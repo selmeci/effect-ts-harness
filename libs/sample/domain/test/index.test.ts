@@ -1,7 +1,7 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Exit, Layer, Schema } from "effect"
+import { Cause, Effect, Exit, Layer, Schema } from "effect"
 import { buildWorkspaceFnIndex, runWithTestTracer } from "@harness/ingest"
 import {
   buildHarnessGraph,
@@ -151,7 +151,7 @@ describe("decideAlbumQuota", () => {
           decideAlbumQuota({ albumId, currentCount })
         )
         if (currentCount >= 100) {
-          expect(Exit.isFailure(exit)).toBe(true)
+          expect(Exit.isFailure(exit) && Cause.hasFails(exit.cause)).toBe(true)
           const err = yield* Effect.flip(
             decideAlbumQuota({ albumId, currentCount })
           )

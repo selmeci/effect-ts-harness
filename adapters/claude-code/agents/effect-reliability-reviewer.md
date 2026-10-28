@@ -42,6 +42,11 @@ Resource lifetimes and distributed tracing must cross process and system boundar
 - **`Scope` Finalizer Omissions:** Stateful resources (database connections, worker service bindings, stream handles, timers) acquired without `Effect.acquireRelease` or proper `Scope` management, leading to connection leaks and resource exhaustion under load.
 - **Traceparent Header Propagation:** Internal Worker-to-Durable Object RPC calls must preserve distributed tracing context. Flag any cross-boundary RPC call that fails to format or forward the W3C `traceparent` header (`00-<traceId>-<spanId>-01`) and restore it via `Effect.withParentSpan`.
 
+### 5. Event Sourcing Reducer Replay & Terminal State Invariants
+Event sourcing reducers (`evolve(state, event)`) must maintain deterministic monotonic versions and irreversible terminal states during event replay:
+- **Terminal State Preservation:** Verify that terminal state variants (e.g. `CheckedOut`, `Cancelled`, `Closed`, `Archived`) cannot be mutated or reverted to non-terminal states by subsequent folded events during event stream replay.
+- **Monotonic Version Sequencing:** Verify that projections and reducers reject or ignore duplicate/out-of-order versions during replay without corrupting state.
+
 ## Confidence Rubric & Quote-the-Line Gate
 
 ### Confidence Levels

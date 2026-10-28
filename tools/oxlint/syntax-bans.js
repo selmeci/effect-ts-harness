@@ -39,10 +39,17 @@ const matchTaggedOtherwiseBanMessage =
 const schemaBooleanStateMessage =
   "Do not use Schema.Boolean for lifecycle or mutually exclusive state flags in Schema.Struct — model mutually exclusive states with a closed discriminated union (Schema.TaggedUnion / Schema.TaggedStruct)."
 const tautologicalFoldPropMessage =
-  "Tautological property test: do not assert fold(events) against events.reduce(evolve, ...) using the same evolve function — assert independent domain invariants on the resulting state."
+  "Tautological property test: do not assert fold(events) against events.reduce(evolve, ...) using the same evolve function. Instead, assert: (1) monoidal batch fold vs step-by-step fold: expect(fold(events)).toEqual(events.reduce((acc, ev) => fold([ev], acc), initialState)), (2) deterministic replay idempotence: expect(fold(events)).toEqual(folded), or (3) state invariants via ts-pattern match."
+const vacuousPropertyAssertMessage =
+  "Vacuous assertion in property test: do not use toBeDefined(), toBeUndefined(), toBeTruthy(), toBeFalsy(), or existence checks to satisfy property test invariants — assert concrete domain invariants (e.g. toEqual, toBe, or pattern-matched structural predicates) to ensure the property test cannot pass vacuously."
+const impreciseFailureAssertMessage =
+  "Imprecise Exit.Failure assertion: checking only exit._tag === 'Failure' masks assertion crashes and unexpected defects (Die) as expected domain errors (Fail). Assert Cause.hasDies(exit.cause) for runner defects or Cause.hasFails / match(exit) for typed domain errors."
 
 const BOOLEAN_STATE_PROP_REGEX =
   /^(is[A-Z]|has[A-Z]|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|published|expired)$/
+
+const QUANTITY_OR_VERSION_PROP_REGEX =
+  /^(qty|quantity|[a-z0-9]+Qty|[a-z0-9]+Quantity|streamVersion|[a-z0-9]+StreamVersion|nextExpectedStreamVersion|availableQty|reservedQty|orderedQty)$/i
 
 const DISCRIMINANT_CALLBACK_METHODS = new Set(["filter", "find", "some", "every"])
 
@@ -171,14 +178,183 @@ function getCallbackPredicateExpression(fnNode) {
   return null
 }
 
-function isSchemaBoolean(node) {
-  return (
+function unwrapSchemaModifier(node) {
+  if (
     node != null &&
-    node.type === "MemberExpression" &&
-    node.computed !== true &&
-    isIdentifier(node.object, "Schema") &&
-    isIdentifier(node.property, "Boolean")
+    node.type === "CallExpression" &&
+    node.callee != null &&
+    node.callee.type === "MemberExpression" &&
+    node.callee.computed !== true &&
+    isIdentifier(node.callee.object, "Schema") &&
+    Array.isArray(node.arguments) &&
+    node.arguments.length > 0
+  ) {
+    return unwrapSchemaModifier(node.arguments[0])
+  }
+  return node
+}
+
+function isSchemaBoolean(node) {
+  const unwrapped = unwrapSchemaModifier(node)
+  return (
+    unwrapped != null &&
+    unwrapped.type === "MemberExpression" &&
+    unwrapped.computed !== true &&
+    isIdentifier(unwrapped.object, "Schema") &&
+    isIdentifier(unwrapped.property, "Boolean")
   )
+}
+
+function isSchemaIntOrNumber(node) {
+  const unwrapped = unwrapSchemaModifier(node)
+  return (
+    unwrapped != null &&
+    unwrapped.type === "MemberExpression" &&
+    unwrapped.computed !== true &&
+    isIdentifier(unwrapped.object, "Schema") &&
+    (isIdentifier(unwrapped.property, "Int") || isIdentifier(unwrapped.property, "Number"))
+  )
+}
+
+function isExpectCall(node) {
+  if (node == null || node.type !== "CallExpression") return false
+  return isIdentifier(node.callee, "expect")
+}
+
+function isVacuousAssertionCall(node) {
+  if (node == null || node.type !== "CallExpression") return false
+  const callee = node.callee
+  if (callee == null || callee.type !== "MemberExpression" || callee.computed === true) {
+    return false
+  }
+  const prop = callee.property
+  if (prop == null || prop.type !== "Identifier") return false
+  const name = prop.name
+
+  if (
+    name === "toBeDefined" ||
+    name === "toBeUndefined" ||
+    name === "toBeTruthy" ||
+    name === "toBeFalsy"
+  ) {
+    if (isExpectCall(callee.object)) return true
+    if (
+      callee.object.type === "MemberExpression" &&
+      isIdentifier(callee.object.property, "not") &&
+      isExpectCall(callee.object.object)
+    ) {
+      return true
+    }
+  }
+
+  if (name === "toBeNull" || name === "toBeUndefined") {
+    if (
+      callee.object.type === "MemberExpression" &&
+      isIdentifier(callee.object.property, "not") &&
+      isExpectCall(callee.object.object)
+    ) {
+      return true
+    }
+  }
+
+  return false
+}
+
+function findVacuousAssertionCalls(root) {
+  const matches = []
+  function walk(node) {
+    if (node == null || typeof node !== "object") return
+    if (isVacuousAssertionCall(node)) {
+      matches.push(node)
+      return
+    }
+    for (const key of Object.keys(node)) {
+      if (key === "parent") continue
+      const val = node[key]
+      if (Array.isArray(val)) {
+        for (const item of val) {
+          if (item != null && typeof item === "object" && item.type) {
+            walk(item)
+          }
+        }
+      } else if (val != null && typeof val === "object" && val.type) {
+        walk(val)
+      }
+    }
+  }
+  walk(root)
+  return matches
+}
+
+function isPropertyTestCall(node) {
+  if (node == null || node.type !== "CallExpression") return false
+  const callee = node.callee
+  if (callee == null) return false
+  if (callee.type === "MemberExpression" && callee.computed !== true && callee.property != null) {
+    if (isIdentifier(callee.property, "prop")) {
+      return true
+    }
+    if (
+      callee.object != null &&
+      callee.object.type === "MemberExpression" &&
+      isIdentifier(callee.object.property, "prop")
+    ) {
+      return true
+    }
+    if (isIdentifier(callee.object, "fc") && isIdentifier(callee.property, "assert")) {
+      return true
+    }
+  }
+  return false
+}
+
+function isImpreciseFailureAssert(node) {
+  if (node == null || node.type !== "CallExpression") return false
+  const callee = node.callee
+  if (callee == null || callee.type !== "MemberExpression" || callee.computed === true) {
+    return false
+  }
+  if (!isIdentifier(callee.property, "toBe") && !isIdentifier(callee.property, "toEqual")) {
+    return false
+  }
+  if (!Array.isArray(node.arguments) || node.arguments.length === 0) return false
+  const firstArg = node.arguments[0]
+
+  // Case 1: expect(exit._tag).toBe("Failure") / toEqual("Failure")
+  if (firstArg.type === "Literal" && firstArg.value === "Failure") {
+    const obj = callee.object
+    if (isExpectCall(obj) && Array.isArray(obj.arguments) && obj.arguments.length > 0) {
+      const expectArg = obj.arguments[0]
+      if (
+        expectArg != null &&
+        expectArg.type === "MemberExpression" &&
+        expectArg.computed !== true &&
+        isIdentifier(expectArg.property, "_tag")
+      ) {
+        return true
+      }
+    }
+  }
+
+  // Case 2: expect(Exit.isFailure(exit)).toBe(true) / toEqual(true)
+  if (firstArg.type === "Literal" && firstArg.value === true) {
+    const obj = callee.object
+    if (isExpectCall(obj) && Array.isArray(obj.arguments) && obj.arguments.length > 0) {
+      const expectArg = obj.arguments[0]
+      if (
+        expectArg != null &&
+        expectArg.type === "CallExpression" &&
+        expectArg.callee != null &&
+        expectArg.callee.type === "MemberExpression" &&
+        isIdentifier(expectArg.callee.object, "Exit") &&
+        isIdentifier(expectArg.callee.property, "isFailure")
+      ) {
+        return true
+      }
+    }
+  }
+
+  return false
 }
 
 function getPropertyKeyName(prop) {
@@ -505,6 +681,7 @@ function isSkippedOrFocusedTestCall(node) {
 const syntaxBans = {
   create(context) {
     const discriminantAliasNames = new Set()
+    const schemaVarNames = new Set()
 
     function getNormalizedFilename() {
       return (
@@ -522,6 +699,38 @@ const syntaxBans = {
     return {
       Program(node) {
         discriminantAliasNames.clear()
+        schemaVarNames.clear()
+        if (node.body && Array.isArray(node.body)) {
+          for (const stmt of node.body) {
+            if (stmt.type === "VariableDeclaration" && Array.isArray(stmt.declarations)) {
+              for (const decl of stmt.declarations) {
+                if (decl.id && decl.id.type === "Identifier") {
+                  if (decl.id.name.endsWith("Schema") || decl.id.name.startsWith("make")) {
+                    schemaVarNames.add(decl.id.name)
+                  }
+                }
+              }
+            } else if (stmt.type === "ExportNamedDeclaration" && stmt.declaration) {
+              if (stmt.declaration.type === "VariableDeclaration" && Array.isArray(stmt.declaration.declarations)) {
+                for (const decl of stmt.declaration.declarations) {
+                  if (decl.id && decl.id.type === "Identifier") {
+                    if (decl.id.name.endsWith("Schema") || decl.id.name.startsWith("make")) {
+                      schemaVarNames.add(decl.id.name)
+                    }
+                  }
+                }
+              } else if (stmt.declaration.type === "FunctionDeclaration" && stmt.declaration.id) {
+                if (stmt.declaration.id.name.endsWith("Schema") || stmt.declaration.id.name.startsWith("make")) {
+                  schemaVarNames.add(stmt.declaration.id.name)
+                }
+              }
+            } else if (stmt.type === "FunctionDeclaration" && stmt.id) {
+              if (stmt.id.name.endsWith("Schema") || stmt.id.name.startsWith("make")) {
+                schemaVarNames.add(stmt.id.name)
+              }
+            }
+          }
+        }
         const text =
           context.sourceCode && typeof context.sourceCode.text === "string"
             ? context.sourceCode.text
@@ -657,6 +866,18 @@ const syntaxBans = {
               ) {
                 context.report({ node: prop, message: schemaBooleanStateMessage })
               }
+              if (
+                keyName != null &&
+                QUANTITY_OR_VERSION_PROP_REGEX.test(keyName) &&
+                isSchemaIntOrNumber(prop.value)
+              ) {
+                const unwrapped = unwrapSchemaModifier(prop.value)
+                const propType = unwrapped && unwrapped.property ? unwrapped.property.name : "Int"
+                context.report({
+                  node: prop,
+                  message: `Do not use Schema.${propType} for quantity, version, or count field '${keyName}' in Schema.Struct — use Schema.Natural (non-negative) or Schema.PositiveInt to prevent negative domain values.`
+                })
+              }
             }
           }
         }
@@ -731,24 +952,64 @@ const syntaxBans = {
       ExportNamedDeclaration(node) {
         const filename = getNormalizedFilename()
         if (isInternalHarnessFile(filename)) return
-        if (!/libs\/[^/]+\/(domain|service|infra)\/src\//.test(filename)) return
+        if (!/libs\/[^/]+\/(contract|domain|service|infra)\/src\//.test(filename)) return
         if (node.declaration == null) return
 
-        if (node.declaration.type === "FunctionDeclaration") {
-          context.report({ node: node.declaration, message: domainExportMessage })
+        const decl = node.declaration
+        if (decl.type === "TSTypeAliasDeclaration" || decl.type === "TSInterfaceDeclaration") {
+          const typeName = decl.id != null ? decl.id.name : null
+          if (typeName != null) {
+            let matchingSchema = null
+            if (schemaVarNames.has(typeName + "Schema")) {
+              matchingSchema = typeName + "Schema"
+            } else if (schemaVarNames.has("make" + typeName + "Schema")) {
+              matchingSchema = "make" + typeName + "Schema"
+            } else if (schemaVarNames.has("make" + typeName)) {
+              matchingSchema = "make" + typeName
+            }
+            if (matchingSchema != null) {
+              let isLoose = false
+              if (decl.type === "TSInterfaceDeclaration") {
+                isLoose = true
+              } else if (decl.type === "TSTypeAliasDeclaration" && decl.typeAnnotation != null) {
+                if (decl.typeAnnotation.type === "TSTypeLiteral") {
+                  isLoose = true
+                } else if (
+                  decl.typeAnnotation.type === "TSUnionType" &&
+                  Array.isArray(decl.typeAnnotation.types) &&
+                  decl.typeAnnotation.types.some((t) => t.type === "TSTypeLiteral")
+                ) {
+                  isLoose = true
+                }
+              }
+              if (isLoose) {
+                context.report({
+                  node: decl,
+                  message: `Do not declare loose handwritten TypeScript type/interface '${typeName}' alongside '${matchingSchema}' — derive the type directly via Schema.Schema.Type<typeof ${matchingSchema}> (or Schema.Schema.Type<ReturnType<typeof ${matchingSchema}>>) to preserve schema constraints.`
+                })
+              }
+            }
+          }
           return
         }
 
-        if (node.declaration.type === "VariableDeclaration") {
+        if (!/libs\/[^/]+\/(domain|service|infra)\/src\//.test(filename)) return
+
+        if (decl.type === "FunctionDeclaration") {
+          context.report({ node: decl, message: domainExportMessage })
+          return
+        }
+
+        if (decl.type === "VariableDeclaration") {
           const isDomain = /libs\/[^/]+\/domain\/src\//.test(filename)
-          for (const decl of node.declaration.declarations) {
-            const init = decl.init
+          for (const varDecl of decl.declarations) {
+            const init = varDecl.init
             if (init == null) continue
             if (init.type === "ArrowFunctionExpression" || init.type === "FunctionExpression") {
-              context.report({ node: decl, message: domainExportMessage })
+              context.report({ node: varDecl, message: domainExportMessage })
             } else if (init.type === "CallExpression") {
               if (isUntracedEffectCall(init) || (isDomain && !isEffectFnInvocation(init))) {
-                context.report({ node: decl, message: domainExportMessage })
+                context.report({ node: varDecl, message: domainExportMessage })
               }
             }
           }
@@ -821,16 +1082,10 @@ const testIntegrity = {
         }
         const filename = getNormalizedFilename()
         if (!isInternalHarnessFile(filename)) {
-          if (
-            node.callee != null &&
-            node.callee.type === "MemberExpression" &&
-            node.callee.computed !== true &&
-            node.callee.property != null &&
-            node.callee.property.type === "Identifier" &&
-            node.callee.property.name === "prop" &&
-            Array.isArray(node.arguments) &&
-            node.arguments.length > 0
-          ) {
+          if (isImpreciseFailureAssert(node)) {
+            context.report({ node, message: impreciseFailureAssertMessage })
+          }
+          if (isPropertyTestCall(node) && Array.isArray(node.arguments) && node.arguments.length > 0) {
             const callbackArg = node.arguments[node.arguments.length - 1]
             if (callbackArg != null) {
               const callbackText = getNodeSourceText(context, callbackArg)
@@ -840,6 +1095,10 @@ const testIntegrity = {
                   /\.reduce\s*\([^)]*\bevolve/i.test(callbackText))
               ) {
                 context.report({ node, message: tautologicalFoldPropMessage })
+              }
+              const vacuousCalls = findVacuousAssertionCalls(callbackArg)
+              for (const vacuousNode of vacuousCalls) {
+                context.report({ node: vacuousNode, message: vacuousPropertyAssertMessage })
               }
             }
           }

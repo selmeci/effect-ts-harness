@@ -176,6 +176,50 @@ describe("Album Projections & Serialization", () => {
 })
 ```
 
+### Non-Tautological Property Invariants (Event Sourcing & Reducers)
+
+When testing stateful reducers (`fold` / `evolve`), `harness/test-integrity` bans tautological property tests (asserting `fold(events)` against `events.reduce(evolve, initial)` using the same reducer function).
+
+Never downgrade an assertion to `expect(state.id).toBeDefined()` to bypass this ban — vacuous assertions in property tests are blocked by `harness/test-integrity`. Instead, assert concrete mathematical and domain invariants:
+
+1. **Monoidal Batch Fold vs Step-by-Step Fold Invariant:**
+   A batch fold of events must produce the exact same state as folding each event incrementally:
+   ```ts
+   expect(fold(events)).toEqual(
+     events.reduce((acc, ev) => fold([ev], acc), initialState)
+   )
+   ```
+2. **Deterministic Replay Idempotence:**
+   Re-running `fold(events)` on the same event sequence must return the identical state:
+   ```ts
+   const folded = fold(events)
+   expect(fold(events)).toEqual(folded)
+   ```
+3. **Terminal State Immutability:**
+   When state reaches a terminal variant (e.g. `CheckedOut`, `Closed`, `Cancelled`), folding subsequent events must leave the state strictly unchanged:
+   ```ts
+   const terminalState = fold(eventsLeadingToCheckout)
+   expect(fold(furtherEvents, terminalState)).toEqual(terminalState)
+   ```
+
+### Defect-Free Negative Testing (`Exit.Failure` vs `Die` vs `Fail`)
+
+When writing negative tests (asserting that an effect fails), never assert bare `expect(exit._tag).toBe("Failure")` or `expect(Exit.isFailure(exit)).toBe(true)`.
+
+In Effect, `Exit.Failure` contains a `Cause`. An assertion failure or unexpected exception inside the effect produces a defect (`Die`), which also produces an `Exit.Failure`. Checking only `_tag === "Failure"` masks defects and crashes as successful negative tests!
+
+Always inspect the cause:
+```ts
+// For asserting typed domain error (E):
+const err = yield* Effect.flip(effect)
+expect(err._tag).toBe("InsufficientStockError")
+// or inspect Cause:
+expect(Cause.hasFails(exit.cause)).toBe(true)
+
+// For asserting runner defects or assertion failures (Die):
+expect(Cause.hasDies(exit.cause)).toBe(true)
+```
+
 > [!IMPORTANT]
 > The harness zero-entropy gate `harness gc --strict` enforces the `missing-decider-property-test` sensor: every pure domain decider (`*.decide` in `type:domain`) must be exercised by at least one property-based test (`it.effect.prop` or `it.prop`).
 

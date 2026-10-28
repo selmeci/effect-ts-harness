@@ -32,6 +32,30 @@ export class User extends Schema.Class<User>("User")({
 }
 ```
 
+### Deriving TypeScript Types from Schemas
+
+Never write loose handwritten TypeScript interfaces or types alongside Schema declarations (e.g. declaring `export type CommandResult = { ... }` with `number` and `ReadonlyArray` alongside `makeCommandResultSchema`). Handwritten loose types bypass Schema validation and allow illegal states (negative versions, empty arrays) to enter domain signatures.
+
+Always derive types directly from the schema:
+```ts
+// For static schemas:
+export const CommandResultSchema = Schema.Union(...)
+export type CommandResult = Schema.Schema.Type<typeof CommandResultSchema>
+
+// For schema factory functions:
+export const makeCommandResultSchema = <State, Event>(...) => ...
+export type CommandResult<State, Event> = Schema.Schema.Type<
+  ReturnType<typeof makeCommandResultSchema<State, Event>>
+>
+```
+
+### Numeric Precision: `Schema.Natural` vs `Schema.Int`
+
+Never use `Schema.Int` or `Schema.Number` for quantities, counts, stock, or stream versions. `Schema.Int` permits negative integers (`-5`, `-1`), which violates domain invariants.
+
+- Use `Schema.Natural` for non-negative integers ($\ge 0$): `availableQty`, `streamVersion`, `nextExpectedStreamVersion`, `count`.
+- Use `Schema.PositiveInt` for strictly positive quantities ($> 0$): `orderQty`, `batchSize`, `limit`.
+
 ## Parsing and Decoding Untrusted Input
 
 Always decode unknown boundaries with `Schema.decodeUnknownEffect` or `Schema.decodeUnknownSync`:

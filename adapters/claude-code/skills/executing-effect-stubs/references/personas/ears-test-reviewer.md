@@ -25,21 +25,27 @@ Every requirement specified in the EARS spec must map to an explicit, behavior-s
 - **`IF <condition>, THEN <action>` (Sad-Path / Typed Failures):**
   - Must test negative branches with `Effect.flip` or `Effect.exit`.
   - Must assert the exact `_tag` AND all relevant payload fields on the `TaggedError` (e.g. `expect(error._tag).toBe("NotFoundError")` and `expect(error.id).toBe(expectedId)`), never generic `Effect.isFailure` alone.
+  - **Defect Masking vs Typed Failures:** Tests asserting negative failure MUST inspect `exit.cause` (`Cause.hasDies(exit.cause)` for assertion runner defects or `Cause.hasFails` / `match(exit)` for typed domain errors). Asserting bare `expect(exit._tag).toBe("Failure")` or `expect(Exit.isFailure(exit)).toBe(true)` is strictly banned by `harness/test-integrity` because unexpected runner defects or exceptions inside the effect produce `Failure` and falsely pass.
 - **`WHILE <state>` (Pure Deciders & Discriminated Unions):**
   - Boundary conditions for pure deciders (`*.decide`) MUST be tested across transition boundaries: `limit - 1`, `limit`, and `limit + 1`.
   - Every variant `_tag` of a discriminated union (`Schema.TaggedUnion`) matched in `.exhaustive()` MUST be explicitly exercised by the test suite.
   - Decider tests MUST run with zero service layers (`R = never`), guaranteeing purity and determinism without mocks.
   - Pure deciders (`*.decide`) and stateful reducers/projections MUST include Property-Based Tests (`it.effect.prop` / `it.prop`) over `Schema` arbitraries (via `effect/Arbitrary`), not just 1-2 hand-picked example inputs.
   - Tests must be strong enough to kill boundary (`>=` vs `>`, `<=` vs `<`) and arithmetic (`+ 1` vs `- 1`) mutants in `harness mutate --strict` (`MutationCheck.decide`).
+  - **State Machine Terminal Variant Preservation in Reducers/Projections (`fold` / `evolve`):** When domain state is a discriminated union with terminal variants (e.g. `CheckedOut`, `Cancelled`, `Closed`, `Archived`), test suites MUST include tests that fold subsequent events onto the terminal state to prove that `fold` preserves terminal state and does not revert to non-terminal variants.
+  - **Multi-Event Batch Sequential Folding Coverage:** When commands can emit multiple events (e.g. `readonly [Event, ...Array<Event>]`), test suites MUST test command executions that emit 2+ events in a single batch and verify that all events are folded sequentially into the final state (`Decider.run`).
 
 ### 2. Silent-Pass & Vacuous Tests
 Flag any test that can pass without exercising real production logic:
 - **Example-Only Blind Spots & Reward Hacking:** Decider or projection tests that only test 1-2 hand-picked example inputs without property invariants, allowing boundary shifts (`>=` mutated to `>`) or off-by-one errors to survive mutation testing. Pure deciders and reducers must use `it.effect.prop` / `it.prop` over `Schema` arbitraries and kill all mutants under `harness mutate --strict`.
 - **Mock Over-Specification:** Mock Layers that stub return values matching expected outputs, allowing broken domain deciders or query logic to pass unnoticed.
-- **Vacuous Assertions:** Weak assertions such as `toBeDefined()`, `toBeTruthy()`, `expect(result).not.toBeNull()`, or checking array length without validating content properties.
+- **Vacuous Assertions & Property Test Degradation:** Weak assertions such as `toBeDefined()`, `toBeTruthy()`, `toBeUndefined()`, `expect(result).not.toBeNull()`, or checking array length without validating content properties. In property tests, replacing tautological assertions with `toBeDefined()` is strictly banned — property tests MUST assert concrete mathematical invariants: (1) monoidal batch fold vs step-by-step fold `expect(fold(events)).toEqual(events.reduce((acc, ev) => fold([ev], acc), initialState))`, (2) replay idempotence `expect(fold(events)).toEqual(folded)`, or (3) exhaustive structural state invariants.
 - **Unasserted Generator Steps:** Tests using `Effect.gen` that execute effects without asserting the outcome or without verifying state mutations.
 
-### 3. Trace & Span Budget Fidelity
+### 3. Superfluous / Dead Event Fields
+100% of fields declared on event schemas must be consumed by reducer (`evolve`) logic, audit trails, or read-model projections. Superfluous event fields that are never read must be flagged and removed.
+
+### 4. Trace & Span Budget Fidelity
 Effect tracing is the foundation of runtime observability and graph verification:
 - **Runtime Test Tracer:** Tests must use `runWithTestTracer` to assert recorded call edges (`edges.tracedCalls`) and reaching test edges (`edges.exercisesSpans`).
 - **Span Budget Assertions:** Tests asserting multi-step or batched operations must invoke `checkSpanBudgets` (`SpanBudget.decide`) to protect against N+1 regressions (`maxRepeatedChildCalls` threshold, e.g. $\le 3$) and verify latency constraints (`maxSpanDurationMs`).

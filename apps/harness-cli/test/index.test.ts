@@ -904,4 +904,261 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
     })
     expect(harnessReports).toHaveLength(0)
   })
+
+  it("flags loose integer types for quantity and streamVersion fields in Schema.Struct", () => {
+    // 1. availableQty: Schema.Int should be flagged
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/contract/src/index.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Schema" },
+          property: { type: "Identifier", name: "Struct" }
+        },
+        arguments: [
+          {
+            type: "ObjectExpression",
+            properties: [
+              {
+                type: "Property",
+                computed: false,
+                key: { type: "Identifier", name: "availableQty" },
+                value: {
+                  type: "MemberExpression",
+                  computed: false,
+                  object: { type: "Identifier", name: "Schema" },
+                  property: { type: "Identifier", name: "Int" }
+                }
+              }
+            ]
+          }
+        ]
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain(
+        "Do not use Schema.Int for quantity, version, or count field 'availableQty' in Schema.Struct — use Schema.Natural (non-negative) or Schema.PositiveInt"
+      )
+    }
+
+    // 2. availableQty: Schema.Natural is allowed
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/contract/src/index.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Schema" },
+          property: { type: "Identifier", name: "Struct" }
+        },
+        arguments: [
+          {
+            type: "ObjectExpression",
+            properties: [
+              {
+                type: "Property",
+                computed: false,
+                key: { type: "Identifier", name: "availableQty" },
+                value: {
+                  type: "MemberExpression",
+                  computed: false,
+                  object: { type: "Identifier", name: "Schema" },
+                  property: { type: "Identifier", name: "Natural" }
+                }
+              }
+            ]
+          }
+        ]
+      })
+      expect(reports).toHaveLength(0)
+    }
+  })
+
+  it("flags loose handwritten TypeScript types/interfaces shadowing Schema declarations", () => {
+    const reports: Array<{ message: string }> = []
+    const visitor = syntaxBans.create({
+      filename: "/repo/libs/es/contract/src/index.ts",
+      report: (r: { message: string }) => {
+        reports.push(r)
+      }
+    })
+    visitor.Program?.({
+      type: "Program",
+      body: [
+        {
+          type: "ExportNamedDeclaration",
+          declaration: {
+            type: "VariableDeclaration",
+            declarations: [
+              {
+                type: "VariableDeclarator",
+                id: { type: "Identifier", name: "makeCommandResultSchema" },
+                init: { type: "Identifier", name: "dummy" }
+              }
+            ]
+          }
+        }
+      ]
+    })
+    visitor.ExportNamedDeclaration?.({
+      type: "ExportNamedDeclaration",
+      declaration: {
+        type: "TSTypeAliasDeclaration",
+        id: { type: "Identifier", name: "CommandResult" },
+        typeAnnotation: {
+          type: "TSTypeLiteral",
+          members: []
+        }
+      }
+    })
+    expect(reports).toHaveLength(1)
+    expect(reports[0]?.message).toContain(
+      "Do not declare loose handwritten TypeScript type/interface 'CommandResult' alongside 'makeCommandResultSchema' — derive the type directly via Schema.Schema.Type"
+    )
+  })
+
+  it("flags vacuous assertions (toBeDefined, toBeTruthy) in property tests", () => {
+    const reports: Array<{ message: string }> = []
+    const visitor = testIntegrity.create({
+      filename: "/repo/libs/sample/domain/test/cart.test.ts",
+      report: (r: { message: string }) => {
+        reports.push(r)
+      }
+    })
+    visitor.CallExpression?.({
+      type: "CallExpression",
+      callee: {
+        type: "MemberExpression",
+        computed: false,
+        object: { type: "Identifier", name: "it" },
+        property: { type: "Identifier", name: "prop" }
+      },
+      arguments: [
+        { type: "Literal", value: "deterministic replay" },
+        { type: "ArrayExpression", elements: [] },
+        {
+          type: "ArrowFunctionExpression",
+          params: [],
+          body: {
+            type: "BlockStatement",
+            body: [
+              {
+                type: "ExpressionStatement",
+                expression: {
+                  type: "CallExpression",
+                  callee: {
+                    type: "MemberExpression",
+                    computed: false,
+                    object: {
+                      type: "CallExpression",
+                      callee: { type: "Identifier", name: "expect" },
+                      arguments: [{ type: "Identifier", name: "cartId" }]
+                    },
+                    property: { type: "Identifier", name: "toBeDefined" }
+                  },
+                  arguments: []
+                }
+              }
+            ]
+          }
+        }
+      ]
+    })
+    expect(reports).toHaveLength(1)
+    expect(reports[0]?.message).toContain(
+      "Vacuous assertion in property test: do not use toBeDefined(), toBeUndefined(), toBeTruthy(), toBeFalsy(), or existence checks"
+    )
+  })
+
+  it("flags imprecise Exit.Failure assertions in test-integrity", () => {
+    // 1. expect(exit._tag).toBe("Failure")
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = testIntegrity.create({
+        filename: "/repo/libs/sample/domain/test/cart.test.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: {
+            type: "CallExpression",
+            callee: { type: "Identifier", name: "expect" },
+            arguments: [
+              {
+                type: "MemberExpression",
+                computed: false,
+                object: { type: "Identifier", name: "exit" },
+                property: { type: "Identifier", name: "_tag" }
+              }
+            ]
+          },
+          property: { type: "Identifier", name: "toBe" }
+        },
+        arguments: [{ type: "Literal", value: "Failure" }]
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain(
+        "Imprecise Exit.Failure assertion: checking only exit._tag === 'Failure' masks assertion crashes and unexpected defects (Die)"
+      )
+    }
+
+    // 2. expect(Exit.isFailure(exit)).toBe(true)
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = testIntegrity.create({
+        filename: "/repo/libs/sample/domain/test/cart.test.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: {
+            type: "CallExpression",
+            callee: { type: "Identifier", name: "expect" },
+            arguments: [
+              {
+                type: "CallExpression",
+                callee: {
+                  type: "MemberExpression",
+                  computed: false,
+                  object: { type: "Identifier", name: "Exit" },
+                  property: { type: "Identifier", name: "isFailure" }
+                },
+                arguments: [{ type: "Identifier", name: "exit" }]
+              }
+            ]
+          },
+          property: { type: "Identifier", name: "toBe" }
+        },
+        arguments: [{ type: "Literal", value: true }]
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain(
+        "Imprecise Exit.Failure assertion: checking only exit._tag === 'Failure' masks assertion crashes and unexpected defects (Die)"
+      )
+    }
+  })
 })
