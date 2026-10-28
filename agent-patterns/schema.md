@@ -100,3 +100,19 @@ Use built-in refinements for domain validation:
 - `Schema.NonEmptyString`: String with at least one character.
 - `Schema.between(min, max)`: Number bounds validation.
 - `Schema.brand("BrandName")`: Nominal typing for identifiers.
+
+## Discriminated Unions (`Schema.TaggedUnion`, `Schema.TaggedStruct`, `Schema.TaggedClass`)
+
+Never model mutually exclusive states using boolean flags (`isPaid`, `isFailed`) or optional fields (`receiptId?: string`, `failureReason?: string`). Define closed discriminated unions in `type:contract` and branch on them exhaustively with `match(val)...exhaustive()` from `ts-pattern` (see [`pattern-matching.md`](./pattern-matching.md)):
+
+```ts
+import { Schema } from "effect"
+
+export const PaymentStatus = Schema.TaggedUnion({
+  Pending: { initiatedAt: Schema.Int },
+  Paid: { receiptId: Schema.String, paidAt: Schema.Int },
+  Declined: { reason: Schema.String }
+})
+export type PaymentStatus = typeof PaymentStatus.Type
+```
+

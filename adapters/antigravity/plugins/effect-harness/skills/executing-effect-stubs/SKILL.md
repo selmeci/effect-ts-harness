@@ -75,6 +75,7 @@ Implement the production code and tests within each package boundary:
 
 - Leaving any `stub()` call in production code during `verify`
 - Using `async/await`, `try/catch`, `throw`, raw `JSON.parse`, or raw `fetch()` in `scope:web`
+- Using `switch` statements, `if / else if` chains, `match().run()`, `.otherwise()` on closed discriminated unions, or `if` / ternary (`? :`) branching on union discriminants (`_tag`, `Option.isSome`, `Either.isRight`, `Result.isSuccess`); always use `match(value).with(...).exhaustive()` from `ts-pattern` (`agent-patterns/pattern-matching.md`)
 - Never use `it.skip`, `it.only`, `it.todo`, `@ts-ignore`, or `oxlint-disable` to bypass a failing test or lint rule (`harness/test-integrity` and `harness/syntax-bans` reject them deterministically).
 - If `harness verify` exits `2` with `[ESCALATE: STUCK LOOP DETECTED]`, stop immediately and escalate to the user instead of retrying variations of the same fix.
 - Dead `TaggedError`s, unprovided `ServiceTag`s, untested domain `Effect.fn`s, missing property tests on deciders (`missing-decider-property-test`), or `stale-doc-reference` detected by `harness gc`

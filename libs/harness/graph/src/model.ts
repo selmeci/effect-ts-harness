@@ -200,11 +200,21 @@ export interface BuildHarnessGraphInput {
     readonly callCount: number
     readonly receiverLayer: string | null
   }>
+  readonly branchingViolations?: ReadonlyArray<BranchingViolation> | undefined
+}
+
+export interface BranchingViolation {
+  readonly rule: "discriminant-branching" | "non-exhaustive-union-match"
+  readonly message: string
+  readonly file: string
+  readonly line: number
+  readonly enclosingSymbol: string
 }
 
 export interface HarnessGraph {
   readonly graph: Graph.DirectedGraph<HarnessNode, HarnessEdge>
   readonly nodeIndexByKey: ReadonlyMap<string, Graph.NodeIndex>
+  readonly branchingViolations?: ReadonlyArray<BranchingViolation> | undefined
 }
 
 export const getNodeKey = (node: HarnessNode): string => {

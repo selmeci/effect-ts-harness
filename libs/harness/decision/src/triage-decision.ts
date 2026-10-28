@@ -143,6 +143,41 @@ const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<{
       kind: "mechanical",
       hint: "Suppressing effecttsgo/* (@effect/language-service) or harness/* diagnostics with oxlint-disable/eslint-disable/@effect-diagnostics is banned — fix the underlying violation instead."
     }
+  },
+  {
+    pattern: "discriminant-branching",
+    result: {
+      kind: "mechanical",
+      hint: "Do not branch on union discriminants with if/else or ternary — enumerate all variants explicitly with match(value).with(...).exhaustive() from ts-pattern (see agent-patterns/pattern-matching.md)."
+    }
+  },
+  {
+    pattern: "non-exhaustive-union-match",
+    result: {
+      kind: "mechanical",
+      hint: "Matching on a closed union with .otherwise() hides unhandled variants — enumerate every variant and terminate with .exhaustive() (see agent-patterns/pattern-matching.md)."
+    }
+  },
+  {
+    pattern: "No switch statements",
+    result: {
+      kind: "mechanical",
+      hint: "Switch statements are banned in domain/app code — use match(value).with(...).exhaustive() from ts-pattern (see agent-patterns/pattern-matching.md)."
+    }
+  },
+  {
+    pattern: "enumerate all states with match",
+    result: {
+      kind: "mechanical",
+      hint: "Branching on discriminated unions or tagged types (_tag, Option, Either, Result) with if/else or ternary is banned — enumerate all variants with match(value).with(...).exhaustive() from ts-pattern (see agent-patterns/pattern-matching.md)."
+    }
+  },
+  {
+    pattern: "match(...).run() is banned",
+    result: {
+      kind: "mechanical",
+      hint: "match(...).run() throws at runtime on unhandled states — terminate with .exhaustive() for closed unions or .otherwise() for open primitive types (see agent-patterns/pattern-matching.md)."
+    }
   }
 ]
 

@@ -37,8 +37,9 @@ Concurrency without synchronization leads to lost updates or corrupted projectio
 - **Concurrent Mutators:** Construct a race where two parallel commands read state at `version: N` and both attempt to write with `expectedVersion: N`. The loser MUST fail with a typed `OptimisticConcurrencyError` in the `E` channel, rather than silently overwriting.
 - **Out-of-Order Projection Ingestion:** What happens when an event batch arrives out of order (e.g. `version: 6` arrives before `version: 5`)? The projection must either buffer, reject with a retryable typed failure, or enforce causal sequencing; it must NEVER apply out-of-order state to the read model.
 
-### 4. Schema Evolution & Boundary Values
+### 4. Schema Evolution, Boundary Values & Impossible States
 Inputs and stored historical records will hit edge conditions:
+- **Boolean-Soup & Optional-Property State Modeling:** Flag any domain state or outcome modeled with multiple boolean flags or optional properties (e.g. `{ isLoading: boolean; error?: string; data?: T }`) that permits contradictory runtime states instead of a closed `Schema.TaggedUnion` (`agent-patterns/pattern-matching.md`), or any `match(...)` using `.otherwise()` to silently swallow unhandled domain variants.
 - **Extreme Boundary Values:** Feed extreme values into Schemas and deciders: `0`, `-1`, `Number.MAX_SAFE_INTEGER`, empty arrays `[]`, strings at exact max length or length 0, and null bytes.
 - **Corrupt Persisted Payloads:** Evaluate how the system handles corrupted JSON in the database or unexpected schema versions.
 - **`Upcaster` Chain Gaps:** When domain schemas evolve from version 1 to version 3, verify that explicit upcaster migration paths (`1 -> 2 -> 3`) exist without missing steps or untyped crashes.

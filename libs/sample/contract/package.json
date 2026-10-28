@@ -19,7 +19,8 @@
     "verify": "pnpm run typecheck && pnpm run lint && pnpm run test && pnpm run openapi:check"
   },
   "dependencies": {
-    "effect": "4.0.0"
+    "effect": "4.0.0",
+    "ts-pattern": "5.9.2"
   },
   "devDependencies": {
     "@effect/vitest": "4.0.0",

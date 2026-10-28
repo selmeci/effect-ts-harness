@@ -39,7 +39,7 @@ plan -> skeleton with stub<A, E, R>(...args) -> harness plan-check -> implement 
 1. **Plan (`specifying-ears-with-effect`):** Write a plan in Effect idioms (using the `agent-patterns/planning.md` template), mapping requirements (including business/EARS specifications) to Schemas, TaggedErrors, `Context.Service` tags, `Layer` graphs, and `Effect<A, E, R>` signatures:
    - `WHEN <trigger>, THE SYSTEM SHALL <response>` $\rightarrow$ `HttpApiEndpoint` / `Rpc` input Schema + `Effect.fn` success channel `A`
    - `IF <condition>, THEN THE SYSTEM SHALL <fail>` $\rightarrow$ `Schema.TaggedErrorClass` in `type:contract` + error channel `E`
-   - `WHILE <state>, THE SYSTEM SHALL <response>` $\rightarrow$ pure decider `Effect.fn("*.decide")` (`R = never`) + stateful `Context.Service` in `R`
+   - `WHILE <state>, THE SYSTEM SHALL <response>` $\rightarrow$ closed `Schema.TaggedUnion` state/decision types + pure decider `Effect.fn("*.decide")` (`R = never`) using exhaustive `match(state)...exhaustive()` from `ts-pattern` + stateful `Context.Service` in `R`
    - `WHERE <feature>, THE SYSTEM SHALL <response>` $\rightarrow$ `Context.Service` + `Layer` / `Config` in `R`
 2. **Skeleton (`planning-effect-skeletons`):** Implement the skeleton first (schemas, errors, service interfaces, function signatures). For function bodies, use `stub<A, E, R>(...args)` from `@harness/gates` to preserve accurate types. The skeleton must pass typecheck before implementation begins.
 3. **`harness plan-check` (`planning-effect-skeletons`):** Run plan-check (`node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts plan-check`). This verifies typecheck and linting under `HARNESS_PLAN_CHECK=1`, verifies unique span names, indexes workspace functions, writes `.harness/plan-graph-snapshot.json`, and records the plan graph to Omnigraph branch `plan/current`.
@@ -79,10 +79,10 @@ Enforce strict directional boundaries across project tags:
 
 | Tag | Purpose | Allowed Imports |
 | :--- | :--- | :--- |
-| `type:contract` | Shared Schemas, `HttpApi`, `RpcGroup`, API errors | `effect` only |
-| `type:domain` | Business use cases, domain errors, pure logic | `contract`, (`@harness/gates` for `stub` during planning); **never** `type:infra` or `alchemy` |
+| `type:contract` | Shared Schemas, `HttpApi`, `RpcGroup`, API errors | `effect`, `ts-pattern` |
+| `type:domain` | Business use cases, domain errors, pure logic | `contract`, `ts-pattern`, (`@harness/gates` for `stub` during planning); **never** `type:infra` or `alchemy` |
 | `type:service` | Service interfaces (`Context.Service`), repository abstractions | `contract`, `domain` |
-| `type:infra` | Live `Layer` implementations, Drizzle repositories, Alchemy resources | `contract`, `domain`, `service`, `infra` |
+| `type:infra` | Live `Layer` implementations, Drizzle repositories, Alchemy resources | `contract`, `domain`, `service`, `infra`, `ts-pattern` |
 | `type:app` | Worker/API entrypoint composing Layers (`alchemy.run.ts`) | All workspace libraries |
 | `type:app` (web) | Frontend (Vite + React) | `contract` and UI libraries only |
 
@@ -93,5 +93,6 @@ Enforce strict directional boundaries across project tags:
 - **Inline Generators:** Prefer `Effect.gen(function* () { ... })` inline.
 - **Tracing:** Use `Effect.fn("Scope.Module.name")` for exported or reusable traced functions; use `Effect.fnUntraced` for private helpers. Avoid wrappers that only return `Effect.gen`.
 - **Error Handling:** Use `return yield* new TaggedError(...)` rather than yielding and assigning errors.
+- **Exhaustive Pattern Matching (`ts-pattern`):** Model all multi-state values, domain outcomes, and commands as closed Discriminated Unions (`Schema.TaggedUnion`, `Schema.TaggedStruct`, `Schema.TaggedClass`). Branch on discriminated unions exclusively with `match(val)...exhaustive()` from `ts-pattern` (even for 2-variant unions). `switch` statements, `else if` chains, `match().run()`, and `if` / ternary checks on union discriminants (`_tag`, `Option.isSome`, `Either.isRight`, `Result.isSuccess`) are banned (`agent-patterns/pattern-matching.md`).
 - **Data Layer:** Drizzle ORM (`1.0.0-rc.5-ab785fc`), `@effect/sql-*`, and table schemas live exclusively in `type:infra`. Decode database rows into `type:contract` Schemas at repository boundaries.
 - **Infrastructure:** Alchemy v2 (`2.0.0-beta.80`) resources live in `type:infra` and `apps/sample/alchemy.run.ts`. Never run `alchemy deploy` or `alchemy destroy` directly — they require explicit human approval via the safety guard.

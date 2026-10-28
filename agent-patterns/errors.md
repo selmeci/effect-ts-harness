@@ -109,3 +109,5 @@ export const fallbackProgram = riskyOperation.pipe(
 
 - **Expected errors** (`E` channel): Business logic failures, validatable client errors, network timeouts.
 - **Defects** (`Effect.die`): Unrecoverable bugs or broken invariant assertions. Use `Effect.die` when an invariant fails that cannot be recovered by business logic.
+- **Exhaustive Error Matching**: When inspecting an error union or `Result` / `Either` value directly rather than via `Effect.catchTags`, never use `switch (err._tag)` or `if (err._tag === ...)` — always use `match(err).with({ _tag: ... }, ...).exhaustive()` from `ts-pattern` (see [`pattern-matching.md`](./pattern-matching.md)).
+

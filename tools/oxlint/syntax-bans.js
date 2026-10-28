@@ -26,6 +26,122 @@ const foreverRetryMessage =
   "Unbounded Effect.retry with Schedule.forever is banned (retry storm risk) — bound retries with Schedule.recurs(n) or Schedule.upTo(duration)."
 const domainEffectIgnoreMessage =
   "Swallowing typed errors with Effect.ignore is banned in type:domain — surface failures in the E channel or handle them explicitly."
+const switchBanMessage =
+  "No switch statements in Effect code — use match(value)...exhaustive() from ts-pattern (see agent-patterns/pattern-matching.md)."
+const elseIfBanMessage =
+  "No if/else-if chains in domain/app code — use match(value) from ts-pattern with explicit .with(...) branches (see agent-patterns/pattern-matching.md)."
+const discriminantIfBanMessage =
+  "Do not use if/else or ternary expressions to branch on discriminated unions or tagged types — enumerate all states with match(value).with(...).exhaustive() from ts-pattern, even for 2 variants."
+const matchRunBanMessage =
+  "match(...).run() is banned (throws at runtime on unhandled states) — use .exhaustive() for closed unions or .otherwise() for open types."
+const matchTaggedOtherwiseBanMessage =
+  "Do not use .otherwise() when matching on discriminated union tags (_tag) — enumerate every variant and terminate with .exhaustive()."
+
+const DISCRIMINANT_PROP_NAMES = new Set([
+  "_tag",
+  "kind",
+  "status",
+  "verdict",
+  "role",
+  "state"
+])
+
+function isInternalHarnessFile(filename) {
+  return /(^|\/)(libs\/harness|apps\/harness-[^/]+)\//.test(filename)
+}
+
+function isDiscriminantMemberAccess(node) {
+  if (node == null || node.type !== "MemberExpression" || node.computed === true) {
+    return false
+  }
+  const prop = node.property
+  return prop != null && prop.type === "Identifier" && DISCRIMINANT_PROP_NAMES.has(prop.name)
+}
+
+function isTagGuardCall(node) {
+  if (node == null || node.type !== "CallExpression") return false
+  const callee = node.callee
+  if (callee != null && callee.type === "MemberExpression" && callee.computed !== true) {
+    const obj = callee.object
+    const prop = callee.property
+    if (obj != null && obj.type === "Identifier" && prop != null && prop.type === "Identifier") {
+      if (
+        (obj.name === "Option" && (prop.name === "isSome" || prop.name === "isNone")) ||
+        (obj.name === "Either" && (prop.name === "isLeft" || prop.name === "isRight")) ||
+        (obj.name === "Result" && (prop.name === "isSuccess" || prop.name === "isFailure")) ||
+        (obj.name === "Predicate" && prop.name === "isTagged")
+      ) {
+        return true
+      }
+    }
+  }
+  return false
+}
+
+function isDiscriminantTestExpression(node) {
+  if (node == null || typeof node !== "object") return false
+  if (isTagGuardCall(node)) return true
+  if (node.type === "UnaryExpression" && node.operator === "!" && isDiscriminantTestExpression(node.argument)) {
+    return true
+  }
+  if (node.type === "LogicalExpression") {
+    return isDiscriminantTestExpression(node.left) || isDiscriminantTestExpression(node.right)
+  }
+  if (
+    node.type === "BinaryExpression" &&
+    (node.operator === "===" || node.operator === "!==" || node.operator === "==" || node.operator === "!=")
+  ) {
+    if (isDiscriminantMemberAccess(node.left) || isDiscriminantMemberAccess(node.right)) {
+      return true
+    }
+  }
+  return false
+}
+
+function inspectMatchChain(node) {
+  const withPatterns = []
+  let curr = node
+  while (
+    curr != null &&
+    curr.type === "CallExpression" &&
+    curr.callee != null &&
+    curr.callee.type === "MemberExpression" &&
+    curr.callee.computed !== true &&
+    curr.callee.property != null &&
+    curr.callee.property.type === "Identifier"
+  ) {
+    const method = curr.callee.property.name
+    if (method === "with") {
+      if (Array.isArray(curr.arguments) && curr.arguments.length >= 2) {
+        withPatterns.push(...curr.arguments.slice(0, curr.arguments.length - 1))
+      }
+      curr = curr.callee.object
+    } else if (method === "when" || method === "narrow" || method === "returnType") {
+      curr = curr.callee.object
+    } else {
+      break
+    }
+  }
+  const isRootMatch =
+    curr != null &&
+    curr.type === "CallExpression" &&
+    isIdentifier(curr.callee, "match")
+  return { isRootMatch, withPatterns }
+}
+
+function isTagObjectPattern(patternNode) {
+  if (patternNode == null || patternNode.type !== "ObjectExpression" || !Array.isArray(patternNode.properties)) {
+    return false
+  }
+  return patternNode.properties.some((prop) => {
+    if (prop == null || (prop.type !== "Property" && prop.type !== "ObjectProperty")) return false
+    const key = prop.key
+    return (
+      (key != null && key.type === "Identifier" && key.name === "_tag") ||
+      (key != null && key.type === "Literal" && key.value === "_tag")
+    )
+  })
+}
 
 function isIdentifier(node, name) {
   return node != null && node.type === "Identifier" && node.name === name
@@ -258,6 +374,13 @@ function isSkippedOrFocusedTestCall(node) {
 
 const syntaxBans = {
   create(context) {
+    function getNormalizedFilename() {
+      return (
+        context.filename ??
+        (typeof context.getFilename === "function" ? context.getFilename() : "")
+      ).replace(/\\/g, "/")
+    }
+
     function reportAsync(node) {
       if (node.async === true) {
         context.report({ node, message: asyncMessage })
@@ -287,17 +410,41 @@ const syntaxBans = {
       AwaitExpression(node) {
         context.report({ node, message: asyncMessage })
       },
+      SwitchStatement(node) {
+        const filename = getNormalizedFilename()
+        if (!isInternalHarnessFile(filename)) {
+          context.report({ node, message: switchBanMessage })
+        }
+      },
+      IfStatement(node) {
+        const filename = getNormalizedFilename()
+        if (isInternalHarnessFile(filename)) return
+        if (isDiscriminantTestExpression(node.test)) {
+          context.report({ node, message: discriminantIfBanMessage })
+          return
+        }
+        if (node.alternate != null && node.alternate.type === "IfStatement") {
+          context.report({ node, message: elseIfBanMessage })
+        }
+      },
+      ConditionalExpression(node) {
+        const filename = getNormalizedFilename()
+        if (isInternalHarnessFile(filename)) return
+        if (isDiscriminantTestExpression(node.test)) {
+          context.report({ node, message: discriminantIfBanMessage })
+        }
+      },
       NewExpression(node) {
         if (isNewPromise(node)) {
           context.report({ node, message: newPromiseMessage })
         }
-        const filename = (context.filename ?? (typeof context.getFilename === "function" ? context.getFilename() : "")).replace(/\\/g, "/")
+        const filename = getNormalizedFilename()
         if (/libs\/[^/]+\/domain\/src\//.test(filename) && isIdentifier(node.callee, "Date")) {
           context.report({ node, message: impureDomainGlobalMessage })
         }
       },
       MemberExpression(node) {
-        const filename = (context.filename ?? (typeof context.getFilename === "function" ? context.getFilename() : "")).replace(/\\/g, "/")
+        const filename = getNormalizedFilename()
         if (
           /libs\/[^/]+\/domain\/src\//.test(filename) &&
           node.computed !== true &&
@@ -314,6 +461,30 @@ const syntaxBans = {
         context.report({ node, message: throwMessage })
       },
       CallExpression(node) {
+        if (
+          node.callee != null &&
+          node.callee.type === "MemberExpression" &&
+          node.callee.computed !== true &&
+          node.callee.property != null &&
+          node.callee.property.type === "Identifier"
+        ) {
+          const termName = node.callee.property.name
+          if (termName === "run") {
+            const chain = inspectMatchChain(node.callee.object)
+            if (chain.isRootMatch) {
+              context.report({ node, message: matchRunBanMessage })
+            }
+          } else if (termName === "otherwise") {
+            const chain = inspectMatchChain(node.callee.object)
+            if (
+              chain.isRootMatch &&
+              chain.withPatterns.length > 0 &&
+              chain.withPatterns.every(isTagObjectPattern)
+            ) {
+              context.report({ node, message: matchTaggedOtherwiseBanMessage })
+            }
+          }
+        }
         if (isJsonParse(node)) {
           context.report({ node, message: jsonParseMessage })
         }
@@ -341,7 +512,7 @@ const syntaxBans = {
         if (isEffectRetryCall(node) && node.arguments.some(hasScheduleForever)) {
           context.report({ node, message: foreverRetryMessage })
         }
-        const filename = (context.filename ?? (typeof context.getFilename === "function" ? context.getFilename() : "")).replace(/\\/g, "/")
+        const filename = getNormalizedFilename()
         if (filename.includes("sample-web/src/") && isFetchCall(node)) {
           context.report({ node, message: fetchBanMessage })
         }
@@ -359,7 +530,7 @@ const syntaxBans = {
         }
       },
       ExportNamedDeclaration(node) {
-        const filename = context.filename ? context.filename.replace(/\\/g, "/") : ""
+        const filename = getNormalizedFilename()
         if (!/libs\/sample\/(domain|service|infra)\/src\//.test(filename)) return
         if (node.declaration == null) return
 

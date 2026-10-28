@@ -2,7 +2,7 @@ import {
   Context,
   Effect,
   Layer,
-  Option,
+  type Option,
   Ref,
   Scheduler,
   Schema,
@@ -14,6 +14,7 @@ import * as HttpClientResponse from "effect/http/HttpClientResponse"
 import * as HttpServerRequest from "effect/http/HttpServerRequest"
 import * as HttpServerResponse from "effect/http/HttpServerResponse"
 import { eq } from "drizzle-orm"
+import { match, P } from "ts-pattern"
 import {
   AlbumQuotaExceededError,
   type CreatePhotoInput,
@@ -204,6 +205,12 @@ const incrementRpcDef = PhotoCounterRpc.requests.get(
 ) as typeof IncrementAlbumCount
 const getRpcDef = PhotoCounterRpc.requests.get("GetAlbumCount") as typeof GetAlbumCount
 
+const formatTraceparent = (maybeSpan: Option.Option<Tracer.AnySpan>): string | undefined =>
+  match(maybeSpan)
+    .with({ _tag: "Some" }, ({ value }) => `00-${value.traceId}-${value.spanId}-01`)
+    .with({ _tag: "None" }, () => undefined)
+    .exhaustive()
+
 export const handleAlbumCounterRpc = Effect.fn("SampleInfra.handleAlbumCounterRpc")(
   function* (rawInput: unknown) {
     const rawAction =
@@ -218,7 +225,10 @@ export const handleAlbumCounterRpc = Effect.fn("SampleInfra.handleAlbumCounterRp
     const payload = yield* Schema.decodeUnknownEffect(rpcDef.payloadSchema)(rawInput)
 
     const maybeStore = yield* Effect.serviceOption(ActiveCounterStore)
-    const store = Option.isSome(maybeStore) ? maybeStore.value : _makeAlbumCounterStoreMemory()
+    const store = match(maybeStore)
+      .with({ _tag: "Some" }, ({ value }) => value)
+      .with({ _tag: "None" }, () => _makeAlbumCounterStoreMemory())
+      .exhaustive()
 
     // 2. Synchronous DO transaction discipline
     return yield* Effect.gen(function* () {
@@ -262,12 +272,16 @@ const _makeAlbumCounterRpcHandler = (
     request: HttpServerRequest.HttpServerRequest | Request
   ) => Effect.Effect<HttpServerResponse.HttpServerResponse, never, never>
 } => {
-  const localStore: AlbumCounterStore =
-    storeOrDb != null && "get" in storeOrDb && "set" in storeOrDb
-      ? (storeOrDb as AlbumCounterStore)
-      : storeOrDb != null && "insert" in storeOrDb && "select" in storeOrDb
-        ? _makeAlbumCounterStoreDrizzle(storeOrDb)
-        : _makeAlbumCounterStoreMemory()
+  const localStore: AlbumCounterStore = match(storeOrDb)
+    .with(
+      P.when((s): s is AlbumCounterStore => s != null && "get" in s && "set" in s),
+      (s) => s
+    )
+    .with(
+      P.when((s): s is DrizzleDatabase => s != null && "insert" in s && "select" in s),
+      (db) => _makeAlbumCounterStoreDrizzle(db)
+    )
+    .otherwise(() => _makeAlbumCounterStoreMemory())
 
   return {
     fetch: (
@@ -288,13 +302,13 @@ const _makeAlbumCounterRpcHandler = (
 
         let externalSpan: Tracer.ExternalSpan | undefined
         if (typeof traceparentHeader === "string") {
-          const match = /^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/i.exec(
+          const parsedTrace = /^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/i.exec(
             traceparentHeader.trim()
           )
-          if (match && match[1] && match[2]) {
+          if (parsedTrace && parsedTrace[1] && parsedTrace[2]) {
             externalSpan = Tracer.externalSpan({
-              traceId: match[1],
-              spanId: match[2],
+              traceId: parsedTrace[1],
+              spanId: parsedTrace[2],
               sampled: true
             })
           }
@@ -308,30 +322,42 @@ const _makeAlbumCounterRpcHandler = (
         }
 
         const res = yield* handler.pipe(
-          Effect.map((count) => ({ ok: true as const, count })),
-          Effect.catch((err: unknown) => Effect.succeed({ ok: false as const, err }))
+          Effect.map((count) => ({ _tag: "Success" as const, count })),
+          Effect.catch((err: unknown) => Effect.succeed({ _tag: "Failure" as const, err }))
         )
-        if (res.ok) {
-          const encodedCount = yield* Schema.encodeUnknownEffect(incrementRpcDef.successSchema)(
-            res.count
-          )
-          return yield* HttpServerResponse.json({ count: encodedCount })
-        }
 
-        const failure = res.err
-        if (
-          failure != null &&
-          typeof failure === "object" &&
-          "_tag" in failure &&
-          failure._tag === "AlbumQuotaExceededError"
-        ) {
-          const encodedErr = yield* Schema.encodeUnknownEffect(incrementRpcDef.errorSchema)(
-            failure
+        return yield* match(res)
+          .with({ _tag: "Success" }, ({ count }) =>
+            Effect.gen(function* () {
+              const encodedCount = yield* Schema.encodeUnknownEffect(
+                incrementRpcDef.successSchema
+              )(count)
+              return yield* HttpServerResponse.json({ count: encodedCount })
+            })
           )
-          return yield* HttpServerResponse.json(encodedErr, { status: 400 })
-        }
-
-        return yield* HttpServerResponse.json({ error: String(failure) }, { status: 500 })
+          .with(
+            {
+              _tag: "Failure",
+              err: P.when(
+                (failure): failure is AlbumQuotaExceededError =>
+                  failure != null &&
+                  typeof failure === "object" &&
+                  "_tag" in failure &&
+                  failure._tag === "AlbumQuotaExceededError"
+              )
+            },
+            ({ err }) =>
+              Effect.gen(function* () {
+                const encodedErr = yield* Schema.encodeUnknownEffect(
+                  incrementRpcDef.errorSchema
+                )(err)
+                return yield* HttpServerResponse.json(encodedErr, { status: 400 })
+              })
+          )
+          .with({ _tag: "Failure" }, ({ err }) =>
+            HttpServerResponse.json({ error: String(err) }, { status: 500 })
+          )
+          .exhaustive()
       }).pipe(Effect.orDie)
   }
 }
@@ -352,9 +378,7 @@ const _makeAlbumCounterRpcClient = (
   const increment = (albumId: string): Effect.Effect<number, AlbumQuotaExceededError> =>
     Effect.gen(function* () {
       const maybeSpan = yield* Effect.currentSpan.pipe(Effect.option)
-      const traceparent = Option.isSome(maybeSpan)
-        ? `00-${maybeSpan.value.traceId}-${maybeSpan.value.spanId}-01`
-        : undefined
+      const traceparent = formatTraceparent(maybeSpan)
 
       const encodedPayload = yield* Schema.encodeUnknownEffect(incrementRpcDef.payloadSchema)({
         albumId
@@ -367,36 +391,45 @@ const _makeAlbumCounterRpcClient = (
       }
 
       const response = yield* client.execute(req)
-      if (response.status === 200) {
-        const data = yield* HttpClientResponse.schemaBodyJson(
-          Schema.Struct({ count: incrementRpcDef.successSchema })
-        )(response)
-        return data.count
-      }
-
-      const err = yield* HttpClientResponse.schemaBodyJson(incrementRpcDef.errorSchema)(response)
-      return yield* err
+      return yield* match(response.status)
+        .with(200, () =>
+          Effect.gen(function* () {
+            const data = yield* HttpClientResponse.schemaBodyJson(
+              Schema.Struct({ count: incrementRpcDef.successSchema })
+            )(response)
+            return data.count
+          })
+        )
+        .otherwise(() =>
+          Effect.gen(function* () {
+            const err = yield* HttpClientResponse.schemaBodyJson(incrementRpcDef.errorSchema)(
+              response
+            )
+            return yield* err
+          })
+        )
     }).pipe(
-      Effect.catch((err: unknown) => {
-        if (
-          err instanceof AlbumQuotaExceededError ||
-          (err != null &&
-            typeof err === "object" &&
-            "_tag" in err &&
-            err._tag === "AlbumQuotaExceededError")
-        ) {
-          return Effect.fail(err as AlbumQuotaExceededError)
-        }
-        return Effect.die(err)
-      })
+      Effect.catch((err: unknown) =>
+        match(err)
+          .with(P.instanceOf(AlbumQuotaExceededError), (e) => Effect.fail(e))
+          .with(
+            P.when(
+              (e): e is AlbumQuotaExceededError =>
+                e != null &&
+                typeof e === "object" &&
+                "_tag" in e &&
+                e._tag === "AlbumQuotaExceededError"
+            ),
+            (e) => Effect.fail(e)
+          )
+          .otherwise((e) => Effect.die(e))
+      )
     )
 
   const getCount = (albumId: string): Effect.Effect<number> =>
     Effect.gen(function* () {
       const maybeSpan = yield* Effect.currentSpan.pipe(Effect.option)
-      const traceparent = Option.isSome(maybeSpan)
-        ? `00-${maybeSpan.value.traceId}-${maybeSpan.value.spanId}-01`
-        : undefined
+      const traceparent = formatTraceparent(maybeSpan)
 
       const encodedPayload = yield* Schema.encodeUnknownEffect(getRpcDef.payloadSchema)({
         albumId

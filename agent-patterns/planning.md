@@ -28,6 +28,7 @@ Every feature plan must map each concern to one of the 16 Effect v4 + Alchemy v2
 | 14 | **Config** | `Config.string`, `Config.integer`, `Effect.config` | `type:domain` & `type:infra` | Type-safe configuration loaded from environment or provider secrets. | Validated at startup; fails fast on missing or malformed configuration. |
 | 15 | **Test Layers** | `Test.make`, in-memory repos, mock bindings | `test/**` | Mock dependencies and in-memory stores for isolated, fast unit tests. | `@effect/vitest` (`it.effect`, `it.scoped`) executes tests deterministically. |
 | 16 | **Verification** | `harness verify`, `nx affected -t verify` | Root tooling | Composite check: typecheck, lint, test, dual-graph trace indexing, and cryptographic stamp. | Verifies all `stub()` calls are eliminated; writes `.harness/verify-stamp.json`. |
+| 17 | **Pattern Matching** | `match(val).with(...).exhaustive()`, `Schema.TaggedUnion` | All packages | Exhaustive branching over closed discriminated unions (`ts-pattern`); replaces `switch` and union `if / else`. | `oxlint` (`syntax-bans`) + `checkEffectGraph` (`discriminant-branching`, `non-exhaustive-union-match`). |
 
 ## The `stub<A, E, R>(...args)` Skeleton Pattern
 
@@ -77,10 +78,10 @@ When a user provides product or domain specifications in **EARS (Easy Approach t
 
 | EARS Clause Pattern | Requirement Intent | Effect / Harness Translation (`Effect<A, E, R>`) | Verification & Test Mapping |
 |---|---|---|---|
-| **Ubiquitous**<br>`THE SYSTEM SHALL <response>` | Core domain invariant or entity shape | `Schema.Struct` / `Schema.Class` in `type:contract` and return channel **`A`** | Schema decode/encode tests & typecheck |
+| **Ubiquitous**<br>`THE SYSTEM SHALL <response>` | Core domain invariant or entity shape | `Schema.Struct` / `Schema.Class` / `Schema.TaggedUnion` in `type:contract` and return channel **`A`** | Schema decode/encode tests & typecheck |
 | **Event-Driven**<br>`WHEN <trigger>, THE SYSTEM SHALL <response>` | Action entry point and happy-path outcome | `HttpApiEndpoint` / `Rpc` payload Schema in `type:contract` $\rightarrow$ `Effect.fn("Domain.useCase")` returning **`A`** | `it.effect("WHEN <trigger>, SHALL <response>")` |
 | **Unwanted Behavior**<br>`IF <condition>, THEN THE SYSTEM SHALL <fail/recover>` | Domain or boundary failure condition | `Schema.TaggedErrorClass` in `type:contract` added to the **`E`** channel (`return yield* new MyError(...)`) | `it.effect("IF <condition>, SHALL fail with <Error>")` + `OpenApi` error status |
-| **State-Driven**<br>`WHILE <in state>, THE SYSTEM SHALL <response>` | State guard, quota, or concurrency invariant | Pure decider `Effect.fn("Domain.decide")` with **`R = never`** + stateful `Context.Service` (e.g., D1 repo or DO counter) in **`R`** | `effect-graph:check` (`impure-decider` rule enforces `R = never` on `.decide`) |
+| **State-Driven**<br>`WHILE <in state>, THE SYSTEM SHALL <response>` | State guard, quota, or concurrency invariant | Closed discriminated union (`Schema.TaggedUnion`) + pure decider `Effect.fn("Domain.decide")` using `match(state)...exhaustive()` with **`R = never`** + stateful `Context.Service` in **`R`** | `effect-graph:check` (`impure-decider`, `discriminant-branching`, `non-exhaustive-union-match`) |
 | **Optional Feature**<br>`WHERE <feature enabled>, THE SYSTEM SHALL <response>` | Pluggable capability or feature flag | `Context.Service` + swappable `Layer` or `Config` in the **`R`** channel | Tested by providing alternate `Layer` in `@effect/vitest` |
 
 ### EARS-to-Skeleton Worked Example

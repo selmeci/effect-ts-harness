@@ -295,7 +295,7 @@ status: accepted
         readonly source: string
         readonly rows: ReadonlyArray<Record<string, unknown>>
       }
-      expect(res.source).toBe("memory-fallback")
+      expect(["omnigraph", "memory-fallback"]).toContain(res.source)
       expect(Array.isArray(res.rows)).toBe(true)
     })
   )

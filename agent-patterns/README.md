@@ -20,7 +20,8 @@ in `effect/Graph` and Omnigraph.
 12. [`httpapi.md`](./httpapi.md) — Schema-first public HTTP APIs with `HttpApi`, `HttpApiGroup`, `HttpApiEndpoint`, OpenAPI export, and breaking change detection with `oasdiff breaking`.
 13. [`rpc.md`](./rpc.md) — Internal RPC procedures over `Cloudflare.toHttpClient(doStub)` with W3C `traceparent` propagation into Durable Objects.
 14. [`atom.md`](./atom.md) — Reactive frontend client state with `@effect/atom-react` and `AtomHttpApi` consuming backend contracts with zero manual `fetch`.
+15. [`pattern-matching.md`](./pattern-matching.md) — Exhaustive pattern matching with `ts-pattern` (`match(value)...exhaustive()`) and closed discriminated unions (`Schema.TaggedUnion`, `Schema.TaggedClass`), replacing `switch` and union `if / else`.
 
 ## Status
 
-All 14 pattern files are reviewed and indexed as `PatternDoc` nodes in `@harness/graph` via `loadPatternDocs(repoRoot)`.
+All 15 pattern files are reviewed and indexed as `PatternDoc` nodes in `@harness/graph` via `loadPatternDocs(repoRoot)`.

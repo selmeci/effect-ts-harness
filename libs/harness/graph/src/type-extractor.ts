@@ -18,6 +18,7 @@ import {
 import { buildHarnessGraph } from "./graph-engine.js"
 import type {
   AdrDocNode,
+  BranchingViolation,
   EarsSpecNode,
   EffectFnNode,
   ExercisesSpanEdge,
@@ -154,6 +155,58 @@ const decomposeType = (type: Type): Array<string> => {
   return [raw]
 }
 
+const isDiscriminantPropertyOfUnion = (
+  objType: Type,
+  propName: string,
+  locationNode: Node
+): boolean => {
+  if (!objType.isUnion()) return false
+  const members = objType.getUnionTypes().filter((u) => !u.isUndefined() && !u.isNull())
+  if (members.length < 2) return false
+  let literalCount = 0
+  for (const member of members) {
+    const propSym = member.getProperty(propName)
+    if (!propSym) continue
+    const propType = propSym.getTypeAtLocation(locationNode)
+    if (propType.isLiteral() || propType.isBooleanLiteral()) {
+      literalCount += 1
+    }
+  }
+  return literalCount >= 2
+}
+
+const isClosedFiniteUnionType = (argType: Type, locationNode: Node): boolean => {
+  if (!argType.isUnion()) return false
+  const members = argType.getUnionTypes().filter((u) => !u.isUndefined() && !u.isNull())
+  if (members.length < 2) return false
+  return members.every((member) => {
+    if (member.isLiteral() || member.isBooleanLiteral()) return true
+    if (member.isObject()) {
+      return member.getProperties().some((propSym) => {
+        const propType = propSym.getTypeAtLocation(locationNode)
+        return propType.isLiteral() || propType.isBooleanLiteral()
+      })
+    }
+    return false
+  })
+}
+
+const findEnclosingSymbolName = (node: Node, relPath: string): string => {
+  let curr: Node | undefined = node.getParent()
+  while (curr !== undefined) {
+    if (Node.isVariableDeclaration(curr)) {
+      const name = curr.getName()
+      if (name) return `${relPath}#${name}`
+    }
+    if (Node.isFunctionDeclaration(curr) || Node.isMethodDeclaration(curr)) {
+      const name = curr.getName()
+      if (name) return `${relPath}#${name}`
+    }
+    curr = curr.getParent()
+  }
+  return relPath
+}
+
 export const extractTypeAwareGraphFromSource = (
   files: ReadonlyArray<SourceFileInput>,
   options?: TypeExtractorOptions
@@ -164,6 +217,7 @@ export const extractTypeAwareGraphFromSource = (
   const dynamicPaths: Record<string, Array<string>> = {
     effect: [path.join(graphNodeModules, "effect")],
     "effect/*": [path.join(graphNodeModules, "effect/*")],
+    "ts-pattern": [path.join(repoRoot, "node_modules/ts-pattern")],
     "@harness/gates": [path.join(repoRoot, "libs/harness/gates/src/index.ts")],
     "@harness/sample-contract": [path.join(repoRoot, "libs/sample/contract/src/index.ts")],
     "@harness/sample-service": [path.join(repoRoot, "libs/sample/service/src/index.ts")],
@@ -211,6 +265,7 @@ export const extractTypeAwareGraphFromSource = (
   const failsWith: Array<{ readonly callerQualname: string; readonly errorTag: string }> = []
   const providesService: Array<{ readonly layerQualname: string; readonly tagId: string }> = []
   const layerRequires: Array<{ readonly layerQualname: string; readonly tagId: string }> = []
+  const branchingViolations: Array<BranchingViolation> = []
 
   const serviceMethodErrors = new Map<string, Map<string, Array<string>>>()
   const classNameToTagId = new Map<string, string>()
@@ -620,6 +675,101 @@ export const extractTypeAwareGraphFromSource = (
     }
   }
 
+  // 2b. Type-aware discriminant branching and non-exhaustive match check
+  for (const sourceFile of project.getSourceFiles()) {
+    const relPath = path.relative(repoRoot, sourceFile.getFilePath()).replace(/\\/g, "/")
+    if (
+      !fileMap.has(relPath) ||
+      relPath.startsWith("libs/harness/") ||
+      relPath.startsWith("apps/harness-")
+    ) {
+      continue
+    }
+
+    const checkConditionNode = (condExpr: Node, statementNode: Node): void => {
+      const binNodes = [
+        ...(Node.isBinaryExpression(condExpr) ? [condExpr] : []),
+        ...condExpr.getDescendantsOfKind(SyntaxKind.BinaryExpression)
+      ]
+      for (const bin of binNodes) {
+        const opKind = bin.getOperatorToken().getKind()
+        if (
+          opKind !== SyntaxKind.EqualsEqualsEqualsToken &&
+          opKind !== SyntaxKind.ExclamationEqualsEqualsToken &&
+          opKind !== SyntaxKind.EqualsEqualsToken &&
+          opKind !== SyntaxKind.ExclamationEqualsToken
+        ) {
+          continue
+        }
+        const candidates = [bin.getLeft(), bin.getRight()]
+        for (const side of candidates) {
+          if (Node.isPropertyAccessExpression(side)) {
+            const objExpr = side.getExpression()
+            const propName = side.getName()
+            const objType = objExpr.getType()
+            if (isDiscriminantPropertyOfUnion(objType, propName, side)) {
+              const enclosingSymbol = findEnclosingSymbolName(statementNode, relPath)
+              branchingViolations.push({
+                rule: "discriminant-branching",
+                message: `Condition in '${enclosingSymbol}' branches on union discriminant '${objExpr.getText()}.${propName}' via if/ternary — enumerate all union variants explicitly with match(${objExpr.getText()}).with(...).exhaustive() from ts-pattern.`,
+                file: relPath,
+                line: statementNode.getStartLineNumber(),
+                enclosingSymbol
+              })
+              return
+            }
+          }
+        }
+      }
+    }
+
+    for (const ifStmt of sourceFile.getDescendantsOfKind(SyntaxKind.IfStatement)) {
+      checkConditionNode(ifStmt.getExpression(), ifStmt)
+    }
+
+    for (const condExpr of sourceFile.getDescendantsOfKind(SyntaxKind.ConditionalExpression)) {
+      checkConditionNode(condExpr.getCondition(), condExpr)
+    }
+
+    for (const callExpr of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+      const callee = callExpr.getExpression()
+      if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== "otherwise") {
+        continue
+      }
+      let curr: Node = callee.getExpression()
+      while (Node.isCallExpression(curr)) {
+        const innerCallee = curr.getExpression()
+        if (
+          Node.isPropertyAccessExpression(innerCallee) &&
+          (innerCallee.getName() === "with" ||
+            innerCallee.getName() === "when" ||
+            innerCallee.getName() === "narrow" ||
+            innerCallee.getName() === "returnType")
+        ) {
+          curr = innerCallee.getExpression()
+        } else {
+          break
+        }
+      }
+      if (Node.isCallExpression(curr) && curr.getExpression().getText() === "match") {
+        const matchArg = curr.getArguments()[0]
+        if (matchArg) {
+          const argType = matchArg.getType()
+          if (isClosedFiniteUnionType(argType, matchArg)) {
+            const enclosingSymbol = findEnclosingSymbolName(callExpr, relPath)
+            branchingViolations.push({
+              rule: "non-exhaustive-union-match",
+              message: `match(${matchArg.getText()}) in '${enclosingSymbol}' matches on a closed union type '${argType.getText(matchArg)}' but terminates with .otherwise() — enumerate every variant and terminate with .exhaustive().`,
+              file: relPath,
+              line: callExpr.getStartLineNumber(),
+              enclosingSymbol
+            })
+          }
+        }
+      }
+    }
+  }
+
   // 3. Auto-register referenced services
   const existingServiceTags = new Set(services.map((s) => s.tagId))
   for (const rawSvc of referencedServices) {
@@ -662,7 +812,8 @@ export const extractTypeAwareGraphFromSource = (
     providesService,
     layerRequires,
     tracedCalls: [],
-    exercisesSpans: []
+    exercisesSpans: [],
+    branchingViolations
   })
 }
 
@@ -1155,6 +1306,7 @@ export const extractWorkspaceTypeAwareGraph = (
 
     return {
       graph: augmentedGraph,
-      nodeIndexByKey: updatedNodeIndexByKey
+      nodeIndexByKey: updatedNodeIndexByKey,
+      branchingViolations: baseGraph.branchingViolations
     } satisfies HarnessGraph
   })

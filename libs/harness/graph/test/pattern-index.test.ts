@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest"
 import { loadPatternDocs } from "../src/pattern-index.js"
 
 describe("agent-patterns index", () => {
-  it("loads all 14 reviewed pattern files with non-empty summaries", () => {
+  it("loads all 15 reviewed pattern files with non-empty summaries", () => {
     const repoRoot = resolve(import.meta.dirname, "../../../..")
     const docs = loadPatternDocs(repoRoot)
     expect(docs.map((d) => d.slug).sort()).toEqual([
@@ -14,6 +14,7 @@ describe("agent-patterns index", () => {
       "durable-object-state",
       "errors",
       "httpapi",
+      "pattern-matching",
       "planning",
       "resources-scope",
       "rpc",

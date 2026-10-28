@@ -204,7 +204,11 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
     }
   })
 
-  return { graph, nodeIndexByKey }
+  return {
+    graph,
+    nodeIndexByKey,
+    branchingViolations: input.branchingViolations
+  }
 }
 
 export const resolveNode = (

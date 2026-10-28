@@ -17,6 +17,7 @@ In this project, the plan IS compilable TypeScript code. Never write long Markdo
 2. **Define Boundary Types (`type:contract` & `type:service`):**
    - `WHEN <trigger>` $\rightarrow$ Request/response `Schema.Struct` and `HttpApiEndpoint` / `Rpc` in `type:contract`.
    - `IF <condition>, THEN` $\rightarrow$ `Schema.TaggedErrorClass` in `type:contract`.
+   - `WHILE <state>` $\rightarrow$ Closed discriminated unions (`Schema.TaggedUnion` / `Schema.TaggedStruct`) for domain states and decisions in `type:contract` (`agent-patterns/pattern-matching.md`).
    - Stateful capabilities $\rightarrow$ `Context.Service` methods in `type:service`.
 3. **Write `stub<A, E, R>()` Skeletons (`type:domain` & `type:infra`):**
    - `WHILE <state>` $\rightarrow$ Pure decider `Effect.fn("<Domain>.decide")` returning `yield* stub<Out, Err, never>(input)` (`R = never` is mandatory).
@@ -25,7 +26,7 @@ In this project, the plan IS compilable TypeScript code. Never write long Markdo
    ```bash
    node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts plan-check
    ```
-   Fix any type error, duplicate span name, or `GraphPolicyViolation` (`domain-requires-infra`, `domain-requires-cloud-binding`, `impure-decider`, `layer-cycle`, `unmapped-spec-symbol` — verifying that every `span`, `service`, and `error` in the EARS spec frontmatter is represented in the `.ts` skeleton graph) until `plan-check` exits `0` and prints the Mermaid graph.
+   Fix any type error, duplicate span name, or `GraphPolicyViolation` (`domain-requires-infra`, `domain-requires-cloud-binding`, `impure-decider`, `layer-cycle`, `discriminant-branching`, `non-exhaustive-union-match`, `unmapped-spec-symbol` — verifying that every `span`, `service`, and `error` in the EARS spec frontmatter is represented in the `.ts` skeleton graph) until `plan-check` exits `0` and prints the Mermaid graph.
 5. **Pre-Implementation Adversarial & Feasibility Lens (for stateful or multi-package plans):** After `harness plan-check` exits `0` and prints the Mermaid graph, audit the skeleton graph against failure modes before dispatching implementers using the [Pre-Implementation Adversarial Plan Lens](references/adversarial-plan-lens.md) (or dispatching [@effect-adversarial-reviewer](../../executing-effect-stubs/references/personas/adversarial-reviewer.md)): verify idempotency keys are present in contract inputs, partial-failure compensation between DO/D1/Queue is represented in `E` and `R`, optimistic concurrency error channels are declared, and no domain `*.decide` function depends on impure services. For reviewer dispatch instructions and personas across all stages, consult the [Reviewer Dispatch Guide](../../executing-effect-stubs/references/dispatch-reviewers.md).
 6. **Update Spec and Record ADR (Spec & ADR Governance):**
    - **Update `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md`:** Append the verified Mermaid topology diagram printed by `harness plan-check` under `## 4. Verified Plan Topology Graph` and record the Pre-Implementation Adversarial Plan Lens summary checklist.

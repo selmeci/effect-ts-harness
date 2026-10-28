@@ -312,6 +312,18 @@ describe("LearnProposalV1 and proposeLearningAction", () => {
       ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
       expect(ignoreRes.kind).toBe("mechanical")
       expect(ignoreRes.hint).toContain("Effect.ignore")
+
+      const discBranchRes = yield* triageFailure(
+        "[discriminant-branching] Condition in 'libs/sample/domain/src/index.ts#checkQuota' branches on union discriminant"
+      ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
+      expect(discBranchRes.kind).toBe("mechanical")
+      expect(discBranchRes.hint).toContain("pattern-matching.md")
+
+      const nonExhaustiveRes = yield* triageFailure(
+        "[non-exhaustive-union-match] match(res) in 'libs/sample/domain/src/index.ts#formatPayment' matches on a closed union"
+      ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
+      expect(nonExhaustiveRes.kind).toBe("mechanical")
+      expect(nonExhaustiveRes.hint).toContain(".exhaustive()")
     })
   )
 })

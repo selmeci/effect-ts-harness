@@ -1,4 +1,5 @@
 import { Effect } from "effect"
+import { match, P } from "ts-pattern"
 import {
   AlbumQuotaExceededError,
   type CreatePhotoInput,
@@ -15,13 +16,14 @@ export const decideAlbumQuota = Effect.fn("Album.decide")(function* (input: {
   readonly albumId: string
   readonly currentCount: number
 }) {
-  if (input.currentCount >= 100) {
-    return yield* new AlbumQuotaExceededError({
-      albumId: input.albumId,
-      count: input.currentCount
-    })
-  }
-  return input.currentCount + 1
+  return yield* match(input)
+    .with({ currentCount: P.when((c) => c >= 100) }, ({ albumId, currentCount }) =>
+      new AlbumQuotaExceededError({
+        albumId,
+        count: currentCount
+      })
+    )
+    .otherwise(({ currentCount }) => Effect.succeed(currentCount + 1))
 })
 
 export const uploadPhoto = Effect.fn("Sample.uploadPhoto")(function* (input: CreatePhotoInput) {

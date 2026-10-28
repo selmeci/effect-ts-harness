@@ -292,4 +292,116 @@ export const OrderRepoLive: Layer.Layer<OrderRepo> = Layer.succeed(OrderRepo, {
     expect(result.violations).toEqual([])
     expect(result.mermaid).toContain("flowchart")
   })
+
+  it("fails with discriminant-branching when an if statement or ternary narrows a union via a custom literal property", () => {
+    const domainSource = `
+import { Effect } from "effect"
+
+export type PlanState =
+  | { readonly tier: "free"; readonly limit: number }
+  | { readonly tier: "pro"; readonly limit: number }
+
+export const checkQuota = Effect.fn("Quota.check")((plan: PlanState, count: number) =>
+  Effect.sync(() => {
+    if (plan.tier === "free") {
+      return count < 5
+    }
+    return count < 100
+  })
+)
+`
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/index.ts",
+        content: domainSource,
+        packageTag: "domain"
+      }
+    ])
+
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(false)
+    expect(result.violations.some((v) => v.rule === "discriminant-branching")).toBe(true)
+  })
+
+  it("allows simple if-else when condition does not narrow a discriminated union", () => {
+    const domainSource = `
+import { Effect } from "effect"
+
+export const checkCount = Effect.fn("Quota.checkCount")((count: number) =>
+  Effect.sync(() => {
+    if (count <= 0) {
+      return 0
+    } else {
+      return count
+    }
+  })
+)
+`
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/index.ts",
+        content: domainSource,
+        packageTag: "domain"
+      }
+    ])
+
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(true)
+  })
+
+  it("fails with non-exhaustive-union-match when match(union) terminates with .otherwise() instead of .exhaustive()", () => {
+    const domainSource = `
+import { Effect } from "effect"
+import { match } from "ts-pattern"
+
+export type PaymentResult =
+  | { readonly kind: "Paid"; readonly receiptId: string }
+  | { readonly kind: "Declined"; readonly reason: string }
+
+export const formatPayment = Effect.fn("Payment.format")((res: PaymentResult) =>
+  Effect.sync(() =>
+    match(res)
+      .with({ kind: "Paid" }, (r) => r.receiptId)
+      .otherwise(() => "unknown")
+  )
+)
+`
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/index.ts",
+        content: domainSource,
+        packageTag: "domain"
+      }
+    ])
+
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(false)
+    expect(result.violations.some((v) => v.rule === "non-exhaustive-union-match")).toBe(true)
+  })
+
+  it("allows match(openPrimitive).otherwise() when matching on non-union open types like number or string", () => {
+    const domainSource = `
+import { Effect } from "effect"
+import { match, P } from "ts-pattern"
+
+export const classifyStatus = Effect.fn("Http.classifyStatus")((status: number) =>
+  Effect.sync(() =>
+    match(status)
+      .with(200, () => "ok" as const)
+      .with(P.number.between(400, 499), () => "client-error" as const)
+      .otherwise(() => "other" as const)
+  )
+)
+`
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/index.ts",
+        content: domainSource,
+        packageTag: "domain"
+      }
+    ])
+
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(true)
+  })
 })

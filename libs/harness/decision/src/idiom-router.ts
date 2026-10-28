@@ -11,6 +11,7 @@ export const IDIOM_BLOCKS = [
   "services-and-layers",
   "errors",
   "schema",
+  "pattern-matching",
   "resources-scope",
   "concurrency",
   "schedule",
@@ -39,6 +40,8 @@ export const IdiomRouterV1 = Decision.make({
         "services-and-layers": "Context.Service capability definitions and Layer wiring",
         errors: "Tagged domain/API errors and typed E-channel handling",
         schema: "Decoding, encoding, validating data at a boundary",
+        "pattern-matching":
+          "Exhaustive ts-pattern match().with().exhaustive() over discriminated unions (Schema.TaggedUnion / TaggedStruct)",
         "resources-scope": "Acquiring and releasing resources with Scope",
         concurrency: "Forking fibers, racing, bounded parallel work",
         schedule: "Retries, repetition, backoff, timing policies",

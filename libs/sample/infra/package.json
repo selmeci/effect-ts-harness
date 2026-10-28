@@ -20,18 +20,19 @@
     "verify": "pnpm run typecheck && pnpm run lint && pnpm run test && pnpm run migration:check"
   },
   "dependencies": {
-    "effect": "4.0.0",
-    "drizzle-orm": "1.0.0-rc.5-ab785fc",
     "@effect/sql-d1": "4.0.0",
     "@effect/sql-sqlite-do": "4.0.0",
     "@harness/sample-contract": "workspace:*",
+    "@harness/sample-domain": "workspace:*",
     "@harness/sample-service": "workspace:*",
-    "@harness/sample-domain": "workspace:*"
+    "drizzle-orm": "1.0.0-rc.5-ab785fc",
+    "effect": "4.0.0",
+    "ts-pattern": "5.9.2"
   },
   "devDependencies": {
     "@effect/vitest": "4.0.0",
-    "@harness/ingest": "workspace:*",
     "@harness/graph": "workspace:*",
+    "@harness/ingest": "workspace:*",
     "@types/node": "26.6.5",
     "drizzle-kit": "1.0.0-rc.5-ab785fc",
     "vitest": "5.0.3"

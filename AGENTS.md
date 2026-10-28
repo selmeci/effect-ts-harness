@@ -26,11 +26,15 @@ A plan maps each section (including EARS requirements: `WHEN` → input Schema &
 `Scope` for resources, `Schedule` for retry/concurrency, `Config` + `Effect.fn("name")` spans, test Layers.
 Plan as code: write the skeleton first (schemas, errors, service interfaces, signatures using `stub<A, E, R>(...args)` from `@harness/gates`) — it must pass typecheck with preserved `A`, `E`, `R` types before implementation starts. `stub()` is allowed during `HARNESS_PLAN_CHECK=1` and banned in `harness verify`.
 
-## Code style (from `repos/effect/LLMS.md`)
+## Code style (from `repos/effect/LLMS.md` & `agent-patterns/pattern-matching.md`)
 
-Prefer `Effect.gen` inline; use `Effect.fn("name")` for reusable traced functions and
-`Effect.fnUntraced` otherwise; avoid wrappers that only return `Effect.gen`; `return` instead of
-yielding-and-assigning an error.
+- Prefer `Effect.gen` inline; use `Effect.fn("name")` for reusable traced functions and `Effect.fnUntraced` otherwise; avoid wrappers that only return `Effect.gen`; `return` instead of yielding-and-assigning an error.
+- **Exhaustive pattern matching (`ts-pattern`) & Discriminated Unions:**
+  - Model mutually exclusive states, commands, events, and results as closed discriminated unions (`Schema.TaggedUnion`, `Schema.TaggedStruct`, `Schema.TaggedClass`) in `type:contract` — never with boolean flags or optional properties.
+  - `switch` statements and multi-branch `if / else if` chains are banned in domain/service/infra/app code. Always use `match(value).with(...).exhaustive()` from `ts-pattern`.
+  - Never use `if / else` or ternary `? :` to check a discriminant property (`_tag`, `kind`, `status`, custom literal tags) or tag guard (`Option.isSome`, `Either.isRight`, `Result.isSuccess`) — enumerate **all** variants with `match(value)...exhaustive()`, even when the union has only 2 states. Simple `if / else` is allowed only when not inspecting a union discriminant.
+  - `.exhaustive()` is mandatory on closed unions; `.otherwise()` is permitted **only** on open types (`number`, `string`, `unknown`) or single-struct `P.when` guards where `.exhaustive()` cannot be used. `match(...).run()` is banned.
+  - Inside `Effect.fn` / `Effect.gen`, `.with()` callbacks are not generators: return an `Effect` or `TaggedError` from each `.with()` arm and `return yield* match(...)...exhaustive()` once at the outer level.
 
 ## Nx taxonomy
 

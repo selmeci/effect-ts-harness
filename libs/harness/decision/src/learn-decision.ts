@@ -76,6 +76,8 @@ export const deterministicLearnFallback = (
       input.detail.includes("domain-requires-") ||
       input.detail.includes("impure-decider") ||
       input.detail.includes("layer-cycle") ||
+      input.detail.includes("discriminant-branching") ||
+      input.detail.includes("non-exhaustive-union-match") ||
       input.detail.includes("harness/syntax-bans")
     const target: LearnTarget = isAstGraphGate ? "ast-graph-gate" : "triage-rule"
     const recommendation = isAstGraphGate

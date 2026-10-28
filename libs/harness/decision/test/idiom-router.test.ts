@@ -12,6 +12,7 @@ describe("IdiomRouterV1 data constraints", () => {
       "services-and-layers",
       "errors",
       "schema",
+      "pattern-matching",
       "resources-scope",
       "concurrency",
       "schedule",

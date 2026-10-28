@@ -391,5 +391,196 @@ describe("Effect.fn syntactic index", () => {
       expect(testReports).toHaveLength(1)
       expect(testReports[0]?.message).toContain(directivePrefix)
     }
+
+    // 12. Enforces ts-pattern exhaustive matching and bans switch, else-if, discriminant if/ternary, match().run(), and union .otherwise()
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = rule.create({
+        filename: "/repo/libs/sample/domain/src/index.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+
+      // SwitchStatement is banned
+      visitor.SwitchStatement({ type: "SwitchStatement" })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain("No switch statements")
+
+      // else-if chain is banned
+      visitor.IfStatement({
+        type: "IfStatement",
+        test: {
+          type: "BinaryExpression",
+          operator: ">",
+          left: { type: "Identifier", name: "count" },
+          right: { type: "Literal", value: 10 }
+        },
+        consequent: { type: "BlockStatement", body: [] },
+        alternate: {
+          type: "IfStatement",
+          test: {
+            type: "BinaryExpression",
+            operator: ">",
+            left: { type: "Identifier", name: "count" },
+            right: { type: "Literal", value: 5 }
+          },
+          consequent: { type: "BlockStatement", body: [] },
+          alternate: null
+        }
+      })
+      expect(reports).toHaveLength(2)
+      expect(reports[1]?.message).toContain("No if/else-if chains")
+
+      // if checking discriminant property (_tag) is banned even for 2 states
+      visitor.IfStatement({
+        type: "IfStatement",
+        test: {
+          type: "BinaryExpression",
+          operator: "===",
+          left: {
+            type: "MemberExpression",
+            computed: false,
+            object: { type: "Identifier", name: "state" },
+            property: { type: "Identifier", name: "_tag" }
+          },
+          right: { type: "Literal", value: "Active" }
+        },
+        consequent: { type: "BlockStatement", body: [] },
+        alternate: { type: "BlockStatement", body: [] }
+      })
+      expect(reports).toHaveLength(3)
+      expect(reports[2]?.message).toContain("enumerate all states with match")
+
+      // ternary checking Option.isSome is banned
+      visitor.ConditionalExpression({
+        type: "ConditionalExpression",
+        test: {
+          type: "CallExpression",
+          callee: {
+            type: "MemberExpression",
+            computed: false,
+            object: { type: "Identifier", name: "Option" },
+            property: { type: "Identifier", name: "isSome" }
+          },
+          arguments: [{ type: "Identifier", name: "opt" }]
+        },
+        consequent: { type: "Literal", value: 1 },
+        alternate: { type: "Literal", value: 0 }
+      })
+      expect(reports).toHaveLength(4)
+      expect(reports[3]?.message).toContain("enumerate all states with match")
+
+      // Simple non-discriminant if-else is allowed
+      visitor.IfStatement({
+        type: "IfStatement",
+        test: {
+          type: "BinaryExpression",
+          operator: "===",
+          left: {
+            type: "MemberExpression",
+            computed: false,
+            object: { type: "Identifier", name: "items" },
+            property: { type: "Identifier", name: "length" }
+          },
+          right: { type: "Literal", value: 0 }
+        },
+        consequent: { type: "BlockStatement", body: [] },
+        alternate: { type: "BlockStatement", body: [] }
+      })
+      expect(reports).toHaveLength(4)
+
+      // match(...).with(...).run() is banned
+      visitor.CallExpression({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: {
+            type: "CallExpression",
+            callee: {
+              type: "MemberExpression",
+              computed: false,
+              object: {
+                type: "CallExpression",
+                callee: { type: "Identifier", name: "match" },
+                arguments: [{ type: "Identifier", name: "x" }]
+              },
+              property: { type: "Identifier", name: "with" }
+            },
+            arguments: [{ type: "Literal", value: 1 }, { type: "ArrowFunctionExpression" }]
+          },
+          property: { type: "Identifier", name: "run" }
+        },
+        arguments: []
+      })
+      expect(reports).toHaveLength(5)
+      expect(reports[4]?.message).toContain("match(...).run() is banned")
+
+      // match(...).with({ _tag: "A" }, ...).otherwise(...) is banned
+      visitor.CallExpression({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: {
+            type: "CallExpression",
+            callee: {
+              type: "MemberExpression",
+              computed: false,
+              object: {
+                type: "CallExpression",
+                callee: { type: "Identifier", name: "match" },
+                arguments: [{ type: "Identifier", name: "x" }]
+              },
+              property: { type: "Identifier", name: "with" }
+            },
+            arguments: [
+              {
+                type: "ObjectExpression",
+                properties: [
+                  {
+                    type: "Property",
+                    key: { type: "Identifier", name: "_tag" },
+                    value: { type: "Literal", value: "A" }
+                  }
+                ]
+              },
+              { type: "ArrowFunctionExpression" }
+            ]
+          },
+          property: { type: "Identifier", name: "otherwise" }
+        },
+        arguments: [{ type: "ArrowFunctionExpression" }]
+      })
+      expect(reports).toHaveLength(6)
+      expect(reports[5]?.message).toContain("Do not use .otherwise() when matching on discriminated union tags")
+
+      // match(num).with(1, ...).otherwise(...) on primitive is allowed
+      visitor.CallExpression({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: {
+            type: "CallExpression",
+            callee: {
+              type: "MemberExpression",
+              computed: false,
+              object: {
+                type: "CallExpression",
+                callee: { type: "Identifier", name: "match" },
+                arguments: [{ type: "Identifier", name: "num" }]
+              },
+              property: { type: "Identifier", name: "with" }
+            },
+            arguments: [{ type: "Literal", value: 1 }, { type: "ArrowFunctionExpression" }]
+          },
+          property: { type: "Identifier", name: "otherwise" }
+        },
+        arguments: [{ type: "ArrowFunctionExpression" }]
+      })
+      expect(reports).toHaveLength(6)
+    }
   })
 })

@@ -31,8 +31,9 @@ Every requirement specified in the EARS spec must map to an explicit, behavior-s
 - **`IF <condition>, THEN <action>` (Sad-Path / Typed Failures):**
   - Must test negative branches with `Effect.flip` or `Effect.exit`.
   - Must assert the exact `_tag` AND all relevant payload fields on the `TaggedError` (e.g. `expect(error._tag).toBe("NotFoundError")` and `expect(error.id).toBe(expectedId)`), never generic `Effect.isFailure` alone.
-- **`WHILE <state>` (Pure Deciders):**
+- **`WHILE <state>` (Pure Deciders & Discriminated Unions):**
   - Boundary conditions for pure deciders (`*.decide`) MUST be tested across transition boundaries: `limit - 1`, `limit`, and `limit + 1`.
+  - Every variant `_tag` of a discriminated union (`Schema.TaggedUnion`) matched in `.exhaustive()` MUST be explicitly exercised by the test suite.
   - Decider tests MUST run with zero service layers (`R = never`), guaranteeing purity and determinism without mocks.
   - Pure deciders (`*.decide`) and stateful reducers/projections MUST include Property-Based Tests (`it.effect.prop` / `it.prop`) over `Schema` arbitraries (via `effect/Arbitrary`), not just 1-2 hand-picked example inputs.
   - Tests must be strong enough to kill boundary (`>=` vs `>`, `<=` vs `<`) and arithmetic (`+ 1` vs `- 1`) mutants in `harness mutate --strict` (`MutationCheck.decide`).

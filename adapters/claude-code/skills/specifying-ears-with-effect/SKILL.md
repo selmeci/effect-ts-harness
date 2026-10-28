@@ -83,7 +83,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | Excuse | Reality |
 |---|---|
 | "The user said 'quickly / no time', so I'll invent default assumptions silently" | Silent assumptions cause full rewrites across 4 Nx tiers. Put defaults in `## Assumptions` and confirm EARS clauses first. |
-| "I can write a prose Markdown implementation plan instead of EARS" | Prose plans hide missing `E` (error) and `WHILE` (pure `.decide`) channels. EARS maps 1:1 to `Effect<A, E, R>`. |
+| "I can write a prose Markdown implementation plan instead of EARS" | Prose plans hide missing `E` (error) and `WHILE` (pure `.decide` over `Schema.TaggedUnion` with `match()...exhaustive()`) channels. EARS maps 1:1 to `Effect<A, E, R>`. |
 | "I don't need `harness_resolve` before asking questions" | Asking without checking the graph wastes the user's time on things already defined in `type:contract` or `type:service`. |
 | "I can use 'the system shall' to save time" | Generic subjects fail `EarsSpecLint.decide` (`generic-subject`). Every Effect requirement must name a concrete symbol. |
 

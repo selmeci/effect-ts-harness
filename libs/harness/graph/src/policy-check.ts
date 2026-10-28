@@ -18,6 +18,8 @@ export interface GraphPolicyViolation {
     | "layer-cycle"
     | "impure-decider"
     | "unmapped-spec-symbol"
+    | "discriminant-branching"
+    | "non-exhaustive-union-match"
   readonly message: string
   readonly path: ReadonlyArray<string>
 }
@@ -204,6 +206,15 @@ export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphRe
         })
       }
     }
+  }
+
+  // Rule 5: discriminant-branching and non-exhaustive-union-match from type-aware extractor
+  for (const bv of harnessGraph.branchingViolations ?? []) {
+    violations.push({
+      rule: bv.rule,
+      message: bv.message,
+      path: [bv.file, bv.enclosingSymbol]
+    })
   }
 
   const mermaid = renderMermaid(harnessGraph)
