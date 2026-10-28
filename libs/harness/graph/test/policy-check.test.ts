@@ -567,5 +567,148 @@ export const Order = Schema.Struct({
     expect(booleanViolations.some((v) => v.message.includes("checkedOut"))).toBe(true)
     expect(booleanViolations.some((v) => v.message.includes("created"))).toBe(true)
   })
+
+  it("fails with impure-reducer when a reducer EffectFn requires services or fails with an error", () => {
+    const graph = buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/sample/domain/src/index.ts#evolveCart",
+          spanName: "Cart.evolve",
+          file: "libs/sample/domain/src/index.ts",
+          line: 1,
+          packageTag: "domain",
+          successType: "CartState",
+          isStub: false
+        }
+      ],
+      services: [
+        {
+          tagId: "DatabasePort",
+          name: "DatabasePort",
+          packageTag: "service",
+          file: "libs/sample/service/src/index.ts"
+        }
+      ],
+      layers: [],
+      errors: [
+        {
+          errorTag: "CartError",
+          file: "libs/sample/contract/src/index.ts"
+        }
+      ],
+      tests: [],
+      patternDocs: [],
+      requiresService: [
+        {
+          fnQualname: "libs/sample/domain/src/index.ts#evolveCart",
+          tagId: "DatabasePort"
+        }
+      ],
+      failsWith: [
+        {
+          callerQualname: "libs/sample/domain/src/index.ts#evolveCart",
+          errorTag: "CartError"
+        }
+      ],
+      providesService: [],
+      layerRequires: [],
+      tracedCalls: [],
+      exercisesSpans: []
+    })
+
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(false)
+    const reducerViolations = result.violations.filter((v) => v.rule === "impure-reducer")
+    expect(reducerViolations).toHaveLength(2)
+    expect(reducerViolations.some((v) => v.message.includes("pure and cannot require service"))).toBe(true)
+    expect(reducerViolations.some((v) => v.message.includes("infallible and cannot fail"))).toBe(true)
+  })
+
+  it("fails with dead-event-payload when Schema.TaggedStruct defines fields never read in evolve", () => {
+    const contractSource = `
+import { Schema } from "effect"
+
+export const ReservationConfirmed = Schema.TaggedStruct("ReservationConfirmed", {
+  reservationId: Schema.String,
+  qty: Schema.Number
+})
+`
+    const domainSource = `
+import { match } from "ts-pattern"
+import { ReservationConfirmed } from "@harness/sample-contract"
+
+export type InventoryState = {
+  readonly reservations: ReadonlyArray<string>
+}
+
+export type InventoryEvent = typeof ReservationConfirmed.Type
+
+export const evolveInventory = (state: InventoryState, event: InventoryEvent): InventoryState =>
+  match(event)
+    .with({ _tag: "ReservationConfirmed" }, (ev) => ({
+      reservations: state.reservations.concat(ev.reservationId)
+    }))
+    .exhaustive()
+`
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/contract/src/index.ts",
+        content: contractSource,
+        packageTag: "contract"
+      },
+      {
+        filePath: "libs/sample/domain/src/index.ts",
+        content: domainSource,
+        packageTag: "domain"
+      }
+    ])
+
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(false)
+    const deadPayload = result.violations.find((v) => v.rule === "dead-event-payload")
+    expect(deadPayload).toBeDefined()
+    expect(deadPayload?.message).toContain("ReservationConfirmed")
+    expect(deadPayload?.message).toContain("qty")
+  })
+
+  it("fails with terminal-state-unhandled when reducer matches only on event while state has terminal variant", () => {
+    const domainSource = `
+import { match } from "ts-pattern"
+
+export type CartState =
+  | { readonly _tag: "Empty" }
+  | { readonly _tag: "Open"; readonly items: ReadonlyArray<string> }
+  | { readonly _tag: "CheckedOut" }
+
+export type CartEvent =
+  | { readonly _tag: "ItemAdded"; readonly item: string }
+  | { readonly _tag: "CartCheckedOut" }
+
+export const evolveCart = (state: CartState, event: CartEvent): CartState =>
+  match(event)
+    .with({ _tag: "ItemAdded" }, (ev) => ({
+      _tag: "Open",
+      items: [ev.item]
+    }))
+    .with({ _tag: "CartCheckedOut" }, () => ({
+      _tag: "CheckedOut"
+    }))
+    .exhaustive()
+`
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/index.ts",
+        content: domainSource,
+        packageTag: "domain"
+      }
+    ])
+
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(false)
+    const terminalViolation = result.violations.find((v) => v.rule === "terminal-state-unhandled")
+    expect(terminalViolation).toBeDefined()
+    expect(terminalViolation?.message).toContain("evolveCart")
+    expect(terminalViolation?.message).toContain("CheckedOut")
+  })
 })
 

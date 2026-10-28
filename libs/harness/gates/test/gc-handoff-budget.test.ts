@@ -1334,6 +1334,37 @@ export const isEnabled = (x: number): boolean => {
       expect(boolFalse?.mutatedSource).toContain("return true")
     })
 
+    it("discovers batch-folding and terminal-state-preservation mutants for event sourcing", () => {
+      const code = `
+export const foldEvents = (events: ReadonlyArray<number>, state: number): number => {
+  return events.reduce((acc, ev) => acc + ev, state)
+}
+
+export const evolveCart = (state: CartState, event: CartEvent): CartState => {
+  if (state._tag === "CheckedOut") {
+    return state
+  }
+  return state
+}
+`
+      const mutants = discoverDomainMutants("libs/sample/domain/src/index.ts", code)
+      const batchFolding = mutants.find(
+        (m) =>
+          m.category === "batch-folding" &&
+          m.original === "events.reduce("
+      )
+      expect(batchFolding).toBeDefined()
+      expect(batchFolding?.mutatedSource).toContain("events.slice(0, 1).reduce(")
+
+      const terminalPreservation = mutants.find(
+        (m) =>
+          m.category === "terminal-state-preservation" &&
+          m.original === "return state"
+      )
+      expect(terminalPreservation).toBeDefined()
+      expect(terminalPreservation?.mutatedSource).toContain("return initialState")
+    })
+
     it.effect("evaluates mutation outcomes and computes correct mutation score", () =>
       Effect.gen(function* () {
         const dummyMutant1: CodeMutant = {

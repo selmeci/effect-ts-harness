@@ -8,6 +8,8 @@ export type MutantCategory =
   | "equality-operator"
   | "arithmetic-operator"
   | "boolean-return"
+  | "batch-folding"
+  | "terminal-state-preservation"
 
 export interface CodeMutant {
   readonly id: string
@@ -50,7 +52,11 @@ const MUTATION_PATTERNS: ReadonlyArray<{
   { original: "+ 1", replacement: "- 1", category: "arithmetic-operator" },
   { original: "- 1", replacement: "+ 1", category: "arithmetic-operator" },
   { original: "return true", replacement: "return false", category: "boolean-return" },
-  { original: "return false", replacement: "return true", category: "boolean-return" }
+  { original: "return false", replacement: "return true", category: "boolean-return" },
+  { original: "events.reduce(", replacement: "events.slice(0, 1).reduce(", category: "batch-folding" },
+  { original: ".reduce(evolve,", replacement: ".slice(0, 1).reduce(evolve,", category: "batch-folding" },
+  { original: "() => state", replacement: "() => initialState", category: "terminal-state-preservation" },
+  { original: "return state", replacement: "return initialState", category: "terminal-state-preservation" }
 ]
 
 const shouldSkipLine = (trimmed: string): boolean => {

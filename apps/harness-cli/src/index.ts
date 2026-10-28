@@ -619,6 +619,36 @@ const handleVerify = (
       }
     }
 
+    const governanceDocs =
+      options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot)
+    const ontologyInvariants = yield* decideOntologyInvariants({
+      graph,
+      governanceDocs
+    })
+    if (!ontologyInvariants.clean) {
+      const msg = ontologyInvariants.findings
+        .map((f) => `[${f.kind}] ${f.nodeId}: ${f.message}`)
+        .join("\n")
+      recordFriction(options, {
+        kind: "verify_failure",
+        summary: ontologyInvariants.findings[0]?.kind ?? "ontology-invariants-failed",
+        detail: msg
+      })
+      const thrashing = checkLoopThrashing(readFrictionEvents(repoRoot))
+      if (thrashing.stuck && thrashing.escalationMessage !== null) {
+        return {
+          exitCode: 2,
+          stdout: "",
+          stderr: `${thrashing.escalationMessage}\n${msg}`
+        }
+      }
+      return {
+        exitCode: 1,
+        stdout: "",
+        stderr: `Verification failed: ontology invariants broken\n${msg}`
+      }
+    }
+
     yield* ensureLocalOmnigraphReady(repoRoot)
     const snapshotPath = join(repoRoot, ".harness", "graph-snapshot.json")
 

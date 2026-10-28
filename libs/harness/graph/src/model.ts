@@ -208,6 +208,8 @@ export interface BranchingViolation {
     | "discriminant-branching"
     | "non-exhaustive-union-match"
     | "schema-boolean-state"
+    | "dead-event-payload"
+    | "terminal-state-unhandled"
   readonly message: string
   readonly file: string
   readonly line: number

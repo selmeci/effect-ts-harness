@@ -272,7 +272,15 @@ export const extractTypeAwareGraphFromSource = (
   const referencedServices = new Set<string>()
   const referencedErrors = new Set<string>()
 
-  // 1. First pass: Extract Services and Errors
+  interface TaggedSchemaInfo {
+    readonly tag: string
+    readonly properties: ReadonlyArray<string>
+    readonly file: string
+    readonly line: number
+  }
+  const taggedSchemasByTag = new Map<string, TaggedSchemaInfo>()
+
+  // 1. First pass: Extract Services, Errors, and Tagged Schemas
   for (const sourceFile of project.getSourceFiles()) {
     const relPath = path.relative(repoRoot, sourceFile.getFilePath()).replace(/\\/g, "/")
     const filePkgTag = fileMap.get(relPath)?.packageTag ?? resolvePackageTag(repoRoot, relPath)
@@ -357,6 +365,50 @@ export const extractTypeAwareGraphFromSource = (
           errorTag,
           file: relPath
         })
+      }
+
+      // TaggedClass check
+      if (extText.includes("TaggedClass")) {
+        for (const c of extClause.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+          const args = c.getArguments()
+          if (args.length >= 2 && Node.isStringLiteral(args[0]) && Node.isObjectLiteralExpression(args[1])) {
+            const tag = args[0].getLiteralText()
+            const props = args[1]
+              .getProperties()
+              .filter(Node.isPropertyAssignment)
+              .map((p) => p.getName())
+              .filter((n) => n !== "_tag")
+            taggedSchemasByTag.set(tag, {
+              tag,
+              properties: props,
+              file: relPath,
+              line: c.getStartLineNumber()
+            })
+            break
+          }
+        }
+      }
+    }
+
+    // Collect Schema.TaggedStruct definitions in sourceFile
+    for (const callExpr of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+      const calleeText = callExpr.getExpression().getText()
+      if (calleeText === "Schema.TaggedStruct" || calleeText === "S.TaggedStruct") {
+        const args = callExpr.getArguments()
+        if (args.length >= 2 && Node.isStringLiteral(args[0]) && Node.isObjectLiteralExpression(args[1])) {
+          const tag = args[0].getLiteralText()
+          const props = args[1]
+            .getProperties()
+            .filter(Node.isPropertyAssignment)
+            .map((p) => p.getName())
+            .filter((n) => n !== "_tag")
+          taggedSchemasByTag.set(tag, {
+            tag,
+            properties: props,
+            file: relPath,
+            line: callExpr.getStartLineNumber()
+          })
+        }
       }
     }
   }
@@ -1001,6 +1053,181 @@ export const extractTypeAwareGraphFromSource = (
               line: node.getStartLineNumber(),
               enclosingSymbol
             })
+          }
+        }
+      }
+    }
+
+    // Event Sourcing Reducer checks: dead-event-payload and terminal-state-unhandled
+    if (filePkgTag === "contract" || filePkgTag === "domain") {
+      const isReducerName = (name: string): boolean => {
+        const baseName = name.includes("#") ? name.split("#")[1]! : name
+        return /^(evolve\w*|reduce\w*|.*Reducer)$/i.test(baseName)
+      }
+
+      const TERMINAL_VARIANT_REGEX =
+        /^(CheckedOut|Cancelled|Canceled|Archived|Completed|Closed|Finished|Terminated)$/i
+
+      const candidateFunctions = [
+        ...sourceFile.getFunctions(),
+        ...sourceFile.getDescendantsOfKind(SyntaxKind.ArrowFunction),
+        ...sourceFile.getDescendantsOfKind(SyntaxKind.FunctionExpression)
+      ]
+
+      const processedSymbols = new Set<string>()
+
+      for (const fnNode of candidateFunctions) {
+        const enclosingSymbol = findEnclosingSymbolName(fnNode, relPath)
+        if (!isReducerName(enclosingSymbol)) continue
+        if (processedSymbols.has(enclosingSymbol)) continue
+
+        const params = fnNode.getParameters()
+        if (params.length < 2) continue
+        processedSymbols.add(enclosingSymbol)
+        const stateParam = params[0]
+        const eventParam = params[1]
+
+        // 1. terminal-state-unhandled check
+        if (stateParam && eventParam) {
+          const stateType = stateParam.getType()
+          let terminalVariantName: string | null = null
+
+          if (stateType.isUnion()) {
+            for (const unionPart of stateType.getUnionTypes()) {
+              const tagProp = unionPart.getProperty("_tag")
+              if (tagProp) {
+                const tagType = tagProp.getTypeAtLocation(stateParam)
+                const rawTag = tagType.getText().replace(/^["'`]|["'`]$/g, "")
+                if (TERMINAL_VARIANT_REGEX.test(rawTag)) {
+                  terminalVariantName = rawTag
+                  break
+                }
+              } else {
+                const typeText = unionPart.getText()
+                const matchTag = typeText.match(TERMINAL_VARIANT_REGEX)
+                if (matchTag) {
+                  terminalVariantName = matchTag[0]
+                  break
+                }
+              }
+            }
+          }
+
+          if (terminalVariantName !== null) {
+            for (const callExpr of fnNode.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+              if (callExpr.getExpression().getText() === "match") {
+                const matchArg = callExpr.getArguments()[0]
+                if (matchArg) {
+                  const matchArgText = matchArg.getText()
+                  const eventParamName = eventParam.getName()
+                  if (matchArgText === eventParamName || matchArgText === "event" || matchArgText === "ev") {
+                    branchingViolations.push({
+                      rule: "terminal-state-unhandled",
+                      message: `Reducer '${enclosingSymbol}' matches only on '${matchArgText}' without checking for terminal state '${terminalVariantName}' — terminal states must be matched on 'state' to preserve terminality during event folding.`,
+                      file: relPath,
+                      line: callExpr.getStartLineNumber(),
+                      enclosingSymbol
+                    })
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // 2. dead-event-payload check
+        const handledTags = new Set<string>()
+        const usedPropsPerTag = new Map<string, Set<string>>()
+
+        for (const withCall of fnNode.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+          const callee = withCall.getExpression()
+          if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== "with") {
+            continue
+          }
+
+          const args = withCall.getArguments()
+          if (args.length < 2) continue
+
+          const handler = args[args.length - 1]
+          if (!handler || (!Node.isArrowFunction(handler) && !Node.isFunctionExpression(handler))) {
+            continue
+          }
+
+          const patternArgs = args.slice(0, args.length - 1)
+          const matchedTagsInWith: Array<string> = []
+
+          for (const patternArg of patternArgs) {
+            for (const propAssign of patternArg.getDescendantsOfKind(SyntaxKind.PropertyAssignment)) {
+              if (propAssign.getName() === "_tag") {
+                const init = propAssign.getInitializer()
+                if (init && (Node.isStringLiteral(init) || Node.isNoSubstitutionTemplateLiteral(init))) {
+                  const tag = init.getLiteralText()
+                  if (taggedSchemasByTag.has(tag)) {
+                    matchedTagsInWith.push(tag)
+                    handledTags.add(tag)
+                    if (!usedPropsPerTag.has(tag)) {
+                      usedPropsPerTag.set(tag, new Set())
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          if (matchedTagsInWith.length === 0) continue
+
+          // Check parameter destructuring: ({ reservationId }) or ([state, { reservationId }])
+          for (const param of handler.getParameters()) {
+            for (const binding of param.getDescendantsOfKind(SyntaxKind.BindingElement)) {
+              const name = binding.getName()
+              for (const tag of matchedTagsInWith) {
+                const schema = taggedSchemasByTag.get(tag)
+                if (schema && schema.properties.includes(name)) {
+                  usedPropsPerTag.get(tag)!.add(name)
+                }
+              }
+            }
+          }
+
+          // Check property accesses in handler body: ev.reservationId
+          for (const propAccess of handler.getDescendantsOfKind(SyntaxKind.PropertyAccessExpression)) {
+            const propName = propAccess.getName()
+            for (const tag of matchedTagsInWith) {
+              const schema = taggedSchemasByTag.get(tag)
+              if (schema && schema.properties.includes(propName)) {
+                usedPropsPerTag.get(tag)!.add(propName)
+              }
+            }
+          }
+
+          // Check identifiers in handler body
+          for (const ident of handler.getDescendantsOfKind(SyntaxKind.Identifier)) {
+            const identText = ident.getText()
+            for (const tag of matchedTagsInWith) {
+              const schema = taggedSchemasByTag.get(tag)
+              if (schema && schema.properties.includes(identText)) {
+                usedPropsPerTag.get(tag)!.add(identText)
+              }
+            }
+          }
+        }
+
+        // For each handled tag, verify all payload fields were used across reducer arms
+        for (const tag of handledTags) {
+          const schema = taggedSchemasByTag.get(tag)
+          if (!schema || schema.properties.length === 0) continue
+
+          const usedProps = usedPropsPerTag.get(tag) ?? new Set()
+          for (const prop of schema.properties) {
+            if (!usedProps.has(prop)) {
+              branchingViolations.push({
+                rule: "dead-event-payload",
+                message: `Event schema '${tag}' defines property '${prop}', but property '${prop}' is never read or applied in reducer '${enclosingSymbol}'. Superfluous event fields waste storage and mislead consumers.`,
+                file: relPath,
+                line: fnNode.getStartLineNumber(),
+                enclosingSymbol
+              })
+            }
           }
         }
       }

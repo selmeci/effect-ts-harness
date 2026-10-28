@@ -365,6 +365,55 @@ describe("harness-cli v2 commands", () => {
         rmSync(dir, { recursive: true, force: true })
       }
     })
+
+    it("fails verify with exit 1 when ontology invariants are broken", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "harness-cli-verify-ontology-fail-"))
+      try {
+        const srcDir = join(dir, "libs", "sample", "src")
+        mkdirSync(srcDir, { recursive: true })
+        writeFileSync(
+          join(srcDir, "a.ts"),
+          `import { Effect } from "effect"\nexport const fnReal = Effect.fn("Sample.real")(function* () { return 42 })\n`
+        )
+
+        const brokenSpecMarkdown = `---
+id: SPEC-001
+title: Broken Spec
+status: accepted
+enforced_by:
+  - libs/sample/src/a.ts
+---
+
+### Area 1: Cart
+
+| ID | Pattern | Requirement | Effect Symbol | Verification |
+| --- | --- | --- | --- | --- |
+| REQ-1.1 | State-driven | While cart is open, the engine shall calculate total. | Sample.real | test |
+`
+
+        const res = await runCli(["verify"], {
+          repoRoot: dir,
+          skipSubprocessVerify: true,
+          governanceDocs: [
+            {
+              id: "SPEC-001",
+              status: "accepted",
+              docPath: "libs/sample/docs/specs/spec-1.md",
+              markdown: brokenSpecMarkdown,
+              enforcedByFiles: ["libs/sample/src/a.ts"],
+              referencedSpans: ["Sample.real"],
+              referencedServices: [],
+              referencedErrors: []
+            }
+          ]
+        })
+        expect(res.exitCode).toBe(1)
+        expect(res.stderr).toContain("Verification failed: ontology invariants broken")
+        expect(res.stderr).toContain("ontology-while-decider-mismatch")
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
   })
 
   describe("done", () => {

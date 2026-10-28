@@ -17,6 +17,9 @@ export interface GraphPolicyViolation {
     | "domain-requires-cloud-binding"
     | "layer-cycle"
     | "impure-decider"
+    | "impure-reducer"
+    | "dead-event-payload"
+    | "terminal-state-unhandled"
     | "unmapped-spec-symbol"
     | "discriminant-branching"
     | "non-exhaustive-union-match"
@@ -37,6 +40,12 @@ const isCloudBinding = (node: ServiceTagNode): boolean =>
 
 const isDeciderSpan = (spanName: string): boolean =>
   spanName.endsWith(".decide") || spanName === "decide"
+
+const isReducerSpan = (spanName: string): boolean =>
+  spanName.endsWith(".evolve") ||
+  spanName === "evolve" ||
+  spanName.endsWith(".fold") ||
+  spanName === "fold"
 
 export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphResult => {
   const violations: Array<GraphPolicyViolation> = []
@@ -116,6 +125,27 @@ export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphRe
             rule: "impure-decider",
             message: `Decider function '${fnNode.qualname}' (${fnNode.spanName}) must be pure and cannot require service '${edge.data.tagId}'`,
             path: [fnNode.qualname, edge.data.tagId]
+          })
+        }
+      }
+    }
+  }
+
+  // Rule 2b: impure-reducer (all reducer/evolve functions must be pure R=never and infallible E=never)
+  for (const [fnIdx, fnNode] of Graph.nodes(harnessGraph.graph)) {
+    if (fnNode._tag === "EffectFn" && isReducerSpan(fnNode.spanName)) {
+      for (const [, edge] of Graph.edges(harnessGraph.graph)) {
+        if (edge.source === fnIdx && edge.data._tag === "RequiresService") {
+          violations.push({
+            rule: "impure-reducer",
+            message: `Reducer function '${fnNode.qualname}' (${fnNode.spanName}) must be pure and cannot require service '${edge.data.tagId}'`,
+            path: [fnNode.qualname, edge.data.tagId]
+          })
+        } else if (edge.source === fnIdx && edge.data._tag === "FailsWith") {
+          violations.push({
+            rule: "impure-reducer",
+            message: `Reducer function '${fnNode.qualname}' (${fnNode.spanName}) must be infallible and cannot fail with '${edge.data.errorTag}'`,
+            path: [fnNode.qualname, edge.data.errorTag]
           })
         }
       }
