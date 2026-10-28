@@ -31,7 +31,12 @@
   },
   "overrides": [
     {
-      "files": ["libs/**/src/**/*.ts", "apps/**/src/**/*.ts"],
+      "files": [
+        "libs/**/src/**/*.ts",
+        "apps/**/src/**/*.ts",
+        "libs/**/test/fixtures/**/*.ts",
+        "apps/**/test/fixtures/**/*.ts"
+      ],
       "rules": {
         "harness/syntax-bans": "error",
         "no-restricted-imports": [

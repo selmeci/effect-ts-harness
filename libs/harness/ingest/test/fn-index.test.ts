@@ -390,6 +390,18 @@ describe("Effect.fn syntactic index", () => {
       testVisitor.Program({ type: "Program" })
       expect(testReports).toHaveLength(1)
       expect(testReports[0]?.message).toContain(directivePrefix)
+
+      // test-integrity also bans SwitchStatement in tests
+      const switchReports: Array<{ message: string }> = []
+      const switchVisitor = testRule.create({
+        filename: "/repo/libs/sample/domain/test/index.test.ts",
+        report: (r: { message: string }) => {
+          switchReports.push(r)
+        }
+      })
+      switchVisitor.SwitchStatement({ type: "SwitchStatement" })
+      expect(switchReports).toHaveLength(1)
+      expect(switchReports[0]?.message).toContain("No switch statements")
     }
 
     // 12. Enforces ts-pattern exhaustive matching and bans switch, else-if, discriminant if/ternary, match().run(), and union .otherwise()

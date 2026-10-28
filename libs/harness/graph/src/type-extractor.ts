@@ -841,11 +841,17 @@ const findWorkspaceSrcFiles = (repoRoot: string): ReadonlyArray<string> => {
         e.name === "node_modules" ||
         e.name === "dist" ||
         e.name === ".nx" ||
-        e.name === "test" ||
         e.name === "repos" ||
         e.name === ".git" ||
         e.name === ".harness"
       ) {
+        continue
+      }
+      if (e.name === "test") {
+        const fixturesDir = path.join(current, "test", "fixtures")
+        if (fs.existsSync(fixturesDir)) {
+          walk(fixturesDir)
+        }
         continue
       }
       const full = path.join(current, e.name)
@@ -858,7 +864,7 @@ const findWorkspaceSrcFiles = (repoRoot: string): ReadonlyArray<string> => {
         !e.name.endsWith(".config.ts")
       ) {
         const rel = path.relative(repoRoot, full).replace(/\\/g, "/")
-        if (rel.includes("/src/") || rel.endsWith("alchemy.run.ts")) {
+        if (rel.includes("/src/") || rel.includes("/test/fixtures/") || rel.endsWith("alchemy.run.ts")) {
           results.push(rel)
         }
       }

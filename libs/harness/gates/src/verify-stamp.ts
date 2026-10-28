@@ -29,7 +29,8 @@ const IGNORED_NAMES = new Set([
   ".vscode",
   ".DS_Store",
   ".alchemy",
-  ".vite"
+  ".vite",
+  ".remember"
 ])
 
 const collectFiles = (

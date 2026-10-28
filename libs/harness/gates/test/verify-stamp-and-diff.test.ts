@@ -24,6 +24,22 @@ describe("verify-stamp and plan/impl graph diff", () => {
     }
   })
 
+  it("ignores files in .remember directory and preserves verify-stamp validity", () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-stamp-remember-"))
+    try {
+      writeFileSync(join(dir, "file.ts"), "export const x = 1\n")
+      writeVerifyStamp(dir, "impl/current")
+      expect(checkVerifyStamp(dir).valid).toBe(true)
+
+      mkdirSync(join(dir, ".remember"), { recursive: true })
+      writeFileSync(join(dir, ".remember", "metadata.json"), "{\"lastSeen\": 123}\n")
+      const afterRememberEdit = checkVerifyStamp(dir)
+      expect(afterRememberEdit.valid).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it("handles missing or corrupt verify-stamp.json", () => {
     const dir = mkdtempSync(join(tmpdir(), "harness-stamp-missing-"))
     try {

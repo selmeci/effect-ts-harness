@@ -593,6 +593,9 @@ const testIntegrity = {
           context.report({ node, message: testSkipOrOnlyMessage })
         }
       },
+      SwitchStatement(node) {
+        context.report({ node, message: switchBanMessage })
+      },
     }
   },
 }
