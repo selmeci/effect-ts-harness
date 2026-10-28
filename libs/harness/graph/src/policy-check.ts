@@ -20,6 +20,7 @@ export interface GraphPolicyViolation {
     | "unmapped-spec-symbol"
     | "discriminant-branching"
     | "non-exhaustive-union-match"
+    | "schema-boolean-state"
   readonly message: string
   readonly path: ReadonlyArray<string>
 }
@@ -106,15 +107,15 @@ export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphRe
     }
   }
 
-  // Rule 2: impure-decider (deciders in type:domain cannot require any services)
-  for (const domainFn of domainFns) {
-    if (isDeciderSpan(domainFn.node.spanName)) {
+  // Rule 2: impure-decider (all decider functions across domain/contract/service cannot require any services)
+  for (const [fnIdx, fnNode] of Graph.nodes(harnessGraph.graph)) {
+    if (fnNode._tag === "EffectFn" && isDeciderSpan(fnNode.spanName)) {
       for (const [, edge] of Graph.edges(harnessGraph.graph)) {
-        if (edge.source === domainFn.index && edge.data._tag === "RequiresService") {
+        if (edge.source === fnIdx && edge.data._tag === "RequiresService") {
           violations.push({
             rule: "impure-decider",
-            message: `Decider function '${domainFn.node.qualname}' (${domainFn.node.spanName}) must be pure and cannot require service '${edge.data.tagId}'`,
-            path: [domainFn.node.qualname, edge.data.tagId]
+            message: `Decider function '${fnNode.qualname}' (${fnNode.spanName}) must be pure and cannot require service '${edge.data.tagId}'`,
+            path: [fnNode.qualname, edge.data.tagId]
           })
         }
       }

@@ -14,6 +14,7 @@ export type OntologyInvariantFindingKind =
   | "ontology-if-then-error-mismatch"
   | "ontology-conflicting-requirements"
   | "ontology-broken-realization-chain"
+  | "ontology-unverified-requirement"
 
 export interface OntologyInvariantFinding {
   readonly kind: OntologyInvariantFindingKind
@@ -81,6 +82,36 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(
 
     const findings: Array<OntologyInvariantFinding> = []
     const g = input.graph.graph
+
+    const incomingTestOrCall = new Map<Graph.NodeIndex, number>()
+    const incomingPropertyTests = new Map<Graph.NodeIndex, number>()
+
+    for (const [, edge] of Graph.edges(g)) {
+      if (edge.data._tag === "ExercisesSpan" || edge.data._tag === "TracedCall") {
+        incomingTestOrCall.set(edge.target, (incomingTestOrCall.get(edge.target) ?? 0) + 1)
+        if (edge.data._tag === "ExercisesSpan") {
+          const srcNode = Graph.getNode(g, edge.source)
+          if (
+            Option.isSome(srcNode) &&
+            srcNode.value._tag === "VitestCase" &&
+            srcNode.value.isPropertyTest === true
+          ) {
+            incomingPropertyTests.set(
+              edge.target,
+              (incomingPropertyTests.get(edge.target) ?? 0) + 1
+            )
+          }
+        }
+      }
+    }
+
+    let hasVitestCases = false
+    for (const [, node] of Graph.nodes(g)) {
+      if (node._tag === "VitestCase") {
+        hasVitestCases = true
+        break
+      }
+    }
 
     // 1. Parse all EARS specs
     interface ParsedSpec {
@@ -292,6 +323,61 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(
               nodeId: node.spanName,
               message: `Domain function '${node.spanName}' (${node.qualname}) in governed scope is not justified by any accepted ADR or EARS spec.`
             })
+          }
+        }
+      }
+    }
+
+    // Rule 5: ontology-unverified-requirement
+    if (hasVitestCases) {
+      for (const spec of parsedSpecs) {
+        if (spec.doc.status === "accepted" || spec.doc.status === "proposed") {
+          for (const row of spec.requirements) {
+            const verif = row.verification.trim().toLowerCase()
+            if (
+              (verif === "unittest" ||
+                verif === "propertytest" ||
+                verif === "tracetest" ||
+                verif === "test") &&
+              row.effectSymbol !== undefined &&
+              row.effectSymbol.length > 0
+            ) {
+              const resolved = resolveNode(input.graph, row.effectSymbol)
+              if (
+                resolved !== undefined &&
+                resolved._tag === "EffectFn" &&
+                !resolved.isStub
+              ) {
+                const resolvedKey = getNodeKey(resolved)
+                const nodeIdx = input.graph.nodeIndexByKey.get(resolvedKey)
+                const propTestCount =
+                  nodeIdx !== undefined
+                    ? (incomingPropertyTests.get(nodeIdx) ?? 0)
+                    : 0
+                const testOrCallCount =
+                  nodeIdx !== undefined
+                    ? (incomingTestOrCall.get(nodeIdx) ?? 0)
+                    : 0
+
+                if (verif === "propertytest") {
+                  if (propTestCount === 0) {
+                    findings.push({
+                      kind: "ontology-unverified-requirement",
+                      nodeId: `${spec.doc.id}:${row.id}`,
+                      message: `Requirement ${row.id} claims PropertyTest verification for '${row.effectSymbol}' but 0 property tests exercise it.`
+                    })
+                  }
+                } else {
+                  if (testOrCallCount === 0) {
+                    findings.push({
+                      kind: "ontology-unverified-requirement",
+                      nodeId: `${spec.doc.id}:${row.id}`,
+                      message: `Requirement ${row.id} claims ${row.verification} verification for '${row.effectSymbol}' but 0 tests exercise it.`
+                    })
+                  }
+                }
+              }
+            }
           }
         }
       }

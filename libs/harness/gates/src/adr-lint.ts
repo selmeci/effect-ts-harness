@@ -8,6 +8,7 @@ export type AdrLintFindingKind =
   | "adr-rejected-alternative-structure"
   | "adr-missing-enforcement-table"
   | "adr-unfilled-placeholder"
+  | "adr-enforcement-mismatch"
 
 export interface AdrLintFinding {
   readonly line: number
@@ -250,6 +251,12 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
         "ADR must govern at least one symbol in 'spans', 'services', or 'errors'."
     })
   }
+
+  const declaredSymbols = new Set<string>([
+    ...(spans ?? []),
+    ...(services ?? []),
+    ...(errors ?? [])
+  ])
 
   // Pre-calculate code block lines
   const isCodeBlock: Array<boolean> = Array.from(
@@ -591,6 +598,77 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
                     !rowCells.every((c) => /^:?-+:?$/.test(c))
                   ) {
                     dataRowCount++
+
+                    const lineNum = r + 1
+
+                    // a) Check that none of the 4 cells (Rule, Enforced By, Gate / Mechanism, Governed Symbols) in a data row is empty or - / N/A
+                    const isCellEmptyOrPlaceholder = (cell: string | undefined): boolean => {
+                      if (cell === undefined) return true
+                      const clean = stripMarkup(cell).trim().toLowerCase()
+                      return (
+                        clean === "" ||
+                        clean === "-" ||
+                        clean === "n/a" ||
+                        clean === "na" ||
+                        clean === "none" ||
+                        clean === "tbd"
+                      )
+                    }
+
+                    const ruleCell = rowCells[0]
+                    const enforcedByCell = rowCells[1]
+                    const gateCell = rowCells[2]
+                    const governedSymbolsCell = rowCells[3]
+
+                    if (
+                      rowCells.length < 4 ||
+                      isCellEmptyOrPlaceholder(ruleCell) ||
+                      isCellEmptyOrPlaceholder(enforcedByCell) ||
+                      isCellEmptyOrPlaceholder(gateCell) ||
+                      isCellEmptyOrPlaceholder(governedSymbolsCell)
+                    ) {
+                      findings.push({
+                        line: lineNum,
+                        kind: "adr-enforcement-mismatch",
+                        message: `Row at line ${lineNum} in 'Deterministic Enforcement' table contains empty or placeholder cell.`
+                      })
+                    }
+
+                    // b) Collect all governed symbols declared in the ADR frontmatter (spans, services, errors).
+                    // If the frontmatter declares at least one symbol, verify that every backtick-enclosed identifier
+                    // in the Governed Symbols column (that is not a file path containing / or .ts and not a wildcard *)
+                    // matches one of the frontmatter spans, services, or errors (or ends with #<symbol>).
+                    if (declaredSymbols.size > 0 && governedSymbolsCell) {
+                      const backtickMatches = Array.from(
+                        governedSymbolsCell.matchAll(/`([^`]+)`/g)
+                      ).map((m) => m[1]!.trim())
+
+                      for (const sym of backtickMatches) {
+                        if (
+                          sym === "*" ||
+                          sym.includes("/") ||
+                          sym.includes(".ts")
+                        ) {
+                          continue
+                        }
+
+                        const matches =
+                          declaredSymbols.has(sym) ||
+                          Array.from(declaredSymbols).some(
+                            (ds) =>
+                              ds.endsWith(`#${sym}`) ||
+                              sym.endsWith(`#${ds}`)
+                          )
+
+                        if (!matches) {
+                          findings.push({
+                            line: lineNum,
+                            kind: "adr-enforcement-mismatch",
+                            message: `Governed symbol '${sym}' at line ${lineNum} is not declared in ADR frontmatter spans, services, or errors.`
+                          })
+                        }
+                      }
+                    }
                   }
                 }
                 if (dataRowCount >= 1) {

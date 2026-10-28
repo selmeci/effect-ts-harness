@@ -6,7 +6,8 @@ import {
   extractWorkspaceTypeAwareGraph,
   findCallees,
   findCallers,
-  resolveNode
+  resolveNode,
+  stripCommentsAndTestTitles
 } from "../src/index.js"
 import type { EffectFnNode, ServiceLayerNode } from "../src/model.js"
 
@@ -246,4 +247,28 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
     expect(greetNode).toBeDefined()
     expect(greetNode?._tag).toBe("EffectFn")
   })
+
+  it("stripCommentsAndTestTitles strips comments and describe/it/test titles", () => {
+    const raw = `
+      // calls Decider.run in line comment
+      /* calls Decider.run in block comment */
+      describe("Decider.run suite", () => {
+        it('tests Decider.run behavior', () => {
+          expect(1).toBe(1)
+        })
+        test(\`Decider.run template\`, () => {
+          const run = "hello"
+        })
+      })
+    `
+    const stripped = stripCommentsAndTestTitles(raw)
+    expect(stripped).not.toContain("Decider.run suite")
+    expect(stripped).not.toContain("tests Decider.run behavior")
+    expect(stripped).not.toContain("Decider.run template")
+    expect(stripped).not.toContain("calls Decider.run")
+    expect(stripped).toContain('describe("",')
+    expect(stripped).toContain('it("",')
+    expect(stripped).toContain('test("",')
+  })
 })
+

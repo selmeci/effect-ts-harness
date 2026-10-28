@@ -18,3 +18,14 @@ interface URL {
 declare var URL: {
   new (url: string, base?: string | URL): URL
 }
+
+declare module "*/tools/oxlint/syntax-bans.js" {
+  const plugin: {
+    meta: { name: string }
+    rules: {
+      "syntax-bans": { create: (context: any) => any }
+      "test-integrity": { create: (context: any) => any }
+    }
+  }
+  export default plugin
+}

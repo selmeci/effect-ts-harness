@@ -501,4 +501,134 @@ spans:
         }
       })
   )
+
+  it.effect("flags Rule 5: ontology-unverified-requirement when graph has VitestCase nodes and requirements lack reaching tests", () =>
+    Effect.gen(function* () {
+      const fnQualname = "libs/sample/domain/src/index.ts#Album.decide"
+      const testId = "libs/sample/domain/test/index.test.ts::suite"
+
+      const doc: GovernanceDocReference = {
+        id: "sample:SPEC-0001",
+        docPath: "libs/sample/docs/specs/0001.md",
+        status: "accepted",
+        referencedSpans: ["Album.decide"],
+        referencedServices: [],
+        referencedErrors: [],
+        markdown: `---
+id: sample:SPEC-0001
+title: Photo Gallery
+status: accepted
+date: 2026-10-25
+enforced_by:
+  - libs/sample/domain/src/index.ts
+spans:
+  - Album.decide
+---
+
+# sample:SPEC-0001: Photo Gallery
+
+## Requirements
+
+### Area 1: Quota
+
+| ID | Pattern | Requirement | Effect Symbol | Verification |
+| --- | --- | --- | --- | --- |
+| REQ-1.1 | State-driven | While album quota is active, the engine shall decide quota limit. | Album.decide | PropertyTest |
+| REQ-1.2 | Ubiquitous | The system shall decide album status. | Album.decide | UnitTest |
+`
+      }
+
+      // 1. Graph with VitestCase nodes but NO ExercisesSpan edges
+      const graphWithoutExercises = buildHarnessGraph({
+        fns: [
+          {
+            qualname: fnQualname,
+            spanName: "Album.decide",
+            packageTag: "domain",
+            file: "libs/sample/domain/src/index.ts",
+            line: 10,
+            successType: "boolean",
+            isStub: false
+          }
+        ],
+        tests: [
+          {
+            testId,
+            testFile: "libs/sample/domain/test/index.test.ts",
+            testName: "libs/sample/domain/test/index.test.ts",
+            lastTreeHash: "workspace",
+            isPropertyTest: false
+          }
+        ]
+      })
+
+      const reportUnverified = yield* decideOntologyInvariants({
+        graph: graphWithoutExercises,
+        governanceDocs: [doc]
+      })
+
+      expect(reportUnverified.clean).toBe(false)
+      const propFinding = reportUnverified.findings.find(
+        (f) =>
+          f.kind === "ontology-unverified-requirement" &&
+          f.nodeId === "sample:SPEC-0001:REQ-1.1"
+      )
+      expect(propFinding).toBeDefined()
+      expect(propFinding?.message).toContain(
+        "claims PropertyTest verification for 'Album.decide' but 0 property tests exercise it"
+      )
+
+      const unitFinding = reportUnverified.findings.find(
+        (f) =>
+          f.kind === "ontology-unverified-requirement" &&
+          f.nodeId === "sample:SPEC-0001:REQ-1.2"
+      )
+      expect(unitFinding).toBeDefined()
+      expect(unitFinding?.message).toContain(
+        "claims UnitTest verification for 'Album.decide' but 0 tests exercise it"
+      )
+
+      // 2. Now add a property test ExercisesSpan edge reaching Album.decide
+      const graphWithPropExercises = buildHarnessGraph({
+        fns: [
+          {
+            qualname: fnQualname,
+            spanName: "Album.decide",
+            packageTag: "domain",
+            file: "libs/sample/domain/src/index.ts",
+            line: 10,
+            successType: "boolean",
+            isStub: false
+          }
+        ],
+        tests: [
+          {
+            testId,
+            testFile: "libs/sample/domain/test/index.test.ts",
+            testName: "libs/sample/domain/test/index.test.ts",
+            lastTreeHash: "workspace",
+            isPropertyTest: true
+          }
+        ],
+        exercisesSpans: [
+          {
+            testId,
+            calleeQualname: fnQualname,
+            callCount: 1,
+            receiverLayer: null
+          }
+        ]
+      })
+
+      const reportVerified = yield* decideOntologyInvariants({
+        graph: graphWithPropExercises,
+        governanceDocs: [doc]
+      })
+
+      const unverifiedFindings = reportVerified.findings.filter(
+        (f) => f.kind === "ontology-unverified-requirement"
+      )
+      expect(unverifiedFindings).toHaveLength(0)
+    })
+  )
 })

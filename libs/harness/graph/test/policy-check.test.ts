@@ -434,4 +434,138 @@ export const classifyStatus = Effect.fn("Http.classifyStatus")((status: number) 
     const result = checkEffectGraph(graph)
     expect(result.ok).toBe(true)
   })
+
+  it("fails when a contract decider EffectFn requires services (impure-decider)", () => {
+    const graph = buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/sample/contract/src/index.ts#contractDecider",
+          spanName: "Order.decide",
+          file: "libs/sample/contract/src/index.ts",
+          line: 10,
+          packageTag: "contract",
+          successType: "OrderEvent",
+          isStub: false
+        }
+      ],
+      services: [
+        {
+          tagId: "OrderRepo",
+          name: "OrderRepo",
+          packageTag: "service",
+          file: "libs/sample/service/src/index.ts"
+        }
+      ],
+      requiresService: [
+        {
+          fnQualname: "libs/sample/contract/src/index.ts#contractDecider",
+          tagId: "OrderRepo"
+        }
+      ]
+    })
+
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(false)
+    expect(result.violations).toHaveLength(1)
+    expect(result.violations[0]?.rule).toBe("impure-decider")
+    expect(result.violations[0]?.path).toEqual([
+      "libs/sample/contract/src/index.ts#contractDecider",
+      "OrderRepo"
+    ])
+  })
+
+  it("fails with discriminant-branching when array predicate filters by _tag === 'Fail'", () => {
+    const domainSource = `
+import { Effect } from "effect"
+
+export type CauseReason =
+  | { readonly _tag: "Fail"; readonly error: string }
+  | { readonly _tag: "Die"; readonly defect: unknown }
+
+export const inspectReasons = Effect.fn("Cause.inspect")((reasons: Array<CauseReason>) =>
+  Effect.sync(() => {
+    const fails = reasons.filter((r) => r._tag === "Fail")
+    return fails.length
+  })
+)
+`
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/index.ts",
+        content: domainSource,
+        packageTag: "domain"
+      }
+    ])
+
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(false)
+    const violation = result.violations.find((v) => v.rule === "discriminant-branching")
+    expect(violation).toBeDefined()
+    expect(violation?.message).toContain("r._tag")
+    expect(violation?.message).toContain(".filter()")
+  })
+
+  it("fails with discriminant-branching when aliasing a union discriminant in a local variable", () => {
+    const domainSource = `
+import { Effect } from "effect"
+
+export type AppError =
+  | { readonly _tag: "NotFound"; readonly id: string }
+  | { readonly _tag: "Unauthorized"; readonly reason: string }
+
+export const matchError = Effect.fn("Error.match")((err: AppError, expectedTag: string) =>
+  Effect.sync(() => {
+    const actualTag = err._tag
+    if (actualTag !== expectedTag) {
+      return false
+    }
+    return true
+  })
+)
+`
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/index.ts",
+        content: domainSource,
+        packageTag: "domain"
+      }
+    ])
+
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(false)
+    const violation = result.violations.find((v) => v.rule === "discriminant-branching")
+    expect(violation).toBeDefined()
+    expect(violation?.message).toContain("actualTag")
+  })
+
+  it("fails with schema-boolean-state when Schema.Struct in contract uses checkedOut or created boolean flags", () => {
+    const contractSource = `
+import { Schema } from "effect"
+
+export const Cart = Schema.Struct({
+  id: Schema.String,
+  checkedOut: Schema.Boolean
 })
+
+export const Order = Schema.Struct({
+  id: Schema.String,
+  created: Schema.optional(Schema.Boolean)
+})
+`
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/contract/src/index.ts",
+        content: contractSource,
+        packageTag: "contract"
+      }
+    ])
+
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(false)
+    const booleanViolations = result.violations.filter((v) => v.rule === "schema-boolean-state")
+    expect(booleanViolations).toHaveLength(2)
+    expect(booleanViolations.some((v) => v.message.includes("checkedOut"))).toBe(true)
+    expect(booleanViolations.some((v) => v.message.includes("created"))).toBe(true)
+  })
+})
+

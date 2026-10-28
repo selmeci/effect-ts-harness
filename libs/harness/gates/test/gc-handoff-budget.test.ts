@@ -271,6 +271,52 @@ describe("Harness Gates: GC check, Session Handoff, Span Budget, and State Dir",
       })
     )
 
+    it.effect("flags untested-effect-fn and missing-decider-property-test on packageTag: 'contract' functions", () =>
+      Effect.gen(function* () {
+        const contractDecider = {
+          qualname: "libs/sample/contract/src/index.ts#Decider.run",
+          spanName: "Decider.run",
+          packageTag: "contract" as const,
+          file: "libs/sample/contract/src/index.ts",
+          line: 15,
+          successType: "void",
+          isStub: false
+        }
+        const contractPureDecider = {
+          qualname: "libs/sample/contract/src/index.ts#Item.decide",
+          spanName: "Item.decide",
+          packageTag: "contract" as const,
+          file: "libs/sample/contract/src/index.ts",
+          line: 30,
+          successType: "boolean",
+          isStub: false
+        }
+
+        const graphWithoutTests = buildHarnessGraph({
+          fns: [contractDecider, contractPureDecider]
+        })
+
+        const report = yield* decideGraphEntropy({
+          graph: graphWithoutTests,
+          checkUntestedDomainFns: true,
+          checkDeciderPropertyTests: true
+        })
+
+        expect(report.clean).toBe(false)
+        const untestedDeciderRun = report.findings.find(
+          (f) => f.kind === "untested-effect-fn" && f.nodeId === "Decider.run"
+        )
+        expect(untestedDeciderRun).toBeDefined()
+        expect(untestedDeciderRun?.message).toContain("has 0 reaching tests")
+
+        const missingProp = report.findings.find(
+          (f) => f.kind === "missing-decider-property-test" && f.nodeId === "Item.decide"
+        )
+        expect(missingProp).toBeDefined()
+        expect(missingProp?.message).toContain("0 Property-Based Tests")
+      })
+    )
+
     it("parses ADR and EARS spec YAML frontmatter accurately", () => {
       const adrMarkdown = `---
 id: ADR-0001
@@ -1259,6 +1305,35 @@ status: accepted
       expect(equality?.mutatedSource).toContain("a !== 100")
     })
 
+    it("discovers boolean-return mutants (return true -> return false, return false -> return true)", () => {
+      const code = `
+export const isEnabled = (x: number): boolean => {
+  if (x > 0) {
+    return true
+  }
+  return false
+}
+`
+      const mutants = discoverDomainMutants("libs/sample/contract/src/index.ts", code)
+      const boolTrue = mutants.find(
+        (m) =>
+          m.category === "boolean-return" &&
+          m.original === "return true" &&
+          m.replacement === "return false"
+      )
+      expect(boolTrue).toBeDefined()
+      expect(boolTrue?.mutatedSource).toContain("return false")
+
+      const boolFalse = mutants.find(
+        (m) =>
+          m.category === "boolean-return" &&
+          m.original === "return false" &&
+          m.replacement === "return true"
+      )
+      expect(boolFalse).toBeDefined()
+      expect(boolFalse?.mutatedSource).toContain("return true")
+    })
+
     it.effect("evaluates mutation outcomes and computes correct mutation score", () =>
       Effect.gen(function* () {
         const dummyMutant1: CodeMutant = {
@@ -1762,5 +1837,66 @@ ${rejectedAlternatives}
           expect(report.findings).toHaveLength(0)
         })
     )
+
+    it("flags adr-enforcement-mismatch when Governed Symbols entry is not declared in frontmatter or cell is empty", () => {
+      const adrWithUndeclaredSymbol = `---
+id: test:ADR-0001
+title: Test ADR
+status: accepted
+date: 2026-10-27
+enforced_by:
+  - libs/harness/gates/src/adr-lint.ts
+spans:
+  - AdrDocLint.decide
+---
+
+# test:ADR-0001: Test ADR
+
+## Context and Problem Statement
+Context description here.
+
+## Decision Drivers
+* Driver 1
+
+## Considered Options
+* Option 1
+
+## Decision Outcome
+**Chosen option:** "Option 1"
+
+## Rejected Alternatives
+### 1 · Option 2
+- **Why rejected:** Reasons
+
+## Consequences and Enforcement
+### Positive Consequences
+- Good things
+
+### Negative Consequences and Trade-offs
+- Tradeoffs
+
+### Deterministic Enforcement
+| Rule | Enforced By | Gate / Mechanism | Governed Symbols |
+| --- | --- | --- | --- |
+| Check Rule | libs/harness/gates/src/adr-lint.ts | AdrDocLint.decide | \`UndeclaredSymbol\` |
+`
+      const report = lintAdrDocMarkdown("docs/adr/test.md", adrWithUndeclaredSymbol)
+      expect(report.clean).toBe(false)
+      const mismatch = report.findings.find((f) => f.kind === "adr-enforcement-mismatch")
+      expect(mismatch).toBeDefined()
+      expect(mismatch?.message).toContain("UndeclaredSymbol")
+
+      const adrWithPlaceholderCell = adrWithUndeclaredSymbol.replace(
+        "| Check Rule | libs/harness/gates/src/adr-lint.ts | AdrDocLint.decide | `UndeclaredSymbol` |",
+        "| Check Rule | - | AdrDocLint.decide | `AdrDocLint.decide` |"
+      )
+      const placeholderReport = lintAdrDocMarkdown("docs/adr/test.md", adrWithPlaceholderCell)
+      expect(placeholderReport.clean).toBe(false)
+      const placeholderMismatch = placeholderReport.findings.find(
+        (f) => f.kind === "adr-enforcement-mismatch"
+      )
+      expect(placeholderMismatch).toBeDefined()
+      expect(placeholderMismatch?.message).toContain("empty or placeholder cell")
+    })
   })
 })

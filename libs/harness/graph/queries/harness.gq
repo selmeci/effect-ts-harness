@@ -101,7 +101,7 @@ query ontology_governed_by($symbol: String) {
 query untested_domain_fns() {
   match {
     $fn: EffectFn
-    $fn.packageTag = "domain" and $fn.isStub = false
+    ($fn.packageTag = "domain" or $fn.packageTag = "contract") and $fn.isStub = false
     not {
       $test: VitestCase
       $test exercisesSpan $fn

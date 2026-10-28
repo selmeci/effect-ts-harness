@@ -7,6 +7,7 @@ export type MutantCategory =
   | "boundary-operator"
   | "equality-operator"
   | "arithmetic-operator"
+  | "boolean-return"
 
 export interface CodeMutant {
   readonly id: string
@@ -47,7 +48,9 @@ const MUTATION_PATTERNS: ReadonlyArray<{
   { original: "===", replacement: "!==", category: "equality-operator" },
   { original: "!==", replacement: "===", category: "equality-operator" },
   { original: "+ 1", replacement: "- 1", category: "arithmetic-operator" },
-  { original: "- 1", replacement: "+ 1", category: "arithmetic-operator" }
+  { original: "- 1", replacement: "+ 1", category: "arithmetic-operator" },
+  { original: "return true", replacement: "return false", category: "boolean-return" },
+  { original: "return false", replacement: "return true", category: "boolean-return" }
 ]
 
 const shouldSkipLine = (trimmed: string): boolean => {
@@ -140,43 +143,79 @@ export const evaluateMutationOutcomes = (
 ): MutationSuiteReport =>
   Effect.runSync(decideMutationReport({ outcomes, minScore }))
 
+interface DomainFile {
+  readonly scope: string
+  readonly tier: "domain" | "contract"
+  readonly fullPath: string
+  readonly relFile: string
+}
+
 const findDomainFiles = (
   repoRoot: string,
   scope?: string
-): ReadonlyArray<{ readonly scope: string; readonly fullPath: string; readonly relFile: string }> => {
-  const results: Array<{ scope: string; fullPath: string; relFile: string }> = []
+): ReadonlyArray<DomainFile> => {
+  const results: Array<DomainFile> = []
   const libsDir = join(repoRoot, "libs")
   if (!existsSync(libsDir)) return results
 
   let cleanScope = scope
   if (cleanScope) {
-    cleanScope = cleanScope.replace(/^@harness\//, "").replace(/-domain$/, "")
+    cleanScope = cleanScope
+      .replace(/^@harness\//, "")
+      .replace(/-(domain|contract)$/, "")
   }
 
   const scopes = cleanScope !== undefined ? [cleanScope] : readdirSync(libsDir)
 
   for (const s of scopes) {
-    const srcDir = join(libsDir, s, "domain", "src")
-    if (!existsSync(srcDir)) continue
-
-    const walk = (dir: string) => {
-      const entries = readdirSync(dir, { withFileTypes: true })
-      for (const entry of entries) {
-        const full = join(dir, entry.name)
-        if (entry.isDirectory()) {
-          walk(full)
-        } else if (
-          entry.isFile() &&
-          (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx")) &&
-          !entry.name.endsWith(".d.ts")
-        ) {
-          const relFile = relative(repoRoot, full).replace(/\\/g, "/")
-          results.push({ scope: s, fullPath: full, relFile })
+    const domainSrcDir = join(libsDir, s, "domain", "src")
+    if (existsSync(domainSrcDir)) {
+      const walk = (dir: string) => {
+        const entries = readdirSync(dir, { withFileTypes: true })
+        for (const entry of entries) {
+          const full = join(dir, entry.name)
+          if (entry.isDirectory()) {
+            walk(full)
+          } else if (
+            entry.isFile() &&
+            (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx")) &&
+            !entry.name.endsWith(".d.ts")
+          ) {
+            const relFile = relative(repoRoot, full).replace(/\\/g, "/")
+            results.push({ scope: s, tier: "domain", fullPath: full, relFile })
+          }
         }
       }
+      walk(domainSrcDir)
     }
 
-    walk(srcDir)
+    const contractSrcDir = join(libsDir, s, "contract", "src")
+    if (existsSync(contractSrcDir)) {
+      const walk = (dir: string) => {
+        const entries = readdirSync(dir, { withFileTypes: true })
+        for (const entry of entries) {
+          const full = join(dir, entry.name)
+          if (entry.isDirectory()) {
+            walk(full)
+          } else if (
+            entry.isFile() &&
+            (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx")) &&
+            !entry.name.endsWith(".d.ts")
+          ) {
+            const content = readFileSync(full, "utf8")
+            if (
+              content.includes("Effect.fn") ||
+              content.includes("Effect.gen") ||
+              content.includes("match(")
+            ) {
+              const relFile = relative(repoRoot, full).replace(/\\/g, "/")
+              results.push({ scope: s, tier: "contract", fullPath: full, relFile })
+            }
+          }
+        }
+      }
+      walk(contractSrcDir)
+    }
   }
 
   return results
@@ -192,7 +231,7 @@ export const runDomainMutationSuite = (
   for (const file of domainFiles) {
     const originalContent = readFileSync(file.fullPath, "utf8")
     const mutants = discoverDomainMutants(file.relFile, originalContent)
-    const pkgDir = join(repoRoot, "libs", file.scope, "domain")
+    const pkgDir = join(repoRoot, "libs", file.scope, file.tier)
 
     for (const mutant of mutants) {
       const outcome = Effect.runSync(

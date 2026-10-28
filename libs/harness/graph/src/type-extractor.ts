@@ -675,7 +675,7 @@ export const extractTypeAwareGraphFromSource = (
     }
   }
 
-  // 2b. Type-aware discriminant branching and non-exhaustive match check
+  // 2b. Type-aware discriminant branching, array predicate branching, non-exhaustive match check, and schema boolean state check
   for (const sourceFile of project.getSourceFiles()) {
     const relPath = path.relative(repoRoot, sourceFile.getFilePath()).replace(/\\/g, "/")
     if (
@@ -684,6 +684,33 @@ export const extractTypeAwareGraphFromSource = (
       relPath.startsWith("apps/harness-")
     ) {
       continue
+    }
+
+    const filePkgTag = fileMap.get(relPath)?.packageTag ?? resolvePackageTag(repoRoot, relPath)
+
+    // Track local variable declarations that alias a discriminant property of a union
+    const discriminantAliasVars = new Set<string>()
+    for (const varDecl of sourceFile.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+      const init = varDecl.getInitializer()
+      if (init && Node.isPropertyAccessExpression(init)) {
+        const objExpr = init.getExpression()
+        const propName = init.getName()
+        const objType = objExpr.getType()
+        if (isDiscriminantPropertyOfUnion(objType, propName, init)) {
+          discriminantAliasVars.add(varDecl.getName())
+        }
+      } else if (init) {
+        const nameNode = varDecl.getNameNode()
+        if (Node.isObjectBindingPattern(nameNode)) {
+          const objType = init.getType()
+          for (const elem of nameNode.getElements()) {
+            const propName = elem.getPropertyNameNode()?.getText() ?? elem.getName()
+            if (isDiscriminantPropertyOfUnion(objType, propName, elem)) {
+              discriminantAliasVars.add(elem.getName())
+            }
+          }
+        }
+      }
     }
 
     const checkConditionNode = (condExpr: Node, statementNode: Node): void => {
@@ -730,6 +757,16 @@ export const extractTypeAwareGraphFromSource = (
               })
               return
             }
+          } else if (Node.isIdentifier(side) && discriminantAliasVars.has(side.getText())) {
+            const enclosingSymbol = findEnclosingSymbolName(statementNode, relPath)
+            branchingViolations.push({
+              rule: "discriminant-branching",
+              message: `Condition in '${enclosingSymbol}' branches on aliased union discriminant '${side.getText()}' via if/ternary — enumerate all union variants explicitly with match(...).with(...).exhaustive() from ts-pattern.`,
+              file: relPath,
+              line: statementNode.getStartLineNumber(),
+              enclosingSymbol
+            })
+            return
           }
         }
       }
@@ -745,35 +782,223 @@ export const extractTypeAwareGraphFromSource = (
 
     for (const callExpr of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
       const callee = callExpr.getExpression()
-      if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== "otherwise") {
-        continue
-      }
-      let curr: Node = callee.getExpression()
-      while (Node.isCallExpression(curr)) {
-        const innerCallee = curr.getExpression()
+
+      // Array predicate callbacks: .filter(...), .find(...), .some(...), .every(...)
+      if (Node.isPropertyAccessExpression(callee)) {
+        const methodName = callee.getName()
         if (
-          Node.isPropertyAccessExpression(innerCallee) &&
-          (innerCallee.getName() === "with" ||
-            innerCallee.getName() === "when" ||
-            innerCallee.getName() === "narrow" ||
-            innerCallee.getName() === "returnType")
+          methodName === "filter" ||
+          methodName === "find" ||
+          methodName === "some" ||
+          methodName === "every"
         ) {
-          curr = innerCallee.getExpression()
-        } else {
-          break
+          const args = callExpr.getArguments()
+          if (args.length > 0 && args[0]) {
+            const cb = args[0]
+            if (Node.isArrowFunction(cb) || Node.isFunctionExpression(cb)) {
+              const binNodes = cb.getDescendantsOfKind(SyntaxKind.BinaryExpression)
+              for (const bin of binNodes) {
+                const opKind = bin.getOperatorToken().getKind()
+                if (
+                  opKind !== SyntaxKind.EqualsEqualsEqualsToken &&
+                  opKind !== SyntaxKind.ExclamationEqualsEqualsToken &&
+                  opKind !== SyntaxKind.EqualsEqualsToken &&
+                  opKind !== SyntaxKind.ExclamationEqualsToken
+                ) {
+                  continue
+                }
+                const candidatePairs = [
+                  { side: bin.getLeft(), other: bin.getRight() },
+                  { side: bin.getRight(), other: bin.getLeft() }
+                ]
+                for (const { side, other } of candidatePairs) {
+                  if (Node.isPropertyAccessExpression(side)) {
+                    const isOtherLiteral =
+                      Node.isStringLiteral(other) ||
+                      Node.isNumericLiteral(other) ||
+                      Node.isNoSubstitutionTemplateLiteral(other) ||
+                      other.getKind() === SyntaxKind.TrueKeyword ||
+                      other.getKind() === SyntaxKind.FalseKeyword
+                    if (!isOtherLiteral) continue
+                    const objExpr = side.getExpression()
+                    const propName = side.getName()
+                    const objType = objExpr.getType()
+                    if (isDiscriminantPropertyOfUnion(objType, propName, side)) {
+                      const enclosingSymbol = findEnclosingSymbolName(callExpr, relPath)
+                      branchingViolations.push({
+                        rule: "discriminant-branching",
+                        message: `Predicate callback in '${enclosingSymbol}' branches on union discriminant '${objExpr.getText()}.${propName}' via .${methodName}() — enumerate all union variants explicitly with match(${objExpr.getText()}).with(...).exhaustive() from ts-pattern.`,
+                        file: relPath,
+                        line: bin.getStartLineNumber(),
+                        enclosingSymbol
+                      })
+                      break
+                    }
+                  } else if (Node.isIdentifier(side) && discriminantAliasVars.has(side.getText())) {
+                    const enclosingSymbol = findEnclosingSymbolName(callExpr, relPath)
+                    branchingViolations.push({
+                      rule: "discriminant-branching",
+                      message: `Predicate callback in '${enclosingSymbol}' branches on aliased union discriminant '${side.getText()}' via .${methodName}() — enumerate all union variants explicitly with match(...).with(...).exhaustive() from ts-pattern.`,
+                      file: relPath,
+                      line: bin.getStartLineNumber(),
+                      enclosingSymbol
+                    })
+                    break
+                  }
+                }
+              }
+            }
+          }
         }
       }
-      if (Node.isCallExpression(curr) && curr.getExpression().getText() === "match") {
-        const matchArg = curr.getArguments()[0]
-        if (matchArg) {
-          const argType = matchArg.getType()
-          if (isClosedFiniteUnionType(argType, matchArg)) {
-            const enclosingSymbol = findEnclosingSymbolName(callExpr, relPath)
+
+      // Check ts-pattern match(...).otherwise() on closed union
+      if (Node.isPropertyAccessExpression(callee) && callee.getName() === "otherwise") {
+        let curr: Node = callee.getExpression()
+        while (Node.isCallExpression(curr)) {
+          const innerCallee = curr.getExpression()
+          if (
+            Node.isPropertyAccessExpression(innerCallee) &&
+            (innerCallee.getName() === "with" ||
+              innerCallee.getName() === "when" ||
+              innerCallee.getName() === "narrow" ||
+              innerCallee.getName() === "returnType")
+          ) {
+            curr = innerCallee.getExpression()
+          } else {
+            break
+          }
+        }
+        if (Node.isCallExpression(curr) && curr.getExpression().getText() === "match") {
+          const matchArg = curr.getArguments()[0]
+          if (matchArg) {
+            const argType = matchArg.getType()
+            if (isClosedFiniteUnionType(argType, matchArg)) {
+              const enclosingSymbol = findEnclosingSymbolName(callExpr, relPath)
+              branchingViolations.push({
+                rule: "non-exhaustive-union-match",
+                message: `match(${matchArg.getText()}) in '${enclosingSymbol}' matches on a closed union type '${argType.getText(matchArg)}' but terminates with .otherwise() — enumerate every variant and terminate with .exhaustive().`,
+                file: relPath,
+                line: callExpr.getStartLineNumber(),
+                enclosingSymbol
+              })
+            }
+          }
+        }
+      }
+    }
+
+    // Schema.Struct boolean state check in type:contract and type:domain
+    if (filePkgTag === "contract" || filePkgTag === "domain") {
+      for (const callExpr of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+        const callee = callExpr.getExpression()
+        const isStructCall =
+          callee.getText() === "Schema.Struct" ||
+          callee.getText() === "S.Struct" ||
+          (Node.isPropertyAccessExpression(callee) &&
+            callee.getName() === "Struct" &&
+            (callee.getExpression().getText() === "Schema" ||
+              callee.getExpression().getText() === "S"))
+
+        if (!isStructCall) continue
+
+        const args = callExpr.getArguments()
+        if (args.length === 0 || !Node.isObjectLiteralExpression(args[0])) continue
+
+        const objLit = args[0]
+        const propAssignments: Array<{ name: string; node: Node; init: Node }> = []
+        const propMap = new Map<string, { node: Node; init: Node }>()
+
+        for (const p of objLit.getProperties()) {
+          if (Node.isPropertyAssignment(p)) {
+            const pName = p.getName()
+            const pInit = p.getInitializer()
+            if (pInit) {
+              const entry = { name: pName, node: p, init: pInit }
+              propAssignments.push(entry)
+              propMap.set(pName, entry)
+            }
+          }
+        }
+
+        const isBooleanSchema = (node: Node): boolean => {
+          const text = node.getText().replace(/\s+/g, "")
+          if (text === "Schema.Boolean" || text === "S.Boolean") {
+            return true
+          }
+          if (Node.isCallExpression(node)) {
+            const calleeText = node.getExpression().getText().replace(/\s+/g, "")
+            if (
+              calleeText === "Schema.optional" ||
+              calleeText === "S.optional" ||
+              calleeText === "Schema.optionalWith" ||
+              calleeText === "S.optionalWith"
+            ) {
+              const firstArg = node.getArguments()[0]
+              if (firstArg) {
+                return isBooleanSchema(firstArg)
+              }
+            }
+          }
+          return false
+        }
+
+        const isNullOrOrOption = (node: Node): boolean => {
+          const text = node.getText()
+          return (
+            text.includes("NullOr") ||
+            text.includes("Option") ||
+            text.includes("Schema.NullOr") ||
+            text.includes("Schema.Option") ||
+            text.includes("S.NullOr") ||
+            text.includes("S.Option")
+          )
+        }
+
+        for (const { name, node, init } of propAssignments) {
+          if (!isBooleanSchema(init)) continue
+
+          const matchesRegex =
+            /^(is[A-Z]|has[A-Z]|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|published|expired)$/.test(
+              name
+            ) ||
+            /^(is[A-Z]\w*|has[A-Z]\w*|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|published|expired)$/.test(
+              name
+            )
+
+          const hasCompanion = (() => {
+            const candidates = [
+              `${name}At`,
+              `${name}By`,
+              ...(name.startsWith("is") && name.length > 2
+                ? [
+                    `${name[2]!.toLowerCase()}${name.slice(3)}At`,
+                    `${name[2]!.toLowerCase()}${name.slice(3)}By`
+                  ]
+                : []),
+              ...(name.startsWith("has") && name.length > 3
+                ? [
+                    `${name[3]!.toLowerCase()}${name.slice(4)}At`,
+                    `${name[3]!.toLowerCase()}${name.slice(4)}By`
+                  ]
+                : [])
+            ]
+            for (const cand of candidates) {
+              const companion = propMap.get(cand)
+              if (companion && isNullOrOrOption(companion.init)) {
+                return true
+              }
+            }
+            return false
+          })()
+
+          if (matchesRegex || hasCompanion) {
+            const enclosingSymbol = findEnclosingSymbolName(node, relPath)
             branchingViolations.push({
-              rule: "non-exhaustive-union-match",
-              message: `match(${matchArg.getText()}) in '${enclosingSymbol}' matches on a closed union type '${argType.getText(matchArg)}' but terminates with .otherwise() — enumerate every variant and terminate with .exhaustive().`,
+              rule: "schema-boolean-state",
+              message: `Property '${name}' in '${enclosingSymbol}' uses boolean flag for lifecycle state in Schema.Struct — mutually exclusive lifecycle states must be modeled as a closed union (Schema.TaggedUnion / Schema.TaggedStruct) instead of boolean flags.`,
               file: relPath,
-              line: callExpr.getStartLineNumber(),
+              line: node.getStartLineNumber(),
               enclosingSymbol
             })
           }
@@ -1115,6 +1340,16 @@ export const loadWorkspaceGovernanceDocs = (
   return results
 }
 
+export const stripCommentsAndTestTitles = (code: string): string => {
+  let stripped = code.replace(/\/\*[\s\S]*?\*\//g, " ")
+  stripped = stripped.replace(/\/\/[^\r\n]*/g, " ")
+  stripped = stripped.replace(
+    /\b(?:describe|it|test)(?:\.[a-zA-Z0-9_$]+)*\s*\(\s*(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`[\s\S]*?`)/g,
+    (match) => match.replace(/(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`[\s\S]*?`)$/, '""')
+  )
+  return stripped
+}
+
 export const extractWorkspaceTypeAwareGraph = (
   repoRoot: string
 ): Effect.Effect<HarnessGraph> =>
@@ -1175,7 +1410,9 @@ export const extractWorkspaceTypeAwareGraph = (
             continue
           }
 
-          const hasPropTest = /\bit(?:\.effect)?\.prop\s*\(/.test(content)
+          const hasPropTest =
+            /\b(?:it|test)(?:\.effect)?\.prop\s*\(/.test(content) ||
+            /\bfc\.assert\s*\(/.test(content)
 
           const testNode: VitestCaseNode = {
             _tag: "VitestCase",
@@ -1188,15 +1425,34 @@ export const extractWorkspaceTypeAwareGraph = (
           const testIdx = Graph.addNode(mutable, testNode)
           updatedNodeIndexByKey.set(testNode.testId, testIdx)
 
+          const strippedContent = stripCommentsAndTestTitles(content)
+          const usesTestTracer = strippedContent.includes("runWithTestTracer")
+
           for (const fnNode of effectFns) {
             const fnName = fnNode.qualname.split("#")[1] ?? ""
             const escapedFnName = fnName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
             const fnRegex = escapedFnName
-              ? new RegExp(`(?:\\b|\\$)${escapedFnName}\\s*\\(`)
+              ? new RegExp(`(?:\\b|\\$)${escapedFnName}\\s*(?:\\(|\\)|,)`)
               : null
+
+            const isDottedIdentifier = /^[a-zA-Z_$][a-zA-Z0-9_$]*(?:\.[a-zA-Z_$][a-zA-Z0-9_$]*)*$/.test(
+              fnNode.spanName
+            )
+            const escapedSpanName = fnNode.spanName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+            const spanCallRegex =
+              isDottedIdentifier && escapedSpanName
+                ? new RegExp(`\\b${escapedSpanName}\\s*\\(`)
+                : null
+
+            const testTracerMatches =
+              usesTestTracer &&
+              ((fnName.length > 0 && strippedContent.includes(fnName)) ||
+                (fnNode.spanName.length > 0 && strippedContent.includes(fnNode.spanName)))
+
             const matches =
-              (fnRegex !== null && fnRegex.test(content)) ||
-              (fnNode.spanName.length > 0 && content.includes(fnNode.spanName))
+              (fnRegex !== null && fnRegex.test(strippedContent)) ||
+              (spanCallRegex !== null && spanCallRegex.test(strippedContent)) ||
+              testTracerMatches
 
             if (matches) {
               const calleeIdx = updatedNodeIndexByKey.get(fnNode.qualname)

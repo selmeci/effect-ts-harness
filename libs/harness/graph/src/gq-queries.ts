@@ -175,7 +175,7 @@ export const HARNESS_GQ_QUERIES: Readonly<
     source: `query untested_domain_fns() {
   match {
     $fn: EffectFn
-    $fn.packageTag = "domain" and $fn.isStub = false
+    ($fn.packageTag = "domain" or $fn.packageTag = "contract") and $fn.isStub = false
     not {
       $test: VitestCase
       $test exercisesSpan $fn
@@ -291,7 +291,7 @@ export const executeNamedGqQueryInMemory = (
       for (const [, node] of Graph.nodes(g)) {
         if (
           node._tag === "EffectFn" &&
-          node.packageTag === "domain" &&
+          (node.packageTag === "domain" || node.packageTag === "contract") &&
           !node.isStub
         ) {
           const reaching = findTestsReaching(harnessGraph, node.qualname)

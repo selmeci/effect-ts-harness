@@ -36,6 +36,15 @@ const matchRunBanMessage =
   "match(...).run() is banned (throws at runtime on unhandled states) — use .exhaustive() for closed unions or .otherwise() for open types."
 const matchTaggedOtherwiseBanMessage =
   "Do not use .otherwise() when matching on discriminated union tags (_tag) — enumerate every variant and terminate with .exhaustive()."
+const schemaBooleanStateMessage =
+  "Do not use Schema.Boolean for lifecycle or mutually exclusive state flags in Schema.Struct — model mutually exclusive states with a closed discriminated union (Schema.TaggedUnion / Schema.TaggedStruct)."
+const tautologicalFoldPropMessage =
+  "Tautological property test: do not assert fold(events) against events.reduce(evolve, ...) using the same evolve function — assert independent domain invariants on the resulting state."
+
+const BOOLEAN_STATE_PROP_REGEX =
+  /^(is[A-Z]|has[A-Z]|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|published|expired)$/
+
+const DISCRIMINANT_CALLBACK_METHODS = new Set(["filter", "find", "some", "every"])
 
 const DISCRIMINANT_PROP_NAMES = new Set([
   "_tag",
@@ -108,6 +117,115 @@ function isDiscriminantTestExpression(node) {
     }
   }
   return false
+}
+
+function isAliasedDiscriminantTest(node, aliasNames) {
+  if (node == null || typeof node !== "object" || aliasNames == null || aliasNames.size === 0) {
+    return false
+  }
+  if (
+    node.type === "UnaryExpression" &&
+    node.operator === "!" &&
+    isAliasedDiscriminantTest(node.argument, aliasNames)
+  ) {
+    return true
+  }
+  if (node.type === "LogicalExpression") {
+    return (
+      isAliasedDiscriminantTest(node.left, aliasNames) ||
+      isAliasedDiscriminantTest(node.right, aliasNames)
+    )
+  }
+  if (
+    node.type === "BinaryExpression" &&
+    (node.operator === "===" || node.operator === "!==" || node.operator === "==" || node.operator === "!=")
+  ) {
+    if (node.left != null && node.left.type === "Identifier" && aliasNames.has(node.left.name)) {
+      return true
+    }
+    if (node.right != null && node.right.type === "Identifier" && aliasNames.has(node.right.name)) {
+      return true
+    }
+  }
+  return false
+}
+
+function getCallbackPredicateExpression(fnNode) {
+  if (fnNode == null) return null
+  if (fnNode.type === "ArrowFunctionExpression") {
+    if (fnNode.body != null && fnNode.body.type !== "BlockStatement") {
+      return fnNode.body
+    }
+  }
+  if (
+    (fnNode.type === "ArrowFunctionExpression" || fnNode.type === "FunctionExpression") &&
+    fnNode.body != null &&
+    fnNode.body.type === "BlockStatement" &&
+    Array.isArray(fnNode.body.body)
+  ) {
+    const returnStmt = fnNode.body.body.find(
+      (stmt) => stmt != null && stmt.type === "ReturnStatement"
+    )
+    return returnStmt ? returnStmt.argument : null
+  }
+  return null
+}
+
+function isSchemaBoolean(node) {
+  return (
+    node != null &&
+    node.type === "MemberExpression" &&
+    node.computed !== true &&
+    isIdentifier(node.object, "Schema") &&
+    isIdentifier(node.property, "Boolean")
+  )
+}
+
+function getPropertyKeyName(prop) {
+  if (prop == null || prop.key == null) return null
+  if (prop.key.type === "Identifier") return prop.key.name
+  if (prop.key.type === "Literal" && typeof prop.key.value === "string") return prop.key.value
+  return null
+}
+
+function getNodeSourceText(context, node) {
+  if (node == null) return ""
+  if (node.rawSource && typeof node.rawSource === "string") {
+    return node.rawSource
+  }
+  if (context.sourceCode && typeof context.sourceCode.getText === "function") {
+    try {
+      const text = context.sourceCode.getText(node)
+      if (typeof text === "string" && text.length > 0) return text
+    } catch {
+      // fallback
+    }
+  }
+  if (typeof context.getSourceCode === "function") {
+    try {
+      const sc = context.getSourceCode()
+      if (sc && typeof sc.getText === "function") {
+        const text = sc.getText(node)
+        if (typeof text === "string" && text.length > 0) return text
+      }
+    } catch {
+      // fallback
+    }
+  }
+  const fullText =
+    context.sourceCode && typeof context.sourceCode.text === "string"
+      ? context.sourceCode.text
+      : ""
+  if (fullText) {
+    if (Array.isArray(node.range) && node.range.length >= 2) {
+      return fullText.slice(node.range[0], node.range[1])
+    }
+    if (typeof node.start === "number" && typeof node.end === "number") {
+      return fullText.slice(node.start, node.end)
+    }
+    return fullText
+  }
+  return ""
 }
 
 function inspectMatchChain(node) {
@@ -386,6 +504,8 @@ function isSkippedOrFocusedTestCall(node) {
 
 const syntaxBans = {
   create(context) {
+    const discriminantAliasNames = new Set()
+
     function getNormalizedFilename() {
       return (
         context.filename ??
@@ -401,6 +521,7 @@ const syntaxBans = {
 
     return {
       Program(node) {
+        discriminantAliasNames.clear()
         const text =
           context.sourceCode && typeof context.sourceCode.text === "string"
             ? context.sourceCode.text
@@ -414,6 +535,15 @@ const syntaxBans = {
         }
         if (/^\s*(\/\/|\/\*)\s*@ts-(ignore|expect-error|nocheck)\b/m.test(text)) {
           context.report({ node, message: tsSuppressionMessage })
+        }
+      },
+      VariableDeclarator(node) {
+        if (
+          node.id != null &&
+          node.id.type === "Identifier" &&
+          isDiscriminantMemberAccess(node.init)
+        ) {
+          discriminantAliasNames.add(node.id.name)
         }
       },
       FunctionDeclaration: reportAsync,
@@ -431,7 +561,10 @@ const syntaxBans = {
       IfStatement(node) {
         const filename = getNormalizedFilename()
         if (isInternalHarnessFile(filename)) return
-        if (isDiscriminantTestExpression(node.test)) {
+        if (
+          isDiscriminantTestExpression(node.test) ||
+          isAliasedDiscriminantTest(node.test, discriminantAliasNames)
+        ) {
           context.report({ node, message: discriminantIfBanMessage })
           return
         }
@@ -442,7 +575,10 @@ const syntaxBans = {
       ConditionalExpression(node) {
         const filename = getNormalizedFilename()
         if (isInternalHarnessFile(filename)) return
-        if (isDiscriminantTestExpression(node.test)) {
+        if (
+          isDiscriminantTestExpression(node.test) ||
+          isAliasedDiscriminantTest(node.test, discriminantAliasNames)
+        ) {
           context.report({ node, message: discriminantIfBanMessage })
         }
       },
@@ -473,6 +609,58 @@ const syntaxBans = {
         context.report({ node, message: throwMessage })
       },
       CallExpression(node) {
+        const filename = getNormalizedFilename()
+        if (!isInternalHarnessFile(filename)) {
+          if (
+            node.callee != null &&
+            node.callee.type === "MemberExpression" &&
+            node.callee.computed !== true &&
+            node.callee.property != null &&
+            node.callee.property.type === "Identifier" &&
+            DISCRIMINANT_CALLBACK_METHODS.has(node.callee.property.name)
+          ) {
+            const callbackArg = node.arguments[0]
+            const predExpr = getCallbackPredicateExpression(callbackArg)
+            if (
+              predExpr != null &&
+              (isDiscriminantTestExpression(predExpr) ||
+                isAliasedDiscriminantTest(predExpr, discriminantAliasNames))
+            ) {
+              context.report({ node, message: discriminantIfBanMessage })
+            }
+          }
+
+          if (
+            node.callee != null &&
+            node.callee.type === "MemberExpression" &&
+            node.callee.computed !== true &&
+            isIdentifier(node.callee.object, "Schema") &&
+            isIdentifier(node.callee.property, "Struct") &&
+            node.arguments.length > 0 &&
+            node.arguments[0] != null &&
+            node.arguments[0].type === "ObjectExpression" &&
+            Array.isArray(node.arguments[0].properties)
+          ) {
+            for (const prop of node.arguments[0].properties) {
+              if (
+                prop == null ||
+                (prop.type !== "Property" && prop.type !== "ObjectProperty") ||
+                prop.computed === true
+              ) {
+                continue
+              }
+              const keyName = getPropertyKeyName(prop)
+              if (
+                keyName != null &&
+                BOOLEAN_STATE_PROP_REGEX.test(keyName) &&
+                isSchemaBoolean(prop.value)
+              ) {
+                context.report({ node: prop, message: schemaBooleanStateMessage })
+              }
+            }
+          }
+        }
+
         if (
           node.callee != null &&
           node.callee.type === "MemberExpression" &&
@@ -524,7 +712,6 @@ const syntaxBans = {
         if (isEffectRetryCall(node) && node.arguments.some(hasScheduleForever)) {
           context.report({ node, message: foreverRetryMessage })
         }
-        const filename = getNormalizedFilename()
         if (filename.includes("sample-web/src/") && isFetchCall(node)) {
           context.report({ node, message: fetchBanMessage })
         }
@@ -543,7 +730,8 @@ const syntaxBans = {
       },
       ExportNamedDeclaration(node) {
         const filename = getNormalizedFilename()
-        if (!/libs\/sample\/(domain|service|infra)\/src\//.test(filename)) return
+        if (isInternalHarnessFile(filename)) return
+        if (!/libs\/[^/]+\/(domain|service|infra)\/src\//.test(filename)) return
         if (node.declaration == null) return
 
         if (node.declaration.type === "FunctionDeclaration") {
@@ -552,7 +740,7 @@ const syntaxBans = {
         }
 
         if (node.declaration.type === "VariableDeclaration") {
-          const isDomain = filename.includes("libs/sample/domain/src/")
+          const isDomain = /libs\/[^/]+\/domain\/src\//.test(filename)
           for (const decl of node.declaration.declarations) {
             const init = decl.init
             if (init == null) continue
@@ -572,8 +760,18 @@ const syntaxBans = {
 
 const testIntegrity = {
   create(context) {
+    const discriminantAliasNames = new Set()
+
+    function getNormalizedFilename() {
+      return (
+        context.filename ??
+        (typeof context.getFilename === "function" ? context.getFilename() : "")
+      ).replace(/\\/g, "/")
+    }
+
     return {
       Program(node) {
+        discriminantAliasNames.clear()
         const text =
           context.sourceCode && typeof context.sourceCode.text === "string"
             ? context.sourceCode.text
@@ -588,9 +786,63 @@ const testIntegrity = {
           context.report({ node, message: testTsIgnoreMessage })
         }
       },
+      VariableDeclarator(node) {
+        if (
+          node.id != null &&
+          node.id.type === "Identifier" &&
+          isDiscriminantMemberAccess(node.init)
+        ) {
+          discriminantAliasNames.add(node.id.name)
+        }
+      },
+      IfStatement(node) {
+        const filename = getNormalizedFilename()
+        if (isInternalHarnessFile(filename)) return
+        if (
+          isDiscriminantTestExpression(node.test) ||
+          isAliasedDiscriminantTest(node.test, discriminantAliasNames)
+        ) {
+          context.report({ node, message: discriminantIfBanMessage })
+        }
+      },
+      ConditionalExpression(node) {
+        const filename = getNormalizedFilename()
+        if (isInternalHarnessFile(filename)) return
+        if (
+          isDiscriminantTestExpression(node.test) ||
+          isAliasedDiscriminantTest(node.test, discriminantAliasNames)
+        ) {
+          context.report({ node, message: discriminantIfBanMessage })
+        }
+      },
       CallExpression(node) {
         if (isSkippedOrFocusedTestCall(node)) {
           context.report({ node, message: testSkipOrOnlyMessage })
+        }
+        const filename = getNormalizedFilename()
+        if (!isInternalHarnessFile(filename)) {
+          if (
+            node.callee != null &&
+            node.callee.type === "MemberExpression" &&
+            node.callee.computed !== true &&
+            node.callee.property != null &&
+            node.callee.property.type === "Identifier" &&
+            node.callee.property.name === "prop" &&
+            Array.isArray(node.arguments) &&
+            node.arguments.length > 0
+          ) {
+            const callbackArg = node.arguments[node.arguments.length - 1]
+            if (callbackArg != null) {
+              const callbackText = getNodeSourceText(context, callbackArg)
+              if (
+                (callbackText.includes("fold(") || /\bfold\s*\(/.test(callbackText)) &&
+                (/\.reduce\s*\(\s*[a-zA-Z0-9_$]*evolve/i.test(callbackText) ||
+                  /\.reduce\s*\([^)]*\bevolve/i.test(callbackText))
+              ) {
+                context.report({ node, message: tautologicalFoldPropMessage })
+              }
+            }
+          }
         }
       },
       SwitchStatement(node) {

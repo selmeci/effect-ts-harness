@@ -8,6 +8,8 @@ import {
 } from "@harness/decision"
 import { writeVerifyStamp } from "@harness/gates"
 import { buildHarnessGraph } from "@harness/graph"
+// oxlint-disable-next-line @nx/enforce-module-boundaries
+import syntaxBansPlugin from "../../../tools/oxlint/syntax-bans.js"
 import { COMMANDS, run, runCli } from "../src/index.js"
 
 describe("harness cli baseline", () => {
@@ -656,5 +658,250 @@ describe("harness-cli v2 commands", () => {
         rmSync(dir, { recursive: true, force: true })
       }
     })
+  })
+})
+
+describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", () => {
+  const syntaxBans = syntaxBansPlugin.rules["syntax-bans"]
+  const testIntegrity = syntaxBansPlugin.rules["test-integrity"]
+
+  it("flags indirect discriminant branching with aliased tags and collection callbacks", () => {
+    // 1a. Aliased tag in if statement: const actualTag = err._tag; if (actualTag !== expectedTag)
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/domain/src/index.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.Program?.({})
+      visitor.VariableDeclarator?.({
+        type: "VariableDeclarator",
+        id: { type: "Identifier", name: "actualTag" },
+        init: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "err" },
+          property: { type: "Identifier", name: "_tag" }
+        }
+      })
+      visitor.IfStatement?.({
+        type: "IfStatement",
+        test: {
+          type: "BinaryExpression",
+          operator: "!==",
+          left: { type: "Identifier", name: "actualTag" },
+          right: { type: "Identifier", name: "expectedTag" }
+        }
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain(
+        "Do not use if/else or ternary expressions to branch on discriminated unions"
+      )
+    }
+
+    // 1b. Collection callback: reasons.filter((r) => r._tag === "Fail")
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/domain/src/index.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "reasons" },
+          property: { type: "Identifier", name: "filter" }
+        },
+        arguments: [
+          {
+            type: "ArrowFunctionExpression",
+            params: [{ type: "Identifier", name: "r" }],
+            body: {
+              type: "BinaryExpression",
+              operator: "===",
+              left: {
+                type: "MemberExpression",
+                computed: false,
+                object: { type: "Identifier", name: "r" },
+                property: { type: "Identifier", name: "_tag" }
+              },
+              right: { type: "Literal", value: "Fail" }
+            }
+          }
+        ]
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain(
+        "Do not use if/else or ternary expressions to branch on discriminated unions"
+      )
+    }
+  })
+
+  it("flags boolean state flags in Schema.Struct (checkedOut: Schema.Boolean)", () => {
+    const reports: Array<{ message: string }> = []
+    const visitor = syntaxBans.create({
+      filename: "/repo/libs/sample/domain/src/index.ts",
+      report: (r: { message: string }) => {
+        reports.push(r)
+      }
+    })
+    visitor.CallExpression?.({
+      type: "CallExpression",
+      callee: {
+        type: "MemberExpression",
+        computed: false,
+        object: { type: "Identifier", name: "Schema" },
+        property: { type: "Identifier", name: "Struct" }
+      },
+      arguments: [
+        {
+          type: "ObjectExpression",
+          properties: [
+            {
+              type: "Property",
+              computed: false,
+              key: { type: "Identifier", name: "checkedOut" },
+              value: {
+                type: "MemberExpression",
+                computed: false,
+                object: { type: "Identifier", name: "Schema" },
+                property: { type: "Identifier", name: "Boolean" }
+              }
+            }
+          ]
+        }
+      ]
+    })
+    expect(reports).toHaveLength(1)
+    expect(reports[0]?.message).toContain(
+      "Do not use Schema.Boolean for lifecycle or mutually exclusive state flags in Schema.Struct"
+    )
+  })
+
+  it("flags discriminant if statements and tautological fold vs .reduce(evolve, ...) in .test.ts under libs/sample/domain/test/", () => {
+    // 3a. if (exit._tag === "Success") in test file
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = testIntegrity.create({
+        filename: "/repo/libs/sample/domain/test/cart.test.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.IfStatement?.({
+        type: "IfStatement",
+        test: {
+          type: "BinaryExpression",
+          operator: "===",
+          left: {
+            type: "MemberExpression",
+            computed: false,
+            object: { type: "Identifier", name: "exit" },
+            property: { type: "Identifier", name: "_tag" }
+          },
+          right: { type: "Literal", value: "Success" }
+        }
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain(
+        "Do not use if/else or ternary expressions to branch on discriminated unions"
+      )
+    }
+
+    // 3b. Tautological fold vs .reduce(evolve, ...)
+    {
+      const reports: Array<{ message: string }> = []
+      const callbackCode = `([events]) => {
+        const folded = fold(events)
+        const reduced = events.reduce(evolve, initial)
+        expect(folded).toEqual(reduced)
+      }`
+      const visitor = testIntegrity.create({
+        filename: "/repo/libs/sample/domain/test/cart.test.ts",
+        sourceCode: {
+          text: `it.prop("fold matches reduce", [eventsArb], ${callbackCode})`,
+          getText: () => callbackCode
+        },
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "it" },
+          property: { type: "Identifier", name: "prop" }
+        },
+        arguments: [
+          { type: "Literal", value: "fold matches reduce" },
+          { type: "ArrayExpression", elements: [{ type: "Identifier", name: "eventsArb" }] },
+          {
+            type: "ArrowFunctionExpression",
+            rawSource: callbackCode,
+            range: [44, 44 + callbackCode.length]
+          }
+        ]
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain(
+        "Tautological property test: do not assert fold(events) against events.reduce(evolve, ...)"
+      )
+    }
+  })
+
+  it("applies ExportNamedDeclaration linting across all non-harness library scopes", () => {
+    const reports: Array<{ message: string }> = []
+    const visitor = syntaxBans.create({
+      filename: "/repo/libs/billing/domain/src/index.ts",
+      report: (r: { message: string }) => {
+        reports.push(r)
+      }
+    })
+    visitor.ExportNamedDeclaration?.({
+      type: "ExportNamedDeclaration",
+      declaration: {
+        type: "VariableDeclaration",
+        declarations: [
+          {
+            type: "VariableDeclarator",
+            id: { type: "Identifier", name: "untraced" },
+            init: {
+              type: "ArrowFunctionExpression",
+              params: [],
+              body: { type: "BlockStatement", body: [] }
+            }
+          }
+        ]
+      }
+    })
+    expect(reports).toHaveLength(1)
+    expect(reports[0]?.message).toContain(
+      "Exported domain functions must use Effect.fn('LiteralName')"
+    )
+
+    // Internal harness file is spared
+    const harnessReports: Array<{ message: string }> = []
+    const harnessVisitor = syntaxBans.create({
+      filename: "/repo/libs/harness/graph/src/index.ts",
+      report: (r: { message: string }) => {
+        harnessReports.push(r)
+      }
+    })
+    harnessVisitor.ExportNamedDeclaration?.({
+      type: "ExportNamedDeclaration",
+      declaration: {
+        type: "FunctionDeclaration",
+        id: { type: "Identifier", name: "someFn" }
+      }
+    })
+    expect(harnessReports).toHaveLength(0)
   })
 })

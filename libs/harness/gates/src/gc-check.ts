@@ -230,7 +230,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
     for (const [idx, node] of Graph.nodes(g)) {
       if (
         node._tag === "EffectFn" &&
-        node.packageTag === "domain" &&
+        (node.packageTag === "domain" || node.packageTag === "contract") &&
         !node.isStub &&
         !IGNORED_UNTESTED_FNS.has(node.spanName)
       ) {
@@ -342,7 +342,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
     for (const [idx, node] of Graph.nodes(g)) {
       if (
         node._tag === "EffectFn" &&
-        node.packageTag === "domain" &&
+        (node.packageTag === "domain" || node.packageTag === "contract") &&
         !node.isStub &&
         (node.spanName.endsWith(".decide") || node.spanName === "decide") &&
         !IGNORED_UNTESTED_FNS.has(node.spanName)

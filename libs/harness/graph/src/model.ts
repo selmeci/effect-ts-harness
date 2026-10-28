@@ -204,7 +204,10 @@ export interface BuildHarnessGraphInput {
 }
 
 export interface BranchingViolation {
-  readonly rule: "discriminant-branching" | "non-exhaustive-union-match"
+  readonly rule:
+    | "discriminant-branching"
+    | "non-exhaustive-union-match"
+    | "schema-boolean-state"
   readonly message: string
   readonly file: string
   readonly line: number
