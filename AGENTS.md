@@ -17,7 +17,27 @@ Google Code Wiki and other generated/prose docs are out — never cite them.
 ## Workflow (one task)
 
 plan (in Effect idioms, `agent-patterns/planning.md` template) → skeleton with `stub<A, E, R>(...args)` typechecks →
-`harness plan-check` (`plan/<task>` branch) → implement (isolate concurrent subagents with `Workspace: "share"` or `HARNESS_WORKTREE_ID`) → `harness gc --strict` (`GraphGc.decide` zero-entropy gate) → `harness verify` (the ONLY sanctioned verification, checks `SpanBudget.decide` and writes `.harness/verify-stamp.json` + `impl/<task>` branch) → `harness done` → `harness learn` (`compounding-effect-learnings` to promote `.harness/friction-log.jsonl` into recipes/gates).
+`pnpm harness plan-check` (`plan/<task>` branch) → implement (isolate concurrent subagents with `Workspace: "share"` or `HARNESS_WORKTREE_ID`) → `pnpm harness gc --strict` (`GraphGc.decide` zero-entropy gate) → `pnpm harness verify` (the ONLY sanctioned verification, checks `SpanBudget.decide` and writes `.harness/verify-stamp.json` + `impl/<task>` branch) → `pnpm harness done` → `pnpm harness learn` (`compounding-effect-learnings` to promote `.harness/friction-log.jsonl` into recipes/gates).
+
+### MCP-First Tooling Preference
+Always prefer in-process MCP tools over spawning shell subcommands to eliminate process overhead and guard prompt friction:
+- **LSP & Type Diagnostics:** `harness_lsp_diagnostics` (replaces slow shell lint/typecheck runs during development).
+- **Ontology & Architecture:** `harness_ontology_check`, `harness_ontology_why`, `harness_ontology_impact` (trace and audit EARS specs and ADR invariants).
+- **Test Impact Analysis:** `harness_tests_reaching` (determines affected test files for touched symbols).
+- **Session Telemetry:** `harness_telemetry_report` (reviews session metrics and friction logs).
+- **Graph Queries:** `harness_gq_query`, `harness_structural_search`.
+- **Task Lifecycle Gates (CLI only):** Use `pnpm harness <cmd>` (`plan-check`, `gc --strict`, `verify`, `done`) strictly for task state transitions and cryptographic verify-stamp generation.
+
+## Nx taxonomy & Package Archetypes
+
+- **Package Archetypes (Framework vs Application):**
+  - **Application Archetype:** Standard user-facing domain models live in `type:domain` (`*.decide`, business use cases).
+  - **Framework / Library Archetype:** The repo produces generic engines, protocols, and abstractions (e.g. `AggregateRoot`, `EventStore`, `Decider`). Business domains (e.g. `Cart`, `Inventory`, `Order`) **MUST NEVER** be created in production libraries. Domain models belong strictly to `test/fixtures` or `samples/` tagged with `scope:fixture`.
+- `type:contract` — shared Schemas, `HttpApi`, `RpcGroup`, API errors, event/command protocols; imports `effect` only
+- `type:domain` (in applications) / `type:core` (in frameworks) — use cases, generic engines, and pure logic, no I/O; imports `contract` (and `@harness/gates` for `stub` in skeletons); must not depend on `type:infra`
+- `type:service` — service interfaces and repository ports
+- `type:infra` — live Layer implementations, Drizzle repositories and handlers, Alchemy resources, adapter implementations
+- `type:app` — composes Layers and runs the runtime; the `web` app may import `contract` and UI libraries only
 
 ## Planning in Effect idioms
 

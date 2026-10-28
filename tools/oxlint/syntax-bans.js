@@ -78,6 +78,15 @@ function isTagGuardCall(node) {
   return false
 }
 
+function isLiteralValue(node) {
+  if (node == null) return false
+  if (node.type === "Literal") return true
+  if (node.type === "TemplateLiteral" && Array.isArray(node.expressions) && node.expressions.length === 0) {
+    return true
+  }
+  return false
+}
+
 function isDiscriminantTestExpression(node) {
   if (node == null || typeof node !== "object") return false
   if (isTagGuardCall(node)) return true
@@ -91,7 +100,10 @@ function isDiscriminantTestExpression(node) {
     node.type === "BinaryExpression" &&
     (node.operator === "===" || node.operator === "!==" || node.operator === "==" || node.operator === "!=")
   ) {
-    if (isDiscriminantMemberAccess(node.left) || isDiscriminantMemberAccess(node.right)) {
+    if (isDiscriminantMemberAccess(node.left) && isLiteralValue(node.right)) {
+      return true
+    }
+    if (isDiscriminantMemberAccess(node.right) && isLiteralValue(node.left)) {
       return true
     }
   }

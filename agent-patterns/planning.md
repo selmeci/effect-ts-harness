@@ -72,6 +72,22 @@ export const checkout = Effect.fn("Cart.checkout")(function* (input: CheckoutInp
    - `stub(...)` is **strictly banned** by `tools/oxlint/syntax-bans.js`.
    - Any remaining stub prevents verification from passing, guaranteeing that no skeleton code reaches production.
 
+## Package Archetypes: Framework vs. Application
+
+Before writing any EARS spec or skeleton, determine the repository and package archetype:
+
+1. **Application Archetype (e.g. Photo Gallery, E-Commerce, SaaS):**
+   - Implements specific customer/business workflows.
+   - Domain models, entities, and state deciders live in `type:domain` (e.g. `libs/shop/domain`).
+   - EARS specs define concrete business operations (`WHEN order is placed, SHALL decrement inventory`).
+
+2. **Framework / Library Archetype (e.g. `effect-es`, Event Sourcing engine, RPC library):**
+   - Implements reusable, generic engines, protocols, and architectural building blocks (e.g. `AggregateRoot`, `EventStore`, `CommandHandler`, `ProjectionEngine`).
+   - Business entities (`Cart`, `Inventory`, `Order`, `BankAccount`) **MUST NEVER** be created in production libraries (`libs/*/src`).
+   - Sample domain models belong strictly to `test/fixtures/**` or `samples/**` with Nx tag `scope:fixture`.
+   - Production packages use `type:contract` (generic event/command envelopes) and `type:core` (engine abstractions).
+   - EARS specs define framework-level guarantees (`WHEN an event stream is appended, THE EVENT STORE SHALL verify concurrency version`).
+
 ## Mapping EARS Requirements to `Effect<A, E, R>`
 
 When a user provides product or domain specifications in **EARS (Easy Approach to Requirements Syntax)** without low-level technical details, translate each EARS clause directly into `Effect<A, E, R>` channels, pure `.decide` functions, and `@effect/vitest` test cases:

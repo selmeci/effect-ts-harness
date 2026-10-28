@@ -701,9 +701,21 @@ export const extractTypeAwareGraphFromSource = (
         ) {
           continue
         }
-        const candidates = [bin.getLeft(), bin.getRight()]
-        for (const side of candidates) {
+        const candidatePairs = [
+          { side: bin.getLeft(), other: bin.getRight() },
+          { side: bin.getRight(), other: bin.getLeft() }
+        ]
+        for (const { side, other } of candidatePairs) {
           if (Node.isPropertyAccessExpression(side)) {
+            const isOtherLiteral =
+              Node.isStringLiteral(other) ||
+              Node.isNumericLiteral(other) ||
+              Node.isNoSubstitutionTemplateLiteral(other) ||
+              other.getKind() === SyntaxKind.TrueKeyword ||
+              other.getKind() === SyntaxKind.FalseKeyword
+            if (!isOtherLiteral) {
+              continue
+            }
             const objExpr = side.getExpression()
             const propName = side.getName()
             const objType = objExpr.getType()

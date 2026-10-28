@@ -349,6 +349,36 @@ export const checkCount = Effect.fn("Quota.checkCount")((count: number) =>
     expect(result.ok).toBe(true)
   })
 
+  it("allows comparing discriminant against dynamic or generic variable without flagging discriminant-branching", () => {
+    const domainSource = `
+import { Effect } from "effect"
+
+export type PlanState =
+  | { readonly tier: "free"; readonly limit: number }
+  | { readonly tier: "pro"; readonly limit: number }
+
+export const hasTier = Effect.fn("Quota.hasTier")((plan: PlanState, expectedTier: PlanState["tier"]) =>
+  Effect.sync(() => {
+    if (plan.tier === expectedTier) {
+      return true
+    }
+    return false
+  })
+)
+`
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/index.ts",
+        content: domainSource,
+        packageTag: "domain"
+      }
+    ])
+
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(true)
+    expect(result.violations.some((v) => v.rule === "discriminant-branching")).toBe(false)
+  })
+
   it("fails with non-exhaustive-union-match when match(union) terminates with .otherwise() instead of .exhaustive()", () => {
     const domainSource = `
 import { Effect } from "effect"

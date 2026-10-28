@@ -10,9 +10,15 @@ export const ALLOWLIST: ReadonlyArray<string> = [
   "pnpm test",
   "pnpm nx ",
   "pnpm verify",
+  "pnpm harness",
+  "pnpm run harness",
+  "pnpm lint",
+  "pnpm oxlint",
+  "pnpm build",
   "CI=true pnpm nx ",
   "CI=true pnpm test",
   "CI=true pnpm verify",
+  "CI=true pnpm harness",
   "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts",
   "node --import ./tools/node-ts-resolver.mjs apps/harness-mcp/src/server.ts",
   "git status",
@@ -24,6 +30,19 @@ export const ALLOWLIST: ReadonlyArray<string> = [
   "git switch",
   "git add",
   "git commit",
+  "git show",
+  "git stash",
+  "git grep",
+  "ls",
+  "dir",
+  "pwd",
+  "which",
+  "find",
+  "cat",
+  "head",
+  "tail",
+  "wc",
+  "tree",
   "omnigraph ",
   "omnigraph-server"
 ]
@@ -48,6 +67,16 @@ export const SHELL_OPERATORS: ReadonlyArray<string> = ["&&", "||", ";", "|", "\n
 const containsToken = (command: string, token: string): boolean =>
   command.toLowerCase().includes(token.toLowerCase())
 
+export const isCommandAllowed = (command: string): boolean => {
+  const trimmed = command.trim()
+  if (trimmed === "") return false
+  return ALLOWLIST.some((prefix) => {
+    if (trimmed === prefix) return true
+    if (prefix.endsWith(" ")) return trimmed.startsWith(prefix)
+    return trimmed.startsWith(prefix + " ")
+  })
+}
+
 export const classifyCommand = (command: string): GuardVerdict => {
   for (const entry of DENYLIST) {
     if (containsToken(command, entry.token)) {
@@ -58,10 +87,32 @@ export const classifyCommand = (command: string): GuardVerdict => {
     return "ask"
   }
   if (SHELL_OPERATORS.some((op) => command.includes(op))) {
+    if (
+      command.includes("|") &&
+      !command.includes("||") &&
+      !command.includes("&&") &&
+      !command.includes(";") &&
+      !command.includes("\n")
+    ) {
+      const parts = command.split("|").map((p) => p.trim())
+      const isAllowedFilter = (p: string) =>
+        p.startsWith("grep ") ||
+        p.startsWith("head ") ||
+        p.startsWith("tail ") ||
+        p.startsWith("wc ") ||
+        p.startsWith("cat ") ||
+        p === "cat"
+      if (
+        parts.length >= 2 &&
+        isCommandAllowed(parts[0]!) &&
+        parts.slice(1).every(isAllowedFilter)
+      ) {
+        return "allow"
+      }
+    }
     return "escalate"
   }
-  const allowed = ALLOWLIST.some((prefix) => command.startsWith(prefix))
-  return allowed ? "allow" : "escalate"
+  return isCommandAllowed(command) ? "allow" : "escalate"
 }
 
 export interface FileWriteGuardResult {

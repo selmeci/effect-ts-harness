@@ -19,6 +19,21 @@ describe("guard policy", () => {
     expect(classifyCommand("git status")).toBe("allow")
     expect(classifyCommand("git diff HEAD~1")).toBe("allow")
     expect(classifyCommand("git checkout -b feat/new main")).toBe("allow")
+    expect(classifyCommand("git grep 'some-symbol'")).toBe("allow")
+    expect(classifyCommand("git log -n 5")).toBe("allow")
+    expect(classifyCommand("ls")).toBe("allow")
+    expect(classifyCommand("ls -la")).toBe("allow")
+    expect(classifyCommand("find libs/es -name '*.ts'")).toBe("allow")
+    expect(classifyCommand("which pnpm")).toBe("allow")
+    expect(classifyCommand("pwd")).toBe("allow")
+    expect(classifyCommand("pnpm harness verify")).toBe("allow")
+    expect(classifyCommand("pnpm lint")).toBe("allow")
+  })
+
+  it("allows safe read-only piped commands", () => {
+    expect(classifyCommand("git status | grep modified")).toBe("allow")
+    expect(classifyCommand("git log -n 10 | head -n 5")).toBe("allow")
+    expect(classifyCommand("find libs -name '*.ts' | wc -l")).toBe("allow")
   })
 
   it("denies rm -rf outside the workspace, .env and force pushes", () => {

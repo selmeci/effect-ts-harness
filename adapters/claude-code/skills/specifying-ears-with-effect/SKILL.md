@@ -11,10 +11,10 @@ Turn informal feature requests into unambiguous **EARS (Easy Approach to Require
 
 ## Discovery & Interview Sequence
 
-1. **Inspect Existing Graph First:** Call `harness_resolve` and `harness_callers` on related domain symbols (`EffectFn`, `ServiceTag`, `TaggedError`), and call `harness_ontology_why` and `harness_ontology_impact` to trace existing ArchiMate layers (`Motivation -> Business -> Application -> Technology`) and see all governing ADRs and EARS requirements before drafting new requirements. `harness_callers` also returns `GovernsSymbol` (`AdrDoc`) and `SpecifiesSymbol` (`EarsSpec`) edges showing governing ADRs and EARS specs.
+1. **Inspect Existing Graph & Determine Archetype First:** Determine whether the repository/scope is an **application** (business domains in `type:domain`) or a **framework/library** (generic engines/protocols in `type:core`/`type:contract`; business entities like Cart/Inventory belong strictly to `test/fixtures/**` with `scope:fixture`). Call `harness_resolve` and `harness_callers` on related domain symbols (`EffectFn`, `ServiceTag`, `TaggedError`), and call `harness_ontology_why` and `harness_ontology_impact` to trace existing ArchiMate layers (`Motivation -> Business -> Application -> Technology`) and see all governing ADRs and EARS requirements before drafting new requirements. `harness_callers` also returns `GovernsSymbol` (`AdrDoc`) and `SpecifiesSymbol` (`EarsSpec`) edges showing governing ADRs and EARS specs.
 2. **Apply Specificity Test & Clarify Ambiguities:** Point at the exact words in the user's prompt or graph before drafting requirements. If the source is silent and blocking, ask at most one targeted question per turn (or use `ask_question`). Never smuggle unprompted numbers, fields, or mechanisms into requirements; separate confirmed facts from `## Assumptions` and `## Out of scope`.
 3. **Write EARS Requirements & Run 3-Role Review:** Draft requirements using the canonical template and rules in `references/ears-patterns.md`. Perform the 3-role review (Implementer, `@effect-ears-test-reviewer`, Source Author).
-4. **Persist and Verify Specification:** Save the specification to `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` (falling back to root `docs/specs/` only for cross-cutting tasks) with machine-verifiable YAML frontmatter (`id: <scope>:SPEC-NNNN`, `status: proposed`, `spans`, `services`, `errors`). Verify with `harness gc --strict` and run `harness_ontology_check` (or CLI `harness ontology check --scope=<scope> --strict`) to verify both deterministic cross-layer invariants (`OntologyInvariants.decide`) and `clef-flash` semantic conflict checks (`OntologyConflictV1`).
+4. **Persist and Verify Specification:** Save the specification to `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` (falling back to root `docs/specs/` only for cross-cutting tasks) with machine-verifiable YAML frontmatter (`id: <scope>:SPEC-NNNN`, `status: proposed`, `archetype: application` | `framework`, `spans`, `services`, `errors`). Verify with `harness gc --strict` and run `harness_ontology_check` (or CLI `harness ontology check --scope=<scope> --strict`) to verify both deterministic cross-layer invariants (`OntologyInvariants.decide`) and `clef-flash` semantic conflict checks (`OntologyConflictV1`).
 
 ## Output Contract (`libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md`)
 
@@ -25,6 +25,7 @@ Every specification must follow this canonical template:
 id: <scope>:SPEC-NNNN
 title: <Feature Title>
 status: proposed
+archetype: application # or: framework
 date: YYYY-MM-DD
 enforced_by:
   - libs/<scope>/contract/src/index.ts
