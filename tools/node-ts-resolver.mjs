@@ -1,9 +1,31 @@
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync, statSync } from "node:fs"
 import { register } from "node:module"
-import { dirname, join } from "node:path"
+import { dirname, join, resolve as resolvePath } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..")
+
+const resolveMainRepoRoot = (root) => {
+  try {
+    const dotGit = join(root, ".git")
+    if (existsSync(dotGit) && statSync(dotGit).isFile()) {
+      const content = readFileSync(dotGit, "utf-8").trim()
+      const match = /^gitdir:\s*(.+)$/.exec(content)
+      if (match?.[1]) {
+        const gitDir = resolvePath(root, match[1].trim())
+        const candidateMain = resolvePath(gitDir, "..", "..", "..")
+        if (existsSync(join(candidateMain, "node_modules"))) {
+          return candidateMain
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return null
+}
+
+const mainRepoRoot = resolveMainRepoRoot(repoRoot)
 
 const WORKSPACE_PACKAGE_PATHS = {
   "@harness/gates": "libs/harness/gates/src/index.ts",
@@ -33,15 +55,21 @@ export async function resolve(specifier, context, nextResolve) {
         return nextResolve(pathToFileURL(targetPath).href, context)
       }
     }
-    const scopedMatch = /^@harness\/([a-z0-9-]+)-(contract|service|domain|infra)$/.exec(
-      specifier
-    )
+    const scopedMatch =
+      /^@harness\/([a-z0-9-]+)-(contract|service|domain|core|infra)$/.exec(specifier) ??
+      /^@effect-([a-z0-9-]+)\/(contract|service|domain|core|infra)$/.exec(specifier)
     if (scopedMatch !== null) {
       const [, scope, tier] = scopedMatch
       const dynamicTarget = join(repoRoot, "libs", scope, tier, "src", "index.ts")
       if (existsSync(dynamicTarget)) {
         return nextResolve(pathToFileURL(dynamicTarget).href, context)
       }
+    }
+    if (mainRepoRoot !== null) {
+      return nextResolve(specifier, {
+        ...context,
+        parentURL: pathToFileURL(join(mainRepoRoot, "package.json")).href
+      })
     }
     throw error
   }

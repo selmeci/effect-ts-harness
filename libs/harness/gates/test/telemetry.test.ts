@@ -38,8 +38,10 @@ import {
   appendTelemetryEvent,
   clearTelemetryEvents,
   decideSessionReport,
+  type FrictionEvent,
   readTelemetryEvents,
   renderSessionReportMarkdown,
+  scopeSessionReportInput,
   type SessionReport,
   type TelemetryCategory,
   type TelemetryEngineSource,
@@ -521,4 +523,259 @@ describe("telemetry & session observability", () => {
         expect(cumulativeReport.kpis.frictionCount).toBe(1)
       })
   )
+
+  it.effect(
+    "decideSessionReport does not deduct health score or increment frictionCount for verdict=allow guard_escalation but counts other friction",
+    () =>
+      Effect.gen(function* () {
+        const events: ReadonlyArray<TelemetryEvent> = [
+          {
+            timestamp: "2026-10-27T10:00:00.000Z",
+            surface: "cli",
+            category: "gate",
+            toolName: "plan-check",
+            outcome: "ok",
+            durationMs: 100
+          },
+          {
+            timestamp: "2026-10-27T10:01:00.000Z",
+            surface: "cli",
+            category: "gate",
+            toolName: "verify",
+            outcome: "ok",
+            durationMs: 200
+          },
+          {
+            timestamp: "2026-10-27T10:02:00.000Z",
+            surface: "cli",
+            category: "lifecycle",
+            toolName: "done",
+            outcome: "ok",
+            durationMs: 50
+          }
+        ]
+
+        const allowedEscalation: FrictionEvent = {
+          kind: "guard_escalation",
+          timestamp: "2026-10-27T10:00:30.000Z",
+          summary: "safe read command",
+          detail: "verdict=allow; reason=read-only check"
+        }
+
+        const reportAllowed = yield* decideSessionReport({
+          events,
+          frictionEvents: [allowedEscalation]
+        })
+
+        // verdict=allow guard_escalation must not increment frictionCount or deduct points
+        expect(reportAllowed.kpis.frictionCount).toBe(0)
+        expect(reportAllowed.healthScore).toBe(100)
+
+        const deniedEscalation: FrictionEvent = {
+          kind: "guard_escalation",
+          timestamp: "2026-10-27T10:00:35.000Z",
+          summary: "unsafe command",
+          detail: "verdict=deny; reason=destructive operation"
+        }
+        const routeMiss: FrictionEvent = {
+          kind: "route_miss",
+          timestamp: "2026-10-27T10:00:40.000Z",
+          summary: "route miss summary",
+          detail: "route target missing"
+        }
+        const verifyFailure: FrictionEvent = {
+          kind: "verify_failure",
+          timestamp: "2026-10-27T10:00:45.000Z",
+          summary: "verify failed",
+          detail: "test assertion failed"
+        }
+
+        const reportMixed = yield* decideSessionReport({
+          events,
+          frictionEvents: [
+            allowedEscalation,
+            deniedEscalation,
+            routeMiss,
+            verifyFailure
+          ]
+        })
+
+        // Exactly the 3 non-allowed events count: deniedEscalation, routeMiss, verifyFailure
+        expect(reportMixed.kpis.frictionCount).toBe(3)
+        // 100 - (3 * 5) = 85
+        expect(reportMixed.healthScore).toBe(85)
+      })
+  )
+
+  it("scopeSessionReportInput ignores intermediate done events and scopes to active task after completed done", () => {
+    // 1. Ignores intermediate done with detail: "fullyIdle=false"
+    const intermediateFullyIdleEvents: ReadonlyArray<TelemetryEvent> = [
+      {
+        timestamp: "2026-10-27T09:00:00.000Z",
+        surface: "cli",
+        category: "gate",
+        toolName: "plan-check",
+        outcome: "ok",
+        durationMs: 100
+      },
+      {
+        timestamp: "2026-10-27T09:01:00.000Z",
+        surface: "cli",
+        category: "lifecycle",
+        toolName: "done",
+        outcome: "ok",
+        detail: "fullyIdle=false",
+        durationMs: 15
+      },
+      {
+        timestamp: "2026-10-27T09:02:00.000Z",
+        surface: "cli",
+        category: "gate",
+        toolName: "verify",
+        outcome: "ok",
+        durationMs: 200
+      }
+    ]
+    const scopedIdle = scopeSessionReportInput({ events: intermediateFullyIdleEvents })
+    expect(scopedIdle.events.length).toBe(3)
+
+    // 2. Ignores hook done without detail: "completed" (and not preceded by omnigraph:merge-main)
+    const intermediateHookDoneEvents: ReadonlyArray<TelemetryEvent> = [
+      {
+        timestamp: "2026-10-27T09:00:00.000Z",
+        surface: "cli",
+        category: "gate",
+        toolName: "plan-check",
+        outcome: "ok",
+        durationMs: 100
+      },
+      {
+        timestamp: "2026-10-27T09:01:00.000Z",
+        surface: "hook",
+        category: "lifecycle",
+        toolName: "done",
+        outcome: "ok",
+        detail: "in-progress",
+        durationMs: 15
+      },
+      {
+        timestamp: "2026-10-27T09:02:00.000Z",
+        surface: "cli",
+        category: "gate",
+        toolName: "verify",
+        outcome: "ok",
+        durationMs: 200
+      }
+    ]
+    const scopedHook = scopeSessionReportInput({ events: intermediateHookDoneEvents })
+    expect(scopedHook.events.length).toBe(3)
+
+    // 3. Properly scopes to active task after completed done with detail: "completed"
+    const completedWithDetailEvents: ReadonlyArray<TelemetryEvent> = [
+      {
+        timestamp: "2026-10-27T09:00:00.000Z",
+        surface: "cli",
+        category: "gate",
+        toolName: "verify",
+        outcome: "ok",
+        durationMs: 300
+      },
+      {
+        timestamp: "2026-10-27T09:01:00.000Z",
+        surface: "hook",
+        category: "lifecycle",
+        toolName: "done",
+        outcome: "ok",
+        detail: "completed",
+        durationMs: 20
+      },
+      // Active task window
+      {
+        timestamp: "2026-10-27T10:00:00.000Z",
+        surface: "cli",
+        category: "gate",
+        toolName: "plan-check",
+        outcome: "ok",
+        durationMs: 150
+      },
+      {
+        timestamp: "2026-10-27T10:01:00.000Z",
+        surface: "cli",
+        category: "gate",
+        toolName: "verify",
+        outcome: "ok",
+        durationMs: 250
+      }
+    ]
+    const frictionEvents: ReadonlyArray<FrictionEvent> = [
+      {
+        kind: "route_miss",
+        timestamp: "2026-10-27T08:59:00.000Z",
+        summary: "stale friction",
+        detail: "from previous task"
+      },
+      {
+        kind: "verify_failure",
+        timestamp: "2026-10-27T10:00:30.000Z",
+        summary: "active friction",
+        detail: "in current task"
+      }
+    ]
+
+    const scopedWithDetail = scopeSessionReportInput({
+      events: completedWithDetailEvents,
+      frictionEvents
+    })
+    expect(scopedWithDetail.events.length).toBe(2)
+    expect(scopedWithDetail.events[0]?.toolName).toBe("plan-check")
+    expect(scopedWithDetail.events[1]?.toolName).toBe("verify")
+    expect(scopedWithDetail.frictionEvents.length).toBe(1)
+    expect(scopedWithDetail.frictionEvents[0]?.summary).toBe("active friction")
+
+    // 4. Properly scopes to active task after done preceded by omnigraph:merge-main
+    const completedPrecededByMergeEvents: ReadonlyArray<TelemetryEvent> = [
+      {
+        timestamp: "2026-10-27T09:00:00.000Z",
+        surface: "cli",
+        category: "gate",
+        toolName: "verify",
+        outcome: "ok",
+        durationMs: 300
+      },
+      {
+        timestamp: "2026-10-27T09:01:00.000Z",
+        surface: "cli",
+        category: "lifecycle",
+        toolName: "omnigraph:merge-main",
+        outcome: "ok",
+        durationMs: 100
+      },
+      {
+        timestamp: "2026-10-27T09:02:00.000Z",
+        surface: "hook",
+        category: "lifecycle",
+        toolName: "done",
+        outcome: "ok",
+        durationMs: 20
+      },
+      // Active task window
+      {
+        timestamp: "2026-10-27T10:00:00.000Z",
+        surface: "cli",
+        category: "gate",
+        toolName: "verify",
+        outcome: "ok",
+        durationMs: 250
+      }
+    ]
+
+    const scopedPreceded = scopeSessionReportInput({
+      events: completedPrecededByMergeEvents,
+      frictionEvents
+    })
+    expect(scopedPreceded.events.length).toBe(1)
+    expect(scopedPreceded.events[0]?.toolName).toBe("verify")
+    expect(scopedPreceded.frictionEvents.length).toBe(1)
+    expect(scopedPreceded.frictionEvents[0]?.summary).toBe("active friction")
+  })
 })

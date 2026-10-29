@@ -15,6 +15,7 @@ Once `harness plan-check` has locked the `type:contract` Schemas, `type:service`
 
 ### 1. Partition by Nx Taxonomy (`flash` Subagents)
 Because `type:contract` and `type:service` are already compiled and locked by `plan-check`, work in downstream packages is isolated:
+- **Test Runner Package Boundaries**: In `type:contract` packages, import `{ describe, expect, it } from "vitest"`; in `type:domain`, `type:core`, and `type:infra`, import `{ describe, expect, it } from "@effect/vitest"`.
 - **Unit A (`type:domain`):** Replace `*.decide` and use-case `stub<A, E, R>()` calls; test with `@effect/vitest` (`it.effect`) + `runWithTestTracer` + in-memory test `Layer`s.
 - **Unit B (`type:infra`):** Implement Drizzle D1 / Durable Object `Layer`s (decoding rows into contract Schemas; synchronous DO SQLite transactions; W3C `traceparent` headers) and test with `@effect/vitest`.
 - **Unit C (`scope:web`):** Derive `AtomHttpApi` query/mutation atoms from `type:contract` (zero raw `fetch`).
@@ -24,12 +25,12 @@ When launching parallel subagents that run CLI or build commands concurrently, i
 When delegating a unit to an implementer subagent, provide this exact 4-part prompt:
 1. **Target Stubs & Files:** Exact file paths and `Effect.fn("SpanName")` stubs to replace.
 2. **EARS Acceptance Clauses:** The `WHEN`, `IF/THEN`, and `WHILE` clauses that must each have a matching `it.effect(...)` test.
-3. **Pattern Reference:** Path to the relevant `agent-patterns/*.md` file (e.g., `agent-patterns/d1-repository.md`, `agent-patterns/durable-object-state.md`).
+3. **Pattern Reference:** Path to the relevant `agent-patterns/*.md` file (e.g., `agent-patterns/d1-repository.md`, `agent-patterns/durable-object-state.md`, `agent-patterns/event-sourcing.md`).
 4. **Package Gate:** `CI=true pnpm nx run <project>:verify` (must pass with 0 active `stub()` calls in that package).
 
 ### 2. Implement & Write `@effect/vitest` Trace Tests
 Implement the production code and tests within each package boundary:
-- Write `@effect/vitest` tests (`it.effect`) validating every EARS requirement with `runWithTestTracer`.
+- Write `@effect/vitest` tests (`it.effect`) validating every EARS requirement with `runWithTestTracer`. In negative tests (`Effect.exit`), extract typed failures with `Cause.findErrorOption(exit.cause)` (never bare `Exit.isFailure` or nonexistent `Cause.failureOption`).
 - Require `it.effect.prop` / `it.prop` property-based tests with `Schema` arbitraries (via `effect/Arbitrary`) for every pure domain decider (`*.decide` / EARS `WHILE` clause) and projection reducer, ensuring boundary invariants and round-trips hold across arbitrary inputs so `harness gc --strict` passes `missing-decider-property-test`.
 - Check span budgets using `checkSpanBudgets` (`SpanBudget.decide`) on recorded spans to prevent N+1 query/RPC repetitions (`maxRepeatedChildCalls` threshold, e.g. $\le 3$) and ensure latency budgets (`maxSpanDurationMs`) are honored.
 - Keep `*.decide` deciders strictly pure (`R = never`), confining side effects and cloud bindings to `type:infra`.

@@ -101,7 +101,9 @@ export const decideLoopThrashing = Effect.fn("LoopCircuitBreaker.decide")(functi
 ) {
   yield* Effect.void
   const failures = events.filter(
-    (event) => event.kind === "verify_failure" || event.kind === "guard_escalation"
+    (event) =>
+      (event.kind === "verify_failure" || event.kind === "guard_escalation") &&
+      !(event.kind === "guard_escalation" && event.detail.startsWith("verdict=allow"))
   )
   const effectiveThreshold = Math.max(2, threshold)
   if (failures.length === 0) {

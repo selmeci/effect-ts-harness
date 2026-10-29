@@ -49,12 +49,19 @@ export type CommandResult<State, Event> = Schema.Schema.Type<
 >
 ```
 
-### Numeric Precision: `Schema.Natural` vs `Schema.Int`
+### Numeric Precision: `Schema.Natural` vs Strictly Positive Integers
 
 Never use `Schema.Int` or `Schema.Number` for quantities, counts, stock, or stream versions. `Schema.Int` permits negative integers (`-5`, `-1`), which violates domain invariants.
 
 - Use `Schema.Natural` for non-negative integers ($\ge 0$): `availableQty`, `streamVersion`, `nextExpectedStreamVersion`, `count`.
-- Use `Schema.PositiveInt` for strictly positive quantities ($> 0$): `orderQty`, `batchSize`, `limit`.
+- Strictly positive quantities ($> 0$, e.g. `orderQty`, `quantity`, `batchSize`, `limit`) must use `Schema.Int.check(Schema.isGreaterThan(0)).pipe(Schema.brand("PositiveInt"))` — never use `Schema.Natural` for strictly positive quantities where `0` is invalid!
+
+```ts
+export const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0)).pipe(
+  Schema.brand("PositiveInt")
+)
+export type PositiveInt = typeof PositiveInt.Type
+```
 
 ## Parsing and Decoding Untrusted Input
 
@@ -139,4 +146,23 @@ export const PaymentStatus = Schema.TaggedUnion({
 })
 export type PaymentStatus = typeof PaymentStatus.Type
 ```
+
+## Tagged Errors (`Schema.TaggedError`)
+
+Define serializable domain and boundary errors using the curried `Schema.TaggedError<Self>()("Tag", { ... })` syntax:
+
+```ts
+import { Schema } from "effect"
+
+export class EntityNotFoundError extends Schema.TaggedError<EntityNotFoundError>()(
+  "EntityNotFoundError",
+  {
+    entityId: Schema.String
+  }
+) {}
+```
+
+> [!NOTE]
+> `Schema.TaggedErrorClass` was removed in Effect v4 runtime exports. Always use `Schema.TaggedError<Self>()("Tag", { ... })`.
+
 

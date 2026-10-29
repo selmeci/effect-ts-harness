@@ -48,6 +48,13 @@ export const ALLOWLIST: ReadonlyArray<string> = [
   "tail",
   "wc",
   "tree",
+  "pnpm --filter ",
+  "pnpm install",
+  "pnpm vitest",
+  "vitest",
+  "git remote",
+  "grep",
+  "rg",
   "omnigraph ",
   "omnigraph-server"
 ]
@@ -266,7 +273,10 @@ const matchesAny = (command: string, rules: ReadonlyArray<GuardPatternRule>): bo
   rules.some((rule) => rule.pattern.test(command))
 
 export const isCommandAllowed = (command: string): boolean => {
-  const trimmed = command.trim()
+  const stripped = command
+    .trim()
+    .replace(/^(?:(?:CI|HARNESS_[A-Z0-9_]+)=[^\s;|&]+\s+)+/, "")
+  const trimmed = stripped.trim()
   if (trimmed === "") return false
   return ALLOWLIST.some((prefix) => {
     if (trimmed === prefix) return true

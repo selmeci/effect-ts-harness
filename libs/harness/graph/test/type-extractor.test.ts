@@ -1,3 +1,5 @@
+import * as fs from "node:fs"
+import * as os from "node:os"
 import * as path from "node:path"
 import { Effect } from "effect"
 import { describe, expect, it } from "vitest"
@@ -6,6 +8,7 @@ import {
   extractWorkspaceTypeAwareGraph,
   findCallees,
   findCallers,
+  findTestsReaching,
   resolveNode,
   stripCommentsAndTestTitles
 } from "../src/index.js"
@@ -269,6 +272,140 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
     expect(stripped).toContain('describe("",')
     expect(stripped).toContain('it("",')
     expect(stripped).toContain('test("",')
+  })
+
+  it("extracts Schema.TaggedError<MyError>()('MyError', ...) as a TaggedError node", () => {
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/contract/src/errors.ts",
+        packageTag: "contract",
+        content: `
+          import { Schema } from "effect"
+          export class MyError extends Schema.TaggedError<MyError>()("MyError", {
+            message: Schema.String
+          }) {}
+        `
+      }
+    ])
+
+    const errorNode = resolveNode(graph, "MyError")
+    expect(errorNode).toBeDefined()
+    expect(errorNode?._tag).toBe("TaggedError")
+    if (errorNode && errorNode._tag === "TaggedError") {
+      expect(errorNode.errorTag).toBe("MyError")
+      expect(errorNode.file).toBe("libs/sample/contract/src/errors.ts")
+    }
+  })
+
+  it("extracts synchronous reducer evolveCart in domain as an EffectFn node with spanName Cart.evolve", () => {
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/cart.ts",
+        packageTag: "domain",
+        content: `
+          export type CartState = { readonly items: ReadonlyArray<string> }
+          export type CartEvent = { readonly _tag: "ItemAdded"; readonly itemId: string; readonly version: number }
+
+          export const evolveCart = (state: CartState, event: CartEvent): CartState => {
+            return state
+          }
+        `
+      }
+    ])
+
+    const fnNode = resolveNode(graph, "Cart.evolve") as EffectFnNode
+    expect(fnNode).toBeDefined()
+    expect(fnNode._tag).toBe("EffectFn")
+    expect(fnNode.spanName).toBe("Cart.evolve")
+    expect(fnNode.packageTag).toBe("domain")
+    expect(fnNode.isStub).toBe(false)
+  })
+
+  it("extracts synchronous reducer exported function declaration in domain as an EffectFn node", () => {
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/cart.ts",
+        packageTag: "domain",
+        content: `
+          export type CartState = { readonly items: ReadonlyArray<string> }
+          export type CartEvent = { readonly _tag: "ItemAdded"; readonly itemId: string; readonly version: number }
+
+          export function evolveCart(state: CartState, event: CartEvent): CartState {
+            return state
+          }
+        `
+      }
+    ])
+
+    const fnNode = resolveNode(graph, "Cart.evolve") as EffectFnNode
+    expect(fnNode).toBeDefined()
+    expect(fnNode._tag).toBe("EffectFn")
+    expect(fnNode.spanName).toBe("Cart.evolve")
+    expect(fnNode.packageTag).toBe("domain")
+    expect(fnNode.isStub).toBe(false)
+  })
+
+  it("propagates ExercisesSpan edges from a test referencing cartDecider to both decideCart and evolveCart", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-workspace-test-"))
+    try {
+      fs.writeFileSync(path.join(tmpDir, "pnpm-workspace.yaml"), "packages:\n  - 'libs/*'\n")
+
+      const domainSrcDir = path.join(tmpDir, "libs/sample/domain/src")
+      fs.mkdirSync(domainSrcDir, { recursive: true })
+      fs.writeFileSync(
+        path.join(domainSrcDir, "cart.ts"),
+        `
+          import { Effect } from "effect"
+
+          export type CartState = { readonly items: ReadonlyArray<string> }
+          export type CartCommand = { readonly _tag: "AddItem"; readonly itemId: string }
+          export type CartEvent = { readonly _tag: "ItemAdded"; readonly itemId: string; readonly version: number }
+
+          export const decideCart = Effect.fn("Cart.decide")((cmd: CartCommand, state: CartState) =>
+            Effect.succeed([])
+          )
+
+          export const evolveCart = (state: CartState, event: CartEvent): CartState => state
+
+          export const cartDecider = Decider.make({
+            initialState: { items: [] },
+            decide: decideCart,
+            evolve: evolveCart
+          })
+        `
+      )
+
+      const domainTestDir = path.join(tmpDir, "libs/sample/domain/test")
+      fs.mkdirSync(domainTestDir, { recursive: true })
+      fs.writeFileSync(
+        path.join(domainTestDir, "cart.test.ts"),
+        `
+          import { describe, it, expect } from "vitest"
+          import { cartDecider } from "../src/cart.js"
+
+          describe("cartDecider tests", () => {
+            it("runs decider", () => {
+              expect(cartDecider).toBeDefined()
+            })
+          })
+        `
+      )
+
+      const resultGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir))
+
+      const decideNode = resolveNode(resultGraph, "Cart.decide")
+      const evolveNode = resolveNode(resultGraph, "Cart.evolve")
+      expect(decideNode).toBeDefined()
+      expect(evolveNode).toBeDefined()
+
+      const reachingDecide = findTestsReaching(resultGraph, "Cart.decide")
+      const reachingEvolve = findTestsReaching(resultGraph, "Cart.evolve")
+
+      expect(reachingDecide.some((t) => t.testFile.includes("cart.test.ts"))).toBe(true)
+      expect(reachingEvolve.some((t) => t.testFile.includes("cart.test.ts"))).toBe(true)
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
   })
 })
 

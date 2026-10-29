@@ -28,7 +28,7 @@ Both leading clauses are optional. Which clauses are present defines the pattern
 | **Ubiquitous** | *(none)* | `**shall**` / `**shall not**` | `Schema` brand / refinement / invariant | `type:contract` | `UnitTest` / `AstGate` |
 | **Event-driven** | `**When**` | `**shall**` | `Effect.fn` input schema & success outcome | `A` channel (`type:domain`) | `UnitTest` / `TraceTest` |
 | **State-driven** | `**While**` | `**shall**` | Pure `*.decide` function (`R = never`) | Domain decider (`type:domain`) | `PropertyTest` (`it.prop`) |
-| **Unwanted behaviour** | `**If** … **then**` | `**shall**` / `**shall not**` | `Schema.TaggedErrorClass` | `E` channel (`type:contract` / `domain`) | `UnitTest` |
+| **Unwanted behaviour** | `**If** … **then**` | `**shall**` / `**shall not**` | `Schema.TaggedError<Self>()("Tag", { ... })` | `E` channel (`type:contract` / `domain`) | `UnitTest` |
 | **Optional feature** | `**Where**` | `**shall**` | `Context.Service` + `Layer` / `Config` | `R` channel (`type:service` / `infra`) | `GraphCheck` / `UnitTest` |
 
 ### Modal Verb Rule
@@ -139,7 +139,7 @@ Before saving the specification to `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md
 2. **As `@effect-ears-test-reviewer`:**
    - Does every requirement define an observable, testable assertion with binary pass/fail criteria?
    - Does every `While` clause target a pure decider (`*.decide`) tested via `PropertyTest`?
-   - Does every `If ... then` clause specify the exact `Schema.TaggedErrorClass`?
+   - Does every `If ... then` clause specify the exact `Schema.TaggedError`?
    - Does every Effect symbol exist or map cleanly to the planned graph?
 
 3. **As the User / Source Author:**

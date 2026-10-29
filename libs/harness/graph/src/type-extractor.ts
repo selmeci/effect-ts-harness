@@ -71,7 +71,7 @@ export const resolvePackageTag = (repoRoot: string, relFilePath: string): Packag
       const opt = decodePackageJson(content)
       if (Option.isSome(opt) && opt.value.nx?.tags) {
         const tags = opt.value.nx.tags
-        if (tags.includes("type:domain")) return "domain"
+        if (tags.includes("type:domain") || tags.includes("type:core")) return "domain"
         if (tags.includes("type:infra")) return "infra"
         if (tags.includes("type:app")) return "app"
         if (tags.includes("type:contract") && !tags.includes("type:service")) return "contract"
@@ -84,7 +84,7 @@ export const resolvePackageTag = (repoRoot: string, relFilePath: string): Packag
     if (parent === currentDir) break
     currentDir = parent
   }
-  if (relFilePath.includes("/domain/")) return "domain"
+  if (relFilePath.includes("/domain/") || relFilePath.includes("/core/")) return "domain"
   if (relFilePath.includes("/infra/")) return "infra"
   if (relFilePath.includes("/contract/")) return "contract"
   if (relFilePath.includes("/service/")) return "service"
@@ -192,7 +192,7 @@ const isClosedFiniteUnionType = (argType: Type, locationNode: Node): boolean => 
 }
 
 const findEnclosingSymbolName = (node: Node, relPath: string): string => {
-  let curr: Node | undefined = node.getParent()
+  let curr: Node | undefined = node
   while (curr !== undefined) {
     if (Node.isVariableDeclaration(curr)) {
       const name = curr.getName()
@@ -230,9 +230,11 @@ export const extractTypeAwareGraphFromSource = (
     for (const scopeEntry of fs.readdirSync(libsDir, { withFileTypes: true })) {
       if (!scopeEntry.isDirectory() || scopeEntry.name === "harness") continue
       const scopeDir = path.join(libsDir, scopeEntry.name)
-      for (const tier of ["contract", "service", "domain", "infra"]) {
+      for (const tier of ["contract", "service", "domain", "core", "infra"]) {
         const entryFile = path.join(scopeDir, tier, "src", "index.ts")
         dynamicPaths[`@harness/${scopeEntry.name}-${tier}`] = [entryFile]
+        dynamicPaths[`@effect-${scopeEntry.name}/${tier}`] = [entryFile]
+        dynamicPaths[`@${scopeEntry.name}/${tier}`] = [entryFile]
       }
     }
   }
@@ -347,6 +349,8 @@ export const extractTypeAwareGraphFromSource = (
       if (
         extText.includes("Data.TaggedError") ||
         extText.includes("TaggedError(") ||
+        extText.includes("TaggedError<") ||
+        extText.includes("Schema.TaggedError") ||
         extText.includes("Schema.TaggedErrorClass") ||
         extText.includes("TaggedErrorClass(")
       ) {
@@ -355,7 +359,11 @@ export const extractTypeAwareGraphFromSource = (
         const callExprs = extClause.getDescendantsOfKind(SyntaxKind.CallExpression)
         for (const c of callExprs) {
           const args = c.getArguments()
-          if (args.length > 0 && args[0]?.getKind() === SyntaxKind.StringLiteral) {
+          if (
+            args.length > 0 &&
+            (args[0]?.getKind() === SyntaxKind.StringLiteral ||
+              args[0]?.getKind() === SyntaxKind.NoSubstitutionTemplateLiteral)
+          ) {
             errorTag = args[0].getText().replace(/^["'`]|["'`]$/g, "")
             break
           }
@@ -377,7 +385,7 @@ export const extractTypeAwareGraphFromSource = (
               .getProperties()
               .filter(Node.isPropertyAssignment)
               .map((p) => p.getName())
-              .filter((n) => n !== "_tag")
+              .filter((n) => n !== "_tag" && n !== "version")
             taggedSchemasByTag.set(tag, {
               tag,
               properties: props,
@@ -401,7 +409,7 @@ export const extractTypeAwareGraphFromSource = (
             .getProperties()
             .filter(Node.isPropertyAssignment)
             .map((p) => p.getName())
-            .filter((n) => n !== "_tag")
+            .filter((n) => n !== "_tag" && n !== "version")
           taggedSchemasByTag.set(tag, {
             tag,
             properties: props,
@@ -549,6 +557,21 @@ export const extractTypeAwareGraphFromSource = (
         }
       }
 
+      if (
+        !isEffectFn &&
+        (filePkgTag === "domain" || filePkgTag === "contract") &&
+        init &&
+        (Node.isArrowFunction(init) || Node.isFunctionExpression(init)) &&
+        init.getParameters().length === 2 &&
+        /^(?:evolve[A-Z]\w*|reduce[A-Z]\w*|.*Reducer)$/.test(varName)
+      ) {
+        isEffectFn = true
+        spanName =
+          varName.startsWith("evolve") && varName.length > 6
+            ? `${varName.slice(6)}.evolve`
+            : varName
+      }
+
       if (!isEffectFn || !init) continue
 
       const qualname = `${relPath}#${varName}`
@@ -612,6 +635,12 @@ export const extractTypeAwareGraphFromSource = (
         const typeArgs = retType.getTypeArguments()
         if (typeArgs.length >= 1 && typeArgs[0] && successType === "void" && !typeArgs[0].isAny()) {
           successType = typeArgs[0].getText()
+        } else if (successType === "void") {
+          const retNode =
+            Node.isArrowFunction(init) || Node.isFunctionExpression(init)
+              ? init.getReturnTypeNode()?.getText()
+              : undefined
+          successType = retNode ?? (!retType.isAny() ? retType.getText() : "unknown")
         }
         if (
           typeArgs.length >= 2 &&
@@ -723,6 +752,34 @@ export const extractTypeAwareGraphFromSource = (
         const svc = classNameToTagId.get(rawSvc) ?? rawSvc
         requiresService.push({ callerQualname: qualname, tagId: svc })
         referencedServices.add(svc)
+      }
+    }
+
+    if (filePkgTag === "domain" || filePkgTag === "contract") {
+      for (const fnDecl of sourceFile.getFunctions()) {
+        if (!fnDecl.isExported()) continue
+        const fnName = fnDecl.getName()
+        if (!fnName) continue
+        if (
+          /^(?:evolve[A-Z]\w*|reduce[A-Z]\w*|.*Reducer)$/.test(fnName) &&
+          fnDecl.getParameters().length === 2
+        ) {
+          const qualname = `${relPath}#${fnName}`
+          const spanName =
+            fnName.startsWith("evolve") && fnName.length > 6
+              ? `${fnName.slice(6)}.evolve`
+              : fnName
+          fns.push({
+            _tag: "EffectFn",
+            qualname,
+            spanName,
+            packageTag: filePkgTag,
+            file: relPath,
+            line: fnDecl.getStartLineNumber(),
+            successType: fnDecl.getReturnTypeNode()?.getText() ?? "unknown",
+            isStub: false
+          })
+        }
       }
     }
   }
@@ -1219,6 +1276,7 @@ export const extractTypeAwareGraphFromSource = (
 
           const usedProps = usedPropsPerTag.get(tag) ?? new Set()
           for (const prop of schema.properties) {
+            if (prop === "_tag" || prop === "version") continue
             if (!usedProps.has(prop)) {
               branchingViolations.push({
                 rule: "dead-event-payload",
@@ -1620,6 +1678,33 @@ export const extractWorkspaceTypeAwareGraph = (
     const governanceDocs = loadWorkspaceGovernanceDocs(root)
     const updatedNodeIndexByKey = new Map<string, Graph.NodeIndex>(baseGraph.nodeIndexByKey)
 
+    const deciderAliasesByFnName = new Map<string, Set<string>>()
+    const deciderRegex = /(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=\s*Decider\.make\s*(?:<[\s\S]*?>)?\s*\(\s*\{([\s\S]*?)\}\s*\)/g
+    for (const input of inputs) {
+      const deciderMatches = input.content.matchAll(deciderRegex)
+      for (const m of deciderMatches) {
+        const deciderVarName = m[1]
+        const body = m[2]
+        if (!deciderVarName || !body) continue
+
+        const decideMatch = body.match(/decide\s*:\s*([A-Za-z0-9_$]+)/)
+        const decideFn = decideMatch ? decideMatch[1] : (/\bdecide\b/.test(body) ? "decide" : null)
+
+        const evolveMatch = body.match(/evolve\s*:\s*([A-Za-z0-9_$]+)/)
+        const evolveFn = evolveMatch ? evolveMatch[1] : (/\bevolve\b/.test(body) ? "evolve" : null)
+
+        for (const fn of [decideFn, evolveFn]) {
+          if (!fn) continue
+          let set = deciderAliasesByFnName.get(fn)
+          if (!set) {
+            set = new Set<string>()
+            deciderAliasesByFnName.set(fn, set)
+          }
+          set.add(deciderVarName)
+        }
+      }
+    }
+
     const augmentedGraph = Graph.mutate<HarnessNode, HarnessEdge>(
       baseGraph.graph,
       (mutable) => {
@@ -1676,10 +1761,23 @@ export const extractWorkspaceTypeAwareGraph = (
               ((fnName.length > 0 && strippedContent.includes(fnName)) ||
                 (fnNode.spanName.length > 0 && strippedContent.includes(fnNode.spanName)))
 
+            const deciderAliases = deciderAliasesByFnName.get(fnName)
+            let deciderAliasMatches = false
+            if (deciderAliases) {
+              for (const alias of deciderAliases) {
+                const escapedAlias = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+                if (new RegExp(`\\b${escapedAlias}\\b`).test(strippedContent)) {
+                  deciderAliasMatches = true
+                  break
+                }
+              }
+            }
+
             const matches =
               (fnRegex !== null && fnRegex.test(strippedContent)) ||
               (spanCallRegex !== null && spanCallRegex.test(strippedContent)) ||
-              testTracerMatches
+              testTracerMatches ||
+              deciderAliasMatches
 
             if (matches) {
               const calleeIdx = updatedNodeIndexByKey.get(fnNode.qualname)

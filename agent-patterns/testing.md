@@ -2,7 +2,18 @@
 
 Testing Effect applications utilizes @effect/vitest with it.effect and it.scoped alongside test Layers and test tracer spans from @harness/ingest.
 
-## Testing with `@effect/vitest`
+## Testing with `@effect/vitest` vs `vitest`
+
+Test runner imports are strictly partitioned by package boundary to prevent leaking framework test runtimes into pure contract packages:
+- **`type:contract` packages**: Import test primitives directly from `"vitest"`:
+  ```ts
+  import { describe, expect, it } from "vitest"
+  ```
+  Contract packages test Schema decoding/encoding and pure types without Effect runtime wrappers.
+- **`type:domain` / `type:core` / `type:infra` / `type:app` packages**: Import test primitives from `"@effect/vitest"`:
+  ```ts
+  import { describe, expect, it } from "@effect/vitest"
+  ```
 
 The `@effect/vitest` package provides native test runners that understand `Effect` generators, fiber lifecycles, and environment injection:
 
@@ -208,15 +219,23 @@ When writing negative tests (asserting that an effect fails), never assert bare 
 
 In Effect, `Exit.Failure` contains a `Cause`. An assertion failure or unexpected exception inside the effect produces a defect (`Die`), which also produces an `Exit.Failure`. Checking only `_tag === "Failure"` masks defects and crashes as successful negative tests!
 
-Always inspect the cause:
+Always inspect the cause. In `Effect.exit` assertions, extract typed errors with `Cause.findErrorOption(exit.cause)` (not `Cause.failureOption`, which does not exist in Effect v4):
 ```ts
-// For asserting typed domain error (E):
+// 1. Flip error channel to assert typed domain error (E):
 const err = yield* Effect.flip(effect)
 expect(err._tag).toBe("InsufficientStockError")
-// or inspect Cause:
-expect(Cause.hasFails(exit.cause)).toBe(true)
 
-// For asserting runner defects or assertion failures (Die):
+// 2. Or inspect Exit.Failure cause tree with Cause.findErrorOption:
+const exit = yield* Effect.exit(effect)
+if (Exit.isFailure(exit)) {
+  const errorOpt = Cause.findErrorOption(exit.cause)
+  expect(Option.isSome(errorOpt)).toBe(true)
+  if (Option.isSome(errorOpt)) {
+    expect(errorOpt.value._tag).toBe("InsufficientStockError")
+  }
+}
+
+// 3. For asserting runner defects or assertion failures (Die):
 expect(Cause.hasDies(exit.cause)).toBe(true)
 ```
 

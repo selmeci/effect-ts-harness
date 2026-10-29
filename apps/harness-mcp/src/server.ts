@@ -107,24 +107,76 @@ const findRepoRoot = (startDir: string): string => {
 
 const SERVER_REPO_ROOT = findRepoRoot(path.dirname(fileURLToPath(import.meta.url)))
 
-const resolveDefaultRepoRoot = (): string => {
-  const fromCwd = findRepoRoot(process.cwd())
-  if (fs.existsSync(path.join(fromCwd, "pnpm-workspace.yaml"))) {
-    return fromCwd
+const resolveDefaultRepoRoot = (args?: Record<string, unknown>): string => {
+  if (typeof args?.repoRoot === "string" && args.repoRoot.length > 0) {
+    return findRepoRoot(args.repoRoot)
+  }
+  const candidate =
+    typeof args?.file === "string" && path.isAbsolute(args.file)
+      ? args.file
+      : typeof args?.project === "string" && path.isAbsolute(args.project)
+        ? args.project
+        : undefined
+  if (candidate !== undefined) {
+    return findRepoRoot(path.dirname(candidate))
+  }
+  const cwdRoot = findRepoRoot(process.cwd())
+  if (cwdRoot !== SERVER_REPO_ROOT) {
+    return cwdRoot
+  }
+  if (process.env.VITEST === undefined) {
+    const activeWorkspacePath = path.join(
+      SERVER_REPO_ROOT,
+      ".harness",
+      "active-workspace.json"
+    )
+    if (fs.existsSync(activeWorkspacePath)) {
+      const decodeActiveWorkspace = Schema.decodeUnknownOption(
+        Schema.fromJsonString(Schema.Struct({ repoRoot: Schema.String }))
+      )
+      const resolvedActiveRoot = Effect.runSync(
+        Effect.try(() => {
+          const raw = fs.readFileSync(activeWorkspacePath, "utf-8")
+          const parsed = Option.getOrUndefined(decodeActiveWorkspace(raw))
+          return parsed !== undefined && fs.existsSync(parsed.repoRoot)
+            ? parsed.repoRoot
+            : undefined
+        }).pipe(Effect.orElseSucceed(() => undefined))
+      )
+      if (resolvedActiveRoot !== undefined) {
+        return resolvedActiveRoot
+      }
+    }
   }
   return SERVER_REPO_ROOT
 }
 
-const resolveGraph = (options?: ServerOptions): Effect.Effect<HarnessGraph> => {
+const resolveGraph = (
+  options?: ServerOptions,
+  args?: Record<string, unknown>
+): Effect.Effect<HarnessGraph> => {
   if (options?.graph) {
     return Effect.succeed(options.graph)
   }
   return Effect.try(() => {
-    const root = options?.repoRoot ?? resolveDefaultRepoRoot()
-    const snapshotPath =
-      options?.snapshotPath ??
-      path.join(root, ".harness", "graph-snapshot.json")
-    if (fs.existsSync(snapshotPath)) {
+    const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+    let snapshotPath = options?.snapshotPath
+    if (!snapshotPath) {
+      const verifySnap = path.join(root, ".harness", "graph-snapshot.json")
+      const planSnap = path.join(root, ".harness", "plan-graph-snapshot.json")
+      const verifyExists = fs.existsSync(verifySnap)
+      const planExists = fs.existsSync(planSnap)
+      if (verifyExists && planExists) {
+        const verifyMtime = fs.statSync(verifySnap).mtimeMs
+        const planMtime = fs.statSync(planSnap).mtimeMs
+        snapshotPath = planMtime > verifyMtime ? planSnap : verifySnap
+      } else if (verifyExists) {
+        snapshotPath = verifySnap
+      } else if (planExists) {
+        snapshotPath = planSnap
+      }
+    }
+    if (snapshotPath && fs.existsSync(snapshotPath)) {
       return loadGraphSnapshot(snapshotPath)
     }
     return buildHarnessGraph({
@@ -219,43 +271,43 @@ const runDefaultLspDiagnostics = (
     )
   )
 
-export const executeToolEffect = (
-  toolName: string,
-  args: Record<string, unknown>,
-  options?: ServerOptions
-): Effect.Effect<unknown, UnknownToolError> =>
-  Effect.gen(function* () {
+export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(
+  function* (
+    toolName: string,
+    args: Record<string, unknown>,
+    options?: ServerOptions
+  ) {
     const startTime = performance.now()
     let result: unknown
 
     switch (toolName) {
       case "harness_resolve": {
         const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
-        const graph = yield* resolveGraph(options)
+        const graph = yield* resolveGraph(options, args)
         result = resolveNode(graph, symbolOrSpan) ?? null
         break
       }
       case "harness_callers": {
         const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
-        const graph = yield* resolveGraph(options)
+        const graph = yield* resolveGraph(options, args)
         result = findCallers(graph, symbolOrSpan)
         break
       }
       case "harness_callees": {
         const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
-        const graph = yield* resolveGraph(options)
+        const graph = yield* resolveGraph(options, args)
         result = findCallees(graph, symbolOrSpan)
         break
       }
       case "harness_tests_reaching": {
         const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
-        const graph = yield* resolveGraph(options)
+        const graph = yield* resolveGraph(options, args)
         result = findTestsReaching(graph, symbolOrSpan)
         break
       }
       case "harness_structural_search": {
         const pattern = (args as { pattern: string }).pattern
-        const root = options?.repoRoot ?? resolveDefaultRepoRoot()
+        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
         result = structuralSearch({ pattern, repoRoot: root })
         break
       }
@@ -277,20 +329,20 @@ export const executeToolEffect = (
       }
       case "harness_ontology_why": {
         const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
-        const graph = yield* resolveGraph(options)
+        const graph = yield* resolveGraph(options, args)
         result = queryOntologyWhy(graph, symbolOrSpan)
         break
       }
       case "harness_ontology_impact": {
         const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
-        const graph = yield* resolveGraph(options)
+        const graph = yield* resolveGraph(options, args)
         result = queryOntologyImpact(graph, symbolOrSpan)
         break
       }
       case "harness_ontology_check": {
         const scope = (args as { scope?: string | undefined }).scope
-        const graph = yield* resolveGraph(options)
-        const root = options?.repoRoot ?? resolveDefaultRepoRoot()
+        const graph = yield* resolveGraph(options, args)
+        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
         const docs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(root)
         const invariants = yield* decideOntologyInvariants({
           graph,
@@ -321,7 +373,7 @@ export const executeToolEffect = (
         const queryName = (args as { queryName: HarnessGqQueryName }).queryName
         const params = (args as { params?: Record<string, unknown> | undefined }).params
         const branch = (args as { branch?: string | undefined }).branch
-        const graph = yield* resolveGraph(options)
+        const graph = yield* resolveGraph(options, args)
         result = yield* invokeOmnigraphNamedQuery({
           name: queryName,
           params,
@@ -333,7 +385,7 @@ export const executeToolEffect = (
       case "harness_lsp_diagnostics": {
         const file = (args as { file?: string | undefined }).file
         const project = (args as { project?: string | undefined }).project
-        const root = options?.repoRoot ?? resolveDefaultRepoRoot()
+        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
         if (options?.lspDiagnosticsRunner !== undefined) {
           result = options.lspDiagnosticsRunner({ file, project })
         } else {
@@ -343,7 +395,7 @@ export const executeToolEffect = (
       }
       case "harness_telemetry_report": {
         const format = (args as { format?: "json" | "markdown" | undefined }).format
-        const root = options?.repoRoot ?? resolveDefaultRepoRoot()
+        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
         const events = readTelemetryEvents(root)
         const frictionEvents = readFrictionEvents(root)
         const report = buildSessionReport({ events, frictionEvents })
@@ -359,7 +411,7 @@ export const executeToolEffect = (
 
     const durationMs = Math.max(0, Math.round(performance.now() - startTime))
     if (options?.repoRoot !== undefined || process.env.VITEST === undefined) {
-      const root = options?.repoRoot ?? resolveDefaultRepoRoot()
+      const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
       let category: TelemetryCategory = "graph_query"
       if (
         toolName === "harness_ontology_why" ||
@@ -416,7 +468,8 @@ export const executeToolEffect = (
     }
 
     return result
-  })
+  }
+)
 
 export const executeTool = (
   toolName: string,

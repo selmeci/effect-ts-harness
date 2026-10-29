@@ -6,7 +6,7 @@ import {
   makeFailingDecisionModelLayer,
   makeMockDecisionModelLayer
 } from "@harness/decision"
-import { writeVerifyStamp } from "@harness/gates"
+import { readTelemetryEvents, writeVerifyStamp } from "@harness/gates"
 import { buildHarnessGraph } from "@harness/graph"
 // oxlint-disable-next-line @nx/enforce-module-boundaries
 import syntaxBansPlugin from "../../../tools/oxlint/syntax-bans.js"
@@ -276,6 +276,43 @@ describe("harness-cli v2 commands", () => {
         rmSync(dir, { recursive: true, force: true })
       }
     })
+
+    it("rejects an active spec/ADR that declares a referencedErrors TaggedError with 0 FailsWith edges when the graph has at least one EffectFn", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "harness-cli-plan-dead-err-"))
+      try {
+        const srcDir = join(dir, "libs", "sample", "src")
+        mkdirSync(srcDir, { recursive: true })
+        writeFileSync(
+          join(srcDir, "a.ts"),
+          `import { Effect } from "effect"\nexport const fnA = Effect.fn("Sample.fnA")(function* () { return 1 })\n`
+        )
+
+        const governanceDocs = [
+          {
+            docPath: "docs/spec.md",
+            id: "spec-001",
+            status: "accepted" as const,
+            referencedErrors: ["OrderNotFoundError"]
+          }
+        ]
+
+        const res = await runCli(["plan-check", "--graph-only"], {
+          repoRoot: dir,
+          governanceDocs
+        })
+        expect(res.exitCode).toBe(1)
+        const payload = JSON.parse(res.stdout)
+        expect(payload).toEqual({
+          step: "type-graph-policy",
+          valid: false,
+          violations: [
+            "[dead-tagged-error] Governance doc 'spec-001' declares TaggedError 'OrderNotFoundError', which has 0 FailsWith edges in the plan graph"
+          ]
+        })
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
   })
 
   describe("verify", () => {
@@ -514,6 +551,24 @@ enforced_by:
           decision: "block",
           reason: expect.stringContaining("Plan step step-1 failed coverage check")
         })
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it("handleDone with fullyIdle: false records detail fullyIdle=false in telemetry and does not write session-report.json", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "harness-cli-done-idle-"))
+      try {
+        const res = await runCli(["done", "--format=antigravity"], {
+          repoRoot: dir,
+          stdin: JSON.stringify({ fullyIdle: false })
+        })
+        expect(res.exitCode).toBe(0)
+        expect(res.stdout).toBe("")
+        const events = readTelemetryEvents(dir)
+        expect(events).toHaveLength(1)
+        expect(events[0]?.detail).toBe("fullyIdle=false")
+        expect(existsSync(join(dir, ".harness", "session-report.json"))).toBe(false)
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }

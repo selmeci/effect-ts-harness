@@ -316,4 +316,82 @@ describe("harness-mcp tools", () => {
       await client.close()
     }
   })
+
+  it("automatically loads plan-graph-snapshot.json when graph-snapshot.json is absent or older, and honours args.repoRoot", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-mcp-plan-"))
+    try {
+      fs.writeFileSync(path.join(tmpDir, "pnpm-workspace.yaml"), "")
+      const harnessDir = path.join(tmpDir, ".harness")
+      fs.mkdirSync(harnessDir, { recursive: true })
+
+      const planGraph = buildHarnessGraph({
+        fns: [
+          {
+            qualname: "libs/sample/domain/src/index.ts#planFn",
+            spanName: "Sample.planFn",
+            file: "libs/sample/domain/src/index.ts",
+            line: 1,
+            packageTag: "domain",
+            successType: "string",
+            isStub: false
+          }
+        ]
+      })
+      const verifyGraph = buildHarnessGraph({
+        fns: [
+          {
+            qualname: "libs/sample/domain/src/index.ts#verifyFn",
+            spanName: "Sample.verifyFn",
+            file: "libs/sample/domain/src/index.ts",
+            line: 1,
+            packageTag: "domain",
+            successType: "string",
+            isStub: false
+          }
+        ]
+      })
+
+      const planPath = path.join(harnessDir, "plan-graph-snapshot.json")
+      const verifyPath = path.join(harnessDir, "graph-snapshot.json")
+
+      // 1. Case A: graph-snapshot.json is absent, plan-graph-snapshot.json is present
+      saveGraphSnapshot(planGraph, planPath)
+      const resPlanOnly = await executeTool(
+        "harness_resolve",
+        { symbolOrSpan: "Sample.planFn", repoRoot: tmpDir }
+      )
+      expect(resPlanOnly).toMatchObject({
+        spanName: "Sample.planFn"
+      })
+
+      // 2. Case B: graph-snapshot.json exists, but plan-graph-snapshot.json is newer
+      saveGraphSnapshot(verifyGraph, verifyPath)
+      const past = new Date(Date.now() - 100000)
+      const now = new Date()
+      fs.utimesSync(verifyPath, past, past)
+      fs.utimesSync(planPath, now, now)
+
+      const resNewerPlan = await executeTool(
+        "harness_resolve",
+        { symbolOrSpan: "Sample.planFn", repoRoot: tmpDir }
+      )
+      expect(resNewerPlan).toMatchObject({
+        spanName: "Sample.planFn"
+      })
+
+      // 3. Case C: graph-snapshot.json is updated to be newer than plan-graph-snapshot.json
+      const future = new Date(Date.now() + 100000)
+      fs.utimesSync(verifyPath, future, future)
+
+      const resNewerVerify = await executeTool(
+        "harness_resolve",
+        { symbolOrSpan: "Sample.verifyFn", repoRoot: tmpDir }
+      )
+      expect(resNewerVerify).toMatchObject({
+        spanName: "Sample.verifyFn"
+      })
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
 })

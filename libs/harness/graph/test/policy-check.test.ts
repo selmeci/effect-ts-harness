@@ -710,5 +710,93 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
     expect(terminalViolation?.message).toContain("evolveCart")
     expect(terminalViolation?.message).toContain("CheckedOut")
   })
+
+  it("does not flag event schema property 'version' as dead-event-payload when omitted in evolve", () => {
+    const contractSource = `
+import { Schema } from "effect"
+
+export const ItemAdded = Schema.TaggedStruct("ItemAdded", {
+  itemId: Schema.String,
+  version: Schema.Number
+})
+`
+    const domainSource = `
+import { match } from "ts-pattern"
+import { ItemAdded } from "@harness/sample-contract"
+
+export type CartState = {
+  readonly items: ReadonlyArray<string>
+}
+
+export type CartEvent = typeof ItemAdded.Type
+
+export const evolveCart = (state: CartState, event: CartEvent): CartState =>
+  match(event)
+    .with({ _tag: "ItemAdded" }, (ev) => ({
+      items: state.items.concat(ev.itemId)
+    }))
+    .exhaustive()
+`
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/contract/src/index.ts",
+        content: contractSource,
+        packageTag: "contract"
+      },
+      {
+        filePath: "libs/sample/domain/src/index.ts",
+        content: domainSource,
+        packageTag: "domain"
+      }
+    ])
+
+    const result = checkEffectGraph(graph)
+    const deadPayloadViolations = result.violations.filter((v) => v.rule === "dead-event-payload")
+    expect(deadPayloadViolations).toHaveLength(0)
+  })
+
+  it("does not flag Schema.TaggedClass property 'version' as dead-event-payload when omitted in evolve", () => {
+    const contractSource = `
+import { Schema } from "effect"
+
+export class ItemAdded extends Schema.TaggedClass<ItemAdded>()("ItemAdded", {
+  itemId: Schema.String,
+  version: Schema.Number
+}) {}
+`
+    const domainSource = `
+import { match } from "ts-pattern"
+import { ItemAdded } from "@harness/sample-contract"
+
+export type CartState = {
+  readonly items: ReadonlyArray<string>
+}
+
+export type CartEvent = ItemAdded
+
+export const evolveCart = (state: CartState, event: CartEvent): CartState =>
+  match(event)
+    .with({ _tag: "ItemAdded" }, (ev) => ({
+      items: state.items.concat(ev.itemId)
+    }))
+    .exhaustive()
+`
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/contract/src/index.ts",
+        content: contractSource,
+        packageTag: "contract"
+      },
+      {
+        filePath: "libs/sample/domain/src/index.ts",
+        content: domainSource,
+        packageTag: "domain"
+      }
+    ])
+
+    const result = checkEffectGraph(graph)
+    const deadPayloadViolations = result.violations.filter((v) => v.rule === "dead-event-payload")
+    expect(deadPayloadViolations).toHaveLength(0)
+  })
 })
 

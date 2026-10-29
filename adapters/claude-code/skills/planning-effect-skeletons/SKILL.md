@@ -16,7 +16,7 @@ In this project, the plan IS compilable TypeScript code. Never write long Markdo
 1. **Route Idioms & Inspect Ontology:** Call `harness_route` for each non-trivial capability (e.g., D1, Durable Object RPC, `HttpApi`, `AtomHttpApi`) and read the matched `agent-patterns/*.md` file. For any existing services or use-cases being modified, call `harness_ontology_why` and `harness_ontology_impact` to inspect cross-layer ArchiMate dependencies and governing ADR/EARS constraints.
 2. **Define Boundary Types (`type:contract` & `type:service`):**
    - `WHEN <trigger>` $\rightarrow$ Request/response `Schema.Struct` and `HttpApiEndpoint` / `Rpc` in `type:contract`.
-   - `IF <condition>, THEN` $\rightarrow$ `Schema.TaggedErrorClass` in `type:contract`.
+   - `IF <condition>, THEN` $\rightarrow$ `Schema.TaggedError<Self>()("Tag", { ... })` in `type:contract`.
    - `WHILE <state>` $\rightarrow$ Closed discriminated unions (`Schema.TaggedUnion` / `Schema.TaggedStruct`) for domain states and decisions in `type:contract` (`agent-patterns/pattern-matching.md`).
    - Stateful capabilities $\rightarrow$ `Context.Service` methods in `type:service`.
 3. **Write `stub<A, E, R>()` Skeletons (`type:domain` & `type:infra`):**

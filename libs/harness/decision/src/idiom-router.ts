@@ -12,6 +12,7 @@ export const IDIOM_BLOCKS = [
   "errors",
   "schema",
   "pattern-matching",
+  "event-sourcing",
   "resources-scope",
   "concurrency",
   "schedule",
@@ -42,6 +43,8 @@ export const IdiomRouterV1 = Decision.make({
         schema: "Decoding, encoding, validating data at a boundary",
         "pattern-matching":
           "Exhaustive ts-pattern match().with().exhaustive() over discriminated unions (Schema.TaggedUnion / TaggedStruct)",
+        "event-sourcing":
+          "Event-sourced Decider (decide / evolve / initialState), EventStore, aggregate command handling, and non-empty event batches",
         "resources-scope": "Acquiring and releasing resources with Scope",
         concurrency: "Forking fibers, racing, bounded parallel work",
         schedule: "Retries, repetition, backoff, timing policies",

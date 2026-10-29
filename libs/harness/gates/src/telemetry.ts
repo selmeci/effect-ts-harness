@@ -107,7 +107,14 @@ export const scopeSessionReportInput = (
   let boundaryIdx = -1
   for (let i = allEvents.length - 1; i >= 0; i--) {
     const ev = allEvents[i]!
-    if (ev.toolName === "done" && ev.outcome === "ok") {
+    const isCompletedDone =
+      ev.toolName === "done" &&
+      ev.outcome === "ok" &&
+      ev.detail !== "fullyIdle=false" &&
+      (ev.surface === "cli" ||
+        ev.detail === "completed" ||
+        allEvents[i - 1]?.toolName === "omnigraph:merge-main")
+    if (isCompletedDone) {
       const hasSubsequentTaskWork = allEvents
         .slice(i + 1)
         .some((later) => TASK_WORK_TOOLS.has(later.toolName))
@@ -308,7 +315,10 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
     (e) => e.category === "guard" && (e.outcome === "deny" || e.outcome === "ask")
   ).length
 
-  const frictionCount = (input.frictionEvents ?? []).length
+  const isActionableFriction = (f: FrictionEvent): boolean =>
+    !(f.kind === "guard_escalation" && f.detail.startsWith("verdict=allow"))
+  const actionableFriction = (input.frictionEvents ?? []).filter(isActionableFriction)
+  const frictionCount = actionableFriction.length
 
   let healthScore = 100
   healthScore -= Math.min(45, fixUpIterations * 15)

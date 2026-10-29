@@ -41,7 +41,7 @@ Always prefer in-process MCP tools over spawning shell subcommands to eliminate 
 
 ## Planning in Effect idioms
 
-A plan maps each section (including EARS requirements: `WHEN` → input Schema & `A`, `IF/THEN` → `TaggedError` in `E`, `WHILE` → pure `.decide` with `R = never` + stateful service in `R`, `WHERE` → `Layer`/`Config` in `R`; see `agent-patterns/planning.md`) to an Effect building block: Schema at boundaries, tagged errors,
+A plan maps each section (including EARS requirements: `WHEN` → input Schema & `A`, `IF/THEN` → `Schema.TaggedError<Self>()("Tag", { ... })` in `E`, `WHILE` → pure `.decide` with `R = never` + stateful service in `R`, `WHERE` → `Layer`/`Config` in `R`; see `agent-patterns/planning.md`) to an Effect building block: Schema at boundaries, tagged errors,
 `Context.Service` capabilities, `Layer` dependency graph, `Effect<A, E, R>` use-case signatures,
 `Scope` for resources, `Schedule` for retry/concurrency, `Config` + `Effect.fn("name")` spans, test Layers.
 Plan as code: write the skeleton first (schemas, errors, service interfaces, signatures using `stub<A, E, R>(...args)` from `@harness/gates`) — it must pass typecheck with preserved `A`, `E`, `R` types before implementation starts. `stub()` is allowed during `HARNESS_PLAN_CHECK=1` and banned in `harness verify`.

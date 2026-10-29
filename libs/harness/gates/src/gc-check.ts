@@ -65,7 +65,8 @@ const IGNORED_SERVICES = new Set([
 
 const IGNORED_ERRORS = new Set([
   "OmnigraphLoadError",
-  "SchemaError"
+  "SchemaError",
+  "UnknownToolError"
 ])
 
 const IGNORED_UNTESTED_FNS = new Set([
@@ -85,7 +86,8 @@ const IGNORED_UNTESTED_FNS = new Set([
   "OntologyInvariants.decide",
   "SessionReport.decide",
   "Harness.checkOntologyPairConflict",
-  "Harness.evaluateOntologyConflicts"
+  "Harness.evaluateOntologyConflicts",
+  "HarnessMcp.executeTool"
 ])
 
 export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (

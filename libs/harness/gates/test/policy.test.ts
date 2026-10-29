@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest"
+import { Effect } from "effect"
+import { decideLoopThrashing, type FrictionEvent } from "../src/friction-log.js"
 import { classifyCommand } from "../src/policy.js"
 
 describe("guard policy", () => {
@@ -221,5 +223,68 @@ describe("guard policy", () => {
     expect(classifyCommand("r''m -r dist")).toBe("escalate")
     // a multi-character class is a normal regex, not obfuscation
     expect(classifyCommand('git grep -n "[A-Z_]+" -- libs')).toBe("allow")
+  })
+
+  it("allows environment prefixes, pnpm filter/install/vitest, git remote, rg, and grep", () => {
+    expect(
+      classifyCommand("HARNESS_PLAN_CHECK=1 pnpm --filter @effect-es/core test")
+    ).toBe("allow")
+    expect(classifyCommand("CI=true pnpm vitest run")).toBe("allow")
+    expect(classifyCommand("pnpm install --frozen-lockfile")).toBe("allow")
+    expect(classifyCommand("git remote -v")).toBe("allow")
+    expect(classifyCommand("rg foo")).toBe("allow")
+    expect(classifyCommand("grep bar")).toBe("allow")
+  })
+
+  it("decideLoopThrashing ignores allowed guard_escalations so 3 consecutive allowed escalations return stuck: false", () => {
+    const events: ReadonlyArray<FrictionEvent> = [
+      {
+        kind: "guard_escalation",
+        timestamp: "2026-10-27T10:00:00.000Z",
+        summary: "inspect package",
+        detail: "verdict=allow; reason=safe"
+      },
+      {
+        kind: "guard_escalation",
+        timestamp: "2026-10-27T10:01:00.000Z",
+        summary: "inspect package",
+        detail: "verdict=allow; reason=safe"
+      },
+      {
+        kind: "guard_escalation",
+        timestamp: "2026-10-27T10:02:00.000Z",
+        summary: "inspect package",
+        detail: "verdict=allow; reason=safe"
+      }
+    ]
+
+    const status = Effect.runSync(decideLoopThrashing(events, 3))
+    expect(status.stuck).toBe(false)
+    expect(status.consecutiveCount).toBe(0)
+    expect(status.escalationMessage).toBeNull()
+
+    const deniedEvents: ReadonlyArray<FrictionEvent> = [
+      {
+        kind: "guard_escalation",
+        timestamp: "2026-10-27T10:00:00.000Z",
+        summary: "blocked action",
+        detail: "verdict=deny; reason=destructive"
+      },
+      {
+        kind: "guard_escalation",
+        timestamp: "2026-10-27T10:01:00.000Z",
+        summary: "blocked action",
+        detail: "verdict=deny; reason=destructive"
+      },
+      {
+        kind: "guard_escalation",
+        timestamp: "2026-10-27T10:02:00.000Z",
+        summary: "blocked action",
+        detail: "verdict=deny; reason=destructive"
+      }
+    ]
+    const deniedStatus = Effect.runSync(decideLoopThrashing(deniedEvents, 3))
+    expect(deniedStatus.stuck).toBe(true)
+    expect(deniedStatus.consecutiveCount).toBe(3)
   })
 })

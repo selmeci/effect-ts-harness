@@ -105,6 +105,7 @@ export interface CliResult {
   readonly exitCode: number
   readonly stdout: string
   readonly stderr: string
+  readonly telemetryDetail?: string | undefined
 }
 
 const PreToolUseStdinSchema = Schema.Struct({
@@ -146,6 +147,8 @@ const findWorkspaceRoot = (startDir: string = process.cwd()): string => {
   }
   return startDir
 }
+
+const CLI_REPO_ROOT = findWorkspaceRoot(dirname(fileURLToPath(import.meta.url)))
 
 const formatSubprocessError = (err: unknown): string => {
   if (typeof err === "object" && err !== null) {
@@ -483,6 +486,8 @@ const handlePlanCheck = (
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
+    const governanceDocs =
+      options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot)
     const graphOnly = argv.includes("--graph-only")
 
     if (!graphOnly && !options?.skipSubprocessVerify && existsSync(join(repoRoot, "package.json"))) {
@@ -528,6 +533,45 @@ const handlePlanCheck = (
         exitCode: 1,
         stdout: "",
         stderr: formattedViolations
+      }
+    }
+
+    let hasEffectFnNodes = false
+    for (const [, node] of Graph.nodes(graph.graph)) {
+      if (node._tag === "EffectFn") {
+        hasEffectFnNodes = true
+        break
+      }
+    }
+    if (hasEffectFnNodes) {
+      const failsWithErrorTags = new Set<string>()
+      for (const [, edge] of Graph.edges(graph.graph)) {
+        if (edge.data._tag === "FailsWith") {
+          failsWithErrorTags.add(edge.data.errorTag)
+        }
+      }
+      const violations: Array<string> = []
+      for (const doc of governanceDocs) {
+        if (doc.status === "accepted" || doc.status === "proposed") {
+          for (const errName of doc.referencedErrors ?? []) {
+            if (!failsWithErrorTags.has(errName)) {
+              violations.push(
+                `[dead-tagged-error] Governance doc '${doc.id}' declares TaggedError '${errName}', which has 0 FailsWith edges in the plan graph`
+              )
+            }
+          }
+        }
+      }
+      if (violations.length > 0) {
+        return {
+          exitCode: 1,
+          stdout: JSON.stringify(
+            { step: "type-graph-policy", valid: false, violations },
+            null,
+            2
+          ),
+          stderr: ""
+        }
       }
     }
 
@@ -738,22 +782,21 @@ const handleDone = (
     const isAntigravity = argv.includes("--format=antigravity")
     const blockDecision = isAntigravity ? "continue" : "block"
 
-    if (isAntigravity) {
-      let rawStdin = options?.stdin
-      if (rawStdin === undefined && !process.stdin.isTTY) {
-        rawStdin = yield* Effect.try({
-          try: () => readFileSync(0, "utf8"),
-          catch: () => ""
-        }).pipe(Effect.orElseSucceed(() => ""))
-      }
-      if (rawStdin) {
-        const decoded = decodeStopHookStdin(rawStdin)
-        if (Option.isSome(decoded) && decoded.value.fullyIdle === false) {
-          return {
-            exitCode: 0,
-            stdout: JSON.stringify({ decision: "stop" }),
-            stderr: ""
-          }
+    let rawStdin = options?.stdin
+    if (rawStdin === undefined && !process.stdin.isTTY) {
+      rawStdin = yield* Effect.try({
+        try: () => readFileSync(0, "utf8"),
+        catch: () => ""
+      }).pipe(Effect.orElseSucceed(() => ""))
+    }
+    if (rawStdin) {
+      const decoded = decodeStopHookStdin(rawStdin)
+      if (Option.isSome(decoded) && decoded.value.fullyIdle === false) {
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          telemetryDetail: "fullyIdle=false"
         }
       }
     }
@@ -864,7 +907,8 @@ const handleDone = (
     return {
       exitCode: 0,
       stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "",
-      stderr: ""
+      stderr: "",
+      telemetryDetail: "completed"
     }
   })
 
@@ -1445,6 +1489,18 @@ export const runCliEffect = (
   Effect.gen(function* () {
     const requested = argv[0] ?? "help"
     const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
+    const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
+
+    if (options?.repoRoot === undefined && process.env.VITEST === undefined) {
+      yield* Effect.try(() => {
+        const harnessDir = join(CLI_REPO_ROOT, ".harness")
+        mkdirSync(harnessDir, { recursive: true })
+        writeFileSync(
+          join(harnessDir, "active-workspace.json"),
+          JSON.stringify({ repoRoot, updatedAt: new Date().toISOString() }, null, 2)
+        )
+      }).pipe(Effect.ignore)
+    }
 
     if (!isCommand(requested)) {
       return {
@@ -1575,15 +1631,16 @@ export const runCliEffect = (
       category,
       toolName: requested === "ontology" ? `ontology:${argv[1] ?? "layers"}` : requested,
       outcome,
-      durationMs
+      durationMs,
+      ...(res.telemetryDetail !== undefined ? { detail: res.telemetryDetail } : {})
     })
 
     if (
       requested === "done" &&
       outcome === "ok" &&
+      res.telemetryDetail !== "fullyIdle=false" &&
       (options?.repoRoot !== undefined || process.env.VITEST === undefined)
     ) {
-      const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
       const finalEvents = readTelemetryEvents(repoRoot)
       const finalFriction = readFrictionEvents(repoRoot)
       const finalReport = buildSessionReport({
