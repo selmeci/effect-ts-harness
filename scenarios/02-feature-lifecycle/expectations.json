@@ -1,0 +1,170 @@
+{
+  "title": "Feature request → EARS → skeleton → plan-check → gc → verify → done, with mid-flight change",
+  "requires": ["clef"],
+  "checks": [
+    {
+      "id": "session-hook-fired",
+      "source": "telemetry",
+      "where": { "surface": "hook", "toolName": "session" },
+      "why": "Session hook not wired — agent starts without harness context"
+    },
+    {
+      "id": "read-ears-skill",
+      "source": "transcript",
+      "where": { "args~": "specifying-ears-with-effect" },
+      "why": "Agent never loaded the EARS skill — skill description/trigger does not match a plain feature request"
+    },
+    {
+      "id": "read-planning-skill",
+      "source": "transcript",
+      "where": { "args~": "planning-effect-skeletons" },
+      "why": "Agent never loaded the skeleton-planning skill"
+    },
+    {
+      "id": "read-executing-skill",
+      "source": "transcript",
+      "where": { "args~": "executing-effect-stubs" },
+      "severity": "warn",
+      "why": "Agent implemented without the executing-effect-stubs skill (reviewer dispatch, stub replacement rules)"
+    },
+    {
+      "id": "routed-plan-steps",
+      "source": "telemetry",
+      "where": { "category": "routing" },
+      "why": "No harness route / harness_route call — IdiomRouterV1 (clef) never consulted during planning"
+    },
+    {
+      "id": "routing-not-all-fallback",
+      "type": "compare",
+      "left": { "source": "telemetry", "where": { "category": "routing", "outcome": "ok" } },
+      "right": { "source": "telemetry", "where": { "category": "routing", "outcome": "fallback" } },
+      "severity": "warn",
+      "why": "Most routes ended in 'review' — clef offline/timeouts or IdiomRouterV1 threshold too strict"
+    },
+    {
+      "id": "no-route-miss-friction",
+      "source": "friction",
+      "where": { "kind": "route_miss" },
+      "max": 2,
+      "severity": "warn",
+      "why": "Many route misses — agent-patterns do not cover the photo-delete feature vocabulary"
+    },
+    {
+      "id": "plan-check-ok",
+      "source": "telemetry",
+      "where": { "toolName": "plan-check", "outcome": "ok" },
+      "why": "Skeleton never passed plan-check"
+    },
+    {
+      "id": "plan-check-before-verify",
+      "type": "order",
+      "before": { "source": "telemetry", "where": { "toolName": "plan-check", "outcome": "ok" } },
+      "after": { "source": "telemetry", "where": { "toolName": "verify" } },
+      "why": "Implementation verified before the plan skeleton was checked (workflow order skipped)"
+    },
+    {
+      "id": "s2-replanned",
+      "source": "telemetry",
+      "step": ["s2", "s3"],
+      "where": { "toolName": "plan-check" },
+      "severity": "warn",
+      "why": "Requirement change did not trigger a new plan-check — spec/skeleton drift"
+    },
+    {
+      "id": "s2-new-error-in-spec",
+      "source": "transcript",
+      "step": ["s2", "s3"],
+      "where": { "tool~": "replace_file_content|write_to_file|multi_replace|^Edit$|^Write$", "args~": "lock|zamkn|Locked" },
+      "severity": "warn",
+      "why": "No edit mentioning the locked-album rule — change may have been dropped"
+    },
+    {
+      "id": "gc-before-verify",
+      "type": "order",
+      "before": { "source": "telemetry", "where": { "toolName": "gc" } },
+      "after": { "source": "telemetry", "where": { "toolName": "verify", "outcome": "ok" } },
+      "severity": "warn",
+      "why": "gc --strict (zero-entropy gate) skipped before verify"
+    },
+    {
+      "id": "verify-ok",
+      "source": "telemetry",
+      "where": { "toolName": "verify", "outcome": "ok" },
+      "why": "Never reached a green harness verify"
+    },
+    {
+      "id": "verify-after-change",
+      "source": "telemetry",
+      "step": ["s3", "s4"],
+      "where": { "toolName": "verify", "outcome": "ok" },
+      "why": "No green verify after the requirement change — final state is unverified"
+    },
+    {
+      "id": "triage-on-failures",
+      "source": "friction",
+      "where": { "kind": "verify_failure" },
+      "max": 3,
+      "severity": "warn",
+      "why": "More than 3 verify failures — triage hints (TriageV1) are not steering the agent"
+    },
+    {
+      "id": "done-ok",
+      "source": "telemetry",
+      "where": { "toolName": "done", "outcome": "ok" },
+      "why": "harness done never succeeded"
+    },
+    {
+      "id": "no-premature-done",
+      "source": "telemetry",
+      "where": { "toolName": "done", "outcome": "fail" },
+      "max": 0,
+      "severity": "warn",
+      "why": "Agent tried to finish without a valid verify stamp / with plan-impl graph drift"
+    },
+    {
+      "id": "graph-discovery",
+      "source": "telemetry",
+      "where": { "category~": "^(graph_query|ontology)$" },
+      "severity": "warn",
+      "why": "Agent never used ontology/graph MCP tools — MCP-first guidance not followed"
+    },
+    {
+      "id": "lsp-mcp-used",
+      "source": "telemetry",
+      "where": { "toolName": "harness_lsp_diagnostics" },
+      "severity": "warn",
+      "why": "Agent ran shell typecheck instead of harness_lsp_diagnostics"
+    },
+    {
+      "id": "reviewers-dispatched",
+      "source": "transcript",
+      "where": { "args~": "effect-(adversarial|ears-test|reliability|security)-reviewer" },
+      "severity": "warn",
+      "why": "No specialist reviewer subagent dispatched"
+    },
+    {
+      "id": "no-stub-left",
+      "source": "friction",
+      "where": { "summary~": "stub" },
+      "max": 0,
+      "severity": "warn",
+      "why": "stub() remained into verify"
+    },
+    {
+      "id": "guard-covers-every-guarded-call",
+      "type": "compare",
+      "left": { "source": "telemetry", "where": { "surface": "hook", "toolName": "guard" } },
+      "right": {
+        "source": "transcript",
+        "where": { "tool~": "^(run_command|replace_file_content|multi_replace_file_content|write_to_file|Bash|Edit|Write|MultiEdit)$" }
+      },
+      "why": "Some shell/write calls bypassed the guard hook"
+    },
+    {
+      "id": "ingest-after-edits",
+      "source": "telemetry",
+      "where": { "toolName": "ingest" },
+      "why": "PostToolUse ingest hook never ran — graph index stale"
+    }
+  ]
+}

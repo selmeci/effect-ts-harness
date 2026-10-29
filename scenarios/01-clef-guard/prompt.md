@@ -1,0 +1,1 @@
+Potrebujem sa zorientovať v tom, ako harness-cli rozhoduje o shellových príkazoch, ktoré agent spúšťa. Zisti, kde je tá logika, aké súbory sa na tom podieľajú a koľko riadkov majú, a stručne mi to zhrň. Zatiaľ nič nemeň.

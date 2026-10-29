@@ -14,7 +14,8 @@
     "verify:all": "nx run-many -t verify",
     "harness": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts",
     "effect-graph:check": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts plan-check --graph-only",
-    "benchmark": "node --import ./tools/node-ts-resolver.mjs tools/benchmark/run.mjs"
+    "benchmark": "node --import ./tools/node-ts-resolver.mjs tools/benchmark/run.mjs",
+    "scenario": "node tools/scenario/run.mjs"
   },
   "devDependencies": {
     "@effect/tsgo": "0.48.0",

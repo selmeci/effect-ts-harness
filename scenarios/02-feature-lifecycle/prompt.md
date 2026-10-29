@@ -1,0 +1,1 @@
+V sample aplikácii (photos) chýba možnosť zmazať fotku. Pridaj prosím endpoint na zmazanie fotky podľa id. Ak fotka neexistuje, má to vrátiť rozumnú chybu. Postupuj podľa toho, ako sa v tomto repe pracuje.

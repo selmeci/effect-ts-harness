@@ -5,6 +5,8 @@ coverage/
 .vite/
 .alchemy/
 .harness/
+# scenario session results (pnpm scenario end) — prompts/scenarios in scenarios/ stay committed
+.harness/scenario-runs/
 *.tsbuildinfo
 
 .env

@@ -1,0 +1,20 @@
+{
+  "title": "TEMPLATE — copy this folder to scenarios/NN-name/ and edit",
+  "requires": [],
+  "checks": [
+    {
+      "id": "session-hook-fired",
+      "source": "telemetry",
+      "where": { "surface": "hook", "toolName": "session" },
+      "why": "Session hook not wired"
+    },
+    {
+      "id": "example-step-check",
+      "source": "transcript",
+      "step": "s1",
+      "where": { "tool~": "view_file|Skill", "args~": "SOME-SKILL-NAME" },
+      "severity": "warn",
+      "why": "Describe the weak spot this would reveal"
+    }
+  ]
+}
