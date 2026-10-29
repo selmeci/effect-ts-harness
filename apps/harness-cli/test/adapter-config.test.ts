@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process"
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 
@@ -348,11 +348,13 @@ describe("Antigravity adapter & plugin configuration", () => {
     expect(allowStdout.trim()).toBe("")
   })
 
-  it("ships specifying-ears-with-effect, planning-effect-skeletons, and executing-effect-stubs in both adapters", () => {
+  it("ships specifying-ears-with-effect, planning-effect-skeletons, executing-effect-stubs, compounding-effect-learnings, and resolving-effect-review-feedback in both adapters", () => {
     const workflowSkills = [
       "specifying-ears-with-effect",
       "planning-effect-skeletons",
-      "executing-effect-stubs"
+      "executing-effect-stubs",
+      "compounding-effect-learnings",
+      "resolving-effect-review-feedback"
     ]
     for (const skillName of workflowSkills) {
       const agySkill = readFileSync(
@@ -369,6 +371,14 @@ describe("Antigravity adapter & plugin configuration", () => {
         expect(content).toContain("## Rationalization Table")
         expect(content).toContain("## Red Flags")
       }
+    }
+
+    for (const base of [
+      resolve(pluginDir, "skills/resolving-effect-review-feedback"),
+      resolve(repoRoot, "adapters/claude-code/skills/resolving-effect-review-feedback")
+    ]) {
+      expect(existsSync(resolve(base, "references/evaluation-rubric.md"))).toBe(true)
+      expect(existsSync(resolve(base, "references/effect-fixer-prompt.md"))).toBe(true)
     }
   })
 })

@@ -1,6 +1,6 @@
 ---
 name: compounding-effect-learnings
-description: Use after completing a task that encountered route misses, repeated verify failures, or new Effect v4 / Alchemy v2 patterns, or when running harness learn to promote friction into deterministic gates and pattern recipes.
+description: Use when completing a task that encountered route misses, repeated verify failures, or new Effect v4 / Alchemy v2 patterns, or when running harness learn to promote friction into deterministic gates and pattern recipes.
 ---
 
 # Compounding Effect Learnings (Zero-Context-Bloat Loop)
