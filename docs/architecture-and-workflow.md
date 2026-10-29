@@ -254,7 +254,13 @@ Keď je plán uzamknutý v grafe, nastáva implementácia:
    - **Unit B (`type:infra`):** Drizzle repozitáre, Durable Objects transakcie, propagácia W3C `traceparent`.
    - **Unit C (`scope:web`):** Reakcia komponentov cez `AtomHttpApi` query a mutácie (zákaz surového `fetch`).
 2. **Priebežné ochranné brány:**
-   - **`PreToolUse` hook (`harness guard`):** Kontroluje každý príkaz pred spustením. Zabraňuje deštruktívnym príkazom (`rm -rf`), úniku tajomstiev (`.env`) a nepovoleným deployom (`alchemy deploy` vyžaduje ľudské potvrdenie).
+   - **`PreToolUse` hook (`harness guard`):** Kontroluje každý príkaz pred spustením. Pravidlá idú v pevnom poradí (`harness:ADR-0003`):
+     1. **deny:** `rm -rf`, `push --force`, `.env` ako cesta k súboru (nie `process.env`), agentom spustený `harness guard`.
+     2. **ask:** `alchemy deploy/destroy/profile` a git príkazy, ktoré zahadzujú prácu (`checkout -- .`, `restore`, `reset --hard`, `stash drop`, `branch -D`, `clean`).
+     3. **escalate na clef:** `find -delete/-exec`, presmerovanie výstupu `>` do súboru, zamaskované slová (`[e]nv`, `r''m`).
+     4. **allow:** až potom shellové operátory a prefixový allowlist.
+
+     Podrobnosti sú v `harness:SPEC-0001`.
    - **`PostToolUse` hook (`harness ingest`):** Po každej úprave súboru reindexuje `Effect.fn` spany pre okamžitú navigáciu.
    - **`tools/oxlint/syntax-bans.js`:**
      - Zákaz `async` / `await` $\rightarrow$ použite `Effect.gen`.
