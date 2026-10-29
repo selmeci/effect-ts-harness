@@ -381,6 +381,46 @@ describe("Antigravity adapter & plugin configuration", () => {
       expect(existsSync(resolve(base, "references/effect-fixer-prompt.md"))).toBe(true)
     }
   })
+
+  it("documents all 6 workflow skills and all 4 specialist reviewer subagents in README.md and adapter READMEs", () => {
+    const docPaths = [
+      resolve(repoRoot, "README.md"),
+      resolve(pluginDir, "README.md"),
+      resolve(repoRoot, "adapters/claude-code/README.md")
+    ]
+    const workflowSkills = [
+      "effect-harness",
+      "specifying-ears-with-effect",
+      "planning-effect-skeletons",
+      "executing-effect-stubs",
+      "resolving-effect-review-feedback",
+      "compounding-effect-learnings"
+    ]
+    const specialistSubagents = [
+      "effect-ears-test-reviewer",
+      "effect-security-reviewer",
+      "effect-reliability-reviewer",
+      "effect-adversarial-reviewer"
+    ]
+
+    for (const docPath of docPaths) {
+      expect(existsSync(docPath), `Document file must exist: ${docPath}`).toBe(true)
+      const content = readFileSync(docPath, "utf8")
+      for (const skill of workflowSkills) {
+        expect(
+          content,
+          `Expected ${docPath} to document workflow skill ${skill}`
+        ).toContain(skill)
+      }
+      for (const agent of specialistSubagents) {
+        expect(
+          content,
+          `Expected ${docPath} to document specialist reviewer subagent ${agent}`
+        ).toContain(agent)
+      }
+    }
+  })
 })
+
 
 

@@ -92,6 +92,8 @@ flowchart LR
   S4 --> S5["5. Zero-Entropy Gates\nharness gc / ontology / mutate"]
   S5 --> S6["6. harness verify & done\n.harness/verify-stamp.json"]
   S6 --> S7["7. harness report & learn\nSession Grade + Gate Promotion"]
+  S6 -.-> S8["8. Review Resolution\nresolving-effect-review-feedback"]
+  S8 --> S5
 ```
 
 1. **EARS Specification & ADR (`specifying-ears-with-effect`):**
@@ -117,6 +119,13 @@ flowchart LR
 7. **Observability & Compounding Learnings (`harness report` & `harness learn`):**
    - `harness report` evaluates `.harness/telemetry-log.jsonl` via `SessionReport.decide`, computing a session health score (`0–100`, grade `A–D`) and writing `.harness/session-report.md`.
    - `harness learn` clusters `.harness/friction-log.jsonl` via `Friction.decide` + `LearnProposalV1` to promote recurring mistakes into new `oxlint` rules or `agent-patterns/*.md` recipes.
+8. **Post-PR / External Review Feedback Resolution (`resolving-effect-review-feedback`):**
+   External review findings (pasted markdown from Grok, Codex, Claude, or human reviewers, or GitHub PR threads fetched via `gh pr view` / `gh api`) flow through a strict 5-phase loop:
+   - **Phase 1 (Ingest & Normalize):** Parse comments into enumerated findings (`F-1`, `F-2`, ...), filtering out-of-scope items immediately.
+   - **Phase 2 (Graph MCP Adjudication):** The orchestrator alone adjudicates each finding against the harness Order of Authority using `harness_resolve`, `harness_callers`, `harness_ontology_why`, `harness_structural_search` (clustering AST twin anti-patterns into a single `class-fix`), and `harness_tests_reaching`. Produces the Adjudication Ledger table (`fix`, `class-fix`, `doc-sync-fix`, `decline-with-evidence`, `escalate-to-human`).
+   - **Phase 3 (Spec & ADR Sync First):** Before any code edits, synchronize touched `type:contract` Schemas, EARS specs (`libs/<scope>/docs/specs/*.md`), and ADRs (`libs/<scope>/docs/adr/*.md`). Run `harness plan-check` if boundaries shifted.
+   - **Phase 4 (Package-Isolated Fixer Dispatch):** Dispatch parallel `flash` fixer subagents (`Workspace: "share"` or `HARNESS_WORKTREE_ID`) with target files, governing ADRs, test files, and sanctioned recipes from `harness_route` (`IdiomRouterV1`). Fixers verify locally with `harness_lsp_diagnostics` and package tests; they never run monorepo verify or modify stamps.
+   - **Phase 5 (Whole-Workspace Gates & Compounding):** Orchestrator executes `harness gc --strict`, `harness mutate --strict`, `harness verify`, and `harness done`. Conducts the Compounding Gate Audit (`compounding-effect-learnings` / `harness learn`) to turn missed defects into permanent AST rules (`oxlint`) or test invariants.
 
 ---
 
@@ -246,22 +255,123 @@ Exposes 12 structural, ontology, diagnostics, and telemetry MCP tools over stdio
 
 ---
 
-## Agent Adapters (Antigravity & Claude Code)
+## Agent Adapters, Workflow Skills & Usage Guide
 
-Both `adapters/antigravity/plugins/effect-harness` and `adapters/claude-code/plugins/effect-harness` ship with identical capabilities wired to the same `harness` CLI and `harness-mcp` server:
+The harness packages full engineering capabilities into two first-class adapter bundles: `adapters/antigravity/plugins/effect-harness` (Antigravity plugin) and `adapters/claude-code` (Claude Code adapter). Both adapters wire agents to the exact same underlying `harness` CLI, `harness-mcp` server, deterministic gates, and pattern repositories.
 
-### 5 Workflow Skills
-- `effect-harness`: Top-level orchestrator for the 7-step lifecycle, MCP tools, and Effect v4 / Alchemy v2 idioms.
-- `specifying-ears-with-effect`: Guides EARS requirement authoring (`docs/specs/*.md`) and ADR linkage (`docs/adr/*.md`).
-- `planning-effect-skeletons`: Translates EARS clauses into compilable `stub<A, E, R>()` skeletons and runs `harness plan-check`.
-- `executing-effect-stubs`: Replaces `stub<A, E, R>()` with `Effect.fn` implementations, Layers, and `@effect/vitest` tests.
-- `compounding-effect-learnings`: Runs `harness report` and `harness learn` to promote friction clusters into deterministic gates.
+### 1. Overview of Adapter Bundles
 
-### 4 Specialist Review Subagents
-- `effect-ears-test-reviewer`: Audits EARS clause-to-test traceability (`WHEN`/`IF-THEN`/`WHILE`/`WHERE`) and checks for vacuous assertions.
-- `effect-security-reviewer`: Audits trust boundaries, `Schema.decodeUnknownEffect` ingress validation, SQL injection safety, and secret handling (`Redacted`).
-- `effect-reliability-reviewer`: Audits fiber concurrency, `Scope` finalizer safety, `Schedule` backoff bounds, and resource leaks.
-- `effect-adversarial-reviewer`: Attempts to break pure deciders and boundary schemas with boundary values, malformed payloads, and race conditions.
+| Component | Antigravity Plugin (`adapters/antigravity/plugins/effect-harness`) | Claude Code Adapter (`adapters/claude-code`) |
+| :--- | :--- | :--- |
+| **Manifest / Config** | `plugin.json` (`"name": "effect-harness"`) | `.mcp.json` (`harness-mcp`, `omnigraph-mcp`, `nx-mcp`) |
+| **Rules Engine** | `rules/AGENTS.md` (and repo root `AGENTS.md`) | `rules/AGENTS.md` (and repo root `AGENTS.md`) |
+| **Hooks Engine** | `hooks.json` (`PreInvocation`, `PreToolUse`, `PostToolUse`, `Stop`) | `hooks.json` (`SessionStart`, `PreToolUse`, `PostToolUse`, `Stop`) |
+| **MCP Servers** | `mcp_config.json` (`harness-mcp`, `omnigraph-mcp`, `nx-mcp`) | `.mcp.json` (`harness-mcp`, `omnigraph-mcp`, `nx-mcp`) |
+| **Workflow Skills** | 6 skills in `skills/` | 6 skills in `skills/` |
+| **Specialist Agents** | 4 read-only reviewer subagents in `agents/` | 4 read-only reviewer subagents in `agents/` |
+
+#### Lifecycle Hook Discipline
+- **Session Resume (`PreInvocation` / `SessionStart`):** Executes `harness session` to evaluate uncommitted working tree state, branch position, `.harness/verify-stamp.json` freshness, and environment health.
+- **Write-Surface Guard (`PreToolUse`):** Evaluates shell commands and file edits. Blocks direct modification of `repos/effect` and `repos/alchemy`. Blocks stamp forgery (`.harness/verify-stamp.json`). Intercepts `alchemy deploy` and `alchemy destroy` to require interactive human confirmation.
+- **Incremental Ingest (`PostToolUse`):** Runs `harness ingest` after file write/edit operations to update `.harness/index.sqlite` and the resident Omnigraph symbol graph.
+- **Completion Check (`Stop`):** Runs `harness done` before concluding a task, verifying that `.harness/verify-stamp.json` exists and matches `HEAD` commit and working tree hash.
+
+---
+
+### 2. 6 Workflow Skills — Reference & Usage Matrix
+
+| Skill | Lifecycle Stage & When to Use | Example Prompt / Trigger | MCP Tools & CLI Gates Used | Required Output / Exit Gate |
+| :--- | :--- | :--- | :--- | :--- |
+| `effect-harness` | Full lifecycle orchestration. Use when starting a new feature or orchestrating tasks across contracts, domain logic, and infra. | `"Implement user authentication with D1 sessions and durable rate limits following the harness lifecycle."` | `harness_route`<br>`harness_lsp_diagnostics`<br>`harness gc --strict`<br>`harness verify`<br>`harness done` | Verified implementation on `impl/<task>` branch with valid `.harness/verify-stamp.json` passing `harness done`. |
+| `specifying-ears-with-effect` | Step 1 (EARS Specification & ADR). Use before writing code or skeletons when requirements are informal or missing EARS clauses. | `"Specify requirements and architecture for D1 session store with exponential backoff retries."` | `harness_ontology_check`<br>`harness_ontology_impact`<br>`EarsSpecLint.decide`<br>`AdrDocLint.decide` | Validated spec `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` and ADR `libs/<scope>/docs/adr/NNNN-<slug>.md` passing linter deciders. |
+| `planning-effect-skeletons` | Steps 2–3 (Plan-as-Code Skeleton & Plan Gate). Use after specification approval to construct typed skeletons with `stub<A, E, R>()`. | `"Create typed skeletons and plan-as-code for the session store use cases and repository ports."` | `harness_route`<br>`harness_lsp_diagnostics`<br>`harness plan-check`<br>`PlanStepCoverageV1` | Typechecked skeleton with JSDoc `@harness-Requirement` tags, clean `harness_lsp_diagnostics`, and checkpointed `plan/<task>` branch. |
+| `executing-effect-stubs` | Steps 4–6 (Implementation & Verification). Use after `harness plan-check` passes to replace stubs with `Effect.fn` bodies, Layers, and tests. | `"Execute stubs for session repository in libs/sample/infra and domain deciders in libs/sample/domain."` | `harness_route`<br>`harness_tests_reaching`<br>`harness_structural_search`<br>`harness_lsp_diagnostics`<br>`harness gc --strict`<br>`harness mutate`<br>`harness verify` | Zero stubs remaining, 100% passing Vitest tests, mutation score `>= 0.85`, zero orphan symbols (`gc --strict`), and verified stamp. |
+| `resolving-effect-review-feedback` | Step 8 (Post-PR / External Review Resolution). Use when receiving review feedback (from Grok, Codex, Claude, human, or GitHub PR thread). | `"Resolve the code review feedback from PR #42"` or `"Resolve this review paste: [markdown]"` | `harness_resolve`<br>`harness_callers`<br>`harness_ontology_why`<br>`harness_structural_search`<br>`harness_tests_reaching`<br>`harness_route`<br>`harness gc --strict`<br>`harness mutate --strict`<br>`harness verify` | Completed Adjudication Ledger, synchronized specs/ADRs, class-fixes resolved via `flash` subagents, and verified stamp with clean gates. |
+| `compounding-effect-learnings` | Step 7 & Post-Review Compounding. Use when completing a task with friction, route misses, or gate escapes, or when running `harness learn`. | `"Run harness learn and promote recent friction clusters into AST rules and pattern recipes."` | `harness_telemetry_report`<br>`harness report`<br>`harness learn`<br>`Friction.decide`<br>`LearnProposalV1`<br>`SessionReport.decide` | `.harness/session-report.md` with session letter grade, and promoted artifacts across the 5 learning targets. |
+
+---
+
+### 3. Practical Skill Usage Recipes
+
+#### Recipe A: Starting a New Feature (`specifying-ears-with-effect` $\rightarrow$ `planning-effect-skeletons`)
+1. **Ingest Requirements:** Ingest raw requirements from user prompt or issue.
+2. **Author EARS Specification:** Create `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` with frontmatter (`id`, `title`, `spans`, `services`, `errors`) and EARS requirements (`WHEN`, `IF/THEN`, `WHILE`, `WHERE`).
+3. **Author ADR:** Create `libs/<scope>/docs/adr/NNNN-<slug>.md` with frontmatter (`realizes`, `influences`, `status: accepted`).
+4. **Map EARS Clauses to Effect Types:**
+   - `WHEN <trigger>` $\rightarrow$ boundary `Schema.Class` input and success type `A`.
+   - `IF <condition> THEN <outcome>` $\rightarrow$ `Schema.TaggedErrorClass` in error channel `E`.
+   - `WHILE <state>` $\rightarrow$ pure `decide(state, input)` function (`R = never`) + stateful `Context.Service` in `R`.
+   - `WHERE <feature>` $\rightarrow$ `Layer` / `Config` dependency in `R`.
+5. **Write Typed Skeletons:** Write signatures in `type:domain` and `type:service` returning `stub<A, E, R>(...args)` from `@harness/gates` with `@harness-Requirement: REQ-...` annotations.
+6. **Execute Plan Gate:** Run `harness plan-check` (`HARNESS_PLAN_CHECK=1`) to lock boundaries and checkpoint `plan/<task>`.
+
+#### Recipe B: Implementing with Package-Isolated `flash` Subagents (`executing-effect-stubs`)
+1. **Route Patterns:** Orchestrator queries `harness_route` (`IdiomRouterV1` via `clef-flash`) for the sanctioned patterns matching each package archetype.
+2. **Partition Package Subagents:** The orchestrator dispatches parallel subagents (`TypeName: "self"`, `Model: "flash"`, `Workspace: "share"` or `HARNESS_WORKTREE_ID=<id>`):
+   - **Subagent 1 (`libs/<scope>/domain`):** Replaces pure stubs with `Effect.fn` use-cases and `.decide` deciders.
+   - **Subagent 2 (`libs/<scope>/infra`):** Implements live Drizzle D1 / DO SQLite repositories and Alchemy resource bindings.
+   - **Subagent 3 (`apps/web` or UI):** Implements `@effect/atom-react` state and client contracts.
+3. **Subagent Execution Discipline:** Subagents run `harness_lsp_diagnostics` and package unit tests (`pnpm nx run <project>:test`). Subagents **never** run monorepo `verify` or mutate `.harness/verify-stamp.json`.
+4. **Specialist Review Lenses:** Orchestrator runs read-only specialist subagents (`effect-ears-test-reviewer`, `effect-security-reviewer`, `effect-reliability-reviewer`, `effect-adversarial-reviewer`) against the implementation.
+5. **Close Monorepo Gates:** Orchestrator runs `harness gc --strict`, `harness mutate --strict`, `CI=true harness verify`, and `harness done`.
+
+#### Recipe C: Resolving Code Review Feedback (`resolving-effect-review-feedback`)
+1. **Ingest & Normalize:** Ingest pasted markdown or GitHub PR threads (`gh pr view <pr> --comments`, `gh api .../pulls/<pr>/comments`). Normalize into `F-1`, `F-2`, ... and separate out-of-scope items.
+2. **Central Adjudication Ledger:** The orchestrator evaluates each item against the harness Order of Authority:
+   - Call `harness_resolve` and `harness_callers` to inspect types, caller trees, and error channels.
+   - Call `harness_ontology_why` to verify governing ADR invariants.
+   - Call `harness_structural_search` (`@ast-grep/napi`) to uncover twin anti-patterns across the workspace and cluster into a `class-fix`.
+   - Call `harness_tests_reaching` to inspect test coverage and identify assertion gaps.
+   - Output the Adjudication Ledger (`fix`, `class-fix`, `doc-sync-fix`, `decline-with-evidence`, `escalate-to-human`).
+3. **Spec & ADR Sync First:** Update `libs/<scope>/docs/specs/*.md` and `libs/<scope>/docs/adr/*.md` before editing implementation code. Run `harness plan-check` if public interfaces changed.
+4. **Dispatch Package-Isolated Fixers:** Launch `flash` subagents with exact pattern routes from `harness_route` and reaching test files. Subagents execute fixes and verify locally.
+5. **Run Gates & Compounding Audit:** Orchestrator executes root gates (`harness gc --strict`, `harness mutate --strict`, `harness verify`, `harness done`), then executes the Compounding Gate Audit to identify why gates missed the defect.
+
+#### Recipe D: Compounding Friction into Deterministic Gates (`compounding-effect-learnings`)
+1. **Cluster Friction Logs:** `harness learn` runs `Friction.decide` over `.harness/friction-log.jsonl`, clustering events with `>= 2` occurrences by root-cause signature.
+2. **Generate Proposals:** `LearnProposalV1` evaluates clusters and proposes target artifacts across the 5 graduation destinations:
+   - `agent-pattern`: Adds new or updated recipes in `agent-patterns/*.md`.
+   - `triage-rule`: Adds diagnostic error patterns to `libs/harness/decision/src/triage.ts`.
+   - `guard-allowlist`: Updates shell or file patterns in `libs/harness/gates/src/guard.ts`.
+   - `ast-graph-gate`: Adds AST syntax bans in `tools/oxlint/syntax-bans.js` or ArchiMate invariants in `libs/harness/gates/src/ontology-invariants.ts`.
+   - `adr`: Documents architectural tradeoffs in `libs/<scope>/docs/adr/NNNN-<slug>.md`.
+3. **Apply & Verify:** Commit the generated gate rules, ensuring recurring mistakes are blocked at compile or lint time.
+
+---
+
+### 4. 4 Read-Only Specialist Review Subagents
+
+| Subagent | Activation Signal | Primary Audit Focus | Supporting References |
+| :--- | :--- | :--- | :--- |
+| `effect-ears-test-reviewer` | Step 4 test authoring, PR review, or when test fidelity is questioned. | Audits 1:1 coverage between EARS clauses (`WHEN`, `IF/THEN`, `WHILE`, `WHERE`) and `@effect/vitest` assertions; flags vacuous `.thenFails()` without expected error instances; checks mock boundary leakage. | `docs/specs/*.md`<br>`agent-patterns/testing.md` |
+| `effect-security-reviewer` | Contract changes, authentication/authorization updates, SQL queries, or secrets. | Audits boundary decoding (`Schema.decodeUnknownEffect`); checks IDOR authorization checks in `type:domain`; detects raw SQL string interpolation; verifies `Redacted` usage for sensitive configuration. | `agent-patterns/schema.md`<br>`agent-patterns/d1-repository.md`<br>`agent-patterns/httpapi.md` |
+| `effect-reliability-reviewer` | Concurrency, background fibers, Durable Object transactions, retry schedules, or scopes. | Audits DO SQLite synchronous transaction discipline (`MixedScheduler("sync")`, pre-transaction decoding, commit-order mutation); checks `Scope` finalizers; detects unbounded `Schedule` retries and fiber leaks. | `agent-patterns/durable-object-state.md`<br>`agent-patterns/concurrency.md`<br>`agent-patterns/schedule.md` |
+| `effect-adversarial-reviewer` | Complex state machines, distributed transactions, deciders, or multi-step operations. | Constructs partial-failure crash-between-steps sequences; constructs concurrent race conditions; analyzes out-of-order event replay; tests boundary value mutations against pure deciders. | `agent-patterns/event-sourcing.md`<br>`agent-patterns/pattern-matching.md`<br>`agent-patterns/errors.md` |
+
+---
+
+### 5. 16 Indexed Pattern Recipes (`agent-patterns/*.md`)
+
+All 16 pattern files are indexed as `PatternDoc` nodes in Omnigraph and routed via `harness route` / `harness_route` (`IdiomRouterV1`):
+
+| Pattern Recipe | File | Key Effect v4 / Alchemy v2 Constructs | Gate / AST Ban Enforced |
+| :--- | :--- | :--- | :--- |
+| **Planning** | `agent-patterns/planning.md` | `stub<A, E, R>()`, 16-row building block mapping, JSDoc `@harness-Requirement` | `effect-harness/no-stub-outside-plan-check` |
+| **Services & Layers** | `agent-patterns/services-and-layers.md` | `Context.Service`, `Layer.effect`, `Layer.succeed`, `Layer.scoped`, `Layer.provideMerge` | `effect-harness/no-layer-in-domain` |
+| **Errors** | `agent-patterns/errors.md` | `Schema.TaggedErrorClass`, `Data.TaggedError`, `Effect.catchTag`, `Effect.fail` | `effect-harness/no-throw-in-effect`, `no-try-catch-in-gen` |
+| **Schema** | `agent-patterns/schema.md` | `Schema.Struct`, `Schema.Class`, `Schema.Int`, `Schema.decodeUnknownEffect` | `effect-harness/no-raw-json-parse` |
+| **Resources & Scope** | `agent-patterns/resources-scope.md` | `Scope`, `Effect.acquireRelease`, `Effect.addFinalizer`, `Layer.scoped` | `effect-harness/no-unscoped-resource` |
+| **Concurrency** | `agent-patterns/concurrency.md` | `Effect.all({ concurrency })`, `Fiber`, `Queue`, `Deferred`, `Semaphore` | `effect-harness/no-async-await` |
+| **Schedule** | `agent-patterns/schedule.md` | `Schedule.exponential`, `Schedule.jittered`, `Schedule.recurs`, `Effect.retry` | `effect-harness/no-unbounded-retry` |
+| **Testing** | `agent-patterns/testing.md` | `@effect/vitest` (`it.effect`, `it.scoped`), `TestClock`, `Layer.mock` | `effect-harness/no-vacuous-assertion` |
+| **Alchemy Infra** | `agent-patterns/alchemy-infra.md` | `alchemy`, `Worker`, `R2Bucket`, `D1Database`, `DurableObjectNamespace` | `effect-harness/no-alchemy-outside-infra` |
+| **D1 Repository** | `agent-patterns/d1-repository.md` | `drizzle-orm/effect-d1`, `@effect/sql-d1`, `sqliteTable`, row schema decoders | `effect-harness/no-drizzle-outside-infra` |
+| **DO State** | `agent-patterns/durable-object-state.md` | `drizzle-orm/effect-sqlite-do`, `Scheduler.MixedScheduler("sync")`, `db.withTransaction` | `effect-harness/no-async-in-do-transaction` |
+| **Event Sourcing** | `agent-patterns/event-sourcing.md` | `Decider.make`, pure synchronous `evolve<Aggregate>`, effectful `.decide` | `effect-harness/no-run-sync-outside-app` |
+| **HTTP API** | `agent-patterns/httpapi.md` | `HttpApi`, `HttpApiGroup`, `HttpApiEndpoint`, OpenAPI generation, `oasdiff breaking` | `effect-harness/no-untyped-http-response` |
+| **RPC** | `agent-patterns/rpc.md` | `RpcGroup`, `Cloudflare.toHttpClient`, W3C `traceparent` propagation | `effect-harness/no-untyped-rpc-payload` |
+| **Atom State** | `agent-patterns/atom.md` | `@effect/atom-react`, `AtomHttpApi`, client state without manual `fetch` | `effect-harness/no-manual-fetch-in-ui` |
+| **Pattern Matching** | `agent-patterns/pattern-matching.md` | `ts-pattern` (`match(value)...exhaustive()`), closed discriminated unions | `effect-harness/no-switch-on-tag`, `no-union-if-else` |
 
 ---
 
