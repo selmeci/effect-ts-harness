@@ -27,6 +27,51 @@ export interface GcFinding {
   readonly kind: GcFindingKind
   readonly nodeId: string
   readonly message: string
+  readonly location?: string | undefined
+  readonly action?: string | undefined
+}
+
+export const levenshteinDistance = (a: string, b: string): number => {
+  const m = a.length
+  const n = b.length
+  const dp: Array<Array<number>> = Array.from({ length: m + 1 }, () =>
+    Array.from({ length: n + 1 }, () => 0)
+  )
+  for (let i = 0; i <= m; i++) dp[i]![0] = i
+  for (let j = 0; j <= n; j++) dp[0]![j] = j
+
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (a[i - 1]?.toLowerCase() === b[j - 1]?.toLowerCase()) {
+        dp[i]![j] = dp[i - 1]![j - 1]!
+      } else {
+        dp[i]![j] =
+          1 + Math.min(dp[i - 1]![j]!, dp[i]![j - 1]!, dp[i - 1]![j - 1]!)
+      }
+    }
+  }
+  return dp[m]![n]!
+}
+
+export const findClosestMatch = (
+  target: string,
+  candidates: Iterable<string>,
+  maxDistanceThreshold?: number
+): string | undefined => {
+  const threshold =
+    maxDistanceThreshold ?? Math.max(3, Math.floor(target.length * 0.35))
+  let closest: string | undefined
+  let minDistance = Number.POSITIVE_INFINITY
+
+  for (const candidate of candidates) {
+    if (candidate === target) continue
+    const dist = levenshteinDistance(target, candidate)
+    if (dist < minDistance && dist <= threshold) {
+      minDistance = dist
+      closest = candidate
+    }
+  }
+  return closest
 }
 
 export interface GcReport {
@@ -165,10 +210,17 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
       const totalConsumers =
         (incomingRequires.get(idx) ?? 0) + (incomingLayerRequires.get(idx) ?? 0)
       if (totalConsumers === 0) {
+        const location = node.file
+          ? typeof (node as any).line === "number"
+            ? `${node.file}:${(node as any).line}`
+            : node.file
+          : undefined
         findings.push({
           kind: "unused-service",
           nodeId: node.tagId,
-          message: `ServiceTag "${node.tagId}" has no consumers (0 RequiresService / LayerRequires edges).`
+          location,
+          message: `ServiceTag "${node.tagId}" has no consumers (0 RequiresService / LayerRequires edges).`,
+          action: `Either inject ServiceTag "${node.tagId}" into an Effect generator (yield* ${node.name}) or remove the unused declaration.`
         })
       }
     }
@@ -182,10 +234,17 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
       }
       const providers = incomingProvides.get(idx) ?? 0
       if (providers === 0) {
+        const location = node.file
+          ? typeof (node as any).line === "number"
+            ? `${node.file}:${(node as any).line}`
+            : node.file
+          : undefined
         findings.push({
           kind: "unprovided-service",
           nodeId: node.tagId,
-          message: `ServiceTag "${node.tagId}" has no providing ServiceLayer (0 ProvidesService edges).`
+          location,
+          message: `ServiceTag "${node.tagId}" has no providing ServiceLayer (0 ProvidesService edges).`,
+          action: `Provide a live layer implementing "${node.tagId}" (e.g. Layer.succeed / Layer.effect) in type:infra.`
         })
       }
     }
@@ -199,10 +258,17 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
       }
       const failsWithCount = incomingFailsWith.get(idx) ?? 0
       if (failsWithCount === 0) {
+        const location = node.file
+          ? typeof (node as any).line === "number"
+            ? `${node.file}:${(node as any).line}`
+            : node.file
+          : undefined
         findings.push({
           kind: "dead-tagged-error",
           nodeId: node.errorTag,
-          message: `TaggedError "${node.errorTag}" is never emitted in any E channel (0 FailsWith edges).`
+          location,
+          message: `TaggedError "${node.errorTag}" is never emitted in any E channel (0 FailsWith edges).`,
+          action: `Fail with this error using Effect.fail(new ${node.errorTag}(...)) in a domain use case or prune unused error definition.`
         })
       }
     }
@@ -234,7 +300,9 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
         findings.push({
           kind: "missing-pattern-doc",
           nodeId: `Pattern:${p}`,
-          message: `Pattern doc "agent-patterns/${p}.md" registered in IdiomRouterV1 is missing from the graph.`
+          location: `agent-patterns/${p}.md`,
+          message: `Pattern doc "agent-patterns/${p}.md" registered in IdiomRouterV1 is missing from the graph.`,
+          action: `Create "agent-patterns/${p}.md" documenting this idiom or remove "${p}" from IDIOM_BLOCKS in IdiomRouter.`
         })
       }
     }
@@ -253,7 +321,9 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
           findings.push({
             kind: "untested-effect-fn",
             nodeId: node.spanName,
-            message: `Domain EffectFn "${node.spanName}" (${node.qualname}) has 0 reaching tests (0 ExercisesSpan / TracedCall edges).`
+            location: `${node.file}:${node.line}`,
+            message: `Domain EffectFn "${node.spanName}" (${node.qualname}) has 0 reaching tests (0 ExercisesSpan / TracedCall edges).`,
+            action: `Add a unit/integration test importing and calling "${node.spanName}" to verify domain behavior.`
           })
         }
       }
@@ -314,7 +384,9 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
             findings.push({
               kind: "stale-doc-reference",
               nodeId: `${doc.id}:${file}`,
-              message: `Governance doc "${doc.docPath}" (${doc.id}) references non-existent enforced_by file "${file}".`
+              location: doc.docPath,
+              message: `Governance doc "${doc.docPath}" (${doc.id}) references non-existent enforced_by file "${file}".`,
+              action: `Create file "${file}" or update enforced_by in "${doc.docPath}".`
             })
           }
         }
@@ -322,30 +394,48 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
 
       for (const span of doc.referencedSpans ?? []) {
         if (!knownSpans.has(span)) {
+          const closest = findClosestMatch(span, knownSpans)
+          const hint = closest ? ` Did you mean "${closest}"?` : ""
           findings.push({
             kind: "stale-doc-reference",
             nodeId: `${doc.id}:${span}`,
-            message: `Governance doc "${doc.docPath}" (${doc.id}) references non-existent EffectFn span "${span}".`
+            location: doc.docPath,
+            message: `Governance doc "${doc.docPath}" (${doc.id}) references non-existent EffectFn span "${span}".${hint}`,
+            action: closest
+              ? `Update reference in "${doc.docPath}" to "${closest}" or declare Effect.fn("${span}").`
+              : `Declare Effect.fn("${span}") in domain/service code or update doc frontmatter.`
           })
         }
       }
 
       for (const svc of doc.referencedServices ?? []) {
         if (!knownServices.has(svc)) {
+          const closest = findClosestMatch(svc, knownServices)
+          const hint = closest ? ` Did you mean "${closest}"?` : ""
           findings.push({
             kind: "stale-doc-reference",
             nodeId: `${doc.id}:${svc}`,
-            message: `Governance doc "${doc.docPath}" (${doc.id}) references non-existent ServiceTag "${svc}".`
+            location: doc.docPath,
+            message: `Governance doc "${doc.docPath}" (${doc.id}) references non-existent ServiceTag "${svc}".${hint}`,
+            action: closest
+              ? `Update reference in "${doc.docPath}" to "${closest}" or declare ServiceTag "${svc}".`
+              : `Declare ServiceTag "${svc}" in domain/service code or update doc frontmatter.`
           })
         }
       }
 
       for (const err of doc.referencedErrors ?? []) {
         if (!knownErrors.has(err)) {
+          const closest = findClosestMatch(err, knownErrors)
+          const hint = closest ? ` Did you mean "${closest}"?` : ""
           findings.push({
             kind: "stale-doc-reference",
             nodeId: `${doc.id}:${err}`,
-            message: `Governance doc "${doc.docPath}" (${doc.id}) references non-existent TaggedError "${err}".`
+            location: doc.docPath,
+            message: `Governance doc "${doc.docPath}" (${doc.id}) references non-existent TaggedError "${err}".${hint}`,
+            action: closest
+              ? `Update reference in "${doc.docPath}" to "${closest}" or declare TaggedError "${err}".`
+              : `Declare TaggedError "${err}" in contract/domain code or update doc frontmatter.`
           })
         }
       }
@@ -373,10 +463,16 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
             if (!ignoredMermaidErrors.has(errName) && !seenDocMermaidErrors.has(errName)) {
               seenDocMermaidErrors.add(errName)
               if (!knownErrors.has(errName)) {
+                const closest = findClosestMatch(errName, knownErrors)
+                const hint = closest ? ` Did you mean "${closest}"?` : ""
                 findings.push({
                   kind: "stale-doc-reference",
                   nodeId: `${doc.id}:${errName}`,
-                  message: `Governance doc "${doc.docPath}" (${doc.id}) references non-existent TaggedError "${errName}" in a Mermaid diagram.`
+                  location: doc.docPath,
+                  message: `Governance doc "${doc.docPath}" (${doc.id}) references non-existent TaggedError "${errName}" in a Mermaid diagram.${hint}`,
+                  action: closest
+                    ? `Update Mermaid diagram in "${doc.docPath}" to reference "${closest}" or declare TaggedError "${errName}".`
+                    : `Declare TaggedError "${errName}" in contract/domain code or remove from Mermaid diagram.`
                 })
               }
             }
@@ -400,13 +496,17 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
           findings.push({
             kind: "missing-decider-property-test",
             nodeId: node.spanName,
-            message: `Pure domain decider "${node.spanName}" (${node.qualname}) has 0 Property-Based Tests (use it.effect.prop / it.prop with Schema arbitraries to prevent example-only blind spots).`
+            location: `${node.file}:${node.line}`,
+            message: `Pure domain decider "${node.spanName}" (${node.qualname}) has 0 Property-Based Tests (use it.effect.prop / it.prop with Schema arbitraries to prevent example-only blind spots).`,
+            action: `Create a property-based test with it.effect.prop / it.prop using fast-check / Schema arbitraries exercising "${node.spanName}".`
           })
         } else if ((incomingRichPropertyTests.get(idx) ?? 0) === 0) {
           findings.push({
             kind: "shallow-decider-property-test",
             nodeId: node.spanName,
-            message: `Pure domain decider "${node.spanName}" (${node.qualname}) is only exercised by scalar/primitive property tests — generate domain Event or Command schemas (e.g. Schema.Array(EventSchema)) in it.prop / it.effect.prop.`
+            location: `${node.file}:${node.line}`,
+            message: `Pure domain decider "${node.spanName}" (${node.qualname}) is only exercised by scalar/primitive property tests — generate domain Event or Command schemas (e.g. Schema.Array(EventSchema)) in it.prop / it.effect.prop.`,
+            action: `Replace scalar arguments in it.prop / it.effect.prop with composite domain generators (e.g. Schema.Array(EventSchema)).`
           })
         }
       }
@@ -421,7 +521,9 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
         findings.push({
           kind: "ears-spec-lint",
           nodeId: doc.id,
-          message: `EARS spec "${doc.id}" (${doc.docPath}:${f.line}) [${f.kind}]: ${f.message}`
+          location: `${doc.docPath}:${f.line}`,
+          message: `EARS spec "${doc.id}" (${doc.docPath}:${f.line}) [${f.kind}]: ${f.message}`,
+          action: `Fix EARS clause syntax at ${doc.docPath}:${f.line} to conform to specifying-ears-with-effect requirements.`
         })
       }
     }
@@ -438,7 +540,9 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
         findings.push({
           kind: "adr-doc-lint",
           nodeId: doc.id,
-          message: `ADR doc "${doc.id}" (${doc.docPath}:${f.line}) [${f.kind}]: ${f.message}`
+          location: `${doc.docPath}:${f.line}`,
+          message: `ADR doc "${doc.id}" (${doc.docPath}:${f.line}) [${f.kind}]: ${f.message}`,
+          action: `Update ${doc.docPath}:${f.line} to satisfy MADR 6-section structure and enforcement table rules.`
         })
       }
     }
@@ -453,7 +557,9 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
     findings.push({
       kind: "ontology-invariant",
       nodeId: f.nodeId,
-      message: `[${f.kind}] ${f.message}`
+      location: f.nodeId,
+      message: `[${f.kind}] ${f.message}`,
+      action: `Align ArchiMate layer invariants or governance doc references for ${f.nodeId}.`
     })
   }
 
@@ -842,7 +948,9 @@ export const scanWorkspacePackageHygiene = (
           findings.push({
             kind: "empty-source-module",
             nodeId: relFilePath,
-            message: `Source module "${relFilePath}" contains only an empty export ('export {}') — remove dead placeholder modules or export concrete contracts.`
+            location: relFilePath,
+            message: `Source module "${relFilePath}" contains only an empty export ('export {}') — remove dead placeholder modules or export concrete contracts.`,
+            action: `Remove "${relFilePath}" or export concrete types/functions.`
           })
         }
       }
@@ -889,10 +997,13 @@ export const scanWorkspacePackageHygiene = (
               combinedContent.includes(`"${depName}/`) ||
               combinedContent.includes(`'${depName}/`)
             if (!isReferenced) {
+              const relPkgPath = relative(repoRoot, pkgJsonPath).replace(/\\/g, "/")
               findings.push({
                 kind: "unused-package-dependency",
                 nodeId: `${pkgName}:${depName}`,
-                message: `Package "${pkgName}" declares dependency "${depName}" in package.json, but no file in src/ imports it.`
+                location: relPkgPath,
+                message: `Package "${pkgName}" declares dependency "${depName}" in package.json, but no file in src/ imports it.`,
+                action: `Remove "${depName}" from dependencies in ${relPkgPath} or import it in src/.`
               })
             }
           }

@@ -20,6 +20,7 @@ export interface ServiceTagNode {
   readonly name: string
   readonly packageTag: PackageTag
   readonly file: string
+  readonly line?: number | undefined
 }
 
 export interface ServiceLayerNode {
@@ -28,12 +29,14 @@ export interface ServiceLayerNode {
   readonly layerKind: LayerKind
   readonly packageTag: PackageTag
   readonly file: string
+  readonly line?: number | undefined
 }
 
 export interface TaggedErrorNode {
   readonly _tag: "TaggedError"
   readonly errorTag: string
   readonly file: string
+  readonly line?: number | undefined
 }
 
 export interface VitestCaseNode {

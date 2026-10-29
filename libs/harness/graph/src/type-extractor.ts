@@ -315,7 +315,8 @@ export const extractTypeAwareGraphFromSource = (
           tagId,
           name: clsName,
           packageTag: filePkgTag,
-          file: relPath
+          file: relPath,
+          line: cls.getStartLineNumber()
         })
 
         // Record methods and errors from Shape literal if present
@@ -372,7 +373,8 @@ export const extractTypeAwareGraphFromSource = (
         errors.push({
           _tag: "TaggedError",
           errorTag,
-          file: relPath
+          file: relPath,
+          line: cls.getStartLineNumber()
         })
       }
 
@@ -461,7 +463,8 @@ export const extractTypeAwareGraphFromSource = (
           qualname,
           layerKind,
           packageTag: filePkgTag,
-          file: relPath
+          file: relPath,
+          line: varDecl.getStartLineNumber()
         })
 
         const rOutMembers = new Set<string>()
