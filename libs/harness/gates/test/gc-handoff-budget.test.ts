@@ -1,7 +1,7 @@
 import { describe, expect, it } from "@effect/vitest"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { basename, dirname, join } from "node:path"
 import { Effect, Schema } from "effect"
 import { buildHarnessGraph, loadGraphSnapshot } from "@harness/graph"
 import {
@@ -18,6 +18,7 @@ import {
   decideMutationReport,
   decideSessionHandoff,
   decideSpanBudgets,
+  deriveRepoOmnigraphPort,
   diffPlanAndImplGraphs,
   discoverDomainMutants,
   evaluateMutationOutcomes,
@@ -25,7 +26,10 @@ import {
   lintEarsSpecMarkdown,
   loadGovernanceDocsFromDisk,
   parseGovernanceDocFrontmatter,
+  resolveCanonicalRepoRoot,
   resolveHarnessStateDir,
+  resolveOmnigraphClusterDir,
+  resolveOmnigraphTaskBranches,
   scanGraphEntropy,
   scanWorkspacePackageHygiene,
   type CodeMutant,
@@ -1169,6 +1173,120 @@ status: accepted
       expect(
         resolveHarnessStateDir("/repo", { HARNESS_STATE_DIR: "/tmp/custom-state" })
       ).toBe("/tmp/custom-state")
+    })
+
+    it("resolveCanonicalRepoRoot resolves regular directory vs linked worktree directory", () => {
+      const regularDir = mkdtempSync(join(tmpdir(), "harness-reg-repo-"))
+      const wtDir = mkdtempSync(join(tmpdir(), "harness-wt-repo-"))
+      try {
+        expect(resolveCanonicalRepoRoot(regularDir)).toBe(regularDir)
+
+        writeFileSync(join(wtDir, ".git"), "gitdir: /path/to/main/.git/worktrees/wt-1\n")
+        expect(resolveCanonicalRepoRoot(wtDir)).toBe("/path/to/main")
+      } finally {
+        rmSync(regularDir, { recursive: true, force: true })
+        rmSync(wtDir, { recursive: true, force: true })
+      }
+    })
+
+    it("resolveOmnigraphClusterDir always resolves to canonicalRepoRoot/.harness/omnigraph-cluster", () => {
+      const mainRepo = mkdtempSync(join(tmpdir(), "harness-main-repo-"))
+      const wtDir = mkdtempSync(join(tmpdir(), "harness-linked-wt-"))
+      try {
+        writeFileSync(join(wtDir, ".git"), `gitdir: ${join(mainRepo, ".git", "worktrees", "wt-1")}\n`)
+
+        // Without HARNESS_WORKTREE_ID
+        expect(resolveOmnigraphClusterDir(mainRepo, {})).toBe(
+          join(mainRepo, ".harness", "omnigraph-cluster")
+        )
+
+        // With HARNESS_WORKTREE_ID set, still points to canonical repo root cluster
+        expect(
+          resolveOmnigraphClusterDir(mainRepo, { HARNESS_WORKTREE_ID: "wt-feature" })
+        ).toBe(join(mainRepo, ".harness", "omnigraph-cluster"))
+
+        // Inside linked git worktree, points to canonical repo root cluster
+        expect(resolveOmnigraphClusterDir(wtDir, {})).toBe(
+          join(mainRepo, ".harness", "omnigraph-cluster")
+        )
+
+        // With explicit HARNESS_STATE_DIR
+        expect(
+          resolveOmnigraphClusterDir(mainRepo, { HARNESS_STATE_DIR: ".custom-state" })
+        ).toBe(join(mainRepo, ".custom-state", "omnigraph-cluster"))
+      } finally {
+        rmSync(mainRepo, { recursive: true, force: true })
+        rmSync(wtDir, { recursive: true, force: true })
+      }
+    })
+
+    it("deriveRepoOmnigraphPort produces deterministic port in range and isolates repositories", () => {
+      const mainRepo = mkdtempSync(join(tmpdir(), "harness-main-port-"))
+      const wtDir = mkdtempSync(join(tmpdir(), "harness-wt-port-"))
+      try {
+        writeFileSync(join(wtDir, ".git"), `gitdir: ${join(mainRepo, ".git", "worktrees", "wt-1")}\n`)
+
+        const mainPort = deriveRepoOmnigraphPort(mainRepo)
+        const wtPort = deriveRepoOmnigraphPort(wtDir)
+
+        expect(wtPort).toBe(mainPort)
+        expect(mainPort).toBeGreaterThanOrEqual(18080)
+        expect(mainPort).toBeLessThanOrEqual(28079)
+
+        const portAlpha = deriveRepoOmnigraphPort("/tmp/repo-alpha")
+        const portBeta = deriveRepoOmnigraphPort("/tmp/repo-beta")
+        expect(portAlpha).toBeGreaterThanOrEqual(18080)
+        expect(portAlpha).toBeLessThanOrEqual(28079)
+        expect(portBeta).toBeGreaterThanOrEqual(18080)
+        expect(portBeta).toBeLessThanOrEqual(28079)
+        expect(portAlpha).not.toBe(portBeta)
+      } finally {
+        rmSync(mainRepo, { recursive: true, force: true })
+        rmSync(wtDir, { recursive: true, force: true })
+      }
+    })
+
+    it("resolveOmnigraphTaskBranches resolves default vs worktree task branches", () => {
+      const mainRepo = mkdtempSync(join(tmpdir(), "harness-main-branches-"))
+      const wtDir = mkdtempSync(join(tmpdir(), "harness-wt-branches-"))
+      try {
+        writeFileSync(join(wtDir, ".git"), `gitdir: ${join(mainRepo, ".git", "worktrees", "wt-1")}\n`)
+
+        // Default
+        expect(resolveOmnigraphTaskBranches(mainRepo, {})).toEqual({
+          planBranch: "plan/current",
+          implBranch: "impl/current",
+          mainBranch: "main"
+        })
+
+        // With HARNESS_WORKTREE_ID
+        expect(
+          resolveOmnigraphTaskBranches(mainRepo, { HARNESS_WORKTREE_ID: "feature-auth" })
+        ).toEqual({
+          planBranch: "plan/wt-feature-auth",
+          implBranch: "impl/wt-feature-auth",
+          mainBranch: "main"
+        })
+
+        expect(
+          resolveOmnigraphTaskBranches(mainRepo, { HARNESS_WORKTREE_ID: "feat/nested#branch" })
+        ).toEqual({
+          planBranch: "plan/wt-feat_nested_branch",
+          implBranch: "impl/wt-feat_nested_branch",
+          mainBranch: "main"
+        })
+
+        // Inside linked git worktree directory
+        const slug = basename(wtDir).replace(/[^a-zA-Z0-9._-]/g, "_")
+        expect(resolveOmnigraphTaskBranches(wtDir, {})).toEqual({
+          planBranch: `plan/wt-${slug}`,
+          implBranch: `impl/wt-${slug}`,
+          mainBranch: "main"
+        })
+      } finally {
+        rmSync(mainRepo, { recursive: true, force: true })
+        rmSync(wtDir, { recursive: true, force: true })
+      }
     })
   })
 

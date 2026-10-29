@@ -33,6 +33,12 @@ import {
   LocalDecisionModel,
   routeStep
 } from "@harness/decision"
+export {
+  deriveRepoOmnigraphPort,
+  resolveCanonicalRepoRoot,
+  resolveOmnigraphClusterDir,
+  resolveOmnigraphTaskBranches
+} from "@harness/gates"
 import {
   appendTelemetryEvent,
   buildSessionReport,
@@ -374,8 +380,10 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(
         const params = (args as { params?: Record<string, unknown> | undefined }).params
         const branch = (args as { branch?: string | undefined }).branch
         const graph = yield* resolveGraph(options, args)
+        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
         result = yield* invokeOmnigraphNamedQuery({
-          name: queryName,
+          repoRoot: root,
+          name: queryName as HarnessGqQueryName,
           params,
           branch,
           fallbackGraph: graph
@@ -641,7 +649,11 @@ export const createServer = (options?: ServerOptions): McpServer => {
       branch: z
         .string()
         .optional()
-        .describe("Target graph branch (defaults to 'main')")
+        .describe("Target graph branch (defaults to 'main')"),
+      repoRoot: z
+        .string()
+        .optional()
+        .describe("Target repository root for cluster resolution")
     },
     (args) =>
       Effect.runPromise(

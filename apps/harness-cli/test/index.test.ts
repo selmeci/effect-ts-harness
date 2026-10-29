@@ -10,7 +10,7 @@ import { readTelemetryEvents, writeVerifyStamp } from "@harness/gates"
 import { buildHarnessGraph } from "@harness/graph"
 // oxlint-disable-next-line @nx/enforce-module-boundaries
 import syntaxBansPlugin from "../../../tools/oxlint/syntax-bans.js"
-import { COMMANDS, run, runCli } from "../src/index.js"
+import { buildOmnigraphClusterKillArgs, COMMANDS, run, runCli } from "../src/index.js"
 
 describe("harness cli baseline", () => {
   it("registers all MVP v2 commands including plan-check and doctor", () => {
@@ -33,6 +33,17 @@ describe("harness cli baseline", () => {
     for (const command of COMMANDS) {
       expect(run([command])).toBe(0)
     }
+  })
+
+  it("builds repo-scoped omnigraph kill args to prevent killing other clusters", () => {
+    const [bin, args] = buildOmnigraphClusterKillArgs(
+      "/tmp/test-repo/.harness/omnigraph-cluster"
+    )
+    expect(bin).toBe("pkill")
+    expect(args).toEqual([
+      "-f",
+      "omnigraph-server.*--cluster file:///tmp/test-repo/.harness/omnigraph-cluster"
+    ])
   })
 
   it("rejects unknown commands with exit code 1", () => {

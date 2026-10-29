@@ -1,4 +1,5 @@
 import * as fs from "node:fs"
+import { tmpdir } from "node:os"
 import * as path from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import type { FetchLike } from "@modernrelay/omnigraph"
@@ -12,6 +13,7 @@ import {
   invokeOmnigraphNamedQuery,
   OmnigraphSync,
   queryOmnigraph,
+  resolveOmnigraphBaseUrl,
   syncToOmnigraphAndSnapshot
 } from "../src/index.js"
 
@@ -516,4 +518,45 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
       }
     })
   )
+
+  it("resolves Omnigraph base URL from server.json and isolates two repositories", () => {
+    const repoA = fs.mkdtempSync(path.join(tmpdir(), "og-repo-a-"))
+    const repoB = fs.mkdtempSync(path.join(tmpdir(), "og-repo-b-"))
+    try {
+      const clusterA = path.join(repoA, ".harness", "omnigraph-cluster")
+      const clusterB = path.join(repoB, ".harness", "omnigraph-cluster")
+      fs.mkdirSync(clusterA, { recursive: true })
+      fs.mkdirSync(clusterB, { recursive: true })
+
+      fs.writeFileSync(
+        path.join(clusterA, "server.json"),
+        JSON.stringify({ baseUrl: "http://127.0.0.1:19991", canonicalRepoRoot: repoA })
+      )
+      fs.writeFileSync(
+        path.join(clusterB, "server.json"),
+        JSON.stringify({ baseUrl: "http://127.0.0.1:24442", canonicalRepoRoot: repoB })
+      )
+
+      const urlA = resolveOmnigraphBaseUrl({ repoRoot: repoA }, {})
+      const urlB = resolveOmnigraphBaseUrl({ repoRoot: repoB }, {})
+
+      expect(urlA).toBe("http://127.0.0.1:19991")
+      expect(urlB).toBe("http://127.0.0.1:24442")
+      expect(urlA).not.toBe(urlB)
+
+      // When server.json does not exist, port is derived deterministically from repoRoot
+      const repoC = fs.mkdtempSync(path.join(tmpdir(), "og-repo-c-"))
+      try {
+        const urlC = resolveOmnigraphBaseUrl({ repoRoot: repoC }, {})
+        expect(urlC).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
+        expect(urlC).not.toBe(urlA)
+        expect(urlC).not.toBe(urlB)
+      } finally {
+        fs.rmSync(repoC, { recursive: true, force: true })
+      }
+    } finally {
+      fs.rmSync(repoA, { recursive: true, force: true })
+      fs.rmSync(repoB, { recursive: true, force: true })
+    }
+  })
 })

@@ -105,6 +105,16 @@ Requirements follow EARS syntax. Each requirement is one sentence with bold keyw
 | REQ-5.4 | Unwanted behaviour | **If** an accepted governance doc references an undeclared `*Error` symbol inside a Mermaid diagram or if an EARS requirement specifies a static `R = never` or `E = never` type-channel invariant with `UnitTest` verification instead of `GraphCheck` or `AstGate`, **then** `GraphGc.decide` and `OntologyInvariants.decide` **shall** report a finding. | OntologyInvariants.decide | test |
 | REQ-5.5 | Unwanted behaviour | **If** a workspace package under `libs/*/*` contains an empty `export {}` source module in `src/` or declares a `dependencies` entry in `package.json` that is never imported in `src/`, **then** `scanWorkspacePackageHygiene` in `GraphGc.decide` **shall** report `empty-source-module` or `unused-package-dependency`. | GraphGc.decide | test |
 
+### 6 · Multi-repository Omnigraph cluster isolation and shared worktree branching
+
+**Source (multi-repository runtime audit 2026-10-29):** An `omnigraph-server` instance booted by `effect-es` on hardcoded port `127.0.0.1:8080` (`--cluster file:///.../effect-es/.harness/omnigraph-cluster`) caused `effect-ts-harness` to pass `checkOmnigraphServerReady("http://127.0.0.1:8080")` and read/write `effect-es`'s graph cluster, while `HARNESS_WORKTREE_ID` and linked git worktrees resolved separate `omnigraph-cluster` directories instead of sharing the canonical repository root cluster via branches.
+
+| ID | Pattern | Requirement | Effect Symbol | Verification |
+| --- | --- | --- | --- | --- |
+| REQ-6.1 | Event-driven | **When** `resolveCanonicalRepoRoot` and `resolveOmnigraphClusterDir` resolve the Omnigraph cluster path from a main checkout, a linked `git worktree` (`.git` file pointing to `gitdir: .../.git/worktrees/<name>`), or `HARNESS_WORKTREE_ID`, the worktree resolver **shall** resolve the shared canonical main repository root (`<canonicalRepoRoot>/.harness/omnigraph-cluster`) while scoping task branch names (`plan/wt-<id>`, `impl/wt-<id>`) via `resolveOmnigraphTaskBranches`. | SessionHandoff.decide | test |
+| REQ-6.2 | Event-driven | **When** `deriveRepoOmnigraphPort` and `ensureLocalOmnigraphReady` initialize or check a repository's local `omnigraph-server`, the CLI runner **shall** derive a deterministic repository-specific port (`18080..28079`) from `sha256(canonicalRepoRoot)`, persist `<clusterRootDir>/server.json` (`pid`, `port`, `baseUrl`, `canonicalRepoRoot`), and verify that the running server belongs to `canonicalRepoRoot` so concurrent repositories never collide on port `8080` or overwrite each other's graphs. | SessionHandoff.decide | test |
+| REQ-6.3 | Unwanted behaviour | **If** `ensureLocalOmnigraphReady` restarts a drifted or stale `omnigraph-server` for `clusterRootDir`, **then** the process manager **shall** terminate only the `omnigraph-server` process matching `clusterRootDir` (or the recorded PID in `server.json`) and never execute a global `pkill -f omnigraph-server` across other repositories. | SessionHandoff.decide | test |
+
 ## Assumptions
 
 * Chained commands (`&&`, `||`, `;`) continue to return `"escalate"` in `classifyCommand` so `scenarios/01-clef-guard` (`s1-escalated-to-clef`) and `libs/harness/gates/test/policy.test.ts` (REQ-1.5) remain satisfied; because REQ-1.3 excludes `verdict=allow` escalations from health score penalties, escalated safe compound commands no longer degrade the session grade.
@@ -112,6 +122,6 @@ Requirements follow EARS syntax. Each requirement is one sentence with bold keyw
 
 ## Acceptance criteria
 
-* Every REQ-1.x through REQ-5.x row has passing unit tests across `libs/harness/gates/test/`, `libs/harness/graph/test/`, `libs/harness/decision/test/`, `apps/harness-cli/test/`, and `apps/harness-mcp/test/`.
+* Every REQ-1.x through REQ-6.x row has passing unit tests across `libs/harness/gates/test/`, `libs/harness/graph/test/`, `libs/harness/decision/test/`, `apps/harness-cli/test/`, and `apps/harness-mcp/test/`.
 * Re-evaluating the `effect-es` PR #3 session telemetry with the updated `decideSessionReport` and `scopeSessionReportInput` recovers all 62 session events (`planBeforeVerify: true`) and scores Grade A.
 * `pnpm harness plan-check`, `pnpm harness gc --strict`, and `pnpm harness verify` exit `0`.

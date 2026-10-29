@@ -1,5 +1,12 @@
 import { join, resolve } from "node:path"
 
+export {
+  deriveRepoOmnigraphPort,
+  resolveCanonicalRepoRoot,
+  resolveOmnigraphClusterDir,
+  resolveOmnigraphTaskBranches
+} from "@harness/graph"
+
 export const resolveHarnessStateDir = (
   repoRoot: string,
   env: NodeJS.ProcessEnv = process.env

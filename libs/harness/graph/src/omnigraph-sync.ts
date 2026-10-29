@@ -1,5 +1,11 @@
+import { existsSync, readFileSync } from "node:fs"
+import { join } from "node:path"
 import { Context, Data, Effect, Layer, Option, Schema } from "effect"
 import { type Diff, type FetchLike, Omnigraph } from "@modernrelay/omnigraph"
+import {
+  deriveRepoOmnigraphPort,
+  resolveOmnigraphClusterDir
+} from "./cluster-resolver.js"
 import {
   executeNamedGqQueryInMemory,
   HARNESS_GQ_QUERIES,
@@ -26,16 +32,62 @@ export interface OmnigraphSyncResult {
 
 export interface OmnigraphConnectionOptions {
   readonly baseUrl?: string | undefined
+  readonly repoRoot?: string | undefined
   readonly graphId?: string | undefined
   readonly token?: string | undefined
   readonly fetch?: FetchLike | undefined
 }
 
+const OmnigraphServerMetaSchema = Schema.Struct({
+  baseUrl: Schema.optional(Schema.String),
+  port: Schema.optional(Schema.Finite),
+  pid: Schema.optional(Schema.Finite),
+  canonicalRepoRoot: Schema.optional(Schema.String)
+})
+
+const decodeServerMetaOption = Schema.decodeOption(
+  Schema.fromJsonString(OmnigraphServerMetaSchema)
+)
+
+export const resolveOmnigraphBaseUrl = (
+  options?: OmnigraphConnectionOptions,
+  env: NodeJS.ProcessEnv = process.env
+): string => {
+  if (options?.baseUrl !== undefined) {
+    return options.baseUrl
+  }
+  if (env.OMNIGRAPH_URL && env.OMNIGRAPH_URL !== "http://127.0.0.1:8080") {
+    return env.OMNIGRAPH_URL
+  }
+  if (options?.repoRoot) {
+    const clusterDir = resolveOmnigraphClusterDir(options.repoRoot, env)
+    const serverJsonPath = join(clusterDir, "server.json")
+    if (existsSync(serverJsonPath)) {
+      const metaOpt = Effect.runSync(
+        Effect.try({
+          try: () => readFileSync(serverJsonPath, "utf8"),
+          catch: () => ""
+        }).pipe(
+          Effect.flatMap((raw) => Effect.fromOption(decodeServerMetaOption(raw))),
+          Effect.option
+        )
+      )
+      if (Option.isSome(metaOpt)) {
+        const meta = metaOpt.value
+        if (meta.baseUrl && meta.baseUrl.length > 0) {
+          return meta.baseUrl
+        }
+      }
+    }
+    return `http://127.0.0.1:${deriveRepoOmnigraphPort(options.repoRoot)}`
+  }
+  return env.OMNIGRAPH_URL ?? "http://127.0.0.1:8080"
+}
+
 export const makeOmnigraphClient = (
   options?: OmnigraphConnectionOptions
 ): Omnigraph => {
-  const baseUrl =
-    options?.baseUrl ?? process.env.OMNIGRAPH_URL ?? "http://127.0.0.1:8080"
+  const baseUrl = resolveOmnigraphBaseUrl(options)
   const graphId =
     options?.graphId ?? process.env.OMNIGRAPH_GRAPH_ID ?? "harness"
   const token = options?.token ?? process.env.OMNIGRAPH_TOKEN

@@ -29,6 +29,7 @@ import {
   clearFrictionEvents,
   clearTelemetryEvents,
   decideOntologyInvariants,
+  deriveRepoOmnigraphPort,
   diffPlanAndImplGraphs,
   type FrictionEventKind,
   type GovernanceDocReference,
@@ -36,7 +37,10 @@ import {
   readFrictionEvents,
   readTelemetryEvents,
   renderSessionReportMarkdown,
+  resolveCanonicalRepoRoot,
   resolveHarnessStateDir,
+  resolveOmnigraphClusterDir,
+  resolveOmnigraphTaskBranches,
   runDomainMutationSuite,
   scanGraphEntropy,
   scanWorkspacePackageHygiene,
@@ -138,6 +142,17 @@ const decodePreToolUseStdin = Schema.decodeOption(
   Schema.fromJsonString(PreToolUseStdinSchema)
 )
 
+const CLI_REPO_ROOT = (() => {
+  let curr = resolve(dirname(fileURLToPath(import.meta.url)))
+  while (curr !== dirname(curr)) {
+    if (existsSync(join(curr, "pnpm-workspace.yaml"))) {
+      return curr
+    }
+    curr = dirname(curr)
+  }
+  return process.cwd()
+})()
+
 const findWorkspaceRoot = (startDir: string = process.cwd()): string => {
   let curr = resolve(startDir)
   while (curr !== dirname(curr)) {
@@ -146,10 +161,8 @@ const findWorkspaceRoot = (startDir: string = process.cwd()): string => {
     }
     curr = dirname(curr)
   }
-  return startDir
+  return CLI_REPO_ROOT
 }
-
-const CLI_REPO_ROOT = findWorkspaceRoot(dirname(fileURLToPath(import.meta.url)))
 
 const formatSubprocessError = (err: unknown): string => {
   if (typeof err === "object" && err !== null) {
@@ -578,10 +591,17 @@ const handlePlanCheck = (
 
     if (!graphOnly) {
       yield* ensureLocalOmnigraphReady(repoRoot)
+      const clusterRepoRoot = existsSync(
+        join(repoRoot, "libs", "harness", "graph", "cluster.yaml")
+      )
+        ? repoRoot
+        : findWorkspaceRoot(repoRoot)
+      const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
       const snapshotPath = join(repoRoot, ".harness", "plan-graph-snapshot.json")
       const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
-        branch: "plan/current",
-        from: "main",
+        repoRoot: clusterRepoRoot,
+        branch: taskBranches.planBranch,
+        from: taskBranches.mainBranch,
         snapshotPath
       }).pipe(
         Effect.provide(OmnigraphSync.Live),
@@ -695,11 +715,18 @@ const handleVerify = (
     }
 
     yield* ensureLocalOmnigraphReady(repoRoot)
+    const clusterRepoRoot = existsSync(
+      join(repoRoot, "libs", "harness", "graph", "cluster.yaml")
+    )
+      ? repoRoot
+      : findWorkspaceRoot(repoRoot)
+    const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
     const snapshotPath = join(repoRoot, ".harness", "graph-snapshot.json")
 
     const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
-      branch: "impl/current",
-      from: "main",
+      repoRoot: clusterRepoRoot,
+      branch: taskBranches.implBranch,
+      from: taskBranches.mainBranch,
       snapshotPath
     }).pipe(
       Effect.provide(OmnigraphSync.Live),
@@ -761,7 +788,7 @@ const handleVerify = (
       }
     }
 
-    const stamp = writeVerifyStamp(repoRoot, "impl/current")
+    const stamp = writeVerifyStamp(repoRoot, taskBranches.implBranch)
     return { exitCode: 0, stdout: JSON.stringify(stamp), stderr: "" }
   })
 
@@ -859,19 +886,27 @@ const handleDone = (
       }
     }
 
-    // 4. Diff and merge branch impl/current into main in Omnigraph (hard gate)
+    // 4. Diff and merge branch impl into main in Omnigraph (hard gate)
     yield* ensureLocalOmnigraphReady(repoRoot)
+    const clusterRepoRoot = existsSync(
+      join(repoRoot, "libs", "harness", "graph", "cluster.yaml")
+    )
+      ? repoRoot
+      : findWorkspaceRoot(repoRoot)
+    const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
     yield* diffOmnigraphBranches({
-      source: "impl/current",
-      target: "plan/current"
+      repoRoot: clusterRepoRoot,
+      source: taskBranches.implBranch,
+      target: taskBranches.planBranch
     }).pipe(
       Effect.provide(OmnigraphSync.Live),
       Effect.orElseSucceed(() => Option.none())
     )
 
     const merged = yield* mergeOmnigraphBranch({
-      source: "impl/current",
-      target: "main"
+      repoRoot: clusterRepoRoot,
+      source: taskBranches.implBranch,
+      target: taskBranches.mainBranch
     }).pipe(
       Effect.provide(OmnigraphSync.Live),
       Effect.orElseSucceed(() => false)
@@ -889,7 +924,7 @@ const handleDone = (
         exitCode: 0,
         stdout: JSON.stringify({
           decision: blockDecision,
-          reason: "Omnigraph branch merge (impl/current -> main) failed"
+          reason: `Omnigraph branch merge (${taskBranches.implBranch} -> ${taskBranches.mainBranch}) failed`
         }),
         stderr: ""
       }
@@ -1011,18 +1046,65 @@ function computeOmnigraphConfigStamp(configDir: string): string {
     .join("\n---\n")
 }
 
+export const buildOmnigraphClusterKillArgs = (
+  clusterRootDir: string
+): readonly [string, ReadonlyArray<string>] => [
+  "pkill",
+  ["-f", `omnigraph-server.*--cluster file://${clusterRootDir}`]
+]
+
+const OmnigraphServerMetaSchema = Schema.Struct({
+  pid: Schema.optional(Schema.Finite),
+  port: Schema.optional(Schema.Finite),
+  baseUrl: Schema.optional(Schema.String),
+  canonicalRepoRoot: Schema.optional(Schema.String),
+  updatedAt: Schema.optional(Schema.String)
+})
+
+type OmnigraphServerMeta = Schema.Schema.Type<typeof OmnigraphServerMetaSchema>
+
+const decodeOmnigraphServerMeta = Schema.decodeOption(
+  Schema.fromJsonString(OmnigraphServerMetaSchema)
+)
+
 function ensureLocalOmnigraphReady(
   repoRoot: string
 ): Effect.Effect<boolean> {
   return Effect.gen(function* () {
-    const baseUrl = process.env.OMNIGRAPH_URL ?? "http://127.0.0.1:8080"
     const clusterRepoRoot = existsSync(
       join(repoRoot, "libs", "harness", "graph", "cluster.yaml")
     )
       ? repoRoot
-      : findWorkspaceRoot()
-    const harnessDir = resolveHarnessStateDir(clusterRepoRoot)
-    const clusterRootDir = join(harnessDir, "omnigraph-cluster")
+      : findWorkspaceRoot(repoRoot)
+    const canonicalRepoRoot = resolveCanonicalRepoRoot(clusterRepoRoot)
+    const clusterRootDir = resolveOmnigraphClusterDir(clusterRepoRoot)
+    const defaultPort = deriveRepoOmnigraphPort(canonicalRepoRoot)
+
+    let serverMeta: OmnigraphServerMeta | undefined
+    const serverJsonPath = join(clusterRootDir, "server.json")
+    if (existsSync(serverJsonPath)) {
+      const decodedMetaOpt = yield* Effect.try({
+        try: () => readFileSync(serverJsonPath, "utf-8"),
+        catch: () => ""
+      }).pipe(
+        Effect.flatMap((raw) => Effect.fromOption(decodeOmnigraphServerMeta(raw))),
+        Effect.option
+      )
+      if (Option.isSome(decodedMetaOpt)) {
+        serverMeta = decodedMetaOpt.value
+      }
+    }
+
+    const explicitEnvUrl =
+      process.env.OMNIGRAPH_URL && process.env.OMNIGRAPH_URL !== "http://127.0.0.1:8080"
+        ? process.env.OMNIGRAPH_URL
+        : undefined
+    const targetBaseUrl =
+      explicitEnvUrl ??
+      (serverMeta?.canonicalRepoRoot === canonicalRepoRoot && serverMeta?.baseUrl
+        ? serverMeta.baseUrl
+        : `http://127.0.0.1:${defaultPort}`)
+
     const configDir = join(clusterRepoRoot, "libs", "harness", "graph")
     const stampPath = join(clusterRootDir, ".config-stamp")
     const expectedStamp = computeOmnigraphConfigStamp(configDir)
@@ -1032,9 +1114,18 @@ function ensureLocalOmnigraphReady(
     const configDrifted = currentStamp !== expectedStamp
 
     if (configDrifted) {
+      if (typeof serverMeta?.pid === "number") {
+        yield* Effect.try({
+          try: () => {
+            process.kill(serverMeta.pid!, "SIGTERM")
+          },
+          catch: () => undefined
+        }).pipe(Effect.orElseSucceed(() => undefined))
+      }
       yield* Effect.try({
         try: () => {
-          execFileSync("pkill", ["-f", "omnigraph-server"], { stdio: "ignore" })
+          const [killBin, killArgs] = buildOmnigraphClusterKillArgs(clusterRootDir)
+          execFileSync(killBin, killArgs as string[], { stdio: "ignore" })
         },
         catch: () => undefined
       }).pipe(Effect.orElseSucceed(() => undefined))
@@ -1046,9 +1137,14 @@ function ensureLocalOmnigraphReady(
         catch: () => undefined
       }).pipe(Effect.orElseSucceed(() => undefined))
     } else {
-      const alreadyReady = yield* checkOmnigraphServerReady(baseUrl)
-      if (alreadyReady) {
-        return true
+      const isReadyCandidate =
+        explicitEnvUrl !== undefined ||
+        serverMeta?.canonicalRepoRoot === canonicalRepoRoot
+      if (isReadyCandidate) {
+        const alreadyReady = yield* checkOmnigraphServerReady(targetBaseUrl)
+        if (alreadyReady) {
+          return true
+        }
       }
     }
 
@@ -1109,13 +1205,17 @@ function ensureLocalOmnigraphReady(
         }
         unlockOmnigraphClusterIfNeeded(omnigraphBin, clusterRootDir)
 
+        const bindHostPort =
+          targetBaseUrl.match(/^https?:\/\/([^/]+)/)?.[1] ??
+          `127.0.0.1:${defaultPort}`
+
         const child = spawn(
           omnigraphServerBin,
           [
             "--cluster",
             `file://${clusterRootDir}`,
             "--bind",
-            "127.0.0.1:8080",
+            bindHostPort,
             "--unauthenticated"
           ],
           {
@@ -1125,13 +1225,31 @@ function ensureLocalOmnigraphReady(
           }
         )
         child.unref()
+
+        if (child.pid !== undefined) {
+          writeFileSync(
+            join(clusterRootDir, "server.json"),
+            JSON.stringify(
+              {
+                pid: child.pid,
+                port: defaultPort,
+                baseUrl: targetBaseUrl,
+                canonicalRepoRoot,
+                updatedAt: new Date().toISOString()
+              },
+              null,
+              2
+            ),
+            "utf-8"
+          )
+        }
       },
       catch: () => undefined
     }).pipe(Effect.orElseSucceed(() => undefined))
 
     // Wait up to 3 seconds for omnigraph-server /readyz
     for (let i = 0; i < 30; i++) {
-      const isReady = yield* checkOmnigraphServerReady(baseUrl)
+      const isReady = yield* checkOmnigraphServerReady(targetBaseUrl)
       if (isReady) {
         return true
       }

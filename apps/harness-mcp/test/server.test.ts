@@ -394,4 +394,24 @@ describe("harness-mcp tools", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true })
     }
   })
+
+  it("executes harness_gq_query with custom repoRoot parameter", async () => {
+    const res = await executeTool(
+      "harness_gq_query",
+      {
+        queryName: "resolve_effect_fn",
+        params: { spanOrQualname: "Sample.greet" },
+        repoRoot: "/tmp/custom-repo"
+      },
+      { graph }
+    )
+    expect(res).toMatchObject({
+      source: "memory-fallback",
+      rows: expect.arrayContaining([
+        expect.objectContaining({
+          spanName: "Sample.greet"
+        })
+      ])
+    })
+  })
 })
