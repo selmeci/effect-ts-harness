@@ -17,9 +17,11 @@ The Decider pattern models domain logic as three core elements:
 
 The reducer function `evolve` calculates the next state strictly from current state and an incoming event:
 - **Must be pure and synchronous**: Never wrap `evolve` in `Effect.fn`, `Effect.gen`, or async Promises. State reconstruction must be fast and infallible.
+- **Ban on `Effect.runSync` (`unscoped-effect-run` gate)**: Never call `Effect.runSync` inside `Decider.make({ evolve })` or domain reducers. `Effect.runSync` starts a disconnected root fiber with an empty context (dropping parent `Tracer` spans, metrics, and fiber refs) and throws defects synchronously if an error occurs. Keep `evolve: (state: S, event: E): S => ...` a pure, synchronous TypeScript function that performs zero side effects and runs no Effects.
 - **Infallible (`E = never`) & Zero I/O (`R = never`)**: The reducer cannot fail (`E = never`) or perform side effects (`R = never`). If an unexpected event occurs, return the current state unchanged or handle it via a closed discriminated union.
 - **Naming convention**: Name the function `evolve<Aggregate>` (e.g., `evolveCart`, `evolveOrder`, `evolveAlbum`).
 - **Exhaustive pattern matching**: Always branch on `event` and `state` variants using `match(state)` and `match(event)...exhaustive()` from `ts-pattern` (see [`pattern-matching.md`](./pattern-matching.md)). Never use `switch` or `if / else`.
+
 
 ```ts
 import { match } from "ts-pattern"
@@ -216,13 +218,109 @@ To maintain clean architecture and prevent leaking Effect test dependencies into
   import { describe, expect, it } from "@effect/vitest"
   ```
 
-### Inspecting Exit Failures with `Cause.findErrorOption`
+### Canonical BDD Testing Harness (`testing.ts` in `type:core`)
 
-When asserting negative paths in `@effect/vitest`, wrap the execution in `Effect.exit` and inspect typed errors using `Cause.findErrorOption(exit.cause)`:
+When building BDD-style test runners for deciders (e.g. `given(...).when(...).thenEvents(...)` / `.thenFails(...)`), adhere strictly to these architectural gates:
+
+1. **Exhaustive Exit Pattern Matching (`discriminant-branching` gate):**
+   Never use `if (Exit.isSuccess(exit))` or `if (Exit.isFailure(exit))`. Always branch on `exit` variants with `match(exit).with({ _tag: "Success" }, ...).with({ _tag: "Failure" }, ...).exhaustive()`.
+2. **Strict Structural Equality (`fallback-json-equality` gate):**
+   Compare events and errors strictly using `Equal.equals(actual, expected)`. Never introduce a `JSON.stringify(a) === JSON.stringify(b)` fallback — stringification erases prototype tags, masks class inequality, and hides non-enumerable properties.
+3. **Mandatory Explicit Expected Error (`vacuous-error-assertion` gate):**
+   In `.thenFails(expectedError: Err)`, require an explicit expected error instance or predicate. Never make the error parameter optional (e.g. `thenFails(expectedError?: Err)`), as calling `.thenFails()` without an argument creates a vacuous assertion that passes on any arbitrary failure.
+4. **Distinguish Defects from Failures:**
+   Ensure that unexpected defects (`Cause.hasDies(cause)`) cause the test runner to fail rather than satisfying a `.thenFails` expectation.
 
 ```ts
-import { Cause, Effect, Exit, Option } from "effect"
+import { Cause, Effect, Equal, Exit, Option } from "effect"
+import { expect } from "@effect/vitest"
+import { match } from "ts-pattern"
+
+export interface Decider<Command, Event, State, Err> {
+  readonly initialState: State
+  readonly evolve: (state: State, event: Event) => State
+  readonly decide: (command: Command, state: State) => Effect.Effect<ReadonlyArray<Event>, Err, never>
+}
+
+export interface DeciderTestScenario<Command, Event, State, Err> {
+  readonly when: (command: Command) => {
+    readonly thenEvents: (expectedEvents: ReadonlyArray<Event>) => Effect.Effect<void, never, never>
+    readonly thenNothing: () => Effect.Effect<void, never, never>
+    readonly thenFails: (expectedError: Err) => Effect.Effect<void, never, never>
+  }
+}
+
+export const makeDeciderTestHarness = <Command, Event, State, Err>(
+  decider: Decider<Command, Event, State, Err>
+) => ({
+  given: (history: ReadonlyArray<Event>): DeciderTestScenario<Command, Event, State, Err> => {
+    const currentState = history.reduce(decider.evolve, decider.initialState)
+    return {
+      when: (command: Command) => ({
+        thenEvents: (expectedEvents: ReadonlyArray<Event>) =>
+          Effect.gen(function* () {
+            const exit = yield* Effect.exit(decider.decide(command, currentState))
+            return yield* match(exit)
+              .with({ _tag: "Success" }, (s) => {
+                expect(s.value.length).toBe(expectedEvents.length)
+                // Strict structural equality: Equal.equals only (fallback-json-equality gate)
+                expect(Equal.equals(s.value, expectedEvents)).toBe(true)
+                return Effect.void
+              })
+              .with({ _tag: "Failure" }, (f) =>
+                Effect.dieMessage(`Expected events but decider failed: ${Cause.pretty(f.cause)}`)
+              )
+              .exhaustive()
+          }),
+
+        thenNothing: () =>
+          Effect.gen(function* () {
+            const exit = yield* Effect.exit(decider.decide(command, currentState))
+            return yield* match(exit)
+              .with({ _tag: "Success" }, (s) => {
+                expect(s.value.length).toBe(0)
+                return Effect.void
+              })
+              .with({ _tag: "Failure" }, (f) =>
+                Effect.dieMessage(`Expected empty event list but decider failed: ${Cause.pretty(f.cause)}`)
+              )
+              .exhaustive()
+          }),
+
+        // Explicit expected error instance required — never optional (vacuous-error-assertion gate)
+        thenFails: (expectedError: Err) =>
+          Effect.gen(function* () {
+            const exit = yield* Effect.exit(decider.decide(command, currentState))
+            return yield* match(exit)
+              .with({ _tag: "Success" }, (s) =>
+                Effect.dieMessage(`Expected decider failure but succeeded with ${JSON.stringify(s.value)}`)
+              )
+              .with({ _tag: "Failure" }, (f) => {
+                expect(Cause.hasDies(f.cause)).toBe(false)
+                const errorOpt = Cause.findErrorOption(f.cause)
+                expect(Option.isSome(errorOpt)).toBe(true)
+                if (Option.isSome(errorOpt)) {
+                  // Strict structural equality: Equal.equals only
+                  expect(Equal.equals(errorOpt.value, expectedError)).toBe(true)
+                }
+                return Effect.void
+              })
+              .exhaustive()
+          })
+      })
+    }
+  }
+})
+```
+
+### Inspecting Exit Failures with `Cause.findErrorOption`
+
+When asserting negative paths in `@effect/vitest` without a BDD harness, wrap execution in `Effect.exit` and branch exhaustively with `match(exit)`:
+
+```ts
+import { Cause, Effect, Equal, Exit, Option } from "effect"
 import { describe, expect, it } from "@effect/vitest"
+import { match } from "ts-pattern"
 import { decideCart, initialCartState } from "domain/cart"
 import { EmptyCartCheckoutError } from "contract/cart"
 
@@ -233,17 +331,21 @@ describe("Cart Decider Negative Paths", () => {
         decideCart({ _tag: "Checkout", cartId: "cart-1", orderId: "ord-1" }, initialCartState)
       )
 
-      expect(Exit.isFailure(exit)).toBe(true)
-      if (Exit.isFailure(exit)) {
-        // Cause.findErrorOption extracts typed error from the Cause failure channel.
-        // (Note: Cause.failureOption does not exist in Effect v4)
-        const errorOpt = Cause.findErrorOption(exit.cause)
-        expect(Option.isSome(errorOpt)).toBe(true)
-        if (Option.isSome(errorOpt)) {
-          expect(errorOpt.value._tag).toBe("EmptyCartCheckoutError")
-          expect(errorOpt.value).toBeInstanceOf(EmptyCartCheckoutError)
-        }
-      }
+      yield* match(exit)
+        .with({ _tag: "Success" }, () =>
+          Effect.dieMessage("Expected EmptyCartCheckoutError but decider succeeded")
+        )
+        .with({ _tag: "Failure" }, (f) => {
+          expect(Cause.hasDies(f.cause)).toBe(false)
+          const errorOpt = Cause.findErrorOption(f.cause)
+          expect(Option.isSome(errorOpt)).toBe(true)
+          if (Option.isSome(errorOpt)) {
+            expect(errorOpt.value._tag).toBe("EmptyCartCheckoutError")
+            expect(Equal.equals(errorOpt.value, new EmptyCartCheckoutError({ cartId: "cart-1" }))).toBe(true)
+          }
+          return Effect.void
+        })
+        .exhaustive()
     })
   )
 })
@@ -251,19 +353,51 @@ describe("Cart Decider Negative Paths", () => {
 
 ### Property-Based Invariants for Deciders and Reducers
 
-Unit tests alone can miss boundary bugs and numeric edge cases. The harness gate `missing-decider-property-test` enforces property-based testing with `it.effect.prop` and `it.prop`:
+Unit tests alone can miss boundary bugs and numeric edge cases. The harness gates `missing-decider-property-test` and `shallow-decider-property-test` enforce comprehensive property-based testing:
 
-1. **Monoidal Batch Fold vs Step-by-Step Fold**:
+> [!WARNING]
+> **Ban on Scalar-Only Property Tests (`shallow-decider-property-test` gate):**
+> Never write scalar-only property tests (e.g. testing `[PositiveInt, PositiveInt]` and folding hardcoded happy-path events). Such tests provide false confidence while skipping real event sequences. Always generate arbitrary event streams using `Schema.Array(EventUnionSchema)` and assert chunked fold equivalence.
+
+1. **Chunked Fold Equivalence Invariant (`Schema.Array(CartEvent)`):**
+   Generate arbitrary sequences of domain events covering:
+   - Empty event streams (`[]`).
+   - Terminal events (e.g. `CartCheckedOut`).
+   - Post-terminal events (verifying that events after checkout do not revive or corrupt the terminal state).
+
+   Folding the stream in two arbitrary sequential chunks must yield the identical state as folding the entire stream at once:
    ```ts
-   expect(foldCart(events)).toEqual(
-     events.reduce((acc, ev) => foldCart([ev], acc), initialCartState)
-   )
+   import { Schema, Equal } from "effect"
+   import { describe, expect, it } from "@effect/vitest"
+   import { CartEvent, foldCart, initialCartState } from "domain/cart"
+
+   describe("Cart Reducer Properties", () => {
+     it.prop(
+       "satisfies chunked fold equivalence across arbitrary CartEvent streams",
+       {
+         events: Schema.Array(CartEvent),
+         splitRatio: Schema.Number.pipe(Schema.between(0, 1))
+       },
+       ({ events, splitRatio }) => {
+         const k = Math.floor(events.length * splitRatio)
+         const fullFold = foldCart(events, initialCartState)
+         const firstChunkState = foldCart(events.slice(0, k), initialCartState)
+         const chunkedFold = foldCart(events.slice(k), firstChunkState)
+
+         // Strict structural equality
+         expect(Equal.equals(chunkedFold, fullFold)).toBe(true)
+       }
+     )
+   })
    ```
-2. **Deterministic Replay Idempotence**:
+
+2. **Deterministic Replay Idempotence:**
    ```ts
-   const state1 = foldCart(events)
-   const state2 = foldCart(events)
-   expect(state1).toEqual(state2)
+   const state1 = foldCart(events, initialCartState)
+   const state2 = foldCart(events, initialCartState)
+   expect(Equal.equals(state1, state2)).toBe(true)
    ```
-3. **Terminal State Immutability**:
+
+3. **Terminal State Immutability:**
    Once an aggregate reaches a terminal variant (e.g. `CheckedOutCart`), subsequent events must not alter that terminal status.
+

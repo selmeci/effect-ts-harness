@@ -10,6 +10,7 @@ export type MutantCategory =
   | "boolean-return"
   | "batch-folding"
   | "terminal-state-preservation"
+  | "guard-condition"
 
 export interface CodeMutant {
   readonly id: string
@@ -56,7 +57,10 @@ const MUTATION_PATTERNS: ReadonlyArray<{
   { original: "events.reduce(", replacement: "events.slice(0, 1).reduce(", category: "batch-folding" },
   { original: ".reduce(evolve,", replacement: ".slice(0, 1).reduce(evolve,", category: "batch-folding" },
   { original: "() => state", replacement: "() => initialState", category: "terminal-state-preservation" },
-  { original: "return state", replacement: "return initialState", category: "terminal-state-preservation" }
+  { original: "return state", replacement: "return initialState", category: "terminal-state-preservation" },
+  { original: "if (!Equal.equals(", replacement: "if (false && !Equal.equals(", category: "guard-condition" },
+  { original: "if (Equal.equals(", replacement: "if (true || Equal.equals(", category: "guard-condition" },
+  { original: "if (Exit.isSuccess(", replacement: "if (false && Exit.isSuccess(", category: "guard-condition" }
 ]
 
 const shouldSkipLine = (trimmed: string): boolean => {

@@ -56,12 +56,28 @@ Never use `Schema.Int` or `Schema.Number` for quantities, counts, stock, or stre
 - Use `Schema.Natural` for non-negative integers ($\ge 0$): `availableQty`, `streamVersion`, `nextExpectedStreamVersion`, `count`.
 - Strictly positive quantities ($> 0$, e.g. `orderQty`, `quantity`, `batchSize`, `limit`) must use `Schema.Int.check(Schema.isGreaterThan(0)).pipe(Schema.brand("PositiveInt"))` — never use `Schema.Natural` for strictly positive quantities where `0` is invalid!
 
+### Decode-Time Checks vs Compile-Time Branded Types
+
+Crucially, **`Schema.Int` and `Schema.Natural` are decode-time filters whose TypeScript type is plain `number`**:
 ```ts
+export const StreamVersion = Schema.Natural
+export type StreamVersion = typeof StreamVersion.Type // -> number!
+```
+Because the TypeScript type is `number`, in-memory TypeScript code can pass `-1` or `1.5` to a function expecting `StreamVersion` without triggering a compiler error!
+
+When compile-time type safety is needed for in-memory construction, always append `.pipe(Schema.brand("BrandName"))`:
+```ts
+// 0-based stream revisions and counters (0 is valid, compile-time branded)
+export const StreamVersion = Schema.Natural.pipe(Schema.brand("StreamVersion"))
+export type StreamVersion = typeof StreamVersion.Type // -> number & Brand<"StreamVersion">
+
+// Strictly positive quantities (> 0, 0 is invalid, compile-time branded)
 export const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0)).pipe(
   Schema.brand("PositiveInt")
 )
-export type PositiveInt = typeof PositiveInt.Type
+export type PositiveInt = typeof PositiveInt.Type // -> number & Brand<"PositiveInt">
 ```
+Branded types prevent unvalidated raw numbers from being assigned at compile time without decoding through `Schema.decodeUnknown*` or constructing with `Brand.nominal`.
 
 ## Parsing and Decoding Untrusted Input
 
@@ -74,6 +90,59 @@ export const parseInput = Effect.fn("Input.parse")(function* (raw: unknown) {
   // Returns Effect<CreateUserInput, ParseError, never>
   const decoded = yield* Schema.decodeUnknownEffect(CreateUserInput)(raw)
   return decoded
+})
+```
+
+## Mandatory Positive and Negative Decode Tests
+
+Every constrained schema (`Schema.Int`, `Schema.Natural`, `PositiveInt`, `NonEmptyString`, branded types, and schemas with `check`) declared in `type:contract` **must** have both positive decode tests and negative rejection tests:
+
+1. **Positive Decode Tests:** Assert that valid boundary values decode successfully to the expected runtime value and type.
+2. **Negative Rejection Tests:** Assert that invalid values (`-1`, `0` when strictly positive, `1.5` for integers, `""` for non-empty strings, missing fields, `null`, `undefined`, wrong types) are rejected with `Either.Left` / `ParseError`.
+
+```ts
+import { describe, expect, it } from "vitest"
+import { Either, Schema } from "effect"
+import { NonEmptyString, PositiveInt, StreamVersion } from "contract/primitives"
+
+describe("Primitives Contract Schemas", () => {
+  describe("PositiveInt", () => {
+    it("decodes valid positive integers", () => {
+      const decoded = Schema.decodeUnknownSync(PositiveInt)(42)
+      expect(decoded).toBe(42)
+    })
+
+    it("rejects zero, negative numbers, decimals, and non-numbers", () => {
+      expect(Either.isLeft(Schema.decodeUnknownEither(PositiveInt)(0))).toBe(true)
+      expect(Either.isLeft(Schema.decodeUnknownEither(PositiveInt)(-5))).toBe(true)
+      expect(Either.isLeft(Schema.decodeUnknownEither(PositiveInt)(3.14))).toBe(true)
+      expect(Either.isLeft(Schema.decodeUnknownEither(PositiveInt)("42"))).toBe(true)
+      expect(Either.isLeft(Schema.decodeUnknownEither(PositiveInt)(null))).toBe(true)
+    })
+  })
+
+  describe("StreamVersion", () => {
+    it("decodes zero and positive integers", () => {
+      expect(Schema.decodeUnknownSync(StreamVersion)(0)).toBe(0)
+      expect(Schema.decodeUnknownSync(StreamVersion)(10)).toBe(10)
+    })
+
+    it("rejects negative integers and decimals", () => {
+      expect(Either.isLeft(Schema.decodeUnknownEither(StreamVersion)(-1))).toBe(true)
+      expect(Either.isLeft(Schema.decodeUnknownEither(StreamVersion)(0.5))).toBe(true)
+    })
+  })
+
+  describe("NonEmptyString", () => {
+    it("decodes non-empty strings", () => {
+      expect(Schema.decodeUnknownSync(NonEmptyString)("hello")).toBe("hello")
+    })
+
+    it("rejects empty strings and non-strings", () => {
+      expect(Either.isLeft(Schema.decodeUnknownEither(NonEmptyString)(""))).toBe(true)
+      expect(Either.isLeft(Schema.decodeUnknownEither(NonEmptyString)(null))).toBe(true)
+    })
+  })
 })
 ```
 

@@ -191,26 +191,49 @@ describe("Album Projections & Serialization", () => {
 
 When testing stateful reducers (`fold` / `evolve`), `harness/test-integrity` bans tautological property tests (asserting `fold(events)` against `events.reduce(evolve, initial)` using the same reducer function).
 
+> [!WARNING]
+> **Ban on Scalar-Only Property Tests (`shallow-decider-property-test` gate):**
+> Never write scalar-only property tests (e.g. testing `[PositiveInt, PositiveInt]` and folding hardcoded happy-path events). Scalar-only tests fail to explore boundary conditions, empty event streams, or post-terminal states. Always generate arbitrary event sequences using `Schema.Array(EventUnionSchema)` and assert chunked fold equivalence.
+
 Never downgrade an assertion to `expect(state.id).toBeDefined()` to bypass this ban — vacuous assertions in property tests are blocked by `harness/test-integrity`. Instead, assert concrete mathematical and domain invariants:
 
-1. **Monoidal Batch Fold vs Step-by-Step Fold Invariant:**
-   A batch fold of events must produce the exact same state as folding each event incrementally:
+1. **Chunked Fold Equivalence Invariant (`Schema.Array(EventUnionSchema)`):**
+   A batch fold of arbitrary events must produce the exact same state as folding any two sequential slices (`events.slice(0, k)` followed by `events.slice(k)`):
    ```ts
-   expect(fold(events)).toEqual(
-     events.reduce((acc, ev) => fold([ev], acc), initialState)
-   )
+   import { Schema, Equal } from "effect"
+   import { describe, expect, it } from "@effect/vitest"
+   import { CartEvent, foldCart, initialCartState } from "domain/cart"
+
+   describe("Cart Reducer Properties", () => {
+     it.prop(
+       "satisfies chunked fold equivalence across arbitrary CartEvent streams",
+       {
+         events: Schema.Array(CartEvent),
+         splitRatio: Schema.Number.pipe(Schema.between(0, 1))
+       },
+       ({ events, splitRatio }) => {
+         const k = Math.floor(events.length * splitRatio)
+         const fullFold = foldCart(events, initialCartState)
+         const firstChunkState = foldCart(events.slice(0, k), initialCartState)
+         const chunkedFold = foldCart(events.slice(k), firstChunkState)
+
+         // Strict structural equality: Equal.equals only (fallback-json-equality gate)
+         expect(Equal.equals(chunkedFold, fullFold)).toBe(true)
+       }
+     )
+   })
    ```
 2. **Deterministic Replay Idempotence:**
    Re-running `fold(events)` on the same event sequence must return the identical state:
    ```ts
-   const folded = fold(events)
-   expect(fold(events)).toEqual(folded)
+   const folded = fold(events, initialState)
+   expect(Equal.equals(fold(events, initialState), folded)).toBe(true)
    ```
 3. **Terminal State Immutability:**
    When state reaches a terminal variant (e.g. `CheckedOut`, `Closed`, `Cancelled`), folding subsequent events must leave the state strictly unchanged:
    ```ts
-   const terminalState = fold(eventsLeadingToCheckout)
-   expect(fold(furtherEvents, terminalState)).toEqual(terminalState)
+   const terminalState = fold(eventsLeadingToCheckout, initialState)
+   expect(Equal.equals(fold(furtherEvents, terminalState), terminalState)).toBe(true)
    ```
 
 ### Defect-Free Negative Testing (`Exit.Failure` vs `Die` vs `Fail`)
@@ -239,8 +262,67 @@ if (Exit.isFailure(exit)) {
 expect(Cause.hasDies(exit.cause)).toBe(true)
 ```
 
+### Negative Meta-Testing for Custom Test Helpers (`guard-condition` gate)
+
+When authoring custom test helpers, decider test scenarios, or BDD assertion builders (such as `makeDeciderTestHarness` in `type:core`), you must plan and implement **negative meta-tests**.
+
+A test helper that has loose guards or improper exit handling creates a critical vulnerability: tests appear to pass while masking real defects. Negative meta-tests use deliberately failing or defective deciders to verify that the test runner itself fails (`Exit.isFailure` / `Cause.isDie`) on every failure condition:
+
+1. **Wrong Event Count:** Verify the runner fails when the decider emits 2 events but the scenario expected 1.
+2. **Wrong Event Payload:** Verify the runner fails when the decider emits an event with mismatched payload fields.
+3. **Unexpected Success:** Verify the runner fails when `.thenFails(expectedError)` is declared but the decider succeeds.
+4. **Defect vs. Typed Failure:** Verify the runner fails when the decider dies with an unhandled defect (`Cause.die`) instead of failing with the declared typed error `E` (`Cause.fail`).
+
+```ts
+import { Cause, Effect, Exit } from "effect"
+import { describe, expect, it } from "@effect/vitest"
+import { makeDeciderTestHarness } from "core/testing"
+
+describe("BDD Runner Meta-Tests", () => {
+  const fakeFailingDecider = {
+    initialState: 0,
+    evolve: (s: number) => s,
+    decide: () => Effect.fail({ _tag: "FakeError" as const })
+  }
+
+  const harness = makeDeciderTestHarness(fakeFailingDecider)
+
+  it.effect("meta-test: runner dies when unexpected failure occurs instead of events", () =>
+    Effect.gen(function* () {
+      const exit = yield* Effect.exit(
+        harness.given([]).when("anyCommand").thenEvents([{ _tag: "FakeEvent" }])
+      )
+      // The runner must die (fail its assertion)
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        expect(Cause.hasDies(exit.cause)).toBe(true)
+      }
+    })
+  )
+
+  it.effect("meta-test: runner dies when decider succeeds instead of expected error", () =>
+    Effect.gen(function* () {
+      const fakeSucceedingDecider = {
+        initialState: 0,
+        evolve: (s: number) => s,
+        decide: () => Effect.succeed([])
+      }
+      const successHarness = makeDeciderTestHarness(fakeSucceedingDecider)
+      const exit = yield* Effect.exit(
+        successHarness.given([]).when("anyCommand").thenFails({ _tag: "FakeError" })
+      )
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        expect(Cause.hasDies(exit.cause)).toBe(true)
+      }
+    })
+  )
+})
+```
+
 > [!IMPORTANT]
-> The harness zero-entropy gate `harness gc --strict` enforces the `missing-decider-property-test` sensor: every pure domain decider (`*.decide` in `type:domain`) must be exercised by at least one property-based test (`it.effect.prop` or `it.prop`).
+> The harness zero-entropy gate `harness gc --strict` enforces both the `missing-decider-property-test` and `shallow-decider-property-test` sensors: every pure domain decider must be exercised by property-based tests verifying chunked-fold equivalence over `Schema.Array(EventUnionSchema)`.
+
 
 ## Targeted Domain AST Mutation Testing (`harness mutate`)
 

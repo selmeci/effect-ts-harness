@@ -798,5 +798,172 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
     const deadPayloadViolations = result.violations.filter((v) => v.rule === "dead-event-payload")
     expect(deadPayloadViolations).toHaveLength(0)
   })
+
+  it("fails with fallback-json-equality when comparing values with JSON.stringify fallback", () => {
+    const domainSource1 = `
+      import { Equal } from "effect"
+
+      export const checkEquality = (a: unknown, b: unknown): boolean => {
+        return Equal.equals(a, b) || JSON.stringify(a) === JSON.stringify(b)
+      }
+    `
+    const graph1 = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/compare1.ts",
+        content: domainSource1,
+        packageTag: "domain"
+      }
+    ])
+    const result1 = checkEffectGraph(graph1)
+    expect(result1.ok).toBe(false)
+    const violations1 = result1.violations.filter((v) => v.rule === "fallback-json-equality")
+    expect(violations1.length).toBeGreaterThan(0)
+    expect(violations1[0]?.message).toContain("JSON.stringify equality fallback")
+
+    const domainSource2 = `
+      export const checkEqualityDirect = (a: unknown, b: unknown): boolean => {
+        return JSON.stringify(a) === JSON.stringify(b)
+      }
+    `
+    const graph2 = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/compare2.ts",
+        content: domainSource2,
+        packageTag: "domain"
+      }
+    ])
+    const result2 = checkEffectGraph(graph2)
+    expect(result2.ok).toBe(false)
+    const violations2 = result2.violations.filter((v) => v.rule === "fallback-json-equality")
+    expect(violations2.length).toBeGreaterThan(0)
+    expect(violations2[0]?.message).toContain("JSON.stringify equality fallback")
+  })
+
+  it("fails with vacuous-error-assertion for thenFails(expected?: E) and thenFails() with 0 params, while allowing thenFails(expected: E)", () => {
+    const badSource = `
+      export interface TestHarness<E> {
+        thenFails(expected?: E): void
+      }
+
+      export const runner = {
+        thenFails: () => {
+          // 0 params
+        }
+      }
+    `
+    const badGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/bad-assert.ts",
+        content: badSource,
+        packageTag: "domain"
+      }
+    ])
+    const badResult = checkEffectGraph(badGraph)
+    expect(badResult.ok).toBe(false)
+    const vacuousViolations = badResult.violations.filter((v) => v.rule === "vacuous-error-assertion")
+    expect(vacuousViolations).toHaveLength(2)
+
+    const goodSource = `
+      export interface TestHarness<E> {
+        thenFails(expected: E): void
+      }
+
+      export const runner = {
+        thenFails: (expected: Error) => {
+          // 1 explicit param
+        }
+      }
+    `
+    const goodGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/good-assert.ts",
+        content: goodSource,
+        packageTag: "domain"
+      }
+    ])
+    const goodResult = checkEffectGraph(goodGraph)
+    const goodViolations = goodResult.violations.filter((v) => v.rule === "vacuous-error-assertion")
+    expect(goodViolations).toHaveLength(0)
+  })
+
+  it("fails with unscoped-effect-run for Effect.runSync inside Decider.make or domain, while allowing Effect.runPromise in testing.ts outside Decider.make", () => {
+    const domainSource = `
+      import { Effect } from "effect"
+
+      export const evolveCart = (s: any, e: any): any => {
+        return Effect.runSync(Effect.succeed(s))
+      }
+    `
+    const domainGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/cart.ts",
+        content: domainSource,
+        packageTag: "domain"
+      }
+    ])
+    const domainResult = checkEffectGraph(domainGraph)
+    expect(domainResult.violations.some((v) => v.rule === "unscoped-effect-run")).toBe(true)
+
+    const deciderSource = `
+      import { Effect } from "effect"
+
+      export const cartDecider = Decider.make({
+        initialState: {},
+        decide: () => Effect.succeed([]),
+        evolve: (s: any, e: any) => Effect.runSync(Effect.succeed(s))
+      })
+    `
+    const deciderGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/es/core/src/decider.ts",
+        content: deciderSource,
+        packageTag: "domain"
+      }
+    ])
+    const deciderResult = checkEffectGraph(deciderGraph)
+    expect(deciderResult.violations.some((v) => v.rule === "unscoped-effect-run")).toBe(true)
+
+    const testingSource = `
+      import { Effect } from "effect"
+
+      export const runScenario = async () => {
+        return await Effect.runPromise(Effect.succeed(true))
+      }
+    `
+    const testingGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/es/core/src/testing.ts",
+        content: testingSource,
+        packageTag: "domain"
+      }
+    ])
+    const testingResult = checkEffectGraph(testingGraph)
+    expect(testingResult.violations.filter((v) => v.rule === "unscoped-effect-run")).toHaveLength(0)
+  })
+
+  it("fails with discriminant-branching when if branches on tag guard Exit.isSuccess(exit) in domain/core files", () => {
+    const domainSource = `
+      import { Exit } from "effect"
+
+      export const handleExit = (exit: Exit.Exit<number, string>): number => {
+        if (Exit.isSuccess(exit)) {
+          return exit.value
+        }
+        return 0
+      }
+    `
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/handler.ts",
+        content: domainSource,
+        packageTag: "domain"
+      }
+    ])
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(false)
+    const violation = result.violations.find((v) => v.rule === "discriminant-branching")
+    expect(violation).toBeDefined()
+    expect(violation?.message).toContain("Exit.isSuccess")
+  })
 })
 

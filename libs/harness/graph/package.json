@@ -20,7 +20,6 @@
   },
   "dependencies": {
     "@ast-grep/napi": "0.51.0",
-    "@harness/ingest": "workspace:*",
     "@modernrelay/omnigraph": "0.14.0",
     "effect": "4.0.0",
     "ts-morph": "28.0.0"

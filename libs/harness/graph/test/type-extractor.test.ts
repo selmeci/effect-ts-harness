@@ -12,7 +12,7 @@ import {
   resolveNode,
   stripCommentsAndTestTitles
 } from "../src/index.js"
-import type { EffectFnNode, ServiceLayerNode } from "../src/model.js"
+import type { EffectFnNode, ServiceLayerNode, VitestCaseNode } from "../src/model.js"
 
 describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
   it("extracts union E and R channels from both stub<A, E, R> skeletons and Effect.fn implementations", () => {
@@ -403,6 +403,60 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
 
       expect(reachingDecide.some((t) => t.testFile.includes("cart.test.ts"))).toBe(true)
       expect(reachingEvolve.some((t) => t.testFile.includes("cart.test.ts"))).toBe(true)
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("sets hasNonPrimitiveArbitrary: false for primitive scalar arbitraries and true for non-primitive arbitraries in prop tests", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-prop-test-"))
+    try {
+      fs.writeFileSync(path.join(tmpDir, "pnpm-workspace.yaml"), "packages:\n  - 'libs/*'\n")
+
+      const testDir = path.join(tmpDir, "libs/sample/domain/test")
+      fs.mkdirSync(testDir, { recursive: true })
+
+      fs.writeFileSync(
+        path.join(testDir, "primitive.test.ts"),
+        `
+          import { describe, it } from "vitest"
+          describe("primitive suite", () => {
+            it.effect.prop("test", [PositiveInt, Schema.String], () => {
+              // property test with scalar primitives
+            })
+          })
+        `
+      )
+
+      fs.writeFileSync(
+        path.join(testDir, "non-primitive.test.ts"),
+        `
+          import { describe, it } from "vitest"
+          describe("non-primitive suite", () => {
+            it.effect.prop("test", [Schema.Array(CartEvent)], () => {
+              // property test with non-primitive arbitrary
+            })
+          })
+        `
+      )
+
+      const resultGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir))
+
+      const primitiveNode = resolveNode(
+        resultGraph,
+        "libs/sample/domain/test/primitive.test.ts::suite"
+      ) as VitestCaseNode
+      expect(primitiveNode).toBeDefined()
+      expect(primitiveNode.isPropertyTest).toBe(true)
+      expect(primitiveNode.hasNonPrimitiveArbitrary).toBe(false)
+
+      const nonPrimitiveNode = resolveNode(
+        resultGraph,
+        "libs/sample/domain/test/non-primitive.test.ts::suite"
+      ) as VitestCaseNode
+      expect(nonPrimitiveNode).toBeDefined()
+      expect(nonPrimitiveNode.isPropertyTest).toBe(true)
+      expect(nonPrimitiveNode.hasNonPrimitiveArbitrary).toBe(true)
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true })
     }

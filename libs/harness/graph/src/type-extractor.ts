@@ -6,6 +6,7 @@ import {
   type CallExpression,
   type NewExpression,
   Node,
+  type ParameterDeclaration,
   type ParenthesizedTypeNode,
   Project,
   type PropertyAccessExpression,
@@ -823,6 +824,34 @@ export const extractTypeAwareGraphFromSource = (
     }
 
     const checkConditionNode = (condExpr: Node, statementNode: Node): void => {
+      const callNodes = [
+        ...(Node.isCallExpression(condExpr) ? [condExpr] : []),
+        ...condExpr.getDescendantsOfKind(SyntaxKind.CallExpression)
+      ]
+      for (const callNode of callNodes) {
+        const calleeText = callNode.getExpression().getText()
+        if (
+          calleeText === "Exit.isSuccess" ||
+          calleeText === "Exit.isFailure" ||
+          calleeText === "Option.isSome" ||
+          calleeText === "Option.isNone" ||
+          calleeText === "Either.isRight" ||
+          calleeText === "Either.isLeft" ||
+          calleeText === "Result.isSuccess" ||
+          calleeText === "Result.isFailure"
+        ) {
+          const enclosingSymbol = findEnclosingSymbolName(statementNode, relPath)
+          branchingViolations.push({
+            rule: "discriminant-branching",
+            message: `Condition in '${enclosingSymbol}' branches on tag guard '${calleeText}(...)' via if/ternary — enumerate all variants explicitly with match(...).with(...).exhaustive() from ts-pattern.`,
+            file: relPath,
+            line: statementNode.getStartLineNumber(),
+            enclosingSymbol
+          })
+          return
+        }
+      }
+
       const binNodes = [
         ...(Node.isBinaryExpression(condExpr) ? [condExpr] : []),
         ...condExpr.getDescendantsOfKind(SyntaxKind.BinaryExpression)
@@ -891,6 +920,37 @@ export const extractTypeAwareGraphFromSource = (
 
     for (const callExpr of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
       const callee = callExpr.getExpression()
+      const calleeText = callee.getText()
+
+      // unscoped-effect-run check
+      if (
+        calleeText === "Effect.runSync" ||
+        calleeText === "Effect.runPromise" ||
+        calleeText === "Effect.runFork" ||
+        calleeText === "Runtime.runSync" ||
+        calleeText === "Runtime.runPromise"
+      ) {
+        const isInsideDeciderMake = callExpr.getAncestors().some(
+          (a) =>
+            Node.isCallExpression(a) &&
+            /^(?:.*\.)?Decider\.make$/.test(a.getExpression().getText())
+        )
+        const enclosingSymbol = findEnclosingSymbolName(callExpr, relPath)
+        const isDomainOrContract =
+          (filePkgTag === "domain" || filePkgTag === "contract") &&
+          !relPath.endsWith("/testing.ts")
+        const isReducerSymbol = /#(evolve\w*|reduce\w*|.*Reducer)$/i.test(enclosingSymbol)
+
+        if (isDomainOrContract || isInsideDeciderMake || isReducerSymbol) {
+          branchingViolations.push({
+            rule: "unscoped-effect-run",
+            message: `Call to '${calleeText}' in '${enclosingSymbol}' executes an Effect synchronously/imperatively inside domain/reducer logic — keep reducers pure '(state, event) => State' and yield Effects instead of calling Effect.run*.`,
+            file: relPath,
+            line: callExpr.getStartLineNumber(),
+            enclosingSymbol
+          })
+        }
+      }
 
       // Array predicate callbacks: .filter(...), .find(...), .some(...), .every(...)
       if (Node.isPropertyAccessExpression(callee)) {
@@ -993,6 +1053,81 @@ export const extractTypeAwareGraphFromSource = (
               })
             }
           }
+        }
+      }
+    }
+
+    // fallback-json-equality check
+    for (const bin of sourceFile.getDescendantsOfKind(SyntaxKind.BinaryExpression)) {
+      const opKind = bin.getOperatorToken().getKind()
+      const isCaseA =
+        (opKind === SyntaxKind.EqualsEqualsEqualsToken ||
+          opKind === SyntaxKind.ExclamationEqualsEqualsToken ||
+          opKind === SyntaxKind.EqualsEqualsToken ||
+          opKind === SyntaxKind.ExclamationEqualsToken) &&
+        bin.getLeft().getText().trim().startsWith("JSON.stringify(") &&
+        bin.getRight().getText().trim().startsWith("JSON.stringify(")
+      const isCaseB =
+        (opKind === SyntaxKind.BarBarToken || opKind === SyntaxKind.AmpersandAmpersandToken) &&
+        bin.getLeft().getText().includes("Equal.equals(") &&
+        bin.getRight().getText().includes("JSON.stringify(")
+
+      if (isCaseA || isCaseB) {
+        const enclosingSymbol = findEnclosingSymbolName(bin, relPath)
+        branchingViolations.push({
+          rule: "fallback-json-equality",
+          message: `Comparison in '${enclosingSymbol}' uses JSON.stringify equality fallback — compare Effect Data/Schema values exclusively with Equal.equals(a, b).`,
+          file: relPath,
+          line: bin.getStartLineNumber(),
+          enclosingSymbol
+        })
+      }
+    }
+
+    // vacuous-error-assertion check
+    const ASSERTION_NAME_REGEX = /^(?:thenFails|assertFails|expectError)$/
+    const assertionCandidates = [
+      ...sourceFile.getDescendantsOfKind(SyntaxKind.MethodSignature),
+      ...sourceFile.getDescendantsOfKind(SyntaxKind.MethodDeclaration),
+      ...sourceFile.getDescendantsOfKind(SyntaxKind.FunctionDeclaration),
+      ...sourceFile.getDescendantsOfKind(SyntaxKind.VariableDeclaration),
+      ...sourceFile.getDescendantsOfKind(SyntaxKind.PropertyAssignment)
+    ]
+    for (const node of assertionCandidates) {
+      const name = node.getName()
+      if (!name || !ASSERTION_NAME_REGEX.test(name)) continue
+
+      let params: ReadonlyArray<ParameterDeclaration> | undefined
+      if (
+        Node.isMethodSignature(node) ||
+        Node.isMethodDeclaration(node) ||
+        Node.isFunctionDeclaration(node)
+      ) {
+        params = node.getParameters()
+      } else if (Node.isVariableDeclaration(node) || Node.isPropertyAssignment(node)) {
+        const init = node.getInitializer()
+        if (init && (Node.isArrowFunction(init) || Node.isFunctionExpression(init))) {
+          params = init.getParameters()
+        }
+      }
+
+      if (params !== undefined) {
+        const isVacuous =
+          params.length === 0 ||
+          (params[0] !== undefined &&
+            (params[0].hasQuestionToken() ||
+              params[0].hasInitializer() ||
+              /\bundefined\b/.test(params[0].getTypeNode()?.getText() ?? "")))
+
+        if (isVacuous) {
+          const enclosingSymbol = findEnclosingSymbolName(node, relPath)
+          branchingViolations.push({
+            rule: "vacuous-error-assertion",
+            message: `Assertion helper '${name}' in '${enclosingSymbol}' allows an optional or omitted expected error — require an explicit expected error instance or predicate so arbitrary failures are never silently swallowed.`,
+            file: relPath,
+            line: node.getStartLineNumber(),
+            enclosingSymbol
+          })
         }
       }
     }
@@ -1635,6 +1770,34 @@ export const stripCommentsAndTestTitles = (code: string): string => {
   return stripped
 }
 
+const splitTopLevelCommas = (input: string): Array<string> => {
+  const items: Array<string> = []
+  let depth = 0
+  let current = ""
+  for (let i = 0; i < input.length; i++) {
+    const char = input[i]
+    if (char === "(" || char === "[" || char === "{") {
+      depth++
+      current += char
+    } else if (char === ")" || char === "]" || char === "}") {
+      if (depth > 0) depth--
+      current += char
+    } else if (char === "," && depth === 0) {
+      items.push(current)
+      current = ""
+    } else {
+      current += char
+    }
+  }
+  if (current.length > 0) {
+    items.push(current)
+  }
+  return items
+}
+
+const PRIMITIVE_SCALAR_REGEX =
+  /^(?:(?:Schema|S)\.(?:String|Number|Boolean|Int|Natural|Positive|Negative|NonNegative|NonPositive|NonEmptyString)(?:\.[A-Za-z0-9_($. )]+)*|PositiveInt|NonEmptyString|fc\.(?:integer|nat|string|boolean|float|double)\s*\([^)]*\))$/
+
 export const extractWorkspaceTypeAwareGraph = (
   repoRoot: string
 ): Effect.Effect<HarnessGraph> =>
@@ -1726,18 +1889,41 @@ export const extractWorkspaceTypeAwareGraph = (
             /\b(?:it|test)(?:\.effect)?\.prop\s*\(/.test(content) ||
             /\bfc\.assert\s*\(/.test(content)
 
+          const strippedContent = stripCommentsAndTestTitles(content)
+
+          let hasNonPrimitiveArbitrary: boolean | undefined = undefined
+          if (hasPropTest) {
+            const propCallRegex =
+              /\b(?:it|test)(?:\.effect)?\.prop\s*\(\s*(?:""|''|``)\s*,\s*\[([\s\S]*?)\]/g
+            const matches = [...strippedContent.matchAll(propCallRegex)]
+            if (matches.length > 0) {
+              const allCallsOnlyPrimitive = matches.every((m) => {
+                const interior = m[1] ?? ""
+                const rawItems = splitTopLevelCommas(interior)
+                const items = rawItems.map((s) => s.trim()).filter((s) => s.length > 0)
+                if (items.length === 0) {
+                  return true
+                }
+                return items.every((item) => PRIMITIVE_SCALAR_REGEX.test(item))
+              })
+              hasNonPrimitiveArbitrary = !allCallsOnlyPrimitive
+            } else {
+              hasNonPrimitiveArbitrary = true
+            }
+          }
+
           const testNode: VitestCaseNode = {
             _tag: "VitestCase",
             testId: `${relTestFile}::suite`,
             testFile: relTestFile,
             testName: relTestFile,
             lastTreeHash: "workspace",
-            isPropertyTest: hasPropTest
+            isPropertyTest: hasPropTest,
+            ...(hasNonPrimitiveArbitrary !== undefined ? { hasNonPrimitiveArbitrary } : {})
           }
           const testIdx = Graph.addNode(mutable, testNode)
           updatedNodeIndexByKey.set(testNode.testId, testIdx)
 
-          const strippedContent = stripCommentsAndTestTitles(content)
           const usesTestTracer = strippedContent.includes("runWithTestTracer")
 
           for (const fnNode of effectFns) {

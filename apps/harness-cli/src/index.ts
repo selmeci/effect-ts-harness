@@ -39,6 +39,7 @@ import {
   resolveHarnessStateDir,
   runDomainMutationSuite,
   scanGraphEntropy,
+  scanWorkspacePackageHygiene,
   scopeSessionReportInput,
   summarizeFrictionEvents,
   type TelemetryCategory,
@@ -1290,9 +1291,16 @@ const handleGc = (
       checkDeciderPropertyTests: true,
       governanceDocs
     })
+    const findings = strict
+      ? [...report.findings, ...scanWorkspacePackageHygiene(repoRoot)]
+      : report.findings
+    const finalReport = {
+      clean: findings.length === 0,
+      findings
+    }
     return {
-      exitCode: strict && !report.clean ? 1 : 0,
-      stdout: JSON.stringify(report),
+      exitCode: strict && !finalReport.clean ? 1 : 0,
+      stdout: JSON.stringify(finalReport),
       stderr: ""
     }
   })

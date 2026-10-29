@@ -24,6 +24,9 @@ export interface GraphPolicyViolation {
     | "discriminant-branching"
     | "non-exhaustive-union-match"
     | "schema-boolean-state"
+    | "fallback-json-equality"
+    | "vacuous-error-assertion"
+    | "unscoped-effect-run"
   readonly message: string
   readonly path: ReadonlyArray<string>
 }

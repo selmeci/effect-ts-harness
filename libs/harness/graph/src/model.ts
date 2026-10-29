@@ -43,6 +43,7 @@ export interface VitestCaseNode {
   readonly testName: string
   readonly lastTreeHash: string
   readonly isPropertyTest?: boolean | undefined
+  readonly hasNonPrimitiveArbitrary?: boolean | undefined
 }
 
 export interface PatternDocNode {
@@ -210,6 +211,9 @@ export interface BranchingViolation {
     | "schema-boolean-state"
     | "dead-event-payload"
     | "terminal-state-unhandled"
+    | "fallback-json-equality"
+    | "vacuous-error-assertion"
+    | "unscoped-effect-run"
   readonly message: string
   readonly file: string
   readonly line: number

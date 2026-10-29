@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs"
-import { join } from "node:path"
-import { Effect, Option } from "effect"
+import { join, relative } from "node:path"
+import { Effect, Option, Schema } from "effect"
 import * as Graph from "effect/Graph"
 import type { GovernanceDocStatus, HarnessGraph } from "@harness/graph"
 import { decideEarsSpecQuality } from "./ears-lint.js"
@@ -15,6 +15,9 @@ export type GcFindingKind =
   | "missing-pattern-doc"
   | "untested-effect-fn"
   | "missing-decider-property-test"
+  | "shallow-decider-property-test"
+  | "empty-source-module"
+  | "unused-package-dependency"
   | "stale-doc-reference"
   | "ears-spec-lint"
   | "adr-doc-lint"
@@ -104,6 +107,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
   const incomingFailsWith = new Map<Graph.NodeIndex, number>()
   const incomingTestOrCall = new Map<Graph.NodeIndex, number>()
   const incomingPropertyTests = new Map<Graph.NodeIndex, number>()
+  const incomingRichPropertyTests = new Map<Graph.NodeIndex, number>()
 
   for (const [, edge] of Graph.edges(g)) {
     if (edge.data._tag === "RequiresService") {
@@ -130,6 +134,15 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
             edge.target,
             (incomingPropertyTests.get(edge.target) ?? 0) + 1
           )
+          if (
+            (srcNode.value as { readonly hasNonPrimitiveArbitrary?: boolean | undefined })
+              .hasNonPrimitiveArbitrary !== false
+          ) {
+            incomingRichPropertyTests.set(
+              edge.target,
+              (incomingRichPropertyTests.get(edge.target) ?? 0) + 1
+            )
+          }
         }
       }
     }
@@ -336,6 +349,40 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
           })
         }
       }
+
+      if (doc.markdown !== undefined) {
+        const mermaidRegex = /```mermaid([\s\S]*?)```/g
+        const ignoredMermaidErrors = new Set([
+          "Error",
+          "TypeError",
+          "RangeError",
+          "SyntaxError",
+          "TaggedError",
+          "SchemaError",
+          "UnknownToolError",
+          "OmnigraphLoadError"
+        ])
+        const seenDocMermaidErrors = new Set<string>()
+        let mermaidMatch: RegExpExecArray | null
+        while ((mermaidMatch = mermaidRegex.exec(doc.markdown)) !== null) {
+          const block = mermaidMatch[1] ?? ""
+          const errRegex = /\b([A-Z][A-Za-z0-9_]*Error)\b/g
+          let errMatch: RegExpExecArray | null
+          while ((errMatch = errRegex.exec(block)) !== null) {
+            const errName = errMatch[1]!
+            if (!ignoredMermaidErrors.has(errName) && !seenDocMermaidErrors.has(errName)) {
+              seenDocMermaidErrors.add(errName)
+              if (!knownErrors.has(errName)) {
+                findings.push({
+                  kind: "stale-doc-reference",
+                  nodeId: `${doc.id}:${errName}`,
+                  message: `Governance doc "${doc.docPath}" (${doc.id}) references non-existent TaggedError "${errName}" in a Mermaid diagram.`
+                })
+              }
+            }
+          }
+        }
+      }
     }
   }
 
@@ -354,6 +401,12 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
             kind: "missing-decider-property-test",
             nodeId: node.spanName,
             message: `Pure domain decider "${node.spanName}" (${node.qualname}) has 0 Property-Based Tests (use it.effect.prop / it.prop with Schema arbitraries to prevent example-only blind spots).`
+          })
+        } else if ((incomingRichPropertyTests.get(idx) ?? 0) === 0) {
+          findings.push({
+            kind: "shallow-decider-property-test",
+            nodeId: node.spanName,
+            message: `Pure domain decider "${node.spanName}" (${node.qualname}) is only exercised by scalar/primitive property tests — generate domain Event or Command schemas (e.g. Schema.Array(EventSchema)) in it.prop / it.effect.prop.`
           })
         }
       }
@@ -652,4 +705,201 @@ export const loadGovernanceDocsFromDisk = (
   }
 
   return results
+}
+
+const PackageJsonSchema = Schema.Struct({
+  name: Schema.optional(Schema.String),
+  dependencies: Schema.optional(Schema.Record(Schema.String, Schema.String))
+})
+
+const decodePackageJson = Schema.decodeUnknownOption(
+  Schema.fromJsonString(PackageJsonSchema)
+)
+
+const SKIPPED_PACKAGE_DEPS = new Set([
+  "effect",
+  "@effect/sql-d1",
+  "@effect/sql-sqlite-do",
+  "@effect/ai-typesafe",
+  "drizzle-orm"
+])
+
+export const scanWorkspacePackageHygiene = (
+  repoRoot: string
+): ReadonlyArray<GcFinding> => {
+  const libsDir = join(repoRoot, "libs")
+  const scopes = Effect.runSync(
+    Effect.try({
+      try: () => {
+        if (!existsSync(libsDir)) {
+          return []
+        }
+        return readdirSync(libsDir, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => entry.name)
+          .sort((a, b) => a.localeCompare(b))
+      },
+      catch: () => []
+    }).pipe(Effect.orElseSucceed(() => []))
+  )
+
+  const collectTsFiles = (dir: string): ReadonlyArray<string> =>
+    Effect.runSync(
+      Effect.try({
+        try: () => {
+          if (!existsSync(dir)) {
+            return []
+          }
+          const entries = readdirSync(dir, { withFileTypes: true })
+          const result: Array<string> = []
+          for (const entry of entries) {
+            const full = join(dir, entry.name)
+            if (entry.isDirectory()) {
+              result.push(...collectTsFiles(full))
+            } else if (
+              entry.isFile() &&
+              (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx")) &&
+              !entry.name.endsWith(".d.ts")
+            ) {
+              result.push(full)
+            }
+          }
+          return result.sort((a, b) => a.localeCompare(b))
+        },
+        catch: () => []
+      }).pipe(Effect.orElseSucceed(() => []))
+    )
+
+  const collectAllFiles = (dir: string): ReadonlyArray<string> =>
+    Effect.runSync(
+      Effect.try({
+        try: () => {
+          if (!existsSync(dir)) {
+            return []
+          }
+          const entries = readdirSync(dir, { withFileTypes: true })
+          const result: Array<string> = []
+          for (const entry of entries) {
+            const full = join(dir, entry.name)
+            if (entry.isDirectory()) {
+              result.push(...collectAllFiles(full))
+            } else if (entry.isFile()) {
+              result.push(full)
+            }
+          }
+          return result.sort((a, b) => a.localeCompare(b))
+        },
+        catch: () => []
+      }).pipe(Effect.orElseSucceed(() => []))
+    )
+
+  const findings: Array<GcFinding> = []
+
+  for (const scope of scopes) {
+    const scopeDir = join(libsDir, scope)
+    const tiers = Effect.runSync(
+      Effect.try({
+        try: () => {
+          if (!existsSync(scopeDir)) {
+            return []
+          }
+          return readdirSync(scopeDir, { withFileTypes: true })
+            .filter((entry) => entry.isDirectory())
+            .map((entry) => entry.name)
+            .sort((a, b) => a.localeCompare(b))
+        },
+        catch: () => []
+      }).pipe(Effect.orElseSucceed(() => []))
+    )
+
+    for (const tier of tiers) {
+      const tierDir = join(scopeDir, tier)
+      const srcDir = join(tierDir, "src")
+      const hasSrc = Effect.runSync(
+        Effect.try({
+          try: () => existsSync(srcDir),
+          catch: () => false
+        }).pipe(Effect.orElseSucceed(() => false))
+      )
+      if (!hasSrc) {
+        continue
+      }
+
+      const srcFiles = collectTsFiles(srcDir)
+      for (const file of srcFiles) {
+        const content = Effect.runSync(
+          Effect.try({
+            try: () => readFileSync(file, "utf8"),
+            catch: () => ""
+          }).pipe(Effect.orElseSucceed(() => ""))
+        )
+        const stripped = content
+          .replace(/\/\*[\s\S]*?\*\//g, "")
+          .replace(/\/\/[^\r\n]*/g, "")
+          .replace(/\s+/g, "")
+        if (stripped === "" || stripped === "export{}" || stripped === "export{};") {
+          const relFilePath = relative(repoRoot, file).replace(/\\/g, "/")
+          findings.push({
+            kind: "empty-source-module",
+            nodeId: relFilePath,
+            message: `Source module "${relFilePath}" contains only an empty export ('export {}') — remove dead placeholder modules or export concrete contracts.`
+          })
+        }
+      }
+
+      const pkgJsonPath = join(tierDir, "package.json")
+      const pkgContent = Effect.runSync(
+        Effect.try({
+          try: () => (existsSync(pkgJsonPath) ? readFileSync(pkgJsonPath, "utf8") : ""),
+          catch: () => ""
+        }).pipe(Effect.orElseSucceed(() => ""))
+      )
+
+      if (pkgContent.length > 0) {
+        const pkgOpt = decodePackageJson(pkgContent)
+        if (Option.isSome(pkgOpt) && pkgOpt.value.dependencies !== undefined) {
+          const dependencies = pkgOpt.value.dependencies
+          const pkgName = pkgOpt.value.name ?? `${scope}/${tier}`
+          const scriptsDir = join(tierDir, "scripts")
+          const scriptFiles = Effect.runSync(
+            Effect.try({
+              try: () => (existsSync(scriptsDir) ? collectAllFiles(scriptsDir) : []),
+              catch: () => []
+            }).pipe(Effect.orElseSucceed(() => []))
+          )
+          const allPackageFiles = [...srcFiles, ...scriptFiles]
+          const combinedContent = allPackageFiles
+            .map((f) =>
+              Effect.runSync(
+                Effect.try({
+                  try: () => readFileSync(f, "utf8"),
+                  catch: () => ""
+                }).pipe(Effect.orElseSucceed(() => ""))
+              )
+            )
+            .join("\n")
+
+          for (const depName of Object.keys(dependencies)) {
+            if (SKIPPED_PACKAGE_DEPS.has(depName)) {
+              continue
+            }
+            const isReferenced =
+              combinedContent.includes(`"${depName}"`) ||
+              combinedContent.includes(`'${depName}'`) ||
+              combinedContent.includes(`"${depName}/`) ||
+              combinedContent.includes(`'${depName}/`)
+            if (!isReferenced) {
+              findings.push({
+                kind: "unused-package-dependency",
+                nodeId: `${pkgName}:${depName}`,
+                message: `Package "${pkgName}" declares dependency "${depName}" in package.json, but no file in src/ imports it.`
+              })
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return findings
 }

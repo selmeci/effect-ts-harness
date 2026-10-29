@@ -52,6 +52,17 @@ One paragraph describing what will be true about the product when finished — n
 ## How to read the requirements
 Requirements follow EARS syntax. Each requirement is a single sentence with bold keywords (`When`, `While`, `If ... then`, `Where`) and the modal `shall` or `shall not`.
 
+### Verification Column Mapping Rules
+
+The `Verification` column in the EARS table maps each requirement to its deterministic enforcement mechanism:
+- **`UnitTest` / `PropertyTest`:** Dynamic runtime assertions in `@effect/vitest` for business logic, return channel `A`, and typed failure channel `E`.
+- **`GraphCheck` / `AstGate`:** Static type-channel invariants (`R = never` for pure deciders, `E = never` for infallible reducers) **must** use `Verification: GraphCheck` or `AstGate` (never `UnitTest`), enforced by `ontology-unverified-requirement`. Pure deciders cannot be proven pure by runtime tests alone.
+- **`TraceTest`:** Distributed trace capture with `@harness/ingest`.
+
+### Frontmatter & Mermaid Symbol Parity Rules
+- **Mermaid Diagram `*Error` Parity:** Any `*Error` symbol appearing inside a Mermaid diagram in an EARS spec or ADR **must** be declared in frontmatter `errors:` and emitted by an `EffectFn`. Failing to do so triggers `stale-doc-reference` (if undeclared or non-existent in code) and `dead-tagged-error` (if declared in frontmatter but not yielded by an `EffectFn`).
+- **No Future-Phase Leaks:** Never reference unbuilt errors, hypothetical command deduplication, or future-phase types in Mermaid diagrams or prose.
+
 ## Requirements
 
 ### 1 · <Area Name>
@@ -61,7 +72,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | ID | Pattern | Requirement | Effect Symbol | Verification |
 | --- | --- | --- | --- | --- |
 | REQ-1.1 | Event-driven | **When** a valid PhotoUpload payload is submitted, the Sample.uploadPhoto use-case **shall** store the photo and return PhotoMetadata. | Sample.uploadPhoto | UnitTest |
-| REQ-1.2 | State-driven | **While** currentCount is greater than or equal to maxAllowed, the AlbumQuota.decide decider **shall** return QuotaExceeded. | AlbumQuota.decide | PropertyTest |
+| REQ-1.2 | State-driven | **While** currentCount is greater than or equal to maxAllowed, the AlbumQuota.decide decider **shall** return QuotaExceeded with R = never. | AlbumQuota.decide | GraphCheck |
 | REQ-1.3 | Unwanted behaviour | **If** the requested photoId is not present in PhotoRepo, **then** the Sample.getPhoto use-case **shall** fail with PhotoNotFoundError. | PhotoNotFoundError | UnitTest |
 
 ## Assumptions
@@ -74,7 +85,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 * Concurrent photo uploads to the same album rely on Durable Object atomic transactions; high concurrency on a single album may queue behind the DO actor mailbox.
 
 ## Acceptance criteria
-* All requirement rows pass their declared Verification methods (`UnitTest`, `PropertyTest`, `TraceTest`).
+* All requirement rows pass their declared Verification methods (`UnitTest`, `PropertyTest`, `TraceTest`, `GraphCheck`, `AstGate`).
 * Affected Nx packages updated: `type:contract` -> `type:service` -> `type:domain` -> `type:infra` -> `scope:web`.
 * Frontmatter updated to `status: accepted` upon implementation and verified by `harness gc --strict`.
 ```
@@ -87,6 +98,8 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | "I can write a prose Markdown implementation plan instead of EARS" | Prose plans hide missing `E` (error) and `WHILE` (pure `.decide` over `Schema.TaggedUnion` with `match()...exhaustive()`) channels. EARS maps 1:1 to `Effect<A, E, R>`. |
 | "I don't need `harness_resolve` before asking questions" | Asking without checking the graph wastes the user's time on things already defined in `type:contract` or `type:service`. |
 | "I can use 'the system shall' to save time" | Generic subjects fail `EarsSpecLint.decide` (`generic-subject`). Every Effect requirement must name a concrete symbol. |
+| "I can verify `R = never` or `E = never` with a `UnitTest`" | Static type-channel invariants cannot be verified by running a unit test; they must be verified by `GraphCheck` or `AstGate` (`ontology-unverified-requirement`). |
+| "I can show future error paths in the Mermaid diagram" | Any `*Error` in a spec or ADR Mermaid diagram must be declared in frontmatter `errors:` and emitted by an `EffectFn` (`stale-doc-reference` & `dead-tagged-error`). |
 
 ## Red Flags — STOP
 
@@ -95,5 +108,8 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 - Writing full implementation code inside a `.md` plan file
 - Inventing domain error or quota rules without checking `harness_resolve`
 - Adding `Status` or `Evidence` columns to the requirements table
+- Using `UnitTest` to verify static type-channel invariants like `R = never` or `E = never` (use `GraphCheck` or `AstGate`)
+- Drawing `*Error` symbols in Mermaid diagrams that are not declared in frontmatter `errors:` and emitted by an `EffectFn` (`stale-doc-reference`, `dead-tagged-error`)
 
 **REQUIRED NEXT SKILL:** After the user approves the EARS specification, use `planning-effect-skeletons`.
+

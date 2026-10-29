@@ -137,7 +137,7 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(
         let refErrors = doc.referencedErrors ?? []
         if (refErrors.length === 0) {
           const specNode = resolveNode(input.graph, doc.id)
-          if (specNode && specNode._tag === "EarsSpec") {
+          if (specNode && specNode._tag === "EarsSpec" && specNode.referencedErrors !== undefined) {
             refErrors = specNode.referencedErrors
           }
         }
@@ -329,6 +329,21 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(
     }
 
     // Rule 5: ontology-unverified-requirement
+    for (const spec of parsedSpecs) {
+      if (spec.doc.status === "accepted" || spec.doc.status === "proposed") {
+        for (const row of spec.requirements) {
+          const verif = row.verification.trim().toLowerCase()
+          if (/\bR\s*=\s*never\b/.test(row.requirement) && verif === "unittest") {
+            findings.push({
+              kind: "ontology-unverified-requirement",
+              nodeId: `${spec.doc.id}:${row.id}`,
+              message: `Requirement ${row.id} specifies a static type-channel invariant (R = never) with UnitTest verification — use GraphCheck or AstGate instead.`
+            })
+          }
+        }
+      }
+    }
+
     if (hasVitestCases) {
       for (const spec of parsedSpecs) {
         if (spec.doc.status === "accepted" || spec.doc.status === "proposed") {

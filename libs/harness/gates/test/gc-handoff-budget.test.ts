@@ -27,6 +27,7 @@ import {
   parseGovernanceDocFrontmatter,
   resolveHarnessStateDir,
   scanGraphEntropy,
+  scanWorkspacePackageHygiene,
   type CodeMutant,
   type FrictionCluster,
   type FrictionEvent,
@@ -1928,6 +1929,200 @@ Context description here.
       )
       expect(placeholderMismatch).toBeDefined()
       expect(placeholderMismatch?.message).toContain("empty or placeholder cell")
+    })
+
+    it.effect("flags shallow-decider-property-test when decider property test only has scalar/primitive arbitraries", () =>
+      Effect.gen(function* () {
+        const fnQualname = "libs/sample/domain/src/index.ts#Album.decide"
+        const testId = "libs/sample/domain/test/index.test.ts#test1"
+
+        const graphWithShallowProp = buildHarnessGraph({
+          fns: [
+            {
+              qualname: fnQualname,
+              spanName: "Album.decide",
+              packageTag: "domain",
+              file: "libs/sample/domain/src/index.ts",
+              line: 14,
+              successType: "number",
+              isStub: false
+            }
+          ],
+          tests: [
+            {
+              testId,
+              testFile: "libs/sample/domain/test/index.test.ts",
+              testName: "libs/sample/domain/test/index.test.ts",
+              lastTreeHash: "workspace",
+              isPropertyTest: true,
+              hasNonPrimitiveArbitrary: false
+            } as any
+          ],
+          exercisesSpans: [
+            {
+              testId,
+              calleeQualname: fnQualname,
+              callCount: 1,
+              receiverLayer: null
+            }
+          ]
+        })
+
+        const report = yield* decideGraphEntropy({
+          graph: graphWithShallowProp,
+          checkDeciderPropertyTests: true
+        })
+
+        expect(report.clean).toBe(false)
+        const shallowFinding = report.findings.find(
+          (f) => f.kind === "shallow-decider-property-test"
+        )
+        expect(shallowFinding).toBeDefined()
+        expect(shallowFinding?.nodeId).toBe("Album.decide")
+        expect(shallowFinding?.message).toContain("only exercised by scalar/primitive property tests")
+      })
+    )
+
+    it.effect("flags stale-doc-reference when an accepted spec Mermaid diagram references non-existent TaggedError", () =>
+      Effect.gen(function* () {
+        const graph = buildHarnessGraph({
+          errors: [
+            {
+              errorTag: "KnownDomainError",
+              file: "libs/sample/contract/src/index.ts"
+            }
+          ]
+        })
+
+        const doc: GovernanceDocReference = {
+          id: "sample:SPEC-0004",
+          docPath: "libs/sample/docs/specs/0004.md",
+          status: "accepted",
+          markdown: `---
+id: sample:SPEC-0004
+title: Decider Spec
+status: accepted
+---
+
+# Architecture Diagram
+
+\`\`\`mermaid
+flowchart TD
+  Decider --> DeciderInvariantError
+  Decider --> KnownDomainError
+\`\`\`
+`
+        }
+
+        const report = yield* decideGraphEntropy({
+          graph,
+          governanceDocs: [doc]
+        })
+
+        expect(report.clean).toBe(false)
+        const staleErrorFinding = report.findings.find(
+          (f) =>
+            f.kind === "stale-doc-reference" &&
+            f.nodeId === "sample:SPEC-0004:DeciderInvariantError"
+        )
+        expect(staleErrorFinding).toBeDefined()
+        expect(staleErrorFinding?.message).toContain(
+          'references non-existent TaggedError "DeciderInvariantError" in a Mermaid diagram'
+        )
+
+        const knownFinding = report.findings.find(
+          (f) =>
+            f.kind === "stale-doc-reference" &&
+            f.nodeId.includes("KnownDomainError")
+        )
+        expect(knownFinding).toBeUndefined()
+      })
+    )
+
+    it("detects empty-source-module and unused-package-dependency with scanWorkspacePackageHygiene", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "harness-hygiene-test-"))
+      try {
+        const domainPkgDir = join(tempDir, "libs", "sample", "domain")
+        const srcDir = join(domainPkgDir, "src")
+        mkdirSync(srcDir, { recursive: true })
+
+        writeFileSync(
+          join(domainPkgDir, "package.json"),
+          JSON.stringify(
+            {
+              name: "@sample/domain",
+              dependencies: {
+                "unimported-dependency": "1.0.0",
+                effect: "4.0.0"
+              }
+            },
+            null,
+            2
+          )
+        )
+
+        writeFileSync(
+          join(srcDir, "errors.ts"),
+          `// Empty error placeholder module
+/* Block comment */
+export {};
+`
+        )
+
+        writeFileSync(
+          join(srcDir, "index.ts"),
+          `export const value = 42\n`
+        )
+
+        const findings = scanWorkspacePackageHygiene(tempDir)
+
+        const emptyModuleFinding = findings.find(
+          (f) => f.kind === "empty-source-module" && f.nodeId === "libs/sample/domain/src/errors.ts"
+        )
+        expect(emptyModuleFinding).toBeDefined()
+        expect(emptyModuleFinding?.message).toContain("contains only an empty export ('export {}')")
+
+        const unusedDepFinding = findings.find(
+          (f) =>
+            f.kind === "unused-package-dependency" &&
+            f.nodeId === "@sample/domain:unimported-dependency"
+        )
+        expect(unusedDepFinding).toBeDefined()
+        expect(unusedDepFinding?.message).toContain(
+          'Package "@sample/domain" declares dependency "unimported-dependency" in package.json, but no file in src/ imports it.'
+        )
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true })
+      }
+    })
+
+    it("discovers guard-condition mutants for Equal.equals and Exit.isSuccess", () => {
+      const sourceCode = `
+export const checkGuard = (actual: unknown, expected: unknown, exit: Exit.Exit<unknown, unknown>) => {
+  if (!Equal.equals(actual, expected)) {
+    return false
+  }
+  if (Equal.equals(actual, expected)) {
+    return true
+  }
+  if (Exit.isSuccess(exit)) {
+    return true
+  }
+  return false
+}
+`
+      const mutants = discoverDomainMutants("libs/sample/domain/src/check.ts", sourceCode)
+      const guardMutants = mutants.filter((m) => m.category === "guard-condition")
+      expect(guardMutants).toHaveLength(3)
+
+      const notEqualMutant = guardMutants.find((m) => m.original === "if (!Equal.equals(")
+      expect(notEqualMutant?.replacement).toBe("if (false && !Equal.equals(")
+
+      const equalMutant = guardMutants.find((m) => m.original === "if (Equal.equals(")
+      expect(equalMutant?.replacement).toBe("if (true || Equal.equals(")
+
+      const exitMutant = guardMutants.find((m) => m.original === "if (Exit.isSuccess(")
+      expect(exitMutant?.replacement).toBe("if (false && Exit.isSuccess(")
     })
   })
 })

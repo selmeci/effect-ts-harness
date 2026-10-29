@@ -631,4 +631,61 @@ spans:
       expect(unverifiedFindings).toHaveLength(0)
     })
   )
+
+  it.effect("flags Rule 5: ontology-unverified-requirement when R = never requirement has UnitTest verification", () =>
+    Effect.gen(function* () {
+      const graph = buildHarnessGraph({
+        earsSpecs: [
+          {
+            id: "sample:SPEC-0003",
+            title: "Type Safety Spec",
+            status: "accepted",
+            path: "libs/sample/docs/specs/0003.md",
+            enforcedByFiles: [],
+            referencedSpans: [],
+            referencedServices: [],
+            referencedErrors: []
+          }
+        ]
+      })
+
+      const doc: GovernanceDocReference = {
+        id: "sample:SPEC-0003",
+        docPath: "libs/sample/docs/specs/0003.md",
+        status: "accepted",
+        markdown: `---
+id: sample:SPEC-0003
+title: Type Safety Spec
+status: accepted
+---
+
+# sample:SPEC-0003: Type Safety Spec
+
+## Requirements
+
+### Area 1: Invariants
+
+| ID | Pattern | Requirement | Effect Symbol | Verification |
+| --- | --- | --- | --- | --- |
+| REQ-3.1 | Ubiquitous | The decider shall preserve R = never purity. | Album.decide | UnitTest |
+`
+      }
+
+      const report = yield* decideOntologyInvariants({
+        graph,
+        governanceDocs: [doc]
+      })
+
+      expect(report.clean).toBe(false)
+      const finding = report.findings.find(
+        (f) =>
+          f.kind === "ontology-unverified-requirement" &&
+          f.nodeId === "sample:SPEC-0003:REQ-3.1"
+      )
+      expect(finding).toBeDefined()
+      expect(finding?.message).toContain(
+        "Requirement REQ-3.1 specifies a static type-channel invariant (R = never) with UnitTest verification — use GraphCheck or AstGate instead."
+      )
+    })
+  )
 })

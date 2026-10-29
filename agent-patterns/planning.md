@@ -132,3 +132,49 @@ export const deletePhoto = Effect.fn("Sample.deletePhoto")(function* (id: number
 })
 ```
 
+---
+
+## Phase-Strict Scope & Doc-to-Code Parity Checklist
+
+Before advancing a plan from skeleton to implementation, verify complete doc-to-code parity and phase hygiene:
+
+- [ ] **No Future-Phase Leakage:** Never copy unimplemented future-phase symbols (e.g., `DeciderInvariantError`, `commandId` idempotency deduplication, partial event matching, or unconfigured `scope:fixture` Nx tags) into the current phase's EARS Spec or ADR. Only plan and declare what is being built in the active phase.
+- [ ] **1:1 Symbol Parity:** Every method name (e.g. `.thenEvents`, `.thenNothing`, `.thenFails`), every `*Error` symbol mentioned in prose or Mermaid diagrams, and every Nx tag in the Spec/ADR must match the current skeleton 1:1. Any symbol in an ADR or Spec that does not exist in code violates `stale-doc-reference`.
+- [ ] **No Empty Source Modules (`empty-source-module` gate):** Never leave placeholder `export {}` files in `src/`. Every source file must contain real domain schemas, service interfaces, or `stub<A, E, R>` signatures.
+- [ ] **Clean Dependency Manifests (`unused-package-dependency` gate):** Never leave unused packages in `package.json` `dependencies`. Note: `@harness/gates` and `@harness/graph` belong in `devDependencies` during planning for `stub()`, and must not remain in runtime `dependencies` once implementation replaces stubs.
+
+---
+
+## Adversarial & Negative Test Matrix
+
+Every plan must include an Adversarial & Negative Test Matrix specifying how boundaries, deciders, and test helpers are tested against invalid states and defects:
+
+### 1. Contract Schemas (`type:contract`)
+- **Positive & Negative Decode Tests:** Every constrained schema (`Schema.Int`, `Schema.Natural`, `PositiveInt`, `NonEmptyString`) must plan both positive decode tests and negative rejection tests asserting failure on `-1`, `1.5`, `""`, missing fields, or null.
+- **Decode-Time Filters vs Compile-Time Branded Types:** Note that `Schema.Int` and `Schema.Natural` are decode-time filters whose TypeScript type is plain `number`. In memory, TypeScript will not prevent passing `-1` or non-integer numbers unless compile-time branding is added. When compile-time branding is needed for in-memory type safety, use `.pipe(Schema.brand("..."))`.
+
+### 2. BDD / Test Runners (`testing.ts` in `type:core`)
+When building domain test harnesses or BDD assertion builders (e.g. `given(...).when(...).thenEvents(...)`):
+- **Strict Structural Equality (`fallback-json-equality` gate):** Compare actual vs expected values strictly using `Equal.equals(actual, expected)` from `effect`. Never fall back to `JSON.stringify(a) === JSON.stringify(b)`, which masks class/prototype differences and non-enumerable properties.
+- **Required Expected Error Parameter (`vacuous-error-assertion` gate):** Require an explicit expected error instance or predicate in `.thenFails(expectedError)`. Never make the error parameter optional (e.g., `.thenFails(expected?: E)`), as calling `.thenFails()` without an argument creates a vacuous assertion that passes on *any* failure.
+- **Runner Negative Meta-Tests (`guard-condition` mutation gate):** The plan must include negative meta-tests that verify the BDD runner itself fails when given incorrect expectations. Use a fake failing decider to assert that the runner produces an `Exit.isFailure` / `Cause.isDie` when:
+  1. Wrong event count is emitted.
+  2. Wrong event payload is emitted.
+  3. Decider succeeds when `.thenFails` was expected.
+  4. Decider throws an unhandled defect (`Die`) when a typed domain error (`Fail`) was expected.
+
+### 3. Decider / Reducer Property-Based Tests
+- **Ban Scalar-Only Property Tests (`shallow-decider-property-test` gate):** Never write property tests that generate only scalar parameters (`[PositiveInt, PositiveInt]`) and fold hardcoded happy-path event sequences.
+- **Arbitrary Stream Generation (`Schema.Array(EventUnionSchema)`):** Always generate arbitrary sequences of events using `Schema.Array(EventUnionSchema)` covering:
+  - Empty event streams (`[]`).
+  - Terminal events (e.g., `CheckedOut`, `Closed`, `Cancelled`).
+  - Post-terminal events (verifying that subsequent events do not mutate or revive terminal state).
+- **Chunked Fold Equivalence Invariant:** Assert that folding an arbitrary event stream in chunks equals folding the stream all at once:
+  ```ts
+  // For any partition index k in [0, events.length]:
+  const fullFold = fold(events)
+  const chunkedFold = fold(events.slice(k), fold(events.slice(0, k)))
+  expect(Equal.equals(chunkedFold, fullFold)).toBe(true)
+  ```
+
+
