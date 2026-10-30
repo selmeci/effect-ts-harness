@@ -348,8 +348,9 @@ describe("Antigravity adapter & plugin configuration", () => {
     expect(allowStdout.trim()).toBe("")
   })
 
-  it("ships specifying-ears-with-effect, planning-effect-skeletons, executing-effect-stubs, compounding-effect-learnings, and resolving-effect-review-feedback in both adapters", () => {
+  it("ships effect-lfg, specifying-ears-with-effect, planning-effect-skeletons, executing-effect-stubs, compounding-effect-learnings, and resolving-effect-review-feedback in both adapters", () => {
     const workflowSkills = [
+      "effect-lfg",
       "specifying-ears-with-effect",
       "planning-effect-skeletons",
       "executing-effect-stubs",
@@ -374,6 +375,21 @@ describe("Antigravity adapter & plugin configuration", () => {
     }
 
     for (const base of [
+      resolve(pluginDir, "skills/effect-lfg"),
+      resolve(repoRoot, "adapters/claude-code/skills/effect-lfg")
+    ]) {
+      expect(existsSync(resolve(base, "references/autonomous-intake-and-ears.md"))).toBe(true)
+      expect(existsSync(resolve(base, "references/review-and-shipping.md"))).toBe(true)
+    }
+
+    const claudeCommand = readFileSync(
+      resolve(repoRoot, "adapters/claude-code/commands/effect-lfg.md"),
+      "utf8"
+    )
+    expect(claudeCommand).toContain("name: effect-lfg")
+    expect(claudeCommand).toContain("argument-hint:")
+
+    for (const base of [
       resolve(pluginDir, "skills/resolving-effect-review-feedback"),
       resolve(repoRoot, "adapters/claude-code/skills/resolving-effect-review-feedback")
     ]) {
@@ -382,7 +398,7 @@ describe("Antigravity adapter & plugin configuration", () => {
     }
   })
 
-  it("documents all 6 workflow skills and all 4 specialist reviewer subagents in README.md and adapter READMEs", () => {
+  it("documents all 7 workflow skills and all 4 specialist reviewer subagents in README.md and adapter READMEs", () => {
     const docPaths = [
       resolve(repoRoot, "README.md"),
       resolve(pluginDir, "README.md"),
@@ -390,6 +406,7 @@ describe("Antigravity adapter & plugin configuration", () => {
     ]
     const workflowSkills = [
       "effect-harness",
+      "effect-lfg",
       "specifying-ears-with-effect",
       "planning-effect-skeletons",
       "executing-effect-stubs",

@@ -11,8 +11,11 @@ adapters/claude-code/
 ├── hooks.json          # Lifecycle hooks wiring SessionStart, PreToolUse, PostToolUse, and Stop
 ├── rules/
 │   └── AGENTS.md       # Governing harness rules, order of authority, and coding standards
+├── commands/
+│   └── effect-lfg.md   # Slash command entrypoint (/effect-lfg)
 ├── skills/
 │   ├── effect-harness/                   # Master orchestrator for the 7-step lifecycle
+│   ├── effect-lfg/                       # Autonomous end-to-end pipeline (/effect-lfg)
 │   ├── specifying-ears-with-effect/      # EARS requirement and ADR authoring
 │   ├── planning-effect-skeletons/        # Plan-as-Code stub<A, E, R>() skeleton generation
 │   ├── executing-effect-stubs/           # Implementation, test authoring, and gate execution
@@ -54,9 +57,9 @@ The adapter configures three Model Context Protocol servers over stdio:
 
 ---
 
-## 6 Workflow Skills
+## 7 Workflow Skills
 
-Use the workflow skills to drive task progress through each lifecycle stage:
+Use the workflow skills to drive task progress through each lifecycle stage or execute end-to-end autonomously:
 
 ### 1. `effect-harness`
 - **When to Use:** Master lifecycle orchestrator. Use at the start of any new engineering task or when coordinating work across contracts, domain logic, and infrastructure.
@@ -65,28 +68,35 @@ Use the workflow skills to drive task progress through each lifecycle stage:
   "Implement a D1 session repository in libs/sample/infra following the effect-harness lifecycle."
   ```
 
-### 2. `specifying-ears-with-effect`
+### 2. `effect-lfg` (`/effect-lfg`)
+- **When to Use:** Autonomous end-to-end pipeline orchestrator. Use when you want to pass a requirement, bug report, or EARS spec and have the harness run hands-off from start to finish (EARS spec with explicit `## Assumptions` $\rightarrow$ `stub<A, E, R>()` & `plan-check` $\rightarrow$ subagent implementation $\rightarrow$ 4-lens specialist review & auto-fix $\rightarrow$ `learn`, `gc --strict`, `mutate --strict`, `verify`, `done` $\rightarrow$ git commit & optional PR).
+- **Trigger / Starter Prompt:**
+  ```text
+  "/effect-lfg Add a Sample.archiveAlbum use-case to libs/sample that marks an album archived or fails with AlbumNotFoundError."
+  ```
+
+### 3. `specifying-ears-with-effect`
 - **When to Use:** Step 1 of the task lifecycle. Use before writing code or skeletons when requirements are informal, unwritten, or missing EARS clauses (`WHEN`, `IF/THEN`, `WHILE`, `WHERE`).
 - **Trigger / Starter Prompt:**
   ```text
   "Author the EARS specification and ADR for rate-limiting Durable Object storage using specifying-ears-with-effect."
   ```
 
-### 3. `planning-effect-skeletons`
+### 4. `planning-effect-skeletons`
 - **When to Use:** Steps 2–3 of the task lifecycle. Use after specification approval to translate EARS clauses into compilable `stub<A, E, R>()` signatures and pass `harness plan-check`.
 - **Trigger / Starter Prompt:**
   ```text
   "Create plan-as-code skeletons for the session store service and domain functions using planning-effect-skeletons."
   ```
 
-### 4. `executing-effect-stubs`
+### 5. `executing-effect-stubs`
 - **When to Use:** Steps 4–6 of the task lifecycle. Use once `harness plan-check` passes on `plan/<task>` to replace stubs with `Effect.fn` implementations, Layers, and Vitest test suites.
 - **Trigger / Starter Prompt:**
   ```text
   "Execute stubs in libs/sample/domain and libs/sample/infra using executing-effect-stubs and verify all gates."
   ```
 
-### 5. `resolving-effect-review-feedback`
+### 6. `resolving-effect-review-feedback`
 - **When to Use:** Step 8 (Post-PR / External Review Resolution). Use when addressing code review comments from Grok, Codex, Claude, human reviewers, or GitHub PR threads (`gh pr view`).
 - **Trigger / Starter Prompt:**
   ```text
@@ -97,7 +107,7 @@ Use the workflow skills to drive task progress through each lifecycle stage:
   "Resolve the code review comments on pull request #42 using resolving-effect-review-feedback."
   ```
 
-### 6. `compounding-effect-learnings`
+### 7. `compounding-effect-learnings`
 - **When to Use:** Step 7 of the task lifecycle and post-review retrospectives. Use when completing tasks that encountered gate failures, route misses, or new idioms to promote friction into deterministic gates.
 - **Trigger / Starter Prompt:**
   ```text
