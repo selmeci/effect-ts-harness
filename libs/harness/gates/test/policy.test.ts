@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { Effect } from "effect"
 import { decideLoopThrashing, type FrictionEvent } from "../src/friction-log.js"
-import { classifyCommand } from "../src/policy.js"
+import { CD_COMMAND_BANNED_REASON, classifyCommand, isCdCommand } from "../src/policy.js"
 
 describe("guard policy", () => {
   it("allows nx, pnpm test, harness-cli, harness-mcp, and safe git commands", () => {
@@ -83,7 +83,7 @@ describe("guard policy", () => {
     expect(classifyCommand("git checkout .")).toBe("ask")
     expect(classifyCommand("git checkout -f main")).toBe("ask")
     expect(classifyCommand("git restore .")).toBe("ask")
-    expect(classifyCommand("git restore --staged -- src/a.ts")).toBe("ask")
+    expect(classifyCommand("git restore -- src/a.ts")).toBe("ask")
     expect(classifyCommand("git stash drop")).toBe("ask")
     expect(classifyCommand("git stash clear")).toBe("ask")
     expect(classifyCommand("git branch -D feat/old")).toBe("ask")
@@ -286,5 +286,27 @@ describe("guard policy", () => {
     const deniedStatus = Effect.runSync(decideLoopThrashing(deniedEvents, 3))
     expect(deniedStatus.stuck).toBe(true)
     expect(deniedStatus.consecutiveCount).toBe(3)
+  })
+
+  // harness:SPEC-0003 · 4 — shell guard ergonomics & workspace containment
+  it("REQ-4.1 denies cd shell commands and provides an actionable reason hint", () => {
+    expect(classifyCommand("cd libs/sample/domain")).toBe("deny")
+    expect(classifyCommand("cd /tmp && ls")).toBe("deny")
+    expect(classifyCommand("ls && cd /tmp")).toBe("deny")
+    expect(classifyCommand("echo foo; cd bar")).toBe("deny")
+    expect(classifyCommand("cd")).toBe("deny")
+
+    expect(isCdCommand("cd libs/sample/domain")).toBe(true)
+    expect(isCdCommand("cd /tmp && ls")).toBe(true)
+    expect(isCdCommand("ls && cd /tmp")).toBe(true)
+    expect(isCdCommand("cd")).toBe(true)
+    expect(isCdCommand("git commit -m 'cd to directory'")).toBe(false)
+    expect(CD_COMMAND_BANNED_REASON).toContain("Cwd")
+  })
+
+  it("REQ-4.2 allows git restore --staged while escalating git restore without --staged", () => {
+    expect(classifyCommand("git restore --staged docs/mvps/mvp_event_sourcing.md")).toBe("allow")
+    expect(classifyCommand("git restore --staged -- src/a.ts")).toBe("allow")
+    expect(classifyCommand("git restore docs/mvps/mvp_event_sourcing.md")).toBe("escalate")
   })
 })

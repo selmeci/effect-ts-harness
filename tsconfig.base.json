@@ -26,12 +26,15 @@
           "returnEffectInGen": "error",
           "runEffectInsideEffect": "error",
           "tryCatchInEffectGen": "error",
-          "unnecessaryEffectGen": "error"
+          "unnecessaryEffectGen": "error",
+          "unstableApiUsage": "off"
         },
         "ignoreEffectSuggestionsInTscExitCode": false,
         "ignoreEffectWarningsInTscExitCode": false,
         "ignoreEffectErrorsInTscExitCode": false
       }
     ]
-  }
+  },
+  "exclude": ["repos", "node_modules", "dist", "coverage", ".nx"]
 }
+

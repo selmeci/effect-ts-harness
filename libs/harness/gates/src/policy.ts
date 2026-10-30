@@ -29,6 +29,7 @@ export const ALLOWLIST: ReadonlyArray<string> = [
   "git checkout",
   "git switch",
   "git add",
+  "git restore --staged",
   "git commit",
   "git fetch",
   "git push",
@@ -223,7 +224,10 @@ export const GIT_DISCARD_PATTERNS: ReadonlyArray<GuardPatternRule> = [
     pattern: /\bgit\s+checkout\s+(?:\S+\s+)*(?:--|\.\/?|-f|--force)(?:\s|$)/,
     reason: "git checkout discarding working-tree changes"
   },
-  { pattern: /\bgit\s+restore\b/, reason: "git restore discarding changes" },
+  {
+    pattern: /\bgit\s+restore\s+(?!.*--staged\b)(?:\S+\s+)*(?:--|\.\/?|-f|--force)(?:\s|$)/,
+    reason: "git restore discarding changes"
+  },
   { pattern: /\bgit\s+stash\s+(?:drop|clear)\b/, reason: "git stash drop/clear" },
   {
     pattern: /\bgit\s+branch\s+(?:\S+\s+)*(?:-[Dd]|--delete)(?:\s|$)/,
@@ -285,9 +289,28 @@ export const isCommandAllowed = (command: string): boolean => {
   })
 }
 
+export const isCdCommand = (trimmed: string): boolean => {
+  const stripped = trimmed
+    .trim()
+    .replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&]+\s+)+/, "")
+  const view = toCommandView(stripped)
+  const firstWord = view.argv.split(/\s+/)[0]
+  if (firstWord === "cd") {
+    return true
+  }
+  return /(?:^|[;&|]\s*)cd(?:\s+|$)/.test(view.argv)
+}
+
 /** Rule order is load-bearing (harness:ADR-0003): deny → ask → escalate → allow.
  * Every rule that removes the automatic `allow` must run before the prefix allowlist. */
 export const classifyCommand = (command: string): GuardVerdict => {
+  const trimmed = command.trim()
+  if (trimmed === "") {
+    return "escalate"
+  }
+  if (isCdCommand(trimmed)) {
+    return "deny"
+  }
   const view = toCommandView(command)
   if (DENYLIST.some((entry) => containsToken(view.argv, entry.token))) {
     return "deny"
@@ -336,6 +359,9 @@ export const classifyCommand = (command: string): GuardVerdict => {
   }
   return isCommandAllowed(command) ? "allow" : "escalate"
 }
+
+export const CD_COMMAND_BANNED_REASON =
+  "Shell 'cd' commands are banned by harness policy; use the tool Cwd parameter instead."
 
 export interface FileWriteGuardResult {
   readonly verdict: "allow" | "deny" | "ask"

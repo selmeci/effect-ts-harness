@@ -294,8 +294,13 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
       (e.outcome === "fail" || e.outcome === "deny")
   ).length
 
+  const isInternalOmnigraphSync = (toolName: string): boolean =>
+    toolName.startsWith("omnigraph:sync-") || toolName.startsWith("omnigraph:merge-")
+
   const graphDiscoveryCalls = input.events.filter(
-    (e) => e.category === "graph_query" || e.category === "ontology"
+    (e) =>
+      (e.category === "graph_query" || e.category === "ontology") &&
+      !isInternalOmnigraphSync(e.toolName)
   ).length
 
   const nonHookCalls = input.events.filter((e) => e.surface !== "hook").length
@@ -304,7 +309,7 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
 
   const omnigraphCalls = input.events.filter((e) => e.engineSource === "omnigraph").length
   const fallbackCalls = input.events.filter(
-    (e) => e.engineSource === "memory-fallback" || e.outcome === "fallback"
+    (e) => e.engineSource === "memory-fallback"
   ).length
   const omnigraphLiveRatio =
     omnigraphCalls + fallbackCalls === 0
@@ -359,6 +364,11 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
   if (prematureDoneAttempts > 0) {
     recommendations.push(
       "Avoid invoking 'harness done' before 'harness verify' produces a valid verify-stamp.json."
+    )
+  }
+  if (bySurface.mcp === 0 && nonHookCalls >= 3) {
+    recommendations.push(
+      "Zero harness-mcp tool calls recorded (bySurface.mcp = 0). Prefer in-process MCP tools (harness_route, harness_lsp_diagnostics, harness_ontology_check, harness_resolve) over shell CLI subcommands."
     )
   }
 
