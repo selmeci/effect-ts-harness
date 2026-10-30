@@ -50,6 +50,29 @@ export interface TypeExtractorOptions {
   readonly patternDocs?: ReadonlyArray<PatternDocNode>
 }
 
+export interface TypeExtractorViolation {
+  readonly rule:
+    | "discriminant-branching"
+    | "non-exhaustive-union-match"
+    | "schema-boolean-state"
+    | "dead-event-payload"
+    | "terminal-state-unhandled"
+    | "fallback-json-equality"
+    | "vacuous-error-assertion"
+    | "unscoped-effect-run"
+    | "unbranded-schema-field"
+    | "handwritten-tagged-union"
+    | "untraced-decider"
+    | "missing-aggregate-id-guard"
+    | "unasserted-state-field"
+    | "unsafe-type-cast"
+  readonly message: string
+  readonly path: ReadonlyArray<string>
+  readonly file?: string | undefined
+  readonly line?: number | undefined
+  readonly enclosingSymbol?: string | undefined
+}
+
 const PackageJsonSchema = Schema.Struct({
   name: Schema.optional(Schema.String),
   nx: Schema.optional(
@@ -287,6 +310,81 @@ export const extractTypeAwareGraphFromSource = (
     readonly line: number
   }
   const taggedSchemasByTag = new Map<string, TaggedSchemaInfo>()
+
+  // 0. Zero-tolerance AST type safety check
+  for (const sourceFile of project.getSourceFiles()) {
+    const relPath = path.relative(repoRoot, sourceFile.getFilePath()).replace(/\\/g, "/")
+    const input = fileMap.get(relPath)
+    if (!input) continue
+
+    const checkNode = (node: ts.Node) => {
+      if (node.kind === ts.SyntaxKind.AnyKeyword) {
+        branchingViolations.push({
+          rule: "unsafe-type-cast",
+          message: `Explicit 'any' (as any, : any, <any>) is banned in '${input.filePath}' — use a concrete static type or decode via Effect Schema.`,
+          path: [input.filePath],
+          file: input.filePath,
+          line: sourceFile.compilerNode.getLineAndCharacterOfPosition(node.getStart(sourceFile.compilerNode)).line + 1,
+          enclosingSymbol: input.filePath
+        })
+      }
+
+      if (
+        (ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) &&
+        node.type.kind === ts.SyntaxKind.NeverKeyword
+      ) {
+        branchingViolations.push({
+          rule: "unsafe-type-cast",
+          message: `Unsafe 'as never' cast is banned in '${input.filePath}' — fix the type mismatch or use ts-pattern .exhaustive().`,
+          path: [input.filePath],
+          file: input.filePath,
+          line: sourceFile.compilerNode.getLineAndCharacterOfPosition(node.getStart(sourceFile.compilerNode)).line + 1,
+          enclosingSymbol: input.filePath
+        })
+      }
+
+      const unwrapParen = (expr: ts.Expression): ts.Expression => {
+        let curr = expr
+        while (ts.isParenthesizedExpression(curr)) {
+          curr = curr.expression
+        }
+        return curr
+      }
+
+      if (ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) {
+        const inner = unwrapParen(node.expression)
+        if (ts.isAsExpression(inner) || ts.isTypeAssertionExpression(inner)) {
+          branchingViolations.push({
+            rule: "unsafe-type-cast",
+            message: `Double type assertion ('as unknown as T') is banned in '${input.filePath}' — decode with Effect Schema or type the boundary properly.`,
+            path: [input.filePath],
+            file: input.filePath,
+            line: sourceFile.compilerNode.getLineAndCharacterOfPosition(node.getStart(sourceFile.compilerNode)).line + 1,
+            enclosingSymbol: input.filePath
+          })
+        }
+      }
+
+      if (
+        (ts.isParameter(node) || ts.isVariableDeclaration(node)) &&
+        node.type != null &&
+        node.type.kind === ts.SyntaxKind.NeverKeyword
+      ) {
+        branchingViolations.push({
+          rule: "unsafe-type-cast",
+          message: `Explicit ': never' annotation on parameter or variable is banned in '${input.filePath}'.`,
+          path: [input.filePath],
+          file: input.filePath,
+          line: sourceFile.compilerNode.getLineAndCharacterOfPosition(node.getStart(sourceFile.compilerNode)).line + 1,
+          enclosingSymbol: input.filePath
+        })
+      }
+
+      ts.forEachChild(node, checkNode)
+    }
+
+    checkNode(sourceFile.compilerNode)
+  }
 
   // 1. First pass: Extract Services, Errors, and Tagged Schemas
   for (const sourceFile of project.getSourceFiles()) {

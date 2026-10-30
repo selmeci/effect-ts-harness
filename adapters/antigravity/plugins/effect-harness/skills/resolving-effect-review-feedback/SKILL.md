@@ -177,6 +177,7 @@ Once all fixer reports are received and merged into the workspace:
 
 Stop execution immediately and escalate or re-adjudicate if any of the following occur:
 
+- Introducing or accepting any `as any`, `: any`, `<any>`, `as never`, or double type assertions (`as unknown as T`) (immediate `CRITICAL` blocker; type erasure is strictly banned).
 - Applying a reviewer suggestion without checking against `repos/effect/LLMS.md` and `agent-patterns/*.md` (e.g. accepting `try/catch`, `async/await`, `switch` on `_tag`, or unredacted secrets).
 - Fixing a single instance of a reported defect without running `harness_structural_search` to identify and fix twins.
 - Allowing a fixer subagent to execute `harness verify`, `harness done`, or `@modernrelay/omnigraph-mcp` write tools.

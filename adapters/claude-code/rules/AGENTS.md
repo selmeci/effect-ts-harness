@@ -55,6 +55,9 @@ Plan as code: write the skeleton first (schemas, errors, service interfaces, sig
   - Never use `if / else` or ternary `? :` to check a discriminant property (`_tag`, `kind`, `status`, custom literal tags) or tag guard (`Option.isSome`, `Either.isRight`, `Result.isSuccess`) — enumerate **all** variants with `match(value)...exhaustive()`, even when the union has only 2 states. Simple `if / else` is allowed only when not inspecting a union discriminant.
   - `.exhaustive()` is mandatory on closed unions; `.otherwise()` is permitted **only** on open types (`number`, `string`, `unknown`) or single-struct `P.when` guards where `.exhaustive()` cannot be used. `match(...).run()` is banned.
   - Inside `Effect.fn` / `Effect.gen`, `.with()` callbacks are not generators: return an `Effect` or `TaggedError` from each `.with()` arm and `return yield* match(...)...exhaustive()` once at the outer level.
+- **Zero-`any` & Minimal-`never` Type Safety:**
+  - `any` (`as any`, `: any`, `<any>`) is strictly banned across all source and test files. Every value must have a concrete, inferable type or be decoded via `Schema`.
+  - `as never`, double type assertions (`as unknown as T`), and explicit `: never` on parameters or variables are banned. `never` is used only in uninhabited type-parameter slots (`Effect<A, E, never>`, `Layer<ROut, never, RIn>`) or conditional type branches.
 
 ## Nx taxonomy
 

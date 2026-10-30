@@ -2332,7 +2332,7 @@ Every domain fixture must have the scope:fixture tag applied in project.json.
               lastTreeHash: "workspace",
               isPropertyTest: true,
               hasNonPrimitiveArbitrary: false
-            } as any
+            }
           ],
           exercisesSpans: [
             {

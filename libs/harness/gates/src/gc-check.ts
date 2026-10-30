@@ -213,8 +213,8 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
         (incomingRequires.get(idx) ?? 0) + (incomingLayerRequires.get(idx) ?? 0)
       if (totalConsumers === 0) {
         const location = node.file
-          ? typeof (node as any).line === "number"
-            ? `${node.file}:${(node as any).line}`
+          ? typeof node.line === "number"
+            ? `${node.file}:${node.line}`
             : node.file
           : undefined
         findings.push({
@@ -237,8 +237,8 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
       const providers = incomingProvides.get(idx) ?? 0
       if (providers === 0) {
         const location = node.file
-          ? typeof (node as any).line === "number"
-            ? `${node.file}:${(node as any).line}`
+          ? typeof node.line === "number"
+            ? `${node.file}:${node.line}`
             : node.file
           : undefined
         findings.push({
@@ -261,8 +261,8 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
       const failsWithCount = incomingFailsWith.get(idx) ?? 0
       if (failsWithCount === 0) {
         const location = node.file
-          ? typeof (node as any).line === "number"
-            ? `${node.file}:${(node as any).line}`
+          ? typeof node.line === "number"
+            ? `${node.file}:${node.line}`
             : node.file
           : undefined
         findings.push({
@@ -282,8 +282,8 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
     for (const [, node] of Graph.nodes(g)) {
       if (node._tag === "PatternDoc") {
         existingPatternSlugs.add(node.slug)
-        if ("patternName" in node && typeof (node as any).patternName === "string") {
-          existingPatternSlugs.add((node as any).patternName)
+        if (typeof node.patternName === "string") {
+          existingPatternSlugs.add(node.patternName)
         }
         if (typeof node.path === "string" && node.path.endsWith(".md")) {
           const base = node.path.split("/").pop()?.replace(/\.md$/, "")

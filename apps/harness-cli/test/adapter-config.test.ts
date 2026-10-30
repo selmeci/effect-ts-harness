@@ -317,9 +317,10 @@ describe("Antigravity adapter & plugin configuration", () => {
           encoding: "utf8"
         }
       )
-    } catch (err: any) {
+    } catch (err: unknown) {
       denied = true
-      errOutput = (err.stderr ?? "") + (err.stdout ?? "")
+      const rec = typeof err === "object" && err !== null ? (err as { stderr?: string; stdout?: string }) : {}
+      errOutput = (rec.stderr ?? "") + (rec.stdout ?? "")
     }
     expect(denied).toBe(true)
     expect(errOutput).toContain("Direct modification of verify-stamp.json is forbidden")

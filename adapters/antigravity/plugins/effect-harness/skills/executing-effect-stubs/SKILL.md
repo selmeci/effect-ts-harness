@@ -76,6 +76,7 @@ Implement the production code and tests within each package boundary:
 
 ## Red Flags — STOP
 
+- Introducing any `as any`, `: any`, `<any>`, `as never`, or double type assertions (`as unknown as T`) across production or test code (immediate `CRITICAL` blocker rejected by oxlint `typescript/no-explicit-any`, `tools/oxlint/syntax-bans.js`, and `checkEffectGraph` `unsafe-type-cast`).
 - Leaving any `stub()` call in production code during `verify`
 - Using `async/await`, `try/catch`, `throw`, raw `JSON.parse`, or raw `fetch()` in `scope:web`
 - Using `switch` statements, `if / else if` chains, `match().run()`, `.otherwise()` on closed discriminated unions, or `if` / ternary (`? :`) branching on union discriminants (`_tag`, `Option.isSome`, `Either.isRight`, `Result.isSuccess`); always use `match(value).with(...).exhaustive()` from `ts-pattern` (`agent-patterns/pattern-matching.md`)

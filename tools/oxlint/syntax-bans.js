@@ -44,6 +44,12 @@ const vacuousPropertyAssertMessage =
   "Vacuous assertion in property test: do not use toBeDefined(), toBeUndefined(), toBeTruthy(), toBeFalsy(), or existence checks to satisfy property test invariants — assert concrete domain invariants (e.g. toEqual, toBe, or pattern-matched structural predicates) to ensure the property test cannot pass vacuously."
 const impreciseFailureAssertMessage =
   "Imprecise Exit.Failure assertion: checking only exit._tag === 'Failure' masks assertion crashes and unexpected defects (Die) as expected domain errors (Fail). Assert Cause.hasDies(exit.cause) for runner defects or Cause.hasFails / match(exit) for typed domain errors."
+const explicitAnyBanMessage =
+  "Explicit 'any' (including 'as any', ': any', and '<any>') is strictly banned — every value must have an explicit, inferable static type or be decoded via Effect Schema."
+const unsafeNeverBanMessage =
+  "Unsafe 'never' ('as never' or explicit ': never' on parameters/variables) is banned — fix the underlying type mismatch or use exhaustive ts-pattern matching (.exhaustive()) instead of bypassing the type checker."
+const doubleTypeAssertionBanMessage =
+  "Double type assertions ('as unknown as T') are banned — decode untrusted data with Effect Schema or type the interface properly instead of erasing types."
 
 const BOOLEAN_STATE_PROP_REGEX =
   /^(is[A-Z]|has[A-Z]|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|published|expired)$/
@@ -745,6 +751,50 @@ function isSkippedOrFocusedTestCall(node) {
   return false
 }
 
+function checkAsOrTypeAssertion(context, node) {
+  if (node.typeAnnotation != null && node.typeAnnotation.type === "TSNeverKeyword") {
+    context.report({ node, message: unsafeNeverBanMessage })
+  }
+  if (
+    node.expression != null &&
+    (node.expression.type === "TSAsExpression" || node.expression.type === "TSTypeAssertion")
+  ) {
+    context.report({ node, message: doubleTypeAssertionBanMessage })
+  }
+}
+
+function checkNeverVariableDeclarator(context, node) {
+  if (
+    node.id != null &&
+    node.id.typeAnnotation != null &&
+    node.id.typeAnnotation.typeAnnotation != null &&
+    node.id.typeAnnotation.typeAnnotation.type === "TSNeverKeyword"
+  ) {
+    context.report({ node, message: unsafeNeverBanMessage })
+  }
+}
+
+function checkNeverParams(context, node) {
+  if (Array.isArray(node.params)) {
+    for (const param of node.params) {
+      if (param == null) continue
+      const typeAnnotation =
+        param.typeAnnotation != null
+          ? param.typeAnnotation
+          : param.type === "AssignmentPattern" && param.left != null
+            ? param.left.typeAnnotation
+            : null
+      if (
+        typeAnnotation != null &&
+        typeAnnotation.typeAnnotation != null &&
+        typeAnnotation.typeAnnotation.type === "TSNeverKeyword"
+      ) {
+        context.report({ node: param, message: unsafeNeverBanMessage })
+      }
+    }
+  }
+}
+
 const syntaxBans = {
   create(context) {
     const discriminantAliasNames = new Set()
@@ -813,7 +863,17 @@ const syntaxBans = {
           context.report({ node, message: tsSuppressionMessage })
         }
       },
+      TSAnyKeyword(node) {
+        context.report({ node, message: explicitAnyBanMessage })
+      },
+      TSAsExpression(node) {
+        checkAsOrTypeAssertion(context, node)
+      },
+      TSTypeAssertion(node) {
+        checkAsOrTypeAssertion(context, node)
+      },
       VariableDeclarator(node) {
+        checkNeverVariableDeclarator(context, node)
         if (
           node.id != null &&
           node.id.type === "Identifier" &&
@@ -822,9 +882,18 @@ const syntaxBans = {
           discriminantAliasNames.add(node.id.name)
         }
       },
-      FunctionDeclaration: reportAsync,
-      FunctionExpression: reportAsync,
-      ArrowFunctionExpression: reportAsync,
+      FunctionDeclaration(node) {
+        reportAsync(node)
+        checkNeverParams(context, node)
+      },
+      FunctionExpression(node) {
+        reportAsync(node)
+        checkNeverParams(context, node)
+      },
+      ArrowFunctionExpression(node) {
+        reportAsync(node)
+        checkNeverParams(context, node)
+      },
       AwaitExpression(node) {
         context.report({ node, message: asyncMessage })
       },
@@ -1114,7 +1183,17 @@ const testIntegrity = {
           context.report({ node, message: testTsIgnoreMessage })
         }
       },
+      TSAnyKeyword(node) {
+        context.report({ node, message: explicitAnyBanMessage })
+      },
+      TSAsExpression(node) {
+        checkAsOrTypeAssertion(context, node)
+      },
+      TSTypeAssertion(node) {
+        checkAsOrTypeAssertion(context, node)
+      },
       VariableDeclarator(node) {
+        checkNeverVariableDeclarator(context, node)
         if (
           node.id != null &&
           node.id.type === "Identifier" &&
@@ -1122,6 +1201,15 @@ const testIntegrity = {
         ) {
           discriminantAliasNames.add(node.id.name)
         }
+      },
+      FunctionDeclaration(node) {
+        checkNeverParams(context, node)
+      },
+      FunctionExpression(node) {
+        checkNeverParams(context, node)
+      },
+      ArrowFunctionExpression(node) {
+        checkNeverParams(context, node)
       },
       IfStatement(node) {
         const filename = getNormalizedFilename()

@@ -23,6 +23,9 @@ First, **locate and read the feature's specification file in `libs/<scope>/docs/
 
 Audit test suites (`*.test.ts`, `*.spec.ts`) and corresponding implementations for these critical failure modes:
 
+### 0. Zero-Tolerance Type-Cast & Type-Erasure Bans (CRITICAL / P0)
+Flag ANY instance of `as any`, `: any`, `<any>`, `as never`, or double type assertions (`as unknown as T`) in production OR test code as an immediate `CRITICAL` (`P0`) blocker. Code must use concrete, inferable types or decode untrusted data via Effect Schema.
+
 ### 1. Missing EARS Clause & Spec Symbol Coverage
 Every requirement specified in the EARS spec must map to an explicit, behavior-sensitive test assertion:
 - **Spec Symbol Parity:** Every span declared in `spans` and every error declared in `errors` in the spec frontmatter must be directly exercised by tests.

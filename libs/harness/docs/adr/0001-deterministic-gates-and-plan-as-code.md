@@ -6,6 +6,7 @@ date: 2026-10-25
 enforced_by:
   - libs/harness/gates/src/stub.ts
   - libs/harness/graph/src/policy-check.ts
+  - libs/harness/graph/src/type-extractor.ts
   - tools/oxlint/syntax-bans.js
   - libs/harness/gates/src/adr-lint.ts
 spans:
@@ -92,5 +93,5 @@ We establish two foundational architectural rules for the harness:
 | Rule | Enforced By | Gate / Mechanism | Governed Symbols |
 | --- | --- | --- | --- |
 | Compilable plan skeletons | libs/harness/gates/src/stub.ts | `stub<A, E, R>()` and harness plan-check | `GraphGc.decide` |
-| Deterministic graph policies | libs/harness/graph/src/policy-check.ts | checkEffectGraph | `SpanBudget.decide`, `MigrationSafety.decide` |
-| Syntax bans & ADR linting | tools/oxlint/syntax-bans.js, libs/harness/gates/src/adr-lint.ts | tools/oxlint/syntax-bans.js & AdrDocLint.decide | `MutationCheck.decide`, `LoopCircuitBreaker.decide`, `EarsSpecLint.decide`, `AdrDocLint.decide`, `OntologyInvariants.decide`, `SessionReport.decide` |
+| Deterministic graph policies & type-cast bans | libs/harness/graph/src/policy-check.ts, libs/harness/graph/src/type-extractor.ts | checkEffectGraph (`unsafe-type-cast`, `domain-requires-infra`, `impure-decider`, `layer-cycle`) | `SpanBudget.decide`, `MigrationSafety.decide` |
+| Syntax bans & ADR linting | tools/oxlint/syntax-bans.js, libs/harness/gates/src/adr-lint.ts | tools/oxlint/syntax-bans.js (zero `any`, unsafe `never`, double type assertions) & AdrDocLint.decide | `MutationCheck.decide`, `LoopCircuitBreaker.decide`, `EarsSpecLint.decide`, `AdrDocLint.decide`, `OntologyInvariants.decide`, `SessionReport.decide` |

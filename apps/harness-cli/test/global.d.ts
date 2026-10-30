@@ -23,8 +23,12 @@ declare module "*/tools/oxlint/syntax-bans.js" {
   const plugin: {
     meta: { name: string }
     rules: {
-      "syntax-bans": { create: (context: any) => any }
-      "test-integrity": { create: (context: any) => any }
+      "syntax-bans": {
+        create: (context: unknown) => Record<string, ((node: Record<string, unknown>) => void) | undefined>
+      }
+      "test-integrity": {
+        create: (context: unknown) => Record<string, ((node: Record<string, unknown>) => void) | undefined>
+      }
     }
   }
   export default plugin

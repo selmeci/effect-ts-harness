@@ -350,7 +350,7 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(
           Effect.timeoutOption("1500 millis"),
           Effect.catchCause(() => Effect.succeedNone)
         )
-        let block = Option.getOrElse(routedOpt, () => "review")
+        let block: string = Option.getOrElse(routedOpt, () => "review")
         const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
         if (block === "review") {
           const patternsDir = path.join(root, "agent-patterns")
@@ -364,7 +364,7 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(
             for (const slug of candidates) {
               const words = slug.split("-").filter((w) => w.length > 0)
               if (words.length > 0 && words.every((w) => stepLower.includes(w))) {
-                block = slug as any
+                block = slug
                 break
               }
             }

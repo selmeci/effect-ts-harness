@@ -32,6 +32,7 @@ export interface GraphPolicyViolation {
     | "untraced-decider"
     | "missing-aggregate-id-guard"
     | "unasserted-state-field"
+    | "unsafe-type-cast"
   readonly message: string
   readonly path: ReadonlyArray<string>
 }
@@ -252,7 +253,7 @@ export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphRe
     violations.push({
       rule: bv.rule,
       message: bv.message,
-      path: [bv.file, bv.enclosingSymbol]
+      path: bv.path ?? [bv.file, bv.enclosingSymbol]
     })
   }
 

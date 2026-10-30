@@ -895,7 +895,7 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
     const domainSource = `
       import { Effect } from "effect"
 
-      export const evolveCart = (s: any, e: any): any => {
+      export const evolveCart = (s: unknown, e: unknown): unknown => {
         return Effect.runSync(Effect.succeed(s))
       }
     `
@@ -915,7 +915,7 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       export const cartDecider = Decider.make({
         initialState: {},
         decide: () => Effect.succeed([]),
-        evolve: (s: any, e: any) => Effect.runSync(Effect.succeed(s))
+        evolve: (s: unknown, e: unknown) => Effect.runSync(Effect.succeed(s))
       })
     `
     const deciderGraph = extractTypeAwareGraphFromSource([
@@ -1105,23 +1105,23 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
 
       export const cartDecider = Decider.make({
         initialState: {},
-        decide: (command: any, state: any) => Effect.succeed([]),
-        evolve: (state: any, event: any) => state
+        decide: (command: unknown, state: unknown) => Effect.succeed([]),
+        evolve: (state: unknown, event: unknown) => state
       })
 
       export const methodDecider = Decider.make({
         initialState: {},
-        decide(command: any, state: any) {
+        decide(command: unknown, state: unknown) {
           return Effect.succeed([])
         },
-        evolve: (state: any, event: any) => state
+        evolve: (state: unknown, event: unknown) => state
       })
 
-      const untracedFn = (command: any, state: any) => Effect.succeed([])
+      const untracedFn = (command: unknown, state: unknown) => Effect.succeed([])
       export const aliasDecider = Decider.make({
         initialState: {},
         decide: untracedFn,
-        evolve: (state: any, event: any) => state
+        evolve: (state: unknown, event: unknown) => state
       })
     `
     const untracedGraph = extractTypeAwareGraphFromSource([
@@ -1138,7 +1138,7 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
 
     const passthroughDecider = `
       export const Decider = {
-        make: (options: any) => options
+        make: (options: unknown) => options
       }
     `
     const deciderGraph = extractTypeAwareGraphFromSource([
@@ -1156,22 +1156,22 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
     const tracedSource = `
       import { Effect } from "effect"
 
-      export const decide = Effect.fn("Cart.decide")(function* (command: any, state: any) {
+      export const decide = Effect.fn("Cart.decide")(function* (command: unknown, state: unknown) {
         return []
       })
 
       export const validDecider = Decider.make({
         initialState: {},
         decide,
-        evolve: (state: any, event: any) => state
+        evolve: (state: unknown, event: unknown) => state
       })
 
       export const inlineDecider = Decider.make({
         initialState: {},
-        decide: Effect.fn("Cart.decide")(function* (command: any, state: any) {
+        decide: Effect.fn("Cart.decide")(function* (command: unknown, state: unknown) {
           return []
         }),
-        evolve: (state: any, event: any) => state
+        evolve: (state: unknown, event: unknown) => state
       })
     `
     const tracedGraph = extractTypeAwareGraphFromSource([
@@ -1188,9 +1188,9 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       import { Effect } from "effect"
 
       export const Decider = {
-        make: (options: any) => ({
+        make: (options: Record<string, (...args: Array<unknown>) => unknown>) => ({
           ...options,
-          decide: (command: any, state: any) => Effect.withSpan(options.decide(command, state), "decider.span")
+          decide: (command: unknown, state: unknown) => Effect.withSpan(options.decide(command, state), "decider.span")
         })
       }
     `
@@ -1291,13 +1291,13 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       fs.writeFileSync(
         path.join(srcDir, "cart.ts"),
         `
-          export const evolve = (state: any, event: any) => {
+          export const evolve = (state: Record<string, unknown>, event: Record<string, unknown>) => {
             return {
               ...state,
               _tag: "ActiveCart",
               cartId: event.cartId,
-              items: [...(state.items ?? []), event.item],
-              totalItems: (state.totalItems ?? 0) + 1
+              items: [...(Array.isArray(state.items) ? state.items : []), event.item],
+              totalItems: (typeof state.totalItems === "number" ? state.totalItems : 0) + 1
             }
           }
         `
@@ -1346,5 +1346,104 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       fs.rmSync(tmpDir, { recursive: true, force: true })
     }
   })
+
+  it("fails with unsafe-type-cast on 'as any', ': any', 'as never', 'as unknown as', and '(x: never) => x', while allowing Effect.Effect<number, never, never>", () => {
+    // 1. as any
+    const asAnySource = `
+      export const value = ("test" as any)
+    `
+    const asAnyGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/as-any.ts",
+        content: asAnySource,
+        packageTag: "domain"
+      }
+    ])
+    const asAnyResult = checkEffectGraph(asAnyGraph)
+    expect(asAnyResult.ok).toBe(false)
+    expect(asAnyResult.violations.some((v) => v.rule === "unsafe-type-cast")).toBe(true)
+    expect(asAnyResult.violations[0]?.message).toContain("Explicit 'any' (as any, : any, <any>) is banned")
+    expect(asAnyResult.violations[0]?.path).toEqual(["libs/sample/domain/src/as-any.ts"])
+
+    // 2. : any
+    const colonAnySource = `
+      export const badVar: any = 42
+    `
+    const colonAnyGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/colon-any.ts",
+        content: colonAnySource,
+        packageTag: "domain"
+      }
+    ])
+    const colonAnyResult = checkEffectGraph(colonAnyGraph)
+    expect(colonAnyResult.ok).toBe(false)
+    expect(colonAnyResult.violations.some((v) => v.rule === "unsafe-type-cast")).toBe(true)
+    expect(colonAnyResult.violations[0]?.message).toContain("Explicit 'any' (as any, : any, <any>) is banned")
+
+    // 3. as never
+    const asNeverSource = `
+      export const castNever = (val: unknown) => val as never
+    `
+    const asNeverGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/as-never.ts",
+        content: asNeverSource,
+        packageTag: "domain"
+      }
+    ])
+    const asNeverResult = checkEffectGraph(asNeverGraph)
+    expect(asNeverResult.ok).toBe(false)
+    expect(asNeverResult.violations.some((v) => v.rule === "unsafe-type-cast")).toBe(true)
+    expect(asNeverResult.violations[0]?.message).toContain("Unsafe 'as never' cast is banned")
+
+    // 4. as unknown as (double type assertion)
+    const doubleCastSource = `
+      export const doubleCast = (val: string) => val as unknown as number
+    `
+    const doubleCastGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/double-cast.ts",
+        content: doubleCastSource,
+        packageTag: "domain"
+      }
+    ])
+    const doubleCastResult = checkEffectGraph(doubleCastGraph)
+    expect(doubleCastResult.ok).toBe(false)
+    expect(doubleCastResult.violations.some((v) => v.rule === "unsafe-type-cast")).toBe(true)
+    expect(doubleCastResult.violations[0]?.message).toContain("Double type assertion ('as unknown as T') is banned")
+
+    // 5. (x: never) => x parameter
+    const neverParamSource = `
+      export const neverParam = (x: never) => x
+    `
+    const neverParamGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/never-param.ts",
+        content: neverParamSource,
+        packageTag: "domain"
+      }
+    ])
+    const neverParamResult = checkEffectGraph(neverParamGraph)
+    expect(neverParamResult.ok).toBe(false)
+    expect(neverParamResult.violations.some((v) => v.rule === "unsafe-type-cast")).toBe(true)
+    expect(neverParamResult.violations[0]?.message).toContain("Explicit ': never' annotation on parameter or variable is banned")
+
+    // 6. Allowing Effect.Effect<number, never, never>
+    const safeNeverSource = `
+      import { Effect } from "effect"
+      export const safeEffect: Effect.Effect<number, never, never> = Effect.succeed(100)
+    `
+    const safeNeverGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/safe-never.ts",
+        content: safeNeverSource,
+        packageTag: "domain"
+      }
+    ])
+    const safeNeverResult = checkEffectGraph(safeNeverGraph)
+    expect(safeNeverResult.violations.filter((v) => v.rule === "unsafe-type-cast")).toHaveLength(0)
+  })
 })
+
 
