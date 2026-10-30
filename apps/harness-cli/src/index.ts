@@ -410,6 +410,9 @@ const handleGuard = (
     }
 
     // Classification is "escalate" -> consult decision layer
+    if (options?.decisionLayer === undefined && process.env.VITEST === undefined) {
+      yield* ensureLocalOllamaReady()
+    }
     const decision = yield* decideGuardCommand(command).pipe(
       Effect.provide(decisionLayer)
     )
@@ -569,6 +572,24 @@ const handlePlanCheck = (
       options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot)
     const graphOnly = argv.includes("--graph-only")
 
+    const requireOllama =
+      process.env.HARNESS_REQUIRE_OLLAMA === "1" ||
+      (!graphOnly &&
+        !isIsolatedExternalWorkspace(repoRoot) &&
+        options?.decisionLayer === undefined &&
+        process.env.VITEST === undefined)
+    if (requireOllama) {
+      const ollamaOk = yield* ensureLocalOllamaReady()
+      if (!ollamaOk) {
+        return {
+          exitCode: 1,
+          stdout: "",
+          stderr:
+            "[CRITICAL HARNESS BLOCKER] Key component Ollama (clef-flash DecisionModel) is not running and could not be started automatically. Halting execution."
+        }
+      }
+    }
+
     if (!graphOnly && !options?.skipSubprocessVerify && existsSync(join(repoRoot, "package.json"))) {
       const nxArgs = resolveNxAffectedArgs(repoRoot, ["typecheck", "lint"])
       const subprocessErr = yield* Effect.try({
@@ -710,6 +731,22 @@ const handleVerify = (
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
+    const requireOllama =
+      process.env.HARNESS_REQUIRE_OLLAMA === "1" ||
+      (!isIsolatedExternalWorkspace(repoRoot) &&
+        options?.decisionLayer === undefined &&
+        process.env.VITEST === undefined)
+    if (requireOllama) {
+      const ollamaOk = yield* ensureLocalOllamaReady()
+      if (!ollamaOk) {
+        return {
+          exitCode: 1,
+          stdout: "",
+          stderr:
+            "[CRITICAL HARNESS BLOCKER] Key component Ollama (clef-flash DecisionModel) is not running and could not be started automatically. Halting execution."
+        }
+      }
+    }
     const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
 
     const stubs = Array.from(fnIndex.bySpanName.values()).filter((fn) => fn.isStub)
@@ -885,12 +922,55 @@ const handleVerify = (
   })
 
 const StopHookStdinSchema = Schema.Struct({
-  fullyIdle: Schema.optional(Schema.Boolean)
+  fullyIdle: Schema.optional(Schema.Boolean),
+  conversationId: Schema.optional(Schema.String),
+  workspacePaths: Schema.optional(Schema.Array(Schema.String)),
+  transcriptPath: Schema.optional(Schema.String)
 })
 
 const decodeStopHookStdin = Schema.decodeOption(
   Schema.fromJsonString(StopHookStdinSchema)
 )
+
+const isSubagentStopContext = (
+  repoRoot: string,
+  decoded?: Schema.Schema.Type<typeof StopHookStdinSchema>
+): boolean => {
+  if (
+    process.env.HARNESS_SUBAGENT === "1" ||
+    repoRoot.includes("/.gemini/antigravity/worktrees/") ||
+    repoRoot.includes("/subagent-")
+  ) {
+    return true
+  }
+  if (
+    decoded?.workspacePaths?.some(
+      (p) => p.includes("/.gemini/antigravity/worktrees/") || p.includes("/subagent-")
+    )
+  ) {
+    return true
+  }
+  if (decoded?.transcriptPath && existsSync(decoded.transcriptPath)) {
+    const isSubagentTranscript = Effect.runSync(
+      Effect.try({
+        try: () => {
+          const content = readFileSync(decoded.transcriptPath!, "utf-8")
+          const firstLine = content.split(/\r?\n/)[0] ?? ""
+          return (
+            firstLine.includes('"source":"SYSTEM"') &&
+            firstLine.includes("[Message]") &&
+            !content.includes('"source":"USER_EXPLICIT"')
+          )
+        },
+        catch: () => false
+      }).pipe(Effect.orElseSucceed(() => false))
+    )
+    if (isSubagentTranscript) {
+      return true
+    }
+  }
+  return false
+}
 
 const handleDone = (
   argv: ReadonlyArray<string>,
@@ -909,15 +989,28 @@ const handleDone = (
         catch: () => ""
       }).pipe(Effect.orElseSucceed(() => ""))
     }
+    let decodedStdin: Schema.Schema.Type<typeof StopHookStdinSchema> | undefined
     if (rawStdin) {
       const decoded = decodeStopHookStdin(rawStdin)
-      if (Option.isSome(decoded) && decoded.value.fullyIdle === false) {
-        return {
-          exitCode: 0,
-          stdout: "",
-          stderr: "",
-          telemetryDetail: "fullyIdle=false"
+      if (Option.isSome(decoded)) {
+        decodedStdin = decoded.value
+        if (decoded.value.fullyIdle === false) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            telemetryDetail: "fullyIdle=false"
+          }
         }
+      }
+    }
+
+    if (isSubagentStopContext(repoRoot, decodedStdin)) {
+      return {
+        exitCode: 0,
+        stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "",
+        stderr: "",
+        telemetryDetail: "subagent=true"
       }
     }
 
@@ -1366,6 +1459,97 @@ function ensureLocalOmnigraphReady(
   })
 }
 
+export interface OllamaReadinessOptions {
+  readonly baseUrl?: string | undefined
+  readonly spawnOllama?: (() => void) | undefined
+  readonly maxRetries?: number | undefined
+  readonly retryDelayMs?: number | undefined
+}
+
+export function checkOllamaServerReady(
+  baseUrl: string =
+    process.env.HARNESS_OLLAMA_URL ??
+    process.env.OLLAMA_HOST ??
+    "http://127.0.0.1:11434"
+): Effect.Effect<boolean> {
+  const normalizedUrl = baseUrl.startsWith("http") ? baseUrl : `http://${baseUrl}`
+  return Effect.tryPromise({
+    try: () =>
+      globalThis
+        .fetch(`${normalizedUrl.replace(/\/$/, "")}/api/tags`, {
+          method: "GET",
+          signal: AbortSignal.timeout(2000)
+        })
+        .then((r) => {
+          if (r.status !== 200) {
+            return Promise.resolve(false)
+          }
+          return r.json().then((rawBody: unknown) => {
+            if (typeof rawBody !== "object" || rawBody === null) {
+              return false
+            }
+            const body = rawBody as {
+              readonly models?: ReadonlyArray<{
+                readonly name?: string
+                readonly model?: string
+              }>
+            }
+            if (!Array.isArray(body.models)) {
+              return false
+            }
+            return body.models.some(
+              (m) =>
+                (typeof m.name === "string" && m.name.startsWith("clef-flash")) ||
+                (typeof m.model === "string" && m.model.startsWith("clef-flash"))
+            )
+          })
+        })
+        .catch(() => false),
+    catch: () => false
+  }).pipe(Effect.orElseSucceed(() => false))
+}
+
+export function ensureLocalOllamaReady(
+  opts?: OllamaReadinessOptions
+): Effect.Effect<boolean> {
+  return Effect.gen(function* () {
+    const customUrl = process.env.HARNESS_OLLAMA_URL
+    const baseUrl =
+      opts?.baseUrl ?? customUrl ?? process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434"
+    const alreadyReady = yield* checkOllamaServerReady(baseUrl)
+    if (alreadyReady) {
+      return true
+    }
+
+    yield* Effect.try({
+      try: () => {
+        if (opts?.spawnOllama !== undefined) {
+          opts.spawnOllama()
+        } else if (customUrl === undefined) {
+          const child = spawn("ollama", ["serve"], {
+            detached: true,
+            stdio: "ignore"
+          })
+          child.unref()
+        }
+      },
+      catch: () => undefined
+    }).pipe(Effect.orElseSucceed(() => undefined))
+
+    const maxRetries = opts?.maxRetries ?? (customUrl !== undefined ? 2 : 25)
+    const retryDelayMs = opts?.retryDelayMs ?? (customUrl !== undefined ? 10 : 200)
+    for (let i = 0; i < maxRetries; i++) {
+      yield* Effect.sleep(`${retryDelayMs} millis`)
+      const isReady = yield* checkOllamaServerReady(baseUrl)
+      if (isReady) {
+        return true
+      }
+    }
+
+    return false
+  })
+}
+
 const handleDoctorOrSession = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
@@ -1392,6 +1576,15 @@ const handleDoctorOrSession = (
     const omnigraphInitialized = isolatedExternal
       ? true
       : yield* ensureLocalOmnigraphReady(repoRoot)
+
+    const requireLiveOllama =
+      process.env.HARNESS_REQUIRE_OLLAMA === "1" ||
+      (!isolatedExternal &&
+        options?.decisionLayer === undefined &&
+        process.env.VITEST === undefined)
+    const ollamaReady = requireLiveOllama
+      ? yield* ensureLocalOllamaReady()
+      : true
 
     const planPath = join(harnessDir, "plan-graph-snapshot.json")
     const implPath = join(harnessDir, "graph-snapshot.json")
@@ -1456,8 +1649,9 @@ const handleDoctorOrSession = (
     }).pipe(Effect.orElseSucceed(() => false))
 
     const modelWarm = isAntigravity
-      ? true
-      : Option.isSome(
+      ? ollamaReady
+      : ollamaReady &&
+        Option.isSome(
           yield* DecisionModel.decide(IdiomRouterV1, {
             input: { planStep: "Initialize session" }
           }).pipe(
@@ -1511,13 +1705,27 @@ const handleDoctorOrSession = (
       stampValid: effectiveStampValid
     })
 
-    const ok = nodeOk && snapshotDirOk && effectLspOk && omnigraphInitialized
+    const ok =
+      nodeOk &&
+      snapshotDirOk &&
+      effectLspOk &&
+      omnigraphInitialized &&
+      ollamaReady
 
     if (isAntigravity) {
+      const injected: Array<string> = []
+      if (!ollamaReady) {
+        injected.push(
+          "[CRITICAL HARNESS BLOCKER] Key component Ollama (clef-flash DecisionModel) is offline and could not be started automatically. Stop all implementation immediately and inform the user."
+        )
+      }
+      if (handoff.handoffMessage !== null) {
+        injected.push(handoff.handoffMessage)
+      }
       return {
         exitCode: 0,
         stdout: JSON.stringify({
-          injectSteps: handoff.handoffMessage !== null ? [handoff.handoffMessage] : []
+          injectSteps: injected
         }),
         stderr: ""
       }
@@ -1531,6 +1739,7 @@ const handleDoctorOrSession = (
         snapshotDirOk,
         effectLspOk,
         omnigraphInitialized,
+        ollamaReady,
         modelWarm,
         handoff,
         telemetry: {
@@ -1541,7 +1750,7 @@ const handleDoctorOrSession = (
       }),
       stderr: ok
         ? ""
-        : `Doctor check failed: nodeOk=${nodeOk}, snapshotDirOk=${snapshotDirOk}, effectLspOk=${effectLspOk}, omnigraphInitialized=${omnigraphInitialized}`
+        : `Doctor check failed: nodeOk=${nodeOk}, snapshotDirOk=${snapshotDirOk}, effectLspOk=${effectLspOk}, omnigraphInitialized=${omnigraphInitialized}, ollamaReady=${ollamaReady}`
     }
   })
 
@@ -1891,7 +2100,7 @@ export const runCliEffect = (
       }
     }
 
-    if (requested === "help") {
+    if (requested === "help" || argv.includes("--help") || argv.includes("-h")) {
       return {
         exitCode: 0,
         stdout: `harness help\nusage: harness <${COMMANDS.join("|")}>`,

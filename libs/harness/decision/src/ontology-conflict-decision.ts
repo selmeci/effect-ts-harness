@@ -294,15 +294,15 @@ export const extractOntologyConflictPairs = (
 export const evaluateOntologyConflicts = Effect.fn(
   "Harness.evaluateOntologyConflicts"
 )(function* (pairs: ReadonlyArray<OntologyConflictInput>) {
-  const conflicts: Array<OntologyConflictResult & OntologyConflictInput> = []
-  for (const pair of pairs) {
-    const res = yield* checkOntologyPairConflict(pair)
-    if (res.hasConflict) {
-      conflicts.push({
-        ...pair,
-        ...res
-      })
-    }
-  }
-  return conflicts as ReadonlyArray<OntologyConflictResult & OntologyConflictInput>
+  const evaluated = yield* Effect.forEach(
+    pairs,
+    (pair) =>
+      checkOntologyPairConflict(pair).pipe(
+        Effect.map((res) => ({ ...pair, ...res }))
+      ),
+    { concurrency: 4 }
+  )
+  return evaluated.filter((res) => res.hasConflict) as ReadonlyArray<
+    OntologyConflictResult & OntologyConflictInput
+  >
 })

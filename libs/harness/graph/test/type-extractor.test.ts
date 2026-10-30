@@ -4,6 +4,8 @@ import * as path from "node:path"
 import { Effect } from "effect"
 import { describe, expect, it } from "vitest"
 import {
+  buildHarnessGraph,
+  diffHarnessGraphs,
   extractTypeAwareGraphFromSource,
   extractWorkspaceTypeAwareGraph,
   findCallees,
@@ -460,6 +462,226 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true })
     }
+  })
+
+  it("does not flag Schema.TaggedStruct state variants or aggregate *Id fields present on state as dead-event-payload", () => {
+    const contractSource = `
+      import { Schema } from "effect"
+
+      export const EmptyCart = Schema.TaggedStruct("EmptyCart", {
+        cartId: Schema.String
+      })
+
+      export const ActiveCart = Schema.TaggedStruct("ActiveCart", {
+        cartId: Schema.String,
+        items: Schema.Array(Schema.String)
+      })
+
+      export const CheckedOutCart = Schema.TaggedStruct("CheckedOutCart", {
+        cartId: Schema.String
+      })
+
+      export const ItemAdded = Schema.TaggedStruct("ItemAdded", {
+        cartId: Schema.String,
+        itemId: Schema.String
+      })
+
+      export const CartCheckedOut = Schema.TaggedStruct("CartCheckedOut", {
+        cartId: Schema.String
+      })
+    `
+
+    const domainSource = `
+      import { match, P } from "ts-pattern"
+      import { EmptyCart, ActiveCart, CheckedOutCart, ItemAdded, CartCheckedOut } from "../../contract/src/index.js"
+
+      export type CartState =
+        | typeof EmptyCart.Type
+        | typeof ActiveCart.Type
+        | typeof CheckedOutCart.Type
+
+      export type CartEvent =
+        | typeof ItemAdded.Type
+        | typeof CartCheckedOut.Type
+
+      export const evolve = (state: CartState, event: CartEvent): CartState =>
+        match([state, event])
+          .with([{ _tag: "CheckedOutCart" }, P._], () => state)
+          .with([{ _tag: "EmptyCart" }, { _tag: "ItemAdded" }], ([, ev]) => ({
+            _tag: "ActiveCart",
+            cartId: state.cartId,
+            items: [ev.itemId]
+          }))
+          .with([{ _tag: "ActiveCart" }, { _tag: "ItemAdded" }], ([s, ev]) => ({
+            ...s,
+            items: [...s.items, ev.itemId]
+          }))
+          .with([{ _tag: "ActiveCart" }, { _tag: "CartCheckedOut" }], ([s]) => ({
+            _tag: "CheckedOutCart",
+            cartId: s.cartId
+          }))
+          .otherwise(() => state)
+    `
+
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/contract/src/index.ts",
+        content: contractSource,
+        packageTag: "contract"
+      },
+      {
+        filePath: "libs/sample/domain/src/cart.ts",
+        content: domainSource,
+        packageTag: "domain"
+      }
+    ])
+
+    const violations = graph.branchingViolations ?? []
+    const deadPayloadViolations = violations.filter((v) => v.rule === "dead-event-payload")
+    expect(deadPayloadViolations).toEqual([])
+  })
+
+  it("shallow-decider-property-test catches object-syntax scalar-only arbitraries in it.effect.prop", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-prop-obj-test-"))
+    try {
+      fs.writeFileSync(path.join(tmpDir, "pnpm-workspace.yaml"), "packages:\n  - 'libs/*'\n")
+
+      const testDir = path.join(tmpDir, "libs/sample/domain/test")
+      fs.mkdirSync(testDir, { recursive: true })
+
+      fs.writeFileSync(
+        path.join(testDir, "scalar-obj.test.ts"),
+        `
+          import { describe, it } from "vitest"
+          describe("scalar object suite", () => {
+            it.effect.prop("test", { cartId: Schema.String }, () => {
+              // property test with scalar object syntax
+            })
+          })
+        `
+      )
+
+      fs.writeFileSync(
+        path.join(testDir, "complex-obj.test.ts"),
+        `
+          import { describe, it } from "vitest"
+          describe("complex object suite", () => {
+            it.effect.prop("test", { cartId: Schema.String, events: Schema.Array(CartEvent) }, () => {
+              // property test with non-primitive object syntax
+            })
+          })
+        `
+      )
+
+      const resultGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir))
+
+      const scalarNode = resolveNode(
+        resultGraph,
+        "libs/sample/domain/test/scalar-obj.test.ts::suite"
+      ) as VitestCaseNode
+      expect(scalarNode).toBeDefined()
+      expect(scalarNode.isPropertyTest).toBe(true)
+      expect(scalarNode.hasNonPrimitiveArbitrary).toBe(false)
+
+      const complexNode = resolveNode(
+        resultGraph,
+        "libs/sample/domain/test/complex-obj.test.ts::suite"
+      ) as VitestCaseNode
+      expect(complexNode).toBeDefined()
+      expect(complexNode.isPropertyTest).toBe(true)
+      expect(complexNode.hasNonPrimitiveArbitrary).toBe(true)
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("diffHarnessGraphs succeeds when a stub variable is renamed while preserving spanName and file", () => {
+    const planGraph = buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/sample/domain/src/decider.ts#thenEventsStub",
+          spanName: "DeciderScenario.thenEvents",
+          file: "libs/sample/domain/src/decider.ts",
+          line: 10,
+          packageTag: "domain",
+          successType: "void",
+          isStub: true
+        }
+      ],
+      services: [
+        {
+          tagId: "EventStore",
+          name: "EventStore",
+          packageTag: "service",
+          file: "libs/sample/service/src/index.ts"
+        }
+      ],
+      errors: [
+        {
+          errorTag: "DeciderConflict",
+          file: "libs/sample/contract/src/errors.ts"
+        }
+      ],
+      requiresService: [
+        {
+          callerQualname: "libs/sample/domain/src/decider.ts#thenEventsStub",
+          tagId: "EventStore"
+        }
+      ],
+      failsWith: [
+        {
+          callerQualname: "libs/sample/domain/src/decider.ts#thenEventsStub",
+          errorTag: "DeciderConflict"
+        }
+      ]
+    })
+
+    const implGraph = buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/sample/domain/src/decider.ts#thenEventsLive",
+          spanName: "DeciderScenario.thenEvents",
+          file: "libs/sample/domain/src/decider.ts",
+          line: 10,
+          packageTag: "domain",
+          successType: "void",
+          isStub: false
+        }
+      ],
+      services: [
+        {
+          tagId: "EventStore",
+          name: "EventStore",
+          packageTag: "service",
+          file: "libs/sample/service/src/index.ts"
+        }
+      ],
+      errors: [
+        {
+          errorTag: "DeciderConflict",
+          file: "libs/sample/contract/src/errors.ts"
+        }
+      ],
+      requiresService: [
+        {
+          callerQualname: "libs/sample/domain/src/decider.ts#thenEventsLive",
+          tagId: "EventStore"
+        }
+      ],
+      failsWith: [
+        {
+          callerQualname: "libs/sample/domain/src/decider.ts#thenEventsLive",
+          errorTag: "DeciderConflict"
+        }
+      ]
+    })
+
+    const diff = diffHarnessGraphs(implGraph, planGraph)
+    expect(diff.missingFns).toEqual([])
+    expect(diff.missingServices).toEqual([])
+    expect(diff.remainingStubs).toEqual([])
+    expect(diff.missingEdges).toEqual([])
+    expect(diff.isGreen).toBe(true)
   })
 })
 

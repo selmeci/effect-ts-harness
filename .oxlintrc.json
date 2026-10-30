@@ -20,10 +20,11 @@
         "depConstraints": [
           { "sourceTag": "scope:web", "onlyDependOnLibsWithTags": ["type:contract"] },
           { "sourceTag": "type:contract", "onlyDependOnLibsWithTags": ["type:contract"] },
-          { "sourceTag": "type:domain", "onlyDependOnLibsWithTags": ["type:contract", "type:domain", "type:service"] },
-          { "sourceTag": "type:service", "onlyDependOnLibsWithTags": ["type:contract", "type:domain", "type:service"] },
-          { "sourceTag": "type:infra", "onlyDependOnLibsWithTags": ["type:contract", "type:domain", "type:service", "type:infra"] },
-          { "sourceTag": "type:app", "onlyDependOnLibsWithTags": ["type:contract", "type:domain", "type:service", "type:infra", "type:app"] },
+          { "sourceTag": "type:core", "onlyDependOnLibsWithTags": ["type:contract", "type:core"] },
+          { "sourceTag": "type:domain", "onlyDependOnLibsWithTags": ["type:contract", "type:core", "type:domain", "type:service"] },
+          { "sourceTag": "type:service", "onlyDependOnLibsWithTags": ["type:contract", "type:core", "type:domain", "type:service"] },
+          { "sourceTag": "type:infra", "onlyDependOnLibsWithTags": ["type:contract", "type:core", "type:domain", "type:service", "type:infra"] },
+          { "sourceTag": "type:app", "onlyDependOnLibsWithTags": ["type:contract", "type:core", "type:domain", "type:service", "type:infra", "type:app"] },
           { "sourceTag": "*", "onlyDependOnLibsWithTags": ["*"] }
         ]
       }
