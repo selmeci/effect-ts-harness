@@ -689,6 +689,52 @@ enforced_by:
         rmSync(tmpDir, { recursive: true, force: true })
       }
     })
+
+    it("ingest writes graph-snapshot.json and graph-head.json, and session reconciles when HEAD SHA advances", async () => {
+      const tmpDir = mkdtempSync(join(tmpdir(), "harness-cli-ingest-reconcile-"))
+      try {
+        const gitRefsDir = join(tmpDir, ".git", "refs", "heads")
+        const srcDir = join(tmpDir, "libs", "sample", "domain", "src")
+        mkdirSync(gitRefsDir, { recursive: true })
+        mkdirSync(srcDir, { recursive: true })
+
+        const sha1 = "1111111111111111111111111111111111111111"
+        const sha2 = "2222222222222222222222222222222222222222"
+        writeFileSync(join(tmpDir, ".git", "HEAD"), "ref: refs/heads/main\n")
+        writeFileSync(join(gitRefsDir, "main"), `${sha1}\n`)
+        writeFileSync(
+          join(srcDir, "index.ts"),
+          `import { Effect } from "effect"\nexport const fnV1 = Effect.fn("Sample.fnV1")(function* () { return 1 })\n`
+        )
+
+        const ingestRes = await runCli(["ingest"], { repoRoot: tmpDir })
+        expect(ingestRes.exitCode).toBe(0)
+        const ingestPayload = JSON.parse(ingestRes.stdout)
+        expect(ingestPayload.reconcileReason).toBe("missing-snapshot")
+        expect(ingestPayload.branch).toBe("main")
+        expect(ingestPayload.headSha).toBe(sha1)
+        expect(ingestPayload.indexedFns).toBe(1)
+
+        // Advance git HEAD SHA and add a second function (simulating git pull after PR merge)
+        writeFileSync(join(gitRefsDir, "main"), `${sha2}\n`)
+        writeFileSync(
+          join(srcDir, "index.ts"),
+          `import { Effect } from "effect"\nexport const fnV1 = Effect.fn("Sample.fnV1")(function* () { return 1 })\nexport const fnV2 = Effect.fn("Sample.fnV2")(function* () { return 2 })\n`
+        )
+
+        const sessRes = await runCli(["session", "--format=antigravity"], {
+          repoRoot: tmpDir
+        })
+        expect(sessRes.exitCode).toBe(0)
+        const headMetaRaw = JSON.parse(
+          readFileSync(join(tmpDir, ".harness", "graph-head.json"), "utf-8")
+        ) as { readonly headSha: string; readonly gitBranch: string }
+        expect(headMetaRaw.headSha).toBe(sha2)
+        expect(headMetaRaw.gitBranch).toBe("main")
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true })
+      }
+    })
   })
 
   describe("learn", () => {

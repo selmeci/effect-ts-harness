@@ -66,10 +66,23 @@ export async function resolve(specifier, context, nextResolve) {
       }
     }
     if (mainRepoRoot !== null) {
-      return nextResolve(specifier, {
-        ...context,
-        parentURL: pathToFileURL(join(mainRepoRoot, "package.json")).href
-      })
+      const repoRootUrl = pathToFileURL(repoRoot).href
+      const mainRepoRootUrl = pathToFileURL(mainRepoRoot).href
+      const mappedParentURL =
+        typeof context.parentURL === "string" && context.parentURL.startsWith(repoRootUrl)
+          ? mainRepoRootUrl + context.parentURL.slice(repoRootUrl.length)
+          : pathToFileURL(join(mainRepoRoot, "apps/harness-cli/package.json")).href
+      try {
+        return await nextResolve(specifier, {
+          ...context,
+          parentURL: mappedParentURL
+        })
+      } catch {
+        return nextResolve(specifier, {
+          ...context,
+          parentURL: pathToFileURL(join(mainRepoRoot, "apps/harness-cli/package.json")).href
+        })
+      }
     }
     throw error
   }
