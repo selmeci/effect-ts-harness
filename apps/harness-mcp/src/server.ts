@@ -9,6 +9,7 @@ import { Effect, Layer, Option, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import {
   buildHarnessGraph,
+  extractWorkspaceTypeAwareGraph,
   findCallees,
   findCallers,
   findTestsReaching,
@@ -21,8 +22,12 @@ import {
   projectOntologyLayers,
   queryOntologyImpact,
   queryOntologyWhy,
+  readGraphHeadMeta,
+  resolveGitHeadState,
   resolveNode,
-  structuralSearch
+  saveGraphSnapshot,
+  structuralSearch,
+  writeGraphHeadMeta
 } from "@harness/graph"
 import {
   decideOntologyInvariants,
@@ -34,10 +39,14 @@ import {
   routeStep
 } from "@harness/decision"
 export {
+  decideOmnigraphReconcile,
   deriveRepoOmnigraphPort,
+  readGraphHeadMeta,
   resolveCanonicalRepoRoot,
+  resolveGitHeadState,
   resolveOmnigraphClusterDir,
-  resolveOmnigraphTaskBranches
+  resolveOmnigraphTaskBranches,
+  writeGraphHeadMeta
 } from "@harness/gates"
 import {
   appendTelemetryEvent,
@@ -164,7 +173,7 @@ const resolveGraph = (
   if (options?.graph) {
     return Effect.succeed(options.graph)
   }
-  return Effect.try(() => {
+  return Effect.gen(function* () {
     const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
     let snapshotPath = options?.snapshotPath
     if (!snapshotPath) {
@@ -172,6 +181,20 @@ const resolveGraph = (
       const planSnap = path.join(root, ".harness", "plan-graph-snapshot.json")
       const verifyExists = fs.existsSync(verifySnap)
       const planExists = fs.existsSync(planSnap)
+      if (verifyExists) {
+        const recordedMeta = readGraphHeadMeta(root)
+        const headState = resolveGitHeadState(root)
+        if (
+          recordedMeta !== null &&
+          headState.headSha !== null &&
+          recordedMeta.headSha !== headState.headSha
+        ) {
+          const freshGraph = yield* extractWorkspaceTypeAwareGraph(root)
+          saveGraphSnapshot(freshGraph, verifySnap)
+          writeGraphHeadMeta(root, headState)
+          return freshGraph
+        }
+      }
       if (verifyExists && planExists) {
         const verifyMtime = fs.statSync(verifySnap).mtimeMs
         const planMtime = fs.statSync(planSnap).mtimeMs
@@ -194,15 +217,17 @@ const resolveGraph = (
       patternDocs: []
     })
   }).pipe(
-    Effect.orElseSucceed(() =>
-      buildHarnessGraph({
-        fns: [],
-        services: [],
-        layers: [],
-        errors: [],
-        tests: [],
-        patternDocs: []
-      })
+    Effect.catchDefect(() =>
+      Effect.succeed(
+        buildHarnessGraph({
+          fns: [],
+          services: [],
+          layers: [],
+          errors: [],
+          tests: [],
+          patternDocs: []
+        })
+      )
     )
   )
 }

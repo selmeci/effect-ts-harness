@@ -29,6 +29,7 @@ import {
   classifyFileWrite,
   clearFrictionEvents,
   clearTelemetryEvents,
+  decideOmnigraphReconcile,
   decideOntologyInvariants,
   deriveRepoOmnigraphPort,
   diffPlanAndImplGraphs,
@@ -37,9 +38,11 @@ import {
   isCdCommand,
   loadGovernanceDocsFromDisk,
   readFrictionEvents,
+  readGraphHeadMeta,
   readTelemetryEvents,
   renderSessionReportMarkdown,
   resolveCanonicalRepoRoot,
+  resolveGitHeadState,
   resolveHarnessStateDir,
   resolveOmnigraphClusterDir,
   resolveOmnigraphTaskBranches,
@@ -52,6 +55,7 @@ import {
   type TelemetryEngineSource,
   type TelemetryOutcome,
   type TelemetrySurface,
+  writeGraphHeadMeta,
   writeSessionReportFiles,
   writeVerifyStamp
 } from "@harness/gates"
@@ -67,6 +71,7 @@ import {
   queryOntologyImpact,
   queryOntologyWhy,
   renderOntologyMermaid,
+  saveGraphSnapshot,
   syncToOmnigraphAndSnapshot
 } from "@harness/graph"
 import { buildWorkspaceFnIndex } from "@harness/ingest"
@@ -164,6 +169,21 @@ const findWorkspaceRoot = (startDir: string = process.cwd()): string => {
     curr = dirname(curr)
   }
   return CLI_REPO_ROOT
+}
+
+const isIsolatedExternalWorkspace = (repoRoot: string): boolean => {
+  if (existsSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"))) {
+    return false
+  }
+  const explicitEnvUrl =
+    process.env.OMNIGRAPH_URL && process.env.OMNIGRAPH_URL !== "http://127.0.0.1:8080"
+  if (explicitEnvUrl) {
+    return false
+  }
+  return (
+    resolveCanonicalRepoRoot(repoRoot) !==
+    resolveCanonicalRepoRoot(CLI_REPO_ROOT)
+  )
 }
 
 const ANSI_REGEX = new RegExp(
@@ -635,36 +655,48 @@ const handlePlanCheck = (
     }
 
     if (!graphOnly) {
-      yield* ensureLocalOmnigraphReady(repoRoot)
-      const clusterRepoRoot = existsSync(
-        join(repoRoot, "libs", "harness", "graph", "cluster.yaml")
-      )
-        ? repoRoot
-        : findWorkspaceRoot(repoRoot)
-      const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
       const snapshotPath = join(repoRoot, ".harness", "plan-graph-snapshot.json")
-      const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
-        repoRoot: clusterRepoRoot,
-        branch: taskBranches.planBranch,
-        from: taskBranches.mainBranch,
-        snapshotPath
-      }).pipe(
-        Effect.provide(OmnigraphSync.Live),
-        Effect.orElseSucceed(() => ({ syncedToOmnigraph: false, snapshotPath, error: undefined }))
-      )
-      recordTelemetry(options, {
-        surface: "cli",
-        category: "graph_query",
-        toolName: "omnigraph:sync-plan",
-        outcome: syncRes.syncedToOmnigraph ? "ok" : "fail",
-        durationMs: 1,
-        engineSource: syncRes.syncedToOmnigraph ? "omnigraph" : "memory-fallback"
-      })
-      if (!syncRes.syncedToOmnigraph) {
-        return {
-          exitCode: 1,
-          stdout: "",
-          stderr: `Plan check failed: could not sync plan graph to Omnigraph${syncRes.error ? ` (${syncRes.error})` : ""}`
+      if (isIsolatedExternalWorkspace(repoRoot)) {
+        saveGraphSnapshot(graph, snapshotPath)
+        recordTelemetry(options, {
+          surface: "cli",
+          category: "graph_query",
+          toolName: "omnigraph:sync-plan",
+          outcome: "ok",
+          durationMs: 1,
+          engineSource: "local"
+        })
+      } else {
+        yield* ensureLocalOmnigraphReady(repoRoot)
+        const clusterRepoRoot = existsSync(
+          join(repoRoot, "libs", "harness", "graph", "cluster.yaml")
+        )
+          ? repoRoot
+          : findWorkspaceRoot(repoRoot)
+        const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
+        const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
+          repoRoot: clusterRepoRoot,
+          branch: taskBranches.planBranch,
+          from: taskBranches.mainBranch,
+          snapshotPath
+        }).pipe(
+          Effect.provide(OmnigraphSync.Live),
+          Effect.orElseSucceed(() => ({ syncedToOmnigraph: false, snapshotPath, error: undefined }))
+        )
+        recordTelemetry(options, {
+          surface: "cli",
+          category: "graph_query",
+          toolName: "omnigraph:sync-plan",
+          outcome: syncRes.syncedToOmnigraph ? "ok" : "fail",
+          durationMs: 1,
+          engineSource: syncRes.syncedToOmnigraph ? "omnigraph" : "memory-fallback"
+        })
+        if (!syncRes.syncedToOmnigraph) {
+          return {
+            exitCode: 1,
+            stdout: "",
+            stderr: `Plan check failed: could not sync plan graph to Omnigraph${syncRes.error ? ` (${syncRes.error})` : ""}`
+          }
         }
       }
     }
@@ -759,37 +791,52 @@ const handleVerify = (
       }
     }
 
-    yield* ensureLocalOmnigraphReady(repoRoot)
-    const clusterRepoRoot = existsSync(
-      join(repoRoot, "libs", "harness", "graph", "cluster.yaml")
-    )
-      ? repoRoot
-      : findWorkspaceRoot(repoRoot)
     const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
     const snapshotPath = join(repoRoot, ".harness", "graph-snapshot.json")
 
-    const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
-      repoRoot: clusterRepoRoot,
-      branch: taskBranches.implBranch,
-      from: taskBranches.mainBranch,
-      snapshotPath
-    }).pipe(
-      Effect.provide(OmnigraphSync.Live),
-      Effect.orElseSucceed(() => ({ syncedToOmnigraph: false, snapshotPath, error: undefined }))
-    )
-    recordTelemetry(options, {
-      surface: "cli",
-      category: "graph_query",
-      toolName: "omnigraph:sync-impl",
-      outcome: syncRes.syncedToOmnigraph ? "ok" : "fail",
-      durationMs: 1,
-      engineSource: syncRes.syncedToOmnigraph ? "omnigraph" : "memory-fallback"
-    })
-    if (!syncRes.syncedToOmnigraph) {
-      return {
-        exitCode: 1,
-        stdout: "",
-        stderr: `Verification failed: could not sync implementation graph to Omnigraph${syncRes.error ? ` (${syncRes.error})` : ""}`
+    if (isIsolatedExternalWorkspace(repoRoot)) {
+      saveGraphSnapshot(graph, snapshotPath)
+      writeGraphHeadMeta(repoRoot)
+      recordTelemetry(options, {
+        surface: "cli",
+        category: "graph_query",
+        toolName: "omnigraph:sync-impl",
+        outcome: "ok",
+        durationMs: 1,
+        engineSource: "local"
+      })
+    } else {
+      yield* ensureLocalOmnigraphReady(repoRoot)
+      const clusterRepoRoot = existsSync(
+        join(repoRoot, "libs", "harness", "graph", "cluster.yaml")
+      )
+        ? repoRoot
+        : findWorkspaceRoot(repoRoot)
+
+      const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
+        repoRoot: clusterRepoRoot,
+        branch: taskBranches.implBranch,
+        from: taskBranches.mainBranch,
+        snapshotPath
+      }).pipe(
+        Effect.provide(OmnigraphSync.Live),
+        Effect.orElseSucceed(() => ({ syncedToOmnigraph: false, snapshotPath, error: undefined }))
+      )
+      writeGraphHeadMeta(repoRoot)
+      recordTelemetry(options, {
+        surface: "cli",
+        category: "graph_query",
+        toolName: "omnigraph:sync-impl",
+        outcome: syncRes.syncedToOmnigraph ? "ok" : "fail",
+        durationMs: 1,
+        engineSource: syncRes.syncedToOmnigraph ? "omnigraph" : "memory-fallback"
+      })
+      if (!syncRes.syncedToOmnigraph) {
+        return {
+          exitCode: 1,
+          stdout: "",
+          stderr: `Verification failed: could not sync implementation graph to Omnigraph${syncRes.error ? ` (${syncRes.error})` : ""}`
+        }
       }
     }
 
@@ -932,46 +979,60 @@ const handleDone = (
     }
 
     // 4. Diff and merge branch impl into main in Omnigraph (hard gate)
-    yield* ensureLocalOmnigraphReady(repoRoot)
-    const clusterRepoRoot = existsSync(
-      join(repoRoot, "libs", "harness", "graph", "cluster.yaml")
-    )
-      ? repoRoot
-      : findWorkspaceRoot(repoRoot)
-    const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
-    yield* diffOmnigraphBranches({
-      repoRoot: clusterRepoRoot,
-      source: taskBranches.implBranch,
-      target: taskBranches.planBranch
-    }).pipe(
-      Effect.provide(OmnigraphSync.Live),
-      Effect.orElseSucceed(() => Option.none())
-    )
+    if (isIsolatedExternalWorkspace(repoRoot)) {
+      writeGraphHeadMeta(repoRoot)
+      recordTelemetry(options, {
+        surface: isAntigravity ? "hook" : "cli",
+        category: "graph_query",
+        toolName: "omnigraph:merge-main",
+        outcome: "ok",
+        durationMs: 1,
+        engineSource: "local"
+      })
+    } else {
+      yield* ensureLocalOmnigraphReady(repoRoot)
+      const clusterRepoRoot = existsSync(
+        join(repoRoot, "libs", "harness", "graph", "cluster.yaml")
+      )
+        ? repoRoot
+        : findWorkspaceRoot(repoRoot)
+      const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
+      yield* diffOmnigraphBranches({
+        repoRoot: clusterRepoRoot,
+        source: taskBranches.implBranch,
+        target: taskBranches.planBranch
+      }).pipe(
+        Effect.provide(OmnigraphSync.Live),
+        Effect.orElseSucceed(() => Option.none())
+      )
 
-    const merged = yield* mergeOmnigraphBranch({
-      repoRoot: clusterRepoRoot,
-      source: taskBranches.implBranch,
-      target: taskBranches.mainBranch
-    }).pipe(
-      Effect.provide(OmnigraphSync.Live),
-      Effect.orElseSucceed(() => false)
-    )
-    recordTelemetry(options, {
-      surface: isAntigravity ? "hook" : "cli",
-      category: "graph_query",
-      toolName: "omnigraph:merge-main",
-      outcome: merged ? "ok" : "fail",
-      durationMs: 1,
-      engineSource: merged ? "omnigraph" : "memory-fallback"
-    })
-    if (!merged) {
-      return {
-        exitCode: 0,
-        stdout: JSON.stringify({
-          decision: blockDecision,
-          reason: `Omnigraph branch merge (${taskBranches.implBranch} -> ${taskBranches.mainBranch}) failed`
-        }),
-        stderr: ""
+      const merged = yield* mergeOmnigraphBranch({
+        repoRoot: clusterRepoRoot,
+        source: taskBranches.implBranch,
+        target: taskBranches.mainBranch,
+        cleanupBranches: [taskBranches.implBranch, taskBranches.planBranch]
+      }).pipe(
+        Effect.provide(OmnigraphSync.Live),
+        Effect.orElseSucceed(() => false)
+      )
+      writeGraphHeadMeta(repoRoot)
+      recordTelemetry(options, {
+        surface: isAntigravity ? "hook" : "cli",
+        category: "graph_query",
+        toolName: "omnigraph:merge-main",
+        outcome: merged ? "ok" : "fail",
+        durationMs: 1,
+        engineSource: merged ? "omnigraph" : "memory-fallback"
+      })
+      if (!merged) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            decision: blockDecision,
+            reason: `Omnigraph branch merge (${taskBranches.implBranch} -> ${taskBranches.mainBranch}) failed`
+          }),
+          stderr: ""
+        }
       }
     }
 
@@ -1327,7 +1388,52 @@ const handleDoctorOrSession = (
       catch: () => false
     }).pipe(Effect.orElseSucceed(() => false))
 
-    const omnigraphInitialized = yield* ensureLocalOmnigraphReady(repoRoot)
+    const isolatedExternal = isIsolatedExternalWorkspace(repoRoot)
+    const omnigraphInitialized = isolatedExternal
+      ? true
+      : yield* ensureLocalOmnigraphReady(repoRoot)
+
+    const planPath = join(harnessDir, "plan-graph-snapshot.json")
+    const implPath = join(harnessDir, "graph-snapshot.json")
+
+    const headState = resolveGitHeadState(repoRoot)
+    const recordedMeta = readGraphHeadMeta(repoRoot)
+    if (!isolatedExternal || recordedMeta !== null) {
+      const reconcileDecision = yield* decideOmnigraphReconcile({
+        snapshotExists: existsSync(implPath),
+        recordedHeadSha: recordedMeta?.headSha ?? null,
+        currentHeadSha: headState.headSha,
+        recordedGitBranch: recordedMeta?.gitBranch ?? null,
+        currentGitBranch: headState.gitBranch
+      })
+      if (reconcileDecision.needsReconcile) {
+        const reconciledGraph = yield* extractWorkspaceTypeAwareGraph(repoRoot)
+        if (isolatedExternal) {
+          saveGraphSnapshot(reconciledGraph, implPath)
+          writeGraphHeadMeta(repoRoot, headState)
+        } else {
+          const clusterRepoRoot = existsSync(
+            join(repoRoot, "libs", "harness", "graph", "cluster.yaml")
+          )
+            ? repoRoot
+            : findWorkspaceRoot(repoRoot)
+          yield* syncToOmnigraphAndSnapshot(reconciledGraph, {
+            repoRoot: clusterRepoRoot,
+            branch: reconcileDecision.targetOmnigraphBranch,
+            from: "main",
+            snapshotPath: implPath
+          }).pipe(
+            Effect.provide(OmnigraphSync.Live),
+            Effect.orElseSucceed(() => ({
+              syncedToOmnigraph: false,
+              snapshotPath: implPath,
+              error: undefined
+            }))
+          )
+          writeGraphHeadMeta(repoRoot, headState)
+        }
+      }
+    }
 
     const workspaceRoot = findWorkspaceRoot()
     const tsconfigBasePath = existsSync(join(repoRoot, "tsconfig.base.json"))
@@ -1366,8 +1472,6 @@ const handleDoctorOrSession = (
       .filter((fn) => fn.isStub)
       .map((fn) => fn.spanName)
 
-    const planPath = join(harnessDir, "plan-graph-snapshot.json")
-    const implPath = join(harnessDir, "graph-snapshot.json")
     let missingPlannedFns: ReadonlyArray<string> = []
     if (existsSync(planPath) && existsSync(implPath)) {
       const planGraph = loadGraphSnapshot(planPath)
@@ -1489,6 +1593,104 @@ const handleMutate = (
       stderr: ""
     }
   })
+
+export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
+  argv: ReadonlyArray<string>,
+  options: CliEnv | undefined
+): Effect.fn.Return<CliResult> {
+  const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
+  const isAntigravity = argv.includes("--format=antigravity")
+  const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
+  const harnessDir = resolveHarnessStateDir(repoRoot)
+  const snapshotPath = join(harnessDir, "graph-snapshot.json")
+  const headState = resolveGitHeadState(repoRoot)
+  const recordedMeta = readGraphHeadMeta(repoRoot)
+  const reconcileDecision = yield* decideOmnigraphReconcile({
+    snapshotExists: existsSync(snapshotPath),
+    recordedHeadSha: recordedMeta?.headSha ?? null,
+    currentHeadSha: headState.headSha,
+    recordedGitBranch: recordedMeta?.gitBranch ?? null,
+    currentGitBranch: headState.gitBranch
+  })
+
+  if (!isAntigravity || reconcileDecision.needsReconcile) {
+    const graph = yield* extractWorkspaceTypeAwareGraph(repoRoot)
+    const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
+    const targetBranch =
+      headState.gitBranch === null ||
+      headState.gitBranch === "main" ||
+      headState.gitBranch === "master"
+        ? taskBranches.mainBranch
+        : taskBranches.implBranch
+
+    if (isIsolatedExternalWorkspace(repoRoot)) {
+      saveGraphSnapshot(graph, snapshotPath)
+      writeGraphHeadMeta(repoRoot, headState)
+      return {
+        exitCode: 0,
+        stdout: isAntigravity
+          ? JSON.stringify({})
+          : JSON.stringify({
+              indexedFns: fnIndex.bySpanName.size,
+              syncedToOmnigraph: false,
+              branch: targetBranch,
+              headSha: headState.headSha,
+              reconcileReason: reconcileDecision.reason
+            }),
+        stderr: ""
+      }
+    }
+
+    yield* ensureLocalOmnigraphReady(repoRoot)
+    const clusterRepoRoot = existsSync(
+      join(repoRoot, "libs", "harness", "graph", "cluster.yaml")
+    )
+      ? repoRoot
+      : findWorkspaceRoot(repoRoot)
+
+    const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
+      repoRoot: clusterRepoRoot,
+      branch: targetBranch,
+      from: taskBranches.mainBranch,
+      snapshotPath
+    }).pipe(
+      Effect.provide(OmnigraphSync.Live),
+      Effect.orElseSucceed(() => ({
+        syncedToOmnigraph: false,
+        snapshotPath,
+        error: undefined
+      }))
+    )
+    writeGraphHeadMeta(repoRoot, headState)
+    return {
+      exitCode: 0,
+      stdout: isAntigravity
+        ? JSON.stringify({})
+        : JSON.stringify({
+            indexedFns: fnIndex.bySpanName.size,
+            syncedToOmnigraph: syncRes.syncedToOmnigraph,
+            branch: targetBranch,
+            headSha: headState.headSha,
+            reconcileReason: reconcileDecision.reason
+          }),
+      stderr: ""
+    }
+  }
+
+  return {
+    exitCode: 0,
+    stdout: isAntigravity
+      ? JSON.stringify({})
+      : JSON.stringify({
+          indexedFns: fnIndex.bySpanName.size,
+          syncedToOmnigraph: true,
+          branch: reconcileDecision.targetOmnigraphBranch,
+          headSha: headState.headSha,
+          reconcileReason: reconcileDecision.reason
+        }),
+    stderr: ""
+  }
+})
 
 const handleLearn = (
   argv: ReadonlyArray<string>,
@@ -1727,21 +1929,9 @@ export const runCliEffect = (
       case "mutate":
         resEffect = handleMutate(argv.slice(1), options)
         break
-      case "ingest": {
-        const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-        const isAntigravity = argv.includes("--format=antigravity")
-        resEffect = Effect.gen(function* () {
-          const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
-          return {
-            exitCode: 0,
-            stdout: isAntigravity
-              ? JSON.stringify({})
-              : JSON.stringify({ indexedFns: fnIndex.bySpanName.size }),
-            stderr: ""
-          }
-        })
+      case "ingest":
+        resEffect = handleIngest(argv, options)
         break
-      }
       case "session":
       case "doctor":
         resEffect = handleDoctorOrSession(argv, options, decisionLayer)
