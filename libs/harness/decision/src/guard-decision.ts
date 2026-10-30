@@ -1,6 +1,11 @@
 import { Effect, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import {
+  CD_COMMAND_BANNED_REASON,
+  classifyCommand,
+  isCdCommand
+} from "@harness/gates"
 
 export const GuardV1 = Decision.make({
   input: Schema.Struct({ command: Schema.String }),
@@ -25,6 +30,28 @@ export interface GuardDecisionResult {
 export const decideGuardCommand = Effect.fn("Harness.decideGuardCommand")(function* (
   command: string
 ) {
+  const fastPath = classifyCommand(command)
+  if (fastPath === "deny") {
+    return {
+      verdict: "deny" as const,
+      reason: isCdCommand(command)
+        ? CD_COMMAND_BANNED_REASON
+        : "Matched deterministic denylist."
+    }
+  }
+  if (fastPath === "allow") {
+    return {
+      verdict: "allow" as const,
+      reason: "Matched deterministic allowlist."
+    }
+  }
+  if (fastPath === "ask") {
+    return {
+      verdict: "ask" as const,
+      reason: "Matched deterministic asklist; requires human confirmation."
+    }
+  }
+
   const outcome = yield* DecisionModel.decide(GuardV1, { input: { command } }).pipe(
     Effect.timeoutOption("1500 millis"),
     Effect.catchCause(() => Effect.succeedNone)

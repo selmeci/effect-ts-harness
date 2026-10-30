@@ -3,37 +3,6 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Schema } from "effect"
-
-const FastCheck = {
-  assert: (prop: () => void, _options?: { readonly numRuns?: number }): void => {
-    prop()
-  },
-  property: <T1, T2>(
-    arb1: () => T1,
-    arb2: () => T2,
-    fn: (val1: T1, val2: T2) => void
-  ): (() => void) => () => {
-    for (let i = 0; i < 100; i++) {
-      fn(arb1(), arb2())
-    }
-  },
-  constantFrom: <T>(...values: ReadonlyArray<T>): (() => T) => () =>
-    values[Math.floor(Math.random() * values.length)]!,
-  constant: <T>(val: T): (() => T) => () => val,
-  integer: ({ min, max }: { min: number; max: number }): (() => number) => () =>
-    Math.floor(Math.random() * (max - min + 1)) + min,
-  array: <T>(gen: () => T, { maxLength }: { maxLength: number }): (() => ReadonlyArray<T>) => () => {
-    const len = Math.floor(Math.random() * (maxLength + 1))
-    return Array.from({ length: len }, () => gen())
-  },
-  record: <T extends Record<string, unknown>>(shape: { [K in keyof T]: () => T[K] }): (() => T) => () => {
-    const obj = {} as Record<string, unknown>
-    for (const key of Object.keys(shape)) {
-      obj[key] = shape[key as keyof T]!()
-    }
-    return obj as T
-  }
-}
 import {
   appendTelemetryEvent,
   clearTelemetryEvents,
@@ -43,11 +12,7 @@ import {
   renderSessionReportMarkdown,
   scopeSessionReportInput,
   type SessionReport,
-  type TelemetryCategory,
-  type TelemetryEngineSource,
   TelemetryEvent,
-  type TelemetryOutcome,
-  type TelemetrySurface,
   writeSessionReportFiles
 } from "../src/index.js"
 
@@ -335,85 +300,39 @@ describe("telemetry & session observability", () => {
     })
   )
 
-  it("SessionReport.decide satisfies bounded score invariant under FastCheck", () => {
+  it.effect.prop(
+    "SessionReport.decide satisfies bounded score and grade invariant across arbitrary telemetry and friction inputs",
+    [
+      Schema.Array(TelemetryEvent),
+      Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 0, maximum: 10 })))
+    ],
+    ([events, frictionCount]) =>
+      Effect.gen(function* () {
+        const frictionEvents = Array.from({ length: frictionCount }, (_, i) => ({
+          kind: "route_miss" as const,
+          timestamp: "2026-10-27T12:00:00.000Z",
+          summary: `friction-${i}`,
+          detail: "detail"
+        }))
 
-      const surfaceArb = FastCheck.constantFrom<TelemetrySurface>("cli", "mcp", "hook")
-      const categoryArb = FastCheck.constantFrom<TelemetryCategory>(
-        "gate",
-        "graph_query",
-        "ontology",
-        "guard",
-        "routing",
-        "lifecycle"
-      )
-      const outcomeArb = FastCheck.constantFrom<TelemetryOutcome>(
-        "ok",
-        "fail",
-        "deny",
-        "ask",
-        "fallback"
-      )
-      const engineSourceArb = FastCheck.constantFrom<TelemetryEngineSource | undefined>(
-        undefined,
-        "omnigraph",
-        "memory-fallback",
-        "local",
-        "decision-model"
-      )
+        const report = yield* decideSessionReport({ events, frictionEvents })
 
-      const eventArb = FastCheck.record<TelemetryEvent>({
-        timestamp: FastCheck.constant("2026-10-27T12:00:00.000Z"),
-        surface: surfaceArb,
-        category: categoryArb,
-        toolName: FastCheck.constantFrom(
-          "verify",
-          "plan-check",
-          "route",
-          "done",
-          "harness_resolve",
-          "harness_gq_query",
-          "guard"
-        ),
-        outcome: outcomeArb,
-        durationMs: FastCheck.integer({ min: 0, max: 5000 }),
-        engineSource: engineSourceArb
+        expect(report.totalEvents).toBeGreaterThanOrEqual(0)
+        expect(report.totalEvents).toBeLessThanOrEqual(events.length)
+        expect(report.healthScore).toBeGreaterThanOrEqual(0)
+        expect(report.healthScore).toBeLessThanOrEqual(100)
+
+        if (report.healthScore >= 90) {
+          expect(report.grade).toBe("A")
+        } else if (report.healthScore >= 75) {
+          expect(report.grade).toBe("B")
+        } else if (report.healthScore >= 60) {
+          expect(report.grade).toBe("C")
+        } else {
+          expect(report.grade).toBe("D")
+        }
       })
-
-      FastCheck.assert(
-        FastCheck.property(
-          FastCheck.array(eventArb, { maxLength: 25 }),
-          FastCheck.integer({ min: 0, max: 10 }),
-          (events, frictionCount) => {
-            const frictionEvents = Array.from({ length: frictionCount }, (_, i) => ({
-              kind: "route_miss" as const,
-              timestamp: "2026-10-27T12:00:00.000Z",
-              summary: `friction-${i}`,
-              detail: "detail"
-            }))
-
-            const report = Effect.runSync(
-              decideSessionReport({ events, frictionEvents })
-            )
-
-            expect(report.totalEvents).toBeGreaterThanOrEqual(0)
-            expect(report.totalEvents).toBeLessThanOrEqual(events.length)
-            expect(report.healthScore).toBeGreaterThanOrEqual(0)
-            expect(report.healthScore).toBeLessThanOrEqual(100)
-
-            if (report.healthScore >= 90) {
-              expect(report.grade).toBe("A")
-            } else if (report.healthScore >= 75) {
-              expect(report.grade).toBe("B")
-            } else if (report.healthScore >= 60) {
-              expect(report.grade).toBe("C")
-            } else {
-              expect(report.grade).toBe("D")
-            }
-          }
-        ),
-        { numRuns: 100 }
-      )
-  })
+  )
 
   it.effect.prop(
     "SessionReport.decide preserves event count across arbitrary input lists",
@@ -778,4 +697,134 @@ describe("telemetry & session observability", () => {
     expect(scopedPreceded.frictionEvents.length).toBe(1)
     expect(scopedPreceded.frictionEvents[0]?.summary).toBe("active friction")
   })
+
+  it.effect("REQ-2.1: routing misses with outcome=fallback do not reduce omnigraphLiveRatio", () =>
+    Effect.gen(function* () {
+      const events: ReadonlyArray<TelemetryEvent> = [
+        {
+          timestamp: "2026-10-30T10:00:00.000Z",
+          surface: "mcp",
+          category: "graph_query",
+          toolName: "harness_gq_query",
+          outcome: "ok",
+          durationMs: 35,
+          engineSource: "omnigraph"
+        },
+        {
+          timestamp: "2026-10-30T10:00:01.000Z",
+          surface: "cli",
+          category: "routing",
+          toolName: "route",
+          outcome: "fallback",
+          durationMs: 400
+        }
+      ]
+
+      const report = yield* decideSessionReport({ events })
+      expect(report.kpis.omnigraphLiveRatio).toBe(1)
+    })
+  )
+
+  it.effect("REQ-2.2: omnigraph:sync-* and omnigraph:merge-* do not increment graphDiscoveryCalls", () =>
+    Effect.gen(function* () {
+      const events: ReadonlyArray<TelemetryEvent> = [
+        {
+          timestamp: "2026-10-30T10:00:00.000Z",
+          surface: "cli",
+          category: "graph_query",
+          toolName: "omnigraph:sync-plan",
+          outcome: "ok",
+          durationMs: 50
+        },
+        {
+          timestamp: "2026-10-30T10:00:01.000Z",
+          surface: "cli",
+          category: "graph_query",
+          toolName: "omnigraph:sync-impl",
+          outcome: "ok",
+          durationMs: 60
+        },
+        {
+          timestamp: "2026-10-30T10:00:02.000Z",
+          surface: "cli",
+          category: "graph_query",
+          toolName: "omnigraph:merge-main",
+          outcome: "ok",
+          durationMs: 70
+        },
+        {
+          timestamp: "2026-10-30T10:00:03.000Z",
+          surface: "mcp",
+          category: "graph_query",
+          toolName: "harness_resolve",
+          outcome: "ok",
+          durationMs: 15
+        }
+      ]
+
+      const report = yield* decideSessionReport({ events })
+      expect(report.kpis.graphDiscoveryCalls).toBe(1)
+    })
+  )
+
+  it.effect("REQ-2.3: recommends in-process MCP tools when bySurface.mcp === 0 and nonHookCalls >= 3", () =>
+    Effect.gen(function* () {
+      const cliEvents: ReadonlyArray<TelemetryEvent> = [
+        {
+          timestamp: "2026-10-30T10:00:00.000Z",
+          surface: "cli",
+          category: "gate",
+          toolName: "plan-check",
+          outcome: "ok",
+          durationMs: 300
+        },
+        {
+          timestamp: "2026-10-30T10:00:01.000Z",
+          surface: "cli",
+          category: "gate",
+          toolName: "verify",
+          outcome: "ok",
+          durationMs: 250
+        },
+        {
+          timestamp: "2026-10-30T10:00:02.000Z",
+          surface: "cli",
+          category: "gate",
+          toolName: "done",
+          outcome: "ok",
+          durationMs: 100
+        }
+      ]
+
+      const report = yield* decideSessionReport({ events: cliEvents })
+      expect(report.bySurface.mcp).toBe(0)
+      expect(report.recommendations).toContain(
+        "Zero harness-mcp tool calls recorded (bySurface.mcp = 0). Prefer in-process MCP tools (harness_route, harness_lsp_diagnostics, harness_ontology_check, harness_resolve) over shell CLI subcommands."
+      )
+
+      const twoCliEvents = cliEvents.slice(0, 2)
+      const subThresholdReport = yield* decideSessionReport({ events: twoCliEvents })
+      expect(subThresholdReport.bySurface.mcp).toBe(0)
+      expect(subThresholdReport.recommendations).not.toContain(
+        "Zero harness-mcp tool calls recorded (bySurface.mcp = 0). Prefer in-process MCP tools (harness_route, harness_lsp_diagnostics, harness_ontology_check, harness_resolve) over shell CLI subcommands."
+      )
+
+      const mcpEvents: ReadonlyArray<TelemetryEvent> = [
+        ...cliEvents,
+        {
+          timestamp: "2026-10-30T10:00:03.000Z",
+          surface: "mcp",
+          category: "graph_query",
+          toolName: "harness_resolve",
+          outcome: "ok",
+          durationMs: 20
+        }
+      ]
+      const mcpReport = yield* decideSessionReport({ events: mcpEvents })
+      expect(mcpReport.bySurface.mcp).toBe(1)
+      expect(mcpReport.recommendations).not.toContain(
+        "Zero harness-mcp tool calls recorded (bySurface.mcp = 0). Prefer in-process MCP tools (harness_route, harness_lsp_diagnostics, harness_ontology_check, harness_resolve) over shell CLI subcommands."
+      )
+    })
+  )
 })

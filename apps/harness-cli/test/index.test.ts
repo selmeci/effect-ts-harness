@@ -2,6 +2,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
+import { Effect, Layer } from "effect"
+import * as DecisionModel from "effect/ai/DecisionModel"
 import {
   makeFailingDecisionModelLayer,
   makeMockDecisionModelLayer
@@ -98,6 +100,21 @@ describe("harness-cli v2 commands", () => {
           hookEventName: "PreToolUse",
           permissionDecision: "ask"
         }
+      })
+
+      const cdDeny = await runCli(["guard", "cd libs/sample/domain"])
+      expect(cdDeny.exitCode).toBe(2)
+      expect(cdDeny.stderr).toContain("Cwd")
+
+      const cdAntigravity = await runCli([
+        "guard",
+        "--format=antigravity",
+        "cd libs/sample/domain"
+      ])
+      expect(cdAntigravity.exitCode).toBe(0)
+      expect(JSON.parse(cdAntigravity.stdout)).toEqual({
+        decision: "deny",
+        reason: expect.stringContaining("Cwd")
       })
     })
 
@@ -637,6 +654,41 @@ enforced_by:
         modelWarm: false
       })
     })
+
+    it("session --format=antigravity fast-path does not invoke DecisionModel.decide", async () => {
+      const tmpDir = mkdtempSync(join(tmpdir(), "harness-cli-antigravity-fast-"))
+      try {
+        let decideCalls = 0
+        const baseLayer = makeMockDecisionModelLayer()
+        const countingLayer = Layer.effect(
+          DecisionModel.DecisionModel,
+          Effect.gen(function* () {
+            const model = yield* Effect.provide(DecisionModel.DecisionModel, baseLayer)
+            const countingModel: DecisionModel.DecisionModel = {
+              ...model,
+              decide: (definition, options) =>
+                Effect.sync(() => {
+                  decideCalls++
+                }).pipe(Effect.andThen(model.decide(definition, options)))
+            }
+            return countingModel
+          })
+        )
+
+        const res = await runCli(
+          ["session", "--format=antigravity"],
+          { repoRoot: tmpDir },
+          countingLayer
+        )
+        expect(res.exitCode).toBe(0)
+        const payload = JSON.parse(res.stdout)
+        expect(payload).toHaveProperty("injectSteps")
+        expect(Array.isArray(payload.injectSteps)).toBe(true)
+        expect(decideCalls).toBe(0)
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true })
+      }
+    })
   })
 
   describe("learn", () => {
@@ -775,11 +827,21 @@ enforced_by:
         const res = await runCli(["report"], { repoRoot: dir })
         expect(res.exitCode).toBe(0)
         const report = JSON.parse(res.stdout)
-        expect(report.totalEvents).toBeGreaterThanOrEqual(2)
-        expect(report.healthScore).toBeGreaterThanOrEqual(0)
-        expect(report.healthScore).toBeLessThanOrEqual(100)
-        expect(["A", "B", "C", "D"]).toContain(report.grade)
-        expect(report.kpis).toBeDefined()
+        expect(report.totalEvents).toBe(2)
+        expect(report.healthScore).toBe(100)
+        expect(report.grade).toBe("A")
+        expect(report.kpis).toMatchObject({
+          firstPassVerify: null,
+          verifyAttempts: 0,
+          fixUpIterations: 0,
+          planBeforeVerify: true,
+          prematureDoneAttempts: 0,
+          graphDiscoveryCalls: 0,
+          graphDiscoveryRatio: 0,
+          omnigraphLiveRatio: null,
+          guardInterventions: 0,
+          frictionCount: 0
+        })
         expect(existsSync(join(dir, ".harness", "session-report.json"))).toBe(true)
         expect(existsSync(join(dir, ".harness", "session-report.md"))).toBe(true)
 

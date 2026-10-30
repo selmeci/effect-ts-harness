@@ -1,6 +1,9 @@
 {
   "$schema": "./node_modules/nx/schemas/nx-schema.json",
   "defaultBase": "main",
+  "cli": {
+    "analytics": false
+  },
   "ignore": ["repos/**", "docs/**", "agent-patterns/**", "adapters/**"],
   "plugins": [
     "@nx/js",

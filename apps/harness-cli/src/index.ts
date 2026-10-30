@@ -22,6 +22,7 @@ import {
   appendTelemetryEvent,
   buildSessionHandoff,
   buildSessionReport,
+  CD_COMMAND_BANNED_REASON,
   checkLoopThrashing,
   checkVerifyStamp,
   classifyCommand,
@@ -33,6 +34,7 @@ import {
   diffPlanAndImplGraphs,
   type FrictionEventKind,
   type GovernanceDocReference,
+  isCdCommand,
   loadGovernanceDocsFromDisk,
   readFrictionEvents,
   readTelemetryEvents,
@@ -337,12 +339,15 @@ const handleGuard = (
 
     const classification = classifyCommand(command)
     if (classification === "deny") {
+      const denyReason = isCdCommand(command)
+        ? `Blocked by harness guard: ${command} (${CD_COMMAND_BANNED_REASON})`
+        : `Blocked by harness guard: ${command}`
       if (isAntigravity) {
         return {
           exitCode: 0,
           stdout: JSON.stringify({
             decision: "deny",
-            reason: `Blocked by harness guard: ${command}`
+            reason: denyReason
           }),
           stderr: ""
         }
@@ -350,7 +355,7 @@ const handleGuard = (
       return {
         exitCode: 2,
         stdout: "",
-        stderr: `Blocked by harness guard: ${command}`
+        stderr: denyReason
       }
     }
     if (classification === "allow") {
@@ -1344,14 +1349,17 @@ const handleDoctorOrSession = (
       catch: () => false
     }).pipe(Effect.orElseSucceed(() => false))
 
-    const warmUpOpt = yield* DecisionModel.decide(IdiomRouterV1, {
-      input: { planStep: "Initialize session" }
-    }).pipe(
-      Effect.timeoutOption("10 seconds"),
-      Effect.catchCause(() => Effect.succeedNone),
-      Effect.provide(decisionLayer)
-    )
-    const modelWarm = Option.isSome(warmUpOpt)
+    const modelWarm = isAntigravity
+      ? true
+      : Option.isSome(
+          yield* DecisionModel.decide(IdiomRouterV1, {
+            input: { planStep: "Initialize session" }
+          }).pipe(
+            Effect.timeoutOption("10 seconds"),
+            Effect.catchCause(() => Effect.succeedNone),
+            Effect.provide(decisionLayer)
+          )
+        )
 
     const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
     const activeStubs = Array.from(fnIndex.bySpanName.values())
@@ -1650,12 +1658,17 @@ const handleReport = (
 
 export const runCliEffect = (
   argv: ReadonlyArray<string>,
-  options?: CliEnv
+  options?: CliEnv,
+  maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     const requested = argv[0] ?? "help"
-    const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
-    const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
+    const effectiveOptions =
+      maybeDecisionLayer !== undefined
+        ? { ...options, decisionLayer: maybeDecisionLayer }
+        : options
+    const decisionLayer = effectiveOptions?.decisionLayer ?? LocalDecisionModel
+    const repoRoot = effectiveOptions?.repoRoot ?? findWorkspaceRoot()
 
     if (options?.repoRoot === undefined && process.env.VITEST === undefined) {
       yield* Effect.try(() => {
@@ -1822,8 +1835,10 @@ export const runCliEffect = (
 
 export const runCli = (
   argv: ReadonlyArray<string>,
-  options?: CliEnv
-): Promise<CliResult> => Effect.runPromise(runCliEffect(argv, options))
+  options?: CliEnv,
+  maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>
+): Promise<CliResult> =>
+  Effect.runPromise(runCliEffect(argv, options, maybeDecisionLayer))
 
 export const run = (argv: ReadonlyArray<string>): number => {
   const requested = argv[0] ?? "help"

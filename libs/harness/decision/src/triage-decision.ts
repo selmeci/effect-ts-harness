@@ -16,15 +16,42 @@ export const TriageV1 = Decision.make({
   }
 })
 
+export type TriageKind = "mechanical" | "semantic" | "compile"
+
 export interface TriageResult {
-  readonly kind: "mechanical" | "semantic"
+  readonly kind: TriageKind
   readonly hint: string
 }
 
-const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<{
-  readonly pattern: string
+export interface DeterministicTriageRule {
+  readonly id?: string
+  readonly pattern: string | RegExp
+  readonly kind?: TriageKind
+  readonly hint?: string
   readonly result: TriageResult
-}> = [
+}
+
+export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> = [
+  {
+    id: "effect-v3-removed-api",
+    pattern: /\b(?:decodeEither|decodeUnknownEither|encodeEither)\b|has no exported member '(?:Either|ParseResult)'/i,
+    kind: "compile",
+    hint: "Effect v4 removed Effect/Either, Effect/ParseResult, and Schema.decodeEither/decodeUnknownEither. Use Effect/Result or Effect/Exit with Schema.decodeExit, Schema.decodeUnknownExit, Schema.decodeSync, or Schema.decodeUnknownSync (see repos/effect/LLMS.md).",
+    result: {
+      kind: "compile",
+      hint: "Effect v4 removed Effect/Either, Effect/ParseResult, and Schema.decodeEither/decodeUnknownEither. Use Effect/Result or Effect/Exit with Schema.decodeExit, Schema.decodeUnknownExit, Schema.decodeSync, or Schema.decodeUnknownSync (see repos/effect/LLMS.md)."
+    }
+  },
+  {
+    id: "schema-decode-sync-unknown-input",
+    pattern: /decodeSync[\s\S]{0,160}Argument of type .* is not assignable to parameter of type|Argument of type .* is not assignable to parameter of type[\s\S]{0,160}decodeSync/i,
+    kind: "compile",
+    hint: "Schema.decodeSync(schema) requires an argument matching the schema's Encoded type. For unvalidated inputs or negative test cases, use Schema.decodeUnknownSync(schema)(input) or Schema.decodeUnknownExit(schema)(input).",
+    result: {
+      kind: "compile",
+      hint: "Schema.decodeSync(schema) requires an argument matching the schema's Encoded type. For unvalidated inputs or negative test cases, use Schema.decodeUnknownSync(schema)(input) or Schema.decodeUnknownExit(schema)(input)."
+    }
+  },
   {
     pattern: "floatingEffect",
     result: {
@@ -185,7 +212,10 @@ export const triageFailure = Effect.fn("Harness.triageFailure")(function* (
   failureOutput: string
 ) {
   for (const rule of DETERMINISTIC_TRIAGE_RULES) {
-    if (failureOutput.includes(rule.pattern)) {
+    const matches = typeof rule.pattern === "string"
+      ? failureOutput.includes(rule.pattern)
+      : rule.pattern.test(failureOutput)
+    if (matches) {
       return rule.result
     }
   }

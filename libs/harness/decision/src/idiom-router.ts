@@ -26,6 +26,51 @@ export const IDIOM_BLOCKS = [
   "effect"
 ] as const
 export type IdiomBlock = (typeof IDIOM_BLOCKS)[number]
+export type BuildingBlock = IdiomBlock
+
+export interface DeterministicRouteRule {
+  readonly id: string
+  readonly pattern: RegExp
+  readonly block: BuildingBlock
+}
+
+export const DETERMINISTIC_ROUTE_RULES: ReadonlyArray<DeterministicRouteRule> = [
+  {
+    id: "event-sourcing",
+    pattern: /\b(?:event[-\s]+sourcing|decider|evolve|event[-\s]+store|aggregate(?:\s+root)?)\b/i,
+    block: "event-sourcing"
+  },
+  {
+    id: "pattern-matching",
+    pattern: /\b(?:ts-pattern|pattern[-\s]+matching|exhaustive\s+match|discriminated\s+union|tagged\s*union)\b/i,
+    block: "pattern-matching"
+  },
+  {
+    id: "d1-repository",
+    pattern: /\b(?:d1[-\s]+repository|drizzle|sqlitetable|d1\s+database)\b/i,
+    block: "d1-repository"
+  },
+  {
+    id: "durable-object-state",
+    pattern: /\b(?:durable[-\s]+object|sqlitedo|runsynctransaction)\b/i,
+    block: "durable-object-state"
+  },
+  {
+    id: "httpapi",
+    pattern: /\b(?:httpapi|httpapiendpoint|httpapigroup|httpapibuilder)\b/i,
+    block: "httpapi"
+  },
+  {
+    id: "rpc",
+    pattern: /\b(?:rpcgroup|rpctest|tohttpclient|durable\s+object\s+rpc)\b/i,
+    block: "rpc"
+  },
+  {
+    id: "atom",
+    pattern: /\b(?:atomhttpapi|useatom|effect[-\s]+atom)\b/i,
+    block: "atom"
+  }
+]
 
 /** Versioned decision definition: reviewed data, not a prompt string. */
 export const IdiomRouterV1 = Decision.make({
@@ -87,8 +132,19 @@ export const assertDecisionLimits = (definition: {
   }
 }
 
-export const routeStep = Effect.fn("Harness.routeStep")(function* (planStep: string) {
-  const outcome = yield* DecisionModel.decide(IdiomRouterV1, { input: { planStep } }).pipe(
+export const routeStep = Effect.fn("Harness.routeStep")(function* (step: string) {
+  const trimmed = step.trim()
+  if (trimmed.length === 0) {
+    return "review" as BuildingBlock
+  }
+
+  for (const rule of DETERMINISTIC_ROUTE_RULES) {
+    if (rule.pattern.test(trimmed)) {
+      return rule.block
+    }
+  }
+
+  const outcome = yield* DecisionModel.decide(IdiomRouterV1, { input: { planStep: step } }).pipe(
     Effect.timeoutOption("1500 millis"),
     Effect.catchCause(() => Effect.succeedNone)
   )

@@ -52,6 +52,17 @@ plan -> skeleton with stub<A, E, R>(...args) -> harness plan-check -> implement 
 7. **`harness learn` (`compounding-effect-learnings`):** Inspect `.harness/friction-log.jsonl` clusters (`Friction.decide` + `LearnProposalV1`) via `node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts learn` and promote recurring friction (`route_miss`, `verify_failure`, `guard_escalation`) into `agent-patterns/*.md`, `DETERMINISTIC_TRIAGE_RULES`, `ALLOWLIST`, or AST/graph gates (`--clear` after promotion).
 8. **Review Feedback Resolution (`resolving-effect-review-feedback`):** When addressing code review feedback (pasted from Grok/Codex/human reviewers or fetched from a GitHub PR), adjudicate findings centrally with Graph MCP (`harness_resolve`, `harness_ontology_why`, `harness_structural_search`, `harness_tests_reaching`), synchronize EARS specs/ADRs first, dispatch package-isolated `flash` fixer subagents with `harness_route` recipes, re-verify via `gc --strict`, `mutate --strict`, and `verify`, and promote any gate blind spots via `compounding-effect-learnings`.
 
+### 1.3 MCP-First Tooling Preference
+
+Always prefer in-process MCP tools over spawning shell subcommands to eliminate process overhead and guard prompt friction:
+- **LSP & Type Diagnostics:** `harness_lsp_diagnostics` (replaces slow shell lint/typecheck runs during development).
+- **Ontology & Architecture:** `harness_ontology_check`, `harness_ontology_why`, `harness_ontology_impact` (trace and audit EARS specs and ADR invariants).
+- **Test Impact Analysis:** `harness_tests_reaching` (determines affected test files for touched symbols).
+- **Session Telemetry:** `harness_telemetry_report` (reviews session metrics and friction logs).
+- **Graph Queries:** `harness_gq_query`, `harness_structural_search`.
+- **Task Lifecycle Gates (CLI only):** Use `pnpm harness <cmd>` (`plan-check`, `gc --strict`, `mutate --strict`, `verify`, `done`) strictly for task state transitions and cryptographic verify-stamp generation.
+- **Long-Running CLI Gate Execution (`WaitMsBeforeAsync`):** When running CLI lifecycle gates (`pnpm harness plan-check`, `pnpm harness gc --strict`, `pnpm harness mutate --strict`, `pnpm harness verify`, `pnpm harness done`), always pass `WaitMsBeforeAsync: 10000` to `run_command`. If a command goes to the background, rely on Antigravity's reactive wakeup — never poll in a loop with `manage_task status` or `schedule` timers.
+
 ---
 
 ## 3. MCP Tool Catalog
