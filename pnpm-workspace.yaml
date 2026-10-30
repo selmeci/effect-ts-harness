@@ -2,6 +2,7 @@ packages:
   - apps/*
   - libs/harness/*
   - libs/sample/*
+  - libs/es/*
 onlyBuiltDependencies:
   - esbuild
   - nx
