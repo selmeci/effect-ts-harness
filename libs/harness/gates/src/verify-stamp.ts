@@ -30,7 +30,8 @@ const IGNORED_NAMES = new Set([
   ".DS_Store",
   ".alchemy",
   ".vite",
-  ".remember"
+  ".remember",
+  ".worktrees"
 ])
 
 const collectFiles = (

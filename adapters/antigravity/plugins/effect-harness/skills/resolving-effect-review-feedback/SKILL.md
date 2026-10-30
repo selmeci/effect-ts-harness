@@ -69,8 +69,10 @@ For each normalized finding `F-n`, run in-process Graph MCP tools instead of slo
 4. **Test Reachability Inspection (`harness_tests_reaching`):**
    - Identify all `@effect/vitest` `VitestCase` nodes exercising the target symbol or span.
    - If the reviewer claims a test gap, verify whether reaching test cases are missing, vacuous (`.thenFails()` with no expected error), or lack negative failure cases.
-5. **Specialist Lens Consultation (Optional for Contested Items):**
-   - If an item involves subtle concurrency races, trust boundaries, or adversarial state sequences, invoke read-only specialist reviewers (`effect-adversarial-reviewer`, `effect-ears-test-reviewer`, `effect-reliability-reviewer`, `effect-security-reviewer`) for targeted analysis before finalizing the verdict.
+5. **Specialist Lens Consultation (Mandatory for Core/Domain/Event Sourcing):**
+   - For ANY task or contested finding touching `type:core`, `type:domain`, deciders, or event sourcing, dispatching **BOTH** `effect-ears-test-reviewer` AND `effect-adversarial-reviewer` is strictly mandatory.
+   - Prompts to reviewers MUST be neutral and adversarial ("Assume there are at least 3 P0/P1 bugs hiding across the spec, ADR, contract, fixtures, and tests; find them using the 7-Point Anti-Rubber-Stamp Audit") — never spoon-feed confirmation-biased prompts or assume implementations are correct.
+   - For trust boundaries or infra/resource questions, invoke `effect-security-reviewer` or `effect-reliability-reviewer` as appropriate.
 
 Assign each finding one disposition from the rubric:
 - `fix`: Single-location valid code defect.

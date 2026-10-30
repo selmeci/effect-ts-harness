@@ -15,6 +15,7 @@ export type EarsLintFindingKind =
   | "invalid-verification"
   | "unfilled-placeholder"
   | "legacy-effect-v3-symbol"
+  | "defect-polarity-inversion"
 
 export interface EarsLintFinding {
   readonly line: number
@@ -417,6 +418,18 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
               line: lineNum,
               kind: "compound-obligation",
               message: `${cleanId} joins two obligations with 'and shall' — split into separate REQ rows if they can fail independently, or drop negative restatements.`
+            })
+          }
+
+          // Defect safety polarity check
+          if (
+            /\b(?:fail|fails|thenfails)\b/.test(normalizedPlain) &&
+            /\bwithout\s+(?:dying|throwing)\b.*\bdefect/.test(normalizedPlain)
+          ) {
+            findings.push({
+              line: lineNum,
+              kind: "defect-polarity-inversion",
+              message: `${cleanId} inverts defect safety polarity ('without dying on ... defects'): in Effect-TS test harnesses, unexpected defects MUST die/fail the assertion rather than being ignored.`
             })
           }
 

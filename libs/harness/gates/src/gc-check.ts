@@ -22,6 +22,7 @@ export type GcFindingKind =
   | "ears-spec-lint"
   | "adr-doc-lint"
   | "ontology-invariant"
+  | "unused-contract-export"
 
 export interface GcFinding {
   readonly kind: GcFindingKind
@@ -91,6 +92,7 @@ export interface GovernanceDocReference {
   readonly referencedSpans?: ReadonlyArray<string> | undefined
   readonly referencedServices?: ReadonlyArray<string> | undefined
   readonly referencedErrors?: ReadonlyArray<string> | undefined
+  readonly enforcedByFileContents?: Readonly<Record<string, string>> | undefined
 }
 
 export interface GraphEntropyInput {
@@ -478,6 +480,99 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
             }
           }
         }
+
+        const detEnfMatch = doc.markdown.match(
+          /###\s+Deterministic Enforcement([\s\S]*?)(?:\n##|\n#|$)/
+        )
+        if (detEnfMatch && detEnfMatch[1]) {
+          const tableLines = detEnfMatch[1].split(/\r?\n/)
+          let seenSep = false
+          for (const line of tableLines) {
+            const trimmed = line.trim()
+            if (!trimmed.startsWith("|")) continue
+            const parts = trimmed.split("|").slice(1, -1).map((p) => p.trim())
+            if (parts.length < 3) continue
+            if (parts.every((p) => /^:?-+:?$/.test(p))) {
+              seenSep = true
+              continue
+            }
+            if (seenSep) {
+              const enforcedByCol = parts[1] ?? ""
+              const gateMechCol = parts[2] ?? ""
+
+              const col1Paths: Array<string> = []
+              const backticks = Array.from(
+                enforcedByCol.matchAll(/`([^`]+)`/g)
+              ).map((m) => m[1]!.trim())
+              for (const b of backticks) {
+                if (
+                  b.includes("/") &&
+                  /\.(?:ts|tsx|js|mjs|md|json|cedar)$/.test(b) &&
+                  !col1Paths.includes(b)
+                ) {
+                  col1Paths.push(b)
+                }
+              }
+              const tokens = enforcedByCol
+                .replace(/`([^`]+)`/g, " $1 ")
+                .split(/[,\s]+/)
+              for (const t of tokens) {
+                const tr = t.trim()
+                if (
+                  tr.includes("/") &&
+                  /\.(?:ts|tsx|js|mjs|md|json|cedar)$/.test(tr) &&
+                  !col1Paths.includes(tr)
+                ) {
+                  col1Paths.push(tr)
+                }
+              }
+
+              const gateBackticks = Array.from(
+                gateMechCol.matchAll(/`([^`]+)`/g)
+              ).map((m) => m[1]!.trim())
+
+              const genericWords = new Set([
+                "vitest",
+                "oxlint",
+                "tsc",
+                "nx",
+                "cedar"
+              ])
+
+              const existingCol1Paths = col1Paths.filter(
+                (p) => doc.existingFiles === undefined || doc.existingFiles.includes(p)
+              )
+
+              if (
+                existingCol1Paths.length > 0 &&
+                doc.enforcedByFileContents !== undefined &&
+                existingCol1Paths.every((p) => doc.enforcedByFileContents?.[p] !== undefined)
+              ) {
+                for (const mech of gateBackticks) {
+                  if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(mech)) {
+                    continue
+                  }
+                  if (genericWords.has(mech.toLowerCase())) {
+                    continue
+                  }
+
+                  const found = existingCol1Paths.some((p) =>
+                    doc.enforcedByFileContents?.[p]?.includes(mech)
+                  )
+                  if (!found) {
+                    findings.push({
+                      kind: "stale-doc-reference",
+                      nodeId: `${doc.id}:${mech}`,
+                      location: doc.docPath,
+                      message: `Governance doc "${doc.docPath}" (${doc.id}) enforcement table attributes "${mech}" to "${enforcedByCol}", but none of those files define or reference "${mech}".`,
+                      action: `Update "${doc.docPath}" enforcement table or implement "${mech}" in "${enforcedByCol}".`
+                    })
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -791,6 +886,20 @@ export const loadGovernanceDocsFromDisk = (
       )
 
       if (parsed !== null) {
+        const enforcedByFileContents: Record<string, string> = {}
+        for (const ef of parsed.enforcedByFiles ?? []) {
+          const fullEfPath = join(repoRoot, ef)
+          if (existsSync(fullEfPath)) {
+            const fileContent = Effect.runSync(
+              Effect.try({
+                try: () => readFileSync(fullEfPath, "utf8"),
+                catch: () => ""
+              }).pipe(Effect.orElseSucceed(() => ""))
+            )
+            enforcedByFileContents[ef] = fileContent
+          }
+        }
+
         if (
           relDir.endsWith("/specs") ||
           relDir.endsWith("/adr") ||
@@ -801,10 +910,14 @@ export const loadGovernanceDocsFromDisk = (
         ) {
           results.push({
             ...parsed,
-            markdown: content
+            markdown: content,
+            enforcedByFileContents
           })
         } else {
-          results.push(parsed)
+          results.push({
+            ...parsed,
+            enforcedByFileContents
+          })
         }
       }
     }
@@ -903,6 +1016,103 @@ export const scanWorkspacePackageHygiene = (
 
   for (const scope of scopes) {
     const scopeDir = join(libsDir, scope)
+
+    // Check unused-contract-export for this scope
+    const contractSrcDir = join(scopeDir, "contract", "src")
+    const hasContractSrc = Effect.runSync(
+      Effect.try({
+        try: () => existsSync(contractSrcDir),
+        catch: () => false
+      }).pipe(Effect.orElseSucceed(() => false))
+    )
+
+    const siblingTierNames = ["core", "domain", "service", "infra"] as const
+    const existingSiblingDirs: Array<string> = []
+    for (const sibName of siblingTierNames) {
+      const sibDir = join(scopeDir, sibName)
+      if (existsSync(sibDir)) {
+        existingSiblingDirs.push(sibDir)
+      }
+    }
+    const appScopeDir = join(repoRoot, "apps", scope)
+    if (existsSync(appScopeDir)) {
+      existingSiblingDirs.push(appScopeDir)
+    }
+    const contractScriptsDir = join(scopeDir, "contract", "scripts")
+    if (existsSync(contractScriptsDir)) {
+      existingSiblingDirs.push(contractScriptsDir)
+    }
+
+    if (hasContractSrc && existingSiblingDirs.length > 0) {
+      const contractFiles = collectTsFiles(contractSrcDir)
+      const siblingFiles: Array<string> = []
+      for (const sibDir of existingSiblingDirs) {
+        if (sibDir.endsWith("/scripts")) {
+          siblingFiles.push(...collectAllFiles(sibDir))
+        } else {
+          siblingFiles.push(...collectTsFiles(sibDir))
+        }
+      }
+
+      const combinedSiblingContent = siblingFiles
+        .map((f) =>
+          Effect.runSync(
+            Effect.try({
+              try: () => readFileSync(f, "utf8"),
+              catch: () => ""
+            }).pipe(Effect.orElseSucceed(() => ""))
+          )
+        )
+        .map((text) =>
+          text.replace(/export\s+(?:type\s+)?\{[^}]*\}\s+from\s+["'][^"']+["']/g, "")
+        )
+        .join("\n")
+
+      for (const contractFile of contractFiles) {
+        const content = Effect.runSync(
+          Effect.try({
+            try: () => readFileSync(contractFile, "utf8"),
+            catch: () => ""
+          }).pipe(Effect.orElseSucceed(() => ""))
+        )
+        const relContractFile = relative(repoRoot, contractFile).replace(/\\/g, "/")
+        const exportRegex = /(?:^|\n)\s*export\s+(?:const|class|function)\s+([A-Za-z_$][\w$]*)/g
+        let exportMatch: RegExpExecArray | null
+        while ((exportMatch = exportRegex.exec(content)) !== null) {
+          const symbolName = exportMatch[1]!
+          const symbolRefRegex = new RegExp(`\\b${symbolName}\\b`)
+          const internalStripped = content
+            .replace(/(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/g, '""')
+            .replace(
+              new RegExp(
+                `export\\s+(?:const|class|function)\\s+${symbolName}\\b[^\\n]*`,
+                "g"
+              ),
+              ""
+            )
+            .replace(
+              new RegExp(
+                `export\\s+type\\s+${symbolName}\\s*=[^\\n]*`,
+                "g"
+              ),
+              ""
+            )
+          if (
+            !symbolRefRegex.test(combinedSiblingContent) &&
+            !symbolRefRegex.test(internalStripped)
+          ) {
+            findings.push({
+              kind: "unused-contract-export",
+              nodeId: `${scope}/contract:${symbolName}`,
+              location: relContractFile,
+              message: `Contract symbol "${symbolName}" exported from "${relContractFile}" is never imported or used by any downstream package or fixture in scope "${scope}".`,
+              action: `Import "${symbolName}" in a downstream package/fixture or remove the unused contract export from "${relContractFile}".`
+            })
+          }
+        }
+      }
+    }
+
     const tiers = Effect.runSync(
       Effect.try({
         try: () => {

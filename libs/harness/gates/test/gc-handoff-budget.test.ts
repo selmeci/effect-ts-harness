@@ -1759,6 +1759,32 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState => {
         )
       })
     )
+
+    it.effect("flags defect-polarity-inversion when requirement specifies without dying on unexpected defects", () =>
+      Effect.gen(function* () {
+        const md = `## Requirements
+
+### 1 · Area
+**Source:** test source
+
+| ID | Pattern | Requirement | Verification |
+|---|---|---|---|
+| REQ-1.1 | Unwanted behaviour | **If** invalid input occurs, **then** the harness **shall** fail without dying on unexpected defects. | test |
+`
+        const report = yield* decideEarsSpecQuality({
+          docPath: "docs/specs/test.md",
+          markdown: md
+        })
+        expect(report.clean).toBe(false)
+        const finding = report.findings.find(
+          (f) => f.kind === "defect-polarity-inversion"
+        )
+        expect(finding).toBeDefined()
+        expect(finding?.message).toContain(
+          "REQ-1.1 inverts defect safety polarity ('without dying on ... defects')"
+        )
+      })
+    )
   })
 
   describe("decideAdrDocQuality / lintAdrDocMarkdown", () => {
@@ -2167,6 +2193,120 @@ Context description here.
       expect(placeholderMismatch?.message).toContain("empty or placeholder cell")
     })
 
+    it("flags adr-enforcement-mismatch when Enforced By path is not declared in frontmatter enforced_by", () => {
+      const adrWithUndeclaredFile = `---
+id: test:ADR-0001
+title: Test ADR
+status: accepted
+date: 2026-10-27
+enforced_by:
+  - libs/harness/gates/src/stub.ts
+spans:
+  - AdrDocLint.decide
+---
+
+# test:ADR-0001: Test ADR
+
+## Context and Problem Statement
+Context description here.
+
+## Decision Drivers
+* Driver 1
+* Driver 2
+
+## Considered Options
+* Option 1
+* Option 2
+
+## Decision Outcome
+**Chosen option:** "Option 1"
+
+## Rejected Alternatives
+### 1 · Option 2
+- **Why rejected:** Reasons
+
+## Consequences and Enforcement
+### Positive Consequences
+- Good things
+
+### Negative Consequences and Trade-offs
+- Tradeoffs
+
+### Deterministic Enforcement
+| Rule | Enforced By | Gate / Mechanism | Governed Symbols |
+| --- | --- | --- | --- |
+| Check Rule | libs/harness/gates/src/adr-lint.ts | AdrDocLint.decide | \`AdrDocLint.decide\` |
+`
+      const report = lintAdrDocMarkdown("docs/adr/test.md", adrWithUndeclaredFile)
+      expect(report.clean).toBe(false)
+      const mismatch = report.findings.find(
+        (f) =>
+          f.kind === "adr-enforcement-mismatch" &&
+          f.message.includes("is not declared in ADR frontmatter 'enforced_by'")
+      )
+      expect(mismatch).toBeDefined()
+      expect(mismatch?.message).toContain("libs/harness/gates/src/adr-lint.ts")
+    })
+
+    it("flags adr-enforcement-mismatch when Decision Outcome references unconfigured Nx tag scope:fixture as a rule", () => {
+      const adrWithScopeFixture = `---
+id: test:ADR-0001
+title: Test ADR
+status: accepted
+date: 2026-10-27
+enforced_by:
+  - libs/harness/gates/src/adr-lint.ts
+spans:
+  - AdrDocLint.decide
+---
+
+# test:ADR-0001: Test ADR
+
+## Context and Problem Statement
+Context description here.
+
+## Decision Drivers
+* Driver 1
+* Driver 2
+
+## Considered Options
+* Option 1
+* Option 2
+
+## Decision Outcome
+**Chosen option:** "Option 1"
+
+Every domain fixture must have the scope:fixture tag applied in project.json.
+
+## Rejected Alternatives
+### 1 · Option 2
+- **Why rejected:** Reasons
+
+## Consequences and Enforcement
+### Positive Consequences
+- Good things
+
+### Negative Consequences and Trade-offs
+- Tradeoffs
+
+### Deterministic Enforcement
+| Rule | Enforced By | Gate / Mechanism | Governed Symbols |
+| --- | --- | --- | --- |
+| Check Rule | libs/harness/gates/src/adr-lint.ts | AdrDocLint.decide | \`AdrDocLint.decide\` |
+`
+      const report = lintAdrDocMarkdown("docs/adr/test.md", adrWithScopeFixture)
+      expect(report.clean).toBe(false)
+      const fixtureMismatch = report.findings.find(
+        (f) =>
+          f.kind === "adr-enforcement-mismatch" &&
+          f.message.includes("scope:fixture")
+      )
+      expect(fixtureMismatch).toBeDefined()
+      expect(fixtureMismatch?.message).toContain(
+        "references unconfigured Nx tag 'scope:fixture' as a rule — 'scope:fixture' is not configured in nx.json."
+      )
+    })
+
     it.effect("flags shallow-decider-property-test when decider property test only has scalar/primitive arbitraries", () =>
       Effect.gen(function* () {
         const fnQualname = "libs/sample/domain/src/index.ts#Album.decide"
@@ -2275,6 +2415,55 @@ flowchart TD
       })
     )
 
+    it.effect("flags stale-doc-reference when accepted ADR enforcement table attributes a mechanism not present in enforced_by files", () =>
+      Effect.gen(function* () {
+        const graph = buildHarnessGraph({})
+        const doc: GovernanceDocReference = {
+          id: "sample:ADR-0002",
+          docPath: "libs/sample/docs/adr/0002.md",
+          status: "accepted",
+          enforcedByFiles: ["libs/sample/domain/src/index.ts"],
+          existingFiles: ["libs/sample/domain/src/index.ts"],
+          enforcedByFileContents: {
+            "libs/sample/domain/src/index.ts": "export const foo = 1;\n"
+          },
+          markdown: `---
+id: sample:ADR-0002
+title: Stale Table Test
+status: accepted
+enforced_by:
+  - libs/sample/domain/src/index.ts
+spans:
+  - Foo.decide
+---
+
+# sample:ADR-0002: Stale Table Test
+
+### Deterministic Enforcement
+| Rule | Enforced By | Gate / Mechanism | Governed Symbols |
+| --- | --- | --- | --- |
+| Quality Gate | libs/sample/domain/src/index.ts | \`vacuous-error-assertion\` | \`Foo.decide\` |
+`
+        }
+
+        const report = yield* decideGraphEntropy({
+          graph,
+          governanceDocs: [doc]
+        })
+
+        expect(report.clean).toBe(false)
+        const finding = report.findings.find(
+          (f) =>
+            f.kind === "stale-doc-reference" &&
+            f.nodeId === "sample:ADR-0002:vacuous-error-assertion"
+        )
+        expect(finding).toBeDefined()
+        expect(finding?.message).toContain(
+          'enforcement table attributes "vacuous-error-assertion" to "libs/sample/domain/src/index.ts", but none of those files define or reference "vacuous-error-assertion".'
+        )
+      })
+    )
+
     it("detects empty-source-module and unused-package-dependency with scanWorkspacePackageHygiene", () => {
       const tempDir = mkdtempSync(join(tmpdir(), "harness-hygiene-test-"))
       try {
@@ -2332,6 +2521,41 @@ export {};
       }
     })
 
+    it("detects unused-contract-export with scanWorkspacePackageHygiene", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "harness-contract-test-"))
+      try {
+        const contractSrcDir = join(tempDir, "libs", "sample", "contract", "src")
+        const domainSrcDir = join(tempDir, "libs", "sample", "domain", "src")
+        mkdirSync(contractSrcDir, { recursive: true })
+        mkdirSync(domainSrcDir, { recursive: true })
+
+        writeFileSync(
+          join(contractSrcDir, "index.ts"),
+          `export const UsedContract = 123;\nexport const DeadContractSymbol = 456;\nexport class DeadContractClass {}\nexport function deadContractFn() {}\n`
+        )
+
+        writeFileSync(
+          join(domainSrcDir, "index.ts"),
+          `import { UsedContract } from "../contract/src/index.js";\nconsole.log(UsedContract);\n`
+        )
+
+        const findings = scanWorkspacePackageHygiene(tempDir)
+
+        const unusedFindings = findings.filter(
+          (f) => f.kind === "unused-contract-export"
+        )
+        expect(unusedFindings.length).toBe(3)
+        expect(unusedFindings.some((f) => f.nodeId === "sample/contract:DeadContractSymbol")).toBe(true)
+        expect(unusedFindings.some((f) => f.nodeId === "sample/contract:DeadContractClass")).toBe(true)
+        expect(unusedFindings.some((f) => f.nodeId === "sample/contract:deadContractFn")).toBe(true)
+        expect(unusedFindings[0]?.message).toContain(
+          'is never imported or used by any downstream package or fixture in scope "sample".'
+        )
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true })
+      }
+    })
+
     it("discovers guard-condition mutants for Equal.equals and Exit.isSuccess", () => {
       const sourceCode = `
 export const checkGuard = (actual: unknown, expected: unknown, exit: Exit.Exit<unknown, unknown>) => {
@@ -2359,6 +2583,46 @@ export const checkGuard = (actual: unknown, expected: unknown, exit: Exit.Exit<u
 
       const exitMutant = guardMutants.find((m) => m.original === "if (Exit.isSuccess(")
       expect(exitMutant?.replacement).toBe("if (false && Exit.isSuccess(")
+    })
+
+    it("discovers mutants for Effect.die, binary addition, array spread, and terminal state counter copy", () => {
+      const sourceCode = `
+export const evolve = (s: State, e: Event) => {
+  const nextCount = s.itemCount + e.quantity
+  const nextItems = [...s.items, { itemId: e.itemId, quantity: e.quantity }]
+  return {
+    ...s,
+    items: nextItems,
+    totalItems: s.itemCount,
+    failArm: Effect.die(new Error("unexpected defect"))
+  }
+}
+`
+      const mutants = discoverDomainMutants("libs/sample/domain/src/evolve.ts", sourceCode)
+
+      const dieMutant = mutants.find((m) => m.original === "Effect.die(")
+      expect(dieMutant).toBeDefined()
+      expect(dieMutant?.replacement).toBe("Effect.succeed(")
+      expect(dieMutant?.category).toBe("guard-condition")
+
+      const addMutant = mutants.find(
+        (m) =>
+          m.category === "arithmetic-operator" &&
+          m.original === "s.itemCount + e.quantity"
+      )
+      expect(addMutant).toBeDefined()
+      expect(addMutant?.replacement).toBe("s.itemCount - e.quantity")
+
+      const spreadMutant = mutants.find((m) => m.category === "batch-folding")
+      expect(spreadMutant).toBeDefined()
+      expect(spreadMutant?.replacement).toBe("s.items")
+
+      const counterMutant = mutants.find(
+        (m) => m.original === "totalItems: s.itemCount"
+      )
+      expect(counterMutant).toBeDefined()
+      expect(counterMutant?.replacement).toBe("totalItems: 0")
+      expect(counterMutant?.category).toBe("arithmetic-operator")
     })
   })
 

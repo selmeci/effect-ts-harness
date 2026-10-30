@@ -217,6 +217,11 @@ export interface BranchingViolation {
     | "fallback-json-equality"
     | "vacuous-error-assertion"
     | "unscoped-effect-run"
+    | "unbranded-schema-field"
+    | "handwritten-tagged-union"
+    | "untraced-decider"
+    | "missing-aggregate-id-guard"
+    | "unasserted-state-field"
   readonly message: string
   readonly file: string
   readonly line: number

@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest"
 import { Effect } from "effect"
 import { decideLoopThrashing, type FrictionEvent } from "../src/friction-log.js"
-import { CD_COMMAND_BANNED_REASON, classifyCommand, isCdCommand } from "../src/policy.js"
+import {
+  CD_COMMAND_BANNED_REASON,
+  classifyCommand,
+  INTERACTIVE_NX_BANNED_REASON,
+  isCdCommand,
+  isInteractiveNxCommand
+} from "../src/policy.js"
 
 describe("guard policy", () => {
   it("allows nx, pnpm test, harness-cli, harness-mcp, and safe git commands", () => {
@@ -308,5 +314,21 @@ describe("guard policy", () => {
     expect(classifyCommand("git restore --staged docs/mvps/mvp_event_sourcing.md")).toBe("allow")
     expect(classifyCommand("git restore --staged -- src/a.ts")).toBe("allow")
     expect(classifyCommand("git restore docs/mvps/mvp_event_sourcing.md")).toBe("escalate")
+  })
+
+  it("denies interactive nx show without CI=true or NX_INTERACTIVE=false", () => {
+    expect(isInteractiveNxCommand("nx show projects")).toBe(true)
+    expect(isInteractiveNxCommand("pnpm nx show project web")).toBe(true)
+    expect(isInteractiveNxCommand("FOO=bar nx show projects")).toBe(true)
+    expect(isInteractiveNxCommand("CI=true nx show projects")).toBe(false)
+    expect(isInteractiveNxCommand("CI=1 pnpm nx show projects")).toBe(false)
+    expect(isInteractiveNxCommand("NX_INTERACTIVE=false nx show projects")).toBe(false)
+    expect(isInteractiveNxCommand("pnpm test")).toBe(false)
+    expect(isInteractiveNxCommand("nx run gates:verify")).toBe(false)
+
+    expect(classifyCommand("nx show projects")).toBe("deny")
+    expect(classifyCommand("pnpm nx show project sample-web")).toBe("deny")
+    expect(classifyCommand("CI=true pnpm nx show projects")).toBe("allow")
+    expect(INTERACTIVE_NX_BANNED_REASON).toContain("Running 'nx show' without 'CI=true'")
   })
 })

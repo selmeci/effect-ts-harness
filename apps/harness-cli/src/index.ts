@@ -59,6 +59,7 @@ import {
   writeSessionReportFiles,
   writeVerifyStamp
 } from "@harness/gates"
+import * as Gates from "@harness/gates"
 import {
   checkEffectGraph,
   diffOmnigraphBranches,
@@ -359,9 +360,18 @@ const handleGuard = (
 
     const classification = classifyCommand(command)
     if (classification === "deny") {
+      const isInteractiveNx =
+        typeof (Gates as any).isInteractiveNxCommand === "function"
+          ? (Gates as any).isInteractiveNxCommand(command)
+          : /^(?:pnpm\s+)?nx\s+show\b/.test(command.trim())
+      const interactiveNxReason: string =
+        (Gates as any).INTERACTIVE_NX_BANNED_REASON ??
+        "Running 'nx show' without 'CI=true' can hang on interactive prompts; prefix with 'CI=true' or use harness MCP tools."
       const denyReason = isCdCommand(command)
         ? `Blocked by harness guard: ${command} (${CD_COMMAND_BANNED_REASON})`
-        : `Blocked by harness guard: ${command}`
+        : isInteractiveNx
+          ? `Blocked by harness guard: ${command} (${interactiveNxReason})`
+          : `Blocked by harness guard: ${command}`
       if (isAntigravity) {
         return {
           exitCode: 0,
@@ -423,12 +433,22 @@ const handleGuard = (
     })
 
     if (decision.verdict === "deny") {
+      const isInteractiveNx =
+        typeof (Gates as any).isInteractiveNxCommand === "function"
+          ? (Gates as any).isInteractiveNxCommand(command)
+          : /^(?:pnpm\s+)?nx\s+show\b/.test(command.trim())
+      const interactiveNxReason: string =
+        (Gates as any).INTERACTIVE_NX_BANNED_REASON ??
+        "Running 'nx show' without 'CI=true' can hang on interactive prompts; prefix with 'CI=true' or use harness MCP tools."
+      const denyReason = isInteractiveNx
+        ? `Blocked by harness guard: ${command} (${interactiveNxReason})`
+        : `Blocked by harness guard: ${command}`
       if (isAntigravity) {
         return {
           exitCode: 0,
           stdout: JSON.stringify({
             decision: "deny",
-            reason: `Blocked by harness guard: ${command}`
+            reason: denyReason
           }),
           stderr: ""
         }
@@ -436,7 +456,7 @@ const handleGuard = (
       return {
         exitCode: 2,
         stdout: "",
-        stderr: `Blocked by harness guard: ${command}`
+        stderr: denyReason
       }
     }
     if (decision.verdict === "allow") {

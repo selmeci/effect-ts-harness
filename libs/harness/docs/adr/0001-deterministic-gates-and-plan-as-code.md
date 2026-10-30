@@ -6,7 +6,8 @@ date: 2026-10-25
 enforced_by:
   - libs/harness/gates/src/stub.ts
   - libs/harness/graph/src/policy-check.ts
-  - libs/harness/gates/src/policy.ts
+  - tools/oxlint/syntax-bans.js
+  - libs/harness/gates/src/adr-lint.ts
 spans:
   - GraphGc.decide
   - SpanBudget.decide
@@ -92,4 +93,4 @@ We establish two foundational architectural rules for the harness:
 | --- | --- | --- | --- |
 | Compilable plan skeletons | libs/harness/gates/src/stub.ts | `stub<A, E, R>()` and harness plan-check | `GraphGc.decide` |
 | Deterministic graph policies | libs/harness/graph/src/policy-check.ts | checkEffectGraph | `SpanBudget.decide`, `MigrationSafety.decide` |
-| Syntax bans & ADR linting | libs/harness/gates/src/policy.ts | tools/oxlint/syntax-bans.js & AdrDocLint.decide | `MutationCheck.decide`, `LoopCircuitBreaker.decide`, `EarsSpecLint.decide`, `AdrDocLint.decide`, `OntologyInvariants.decide`, `SessionReport.decide` |
+| Syntax bans & ADR linting | tools/oxlint/syntax-bans.js, libs/harness/gates/src/adr-lint.ts | tools/oxlint/syntax-bans.js & AdrDocLint.decide | `MutationCheck.decide`, `LoopCircuitBreaker.decide`, `EarsSpecLint.decide`, `AdrDocLint.decide`, `OntologyInvariants.decide`, `SessionReport.decide` |

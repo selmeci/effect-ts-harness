@@ -698,6 +698,48 @@ describe("telemetry & session observability", () => {
     expect(scopedPreceded.frictionEvents[0]?.summary).toBe("active friction")
   })
 
+  it("scopeSessionReportInput does not treat post-done ingest or gc as new task work", () => {
+    const postDoneEvents: ReadonlyArray<TelemetryEvent> = [
+      {
+        timestamp: "2026-10-27T09:00:00.000Z",
+        surface: "cli",
+        category: "gate",
+        toolName: "verify",
+        outcome: "ok",
+        durationMs: 300
+      },
+      {
+        timestamp: "2026-10-27T09:01:00.000Z",
+        surface: "cli",
+        category: "lifecycle",
+        toolName: "done",
+        outcome: "ok",
+        detail: "completed",
+        durationMs: 20
+      },
+      {
+        timestamp: "2026-10-27T09:02:00.000Z",
+        surface: "hook",
+        category: "gate",
+        toolName: "ingest",
+        outcome: "ok",
+        durationMs: 50
+      },
+      {
+        timestamp: "2026-10-27T09:03:00.000Z",
+        surface: "cli",
+        category: "gate",
+        toolName: "gc",
+        outcome: "ok",
+        durationMs: 30
+      }
+    ]
+
+    const scoped = scopeSessionReportInput({ events: postDoneEvents })
+    expect(scoped.events.length).toBe(4)
+    expect(scoped.events.some((e) => e.toolName === "done")).toBe(true)
+  })
+
   it.effect("REQ-2.1: routing misses with outcome=fallback do not reduce omnigraphLiveRatio", () =>
     Effect.gen(function* () {
       const events: ReadonlyArray<TelemetryEvent> = [

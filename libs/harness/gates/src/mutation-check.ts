@@ -66,7 +66,8 @@ const MUTATION_PATTERNS: ReadonlyArray<{
   },
   { original: "if (!Equal.equals(", replacement: "if (false && !Equal.equals(", category: "guard-condition" },
   { original: "if (Equal.equals(", replacement: "if (true || Equal.equals(", category: "guard-condition" },
-  { original: "if (Exit.isSuccess(", replacement: "if (false && Exit.isSuccess(", category: "guard-condition" }
+  { original: "if (Exit.isSuccess(", replacement: "if (false && Exit.isSuccess(", category: "guard-condition" },
+  { original: "Effect.die(", replacement: "Effect.succeed(", category: "guard-condition" }
 ]
 
 const shouldSkipLine = (trimmed: string): boolean => {
@@ -122,6 +123,64 @@ export const discoverDomainMutants = (
           mutatedSource
         })
       }
+    }
+
+    // Regex-based line mutations
+    const binaryAddMatch = line.match(
+      /\b([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\s*\+\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\b/
+    )
+    if (binaryAddMatch && binaryAddMatch[1] && binaryAddMatch[2]) {
+      const orig = binaryAddMatch[0]
+      const repl = `${binaryAddMatch[1]} - ${binaryAddMatch[2]}`
+      const mutatedLines = [...lines]
+      mutatedLines[i] = line.replace(orig, repl)
+      mutants.push({
+        id: `${filePath}:${lineNo}:${orig}->${repl}`,
+        file: filePath,
+        line: lineNo,
+        category: "arithmetic-operator",
+        original: orig,
+        replacement: repl,
+        mutatedSource: mutatedLines.join(newline)
+      })
+    }
+
+    const spreadAppendMatch = line.match(
+      /\[\s*\.\.\.([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\s*,\s*\{[^[\]]+\}\s*\]/
+    )
+    if (spreadAppendMatch && spreadAppendMatch[1]) {
+      const orig = spreadAppendMatch[0]
+      const repl = spreadAppendMatch[1]
+      const mutatedLines = [...lines]
+      mutatedLines[i] = line.replace(orig, repl)
+      mutants.push({
+        id: `${filePath}:${lineNo}:${orig}->${repl}`,
+        file: filePath,
+        line: lineNo,
+        category: "batch-folding",
+        original: orig,
+        replacement: repl,
+        mutatedSource: mutatedLines.join(newline)
+      })
+    }
+
+    const counterCopyMatch = line.match(
+      /\b(totalItems|totalCount|itemCount)\s*:\s*([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\b/
+    )
+    if (counterCopyMatch && counterCopyMatch[1]) {
+      const orig = counterCopyMatch[0]
+      const repl = `${counterCopyMatch[1]}: 0`
+      const mutatedLines = [...lines]
+      mutatedLines[i] = line.replace(orig, repl)
+      mutants.push({
+        id: `${filePath}:${lineNo}:${orig}->${repl}`,
+        file: filePath,
+        line: lineNo,
+        category: "arithmetic-operator",
+        original: orig,
+        replacement: repl,
+        mutatedSource: mutatedLines.join(newline)
+      })
     }
   }
 

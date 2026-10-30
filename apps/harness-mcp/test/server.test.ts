@@ -235,6 +235,31 @@ describe("harness-mcp tools", () => {
     })
   })
 
+  it("dynamically falls back to agent-patterns files when routed to review", async () => {
+    const failingModel: DecisionModel.DecisionModel = {
+      [DecisionModel.TypeId]: DecisionModel.TypeId,
+      decide: (() =>
+        Effect.fail(
+          AiError.make({
+            module: "DecisionModel",
+            method: "decide",
+            reason: new AiError.UnknownError({ description: "Connection refused to Ollama" })
+          })
+        )) as any
+    }
+    const failingLayer = Layer.succeed(DecisionModel.DecisionModel, failingModel)
+
+    const routed = await executeTool(
+      "harness_route",
+      { planStep: "event sourcing decider core" },
+      { decisionLayer: failingLayer }
+    )
+    expect(routed).toEqual({
+      block: "event-sourcing",
+      patternFile: "agent-patterns/event-sourcing.md"
+    })
+  })
+
   it("falls back gracefully when snapshot file does not exist (offline fallback)", async () => {
     const nonExistentPath = path.join(os.tmpdir(), `non-existent-${Date.now()}.json`)
     const resolved = await executeTool(
