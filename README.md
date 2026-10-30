@@ -267,7 +267,7 @@ The harness packages full engineering capabilities into two first-class adapter 
 | **Rules Engine** | `rules/AGENTS.md` (and repo root `AGENTS.md`) | `rules/AGENTS.md` (and repo root `AGENTS.md`) |
 | **Hooks Engine** | `hooks.json` (`PreInvocation`, `PreToolUse`, `PostToolUse`, `Stop`) | `hooks.json` (`SessionStart`, `PreToolUse`, `PostToolUse`, `Stop`) |
 | **MCP Servers** | `mcp_config.json` (`harness-mcp`, `omnigraph-mcp`, `nx-mcp`) | `.mcp.json` (`harness-mcp`, `omnigraph-mcp`, `nx-mcp`) |
-| **Workflow Skills** | 6 skills in `skills/` | 6 skills in `skills/` |
+| **Workflow Skills** | 7 skills in `skills/` (including `/effect-lfg`) | 7 skills in `skills/` + `/effect-lfg` in `commands/` |
 | **Specialist Agents** | 4 read-only reviewer subagents in `agents/` | 4 read-only reviewer subagents in `agents/` |
 
 #### Lifecycle Hook Discipline
@@ -278,11 +278,12 @@ The harness packages full engineering capabilities into two first-class adapter 
 
 ---
 
-### 2. 6 Workflow Skills — Reference & Usage Matrix
+### 2. 7 Workflow Skills — Reference & Usage Matrix
 
 | Skill | Lifecycle Stage & When to Use | Example Prompt / Trigger | MCP Tools & CLI Gates Used | Required Output / Exit Gate |
 | :--- | :--- | :--- | :--- | :--- |
 | `effect-harness` | Full lifecycle orchestration. Use when starting a new feature or orchestrating tasks across contracts, domain logic, and infra. | `"Implement user authentication with D1 sessions and durable rate limits following the harness lifecycle."` | `harness_route`<br>`harness_lsp_diagnostics`<br>`harness gc --strict`<br>`harness verify`<br>`harness done` | Verified implementation on `impl/<task>` branch with valid `.harness/verify-stamp.json` passing `harness done`. |
+| `effect-lfg` | Autonomous end-to-end pipeline (`/effect-lfg`). Use when passing a requirement, bug report, or EARS spec to execute hands-off from intake through commit/PR without stopping. | `"/effect-lfg Add Sample.archiveAlbum use-case to libs/sample that marks an album archived or fails with AlbumNotFoundError."` | `harness_resolve`<br>`harness_ontology_why`<br>`harness plan-check`<br>4 specialist reviewers<br>`harness learn`<br>`harness gc --strict`<br>`harness mutate --strict`<br>`harness verify`<br>`harness done` | Accepted EARS spec with `## Assumptions`, verified stamp, clean `harness done`, scoped git commit (and open PR when applicable), and `<promise>DONE</promise>`. |
 | `specifying-ears-with-effect` | Step 1 (EARS Specification & ADR). Use before writing code or skeletons when requirements are informal or missing EARS clauses. | `"Specify requirements and architecture for D1 session store with exponential backoff retries."` | `harness_ontology_check`<br>`harness_ontology_impact`<br>`EarsSpecLint.decide`<br>`AdrDocLint.decide` | Validated spec `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` and ADR `libs/<scope>/docs/adr/NNNN-<slug>.md` passing linter deciders. |
 | `planning-effect-skeletons` | Steps 2–3 (Plan-as-Code Skeleton & Plan Gate). Use after specification approval to construct typed skeletons with `stub<A, E, R>()`. | `"Create typed skeletons and plan-as-code for the session store use cases and repository ports."` | `harness_route`<br>`harness_lsp_diagnostics`<br>`harness plan-check`<br>`PlanStepCoverageV1` | Typechecked skeleton with JSDoc `@harness-Requirement` tags, clean `harness_lsp_diagnostics`, and checkpointed `plan/<task>` branch. |
 | `executing-effect-stubs` | Steps 4–6 (Implementation & Verification). Use after `harness plan-check` passes to replace stubs with `Effect.fn` bodies, Layers, and tests. | `"Execute stubs for session repository in libs/sample/infra and domain deciders in libs/sample/domain."` | `harness_route`<br>`harness_tests_reaching`<br>`harness_structural_search`<br>`harness_lsp_diagnostics`<br>`harness gc --strict`<br>`harness mutate`<br>`harness verify` | Zero stubs remaining, 100% passing Vitest tests, mutation score `>= 0.85`, zero orphan symbols (`gc --strict`), and verified stamp. |
