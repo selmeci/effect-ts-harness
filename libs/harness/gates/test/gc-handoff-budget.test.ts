@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { Effect, Schema } from "effect"
-import { buildHarnessGraph, loadGraphSnapshot } from "@harness/graph"
+import { buildHarnessGraph, loadGraphSnapshot, saveGraphSnapshot } from "@harness/graph"
 import {
   buildSessionHandoff,
   checkLoopThrashing,
@@ -16,6 +16,7 @@ import {
   decideLoopThrashing,
   decideMigrationSafety,
   decideMutationReport,
+  decideOntologyInvariants,
   decideSessionHandoff,
   decideSpanBudgets,
   deriveRepoOmnigraphPort,
@@ -43,15 +44,45 @@ import {
 
 describe("Harness Gates: GC check, Session Handoff, Span Budget, and State Dir", () => {
   it("diffs plan and impl snapshots and confirms 0 missing symbols", () => {
-    const repoRoot = "/home/roan/WebstormProjects/effect-ts-harness"
-    const planPath = join(repoRoot, ".harness", "plan-graph-snapshot.json")
-    const implPath = join(repoRoot, ".harness", "graph-snapshot.json")
-    if (existsSync(planPath) && existsSync(implPath)) {
+    const tempDir = mkdtempSync(join(tmpdir(), "harness-gates-snap-"))
+    try {
+      const initialPlanGraph = buildHarnessGraph({
+        fns: [
+          {
+            qualname: "libs/sample/domain/src/index.ts#greet",
+            spanName: "greet",
+            packageTag: "domain",
+            file: "libs/sample/domain/src/index.ts",
+            line: 1,
+            successType: "string",
+            isStub: true
+          }
+        ]
+      })
+      const initialImplGraph = buildHarnessGraph({
+        fns: [
+          {
+            qualname: "libs/sample/domain/src/index.ts#greet",
+            spanName: "greet",
+            packageTag: "domain",
+            file: "libs/sample/domain/src/index.ts",
+            line: 1,
+            successType: "string",
+            isStub: false
+          }
+        ]
+      })
+      const planPath = join(tempDir, "plan-graph-snapshot.json")
+      const implPath = join(tempDir, "graph-snapshot.json")
+      saveGraphSnapshot(initialPlanGraph, planPath)
+      saveGraphSnapshot(initialImplGraph, implPath)
       const planGraph = loadGraphSnapshot(planPath)
       const implGraph = loadGraphSnapshot(implPath)
       const diff = diffPlanAndImplGraphs(planGraph, implGraph)
       expect(diff.ok).toBe(true)
       expect(diff.reasons).toHaveLength(0)
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
     }
   })
   describe("decideGraphEntropy / scanGraphEntropy", () => {
@@ -1702,6 +1733,32 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState => {
           expect(report.findings).toHaveLength(0)
         })
     )
+
+    it.effect("rejects legacy Effect v3 ParseError in requirement prose", () =>
+      Effect.gen(function* () {
+        const md = `## Requirements
+
+### 1 · Area
+**Source:** test source
+
+| ID | Pattern | Requirement | Verification |
+|---|---|---|---|
+| REQ-1.1 | Unwanted behaviour | **If** input is invalid, **then** the decoder **shall** fail with ParseError. | test |
+`
+        const report = yield* decideEarsSpecQuality({
+          docPath: "docs/specs/test.md",
+          markdown: md
+        })
+        expect(report.clean).toBe(false)
+        const finding = report.findings.find(
+          (f) => f.kind === "legacy-effect-v3-symbol"
+        )
+        expect(finding).toBeDefined()
+        expect(finding?.message).toBe(
+          "Requirement REQ-1.1 references legacy Effect v3 symbol (use Effect v4 Schema.SchemaError / Context.Service instead)."
+        )
+      })
+    )
   })
 
   describe("decideAdrDocQuality / lintAdrDocMarkdown", () => {
@@ -2303,5 +2360,75 @@ export const checkGuard = (actual: unknown, expected: unknown, exit: Exit.Exit<u
       const exitMutant = guardMutants.find((m) => m.original === "if (Exit.isSuccess(")
       expect(exitMutant?.replacement).toBe("if (false && Exit.isSuccess(")
     })
+  })
+
+  describe("decideOntologyInvariants (OntologyInvariants.decide)", () => {
+    it.effect("flags Unwanted behaviour requirement prose referencing undeclared *Error", () =>
+      Effect.gen(function* () {
+        const graph = buildHarnessGraph({
+          earsSpecs: [
+            {
+              id: "sample:SPEC-0001",
+              title: "Cart",
+              status: "accepted",
+              path: "libs/sample/docs/specs/0001.md",
+              enforcedByFiles: [],
+              referencedSpans: [],
+              referencedServices: [],
+              referencedErrors: ["DeclaredError"]
+            }
+          ],
+          errors: [
+            { errorTag: "DeclaredError", file: "libs/sample/contract/src/index.ts" }
+          ]
+        })
+
+        const doc: GovernanceDocReference = {
+          id: "sample:SPEC-0001",
+          docPath: "libs/sample/docs/specs/0001.md",
+          status: "accepted",
+          referencedErrors: ["DeclaredError"],
+          markdown: `---
+id: sample:SPEC-0001
+title: Cart
+status: accepted
+date: 2026-10-30
+enforced_by:
+  - libs/sample/domain/src/index.ts
+errors:
+  - DeclaredError
+---
+
+# sample:SPEC-0001: Cart
+
+## Requirements
+
+### 1 · Cart Operations
+**Source:** domain logic
+
+| ID | Pattern | Requirement | Effect Symbol | Verification |
+| --- | --- | --- | --- | --- |
+| REQ-1.1 | Unwanted behaviour | **If** checkout fails, **then** the engine **shall** fail with UndeclaredCartError. | DeclaredError | test |
+`
+        }
+
+        const report = yield* decideOntologyInvariants({
+          graph,
+          governanceDocs: [doc]
+        })
+
+        expect(report.clean).toBe(false)
+        const finding = report.findings.find(
+          (f) =>
+            f.kind === "ontology-if-then-error-mismatch" &&
+            f.message.includes('references error "UndeclaredCartError"')
+        )
+        expect(finding).toBeDefined()
+        expect(finding?.nodeId).toBe("sample:SPEC-0001:REQ-1.1")
+        expect(finding?.message).toBe(
+          'Unwanted behaviour requirement REQ-1.1 prose references error "UndeclaredCartError" which does not exist in referencedErrors or the workspace graph.'
+        )
+      })
+    )
   })
 })

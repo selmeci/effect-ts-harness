@@ -14,6 +14,7 @@ export type EarsLintFindingKind =
   | "pattern-keyword-mismatch"
   | "invalid-verification"
   | "unfilled-placeholder"
+  | "legacy-effect-v3-symbol"
 
 export interface EarsLintFinding {
   readonly line: number
@@ -416,6 +417,21 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
               line: lineNum,
               kind: "compound-obligation",
               message: `${cleanId} joins two obligations with 'and shall' — split into separate REQ rows if they can fail independently, or drop negative restatements.`
+            })
+          }
+
+          // Removed Effect v3 terminology check
+          const legacyV3Regex = /\b(?:ParseError|ParseResult|Context\.Tag|Effect\.Service)\b/
+          const isMetaV3DetectionRule =
+            /\bEffect\s+v3\b/i.test(rawReq) || /\bhas no exported member\b/i.test(rawReq)
+          if (
+            !isMetaV3DetectionRule &&
+            (legacyV3Regex.test(rawReq) || legacyV3Regex.test(stripMarkup(rawReq)))
+          ) {
+            findings.push({
+              line: lineNum,
+              kind: "legacy-effect-v3-symbol",
+              message: `Requirement ${cleanId} references legacy Effect v3 symbol (use Effect v4 Schema.SchemaError / Context.Service instead).`
             })
           }
 

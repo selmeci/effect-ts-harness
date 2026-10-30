@@ -224,6 +224,26 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(
                 }
               }
             }
+
+            const cleanReq = row.requirement.replace(/[*_]/g, "")
+            const errorRegex =
+              /fail with (?:a |an |typed error )?`?`?([A-Z][A-Za-z0-9_]*Error)`?`?/gi
+            const seenExtracted = new Set<string>()
+            for (const match of cleanReq.matchAll(errorRegex)) {
+              const extractedError = match[1]!
+              if (extractedError !== "SchemaError" && !seenExtracted.has(extractedError)) {
+                seenExtracted.add(extractedError)
+                const inReferenced = spec.referencedErrors.includes(extractedError)
+                const inGraph = resolveNode(input.graph, extractedError) !== undefined
+                if (!inReferenced && !inGraph) {
+                  findings.push({
+                    kind: "ontology-if-then-error-mismatch",
+                    nodeId: `${spec.doc.id}:${row.id}`,
+                    message: `Unwanted behaviour requirement ${row.id} prose references error "${extractedError}" which does not exist in referencedErrors or the workspace graph.`
+                  })
+                }
+              }
+            }
           }
         }
       }

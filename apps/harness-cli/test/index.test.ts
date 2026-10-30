@@ -1407,4 +1407,201 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       )
     }
   })
+
+  it("flags shallow tag-only assertions in property tests unless payload fields are also asserted", () => {
+    // 1. Only finalState._tag is asserted -> flagged
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = testIntegrity.create({
+        filename: "/repo/libs/es/core/test/properties.test.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "it" },
+          property: { type: "Identifier", name: "prop" }
+        },
+        arguments: [
+          { type: "Literal", value: "terminal state immutability" },
+          { type: "ArrayExpression", elements: [] },
+          {
+            type: "ArrowFunctionExpression",
+            params: [],
+            body: {
+              type: "BlockStatement",
+              body: [
+                {
+                  type: "ExpressionStatement",
+                  expression: {
+                    type: "CallExpression",
+                    callee: {
+                      type: "MemberExpression",
+                      computed: false,
+                      object: {
+                        type: "CallExpression",
+                        callee: { type: "Identifier", name: "expect" },
+                        arguments: [
+                          {
+                            type: "MemberExpression",
+                            computed: false,
+                            object: { type: "Identifier", name: "finalState" },
+                            property: { type: "Identifier", name: "_tag" }
+                          }
+                        ]
+                      },
+                      property: { type: "Identifier", name: "toBe" }
+                    },
+                    arguments: [{ type: "Literal", value: "CheckedOutCart" }]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain("Vacuous assertion in property test")
+    }
+
+    // 2. Both err._tag and err.albumId are accessed -> allowed
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = testIntegrity.create({
+        filename: "/repo/libs/sample/domain/test/index.test.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "it" },
+          property: { type: "Identifier", name: "prop" }
+        },
+        arguments: [
+          { type: "Literal", value: "quota exceeded" },
+          { type: "ArrayExpression", elements: [] },
+          {
+            type: "ArrowFunctionExpression",
+            params: [],
+            body: {
+              type: "BlockStatement",
+              body: [
+                {
+                  type: "ExpressionStatement",
+                  expression: {
+                    type: "CallExpression",
+                    callee: {
+                      type: "MemberExpression",
+                      computed: false,
+                      object: {
+                        type: "CallExpression",
+                        callee: { type: "Identifier", name: "expect" },
+                        arguments: [
+                          {
+                            type: "MemberExpression",
+                            computed: false,
+                            object: { type: "Identifier", name: "err" },
+                            property: { type: "Identifier", name: "_tag" }
+                          }
+                        ]
+                      },
+                      property: { type: "Identifier", name: "toBe" }
+                    },
+                    arguments: [{ type: "Literal", value: "AlbumQuotaExceededError" }]
+                  }
+                },
+                {
+                  type: "ExpressionStatement",
+                  expression: {
+                    type: "CallExpression",
+                    callee: {
+                      type: "MemberExpression",
+                      computed: false,
+                      object: {
+                        type: "CallExpression",
+                        callee: { type: "Identifier", name: "expect" },
+                        arguments: [
+                          {
+                            type: "MemberExpression",
+                            computed: false,
+                            object: { type: "Identifier", name: "err" },
+                            property: { type: "Identifier", name: "albumId" }
+                          }
+                        ]
+                      },
+                      property: { type: "Identifier", name: "toBe" }
+                    },
+                    arguments: [{ type: "Identifier", name: "albumId" }]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      })
+      expect(reports).toHaveLength(0)
+    }
+  })
+
+  it("halts execution with [CRITICAL HARNESS BLOCKER] when Ollama is required and unavailable", async () => {
+    const prevRequire = process.env["HARNESS_REQUIRE_OLLAMA"]
+    const prevUrl = process.env["HARNESS_OLLAMA_URL"]
+    process.env["HARNESS_REQUIRE_OLLAMA"] = "1"
+    process.env["HARNESS_OLLAMA_URL"] = "http://127.0.0.1:1"
+    try {
+      const verifyRes = await runCli(["verify"])
+      expect(verifyRes.exitCode).toBe(1)
+      expect(verifyRes.stderr).toContain(
+        "[CRITICAL HARNESS BLOCKER] Key component Ollama (clef-flash DecisionModel) is not running and could not be started automatically. Halting execution."
+      )
+
+      const docRes = await runCli(["doctor"])
+      expect(docRes.exitCode).toBe(1)
+      expect(JSON.parse(docRes.stdout).ollamaReady).toBe(false)
+    } finally {
+      if (prevRequire === undefined) delete process.env["HARNESS_REQUIRE_OLLAMA"]
+      else process.env["HARNESS_REQUIRE_OLLAMA"] = prevRequire
+      if (prevUrl === undefined) delete process.env["HARNESS_OLLAMA_URL"]
+      else process.env["HARNESS_OLLAMA_URL"] = prevUrl
+    }
+  }, 15_000)
+
+  it("allows subagent Stop hook to complete cleanly without verify-stamp.json and handles --help without executing verify", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-cli-subagent-done-"))
+    try {
+      const transcriptFile = join(dir, "transcript.jsonl")
+      writeFileSync(
+        transcriptFile,
+        `${JSON.stringify({ step_index: 0, source: "SYSTEM", content: "[Message]\nSender ID: parent\nContent: Run tests" })}\n`
+      )
+      const doneRes = await runCli(["done", "--format=antigravity"], {
+        repoRoot: dir,
+        stdin: JSON.stringify({
+          fullyIdle: true,
+          transcriptPath: transcriptFile,
+          workspacePaths: [dir]
+        })
+      })
+      expect(doneRes.exitCode).toBe(0)
+      expect(JSON.parse(doneRes.stdout)).toEqual({ decision: "stop" })
+      const events = readTelemetryEvents(dir)
+      expect(events).toHaveLength(1)
+      expect(events[0]?.detail).toBe("subagent=true")
+
+      const helpRes = await runCli(["verify", "--help"], { repoRoot: dir })
+      expect(helpRes.exitCode).toBe(0)
+      expect(helpRes.stdout).toContain("usage: harness")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
+

@@ -260,13 +260,75 @@ function isVacuousAssertionCall(node) {
   return false
 }
 
+function getMemberObjectChainKey(node) {
+  if (node == null) return null
+  if (node.type === "Identifier") return node.name
+  if (
+    node.type === "MemberExpression" &&
+    node.computed !== true &&
+    node.property != null &&
+    node.property.type === "Identifier"
+  ) {
+    const prefix = getMemberObjectChainKey(node.object)
+    return prefix ? `${prefix}.${node.property.name}` : null
+  }
+  return null
+}
+
+function getTagOnlyExpectTarget(node) {
+  if (node == null || node.type !== "CallExpression") return null
+  const callee = node.callee
+  if (callee == null || callee.type !== "MemberExpression" || callee.computed === true) {
+    return null
+  }
+  const prop = callee.property
+  if (prop == null || prop.type !== "Identifier") return null
+  if (prop.name !== "toBe" && prop.name !== "toEqual") return null
+  if (
+    !isExpectCall(callee.object) ||
+    !Array.isArray(callee.object.arguments) ||
+    callee.object.arguments.length === 0
+  ) {
+    return null
+  }
+  const expectArg = callee.object.arguments[0]
+  if (
+    expectArg != null &&
+    expectArg.type === "MemberExpression" &&
+    expectArg.computed !== true &&
+    isIdentifier(expectArg.property, "_tag")
+  ) {
+    return getMemberObjectChainKey(expectArg.object)
+  }
+  return null
+}
+
 function findVacuousAssertionCalls(root) {
   const matches = []
+  const tagAsserts = []
+  const observedTargets = new Set()
+
   function walk(node) {
     if (node == null || typeof node !== "object") return
     if (isVacuousAssertionCall(node)) {
       matches.push(node)
       return
+    }
+    const tagTarget = getTagOnlyExpectTarget(node)
+    if (tagTarget != null) {
+      tagAsserts.push({ node, target: tagTarget })
+    }
+    if (
+      node.type === "MemberExpression" &&
+      node.computed !== true &&
+      node.property != null &&
+      node.property.type === "Identifier" &&
+      node.property.name !== "_tag"
+    ) {
+      const objKey = getMemberObjectChainKey(node.object)
+      if (objKey != null) {
+        observedTargets.add(objKey)
+      }
     }
     for (const key of Object.keys(node)) {
       if (key === "parent") continue
@@ -283,6 +345,11 @@ function findVacuousAssertionCalls(root) {
     }
   }
   walk(root)
+  for (const item of tagAsserts) {
+    if (!observedTargets.has(item.target)) {
+      matches.push(item.node)
+    }
+  }
   return matches
 }
 
@@ -796,14 +863,14 @@ const syntaxBans = {
           context.report({ node, message: newPromiseMessage })
         }
         const filename = getNormalizedFilename()
-        if (/libs\/[^/]+\/domain\/src\//.test(filename) && isIdentifier(node.callee, "Date")) {
+        if (/libs\/[^/]+\/(?:domain|core)\/src\//.test(filename) && isIdentifier(node.callee, "Date")) {
           context.report({ node, message: impureDomainGlobalMessage })
         }
       },
       MemberExpression(node) {
         const filename = getNormalizedFilename()
         if (
-          /libs\/[^/]+\/domain\/src\//.test(filename) &&
+          /libs\/[^/]+\/(?:domain|core)\/src\//.test(filename) &&
           node.computed !== true &&
           isIdentifier(node.object, "Effect") &&
           isIdentifier(node.property, "ignore")
@@ -936,7 +1003,7 @@ const syntaxBans = {
         if (filename.includes("sample-web/src/") && isFetchCall(node)) {
           context.report({ node, message: fetchBanMessage })
         }
-        if (/libs\/[^/]+\/domain\/src\//.test(filename)) {
+        if (/libs\/[^/]+\/(?:domain|core)\/src\//.test(filename)) {
           const callee = node.callee
           if (
             callee != null &&
@@ -952,7 +1019,7 @@ const syntaxBans = {
       ExportNamedDeclaration(node) {
         const filename = getNormalizedFilename()
         if (isInternalHarnessFile(filename)) return
-        if (!/libs\/[^/]+\/(contract|domain|service|infra)\/src\//.test(filename)) return
+        if (!/libs\/[^/]+\/(contract|domain|core|service|infra)\/src\//.test(filename)) return
         if (node.declaration == null) return
 
         const decl = node.declaration

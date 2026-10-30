@@ -881,11 +881,23 @@ export const diffHarnessGraphs = (
   const missingServices: Array<string> = []
   const remainingStubs: Array<string> = []
   const missingEdges: Array<HarnessEdge> = []
+  const qualnameAliasMap = new Map<string, string>()
 
   // Check planned EffectFn
   for (const [, node] of Graph.nodes(planGraph.graph)) {
     if (node._tag === "EffectFn") {
-      const implNode = resolveNode(implGraph, node.qualname)
+      let implNode = resolveNode(implGraph, node.qualname)
+      if (!implNode || implNode._tag !== "EffectFn") {
+        const fallbackNode = resolveNode(implGraph, node.spanName)
+        if (
+          fallbackNode &&
+          fallbackNode._tag === "EffectFn" &&
+          fallbackNode.file === node.file
+        ) {
+          implNode = fallbackNode
+          qualnameAliasMap.set(node.qualname, fallbackNode.qualname)
+        }
+      }
       if (!implNode || implNode._tag !== "EffectFn") {
         missingFns.push(node.qualname)
       }
@@ -910,6 +922,29 @@ export const diffHarnessGraphs = (
     implEdgeKeys.add(getEdgeKey(edge.data))
   }
 
+  const resolveEdgeKeyWithAlias = (edge: HarnessEdge): string => {
+    switch (edge._tag) {
+      case "RequiresService": {
+        const caller = qualnameAliasMap.get(edge.callerQualname) ?? edge.callerQualname
+        return `RequiresService:${caller}->${edge.tagId}`
+      }
+      case "FailsWith": {
+        const caller = qualnameAliasMap.get(edge.callerQualname) ?? edge.callerQualname
+        return `FailsWith:${caller}->${edge.errorTag}`
+      }
+      case "SpecifiesSymbol": {
+        const target = qualnameAliasMap.get(edge.targetKey) ?? edge.targetKey
+        return `SpecifiesSymbol:${edge.specId}->${target}`
+      }
+      case "GovernsSymbol": {
+        const target = qualnameAliasMap.get(edge.targetKey) ?? edge.targetKey
+        return `GovernsSymbol:${edge.adrId}->${target}`
+      }
+      default:
+        return getEdgeKey(edge)
+    }
+  }
+
   for (const [, edge] of Graph.edges(planGraph.graph)) {
     if (
       edge.data._tag === "RequiresService" ||
@@ -917,8 +952,9 @@ export const diffHarnessGraphs = (
       edge.data._tag === "SpecifiesSymbol" ||
       edge.data._tag === "GovernsSymbol"
     ) {
-      const key = getEdgeKey(edge.data)
-      if (!implEdgeKeys.has(key)) {
+      const origKey = getEdgeKey(edge.data)
+      const mappedKey = resolveEdgeKeyWithAlias(edge.data)
+      if (!implEdgeKeys.has(origKey) && !implEdgeKeys.has(mappedKey)) {
         missingEdges.push(edge.data)
       }
     }

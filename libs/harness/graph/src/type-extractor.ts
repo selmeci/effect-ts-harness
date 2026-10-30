@@ -51,6 +51,7 @@ export interface TypeExtractorOptions {
 }
 
 const PackageJsonSchema = Schema.Struct({
+  name: Schema.optional(Schema.String),
   nx: Schema.optional(
     Schema.Struct({
       tags: Schema.optional(Schema.Array(Schema.String))
@@ -1331,6 +1332,93 @@ export const extractTypeAwareGraphFromSource = (
         }
 
         // 2. dead-event-payload check
+        const stateTagSet = new Set<string>()
+        const stateProps = new Set<string>()
+        if (stateParam) {
+          const stateType = stateParam.getType()
+          const constituents = stateType.isUnion() ? stateType.getUnionTypes() : [stateType]
+          for (const part of constituents) {
+            const tagProp = part.getProperty("_tag")
+            if (tagProp) {
+              const tagType = tagProp.getTypeAtLocation(stateParam)
+              const rawTag = tagType.getText().replace(/^["'`]|["'`]$/g, "")
+              if (rawTag && rawTag !== "string") {
+                stateTagSet.add(rawTag)
+              }
+            }
+            for (const p of part.getProperties()) {
+              stateProps.add(p.getName())
+            }
+          }
+        }
+
+        // Add state properties from any stateTag in taggedSchemasByTag
+        for (const stateTag of stateTagSet) {
+          const stSchema = taggedSchemasByTag.get(stateTag)
+          if (stSchema) {
+            for (const p of stSchema.properties) {
+              stateProps.add(p)
+            }
+          }
+        }
+
+        for (const [tag, schema] of taggedSchemasByTag.entries()) {
+          if (stateTagSet.has(tag) || /State$/i.test(tag) || /State\b/i.test(tag)) {
+            for (const p of schema.properties) {
+              stateProps.add(p)
+            }
+          }
+        }
+
+        for (const typeAlias of sourceFile.getTypeAliases()) {
+          if (/State\b/i.test(typeAlias.getName())) {
+            const t = typeAlias.getType()
+            const parts = t.isUnion() ? t.getUnionTypes() : [t]
+            for (const part of parts) {
+              for (const p of part.getProperties()) {
+                stateProps.add(p.getName())
+              }
+            }
+          }
+        }
+        for (const iface of sourceFile.getInterfaces()) {
+          if (/State\b/i.test(iface.getName())) {
+            for (const p of iface.getType().getProperties()) {
+              stateProps.add(p.getName())
+            }
+          }
+        }
+
+        const eventTagSet = new Set<string>()
+        const eventTypeText = eventParam ? eventParam.getType().getText() : ""
+        if (eventParam) {
+          const eventType = eventParam.getType()
+          const constituents = eventType.isUnion() ? eventType.getUnionTypes() : [eventType]
+          for (const part of constituents) {
+            const tagProp = part.getProperty("_tag")
+            if (tagProp) {
+              const tagType = tagProp.getTypeAtLocation(eventParam)
+              const rawTag = tagType.getText().replace(/^["'`]|["'`]$/g, "")
+              if (rawTag && rawTag !== "string") {
+                eventTagSet.add(rawTag)
+              }
+            }
+          }
+        }
+
+        const isEventVariant = (tag: string): boolean => {
+          if (eventTagSet.has(tag)) return true
+          if (eventTypeText.includes(`"${tag}"`) || eventTypeText.includes(`'${tag}'`)) return true
+          if (eventParam) {
+            const typeNode = eventParam.getTypeNode()
+            if (typeNode && new RegExp(`\\b${tag}\\b`).test(typeNode.getText())) return true
+          }
+          if (eventTagSet.size === 0 && !stateTagSet.has(tag)) {
+            return true
+          }
+          return false
+        }
+
         const handledTags = new Set<string>()
         const usedPropsPerTag = new Map<string, Set<string>>()
 
@@ -1357,6 +1445,12 @@ export const extractTypeAwareGraphFromSource = (
                 const init = propAssign.getInitializer()
                 if (init && (Node.isStringLiteral(init) || Node.isNoSubstitutionTemplateLiteral(init))) {
                   const tag = init.getLiteralText()
+                  if (stateTagSet.has(tag) && !eventTagSet.has(tag)) {
+                    continue
+                  }
+                  if (eventParam && eventTagSet.size > 0 && !isEventVariant(tag)) {
+                    continue
+                  }
                   if (taggedSchemasByTag.has(tag)) {
                     matchedTagsInWith.push(tag)
                     handledTags.add(tag)
@@ -1409,12 +1503,18 @@ export const extractTypeAwareGraphFromSource = (
 
         // For each handled tag, verify all payload fields were used across reducer arms
         for (const tag of handledTags) {
+          if (stateTagSet.has(tag) && !eventTagSet.has(tag)) continue
+          if (eventParam && eventTagSet.size > 0 && !isEventVariant(tag)) continue
+
           const schema = taggedSchemasByTag.get(tag)
           if (!schema || schema.properties.length === 0) continue
 
           const usedProps = usedPropsPerTag.get(tag) ?? new Set()
           for (const prop of schema.properties) {
             if (prop === "_tag" || prop === "version") continue
+            if (prop.endsWith("Id") && stateProps.has(prop)) {
+              continue
+            }
             if (!usedProps.has(prop)) {
               branchingViolations.push({
                 rule: "dead-event-payload",
@@ -1770,6 +1870,7 @@ export const stripCommentsAndTestTitles = (code: string): string => {
     /\b(?:describe|it|test)(?:\.[a-zA-Z0-9_$]+)*\s*\(\s*(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`[\s\S]*?`)/g,
     (match) => match.replace(/(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`[\s\S]*?`)$/, '""')
   )
+  stripped = stripped.replace(/`[\s\S]*?`/g, '""')
   return stripped
 }
 
@@ -1799,7 +1900,114 @@ const splitTopLevelCommas = (input: string): Array<string> => {
 }
 
 const PRIMITIVE_SCALAR_REGEX =
-  /^(?:(?:Schema|S)\.(?:String|Number|Boolean|Int|Natural|Positive|Negative|NonNegative|NonPositive|NonEmptyString)(?:\.[A-Za-z0-9_($. )]+)*|PositiveInt|NonEmptyString|fc\.(?:integer|nat|string|boolean|float|double)\s*\([^)]*\))$/
+  /^(?:(?:Schema|S)\.(?:String|Number|Boolean|Int|Natural|Positive|Negative|NonNegative|NonPositive|NonEmptyString)(?:\.[A-Za-z0-9_($. )]+)*|PositiveInt|NonEmptyString|StreamVersion|fc\.(?:integer|nat|string|boolean|float|double)\s*\([^)]*\))$/
+
+const isAllPrimitiveArbitraryBlock = (rawBlock: string): boolean => {
+  const block = rawBlock.trim()
+  if (block.startsWith("[") && block.endsWith("]")) {
+    const interior = block.slice(1, -1)
+    const rawItems = splitTopLevelCommas(interior)
+    const items = rawItems.map((s) => s.trim()).filter((s) => s.length > 0)
+    if (items.length === 0) return true
+    return items.every((item) => PRIMITIVE_SCALAR_REGEX.test(item))
+  }
+  if (block.startsWith("{") && block.endsWith("}")) {
+    const interior = block.slice(1, -1)
+    const rawItems = splitTopLevelCommas(interior)
+    const items = rawItems.map((s) => s.trim()).filter((s) => s.length > 0)
+    if (items.length === 0) return true
+    return items.every((entry) => {
+      const parts = entry.split(":")
+      if (parts.length < 2) return false
+      const val = parts.slice(1).join(":").trim()
+      return val.length > 0 && PRIMITIVE_SCALAR_REGEX.test(val)
+    })
+  }
+  return false
+}
+
+const getScopeDir = (relPath: string): string | null => {
+  const norm = relPath.replace(/\\/g, "/")
+  const match = norm.match(/^(libs\/[^/]+|apps\/[^/]+)/)
+  return match ? match[1]! : null
+}
+
+const packageJsonCache = new Map<string, { name?: string | undefined; dir: string }>()
+
+const findPackageForRelFile = (
+  root: string,
+  relFile: string
+): { name?: string | undefined; dir: string } | null => {
+  let curr = path.dirname(path.join(root, relFile))
+  const rootResolved = path.resolve(root)
+  while (curr.startsWith(rootResolved)) {
+    if (packageJsonCache.has(curr)) {
+      return packageJsonCache.get(curr)!
+    }
+    const pkgPath = path.join(curr, "package.json")
+    if (fs.existsSync(pkgPath)) {
+      const content = fs.readFileSync(pkgPath, "utf-8")
+      const opt = decodePackageJson(content)
+      const relDir = path.relative(rootResolved, curr).replace(/\\/g, "/")
+      const entry = {
+        name: Option.isSome(opt) ? opt.value.name : undefined,
+        dir: relDir
+      }
+      packageJsonCache.set(curr, entry)
+      return entry
+    }
+    const parent = path.dirname(curr)
+    if (parent === curr) break
+    curr = parent
+  }
+  return null
+}
+
+const testImportsFn = (
+  root: string,
+  testRelPath: string,
+  testContent: string,
+  fnFile: string
+): boolean => {
+  const fnPkg = findPackageForRelFile(root, fnFile)
+  if (fnPkg?.name) {
+    if (
+      testContent.includes(`"${fnPkg.name}"`) ||
+      testContent.includes(`'${fnPkg.name}'`) ||
+      testContent.includes(`"${fnPkg.name}/`) ||
+      testContent.includes(`'${fnPkg.name}/`)
+    ) {
+      return true
+    }
+  }
+
+  const importRegex = /(?:import|export)\s+(?:[\s\S]*?from\s+)?["']([^"']+)["']/g
+  const testFullDir = path.dirname(path.join(root, testRelPath))
+  const fnFullFile = path.join(root, fnFile)
+  const fnFullDir = path.dirname(fnFullFile)
+  const fnPkgFullDir = fnPkg ? path.join(root, fnPkg.dir) : null
+
+  for (const match of testContent.matchAll(importRegex)) {
+    const spec = match[1]
+    if (!spec) continue
+    if (spec.startsWith(".")) {
+      const resolved = path.resolve(testFullDir, spec)
+      if (
+        resolved === fnFullFile ||
+        resolved === fnFullFile.replace(/\.tsx?$/, ".js") ||
+        resolved.replace(/\.js$/, "") === fnFullFile.replace(/\.tsx?$/, "") ||
+        resolved.startsWith(fnFullDir) ||
+        (fnPkgFullDir && resolved.startsWith(fnPkgFullDir))
+      ) {
+        return true
+      }
+    } else if (fnPkg?.dir && spec.includes(fnPkg.dir)) {
+      return true
+    }
+  }
+
+  return false
+}
 
 export const extractWorkspaceTypeAwareGraph = (
   repoRoot: string
@@ -1845,7 +2053,7 @@ export const extractWorkspaceTypeAwareGraph = (
     const updatedNodeIndexByKey = new Map<string, Graph.NodeIndex>(baseGraph.nodeIndexByKey)
 
     const deciderAliasesByFnName = new Map<string, Set<string>>()
-    const deciderRegex = /(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=\s*Decider\.make\s*(?:<[\s\S]*?>)?\s*\(\s*\{([\s\S]*?)\}\s*\)/g
+    const deciderRegex = /(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=\s*(?:Decider\.)?make\s*(?:<[\s\S]*?>)?\s*\(\s*\{([\s\S]*?)\}\s*\)/g
     for (const input of inputs) {
       const deciderMatches = input.content.matchAll(deciderRegex)
       for (const m of deciderMatches) {
@@ -1897,22 +2105,11 @@ export const extractWorkspaceTypeAwareGraph = (
           let hasNonPrimitiveArbitrary: boolean | undefined = undefined
           if (hasPropTest) {
             const propCallRegex =
-              /\b(?:it|test)(?:\.effect)?\.prop\s*\(\s*(?:""|''|``)\s*,\s*\[([\s\S]*?)\]/g
+              /\b(?:it|test)(?:\.effect)?\.prop\s*\(\s*(?:""|''|``)\s*,\s*(\[[\s\S]*?\]|\{[\s\S]*?\})\s*,/g
             const matches = [...strippedContent.matchAll(propCallRegex)]
-            if (matches.length > 0) {
-              const allCallsOnlyPrimitive = matches.every((m) => {
-                const interior = m[1] ?? ""
-                const rawItems = splitTopLevelCommas(interior)
-                const items = rawItems.map((s) => s.trim()).filter((s) => s.length > 0)
-                if (items.length === 0) {
-                  return true
-                }
-                return items.every((item) => PRIMITIVE_SCALAR_REGEX.test(item))
-              })
-              hasNonPrimitiveArbitrary = !allCallsOnlyPrimitive
-            } else {
-              hasNonPrimitiveArbitrary = true
-            }
+            hasNonPrimitiveArbitrary =
+              matches.length > 0 &&
+              matches.every((m) => !isAllPrimitiveArbitraryBlock(m[1]!))
           }
 
           const testNode: VitestCaseNode = {
@@ -1930,6 +2127,13 @@ export const extractWorkspaceTypeAwareGraph = (
           const usesTestTracer = strippedContent.includes("runWithTestTracer")
 
           for (const fnNode of effectFns) {
+            const testScope = getScopeDir(relTestFile)
+            const fnScope = fnNode.file ? getScopeDir(fnNode.file) : null
+            if (testScope && fnScope && testScope !== fnScope) {
+              if (!testImportsFn(root, relTestFile, content, fnNode.file)) {
+                continue
+              }
+            }
             const fnName = fnNode.qualname.split("#")[1] ?? ""
             const escapedFnName = fnName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
             const fnRegex = escapedFnName

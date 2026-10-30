@@ -58,6 +58,12 @@ const MUTATION_PATTERNS: ReadonlyArray<{
   { original: ".reduce(evolve,", replacement: ".slice(0, 1).reduce(evolve,", category: "batch-folding" },
   { original: "() => state", replacement: "() => initialState", category: "terminal-state-preservation" },
   { original: "return state", replacement: "return initialState", category: "terminal-state-preservation" },
+  {
+    original: "!Equal.equals(someErr.value, expectedError)",
+    replacement:
+      "((someErr.value as { readonly _tag?: unknown })?._tag !== (expectedError as { readonly _tag?: unknown })?._tag)",
+    category: "equality-operator"
+  },
   { original: "if (!Equal.equals(", replacement: "if (false && !Equal.equals(", category: "guard-condition" },
   { original: "if (Equal.equals(", replacement: "if (true || Equal.equals(", category: "guard-condition" },
   { original: "if (Exit.isSuccess(", replacement: "if (false && Exit.isSuccess(", category: "guard-condition" }
@@ -184,7 +190,9 @@ const findDomainFiles = (
       readonly tier: "domain" | "core" | "contract"
     }> = [
       { dir: join(scopePath, "domain", "src"), tier: "domain" as const },
+      { dir: join(scopePath, "domain", "test", "fixtures"), tier: "domain" as const },
       { dir: join(scopePath, "core", "src"), tier: "core" as const },
+      { dir: join(scopePath, "core", "test", "fixtures"), tier: "core" as const },
       { dir: join(scopePath, "contract", "src"), tier: "contract" as const }
     ]
 
