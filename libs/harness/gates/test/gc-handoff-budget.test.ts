@@ -22,6 +22,8 @@ import {
   diffPlanAndImplGraphs,
   discoverDomainMutants,
   evaluateMutationOutcomes,
+  findClosestMatch,
+  levenshteinDistance,
   lintAdrDocMarkdown,
   lintEarsSpecMarkdown,
   loadGovernanceDocsFromDisk,
@@ -113,12 +115,16 @@ describe("Harness Gates: GC check, Session Handoff, Span Budget, and State Dir",
         )
         expect(unused).toBeDefined()
         expect(unused?.message).toContain("has no consumers")
+        expect(unused?.location).toBe("libs/sample/service/src/index.ts")
+        expect(unused?.action).toContain("inject ServiceTag")
 
         const unprovided = report.findings.find(
           (f) => f.kind === "unprovided-service" && f.nodeId === "UnusedAndUnprovided"
         )
         expect(unprovided).toBeDefined()
         expect(unprovided?.message).toContain("has no providing ServiceLayer")
+        expect(unprovided?.location).toBe("libs/sample/service/src/index.ts")
+        expect(unprovided?.action).toContain("Provide a live layer")
 
         // Ignored services should NOT produce findings
         expect(
@@ -133,6 +139,8 @@ describe("Harness Gates: GC check, Session Handoff, Span Budget, and State Dir",
         )
         expect(deadErr).toBeDefined()
         expect(deadErr?.message).toContain("is never emitted in any E channel")
+        expect(deadErr?.location).toBe("libs/sample/contract/src/index.ts")
+        expect(deadErr?.action).toContain("Fail with this error")
 
         // Ignored errors should NOT produce findings
         expect(
@@ -144,8 +152,61 @@ describe("Harness Gates: GC check, Session Handoff, Span Budget, and State Dir",
         // Missing pattern docs for planning and httpapi (review & effect excluded)
         const missingDocs = report.findings.filter((f) => f.kind === "missing-pattern-doc")
         expect(missingDocs.map((f) => f.nodeId)).toEqual(["Pattern:planning", "Pattern:httpapi"])
+        expect(missingDocs[0]?.location).toBe("agent-patterns/planning.md")
+        expect(missingDocs[0]?.action).toContain("Create \"agent-patterns/planning.md\"")
       })
     )
+
+    it.effect("enriches findings with location, action and fuzzy match suggestions on typos in governance docs", () =>
+      Effect.gen(function* () {
+        const graph = buildHarnessGraph({
+          fns: [
+            {
+              qualname: "libs/sample/domain/src/index.ts#greet",
+              spanName: "Sample.greet",
+              packageTag: "domain",
+              file: "libs/sample/domain/src/index.ts",
+              line: 12,
+              successType: "string",
+              isStub: false
+            }
+          ]
+        })
+
+        const governanceDocs: ReadonlyArray<GovernanceDocReference> = [
+          {
+            docPath: "libs/sample/docs/adr/0001-sample.md",
+            id: "sample:ADR-0001",
+            status: "accepted",
+            referencedSpans: ["Sample.greett"] // typo
+          }
+        ]
+
+        const report = yield* decideGraphEntropy({
+          graph,
+          governanceDocs
+        })
+
+        const stale = report.findings.find(
+          (f) => f.kind === "stale-doc-reference" && f.nodeId === "sample:ADR-0001:Sample.greett"
+        )
+        expect(stale).toBeDefined()
+        expect(stale?.location).toBe("libs/sample/docs/adr/0001-sample.md")
+        expect(stale?.message).toContain('Did you mean "Sample.greet"?')
+        expect(stale?.action).toContain('Update reference in "libs/sample/docs/adr/0001-sample.md" to "Sample.greet"')
+      })
+    )
+
+    it("calculates levenshtein distance and closest fuzzy match correctly", () => {
+      expect(levenshteinDistance("kitten", "sitting")).toBe(3)
+      expect(levenshteinDistance("Cart.addItem", "Cart.addItem")).toBe(0)
+      expect(levenshteinDistance("Cart.addItem", "Cart.adItem")).toBe(1)
+
+      const candidates = ["Cart.addItem", "Cart.checkout", "Cart.clear"]
+      expect(findClosestMatch("Cart.adItem", candidates)).toBe("Cart.addItem")
+      expect(findClosestMatch("Cart.checkot", candidates)).toBe("Cart.checkout")
+      expect(findClosestMatch("CompletelyDifferent", candidates)).toBeUndefined()
+    })
 
     it("passes clean: true via scanGraphEntropy when all elements are correctly wired", () => {
       const graph = buildHarnessGraph({

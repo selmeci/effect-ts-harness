@@ -164,7 +164,46 @@ const findWorkspaceRoot = (startDir: string = process.cwd()): string => {
   return CLI_REPO_ROOT
 }
 
-const formatSubprocessError = (err: unknown): string => {
+const ANSI_REGEX = new RegExp(
+  `[${String.fromCharCode(27)}${String.fromCharCode(155)}][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]`,
+  "g"
+)
+
+export const stripAnsiCodes = (text: string): string => text.replace(ANSI_REGEX, "")
+
+export const cleanSubprocessError = (raw: string): string => {
+  const noAnsi = stripAnsiCodes(raw)
+  const lines = noAnsi.split(/\r?\n/)
+  const filtered: Array<string> = []
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (trimmed.includes("[existing outputs match the cache, left as is]")) {
+      continue
+    }
+    if (/^✔\s+nx run\b/.test(trimmed)) {
+      continue
+    }
+    if (trimmed.startsWith("Output of") && trimmed.includes("successful tasks were not shown")) {
+      continue
+    }
+    if (
+      trimmed.startsWith("Run duration:") ||
+      trimmed.startsWith("Cache:") ||
+      trimmed.startsWith("Critical path:") ||
+      trimmed.startsWith("Recoverable time:")
+    ) {
+      continue
+    }
+    filtered.push(line)
+  }
+
+  const result = filtered.join("\n").replace(/\n{3,}/g, "\n\n").trim()
+  return result.length > 0 ? result : noAnsi.trim()
+}
+
+export const formatSubprocessError = (err: unknown): string => {
+  let raw = ""
   if (typeof err === "object" && err !== null) {
     const rec = err as { stdout?: unknown; stderr?: unknown; message?: unknown }
     const stdout =
@@ -181,13 +220,14 @@ const formatSubprocessError = (err: unknown): string => {
           : ""
     const combined = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n")
     if (combined.length > 0) {
-      return combined
+      raw = combined
+    } else if (typeof rec.message === "string") {
+      raw = rec.message
     }
-    if (typeof rec.message === "string") {
-      return rec.message
-    }
+  } else {
+    raw = String(err)
   }
-  return String(err)
+  return cleanSubprocessError(raw)
 }
 
 const handleGuard = (
@@ -522,7 +562,7 @@ const handlePlanCheck = (
         return {
           exitCode: 1,
           stdout: "",
-          stderr: subprocessErr
+          stderr: `[GATE FAILURE] plan-check:subprocess\nHINT: Fix compilation or lint errors before plan graph generation.\n\nFAILED OUTPUT:\n${subprocessErr}`
         }
       }
     }
@@ -766,7 +806,7 @@ const handleVerify = (
         const triage = yield* triageFailure(subprocessErr).pipe(
           Effect.provide(decisionLayer)
         )
-        const formattedErr = `[triage:${triage.kind}] ${triage.hint}\n${subprocessErr}`
+        const formattedErr = `[GATE FAILURE] [triage:${triage.kind}] ${triage.hint}\n\nFAILED OUTPUT:\n${subprocessErr}`
         recordFriction(options, {
           kind: "verify_failure",
           summary: `verify:${triage.kind}`,
@@ -777,7 +817,7 @@ const handleVerify = (
           return {
             exitCode: 2,
             stdout: "",
-            stderr: `${thrashing.escalationMessage}\n${formattedErr}`
+            stderr: `${thrashing.escalationMessage}\n\n${formattedErr}`
           }
         }
         return {

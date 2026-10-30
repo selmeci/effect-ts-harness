@@ -10,7 +10,14 @@ import { readTelemetryEvents, writeVerifyStamp } from "@harness/gates"
 import { buildHarnessGraph } from "@harness/graph"
 // oxlint-disable-next-line @nx/enforce-module-boundaries
 import syntaxBansPlugin from "../../../tools/oxlint/syntax-bans.js"
-import { buildOmnigraphClusterKillArgs, COMMANDS, run, runCli } from "../src/index.js"
+import {
+  buildOmnigraphClusterKillArgs,
+  cleanSubprocessError,
+  COMMANDS,
+  run,
+  runCli,
+  stripAnsiCodes
+} from "../src/index.js"
 
 describe("harness cli baseline", () => {
   it("registers all MVP v2 commands including plan-check and doctor", () => {
@@ -54,6 +61,22 @@ describe("harness cli baseline", () => {
     const res = await runCli(["help"])
     expect(res.exitCode).toBe(0)
     expect(res.stdout).toContain("harness help")
+  })
+
+  it("strips ANSI color codes and cleans noisy Nx caching lines", () => {
+    const noisyOutput =
+      "\u001b[36m✔\u001b[39m nx run @harness/graph:verify [existing outputs match the cache, left as is]\n" +
+      "> nx run sample:verify\n" +
+      "\u001b[91merror TS377012: Syntax error\u001b[0m\n" +
+      "Run duration: 1.2s\n" +
+      "Cache: 1/2 hit"
+
+    const cleaned = cleanSubprocessError(noisyOutput)
+    expect(cleaned).not.toContain("\u001b")
+    expect(cleaned).not.toContain("[existing outputs match the cache, left as is]")
+    expect(cleaned).toContain("> nx run sample:verify")
+    expect(cleaned).toContain("error TS377012: Syntax error")
+    expect(stripAnsiCodes("\u001b[1m\u001b[31mFAIL\u001b[39m\u001b[22m")).toBe("FAIL")
   })
 })
 
