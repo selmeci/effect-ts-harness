@@ -29,7 +29,16 @@ const resolveRepoRoot = (startDir: string): string => {
   return startDir
 }
 
-const createMockD1Database = () => {
+type D1Database = Parameters<typeof D1Client.layer>[0]["db"]
+type D1PreparedStatement = ReturnType<D1Database["prepare"]>
+type D1Result<T> = Awaited<ReturnType<D1PreparedStatement["all"]>> extends { results: Array<unknown> }
+  ? Omit<Awaited<ReturnType<D1PreparedStatement["all"]>>, "results"> & { results: Array<T> }
+  : never
+
+const createMockD1Database = (): {
+  sqlite: DatabaseSync
+  mockD1: D1Database
+} => {
   const sqlite = new DatabaseSync(":memory:")
   sqlite.exec(`
     CREATE TABLE photos (
@@ -44,24 +53,99 @@ const createMockD1Database = () => {
     );
   `)
 
-  const mockD1 = {
-    prepare(sql: string) {
-      return {
-        bind(...params: unknown[]) {
-          return {
-            all: async () => {
-              const stmt = sqlite.prepare(sql)
-              const results = stmt.all(...(params as any[]))
-              return { results, success: true }
-            },
-            raw: async () => {
-              const stmt = sqlite.prepare(sql)
-              return stmt.all(...(params as any[])).map((row: any) => Object.values(row))
-            }
-          }
+  const createMeta = () => ({
+    served_by: "local",
+    duration: 0,
+    changes: 0,
+    last_row_id: 0,
+    changed_db: false,
+    size_after: 0,
+    rows_read: 0,
+    rows_written: 0,
+    sql_duration_ms: 0
+  })
+
+  const createStatement = (
+    sql: string,
+    boundParams: Array<string | number | bigint | Buffer | null> = []
+  ): D1PreparedStatement => {
+    function raw<T = Array<unknown>>(options: { columnNames: true }): Promise<[Array<string>, ...Array<T>]>
+    function raw<T = Array<unknown>>(options?: { columnNames?: false }): Promise<Array<T>>
+    async function raw<T = Array<unknown>>(options?: {
+      columnNames?: boolean
+    }): Promise<[Array<string>, ...Array<T>] | Array<T>> {
+      const stmt = sqlite.prepare(sql)
+      const rows = stmt
+        .all(...boundParams)
+        .map((row: Record<string, unknown>) => Object.values(row) as T)
+      if (options?.columnNames === true) {
+        return [[] as Array<string>, ...rows]
+      }
+      return rows
+    }
+
+    function first<T = unknown>(colName: string): Promise<T | null>
+    function first<T = Record<string, unknown>>(): Promise<T | null>
+    async function first<T = Record<string, unknown>>(colName?: string): Promise<T | null> {
+      const stmt = sqlite.prepare(sql)
+      const results = stmt.all(...boundParams)
+      const row = results[0] as Record<string, unknown> | undefined
+      if (!row) return null
+      if (typeof colName === "string") {
+        return (row[colName] as T | undefined) ?? null
+      }
+      return row as T
+    }
+
+    const statement: D1PreparedStatement = {
+      bind(...params: Array<unknown>) {
+        return createStatement(
+          sql,
+          params as Array<string | number | bigint | Buffer | null>
+        )
+      },
+      all: async <T = Record<string, unknown>>(): Promise<D1Result<T>> => {
+        const stmt = sqlite.prepare(sql)
+        const results = stmt.all(...boundParams) as Array<T>
+        return {
+          results,
+          success: true,
+          meta: createMeta()
+        }
+      },
+      raw,
+      first,
+      run: async <T = Record<string, unknown>>(): Promise<D1Result<T>> => {
+        const stmt = sqlite.prepare(sql)
+        const results = stmt.all(...boundParams) as Array<T>
+        return {
+          results,
+          success: true,
+          meta: createMeta()
         }
       }
     }
+    return statement
+  }
+
+  const mockD1: D1Database = {
+    prepare(sql: string) {
+      return createStatement(sql)
+    },
+    batch: async <T = unknown>(statements: Array<D1PreparedStatement>): Promise<Array<D1Result<T>>> =>
+      Promise.all(statements.map((s) => s.all<T>())),
+    exec: async (query: string) => {
+      sqlite.exec(query)
+      return { count: 0, duration: 0 }
+    },
+    withSession() {
+      return {
+        prepare: (sql: string) => createStatement(sql),
+        batch: <T = unknown>(statements: Array<D1PreparedStatement>) => mockD1.batch<T>(statements),
+        getBookmark: () => null
+      }
+    },
+    dump: async () => new ArrayBuffer(0)
   }
 
   return { sqlite, mockD1 }
@@ -87,7 +171,7 @@ describe("sample-infra", () => {
         Effect.gen(function* () {
         const { mockD1 } = createMockD1Database()
         const drizzleDb = yield* makeWithDefaults({}).pipe(
-          Effect.provide(D1Client.layer({ db: mockD1 as any }))
+          Effect.provide(D1Client.layer({ db: mockD1 }))
         )
 
         const repoLayer = makePhotoRepoD1Layer(drizzleDb)
@@ -185,7 +269,7 @@ describe("sample-infra", () => {
 
           const { mockD1, sqlite } = createMockD1Database()
           const drizzleDb = yield* makeWithDefaults({}).pipe(
-            Effect.provide(D1Client.layer({ db: mockD1 as any }))
+            Effect.provide(D1Client.layer({ db: mockD1 }))
           )
 
           const doRpcHandler = makeAlbumCounterRpcHandler(drizzleDb)
@@ -212,7 +296,7 @@ describe("sample-infra", () => {
           // Verify SQLite database has genuine persisted count row in album_counters table
           const countRows = sqlite
             .prepare("SELECT * FROM album_counters WHERE album_id = ?")
-            .all("album-nature") as any[]
+            .all("album-nature") as Array<{ album_id: string; count: number }>
           expect(countRows).toHaveLength(1)
           expect(countRows[0]?.count).toBe(1)
 
@@ -280,7 +364,7 @@ describe("sample-infra", () => {
           .run("album-full", 100)
 
         const drizzleDb = yield* makeWithDefaults({}).pipe(
-          Effect.provide(D1Client.layer({ db: mockD1 as any }))
+          Effect.provide(D1Client.layer({ db: mockD1 }))
         )
 
         const doRpcHandler = makeAlbumCounterRpcHandler(drizzleDb)

@@ -14,6 +14,7 @@ import * as HttpClientResponse from "effect/http/HttpClientResponse"
 import * as HttpServerRequest from "effect/http/HttpServerRequest"
 import * as HttpServerResponse from "effect/http/HttpServerResponse"
 import { eq } from "drizzle-orm"
+import type { EffectSQLiteD1Database } from "drizzle-orm/effect-d1"
 import { match, P } from "ts-pattern"
 import {
   AlbumQuotaExceededError,
@@ -79,28 +80,22 @@ export const PhotoRepoMemoryLayer: Layer.Layer<PhotoRepo> = Layer.effect(
 )
 
 // PhotoRepo D1 / SQLite Layer Factory
-export interface DrizzleDatabase {
-  readonly insert: (table: any) => {
-    readonly values: (value: any) => any
-  }
-  readonly select: () => {
-    readonly from: (table: any) => any
-  }
-}
+export type EffectD1Database = EffectSQLiteD1Database
+export type DrizzleDatabase = EffectSQLiteD1Database
 
 const _makePhotoRepoDrizzle = (db: DrizzleDatabase) => {
   const insert = Effect.fn("PhotoRepo.insert")(
     (input: CreatePhotoInput): Effect.Effect<Photo> =>
       Effect.gen(function* () {
         const createdAt = Math.floor(Date.now())
-        const insertEffect = (db
+        const insertEffect = db
           .insert(photos)
           .values({
             name: input.name,
             albumId: input.albumId,
             createdAt
           })
-          .returning()) as unknown as Effect.Effect<ReadonlyArray<unknown>, Error, never>
+          .returning()
 
         const rows = yield* insertEffect
         return yield* Schema.decodeUnknownEffect(Photo)(rows[0])
@@ -110,10 +105,10 @@ const _makePhotoRepoDrizzle = (db: DrizzleDatabase) => {
   const findById = Effect.fn("PhotoRepo.findById")(
     (id: number): Effect.Effect<Photo, PhotoNotFoundError> =>
       Effect.gen(function* () {
-        const selectEffect = (db
+        const selectEffect = db
           .select()
           .from(photos)
-          .where(eq(photos.id, id))) as unknown as Effect.Effect<ReadonlyArray<unknown>, Error, never>
+          .where(eq(photos.id, id))
         const rows = yield* Effect.orDie(selectEffect)
         if (!rows || rows.length === 0) {
           return yield* new PhotoNotFoundError({ id })
@@ -123,11 +118,11 @@ const _makePhotoRepoDrizzle = (db: DrizzleDatabase) => {
   )
 
   const listAll: Effect.Effect<ReadonlyArray<Photo>> = Effect.gen(function* () {
-    const selectEffect = (db
+    const selectEffect = db
       .select()
-      .from(photos)) as unknown as Effect.Effect<ReadonlyArray<unknown>, Error, never>
+      .from(photos)
     const rows = yield* selectEffect
-    return yield* Schema.decodeUnknownEffect(Schema.Array(Photo))(rows ?? [])
+    return yield* Schema.decodeEffect(Schema.Array(Photo))(rows ?? [])
   }).pipe(Effect.orDie, Effect.withSpan("PhotoRepo.listAll"))
 
   return PhotoRepo.of({ insert, findById, listAll })
@@ -170,14 +165,10 @@ export const AlbumCounterStoreMemoryLayer: Layer.Layer<ActiveCounterStore> = Lay
 const _makeAlbumCounterStoreDrizzle = (db: DrizzleDatabase): AlbumCounterStore => ({
   get: (albumId: string) =>
     Effect.gen(function* () {
-      const selectEffect = (db
+      const selectEffect = db
         .select()
         .from(albumCounters)
-        .where(eq(albumCounters.albumId, albumId))) as unknown as Effect.Effect<
-        ReadonlyArray<{ albumId: string; count: number }>,
-        Error,
-        never
-      >
+        .where(eq(albumCounters.albumId, albumId))
       const rows = yield* Effect.orDie(selectEffect)
       if (!rows || rows.length === 0 || rows[0] == null) {
         return 0
@@ -186,13 +177,13 @@ const _makeAlbumCounterStoreDrizzle = (db: DrizzleDatabase): AlbumCounterStore =
     }),
   set: (albumId: string, count: number) =>
     Effect.gen(function* () {
-      const upsertEffect = (db
+      const upsertEffect = db
         .insert(albumCounters)
         .values({ albumId, count })
         .onConflictDoUpdate({
           target: albumCounters.albumId,
           set: { count }
-        })) as unknown as Effect.Effect<unknown, Error, never>
+        })
       yield* Effect.orDie(upsertEffect)
     })
 })
@@ -215,7 +206,9 @@ export const handleAlbumCounterRpc = Effect.fn("SampleInfra.handleAlbumCounterRp
   function* (rawInput: unknown) {
     const rawAction =
       rawInput != null && typeof rawInput === "object" && "action" in rawInput
-        ? String((rawInput as any).action)
+        ? typeof (rawInput as { readonly action?: unknown }).action === "string"
+          ? (rawInput as { readonly action: string }).action
+          : String((rawInput as { readonly action?: unknown }).action)
         : "IncrementAlbumCount"
 
     const isGet = rawAction === "GetAlbumCount"
@@ -247,11 +240,13 @@ export const handleAlbumCounterRpc = Effect.fn("SampleInfra.handleAlbumCounterRp
   }
 )
 
-const _toHttpClient = (fetcher: {
+export interface ServerRequestFetcher {
   readonly fetch: (
     request: HttpServerRequest.HttpServerRequest
   ) => Effect.Effect<HttpServerResponse.HttpServerResponse, Error, never>
-}): HttpClient.HttpClient =>
+}
+
+const _toHttpClient = (fetcher: ServerRequestFetcher): HttpClient.HttpClient =>
   HttpClient.make((request) =>
     Effect.gen(function* () {
       const serverReq = HttpServerRequest.fromClientRequest(request)
@@ -365,15 +360,14 @@ const _makeAlbumCounterRpcHandler = (
 export { _makeAlbumCounterRpcHandler as makeAlbumCounterRpcHandler }
 
 const _makeAlbumCounterRpcClient = (
-  httpClient: HttpClient.HttpClient | { execute: any } | { fetch: any }
+  httpClient: HttpClient.HttpClient | ServerRequestFetcher
 ): Layer.Layer<AlbumCounterClient> & {
   readonly increment: (albumId: string) => Effect.Effect<number, AlbumQuotaExceededError>
   readonly getCount: (albumId: string) => Effect.Effect<number>
 } => {
-  const client: HttpClient.HttpClient =
-    HttpClient.isHttpClient(httpClient) || "execute" in (httpClient as any)
-      ? (httpClient as HttpClient.HttpClient)
-      : _toHttpClient(httpClient as any)
+  const client: HttpClient.HttpClient = HttpClient.isHttpClient(httpClient)
+    ? httpClient
+    : _toHttpClient(httpClient)
 
   const increment = (albumId: string): Effect.Effect<number, AlbumQuotaExceededError> =>
     Effect.gen(function* () {

@@ -35,7 +35,9 @@ import {
   diffPlanAndImplGraphs,
   type FrictionEventKind,
   type GovernanceDocReference,
+  INTERACTIVE_NX_BANNED_REASON,
   isCdCommand,
+  isInteractiveNxCommand,
   loadGovernanceDocsFromDisk,
   readFrictionEvents,
   readGraphHeadMeta,
@@ -359,9 +361,12 @@ const handleGuard = (
 
     const classification = classifyCommand(command)
     if (classification === "deny") {
+      const isInteractiveNx = isInteractiveNxCommand(command)
       const denyReason = isCdCommand(command)
         ? `Blocked by harness guard: ${command} (${CD_COMMAND_BANNED_REASON})`
-        : `Blocked by harness guard: ${command}`
+        : isInteractiveNx
+          ? `Blocked by harness guard: ${command} (${INTERACTIVE_NX_BANNED_REASON})`
+          : `Blocked by harness guard: ${command}`
       if (isAntigravity) {
         return {
           exitCode: 0,
@@ -423,12 +428,16 @@ const handleGuard = (
     })
 
     if (decision.verdict === "deny") {
+      const isInteractiveNx = isInteractiveNxCommand(command)
+      const denyReason = isInteractiveNx
+        ? `Blocked by harness guard: ${command} (${INTERACTIVE_NX_BANNED_REASON})`
+        : `Blocked by harness guard: ${command}`
       if (isAntigravity) {
         return {
           exitCode: 0,
           stdout: JSON.stringify({
             decision: "deny",
-            reason: `Blocked by harness guard: ${command}`
+            reason: denyReason
           }),
           stderr: ""
         }
@@ -436,7 +445,7 @@ const handleGuard = (
       return {
         exitCode: 2,
         stdout: "",
-        stderr: `Blocked by harness guard: ${command}`
+        stderr: denyReason
       }
     }
     if (decision.verdict === "allow") {

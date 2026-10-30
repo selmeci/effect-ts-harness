@@ -62,10 +62,37 @@ describe("sample-contract (Schemas, HttpApi, RpcGroup, OpenAPI)", () => {
   })
 
   it("scripts/check-openapi.mjs CLI exits with code 2 and ESCALATE on breaking change", () => {
-    const liveSpec = buildOpenApiSpec() as any
-    const baselineSpec = JSON.parse(JSON.stringify(liveSpec))
-    if (baselineSpec.paths?.["/photos"]?.get?.responses?.["200"]?.content?.["application/json"]?.schema?.items) {
-      const items = baselineSpec.paths["/photos"].get.responses["200"].content["application/json"].schema.items
+    interface OpenApiDoc {
+      paths?: Record<
+        string,
+        Record<
+          string,
+          {
+            responses?: Record<
+              string,
+              {
+                content?: Record<
+                  string,
+                  {
+                    schema?: {
+                      items?: {
+                        required?: string[]
+                        properties?: Record<string, unknown>
+                      }
+                    }
+                  }
+                >
+              }
+            >
+          }
+        >
+      >
+    }
+    const liveSpec = buildOpenApiSpec()
+    const baselineSpec: OpenApiDoc = JSON.parse(JSON.stringify(liveSpec))
+    const items =
+      baselineSpec.paths?.["/photos"]?.["get"]?.responses?.["200"]?.content?.["application/json"]?.schema?.items
+    if (items) {
       items.required = [...(items.required ?? []), "extraRequiredField"]
       items.properties = { ...items.properties, extraRequiredField: { type: "string" } }
     }

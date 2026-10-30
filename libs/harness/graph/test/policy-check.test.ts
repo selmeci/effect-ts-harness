@@ -1,8 +1,13 @@
+import * as fs from "node:fs"
+import * as os from "node:os"
+import * as path from "node:path"
+import { Effect } from "effect"
 import { describe, expect, it } from "vitest"
 import {
   buildHarnessGraph,
   checkEffectGraph,
-  extractTypeAwareGraphFromSource
+  extractTypeAwareGraphFromSource,
+  extractWorkspaceTypeAwareGraph
 } from "../src/index.js"
 
 describe("effect-graph:check policy rules", () => {
@@ -890,7 +895,7 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
     const domainSource = `
       import { Effect } from "effect"
 
-      export const evolveCart = (s: any, e: any): any => {
+      export const evolveCart = (s: unknown, e: unknown): unknown => {
         return Effect.runSync(Effect.succeed(s))
       }
     `
@@ -910,7 +915,7 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       export const cartDecider = Decider.make({
         initialState: {},
         decide: () => Effect.succeed([]),
-        evolve: (s: any, e: any) => Effect.runSync(Effect.succeed(s))
+        evolve: (s: unknown, e: unknown) => Effect.runSync(Effect.succeed(s))
       })
     `
     const deciderGraph = extractTypeAwareGraphFromSource([
@@ -965,5 +970,480 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
     expect(violation).toBeDefined()
     expect(violation?.message).toContain("Exit.isSuccess")
   })
+
+  it("fails with unbranded-schema-field when Schema.Struct, TaggedStruct, or TaggedClass uses unbranded Int or Number for quantity or version", () => {
+    const badContract = `
+      import { Schema } from "effect"
+
+      export const ItemAdded = Schema.TaggedStruct("ItemAdded", {
+        cartId: Schema.String,
+        quantity: Schema.Int,
+        expectedVersion: Schema.Number
+      })
+
+      export class CartUpdated extends Schema.TaggedClass<CartUpdated>()("CartUpdated", {
+        cartId: Schema.String,
+        streamVersion: Schema.Natural
+      })
+
+      export const LegacyPayload = Schema.Struct({
+        quantity: Schema.Int.pipe(Schema.positive())
+      })
+    `
+    const badGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/contract/src/events.ts",
+        content: badContract,
+        packageTag: "contract"
+      }
+    ])
+    const badResult = checkEffectGraph(badGraph)
+    const violations = badResult.violations.filter((v) => v.rule === "unbranded-schema-field")
+    expect(violations.length).toBe(4)
+    expect(violations[0]?.message).toContain("domain quantity and version fields must use a branded contract schema")
+
+    const goodContract = `
+      import { Schema } from "effect"
+
+      export const PositiveInt = Schema.Int.pipe(Schema.brand("PositiveInt"))
+      export const StreamVersion = Schema.Int.pipe(Schema.brand("StreamVersion"))
+
+      export const ItemAdded = Schema.TaggedStruct("ItemAdded", {
+        cartId: Schema.String,
+        quantity: PositiveInt,
+        expectedVersion: StreamVersion
+      })
+
+      export class CartUpdated extends Schema.TaggedClass<CartUpdated>()("CartUpdated", {
+        cartId: Schema.String,
+        streamVersion: Schema.Natural.pipe(Schema.brand("NaturalVersion")),
+        quantity: Schema.Int.pipe(Schema.positive(), Schema.brand("Quantity"))
+      })
+    `
+    const goodGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/contract/src/events.ts",
+        content: goodContract,
+        packageTag: "contract"
+      }
+    ])
+    const goodResult = checkEffectGraph(goodGraph)
+    expect(goodResult.violations.filter((v) => v.rule === "unbranded-schema-field")).toHaveLength(0)
+  })
+
+  it("fails with schema-boolean-state on Schema.TaggedStruct and Schema.TaggedClass", () => {
+    const badSource = `
+      import { Schema } from "effect"
+
+      export const CartTagged = Schema.TaggedStruct("CartTagged", {
+        cartId: Schema.String,
+        checkedOut: Schema.Boolean
+      })
+
+      export class CartClass extends Schema.TaggedClass<CartClass>()("CartClass", {
+        cartId: Schema.String,
+        isActive: Schema.Boolean
+      })
+    `
+    const badGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/contract/src/cart.ts",
+        content: badSource,
+        packageTag: "contract"
+      }
+    ])
+    const badResult = checkEffectGraph(badGraph)
+    const boolViolations = badResult.violations.filter((v) => v.rule === "schema-boolean-state")
+    expect(boolViolations.length).toBe(2)
+  })
+
+  it("fails with handwritten-tagged-union when type alias is an inline union of _tag object literals, but allows Schema-derived unions", () => {
+    const badSource = `
+      export type CartState =
+        | { readonly _tag: "EmptyCart" }
+        | { readonly _tag: "ActiveCart"; readonly cartId: string; readonly items: ReadonlyArray<string> }
+        | { readonly _tag: "CheckedOutCart"; readonly cartId: string }
+    `
+    const badGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/contract/src/state.ts",
+        content: badSource,
+        packageTag: "contract"
+      }
+    ])
+    const badResult = checkEffectGraph(badGraph)
+    const violations = badResult.violations.filter((v) => v.rule === "handwritten-tagged-union")
+    expect(violations.length).toBe(1)
+    expect(violations[0]?.message).toContain("CartState")
+    expect(violations[0]?.message).toContain("handwritten TypeScript union of '_tag' object literals")
+
+    const goodSource = `
+      import { Schema } from "effect"
+
+      export const EmptyCart = Schema.TaggedStruct("EmptyCart", {})
+      export const ActiveCart = Schema.TaggedStruct("ActiveCart", { cartId: Schema.String })
+      export const CartState = Schema.Union(EmptyCart, ActiveCart)
+      export type CartState = typeof CartState.Type
+
+      export type Identifier = string | number
+      export type ItemList = ReadonlyArray<{ readonly id: string; readonly name: string }>
+    `
+    const goodGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/contract/src/state.ts",
+        content: goodSource,
+        packageTag: "contract"
+      }
+    ])
+    const goodResult = checkEffectGraph(goodGraph)
+    expect(goodResult.violations.filter((v) => v.rule === "handwritten-tagged-union")).toHaveLength(0)
+  })
+
+  it("fails with untraced-decider when Decider.make binds an untraced decide function or returns options unchanged in decider.ts", () => {
+    const untracedSource = `
+      import { Effect } from "effect"
+
+      export const cartDecider = Decider.make({
+        initialState: {},
+        decide: (command: unknown, state: unknown) => Effect.succeed([]),
+        evolve: (state: unknown, event: unknown) => state
+      })
+
+      export const methodDecider = Decider.make({
+        initialState: {},
+        decide(command: unknown, state: unknown) {
+          return Effect.succeed([])
+        },
+        evolve: (state: unknown, event: unknown) => state
+      })
+
+      const untracedFn = (command: unknown, state: unknown) => Effect.succeed([])
+      export const aliasDecider = Decider.make({
+        initialState: {},
+        decide: untracedFn,
+        evolve: (state: unknown, event: unknown) => state
+      })
+    `
+    const untracedGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/cart.ts",
+        content: untracedSource,
+        packageTag: "domain"
+      }
+    ])
+    const untracedResult = checkEffectGraph(untracedGraph)
+    const violations = untracedResult.violations.filter((v) => v.rule === "untraced-decider")
+    expect(violations.length).toBe(3)
+    expect(violations[0]?.message).toContain("binds an untraced 'decide' function")
+
+    const passthroughDecider = `
+      export const Decider = {
+        make: (options: unknown) => options
+      }
+    `
+    const deciderGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/es/core/src/decider.ts",
+        content: passthroughDecider,
+        packageTag: "domain"
+      }
+    ])
+    const deciderResult = checkEffectGraph(deciderGraph)
+    const deciderViolations = deciderResult.violations.filter((v) => v.rule === "untraced-decider")
+    expect(deciderViolations.length).toBe(1)
+    expect(deciderViolations[0]?.message).toContain("returns options unchanged without enforcing or wrapping span tracing")
+
+    const tracedSource = `
+      import { Effect } from "effect"
+
+      export const decide = Effect.fn("Cart.decide")(function* (command: unknown, state: unknown) {
+        return []
+      })
+
+      export const validDecider = Decider.make({
+        initialState: {},
+        decide,
+        evolve: (state: unknown, event: unknown) => state
+      })
+
+      export const inlineDecider = Decider.make({
+        initialState: {},
+        decide: Effect.fn("Cart.decide")(function* (command: unknown, state: unknown) {
+          return []
+        }),
+        evolve: (state: unknown, event: unknown) => state
+      })
+    `
+    const tracedGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/cart.ts",
+        content: tracedSource,
+        packageTag: "domain"
+      }
+    ])
+    const tracedResult = checkEffectGraph(tracedGraph)
+    expect(tracedResult.violations.filter((v) => v.rule === "untraced-decider")).toHaveLength(0)
+
+    const wrappedDecider = `
+      import { Effect } from "effect"
+
+      export const Decider = {
+        make: (options: Record<string, (...args: Array<unknown>) => unknown>) => ({
+          ...options,
+          decide: (command: unknown, state: unknown) => Effect.withSpan(options.decide(command, state), "decider.span")
+        })
+      }
+    `
+    const wrappedGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/es/core/src/decider.ts",
+        content: wrappedDecider,
+        packageTag: "domain"
+      }
+    ])
+    const wrappedResult = checkEffectGraph(wrappedGraph)
+    expect(wrappedResult.violations.filter((v) => v.rule === "untraced-decider")).toHaveLength(0)
+  })
+
+  it("fails with missing-aggregate-id-guard when decide does not verify that command and state aggregate ID match", () => {
+    const unguardedSource = `
+      import { Effect, Schema } from "effect"
+
+      export const AddItem = Schema.TaggedStruct("AddItem", {
+        cartId: Schema.String,
+        item: Schema.String
+      })
+      export type AddItem = typeof AddItem.Type
+
+      export const ActiveCart = Schema.TaggedStruct("ActiveCart", {
+        cartId: Schema.String,
+        items: Schema.Array(Schema.String)
+      })
+      export type ActiveCart = typeof ActiveCart.Type
+
+      export const decide = Effect.fn("Cart.decide")(function* (command: AddItem, state: ActiveCart) {
+        // Does not compare command.cartId with state.cartId!
+        return [command]
+      })
+    `
+    const badGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/cart.ts",
+        content: unguardedSource,
+        packageTag: "domain"
+      }
+    ])
+    const badResult = checkEffectGraph(badGraph)
+    const violations = badResult.violations.filter((v) => v.rule === "missing-aggregate-id-guard")
+    expect(violations.length).toBe(1)
+    expect(violations[0]?.message).toContain("accepts command and state that both carry aggregate identifier 'cartId'")
+
+    const guardedSource = `
+      import { Effect, Equal, Schema } from "effect"
+
+      export const AddItem = Schema.TaggedStruct("AddItem", {
+        cartId: Schema.String,
+        item: Schema.String
+      })
+      export type AddItem = typeof AddItem.Type
+
+      export const ActiveCart = Schema.TaggedStruct("ActiveCart", {
+        cartId: Schema.String,
+        items: Schema.Array(Schema.String)
+      })
+      export type ActiveCart = typeof ActiveCart.Type
+
+      export const decideA = Effect.fn("Cart.decide")(function* (command: AddItem, state: ActiveCart) {
+        if (state.cartId !== command.cartId) {
+          return yield* Effect.fail(new Error("CartId mismatch"))
+        }
+        return [command]
+      })
+
+      export const decideB = Effect.fn("Cart.decide")(function* (cmd: AddItem, s: ActiveCart) {
+        if (!Equal.equals(s.cartId, cmd.cartId)) {
+          return yield* Effect.fail(new Error("CartId mismatch"))
+        }
+        return [cmd]
+      })
+    `
+    const goodGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/cart.ts",
+        content: guardedSource,
+        packageTag: "domain"
+      }
+    ])
+    const goodResult = checkEffectGraph(goodGraph)
+    expect(goodResult.violations.filter((v) => v.rule === "missing-aggregate-id-guard")).toHaveLength(0)
+  })
+
+  it("fails with unasserted-state-field when evolve assigns state properties never read or asserted in scope tests", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-unasserted-test-"))
+    try {
+      fs.writeFileSync(path.join(tmpDir, "pnpm-workspace.yaml"), "packages:\n  - 'libs/*'\n")
+
+      const srcDir = path.join(tmpDir, "libs/sample/domain/src")
+      const testDir = path.join(tmpDir, "libs/sample/domain/test")
+      fs.mkdirSync(srcDir, { recursive: true })
+      fs.mkdirSync(testDir, { recursive: true })
+
+      fs.writeFileSync(
+        path.join(srcDir, "cart.ts"),
+        `
+          export const evolve = (state: Record<string, unknown>, event: Record<string, unknown>) => {
+            return {
+              ...state,
+              _tag: "ActiveCart",
+              cartId: event.cartId,
+              items: [...(Array.isArray(state.items) ? state.items : []), event.item],
+              totalItems: (typeof state.totalItems === "number" ? state.totalItems : 0) + 1
+            }
+          }
+        `
+      )
+
+      // Test file only reads items, never reads or asserts totalItems!
+      fs.writeFileSync(
+        path.join(testDir, "cart.test.ts"),
+        `
+          import { describe, it, expect } from "vitest"
+          describe("cart suite", () => {
+            it("handles items correctly (mentioning totalItems in title only)", () => {
+              const state = { items: ["apple"] }
+              expect(state.items).toHaveLength(1)
+            })
+          })
+        `
+      )
+
+      const badGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir))
+      const badResult = checkEffectGraph(badGraph)
+      const violations = badResult.violations.filter((v) => v.rule === "unasserted-state-field")
+      expect(violations.length).toBe(1)
+      expect(violations[0]?.message).toContain("State property 'totalItems' computed in reducer")
+      expect(violations[0]?.message).toContain("is never read or asserted in any test file in scope 'libs/sample'")
+
+      // Update test file to assert totalItems
+      fs.writeFileSync(
+        path.join(testDir, "cart.test.ts"),
+        `
+          import { describe, it, expect } from "vitest"
+          describe("cart suite", () => {
+            it("handles items and totalItems", () => {
+              const state = { items: ["apple"], totalItems: 1 }
+              expect(state.items).toHaveLength(1)
+              expect(state.totalItems).toBe(1)
+            })
+          })
+        `
+      )
+
+      const goodGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir))
+      const goodResult = checkEffectGraph(goodGraph)
+      expect(goodResult.violations.filter((v) => v.rule === "unasserted-state-field")).toHaveLength(0)
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("fails with unsafe-type-cast on 'as any', ': any', 'as never', 'as unknown as', and '(x: never) => x', while allowing Effect.Effect<number, never, never>", () => {
+    // 1. as any
+    const asAnySource = `
+      export const value = ("test" as any)
+    `
+    const asAnyGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/as-any.ts",
+        content: asAnySource,
+        packageTag: "domain"
+      }
+    ])
+    const asAnyResult = checkEffectGraph(asAnyGraph)
+    expect(asAnyResult.ok).toBe(false)
+    expect(asAnyResult.violations.some((v) => v.rule === "unsafe-type-cast")).toBe(true)
+    expect(asAnyResult.violations[0]?.message).toContain("Explicit 'any' (as any, : any, <any>) is banned")
+    expect(asAnyResult.violations[0]?.path).toEqual(["libs/sample/domain/src/as-any.ts"])
+
+    // 2. : any
+    const colonAnySource = `
+      export const badVar: any = 42
+    `
+    const colonAnyGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/colon-any.ts",
+        content: colonAnySource,
+        packageTag: "domain"
+      }
+    ])
+    const colonAnyResult = checkEffectGraph(colonAnyGraph)
+    expect(colonAnyResult.ok).toBe(false)
+    expect(colonAnyResult.violations.some((v) => v.rule === "unsafe-type-cast")).toBe(true)
+    expect(colonAnyResult.violations[0]?.message).toContain("Explicit 'any' (as any, : any, <any>) is banned")
+
+    // 3. as never
+    const asNeverSource = `
+      export const castNever = (val: unknown) => val as never
+    `
+    const asNeverGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/as-never.ts",
+        content: asNeverSource,
+        packageTag: "domain"
+      }
+    ])
+    const asNeverResult = checkEffectGraph(asNeverGraph)
+    expect(asNeverResult.ok).toBe(false)
+    expect(asNeverResult.violations.some((v) => v.rule === "unsafe-type-cast")).toBe(true)
+    expect(asNeverResult.violations[0]?.message).toContain("Unsafe 'as never' cast is banned")
+
+    // 4. as unknown as (double type assertion)
+    const doubleCastSource = `
+      export const doubleCast = (val: string) => val as unknown as number
+    `
+    const doubleCastGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/double-cast.ts",
+        content: doubleCastSource,
+        packageTag: "domain"
+      }
+    ])
+    const doubleCastResult = checkEffectGraph(doubleCastGraph)
+    expect(doubleCastResult.ok).toBe(false)
+    expect(doubleCastResult.violations.some((v) => v.rule === "unsafe-type-cast")).toBe(true)
+    expect(doubleCastResult.violations[0]?.message).toContain("Double type assertion ('as unknown as T') is banned")
+
+    // 5. (x: never) => x parameter
+    const neverParamSource = `
+      export const neverParam = (x: never) => x
+    `
+    const neverParamGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/never-param.ts",
+        content: neverParamSource,
+        packageTag: "domain"
+      }
+    ])
+    const neverParamResult = checkEffectGraph(neverParamGraph)
+    expect(neverParamResult.ok).toBe(false)
+    expect(neverParamResult.violations.some((v) => v.rule === "unsafe-type-cast")).toBe(true)
+    expect(neverParamResult.violations[0]?.message).toContain("Explicit ': never' annotation on parameter or variable is banned")
+
+    // 6. Allowing Effect.Effect<number, never, never>
+    const safeNeverSource = `
+      import { Effect } from "effect"
+      export const safeEffect: Effect.Effect<number, never, never> = Effect.succeed(100)
+    `
+    const safeNeverGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/safe-never.ts",
+        content: safeNeverSource,
+        packageTag: "domain"
+      }
+    ])
+    const safeNeverResult = checkEffectGraph(safeNeverGraph)
+    expect(safeNeverResult.violations.filter((v) => v.rule === "unsafe-type-cast")).toHaveLength(0)
+  })
 })
+
 

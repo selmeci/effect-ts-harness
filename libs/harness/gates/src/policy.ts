@@ -301,6 +301,21 @@ export const isCdCommand = (trimmed: string): boolean => {
   return /(?:^|[;&|]\s*)cd(?:\s+|$)/.test(view.argv)
 }
 
+export const INTERACTIVE_NX_BANNED_REASON =
+  "Running 'nx show' without 'CI=true' can hang on interactive prompts; prefix with 'CI=true' or use harness MCP tools."
+
+export const isInteractiveNxCommand = (command: string): boolean => {
+  const trimmed = command.trim()
+  const match = trimmed.match(/^(?:(?:[A-Za-z_][\w]*=\S*\s+)*)(?:pnpm\s+)?nx\s+show\b/)
+  if (!match) {
+    return false
+  }
+  const leading = match[0]
+  const hasCi = /\bCI=(?:true|1)\b/.test(leading)
+  const hasNxInteractiveFalse = /\bNX_INTERACTIVE=false\b/.test(leading)
+  return !hasCi && !hasNxInteractiveFalse
+}
+
 /** Rule order is load-bearing (harness:ADR-0003): deny → ask → escalate → allow.
  * Every rule that removes the automatic `allow` must run before the prefix allowlist. */
 export const classifyCommand = (command: string): GuardVerdict => {
@@ -309,6 +324,9 @@ export const classifyCommand = (command: string): GuardVerdict => {
     return "escalate"
   }
   if (isCdCommand(trimmed)) {
+    return "deny"
+  }
+  if (isInteractiveNxCommand(trimmed)) {
     return "deny"
   }
   const view = toCommandView(command)

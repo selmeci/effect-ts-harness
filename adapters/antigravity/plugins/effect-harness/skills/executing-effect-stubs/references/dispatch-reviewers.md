@@ -10,10 +10,14 @@ The controller inspects the files, package boundaries (Nx tags), and Effect capa
 
 | Touched Files / Nx Tags / Capabilities | Specialist Agent | Persona Reference | Primary Hunting Ground |
 |---|---|---|---|
-| **Always (Every Task)**<br>Any `*.test.ts`, `*.spec.ts`, `type:domain`, or EARS acceptance criteria | `effect-ears-test-reviewer` | `references/personas/ears-test-reviewer.md` | EARS clause test assertions (`WHEN`, `IF/THEN`, `WHILE`), mock over-specification, vacuous tests (`toBeDefined`), `runWithTestTracer`, and `checkSpanBudgets` (N+1 query protection). |
+| **Always (Every Task) & Mandatory for Core/Domain/Event Sourcing**<br>Any `*.test.ts`, `*.spec.ts`, `type:domain`, `type:core`, deciders, or EARS acceptance criteria | `effect-ears-test-reviewer` | `references/personas/ears-test-reviewer.md` | 7-Point Anti-Rubber-Stamp Deep Audit, EARS clause test assertions (`WHEN`, `IF/THEN`, `WHILE`), mock over-specification, vacuous tests (`toBeDefined`), `runWithTestTracer`, folded state properties, contract brand reuse, and `checkSpanBudgets` (N+1 query protection). |
+| **Mandatory for Core/Domain/Event Sourcing & Stateful Flows**<br>`type:core`, `type:domain`, deciders, event streams, Outbox, Projections, Process Managers, `stub<A, E, R>()` skeletons | `effect-adversarial-reviewer` | `references/personas/adversarial-reviewer.md` | Cross-entity command/event injection, property test generator weakening, protocol tracing enforcement (`Decider.make`), inter-step crash windows (commit vs. publish), duplicate message replay / idempotency deduplication, optimistic concurrency races, schema evolution, and omitted error types in `E`. |
 | **Contracts, APIs, Auth, Secrets**<br>`type:contract`, `HttpApi*`, `Rpc*`, `Config.*`, auth context, sessions | `effect-security-reviewer` | `references/personas/security-reviewer.md` | Multi-tenant IDOR / authorization in use cases, secret leakage via `Redacted.value(...)`, unbounded schemas (`Schema.Finite`, string/array length limits), and indirect injection in `type:infra`. |
 | **Infra, Storage, Retries, Resources**<br>`type:infra`, DO SQLite, D1, Queues, `Schedule.*`, `Scope`, `HttpClient` | `effect-reliability-reviewer` | `references/personas/reliability-reviewer.md` | DO SQLite synchronous transaction discipline (`MixedScheduler("sync")`), pre-transaction schema decoding, commit-order `Ref` mutation, retry storms, missing timeouts, and `Scope` leaks. |
-| **Stateful Flows, Event Sourcing, Skeletons**<br>Event streams, Outbox, Projections, Process Managers, `stub<A, E, R>()` skeletons | `effect-adversarial-reviewer` | `references/personas/adversarial-reviewer.md` | Inter-step crash windows (commit vs. publish), duplicate message replay / idempotency deduplication, optimistic concurrency races, schema evolution, and omitted error types in `E`. |
+
+> [!IMPORTANT]
+> **Mandatory Dual-Review for Core / Domain / Event Sourcing:** For any task touching `type:core`, `type:domain`, deciders, or event sourcing, dispatching **BOTH** `effect-ears-test-reviewer` AND `effect-adversarial-reviewer` is strictly mandatory.
+> **Neutral & Adversarial Prompting:** Prompts to reviewers MUST be neutral and adversarial ("Assume there are at least 3 P0/P1 bugs hiding across the spec, ADR, contract, fixtures, and tests; find them using the 7-Point Anti-Rubber-Stamp Audit") — never spoon-feed confirmation-biased prompts.
 
 ---
 
@@ -23,10 +27,10 @@ Specialist reviewers run concurrently as read-only subagents. They never mutate 
 
 ### In Antigravity (`invoke_subagent`)
 
-When invoking defined specialist agents or generic research agents, use `Workspace: "share"` so workspace isolation is preserved without copying overhead:
+When invoking defined specialist agents or generic research agents, use `Workspace: "share"` so workspace isolation is preserved without copying overhead. Prompts must be neutral and adversarial:
 
 ```ts
-// Dispatching via defined specialist agent:
+// Dispatching via defined specialist agents (mandatory dual-review for core/domain):
 invoke_subagent({
   Subagents: [
     {
@@ -34,19 +38,20 @@ invoke_subagent({
       Role: "EARS & Test Fidelity Reviewer",
       Model: "flash",
       Workspace: "share",
-      Prompt: `Review touched test and domain files for EARS clause coverage and test fidelity:
+      Prompt: `Assume there are at least 3 P0/P1 bugs hiding across the spec, ADR, contract, fixtures, and tests; find them using the 7-Point Anti-Rubber-Stamp Audit. Do not assume any code or test is correct:
 - Target Files: libs/sample/domain/src/sample.ts, libs/sample/domain/test/sample.test.ts
-- EARS Requirements: doc/plans/feature-plan.md
+- EARS Requirements & ADRs: libs/sample/docs/specs/SPEC-0001.md, libs/sample/docs/adr/0001.md
+- Execute the 7-Point Anti-Rubber-Stamp Deep Audit.
 - Adhere strictly to the Quote-the-Line Gate and False-Positive Suppression List.`
     },
     {
-      TypeName: "effect-security-reviewer",
-      Role: "Security & Trust-Boundary Reviewer",
+      TypeName: "effect-adversarial-reviewer",
+      Role: "Adversarial Chaos Reviewer",
       Model: "flash",
       Workspace: "share",
-      Prompt: `Audit touched contract and domain files for authorization (IDOR), secret unwrapping, and schema bounds:
-- Target Files: libs/sample/contract/src/index.ts, libs/sample/domain/src/usecase.ts
-- Persona Guide: adapters/antigravity/plugins/effect-harness/skills/executing-effect-stubs/references/personas/security-reviewer.md
+      Prompt: `Assume there are at least 3 P0/P1 bugs hiding across the spec, ADR, contract, fixtures, and tests; find them using adversarial falsification. Do not assume any code or test is correct:
+- Target Files: libs/sample/domain/src/sample.ts, libs/sample/domain/test/sample.test.ts
+- Hunt for: Cross-entity command/event injection, property test generator weakening, protocol tracing enforcement in Decider.make, inter-step crashes, idempotency bypass, and optimistic concurrency races.
 - Adhere strictly to the Quote-the-Line Gate and False-Positive Suppression List.`
     }
   ]

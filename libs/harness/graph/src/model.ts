@@ -54,6 +54,7 @@ export interface PatternDocNode {
   readonly slug: string
   readonly path: string
   readonly summary: string
+  readonly patternName?: string | undefined
 }
 
 export type GovernanceDocStatus = "accepted" | "proposed" | "superseded" | "deprecated"
@@ -207,6 +208,28 @@ export interface BuildHarnessGraphInput {
   readonly branchingViolations?: ReadonlyArray<BranchingViolation> | undefined
 }
 
+export type ViolationRule =
+  | "domain-requires-infra"
+  | "domain-requires-cloud-binding"
+  | "layer-cycle"
+  | "impure-decider"
+  | "impure-reducer"
+  | "dead-event-payload"
+  | "terminal-state-unhandled"
+  | "unmapped-spec-symbol"
+  | "discriminant-branching"
+  | "non-exhaustive-union-match"
+  | "schema-boolean-state"
+  | "fallback-json-equality"
+  | "vacuous-error-assertion"
+  | "unscoped-effect-run"
+  | "unbranded-schema-field"
+  | "handwritten-tagged-union"
+  | "untraced-decider"
+  | "missing-aggregate-id-guard"
+  | "unasserted-state-field"
+  | "unsafe-type-cast"
+
 export interface BranchingViolation {
   readonly rule:
     | "discriminant-branching"
@@ -217,10 +240,17 @@ export interface BranchingViolation {
     | "fallback-json-equality"
     | "vacuous-error-assertion"
     | "unscoped-effect-run"
+    | "unbranded-schema-field"
+    | "handwritten-tagged-union"
+    | "untraced-decider"
+    | "missing-aggregate-id-guard"
+    | "unasserted-state-field"
+    | "unsafe-type-cast"
   readonly message: string
   readonly file: string
   readonly line: number
   readonly enclosingSymbol: string
+  readonly path?: ReadonlyArray<string> | undefined
 }
 
 export interface HarnessGraph {
