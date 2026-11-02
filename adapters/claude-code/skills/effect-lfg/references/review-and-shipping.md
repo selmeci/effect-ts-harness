@@ -8,17 +8,17 @@ This reference governs **Stage 4 (4-Lens Specialist Review & Autonomous Fix Loop
 
 Once package-isolated `flash` implementer subagents have replaced all `stub<A, E, R>()` calls and passed package-level verification (`CI=true pnpm nx run <project>:verify`):
 
-### Step 4.1 — Dispatch Parallel Specialist Review Lenses
-Select and invoke the read-only specialist review subagents (`Model: "flash"`, `Workspace: "share"`) matching the touched packages and capabilities:
+### Step 4.1 — Dispatch Parallel Specialist Review Lenses (Whole Git Diff)
+Select and invoke the read-only specialist review subagents (`Model: "flash"`, `Workspace: "share"`) across the **entire git diff (`git diff main...HEAD`)** — including any modified harness gates (`libs/harness/**`) and linter plugins (`tools/oxlint/**`), not just domain packages:
 
 1. **`effect-ears-test-reviewer` (Always):**
    Verifies 1:1 behavioral coverage between every EARS clause (`WHEN`, `IF/THEN`, `WHILE`, `WHERE`) in `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` and `@effect/vitest` assertions (`it.effect`, `it.effect.prop`, `Cause.findErrorOption`, `Equal.equals`, `checkSpanBudgets`).
-2. **`effect-security-reviewer` (When touching `type:contract`, `HttpApi`, `Rpc`, auth, SQL, or `Config`):**
-   Audits boundary `Schema` constraints, actor/tenant authorization (IDOR) in `type:domain`, parameterized SQL in `type:infra`, and `Config.redacted` secret handling.
+2. **`effect-security-reviewer` (When touching `type:contract`, `HttpApi`, `Rpc`, auth, SQL, `Config`, or `policy.ts`):**
+   Audits boundary `Schema` constraints, actor/tenant authorization (IDOR) in `type:domain`, parameterized SQL in `type:infra`, `Config.redacted` secret handling, and shell/file guard allowlist bypasses.
 3. **`effect-reliability-reviewer` (When touching `type:infra`, DO SQLite, D1, Queues, `Schedule`, or `Scope`):**
    Audits synchronous DO SQLite transaction discipline (`MixedScheduler("sync")`, zero async I/O inside `withTransaction`), bounded jittered `Schedule` retries, and `Scope` resource finalizers.
-4. **`effect-adversarial-reviewer` (When touching `*.decide` deciders, Event Sourcing, Outbox, Projections, or multi-step stateful flows):**
-   Constructs crash-between-steps sequences, duplicate command delivery, out-of-order replay, and boundary mutation cases.
+4. **`effect-adversarial-reviewer` (When touching `*.decide` deciders, Event Sourcing, Outbox, Projections, multi-step stateful flows, OR harness gate implementations in `libs/harness/**` and `tools/oxlint/**`):**
+   Constructs crash-between-steps sequences, duplicate command delivery, out-of-order replay, boundary mutation cases, and adversarial gate evasion vectors (shell wrapper/quoting/subshell bypasses, multi-aggregate / multi-schema scope bleed, and fail-open fallbacks).
 
 ### Step 4.2 — Central Adjudication & Twin Class-Fix Loop
 Follow the adjudication rubric from `resolving-effect-review-feedback`:

@@ -1093,26 +1093,46 @@ function isSkippedOrFocusedTestCall(node) {
   return false
 }
 
+function unwrapTSParenthesizedType(typeNode) {
+  let curr = typeNode
+  while (curr != null && curr.type === "TSParenthesizedType" && curr.typeAnnotation != null) {
+    curr = curr.typeAnnotation
+  }
+  return curr
+}
+
+function unwrapAssertionInnerExpression(expr) {
+  let curr = expr
+  while (
+    curr != null &&
+    (curr.type === "ParenthesizedExpression" || curr.type === "TSSatisfiesExpression") &&
+    curr.expression != null
+  ) {
+    curr = curr.expression
+  }
+  return curr
+}
+
 function checkAsOrTypeAssertion(context, node) {
-  if (node.typeAnnotation != null && node.typeAnnotation.type === "TSNeverKeyword") {
+  const targetType = unwrapTSParenthesizedType(node.typeAnnotation)
+  if (targetType != null && targetType.type === "TSNeverKeyword") {
     context.report({ node, message: unsafeNeverBanMessage })
   }
+  const innerExpr = unwrapAssertionInnerExpression(node.expression)
   if (
-    node.expression != null &&
-    (node.expression.type === "TSAsExpression" || node.expression.type === "TSTypeAssertion")
+    innerExpr != null &&
+    (innerExpr.type === "TSAsExpression" || innerExpr.type === "TSTypeAssertion")
   ) {
     context.report({ node, message: doubleTypeAssertionBanMessage })
   }
 }
 
 function checkNeverVariableDeclarator(context, node) {
-  if (
-    node.id != null &&
-    node.id.typeAnnotation != null &&
-    node.id.typeAnnotation.typeAnnotation != null &&
-    node.id.typeAnnotation.typeAnnotation.type === "TSNeverKeyword"
-  ) {
-    context.report({ node, message: unsafeNeverBanMessage })
+  if (node.id != null && node.id.typeAnnotation != null) {
+    const targetType = unwrapTSParenthesizedType(node.id.typeAnnotation.typeAnnotation)
+    if (targetType != null && targetType.type === "TSNeverKeyword") {
+      context.report({ node, message: unsafeNeverBanMessage })
+    }
   }
 }
 
@@ -1125,13 +1145,14 @@ function checkNeverParams(context, node) {
           ? param.typeAnnotation
           : param.type === "AssignmentPattern" && param.left != null
             ? param.left.typeAnnotation
-            : null
-      if (
-        typeAnnotation != null &&
-        typeAnnotation.typeAnnotation != null &&
-        typeAnnotation.typeAnnotation.type === "TSNeverKeyword"
-      ) {
-        context.report({ node: param, message: unsafeNeverBanMessage })
+            : param.type === "RestElement" && param.argument != null
+              ? param.argument.typeAnnotation
+              : null
+      if (typeAnnotation != null) {
+        const targetType = unwrapTSParenthesizedType(typeAnnotation.typeAnnotation)
+        if (targetType != null && targetType.type === "TSNeverKeyword") {
+          context.report({ node: param, message: unsafeNeverBanMessage })
+        }
       }
     }
   }
@@ -1999,8 +2020,9 @@ const testIntegrity = {
               const callbackText = getNodeSourceText(context, callbackArg)
               if (
                 (callbackText.includes("fold(") || /\bfold\s*\(/.test(callbackText)) &&
-                (/\.reduce\s*\(\s*[a-zA-Z0-9_$]*evolve/i.test(callbackText) ||
-                  /\.reduce\s*\([^)]*\bevolve/i.test(callbackText))
+                /\.reduce\s*\(\s*(?:(?:\([^)]*\)|[a-zA-Z0-9_$]+)\s*=>\s*)?[a-zA-Z0-9_$.]*\b(?:evolve|reduce)\w*/i.test(
+                  callbackText
+                )
               ) {
                 context.report({ node, message: tautologicalFoldPropMessage })
               }

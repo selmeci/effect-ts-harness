@@ -1252,6 +1252,62 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
     expect(violations.length).toBe(1)
     expect(violations[0]?.message).toContain("accepts command and state that both carry aggregate identifier 'cartId'")
 
+    const unionAndMultiAggregateSource = `
+      import { Effect, Schema } from "effect"
+
+      export const AddItem = Schema.TaggedStruct("AddItem", {
+        cartId: Schema.String,
+        itemId: Schema.String
+      })
+      export const Checkout = Schema.TaggedStruct("Checkout", {
+        cartId: Schema.String,
+        orderId: Schema.String
+      })
+      export const CartCommand = Schema.Union([AddItem, Checkout])
+      export type CartCommand = typeof CartCommand.Type
+
+      export const EmptyCart = Schema.TaggedStruct("EmptyCart", {})
+      export const ActiveCart = Schema.TaggedStruct("ActiveCart", {
+        cartId: Schema.String
+      })
+      export const CheckedOutCart = Schema.TaggedStruct("CheckedOutCart", {
+        cartId: Schema.String,
+        orderId: Schema.String
+      })
+      export const CartState = Schema.Union([EmptyCart, ActiveCart, CheckedOutCart])
+      export type CartState = typeof CartState.Type
+
+      // Unrelated Command and State schemas in the same file must NOT zero out the cartId intersection
+      export const CancelOrderCommand = Schema.TaggedStruct("CancelOrderCommand", {
+        orderId: Schema.String
+      })
+      export const CancelledOrderState = Schema.TaggedStruct("CancelledOrderState", {
+        orderId: Schema.String
+      })
+
+      export const decideCart = Effect.fn("Cart.decide")(function* (
+        command: CartCommand,
+        state: CartState
+      ) {
+        return [command]
+      })
+    `
+    const unionBadGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/cart.ts",
+        content: unionAndMultiAggregateSource,
+        packageTag: "domain"
+      }
+    ])
+    const unionBadResult = checkEffectGraph(unionBadGraph)
+    const unionViolations = unionBadResult.violations.filter(
+      (v) => v.rule === "missing-aggregate-id-guard"
+    )
+    expect(unionViolations.length).toBe(1)
+    expect(unionViolations[0]?.message).toContain(
+      "accepts command and state that both carry aggregate identifier 'cartId'"
+    )
+
     const guardedSource = `
       import { Effect, Equal, Schema } from "effect"
 
@@ -1649,5 +1705,99 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
     expect(
       goodResult.violations.filter((v) => v.rule === "unbranded-primitive-boundary")
     ).toEqual([])
+  })
+
+  it("hardens missing-aggregate-id-guard, dead-event-payload, terminal-state-unhandled, and unsafe-type-cast against adversarial evasions", () => {
+    const evasionSource = `
+      import { Effect, Schema } from "effect"
+      import { match } from "ts-pattern"
+
+      const CartId = Schema.NonEmptyString.pipe(Schema.brand("CartId"))
+      const ItemCount = Schema.Natural.pipe(Schema.brand("ItemCount"))
+
+      export const AddItem = Schema.TaggedStruct("AddItem", {
+        cartId: CartId,
+        quantity: ItemCount
+      })
+      export const CartCommand = Schema.Union([AddItem])
+      export type CartCommand = typeof CartCommand.Type
+
+      export const ItemAdded = Schema.TaggedStruct("ItemAdded", {
+        cartId: CartId,
+        quantity: ItemCount
+      })
+      export const CartEvent = Schema.Union([ItemAdded])
+      export type CartEvent = typeof CartEvent.Type
+
+      // EmptyCart has a non-_tag property (itemCount) without cartId, while ActiveCart has cartId
+      export const EmptyCart = Schema.TaggedStruct("EmptyCart", {
+        itemCount: ItemCount
+      })
+      export const ActiveCart = Schema.TaggedStruct("ActiveCart", {
+        cartId: CartId,
+        itemCount: ItemCount
+      })
+      export const CheckedOut = Schema.TaggedStruct("CheckedOut", {
+        cartId: CartId,
+        itemCount: ItemCount
+      })
+      export const CartState = Schema.Union([EmptyCart, ActiveCart, CheckedOut])
+      export type CartState = typeof CartState.Type
+
+      export const decideEvasion = Effect.fn("Cart.decide")(function* (
+        command: CartCommand,
+        state: CartState
+      ) {
+        // Evasion 1: comment pretending to compare IDs: state.cartId === command.cartId
+        // Evasion 2: self-comparison:
+        if (command.cartId === command.cartId) {
+          return yield* Effect.succeed([])
+        }
+        return yield* Effect.succeed([])
+      })
+
+      export const evolveWithUnusedKeyCollision = (state: CartState, event: CartEvent): CartState =>
+        match(state)
+          .with({ _tag: "CheckedOut" }, (s) => s)
+          .with({ _tag: "EmptyCart" }, { _tag: "ActiveCart" }, () =>
+            match(event)
+              // Evasion 3: object literal key 'quantity' without reading event.quantity
+              .with({ _tag: "ItemAdded" }, () => ({
+                _tag: "ActiveCart" as const,
+                cartId: event.cartId,
+                itemCount: ItemCount.make(0),
+                quantity: 0
+              }))
+              .exhaustive()
+          )
+          .exhaustive()
+
+      export const doubleSatisfiesCast = (x: unknown): string =>
+        (x as unknown satisfies unknown) as string
+
+      export const parenNeverCast = (x: string) => x as (never)
+    `
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/es/core/test/fixtures/evasion.ts",
+        content: evasionSource,
+        packageTag: "domain"
+      }
+    ])
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(false)
+    // 1. Self-comparison + comment + EmptyCart with non-_tag field must still trigger missing-aggregate-id-guard
+    expect(result.violations.some((v) => v.rule === "missing-aggregate-id-guard")).toBe(true)
+    // 2. Object literal key 'quantity: 0' must NOT mask unused event.quantity
+    expect(
+      result.violations.some(
+        (v) => v.rule === "dead-event-payload" && v.message.includes("property 'quantity'")
+      )
+    ).toBe(true)
+    // 3. Inner match(event) inside outer match(state) must NOT trigger terminal-state-unhandled false positive
+    expect(result.violations.some((v) => v.rule === "terminal-state-unhandled")).toBe(false)
+    // 4. Satisfies double cast and parenthesized never cast must trigger unsafe-type-cast
+    const castViolations = result.violations.filter((v) => v.rule === "unsafe-type-cast")
+    expect(castViolations.length).toBeGreaterThanOrEqual(2)
   })
 })

@@ -105,12 +105,19 @@ export const discoverDomainMutants = (
       continue
     }
 
+    const commentIdx = line.indexOf("//")
+    const codePart = commentIdx >= 0 ? line.slice(0, commentIdx) : line
+    const commentPart = commentIdx >= 0 ? line.slice(commentIdx) : ""
+    if (codePart.trim() === "") {
+      continue
+    }
+
     const lineNo = i + 1
 
     for (const pattern of MUTATION_PATTERNS) {
-      if (line.includes(pattern.original)) {
+      if (codePart.includes(pattern.original)) {
         const mutatedLines = [...lines]
-        mutatedLines[i] = line.replace(pattern.original, pattern.replacement)
+        mutatedLines[i] = codePart.replace(pattern.original, pattern.replacement) + commentPart
         const mutatedSource = mutatedLines.join(newline)
 
         mutants.push({
@@ -126,14 +133,14 @@ export const discoverDomainMutants = (
     }
 
     // Regex-based line mutations
-    const binaryAddMatch = line.match(
+    const binaryAddMatch = codePart.match(
       /\b([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\s*\+\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\b/
     )
     if (binaryAddMatch && binaryAddMatch[1] && binaryAddMatch[2]) {
       const orig = binaryAddMatch[0]
       const repl = `${binaryAddMatch[1]} - ${binaryAddMatch[2]}`
       const mutatedLines = [...lines]
-      mutatedLines[i] = line.replace(orig, repl)
+      mutatedLines[i] = codePart.replace(orig, repl) + commentPart
       mutants.push({
         id: `${filePath}:${lineNo}:${orig}->${repl}`,
         file: filePath,
@@ -145,14 +152,14 @@ export const discoverDomainMutants = (
       })
     }
 
-    const spreadAppendMatch = line.match(
+    const spreadAppendMatch = codePart.match(
       /\[\s*\.\.\.([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\s*,\s*\{[^[\]]+\}\s*\]/
     )
     if (spreadAppendMatch && spreadAppendMatch[1]) {
       const orig = spreadAppendMatch[0]
       const repl = spreadAppendMatch[1]
       const mutatedLines = [...lines]
-      mutatedLines[i] = line.replace(orig, repl)
+      mutatedLines[i] = codePart.replace(orig, repl) + commentPart
       mutants.push({
         id: `${filePath}:${lineNo}:${orig}->${repl}`,
         file: filePath,
@@ -164,14 +171,14 @@ export const discoverDomainMutants = (
       })
     }
 
-    const counterCopyMatch = line.match(
+    const counterCopyMatch = codePart.match(
       /\b(totalItems|totalCount|itemCount)\s*:\s*([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\b/
     )
     if (counterCopyMatch && counterCopyMatch[1]) {
       const orig = counterCopyMatch[0]
       const repl = `${counterCopyMatch[1]}: 0`
       const mutatedLines = [...lines]
-      mutatedLines[i] = line.replace(orig, repl)
+      mutatedLines[i] = codePart.replace(orig, repl) + commentPart
       mutants.push({
         id: `${filePath}:${lineNo}:${orig}->${repl}`,
         file: filePath,
