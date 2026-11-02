@@ -33,6 +33,8 @@ export interface GraphPolicyViolation {
     | "missing-aggregate-id-guard"
     | "unasserted-state-field"
     | "unsafe-type-cast"
+    | "unbranded-contract-schema"
+    | "unbranded-primitive-boundary"
   readonly message: string
   readonly path: ReadonlyArray<string>
 }

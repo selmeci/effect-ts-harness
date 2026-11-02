@@ -2,7 +2,14 @@ import { describe, it, expect } from "vitest"
 import { Effect, Layer } from "effect"
 import { HttpClient, HttpClientResponse } from "effect/http"
 import { AtomHttpApi, AtomRegistry } from "effect/reactivity"
-import { SampleApi, type Photo } from "@harness/sample-contract"
+import {
+  AlbumId,
+  CreatedAtMillis,
+  type Photo,
+  PhotoId,
+  PhotoName,
+  SampleApi
+} from "@harness/sample-contract"
 import {
   SampleApiClient,
   listPhotosAtom,
@@ -18,8 +25,18 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(__dirname, "../../..")
 
 const testPhotos: readonly Photo[] = [
-  { id: 1, name: "photo1.jpg", albumId: "vacation", createdAt: 1000 },
-  { id: 2, name: "photo2.jpg", albumId: "vacation", createdAt: 2000 }
+  {
+    id: PhotoId.make(1),
+    name: PhotoName.make("photo1.jpg"),
+    albumId: AlbumId.make("vacation"),
+    createdAt: CreatedAtMillis.make(1000)
+  },
+  {
+    id: PhotoId.make(2),
+    name: PhotoName.make("photo2.jpg"),
+    albumId: AlbumId.make("vacation"),
+    createdAt: CreatedAtMillis.make(2000)
+  }
 ]
 
 const getExecErrorOutput = (err: unknown): string => {
@@ -35,7 +52,7 @@ describe("SampleApiClient and AtomHttpApi", () => {
     expect(SampleApiClient).toBeDefined()
     expect(listPhotosAtom).toBeDefined()
     expect(getPhotoByIdAtom).toBeDefined()
-    const photo1Atom = getPhotoByIdAtom(1)
+    const photo1Atom = getPhotoByIdAtom(PhotoId.make(1))
     expect(photo1Atom).toBeDefined()
     expect(createPhotoMutation).toBeDefined()
   })
@@ -57,10 +74,10 @@ describe("SampleApiClient and AtomHttpApi", () => {
             }
             if (request.method === "POST" && url.pathname === "/photos") {
               const newPhoto: Photo = {
-                id: 3,
-                name: "new.jpg",
-                albumId: "vacation",
-                createdAt: 3000
+                id: PhotoId.make(3),
+                name: PhotoName.make("new.jpg"),
+                albumId: AlbumId.make("vacation"),
+                createdAt: CreatedAtMillis.make(3000)
               }
               return HttpClientResponse.fromWeb(request, Response.json(newPhoto))
             }
@@ -71,7 +88,9 @@ describe("SampleApiClient and AtomHttpApi", () => {
     }) {}
 
     const queryAtom = MockSampleApiClient.query("photos", "listPhotos", {})
-    const getAtom = MockSampleApiClient.query("photos", "getPhoto", { params: { id: 1 } })
+    const getAtom = MockSampleApiClient.query("photos", "getPhoto", {
+      params: { id: PhotoId.make(1) }
+    })
     const mutation = MockSampleApiClient.mutation("photos", "createPhoto")
 
     const registry = AtomRegistry.make()
@@ -86,11 +105,21 @@ describe("SampleApiClient and AtomHttpApi", () => {
       )
       expect(single).toEqual(testPhotos[0])
 
-      registry.set(mutation, { payload: { name: "new.jpg", albumId: "vacation" } })
+      registry.set(mutation, {
+        payload: {
+          name: PhotoName.make("new.jpg"),
+          albumId: AlbumId.make("vacation")
+        }
+      })
       const created = await Effect.runPromise(
         AtomRegistry.getResult(registry, mutation, { suspendOnWaiting: true })
       )
-      expect(created).toEqual({ id: 3, name: "new.jpg", albumId: "vacation", createdAt: 3000 })
+      expect(created).toEqual({
+        id: 3,
+        name: "new.jpg",
+        albumId: "vacation",
+        createdAt: 3000
+      })
     } finally {
       registry.dispose()
     }

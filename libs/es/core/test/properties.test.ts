@@ -5,13 +5,22 @@ import {
   AddItem,
   CartCommand,
   CartEvent,
+  CartId,
   type CartState,
   decideCart,
   evolveCart,
   initialCartState,
   ItemAdded,
+  ItemCount,
+  ItemId,
+  OrderId,
   positiveInt
 } from "./fixtures/cart.js"
+
+const cid = (v: string) => CartId.make(v)
+const iid = (v: string) => ItemId.make(v)
+const oid = (v: string) => OrderId.make(v)
+const icount = (v: number) => ItemCount.make(v)
 
 describe("Cart Reducer Property-Based Tests", () => {
   it.prop(
@@ -49,22 +58,22 @@ describe("Cart Reducer Property-Based Tests", () => {
     },
     ({ subsequentEvents }) => {
       const checkedOutState = [
-        { _tag: "CartCreated" as const, cartId: "c-1", version: 1 as const },
+        { _tag: "CartCreated" as const, cartId: cid("c-1"), version: 1 as const },
         {
           _tag: "ItemAdded" as const,
-          cartId: "c-1",
-          itemId: "i-1",
+          cartId: cid("c-1"),
+          itemId: iid("i-1"),
           quantity: positiveInt(4),
           version: 1 as const
         },
-        { _tag: "CartCheckedOut" as const, cartId: "c-1", orderId: "o-1", version: 1 as const }
+        { _tag: "CartCheckedOut" as const, cartId: cid("c-1"), orderId: oid("o-1"), version: 1 as const }
       ].reduce(evolveCart, initialCartState)
       const finalState = subsequentEvents.reduce(evolveCart, checkedOutState)
       match(finalState)
         .with({ _tag: "CheckedOutCart" }, (s) => {
-          expect(s.cartId).toBe("c-1")
-          expect(s.orderId).toBe("o-1")
-          expect(s.totalItems).toBe(4)
+          expect(s.cartId).toBe(cid("c-1"))
+          expect(s.orderId).toBe(oid("o-1"))
+          expect(s.totalItems).toBe(icount(4))
         })
         .with({ _tag: "ActiveCart" }, () => {
           expect.unreachable("Expected CheckedOutCart")
@@ -82,7 +91,7 @@ describe("Cart Reducer Property-Based Tests", () => {
       additions: Schema.Array(ItemAdded)
     },
     ({ additions }) => {
-      const cartId = "cart-prop"
+      const cartId = cid("cart-prop")
       const normalizedAdditions = additions.map((ev) => ({
         ...ev,
         cartId
@@ -91,7 +100,7 @@ describe("Cart Reducer Property-Based Tests", () => {
         _tag: "ActiveCart",
         cartId,
         items: [],
-        itemCount: 0
+        itemCount: icount(0)
       }
       const finalState = normalizedAdditions.reduce(evolveCart, initialState)
       const expectedTotal = normalizedAdditions.reduce((acc, ev) => acc + ev.quantity, 0)
@@ -99,7 +108,7 @@ describe("Cart Reducer Property-Based Tests", () => {
       match(finalState)
         .with({ _tag: "ActiveCart" }, (s) => {
           expect(s.items.length).toBe(additions.length)
-          expect(s.itemCount).toBe(expectedTotal)
+          expect(s.itemCount).toBe(icount(expectedTotal))
           expect(
             Equal.equals(
               s.items,
@@ -130,7 +139,7 @@ describe("Cart Decider Property-Based Tests", () => {
           _tag: "ActiveCart",
           cartId: command.cartId,
           items: [],
-          itemCount: 0
+          itemCount: icount(0)
         }
         const events = yield* decideCart(command, activeState)
         expect(events.length).toBe(1)
@@ -164,8 +173,8 @@ describe("Cart Decider Property-Based Tests", () => {
         const checkedOutState: CartState = {
           _tag: "CheckedOutCart",
           cartId: command.cartId,
-          orderId: "o-1",
-          totalItems: 5
+          orderId: oid("o-1"),
+          totalItems: icount(5)
         }
         const exit = yield* Effect.exit(decideCart(command, checkedOutState))
         match(exit)
@@ -204,12 +213,12 @@ describe("Cart Decider Property-Based Tests", () => {
     },
     ({ command }) =>
       Effect.gen(function* () {
-        const stateCartId = `${command.cartId}-other-aggregate`
+        const stateCartId = cid(`${command.cartId}-other-aggregate`)
         const activeState: CartState = {
           _tag: "ActiveCart",
           cartId: stateCartId,
           items: [],
-          itemCount: 0
+          itemCount: icount(0)
         }
         const activeExit = yield* Effect.exit(decideCart(command, activeState))
         match(activeExit)
@@ -243,8 +252,8 @@ describe("Cart Decider Property-Based Tests", () => {
         const checkedOutState: CartState = {
           _tag: "CheckedOutCart",
           cartId: stateCartId,
-          orderId: "order-prop",
-          totalItems: 3
+          orderId: oid("order-prop"),
+          totalItems: icount(3)
         }
         const checkedOutExit = yield* Effect.exit(decideCart(command, checkedOutState))
         match(checkedOutExit)

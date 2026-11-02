@@ -7,6 +7,7 @@ import {
   CartAlreadyCheckedOutError,
   CartCheckedOut,
   cartDecider,
+  CartId,
   CartIdMismatchError,
   CartState,
   CheckedOutCart,
@@ -15,9 +16,17 @@ import {
   INITIAL_EVENT_VERSION,
   initialCartState,
   type ItemAdded,
+  ItemCount,
+  ItemId,
+  OrderId,
   positiveInt,
   streamVersion
 } from "./fixtures/cart.js"
+
+const cid = (v: string) => CartId.make(v)
+const iid = (v: string) => ItemId.make(v)
+const oid = (v: string) => OrderId.make(v)
+const icount = (v: number) => ItemCount.make(v)
 
 describe("Cart Decider BDD Scenarios", () => {
   const scenario = makeDeciderTestHarness(cartDecider)
@@ -31,17 +40,17 @@ describe("Cart Decider BDD Scenarios", () => {
   it("decodes CartState, ActiveCart, and CheckedOutCart with Schema.Natural counts and rejects negative counts", () => {
     const active = Schema.decodeSync(ActiveCart)({
       _tag: "ActiveCart",
-      cartId: "cart-1",
-      items: [{ itemId: "item-1", quantity: positiveInt(2) }],
-      itemCount: 2
+      cartId: cid("cart-1"),
+      items: [{ itemId: iid("item-1"), quantity: positiveInt(2) }],
+      itemCount: icount(2)
     })
     expect(active.itemCount).toBe(2)
 
     const checkedOut = Schema.decodeSync(CheckedOutCart)({
       _tag: "CheckedOutCart",
-      cartId: "cart-1",
-      orderId: "order-1",
-      totalItems: 2
+      cartId: cid("cart-1"),
+      orderId: oid("order-1"),
+      totalItems: icount(2)
     })
     expect(checkedOut.totalItems).toBe(2)
 
@@ -63,51 +72,51 @@ describe("Cart Decider BDD Scenarios", () => {
   it.effect("emits CartCreated and ItemAdded when adding item to an empty cart", () =>
     scenario
       .given([])
-      .when({ _tag: "AddItem", cartId: "cart-1", itemId: "item-1", quantity: positiveInt(2) })
+      .when({ _tag: "AddItem", cartId: cid("cart-1"), itemId: iid("item-1"), quantity: positiveInt(2) })
       .thenEvents([
-        { _tag: "CartCreated", cartId: "cart-1", version: 1 },
-        { _tag: "ItemAdded", cartId: "cart-1", itemId: "item-1", quantity: positiveInt(2), version: 1 }
+        { _tag: "CartCreated", cartId: cid("cart-1"), version: 1 },
+        { _tag: "ItemAdded", cartId: cid("cart-1"), itemId: iid("item-1"), quantity: positiveInt(2), version: 1 }
       ])
   )
 
   it.effect("emits ItemAdded when adding item to an active cart", () =>
     scenario
       .given([
-        { _tag: "CartCreated", cartId: "cart-1", version: 1 },
-        { _tag: "ItemAdded", cartId: "cart-1", itemId: "item-1", quantity: positiveInt(1), version: 1 }
+        { _tag: "CartCreated", cartId: cid("cart-1"), version: 1 },
+        { _tag: "ItemAdded", cartId: cid("cart-1"), itemId: iid("item-1"), quantity: positiveInt(1), version: 1 }
       ])
-      .when({ _tag: "AddItem", cartId: "cart-1", itemId: "item-2", quantity: positiveInt(3) })
+      .when({ _tag: "AddItem", cartId: cid("cart-1"), itemId: iid("item-2"), quantity: positiveInt(3) })
       .thenEvents([
-        { _tag: "ItemAdded", cartId: "cart-1", itemId: "item-2", quantity: positiveInt(3), version: 1 }
+        { _tag: "ItemAdded", cartId: cid("cart-1"), itemId: iid("item-2"), quantity: positiveInt(3), version: 1 }
       ])
   )
 
   it.effect("emits CartCheckedOut when checking out an active cart", () =>
     scenario
       .given([
-        { _tag: "CartCreated", cartId: "cart-1", version: 1 },
-        { _tag: "ItemAdded", cartId: "cart-1", itemId: "item-1", quantity: positiveInt(1), version: 1 }
+        { _tag: "CartCreated", cartId: cid("cart-1"), version: 1 },
+        { _tag: "ItemAdded", cartId: cid("cart-1"), itemId: iid("item-1"), quantity: positiveInt(1), version: 1 }
       ])
-      .when({ _tag: "Checkout", cartId: "cart-1", orderId: "order-99" })
+      .when({ _tag: "Checkout", cartId: cid("cart-1"), orderId: oid("order-99") })
       .thenEvents([
-        { _tag: "CartCheckedOut", cartId: "cart-1", orderId: "order-99", version: 1 }
+        { _tag: "CartCheckedOut", cartId: cid("cart-1"), orderId: oid("order-99"), version: 1 }
       ])
   )
 
   it.effect("fails with EmptyCartCheckoutError when checking out an empty cart", () =>
     scenario
       .given([])
-      .when({ _tag: "Checkout", cartId: "cart-1", orderId: "order-99" })
-      .thenFails(new EmptyCartCheckoutError({ cartId: "cart-1" }))
+      .when({ _tag: "Checkout", cartId: cid("cart-1"), orderId: oid("order-99") })
+      .thenFails(new EmptyCartCheckoutError({ cartId: cid("cart-1") }))
   )
 
   it.effect(
     "fails with EmptyCartCheckoutError when checking out an active cart with zero items (after lone CartCreated)",
     () =>
       scenario
-        .given([{ _tag: "CartCreated", cartId: "cart-1", version: 1 }])
-        .when({ _tag: "Checkout", cartId: "cart-1", orderId: "order-99" })
-        .thenFails(new EmptyCartCheckoutError({ cartId: "cart-1" }))
+        .given([{ _tag: "CartCreated", cartId: cid("cart-1"), version: 1 }])
+        .when({ _tag: "Checkout", cartId: cid("cart-1"), orderId: oid("order-99") })
+        .thenFails(new EmptyCartCheckoutError({ cartId: cid("cart-1") }))
   )
 
   it.effect(
@@ -115,11 +124,11 @@ describe("Cart Decider BDD Scenarios", () => {
     () =>
       scenario
         .given([
-          { _tag: "CartCreated", cartId: "cart-1", version: 1 },
-          { _tag: "ItemAdded", cartId: "cart-1", itemId: "item-1", quantity: positiveInt(1), version: 1 }
+          { _tag: "CartCreated", cartId: cid("cart-1"), version: 1 },
+          { _tag: "ItemAdded", cartId: cid("cart-1"), itemId: iid("item-1"), quantity: positiveInt(1), version: 1 }
         ])
-        .when({ _tag: "AddItem", cartId: "cart-2", itemId: "item-2", quantity: positiveInt(1) })
-        .thenFails(new CartIdMismatchError({ expectedCartId: "cart-1", actualCartId: "cart-2" }))
+        .when({ _tag: "AddItem", cartId: cid("cart-2"), itemId: iid("item-2"), quantity: positiveInt(1) })
+        .thenFails(new CartIdMismatchError({ expectedCartId: cid("cart-1"), actualCartId: cid("cart-2") }))
   )
 
   it.effect(
@@ -127,50 +136,50 @@ describe("Cart Decider BDD Scenarios", () => {
     () =>
       scenario
         .given([
-          { _tag: "CartCreated", cartId: "cart-1", version: 1 },
-          { _tag: "ItemAdded", cartId: "cart-1", itemId: "item-1", quantity: positiveInt(1), version: 1 },
-          { _tag: "CartCheckedOut", cartId: "cart-1", orderId: "order-99", version: 1 }
+          { _tag: "CartCreated", cartId: cid("cart-1"), version: 1 },
+          { _tag: "ItemAdded", cartId: cid("cart-1"), itemId: iid("item-1"), quantity: positiveInt(1), version: 1 },
+          { _tag: "CartCheckedOut", cartId: cid("cart-1"), orderId: oid("order-99"), version: 1 }
         ])
-        .when({ _tag: "Checkout", cartId: "cart-2", orderId: "order-100" })
-        .thenFails(new CartIdMismatchError({ expectedCartId: "cart-1", actualCartId: "cart-2" }))
+        .when({ _tag: "Checkout", cartId: cid("cart-2"), orderId: oid("order-100") })
+        .thenFails(new CartIdMismatchError({ expectedCartId: cid("cart-1"), actualCartId: cid("cart-2") }))
   )
 
   it.effect("fails with CartAlreadyCheckedOutError when adding item to a checked out cart", () =>
     scenario
       .given([
-        { _tag: "CartCreated", cartId: "cart-1", version: 1 },
-        { _tag: "ItemAdded", cartId: "cart-1", itemId: "item-1", quantity: positiveInt(1), version: 1 },
-        { _tag: "CartCheckedOut", cartId: "cart-1", orderId: "order-99", version: 1 }
+        { _tag: "CartCreated", cartId: cid("cart-1"), version: 1 },
+        { _tag: "ItemAdded", cartId: cid("cart-1"), itemId: iid("item-1"), quantity: positiveInt(1), version: 1 },
+        { _tag: "CartCheckedOut", cartId: cid("cart-1"), orderId: oid("order-99"), version: 1 }
       ])
-      .when({ _tag: "AddItem", cartId: "cart-1", itemId: "item-2", quantity: positiveInt(1) })
-      .thenFails(new CartAlreadyCheckedOutError({ cartId: "cart-1" }))
+      .when({ _tag: "AddItem", cartId: cid("cart-1"), itemId: iid("item-2"), quantity: positiveInt(1) })
+      .thenFails(new CartAlreadyCheckedOutError({ cartId: cid("cart-1") }))
   )
 
   it.effect("fails with CartAlreadyCheckedOutError when checking out a checked out cart", () =>
     scenario
       .given([
-        { _tag: "CartCreated", cartId: "cart-1", version: 1 },
-        { _tag: "ItemAdded", cartId: "cart-1", itemId: "item-1", quantity: positiveInt(1), version: 1 },
-        { _tag: "CartCheckedOut", cartId: "cart-1", orderId: "order-99", version: 1 }
+        { _tag: "CartCreated", cartId: cid("cart-1"), version: 1 },
+        { _tag: "ItemAdded", cartId: cid("cart-1"), itemId: iid("item-1"), quantity: positiveInt(1), version: 1 },
+        { _tag: "CartCheckedOut", cartId: cid("cart-1"), orderId: oid("order-99"), version: 1 }
       ])
-      .when({ _tag: "Checkout", cartId: "cart-1", orderId: "order-100" })
-      .thenFails(new CartAlreadyCheckedOutError({ cartId: "cart-1" }))
+      .when({ _tag: "Checkout", cartId: cid("cart-1"), orderId: oid("order-100") })
+      .thenFails(new CartAlreadyCheckedOutError({ cartId: cid("cart-1") }))
   )
 
   it("folds CartCreated, two ItemAdded events, and CartCheckedOut into accurate items, itemCount, and totalItems", () => {
     const s0 = initialCartState
-    const s1 = evolveCart(s0, { _tag: "CartCreated", cartId: "cart-1", version: 1 })
+    const s1 = evolveCart(s0, { _tag: "CartCreated", cartId: cid("cart-1"), version: 1 })
     const ev1: ItemAdded = {
       _tag: "ItemAdded",
-      cartId: "cart-1",
-      itemId: "item-1",
+      cartId: cid("cart-1"),
+      itemId: iid("item-1"),
       quantity: positiveInt(2),
       version: 1
     }
     const ev2: ItemAdded = {
       _tag: "ItemAdded",
-      cartId: "cart-1",
-      itemId: "item-2",
+      cartId: cid("cart-1"),
+      itemId: iid("item-2"),
       quantity: positiveInt(3),
       version: 1
     }
@@ -179,14 +188,14 @@ describe("Cart Decider BDD Scenarios", () => {
 
     match(s3)
       .with({ _tag: "ActiveCart" }, (s) => {
-        expect(s.cartId).toBe("cart-1")
+        expect(s.cartId).toBe(cid("cart-1"))
         expect(
           Equal.equals(s.items, [
-            { itemId: "item-1", quantity: positiveInt(2) },
-            { itemId: "item-2", quantity: positiveInt(3) }
+            { itemId: iid("item-1"), quantity: positiveInt(2) },
+            { itemId: iid("item-2"), quantity: positiveInt(3) }
           ])
         ).toBe(true)
-        expect(s.itemCount).toBe(5)
+        expect(s.itemCount).toBe(icount(5))
       })
       .with({ _tag: "EmptyCart" }, () => {
         expect.unreachable("Expected ActiveCart")
@@ -198,8 +207,8 @@ describe("Cart Decider BDD Scenarios", () => {
 
     const mismatchedEv: ItemAdded = {
       _tag: "ItemAdded",
-      cartId: "cart-other",
-      itemId: "item-3",
+      cartId: cid("cart-other"),
+      itemId: iid("item-3"),
       quantity: positiveInt(4),
       version: 1
     }
@@ -207,7 +216,7 @@ describe("Cart Decider BDD Scenarios", () => {
     expect(Equal.equals(s3Mismatched, s3)).toBe(true)
     match(s3Mismatched)
       .with({ _tag: "ActiveCart" }, (s) => {
-        expect(s.itemCount).toBe(5)
+        expect(s.itemCount).toBe(icount(5))
         expect(s.items.length).toBe(2)
       })
       .with({ _tag: "EmptyCart" }, () => {
@@ -220,16 +229,16 @@ describe("Cart Decider BDD Scenarios", () => {
 
     const checkedOutEv: CartCheckedOut = {
       _tag: "CartCheckedOut",
-      cartId: "cart-1",
-      orderId: "order-99",
+      cartId: cid("cart-1"),
+      orderId: oid("order-99"),
       version: 1
     }
     const s4 = evolveCart(s3, checkedOutEv)
     match(s4)
       .with({ _tag: "CheckedOutCart" }, (s) => {
-        expect(s.cartId).toBe("cart-1")
-        expect(s.orderId).toBe("order-99")
-        expect(s.totalItems).toBe(5)
+        expect(s.cartId).toBe(cid("cart-1"))
+        expect(s.orderId).toBe(oid("order-99"))
+        expect(s.totalItems).toBe(icount(5))
       })
       .with({ _tag: "ActiveCart" }, () => {
         expect.unreachable("Expected CheckedOutCart")

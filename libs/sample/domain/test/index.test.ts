@@ -10,9 +10,15 @@ import {
   saveGraphSnapshot
 } from "@harness/graph"
 import {
-  type CreatePhotoInput,
-  type Photo,
+  AlbumId,
+  AlbumPhotoCount,
   AlbumQuotaExceededError,
+  CreatedAtMillis,
+  type CreatePhotoInput,
+  PersonName,
+  type Photo,
+  PhotoId,
+  PhotoName,
   PhotoNotFoundError
 } from "@harness/sample-contract"
 import { AlbumCounterClient, PhotoRepo } from "@harness/sample-service"
@@ -44,7 +50,7 @@ describe("greet", () => {
 
       const { result, edges } = yield* runWithTestTracer(
         testId,
-        greet({ name: "Roman" }),
+        greet({ name: PersonName.make("Roman") }),
         fnIndex.bySpanName
       )
       expect(result).toBe("Hello, Roman!")
@@ -55,7 +61,7 @@ describe("greet", () => {
         file: fn.file,
         line: fn.line,
         packageTag: fn.packageTag,
-        successType: "string",
+        successType: "GreetingMessage",
         isStub: fn.isStub
       }))
 
@@ -98,14 +104,14 @@ describe("decideAlbumQuota", () => {
     Effect.gen(function* () {
       // Runs with zero Layers (R = never)
       const nextCount = yield* decideAlbumQuota({
-        albumId: "album-vacation",
-        currentCount: 42
+        albumId: AlbumId.make("album-vacation"),
+        currentCount: AlbumPhotoCount.make(42)
       })
       expect(nextCount).toBe(43)
 
       const atLimitMinusOne = yield* decideAlbumQuota({
-        albumId: "album-vacation",
-        currentCount: 99
+        albumId: AlbumId.make("album-vacation"),
+        currentCount: AlbumPhotoCount.make(99)
       })
       expect(atLimitMinusOne).toBe(100)
     })
@@ -115,8 +121,8 @@ describe("decideAlbumQuota", () => {
     Effect.gen(function* () {
       const errAt100 = yield* Effect.flip(
         decideAlbumQuota({
-          albumId: "album-vacation",
-          currentCount: 100
+          albumId: AlbumId.make("album-vacation"),
+          currentCount: AlbumPhotoCount.make(100)
         })
       )
       expect(errAt100).toBeInstanceOf(AlbumQuotaExceededError)
@@ -126,8 +132,8 @@ describe("decideAlbumQuota", () => {
 
       const errAt150 = yield* Effect.flip(
         decideAlbumQuota({
-          albumId: "album-party",
-          currentCount: 150
+          albumId: AlbumId.make("album-party"),
+          currentCount: AlbumPhotoCount.make(150)
         })
       )
       expect(errAt150).toBeInstanceOf(AlbumQuotaExceededError)
@@ -140,9 +146,9 @@ describe("decideAlbumQuota", () => {
   it.effect.prop(
     "enforces quota invariant and monotonicity across generated inputs",
     {
-      albumId: Schema.NonEmptyString,
-      currentCount: Schema.Int.check(
-        Schema.isBetween({ minimum: -50, maximum: 250 })
+      albumId: AlbumId.check(Schema.isMinLength(1)),
+      currentCount: AlbumPhotoCount.check(
+        Schema.isBetween({ minimum: 0, maximum: 250 })
       )
     },
     ({ albumId, currentCount }) =>
@@ -176,15 +182,15 @@ const makeTestLayers = (initialCount = 0) => {
     insert: (input: CreatePhotoInput) =>
       Effect.sync(() => {
         const photo: Photo = {
-          id: nextId++,
+          id: PhotoId.make(nextId++),
           name: input.name,
           albumId: input.albumId,
-          createdAt: 1000
+          createdAt: CreatedAtMillis.make(1000)
         }
         photos.push(photo)
         return photo
       }),
-    findById: (id: number) =>
+    findById: (id: PhotoId) =>
       Effect.gen(function* () {
         const found = photos.find((p) => p.id === id)
         if (!found) {
@@ -196,12 +202,12 @@ const makeTestLayers = (initialCount = 0) => {
   })
 
   const albumCounterLayer = Layer.succeed(AlbumCounterClient, {
-    increment: (_albumId: string) =>
+    increment: (_albumId: AlbumId) =>
       Effect.sync(() => {
         count++
-        return count
+        return AlbumPhotoCount.make(count)
       }),
-    getCount: (_albumId: string) => Effect.sync(() => count)
+    getCount: (_albumId: AlbumId) => Effect.sync(() => AlbumPhotoCount.make(count))
   })
 
   const testLayer = Layer.merge(photoRepoLayer, albumCounterLayer)
@@ -218,7 +224,10 @@ describe("uploadPhoto", () => {
 
       const { result, edges } = yield* runWithTestTracer(
         testId,
-        uploadPhoto({ name: "Sunset.jpg", albumId: "album-nature" }).pipe(
+        uploadPhoto({
+          name: PhotoName.make("Sunset.jpg"),
+          albumId: AlbumId.make("album-nature")
+        }).pipe(
           Effect.provide(testLayer)
         ),
         fnIndex.bySpanName
@@ -255,7 +264,10 @@ describe("uploadPhoto", () => {
       const { testLayer, photos, getCount } = makeTestLayers(100)
 
       const error = yield* Effect.flip(
-        uploadPhoto({ name: "OverLimit.jpg", albumId: "album-full" }).pipe(
+        uploadPhoto({
+          name: PhotoName.make("OverLimit.jpg"),
+          albumId: AlbumId.make("album-full")
+        }).pipe(
           Effect.provide(testLayer)
         )
       )
@@ -274,7 +286,10 @@ describe("getPhotoById & listPhotos", () => {
     Effect.gen(function* () {
       const { testLayer } = makeTestLayers()
 
-      const created = yield* uploadPhoto({ name: "Mountains.jpg", albumId: "travel" }).pipe(
+      const created = yield* uploadPhoto({
+        name: PhotoName.make("Mountains.jpg"),
+        albumId: AlbumId.make("travel")
+      }).pipe(
         Effect.provide(testLayer)
       )
 
@@ -295,7 +310,7 @@ describe("getPhotoById & listPhotos", () => {
       const { testLayer } = makeTestLayers()
 
       const error = yield* Effect.flip(
-        getPhotoById(999).pipe(
+        getPhotoById(PhotoId.make(999)).pipe(
           Effect.provide(testLayer)
         )
       )

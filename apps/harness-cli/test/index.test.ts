@@ -1194,8 +1194,47 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       )
     }
 
-    // 2. availableQty: Schema.Natural is allowed
+    // 2. availableQty: unbranded Schema.Natural is flagged as unbranded scalar field, while Schema.Natural.pipe(Schema.brand("Quantity")) is allowed
     {
+      const unbrandedReports: Array<{ message: string }> = []
+      const unbrandedVisitor = syntaxBans.create({
+        filename: "/repo/libs/sample/contract/src/index.ts",
+        report: (r: { message: string }) => {
+          unbrandedReports.push(r)
+        }
+      })
+      unbrandedVisitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Schema" },
+          property: { type: "Identifier", name: "Struct" }
+        },
+        arguments: [
+          {
+            type: "ObjectExpression",
+            properties: [
+              {
+                type: "Property",
+                computed: false,
+                key: { type: "Identifier", name: "availableQty" },
+                value: {
+                  type: "MemberExpression",
+                  computed: false,
+                  object: { type: "Identifier", name: "Schema" },
+                  property: { type: "Identifier", name: "Natural" }
+                }
+              }
+            ]
+          }
+        ]
+      })
+      expect(unbrandedReports).toHaveLength(1)
+      expect(unbrandedReports[0]?.message).toContain(
+        "Do not use unbranded Schema.Natural for field 'availableQty'"
+      )
+
       const reports: Array<{ message: string }> = []
       const visitor = syntaxBans.create({
         filename: "/repo/libs/sample/contract/src/index.ts",
@@ -1220,10 +1259,30 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                 computed: false,
                 key: { type: "Identifier", name: "availableQty" },
                 value: {
-                  type: "MemberExpression",
-                  computed: false,
-                  object: { type: "Identifier", name: "Schema" },
-                  property: { type: "Identifier", name: "Natural" }
+                  type: "CallExpression",
+                  callee: {
+                    type: "MemberExpression",
+                    computed: false,
+                    object: {
+                      type: "MemberExpression",
+                      computed: false,
+                      object: { type: "Identifier", name: "Schema" },
+                      property: { type: "Identifier", name: "Natural" }
+                    },
+                    property: { type: "Identifier", name: "pipe" }
+                  },
+                  arguments: [
+                    {
+                      type: "CallExpression",
+                      callee: {
+                        type: "MemberExpression",
+                        computed: false,
+                        object: { type: "Identifier", name: "Schema" },
+                        property: { type: "Identifier", name: "brand" }
+                      },
+                      arguments: [{ type: "Literal", value: "Quantity" }]
+                    }
+                  ]
                 }
               }
             ]
@@ -1548,6 +1607,474 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         ]
       })
       expect(reports).toHaveLength(0)
+    }
+  })
+
+  it("flags raw primitive type aliases, unbranded contract schemas, unbranded struct fields, raw primitive boundary annotations, and unsafe brand casts", () => {
+    // REQ-2.1: Raw primitive type alias (type UserId = string)
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/contract/src/index.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.TSTypeAliasDeclaration?.({
+        type: "TSTypeAliasDeclaration",
+        id: { type: "Identifier", name: "UserId" },
+        typeAnnotation: { type: "TSStringKeyword" }
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain(
+        "Do not declare raw primitive type alias 'UserId = string'"
+      )
+    }
+
+    // REQ-2.2: Unbranded scalar schema exported from type:contract vs branded schema
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/contract/src/index.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.ExportNamedDeclaration?.({
+        type: "ExportNamedDeclaration",
+        declaration: {
+          type: "VariableDeclaration",
+          declarations: [
+            {
+              type: "VariableDeclarator",
+              id: { type: "Identifier", name: "UserId" },
+              init: {
+                type: "MemberExpression",
+                computed: false,
+                object: { type: "Identifier", name: "Schema" },
+                property: { type: "Identifier", name: "NonEmptyString" }
+              }
+            }
+          ]
+        }
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain(
+        "Do not export unbranded primitive schema 'UserId' from type:contract"
+      )
+    }
+
+    // REQ-2.3: Unbranded scalar field inside Schema.Struct in type:contract
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/contract/src/index.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Schema" },
+          property: { type: "Identifier", name: "Struct" }
+        },
+        arguments: [
+          {
+            type: "ObjectExpression",
+            properties: [
+              {
+                type: "Property",
+                computed: false,
+                key: { type: "Identifier", name: "albumId" },
+                value: {
+                  type: "MemberExpression",
+                  computed: false,
+                  object: { type: "Identifier", name: "Schema" },
+                  property: { type: "Identifier", name: "NonEmptyString" }
+                }
+              }
+            ]
+          }
+        ]
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain(
+        "Do not use unbranded Schema.NonEmptyString for field 'albumId' in Schema.Struct"
+      )
+    }
+
+    // REQ-2.4: Raw primitive parameter in exported Effect.fn in type:domain
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/domain/src/index.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.ExportNamedDeclaration?.({
+        type: "ExportNamedDeclaration",
+        declaration: {
+          type: "VariableDeclaration",
+          declarations: [
+            {
+              type: "VariableDeclarator",
+              id: { type: "Identifier", name: "findUser" },
+              init: {
+                type: "CallExpression",
+                callee: {
+                  type: "CallExpression",
+                  callee: {
+                    type: "MemberExpression",
+                    computed: false,
+                    object: { type: "Identifier", name: "Effect" },
+                    property: { type: "Identifier", name: "fn" }
+                  },
+                  arguments: [{ type: "Literal", value: "Sample.findUser" }]
+                },
+                arguments: [
+                  {
+                    type: "FunctionExpression",
+                    generator: true,
+                    params: [
+                      {
+                        type: "Identifier",
+                        name: "id",
+                        typeAnnotation: {
+                          type: "TSTypeAnnotation",
+                          typeAnnotation: { type: "TSStringKeyword" }
+                        }
+                      }
+                    ],
+                    body: { type: "BlockStatement", body: [] }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain(
+        "Do not use raw primitive type 'string' at exported domain boundary 'findUser'"
+      )
+    }
+
+    // REQ-2.5: Unsafe `as BrandedType` assertion in production source (including imported brand)
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/domain/src/index.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.Program?.({
+        type: "Program",
+        body: [
+          {
+            type: "ImportDeclaration",
+            source: { type: "Literal", value: "@harness/sample-contract" },
+            specifiers: [
+              {
+                type: "ImportSpecifier",
+                local: { type: "Identifier", name: "CustomToken" }
+              }
+            ]
+          }
+        ]
+      })
+      visitor.TSAsExpression?.({
+        type: "TSAsExpression",
+        expression: { type: "Literal", value: "u-1" },
+        typeAnnotation: {
+          type: "TSTypeReference",
+          typeName: { type: "Identifier", name: "CustomToken" }
+        }
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain(
+        "Do not bypass brand validation with 'as' type assertion"
+      )
+      expect(reports[0]?.message).toContain("Brand.make")
+      expect(reports[0]?.message).not.toContain("Brand.refined")
+    }
+
+    // F-1: Duplicate Schema.brand('<Key>') across multiple schemas in same file
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/contract/src/index.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.Program?.({ type: "Program", body: [] })
+      const makeBrandCall = () => ({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Schema" },
+          property: { type: "Identifier", name: "brand" }
+        },
+        arguments: [{ type: "Literal", value: "PhotoId" }]
+      })
+      visitor.CallExpression?.(makeBrandCall())
+      visitor.CallExpression?.(makeBrandCall())
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain(
+        "Do not declare duplicate Schema.brand('PhotoId') across multiple schemas"
+      )
+      expect(reports[0]?.message).toContain("Schema.decodeTo")
+    }
+
+    // F-2 & F-3 & F-8: Quantity field with unbranded Schema.Natural / Schema.String, local unbranded scalar ref, TaggedStruct, and TaggedUnion
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/contract/src/index.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.Program?.({
+        type: "Program",
+        body: [
+          {
+            type: "VariableDeclaration",
+            declarations: [
+              {
+                type: "VariableDeclarator",
+                id: { type: "Identifier", name: "LocalId" },
+                init: {
+                  type: "MemberExpression",
+                  computed: false,
+                  object: { type: "Identifier", name: "Schema" },
+                  property: { type: "Identifier", name: "Int" }
+                }
+              }
+            ]
+          }
+        ]
+      })
+      // 1) Schema.Struct with local unbranded identifier LocalId and unbranded quantity Schema.Natural
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Schema" },
+          property: { type: "Identifier", name: "Struct" }
+        },
+        arguments: [
+          {
+            type: "ObjectExpression",
+            properties: [
+              {
+                type: "Property",
+                computed: false,
+                key: { type: "Identifier", name: "id" },
+                value: { type: "Identifier", name: "LocalId" }
+              },
+              {
+                type: "Property",
+                computed: false,
+                key: { type: "Identifier", name: "qty" },
+                value: {
+                  type: "MemberExpression",
+                  computed: false,
+                  object: { type: "Identifier", name: "Schema" },
+                  property: { type: "Identifier", name: "Natural" }
+                }
+              }
+            ]
+          }
+        ]
+      })
+      // 2) Schema.TaggedUnion with unbranded Schema.String
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Schema" },
+          property: { type: "Identifier", name: "TaggedUnion" }
+        },
+        arguments: [
+          {
+            type: "ObjectExpression",
+            properties: [
+              {
+                type: "Property",
+                computed: false,
+                key: { type: "Identifier", name: "Created" },
+                value: {
+                  type: "ObjectExpression",
+                  properties: [
+                    {
+                      type: "Property",
+                      computed: false,
+                      key: { type: "Identifier", name: "itemId" },
+                      value: {
+                        type: "MemberExpression",
+                        computed: false,
+                        object: { type: "Identifier", name: "Schema" },
+                        property: { type: "Identifier", name: "String" }
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      })
+      expect(reports).toHaveLength(3)
+      expect(reports[0]?.message).toContain(
+        "Do not use unbranded Schema.Int for field 'id' in Schema.Struct"
+      )
+      expect(reports[1]?.message).toContain(
+        "Do not use unbranded Schema.Natural for field 'qty' in Schema.Struct"
+      )
+      expect(reports[2]?.message).toContain(
+        "Do not use unbranded Schema.String for field 'itemId' in Schema.TaggedUnion"
+      )
+    }
+
+    // F-7 & User Request: Inline object type alias ban and inline object parameter/return ban on service & domain boundaries
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/domain/src/index.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.Program?.({ type: "Program", body: [] })
+      visitor.TSTypeAliasDeclaration?.({
+        type: "TSTypeAliasDeclaration",
+        id: { type: "Identifier", name: "InlineInput" },
+        typeAnnotation: {
+          type: "TSTypeLiteral",
+          members: []
+        }
+      })
+      visitor.ExportNamedDeclaration?.({
+        type: "ExportNamedDeclaration",
+        declaration: {
+          type: "VariableDeclaration",
+          declarations: [
+            {
+              type: "VariableDeclarator",
+              id: { type: "Identifier", name: "decideQuota" },
+              init: {
+                type: "CallExpression",
+                callee: {
+                  type: "CallExpression",
+                  callee: {
+                    type: "MemberExpression",
+                    computed: false,
+                    object: { type: "Identifier", name: "Effect" },
+                    property: { type: "Identifier", name: "fn" }
+                  },
+                  arguments: [{ type: "Literal", value: "Album.decide" }]
+                },
+                arguments: [
+                  {
+                    type: "FunctionExpression",
+                    generator: true,
+                    params: [
+                      {
+                        type: "Identifier",
+                        name: "input",
+                        typeAnnotation: {
+                          type: "TSTypeAnnotation",
+                          typeAnnotation: {
+                            type: "TSTypeLiteral",
+                            members: []
+                          }
+                        }
+                      }
+                    ],
+                    returnType: {
+                      type: "TSTypeAnnotation",
+                      typeAnnotation: { type: "TSBooleanKeyword" }
+                    },
+                    body: { type: "BlockStatement", body: [] }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      })
+      expect(reports).toHaveLength(3)
+      expect(reports[0]?.message).toContain(
+        "Do not declare inline object type alias 'InlineInput'"
+      )
+      expect(reports[1]?.message).toContain(
+        "Do not use inline object type for parameter at exported domain boundary 'decideQuota'"
+      )
+      expect(reports[2]?.message).toContain(
+        "Do not use raw primitive return type 'boolean' at exported domain boundary 'decideQuota'"
+      )
+    }
+
+    // 9. Standalone count/quantity schema using Schema.Int.pipe(Schema.brand("AlbumPhotoCount")) without .check() or Schema.Natural
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/contract/src/index.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.ExportNamedDeclaration?.({
+        type: "ExportNamedDeclaration",
+        declaration: {
+          type: "VariableDeclaration",
+          declarations: [
+            {
+              type: "VariableDeclarator",
+              id: { type: "Identifier", name: "AlbumPhotoCount" },
+              init: {
+                type: "CallExpression",
+                callee: {
+                  type: "MemberExpression",
+                  computed: false,
+                  object: {
+                    type: "MemberExpression",
+                    computed: false,
+                    object: { type: "Identifier", name: "Schema" },
+                    property: { type: "Identifier", name: "Int" }
+                  },
+                  property: { type: "Identifier", name: "pipe" }
+                },
+                arguments: [
+                  {
+                    type: "CallExpression",
+                    callee: {
+                      type: "MemberExpression",
+                      computed: false,
+                      object: { type: "Identifier", name: "Schema" },
+                      property: { type: "Identifier", name: "brand" }
+                    },
+                    arguments: [{ type: "Literal", value: "AlbumPhotoCount" }]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain(
+        "Do not use Schema.Int for quantity, version, or count schema 'AlbumPhotoCount' — use Schema.Natural"
+      )
     }
   })
 

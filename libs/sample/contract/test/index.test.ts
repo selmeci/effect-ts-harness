@@ -7,13 +7,22 @@ import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import { Schema } from "effect"
 import {
+  AlbumId,
+  AlbumPhotoCount,
   AlbumQuotaExceededError,
   buildOpenApiSpec,
+  CreatedAtMillis,
   CreatePhotoInput,
+  DecideAlbumQuotaInput,
   detectOpenApiBreakingChanges,
   GreetInput,
+  GreetingMessage,
+  PersonName,
   Photo,
   PhotoCounterRpc,
+  PhotoId,
+  PhotoIdFromString,
+  PhotoName,
   PhotoNotFoundError,
   SampleApi
 } from "../src/index.js"
@@ -25,29 +34,57 @@ const resolverPath = resolve(repoRoot, "tools/node-ts-resolver.mjs")
 const openApiPath = resolve(currentDir, "../openapi.json")
 
 describe("sample-contract (Schemas, HttpApi, RpcGroup, OpenAPI)", () => {
-  it("preserves GreetInput for backward compatibility", () => {
+  it("preserves GreetInput and constructs branded PersonName and GreetingMessage", () => {
     const decoded = Schema.decodeSync(GreetInput)({ name: "Roman" })
-    expect(decoded.name).toBe("Roman")
+    expect(decoded.name).toBe(PersonName.make("Roman"))
+    expect(GreetingMessage.make("Hello, Roman!")).toBe("Hello, Roman!")
   })
 
-  it("decodes Photo and CreatePhotoInput Schemas", () => {
+  it("decodes Photo, CreatePhotoInput, DecideAlbumQuotaInput, and PhotoIdFromString branded Schemas", () => {
     const input = Schema.decodeSync(CreatePhotoInput)({ name: "sunset.jpg", albumId: "vacation" })
-    expect(input.albumId).toBe("vacation")
+    expect(input.albumId).toBe(AlbumId.make("vacation"))
+    expect(input.name).toBe(PhotoName.make("sunset.jpg"))
+    const quotaInput = Schema.decodeSync(DecideAlbumQuotaInput)({
+      albumId: "vacation",
+      currentCount: 0
+    })
+    expect(quotaInput.albumId).toBe(AlbumId.make("vacation"))
+    expect(quotaInput.currentCount).toBe(AlbumPhotoCount.make(0))
     const photo = Schema.decodeSync(Photo)({
       id: 1,
       name: "sunset.jpg",
       albumId: "vacation",
       createdAt: 1700000000
     })
-    expect(photo.id).toBe(1)
+    expect(photo.id).toBe(PhotoId.make(1))
+    expect(photo.createdAt).toBe(CreatedAtMillis.make(1700000000))
+    const idFromParam = Schema.decodeSync(PhotoIdFromString)("42")
+    expect(idFromParam).toBe(PhotoId.make(42))
   })
 
-  it("constructs PhotoNotFoundError and AlbumQuotaExceededError", () => {
-    const notFound = new PhotoNotFoundError({ id: 42 })
+  it("rejects non-integer and non-positive values in PhotoId and PhotoIdFromString, and negative values in AlbumPhotoCount", () => {
+    expect(() => Schema.decodeSync(PhotoIdFromString)("1.5")).toThrow()
+    expect(() => Schema.decodeSync(PhotoIdFromString)("-3")).toThrow()
+    expect(() => Schema.decodeSync(PhotoIdFromString)("0")).toThrow()
+    expect(() => PhotoId.make(0)).toThrow()
+    expect(() => PhotoId.make(-1)).toThrow()
+    expect(() => PhotoId.make(1.5)).toThrow()
+
+    expect(() => Schema.decodeSync(AlbumPhotoCount)(-1)).toThrow()
+    expect(() => Schema.decodeSync(AlbumPhotoCount)(1.5)).toThrow()
+    expect(() => AlbumPhotoCount.make(-1)).toThrow()
+    expect(AlbumPhotoCount.make(0)).toBe(0)
+  })
+
+  it("constructs PhotoNotFoundError and AlbumQuotaExceededError with branded fields", () => {
+    const notFound = new PhotoNotFoundError({ id: PhotoId.make(42) })
     expect(notFound._tag).toBe("PhotoNotFoundError")
     expect(notFound.id).toBe(42)
 
-    const quota = new AlbumQuotaExceededError({ albumId: "vacation", count: 100 })
+    const quota = new AlbumQuotaExceededError({
+      albumId: AlbumId.make("vacation"),
+      count: AlbumPhotoCount.make(100)
+    })
     expect(quota._tag).toBe("AlbumQuotaExceededError")
     expect(quota.albumId).toBe("vacation")
     expect(quota.count).toBe(100)

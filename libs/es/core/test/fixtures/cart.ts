@@ -7,23 +7,35 @@ export const positiveInt = Schema.decodeSync(PositiveInt)
 export const streamVersion = Schema.decodeSync(StreamVersion)
 export const INITIAL_EVENT_VERSION: StreamVersion = streamVersion(1)
 
+export const CartId = Schema.String.pipe(Schema.brand("CartId"))
+export type CartId = typeof CartId.Type
+
+export const ItemId = Schema.String.pipe(Schema.brand("ItemId"))
+export type ItemId = typeof ItemId.Type
+
+export const OrderId = Schema.String.pipe(Schema.brand("OrderId"))
+export type OrderId = typeof OrderId.Type
+
+export const ItemCount = Schema.Natural.pipe(Schema.brand("ItemCount"))
+export type ItemCount = typeof ItemCount.Type
+
 export const CartCreated = Schema.TaggedStruct("CartCreated", {
-  cartId: Schema.String,
+  cartId: CartId,
   version: Schema.Literal(1)
 })
 export type CartCreated = typeof CartCreated.Type
 
 export const ItemAdded = Schema.TaggedStruct("ItemAdded", {
-  cartId: Schema.String,
-  itemId: Schema.String,
+  cartId: CartId,
+  itemId: ItemId,
   quantity: PositiveInt,
   version: Schema.Literal(1)
 })
 export type ItemAdded = typeof ItemAdded.Type
 
 export const CartCheckedOut = Schema.TaggedStruct("CartCheckedOut", {
-  cartId: Schema.String,
-  orderId: Schema.String,
+  cartId: CartId,
+  orderId: OrderId,
   version: Schema.Literal(1)
 })
 export type CartCheckedOut = typeof CartCheckedOut.Type
@@ -32,15 +44,15 @@ export const CartEvent = Schema.Union([CartCreated, ItemAdded, CartCheckedOut])
 export type CartEvent = typeof CartEvent.Type
 
 export const AddItem = Schema.TaggedStruct("AddItem", {
-  cartId: Schema.String,
-  itemId: Schema.String,
+  cartId: CartId,
+  itemId: ItemId,
   quantity: PositiveInt
 })
 export type AddItem = typeof AddItem.Type
 
 export const Checkout = Schema.TaggedStruct("Checkout", {
-  cartId: Schema.String,
-  orderId: Schema.String
+  cartId: CartId,
+  orderId: OrderId
 })
 export type Checkout = typeof Checkout.Type
 
@@ -50,27 +62,27 @@ export type CartCommand = typeof CartCommand.Type
 export class CartAlreadyCheckedOutError extends Schema.TaggedError<CartAlreadyCheckedOutError>()(
   "CartAlreadyCheckedOutError",
   {
-    cartId: Schema.String
+    cartId: CartId
   }
 ) {}
 
 export class EmptyCartCheckoutError extends Schema.TaggedError<EmptyCartCheckoutError>()(
   "EmptyCartCheckoutError",
   {
-    cartId: Schema.String
+    cartId: CartId
   }
 ) {}
 
 export class CartIdMismatchError extends Schema.TaggedError<CartIdMismatchError>()(
   "CartIdMismatchError",
   {
-    expectedCartId: Schema.String,
-    actualCartId: Schema.String
+    expectedCartId: CartId,
+    actualCartId: CartId
   }
 ) {}
 
 export const CartLineItem = Schema.Struct({
-  itemId: Schema.String,
+  itemId: ItemId,
   quantity: PositiveInt
 })
 export type CartLineItem = typeof CartLineItem.Type
@@ -79,16 +91,16 @@ export const EmptyCart = Schema.TaggedStruct("EmptyCart", {})
 export type EmptyCart = typeof EmptyCart.Type
 
 export const ActiveCart = Schema.TaggedStruct("ActiveCart", {
-  cartId: Schema.String,
+  cartId: CartId,
   items: Schema.Array(CartLineItem),
-  itemCount: Schema.Natural
+  itemCount: ItemCount
 })
 export type ActiveCart = typeof ActiveCart.Type
 
 export const CheckedOutCart = Schema.TaggedStruct("CheckedOutCart", {
-  cartId: Schema.String,
-  orderId: Schema.String,
-  totalItems: Schema.Natural
+  cartId: CartId,
+  orderId: OrderId,
+  totalItems: ItemCount
 })
 export type CheckedOutCart = typeof CheckedOutCart.Type
 
@@ -107,7 +119,7 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
           _tag: "ActiveCart" as const,
           cartId: e.cartId,
           items: [],
-          itemCount: 0
+          itemCount: ItemCount.make(0)
         }))
         .with({ _tag: "ActiveCart" }, () => state)
         .with({ _tag: "CheckedOutCart" }, () => state)
@@ -120,7 +132,7 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
           (s) => ({
             ...s,
             items: [...s.items, { itemId: e.itemId, quantity: e.quantity }],
-            itemCount: s.itemCount + e.quantity
+            itemCount: ItemCount.make(s.itemCount + e.quantity)
           })
         )
         .with({ _tag: "ActiveCart" }, () => state)

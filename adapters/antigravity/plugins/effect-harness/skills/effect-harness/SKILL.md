@@ -29,6 +29,7 @@ When learning Effect patterns or resolving architectural questions, adhere stric
 
 Every task follows a strict 7-step gated lifecycle orchestrated by four specialized skills:
 
+- **AUTONOMOUS END-TO-END ORCHESTRATOR (`/effect-lfg`):** Use `effect-lfg` when the user asks to execute a requirement from start to finish hands-off without intermediate approval pauses
 - **REQUIRED SUB-SKILL (Step 1 — EARS Discovery):** Use `specifying-ears-with-effect`
 - **REQUIRED SUB-SKILL (Steps 2–3 — Skeleton & Plan-Check):** Use `planning-effect-skeletons`
 - **REQUIRED SUB-SKILL (Steps 4–6 — Subagent Implementation, GC & Verify):** Use `executing-effect-stubs`
