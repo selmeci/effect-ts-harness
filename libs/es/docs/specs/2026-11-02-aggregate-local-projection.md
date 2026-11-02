@@ -6,6 +6,7 @@ archetype: framework
 date: 2026-11-02
 adrs:
   - es:ADR-0002
+  - harness:ADR-0008
 enforced_by:
   - libs/es/contract/src/index.ts
   - libs/es/core/src/index.ts
@@ -109,7 +110,7 @@ The `Verification` column in the EARS table maps each requirement to its determi
 
 ## Assumptions
 * **REQ-1.1:** Deduplicated commands decode `es_commands.result_json` and preserve the original `creationStatus` (`CreatedStream`, `ExistingStream`, or `NoStream`) and `nextExpectedStreamVersion` with `processingStatus: { _tag: "Deduplicated" }`.
-* **REQ-2.1:** Events within an aggregate stream are ordered sequentially by `streamVersion` incrementing strictly by 1 starting from 1, and local test layers (`@harness/es-infra/memory`) execute against real `workerd` SQLite Durable Object storage (`enableSql: true`) via `@alchemy.run/cloudflare-runtime` without `node:sqlite` (`DatabaseSync`) mocks.
+* **REQ-2.1:** Events within an aggregate stream are ordered sequentially by `streamVersion` incrementing strictly by 1 starting from 1, and local test layers (`@harness/es-infra/memory`) comply with `harness:SPEC-0006` (`harness:ADR-0008`) by executing against real `workerd` SQLite Durable Object storage (`enableSql: true`) via `@alchemy.run/cloudflare-runtime`.
 * **REQ-4.1:** The default `outboxMode` on `AggregateConfig` is `{ _tag: "SuppressOutbox" }`.
 
 ## Out of scope

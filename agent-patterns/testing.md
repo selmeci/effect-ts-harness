@@ -62,7 +62,7 @@ export const UserRepositoryTest = Layer.succeed(
 ## Testing Cloudflare D1 & Durable Object SQLite with `workerd` (`@alchemy.run/cloudflare-runtime`)
 
 > [!IMPORTANT]
-> **Ban on `node:sqlite` Mocks in `type:infra` and `type:app` (`es:ADR-0002`, `node-sqlite-in-infra`):**
+> **Ban on `node:sqlite` Mocks in `type:infra` and `type:app` (`harness:SPEC-0006` / `harness:ADR-0008`, `node-sqlite-in-infra`):**
 > Never import `node:sqlite` (`DatabaseSync`) or author hand-rolled `DurableObjectStorage`, `SqlStorage`, or `D1Database` mocks in `type:infra` or `type:app` packages (`libs/*/infra/**`, `apps/**`). Hand-rolled `node:sqlite` wrappers diverge from Cloudflare's `workerd` runtime (which forbids raw `BEGIN` / `COMMIT` / `ROLLBACK` statements in `storage.sql.exec()` and manages nested transactions via C++ savepoints in `storage.transaction()`).
 
 Always execute `type:infra` storage tests against the real `workerd` runtime using `@alchemy.run/cloudflare-runtime`:

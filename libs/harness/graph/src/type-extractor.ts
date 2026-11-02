@@ -1242,7 +1242,7 @@ export const extractTypeAwareGraphFromSource = (
         ) {
           branchingViolations.push({
             rule: "node-sqlite-in-infra",
-            message: `Do not import '${modSpec}' in '${relPath}' — Cloudflare Durable Object SQLite and D1 storages in type:infra/type:app must execute against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (es:ADR-0002).`,
+            message: `Do not import '${modSpec}' in '${relPath}' — Cloudflare Durable Object SQLite and D1 storages in type:infra/type:app must execute against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006).`,
             file: relPath,
             line: imp.getStartLineNumber(),
             enclosingSymbol: relPath

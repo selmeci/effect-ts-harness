@@ -668,7 +668,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
         location: `${bv.file}:${bv.line}`,
         message: bv.message,
         action:
-          "Replace node:sqlite with real Cloudflare workerd storage via @alchemy.run/cloudflare-runtime (Workerd SQLite Durable Object or D1.local)."
+          "Replace node:sqlite with real Cloudflare workerd storage via @alchemy.run/cloudflare-runtime (Workerd SQLite Durable Object or D1.local) per harness:ADR-0008 / harness:SPEC-0006."
       })
     }
   }

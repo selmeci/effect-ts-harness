@@ -1616,7 +1616,7 @@ const syntaxBans = {
           ) {
             reportOnce(
               node,
-              `Do not import '${importSource}' in type:infra or type:app ('${filename}') — execute Cloudflare Durable Object SQLite and D1 storages against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (es:ADR-0002, node-sqlite-in-infra).`
+              `Do not import '${importSource}' in type:infra or type:app ('${filename}') — execute Cloudflare Durable Object SQLite and D1 storages against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006, node-sqlite-in-infra).`
             )
           }
         }
@@ -2025,7 +2025,7 @@ const testIntegrity = {
           ) {
             context.report({
               node,
-              message: `Do not import '${importSource}' in type:infra or type:app tests ('${filename}') — execute Cloudflare Durable Object SQLite and D1 tests against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (es:ADR-0002, node-sqlite-in-infra).`
+              message: `Do not import '${importSource}' in type:infra or type:app tests ('${filename}') — execute Cloudflare Durable Object SQLite and D1 tests against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006, node-sqlite-in-infra).`
             })
           }
         }
