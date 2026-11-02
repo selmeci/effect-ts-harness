@@ -252,6 +252,7 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
     })
   }
 
+  const declaredEnforcedBy = new Set<string>(enforcedBy ?? [])
   const declaredSymbols = new Set<string>([
     ...(spans ?? []),
     ...(services ?? []),
@@ -453,6 +454,22 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
           'Section "## Decision Outcome" must specify a chosen option containing "Chosen option:".'
       })
     }
+
+    for (const item of outcomeInfo.lines) {
+      if (/\bscope:fixture\b/.test(item.text)) {
+        const isNegated =
+          /\b(?:not configured|do not use|omitted|never use|unconfigured)\b/i.test(
+            item.text
+          )
+        if (!isNegated) {
+          findings.push({
+            line: item.line,
+            kind: "adr-enforcement-mismatch",
+            message: `Line ${item.line} references unconfigured Nx tag 'scope:fixture' as a rule — 'scope:fixture' is not configured in nx.json.`
+          })
+        }
+      }
+    }
   }
 
   // 6. Rejected Alternatives
@@ -634,7 +651,47 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
                       })
                     }
 
-                    // b) Collect all governed symbols declared in the ADR frontmatter (spans, services, errors).
+                    // b) Verify Enforced By file paths are declared in frontmatter
+                    if (enforcedByCell) {
+                      const extractedPaths: Array<string> = []
+                      const backticks = Array.from(
+                        enforcedByCell.matchAll(/`([^`]+)`/g)
+                      ).map((m) => m[1]!.trim())
+                      for (const b of backticks) {
+                        if (
+                          b.includes("/") &&
+                          /\.(?:ts|tsx|js|mjs|md|json|cedar)$/.test(b) &&
+                          !extractedPaths.includes(b)
+                        ) {
+                          extractedPaths.push(b)
+                        }
+                      }
+                      const tokens = enforcedByCell
+                        .replace(/`([^`]+)`/g, " $1 ")
+                        .split(/[,\s]+/)
+                      for (const t of tokens) {
+                        const trimmed = t.trim()
+                        if (
+                          trimmed.includes("/") &&
+                          /\.(?:ts|tsx|js|mjs|md|json|cedar)$/.test(trimmed) &&
+                          !extractedPaths.includes(trimmed)
+                        ) {
+                          extractedPaths.push(trimmed)
+                        }
+                      }
+
+                      for (const p of extractedPaths) {
+                        if (declaredEnforcedBy.size > 0 && !declaredEnforcedBy.has(p)) {
+                          findings.push({
+                            line: lineNum,
+                            kind: "adr-enforcement-mismatch",
+                            message: `Enforced By file '${p}' at line ${lineNum} is not declared in ADR frontmatter 'enforced_by'.`
+                          })
+                        }
+                      }
+                    }
+
+                    // c) Collect all governed symbols declared in the ADR frontmatter (spans, services, errors).
                     // If the frontmatter declares at least one symbol, verify that every backtick-enclosed identifier
                     // in the Governed Symbols column (that is not a file path containing / or .ts and not a wildcard *)
                     // matches one of the frontmatter spans, services, or errors (or ends with #<symbol>).

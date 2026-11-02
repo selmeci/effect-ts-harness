@@ -1,0 +1,32 @@
+{
+  "name": "@harness/es-core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "nx": {
+    "tags": [
+      "type:core"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit && effect-tsgo diagnostics --strict --project tsconfig.json",
+    "lint": "oxlint --deny-warnings .",
+    "test": "vitest run",
+    "verify": "pnpm run typecheck && pnpm run lint && pnpm run test"
+  },
+  "dependencies": {
+    "@harness/es-contract": "workspace:*",
+    "effect": "4.0.0",
+    "ts-pattern": "5.9.2"
+  },
+  "devDependencies": {
+    "@effect/vitest": "4.0.0",
+    "@harness/gates": "workspace:*",
+    "@harness/graph": "workspace:*",
+    "@types/node": "26.6.5",
+    "vitest": "5.0.3"
+  }
+}

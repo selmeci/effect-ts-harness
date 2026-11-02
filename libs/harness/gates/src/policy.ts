@@ -3,6 +3,8 @@
  * "ask" means "always confirm with the human first" (alchemy deploy/destroy/profile,
  * matching Alchemy's own advice to confirm every deploy). */
 
+import * as path from "node:path"
+
 export type GuardVerdict = "allow" | "deny" | "ask" | "escalate"
 
 export const ALLOWLIST: ReadonlyArray<string> = [
@@ -31,6 +33,7 @@ export const ALLOWLIST: ReadonlyArray<string> = [
   "git add",
   "git restore --staged",
   "git commit",
+  "git merge",
   "git fetch",
   "git push",
   "git show",
@@ -279,7 +282,7 @@ const matchesAny = (command: string, rules: ReadonlyArray<GuardPatternRule>): bo
 export const isCommandAllowed = (command: string): boolean => {
   const stripped = command
     .trim()
-    .replace(/^(?:(?:CI|HARNESS_[A-Z0-9_]+)=[^\s;|&]+\s+)+/, "")
+    .replace(/^(?:(?:CI|NX_INTERACTIVE|HARNESS_[A-Z0-9_]+)=[^\s;|&]+\s+)+/, "")
   const trimmed = stripped.trim()
   if (trimmed === "") return false
   return ALLOWLIST.some((prefix) => {
@@ -289,17 +292,109 @@ export const isCommandAllowed = (command: string): boolean => {
   })
 }
 
-export const isCdCommand = (trimmed: string): boolean => {
-  const stripped = trimmed
-    .trim()
-    .replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;|&]+\s+)+/, "")
-  const view = toCommandView(stripped)
-  const firstWord = view.argv.split(/\s+/)[0]
-  if (firstWord === "cd") {
-    return true
-  }
-  return /(?:^|[;&|]\s*)cd(?:\s+|$)/.test(view.argv)
+const WRAPPER_BINARIES: ReadonlySet<string> = new Set(["pnpm", "npm", "npx", "yarn", "bunx"])
+const WRAPPER_VALUE_FLAGS: ReadonlySet<string> = new Set([
+  "--filter",
+  "-F",
+  "--dir",
+  "-C",
+  "--prefix",
+  "--package",
+  "-p"
+])
+const WRAPPER_SUBCOMMANDS: ReadonlySet<string> = new Set(["exec", "run", "dlx"])
+
+interface UnwrappedSegment {
+  readonly envAssignments: ReadonlyArray<string>
+  readonly commandWords: ReadonlyArray<string>
 }
+
+const unwrapCommandSegment = (words: ReadonlyArray<string>): UnwrappedSegment => {
+  const envAssignments: Array<string> = []
+  let i = 0
+  while (i < words.length) {
+    const w = words[i]!
+    if (w === "env" || w === "cross-env" || w === "command" || w === "builtin") {
+      i++
+      continue
+    }
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) {
+      envAssignments.push(w)
+      i++
+      continue
+    }
+    if (WRAPPER_BINARIES.has(w)) {
+      i++
+      while (i < words.length) {
+        const arg = words[i]!
+        if (WRAPPER_VALUE_FLAGS.has(arg)) {
+          i += 2
+        } else if (arg === "--") {
+          i++
+          break
+        } else if (arg.startsWith("-")) {
+          i++
+        } else if (WRAPPER_SUBCOMMANDS.has(arg)) {
+          i++
+        } else if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(arg)) {
+          envAssignments.push(arg)
+          i++
+        } else {
+          break
+        }
+      }
+      continue
+    }
+    break
+  }
+  return {
+    envAssignments,
+    commandWords: words.slice(i)
+  }
+}
+
+const extractCommandSegments = (command: string): ReadonlyArray<UnwrappedSegment> => {
+  const segments: Array<UnwrappedSegment> = []
+  for (const line of command.split(/\r?\n/)) {
+    const view = toCommandView(line)
+    for (const rawSeg of view.argv.split(/\s*(?:&&|\|\||[;|&])\s*/)) {
+      const cleanedSeg = rawSeg.replace(/^[()\s]+|[()\s]+$/g, "")
+      const words = cleanedSeg
+        .split(/\s+/)
+        .map((w) => w.replace(/^[()]+|[()]+$/g, ""))
+        .filter(Boolean)
+      if (words.length > 0) {
+        segments.push(unwrapCommandSegment(words))
+      }
+    }
+  }
+  return segments
+}
+
+export const isCdCommand = (trimmed: string): boolean =>
+  extractCommandSegments(trimmed).some((seg) => seg.commandWords[0] === "cd")
+
+export const INTERACTIVE_NX_BANNED_REASON =
+  "Running 'nx show' without 'CI=true' can hang on interactive prompts; prefix with 'CI=true' or use harness MCP tools."
+
+export const isInteractiveNxCommand = (command: string): boolean =>
+  extractCommandSegments(command).some((seg) => {
+    const bin = seg.commandWords[0]
+    if (bin !== "nx" && !(bin?.endsWith("/nx") ?? false)) {
+      return false
+    }
+    const nonFlagWords = seg.commandWords.slice(1).filter((tok) => !tok.startsWith("-"))
+    const isShowSubcommand =
+      nonFlagWords[0] === "show" ||
+      (seg.commandWords[1]?.startsWith("-") === true && nonFlagWords.includes("show"))
+    if (!isShowSubcommand) {
+      return false
+    }
+    const hasNonInteractiveEnv = seg.envAssignments.some(
+      (env) => env === "CI=true" || env === "CI=1" || env === "NX_INTERACTIVE=false"
+    )
+    return !hasNonInteractiveEnv
+  })
 
 /** Rule order is load-bearing (harness:ADR-0003): deny → ask → escalate → allow.
  * Every rule that removes the automatic `allow` must run before the prefix allowlist. */
@@ -309,6 +404,9 @@ export const classifyCommand = (command: string): GuardVerdict => {
     return "escalate"
   }
   if (isCdCommand(trimmed)) {
+    return "deny"
+  }
+  if (isInteractiveNxCommand(trimmed)) {
     return "deny"
   }
   const view = toCommandView(command)
@@ -327,7 +425,8 @@ export const classifyCommand = (command: string): GuardVerdict => {
   if (
     matchesAny(view.argv, DESTRUCTIVE_ARGUMENT_PATTERNS) ||
     FILE_REDIRECTION_PATTERN.test(view.unquoted) ||
-    matchesAny(command, OBFUSCATION_PATTERNS)
+    matchesAny(command, OBFUSCATION_PATTERNS) ||
+    /\$\(|`/.test(view.argv)
   ) {
     return "escalate"
   }
@@ -369,19 +468,23 @@ export interface FileWriteGuardResult {
 }
 
 export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
-  const norm = filePath.replace(/\\/g, "/").trim()
-  if (norm === "") {
+  const rawNorm = filePath.replace(/\\/g, "/").trim()
+  if (rawNorm === "") {
     return { verdict: "allow" }
   }
+  const norm = path.posix.normalize(rawNorm)
+  const candidates = rawNorm === norm ? [norm] : [rawNorm, norm]
 
-  if (/(^|\/)repos\/(effect|alchemy)(\/|$)/.test(norm)) {
+  if (candidates.some((p) => /(^|\/)repos\/(effect|alchemy)(\/|$)/.test(p))) {
     return {
       verdict: "deny",
       reason: `Protected read-only subtree cannot be modified: ${filePath}`
     }
   }
 
-  if (/(^|\/)\.harness\/(worktrees\/[^/]+\/)?verify-stamp\.json$/.test(norm)) {
+  if (
+    candidates.some((p) => /(^|\/)\.harness\/(worktrees\/[^/]+\/)?verify-stamp\.json$/.test(p))
+  ) {
     return {
       verdict: "deny",
       reason: `Direct modification of verify-stamp.json is forbidden (stamp forgery protection): ${filePath}`
@@ -389,8 +492,11 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
   }
 
   if (
-    /(^|\/)(\.env(\.[a-zA-Z0-9_-]+)?|\.dev\.vars|.*\.(pem|key))$/.test(norm) &&
-    !/\.(example|template|sample)$/i.test(norm)
+    candidates.some(
+      (p) =>
+        /(^|\/)(\.env(\.[a-zA-Z0-9_-]+)*|\.dev\.vars|.*\.(pem|key))$/.test(p) &&
+        !/\.(example|template|sample)$/i.test(p)
+    )
   ) {
     return {
       verdict: "deny",
@@ -399,8 +505,8 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
   }
 
   if (
-    /(^|\/)(\.oxlintrc\.json|tools\/oxlint\/.*|libs\/harness\/graph\/policies\.cedar)$/.test(
-      norm
+    candidates.some((p) =>
+      /(^|\/)(\.oxlintrc\.json|tools\/oxlint\/.*|libs\/harness\/graph\/policies\.cedar)$/.test(p)
     )
   ) {
     return {

@@ -8,6 +8,7 @@ import {
   clearFrictionEvents,
   decideFrictionClusters,
   readFrictionEvents,
+  resolveHarnessStateDir,
   summarizeFrictionEvents,
   type FrictionEvent
 } from "../src/index.js"
@@ -101,8 +102,8 @@ describe("Friction log and clustering", () => {
       expect(readBack[0]).toEqual(ev1)
       expect(readBack[1]?.summary).toBe("rm -rf")
 
-      // 3. Add malformed lines and empty lines to .harness/friction-log.jsonl
-      const filePath = join(tempDir, ".harness", "friction-log.jsonl")
+      // 3. Add malformed lines and empty lines to friction-log.jsonl
+      const filePath = join(resolveHarnessStateDir(tempDir), "friction-log.jsonl")
       const currentRaw = readFileSync(filePath, "utf-8")
       writeFileSync(
         filePath,

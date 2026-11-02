@@ -69,8 +69,11 @@ For each normalized finding `F-n`, run in-process Graph MCP tools instead of slo
 4. **Test Reachability Inspection (`harness_tests_reaching`):**
    - Identify all `@effect/vitest` `VitestCase` nodes exercising the target symbol or span.
    - If the reviewer claims a test gap, verify whether reaching test cases are missing, vacuous (`.thenFails()` with no expected error), or lack negative failure cases.
-5. **Specialist Lens Consultation (Optional for Contested Items):**
-   - If an item involves subtle concurrency races, trust boundaries, or adversarial state sequences, invoke read-only specialist reviewers (`effect-adversarial-reviewer`, `effect-ears-test-reviewer`, `effect-reliability-reviewer`, `effect-security-reviewer`) for targeted analysis before finalizing the verdict.
+5. **Specialist Lens Consultation (Mandatory for Core/Domain/Event Sourcing & Harness Gates):**
+   - For ANY task or contested finding touching `type:core`, `type:domain`, deciders, event sourcing, OR harness gate implementations (`libs/harness/**`, `tools/oxlint/**`), dispatching **BOTH** `effect-ears-test-reviewer` AND `effect-adversarial-reviewer` is strictly mandatory.
+   - **Audit the Entire Git Diff (`git diff main...HEAD`):** Specialist reviewers MUST audit all changed files in the branch — including `libs/harness/gates/**`, `libs/harness/graph/**`, and `tools/oxlint/**` ("Who guards the guards?") — never scope reviewers exclusively to `libs/<domain-scope>/**`.
+   - Prompts to reviewers MUST be neutral and adversarial ("Assume there are at least 3 P0/P1 bugs, false-negative bypasses, or fail-open fallbacks hiding across the diff; find them using the 7-Point Anti-Rubber-Stamp Audit") — never spoon-feed confirmation-biased prompts or assume implementations are correct.
+   - For trust boundaries or infra/resource questions, invoke `effect-security-reviewer` or `effect-reliability-reviewer` as appropriate.
 
 Assign each finding one disposition from the rubric:
 - `fix`: Single-location valid code defect.
@@ -131,7 +134,7 @@ Once all fixer reports are received and merged into the workspace:
    CI=true node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done
    ```
 
-2. **Compounding Gate Audit (`compounding-effect-learnings`):**
+2. **Compounding Gate Audit & Adversarial Evasion Matrix (`compounding-effect-learnings`):**
    For every valid `Critical` or `Important` review finding that previously slipped past `harness verify`, conduct the Compounding Audit:
    - Ask: *"Why did our deterministic gates allow this defect to exist?"*
    - Examples:
@@ -139,6 +142,7 @@ Once all fixer reports are received and merged into the workspace:
      - If `.thenFails()` had no expected error: add a regex rule or linter check forbidding bare `.thenFails()` without arguments.
      - If an edge-case mutation survived: add an operator to `libs/harness/gates/src/mutation-check.ts`.
      - If a recurring architectural question arose: run `node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts learn` and promote an ADR or pattern doc.
+   - **Adversarial Evasion Matrix for New/Modified Gates:** Whenever you add or modify a gate in `libs/harness/gates/src/policy.ts`, `libs/harness/graph/src/type-extractor.ts`, `tools/oxlint/syntax-bans.js`, or `libs/harness/gates/src/mutation-check.ts`, you MUST write unit tests covering adversarial evasion vectors (shell wrapper/quoting/subshell bypasses, multi-aggregate / multi-schema files where global `/Command$/` or `/State$/` regexes would zero out intersections, self-comparison `x.id === x.id` or comment bypasses, and `satisfies`/parenthesized type casts) and run `effect-adversarial-reviewer` directly against the gate implementation.
 
 ---
 
@@ -175,6 +179,7 @@ Once all fixer reports are received and merged into the workspace:
 
 Stop execution immediately and escalate or re-adjudicate if any of the following occur:
 
+- Introducing or accepting any `as any`, `: any`, `<any>`, `as never`, or double type assertions (`as unknown as T`) (immediate `CRITICAL` blocker; type erasure is strictly banned).
 - Applying a reviewer suggestion without checking against `repos/effect/LLMS.md` and `agent-patterns/*.md` (e.g. accepting `try/catch`, `async/await`, `switch` on `_tag`, or unredacted secrets).
 - Fixing a single instance of a reported defect without running `harness_structural_search` to identify and fix twins.
 - Allowing a fixer subagent to execute `harness verify`, `harness done`, or `@modernrelay/omnigraph-mcp` write tools.

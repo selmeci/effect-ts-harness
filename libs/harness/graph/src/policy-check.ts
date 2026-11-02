@@ -27,6 +27,12 @@ export interface GraphPolicyViolation {
     | "fallback-json-equality"
     | "vacuous-error-assertion"
     | "unscoped-effect-run"
+    | "unbranded-schema-field"
+    | "handwritten-tagged-union"
+    | "untraced-decider"
+    | "missing-aggregate-id-guard"
+    | "unasserted-state-field"
+    | "unsafe-type-cast"
     | "unbranded-contract-schema"
     | "unbranded-primitive-boundary"
   readonly message: string
@@ -249,7 +255,7 @@ export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphRe
     violations.push({
       rule: bv.rule,
       message: bv.message,
-      path: [bv.file, bv.enclosingSymbol]
+      path: bv.path ?? [bv.file, bv.enclosingSymbol]
     })
   }
 

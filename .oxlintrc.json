@@ -4,6 +4,7 @@
   "ignorePatterns": ["repos/**", "node_modules/**", "dist/**", "coverage/**"],
   "jsPlugins": ["./tools/oxlint/syntax-bans.js", "@nx/oxlint/boundaries-plugin"],
   "rules": {
+    "typescript/no-explicit-any": "error",
     "effecttsgo/unstable-api-usage": "off",
     "effecttsgo/lazy-effect": "error",
     "effecttsgo/redundant-or-die": "error",

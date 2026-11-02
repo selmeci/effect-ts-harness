@@ -39,6 +39,14 @@ const testPhotos: readonly Photo[] = [
   }
 ]
 
+const getExecErrorOutput = (err: unknown): string => {
+  if (typeof err === "object" && err !== null) {
+    const rec = err as { stdout?: string | Buffer; stderr?: string | Buffer }
+    return String(rec.stdout ?? "") + String(rec.stderr ?? "")
+  }
+  return String(err)
+}
+
 describe("SampleApiClient and AtomHttpApi", () => {
   it("exports SampleApiClient and derived query and mutation atoms", () => {
     expect(SampleApiClient).toBeDefined()
@@ -50,7 +58,7 @@ describe("SampleApiClient and AtomHttpApi", () => {
   })
 
   it("executes typed queries and mutations against SampleApi via AtomRegistry", async () => {
-    const MockSampleApiClient = AtomHttpApi.Service<any>()("MockSampleApiClient", {
+    class MockSampleApiClient extends AtomHttpApi.Service<MockSampleApiClient>()("MockSampleApiClient", {
       api: SampleApi,
       baseUrl: "http://localhost:8787",
       httpClient: Layer.succeed(
@@ -77,7 +85,7 @@ describe("SampleApiClient and AtomHttpApi", () => {
           })
         )
       )
-    })
+    }) {}
 
     const queryAtom = MockSampleApiClient.query("photos", "listPhotos", {})
     const getAtom = MockSampleApiClient.query("photos", "getPhoto", {
@@ -129,9 +137,9 @@ describe("SampleApiClient and AtomHttpApi", () => {
           stdio: "pipe",
           encoding: "utf-8"
         })
-      } catch (err: any) {
+      } catch (err: unknown) {
         failed = true
-        output = (err.stdout ?? "") + (err.stderr ?? "")
+        output = getExecErrorOutput(err)
       }
       expect(failed).toBe(true)
       expect(output).toMatch(/fetch/i)
@@ -157,9 +165,9 @@ describe("SampleApiClient and AtomHttpApi", () => {
           stdio: "pipe",
           encoding: "utf-8"
         })
-      } catch (err: any) {
+      } catch (err: unknown) {
         failed = true
-        output = (err.stdout ?? "") + (err.stderr ?? "")
+        output = getExecErrorOutput(err)
       }
       expect(failed).toBe(true)
       expect(output).toMatch(/scope:web|contract/i)
@@ -179,7 +187,7 @@ describe("SampleApiClient and AtomHttpApi", () => {
       },
       {
         file: path.resolve(repoRoot, "apps/sample-web/src/temp-sql-test.ts"),
-        code: "const db: any = {}; const id = 1;\nexport const q = db.prepare(`SELECT * FROM t WHERE id = ${id}`)\n",
+        code: "const db = { prepare: (q: string) => q }; const id = 1;\nexport const q = db.prepare(`SELECT * FROM t WHERE id = ${id}`)\n",
         match: /SQL injection risk/
       },
       {
@@ -210,9 +218,9 @@ describe("SampleApiClient and AtomHttpApi", () => {
             stdio: "pipe",
             encoding: "utf-8"
           })
-        } catch (err: any) {
+        } catch (err: unknown) {
           failed = true
-          output = (err.stdout ?? "") + (err.stderr ?? "")
+          output = getExecErrorOutput(err)
         }
         expect(failed).toBe(true)
         expect(output).toMatch(match)
@@ -254,9 +262,53 @@ describe("SampleApiClient and AtomHttpApi", () => {
             stdio: "pipe",
             encoding: "utf-8"
           })
-        } catch (err: any) {
+        } catch (err: unknown) {
           failed = true
-          output = (err.stdout ?? "") + (err.stderr ?? "")
+          output = getExecErrorOutput(err)
+        }
+        expect(failed).toBe(true)
+        expect(output).toMatch(match)
+      } finally {
+        if (fs.existsSync(file)) {
+          fs.unlinkSync(file)
+        }
+      }
+    }
+  })
+
+  it("enforces type-safety bans on any, never, and double type assertions via oxlint", () => {
+    const testCases = [
+      {
+        file: path.resolve(repoRoot, "apps/sample-web/src/temp-any-ban-test.ts"),
+        code: "export const x = 1 as" + " any\n",
+        match: /Explicit 'any'/
+      },
+      {
+        file: path.resolve(repoRoot, "apps/sample-web/src/temp-never-ban-test.ts"),
+        code: "export const y = 1 as" + " never\n",
+        match: /Unsafe 'never'/
+      },
+      {
+        file: path.resolve(repoRoot, "apps/sample-web/src/temp-double-cast-ban-test.ts"),
+        code: "export const z = 1 as" + " unknown as" + " string\n",
+        match: /Double type assertions/
+      }
+    ]
+
+    for (const { file, code, match } of testCases) {
+      try {
+        fs.writeFileSync(file, code)
+        let failed = false
+        let output = ""
+        try {
+          output = execSync(`pnpm exec oxlint ${file}`, {
+            cwd: repoRoot,
+            stdio: "pipe",
+            encoding: "utf-8"
+          })
+        } catch (err: unknown) {
+          failed = true
+          output = getExecErrorOutput(err)
         }
         expect(failed).toBe(true)
         expect(output).toMatch(match)

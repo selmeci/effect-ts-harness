@@ -150,7 +150,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
               const db = yield* DatabaseService
               const cache = yield* CacheService
               return {
-                findById: (id: string) => db.query("select * from users") as any
+                findById: (id: string) => Effect.succeed("user")
               }
             })
           )

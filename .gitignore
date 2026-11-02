@@ -19,4 +19,5 @@ coverage/
 .idea/
 .DS_Store
 .superpowers/
+.worktrees/
 skills/system/

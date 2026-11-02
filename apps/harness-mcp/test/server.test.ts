@@ -137,18 +137,51 @@ describe("harness-mcp tools", () => {
     expect(results.some((r) => r.file.includes("libs/sample/domain/src/index.ts"))).toBe(true)
   })
 
+  const makeMockDecisionModel = (
+    outcome:
+      | { readonly fitsAny: number; readonly block: string }
+      | { readonly error: AiError.AiError }
+  ): DecisionModel.DecisionModel =>
+    Effect.runSync(
+      DecisionModel.make({
+        decide: (options) => {
+          if ("error" in outcome) {
+            return Effect.fail(outcome.error)
+          }
+          const answers: Record<string, DecisionModel.ProviderAnswer> = {}
+          for (const [key, decision] of Object.entries(options.decisions)) {
+            if (decision._tag === "Probability") {
+              answers[key] = {
+                _tag: "Probability",
+                probability: key === "fitsAny" ? outcome.fitsAny : 0.9
+              }
+            } else if (decision._tag === "Classify") {
+              const labels = Object.keys(decision.criteria)
+              const chosen = key === "block" ? outcome.block : (labels[0] ?? "")
+              const probabilities: Record<string, number> = {}
+              for (const l of labels) {
+                probabilities[l] = l === chosen ? 1 : 0
+              }
+              answers[key] = {
+                _tag: "Classify",
+                label: chosen,
+                probabilities
+              }
+            }
+          }
+          return Effect.succeed({
+            answers,
+            usage: { inputTokens: 5, outputTokens: 5 }
+          })
+        }
+      })
+    )
+
   it("routes plan step with mock decisionLayer", async () => {
-    const mockModel: DecisionModel.DecisionModel = {
-      [DecisionModel.TypeId]: DecisionModel.TypeId,
-      decide: (() =>
-        Effect.succeed({
-          answers: {
-            fitsAny: { probability: 0.95 },
-            block: { label: "services-and-layers" }
-          },
-          usage: new DecisionModel.DecisionUsage({ inputTokens: 5, outputTokens: 5 })
-        })) as any
-    }
+    const mockModel = makeMockDecisionModel({
+      fitsAny: 0.95,
+      block: "services-and-layers"
+    })
     const decisionLayer = Layer.succeed(DecisionModel.DecisionModel, mockModel)
 
     const routed = await executeTool(
@@ -163,17 +196,10 @@ describe("harness-mcp tools", () => {
   })
 
   it("routes plan step to null patternFile for effect or review", async () => {
-    const effectModel: DecisionModel.DecisionModel = {
-      [DecisionModel.TypeId]: DecisionModel.TypeId,
-      decide: (() =>
-        Effect.succeed({
-          answers: {
-            fitsAny: { probability: 0.95 },
-            block: { label: "effect" }
-          },
-          usage: new DecisionModel.DecisionUsage({ inputTokens: 5, outputTokens: 5 })
-        })) as any
-    }
+    const effectModel = makeMockDecisionModel({
+      fitsAny: 0.95,
+      block: "effect"
+    })
     const effectLayer = Layer.succeed(DecisionModel.DecisionModel, effectModel)
 
     const routedEffect = await executeTool(
@@ -186,17 +212,10 @@ describe("harness-mcp tools", () => {
       patternFile: null
     })
 
-    const reviewModel: DecisionModel.DecisionModel = {
-      [DecisionModel.TypeId]: DecisionModel.TypeId,
-      decide: (() =>
-        Effect.succeed({
-          answers: {
-            fitsAny: { probability: 0.4 },
-            block: { label: "services-and-layers" }
-          },
-          usage: new DecisionModel.DecisionUsage({ inputTokens: 5, outputTokens: 5 })
-        })) as any
-    }
+    const reviewModel = makeMockDecisionModel({
+      fitsAny: 0.4,
+      block: "services-and-layers"
+    })
     const reviewLayer = Layer.succeed(DecisionModel.DecisionModel, reviewModel)
 
     const routedReview = await executeTool(
@@ -211,17 +230,13 @@ describe("harness-mcp tools", () => {
   })
 
   it("handles offline or failing decisionLayer gracefully", async () => {
-    const failingModel: DecisionModel.DecisionModel = {
-      [DecisionModel.TypeId]: DecisionModel.TypeId,
-      decide: (() =>
-        Effect.fail(
-          AiError.make({
-            module: "DecisionModel",
-            method: "decide",
-            reason: new AiError.UnknownError({ description: "Connection refused to Ollama" })
-          })
-        )) as any
-    }
+    const failingModel = makeMockDecisionModel({
+      error: AiError.make({
+        module: "DecisionModel",
+        method: "decide",
+        reason: new AiError.UnknownError({ description: "Connection refused to Ollama" })
+      })
+    })
     const failingLayer = Layer.succeed(DecisionModel.DecisionModel, failingModel)
 
     const routed = await executeTool(
@@ -232,6 +247,27 @@ describe("harness-mcp tools", () => {
     expect(routed).toEqual({
       block: "review",
       patternFile: null
+    })
+  })
+
+  it("dynamically falls back to agent-patterns files when routed to review", async () => {
+    const failingModel = makeMockDecisionModel({
+      error: AiError.make({
+        module: "DecisionModel",
+        method: "decide",
+        reason: new AiError.UnknownError({ description: "Connection refused to Ollama" })
+      })
+    })
+    const failingLayer = Layer.succeed(DecisionModel.DecisionModel, failingModel)
+
+    const routed = await executeTool(
+      "harness_route",
+      { planStep: "event sourcing decider core" },
+      { decisionLayer: failingLayer }
+    )
+    expect(routed).toEqual({
+      block: "event-sourcing",
+      patternFile: "agent-patterns/event-sourcing.md"
     })
   })
 

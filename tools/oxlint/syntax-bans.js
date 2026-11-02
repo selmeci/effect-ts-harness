@@ -44,6 +44,12 @@ const vacuousPropertyAssertMessage =
   "Vacuous assertion in property test: do not use toBeDefined(), toBeUndefined(), toBeTruthy(), toBeFalsy(), or existence checks to satisfy property test invariants — assert concrete domain invariants (e.g. toEqual, toBe, or pattern-matched structural predicates) to ensure the property test cannot pass vacuously."
 const impreciseFailureAssertMessage =
   "Imprecise Exit.Failure assertion: checking only exit._tag === 'Failure' masks assertion crashes and unexpected defects (Die) as expected domain errors (Fail). Assert Cause.hasDies(exit.cause) for runner defects or Cause.hasFails / match(exit) for typed domain errors."
+const explicitAnyBanMessage =
+  "Explicit 'any' (including 'as any', ': any', and '<any>') is strictly banned — every value must have an explicit, inferable static type or be decoded via Effect Schema."
+const unsafeNeverBanMessage =
+  "Unsafe 'never' ('as never' or explicit ': never' on parameters/variables) is banned — fix the underlying type mismatch or use exhaustive ts-pattern matching (.exhaustive()) instead of bypassing the type checker."
+const doubleTypeAssertionBanMessage =
+  "Double type assertions ('as unknown as T') are banned — decode untrusted data with Effect Schema or type the interface properly instead of erasing types."
 
 const BOOLEAN_STATE_PROP_REGEX =
   /^(is[A-Z]|has[A-Z]|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|published|expired)$/
@@ -1087,6 +1093,71 @@ function isSkippedOrFocusedTestCall(node) {
   return false
 }
 
+function unwrapTSParenthesizedType(typeNode) {
+  let curr = typeNode
+  while (curr != null && curr.type === "TSParenthesizedType" && curr.typeAnnotation != null) {
+    curr = curr.typeAnnotation
+  }
+  return curr
+}
+
+function unwrapAssertionInnerExpression(expr) {
+  let curr = expr
+  while (
+    curr != null &&
+    (curr.type === "ParenthesizedExpression" || curr.type === "TSSatisfiesExpression") &&
+    curr.expression != null
+  ) {
+    curr = curr.expression
+  }
+  return curr
+}
+
+function checkAsOrTypeAssertion(context, node) {
+  const targetType = unwrapTSParenthesizedType(node.typeAnnotation)
+  if (targetType != null && targetType.type === "TSNeverKeyword") {
+    context.report({ node, message: unsafeNeverBanMessage })
+  }
+  const innerExpr = unwrapAssertionInnerExpression(node.expression)
+  if (
+    innerExpr != null &&
+    (innerExpr.type === "TSAsExpression" || innerExpr.type === "TSTypeAssertion")
+  ) {
+    context.report({ node, message: doubleTypeAssertionBanMessage })
+  }
+}
+
+function checkNeverVariableDeclarator(context, node) {
+  if (node.id != null && node.id.typeAnnotation != null) {
+    const targetType = unwrapTSParenthesizedType(node.id.typeAnnotation.typeAnnotation)
+    if (targetType != null && targetType.type === "TSNeverKeyword") {
+      context.report({ node, message: unsafeNeverBanMessage })
+    }
+  }
+}
+
+function checkNeverParams(context, node) {
+  if (Array.isArray(node.params)) {
+    for (const param of node.params) {
+      if (param == null) continue
+      const typeAnnotation =
+        param.typeAnnotation != null
+          ? param.typeAnnotation
+          : param.type === "AssignmentPattern" && param.left != null
+            ? param.left.typeAnnotation
+            : param.type === "RestElement" && param.argument != null
+              ? param.argument.typeAnnotation
+              : null
+      if (typeAnnotation != null) {
+        const targetType = unwrapTSParenthesizedType(typeAnnotation.typeAnnotation)
+        if (targetType != null && targetType.type === "TSNeverKeyword") {
+          context.report({ node: param, message: unsafeNeverBanMessage })
+        }
+      }
+    }
+  }
+}
+
 const syntaxBans = {
   create(context) {
     const discriminantAliasNames = new Set()
@@ -1517,7 +1588,14 @@ const syntaxBans = {
       ImportDeclaration(node) {
         recordContractImports(node)
       },
+      TSAnyKeyword(node) {
+        context.report({ node, message: explicitAnyBanMessage })
+      },
+      TSTypeAssertion(node) {
+        checkAsOrTypeAssertion(context, node)
+      },
       VariableDeclarator(node) {
+        checkNeverVariableDeclarator(context, node)
         if (node.id != null && node.id.type === "Identifier") {
           if (isDiscriminantMemberAccess(node.init)) {
             discriminantAliasNames.add(node.id.name)
@@ -1550,6 +1628,7 @@ const syntaxBans = {
         checkContextServiceClass(node, filename)
       },
       TSAsExpression(node) {
+        checkAsOrTypeAssertion(context, node)
         const filename = getNormalizedFilename()
         if (isInternalHarnessFile(filename)) return
         if (!/libs\/[^/]+\/(contract|domain|core|service|infra)\/src\//.test(filename)) return
@@ -1560,9 +1639,18 @@ const syntaxBans = {
           )
         }
       },
-      FunctionDeclaration: reportAsync,
-      FunctionExpression: reportAsync,
-      ArrowFunctionExpression: reportAsync,
+      FunctionDeclaration(node) {
+        reportAsync(node)
+        checkNeverParams(context, node)
+      },
+      FunctionExpression(node) {
+        reportAsync(node)
+        checkNeverParams(context, node)
+      },
+      ArrowFunctionExpression(node) {
+        reportAsync(node)
+        checkNeverParams(context, node)
+      },
       AwaitExpression(node) {
         context.report({ node, message: asyncMessage })
       },
@@ -1869,7 +1957,17 @@ const testIntegrity = {
           context.report({ node, message: testTsIgnoreMessage })
         }
       },
+      TSAnyKeyword(node) {
+        context.report({ node, message: explicitAnyBanMessage })
+      },
+      TSAsExpression(node) {
+        checkAsOrTypeAssertion(context, node)
+      },
+      TSTypeAssertion(node) {
+        checkAsOrTypeAssertion(context, node)
+      },
       VariableDeclarator(node) {
+        checkNeverVariableDeclarator(context, node)
         if (
           node.id != null &&
           node.id.type === "Identifier" &&
@@ -1877,6 +1975,15 @@ const testIntegrity = {
         ) {
           discriminantAliasNames.add(node.id.name)
         }
+      },
+      FunctionDeclaration(node) {
+        checkNeverParams(context, node)
+      },
+      FunctionExpression(node) {
+        checkNeverParams(context, node)
+      },
+      ArrowFunctionExpression(node) {
+        checkNeverParams(context, node)
       },
       IfStatement(node) {
         const filename = getNormalizedFilename()
@@ -1913,8 +2020,9 @@ const testIntegrity = {
               const callbackText = getNodeSourceText(context, callbackArg)
               if (
                 (callbackText.includes("fold(") || /\bfold\s*\(/.test(callbackText)) &&
-                (/\.reduce\s*\(\s*[a-zA-Z0-9_$]*evolve/i.test(callbackText) ||
-                  /\.reduce\s*\([^)]*\bevolve/i.test(callbackText))
+                /\.reduce\s*\(\s*(?:(?:\([^)]*\)|[a-zA-Z0-9_$]+)\s*=>\s*)?[a-zA-Z0-9_$.]*\b(?:evolve|reduce)\w*/i.test(
+                  callbackText
+                )
               ) {
                 context.report({ node, message: tautologicalFoldPropMessage })
               }

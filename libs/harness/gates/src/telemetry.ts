@@ -86,9 +86,7 @@ export interface SessionReportInput {
 
 const TASK_WORK_TOOLS = new Set([
   "plan-check",
-  "ingest",
   "verify",
-  "gc",
   "mutate"
 ])
 

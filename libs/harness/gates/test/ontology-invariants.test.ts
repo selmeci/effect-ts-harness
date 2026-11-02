@@ -688,4 +688,66 @@ status: accepted
       )
     })
   )
+
+  it.effect("flags ontology-spec-adr-conflict when spec requirement specifies without dying on defects while ADR requires dying on defects", () =>
+    Effect.gen(function* () {
+      const graph = buildHarnessGraph({})
+
+      const specDoc: GovernanceDocReference = {
+        id: "sample:SPEC-0001",
+        docPath: "libs/sample/docs/specs/0001.md",
+        status: "accepted",
+        markdown: `---
+id: sample:SPEC-0001
+title: Photo Spec
+status: accepted
+---
+
+## Requirements
+
+### Area 1: Error Handling
+
+| ID | Pattern | Requirement | Effect Symbol | Verification |
+| --- | --- | --- | --- | --- |
+| REQ-1.1 | Event-driven | When photo is missing, the decider shall fail without dying on unexpected defects. | Album.decide | UnitTest |
+`
+      }
+
+      const adrDoc: GovernanceDocReference = {
+        id: "sample:ADR-0001",
+        docPath: "libs/sample/docs/adr/0001.md",
+        status: "accepted",
+        markdown: `---
+id: sample:ADR-0001
+title: Defect Handling Policy
+status: accepted
+enforced_by:
+  - libs/sample/domain/src/index.ts
+spans:
+  - Album.decide
+---
+
+# sample:ADR-0001: Defect Handling Policy
+
+## Decision Outcome
+
+In all test harnesses, unexpected execution failures must result in dying on unexpected defects immediately.
+`
+      }
+
+      const report = yield* decideOntologyInvariants({
+        graph,
+        governanceDocs: [specDoc, adrDoc]
+      })
+
+      expect(report.clean).toBe(false)
+      const conflictFinding = report.findings.find(
+        (f) =>
+          f.kind === "ontology-spec-adr-conflict" &&
+          f.nodeId === "sample:SPEC-0001:REQ-1.1"
+      )
+      expect(conflictFinding).toBeDefined()
+      expect(conflictFinding?.message).toContain("conflicts with ADR sample:ADR-0001")
+    })
+  )
 })

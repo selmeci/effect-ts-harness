@@ -15,6 +15,7 @@ export type OntologyInvariantFindingKind =
   | "ontology-conflicting-requirements"
   | "ontology-broken-realization-chain"
   | "ontology-unverified-requirement"
+  | "ontology-spec-adr-conflict"
 
 export interface OntologyInvariantFinding {
   readonly kind: OntologyInvariantFindingKind
@@ -74,6 +75,17 @@ const isContradiction = (textA: string, textB: string): boolean => {
   }
 
   return false
+}
+
+const getDocScope = (doc: GovernanceDocReference): string | undefined => {
+  if (doc.id.includes(":")) {
+    return doc.id.split(":")[0]
+  }
+  const match = doc.docPath.match(/(?:libs|apps)\/([^/]+)\//)
+  if (match) {
+    return match[1]
+  }
+  return undefined
 }
 
 export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(
@@ -302,6 +314,55 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(
                   kind: "ontology-conflicting-requirements",
                   nodeId: pairKey,
                   message: `Requirement ${rowA.specId}:${rowA.id} contradicts ${rowB.specId}:${rowB.id} for symbol "${rowA.effectSymbol}".`
+                })
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Rule 3b: ontology-spec-adr-conflict
+    const adrDocs = (input.governanceDocs ?? []).filter(
+      (doc) =>
+        doc.markdown !== undefined &&
+        (doc.docPath.includes("/adr/") ||
+          doc.id.includes(":ADR-") ||
+          doc.id.startsWith("ADR-"))
+    )
+
+    for (const spec of parsedSpecs) {
+      const specScope = getDocScope(spec.doc)
+      for (const row of spec.requirements) {
+        if (/\bwithout\s+dying\b.*\bdefect/i.test(row.requirement)) {
+          for (const adr of adrDocs) {
+            if (
+              adr.markdown &&
+              /\b(?:dying|die|dies)\s+on\s+(?:unhandled\s+|unexpected\s+)?defects\b/i.test(
+                adr.markdown
+              )
+            ) {
+              const adrScope = getDocScope(adr)
+              const sameScope =
+                (specScope !== undefined &&
+                  adrScope !== undefined &&
+                  specScope === adrScope) ||
+                (specScope === undefined && adrScope === undefined) ||
+                specScope === "harness" ||
+                adrScope === "harness"
+              const sharesSymbol =
+                row.effectSymbol !== undefined &&
+                row.effectSymbol.length > 0 &&
+                (adr.referencedSpans?.includes(row.effectSymbol) ||
+                  adr.referencedServices?.includes(row.effectSymbol) ||
+                  adr.referencedErrors?.includes(row.effectSymbol) ||
+                  adr.markdown.includes(row.effectSymbol))
+
+              if (sameScope || sharesSymbol) {
+                findings.push({
+                  kind: "ontology-spec-adr-conflict",
+                  nodeId: `${spec.doc.id}:${row.id}`,
+                  message: `Requirement ${spec.doc.id}:${row.id} conflicts with ADR ${adr.id}: requirement specifies 'without dying on defects' while ${adr.id} mandates dying on unexpected defects.`
                 })
               }
             }

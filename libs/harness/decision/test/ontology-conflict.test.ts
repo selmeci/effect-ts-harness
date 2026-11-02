@@ -1,5 +1,7 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Effect } from "effect"
+import { Effect, Layer } from "effect"
+import * as AiError from "effect/ai/AiError"
+import * as DecisionModel from "effect/ai/DecisionModel"
 import {
   assertDecisionLimits,
   checkOntologyInvariants,
@@ -188,6 +190,42 @@ How to persist photos.
       expect(conflicts[0]?.hasConflict).toBe(true)
       expect(conflicts[0]?.conflictKind).toBe("state-transition-conflict")
       expect(conflicts[0]?.sourceId).toBe("sample:SPEC-0001#REQ-1.1")
+    })
+  )
+
+  it.effect("short-circuits after 1 call when DecisionModel times out or fails on the first pair", () =>
+    Effect.gen(function* () {
+      let callCount = 0
+      const failingLayer = Layer.effect(
+        DecisionModel.DecisionModel,
+        DecisionModel.make({
+          decide: () => {
+            callCount++
+            return Effect.fail(
+              AiError.make({
+                module: "DecisionModel",
+                method: "decide",
+                reason: new AiError.UnknownError({ description: "Unavailable" })
+              })
+            )
+          }
+        })
+      )
+
+      const pairs = Array.from({ length: 16 }, (_, i) => ({
+        sourceId: `sample:SPEC-0001#REQ-${i}`,
+        sourceText: `Requirement ${i}`,
+        targetId: `sample:SPEC-0001#REQ-${i + 1}`,
+        targetText: `Requirement ${i + 1}`,
+        sharedSymbol: "Sample.operation"
+      }))
+
+      const conflicts = yield* evaluateOntologyConflicts(pairs).pipe(
+        Effect.provide(failingLayer)
+      )
+
+      expect(conflicts).toEqual([])
+      expect(callCount).toBe(1)
     })
   )
 })

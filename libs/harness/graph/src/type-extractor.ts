@@ -50,6 +50,31 @@ export interface TypeExtractorOptions {
   readonly patternDocs?: ReadonlyArray<PatternDocNode>
 }
 
+export interface TypeExtractorViolation {
+  readonly rule:
+    | "discriminant-branching"
+    | "non-exhaustive-union-match"
+    | "schema-boolean-state"
+    | "dead-event-payload"
+    | "terminal-state-unhandled"
+    | "fallback-json-equality"
+    | "vacuous-error-assertion"
+    | "unscoped-effect-run"
+    | "unbranded-schema-field"
+    | "handwritten-tagged-union"
+    | "untraced-decider"
+    | "missing-aggregate-id-guard"
+    | "unasserted-state-field"
+    | "unsafe-type-cast"
+    | "unbranded-contract-schema"
+    | "unbranded-primitive-boundary"
+  readonly message: string
+  readonly path: ReadonlyArray<string>
+  readonly file?: string | undefined
+  readonly line?: number | undefined
+  readonly enclosingSymbol?: string | undefined
+}
+
 const PackageJsonSchema = Schema.Struct({
   name: Schema.optional(Schema.String),
   nx: Schema.optional(
@@ -197,6 +222,10 @@ const findEnclosingSymbolName = (node: Node, relPath: string): string => {
   let curr: Node | undefined = node
   while (curr !== undefined) {
     if (Node.isVariableDeclaration(curr)) {
+      const name = curr.getName()
+      if (name) return `${relPath}#${name}`
+    }
+    if (Node.isClassDeclaration(curr)) {
       const name = curr.getName()
       if (name) return `${relPath}#${name}`
     }
@@ -482,6 +511,131 @@ export const extractTypeAwareGraphFromSource = (
     readonly line: number
   }
   const taggedSchemasByTag = new Map<string, TaggedSchemaInfo>()
+  const unionSchemaTagsByName = new Map<string, ReadonlyArray<string>>()
+
+  const resolveSchemasForParameter = (
+    param: ParameterDeclaration
+  ): ReadonlyArray<TaggedSchemaInfo> => {
+    const typeTexts = [
+      param.getTypeNode()?.getText() ?? "",
+      param.getType().getText(param)
+    ].join(" ")
+    const rawTokens = new Set<string>()
+    for (const m of typeTexts.matchAll(/\b([A-Za-z_$][A-Za-z0-9_$]*)\b/g)) {
+      const tok = m[1]
+      if (tok && tok !== "typeof" && tok !== "Type" && tok !== "Schema" && tok !== "Readonly") {
+        rawTokens.add(tok)
+      }
+    }
+    const expandedTags = new Set<string>()
+    const queue = [...rawTokens]
+    const visited = new Set<string>()
+    while (queue.length > 0) {
+      const curr = queue.shift()!
+      if (visited.has(curr)) continue
+      visited.add(curr)
+      const unionMembers = unionSchemaTagsByName.get(curr)
+      if (unionMembers) {
+        for (const member of unionMembers) {
+          queue.push(member)
+        }
+      }
+      if (taggedSchemasByTag.has(curr)) {
+        expandedTags.add(curr)
+      }
+    }
+    const result: Array<TaggedSchemaInfo> = []
+    for (const tag of expandedTags) {
+      const schema = taggedSchemasByTag.get(tag)
+      if (schema) {
+        result.push(schema)
+      }
+    }
+    return result
+  }
+
+  // 0. Zero-tolerance AST type safety check
+  for (const sourceFile of project.getSourceFiles()) {
+    const relPath = path.relative(repoRoot, sourceFile.getFilePath()).replace(/\\/g, "/")
+    const input = fileMap.get(relPath)
+    if (!input) continue
+
+    const checkNode = (node: ts.Node) => {
+      if (node.kind === ts.SyntaxKind.AnyKeyword) {
+        branchingViolations.push({
+          rule: "unsafe-type-cast",
+          message: `Explicit 'any' (as any, : any, <any>) is banned in '${input.filePath}' — use a concrete static type or decode via Effect Schema.`,
+          path: [input.filePath],
+          file: input.filePath,
+          line: sourceFile.compilerNode.getLineAndCharacterOfPosition(node.getStart(sourceFile.compilerNode)).line + 1,
+          enclosingSymbol: input.filePath
+        })
+      }
+
+      const unwrapTypeParen = (typeNode: ts.TypeNode): ts.TypeNode => {
+        let curr = typeNode
+        while (ts.isParenthesizedTypeNode(curr)) {
+          curr = curr.type
+        }
+        return curr
+      }
+
+      if (
+        (ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) &&
+        unwrapTypeParen(node.type).kind === ts.SyntaxKind.NeverKeyword
+      ) {
+        branchingViolations.push({
+          rule: "unsafe-type-cast",
+          message: `Unsafe 'as never' cast is banned in '${input.filePath}' — fix the type mismatch or use ts-pattern .exhaustive().`,
+          path: [input.filePath],
+          file: input.filePath,
+          line: sourceFile.compilerNode.getLineAndCharacterOfPosition(node.getStart(sourceFile.compilerNode)).line + 1,
+          enclosingSymbol: input.filePath
+        })
+      }
+
+      const unwrapExpr = (expr: ts.Expression): ts.Expression => {
+        let curr = expr
+        while (ts.isParenthesizedExpression(curr) || ts.isSatisfiesExpression(curr)) {
+          curr = curr.expression
+        }
+        return curr
+      }
+
+      if (ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) {
+        const inner = unwrapExpr(node.expression)
+        if (ts.isAsExpression(inner) || ts.isTypeAssertionExpression(inner)) {
+          branchingViolations.push({
+            rule: "unsafe-type-cast",
+            message: `Double type assertion ('as unknown as T') is banned in '${input.filePath}' — decode with Effect Schema or type the boundary properly.`,
+            path: [input.filePath],
+            file: input.filePath,
+            line: sourceFile.compilerNode.getLineAndCharacterOfPosition(node.getStart(sourceFile.compilerNode)).line + 1,
+            enclosingSymbol: input.filePath
+          })
+        }
+      }
+
+      if (
+        (ts.isParameter(node) || ts.isVariableDeclaration(node)) &&
+        node.type != null &&
+        unwrapTypeParen(node.type).kind === ts.SyntaxKind.NeverKeyword
+      ) {
+        branchingViolations.push({
+          rule: "unsafe-type-cast",
+          message: `Explicit ': never' annotation on parameter or variable is banned in '${input.filePath}'.`,
+          path: [input.filePath],
+          file: input.filePath,
+          line: sourceFile.compilerNode.getLineAndCharacterOfPosition(node.getStart(sourceFile.compilerNode)).line + 1,
+          enclosingSymbol: input.filePath
+        })
+      }
+
+      ts.forEachChild(node, checkNode)
+    }
+
+    checkNode(sourceFile.compilerNode)
+  }
 
   // 1. First pass: Extract Services, Errors, and Tagged Schemas
   for (const sourceFile of project.getSourceFiles()) {
@@ -595,13 +749,17 @@ export const extractTypeAwareGraphFromSource = (
               file: relPath,
               line: c.getStartLineNumber()
             })
+            const clsName = cls.getName()
+            if (clsName) {
+              unionSchemaTagsByName.set(clsName, [tag])
+            }
             break
           }
         }
       }
     }
 
-    // Collect Schema.TaggedStruct definitions in sourceFile
+    // Collect Schema.TaggedStruct, Schema.TaggedUnion, and Schema.Union definitions in sourceFile
     for (const callExpr of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
       const calleeText = callExpr.getExpression().getText()
       if (calleeText === "Schema.TaggedStruct" || calleeText === "S.TaggedStruct") {
@@ -619,6 +777,78 @@ export const extractTypeAwareGraphFromSource = (
             file: relPath,
             line: callExpr.getStartLineNumber()
           })
+          const parentVar = callExpr.getFirstAncestorByKind(SyntaxKind.VariableDeclaration)
+          if (parentVar) {
+            unionSchemaTagsByName.set(parentVar.getName(), [tag])
+          }
+        }
+      } else if (calleeText === "Schema.TaggedUnion" || calleeText === "S.TaggedUnion") {
+        const args = callExpr.getArguments()
+        if (args.length >= 1 && Node.isObjectLiteralExpression(args[0])) {
+          const memberTags: Array<string> = []
+          for (const prop of args[0].getProperties()) {
+            if (Node.isPropertyAssignment(prop)) {
+              const tag = prop.getName().replace(/^["'`]|["'`]$/g, "")
+              const initObj = prop.getInitializer()
+              const props =
+                initObj && Node.isObjectLiteralExpression(initObj)
+                  ? initObj
+                      .getProperties()
+                      .filter(Node.isPropertyAssignment)
+                      .map((p) => p.getName())
+                      .filter((n) => n !== "_tag" && n !== "version")
+                  : []
+              taggedSchemasByTag.set(tag, {
+                tag,
+                properties: props,
+                file: relPath,
+                line: prop.getStartLineNumber()
+              })
+              memberTags.push(tag)
+            }
+          }
+          const parentVar = callExpr.getFirstAncestorByKind(SyntaxKind.VariableDeclaration)
+          if (parentVar && memberTags.length > 0) {
+            unionSchemaTagsByName.set(parentVar.getName(), memberTags)
+          }
+        }
+      } else if (calleeText === "Schema.Union" || calleeText === "S.Union") {
+        const parentVar = callExpr.getFirstAncestorByKind(SyntaxKind.VariableDeclaration)
+        if (parentVar && parentVar.getInitializer() === callExpr) {
+          const memberNames: Array<string> = []
+          for (const arg of callExpr.getArguments()) {
+            if (Node.isArrayLiteralExpression(arg)) {
+              for (const el of arg.getElements()) {
+                if (Node.isIdentifier(el)) {
+                  memberNames.push(el.getText())
+                }
+              }
+            } else if (Node.isIdentifier(arg)) {
+              memberNames.push(arg.getText())
+            }
+          }
+          if (memberNames.length > 0) {
+            unionSchemaTagsByName.set(parentVar.getName(), memberNames)
+          }
+        }
+      }
+    }
+
+    for (const typeAlias of sourceFile.getTypeAliases()) {
+      const aliasName = typeAlias.getName()
+      if (!unionSchemaTagsByName.has(aliasName)) {
+        const typeNode = typeAlias.getTypeNode()
+        if (typeNode && Node.isUnionTypeNode(typeNode)) {
+          const members: Array<string> = []
+          for (const part of typeNode.getTypeNodes()) {
+            const text = part.getText().trim()
+            if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(text)) {
+              members.push(text)
+            }
+          }
+          if (members.length > 0) {
+            unionSchemaTagsByName.set(aliasName, members)
+          }
         }
       }
     }
@@ -1335,7 +1565,7 @@ export const extractTypeAwareGraphFromSource = (
       }
     }
 
-    // Schema.Struct boolean state check in type:contract and type:domain
+    // Schema.Struct, Schema.TaggedStruct, and Schema.TaggedClass check in type:contract and type:domain
     if (filePkgTag === "contract" || filePkgTag === "domain") {
       for (const callExpr of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
         const callee = callExpr.getExpression()
@@ -1347,12 +1577,58 @@ export const extractTypeAwareGraphFromSource = (
             (callee.getExpression().getText() === "Schema" ||
               callee.getExpression().getText() === "S"))
 
-        if (!isStructCall) continue
+        const isTaggedStructCall =
+          callee.getText() === "Schema.TaggedStruct" ||
+          callee.getText() === "S.TaggedStruct" ||
+          (Node.isPropertyAccessExpression(callee) &&
+            callee.getName() === "TaggedStruct" &&
+            (callee.getExpression().getText() === "Schema" ||
+              callee.getExpression().getText() === "S"))
+
+        const isTaggedClassCall = (() => {
+          if (Node.isCallExpression(callee)) {
+            const innerCallee = callee.getExpression()
+            const innerText = innerCallee.getText()
+            if (
+              innerText === "Schema.TaggedClass" ||
+              innerText === "S.TaggedClass" ||
+              (Node.isPropertyAccessExpression(innerCallee) &&
+                innerCallee.getName() === "TaggedClass" &&
+                (innerCallee.getExpression().getText() === "Schema" ||
+                  innerCallee.getExpression().getText() === "S"))
+            ) {
+              return true
+            }
+          }
+          if (
+            callee.getText() === "Schema.TaggedClass" ||
+            callee.getText() === "S.TaggedClass" ||
+            (Node.isPropertyAccessExpression(callee) &&
+              callee.getName() === "TaggedClass" &&
+              (callee.getExpression().getText() === "Schema" ||
+                callee.getExpression().getText() === "S"))
+          ) {
+            return true
+          }
+          return false
+        })()
+
+        if (!isStructCall && !isTaggedStructCall && !isTaggedClassCall) continue
 
         const args = callExpr.getArguments()
-        if (args.length === 0 || !Node.isObjectLiteralExpression(args[0])) continue
+        let objLit: Node | undefined = undefined
+        if (isStructCall && args.length >= 1 && Node.isObjectLiteralExpression(args[0])) {
+          objLit = args[0]
+        } else if (
+          (isTaggedStructCall || isTaggedClassCall) &&
+          args.length >= 2 &&
+          Node.isObjectLiteralExpression(args[1])
+        ) {
+          objLit = args[1]
+        }
 
-        const objLit = args[0]
+        if (!objLit || !Node.isObjectLiteralExpression(objLit)) continue
+
         const propAssignments: Array<{ name: string; node: Node; init: Node }> = []
         const propMap = new Map<string, { node: Node; init: Node }>()
 
@@ -1403,49 +1679,497 @@ export const extractTypeAwareGraphFromSource = (
         }
 
         for (const { name, node, init } of propAssignments) {
-          if (!isBooleanSchema(init)) continue
+          if (isBooleanSchema(init)) {
+            const matchesRegex =
+              /^(is[A-Z]|has[A-Z]|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|published|expired)$/.test(
+                name
+              ) ||
+              /^(is[A-Z]\w*|has[A-Z]\w*|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|published|expired)$/.test(
+                name
+              )
 
-          const matchesRegex =
-            /^(is[A-Z]|has[A-Z]|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|published|expired)$/.test(
-              name
-            ) ||
-            /^(is[A-Z]\w*|has[A-Z]\w*|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|published|expired)$/.test(
-              name
-            )
+            const hasCompanion = (() => {
+              const candidates = [
+                `${name}At`,
+                `${name}By`,
+                ...(name.startsWith("is") && name.length > 2
+                  ? [
+                      `${name[2]!.toLowerCase()}${name.slice(3)}At`,
+                      `${name[2]!.toLowerCase()}${name.slice(3)}By`
+                    ]
+                  : []),
+                ...(name.startsWith("has") && name.length > 3
+                  ? [
+                      `${name[3]!.toLowerCase()}${name.slice(4)}At`,
+                      `${name[3]!.toLowerCase()}${name.slice(4)}By`
+                    ]
+                  : [])
+              ]
+              for (const cand of candidates) {
+                const companion = propMap.get(cand)
+                if (companion && isNullOrOrOption(companion.init)) {
+                  return true
+                }
+              }
+              return false
+            })()
 
-          const hasCompanion = (() => {
-            const candidates = [
-              `${name}At`,
-              `${name}By`,
-              ...(name.startsWith("is") && name.length > 2
-                ? [
-                    `${name[2]!.toLowerCase()}${name.slice(3)}At`,
-                    `${name[2]!.toLowerCase()}${name.slice(3)}By`
-                  ]
-                : []),
-              ...(name.startsWith("has") && name.length > 3
-                ? [
-                    `${name[3]!.toLowerCase()}${name.slice(4)}At`,
-                    `${name[3]!.toLowerCase()}${name.slice(4)}By`
-                  ]
-                : [])
-            ]
-            for (const cand of candidates) {
-              const companion = propMap.get(cand)
-              if (companion && isNullOrOrOption(companion.init)) {
-                return true
+            if (matchesRegex || hasCompanion) {
+              const enclosingSymbol = findEnclosingSymbolName(node, relPath)
+              branchingViolations.push({
+                rule: "schema-boolean-state",
+                message: `Property '${name}' in '${enclosingSymbol}' uses boolean flag for lifecycle state in Schema.Struct — mutually exclusive lifecycle states must be modeled as a closed union (Schema.TaggedUnion / Schema.TaggedStruct) instead of boolean flags.`,
+                file: relPath,
+                line: node.getStartLineNumber(),
+                enclosingSymbol
+              })
+            }
+          }
+
+          // Rule A: unbranded-schema-field check
+          if (/^(quantity|streamVersion|expectedVersion)$/.test(name)) {
+            const initClean = init.getText().replace(/\s+/g, "")
+            const startsWithUnbrandedNum =
+              initClean.startsWith("Schema.Int") ||
+              initClean.startsWith("S.Int") ||
+              initClean.startsWith("Schema.Number") ||
+              initClean.startsWith("S.Number") ||
+              initClean.startsWith("Schema.Natural") ||
+              initClean.startsWith("S.Natural")
+
+            if (startsWithUnbrandedNum && !initClean.includes("brand(")) {
+              const enclosingSymbol = findEnclosingSymbolName(node, relPath)
+              branchingViolations.push({
+                rule: "unbranded-schema-field",
+                message: `Property '${name}' in '${enclosingSymbol}' uses unbranded '${init.getText()}' — domain quantity and version fields must use a branded contract schema (e.g. PositiveInt, StreamVersion, or .pipe(Schema.brand(...))) so invalid raw numbers cannot be passed at compile time.`,
+                file: relPath,
+                line: node.getStartLineNumber(),
+                enclosingSymbol
+              })
+            }
+          }
+        }
+      }
+    }
+
+    // Rule B: handwritten-tagged-union check
+    if (filePkgTag === "contract" || filePkgTag === "domain") {
+      for (const typeAlias of sourceFile.getTypeAliases()) {
+        const typeNode = typeAlias.getTypeNode()
+        if (typeNode && Node.isUnionTypeNode(typeNode)) {
+          let tagMemberCount = 0
+          for (const member of typeNode.getTypeNodes()) {
+            if (Node.isTypeLiteral(member)) {
+              if (member.getProperties().some((p) => p.getName() === "_tag")) {
+                tagMemberCount++
               }
             }
-            return false
-          })()
-
-          if (matchesRegex || hasCompanion) {
-            const enclosingSymbol = findEnclosingSymbolName(node, relPath)
+          }
+          if (tagMemberCount >= 2) {
             branchingViolations.push({
-              rule: "schema-boolean-state",
-              message: `Property '${name}' in '${enclosingSymbol}' uses boolean flag for lifecycle state in Schema.Struct — mutually exclusive lifecycle states must be modeled as a closed union (Schema.TaggedUnion / Schema.TaggedStruct) instead of boolean flags.`,
+              rule: "handwritten-tagged-union",
+              message: `Type alias '${typeAlias.getName()}' in '${relPath}' is a handwritten TypeScript union of '_tag' object literals — model domain states, commands, and events with Schema.Union / Schema.TaggedStruct / Schema.TaggedUnion and derive the type via 'typeof ${typeAlias.getName()}.Type'.`,
               file: relPath,
-              line: node.getStartLineNumber(),
+              line: typeAlias.getStartLineNumber(),
+              enclosingSymbol: `${relPath}#${typeAlias.getName()}`
+            })
+          }
+        }
+      }
+    }
+
+    // Rule C: untraced-decider check
+    const isTracedWithEffectFn = (node: Node): boolean => {
+      const text = node.getText()
+      if (text.startsWith("Effect.fn(") || text.includes("Effect.fn(")) {
+        return true
+      }
+      if (Node.isCallExpression(node)) {
+        const expr = node.getExpression()
+        if (Node.isCallExpression(expr)) {
+          const innerExpr = expr.getExpression()
+          if (innerExpr.getText() === "Effect.fn") return true
+        }
+        if (expr.getText() === "Effect.fn") return true
+      }
+      return false
+    }
+
+    // 1. Decider.make call sites
+    for (const callExpr of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+      const callee = callExpr.getExpression()
+      const calleeText = callee.getText()
+      if (calleeText === "Decider.make" || calleeText.endsWith(".Decider.make")) {
+        const args = callExpr.getArguments()
+        if (args.length > 0 && Node.isObjectLiteralExpression(args[0])) {
+          const objLit = args[0]
+          const decideProp = objLit.getProperty("decide")
+          if (decideProp) {
+            let isUntraced = false
+            if (Node.isMethodDeclaration(decideProp)) {
+              isUntraced = true
+            } else if (Node.isPropertyAssignment(decideProp)) {
+              const init = decideProp.getInitializer()
+              if (init) {
+                if (Node.isArrowFunction(init) || Node.isFunctionExpression(init)) {
+                  isUntraced = !isTracedWithEffectFn(init)
+                } else if (Node.isIdentifier(init)) {
+                  const idName = init.getText()
+                  const decl =
+                    sourceFile.getVariableDeclaration(idName) ??
+                    sourceFile.getFunction(idName)
+                  if (decl) {
+                    if (Node.isVariableDeclaration(decl)) {
+                      const declInit = decl.getInitializer()
+                      if (!declInit || !isTracedWithEffectFn(declInit)) {
+                        isUntraced = true
+                      }
+                    } else {
+                      isUntraced = true
+                    }
+                  }
+                } else if (!isTracedWithEffectFn(init)) {
+                  isUntraced = true
+                }
+              }
+            } else if (Node.isShorthandPropertyAssignment(decideProp)) {
+              const idName = decideProp.getName()
+              const decl =
+                sourceFile.getVariableDeclaration(idName) ??
+                sourceFile.getFunction(idName)
+              if (decl) {
+                if (Node.isVariableDeclaration(decl)) {
+                  const declInit = decl.getInitializer()
+                  if (!declInit || !isTracedWithEffectFn(declInit)) {
+                    isUntraced = true
+                  }
+                } else {
+                  isUntraced = true
+                }
+              }
+            }
+
+            if (isUntraced) {
+              const enclosingSymbol = findEnclosingSymbolName(callExpr, relPath)
+              branchingViolations.push({
+                rule: "untraced-decider",
+                message: `Decider.make in '${enclosingSymbol}' binds an untraced 'decide' function — 'decide' must be declared with Effect.fn("<Domain>.decide") for automatic span tracing.`,
+                file: relPath,
+                line: decideProp.getStartLineNumber(),
+                enclosingSymbol
+              })
+            }
+          }
+        }
+      }
+    }
+
+    // 2. Decider.make definitions inside files ending with decider.ts
+    if (relPath.endsWith("decider.ts") || relPath.endsWith("/decider.ts")) {
+      const makeCandidates: Array<{ name: string; node: Node; getBodyText: () => string }> = []
+
+      for (const varDecl of sourceFile.getVariableDeclarations()) {
+        if (varDecl.getName() === "make") {
+          const init = varDecl.getInitializer()
+          if (init && (Node.isArrowFunction(init) || Node.isFunctionExpression(init))) {
+            const body = init.getBody()
+            makeCandidates.push({
+              name: "make",
+              node: varDecl,
+              getBodyText: () => (body ? body.getText() : init.getText())
+            })
+          }
+        }
+      }
+      for (const fnDecl of sourceFile.getFunctions()) {
+        if (fnDecl.getName() === "make") {
+          const body = fnDecl.getBody()
+          makeCandidates.push({
+            name: "make",
+            node: fnDecl,
+            getBodyText: () => (body ? body.getText() : fnDecl.getText())
+          })
+        }
+      }
+      for (const prop of sourceFile.getDescendantsOfKind(SyntaxKind.PropertyAssignment)) {
+        if (prop.getName() === "make") {
+          const init = prop.getInitializer()
+          if (init && (Node.isArrowFunction(init) || Node.isFunctionExpression(init))) {
+            const body = init.getBody()
+            makeCandidates.push({
+              name: "make",
+              node: prop,
+              getBodyText: () => (body ? body.getText() : init.getText())
+            })
+          }
+        }
+      }
+      for (const method of sourceFile.getDescendantsOfKind(SyntaxKind.MethodDeclaration)) {
+        if (method.getName() === "make") {
+          const body = method.getBody()
+          makeCandidates.push({
+            name: "make",
+            node: method,
+            getBodyText: () => (body ? body.getText() : method.getText())
+          })
+        }
+      }
+
+      for (const cand of makeCandidates) {
+        const bodyText = cand.getBodyText()
+        const cleanBody = bodyText.replace(/\s+/g, "")
+        const hasTracing =
+          bodyText.includes("Effect.fn") ||
+          bodyText.includes("Effect.withSpan") ||
+          bodyText.includes("withSpan")
+
+        const returnsOptionsDirectly =
+          cleanBody === "options" ||
+          cleanBody === "{returnoptions;}" ||
+          cleanBody === "{returnoptions}" ||
+          /^\{?\s*return\s+options;?\s*\}?$/.test(bodyText.trim()) ||
+          bodyText.trim() === "options"
+
+        if (!hasTracing && returnsOptionsDirectly) {
+          branchingViolations.push({
+            rule: "untraced-decider",
+            message: `Decider.make in '${relPath}' returns options unchanged without enforcing or wrapping span tracing — wrap or trace options.decide (e.g. Effect.withSpan / Effect.fn) in Decider.make.`,
+            file: relPath,
+            line: cand.node.getStartLineNumber(),
+            enclosingSymbol: `${relPath}#make`
+          })
+        }
+      }
+    }
+
+    // Rule D: missing-aggregate-id-guard check
+    if (filePkgTag === "contract" || filePkgTag === "domain") {
+      const deciderCalls: Array<{ callNode: Node; genFn: Node }> = []
+
+      // Check VariableDeclarations initialized with Effect.fn("*.decide")(function* ...)
+      for (const varDecl of sourceFile.getVariableDeclarations()) {
+        const init = varDecl.getInitializer()
+        if (init && Node.isCallExpression(init)) {
+          const innerCall = init.getExpression()
+          if (Node.isCallExpression(innerCall)) {
+            const innerCallee = innerCall.getExpression()
+            if (innerCallee.getText() === "Effect.fn") {
+              const spanArg = innerCall.getArguments()[0]
+              if (spanArg && Node.isStringLiteral(spanArg)) {
+                const spanName = spanArg.getLiteralText()
+                if (spanName.endsWith(".decide") || spanName === "decide") {
+                  const args = init.getArguments()
+                  if (args.length > 0 && (Node.isFunctionExpression(args[0]!) || Node.isArrowFunction(args[0]!))) {
+                    deciderCalls.push({ callNode: varDecl, genFn: args[0]! })
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // Also check any CallExpression of Effect.fn("*.decide")(function* ...) anywhere (e.g. inside Decider.make)
+      for (const callExpr of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+        const innerCall = callExpr.getExpression()
+        if (Node.isCallExpression(innerCall)) {
+          const innerCallee = innerCall.getExpression()
+          if (innerCallee.getText() === "Effect.fn") {
+            const spanArg = innerCall.getArguments()[0]
+            if (spanArg && Node.isStringLiteral(spanArg)) {
+              const spanName = spanArg.getLiteralText()
+              if (spanName.endsWith(".decide") || spanName === "decide") {
+                const args = callExpr.getArguments()
+                if (args.length > 0 && (Node.isFunctionExpression(args[0]!) || Node.isArrowFunction(args[0]!))) {
+                  if (!deciderCalls.some((c) => c.genFn === args[0]!)) {
+                    deciderCalls.push({ callNode: callExpr, genFn: args[0]! })
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      for (const { callNode, genFn } of deciderCalls) {
+        let params: ReadonlyArray<ParameterDeclaration> = []
+        if (Node.isFunctionExpression(genFn) || Node.isArrowFunction(genFn)) {
+          params = genFn.getParameters()
+        }
+        if (params.length < 2) continue
+
+        const cmdParam = params[0]!
+        const stateParam = params[1]!
+
+        // 1. Collect *Id properties present across ALL command variants
+        const cmdIdProps = new Set<string>()
+        const cmdType = cmdParam.getType()
+        const cmdParts = cmdType.isUnion() ? cmdType.getUnionTypes() : [cmdType]
+        if (cmdParts.length > 0) {
+          const perPartIds = cmdParts.map((part) => {
+            const set = new Set<string>()
+            for (const p of part.getProperties()) {
+              const pName = p.getName()
+              if (pName.endsWith("Id") && pName !== "commandId" && pName !== "id") {
+                set.add(pName)
+              }
+            }
+            return set
+          })
+          const firstSet = perPartIds[0]!
+          for (const idName of firstSet) {
+            if (perPartIds.every((s) => s.has(idName))) {
+              cmdIdProps.add(idName)
+            }
+          }
+        }
+        if (cmdIdProps.size === 0) {
+          const matchingCmdSchemas = resolveSchemasForParameter(cmdParam)
+          if (matchingCmdSchemas.length > 0) {
+            const firstProps = matchingCmdSchemas[0]!.properties.filter(
+              (p) => p.endsWith("Id") && p !== "commandId" && p !== "id"
+            )
+            for (const p of firstProps) {
+              if (matchingCmdSchemas.every((s) => s.properties.includes(p))) {
+                cmdIdProps.add(p)
+              }
+            }
+          }
+        }
+
+        // 2. Collect *Id properties on stateParam constituents that carry aggregate IDs
+        const stateIdProps = new Set<string>()
+        const stateType = stateParam.getType()
+        const stateParts = stateType.isUnion() ? stateType.getUnionTypes() : [stateType]
+        const statePartsWithIds = stateParts
+          .map((part) => {
+            const set = new Set<string>()
+            for (const p of part.getProperties()) {
+              const pName = p.getName()
+              if (pName.endsWith("Id") && pName !== "commandId" && pName !== "id") {
+                set.add(pName)
+              }
+            }
+            return set
+          })
+          .filter((set) => set.size > 0)
+        if (statePartsWithIds.length > 0) {
+          for (const idName of statePartsWithIds[0]!) {
+            if (statePartsWithIds.every((s) => s.has(idName))) {
+              stateIdProps.add(idName)
+            }
+          }
+        }
+        if (stateIdProps.size === 0) {
+          const matchingStateSchemas = resolveSchemasForParameter(stateParam).filter((s) =>
+            s.properties.some((p) => p.endsWith("Id") && p !== "commandId" && p !== "id")
+          )
+          if (matchingStateSchemas.length > 0) {
+            const firstProps = matchingStateSchemas[0]!.properties.filter(
+              (p) => p.endsWith("Id") && p !== "commandId" && p !== "id"
+            )
+            for (const p of firstProps) {
+              if (matchingStateSchemas.every((s) => s.properties.includes(p))) {
+                stateIdProps.add(p)
+              }
+            }
+          }
+        }
+
+        // 3. Find shared aggregate ID properties present on BOTH command and state
+        const sharedIdProps = [...cmdIdProps].filter((id) => stateIdProps.has(id))
+
+        if (sharedIdProps.length === 0) continue
+
+        let bodyNode: Node | undefined = undefined
+        if (Node.isFunctionExpression(genFn) || Node.isArrowFunction(genFn)) {
+          bodyNode = genFn.getBody()
+        }
+        if (!bodyNode) continue
+
+        const bodyText = stripCommentsAndTestTitles(bodyNode.getText())
+
+        for (const idProp of sharedIdProps) {
+          let hasIdComparison = false
+          const receiverRegex = new RegExp(`([a-zA-Z0-9_$]+)\\.${idProp}\\b`)
+
+          const hasDistinctReceivers = (aText: string, bText: string): boolean => {
+            const mA = aText.match(receiverRegex)
+            const mB = bText.match(receiverRegex)
+            return Boolean(mA && mB && mA[1] !== mB[1])
+          }
+
+          // 1. BinaryExpression check
+          for (const bin of bodyNode.getDescendantsOfKind(SyntaxKind.BinaryExpression)) {
+            const opKind = bin.getOperatorToken().getKind()
+            if (
+              opKind === SyntaxKind.EqualsEqualsEqualsToken ||
+              opKind === SyntaxKind.ExclamationEqualsEqualsToken ||
+              opKind === SyntaxKind.EqualsEqualsToken ||
+              opKind === SyntaxKind.ExclamationEqualsToken
+            ) {
+              const leftText = bin.getLeft().getText()
+              const rightText = bin.getRight().getText()
+              if (hasDistinctReceivers(leftText, rightText)) {
+                hasIdComparison = true
+                break
+              }
+            }
+          }
+
+          // 2. Equal.equals check
+          if (!hasIdComparison) {
+            for (const call of bodyNode.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+              const calleeText = call.getExpression().getText()
+              if (calleeText === "Equal.equals" || calleeText.endsWith(".Equal.equals")) {
+                const cArgs = call.getArguments()
+                if (
+                  cArgs.length >= 2 &&
+                  hasDistinctReceivers(cArgs[0]!.getText(), cArgs[1]!.getText())
+                ) {
+                  hasIdComparison = true
+                  break
+                }
+              }
+            }
+          }
+
+          // 3. Regex checks on comment-stripped bodyText with distinct receivers
+          if (!hasIdComparison) {
+            const compareRegex = new RegExp(
+              `\\b([a-zA-Z0-9_$]+)\\.${idProp}\\b\\s*(?:===|!==|==|!=)\\s*\\b([a-zA-Z0-9_$]+)\\.${idProp}\\b`
+            )
+            const m = bodyText.match(compareRegex)
+            if (m && m[1] !== m[2]) {
+              hasIdComparison = true
+            }
+          }
+          if (!hasIdComparison) {
+            const equalsRegex = new RegExp(
+              `Equal\\.equals\\(\\s*\\b([a-zA-Z0-9_$]+)\\.${idProp}\\b\\s*,\\s*\\b([a-zA-Z0-9_$]+)\\.${idProp}\\b\\s*\\)`
+            )
+            const m = bodyText.match(equalsRegex)
+            if (m && m[1] !== m[2]) {
+              hasIdComparison = true
+            }
+          }
+          if (!hasIdComparison) {
+            const guardRegex = new RegExp(
+              `(?:if|when)\\s*\\([^)]*\\b([a-zA-Z0-9_$]+)\\.${idProp}\\b[^)]*\\b([a-zA-Z0-9_$]+)\\.${idProp}\\b`
+            )
+            const m = bodyText.match(guardRegex)
+            if (m && m[1] !== m[2]) {
+              hasIdComparison = true
+            }
+          }
+
+          if (!hasIdComparison) {
+            const enclosingSymbol = findEnclosingSymbolName(callNode, relPath)
+            branchingViolations.push({
+              rule: "missing-aggregate-id-guard",
+              message: `Decider '${enclosingSymbol}' accepts command and state that both carry aggregate identifier '${idProp}', but never verifies that command.${idProp} matches state.${idProp} on existing state variants.`,
+              file: relPath,
+              line: callNode.getStartLineNumber(),
               enclosingSymbol
             })
           }
@@ -1887,22 +2611,62 @@ export const extractTypeAwareGraphFromSource = (
               }
             }
           }
+          if (terminalVariantName === null) {
+            for (const stSchema of resolveSchemasForParameter(stateParam)) {
+              if (TERMINAL_VARIANT_REGEX.test(stSchema.tag)) {
+                terminalVariantName = stSchema.tag
+                break
+              }
+            }
+          }
 
           if (terminalVariantName !== null) {
+            const stateParamName = stateParam.getName()
+            const isMatchingOnState = (mArg: Node): boolean => {
+              const text = mArg.getText()
+              return new RegExp(`\\b${stateParamName}\\b`).test(text)
+            }
+            const findRootMatchCall = (node: Node): CallExpression | null => {
+              let curr: Node = node
+              while (Node.isCallExpression(curr)) {
+                const callee = curr.getExpression()
+                if (callee.getText() === "match") {
+                  return curr
+                }
+                if (Node.isPropertyAccessExpression(callee)) {
+                  curr = callee.getExpression()
+                } else {
+                  break
+                }
+              }
+              return null
+            }
+
             for (const callExpr of fnNode.getDescendantsOfKind(SyntaxKind.CallExpression)) {
               if (callExpr.getExpression().getText() === "match") {
                 const matchArg = callExpr.getArguments()[0]
                 if (matchArg) {
                   const matchArgText = matchArg.getText()
                   const eventParamName = eventParam.getName()
-                  if (matchArgText === eventParamName || matchArgText === "event" || matchArgText === "ev") {
-                    branchingViolations.push({
-                      rule: "terminal-state-unhandled",
-                      message: `Reducer '${enclosingSymbol}' matches only on '${matchArgText}' without checking for terminal state '${terminalVariantName}' — terminal states must be matched on 'state' to preserve terminality during event folding.`,
-                      file: relPath,
-                      line: callExpr.getStartLineNumber(),
-                      enclosingSymbol
+                  if (
+                    matchArgText === eventParamName ||
+                    matchArgText === "event" ||
+                    matchArgText === "ev"
+                  ) {
+                    const hasEnclosingStateMatch = callExpr.getAncestors().some((anc) => {
+                      const rootMatch = findRootMatchCall(anc)
+                      const arg0 = rootMatch?.getArguments()[0]
+                      return arg0 !== undefined && isMatchingOnState(arg0)
                     })
+                    if (!hasEnclosingStateMatch) {
+                      branchingViolations.push({
+                        rule: "terminal-state-unhandled",
+                        message: `Reducer '${enclosingSymbol}' matches only on '${matchArgText}' without checking for terminal state '${terminalVariantName}' — terminal states must be matched on 'state' to preserve terminality during event folding.`,
+                        file: relPath,
+                        line: callExpr.getStartLineNumber(),
+                        enclosingSymbol
+                      })
+                    }
                   }
                 }
               }
@@ -1929,41 +2693,19 @@ export const extractTypeAwareGraphFromSource = (
               stateProps.add(p.getName())
             }
           }
-        }
-
-        // Add state properties from any stateTag in taggedSchemasByTag
-        for (const stateTag of stateTagSet) {
-          const stSchema = taggedSchemasByTag.get(stateTag)
-          if (stSchema) {
+          for (const stSchema of resolveSchemasForParameter(stateParam)) {
+            stateTagSet.add(stSchema.tag)
             for (const p of stSchema.properties) {
               stateProps.add(p)
             }
           }
         }
 
-        for (const [tag, schema] of taggedSchemasByTag.entries()) {
-          if (stateTagSet.has(tag) || /State$/i.test(tag) || /State\b/i.test(tag)) {
-            for (const p of schema.properties) {
+        for (const stateTag of stateTagSet) {
+          const stSchema = taggedSchemasByTag.get(stateTag)
+          if (stSchema) {
+            for (const p of stSchema.properties) {
               stateProps.add(p)
-            }
-          }
-        }
-
-        for (const typeAlias of sourceFile.getTypeAliases()) {
-          if (/State\b/i.test(typeAlias.getName())) {
-            const t = typeAlias.getType()
-            const parts = t.isUnion() ? t.getUnionTypes() : [t]
-            for (const part of parts) {
-              for (const p of part.getProperties()) {
-                stateProps.add(p.getName())
-              }
-            }
-          }
-        }
-        for (const iface of sourceFile.getInterfaces()) {
-          if (/State\b/i.test(iface.getName())) {
-            for (const p of iface.getType().getProperties()) {
-              stateProps.add(p.getName())
             }
           }
         }
@@ -1982,6 +2724,9 @@ export const extractTypeAwareGraphFromSource = (
                 eventTagSet.add(rawTag)
               }
             }
+          }
+          for (const evSchema of resolveSchemasForParameter(eventParam)) {
+            eventTagSet.add(evSchema.tag)
           }
         }
 
@@ -2068,8 +2813,12 @@ export const extractTypeAwareGraphFromSource = (
             }
           }
 
-          // Check identifiers in handler body
+          // Check identifiers in handler body (excluding PropertyAssignment property keys)
           for (const ident of handler.getDescendantsOfKind(SyntaxKind.Identifier)) {
+            const parent = ident.getParent()
+            if (parent && Node.isPropertyAssignment(parent) && parent.getNameNode() === ident) {
+              continue
+            }
             const identText = ident.getText()
             for (const tag of matchedTagsInWith) {
               const schema = taggedSchemasByTag.get(tag)
@@ -2139,6 +2888,15 @@ export const extractTypeAwareGraphFromSource = (
     }
   }
 
+  const inMemoryTests = files.filter((f) => f.filePath.includes(".test.ts"))
+  if (inMemoryTests.length > 0) {
+    const unasserted = checkUnassertedStateFieldsForInputs(
+      files.filter((f) => !f.filePath.includes(".test.ts")),
+      inMemoryTests.map((t) => ({ filePath: t.filePath, getContent: () => t.content }))
+    )
+    branchingViolations.push(...unasserted)
+  }
+
   return buildHarnessGraph({
     fns,
     services,
@@ -2154,6 +2912,97 @@ export const extractTypeAwareGraphFromSource = (
     exercisesSpans: [],
     branchingViolations
   })
+}
+
+const checkUnassertedStateFieldsForInputs = (
+  sourceInputs: ReadonlyArray<SourceFileInput>,
+  testFiles: ReadonlyArray<{ filePath: string; getContent: () => string }>
+): ReadonlyArray<BranchingViolation> => {
+  const violations: Array<BranchingViolation> = []
+  const astProject = new Project({ useInMemoryFileSystem: true })
+
+  for (const input of sourceInputs) {
+    if (!/\bevolve\w*\b/.test(input.content)) continue
+
+    const scope = getScopeDir(input.filePath)
+    if (!scope) continue
+
+    const scopeTestFiles = testFiles.filter(
+      (relTestFile) =>
+        getScopeDir(relTestFile.filePath) === scope &&
+        !relTestFile.filePath.includes("/test/fixtures/")
+    )
+    if (scopeTestFiles.length === 0) continue
+
+    const sf = astProject.createSourceFile(
+      `temp_evolve_${Math.random().toString(36).slice(2)}.ts`,
+      input.content
+    )
+    const evolveFns: Array<Node> = []
+
+    for (const fnDecl of sf.getFunctions()) {
+      const name = fnDecl.getName()
+      if (name && /^evolve/i.test(name)) {
+        evolveFns.push(fnDecl)
+      }
+    }
+    for (const varDecl of sf.getVariableDeclarations()) {
+      const name = varDecl.getName()
+      if (/^evolve/i.test(name)) {
+        const init = varDecl.getInitializer()
+        if (init && (Node.isArrowFunction(init) || Node.isFunctionExpression(init))) {
+          evolveFns.push(init)
+        }
+      }
+    }
+
+    const assignedFields = new Set<string>()
+    for (const fnNode of evolveFns) {
+      for (const objLit of fnNode.getDescendantsOfKind(SyntaxKind.ObjectLiteralExpression)) {
+        for (const prop of objLit.getProperties()) {
+          let propName: string | null = null
+          if (Node.isPropertyAssignment(prop) || Node.isShorthandPropertyAssignment(prop)) {
+            propName = prop.getName()
+          }
+          if (
+            propName &&
+            propName !== "_tag" &&
+            !propName.endsWith("Id") &&
+            propName !== "id"
+          ) {
+            assignedFields.add(propName)
+          }
+        }
+      }
+    }
+
+    if (assignedFields.size > 0) {
+      let combinedTestContent = ""
+      for (const t of scopeTestFiles) {
+        combinedTestContent += " " + stripCommentsAndTestTitles(t.getContent())
+      }
+
+      for (const field of assignedFields) {
+        const dotReadRegex = new RegExp("\\.\\s*" + field + "\\b")
+        const assertionBlockRegex = new RegExp(
+          `(?:expect|Equal\\.equals)\\s*\\([\\s\\S]{0,240}?\\b${field}\\b`
+        )
+        if (!dotReadRegex.test(combinedTestContent) && !assertionBlockRegex.test(combinedTestContent)) {
+          violations.push({
+            rule: "unasserted-state-field",
+            message: `State property '${field}' computed in reducer '${input.filePath}' is never read or asserted in any test file in scope '${scope}' — add fold assertions verifying '${field}' on folded states.`,
+            file: input.filePath,
+            line: 1,
+            enclosingSymbol: `${input.filePath}#evolve`
+          })
+        }
+      }
+    }
+
+    astProject.removeSourceFile(sf)
+  }
+
+  return violations
 }
 
 const findWorkspaceSrcFiles = (repoRoot: string): ReadonlyArray<string> => {
@@ -2658,6 +3507,16 @@ export const extractWorkspaceTypeAwareGraph = (
       }
     }
 
+    // Rule E: unasserted-state-field check
+    const testFilesWithContent = testFiles.map((relTestFile) => ({
+      filePath: relTestFile,
+      getContent: () => {
+        const fullPath = path.join(root, relTestFile)
+        return fs.existsSync(fullPath) ? fs.readFileSync(fullPath, "utf-8") : ""
+      }
+    }))
+    const unassertedStateViolations = checkUnassertedStateFieldsForInputs(inputs, testFilesWithContent)
+
     const augmentedGraph = Graph.mutate<HarnessNode, HarnessEdge>(
       baseGraph.graph,
       (mutable) => {
@@ -2875,9 +3734,14 @@ export const extractWorkspaceTypeAwareGraph = (
       }
     )
 
+    const combinedViolations = [
+      ...(baseGraph.branchingViolations ?? []),
+      ...unassertedStateViolations
+    ]
+
     return {
       graph: augmentedGraph,
       nodeIndexByKey: updatedNodeIndexByKey,
-      branchingViolations: baseGraph.branchingViolations
+      branchingViolations: combinedViolations
     } satisfies HarnessGraph
   })

@@ -77,6 +77,7 @@ export interface OntologyConflictResult {
   readonly probability: number
   readonly conflictKind: OntologyConflictKind
   readonly reason: string
+  readonly timedOutOrUnavailable?: boolean
 }
 
 export const checkOntologyPairConflict = Effect.fn(
@@ -93,7 +94,8 @@ export const checkOntologyPairConflict = Effect.fn(
       probability: 0,
       conflictKind: "none" as const,
       reason:
-        "DecisionModel unavailable or timed out; relying on deterministic ontology invariants."
+        "DecisionModel unavailable or timed out; relying on deterministic ontology invariants.",
+      timedOutOrUnavailable: true
     } satisfies OntologyConflictResult
   }
 
@@ -115,7 +117,8 @@ export const checkOntologyPairConflict = Effect.fn(
       : ("none" as const),
     reason: hasConflict
       ? `Semantic conflict (${answers.conflictKind.label}, p=${answers.contradicts.probability}) between ${input.sourceId} and ${input.targetId} on ${input.sharedSymbol}.`
-      : `No semantic conflict detected between ${input.sourceId} and ${input.targetId}.`
+      : `No semantic conflict detected between ${input.sourceId} and ${input.targetId}.`,
+    timedOutOrUnavailable: false
   } satisfies OntologyConflictResult
 })
 
@@ -294,14 +297,29 @@ export const extractOntologyConflictPairs = (
 export const evaluateOntologyConflicts = Effect.fn(
   "Harness.evaluateOntologyConflicts"
 )(function* (pairs: ReadonlyArray<OntologyConflictInput>) {
-  const evaluated = yield* Effect.forEach(
-    pairs,
+  if (pairs.length === 0) {
+    return []
+  }
+
+  const firstPair = pairs[0]!
+  const firstResult = yield* checkOntologyPairConflict(firstPair)
+
+  if (firstResult.timedOutOrUnavailable === true) {
+    return []
+  }
+
+  const firstEvaluated = { ...firstPair, ...firstResult }
+  const rest = pairs.slice(1)
+  const restEvaluated = yield* Effect.forEach(
+    rest,
     (pair) =>
       checkOntologyPairConflict(pair).pipe(
         Effect.map((res) => ({ ...pair, ...res }))
       ),
     { concurrency: 4 }
   )
+
+  const evaluated = [firstEvaluated, ...restEvaluated]
   return evaluated.filter((res) => res.hasConflict) as ReadonlyArray<
     OntologyConflictResult & OntologyConflictInput
   >

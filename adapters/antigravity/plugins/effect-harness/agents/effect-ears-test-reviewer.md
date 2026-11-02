@@ -23,6 +23,9 @@ First, **locate and read the feature's specification file in `libs/<scope>/docs/
 
 Audit test suites (`*.test.ts`, `*.spec.ts`) and corresponding implementations for these critical failure modes:
 
+### 0. Zero-Tolerance Type-Cast & Type-Erasure Bans (CRITICAL / P0)
+Flag ANY instance of `as any`, `: any`, `<any>`, `as never`, or double type assertions (`as unknown as T`) in production OR test code as an immediate `CRITICAL` (`P0`) blocker. Code must use concrete, inferable types or decode untrusted data via Effect Schema.
+
 ### 1. Missing EARS Clause & Spec Symbol Coverage
 Every requirement specified in the EARS spec must map to an explicit, behavior-sensitive test assertion:
 - **Spec Symbol Parity:** Every span declared in `spans` and every error declared in `errors` in the spec frontmatter must be directly exercised by tests.
@@ -55,6 +58,18 @@ Flag any test that can pass without exercising real production logic:
 Effect tracing is the foundation of runtime observability and graph verification:
 - **Runtime Test Tracer:** Tests must use `runWithTestTracer` to assert recorded call edges (`edges.tracedCalls`) and reaching test edges (`edges.exercisesSpans`).
 - **Span Budget Assertions:** Tests asserting multi-step or batched operations must invoke `checkSpanBudgets` (`SpanBudget.decide`) to protect against N+1 regressions (`maxRepeatedChildCalls` threshold, e.g. $\le 3$) and verify latency constraints (`maxSpanDurationMs`).
+
+## 7-Point Anti-Rubber-Stamp Deep Audit (Mandatory Before PASS)
+
+Prior to issuing a PASS recommendation or concluding a review, you MUST systematically execute every check in this 7-point audit and report concrete findings or explicit verification evidence:
+
+1. **Spec-vs-ADR Polarity Check:** Verify no EARS requirement uses inverted negative phrasing (e.g., `"without dying on unexpected defects"`) that contradicts ADR rules or `testing.ts` assertions (`Cause.hasDies`).
+2. **ADR Enforcement Table Fact-Check:** Use `view_file` or `grep_search` on every file path and gate/rule name in the ADR `### Deterministic Enforcement` table. Confirm the file exists on disk AND actually defines the named rule (`impure-decider`, `vacuous-error-assertion`, etc.).
+3. **Folded State Projection Coverage:** Verify tests do NOT merely test emitted events (`decide`) and tautological self-equality (`Equal.equals(fold1, fold2)`). Tests MUST explicitly assert folded state properties (e.g. `items`, `itemCount`, `totalItems`) against concrete expected values.
+4. **Contract Brand Reuse:** Verify domain code and `test/fixtures/` import and use branded schemas from `@harness/*-contract` (`PositiveInt`, `StreamVersion`) rather than redefining unbranded `Schema.Int.check(...)` or handwritten TypeScript union `type Foo = { _tag: ... }`.
+5. **Meta-Test Failure Arm Coverage:** When reviewing a test runner/harness (`testing.ts`), verify every `.with({ _tag: "Failure" })` and `.with({ _tag: "Success" })` branch in `thenEvents`, `thenNothing`, and `thenFails` has a dedicated meta-test that triggers that exact failure arm.
+6. **Aggregate Identity & Boundary State Invariants:** Verify `decide` and `evolve` validate aggregate ID consistency (`command.cartId === state.cartId`) and empty-active edge states (e.g. `ActiveCart` with `itemCount === 0` on `Checkout`).
+7. **Contract Decode Negative Matrix:** Verify contract schema tests reject non-number/malformed inputs (`"0"`, `null`, `undefined`, `NaN`) in addition to out-of-range numbers.
 
 ## Confidence Rubric & Quote-the-Line Gate
 
