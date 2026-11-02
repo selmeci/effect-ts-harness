@@ -6,6 +6,7 @@ export { SqliteClient } from "@effect/sql-sqlite-do/SqliteClient"
 export {
   handleAggregateCommand,
   initializeAggregateTables,
+  isEventStreamUniqueConflict,
   loadAggregate
 } from "./aggregate.js"
 

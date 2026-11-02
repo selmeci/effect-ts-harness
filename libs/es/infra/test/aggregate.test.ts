@@ -1,7 +1,12 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Schema } from "effect"
 import { SqlClient } from "effect/sql/SqlClient"
-import { isSqlError } from "effect/sql/SqlError"
+import {
+  ConstraintError,
+  isSqlError,
+  SqlError,
+  UniqueViolation
+} from "effect/sql/SqlError"
 import {
   AggregateId,
   AggregateName,
@@ -35,6 +40,7 @@ import { match } from "ts-pattern"
 import {
   handleAggregateCommand,
   initializeAggregateTables,
+  isEventStreamUniqueConflict,
   loadAggregate
 } from "../src/index.js"
 import { SqlClientMemoryLayer } from "../src/memory.js"
@@ -471,6 +477,37 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
         )
         const brokenErr = yield* Effect.flip(brokenAttempt)
         expect(isSqlError(brokenErr)).toBe(true)
+
+        expect(
+          isEventStreamUniqueConflict(
+            new SqlError({
+              reason: new UniqueViolation({
+                cause: new Error("unique"),
+                constraint:
+                  "es_events.aggregate_name, es_events.aggregate_id, es_events.stream_version"
+              })
+            })
+          )
+        ).toBe(true)
+        expect(
+          isEventStreamUniqueConflict(
+            new SqlError({
+              reason: new UniqueViolation({
+                cause: new Error("unique"),
+                constraint: "es_commands.command_id"
+              })
+            })
+          )
+        ).toBe(false)
+        expect(
+          isEventStreamUniqueConflict(
+            new SqlError({
+              reason: new ConstraintError({
+                cause: new Error("NOT NULL constraint failed: es_events.payload")
+              })
+            })
+          )
+        ).toBe(false)
       }).pipe(Effect.provide(SqlClientMemoryLayer))
   )
 

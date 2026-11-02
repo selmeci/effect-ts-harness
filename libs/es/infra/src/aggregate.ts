@@ -60,24 +60,39 @@ interface MaxVersionRow {
 const toSafeStreamVersion = (raw: number): StreamVersion =>
   Number.isInteger(raw) && raw >= 0 ? StreamVersion.make(raw) : StreamVersion.make(0)
 
-const extractNestedCauseMessage = (value: unknown): string => {
-  if (typeof value !== "object" || value === null) return String(value)
-  const reason = "reason" in value ? value.reason : undefined
-  const nestedCause =
-    typeof reason === "object" && reason !== null && "cause" in reason
-      ? reason.cause
-      : undefined
-  return nestedCause instanceof Error ? nestedCause.message : String(nestedCause)
+const extractCauseText = (sqlErr: SqlError): string => {
+  const nestedCause = sqlErr.reason.cause
+  const causeMsg =
+    nestedCause instanceof Error ? nestedCause.message : String(nestedCause)
+  return `${sqlErr.message} ${sqlErr.reason.message ?? ""} ${causeMsg}`
 }
 
-const isEventStreamUniqueConflict = (sqlErr: SqlError): boolean => {
-  const causeStr = extractNestedCauseMessage(sqlErr)
-  const errMsg = `${sqlErr.message} ${causeStr} ${String(sqlErr.cause)}`
-  return (
-    errMsg.includes("UNIQUE constraint failed") &&
-    errMsg.includes("es_events")
-  )
-}
+const isEventStreamUniqueConflict = (sqlErr: SqlError): boolean =>
+  match(sqlErr.reason)
+    .with({ _tag: "UniqueViolation" }, (r) =>
+      r.constraint.includes("es_events") || extractCauseText(sqlErr).includes("es_events")
+    )
+    .with({ _tag: "ConstraintError" }, { _tag: "UnknownError" }, () => {
+      const errMsg = extractCauseText(sqlErr)
+      return (
+        errMsg.includes("UNIQUE constraint failed") &&
+        errMsg.includes("es_events")
+      )
+    })
+    .with(
+      { _tag: "ConnectionError" },
+      { _tag: "AuthenticationError" },
+      { _tag: "AuthorizationError" },
+      { _tag: "SqlSyntaxError" },
+      { _tag: "DeadlockError" },
+      { _tag: "SerializationError" },
+      { _tag: "LockTimeoutError" },
+      { _tag: "StatementTimeoutError" },
+      () => false
+    )
+    .exhaustive()
+
+export { isEventStreamUniqueConflict }
 
 export const initializeAggregateTables = Effect.fn("AggregateInfra.initTables")(
   function* () {
