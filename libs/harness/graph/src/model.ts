@@ -217,6 +217,8 @@ export interface BranchingViolation {
     | "fallback-json-equality"
     | "vacuous-error-assertion"
     | "unscoped-effect-run"
+    | "unbranded-contract-schema"
+    | "unbranded-primitive-boundary"
   readonly message: string
   readonly file: string
   readonly line: number

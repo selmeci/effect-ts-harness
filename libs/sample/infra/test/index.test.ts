@@ -6,6 +6,12 @@ import { join } from "node:path"
 import { D1Client } from "@effect/sql-d1"
 import { makeWithDefaults } from "drizzle-orm/effect-d1"
 import { buildWorkspaceFnIndex, runWithTestTracer } from "@harness/ingest"
+import {
+  AlbumId,
+  GreetingMessage,
+  PhotoId,
+  PhotoName
+} from "@harness/sample-contract"
 import { uploadPhoto } from "@harness/sample-domain"
 import { PhotoRepo } from "@harness/sample-service"
 import { albumCounters, photos } from "../src/db/schema.js"
@@ -70,7 +76,7 @@ const createMockD1Database = () => {
 describe("sample-infra", () => {
   it.effect("runs logToConsole without failing", () =>
     Effect.gen(function* () {
-      yield* logToConsole("harness")
+      yield* logToConsole(GreetingMessage.make("harness"))
       expect(photos.id.name).toBe("id")
     })
   )
@@ -97,8 +103,8 @@ describe("sample-infra", () => {
 
           // Insert photo
           const created = yield* repo.insert({
-            name: "Vacation.jpg",
-            albumId: "album-1"
+            name: PhotoName.make("Vacation.jpg"),
+            albumId: AlbumId.make("album-1")
           })
 
           expect(created.id).toBe(1)
@@ -111,14 +117,14 @@ describe("sample-infra", () => {
           expect(fetched).toEqual(created)
 
           // Find missing by ID should fail with PhotoNotFoundError
-          const missingError = yield* Effect.flip(repo.findById(999))
+          const missingError = yield* Effect.flip(repo.findById(PhotoId.make(999)))
           expect(missingError._tag).toBe("PhotoNotFoundError")
           expect(missingError.id).toBe(999)
 
           // Insert second photo
           yield* repo.insert({
-            name: "Sunset.jpg",
-            albumId: "album-1"
+            name: PhotoName.make("Sunset.jpg"),
+            albumId: AlbumId.make("album-1")
           })
 
           // List all photos
@@ -137,14 +143,17 @@ describe("sample-infra", () => {
       Effect.gen(function* () {
         const program = Effect.gen(function* () {
           const repo = yield* PhotoRepo
-          const p1 = yield* repo.insert({ name: "Memory.png", albumId: "a-mem" })
+          const p1 = yield* repo.insert({
+            name: PhotoName.make("Memory.png"),
+            albumId: AlbumId.make("a-mem")
+          })
           expect(p1.id).toBe(1)
           expect(p1.name).toBe("Memory.png")
 
-          const fetched = yield* repo.findById(1)
+          const fetched = yield* repo.findById(PhotoId.make(1))
           expect(fetched.name).toBe("Memory.png")
 
-          const missing = yield* Effect.flip(repo.findById(404))
+          const missing = yield* Effect.flip(repo.findById(PhotoId.make(404)))
           expect(missing._tag).toBe("PhotoNotFoundError")
 
           const all = yield* repo.listAll
@@ -199,7 +208,10 @@ describe("sample-infra", () => {
 
           const { result, edges, spans } = yield* runWithTestTracer(
             testId,
-            uploadPhoto({ name: "Nature.jpg", albumId: "album-nature" }).pipe(
+            uploadPhoto({
+              name: PhotoName.make("Nature.jpg"),
+              albumId: AlbumId.make("album-nature")
+            }).pipe(
               Effect.provide(testLayer)
             ),
             fnIndex.bySpanName
@@ -287,7 +299,7 @@ describe("sample-infra", () => {
         const httpClient = toHttpClient(doRpcHandler)
         const client = makeAlbumCounterRpcClient(httpClient)
 
-        const error = yield* Effect.flip(client.increment("album-full"))
+        const error = yield* Effect.flip(client.increment(AlbumId.make("album-full")))
         expect(error._tag).toBe("AlbumQuotaExceededError")
         expect(error.albumId).toBe("album-full")
         expect(error.count).toBe(100)

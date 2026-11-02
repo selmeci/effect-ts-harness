@@ -27,6 +27,8 @@ export interface GraphPolicyViolation {
     | "fallback-json-equality"
     | "vacuous-error-assertion"
     | "unscoped-effect-run"
+    | "unbranded-contract-schema"
+    | "unbranded-primitive-boundary"
   readonly message: string
   readonly path: ReadonlyArray<string>
 }

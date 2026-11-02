@@ -1499,14 +1499,14 @@ status: accepted
         (m) => m.category === "boundary-operator" && m.original === ">=" && m.replacement === ">"
       )
       expect(boundary).toBeDefined()
-      expect(boundary?.line).toBe(20)
+      expect(boundary?.line).toBe(23)
       expect(boundary?.mutatedSource).toContain("c > 100")
 
       const arithmetic = mutants.find(
         (m) => m.category === "arithmetic-operator" && m.original === "+ 1" && m.replacement === "- 1"
       )
       expect(arithmetic).toBeDefined()
-      expect(arithmetic?.line).toBe(26)
+      expect(arithmetic?.line).toBe(29)
       expect(arithmetic?.mutatedSource).toContain("currentCount - 1")
 
       const equality = mutants.find(

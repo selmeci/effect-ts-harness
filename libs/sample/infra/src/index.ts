@@ -16,12 +16,16 @@ import * as HttpServerResponse from "effect/http/HttpServerResponse"
 import { eq } from "drizzle-orm"
 import { match, P } from "ts-pattern"
 import {
+  type AlbumId,
+  AlbumPhotoCount,
   AlbumQuotaExceededError,
   type CreatePhotoInput,
   GetAlbumCount,
+  type GreetingMessage,
   IncrementAlbumCount,
   Photo,
   PhotoCounterRpc,
+  type PhotoId,
   PhotoNotFoundError
 } from "@harness/sample-contract"
 import { AlbumCounterClient, PhotoRepo } from "@harness/sample-service"
@@ -30,7 +34,7 @@ import { albumCounters, photos } from "./db/schema.js"
 
 export { albumCounters, photos } from "./db/schema.js"
 
-export const logToConsole = Effect.fn("Sample.logToConsole")(function* (message: string) {
+export const logToConsole = Effect.fn("Sample.logToConsole")(function* (message: GreetingMessage) {
   yield* Effect.sync(() => {
     console.log(message)
   })
@@ -59,7 +63,7 @@ export const PhotoRepoMemoryLayer: Layer.Layer<PhotoRepo> = Layer.effect(
     )
 
     const findById = Effect.fn("PhotoRepo.findById")(
-      (id: number): Effect.Effect<Photo, PhotoNotFoundError> =>
+      (id: PhotoId): Effect.Effect<Photo, PhotoNotFoundError> =>
         Effect.gen(function* () {
           const items = yield* Ref.get(itemsRef)
           const found = items.find((p) => p.id === id)
@@ -108,7 +112,7 @@ const _makePhotoRepoDrizzle = (db: DrizzleDatabase) => {
   )
 
   const findById = Effect.fn("PhotoRepo.findById")(
-    (id: number): Effect.Effect<Photo, PhotoNotFoundError> =>
+    (id: PhotoId): Effect.Effect<Photo, PhotoNotFoundError> =>
       Effect.gen(function* () {
         const selectEffect = (db
           .select()
@@ -143,8 +147,8 @@ export {
 
 // AlbumCounter Store Interface & Implementation
 export interface AlbumCounterStore {
-  readonly get: (albumId: string) => Effect.Effect<number>
-  readonly set: (albumId: string, count: number) => Effect.Effect<void>
+  readonly get: (albumId: AlbumId) => Effect.Effect<AlbumPhotoCount>
+  readonly set: (albumId: AlbumId, count: AlbumPhotoCount) => Effect.Effect<void>
 }
 
 export class ActiveCounterStore extends Context.Service<ActiveCounterStore, AlbumCounterStore>()(
@@ -154,8 +158,8 @@ export class ActiveCounterStore extends Context.Service<ActiveCounterStore, Albu
 const _makeAlbumCounterStoreMemory = (initial: Record<string, number> = {}): AlbumCounterStore => {
   const map = new Map<string, number>(Object.entries(initial))
   return {
-    get: (albumId: string) => Effect.sync(() => map.get(albumId) ?? 0),
-    set: (albumId: string, count: number) =>
+    get: (albumId: AlbumId) => Effect.sync(() => AlbumPhotoCount.make(map.get(albumId) ?? 0)),
+    set: (albumId: AlbumId, count: AlbumPhotoCount) =>
       Effect.sync(() => {
         map.set(albumId, count)
       })
@@ -168,7 +172,7 @@ export const AlbumCounterStoreMemoryLayer: Layer.Layer<ActiveCounterStore> = Lay
 )
 
 const _makeAlbumCounterStoreDrizzle = (db: DrizzleDatabase): AlbumCounterStore => ({
-  get: (albumId: string) =>
+  get: (albumId: AlbumId) =>
     Effect.gen(function* () {
       const selectEffect = (db
         .select()
@@ -178,13 +182,13 @@ const _makeAlbumCounterStoreDrizzle = (db: DrizzleDatabase): AlbumCounterStore =
         Error,
         never
       >
-      const rows = yield* Effect.orDie(selectEffect)
+      const rows = yield* selectEffect
       if (!rows || rows.length === 0 || rows[0] == null) {
-        return 0
+        return AlbumPhotoCount.make(0)
       }
-      return rows[0].count
-    }),
-  set: (albumId: string, count: number) =>
+      return yield* Schema.decodeEffect(AlbumPhotoCount)(rows[0].count)
+    }).pipe(Effect.orDie),
+  set: (albumId: AlbumId, count: AlbumPhotoCount) =>
     Effect.gen(function* () {
       const upsertEffect = (db
         .insert(albumCounters)
@@ -367,15 +371,15 @@ export { _makeAlbumCounterRpcHandler as makeAlbumCounterRpcHandler }
 const _makeAlbumCounterRpcClient = (
   httpClient: HttpClient.HttpClient | { execute: any } | { fetch: any }
 ): Layer.Layer<AlbumCounterClient> & {
-  readonly increment: (albumId: string) => Effect.Effect<number, AlbumQuotaExceededError>
-  readonly getCount: (albumId: string) => Effect.Effect<number>
+  readonly increment: (albumId: AlbumId) => Effect.Effect<AlbumPhotoCount, AlbumQuotaExceededError>
+  readonly getCount: (albumId: AlbumId) => Effect.Effect<AlbumPhotoCount>
 } => {
   const client: HttpClient.HttpClient =
     HttpClient.isHttpClient(httpClient) || "execute" in (httpClient as any)
       ? (httpClient as HttpClient.HttpClient)
       : _toHttpClient(httpClient as any)
 
-  const increment = (albumId: string): Effect.Effect<number, AlbumQuotaExceededError> =>
+  const increment = (albumId: AlbumId): Effect.Effect<AlbumPhotoCount, AlbumQuotaExceededError> =>
     Effect.gen(function* () {
       const maybeSpan = yield* Effect.currentSpan.pipe(Effect.option)
       const traceparent = formatTraceparent(maybeSpan)
@@ -426,7 +430,7 @@ const _makeAlbumCounterRpcClient = (
       )
     )
 
-  const getCount = (albumId: string): Effect.Effect<number> =>
+  const getCount = (albumId: AlbumId): Effect.Effect<AlbumPhotoCount> =>
     Effect.gen(function* () {
       const maybeSpan = yield* Effect.currentSpan.pipe(Effect.option)
       const traceparent = formatTraceparent(maybeSpan)

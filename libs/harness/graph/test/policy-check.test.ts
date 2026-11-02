@@ -226,41 +226,50 @@ export class R2BucketBinding extends Context.Service<R2BucketBinding, { readonly
 
   it("end-to-end: passes on clean type-aware graph with valid architecture and returns mermaid", () => {
     const contractSource = `
-import { Data } from "effect"
+import { Data, Schema } from "effect"
+
+export const OrderId = Schema.String.pipe(Schema.brand("OrderId"))
+export type OrderId = typeof OrderId.Type
 
 export class OrderNotFoundError extends Data.TaggedError("OrderNotFoundError")<{
-  readonly orderId: string
+  readonly orderId: OrderId
 }> {}
 `
     const serviceSource = `
-import { Context, Effect } from "effect"
+import { type Brand, Context, Effect } from "effect"
 import type { OrderNotFoundError } from "./contract.js"
 
+type OrderId = string & Brand.Brand<"OrderId">
+
 export class OrderRepo extends Context.Service<OrderRepo, {
-  readonly get: (id: string) => Effect.Effect<string, OrderNotFoundError>
+  readonly get: (id: OrderId) => Effect.Effect<OrderId, OrderNotFoundError>
 }>()("OrderRepo") {}
 `
     const domainSource = `
-import { Effect } from "effect"
+import { type Brand, Effect } from "effect"
 import { OrderRepo } from "./service.js"
 
-export const getOrder = Effect.fn("Order.get")((id: string) =>
+type OrderId = string & Brand.Brand<"OrderId">
+
+export const getOrder = Effect.fn("Order.get")((id: OrderId) =>
   Effect.gen(function* () {
     const repo = yield* OrderRepo
     return yield* repo.get(id)
   })
 )
 
-export const pureDecider = Effect.fn("Order.decide")((cmd: string) =>
+export const pureDecider = Effect.fn("Order.decide")((cmd: OrderId) =>
   Effect.succeed(cmd)
 )
 `
     const infraSource = `
-import { Layer, Effect } from "effect"
+import { type Brand, Layer, Effect } from "effect"
 import { OrderRepo } from "./service.js"
 
+type OrderId = string & Brand.Brand<"OrderId">
+
 export const OrderRepoLive: Layer.Layer<OrderRepo> = Layer.succeed(OrderRepo, {
-  get: (id: string) => Effect.succeed(id)
+  get: (id: OrderId) => Effect.succeed(id)
 })
 `
 
@@ -325,12 +334,15 @@ export const checkQuota = Effect.fn("Quota.check")((plan: PlanState, count: numb
 
   it("allows simple if-else when condition does not narrow a discriminated union", () => {
     const domainSource = `
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 
-export const checkCount = Effect.fn("Quota.checkCount")((count: number) =>
+const QuotaCount = Schema.Int.pipe(Schema.brand("QuotaCount"))
+type QuotaCount = typeof QuotaCount.Type
+
+export const checkCount = Effect.fn("Quota.checkCount")((count: QuotaCount) =>
   Effect.sync(() => {
     if (count <= 0) {
-      return 0
+      return QuotaCount.make(0)
     } else {
       return count
     }
@@ -411,10 +423,12 @@ export const formatPayment = Effect.fn("Payment.format")((res: PaymentResult) =>
 
   it("allows match(openPrimitive).otherwise() when matching on non-union open types like number or string", () => {
     const domainSource = `
-import { Effect } from "effect"
+import { type Brand, Effect } from "effect"
 import { match, P } from "ts-pattern"
 
-export const classifyStatus = Effect.fn("Http.classifyStatus")((status: number) =>
+type HttpStatus = number & Brand.Brand<"HttpStatus">
+
+export const classifyStatus = Effect.fn("Http.classifyStatus")((status: HttpStatus) =>
   Effect.sync(() =>
     match(status)
       .with(200, () => "ok" as const)
@@ -965,5 +979,196 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
     expect(violation).toBeDefined()
     expect(violation?.message).toContain("Exit.isSuccess")
   })
-})
 
+  it("fails with unbranded-contract-schema when contract/domain schemas, piped structs, unions, inline object type aliases, or any/unknown lack ~effect/Brand, and passes when branded", () => {
+    const badContractSource = `
+      import { Schema } from "effect"
+
+      export type RawAlbumId = string
+      export type ErasedId = any
+      export type UnknownId = unknown
+      export type InlineDto = { readonly id: string }
+      export const PhotoId = Schema.Int
+
+      const LocalUnbrandedId = Schema.Int
+      export const PipedPhoto = Schema.Struct({
+        id: LocalUnbrandedId,
+        albumId: Schema.String
+      }).pipe(Schema.brand("PipedPhoto"))
+
+      export const EventUnion = Schema.TaggedUnion({
+        Created: { itemId: Schema.String },
+        Deleted: { itemId: Schema.String }
+      })
+
+      export class PhotoNotFoundError extends Schema.TaggedError<PhotoNotFoundError>()(
+        "PhotoNotFoundError",
+        { id: Schema.Int }
+      ) {}
+
+      export const BrandA = Schema.Int.pipe(Schema.brand("DuplicateBrand"))
+      export const BrandB = Schema.NumberFromString.pipe(Schema.brand("DuplicateBrand"))
+    `
+    const badDomainSchemaSource = `
+      import { Schema } from "effect"
+
+      export const InternalStruct = Schema.Struct({
+        rawCount: Schema.Int
+      })
+    `
+    const badGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/contract/src/index.ts",
+        content: badContractSource,
+        packageTag: "contract"
+      },
+      {
+        filePath: "libs/sample/domain/src/index.ts",
+        content: badDomainSchemaSource,
+        packageTag: "domain"
+      }
+    ])
+    const badResult = checkEffectGraph(badGraph)
+    expect(badResult.ok).toBe(false)
+    const contractViolations = badResult.violations.filter(
+      (v) => v.rule === "unbranded-contract-schema"
+    )
+    expect(contractViolations.some((v) => v.message.includes("Exported type alias 'RawAlbumId'") && v.message.includes("'string'"))).toBe(true)
+    expect(contractViolations.some((v) => v.message.includes("Exported type alias 'ErasedId'") && v.message.includes("'any'"))).toBe(true)
+    expect(contractViolations.some((v) => v.message.includes("Exported type alias 'UnknownId'") && v.message.includes("'unknown'"))).toBe(true)
+    expect(contractViolations.some((v) => v.message.includes("Exported type alias 'InlineDto'"))).toBe(true)
+    expect(contractViolations.some((v) => v.message.includes("Contract schema 'PhotoId'"))).toBe(true)
+    expect(contractViolations.some((v) => v.message.includes("Property 'id' of contract schema 'PipedPhoto'"))).toBe(true)
+    expect(contractViolations.some((v) => v.message.includes("Property 'albumId' of contract schema 'PipedPhoto'"))).toBe(true)
+    expect(contractViolations.some((v) => v.message.includes("Property 'itemId' of contract schema 'EventUnion'"))).toBe(true)
+    expect(contractViolations.some((v) => v.message.includes("Field 'id' of 'PhotoNotFoundError'"))).toBe(true)
+    expect(contractViolations.some((v) => v.message.includes("Property 'rawCount' of contract schema 'InternalStruct'"))).toBe(true)
+    expect(contractViolations.some((v) => v.message.includes("Duplicate Schema.brand('DuplicateBrand')"))).toBe(true)
+
+    const goodContractSource = `
+      import { Schema } from "effect"
+
+      export const PhotoId = Schema.Int.check(Schema.isGreaterThan(0)).pipe(Schema.brand("PhotoId"))
+      export type PhotoId = typeof PhotoId.Type
+
+      export const PhotoIdFromString = Schema.FiniteFromString.pipe(Schema.decodeTo(PhotoId))
+      export type PhotoIdFromString = typeof PhotoIdFromString.Type
+
+      export const AlbumId = Schema.String.pipe(Schema.brand("AlbumId"))
+      export type AlbumId = typeof AlbumId.Type
+
+      export const Photo = Schema.Struct({
+        id: PhotoId,
+        albumId: AlbumId
+      })
+      export type Photo = typeof Photo.Type
+
+      export class PhotoNotFoundError extends Schema.TaggedError<PhotoNotFoundError>()(
+        "PhotoNotFoundError",
+        { id: PhotoId }
+      ) {}
+    `
+    const goodGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/contract/src/index.ts",
+        content: goodContractSource,
+        packageTag: "contract"
+      }
+    ])
+    const goodResult = checkEffectGraph(goodGraph)
+    expect(
+      goodResult.violations.filter((v) => v.rule === "unbranded-contract-schema")
+    ).toEqual([])
+  })
+
+  it("fails with unbranded-primitive-boundary on raw primitive or inline object service/domain boundaries and 'as Brand' casts, and passes on compliant branded boundaries", () => {
+    const badServiceSource = `
+      import { type Brand, Context, type Effect } from "effect"
+
+      type PhotoId = number & Brand.Brand<"PhotoId">
+
+      export class PhotoRepo extends Context.Service<PhotoRepo, {
+        readonly findById: (id: number) => Effect.Effect<string>
+        readonly createInline: (input: { readonly id: PhotoId }) => Effect.Effect<{ readonly ok: PhotoId }>
+      }>()("PhotoRepo") {}
+    `
+    const badDomainSource = `
+      import { type Brand, Effect } from "effect"
+
+      type PhotoId = number & Brand.Brand<"PhotoId">
+
+      export const getPhoto = Effect.fn("Photo.get")(function* (
+        rawId: number,
+        inlineFilter: { readonly id: PhotoId }
+      ) {
+        const castId = rawId as PhotoId
+        return yield* Effect.succeed(String(castId) + String(inlineFilter.id))
+      })
+
+      export const plainDecider = (input: { readonly current: PhotoId }): number =>
+        input.current + 1
+    `
+    const badGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/service/src/index.ts",
+        content: badServiceSource,
+        packageTag: "service"
+      },
+      {
+        filePath: "libs/sample/domain/src/index.ts",
+        content: badDomainSource,
+        packageTag: "domain"
+      }
+    ])
+    const badResult = checkEffectGraph(badGraph)
+    expect(badResult.ok).toBe(false)
+    const boundaryViolations = badResult.violations.filter(
+      (v) => v.rule === "unbranded-primitive-boundary"
+    )
+    expect(boundaryViolations.some((v) => v.message.includes("Service capability 'PhotoRepo.findById' parameter 'id'"))).toBe(true)
+    expect(boundaryViolations.some((v) => v.message.includes("Service capability 'PhotoRepo.findById' return type"))).toBe(true)
+    expect(boundaryViolations.some((v) => v.message.includes("Service capability 'PhotoRepo.createInline' parameter 'input'") && v.message.includes("inline object type literal"))).toBe(true)
+    expect(boundaryViolations.some((v) => v.message.includes("Service capability 'PhotoRepo.createInline' return type") && v.message.includes("inline object type literal"))).toBe(true)
+    expect(boundaryViolations.some((v) => v.message.includes("Domain function 'getPhoto' parameter 'rawId'"))).toBe(true)
+    expect(boundaryViolations.some((v) => v.message.includes("Domain function 'getPhoto' parameter 'inlineFilter'") && v.message.includes("inline object type literal"))).toBe(true)
+    expect(boundaryViolations.some((v) => v.message.includes("Domain function 'getPhoto' return success type"))).toBe(true)
+    expect(boundaryViolations.some((v) => v.message.includes("Domain function 'plainDecider' parameter 'input'") && v.message.includes("inline object type literal"))).toBe(true)
+    expect(boundaryViolations.some((v) => v.message.includes("Domain function 'plainDecider' return success type") && v.message.includes("'number'"))).toBe(true)
+    expect(boundaryViolations.some((v) => v.message.includes("casts an unbranded value directly to branded type"))).toBe(true)
+
+    const goodServiceSource = `
+      import { type Brand, Context, type Effect } from "effect"
+
+      type PhotoId = number & Brand.Brand<"PhotoId">
+
+      export class PhotoRepo extends Context.Service<PhotoRepo, {
+        readonly findById: (id: PhotoId) => Effect.Effect<PhotoId>
+      }>()("PhotoRepo") {}
+    `
+    const goodDomainSource = `
+      import { type Brand, Effect } from "effect"
+
+      type PhotoId = number & Brand.Brand<"PhotoId">
+
+      export const getPhoto = Effect.fn("Photo.get")(function* (id: PhotoId) {
+        return yield* Effect.succeed(id)
+      })
+    `
+    const goodGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/service/src/index.ts",
+        content: goodServiceSource,
+        packageTag: "service"
+      },
+      {
+        filePath: "libs/sample/domain/src/index.ts",
+        content: goodDomainSource,
+        packageTag: "domain"
+      }
+    ])
+    const goodResult = checkEffectGraph(goodGraph)
+    expect(
+      goodResult.violations.filter((v) => v.rule === "unbranded-primitive-boundary")
+    ).toEqual([])
+  })
+})
