@@ -1005,6 +1005,9 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
         "PhotoNotFoundError",
         { id: Schema.Int }
       ) {}
+
+      export const BrandA = Schema.Int.pipe(Schema.brand("DuplicateBrand"))
+      export const BrandB = Schema.NumberFromString.pipe(Schema.brand("DuplicateBrand"))
     `
     const badDomainSchemaSource = `
       import { Schema } from "effect"
@@ -1040,6 +1043,7 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
     expect(contractViolations.some((v) => v.message.includes("Property 'itemId' of contract schema 'EventUnion'"))).toBe(true)
     expect(contractViolations.some((v) => v.message.includes("Field 'id' of 'PhotoNotFoundError'"))).toBe(true)
     expect(contractViolations.some((v) => v.message.includes("Property 'rawCount' of contract schema 'InternalStruct'"))).toBe(true)
+    expect(contractViolations.some((v) => v.message.includes("Duplicate Schema.brand('DuplicateBrand')"))).toBe(true)
 
     const goodContractSource = `
       import { Schema } from "effect"
@@ -1100,6 +1104,9 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
         const castId = rawId as PhotoId
         return yield* Effect.succeed(String(castId) + String(inlineFilter.id))
       })
+
+      export const plainDecider = (input: { readonly current: PhotoId }): number =>
+        input.current + 1
     `
     const badGraph = extractTypeAwareGraphFromSource([
       {
@@ -1125,6 +1132,8 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
     expect(boundaryViolations.some((v) => v.message.includes("Domain function 'getPhoto' parameter 'rawId'"))).toBe(true)
     expect(boundaryViolations.some((v) => v.message.includes("Domain function 'getPhoto' parameter 'inlineFilter'") && v.message.includes("inline object type literal"))).toBe(true)
     expect(boundaryViolations.some((v) => v.message.includes("Domain function 'getPhoto' return success type"))).toBe(true)
+    expect(boundaryViolations.some((v) => v.message.includes("Domain function 'plainDecider' parameter 'input'") && v.message.includes("inline object type literal"))).toBe(true)
+    expect(boundaryViolations.some((v) => v.message.includes("Domain function 'plainDecider' return success type") && v.message.includes("'number'"))).toBe(true)
     expect(boundaryViolations.some((v) => v.message.includes("casts an unbranded value directly to branded type"))).toBe(true)
 
     const goodServiceSource = `

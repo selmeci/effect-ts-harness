@@ -1502,6 +1502,30 @@ export const extractTypeAwareGraphFromSource = (
         }
       }
 
+      const declaredBrandKeys = new Map<string, string>()
+      for (const callExpr of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+        const exprText = callExpr.getExpression().getText()
+        if (exprText === "Schema.brand" || exprText === "S.brand") {
+          const arg0 = callExpr.getArguments()[0]
+          if (arg0 && Node.isStringLiteral(arg0)) {
+            const brandKey = arg0.getLiteralValue()
+            const enclosingSymbol = findEnclosingSymbolName(callExpr, relPath)
+            const firstSymbol = declaredBrandKeys.get(brandKey)
+            if (firstSymbol && firstSymbol !== enclosingSymbol) {
+              branchingViolations.push({
+                rule: "unbranded-contract-schema",
+                message: `Duplicate Schema.brand('${brandKey}') in '${enclosingSymbol}' (already declared in '${firstSymbol}') — each brand key must have a single canonical constructor schema; compose wire schemas using Schema.decodeTo(${brandKey}).`,
+                file: relPath,
+                line: callExpr.getStartLineNumber(),
+                enclosingSymbol
+              })
+            } else if (!firstSymbol) {
+              declaredBrandKeys.set(brandKey, enclosingSymbol)
+            }
+          }
+        }
+      }
+
       for (const varDecl of sourceFile.getVariableDeclarations()) {
         if (!varDecl.isExported()) continue
         const varName = varDecl.getName()
@@ -1696,24 +1720,24 @@ export const extractTypeAwareGraphFromSource = (
     }
 
     if (filePkgTag === "domain" && (relPath.includes("/domain/") || relPath.includes("/core/"))) {
-      for (const varDecl of sourceFile.getVariableDeclarations()) {
-        if (!varDecl.isExported()) continue
-        const varName = varDecl.getName()
-        const init = varDecl.getInitializer()
-        if (!init || !Node.isCallExpression(init)) continue
-        const innerExpr = init.getExpression()
-        if (!Node.isCallExpression(innerExpr) || innerExpr.getExpression().getText() !== "Effect.fn") {
-          continue
-        }
-        const enclosingSymbol = `${relPath}#${varName}`
-        const fnArg = init.getArguments()[0]
-        if (fnArg && (Node.isFunctionExpression(fnArg) || Node.isArrowFunction(fnArg))) {
-          for (const param of fnArg.getParameters()) {
+      const checkExportedDomainFn = (
+        fnName: string,
+        fnNode: Node | undefined,
+        declNode: Node
+      ): void => {
+        const enclosingSymbol = `${relPath}#${fnName}`
+        if (
+          fnNode &&
+          (Node.isFunctionExpression(fnNode) ||
+            Node.isArrowFunction(fnNode) ||
+            Node.isFunctionDeclaration(fnNode))
+        ) {
+          for (const param of fnNode.getParameters()) {
             const paramTypeNode = param.getTypeNode()
             if (containsInlineObjectTypeAst(paramTypeNode)) {
               branchingViolations.push({
                 rule: "unbranded-primitive-boundary",
-                message: `Domain function '${varName}' parameter '${param.getName()}' in '${enclosingSymbol}' uses an inline object type literal — define a named Schema.Struct or Schema.Class in type:contract with branded fields and reference its derived type.`,
+                message: `Domain function '${fnName}' parameter '${param.getName()}' in '${enclosingSymbol}' uses an inline object type literal — define a named Schema.Struct or Schema.Class in type:contract with branded fields and reference its derived type.`,
                 file: relPath,
                 line: param.getStartLineNumber(),
                 enclosingSymbol
@@ -1724,7 +1748,7 @@ export const extractTypeAwareGraphFromSource = (
             if (paramPrim !== null) {
               branchingViolations.push({
                 rule: "unbranded-primitive-boundary",
-                message: `Domain function '${varName}' parameter '${param.getName()}' in '${enclosingSymbol}' uses unbranded primitive '${paramPrim}' without '~effect/Brand' — use a branded domain type from type:contract.`,
+                message: `Domain function '${fnName}' parameter '${param.getName()}' in '${enclosingSymbol}' uses unbranded primitive '${paramPrim}' without '~effect/Brand' — use a branded domain type from type:contract.`,
                 file: relPath,
                 line: param.getStartLineNumber(),
                 enclosingSymbol
@@ -1734,7 +1758,7 @@ export const extractTypeAwareGraphFromSource = (
               for (const { propName, prim, line } of unbrandedProps) {
                 branchingViolations.push({
                   rule: "unbranded-primitive-boundary",
-                  message: `Domain function '${varName}' parameter property '${propName}' in '${enclosingSymbol}' uses unbranded primitive '${prim}' without '~effect/Brand' — use a branded domain type from type:contract.`,
+                  message: `Domain function '${fnName}' parameter property '${propName}' in '${enclosingSymbol}' uses unbranded primitive '${prim}' without '~effect/Brand' — use a branded domain type from type:contract.`,
                   file: relPath,
                   line,
                   enclosingSymbol
@@ -1743,39 +1767,39 @@ export const extractTypeAwareGraphFromSource = (
             }
           }
 
-          const explicitRetNode = fnArg.getReturnTypeNode()
+          const explicitRetNode = fnNode.getReturnTypeNode()
           if (containsInlineObjectTypeAst(explicitRetNode)) {
             branchingViolations.push({
               rule: "unbranded-primitive-boundary",
-              message: `Domain function '${varName}' return type in '${enclosingSymbol}' uses an inline object type literal — define a named Schema.Struct or Schema.Class in type:contract with branded fields and reference its derived type.`,
+              message: `Domain function '${fnName}' return type in '${enclosingSymbol}' uses an inline object type literal — define a named Schema.Struct or Schema.Class in type:contract with branded fields and reference its derived type.`,
               file: relPath,
-              line: varDecl.getStartLineNumber(),
+              line: declNode.getStartLineNumber(),
               enclosingSymbol
             })
           }
         }
 
-        const sigs = varDecl.getType().getCallSignatures()
+        const sigs = declNode.getType().getCallSignatures()
         if (sigs.length > 0 && sigs[0]) {
           const fullRetType = sigs[0].getReturnType()
           const retTypeArgs = fullRetType.getTypeArguments()
           const retSuccessType =
             retTypeArgs.length >= 1 && retTypeArgs[0] ? retTypeArgs[0] : fullRetType
-          const retPrim = isOpenUnbrandedPrimitiveType(retSuccessType, varDecl)
+          const retPrim = isOpenUnbrandedPrimitiveType(retSuccessType, declNode)
           if (retPrim !== null) {
             branchingViolations.push({
               rule: "unbranded-primitive-boundary",
-              message: `Domain function '${varName}' return success type in '${enclosingSymbol}' resolves to unbranded primitive '${retPrim}' without '~effect/Brand' — use a branded domain type from type:contract.`,
+              message: `Domain function '${fnName}' return success type in '${enclosingSymbol}' resolves to unbranded primitive '${retPrim}' without '~effect/Brand' — use a branded domain type from type:contract.`,
               file: relPath,
-              line: varDecl.getStartLineNumber(),
+              line: declNode.getStartLineNumber(),
               enclosingSymbol
             })
           } else if (!retSuccessType.isUnion()) {
-            const unbrandedRetProps = collectUnbrandedObjectProperties(retSuccessType, varDecl)
+            const unbrandedRetProps = collectUnbrandedObjectProperties(retSuccessType, declNode)
             for (const { propName, prim, line } of unbrandedRetProps) {
               branchingViolations.push({
                 rule: "unbranded-primitive-boundary",
-                message: `Domain function '${varName}' return property '${propName}' in '${enclosingSymbol}' uses unbranded primitive '${prim}' without '~effect/Brand' — use a branded domain type from type:contract.`,
+                message: `Domain function '${fnName}' return property '${propName}' in '${enclosingSymbol}' uses unbranded primitive '${prim}' without '~effect/Brand' — use a branded domain type from type:contract.`,
                 file: relPath,
                 line,
                 enclosingSymbol
@@ -1783,6 +1807,29 @@ export const extractTypeAwareGraphFromSource = (
             }
           }
         }
+      }
+
+      for (const varDecl of sourceFile.getVariableDeclarations()) {
+        if (!varDecl.isExported()) continue
+        const varName = varDecl.getName()
+        const init = varDecl.getInitializer()
+        if (!init) continue
+        if (Node.isCallExpression(init)) {
+          const innerExpr = init.getExpression()
+          if (Node.isCallExpression(innerExpr) && innerExpr.getExpression().getText() === "Effect.fn") {
+            checkExportedDomainFn(varName, init.getArguments()[0], varDecl)
+          } else if (innerExpr.getText() === "Effect.fnUntraced") {
+            checkExportedDomainFn(varName, init.getArguments()[0], varDecl)
+          }
+        } else if (Node.isArrowFunction(init) || Node.isFunctionExpression(init)) {
+          checkExportedDomainFn(varName, init, varDecl)
+        }
+      }
+
+      for (const fnDecl of sourceFile.getFunctions()) {
+        if (!fnDecl.isExported()) continue
+        const fnName = fnDecl.getName() ?? "anonymousFn"
+        checkExportedDomainFn(fnName, fnDecl, fnDecl)
       }
     }
 

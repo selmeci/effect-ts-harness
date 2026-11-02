@@ -49,7 +49,7 @@ const BOOLEAN_STATE_PROP_REGEX =
   /^(is[A-Z]|has[A-Z]|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|published|expired)$/
 
 const QUANTITY_OR_VERSION_PROP_REGEX =
-  /^(qty|quantity|[a-z0-9]+Qty|[a-z0-9]+Quantity|streamVersion|[a-z0-9]+StreamVersion|nextExpectedStreamVersion|availableQty|reservedQty|orderedQty)$/i
+  /^(qty|quantity|count|[a-z0-9]+Qty|[a-z0-9]+Quantity|[a-z0-9]+Count|streamVersion|[a-z0-9]+StreamVersion|nextExpectedStreamVersion|availableQty|reservedQty|orderedQty)$/i
 
 const DISCRIMINANT_CALLBACK_METHODS = new Set(["filter", "find", "some", "every"])
 
@@ -521,6 +521,41 @@ function isSchemaIntOrNumber(node) {
     isIdentifier(unwrapped.object, "Schema") &&
     (isIdentifier(unwrapped.property, "Int") || isIdentifier(unwrapped.property, "Number"))
   )
+}
+
+function getUncheckedSchemaIntOrNumberName(node) {
+  const unwrapped = unwrapSchemaModifier(node)
+  if (unwrapped == null || typeof unwrapped !== "object") return null
+  if (
+    unwrapped.type === "MemberExpression" &&
+    unwrapped.computed !== true &&
+    isIdentifier(unwrapped.object, "Schema") &&
+    (isIdentifier(unwrapped.property, "Int") || isIdentifier(unwrapped.property, "Number"))
+  ) {
+    return unwrapped.property.name
+  }
+  if (
+    unwrapped.type === "CallExpression" &&
+    unwrapped.callee != null &&
+    unwrapped.callee.type === "MemberExpression" &&
+    unwrapped.callee.computed !== true &&
+    isIdentifier(unwrapped.callee.property, "pipe")
+  ) {
+    const hasCheckArg =
+      Array.isArray(unwrapped.arguments) &&
+      unwrapped.arguments.some(
+        (arg) =>
+          arg != null &&
+          arg.type === "CallExpression" &&
+          arg.callee != null &&
+          arg.callee.type === "MemberExpression" &&
+          isIdentifier(arg.callee.object, "Schema") &&
+          isIdentifier(arg.callee.property, "check")
+      )
+    if (hasCheckArg) return null
+    return getUncheckedSchemaIntOrNumberName(unwrapped.callee.object)
+  }
+  return null
 }
 
 function isExpectCall(node) {
@@ -1307,6 +1342,78 @@ const syntaxBans = {
       }
     }
 
+    function checkDomainBoundaryFunctionNode(implFn, fnName) {
+      if (implFn == null) return
+      const params = Array.isArray(implFn.params) ? implFn.params : []
+      for (const param of params) {
+        const paramType = param?.typeAnnotation?.typeAnnotation
+        const primInfo = getRawPrimitiveKeywordInfo(paramType)
+        if (primInfo != null) {
+          reportOnce(
+            param,
+            `Do not use raw primitive type '${primInfo.prim}' at exported domain boundary '${fnName}' — use a branded domain type from type:contract (defined with Schema.brand('<BrandName>')) so domain deciders and use cases cannot accept or return unvalidated primitives.`
+          )
+        } else if (containsInlineObjectTypeNode(paramType)) {
+          reportOnce(
+            param,
+            `Do not use inline object type for parameter at exported domain boundary '${fnName}' — define a named Schema.Struct or Schema.Class in type:contract with branded fields and reference its derived type.`
+          )
+        }
+      }
+
+      const retType = implFn.returnType?.typeAnnotation
+      const successType = getEffectSuccessTypeNode(retType) ?? retType
+      if (successType != null && successType.type !== "TSVoidKeyword") {
+        const retPrim = getRawPrimitiveKeywordInfo(successType)
+        if (retPrim != null) {
+          reportOnce(
+            implFn,
+            `Do not use raw primitive return type '${retPrim.prim}' at exported domain boundary '${fnName}' — use a branded domain type from type:contract (defined with Schema.brand('<BrandName>')) so domain deciders and use cases cannot accept or return unvalidated primitives.`
+          )
+        } else if (containsInlineObjectTypeNode(successType)) {
+          reportOnce(
+            implFn,
+            `Do not use inline object return/success type at exported domain boundary '${fnName}' — define a named Schema.Struct or Schema.Class in type:contract with branded fields and reference its derived type.`
+          )
+        }
+      }
+
+      // Check stub<A, E, R>(...) call inside body
+      const bodyNode = implFn.body
+      if (bodyNode != null) {
+        const stubCall =
+          bodyNode.type === "CallExpression" && isStubCall(bodyNode)
+            ? bodyNode
+            : bodyNode.type === "BlockStatement" && Array.isArray(bodyNode.body)
+              ? bodyNode.body
+                  .map((s) =>
+                    s.type === "ReturnStatement"
+                      ? s.argument?.type === "YieldExpression"
+                        ? s.argument.argument
+                        : s.argument
+                      : null
+                  )
+                  .find((expr) => expr != null && expr.type === "CallExpression" && isStubCall(expr))
+              : null
+        if (stubCall != null) {
+          const stubParams = getTypeParams(stubCall)
+          const stubA = stubParams.length > 0 ? stubParams[0] : null
+          const stubPrim = getRawPrimitiveKeywordInfo(stubA)
+          if (stubPrim != null) {
+            reportOnce(
+              stubCall,
+              `Do not use raw primitive success type '${stubPrim.prim}' in stub<A, E, R> at exported domain boundary '${fnName}' — use a branded domain type from type:contract (defined with Schema.brand('<BrandName>')).`
+            )
+          } else if (containsInlineObjectTypeNode(stubA)) {
+            reportOnce(
+              stubCall,
+              `Do not use inline object success type in stub<A, E, R> at exported domain boundary '${fnName}' — define a named Schema.Struct or Schema.Class in type:contract with branded fields and reference its derived type.`
+            )
+          }
+        }
+      }
+    }
+
     function checkDomainBoundaryVarDeclarator(varDecl, filename) {
       if (varDecl == null || varDecl.init == null) return
       if (!/libs\/[^/]+\/(?:domain|core)\/src\//.test(filename)) return
@@ -1325,75 +1432,26 @@ const syntaxBans = {
           implFn != null &&
           (implFn.type === "FunctionExpression" || implFn.type === "ArrowFunctionExpression")
         ) {
-          const params = Array.isArray(implFn.params) ? implFn.params : []
-          for (const param of params) {
-            const paramType = param?.typeAnnotation?.typeAnnotation
-            const primInfo = getRawPrimitiveKeywordInfo(paramType)
-            if (primInfo != null) {
-              reportOnce(
-                param,
-                `Do not use raw primitive type '${primInfo.prim}' at exported domain boundary '${fnName}' — use a branded domain type from type:contract (defined with Schema.brand('<BrandName>')) so domain deciders and use cases cannot accept or return unvalidated primitives.`
-              )
-            } else if (containsInlineObjectTypeNode(paramType)) {
-              reportOnce(
-                param,
-                `Do not use inline object type for parameter at exported domain boundary '${fnName}' — define a named Schema.Struct or Schema.Class in type:contract with branded fields and reference its derived type.`
-              )
-            }
-          }
-
-          const retType = implFn.returnType?.typeAnnotation
-          const successType = getEffectSuccessTypeNode(retType) ?? retType
-          if (successType != null && successType.type !== "TSVoidKeyword") {
-            const retPrim = getRawPrimitiveKeywordInfo(successType)
-            if (retPrim != null) {
-              reportOnce(
-                implFn,
-                `Do not use raw primitive return type '${retPrim.prim}' at exported domain boundary '${fnName}' — use a branded domain type from type:contract (defined with Schema.brand('<BrandName>')) so domain deciders and use cases cannot accept or return unvalidated primitives.`
-              )
-            } else if (containsInlineObjectTypeNode(successType)) {
-              reportOnce(
-                implFn,
-                `Do not use inline object return/success type at exported domain boundary '${fnName}' — define a named Schema.Struct or Schema.Class in type:contract with branded fields and reference its derived type.`
-              )
-            }
-          }
-
-          // Check stub<A, E, R>(...) call inside body
-          const bodyNode = implFn.body
-          if (bodyNode != null) {
-            const stubCall =
-              bodyNode.type === "CallExpression" && isStubCall(bodyNode)
-                ? bodyNode
-                : bodyNode.type === "BlockStatement" && Array.isArray(bodyNode.body)
-                  ? bodyNode.body
-                      .map((s) =>
-                        s.type === "ReturnStatement"
-                          ? s.argument?.type === "YieldExpression"
-                            ? s.argument.argument
-                            : s.argument
-                          : null
-                      )
-                      .find((expr) => expr != null && expr.type === "CallExpression" && isStubCall(expr))
-                  : null
-            if (stubCall != null) {
-              const stubParams = getTypeParams(stubCall)
-              const stubA = stubParams.length > 0 ? stubParams[0] : null
-              const stubPrim = getRawPrimitiveKeywordInfo(stubA)
-              if (stubPrim != null) {
-                reportOnce(
-                  stubCall,
-                  `Do not use raw primitive success type '${stubPrim.prim}' in stub<A, E, R> at exported domain boundary '${fnName}' — use a branded domain type from type:contract (defined with Schema.brand('<BrandName>')).`
-                )
-              } else if (containsInlineObjectTypeNode(stubA)) {
-                reportOnce(
-                  stubCall,
-                  `Do not use inline object success type in stub<A, E, R> at exported domain boundary '${fnName}' — define a named Schema.Struct or Schema.Class in type:contract with branded fields and reference its derived type.`
-                )
-              }
-            }
-          }
+          checkDomainBoundaryFunctionNode(implFn, fnName)
         }
+      } else if (
+        init.type === "CallExpression" &&
+        isUntracedEffectCall(init) &&
+        Array.isArray(init.arguments) &&
+        init.arguments.length > 0
+      ) {
+        const implFn = init.arguments[0]
+        if (
+          implFn != null &&
+          (implFn.type === "FunctionExpression" || implFn.type === "ArrowFunctionExpression")
+        ) {
+          checkDomainBoundaryFunctionNode(implFn, fnName)
+        }
+      } else if (
+        init.type === "FunctionExpression" ||
+        init.type === "ArrowFunctionExpression"
+      ) {
+        checkDomainBoundaryFunctionNode(init, fnName)
       }
     }
 
@@ -1465,6 +1523,22 @@ const syntaxBans = {
             discriminantAliasNames.add(node.id.name)
           }
           recordSchemaDeclarator(node)
+          const filename = getNormalizedFilename()
+          if (
+            !isInternalHarnessFile(filename) &&
+            /libs\/[^/]+\/(contract|domain|core)\/src\//.test(filename) &&
+            node.init != null &&
+            QUANTITY_OR_VERSION_PROP_REGEX.test(node.id.name)
+          ) {
+            const uncheckedIntOrNumber = getUncheckedSchemaIntOrNumberName(node.init)
+            if (uncheckedIntOrNumber != null) {
+              const suggestedBrand = toPascalCase(node.id.name)
+              reportOnce(
+                node,
+                `Do not use Schema.${uncheckedIntOrNumber} for quantity, version, or count schema '${node.id.name}' — use Schema.Natural (non-negative) or Schema.PositiveInt piped into Schema.brand('${suggestedBrand}') (e.g. Schema.Natural.pipe(Schema.brand('${suggestedBrand}'))) to prevent negative domain values and enforce nominal branding.`
+              )
+            }
+          }
         }
       },
       TSTypeAliasDeclaration(node) {
@@ -1700,6 +1774,16 @@ const syntaxBans = {
           for (const varDecl of decl.declarations) {
             if (varDecl.id != null && varDecl.id.type === "Identifier" && varDecl.init != null) {
               const varName = varDecl.id.name
+              if (QUANTITY_OR_VERSION_PROP_REGEX.test(varName)) {
+                const uncheckedIntOrNumber = getUncheckedSchemaIntOrNumberName(varDecl.init)
+                if (uncheckedIntOrNumber != null) {
+                  const suggestedBrand = toPascalCase(varName)
+                  reportOnce(
+                    varDecl,
+                    `Do not use Schema.${uncheckedIntOrNumber} for quantity, version, or count schema '${varName}' — use Schema.Natural (non-negative) or Schema.PositiveInt piped into Schema.brand('${suggestedBrand}') (e.g. Schema.Natural.pipe(Schema.brand('${suggestedBrand}'))) to prevent negative domain values and enforce nominal branding.`
+                  )
+                }
+              }
               if (hasSchemaBrandInTree(varDecl.init, brandedTypeNames)) {
                 brandedTypeNames.add(varName)
               } else {
@@ -1726,6 +1810,10 @@ const syntaxBans = {
         if (decl.type === "FunctionDeclaration") {
           if (/libs\/[^/]+\/(domain|service|infra)\/src\//.test(filename)) {
             context.report({ node: decl, message: domainExportMessage })
+          }
+          if (/libs\/[^/]+\/(?:domain|core)\/src\//.test(filename)) {
+            const fnName = decl.id != null && decl.id.type === "Identifier" ? decl.id.name : "fn"
+            checkDomainBoundaryFunctionNode(decl, fnName)
           }
           return
         }

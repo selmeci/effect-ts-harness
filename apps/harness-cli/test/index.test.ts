@@ -2023,6 +2023,59 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         "Do not use raw primitive return type 'boolean' at exported domain boundary 'decideQuota'"
       )
     }
+
+    // 9. Standalone count/quantity schema using Schema.Int.pipe(Schema.brand("AlbumPhotoCount")) without .check() or Schema.Natural
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/contract/src/index.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.ExportNamedDeclaration?.({
+        type: "ExportNamedDeclaration",
+        declaration: {
+          type: "VariableDeclaration",
+          declarations: [
+            {
+              type: "VariableDeclarator",
+              id: { type: "Identifier", name: "AlbumPhotoCount" },
+              init: {
+                type: "CallExpression",
+                callee: {
+                  type: "MemberExpression",
+                  computed: false,
+                  object: {
+                    type: "MemberExpression",
+                    computed: false,
+                    object: { type: "Identifier", name: "Schema" },
+                    property: { type: "Identifier", name: "Int" }
+                  },
+                  property: { type: "Identifier", name: "pipe" }
+                },
+                arguments: [
+                  {
+                    type: "CallExpression",
+                    callee: {
+                      type: "MemberExpression",
+                      computed: false,
+                      object: { type: "Identifier", name: "Schema" },
+                      property: { type: "Identifier", name: "brand" }
+                    },
+                    arguments: [{ type: "Literal", value: "AlbumPhotoCount" }]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain(
+        "Do not use Schema.Int for quantity, version, or count schema 'AlbumPhotoCount' — use Schema.Natural"
+      )
+    }
   })
 
   it("halts execution with [CRITICAL HARNESS BLOCKER] when Ollama is required and unavailable", async () => {
