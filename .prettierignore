@@ -1,0 +1,7 @@
+repos/
+dist/
+coverage/
+node_modules/
+.worktrees/
+.harness/
+pnpm-lock.yaml

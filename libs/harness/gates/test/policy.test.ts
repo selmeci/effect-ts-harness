@@ -36,6 +36,9 @@ describe("guard policy", () => {
     expect(classifyCommand("pwd")).toBe("allow")
     expect(classifyCommand("pnpm harness verify")).toBe("allow")
     expect(classifyCommand("pnpm lint")).toBe("allow")
+    expect(classifyCommand("pnpm format")).toBe("allow")
+    expect(classifyCommand("pnpm format:check")).toBe("allow")
+    expect(classifyCommand("pnpm oxfmt --check .")).toBe("allow")
   })
 
   it("allows safe read-only piped commands", () => {
