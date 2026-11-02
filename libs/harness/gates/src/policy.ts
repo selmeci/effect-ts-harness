@@ -31,6 +31,7 @@ export const ALLOWLIST: ReadonlyArray<string> = [
   "git add",
   "git restore --staged",
   "git commit",
+  "git merge",
   "git fetch",
   "git push",
   "git show",
