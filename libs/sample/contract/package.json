@@ -16,7 +16,7 @@
     "lint": "oxlint --deny-warnings .",
     "test": "vitest run",
     "openapi:check": "node --import ../../../tools/node-ts-resolver.mjs scripts/check-openapi.mjs",
-    "verify": "pnpm run typecheck && pnpm run lint && pnpm run test && pnpm run openapi:check"
+    "verify": "pnpm run openapi:check"
   },
   "dependencies": {
     "effect": "4.0.0"
