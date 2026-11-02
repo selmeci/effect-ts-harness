@@ -205,6 +205,48 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
       kind: "mechanical",
       hint: "match(...).run() throws at runtime on unhandled states — terminate with .exhaustive() for closed unions or .otherwise() for open primitive types (see agent-patterns/pattern-matching.md)."
     }
+  },
+  {
+    pattern: "unbranded-contract-schema",
+    result: {
+      kind: "mechanical",
+      hint: "Exported contract schema resolves to an unbranded primitive type — pipe scalar schemas into Schema.brand('<BrandName>') in type:contract and derive the TypeScript type via typeof <Schema>.Type (see agent-patterns/schema.md)."
+    }
+  },
+  {
+    pattern: "unbranded-primitive-boundary",
+    result: {
+      kind: "mechanical",
+      hint: "Domain use case or Context.Service capability accepts or returns an unbranded primitive (string/number) — replace raw primitives with branded domain types from type:contract defined via Schema.brand('<BrandName>') (see agent-patterns/schema.md)."
+    }
+  },
+  {
+    pattern: "raw primitive type alias",
+    result: {
+      kind: "mechanical",
+      hint: "Raw primitive type aliases (type X = string | number | boolean) are erased at compile time — define a branded schema in type:contract using Schema.<Base>.pipe(Schema.brand('<Name>')) or Brand.Branded (see agent-patterns/schema.md)."
+    }
+  },
+  {
+    pattern: "unbranded primitive schema",
+    result: {
+      kind: "mechanical",
+      hint: "Exported scalar schemas in type:contract must carry a compile-time brand — append .pipe(Schema.brand('<BrandName>')) (see agent-patterns/schema.md)."
+    }
+  },
+  {
+    pattern: "Do not use unbranded Schema.",
+    result: {
+      kind: "mechanical",
+      hint: "Struct/Class/Error fields in type:contract must reference branded domain schemas rather than raw Schema.String / Schema.Int / Schema.Natural — extract a reusable branded schema with Schema.brand('<BrandName>') (see agent-patterns/schema.md)."
+    }
+  },
+  {
+    pattern: "Do not bypass brand validation with 'as'",
+    result: {
+      kind: "mechanical",
+      hint: "Never cast raw values with `as <BrandedType>` — construct branded values via <BrandedSchema>.make(value), Brand.nominal, Brand.refined, or Schema.decodeUnknownEffect (see agent-patterns/schema.md)."
+    }
   }
 ]
 

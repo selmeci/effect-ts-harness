@@ -1551,6 +1551,187 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
     }
   })
 
+  it("flags raw primitive type aliases, unbranded contract schemas, unbranded struct fields, raw primitive boundary annotations, and unsafe brand casts", () => {
+    // REQ-2.1: Raw primitive type alias (type UserId = string)
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/contract/src/index.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.TSTypeAliasDeclaration?.({
+        type: "TSTypeAliasDeclaration",
+        id: { type: "Identifier", name: "UserId" },
+        typeAnnotation: { type: "TSStringKeyword" }
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain(
+        "Do not declare raw primitive type alias 'UserId = string'"
+      )
+    }
+
+    // REQ-2.2: Unbranded scalar schema exported from type:contract vs branded schema
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/contract/src/index.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.ExportNamedDeclaration?.({
+        type: "ExportNamedDeclaration",
+        declaration: {
+          type: "VariableDeclaration",
+          declarations: [
+            {
+              type: "VariableDeclarator",
+              id: { type: "Identifier", name: "UserId" },
+              init: {
+                type: "MemberExpression",
+                computed: false,
+                object: { type: "Identifier", name: "Schema" },
+                property: { type: "Identifier", name: "NonEmptyString" }
+              }
+            }
+          ]
+        }
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain(
+        "Do not export unbranded primitive schema 'UserId' from type:contract"
+      )
+    }
+
+    // REQ-2.3: Unbranded scalar field inside Schema.Struct in type:contract
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/contract/src/index.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Schema" },
+          property: { type: "Identifier", name: "Struct" }
+        },
+        arguments: [
+          {
+            type: "ObjectExpression",
+            properties: [
+              {
+                type: "Property",
+                computed: false,
+                key: { type: "Identifier", name: "albumId" },
+                value: {
+                  type: "MemberExpression",
+                  computed: false,
+                  object: { type: "Identifier", name: "Schema" },
+                  property: { type: "Identifier", name: "NonEmptyString" }
+                }
+              }
+            ]
+          }
+        ]
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain(
+        "Do not use unbranded Schema.NonEmptyString for field 'albumId' in Schema.Struct"
+      )
+    }
+
+    // REQ-2.4: Raw primitive parameter in exported Effect.fn in type:domain
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/domain/src/index.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.ExportNamedDeclaration?.({
+        type: "ExportNamedDeclaration",
+        declaration: {
+          type: "VariableDeclaration",
+          declarations: [
+            {
+              type: "VariableDeclarator",
+              id: { type: "Identifier", name: "findUser" },
+              init: {
+                type: "CallExpression",
+                callee: {
+                  type: "CallExpression",
+                  callee: {
+                    type: "MemberExpression",
+                    computed: false,
+                    object: { type: "Identifier", name: "Effect" },
+                    property: { type: "Identifier", name: "fn" }
+                  },
+                  arguments: [{ type: "Literal", value: "Sample.findUser" }]
+                },
+                arguments: [
+                  {
+                    type: "FunctionExpression",
+                    generator: true,
+                    params: [
+                      {
+                        type: "Identifier",
+                        name: "id",
+                        typeAnnotation: {
+                          type: "TSTypeAnnotation",
+                          typeAnnotation: { type: "TSStringKeyword" }
+                        }
+                      }
+                    ],
+                    body: { type: "BlockStatement", body: [] }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain(
+        "Do not use raw primitive type 'string' at exported domain boundary 'findUser'"
+      )
+    }
+
+    // REQ-2.5: Unsafe `as BrandedType` assertion in production source
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/domain/src/index.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        }
+      })
+      visitor.TSAsExpression?.({
+        type: "TSAsExpression",
+        expression: { type: "Literal", value: "u-1" },
+        typeAnnotation: {
+          type: "TSTypeReference",
+          typeName: {
+            type: "TSQualifiedName",
+            left: { type: "Identifier", name: "Brand" },
+            right: { type: "Identifier", name: "Branded" }
+          }
+        }
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain(
+        "Do not bypass brand validation with 'as' type assertion"
+      )
+    }
+  })
+
   it("halts execution with [CRITICAL HARNESS BLOCKER] when Ollama is required and unavailable", async () => {
     const prevRequire = process.env["HARNESS_REQUIRE_OLLAMA"]
     const prevUrl = process.env["HARNESS_OLLAMA_URL"]

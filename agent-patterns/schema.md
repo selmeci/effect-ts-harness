@@ -7,34 +7,58 @@ Schema validates, parses, and transforms data across system boundaries, replacin
 The `Schema` module defines models, decoders, encoders, and validators in one declaration:
 
 ```ts
-import { Schema } from "effect"
+import { Brand, Schema } from "effect"
 
-// Struct schema for simple records
+// 1. Always define branded scalar schemas first in type:contract
+export const UserId = Schema.NonEmptyString.pipe(Schema.brand("UserId"))
+export type UserId = typeof UserId.Type
+
+export const EmailAddress = Schema.NonEmptyString.pipe(Schema.brand("EmailAddress"))
+export type EmailAddress = typeof EmailAddress.Type
+
+export const AgeYears = Schema.Natural.pipe(Schema.brand("AgeYears"))
+export type AgeYears = typeof AgeYears.Type
+
+export const TagLabel = Schema.NonEmptyString.pipe(Schema.brand("TagLabel"))
+export type TagLabel = typeof TagLabel.Type
+
+export const Nickname = Schema.NonEmptyString.pipe(Schema.brand("Nickname"))
+export type Nickname = typeof Nickname.Type
+
+// 2. Compose Struct schemas from branded domain schemas (never raw Schema.String / Schema.Int)
 export const CreateUserInput = Schema.Struct({
-  email: Schema.String,
-  age: Schema.Int,
+  email: EmailAddress,
+  age: AgeYears,
   isActive: Schema.Boolean,
-  tags: Schema.Array(Schema.String),
-  nickname: Schema.optional(Schema.String)
+  tags: Schema.Array(TagLabel),
+  nickname: Schema.optional(Nickname)
 })
 export type CreateUserInput = typeof CreateUserInput.Type
 
-// Schema.Class for domain entities with methods
+// 3. Schema.Class for domain entities with methods
 export class User extends Schema.Class<User>("User")({
-  id: Schema.String,
-  email: Schema.String,
-  age: Schema.Int,
+  id: UserId,
+  email: EmailAddress,
+  age: AgeYears,
   createdAt: Schema.Date
 }) {
   get isAdult(): boolean {
     return this.age >= 18
   }
 }
+
+// 4. Value-level Brand constructors for fast synchronous validation or wrapping
+export const makeUserId = Brand.nominal<UserId>()
+export const PositiveCount = Brand.refined<number & Brand.Brand<"PositiveCount">>(
+  (n) => Number.isInteger(n) && n > 0,
+  (n) => Brand.error(`Expected positive integer count, got ${n}`)
+)
+export const PositiveCountSchema = Schema.Int.pipe(Schema.fromBrand("PositiveCount", PositiveCount))
 ```
 
 ### Deriving TypeScript Types from Schemas
 
-Never write loose handwritten TypeScript interfaces or types alongside Schema declarations (e.g. declaring `export type CommandResult = { ... }` with `number` and `ReadonlyArray` alongside `makeCommandResultSchema`). Handwritten loose types bypass Schema validation and allow illegal states (negative versions, empty arrays) to enter domain signatures.
+Never write loose handwritten TypeScript interfaces or types alongside Schema declarations (e.g. declaring `export type CommandResult = { ... }` with `number` and `ReadonlyArray` alongside `makeCommandResultSchema`), and **never declare raw primitive type aliases** (`export type UserId = string`). Raw type aliases are erased by TypeScript and enforced against by `harness/syntax-bans` and `checkEffectGraph`.
 
 Always derive types directly from the schema:
 ```ts
@@ -53,19 +77,25 @@ export type CommandResult<State, Event> = Schema.Schema.Type<
 
 Never use `Schema.Int` or `Schema.Number` for quantities, counts, stock, or stream versions. `Schema.Int` permits negative integers (`-5`, `-1`), which violates domain invariants.
 
-- Use `Schema.Natural` for non-negative integers ($\ge 0$): `availableQty`, `streamVersion`, `nextExpectedStreamVersion`, `count`.
+- Use `Schema.Natural.pipe(Schema.brand("..."))` for non-negative integers ($\ge 0$): `availableQty`, `streamVersion`, `nextExpectedStreamVersion`, `count`.
 - Strictly positive quantities ($> 0$, e.g. `orderQty`, `quantity`, `batchSize`, `limit`) must use `Schema.Int.check(Schema.isGreaterThan(0)).pipe(Schema.brand("PositiveInt"))` — never use `Schema.Natural` for strictly positive quantities where `0` is invalid!
 
-### Decode-Time Checks vs Compile-Time Branded Types
+### Mandatory Compile-Time Branded Types (`Schema.brand` & `Brand.Branded`)
 
-Crucially, **`Schema.Int` and `Schema.Natural` are decode-time filters whose TypeScript type is plain `number`**:
+Crucially, **`Schema.String`, `Schema.NonEmptyString`, `Schema.Int`, and `Schema.Natural` are decode-time filters whose unbranded TypeScript type is plain `string` or `number`**:
 ```ts
+// BANNED in type:contract — unbranded TypeScript type is plain `number`!
 export const StreamVersion = Schema.Natural
 export type StreamVersion = typeof StreamVersion.Type // -> number!
 ```
-Because the TypeScript type is `number`, in-memory TypeScript code can pass `-1` or `1.5` to a function expecting `StreamVersion` without triggering a compiler error!
+Because the unbranded TypeScript type is `number` or `string`, in-memory TypeScript code can accidentally swap `(userId, albumId)` or pass `-1` or `1.5` to a function expecting `StreamVersion` without triggering a compiler error.
 
-When compile-time type safety is needed for in-memory construction, always append `.pipe(Schema.brand("BrandName"))`:
+Therefore, the Harness enforces **Branded Domain Types everywhere (`harness:SPEC-0005` / `harness:ADR-0007`)**:
+1. **Contract Scalar Exports (`unbranded-contract-schema`):** Every exported scalar schema in `type:contract` must append `.pipe(Schema.brand("<BrandName>"))` (or `Schema.fromBrand("<BrandName>", BrandCtor)`).
+2. **Composite Schema Fields (`harness/syntax-bans`):** Every non-boolean scalar field inside `Schema.Struct`, `Schema.Class`, `Schema.TaggedStruct`, `Schema.TaggedClass`, `Schema.TaggedUnion`, and `Schema.TaggedError` in `type:contract`, `type:domain`, and `type:core` must reference a branded schema rather than raw `Schema.String`, `Schema.NonEmptyString`, `Schema.Int`, `Schema.Natural`, or `Schema.Finite`.
+3. **Domain & Service Boundaries (`unbranded-primitive-boundary`):** Exported `Effect.fn` use cases, `.decide` / `evolve` functions, `stub<A, E, R>` skeletons, and `Context.Service` capability methods must never accept or return raw `string` or `number` primitives.
+4. **No `as <BrandedType>` Assertions (`harness/syntax-bans`):** Never cast raw values with `as UserId`. Construct branded values using `<BrandedSchema>.make(value)`, `Brand.nominal<T>()(value)`, `Brand.refined<T>(...)(value)`, or `Schema.decodeUnknownEffect(<BrandedSchema>)(value)`.
+
 ```ts
 // 0-based stream revisions and counters (0 is valid, compile-time branded)
 export const StreamVersion = Schema.Natural.pipe(Schema.brand("StreamVersion"))
@@ -77,7 +107,7 @@ export const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0)).pipe(
 )
 export type PositiveInt = typeof PositiveInt.Type // -> number & Brand<"PositiveInt">
 ```
-Branded types prevent unvalidated raw numbers from being assigned at compile time without decoding through `Schema.decodeUnknown*` or constructing with `Brand.nominal`.
+Branded types attach the phantom symbol `"~effect/Brand"` at compile time with zero runtime memory overhead and zero change to JSON / OpenAPI `Encoded` wire formats.
 
 ## Parsing and Decoding Untrusted Input
 

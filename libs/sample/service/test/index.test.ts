@@ -1,11 +1,23 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
+import {
+  AlbumId,
+  AlbumPhotoCount,
+  CreatedAtMillis,
+  PhotoId,
+  PhotoName
+} from "@harness/sample-contract"
 import { AlbumCounterClient, PhotoRepo } from "../src/index.js"
 
 describe("PhotoRepo", () => {
   it.effect("can be provided and accessed via Context", () =>
     Effect.gen(function* () {
-      const dummyPhoto = { id: 1, name: "Sunset", albumId: "a1", createdAt: 12345 }
+      const dummyPhoto = {
+        id: PhotoId.make(1),
+        name: PhotoName.make("Sunset"),
+        albumId: AlbumId.make("a1"),
+        createdAt: CreatedAtMillis.make(12345)
+      }
       const repoImpl = {
         insert: () => Effect.succeed(dummyPhoto),
         findById: () => Effect.succeed(dummyPhoto),
@@ -13,8 +25,11 @@ describe("PhotoRepo", () => {
       }
       const program = Effect.gen(function* () {
         const repo = yield* PhotoRepo
-        const inserted = yield* repo.insert({ name: "Sunset", albumId: "a1" })
-        const found = yield* repo.findById(1)
+        const inserted = yield* repo.insert({
+          name: PhotoName.make("Sunset"),
+          albumId: AlbumId.make("a1")
+        })
+        const found = yield* repo.findById(PhotoId.make(1))
         const all = yield* repo.listAll
         return { inserted, found, all }
       }).pipe(Effect.provideService(PhotoRepo, repoImpl))
@@ -31,13 +46,13 @@ describe("AlbumCounterClient", () => {
   it.effect("can be provided and accessed via Context", () =>
     Effect.gen(function* () {
       const clientImpl = {
-        increment: () => Effect.succeed(1),
-        getCount: () => Effect.succeed(0)
+        increment: () => Effect.succeed(AlbumPhotoCount.make(1)),
+        getCount: () => Effect.succeed(AlbumPhotoCount.make(0))
       }
       const program = Effect.gen(function* () {
         const client = yield* AlbumCounterClient
-        const count = yield* client.getCount("a1")
-        const next = yield* client.increment("a1")
+        const count = yield* client.getCount(AlbumId.make("a1"))
+        const next = yield* client.increment(AlbumId.make("a1"))
         return { count, next }
       }).pipe(Effect.provideService(AlbumCounterClient, clientImpl))
 

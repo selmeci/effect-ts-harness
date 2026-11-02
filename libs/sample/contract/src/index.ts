@@ -2,34 +2,59 @@ import { Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/http-api"
 import { Rpc, RpcGroup } from "effect/rpc"
 
+// Branded Domain Value Schemas
+export const PersonName = Schema.String.pipe(Schema.brand("PersonName"))
+export type PersonName = typeof PersonName.Type
+
+export const GreetingMessage = Schema.String.pipe(Schema.brand("GreetingMessage"))
+export type GreetingMessage = typeof GreetingMessage.Type
+
+export const PhotoId = Schema.Int.pipe(Schema.brand("PhotoId"))
+export type PhotoId = typeof PhotoId.Type
+
+export const PhotoIdFromString = Schema.FiniteFromString.pipe(Schema.brand("PhotoId"))
+export type PhotoIdFromString = typeof PhotoIdFromString.Type
+
+export const PhotoName = Schema.String.pipe(Schema.brand("PhotoName"))
+export type PhotoName = typeof PhotoName.Type
+
+export const AlbumId = Schema.String.pipe(Schema.brand("AlbumId"))
+export type AlbumId = typeof AlbumId.Type
+
+export const CreatedAtMillis = Schema.Int.pipe(Schema.brand("CreatedAtMillis"))
+export type CreatedAtMillis = typeof CreatedAtMillis.Type
+
+export const AlbumPhotoCount = Schema.Int.pipe(Schema.brand("AlbumPhotoCount"))
+export type AlbumPhotoCount = typeof AlbumPhotoCount.Type
+
 // Backward-compatible GreetInput export for sample-domain
-export const GreetInput = Schema.Struct({ name: Schema.String })
+export const GreetInput = Schema.Struct({ name: PersonName })
 export type GreetInput = typeof GreetInput.Type
 
 // Schemas
 export const Photo = Schema.Struct({
-  id: Schema.Int,
-  name: Schema.String,
-  albumId: Schema.String,
-  createdAt: Schema.Int
+  id: PhotoId,
+  name: PhotoName,
+  albumId: AlbumId,
+  createdAt: CreatedAtMillis
 })
 export type Photo = typeof Photo.Type
 
 export const CreatePhotoInput = Schema.Struct({
-  name: Schema.String,
-  albumId: Schema.String
+  name: PhotoName,
+  albumId: AlbumId
 })
 export type CreatePhotoInput = typeof CreatePhotoInput.Type
 
 // Tagged Errors
 export class PhotoNotFoundError extends Schema.TaggedError<PhotoNotFoundError>()(
   "PhotoNotFoundError",
-  { id: Schema.Int }
+  { id: PhotoId }
 ) {}
 
 export class AlbumQuotaExceededError extends Schema.TaggedError<AlbumQuotaExceededError>()(
   "AlbumQuotaExceededError",
-  { albumId: Schema.String, count: Schema.Int }
+  { albumId: AlbumId, count: AlbumPhotoCount }
 ) {}
 
 // HttpApi Group & API
@@ -43,7 +68,7 @@ export const PhotosApiGroup = HttpApiGroup.make("photos").add(
     error: AlbumQuotaExceededError
   }),
   HttpApiEndpoint.get("getPhoto", "/photos/:id", {
-    params: Schema.Struct({ id: Schema.FiniteFromString }),
+    params: Schema.Struct({ id: PhotoIdFromString }),
     success: Photo,
     error: PhotoNotFoundError
   })
@@ -56,15 +81,15 @@ export const buildOpenApiSpec = (): unknown => OpenApi.fromApi(SampleApi)
 
 // RpcGroup
 export const IncrementAlbumCount = Rpc.make("IncrementAlbumCount", {
-  payload: Schema.Struct({ albumId: Schema.String }),
-  success: Schema.Int,
+  payload: Schema.Struct({ albumId: AlbumId }),
+  success: AlbumPhotoCount,
   error: AlbumQuotaExceededError
 })
 export type IncrementAlbumCount = typeof IncrementAlbumCount
 
 export const GetAlbumCount = Rpc.make("GetAlbumCount", {
-  payload: Schema.Struct({ albumId: Schema.String }),
-  success: Schema.Int
+  payload: Schema.Struct({ albumId: AlbumId }),
+  success: AlbumPhotoCount
 })
 export type GetAlbumCount = typeof GetAlbumCount
 

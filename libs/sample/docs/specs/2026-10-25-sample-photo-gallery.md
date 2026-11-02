@@ -28,14 +28,15 @@ errors:
 
 Existing Graph Context & Boundaries:
 - **Reused Contracts / Schemas:**
-  - `Photo` (`libs/sample/contract/src/index.ts`): `{ id: number, name: string, albumId: string, createdAt: number }`
-  - `CreatePhotoInput` (`libs/sample/contract/src/index.ts`): `{ name: string, albumId: string }`
+  - `PhotoId`, `PhotoName`, `AlbumId`, `CreatedAtMillis`, `AlbumPhotoCount`, `PersonName`, `GreetingMessage` (`libs/sample/contract/src/index.ts`): Nominal branded domain scalars (`Schema.brand`).
+  - `Photo` (`libs/sample/contract/src/index.ts`): `{ id: PhotoId, name: PhotoName, albumId: AlbumId, createdAt: CreatedAtMillis }`
+  - `CreatePhotoInput` (`libs/sample/contract/src/index.ts`): `{ name: PhotoName, albumId: AlbumId }`
 - **Reused Services:**
   - `PhotoRepo` (`libs/sample/service/src/index.ts`): D1 repository for CRUD read projections (`findById`, `listAll`, `insert`).
   - `AlbumCounterClient` (`libs/sample/service/src/index.ts`): Durable Object RPC client for atomic album quota counters (`getCount`, `increment`).
 - **Capabilities & Errors:**
-  - `PhotoNotFoundError` (`libs/sample/contract/src/index.ts`): Tagged error with `{ id: number }`.
-  - `AlbumQuotaExceededError` (`libs/sample/contract/src/index.ts`): Tagged error with `{ albumId: string, count: number }`.
+  - `PhotoNotFoundError` (`libs/sample/contract/src/index.ts`): Tagged error with `{ id: PhotoId }`.
+  - `AlbumQuotaExceededError` (`libs/sample/contract/src/index.ts`): Tagged error with `{ albumId: AlbumId, count: AlbumPhotoCount }`.
   - `Album.decide` (`libs/sample/domain/src/index.ts`): Pure decider with `R = never` enforcing album quota threshold (max 100 photos per album).
 
 ## Goal

@@ -69,6 +69,11 @@ export const DETERMINISTIC_ROUTE_RULES: ReadonlyArray<DeterministicRouteRule> = 
     id: "atom",
     pattern: /\b(?:atomhttpapi|useatom|effect[-\s]+atom)\b/i,
     block: "atom"
+  },
+  {
+    id: "schema",
+    pattern: /\b(?:brand(?:ed)?(?:\s+type)?|schema\.brand|frombrand|nominal\s+type|primitive\s+obsession)\b/i,
+    block: "schema"
   }
 ]
 
@@ -85,7 +90,7 @@ export const IdiomRouterV1 = Decision.make({
         review: "Unclear or spans multiple blocks",
         "services-and-layers": "Context.Service capability definitions and Layer wiring",
         errors: "Tagged domain/API errors and typed E-channel handling",
-        schema: "Decoding, encoding, validating data at a boundary",
+        schema: "Decoding, encoding, validating data at a boundary, and branded domain types (Schema.brand / Brand.Branded)",
         "pattern-matching":
           "Exhaustive ts-pattern match().with().exhaustive() over discriminated unions (Schema.TaggedUnion / TaggedStruct)",
         "event-sourcing":

@@ -7,13 +7,21 @@ import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import { Schema } from "effect"
 import {
+  AlbumId,
+  AlbumPhotoCount,
   AlbumQuotaExceededError,
   buildOpenApiSpec,
+  CreatedAtMillis,
   CreatePhotoInput,
   detectOpenApiBreakingChanges,
   GreetInput,
+  GreetingMessage,
+  PersonName,
   Photo,
   PhotoCounterRpc,
+  PhotoId,
+  PhotoIdFromString,
+  PhotoName,
   PhotoNotFoundError,
   SampleApi
 } from "../src/index.js"
@@ -25,29 +33,37 @@ const resolverPath = resolve(repoRoot, "tools/node-ts-resolver.mjs")
 const openApiPath = resolve(currentDir, "../openapi.json")
 
 describe("sample-contract (Schemas, HttpApi, RpcGroup, OpenAPI)", () => {
-  it("preserves GreetInput for backward compatibility", () => {
+  it("preserves GreetInput and constructs branded PersonName and GreetingMessage", () => {
     const decoded = Schema.decodeSync(GreetInput)({ name: "Roman" })
-    expect(decoded.name).toBe("Roman")
+    expect(decoded.name).toBe(PersonName.make("Roman"))
+    expect(GreetingMessage.make("Hello, Roman!")).toBe("Hello, Roman!")
   })
 
-  it("decodes Photo and CreatePhotoInput Schemas", () => {
+  it("decodes Photo, CreatePhotoInput, and PhotoIdFromString branded Schemas", () => {
     const input = Schema.decodeSync(CreatePhotoInput)({ name: "sunset.jpg", albumId: "vacation" })
-    expect(input.albumId).toBe("vacation")
+    expect(input.albumId).toBe(AlbumId.make("vacation"))
+    expect(input.name).toBe(PhotoName.make("sunset.jpg"))
     const photo = Schema.decodeSync(Photo)({
       id: 1,
       name: "sunset.jpg",
       albumId: "vacation",
       createdAt: 1700000000
     })
-    expect(photo.id).toBe(1)
+    expect(photo.id).toBe(PhotoId.make(1))
+    expect(photo.createdAt).toBe(CreatedAtMillis.make(1700000000))
+    const idFromParam = Schema.decodeSync(PhotoIdFromString)("42")
+    expect(idFromParam).toBe(PhotoId.make(42))
   })
 
-  it("constructs PhotoNotFoundError and AlbumQuotaExceededError", () => {
-    const notFound = new PhotoNotFoundError({ id: 42 })
+  it("constructs PhotoNotFoundError and AlbumQuotaExceededError with branded fields", () => {
+    const notFound = new PhotoNotFoundError({ id: PhotoId.make(42) })
     expect(notFound._tag).toBe("PhotoNotFoundError")
     expect(notFound.id).toBe(42)
 
-    const quota = new AlbumQuotaExceededError({ albumId: "vacation", count: 100 })
+    const quota = new AlbumQuotaExceededError({
+      albumId: AlbumId.make("vacation"),
+      count: AlbumPhotoCount.make(100)
+    })
     expect(quota._tag).toBe("AlbumQuotaExceededError")
     expect(quota.albumId).toBe("vacation")
     expect(quota.count).toBe(100)

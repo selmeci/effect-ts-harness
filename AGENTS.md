@@ -55,6 +55,10 @@ Plan as code: write the skeleton first (schemas, errors, service interfaces, sig
   - Never use `if / else` or ternary `? :` to check a discriminant property (`_tag`, `kind`, `status`, custom literal tags) or tag guard (`Option.isSome`, `Either.isRight`, `Result.isSuccess`) — enumerate **all** variants with `match(value)...exhaustive()`, even when the union has only 2 states. Simple `if / else` is allowed only when not inspecting a union discriminant.
   - `.exhaustive()` is mandatory on closed unions; `.otherwise()` is permitted **only** on open types (`number`, `string`, `unknown`) or single-struct `P.when` guards where `.exhaustive()` cannot be used. `match(...).run()` is banned.
   - Inside `Effect.fn` / `Effect.gen`, `.with()` callbacks are not generators: return an `Effect` or `TaggedError` from each `.with()` arm and `return yield* match(...)...exhaustive()` once at the outer level.
+- **Branded Domain Types (`Schema.brand` & `Brand.Branded` — `harness:SPEC-0005` / `harness:ADR-0007`):**
+  - Raw primitive type aliases (`type UserId = string`) and unbranded scalar schemas in `type:contract` are banned (`harness/syntax-bans`, `unbranded-contract-schema`). Always pipe scalar schemas into `.pipe(Schema.brand("<BrandName>"))` and derive `export type <BrandName> = typeof <BrandName>.Type`.
+  - Struct, Class, TaggedStruct, TaggedUnion, and TaggedError fields in `type:contract`, `type:domain`, and `type:core` must reference branded schemas rather than raw `Schema.String`, `Schema.NonEmptyString`, `Schema.Int`, or `Schema.Natural`.
+  - Exported domain `Effect.fn` use cases, `.decide` / `evolve` functions, `stub<A, E, R>` skeletons, and `Context.Service` capability methods must use branded domain types at their boundaries rather than raw `string` or `number` (`unbranded-primitive-boundary`). Never bypass brand validation with `as <BrandedType>`.
 
 ## Nx taxonomy
 

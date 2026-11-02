@@ -1,20 +1,24 @@
 import { Effect } from "effect"
 import { match, P } from "ts-pattern"
 import {
+  type AlbumId,
+  AlbumPhotoCount,
   AlbumQuotaExceededError,
   type CreatePhotoInput,
-  type GreetInput
+  type GreetInput,
+  GreetingMessage,
+  type PhotoId
 } from "@harness/sample-contract"
 import { AlbumCounterClient, PhotoRepo } from "@harness/sample-service"
 
 export const greet = Effect.fn("Sample.greet")(function* (input: GreetInput) {
   yield* Effect.void
-  return `Hello, ${input.name}!`
+  return GreetingMessage.make(`Hello, ${input.name}!`)
 })
 
 export const decideAlbumQuota = Effect.fn("Album.decide")(function* (input: {
-  readonly albumId: string
-  readonly currentCount: number
+  readonly albumId: AlbumId
+  readonly currentCount: AlbumPhotoCount
 }) {
   return yield* match(input)
     .with({ currentCount: P.when((c) => c >= 100) }, ({ albumId, currentCount }) =>
@@ -23,7 +27,7 @@ export const decideAlbumQuota = Effect.fn("Album.decide")(function* (input: {
         count: currentCount
       })
     )
-    .otherwise(({ currentCount }) => Effect.succeed(currentCount + 1))
+    .otherwise(({ currentCount }) => Effect.succeed(AlbumPhotoCount.make(currentCount + 1)))
 })
 
 export const uploadPhoto = Effect.fn("Sample.uploadPhoto")(function* (input: CreatePhotoInput) {
@@ -35,7 +39,7 @@ export const uploadPhoto = Effect.fn("Sample.uploadPhoto")(function* (input: Cre
   return yield* repo.insert(input)
 })
 
-export const getPhotoById = Effect.fn("Sample.getPhotoById")(function* (id: number) {
+export const getPhotoById = Effect.fn("Sample.getPhotoById")(function* (id: PhotoId) {
   const repo = yield* PhotoRepo
   return yield* repo.findById(id)
 })

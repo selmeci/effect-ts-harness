@@ -1,6 +1,6 @@
 import { AtomHttpApi } from "effect/reactivity"
 import { FetchHttpClient } from "effect/http"
-import { SampleApi } from "@harness/sample-contract"
+import { type PhotoId, SampleApi } from "@harness/sample-contract"
 
 export class SampleApiClient extends AtomHttpApi.Service<SampleApiClient>()(
   "SampleApiClient",
@@ -12,6 +12,6 @@ export class SampleApiClient extends AtomHttpApi.Service<SampleApiClient>()(
 ) {}
 
 export const listPhotosAtom = SampleApiClient.query("photos", "listPhotos", {})
-export const getPhotoByIdAtom = (id: number) =>
+export const getPhotoByIdAtom = (id: PhotoId) =>
   SampleApiClient.query("photos", "getPhoto", { params: { id } })
 export const createPhotoMutation = SampleApiClient.mutation("photos", "createPhoto")

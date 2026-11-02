@@ -7,6 +7,7 @@ import {
   makeFailingDecisionModelLayer,
   makeMockDecisionModelLayer,
   proposeLearningAction,
+  routeStep,
   triageFailure,
   type LearnProposalInput
 } from "../src/index.js"
@@ -324,6 +325,27 @@ describe("LearnProposalV1 and proposeLearningAction", () => {
       ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
       expect(nonExhaustiveRes.kind).toBe("mechanical")
       expect(nonExhaustiveRes.hint).toContain(".exhaustive()")
+
+      const unbrandedContractRes = yield* triageFailure(
+        "[unbranded-contract-schema] Exported contract schema 'libs/sample/contract/src/index.ts#UserId' resolves to unbranded primitive type 'string'"
+      ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
+      expect(unbrandedContractRes.kind).toBe("mechanical")
+      expect(unbrandedContractRes.hint).toContain("Schema.brand")
+
+      const unbrandedBoundaryRes = yield* triageFailure(
+        "[unbranded-primitive-boundary] Domain function 'libs/sample/domain/src/index.ts#deletePhoto' uses unbranded primitive type(s) (param 'id: number')"
+      ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
+      expect(unbrandedBoundaryRes.kind).toBe("mechanical")
+      expect(unbrandedBoundaryRes.hint).toContain("Schema.brand")
+    })
+  )
+
+  it.effect("routeStep deterministically routes branded type steps to schema", () =>
+    Effect.gen(function* () {
+      const block = yield* routeStep(
+        "Define branded domain identifiers using Schema.brand and Brand.nominal to eliminate primitive obsession"
+      ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
+      expect(block).toBe("schema")
     })
   )
 })

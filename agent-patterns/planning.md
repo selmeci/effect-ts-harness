@@ -116,18 +116,18 @@ The agent inspects existing domain nodes via `harness_resolve` / `harness_caller
 ```ts
 import { Effect } from "effect"
 import { stub } from "@harness/gates"
-import { PhotoNotFoundError } from "@harness/sample-contract"
+import { AlbumPhotoCount, PhotoId, PhotoNotFoundError } from "@harness/sample-contract"
 import { AlbumCounterClient, PhotoRepo } from "@harness/sample-service"
 
 // Derived from STATE-DRIVEN ("WHILE count is 0..."): pure decider (R = never)
 export const decideAlbumDecrement = Effect.fn("AlbumDecrement.decide")(function* (input: {
-  readonly currentCount: number
+  readonly currentCount: AlbumPhotoCount
 }) {
-  return yield* stub<number, never, never>(input)
+  return yield* stub<AlbumPhotoCount, never, never>(input)
 })
 
 // Derived from EVENT-DRIVEN ("WHEN user deletes...") + UNWANTED ("IF photo does not exist...")
-export const deletePhoto = Effect.fn("Sample.deletePhoto")(function* (id: number) {
+export const deletePhoto = Effect.fn("Sample.deletePhoto")(function* (id: PhotoId) {
   return yield* stub<void, PhotoNotFoundError, PhotoRepo | AlbumCounterClient>(id)
 })
 ```
@@ -150,8 +150,8 @@ Before advancing a plan from skeleton to implementation, verify complete doc-to-
 Every plan must include an Adversarial & Negative Test Matrix specifying how boundaries, deciders, and test helpers are tested against invalid states and defects:
 
 ### 1. Contract Schemas (`type:contract`)
-- **Positive & Negative Decode Tests:** Every constrained schema (`Schema.Int`, `Schema.Natural`, `PositiveInt`, `NonEmptyString`) must plan both positive decode tests and negative rejection tests asserting failure on `-1`, `1.5`, `""`, missing fields, or null.
-- **Decode-Time Filters vs Compile-Time Branded Types:** Note that `Schema.Int` and `Schema.Natural` are decode-time filters whose TypeScript type is plain `number`. In memory, TypeScript will not prevent passing `-1` or non-integer numbers unless compile-time branding is added. When compile-time branding is needed for in-memory type safety, use `.pipe(Schema.brand("..."))`.
+- **Positive & Negative Decode Tests:** Every constrained schema (`Schema.Int`, `Schema.Natural`, `PositiveInt`, `NonEmptyString`, and branded domain schemas) must plan both positive decode tests and negative rejection tests asserting failure on `-1`, `1.5`, `""`, missing fields, or null.
+- **Mandatory Compile-Time Branded Types (`unbranded-contract-schema` & `unbranded-primitive-boundary` gates):** `Schema.String`, `Schema.NonEmptyString`, `Schema.Int`, and `Schema.Natural` are decode-time filters whose unbranded TypeScript type is plain `string` or `number`. Every scalar domain schema in `type:contract` must append `.pipe(Schema.brand("<BrandName>"))`, and every domain `Effect.fn` / `stub<A, E, R>` / `Context.Service` boundary must use branded domain types instead of raw primitives.
 
 ### 2. BDD / Test Runners (`testing.ts` in `type:core`)
 When building domain test harnesses or BDD assertion builders (e.g. `given(...).when(...).thenEvents(...)`):
