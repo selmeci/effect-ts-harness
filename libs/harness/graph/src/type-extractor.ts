@@ -68,6 +68,7 @@ export interface TypeExtractorViolation {
     | "unsafe-type-cast"
     | "unbranded-contract-schema"
     | "unbranded-primitive-boundary"
+    | "node-sqlite-in-infra"
   readonly message: string
   readonly path: ReadonlyArray<string>
   readonly file?: string | undefined
@@ -1230,6 +1231,25 @@ export const extractTypeAwareGraphFromSource = (
     }
 
     const filePkgTag = fileMap.get(relPath)?.packageTag ?? resolvePackageTag(repoRoot, relPath)
+
+    if (filePkgTag === "infra" || filePkgTag === "app") {
+      for (const imp of sourceFile.getImportDeclarations()) {
+        const modSpec = imp.getModuleSpecifierValue()
+        if (
+          modSpec === "node:sqlite" ||
+          modSpec === "sqlite" ||
+          modSpec === "better-sqlite3"
+        ) {
+          branchingViolations.push({
+            rule: "node-sqlite-in-infra",
+            message: `Do not import '${modSpec}' in '${relPath}' — Cloudflare Durable Object SQLite and D1 storages in type:infra/type:app must execute against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (es:ADR-0002).`,
+            file: relPath,
+            line: imp.getStartLineNumber(),
+            enclosingSymbol: relPath
+          })
+        }
+      }
+    }
 
     // Track local variable declarations that alias a discriminant property of a union
     const discriminantAliasVars = new Set<string>()
@@ -3567,6 +3587,37 @@ export const extractWorkspaceTypeAwareGraph = (
       }
     }))
     const unassertedStateViolations = checkUnassertedStateFieldsForInputs(inputs, testFilesWithContent)
+    const nodeSqliteTestViolations: Array<BranchingViolation> = []
+    for (const relTestFile of testFiles) {
+      if (
+        relTestFile.startsWith("libs/harness/") ||
+        relTestFile.startsWith("apps/harness-")
+      ) {
+        continue
+      }
+      if (!/(?:^libs\/[^/]+\/infra\/|^apps\/)/.test(relTestFile)) {
+        continue
+      }
+      const fullPath = path.join(root, relTestFile)
+      if (!fs.existsSync(fullPath)) continue
+      const content = fs.readFileSync(fullPath, "utf-8")
+      const lines = content.split(/\r?\n/)
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i] ?? ""
+        const importMatch = line.match(
+          /\b(?:import|from)\s+["'](node:sqlite|sqlite|better-sqlite3)["']/
+        )
+        if (importMatch && importMatch[1]) {
+          nodeSqliteTestViolations.push({
+            rule: "node-sqlite-in-infra",
+            message: `Do not import '${importMatch[1]}' in '${relTestFile}' — Cloudflare Durable Object SQLite and D1 tests in type:infra/type:app must execute against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (es:ADR-0002).`,
+            file: relTestFile,
+            line: i + 1,
+            enclosingSymbol: relTestFile
+          })
+        }
+      }
+    }
 
     const augmentedGraph = Graph.mutate<HarnessNode, HarnessEdge>(
       baseGraph.graph,
@@ -3787,7 +3838,8 @@ export const extractWorkspaceTypeAwareGraph = (
 
     const combinedViolations = [
       ...(baseGraph.branchingViolations ?? []),
-      ...unassertedStateViolations
+      ...unassertedStateViolations,
+      ...nodeSqliteTestViolations
     ]
 
     return {

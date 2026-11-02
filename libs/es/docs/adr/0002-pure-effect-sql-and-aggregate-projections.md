@@ -35,27 +35,28 @@ errors:
 
 ## Context and Problem Statement
 
-In Phase 2 of the Event Sourcing MVP (`docs/mvp_event_sourcing.md`), an aggregate must append events, update local projections, ensure command idempotency via `commandId`, and rebuild local projections on version mismatch or stream drift inside a single transactional boundary within Cloudflare Durable Objects. The initial brief contemplated using Drizzle ORM (`drizzle-orm/effect-sqlite-do`) for table declarations. However, using Drizzle in an Effect v4 event sourcing architecture creates schema duplication (`sqliteTable` vs `Schema.Struct`), relies on pinned release-candidate drivers with transaction workarounds, and introduces an unnecessary ORM abstraction over an append-only event log and narrow key-value read models. Furthermore, our Nx taxonomy requires `@harness/es-core` (`type:core`) to remain 100% free of I/O, while SQL execution and `SqlClient` adapters live in `@harness/es-infra` (`type:infra`) with Node-based memory test adapters isolated from the Cloudflare Worker entrypoint.
+In Phase 2 of the Event Sourcing MVP (`docs/mvp_event_sourcing.md`), an aggregate must append events, update local projections, ensure command idempotency via `commandId`, and rebuild local projections on version mismatch or stream drift inside a single transactional boundary within Cloudflare Durable Objects. The initial brief contemplated using Drizzle ORM (`drizzle-orm/effect-sqlite-do`) for table declarations. However, using Drizzle in an Effect v4 event sourcing architecture creates schema duplication (`sqliteTable` vs `Schema.Struct`), relies on pinned release-candidate drivers with transaction workarounds, and introduces an unnecessary ORM abstraction over an append-only event log and narrow key-value read models. Furthermore, our Nx taxonomy requires `@harness/es-core` (`type:core`) to remain 100% free of I/O, while SQL execution and `SqlClient` adapters live in `@harness/es-infra` (`type:infra`) and execute against the real Cloudflare `workerd` runtime (`@alchemy.run/cloudflare-runtime`) rather than hand-rolled `node:sqlite` (`DatabaseSync`) mocks.
 
 ## Decision Drivers
 
 * **Single Source of Truth for Schemas:** Avoid dual-maintenance and translation overhead between Drizzle table schemas and Effect v4 `Schema` / branded domain types.
-* **Strict Core vs Infra Taxonomy:** Keep `@harness/es-core` (`type:core`) completely free of `SqlClient` and SQL statements, placing all SQLite persistence in `@harness/es-infra` (`type:infra`) and isolating `node:sqlite` in `@harness/es-infra/memory`.
+* **Strict Core vs Infra Taxonomy:** Keep `@harness/es-core` (`type:core`) completely free of `SqlClient` and SQL statements, placing all SQLite persistence in `@harness/es-infra` (`type:infra`) and isolating test runtime helpers in `@harness/es-infra/memory`.
+* **Production-Faithful `workerd` Storage Semantics (Zero `node:sqlite` Mocks):** Cloudflare's Vite plugin and runtime (`@alchemy.run/cloudflare-runtime`) execute Durable Object SQLite (`enableSql: true`) and D1 directly inside `workerd`. Hand-rolled `node:sqlite` (`DatabaseSync`) mocks diverge from `workerd` (allowing raw `BEGIN`/`COMMIT`/`ROLLBACK` statements that `workerd` forbids, lacking C++ nested savepoints in `storage.transaction()`, and introducing mock-specific cursor/rollback bugs) and must be banned in `type:infra` and `type:app`.
 * **Append-Only Simplicity:** The aggregate storage schema consists of narrow relational tables (`es_events`, `es_commands`, `es_projections_meta`, `es_outbox`) scoped by `(aggregate_name, aggregate_id)` requiring no relational ORM join builders.
 * **Strong Consistency & Read-Your-Writes:** Local read models must be updated within the event append transaction and queried by `ProjectionName` and `AggregateId`.
 
 ## Considered Options
 
 * **Option 1:** Drizzle ORM (`drizzle-orm/effect-sqlite-do`) with dual `sqliteTable` and `Schema` declarations.
-* **Option 2:** Pure `effect/sql/SqlClient` and `@effect/sql-sqlite-do` in `@harness/es-infra` with I/O-free protocols in `@harness/es-core`, direct `Schema` decoding, and native `sql.withTransaction` boundaries.
+* **Option 2:** Pure `effect/sql/SqlClient` and `@effect/sql-sqlite-do` in `@harness/es-infra` with I/O-free protocols in `@harness/es-core`, direct `Schema` decoding, native `sql.withTransaction` boundaries, and real `workerd` SQLite Durable Object execution via `@alchemy.run/cloudflare-runtime`.
 
 ## Decision Outcome
 
-**Chosen option:** "Option 2: Pure `effect/sql/SqlClient` and `@effect/sql-sqlite-do` in `@harness/es-infra` with I/O-free protocols in `@harness/es-core`, direct `Schema` decoding, and native `sql.withTransaction` boundaries", because it eliminates external ORM impedance, preserves `type:core` purity, uses Effect `Schema` as the single source of truth for both domain and persistence models, and keeps the Cloudflare Worker entrypoint free of Node built-ins.
+**Chosen option:** "Option 2: Pure `effect/sql/SqlClient` and `@effect/sql-sqlite-do` in `@harness/es-infra` with I/O-free protocols in `@harness/es-core`, direct `Schema` decoding, native `sql.withTransaction` boundaries, and real `workerd` SQLite Durable Object execution via `@alchemy.run/cloudflare-runtime`", because it eliminates external ORM impedance, preserves `type:core` purity, uses Effect `Schema` as the single source of truth for both domain and persistence models, and tests against the real Cloudflare `workerd` SQLite engine without `node:sqlite` mocks.
 
 ### Binding Architectural Rules
 
-1. **Taxonomy & Worker Entrypoint Isolation:** `@harness/es-core` (`type:core`) defines pure protocols (`Decider`, `LocalProjection`, `AggregateConfig`) with zero `SqlClient` imports. `@harness/es-infra` (`type:infra`) implements `initializeAggregateTables`, `loadAggregate`, and `handleAggregateCommand` over `effect/sql/SqlClient`. The `node:sqlite` in-memory test layer lives exclusively in `@harness/es-infra/memory` (`libs/es/infra/src/memory.ts`), never on the Worker entrypoint (`libs/es/infra/src/index.ts`).
+1. **Taxonomy, Worker Entrypoint Isolation & Ban on `node:sqlite` in `type:infra`:** `@harness/es-core` (`type:core`) defines pure protocols (`Decider`, `LocalProjection`, `AggregateConfig`) with zero `SqlClient` imports. `@harness/es-infra` (`type:infra`) implements `initializeAggregateTables`, `loadAggregate`, and `handleAggregateCommand` over `effect/sql/SqlClient`. Importing `node:sqlite` (`DatabaseSync`) or writing hand-rolled `DurableObjectStorage` / `SqlStorage` / `D1Database` mocks in `type:infra` or `type:app` packages (`libs/*/infra/**`, `apps/**`) is strictly banned (`node-sqlite-in-infra`, `harness(syntax-bans)`, `harness(test-integrity)`). `@harness/es-infra/memory` (`libs/es/infra/src/memory.ts`) runs `@effect/sql-sqlite-do` (`makeSqliteClientLayer`) against a real `workerd` SQLite Durable Object (`enableSql: true`) spawned via `@alchemy.run/cloudflare-runtime`.
 2. **Single Transactional Boundary:** Every `handleAggregateCommand` execution runs its entire read-decide-commit cycle inside `sql.withTransaction`:
    - Check `commandId` in `es_commands` and verify `(aggregate_name, aggregate_id)` ownership (failing with `CommandAggregateMismatchError` on cross-aggregate reuse).
    - Load and fold `es_events` (verifying contiguous `stream_version` starting at 1 and valid JSON payloads, failing with `EventStreamCorruptionError` on corruption) and run any required projection rebuilds.
@@ -73,12 +74,17 @@ In Phase 2 of the Event Sourcing MVP (`docs/mvp_event_sourcing.md`), an aggregat
 
 **Why rejected:** Drizzle requires duplicate table declarations in parallel with Effect `Schema`, requires continuous boilerplate decoding between Drizzle row types and branded domain schemas, and the pinned `1.0.0-rc.5-ab785fc` driver contains fragile workarounds for Cloudflare DO SQLite transactions. Pure `effect/sql/SqlClient` provides superior ergonomics and zero impedance mismatch.
 
+### 2 · Hand-Rolled `node:sqlite` (`DatabaseSync`) Storage Mocks in `type:infra`
+
+**Why rejected:** Emulating Cloudflare `DurableObjectStorage`, `SqlStorage`, or `D1Database` with `node:sqlite` (`DatabaseSync`) diverges from the real `workerd` runtime: `workerd` forbids raw `BEGIN` / `COMMIT` / `ROLLBACK` statements in `storage.sql.exec()` and manages nested transactions via C++ savepoints in `storage.transaction()`, whereas `node:sqlite` mocks relied on manual SQL transaction statements and custom cursor wrappers (`MockCursor.one()`, `Promise.all` fake batching). Executing tests against `@alchemy.run/cloudflare-runtime` (`workerd`) eliminates mock drift entirely.
+
 ## Consequences and Enforcement
 
 ### Positive Consequences
 
 * Single schema definition language (`Schema.Struct`, `Schema.Class`, `Schema.brand`) across contracts, core protocols, and persistence.
 * Strict adherence to Nx taxonomy (`type:core` has zero I/O; `type:infra` owns SQL; Worker entrypoint has zero `node:*` imports).
+* 100% fidelity with Cloudflare `workerd` SQLite Durable Object and D1 transaction semantics (`storage.transaction()` C++ savepoints, authorizer rules, and cursor behavior).
 * Deterministic transaction rollback on conflict, domain rejection, or SQL failure.
 
 ### Negative Consequences and Trade-offs

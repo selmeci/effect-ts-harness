@@ -1608,6 +1608,17 @@ const syntaxBans = {
               `Do not import Node.js builtin '${importSource}' in the main Cloudflare Worker infra entrypoint (src/index.ts) — isolate Node-backed test/memory adapters in a separate module (e.g. src/memory.ts).`
             )
           }
+          if (
+            /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
+            (importSource === "node:sqlite" ||
+              importSource === "sqlite" ||
+              importSource === "better-sqlite3")
+          ) {
+            reportOnce(
+              node,
+              `Do not import '${importSource}' in type:infra or type:app ('${filename}') — execute Cloudflare Durable Object SQLite and D1 storages against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (es:ADR-0002, node-sqlite-in-infra).`
+            )
+          }
         }
       },
       TSAnyKeyword(node) {
@@ -2000,6 +2011,23 @@ const testIntegrity = {
         }
         if (/^\s*(\/\/|\/\*)\s*@ts-(ignore|nocheck)\b/m.test(text)) {
           context.report({ node, message: testTsIgnoreMessage })
+        }
+      },
+      ImportDeclaration(node) {
+        const filename = getNormalizedFilename()
+        if (!isInternalHarnessFile(filename) && node.source != null && typeof node.source.value === "string") {
+          const importSource = node.source.value
+          if (
+            /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
+            (importSource === "node:sqlite" ||
+              importSource === "sqlite" ||
+              importSource === "better-sqlite3")
+          ) {
+            context.report({
+              node,
+              message: `Do not import '${importSource}' in type:infra or type:app tests ('${filename}') — execute Cloudflare Durable Object SQLite and D1 tests against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (es:ADR-0002, node-sqlite-in-infra).`
+            })
+          }
         }
       },
       TSAnyKeyword(node) {

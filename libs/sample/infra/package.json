@@ -30,6 +30,8 @@
     "ts-pattern": "5.9.2"
   },
   "devDependencies": {
+    "@alchemy.run/cloudflare-runtime": "2.0.0-beta.80",
+    "@effect/platform-node": "4.0.0",
     "@effect/vitest": "4.0.0",
     "@harness/graph": "workspace:*",
     "@harness/ingest": "workspace:*",

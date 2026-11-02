@@ -23,6 +23,7 @@ export type GcFindingKind =
   | "adr-doc-lint"
   | "ontology-invariant"
   | "unused-contract-export"
+  | "node-sqlite-in-infra"
 
 export interface GcFinding {
   readonly kind: GcFindingKind
@@ -656,6 +657,20 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
       message: `[${f.kind}] ${f.message}`,
       action: `Align ArchiMate layer invariants or governance doc references for ${f.nodeId}.`
     })
+  }
+
+  // 11. node-sqlite-in-infra
+  for (const bv of input.graph.branchingViolations ?? []) {
+    if (bv.rule === "node-sqlite-in-infra") {
+      findings.push({
+        kind: "node-sqlite-in-infra",
+        nodeId: bv.enclosingSymbol,
+        location: `${bv.file}:${bv.line}`,
+        message: bv.message,
+        action:
+          "Replace node:sqlite with real Cloudflare workerd storage via @alchemy.run/cloudflare-runtime (Workerd SQLite Durable Object or D1.local)."
+      })
+    }
   }
 
   return {

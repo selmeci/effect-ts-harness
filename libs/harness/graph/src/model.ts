@@ -231,6 +231,7 @@ export type ViolationRule =
   | "unsafe-type-cast"
   | "unbranded-contract-schema"
   | "unbranded-primitive-boundary"
+  | "node-sqlite-in-infra"
 
 export interface BranchingViolation {
   readonly rule:
@@ -250,6 +251,7 @@ export interface BranchingViolation {
     | "unsafe-type-cast"
     | "unbranded-contract-schema"
     | "unbranded-primitive-boundary"
+    | "node-sqlite-in-infra"
   readonly message: string
   readonly file: string
   readonly line: number
