@@ -52,7 +52,7 @@ const doubleTypeAssertionBanMessage =
   "Double type assertions ('as unknown as T') are banned — decode untrusted data with Effect Schema or type the interface properly instead of erasing types."
 
 const BOOLEAN_STATE_PROP_REGEX =
-  /^(is[A-Z]|has[A-Z]|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|published|expired)$/
+  /^(is[A-Z]|has[A-Z]|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|publish|published|expired)$/
 
 const QUANTITY_OR_VERSION_PROP_REGEX =
   /^(qty|quantity|count|[a-z0-9]+Qty|[a-z0-9]+Quantity|[a-z0-9]+Count|streamVersion|[a-z0-9]+StreamVersion|nextExpectedStreamVersion|availableQty|reservedQty|orderedQty)$/i
@@ -1587,6 +1587,28 @@ const syntaxBans = {
       },
       ImportDeclaration(node) {
         recordContractImports(node)
+        const filename = getNormalizedFilename()
+        if (!isInternalHarnessFile(filename) && node.source != null && typeof node.source.value === "string") {
+          const importSource = node.source.value
+          if (
+            /libs\/[^/]+\/(domain|core)\/(src|test\/fixtures)\//.test(filename) &&
+            (importSource.startsWith("effect/sql") || importSource.startsWith("@effect/sql"))
+          ) {
+            reportOnce(
+              node,
+              `Do not import SQL client/driver module '${importSource}' in type:domain or type:core — keep domain/core packages 100% free of I/O and place SqlClient implementations in type:infra.`
+            )
+          }
+          if (
+            /libs\/[^/]+\/infra\/src\/index\.ts$/.test(filename) &&
+            importSource.startsWith("node:")
+          ) {
+            reportOnce(
+              node,
+              `Do not import Node.js builtin '${importSource}' in the main Cloudflare Worker infra entrypoint (src/index.ts) — isolate Node-backed test/memory adapters in a separate module (e.g. src/memory.ts).`
+            )
+          }
+        }
       },
       TSAnyKeyword(node) {
         context.report({ node, message: explicitAnyBanMessage })
@@ -1849,6 +1871,29 @@ const syntaxBans = {
                   `Do not declare loose handwritten TypeScript type/interface '${typeName}' alongside '${matchingSchema}' — derive the type directly via Schema.Schema.Type<typeof ${matchingSchema}> (or Schema.Schema.Type<ReturnType<typeof ${matchingSchema}>>) to preserve schema constraints.`
                 )
                 return
+              }
+            }
+          }
+          if (
+            decl.type === "TSInterfaceDeclaration" &&
+            /libs\/[^/]+\/(contract|domain|core)\/src\//.test(filename) &&
+            decl.body != null &&
+            Array.isArray(decl.body.body)
+          ) {
+            for (const member of decl.body.body) {
+              if (
+                member != null &&
+                member.type === "TSPropertySignature" &&
+                member.key != null &&
+                member.key.type === "Identifier" &&
+                BOOLEAN_STATE_PROP_REGEX.test(member.key.name) &&
+                member.typeAnnotation != null &&
+                getRawPrimitiveKeywordInfo(member.typeAnnotation.typeAnnotation)?.prim === "boolean"
+              ) {
+                reportOnce(
+                  member,
+                  schemaBooleanStateMessage
+                )
               }
             }
           }

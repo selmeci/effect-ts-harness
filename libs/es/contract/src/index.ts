@@ -45,10 +45,11 @@ export class EventMetadata extends Schema.Class<EventMetadata>("EventMetadata")(
   causationId: Schema.optional(CausationId)
 }) {}
 
-// Lifecycle states modeled as closed discriminated unions (no boolean flags)
+// Lifecycle and publication states modeled as closed discriminated unions (no boolean flags)
 export const StreamCreationStatus = Schema.Union([
   Schema.TaggedStruct("CreatedStream", {}),
-  Schema.TaggedStruct("ExistingStream", {})
+  Schema.TaggedStruct("ExistingStream", {}),
+  Schema.TaggedStruct("NoStream", {})
 ])
 export type StreamCreationStatus = typeof StreamCreationStatus.Type
 
@@ -57,6 +58,12 @@ export const CommandProcessingStatus = Schema.Union([
   Schema.TaggedStruct("Deduplicated", {})
 ])
 export type CommandProcessingStatus = typeof CommandProcessingStatus.Type
+
+export const OutboxPublicationMode = Schema.Union([
+  Schema.TaggedStruct("PublishOutbox", {}),
+  Schema.TaggedStruct("SuppressOutbox", {})
+])
+export type OutboxPublicationMode = typeof OutboxPublicationMode.Type
 
 // Command execution outcome contract
 export class AggregateCommandResult extends Schema.Class<AggregateCommandResult>(
@@ -88,5 +95,26 @@ export class LocalProjectionNotFoundError extends Schema.TaggedError<LocalProjec
   "LocalProjectionNotFoundError",
   {
     name: ProjectionName
+  }
+) {}
+
+export class CommandAggregateMismatchError extends Schema.TaggedError<CommandAggregateMismatchError>()(
+  "CommandAggregateMismatchError",
+  {
+    commandId: CommandId,
+    expectedAggregateName: AggregateName,
+    expectedAggregateId: AggregateId,
+    actualAggregateName: AggregateName,
+    actualAggregateId: AggregateId
+  }
+) {}
+
+export class EventStreamCorruptionError extends Schema.TaggedError<EventStreamCorruptionError>()(
+  "EventStreamCorruptionError",
+  {
+    aggregateName: AggregateName,
+    aggregateId: AggregateId,
+    expectedStreamVersion: StreamVersion,
+    actualStreamVersion: StreamVersion
   }
 ) {}

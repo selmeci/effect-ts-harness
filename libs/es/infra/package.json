@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./memory": "./src/memory.ts",
+    "./fixtures/cart-sqlite": "./test/fixtures/cart-sqlite.ts"
   },
   "nx": {
     "tags": [
@@ -19,17 +21,17 @@
   },
   "dependencies": {
     "@effect/sql-sqlite-do": "4.0.0",
-    "effect": "4.0.0"
+    "@harness/es-contract": "workspace:*",
+    "@harness/es-core": "workspace:*",
+    "effect": "4.0.0",
+    "ts-pattern": "5.9.2"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20261024.1",
     "@effect/vitest": "4.0.0",
-    "@harness/es-contract": "workspace:*",
-    "@harness/es-core": "workspace:*",
     "@harness/gates": "workspace:*",
     "@harness/graph": "workspace:*",
     "@types/node": "26.6.5",
-    "ts-pattern": "5.9.2",
     "vitest": "5.0.3"
   }
 }

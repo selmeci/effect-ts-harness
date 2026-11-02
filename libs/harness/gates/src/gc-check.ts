@@ -1054,6 +1054,12 @@ export const scanWorkspacePackageHygiene = (
         }
       }
 
+      const stripCommentsAndStrings = (text: string): string =>
+        text
+          .replace(/\/\*[\s\S]*?\*\//g, " ")
+          .replace(/\/\/[^\r\n]*/g, " ")
+          .replace(/(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/g, '""')
+
       const combinedSiblingContent = siblingFiles
         .map((f) =>
           Effect.runSync(
@@ -1064,9 +1070,27 @@ export const scanWorkspacePackageHygiene = (
           )
         )
         .map((text) =>
-          text.replace(/export\s+(?:type\s+)?\{[^}]*\}\s+from\s+["'][^"']+["']/g, "")
+          stripCommentsAndStrings(text).replace(
+            /export\s+(?:type\s+)?\{[^}]*\}\s+from\s+["'][^"']*["']/g,
+            ""
+          )
         )
         .join("\n")
+
+      const nonTestSiblingContent = siblingFiles
+        .filter((f) => !f.endsWith(".test.ts"))
+        .map((f) =>
+          Effect.runSync(
+            Effect.try({
+              try: () => readFileSync(f, "utf8"),
+              catch: () => ""
+            }).pipe(Effect.orElseSucceed(() => ""))
+          )
+        )
+        .map(stripCommentsAndStrings)
+        .join("\n")
+
+      const hasActiveStubs = /\bstub\s*</.test(nonTestSiblingContent)
 
       for (const contractFile of contractFiles) {
         const content = Effect.runSync(
@@ -1075,24 +1099,31 @@ export const scanWorkspacePackageHygiene = (
             catch: () => ""
           }).pipe(Effect.orElseSucceed(() => ""))
         )
+        const strippedContractContent = stripCommentsAndStrings(content)
         const relContractFile = relative(repoRoot, contractFile).replace(/\\/g, "/")
         const exportRegex = /(?:^|\n)\s*export\s+(?:const|class|function)\s+([A-Za-z_$][\w$]*)/g
         let exportMatch: RegExpExecArray | null
-        while ((exportMatch = exportRegex.exec(content)) !== null) {
+        while ((exportMatch = exportRegex.exec(strippedContractContent)) !== null) {
           const symbolName = exportMatch[1]!
           const symbolRefRegex = new RegExp(`\\b${symbolName}\\b`)
-          const internalStripped = content
-            .replace(/(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/g, '""')
+          const internalStripped = strippedContractContent
             .replace(
               new RegExp(
-                `export\\s+(?:const|class|function)\\s+${symbolName}\\b[^\\n]*`,
+                `export\\s+class\\s+${symbolName}\\b[\\s\\S]*?\\{`,
+                "g"
+              ),
+              "{"
+            )
+            .replace(
+              new RegExp(
+                `export\\s+(?:const|function)\\s+${symbolName}\\b[^\\n]*`,
                 "g"
               ),
               ""
             )
             .replace(
               new RegExp(
-                `export\\s+type\\s+${symbolName}\\s*=[^\\n]*`,
+                `export\\s+type\\s+${symbolName}\\s*=[\\s\\S]*?(?:\\n|$)`,
                 "g"
               ),
               ""
@@ -1108,6 +1139,27 @@ export const scanWorkspacePackageHygiene = (
               message: `Contract symbol "${symbolName}" exported from "${relContractFile}" is never imported or used by any downstream package or fixture in scope "${scope}".`,
               action: `Import "${symbolName}" in a downstream package/fixture or remove the unused contract export from "${relContractFile}".`
             })
+          }
+        }
+
+        if (!hasActiveStubs && nonTestSiblingContent.trim().length > 0) {
+          const taggedErrorRegex =
+            /export\s+class\s+([A-Za-z_$][\w$]*)\s+extends\s+Schema\.TaggedError/g
+          let errMatch: RegExpExecArray | null
+          while ((errMatch = taggedErrorRegex.exec(strippedContractContent)) !== null) {
+            const errName = errMatch[1]!
+            const constructRegex = new RegExp(
+              `(?:\\bnew\\s+${errName}\\s*\\(|\\b${errName}\\.make\\s*\\()`
+            )
+            if (!constructRegex.test(nonTestSiblingContent)) {
+              findings.push({
+                kind: "dead-tagged-error",
+                nodeId: `${scope}/contract:${errName}`,
+                location: relContractFile,
+                message: `Contract TaggedError "${errName}" in "${relContractFile}" is never constructed (new ${errName}(...)) in any non-test implementation or fixture file in scope "${scope}".`,
+                action: `Construct and fail with "new ${errName}(...)" in the implementation or remove the phantom error from "${relContractFile}".`
+              })
+            }
           }
         }
       }

@@ -1,16 +1,20 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Schema } from "effect"
 import {
-  AggregateId,
-  AggregateNotFoundError,
   AggregateCommandResult,
+  AggregateId,
+  AggregateName,
+  AggregateNotFoundError,
   CausationId,
+  CommandAggregateMismatchError,
   CommandId,
   CommandProcessingStatus,
   ConcurrencyConflictError,
   CorrelationId,
   EventMetadata,
+  EventStreamCorruptionError,
   LocalProjectionNotFoundError,
+  OutboxPublicationMode,
   PositiveInt,
   ProjectionName,
   ProjectionVersion,
@@ -61,6 +65,7 @@ describe("@harness/es-contract", () => {
     it("decodes non-empty strings into branded identifiers", () => {
       expect(Schema.decodeSync(CommandId)("cmd-1")).toBe("cmd-1")
       expect(Schema.decodeSync(AggregateId)("cart-123")).toBe("cart-123")
+      expect(Schema.decodeSync(AggregateName)("Cart")).toBe("Cart")
       expect(Schema.decodeSync(ProjectionName)("cart-view")).toBe("cart-view")
       expect(Schema.decodeSync(CorrelationId)("corr-999")).toBe("corr-999")
       expect(Schema.decodeSync(CausationId)("cause-888")).toBe("cause-888")
@@ -69,6 +74,7 @@ describe("@harness/es-contract", () => {
     it("rejects empty strings for identifiers", () => {
       expect(() => Schema.decodeSync(CommandId)("")).toThrow()
       expect(() => Schema.decodeSync(AggregateId)("")).toThrow()
+      expect(() => Schema.decodeSync(AggregateName)("")).toThrow()
       expect(() => Schema.decodeSync(ProjectionName)("")).toThrow()
     })
 
@@ -111,7 +117,10 @@ describe("@harness/es-contract", () => {
   describe("AggregateCommandResult & Status Unions", () => {
     it("decodes valid command results with closed status variants", () => {
       expect(Schema.decodeSync(StreamCreationStatus)({ _tag: "CreatedStream" })._tag).toBe("CreatedStream")
+      expect(Schema.decodeSync(StreamCreationStatus)({ _tag: "NoStream" })._tag).toBe("NoStream")
       expect(Schema.decodeSync(CommandProcessingStatus)({ _tag: "Processed" })._tag).toBe("Processed")
+      expect(Schema.decodeSync(OutboxPublicationMode)({ _tag: "PublishOutbox" })._tag).toBe("PublishOutbox")
+      expect(Schema.decodeSync(OutboxPublicationMode)({ _tag: "SuppressOutbox" })._tag).toBe("SuppressOutbox")
 
       const res1 = Schema.decodeSync(AggregateCommandResult)({
         nextExpectedStreamVersion: 1,
@@ -159,6 +168,25 @@ describe("@harness/es-contract", () => {
       })
       expect(err._tag).toBe("LocalProjectionNotFoundError")
       expect(err.name).toBe("missing-view")
+    })
+
+    it("instantiates CommandAggregateMismatchError and EventStreamCorruptionError", () => {
+      const mismatch = new CommandAggregateMismatchError({
+        commandId: CommandId.make("cmd-1"),
+        expectedAggregateName: AggregateName.make("Cart"),
+        expectedAggregateId: AggregateId.make("cart-1"),
+        actualAggregateName: AggregateName.make("Cart"),
+        actualAggregateId: AggregateId.make("cart-2")
+      })
+      expect(mismatch._tag).toBe("CommandAggregateMismatchError")
+
+      const corrupt = new EventStreamCorruptionError({
+        aggregateName: AggregateName.make("Cart"),
+        aggregateId: AggregateId.make("cart-1"),
+        expectedStreamVersion: StreamVersion.make(1),
+        actualStreamVersion: StreamVersion.make(3)
+      })
+      expect(corrupt._tag).toBe("EventStreamCorruptionError")
     })
   })
 })

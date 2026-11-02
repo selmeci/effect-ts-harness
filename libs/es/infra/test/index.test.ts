@@ -1,7 +1,8 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
 import { SqlClient } from "effect/sql/SqlClient"
-import { initializeAggregateTables, SqlClientMemoryLayer } from "../src/index.js"
+import { initializeAggregateTables } from "../src/index.js"
+import { SqlClientMemoryLayer } from "../src/memory.js"
 
 describe("@harness/es-infra", () => {
   it.effect("initializes aggregate SQLite tables using SqlClientMemoryLayer", () =>

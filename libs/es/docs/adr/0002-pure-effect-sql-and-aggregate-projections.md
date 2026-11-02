@@ -1,6 +1,6 @@
 ---
 id: es:ADR-0002
-title: Pure Effect SQL Engine and Local Projection Storage over Drizzle ORM
+title: Pure Effect SQL Engine in Infra and I/O-Free Core Protocols over Drizzle ORM
 status: accepted
 date: 2026-11-02
 enforced_by:
@@ -11,6 +11,10 @@ enforced_by:
   - libs/es/core/src/aggregate.ts
   - libs/es/core/src/testing.ts
   - libs/es/core/test/fixtures/cart.ts
+  - libs/es/infra/src/index.ts
+  - libs/es/infra/src/aggregate.ts
+  - libs/es/infra/src/memory.ts
+  - libs/es/infra/test/fixtures/cart-sqlite.ts
   - tools/oxlint/syntax-bans.js
 spans:
   - Aggregate.handleCommand
@@ -23,71 +27,75 @@ errors:
   - ConcurrencyConflictError
   - AggregateNotFoundError
   - LocalProjectionNotFoundError
+  - CommandAggregateMismatchError
+  - EventStreamCorruptionError
 ---
 
-# Pure Effect SQL Engine and Local Projection Storage over Drizzle ORM
+# Pure Effect SQL Engine in Infra and I/O-Free Core Protocols over Drizzle ORM
 
 ## Context and Problem Statement
 
-In Phase 2 of the Event Sourcing MVP (`docs/mvp_event_sourcing.md`), an aggregate must append events, update local projections, ensure command idempotency via `commandId`, and rebuild local projections on version mismatch inside a single transactional boundary within Cloudflare Durable Objects. The initial brief contemplated using Drizzle ORM (`drizzle-orm/effect-sqlite-do`) for table declarations. However, using Drizzle in an Effect v4 event sourcing architecture creates schema duplication (`sqliteTable` vs `Schema.Struct`), relies on pinned release-candidate drivers with transaction workarounds, and introduces an unnecessary ORM abstraction over what is essentially an append-only event log and narrow key-value read models. We must decide the persistence and query abstraction for aggregates and local projections.
+In Phase 2 of the Event Sourcing MVP (`docs/mvp_event_sourcing.md`), an aggregate must append events, update local projections, ensure command idempotency via `commandId`, and rebuild local projections on version mismatch or stream drift inside a single transactional boundary within Cloudflare Durable Objects. The initial brief contemplated using Drizzle ORM (`drizzle-orm/effect-sqlite-do`) for table declarations. However, using Drizzle in an Effect v4 event sourcing architecture creates schema duplication (`sqliteTable` vs `Schema.Struct`), relies on pinned release-candidate drivers with transaction workarounds, and introduces an unnecessary ORM abstraction over an append-only event log and narrow key-value read models. Furthermore, our Nx taxonomy requires `@harness/es-core` (`type:core`) to remain 100% free of I/O, while SQL execution and `SqlClient` adapters live in `@harness/es-infra` (`type:infra`) with Node-based memory test adapters isolated from the Cloudflare Worker entrypoint.
 
 ## Decision Drivers
 
 * **Single Source of Truth for Schemas:** Avoid dual-maintenance and translation overhead between Drizzle table schemas and Effect v4 `Schema` / branded domain types.
-* **Native Effect v4 Runtime & Fiber Integration:** Ensure transactional execution uses native Effect Fiber context, `Scope`, and `MixedScheduler("sync")` without driver-level monkey patching.
-* **Append-Only Simplicity:** The aggregate storage schema consists of narrow relational tables (`events`, `commands`, `projections_meta`, `outbox`) requiring no relational ORM mapping or join builders.
-* **Strong Consistency & Read-Your-Writes:** Local read models must be updated within the event append transaction and queried with type-safe schema decoding.
+* **Strict Core vs Infra Taxonomy:** Keep `@harness/es-core` (`type:core`) completely free of `SqlClient` and SQL statements, placing all SQLite persistence in `@harness/es-infra` (`type:infra`) and isolating `node:sqlite` in `@harness/es-infra/memory`.
+* **Append-Only Simplicity:** The aggregate storage schema consists of narrow relational tables (`es_events`, `es_commands`, `es_projections_meta`, `es_outbox`) scoped by `(aggregate_name, aggregate_id)` requiring no relational ORM join builders.
+* **Strong Consistency & Read-Your-Writes:** Local read models must be updated within the event append transaction and queried by `ProjectionName` and `AggregateId`.
 
 ## Considered Options
 
 * **Option 1:** Drizzle ORM (`drizzle-orm/effect-sqlite-do`) with dual `sqliteTable` and `Schema` declarations.
-* **Option 2:** Pure `@effect/sql` and `@effect/sql-sqlite-do` with direct `Schema` decoding and native `SqlClient` transactions.
+* **Option 2:** Pure `effect/sql/SqlClient` and `@effect/sql-sqlite-do` in `@harness/es-infra` with I/O-free protocols in `@harness/es-core`, direct `Schema` decoding, and native `sql.withTransaction` boundaries.
 
 ## Decision Outcome
 
-**Chosen option:** "Option 2: Pure `@effect/sql` and `@effect/sql-sqlite-do` with direct `Schema` decoding and native `SqlClient` transactions", because it eliminates external ORM impedance, uses Effect `Schema` as the single source of truth for both domain and persistence models, integrates natively with Effect v4 Fiber schedulers, and avoids pinning outdated Drizzle release candidates.
+**Chosen option:** "Option 2: Pure `effect/sql/SqlClient` and `@effect/sql-sqlite-do` in `@harness/es-infra` with I/O-free protocols in `@harness/es-core`, direct `Schema` decoding, and native `sql.withTransaction` boundaries", because it eliminates external ORM impedance, preserves `type:core` purity, uses Effect `Schema` as the single source of truth for both domain and persistence models, and keeps the Cloudflare Worker entrypoint free of Node built-ins.
 
 ### Binding Architectural Rules
 
-1. **Native Effect SQL Protocol:** Aggregate persistence and local projections must interact with SQLite via `@effect/sql` (`SqlClient.SqlClient`), using parameterized SQL statements and `Schema` decoders. Drizzle ORM dependencies are eliminated from `libs/es`.
-2. **Transactional Boundary:** Every command execution that yields non-empty events must atomically:
-   - Verify `commandId` idempotency against the `commands` table.
-   - Append serialized events with incremental `streamVersion` and metadata into `events`.
-   - Execute `apply` on every registered `LocalProjection` synchronously.
-   - Insert rows into `outbox` if and only if `publish` is enabled on the aggregate.
-   - Record the `commandId` and execution result in `commands`.
-3. **Idempotent Deduplication:** A command whose `commandId` is already present in `commands` must return the previously computed result without re-invoking `decide` or appending duplicate events.
-4. **Versioned Local Projection Rebuild:** On aggregate activation (`loadAggregate`), if a projection's recorded version in `projections_meta` does not match its current code version, the projection tables must be wiped and rebuilt by replaying the aggregate's full event stream.
-5. **Selective Outbox Publishing:** Aggregates configured with `publish: false` (or without cross-aggregate subscribers) must never write rows to the `outbox` table.
+1. **Taxonomy & Worker Entrypoint Isolation:** `@harness/es-core` (`type:core`) defines pure protocols (`Decider`, `LocalProjection`, `AggregateConfig`) with zero `SqlClient` imports. `@harness/es-infra` (`type:infra`) implements `initializeAggregateTables`, `loadAggregate`, and `handleAggregateCommand` over `effect/sql/SqlClient`. The `node:sqlite` in-memory test layer lives exclusively in `@harness/es-infra/memory` (`libs/es/infra/src/memory.ts`), never on the Worker entrypoint (`libs/es/infra/src/index.ts`).
+2. **Single Transactional Boundary:** Every `handleAggregateCommand` execution runs its entire read-decide-commit cycle inside `sql.withTransaction`:
+   - Check `commandId` in `es_commands` and verify `(aggregate_name, aggregate_id)` ownership (failing with `CommandAggregateMismatchError` on cross-aggregate reuse).
+   - Load and fold `es_events` (verifying contiguous `stream_version` starting at 1 and valid JSON payloads, failing with `EventStreamCorruptionError` on corruption) and run any required projection rebuilds.
+   - Invoke `decider.decide(command, state)`.
+   - Append emitted events to `es_events`, apply registered `LocalProjection` instances, and update `es_projections_meta`.
+   - Append rows to `es_outbox` when `outboxMode` is `PublishOutbox` (and write zero rows when `SuppressOutbox`).
+   - Record the serialized `AggregateCommandResult` in `es_commands` (including 0-event decisions, which record `NoStream` on empty streams).
+3. **Exact Stored Result Deduplication:** When `commandId` is already present in `es_commands` for the same `(aggregate_name, aggregate_id)`, `handleAggregateCommand` decodes the stored `result_json` and returns the original `nextExpectedStreamVersion` and `creationStatus` (`CreatedStream`, `ExistingStream`, or `NoStream`) with `processingStatus: { _tag: "Deduplicated" }`.
+4. **Versioned and Drift-Aware Local Projection Rebuild:** During `loadAggregate`, if `es_projections_meta` is missing for a non-empty stream, or `projection_version !== projection.version`, or `last_stream_version !== currentVersion`, `rebuildLocalProjection` purges the projection for that `AggregateId`, replays the aggregate's historical events, and updates `es_projections_meta` inside the transaction.
+5. **Precise Concurrency Conflict Detection:** Only a `UNIQUE constraint failed` error on `es_events` is mapped to `ConcurrencyConflictError`, querying `SELECT MAX(stream_version) FROM es_events` to report the true stored head as `actualVersion` before transaction rollback. All other `SqlError` failures remain in the error channel.
 
 ## Rejected Alternatives
 
 ### 1 · Drizzle ORM (`drizzle-orm/effect-sqlite-do`)
 
-**Why rejected:** Drizzle requires duplicate table declarations in parallel with Effect `Schema`, requires continuous boilerplate decoding between Drizzle row types and branded domain schemas, and the pinned `1.0.0-rc.5-ab785fc` driver contains fragile workarounds for Cloudflare DO SQLite transactions. Pure `@effect/sql` provides superior ergonomics and zero impedance mismatch.
+**Why rejected:** Drizzle requires duplicate table declarations in parallel with Effect `Schema`, requires continuous boilerplate decoding between Drizzle row types and branded domain schemas, and the pinned `1.0.0-rc.5-ab785fc` driver contains fragile workarounds for Cloudflare DO SQLite transactions. Pure `effect/sql/SqlClient` provides superior ergonomics and zero impedance mismatch.
 
 ## Consequences and Enforcement
 
 ### Positive Consequences
 
-* Single schema definition language (`Schema.Struct`, `Schema.Class`, `Schema.brand`) across contracts, domain, and persistence.
-* Zero external ORM dependency overhead; smaller bundle sizes in Cloudflare Workers and Durable Objects.
-* Robust transactional execution with native Effect `withTransaction` and `PreventSchedulerYield`.
-* Transparent testability with in-memory SQLite (`node:sqlite`) using the same `SqlClient` interface.
+* Single schema definition language (`Schema.Struct`, `Schema.Class`, `Schema.brand`) across contracts, core protocols, and persistence.
+* Strict adherence to Nx taxonomy (`type:core` has zero I/O; `type:infra` owns SQL; Worker entrypoint has zero `node:*` imports).
+* Deterministic transaction rollback on conflict, domain rejection, or SQL failure.
 
 ### Negative Consequences and Trade-offs
 
-* Schema migrations for aggregate tables must be managed via SQL DDL scripts rather than Drizzle Kit automated migrations.
-* Complex queries across tables (if ever needed in projections) must be written as raw SQL templates rather than fluent ORM method chains.
+* Schema migrations for aggregate tables (`es_events`, `es_commands`, `es_projections_meta`, `es_outbox`) are managed via parameterized SQL DDL scripts rather than Drizzle Kit automated migrations.
+* Read model queries in projections are written as parameterized SQL templates over `SqlClient`.
 
 ### Deterministic Enforcement
 
 | Rule | Enforced By | Gate / Mechanism | Governed Symbols |
 | --- | --- | --- | --- |
-| Command Idempotency Dedup | `libs/es/core/src/aggregate.ts` | `handleAggregateCommand` | `Aggregate.handleCommand` |
+| Command Idempotency Dedup | `libs/es/infra/src/aggregate.ts` | `handleAggregateCommand` | `Aggregate.handleCommand` |
+| Cross-Aggregate Command Guard | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts` | `CommandAggregateMismatchError`, `handleAggregateCommand` | `CommandAggregateMismatchError` |
+| Stream Contiguity & Decode Guard | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts` | `EventStreamCorruptionError`, `loadAggregate` | `EventStreamCorruptionError` |
 | Read-Your-Writes Query | `libs/es/core/src/projection.ts` | `queryLocalProjection` | `LocalProjection.query` |
-| Versioned Projection Rebuild | `libs/es/core/src/projection.ts`, `libs/es/core/src/aggregate.ts` | `rebuildLocalProjection`, `loadAggregate` | `LocalProjection.rebuild`, `Aggregate.load` |
-| Selective Outbox Isolation | `libs/es/core/src/aggregate.ts` | `handleAggregateCommand` | `Aggregate.handleCommand` |
-| Concurrency Conflict Detection | `libs/es/contract/src/index.ts`, `libs/es/core/src/aggregate.ts` | `ConcurrencyConflictError`, `handleAggregateCommand` | `ConcurrencyConflictError` |
-| Missing Aggregate Query | `libs/es/contract/src/index.ts`, `libs/es/core/src/projection.ts` | `AggregateNotFoundError`, `queryLocalProjection` | `AggregateNotFoundError` |
+| Versioned Projection Rebuild | `libs/es/core/src/projection.ts`, `libs/es/infra/src/aggregate.ts` | `rebuildLocalProjection`, `loadAggregate` | `LocalProjection.rebuild`, `Aggregate.load` |
+| Selective Outbox Isolation | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts` | `OutboxPublicationMode`, `handleAggregateCommand` | `Aggregate.handleCommand` |
+| Concurrency Conflict Detection | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts` | `ConcurrencyConflictError`, `handleAggregateCommand` | `ConcurrencyConflictError` |
+| Missing Aggregate Query | `libs/es/contract/src/index.ts`, `libs/es/infra/test/fixtures/cart-sqlite.ts` | `AggregateNotFoundError`, `queryCartView` | `AggregateNotFoundError` |
 | Missing Local Projection | `libs/es/contract/src/index.ts`, `libs/es/core/src/projection.ts` | `LocalProjectionNotFoundError`, `queryLocalProjection` | `LocalProjectionNotFoundError` |

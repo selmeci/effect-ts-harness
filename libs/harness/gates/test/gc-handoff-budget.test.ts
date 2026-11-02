@@ -2556,6 +2556,36 @@ export {};
       }
     })
 
+    it("detects dead-tagged-error when a contract Schema.TaggedError is referenced only in type positions and never constructed at runtime", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "harness-dead-error-test-"))
+      try {
+        const contractSrcDir = join(tempDir, "libs", "sample", "contract", "src")
+        const domainSrcDir = join(tempDir, "libs", "sample", "domain", "src")
+        mkdirSync(contractSrcDir, { recursive: true })
+        mkdirSync(domainSrcDir, { recursive: true })
+
+        writeFileSync(
+          join(contractSrcDir, "index.ts"),
+          `import { Schema } from "effect";\nexport class ConstructedError extends Schema.TaggedError<ConstructedError>()("ConstructedError", {}) {}\nexport class PhantomError extends Schema.TaggedError<PhantomError>()("PhantomError", {}) {}\n`
+        )
+
+        writeFileSync(
+          join(domainSrcDir, "index.ts"),
+          `import { Effect } from "effect";\nimport { ConstructedError, type PhantomError } from "../contract/src/index.js";\nexport const run = (): Effect.Effect<void, ConstructedError | PhantomError> => Effect.fail(new ConstructedError({}));\n`
+        )
+
+        const findings = scanWorkspacePackageHygiene(tempDir)
+        const deadErrorFindings = findings.filter((f) => f.kind === "dead-tagged-error")
+        expect(deadErrorFindings).toHaveLength(1)
+        expect(deadErrorFindings[0]?.nodeId).toBe("sample/contract:PhantomError")
+        expect(deadErrorFindings[0]?.message).toContain(
+          'Contract TaggedError "PhantomError" in "libs/sample/contract/src/index.ts" is never constructed (new PhantomError(...))'
+        )
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true })
+      }
+    })
+
     it("discovers guard-condition mutants for Equal.equals and Exit.isSuccess", () => {
       const sourceCode = `
 export const checkGuard = (actual: unknown, expected: unknown, exit: Exit.Exit<unknown, unknown>) => {
