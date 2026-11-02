@@ -116,13 +116,18 @@ The agent inspects existing domain nodes via `harness_resolve` / `harness_caller
 ```ts
 import { Effect } from "effect"
 import { stub } from "@harness/gates"
-import { AlbumPhotoCount, PhotoId, PhotoNotFoundError } from "@harness/sample-contract"
+import {
+  type AlbumPhotoCount,
+  type DecideAlbumDecrementInput,
+  type PhotoId,
+  PhotoNotFoundError
+} from "@harness/sample-contract"
 import { AlbumCounterClient, PhotoRepo } from "@harness/sample-service"
 
 // Derived from STATE-DRIVEN ("WHILE count is 0..."): pure decider (R = never)
-export const decideAlbumDecrement = Effect.fn("AlbumDecrement.decide")(function* (input: {
-  readonly currentCount: AlbumPhotoCount
-}) {
+export const decideAlbumDecrement = Effect.fn("AlbumDecrement.decide")(function* (
+  input: DecideAlbumDecrementInput
+) {
   return yield* stub<AlbumPhotoCount, never, never>(input)
 })
 

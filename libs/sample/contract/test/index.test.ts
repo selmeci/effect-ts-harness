@@ -13,6 +13,7 @@ import {
   buildOpenApiSpec,
   CreatedAtMillis,
   CreatePhotoInput,
+  DecideAlbumQuotaInput,
   detectOpenApiBreakingChanges,
   GreetInput,
   GreetingMessage,
@@ -39,10 +40,16 @@ describe("sample-contract (Schemas, HttpApi, RpcGroup, OpenAPI)", () => {
     expect(GreetingMessage.make("Hello, Roman!")).toBe("Hello, Roman!")
   })
 
-  it("decodes Photo, CreatePhotoInput, and PhotoIdFromString branded Schemas", () => {
+  it("decodes Photo, CreatePhotoInput, DecideAlbumQuotaInput, and PhotoIdFromString branded Schemas", () => {
     const input = Schema.decodeSync(CreatePhotoInput)({ name: "sunset.jpg", albumId: "vacation" })
     expect(input.albumId).toBe(AlbumId.make("vacation"))
     expect(input.name).toBe(PhotoName.make("sunset.jpg"))
+    const quotaInput = Schema.decodeSync(DecideAlbumQuotaInput)({
+      albumId: "vacation",
+      currentCount: 0
+    })
+    expect(quotaInput.albumId).toBe(AlbumId.make("vacation"))
+    expect(quotaInput.currentCount).toBe(AlbumPhotoCount.make(0))
     const photo = Schema.decodeSync(Photo)({
       id: 1,
       name: "sunset.jpg",
@@ -53,6 +60,20 @@ describe("sample-contract (Schemas, HttpApi, RpcGroup, OpenAPI)", () => {
     expect(photo.createdAt).toBe(CreatedAtMillis.make(1700000000))
     const idFromParam = Schema.decodeSync(PhotoIdFromString)("42")
     expect(idFromParam).toBe(PhotoId.make(42))
+  })
+
+  it("rejects non-integer and non-positive values in PhotoId and PhotoIdFromString, and negative values in AlbumPhotoCount", () => {
+    expect(() => Schema.decodeSync(PhotoIdFromString)("1.5")).toThrow()
+    expect(() => Schema.decodeSync(PhotoIdFromString)("-3")).toThrow()
+    expect(() => Schema.decodeSync(PhotoIdFromString)("0")).toThrow()
+    expect(() => PhotoId.make(0)).toThrow()
+    expect(() => PhotoId.make(-1)).toThrow()
+    expect(() => PhotoId.make(1.5)).toThrow()
+
+    expect(() => Schema.decodeSync(AlbumPhotoCount)(-1)).toThrow()
+    expect(() => Schema.decodeSync(AlbumPhotoCount)(1.5)).toThrow()
+    expect(() => AlbumPhotoCount.make(-1)).toThrow()
+    expect(AlbumPhotoCount.make(0)).toBe(0)
   })
 
   it("constructs PhotoNotFoundError and AlbumQuotaExceededError with branded fields", () => {

@@ -24,7 +24,8 @@
                     "type": "object",
                     "properties": {
                       "id": {
-                        "type": "integer"
+                        "type": "integer",
+                        "exclusiveMinimum": 0
                       },
                       "name": {
                         "type": "string"
@@ -66,7 +67,8 @@
                   "type": "object",
                   "properties": {
                     "id": {
-                      "type": "integer"
+                      "type": "integer",
+                      "exclusiveMinimum": 0
                     },
                     "name": {
                       "type": "string"
@@ -151,7 +153,8 @@
                   "type": "object",
                   "properties": {
                     "id": {
-                      "type": "integer"
+                      "type": "integer",
+                      "exclusiveMinimum": 0
                     },
                     "name": {
                       "type": "string"
@@ -200,7 +203,8 @@
             ]
           },
           "id": {
-            "type": "integer"
+            "type": "integer",
+            "exclusiveMinimum": 0
           }
         },
         "required": [
@@ -222,7 +226,8 @@
             "type": "string"
           },
           "count": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0
           }
         },
         "required": [

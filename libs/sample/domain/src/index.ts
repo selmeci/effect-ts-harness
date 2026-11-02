@@ -1,10 +1,10 @@
 import { Effect } from "effect"
 import { match, P } from "ts-pattern"
 import {
-  type AlbumId,
   AlbumPhotoCount,
   AlbumQuotaExceededError,
   type CreatePhotoInput,
+  type DecideAlbumQuotaInput,
   type GreetInput,
   GreetingMessage,
   type PhotoId
@@ -16,10 +16,9 @@ export const greet = Effect.fn("Sample.greet")(function* (input: GreetInput) {
   return GreetingMessage.make(`Hello, ${input.name}!`)
 })
 
-export const decideAlbumQuota = Effect.fn("Album.decide")(function* (input: {
-  readonly albumId: AlbumId
-  readonly currentCount: AlbumPhotoCount
-}) {
+export const decideAlbumQuota = Effect.fn("Album.decide")(function* (
+  input: DecideAlbumQuotaInput
+) {
   return yield* match(input)
     .with({ currentCount: P.when((c) => c >= 100) }, ({ albumId, currentCount }) =>
       new AlbumQuotaExceededError({

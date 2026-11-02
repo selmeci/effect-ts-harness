@@ -36,6 +36,11 @@ export interface DeterministicRouteRule {
 
 export const DETERMINISTIC_ROUTE_RULES: ReadonlyArray<DeterministicRouteRule> = [
   {
+    id: "schema",
+    pattern: /\b(?:brand(?:ed)?(?:\s+type)?|schema\.brand|frombrand|nominal\s+type|primitive\s+obsession)\b/i,
+    block: "schema"
+  },
+  {
     id: "event-sourcing",
     pattern: /\b(?:event[-\s]+sourcing|decider|evolve|event[-\s]+store|aggregate(?:\s+root)?)\b/i,
     block: "event-sourcing"
@@ -69,11 +74,6 @@ export const DETERMINISTIC_ROUTE_RULES: ReadonlyArray<DeterministicRouteRule> = 
     id: "atom",
     pattern: /\b(?:atomhttpapi|useatom|effect[-\s]+atom)\b/i,
     block: "atom"
-  },
-  {
-    id: "schema",
-    pattern: /\b(?:brand(?:ed)?(?:\s+type)?|schema\.brand|frombrand|nominal\s+type|primitive\s+obsession)\b/i,
-    block: "schema"
   }
 ]
 

@@ -337,15 +337,50 @@ describe("LearnProposalV1 and proposeLearningAction", () => {
       ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
       expect(unbrandedBoundaryRes.kind).toBe("mechanical")
       expect(unbrandedBoundaryRes.hint).toContain("Schema.brand")
+
+      const rawPrimParamOxlintRes = yield* triageFailure(
+        "harness(syntax-bans): Do not use raw primitive type 'string' at exported domain boundary 'findUser'"
+      ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
+      expect(rawPrimParamOxlintRes.kind).toBe("mechanical")
+      expect(rawPrimParamOxlintRes.hint).toContain("Schema.brand")
+
+      const inlineObjOxlintRes = yield* triageFailure(
+        "harness(syntax-bans): Do not use inline object type for parameter at exported domain boundary 'decideAlbumQuota'"
+      ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
+      expect(inlineObjOxlintRes.kind).toBe("mechanical")
+      expect(inlineObjOxlintRes.hint).toContain("Schema.Struct")
+
+      const dupBrandOxlintRes = yield* triageFailure(
+        "harness(syntax-bans): Do not declare duplicate Schema.brand('PhotoId') across multiple schemas"
+      ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
+      expect(dupBrandOxlintRes.kind).toBe("mechanical")
+      expect(dupBrandOxlintRes.hint).toContain("Schema.decodeTo")
+
+      const asBrandOxlintRes = yield* triageFailure(
+        "harness(syntax-bans): Do not bypass brand validation with 'as' type assertion"
+      ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
+      expect(asBrandOxlintRes.kind).toBe("mechanical")
+      expect(asBrandOxlintRes.hint).toContain("Brand.make")
+      expect(asBrandOxlintRes.hint).not.toContain("Brand.refined")
     })
   )
 
-  it.effect("routeStep deterministically routes branded type steps to schema", () =>
+  it.effect("routeStep deterministically routes branded type steps to schema ahead of overlapping keywords", () =>
     Effect.gen(function* () {
-      const block = yield* routeStep(
+      const block1 = yield* routeStep(
         "Define branded domain identifiers using Schema.brand and Brand.nominal to eliminate primitive obsession"
       ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
-      expect(block).toBe("schema")
+      expect(block1).toBe("schema")
+
+      const block2 = yield* routeStep(
+        "Brand the decider id and aggregate version using Schema.brand"
+      ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
+      expect(block2).toBe("schema")
+
+      const block3 = yield* routeStep(
+        "Brand the HttpApi params with Schema.brand"
+      ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
+      expect(block3).toBe("schema")
     })
   )
 })

@@ -980,16 +980,25 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
     expect(violation?.message).toContain("Exit.isSuccess")
   })
 
-  it("fails with unbranded-contract-schema when contract schemas or fields lack ~effect/Brand, and passes when branded", () => {
+  it("fails with unbranded-contract-schema when contract/domain schemas, piped structs, unions, inline object type aliases, or any/unknown lack ~effect/Brand, and passes when branded", () => {
     const badContractSource = `
       import { Schema } from "effect"
 
       export type RawAlbumId = string
+      export type ErasedId = any
+      export type UnknownId = unknown
+      export type InlineDto = { readonly id: string }
       export const PhotoId = Schema.Int
 
-      export const Photo = Schema.Struct({
-        id: Schema.Int,
+      const LocalUnbrandedId = Schema.Int
+      export const PipedPhoto = Schema.Struct({
+        id: LocalUnbrandedId,
         albumId: Schema.String
+      }).pipe(Schema.brand("PipedPhoto"))
+
+      export const EventUnion = Schema.TaggedUnion({
+        Created: { itemId: Schema.String },
+        Deleted: { itemId: Schema.String }
       })
 
       export class PhotoNotFoundError extends Schema.TaggedError<PhotoNotFoundError>()(
@@ -997,11 +1006,23 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
         { id: Schema.Int }
       ) {}
     `
+    const badDomainSchemaSource = `
+      import { Schema } from "effect"
+
+      export const InternalStruct = Schema.Struct({
+        rawCount: Schema.Int
+      })
+    `
     const badGraph = extractTypeAwareGraphFromSource([
       {
         filePath: "libs/sample/contract/src/index.ts",
         content: badContractSource,
         packageTag: "contract"
+      },
+      {
+        filePath: "libs/sample/domain/src/index.ts",
+        content: badDomainSchemaSource,
+        packageTag: "domain"
       }
     ])
     const badResult = checkEffectGraph(badGraph)
@@ -1009,17 +1030,25 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
     const contractViolations = badResult.violations.filter(
       (v) => v.rule === "unbranded-contract-schema"
     )
-    expect(contractViolations.length).toBeGreaterThanOrEqual(4)
-    expect(contractViolations.some((v) => v.message.includes("RawAlbumId"))).toBe(true)
+    expect(contractViolations.some((v) => v.message.includes("Exported type alias 'RawAlbumId'") && v.message.includes("'string'"))).toBe(true)
+    expect(contractViolations.some((v) => v.message.includes("Exported type alias 'ErasedId'") && v.message.includes("'any'"))).toBe(true)
+    expect(contractViolations.some((v) => v.message.includes("Exported type alias 'UnknownId'") && v.message.includes("'unknown'"))).toBe(true)
+    expect(contractViolations.some((v) => v.message.includes("Exported type alias 'InlineDto'"))).toBe(true)
     expect(contractViolations.some((v) => v.message.includes("Contract schema 'PhotoId'"))).toBe(true)
-    expect(contractViolations.some((v) => v.message.includes("Property 'id' of contract schema 'Photo'"))).toBe(true)
+    expect(contractViolations.some((v) => v.message.includes("Property 'id' of contract schema 'PipedPhoto'"))).toBe(true)
+    expect(contractViolations.some((v) => v.message.includes("Property 'albumId' of contract schema 'PipedPhoto'"))).toBe(true)
+    expect(contractViolations.some((v) => v.message.includes("Property 'itemId' of contract schema 'EventUnion'"))).toBe(true)
     expect(contractViolations.some((v) => v.message.includes("Field 'id' of 'PhotoNotFoundError'"))).toBe(true)
+    expect(contractViolations.some((v) => v.message.includes("Property 'rawCount' of contract schema 'InternalStruct'"))).toBe(true)
 
     const goodContractSource = `
       import { Schema } from "effect"
 
-      export const PhotoId = Schema.Int.pipe(Schema.brand("PhotoId"))
+      export const PhotoId = Schema.Int.check(Schema.isGreaterThan(0)).pipe(Schema.brand("PhotoId"))
       export type PhotoId = typeof PhotoId.Type
+
+      export const PhotoIdFromString = Schema.FiniteFromString.pipe(Schema.decodeTo(PhotoId))
+      export type PhotoIdFromString = typeof PhotoIdFromString.Type
 
       export const AlbumId = Schema.String.pipe(Schema.brand("AlbumId"))
       export type AlbumId = typeof AlbumId.Type
@@ -1028,6 +1057,7 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
         id: PhotoId,
         albumId: AlbumId
       })
+      export type Photo = typeof Photo.Type
 
       export class PhotoNotFoundError extends Schema.TaggedError<PhotoNotFoundError>()(
         "PhotoNotFoundError",
@@ -1047,12 +1077,15 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
     ).toEqual([])
   })
 
-  it("fails with unbranded-primitive-boundary on raw primitive service/domain boundaries and 'as Brand' casts", () => {
+  it("fails with unbranded-primitive-boundary on raw primitive or inline object service/domain boundaries and 'as Brand' casts, and passes on compliant branded boundaries", () => {
     const badServiceSource = `
-      import { Context, type Effect } from "effect"
+      import { type Brand, Context, type Effect } from "effect"
+
+      type PhotoId = number & Brand.Brand<"PhotoId">
 
       export class PhotoRepo extends Context.Service<PhotoRepo, {
         readonly findById: (id: number) => Effect.Effect<string>
+        readonly createInline: (input: { readonly id: PhotoId }) => Effect.Effect<{ readonly ok: PhotoId }>
       }>()("PhotoRepo") {}
     `
     const badDomainSource = `
@@ -1060,9 +1093,12 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
 
       type PhotoId = number & Brand.Brand<"PhotoId">
 
-      export const getPhoto = Effect.fn("Photo.get")(function* (rawId: number) {
+      export const getPhoto = Effect.fn("Photo.get")(function* (
+        rawId: number,
+        inlineFilter: { readonly id: PhotoId }
+      ) {
         const castId = rawId as PhotoId
-        return yield* Effect.succeed(String(castId))
+        return yield* Effect.succeed(String(castId) + String(inlineFilter.id))
       })
     `
     const badGraph = extractTypeAwareGraphFromSource([
@@ -1082,8 +1118,48 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
     const boundaryViolations = badResult.violations.filter(
       (v) => v.rule === "unbranded-primitive-boundary"
     )
-    expect(boundaryViolations.some((v) => v.message.includes("PhotoRepo.findById"))).toBe(true)
-    expect(boundaryViolations.some((v) => v.message.includes("Domain function 'getPhoto'"))).toBe(true)
+    expect(boundaryViolations.some((v) => v.message.includes("Service capability 'PhotoRepo.findById' parameter 'id'"))).toBe(true)
+    expect(boundaryViolations.some((v) => v.message.includes("Service capability 'PhotoRepo.findById' return type"))).toBe(true)
+    expect(boundaryViolations.some((v) => v.message.includes("Service capability 'PhotoRepo.createInline' parameter 'input'") && v.message.includes("inline object type literal"))).toBe(true)
+    expect(boundaryViolations.some((v) => v.message.includes("Service capability 'PhotoRepo.createInline' return type") && v.message.includes("inline object type literal"))).toBe(true)
+    expect(boundaryViolations.some((v) => v.message.includes("Domain function 'getPhoto' parameter 'rawId'"))).toBe(true)
+    expect(boundaryViolations.some((v) => v.message.includes("Domain function 'getPhoto' parameter 'inlineFilter'") && v.message.includes("inline object type literal"))).toBe(true)
+    expect(boundaryViolations.some((v) => v.message.includes("Domain function 'getPhoto' return success type"))).toBe(true)
     expect(boundaryViolations.some((v) => v.message.includes("casts an unbranded value directly to branded type"))).toBe(true)
+
+    const goodServiceSource = `
+      import { type Brand, Context, type Effect } from "effect"
+
+      type PhotoId = number & Brand.Brand<"PhotoId">
+
+      export class PhotoRepo extends Context.Service<PhotoRepo, {
+        readonly findById: (id: PhotoId) => Effect.Effect<PhotoId>
+      }>()("PhotoRepo") {}
+    `
+    const goodDomainSource = `
+      import { type Brand, Effect } from "effect"
+
+      type PhotoId = number & Brand.Brand<"PhotoId">
+
+      export const getPhoto = Effect.fn("Photo.get")(function* (id: PhotoId) {
+        return yield* Effect.succeed(id)
+      })
+    `
+    const goodGraph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/service/src/index.ts",
+        content: goodServiceSource,
+        packageTag: "service"
+      },
+      {
+        filePath: "libs/sample/domain/src/index.ts",
+        content: goodDomainSource,
+        packageTag: "domain"
+      }
+    ])
+    const goodResult = checkEffectGraph(goodGraph)
+    expect(
+      goodResult.violations.filter((v) => v.rule === "unbranded-primitive-boundary")
+    ).toEqual([])
   })
 })

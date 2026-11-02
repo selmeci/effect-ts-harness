@@ -60,13 +60,6 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     }
   },
   {
-    pattern: "harness/syntax-bans",
-    result: {
-      kind: "mechanical",
-      hint: "Banned syntax in Effect code — use Effect.gen, Schema.fromJsonString, and typed errors instead of async/await, try/catch, throw, or JSON.parse (see agent-patterns/errors.md and agent-patterns/schema.md)."
-    }
-  },
-  {
     pattern: "no-restricted-imports",
     result: {
       kind: "mechanical",
@@ -217,7 +210,7 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     pattern: "unbranded-primitive-boundary",
     result: {
       kind: "mechanical",
-      hint: "Domain use case or Context.Service capability accepts or returns an unbranded primitive (string/number) — replace raw primitives with branded domain types from type:contract defined via Schema.brand('<BrandName>') (see agent-patterns/schema.md)."
+      hint: "Domain use case or Context.Service capability accepts or returns an unbranded primitive or inline object literal — replace raw primitives and inline object types with branded domain types (Schema.brand('<BrandName>')) and Schema.Struct definitions from type:contract (see agent-patterns/schema.md)."
     }
   },
   {
@@ -225,6 +218,27 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     result: {
       kind: "mechanical",
       hint: "Raw primitive type aliases (type X = string | number | boolean) are erased at compile time — define a branded schema in type:contract using Schema.<Base>.pipe(Schema.brand('<Name>')) or Brand.Branded (see agent-patterns/schema.md)."
+    }
+  },
+  {
+    pattern: /Do not (?:declare|use) inline object/i,
+    result: {
+      kind: "mechanical",
+      hint: "Inline object type literals ({ ... }) bypass runtime Schema validation and branded field checks — define a named Schema.Struct, Schema.Class, or Schema.TaggedStruct in type:contract with branded fields and derive 'export type <Name> = typeof <Name>.Type' (see agent-patterns/schema.md)."
+    }
+  },
+  {
+    pattern: /Do not use raw primitive (?:type|success type|return type)/i,
+    result: {
+      kind: "mechanical",
+      hint: "Domain use case or Context.Service capability accepts or returns a raw primitive — replace raw primitives with branded domain types from type:contract defined via Schema.brand('<BrandName>') (see agent-patterns/schema.md)."
+    }
+  },
+  {
+    pattern: "duplicate Schema.brand",
+    result: {
+      kind: "mechanical",
+      hint: "Each brand key in Schema.brand('<BrandName>') must have a single canonical constructor schema — compose wire or parameter schemas into the canonical branded schema using Schema.decodeTo(<BrandedSchema>) (see agent-patterns/schema.md)."
     }
   },
   {
@@ -245,7 +259,14 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     pattern: "Do not bypass brand validation with 'as'",
     result: {
       kind: "mechanical",
-      hint: "Never cast raw values with `as <BrandedType>` — construct branded values via <BrandedSchema>.make(value), Brand.nominal, Brand.refined, or Schema.decodeUnknownEffect (see agent-patterns/schema.md)."
+      hint: "Never cast raw values with `as <BrandedType>` — construct branded values via <BrandedSchema>.make(value), Schema.decodeUnknownEffect(<BrandedSchema>)(value), or Effect v4 Brand.nominal / Brand.make / Brand.check (see agent-patterns/schema.md)."
+    }
+  },
+  {
+    pattern: /harness(?:\/|\()syntax-bans\)?/,
+    result: {
+      kind: "mechanical",
+      hint: "Banned syntax in Effect code — use Effect.gen, Schema.fromJsonString, and typed errors instead of async/await, try/catch, throw, or JSON.parse (see agent-patterns/errors.md and agent-patterns/schema.md)."
     }
   }
 ]

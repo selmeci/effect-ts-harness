@@ -146,10 +146,10 @@ describe("decideAlbumQuota", () => {
   it.effect.prop(
     "enforces quota invariant and monotonicity across generated inputs",
     {
-      albumId: Schema.NonEmptyString.pipe(Schema.brand("AlbumId")),
-      currentCount: Schema.Int.check(
-        Schema.isBetween({ minimum: -50, maximum: 250 })
-      ).pipe(Schema.brand("AlbumPhotoCount"))
+      albumId: AlbumId.check(Schema.isMinLength(1)),
+      currentCount: AlbumPhotoCount.check(
+        Schema.isBetween({ minimum: 0, maximum: 250 })
+      )
     },
     ({ albumId, currentCount }) =>
       Effect.gen(function* () {

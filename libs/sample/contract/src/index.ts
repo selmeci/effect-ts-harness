@@ -9,10 +9,10 @@ export type PersonName = typeof PersonName.Type
 export const GreetingMessage = Schema.String.pipe(Schema.brand("GreetingMessage"))
 export type GreetingMessage = typeof GreetingMessage.Type
 
-export const PhotoId = Schema.Int.pipe(Schema.brand("PhotoId"))
+export const PhotoId = Schema.Int.check(Schema.isGreaterThan(0)).pipe(Schema.brand("PhotoId"))
 export type PhotoId = typeof PhotoId.Type
 
-export const PhotoIdFromString = Schema.FiniteFromString.pipe(Schema.brand("PhotoId"))
+export const PhotoIdFromString = Schema.FiniteFromString.pipe(Schema.decodeTo(PhotoId))
 export type PhotoIdFromString = typeof PhotoIdFromString.Type
 
 export const PhotoName = Schema.String.pipe(Schema.brand("PhotoName"))
@@ -24,12 +24,18 @@ export type AlbumId = typeof AlbumId.Type
 export const CreatedAtMillis = Schema.Int.pipe(Schema.brand("CreatedAtMillis"))
 export type CreatedAtMillis = typeof CreatedAtMillis.Type
 
-export const AlbumPhotoCount = Schema.Int.pipe(Schema.brand("AlbumPhotoCount"))
+export const AlbumPhotoCount = Schema.Natural.pipe(Schema.brand("AlbumPhotoCount"))
 export type AlbumPhotoCount = typeof AlbumPhotoCount.Type
 
 // Backward-compatible GreetInput export for sample-domain
 export const GreetInput = Schema.Struct({ name: PersonName })
 export type GreetInput = typeof GreetInput.Type
+
+export const DecideAlbumQuotaInput = Schema.Struct({
+  albumId: AlbumId,
+  currentCount: AlbumPhotoCount
+})
+export type DecideAlbumQuotaInput = typeof DecideAlbumQuotaInput.Type
 
 // Schemas
 export const Photo = Schema.Struct({

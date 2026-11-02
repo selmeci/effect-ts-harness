@@ -47,20 +47,21 @@ export class User extends Schema.Class<User>("User")({
   }
 }
 
-// 4. Value-level Brand constructors for fast synchronous validation or wrapping
+// 4. Value-level Brand constructors in Effect v4 (Brand.nominal / Brand.make / Brand.check)
 export const makeUserId = Brand.nominal<UserId>()
-export const PositiveCount = Brand.refined<number & Brand.Brand<"PositiveCount">>(
-  (n) => Number.isInteger(n) && n > 0,
-  (n) => Brand.error(`Expected positive integer count, got ${n}`)
+export type PositiveCount = Brand.Branded<number, "PositiveCount">
+export const PositiveCount = Brand.check<PositiveCount>(Schema.isInt(), Schema.isGreaterThan(0))
+export const PositiveCountFromFilter = Brand.make<PositiveCount>((n) =>
+  Number.isInteger(n) && n > 0 ? undefined : `Expected positive integer count, got ${n}`
 )
 export const PositiveCountSchema = Schema.Int.pipe(Schema.fromBrand("PositiveCount", PositiveCount))
 ```
 
-### Deriving TypeScript Types from Schemas
+### Deriving TypeScript Types from Schemas (No Inline Object Types)
 
-Never write loose handwritten TypeScript interfaces or types alongside Schema declarations (e.g. declaring `export type CommandResult = { ... }` with `number` and `ReadonlyArray` alongside `makeCommandResultSchema`), and **never declare raw primitive type aliases** (`export type UserId = string`). Raw type aliases are erased by TypeScript and enforced against by `harness/syntax-bans` and `checkEffectGraph`.
+Never write loose handwritten TypeScript interfaces, inline object types (`type X = { ... }` or `input: { readonly id: AlbumId }`), or raw primitive type aliases (`export type UserId = string`). Handwritten inline object types and raw aliases bypass `Schema` validation and branding gates (`harness/syntax-bans`, `unbranded-contract-schema`, `unbranded-primitive-boundary`).
 
-Always derive types directly from the schema:
+Always define a `Schema` in `type:contract` and derive the TypeScript type directly from the schema:
 ```ts
 // For static schemas:
 export const CommandResultSchema = Schema.Union(...)
@@ -91,10 +92,10 @@ export type StreamVersion = typeof StreamVersion.Type // -> number!
 Because the unbranded TypeScript type is `number` or `string`, in-memory TypeScript code can accidentally swap `(userId, albumId)` or pass `-1` or `1.5` to a function expecting `StreamVersion` without triggering a compiler error.
 
 Therefore, the Harness enforces **Branded Domain Types everywhere (`harness:SPEC-0005` / `harness:ADR-0007`)**:
-1. **Contract Scalar Exports (`unbranded-contract-schema`):** Every exported scalar schema in `type:contract` must append `.pipe(Schema.brand("<BrandName>"))` (or `Schema.fromBrand("<BrandName>", BrandCtor)`).
-2. **Composite Schema Fields (`harness/syntax-bans`):** Every non-boolean scalar field inside `Schema.Struct`, `Schema.Class`, `Schema.TaggedStruct`, `Schema.TaggedClass`, `Schema.TaggedUnion`, and `Schema.TaggedError` in `type:contract`, `type:domain`, and `type:core` must reference a branded schema rather than raw `Schema.String`, `Schema.NonEmptyString`, `Schema.Int`, `Schema.Natural`, or `Schema.Finite`.
-3. **Domain & Service Boundaries (`unbranded-primitive-boundary`):** Exported `Effect.fn` use cases, `.decide` / `evolve` functions, `stub<A, E, R>` skeletons, and `Context.Service` capability methods must never accept or return raw `string` or `number` primitives.
-4. **No `as <BrandedType>` Assertions (`harness/syntax-bans`):** Never cast raw values with `as UserId`. Construct branded values using `<BrandedSchema>.make(value)`, `Brand.nominal<T>()(value)`, `Brand.refined<T>(...)(value)`, or `Schema.decodeUnknownEffect(<BrandedSchema>)(value)`.
+1. **Contract Scalar Exports (`unbranded-contract-schema`):** Every exported scalar schema in `type:contract` must append `.pipe(Schema.brand("<BrandName>"))` (or `Schema.fromBrand("<BrandName>", BrandCtor)`). Each brand key belongs to one canonical schema; compose wire-level string decoders into that schema via `Schema.FiniteFromString.pipe(Schema.decodeTo(<BrandedSchema>))` rather than calling `Schema.brand("<BrandName>")` on a wider schema.
+2. **Composite Schema Fields (`harness/syntax-bans` & `unbranded-contract-schema`):** Every non-boolean scalar field inside `Schema.Struct` (including piped structs), `Schema.Class`, `Schema.TaggedStruct`, `Schema.TaggedClass`, `Schema.TaggedUnion`, and `Schema.TaggedError` in `type:contract`, `type:domain`, and `type:core` must reference a branded schema rather than raw `Schema.String`, `Schema.NonEmptyString`, `Schema.Int`, `Schema.Natural`, or `Schema.Finite`.
+3. **Domain & Service Boundaries (`unbranded-primitive-boundary` & `harness/syntax-bans`):** Exported `Effect.fn` use cases, `.decide` / `evolve` functions, `stub<A, E, R>` skeletons, and `Context.Service` capability methods must never accept or return raw `string`, `number`, `boolean`, `any`, `unknown`, or inline `{ ... }` object type literals — always use named contract schemas and types.
+4. **No `as <BrandedType>` Assertions (`harness/syntax-bans` & `unbranded-primitive-boundary`):** Never cast raw values with `as UserId`. Construct branded values using `<BrandedSchema>.make(value)`, `Brand.make<T>(filter)(value)`, `Brand.check<T>(...checks)(value)`, `Brand.nominal<T>()(value)`, or `Schema.decodeUnknownEffect(<BrandedSchema>)(value)`.
 
 ```ts
 // 0-based stream revisions and counters (0 is valid, compile-time branded)
