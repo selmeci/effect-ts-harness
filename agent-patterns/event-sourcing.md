@@ -5,6 +5,7 @@ Event Sourcing in the Effect-TS Engineering Harness structures stateful domain e
 ## Overview & The Decider Pattern
 
 The Decider pattern models domain logic as three core elements:
+
 1. **Initial State (`initialState: S`)**: The identity state before any events have been applied.
 2. **Pure Synchronous Reducer (`evolve: (state: S, event: E) => S`)**: Replays history deterministically without side effects, I/O, or failure.
 3. **Effectful Command Decision (`decide: (command: C, state: S) => Effect<ReadonlyArray<E>, Err, R>`)**: Evaluates a command against current state, validating business invariants and emitting new events or failing with a typed error.
@@ -16,19 +17,19 @@ The Decider pattern models domain logic as three core elements:
 ### The Pure Reducer: `evolve<Aggregate>`
 
 The reducer function `evolve` calculates the next state strictly from current state and an incoming event:
+
 - **Must be pure and synchronous**: Never wrap `evolve` in `Effect.fn`, `Effect.gen`, or async Promises. State reconstruction must be fast and infallible.
 - **Ban on `Effect.runSync` (`unscoped-effect-run` gate)**: Never call `Effect.runSync` inside `Decider.make({ evolve })` or domain reducers. `Effect.runSync` starts a disconnected root fiber with an empty context (dropping parent `Tracer` spans, metrics, and fiber refs) and throws defects synchronously if an error occurs. Keep `evolve: (state: S, event: E): S => ...` a pure, synchronous TypeScript function that performs zero side effects and runs no Effects.
 - **Infallible (`E = never`) & Zero I/O (`R = never`)**: The reducer cannot fail (`E = never`) or perform side effects (`R = never`). If an unexpected event occurs, return the current state unchanged or handle it via a closed discriminated union.
 - **Naming convention**: Name the function `evolve<Aggregate>` (e.g., `evolveCart`, `evolveOrder`, `evolveAlbum`).
 - **Exhaustive pattern matching**: Always branch on `event` and `state` variants using `match(state)` and `match(event)...exhaustive()` from `ts-pattern` (see [`pattern-matching.md`](./pattern-matching.md)). Never use `switch` or `if / else`.
 
-
 ```ts
 import { match } from "ts-pattern"
 import type { CartEvent, CartState } from "@harness/sample-contract"
 
 export const initialCartState: CartState = {
-  _tag: "EmptyCart"
+  _tag: "EmptyCart",
 }
 
 export const evolveCart = (state: CartState, event: CartEvent): CartState =>
@@ -37,18 +38,18 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       _tag: "ActiveCart" as const,
       cartId: e.cartId,
       items: [],
-      itemCount: 0
+      itemCount: 0,
     }))
     .with({ _tag: "ItemAdded" }, (e) =>
       match(state)
         .with({ _tag: "ActiveCart" }, (s) => ({
           ...s,
           items: [...s.items, { itemId: e.itemId, quantity: e.quantity }],
-          itemCount: s.itemCount + e.quantity
+          itemCount: s.itemCount + e.quantity,
         }))
         .with({ _tag: "EmptyCart" }, () => state)
         .with({ _tag: "CheckedOutCart" }, () => state)
-        .exhaustive()
+        .exhaustive(),
     )
     .with({ _tag: "CartCheckedOut" }, (e) =>
       match(state)
@@ -56,11 +57,11 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
           _tag: "CheckedOutCart" as const,
           cartId: s.cartId,
           orderId: e.orderId,
-          totalItems: s.itemCount
+          totalItems: s.itemCount,
         }))
         .with({ _tag: "EmptyCart" }, () => state)
         .with({ _tag: "CheckedOutCart" }, () => state)
-        .exhaustive()
+        .exhaustive(),
     )
     .exhaustive()
 ```
@@ -68,6 +69,7 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
 ### The Command Decider: `decide`
 
 The decision function `decide` takes an aggregate command and current state and returns an `Effect` producing an array of events:
+
 - **Wrap in `Effect.fn`**: Must be declared with `Effect.fn("<Aggregate>.decide")` for runtime trace capture and span attribution.
 - **Pure Deciders (`R = never`)**: In accordance with the `impure-decider` policy gate, deciders that enforce state invariants must require no services (`R = never`). If dependencies are needed (e.g. external inventory checks), orchestrate them in an application use case, keeping the core state decision pure.
 - **Typed Error Channel (`E`)**: Failures must be typed errors defined as `Schema.TaggedError`.
@@ -79,7 +81,10 @@ import type { CartCommand, CartEvent, CartState } from "@harness/sample-contract
 import { CartAlreadyCheckedOutError, EmptyCartCheckoutError } from "@harness/sample-contract"
 
 export const decideCart = Effect.fn("Cart.decide")(
-  (command: CartCommand, state: CartState): Effect.Effect<
+  (
+    command: CartCommand,
+    state: CartState,
+  ): Effect.Effect<
     readonly [CartEvent, ...Array<CartEvent>],
     CartAlreadyCheckedOutError | EmptyCartCheckoutError,
     never
@@ -88,37 +93,47 @@ export const decideCart = Effect.fn("Cart.decide")(
       .with({ _tag: "AddItem" }, (cmd) =>
         match(state)
           .with({ _tag: "CheckedOutCart" }, () =>
-            Effect.fail(new CartAlreadyCheckedOutError({ cartId: cmd.cartId }))
+            Effect.fail(new CartAlreadyCheckedOutError({ cartId: cmd.cartId })),
           )
           .with({ _tag: "EmptyCart" }, () =>
             Effect.succeed([
               { _tag: "CartCreated" as const, cartId: cmd.cartId },
-              { _tag: "ItemAdded" as const, cartId: cmd.cartId, itemId: cmd.itemId, quantity: cmd.quantity }
-            ])
+              {
+                _tag: "ItemAdded" as const,
+                cartId: cmd.cartId,
+                itemId: cmd.itemId,
+                quantity: cmd.quantity,
+              },
+            ]),
           )
           .with({ _tag: "ActiveCart" }, () =>
             Effect.succeed([
-              { _tag: "ItemAdded" as const, cartId: cmd.cartId, itemId: cmd.itemId, quantity: cmd.quantity }
-            ])
+              {
+                _tag: "ItemAdded" as const,
+                cartId: cmd.cartId,
+                itemId: cmd.itemId,
+                quantity: cmd.quantity,
+              },
+            ]),
           )
-          .exhaustive()
+          .exhaustive(),
       )
       .with({ _tag: "Checkout" }, (cmd) =>
         match(state)
           .with({ _tag: "EmptyCart" }, () =>
-            Effect.fail(new EmptyCartCheckoutError({ cartId: cmd.cartId }))
+            Effect.fail(new EmptyCartCheckoutError({ cartId: cmd.cartId })),
           )
           .with({ _tag: "CheckedOutCart" }, () =>
-            Effect.fail(new CartAlreadyCheckedOutError({ cartId: cmd.cartId }))
+            Effect.fail(new CartAlreadyCheckedOutError({ cartId: cmd.cartId })),
           )
           .with({ _tag: "ActiveCart" }, () =>
             Effect.succeed([
-              { _tag: "CartCheckedOut" as const, cartId: cmd.cartId, orderId: cmd.orderId }
-            ])
+              { _tag: "CartCheckedOut" as const, cartId: cmd.cartId, orderId: cmd.orderId },
+            ]),
           )
-          .exhaustive()
+          .exhaustive(),
       )
-      .exhaustive()
+      .exhaustive(),
 )
 ```
 
@@ -127,6 +142,7 @@ export const decideCart = Effect.fn("Cart.decide")(
 ## 2. Non-Empty Event Batches (`NonEmptyReadonlyArray<E>`)
 
 Commands that mutate state emit at least one domain event.
+
 - **Type Non-Empty Batches**: Return `readonly [E, ...Array<E>]` (or `NonEmptyReadonlyArray<E>`).
 - **No Non-Null Assertions**: Never use `events[0]!` (banned by `oxlint`).
 - **Pattern Match or Destructure Safely**: Use TypeScript tuple destructuring `const [firstEvent, ...restEvents] = events` or `Array.match`:
@@ -137,7 +153,8 @@ import { Array } from "effect"
 // Safe access without non-null assertion:
 const summary = Array.match(events, {
   onEmpty: () => "No events emitted",
-  onNonEmpty: ([head, ...tail]) => `Primary event: ${head._tag}, followed by ${tail.length} event(s)`
+  onNonEmpty: ([head, ...tail]) =>
+    `Primary event: ${head._tag}, followed by ${tail.length} event(s)`,
 })
 ```
 
@@ -154,15 +171,15 @@ import { Schema } from "effect"
 export class CartAlreadyCheckedOutError extends Schema.TaggedError<CartAlreadyCheckedOutError>()(
   "CartAlreadyCheckedOutError",
   {
-    cartId: Schema.String
-  }
+    cartId: Schema.String,
+  },
 ) {}
 
 export class EmptyCartCheckoutError extends Schema.TaggedError<EmptyCartCheckoutError>()(
   "EmptyCartCheckoutError",
   {
-    cartId: Schema.String
-  }
+    cartId: Schema.String,
+  },
 ) {}
 ```
 
@@ -174,6 +191,7 @@ export class EmptyCartCheckoutError extends Schema.TaggedError<EmptyCartCheckout
 ## 4. Numeric Precision: Positive vs Non-Negative Integers
 
 Choosing the right numeric schema is critical for stream versions and quantities:
+
 - **`Schema.Natural` ($\ge 0$)**: Non-negative integers including `0`. Use for 0-based stream versions (`streamVersion`, `nextExpectedStreamVersion`) and non-negative counters (`itemCount`, `totalEvents`).
 - **Branded Positive Integer ($> 0$)**: Strictly positive integers excluding `0`. Use for quantities (`orderQty`, `quantity`, `batchSize`) where `0` is invalid.
 
@@ -186,7 +204,7 @@ export type StreamVersion = typeof StreamVersion.Type
 
 // Strictly positive quantities (> 0, 0 is invalid)
 export const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0)).pipe(
-  Schema.brand("PositiveInt")
+  Schema.brand("PositiveInt"),
 )
 export type PositiveInt = typeof PositiveInt.Type
 ```
@@ -199,6 +217,7 @@ export type PositiveInt = typeof PositiveInt.Type
 ## 5. No Dead Error Unions in Specs and Skeletons
 
 Every tagged error declared in a plan or EARS specification must correspond to a real failure scenario:
+
 - **EARS `IF/THEN` Parity**: Declare a `Schema.TaggedError` in an EARS `IF/THEN` clause and `Decider` error channel `E` only if at least one `EffectFn` actually yields/fails with that error (`FailsWith` edge in the graph).
 - **Entropy Check**: The deterministic zero-entropy gate `harness gc --strict` checks for `dead-tagged-error`. If a `TaggedError` is declared but never yielded by any domain function, `gc --strict` fails.
 
@@ -209,6 +228,7 @@ Every tagged error declared in a plan or EARS specification must correspond to a
 ### Vitest Test Runner Package Boundaries
 
 To maintain clean architecture and prevent leaking Effect test dependencies into shared contracts:
+
 - **`type:contract` packages**: Import test utilities directly from `vitest`:
   ```ts
   import { describe, expect, it } from "vitest"
@@ -239,7 +259,10 @@ import { match } from "ts-pattern"
 export interface Decider<Command, Event, State, Err> {
   readonly initialState: State
   readonly evolve: (state: State, event: Event) => State
-  readonly decide: (command: Command, state: State) => Effect.Effect<ReadonlyArray<Event>, Err, never>
+  readonly decide: (
+    command: Command,
+    state: State,
+  ) => Effect.Effect<ReadonlyArray<Event>, Err, never>
 }
 
 export interface DeciderTestScenario<Command, Event, State, Err> {
@@ -251,7 +274,7 @@ export interface DeciderTestScenario<Command, Event, State, Err> {
 }
 
 export const makeDeciderTestHarness = <Command, Event, State, Err>(
-  decider: Decider<Command, Event, State, Err>
+  decider: Decider<Command, Event, State, Err>,
 ) => ({
   given: (history: ReadonlyArray<Event>): DeciderTestScenario<Command, Event, State, Err> => {
     const currentState = history.reduce(decider.evolve, decider.initialState)
@@ -268,7 +291,7 @@ export const makeDeciderTestHarness = <Command, Event, State, Err>(
                 return Effect.void
               })
               .with({ _tag: "Failure" }, (f) =>
-                Effect.dieMessage(`Expected events but decider failed: ${Cause.pretty(f.cause)}`)
+                Effect.dieMessage(`Expected events but decider failed: ${Cause.pretty(f.cause)}`),
               )
               .exhaustive()
           }),
@@ -282,7 +305,9 @@ export const makeDeciderTestHarness = <Command, Event, State, Err>(
                 return Effect.void
               })
               .with({ _tag: "Failure" }, (f) =>
-                Effect.dieMessage(`Expected empty event list but decider failed: ${Cause.pretty(f.cause)}`)
+                Effect.dieMessage(
+                  `Expected empty event list but decider failed: ${Cause.pretty(f.cause)}`,
+                ),
               )
               .exhaustive()
           }),
@@ -293,7 +318,9 @@ export const makeDeciderTestHarness = <Command, Event, State, Err>(
             const exit = yield* Effect.exit(decider.decide(command, currentState))
             return yield* match(exit)
               .with({ _tag: "Success" }, (s) =>
-                Effect.dieMessage(`Expected decider failure but succeeded with ${JSON.stringify(s.value)}`)
+                Effect.dieMessage(
+                  `Expected decider failure but succeeded with ${JSON.stringify(s.value)}`,
+                ),
               )
               .with({ _tag: "Failure" }, (f) => {
                 expect(Cause.hasDies(f.cause)).toBe(false)
@@ -306,10 +333,10 @@ export const makeDeciderTestHarness = <Command, Event, State, Err>(
                 return Effect.void
               })
               .exhaustive()
-          })
-      })
+          }),
+      }),
     }
-  }
+  },
 })
 ```
 
@@ -328,12 +355,12 @@ describe("Cart Decider Negative Paths", () => {
   it.effect("fails with EmptyCartCheckoutError when checking out empty cart", () =>
     Effect.gen(function* () {
       const exit = yield* Effect.exit(
-        decideCart({ _tag: "Checkout", cartId: "cart-1", orderId: "ord-1" }, initialCartState)
+        decideCart({ _tag: "Checkout", cartId: "cart-1", orderId: "ord-1" }, initialCartState),
       )
 
       yield* match(exit)
         .with({ _tag: "Success" }, () =>
-          Effect.dieMessage("Expected EmptyCartCheckoutError but decider succeeded")
+          Effect.dieMessage("Expected EmptyCartCheckoutError but decider succeeded"),
         )
         .with({ _tag: "Failure" }, (f) => {
           expect(Cause.hasDies(f.cause)).toBe(false)
@@ -341,12 +368,14 @@ describe("Cart Decider Negative Paths", () => {
           expect(Option.isSome(errorOpt)).toBe(true)
           if (Option.isSome(errorOpt)) {
             expect(errorOpt.value._tag).toBe("EmptyCartCheckoutError")
-            expect(Equal.equals(errorOpt.value, new EmptyCartCheckoutError({ cartId: "cart-1" }))).toBe(true)
+            expect(
+              Equal.equals(errorOpt.value, new EmptyCartCheckoutError({ cartId: "cart-1" })),
+            ).toBe(true)
           }
           return Effect.void
         })
         .exhaustive()
-    })
+    }),
   )
 })
 ```
@@ -366,6 +395,7 @@ Unit tests alone can miss boundary bugs and numeric edge cases. The harness gate
    - Post-terminal events (verifying that events after checkout do not revive or corrupt the terminal state).
 
    Folding the stream in two arbitrary sequential chunks must yield the identical state as folding the entire stream at once:
+
    ```ts
    import { Schema, Equal } from "effect"
    import { describe, expect, it } from "@effect/vitest"
@@ -376,7 +406,7 @@ Unit tests alone can miss boundary bugs and numeric edge cases. The harness gate
        "satisfies chunked fold equivalence across arbitrary CartEvent streams",
        {
          events: Schema.Array(CartEvent),
-         splitRatio: Schema.Number.pipe(Schema.between(0, 1))
+         splitRatio: Schema.Number.pipe(Schema.between(0, 1)),
        },
        ({ events, splitRatio }) => {
          const k = Math.floor(events.length * splitRatio)
@@ -386,12 +416,13 @@ Unit tests alone can miss boundary bugs and numeric edge cases. The harness gate
 
          // Strict structural equality
          expect(Equal.equals(chunkedFold, fullFold)).toBe(true)
-       }
+       },
      )
    })
    ```
 
 2. **Deterministic Replay Idempotence:**
+
    ```ts
    const state1 = foldCart(events, initialCartState)
    const state2 = foldCart(events, initialCartState)
@@ -400,4 +431,3 @@ Unit tests alone can miss boundary bugs and numeric edge cases. The harness gate
 
 3. **Terminal State Immutability:**
    Once an aggregate reaches a terminal variant (e.g. `CheckedOutCart`), subsequent events must not alter that terminal status.
-

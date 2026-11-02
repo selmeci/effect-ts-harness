@@ -66,13 +66,13 @@ export const ALLOWLIST: ReadonlyArray<string> = [
   "grep",
   "rg",
   "omnigraph ",
-  "omnigraph-server"
+  "omnigraph-server",
 ]
 
 export const DENYLIST: ReadonlyArray<{ readonly token: string; readonly reason: string }> = [
   { token: "rm -rf", reason: "destructive delete" },
   { token: "push --force", reason: "force push" },
-  { token: "push -f", reason: "force push" }
+  { token: "push -f", reason: "force push" },
 ]
 
 /** Human confirmation required, never auto-approved (mvp.md "Infrastructure as Effect",
@@ -80,7 +80,7 @@ export const DENYLIST: ReadonlyArray<{ readonly token: string; readonly reason: 
 export const ASKLIST: ReadonlyArray<string> = [
   "alchemy deploy",
   "alchemy destroy",
-  "alchemy profile"
+  "alchemy profile",
 ]
 
 export const SHELL_OPERATORS: ReadonlyArray<string> = ["&&", "||", ";", "|", "\n"]
@@ -104,7 +104,7 @@ export interface CommandView {
 const OPERATOR_WORDS: ReadonlySet<string> = new Set(["&&", "||", ";", "|"])
 
 const splitShellWords = (
-  command: string
+  command: string,
 ): { readonly words: ReadonlyArray<string>; readonly unquoted: string } => {
   const words: Array<string> = []
   let current = ""
@@ -190,7 +190,10 @@ const dropDataArguments = (words: ReadonlyArray<string>): ReadonlyArray<string> 
       continue
     }
     if (sub === "log" && word.startsWith("--grep=")) continue
-    if (ghSub === "pr" && (word === "-t" || word === "--title" || word === "-b" || word === "--body")) {
+    if (
+      ghSub === "pr" &&
+      (word === "-t" || word === "--title" || word === "-b" || word === "--body")
+    ) {
       skipNext = true
       continue
     }
@@ -231,27 +234,27 @@ export const GUARD_SELF_INVOCATION_PATTERN: RegExp =
 export const GIT_DISCARD_PATTERNS: ReadonlyArray<GuardPatternRule> = [
   {
     pattern: /\bgit\s+checkout\s+(?:\S+\s+)*(?:--|\.\/?|-f|--force)(?:\s|$)/,
-    reason: "git checkout discarding working-tree changes"
+    reason: "git checkout discarding working-tree changes",
   },
   {
     pattern: /\bgit\s+restore\s+(?!.*--staged\b)(?:\S+\s+)*(?:--|\.\/?|-f|--force)(?:\s|$)/,
-    reason: "git restore discarding changes"
+    reason: "git restore discarding changes",
   },
   { pattern: /\bgit\s+stash\s+(?:drop|clear)\b/, reason: "git stash drop/clear" },
   {
     pattern: /\bgit\s+branch\s+(?:\S+\s+)*(?:-[Dd]|--delete)(?:\s|$)/,
-    reason: "git branch deletion"
+    reason: "git branch deletion",
   },
   { pattern: /\bgit\s+clean\b/, reason: "git clean removing untracked files" },
   {
     pattern: /\bgit\s+switch\s+(?:\S+\s+)*(?:--discard-changes|-f|--force)(?:\s|$)/,
-    reason: "git switch discarding changes"
+    reason: "git switch discarding changes",
   },
   { pattern: /\bgit\s+reset\s+(?:\S+\s+)*--hard\b/, reason: "git reset --hard" },
   {
     pattern: /\bgit\s+push\s+(?:\S+\s+)*(?:--delete|-d)(?:\s|$)/,
-    reason: "git push deleting remote ref"
-  }
+    reason: "git push deleting remote ref",
+  },
 ]
 
 /** REQ-1.1 / REQ-1.4: find actions that delete or execute. Evaluated on `CommandView.argv`,
@@ -259,8 +262,8 @@ export const GIT_DISCARD_PATTERNS: ReadonlyArray<GuardPatternRule> = [
 export const DESTRUCTIVE_ARGUMENT_PATTERNS: ReadonlyArray<GuardPatternRule> = [
   {
     pattern: /\bfind\b.*\s-(?:delete|exec|execdir|ok|okdir)\b/,
-    reason: "find action that deletes or executes"
-  }
+    reason: "find action that deletes or executes",
+  },
 ]
 
 /** REQ-1.3: `>`, `>>`, `N>`, `&>`, `&>>`, `>& file` into a file. Not stream duplication
@@ -274,9 +277,9 @@ export const FILE_REDIRECTION_PATTERN: RegExp =
 export const OBFUSCATION_PATTERNS: ReadonlyArray<GuardPatternRule> = [
   {
     pattern: /\[[^\]\s]\](?=[\w.])|(?<=[\w.])\[[^\]\s]\]/,
-    reason: "single-character bracket class inside a word"
+    reason: "single-character bracket class inside a word",
   },
-  { pattern: /(?<=[\w.])(?:''|"")(?=[\w.])/, reason: "empty quotes inside a word" }
+  { pattern: /(?<=[\w.])(?:''|"")(?=[\w.])/, reason: "empty quotes inside a word" },
 ]
 
 const containsToken = (command: string, token: string): boolean =>
@@ -306,7 +309,7 @@ const WRAPPER_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "-C",
   "--prefix",
   "--package",
-  "-p"
+  "-p",
 ])
 const WRAPPER_SUBCOMMANDS: ReadonlySet<string> = new Set(["exec", "run", "dlx"])
 
@@ -355,7 +358,7 @@ const unwrapCommandSegment = (words: ReadonlyArray<string>): UnwrappedSegment =>
   }
   return {
     envAssignments,
-    commandWords: words.slice(i)
+    commandWords: words.slice(i),
   }
 }
 
@@ -397,7 +400,7 @@ export const isInteractiveNxCommand = (command: string): boolean =>
       return false
     }
     const hasNonInteractiveEnv = seg.envAssignments.some(
-      (env) => env === "CI=true" || env === "CI=1" || env === "NX_INTERACTIVE=false"
+      (env) => env === "CI=true" || env === "CI=1" || env === "NX_INTERACTIVE=false",
     )
     return !hasNonInteractiveEnv
   })
@@ -484,16 +487,14 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
   if (candidates.some((p) => /(^|\/)repos\/(effect|alchemy)(\/|$)/.test(p))) {
     return {
       verdict: "deny",
-      reason: `Protected read-only subtree cannot be modified: ${filePath}`
+      reason: `Protected read-only subtree cannot be modified: ${filePath}`,
     }
   }
 
-  if (
-    candidates.some((p) => /(^|\/)\.harness\/(worktrees\/[^/]+\/)?verify-stamp\.json$/.test(p))
-  ) {
+  if (candidates.some((p) => /(^|\/)\.harness\/(worktrees\/[^/]+\/)?verify-stamp\.json$/.test(p))) {
     return {
       verdict: "deny",
-      reason: `Direct modification of verify-stamp.json is forbidden (stamp forgery protection): ${filePath}`
+      reason: `Direct modification of verify-stamp.json is forbidden (stamp forgery protection): ${filePath}`,
     }
   }
 
@@ -501,23 +502,23 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
     candidates.some(
       (p) =>
         /(^|\/)(\.env(\.[a-zA-Z0-9_-]+)*|\.dev\.vars|.*\.(pem|key))$/.test(p) &&
-        !/\.(example|template|sample)$/i.test(p)
+        !/\.(example|template|sample)$/i.test(p),
     )
   ) {
     return {
       verdict: "deny",
-      reason: `Secret or credential file modification is forbidden by harness guard: ${filePath}`
+      reason: `Secret or credential file modification is forbidden by harness guard: ${filePath}`,
     }
   }
 
   if (
     candidates.some((p) =>
-      /(^|\/)(\.oxlintrc\.json|tools\/oxlint\/.*|libs\/harness\/graph\/policies\.cedar)$/.test(p)
+      /(^|\/)(\.oxlintrc\.json|tools\/oxlint\/.*|libs\/harness\/graph\/policies\.cedar)$/.test(p),
     )
   ) {
     return {
       verdict: "ask",
-      reason: `Modifying harness governance/linter policy requires human confirmation: ${filePath}`
+      reason: `Modifying harness governance/linter policy requires human confirmation: ${filePath}`,
     }
   }
 

@@ -4,14 +4,9 @@ import {
   type ArchiMateLayer,
   classifyOntologyNode,
   projectOntologyLayers,
-  queryOntologyWhy
+  queryOntologyWhy,
 } from "./archimate-ontology.js"
-import {
-  findCallees,
-  findCallers,
-  findTestsReaching,
-  resolveNode
-} from "./graph-engine.js"
+import { findCallees, findCallers, findTestsReaching, resolveNode } from "./graph-engine.js"
 import type { HarnessGraph } from "./model.js"
 
 export const HARNESS_GQ_QUERY_NAMES = [
@@ -22,7 +17,7 @@ export const HARNESS_GQ_QUERY_NAMES = [
   "find_tests_reaching",
   "ontology_layer_nodes",
   "ontology_governed_by",
-  "untested_domain_fns"
+  "untested_domain_fns",
 ] as const
 
 export type HarnessGqQueryName = (typeof HARNESS_GQ_QUERY_NAMES)[number]
@@ -34,9 +29,7 @@ export interface HarnessGqQueryDescriptor {
   readonly source: string
 }
 
-export const HARNESS_GQ_QUERIES: Readonly<
-  Record<HarnessGqQueryName, HarnessGqQueryDescriptor>
-> = {
+export const HARNESS_GQ_QUERIES: Readonly<Record<HarnessGqQueryName, HarnessGqQueryDescriptor>> = {
   resolve_effect_fn: {
     name: "resolve_effect_fn",
     description:
@@ -59,12 +52,11 @@ export const HARNESS_GQ_QUERIES: Readonly<
     $fn.archimateAspect,
     $fn.archimateElementType
   }
-}`
+}`,
   },
   find_service_providers: {
     name: "find_service_providers",
-    description:
-      "Find all ServiceLayer implementations that provide a given ServiceTag",
+    description: "Find all ServiceLayer implementations that provide a given ServiceTag",
     params: ["tagId"],
     source: `query find_service_providers($tagId: String) {
   match {
@@ -80,7 +72,7 @@ export const HARNESS_GQ_QUERIES: Readonly<
     $layer.file as file,
     $tag.tagId as tagId
   }
-}`
+}`,
   },
   find_callers: {
     name: "find_callers",
@@ -98,7 +90,7 @@ export const HARNESS_GQ_QUERIES: Readonly<
     $rel.archimateRelation as rel,
     $callee.qualname as callee
   }
-}`
+}`,
   },
   find_callees: {
     name: "find_callees",
@@ -116,7 +108,7 @@ export const HARNESS_GQ_QUERIES: Readonly<
     $rel.archimateRelation as rel,
     $callee.qualname as callee
   }
-}`
+}`,
   },
   find_tests_reaching: {
     name: "find_tests_reaching",
@@ -134,7 +126,7 @@ export const HARNESS_GQ_QUERIES: Readonly<
     $test.testFile as testFile,
     $test.testName as testName
   }
-}`
+}`,
   },
   ontology_layer_nodes: {
     name: "ontology_layer_nodes",
@@ -148,7 +140,7 @@ export const HARNESS_GQ_QUERIES: Readonly<
   return {
     $node
   }
-}`
+}`,
   },
   ontology_governed_by: {
     name: "ontology_governed_by",
@@ -165,12 +157,11 @@ export const HARNESS_GQ_QUERIES: Readonly<
     $rel.archimateRelation as rel,
     $target
   }
-}`
+}`,
   },
   untested_domain_fns: {
     name: "untested_domain_fns",
-    description:
-      "Find all non-stub domain Effect functions that lack reaching test coverage",
+    description: "Find all non-stub domain Effect functions that lack reaching test coverage",
     params: [],
     source: `query untested_domain_fns() {
   match {
@@ -186,14 +177,14 @@ export const HARNESS_GQ_QUERIES: Readonly<
     $fn.spanName as spanName,
     $fn.file as file
   }
-}`
-  }
+}`,
+  },
 }
 
 const getStringParam = (
   params: Readonly<Record<string, unknown>> | undefined,
   key: string,
-  defaultValue = ""
+  defaultValue = "",
 ): string => {
   const val = params?.[key]
   if (typeof val === "string") return val
@@ -204,7 +195,7 @@ const getStringParam = (
 export const executeNamedGqQueryInMemory = (
   harnessGraph: HarnessGraph,
   queryName: HarnessGqQueryName,
-  params?: Readonly<Record<string, unknown>>
+  params?: Readonly<Record<string, unknown>>,
 ): ReadonlyArray<Record<string, unknown>> => {
   switch (queryName) {
     case "resolve_effect_fn": {
@@ -218,8 +209,8 @@ export const executeNamedGqQueryInMemory = (
             ...ont,
             archimateLayer: ont.layer,
             archimateAspect: ont.aspect,
-            archimateElementType: ont.elementType
-          }
+            archimateElementType: ont.elementType,
+          },
         ]
       }
       return []
@@ -245,7 +236,7 @@ export const executeNamedGqQueryInMemory = (
                 layerKind: layerNode.layerKind,
                 packageTag: layerNode.packageTag,
                 file: layerNode.file,
-                tagId: tagNode.tagId
+                tagId: tagNode.tagId,
               })
             }
           }
@@ -266,11 +257,7 @@ export const executeNamedGqQueryInMemory = (
       return findTestsReaching(harnessGraph, callee).map((t) => ({ ...t }))
     }
     case "ontology_layer_nodes": {
-      const layer = getStringParam(
-        params,
-        "layer",
-        "Business"
-      ) as ArchiMateLayer
+      const layer = getStringParam(params, "layer", "Business") as ArchiMateLayer
       const projection = projectOntologyLayers(harnessGraph)
       if (layer in projection.layers) {
         return projection.layers[layer].map((node) => ({ ...node }))
@@ -282,7 +269,7 @@ export const executeNamedGqQueryInMemory = (
       const why = queryOntologyWhy(harnessGraph, symbol)
       return [
         ...why.governingAdrs.map((a) => ({ docKind: "AdrDoc" as const, ...a })),
-        ...why.realizingSpecs.map((s) => ({ docKind: "EarsSpec" as const, ...s }))
+        ...why.realizingSpecs.map((s) => ({ docKind: "EarsSpec" as const, ...s })),
       ]
     }
     case "untested_domain_fns": {
@@ -299,7 +286,7 @@ export const executeNamedGqQueryInMemory = (
             results.push({
               qualname: node.qualname,
               spanName: node.spanName,
-              file: node.file
+              file: node.file,
             })
           }
         }

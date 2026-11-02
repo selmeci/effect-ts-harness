@@ -13,24 +13,18 @@ export const TelemetryCategory = Schema.Literals([
   "ontology",
   "guard",
   "routing",
-  "lifecycle"
+  "lifecycle",
 ])
 export type TelemetryCategory = typeof TelemetryCategory.Type
 
-export const TelemetryOutcome = Schema.Literals([
-  "ok",
-  "fail",
-  "deny",
-  "ask",
-  "fallback"
-])
+export const TelemetryOutcome = Schema.Literals(["ok", "fail", "deny", "ask", "fallback"])
 export type TelemetryOutcome = typeof TelemetryOutcome.Type
 
 export const TelemetryEngineSource = Schema.Literals([
   "omnigraph",
   "memory-fallback",
   "local",
-  "decision-model"
+  "decision-model",
 ])
 export type TelemetryEngineSource = typeof TelemetryEngineSource.Type
 
@@ -42,7 +36,7 @@ export const TelemetryEvent = Schema.Struct({
   outcome: TelemetryOutcome,
   durationMs: Schema.Finite,
   engineSource: Schema.optional(TelemetryEngineSource),
-  detail: Schema.optional(Schema.String)
+  detail: Schema.optional(Schema.String),
 })
 export type TelemetryEvent = typeof TelemetryEvent.Type
 
@@ -84,14 +78,10 @@ export interface SessionReportInput {
   readonly cumulative?: boolean | undefined
 }
 
-const TASK_WORK_TOOLS = new Set([
-  "plan-check",
-  "verify",
-  "mutate"
-])
+const TASK_WORK_TOOLS = new Set(["plan-check", "verify", "mutate"])
 
 export const scopeSessionReportInput = (
-  input: SessionReportInput
+  input: SessionReportInput,
 ): {
   readonly events: ReadonlyArray<TelemetryEvent>
   readonly frictionEvents: ReadonlyArray<FrictionEvent>
@@ -136,7 +126,7 @@ export const scopeSessionReportInput = (
 
   return {
     events: scopedEvents,
-    frictionEvents: scopedFriction
+    frictionEvents: scopedFriction,
   }
 }
 
@@ -153,7 +143,7 @@ export interface SessionReport {
 }
 
 export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
-  rawInput: SessionReportInput
+  rawInput: SessionReportInput,
 ) {
   yield* Effect.void
 
@@ -161,13 +151,13 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
   const input: SessionReportInput = {
     ...rawInput,
     events: scoped.events,
-    frictionEvents: scoped.frictionEvents
+    frictionEvents: scoped.frictionEvents,
   }
 
   const bySurface: Record<TelemetrySurface, number> = {
     cli: 0,
     mcp: 0,
-    hook: 0
+    hook: 0,
   }
 
   const byCategory: Record<TelemetryCategory, number> = {
@@ -176,7 +166,7 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
     ontology: 0,
     guard: 0,
     routing: 0,
-    lifecycle: 0
+    lifecycle: 0,
   }
 
   let totalDurationMsSum = 0
@@ -229,10 +219,7 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
 
     const percentile = (sorted: ReadonlyArray<number>, p: number): number => {
       if (sorted.length === 0) return 0
-      const idx = Math.min(
-        sorted.length - 1,
-        Math.max(0, Math.ceil((p / 100) * sorted.length) - 1)
-      )
+      const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1))
       return sorted[idx] ?? 0
     }
 
@@ -253,7 +240,7 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
       meanDurationMs,
       p50DurationMs,
       p95DurationMs,
-      maxDurationMs
+      maxDurationMs,
     })
   }
 
@@ -267,8 +254,7 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
   const verifyEvents = input.events.filter((e) => e.toolName === "verify")
   const verifyAttempts = verifyEvents.length
   const fixUpIterations = verifyEvents.filter((e) => e.outcome === "fail").length
-  const firstPassVerify =
-    verifyEvents.length === 0 ? null : (verifyEvents[0]?.outcome === "ok")
+  const firstPassVerify = verifyEvents.length === 0 ? null : verifyEvents[0]?.outcome === "ok"
 
   const firstVerifyIdx = input.events.findIndex((e) => e.toolName === "verify")
   let planBeforeVerify = true
@@ -281,7 +267,7 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
           e.toolName === "route" ||
           e.toolName === "harness_route" ||
           e.category === "ontology" ||
-          e.category === "graph_query"
+          e.category === "graph_query",
       )
   }
 
@@ -289,7 +275,7 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
     (e) =>
       e.toolName === "done" &&
       e.surface !== "hook" &&
-      (e.outcome === "fail" || e.outcome === "deny")
+      (e.outcome === "fail" || e.outcome === "deny"),
   ).length
 
   const isInternalOmnigraphSync = (toolName: string): boolean =>
@@ -298,7 +284,7 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
   const graphDiscoveryCalls = input.events.filter(
     (e) =>
       (e.category === "graph_query" || e.category === "ontology") &&
-      !isInternalOmnigraphSync(e.toolName)
+      !isInternalOmnigraphSync(e.toolName),
   ).length
 
   const nonHookCalls = input.events.filter((e) => e.surface !== "hook").length
@@ -306,16 +292,14 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
     nonHookCalls === 0 ? 0 : Number((graphDiscoveryCalls / nonHookCalls).toFixed(2))
 
   const omnigraphCalls = input.events.filter((e) => e.engineSource === "omnigraph").length
-  const fallbackCalls = input.events.filter(
-    (e) => e.engineSource === "memory-fallback"
-  ).length
+  const fallbackCalls = input.events.filter((e) => e.engineSource === "memory-fallback").length
   const omnigraphLiveRatio =
     omnigraphCalls + fallbackCalls === 0
       ? null
       : Number((omnigraphCalls / (omnigraphCalls + fallbackCalls)).toFixed(2))
 
   const guardInterventions = input.events.filter(
-    (e) => e.category === "guard" && (e.outcome === "deny" || e.outcome === "ask")
+    (e) => e.category === "guard" && (e.outcome === "deny" || e.outcome === "ask"),
   ).length
 
   const isActionableFriction = (f: FrictionEvent): boolean =>
@@ -341,32 +325,32 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
   const recommendations: Array<string> = []
   if (fixUpIterations > 0) {
     recommendations.push(
-      "Run 'harness gc --strict' and 'harness ontology check --strict' before 'harness verify' to reduce fix-up iterations."
+      "Run 'harness gc --strict' and 'harness ontology check --strict' before 'harness verify' to reduce fix-up iterations.",
     )
   }
   if (!planBeforeVerify && verifyAttempts > 0) {
     recommendations.push(
-      "Execute planning/discovery tools ('harness route', 'harness ontology check', or 'harness plan-check') before running 'harness verify'."
+      "Execute planning/discovery tools ('harness route', 'harness ontology check', or 'harness plan-check') before running 'harness verify'.",
     )
   }
   if (graphDiscoveryCalls === 0 && nonHookCalls >= 3) {
     recommendations.push(
-      "Use semantic MCP graph & ontology tools ('harness_resolve', 'harness_callers', 'harness_ontology_why', 'harness_gq_query') to inspect topology before editing."
+      "Use semantic MCP graph & ontology tools ('harness_resolve', 'harness_callers', 'harness_ontology_why', 'harness_gq_query') to inspect topology before editing.",
     )
   }
   if (omnigraphLiveRatio !== null && omnigraphLiveRatio < 1) {
     recommendations.push(
-      "Queries used deterministic in-memory fallback ('memory-fallback'). Start Omnigraph server if persistent branch queries are needed."
+      "Queries used deterministic in-memory fallback ('memory-fallback'). Start Omnigraph server if persistent branch queries are needed.",
     )
   }
   if (prematureDoneAttempts > 0) {
     recommendations.push(
-      "Avoid invoking 'harness done' before 'harness verify' produces a valid verify-stamp.json."
+      "Avoid invoking 'harness done' before 'harness verify' produces a valid verify-stamp.json.",
     )
   }
   if (bySurface.mcp === 0 && nonHookCalls >= 3) {
     recommendations.push(
-      "Zero harness-mcp tool calls recorded (bySurface.mcp = 0). Prefer in-process MCP tools (harness_route, harness_lsp_diagnostics, harness_ontology_check, harness_resolve) over shell CLI subcommands."
+      "Zero harness-mcp tool calls recorded (bySurface.mcp = 0). Prefer in-process MCP tools (harness_route, harness_lsp_diagnostics, harness_ontology_check, harness_resolve) over shell CLI subcommands.",
     )
   }
 
@@ -387,10 +371,10 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
       graphDiscoveryRatio,
       omnigraphLiveRatio,
       guardInterventions,
-      frictionCount
+      frictionCount,
     },
     toolMetrics,
-    recommendations
+    recommendations,
   }
 
   return report
@@ -405,7 +389,7 @@ export const renderSessionReportMarkdown = (report: SessionReport): string => {
   lines.push("")
   lines.push(`**Health Score:** ${report.healthScore}/100 (Grade: ${report.grade})`)
   lines.push(
-    `**Total Events:** ${report.totalEvents} | **Total Duration:** ${report.totalDurationMs} ms`
+    `**Total Events:** ${report.totalEvents} | **Total Duration:** ${report.totalDurationMs} ms`,
   )
   lines.push("")
   lines.push("## Key Performance Indicators (KPIs)")
@@ -413,22 +397,28 @@ export const renderSessionReportMarkdown = (report: SessionReport): string => {
   lines.push("| KPI | Value | Description |")
   lines.push("|---|---|---|")
   lines.push(
-    `| First-Pass Verification | ${report.kpis.firstPassVerify === null ? "N/A" : report.kpis.firstPassVerify ? "Passed" : "Failed"} | Green on first attempt |`
+    `| First-Pass Verification | ${report.kpis.firstPassVerify === null ? "N/A" : report.kpis.firstPassVerify ? "Passed" : "Failed"} | Green on first attempt |`,
   )
   lines.push(`| Verify Attempts | ${report.kpis.verifyAttempts} | Total verify runs |`)
   lines.push(`| Fix-Up Iterations | ${report.kpis.fixUpIterations} | Verify runs with failures |`)
   lines.push(
-    `| Plan Before Verify | ${report.kpis.planBeforeVerify ? "Yes" : "No"} | Route/plan-check/graph queried first |`
+    `| Plan Before Verify | ${report.kpis.planBeforeVerify ? "Yes" : "No"} | Route/plan-check/graph queried first |`,
   )
   lines.push(
-    `| Premature Done Attempts | ${report.kpis.prematureDoneAttempts} | Done invoked without valid stamp |`
+    `| Premature Done Attempts | ${report.kpis.prematureDoneAttempts} | Done invoked without valid stamp |`,
   )
-  lines.push(`| Graph Discovery Calls | ${report.kpis.graphDiscoveryCalls} | Ontology & graph queries |`)
-  lines.push(`| Graph Discovery Ratio | ${report.kpis.graphDiscoveryRatio} | Discovery / non-hook calls |`)
   lines.push(
-    `| Omnigraph Live Ratio | ${report.kpis.omnigraphLiveRatio === null ? "N/A" : report.kpis.omnigraphLiveRatio} | Omnigraph vs fallback queries |`
+    `| Graph Discovery Calls | ${report.kpis.graphDiscoveryCalls} | Ontology & graph queries |`,
   )
-  lines.push(`| Guard Interventions | ${report.kpis.guardInterventions} | Denied or asked actions |`)
+  lines.push(
+    `| Graph Discovery Ratio | ${report.kpis.graphDiscoveryRatio} | Discovery / non-hook calls |`,
+  )
+  lines.push(
+    `| Omnigraph Live Ratio | ${report.kpis.omnigraphLiveRatio === null ? "N/A" : report.kpis.omnigraphLiveRatio} | Omnigraph vs fallback queries |`,
+  )
+  lines.push(
+    `| Guard Interventions | ${report.kpis.guardInterventions} | Denied or asked actions |`,
+  )
   lines.push(`| Friction Count | ${report.kpis.frictionCount} | Logged friction events |`)
   lines.push("")
   lines.push("## Tool Usage & Latency")
@@ -437,12 +427,12 @@ export const renderSessionReportMarkdown = (report: SessionReport): string => {
     lines.push("*No tools recorded.*")
   } else {
     lines.push(
-      "| Tool | Surface | Category | Calls | Success | Fail | Deny/Ask | Fallback | Success Rate | Mean (ms) | p50 (ms) | p95 (ms) | Max (ms) |"
+      "| Tool | Surface | Category | Calls | Success | Fail | Deny/Ask | Fallback | Success Rate | Mean (ms) | p50 (ms) | p95 (ms) | Max (ms) |",
     )
     lines.push("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for (const m of report.toolMetrics) {
       lines.push(
-        `| ${m.toolName} | ${m.surface} | ${m.category} | ${m.calls} | ${m.successCount} | ${m.failCount} | ${m.denyOrAskCount} | ${m.fallbackCount} | ${m.successRate} | ${m.meanDurationMs} | ${m.p50DurationMs} | ${m.p95DurationMs} | ${m.maxDurationMs} |`
+        `| ${m.toolName} | ${m.surface} | ${m.category} | ${m.calls} | ${m.successCount} | ${m.failCount} | ${m.denyOrAskCount} | ${m.fallbackCount} | ${m.successRate} | ${m.meanDurationMs} | ${m.p50DurationMs} | ${m.p95DurationMs} | ${m.maxDurationMs} |`,
       )
     }
   }
@@ -473,7 +463,7 @@ export const appendTelemetryEvent = (
     readonly engineSource?: TelemetryEngineSource | undefined
     readonly detail?: string | undefined
     readonly timestamp?: string | undefined
-  }
+  },
 ): TelemetryEvent => {
   const record: TelemetryEvent = {
     timestamp: input.timestamp ?? new Date().toISOString(),
@@ -483,7 +473,7 @@ export const appendTelemetryEvent = (
     outcome: input.outcome,
     durationMs: input.durationMs,
     ...(input.engineSource !== undefined ? { engineSource: input.engineSource } : {}),
-    ...(input.detail !== undefined ? { detail: input.detail } : {})
+    ...(input.detail !== undefined ? { detail: input.detail } : {}),
   }
   const harnessDir = resolveHarnessStateDir(repoRoot)
   const filePath = join(harnessDir, "telemetry-log.jsonl")
@@ -493,7 +483,7 @@ export const appendTelemetryEvent = (
         mkdirSync(harnessDir, { recursive: true })
       }
       appendFileSync(filePath, JSON.stringify(record) + "\n", "utf-8")
-    }).pipe(Effect.orElseSucceed(() => undefined))
+    }).pipe(Effect.orElseSucceed(() => undefined)),
   )
   return record
 }
@@ -505,7 +495,7 @@ export const readTelemetryEvents = (repoRoot: string): ReadonlyArray<TelemetryEv
     return []
   }
   const contentOption = Effect.runSync(
-    Effect.try(() => readFileSync(filePath, "utf-8")).pipe(Effect.option)
+    Effect.try(() => readFileSync(filePath, "utf-8")).pipe(Effect.option),
   )
   if (Option.isNone(contentOption)) {
     return []
@@ -532,13 +522,13 @@ export const clearTelemetryEvents = (repoRoot: string): void => {
         mkdirSync(harnessDir, { recursive: true })
       }
       writeFileSync(filePath, "", "utf-8")
-    }).pipe(Effect.orElseSucceed(() => undefined))
+    }).pipe(Effect.orElseSucceed(() => undefined)),
   )
 }
 
 export const writeSessionReportFiles = (
   repoRoot: string,
-  report: SessionReport
+  report: SessionReport,
 ): { readonly jsonPath: string; readonly markdownPath: string } => {
   const harnessDir = resolveHarnessStateDir(repoRoot)
   const jsonPath = join(harnessDir, "session-report.json")
@@ -550,7 +540,7 @@ export const writeSessionReportFiles = (
       }
       writeFileSync(jsonPath, JSON.stringify(report, null, 2), "utf-8")
       writeFileSync(markdownPath, renderSessionReportMarkdown(report), "utf-8")
-    }).pipe(Effect.orElseSucceed(() => undefined))
+    }).pipe(Effect.orElseSucceed(() => undefined)),
   )
   return { jsonPath, markdownPath }
 }

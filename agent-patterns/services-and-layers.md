@@ -10,7 +10,7 @@ In Effect v4, the standard way to define a service capability is to extend `Cont
 import { Context, Effect, Layer, Schema } from "effect"
 
 export class DatabaseError extends Schema.TaggedError<DatabaseError>()("DatabaseError", {
-  message: Schema.String
+  message: Schema.String,
 }) {}
 
 export interface DatabaseService {
@@ -28,7 +28,7 @@ export class Database extends Context.Service<Database, DatabaseService>()("myap
       })
 
       return Database.of({ query })
-    })
+    }),
   )
 }
 
@@ -56,23 +56,25 @@ export const getItems = Effect.fn("Items.getItems")(function* () {
 Layers construct and manage the lifecycle of services:
 
 - **`Layer.effect`**: Creates a layer from an effectful constructor.
+
   ```ts
   export const DatabaseLive = Layer.effect(
     Database,
     Effect.gen(function* () {
       yield* Effect.log("Initializing database connection...")
       return Database.of({ query: (sql) => Effect.succeed([]) })
-    })
+    }),
   )
   ```
 
 - **`Layer.succeed`**: Creates a layer from a pure, static value without effects.
+
   ```ts
   export const DatabaseTest = Layer.succeed(
     Database,
     Database.of({
-      query: (_sql) => Effect.succeed([{ id: 42, name: "Mocked" }])
-    })
+      query: (_sql) => Effect.succeed([{ id: 42, name: "Mocked" }]),
+    }),
   )
   ```
 
@@ -81,12 +83,11 @@ Layers construct and manage the lifecycle of services:
   export const ManagedPoolLive = Layer.scoped(
     Database,
     Effect.gen(function* () {
-      const pool = yield* Effect.acquireRelease(
-        Effect.succeed({ open: true }),
-        (pool) => Effect.log("Closing connection pool...")
+      const pool = yield* Effect.acquireRelease(Effect.succeed({ open: true }), (pool) =>
+        Effect.log("Closing connection pool..."),
       )
       return Database.of({ query: () => Effect.succeed([]) })
-    })
+    }),
   )
   ```
 
@@ -98,18 +99,13 @@ Compose layers together to build your application's dependency graph:
 import { Layer } from "effect"
 
 // Layer.provide: provides dependencies to a consumer layer
-export const AppLayer = ServiceLayer.pipe(
-  Layer.provide(Database.Live),
-  Layer.provide(Config.Live)
-)
+export const AppLayer = ServiceLayer.pipe(Layer.provide(Database.Live), Layer.provide(Config.Live))
 
 // Layer.merge: combines two layers side-by-side into a single layer providing both
 export const SharedServices = Layer.merge(Database.Live, Cache.Live)
 
 // Layer.provideMerge: provides dependencies while keeping them exposed in the output
-export const ComposedWithDeps = ServiceLayer.pipe(
-  Layer.provideMerge(Database.Live)
-)
+export const ComposedWithDeps = ServiceLayer.pipe(Layer.provideMerge(Database.Live))
 ```
 
 ## Architectural Guidelines

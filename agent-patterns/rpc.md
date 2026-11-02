@@ -16,13 +16,13 @@ export class SessionRpcGroup extends RpcGroup.make("SessionRpc")
     Rpc.make("getSession")
       .setPayload(Schema.Struct({ sessionId: Schema.String }))
       .setSuccess(SessionData)
-      .setError(SessionError)
+      .setError(SessionError),
   )
   .add(
     Rpc.make("touchSession")
       .setPayload(Schema.Struct({ sessionId: Schema.String }))
       .setSuccess(Schema.Void)
-      .setError(SessionError)
+      .setError(SessionError),
   ) {}
 ```
 
@@ -42,7 +42,7 @@ export const makeSessionClient = (doStub: DurableObjectStub) =>
 
     // Build the typed RpcClient using the contract definition and http client
     const client = RpcClient.make(SessionRpcGroup, {
-      httpClient
+      httpClient,
     })
 
     return client
@@ -67,7 +67,7 @@ export const SessionRpcRouter = RpcServer.make(SessionRpcGroup, {
   touchSession: ({ sessionId }) =>
     Effect.gen(function* () {
       yield* updateSessionTimestamp(sessionId)
-    })
+    }),
 })
 ```
 

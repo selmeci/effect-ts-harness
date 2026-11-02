@@ -22,7 +22,7 @@ describe("agent-patterns index", () => {
       "schedule",
       "schema",
       "services-and-layers",
-      "testing"
+      "testing",
     ])
     for (const doc of docs) {
       expect(doc.summary.length).toBeGreaterThan(20)

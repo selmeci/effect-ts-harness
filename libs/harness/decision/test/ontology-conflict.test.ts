@@ -13,7 +13,7 @@ import {
   loadGovernanceDocsFromDisk,
   makeFailingDecisionModelLayer,
   makeMockDecisionModelLayer,
-  OntologyConflictV1
+  OntologyConflictV1,
 } from "../src/index.js"
 
 describe("Ontology Conflict Decision", () => {
@@ -21,27 +21,29 @@ describe("Ontology Conflict Decision", () => {
     expect(() => assertDecisionLimits(OntologyConflictV1)).not.toThrow()
   })
 
-  it.effect("detects conflict when contradicts probability is high and conflictKind is non-none", () =>
-    Effect.gen(function* () {
-      const mockLayer = makeMockDecisionModelLayer({
-        contradictsProb: 0.9,
-        conflictKindLabel: "state-transition-conflict"
-      })
+  it.effect(
+    "detects conflict when contradicts probability is high and conflictKind is non-none",
+    () =>
+      Effect.gen(function* () {
+        const mockLayer = makeMockDecisionModelLayer({
+          contradictsProb: 0.9,
+          conflictKindLabel: "state-transition-conflict",
+        })
 
-      const result = yield* checkOntologyPairConflict({
-        sourceId: "sample:SPEC-0001:REQ-1.1",
-        sourceText: "When upload is requested, the system shall approve.",
-        targetId: "sample:SPEC-0001:REQ-1.2",
-        targetText: "When upload is requested, the system shall reject.",
-        sharedSymbol: "Sample.uploadPhoto"
-      }).pipe(Effect.provide(mockLayer))
+        const result = yield* checkOntologyPairConflict({
+          sourceId: "sample:SPEC-0001:REQ-1.1",
+          sourceText: "When upload is requested, the system shall approve.",
+          targetId: "sample:SPEC-0001:REQ-1.2",
+          targetText: "When upload is requested, the system shall reject.",
+          sharedSymbol: "Sample.uploadPhoto",
+        }).pipe(Effect.provide(mockLayer))
 
-      expect(result.hasConflict).toBe(true)
-      expect(result.probability).toBe(0.9)
-      expect(result.conflictKind).toBe("state-transition-conflict")
-      expect(result.reason).toContain("Semantic conflict")
-      expect(result.reason).toContain("sample:SPEC-0001:REQ-1.1")
-    })
+        expect(result.hasConflict).toBe(true)
+        expect(result.probability).toBe(0.9)
+        expect(result.conflictKind).toBe("state-transition-conflict")
+        expect(result.reason).toContain("Semantic conflict")
+        expect(result.reason).toContain("sample:SPEC-0001:REQ-1.1")
+      }),
   )
 
   it.effect("returns no conflict when contradicts probability is low by default", () =>
@@ -53,13 +55,13 @@ describe("Ontology Conflict Decision", () => {
         sourceText: "When upload is requested, the system shall approve.",
         targetId: "sample:SPEC-0001:REQ-1.2",
         targetText: "While album quota is normal, the system shall record metric.",
-        sharedSymbol: "Sample.uploadPhoto"
+        sharedSymbol: "Sample.uploadPhoto",
       }).pipe(Effect.provide(mockLayer))
 
       expect(result.hasConflict).toBe(false)
       expect(result.conflictKind).toBe("none")
       expect(result.reason).toContain("No semantic conflict detected")
-    })
+    }),
   )
 
   it.effect("falls back gracefully when DecisionModel fails or times out", () =>
@@ -71,14 +73,14 @@ describe("Ontology Conflict Decision", () => {
         sourceText: "When upload is requested, the system shall approve.",
         targetId: "sample:SPEC-0001:REQ-1.2",
         targetText: "When upload is requested, the system shall reject.",
-        sharedSymbol: "Sample.uploadPhoto"
+        sharedSymbol: "Sample.uploadPhoto",
       }).pipe(Effect.provide(failingLayer))
 
       expect(result.hasConflict).toBe(false)
       expect(result.probability).toBe(0)
       expect(result.conflictKind).toBe("none")
       expect(result.reason).toContain("DecisionModel unavailable or timed out")
-    })
+    }),
   )
 
   it("re-exports ontology gates utilities correctly", () => {
@@ -141,15 +143,15 @@ How to persist photos.
         id: "sample:SPEC-0001",
         docPath: "libs/sample/docs/specs/SPEC-0001.md",
         status: "accepted",
-        markdown: validSpecMd
+        markdown: validSpecMd,
       },
       {
         id: "sample:ADR-0001",
         docPath: "libs/sample/docs/adr/0001.md",
         status: "accepted",
         referencedSpans: ["Sample.uploadPhoto"],
-        markdown: validAdrMd
-      }
+        markdown: validAdrMd,
+      },
     ]
 
     const pairs = extractOntologyConflictPairs(docs, "sample")
@@ -169,7 +171,7 @@ How to persist photos.
     Effect.gen(function* () {
       const mockLayer = makeMockDecisionModelLayer({
         contradictsProb: 0.85,
-        conflictKindLabel: "state-transition-conflict"
+        conflictKindLabel: "state-transition-conflict",
       })
 
       const pairs = [
@@ -178,54 +180,52 @@ How to persist photos.
           sourceText: "When photo is submitted, the system shall approve.",
           targetId: "sample:SPEC-0001#REQ-1.2",
           targetText: "When photo is submitted, the system shall reject.",
-          sharedSymbol: "Sample.uploadPhoto"
-        }
+          sharedSymbol: "Sample.uploadPhoto",
+        },
       ]
 
-      const conflicts = yield* evaluateOntologyConflicts(pairs).pipe(
-        Effect.provide(mockLayer)
-      )
+      const conflicts = yield* evaluateOntologyConflicts(pairs).pipe(Effect.provide(mockLayer))
 
       expect(conflicts.length).toBe(1)
       expect(conflicts[0]?.hasConflict).toBe(true)
       expect(conflicts[0]?.conflictKind).toBe("state-transition-conflict")
       expect(conflicts[0]?.sourceId).toBe("sample:SPEC-0001#REQ-1.1")
-    })
+    }),
   )
 
-  it.effect("short-circuits after 1 call when DecisionModel times out or fails on the first pair", () =>
-    Effect.gen(function* () {
-      let callCount = 0
-      const failingLayer = Layer.effect(
-        DecisionModel.DecisionModel,
-        DecisionModel.make({
-          decide: () => {
-            callCount++
-            return Effect.fail(
-              AiError.make({
-                module: "DecisionModel",
-                method: "decide",
-                reason: new AiError.UnknownError({ description: "Unavailable" })
-              })
-            )
-          }
-        })
-      )
+  it.effect(
+    "short-circuits after 1 call when DecisionModel times out or fails on the first pair",
+    () =>
+      Effect.gen(function* () {
+        let callCount = 0
+        const failingLayer = Layer.effect(
+          DecisionModel.DecisionModel,
+          DecisionModel.make({
+            decide: () => {
+              callCount++
+              return Effect.fail(
+                AiError.make({
+                  module: "DecisionModel",
+                  method: "decide",
+                  reason: new AiError.UnknownError({ description: "Unavailable" }),
+                }),
+              )
+            },
+          }),
+        )
 
-      const pairs = Array.from({ length: 16 }, (_, i) => ({
-        sourceId: `sample:SPEC-0001#REQ-${i}`,
-        sourceText: `Requirement ${i}`,
-        targetId: `sample:SPEC-0001#REQ-${i + 1}`,
-        targetText: `Requirement ${i + 1}`,
-        sharedSymbol: "Sample.operation"
-      }))
+        const pairs = Array.from({ length: 16 }, (_, i) => ({
+          sourceId: `sample:SPEC-0001#REQ-${i}`,
+          sourceText: `Requirement ${i}`,
+          targetId: `sample:SPEC-0001#REQ-${i + 1}`,
+          targetText: `Requirement ${i + 1}`,
+          sharedSymbol: "Sample.operation",
+        }))
 
-      const conflicts = yield* evaluateOntologyConflicts(pairs).pipe(
-        Effect.provide(failingLayer)
-      )
+        const conflicts = yield* evaluateOntologyConflicts(pairs).pipe(Effect.provide(failingLayer))
 
-      expect(conflicts).toEqual([])
-      expect(callCount).toBe(1)
-    })
+        expect(conflicts).toEqual([])
+        expect(callCount).toBe(1)
+      }),
   )
 })

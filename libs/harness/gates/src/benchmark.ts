@@ -12,36 +12,36 @@ export const BENCHMARK_TASKS: ReadonlyArray<BenchmarkTaskDefinition> = [
     title: "Contract Schema & HttpApi Definition",
     targetPackage: "@harness/sample-contract",
     expectedPatternDoc: "agent-patterns/httpapi.md",
-    description: "Define schemas and HttpApi endpoints in @harness/sample-contract"
+    description: "Define schemas and HttpApi endpoints in @harness/sample-contract",
   },
   {
     id: "task-2-domain-use-case",
     title: "Domain Use Case Implementation",
     targetPackage: "@harness/sample-domain",
     expectedPatternDoc: "agent-patterns/planning.md",
-    description: "Implement domain use case with pure decider and Effect.fn spans"
+    description: "Implement domain use case with pure decider and Effect.fn spans",
   },
   {
     id: "task-3-d1-repository",
     title: "D1 Repository Implementation",
     targetPackage: "@harness/sample-infra",
     expectedPatternDoc: "agent-patterns/d1-repository.md",
-    description: "Implement SQLite/D1 Drizzle repository decoding rows into contract schemas"
+    description: "Implement SQLite/D1 Drizzle repository decoding rows into contract schemas",
   },
   {
     id: "task-4-do-rpc",
     title: "Durable Object RPC Bridge",
     targetPackage: "@harness/sample-infra",
     expectedPatternDoc: "agent-patterns/durable-object-state.md",
-    description: "Implement Durable Object state and W3C traceparent RPC bridge"
+    description: "Implement Durable Object state and W3C traceparent RPC bridge",
   },
   {
     id: "task-5-atom-client",
     title: "AtomHttpApi Web Client",
     targetPackage: "sample-web",
     expectedPatternDoc: "agent-patterns/atom.md",
-    description: "Derive typed query and mutation atoms with AtomHttpApi"
-  }
+    description: "Derive typed query and mutation atoms with AtomHttpApi",
+  },
 ]
 
 export interface BenchmarkRunMetrics {
@@ -88,7 +88,7 @@ const computeMean = (values: ReadonlyArray<number>): number => {
 
 const isWinning = (
   harnessValues: ReadonlyArray<number>,
-  noHarnessValues: ReadonlyArray<number>
+  noHarnessValues: ReadonlyArray<number>,
 ): boolean => {
   if (harnessValues.length === 0 || noHarnessValues.length === 0) {
     return false
@@ -105,7 +105,7 @@ const isWinning = (
 }
 
 export const compareBenchmarkRuns = (
-  runs: ReadonlyArray<BenchmarkRunMetrics>
+  runs: ReadonlyArray<BenchmarkRunMetrics>,
 ): BenchmarkComparisonSummary => {
   const harnessRuns = runs.filter((r) => r.mode === "harness")
   const noHarnessRuns = runs.filter((r) => r.mode === "no-harness")
@@ -134,12 +134,12 @@ export const compareBenchmarkRuns = (
     harnessMedians: {
       diagnosticsBeforeGreen: computeMedian(harnessDiags),
       fixUpIterations: computeMedian(harnessIters),
-      tokenCount: computeMedian(harnessTokens)
+      tokenCount: computeMedian(harnessTokens),
     },
     noHarnessMedians: {
       diagnosticsBeforeGreen: computeMedian(noHarnessDiags),
       fixUpIterations: computeMedian(noHarnessIters),
-      tokenCount: computeMedian(noHarnessTokens)
-    }
+      tokenCount: computeMedian(noHarnessTokens),
+    },
   }
 }

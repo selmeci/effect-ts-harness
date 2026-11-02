@@ -33,6 +33,7 @@
 ### Task 1: Upgrade Drizzle to `1.0.0-rc.5-ab785fc` and regenerate baseline migration
 
 **Files:**
+
 - Delete: `libs/sample/infra/migrations/0000_talented_lyja.sql`, `libs/sample/infra/migrations/meta/_journal.json`, `libs/sample/infra/migrations/meta/0000_snapshot.json`
 - Modify: `libs/sample/infra/package.json:20-28`
 - Modify: `libs/sample/infra/scripts/check-migrations.mjs:18-76`
@@ -40,6 +41,7 @@
 - Modify: `libs/sample/infra/test/index.test.ts`
 
 **Interfaces:**
+
 - Consumes: `libs/sample/infra/src/db/schema.ts` (`photos` table).
 - Produces: `drizzle-orm@1.0.0-rc.5-ab785fc` + `drizzle-kit@1.0.0-rc.5-ab785fc` in `@harness/sample-infra`; recursive `check-migrations.mjs` supporting Drizzle v1 subfolder migrations (`<dir>/migration.sql`).
 
@@ -56,7 +58,7 @@ describe("sample-infra", () => {
     Effect.gen(function* () {
       yield* logToConsole("harness")
       expect(photos.id.name).toBe("id")
-    })
+    }),
   )
 
   it("resolves drizzle-orm/effect-d1 from the 1.0.0-rc.5 pin", async () => {
@@ -74,6 +76,7 @@ Expected: FAIL with `Cannot find module 'drizzle-orm/effect-d1'`.
 - [ ] **Step 3: Update `libs/sample/infra/package.json` to `1.0.0-rc.5-ab785fc`, update `check-migrations.mjs` for recursive `.sql` discovery, delete old `migrations/`, and regenerate baseline migration**
 
 In `libs/sample/infra/package.json`, set:
+
 - `"drizzle-orm": "1.0.0-rc.5-ab785fc"` in `dependencies`
 - `"drizzle-kit": "1.0.0-rc.5-ab785fc"` in `devDependencies`
 
@@ -82,9 +85,7 @@ In `libs/sample/infra/scripts/check-migrations.mjs`, update `listSql(dir)` to us
 ```js
 const listSql = async (dir) => {
   try {
-    return (await readdir(dir, { recursive: true }))
-      .filter((file) => file.endsWith(".sql"))
-      .sort()
+    return (await readdir(dir, { recursive: true })).filter((file) => file.endsWith(".sql")).sort()
   } catch {
     return []
   }
@@ -118,11 +119,13 @@ git commit -m "feat(sample-infra): upgrade drizzle to 1.0.0-rc.5-ab785fc and reg
 ### Task 2: Add `stub<A, E, R>(...args)` to `@harness/gates` and enforce `no-stub` in `tools/oxlint/syntax-bans.js`
 
 **Files:**
+
 - Create: `libs/harness/gates/src/stub.ts`, `libs/harness/gates/src/index.ts`, `libs/harness/gates/test/stub.test.ts`
 - Modify: `libs/harness/gates/package.json:6-11`
 - Modify: `tools/oxlint/syntax-bans.js:1-74`
 
 **Interfaces:**
+
 - Consumes: `Effect` from `"effect"`.
 - Produces:
   - `stub<A, E = never, R = never>(..._usedArgs: ReadonlyArray<unknown>): Effect.Effect<A, E, R>` exported from `@harness/gates`.
@@ -136,9 +139,10 @@ import { Context, Data, Effect } from "effect"
 import { stub } from "../src/index.js"
 
 class SampleError extends Data.TaggedError("SampleError")<{ readonly message: string }> {}
-class SampleRepo extends Context.Service<SampleRepo, { readonly find: (id: string) => Effect.Effect<string> }>()(
-  "SampleRepo"
-) {}
+class SampleRepo extends Context.Service<
+  SampleRepo,
+  { readonly find: (id: string) => Effect.Effect<string> }
+>()("SampleRepo") {}
 
 describe("stub<A, E, R>", () => {
   it("preserves exact A, E, R types on Effect.fn skeletons", () => {
@@ -155,7 +159,7 @@ describe("stub<A, E, R>", () => {
     Effect.gen(function* () {
       const exit = yield* Effect.exit(stub<number>("unused-arg"))
       expect(exit._tag).toBe("Failure")
-    })
+    }),
   )
 })
 ```
@@ -221,9 +225,10 @@ Run: `pnpm nx run @harness/gates:verify`
 Expected: PASS (note: `test/` files are not matched by `libs/**/src/**/*.ts` override, so `stub.test.ts` runs cleanly).
 
 Verify the `HARNESS_PLAN_CHECK` toggle by temporarily placing `stub<string>(input)` inside `libs/sample/domain/src/index.ts`:
+
 - `HARNESS_PLAN_CHECK=1 pnpm nx run @harness/sample-domain:lint` -> PASS
 - `pnpm nx run @harness/sample-domain:lint` -> FAIL with `No stub() in verified code`
-Revert the temporary edit in `libs/sample/domain/src/index.ts`.
+  Revert the temporary edit in `libs/sample/domain/src/index.ts`.
 
 - [ ] **Step 5: Commit**
 
@@ -237,10 +242,12 @@ git commit -m "feat(gates): add stub<A, E, R> skeleton helper and oxlint verify 
 ### Task 3: Expand `.oxlintrc.json` restricted-import patterns (`alchemy/*`, `@effect/sql-*`) and `.gitignore` (`.harness/`)
 
 **Files:**
+
 - Modify: `.oxlintrc.json:23-46`
 - Modify: `.gitignore:1-18`
 
 **Interfaces:**
+
 - Consumes: `.oxlintrc.json` from Phase 0 v1.
 - Produces: Static import bans for `drizzle-orm`, `drizzle-orm/*`, `alchemy`, `alchemy/*`, and `@effect/sql-*` outside `type:infra` and `apps/sample`; `.harness/` ignored in git.
 
@@ -303,11 +310,13 @@ git commit -m "feat(gates): ban alchemy/* and @effect/sql-* imports outside infr
 ### Task 4: Align `@harness/ingest`, `@harness/decision`, and `apps/harness-cli` seeds with MVP v2
 
 **Files:**
+
 - Modify: `libs/harness/ingest/src/trace-format.ts`, `libs/harness/ingest/test/trace-format.test.ts`
 - Modify: `libs/harness/decision/src/idiom-router.ts`, `libs/harness/decision/test/idiom-router.test.ts`
 - Modify: `apps/harness-cli/src/index.ts`, `apps/harness-cli/test/index.test.ts`
 
 **Interfaces:**
+
 - Consumes: `effect` (`Schema`, `Effect`, `Layer`), `@effect/ai-typesafe`.
 - Produces:
   - `@harness/ingest`: `TRACE_FORMAT_VERSION = 2`, `TracedCallEdge`, `ExercisesSpanEdge` Schemas matching `docs/mvp_v2.md` §8.2 (`schema.pg` `TracedCall` and `ExercisesSpan` edges) alongside `TraceHeader`.
@@ -326,7 +335,7 @@ import {
   makeTraceHeader,
   TracedCallEdge,
   TraceHeader,
-  TRACE_FORMAT_VERSION
+  TRACE_FORMAT_VERSION,
 } from "../src/trace-format.js"
 
 describe("trace format (v2 Omnigraph & root TestSpan)", () => {
@@ -342,7 +351,7 @@ describe("trace format (v2 Omnigraph & root TestSpan)", () => {
       callerQualname: "libs/sample/domain/src/index.ts#greet",
       calleeQualname: "libs/sample/infra/src/index.ts#PhotoRepo.insert",
       callCount: 1,
-      receiverLayer: "libs/sample/infra/src/index.ts#PhotoRepoLive"
+      receiverLayer: "libs/sample/infra/src/index.ts#PhotoRepoLive",
     })
     expect(call.callCount).toBe(1)
 
@@ -350,7 +359,7 @@ describe("trace format (v2 Omnigraph & root TestSpan)", () => {
       testId: "libs/sample/domain/test/index.test.ts::greet greets by name",
       calleeQualname: "libs/sample/domain/src/index.ts#greet",
       callCount: 1,
-      receiverLayer: null
+      receiverLayer: null,
     })
     expect(exercise.testId).toContain("greet")
   })
@@ -389,12 +398,14 @@ git commit -m "feat(harness): align ingest, decision, and cli seeds with MVP v2 
 ### Task 5: Update `AGENTS.md`, `README.md`, `agent-patterns/README.md`, and `docs/dependency-pins.md` to MVP v2
 
 **Files:**
+
 - Modify: `AGENTS.md`
 - Modify: `README.md`
 - Modify: `agent-patterns/README.md`
 - Modify: `docs/dependency-pins.md`
 
 **Interfaces:**
+
 - Consumes: `docs/mvp_v2.md`.
 - Produces: Agent-neutral rules and project documentation reflecting `effect/Graph` + `Omnigraph v0.14.0` (zero Docker/Memgraph), `stub<A, E, R>(...args)`, `harness plan-check`, resident `clef-flash` (9B), and `drizzle-orm@1.0.0-rc.5-ab785fc`.
 

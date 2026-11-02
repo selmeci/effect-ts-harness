@@ -6,12 +6,7 @@ import { join } from "node:path"
 import { D1Client } from "@effect/sql-d1"
 import { makeWithDefaults } from "drizzle-orm/effect-d1"
 import { buildWorkspaceFnIndex, runWithTestTracer } from "@harness/ingest"
-import {
-  AlbumId,
-  GreetingMessage,
-  PhotoId,
-  PhotoName
-} from "@harness/sample-contract"
+import { AlbumId, GreetingMessage, PhotoId, PhotoName } from "@harness/sample-contract"
 import { uploadPhoto } from "@harness/sample-domain"
 import { PhotoRepo } from "@harness/sample-service"
 import { albumCounters, photos } from "../src/db/schema.js"
@@ -21,7 +16,7 @@ import {
   makeAlbumCounterRpcHandler,
   makePhotoRepoD1Layer,
   PhotoRepoMemoryLayer,
-  toHttpClient
+  toHttpClient,
 } from "../src/index.js"
 
 const resolveRepoRoot = (startDir: string): string => {
@@ -37,9 +32,10 @@ const resolveRepoRoot = (startDir: string): string => {
 
 type D1Database = Parameters<typeof D1Client.layer>[0]["db"]
 type D1PreparedStatement = ReturnType<D1Database["prepare"]>
-type D1Result<T> = Awaited<ReturnType<D1PreparedStatement["all"]>> extends { results: Array<unknown> }
-  ? Omit<Awaited<ReturnType<D1PreparedStatement["all"]>>, "results"> & { results: Array<T> }
-  : never
+type D1Result<T> =
+  Awaited<ReturnType<D1PreparedStatement["all"]>> extends { results: Array<unknown> }
+    ? Omit<Awaited<ReturnType<D1PreparedStatement["all"]>>, "results"> & { results: Array<T> }
+    : never
 
 const createMockD1Database = (): {
   sqlite: DatabaseSync
@@ -68,14 +64,16 @@ const createMockD1Database = (): {
     size_after: 0,
     rows_read: 0,
     rows_written: 0,
-    sql_duration_ms: 0
+    sql_duration_ms: 0,
   })
 
   const createStatement = (
     sql: string,
-    boundParams: Array<string | number | bigint | Buffer | null> = []
+    boundParams: Array<string | number | bigint | Buffer | null> = [],
   ): D1PreparedStatement => {
-    function raw<T = Array<unknown>>(options: { columnNames: true }): Promise<[Array<string>, ...Array<T>]>
+    function raw<T = Array<unknown>>(options: {
+      columnNames: true
+    }): Promise<[Array<string>, ...Array<T>]>
     function raw<T = Array<unknown>>(options?: { columnNames?: false }): Promise<Array<T>>
     async function raw<T = Array<unknown>>(options?: {
       columnNames?: boolean
@@ -105,10 +103,7 @@ const createMockD1Database = (): {
 
     const statement: D1PreparedStatement = {
       bind(...params: Array<unknown>) {
-        return createStatement(
-          sql,
-          params as Array<string | number | bigint | Buffer | null>
-        )
+        return createStatement(sql, params as Array<string | number | bigint | Buffer | null>)
       },
       all: async <T = Record<string, unknown>>(): Promise<D1Result<T>> => {
         const stmt = sqlite.prepare(sql)
@@ -116,7 +111,7 @@ const createMockD1Database = (): {
         return {
           results,
           success: true,
-          meta: createMeta()
+          meta: createMeta(),
         }
       },
       raw,
@@ -127,9 +122,9 @@ const createMockD1Database = (): {
         return {
           results,
           success: true,
-          meta: createMeta()
+          meta: createMeta(),
         }
-      }
+      },
     }
     return statement
   }
@@ -138,8 +133,9 @@ const createMockD1Database = (): {
     prepare(sql: string) {
       return createStatement(sql)
     },
-    batch: async <T = unknown>(statements: Array<D1PreparedStatement>): Promise<Array<D1Result<T>>> =>
-      Promise.all(statements.map((s) => s.all<T>())),
+    batch: async <T = unknown>(
+      statements: Array<D1PreparedStatement>,
+    ): Promise<Array<D1Result<T>>> => Promise.all(statements.map((s) => s.all<T>())),
     exec: async (query: string) => {
       sqlite.exec(query)
       return { count: 0, duration: 0 }
@@ -148,10 +144,10 @@ const createMockD1Database = (): {
       return {
         prepare: (sql: string) => createStatement(sql),
         batch: <T = unknown>(statements: Array<D1PreparedStatement>) => mockD1.batch<T>(statements),
-        getBookmark: () => null
+        getBookmark: () => null,
       }
     },
-    dump: async () => new ArrayBuffer(0)
+    dump: async () => new ArrayBuffer(0),
   }
 
   return { sqlite, mockD1 }
@@ -162,7 +158,7 @@ describe("sample-infra", () => {
     Effect.gen(function* () {
       yield* logToConsole(GreetingMessage.make("harness"))
       expect(photos.id.name).toBe("id")
-    })
+    }),
   )
 
   it("resolves drizzle-orm/effect-d1 from the 1.0.0-rc.5 pin", async () => {
@@ -175,52 +171,52 @@ describe("sample-infra", () => {
     it.effect("inserts, fetches by ID, lists all photos, and decodes into Photo schema", () =>
       Effect.scoped(
         Effect.gen(function* () {
-        const { mockD1 } = createMockD1Database()
-        const drizzleDb = yield* makeWithDefaults({}).pipe(
-          Effect.provide(D1Client.layer({ db: mockD1 }))
-        )
+          const { mockD1 } = createMockD1Database()
+          const drizzleDb = yield* makeWithDefaults({}).pipe(
+            Effect.provide(D1Client.layer({ db: mockD1 })),
+          )
 
-        const repoLayer = makePhotoRepoD1Layer(drizzleDb)
+          const repoLayer = makePhotoRepoD1Layer(drizzleDb)
 
-        const program = Effect.gen(function* () {
-          const repo = yield* PhotoRepo
+          const program = Effect.gen(function* () {
+            const repo = yield* PhotoRepo
 
-          // Insert photo
-          const created = yield* repo.insert({
-            name: PhotoName.make("Vacation.jpg"),
-            albumId: AlbumId.make("album-1")
+            // Insert photo
+            const created = yield* repo.insert({
+              name: PhotoName.make("Vacation.jpg"),
+              albumId: AlbumId.make("album-1"),
+            })
+
+            expect(created.id).toBe(1)
+            expect(created.name).toBe("Vacation.jpg")
+            expect(created.albumId).toBe("album-1")
+            expect(typeof created.createdAt).toBe("number")
+
+            // Find by ID
+            const fetched = yield* repo.findById(created.id)
+            expect(fetched).toEqual(created)
+
+            // Find missing by ID should fail with PhotoNotFoundError
+            const missingError = yield* Effect.flip(repo.findById(PhotoId.make(999)))
+            expect(missingError._tag).toBe("PhotoNotFoundError")
+            expect(missingError.id).toBe(999)
+
+            // Insert second photo
+            yield* repo.insert({
+              name: PhotoName.make("Sunset.jpg"),
+              albumId: AlbumId.make("album-1"),
+            })
+
+            // List all photos
+            const all = yield* repo.listAll
+            expect(all).toHaveLength(2)
+            expect(all[0]?.name).toBe("Vacation.jpg")
+            expect(all[1]?.name).toBe("Sunset.jpg")
           })
 
-          expect(created.id).toBe(1)
-          expect(created.name).toBe("Vacation.jpg")
-          expect(created.albumId).toBe("album-1")
-          expect(typeof created.createdAt).toBe("number")
-
-          // Find by ID
-          const fetched = yield* repo.findById(created.id)
-          expect(fetched).toEqual(created)
-
-          // Find missing by ID should fail with PhotoNotFoundError
-          const missingError = yield* Effect.flip(repo.findById(PhotoId.make(999)))
-          expect(missingError._tag).toBe("PhotoNotFoundError")
-          expect(missingError.id).toBe(999)
-
-          // Insert second photo
-          yield* repo.insert({
-            name: PhotoName.make("Sunset.jpg"),
-            albumId: AlbumId.make("album-1")
-          })
-
-          // List all photos
-          const all = yield* repo.listAll
-          expect(all).toHaveLength(2)
-          expect(all[0]?.name).toBe("Vacation.jpg")
-          expect(all[1]?.name).toBe("Sunset.jpg")
-        })
-
-        yield* program.pipe(Effect.provide(repoLayer))
-      })
-      )
+          yield* program.pipe(Effect.provide(repoLayer))
+        }),
+      ),
     )
 
     it.effect("PhotoRepoMemoryLayer operates in memory and decodes Photo schemas", () =>
@@ -229,7 +225,7 @@ describe("sample-infra", () => {
           const repo = yield* PhotoRepo
           const p1 = yield* repo.insert({
             name: PhotoName.make("Memory.png"),
-            albumId: AlbumId.make("a-mem")
+            albumId: AlbumId.make("a-mem"),
           })
           expect(p1.id).toBe(1)
           expect(p1.name).toBe("Memory.png")
@@ -245,7 +241,7 @@ describe("sample-infra", () => {
         })
 
         yield* program.pipe(Effect.provide(PhotoRepoMemoryLayer))
-      })
+      }),
     )
   })
 
@@ -267,104 +263,94 @@ describe("sample-infra", () => {
 
   // Test 3: Distributed W3C traceparent correlation across Worker/DO boundary
   describe("distributed W3C traceparent correlation", () => {
-    it.effect(
-      "propagates traceparent header and links remote DO spans into test trace graph",
-      () =>
-        Effect.gen(function* () {
-          const testId =
-            "libs/sample/infra/test/index.test.ts::distributed traceparent correlation"
-          const repoRoot = resolveRepoRoot(process.cwd())
-          const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
+    it.effect("propagates traceparent header and links remote DO spans into test trace graph", () =>
+      Effect.gen(function* () {
+        const testId = "libs/sample/infra/test/index.test.ts::distributed traceparent correlation"
+        const repoRoot = resolveRepoRoot(process.cwd())
+        const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
 
-          const { mockD1, sqlite } = createMockD1Database()
-          const drizzleDb = yield* makeWithDefaults({}).pipe(
-            Effect.provide(D1Client.layer({ db: mockD1 }))
-          )
+        const { mockD1, sqlite } = createMockD1Database()
+        const drizzleDb = yield* makeWithDefaults({}).pipe(
+          Effect.provide(D1Client.layer({ db: mockD1 })),
+        )
 
-          const doRpcHandler = makeAlbumCounterRpcHandler(drizzleDb)
-          const httpClient = toHttpClient(doRpcHandler)
-          const albumCounterLayer = makeAlbumCounterRpcClient(httpClient)
+        const doRpcHandler = makeAlbumCounterRpcHandler(drizzleDb)
+        const httpClient = toHttpClient(doRpcHandler)
+        const albumCounterLayer = makeAlbumCounterRpcClient(httpClient)
 
-          const testLayer = Layer.mergeAll(
-            albumCounterLayer,
-            PhotoRepoMemoryLayer
-          )
+        const testLayer = Layer.mergeAll(albumCounterLayer, PhotoRepoMemoryLayer)
 
-          const { result, edges, spans } = yield* runWithTestTracer(
-            testId,
-            uploadPhoto({
-              name: PhotoName.make("Nature.jpg"),
-              albumId: AlbumId.make("album-nature")
-            }).pipe(
-              Effect.provide(testLayer)
-            ),
-            fnIndex.bySpanName
-          )
+        const { result, edges, spans } = yield* runWithTestTracer(
+          testId,
+          uploadPhoto({
+            name: PhotoName.make("Nature.jpg"),
+            albumId: AlbumId.make("album-nature"),
+          }).pipe(Effect.provide(testLayer)),
+          fnIndex.bySpanName,
+        )
 
-          expect(result.id).toBe(1)
-          expect(result.name).toBe("Nature.jpg")
-          expect(result.albumId).toBe("album-nature")
+        expect(result.id).toBe(1)
+        expect(result.name).toBe("Nature.jpg")
+        expect(result.albumId).toBe("album-nature")
 
-          // Verify SQLite database has genuine persisted count row in album_counters table
-          const countRows = sqlite
-            .prepare("SELECT * FROM album_counters WHERE album_id = ?")
-            .all("album-nature") as Array<{ album_id: string; count: number }>
-          expect(countRows).toHaveLength(1)
-          expect(countRows[0]?.count).toBe(1)
+        // Verify SQLite database has genuine persisted count row in album_counters table
+        const countRows = sqlite
+          .prepare("SELECT * FROM album_counters WHERE album_id = ?")
+          .all("album-nature") as Array<{ album_id: string; count: number }>
+        expect(countRows).toHaveLength(1)
+        expect(countRows[0]?.count).toBe(1)
 
-          // Verify all recorded spans share the exact same traceId as the root Test: span
-          const rootSpan = spans.find((s) => s.name.startsWith("Test:"))
-          expect(rootSpan).toBeDefined()
-          const expectedTraceId = rootSpan!.traceId
+        // Verify all recorded spans share the exact same traceId as the root Test: span
+        const rootSpan = spans.find((s) => s.name.startsWith("Test:"))
+        expect(rootSpan).toBeDefined()
+        const expectedTraceId = rootSpan!.traceId
 
-          for (const span of spans) {
-            expect(span.traceId).toBe(expectedTraceId)
-          }
+        for (const span of spans) {
+          expect(span.traceId).toBe(expectedTraceId)
+        }
 
-          // Verify individual span names exist
-          const spanNames = spans.map((s) => s.name)
-          expect(spanNames).toContain("Sample.uploadPhoto")
-          expect(spanNames).toContain("SampleInfra.handleAlbumCounterRpc")
-          expect(spanNames).toContain("Album.decide")
+        // Verify individual span names exist
+        const spanNames = spans.map((s) => s.name)
+        expect(spanNames).toContain("Sample.uploadPhoto")
+        expect(spanNames).toContain("SampleInfra.handleAlbumCounterRpc")
+        expect(spanNames).toContain("Album.decide")
 
-          // Verify exercisesSpans edges
-          const uploadPhotoQualname = fnIndex.bySpanName.get("Sample.uploadPhoto")?.qualname
-          const handleAlbumCounterRpcQualname = fnIndex.bySpanName.get(
-            "SampleInfra.handleAlbumCounterRpc"
-          )?.qualname
-          const decideAlbumQuotaQualname = fnIndex.bySpanName.get("Album.decide")?.qualname
+        // Verify exercisesSpans edges
+        const uploadPhotoQualname = fnIndex.bySpanName.get("Sample.uploadPhoto")?.qualname
+        const handleAlbumCounterRpcQualname = fnIndex.bySpanName.get(
+          "SampleInfra.handleAlbumCounterRpc",
+        )?.qualname
+        const decideAlbumQuotaQualname = fnIndex.bySpanName.get("Album.decide")?.qualname
 
-          expect(uploadPhotoQualname).toBeDefined()
-          expect(handleAlbumCounterRpcQualname).toBeDefined()
-          expect(decideAlbumQuotaQualname).toBeDefined()
+        expect(uploadPhotoQualname).toBeDefined()
+        expect(handleAlbumCounterRpcQualname).toBeDefined()
+        expect(decideAlbumQuotaQualname).toBeDefined()
 
-          expect(
-            edges.exercisesSpans.some((e) => e.calleeQualname === uploadPhotoQualname)
-          ).toBe(true)
-          expect(
-            edges.exercisesSpans.some(
-              (e) => e.calleeQualname === handleAlbumCounterRpcQualname
-            )
-          ).toBe(true)
-          expect(
-            edges.exercisesSpans.some((e) => e.calleeQualname === decideAlbumQuotaQualname)
-          ).toBe(true)
+        expect(edges.exercisesSpans.some((e) => e.calleeQualname === uploadPhotoQualname)).toBe(
+          true,
+        )
+        expect(
+          edges.exercisesSpans.some((e) => e.calleeQualname === handleAlbumCounterRpcQualname),
+        ).toBe(true)
+        expect(
+          edges.exercisesSpans.some((e) => e.calleeQualname === decideAlbumQuotaQualname),
+        ).toBe(true)
 
-          // Verify tracedCalls joins caller to callee
-          const hasUploadToRpcCall = edges.tracedCalls.some(
-            (e) =>
-              e.callerQualname === uploadPhotoQualname &&
-              e.calleeQualname === handleAlbumCounterRpcQualname
-          )
-          expect(hasUploadToRpcCall).toBe(true)
+        // Verify tracedCalls joins caller to callee
+        const hasUploadToRpcCall = edges.tracedCalls.some(
+          (e) =>
+            e.callerQualname === uploadPhotoQualname &&
+            e.calleeQualname === handleAlbumCounterRpcQualname,
+        )
+        expect(hasUploadToRpcCall).toBe(true)
 
-          const hasRpcToDecideCall = edges.tracedCalls.some(
-            (e) =>
-              e.callerQualname === handleAlbumCounterRpcQualname &&
-              e.calleeQualname === decideAlbumQuotaQualname
-          )
-          expect(hasRpcToDecideCall).toBe(true)
-        })
+        const hasRpcToDecideCall = edges.tracedCalls.some(
+          (e) =>
+            e.callerQualname === handleAlbumCounterRpcQualname &&
+            e.calleeQualname === decideAlbumQuotaQualname,
+        )
+        expect(hasRpcToDecideCall).toBe(true)
+      }),
     )
 
     it.effect("propagates AlbumQuotaExceededError across RPC when quota reached", () =>
@@ -376,7 +362,7 @@ describe("sample-infra", () => {
           .run("album-full", 100)
 
         const drizzleDb = yield* makeWithDefaults({}).pipe(
-          Effect.provide(D1Client.layer({ db: mockD1 }))
+          Effect.provide(D1Client.layer({ db: mockD1 })),
         )
 
         const doRpcHandler = makeAlbumCounterRpcHandler(drizzleDb)
@@ -387,7 +373,7 @@ describe("sample-infra", () => {
         expect(error._tag).toBe("AlbumQuotaExceededError")
         expect(error.albumId).toBe("album-full")
         expect(error.count).toBe(100)
-      })
+      }),
     )
   })
 })

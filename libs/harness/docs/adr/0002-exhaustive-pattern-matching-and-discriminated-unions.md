@@ -43,13 +43,13 @@ Imperative branching constructs (`switch` statements, multi-branch `if / else if
 
 ### 1 · AST-Only Linting (`tools/oxlint/syntax-bans.js`)
 
- Relying solely on untyped AST rules in `oxlint` to detect union branching and `.otherwise()` misuse.
+Relying solely on untyped AST rules in `oxlint` to detect union branching and `.otherwise()` misuse.
 
 - **Why rejected:** An untyped AST walker cannot know whether `x.tier === "free"` narrows a TypeScript union or compares a plain `string` property on a single struct, nor can it distinguish `match(closedUnion).otherwise(...)` from `match(statusCodeNumber).otherwise(...)` when patterns do not mention `_tag`.
 
 ### 2 · `Effect.Match` Only without `ts-pattern`
 
- Restricting pattern matching to `Effect.Match` instead of `ts-pattern`.
+Restricting pattern matching to `Effect.Match` instead of `ts-pattern`.
 
 - **Why rejected:** The user and harness architecture explicitly standardize on `ts-pattern` (`match(value).with(...).exhaustive()`, `P.union`, `P.select`, `P.when`) for concise deep structural and tuple matching across domain deciders, infrastructure handlers, and UI state.
 
@@ -67,8 +67,8 @@ Imperative branching constructs (`switch` statements, multi-branch `if / else if
 
 ### Deterministic Enforcement
 
-| Rule | Enforced By | Gate / Mechanism | Governed Symbols |
-| :--- | :--- | :--- | :--- |
-| Ban `switch`, `if / else if`, `match().run()`, and known discriminant `if` / ternary (`_tag`, `Option.isSome`) | `tools/oxlint/syntax-bans.js` | `harness/syntax-bans` (`oxlint --deny-warnings`) | `Album.decide`, `SampleInfra.handleAlbumCounterRpc` |
-| Ban `if` / ternary narrowing any TypeScript union via literal discriminant property | `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/policy-check.ts` | `checkEffectGraph` (`discriminant-branching`) | `Album.decide`, `PhotoRepo` |
-| Ban `.otherwise()` when `match(arg)` inspects a closed finite union | `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/policy-check.ts` | `checkEffectGraph` (`non-exhaustive-union-match`) | `SampleInfra.handleAlbumCounterRpc`, `AlbumQuotaExceededError` |
+| Rule                                                                                                           | Enforced By                                                                          | Gate / Mechanism                                  | Governed Symbols                                               |
+| :------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------- | :------------------------------------------------ | :------------------------------------------------------------- |
+| Ban `switch`, `if / else if`, `match().run()`, and known discriminant `if` / ternary (`_tag`, `Option.isSome`) | `tools/oxlint/syntax-bans.js`                                                        | `harness/syntax-bans` (`oxlint --deny-warnings`)  | `Album.decide`, `SampleInfra.handleAlbumCounterRpc`            |
+| Ban `if` / ternary narrowing any TypeScript union via literal discriminant property                            | `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/policy-check.ts` | `checkEffectGraph` (`discriminant-branching`)     | `Album.decide`, `PhotoRepo`                                    |
+| Ban `.otherwise()` when `match(arg)` inspects a closed finite union                                            | `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/policy-check.ts` | `checkEffectGraph` (`non-exhaustive-union-match`) | `SampleInfra.handleAlbumCounterRpc`, `AlbumQuotaExceededError` |

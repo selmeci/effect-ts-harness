@@ -6,7 +6,7 @@ import type {
   CreatePhotoInput,
   Photo,
   PhotoId,
-  PhotoNotFoundError
+  PhotoNotFoundError,
 } from "@harness/sample-contract"
 
 export class PhotoRepo extends Context.Service<
@@ -21,7 +21,9 @@ export class PhotoRepo extends Context.Service<
 export class AlbumCounterClient extends Context.Service<
   AlbumCounterClient,
   {
-    readonly increment: (albumId: AlbumId) => Effect.Effect<AlbumPhotoCount, AlbumQuotaExceededError>
+    readonly increment: (
+      albumId: AlbumId,
+    ) => Effect.Effect<AlbumPhotoCount, AlbumQuotaExceededError>
     readonly getCount: (albumId: AlbumId) => Effect.Effect<AlbumPhotoCount>
   }
 >()("AlbumCounterClient") {}

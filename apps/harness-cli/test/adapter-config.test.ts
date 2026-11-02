@@ -8,50 +8,41 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
 
   it("wires SessionStart, PreToolUse, PostToolUse, and Stop hooks to harness-cli", () => {
     const hooks = JSON.parse(
-      readFileSync(resolve(repoRoot, "adapters/claude-code/hooks.json"), "utf8")
+      readFileSync(resolve(repoRoot, "adapters/claude-code/hooks.json"), "utf8"),
     )
-    expect(Object.keys(hooks.hooks)).toEqual([
-      "SessionStart",
-      "PreToolUse",
-      "PostToolUse",
-      "Stop"
-    ])
+    expect(Object.keys(hooks.hooks)).toEqual(["SessionStart", "PreToolUse", "PostToolUse", "Stop"])
 
     const sessionHook = hooks.hooks.SessionStart[0].hooks[0]
     expect(sessionHook.command).toBe(
-      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts session"
+      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts session",
     )
 
     const preHook = hooks.hooks.PreToolUse[0]
     expect(preHook.matcher).toBe("Bash")
     expect(preHook.hooks[0].command).toBe(
-      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard"
+      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard",
     )
 
     const postHook = hooks.hooks.PostToolUse[0]
     expect(postHook.matcher).toBe("Edit|Write")
     expect(postHook.hooks[0].command).toBe(
-      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts ingest"
+      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts ingest",
     )
 
     const stopHook = hooks.hooks.Stop[0].hooks[0]
     expect(stopHook.command).toBe(
-      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done"
+      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done",
     )
   })
 
   it("configures harness-mcp, omnigraph-mcp, and nx-mcp in .mcp.json", () => {
     const mcp = JSON.parse(
-      readFileSync(resolve(repoRoot, "adapters/claude-code/.mcp.json"), "utf8")
+      readFileSync(resolve(repoRoot, "adapters/claude-code/.mcp.json"), "utf8"),
     )
-    expect(Object.keys(mcp.mcpServers)).toEqual([
-      "harness-mcp",
-      "omnigraph-mcp",
-      "nx-mcp"
-    ])
+    expect(Object.keys(mcp.mcpServers)).toEqual(["harness-mcp", "omnigraph-mcp", "nx-mcp"])
     expect(mcp.mcpServers["harness-mcp"]).toEqual({
       command: "node",
-      args: ["--import", "./tools/node-ts-resolver.mjs", "apps/harness-mcp/src/server.ts"]
+      args: ["--import", "./tools/node-ts-resolver.mjs", "apps/harness-mcp/src/server.ts"],
     })
     expect(mcp.mcpServers["omnigraph-mcp"]).toEqual({
       command: "npx",
@@ -60,12 +51,12 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
         OMNIGRAPH_BASE_URL: "http://127.0.0.1:8080",
         OMNIGRAPH_URL: "http://127.0.0.1:8080",
         OMNIGRAPH_GRAPH_ID: "harness",
-        OMNIGRAPH_SUBJECT: "agent-mcp"
-      }
+        OMNIGRAPH_SUBJECT: "agent-mcp",
+      },
     })
     expect(mcp.mcpServers["nx-mcp"]).toEqual({
       command: "npx",
-      args: ["-y", "nx-mcp"]
+      args: ["-y", "nx-mcp"],
     })
   })
 
@@ -76,24 +67,21 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
       {
         cwd: repoRoot,
         input: JSON.stringify({ tool_input: { command: "alchemy deploy" } }),
-        encoding: "utf8"
-      }
+        encoding: "utf8",
+      },
     )
     const result = JSON.parse(stdout.trim())
     expect(result).toEqual({
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "ask",
-        permissionDecisionReason: "Command requires human confirmation: alchemy deploy"
-      }
+        permissionDecisionReason: "Command requires human confirmation: alchemy deploy",
+      },
     })
   })
 
   it("forbids agent-mcp from mutating Omnigraph branches in policies.cedar", () => {
-    const cedar = readFileSync(
-      resolve(repoRoot, "libs/harness/graph/policies.cedar"),
-      "utf8"
-    )
+    const cedar = readFileSync(resolve(repoRoot, "libs/harness/graph/policies.cedar"), "utf8")
     expect(cedar).toContain('Omnigraph::Subject::"agent-mcp"')
     expect(cedar).toContain('Omnigraph::Action::"read"')
     expect(cedar).toContain('"main"')
@@ -106,7 +94,7 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
   it("provides comprehensive instructions in effect-harness skill", () => {
     const skill = readFileSync(
       resolve(repoRoot, "adapters/claude-code/skills/effect-harness/SKILL.md"),
-      "utf8"
+      "utf8",
     )
     expect(skill).toContain("name: effect-harness")
     expect(skill).toContain("harness plan-check")
@@ -129,33 +117,23 @@ describe("Antigravity adapter & plugin configuration", () => {
   const pluginDir = resolve(repoRoot, "adapters/antigravity/plugins/effect-harness")
 
   it("registers adapters/antigravity/plugins in .agents/plugins.json and declares plugin.json", () => {
-    const pluginsJson = JSON.parse(
-      readFileSync(resolve(repoRoot, ".agents/plugins.json"), "utf8")
-    )
+    const pluginsJson = JSON.parse(readFileSync(resolve(repoRoot, ".agents/plugins.json"), "utf8"))
     expect(pluginsJson.entries).toEqual([{ path: "adapters/antigravity/plugins" }])
 
-    const pluginManifest = JSON.parse(
-      readFileSync(resolve(pluginDir, "plugin.json"), "utf8")
-    )
+    const pluginManifest = JSON.parse(readFileSync(resolve(pluginDir, "plugin.json"), "utf8"))
     expect(pluginManifest).toEqual({ name: "effect-harness" })
   })
 
   it("configures harness-mcp, omnigraph-mcp, and nx-mcp in mcp_config.json", () => {
-    const mcp = JSON.parse(
-      readFileSync(resolve(pluginDir, "mcp_config.json"), "utf8")
-    )
-    expect(Object.keys(mcp.mcpServers)).toEqual([
-      "harness-mcp",
-      "omnigraph-mcp",
-      "nx-mcp"
-    ])
+    const mcp = JSON.parse(readFileSync(resolve(pluginDir, "mcp_config.json"), "utf8"))
+    expect(Object.keys(mcp.mcpServers)).toEqual(["harness-mcp", "omnigraph-mcp", "nx-mcp"])
     expect(mcp.mcpServers["harness-mcp"]).toEqual({
       command: "node",
       args: [
         "--import",
         "../../../../tools/node-ts-resolver.mjs",
-        "../../../../apps/harness-mcp/src/server.ts"
-      ]
+        "../../../../apps/harness-mcp/src/server.ts",
+      ],
     })
     expect(mcp.mcpServers["omnigraph-mcp"]).toEqual({
       command: "npx",
@@ -164,22 +142,20 @@ describe("Antigravity adapter & plugin configuration", () => {
         OMNIGRAPH_BASE_URL: "http://127.0.0.1:8080",
         OMNIGRAPH_URL: "http://127.0.0.1:8080",
         OMNIGRAPH_GRAPH_ID: "harness",
-        OMNIGRAPH_SUBJECT: "agent-mcp"
-      }
+        OMNIGRAPH_SUBJECT: "agent-mcp",
+      },
     })
   })
 
   it("wires PreInvocation, PreToolUse, PostToolUse, and Stop hooks in Antigravity hooks.json", () => {
-    const hooks = JSON.parse(
-      readFileSync(resolve(pluginDir, "hooks.json"), "utf8")
-    )
+    const hooks = JSON.parse(readFileSync(resolve(pluginDir, "hooks.json"), "utf8"))
     const spec = hooks["effect-harness"]
     expect(spec).toBeDefined()
     expect(spec.PreInvocation[0].command).toContain("session --format=antigravity")
     expect(spec.PreToolUse[0].matcher).toBe("run_command")
     expect(spec.PreToolUse[0].hooks[0].command).toContain("guard --format=antigravity")
     expect(spec.PostToolUse[0].matcher).toBe(
-      "replace_file_content|multi_replace_file_content|write_to_file"
+      "replace_file_content|multi_replace_file_content|write_to_file",
     )
     expect(spec.PostToolUse[0].hooks[0].command).toContain("ingest --format=antigravity")
     expect(spec.Stop[0].command).toContain("done --format=antigravity")
@@ -193,22 +169,22 @@ describe("Antigravity adapter & plugin configuration", () => {
         "../../../../tools/node-ts-resolver.mjs",
         "../../../../apps/harness-cli/src/index.ts",
         "guard",
-        "--format=antigravity"
+        "--format=antigravity",
       ],
       {
         cwd: pluginDir,
         input: JSON.stringify({
           toolCall: {
             name: "run_command",
-            args: { CommandLine: "alchemy deploy" }
-          }
+            args: { CommandLine: "alchemy deploy" },
+          },
         }),
-        encoding: "utf8"
-      }
+        encoding: "utf8",
+      },
     )
     expect(JSON.parse(askStdout.trim())).toEqual({
       decision: "ask",
-      reason: "Command requires human confirmation: alchemy deploy"
+      reason: "Command requires human confirmation: alchemy deploy",
     })
 
     const denyStdout = execFileSync(
@@ -218,22 +194,22 @@ describe("Antigravity adapter & plugin configuration", () => {
         "../../../../tools/node-ts-resolver.mjs",
         "../../../../apps/harness-cli/src/index.ts",
         "guard",
-        "--format=antigravity"
+        "--format=antigravity",
       ],
       {
         cwd: pluginDir,
         input: JSON.stringify({
           toolCall: {
             name: "run_command",
-            args: { CommandLine: "git push --force" }
-          }
+            args: { CommandLine: "git push --force" },
+          },
         }),
-        encoding: "utf8"
-      }
+        encoding: "utf8",
+      },
     )
     expect(JSON.parse(denyStdout.trim())).toEqual({
       decision: "deny",
-      reason: "Blocked by harness guard: git push --force"
+      reason: "Blocked by harness guard: git push --force",
     })
 
     const allowStdout = execFileSync(
@@ -243,21 +219,21 @@ describe("Antigravity adapter & plugin configuration", () => {
         "../../../../tools/node-ts-resolver.mjs",
         "../../../../apps/harness-cli/src/index.ts",
         "guard",
-        "--format=antigravity"
+        "--format=antigravity",
       ],
       {
         cwd: pluginDir,
         input: JSON.stringify({
           toolCall: {
             name: "run_command",
-            args: { CommandLine: "pnpm test" }
-          }
+            args: { CommandLine: "pnpm test" },
+          },
         }),
-        encoding: "utf8"
-      }
+        encoding: "utf8",
+      },
     )
     expect(JSON.parse(allowStdout.trim())).toEqual({
-      decision: "allow"
+      decision: "allow",
     })
   })
 
@@ -270,18 +246,18 @@ describe("Antigravity adapter & plugin configuration", () => {
           "../../../../tools/node-ts-resolver.mjs",
           "../../../../apps/harness-cli/src/index.ts",
           "guard",
-          "--format=antigravity"
+          "--format=antigravity",
         ],
         {
           cwd: pluginDir,
           input: JSON.stringify({
             toolCall: {
               name: "write_to_file",
-              args: { TargetFile: targetFile }
-            }
+              args: { TargetFile: targetFile },
+            },
           }),
-          encoding: "utf8"
-        }
+          encoding: "utf8",
+        },
       )
       return JSON.parse(stdout.trim())
     }
@@ -297,7 +273,7 @@ describe("Antigravity adapter & plugin configuration", () => {
     const oxlintRes = runGuardForFile(".oxlintrc.json")
     expect(oxlintRes.decision).toBe("ask")
     expect(oxlintRes.reason).toContain(
-      "Modifying harness governance/linter policy requires human confirmation"
+      "Modifying harness governance/linter policy requires human confirmation",
     )
 
     const allowRes = runGuardForFile("libs/sample/domain/src/index.ts")
@@ -314,12 +290,13 @@ describe("Antigravity adapter & plugin configuration", () => {
         {
           cwd: repoRoot,
           input: JSON.stringify({ tool_input: { file_path: ".harness/verify-stamp.json" } }),
-          encoding: "utf8"
-        }
+          encoding: "utf8",
+        },
       )
     } catch (err: unknown) {
       denied = true
-      const rec = typeof err === "object" && err !== null ? (err as { stderr?: string; stdout?: string }) : {}
+      const rec =
+        typeof err === "object" && err !== null ? (err as { stderr?: string; stdout?: string }) : {}
       errOutput = (rec.stderr ?? "") + (rec.stdout ?? "")
     }
     expect(denied).toBe(true)
@@ -331,8 +308,8 @@ describe("Antigravity adapter & plugin configuration", () => {
       {
         cwd: repoRoot,
         input: JSON.stringify({ tool_input: { file_path: ".oxlintrc.json" } }),
-        encoding: "utf8"
-      }
+        encoding: "utf8",
+      },
     )
     const askResult = JSON.parse(askStdout.trim())
     expect(askResult.hookSpecificOutput?.permissionDecision).toBe("ask")
@@ -343,8 +320,8 @@ describe("Antigravity adapter & plugin configuration", () => {
       {
         cwd: repoRoot,
         input: JSON.stringify({ tool_input: { file_path: "libs/sample/domain/src/index.ts" } }),
-        encoding: "utf8"
-      }
+        encoding: "utf8",
+      },
     )
     expect(allowStdout.trim()).toBe("")
   })
@@ -356,16 +333,13 @@ describe("Antigravity adapter & plugin configuration", () => {
       "planning-effect-skeletons",
       "executing-effect-stubs",
       "compounding-effect-learnings",
-      "resolving-effect-review-feedback"
+      "resolving-effect-review-feedback",
     ]
     for (const skillName of workflowSkills) {
-      const agySkill = readFileSync(
-        resolve(pluginDir, "skills", skillName, "SKILL.md"),
-        "utf8"
-      )
+      const agySkill = readFileSync(resolve(pluginDir, "skills", skillName, "SKILL.md"), "utf8")
       const claudeSkill = readFileSync(
         resolve(repoRoot, "adapters/claude-code/skills", skillName, "SKILL.md"),
-        "utf8"
+        "utf8",
       )
       for (const content of [agySkill, claudeSkill]) {
         expect(content).toContain(`name: ${skillName}`)
@@ -377,7 +351,7 @@ describe("Antigravity adapter & plugin configuration", () => {
 
     for (const base of [
       resolve(pluginDir, "skills/effect-lfg"),
-      resolve(repoRoot, "adapters/claude-code/skills/effect-lfg")
+      resolve(repoRoot, "adapters/claude-code/skills/effect-lfg"),
     ]) {
       expect(existsSync(resolve(base, "references/autonomous-intake-and-ears.md"))).toBe(true)
       expect(existsSync(resolve(base, "references/review-and-shipping.md"))).toBe(true)
@@ -385,14 +359,14 @@ describe("Antigravity adapter & plugin configuration", () => {
 
     const claudeCommand = readFileSync(
       resolve(repoRoot, "adapters/claude-code/commands/effect-lfg.md"),
-      "utf8"
+      "utf8",
     )
     expect(claudeCommand).toContain("name: effect-lfg")
     expect(claudeCommand).toContain("argument-hint:")
 
     for (const base of [
       resolve(pluginDir, "skills/resolving-effect-review-feedback"),
-      resolve(repoRoot, "adapters/claude-code/skills/resolving-effect-review-feedback")
+      resolve(repoRoot, "adapters/claude-code/skills/resolving-effect-review-feedback"),
     ]) {
       expect(existsSync(resolve(base, "references/evaluation-rubric.md"))).toBe(true)
       expect(existsSync(resolve(base, "references/effect-fixer-prompt.md"))).toBe(true)
@@ -403,7 +377,7 @@ describe("Antigravity adapter & plugin configuration", () => {
     const docPaths = [
       resolve(repoRoot, "README.md"),
       resolve(pluginDir, "README.md"),
-      resolve(repoRoot, "adapters/claude-code/README.md")
+      resolve(repoRoot, "adapters/claude-code/README.md"),
     ]
     const workflowSkills = [
       "effect-harness",
@@ -412,33 +386,27 @@ describe("Antigravity adapter & plugin configuration", () => {
       "planning-effect-skeletons",
       "executing-effect-stubs",
       "resolving-effect-review-feedback",
-      "compounding-effect-learnings"
+      "compounding-effect-learnings",
     ]
     const specialistSubagents = [
       "effect-ears-test-reviewer",
       "effect-security-reviewer",
       "effect-reliability-reviewer",
-      "effect-adversarial-reviewer"
+      "effect-adversarial-reviewer",
     ]
 
     for (const docPath of docPaths) {
       expect(existsSync(docPath), `Document file must exist: ${docPath}`).toBe(true)
       const content = readFileSync(docPath, "utf8")
       for (const skill of workflowSkills) {
-        expect(
-          content,
-          `Expected ${docPath} to document workflow skill ${skill}`
-        ).toContain(skill)
+        expect(content, `Expected ${docPath} to document workflow skill ${skill}`).toContain(skill)
       }
       for (const agent of specialistSubagents) {
         expect(
           content,
-          `Expected ${docPath} to document specialist reviewer subagent ${agent}`
+          `Expected ${docPath} to document specialist reviewer subagent ${agent}`,
         ).toContain(agent)
       }
     }
   })
 })
-
-
-

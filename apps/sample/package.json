@@ -3,11 +3,6 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "nx": {
-    "tags": [
-      "type:app"
-    ]
-  },
   "scripts": {
     "typecheck": "tsc --noEmit && effect-tsgo diagnostics --strict --project tsconfig.json",
     "lint": "oxlint --deny-warnings .",
@@ -16,9 +11,14 @@
     "deploy": "alchemy deploy"
   },
   "dependencies": {
-    "alchemy": "2.0.0-beta.80",
-    "effect": "4.0.0",
     "@effect/platform-node": "4.0.0",
-    "@harness/sample-infra": "workspace:*"
+    "@harness/sample-infra": "workspace:*",
+    "alchemy": "2.0.0-beta.80",
+    "effect": "4.0.0"
+  },
+  "nx": {
+    "tags": [
+      "type:app"
+    ]
   }
 }

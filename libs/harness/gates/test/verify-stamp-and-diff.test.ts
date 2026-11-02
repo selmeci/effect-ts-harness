@@ -32,7 +32,7 @@ describe("verify-stamp and plan/impl graph diff", () => {
       expect(checkVerifyStamp(dir).valid).toBe(true)
 
       mkdirSync(join(dir, ".remember"), { recursive: true })
-      writeFileSync(join(dir, ".remember", "metadata.json"), "{\"lastSeen\": 123}\n")
+      writeFileSync(join(dir, ".remember", "metadata.json"), '{"lastSeen": 123}\n')
       const afterRememberEdit = checkVerifyStamp(dir)
       expect(afterRememberEdit.valid).toBe(true)
     } finally {
@@ -72,8 +72,8 @@ describe("verify-stamp and plan/impl graph diff", () => {
           line: 4,
           packageTag: "domain",
           successType: "string",
-          isStub: true
-        }
+          isStub: true,
+        },
       ],
       services: [],
       layers: [],
@@ -85,7 +85,7 @@ describe("verify-stamp and plan/impl graph diff", () => {
       providesService: [],
       layerRequires: [],
       tracedCalls: [],
-      exercisesSpans: []
+      exercisesSpans: [],
     })
 
     const stillStub = diffPlanAndImplGraphs(planGraph, planGraph)
@@ -103,8 +103,8 @@ describe("verify-stamp and plan/impl graph diff", () => {
           line: 4,
           packageTag: "domain",
           successType: "string",
-          isStub: true
-        }
+          isStub: true,
+        },
       ],
       services: [],
       layers: [],
@@ -116,7 +116,7 @@ describe("verify-stamp and plan/impl graph diff", () => {
       providesService: [],
       layerRequires: [],
       tracedCalls: [],
-      exercisesSpans: []
+      exercisesSpans: [],
     })
 
     const implGraph = buildHarnessGraph({
@@ -128,8 +128,8 @@ describe("verify-stamp and plan/impl graph diff", () => {
           line: 4,
           packageTag: "domain",
           successType: "string",
-          isStub: false
-        }
+          isStub: false,
+        },
       ],
       services: [],
       layers: [],
@@ -141,7 +141,7 @@ describe("verify-stamp and plan/impl graph diff", () => {
       providesService: [],
       layerRequires: [],
       tracedCalls: [],
-      exercisesSpans: []
+      exercisesSpans: [],
     })
 
     const green = diffPlanAndImplGraphs(planGraph, implGraph)
@@ -159,16 +159,16 @@ describe("verify-stamp and plan/impl graph diff", () => {
           line: 4,
           packageTag: "domain",
           successType: "string",
-          isStub: false
-        }
+          isStub: false,
+        },
       ],
       services: [
         {
           tagId: "libs/sample/service/src/index.ts#Greeter",
           name: "Greeter",
           file: "libs/sample/service/src/index.ts",
-          packageTag: "service"
-        }
+          packageTag: "service",
+        },
       ],
       layers: [],
       errors: [],
@@ -179,7 +179,7 @@ describe("verify-stamp and plan/impl graph diff", () => {
       providesService: [],
       layerRequires: [],
       tracedCalls: [],
-      exercisesSpans: []
+      exercisesSpans: [],
     })
 
     const emptyImplGraph = buildHarnessGraph({
@@ -194,7 +194,7 @@ describe("verify-stamp and plan/impl graph diff", () => {
       providesService: [],
       layerRequires: [],
       tracedCalls: [],
-      exercisesSpans: []
+      exercisesSpans: [],
     })
 
     const diff = diffPlanAndImplGraphs(planGraph, emptyImplGraph)
@@ -213,16 +213,16 @@ describe("verify-stamp and plan/impl graph diff", () => {
           line: 4,
           packageTag: "domain",
           successType: "string",
-          isStub: false
-        }
+          isStub: false,
+        },
       ],
       services: [
         {
           tagId: "PhotoRepo",
           name: "PhotoRepo",
           packageTag: "service",
-          file: "libs/sample/service/src/index.ts"
-        }
+          file: "libs/sample/service/src/index.ts",
+        },
       ],
       adrDocs: [
         {
@@ -233,8 +233,8 @@ describe("verify-stamp and plan/impl graph diff", () => {
           enforcedByFiles: [],
           referencedSpans: [],
           referencedServices: ["PhotoRepo"],
-          referencedErrors: []
-        }
+          referencedErrors: [],
+        },
       ],
       earsSpecs: [
         {
@@ -245,23 +245,23 @@ describe("verify-stamp and plan/impl graph diff", () => {
           enforcedByFiles: [],
           referencedSpans: ["Sample.greet"],
           referencedServices: [],
-          referencedErrors: []
-        }
+          referencedErrors: [],
+        },
       ],
       governsSymbols: [
         {
           adrId: "sample:ADR-0001",
           targetKey: "PhotoRepo",
-          targetKind: "ServiceTag"
-        }
+          targetKind: "ServiceTag",
+        },
       ],
       specifiesSymbols: [
         {
           specId: "sample:SPEC-0001",
           targetKey: "libs/sample/domain/src/index.ts#greet",
-          targetKind: "EffectFn"
-        }
-      ]
+          targetKind: "EffectFn",
+        },
+      ],
     })
 
     const implGraph = buildHarnessGraph({
@@ -273,16 +273,16 @@ describe("verify-stamp and plan/impl graph diff", () => {
           line: 4,
           packageTag: "domain",
           successType: "string",
-          isStub: false
-        }
+          isStub: false,
+        },
       ],
       services: [
         {
           tagId: "PhotoRepo",
           name: "PhotoRepo",
           packageTag: "service",
-          file: "libs/sample/service/src/index.ts"
-        }
+          file: "libs/sample/service/src/index.ts",
+        },
       ],
       adrDocs: [
         {
@@ -293,8 +293,8 @@ describe("verify-stamp and plan/impl graph diff", () => {
           enforcedByFiles: [],
           referencedSpans: [],
           referencedServices: ["PhotoRepo"],
-          referencedErrors: []
-        }
+          referencedErrors: [],
+        },
       ],
       earsSpecs: [
         {
@@ -305,11 +305,11 @@ describe("verify-stamp and plan/impl graph diff", () => {
           enforcedByFiles: [],
           referencedSpans: ["Sample.greet"],
           referencedServices: [],
-          referencedErrors: []
-        }
+          referencedErrors: [],
+        },
       ],
       governsSymbols: [],
-      specifiesSymbols: []
+      specifiesSymbols: [],
     })
 
     const planImplDiff = diffPlanAndImplGraphs(planGraph, implGraph)
@@ -317,8 +317,8 @@ describe("verify-stamp and plan/impl graph diff", () => {
     expect(planImplDiff.reasons).toEqual(
       expect.arrayContaining([
         "Missing planned GovernsSymbol edge: sample:ADR-0001 -> PhotoRepo",
-        "Missing planned SpecifiesSymbol edge: sample:SPEC-0001 -> libs/sample/domain/src/index.ts#greet"
-      ])
+        "Missing planned SpecifiesSymbol edge: sample:SPEC-0001 -> libs/sample/domain/src/index.ts#greet",
+      ]),
     )
   })
 })

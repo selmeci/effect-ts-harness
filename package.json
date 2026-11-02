@@ -3,10 +3,6 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@12.9.1",
-  "engines": {
-    "node": ">=24.0.0"
-  },
   "scripts": {
     "prepare": "effect-tsgo patch --typescript --oxlint",
     "lint": "oxlint --deny-warnings .",
@@ -30,5 +26,9 @@
     "ts-pattern": "5.9.2",
     "typescript": "7.0.2",
     "vitest": "5.0.3"
-  }
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "packageManager": "pnpm@12.9.1"
 }

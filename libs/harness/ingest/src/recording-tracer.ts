@@ -17,7 +17,7 @@ export interface SpanRecorderShape {
   readonly toTraceEdges: (
     fnIndex: ReadonlyMap<string, IndexedEffectFn>,
     externalSpans?: ReadonlyArray<RecordedSpanEvent>,
-    defaultReceiverLayer?: string | null
+    defaultReceiverLayer?: string | null,
   ) => {
     readonly tracedCalls: ReadonlyArray<TracedCallEdge>
     readonly exercisesSpans: ReadonlyArray<ExercisesSpanEdge>
@@ -46,16 +46,12 @@ export const makeSpanRecorder = (): SpanRecorderShape => {
       return [...recorded]
     },
     toTraceEdges: (fnIndex, externalSpans, defaultReceiverLayer) =>
-      toTraceEdges(
-        [...recorded, ...(externalSpans ?? [])],
-        fnIndex,
-        defaultReceiverLayer
-      )
+      toTraceEdges([...recorded, ...(externalSpans ?? [])], fnIndex, defaultReceiverLayer),
   }
 }
 
 export class SpanRecorder extends Context.Service<SpanRecorder, SpanRecorderShape>()(
-  "@harness/ingest/SpanRecorder"
+  "@harness/ingest/SpanRecorder",
 ) {
   static readonly layer: Layer.Layer<SpanRecorder> = Layer.sync(SpanRecorder, makeSpanRecorder)
 }
@@ -64,9 +60,7 @@ export const makeRecordingTracer = (recorder: SpanRecorderShape): Tracer.Tracer 
   Tracer.make({
     span(options) {
       const span = new Tracer.NativeSpan(options)
-      const parentSpanId = Option.isSome(options.parent)
-        ? options.parent.value.spanId
-        : null
+      const parentSpanId = Option.isSome(options.parent) ? options.parent.value.spanId : null
       let durationMs: number | undefined = undefined
 
       const syncRecord = (): void => {
@@ -80,7 +74,7 @@ export const makeRecordingTracer = (recorder: SpanRecorderShape): Tracer.Tracer 
           name: span.name,
           parentSpanId,
           attributes,
-          durationMs
+          durationMs,
         })
       }
 
@@ -103,7 +97,7 @@ export const makeRecordingTracer = (recorder: SpanRecorderShape): Tracer.Tracer 
       }
 
       return span
-    }
+    },
   })
 
 export const recordingTracerLayer = Layer.effect(
@@ -111,13 +105,13 @@ export const recordingTracerLayer = Layer.effect(
   Effect.gen(function* () {
     const recorder = yield* SpanRecorder
     return makeRecordingTracer(recorder)
-  })
+  }),
 )
 
 export const toTraceEdges = (
   spans: ReadonlyArray<RecordedSpanEvent>,
   fnIndex: ReadonlyMap<string, IndexedEffectFn>,
-  defaultReceiverLayer?: string | null
+  defaultReceiverLayer?: string | null,
 ): {
   readonly tracedCalls: ReadonlyArray<TracedCallEdge>
   readonly exercisesSpans: ReadonlyArray<ExercisesSpanEdge>
@@ -206,14 +200,14 @@ export const toTraceEdges = (
       if (existing) {
         exercisesMap.set(key, {
           ...existing,
-          callCount: existing.callCount + 1
+          callCount: existing.callCount + 1,
         })
       } else {
         exercisesMap.set(key, {
           testId,
           calleeQualname,
           callCount: 1,
-          receiverLayer
+          receiverLayer,
         })
       }
     }
@@ -225,14 +219,14 @@ export const toTraceEdges = (
       if (existing) {
         tracedCallsMap.set(key, {
           ...existing,
-          callCount: existing.callCount + 1
+          callCount: existing.callCount + 1,
         })
       } else {
         tracedCallsMap.set(key, {
           callerQualname,
           calleeQualname,
           callCount: 1,
-          receiverLayer
+          receiverLayer,
         })
       }
     }
@@ -240,43 +234,36 @@ export const toTraceEdges = (
 
   return {
     tracedCalls: Array.from(tracedCallsMap.values()),
-    exercisesSpans: Array.from(exercisesMap.values())
+    exercisesSpans: Array.from(exercisesMap.values()),
   }
 }
 
 export const withRecordedTestSpan: {
   (
     testId: string,
-    receiverLayer?: string | null
+    receiverLayer?: string | null,
   ): <A, E, R>(
-    effect: Effect.Effect<A, E, R>
+    effect: Effect.Effect<A, E, R>,
   ) => Effect.Effect<A, E, Exclude<R, SpanRecorder | Tracer.ParentSpan>>
   <A, E, R>(
     effect: Effect.Effect<A, E, R>,
     testId: string,
-    receiverLayer?: string | null
+    receiverLayer?: string | null,
   ): Effect.Effect<A, E, Exclude<R, SpanRecorder | Tracer.ParentSpan>>
 } = Function.dual(
   (args) => Effect.isEffect(args[0]),
-  <A, E, R>(
-    effect: Effect.Effect<A, E, R>,
-    testId: string,
-    receiverLayer?: string | null
-  ) => {
+  <A, E, R>(effect: Effect.Effect<A, E, R>, testId: string, receiverLayer?: string | null) => {
     const recorder = makeSpanRecorder()
     const tracer = makeRecordingTracer(recorder)
     const spanOptions: Tracer.SpanOptions = {
-      attributes:
-        receiverLayer != null
-          ? { "harness.receiverLayer": receiverLayer }
-          : undefined
+      attributes: receiverLayer != null ? { "harness.receiverLayer": receiverLayer } : undefined,
     }
     return effect.pipe(
       Effect.withSpan(`Test:${testId}`, spanOptions),
       Effect.provideService(Tracer.Tracer, tracer),
-      Effect.provideService(SpanRecorder, recorder)
+      Effect.provideService(SpanRecorder, recorder),
     )
-  }
+  },
 )
 
 export const runWithTestTracer = <A, E, R>(
@@ -286,7 +273,7 @@ export const runWithTestTracer = <A, E, R>(
   options?: {
     readonly receiverLayer?: string | null
     readonly externalSpans?: ReadonlyArray<RecordedSpanEvent>
-  }
+  },
 ): Effect.Effect<
   {
     readonly result: A
@@ -306,13 +293,13 @@ export const runWithTestTracer = <A, E, R>(
       attributes:
         options?.receiverLayer != null
           ? { "harness.receiverLayer": options.receiverLayer }
-          : undefined
+          : undefined,
     }
 
     const result = yield* effect.pipe(
       Effect.withSpan(`Test:${testId}`, spanOptions),
       Effect.provideService(Tracer.Tracer, tracer),
-      Effect.provideService(SpanRecorder, recorder)
+      Effect.provideService(SpanRecorder, recorder),
     )
 
     if (options?.externalSpans) {
@@ -327,6 +314,6 @@ export const runWithTestTracer = <A, E, R>(
     return {
       result,
       spans: allSpans,
-      edges
+      edges,
     }
   })

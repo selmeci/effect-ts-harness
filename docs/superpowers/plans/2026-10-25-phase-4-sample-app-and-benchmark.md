@@ -14,7 +14,7 @@
 
 - **Single source of truth in `type:contract`:** `Photo`, `CreatePhotoInput`, `PhotoNotFoundError`, `SampleApi` (`HttpApi`), and `PhotoCounterRpc` (`RpcGroup`) live in `@harness/sample-contract` (imports `effect` only).
 - **OpenAPI breaking-change gate (`contract:openapi` + `oasdiff`):** `@harness/sample-contract` exports and commits `openapi.json` (`OpenApi.fromApi(SampleApi)`). Removing a required response field fails `oasdiff breaking` (exit code 2 -> human escalation).
-- **Durable Object SQLite synchronous transaction rule (`docs/mvp_v2.md` §10):** All Schema decoding/encoding happens *before* entering `db.transaction(...)` in `Drizzle.DurableObject` so `Scheduler.MixedScheduler("sync")` never encounters async I/O interleaving.
+- **Durable Object SQLite synchronous transaction rule (`docs/mvp_v2.md` §10):** All Schema decoding/encoding happens _before_ entering `db.transaction(...)` in `Drizzle.DurableObject` so `Scheduler.MixedScheduler("sync")` never encounters async I/O interleaving.
 - **Distributed W3C trace propagation into Durable Objects (`docs/mvp_v2.md` §0.1 #5 & §10):** Internal RPC calls to Durable Objects use `Cloudflare.toHttpClient(doStub)` so W3C `traceparent` (`trace_id`, `span_id`) crosses the `Node <-> workerd` boundary and correlates with the `@effect/vitest` root `TestSpan`.
 - **Frontend module boundary (`scope:web`):** `apps/sample-web` is tagged `["type:app", "scope:web"]` and `.oxlintrc.json` restricts `scope:web` to `onlyDependOnLibsWithTags: ["type:contract"]`, plus a ban on raw `fetch(...)` in `apps/sample-web/src/**`.
 
@@ -31,11 +31,13 @@
 ### Task 1: Expand `@harness/sample-contract` with `HttpApi`, `RpcGroup`, `openapi.json`, and breaking-change gate
 
 **Files:**
+
 - Modify: `libs/sample/contract/package.json`
 - Modify: `libs/sample/contract/src/index.ts`, `libs/sample/contract/test/index.test.ts`
 - Create: `libs/sample/contract/scripts/check-openapi.mjs`, `libs/sample/contract/openapi.json`
 
 **Interfaces:**
+
 - Consumes: `Schema` from `"effect"`, `HttpApi`, `HttpApiEndpoint`, `HttpApiGroup`, `OpenApi` from `"effect/httpapi/*"`, `Rpc`, `RpcGroup` from `"effect/rpc/*"`.
 - Produces:
   - `Photo`, `CreatePhotoInput`, `PhotoNotFoundError` (Schemas).
@@ -51,22 +53,25 @@ import { resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 import { Schema } from "effect"
 import {
-   buildOpenApiSpec,
+  buildOpenApiSpec,
   CreatePhotoInput,
   Photo,
   PhotoCounterRpc,
-  SampleApi
+  SampleApi,
 } from "../src/index.js"
 
 describe("sample-contract (Schemas, HttpApi, RpcGroup, OpenAPI)", () => {
   it("decodes Photo and CreatePhotoInput Schemas", () => {
-    const input = Schema.decodeUnknownSync(CreatePhotoInput)({ name: "sunset.jpg", albumId: "vacation" })
+    const input = Schema.decodeUnknownSync(CreatePhotoInput)({
+      name: "sunset.jpg",
+      albumId: "vacation",
+    })
     expect(input.albumId).toBe("vacation")
     const photo = Schema.decodeUnknownSync(Photo)({
       id: 1,
       name: "sunset.jpg",
       albumId: "vacation",
-      createdAt: 1700000000
+      createdAt: 1700000000,
     })
     expect(photo.id).toBe(1)
   })
@@ -75,7 +80,9 @@ describe("sample-contract (Schemas, HttpApi, RpcGroup, OpenAPI)", () => {
     expect(SampleApi).toBeDefined()
     expect(PhotoCounterRpc).toBeDefined()
     const liveSpec = buildOpenApiSpec()
-    const committed = JSON.parse(readFileSync(resolve(import.meta.dirname, "../openapi.json"), "utf8"))
+    const committed = JSON.parse(
+      readFileSync(resolve(import.meta.dirname, "../openapi.json"), "utf8"),
+    )
     expect(liveSpec).toEqual(committed)
   })
 })
@@ -107,10 +114,12 @@ git commit -m "feat(sample-contract): add Photo HttpApi, PhotoCounterRpc, openap
 ### Task 2: Create `@harness/sample-service` (`type:service`) and expand `@harness/sample-domain` (`type:domain`) with pure decider and `Effect.fn` use cases
 
 **Files:**
+
 - Create: `libs/sample/service/package.json`, `libs/sample/service/tsconfig.json`, `libs/sample/service/vitest.config.ts`, `libs/sample/service/src/index.ts`, `libs/sample/service/test/index.test.ts`
 - Modify: `libs/sample/domain/package.json`, `libs/sample/domain/src/index.ts`, `libs/sample/domain/test/index.test.ts`
 
 **Interfaces:**
+
 - Consumes: `@harness/sample-contract`.
 - Produces:
   - `@harness/sample-service` (`type:service`): `PhotoRepo` (`Context.Service` with `insert`, `findById`, `listAll`) and `AlbumCounterClient` (`Context.Service` with `increment`, `getCount`).
@@ -149,12 +158,14 @@ git commit -m "feat(sample-domain,sample-service): add PhotoRepo, AlbumCounterCl
 ### Task 3: Implement `Drizzle.D1`, `Drizzle.DurableObject`, and `Cloudflare.toHttpClient` RPC with `trace_id` correlation in `@harness/sample-infra` and `apps/sample`
 
 **Files:**
+
 - Modify: `libs/sample/infra/package.json` (add `@effect/sql-d1: "4.0.0"`, `@effect/sql-sqlite-do: "4.0.0"`, `@harness/sample-contract: "workspace:*"`, `@harness/sample-service: "workspace:*"`, `@harness/sample-domain: "workspace:*"`)
 - Modify: `libs/sample/infra/src/db/schema.ts` (add `albumId` to `photos` + `albumCounters` table for DO SQLite, regenerate Drizzle v1 migration)
 - Modify: `libs/sample/infra/src/index.ts`, `libs/sample/infra/test/index.test.ts`
 - Modify: `apps/sample/alchemy.run.ts`, `apps/sample/package.json`
 
 **Interfaces:**
+
 - Consumes: `@harness/sample-contract`, `@harness/sample-service`, `@harness/sample-domain`, `alchemy@2.0.0-beta.80`, `drizzle-orm@1.0.0-rc.5-ab785fc`.
 - Produces:
   - `makePhotoRepoD1Layer(db)` and `PhotoRepoMemoryLayer` in `@harness/sample-infra`.
@@ -164,6 +175,7 @@ git commit -m "feat(sample-domain,sample-service): add PhotoRepo, AlbumCounterCl
 - [ ] **Step 1: Write the failing test in `libs/sample/infra/test/index.test.ts`**
 
 Test:
+
 1. `PhotoRepo` queries against a SQLite/D1 Drizzle instance decode rows into contract `Photo` Schemas.
 2. Calling `uploadPhoto` across `AlbumCounterClient` (over HTTP RPC with `traceparent` propagation) into the DO RPC handler emits remote spans with the same `traceId` as the root `TestSpan`, and `runWithTestTracer` joins those remote spans into `TracedCall` and `ExercisesSpan` edges.
 
@@ -193,10 +205,12 @@ git commit -m "feat(sample-infra,sample-app): add Drizzle D1/DO repositories, W3
 ### Task 4: Create `apps/sample-web` (`type:app`, `scope:web`) with `AtomHttpApi` and enforce `scope:web` module & `no-fetch` boundaries
 
 **Files:**
+
 - Create: `apps/sample-web/package.json`, `apps/sample-web/tsconfig.json`, `apps/sample-web/vitest.config.ts`, `apps/sample-web/src/client.ts`, `apps/sample-web/src/ index.ts`, `apps/sample-web/test/client.test.ts`
 - Modify: `.oxlintrc.json`, `tools/oxlint/syntax-bans.js`
 
 **Interfaces:**
+
 - Consumes: `SampleApi` from `@harness/sample-contract`, `@effect/atom-react@4.0.0`, `react@19.3.0`, `vite@8.3.2`.
 - Produces:
   - `SampleApiClient` derived via `AtomHttpApi` in `apps/sample-web/src/client.ts`.
@@ -234,10 +248,12 @@ git commit -m "feat(sample-web): add AtomHttpApi client and enforce scope:web co
 ### Task 5: Phase 5 — 5-Task Evaluation Benchmark (`tools/benchmark`) and Final Acceptance Gate
 
 **Files:**
+
 - Create: `libs/harness/gates/src/benchmark.ts`, `libs/harness/gates/test/benchmark.test.ts`
 - Modify: `libs/harness/gates/src/index.ts`
 
 **Interfaces:**
+
 - Consumes: `@harness/gates`, `@harness/graph`, `@harness/decision`.
 - Produces:
   - `BenchmarkRunMetrics`: `{ readonly taskId: string; readonly mode: "harness" | "no-harness"; readonly diagnosticsBeforeGreen: number; readonly fixUpIterations: number; readonly tokenCount: number }`
@@ -257,8 +273,20 @@ describe("5-task MVP v2 benchmark evaluation", () => {
 
   it("evaluates harness vs no-harness across the 3 acceptance metrics (winning >= 2 of 3)", () => {
     const summary = compareBenchmarkRuns([
-      { taskId: "t1", mode: "harness", diagnosticsBeforeGreen: 0, fixUpIterations: 1, tokenCount: 1800 },
-      { taskId: "t1", mode: "no-harness", diagnosticsBeforeGreen: 3, fixUpIterations: 3, tokenCount: 3200 }
+      {
+        taskId: "t1",
+        mode: "harness",
+        diagnosticsBeforeGreen: 0,
+        fixUpIterations: 1,
+        tokenCount: 1800,
+      },
+      {
+        taskId: "t1",
+        mode: "no-harness",
+        diagnosticsBeforeGreen: 3,
+        fixUpIterations: 3,
+        tokenCount: 3200,
+      },
     ])
     expect(summary.winsOnDiagnostics).toBe(true)
     expect(summary.winsOnIterations).toBe(true)

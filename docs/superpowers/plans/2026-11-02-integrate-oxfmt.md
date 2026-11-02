@@ -30,6 +30,7 @@
 ### Task 1: Package and Configuration Setup
 
 **Files:**
+
 - Modify: `package.json`
 - Create: `.oxfmtrc.json`
 - Modify: `nx.json`
@@ -37,17 +38,19 @@
 - Test: `libs/harness/gates/test/policy.test.ts`
 
 **Interfaces:**
+
 - Produces: `format` and `format:check` scripts in root `package.json`.
 - Produces: `.oxfmtrc.json` with ignore patterns and format options.
 
 - [ ] **Step 1: Install `oxfmt` in devDependencies**
-Add `oxfmt: "0.75.0"` to root `devDependencies` using `pnpm add -D oxfmt@0.75.0`.
+      Add `oxfmt: "0.75.0"` to root `devDependencies` using `pnpm add -D oxfmt@0.75.0`.
 
 - [ ] **Step 2: Add scripts to `package.json`**
-Add `"format": "oxfmt --write ."` and `"format:check": "oxfmt --check ."` to `package.json` `scripts`.
+      Add `"format": "oxfmt --write ."` and `"format:check": "oxfmt --check ."` to `package.json` `scripts`.
 
 - [ ] **Step 3: Author `.oxfmtrc.json`**
-Create `.oxfmtrc.json` with:
+      Create `.oxfmtrc.json` with:
+
 ```json
 {
   "$schema": "./node_modules/oxfmt/configuration_schema.json",
@@ -73,48 +76,50 @@ Create `.oxfmtrc.json` with:
 ```
 
 - [ ] **Step 4: Update `nx.json` sharedGlobals**
-Add `"{workspaceRoot}/.oxfmtrc.json"` to `namedInputs.sharedGlobals` in `nx.json`.
+      Add `"{workspaceRoot}/.oxfmtrc.json"` to `namedInputs.sharedGlobals` in `nx.json`.
 
 - [ ] **Step 5: Update `policy.ts` ALLOWLIST and write unit test**
-Add `"pnpm format"`, `"pnpm oxfmt"`, `"CI=true pnpm format"`, `"CI=true pnpm oxfmt"` to `ALLOWLIST` in `libs/harness/gates/src/policy.ts`. Verify with `pnpm --filter @harness/gates test`.
+      Add `"pnpm format"`, `"pnpm oxfmt"`, `"CI=true pnpm format"`, `"CI=true pnpm oxfmt"` to `ALLOWLIST` in `libs/harness/gates/src/policy.ts`. Verify with `pnpm --filter @harness/gates test`.
 
 - [ ] **Step 6: Commit Task 1**
-Commit configuration files and policy changes.
+      Commit configuration files and policy changes.
 
 ---
 
 ### Task 2: Workspace Formatting & Verification
 
 **Files:**
+
 - Modify: Workspace source files requiring formatting (under `apps/`, `libs/`, `tools/`, `scenarios/`, `docs/`)
 
 - [ ] **Step 1: Run `pnpm format`**
-Run `pnpm format` to format the workspace files in place.
+      Run `pnpm format` to format the workspace files in place.
 
 - [ ] **Step 2: Run `pnpm format:check`**
-Verify `pnpm format:check` exits with 0 and reports all checked files are formatted.
+      Verify `pnpm format:check` exits with 0 and reports all checked files are formatted.
 
 - [ ] **Step 3: Run `pnpm lint`**
-Verify `pnpm lint` (`oxlint --deny-warnings .`) passes with 0 errors and 0 warnings.
+      Verify `pnpm lint` (`oxlint --deny-warnings .`) passes with 0 errors and 0 warnings.
 
 - [ ] **Step 4: Run `CI=true pnpm verify:all`**
-Verify `CI=true pnpm verify:all` passes across all 14 projects.
+      Verify `CI=true pnpm verify:all` passes across all 14 projects.
 
 - [ ] **Step 5: Commit Task 2**
-Commit formatted workspace files.
+      Commit formatted workspace files.
 
 ---
 
 ### Task 3: PR Preparation & Final Audit
 
 **Files:**
+
 - Git refs: `feat/integrate-oxfmt` on `origin`
 
 - [ ] **Step 1: Check `git status` and `git diff`**
-Verify working directory is clean and no stray files or subtree modifications exist.
+      Verify working directory is clean and no stray files or subtree modifications exist.
 
 - [ ] **Step 2: Push branch to remote**
-Push `feat/integrate-oxfmt` to `origin`.
+      Push `feat/integrate-oxfmt` to `origin`.
 
 - [ ] **Step 3: Open Pull Request using `gh pr create`**
-Create the Pull Request with clear title, summary, test evidence, and review instructions.
+      Create the Pull Request with clear title, summary, test evidence, and review instructions.

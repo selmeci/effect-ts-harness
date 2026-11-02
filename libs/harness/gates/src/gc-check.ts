@@ -36,7 +36,7 @@ export const levenshteinDistance = (a: string, b: string): number => {
   const m = a.length
   const n = b.length
   const dp: Array<Array<number>> = Array.from({ length: m + 1 }, () =>
-    Array.from({ length: n + 1 }, () => 0)
+    Array.from({ length: n + 1 }, () => 0),
   )
   for (let i = 0; i <= m; i++) dp[i]![0] = i
   for (let j = 0; j <= n; j++) dp[0]![j] = j
@@ -46,8 +46,7 @@ export const levenshteinDistance = (a: string, b: string): number => {
       if (a[i - 1]?.toLowerCase() === b[j - 1]?.toLowerCase()) {
         dp[i]![j] = dp[i - 1]![j - 1]!
       } else {
-        dp[i]![j] =
-          1 + Math.min(dp[i - 1]![j]!, dp[i]![j - 1]!, dp[i - 1]![j - 1]!)
+        dp[i]![j] = 1 + Math.min(dp[i - 1]![j]!, dp[i]![j - 1]!, dp[i - 1]![j - 1]!)
       }
     }
   }
@@ -57,10 +56,9 @@ export const levenshteinDistance = (a: string, b: string): number => {
 export const findClosestMatch = (
   target: string,
   candidates: Iterable<string>,
-  maxDistanceThreshold?: number
+  maxDistanceThreshold?: number,
 ): string | undefined => {
-  const threshold =
-    maxDistanceThreshold ?? Math.max(3, Math.floor(target.length * 0.35))
+  const threshold = maxDistanceThreshold ?? Math.max(3, Math.floor(target.length * 0.35))
   let closest: string | undefined
   let minDistance = Number.POSITIVE_INFINITY
 
@@ -110,14 +108,10 @@ const IGNORED_SERVICES = new Set([
   "SpanRecorder",
   "@harness/ingest/SpanRecorder",
   "SampleApiClient",
-  "ActiveCounterStore"
+  "ActiveCounterStore",
 ])
 
-const IGNORED_ERRORS = new Set([
-  "OmnigraphLoadError",
-  "SchemaError",
-  "UnknownToolError"
-])
+const IGNORED_ERRORS = new Set(["OmnigraphLoadError", "SchemaError", "UnknownToolError"])
 
 const IGNORED_UNTESTED_FNS = new Set([
   "Friction.decide",
@@ -137,12 +131,10 @@ const IGNORED_UNTESTED_FNS = new Set([
   "SessionReport.decide",
   "Harness.checkOntologyPairConflict",
   "Harness.evaluateOntologyConflicts",
-  "HarnessMcp.executeTool"
+  "HarnessMcp.executeTool",
 ])
 
-export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
-  input: GraphEntropyInput
-) {
+export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (input: GraphEntropyInput) {
   yield* Effect.void
 
   const g = input.graph.graph
@@ -177,17 +169,14 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
           srcNode.value._tag === "VitestCase" &&
           srcNode.value.isPropertyTest === true
         ) {
-          incomingPropertyTests.set(
-            edge.target,
-            (incomingPropertyTests.get(edge.target) ?? 0) + 1
-          )
+          incomingPropertyTests.set(edge.target, (incomingPropertyTests.get(edge.target) ?? 0) + 1)
           if (
             (srcNode.value as { readonly hasNonPrimitiveArbitrary?: boolean | undefined })
               .hasNonPrimitiveArbitrary !== false
           ) {
             incomingRichPropertyTests.set(
               edge.target,
-              (incomingRichPropertyTests.get(edge.target) ?? 0) + 1
+              (incomingRichPropertyTests.get(edge.target) ?? 0) + 1,
             )
           }
         }
@@ -222,7 +211,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
           nodeId: node.tagId,
           location,
           message: `ServiceTag "${node.tagId}" has no consumers (0 RequiresService / LayerRequires edges).`,
-          action: `Either inject ServiceTag "${node.tagId}" into an Effect generator (yield* ${node.name}) or remove the unused declaration.`
+          action: `Either inject ServiceTag "${node.tagId}" into an Effect generator (yield* ${node.name}) or remove the unused declaration.`,
         })
       }
     }
@@ -246,7 +235,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
           nodeId: node.tagId,
           location,
           message: `ServiceTag "${node.tagId}" has no providing ServiceLayer (0 ProvidesService edges).`,
-          action: `Provide a live layer implementing "${node.tagId}" (e.g. Layer.succeed / Layer.effect) in type:infra.`
+          action: `Provide a live layer implementing "${node.tagId}" (e.g. Layer.succeed / Layer.effect) in type:infra.`,
         })
       }
     }
@@ -270,7 +259,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
           nodeId: node.errorTag,
           location,
           message: `TaggedError "${node.errorTag}" is never emitted in any E channel (0 FailsWith edges).`,
-          action: `Fail with this error using Effect.fail(new ${node.errorTag}(...)) in a domain use case or prune unused error definition.`
+          action: `Fail with this error using Effect.fail(new ${node.errorTag}(...)) in a domain use case or prune unused error definition.`,
         })
       }
     }
@@ -304,7 +293,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
           nodeId: `Pattern:${p}`,
           location: `agent-patterns/${p}.md`,
           message: `Pattern doc "agent-patterns/${p}.md" registered in IdiomRouterV1 is missing from the graph.`,
-          action: `Create "agent-patterns/${p}.md" documenting this idiom or remove "${p}" from IDIOM_BLOCKS in IdiomRouter.`
+          action: `Create "agent-patterns/${p}.md" documenting this idiom or remove "${p}" from IDIOM_BLOCKS in IdiomRouter.`,
         })
       }
     }
@@ -325,7 +314,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
             nodeId: node.spanName,
             location: `${node.file}:${node.line}`,
             message: `Domain EffectFn "${node.spanName}" (${node.qualname}) has 0 reaching tests (0 ExercisesSpan / TracedCall edges).`,
-            action: `Add a unit/integration test importing and calling "${node.spanName}" to verify domain behavior.`
+            action: `Add a unit/integration test importing and calling "${node.spanName}" to verify domain behavior.`,
           })
         }
       }
@@ -352,7 +341,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
         enforcedByFiles: node.enforcedByFiles,
         referencedSpans: node.referencedSpans,
         referencedServices: node.referencedServices,
-        referencedErrors: node.referencedErrors
+        referencedErrors: node.referencedErrors,
       })
     }
   }
@@ -388,7 +377,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
               nodeId: `${doc.id}:${file}`,
               location: doc.docPath,
               message: `Governance doc "${doc.docPath}" (${doc.id}) references non-existent enforced_by file "${file}".`,
-              action: `Create file "${file}" or update enforced_by in "${doc.docPath}".`
+              action: `Create file "${file}" or update enforced_by in "${doc.docPath}".`,
             })
           }
         }
@@ -405,7 +394,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
             message: `Governance doc "${doc.docPath}" (${doc.id}) references non-existent EffectFn span "${span}".${hint}`,
             action: closest
               ? `Update reference in "${doc.docPath}" to "${closest}" or declare Effect.fn("${span}").`
-              : `Declare Effect.fn("${span}") in domain/service code or update doc frontmatter.`
+              : `Declare Effect.fn("${span}") in domain/service code or update doc frontmatter.`,
           })
         }
       }
@@ -421,7 +410,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
             message: `Governance doc "${doc.docPath}" (${doc.id}) references non-existent ServiceTag "${svc}".${hint}`,
             action: closest
               ? `Update reference in "${doc.docPath}" to "${closest}" or declare ServiceTag "${svc}".`
-              : `Declare ServiceTag "${svc}" in domain/service code or update doc frontmatter.`
+              : `Declare ServiceTag "${svc}" in domain/service code or update doc frontmatter.`,
           })
         }
       }
@@ -437,7 +426,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
             message: `Governance doc "${doc.docPath}" (${doc.id}) references non-existent TaggedError "${err}".${hint}`,
             action: closest
               ? `Update reference in "${doc.docPath}" to "${closest}" or declare TaggedError "${err}".`
-              : `Declare TaggedError "${err}" in contract/domain code or update doc frontmatter.`
+              : `Declare TaggedError "${err}" in contract/domain code or update doc frontmatter.`,
           })
         }
       }
@@ -452,7 +441,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
           "TaggedError",
           "SchemaError",
           "UnknownToolError",
-          "OmnigraphLoadError"
+          "OmnigraphLoadError",
         ])
         const seenDocMermaidErrors = new Set<string>()
         let mermaidMatch: RegExpExecArray | null
@@ -474,7 +463,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
                   message: `Governance doc "${doc.docPath}" (${doc.id}) references non-existent TaggedError "${errName}" in a Mermaid diagram.${hint}`,
                   action: closest
                     ? `Update Mermaid diagram in "${doc.docPath}" to reference "${closest}" or declare TaggedError "${errName}".`
-                    : `Declare TaggedError "${errName}" in contract/domain code or remove from Mermaid diagram.`
+                    : `Declare TaggedError "${errName}" in contract/domain code or remove from Mermaid diagram.`,
                 })
               }
             }
@@ -482,7 +471,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
         }
 
         const detEnfMatch = doc.markdown.match(
-          /###\s+Deterministic Enforcement([\s\S]*?)(?:\n##|\n#|$)/
+          /###\s+Deterministic Enforcement([\s\S]*?)(?:\n##|\n#|$)/,
         )
         if (detEnfMatch && detEnfMatch[1]) {
           const tableLines = detEnfMatch[1].split(/\r?\n/)
@@ -490,7 +479,10 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
           for (const line of tableLines) {
             const trimmed = line.trim()
             if (!trimmed.startsWith("|")) continue
-            const parts = trimmed.split("|").slice(1, -1).map((p) => p.trim())
+            const parts = trimmed
+              .split("|")
+              .slice(1, -1)
+              .map((p) => p.trim())
             if (parts.length < 3) continue
             if (parts.every((p) => /^:?-+:?$/.test(p))) {
               seenSep = true
@@ -501,9 +493,9 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
               const gateMechCol = parts[2] ?? ""
 
               const col1Paths: Array<string> = []
-              const backticks = Array.from(
-                enforcedByCol.matchAll(/`([^`]+)`/g)
-              ).map((m) => m[1]!.trim())
+              const backticks = Array.from(enforcedByCol.matchAll(/`([^`]+)`/g)).map((m) =>
+                m[1]!.trim(),
+              )
               for (const b of backticks) {
                 if (
                   b.includes("/") &&
@@ -513,9 +505,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
                   col1Paths.push(b)
                 }
               }
-              const tokens = enforcedByCol
-                .replace(/`([^`]+)`/g, " $1 ")
-                .split(/[,\s]+/)
+              const tokens = enforcedByCol.replace(/`([^`]+)`/g, " $1 ").split(/[,\s]+/)
               for (const t of tokens) {
                 const tr = t.trim()
                 if (
@@ -527,20 +517,14 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
                 }
               }
 
-              const gateBackticks = Array.from(
-                gateMechCol.matchAll(/`([^`]+)`/g)
-              ).map((m) => m[1]!.trim())
+              const gateBackticks = Array.from(gateMechCol.matchAll(/`([^`]+)`/g)).map((m) =>
+                m[1]!.trim(),
+              )
 
-              const genericWords = new Set([
-                "vitest",
-                "oxlint",
-                "tsc",
-                "nx",
-                "cedar"
-              ])
+              const genericWords = new Set(["vitest", "oxlint", "tsc", "nx", "cedar"])
 
               const existingCol1Paths = col1Paths.filter(
-                (p) => doc.existingFiles === undefined || doc.existingFiles.includes(p)
+                (p) => doc.existingFiles === undefined || doc.existingFiles.includes(p),
               )
 
               if (
@@ -557,7 +541,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
                   }
 
                   const found = existingCol1Paths.some((p) =>
-                    doc.enforcedByFileContents?.[p]?.includes(mech)
+                    doc.enforcedByFileContents?.[p]?.includes(mech),
                   )
                   if (!found) {
                     findings.push({
@@ -565,7 +549,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
                       nodeId: `${doc.id}:${mech}`,
                       location: doc.docPath,
                       message: `Governance doc "${doc.docPath}" (${doc.id}) enforcement table attributes "${mech}" to "${enforcedByCol}", but none of those files define or reference "${mech}".`,
-                      action: `Update "${doc.docPath}" enforcement table or implement "${mech}" in "${enforcedByCol}".`
+                      action: `Update "${doc.docPath}" enforcement table or implement "${mech}" in "${enforcedByCol}".`,
                     })
                   }
                 }
@@ -593,7 +577,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
             nodeId: node.spanName,
             location: `${node.file}:${node.line}`,
             message: `Pure domain decider "${node.spanName}" (${node.qualname}) has 0 Property-Based Tests (use it.effect.prop / it.prop with Schema arbitraries to prevent example-only blind spots).`,
-            action: `Create a property-based test with it.effect.prop / it.prop using fast-check / Schema arbitraries exercising "${node.spanName}".`
+            action: `Create a property-based test with it.effect.prop / it.prop using fast-check / Schema arbitraries exercising "${node.spanName}".`,
           })
         } else if ((incomingRichPropertyTests.get(idx) ?? 0) === 0) {
           findings.push({
@@ -601,7 +585,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
             nodeId: node.spanName,
             location: `${node.file}:${node.line}`,
             message: `Pure domain decider "${node.spanName}" (${node.qualname}) is only exercised by scalar/primitive property tests — generate domain Event or Command schemas (e.g. Schema.Array(EventSchema)) in it.prop / it.effect.prop.`,
-            action: `Replace scalar arguments in it.prop / it.effect.prop with composite domain generators (e.g. Schema.Array(EventSchema)).`
+            action: `Replace scalar arguments in it.prop / it.effect.prop with composite domain generators (e.g. Schema.Array(EventSchema)).`,
           })
         }
       }
@@ -610,15 +594,21 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
 
   // 8. ears-spec-lint
   for (const doc of input.governanceDocs ?? []) {
-    if (doc.markdown !== undefined && (doc.docPath.includes("/specs/") || doc.id.includes(":SPEC-"))) {
-      const lintReport = yield* decideEarsSpecQuality({ docPath: doc.docPath, markdown: doc.markdown })
+    if (
+      doc.markdown !== undefined &&
+      (doc.docPath.includes("/specs/") || doc.id.includes(":SPEC-"))
+    ) {
+      const lintReport = yield* decideEarsSpecQuality({
+        docPath: doc.docPath,
+        markdown: doc.markdown,
+      })
       for (const f of lintReport.findings) {
         findings.push({
           kind: "ears-spec-lint",
           nodeId: doc.id,
           location: `${doc.docPath}:${f.line}`,
           message: `EARS spec "${doc.id}" (${doc.docPath}:${f.line}) [${f.kind}]: ${f.message}`,
-          action: `Fix EARS clause syntax at ${doc.docPath}:${f.line} to conform to specifying-ears-with-effect requirements.`
+          action: `Fix EARS clause syntax at ${doc.docPath}:${f.line} to conform to specifying-ears-with-effect requirements.`,
         })
       }
     }
@@ -637,7 +627,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
           nodeId: doc.id,
           location: `${doc.docPath}:${f.line}`,
           message: `ADR doc "${doc.id}" (${doc.docPath}:${f.line}) [${f.kind}]: ${f.message}`,
-          action: `Update ${doc.docPath}:${f.line} to satisfy MADR 6-section structure and enforcement table rules.`
+          action: `Update ${doc.docPath}:${f.line} to satisfy MADR 6-section structure and enforcement table rules.`,
         })
       }
     }
@@ -646,7 +636,7 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
   // 10. ontology-invariants
   const ontologyReport = yield* decideOntologyInvariants({
     graph: input.graph,
-    governanceDocs: input.governanceDocs
+    governanceDocs: input.governanceDocs,
   })
   for (const f of ontologyReport.findings) {
     findings.push({
@@ -654,13 +644,13 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
       nodeId: f.nodeId,
       location: f.nodeId,
       message: `[${f.kind}] ${f.message}`,
-      action: `Align ArchiMate layer invariants or governance doc references for ${f.nodeId}.`
+      action: `Align ArchiMate layer invariants or governance doc references for ${f.nodeId}.`,
     })
   }
 
   return {
     clean: findings.length === 0,
-    findings
+    findings,
   } satisfies GcReport
 })
 
@@ -671,7 +661,7 @@ export const scanGraphEntropy = (
     readonly checkUntestedDomainFns?: boolean | undefined
     readonly checkDeciderPropertyTests?: boolean | undefined
     readonly governanceDocs?: ReadonlyArray<GovernanceDocReference> | undefined
-  }
+  },
 ): GcReport =>
   Effect.runSync(
     decideGraphEntropy({
@@ -679,14 +669,14 @@ export const scanGraphEntropy = (
       expectedPatterns: options?.expectedPatterns,
       checkUntestedDomainFns: options?.checkUntestedDomainFns,
       checkDeciderPropertyTests: options?.checkDeciderPropertyTests,
-      governanceDocs: options?.governanceDocs
-    })
+      governanceDocs: options?.governanceDocs,
+    }),
   )
 
 export const parseGovernanceDocFrontmatter = (
   docPath: string,
   markdown: string,
-  existingFileCheck?: (relPath: string) => boolean
+  existingFileCheck?: (relPath: string) => boolean,
 ): GovernanceDocReference | null => {
   const normalized = markdown.replace(/^\uFEFF/, "")
   const match = normalized.match(/^---\r?\n([\s\S]*?)\r?\n---/)
@@ -804,12 +794,12 @@ export const parseGovernanceDocFrontmatter = (
     ...(enforcedByFiles !== undefined ? { enforcedByFiles, existingFiles } : {}),
     ...(referencedSpans !== undefined ? { referencedSpans } : {}),
     ...(referencedServices !== undefined ? { referencedServices } : {}),
-    ...(referencedErrors !== undefined ? { referencedErrors } : {})
+    ...(referencedErrors !== undefined ? { referencedErrors } : {}),
   }
 }
 
 export const loadGovernanceDocsFromDisk = (
-  repoRoot: string
+  repoRoot: string,
 ): ReadonlyArray<GovernanceDocReference> => {
   const candidateRelDirs: Array<string> = ["docs/adr", "docs/specs"]
 
@@ -826,8 +816,8 @@ export const loadGovernanceDocsFromDisk = (
             .map((entry) => entry.name)
             .sort((a, b) => a.localeCompare(b))
         },
-        catch: () => []
-      }).pipe(Effect.orElseSucceed(() => []))
+        catch: () => [],
+      }).pipe(Effect.orElseSucceed(() => [])),
     )
   }
 
@@ -854,8 +844,8 @@ export const loadGovernanceDocsFromDisk = (
     const entries = Effect.runSync(
       Effect.try({
         try: () => readdirSync(fullDir, { withFileTypes: true }),
-        catch: () => []
-      }).pipe(Effect.orElseSucceed(() => []))
+        catch: () => [],
+      }).pipe(Effect.orElseSucceed(() => [])),
     )
 
     const files = entries
@@ -864,7 +854,7 @@ export const loadGovernanceDocsFromDisk = (
           entry.isFile() &&
           entry.name.endsWith(".md") &&
           entry.name !== "README.md" &&
-          entry.name !== "TEMPLATE.md"
+          entry.name !== "TEMPLATE.md",
       )
       .map((entry) => entry.name)
       .sort((a, b) => a.localeCompare(b))
@@ -875,14 +865,12 @@ export const loadGovernanceDocsFromDisk = (
       const content = Effect.runSync(
         Effect.try({
           try: () => readFileSync(fullPath, "utf8"),
-          catch: () => ""
-        }).pipe(Effect.orElseSucceed(() => ""))
+          catch: () => "",
+        }).pipe(Effect.orElseSucceed(() => "")),
       )
 
-      const parsed = parseGovernanceDocFrontmatter(
-        `${relDir}/${file}`,
-        content,
-        (rel) => existsSync(join(repoRoot, rel))
+      const parsed = parseGovernanceDocFrontmatter(`${relDir}/${file}`, content, (rel) =>
+        existsSync(join(repoRoot, rel)),
       )
 
       if (parsed !== null) {
@@ -893,8 +881,8 @@ export const loadGovernanceDocsFromDisk = (
             const fileContent = Effect.runSync(
               Effect.try({
                 try: () => readFileSync(fullEfPath, "utf8"),
-                catch: () => ""
-              }).pipe(Effect.orElseSucceed(() => ""))
+                catch: () => "",
+              }).pipe(Effect.orElseSucceed(() => "")),
             )
             enforcedByFileContents[ef] = fileContent
           }
@@ -911,12 +899,12 @@ export const loadGovernanceDocsFromDisk = (
           results.push({
             ...parsed,
             markdown: content,
-            enforcedByFileContents
+            enforcedByFileContents,
           })
         } else {
           results.push({
             ...parsed,
-            enforcedByFileContents
+            enforcedByFileContents,
           })
         }
       }
@@ -928,24 +916,20 @@ export const loadGovernanceDocsFromDisk = (
 
 const PackageJsonSchema = Schema.Struct({
   name: Schema.optional(Schema.String),
-  dependencies: Schema.optional(Schema.Record(Schema.String, Schema.String))
+  dependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
 })
 
-const decodePackageJson = Schema.decodeUnknownOption(
-  Schema.fromJsonString(PackageJsonSchema)
-)
+const decodePackageJson = Schema.decodeUnknownOption(Schema.fromJsonString(PackageJsonSchema))
 
 const SKIPPED_PACKAGE_DEPS = new Set([
   "effect",
   "@effect/sql-d1",
   "@effect/sql-sqlite-do",
   "@effect/ai-typesafe",
-  "drizzle-orm"
+  "drizzle-orm",
 ])
 
-export const scanWorkspacePackageHygiene = (
-  repoRoot: string
-): ReadonlyArray<GcFinding> => {
+export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcFinding> => {
   const libsDir = join(repoRoot, "libs")
   const scopes = Effect.runSync(
     Effect.try({
@@ -958,8 +942,8 @@ export const scanWorkspacePackageHygiene = (
           .map((entry) => entry.name)
           .sort((a, b) => a.localeCompare(b))
       },
-      catch: () => []
-    }).pipe(Effect.orElseSucceed(() => []))
+      catch: () => [],
+    }).pipe(Effect.orElseSucceed(() => [])),
   )
 
   const collectTsFiles = (dir: string): ReadonlyArray<string> =>
@@ -985,8 +969,8 @@ export const scanWorkspacePackageHygiene = (
           }
           return result.sort((a, b) => a.localeCompare(b))
         },
-        catch: () => []
-      }).pipe(Effect.orElseSucceed(() => []))
+        catch: () => [],
+      }).pipe(Effect.orElseSucceed(() => [])),
     )
 
   const collectAllFiles = (dir: string): ReadonlyArray<string> =>
@@ -1008,8 +992,8 @@ export const scanWorkspacePackageHygiene = (
           }
           return result.sort((a, b) => a.localeCompare(b))
         },
-        catch: () => []
-      }).pipe(Effect.orElseSucceed(() => []))
+        catch: () => [],
+      }).pipe(Effect.orElseSucceed(() => [])),
     )
 
   const findings: Array<GcFinding> = []
@@ -1022,8 +1006,8 @@ export const scanWorkspacePackageHygiene = (
     const hasContractSrc = Effect.runSync(
       Effect.try({
         try: () => existsSync(contractSrcDir),
-        catch: () => false
-      }).pipe(Effect.orElseSucceed(() => false))
+        catch: () => false,
+      }).pipe(Effect.orElseSucceed(() => false)),
     )
 
     const siblingTierNames = ["core", "domain", "service", "infra"] as const
@@ -1059,21 +1043,19 @@ export const scanWorkspacePackageHygiene = (
           Effect.runSync(
             Effect.try({
               try: () => readFileSync(f, "utf8"),
-              catch: () => ""
-            }).pipe(Effect.orElseSucceed(() => ""))
-          )
+              catch: () => "",
+            }).pipe(Effect.orElseSucceed(() => "")),
+          ),
         )
-        .map((text) =>
-          text.replace(/export\s+(?:type\s+)?\{[^}]*\}\s+from\s+["'][^"']+["']/g, "")
-        )
+        .map((text) => text.replace(/export\s+(?:type\s+)?\{[^}]*\}\s+from\s+["'][^"']+["']/g, ""))
         .join("\n")
 
       for (const contractFile of contractFiles) {
         const content = Effect.runSync(
           Effect.try({
             try: () => readFileSync(contractFile, "utf8"),
-            catch: () => ""
-          }).pipe(Effect.orElseSucceed(() => ""))
+            catch: () => "",
+          }).pipe(Effect.orElseSucceed(() => "")),
         )
         const relContractFile = relative(repoRoot, contractFile).replace(/\\/g, "/")
         const exportRegex = /(?:^|\n)\s*export\s+(?:const|class|function)\s+([A-Za-z_$][\w$]*)/g
@@ -1084,19 +1066,10 @@ export const scanWorkspacePackageHygiene = (
           const internalStripped = content
             .replace(/(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/g, '""')
             .replace(
-              new RegExp(
-                `export\\s+(?:const|class|function)\\s+${symbolName}\\b[^\\n]*`,
-                "g"
-              ),
-              ""
+              new RegExp(`export\\s+(?:const|class|function)\\s+${symbolName}\\b[^\\n]*`, "g"),
+              "",
             )
-            .replace(
-              new RegExp(
-                `export\\s+type\\s+${symbolName}\\s*=[^\\n]*`,
-                "g"
-              ),
-              ""
-            )
+            .replace(new RegExp(`export\\s+type\\s+${symbolName}\\s*=[^\\n]*`, "g"), "")
           if (
             !symbolRefRegex.test(combinedSiblingContent) &&
             !symbolRefRegex.test(internalStripped)
@@ -1106,7 +1079,7 @@ export const scanWorkspacePackageHygiene = (
               nodeId: `${scope}/contract:${symbolName}`,
               location: relContractFile,
               message: `Contract symbol "${symbolName}" exported from "${relContractFile}" is never imported or used by any downstream package or fixture in scope "${scope}".`,
-              action: `Import "${symbolName}" in a downstream package/fixture or remove the unused contract export from "${relContractFile}".`
+              action: `Import "${symbolName}" in a downstream package/fixture or remove the unused contract export from "${relContractFile}".`,
             })
           }
         }
@@ -1124,8 +1097,8 @@ export const scanWorkspacePackageHygiene = (
             .map((entry) => entry.name)
             .sort((a, b) => a.localeCompare(b))
         },
-        catch: () => []
-      }).pipe(Effect.orElseSucceed(() => []))
+        catch: () => [],
+      }).pipe(Effect.orElseSucceed(() => [])),
     )
 
     for (const tier of tiers) {
@@ -1134,8 +1107,8 @@ export const scanWorkspacePackageHygiene = (
       const hasSrc = Effect.runSync(
         Effect.try({
           try: () => existsSync(srcDir),
-          catch: () => false
-        }).pipe(Effect.orElseSucceed(() => false))
+          catch: () => false,
+        }).pipe(Effect.orElseSucceed(() => false)),
       )
       if (!hasSrc) {
         continue
@@ -1146,8 +1119,8 @@ export const scanWorkspacePackageHygiene = (
         const content = Effect.runSync(
           Effect.try({
             try: () => readFileSync(file, "utf8"),
-            catch: () => ""
-          }).pipe(Effect.orElseSucceed(() => ""))
+            catch: () => "",
+          }).pipe(Effect.orElseSucceed(() => "")),
         )
         const stripped = content
           .replace(/\/\*[\s\S]*?\*\//g, "")
@@ -1160,7 +1133,7 @@ export const scanWorkspacePackageHygiene = (
             nodeId: relFilePath,
             location: relFilePath,
             message: `Source module "${relFilePath}" contains only an empty export ('export {}') — remove dead placeholder modules or export concrete contracts.`,
-            action: `Remove "${relFilePath}" or export concrete types/functions.`
+            action: `Remove "${relFilePath}" or export concrete types/functions.`,
           })
         }
       }
@@ -1169,8 +1142,8 @@ export const scanWorkspacePackageHygiene = (
       const pkgContent = Effect.runSync(
         Effect.try({
           try: () => (existsSync(pkgJsonPath) ? readFileSync(pkgJsonPath, "utf8") : ""),
-          catch: () => ""
-        }).pipe(Effect.orElseSucceed(() => ""))
+          catch: () => "",
+        }).pipe(Effect.orElseSucceed(() => "")),
       )
 
       if (pkgContent.length > 0) {
@@ -1182,8 +1155,8 @@ export const scanWorkspacePackageHygiene = (
           const scriptFiles = Effect.runSync(
             Effect.try({
               try: () => (existsSync(scriptsDir) ? collectAllFiles(scriptsDir) : []),
-              catch: () => []
-            }).pipe(Effect.orElseSucceed(() => []))
+              catch: () => [],
+            }).pipe(Effect.orElseSucceed(() => [])),
           )
           const allPackageFiles = [...srcFiles, ...scriptFiles]
           const combinedContent = allPackageFiles
@@ -1191,9 +1164,9 @@ export const scanWorkspacePackageHygiene = (
               Effect.runSync(
                 Effect.try({
                   try: () => readFileSync(f, "utf8"),
-                  catch: () => ""
-                }).pipe(Effect.orElseSucceed(() => ""))
-              )
+                  catch: () => "",
+                }).pipe(Effect.orElseSucceed(() => "")),
+              ),
             )
             .join("\n")
 
@@ -1213,7 +1186,7 @@ export const scanWorkspacePackageHygiene = (
                 nodeId: `${pkgName}:${depName}`,
                 location: relPkgPath,
                 message: `Package "${pkgName}" declares dependency "${depName}" in package.json, but no file in src/ imports it.`,
-                action: `Remove "${depName}" from dependencies in ${relPkgPath} or import it in src/.`
+                action: `Remove "${depName}" from dependencies in ${relPkgPath} or import it in src/.`,
               })
             }
           }

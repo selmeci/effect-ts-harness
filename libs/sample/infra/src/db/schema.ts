@@ -4,10 +4,10 @@ export const photos = sqliteTable("photos", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull(),
   albumId: text("album_id").notNull(),
-  createdAt: integer("created_at").notNull()
+  createdAt: integer("created_at").notNull(),
 })
 
 export const albumCounters = sqliteTable("album_counters", {
   albumId: text("album_id").primaryKey(),
-  count: integer("count").notNull()
+  count: integer("count").notNull(),
 })

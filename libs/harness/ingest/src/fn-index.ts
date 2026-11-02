@@ -23,9 +23,9 @@ export interface WorkspaceFnIndex {
 const PackageJsonSchema = Schema.Struct({
   nx: Schema.optional(
     Schema.Struct({
-      tags: Schema.optional(Schema.Array(Schema.String))
-    })
-  )
+      tags: Schema.optional(Schema.Array(Schema.String)),
+    }),
+  ),
 })
 
 const decodePackageJson = Schema.decodeOption(Schema.fromJsonString(PackageJsonSchema))
@@ -33,7 +33,7 @@ const decodePackageJson = Schema.decodeOption(Schema.fromJsonString(PackageJsonS
 export const indexEffectFnsInFile = (
   filePath: string,
   sourceText: string,
-  packageTag: PackageTag
+  packageTag: PackageTag,
 ): ReadonlyArray<IndexedEffectFn> => {
   const root = parse(Lang.TypeScript, sourceText).root()
   const results: Array<IndexedEffectFn> = []
@@ -80,7 +80,7 @@ export const indexEffectFnsInFile = (
         file: filePath,
         line,
         packageTag,
-        isStub
+        isStub,
       })
     }
   }
@@ -88,9 +88,7 @@ export const indexEffectFnsInFile = (
   return results
 }
 
-export const validateUniqueSpanNames = (
-  fns: ReadonlyArray<IndexedEffectFn>
-): WorkspaceFnIndex => {
+export const validateUniqueSpanNames = (fns: ReadonlyArray<IndexedEffectFn>): WorkspaceFnIndex => {
   const bySpanName = new Map<string, IndexedEffectFn>()
   const duplicates = new Set<string>()
 
@@ -104,7 +102,7 @@ export const validateUniqueSpanNames = (
 
   return {
     bySpanName,
-    duplicates: Array.from(duplicates)
+    duplicates: Array.from(duplicates),
   }
 }
 
@@ -165,23 +163,18 @@ const findSrcTsFiles = (repoRoot: string, subDir: string): ReadonlyArray<string>
   return results
 }
 
-export const buildWorkspaceFnIndex = (
-  repoRoot: string
-): Effect.Effect<WorkspaceFnIndex> =>
+export const buildWorkspaceFnIndex = (repoRoot: string): Effect.Effect<WorkspaceFnIndex> =>
   Effect.sync(() => {
     const allFns: Array<IndexedEffectFn> = []
-    const files = [
-      ...findSrcTsFiles(repoRoot, "libs"),
-      ...findSrcTsFiles(repoRoot, "apps")
-    ]
+    const files = [...findSrcTsFiles(repoRoot, "libs"), ...findSrcTsFiles(repoRoot, "apps")]
     for (const file of files) {
       const fullPath = path.join(repoRoot, file)
       if (!fs.existsSync(fullPath)) continue
       const content = Effect.runSync(
         Effect.try({
           try: () => fs.readFileSync(fullPath, "utf-8"),
-          catch: () => null
-        }).pipe(Effect.orElseSucceed(() => null))
+          catch: () => null,
+        }).pipe(Effect.orElseSucceed(() => null)),
       )
       if (content === null) continue
       const tag = resolvePackageTag(repoRoot, file)

@@ -7,9 +7,7 @@
   "paths": {
     "/photos": {
       "get": {
-        "tags": [
-          "photos"
-        ],
+        "tags": ["photos"],
         "operationId": "photos.listPhotos",
         "parameters": [],
         "security": [],
@@ -37,12 +35,7 @@
                         "type": "integer"
                       }
                     },
-                    "required": [
-                      "id",
-                      "name",
-                      "albumId",
-                      "createdAt"
-                    ],
+                    "required": ["id", "name", "albumId", "createdAt"],
                     "additionalProperties": false
                   }
                 }
@@ -52,9 +45,7 @@
         }
       },
       "post": {
-        "tags": [
-          "photos"
-        ],
+        "tags": ["photos"],
         "operationId": "photos.createPhoto",
         "parameters": [],
         "security": [],
@@ -80,12 +71,7 @@
                       "type": "integer"
                     }
                   },
-                  "required": [
-                    "id",
-                    "name",
-                    "albumId",
-                    "createdAt"
-                  ],
+                  "required": ["id", "name", "albumId", "createdAt"],
                   "additionalProperties": false
                 }
               }
@@ -115,10 +101,7 @@
                     "type": "string"
                   }
                 },
-                "required": [
-                  "name",
-                  "albumId"
-                ],
+                "required": ["name", "albumId"],
                 "additionalProperties": false
               }
             }
@@ -129,9 +112,7 @@
     },
     "/photos/{id}": {
       "get": {
-        "tags": [
-          "photos"
-        ],
+        "tags": ["photos"],
         "operationId": "photos.getPhoto",
         "parameters": [
           {
@@ -166,12 +147,7 @@
                       "type": "integer"
                     }
                   },
-                  "required": [
-                    "id",
-                    "name",
-                    "albumId",
-                    "createdAt"
-                  ],
+                  "required": ["id", "name", "albumId", "createdAt"],
                   "additionalProperties": false
                 }
               }
@@ -198,19 +174,14 @@
         "properties": {
           "_tag": {
             "type": "string",
-            "enum": [
-              "PhotoNotFoundError"
-            ]
+            "enum": ["PhotoNotFoundError"]
           },
           "id": {
             "type": "integer",
             "exclusiveMinimum": 0
           }
         },
-        "required": [
-          "_tag",
-          "id"
-        ],
+        "required": ["_tag", "id"],
         "additionalProperties": false
       },
       "AlbumQuotaExceededErrorEncoded": {
@@ -218,9 +189,7 @@
         "properties": {
           "_tag": {
             "type": "string",
-            "enum": [
-              "AlbumQuotaExceededError"
-            ]
+            "enum": ["AlbumQuotaExceededError"]
           },
           "albumId": {
             "type": "string"
@@ -230,11 +199,7 @@
             "minimum": 0
           }
         },
-        "required": [
-          "_tag",
-          "albumId",
-          "count"
-        ],
+        "required": ["_tag", "albumId", "count"],
         "additionalProperties": false
       }
     },

@@ -36,16 +36,16 @@ We need a deterministic enforcement architecture that prevents raw primitive typ
 
 ## Decision Drivers
 
-* Decode-only schemas (`Schema.Int`, `Schema.Natural`, `Schema.NonEmptyString`) must never masquerade as compile-time nominal types in `type:contract`, `type:service`, or `type:domain`.
-* Developers and autonomous agents must receive sub-second actionable feedback during file edits (`PostToolUse` / `oxlint`) explaining how to apply `Schema.brand("BrandName")`.
-* Cross-file type aliases and imported schemas that omit `"~effect/Brand"` must be caught deterministically during `harness plan-check` and `harness verify` even when the AST at the call site only references an identifier name.
-* Finite literal discriminants (`_tag: "Created"`) and `void` effects must not trigger false positives.
+- Decode-only schemas (`Schema.Int`, `Schema.Natural`, `Schema.NonEmptyString`) must never masquerade as compile-time nominal types in `type:contract`, `type:service`, or `type:domain`.
+- Developers and autonomous agents must receive sub-second actionable feedback during file edits (`PostToolUse` / `oxlint`) explaining how to apply `Schema.brand("BrandName")`.
+- Cross-file type aliases and imported schemas that omit `"~effect/Brand"` must be caught deterministically during `harness plan-check` and `harness verify` even when the AST at the call site only references an identifier name.
+- Finite literal discriminants (`_tag: "Created"`) and `void` effects must not trigger false positives.
 
 ## Considered Options
 
-* **Option 1:** Two-Layer Gate (`oxlint` AST Syntax Bans + Type-Aware `ts-morph` `"~effect/Brand"` Graph Policy) with Deterministic Routing and Triage.
-* **Option 2:** AST-Only Linting (`tools/oxlint/syntax-bans.js`) Based Solely on Identifier Naming Regexes.
-* **Option 3:** Runtime Wrapper Classes (`new ValueObject(raw)`) Instead of Zero-Cost Effect `Schema.brand` Phantom Brands.
+- **Option 1:** Two-Layer Gate (`oxlint` AST Syntax Bans + Type-Aware `ts-morph` `"~effect/Brand"` Graph Policy) with Deterministic Routing and Triage.
+- **Option 2:** AST-Only Linting (`tools/oxlint/syntax-bans.js`) Based Solely on Identifier Naming Regexes.
+- **Option 3:** Runtime Wrapper Classes (`new ValueObject(raw)`) Instead of Zero-Cost Effect `Schema.brand` Phantom Brands.
 
 ## Decision Outcome
 
@@ -75,19 +75,19 @@ Wrapping every identifier, count, and timestamp in a runtime class instance (`cl
 
 ### Positive Consequences
 
-* Compile-time nominal type safety across all aggregate IDs, quantities, counts, timestamps, and domain strings with zero runtime allocation overhead.
-* Immediate remediation hints in `oxlint`, `checkEffectGraph`, and `Harness.triageFailure` guiding agents directly to `Schema.brand` and `agent-patterns/schema.md`.
-* Full alignment between `plan-check` skeletons (`stub<A, E, R>()`) and production implementations.
+- Compile-time nominal type safety across all aggregate IDs, quantities, counts, timestamps, and domain strings with zero runtime allocation overhead.
+- Immediate remediation hints in `oxlint`, `checkEffectGraph`, and `Harness.triageFailure` guiding agents directly to `Schema.brand` and `agent-patterns/schema.md`.
+- Full alignment between `plan-check` skeletons (`stub<A, E, R>()`) and production implementations.
 
 ### Negative Consequences and Trade-offs
 
-* Constructing domain values in tests and in-memory adapters requires calling `<BrandSchema>.make(value)` or `Schema.decodeSync(<StructSchema>)(raw)` rather than passing bare string or number literals directly to typed domain functions.
+- Constructing domain values in tests and in-memory adapters requires calling `<BrandSchema>.make(value)` or `Schema.decodeSync(<StructSchema>)(raw)` rather than passing bare string or number literals directly to typed domain functions.
 
 ### Deterministic Enforcement
 
-| Rule | Enforced By | Gate / Mechanism | Governed Symbols |
-| :--- | :--- | :--- | :--- |
-| Ban raw primitive type aliases, unbranded contract schemas, raw primitive boundary annotations, and `as Brand` casts | `tools/oxlint/syntax-bans.js` | `harness/syntax-bans` (`oxlint --deny-warnings`) | `Album.decide`, `Sample.uploadPhoto`, `Sample.getPhotoById` |
-| Verify `"~effect/Brand"` presence on `type:contract` schemas and struct/error fields | `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/policy-check.ts` | `checkEffectGraph` (`unbranded-contract-schema`) | `PhotoNotFoundError`, `AlbumQuotaExceededError` |
-| Verify `"~effect/Brand"` presence on `type:service` and `type:domain` parameters, success channels, and `as` casts | `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/policy-check.ts` | `checkEffectGraph` (`unbranded-primitive-boundary`) | `PhotoRepo`, `AlbumCounterClient`, `Album.decide` |
-| Deterministically route and triage branded type steps and failures to `agent-patterns/schema.md` | `libs/harness/decision/src/idiom-router.ts`, `libs/harness/decision/src/triage-decision.ts` | `Harness.routeStep`, `Harness.triageFailure` | `Harness.routeStep`, `Harness.triageFailure` |
+| Rule                                                                                                                 | Enforced By                                                                                 | Gate / Mechanism                                    | Governed Symbols                                            |
+| :------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------ | :-------------------------------------------------- | :---------------------------------------------------------- |
+| Ban raw primitive type aliases, unbranded contract schemas, raw primitive boundary annotations, and `as Brand` casts | `tools/oxlint/syntax-bans.js`                                                               | `harness/syntax-bans` (`oxlint --deny-warnings`)    | `Album.decide`, `Sample.uploadPhoto`, `Sample.getPhotoById` |
+| Verify `"~effect/Brand"` presence on `type:contract` schemas and struct/error fields                                 | `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/policy-check.ts`        | `checkEffectGraph` (`unbranded-contract-schema`)    | `PhotoNotFoundError`, `AlbumQuotaExceededError`             |
+| Verify `"~effect/Brand"` presence on `type:service` and `type:domain` parameters, success channels, and `as` casts   | `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/policy-check.ts`        | `checkEffectGraph` (`unbranded-primitive-boundary`) | `PhotoRepo`, `AlbumCounterClient`, `Album.decide`           |
+| Deterministically route and triage branded type steps and failures to `agent-patterns/schema.md`                     | `libs/harness/decision/src/idiom-router.ts`, `libs/harness/decision/src/triage-decision.ts` | `Harness.routeStep`, `Harness.triageFailure`        | `Harness.routeStep`, `Harness.triageFailure`                |

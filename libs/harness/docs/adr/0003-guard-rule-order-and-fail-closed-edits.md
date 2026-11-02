@@ -20,24 +20,24 @@ The same session showed a second failure mode. The guard hook imports `policy.ts
 
 ## Decision Drivers
 
-* Deterministic rules hold absolute veto (harness:ADR-0001). clef only advises on what the deterministic layer leaves open, and its fallback is `ask`, never `allow`.
-* A rule that takes away an automatic `allow` is useless if a prefix match can grant `allow` before it runs.
-* Ambiguous but sometimes legitimate commands (`find dist -delete` in a clean-up task) must not be hard-denied, because that pushes agents to obfuscate.
-* Irreversible loss of uncommitted git work must not depend on clef. Probe: `git checkout -- .` scored destructive = 0.26, which means `allow`.
-* An agent must be able to recover from its own edit mistakes, except in the guard itself, where failing closed is the safe default.
+- Deterministic rules hold absolute veto (harness:ADR-0001). clef only advises on what the deterministic layer leaves open, and its fallback is `ask`, never `allow`.
+- A rule that takes away an automatic `allow` is useless if a prefix match can grant `allow` before it runs.
+- Ambiguous but sometimes legitimate commands (`find dist -delete` in a clean-up task) must not be hard-denied, because that pushes agents to obfuscate.
+- Irreversible loss of uncommitted git work must not depend on clef. Probe: `git checkout -- .` scored destructive = 0.26, which means `allow`.
+- An agent must be able to recover from its own edit mistakes, except in the guard itself, where failing closed is the safe default.
 
 ## Considered Options
 
-* **Option 1:** Ordered stages deny → ask → escalate → allowlist, with escalate (not deny) for ambiguous forms and ask for git discards.
-* **Option 2:** Keep the allowlist first and add more denylist tokens (`-delete`, `checkout --`, …).
-* **Option 3:** Replace regex rules with a full shell parser and argument-level policy.
+- **Option 1:** Ordered stages deny → ask → escalate → allowlist, with escalate (not deny) for ambiguous forms and ask for git discards.
+- **Option 2:** Keep the allowlist first and add more denylist tokens (`-delete`, `checkout --`, …).
+- **Option 3:** Replace regex rules with a full shell parser and argument-level policy.
 
 ## Decision Outcome
 
 **Chosen option:** "Option 1 — ordered stages deny → ask → escalate → allowlist". Binding rules:
 
 1. Stage order in `classifyCommand` is: `DENYLIST` / `SECRET_FILE_PATTERN` / `GUARD_SELF_INVOCATION_PATTERN` → **deny**; `ASKLIST` / `GIT_DISCARD_PATTERNS` → **ask**; `DESTRUCTIVE_ARGUMENT_PATTERNS` / `OBFUSCATION_PATTERNS` → **escalate**; then `SHELL_OPERATORS` and the read-only pipe allowance; the prefix `ALLOWLIST` comes **last**.
-2. New rules that take away an automatic `allow` must be added before stage 4 and must escalate, unless the action is irreversible *and* clef has been shown to underrate it. In that case they ask.
+2. New rules that take away an automatic `allow` must be added before stage 4 and must escalate, unless the action is irreversible _and_ clef has been shown to underrate it. In that case they ask.
 3. Secret files are matched as path tokens, never as substrings, so identifiers such as `process.env` stay allowed.
 4. Agents may not invoke the `guard` subcommand. Only the IDE hook calls it.
 5. Edits to `libs/harness/gates/src/policy.ts` are made as **one complete write** after the new rules pass their tests. Partial in-place edits are avoided, because a broken file locks the agent out (fail-closed).
@@ -56,22 +56,22 @@ The same session showed a second failure mode. The guard hook imports `policy.ts
 
 ### Positive Consequences
 
-* `find … -delete`, `-exec rm`, file redirection and obfuscated words always reach clef. Probes on 2026-10-29: `find -delete` scored 0.91 (deny), `-exec rm` 0.80 (deny), `cat .[e]nv` secretAccess 0.92 (deny).
-* Harmless `process.env` greps are no longer denied, so agents have no reason to obfuscate.
-* The guard can't be used as an oracle to search for bypasses.
+- `find … -delete`, `-exec rm`, file redirection and obfuscated words always reach clef. Probes on 2026-10-29: `find -delete` scored 0.91 (deny), `-exec rm` 0.80 (deny), `cat .[e]nv` secretAccess 0.92 (deny).
+- Harmless `process.env` greps are no longer denied, so agents have no reason to obfuscate.
+- The guard can't be used as an oracle to search for bypasses.
 
 ### Negative Consequences and Trade-offs
 
-* Read-only `find … -exec grep` and `cat a > /tmp/b` now cost one clef call (about 100 ms warm). clef allows both.
-* Discarding git work always needs a human click, even when it is intended.
-* A broken `policy.ts` still locks the agent out until a human repairs it. This is accepted as fail-closed; rule 5 lowers the chance.
+- Read-only `find … -exec grep` and `cat a > /tmp/b` now cost one clef call (about 100 ms warm). clef allows both.
+- Discarding git work always needs a human click, even when it is intended.
+- A broken `policy.ts` still locks the agent out until a human repairs it. This is accepted as fail-closed; rule 5 lowers the chance.
 
 ### Deterministic Enforcement
 
-| Rule | Enforced By | Gate / Mechanism | Governed Symbols |
-| :--- | :--- | :--- | :--- |
+| Rule                                          | Enforced By                        | Gate / Mechanism                                                                                         | Governed Symbols             |
+| :-------------------------------------------- | :--------------------------------- | :------------------------------------------------------------------------------------------------------- | :--------------------------- |
 | Stage order deny → ask → escalate → allowlist | `libs/harness/gates/src/policy.ts` | `classifyCommand` + `libs/harness/gates/test/policy.test.ts` (REQ-1.4 pipe case, REQ-1.1 `find -delete`) | `Harness.decideGuardCommand` |
-| Git discards ask, never escalate | `libs/harness/gates/src/policy.ts` | `GIT_DISCARD_PATTERNS` + policy tests REQ-1.2 | `Harness.decideGuardCommand` |
-| Secret files as path tokens only | `libs/harness/gates/src/policy.ts` | `SECRET_FILE_PATTERN` + policy tests REQ-3.1 / REQ-3.2 | `Harness.decideGuardCommand` |
-| No agent-initiated guard calls | `libs/harness/gates/src/policy.ts` | `GUARD_SELF_INVOCATION_PATTERN` + policy tests REQ-2.1 / REQ-2.2 | `Harness.decideGuardCommand` |
-| Destructive argument & obfuscation escalation | `libs/harness/gates/src/policy.ts` | `DESTRUCTIVE_ARGUMENT_PATTERNS` + `OBFUSCATION_PATTERNS` + policy tests REQ-1.1 / REQ-1.3 / REQ-3.3 | `Harness.decideGuardCommand` |
+| Git discards ask, never escalate              | `libs/harness/gates/src/policy.ts` | `GIT_DISCARD_PATTERNS` + policy tests REQ-1.2                                                            | `Harness.decideGuardCommand` |
+| Secret files as path tokens only              | `libs/harness/gates/src/policy.ts` | `SECRET_FILE_PATTERN` + policy tests REQ-3.1 / REQ-3.2                                                   | `Harness.decideGuardCommand` |
+| No agent-initiated guard calls                | `libs/harness/gates/src/policy.ts` | `GUARD_SELF_INVOCATION_PATTERN` + policy tests REQ-2.1 / REQ-2.2                                         | `Harness.decideGuardCommand` |
+| Destructive argument & obfuscation escalation | `libs/harness/gates/src/policy.ts` | `DESTRUCTIVE_ARGUMENT_PATTERNS` + `OBFUSCATION_PATTERNS` + policy tests REQ-1.1 / REQ-1.3 / REQ-3.3      | `Harness.decideGuardCommand` |
