@@ -170,8 +170,9 @@ overrides:
   '@typescript-eslint/utils>typescript': 5.9.3
   '@typescript-eslint/typescript-estree>typescript': 5.9.3
   '@typescript-eslint/parser>typescript': 5.9.3
+  '@effect/platform-node-shared': 4.0.0
 
-packageExtensionsChecksum: sha256-4FOAEI45uCng4rJRmuzXSM4CO1kqRegepxl2UxVr6Gg=
+packageExtensionsChecksum: sha256-evsEeDQc8ZKaZ65JshnIi5/KOI21yID0GJYADQWrYEw=
 
 importers:
 
@@ -366,6 +367,49 @@ importers:
         specifier: 5.0.3
         version: 5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))
 
+  libs/es/infra:
+    dependencies:
+      '@effect/sql-sqlite-do':
+        specifier: 4.0.0
+        version: 4.0.0(effect@4.0.0)
+      '@harness/es-contract':
+        specifier: workspace:*
+        version: link:../contract
+      '@harness/es-core':
+        specifier: workspace:*
+        version: link:../core
+      effect:
+        specifier: 4.0.0
+        version: 4.0.0
+      ts-pattern:
+        specifier: 5.9.2
+        version: 5.9.2
+    devDependencies:
+      '@alchemy.run/cloudflare-runtime':
+        specifier: 2.0.0-beta.80
+        version: 2.0.0-beta.80(@distilled.cloud/cloudflare@1.0.0-rc.13(effect@4.0.0))(@effect/platform-node@4.0.0(effect@4.0.0)(redis@6.3.0))(@types/node@26.6.5)(effect@4.0.0)(rolldown@1.2.5)(typescript@7.0.2)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))
+      '@cloudflare/workers-types':
+        specifier: 5.20261024.1
+        version: 5.20261024.1
+      '@effect/platform-node':
+        specifier: 4.0.0
+        version: 4.0.0(effect@4.0.0)(redis@6.3.0)
+      '@effect/vitest':
+        specifier: 4.0.0
+        version: 4.0.0(effect@4.0.0)(vitest@5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)))
+      '@harness/gates':
+        specifier: workspace:*
+        version: link:../../harness/gates
+      '@harness/graph':
+        specifier: workspace:*
+        version: link:../../harness/graph
+      '@types/node':
+        specifier: 26.6.5
+        version: 26.6.5
+      vitest:
+        specifier: 5.0.3
+        version: 5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))
+
   libs/harness/decision:
     dependencies:
       '@effect/ai-typesafe':
@@ -520,7 +564,7 @@ importers:
         version: link:../service
       drizzle-orm:
         specifier: 1.0.0-rc.5-ab785fc
-        version: 1.0.0-rc.5-ab785fc(@cloudflare/workers-types@5.20261024.1)(@effect/sql-d1@4.0.0(effect@4.0.0))(@effect/sql-sqlite-do@4.0.0(effect@4.0.0))(@electric-sql/pglite@0.3.15)(@libsql/client@0.17.4)(effect@4.0.0)(valibot@1.2.0(typescript@7.0.2))(zod@4.6.5)
+        version: 1.0.0-rc.5-ab785fc(@cloudflare/workers-types@5.20261024.1)(@effect/sql-d1@4.0.0(effect@4.0.0))(@effect/sql-sqlite-do@4.0.0(effect@4.0.0))(@electric-sql/pglite@0.3.15)(@libsql/client@0.17.4)(effect@4.0.0)(valibot@1.2.0(typescript@5.9.3))(zod@4.6.5)
       effect:
         specifier: 4.0.0
         version: 4.0.0
@@ -528,6 +572,12 @@ importers:
         specifier: 5.9.2
         version: 5.9.2
     devDependencies:
+      '@alchemy.run/cloudflare-runtime':
+        specifier: 2.0.0-beta.80
+        version: 2.0.0-beta.80(@distilled.cloud/cloudflare@1.0.0-rc.13(effect@4.0.0))(@effect/platform-node@4.0.0(effect@4.0.0)(redis@6.3.0))(@types/node@26.6.5)(effect@4.0.0)(rolldown@1.2.5)(typescript@5.9.3)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))
+      '@effect/platform-node':
+        specifier: 4.0.0
+        version: 4.0.0(effect@4.0.0)(redis@6.3.0)
       '@effect/vitest':
         specifier: 4.0.0
         version: 4.0.0(effect@4.0.0)(vitest@5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)))
@@ -1375,11 +1425,11 @@ packages:
       react: '>=19.0.0 <20.0.0'
       scheduler: '>=0.25.0 <0.29.0'
 
-  '@effect/platform-node-shared@4.0.6':
-    resolution: {integrity: sha512-0PhyC4uG30xGtsajnxjkcBWfTjNRzUh4ZKl1Kvo/MNyCTb+W2O+fBzf7wCRCoqt+nLudiq4V7vX40Q8XIBuMaQ==}
+  '@effect/platform-node-shared@4.0.0':
+    resolution: {integrity: sha512-VBXHJU9UXVZPdQGGDRjGXpo+TpOzRwZuMrdKAtIxi1qwcRftmacZ1zTgIrzBa0Z2RA2KVkoOecQUsTlt/nJZhw==}
     engines: {node: '>=18.0.0'}
     peerDependencies:
-      effect: ^4.0.6
+      effect: ^4.0.0
 
   '@effect/platform-node@4.0.0':
     resolution: {integrity: sha512-/L+4MUbl8FejPKLHLROYSOebvHnfixkP8KiblSD/DE5uH5xENZBHaux4nH6XMnRP+lr8ajpEJFS8sUrmmxFJeQ==}
@@ -5045,6 +5095,29 @@ snapshots:
       - proxy-agent
       - typescript
 
+  '@alchemy.run/cloudflare-runtime@2.0.0-beta.80(@distilled.cloud/cloudflare@1.0.0-rc.13(effect@4.0.0))(@effect/platform-node@4.0.0(effect@4.0.0)(redis@6.3.0))(@types/node@26.6.5)(effect@4.0.0)(rolldown@1.2.5)(typescript@7.0.2)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))':
+    dependencies:
+      '@alchemy.run/node-utils': 2.0.0-beta.80
+      '@cloudflare/unenv-preset': 2.16.2(unenv@2.0.0-rc.24)(workerd@1.20260918.1)
+      '@distilled.cloud/cloudflare': 1.0.0-rc.13(effect@4.0.0)
+      '@puppeteer/browsers': 3.2.6(yauzl@3.4.0)
+      capnp-es: 0.0.16(typescript@7.0.2)
+      effect: 4.0.0
+      magic-string: 0.30.21
+      mime: 4.1.1
+      sharp: 0.35.5(@types/node@26.6.5)
+      unenv: 2.0.0-rc.24
+      workerd: 1.20260918.1
+      yauzl: 3.4.0
+    optionalDependencies:
+      '@effect/platform-node': 4.0.0(effect@4.0.0)(redis@6.3.0)
+      rolldown: 1.2.5
+      vite: 8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)
+    transitivePeerDependencies:
+      - '@types/node'
+      - proxy-agent
+      - typescript
+
   '@alchemy.run/floci@2.0.0-beta.80(effect@4.0.0)':
     dependencies:
       effect: 4.0.0
@@ -5973,7 +6046,7 @@ snapshots:
       react: 19.3.1
       scheduler: 0.28.0
 
-  '@effect/platform-node-shared@4.0.6(effect@4.0.0)':
+  '@effect/platform-node-shared@4.0.0(effect@4.0.0)':
     dependencies:
       '@types/ws': 8.18.2
       effect: 4.0.0
@@ -5984,7 +6057,7 @@ snapshots:
 
   '@effect/platform-node@4.0.0(effect@4.0.0)(redis@6.3.0)':
     dependencies:
-      '@effect/platform-node-shared': 4.0.6(effect@4.0.0)
+      '@effect/platform-node-shared': 4.0.0(effect@4.0.0)
       effect: 4.0.0
       redis: 6.3.0
       undici: 8.12.3
@@ -7468,6 +7541,10 @@ snapshots:
     optionalDependencies:
       typescript: 5.9.3
 
+  capnp-es@0.0.16(typescript@7.0.2):
+    optionalDependencies:
+      typescript: 7.0.2
+
   capnweb@0.12.0: {}
 
   chai@6.3.0: {}
@@ -7624,18 +7701,6 @@ snapshots:
       '@libsql/client': 0.17.4
       effect: 4.0.0
       valibot: 1.2.0(typescript@5.9.3)
-      zod: 4.6.5
-    optional: true
-
-  drizzle-orm@1.0.0-rc.5-ab785fc(@cloudflare/workers-types@5.20261024.1)(@effect/sql-d1@4.0.0(effect@4.0.0))(@effect/sql-sqlite-do@4.0.0(effect@4.0.0))(@electric-sql/pglite@0.3.15)(@libsql/client@0.17.4)(effect@4.0.0)(valibot@1.2.0(typescript@7.0.2))(zod@4.6.5):
-    optionalDependencies:
-      '@cloudflare/workers-types': 5.20261024.1
-      '@effect/sql-d1': 4.0.0(effect@4.0.0)
-      '@effect/sql-sqlite-do': 4.0.0(effect@4.0.0)
-      '@electric-sql/pglite': 0.3.15
-      '@libsql/client': 0.17.4
-      effect: 4.0.0
-      valibot: 1.2.0(typescript@7.0.2)
       zod: 4.6.5
 
   dunder-proto@1.0.1:
@@ -9044,11 +9109,6 @@ snapshots:
   valibot@1.2.0(typescript@5.9.3):
     optionalDependencies:
       typescript: 5.9.3
-
-  valibot@1.2.0(typescript@7.0.2):
-    optionalDependencies:
-      typescript: 7.0.2
-    optional: true
 
   vary@1.1.2: {}
 

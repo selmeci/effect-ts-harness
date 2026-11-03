@@ -1,9 +1,23 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Layer } from "effect"
-import { DatabaseSync } from "node:sqlite"
-import { existsSync } from "node:fs"
+import { Effect, Layer, type Scope } from "effect"
+import { existsSync, mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { D1Client } from "@effect/sql-d1"
+import {
+  BINDING_D1_OBJECT,
+  D1_OBJECT_CLASS_NAME,
+  SERVICE_D1,
+  SERVICE_D1_STORAGE,
+} from "@alchemy.run/cloudflare-runtime/core/bindings/d1/D1Options"
+import {
+  type InternalWorkerModule,
+  loadInternalWorker,
+} from "@alchemy.run/cloudflare-runtime/core/internal/internal-worker"
+import { connect } from "@alchemy.run/cloudflare-runtime/core/platform-proxy/connect"
+import { BINDING_PLATFORM_PROXY_TOKEN } from "@alchemy.run/cloudflare-runtime/core/platform-proxy/PlatformProxyProtocol"
+import type * as WorkerdConfig from "@alchemy.run/cloudflare-runtime/core/workerd/Config"
+import { Workerd, WorkerdLive } from "@alchemy.run/cloudflare-runtime/core/workerd/Workerd"
 import { makeWithDefaults } from "drizzle-orm/effect-d1"
 import { buildWorkspaceFnIndex, runWithTestTracer } from "@harness/ingest"
 import { AlbumId, GreetingMessage, PhotoId, PhotoName } from "@harness/sample-contract"
@@ -31,127 +45,125 @@ const resolveRepoRoot = (startDir: string): string => {
 }
 
 type D1Database = Parameters<typeof D1Client.layer>[0]["db"]
-type D1PreparedStatement = ReturnType<D1Database["prepare"]>
-type D1Result<T> =
-  Awaited<ReturnType<D1PreparedStatement["all"]>> extends { results: Array<unknown> }
-    ? Omit<Awaited<ReturnType<D1PreparedStatement["all"]>>, "results"> & { results: Array<T> }
-    : never
-
-const createMockD1Database = (): {
-  sqlite: DatabaseSync
-  mockD1: D1Database
-} => {
-  const sqlite = new DatabaseSync(":memory:")
-  sqlite.exec(`
-    CREATE TABLE photos (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      album_id TEXT NOT NULL,
-      created_at INTEGER NOT NULL
-    );
-    CREATE TABLE album_counters (
-      album_id TEXT PRIMARY KEY,
-      count INTEGER NOT NULL
-    );
-  `)
-
-  const createMeta = () => ({
-    served_by: "local",
-    duration: 0,
-    changes: 0,
-    last_row_id: 0,
-    changed_db: false,
-    size_after: 0,
-    rows_read: 0,
-    rows_written: 0,
-    sql_duration_ms: 0,
-  })
-
-  const createStatement = (
-    sql: string,
-    boundParams: Array<string | number | bigint | Buffer | null> = [],
-  ): D1PreparedStatement => {
-    function raw<T = Array<unknown>>(options: {
-      columnNames: true
-    }): Promise<[Array<string>, ...Array<T>]>
-    function raw<T = Array<unknown>>(options?: { columnNames?: false }): Promise<Array<T>>
-    async function raw<T = Array<unknown>>(options?: {
-      columnNames?: boolean
-    }): Promise<[Array<string>, ...Array<T>] | Array<T>> {
-      const stmt = sqlite.prepare(sql)
-      const rows = stmt
-        .all(...boundParams)
-        .map((row: Record<string, unknown>) => Object.values(row) as T)
-      if (options?.columnNames === true) {
-        return [[] as Array<string>, ...rows]
-      }
-      return rows
-    }
-
-    function first<T = unknown>(colName: string): Promise<T | null>
-    function first<T = Record<string, unknown>>(): Promise<T | null>
-    async function first<T = Record<string, unknown>>(colName?: string): Promise<T | null> {
-      const stmt = sqlite.prepare(sql)
-      const results = stmt.all(...boundParams)
-      const row = results[0] as Record<string, unknown> | undefined
-      if (!row) return null
-      if (typeof colName === "string") {
-        return (row[colName] as T | undefined) ?? null
-      }
-      return row as T
-    }
-
-    const statement: D1PreparedStatement = {
-      bind(...params: Array<unknown>) {
-        return createStatement(sql, params as Array<string | number | bigint | Buffer | null>)
-      },
-      all: async <T = Record<string, unknown>>(): Promise<D1Result<T>> => {
-        const stmt = sqlite.prepare(sql)
-        const results = stmt.all(...boundParams) as Array<T>
-        return {
-          results,
-          success: true,
-          meta: createMeta(),
-        }
-      },
-      raw,
-      first,
-      run: async <T = Record<string, unknown>>(): Promise<D1Result<T>> => {
-        const stmt = sqlite.prepare(sql)
-        const results = stmt.all(...boundParams) as Array<T>
-        return {
-          results,
-          success: true,
-          meta: createMeta(),
-        }
-      },
-    }
-    return statement
-  }
-
-  const mockD1: D1Database = {
-    prepare(sql: string) {
-      return createStatement(sql)
-    },
-    batch: async <T = unknown>(
-      statements: Array<D1PreparedStatement>,
-    ): Promise<Array<D1Result<T>>> => Promise.all(statements.map((s) => s.all<T>())),
-    exec: async (query: string) => {
-      sqlite.exec(query)
-      return { count: 0, duration: 0 }
-    },
-    withSession() {
-      return {
-        prepare: (sql: string) => createStatement(sql),
-        batch: <T = unknown>(statements: Array<D1PreparedStatement>) => mockD1.batch<T>(statements),
-        getBookmark: () => null,
-      }
-    },
-    dump: async () => new ArrayBuffer(0),
-  }
-
-  return { sqlite, mockD1 }
+const formatWorkerModules = (bundle: InternalWorkerModule): Array<WorkerdConfig.Worker_Module> => {
+  const mainContent = bundle.modules[bundle.main] ?? ""
+  return [
+    { name: bundle.main, esModule: mainContent },
+    ...Object.entries(bundle.modules)
+      .filter(([name]) => name !== bundle.main)
+      .map(([name, esModule]) => ({ name, esModule })),
+  ]
 }
+
+const createWorkerdD1Database: Effect.Effect<D1Database, never, Scope.Scope> = Effect.gen(
+  function* () {
+    const tmpDir = yield* Effect.acquireRelease(
+      Effect.sync(() => mkdtempSync(join(tmpdir(), "harness-sample-d1-"))),
+      (dir) =>
+        Effect.sync(() => {
+          rmSync(dir, { recursive: true, force: true })
+        }),
+    )
+    const [d1Worker, proxyWorker] = yield* Effect.promise(() =>
+      Promise.all([
+        loadInternalWorker("#cloudflare-runtime-core-worker/bindings/d1/D1.worker"),
+        loadInternalWorker("#cloudflare-runtime-core-worker/platform-proxy/PlatformProxy.worker"),
+      ]),
+    )
+    const workerd = yield* Workerd
+    const token = crypto.randomUUID()
+    const ports = yield* workerd.serve({
+      sockets: [
+        {
+          name: "entry",
+          address: "127.0.0.1:0",
+          http: {},
+          service: { name: "proxy" },
+        },
+      ],
+      services: [
+        { name: SERVICE_D1_STORAGE, disk: { path: tmpDir, writable: true } },
+        {
+          name: SERVICE_D1,
+          worker: {
+            compatibilityDate: workerd.compatibilityDate,
+            modules: formatWorkerModules(d1Worker),
+            durableObjectNamespaces: [
+              {
+                className: D1_OBJECT_CLASS_NAME,
+                enableSql: true,
+                uniqueKey: `cloudflare-runtime-${D1_OBJECT_CLASS_NAME}`,
+                preventEviction: true,
+              },
+            ],
+            durableObjectStorage: { localDisk: SERVICE_D1_STORAGE },
+            bindings: [
+              {
+                name: BINDING_D1_OBJECT,
+                durableObjectNamespace: { className: D1_OBJECT_CLASS_NAME },
+              },
+            ],
+          },
+        },
+        {
+          name: "proxy",
+          worker: {
+            compatibilityDate: workerd.compatibilityDate,
+            compatibilityFlags: ["nodejs_compat"],
+            modules: formatWorkerModules(proxyWorker),
+            bindings: [
+              { name: BINDING_PLATFORM_PROXY_TOKEN, text: token },
+              {
+                name: "DB",
+                wrapped: {
+                  moduleName: "cloudflare-internal:d1-api",
+                  innerBindings: [
+                    {
+                      name: "fetcher",
+                      service: {
+                        name: SERVICE_D1,
+                        props: { json: JSON.stringify({ databaseId: "sample-db" }) },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      ],
+    })
+    const entryPort = ports.entry
+    const connected = yield* Effect.promise(() =>
+      connect<{ readonly DB: D1Database }>({
+        url: `http://127.0.0.1:${String(entryPort)}`,
+        token,
+      }),
+    )
+    const d1 = connected.env.DB
+    yield* Effect.promise(async () => {
+      await d1
+        .prepare(`
+          CREATE TABLE photos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            album_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+          )
+        `)
+        .run()
+      await d1
+        .prepare(`
+          CREATE TABLE album_counters (
+            album_id TEXT PRIMARY KEY,
+            count INTEGER NOT NULL
+          )
+        `)
+        .run()
+    })
+    return d1
+  },
+).pipe(Effect.provide(WorkerdLive), Effect.orDie)
 
 describe("sample-infra", () => {
   it.effect("runs logToConsole without failing", () =>
@@ -171,9 +183,9 @@ describe("sample-infra", () => {
     it.effect("inserts, fetches by ID, lists all photos, and decodes into Photo schema", () =>
       Effect.scoped(
         Effect.gen(function* () {
-          const { mockD1 } = createMockD1Database()
+          const d1 = yield* createWorkerdD1Database
           const drizzleDb = yield* makeWithDefaults({}).pipe(
-            Effect.provide(D1Client.layer({ db: mockD1 })),
+            Effect.provide(D1Client.layer({ db: d1 })),
           )
 
           const repoLayer = makePhotoRepoD1Layer(drizzleDb)
@@ -264,116 +276,126 @@ describe("sample-infra", () => {
   // Test 3: Distributed W3C traceparent correlation across Worker/DO boundary
   describe("distributed W3C traceparent correlation", () => {
     it.effect("propagates traceparent header and links remote DO spans into test trace graph", () =>
-      Effect.gen(function* () {
-        const testId = "libs/sample/infra/test/index.test.ts::distributed traceparent correlation"
-        const repoRoot = resolveRepoRoot(process.cwd())
-        const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
+      Effect.scoped(
+        Effect.gen(function* () {
+          const testId = "libs/sample/infra/test/index.test.ts::distributed traceparent correlation"
+          const repoRoot = resolveRepoRoot(process.cwd())
+          const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
 
-        const { mockD1, sqlite } = createMockD1Database()
-        const drizzleDb = yield* makeWithDefaults({}).pipe(
-          Effect.provide(D1Client.layer({ db: mockD1 })),
-        )
+          const d1 = yield* createWorkerdD1Database
+          const drizzleDb = yield* makeWithDefaults({}).pipe(
+            Effect.provide(D1Client.layer({ db: d1 })),
+          )
 
-        const doRpcHandler = makeAlbumCounterRpcHandler(drizzleDb)
-        const httpClient = toHttpClient(doRpcHandler)
-        const albumCounterLayer = makeAlbumCounterRpcClient(httpClient)
+          const doRpcHandler = makeAlbumCounterRpcHandler(drizzleDb)
+          const httpClient = toHttpClient(doRpcHandler)
+          const albumCounterLayer = makeAlbumCounterRpcClient(httpClient)
 
-        const testLayer = Layer.mergeAll(albumCounterLayer, PhotoRepoMemoryLayer)
+          const testLayer = Layer.mergeAll(albumCounterLayer, PhotoRepoMemoryLayer)
 
-        const { result, edges, spans } = yield* runWithTestTracer(
-          testId,
-          uploadPhoto({
-            name: PhotoName.make("Nature.jpg"),
-            albumId: AlbumId.make("album-nature"),
-          }).pipe(Effect.provide(testLayer)),
-          fnIndex.bySpanName,
-        )
+          const { result, edges, spans } = yield* runWithTestTracer(
+            testId,
+            uploadPhoto({
+              name: PhotoName.make("Nature.jpg"),
+              albumId: AlbumId.make("album-nature"),
+            }).pipe(Effect.provide(testLayer)),
+            fnIndex.bySpanName,
+          )
 
-        expect(result.id).toBe(1)
-        expect(result.name).toBe("Nature.jpg")
-        expect(result.albumId).toBe("album-nature")
+          expect(result.id).toBe(1)
+          expect(result.name).toBe("Nature.jpg")
+          expect(result.albumId).toBe("album-nature")
 
-        // Verify SQLite database has genuine persisted count row in album_counters table
-        const countRows = sqlite
-          .prepare("SELECT * FROM album_counters WHERE album_id = ?")
-          .all("album-nature") as Array<{ album_id: string; count: number }>
-        expect(countRows).toHaveLength(1)
-        expect(countRows[0]?.count).toBe(1)
+          // Verify real workerd D1 database has genuine persisted count row in album_counters table
+          const countResult = yield* Effect.promise(() =>
+            d1
+              .prepare("SELECT * FROM album_counters WHERE album_id = ?")
+              .bind("album-nature")
+              .all<{ readonly album_id: string; readonly count: number }>(),
+          )
+          expect(countResult.results).toHaveLength(1)
+          expect(countResult.results[0]?.count).toBe(1)
 
-        // Verify all recorded spans share the exact same traceId as the root Test: span
-        const rootSpan = spans.find((s) => s.name.startsWith("Test:"))
-        expect(rootSpan).toBeDefined()
-        const expectedTraceId = rootSpan!.traceId
+          // Verify all recorded spans share the exact same traceId as the root Test: span
+          const rootSpan = spans.find((s) => s.name.startsWith("Test:"))
+          expect(rootSpan).toBeDefined()
+          const expectedTraceId = rootSpan!.traceId
 
-        for (const span of spans) {
-          expect(span.traceId).toBe(expectedTraceId)
-        }
+          for (const span of spans) {
+            expect(span.traceId).toBe(expectedTraceId)
+          }
 
-        // Verify individual span names exist
-        const spanNames = spans.map((s) => s.name)
-        expect(spanNames).toContain("Sample.uploadPhoto")
-        expect(spanNames).toContain("SampleInfra.handleAlbumCounterRpc")
-        expect(spanNames).toContain("Album.decide")
+          // Verify individual span names exist
+          const spanNames = spans.map((s) => s.name)
+          expect(spanNames).toContain("Sample.uploadPhoto")
+          expect(spanNames).toContain("SampleInfra.handleAlbumCounterRpc")
+          expect(spanNames).toContain("Album.decide")
 
-        // Verify exercisesSpans edges
-        const uploadPhotoQualname = fnIndex.bySpanName.get("Sample.uploadPhoto")?.qualname
-        const handleAlbumCounterRpcQualname = fnIndex.bySpanName.get(
-          "SampleInfra.handleAlbumCounterRpc",
-        )?.qualname
-        const decideAlbumQuotaQualname = fnIndex.bySpanName.get("Album.decide")?.qualname
+          // Verify exercisesSpans edges
+          const uploadPhotoQualname = fnIndex.bySpanName.get("Sample.uploadPhoto")?.qualname
+          const handleAlbumCounterRpcQualname = fnIndex.bySpanName.get(
+            "SampleInfra.handleAlbumCounterRpc",
+          )?.qualname
+          const decideAlbumQuotaQualname = fnIndex.bySpanName.get("Album.decide")?.qualname
 
-        expect(uploadPhotoQualname).toBeDefined()
-        expect(handleAlbumCounterRpcQualname).toBeDefined()
-        expect(decideAlbumQuotaQualname).toBeDefined()
+          expect(uploadPhotoQualname).toBeDefined()
+          expect(handleAlbumCounterRpcQualname).toBeDefined()
+          expect(decideAlbumQuotaQualname).toBeDefined()
 
-        expect(edges.exercisesSpans.some((e) => e.calleeQualname === uploadPhotoQualname)).toBe(
-          true,
-        )
-        expect(
-          edges.exercisesSpans.some((e) => e.calleeQualname === handleAlbumCounterRpcQualname),
-        ).toBe(true)
-        expect(
-          edges.exercisesSpans.some((e) => e.calleeQualname === decideAlbumQuotaQualname),
-        ).toBe(true)
+          expect(edges.exercisesSpans.some((e) => e.calleeQualname === uploadPhotoQualname)).toBe(
+            true,
+          )
+          expect(
+            edges.exercisesSpans.some((e) => e.calleeQualname === handleAlbumCounterRpcQualname),
+          ).toBe(true)
+          expect(
+            edges.exercisesSpans.some((e) => e.calleeQualname === decideAlbumQuotaQualname),
+          ).toBe(true)
 
-        // Verify tracedCalls joins caller to callee
-        const hasUploadToRpcCall = edges.tracedCalls.some(
-          (e) =>
-            e.callerQualname === uploadPhotoQualname &&
-            e.calleeQualname === handleAlbumCounterRpcQualname,
-        )
-        expect(hasUploadToRpcCall).toBe(true)
+          // Verify tracedCalls joins caller to callee
+          const hasUploadToRpcCall = edges.tracedCalls.some(
+            (e) =>
+              e.callerQualname === uploadPhotoQualname &&
+              e.calleeQualname === handleAlbumCounterRpcQualname,
+          )
+          expect(hasUploadToRpcCall).toBe(true)
 
-        const hasRpcToDecideCall = edges.tracedCalls.some(
-          (e) =>
-            e.callerQualname === handleAlbumCounterRpcQualname &&
-            e.calleeQualname === decideAlbumQuotaQualname,
-        )
-        expect(hasRpcToDecideCall).toBe(true)
-      }),
+          const hasRpcToDecideCall = edges.tracedCalls.some(
+            (e) =>
+              e.callerQualname === handleAlbumCounterRpcQualname &&
+              e.calleeQualname === decideAlbumQuotaQualname,
+          )
+          expect(hasRpcToDecideCall).toBe(true)
+        }),
+      ),
     )
 
     it.effect("propagates AlbumQuotaExceededError across RPC when quota reached", () =>
-      Effect.gen(function* () {
-        const { mockD1, sqlite } = createMockD1Database()
-        // Pre-populate album_counters with count 100
-        sqlite
-          .prepare("INSERT INTO album_counters (album_id, count) VALUES (?, ?)")
-          .run("album-full", 100)
+      Effect.scoped(
+        Effect.gen(function* () {
+          const d1 = yield* createWorkerdD1Database
+          // Pre-populate album_counters with count 100 in workerd D1
+          yield* Effect.promise(() =>
+            d1
+              .prepare("INSERT INTO album_counters (album_id, count) VALUES (?, ?)")
+              .bind("album-full", 100)
+              .run(),
+          )
 
-        const drizzleDb = yield* makeWithDefaults({}).pipe(
-          Effect.provide(D1Client.layer({ db: mockD1 })),
-        )
+          const drizzleDb = yield* makeWithDefaults({}).pipe(
+            Effect.provide(D1Client.layer({ db: d1 })),
+          )
 
-        const doRpcHandler = makeAlbumCounterRpcHandler(drizzleDb)
-        const httpClient = toHttpClient(doRpcHandler)
-        const client = makeAlbumCounterRpcClient(httpClient)
+          const doRpcHandler = makeAlbumCounterRpcHandler(drizzleDb)
+          const httpClient = toHttpClient(doRpcHandler)
+          const client = makeAlbumCounterRpcClient(httpClient)
 
-        const error = yield* Effect.flip(client.increment(AlbumId.make("album-full")))
-        expect(error._tag).toBe("AlbumQuotaExceededError")
-        expect(error.albumId).toBe("album-full")
-        expect(error.count).toBe(100)
-      }),
+          const error = yield* Effect.flip(client.increment(AlbumId.make("album-full")))
+          expect(error._tag).toBe("AlbumQuotaExceededError")
+          expect(error.albumId).toBe("album-full")
+          expect(error.count).toBe(100)
+        }),
+      ),
     )
   })
 })

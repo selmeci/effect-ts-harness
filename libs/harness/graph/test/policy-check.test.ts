@@ -1918,4 +1918,41 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
     const castViolations = result.violations.filter((v) => v.rule === "unsafe-type-cast")
     expect(castViolations.length).toBeGreaterThanOrEqual(2)
   })
+
+  it("fails with domain-requires-infra when domain/core requires SqlClient and schema-boolean-state when exported interface uses publish?: boolean", () => {
+    const badCoreSource = `
+      import { Effect } from "effect"
+      import { SqlClient } from "effect/sql/SqlClient"
+
+      export interface EngineConfig {
+        readonly publish?: boolean | undefined
+      }
+
+      export const runInCore = Effect.fn("Core.run")(function* (cfg: EngineConfig) {
+        const sql = yield* SqlClient
+        return yield* sql\`SELECT 1\`
+      })
+    `
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/es/core/src/engine.ts",
+        content: badCoreSource,
+        packageTag: "domain",
+      },
+    ])
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(false)
+    expect(
+      result.violations.some(
+        (v) => v.rule === "domain-requires-infra" && v.message.includes("SqlClient"),
+      ),
+    ).toBe(true)
+    expect(
+      result.violations.some(
+        (v) =>
+          v.rule === "schema-boolean-state" &&
+          v.message.includes("Interface property 'publish' on 'EngineConfig'"),
+      ),
+    ).toBe(true)
+  })
 })

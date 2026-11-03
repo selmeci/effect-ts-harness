@@ -22,7 +22,11 @@ overrides:
   "@typescript-eslint/utils>typescript": "5.9.3"
   "@typescript-eslint/typescript-estree>typescript": "5.9.3"
   "@typescript-eslint/parser>typescript": "5.9.3"
+  "@effect/platform-node-shared": "4.0.0"
 packageExtensions:
+  "@alchemy.run/cloudflare-runtime":
+    dependencies:
+      "@effect/platform-node": "4.0.0"
   "@nx/eslint-plugin":
     dependencies:
       typescript: "5.9.3"

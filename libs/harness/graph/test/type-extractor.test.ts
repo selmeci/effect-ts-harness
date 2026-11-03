@@ -5,6 +5,7 @@ import { Effect } from "effect"
 import { describe, expect, it } from "vitest"
 import {
   buildHarnessGraph,
+  checkEffectGraph,
   diffHarnessGraphs,
   extractTypeAwareGraphFromSource,
   extractWorkspaceTypeAwareGraph,
@@ -683,5 +684,21 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
     expect(diff.remainingStubs).toEqual([])
     expect(diff.missingEdges).toEqual([])
     expect(diff.isGreen).toBe(true)
+  })
+
+  it("flags node-sqlite-in-infra when type:infra source or test imports node:sqlite", () => {
+    const hg = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/es/infra/src/memory.ts",
+        packageTag: "infra",
+        content: `
+          import { DatabaseSync } from "node:sqlite"
+          export const makeMock = () => new DatabaseSync(":memory:")
+        `,
+      },
+    ])
+
+    const res = checkEffectGraph(hg)
+    expect(res.violations.some((v) => v.rule === "node-sqlite-in-infra")).toBe(true)
   })
 })

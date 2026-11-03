@@ -1,0 +1,39 @@
+{
+  "name": "@harness/es-infra",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./memory": "./src/memory.ts",
+    "./fixtures/cart-sqlite": "./test/fixtures/cart-sqlite.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit && effect-tsgo diagnostics --strict --project tsconfig.json",
+    "lint": "oxlint --deny-warnings .",
+    "test": "vitest run",
+    "verify": "node -e \"\""
+  },
+  "dependencies": {
+    "@effect/sql-sqlite-do": "4.0.0",
+    "@harness/es-contract": "workspace:*",
+    "@harness/es-core": "workspace:*",
+    "effect": "4.0.0",
+    "ts-pattern": "5.9.2"
+  },
+  "devDependencies": {
+    "@alchemy.run/cloudflare-runtime": "2.0.0-beta.80",
+    "@cloudflare/workers-types": "5.20261024.1",
+    "@effect/platform-node": "4.0.0",
+    "@effect/vitest": "4.0.0",
+    "@harness/gates": "workspace:*",
+    "@harness/graph": "workspace:*",
+    "@types/node": "26.6.5",
+    "vitest": "5.0.3"
+  },
+  "nx": {
+    "tags": [
+      "type:infra"
+    ]
+  }
+}

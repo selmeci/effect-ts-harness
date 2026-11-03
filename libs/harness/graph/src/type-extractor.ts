@@ -68,6 +68,7 @@ export interface TypeExtractorViolation {
     | "unsafe-type-cast"
     | "unbranded-contract-schema"
     | "unbranded-primitive-boundary"
+    | "node-sqlite-in-infra"
   readonly message: string
   readonly path: ReadonlyArray<string>
   readonly file?: string | undefined
@@ -161,7 +162,7 @@ const decomposeTypeNode = (node: TypeNode): Array<string> => {
 }
 
 const decomposeType = (type: Type): Array<string> => {
-  if (type.isNever() || type.isUnknown() || type.isAny()) {
+  if (type.isNever() || type.isUnknown() || type.isAny() || type.isTypeParameter()) {
     return []
   }
   if (type.isUnion()) {
@@ -1250,6 +1251,51 @@ export const extractTypeAwareGraphFromSource = (
 
     const filePkgTag = fileMap.get(relPath)?.packageTag ?? resolvePackageTag(repoRoot, relPath)
 
+    if (filePkgTag === "infra" || filePkgTag === "app") {
+      for (const imp of sourceFile.getImportDeclarations()) {
+        const modSpec = imp.getModuleSpecifierValue()
+        if (modSpec === "node:sqlite" || modSpec === "sqlite" || modSpec === "better-sqlite3") {
+          branchingViolations.push({
+            rule: "node-sqlite-in-infra",
+            message: `Do not import '${modSpec}' in '${relPath}' — Cloudflare Durable Object SQLite and D1 storages in type:infra/type:app must execute against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006).`,
+            file: relPath,
+            line: imp.getStartLineNumber(),
+            enclosingSymbol: relPath,
+          })
+        }
+      }
+      for (const callExpr of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+        const expr = callExpr.getExpression()
+        const exprText = expr.getText()
+        const isRequireOrImport =
+          (Node.isIdentifier(expr) && exprText === "require") ||
+          expr.getKind() === SyntaxKind.ImportKeyword ||
+          exprText === "require" ||
+          exprText === "import"
+        if (isRequireOrImport) {
+          const args = callExpr.getArguments()
+          if (args.length > 0) {
+            const firstArg = args[0]
+            const modSpec =
+              firstArg != null && Node.isStringLiteral(firstArg)
+                ? firstArg.getLiteralValue()
+                : firstArg != null && Node.isNoSubstitutionTemplateLiteral(firstArg)
+                  ? firstArg.getLiteralValue()
+                  : undefined
+            if (modSpec === "node:sqlite" || modSpec === "sqlite" || modSpec === "better-sqlite3") {
+              branchingViolations.push({
+                rule: "node-sqlite-in-infra",
+                message: `Do not import '${modSpec}' in '${relPath}' — Cloudflare Durable Object SQLite and D1 storages in type:infra/type:app must execute against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006).`,
+                file: relPath,
+                line: callExpr.getStartLineNumber(),
+                enclosingSymbol: relPath,
+              })
+            }
+          }
+        }
+      }
+    }
+
     // Track local variable declarations that alias a discriminant property of a union
     const discriminantAliasVars = new Set<string>()
     for (const varDecl of sourceFile.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
@@ -1701,10 +1747,10 @@ export const extractTypeAwareGraphFromSource = (
         for (const { name, node, init } of propAssignments) {
           if (isBooleanSchema(init)) {
             const matchesRegex =
-              /^(is[A-Z]|has[A-Z]|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|published|expired)$/.test(
+              /^(is[A-Z]|has[A-Z]|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|publish|published|expired)$/.test(
                 name,
               ) ||
-              /^(is[A-Z]\w*|has[A-Z]\w*|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|published|expired)$/.test(
+              /^(is[A-Z]\w*|has[A-Z]\w*|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|publish|published|expired)$/.test(
                 name,
               )
 
@@ -1767,6 +1813,29 @@ export const extractTypeAwareGraphFromSource = (
                 enclosingSymbol,
               })
             }
+          }
+        }
+      }
+
+      for (const iface of sourceFile.getInterfaces()) {
+        if (!iface.isExported()) continue
+        const ifaceName = iface.getName()
+        for (const prop of iface.getProperties()) {
+          const propName = prop.getName()
+          const typeNodeText = prop.getTypeNode()?.getText() ?? ""
+          if (
+            /\bboolean\b/.test(typeNodeText) &&
+            /^(is[A-Z]\w*|has[A-Z]\w*|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|publish|published|expired)$/.test(
+              propName,
+            )
+          ) {
+            branchingViolations.push({
+              rule: "schema-boolean-state",
+              message: `Interface property '${propName}' on '${ifaceName}' in '${relPath}' uses a boolean flag ('${typeNodeText}') — model configuration and lifecycle modes with a closed discriminated union (Schema.TaggedStruct / Schema.Union) instead of boolean flags.`,
+              file: relPath,
+              line: prop.getStartLineNumber(),
+              enclosingSymbol: `${relPath}#${ifaceName}`,
+            })
           }
         }
       }
@@ -2202,18 +2271,41 @@ export const extractTypeAwareGraphFromSource = (
     }
 
     // Branded Type checks: unbranded-contract-schema and unbranded-primitive-boundary
-    for (const asExpr of sourceFile.getDescendantsOfKind(SyntaxKind.AsExpression)) {
-      const targetType = asExpr.getType()
-      const exprType = asExpr.getExpression().getType()
-      if (isTypeBranded(targetType) && !isTypeBranded(exprType)) {
-        const enclosingSymbol = findEnclosingSymbolName(asExpr, relPath)
-        branchingViolations.push({
-          rule: "unbranded-primitive-boundary",
-          message: `Type assertion '${asExpr.getText()}' in '${enclosingSymbol}' casts an unbranded value directly to branded type '${targetType.getText(asExpr)}' — construct branded values via <Schema>.make(...) or Schema.decodeUnknownEffect(<Schema>)(...).`,
-          file: relPath,
-          line: asExpr.getStartLineNumber(),
-          enclosingSymbol,
-        })
+    const extractBrandKeys = (type: Type): ReadonlyArray<string> => {
+      const brandProp = type.getProperty("~effect/Brand")
+      if (brandProp) {
+        const brandType = brandProp.getValueDeclaration()?.getType() ?? brandProp.getDeclaredType()
+        return brandType.getProperties().map((p) => p.getName())
+      }
+      if (type.isIntersection()) {
+        return type.getIntersectionTypes().flatMap(extractBrandKeys)
+      }
+      return []
+    }
+
+    const castNodes = [
+      ...sourceFile.getDescendantsOfKind(SyntaxKind.AsExpression),
+      ...sourceFile.getDescendantsOfKind(SyntaxKind.TypeAssertionExpression),
+    ]
+    for (const castNode of castNodes) {
+      const targetType = castNode.getType()
+      const exprType = castNode.getExpression().getType()
+      if (isTypeBranded(targetType)) {
+        const targetBrands = extractBrandKeys(targetType)
+        const exprBrands = new Set(extractBrandKeys(exprType))
+        const isExprBranded = isTypeBranded(exprType)
+        const missingBrand = !isExprBranded || targetBrands.some((b) => !exprBrands.has(b))
+        if (missingBrand) {
+          const enclosingSymbol = findEnclosingSymbolName(castNode, relPath)
+          const castKind = isExprBranded ? "a differently branded" : "an unbranded"
+          branchingViolations.push({
+            rule: "unbranded-primitive-boundary",
+            message: `Type assertion '${castNode.getText()}' in '${enclosingSymbol}' casts ${castKind} value directly to branded type '${targetType.getText(castNode)}' — construct branded values via <Schema>.make(...) or Schema.decodeUnknownEffect(<Schema>)(...).`,
+            file: relPath,
+            line: castNode.getStartLineNumber(),
+            enclosingSymbol,
+          })
+        }
       }
     }
 
@@ -2896,7 +2988,10 @@ export const extractTypeAwareGraphFromSource = (
     const svc = classNameToTagId.get(rawSvc) ?? rawSvc
     if (!existingServiceTags.has(svc)) {
       existingServiceTags.add(svc)
-      const isInfra = /^(Cloudflare|Alchemy|Drizzle|Provider|Binding)\b/.test(svc)
+      const isInfra =
+        /^(Cloudflare|Alchemy|Drizzle|Provider|Binding|SqlClient|SqliteClient|SqlStorage)\b/.test(
+          svc,
+        )
       services.push({
         _tag: "ServiceTag",
         tagId: svc,
@@ -3549,6 +3644,34 @@ export const extractWorkspaceTypeAwareGraph = (repoRoot: string): Effect.Effect<
       inputs,
       testFilesWithContent,
     )
+    const nodeSqliteTestViolations: Array<BranchingViolation> = []
+    for (const relTestFile of testFiles) {
+      if (relTestFile.startsWith("libs/harness/") || relTestFile.startsWith("apps/harness-")) {
+        continue
+      }
+      if (!/(?:^libs\/[^/]+\/infra\/|^apps\/)/.test(relTestFile)) {
+        continue
+      }
+      const fullPath = path.join(root, relTestFile)
+      if (!fs.existsSync(fullPath)) continue
+      const content = fs.readFileSync(fullPath, "utf-8")
+      const lines = content.split(/\r?\n/)
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i] ?? ""
+        const importMatch = line.match(
+          /\b(?:import\s*\(\s*|require\s*\(\s*|(?:import|from)\s+)["'](node:sqlite|sqlite|better-sqlite3)["']/,
+        )
+        if (importMatch && importMatch[1]) {
+          nodeSqliteTestViolations.push({
+            rule: "node-sqlite-in-infra",
+            message: `Do not import '${importMatch[1]}' in '${relTestFile}' — Cloudflare Durable Object SQLite and D1 tests in type:infra/type:app must execute against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006).`,
+            file: relTestFile,
+            line: i + 1,
+            enclosingSymbol: relTestFile,
+          })
+        }
+      }
+    }
 
     const augmentedGraph = Graph.mutate<HarnessNode, HarnessEdge>(baseGraph.graph, (mutable) => {
       for (const relTestFile of testFiles) {
@@ -3760,6 +3883,7 @@ export const extractWorkspaceTypeAwareGraph = (repoRoot: string): Effect.Effect<
     const combinedViolations = [
       ...(baseGraph.branchingViolations ?? []),
       ...unassertedStateViolations,
+      ...nodeSqliteTestViolations,
     ]
 
     return {

@@ -6,6 +6,7 @@ import type { GovernanceDocStatus, HarnessGraph } from "@harness/graph"
 import { decideEarsSpecQuality } from "./ears-lint.js"
 import { decideAdrDocQuality } from "./adr-lint.js"
 import { decideOntologyInvariants } from "./ontology-invariants.js"
+import { checkMigrationFiles, checkMigrationSqlSafety } from "./migration-check.js"
 
 export type GcFindingKind =
   | "unused-service"
@@ -23,6 +24,10 @@ export type GcFindingKind =
   | "adr-doc-lint"
   | "ontology-invariant"
   | "unused-contract-export"
+  | "node-sqlite-in-infra"
+  | "unmanaged-sql-ddl"
+  | "invalid-migrator-record-key"
+  | "unsafe-sql-migration"
 
 export interface GcFinding {
   readonly kind: GcFindingKind
@@ -648,6 +653,20 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (input: 
     })
   }
 
+  // 11. node-sqlite-in-infra
+  for (const bv of input.graph.branchingViolations ?? []) {
+    if (bv.rule === "node-sqlite-in-infra") {
+      findings.push({
+        kind: "node-sqlite-in-infra",
+        nodeId: bv.enclosingSymbol,
+        location: `${bv.file}:${bv.line}`,
+        message: bv.message,
+        action:
+          "Replace node:sqlite with real Cloudflare workerd storage via @alchemy.run/cloudflare-runtime (Workerd SQLite Durable Object or D1.local) per harness:ADR-0008 / harness:SPEC-0006.",
+      })
+    }
+  }
+
   return {
     clean: findings.length === 0,
     findings,
@@ -929,6 +948,121 @@ const SKIPPED_PACKAGE_DEPS = new Set([
   "drizzle-orm",
 ])
 
+export const extractBalancedBraces = (
+  text: string,
+  openBraceIndex: number,
+): { readonly body: string; readonly endIndex: number } | undefined => {
+  if (text[openBraceIndex] !== "{") return undefined
+  let depth = 0
+  let i = openBraceIndex
+  while (i < text.length) {
+    const ch = text[i]!
+    if (ch === "'" || ch === '"' || ch === "`") {
+      const quote = ch
+      i += 1
+      while (i < text.length) {
+        if (text[i] === "\\") {
+          i += 2
+          continue
+        }
+        if (text[i] === quote) {
+          i += 1
+          break
+        }
+        i += 1
+      }
+      continue
+    }
+    if (ch === "{") {
+      depth += 1
+    } else if (ch === "}") {
+      depth -= 1
+      if (depth === 0) {
+        return {
+          body: text.slice(openBraceIndex + 1, i),
+          endIndex: i,
+        }
+      }
+    }
+    i += 1
+  }
+  return undefined
+}
+
+export const extractTopLevelObjectAnalysis = (
+  objBody: string,
+): { readonly keys: ReadonlyArray<string>; readonly spreads: ReadonlyArray<string> } => {
+  const keys: Array<string> = []
+  const spreads: Array<string> = []
+
+  let braceDepth = 0
+  let parenDepth = 0
+  let bracketDepth = 0
+  let i = 0
+
+  while (i < objBody.length) {
+    const ch = objBody[i]!
+
+    if (braceDepth === 0 && parenDepth === 0 && bracketDepth === 0) {
+      if (objBody.startsWith("...", i)) {
+        const spreadSlice = objBody.slice(i)
+        const spreadMatch = /^\.\.\.([A-Za-z_$][\w$]*)/.exec(spreadSlice)
+        if (spreadMatch !== null) {
+          spreads.push(spreadMatch[1]!)
+          i += spreadMatch[0].length
+          continue
+        }
+      }
+
+      const keySlice = objBody.slice(i)
+      const keyMatch = /^(?:"([^"]+)"|'([^']+)'|([A-Za-z_$][\w$]*))\s*:/.exec(keySlice)
+      if (keyMatch !== null) {
+        const keyName = keyMatch[1] ?? keyMatch[2] ?? keyMatch[3]
+        if (keyName !== undefined) {
+          keys.push(keyName)
+        }
+        i += keyMatch[0].length
+        continue
+      }
+    }
+
+    if (ch === "'" || ch === '"' || ch === "`") {
+      const quote = ch
+      i += 1
+      while (i < objBody.length) {
+        if (objBody[i] === "\\") {
+          i += 2
+          continue
+        }
+        if (objBody[i] === quote) {
+          i += 1
+          break
+        }
+        i += 1
+      }
+      continue
+    }
+
+    if (ch === "{") {
+      braceDepth += 1
+    } else if (ch === "}") {
+      braceDepth = Math.max(0, braceDepth - 1)
+    } else if (ch === "(") {
+      parenDepth += 1
+    } else if (ch === ")") {
+      parenDepth = Math.max(0, parenDepth - 1)
+    } else if (ch === "[") {
+      bracketDepth += 1
+    } else if (ch === "]") {
+      bracketDepth = Math.max(0, bracketDepth - 1)
+    }
+
+    i += 1
+  }
+
+  return { keys, spreads }
+}
+
 export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcFinding> => {
   const libsDir = join(repoRoot, "libs")
   const scopes = Effect.runSync(
@@ -1038,6 +1172,12 @@ export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcF
         }
       }
 
+      const stripCommentsAndStrings = (text: string): string =>
+        text
+          .replace(/\/\*[\s\S]*?\*\//g, " ")
+          .replace(/\/\/[^\r\n]*/g, " ")
+          .replace(/(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/g, '""')
+
       const combinedSiblingContent = siblingFiles
         .map((f) =>
           Effect.runSync(
@@ -1047,8 +1187,28 @@ export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcF
             }).pipe(Effect.orElseSucceed(() => "")),
           ),
         )
-        .map((text) => text.replace(/export\s+(?:type\s+)?\{[^}]*\}\s+from\s+["'][^"']+["']/g, ""))
+        .map((text) =>
+          stripCommentsAndStrings(text).replace(
+            /export\s+(?:type\s+)?\{[^}]*\}\s+from\s+["'][^"']*["']/g,
+            "",
+          ),
+        )
         .join("\n")
+
+      const nonTestSiblingContent = siblingFiles
+        .filter((f) => !f.endsWith(".test.ts"))
+        .map((f) =>
+          Effect.runSync(
+            Effect.try({
+              try: () => readFileSync(f, "utf8"),
+              catch: () => "",
+            }).pipe(Effect.orElseSucceed(() => "")),
+          ),
+        )
+        .map(stripCommentsAndStrings)
+        .join("\n")
+
+      const hasActiveStubs = /\bstub\s*</.test(nonTestSiblingContent)
 
       for (const contractFile of contractFiles) {
         const content = Effect.runSync(
@@ -1057,19 +1217,17 @@ export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcF
             catch: () => "",
           }).pipe(Effect.orElseSucceed(() => "")),
         )
+        const strippedContractContent = stripCommentsAndStrings(content)
         const relContractFile = relative(repoRoot, contractFile).replace(/\\/g, "/")
         const exportRegex = /(?:^|\n)\s*export\s+(?:const|class|function)\s+([A-Za-z_$][\w$]*)/g
         let exportMatch: RegExpExecArray | null
-        while ((exportMatch = exportRegex.exec(content)) !== null) {
+        while ((exportMatch = exportRegex.exec(strippedContractContent)) !== null) {
           const symbolName = exportMatch[1]!
           const symbolRefRegex = new RegExp(`\\b${symbolName}\\b`)
-          const internalStripped = content
-            .replace(/(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/g, '""')
-            .replace(
-              new RegExp(`export\\s+(?:const|class|function)\\s+${symbolName}\\b[^\\n]*`, "g"),
-              "",
-            )
-            .replace(new RegExp(`export\\s+type\\s+${symbolName}\\s*=[^\\n]*`, "g"), "")
+          const internalStripped = strippedContractContent
+            .replace(new RegExp(`export\\s+class\\s+${symbolName}\\b[\\s\\S]*?\\{`, "g"), "{")
+            .replace(new RegExp(`export\\s+(?:const|function)\\s+${symbolName}\\b[^\\n]*`, "g"), "")
+            .replace(new RegExp(`export\\s+type\\s+${symbolName}\\s*=[\\s\\S]*?(?:\\n|$)`, "g"), "")
           if (
             !symbolRefRegex.test(combinedSiblingContent) &&
             !symbolRefRegex.test(internalStripped)
@@ -1081,6 +1239,27 @@ export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcF
               message: `Contract symbol "${symbolName}" exported from "${relContractFile}" is never imported or used by any downstream package or fixture in scope "${scope}".`,
               action: `Import "${symbolName}" in a downstream package/fixture or remove the unused contract export from "${relContractFile}".`,
             })
+          }
+        }
+
+        if (!hasActiveStubs && nonTestSiblingContent.trim().length > 0) {
+          const taggedErrorRegex =
+            /export\s+class\s+([A-Za-z_$][\w$]*)\s+extends\s+Schema\.TaggedError/g
+          let errMatch: RegExpExecArray | null
+          while ((errMatch = taggedErrorRegex.exec(strippedContractContent)) !== null) {
+            const errName = errMatch[1]!
+            const constructRegex = new RegExp(
+              `(?:\\bnew\\s+${errName}\\s*\\(|\\b${errName}\\.make\\s*\\()`,
+            )
+            if (!constructRegex.test(nonTestSiblingContent)) {
+              findings.push({
+                kind: "dead-tagged-error",
+                nodeId: `${scope}/contract:${errName}`,
+                location: relContractFile,
+                message: `Contract TaggedError "${errName}" in "${relContractFile}" is never constructed (new ${errName}(...)) in any non-test implementation or fixture file in scope "${scope}".`,
+                action: `Construct and fail with "new ${errName}(...)" in the implementation or remove the phantom error from "${relContractFile}".`,
+              })
+            }
           }
         }
       }
@@ -1116,6 +1295,7 @@ export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcF
 
       const srcFiles = collectTsFiles(srcDir)
       for (const file of srcFiles) {
+        const relFilePath = relative(repoRoot, file).replace(/\\/g, "/")
         const content = Effect.runSync(
           Effect.try({
             try: () => readFileSync(file, "utf8"),
@@ -1127,7 +1307,6 @@ export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcF
           .replace(/\/\/[^\r\n]*/g, "")
           .replace(/\s+/g, "")
         if (stripped === "" || stripped === "export{}" || stripped === "export{};") {
-          const relFilePath = relative(repoRoot, file).replace(/\\/g, "/")
           findings.push({
             kind: "empty-source-module",
             nodeId: relFilePath,
@@ -1135,6 +1314,177 @@ export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcF
             message: `Source module "${relFilePath}" contains only an empty export ('export {}') — remove dead placeholder modules or export concrete contracts.`,
             action: `Remove "${relFilePath}" or export concrete types/functions.`,
           })
+        }
+
+        if (tier === "infra" && scope !== "harness") {
+          const noComments = content.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\r\n]*/g, "")
+
+          const nodeSqliteRegex =
+            /\b(?:import\s*\(\s*|require\s*\(\s*|(?:import|from)\s+)["'](node:sqlite|sqlite|better-sqlite3)["']/g
+          let sqliteMatch: RegExpExecArray | null
+          while ((sqliteMatch = nodeSqliteRegex.exec(noComments)) !== null) {
+            const mod = sqliteMatch[1]!
+            findings.push({
+              kind: "node-sqlite-in-infra",
+              nodeId: `${relFilePath}:${mod}`,
+              location: relFilePath,
+              message: `Do not import '${mod}' in '${relFilePath}' — Cloudflare Durable Object SQLite and D1 storages in type:infra/type:app must execute against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006).`,
+              action: `Remove '${mod}' import and execute storage against @alchemy.run/cloudflare-runtime.`,
+            })
+          }
+
+          const hasMigratorImport = /\bimport\b[\s\S]*?\b(?:SqliteMigrator|Migrator)\b/.test(
+            noComments,
+          )
+
+          const namedMigrationBodies = new Map<string, string>()
+          const allowedDdlSpans: Array<[number, number]> = []
+
+          const migrationsVarRegex =
+            /(?:const|let)\s+([A-Za-z0-9_$]*[Mm]igrations[A-Za-z0-9_$]*)\s*(?::[^=]+)?=\s*\{/g
+          let mvMatch: RegExpExecArray | null
+          while ((mvMatch = migrationsVarRegex.exec(noComments)) !== null) {
+            const varName = mvMatch[1]!
+            const openBraceIdx = mvMatch.index + mvMatch[0].lastIndexOf("{")
+            const balanced = extractBalancedBraces(noComments, openBraceIdx)
+            if (balanced !== undefined) {
+              namedMigrationBodies.set(varName, balanced.body)
+              if (hasMigratorImport) {
+                allowedDdlSpans.push([openBraceIdx, balanced.endIndex])
+              }
+            }
+          }
+
+          const fromRecordBodies: Array<string> = []
+          const fromRecordRegex = /\bfromRecord\s*(?:<[^>]+>)?\s*\(\s*(\{|[A-Za-z_$][\w$]*)/g
+          let frMatch: RegExpExecArray | null
+          while ((frMatch = fromRecordRegex.exec(noComments)) !== null) {
+            const arg = frMatch[1]!
+            if (arg === "{") {
+              const openBraceIdx = frMatch.index + frMatch[0].lastIndexOf("{")
+              const balanced = extractBalancedBraces(noComments, openBraceIdx)
+              if (balanced !== undefined) {
+                fromRecordBodies.push(balanced.body)
+                if (hasMigratorImport) {
+                  allowedDdlSpans.push([openBraceIdx, balanced.endIndex])
+                }
+              }
+            } else {
+              fromRecordBodies.push(`...${arg}`)
+            }
+          }
+
+          const sqlRegex = /\bsql\s*`([\s\S]*?)`/g
+          let sqlMatch: RegExpExecArray | null
+          let reportedUnmanagedDdl = false
+          while ((sqlMatch = sqlRegex.exec(noComments)) !== null) {
+            const sqlBody = sqlMatch[1]!
+            if (
+              /\b(?:CREATE\s+(?:TEMP\s+|TEMPORARY\s+)?(?:TABLE|INDEX|UNIQUE\s+INDEX|VIEW|TRIGGER)|ALTER\s+TABLE|DROP\s+(?:TABLE|INDEX|VIEW|TRIGGER))\b/i.test(
+                sqlBody,
+              )
+            ) {
+              const isInsideAllowedSpan =
+                hasMigratorImport &&
+                allowedDdlSpans.some(
+                  ([start, end]) => sqlMatch!.index >= start && sqlMatch!.index <= end,
+                )
+
+              if (!isInsideAllowedSpan && !reportedUnmanagedDdl) {
+                reportedUnmanagedDdl = true
+                findings.push({
+                  kind: "unmanaged-sql-ddl",
+                  nodeId: relFilePath,
+                  location: relFilePath,
+                  message: `Infrastructure module "${relFilePath}" executes raw SQL DDL without SqliteMigrator — manage Durable Object SQLite migrations via @effect/sql-sqlite-do/SqliteMigrator (SqliteMigrator.fromRecord) so applied versions are tracked in effect_sql_migrations (harness:ADR-0008, harness:SPEC-0006).`,
+                  action: `Wrap DDL statements in SqliteMigrator.fromRecord({ "1_init_...": ... }) and execute via SqliteMigrator.run or SqliteMigrator.layer.`,
+                })
+              }
+
+              const safety = checkMigrationSqlSafety([{ file: relFilePath, sql: sqlBody }])
+              for (const v of safety.violations) {
+                findings.push({
+                  kind: "unsafe-sql-migration",
+                  nodeId: `${relFilePath}:${v.kind}`,
+                  location: relFilePath,
+                  message: v.message,
+                  action: `Escalate destructive migration (${v.kind}) to the human or refactor to an additive migration.`,
+                })
+              }
+            }
+          }
+
+          const resolveRecordKeys = (
+            initialBody: string,
+            namedBodies: Map<string, string>,
+          ): ReadonlyArray<string> => {
+            const visited = new Set<string>()
+            const allKeys: Array<string> = []
+
+            const collect = (body: string) => {
+              const { keys, spreads } = extractTopLevelObjectAnalysis(body)
+              for (const spread of spreads) {
+                if (!visited.has(spread)) {
+                  visited.add(spread)
+                  const namedBody = namedBodies.get(spread)
+                  if (namedBody !== undefined) {
+                    collect(namedBody)
+                  }
+                }
+              }
+              for (const key of keys) {
+                allKeys.push(key)
+              }
+            }
+
+            collect(initialBody)
+            return allKeys
+          }
+
+          const recordsToValidate: Array<string> = [
+            ...fromRecordBodies,
+            ...namedMigrationBodies.values(),
+          ]
+          const reportedKeyNodeIds = new Set<string>()
+
+          for (const objBody of recordsToValidate) {
+            const keys = resolveRecordKeys(objBody, namedMigrationBodies)
+            const seenIds = new Set<number>()
+
+            for (const keyName of keys) {
+              const m = /^([1-9]\d*)_([a-z0-9_]+)$/.exec(keyName)
+              if (!m) {
+                const nodeId = `${relFilePath}:${keyName}`
+                if (!reportedKeyNodeIds.has(nodeId)) {
+                  reportedKeyNodeIds.add(nodeId)
+                  findings.push({
+                    kind: "invalid-migrator-record-key",
+                    nodeId,
+                    location: relFilePath,
+                    message: `Invalid SqliteMigrator.fromRecord migration key "${keyName}" in "${relFilePath}" — keys must match "<positive_integer>_<snake_case_name>" (e.g. "1_init_tables") because Effect Migrator.fromRecord silently ignores unnumbered keys (harness:ADR-0008, harness:SPEC-0006).`,
+                    action: `Rename migration key to "<positive_integer>_<snake_case_name>" (e.g. "1_init_tables") with an unused integer id.`,
+                  })
+                }
+              } else {
+                const idNum = Number(m[1])
+                if (seenIds.has(idNum)) {
+                  const nodeId = `${relFilePath}:${keyName}`
+                  if (!reportedKeyNodeIds.has(nodeId)) {
+                    reportedKeyNodeIds.add(nodeId)
+                    findings.push({
+                      kind: "invalid-migrator-record-key",
+                      nodeId,
+                      location: relFilePath,
+                      message: `Duplicate SqliteMigrator.fromRecord migration id "${m[1]}" in key "${keyName}" in "${relFilePath}".`,
+                      action: `Assign a unique positive integer id to migration key "${keyName}" in "${relFilePath}".`,
+                    })
+                  }
+                } else {
+                  seenIds.add(idNum)
+                }
+              }
+            }
+          }
         }
       }
 
@@ -1192,6 +1542,81 @@ export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcF
           }
         }
       }
+    }
+  }
+
+  const collectSqlFiles = (dir: string): ReadonlyArray<string> =>
+    Effect.runSync(
+      Effect.try({
+        try: () => {
+          if (!existsSync(dir)) {
+            return []
+          }
+          const entries = readdirSync(dir, { withFileTypes: true })
+          const result: Array<string> = []
+          for (const entry of entries) {
+            const full = join(dir, entry.name)
+            if (entry.isDirectory()) {
+              result.push(...collectSqlFiles(full))
+            } else if (entry.isFile() && entry.name.endsWith(".sql")) {
+              result.push(full)
+            }
+          }
+          return result.sort((a, b) => a.localeCompare(b))
+        },
+        catch: () => [],
+      }).pipe(Effect.orElseSucceed(() => [])),
+    )
+
+  const sqlFilesToScan: Array<string> = []
+  sqlFilesToScan.push(...collectSqlFiles(join(repoRoot, "migrations")))
+
+  for (const scope of scopes) {
+    const scopeDir = join(libsDir, scope)
+    const tiers = Effect.runSync(
+      Effect.try({
+        try: () => {
+          if (!existsSync(scopeDir)) return []
+          return readdirSync(scopeDir, { withFileTypes: true })
+            .filter((e) => e.isDirectory())
+            .map((e) => e.name)
+        },
+        catch: () => [],
+      }).pipe(Effect.orElseSucceed(() => [])),
+    )
+    for (const tier of tiers) {
+      sqlFilesToScan.push(...collectSqlFiles(join(scopeDir, tier, "migrations")))
+    }
+  }
+
+  const appsDir = join(repoRoot, "apps")
+  const appNames = Effect.runSync(
+    Effect.try({
+      try: () => {
+        if (!existsSync(appsDir)) return []
+        return readdirSync(appsDir, { withFileTypes: true })
+          .filter((e) => e.isDirectory())
+          .map((e) => e.name)
+      },
+      catch: () => [],
+    }).pipe(Effect.orElseSucceed(() => [])),
+  )
+  for (const app of appNames) {
+    sqlFilesToScan.push(...collectSqlFiles(join(appsDir, app, "migrations")))
+  }
+
+  if (sqlFilesToScan.length > 0) {
+    const sqlReport = checkMigrationFiles(sqlFilesToScan)
+    for (const v of sqlReport.violations) {
+      const relFile = relative(repoRoot, v.file).replace(/\\/g, "/")
+      const message = v.file !== relFile ? v.message.replaceAll(v.file, relFile) : v.message
+      findings.push({
+        kind: "unsafe-sql-migration",
+        nodeId: `${relFile}:${v.kind}`,
+        location: relFile,
+        message,
+        action: `Escalate destructive migration (${v.kind}) to the human or refactor to an additive migration.`,
+      })
     }
   }
 

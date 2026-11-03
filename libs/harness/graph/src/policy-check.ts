@@ -35,6 +35,7 @@ export interface GraphPolicyViolation {
     | "unsafe-type-cast"
     | "unbranded-contract-schema"
     | "unbranded-primitive-boundary"
+    | "node-sqlite-in-infra"
   readonly message: string
   readonly path: ReadonlyArray<string>
 }

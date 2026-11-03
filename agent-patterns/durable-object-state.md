@@ -43,4 +43,4 @@ export const addItemToCart = (input: CartItemInput) =>
 
 1. **Pre-Validate Input**: Always decode parameters and contract Schemas **before** calling `withTransaction`. Never decode untrusted input or perform asynchronous network I/O inside a transaction block.
 2. **Encapsulate Tables in `type:infra`**: Table definitions for Durable Objects belong exclusively in `type:infra`.
-3. **DO Migrations**: Embedded SQLite migrations in Durable Objects run sequentially during DO instantiation or upgrade using committed SQL migration scripts.
+3. **DO Migrations (`@effect/sql-sqlite-do/SqliteMigrator`)**: Because each Durable Object instance owns an isolated embedded SQLite database initialized lazily on first activation, run migrations via `SqliteMigrator.run` or `SqliteMigrator.layer` using `SqliteMigrator.fromRecord({ "1_init": ... })` (which tracks applied versions in `effect_sql_migrations` inside `storage.transaction()`).

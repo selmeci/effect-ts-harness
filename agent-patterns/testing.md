@@ -58,6 +58,17 @@ export const UserRepositoryTest = Layer.succeed(
 )
 ```
 
+## Testing Cloudflare D1 & Durable Object SQLite with `workerd` (`@alchemy.run/cloudflare-runtime`)
+
+> [!IMPORTANT]
+> **Ban on `node:sqlite` Mocks in `type:infra` and `type:app` (`harness:SPEC-0006` / `harness:ADR-0008`, `node-sqlite-in-infra`):**
+> Never import `node:sqlite` (`DatabaseSync`) or author hand-rolled `DurableObjectStorage`, `SqlStorage`, or `D1Database` mocks in `type:infra` or `type:app` packages (`libs/*/infra/**`, `apps/**`). Hand-rolled `node:sqlite` wrappers diverge from Cloudflare's `workerd` runtime (which forbids raw `BEGIN` / `COMMIT` / `ROLLBACK` statements in `storage.sql.exec()` and manages nested transactions via C++ savepoints in `storage.transaction()`).
+
+Always execute `type:infra` storage tests against the real `workerd` runtime using `@alchemy.run/cloudflare-runtime`:
+
+- **Cloudflare D1 (`@effect/sql-d1`):** Spawn a real `workerd` D1 instance (`cloudflare-internal:d1-api` backed by a SQLite Durable Object) via `Workerd` / `getPlatformProxy` with `D1.local` and pass the binding to `D1Client.layer({ db })`.
+- **Cloudflare Durable Object SQLite (`@effect/sql-sqlite-do`):** Spawn a `workerd` worker with a SQLite-enabled Durable Object (`enableSql: true`, `durableObjectStorage: { localDisk }`) and run `@effect/sql-sqlite-do` (`makeSqliteClientLayer`) against it so both `storage.sql.exec()` and nested `storage.transaction()` C++ savepoints execute on the real `workerd` engine.
+
 ## Recording Test Spans for Dual-Graph Indexing
 
 The harness indexes runtime execution traces to map which tests exercise which domain functions. Use `runWithTestTracer` and `withRecordedTestSpan` from `@harness/ingest`:
