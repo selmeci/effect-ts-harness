@@ -54,7 +54,7 @@ In Phase 2 of the Event Sourcing MVP (`docs/mvp_event_sourcing.md`), an aggregat
 
 ### Binding Architectural Rules
 
-1. **Taxonomy & Worker Entrypoint Isolation:** `@harness/es-core` (`type:core`) defines pure protocols (`Decider`, `LocalProjection`, `AggregateConfig`) with zero `SqlClient` imports. `@harness/es-infra` (`type:infra`) implements `initializeAggregateTables`, `loadAggregate`, and `handleAggregateCommand` over `effect/sql/SqlClient`. Per `harness:ADR-0008` (`harness:SPEC-0006`), `@harness/es-infra/memory` (`libs/es/infra/src/memory.ts`) runs `@effect/sql-sqlite-do` (`makeSqliteClientLayer`) against a real `workerd` SQLite Durable Object (`enableSql: true`) spawned via `@alchemy.run/cloudflare-runtime`.
+1. **Taxonomy, Worker Entrypoint Isolation & Native `SqliteMigrator`:** `@harness/es-core` (`type:core`) defines pure protocols (`Decider`, `LocalProjection`, `AggregateConfig`) with zero `SqlClient` imports. `@harness/es-infra` (`type:infra`) implements `initializeAggregateTables`, `makeAggregateMigratorLayer`, `loadAggregate`, and `handleAggregateCommand` over `effect/sql/SqlClient` and `@effect/sql-sqlite-do/SqliteMigrator` (executing numbered migrations via `SqliteMigrator.fromRecord` inside a transaction and recording applied versions in `effect_sql_migrations`). Per `harness:ADR-0008` (`harness:SPEC-0006`), `@harness/es-infra/memory` (`libs/es/infra/src/memory.ts`) runs `@effect/sql-sqlite-do` (`makeSqliteClientLayer`) against a real `workerd` SQLite Durable Object (`enableSql: true`) spawned via `@alchemy.run/cloudflare-runtime`.
 2. **Single Transactional Boundary:** Every `handleAggregateCommand` execution runs its entire read-decide-commit cycle inside `sql.withTransaction`:
    - Check `commandId` in `es_commands` and verify `(aggregate_name, aggregate_id)` ownership (failing with `CommandAggregateMismatchError` on cross-aggregate reuse).
    - Load and fold `es_events` (verifying contiguous `stream_version` starting at 1 and valid JSON payloads, failing with `EventStreamCorruptionError` on corruption) and run any required projection rebuilds.
@@ -77,12 +77,13 @@ In Phase 2 of the Event Sourcing MVP (`docs/mvp_event_sourcing.md`), an aggregat
 ### Positive Consequences
 
 - Single schema definition language (`Schema.Struct`, `Schema.Class`, `Schema.brand`) across contracts, core protocols, and persistence.
+- Native, transactional schema migration state tracking (`effect_sql_migrations`) in Durable Object SQLite via `@effect/sql-sqlite-do/SqliteMigrator` (`SqliteMigrator.fromRecord`, `initializeAggregateTables`, `makeAggregateMigratorLayer`).
 - Strict adherence to Nx taxonomy (`type:core` has zero I/O; `type:infra` owns SQL; Worker entrypoint has zero `node:*` imports).
 - Deterministic transaction rollback on conflict, domain rejection, or SQL failure.
 
 ### Negative Consequences and Trade-offs
 
-- Schema migrations for aggregate tables (`es_events`, `es_commands`, `es_projections_meta`, `es_outbox`) are managed via parameterized SQL DDL scripts rather than Drizzle Kit automated migrations.
+- While migration ordering, locking, transactional execution, and state tracking (`effect_sql_migrations`) are handled natively by `@effect/sql-sqlite-do/SqliteMigrator`, individual migration steps (`1_init_es_core_tables`, etc.) are authored as numbered `SqlClient` Effects rather than auto-diffed from an ORM table DSL via `drizzle-kit generate`.
 - Read model queries in projections are written as parameterized SQL templates over `SqlClient`.
 
 ### Deterministic Enforcement

@@ -1,6 +1,7 @@
 import { Clock, Effect, Schema } from "effect"
 import { SqlClient } from "effect/sql/SqlClient"
 import type { SqlError } from "effect/sql/SqlError"
+import * as SqliteMigrator from "@effect/sql-sqlite-do/SqliteMigrator"
 import {
   AggregateCommandResult,
   AggregateId,
@@ -91,9 +92,12 @@ const isEventStreamUniqueConflict = (sqlErr: SqlError): boolean =>
 
 export { isEventStreamUniqueConflict }
 
-export const initializeAggregateTables = Effect.fn("AggregateInfra.initTables")(function* () {
-  const sql = yield* SqlClient
-  yield* sql`
+export const aggregateCoreMigrations: Readonly<
+  Record<string, Effect.Effect<void, SqlError, SqlClient>>
+> = {
+  "1_init_es_core_tables": Effect.gen(function* () {
+    const sql = yield* SqlClient
+    yield* sql`
       CREATE TABLE IF NOT EXISTS es_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         aggregate_name TEXT NOT NULL,
@@ -107,7 +111,7 @@ export const initializeAggregateTables = Effect.fn("AggregateInfra.initTables")(
         UNIQUE(aggregate_name, aggregate_id, stream_version)
       );
     `
-  yield* sql`
+    yield* sql`
       CREATE TABLE IF NOT EXISTS es_commands (
         command_id TEXT PRIMARY KEY,
         aggregate_name TEXT NOT NULL,
@@ -117,7 +121,7 @@ export const initializeAggregateTables = Effect.fn("AggregateInfra.initTables")(
         created_at INTEGER NOT NULL
       );
     `
-  yield* sql`
+    yield* sql`
       CREATE TABLE IF NOT EXISTS es_projections_meta (
         aggregate_name TEXT NOT NULL,
         aggregate_id TEXT NOT NULL,
@@ -128,7 +132,7 @@ export const initializeAggregateTables = Effect.fn("AggregateInfra.initTables")(
         PRIMARY KEY (aggregate_name, aggregate_id, projection_name)
       );
     `
-  yield* sql`
+    yield* sql`
       CREATE TABLE IF NOT EXISTS es_outbox (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         aggregate_name TEXT NOT NULL,
@@ -140,6 +144,18 @@ export const initializeAggregateTables = Effect.fn("AggregateInfra.initTables")(
         created_at INTEGER NOT NULL
       );
     `
+  }),
+}
+
+export const initializeAggregateTables = Effect.fn("AggregateInfra.initTables")(function* (
+  additionalMigrations?: Readonly<Record<string, Effect.Effect<void, SqlError, SqlClient>>>,
+) {
+  return yield* SqliteMigrator.run({
+    loader: SqliteMigrator.fromRecord({
+      ...aggregateCoreMigrations,
+      ...additionalMigrations,
+    }),
+  })
 })
 
 const loadAggregateInTx = <Command, Event, State, Err, ProjectionEnv, ProjectionErr>(
