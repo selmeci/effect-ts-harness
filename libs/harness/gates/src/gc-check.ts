@@ -6,6 +6,7 @@ import type { GovernanceDocStatus, HarnessGraph } from "@harness/graph"
 import { decideEarsSpecQuality } from "./ears-lint.js"
 import { decideAdrDocQuality } from "./adr-lint.js"
 import { decideOntologyInvariants } from "./ontology-invariants.js"
+import { checkMigrationSqlSafety } from "./migration-check.js"
 
 export type GcFindingKind =
   | "unused-service"
@@ -24,6 +25,9 @@ export type GcFindingKind =
   | "ontology-invariant"
   | "unused-contract-export"
   | "node-sqlite-in-infra"
+  | "unmanaged-sql-ddl"
+  | "invalid-migrator-record-key"
+  | "unsafe-sql-migration"
 
 export interface GcFinding {
   readonly kind: GcFindingKind
@@ -1176,6 +1180,7 @@ export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcF
 
       const srcFiles = collectTsFiles(srcDir)
       for (const file of srcFiles) {
+        const relFilePath = relative(repoRoot, file).replace(/\\/g, "/")
         const content = Effect.runSync(
           Effect.try({
             try: () => readFileSync(file, "utf8"),
@@ -1187,7 +1192,6 @@ export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcF
           .replace(/\/\/[^\r\n]*/g, "")
           .replace(/\s+/g, "")
         if (stripped === "" || stripped === "export{}" || stripped === "export{};") {
-          const relFilePath = relative(repoRoot, file).replace(/\\/g, "/")
           findings.push({
             kind: "empty-source-module",
             nodeId: relFilePath,
@@ -1195,6 +1199,100 @@ export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcF
             message: `Source module "${relFilePath}" contains only an empty export ('export {}') — remove dead placeholder modules or export concrete contracts.`,
             action: `Remove "${relFilePath}" or export concrete types/functions.`,
           })
+        }
+
+        if (tier === "infra" && scope !== "harness") {
+          const noComments = content.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\r\n]*/g, "")
+
+          const sqlRegex = /\bsql\s*`([\s\S]*?)`/g
+          let sqlMatch: RegExpExecArray | null
+          let reportedUnmanagedDdl = false
+          while ((sqlMatch = sqlRegex.exec(noComments)) !== null) {
+            const sqlBody = sqlMatch[1]!
+            if (
+              /\b(?:CREATE\s+(?:TEMP\s+|TEMPORARY\s+)?(?:TABLE|INDEX|UNIQUE\s+INDEX|VIEW|TRIGGER)|ALTER\s+TABLE|DROP\s+(?:TABLE|INDEX|VIEW|TRIGGER))\b/i.test(
+                sqlBody,
+              )
+            ) {
+              const usesMigrator =
+                /\b(?:SqliteMigrator|Migrator)\b/.test(noComments) &&
+                /\b(?:fromRecord|fromGlob|fromFileSystem)\s*\(/.test(noComments)
+
+              if (!usesMigrator && !reportedUnmanagedDdl) {
+                reportedUnmanagedDdl = true
+                findings.push({
+                  kind: "unmanaged-sql-ddl",
+                  nodeId: relFilePath,
+                  location: relFilePath,
+                  message: `Infrastructure module "${relFilePath}" executes raw SQL DDL without SqliteMigrator — manage Durable Object SQLite migrations via @effect/sql-sqlite-do/SqliteMigrator (SqliteMigrator.fromRecord) so applied versions are tracked in effect_sql_migrations (harness:ADR-0008, harness:SPEC-0006).`,
+                  action: `Wrap DDL statements in SqliteMigrator.fromRecord({ "1_init_...": ... }) and execute via SqliteMigrator.run or SqliteMigrator.layer.`,
+                })
+              }
+
+              const safety = checkMigrationSqlSafety([{ file: relFilePath, sql: sqlBody }])
+              for (const v of safety.violations) {
+                findings.push({
+                  kind: "unsafe-sql-migration",
+                  nodeId: `${relFilePath}:${v.kind}`,
+                  location: relFilePath,
+                  message: v.message,
+                  action: `Escalate destructive migration (${v.kind}) to the human or refactor to an additive migration.`,
+                })
+              }
+            }
+          }
+
+          const cleanedForRecord = noComments.replace(/sql`[\s\S]*?`/g, 'sql""')
+          const recordObjectBodies: Array<string> = []
+
+          const migrationsVarRegex =
+            /(?:const|let)\s+[A-Za-z0-9_$]*[Mm]igrations[A-Za-z0-9_$]*\s*(?::[^=]+)?=\s*\{([\s\S]*?)(?:\n\s*\}|\})/g
+          let mvMatch: RegExpExecArray | null
+          while ((mvMatch = migrationsVarRegex.exec(cleanedForRecord)) !== null) {
+            if (mvMatch[1] !== undefined) {
+              recordObjectBodies.push(mvMatch[1])
+            }
+          }
+
+          const fromRecordRegex = /\bfromRecord\s*\(\s*\{([\s\S]*?)\}\s*\)/g
+          let frMatch: RegExpExecArray | null
+          while ((frMatch = fromRecordRegex.exec(cleanedForRecord)) !== null) {
+            if (frMatch[1] !== undefined) {
+              recordObjectBodies.push(frMatch[1])
+            }
+          }
+
+          for (const objBody of recordObjectBodies) {
+            const seenIds = new Set<number>()
+            const propKeyRegex = /(?:^|[,{])\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z_$][\w$]*))\s*:/g
+            let keyMatch: RegExpExecArray | null
+            while ((keyMatch = propKeyRegex.exec(objBody)) !== null) {
+              const keyName = keyMatch[1] ?? keyMatch[2] ?? keyMatch[3]
+              if (keyName === undefined) {
+                continue
+              }
+              const m = /^([1-9]\d*)_([a-zA-Z0-9_]+)$/.exec(keyName)
+              if (!m) {
+                findings.push({
+                  kind: "invalid-migrator-record-key",
+                  nodeId: `${relFilePath}:${keyName}`,
+                  location: relFilePath,
+                  message: `Invalid SqliteMigrator.fromRecord migration key "${keyName}" in "${relFilePath}" — keys must match "<positive_integer>_<snake_case_name>" (e.g. "1_init_tables") because Effect Migrator.fromRecord silently ignores unnumbered keys (harness:ADR-0008, harness:SPEC-0006).`,
+                  action: `Rename migration key to "<positive_integer>_<snake_case_name>" (e.g. "1_init_tables") with an unused integer id.`,
+                })
+              } else if (seenIds.has(Number(m[1]))) {
+                findings.push({
+                  kind: "invalid-migrator-record-key",
+                  nodeId: `${relFilePath}:${keyName}`,
+                  location: relFilePath,
+                  message: `Duplicate SqliteMigrator.fromRecord migration id "${m[1]}" in key "${keyName}" in "${relFilePath}".`,
+                  action: `Assign a unique positive integer id to migration key "${keyName}" in "${relFilePath}".`,
+                })
+              } else {
+                seenIds.add(Number(m[1]))
+              }
+            }
+          }
         }
       }
 

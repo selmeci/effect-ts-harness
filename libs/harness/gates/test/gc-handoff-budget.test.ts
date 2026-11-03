@@ -2458,126 +2458,221 @@ spans:
         }),
     )
 
-    it("detects empty-source-module and unused-package-dependency with scanWorkspacePackageHygiene", () => {
-      const tempDir = mkdtempSync(join(tmpdir(), "harness-hygiene-test-"))
-      try {
-        const domainPkgDir = join(tempDir, "libs", "sample", "domain")
-        const srcDir = join(domainPkgDir, "src")
-        mkdirSync(srcDir, { recursive: true })
+    describe("scanWorkspacePackageHygiene", () => {
+      it("detects empty-source-module and unused-package-dependency with scanWorkspacePackageHygiene", () => {
+        const tempDir = mkdtempSync(join(tmpdir(), "harness-hygiene-test-"))
+        try {
+          const domainPkgDir = join(tempDir, "libs", "sample", "domain")
+          const srcDir = join(domainPkgDir, "src")
+          mkdirSync(srcDir, { recursive: true })
 
-        writeFileSync(
-          join(domainPkgDir, "package.json"),
-          JSON.stringify(
-            {
-              name: "@sample/domain",
-              dependencies: {
-                "unimported-dependency": "1.0.0",
-                effect: "4.0.0",
+          writeFileSync(
+            join(domainPkgDir, "package.json"),
+            JSON.stringify(
+              {
+                name: "@sample/domain",
+                dependencies: {
+                  "unimported-dependency": "1.0.0",
+                  effect: "4.0.0",
+                },
               },
-            },
-            null,
-            2,
-          ),
-        )
+              null,
+              2,
+            ),
+          )
 
-        writeFileSync(
-          join(srcDir, "errors.ts"),
-          `// Empty error placeholder module
+          writeFileSync(
+            join(srcDir, "errors.ts"),
+            `// Empty error placeholder module
 /* Block comment */
 export {};
 `,
-        )
+          )
 
-        writeFileSync(join(srcDir, "index.ts"), `export const value = 42\n`)
+          writeFileSync(join(srcDir, "index.ts"), `export const value = 42\n`)
 
-        const findings = scanWorkspacePackageHygiene(tempDir)
+          const findings = scanWorkspacePackageHygiene(tempDir)
 
-        const emptyModuleFinding = findings.find(
-          (f) =>
-            f.kind === "empty-source-module" && f.nodeId === "libs/sample/domain/src/errors.ts",
-        )
-        expect(emptyModuleFinding).toBeDefined()
-        expect(emptyModuleFinding?.message).toContain("contains only an empty export ('export {}')")
+          const emptyModuleFinding = findings.find(
+            (f) =>
+              f.kind === "empty-source-module" && f.nodeId === "libs/sample/domain/src/errors.ts",
+          )
+          expect(emptyModuleFinding).toBeDefined()
+          expect(emptyModuleFinding?.message).toContain(
+            "contains only an empty export ('export {}')",
+          )
 
-        const unusedDepFinding = findings.find(
-          (f) =>
-            f.kind === "unused-package-dependency" &&
-            f.nodeId === "@sample/domain:unimported-dependency",
-        )
-        expect(unusedDepFinding).toBeDefined()
-        expect(unusedDepFinding?.message).toContain(
-          'Package "@sample/domain" declares dependency "unimported-dependency" in package.json, but no file in src/ imports it.',
-        )
-      } finally {
-        rmSync(tempDir, { recursive: true, force: true })
-      }
-    })
+          const unusedDepFinding = findings.find(
+            (f) =>
+              f.kind === "unused-package-dependency" &&
+              f.nodeId === "@sample/domain:unimported-dependency",
+          )
+          expect(unusedDepFinding).toBeDefined()
+          expect(unusedDepFinding?.message).toContain(
+            'Package "@sample/domain" declares dependency "unimported-dependency" in package.json, but no file in src/ imports it.',
+          )
+        } finally {
+          rmSync(tempDir, { recursive: true, force: true })
+        }
+      })
 
-    it("detects unused-contract-export with scanWorkspacePackageHygiene", () => {
-      const tempDir = mkdtempSync(join(tmpdir(), "harness-contract-test-"))
-      try {
-        const contractSrcDir = join(tempDir, "libs", "sample", "contract", "src")
-        const domainSrcDir = join(tempDir, "libs", "sample", "domain", "src")
-        mkdirSync(contractSrcDir, { recursive: true })
-        mkdirSync(domainSrcDir, { recursive: true })
+      it("detects unused-contract-export with scanWorkspacePackageHygiene", () => {
+        const tempDir = mkdtempSync(join(tmpdir(), "harness-contract-test-"))
+        try {
+          const contractSrcDir = join(tempDir, "libs", "sample", "contract", "src")
+          const domainSrcDir = join(tempDir, "libs", "sample", "domain", "src")
+          mkdirSync(contractSrcDir, { recursive: true })
+          mkdirSync(domainSrcDir, { recursive: true })
 
-        writeFileSync(
-          join(contractSrcDir, "index.ts"),
-          `export const UsedContract = 123;\nexport const DeadContractSymbol = 456;\nexport class DeadContractClass {}\nexport function deadContractFn() {}\n`,
-        )
+          writeFileSync(
+            join(contractSrcDir, "index.ts"),
+            `export const UsedContract = 123;\nexport const DeadContractSymbol = 456;\nexport class DeadContractClass {}\nexport function deadContractFn() {}\n`,
+          )
 
-        writeFileSync(
-          join(domainSrcDir, "index.ts"),
-          `import { UsedContract } from "../contract/src/index.js";\nconsole.log(UsedContract);\n`,
-        )
+          writeFileSync(
+            join(domainSrcDir, "index.ts"),
+            `import { UsedContract } from "../contract/src/index.js";\nconsole.log(UsedContract);\n`,
+          )
 
-        const findings = scanWorkspacePackageHygiene(tempDir)
+          const findings = scanWorkspacePackageHygiene(tempDir)
 
-        const unusedFindings = findings.filter((f) => f.kind === "unused-contract-export")
-        expect(unusedFindings.length).toBe(3)
-        expect(unusedFindings.some((f) => f.nodeId === "sample/contract:DeadContractSymbol")).toBe(
-          true,
-        )
-        expect(unusedFindings.some((f) => f.nodeId === "sample/contract:DeadContractClass")).toBe(
-          true,
-        )
-        expect(unusedFindings.some((f) => f.nodeId === "sample/contract:deadContractFn")).toBe(true)
-        expect(unusedFindings[0]?.message).toContain(
-          'is never imported or used by any downstream package or fixture in scope "sample".',
-        )
-      } finally {
-        rmSync(tempDir, { recursive: true, force: true })
-      }
-    })
+          const unusedFindings = findings.filter((f) => f.kind === "unused-contract-export")
+          expect(unusedFindings.length).toBe(3)
+          expect(
+            unusedFindings.some((f) => f.nodeId === "sample/contract:DeadContractSymbol"),
+          ).toBe(true)
+          expect(unusedFindings.some((f) => f.nodeId === "sample/contract:DeadContractClass")).toBe(
+            true,
+          )
+          expect(unusedFindings.some((f) => f.nodeId === "sample/contract:deadContractFn")).toBe(
+            true,
+          )
+          expect(unusedFindings[0]?.message).toContain(
+            'is never imported or used by any downstream package or fixture in scope "sample".',
+          )
+        } finally {
+          rmSync(tempDir, { recursive: true, force: true })
+        }
+      })
 
-    it("detects dead-tagged-error when a contract Schema.TaggedError is referenced only in type positions and never constructed at runtime", () => {
-      const tempDir = mkdtempSync(join(tmpdir(), "harness-dead-error-test-"))
-      try {
-        const contractSrcDir = join(tempDir, "libs", "sample", "contract", "src")
-        const domainSrcDir = join(tempDir, "libs", "sample", "domain", "src")
-        mkdirSync(contractSrcDir, { recursive: true })
-        mkdirSync(domainSrcDir, { recursive: true })
+      it("detects dead-tagged-error when a contract Schema.TaggedError is referenced only in type positions and never constructed at runtime", () => {
+        const tempDir = mkdtempSync(join(tmpdir(), "harness-dead-error-test-"))
+        try {
+          const contractSrcDir = join(tempDir, "libs", "sample", "contract", "src")
+          const domainSrcDir = join(tempDir, "libs", "sample", "domain", "src")
+          mkdirSync(contractSrcDir, { recursive: true })
+          mkdirSync(domainSrcDir, { recursive: true })
 
-        writeFileSync(
-          join(contractSrcDir, "index.ts"),
-          `import { Schema } from "effect";\nexport class ConstructedError extends Schema.TaggedError<ConstructedError>()("ConstructedError", {}) {}\nexport class PhantomError extends Schema.TaggedError<PhantomError>()("PhantomError", {}) {}\n`,
-        )
+          writeFileSync(
+            join(contractSrcDir, "index.ts"),
+            `import { Schema } from "effect";\nexport class ConstructedError extends Schema.TaggedError<ConstructedError>()("ConstructedError", {}) {}\nexport class PhantomError extends Schema.TaggedError<PhantomError>()("PhantomError", {}) {}\n`,
+          )
 
-        writeFileSync(
-          join(domainSrcDir, "index.ts"),
-          `import { Effect } from "effect";\nimport { ConstructedError, type PhantomError } from "../contract/src/index.js";\nexport const run = (): Effect.Effect<void, ConstructedError | PhantomError> => Effect.fail(new ConstructedError({}));\n`,
-        )
+          writeFileSync(
+            join(domainSrcDir, "index.ts"),
+            `import { Effect } from "effect";\nimport { ConstructedError, type PhantomError } from "../contract/src/index.js";\nexport const run = (): Effect.Effect<void, ConstructedError | PhantomError> => Effect.fail(new ConstructedError({}));\n`,
+          )
 
-        const findings = scanWorkspacePackageHygiene(tempDir)
-        const deadErrorFindings = findings.filter((f) => f.kind === "dead-tagged-error")
-        expect(deadErrorFindings).toHaveLength(1)
-        expect(deadErrorFindings[0]?.nodeId).toBe("sample/contract:PhantomError")
-        expect(deadErrorFindings[0]?.message).toContain(
-          'Contract TaggedError "PhantomError" in "libs/sample/contract/src/index.ts" is never constructed (new PhantomError(...))',
-        )
-      } finally {
-        rmSync(tempDir, { recursive: true, force: true })
-      }
+          const findings = scanWorkspacePackageHygiene(tempDir)
+          const deadErrorFindings = findings.filter((f) => f.kind === "dead-tagged-error")
+          expect(deadErrorFindings).toHaveLength(1)
+          expect(deadErrorFindings[0]?.nodeId).toBe("sample/contract:PhantomError")
+          expect(deadErrorFindings[0]?.message).toContain(
+            'Contract TaggedError "PhantomError" in "libs/sample/contract/src/index.ts" is never constructed (new PhantomError(...))',
+          )
+        } finally {
+          rmSync(tempDir, { recursive: true, force: true })
+        }
+      })
+
+      it("enforces SQL migration hygiene and safety across libs/*/infra packages", () => {
+        const tempDir = mkdtempSync(join(tmpdir(), "harness-sql-hygiene-test-"))
+        try {
+          const infraSrcDir = join(tempDir, "libs", "sample", "infra", "src")
+          mkdirSync(infraSrcDir, { recursive: true })
+
+          // 1. bad-ddl.ts: runs sql`CREATE TABLE foo (id INT)` without SqliteMigrator
+          writeFileSync(
+            join(infraSrcDir, "bad-ddl.ts"),
+            `import { sql } from "@effect/sql";\nexport const makeTable = sql\`CREATE TABLE foo (id INT);\`;\n`,
+          )
+
+          // 2. bad-key.ts: passes "init_Without_Number" and duplicate "1_first" / "1_second" to SqliteMigrator.fromRecord
+          writeFileSync(
+            join(infraSrcDir, "bad-key.ts"),
+            `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nexport const badMigrations = SqliteMigrator.fromRecord({\n  "init_Without_Number": sql\`CREATE TABLE IF NOT EXISTS a (id INT);\`,\n  "1_first": sql\`CREATE TABLE IF NOT EXISTS b (id INT);\`,\n  "1_second": sql\`CREATE TABLE IF NOT EXISTS c (id INT);\`,\n});\n`,
+          )
+
+          // 3. drop.ts: contains sql`DROP TABLE foo`
+          writeFileSync(
+            join(infraSrcDir, "drop.ts"),
+            `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nexport const dropMigrations = SqliteMigrator.fromRecord({\n  "1_drop_table": sql\`DROP TABLE foo;\`,\n});\n`,
+          )
+
+          const findings = scanWorkspacePackageHygiene(tempDir)
+
+          // Check unmanaged-sql-ddl
+          const unmanagedFindings = findings.filter(
+            (f) =>
+              f.kind === "unmanaged-sql-ddl" && f.nodeId === "libs/sample/infra/src/bad-ddl.ts",
+          )
+          expect(unmanagedFindings).toHaveLength(1)
+          expect(unmanagedFindings[0]?.message).toContain(
+            'Infrastructure module "libs/sample/infra/src/bad-ddl.ts" executes raw SQL DDL without SqliteMigrator',
+          )
+
+          // Check invalid-migrator-record-key (invalid format and duplicate id)
+          const invalidKeyFinding = findings.find(
+            (f) =>
+              f.kind === "invalid-migrator-record-key" &&
+              f.nodeId === "libs/sample/infra/src/bad-key.ts:init_Without_Number",
+          )
+          expect(invalidKeyFinding).toBeDefined()
+          expect(invalidKeyFinding?.message).toContain(
+            'Invalid SqliteMigrator.fromRecord migration key "init_Without_Number"',
+          )
+
+          const duplicateKeyFinding = findings.find(
+            (f) =>
+              f.kind === "invalid-migrator-record-key" &&
+              f.nodeId === "libs/sample/infra/src/bad-key.ts:1_second",
+          )
+          expect(duplicateKeyFinding).toBeDefined()
+          expect(duplicateKeyFinding?.message).toContain(
+            'Duplicate SqliteMigrator.fromRecord migration id "1" in key "1_second"',
+          )
+
+          // Check unsafe-sql-migration
+          const unsafeFindings = findings.filter(
+            (f) =>
+              f.kind === "unsafe-sql-migration" &&
+              f.nodeId === "libs/sample/infra/src/drop.ts:drop-statement",
+          )
+          expect(unsafeFindings).toHaveLength(1)
+          expect(unsafeFindings[0]?.message).toContain(
+            'Destructive DROP statement in "libs/sample/infra/src/drop.ts" requires human approval (ESCALATE).',
+          )
+        } finally {
+          rmSync(tempDir, { recursive: true, force: true })
+        }
+
+        // 4. Reports 0 findings when SqliteMigrator.fromRecord({ "1_init_foo": ... }) is used with additive CREATE TABLE IF NOT EXISTS
+        const cleanTempDir = mkdtempSync(join(tmpdir(), "harness-sql-clean-test-"))
+        try {
+          const cleanInfraSrcDir = join(cleanTempDir, "libs", "sample", "infra", "src")
+          mkdirSync(cleanInfraSrcDir, { recursive: true })
+
+          writeFileSync(
+            join(cleanInfraSrcDir, "clean.ts"),
+            `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nexport const cleanMigrations = SqliteMigrator.fromRecord({\n  "1_init_foo": sql\`CREATE TABLE IF NOT EXISTS foo (id INT);\`,\n});\n`,
+          )
+
+          const cleanFindings = scanWorkspacePackageHygiene(cleanTempDir)
+          expect(cleanFindings).toHaveLength(0)
+        } finally {
+          rmSync(cleanTempDir, { recursive: true, force: true })
+        }
+      })
     })
 
     it("discovers guard-condition mutants for Equal.equals and Exit.isSuccess", () => {

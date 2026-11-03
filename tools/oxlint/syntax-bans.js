@@ -1173,6 +1173,8 @@ const syntaxBans = {
     const brandedTypeNames = new Set()
     const unbrandedSchemaVarNames = new Map()
     const declaredBrandKeys = new Map()
+    const migrationRecordVars = new Map()
+    let hasSqliteMigratorImport = false
     const reportedNodes = new WeakSet()
 
     function reportOnce(node, message) {
@@ -1545,6 +1547,8 @@ const syntaxBans = {
         brandedTypeNames.clear()
         unbrandedSchemaVarNames.clear()
         declaredBrandKeys.clear()
+        migrationRecordVars.clear()
+        hasSqliteMigratorImport = false
         if (node.body && Array.isArray(node.body)) {
           for (const stmt of node.body) {
             if (stmt.type === "ImportDeclaration") {
@@ -1608,6 +1612,26 @@ const syntaxBans = {
       ImportDeclaration(node) {
         recordContractImports(node)
         const filename = getNormalizedFilename()
+        if (node.source != null && typeof node.source.value === "string") {
+          const importSource = node.source.value
+          if (importSource.includes("SqliteMigrator") || importSource.includes("Migrator")) {
+            hasSqliteMigratorImport = true
+          }
+          if (Array.isArray(node.specifiers)) {
+            for (const spec of node.specifiers) {
+              const localName = spec?.local?.name
+              const importedName = spec?.imported?.name
+              if (
+                localName === "SqliteMigrator" ||
+                localName === "Migrator" ||
+                importedName === "SqliteMigrator" ||
+                importedName === "Migrator"
+              ) {
+                hasSqliteMigratorImport = true
+              }
+            }
+          }
+        }
         if (
           !isInternalHarnessFile(filename) &&
           node.source != null &&
@@ -1651,9 +1675,47 @@ const syntaxBans = {
       TSTypeAssertion(node) {
         checkAsOrTypeAssertion(context, node)
       },
+      TaggedTemplateExpression(node) {
+        const filename = getNormalizedFilename()
+        if (isInternalHarnessFile(filename)) return
+        if (!/libs\/[^/]+\/infra\/src\//.test(filename)) return
+        const tag = node.tag
+        const isSqlTag =
+          (tag != null && tag.type === "Identifier" && tag.name === "sql") ||
+          (tag != null &&
+            tag.type === "MemberExpression" &&
+            tag.computed !== true &&
+            tag.property != null &&
+            tag.property.type === "Identifier" &&
+            tag.property.name === "sql")
+        if (!isSqlTag || node.quasi == null || !Array.isArray(node.quasi.quasis)) return
+        const sqlText = node.quasi.quasis
+          .map((q) => (q.value && (q.value.raw ?? q.value.cooked)) || "")
+          .join(" ")
+        const hasDdl =
+          /\b(?:CREATE\s+(?:TEMP\s+|TEMPORARY\s+)?(?:TABLE|INDEX|UNIQUE\s+INDEX|VIEW|TRIGGER)|ALTER\s+TABLE|DROP\s+(?:TABLE|INDEX|VIEW|TRIGGER))\b/i.test(
+            sqlText,
+          )
+        if (!hasDdl) return
+        const fullSourceText =
+          context.sourceCode && typeof context.sourceCode.text === "string"
+            ? context.sourceCode.text
+            : ""
+        const hasMigratorInFile =
+          hasSqliteMigratorImport || /\b(?:SqliteMigrator|Migrator)\b/.test(fullSourceText)
+        if (!hasMigratorInFile) {
+          context.report({
+            node,
+            message: `Do not execute ad-hoc SQL DDL ('CREATE TABLE' / 'ALTER TABLE' / 'DROP TABLE') outside SqliteMigrator in type:infra ('${filename}') — manage Durable Object SQLite schema migrations transactionally via @effect/sql-sqlite-do/SqliteMigrator (SqliteMigrator.run / SqliteMigrator.layer with SqliteMigrator.fromRecord) so applied versions are tracked in effect_sql_migrations (harness:ADR-0008, harness:SPEC-0006, unmanaged-sql-ddl).`,
+          })
+        }
+      },
       VariableDeclarator(node) {
         checkNeverVariableDeclarator(context, node)
         if (node.id != null && node.id.type === "Identifier") {
+          if (node.init != null && node.init.type === "ObjectExpression") {
+            migrationRecordVars.set(node.id.name, node.init)
+          }
           if (isDiscriminantMemberAccess(node.init)) {
             discriminantAliasNames.add(node.id.name)
           }
@@ -1875,6 +1937,67 @@ const syntaxBans = {
               (isIdentifier(callee.object, "Math") && isIdentifier(callee.property, "random")))
           ) {
             context.report({ node, message: impureDomainGlobalMessage })
+          }
+        }
+        if (
+          /libs\/[^/]+\/infra\/src\//.test(filename) &&
+          !filename.includes("/libs/harness/") &&
+          node.callee != null &&
+          node.callee.type === "MemberExpression" &&
+          node.callee.computed !== true &&
+          isIdentifier(node.callee.property, "fromRecord") &&
+          Array.isArray(node.arguments) &&
+          node.arguments.length >= 1
+        ) {
+          const arg0 = node.arguments[0]
+          const collectEntries = (expr, out) => {
+            if (expr == null) return
+            if (expr.type === "Identifier" && typeof expr.name === "string") {
+              const saved = migrationRecordVars.get(expr.name)
+              if (Array.isArray(saved)) {
+                for (const item of saved) out.push(item)
+              }
+              return
+            }
+            if (expr.type === "ObjectExpression" && Array.isArray(expr.properties)) {
+              for (const prop of expr.properties) {
+                if (prop == null) continue
+                if (prop.type === "SpreadElement" && prop.argument != null) {
+                  collectEntries(prop.argument, out)
+                } else if (prop.type === "Property" && prop.key != null) {
+                  const keyName =
+                    prop.key.type === "Identifier"
+                      ? prop.key.name
+                      : prop.key.type === "Literal" && typeof prop.key.value === "string"
+                        ? prop.key.value
+                        : null
+                  if (keyName != null) {
+                    out.push({ keyName, node: prop.key })
+                  }
+                }
+              }
+            }
+          }
+          const entries = []
+          collectEntries(arg0, entries)
+          const seenIds = new Set()
+          for (const entry of entries) {
+            const m = /^([1-9]\d*)_([a-zA-Z0-9_]+)$/.exec(entry.keyName)
+            if (m == null) {
+              reportOnce(
+                entry.node,
+                `Invalid SqliteMigrator.fromRecord migration key '${entry.keyName}' (invalid-migrator-record-key) — migration keys must match '<positive_integer>_<snake_case_name>' (e.g. '1_init_tables') because Effect's Migrator.fromRecord silently ignores keys without a numeric prefix (harness:ADR-0008, harness:SPEC-0006).`,
+              )
+            } else {
+              const idNum = Number(m[1])
+              if (seenIds.has(idNum)) {
+                reportOnce(
+                  entry.node,
+                  `Duplicate SqliteMigrator.fromRecord migration numeric id '${idNum}' in key '${entry.keyName}' (invalid-migrator-record-key) — each migration must have a unique monotonic integer prefix (harness:ADR-0008, harness:SPEC-0006).`,
+                )
+              }
+              seenIds.add(idNum)
+            }
           }
         }
       },

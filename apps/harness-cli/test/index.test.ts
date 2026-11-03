@@ -2070,6 +2070,194 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
     }
   })
 
+  it("enforces transactional SQLite migrations via SqliteMigrator and validates migration record keys in type:infra", () => {
+    // 1. TaggedTemplateExpression sql`CREATE TABLE ...` in libs/sample/infra/src/repo.ts without importing SqliteMigrator is flagged with unmanaged-sql-ddl
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/infra/src/repo.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        },
+      })
+      visitor.TaggedTemplateExpression?.({
+        type: "TaggedTemplateExpression",
+        tag: { type: "Identifier", name: "sql" },
+        quasi: {
+          type: "TemplateLiteral",
+          quasis: [
+            {
+              type: "TemplateElement",
+              value: {
+                raw: "CREATE TABLE raw_table (id INTEGER PRIMARY KEY)",
+                cooked: "CREATE TABLE raw_table (id INTEGER PRIMARY KEY)",
+              },
+            },
+          ],
+          expressions: [],
+        },
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain("unmanaged-sql-ddl")
+    }
+
+    // 2. TaggedTemplateExpression in libs/sample/infra/src/repo.ts when ImportDeclaration for @effect/sql-sqlite-do/SqliteMigrator is present is not flagged
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/infra/src/repo.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        },
+      })
+      visitor.ImportDeclaration?.({
+        type: "ImportDeclaration",
+        source: { type: "Literal", value: "@effect/sql-sqlite-do/SqliteMigrator" },
+        specifiers: [
+          {
+            type: "ImportSpecifier",
+            imported: { type: "Identifier", name: "SqliteMigrator" },
+            local: { type: "Identifier", name: "SqliteMigrator" },
+          },
+        ],
+      })
+      visitor.TaggedTemplateExpression?.({
+        type: "TaggedTemplateExpression",
+        tag: { type: "Identifier", name: "sql" },
+        quasi: {
+          type: "TemplateLiteral",
+          quasis: [
+            {
+              type: "TemplateElement",
+              value: {
+                raw: "CREATE TABLE raw_table (id INTEGER PRIMARY KEY)",
+                cooked: "CREATE TABLE raw_table (id INTEGER PRIMARY KEY)",
+              },
+            },
+          ],
+          expressions: [],
+        },
+      })
+      expect(reports).toHaveLength(0)
+    }
+
+    // 3. CallExpression SqliteMigrator.fromRecord({ "init_no_number": effect }) is flagged with invalid-migrator-record-key
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/infra/src/repo.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        },
+      })
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "SqliteMigrator" },
+          property: { type: "Identifier", name: "fromRecord" },
+        },
+        arguments: [
+          {
+            type: "ObjectExpression",
+            properties: [
+              {
+                type: "Property",
+                computed: false,
+                key: { type: "Literal", value: "init_no_number" },
+                value: { type: "Identifier", name: "effect" },
+              },
+            ],
+          },
+        ],
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain("invalid-migrator-record-key")
+    }
+
+    // 4. CallExpression SqliteMigrator.fromRecord({ "1_first": effect1, "1_duplicate": effect2 }) is flagged with invalid-migrator-record-key
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/infra/src/repo.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        },
+      })
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "SqliteMigrator" },
+          property: { type: "Identifier", name: "fromRecord" },
+        },
+        arguments: [
+          {
+            type: "ObjectExpression",
+            properties: [
+              {
+                type: "Property",
+                computed: false,
+                key: { type: "Literal", value: "1_first" },
+                value: { type: "Identifier", name: "effect1" },
+              },
+              {
+                type: "Property",
+                computed: false,
+                key: { type: "Literal", value: "1_duplicate" },
+                value: { type: "Identifier", name: "effect2" },
+              },
+            ],
+          },
+        ],
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain("invalid-migrator-record-key")
+    }
+
+    // 5. CallExpression SqliteMigrator.fromRecord({ "1_init_tables": effect1, "2_add_index": effect2 }) produces 0 reports
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/infra/src/repo.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        },
+      })
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "SqliteMigrator" },
+          property: { type: "Identifier", name: "fromRecord" },
+        },
+        arguments: [
+          {
+            type: "ObjectExpression",
+            properties: [
+              {
+                type: "Property",
+                computed: false,
+                key: { type: "Literal", value: "1_init_tables" },
+                value: { type: "Identifier", name: "effect1" },
+              },
+              {
+                type: "Property",
+                computed: false,
+                key: { type: "Literal", value: "2_add_index" },
+                value: { type: "Identifier", name: "effect2" },
+              },
+            ],
+          },
+        ],
+      })
+      expect(reports).toHaveLength(0)
+    }
+  })
+
   it("halts execution with [CRITICAL HARNESS BLOCKER] when Ollama is required and unavailable", async () => {
     const prevRequire = process.env["HARNESS_REQUIRE_OLLAMA"]
     const prevUrl = process.env["HARNESS_OLLAMA_URL"]
