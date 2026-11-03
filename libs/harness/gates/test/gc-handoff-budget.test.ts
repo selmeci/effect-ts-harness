@@ -39,7 +39,7 @@ import {
   type FrictionCluster,
   type FrictionEvent,
   type GovernanceDocReference,
-  type SpanSample
+  type SpanSample,
 } from "../src/index.js"
 
 describe("Harness Gates: GC check, Session Handoff, Span Budget, and State Dir", () => {
@@ -55,9 +55,9 @@ describe("Harness Gates: GC check, Session Handoff, Span Budget, and State Dir",
             file: "libs/sample/domain/src/index.ts",
             line: 1,
             successType: "string",
-            isStub: true
-          }
-        ]
+            isStub: true,
+          },
+        ],
       })
       const initialImplGraph = buildHarnessGraph({
         fns: [
@@ -68,9 +68,9 @@ describe("Harness Gates: GC check, Session Handoff, Span Budget, and State Dir",
             file: "libs/sample/domain/src/index.ts",
             line: 1,
             successType: "string",
-            isStub: false
-          }
-        ]
+            isStub: false,
+          },
+        ],
       })
       const planPath = join(tempDir, "plan-graph-snapshot.json")
       const implPath = join(tempDir, "graph-snapshot.json")
@@ -86,146 +86,152 @@ describe("Harness Gates: GC check, Session Handoff, Span Budget, and State Dir",
     }
   })
   describe("decideGraphEntropy / scanGraphEntropy", () => {
-    it.effect("detects unused-service, unprovided-service, dead-tagged-error, and missing-pattern-doc", () =>
-      Effect.gen(function* () {
-        const graph = buildHarnessGraph({
-          services: [
-            {
-              tagId: "UnusedAndUnprovided",
-              name: "UnusedAndUnprovided",
-              packageTag: "service",
-              file: "libs/sample/service/src/index.ts"
-            },
-            // Built-in framework services should be ignored
-            {
-              tagId: "DecisionModel",
-              name: "DecisionModel",
-              packageTag: "service",
-              file: "libs/harness/decision/src/index.ts"
-            },
-            {
-              tagId: "@harness/ingest/SpanRecorder",
-              name: "SpanRecorder",
-              packageTag: "service",
-              file: "libs/harness/ingest/src/index.ts"
-            }
-          ],
-          errors: [
-            {
-              errorTag: "DeadCustomError",
-              file: "libs/sample/contract/src/index.ts"
-            },
-            // Built-in framework errors should be ignored
-            {
-              errorTag: "OmnigraphLoadError",
-              file: "libs/harness/graph/src/index.ts"
-            },
-            {
-              errorTag: "SchemaError",
-              file: "libs/harness/graph/src/index.ts"
-            }
-          ]
-        })
+    it.effect(
+      "detects unused-service, unprovided-service, dead-tagged-error, and missing-pattern-doc",
+      () =>
+        Effect.gen(function* () {
+          const graph = buildHarnessGraph({
+            services: [
+              {
+                tagId: "UnusedAndUnprovided",
+                name: "UnusedAndUnprovided",
+                packageTag: "service",
+                file: "libs/sample/service/src/index.ts",
+              },
+              // Built-in framework services should be ignored
+              {
+                tagId: "DecisionModel",
+                name: "DecisionModel",
+                packageTag: "service",
+                file: "libs/harness/decision/src/index.ts",
+              },
+              {
+                tagId: "@harness/ingest/SpanRecorder",
+                name: "SpanRecorder",
+                packageTag: "service",
+                file: "libs/harness/ingest/src/index.ts",
+              },
+            ],
+            errors: [
+              {
+                errorTag: "DeadCustomError",
+                file: "libs/sample/contract/src/index.ts",
+              },
+              // Built-in framework errors should be ignored
+              {
+                errorTag: "OmnigraphLoadError",
+                file: "libs/harness/graph/src/index.ts",
+              },
+              {
+                errorTag: "SchemaError",
+                file: "libs/harness/graph/src/index.ts",
+              },
+            ],
+          })
 
-        const report = yield* decideGraphEntropy({
-          graph,
-          expectedPatterns: ["planning", "httpapi", "review", "effect"]
-        })
+          const report = yield* decideGraphEntropy({
+            graph,
+            expectedPatterns: ["planning", "httpapi", "review", "effect"],
+          })
 
-        expect(report.clean).toBe(false)
+          expect(report.clean).toBe(false)
 
-        const kinds = report.findings.map((f) => f.kind)
-        expect(kinds).toContain("unused-service")
-        expect(kinds).toContain("unprovided-service")
-        expect(kinds).toContain("dead-tagged-error")
-        expect(kinds).toContain("missing-pattern-doc")
+          const kinds = report.findings.map((f) => f.kind)
+          expect(kinds).toContain("unused-service")
+          expect(kinds).toContain("unprovided-service")
+          expect(kinds).toContain("dead-tagged-error")
+          expect(kinds).toContain("missing-pattern-doc")
 
-        // Unused & unprovided for UnusedAndUnprovided
-        const unused = report.findings.find(
-          (f) => f.kind === "unused-service" && f.nodeId === "UnusedAndUnprovided"
-        )
-        expect(unused).toBeDefined()
-        expect(unused?.message).toContain("has no consumers")
-        expect(unused?.location).toBe("libs/sample/service/src/index.ts")
-        expect(unused?.action).toContain("inject ServiceTag")
-
-        const unprovided = report.findings.find(
-          (f) => f.kind === "unprovided-service" && f.nodeId === "UnusedAndUnprovided"
-        )
-        expect(unprovided).toBeDefined()
-        expect(unprovided?.message).toContain("has no providing ServiceLayer")
-        expect(unprovided?.location).toBe("libs/sample/service/src/index.ts")
-        expect(unprovided?.action).toContain("Provide a live layer")
-
-        // Ignored services should NOT produce findings
-        expect(
-          report.findings.some(
-            (f) => f.nodeId === "DecisionModel" || f.nodeId === "@harness/ingest/SpanRecorder"
+          // Unused & unprovided for UnusedAndUnprovided
+          const unused = report.findings.find(
+            (f) => f.kind === "unused-service" && f.nodeId === "UnusedAndUnprovided",
           )
-        ).toBe(false)
+          expect(unused).toBeDefined()
+          expect(unused?.message).toContain("has no consumers")
+          expect(unused?.location).toBe("libs/sample/service/src/index.ts")
+          expect(unused?.action).toContain("inject ServiceTag")
 
-        // Dead tagged error
-        const deadErr = report.findings.find(
-          (f) => f.kind === "dead-tagged-error" && f.nodeId === "DeadCustomError"
-        )
-        expect(deadErr).toBeDefined()
-        expect(deadErr?.message).toContain("is never emitted in any E channel")
-        expect(deadErr?.location).toBe("libs/sample/contract/src/index.ts")
-        expect(deadErr?.action).toContain("Fail with this error")
-
-        // Ignored errors should NOT produce findings
-        expect(
-          report.findings.some(
-            (f) => f.nodeId === "OmnigraphLoadError" || f.nodeId === "SchemaError"
+          const unprovided = report.findings.find(
+            (f) => f.kind === "unprovided-service" && f.nodeId === "UnusedAndUnprovided",
           )
-        ).toBe(false)
+          expect(unprovided).toBeDefined()
+          expect(unprovided?.message).toContain("has no providing ServiceLayer")
+          expect(unprovided?.location).toBe("libs/sample/service/src/index.ts")
+          expect(unprovided?.action).toContain("Provide a live layer")
 
-        // Missing pattern docs for planning and httpapi (review & effect excluded)
-        const missingDocs = report.findings.filter((f) => f.kind === "missing-pattern-doc")
-        expect(missingDocs.map((f) => f.nodeId)).toEqual(["Pattern:planning", "Pattern:httpapi"])
-        expect(missingDocs[0]?.location).toBe("agent-patterns/planning.md")
-        expect(missingDocs[0]?.action).toContain("Create \"agent-patterns/planning.md\"")
-      })
+          // Ignored services should NOT produce findings
+          expect(
+            report.findings.some(
+              (f) => f.nodeId === "DecisionModel" || f.nodeId === "@harness/ingest/SpanRecorder",
+            ),
+          ).toBe(false)
+
+          // Dead tagged error
+          const deadErr = report.findings.find(
+            (f) => f.kind === "dead-tagged-error" && f.nodeId === "DeadCustomError",
+          )
+          expect(deadErr).toBeDefined()
+          expect(deadErr?.message).toContain("is never emitted in any E channel")
+          expect(deadErr?.location).toBe("libs/sample/contract/src/index.ts")
+          expect(deadErr?.action).toContain("Fail with this error")
+
+          // Ignored errors should NOT produce findings
+          expect(
+            report.findings.some(
+              (f) => f.nodeId === "OmnigraphLoadError" || f.nodeId === "SchemaError",
+            ),
+          ).toBe(false)
+
+          // Missing pattern docs for planning and httpapi (review & effect excluded)
+          const missingDocs = report.findings.filter((f) => f.kind === "missing-pattern-doc")
+          expect(missingDocs.map((f) => f.nodeId)).toEqual(["Pattern:planning", "Pattern:httpapi"])
+          expect(missingDocs[0]?.location).toBe("agent-patterns/planning.md")
+          expect(missingDocs[0]?.action).toContain('Create "agent-patterns/planning.md"')
+        }),
     )
 
-    it.effect("enriches findings with location, action and fuzzy match suggestions on typos in governance docs", () =>
-      Effect.gen(function* () {
-        const graph = buildHarnessGraph({
-          fns: [
+    it.effect(
+      "enriches findings with location, action and fuzzy match suggestions on typos in governance docs",
+      () =>
+        Effect.gen(function* () {
+          const graph = buildHarnessGraph({
+            fns: [
+              {
+                qualname: "libs/sample/domain/src/index.ts#greet",
+                spanName: "Sample.greet",
+                packageTag: "domain",
+                file: "libs/sample/domain/src/index.ts",
+                line: 12,
+                successType: "string",
+                isStub: false,
+              },
+            ],
+          })
+
+          const governanceDocs: ReadonlyArray<GovernanceDocReference> = [
             {
-              qualname: "libs/sample/domain/src/index.ts#greet",
-              spanName: "Sample.greet",
-              packageTag: "domain",
-              file: "libs/sample/domain/src/index.ts",
-              line: 12,
-              successType: "string",
-              isStub: false
-            }
+              docPath: "libs/sample/docs/adr/0001-sample.md",
+              id: "sample:ADR-0001",
+              status: "accepted",
+              referencedSpans: ["Sample.greett"], // typo
+            },
           ]
-        })
 
-        const governanceDocs: ReadonlyArray<GovernanceDocReference> = [
-          {
-            docPath: "libs/sample/docs/adr/0001-sample.md",
-            id: "sample:ADR-0001",
-            status: "accepted",
-            referencedSpans: ["Sample.greett"] // typo
-          }
-        ]
+          const report = yield* decideGraphEntropy({
+            graph,
+            governanceDocs,
+          })
 
-        const report = yield* decideGraphEntropy({
-          graph,
-          governanceDocs
-        })
-
-        const stale = report.findings.find(
-          (f) => f.kind === "stale-doc-reference" && f.nodeId === "sample:ADR-0001:Sample.greett"
-        )
-        expect(stale).toBeDefined()
-        expect(stale?.location).toBe("libs/sample/docs/adr/0001-sample.md")
-        expect(stale?.message).toContain('Did you mean "Sample.greet"?')
-        expect(stale?.action).toContain('Update reference in "libs/sample/docs/adr/0001-sample.md" to "Sample.greet"')
-      })
+          const stale = report.findings.find(
+            (f) => f.kind === "stale-doc-reference" && f.nodeId === "sample:ADR-0001:Sample.greett",
+          )
+          expect(stale).toBeDefined()
+          expect(stale?.location).toBe("libs/sample/docs/adr/0001-sample.md")
+          expect(stale?.message).toContain('Did you mean "Sample.greet"?')
+          expect(stale?.action).toContain(
+            'Update reference in "libs/sample/docs/adr/0001-sample.md" to "Sample.greet"',
+          )
+        }),
     )
 
     it("calculates levenshtein distance and closest fuzzy match correctly", () => {
@@ -249,169 +255,173 @@ describe("Harness Gates: GC check, Session Handoff, Span Budget, and State Dir",
             file: "libs/sample/domain/src/index.ts",
             line: 5,
             successType: "string",
-            isStub: false
-          }
+            isStub: false,
+          },
         ],
         services: [
           {
             tagId: "GreeterService",
             name: "GreeterService",
             packageTag: "service",
-            file: "libs/sample/service/src/index.ts"
-          }
+            file: "libs/sample/service/src/index.ts",
+          },
         ],
         layers: [
           {
             qualname: "libs/sample/infra/src/index.ts#GreeterLive",
             layerKind: "live",
             packageTag: "infra",
-            file: "libs/sample/infra/src/index.ts"
-          }
+            file: "libs/sample/infra/src/index.ts",
+          },
         ],
         errors: [
           {
             errorTag: "GreeterError",
-            file: "libs/sample/contract/src/index.ts"
-          }
+            file: "libs/sample/contract/src/index.ts",
+          },
         ],
         patternDocs: [
           {
             slug: "planning",
             path: "agent-patterns/planning.md",
-            summary: "Planning pattern"
-          }
+            summary: "Planning pattern",
+          },
         ],
         requiresService: [
           {
             callerQualname: "libs/sample/domain/src/index.ts#greet",
-            tagId: "GreeterService"
-          }
+            tagId: "GreeterService",
+          },
         ],
         providesService: [
           {
             layerQualname: "libs/sample/infra/src/index.ts#GreeterLive",
-            tagId: "GreeterService"
-          }
+            tagId: "GreeterService",
+          },
         ],
         failsWith: [
           {
             callerQualname: "libs/sample/domain/src/index.ts#greet",
-            errorTag: "GreeterError"
-          }
-        ]
+            errorTag: "GreeterError",
+          },
+        ],
       })
 
       const report = scanGraphEntropy(graph, {
-        expectedPatterns: ["planning", "review", "effect"]
+        expectedPatterns: ["planning", "review", "effect"],
       })
 
       expect(report.clean).toBe(true)
       expect(report.findings).toHaveLength(0)
     })
 
-    it.effect("flags untested domain EffectFn when checkUntestedDomainFns: true, passes once tested", () =>
-      Effect.gen(function* () {
-        const fnNode = {
-          qualname: "libs/sample/domain/src/index.ts#greet",
-          spanName: "Sample.greet",
-          packageTag: "domain" as const,
-          file: "libs/sample/domain/src/index.ts",
-          line: 9,
-          successType: "string",
-          isStub: false
-        }
+    it.effect(
+      "flags untested domain EffectFn when checkUntestedDomainFns: true, passes once tested",
+      () =>
+        Effect.gen(function* () {
+          const fnNode = {
+            qualname: "libs/sample/domain/src/index.ts#greet",
+            spanName: "Sample.greet",
+            packageTag: "domain" as const,
+            file: "libs/sample/domain/src/index.ts",
+            line: 9,
+            successType: "string",
+            isStub: false,
+          }
 
-        const graphWithoutTest = buildHarnessGraph({
-          fns: [fnNode]
-        })
+          const graphWithoutTest = buildHarnessGraph({
+            fns: [fnNode],
+          })
 
-        const reportUntested = yield* decideGraphEntropy({
-          graph: graphWithoutTest,
-          checkUntestedDomainFns: true
-        })
+          const reportUntested = yield* decideGraphEntropy({
+            graph: graphWithoutTest,
+            checkUntestedDomainFns: true,
+          })
 
-        expect(reportUntested.clean).toBe(false)
-        const untested = reportUntested.findings.find((f) => f.kind === "untested-effect-fn")
-        expect(untested).toBeDefined()
-        expect(untested?.nodeId).toBe("Sample.greet")
-        expect(untested?.message).toContain("has 0 reaching tests")
+          expect(reportUntested.clean).toBe(false)
+          const untested = reportUntested.findings.find((f) => f.kind === "untested-effect-fn")
+          expect(untested).toBeDefined()
+          expect(untested?.nodeId).toBe("Sample.greet")
+          expect(untested?.message).toContain("has 0 reaching tests")
 
-        // Now add a VitestCase and ExercisesSpan edge
-        const graphWithTest = buildHarnessGraph({
-          fns: [fnNode],
-          tests: [
-            {
-              testId: "libs/sample/domain/test/index.test.ts::suite",
-              testFile: "libs/sample/domain/test/index.test.ts",
-              testName: "libs/sample/domain/test/index.test.ts",
-              lastTreeHash: "workspace"
-            }
-          ],
-          exercisesSpans: [
-            {
-              testId: "libs/sample/domain/test/index.test.ts::suite",
-              calleeQualname: "libs/sample/domain/src/index.ts#greet",
-              callCount: 1,
-              receiverLayer: null
-            }
-          ]
-        })
+          // Now add a VitestCase and ExercisesSpan edge
+          const graphWithTest = buildHarnessGraph({
+            fns: [fnNode],
+            tests: [
+              {
+                testId: "libs/sample/domain/test/index.test.ts::suite",
+                testFile: "libs/sample/domain/test/index.test.ts",
+                testName: "libs/sample/domain/test/index.test.ts",
+                lastTreeHash: "workspace",
+              },
+            ],
+            exercisesSpans: [
+              {
+                testId: "libs/sample/domain/test/index.test.ts::suite",
+                calleeQualname: "libs/sample/domain/src/index.ts#greet",
+                callCount: 1,
+                receiverLayer: null,
+              },
+            ],
+          })
 
-        const reportTested = yield* decideGraphEntropy({
-          graph: graphWithTest,
-          checkUntestedDomainFns: true
-        })
+          const reportTested = yield* decideGraphEntropy({
+            graph: graphWithTest,
+            checkUntestedDomainFns: true,
+          })
 
-        const untestedAfter = reportTested.findings.filter((f) => f.kind === "untested-effect-fn")
-        expect(untestedAfter).toHaveLength(0)
-        expect(reportTested.clean).toBe(true)
-      })
+          const untestedAfter = reportTested.findings.filter((f) => f.kind === "untested-effect-fn")
+          expect(untestedAfter).toHaveLength(0)
+          expect(reportTested.clean).toBe(true)
+        }),
     )
 
-    it.effect("flags untested-effect-fn and missing-decider-property-test on packageTag: 'contract' functions", () =>
-      Effect.gen(function* () {
-        const contractDecider = {
-          qualname: "libs/sample/contract/src/index.ts#Decider.run",
-          spanName: "Decider.run",
-          packageTag: "contract" as const,
-          file: "libs/sample/contract/src/index.ts",
-          line: 15,
-          successType: "void",
-          isStub: false
-        }
-        const contractPureDecider = {
-          qualname: "libs/sample/contract/src/index.ts#Item.decide",
-          spanName: "Item.decide",
-          packageTag: "contract" as const,
-          file: "libs/sample/contract/src/index.ts",
-          line: 30,
-          successType: "boolean",
-          isStub: false
-        }
+    it.effect(
+      "flags untested-effect-fn and missing-decider-property-test on packageTag: 'contract' functions",
+      () =>
+        Effect.gen(function* () {
+          const contractDecider = {
+            qualname: "libs/sample/contract/src/index.ts#Decider.run",
+            spanName: "Decider.run",
+            packageTag: "contract" as const,
+            file: "libs/sample/contract/src/index.ts",
+            line: 15,
+            successType: "void",
+            isStub: false,
+          }
+          const contractPureDecider = {
+            qualname: "libs/sample/contract/src/index.ts#Item.decide",
+            spanName: "Item.decide",
+            packageTag: "contract" as const,
+            file: "libs/sample/contract/src/index.ts",
+            line: 30,
+            successType: "boolean",
+            isStub: false,
+          }
 
-        const graphWithoutTests = buildHarnessGraph({
-          fns: [contractDecider, contractPureDecider]
-        })
+          const graphWithoutTests = buildHarnessGraph({
+            fns: [contractDecider, contractPureDecider],
+          })
 
-        const report = yield* decideGraphEntropy({
-          graph: graphWithoutTests,
-          checkUntestedDomainFns: true,
-          checkDeciderPropertyTests: true
-        })
+          const report = yield* decideGraphEntropy({
+            graph: graphWithoutTests,
+            checkUntestedDomainFns: true,
+            checkDeciderPropertyTests: true,
+          })
 
-        expect(report.clean).toBe(false)
-        const untestedDeciderRun = report.findings.find(
-          (f) => f.kind === "untested-effect-fn" && f.nodeId === "Decider.run"
-        )
-        expect(untestedDeciderRun).toBeDefined()
-        expect(untestedDeciderRun?.message).toContain("has 0 reaching tests")
+          expect(report.clean).toBe(false)
+          const untestedDeciderRun = report.findings.find(
+            (f) => f.kind === "untested-effect-fn" && f.nodeId === "Decider.run",
+          )
+          expect(untestedDeciderRun).toBeDefined()
+          expect(untestedDeciderRun?.message).toContain("has 0 reaching tests")
 
-        const missingProp = report.findings.find(
-          (f) => f.kind === "missing-decider-property-test" && f.nodeId === "Item.decide"
-        )
-        expect(missingProp).toBeDefined()
-        expect(missingProp?.message).toContain("0 Property-Based Tests")
-      })
+          const missingProp = report.findings.find(
+            (f) => f.kind === "missing-decider-property-test" && f.nodeId === "Item.decide",
+          )
+          expect(missingProp).toBeDefined()
+          expect(missingProp?.message).toContain("0 Property-Based Tests")
+        }),
     )
 
     it("parses ADR and EARS spec YAML frontmatter accurately", () => {
@@ -430,10 +440,8 @@ errors:
 ---
 # ADR-0001
 `
-      const parsedAdr = parseGovernanceDocFrontmatter(
-        "docs/adr/0001-adr.md",
-        adrMarkdown,
-        (rel) => rel.includes("gc-check.ts")
+      const parsedAdr = parseGovernanceDocFrontmatter("docs/adr/0001-adr.md", adrMarkdown, (rel) =>
+        rel.includes("gc-check.ts"),
       )
       expect(parsedAdr).not.toBeNull()
       expect(parsedAdr?.id).toBe("ADR-0001")
@@ -441,11 +449,9 @@ errors:
       expect(parsedAdr?.docPath).toBe("docs/adr/0001-adr.md")
       expect(parsedAdr?.enforcedByFiles).toEqual([
         "libs/harness/gates/src/gc-check.ts",
-        "libs/harness/gates/test/gc-handoff-budget.test.ts"
+        "libs/harness/gates/test/gc-handoff-budget.test.ts",
       ])
-      expect(parsedAdr?.existingFiles).toEqual([
-        "libs/harness/gates/src/gc-check.ts"
-      ])
+      expect(parsedAdr?.existingFiles).toEqual(["libs/harness/gates/src/gc-check.ts"])
       expect(parsedAdr?.referencedSpans).toEqual(["Sample.greet"])
       expect(parsedAdr?.referencedServices).toEqual(["GreeterService"])
       expect(parsedAdr?.referencedErrors).toEqual(["GreeterError"])
@@ -460,10 +466,7 @@ errors: []
 ---
 # EARS Spec
 `
-      const parsedEars = parseGovernanceDocFrontmatter(
-        "docs/specs/0001-spec.md",
-        earsMarkdown
-      )
+      const parsedEars = parseGovernanceDocFrontmatter("docs/specs/0001-spec.md", earsMarkdown)
       expect(parsedEars).not.toBeNull()
       expect(parsedEars?.id).toBe("SPEC-0001")
       expect(parsedEars?.status).toBe("proposed")
@@ -476,11 +479,9 @@ errors: []
       // Missing or invalid frontmatter/id
       expect(parseGovernanceDocFrontmatter("docs/adr/no-fm.md", "# Just MD")).toBeNull()
       expect(
-        parseGovernanceDocFrontmatter("docs/adr/no-id.md", "---\nstatus: accepted\n---")
+        parseGovernanceDocFrontmatter("docs/adr/no-id.md", "---\nstatus: accepted\n---"),
       ).toBeNull()
-      expect(
-        parseGovernanceDocFrontmatter("docs/adr/empty-id.md", "---\nid: ''\n---")
-      ).toBeNull()
+      expect(parseGovernanceDocFrontmatter("docs/adr/empty-id.md", "---\nid: ''\n---")).toBeNull()
     })
 
     it("returns clean: true when accepted ADR/Spec references valid files, spans, services, and errors", () => {
@@ -493,56 +494,56 @@ errors: []
             file: "libs/sample/domain/src/index.ts",
             line: 5,
             successType: "string",
-            isStub: false
-          }
+            isStub: false,
+          },
         ],
         services: [
           {
             tagId: "GreeterService",
             name: "GreeterService",
             packageTag: "service",
-            file: "libs/sample/service/src/index.ts"
-          }
+            file: "libs/sample/service/src/index.ts",
+          },
         ],
         layers: [
           {
             qualname: "libs/sample/infra/src/index.ts#GreeterLive",
             layerKind: "live",
             packageTag: "infra",
-            file: "libs/sample/infra/src/index.ts"
-          }
+            file: "libs/sample/infra/src/index.ts",
+          },
         ],
         errors: [
           {
             errorTag: "GreeterError",
-            file: "libs/sample/contract/src/index.ts"
-          }
+            file: "libs/sample/contract/src/index.ts",
+          },
         ],
         patternDocs: [
           {
             slug: "planning",
             path: "agent-patterns/planning.md",
-            summary: "Planning pattern"
-          }
+            summary: "Planning pattern",
+          },
         ],
         requiresService: [
           {
             callerQualname: "libs/sample/domain/src/index.ts#greet",
-            tagId: "GreeterService"
-          }
+            tagId: "GreeterService",
+          },
         ],
         providesService: [
           {
             layerQualname: "libs/sample/infra/src/index.ts#GreeterLive",
-            tagId: "GreeterService"
-          }
+            tagId: "GreeterService",
+          },
         ],
         failsWith: [
           {
             callerQualname: "libs/sample/domain/src/index.ts#greet",
-            errorTag: "GreeterError"
-          }
-        ]
+            errorTag: "GreeterError",
+          },
+        ],
       })
 
       const doc: GovernanceDocReference = {
@@ -553,158 +554,160 @@ errors: []
         existingFiles: ["libs/sample/domain/src/index.ts"],
         referencedSpans: ["Sample.greet"],
         referencedServices: ["GreeterService"],
-        referencedErrors: ["GreeterError"]
+        referencedErrors: ["GreeterError"],
       }
 
       const report = scanGraphEntropy(graph, {
         expectedPatterns: ["planning", "review", "effect"],
-        governanceDocs: [doc]
+        governanceDocs: [doc],
       })
 
       expect(report.clean).toBe(true)
       expect(report.findings).toHaveLength(0)
     })
 
-    it.effect("flags stale-doc-reference when accepted doc references missing elements while ignoring proposed/superseded", () =>
-      Effect.gen(function* () {
-        const graph = buildHarnessGraph({
-          fns: [
-            {
-              qualname: "libs/sample/domain/src/index.ts#greet",
-              spanName: "Sample.greet",
-              packageTag: "domain",
-              file: "libs/sample/domain/src/index.ts",
-              line: 5,
-              successType: "string",
-              isStub: false
-            }
-          ],
-          services: [
-            {
-              tagId: "GreeterService",
-              name: "GreeterService",
-              packageTag: "service",
-              file: "libs/sample/service/src/index.ts"
-            }
-          ],
-          layers: [
-            {
-              qualname: "libs/sample/infra/src/index.ts#GreeterLive",
-              layerKind: "live",
-              packageTag: "infra",
-              file: "libs/sample/infra/src/index.ts"
-            }
-          ],
-          errors: [
-            {
-              errorTag: "GreeterError",
-              file: "libs/sample/contract/src/index.ts"
-            }
-          ],
-          patternDocs: [
-            {
-              slug: "planning",
-              path: "agent-patterns/planning.md",
-              summary: "Planning pattern"
-            }
-          ],
-          requiresService: [
-            {
-              callerQualname: "libs/sample/domain/src/index.ts#greet",
-              tagId: "GreeterService"
-            }
-          ],
-          providesService: [
-            {
-              layerQualname: "libs/sample/infra/src/index.ts#GreeterLive",
-              tagId: "GreeterService"
-            }
-          ],
-          failsWith: [
-            {
-              callerQualname: "libs/sample/domain/src/index.ts#greet",
-              errorTag: "GreeterError"
-            }
-          ]
-        })
+    it.effect(
+      "flags stale-doc-reference when accepted doc references missing elements while ignoring proposed/superseded",
+      () =>
+        Effect.gen(function* () {
+          const graph = buildHarnessGraph({
+            fns: [
+              {
+                qualname: "libs/sample/domain/src/index.ts#greet",
+                spanName: "Sample.greet",
+                packageTag: "domain",
+                file: "libs/sample/domain/src/index.ts",
+                line: 5,
+                successType: "string",
+                isStub: false,
+              },
+            ],
+            services: [
+              {
+                tagId: "GreeterService",
+                name: "GreeterService",
+                packageTag: "service",
+                file: "libs/sample/service/src/index.ts",
+              },
+            ],
+            layers: [
+              {
+                qualname: "libs/sample/infra/src/index.ts#GreeterLive",
+                layerKind: "live",
+                packageTag: "infra",
+                file: "libs/sample/infra/src/index.ts",
+              },
+            ],
+            errors: [
+              {
+                errorTag: "GreeterError",
+                file: "libs/sample/contract/src/index.ts",
+              },
+            ],
+            patternDocs: [
+              {
+                slug: "planning",
+                path: "agent-patterns/planning.md",
+                summary: "Planning pattern",
+              },
+            ],
+            requiresService: [
+              {
+                callerQualname: "libs/sample/domain/src/index.ts#greet",
+                tagId: "GreeterService",
+              },
+            ],
+            providesService: [
+              {
+                layerQualname: "libs/sample/infra/src/index.ts#GreeterLive",
+                tagId: "GreeterService",
+              },
+            ],
+            failsWith: [
+              {
+                callerQualname: "libs/sample/domain/src/index.ts#greet",
+                errorTag: "GreeterError",
+              },
+            ],
+          })
 
-        const staleAcceptedDoc: GovernanceDocReference = {
-          docPath: "docs/adr/0002-stale.md",
-          id: "ADR-0002",
-          status: "accepted",
-          enforcedByFiles: ["libs/sample/deleted.ts"],
-          existingFiles: [],
-          referencedSpans: ["Missing.span"],
-          referencedServices: ["MissingService"],
-          referencedErrors: ["MissingError"]
-        }
+          const staleAcceptedDoc: GovernanceDocReference = {
+            docPath: "docs/adr/0002-stale.md",
+            id: "ADR-0002",
+            status: "accepted",
+            enforcedByFiles: ["libs/sample/deleted.ts"],
+            existingFiles: [],
+            referencedSpans: ["Missing.span"],
+            referencedServices: ["MissingService"],
+            referencedErrors: ["MissingError"],
+          }
 
-        const proposedDocWithBrokenRefs: GovernanceDocReference = {
-          docPath: "docs/specs/0001-draft.md",
-          id: "SPEC-0001",
-          status: "proposed",
-          enforcedByFiles: ["libs/sample/draft-nonexistent.ts"],
-          existingFiles: [],
-          referencedSpans: ["Draft.span"],
-          referencedServices: ["DraftService"],
-          referencedErrors: ["DraftError"]
-        }
+          const proposedDocWithBrokenRefs: GovernanceDocReference = {
+            docPath: "docs/specs/0001-draft.md",
+            id: "SPEC-0001",
+            status: "proposed",
+            enforcedByFiles: ["libs/sample/draft-nonexistent.ts"],
+            existingFiles: [],
+            referencedSpans: ["Draft.span"],
+            referencedServices: ["DraftService"],
+            referencedErrors: ["DraftError"],
+          }
 
-        const supersededDocWithBrokenRefs: GovernanceDocReference = {
-          docPath: "docs/adr/0000-old.md",
-          id: "ADR-0000",
-          status: "superseded",
-          enforcedByFiles: ["libs/sample/old-nonexistent.ts"],
-          existingFiles: [],
-          referencedSpans: ["Old.span"],
-          referencedServices: ["OldService"],
-          referencedErrors: ["OldError"]
-        }
+          const supersededDocWithBrokenRefs: GovernanceDocReference = {
+            docPath: "docs/adr/0000-old.md",
+            id: "ADR-0000",
+            status: "superseded",
+            enforcedByFiles: ["libs/sample/old-nonexistent.ts"],
+            existingFiles: [],
+            referencedSpans: ["Old.span"],
+            referencedServices: ["OldService"],
+            referencedErrors: ["OldError"],
+          }
 
-        const report = yield* decideGraphEntropy({
-          graph,
-          expectedPatterns: ["planning", "review", "effect"],
-          governanceDocs: [
-            staleAcceptedDoc,
-            proposedDocWithBrokenRefs,
-            supersededDocWithBrokenRefs
-          ]
-        })
+          const report = yield* decideGraphEntropy({
+            graph,
+            expectedPatterns: ["planning", "review", "effect"],
+            governanceDocs: [
+              staleAcceptedDoc,
+              proposedDocWithBrokenRefs,
+              supersededDocWithBrokenRefs,
+            ],
+          })
 
-        expect(report.clean).toBe(false)
-        const staleFindings = report.findings.filter((f) => f.kind === "stale-doc-reference")
-        expect(staleFindings).toHaveLength(4)
+          expect(report.clean).toBe(false)
+          const staleFindings = report.findings.filter((f) => f.kind === "stale-doc-reference")
+          expect(staleFindings).toHaveLength(4)
 
-        const fileFinding = staleFindings.find(
-          (f) => f.nodeId === "ADR-0002:libs/sample/deleted.ts"
-        )
-        expect(fileFinding).toBeDefined()
-        expect(fileFinding?.message).toContain(
-          'Governance doc "docs/adr/0002-stale.md" (ADR-0002) references non-existent enforced_by file "libs/sample/deleted.ts".'
-        )
+          const fileFinding = staleFindings.find(
+            (f) => f.nodeId === "ADR-0002:libs/sample/deleted.ts",
+          )
+          expect(fileFinding).toBeDefined()
+          expect(fileFinding?.message).toContain(
+            'Governance doc "docs/adr/0002-stale.md" (ADR-0002) references non-existent enforced_by file "libs/sample/deleted.ts".',
+          )
 
-        const spanFinding = staleFindings.find((f) => f.nodeId === "ADR-0002:Missing.span")
-        expect(spanFinding).toBeDefined()
-        expect(spanFinding?.message).toContain(
-          'Governance doc "docs/adr/0002-stale.md" (ADR-0002) references non-existent EffectFn span "Missing.span".'
-        )
+          const spanFinding = staleFindings.find((f) => f.nodeId === "ADR-0002:Missing.span")
+          expect(spanFinding).toBeDefined()
+          expect(spanFinding?.message).toContain(
+            'Governance doc "docs/adr/0002-stale.md" (ADR-0002) references non-existent EffectFn span "Missing.span".',
+          )
 
-        const svcFinding = staleFindings.find((f) => f.nodeId === "ADR-0002:MissingService")
-        expect(svcFinding).toBeDefined()
-        expect(svcFinding?.message).toContain(
-          'Governance doc "docs/adr/0002-stale.md" (ADR-0002) references non-existent ServiceTag "MissingService".'
-        )
+          const svcFinding = staleFindings.find((f) => f.nodeId === "ADR-0002:MissingService")
+          expect(svcFinding).toBeDefined()
+          expect(svcFinding?.message).toContain(
+            'Governance doc "docs/adr/0002-stale.md" (ADR-0002) references non-existent ServiceTag "MissingService".',
+          )
 
-        const errFinding = staleFindings.find((f) => f.nodeId === "ADR-0002:MissingError")
-        expect(errFinding).toBeDefined()
-        expect(errFinding?.message).toContain(
-          'Governance doc "docs/adr/0002-stale.md" (ADR-0002) references non-existent TaggedError "MissingError".'
-        )
+          const errFinding = staleFindings.find((f) => f.nodeId === "ADR-0002:MissingError")
+          expect(errFinding).toBeDefined()
+          expect(errFinding?.message).toContain(
+            'Governance doc "docs/adr/0002-stale.md" (ADR-0002) references non-existent TaggedError "MissingError".',
+          )
 
-        // Neither proposed nor superseded doc should produce findings
-        expect(staleFindings.some((f) => f.nodeId.startsWith("SPEC-0001"))).toBe(false)
-        expect(staleFindings.some((f) => f.nodeId.startsWith("ADR-0000"))).toBe(false)
-      })
+          // Neither proposed nor superseded doc should produce findings
+          expect(staleFindings.some((f) => f.nodeId.startsWith("SPEC-0001"))).toBe(false)
+          expect(staleFindings.some((f) => f.nodeId.startsWith("ADR-0000"))).toBe(false)
+        }),
     )
 
     it("loads governance docs safely from disk even when folders do not exist", () => {
@@ -732,7 +735,7 @@ id: ADR-0001
 status: accepted
 ---
 # Monorepo Taxonomy
-`
+`,
         )
         writeFileSync(
           join(tempDir, "libs", "es", "docs", "adr", "0001-do-event-store.md"),
@@ -741,7 +744,7 @@ id: ADR-ES-0001
 status: accepted
 ---
 # DO Event Store
-`
+`,
         )
         writeFileSync(
           join(tempDir, "libs", "es", "docs", "specs", "2026-10-27-aggregate-root.md"),
@@ -750,7 +753,7 @@ id: SPEC-ES-0001
 status: proposed
 ---
 # Aggregate Root Spec
-`
+`,
         )
 
         writeFileSync(
@@ -760,7 +763,7 @@ id: ADR-README
 status: accepted
 ---
 # README
-`
+`,
         )
         writeFileSync(
           join(tempDir, "docs", "adr", "TEMPLATE.md"),
@@ -769,7 +772,7 @@ id: ADR-TEMPLATE
 status: accepted
 ---
 # TEMPLATE
-`
+`,
         )
         writeFileSync(
           join(tempDir, "docs", "specs", "README.md"),
@@ -778,7 +781,7 @@ id: SPEC-README
 status: accepted
 ---
 # README
-`
+`,
         )
         writeFileSync(
           join(tempDir, "libs", "es", "docs", "adr", "README.md"),
@@ -787,7 +790,7 @@ id: LIB-ADR-README
 status: accepted
 ---
 # README
-`
+`,
         )
         writeFileSync(
           join(tempDir, "libs", "es", "docs", "specs", "TEMPLATE.md"),
@@ -796,7 +799,7 @@ id: LIB-SPEC-TEMPLATE
 status: accepted
 ---
 # TEMPLATE
-`
+`,
         )
 
         const docs = loadGovernanceDocsFromDisk(tempDir)
@@ -806,7 +809,7 @@ status: accepted
         expect(paths).toEqual([
           "docs/adr/0001-monorepo-taxonomy.md",
           "libs/es/docs/adr/0001-do-event-store.md",
-          "libs/es/docs/specs/2026-10-27-aggregate-root.md"
+          "libs/es/docs/specs/2026-10-27-aggregate-root.md",
         ])
 
         const globalAdr = docs.find((d) => d.docPath === "docs/adr/0001-monorepo-taxonomy.md")
@@ -815,14 +818,14 @@ status: accepted
         expect(globalAdr?.status).toBe("accepted")
 
         const colocatedAdr = docs.find(
-          (d) => d.docPath === "libs/es/docs/adr/0001-do-event-store.md"
+          (d) => d.docPath === "libs/es/docs/adr/0001-do-event-store.md",
         )
         expect(colocatedAdr).toBeDefined()
         expect(colocatedAdr?.id).toBe("ADR-ES-0001")
         expect(colocatedAdr?.status).toBe("accepted")
 
         const colocatedSpec = docs.find(
-          (d) => d.docPath === "libs/es/docs/specs/2026-10-27-aggregate-root.md"
+          (d) => d.docPath === "libs/es/docs/specs/2026-10-27-aggregate-root.md",
         )
         expect(colocatedSpec).toBeDefined()
         expect(colocatedSpec?.id).toBe("SPEC-ES-0001")
@@ -837,44 +840,46 @@ status: accepted
   })
 
   describe("decideMigrationSafety / checkMigrationSqlSafety", () => {
-    it.effect("reports safe: true for clean CREATE TABLE and ALTER TABLE ADD COLUMN with DEFAULT", () =>
-      Effect.gen(function* () {
-        const report = yield* decideMigrationSafety({
-          files: [
-            {
-              file: "migrations/0001_init.sql",
-              sql: `
+    it.effect(
+      "reports safe: true for clean CREATE TABLE and ALTER TABLE ADD COLUMN with DEFAULT",
+      () =>
+        Effect.gen(function* () {
+          const report = yield* decideMigrationSafety({
+            files: [
+              {
+                file: "migrations/0001_init.sql",
+                sql: `
                 CREATE TABLE users (
                   id INTEGER PRIMARY KEY,
                   name TEXT NOT NULL
                 );
                 --> statement-breakpoint
                 ALTER TABLE users ADD COLUMN age INTEGER NOT NULL DEFAULT 0;
-              `
-            }
-          ]
-        })
+              `,
+              },
+            ],
+          })
 
-        expect(report.safe).toBe(true)
-        expect(report.requiresEscalation).toBe(false)
-        expect(report.violations).toHaveLength(0)
-      })
+          expect(report.safe).toBe(true)
+          expect(report.requiresEscalation).toBe(false)
+          expect(report.violations).toHaveLength(0)
+        }),
     )
 
     it("detects DROP TABLE, table rebuild, and ADD NOT NULL without DEFAULT via checkMigrationSqlSafety", () => {
       const report = checkMigrationSqlSafety([
         {
           file: "migrations/0002_drop.sql",
-          sql: "DROP TABLE users;"
+          sql: "DROP TABLE users;",
         },
         {
           file: "migrations/0003_rebuild.sql",
-          sql: "CREATE TABLE `__new_users` (id INTEGER PRIMARY KEY); PRAGMA foreign_keys=OFF;"
+          sql: "CREATE TABLE `__new_users` (id INTEGER PRIMARY KEY); PRAGMA foreign_keys=OFF;",
         },
         {
           file: "migrations/0004_not_null.sql",
-          sql: "ALTER TABLE photos ADD COLUMN owner_id TEXT NOT NULL;"
-        }
+          sql: "ALTER TABLE photos ADD COLUMN owner_id TEXT NOT NULL;",
+        },
       ])
 
       expect(report.safe).toBe(false)
@@ -899,15 +904,15 @@ status: accepted
             -- DEFAULT 0 should not bypass NOT NULL check
             ALTER TABLE "default" ADD COLUMN tenant_id TEXT NOT NULL /* DEFAULT 'none' */;
             ALTER TABLE users DROP is_admin;
-          `
-        }
+          `,
+        },
       ])
 
       expect(report.safe).toBe(false)
       expect(report.requiresEscalation).toBe(true)
       expect(report.violations.map((v) => v.kind)).toEqual([
         "add-not-null-without-default",
-        "drop-statement"
+        "drop-statement",
       ])
     })
   })
@@ -918,7 +923,7 @@ status: accepted
         stampValid: true,
         activeStubs: [],
         missingPlannedFns: [],
-        frictionClusters: []
+        frictionClusters: [],
       })
 
       expect(summary.hasActiveTask).toBe(false)
@@ -937,7 +942,7 @@ status: accepted
             summary: "tsc error in domain",
             detail: "detail 1",
             occurrences: 3,
-            lastSeen: "2026-10-26T12:00:00.000Z"
+            lastSeen: "2026-10-26T12:00:00.000Z",
           },
           {
             key: "route_miss::d1",
@@ -945,8 +950,8 @@ status: accepted
             summary: "missing d1 route",
             detail: "detail 2",
             occurrences: 2,
-            lastSeen: "2026-10-26T12:05:00.000Z"
-          }
+            lastSeen: "2026-10-26T12:05:00.000Z",
+          },
         ]
 
         const summary = yield* decideSessionHandoff({
@@ -954,30 +959,30 @@ status: accepted
           stampReason: "Workspace files modified",
           activeStubs: ["libs/sample/domain/src/index.ts#greet"],
           missingPlannedFns: ["libs/sample/domain/src/index.ts#cancel"],
-          frictionClusters: clusters
+          frictionClusters: clusters,
         })
 
         expect(summary.hasActiveTask).toBe(true)
         expect(summary.recentFrictionCount).toBe(5)
         expect(summary.topFrictionSummary).toEqual([
           "[verify_failure x3] tsc error in domain",
-          "[route_miss x2] missing d1 route"
+          "[route_miss x2] missing d1 route",
         ])
 
         expect(summary.handoffMessage).not.toBeNull()
         const msg = summary.handoffMessage!
         expect(msg).toContain("[Harness Context Handoff]")
         expect(msg).toContain(
-          "Active stub() skeletons remaining: libs/sample/domain/src/index.ts#greet"
+          "Active stub() skeletons remaining: libs/sample/domain/src/index.ts#greet",
         )
         expect(msg).toContain(
-          "Missing planned functions from plan-graph-snapshot: libs/sample/domain/src/index.ts#cancel"
+          "Missing planned functions from plan-graph-snapshot: libs/sample/domain/src/index.ts#cancel",
         )
         expect(msg).toContain("Verify stamp status: INVALID (Workspace files modified)")
         expect(msg).toContain(
-          "Recent friction events: [verify_failure x3] tsc error in domain; [route_miss x2] missing d1 route"
+          "Recent friction events: [verify_failure x3] tsc error in domain; [route_miss x2] missing d1 route",
         )
-      })
+      }),
     )
 
     it.effect("surfaces stuck loop escalation and marks hasActiveTask when loop is thrashing", () =>
@@ -987,20 +992,20 @@ status: accepted
             kind: "verify_failure",
             timestamp: "2026-10-27T10:00:00.000Z",
             summary: "tsc error",
-            detail: "error detail 1"
+            detail: "error detail 1",
           },
           {
             kind: "verify_failure",
             timestamp: "2026-10-27T10:01:00.000Z",
             summary: "tsc error",
-            detail: "error detail 2"
+            detail: "error detail 2",
           },
           {
             kind: "verify_failure",
             timestamp: "2026-10-27T10:02:00.000Z",
             summary: "tsc error",
-            detail: "error detail 3"
-          }
+            detail: "error detail 3",
+          },
         ])
 
         const summary = yield* decideSessionHandoff({
@@ -1008,14 +1013,14 @@ status: accepted
           activeStubs: [],
           missingPlannedFns: [],
           frictionClusters: [],
-          loopThrashing: thrashing
+          loopThrashing: thrashing,
         })
 
         expect(summary.hasActiveTask).toBe(true)
         expect(summary.stuckLoopEscalation).not.toBeNull()
         expect(summary.stuckLoopEscalation).toContain("[ESCALATE: STUCK LOOP DETECTED]")
         expect(summary.handoffMessage).toContain("[ESCALATE: STUCK LOOP DETECTED]")
-      })
+      }),
     )
   })
 
@@ -1027,26 +1032,26 @@ status: accepted
             kind: "verify_failure",
             timestamp: "2026-10-27T10:00:00.000Z",
             summary: "type error in domain",
-            detail: "d1"
+            detail: "d1",
           },
           {
             kind: "verify_failure",
             timestamp: "2026-10-27T10:01:00.000Z",
             summary: "type error in domain",
-            detail: "d2"
+            detail: "d2",
           },
           {
             kind: "route_miss",
             timestamp: "2026-10-27T10:01:30.000Z",
             summary: "missed route",
-            detail: "d3"
+            detail: "d3",
           },
           {
             kind: "verify_failure",
             timestamp: "2026-10-27T10:02:00.000Z",
             summary: " type error in domain ",
-            detail: "d4"
-          }
+            detail: "d4",
+          },
         ]
 
         const status = yield* decideLoopThrashing(events, 3)
@@ -1060,7 +1065,7 @@ status: accepted
 
         const syncStatus = checkLoopThrashing(events, 3)
         expect(syncStatus).toEqual(status)
-      })
+      }),
     )
 
     it("resets consecutive streak when failure summary changes and handles empty events", () => {
@@ -1076,20 +1081,20 @@ status: accepted
           kind: "verify_failure",
           timestamp: "2026-10-27T10:00:00.000Z",
           summary: "syntax ban",
-          detail: "d1"
+          detail: "d1",
         },
         {
           kind: "verify_failure",
           timestamp: "2026-10-27T10:01:00.000Z",
           summary: "syntax ban",
-          detail: "d2"
+          detail: "d2",
         },
         {
           kind: "guard_escalation",
           timestamp: "2026-10-27T10:02:00.000Z",
           summary: "alchemy dev",
-          detail: "d3"
-        }
+          detail: "d3",
+        },
       ]
 
       const status = checkLoopThrashing(events, 3)
@@ -1101,24 +1106,17 @@ status: accepted
     it.effect.prop(
       "LoopCircuitBreaker.decide: stuck is true if and only if consecutive failure count meets or exceeds threshold",
       {
-        repeatCount: Schema.Int.check(
-          Schema.isBetween({ minimum: 0, maximum: 6 })
-        ),
-        threshold: Schema.Int.check(
-          Schema.isBetween({ minimum: 2, maximum: 5 })
-        )
+        repeatCount: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 6 })),
+        threshold: Schema.Int.check(Schema.isBetween({ minimum: 2, maximum: 5 })),
       },
       ({ repeatCount, threshold }) =>
         Effect.gen(function* () {
-          const events: Array<FrictionEvent> = Array.from(
-            { length: repeatCount },
-            (_, i) => ({
-              kind: "verify_failure" as const,
-              timestamp: new Date(1000 + i * 1000).toISOString(),
-              summary: "tsc error",
-              detail: "error detail"
-            })
-          )
+          const events: Array<FrictionEvent> = Array.from({ length: repeatCount }, (_, i) => ({
+            kind: "verify_failure" as const,
+            timestamp: new Date(1000 + i * 1000).toISOString(),
+            summary: "tsc error",
+            detail: "error detail",
+          }))
           const status = yield* decideLoopThrashing(events, threshold)
           const effectiveThreshold = Math.max(2, threshold)
           const expectedStuck = repeatCount >= effectiveThreshold
@@ -1131,7 +1129,7 @@ status: accepted
           } else {
             expect(status.escalationMessage).toBeNull()
           }
-        })
+        }),
     )
   })
 
@@ -1145,12 +1143,10 @@ status: accepted
 
     it("denies direct modification of verify-stamp.json (forgery protection)", () => {
       expect(classifyFileWrite(".harness/verify-stamp.json").verdict).toBe("deny")
-      expect(
-        classifyFileWrite(".harness/worktrees/wt-1/verify-stamp.json").verdict
-      ).toBe("deny")
-      expect(
-        classifyFileWrite("/home/user/project/.harness/verify-stamp.json").verdict
-      ).toBe("deny")
+      expect(classifyFileWrite(".harness/worktrees/wt-1/verify-stamp.json").verdict).toBe("deny")
+      expect(classifyFileWrite("/home/user/project/.harness/verify-stamp.json").verdict).toBe(
+        "deny",
+      )
     })
 
     it("denies modification of secret and credential files", () => {
@@ -1185,17 +1181,17 @@ status: accepted
       const parent: SpanSample = {
         spanId: "parent-1",
         name: "Order.checkout",
-        parentSpanId: null
+        parentSpanId: null,
       }
       const children: Array<SpanSample> = Array.from({ length: 6 }, (_, i) => ({
         spanId: `child-${i}`,
         name: "Db.query",
-        parentSpanId: "parent-1"
+        parentSpanId: "parent-1",
       }))
 
       const violations = checkSpanBudgets({
         spans: [parent, ...children],
-        maxRepeatedChildCalls: 5
+        maxRepeatedChildCalls: 5,
       })
 
       expect(violations).toHaveLength(1)
@@ -1215,19 +1211,19 @@ status: accepted
             spanId: "s1",
             name: "SlowOperation",
             parentSpanId: null,
-            durationMs: 250.7
+            durationMs: 250.7,
           },
           {
             spanId: "s2",
             name: "FastOperation",
             parentSpanId: null,
-            durationMs: 45.2
-          }
+            durationMs: 45.2,
+          },
         ]
 
         const violations = yield* decideSpanBudgets({
           spans,
-          maxSpanDurationMs: 100
+          maxSpanDurationMs: 100,
         })
 
         expect(violations).toHaveLength(1)
@@ -1238,7 +1234,7 @@ status: accepted
         expect(v.count).toBe(251)
         expect(v.maxAllowed).toBe(100)
         expect(v.message).toContain("Span duration budget exceeded")
-      })
+      }),
     )
   })
 
@@ -1248,23 +1244,23 @@ status: accepted
     })
 
     it("respects HARNESS_WORKTREE_ID and sanitizes special characters", () => {
-      expect(
-        resolveHarnessStateDir("/repo", { HARNESS_WORKTREE_ID: "feature-branch" })
-      ).toBe("/repo/.harness/worktrees/feature-branch")
+      expect(resolveHarnessStateDir("/repo", { HARNESS_WORKTREE_ID: "feature-branch" })).toBe(
+        "/repo/.harness/worktrees/feature-branch",
+      )
 
-      expect(
-        resolveHarnessStateDir("/repo", { HARNESS_WORKTREE_ID: "feat/nested#branch" })
-      ).toBe("/repo/.harness/worktrees/feat_nested_branch")
+      expect(resolveHarnessStateDir("/repo", { HARNESS_WORKTREE_ID: "feat/nested#branch" })).toBe(
+        "/repo/.harness/worktrees/feat_nested_branch",
+      )
     })
 
     it("respects HARNESS_STATE_DIR (both relative and absolute)", () => {
-      expect(
-        resolveHarnessStateDir("/repo", { HARNESS_STATE_DIR: ".custom-state" })
-      ).toBe("/repo/.custom-state")
+      expect(resolveHarnessStateDir("/repo", { HARNESS_STATE_DIR: ".custom-state" })).toBe(
+        "/repo/.custom-state",
+      )
 
-      expect(
-        resolveHarnessStateDir("/repo", { HARNESS_STATE_DIR: "/tmp/custom-state" })
-      ).toBe("/tmp/custom-state")
+      expect(resolveHarnessStateDir("/repo", { HARNESS_STATE_DIR: "/tmp/custom-state" })).toBe(
+        "/tmp/custom-state",
+      )
     })
 
     it("resolveCanonicalRepoRoot resolves regular directory vs linked worktree directory", () => {
@@ -1285,27 +1281,30 @@ status: accepted
       const mainRepo = mkdtempSync(join(tmpdir(), "harness-main-repo-"))
       const wtDir = mkdtempSync(join(tmpdir(), "harness-linked-wt-"))
       try {
-        writeFileSync(join(wtDir, ".git"), `gitdir: ${join(mainRepo, ".git", "worktrees", "wt-1")}\n`)
+        writeFileSync(
+          join(wtDir, ".git"),
+          `gitdir: ${join(mainRepo, ".git", "worktrees", "wt-1")}\n`,
+        )
 
         // Without HARNESS_WORKTREE_ID
         expect(resolveOmnigraphClusterDir(mainRepo, {})).toBe(
-          join(mainRepo, ".harness", "omnigraph-cluster")
+          join(mainRepo, ".harness", "omnigraph-cluster"),
         )
 
         // With HARNESS_WORKTREE_ID set, still points to canonical repo root cluster
-        expect(
-          resolveOmnigraphClusterDir(mainRepo, { HARNESS_WORKTREE_ID: "wt-feature" })
-        ).toBe(join(mainRepo, ".harness", "omnigraph-cluster"))
+        expect(resolveOmnigraphClusterDir(mainRepo, { HARNESS_WORKTREE_ID: "wt-feature" })).toBe(
+          join(mainRepo, ".harness", "omnigraph-cluster"),
+        )
 
         // Inside linked git worktree, points to canonical repo root cluster
         expect(resolveOmnigraphClusterDir(wtDir, {})).toBe(
-          join(mainRepo, ".harness", "omnigraph-cluster")
+          join(mainRepo, ".harness", "omnigraph-cluster"),
         )
 
         // With explicit HARNESS_STATE_DIR
-        expect(
-          resolveOmnigraphClusterDir(mainRepo, { HARNESS_STATE_DIR: ".custom-state" })
-        ).toBe(join(mainRepo, ".custom-state", "omnigraph-cluster"))
+        expect(resolveOmnigraphClusterDir(mainRepo, { HARNESS_STATE_DIR: ".custom-state" })).toBe(
+          join(mainRepo, ".custom-state", "omnigraph-cluster"),
+        )
       } finally {
         rmSync(mainRepo, { recursive: true, force: true })
         rmSync(wtDir, { recursive: true, force: true })
@@ -1316,7 +1315,10 @@ status: accepted
       const mainRepo = mkdtempSync(join(tmpdir(), "harness-main-port-"))
       const wtDir = mkdtempSync(join(tmpdir(), "harness-wt-port-"))
       try {
-        writeFileSync(join(wtDir, ".git"), `gitdir: ${join(mainRepo, ".git", "worktrees", "wt-1")}\n`)
+        writeFileSync(
+          join(wtDir, ".git"),
+          `gitdir: ${join(mainRepo, ".git", "worktrees", "wt-1")}\n`,
+        )
 
         const mainPort = deriveRepoOmnigraphPort(mainRepo)
         const wtPort = deriveRepoOmnigraphPort(wtDir)
@@ -1342,30 +1344,33 @@ status: accepted
       const mainRepo = mkdtempSync(join(tmpdir(), "harness-main-branches-"))
       const wtDir = mkdtempSync(join(tmpdir(), "harness-wt-branches-"))
       try {
-        writeFileSync(join(wtDir, ".git"), `gitdir: ${join(mainRepo, ".git", "worktrees", "wt-1")}\n`)
+        writeFileSync(
+          join(wtDir, ".git"),
+          `gitdir: ${join(mainRepo, ".git", "worktrees", "wt-1")}\n`,
+        )
 
         // Default
         expect(resolveOmnigraphTaskBranches(mainRepo, {})).toEqual({
           planBranch: "plan/current",
           implBranch: "impl/current",
-          mainBranch: "main"
+          mainBranch: "main",
         })
 
         // With HARNESS_WORKTREE_ID
         expect(
-          resolveOmnigraphTaskBranches(mainRepo, { HARNESS_WORKTREE_ID: "feature-auth" })
+          resolveOmnigraphTaskBranches(mainRepo, { HARNESS_WORKTREE_ID: "feature-auth" }),
         ).toEqual({
           planBranch: "plan/wt-feature-auth",
           implBranch: "impl/wt-feature-auth",
-          mainBranch: "main"
+          mainBranch: "main",
         })
 
         expect(
-          resolveOmnigraphTaskBranches(mainRepo, { HARNESS_WORKTREE_ID: "feat/nested#branch" })
+          resolveOmnigraphTaskBranches(mainRepo, { HARNESS_WORKTREE_ID: "feat/nested#branch" }),
         ).toEqual({
           planBranch: "plan/wt-feat_nested_branch",
           implBranch: "impl/wt-feat_nested_branch",
-          mainBranch: "main"
+          mainBranch: "main",
         })
 
         // Inside linked git worktree directory
@@ -1373,7 +1378,7 @@ status: accepted
         expect(resolveOmnigraphTaskBranches(wtDir, {})).toEqual({
           planBranch: `plan/wt-${slug}`,
           implBranch: `impl/wt-${slug}`,
-          mainBranch: "main"
+          mainBranch: "main",
         })
       } finally {
         rmSync(mainRepo, { recursive: true, force: true })
@@ -1383,97 +1388,99 @@ status: accepted
   })
 
   describe("decider property tests & AST mutation testing", () => {
-    it.effect("flags domain *.decide without property-based test and passes when property test exists", () =>
-      Effect.gen(function* () {
-        const fnQualname = "libs/sample/domain/src/index.ts#Album.decide"
-        const testId = "libs/sample/domain/test/index.test.ts::suite"
+    it.effect(
+      "flags domain *.decide without property-based test and passes when property test exists",
+      () =>
+        Effect.gen(function* () {
+          const fnQualname = "libs/sample/domain/src/index.ts#Album.decide"
+          const testId = "libs/sample/domain/test/index.test.ts::suite"
 
-        const graphWithoutProp = buildHarnessGraph({
-          fns: [
-            {
-              qualname: fnQualname,
-              spanName: "Album.decide",
-              packageTag: "domain",
-              file: "libs/sample/domain/src/index.ts",
-              line: 14,
-              successType: "number",
-              isStub: false
-            }
-          ],
-          tests: [
-            {
-              testId,
-              testFile: "libs/sample/domain/test/index.test.ts",
-              testName: "libs/sample/domain/test/index.test.ts",
-              lastTreeHash: "workspace",
-              isPropertyTest: false
-            }
-          ],
-          exercisesSpans: [
-            {
-              testId,
-              calleeQualname: fnQualname,
-              callCount: 1,
-              receiverLayer: null
-            }
-          ]
-        })
+          const graphWithoutProp = buildHarnessGraph({
+            fns: [
+              {
+                qualname: fnQualname,
+                spanName: "Album.decide",
+                packageTag: "domain",
+                file: "libs/sample/domain/src/index.ts",
+                line: 14,
+                successType: "number",
+                isStub: false,
+              },
+            ],
+            tests: [
+              {
+                testId,
+                testFile: "libs/sample/domain/test/index.test.ts",
+                testName: "libs/sample/domain/test/index.test.ts",
+                lastTreeHash: "workspace",
+                isPropertyTest: false,
+              },
+            ],
+            exercisesSpans: [
+              {
+                testId,
+                calleeQualname: fnQualname,
+                callCount: 1,
+                receiverLayer: null,
+              },
+            ],
+          })
 
-        const failingReport = yield* decideGraphEntropy({
-          graph: graphWithoutProp,
-          checkDeciderPropertyTests: true
-        })
+          const failingReport = yield* decideGraphEntropy({
+            graph: graphWithoutProp,
+            checkDeciderPropertyTests: true,
+          })
 
-        expect(failingReport.clean).toBe(false)
-        const missing = failingReport.findings.find(
-          (f) => f.kind === "missing-decider-property-test"
-        )
-        expect(missing).toBeDefined()
-        expect(missing?.nodeId).toBe("Album.decide")
-        expect(missing?.message).toContain("0 Property-Based Tests")
+          expect(failingReport.clean).toBe(false)
+          const missing = failingReport.findings.find(
+            (f) => f.kind === "missing-decider-property-test",
+          )
+          expect(missing).toBeDefined()
+          expect(missing?.nodeId).toBe("Album.decide")
+          expect(missing?.message).toContain("0 Property-Based Tests")
 
-        // Now test with isPropertyTest: true
-        const graphWithProp = buildHarnessGraph({
-          fns: [
-            {
-              qualname: fnQualname,
-              spanName: "Album.decide",
-              packageTag: "domain",
-              file: "libs/sample/domain/src/index.ts",
-              line: 14,
-              successType: "number",
-              isStub: false
-            }
-          ],
-          tests: [
-            {
-              testId,
-              testFile: "libs/sample/domain/test/index.test.ts",
-              testName: "libs/sample/domain/test/index.test.ts",
-              lastTreeHash: "workspace",
-              isPropertyTest: true
-            }
-          ],
-          exercisesSpans: [
-            {
-              testId,
-              calleeQualname: fnQualname,
-              callCount: 1,
-              receiverLayer: null
-            }
-          ]
-        })
+          // Now test with isPropertyTest: true
+          const graphWithProp = buildHarnessGraph({
+            fns: [
+              {
+                qualname: fnQualname,
+                spanName: "Album.decide",
+                packageTag: "domain",
+                file: "libs/sample/domain/src/index.ts",
+                line: 14,
+                successType: "number",
+                isStub: false,
+              },
+            ],
+            tests: [
+              {
+                testId,
+                testFile: "libs/sample/domain/test/index.test.ts",
+                testName: "libs/sample/domain/test/index.test.ts",
+                lastTreeHash: "workspace",
+                isPropertyTest: true,
+              },
+            ],
+            exercisesSpans: [
+              {
+                testId,
+                calleeQualname: fnQualname,
+                callCount: 1,
+                receiverLayer: null,
+              },
+            ],
+          })
 
-        const passingReport = yield* decideGraphEntropy({
-          graph: graphWithProp,
-          checkDeciderPropertyTests: true
-        })
+          const passingReport = yield* decideGraphEntropy({
+            graph: graphWithProp,
+            checkDeciderPropertyTests: true,
+          })
 
-        const deciderFindings = passingReport.findings.filter(
-          (f) => f.kind === "missing-decider-property-test"
-        )
-        expect(deciderFindings).toHaveLength(0)
-      })
+          const deciderFindings = passingReport.findings.filter(
+            (f) => f.kind === "missing-decider-property-test",
+          )
+          expect(deciderFindings).toHaveLength(0)
+        }),
     )
 
     it("discovers boundary, equality, and arithmetic mutants in domain code", () => {
@@ -1484,33 +1491,33 @@ status: accepted
         }
         root = dirname(root)
       }
-      const diskSource = readFileSync(
-        join(root, "libs/sample/domain/src/index.ts"),
-        "utf8"
-      )
+      const diskSource = readFileSync(join(root, "libs/sample/domain/src/index.ts"), "utf8")
       // diskSource has >= and + 1; append equality operator for comprehensive discovery check
       const sampleSource = `${diskSource}\nconst isExact = (a: number) => a === 100\n`
-      const mutants = discoverDomainMutants(
-        "libs/sample/domain/src/index.ts",
-        sampleSource
-      )
+      const mutants = discoverDomainMutants("libs/sample/domain/src/index.ts", sampleSource)
 
+      const expectedBoundaryLine =
+        sampleSource.split("\n").findIndex((l) => l.includes("c >= 100")) + 1
       const boundary = mutants.find(
-        (m) => m.category === "boundary-operator" && m.original === ">=" && m.replacement === ">"
+        (m) => m.category === "boundary-operator" && m.original === ">=" && m.replacement === ">",
       )
       expect(boundary).toBeDefined()
-      expect(boundary?.line).toBe(23)
+      expect(boundary?.line).toBe(expectedBoundaryLine)
       expect(boundary?.mutatedSource).toContain("c > 100")
 
+      const expectedArithmeticLine =
+        sampleSource.split("\n").findIndex((l) => l.includes("currentCount + 1")) + 1
       const arithmetic = mutants.find(
-        (m) => m.category === "arithmetic-operator" && m.original === "+ 1" && m.replacement === "- 1"
+        (m) =>
+          m.category === "arithmetic-operator" && m.original === "+ 1" && m.replacement === "- 1",
       )
       expect(arithmetic).toBeDefined()
-      expect(arithmetic?.line).toBe(29)
+      expect(arithmetic?.line).toBe(expectedArithmeticLine)
       expect(arithmetic?.mutatedSource).toContain("currentCount - 1")
 
       const equality = mutants.find(
-        (m) => m.category === "equality-operator" && m.original === "===" && m.replacement === "!=="
+        (m) =>
+          m.category === "equality-operator" && m.original === "===" && m.replacement === "!==",
       )
       expect(equality).toBeDefined()
       expect(equality?.mutatedSource).toContain("a !== 100")
@@ -1530,7 +1537,7 @@ export const isEnabled = (x: number): boolean => {
         (m) =>
           m.category === "boolean-return" &&
           m.original === "return true" &&
-          m.replacement === "return false"
+          m.replacement === "return false",
       )
       expect(boolTrue).toBeDefined()
       expect(boolTrue?.mutatedSource).toContain("return false")
@@ -1539,7 +1546,7 @@ export const isEnabled = (x: number): boolean => {
         (m) =>
           m.category === "boolean-return" &&
           m.original === "return false" &&
-          m.replacement === "return true"
+          m.replacement === "return true",
       )
       expect(boolFalse).toBeDefined()
       expect(boolFalse?.mutatedSource).toContain("return true")
@@ -1560,17 +1567,13 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState => {
 `
       const mutants = discoverDomainMutants("libs/sample/domain/src/index.ts", code)
       const batchFolding = mutants.find(
-        (m) =>
-          m.category === "batch-folding" &&
-          m.original === "events.reduce("
+        (m) => m.category === "batch-folding" && m.original === "events.reduce(",
       )
       expect(batchFolding).toBeDefined()
       expect(batchFolding?.mutatedSource).toContain("events.slice(0, 1).reduce(")
 
       const terminalPreservation = mutants.find(
-        (m) =>
-          m.category === "terminal-state-preservation" &&
-          m.original === "return state"
+        (m) => m.category === "terminal-state-preservation" && m.original === "return state",
       )
       expect(terminalPreservation).toBeDefined()
       expect(terminalPreservation?.mutatedSource).toContain("return initialState")
@@ -1585,7 +1588,7 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState => {
           category: "boundary-operator",
           original: ">=",
           replacement: ">",
-          mutatedSource: "x > 1"
+          mutatedSource: "x > 1",
         }
         const dummyMutant2: CodeMutant = {
           id: "test:2:+ 1->- 1",
@@ -1594,13 +1597,13 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState => {
           category: "arithmetic-operator",
           original: "+ 1",
           replacement: "- 1",
-          mutatedSource: "x - 1"
+          mutatedSource: "x - 1",
         }
 
         // All killed -> pass with score 1
         const allKilledReport = evaluateMutationOutcomes([
           { mutant: dummyMutant1, status: "killed" },
-          { mutant: dummyMutant2, status: "killed" }
+          { mutant: dummyMutant2, status: "killed" },
         ])
         expect(allKilledReport.passed).toBe(true)
         expect(allKilledReport.totalMutants).toBe(2)
@@ -1613,8 +1616,8 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState => {
         const oneSurvivedReport = yield* decideMutationReport({
           outcomes: [
             { mutant: dummyMutant1, status: "killed" },
-            { mutant: dummyMutant2, status: "survived" }
-          ]
+            { mutant: dummyMutant2, status: "survived" },
+          ],
         })
         expect(oneSurvivedReport.passed).toBe(false)
         expect(oneSurvivedReport.totalMutants).toBe(2)
@@ -1622,7 +1625,7 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState => {
         expect(oneSurvivedReport.survivedCount).toBe(1)
         expect(oneSurvivedReport.mutationScore).toBe(0.5)
         expect(oneSurvivedReport.survivedMutants).toEqual([dummyMutant2])
-      })
+      }),
     )
   })
 
@@ -1683,55 +1686,55 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState => {
       expect(forbiddenReport.findings.some((f) => f.kind === "forbidden-column")).toBe(true)
     })
 
-    it.effect("flags ears-spec-lint in decideGraphEntropy when governance doc has EARS violations", () =>
-      Effect.gen(function* () {
-        const graph = buildHarnessGraph({})
-        const report = yield* decideGraphEntropy({
-          graph,
-          governanceDocs: [
-            {
-              docPath: "libs/sample/docs/specs/2026-10-27-broken.md",
-              id: "sample:SPEC-BROKEN",
-              status: "accepted",
-              markdown: "No requirements table in this file."
-            }
-          ]
-        })
-        expect(report.clean).toBe(false)
-        const finding = report.findings.find((f) => f.kind === "ears-spec-lint")
-        expect(finding).toBeDefined()
-        expect(finding?.nodeId).toBe("sample:SPEC-BROKEN")
-        expect(finding?.message).toContain("no-requirements-table")
-      })
+    it.effect(
+      "flags ears-spec-lint in decideGraphEntropy when governance doc has EARS violations",
+      () =>
+        Effect.gen(function* () {
+          const graph = buildHarnessGraph({})
+          const report = yield* decideGraphEntropy({
+            graph,
+            governanceDocs: [
+              {
+                docPath: "libs/sample/docs/specs/2026-10-27-broken.md",
+                id: "sample:SPEC-BROKEN",
+                status: "accepted",
+                markdown: "No requirements table in this file.",
+              },
+            ],
+          })
+          expect(report.clean).toBe(false)
+          const finding = report.findings.find((f) => f.kind === "ears-spec-lint")
+          expect(finding).toBeDefined()
+          expect(finding?.nodeId).toBe("sample:SPEC-BROKEN")
+          expect(finding?.message).toContain("no-requirements-table")
+        }),
     )
 
     it.effect.prop(
       "EarsSpecLint.decide: validates N generated requirements cleanly",
       {
-        requirementCount: Schema.Int.check(
-          Schema.isBetween({ minimum: 1, maximum: 5 })
-        )
+        requirementCount: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 5 })),
       },
       ({ requirementCount }) =>
         Effect.gen(function* () {
           const rows = Array.from(
             { length: requirementCount },
             (_, i) =>
-              `| REQ-1.${i + 1} | Ubiquitous | The Service${i + 1} **shall** execute step ${i + 1}. | test |`
+              `| REQ-1.${i + 1} | Ubiquitous | The Service${i + 1} **shall** execute step ${i + 1}. | test |`,
           ).join("\n")
 
           const md = `## Requirements\n\n### 1 · Area\n**Source:** test source\n\n| ID | Pattern | Requirement | Verification |\n|---|---|---|---|\n${rows}\n`
 
           const report = yield* decideEarsSpecQuality({
             docPath: "docs/specs/generated.md",
-            markdown: md
+            markdown: md,
           })
 
           expect(report.clean).toBe(true)
           expect(report.requirementCount).toBe(requirementCount)
           expect(report.requirements).toHaveLength(requirementCount)
           expect(report.findings).toHaveLength(0)
-        })
+        }),
     )
 
     it.effect("rejects legacy Effect v3 ParseError in requirement prose", () =>
@@ -1747,22 +1750,22 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState => {
 `
         const report = yield* decideEarsSpecQuality({
           docPath: "docs/specs/test.md",
-          markdown: md
+          markdown: md,
         })
         expect(report.clean).toBe(false)
-        const finding = report.findings.find(
-          (f) => f.kind === "legacy-effect-v3-symbol"
-        )
+        const finding = report.findings.find((f) => f.kind === "legacy-effect-v3-symbol")
         expect(finding).toBeDefined()
         expect(finding?.message).toBe(
-          "Requirement REQ-1.1 references legacy Effect v3 symbol (use Effect v4 Schema.SchemaError / Context.Service instead)."
+          "Requirement REQ-1.1 references legacy Effect v3 symbol (use Effect v4 Schema.SchemaError / Context.Service instead).",
         )
-      })
+      }),
     )
 
-    it.effect("flags defect-polarity-inversion when requirement specifies without dying on unexpected defects", () =>
-      Effect.gen(function* () {
-        const md = `## Requirements
+    it.effect(
+      "flags defect-polarity-inversion when requirement specifies without dying on unexpected defects",
+      () =>
+        Effect.gen(function* () {
+          const md = `## Requirements
 
 ### 1 · Area
 **Source:** test source
@@ -1771,19 +1774,17 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState => {
 |---|---|---|---|
 | REQ-1.1 | Unwanted behaviour | **If** invalid input occurs, **then** the harness **shall** fail without dying on unexpected defects. | test |
 `
-        const report = yield* decideEarsSpecQuality({
-          docPath: "docs/specs/test.md",
-          markdown: md
-        })
-        expect(report.clean).toBe(false)
-        const finding = report.findings.find(
-          (f) => f.kind === "defect-polarity-inversion"
-        )
-        expect(finding).toBeDefined()
-        expect(finding?.message).toContain(
-          "REQ-1.1 inverts defect safety polarity ('without dying on ... defects')"
-        )
-      })
+          const report = yield* decideEarsSpecQuality({
+            docPath: "docs/specs/test.md",
+            markdown: md,
+          })
+          expect(report.clean).toBe(false)
+          const finding = report.findings.find((f) => f.kind === "defect-polarity-inversion")
+          expect(finding).toBeDefined()
+          expect(finding?.message).toContain(
+            "REQ-1.1 inverts defect safety polarity ('without dying on ... defects')",
+          )
+        }),
     )
   })
 
@@ -1857,22 +1858,25 @@ We need automated mechanical gating.
 
       const harnessAdr = readFileSync(
         join(root, "libs/harness/docs/adr/0001-deterministic-gates-and-plan-as-code.md"),
-        "utf8"
+        "utf8",
       )
       const harnessReport = lintAdrDocMarkdown(
         "libs/harness/docs/adr/0001-deterministic-gates-and-plan-as-code.md",
-        harnessAdr
+        harnessAdr,
       )
       expect(harnessReport.clean).toBe(true)
       expect(harnessReport.findings).toHaveLength(0)
 
       const sampleAdr = readFileSync(
-        join(root, "libs/sample/docs/adr/0001-cloudflare-d1-do-sqlite-and-traceparent-boundaries.md"),
-        "utf8"
+        join(
+          root,
+          "libs/sample/docs/adr/0001-cloudflare-d1-do-sqlite-and-traceparent-boundaries.md",
+        ),
+        "utf8",
       )
       const sampleReport = lintAdrDocMarkdown(
         "libs/sample/docs/adr/0001-cloudflare-d1-do-sqlite-and-traceparent-boundaries.md",
-        sampleAdr
+        sampleAdr,
       )
       expect(sampleReport.clean).toBe(true)
       expect(sampleReport.findings).toHaveLength(0)
@@ -1898,8 +1902,8 @@ spans:
       expect(noEnforcedReport.clean).toBe(false)
       expect(
         noEnforcedReport.findings.some(
-          (f) => f.kind === "adr-frontmatter-invalid" && f.message.includes("enforced_by")
-        )
+          (f) => f.kind === "adr-frontmatter-invalid" && f.message.includes("enforced_by"),
+        ),
       ).toBe(true)
 
       // 3. Missing governed symbols
@@ -1916,8 +1920,8 @@ enforced_by:
       expect(noSymbolsReport.clean).toBe(false)
       expect(
         noSymbolsReport.findings.some(
-          (f) => f.kind === "adr-frontmatter-invalid" && f.message.includes("govern")
-        )
+          (f) => f.kind === "adr-frontmatter-invalid" && f.message.includes("govern"),
+        ),
       ).toBe(true)
 
       // 4. Superseded without superseded_by
@@ -1936,8 +1940,8 @@ spans:
       expect(supersededReport.clean).toBe(false)
       expect(
         supersededReport.findings.some(
-          (f) => f.kind === "adr-frontmatter-invalid" && f.message.includes("superseded_by")
-        )
+          (f) => f.kind === "adr-frontmatter-invalid" && f.message.includes("superseded_by"),
+        ),
       ).toBe(true)
     })
 
@@ -1945,40 +1949,34 @@ spans:
       // Missing section
       const missingSectionMd = validCanonicalAdr.replace(
         "## Decision Drivers\n\n* Guarantee canonical 6-section MADR structure across all ADRs.\n* Deterministically verify frontmatter, chosen options, and rejected alternatives.",
-        ""
+        "",
       )
       const missingReport = lintAdrDocMarkdown("test.md", missingSectionMd)
       expect(missingReport.clean).toBe(false)
       expect(
         missingReport.findings.some(
-          (f) => f.kind === "adr-section-structure" && f.message.includes("Decision Drivers")
-        )
+          (f) => f.kind === "adr-section-structure" && f.message.includes("Decision Drivers"),
+        ),
       ).toBe(true)
 
       // Out of order sections
-      const outOfOrderMd = validCanonicalAdr.replace(
-        "## Decision Drivers",
-        "## TEMP_MARKER"
-      ).replace(
-        "## Considered Options",
-        "## Decision Drivers"
-      ).replace(
-        "## TEMP_MARKER",
-        "## Considered Options"
-      )
+      const outOfOrderMd = validCanonicalAdr
+        .replace("## Decision Drivers", "## TEMP_MARKER")
+        .replace("## Considered Options", "## Decision Drivers")
+        .replace("## TEMP_MARKER", "## Considered Options")
       const outOfOrderReport = lintAdrDocMarkdown("test.md", outOfOrderMd)
       expect(outOfOrderReport.clean).toBe(false)
       expect(
         outOfOrderReport.findings.some(
-          (f) => f.kind === "adr-section-structure" && f.message.includes("out of order")
-        )
+          (f) => f.kind === "adr-section-structure" && f.message.includes("out of order"),
+        ),
       ).toBe(true)
     })
 
     it("rejects missing chosen option in Decision Outcome", () => {
       const noChosenMd = validCanonicalAdr.replace(
         '**Chosen option:** "Option 1" because deterministic gates provide instant mechanical feedback.',
-        "We chose Option 1 after careful evaluation."
+        "We chose Option 1 after careful evaluation.",
       )
       const report = lintAdrDocMarkdown("test.md", noChosenMd)
       expect(report.clean).toBe(false)
@@ -1989,90 +1987,82 @@ spans:
       // Missing ### 1 · subsection
       const noSubMd = validCanonicalAdr.replace(
         "### 1 · Unstructured Markdown without Linting\n- **Why rejected:** Causes documentation drift and broken references across repos.",
-        "We considered unstructured markdown but didn't write it up."
+        "We considered unstructured markdown but didn't write it up.",
       )
       const noSubReport = lintAdrDocMarkdown("test.md", noSubMd)
       expect(noSubReport.clean).toBe(false)
       expect(
-        noSubReport.findings.some(
-          (f) => f.kind === "adr-rejected-alternative-structure"
-        )
+        noSubReport.findings.some((f) => f.kind === "adr-rejected-alternative-structure"),
       ).toBe(true)
 
       // Missing **Why rejected:**
-      const noWhyMd = validCanonicalAdr.replace(
-        "**Why rejected:**",
-        "Reason for rejection:"
-      )
+      const noWhyMd = validCanonicalAdr.replace("**Why rejected:**", "Reason for rejection:")
       const noWhyReport = lintAdrDocMarkdown("test.md", noWhyMd)
       expect(noWhyReport.clean).toBe(false)
       expect(
         noWhyReport.findings.some(
-          (f) => f.kind === "adr-rejected-alternative-structure" && f.message.includes("Why rejected")
-        )
+          (f) =>
+            f.kind === "adr-rejected-alternative-structure" && f.message.includes("Why rejected"),
+        ),
       ).toBe(true)
     })
 
     it("rejects missing enforcement table under Consequences and Enforcement", () => {
       const noTableMd = validCanonicalAdr.replace(
         /\| Rule \|[\s\S]*\| `AdrDocLint\.decide` \|/,
-        "Enforcement is handled through code review."
+        "Enforcement is handled through code review.",
       )
       const report = lintAdrDocMarkdown("test.md", noTableMd)
       expect(report.clean).toBe(false)
-      expect(
-        report.findings.some((f) => f.kind === "adr-missing-enforcement-table")
-      ).toBe(true)
+      expect(report.findings.some((f) => f.kind === "adr-missing-enforcement-table")).toBe(true)
     })
 
-    it.effect("flags adr-doc-lint in decideGraphEntropy when governance doc has ADR violations", () =>
-      Effect.gen(function* () {
-        const graph = buildHarnessGraph({})
-        const report = yield* decideGraphEntropy({
-          graph,
-          governanceDocs: [
-            {
-              docPath: "libs/sample/docs/adr/0002-broken.md",
-              id: "sample:ADR-0002",
-              status: "accepted",
-              markdown: "# Broken ADR\n\nNo frontmatter here."
-            }
-          ]
-        })
-        expect(report.clean).toBe(false)
-        const finding = report.findings.find((f) => f.kind === "adr-doc-lint")
-        expect(finding).toBeDefined()
-        expect(finding?.nodeId).toBe("sample:ADR-0002")
-        expect(finding?.message).toContain("adr-frontmatter-invalid")
-      })
+    it.effect(
+      "flags adr-doc-lint in decideGraphEntropy when governance doc has ADR violations",
+      () =>
+        Effect.gen(function* () {
+          const graph = buildHarnessGraph({})
+          const report = yield* decideGraphEntropy({
+            graph,
+            governanceDocs: [
+              {
+                docPath: "libs/sample/docs/adr/0002-broken.md",
+                id: "sample:ADR-0002",
+                status: "accepted",
+                markdown: "# Broken ADR\n\nNo frontmatter here.",
+              },
+            ],
+          })
+          expect(report.clean).toBe(false)
+          const finding = report.findings.find((f) => f.kind === "adr-doc-lint")
+          expect(finding).toBeDefined()
+          expect(finding?.nodeId).toBe("sample:ADR-0002")
+          expect(finding?.message).toContain("adr-frontmatter-invalid")
+        }),
     )
 
     it.effect.prop(
       "AdrDocLint.decide: validates canonical ADR with N rejected alternatives and M drivers cleanly",
       {
-        rejectedCount: Schema.Int.check(
-          Schema.isBetween({ minimum: 1, maximum: 4 })
-        ),
-        driverCount: Schema.Int.check(
-          Schema.isBetween({ minimum: 2, maximum: 5 })
-        )
+        rejectedCount: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 4 })),
+        driverCount: Schema.Int.check(Schema.isBetween({ minimum: 2, maximum: 5 })),
       },
       ({ rejectedCount, driverCount }) =>
         Effect.gen(function* () {
           const drivers = Array.from(
             { length: driverCount },
-            (_, i) => `* Driver requirement ${i + 1} for architectural compliance`
+            (_, i) => `* Driver requirement ${i + 1} for architectural compliance`,
           ).join("\n")
 
           const options = Array.from(
             { length: rejectedCount + 1 },
-            (_, i) => `* **Option ${i + 1}:** Approach ${i + 1}`
+            (_, i) => `* **Option ${i + 1}:** Approach ${i + 1}`,
           ).join("\n")
 
           const rejectedAlternatives = Array.from(
             { length: rejectedCount },
             (_, i) =>
-              `### ${i + 1} · Option ${i + 2}\n- **Why rejected:** Reasons for rejecting option ${i + 2}.`
+              `### ${i + 1} · Option ${i + 2}\n- **Why rejected:** Reasons for rejecting option ${i + 2}.`,
           ).join("\n\n")
 
           const md = `---
@@ -2124,12 +2114,12 @@ ${rejectedAlternatives}
 
           const report = yield* decideAdrDocQuality({
             docPath: "docs/adr/test-0001.md",
-            markdown: md
+            markdown: md,
           })
 
           expect(report.clean).toBe(true)
           expect(report.findings).toHaveLength(0)
-        })
+        }),
     )
 
     it("flags adr-enforcement-mismatch when Governed Symbols entry is not declared in frontmatter or cell is empty", () => {
@@ -2182,12 +2172,12 @@ Context description here.
 
       const adrWithPlaceholderCell = adrWithUndeclaredSymbol.replace(
         "| Check Rule | libs/harness/gates/src/adr-lint.ts | AdrDocLint.decide | `UndeclaredSymbol` |",
-        "| Check Rule | - | AdrDocLint.decide | `AdrDocLint.decide` |"
+        "| Check Rule | - | AdrDocLint.decide | `AdrDocLint.decide` |",
       )
       const placeholderReport = lintAdrDocMarkdown("docs/adr/test.md", adrWithPlaceholderCell)
       expect(placeholderReport.clean).toBe(false)
       const placeholderMismatch = placeholderReport.findings.find(
-        (f) => f.kind === "adr-enforcement-mismatch"
+        (f) => f.kind === "adr-enforcement-mismatch",
       )
       expect(placeholderMismatch).toBeDefined()
       expect(placeholderMismatch?.message).toContain("empty or placeholder cell")
@@ -2242,7 +2232,7 @@ Context description here.
       const mismatch = report.findings.find(
         (f) =>
           f.kind === "adr-enforcement-mismatch" &&
-          f.message.includes("is not declared in ADR frontmatter 'enforced_by'")
+          f.message.includes("is not declared in ADR frontmatter 'enforced_by'"),
       )
       expect(mismatch).toBeDefined()
       expect(mismatch?.message).toContain("libs/harness/gates/src/adr-lint.ts")
@@ -2297,84 +2287,88 @@ Every domain fixture must have the scope:fixture tag applied in project.json.
       const report = lintAdrDocMarkdown("docs/adr/test.md", adrWithScopeFixture)
       expect(report.clean).toBe(false)
       const fixtureMismatch = report.findings.find(
-        (f) =>
-          f.kind === "adr-enforcement-mismatch" &&
-          f.message.includes("scope:fixture")
+        (f) => f.kind === "adr-enforcement-mismatch" && f.message.includes("scope:fixture"),
       )
       expect(fixtureMismatch).toBeDefined()
       expect(fixtureMismatch?.message).toContain(
-        "references unconfigured Nx tag 'scope:fixture' as a rule — 'scope:fixture' is not configured in nx.json."
+        "references unconfigured Nx tag 'scope:fixture' as a rule — 'scope:fixture' is not configured in nx.json.",
       )
     })
 
-    it.effect("flags shallow-decider-property-test when decider property test only has scalar/primitive arbitraries", () =>
-      Effect.gen(function* () {
-        const fnQualname = "libs/sample/domain/src/index.ts#Album.decide"
-        const testId = "libs/sample/domain/test/index.test.ts#test1"
+    it.effect(
+      "flags shallow-decider-property-test when decider property test only has scalar/primitive arbitraries",
+      () =>
+        Effect.gen(function* () {
+          const fnQualname = "libs/sample/domain/src/index.ts#Album.decide"
+          const testId = "libs/sample/domain/test/index.test.ts#test1"
 
-        const graphWithShallowProp = buildHarnessGraph({
-          fns: [
-            {
-              qualname: fnQualname,
-              spanName: "Album.decide",
-              packageTag: "domain",
-              file: "libs/sample/domain/src/index.ts",
-              line: 14,
-              successType: "number",
-              isStub: false
-            }
-          ],
-          tests: [
-            {
-              testId,
-              testFile: "libs/sample/domain/test/index.test.ts",
-              testName: "libs/sample/domain/test/index.test.ts",
-              lastTreeHash: "workspace",
-              isPropertyTest: true,
-              hasNonPrimitiveArbitrary: false
-            }
-          ],
-          exercisesSpans: [
-            {
-              testId,
-              calleeQualname: fnQualname,
-              callCount: 1,
-              receiverLayer: null
-            }
-          ]
-        })
+          const graphWithShallowProp = buildHarnessGraph({
+            fns: [
+              {
+                qualname: fnQualname,
+                spanName: "Album.decide",
+                packageTag: "domain",
+                file: "libs/sample/domain/src/index.ts",
+                line: 14,
+                successType: "number",
+                isStub: false,
+              },
+            ],
+            tests: [
+              {
+                testId,
+                testFile: "libs/sample/domain/test/index.test.ts",
+                testName: "libs/sample/domain/test/index.test.ts",
+                lastTreeHash: "workspace",
+                isPropertyTest: true,
+                hasNonPrimitiveArbitrary: false,
+              },
+            ],
+            exercisesSpans: [
+              {
+                testId,
+                calleeQualname: fnQualname,
+                callCount: 1,
+                receiverLayer: null,
+              },
+            ],
+          })
 
-        const report = yield* decideGraphEntropy({
-          graph: graphWithShallowProp,
-          checkDeciderPropertyTests: true
-        })
+          const report = yield* decideGraphEntropy({
+            graph: graphWithShallowProp,
+            checkDeciderPropertyTests: true,
+          })
 
-        expect(report.clean).toBe(false)
-        const shallowFinding = report.findings.find(
-          (f) => f.kind === "shallow-decider-property-test"
-        )
-        expect(shallowFinding).toBeDefined()
-        expect(shallowFinding?.nodeId).toBe("Album.decide")
-        expect(shallowFinding?.message).toContain("only exercised by scalar/primitive property tests")
-      })
+          expect(report.clean).toBe(false)
+          const shallowFinding = report.findings.find(
+            (f) => f.kind === "shallow-decider-property-test",
+          )
+          expect(shallowFinding).toBeDefined()
+          expect(shallowFinding?.nodeId).toBe("Album.decide")
+          expect(shallowFinding?.message).toContain(
+            "only exercised by scalar/primitive property tests",
+          )
+        }),
     )
 
-    it.effect("flags stale-doc-reference when an accepted spec Mermaid diagram references non-existent TaggedError", () =>
-      Effect.gen(function* () {
-        const graph = buildHarnessGraph({
-          errors: [
-            {
-              errorTag: "KnownDomainError",
-              file: "libs/sample/contract/src/index.ts"
-            }
-          ]
-        })
+    it.effect(
+      "flags stale-doc-reference when an accepted spec Mermaid diagram references non-existent TaggedError",
+      () =>
+        Effect.gen(function* () {
+          const graph = buildHarnessGraph({
+            errors: [
+              {
+                errorTag: "KnownDomainError",
+                file: "libs/sample/contract/src/index.ts",
+              },
+            ],
+          })
 
-        const doc: GovernanceDocReference = {
-          id: "sample:SPEC-0004",
-          docPath: "libs/sample/docs/specs/0004.md",
-          status: "accepted",
-          markdown: `---
+          const doc: GovernanceDocReference = {
+            id: "sample:SPEC-0004",
+            docPath: "libs/sample/docs/specs/0004.md",
+            status: "accepted",
+            markdown: `---
 id: sample:SPEC-0004
 title: Decider Spec
 status: accepted
@@ -2387,47 +2381,47 @@ flowchart TD
   Decider --> DeciderInvariantError
   Decider --> KnownDomainError
 \`\`\`
-`
-        }
+`,
+          }
 
-        const report = yield* decideGraphEntropy({
-          graph,
-          governanceDocs: [doc]
-        })
+          const report = yield* decideGraphEntropy({
+            graph,
+            governanceDocs: [doc],
+          })
 
-        expect(report.clean).toBe(false)
-        const staleErrorFinding = report.findings.find(
-          (f) =>
-            f.kind === "stale-doc-reference" &&
-            f.nodeId === "sample:SPEC-0004:DeciderInvariantError"
-        )
-        expect(staleErrorFinding).toBeDefined()
-        expect(staleErrorFinding?.message).toContain(
-          'references non-existent TaggedError "DeciderInvariantError" in a Mermaid diagram'
-        )
+          expect(report.clean).toBe(false)
+          const staleErrorFinding = report.findings.find(
+            (f) =>
+              f.kind === "stale-doc-reference" &&
+              f.nodeId === "sample:SPEC-0004:DeciderInvariantError",
+          )
+          expect(staleErrorFinding).toBeDefined()
+          expect(staleErrorFinding?.message).toContain(
+            'references non-existent TaggedError "DeciderInvariantError" in a Mermaid diagram',
+          )
 
-        const knownFinding = report.findings.find(
-          (f) =>
-            f.kind === "stale-doc-reference" &&
-            f.nodeId.includes("KnownDomainError")
-        )
-        expect(knownFinding).toBeUndefined()
-      })
+          const knownFinding = report.findings.find(
+            (f) => f.kind === "stale-doc-reference" && f.nodeId.includes("KnownDomainError"),
+          )
+          expect(knownFinding).toBeUndefined()
+        }),
     )
 
-    it.effect("flags stale-doc-reference when accepted ADR enforcement table attributes a mechanism not present in enforced_by files", () =>
-      Effect.gen(function* () {
-        const graph = buildHarnessGraph({})
-        const doc: GovernanceDocReference = {
-          id: "sample:ADR-0002",
-          docPath: "libs/sample/docs/adr/0002.md",
-          status: "accepted",
-          enforcedByFiles: ["libs/sample/domain/src/index.ts"],
-          existingFiles: ["libs/sample/domain/src/index.ts"],
-          enforcedByFileContents: {
-            "libs/sample/domain/src/index.ts": "export const foo = 1;\n"
-          },
-          markdown: `---
+    it.effect(
+      "flags stale-doc-reference when accepted ADR enforcement table attributes a mechanism not present in enforced_by files",
+      () =>
+        Effect.gen(function* () {
+          const graph = buildHarnessGraph({})
+          const doc: GovernanceDocReference = {
+            id: "sample:ADR-0002",
+            docPath: "libs/sample/docs/adr/0002.md",
+            status: "accepted",
+            enforcedByFiles: ["libs/sample/domain/src/index.ts"],
+            existingFiles: ["libs/sample/domain/src/index.ts"],
+            enforcedByFileContents: {
+              "libs/sample/domain/src/index.ts": "export const foo = 1;\n",
+            },
+            markdown: `---
 id: sample:ADR-0002
 title: Stale Table Test
 status: accepted
@@ -2443,25 +2437,25 @@ spans:
 | Rule | Enforced By | Gate / Mechanism | Governed Symbols |
 | --- | --- | --- | --- |
 | Quality Gate | libs/sample/domain/src/index.ts | \`vacuous-error-assertion\` | \`Foo.decide\` |
-`
-        }
+`,
+          }
 
-        const report = yield* decideGraphEntropy({
-          graph,
-          governanceDocs: [doc]
-        })
+          const report = yield* decideGraphEntropy({
+            graph,
+            governanceDocs: [doc],
+          })
 
-        expect(report.clean).toBe(false)
-        const finding = report.findings.find(
-          (f) =>
-            f.kind === "stale-doc-reference" &&
-            f.nodeId === "sample:ADR-0002:vacuous-error-assertion"
-        )
-        expect(finding).toBeDefined()
-        expect(finding?.message).toContain(
-          'enforcement table attributes "vacuous-error-assertion" to "libs/sample/domain/src/index.ts", but none of those files define or reference "vacuous-error-assertion".'
-        )
-      })
+          expect(report.clean).toBe(false)
+          const finding = report.findings.find(
+            (f) =>
+              f.kind === "stale-doc-reference" &&
+              f.nodeId === "sample:ADR-0002:vacuous-error-assertion",
+          )
+          expect(finding).toBeDefined()
+          expect(finding?.message).toContain(
+            'enforcement table attributes "vacuous-error-assertion" to "libs/sample/domain/src/index.ts", but none of those files define or reference "vacuous-error-assertion".',
+          )
+        }),
     )
 
     it("detects empty-source-module and unused-package-dependency with scanWorkspacePackageHygiene", () => {
@@ -2478,12 +2472,12 @@ spans:
               name: "@sample/domain",
               dependencies: {
                 "unimported-dependency": "1.0.0",
-                effect: "4.0.0"
-              }
+                effect: "4.0.0",
+              },
             },
             null,
-            2
-          )
+            2,
+          ),
         )
 
         writeFileSync(
@@ -2491,18 +2485,16 @@ spans:
           `// Empty error placeholder module
 /* Block comment */
 export {};
-`
+`,
         )
 
-        writeFileSync(
-          join(srcDir, "index.ts"),
-          `export const value = 42\n`
-        )
+        writeFileSync(join(srcDir, "index.ts"), `export const value = 42\n`)
 
         const findings = scanWorkspacePackageHygiene(tempDir)
 
         const emptyModuleFinding = findings.find(
-          (f) => f.kind === "empty-source-module" && f.nodeId === "libs/sample/domain/src/errors.ts"
+          (f) =>
+            f.kind === "empty-source-module" && f.nodeId === "libs/sample/domain/src/errors.ts",
         )
         expect(emptyModuleFinding).toBeDefined()
         expect(emptyModuleFinding?.message).toContain("contains only an empty export ('export {}')")
@@ -2510,11 +2502,11 @@ export {};
         const unusedDepFinding = findings.find(
           (f) =>
             f.kind === "unused-package-dependency" &&
-            f.nodeId === "@sample/domain:unimported-dependency"
+            f.nodeId === "@sample/domain:unimported-dependency",
         )
         expect(unusedDepFinding).toBeDefined()
         expect(unusedDepFinding?.message).toContain(
-          'Package "@sample/domain" declares dependency "unimported-dependency" in package.json, but no file in src/ imports it.'
+          'Package "@sample/domain" declares dependency "unimported-dependency" in package.json, but no file in src/ imports it.',
         )
       } finally {
         rmSync(tempDir, { recursive: true, force: true })
@@ -2531,25 +2523,27 @@ export {};
 
         writeFileSync(
           join(contractSrcDir, "index.ts"),
-          `export const UsedContract = 123;\nexport const DeadContractSymbol = 456;\nexport class DeadContractClass {}\nexport function deadContractFn() {}\n`
+          `export const UsedContract = 123;\nexport const DeadContractSymbol = 456;\nexport class DeadContractClass {}\nexport function deadContractFn() {}\n`,
         )
 
         writeFileSync(
           join(domainSrcDir, "index.ts"),
-          `import { UsedContract } from "../contract/src/index.js";\nconsole.log(UsedContract);\n`
+          `import { UsedContract } from "../contract/src/index.js";\nconsole.log(UsedContract);\n`,
         )
 
         const findings = scanWorkspacePackageHygiene(tempDir)
 
-        const unusedFindings = findings.filter(
-          (f) => f.kind === "unused-contract-export"
-        )
+        const unusedFindings = findings.filter((f) => f.kind === "unused-contract-export")
         expect(unusedFindings.length).toBe(3)
-        expect(unusedFindings.some((f) => f.nodeId === "sample/contract:DeadContractSymbol")).toBe(true)
-        expect(unusedFindings.some((f) => f.nodeId === "sample/contract:DeadContractClass")).toBe(true)
+        expect(unusedFindings.some((f) => f.nodeId === "sample/contract:DeadContractSymbol")).toBe(
+          true,
+        )
+        expect(unusedFindings.some((f) => f.nodeId === "sample/contract:DeadContractClass")).toBe(
+          true,
+        )
         expect(unusedFindings.some((f) => f.nodeId === "sample/contract:deadContractFn")).toBe(true)
         expect(unusedFindings[0]?.message).toContain(
-          'is never imported or used by any downstream package or fixture in scope "sample".'
+          'is never imported or used by any downstream package or fixture in scope "sample".',
         )
       } finally {
         rmSync(tempDir, { recursive: true, force: true })
@@ -2566,12 +2560,12 @@ export {};
 
         writeFileSync(
           join(contractSrcDir, "index.ts"),
-          `import { Schema } from "effect";\nexport class ConstructedError extends Schema.TaggedError<ConstructedError>()("ConstructedError", {}) {}\nexport class PhantomError extends Schema.TaggedError<PhantomError>()("PhantomError", {}) {}\n`
+          `import { Schema } from "effect";\nexport class ConstructedError extends Schema.TaggedError<ConstructedError>()("ConstructedError", {}) {}\nexport class PhantomError extends Schema.TaggedError<PhantomError>()("PhantomError", {}) {}\n`,
         )
 
         writeFileSync(
           join(domainSrcDir, "index.ts"),
-          `import { Effect } from "effect";\nimport { ConstructedError, type PhantomError } from "../contract/src/index.js";\nexport const run = (): Effect.Effect<void, ConstructedError | PhantomError> => Effect.fail(new ConstructedError({}));\n`
+          `import { Effect } from "effect";\nimport { ConstructedError, type PhantomError } from "../contract/src/index.js";\nexport const run = (): Effect.Effect<void, ConstructedError | PhantomError> => Effect.fail(new ConstructedError({}));\n`,
         )
 
         const findings = scanWorkspacePackageHygiene(tempDir)
@@ -2579,7 +2573,7 @@ export {};
         expect(deadErrorFindings).toHaveLength(1)
         expect(deadErrorFindings[0]?.nodeId).toBe("sample/contract:PhantomError")
         expect(deadErrorFindings[0]?.message).toContain(
-          'Contract TaggedError "PhantomError" in "libs/sample/contract/src/index.ts" is never constructed (new PhantomError(...))'
+          'Contract TaggedError "PhantomError" in "libs/sample/contract/src/index.ts" is never constructed (new PhantomError(...))',
         )
       } finally {
         rmSync(tempDir, { recursive: true, force: true })
@@ -2636,9 +2630,7 @@ export const evolve = (s: State, e: Event) => {
       expect(dieMutant?.category).toBe("guard-condition")
 
       const addMutant = mutants.find(
-        (m) =>
-          m.category === "arithmetic-operator" &&
-          m.original === "s.itemCount + e.quantity"
+        (m) => m.category === "arithmetic-operator" && m.original === "s.itemCount + e.quantity",
       )
       expect(addMutant).toBeDefined()
       expect(addMutant?.replacement).toBe("s.itemCount - e.quantity")
@@ -2647,9 +2639,7 @@ export const evolve = (s: State, e: Event) => {
       expect(spreadMutant).toBeDefined()
       expect(spreadMutant?.replacement).toBe("s.items")
 
-      const counterMutant = mutants.find(
-        (m) => m.original === "totalItems: s.itemCount"
-      )
+      const counterMutant = mutants.find((m) => m.original === "totalItems: s.itemCount")
       expect(counterMutant).toBeDefined()
       expect(counterMutant?.replacement).toBe("totalItems: 0")
       expect(counterMutant?.category).toBe("arithmetic-operator")
@@ -2669,12 +2659,10 @@ export const evolve = (s: State, e: Event) => {
               enforcedByFiles: [],
               referencedSpans: [],
               referencedServices: [],
-              referencedErrors: ["DeclaredError"]
-            }
+              referencedErrors: ["DeclaredError"],
+            },
           ],
-          errors: [
-            { errorTag: "DeclaredError", file: "libs/sample/contract/src/index.ts" }
-          ]
+          errors: [{ errorTag: "DeclaredError", file: "libs/sample/contract/src/index.ts" }],
         })
 
         const doc: GovernanceDocReference = {
@@ -2703,26 +2691,26 @@ errors:
 | ID | Pattern | Requirement | Effect Symbol | Verification |
 | --- | --- | --- | --- | --- |
 | REQ-1.1 | Unwanted behaviour | **If** checkout fails, **then** the engine **shall** fail with UndeclaredCartError. | DeclaredError | test |
-`
+`,
         }
 
         const report = yield* decideOntologyInvariants({
           graph,
-          governanceDocs: [doc]
+          governanceDocs: [doc],
         })
 
         expect(report.clean).toBe(false)
         const finding = report.findings.find(
           (f) =>
             f.kind === "ontology-if-then-error-mismatch" &&
-            f.message.includes('references error "UndeclaredCartError"')
+            f.message.includes('references error "UndeclaredCartError"'),
         )
         expect(finding).toBeDefined()
         expect(finding?.nodeId).toBe("sample:SPEC-0001:REQ-1.1")
         expect(finding?.message).toBe(
-          'Unwanted behaviour requirement REQ-1.1 prose references error "UndeclaredCartError" which does not exist in referencedErrors or the workspace graph.'
+          'Unwanted behaviour requirement REQ-1.1 prose references error "UndeclaredCartError" which does not exist in referencedErrors or the workspace graph.',
         )
-      })
+      }),
     )
   })
 })

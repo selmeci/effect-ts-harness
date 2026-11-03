@@ -12,17 +12,17 @@ import { Effect } from "effect"
 
 // Declare an R2 storage bucket
 export const AssetsBucket = R2Bucket("AssetsBucket", {
-  name: "app-assets-production"
+  name: "app-assets-production",
 })
 
 // Declare a D1 relational database
 export const MainDatabase = D1Database("MainDatabase", {
-  name: "app-d1-production"
+  name: "app-d1-production",
 })
 
 // Declare a Durable Object namespace for stateful entities
 export const SessionDO = DurableObjectNamespace("SessionDO", {
-  className: "SessionDurableObject"
+  className: "SessionDurableObject",
 })
 
 // Declare a Cloudflare Worker binding to the resources
@@ -31,8 +31,8 @@ export const ApiWorker = Worker("ApiWorker", {
   bindings: {
     ASSETS: AssetsBucket,
     DB: MainDatabase,
-    SESSIONS: SessionDO
-  }
+    SESSIONS: SessionDO,
+  },
 })
 ```
 

@@ -7,13 +7,9 @@ import {
   AggregateNotFoundError,
   type EventMetadata,
   ProjectionName,
-  ProjectionVersion
+  ProjectionVersion,
 } from "@harness/es-contract"
-import {
-  type AggregateConfig,
-  type HistoricalEvent,
-  LocalProjection
-} from "@harness/es-core"
+import { type AggregateConfig, type HistoricalEvent, LocalProjection } from "@harness/es-core"
 import {
   type CartAlreadyCheckedOutError,
   type CartCommand,
@@ -22,7 +18,7 @@ import {
   type CartIdMismatchError,
   type CartState,
   type EmptyCartCheckoutError,
-  ItemCount
+  ItemCount,
 } from "@harness/es-core/fixtures/cart"
 import { match } from "ts-pattern"
 
@@ -36,7 +32,7 @@ export class CartView extends Schema.Class<CartView>("CartView")({
   cartId: AggregateId,
   itemCount: ItemCount,
   status: CartStatus,
-  totalQuantity: TotalQuantity
+  totalQuantity: TotalQuantity,
 }) {}
 
 interface CartViewRow {
@@ -46,10 +42,9 @@ interface CartViewRow {
   readonly total_quantity: number
 }
 
-export const initCartViewTable: Effect.Effect<void, SqlError, SqlClient> = Effect.gen(
-  function* () {
-    const sql = yield* SqlClient
-    yield* sql`
+export const initCartViewTable: Effect.Effect<void, SqlError, SqlClient> = Effect.gen(function* () {
+  const sql = yield* SqlClient
+  yield* sql`
       CREATE TABLE IF NOT EXISTS projection_cart_view (
         cart_id TEXT PRIMARY KEY NOT NULL,
         item_count INTEGER NOT NULL,
@@ -57,12 +52,11 @@ export const initCartViewTable: Effect.Effect<void, SqlError, SqlClient> = Effec
         total_quantity INTEGER NOT NULL
       );
     `
-  }
-)
+})
 
 export const applyCartView = (
   event: CartEvent,
-  metadata: EventMetadata
+  metadata: EventMetadata,
 ): Effect.Effect<void, SqlError, SqlClient> =>
   Effect.gen(function* () {
     const sql = yield* SqlClient
@@ -73,7 +67,7 @@ export const applyCartView = (
           INSERT INTO projection_cart_view (cart_id, item_count, status, total_quantity)
           VALUES (${targetAggregateId}, 0, 'active', 0)
           ON CONFLICT (cart_id) DO NOTHING
-        `.pipe(Effect.asVoid)
+        `.pipe(Effect.asVoid),
       )
       .with({ _tag: "ItemAdded" }, (e) =>
         sql`
@@ -82,7 +76,7 @@ export const applyCartView = (
           ON CONFLICT (cart_id) DO UPDATE SET
             item_count = item_count + 1,
             total_quantity = total_quantity + ${e.quantity}
-        `.pipe(Effect.asVoid)
+        `.pipe(Effect.asVoid),
       )
       .with({ _tag: "CartCheckedOut" }, () =>
         sql`
@@ -90,13 +84,13 @@ export const applyCartView = (
           VALUES (${targetAggregateId}, 0, 'checked_out', 0)
           ON CONFLICT (cart_id) DO UPDATE SET
             status = 'checked_out'
-        `.pipe(Effect.asVoid)
+        `.pipe(Effect.asVoid),
       )
       .exhaustive()
   })
 
 export const queryCartView = (
-  aggregateId: AggregateId
+  aggregateId: AggregateId,
 ): Effect.Effect<CartView, AggregateNotFoundError | SqlError, SqlClient> =>
   Effect.gen(function* () {
     const sql = yield* SqlClient
@@ -113,13 +107,13 @@ export const queryCartView = (
       cartId: AggregateId.make(row.cart_id),
       itemCount: ItemCount.make(row.item_count),
       status: CartStatus.make(row.status),
-      totalQuantity: TotalQuantity.make(row.total_quantity)
+      totalQuantity: TotalQuantity.make(row.total_quantity),
     })
   })
 
 export const rebuildCartView = (
   aggregateId: AggregateId,
-  events: ReadonlyArray<HistoricalEvent<CartEvent>>
+  events: ReadonlyArray<HistoricalEvent<CartEvent>>,
 ): Effect.Effect<void, SqlError, SqlClient> =>
   Effect.gen(function* () {
     const sql = yield* SqlClient
@@ -129,33 +123,25 @@ export const rebuildCartView = (
     }
   })
 
-export const cartViewProjection: LocalProjection<
-  CartEvent,
-  CartView,
-  SqlClient,
-  SqlError
-> = LocalProjection.make({
-  name: ProjectionName.make("CartView"),
-  version: ProjectionVersion.make(1),
-  model: CartView,
-  apply: applyCartView,
-  query: queryCartView,
-  rebuild: rebuildCartView
-})
+export const cartViewProjection: LocalProjection<CartEvent, CartView, SqlClient, SqlError> =
+  LocalProjection.make({
+    name: ProjectionName.make("CartView"),
+    version: ProjectionVersion.make(1),
+    model: CartView,
+    apply: applyCartView,
+    query: queryCartView,
+    rebuild: rebuildCartView,
+  })
 
-export const cartViewProjectionV2: LocalProjection<
-  CartEvent,
-  CartView,
-  SqlClient,
-  SqlError
-> = LocalProjection.make({
-  name: ProjectionName.make("CartView"),
-  version: ProjectionVersion.make(2),
-  model: CartView,
-  apply: applyCartView,
-  query: queryCartView,
-  rebuild: rebuildCartView
-})
+export const cartViewProjectionV2: LocalProjection<CartEvent, CartView, SqlClient, SqlError> =
+  LocalProjection.make({
+    name: ProjectionName.make("CartView"),
+    version: ProjectionVersion.make(2),
+    model: CartView,
+    apply: applyCartView,
+    query: queryCartView,
+    rebuild: rebuildCartView,
+  })
 
 export const cartAggregateConfig: AggregateConfig<
   CartCommand,
@@ -169,5 +155,5 @@ export const cartAggregateConfig: AggregateConfig<
   decider: cartDecider,
   eventSchema: CartEvent,
   projections: [cartViewProjection],
-  outboxMode: { _tag: "SuppressOutbox" }
+  outboxMode: { _tag: "SuppressOutbox" },
 }

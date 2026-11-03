@@ -5,7 +5,7 @@ export interface Decider<Command, Event, State, Err> {
   readonly evolve: (state: State, event: Event) => State
   readonly decide: (
     command: Command,
-    state: State
+    state: State,
   ) => Effect.Effect<ReadonlyArray<Event>, Err, never>
 }
 
@@ -16,12 +16,12 @@ export const Decider = {
     readonly evolve: (state: State, event: Event) => State
     readonly decide: (
       command: Command,
-      state: State
+      state: State,
     ) => Effect.Effect<ReadonlyArray<Event>, Err, never>
   }): Decider<Command, Event, State, Err> => ({
     initialState: options.initialState,
     evolve: options.evolve,
     decide: (command, state) =>
-      Effect.withSpan(options.decide(command, state), options.name ?? "Decider.decide")
-  })
+      Effect.withSpan(options.decide(command, state), options.name ?? "Decider.decide"),
+  }),
 }

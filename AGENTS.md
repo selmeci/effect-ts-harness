@@ -20,7 +20,9 @@ plan (in Effect idioms, `agent-patterns/planning.md` template) → skeleton with
 `pnpm harness plan-check` (`plan/<task>` branch) → implement (isolate concurrent subagents with `Workspace: "share"` or `HARNESS_WORKTREE_ID`) → `pnpm harness gc --strict` (`GraphGc.decide` zero-entropy gate) → `pnpm harness verify` (the ONLY sanctioned verification, checks `SpanBudget.decide` and writes `.harness/verify-stamp.json` + `impl/<task>` branch) → `pnpm harness done` → `pnpm harness learn` (`compounding-effect-learnings` to promote `.harness/friction-log.jsonl` into recipes/gates).
 
 ### MCP-First Tooling Preference
+
 Always prefer in-process MCP tools over spawning shell subcommands to eliminate process overhead and guard prompt friction:
+
 - **LSP & Type Diagnostics:** `harness_lsp_diagnostics` (replaces slow shell lint/typecheck runs during development).
 - **Ontology & Architecture:** `harness_ontology_check`, `harness_ontology_why`, `harness_ontology_impact` (trace and audit EARS specs and ADR invariants).
 - **Test Impact Analysis:** `harness_tests_reaching` (determines affected test files for touched symbols).

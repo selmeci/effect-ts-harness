@@ -4,6 +4,7 @@
   "cli": {
     "analytics": false
   },
+  "cacheDirectory": ".nx/cache",
   "ignore": ["repos/**", "docs/**", "agent-patterns/**", "adapters/**"],
   "plugins": [
     "@nx/js",
@@ -15,15 +16,53 @@
     }
   ],
   "namedInputs": {
-    "sharedGlobals": ["{workspaceRoot}/tsconfig.base.json", "{workspaceRoot}/.oxlintrc.json"],
+    "sharedGlobals": [
+      "{workspaceRoot}/tsconfig.base.json",
+      "{workspaceRoot}/.oxlintrc.json",
+      "{workspaceRoot}/.oxfmtrc.json",
+      "{workspaceRoot}/tools/oxlint/syntax-bans.js",
+      "{workspaceRoot}/pnpm-lock.yaml",
+      "{workspaceRoot}/package.json"
+    ],
     "default": ["{projectRoot}/**/*", "sharedGlobals"],
     "production": ["default"]
   },
   "targetDefaults": {
-    "typecheck": { "cache": true },
-    "lint": { "cache": true },
-    "test": { "cache": true },
-    "verify": { "cache": true },
-    "effect-graph:check": { "cache": true }
+    "typecheck": {
+      "cache": true,
+      "inputs": ["default", "^production"]
+    },
+    "lint": {
+      "cache": true,
+      "inputs": [
+        "default",
+        "{workspaceRoot}/.oxlintrc.json",
+        "{workspaceRoot}/tools/oxlint/syntax-bans.js"
+      ]
+    },
+    "format:check": {
+      "cache": true,
+      "inputs": ["default", "{workspaceRoot}/.oxfmtrc.json"]
+    },
+    "test": {
+      "cache": true,
+      "inputs": ["default", "^production"]
+    },
+    "openapi:check": {
+      "cache": true,
+      "inputs": ["default"]
+    },
+    "migration:check": {
+      "cache": true,
+      "inputs": ["default"]
+    },
+    "verify": {
+      "cache": true,
+      "dependsOn": ["typecheck", "lint", "test"]
+    },
+    "effect-graph:check": {
+      "cache": true,
+      "inputs": ["default"]
+    }
   }
 }

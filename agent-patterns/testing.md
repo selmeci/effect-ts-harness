@@ -5,6 +5,7 @@ Testing Effect applications utilizes @effect/vitest with it.effect and it.scoped
 ## Testing with `@effect/vitest` vs `vitest`
 
 Test runner imports are strictly partitioned by package boundary to prevent leaking framework test runtimes into pure contract packages:
+
 - **`type:contract` packages**: Import test primitives directly from `"vitest"`:
   ```ts
   import { describe, expect, it } from "vitest"
@@ -28,16 +29,14 @@ describe("Greeter Service", () => {
       const greeter = yield* Greeter
       const message = yield* greeter.greet("Alice")
       expect(message).toBe("Hello, Alice!")
-    }).pipe(
-      Effect.provide(Greeter.Test)
-    )
+    }).pipe(Effect.provide(Greeter.Test)),
   )
 
   it.scoped("tests resource lifecycle cleanly", () =>
     Effect.gen(function* () {
       const handle = yield* openTestResource
       expect(handle.isOpen).toBe(true)
-    })
+    }),
   )
 })
 ```
@@ -54,8 +53,8 @@ export const UserRepositoryTest = Layer.succeed(
   UserRepository,
   UserRepository.of({
     findById: (id) => Effect.succeed({ id, name: "Test User" }),
-    save: (user) => Effect.succeed(user)
-  })
+    save: (user) => Effect.succeed(user),
+  }),
 )
 ```
 
@@ -66,6 +65,7 @@ export const UserRepositoryTest = Layer.succeed(
 > Never import `node:sqlite` (`DatabaseSync`) or author hand-rolled `DurableObjectStorage`, `SqlStorage`, or `D1Database` mocks in `type:infra` or `type:app` packages (`libs/*/infra/**`, `apps/**`). Hand-rolled `node:sqlite` wrappers diverge from Cloudflare's `workerd` runtime (which forbids raw `BEGIN` / `COMMIT` / `ROLLBACK` statements in `storage.sql.exec()` and manages nested transactions via C++ savepoints in `storage.transaction()`).
 
 Always execute `type:infra` storage tests against the real `workerd` runtime using `@alchemy.run/cloudflare-runtime`:
+
 - **Cloudflare D1 (`@effect/sql-d1`):** Spawn a real `workerd` D1 instance (`cloudflare-internal:d1-api` backed by a SQLite Durable Object) via `Workerd` / `getPlatformProxy` with `D1.local` and pass the binding to `D1Client.layer({ db })`.
 - **Cloudflare Durable Object SQLite (`@effect/sql-sqlite-do`):** Spawn a `workerd` worker with a SQLite-enabled Durable Object (`enableSql: true`, `durableObjectStorage: { localDisk }`) and run `@effect/sql-sqlite-do` (`makeSqliteClientLayer`) against it so both `storage.sql.exec()` and nested `storage.transaction()` C++ savepoints execute on the real `workerd` engine.
 
@@ -84,11 +84,11 @@ describe("Cart Domain", () => {
     runWithTestTracer("tests/cart.test.ts#calculates order total", () =>
       Effect.gen(function* () {
         const total = yield* withRecordedTestSpan("Cart.calculateTotal", () =>
-          calculateTotal([{ price: 10, quantity: 2 }])
+          calculateTotal([{ price: 10, quantity: 2 }]),
         )
         expect(total).toBe(20)
-      })
-    )
+      }),
+    ),
   )
 })
 ```
@@ -109,13 +109,14 @@ it.effect("advances simulated time", () =>
     yield* TestClock.adjust(Duration.seconds(10))
     const result = yield* Fiber.join(fiber)
     expect(result).toBe("done")
-  })
+  }),
 )
 ```
 
 ## Property-Based Testing with Schema Arbitraries (`it.effect.prop`)
 
 Example-based unit tests suffer from two critical failure modes in AI-assisted development:
+
 - **Shared Blind Spots**: LLMs generate tests based on the same conceptual assumptions as their implementation code, leading to tests that verify happy paths while missing edge cases (off-by-one errors, negative boundaries, numeric overflow).
 - **Test Reward Hacking**: Agents optimize for passing tests rather than semantic correctness. When tests only assert a single hardcoded input-output pair (`expect(decide(5)).toBe(true)`), trivial or degenerate implementations can satisfy the test suite without fulfilling domain invariants.
 
@@ -139,14 +140,14 @@ describe("PhotoQuotaDecider", () => {
     {
       albumId: Schema.NonEmptyString,
       currentCount: Schema.Number.pipe(Schema.int(), Schema.between(-50, 250)),
-      maxAllowed: Schema.Number.pipe(Schema.int(), Schema.between(1, 100))
+      maxAllowed: Schema.Number.pipe(Schema.int(), Schema.between(1, 100)),
     },
     ({ albumId, currentCount, maxAllowed }) =>
       Effect.gen(function* () {
         const decision = PhotoQuotaDecider.decide({
           albumId,
           currentCount,
-          maxAllowed
+          maxAllowed,
         })
 
         if (currentCount >= maxAllowed) {
@@ -158,7 +159,7 @@ describe("PhotoQuotaDecider", () => {
         } else {
           expect(decision._tag).toBe("QuotaAllowed")
         }
-      })
+      }),
   )
 })
 ```
@@ -181,7 +182,7 @@ describe("Album Projections & Serialization", () => {
       const encoded = Schema.encodeSync(PhotoUploadedEvent)(event)
       const decoded = Schema.decodeUnknownSync(PhotoUploadedEvent)(encoded)
       expect(decoded).toEqual(event)
-    }
+    },
   )
 
   // Idempotency invariant: project(project(state, event), event) === project(state, event)
@@ -192,7 +193,7 @@ describe("Album Projections & Serialization", () => {
       const stateOnce = projectAlbumState(initialAlbumState, event)
       const stateTwice = projectAlbumState(stateOnce, event)
       expect(stateTwice).toEqual(stateOnce)
-    }
+    },
   )
 })
 ```
@@ -219,7 +220,7 @@ Never downgrade an assertion to `expect(state.id).toBeDefined()` to bypass this 
        "satisfies chunked fold equivalence across arbitrary CartEvent streams",
        {
          events: Schema.Array(CartEvent),
-         splitRatio: Schema.Number.pipe(Schema.between(0, 1))
+         splitRatio: Schema.Number.pipe(Schema.between(0, 1)),
        },
        ({ events, splitRatio }) => {
          const k = Math.floor(events.length * splitRatio)
@@ -229,7 +230,7 @@ Never downgrade an assertion to `expect(state.id).toBeDefined()` to bypass this 
 
          // Strict structural equality: Equal.equals only (fallback-json-equality gate)
          expect(Equal.equals(chunkedFold, fullFold)).toBe(true)
-       }
+       },
      )
    })
    ```
@@ -253,13 +254,14 @@ When writing negative tests (asserting that an effect fails), never assert bare 
 In Effect, `Exit.Failure` contains a `Cause`. An assertion failure or unexpected exception inside the effect produces a defect (`Die`), which also produces an `Exit.Failure`. Checking only `_tag === "Failure"` masks defects and crashes as successful negative tests!
 
 Always inspect the cause. In `Effect.exit` assertions, extract typed errors with `Cause.findErrorOption(exit.cause)` (not `Cause.failureOption`, which does not exist in Effect v4):
+
 ```ts
 // 1. Flip error channel to assert typed domain error (E):
-const err = yield* Effect.flip(effect)
+const err = yield * Effect.flip(effect)
 expect(err._tag).toBe("InsufficientStockError")
 
 // 2. Or inspect Exit.Failure cause tree with Cause.findErrorOption:
-const exit = yield* Effect.exit(effect)
+const exit = yield * Effect.exit(effect)
 if (Exit.isFailure(exit)) {
   const errorOpt = Cause.findErrorOption(exit.cause)
   expect(Option.isSome(errorOpt)).toBe(true)
@@ -292,7 +294,7 @@ describe("BDD Runner Meta-Tests", () => {
   const fakeFailingDecider = {
     initialState: 0,
     evolve: (s: number) => s,
-    decide: () => Effect.fail({ _tag: "FakeError" as const })
+    decide: () => Effect.fail({ _tag: "FakeError" as const }),
   }
 
   const harness = makeDeciderTestHarness(fakeFailingDecider)
@@ -300,14 +302,17 @@ describe("BDD Runner Meta-Tests", () => {
   it.effect("meta-test: runner dies when unexpected failure occurs instead of events", () =>
     Effect.gen(function* () {
       const exit = yield* Effect.exit(
-        harness.given([]).when("anyCommand").thenEvents([{ _tag: "FakeEvent" }])
+        harness
+          .given([])
+          .when("anyCommand")
+          .thenEvents([{ _tag: "FakeEvent" }]),
       )
       // The runner must die (fail its assertion)
       expect(Exit.isFailure(exit)).toBe(true)
       if (Exit.isFailure(exit)) {
         expect(Cause.hasDies(exit.cause)).toBe(true)
       }
-    })
+    }),
   )
 
   it.effect("meta-test: runner dies when decider succeeds instead of expected error", () =>
@@ -315,24 +320,23 @@ describe("BDD Runner Meta-Tests", () => {
       const fakeSucceedingDecider = {
         initialState: 0,
         evolve: (s: number) => s,
-        decide: () => Effect.succeed([])
+        decide: () => Effect.succeed([]),
       }
       const successHarness = makeDeciderTestHarness(fakeSucceedingDecider)
       const exit = yield* Effect.exit(
-        successHarness.given([]).when("anyCommand").thenFails({ _tag: "FakeError" })
+        successHarness.given([]).when("anyCommand").thenFails({ _tag: "FakeError" }),
       )
       expect(Exit.isFailure(exit)).toBe(true)
       if (Exit.isFailure(exit)) {
         expect(Cause.hasDies(exit.cause)).toBe(true)
       }
-    })
+    }),
   )
 })
 ```
 
 > [!IMPORTANT]
 > The harness zero-entropy gate `harness gc --strict` enforces both the `missing-decider-property-test` and `shallow-decider-property-test` sensors: every pure domain decider must be exercised by property-based tests verifying chunked-fold equivalence over `Schema.Array(EventUnionSchema)`.
-
 
 ## Targeted Domain AST Mutation Testing (`harness mutate`)
 
@@ -343,6 +347,7 @@ Unlike brute-force mutation testing tools that mutate every line across the enti
 ### Semantic AST Mutations
 
 `MutationCheck.decide` injects semantic AST mutants at boundary and decision sites:
+
 - **Comparison Operators**: `>=` -> `>`, `<=` -> `<`, `>` -> `>=`, `<` -> `<=`
 - **Equality Operators**: `===` -> `!==`, `!==` -> `===`
 - **Arithmetic Increments**: `+ 1` -> `- 1`, `- 1` -> `+ 1`
@@ -355,10 +360,14 @@ harness mutate --strict
 ```
 
 For each mutant injected into a `type:domain` AST:
+
 1. The mutated AST is compiled in-memory.
 2. The affected project's `@effect/vitest` suite runs.
 3. If the test suite passes, the mutant has **survived** (a test gap).
 4. If the test suite fails, the mutant is **killed**.
 
 `harness mutate --strict` requires a **100% mutation score** (0 survived mutants) across all domain deciders. If any mutant survives, it highlights a boundary where tests relied on hand-picked example inputs without checking the exact edge condition.
+
+```
+
 ```

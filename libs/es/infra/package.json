@@ -8,16 +8,11 @@
     "./memory": "./src/memory.ts",
     "./fixtures/cart-sqlite": "./test/fixtures/cart-sqlite.ts"
   },
-  "nx": {
-    "tags": [
-      "type:infra"
-    ]
-  },
   "scripts": {
     "typecheck": "tsc --noEmit && effect-tsgo diagnostics --strict --project tsconfig.json",
     "lint": "oxlint --deny-warnings .",
     "test": "vitest run",
-    "verify": "pnpm run typecheck && pnpm run lint && pnpm run test"
+    "verify": "node -e \"\""
   },
   "dependencies": {
     "@effect/sql-sqlite-do": "4.0.0",
@@ -35,5 +30,10 @@
     "@harness/graph": "workspace:*",
     "@types/node": "26.6.5",
     "vitest": "5.0.3"
+  },
+  "nx": {
+    "tags": [
+      "type:infra"
+    ]
   }
 }

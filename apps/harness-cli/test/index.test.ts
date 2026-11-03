@@ -4,10 +4,7 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { Effect, Layer } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
-import {
-  makeFailingDecisionModelLayer,
-  makeMockDecisionModelLayer
-} from "@harness/decision"
+import { makeFailingDecisionModelLayer, makeMockDecisionModelLayer } from "@harness/decision"
 import { readTelemetryEvents, writeVerifyStamp } from "@harness/gates"
 import { buildHarnessGraph } from "@harness/graph"
 // oxlint-disable-next-line @nx/enforce-module-boundaries
@@ -18,7 +15,7 @@ import {
   COMMANDS,
   run,
   runCli,
-  stripAnsiCodes
+  stripAnsiCodes,
 } from "../src/index.js"
 
 describe("harness cli baseline", () => {
@@ -37,7 +34,7 @@ describe("harness cli baseline", () => {
       "doctor",
       "ontology",
       "report",
-      "help"
+      "help",
     ])
     for (const command of COMMANDS) {
       expect(run([command])).toBe(0)
@@ -45,13 +42,11 @@ describe("harness cli baseline", () => {
   })
 
   it("builds repo-scoped omnigraph kill args to prevent killing other clusters", () => {
-    const [bin, args] = buildOmnigraphClusterKillArgs(
-      "/tmp/test-repo/.harness/omnigraph-cluster"
-    )
+    const [bin, args] = buildOmnigraphClusterKillArgs("/tmp/test-repo/.harness/omnigraph-cluster")
     expect(bin).toBe("pkill")
     expect(args).toEqual([
       "-f",
-      "omnigraph-server.*--cluster file:///tmp/test-repo/.harness/omnigraph-cluster"
+      "omnigraph-server.*--cluster file:///tmp/test-repo/.harness/omnigraph-cluster",
     ])
   })
 
@@ -98,23 +93,19 @@ describe("harness-cli v2 commands", () => {
       expect(JSON.parse(ask.stdout)).toMatchObject({
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
-          permissionDecision: "ask"
-        }
+          permissionDecision: "ask",
+        },
       })
 
       const cdDeny = await runCli(["guard", "cd libs/sample/domain"])
       expect(cdDeny.exitCode).toBe(2)
       expect(cdDeny.stderr).toContain("Cwd")
 
-      const cdAntigravity = await runCli([
-        "guard",
-        "--format=antigravity",
-        "cd libs/sample/domain"
-      ])
+      const cdAntigravity = await runCli(["guard", "--format=antigravity", "cd libs/sample/domain"])
       expect(cdAntigravity.exitCode).toBe(0)
       expect(JSON.parse(cdAntigravity.stdout)).toEqual({
         decision: "deny",
-        reason: expect.stringContaining("Cwd")
+        reason: expect.stringContaining("Cwd"),
       })
     })
 
@@ -122,8 +113,8 @@ describe("harness-cli v2 commands", () => {
       const stdin = JSON.stringify({
         tool_name: "Bash",
         tool_input: {
-          command: "rm -rf /sensitive"
-        }
+          command: "rm -rf /sensitive",
+        },
       })
       const deny = await runCli(["guard"], { stdin })
       expect(deny.exitCode).toBe(2)
@@ -131,16 +122,16 @@ describe("harness-cli v2 commands", () => {
       const askStdin = JSON.stringify({
         tool_name: "Bash",
         tool_input: {
-          command: "alchemy destroy"
-        }
+          command: "alchemy destroy",
+        },
       })
       const ask = await runCli(["guard"], { stdin: askStdin })
       expect(ask.exitCode).toBe(0)
       expect(JSON.parse(ask.stdout)).toMatchObject({
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
-          permissionDecision: "ask"
-        }
+          permissionDecision: "ask",
+        },
       })
     })
 
@@ -148,34 +139,34 @@ describe("harness-cli v2 commands", () => {
       const denyLayer = makeMockDecisionModelLayer({
         destructiveProb: 0.85,
         secretAccessProb: 0.1,
-        exfiltrationProb: 0.1
+        exfiltrationProb: 0.1,
       })
       const deny = await runCli(["guard", "custom-script --mutate-all"], {
-        decisionLayer: denyLayer
+        decisionLayer: denyLayer,
       })
       expect(deny.exitCode).toBe(2)
 
       const allowLayer = makeMockDecisionModelLayer({
         destructiveProb: 0.05,
         secretAccessProb: 0.05,
-        exfiltrationProb: 0.05
+        exfiltrationProb: 0.05,
       })
       const allow = await runCli(["guard", "custom-script --dry-run"], {
-        decisionLayer: allowLayer
+        decisionLayer: allowLayer,
       })
       expect(allow.exitCode).toBe(0)
 
       const failingLayer = makeFailingDecisionModelLayer()
       const fallbackAsk = await runCli(["guard", "custom-script --unknown"], {
-        decisionLayer: failingLayer
+        decisionLayer: failingLayer,
       })
       expect(fallbackAsk.exitCode).toBe(0)
       expect(JSON.parse(fallbackAsk.stdout)).toMatchObject({
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
           permissionDecision: "ask",
-          permissionDecisionReason: expect.stringContaining("requires human confirmation")
-        }
+          permissionDecisionReason: expect.stringContaining("requires human confirmation"),
+        },
       })
     })
   })
@@ -184,30 +175,30 @@ describe("harness-cli v2 commands", () => {
     it("routes plan steps to pattern docs, review, or effect", async () => {
       const schemaLayer = makeMockDecisionModelLayer({
         fitsAnyProb: 0.9,
-        blockLabel: "schema"
+        blockLabel: "schema",
       })
       const schemaRoute = await runCli(["route", "Parse incoming HTTP payload with Schema"], {
-        decisionLayer: schemaLayer
+        decisionLayer: schemaLayer,
       })
       expect(schemaRoute.exitCode).toBe(0)
       expect(schemaRoute.stdout).toBe("agent-patterns/schema.md")
 
       const reviewLayer = makeMockDecisionModelLayer({
         fitsAnyProb: 0.4,
-        blockLabel: "review"
+        blockLabel: "review",
       })
       const reviewRoute = await runCli(["route", "Unclear vague requirement"], {
-        decisionLayer: reviewLayer
+        decisionLayer: reviewLayer,
       })
       expect(reviewRoute.exitCode).toBe(0)
       expect(reviewRoute.stdout).toBe("review")
 
       const effectLayer = makeMockDecisionModelLayer({
         fitsAnyProb: 0.9,
-        blockLabel: "effect"
+        blockLabel: "effect",
       })
       const effectRoute = await runCli(["route", "Simple sequential effect step"], {
-        decisionLayer: effectLayer
+        decisionLayer: effectLayer,
       })
       expect(effectRoute.exitCode).toBe(0)
       expect(effectRoute.stdout).toBe("effect")
@@ -222,11 +213,11 @@ describe("harness-cli v2 commands", () => {
         mkdirSync(srcDir, { recursive: true })
         writeFileSync(
           join(srcDir, "a.ts"),
-          `import { Effect } from "effect"\nexport const fnA = Effect.fn("Sample.duplicate")(function* () { return 1 })\n`
+          `import { Effect } from "effect"\nexport const fnA = Effect.fn("Sample.duplicate")(function* () { return 1 })\n`,
         )
         writeFileSync(
           join(srcDir, "b.ts"),
-          `import { Effect } from "effect"\nexport const fnB = Effect.fn("Sample.duplicate")(function* () { return 2 })\n`
+          `import { Effect } from "effect"\nexport const fnB = Effect.fn("Sample.duplicate")(function* () { return 2 })\n`,
         )
 
         const res = await runCli(["plan-check"], { repoRoot: dir })
@@ -244,7 +235,7 @@ describe("harness-cli v2 commands", () => {
         mkdirSync(srcDir, { recursive: true })
         writeFileSync(
           join(srcDir, "a.ts"),
-          `import { Effect } from "effect"\nexport const fnA = Effect.fn("Sample.fnA")(function* () { return 1 })\n`
+          `import { Effect } from "effect"\nexport const fnA = Effect.fn("Sample.fnA")(function* () { return 1 })\n`,
         )
 
         const res = await runCli(["plan-check"], { repoRoot: dir })
@@ -287,7 +278,7 @@ describe("harness-cli v2 commands", () => {
         mkdirSync(srcDir, { recursive: true })
         writeFileSync(
           join(srcDir, "a.ts"),
-          `import { Effect } from "effect"\nexport const fnA = Effect.fn("Sample.fnA")(function* () { return 1 })\n`
+          `import { Effect } from "effect"\nexport const fnA = Effect.fn("Sample.fnA")(function* () { return 1 })\n`,
         )
 
         const res = await runCli(["plan-check", "--graph-only"], { repoRoot: dir })
@@ -312,11 +303,11 @@ describe("harness-cli v2 commands", () => {
 
         writeFileSync(
           join(infraDir, "index.ts"),
-          `import { Context, Effect } from "effect"\nexport class BucketService extends Context.Service<BucketService, {\n  readonly get: () => Effect.Effect<string>\n}>()("Cloudflare.R2.BucketBinding") {}\n`
+          `import { Context, Effect } from "effect"\nexport class BucketService extends Context.Service<BucketService, {\n  readonly get: () => Effect.Effect<string>\n}>()("Cloudflare.R2.BucketBinding") {}\n`,
         )
         writeFileSync(
           join(domainDir, "index.ts"),
-          `import { Effect } from "effect"\nimport { BucketService } from "../../infra/src/index.js"\nexport const badUseCase = Effect.fn("Sample.badUseCase")(function* () {\n  const bucket = yield* BucketService\n  return yield* bucket.get()\n})\n`
+          `import { Effect } from "effect"\nimport { BucketService } from "../../infra/src/index.js"\nexport const badUseCase = Effect.fn("Sample.badUseCase")(function* () {\n  const bucket = yield* BucketService\n  return yield* bucket.get()\n})\n`,
         )
 
         const res = await runCli(["plan-check", "--graph-only"], { repoRoot: dir })
@@ -335,7 +326,7 @@ describe("harness-cli v2 commands", () => {
         mkdirSync(srcDir, { recursive: true })
         writeFileSync(
           join(srcDir, "a.ts"),
-          `import { Effect } from "effect"\nexport const fnA = Effect.fn("Sample.fnA")(function* () { return 1 })\n`
+          `import { Effect } from "effect"\nexport const fnA = Effect.fn("Sample.fnA")(function* () { return 1 })\n`,
         )
 
         const governanceDocs = [
@@ -343,13 +334,13 @@ describe("harness-cli v2 commands", () => {
             docPath: "docs/spec.md",
             id: "spec-001",
             status: "accepted" as const,
-            referencedErrors: ["OrderNotFoundError"]
-          }
+            referencedErrors: ["OrderNotFoundError"],
+          },
         ]
 
         const res = await runCli(["plan-check", "--graph-only"], {
           repoRoot: dir,
-          governanceDocs
+          governanceDocs,
         })
         expect(res.exitCode).toBe(1)
         const payload = JSON.parse(res.stdout)
@@ -357,8 +348,8 @@ describe("harness-cli v2 commands", () => {
           step: "type-graph-policy",
           valid: false,
           violations: [
-            "[dead-tagged-error] Governance doc 'spec-001' declares TaggedError 'OrderNotFoundError', which has 0 FailsWith edges in the plan graph"
-          ]
+            "[dead-tagged-error] Governance doc 'spec-001' declares TaggedError 'OrderNotFoundError', which has 0 FailsWith edges in the plan graph",
+          ],
         })
       } finally {
         rmSync(dir, { recursive: true, force: true })
@@ -374,7 +365,7 @@ describe("harness-cli v2 commands", () => {
         mkdirSync(srcDir, { recursive: true })
         writeFileSync(
           join(srcDir, "a.ts"),
-          `import { Effect } from "effect"\nimport { stub } from "@harness/gates"\nexport const fnStub = Effect.fn("Sample.stubbed")(function* () { return yield* stub<number, never, never>() })\n`
+          `import { Effect } from "effect"\nimport { stub } from "@harness/gates"\nexport const fnStub = Effect.fn("Sample.stubbed")(function* () { return yield* stub<number, never, never>() })\n`,
         )
 
         const res = await runCli(["verify"], { repoRoot: dir, skipSubprocessVerify: true })
@@ -392,7 +383,7 @@ describe("harness-cli v2 commands", () => {
         writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fail-pkg" }))
         const res = await runCli(["verify"], {
           repoRoot: dir,
-          decisionLayer: makeMockDecisionModelLayer({ triageKind: "semantic" })
+          decisionLayer: makeMockDecisionModelLayer({ triageKind: "semantic" }),
         })
         expect(res.exitCode).toBe(1)
         expect(res.stderr).toContain("[triage:semantic]")
@@ -408,7 +399,7 @@ describe("harness-cli v2 commands", () => {
         mkdirSync(srcDir, { recursive: true })
         writeFileSync(
           join(srcDir, "a.ts"),
-          `import { Effect } from "effect"\nexport const fnReal = Effect.fn("Sample.real")(function* () { return 42 })\n`
+          `import { Effect } from "effect"\nexport const fnReal = Effect.fn("Sample.real")(function* () { return 42 })\n`,
         )
 
         const res = await runCli(["verify"], { repoRoot: dir, skipSubprocessVerify: true })
@@ -418,7 +409,7 @@ describe("harness-cli v2 commands", () => {
         expect(stamp).toMatchObject({
           treeHash: expect.any(String),
           taskBranch: "impl/current",
-          timestamp: expect.any(String)
+          timestamp: expect.any(String),
         })
 
         const snapshotPath = join(dir, ".harness", "graph-snapshot.json")
@@ -438,11 +429,11 @@ describe("harness-cli v2 commands", () => {
 
         writeFileSync(
           join(infraDir, "index.ts"),
-          `import { Context, Effect } from "effect"\nexport class BucketService extends Context.Service<BucketService, {\n  readonly get: () => Effect.Effect<string>\n}>()("Cloudflare.R2.BucketBinding") {}\n`
+          `import { Context, Effect } from "effect"\nexport class BucketService extends Context.Service<BucketService, {\n  readonly get: () => Effect.Effect<string>\n}>()("Cloudflare.R2.BucketBinding") {}\n`,
         )
         writeFileSync(
           join(domainDir, "index.ts"),
-          `import { Effect } from "effect"\nimport { BucketService } from "../../infra/src/index.js"\nexport const badUseCase = Effect.fn("Sample.badUseCase")(function* () {\n  const bucket = yield* BucketService\n  return yield* bucket.get()\n})\n`
+          `import { Effect } from "effect"\nimport { BucketService } from "../../infra/src/index.js"\nexport const badUseCase = Effect.fn("Sample.badUseCase")(function* () {\n  const bucket = yield* BucketService\n  return yield* bucket.get()\n})\n`,
         )
 
         const res = await runCli(["verify"], { repoRoot: dir, skipSubprocessVerify: true })
@@ -461,7 +452,7 @@ describe("harness-cli v2 commands", () => {
         mkdirSync(srcDir, { recursive: true })
         writeFileSync(
           join(srcDir, "a.ts"),
-          `import { Effect } from "effect"\nexport const fnReal = Effect.fn("Sample.real")(function* () { return 42 })\n`
+          `import { Effect } from "effect"\nexport const fnReal = Effect.fn("Sample.real")(function* () { return 42 })\n`,
         )
 
         const brokenSpecMarkdown = `---
@@ -491,9 +482,9 @@ enforced_by:
               enforcedByFiles: ["libs/sample/src/a.ts"],
               referencedSpans: ["Sample.real"],
               referencedServices: [],
-              referencedErrors: []
-            }
-          ]
+              referencedErrors: [],
+            },
+          ],
         })
         expect(res.exitCode).toBe(1)
         expect(res.stderr).toContain("Verification failed: ontology invariants broken")
@@ -513,13 +504,16 @@ enforced_by:
         expect(missing.exitCode).toBe(0)
         expect(JSON.parse(missing.stdout)).toEqual({
           decision: "block",
-          reason: expect.stringContaining("Run harness verify")
+          reason: expect.stringContaining("Run harness verify"),
         })
 
         writeVerifyStamp(dir, "impl/current")
         const green = await runCli(["done"], {
           repoRoot: dir,
-          decisionLayer: makeMockDecisionModelLayer({ implementedProb: 0.95, noOutOfScopeProb: 0.95 })
+          decisionLayer: makeMockDecisionModelLayer({
+            implementedProb: 0.95,
+            noOutOfScopeProb: 0.95,
+          }),
         })
         expect(green.exitCode).toBe(0)
         expect(green.stdout).toBe("")
@@ -532,7 +526,7 @@ enforced_by:
         expect(stale.exitCode).toBe(0)
         expect(JSON.parse(stale.stdout)).toEqual({
           decision: "block",
-          reason: expect.stringContaining("Workspace files changed since last verify")
+          reason: expect.stringContaining("Workspace files changed since last verify"),
         })
       } finally {
         rmSync(dir, { recursive: true, force: true })
@@ -553,23 +547,23 @@ enforced_by:
               file: "src/fn.ts",
               line: 1,
               successType: "string",
-              isStub: true
-            }
-          ]
+              isStub: true,
+            },
+          ],
         })
         const implGraph = buildHarnessGraph({
-          fns: [] // missing greet!
+          fns: [], // missing greet!
         })
 
         const res = await runCli(["done"], {
           repoRoot: dir,
           planGraph,
-          implGraph
+          implGraph,
         })
         expect(res.exitCode).toBe(0)
         expect(JSON.parse(res.stdout)).toEqual({
           decision: "block",
-          reason: expect.stringContaining("Missing planned EffectFn: src/fn.ts#greet")
+          reason: expect.stringContaining("Missing planned EffectFn: src/fn.ts#greet"),
         })
       } finally {
         rmSync(dir, { recursive: true, force: true })
@@ -583,7 +577,7 @@ enforced_by:
 
         const failingCovLayer = makeMockDecisionModelLayer({
           implementedProb: 0.3,
-          noOutOfScopeProb: 0.9
+          noOutOfScopeProb: 0.9,
         })
 
         const res = await runCli(["done"], {
@@ -593,14 +587,14 @@ enforced_by:
             {
               stepId: "step-1",
               planStep: "Implement User schema",
-              stepDiff: "+ export const User = Schema.Struct({})"
-            }
-          ]
+              stepDiff: "+ export const User = Schema.Struct({})",
+            },
+          ],
         })
         expect(res.exitCode).toBe(0)
         expect(JSON.parse(res.stdout)).toEqual({
           decision: "block",
-          reason: expect.stringContaining("Plan step step-1 failed coverage check")
+          reason: expect.stringContaining("Plan step step-1 failed coverage check"),
         })
       } finally {
         rmSync(dir, { recursive: true, force: true })
@@ -612,7 +606,7 @@ enforced_by:
       try {
         const res = await runCli(["done", "--format=antigravity"], {
           repoRoot: dir,
-          stdin: JSON.stringify({ fullyIdle: false })
+          stdin: JSON.stringify({ fullyIdle: false }),
         })
         expect(res.exitCode).toBe(0)
         expect(res.stdout).toBe("")
@@ -638,7 +632,7 @@ enforced_by:
         snapshotDirOk: true,
         effectLspOk: true,
         omnigraphInitialized: expect.any(Boolean),
-        modelWarm: true
+        modelWarm: true,
       })
 
       const failLayer = makeFailingDecisionModelLayer()
@@ -651,7 +645,7 @@ enforced_by:
         snapshotDirOk: true,
         effectLspOk: true,
         omnigraphInitialized: expect.any(Boolean),
-        modelWarm: false
+        modelWarm: false,
       })
     })
 
@@ -669,16 +663,16 @@ enforced_by:
               decide: (definition, options) =>
                 Effect.sync(() => {
                   decideCalls++
-                }).pipe(Effect.andThen(model.decide(definition, options)))
+                }).pipe(Effect.andThen(model.decide(definition, options))),
             }
             return countingModel
-          })
+          }),
         )
 
         const res = await runCli(
           ["session", "--format=antigravity"],
           { repoRoot: tmpDir },
-          countingLayer
+          countingLayer,
         )
         expect(res.exitCode).toBe(0)
         const payload = JSON.parse(res.stdout)
@@ -704,7 +698,7 @@ enforced_by:
         writeFileSync(join(gitRefsDir, "main"), `${sha1}\n`)
         writeFileSync(
           join(srcDir, "index.ts"),
-          `import { Effect } from "effect"\nexport const fnV1 = Effect.fn("Sample.fnV1")(function* () { return 1 })\n`
+          `import { Effect } from "effect"\nexport const fnV1 = Effect.fn("Sample.fnV1")(function* () { return 1 })\n`,
         )
 
         const ingestRes = await runCli(["ingest"], { repoRoot: tmpDir })
@@ -719,15 +713,15 @@ enforced_by:
         writeFileSync(join(gitRefsDir, "main"), `${sha2}\n`)
         writeFileSync(
           join(srcDir, "index.ts"),
-          `import { Effect } from "effect"\nexport const fnV1 = Effect.fn("Sample.fnV1")(function* () { return 1 })\nexport const fnV2 = Effect.fn("Sample.fnV2")(function* () { return 2 })\n`
+          `import { Effect } from "effect"\nexport const fnV1 = Effect.fn("Sample.fnV1")(function* () { return 1 })\nexport const fnV2 = Effect.fn("Sample.fnV2")(function* () { return 2 })\n`,
         )
 
         const sessRes = await runCli(["session", "--format=antigravity"], {
-          repoRoot: tmpDir
+          repoRoot: tmpDir,
         })
         expect(sessRes.exitCode).toBe(0)
         const headMetaRaw = JSON.parse(
-          readFileSync(join(tmpDir, ".harness", "graph-head.json"), "utf-8")
+          readFileSync(join(tmpDir, ".harness", "graph-head.json"), "utf-8"),
         ) as { readonly headSha: string; readonly gitBranch: string }
         expect(headMetaRaw.headSha).toBe(sha2)
         expect(headMetaRaw.gitBranch).toBe("main")
@@ -745,25 +739,25 @@ enforced_by:
           fitsAnyProb: 0.3,
           blockLabel: "review",
           learnActionableProb: 0.92,
-          learnTargetLabel: "agent-pattern"
+          learnTargetLabel: "agent-pattern",
         })
 
         await runCli(["route", "Stream large R2 CSV with Effect Stream"], {
           repoRoot: dir,
-          decisionLayer: reviewLayer
+          decisionLayer: reviewLayer,
         })
         await runCli(["route", "Stream large R2 CSV with Effect Stream"], {
           repoRoot: dir,
-          decisionLayer: reviewLayer
+          decisionLayer: reviewLayer,
         })
         await runCli(["guard", "node custom-migration-check.mjs"], {
           repoRoot: dir,
-          decisionLayer: reviewLayer
+          decisionLayer: reviewLayer,
         })
 
         const learnRes = await runCli(["learn"], {
           repoRoot: dir,
-          decisionLayer: reviewLayer
+          decisionLayer: reviewLayer,
         })
         expect(learnRes.exitCode).toBe(0)
         const payload = JSON.parse(learnRes.stdout)
@@ -775,24 +769,24 @@ enforced_by:
           summary: "Stream large R2 CSV with Effect Stream",
           occurrences: 2,
           target: "agent-pattern",
-          actionable: true
+          actionable: true,
         })
 
         const clearRes = await runCli(["learn", "--clear"], {
           repoRoot: dir,
-          decisionLayer: reviewLayer
+          decisionLayer: reviewLayer,
         })
         expect(clearRes.exitCode).toBe(0)
         expect(JSON.parse(clearRes.stdout).cleared).toBe(true)
 
         const afterClear = await runCli(["learn"], {
           repoRoot: dir,
-          decisionLayer: reviewLayer
+          decisionLayer: reviewLayer,
         })
         expect(JSON.parse(afterClear.stdout)).toEqual({
           totalEvents: 0,
           proposals: [],
-          cleared: false
+          cleared: false,
         })
       } finally {
         rmSync(dir, { recursive: true, force: true })
@@ -806,7 +800,7 @@ enforced_by:
       expect(workspaceGc.exitCode).toBe(0)
       expect(JSON.parse(workspaceGc.stdout)).toEqual({
         clean: true,
-        findings: []
+        findings: [],
       })
 
       const dir = mkdtempSync(join(tmpdir(), "harness-cli-gc-"))
@@ -815,7 +809,7 @@ enforced_by:
         mkdirSync(srcDir, { recursive: true })
         writeFileSync(
           join(srcDir, "index.ts"),
-          `import { Schema } from "effect"\nexport class UnusedError extends Schema.TaggedErrorClass<UnusedError>()("UnusedError", {}) {}\n`
+          `import { Schema } from "effect"\nexport class UnusedError extends Schema.TaggedErrorClass<UnusedError>()("UnusedError", {}) {}\n`,
         )
 
         const strictGc = await runCli(["gc", "--strict"], { repoRoot: dir })
@@ -826,9 +820,9 @@ enforced_by:
           expect.arrayContaining([
             expect.objectContaining({
               kind: "dead-tagged-error",
-              nodeId: "UnusedError"
-            })
-          ])
+              nodeId: "UnusedError",
+            }),
+          ]),
         )
       } finally {
         rmSync(dir, { recursive: true, force: true })
@@ -842,12 +836,12 @@ enforced_by:
         mkdirSync(srcDir, { recursive: true })
         writeFileSync(
           join(srcDir, "index.ts"),
-          `import { Effect } from "effect"\nimport { stub } from "@harness/gates"\nexport const pendingFn = Effect.fn("Sample.pendingFn")(function* () { return yield* stub<number, never, never>() })\n`
+          `import { Effect } from "effect"\nimport { stub } from "@harness/gates"\nexport const pendingFn = Effect.fn("Sample.pendingFn")(function* () { return yield* stub<number, never, never>() })\n`,
         )
 
         const sess = await runCli(["session", "--format=antigravity"], {
           repoRoot: dir,
-          decisionLayer: makeFailingDecisionModelLayer()
+          decisionLayer: makeFailingDecisionModelLayer(),
         })
         expect(sess.exitCode).toBe(0)
         const payload = JSON.parse(sess.stdout)
@@ -867,7 +861,7 @@ enforced_by:
         await runCli(["guard", "pnpm test"], { repoRoot: dir })
         await runCli(["route", "Add schema"], {
           repoRoot: dir,
-          decisionLayer: makeMockDecisionModelLayer({ fitsAnyProb: 0.9, blockLabel: "effect" })
+          decisionLayer: makeMockDecisionModelLayer({ fitsAnyProb: 0.9, blockLabel: "effect" }),
         })
 
         const res = await runCli(["report"], { repoRoot: dir })
@@ -886,7 +880,7 @@ enforced_by:
           graphDiscoveryRatio: 0,
           omnigraphLiveRatio: null,
           guardInterventions: 0,
-          frictionCount: 0
+          frictionCount: 0,
         })
         expect(existsSync(join(dir, ".harness", "session-report.json"))).toBe(true)
         expect(existsSync(join(dir, ".harness", "session-report.md"))).toBe(true)
@@ -919,7 +913,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         filename: "/repo/libs/sample/domain/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.Program?.({})
       visitor.VariableDeclarator?.({
@@ -929,8 +923,8 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
           type: "MemberExpression",
           computed: false,
           object: { type: "Identifier", name: "err" },
-          property: { type: "Identifier", name: "_tag" }
-        }
+          property: { type: "Identifier", name: "_tag" },
+        },
       })
       visitor.IfStatement?.({
         type: "IfStatement",
@@ -938,12 +932,12 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
           type: "BinaryExpression",
           operator: "!==",
           left: { type: "Identifier", name: "actualTag" },
-          right: { type: "Identifier", name: "expectedTag" }
-        }
+          right: { type: "Identifier", name: "expectedTag" },
+        },
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toContain(
-        "Do not use if/else or ternary expressions to branch on discriminated unions"
+        "Do not use if/else or ternary expressions to branch on discriminated unions",
       )
     }
 
@@ -954,7 +948,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         filename: "/repo/libs/sample/domain/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.CallExpression?.({
         type: "CallExpression",
@@ -962,7 +956,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
           type: "MemberExpression",
           computed: false,
           object: { type: "Identifier", name: "reasons" },
-          property: { type: "Identifier", name: "filter" }
+          property: { type: "Identifier", name: "filter" },
         },
         arguments: [
           {
@@ -975,16 +969,16 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                 type: "MemberExpression",
                 computed: false,
                 object: { type: "Identifier", name: "r" },
-                property: { type: "Identifier", name: "_tag" }
+                property: { type: "Identifier", name: "_tag" },
               },
-              right: { type: "Literal", value: "Fail" }
-            }
-          }
-        ]
+              right: { type: "Literal", value: "Fail" },
+            },
+          },
+        ],
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toContain(
-        "Do not use if/else or ternary expressions to branch on discriminated unions"
+        "Do not use if/else or ternary expressions to branch on discriminated unions",
       )
     }
   })
@@ -995,7 +989,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       filename: "/repo/libs/sample/domain/src/index.ts",
       report: (r: { message: string }) => {
         reports.push(r)
-      }
+      },
     })
     visitor.CallExpression?.({
       type: "CallExpression",
@@ -1003,7 +997,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         type: "MemberExpression",
         computed: false,
         object: { type: "Identifier", name: "Schema" },
-        property: { type: "Identifier", name: "Struct" }
+        property: { type: "Identifier", name: "Struct" },
       },
       arguments: [
         {
@@ -1017,16 +1011,16 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                 type: "MemberExpression",
                 computed: false,
                 object: { type: "Identifier", name: "Schema" },
-                property: { type: "Identifier", name: "Boolean" }
-              }
-            }
-          ]
-        }
-      ]
+                property: { type: "Identifier", name: "Boolean" },
+              },
+            },
+          ],
+        },
+      ],
     })
     expect(reports).toHaveLength(1)
     expect(reports[0]?.message).toContain(
-      "Do not use Schema.Boolean for lifecycle or mutually exclusive state flags in Schema.Struct"
+      "Do not use Schema.Boolean for lifecycle or mutually exclusive state flags in Schema.Struct",
     )
   })
 
@@ -1038,7 +1032,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         filename: "/repo/libs/sample/domain/test/cart.test.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.IfStatement?.({
         type: "IfStatement",
@@ -1049,14 +1043,14 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
             type: "MemberExpression",
             computed: false,
             object: { type: "Identifier", name: "exit" },
-            property: { type: "Identifier", name: "_tag" }
+            property: { type: "Identifier", name: "_tag" },
           },
-          right: { type: "Literal", value: "Success" }
-        }
+          right: { type: "Literal", value: "Success" },
+        },
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toContain(
-        "Do not use if/else or ternary expressions to branch on discriminated unions"
+        "Do not use if/else or ternary expressions to branch on discriminated unions",
       )
     }
 
@@ -1072,11 +1066,11 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         filename: "/repo/libs/sample/domain/test/cart.test.ts",
         sourceCode: {
           text: `it.prop("fold matches reduce", [eventsArb], ${callbackCode})`,
-          getText: () => callbackCode
+          getText: () => callbackCode,
         },
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.CallExpression?.({
         type: "CallExpression",
@@ -1084,7 +1078,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
           type: "MemberExpression",
           computed: false,
           object: { type: "Identifier", name: "it" },
-          property: { type: "Identifier", name: "prop" }
+          property: { type: "Identifier", name: "prop" },
         },
         arguments: [
           { type: "Literal", value: "fold matches reduce" },
@@ -1092,13 +1086,13 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
           {
             type: "ArrowFunctionExpression",
             rawSource: callbackCode,
-            range: [44, 44 + callbackCode.length]
-          }
-        ]
+            range: [44, 44 + callbackCode.length],
+          },
+        ],
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toContain(
-        "Tautological property test: do not assert fold(events) against events.reduce(evolve, ...)"
+        "Tautological property test: do not assert fold(events) against events.reduce(evolve, ...)",
       )
     }
   })
@@ -1109,7 +1103,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       filename: "/repo/libs/billing/domain/src/index.ts",
       report: (r: { message: string }) => {
         reports.push(r)
-      }
+      },
     })
     visitor.ExportNamedDeclaration?.({
       type: "ExportNamedDeclaration",
@@ -1122,15 +1116,15 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
             init: {
               type: "ArrowFunctionExpression",
               params: [],
-              body: { type: "BlockStatement", body: [] }
-            }
-          }
-        ]
-      }
+              body: { type: "BlockStatement", body: [] },
+            },
+          },
+        ],
+      },
     })
     expect(reports).toHaveLength(1)
     expect(reports[0]?.message).toContain(
-      "Exported domain functions must use Effect.fn('LiteralName')"
+      "Exported domain functions must use Effect.fn('LiteralName')",
     )
 
     // Internal harness file is spared
@@ -1139,14 +1133,14 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       filename: "/repo/libs/harness/graph/src/index.ts",
       report: (r: { message: string }) => {
         harnessReports.push(r)
-      }
+      },
     })
     harnessVisitor.ExportNamedDeclaration?.({
       type: "ExportNamedDeclaration",
       declaration: {
         type: "FunctionDeclaration",
-        id: { type: "Identifier", name: "someFn" }
-      }
+        id: { type: "Identifier", name: "someFn" },
+      },
     })
     expect(harnessReports).toHaveLength(0)
   })
@@ -1159,7 +1153,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         filename: "/repo/libs/sample/contract/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.CallExpression?.({
         type: "CallExpression",
@@ -1167,7 +1161,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
           type: "MemberExpression",
           computed: false,
           object: { type: "Identifier", name: "Schema" },
-          property: { type: "Identifier", name: "Struct" }
+          property: { type: "Identifier", name: "Struct" },
         },
         arguments: [
           {
@@ -1181,16 +1175,16 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                   type: "MemberExpression",
                   computed: false,
                   object: { type: "Identifier", name: "Schema" },
-                  property: { type: "Identifier", name: "Int" }
-                }
-              }
-            ]
-          }
-        ]
+                  property: { type: "Identifier", name: "Int" },
+                },
+              },
+            ],
+          },
+        ],
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toContain(
-        "Do not use Schema.Int for quantity, version, or count field 'availableQty' in Schema.Struct — use Schema.Natural (non-negative) or Schema.PositiveInt"
+        "Do not use Schema.Int for quantity, version, or count field 'availableQty' in Schema.Struct — use Schema.Natural (non-negative) or Schema.PositiveInt",
       )
     }
 
@@ -1201,7 +1195,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         filename: "/repo/libs/sample/contract/src/index.ts",
         report: (r: { message: string }) => {
           unbrandedReports.push(r)
-        }
+        },
       })
       unbrandedVisitor.CallExpression?.({
         type: "CallExpression",
@@ -1209,7 +1203,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
           type: "MemberExpression",
           computed: false,
           object: { type: "Identifier", name: "Schema" },
-          property: { type: "Identifier", name: "Struct" }
+          property: { type: "Identifier", name: "Struct" },
         },
         arguments: [
           {
@@ -1223,16 +1217,16 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                   type: "MemberExpression",
                   computed: false,
                   object: { type: "Identifier", name: "Schema" },
-                  property: { type: "Identifier", name: "Natural" }
-                }
-              }
-            ]
-          }
-        ]
+                  property: { type: "Identifier", name: "Natural" },
+                },
+              },
+            ],
+          },
+        ],
       })
       expect(unbrandedReports).toHaveLength(1)
       expect(unbrandedReports[0]?.message).toContain(
-        "Do not use unbranded Schema.Natural for field 'availableQty'"
+        "Do not use unbranded Schema.Natural for field 'availableQty'",
       )
 
       const reports: Array<{ message: string }> = []
@@ -1240,7 +1234,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         filename: "/repo/libs/sample/contract/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.CallExpression?.({
         type: "CallExpression",
@@ -1248,7 +1242,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
           type: "MemberExpression",
           computed: false,
           object: { type: "Identifier", name: "Schema" },
-          property: { type: "Identifier", name: "Struct" }
+          property: { type: "Identifier", name: "Struct" },
         },
         arguments: [
           {
@@ -1267,9 +1261,9 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                       type: "MemberExpression",
                       computed: false,
                       object: { type: "Identifier", name: "Schema" },
-                      property: { type: "Identifier", name: "Natural" }
+                      property: { type: "Identifier", name: "Natural" },
                     },
-                    property: { type: "Identifier", name: "pipe" }
+                    property: { type: "Identifier", name: "pipe" },
                   },
                   arguments: [
                     {
@@ -1278,16 +1272,16 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                         type: "MemberExpression",
                         computed: false,
                         object: { type: "Identifier", name: "Schema" },
-                        property: { type: "Identifier", name: "brand" }
+                        property: { type: "Identifier", name: "brand" },
                       },
-                      arguments: [{ type: "Literal", value: "Quantity" }]
-                    }
-                  ]
-                }
-              }
-            ]
-          }
-        ]
+                      arguments: [{ type: "Literal", value: "Quantity" }],
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
       })
       expect(reports).toHaveLength(0)
     }
@@ -1299,7 +1293,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       filename: "/repo/libs/es/contract/src/index.ts",
       report: (r: { message: string }) => {
         reports.push(r)
-      }
+      },
     })
     visitor.Program?.({
       type: "Program",
@@ -1312,12 +1306,12 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
               {
                 type: "VariableDeclarator",
                 id: { type: "Identifier", name: "makeCommandResultSchema" },
-                init: { type: "Identifier", name: "dummy" }
-              }
-            ]
-          }
-        }
-      ]
+                init: { type: "Identifier", name: "dummy" },
+              },
+            ],
+          },
+        },
+      ],
     })
     visitor.ExportNamedDeclaration?.({
       type: "ExportNamedDeclaration",
@@ -1326,13 +1320,13 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         id: { type: "Identifier", name: "CommandResult" },
         typeAnnotation: {
           type: "TSTypeLiteral",
-          members: []
-        }
-      }
+          members: [],
+        },
+      },
     })
     expect(reports).toHaveLength(1)
     expect(reports[0]?.message).toContain(
-      "Do not declare loose handwritten TypeScript type/interface 'CommandResult' alongside 'makeCommandResultSchema' — derive the type directly via Schema.Schema.Type"
+      "Do not declare loose handwritten TypeScript type/interface 'CommandResult' alongside 'makeCommandResultSchema' — derive the type directly via Schema.Schema.Type",
     )
   })
 
@@ -1342,7 +1336,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       filename: "/repo/libs/sample/domain/test/cart.test.ts",
       report: (r: { message: string }) => {
         reports.push(r)
-      }
+      },
     })
     visitor.CallExpression?.({
       type: "CallExpression",
@@ -1350,7 +1344,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         type: "MemberExpression",
         computed: false,
         object: { type: "Identifier", name: "it" },
-        property: { type: "Identifier", name: "prop" }
+        property: { type: "Identifier", name: "prop" },
       },
       arguments: [
         { type: "Literal", value: "deterministic replay" },
@@ -1371,21 +1365,21 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                     object: {
                       type: "CallExpression",
                       callee: { type: "Identifier", name: "expect" },
-                      arguments: [{ type: "Identifier", name: "cartId" }]
+                      arguments: [{ type: "Identifier", name: "cartId" }],
                     },
-                    property: { type: "Identifier", name: "toBeDefined" }
+                    property: { type: "Identifier", name: "toBeDefined" },
                   },
-                  arguments: []
-                }
-              }
-            ]
-          }
-        }
-      ]
+                  arguments: [],
+                },
+              },
+            ],
+          },
+        },
+      ],
     })
     expect(reports).toHaveLength(1)
     expect(reports[0]?.message).toContain(
-      "Vacuous assertion in property test: do not use toBeDefined(), toBeUndefined(), toBeTruthy(), toBeFalsy(), or existence checks"
+      "Vacuous assertion in property test: do not use toBeDefined(), toBeUndefined(), toBeTruthy(), toBeFalsy(), or existence checks",
     )
   })
 
@@ -1397,7 +1391,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         filename: "/repo/libs/sample/domain/test/cart.test.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.CallExpression?.({
         type: "CallExpression",
@@ -1412,17 +1406,17 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                 type: "MemberExpression",
                 computed: false,
                 object: { type: "Identifier", name: "exit" },
-                property: { type: "Identifier", name: "_tag" }
-              }
-            ]
+                property: { type: "Identifier", name: "_tag" },
+              },
+            ],
           },
-          property: { type: "Identifier", name: "toBe" }
+          property: { type: "Identifier", name: "toBe" },
         },
-        arguments: [{ type: "Literal", value: "Failure" }]
+        arguments: [{ type: "Literal", value: "Failure" }],
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toContain(
-        "Imprecise Exit.Failure assertion: checking only exit._tag === 'Failure' masks assertion crashes and unexpected defects (Die)"
+        "Imprecise Exit.Failure assertion: checking only exit._tag === 'Failure' masks assertion crashes and unexpected defects (Die)",
       )
     }
 
@@ -1433,7 +1427,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         filename: "/repo/libs/sample/domain/test/cart.test.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.CallExpression?.({
         type: "CallExpression",
@@ -1450,19 +1444,19 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                   type: "MemberExpression",
                   computed: false,
                   object: { type: "Identifier", name: "Exit" },
-                  property: { type: "Identifier", name: "isFailure" }
+                  property: { type: "Identifier", name: "isFailure" },
                 },
-                arguments: [{ type: "Identifier", name: "exit" }]
-              }
-            ]
+                arguments: [{ type: "Identifier", name: "exit" }],
+              },
+            ],
           },
-          property: { type: "Identifier", name: "toBe" }
+          property: { type: "Identifier", name: "toBe" },
         },
-        arguments: [{ type: "Literal", value: true }]
+        arguments: [{ type: "Literal", value: true }],
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toContain(
-        "Imprecise Exit.Failure assertion: checking only exit._tag === 'Failure' masks assertion crashes and unexpected defects (Die)"
+        "Imprecise Exit.Failure assertion: checking only exit._tag === 'Failure' masks assertion crashes and unexpected defects (Die)",
       )
     }
   })
@@ -1475,7 +1469,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         filename: "/repo/libs/es/core/test/properties.test.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.CallExpression?.({
         type: "CallExpression",
@@ -1483,7 +1477,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
           type: "MemberExpression",
           computed: false,
           object: { type: "Identifier", name: "it" },
-          property: { type: "Identifier", name: "prop" }
+          property: { type: "Identifier", name: "prop" },
         },
         arguments: [
           { type: "Literal", value: "terminal state immutability" },
@@ -1509,19 +1503,19 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                             type: "MemberExpression",
                             computed: false,
                             object: { type: "Identifier", name: "finalState" },
-                            property: { type: "Identifier", name: "_tag" }
-                          }
-                        ]
+                            property: { type: "Identifier", name: "_tag" },
+                          },
+                        ],
                       },
-                      property: { type: "Identifier", name: "toBe" }
+                      property: { type: "Identifier", name: "toBe" },
                     },
-                    arguments: [{ type: "Literal", value: "CheckedOutCart" }]
-                  }
-                }
-              ]
-            }
-          }
-        ]
+                    arguments: [{ type: "Literal", value: "CheckedOutCart" }],
+                  },
+                },
+              ],
+            },
+          },
+        ],
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toContain("Vacuous assertion in property test")
@@ -1534,7 +1528,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         filename: "/repo/libs/sample/domain/test/index.test.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.CallExpression?.({
         type: "CallExpression",
@@ -1542,7 +1536,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
           type: "MemberExpression",
           computed: false,
           object: { type: "Identifier", name: "it" },
-          property: { type: "Identifier", name: "prop" }
+          property: { type: "Identifier", name: "prop" },
         },
         arguments: [
           { type: "Literal", value: "quota exceeded" },
@@ -1568,14 +1562,14 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                             type: "MemberExpression",
                             computed: false,
                             object: { type: "Identifier", name: "err" },
-                            property: { type: "Identifier", name: "_tag" }
-                          }
-                        ]
+                            property: { type: "Identifier", name: "_tag" },
+                          },
+                        ],
                       },
-                      property: { type: "Identifier", name: "toBe" }
+                      property: { type: "Identifier", name: "toBe" },
                     },
-                    arguments: [{ type: "Literal", value: "AlbumQuotaExceededError" }]
-                  }
+                    arguments: [{ type: "Literal", value: "AlbumQuotaExceededError" }],
+                  },
                 },
                 {
                   type: "ExpressionStatement",
@@ -1592,19 +1586,19 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                             type: "MemberExpression",
                             computed: false,
                             object: { type: "Identifier", name: "err" },
-                            property: { type: "Identifier", name: "albumId" }
-                          }
-                        ]
+                            property: { type: "Identifier", name: "albumId" },
+                          },
+                        ],
                       },
-                      property: { type: "Identifier", name: "toBe" }
+                      property: { type: "Identifier", name: "toBe" },
                     },
-                    arguments: [{ type: "Identifier", name: "albumId" }]
-                  }
-                }
-              ]
-            }
-          }
-        ]
+                    arguments: [{ type: "Identifier", name: "albumId" }],
+                  },
+                },
+              ],
+            },
+          },
+        ],
       })
       expect(reports).toHaveLength(0)
     }
@@ -1618,16 +1612,16 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         filename: "/repo/libs/sample/contract/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.TSTypeAliasDeclaration?.({
         type: "TSTypeAliasDeclaration",
         id: { type: "Identifier", name: "UserId" },
-        typeAnnotation: { type: "TSStringKeyword" }
+        typeAnnotation: { type: "TSStringKeyword" },
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toContain(
-        "Do not declare raw primitive type alias 'UserId = string'"
+        "Do not declare raw primitive type alias 'UserId = string'",
       )
     }
 
@@ -1638,7 +1632,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         filename: "/repo/libs/sample/contract/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.ExportNamedDeclaration?.({
         type: "ExportNamedDeclaration",
@@ -1652,15 +1646,15 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                 type: "MemberExpression",
                 computed: false,
                 object: { type: "Identifier", name: "Schema" },
-                property: { type: "Identifier", name: "NonEmptyString" }
-              }
-            }
-          ]
-        }
+                property: { type: "Identifier", name: "NonEmptyString" },
+              },
+            },
+          ],
+        },
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toContain(
-        "Do not export unbranded primitive schema 'UserId' from type:contract"
+        "Do not export unbranded primitive schema 'UserId' from type:contract",
       )
     }
 
@@ -1671,7 +1665,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         filename: "/repo/libs/sample/contract/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.CallExpression?.({
         type: "CallExpression",
@@ -1679,7 +1673,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
           type: "MemberExpression",
           computed: false,
           object: { type: "Identifier", name: "Schema" },
-          property: { type: "Identifier", name: "Struct" }
+          property: { type: "Identifier", name: "Struct" },
         },
         arguments: [
           {
@@ -1693,16 +1687,16 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                   type: "MemberExpression",
                   computed: false,
                   object: { type: "Identifier", name: "Schema" },
-                  property: { type: "Identifier", name: "NonEmptyString" }
-                }
-              }
-            ]
-          }
-        ]
+                  property: { type: "Identifier", name: "NonEmptyString" },
+                },
+              },
+            ],
+          },
+        ],
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toContain(
-        "Do not use unbranded Schema.NonEmptyString for field 'albumId' in Schema.Struct"
+        "Do not use unbranded Schema.NonEmptyString for field 'albumId' in Schema.Struct",
       )
     }
 
@@ -1713,7 +1707,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         filename: "/repo/libs/sample/domain/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.ExportNamedDeclaration?.({
         type: "ExportNamedDeclaration",
@@ -1731,9 +1725,9 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                     type: "MemberExpression",
                     computed: false,
                     object: { type: "Identifier", name: "Effect" },
-                    property: { type: "Identifier", name: "fn" }
+                    property: { type: "Identifier", name: "fn" },
                   },
-                  arguments: [{ type: "Literal", value: "Sample.findUser" }]
+                  arguments: [{ type: "Literal", value: "Sample.findUser" }],
                 },
                 arguments: [
                   {
@@ -1745,21 +1739,21 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                         name: "id",
                         typeAnnotation: {
                           type: "TSTypeAnnotation",
-                          typeAnnotation: { type: "TSStringKeyword" }
-                        }
-                      }
+                          typeAnnotation: { type: "TSStringKeyword" },
+                        },
+                      },
                     ],
-                    body: { type: "BlockStatement", body: [] }
-                  }
-                ]
-              }
-            }
-          ]
-        }
+                    body: { type: "BlockStatement", body: [] },
+                  },
+                ],
+              },
+            },
+          ],
+        },
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toContain(
-        "Do not use raw primitive type 'string' at exported domain boundary 'findUser'"
+        "Do not use raw primitive type 'string' at exported domain boundary 'findUser'",
       )
     }
 
@@ -1770,7 +1764,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         filename: "/repo/libs/sample/domain/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.Program?.({
         type: "Program",
@@ -1781,23 +1775,23 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
             specifiers: [
               {
                 type: "ImportSpecifier",
-                local: { type: "Identifier", name: "CustomToken" }
-              }
-            ]
-          }
-        ]
+                local: { type: "Identifier", name: "CustomToken" },
+              },
+            ],
+          },
+        ],
       })
       visitor.TSAsExpression?.({
         type: "TSAsExpression",
         expression: { type: "Literal", value: "u-1" },
         typeAnnotation: {
           type: "TSTypeReference",
-          typeName: { type: "Identifier", name: "CustomToken" }
-        }
+          typeName: { type: "Identifier", name: "CustomToken" },
+        },
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toContain(
-        "Do not bypass brand validation with 'as' type assertion"
+        "Do not bypass brand validation with 'as' type assertion",
       )
       expect(reports[0]?.message).toContain("Brand.make")
       expect(reports[0]?.message).not.toContain("Brand.refined")
@@ -1810,7 +1804,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         filename: "/repo/libs/sample/contract/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.Program?.({ type: "Program", body: [] })
       const makeBrandCall = () => ({
@@ -1819,15 +1813,15 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
           type: "MemberExpression",
           computed: false,
           object: { type: "Identifier", name: "Schema" },
-          property: { type: "Identifier", name: "brand" }
+          property: { type: "Identifier", name: "brand" },
         },
-        arguments: [{ type: "Literal", value: "PhotoId" }]
+        arguments: [{ type: "Literal", value: "PhotoId" }],
       })
       visitor.CallExpression?.(makeBrandCall())
       visitor.CallExpression?.(makeBrandCall())
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toContain(
-        "Do not declare duplicate Schema.brand('PhotoId') across multiple schemas"
+        "Do not declare duplicate Schema.brand('PhotoId') across multiple schemas",
       )
       expect(reports[0]?.message).toContain("Schema.decodeTo")
     }
@@ -1839,7 +1833,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         filename: "/repo/libs/sample/contract/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.Program?.({
         type: "Program",
@@ -1854,12 +1848,12 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                   type: "MemberExpression",
                   computed: false,
                   object: { type: "Identifier", name: "Schema" },
-                  property: { type: "Identifier", name: "Int" }
-                }
-              }
-            ]
-          }
-        ]
+                  property: { type: "Identifier", name: "Int" },
+                },
+              },
+            ],
+          },
+        ],
       })
       // 1) Schema.Struct with local unbranded identifier LocalId and unbranded quantity Schema.Natural
       visitor.CallExpression?.({
@@ -1868,7 +1862,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
           type: "MemberExpression",
           computed: false,
           object: { type: "Identifier", name: "Schema" },
-          property: { type: "Identifier", name: "Struct" }
+          property: { type: "Identifier", name: "Struct" },
         },
         arguments: [
           {
@@ -1878,7 +1872,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                 type: "Property",
                 computed: false,
                 key: { type: "Identifier", name: "id" },
-                value: { type: "Identifier", name: "LocalId" }
+                value: { type: "Identifier", name: "LocalId" },
               },
               {
                 type: "Property",
@@ -1888,12 +1882,12 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                   type: "MemberExpression",
                   computed: false,
                   object: { type: "Identifier", name: "Schema" },
-                  property: { type: "Identifier", name: "Natural" }
-                }
-              }
-            ]
-          }
-        ]
+                  property: { type: "Identifier", name: "Natural" },
+                },
+              },
+            ],
+          },
+        ],
       })
       // 2) Schema.TaggedUnion with unbranded Schema.String
       visitor.CallExpression?.({
@@ -1902,7 +1896,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
           type: "MemberExpression",
           computed: false,
           object: { type: "Identifier", name: "Schema" },
-          property: { type: "Identifier", name: "TaggedUnion" }
+          property: { type: "Identifier", name: "TaggedUnion" },
         },
         arguments: [
           {
@@ -1923,25 +1917,25 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                         type: "MemberExpression",
                         computed: false,
                         object: { type: "Identifier", name: "Schema" },
-                        property: { type: "Identifier", name: "String" }
-                      }
-                    }
-                  ]
-                }
-              }
-            ]
-          }
-        ]
+                        property: { type: "Identifier", name: "String" },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
       })
       expect(reports).toHaveLength(3)
       expect(reports[0]?.message).toContain(
-        "Do not use unbranded Schema.Int for field 'id' in Schema.Struct"
+        "Do not use unbranded Schema.Int for field 'id' in Schema.Struct",
       )
       expect(reports[1]?.message).toContain(
-        "Do not use unbranded Schema.Natural for field 'qty' in Schema.Struct"
+        "Do not use unbranded Schema.Natural for field 'qty' in Schema.Struct",
       )
       expect(reports[2]?.message).toContain(
-        "Do not use unbranded Schema.String for field 'itemId' in Schema.TaggedUnion"
+        "Do not use unbranded Schema.String for field 'itemId' in Schema.TaggedUnion",
       )
     }
 
@@ -1952,7 +1946,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         filename: "/repo/libs/sample/domain/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.Program?.({ type: "Program", body: [] })
       visitor.TSTypeAliasDeclaration?.({
@@ -1960,8 +1954,8 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         id: { type: "Identifier", name: "InlineInput" },
         typeAnnotation: {
           type: "TSTypeLiteral",
-          members: []
-        }
+          members: [],
+        },
       })
       visitor.ExportNamedDeclaration?.({
         type: "ExportNamedDeclaration",
@@ -1979,9 +1973,9 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                     type: "MemberExpression",
                     computed: false,
                     object: { type: "Identifier", name: "Effect" },
-                    property: { type: "Identifier", name: "fn" }
+                    property: { type: "Identifier", name: "fn" },
                   },
-                  arguments: [{ type: "Literal", value: "Album.decide" }]
+                  arguments: [{ type: "Literal", value: "Album.decide" }],
                 },
                 arguments: [
                   {
@@ -1995,32 +1989,30 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                           type: "TSTypeAnnotation",
                           typeAnnotation: {
                             type: "TSTypeLiteral",
-                            members: []
-                          }
-                        }
-                      }
+                            members: [],
+                          },
+                        },
+                      },
                     ],
                     returnType: {
                       type: "TSTypeAnnotation",
-                      typeAnnotation: { type: "TSBooleanKeyword" }
+                      typeAnnotation: { type: "TSBooleanKeyword" },
                     },
-                    body: { type: "BlockStatement", body: [] }
-                  }
-                ]
-              }
-            }
-          ]
-        }
+                    body: { type: "BlockStatement", body: [] },
+                  },
+                ],
+              },
+            },
+          ],
+        },
       })
       expect(reports).toHaveLength(3)
-      expect(reports[0]?.message).toContain(
-        "Do not declare inline object type alias 'InlineInput'"
-      )
+      expect(reports[0]?.message).toContain("Do not declare inline object type alias 'InlineInput'")
       expect(reports[1]?.message).toContain(
-        "Do not use inline object type for parameter at exported domain boundary 'decideQuota'"
+        "Do not use inline object type for parameter at exported domain boundary 'decideQuota'",
       )
       expect(reports[2]?.message).toContain(
-        "Do not use raw primitive return type 'boolean' at exported domain boundary 'decideQuota'"
+        "Do not use raw primitive return type 'boolean' at exported domain boundary 'decideQuota'",
       )
     }
 
@@ -2031,7 +2023,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         filename: "/repo/libs/sample/contract/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.ExportNamedDeclaration?.({
         type: "ExportNamedDeclaration",
@@ -2050,9 +2042,9 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                     type: "MemberExpression",
                     computed: false,
                     object: { type: "Identifier", name: "Schema" },
-                    property: { type: "Identifier", name: "Int" }
+                    property: { type: "Identifier", name: "Int" },
                   },
-                  property: { type: "Identifier", name: "pipe" }
+                  property: { type: "Identifier", name: "pipe" },
                 },
                 arguments: [
                   {
@@ -2061,19 +2053,19 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
                       type: "MemberExpression",
                       computed: false,
                       object: { type: "Identifier", name: "Schema" },
-                      property: { type: "Identifier", name: "brand" }
+                      property: { type: "Identifier", name: "brand" },
                     },
-                    arguments: [{ type: "Literal", value: "AlbumPhotoCount" }]
-                  }
-                ]
-              }
-            }
-          ]
-        }
+                    arguments: [{ type: "Literal", value: "AlbumPhotoCount" }],
+                  },
+                ],
+              },
+            },
+          ],
+        },
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toContain(
-        "Do not use Schema.Int for quantity, version, or count schema 'AlbumPhotoCount' — use Schema.Natural"
+        "Do not use Schema.Int for quantity, version, or count schema 'AlbumPhotoCount' — use Schema.Natural",
       )
     }
   })
@@ -2087,7 +2079,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       const verifyRes = await runCli(["verify"])
       expect(verifyRes.exitCode).toBe(1)
       expect(verifyRes.stderr).toContain(
-        "[CRITICAL HARNESS BLOCKER] Key component Ollama (clef-flash DecisionModel) is not running and could not be started automatically. Halting execution."
+        "[CRITICAL HARNESS BLOCKER] Key component Ollama (clef-flash DecisionModel) is not running and could not be started automatically. Halting execution.",
       )
 
       const docRes = await runCli(["doctor"])
@@ -2107,15 +2099,15 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       const transcriptFile = join(dir, "transcript.jsonl")
       writeFileSync(
         transcriptFile,
-        `${JSON.stringify({ step_index: 0, source: "SYSTEM", content: "[Message]\nSender ID: parent\nContent: Run tests" })}\n`
+        `${JSON.stringify({ step_index: 0, source: "SYSTEM", content: "[Message]\nSender ID: parent\nContent: Run tests" })}\n`,
       )
       const doneRes = await runCli(["done", "--format=antigravity"], {
         repoRoot: dir,
         stdin: JSON.stringify({
           fullyIdle: true,
           transcriptPath: transcriptFile,
-          workspacePaths: [dir]
-        })
+          workspacePaths: [dir],
+        }),
       })
       expect(doneRes.exitCode).toBe(0)
       expect(JSON.parse(doneRes.stdout)).toEqual({ decision: "stop" })
@@ -2131,4 +2123,3 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
     }
   })
 })
-

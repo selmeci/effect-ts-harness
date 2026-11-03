@@ -7,7 +7,7 @@ import {
   buildHarnessGraph,
   checkEffectGraph,
   extractTypeAwareGraphFromSource,
-  extractWorkspaceTypeAwareGraph
+  extractWorkspaceTypeAwareGraph,
 } from "../src/index.js"
 
 describe("effect-graph:check policy rules", () => {
@@ -21,16 +21,16 @@ describe("effect-graph:check policy rules", () => {
           line: 1,
           packageTag: "domain",
           successType: "void",
-          isStub: true
-        }
+          isStub: true,
+        },
       ],
       services: [
         {
           tagId: "Cloudflare.R2.BucketBinding",
           name: "BucketBinding",
           packageTag: "infra",
-          file: "libs/sample/infra/src/index.ts"
-        }
+          file: "libs/sample/infra/src/index.ts",
+        },
       ],
       layers: [],
       errors: [],
@@ -39,14 +39,14 @@ describe("effect-graph:check policy rules", () => {
       requiresService: [
         {
           fnQualname: "libs/sample/domain/src/index.ts#badUseCase",
-          tagId: "Cloudflare.R2.BucketBinding"
-        }
+          tagId: "Cloudflare.R2.BucketBinding",
+        },
       ],
       failsWith: [],
       providesService: [],
       layerRequires: [],
       tracedCalls: [],
-      exercisesSpans: []
+      exercisesSpans: [],
     })
 
     const result = checkEffectGraph(graph)
@@ -54,7 +54,7 @@ describe("effect-graph:check policy rules", () => {
     expect(result.violations[0]?.rule).toBe("domain-requires-infra")
     expect(result.violations[0]?.path).toEqual([
       "libs/sample/domain/src/index.ts#badUseCase",
-      "Cloudflare.R2.BucketBinding"
+      "Cloudflare.R2.BucketBinding",
     ])
   })
 
@@ -63,11 +63,11 @@ describe("effect-graph:check policy rules", () => {
       fns: [],
       services: [
         { tagId: "SvcA", name: "SvcA", packageTag: "service", file: "a.ts" },
-        { tagId: "SvcB", name: "SvcB", packageTag: "service", file: "b.ts" }
+        { tagId: "SvcB", name: "SvcB", packageTag: "service", file: "b.ts" },
       ],
       layers: [
         { qualname: "LayerA", layerKind: "live", packageTag: "infra", file: "a.ts" },
-        { qualname: "LayerB", layerKind: "live", packageTag: "infra", file: "b.ts" }
+        { qualname: "LayerB", layerKind: "live", packageTag: "infra", file: "b.ts" },
       ],
       errors: [],
       tests: [],
@@ -76,14 +76,14 @@ describe("effect-graph:check policy rules", () => {
       failsWith: [],
       providesService: [
         { layerQualname: "LayerA", tagId: "SvcA" },
-        { layerQualname: "LayerB", tagId: "SvcB" }
+        { layerQualname: "LayerB", tagId: "SvcB" },
       ],
       layerRequires: [
         { layerQualname: "LayerA", tagId: "SvcB" },
-        { layerQualname: "LayerB", tagId: "SvcA" }
+        { layerQualname: "LayerB", tagId: "SvcA" },
       ],
       tracedCalls: [],
-      exercisesSpans: []
+      exercisesSpans: [],
     })
 
     const result = checkEffectGraph(graph)
@@ -101,16 +101,16 @@ describe("effect-graph:check policy rules", () => {
           line: 1,
           packageTag: "domain",
           successType: "void",
-          isStub: false
-        }
+          isStub: false,
+        },
       ],
       services: [
         {
           tagId: "Provider<Database>",
           name: "Provider<Database>",
           packageTag: "service",
-          file: "libs/sample/service/src/index.ts"
-        }
+          file: "libs/sample/service/src/index.ts",
+        },
       ],
       layers: [],
       errors: [],
@@ -119,14 +119,14 @@ describe("effect-graph:check policy rules", () => {
       requiresService: [
         {
           fnQualname: "libs/sample/domain/src/index.ts#orderUseCase",
-          tagId: "Provider<Database>"
-        }
+          tagId: "Provider<Database>",
+        },
       ],
       failsWith: [],
       providesService: [],
       layerRequires: [],
       tracedCalls: [],
-      exercisesSpans: []
+      exercisesSpans: [],
     })
 
     const result = checkEffectGraph(graph)
@@ -134,7 +134,7 @@ describe("effect-graph:check policy rules", () => {
     expect(result.violations[0]?.rule).toBe("domain-requires-cloud-binding")
     expect(result.violations[0]?.path).toEqual([
       "libs/sample/domain/src/index.ts#orderUseCase",
-      "Provider<Database>"
+      "Provider<Database>",
     ])
   })
 
@@ -148,16 +148,16 @@ describe("effect-graph:check policy rules", () => {
           line: 10,
           packageTag: "domain",
           successType: "OrderEvent",
-          isStub: false
-        }
+          isStub: false,
+        },
       ],
       services: [
         {
           tagId: "OrderRepository",
           name: "OrderRepository",
           packageTag: "service",
-          file: "libs/sample/service/src/index.ts"
-        }
+          file: "libs/sample/service/src/index.ts",
+        },
       ],
       layers: [],
       errors: [],
@@ -166,14 +166,14 @@ describe("effect-graph:check policy rules", () => {
       requiresService: [
         {
           fnQualname: "libs/sample/domain/src/index.ts#decide",
-          tagId: "OrderRepository"
-        }
+          tagId: "OrderRepository",
+        },
       ],
       failsWith: [],
       providesService: [],
       layerRequires: [],
       tracedCalls: [],
-      exercisesSpans: []
+      exercisesSpans: [],
     })
 
     const result = checkEffectGraph(graph)
@@ -182,7 +182,7 @@ describe("effect-graph:check policy rules", () => {
     expect(impureViolation).toBeDefined()
     expect(impureViolation?.path).toEqual([
       "libs/sample/domain/src/index.ts#decide",
-      "OrderRepository"
+      "OrderRepository",
     ])
   })
 
@@ -211,21 +211,21 @@ export class R2BucketBinding extends Context.Service<R2BucketBinding, { readonly
       {
         filePath: "libs/sample/domain/src/index.ts",
         content: domainSource,
-        packageTag: "domain"
+        packageTag: "domain",
       },
       {
         filePath: "libs/sample/infra/src/index.ts",
         content: infraSource,
-        packageTag: "infra"
-      }
+        packageTag: "infra",
+      },
     ])
 
     const result = checkEffectGraph(graph)
     expect(result.ok).toBe(false)
     expect(
       result.violations.some(
-        (v) => v.rule === "domain-requires-infra" || v.rule === "domain-requires-cloud-binding"
-      )
+        (v) => v.rule === "domain-requires-infra" || v.rule === "domain-requires-cloud-binding",
+      ),
     ).toBe(true)
   })
 
@@ -282,23 +282,23 @@ export const OrderRepoLive: Layer.Layer<OrderRepo> = Layer.succeed(OrderRepo, {
       {
         filePath: "libs/sample/contract/src/index.ts",
         content: contractSource,
-        packageTag: "contract"
+        packageTag: "contract",
       },
       {
         filePath: "libs/sample/service/src/index.ts",
         content: serviceSource,
-        packageTag: "service"
+        packageTag: "service",
       },
       {
         filePath: "libs/sample/domain/src/index.ts",
         content: domainSource,
-        packageTag: "domain"
+        packageTag: "domain",
       },
       {
         filePath: "libs/sample/infra/src/index.ts",
         content: infraSource,
-        packageTag: "infra"
-      }
+        packageTag: "infra",
+      },
     ])
 
     const result = checkEffectGraph(graph)
@@ -328,8 +328,8 @@ export const checkQuota = Effect.fn("Quota.check")((plan: PlanState, count: numb
       {
         filePath: "libs/sample/domain/src/index.ts",
         content: domainSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
 
     const result = checkEffectGraph(graph)
@@ -358,8 +358,8 @@ export const checkCount = Effect.fn("Quota.checkCount")((count: QuotaCount) =>
       {
         filePath: "libs/sample/domain/src/index.ts",
         content: domainSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
 
     const result = checkEffectGraph(graph)
@@ -387,8 +387,8 @@ export const hasTier = Effect.fn("Quota.hasTier")((plan: PlanState, expectedTier
       {
         filePath: "libs/sample/domain/src/index.ts",
         content: domainSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
 
     const result = checkEffectGraph(graph)
@@ -417,8 +417,8 @@ export const formatPayment = Effect.fn("Payment.format")((res: PaymentResult) =>
       {
         filePath: "libs/sample/domain/src/index.ts",
         content: domainSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
 
     const result = checkEffectGraph(graph)
@@ -446,8 +446,8 @@ export const classifyStatus = Effect.fn("Http.classifyStatus")((status: HttpStat
       {
         filePath: "libs/sample/domain/src/index.ts",
         content: domainSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
 
     const result = checkEffectGraph(graph)
@@ -464,23 +464,23 @@ export const classifyStatus = Effect.fn("Http.classifyStatus")((status: HttpStat
           line: 10,
           packageTag: "contract",
           successType: "OrderEvent",
-          isStub: false
-        }
+          isStub: false,
+        },
       ],
       services: [
         {
           tagId: "OrderRepo",
           name: "OrderRepo",
           packageTag: "service",
-          file: "libs/sample/service/src/index.ts"
-        }
+          file: "libs/sample/service/src/index.ts",
+        },
       ],
       requiresService: [
         {
           fnQualname: "libs/sample/contract/src/index.ts#contractDecider",
-          tagId: "OrderRepo"
-        }
-      ]
+          tagId: "OrderRepo",
+        },
+      ],
     })
 
     const result = checkEffectGraph(graph)
@@ -489,7 +489,7 @@ export const classifyStatus = Effect.fn("Http.classifyStatus")((status: HttpStat
     expect(result.violations[0]?.rule).toBe("impure-decider")
     expect(result.violations[0]?.path).toEqual([
       "libs/sample/contract/src/index.ts#contractDecider",
-      "OrderRepo"
+      "OrderRepo",
     ])
   })
 
@@ -512,8 +512,8 @@ export const inspectReasons = Effect.fn("Cause.inspect")((reasons: Array<CauseRe
       {
         filePath: "libs/sample/domain/src/index.ts",
         content: domainSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
 
     const result = checkEffectGraph(graph)
@@ -546,8 +546,8 @@ export const matchError = Effect.fn("Error.match")((err: AppError, expectedTag: 
       {
         filePath: "libs/sample/domain/src/index.ts",
         content: domainSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
 
     const result = checkEffectGraph(graph)
@@ -575,8 +575,8 @@ export const Order = Schema.Struct({
       {
         filePath: "libs/sample/contract/src/index.ts",
         content: contractSource,
-        packageTag: "contract"
-      }
+        packageTag: "contract",
+      },
     ])
 
     const result = checkEffectGraph(graph)
@@ -597,50 +597,54 @@ export const Order = Schema.Struct({
           line: 1,
           packageTag: "domain",
           successType: "CartState",
-          isStub: false
-        }
+          isStub: false,
+        },
       ],
       services: [
         {
           tagId: "DatabasePort",
           name: "DatabasePort",
           packageTag: "service",
-          file: "libs/sample/service/src/index.ts"
-        }
+          file: "libs/sample/service/src/index.ts",
+        },
       ],
       layers: [],
       errors: [
         {
           errorTag: "CartError",
-          file: "libs/sample/contract/src/index.ts"
-        }
+          file: "libs/sample/contract/src/index.ts",
+        },
       ],
       tests: [],
       patternDocs: [],
       requiresService: [
         {
           fnQualname: "libs/sample/domain/src/index.ts#evolveCart",
-          tagId: "DatabasePort"
-        }
+          tagId: "DatabasePort",
+        },
       ],
       failsWith: [
         {
           callerQualname: "libs/sample/domain/src/index.ts#evolveCart",
-          errorTag: "CartError"
-        }
+          errorTag: "CartError",
+        },
       ],
       providesService: [],
       layerRequires: [],
       tracedCalls: [],
-      exercisesSpans: []
+      exercisesSpans: [],
     })
 
     const result = checkEffectGraph(graph)
     expect(result.ok).toBe(false)
     const reducerViolations = result.violations.filter((v) => v.rule === "impure-reducer")
     expect(reducerViolations).toHaveLength(2)
-    expect(reducerViolations.some((v) => v.message.includes("pure and cannot require service"))).toBe(true)
-    expect(reducerViolations.some((v) => v.message.includes("infallible and cannot fail"))).toBe(true)
+    expect(
+      reducerViolations.some((v) => v.message.includes("pure and cannot require service")),
+    ).toBe(true)
+    expect(reducerViolations.some((v) => v.message.includes("infallible and cannot fail"))).toBe(
+      true,
+    )
   })
 
   it("fails with dead-event-payload when Schema.TaggedStruct defines fields never read in evolve", () => {
@@ -673,13 +677,13 @@ export const evolveInventory = (state: InventoryState, event: InventoryEvent): I
       {
         filePath: "libs/sample/contract/src/index.ts",
         content: contractSource,
-        packageTag: "contract"
+        packageTag: "contract",
       },
       {
         filePath: "libs/sample/domain/src/index.ts",
         content: domainSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
 
     const result = checkEffectGraph(graph)
@@ -718,8 +722,8 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/domain/src/index.ts",
         content: domainSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
 
     const result = checkEffectGraph(graph)
@@ -760,13 +764,13 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/contract/src/index.ts",
         content: contractSource,
-        packageTag: "contract"
+        packageTag: "contract",
       },
       {
         filePath: "libs/sample/domain/src/index.ts",
         content: domainSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
 
     const result = checkEffectGraph(graph)
@@ -804,13 +808,13 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/contract/src/index.ts",
         content: contractSource,
-        packageTag: "contract"
+        packageTag: "contract",
       },
       {
         filePath: "libs/sample/domain/src/index.ts",
         content: domainSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
 
     const result = checkEffectGraph(graph)
@@ -830,8 +834,8 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/domain/src/compare1.ts",
         content: domainSource1,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const result1 = checkEffectGraph(graph1)
     expect(result1.ok).toBe(false)
@@ -848,8 +852,8 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/domain/src/compare2.ts",
         content: domainSource2,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const result2 = checkEffectGraph(graph2)
     expect(result2.ok).toBe(false)
@@ -874,12 +878,14 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/domain/src/bad-assert.ts",
         content: badSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const badResult = checkEffectGraph(badGraph)
     expect(badResult.ok).toBe(false)
-    const vacuousViolations = badResult.violations.filter((v) => v.rule === "vacuous-error-assertion")
+    const vacuousViolations = badResult.violations.filter(
+      (v) => v.rule === "vacuous-error-assertion",
+    )
     expect(vacuousViolations).toHaveLength(2)
 
     const goodSource = `
@@ -897,8 +903,8 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/domain/src/good-assert.ts",
         content: goodSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const goodResult = checkEffectGraph(goodGraph)
     const goodViolations = goodResult.violations.filter((v) => v.rule === "vacuous-error-assertion")
@@ -917,8 +923,8 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/domain/src/cart.ts",
         content: domainSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const domainResult = checkEffectGraph(domainGraph)
     expect(domainResult.violations.some((v) => v.rule === "unscoped-effect-run")).toBe(true)
@@ -936,8 +942,8 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/es/core/src/decider.ts",
         content: deciderSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const deciderResult = checkEffectGraph(deciderGraph)
     expect(deciderResult.violations.some((v) => v.rule === "unscoped-effect-run")).toBe(true)
@@ -953,8 +959,8 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/es/core/src/testing.ts",
         content: testingSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const testingResult = checkEffectGraph(testingGraph)
     expect(testingResult.violations.filter((v) => v.rule === "unscoped-effect-run")).toHaveLength(0)
@@ -975,8 +981,8 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/domain/src/handler.ts",
         content: domainSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const result = checkEffectGraph(graph)
     expect(result.ok).toBe(false)
@@ -1008,13 +1014,15 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/contract/src/events.ts",
         content: badContract,
-        packageTag: "contract"
-      }
+        packageTag: "contract",
+      },
     ])
     const badResult = checkEffectGraph(badGraph)
     const violations = badResult.violations.filter((v) => v.rule === "unbranded-schema-field")
     expect(violations.length).toBe(4)
-    expect(violations[0]?.message).toContain("domain quantity and version fields must use a branded contract schema")
+    expect(violations[0]?.message).toContain(
+      "domain quantity and version fields must use a branded contract schema",
+    )
 
     const goodContract = `
       import { Schema } from "effect"
@@ -1038,8 +1046,8 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/contract/src/events.ts",
         content: goodContract,
-        packageTag: "contract"
-      }
+        packageTag: "contract",
+      },
     ])
     const goodResult = checkEffectGraph(goodGraph)
     expect(goodResult.violations.filter((v) => v.rule === "unbranded-schema-field")).toHaveLength(0)
@@ -1063,8 +1071,8 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/contract/src/cart.ts",
         content: badSource,
-        packageTag: "contract"
-      }
+        packageTag: "contract",
+      },
     ])
     const badResult = checkEffectGraph(badGraph)
     const boolViolations = badResult.violations.filter((v) => v.rule === "schema-boolean-state")
@@ -1082,14 +1090,16 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/contract/src/state.ts",
         content: badSource,
-        packageTag: "contract"
-      }
+        packageTag: "contract",
+      },
     ])
     const badResult = checkEffectGraph(badGraph)
     const violations = badResult.violations.filter((v) => v.rule === "handwritten-tagged-union")
     expect(violations.length).toBe(1)
     expect(violations[0]?.message).toContain("CartState")
-    expect(violations[0]?.message).toContain("handwritten TypeScript union of '_tag' object literals")
+    expect(violations[0]?.message).toContain(
+      "handwritten TypeScript union of '_tag' object literals",
+    )
 
     const goodSource = `
       import { Schema } from "effect"
@@ -1106,11 +1116,13 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/contract/src/state.ts",
         content: goodSource,
-        packageTag: "contract"
-      }
+        packageTag: "contract",
+      },
     ])
     const goodResult = checkEffectGraph(goodGraph)
-    expect(goodResult.violations.filter((v) => v.rule === "handwritten-tagged-union")).toHaveLength(0)
+    expect(goodResult.violations.filter((v) => v.rule === "handwritten-tagged-union")).toHaveLength(
+      0,
+    )
   })
 
   it("fails with untraced-decider when Decider.make binds an untraced decide function or returns options unchanged in decider.ts", () => {
@@ -1142,8 +1154,8 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/domain/src/cart.ts",
         content: untracedSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const untracedResult = checkEffectGraph(untracedGraph)
     const violations = untracedResult.violations.filter((v) => v.rule === "untraced-decider")
@@ -1159,13 +1171,15 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/es/core/src/decider.ts",
         content: passthroughDecider,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const deciderResult = checkEffectGraph(deciderGraph)
     const deciderViolations = deciderResult.violations.filter((v) => v.rule === "untraced-decider")
     expect(deciderViolations.length).toBe(1)
-    expect(deciderViolations[0]?.message).toContain("returns options unchanged without enforcing or wrapping span tracing")
+    expect(deciderViolations[0]?.message).toContain(
+      "returns options unchanged without enforcing or wrapping span tracing",
+    )
 
     const tracedSource = `
       import { Effect } from "effect"
@@ -1192,8 +1206,8 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/domain/src/cart.ts",
         content: tracedSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const tracedResult = checkEffectGraph(tracedGraph)
     expect(tracedResult.violations.filter((v) => v.rule === "untraced-decider")).toHaveLength(0)
@@ -1212,8 +1226,8 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/es/core/src/decider.ts",
         content: wrappedDecider,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const wrappedResult = checkEffectGraph(wrappedGraph)
     expect(wrappedResult.violations.filter((v) => v.rule === "untraced-decider")).toHaveLength(0)
@@ -1244,13 +1258,15 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/domain/src/cart.ts",
         content: unguardedSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const badResult = checkEffectGraph(badGraph)
     const violations = badResult.violations.filter((v) => v.rule === "missing-aggregate-id-guard")
     expect(violations.length).toBe(1)
-    expect(violations[0]?.message).toContain("accepts command and state that both carry aggregate identifier 'cartId'")
+    expect(violations[0]?.message).toContain(
+      "accepts command and state that both carry aggregate identifier 'cartId'",
+    )
 
     const unionAndMultiAggregateSource = `
       import { Effect, Schema } from "effect"
@@ -1296,16 +1312,16 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/domain/src/cart.ts",
         content: unionAndMultiAggregateSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const unionBadResult = checkEffectGraph(unionBadGraph)
     const unionViolations = unionBadResult.violations.filter(
-      (v) => v.rule === "missing-aggregate-id-guard"
+      (v) => v.rule === "missing-aggregate-id-guard",
     )
     expect(unionViolations.length).toBe(1)
     expect(unionViolations[0]?.message).toContain(
-      "accepts command and state that both carry aggregate identifier 'cartId'"
+      "accepts command and state that both carry aggregate identifier 'cartId'",
     )
 
     const guardedSource = `
@@ -1341,11 +1357,13 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/domain/src/cart.ts",
         content: guardedSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const goodResult = checkEffectGraph(goodGraph)
-    expect(goodResult.violations.filter((v) => v.rule === "missing-aggregate-id-guard")).toHaveLength(0)
+    expect(
+      goodResult.violations.filter((v) => v.rule === "missing-aggregate-id-guard"),
+    ).toHaveLength(0)
   })
 
   it("fails with unasserted-state-field when evolve assigns state properties never read or asserted in scope tests", () => {
@@ -1370,7 +1388,7 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
               totalItems: (typeof state.totalItems === "number" ? state.totalItems : 0) + 1
             }
           }
-        `
+        `,
       )
 
       // Test file only reads items, never reads or asserts totalItems!
@@ -1384,7 +1402,7 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
               expect(state.items).toHaveLength(1)
             })
           })
-        `
+        `,
       )
 
       const badGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir))
@@ -1392,7 +1410,9 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       const violations = badResult.violations.filter((v) => v.rule === "unasserted-state-field")
       expect(violations.length).toBe(1)
       expect(violations[0]?.message).toContain("State property 'totalItems' computed in reducer")
-      expect(violations[0]?.message).toContain("is never read or asserted in any test file in scope 'libs/sample'")
+      expect(violations[0]?.message).toContain(
+        "is never read or asserted in any test file in scope 'libs/sample'",
+      )
 
       // Update test file to assert totalItems
       fs.writeFileSync(
@@ -1406,12 +1426,14 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
               expect(state.totalItems).toBe(1)
             })
           })
-        `
+        `,
       )
 
       const goodGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir))
       const goodResult = checkEffectGraph(goodGraph)
-      expect(goodResult.violations.filter((v) => v.rule === "unasserted-state-field")).toHaveLength(0)
+      expect(goodResult.violations.filter((v) => v.rule === "unasserted-state-field")).toHaveLength(
+        0,
+      )
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true })
     }
@@ -1426,13 +1448,15 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/domain/src/as-any.ts",
         content: asAnySource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const asAnyResult = checkEffectGraph(asAnyGraph)
     expect(asAnyResult.ok).toBe(false)
     expect(asAnyResult.violations.some((v) => v.rule === "unsafe-type-cast")).toBe(true)
-    expect(asAnyResult.violations[0]?.message).toContain("Explicit 'any' (as any, : any, <any>) is banned")
+    expect(asAnyResult.violations[0]?.message).toContain(
+      "Explicit 'any' (as any, : any, <any>) is banned",
+    )
     expect(asAnyResult.violations[0]?.path).toEqual(["libs/sample/domain/src/as-any.ts"])
 
     // 2. : any
@@ -1443,13 +1467,15 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/domain/src/colon-any.ts",
         content: colonAnySource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const colonAnyResult = checkEffectGraph(colonAnyGraph)
     expect(colonAnyResult.ok).toBe(false)
     expect(colonAnyResult.violations.some((v) => v.rule === "unsafe-type-cast")).toBe(true)
-    expect(colonAnyResult.violations[0]?.message).toContain("Explicit 'any' (as any, : any, <any>) is banned")
+    expect(colonAnyResult.violations[0]?.message).toContain(
+      "Explicit 'any' (as any, : any, <any>) is banned",
+    )
 
     // 3. as never
     const asNeverSource = `
@@ -1459,8 +1485,8 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/domain/src/as-never.ts",
         content: asNeverSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const asNeverResult = checkEffectGraph(asNeverGraph)
     expect(asNeverResult.ok).toBe(false)
@@ -1475,13 +1501,15 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/domain/src/double-cast.ts",
         content: doubleCastSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const doubleCastResult = checkEffectGraph(doubleCastGraph)
     expect(doubleCastResult.ok).toBe(false)
     expect(doubleCastResult.violations.some((v) => v.rule === "unsafe-type-cast")).toBe(true)
-    expect(doubleCastResult.violations[0]?.message).toContain("Double type assertion ('as unknown as T') is banned")
+    expect(doubleCastResult.violations[0]?.message).toContain(
+      "Double type assertion ('as unknown as T') is banned",
+    )
 
     // 5. (x: never) => x parameter
     const neverParamSource = `
@@ -1491,13 +1519,15 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/domain/src/never-param.ts",
         content: neverParamSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const neverParamResult = checkEffectGraph(neverParamGraph)
     expect(neverParamResult.ok).toBe(false)
     expect(neverParamResult.violations.some((v) => v.rule === "unsafe-type-cast")).toBe(true)
-    expect(neverParamResult.violations[0]?.message).toContain("Explicit ': never' annotation on parameter or variable is banned")
+    expect(neverParamResult.violations[0]?.message).toContain(
+      "Explicit ': never' annotation on parameter or variable is banned",
+    )
 
     // 6. Allowing Effect.Effect<number, never, never>
     const safeNeverSource = `
@@ -1508,8 +1538,8 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/domain/src/safe-never.ts",
         content: safeNeverSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const safeNeverResult = checkEffectGraph(safeNeverGraph)
     expect(safeNeverResult.violations.filter((v) => v.rule === "unsafe-type-cast")).toHaveLength(0)
@@ -1555,30 +1585,70 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/contract/src/index.ts",
         content: badContractSource,
-        packageTag: "contract"
+        packageTag: "contract",
       },
       {
         filePath: "libs/sample/domain/src/index.ts",
         content: badDomainSchemaSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const badResult = checkEffectGraph(badGraph)
     expect(badResult.ok).toBe(false)
     const contractViolations = badResult.violations.filter(
-      (v) => v.rule === "unbranded-contract-schema"
+      (v) => v.rule === "unbranded-contract-schema",
     )
-    expect(contractViolations.some((v) => v.message.includes("Exported type alias 'RawAlbumId'") && v.message.includes("'string'"))).toBe(true)
-    expect(contractViolations.some((v) => v.message.includes("Exported type alias 'ErasedId'") && v.message.includes("'any'"))).toBe(true)
-    expect(contractViolations.some((v) => v.message.includes("Exported type alias 'UnknownId'") && v.message.includes("'unknown'"))).toBe(true)
-    expect(contractViolations.some((v) => v.message.includes("Exported type alias 'InlineDto'"))).toBe(true)
-    expect(contractViolations.some((v) => v.message.includes("Contract schema 'PhotoId'"))).toBe(true)
-    expect(contractViolations.some((v) => v.message.includes("Property 'id' of contract schema 'PipedPhoto'"))).toBe(true)
-    expect(contractViolations.some((v) => v.message.includes("Property 'albumId' of contract schema 'PipedPhoto'"))).toBe(true)
-    expect(contractViolations.some((v) => v.message.includes("Property 'itemId' of contract schema 'EventUnion'"))).toBe(true)
-    expect(contractViolations.some((v) => v.message.includes("Field 'id' of 'PhotoNotFoundError'"))).toBe(true)
-    expect(contractViolations.some((v) => v.message.includes("Property 'rawCount' of contract schema 'InternalStruct'"))).toBe(true)
-    expect(contractViolations.some((v) => v.message.includes("Duplicate Schema.brand('DuplicateBrand')"))).toBe(true)
+    expect(
+      contractViolations.some(
+        (v) =>
+          v.message.includes("Exported type alias 'RawAlbumId'") && v.message.includes("'string'"),
+      ),
+    ).toBe(true)
+    expect(
+      contractViolations.some(
+        (v) => v.message.includes("Exported type alias 'ErasedId'") && v.message.includes("'any'"),
+      ),
+    ).toBe(true)
+    expect(
+      contractViolations.some(
+        (v) =>
+          v.message.includes("Exported type alias 'UnknownId'") && v.message.includes("'unknown'"),
+      ),
+    ).toBe(true)
+    expect(
+      contractViolations.some((v) => v.message.includes("Exported type alias 'InlineDto'")),
+    ).toBe(true)
+    expect(contractViolations.some((v) => v.message.includes("Contract schema 'PhotoId'"))).toBe(
+      true,
+    )
+    expect(
+      contractViolations.some((v) =>
+        v.message.includes("Property 'id' of contract schema 'PipedPhoto'"),
+      ),
+    ).toBe(true)
+    expect(
+      contractViolations.some((v) =>
+        v.message.includes("Property 'albumId' of contract schema 'PipedPhoto'"),
+      ),
+    ).toBe(true)
+    expect(
+      contractViolations.some((v) =>
+        v.message.includes("Property 'itemId' of contract schema 'EventUnion'"),
+      ),
+    ).toBe(true)
+    expect(
+      contractViolations.some((v) => v.message.includes("Field 'id' of 'PhotoNotFoundError'")),
+    ).toBe(true)
+    expect(
+      contractViolations.some((v) =>
+        v.message.includes("Property 'rawCount' of contract schema 'InternalStruct'"),
+      ),
+    ).toBe(true)
+    expect(
+      contractViolations.some((v) =>
+        v.message.includes("Duplicate Schema.brand('DuplicateBrand')"),
+      ),
+    ).toBe(true)
 
     const goodContractSource = `
       import { Schema } from "effect"
@@ -1607,13 +1677,11 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/contract/src/index.ts",
         content: goodContractSource,
-        packageTag: "contract"
-      }
+        packageTag: "contract",
+      },
     ])
     const goodResult = checkEffectGraph(goodGraph)
-    expect(
-      goodResult.violations.filter((v) => v.rule === "unbranded-contract-schema")
-    ).toEqual([])
+    expect(goodResult.violations.filter((v) => v.rule === "unbranded-contract-schema")).toEqual([])
   })
 
   it("fails with unbranded-primitive-boundary on raw primitive or inline object service/domain boundaries and 'as Brand' casts, and passes on compliant branded boundaries", () => {
@@ -1647,29 +1715,79 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/service/src/index.ts",
         content: badServiceSource,
-        packageTag: "service"
+        packageTag: "service",
       },
       {
         filePath: "libs/sample/domain/src/index.ts",
         content: badDomainSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const badResult = checkEffectGraph(badGraph)
     expect(badResult.ok).toBe(false)
     const boundaryViolations = badResult.violations.filter(
-      (v) => v.rule === "unbranded-primitive-boundary"
+      (v) => v.rule === "unbranded-primitive-boundary",
     )
-    expect(boundaryViolations.some((v) => v.message.includes("Service capability 'PhotoRepo.findById' parameter 'id'"))).toBe(true)
-    expect(boundaryViolations.some((v) => v.message.includes("Service capability 'PhotoRepo.findById' return type"))).toBe(true)
-    expect(boundaryViolations.some((v) => v.message.includes("Service capability 'PhotoRepo.createInline' parameter 'input'") && v.message.includes("inline object type literal"))).toBe(true)
-    expect(boundaryViolations.some((v) => v.message.includes("Service capability 'PhotoRepo.createInline' return type") && v.message.includes("inline object type literal"))).toBe(true)
-    expect(boundaryViolations.some((v) => v.message.includes("Domain function 'getPhoto' parameter 'rawId'"))).toBe(true)
-    expect(boundaryViolations.some((v) => v.message.includes("Domain function 'getPhoto' parameter 'inlineFilter'") && v.message.includes("inline object type literal"))).toBe(true)
-    expect(boundaryViolations.some((v) => v.message.includes("Domain function 'getPhoto' return success type"))).toBe(true)
-    expect(boundaryViolations.some((v) => v.message.includes("Domain function 'plainDecider' parameter 'input'") && v.message.includes("inline object type literal"))).toBe(true)
-    expect(boundaryViolations.some((v) => v.message.includes("Domain function 'plainDecider' return success type") && v.message.includes("'number'"))).toBe(true)
-    expect(boundaryViolations.some((v) => v.message.includes("casts an unbranded value directly to branded type"))).toBe(true)
+    expect(
+      boundaryViolations.some((v) =>
+        v.message.includes("Service capability 'PhotoRepo.findById' parameter 'id'"),
+      ),
+    ).toBe(true)
+    expect(
+      boundaryViolations.some((v) =>
+        v.message.includes("Service capability 'PhotoRepo.findById' return type"),
+      ),
+    ).toBe(true)
+    expect(
+      boundaryViolations.some(
+        (v) =>
+          v.message.includes("Service capability 'PhotoRepo.createInline' parameter 'input'") &&
+          v.message.includes("inline object type literal"),
+      ),
+    ).toBe(true)
+    expect(
+      boundaryViolations.some(
+        (v) =>
+          v.message.includes("Service capability 'PhotoRepo.createInline' return type") &&
+          v.message.includes("inline object type literal"),
+      ),
+    ).toBe(true)
+    expect(
+      boundaryViolations.some((v) =>
+        v.message.includes("Domain function 'getPhoto' parameter 'rawId'"),
+      ),
+    ).toBe(true)
+    expect(
+      boundaryViolations.some(
+        (v) =>
+          v.message.includes("Domain function 'getPhoto' parameter 'inlineFilter'") &&
+          v.message.includes("inline object type literal"),
+      ),
+    ).toBe(true)
+    expect(
+      boundaryViolations.some((v) =>
+        v.message.includes("Domain function 'getPhoto' return success type"),
+      ),
+    ).toBe(true)
+    expect(
+      boundaryViolations.some(
+        (v) =>
+          v.message.includes("Domain function 'plainDecider' parameter 'input'") &&
+          v.message.includes("inline object type literal"),
+      ),
+    ).toBe(true)
+    expect(
+      boundaryViolations.some(
+        (v) =>
+          v.message.includes("Domain function 'plainDecider' return success type") &&
+          v.message.includes("'number'"),
+      ),
+    ).toBe(true)
+    expect(
+      boundaryViolations.some((v) =>
+        v.message.includes("casts an unbranded value directly to branded type"),
+      ),
+    ).toBe(true)
 
     const goodServiceSource = `
       import { type Brand, Context, type Effect } from "effect"
@@ -1693,18 +1811,18 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/sample/service/src/index.ts",
         content: goodServiceSource,
-        packageTag: "service"
+        packageTag: "service",
       },
       {
         filePath: "libs/sample/domain/src/index.ts",
         content: goodDomainSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const goodResult = checkEffectGraph(goodGraph)
-    expect(
-      goodResult.violations.filter((v) => v.rule === "unbranded-primitive-boundary")
-    ).toEqual([])
+    expect(goodResult.violations.filter((v) => v.rule === "unbranded-primitive-boundary")).toEqual(
+      [],
+    )
   })
 
   it("hardens missing-aggregate-id-guard, dead-event-payload, terminal-state-unhandled, and unsafe-type-cast against adversarial evasions", () => {
@@ -1781,8 +1899,8 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/es/core/test/fixtures/evasion.ts",
         content: evasionSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const result = checkEffectGraph(graph)
     expect(result.ok).toBe(false)
@@ -1791,8 +1909,8 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
     // 2. Object literal key 'quantity: 0' must NOT mask unused event.quantity
     expect(
       result.violations.some(
-        (v) => v.rule === "dead-event-payload" && v.message.includes("property 'quantity'")
-      )
+        (v) => v.rule === "dead-event-payload" && v.message.includes("property 'quantity'"),
+      ),
     ).toBe(true)
     // 3. Inner match(event) inside outer match(state) must NOT trigger terminal-state-unhandled false positive
     expect(result.violations.some((v) => v.rule === "terminal-state-unhandled")).toBe(false)
@@ -1819,23 +1937,22 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       {
         filePath: "libs/es/core/src/engine.ts",
         content: badCoreSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
     const result = checkEffectGraph(graph)
     expect(result.ok).toBe(false)
     expect(
       result.violations.some(
-        (v) => v.rule === "domain-requires-infra" && v.message.includes("SqlClient")
-      )
+        (v) => v.rule === "domain-requires-infra" && v.message.includes("SqlClient"),
+      ),
     ).toBe(true)
     expect(
       result.violations.some(
         (v) =>
           v.rule === "schema-boolean-state" &&
-          v.message.includes("Interface property 'publish' on 'EngineConfig'")
-      )
+          v.message.includes("Interface property 'publish' on 'EngineConfig'"),
+      ),
     ).toBe(true)
   })
 })
-

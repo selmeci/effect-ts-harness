@@ -9,7 +9,7 @@ import {
   lintEarsSpecMarkdown,
   loadGovernanceDocsFromDisk,
   type OntologyInvariantFinding,
-  type OntologyInvariantsReport
+  type OntologyInvariantsReport,
 } from "@harness/gates"
 import { assertDecisionLimits } from "./idiom-router.js"
 
@@ -19,7 +19,7 @@ export {
   type GovernanceDocReference,
   loadGovernanceDocsFromDisk,
   type OntologyInvariantFinding,
-  type OntologyInvariantsReport
+  type OntologyInvariantsReport,
 }
 
 export const ONTOLOGY_CONFLICT_KINDS = [
@@ -27,7 +27,7 @@ export const ONTOLOGY_CONFLICT_KINDS = [
   "state-transition-conflict",
   "error-contract-conflict",
   "adr-constraint-violation",
-  "duplicate-overlap"
+  "duplicate-overlap",
 ] as const
 export type OntologyConflictKind = (typeof ONTOLOGY_CONFLICT_KINDS)[number]
 
@@ -37,12 +37,12 @@ export const OntologyConflictV1 = Decision.make({
     sourceText: Schema.String,
     targetId: Schema.String,
     targetText: Schema.String,
-    sharedSymbol: Schema.String
+    sharedSymbol: Schema.String,
   }),
   decisions: {
     contradicts: Decision.probability({
       instructions:
-        "Do these two requirements or architectural constraints contradict each other or require incompatible behavior for the shared symbol?"
+        "Do these two requirements or architectural constraints contradict each other or require incompatible behavior for the shared symbol?",
     }),
     conflictKind: Decision.classify({
       instructions:
@@ -55,11 +55,10 @@ export const OntologyConflictV1 = Decision.make({
           "Incompatible failure conditions or TaggedError expectations (IF/THEN conflict)",
         "adr-constraint-violation":
           "Requirement violates an architectural driver, principle, or rejected alternative in an ADR",
-        "duplicate-overlap":
-          "Redundant or ambiguous duplicate requirement for the same behavior"
-      }
-    })
-  }
+        "duplicate-overlap": "Redundant or ambiguous duplicate requirement for the same behavior",
+      },
+    }),
+  },
 })
 
 assertDecisionLimits(OntologyConflictV1)
@@ -80,12 +79,12 @@ export interface OntologyConflictResult {
   readonly timedOutOrUnavailable?: boolean
 }
 
-export const checkOntologyPairConflict = Effect.fn(
-  "Harness.checkOntologyPairConflict"
-)(function* (input: OntologyConflictInput) {
+export const checkOntologyPairConflict = Effect.fn("Harness.checkOntologyPairConflict")(function* (
+  input: OntologyConflictInput,
+) {
   const outcome = yield* DecisionModel.decide(OntologyConflictV1, { input }).pipe(
     Effect.timeoutOption("1500 millis"),
-    Effect.catchCause(() => Effect.succeedNone)
+    Effect.catchCause(() => Effect.succeedNone),
   )
 
   if (Option.isNone(outcome)) {
@@ -95,7 +94,7 @@ export const checkOntologyPairConflict = Effect.fn(
       conflictKind: "none" as const,
       reason:
         "DecisionModel unavailable or timed out; relying on deterministic ontology invariants.",
-      timedOutOrUnavailable: true
+      timedOutOrUnavailable: true,
     } satisfies OntologyConflictResult
   }
 
@@ -103,7 +102,7 @@ export const checkOntologyPairConflict = Effect.fn(
   yield* Effect.annotateCurrentSpan({
     "decision.definition": "OntologyConflictV1",
     "decision.contradicts": answers.contradicts.probability,
-    "decision.conflictKind": answers.conflictKind.label
+    "decision.conflictKind": answers.conflictKind.label,
   })
 
   const hasConflict =
@@ -118,7 +117,7 @@ export const checkOntologyPairConflict = Effect.fn(
     reason: hasConflict
       ? `Semantic conflict (${answers.conflictKind.label}, p=${answers.contradicts.probability}) between ${input.sourceId} and ${input.targetId} on ${input.sharedSymbol}.`
       : `No semantic conflict detected between ${input.sourceId} and ${input.targetId}.`,
-    timedOutOrUnavailable: false
+    timedOutOrUnavailable: false,
   } satisfies OntologyConflictResult
 })
 
@@ -141,7 +140,7 @@ const extractAdrSummary = (markdown: string, fallbackId: string): string => {
 
 export const extractOntologyConflictPairs = (
   governanceDocs: ReadonlyArray<GovernanceDocReference>,
-  scope?: string
+  scope?: string,
 ): ReadonlyArray<OntologyConflictInput> => {
   const activeDocs = governanceDocs.filter((doc) => {
     if (doc.status !== "accepted" && doc.status !== "proposed") {
@@ -169,18 +168,13 @@ export const extractOntologyConflictPairs = (
   const adrDocs: Array<GovernanceDocReference> = []
 
   for (const doc of activeDocs) {
-    if (
-      doc.markdown !== undefined &&
-      (doc.id.includes("ADR-") || doc.docPath.includes("/adr/"))
-    ) {
+    if (doc.markdown !== undefined && (doc.id.includes("ADR-") || doc.docPath.includes("/adr/"))) {
       adrDocs.push(doc)
     }
 
     if (
       doc.markdown !== undefined &&
-      (doc.docPath.includes("/specs/") ||
-        doc.id.includes(":SPEC-") ||
-        doc.id.startsWith("SPEC-"))
+      (doc.docPath.includes("/specs/") || doc.id.includes(":SPEC-") || doc.id.startsWith("SPEC-"))
     ) {
       const lintReport = lintEarsSpecMarkdown(doc.docPath, doc.markdown)
       for (const row of lintReport.requirements) {
@@ -229,7 +223,7 @@ export const extractOntologyConflictPairs = (
                 sourceText: rowA.row.requirement,
                 targetId,
                 targetText: rowB.row.requirement,
-                sharedSymbol: effectSymbol
+                sharedSymbol: effectSymbol,
               })
             }
           }
@@ -252,7 +246,7 @@ export const extractOntologyConflictPairs = (
     const governed = new Set([
       ...(adr.referencedSpans ?? []),
       ...(adr.referencedServices ?? []),
-      ...(adr.referencedErrors ?? [])
+      ...(adr.referencedErrors ?? []),
     ])
     if (governed.size === 0) {
       continue
@@ -270,9 +264,7 @@ export const extractOntologyConflictPairs = (
       }
       const matches =
         governed.has(sym) ||
-        Array.from(governed).some(
-          (s) => s.endsWith(`.${sym}`) || sym.endsWith(`.${s}`)
-        )
+        Array.from(governed).some((s) => s.endsWith(`.${sym}`) || sym.endsWith(`.${s}`))
       if (matches) {
         const sourceId = `${item.specId}#${item.row.id}`
         const targetId = adr.id
@@ -284,7 +276,7 @@ export const extractOntologyConflictPairs = (
             sourceText: item.row.requirement,
             targetId,
             targetText: adrSummary,
-            sharedSymbol: sym
+            sharedSymbol: sym,
           })
         }
       }
@@ -294,9 +286,9 @@ export const extractOntologyConflictPairs = (
   return pairs
 }
 
-export const evaluateOntologyConflicts = Effect.fn(
-  "Harness.evaluateOntologyConflicts"
-)(function* (pairs: ReadonlyArray<OntologyConflictInput>) {
+export const evaluateOntologyConflicts = Effect.fn("Harness.evaluateOntologyConflicts")(function* (
+  pairs: ReadonlyArray<OntologyConflictInput>,
+) {
   if (pairs.length === 0) {
     return []
   }
@@ -312,11 +304,8 @@ export const evaluateOntologyConflicts = Effect.fn(
   const rest = pairs.slice(1)
   const restEvaluated = yield* Effect.forEach(
     rest,
-    (pair) =>
-      checkOntologyPairConflict(pair).pipe(
-        Effect.map((res) => ({ ...pair, ...res }))
-      ),
-    { concurrency: 4 }
+    (pair) => checkOntologyPairConflict(pair).pipe(Effect.map((res) => ({ ...pair, ...res }))),
+    { concurrency: 4 },
   )
 
   const evaluated = [firstEvaluated, ...restEvaluated]

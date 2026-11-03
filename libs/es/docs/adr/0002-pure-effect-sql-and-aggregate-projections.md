@@ -38,15 +38,15 @@ In Phase 2 of the Event Sourcing MVP (`docs/mvp_event_sourcing.md`), an aggregat
 
 ## Decision Drivers
 
-* **Single Source of Truth for Schemas:** Avoid dual-maintenance and translation overhead between Drizzle table schemas and Effect v4 `Schema` / branded domain types.
-* **Strict Core vs Infra Taxonomy:** Keep `@harness/es-core` (`type:core`) completely free of `SqlClient` and SQL statements, placing all SQLite persistence in `@harness/es-infra` (`type:infra`) and isolating test runtime helpers in `@harness/es-infra/memory` in compliance with `harness:ADR-0008`.
-* **Append-Only Simplicity:** The aggregate storage schema consists of narrow relational tables (`es_events`, `es_commands`, `es_projections_meta`, `es_outbox`) scoped by `(aggregate_name, aggregate_id)` requiring no relational ORM join builders.
-* **Strong Consistency & Read-Your-Writes:** Local read models must be updated within the event append transaction and queried by `ProjectionName` and `AggregateId`.
+- **Single Source of Truth for Schemas:** Avoid dual-maintenance and translation overhead between Drizzle table schemas and Effect v4 `Schema` / branded domain types.
+- **Strict Core vs Infra Taxonomy:** Keep `@harness/es-core` (`type:core`) completely free of `SqlClient` and SQL statements, placing all SQLite persistence in `@harness/es-infra` (`type:infra`) and isolating test runtime helpers in `@harness/es-infra/memory` in compliance with `harness:ADR-0008`.
+- **Append-Only Simplicity:** The aggregate storage schema consists of narrow relational tables (`es_events`, `es_commands`, `es_projections_meta`, `es_outbox`) scoped by `(aggregate_name, aggregate_id)` requiring no relational ORM join builders.
+- **Strong Consistency & Read-Your-Writes:** Local read models must be updated within the event append transaction and queried by `ProjectionName` and `AggregateId`.
 
 ## Considered Options
 
-* **Option 1:** Drizzle ORM (`drizzle-orm/effect-sqlite-do`) with dual `sqliteTable` and `Schema` declarations.
-* **Option 2:** Pure `effect/sql/SqlClient` and `@effect/sql-sqlite-do` in `@harness/es-infra` with I/O-free protocols in `@harness/es-core`, direct `Schema` decoding, and native `sql.withTransaction` boundaries.
+- **Option 1:** Drizzle ORM (`drizzle-orm/effect-sqlite-do`) with dual `sqliteTable` and `Schema` declarations.
+- **Option 2:** Pure `effect/sql/SqlClient` and `@effect/sql-sqlite-do` in `@harness/es-infra` with I/O-free protocols in `@harness/es-core`, direct `Schema` decoding, and native `sql.withTransaction` boundaries.
 
 ## Decision Outcome
 
@@ -76,25 +76,25 @@ In Phase 2 of the Event Sourcing MVP (`docs/mvp_event_sourcing.md`), an aggregat
 
 ### Positive Consequences
 
-* Single schema definition language (`Schema.Struct`, `Schema.Class`, `Schema.brand`) across contracts, core protocols, and persistence.
-* Strict adherence to Nx taxonomy (`type:core` has zero I/O; `type:infra` owns SQL; Worker entrypoint has zero `node:*` imports).
-* Deterministic transaction rollback on conflict, domain rejection, or SQL failure.
+- Single schema definition language (`Schema.Struct`, `Schema.Class`, `Schema.brand`) across contracts, core protocols, and persistence.
+- Strict adherence to Nx taxonomy (`type:core` has zero I/O; `type:infra` owns SQL; Worker entrypoint has zero `node:*` imports).
+- Deterministic transaction rollback on conflict, domain rejection, or SQL failure.
 
 ### Negative Consequences and Trade-offs
 
-* Schema migrations for aggregate tables (`es_events`, `es_commands`, `es_projections_meta`, `es_outbox`) are managed via parameterized SQL DDL scripts rather than Drizzle Kit automated migrations.
-* Read model queries in projections are written as parameterized SQL templates over `SqlClient`.
+- Schema migrations for aggregate tables (`es_events`, `es_commands`, `es_projections_meta`, `es_outbox`) are managed via parameterized SQL DDL scripts rather than Drizzle Kit automated migrations.
+- Read model queries in projections are written as parameterized SQL templates over `SqlClient`.
 
 ### Deterministic Enforcement
 
-| Rule | Enforced By | Gate / Mechanism | Governed Symbols |
-| --- | --- | --- | --- |
-| Command Idempotency Dedup | `libs/es/infra/src/aggregate.ts` | `handleAggregateCommand` | `Aggregate.handleCommand` |
-| Cross-Aggregate Command Guard | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts` | `CommandAggregateMismatchError`, `handleAggregateCommand` | `CommandAggregateMismatchError` |
-| Stream Contiguity & Decode Guard | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts` | `EventStreamCorruptionError`, `loadAggregate` | `EventStreamCorruptionError` |
-| Read-Your-Writes Query | `libs/es/core/src/projection.ts` | `queryLocalProjection` | `LocalProjection.query` |
-| Versioned Projection Rebuild | `libs/es/core/src/projection.ts`, `libs/es/infra/src/aggregate.ts` | `rebuildLocalProjection`, `loadAggregate` | `LocalProjection.rebuild`, `Aggregate.load` |
-| Selective Outbox Isolation | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts` | `OutboxPublicationMode`, `handleAggregateCommand` | `Aggregate.handleCommand` |
-| Concurrency Conflict Detection | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts` | `ConcurrencyConflictError`, `handleAggregateCommand` | `ConcurrencyConflictError` |
-| Missing Aggregate Query | `libs/es/contract/src/index.ts`, `libs/es/infra/test/fixtures/cart-sqlite.ts` | `AggregateNotFoundError`, `queryCartView` | `AggregateNotFoundError` |
-| Missing Local Projection | `libs/es/contract/src/index.ts`, `libs/es/core/src/projection.ts` | `LocalProjectionNotFoundError`, `queryLocalProjection` | `LocalProjectionNotFoundError` |
+| Rule                             | Enforced By                                                                   | Gate / Mechanism                                          | Governed Symbols                            |
+| -------------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------- |
+| Command Idempotency Dedup        | `libs/es/infra/src/aggregate.ts`                                              | `handleAggregateCommand`                                  | `Aggregate.handleCommand`                   |
+| Cross-Aggregate Command Guard    | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`             | `CommandAggregateMismatchError`, `handleAggregateCommand` | `CommandAggregateMismatchError`             |
+| Stream Contiguity & Decode Guard | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`             | `EventStreamCorruptionError`, `loadAggregate`             | `EventStreamCorruptionError`                |
+| Read-Your-Writes Query           | `libs/es/core/src/projection.ts`                                              | `queryLocalProjection`                                    | `LocalProjection.query`                     |
+| Versioned Projection Rebuild     | `libs/es/core/src/projection.ts`, `libs/es/infra/src/aggregate.ts`            | `rebuildLocalProjection`, `loadAggregate`                 | `LocalProjection.rebuild`, `Aggregate.load` |
+| Selective Outbox Isolation       | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`             | `OutboxPublicationMode`, `handleAggregateCommand`         | `Aggregate.handleCommand`                   |
+| Concurrency Conflict Detection   | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`             | `ConcurrencyConflictError`, `handleAggregateCommand`      | `ConcurrencyConflictError`                  |
+| Missing Aggregate Query          | `libs/es/contract/src/index.ts`, `libs/es/infra/test/fixtures/cart-sqlite.ts` | `AggregateNotFoundError`, `queryCartView`                 | `AggregateNotFoundError`                    |
+| Missing Local Projection         | `libs/es/contract/src/index.ts`, `libs/es/core/src/projection.ts`             | `LocalProjectionNotFoundError`, `queryLocalProjection`    | `LocalProjectionNotFoundError`              |

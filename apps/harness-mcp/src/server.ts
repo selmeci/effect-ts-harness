@@ -27,7 +27,7 @@ import {
   resolveNode,
   saveGraphSnapshot,
   structuralSearch,
-  writeGraphHeadMeta
+  writeGraphHeadMeta,
 } from "@harness/graph"
 import {
   decideOntologyInvariants,
@@ -36,7 +36,7 @@ import {
   type GovernanceDocReference,
   loadGovernanceDocsFromDisk,
   LocalDecisionModel,
-  routeStep
+  routeStep,
 } from "@harness/decision"
 export {
   decideOmnigraphReconcile,
@@ -46,7 +46,7 @@ export {
   resolveGitHeadState,
   resolveOmnigraphClusterDir,
   resolveOmnigraphTaskBranches,
-  writeGraphHeadMeta
+  writeGraphHeadMeta,
 } from "@harness/gates"
 import {
   appendTelemetryEvent,
@@ -56,15 +56,12 @@ import {
   renderSessionReportMarkdown,
   type TelemetryCategory,
   type TelemetryEngineSource,
-  type TelemetryOutcome
+  type TelemetryOutcome,
 } from "@harness/gates"
 
-export class UnknownToolError extends Schema.TaggedError<UnknownToolError>()(
-  "UnknownToolError",
-  {
-    toolName: Schema.String
-  }
-) {}
+export class UnknownToolError extends Schema.TaggedError<UnknownToolError>()("UnknownToolError", {
+  toolName: Schema.String,
+}) {}
 
 export interface LspDiagnosticsReport {
   readonly clean: boolean
@@ -85,16 +82,16 @@ const LspDiagnosticsSummarySchema = Schema.Struct({
   totalFiles: Schema.Int,
   errors: Schema.Int,
   warnings: Schema.Int,
-  messages: Schema.Int
+  messages: Schema.Int,
 })
 
 const LspDiagnosticsPayloadSchema = Schema.Struct({
   diagnostics: Schema.Array(Schema.Unknown),
-  summary: LspDiagnosticsSummarySchema
+  summary: LspDiagnosticsSummarySchema,
 })
 
 const decodeLspDiagnosticsPayload = Schema.decodeOption(
-  Schema.fromJsonString(LspDiagnosticsPayloadSchema)
+  Schema.fromJsonString(LspDiagnosticsPayloadSchema),
 )
 
 export interface ServerOptions {
@@ -140,14 +137,10 @@ const resolveDefaultRepoRoot = (args?: Record<string, unknown>): string => {
     return cwdRoot
   }
   if (process.env.VITEST === undefined) {
-    const activeWorkspacePath = path.join(
-      SERVER_REPO_ROOT,
-      ".harness",
-      "active-workspace.json"
-    )
+    const activeWorkspacePath = path.join(SERVER_REPO_ROOT, ".harness", "active-workspace.json")
     if (fs.existsSync(activeWorkspacePath)) {
       const decodeActiveWorkspace = Schema.decodeUnknownOption(
-        Schema.fromJsonString(Schema.Struct({ repoRoot: Schema.String }))
+        Schema.fromJsonString(Schema.Struct({ repoRoot: Schema.String })),
       )
       const resolvedActiveRoot = Effect.runSync(
         Effect.try(() => {
@@ -156,7 +149,7 @@ const resolveDefaultRepoRoot = (args?: Record<string, unknown>): string => {
           return parsed !== undefined && fs.existsSync(parsed.repoRoot)
             ? parsed.repoRoot
             : undefined
-        }).pipe(Effect.orElseSucceed(() => undefined))
+        }).pipe(Effect.orElseSucceed(() => undefined)),
       )
       if (resolvedActiveRoot !== undefined) {
         return resolvedActiveRoot
@@ -168,7 +161,7 @@ const resolveDefaultRepoRoot = (args?: Record<string, unknown>): string => {
 
 const resolveGraph = (
   options?: ServerOptions,
-  args?: Record<string, unknown>
+  args?: Record<string, unknown>,
 ): Effect.Effect<HarnessGraph> => {
   if (options?.graph) {
     return Effect.succeed(options.graph)
@@ -214,7 +207,7 @@ const resolveGraph = (
       layers: [],
       errors: [],
       tests: [],
-      patternDocs: []
+      patternDocs: [],
     })
   }).pipe(
     Effect.catchDefect(() =>
@@ -225,10 +218,10 @@ const resolveGraph = (
           layers: [],
           errors: [],
           tests: [],
-          patternDocs: []
-        })
-      )
-    )
+          patternDocs: [],
+        }),
+      ),
+    ),
   )
 }
 
@@ -237,7 +230,7 @@ const runDefaultLspDiagnostics = (
   input: {
     readonly file?: string | undefined
     readonly project?: string | undefined
-  }
+  },
 ): Effect.Effect<LspDiagnosticsReport> =>
   Effect.try(() => {
     const cliArgs = ["diagnostics", "--strict", "--format", "json"]
@@ -258,19 +251,16 @@ const runDefaultLspDiagnostics = (
     const proc = spawnSync(binPath, cliArgs, {
       cwd: repoRoot,
       encoding: "utf-8",
-      timeout: 30_000
+      timeout: 30_000,
     })
     const stdout = (proc.stdout ?? "").trim()
     const decoded = decodeLspDiagnosticsPayload(stdout)
     if (Option.isSome(decoded)) {
       const { diagnostics, summary } = decoded.value
       return {
-        clean:
-          summary.errors === 0 &&
-          summary.warnings === 0 &&
-          summary.filesWithoutPlugin === 0,
+        clean: summary.errors === 0 && summary.warnings === 0 && summary.filesWithoutPlugin === 0,
         diagnostics,
-        summary
+        summary,
       } satisfies LspDiagnosticsReport
     }
     return {
@@ -282,251 +272,245 @@ const runDefaultLspDiagnostics = (
         totalFiles: 0,
         errors: 1,
         warnings: 0,
-        messages: 0
-      }
+        messages: 0,
+      },
     } satisfies LspDiagnosticsReport
   }).pipe(
-    Effect.orElseSucceed(
-      (): LspDiagnosticsReport => ({
-        clean: false,
-        diagnostics: [],
-        summary: {
-          filesChecked: 0,
-          filesWithoutPlugin: 0,
-          totalFiles: 0,
-          errors: 1,
-          warnings: 0,
-          messages: 0
-        }
-      })
-    )
+    Effect.orElseSucceed((): LspDiagnosticsReport => ({
+      clean: false,
+      diagnostics: [],
+      summary: {
+        filesChecked: 0,
+        filesWithoutPlugin: 0,
+        totalFiles: 0,
+        errors: 1,
+        warnings: 0,
+        messages: 0,
+      },
+    })),
   )
 
-export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(
-  function* (
-    toolName: string,
-    args: Record<string, unknown>,
-    options?: ServerOptions
-  ) {
-    const startTime = performance.now()
-    let result: unknown
+export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
+  toolName: string,
+  args: Record<string, unknown>,
+  options?: ServerOptions,
+) {
+  const startTime = performance.now()
+  let result: unknown
 
-    switch (toolName) {
-      case "harness_resolve": {
-        const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
-        const graph = yield* resolveGraph(options, args)
-        result = resolveNode(graph, symbolOrSpan) ?? null
-        break
-      }
-      case "harness_callers": {
-        const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
-        const graph = yield* resolveGraph(options, args)
-        result = findCallers(graph, symbolOrSpan)
-        break
-      }
-      case "harness_callees": {
-        const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
-        const graph = yield* resolveGraph(options, args)
-        result = findCallees(graph, symbolOrSpan)
-        break
-      }
-      case "harness_tests_reaching": {
-        const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
-        const graph = yield* resolveGraph(options, args)
-        result = findTestsReaching(graph, symbolOrSpan)
-        break
-      }
-      case "harness_structural_search": {
-        const pattern = (args as { pattern: string }).pattern
-        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-        result = structuralSearch({ pattern, repoRoot: root })
-        break
-      }
-      case "harness_route": {
-        const planStep = (args as { planStep: string }).planStep
-        const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
-        const routedOpt = yield* routeStep(planStep).pipe(
-          Effect.provide(decisionLayer),
-          Effect.timeoutOption("1500 millis"),
-          Effect.catchCause(() => Effect.succeedNone)
-        )
-        let block: string = Option.getOrElse(routedOpt, () => "review")
-        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-        if (block === "review") {
-          const patternsDir = path.join(root, "agent-patterns")
-          if (fs.existsSync(patternsDir)) {
-            const files = fs.readdirSync(patternsDir)
-            const stepLower = planStep.toLowerCase()
-            const candidates = files
-              .filter((f) => f.endsWith(".md") && f.toLowerCase() !== "readme.md")
-              .map((f) => f.replace(/\.md$/, ""))
-              .sort((a, b) => b.length - a.length)
-            for (const slug of candidates) {
-              const words = slug.split("-").filter((w) => w.length > 0)
-              if (words.length > 0 && words.every((w) => stepLower.includes(w))) {
-                block = slug
-                break
-              }
+  switch (toolName) {
+    case "harness_resolve": {
+      const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
+      const graph = yield* resolveGraph(options, args)
+      result = resolveNode(graph, symbolOrSpan) ?? null
+      break
+    }
+    case "harness_callers": {
+      const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
+      const graph = yield* resolveGraph(options, args)
+      result = findCallers(graph, symbolOrSpan)
+      break
+    }
+    case "harness_callees": {
+      const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
+      const graph = yield* resolveGraph(options, args)
+      result = findCallees(graph, symbolOrSpan)
+      break
+    }
+    case "harness_tests_reaching": {
+      const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
+      const graph = yield* resolveGraph(options, args)
+      result = findTestsReaching(graph, symbolOrSpan)
+      break
+    }
+    case "harness_structural_search": {
+      const pattern = (args as { pattern: string }).pattern
+      const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+      result = structuralSearch({ pattern, repoRoot: root })
+      break
+    }
+    case "harness_route": {
+      const planStep = (args as { planStep: string }).planStep
+      const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
+      const routedOpt = yield* routeStep(planStep).pipe(
+        Effect.provide(decisionLayer),
+        Effect.timeoutOption("1500 millis"),
+        Effect.catchCause(() => Effect.succeedNone),
+      )
+      let block: string = Option.getOrElse(routedOpt, () => "review")
+      const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+      if (block === "review") {
+        const patternsDir = path.join(root, "agent-patterns")
+        if (fs.existsSync(patternsDir)) {
+          const files = fs.readdirSync(patternsDir)
+          const stepLower = planStep.toLowerCase()
+          const candidates = files
+            .filter((f) => f.endsWith(".md") && f.toLowerCase() !== "readme.md")
+            .map((f) => f.replace(/\.md$/, ""))
+            .sort((a, b) => b.length - a.length)
+          for (const slug of candidates) {
+            const words = slug.split("-").filter((w) => w.length > 0)
+            if (words.length > 0 && words.every((w) => stepLower.includes(w))) {
+              block = slug
+              break
             }
           }
         }
-        const patternFile =
-          block === "review" || block === "effect"
-            ? null
-            : `agent-patterns/${block}.md`
-        result = { block, patternFile }
-        break
       }
-      case "harness_ontology_why": {
-        const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
-        const graph = yield* resolveGraph(options, args)
-        result = queryOntologyWhy(graph, symbolOrSpan)
-        break
+      const patternFile =
+        block === "review" || block === "effect" ? null : `agent-patterns/${block}.md`
+      result = { block, patternFile }
+      break
+    }
+    case "harness_ontology_why": {
+      const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
+      const graph = yield* resolveGraph(options, args)
+      result = queryOntologyWhy(graph, symbolOrSpan)
+      break
+    }
+    case "harness_ontology_impact": {
+      const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
+      const graph = yield* resolveGraph(options, args)
+      result = queryOntologyImpact(graph, symbolOrSpan)
+      break
+    }
+    case "harness_ontology_check": {
+      const scope = (args as { scope?: string | undefined }).scope
+      const graph = yield* resolveGraph(options, args)
+      const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+      const docs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(root)
+      const invariants = yield* decideOntologyInvariants({
+        graph,
+        governanceDocs: docs,
+      })
+      const pairs = extractOntologyConflictPairs(docs, scope)
+      const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
+      const semanticConflicts = yield* evaluateOntologyConflicts(pairs).pipe(
+        Effect.provide(decisionLayer),
+      )
+      const projection = projectOntologyLayers(graph)
+      result = {
+        clean: invariants.clean && semanticConflicts.length === 0,
+        findings: invariants.findings,
+        semanticConflicts,
+        evaluatedPairs: pairs.length,
+        layerCounts: {
+          Motivation: projection.layers.Motivation.length,
+          Business: projection.layers.Business.length,
+          Application: projection.layers.Application.length,
+          Technology: projection.layers.Technology.length,
+          Implementation: projection.layers.Implementation.length,
+        },
       }
-      case "harness_ontology_impact": {
-        const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
-        const graph = yield* resolveGraph(options, args)
-        result = queryOntologyImpact(graph, symbolOrSpan)
-        break
+      break
+    }
+    case "harness_gq_query": {
+      const queryName = (args as { queryName: HarnessGqQueryName }).queryName
+      const params = (args as { params?: Record<string, unknown> | undefined }).params
+      const branch = (args as { branch?: string | undefined }).branch
+      const graph = yield* resolveGraph(options, args)
+      const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+      result = yield* invokeOmnigraphNamedQuery({
+        repoRoot: root,
+        name: queryName as HarnessGqQueryName,
+        params,
+        branch,
+        fallbackGraph: graph,
+      }).pipe(Effect.provide(OmnigraphSync.Live))
+      break
+    }
+    case "harness_lsp_diagnostics": {
+      const file = (args as { file?: string | undefined }).file
+      const project = (args as { project?: string | undefined }).project
+      const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+      if (options?.lspDiagnosticsRunner !== undefined) {
+        result = options.lspDiagnosticsRunner({ file, project })
+      } else {
+        result = yield* runDefaultLspDiagnostics(root, { file, project })
       }
-      case "harness_ontology_check": {
-        const scope = (args as { scope?: string | undefined }).scope
-        const graph = yield* resolveGraph(options, args)
-        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-        const docs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(root)
-        const invariants = yield* decideOntologyInvariants({
-          graph,
-          governanceDocs: docs
-        })
-        const pairs = extractOntologyConflictPairs(docs, scope)
-        const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
-        const semanticConflicts = yield* evaluateOntologyConflicts(pairs).pipe(
-          Effect.provide(decisionLayer)
-        )
-        const projection = projectOntologyLayers(graph)
-        result = {
-          clean: invariants.clean && semanticConflicts.length === 0,
-          findings: invariants.findings,
-          semanticConflicts,
-          evaluatedPairs: pairs.length,
-          layerCounts: {
-            Motivation: projection.layers.Motivation.length,
-            Business: projection.layers.Business.length,
-            Application: projection.layers.Application.length,
-            Technology: projection.layers.Technology.length,
-            Implementation: projection.layers.Implementation.length
-          }
-        }
-        break
+      break
+    }
+    case "harness_telemetry_report": {
+      const format = (args as { format?: "json" | "markdown" | undefined }).format
+      const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+      const events = readTelemetryEvents(root)
+      const frictionEvents = readFrictionEvents(root)
+      const report = buildSessionReport({ events, frictionEvents })
+      if (format === "markdown") {
+        return { markdown: renderSessionReportMarkdown(report), report }
       }
-      case "harness_gq_query": {
-        const queryName = (args as { queryName: HarnessGqQueryName }).queryName
-        const params = (args as { params?: Record<string, unknown> | undefined }).params
-        const branch = (args as { branch?: string | undefined }).branch
-        const graph = yield* resolveGraph(options, args)
-        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-        result = yield* invokeOmnigraphNamedQuery({
-          repoRoot: root,
-          name: queryName as HarnessGqQueryName,
-          params,
-          branch,
-          fallbackGraph: graph
-        }).pipe(Effect.provide(OmnigraphSync.Live))
-        break
-      }
-      case "harness_lsp_diagnostics": {
-        const file = (args as { file?: string | undefined }).file
-        const project = (args as { project?: string | undefined }).project
-        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-        if (options?.lspDiagnosticsRunner !== undefined) {
-          result = options.lspDiagnosticsRunner({ file, project })
-        } else {
-          result = yield* runDefaultLspDiagnostics(root, { file, project })
-        }
-        break
-      }
-      case "harness_telemetry_report": {
-        const format = (args as { format?: "json" | "markdown" | undefined }).format
-        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-        const events = readTelemetryEvents(root)
-        const frictionEvents = readFrictionEvents(root)
-        const report = buildSessionReport({ events, frictionEvents })
-        if (format === "markdown") {
-          return { markdown: renderSessionReportMarkdown(report), report }
-        }
-        return report
-      }
-      default: {
-        return yield* new UnknownToolError({ toolName })
-      }
+      return report
+    }
+    default: {
+      return yield* new UnknownToolError({ toolName })
+    }
+  }
+
+  const durationMs = Math.max(0, Math.round(performance.now() - startTime))
+  if (options?.repoRoot !== undefined || process.env.VITEST === undefined) {
+    const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+    let category: TelemetryCategory = "graph_query"
+    if (
+      toolName === "harness_ontology_why" ||
+      toolName === "harness_ontology_impact" ||
+      toolName === "harness_ontology_check"
+    ) {
+      category = "ontology"
+    } else if (toolName === "harness_route") {
+      category = "routing"
+    } else if (toolName === "harness_lsp_diagnostics") {
+      category = "gate"
+    } else {
+      category = "graph_query"
     }
 
-    const durationMs = Math.max(0, Math.round(performance.now() - startTime))
-    if (options?.repoRoot !== undefined || process.env.VITEST === undefined) {
-      const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-      let category: TelemetryCategory = "graph_query"
-      if (
-        toolName === "harness_ontology_why" ||
-        toolName === "harness_ontology_impact" ||
-        toolName === "harness_ontology_check"
-      ) {
-        category = "ontology"
-      } else if (toolName === "harness_route") {
-        category = "routing"
-      } else if (toolName === "harness_lsp_diagnostics") {
-        category = "gate"
-      } else {
-        category = "graph_query"
-      }
-
-      let engineSource: TelemetryEngineSource = "local"
-      if (toolName === "harness_gq_query") {
-        engineSource =
-          typeof result === "object" &&
-          result !== null &&
-          "source" in result &&
-          result.source === "omnigraph"
-            ? "omnigraph"
-            : "memory-fallback"
-      } else if (toolName === "harness_route" || toolName === "harness_ontology_check") {
-        engineSource = "decision-model"
-      } else {
-        engineSource = "local"
-      }
-
-      let outcome: TelemetryOutcome = "ok"
-      if (toolName === "harness_gq_query" && engineSource === "memory-fallback") {
-        outcome = "fallback"
-      } else if (
-        toolName === "harness_lsp_diagnostics" &&
+    let engineSource: TelemetryEngineSource = "local"
+    if (toolName === "harness_gq_query") {
+      engineSource =
         typeof result === "object" &&
         result !== null &&
-        "clean" in result &&
-        result.clean === false
-      ) {
-        outcome = "fail"
-      } else {
-        outcome = "ok"
-      }
-
-      appendTelemetryEvent(root, {
-        surface: "mcp",
-        category,
-        toolName,
-        outcome,
-        durationMs,
-        engineSource
-      })
+        "source" in result &&
+        result.source === "omnigraph"
+          ? "omnigraph"
+          : "memory-fallback"
+    } else if (toolName === "harness_route" || toolName === "harness_ontology_check") {
+      engineSource = "decision-model"
+    } else {
+      engineSource = "local"
     }
 
-    return result
+    let outcome: TelemetryOutcome = "ok"
+    if (toolName === "harness_gq_query" && engineSource === "memory-fallback") {
+      outcome = "fallback"
+    } else if (
+      toolName === "harness_lsp_diagnostics" &&
+      typeof result === "object" &&
+      result !== null &&
+      "clean" in result &&
+      result.clean === false
+    ) {
+      outcome = "fail"
+    } else {
+      outcome = "ok"
+    }
+
+    appendTelemetryEvent(root, {
+      surface: "mcp",
+      category,
+      toolName,
+      outcome,
+      durationMs,
+      engineSource,
+    })
   }
-)
+
+  return result
+})
 
 export const executeTool = (
   toolName: string,
   args: Record<string, unknown>,
-  options?: ServerOptions
+  options?: ServerOptions,
 ): Promise<unknown> => Effect.runPromise(executeToolEffect(toolName, args, options))
 
 export const createServer = (options?: ServerOptions): McpServer => {
@@ -540,10 +524,10 @@ export const createServer = (options?: ServerOptions): McpServer => {
       Effect.runPromise(
         executeToolEffect("harness_resolve", args, options).pipe(
           Effect.map((data) => ({
-            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }]
-          }))
-        )
-      )
+            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+          })),
+        ),
+      ),
   )
 
   server.tool(
@@ -554,10 +538,10 @@ export const createServer = (options?: ServerOptions): McpServer => {
       Effect.runPromise(
         executeToolEffect("harness_callers", args, options).pipe(
           Effect.map((data) => ({
-            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }]
-          }))
-        )
-      )
+            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+          })),
+        ),
+      ),
   )
 
   server.tool(
@@ -568,10 +552,10 @@ export const createServer = (options?: ServerOptions): McpServer => {
       Effect.runPromise(
         executeToolEffect("harness_callees", args, options).pipe(
           Effect.map((data) => ({
-            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }]
-          }))
-        )
-      )
+            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+          })),
+        ),
+      ),
   )
 
   server.tool(
@@ -582,38 +566,46 @@ export const createServer = (options?: ServerOptions): McpServer => {
       Effect.runPromise(
         executeToolEffect("harness_tests_reaching", args, options).pipe(
           Effect.map((data) => ({
-            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }]
-          }))
-        )
-      )
+            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+          })),
+        ),
+      ),
   )
 
   server.tool(
     "harness_structural_search",
     "Perform structural AST search using ast-grep across workspace TypeScript code",
-    { pattern: z.string().describe("ast-grep pattern to search for across workspace TypeScript files") },
+    {
+      pattern: z
+        .string()
+        .describe("ast-grep pattern to search for across workspace TypeScript files"),
+    },
     (args) =>
       Effect.runPromise(
         executeToolEffect("harness_structural_search", args, options).pipe(
           Effect.map((data) => ({
-            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }]
-          }))
-        )
-      )
+            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+          })),
+        ),
+      ),
   )
 
   server.tool(
     "harness_route",
     "Route an implementation plan step to an Effect idiom building block using local decision model",
-    { planStep: z.string().describe("Implementation plan step text to route to an Effect idiom block") },
+    {
+      planStep: z
+        .string()
+        .describe("Implementation plan step text to route to an Effect idiom block"),
+    },
     (args) =>
       Effect.runPromise(
         executeToolEffect("harness_route", args, options).pipe(
           Effect.map((data) => ({
-            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }]
-          }))
-        )
-      )
+            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+          })),
+        ),
+      ),
   )
 
   server.tool(
@@ -623,17 +615,17 @@ export const createServer = (options?: ServerOptions): McpServer => {
       symbolOrSpan: z
         .string()
         .describe(
-          "Symbol, service, layer, error, or span name to trace upward to Motivation (EARS & ADR)"
-        )
+          "Symbol, service, layer, error, or span name to trace upward to Motivation (EARS & ADR)",
+        ),
     },
     (args) =>
       Effect.runPromise(
         executeToolEffect("harness_ontology_why", args, options).pipe(
           Effect.map((data) => ({
-            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }]
-          }))
-        )
-      )
+            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+          })),
+        ),
+      ),
   )
 
   server.tool(
@@ -643,17 +635,17 @@ export const createServer = (options?: ServerOptions): McpServer => {
       symbolOrSpan: z
         .string()
         .describe(
-          "Symbol, service, layer, error, or span name to analyze cross-layer ArchiMate impact for"
-        )
+          "Symbol, service, layer, error, or span name to analyze cross-layer ArchiMate impact for",
+        ),
     },
     (args) =>
       Effect.runPromise(
         executeToolEffect("harness_ontology_impact", args, options).pipe(
           Effect.map((data) => ({
-            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }]
-          }))
-        )
-      )
+            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+          })),
+        ),
+      ),
   )
 
   server.tool(
@@ -664,17 +656,17 @@ export const createServer = (options?: ServerOptions): McpServer => {
         .string()
         .optional()
         .describe(
-          "Optional scope name (e.g. 'sample') to check deterministic cross-layer invariants and Clef semantic conflicts"
-        )
+          "Optional scope name (e.g. 'sample') to check deterministic cross-layer invariants and Clef semantic conflicts",
+        ),
     },
     (args) =>
       Effect.runPromise(
         executeToolEffect("harness_ontology_check", args, options).pipe(
           Effect.map((data) => ({
-            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }]
-          }))
-        )
-      )
+            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+          })),
+        ),
+      ),
   )
 
   server.tool(
@@ -683,30 +675,22 @@ export const createServer = (options?: ServerOptions): McpServer => {
     {
       queryName: z
         .enum(HARNESS_GQ_QUERY_NAMES)
-        .describe(
-          "Name of the canonical .gq query in libs/harness/graph/queries/harness.gq"
-        ),
+        .describe("Name of the canonical .gq query in libs/harness/graph/queries/harness.gq"),
       params: z
         .record(z.string(), z.unknown())
         .optional()
         .describe("Query parameters matching $var placeholders"),
-      branch: z
-        .string()
-        .optional()
-        .describe("Target graph branch (defaults to 'main')"),
-      repoRoot: z
-        .string()
-        .optional()
-        .describe("Target repository root for cluster resolution")
+      branch: z.string().optional().describe("Target graph branch (defaults to 'main')"),
+      repoRoot: z.string().optional().describe("Target repository root for cluster resolution"),
     },
     (args) =>
       Effect.runPromise(
         executeToolEffect("harness_gq_query", args, options).pipe(
           Effect.map((data) => ({
-            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }]
-          }))
-        )
-      )
+            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+          })),
+        ),
+      ),
   )
 
   server.tool(
@@ -720,16 +704,16 @@ export const createServer = (options?: ServerOptions): McpServer => {
       project: z
         .string()
         .optional()
-        .describe("Optional tsconfig.json path to check (defaults to tsconfig.base.json)")
+        .describe("Optional tsconfig.json path to check (defaults to tsconfig.base.json)"),
     },
     (args) =>
       Effect.runPromise(
         executeToolEffect("harness_lsp_diagnostics", args, options).pipe(
           Effect.map((data) => ({
-            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }]
-          }))
-        )
-      )
+            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+          })),
+        ),
+      ),
   )
 
   server.tool(
@@ -739,16 +723,16 @@ export const createServer = (options?: ServerOptions): McpServer => {
       format: z
         .enum(["json", "markdown"])
         .optional()
-        .describe("Report output format (defaults to 'json')")
+        .describe("Report output format (defaults to 'json')"),
     },
     (args) =>
       Effect.runPromise(
         executeToolEffect("harness_telemetry_report", args, options).pipe(
           Effect.map((data) => ({
-            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }]
-          }))
-        )
-      )
+            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+          })),
+        ),
+      ),
   )
 
   return server

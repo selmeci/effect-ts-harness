@@ -17,9 +17,7 @@ const schemaPath = join(packageRoot, "src/db/schema.ts")
 
 const listSql = async (dir) => {
   try {
-    return (await readdir(dir, { recursive: true }))
-      .filter((file) => file.endsWith(".sql"))
-      .sort()
+    return (await readdir(dir, { recursive: true })).filter((file) => file.endsWith(".sql")).sort()
   } catch {
     return []
   }
@@ -52,9 +50,9 @@ const run = async () => {
         "--out",
         outDir,
         "--name",
-        "drift"
+        "drift",
       ],
-      { stdio: "pipe", cwd: packageRoot }
+      { stdio: "pipe", cwd: packageRoot },
     )
 
     const newFiles = (await listSql(outDir)).filter((file) => !before.includes(file))
@@ -73,15 +71,15 @@ const run = async () => {
     const report = checkMigrationSqlSafety(sqlFiles)
     if (report.requiresEscalation) {
       for (const v of report.violations) {
-        console.error(
-          `migration check: ESCALATE — ${v.message} (${v.file}):\n${v.statement}`
-        )
+        console.error(`migration check: ESCALATE — ${v.message} (${v.file}):\n${v.statement}`)
       }
       process.exitCode = 2
       return
     }
 
-    console.error(`migration check: FAIL — schema changed without a committed migration:\n${newFiles.join("\n")}`)
+    console.error(
+      `migration check: FAIL — schema changed without a committed migration:\n${newFiles.join("\n")}`,
+    )
     process.exitCode = 1
     return
   } finally {

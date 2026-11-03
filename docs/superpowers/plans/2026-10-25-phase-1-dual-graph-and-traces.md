@@ -31,11 +31,13 @@
 ### Task 1: Syntactic `Effect.fn` index in `@harness/ingest` and exported `Effect.fn` literal-name rule
 
 **Files:**
+
 - Modify: `libs/harness/ingest/package.json` (add `@ast-grep/napi: "0.51.0"`, update exports)
 - Create: `libs/harness/ingest/src/fn-index.ts`, `libs/harness/ingest/src/index.ts`, `libs/harness/ingest/test/fn-index.test.ts`
 - Modify: `tools/oxlint/syntax-bans.js`
 
 **Interfaces:**
+
 - Consumes: `@ast-grep/napi` (`parse`, `Lang.TypeScript`).
 - Produces:
   - `IndexedEffectFn`: `{ readonly qualname: string; readonly spanName: string; readonly exportName: string; readonly file: string; readonly line: number; readonly packageTag: "contract" | "domain" | "service" | "infra" | "app"; readonly isStub: boolean }`
@@ -70,7 +72,7 @@ describe("Effect.fn syntactic index", () => {
         file: "libs/sample/domain/src/index.ts",
         line: 4,
         packageTag: "domain",
-        isStub: false
+        isStub: false,
       },
       {
         qualname: "libs/sample/domain/src/index.ts#pending",
@@ -79,14 +81,22 @@ describe("Effect.fn syntactic index", () => {
         file: "libs/sample/domain/src/index.ts",
         line: 7,
         packageTag: "domain",
-        isStub: true
-      }
+        isStub: true,
+      },
     ])
   })
 
   it("reports duplicate spanName across indexed functions", () => {
-    const a = indexEffectFnsInFile("a.ts", `export const f = Effect.fn("Dup")(function* () {})`, "domain")
-    const b = indexEffectFnsInFile("b.ts", `export const g = Effect.fn("Dup")(function* () {})`, "domain")
+    const a = indexEffectFnsInFile(
+      "a.ts",
+      `export const f = Effect.fn("Dup")(function* () {})`,
+      "domain",
+    )
+    const b = indexEffectFnsInFile(
+      "b.ts",
+      `export const g = Effect.fn("Dup")(function* () {})`,
+      "domain",
+    )
     const result = validateUniqueSpanNames([...a, ...b])
     expect(result.duplicates).toEqual(["Dup"])
   })
@@ -121,10 +131,12 @@ git commit -m "feat(ingest): add syntactic Effect.fn index and literal span-name
 ### Task 2: Recording `Tracer` Layer with synthetic root `TestSpan` in `@harness/ingest`
 
 **Files:**
+
 - Create: `libs/harness/ingest/src/recording-tracer.ts`, `libs/harness/ingest/test/recording-tracer.test.ts`
 - Modify: `libs/harness/ingest/src/index.ts`
 
 **Interfaces:**
+
 - Consumes: `Effect`, `Layer`, `Option`, `Tracer` from `"effect"`, `IndexedEffectFn` from `./fn-index.js`, `TracedCallEdge`, `ExercisesSpanEdge` from `./trace-format.js`.
 - Produces:
   - `RecordedSpanEvent`: `{ readonly traceId: string; readonly spanId: string; readonly name: string; readonly parentSpanId: string | null; readonly attributes: ReadonlyRecord<string, unknown> }`
@@ -153,15 +165,15 @@ describe("recording tracer with synthetic root TestSpan", () => {
           indexEffectFnsInFile(
             "libs/sample/domain/src/index.ts",
             `export const greet = Effect.fn("Sample.greet")(function* () {})`,
-            "domain"
-          )[0]!
-        ]
+            "domain",
+          )[0]!,
+        ],
       ])
 
       const { result, edges } = yield* runWithTestTracer(
         "libs/sample/domain/test/index.test.ts::greets by name",
         greet({ name: "Roman" }),
-        fnIndex
+        fnIndex,
       )
 
       expect(result).toBe("Hello, Roman!")
@@ -170,10 +182,10 @@ describe("recording tracer with synthetic root TestSpan", () => {
           testId: "libs/sample/domain/test/index.test.ts::greets by name",
           calleeQualname: "libs/sample/domain/src/index.ts#greet",
           callCount: 1,
-          receiverLayer: null
-        }
+          receiverLayer: null,
+        },
       ])
-    })
+    }),
   )
 
   it.effect("records both ExercisesSpan and parent->child TracedCall edges", () =>
@@ -184,14 +196,14 @@ describe("recording tracer with synthetic root TestSpan", () => {
         export const greet = Effect.fn("Sample.greet")(function* () {})
         export const helper = Effect.fn("Sample.helper")(function* () {})
         `,
-        "domain"
+        "domain",
       )
       const fnIndex = new Map(fns.map((f) => [f.spanName, f]))
 
       const { edges } = yield* runWithTestTracer(
         "libs/sample/domain/test/index.test.ts::helper calls greet",
         helper("Roman"),
-        fnIndex
+        fnIndex,
       )
 
       expect(edges.tracedCalls).toEqual([
@@ -199,11 +211,11 @@ describe("recording tracer with synthetic root TestSpan", () => {
           callerQualname: "libs/sample/domain/src/index.ts#helper",
           calleeQualname: "libs/sample/domain/src/index.ts#greet",
           callCount: 1,
-          receiverLayer: null
-        }
+          receiverLayer: null,
+        },
       ])
       expect(edges.exercisesSpans).toHaveLength(2)
-    })
+    }),
   )
 })
 ```
@@ -215,7 +227,7 @@ Expected: FAIL with `Cannot find module '../src/recording-tracer.js'`.
 
 - [ ] **Step 3: Implement `libs/harness/ingest/src/recording-tracer.ts`**
 
-Use `Tracer.make` and `Effect.withTracer` + `Effect.withSpan(\`Test:\${testId}\`)` in `libs/harness/ingest/src/recording-tracer.ts`. Whenever a span starts, record `{ traceId: span.traceId, spanId: span.spanId, name, parentSpanId }`, and when `runWithTestTracer` completes, aggregate `(Test) -> (EffectFn)` pairs into `ExercisesSpanEdge[]` and `(ParentEffectFn) -> (ChildEffectFn)` pairs into `TracedCallEdge[]`. Also support merging external `workerd` spans by matching `traceId` to the root `TestSpan`'s `traceId`.
+Use `Tracer.make` and `Effect.withTracer` + `Effect.withSpan(\`Test:\${testId}\`)`in`libs/harness/ingest/src/recording-tracer.ts`. Whenever a span starts, record `{ traceId: span.traceId, spanId: span.spanId, name, parentSpanId }`, and when `runWithTestTracer`completes, aggregate`(Test) -> (EffectFn)`pairs into`ExercisesSpanEdge[]`and`(ParentEffectFn) -> (ChildEffectFn)`pairs into`TracedCallEdge[]`. Also support merging external `workerd`spans by matching`traceId`to the root`TestSpan`'s `traceId`.
 
 - [ ] **Step 4: Run `@harness/ingest:verify`**
 
@@ -234,12 +246,14 @@ git commit -m "feat(ingest): implement recording Tracer with synthetic root Test
 ### Task 3: Create `@harness/graph` with `effect/Graph`, `schema.pg`, and Omnigraph NDJSON sync
 
 **Files:**
+
 - Create: `libs/harness/graph/package.json`, `libs/harness/graph/tsconfig.json`, `libs/harness/graph/vitest.config.ts`
 - Create: `libs/harness/graph/schema.pg`
 - Create: `libs/harness/graph/src/model.ts`, `libs/harness/graph/src/graph-engine.ts`, `libs/harness/graph/src/omnigraph-sync.ts`, `libs/harness/graph/src/structural-search.ts`, `libs/harness/graph/src/index.ts`
 - Create: `libs/harness/graph/test/graph-engine.test.ts`
 
 **Interfaces:**
+
 - Consumes: `Graph` from `"effect/Graph"`, `@harness/ingest`, `@modernrelay/omnigraph@0.14.0`, `@ast-grep/napi@0.51.0`.
 - Produces:
   - `libs/harness/graph/schema.pg` (exact schema from `docs/mvp_v2.md` §8.2).
@@ -266,7 +280,7 @@ import {
   findCallers,
   findTestsReaching,
   renderMermaid,
-  toOmnigraphNdjson
+  toOmnigraphNdjson,
 } from "../src/index.js"
 
 describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
@@ -279,7 +293,7 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
         line: 4,
         packageTag: "domain",
         successType: "string",
-        isStub: false
+        isStub: false,
       },
       {
         qualname: "libs/sample/infra/src/index.ts#PhotoRepo.insert",
@@ -288,8 +302,8 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
         line: 10,
         packageTag: "infra",
         successType: "Photo",
-        isStub: false
-      }
+        isStub: false,
+      },
     ],
     services: [],
     layers: [],
@@ -299,8 +313,8 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
         testId: "libs/sample/domain/test/index.test.ts::greets by name",
         testFile: "libs/sample/domain/test/index.test.ts",
         testName: "greets by name",
-        lastTreeHash: "abc123"
-      }
+        lastTreeHash: "abc123",
+      },
     ],
     patternDocs: [],
     requiresService: [],
@@ -312,28 +326,28 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
         callerQualname: "libs/sample/domain/src/index.ts#greet",
         calleeQualname: "libs/sample/infra/src/index.ts#PhotoRepo.insert",
         callCount: 1,
-        receiverLayer: "PhotoRepoLive"
-      }
+        receiverLayer: "PhotoRepoLive",
+      },
     ],
     exercisesSpans: [
       {
         testId: "libs/sample/domain/test/index.test.ts::greets by name",
         calleeQualname: "libs/sample/domain/src/index.ts#greet",
         callCount: 1,
-        receiverLayer: null
-      }
-    ]
+        receiverLayer: null,
+      },
+    ],
   })
 
   it("resolves tests_reaching transitively from leaf and downstream spans", () => {
     const direct = findTestsReaching(sampleGraph, "Sample.greet")
     expect(direct.map((t) => t.testId)).toEqual([
-      "libs/sample/domain/test/index.test.ts::greets by name"
+      "libs/sample/domain/test/index.test.ts::greets by name",
     ])
 
     const transitive = findTestsReaching(sampleGraph, "PhotoRepo.insert")
     expect(transitive.map((t) => t.testId)).toEqual([
-      "libs/sample/domain/test/index.test.ts::greets by name"
+      "libs/sample/domain/test/index.test.ts::greets by name",
     ])
   })
 
@@ -341,13 +355,13 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
     expect(findCallees(sampleGraph, "Sample.greet")).toEqual([
       expect.objectContaining({
         qualname: "libs/sample/infra/src/index.ts#PhotoRepo.insert",
-        receiverLayer: "PhotoRepoLive"
-      })
+        receiverLayer: "PhotoRepoLive",
+      }),
     ])
     expect(findCallers(sampleGraph, "PhotoRepo.insert")).toEqual([
       expect.objectContaining({
-        qualname: "libs/sample/domain/src/index.ts#greet"
-      })
+        qualname: "libs/sample/domain/src/index.ts#greet",
+      }),
     ])
   })
 
@@ -388,6 +402,7 @@ git commit -m "feat(graph): add effect/Graph engine, schema.pg, Omnigraph sync, 
 ### Task 4: Generate reviewed `agent-patterns/*.md` files and index them as `PatternDoc` nodes
 
 **Files:**
+
 - Create:
   - `agent-patterns/planning.md`
   - `agent-patterns/services-and-layers.md`
@@ -407,6 +422,7 @@ git commit -m "feat(graph): add effect/Graph engine, schema.pg, Omnigraph sync, 
 - Create: `libs/harness/graph/src/pattern-index.ts`, `libs/harness/graph/test/pattern-index.test.ts`
 
 **Interfaces:**
+
 - Consumes: `repos/effect/LLMS.md`, `repos/effect/packages/effect/src/*`, `repos/alchemy/packages/alchemy/src/*`, `docs/alchemy-llms-full.txt`.
 - Produces: All 14 reviewed pattern files in `agent-patterns/*.md` (including the plan template in `agent-patterns/planning.md` with `stub<A, E, R>`) and `loadPatternDocs(repoRoot: string): ReadonlyArray<PatternDocNode>` in `@harness/graph`.
 
@@ -435,7 +451,7 @@ describe("agent-patterns index", () => {
       "schedule",
       "schema",
       "services-and-layers",
-      "testing"
+      "testing",
     ])
     for (const doc of docs) {
       expect(doc.summary.length).toBeGreaterThan(20)
@@ -470,11 +486,13 @@ git commit -m "docs(agent-patterns): add 14 Effect v4 and Alchemy v2 pattern fil
 ### Task 5: Expose Effect graph & trace tools in `apps/harness-mcp` and wire workspace trace sync
 
 **Files:**
+
 - Modify: `apps/harness-mcp/package.json`
 - Modify: `apps/harness-mcp/src/server.ts`, `apps/harness-mcp/test/server.test.ts`
 - Modify: `libs/sample/domain/package.json`, `libs/sample/domain/test/index.test.ts`
 
 **Interfaces:**
+
 - Consumes: `@harness/graph`, `@harness/ingest`, `@harness/decision`.
 - Produces:
   - `createServer(options?: { graph?: HarnessGraph; decisionLayer?: Layer.Layer<DecisionModel.DecisionModel> })` in `apps/harness-mcp/src/server.ts` registering tools:
@@ -503,8 +521,8 @@ describe("harness-mcp tools", () => {
         line: 4,
         packageTag: "domain",
         successType: "string",
-        isStub: false
-      }
+        isStub: false,
+      },
     ],
     services: [],
     layers: [],
@@ -514,8 +532,8 @@ describe("harness-mcp tools", () => {
         testId: "libs/sample/domain/test/index.test.ts::greets by name",
         testFile: "libs/sample/domain/test/index.test.ts",
         testName: "greets by name",
-        lastTreeHash: "hash1"
-      }
+        lastTreeHash: "hash1",
+      },
     ],
     patternDocs: [],
     requiresService: [],
@@ -528,24 +546,32 @@ describe("harness-mcp tools", () => {
         testId: "libs/sample/domain/test/index.test.ts::greets by name",
         calleeQualname: "libs/sample/domain/src/index.ts#greet",
         callCount: 1,
-        receiverLayer: null
-      }
-    ]
+        receiverLayer: null,
+      },
+    ],
   })
 
   it("resolves EffectFn node and tests_reaching from the graph snapshot", async () => {
     expect(createServer({ graph })).toBeDefined()
-    const resolved = await executeTool("harness_resolve", { symbolOrSpan: "Sample.greet" }, { graph })
+    const resolved = await executeTool(
+      "harness_resolve",
+      { symbolOrSpan: "Sample.greet" },
+      { graph },
+    )
     expect(resolved).toMatchObject({
       qualname: "libs/sample/domain/src/index.ts#greet",
-      spanName: "Sample.greet"
+      spanName: "Sample.greet",
     })
 
-    const tests = await executeTool("harness_tests_reaching", { symbolOrSpan: "Sample.greet" }, { graph })
+    const tests = await executeTool(
+      "harness_tests_reaching",
+      { symbolOrSpan: "Sample.greet" },
+      { graph },
+    )
     expect(tests).toEqual([
       expect.objectContaining({
-        testId: "libs/sample/domain/test/index.test.ts::greets by name"
-      })
+        testId: "libs/sample/domain/test/index.test.ts::greets by name",
+      }),
     ])
   })
 })

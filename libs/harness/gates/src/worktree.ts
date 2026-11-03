@@ -15,12 +15,12 @@ export {
   resolveOmnigraphClusterDir,
   resolveOmnigraphTaskBranches,
   sanitizeOmnigraphBranchSlug,
-  writeGraphHeadMeta
+  writeGraphHeadMeta,
 } from "@harness/graph"
 
 export const resolveHarnessStateDir = (
   repoRoot: string,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
 ): string => {
   const customDir = env.HARNESS_STATE_DIR?.trim()
   if (customDir && customDir.length > 0) {

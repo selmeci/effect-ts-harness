@@ -11,7 +11,7 @@ import type {
   DurableObjectTransaction,
   SqlStorage,
   SqlStorageCursor,
-  SqlStorageValue
+  SqlStorageValue,
 } from "@cloudflare/workers-types"
 
 const unsafeCast = <T>(value: unknown): T => value as T
@@ -39,9 +39,7 @@ const serializeSqlBinding = (value: unknown): unknown => {
   }
   if (ArrayBuffer.isView(value)) {
     return {
-      __uint8: Array.from(
-        new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
-      )
+      __uint8: Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)),
     }
   }
   return value
@@ -59,7 +57,7 @@ class WorkerdSqlCursor<T extends Record<string, SqlStorageValue>> {
     columnNames: Array<string>,
     rawRows: ReadonlyArray<ReadonlyArray<SqlStorageValue>>,
     rowsRead: number,
-    rowsWritten: number
+    rowsWritten: number,
   ) {
     this.columnNames = columnNames
     this.rawRows = rawRows
@@ -100,9 +98,9 @@ class WorkerdSqlCursor<T extends Record<string, SqlStorageValue>> {
     return Effect.runSync(
       Effect.die(
         new Error(
-          `Expected exactly 1 row in SqlStorageCursor.one(), got ${this.objectRows.length}`
-        )
-      )
+          `Expected exactly 1 row in SqlStorageCursor.one(), got ${this.objectRows.length}`,
+        ),
+      ),
     )
   }
 
@@ -440,11 +438,7 @@ const closeSharedBridge = (bridgeToClose: SharedWorkerdBridge): void => {
     })
 }
 
-const acquireSharedWorkerdBridge = (): Effect.Effect<
-  SharedWorkerdBridge,
-  never,
-  Scope.Scope
-> =>
+const acquireSharedWorkerdBridge = (): Effect.Effect<SharedWorkerdBridge, never, Scope.Scope> =>
   Effect.acquireRelease(
     Effect.gen(function* () {
       if (idleCloseTimer !== null) {
@@ -481,20 +475,20 @@ const acquireSharedWorkerdBridge = (): Effect.Effect<
               name: "main",
               address: "127.0.0.1:0",
               http: {},
-              service: { name: "main" }
-            }
+              service: { name: "main" },
+            },
           ],
           services: [
             {
               name: "storage",
-              disk: { path: tmpDir, writable: true }
+              disk: { path: tmpDir, writable: true },
             },
             {
               name: "callback",
               external: {
                 address: `127.0.0.1:${String(callbackPort)}`,
-                http: {}
-              }
+                http: {},
+              },
             },
             {
               name: "main",
@@ -503,32 +497,32 @@ const acquireSharedWorkerdBridge = (): Effect.Effect<
                 modules: [
                   {
                     name: "worker.js",
-                    esModule: DO_WORKER_ES_MODULE
-                  }
+                    esModule: DO_WORKER_ES_MODULE,
+                  },
                 ],
                 durableObjectNamespaces: [
                   {
                     className: "HarnessSqlDurableObject",
                     uniqueKey: "harness-es-sql-do",
-                    enableSql: true
-                  }
+                    enableSql: true,
+                  },
                 ],
                 durableObjectStorage: { localDisk: "storage" },
                 bindings: [
                   {
                     name: "DO",
                     durableObjectNamespace: {
-                      className: "HarnessSqlDurableObject"
-                    }
+                      className: "HarnessSqlDurableObject",
+                    },
                   },
                   {
                     name: "CALLBACK",
-                    service: { name: "callback" }
-                  }
-                ]
-              }
-            }
-          ]
+                    service: { name: "callback" },
+                  },
+                ],
+              },
+            },
+          ],
         })
         .pipe(Scope.provide(bridgeScope), Effect.orDie)
 
@@ -552,7 +546,7 @@ const acquireSharedWorkerdBridge = (): Effect.Effect<
         worker,
         scope: bridgeScope,
         tmpDir,
-        callSync
+        callSync,
       }
       activeBridge = bridge
       return bridge
@@ -570,12 +564,12 @@ const acquireSharedWorkerdBridge = (): Effect.Effect<
             }
           }, 50)
         }
-      })
+      }),
   )
 
 const createWorkerdDurableObjectStorage = (
   bridge: SharedWorkerdBridge,
-  doName: string
+  doName: string,
 ): DurableObjectStorage => {
   const txStack: Array<{ readonly txId: string; rolledBack: boolean }> = []
   let txCounter = 0
@@ -594,26 +588,24 @@ const createWorkerdDurableObjectStorage = (
         doName,
         txId: currentTx?.txId ?? null,
         query,
-        bindings: bindings.map(serializeSqlBinding)
+        bindings: bindings.map(serializeSqlBinding),
       })
       if (!res.ok) {
         return Effect.runSync(
-          Effect.die(new Error(res.message ?? "SQLite execution failed in workerd"))
+          Effect.die(new Error(res.message ?? "SQLite execution failed in workerd")),
         )
       }
       const colNames = res.columnNames ?? []
-      const rawRows = (res.rawRows ?? []).map((row) =>
-        row.map(deserializeSqlValue)
-      )
+      const rawRows = (res.rawRows ?? []).map((row) => row.map(deserializeSqlValue))
       return unsafeCast<SqlStorageCursor<T>>(
         new WorkerdSqlCursor<T>(
           colNames,
           rawRows,
           res.rowsRead ?? rawRows.length,
-          res.rowsWritten ?? 0
-        )
+          res.rowsWritten ?? 0,
+        ),
       )
-    }
+    },
   }
 
   const doStorage = {
@@ -628,11 +620,11 @@ const createWorkerdDurableObjectStorage = (
         type: "begin-tx",
         doName,
         txId,
-        parentTxId: parentTx?.txId ?? null
+        parentTxId: parentTx?.txId ?? null,
       })
       if (!startRes.ok) {
         return Promise.reject(
-          new Error(startRes.message ?? "Failed to begin workerd DO transaction")
+          new Error(startRes.message ?? "Failed to begin workerd DO transaction"),
         )
       }
 
@@ -644,7 +636,7 @@ const createWorkerdDurableObjectStorage = (
           bridge.callSync({
             type: "rollback-tx",
             doName,
-            txId
+            txId,
           })
         }
       }
@@ -652,7 +644,7 @@ const createWorkerdDurableObjectStorage = (
       const txn = {
         rollback() {
           safeRollback()
-        }
+        },
       }
 
       return Promise.resolve()
@@ -664,11 +656,11 @@ const createWorkerdDurableObjectStorage = (
               const commitRes = bridge.callSync({
                 type: "commit-tx",
                 doName,
-                txId
+                txId,
               })
               if (!commitRes.ok) {
                 return Promise.reject(
-                  new Error(commitRes.message ?? "Failed to commit workerd DO transaction")
+                  new Error(commitRes.message ?? "Failed to commit workerd DO transaction"),
                 )
               }
             }
@@ -678,9 +670,9 @@ const createWorkerdDurableObjectStorage = (
             txStack.pop()
             safeRollback()
             return Promise.reject(err)
-          }
+          },
         )
-    }
+    },
   }
 
   return unsafeCast<DurableObjectStorage>(doStorage)
@@ -694,5 +686,5 @@ export const SqlClientMemoryLayer: Layer.Layer<SqlClient> = Layer.effect(
     const storage = createWorkerdDurableObjectStorage(bridge, doName)
     const services = yield* Layer.build(SqliteClientModule.layer({ storage }))
     return Context.get(services, SqlClient)
-  })
+  }),
 )

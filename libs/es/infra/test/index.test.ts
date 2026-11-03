@@ -18,7 +18,7 @@ describe("@harness/es-infra", () => {
       expect(tableNames).toContain("es_commands")
       expect(tableNames).toContain("es_projections_meta")
       expect(tableNames).toContain("es_outbox")
-    }).pipe(Effect.provide(SqlClientMemoryLayer))
+    }).pipe(Effect.provide(SqlClientMemoryLayer)),
   )
 
   it.effect(
@@ -47,18 +47,18 @@ describe("@harness/es-infra", () => {
                     VALUES ('Cart', 'agg-1', 2, 'Updated', '{}', '{}', 1001)
                   `
                   return yield* Effect.fail("rollback-inner")
-                })
-              )
+                }),
+              ),
             )
             expect(innerErr).toBe("rollback-inner")
-          })
+          }),
         )
 
         const rows = yield* sql`SELECT stream_version FROM es_outbox ORDER BY stream_version ASC`
         const versions = (rows as Array<{ readonly stream_version: number }>).map(
-          (r) => r.stream_version
+          (r) => r.stream_version,
         )
         expect(versions).toEqual([1])
-      }).pipe(Effect.provide(SqlClientMemoryLayer))
+      }).pipe(Effect.provide(SqlClientMemoryLayer)),
   )
 })

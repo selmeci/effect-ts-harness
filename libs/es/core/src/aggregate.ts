@@ -3,7 +3,7 @@ import type {
   AggregateCommandResult,
   AggregateName,
   OutboxPublicationMode,
-  StreamVersion
+  StreamVersion,
 } from "@harness/es-contract"
 import type { Decider } from "./decider.js"
 import type { LocalProjection } from "./projection.js"
@@ -14,7 +14,7 @@ export interface AggregateConfig<
   State,
   Err,
   ProjectionEnv = never,
-  ProjectionErr = never
+  ProjectionErr = never,
 > {
   readonly aggregateName: AggregateName
   readonly decider: Decider<Command, Event, State, Err>

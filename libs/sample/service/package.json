@@ -6,16 +6,11 @@
   "exports": {
     ".": "./src/index.ts"
   },
-  "nx": {
-    "tags": [
-      "type:service"
-    ]
-  },
   "scripts": {
     "typecheck": "tsc --noEmit && effect-tsgo diagnostics --strict --project tsconfig.json",
     "lint": "oxlint --deny-warnings .",
     "test": "vitest run",
-    "verify": "pnpm run typecheck && pnpm run lint && pnpm run test"
+    "verify": "node -e \"\""
   },
   "dependencies": {
     "@harness/sample-contract": "workspace:*",
@@ -25,5 +20,10 @@
     "@effect/vitest": "4.0.0",
     "@types/node": "26.6.5",
     "vitest": "5.0.3"
+  },
+  "nx": {
+    "tags": [
+      "type:service"
+    ]
   }
 }

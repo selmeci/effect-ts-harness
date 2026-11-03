@@ -18,7 +18,16 @@
  */
 import { execSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -87,12 +96,14 @@ const die = (msg) => {
 }
 
 const loadCurrentRun = () => {
-  if (!existsSync(currentPointer)) die("No active scenario run. Start one with `pnpm scenario start <id>`.")
+  if (!existsSync(currentPointer))
+    die("No active scenario run. Start one with `pnpm scenario start <id>`.")
   const { runDir } = readJson(currentPointer)
   return { runDir, run: readJson(join(runDir, "run.json")) }
 }
 
-const saveRun = (runDir, run) => writeFileSync(join(runDir, "run.json"), JSON.stringify(run, null, 2))
+const saveRun = (runDir, run) =>
+  writeFileSync(join(runDir, "run.json"), JSON.stringify(run, null, 2))
 
 /** Antigravity double-encodes tool args (`"\"value\""`); unwrap when possible. */
 const unwrap = (value) => {
@@ -125,9 +136,13 @@ const callClef = async () => {
       model: CLEF_MODEL,
       state: { command: "rm -r dist" },
       questions: {
-        destructive: { type: "noul", instructions: "Does this command delete, overwrite, or mutate critical state irreversibly?" }
-      }
-    })
+        destructive: {
+          type: "noul",
+          instructions:
+            "Does this command delete, overwrite, or mutate critical state irreversibly?",
+        },
+      },
+    }),
   })
   const ms = Math.round(performance.now() - started)
   const body = await res.json().catch(() => ({}))
@@ -140,7 +155,7 @@ const preflightClef = async () => {
     if (!cold.ok) {
       return {
         clefModel: false,
-        detail: `${CLEF_MODEL}: HTTP ${cold.status} ${JSON.stringify(cold.body?.error?.message ?? cold.body)}`
+        detail: `${CLEF_MODEL}: HTTP ${cold.status} ${JSON.stringify(cold.body?.error?.message ?? cold.body)}`,
       }
     }
     const warm = await callClef()
@@ -150,7 +165,7 @@ const preflightClef = async () => {
       clefModel: withinBudget,
       coldMs: cold.ms,
       warmMs: warm.ms,
-      detail: `${CLEF_MODEL} cold=${cold.ms}ms warm=${warm.ms}ms (budget ${CLEF_BUDGET_MS}ms) sanity destructive("rm -r dist")=${typeof p === "number" ? p.toFixed(2) : "?"}${withinBudget ? "" : " — TOO SLOW"}`
+      detail: `${CLEF_MODEL} cold=${cold.ms}ms warm=${warm.ms}ms (budget ${CLEF_BUDGET_MS}ms) sanity destructive("rm -r dist")=${typeof p === "number" ? p.toFixed(2) : "?"}${withinBudget ? "" : " — TOO SLOW"}`,
     }
   } catch (err) {
     return { clefModel: false, detail: `${CLEF_MODEL}: ${String(err?.message ?? err)}` }
@@ -172,7 +187,13 @@ const firstTimestamp = (file) => {
 const discoverTranscript = (run, flags) => {
   if (flags.transcript) return resolve(flags.transcript)
   if (flags.conversation) {
-    const file = join(antigravityBrain, flags.conversation, ".system_generated", "logs", "transcript.jsonl")
+    const file = join(
+      antigravityBrain,
+      flags.conversation,
+      ".system_generated",
+      "logs",
+      "transcript.jsonl",
+    )
     if (!existsSync(file)) die(`Transcript not found: ${file}`)
     return file
   }
@@ -187,7 +208,8 @@ const discoverTranscript = (run, flags) => {
   // Claude Code: ~/.claude/projects/<repo path with / -> ->/<session>.jsonl
   const claudeDir = join(homedir(), ".claude", "projects", repoRoot.replace(/[/.]/g, "-"))
   if (existsSync(claudeDir)) {
-    for (const f of readdirSync(claudeDir)) if (f.endsWith(".jsonl")) candidates.push(join(claudeDir, f))
+    for (const f of readdirSync(claudeDir))
+      if (f.endsWith(".jsonl")) candidates.push(join(claudeDir, f))
   }
   // The scenario session is the conversation that STARTED after `scenario start`
   // and was still being written to; pick the earliest such start.
@@ -207,10 +229,18 @@ const normaliseTranscript = (file) => {
     // Antigravity: { created_at, tool_calls: [{ name, args }] }
     if (Array.isArray(row.tool_calls)) {
       for (const call of row.tool_calls) {
-        const args = Object.fromEntries(Object.entries(call.args ?? {}).map(([k, v]) => [k, unwrap(v)]))
+        const args = Object.fromEntries(
+          Object.entries(call.args ?? {}).map(([k, v]) => [k, unwrap(v)]),
+        )
         const tool =
-          call.name === "call_mcp_tool" ? `mcp:${args.ServerName ?? "?"}/${args.ToolName ?? "?"}` : call.name
-        out.push({ timestamp: new Date(row.created_at).toISOString(), tool, args: JSON.stringify(args) })
+          call.name === "call_mcp_tool"
+            ? `mcp:${args.ServerName ?? "?"}/${args.ToolName ?? "?"}`
+            : call.name
+        out.push({
+          timestamp: new Date(row.created_at).toISOString(),
+          tool,
+          args: JSON.stringify(args),
+        })
       }
     }
     // Claude Code: { type: "assistant", timestamp, message: { content: [{ type: "tool_use", name, input }] } }
@@ -221,7 +251,7 @@ const normaliseTranscript = (file) => {
           out.push({
             timestamp: new Date(row.timestamp).toISOString(),
             tool: part.name,
-            args: JSON.stringify(part.input ?? {})
+            args: JSON.stringify(part.input ?? {}),
           })
         }
       }
@@ -250,7 +280,10 @@ const stepWindows = (run) => {
   const marks = run.marks ?? []
   const grace = (iso) => new Date(new Date(iso).getTime() - 1000).toISOString()
   return Object.fromEntries(
-    marks.map((m, i) => [m.label, { from: grace(m.timestamp), to: marks[i + 1]?.timestamp ?? run.endedAt }])
+    marks.map((m, i) => [
+      m.label,
+      { from: grace(m.timestamp), to: marks[i + 1]?.timestamp ?? run.endedAt },
+    ]),
   )
 }
 
@@ -264,7 +297,9 @@ const inWindows = (record, steps, windows) => {
 }
 
 const select = (sources, spec, windows) =>
-  (sources[spec.source] ?? []).filter((r) => matches(r, spec.where) && inWindows(r, spec.step, windows))
+  (sources[spec.source] ?? []).filter(
+    (r) => matches(r, spec.where) && inWindows(r, spec.step, windows),
+  )
 
 const evaluateCheck = (check, sources, windows) => {
   const severity = check.severity ?? "fail"
@@ -302,7 +337,14 @@ const icon = (r) => (r.passed ? "✅" : r.severity === "warn" ? "⚠️" : "❌"
 const renderReport = ({ run, results, sources, transcriptFile, contamination }) => {
   const fails = results.filter((r) => !r.passed && r.severity === "fail").length
   const warns = results.filter((r) => !r.passed && r.severity === "warn").length
-  const verdict = contamination.length > 0 ? "CONTAMINATED" : fails > 0 ? "FAIL" : warns > 0 ? "PASS (with warnings)" : "PASS"
+  const verdict =
+    contamination.length > 0
+      ? "CONTAMINATED"
+      : fails > 0
+        ? "FAIL"
+        : warns > 0
+          ? "PASS (with warnings)"
+          : "PASS"
   const lines = [
     `# Scenario run: ${run.scenario}`,
     "",
@@ -310,32 +352,59 @@ const renderReport = ({ run, results, sources, transcriptFile, contamination }) 
     `**Window:** ${run.startedAt} → ${run.endedAt}`,
     `**Clef preflight:** ${run.preflight.clefModel ? "OK" : "NOT OK"} — ${run.preflight.detail}`,
     `**Transcript:** ${transcriptFile ?? "not found (transcript checks skipped / failed)"}`,
-    ""
+    "",
   ]
   if (contamination.length > 0) {
     lines.push(
       "> [!CAUTION]",
       "> The agent touched `scenarios/` or `tools/scenario/` — it may have seen the hidden script. Results are not trustworthy.",
       ...contamination.map((c) => `> - ${c.timestamp} \`${c.tool}\` ${c.args.slice(0, 160)}`),
-      ""
+      "",
     )
   }
-  lines.push("## Checks", "", "| | Check | Step | Observed | Why it matters |", "|---|---|---|---|---|")
+  lines.push(
+    "## Checks",
+    "",
+    "| | Check | Step | Observed | Why it matters |",
+    "|---|---|---|---|---|",
+  )
   for (const r of results) {
     const step = r.step === undefined ? "all" : [].concat(r.step).join(", ")
-    lines.push(`| ${icon(r)} | \`${r.id}\` | ${step} | ${r.observed} | ${(r.why ?? "").replace(/\|/g, "\\|")} |`)
+    lines.push(
+      `| ${icon(r)} | \`${r.id}\` | ${step} | ${r.observed} | ${(r.why ?? "").replace(/\|/g, "\\|")} |`,
+    )
   }
   lines.push("", "## Step timeline", "")
-  for (const m of run.marks ?? []) lines.push(`- \`${m.timestamp}\` **${m.label}**${m.note ? ` — ${m.note}` : ""}`)
-  lines.push("", "## Telemetry (toolName · outcome · engineSource)", "", "| Count | Event |", "|---|---|")
-  for (const [k, n] of countBy(sources.telemetry, (e) => `${e.surface}/${e.toolName} · ${e.outcome}${e.engineSource ? ` · ${e.engineSource}` : ""}`))
+  for (const m of run.marks ?? [])
+    lines.push(`- \`${m.timestamp}\` **${m.label}**${m.note ? ` — ${m.note}` : ""}`)
+  lines.push(
+    "",
+    "## Telemetry (toolName · outcome · engineSource)",
+    "",
+    "| Count | Event |",
+    "|---|---|",
+  )
+  for (const [k, n] of countBy(
+    sources.telemetry,
+    (e) =>
+      `${e.surface}/${e.toolName} · ${e.outcome}${e.engineSource ? ` · ${e.engineSource}` : ""}`,
+  ))
     lines.push(`| ${n} | ${k} |`)
   lines.push("", "## Friction", "", "| Count | Kind · verdict |", "|---|---|")
-  for (const [k, n] of countBy(sources.friction, (f) => `${f.kind} · ${(f.detail ?? "").split(";")[0]}`))
+  for (const [k, n] of countBy(
+    sources.friction,
+    (f) => `${f.kind} · ${(f.detail ?? "").split(";")[0]}`,
+  ))
     lines.push(`| ${n} | ${k} |`)
   lines.push("", "## Agent tool usage (transcript)", "", "| Count | Tool |", "|---|---|")
   for (const [k, n] of countBy(sources.transcript, (t) => t.tool)) lines.push(`| ${n} | ${k} |`)
-  lines.push("", "## Human notes", "", "_What felt wrong during the session? Which step needed a nudge?_", "")
+  lines.push(
+    "",
+    "## Human notes",
+    "",
+    "_What felt wrong during the session? Which step needed a nudge?_",
+    "",
+  )
   return { markdown: lines.join("\n"), verdict, fails }
 }
 
@@ -344,7 +413,8 @@ const renderReport = ({ run, results, sources, transcriptFile, contamination }) 
 // cannot discover or read expectations via `find .`, `git status`, or `view_file`)
 // ---------------------------------------------------------------------------
 
-const activeScenariosDir = () => (existsSync(stashedScenariosDir) ? stashedScenariosDir : scenariosDir)
+const activeScenariosDir = () =>
+  existsSync(stashedScenariosDir) ? stashedScenariosDir : scenariosDir
 
 const STAMP_IGNORED = new Set([
   ".git",
@@ -360,7 +430,7 @@ const STAMP_IGNORED = new Set([
   ".DS_Store",
   ".alchemy",
   ".vite",
-  ".remember"
+  ".remember",
 ])
 
 // Mirrors libs/harness/gates/src/verify-stamp.ts#computeWorkspaceTreeHash so that
@@ -417,7 +487,10 @@ const restoreScenariosToWorkspace = () => {
   if (existsSync(gitExcludeFile)) {
     const raw = readFileSync(gitExcludeFile, "utf8")
     if (raw.includes(EXCLUDE_START)) {
-      const cleaned = raw.replace(new RegExp(`\\n?${EXCLUDE_START}[\\s\\S]*?${EXCLUDE_END}\\n?`, "g"), "\n")
+      const cleaned = raw.replace(
+        new RegExp(`\\n?${EXCLUDE_START}[\\s\\S]*?${EXCLUDE_END}\\n?`, "g"),
+        "\n",
+      )
       writeFileSync(gitExcludeFile, cleaned)
       changed = true
     }
@@ -448,7 +521,7 @@ const listScenarios = () => {
   const root = activeScenariosDir()
   return existsSync(root)
     ? readdirSync(root).filter(
-        (d) => !d.startsWith("_") && existsSync(join(root, d, "expectations.json"))
+        (d) => !d.startsWith("_") && existsSync(join(root, d, "expectations.json")),
       )
     : []
 }
@@ -465,10 +538,12 @@ const commands = {
 
   start: async ({ positional }) => {
     const id = positional[0] ?? die("usage: pnpm scenario start <id>")
-    if (existsSync(currentPointer)) die("A run is already active. Finish it with `pnpm scenario end` first.")
+    if (existsSync(currentPointer))
+      die("A run is already active. Finish it with `pnpm scenario end` first.")
     restoreScenariosToWorkspace()
     const dir = join(scenariosDir, id)
-    if (!existsSync(join(dir, "expectations.json"))) die(`Unknown scenario '${id}'. Try \`pnpm scenario list\`.`)
+    if (!existsSync(join(dir, "expectations.json")))
+      die(`Unknown scenario '${id}'. Try \`pnpm scenario list\`.`)
     const expectations = readJson(join(dir, "expectations.json"))
     const openingPrompt = readFileSync(join(dir, "prompt.md"), "utf8").trim()
     const preflight = await preflightClef()
@@ -490,17 +565,23 @@ const commands = {
     console.log(`▶ Scenario run started: ${id}`)
     console.log(`  run dir:   ${runDir}`)
     console.log(`  state dir: ${resolveStateDir()}`)
-    console.log(`  isolated:  scenarios/ stashed in .harness/scenario-runs/_stashed-scenarios (restored on \`end\`)`)
+    console.log(
+      `  isolated:  scenarios/ stashed in .harness/scenario-runs/_stashed-scenarios (restored on \`end\`)`,
+    )
     console.log(`  clef:      ${preflight.clefModel ? "OK" : "NOT OK"} — ${preflight.detail}`)
     if ((expectations.requires ?? []).includes("clef") && !preflight.clefModel) {
-      console.log(`\n⚠️  This scenario needs clef, but '${CLEF_MODEL}' does not answer within ${CLEF_BUDGET_MS} ms.`)
+      console.log(
+        `\n⚠️  This scenario needs clef, but '${CLEF_MODEL}' does not answer within ${CLEF_BUDGET_MS} ms.`,
+      )
       console.log("   Check: ollama serve running; `ollama list` has an exact `clef-flash` tag")
       console.log("   (if you only have e.g. clef-flash:9b →  ollama cp clef-flash:9b clef-flash)")
       console.log("   Or continue on purpose to observe the deterministic fallback path.")
     }
     console.log("\nNext:")
     console.log("  1. Open a NEW agent session (Antigravity / Claude Code) in this repo.")
-    console.log("  2. Run `pnpm scenario mark s1` (each `mark <step>` prints the prompt for that step).\n")
+    console.log(
+      "  2. Run `pnpm scenario mark s1` (each `mark <step>` prints the prompt for that step).\n",
+    )
     console.log("──────── opening prompt (copy) ────────")
     console.log(openingPrompt)
     console.log("───────────────────────────────────────")
@@ -509,7 +590,11 @@ const commands = {
   mark: ({ positional }) => {
     const label = positional[0] ?? die("usage: pnpm scenario mark <label> [note]")
     const { runDir, run } = loadCurrentRun()
-    const mark = { label, note: positional.slice(1).join(" ") || undefined, timestamp: new Date().toISOString() }
+    const mark = {
+      label,
+      note: positional.slice(1).join(" ") || undefined,
+      timestamp: new Date().toISOString(),
+    }
     run.marks.push(mark)
     saveRun(runDir, run)
     console.log(`⚑ ${mark.timestamp} ${label}${mark.note ? ` — ${mark.note}` : ""}`)
@@ -529,7 +614,8 @@ const commands = {
   status: () => {
     const { runDir, run } = loadCurrentRun()
     console.log(`Active: ${run.scenario} since ${run.startedAt}\n  ${runDir}`)
-    for (const m of run.marks) console.log(`  ⚑ ${m.timestamp} ${m.label}${m.note ? ` — ${m.note}` : ""}`)
+    for (const m of run.marks)
+      console.log(`  ⚑ ${m.timestamp} ${m.label}${m.note ? ` — ${m.note}` : ""}`)
   },
 
   end: ({ flags }) => {
@@ -539,7 +625,9 @@ const commands = {
     const telemetry = readJsonl(join(run.stateDir, "telemetry-log.jsonl")).filter(inRun)
     const friction = readJsonl(join(run.stateDir, "friction-log.jsonl")).filter(inRun)
     run.transcriptFile = discoverTranscript(run, flags)
-    const transcript = run.transcriptFile ? normaliseTranscript(run.transcriptFile).filter(inRun) : []
+    const transcript = run.transcriptFile
+      ? normaliseTranscript(run.transcriptFile).filter(inRun)
+      : []
     writeJsonl(join(runDir, "telemetry.jsonl"), telemetry)
     writeJsonl(join(runDir, "friction.jsonl"), friction)
     writeJsonl(join(runDir, "transcript-tools.jsonl"), transcript)
@@ -566,29 +654,40 @@ const commands = {
     evaluateRun(runDir, run, {
       telemetry: readJsonl(join(runDir, "telemetry.jsonl")),
       friction: readJsonl(join(runDir, "friction.jsonl")),
-      transcript: readJsonl(join(runDir, "transcript-tools.jsonl"))
+      transcript: readJsonl(join(runDir, "transcript-tools.jsonl")),
     })
-  }
+  },
 }
 
 function evaluateRun(runDir, run, sources) {
   const contamination = sources.transcript.filter((t) =>
-    /scenarios\/|tools\/scenario|_stashed-scenarios|scenario-runs/.test(t.args)
+    /scenarios\/|tools\/scenario|_stashed-scenarios|scenario-runs/.test(t.args),
   )
   const expectations = readJson(join(activeScenariosDir(), run.scenario, "expectations.json"))
   const results = expectations.checks.map((c) => evaluateCheck(c, sources, stepWindows(run)))
   const transcriptFile = run.transcriptFile
-  writeFileSync(join(runDir, "results.json"), JSON.stringify({ run, transcriptFile, results, contamination }, null, 2))
-  const { markdown, verdict, fails } = renderReport({ run, results, sources, transcriptFile, contamination })
+  writeFileSync(
+    join(runDir, "results.json"),
+    JSON.stringify({ run, transcriptFile, results, contamination }, null, 2),
+  )
+  const { markdown, verdict, fails } = renderReport({
+    run,
+    results,
+    sources,
+    transcriptFile,
+    contamination,
+  })
   writeFileSync(join(runDir, "report.md"), markdown)
 
   for (const r of results) console.log(`${icon(r)} ${r.id.padEnd(40)} ${r.observed}`)
   console.log(`\n${verdict}  →  ${join(runDir, "report.md")}`)
-  if (!transcriptFile) console.log("⚠️  No transcript found — pass --conversation <id> or --transcript <path>.")
+  if (!transcriptFile)
+    console.log("⚠️  No transcript found — pass --conversation <id> or --transcript <path>.")
   process.exitCode = fails > 0 || contamination.length > 0 ? 1 : 0
   return expectations
 }
 
 const [cmd = "list", ...rest] = process.argv.slice(2)
-const handler = commands[cmd] ?? (() => die(`unknown command '${cmd}' (list|start|mark|status|end|eval)`))
+const handler =
+  commands[cmd] ?? (() => die(`unknown command '${cmd}' (list|start|mark|status|end|eval)`))
 await handler(parseFlags(rest))

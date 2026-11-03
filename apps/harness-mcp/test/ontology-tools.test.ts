@@ -18,8 +18,8 @@ describe("harness-mcp ontology tools", () => {
         enforcedByFiles: [],
         referencedSpans: [],
         referencedServices: ["PhotoRepo"],
-        referencedErrors: []
-      }
+        referencedErrors: [],
+      },
     ],
     earsSpecs: [
       {
@@ -30,59 +30,59 @@ describe("harness-mcp ontology tools", () => {
         enforcedByFiles: [],
         referencedSpans: [],
         referencedServices: ["PhotoRepo"],
-        referencedErrors: []
-      }
+        referencedErrors: [],
+      },
     ],
     services: [
       {
         tagId: "PhotoRepo",
         name: "PhotoRepo",
         packageTag: "service",
-        file: "libs/sample/service/src/index.ts"
-      }
+        file: "libs/sample/service/src/index.ts",
+      },
     ],
     layers: [
       {
         qualname: "PhotoRepoLive",
         layerKind: "infra",
         packageTag: "infra",
-        file: "libs/sample/infra/src/index.ts"
-      }
+        file: "libs/sample/infra/src/index.ts",
+      },
     ],
     governsSymbols: [
       {
         adrId: "sample:ADR-0001",
         targetKey: "PhotoRepo",
-        targetKind: "ServiceTag"
-      }
+        targetKind: "ServiceTag",
+      },
     ],
     specifiesSymbols: [
       {
         specId: "sample:SPEC-0001",
         targetKey: "PhotoRepo",
-        targetKind: "ServiceTag"
-      }
+        targetKind: "ServiceTag",
+      },
     ],
     providesService: [
       {
         layerQualname: "PhotoRepoLive",
-        tagId: "PhotoRepo"
-      }
-    ]
+        tagId: "PhotoRepo",
+      },
+    ],
   })
 
   const WhyTraceSchema = Schema.Struct({
     justified: Schema.Boolean,
     governingAdrs: Schema.Array(
       Schema.Struct({
-        id: Schema.String
-      })
+        id: Schema.String,
+      }),
     ),
     realizingSpecs: Schema.Array(
       Schema.Struct({
-        id: Schema.String
-      })
-    )
+        id: Schema.String,
+      }),
+    ),
   })
   const decodeWhyTrace = Schema.decodeUnknownSync(WhyTraceSchema)
 
@@ -90,11 +90,11 @@ describe("harness-mcp ontology tools", () => {
     target: Schema.NullOr(
       Schema.Struct({
         key: Schema.String,
-        layer: Schema.String
-      })
+        layer: Schema.String,
+      }),
     ),
     affectedSpecs: Schema.Array(Schema.String),
-    affectedAdrs: Schema.Array(Schema.String)
+    affectedAdrs: Schema.Array(Schema.String),
   })
   const decodeImpact = Schema.decodeUnknownSync(ImpactSchema)
 
@@ -104,16 +104,16 @@ describe("harness-mcp ontology tools", () => {
       Schema.Struct({
         kind: Schema.String,
         nodeId: Schema.String,
-        message: Schema.String
-      })
+        message: Schema.String,
+      }),
     ),
     semanticConflicts: Schema.Array(
       Schema.Struct({
         sourceId: Schema.String,
         targetId: Schema.String,
         hasConflict: Schema.Boolean,
-        conflictKind: Schema.String
-      })
+        conflictKind: Schema.String,
+      }),
     ),
     evaluatedPairs: Schema.Finite,
     layerCounts: Schema.Struct({
@@ -121,8 +121,8 @@ describe("harness-mcp ontology tools", () => {
       Business: Schema.Finite,
       Application: Schema.Finite,
       Technology: Schema.Finite,
-      Implementation: Schema.Finite
-    })
+      Implementation: Schema.Finite,
+    }),
   })
   const decodeCheckResult = Schema.decodeUnknownSync(CheckResultSchema)
 
@@ -131,13 +131,13 @@ describe("harness-mcp ontology tools", () => {
       const raw = yield* executeToolEffect(
         "harness_ontology_why",
         { symbolOrSpan: "PhotoRepoLive" },
-        { graph }
+        { graph },
       )
       const res = decodeWhyTrace(raw)
       expect(res.justified).toBe(true)
       expect(res.governingAdrs.some((a) => a.id === "sample:ADR-0001")).toBe(true)
       expect(res.realizingSpecs.some((s) => s.id === "sample:SPEC-0001")).toBe(true)
-    })
+    }),
   )
 
   it.effect("executes harness_ontology_impact to analyze cross-layer impact", () =>
@@ -145,14 +145,14 @@ describe("harness-mcp ontology tools", () => {
       const raw = yield* executeToolEffect(
         "harness_ontology_impact",
         { symbolOrSpan: "PhotoRepo" },
-        { graph }
+        { graph },
       )
       const res = decodeImpact(raw)
       expect(res.target).not.toBeNull()
       expect(res.target?.key).toBe("PhotoRepo")
       expect(res.affectedSpecs).toContain("sample:SPEC-0001")
       expect(res.affectedAdrs).toContain("sample:ADR-0001")
-    })
+    }),
   )
 
   it.effect("executes harness_ontology_check cleanly when no conflicts exist", () =>
@@ -173,7 +173,7 @@ status: accepted
 | ID | Pattern | Requirement | Effect Symbol | Verification |
 |---|---|---|---|---|
 | REQ-1.1 | Event-driven | When a photo is uploaded, the service shall store it in PhotoRepo. | PhotoRepo | test |
-`
+`,
         },
         {
           id: "sample:ADR-0001",
@@ -211,8 +211,8 @@ Context
 | Rule | Component | Enforcement Tool | Verified in CI |
 |---|---|---|---|
 | Rule 1 | Infra | AST | Yes |
-`
-        }
+`,
+        },
       ]
 
       const raw = yield* executeToolEffect(
@@ -221,8 +221,8 @@ Context
         {
           graph,
           governanceDocs: cleanDocs,
-          decisionLayer: makeMockDecisionModelLayer()
-        }
+          decisionLayer: makeMockDecisionModelLayer(),
+        },
       )
 
       const res = decodeCheckResult(raw)
@@ -232,7 +232,7 @@ Context
       expect(res.layerCounts.Motivation).toBe(2)
       expect(res.layerCounts.Application).toBe(1)
       expect(res.layerCounts.Technology).toBe(1)
-    })
+    }),
   )
 
   it.effect("executes harness_ontology_check and flags semantic conflicts", () =>
@@ -254,13 +254,13 @@ status: accepted
 |---|---|---|---|---|
 | REQ-1.1 | Event-driven | When upload is submitted, the system shall approve photo upload. | Sample.uploadPhoto | test |
 | REQ-1.2 | Event-driven | When upload is submitted, the system shall reject photo upload. | Sample.uploadPhoto | test |
-`
-        }
+`,
+        },
       ]
 
       const conflictLayer = makeMockDecisionModelLayer({
         contradictsProb: 0.95,
-        conflictKindLabel: "state-transition-conflict"
+        conflictKindLabel: "state-transition-conflict",
       })
 
       const raw = yield* executeToolEffect(
@@ -269,8 +269,8 @@ status: accepted
         {
           graph,
           governanceDocs: conflictingDocs,
-          decisionLayer: conflictLayer
-        }
+          decisionLayer: conflictLayer,
+        },
       )
 
       const res = decodeCheckResult(raw)
@@ -281,7 +281,7 @@ status: accepted
       expect(conflict?.conflictKind).toBe("state-transition-conflict")
       expect(conflict?.sourceId).toBe("sample:SPEC-0001#REQ-1.1")
       expect(conflict?.targetId).toBe("sample:SPEC-0001#REQ-1.2")
-    })
+    }),
   )
 
   it.effect("executes harness_gq_query for ontology_layer_nodes", () =>
@@ -289,7 +289,7 @@ status: accepted
       const raw = yield* executeToolEffect(
         "harness_gq_query",
         { queryName: "ontology_layer_nodes", params: { layer: "Business" } },
-        { graph }
+        { graph },
       )
       const res = raw as {
         readonly source: string
@@ -297,7 +297,7 @@ status: accepted
       }
       expect(["omnigraph", "memory-fallback"]).toContain(res.source)
       expect(Array.isArray(res.rows)).toBe(true)
-    })
+    }),
   )
 
   it.effect("executes harness_telemetry_report and formats report after running MCP tools", () =>
@@ -306,25 +306,25 @@ status: accepted
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
           rmSync(tmpDir, { recursive: true, force: true })
-        })
+        }),
       )
 
       yield* executeToolEffect(
         "harness_ontology_why",
         { symbolOrSpan: "PhotoRepo" },
-        { repoRoot: tmpDir, graph }
+        { repoRoot: tmpDir, graph },
       )
 
       yield* executeToolEffect(
         "harness_gq_query",
         { queryName: "ontology_layer_nodes", params: { layer: "Business" } },
-        { repoRoot: tmpDir, graph }
+        { repoRoot: tmpDir, graph },
       )
 
       const raw = yield* executeToolEffect(
         "harness_telemetry_report",
         { format: "markdown" },
-        { repoRoot: tmpDir, graph }
+        { repoRoot: tmpDir, graph },
       )
 
       const res = raw as {
@@ -340,7 +340,7 @@ status: accepted
       expect(res.markdown).toContain("Key Performance Indicators")
       expect(res.report.totalEvents).toBe(2)
       expect(res.report.kpis.graphDiscoveryCalls).toBe(2)
-    })
+    }),
   )
 
   it.effect("executes harness_lsp_diagnostics and records gate telemetry", () =>
@@ -349,7 +349,7 @@ status: accepted
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
           rmSync(tmpDir, { recursive: true, force: true })
-        })
+        }),
       )
 
       const rawClean = yield* executeToolEffect(
@@ -366,10 +366,10 @@ status: accepted
               totalFiles: 1,
               errors: 0,
               warnings: 0,
-              messages: 0
-            }
-          })
-        }
+              messages: 0,
+            },
+          }),
+        },
       )
 
       const cleanRes = rawClean as {
@@ -379,7 +379,6 @@ status: accepted
       expect(cleanRes.clean).toBe(true)
       expect(cleanRes.summary.filesChecked).toBe(1)
       expect(cleanRes.summary.errors).toBe(0)
-    })
+    }),
   )
 })
-

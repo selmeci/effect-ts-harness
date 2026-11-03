@@ -38,15 +38,15 @@ Because `@alchemy.run/cloudflare-runtime` (`cloudflareVitePlugin`, `Workerd.Work
 
 ## Decision Drivers
 
-* Every `type:infra` and `type:app` package in the workspace (existing and future) must test D1 and Durable Object SQLite persistence against the real Cloudflare `workerd` engine (`@alchemy.run/cloudflare-runtime`).
-* Hand-rolled `node:sqlite`, `sqlite`, or `better-sqlite3` storage mocks must be deterministically blocked in `type:infra` and `type:app` source and test files at both the fast AST lint level (`oxlint`) and the type-aware Effect graph / GC level (`checkEffectGraph` and `GraphGc.decide`).
-* Internal harness tooling packages (`libs/harness/**`, `apps/harness-*`) that run on Node.js are unaffected and remain free from Cloudflare Worker runtime constraints.
+- Every `type:infra` and `type:app` package in the workspace (existing and future) must test D1 and Durable Object SQLite persistence against the real Cloudflare `workerd` engine (`@alchemy.run/cloudflare-runtime`).
+- Hand-rolled `node:sqlite`, `sqlite`, or `better-sqlite3` storage mocks must be deterministically blocked in `type:infra` and `type:app` source and test files at both the fast AST lint level (`oxlint`) and the type-aware Effect graph / GC level (`checkEffectGraph` and `GraphGc.decide`).
+- Internal harness tooling packages (`libs/harness/**`, `apps/harness-*`) that run on Node.js are unaffected and remain free from Cloudflare Worker runtime constraints.
 
 ## Considered Options
 
-* **Option 1:** Workspace-Wide Two-Layer Ban on `node:sqlite` in `type:infra` / `type:app` (`oxlint` AST + `@harness/graph` / `GraphGc.decide`) Mandating Real `workerd` Storage via `@alchemy.run/cloudflare-runtime`.
-* **Option 2:** Package-Local Convention in `@harness/es-*` Only Without Workspace-Wide Enforcement.
-* **Option 3:** Retaining `node:sqlite` (`DatabaseSync`) Mocks Alongside `workerd` Integration Tests.
+- **Option 1:** Workspace-Wide Two-Layer Ban on `node:sqlite` in `type:infra` / `type:app` (`oxlint` AST + `@harness/graph` / `GraphGc.decide`) Mandating Real `workerd` Storage via `@alchemy.run/cloudflare-runtime`.
+- **Option 2:** Package-Local Convention in `@harness/es-*` Only Without Workspace-Wide Enforcement.
+- **Option 3:** Retaining `node:sqlite` (`DatabaseSync`) Mocks Alongside `workerd` Integration Tests.
 
 ## Decision Outcome
 
@@ -77,17 +77,17 @@ Allowing `DatabaseSync(":memory:")` wrappers in unit tests while reserving `work
 
 ### Positive Consequences
 
-* Every `type:infra` and `type:app` package in the workspace is guaranteed to test against real `workerd` D1 and Durable Object SQLite semantics (authorizer rules, C++ savepoints, cursor behavior).
-* Immediate sub-second rejection of `node:sqlite` imports in `libs/*/infra/**` and `apps/**` via `oxlint` (`harness(syntax-bans)` and `harness(test-integrity)`) and `harness gc --strict` (`node-sqlite-in-infra`).
+- Every `type:infra` and `type:app` package in the workspace is guaranteed to test against real `workerd` D1 and Durable Object SQLite semantics (authorizer rules, C++ savepoints, cursor behavior).
+- Immediate sub-second rejection of `node:sqlite` imports in `libs/*/infra/**` and `apps/**` via `oxlint` (`harness(syntax-bans)` and `harness(test-integrity)`) and `harness gc --strict` (`node-sqlite-in-infra`).
 
 ### Negative Consequences and Trade-offs
 
-* Infrastructure packages (`type:infra`) must declare `@alchemy.run/cloudflare-runtime` in `devDependencies` and run tests within a `Scope` (`Effect.scoped` or scoped `Layer`) so `workerd` child processes and temporary disk directories are deterministically cleaned up.
+- Infrastructure packages (`type:infra`) must declare `@alchemy.run/cloudflare-runtime` in `devDependencies` and run tests within a `Scope` (`Effect.scoped` or scoped `Layer`) so `workerd` child processes and temporary disk directories are deterministically cleaned up.
 
 ### Deterministic Enforcement
 
-| Rule | Enforced By | Gate / Mechanism | Governed Symbols |
-| :--- | :--- | :--- | :--- |
-| Ban `node:sqlite`, `sqlite`, and `better-sqlite3` imports in `libs/*/infra/**` and `apps/**` source and test files | `tools/oxlint/syntax-bans.js` | `harness/syntax-bans`, `harness/test-integrity` (`oxlint --deny-warnings`) | `GraphGc.decide` |
-| Detect `node-sqlite-in-infra` across `type:infra` and `type:app` packages in the type-aware Effect graph and GC gate | `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/policy-check.ts`, `libs/harness/gates/src/gc-check.ts` | `checkEffectGraph`, `GraphGc.decide` (`node-sqlite-in-infra`) | `GraphGc.decide` |
-| Execute D1 and Durable Object SQLite infrastructure tests against real `workerd` via `@alchemy.run/cloudflare-runtime` | `libs/sample/infra/test/index.test.ts`, `libs/es/infra/src/memory.ts`, `libs/es/infra/test/index.test.ts` | `WorkerdLive` (`@alchemy.run/cloudflare-runtime/core/workerd/Workerd`) | `PhotoRepo`, `AlbumCounterClient`, `SampleInfra.handleAlbumCounterRpc`, `AggregateInfra.initTables` |
+| Rule                                                                                                                   | Enforced By                                                                                                                | Gate / Mechanism                                                           | Governed Symbols                                                                                    |
+| :--------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------- |
+| Ban `node:sqlite`, `sqlite`, and `better-sqlite3` imports in `libs/*/infra/**` and `apps/**` source and test files     | `tools/oxlint/syntax-bans.js`                                                                                              | `harness/syntax-bans`, `harness/test-integrity` (`oxlint --deny-warnings`) | `GraphGc.decide`                                                                                    |
+| Detect `node-sqlite-in-infra` across `type:infra` and `type:app` packages in the type-aware Effect graph and GC gate   | `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/policy-check.ts`, `libs/harness/gates/src/gc-check.ts` | `checkEffectGraph`, `GraphGc.decide` (`node-sqlite-in-infra`)              | `GraphGc.decide`                                                                                    |
+| Execute D1 and Durable Object SQLite infrastructure tests against real `workerd` via `@alchemy.run/cloudflare-runtime` | `libs/sample/infra/test/index.test.ts`, `libs/es/infra/src/memory.ts`, `libs/es/infra/test/index.test.ts`                  | `WorkerdLive` (`@alchemy.run/cloudflare-runtime/core/workerd/Workerd`)     | `PhotoRepo`, `AlbumCounterClient`, `SampleInfra.handleAlbumCounterRpc`, `AggregateInfra.initTables` |

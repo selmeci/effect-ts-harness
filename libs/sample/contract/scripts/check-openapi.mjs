@@ -18,7 +18,9 @@ if (shouldWrite) {
 }
 
 if (!existsSync(openApiPath)) {
-  console.error("ERROR: openapi.json does not exist. Run scripts/check-openapi.mjs --write to generate it.")
+  console.error(
+    "ERROR: openapi.json does not exist. Run scripts/check-openapi.mjs --write to generate it.",
+  )
   process.exit(1)
 }
 
@@ -50,7 +52,9 @@ if (baselineJson == null && process.env.OPENAPI_BASELINE_PATH) {
 // Check git show main:libs/sample/contract/openapi.json
 if (baselineJson == null) {
   try {
-    const gitMain = execSync("git show main:libs/sample/contract/openapi.json 2>/dev/null", { encoding: "utf8" })
+    const gitMain = execSync("git show main:libs/sample/contract/openapi.json 2>/dev/null", {
+      encoding: "utf8",
+    })
     if (gitMain.trim().length > 0) {
       baselineJson = gitMain
       baselineSource = "git:main"
@@ -63,7 +67,9 @@ if (baselineJson == null) {
 // Check git show HEAD:libs/sample/contract/openapi.json
 if (baselineJson == null) {
   try {
-    const gitHead = execSync("git show HEAD:libs/sample/contract/openapi.json 2>/dev/null", { encoding: "utf8" })
+    const gitHead = execSync("git show HEAD:libs/sample/contract/openapi.json 2>/dev/null", {
+      encoding: "utf8",
+    })
     if (gitHead.trim().length > 0) {
       baselineJson = gitHead
       baselineSource = "git:HEAD"
@@ -99,16 +105,18 @@ try {
 if (oasdiffAvailable) {
   const tmpBaselinePath = resolve(
     os.tmpdir(),
-    `harness-baseline-${Date.now()}-${Math.random().toString(36).slice(2)}.json`
+    `harness-baseline-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
   )
   try {
     writeFileSync(tmpBaselinePath, baselineJson, "utf8")
     const result = spawnSync("oasdiff", ["breaking", tmpBaselinePath, openApiPath], {
       stdio: "pipe",
-      encoding: "utf8"
+      encoding: "utf8",
     })
     if (result.status !== 0) {
-      console.error("openapi check: ESCALATE — breaking OpenAPI changes require human confirmation:")
+      console.error(
+        "openapi check: ESCALATE — breaking OpenAPI changes require human confirmation:",
+      )
       if (result.stderr) console.error(result.stderr)
       if (result.stdout) console.error(result.stdout)
       process.exit(2)
@@ -131,7 +139,9 @@ if (breakingChanges.length > 0) {
 // 3. Check snapshot freshness (exit 1 on uncommitted snapshot drift)
 if (JSON.stringify(committedSpec) !== JSON.stringify(currentSpec)) {
   console.error("ERROR: openapi.json is stale and does not match SampleApi.")
-  console.error("Run `node --import ../../../tools/node-ts-resolver.mjs scripts/check-openapi.mjs --write` to update it.")
+  console.error(
+    "Run `node --import ../../../tools/node-ts-resolver.mjs scripts/check-openapi.mjs --write` to update it.",
+  )
   process.exit(1)
 }
 

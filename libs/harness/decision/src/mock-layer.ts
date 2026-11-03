@@ -21,7 +21,7 @@ export interface MockDecisionModelOverrides {
 }
 
 export const makeMockDecisionModelLayer = (
-  overrides?: MockDecisionModelOverrides
+  overrides?: MockDecisionModelOverrides,
 ): Layer.Layer<DecisionModel.DecisionModel> =>
   Layer.effect(
     DecisionModel.DecisionModel,
@@ -33,37 +33,49 @@ export const makeMockDecisionModelLayer = (
             if (decision._tag === "Probability") {
               let probability = 0.5
               if (key === "implemented") {
-                probability = overrides?.implementedProb !== undefined ? overrides.implementedProb : 0.9
+                probability =
+                  overrides?.implementedProb !== undefined ? overrides.implementedProb : 0.9
               } else if (key === "noOutOfScopeEdits") {
-                probability = overrides?.noOutOfScopeProb !== undefined ? overrides.noOutOfScopeProb : 0.9
+                probability =
+                  overrides?.noOutOfScopeProb !== undefined ? overrides.noOutOfScopeProb : 0.9
               } else if (key === "fitsAny") {
                 probability = overrides?.fitsAnyProb !== undefined ? overrides.fitsAnyProb : 0.9
               } else if (key === "destructive") {
-                probability = overrides?.destructiveProb !== undefined ? overrides.destructiveProb : 0.0
+                probability =
+                  overrides?.destructiveProb !== undefined ? overrides.destructiveProb : 0.0
               } else if (key === "secretAccess") {
-                probability = overrides?.secretAccessProb !== undefined ? overrides.secretAccessProb : 0.0
+                probability =
+                  overrides?.secretAccessProb !== undefined ? overrides.secretAccessProb : 0.0
               } else if (key === "exfiltration") {
-                probability = overrides?.exfiltrationProb !== undefined ? overrides.exfiltrationProb : 0.0
+                probability =
+                  overrides?.exfiltrationProb !== undefined ? overrides.exfiltrationProb : 0.0
               } else if (key === "actionable") {
-                probability = overrides?.learnActionableProb !== undefined ? overrides.learnActionableProb : 0.9
+                probability =
+                  overrides?.learnActionableProb !== undefined ? overrides.learnActionableProb : 0.9
               } else if (key === "contradicts") {
-                probability = overrides?.contradictsProb !== undefined ? overrides.contradictsProb : 0.1
+                probability =
+                  overrides?.contradictsProb !== undefined ? overrides.contradictsProb : 0.1
               }
               answers[key] = {
                 _tag: "Probability",
-                probability
+                probability,
               }
             } else if (decision._tag === "Classify") {
               const labels = Object.keys(decision.criteria)
               let chosenLabel = labels[0] ?? ""
               if (key === "block") {
-                chosenLabel = overrides?.blockLabel ?? (labels.includes("effect") ? "effect" : chosenLabel)
+                chosenLabel =
+                  overrides?.blockLabel ?? (labels.includes("effect") ? "effect" : chosenLabel)
               } else if (key === "kind") {
-                chosenLabel = overrides?.triageKind ?? (labels.includes("semantic") ? "semantic" : chosenLabel)
+                chosenLabel =
+                  overrides?.triageKind ?? (labels.includes("semantic") ? "semantic" : chosenLabel)
               } else if (key === "target") {
-                chosenLabel = overrides?.learnTargetLabel ?? (labels.includes("agent-pattern") ? "agent-pattern" : chosenLabel)
+                chosenLabel =
+                  overrides?.learnTargetLabel ??
+                  (labels.includes("agent-pattern") ? "agent-pattern" : chosenLabel)
               } else if (key === "conflictKind") {
-                chosenLabel = overrides?.conflictKindLabel ?? (labels.includes("none") ? "none" : chosenLabel)
+                chosenLabel =
+                  overrides?.conflictKindLabel ?? (labels.includes("none") ? "none" : chosenLabel)
               }
               const probabilities: Record<string, number> = {}
               for (const l of labels) {
@@ -72,7 +84,7 @@ export const makeMockDecisionModelLayer = (
               answers[key] = {
                 _tag: "Classify",
                 label: chosenLabel,
-                probabilities
+                probabilities,
               }
             }
           }
@@ -80,15 +92,15 @@ export const makeMockDecisionModelLayer = (
             answers,
             usage: {
               inputTokens: 10,
-              outputTokens: 2
-            }
+              outputTokens: 2,
+            },
           }
-        })
-    })
+        }),
+    }),
   )
 
 export const makeFailingDecisionModelLayer = (
-  description = "Ollama unreachable"
+  description = "Ollama unreachable",
 ): Layer.Layer<DecisionModel.DecisionModel> =>
   Layer.effect(
     DecisionModel.DecisionModel,
@@ -98,8 +110,8 @@ export const makeFailingDecisionModelLayer = (
           AiError.make({
             module: "DecisionModel",
             method: "decide",
-            reason: new AiError.UnknownError({ description })
-          })
-        )
-    })
+            reason: new AiError.UnknownError({ description }),
+          }),
+        ),
+    }),
   )

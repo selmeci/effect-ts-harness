@@ -59,14 +59,7 @@ const QUANTITY_OR_VERSION_PROP_REGEX =
 
 const DISCRIMINANT_CALLBACK_METHODS = new Set(["filter", "find", "some", "every"])
 
-const DISCRIMINANT_PROP_NAMES = new Set([
-  "_tag",
-  "kind",
-  "status",
-  "verdict",
-  "role",
-  "state"
-])
+const DISCRIMINANT_PROP_NAMES = new Set(["_tag", "kind", "status", "verdict", "role", "state"])
 
 function isInternalHarnessFile(filename) {
   return /(^|\/)(libs\/harness|apps\/harness-[^/]+)\//.test(filename)
@@ -103,7 +96,11 @@ function isTagGuardCall(node) {
 function isLiteralValue(node) {
   if (node == null) return false
   if (node.type === "Literal") return true
-  if (node.type === "TemplateLiteral" && Array.isArray(node.expressions) && node.expressions.length === 0) {
+  if (
+    node.type === "TemplateLiteral" &&
+    Array.isArray(node.expressions) &&
+    node.expressions.length === 0
+  ) {
     return true
   }
   return false
@@ -112,7 +109,11 @@ function isLiteralValue(node) {
 function isDiscriminantTestExpression(node) {
   if (node == null || typeof node !== "object") return false
   if (isTagGuardCall(node)) return true
-  if (node.type === "UnaryExpression" && node.operator === "!" && isDiscriminantTestExpression(node.argument)) {
+  if (
+    node.type === "UnaryExpression" &&
+    node.operator === "!" &&
+    isDiscriminantTestExpression(node.argument)
+  ) {
     return true
   }
   if (node.type === "LogicalExpression") {
@@ -120,7 +121,10 @@ function isDiscriminantTestExpression(node) {
   }
   if (
     node.type === "BinaryExpression" &&
-    (node.operator === "===" || node.operator === "!==" || node.operator === "==" || node.operator === "!=")
+    (node.operator === "===" ||
+      node.operator === "!==" ||
+      node.operator === "==" ||
+      node.operator === "!=")
   ) {
     if (isDiscriminantMemberAccess(node.left) && isLiteralValue(node.right)) {
       return true
@@ -151,7 +155,10 @@ function isAliasedDiscriminantTest(node, aliasNames) {
   }
   if (
     node.type === "BinaryExpression" &&
-    (node.operator === "===" || node.operator === "!==" || node.operator === "==" || node.operator === "!=")
+    (node.operator === "===" ||
+      node.operator === "!==" ||
+      node.operator === "==" ||
+      node.operator === "!=")
   ) {
     if (node.left != null && node.left.type === "Identifier" && aliasNames.has(node.left.name)) {
       return true
@@ -177,7 +184,7 @@ function getCallbackPredicateExpression(fnNode) {
     Array.isArray(fnNode.body.body)
   ) {
     const returnStmt = fnNode.body.body.find(
-      (stmt) => stmt != null && stmt.type === "ReturnStatement"
+      (stmt) => stmt != null && stmt.type === "ReturnStatement",
     )
     return returnStmt ? returnStmt.argument : null
   }
@@ -198,7 +205,7 @@ const SCALAR_PRIMITIVE_SCHEMA_NAMES = new Set([
   "Positive",
   "PositiveInt",
   "NonNegative",
-  "NonNegativeInt"
+  "NonNegativeInt",
 ])
 
 function getRawPrimitiveKeywordInfo(typeNode) {
@@ -258,11 +265,7 @@ function isSchemaBrandCall(node) {
 
 function hasSchemaBrandInTree(node, brandedTypeNames) {
   if (node == null || typeof node !== "object") return false
-  if (
-    node.type === "Identifier" &&
-    brandedTypeNames != null &&
-    brandedTypeNames.has(node.name)
-  ) {
+  if (node.type === "Identifier" && brandedTypeNames != null && brandedTypeNames.has(node.name)) {
     return true
   }
   if (
@@ -349,7 +352,7 @@ function getUnbrandedScalarSchemaName(node, unbrandedSchemaVarNames, brandedType
     return getUnbrandedScalarSchemaName(
       unwrapped.callee.object,
       unbrandedSchemaVarNames,
-      brandedTypeNames
+      brandedTypeNames,
     )
   }
   return null
@@ -361,7 +364,11 @@ function toPascalCase(str) {
 }
 
 function extractSchemaFieldObjects(callNode) {
-  if (callNode == null || callNode.type !== "CallExpression" || !Array.isArray(callNode.arguments)) {
+  if (
+    callNode == null ||
+    callNode.type !== "CallExpression" ||
+    !Array.isArray(callNode.arguments)
+  ) {
     return []
   }
   const callee = callNode.callee
@@ -556,7 +563,7 @@ function getUncheckedSchemaIntOrNumberName(node) {
           arg.callee != null &&
           arg.callee.type === "MemberExpression" &&
           isIdentifier(arg.callee.object, "Schema") &&
-          isIdentifier(arg.callee.property, "check")
+          isIdentifier(arg.callee.property, "check"),
       )
     if (hasCheckArg) return null
     return getUncheckedSchemaIntOrNumberName(unwrapped.callee.object)
@@ -804,9 +811,7 @@ function getNodeSourceText(context, node) {
     }
   }
   const fullText =
-    context.sourceCode && typeof context.sourceCode.text === "string"
-      ? context.sourceCode.text
-      : ""
+    context.sourceCode && typeof context.sourceCode.text === "string" ? context.sourceCode.text : ""
   if (fullText) {
     if (Array.isArray(node.range) && node.range.length >= 2) {
       return fullText.slice(node.range[0], node.range[1])
@@ -844,14 +849,16 @@ function inspectMatchChain(node) {
     }
   }
   const isRootMatch =
-    curr != null &&
-    curr.type === "CallExpression" &&
-    isIdentifier(curr.callee, "match")
+    curr != null && curr.type === "CallExpression" && isIdentifier(curr.callee, "match")
   return { isRootMatch, withPatterns }
 }
 
 function isTagObjectPattern(patternNode) {
-  if (patternNode == null || patternNode.type !== "ObjectExpression" || !Array.isArray(patternNode.properties)) {
+  if (
+    patternNode == null ||
+    patternNode.type !== "ObjectExpression" ||
+    !Array.isArray(patternNode.properties)
+  ) {
     return false
   }
   return patternNode.properties.some((prop) => {
@@ -923,7 +930,8 @@ function isEffectFnCall(node) {
 function isEffectFnInvocation(node) {
   if (node == null || node.type !== "CallExpression") return false
   if (isEffectFnCall(node)) return true
-  if (node.callee != null && node.callee.type === "CallExpression" && isEffectFnCall(node.callee)) return true
+  if (node.callee != null && node.callee.type === "CallExpression" && isEffectFnCall(node.callee))
+    return true
   return false
 }
 
@@ -1177,8 +1185,7 @@ const syntaxBans = {
 
     function getNormalizedFilename() {
       return (
-        context.filename ??
-        (typeof context.getFilename === "function" ? context.getFilename() : "")
+        context.filename ?? (typeof context.getFilename === "function" ? context.getFilename() : "")
       ).replace(/\\/g, "/")
     }
 
@@ -1198,7 +1205,9 @@ const syntaxBans = {
       for (const spec of importNode.specifiers) {
         if (spec != null && spec.local != null && spec.local.type === "Identifier") {
           const localName = spec.local.name
-          if (!/(?:Error|Api|Group|Rpc|Service|Repo|Client|Layer|Store|Database)$/.test(localName)) {
+          if (
+            !/(?:Error|Api|Group|Rpc|Service|Repo|Client|Layer|Store|Database)$/.test(localName)
+          ) {
             brandedTypeNames.add(localName)
           }
         }
@@ -1217,7 +1226,7 @@ const syntaxBans = {
         const unbrandedScalar = getUnbrandedScalarSchemaName(
           decl.init,
           unbrandedSchemaVarNames,
-          brandedTypeNames
+          brandedTypeNames,
         )
         if (unbrandedScalar != null) {
           unbrandedSchemaVarNames.set(varName, unbrandedScalar)
@@ -1246,7 +1255,7 @@ const syntaxBans = {
       if (matchingSchema != null && containsInlineObjectTypeNode(decl.typeAnnotation)) {
         reportOnce(
           decl,
-          `Do not declare loose handwritten TypeScript type/interface '${typeName}' alongside '${matchingSchema}' — derive the type directly via Schema.Schema.Type<typeof ${matchingSchema}> (or Schema.Schema.Type<ReturnType<typeof ${matchingSchema}>>) to preserve schema constraints.`
+          `Do not declare loose handwritten TypeScript type/interface '${typeName}' alongside '${matchingSchema}' — derive the type directly via Schema.Schema.Type<typeof ${matchingSchema}> (or Schema.Schema.Type<ReturnType<typeof ${matchingSchema}>>) to preserve schema constraints.`,
         )
         return
       }
@@ -1254,14 +1263,14 @@ const syntaxBans = {
       if (primInfo != null) {
         reportOnce(
           decl,
-          `Do not declare raw primitive type alias '${typeName} = ${primInfo.prim}' — raw type aliases are erased by TypeScript and do not prevent mixing domain values. Define a branded schema in type:contract using Schema.${primInfo.schema}.pipe(Schema.brand('${typeName}')) and export type ${typeName} = typeof ${typeName}.Type (or use Brand.Branded<${primInfo.prim}, '${typeName}'>).`
+          `Do not declare raw primitive type alias '${typeName} = ${primInfo.prim}' — raw type aliases are erased by TypeScript and do not prevent mixing domain values. Define a branded schema in type:contract using Schema.${primInfo.schema}.pipe(Schema.brand('${typeName}')) and export type ${typeName} = typeof ${typeName}.Type (or use Brand.Branded<${primInfo.prim}, '${typeName}'>).`,
         )
         return
       }
       if (containsInlineObjectTypeNode(decl.typeAnnotation)) {
         reportOnce(
           decl,
-          `Do not declare inline object type alias '${typeName}' — inline object types bypass runtime Schema validation and branded field checks. Define a Schema.Struct, Schema.Class, or Schema.TaggedStruct in type:contract with branded field schemas and derive 'export type ${typeName} = typeof ${typeName}.Type'.`
+          `Do not declare inline object type alias '${typeName}' — inline object types bypass runtime Schema validation and branded field checks. Define a Schema.Struct, Schema.Class, or Schema.TaggedStruct in type:contract with branded field schemas and derive 'export type ${typeName} = typeof ${typeName}.Type'.`,
         )
       }
     }
@@ -1300,7 +1309,7 @@ const syntaxBans = {
               const suggestedBrand = toPascalCase(keyName)
               reportOnce(
                 prop,
-                `Do not use Schema.${propType} for quantity, version, or count field '${keyName}' in Schema.Struct — use Schema.Natural (non-negative) or Schema.PositiveInt piped into Schema.brand('${suggestedBrand}') (e.g. Schema.Natural.pipe(Schema.brand('${suggestedBrand}'))) to prevent negative domain values and enforce nominal branding.`
+                `Do not use Schema.${propType} for quantity, version, or count field '${keyName}' in Schema.Struct — use Schema.Natural (non-negative) or Schema.PositiveInt piped into Schema.brand('${suggestedBrand}') (e.g. Schema.Natural.pipe(Schema.brand('${suggestedBrand}'))) to prevent negative domain values and enforce nominal branding.`,
               )
               continue
             }
@@ -1310,13 +1319,13 @@ const syntaxBans = {
             const unbrandedSchemaName = getUnbrandedScalarSchemaName(
               prop.value,
               unbrandedSchemaVarNames,
-              brandedTypeNames
+              brandedTypeNames,
             )
             if (unbrandedSchemaName != null) {
               const suggestedBrand = toPascalCase(keyName)
               reportOnce(
                 prop,
-                `Do not use unbranded Schema.${unbrandedSchemaName} for field '${keyName}' in Schema.${kind} — define a reusable branded schema with Schema.brand('${suggestedBrand}') in type:contract (e.g. export const ${suggestedBrand} = Schema.${unbrandedSchemaName}.pipe(Schema.brand('${suggestedBrand}'))) and reference it here so domain values cannot be mixed.`
+                `Do not use unbranded Schema.${unbrandedSchemaName} for field '${keyName}' in Schema.${kind} — define a reusable branded schema with Schema.brand('${suggestedBrand}') in type:contract (e.g. export const ${suggestedBrand} = Schema.${unbrandedSchemaName}.pipe(Schema.brand('${suggestedBrand}'))) and reference it here so domain values cannot be mixed.`,
               )
             }
           }
@@ -1355,7 +1364,11 @@ const syntaxBans = {
       const typeParams = getTypeParams(innerCall)
       if (typeParams.length < 2) return
       const shapeNode = typeParams[1]
-      if (shapeNode == null || shapeNode.type !== "TSTypeLiteral" || !Array.isArray(shapeNode.members)) {
+      if (
+        shapeNode == null ||
+        shapeNode.type !== "TSTypeLiteral" ||
+        !Array.isArray(shapeNode.members)
+      ) {
         return
       }
 
@@ -1381,12 +1394,12 @@ const syntaxBans = {
           if (primInfo != null) {
             reportOnce(
               param,
-              `Do not use raw primitive type '${primInfo.prim}' for parameter in Context.Service capability '${memberName}' — use a branded domain type from type:contract (defined with Schema.brand('<BrandName>')) so service ports enforce nominal domain safety.`
+              `Do not use raw primitive type '${primInfo.prim}' for parameter in Context.Service capability '${memberName}' — use a branded domain type from type:contract (defined with Schema.brand('<BrandName>')) so service ports enforce nominal domain safety.`,
             )
           } else if (containsInlineObjectTypeNode(paramType)) {
             reportOnce(
               param,
-              `Do not use inline object type for parameter in Context.Service capability '${memberName}' — define a named Schema.Struct or Schema.Class in type:contract with branded fields and reference its derived type.`
+              `Do not use inline object type for parameter in Context.Service capability '${memberName}' — define a named Schema.Struct or Schema.Class in type:contract with branded fields and reference its derived type.`,
             )
           }
         }
@@ -1401,12 +1414,12 @@ const syntaxBans = {
           if (retPrim != null) {
             reportOnce(
               member,
-              `Do not use raw primitive success type '${retPrim.prim}' in Context.Service capability '${memberName}' — use a branded domain type from type:contract (defined with Schema.brand('<BrandName>')) so service ports enforce nominal domain safety.`
+              `Do not use raw primitive success type '${retPrim.prim}' in Context.Service capability '${memberName}' — use a branded domain type from type:contract (defined with Schema.brand('<BrandName>')) so service ports enforce nominal domain safety.`,
             )
           } else if (containsInlineObjectTypeNode(successType)) {
             reportOnce(
               member,
-              `Do not use inline object return/success type in Context.Service capability '${memberName}' — define a named Schema.Struct or Schema.Class in type:contract with branded fields and reference its derived type.`
+              `Do not use inline object return/success type in Context.Service capability '${memberName}' — define a named Schema.Struct or Schema.Class in type:contract with branded fields and reference its derived type.`,
             )
           }
         }
@@ -1422,12 +1435,12 @@ const syntaxBans = {
         if (primInfo != null) {
           reportOnce(
             param,
-            `Do not use raw primitive type '${primInfo.prim}' at exported domain boundary '${fnName}' — use a branded domain type from type:contract (defined with Schema.brand('<BrandName>')) so domain deciders and use cases cannot accept or return unvalidated primitives.`
+            `Do not use raw primitive type '${primInfo.prim}' at exported domain boundary '${fnName}' — use a branded domain type from type:contract (defined with Schema.brand('<BrandName>')) so domain deciders and use cases cannot accept or return unvalidated primitives.`,
           )
         } else if (containsInlineObjectTypeNode(paramType)) {
           reportOnce(
             param,
-            `Do not use inline object type for parameter at exported domain boundary '${fnName}' — define a named Schema.Struct or Schema.Class in type:contract with branded fields and reference its derived type.`
+            `Do not use inline object type for parameter at exported domain boundary '${fnName}' — define a named Schema.Struct or Schema.Class in type:contract with branded fields and reference its derived type.`,
           )
         }
       }
@@ -1439,12 +1452,12 @@ const syntaxBans = {
         if (retPrim != null) {
           reportOnce(
             implFn,
-            `Do not use raw primitive return type '${retPrim.prim}' at exported domain boundary '${fnName}' — use a branded domain type from type:contract (defined with Schema.brand('<BrandName>')) so domain deciders and use cases cannot accept or return unvalidated primitives.`
+            `Do not use raw primitive return type '${retPrim.prim}' at exported domain boundary '${fnName}' — use a branded domain type from type:contract (defined with Schema.brand('<BrandName>')) so domain deciders and use cases cannot accept or return unvalidated primitives.`,
           )
         } else if (containsInlineObjectTypeNode(successType)) {
           reportOnce(
             implFn,
-            `Do not use inline object return/success type at exported domain boundary '${fnName}' — define a named Schema.Struct or Schema.Class in type:contract with branded fields and reference its derived type.`
+            `Do not use inline object return/success type at exported domain boundary '${fnName}' — define a named Schema.Struct or Schema.Class in type:contract with branded fields and reference its derived type.`,
           )
         }
       }
@@ -1462,9 +1475,11 @@ const syntaxBans = {
                       ? s.argument?.type === "YieldExpression"
                         ? s.argument.argument
                         : s.argument
-                      : null
+                      : null,
                   )
-                  .find((expr) => expr != null && expr.type === "CallExpression" && isStubCall(expr))
+                  .find(
+                    (expr) => expr != null && expr.type === "CallExpression" && isStubCall(expr),
+                  )
               : null
         if (stubCall != null) {
           const stubParams = getTypeParams(stubCall)
@@ -1473,12 +1488,12 @@ const syntaxBans = {
           if (stubPrim != null) {
             reportOnce(
               stubCall,
-              `Do not use raw primitive success type '${stubPrim.prim}' in stub<A, E, R> at exported domain boundary '${fnName}' — use a branded domain type from type:contract (defined with Schema.brand('<BrandName>')).`
+              `Do not use raw primitive success type '${stubPrim.prim}' in stub<A, E, R> at exported domain boundary '${fnName}' — use a branded domain type from type:contract (defined with Schema.brand('<BrandName>')).`,
             )
           } else if (containsInlineObjectTypeNode(stubA)) {
             reportOnce(
               stubCall,
-              `Do not use inline object success type in stub<A, E, R> at exported domain boundary '${fnName}' — define a named Schema.Struct or Schema.Class in type:contract with branded fields and reference its derived type.`
+              `Do not use inline object success type in stub<A, E, R> at exported domain boundary '${fnName}' — define a named Schema.Struct or Schema.Class in type:contract with branded fields and reference its derived type.`,
             )
           }
         }
@@ -1518,10 +1533,7 @@ const syntaxBans = {
         ) {
           checkDomainBoundaryFunctionNode(implFn, fnName)
         }
-      } else if (
-        init.type === "FunctionExpression" ||
-        init.type === "ArrowFunctionExpression"
-      ) {
+      } else if (init.type === "FunctionExpression" || init.type === "ArrowFunctionExpression") {
         checkDomainBoundaryFunctionNode(init, fnName)
       }
     }
@@ -1542,12 +1554,18 @@ const syntaxBans = {
                 recordSchemaDeclarator(decl)
               }
             } else if (stmt.type === "ExportNamedDeclaration" && stmt.declaration) {
-              if (stmt.declaration.type === "VariableDeclaration" && Array.isArray(stmt.declaration.declarations)) {
+              if (
+                stmt.declaration.type === "VariableDeclaration" &&
+                Array.isArray(stmt.declaration.declarations)
+              ) {
                 for (const decl of stmt.declaration.declarations) {
                   recordSchemaDeclarator(decl)
                 }
               } else if (stmt.declaration.type === "FunctionDeclaration" && stmt.declaration.id) {
-                if (stmt.declaration.id.name.endsWith("Schema") || stmt.declaration.id.name.startsWith("make")) {
+                if (
+                  stmt.declaration.id.name.endsWith("Schema") ||
+                  stmt.declaration.id.name.startsWith("make")
+                ) {
                   schemaVarNames.add(stmt.declaration.id.name)
                 }
               } else if (
@@ -1575,7 +1593,9 @@ const syntaxBans = {
             ? context.sourceCode.text
             : ""
         if (
-          /^\s*(\/\/|\/\*)\s*(oxlint-disable|eslint-disable)[^\n]*(effecttsgo\/|harness\/)/m.test(text) ||
+          /^\s*(\/\/|\/\*)\s*(oxlint-disable|eslint-disable)[^\n]*(effecttsgo\/|harness\/)/m.test(
+            text,
+          ) ||
           /oxlint-disable[^\n]*effecttsgo\//.test(text) ||
           /^\s*(\/\/|\/\*)\s*@effect-diagnostics(-next-line)?\b/m.test(text)
         ) {
@@ -1588,7 +1608,11 @@ const syntaxBans = {
       ImportDeclaration(node) {
         recordContractImports(node)
         const filename = getNormalizedFilename()
-        if (!isInternalHarnessFile(filename) && node.source != null && typeof node.source.value === "string") {
+        if (
+          !isInternalHarnessFile(filename) &&
+          node.source != null &&
+          typeof node.source.value === "string"
+        ) {
           const importSource = node.source.value
           if (
             /libs\/[^/]+\/(domain|core)\/(src|test\/fixtures)\//.test(filename) &&
@@ -1596,7 +1620,7 @@ const syntaxBans = {
           ) {
             reportOnce(
               node,
-              `Do not import SQL client/driver module '${importSource}' in type:domain or type:core — keep domain/core packages 100% free of I/O and place SqlClient implementations in type:infra.`
+              `Do not import SQL client/driver module '${importSource}' in type:domain or type:core — keep domain/core packages 100% free of I/O and place SqlClient implementations in type:infra.`,
             )
           }
           if (
@@ -1605,7 +1629,7 @@ const syntaxBans = {
           ) {
             reportOnce(
               node,
-              `Do not import Node.js builtin '${importSource}' in the main Cloudflare Worker infra entrypoint (src/index.ts) — isolate Node-backed test/memory adapters in a separate module (e.g. src/memory.ts).`
+              `Do not import Node.js builtin '${importSource}' in the main Cloudflare Worker infra entrypoint (src/index.ts) — isolate Node-backed test/memory adapters in a separate module (e.g. src/memory.ts).`,
             )
           }
           if (
@@ -1616,7 +1640,7 @@ const syntaxBans = {
           ) {
             reportOnce(
               node,
-              `Do not import '${importSource}' in type:infra or type:app ('${filename}') — execute Cloudflare Durable Object SQLite and D1 storages against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006, node-sqlite-in-infra).`
+              `Do not import '${importSource}' in type:infra or type:app ('${filename}') — execute Cloudflare Durable Object SQLite and D1 storages against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006, node-sqlite-in-infra).`,
             )
           }
         }
@@ -1646,7 +1670,7 @@ const syntaxBans = {
               const suggestedBrand = toPascalCase(node.id.name)
               reportOnce(
                 node,
-                `Do not use Schema.${uncheckedIntOrNumber} for quantity, version, or count schema '${node.id.name}' — use Schema.Natural (non-negative) or Schema.PositiveInt piped into Schema.brand('${suggestedBrand}') (e.g. Schema.Natural.pipe(Schema.brand('${suggestedBrand}'))) to prevent negative domain values and enforce nominal branding.`
+                `Do not use Schema.${uncheckedIntOrNumber} for quantity, version, or count schema '${node.id.name}' — use Schema.Natural (non-negative) or Schema.PositiveInt piped into Schema.brand('${suggestedBrand}') (e.g. Schema.Natural.pipe(Schema.brand('${suggestedBrand}'))) to prevent negative domain values and enforce nominal branding.`,
               )
             }
           }
@@ -1668,7 +1692,7 @@ const syntaxBans = {
         if (containsBrandTypeReference(node.typeAnnotation, brandedTypeNames)) {
           reportOnce(
             node,
-            "Do not bypass brand validation with 'as' type assertion — construct branded values via <BrandedSchema>.make(value), Schema.decodeUnknownEffect(<BrandedSchema>)(value), or Effect v4 Brand.nominal<T>()(value) / Brand.make<T>(filter)(value) / Brand.check<T>(...checks)(value)."
+            "Do not bypass brand validation with 'as' type assertion — construct branded values via <BrandedSchema>.make(value), Schema.decodeUnknownEffect(<BrandedSchema>)(value), or Effect v4 Brand.nominal<T>()(value) / Brand.make<T>(filter)(value) / Brand.check<T>(...checks)(value).",
           )
         }
       },
@@ -1722,7 +1746,10 @@ const syntaxBans = {
           context.report({ node, message: newPromiseMessage })
         }
         const filename = getNormalizedFilename()
-        if (/libs\/[^/]+\/(?:domain|core)\/src\//.test(filename) && isIdentifier(node.callee, "Date")) {
+        if (
+          /libs\/[^/]+\/(?:domain|core)\/src\//.test(filename) &&
+          isIdentifier(node.callee, "Date")
+        ) {
           context.report({ node, message: impureDomainGlobalMessage })
         }
       },
@@ -1774,7 +1801,7 @@ const syntaxBans = {
             if (firstNode != null && firstNode !== node) {
               reportOnce(
                 node,
-                `Do not declare duplicate Schema.brand('${brandKey}') across multiple schemas — each brand key must have a single canonical constructor schema so validation invariants cannot be weakened. Compose wire or parameter schemas into the canonical branded schema using Schema.decodeTo(<BrandedSchema>) (e.g. Schema.FiniteFromString.pipe(Schema.decodeTo(${brandKey}))).`
+                `Do not declare duplicate Schema.brand('${brandKey}') across multiple schemas — each brand key must have a single canonical constructor schema so validation invariants cannot be weakened. Compose wire or parameter schemas into the canonical branded schema using Schema.decodeTo(<BrandedSchema>) (e.g. Schema.FiniteFromString.pipe(Schema.decodeTo(${brandKey}))).`,
               )
             } else {
               declaredBrandKeys.set(brandKey, node)
@@ -1845,7 +1872,7 @@ const syntaxBans = {
             callee.type === "MemberExpression" &&
             callee.computed !== true &&
             ((isIdentifier(callee.object, "Date") && isIdentifier(callee.property, "now")) ||
-             (isIdentifier(callee.object, "Math") && isIdentifier(callee.property, "random")))
+              (isIdentifier(callee.object, "Math") && isIdentifier(callee.property, "random")))
           ) {
             context.report({ node, message: impureDomainGlobalMessage })
           }
@@ -1879,7 +1906,7 @@ const syntaxBans = {
               if (isLoose) {
                 reportOnce(
                   decl,
-                  `Do not declare loose handwritten TypeScript type/interface '${typeName}' alongside '${matchingSchema}' — derive the type directly via Schema.Schema.Type<typeof ${matchingSchema}> (or Schema.Schema.Type<ReturnType<typeof ${matchingSchema}>>) to preserve schema constraints.`
+                  `Do not declare loose handwritten TypeScript type/interface '${typeName}' alongside '${matchingSchema}' — derive the type directly via Schema.Schema.Type<typeof ${matchingSchema}> (or Schema.Schema.Type<ReturnType<typeof ${matchingSchema}>>) to preserve schema constraints.`,
                 )
                 return
               }
@@ -1901,10 +1928,7 @@ const syntaxBans = {
                 member.typeAnnotation != null &&
                 getRawPrimitiveKeywordInfo(member.typeAnnotation.typeAnnotation)?.prim === "boolean"
               ) {
-                reportOnce(
-                  member,
-                  schemaBooleanStateMessage
-                )
+                reportOnce(member, schemaBooleanStateMessage)
               }
             }
           }
@@ -1924,7 +1948,7 @@ const syntaxBans = {
                   const suggestedBrand = toPascalCase(varName)
                   reportOnce(
                     varDecl,
-                    `Do not use Schema.${uncheckedIntOrNumber} for quantity, version, or count schema '${varName}' — use Schema.Natural (non-negative) or Schema.PositiveInt piped into Schema.brand('${suggestedBrand}') (e.g. Schema.Natural.pipe(Schema.brand('${suggestedBrand}'))) to prevent negative domain values and enforce nominal branding.`
+                    `Do not use Schema.${uncheckedIntOrNumber} for quantity, version, or count schema '${varName}' — use Schema.Natural (non-negative) or Schema.PositiveInt piped into Schema.brand('${suggestedBrand}') (e.g. Schema.Natural.pipe(Schema.brand('${suggestedBrand}'))) to prevent negative domain values and enforce nominal branding.`,
                   )
                 }
               }
@@ -1934,13 +1958,13 @@ const syntaxBans = {
                 const unbrandedScalar = getUnbrandedScalarSchemaName(
                   varDecl.init,
                   unbrandedSchemaVarNames,
-                  brandedTypeNames
+                  brandedTypeNames,
                 )
                 if (unbrandedScalar != null) {
                   unbrandedSchemaVarNames.set(varName, unbrandedScalar)
                   reportOnce(
                     varDecl,
-                    `Do not export unbranded primitive schema '${varName}' from type:contract — pipe into Schema.brand('${varName}') (e.g. Schema.${unbrandedScalar}.pipe(Schema.brand('${varName}'))) and export type ${varName} = typeof ${varName}.Type so the decoded type carries a compile-time brand.`
+                    `Do not export unbranded primitive schema '${varName}' from type:contract — pipe into Schema.brand('${varName}') (e.g. Schema.${unbrandedScalar}.pipe(Schema.brand('${varName}'))) and export type ${varName} = typeof ${varName}.Type so the decoded type carries a compile-time brand.`,
                   )
                 }
               }
@@ -1991,8 +2015,7 @@ const testIntegrity = {
 
     function getNormalizedFilename() {
       return (
-        context.filename ??
-        (typeof context.getFilename === "function" ? context.getFilename() : "")
+        context.filename ?? (typeof context.getFilename === "function" ? context.getFilename() : "")
       ).replace(/\\/g, "/")
     }
 
@@ -2004,7 +2027,9 @@ const testIntegrity = {
             ? context.sourceCode.text
             : ""
         if (
-          /^\s*(\/\/|\/\*)\s*(oxlint-disable|eslint-disable)[^\n]*(harness\/test-integrity|effecttsgo\/)/m.test(text) ||
+          /^\s*(\/\/|\/\*)\s*(oxlint-disable|eslint-disable)[^\n]*(harness\/test-integrity|effecttsgo\/)/m.test(
+            text,
+          ) ||
           /^\s*(\/\/|\/\*)\s*@effect-diagnostics(-next-line)?\b/m.test(text)
         ) {
           context.report({ node, message: effectTsgoDisableMessage })
@@ -2015,7 +2040,11 @@ const testIntegrity = {
       },
       ImportDeclaration(node) {
         const filename = getNormalizedFilename()
-        if (!isInternalHarnessFile(filename) && node.source != null && typeof node.source.value === "string") {
+        if (
+          !isInternalHarnessFile(filename) &&
+          node.source != null &&
+          typeof node.source.value === "string"
+        ) {
           const importSource = node.source.value
           if (
             /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
@@ -2025,7 +2054,7 @@ const testIntegrity = {
           ) {
             context.report({
               node,
-              message: `Do not import '${importSource}' in type:infra or type:app tests ('${filename}') — execute Cloudflare Durable Object SQLite and D1 tests against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006, node-sqlite-in-infra).`
+              message: `Do not import '${importSource}' in type:infra or type:app tests ('${filename}') — execute Cloudflare Durable Object SQLite and D1 tests against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006, node-sqlite-in-infra).`,
             })
           }
         }
@@ -2087,14 +2116,18 @@ const testIntegrity = {
           if (isImpreciseFailureAssert(node)) {
             context.report({ node, message: impreciseFailureAssertMessage })
           }
-          if (isPropertyTestCall(node) && Array.isArray(node.arguments) && node.arguments.length > 0) {
+          if (
+            isPropertyTestCall(node) &&
+            Array.isArray(node.arguments) &&
+            node.arguments.length > 0
+          ) {
             const callbackArg = node.arguments[node.arguments.length - 1]
             if (callbackArg != null) {
               const callbackText = getNodeSourceText(context, callbackArg)
               if (
                 (callbackText.includes("fold(") || /\bfold\s*\(/.test(callbackText)) &&
                 /\.reduce\s*\(\s*(?:(?:\([^)]*\)|[a-zA-Z0-9_$]+)\s*=>\s*)?[a-zA-Z0-9_$.]*\b(?:evolve|reduce)\w*/i.test(
-                  callbackText
+                  callbackText,
                 )
               ) {
                 context.report({ node, message: tautologicalFoldPropMessage })

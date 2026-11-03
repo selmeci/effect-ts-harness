@@ -8,7 +8,7 @@ import {
   type HarnessGraph,
   type HarnessNode,
   type ServiceTagNode,
-  type TaggedErrorNode
+  type TaggedErrorNode,
 } from "./model.js"
 
 export interface GraphPolicyViolation {
@@ -86,13 +86,13 @@ export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphRe
         forbiddenServices.push({
           index: idx,
           node,
-          rule: "domain-requires-infra"
+          rule: "domain-requires-infra",
         })
       } else if (isCloudBinding(node)) {
         forbiddenServices.push({
           index: idx,
           node,
-          rule: "domain-requires-cloud-binding"
+          rule: "domain-requires-cloud-binding",
         })
       }
     } else if (node._tag === "TaggedError") {
@@ -108,7 +108,7 @@ export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphRe
       const walker = Graph.simplePaths(harnessGraph.graph, {
         source: domainFn.index,
         target: forbiddenSvc.index,
-        limit: 1
+        limit: 1,
       })
       for (const pathResult of walker) {
         const pathKeys = pathResult.path.map((nodeIdx) => {
@@ -122,7 +122,7 @@ export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphRe
         violations.push({
           rule: forbiddenSvc.rule,
           message,
-          path: pathKeys
+          path: pathKeys,
         })
       }
     }
@@ -136,7 +136,7 @@ export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphRe
           violations.push({
             rule: "impure-decider",
             message: `Decider function '${fnNode.qualname}' (${fnNode.spanName}) must be pure and cannot require service '${edge.data.tagId}'`,
-            path: [fnNode.qualname, edge.data.tagId]
+            path: [fnNode.qualname, edge.data.tagId],
           })
         }
       }
@@ -151,13 +151,13 @@ export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphRe
           violations.push({
             rule: "impure-reducer",
             message: `Reducer function '${fnNode.qualname}' (${fnNode.spanName}) must be pure and cannot require service '${edge.data.tagId}'`,
-            path: [fnNode.qualname, edge.data.tagId]
+            path: [fnNode.qualname, edge.data.tagId],
           })
         } else if (edge.source === fnIdx && edge.data._tag === "FailsWith") {
           violations.push({
             rule: "impure-reducer",
             message: `Reducer function '${fnNode.qualname}' (${fnNode.spanName}) must be infallible and cannot fail with '${edge.data.errorTag}'`,
-            path: [fnNode.qualname, edge.data.errorTag]
+            path: [fnNode.qualname, edge.data.errorTag],
           })
         }
       }
@@ -203,7 +203,7 @@ export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphRe
     violations.push({
       rule: "layer-cycle",
       message: `Layer dependency cycle detected: ${path.join(" -> ")}`,
-      path
+      path,
     })
   }
 
@@ -215,26 +215,26 @@ export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphRe
 
     for (const span of node.referencedSpans) {
       const exists = allFns.some(
-        (fn) => fn.spanName === span || fn.qualname === span || fn.qualname.endsWith(`#${span}`)
+        (fn) => fn.spanName === span || fn.qualname === span || fn.qualname.endsWith(`#${span}`),
       )
       if (!exists) {
         violations.push({
           rule: "unmapped-spec-symbol",
           message: `EARS Spec '${node.id}' (${node.path}) declares EffectFn span '${span}', which is missing from the graph`,
-          path: [node.id, span]
+          path: [node.id, span],
         })
       }
     }
 
     for (const svc of node.referencedServices) {
       const exists = allServices.some(
-        (s) => s.tagId === svc || s.name === svc || s.tagId.endsWith(`#${svc}`)
+        (s) => s.tagId === svc || s.name === svc || s.tagId.endsWith(`#${svc}`),
       )
       if (!exists) {
         violations.push({
           rule: "unmapped-spec-symbol",
           message: `EARS Spec '${node.id}' (${node.path}) declares ServiceTag '${svc}', which is missing from the graph`,
-          path: [node.id, svc]
+          path: [node.id, svc],
         })
       }
     }
@@ -245,7 +245,7 @@ export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphRe
         violations.push({
           rule: "unmapped-spec-symbol",
           message: `EARS Spec '${node.id}' (${node.path}) declares TaggedError '${err}', which is missing from the graph`,
-          path: [node.id, err]
+          path: [node.id, err],
         })
       }
     }
@@ -256,7 +256,7 @@ export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphRe
     violations.push({
       rule: bv.rule,
       message: bv.message,
-      path: bv.path ?? [bv.file, bv.enclosingSymbol]
+      path: bv.path ?? [bv.file, bv.enclosingSymbol],
     })
   }
 
@@ -265,6 +265,6 @@ export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphRe
   return {
     ok: violations.length === 0,
     violations,
-    mermaid
+    mermaid,
   }
 }

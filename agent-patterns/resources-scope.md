@@ -22,10 +22,10 @@ export const openFile = (filename: string): Effect.Effect<FileHandle, Error, Sco
       return {
         fd: 42,
         read: Effect.succeed("file contents"),
-        close: Effect.logInfo(`Closed file: ${filename}`)
+        close: Effect.logInfo(`Closed file: ${filename}`),
       }
     }),
-    (handle, _exit) => handle.close
+    (handle, _exit) => handle.close,
   )
 ```
 
@@ -51,22 +51,23 @@ For services that represent long-lived stateful resources (such as database pool
 ```ts
 import { Context, Effect, Layer } from "effect"
 
-export class ConnectionPool extends Context.Service<ConnectionPool, {
-  readonly execute: (query: string) => Effect.Effect<void>
-}>()("infra/ConnectionPool") {
+export class ConnectionPool extends Context.Service<
+  ConnectionPool,
+  {
+    readonly execute: (query: string) => Effect.Effect<void>
+  }
+>()("infra/ConnectionPool") {
   static readonly Live = Layer.scoped(
     ConnectionPool,
     Effect.gen(function* () {
       yield* Effect.logInfo("Connecting connection pool...")
 
-      yield* Effect.addFinalizer((exit) =>
-        Effect.logInfo("Closing connection pool...")
-      )
+      yield* Effect.addFinalizer((exit) => Effect.logInfo("Closing connection pool..."))
 
       return ConnectionPool.of({
-        execute: (query) => Effect.logInfo(`Running ${query}`)
+        execute: (query) => Effect.logInfo(`Running ${query}`),
       })
-    })
+    }),
   )
 }
 ```

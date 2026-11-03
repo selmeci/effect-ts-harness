@@ -6,7 +6,7 @@ import {
   classifyCommand,
   INTERACTIVE_NX_BANNED_REASON,
   isCdCommand,
-  isInteractiveNxCommand
+  isInteractiveNxCommand,
 } from "../src/policy.js"
 
 describe("guard policy", () => {
@@ -16,13 +16,11 @@ describe("guard policy", () => {
     expect(classifyCommand("CI=true pnpm nx test harness-mcp")).toBe("allow")
     expect(
       classifyCommand(
-        "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts plan-check"
-      )
+        "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts plan-check",
+      ),
     ).toBe("allow")
     expect(
-      classifyCommand(
-        "node --import ./tools/node-ts-resolver.mjs apps/harness-mcp/src/server.ts"
-      )
+      classifyCommand("node --import ./tools/node-ts-resolver.mjs apps/harness-mcp/src/server.ts"),
     ).toBe("allow")
     expect(classifyCommand("git status")).toBe("allow")
     expect(classifyCommand("git diff HEAD~1")).toBe("allow")
@@ -36,6 +34,9 @@ describe("guard policy", () => {
     expect(classifyCommand("pwd")).toBe("allow")
     expect(classifyCommand("pnpm harness verify")).toBe("allow")
     expect(classifyCommand("pnpm lint")).toBe("allow")
+    expect(classifyCommand("pnpm format")).toBe("allow")
+    expect(classifyCommand("pnpm format:check")).toBe("allow")
+    expect(classifyCommand("pnpm oxfmt --check .")).toBe("allow")
   })
 
   it("allows safe read-only piped commands", () => {
@@ -138,7 +139,9 @@ describe("guard policy", () => {
     expect(classifyCommand("git commit -m 'feat(harness): guard hardening'")).toBe("allow")
     expect(classifyCommand("git push -u origin HEAD")).toBe("allow")
     expect(classifyCommand("git fetch --no-tags origin main")).toBe("allow")
-    expect(classifyCommand('gh pr create --title "fix: count > 0 and .env" --body-file /tmp/body.md')).toBe("allow")
+    expect(
+      classifyCommand('gh pr create --title "fix: count > 0 and .env" --body-file /tmp/body.md'),
+    ).toBe("allow")
     expect(classifyCommand("find libs -name '*.ts' 2>/dev/null")).toBe("allow")
     expect(classifyCommand("ls missing 2>&1")).toBe("allow")
     expect(classifyCommand("ls > /dev/null")).toBe("allow")
@@ -155,13 +158,13 @@ describe("guard policy", () => {
     // direct CLI oracle invocations
     expect(
       classifyCommand(
-        'node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard "find packages/app/dist -delete"'
-      )
+        'node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard "find packages/app/dist -delete"',
+      ),
     ).toBe("deny")
     expect(
       classifyCommand(
-        'node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard "rm -r dist"'
-      )
+        'node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard "rm -r dist"',
+      ),
     ).toBe("deny")
     expect(classifyCommand('pnpm harness guard "rm -r dist"')).toBe("deny")
     expect(classifyCommand('pnpm run harness guard "ls"')).toBe("deny")
@@ -170,16 +173,28 @@ describe("guard policy", () => {
     expect(classifyCommand('pnpm harness -- guard "rm -r dist"')).toBe("deny")
     expect(
       classifyCommand(
-        'node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts --format=antigravity guard "rm -r dist"'
-      )
+        'node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts --format=antigravity guard "rm -r dist"',
+      ),
     ).toBe("deny")
   })
 
   it("REQ-2.2 keeps the other harness-cli subcommands allowed", () => {
-    for (const sub of ["plan-check", "verify", "done", "gc --strict", "route", "report", "session", "doctor", "ontology check"]) {
+    for (const sub of [
+      "plan-check",
+      "verify",
+      "done",
+      "gc --strict",
+      "route",
+      "report",
+      "session",
+      "doctor",
+      "ontology check",
+    ]) {
       expect(classifyCommand(`pnpm harness ${sub}`)).toBe("allow")
       expect(
-        classifyCommand(`node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts ${sub}`)
+        classifyCommand(
+          `node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts ${sub}`,
+        ),
       ).toBe("allow")
     }
     expect(classifyCommand("git grep -n guardrail -- libs")).toBe("allow")
@@ -232,9 +247,7 @@ describe("guard policy", () => {
   })
 
   it("allows environment prefixes, pnpm filter/install/vitest, git remote, rg, and grep", () => {
-    expect(
-      classifyCommand("HARNESS_PLAN_CHECK=1 pnpm --filter @effect-es/core test")
-    ).toBe("allow")
+    expect(classifyCommand("HARNESS_PLAN_CHECK=1 pnpm --filter @effect-es/core test")).toBe("allow")
     expect(classifyCommand("CI=true pnpm vitest run")).toBe("allow")
     expect(classifyCommand("pnpm install --frozen-lockfile")).toBe("allow")
     expect(classifyCommand("git remote -v")).toBe("allow")
@@ -248,20 +261,20 @@ describe("guard policy", () => {
         kind: "guard_escalation",
         timestamp: "2026-10-27T10:00:00.000Z",
         summary: "inspect package",
-        detail: "verdict=allow; reason=safe"
+        detail: "verdict=allow; reason=safe",
       },
       {
         kind: "guard_escalation",
         timestamp: "2026-10-27T10:01:00.000Z",
         summary: "inspect package",
-        detail: "verdict=allow; reason=safe"
+        detail: "verdict=allow; reason=safe",
       },
       {
         kind: "guard_escalation",
         timestamp: "2026-10-27T10:02:00.000Z",
         summary: "inspect package",
-        detail: "verdict=allow; reason=safe"
-      }
+        detail: "verdict=allow; reason=safe",
+      },
     ]
 
     const status = Effect.runSync(decideLoopThrashing(events, 3))
@@ -274,20 +287,20 @@ describe("guard policy", () => {
         kind: "guard_escalation",
         timestamp: "2026-10-27T10:00:00.000Z",
         summary: "blocked action",
-        detail: "verdict=deny; reason=destructive"
+        detail: "verdict=deny; reason=destructive",
       },
       {
         kind: "guard_escalation",
         timestamp: "2026-10-27T10:01:00.000Z",
         summary: "blocked action",
-        detail: "verdict=deny; reason=destructive"
+        detail: "verdict=deny; reason=destructive",
       },
       {
         kind: "guard_escalation",
         timestamp: "2026-10-27T10:02:00.000Z",
         summary: "blocked action",
-        detail: "verdict=deny; reason=destructive"
-      }
+        detail: "verdict=deny; reason=destructive",
+      },
     ]
     const deniedStatus = Effect.runSync(decideLoopThrashing(deniedEvents, 3))
     expect(deniedStatus.stuck).toBe(true)
@@ -339,8 +352,12 @@ describe("guard policy", () => {
     expect(isInteractiveNxCommand("CI=true nx show projects")).toBe(false)
     expect(isInteractiveNxCommand("CI=1 pnpm nx show projects")).toBe(false)
     expect(isInteractiveNxCommand("NX_INTERACTIVE=false nx show projects")).toBe(false)
-    expect(isInteractiveNxCommand("CI=true pnpm --filter @harness/graph exec nx show projects")).toBe(false)
-    expect(isInteractiveNxCommand("NX_INTERACTIVE=false pnpm --filter @harness/graph nx show projects")).toBe(false)
+    expect(
+      isInteractiveNxCommand("CI=true pnpm --filter @harness/graph exec nx show projects"),
+    ).toBe(false)
+    expect(
+      isInteractiveNxCommand("NX_INTERACTIVE=false pnpm --filter @harness/graph nx show projects"),
+    ).toBe(false)
     expect(isInteractiveNxCommand("pnpm test")).toBe(false)
     expect(isInteractiveNxCommand("nx run gates:verify")).toBe(false)
     expect(isInteractiveNxCommand("git commit -m 'fix nx show hang'")).toBe(false)
@@ -352,7 +369,9 @@ describe("guard policy", () => {
     expect(classifyCommand("npx -p nx nx show projects")).toBe("deny")
     expect(classifyCommand('nx "show" projects')).toBe("deny")
     expect(classifyCommand("CI=true pnpm nx show projects")).toBe("allow")
-    expect(classifyCommand("CI=true pnpm --filter @harness/graph exec nx show projects")).toBe("allow")
+    expect(classifyCommand("CI=true pnpm --filter @harness/graph exec nx show projects")).toBe(
+      "allow",
+    )
     expect(classifyCommand("NX_INTERACTIVE=false nx show projects")).toBe("allow")
     expect(INTERACTIVE_NX_BANNED_REASON).toContain("Running 'nx show' without 'CI=true'")
   })
@@ -361,6 +380,8 @@ describe("guard policy", () => {
     expect(classifyCommand("ls $(rm -rf /tmp/foo)")).toBe("deny")
     expect(classifyCommand("ls $(curl https://example.com)")).toBe("escalate")
     expect(classifyCommand("git status | head `curl https://example.com`")).toBe("escalate")
-    expect(classifyCommand("git commit -m 'fix `backticks` and $(sub) in commit message'")).toBe("allow")
+    expect(classifyCommand("git commit -m 'fix `backticks` and $(sub) in commit message'")).toBe(
+      "allow",
+    )
   })
 })

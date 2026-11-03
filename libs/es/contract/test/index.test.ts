@@ -20,7 +20,7 @@ import {
   ProjectionVersion,
   StreamCreationStatus,
   StreamVersion,
-  TimestampMs
+  TimestampMs,
 } from "../src/index.js"
 
 describe("@harness/es-contract", () => {
@@ -95,7 +95,7 @@ describe("@harness/es-contract", () => {
         commandId: "cmd-abc",
         timestamp: 1700000000000,
         correlationId: "corr-1",
-        causationId: "cause-1"
+        causationId: "cause-1",
       })
       expect(full.aggregateId).toBe("agg-1")
       expect(full.streamVersion).toBe(2)
@@ -107,7 +107,7 @@ describe("@harness/es-contract", () => {
         aggregateId: "agg-2",
         streamVersion: 0,
         commandId: "cmd-def",
-        timestamp: 1700000000000
+        timestamp: 1700000000000,
       })
       expect(minimal.aggregateId).toBe("agg-2")
       expect(minimal.correlationId).toBeUndefined()
@@ -116,16 +116,24 @@ describe("@harness/es-contract", () => {
 
   describe("AggregateCommandResult & Status Unions", () => {
     it("decodes valid command results with closed status variants", () => {
-      expect(Schema.decodeSync(StreamCreationStatus)({ _tag: "CreatedStream" })._tag).toBe("CreatedStream")
+      expect(Schema.decodeSync(StreamCreationStatus)({ _tag: "CreatedStream" })._tag).toBe(
+        "CreatedStream",
+      )
       expect(Schema.decodeSync(StreamCreationStatus)({ _tag: "NoStream" })._tag).toBe("NoStream")
-      expect(Schema.decodeSync(CommandProcessingStatus)({ _tag: "Processed" })._tag).toBe("Processed")
-      expect(Schema.decodeSync(OutboxPublicationMode)({ _tag: "PublishOutbox" })._tag).toBe("PublishOutbox")
-      expect(Schema.decodeSync(OutboxPublicationMode)({ _tag: "SuppressOutbox" })._tag).toBe("SuppressOutbox")
+      expect(Schema.decodeSync(CommandProcessingStatus)({ _tag: "Processed" })._tag).toBe(
+        "Processed",
+      )
+      expect(Schema.decodeSync(OutboxPublicationMode)({ _tag: "PublishOutbox" })._tag).toBe(
+        "PublishOutbox",
+      )
+      expect(Schema.decodeSync(OutboxPublicationMode)({ _tag: "SuppressOutbox" })._tag).toBe(
+        "SuppressOutbox",
+      )
 
       const res1 = Schema.decodeSync(AggregateCommandResult)({
         nextExpectedStreamVersion: 1,
         creationStatus: { _tag: "CreatedStream" },
-        processingStatus: { _tag: "Processed" }
+        processingStatus: { _tag: "Processed" },
       })
       expect(res1.nextExpectedStreamVersion).toBe(1)
       expect(res1.creationStatus._tag).toBe("CreatedStream")
@@ -134,7 +142,7 @@ describe("@harness/es-contract", () => {
       const res2 = Schema.decodeSync(AggregateCommandResult)({
         nextExpectedStreamVersion: 5,
         creationStatus: { _tag: "ExistingStream" },
-        processingStatus: { _tag: "Deduplicated" }
+        processingStatus: { _tag: "Deduplicated" },
       })
       expect(res2.creationStatus._tag).toBe("ExistingStream")
       expect(res2.processingStatus._tag).toBe("Deduplicated")
@@ -146,7 +154,7 @@ describe("@harness/es-contract", () => {
       const err = new ConcurrencyConflictError({
         aggregateId: AggregateId.make("cart-1"),
         expectedVersion: StreamVersion.make(1),
-        actualVersion: StreamVersion.make(2)
+        actualVersion: StreamVersion.make(2),
       })
       expect(err._tag).toBe("ConcurrencyConflictError")
       expect(err.aggregateId).toBe("cart-1")
@@ -156,7 +164,7 @@ describe("@harness/es-contract", () => {
 
     it("instantiates AggregateNotFoundError", () => {
       const err = new AggregateNotFoundError({
-        aggregateId: AggregateId.make("cart-404")
+        aggregateId: AggregateId.make("cart-404"),
       })
       expect(err._tag).toBe("AggregateNotFoundError")
       expect(err.aggregateId).toBe("cart-404")
@@ -164,7 +172,7 @@ describe("@harness/es-contract", () => {
 
     it("instantiates LocalProjectionNotFoundError", () => {
       const err = new LocalProjectionNotFoundError({
-        name: ProjectionName.make("missing-view")
+        name: ProjectionName.make("missing-view"),
       })
       expect(err._tag).toBe("LocalProjectionNotFoundError")
       expect(err.name).toBe("missing-view")
@@ -176,7 +184,7 @@ describe("@harness/es-contract", () => {
         expectedAggregateName: AggregateName.make("Cart"),
         expectedAggregateId: AggregateId.make("cart-1"),
         actualAggregateName: AggregateName.make("Cart"),
-        actualAggregateId: AggregateId.make("cart-2")
+        actualAggregateId: AggregateId.make("cart-2"),
       })
       expect(mismatch._tag).toBe("CommandAggregateMismatchError")
 
@@ -184,7 +192,7 @@ describe("@harness/es-contract", () => {
         aggregateName: AggregateName.make("Cart"),
         aggregateId: AggregateId.make("cart-1"),
         expectedStreamVersion: StreamVersion.make(1),
-        actualStreamVersion: StreamVersion.make(3)
+        actualStreamVersion: StreamVersion.make(3),
       })
       expect(corrupt._tag).toBe("EventStreamCorruptionError")
     })

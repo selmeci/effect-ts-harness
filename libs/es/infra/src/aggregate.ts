@@ -12,7 +12,7 @@ import {
   EventStreamCorruptionError,
   type OutboxPublicationMode,
   StreamVersion,
-  TimestampMs
+  TimestampMs,
 } from "@harness/es-contract"
 import {
   type AggregateConfig,
@@ -20,7 +20,7 @@ import {
   type HandledCommandResult,
   type HistoricalEvent,
   type LoadedAggregate,
-  rebuildLocalProjection
+  rebuildLocalProjection,
 } from "@harness/es-core"
 import { match } from "ts-pattern"
 
@@ -62,22 +62,19 @@ const toSafeStreamVersion = (raw: number): StreamVersion =>
 
 const extractCauseText = (sqlErr: SqlError): string => {
   const nestedCause = sqlErr.reason.cause
-  const causeMsg =
-    nestedCause instanceof Error ? nestedCause.message : String(nestedCause)
+  const causeMsg = nestedCause instanceof Error ? nestedCause.message : String(nestedCause)
   return `${sqlErr.message} ${sqlErr.reason.message ?? ""} ${causeMsg}`
 }
 
 const isEventStreamUniqueConflict = (sqlErr: SqlError): boolean =>
   match(sqlErr.reason)
-    .with({ _tag: "UniqueViolation" }, (r) =>
-      r.constraint.includes("es_events") || extractCauseText(sqlErr).includes("es_events")
+    .with(
+      { _tag: "UniqueViolation" },
+      (r) => r.constraint.includes("es_events") || extractCauseText(sqlErr).includes("es_events"),
     )
     .with({ _tag: "ConstraintError" }, { _tag: "UnknownError" }, () => {
       const errMsg = extractCauseText(sqlErr)
-      return (
-        errMsg.includes("UNIQUE constraint failed") &&
-        errMsg.includes("es_events")
-      )
+      return errMsg.includes("UNIQUE constraint failed") && errMsg.includes("es_events")
     })
     .with(
       { _tag: "ConnectionError" },
@@ -88,16 +85,15 @@ const isEventStreamUniqueConflict = (sqlErr: SqlError): boolean =>
       { _tag: "SerializationError" },
       { _tag: "LockTimeoutError" },
       { _tag: "StatementTimeoutError" },
-      () => false
+      () => false,
     )
     .exhaustive()
 
 export { isEventStreamUniqueConflict }
 
-export const initializeAggregateTables = Effect.fn("AggregateInfra.initTables")(
-  function* () {
-    const sql = yield* SqlClient
-    yield* sql`
+export const initializeAggregateTables = Effect.fn("AggregateInfra.initTables")(function* () {
+  const sql = yield* SqlClient
+  yield* sql`
       CREATE TABLE IF NOT EXISTS es_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         aggregate_name TEXT NOT NULL,
@@ -111,7 +107,7 @@ export const initializeAggregateTables = Effect.fn("AggregateInfra.initTables")(
         UNIQUE(aggregate_name, aggregate_id, stream_version)
       );
     `
-    yield* sql`
+  yield* sql`
       CREATE TABLE IF NOT EXISTS es_commands (
         command_id TEXT PRIMARY KEY,
         aggregate_name TEXT NOT NULL,
@@ -121,7 +117,7 @@ export const initializeAggregateTables = Effect.fn("AggregateInfra.initTables")(
         created_at INTEGER NOT NULL
       );
     `
-    yield* sql`
+  yield* sql`
       CREATE TABLE IF NOT EXISTS es_projections_meta (
         aggregate_name TEXT NOT NULL,
         aggregate_id TEXT NOT NULL,
@@ -132,7 +128,7 @@ export const initializeAggregateTables = Effect.fn("AggregateInfra.initTables")(
         PRIMARY KEY (aggregate_name, aggregate_id, projection_name)
       );
     `
-    yield* sql`
+  yield* sql`
       CREATE TABLE IF NOT EXISTS es_outbox (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         aggregate_name TEXT NOT NULL,
@@ -144,12 +140,11 @@ export const initializeAggregateTables = Effect.fn("AggregateInfra.initTables")(
         created_at INTEGER NOT NULL
       );
     `
-  }
-)
+})
 
 const loadAggregateInTx = <Command, Event, State, Err, ProjectionEnv, ProjectionErr>(
   aggregateId: AggregateId,
-  config: AggregateConfig<Command, Event, State, Err, ProjectionEnv, ProjectionErr>
+  config: AggregateConfig<Command, Event, State, Err, ProjectionEnv, ProjectionErr>,
 ): Effect.Effect<
   LoadedAggregate<State>,
   EventStreamCorruptionError | ProjectionErr | SqlError,
@@ -181,7 +176,7 @@ const loadAggregateInTx = <Command, Event, State, Err, ProjectionEnv, Projection
           aggregateName: config.aggregateName,
           aggregateId,
           expectedStreamVersion,
-          actualStreamVersion: actualRowVersion
+          actualStreamVersion: actualRowVersion,
         })
       }
 
@@ -192,9 +187,9 @@ const loadAggregateInTx = <Command, Event, State, Err, ProjectionEnv, Projection
               aggregateName: config.aggregateName,
               aggregateId,
               expectedStreamVersion,
-              actualStreamVersion: actualRowVersion
-            })
-        )
+              actualStreamVersion: actualRowVersion,
+            }),
+        ),
       )
       const metadata = yield* Schema.decodeEffect(metadataJsonSchema)(row.metadata).pipe(
         Effect.mapError(
@@ -203,9 +198,9 @@ const loadAggregateInTx = <Command, Event, State, Err, ProjectionEnv, Projection
               aggregateName: config.aggregateName,
               aggregateId,
               expectedStreamVersion,
-              actualStreamVersion: actualRowVersion
-            })
-        )
+              actualStreamVersion: actualRowVersion,
+            }),
+        ),
       )
 
       if (
@@ -216,7 +211,7 @@ const loadAggregateInTx = <Command, Event, State, Err, ProjectionEnv, Projection
           aggregateName: config.aggregateName,
           aggregateId,
           expectedStreamVersion,
-          actualStreamVersion: toSafeStreamVersion(metadata.streamVersion)
+          actualStreamVersion: toSafeStreamVersion(metadata.streamVersion),
         })
       }
 
@@ -273,239 +268,242 @@ const loadAggregateInTx = <Command, Event, State, Err, ProjectionEnv, Projection
 
     const loaded: LoadedAggregate<State> = {
       state: currentState,
-      currentVersion
+      currentVersion,
     }
     return loaded
   })
 
-export const loadAggregate = Effect.fn("Aggregate.load")(
-  function* <Command, Event, State, Err, ProjectionEnv = never, ProjectionErr = never>(
-    aggregateId: AggregateId,
-    config: AggregateConfig<Command, Event, State, Err, ProjectionEnv, ProjectionErr>
-  ) {
-    const sql = yield* SqlClient
-    return yield* sql.withTransaction(loadAggregateInTx(aggregateId, config))
-  }
-)
+export const loadAggregate = Effect.fn("Aggregate.load")(function* <
+  Command,
+  Event,
+  State,
+  Err,
+  ProjectionEnv = never,
+  ProjectionErr = never,
+>(
+  aggregateId: AggregateId,
+  config: AggregateConfig<Command, Event, State, Err, ProjectionEnv, ProjectionErr>,
+) {
+  const sql = yield* SqlClient
+  return yield* sql.withTransaction(loadAggregateInTx(aggregateId, config))
+})
 
-export const handleAggregateCommand = Effect.fn("Aggregate.handleCommand")(
-  function* <Command, Event, State, Err, ProjectionEnv = never, ProjectionErr = never>(
-    aggregateId: AggregateId,
-    command: Command,
-    commandId: CommandId,
-    config: AggregateConfig<Command, Event, State, Err, ProjectionEnv, ProjectionErr>
-  ) {
-    const sql = yield* SqlClient
-    const commandResultJsonSchema = Schema.fromJsonString(AggregateCommandResult)
-    const eventJsonSchema = Schema.fromJsonString(config.eventSchema)
-    const metadataJsonSchema = Schema.fromJsonString(EventMetadata)
-    const outboxMode: OutboxPublicationMode =
-      config.outboxMode ?? ({ _tag: "SuppressOutbox" } as const)
+export const handleAggregateCommand = Effect.fn("Aggregate.handleCommand")(function* <
+  Command,
+  Event,
+  State,
+  Err,
+  ProjectionEnv = never,
+  ProjectionErr = never,
+>(
+  aggregateId: AggregateId,
+  command: Command,
+  commandId: CommandId,
+  config: AggregateConfig<Command, Event, State, Err, ProjectionEnv, ProjectionErr>,
+) {
+  const sql = yield* SqlClient
+  const commandResultJsonSchema = Schema.fromJsonString(AggregateCommandResult)
+  const eventJsonSchema = Schema.fromJsonString(config.eventSchema)
+  const metadataJsonSchema = Schema.fromJsonString(EventMetadata)
+  const outboxMode: OutboxPublicationMode =
+    config.outboxMode ?? ({ _tag: "SuppressOutbox" } as const)
 
-    const txEffect = Effect.gen(function* () {
-      const existingCommands = yield* sql<CommandRow>`
+  const txEffect = Effect.gen(function* () {
+    const existingCommands = yield* sql<CommandRow>`
         SELECT command_id, aggregate_name, aggregate_id, stream_version, result_json, created_at
         FROM es_commands
         WHERE command_id = ${commandId}
       `
-      const cachedCommand = existingCommands[0]
-      if (cachedCommand !== undefined) {
-        const safeCachedVersion = toSafeStreamVersion(cachedCommand.stream_version)
-        const decodedNameOpt = Schema.decodeOption(AggregateName)(
-          cachedCommand.aggregate_name
+    const cachedCommand = existingCommands[0]
+    if (cachedCommand !== undefined) {
+      const safeCachedVersion = toSafeStreamVersion(cachedCommand.stream_version)
+      const decodedNameOpt = Schema.decodeOption(AggregateName)(cachedCommand.aggregate_name)
+      const decodedIdOpt = Schema.decodeOption(AggregateId)(cachedCommand.aggregate_id)
+      const decodedVersionOpt = Schema.decodeOption(StreamVersion)(cachedCommand.stream_version)
+      const cachedIdentity = yield* match({
+        nameOpt: decodedNameOpt,
+        idOpt: decodedIdOpt,
+        versionOpt: decodedVersionOpt,
+      })
+        .with(
+          {
+            nameOpt: { _tag: "Some" },
+            idOpt: { _tag: "Some" },
+            versionOpt: { _tag: "Some" },
+          },
+          ({ idOpt, nameOpt, versionOpt }) =>
+            Effect.succeed({
+              actualName: nameOpt.value,
+              actualId: idOpt.value,
+              storedVersion: versionOpt.value,
+            }),
         )
-        const decodedIdOpt = Schema.decodeOption(AggregateId)(
-          cachedCommand.aggregate_id
-        )
-        const decodedVersionOpt = Schema.decodeOption(StreamVersion)(
-          cachedCommand.stream_version
-        )
-        const cachedIdentity = yield* match({
-          nameOpt: decodedNameOpt,
-          idOpt: decodedIdOpt,
-          versionOpt: decodedVersionOpt
-        })
-          .with(
-            {
-              nameOpt: { _tag: "Some" },
-              idOpt: { _tag: "Some" },
-              versionOpt: { _tag: "Some" }
-            },
-            ({ idOpt, nameOpt, versionOpt }) =>
-              Effect.succeed({
-                actualName: nameOpt.value,
-                actualId: idOpt.value,
-                storedVersion: versionOpt.value
-              })
-          )
-          .with(
-            { nameOpt: { _tag: "None" } },
-            { idOpt: { _tag: "None" } },
-            { versionOpt: { _tag: "None" } },
-            () =>
-              Effect.fail(
-                new EventStreamCorruptionError({
-                  aggregateName: config.aggregateName,
-                  aggregateId,
-                  expectedStreamVersion: safeCachedVersion,
-                  actualStreamVersion: safeCachedVersion
-                })
-              )
-          )
-          .exhaustive()
-
-        if (
-          cachedIdentity.actualName !== config.aggregateName ||
-          cachedIdentity.actualId !== aggregateId
-        ) {
-          return yield* new CommandAggregateMismatchError({
-            commandId,
-            expectedAggregateName: config.aggregateName,
-            expectedAggregateId: aggregateId,
-            actualAggregateName: cachedIdentity.actualName,
-            actualAggregateId: cachedIdentity.actualId
-          })
-        }
-
-        const storedResult = yield* Schema.decodeEffect(commandResultJsonSchema)(
-          cachedCommand.result_json
-        ).pipe(
-          Effect.mapError(
-            () =>
+        .with(
+          { nameOpt: { _tag: "None" } },
+          { idOpt: { _tag: "None" } },
+          { versionOpt: { _tag: "None" } },
+          () =>
+            Effect.fail(
               new EventStreamCorruptionError({
                 aggregateName: config.aggregateName,
                 aggregateId,
-                expectedStreamVersion: cachedIdentity.storedVersion,
-                actualStreamVersion: cachedIdentity.storedVersion
-              })
-          )
+                expectedStreamVersion: safeCachedVersion,
+                actualStreamVersion: safeCachedVersion,
+              }),
+            ),
         )
+        .exhaustive()
 
-        if (storedResult.nextExpectedStreamVersion !== cachedIdentity.storedVersion) {
-          return yield* new EventStreamCorruptionError({
-            aggregateName: config.aggregateName,
-            aggregateId,
-            expectedStreamVersion: cachedIdentity.storedVersion,
-            actualStreamVersion: storedResult.nextExpectedStreamVersion
-          })
-        }
-
-        const loaded = yield* loadAggregateInTx(aggregateId, config)
-        const deduplicatedResult = new AggregateCommandResult({
-          nextExpectedStreamVersion: storedResult.nextExpectedStreamVersion,
-          creationStatus: storedResult.creationStatus,
-          processingStatus: { _tag: "Deduplicated" }
+      if (
+        cachedIdentity.actualName !== config.aggregateName ||
+        cachedIdentity.actualId !== aggregateId
+      ) {
+        return yield* new CommandAggregateMismatchError({
+          commandId,
+          expectedAggregateName: config.aggregateName,
+          expectedAggregateId: aggregateId,
+          actualAggregateName: cachedIdentity.actualName,
+          actualAggregateId: cachedIdentity.actualId,
         })
-        const handledDeduplicated: HandledCommandResult<State, Event> = {
-          state: loaded.state,
-          events: [],
-          result: deduplicatedResult
-        }
-        return handledDeduplicated
+      }
+
+      const storedResult = yield* Schema.decodeEffect(commandResultJsonSchema)(
+        cachedCommand.result_json,
+      ).pipe(
+        Effect.mapError(
+          () =>
+            new EventStreamCorruptionError({
+              aggregateName: config.aggregateName,
+              aggregateId,
+              expectedStreamVersion: cachedIdentity.storedVersion,
+              actualStreamVersion: cachedIdentity.storedVersion,
+            }),
+        ),
+      )
+
+      if (storedResult.nextExpectedStreamVersion !== cachedIdentity.storedVersion) {
+        return yield* new EventStreamCorruptionError({
+          aggregateName: config.aggregateName,
+          aggregateId,
+          expectedStreamVersion: cachedIdentity.storedVersion,
+          actualStreamVersion: storedResult.nextExpectedStreamVersion,
+        })
       }
 
       const loaded = yield* loadAggregateInTx(aggregateId, config)
-      const currentVersion = loaded.currentVersion
-      const currentState = loaded.state
+      const deduplicatedResult = new AggregateCommandResult({
+        nextExpectedStreamVersion: storedResult.nextExpectedStreamVersion,
+        creationStatus: storedResult.creationStatus,
+        processingStatus: { _tag: "Deduplicated" },
+      })
+      const handledDeduplicated: HandledCommandResult<State, Event> = {
+        state: loaded.state,
+        events: [],
+        result: deduplicatedResult,
+      }
+      return handledDeduplicated
+    }
 
-      const events = yield* config.decider.decide(command, currentState)
+    const loaded = yield* loadAggregateInTx(aggregateId, config)
+    const currentVersion = loaded.currentVersion
+    const currentState = loaded.state
 
-      if (events.length === 0) {
-        const nowMs = yield* Clock.currentTimeMillis
-        const now = TimestampMs.make(nowMs)
-        const noOpCreationStatus =
-          currentVersion === 0
-            ? ({ _tag: "NoStream" } as const)
-            : ({ _tag: "ExistingStream" } as const)
-        const noOpResult = new AggregateCommandResult({
-          nextExpectedStreamVersion: currentVersion,
-          creationStatus: noOpCreationStatus,
-          processingStatus: { _tag: "Processed" }
-        })
-        const noOpResultJson = yield* Schema.encodeEffect(commandResultJsonSchema)(
-          noOpResult
-        ).pipe(
-          Effect.mapError(
-            () =>
-              new EventStreamCorruptionError({
-                aggregateName: config.aggregateName,
-                aggregateId,
-                expectedStreamVersion: currentVersion,
-                actualStreamVersion: currentVersion
-              })
-          )
-        )
-        yield* sql`
+    const events = yield* config.decider.decide(command, currentState)
+
+    if (events.length === 0) {
+      const nowMs = yield* Clock.currentTimeMillis
+      const now = TimestampMs.make(nowMs)
+      const noOpCreationStatus =
+        currentVersion === 0
+          ? ({ _tag: "NoStream" } as const)
+          : ({ _tag: "ExistingStream" } as const)
+      const noOpResult = new AggregateCommandResult({
+        nextExpectedStreamVersion: currentVersion,
+        creationStatus: noOpCreationStatus,
+        processingStatus: { _tag: "Processed" },
+      })
+      const noOpResultJson = yield* Schema.encodeEffect(commandResultJsonSchema)(noOpResult).pipe(
+        Effect.mapError(
+          () =>
+            new EventStreamCorruptionError({
+              aggregateName: config.aggregateName,
+              aggregateId,
+              expectedStreamVersion: currentVersion,
+              actualStreamVersion: currentVersion,
+            }),
+        ),
+      )
+      yield* sql`
           INSERT INTO es_commands (
             command_id, aggregate_name, aggregate_id, stream_version, result_json, created_at
           ) VALUES (
             ${commandId}, ${config.aggregateName}, ${aggregateId}, ${currentVersion}, ${noOpResultJson}, ${now}
           )
         `
-        const handledNoOp: HandledCommandResult<State, Event> = {
-          state: currentState,
-          events: [],
-          result: noOpResult
-        }
-        return handledNoOp
+      const handledNoOp: HandledCommandResult<State, Event> = {
+        state: currentState,
+        events: [],
+        result: noOpResult,
       }
+      return handledNoOp
+    }
 
-      const nextExpectedStreamVersion = StreamVersion.make(currentVersion + events.length)
-      const creationStatus =
-        currentVersion === 0
-          ? ({ _tag: "CreatedStream" } as const)
-          : ({ _tag: "ExistingStream" } as const)
-      const commandResult = new AggregateCommandResult({
-        nextExpectedStreamVersion,
-        creationStatus,
-        processingStatus: { _tag: "Processed" }
+    const nextExpectedStreamVersion = StreamVersion.make(currentVersion + events.length)
+    const creationStatus =
+      currentVersion === 0
+        ? ({ _tag: "CreatedStream" } as const)
+        : ({ _tag: "ExistingStream" } as const)
+    const commandResult = new AggregateCommandResult({
+      nextExpectedStreamVersion,
+      creationStatus,
+      processingStatus: { _tag: "Processed" },
+    })
+
+    let activeState = currentState
+    let eventVersion = currentVersion
+
+    for (const event of events) {
+      eventVersion = StreamVersion.make(eventVersion + 1)
+      activeState = config.decider.evolve(activeState, event)
+      const nowMs = yield* Clock.currentTimeMillis
+      const now = TimestampMs.make(nowMs)
+      const metadata = new EventMetadata({
+        aggregateId,
+        streamVersion: eventVersion,
+        commandId,
+        timestamp: now,
       })
+      const payloadJson = yield* Schema.encodeEffect(eventJsonSchema)(event).pipe(
+        Effect.mapError(
+          () =>
+            new EventStreamCorruptionError({
+              aggregateName: config.aggregateName,
+              aggregateId,
+              expectedStreamVersion: eventVersion,
+              actualStreamVersion: eventVersion,
+            }),
+        ),
+      )
+      const metadataJson = yield* Schema.encodeEffect(metadataJsonSchema)(metadata).pipe(
+        Effect.mapError(
+          () =>
+            new EventStreamCorruptionError({
+              aggregateName: config.aggregateName,
+              aggregateId,
+              expectedStreamVersion: eventVersion,
+              actualStreamVersion: eventVersion,
+            }),
+        ),
+      )
+      const eventType =
+        typeof event === "object" &&
+        event !== null &&
+        "_tag" in event &&
+        typeof event._tag === "string"
+          ? event._tag
+          : "Event"
 
-      let activeState = currentState
-      let eventVersion = currentVersion
-
-      for (const event of events) {
-        eventVersion = StreamVersion.make(eventVersion + 1)
-        activeState = config.decider.evolve(activeState, event)
-        const nowMs = yield* Clock.currentTimeMillis
-        const now = TimestampMs.make(nowMs)
-        const metadata = new EventMetadata({
-          aggregateId,
-          streamVersion: eventVersion,
-          commandId,
-          timestamp: now
-        })
-        const payloadJson = yield* Schema.encodeEffect(eventJsonSchema)(event).pipe(
-          Effect.mapError(
-            () =>
-              new EventStreamCorruptionError({
-                aggregateName: config.aggregateName,
-                aggregateId,
-                expectedStreamVersion: eventVersion,
-                actualStreamVersion: eventVersion
-              })
-          )
-        )
-        const metadataJson = yield* Schema.encodeEffect(metadataJsonSchema)(metadata).pipe(
-          Effect.mapError(
-            () =>
-              new EventStreamCorruptionError({
-                aggregateName: config.aggregateName,
-                aggregateId,
-                expectedStreamVersion: eventVersion,
-                actualStreamVersion: eventVersion
-              })
-          )
-        )
-        const eventType =
-          typeof event === "object" &&
-          event !== null &&
-          "_tag" in event &&
-          typeof event._tag === "string"
-            ? event._tag
-            : "Event"
-
-        yield* sql`
+      yield* sql`
           INSERT INTO es_events (
             aggregate_name,
             aggregate_id,
@@ -526,27 +524,27 @@ export const handleAggregateCommand = Effect.fn("Aggregate.handleCommand")(
             ${now}
           )
         `.pipe(
-          Effect.catchIf(isEventStreamUniqueConflict, () =>
-            Effect.gen(function* () {
-              const headRows = yield* sql<MaxVersionRow>`
+        Effect.catchIf(isEventStreamUniqueConflict, () =>
+          Effect.gen(function* () {
+            const headRows = yield* sql<MaxVersionRow>`
                 SELECT MAX(stream_version) as max_version
                 FROM es_events
                 WHERE aggregate_name = ${config.aggregateName} AND aggregate_id = ${aggregateId}
               `
-              const actualHead = toSafeStreamVersion(headRows[0]?.max_version ?? 0)
-              return yield* new ConcurrencyConflictError({
-                aggregateId,
-                expectedVersion: currentVersion,
-                actualVersion: actualHead
-              })
+            const actualHead = toSafeStreamVersion(headRows[0]?.max_version ?? 0)
+            return yield* new ConcurrencyConflictError({
+              aggregateId,
+              expectedVersion: currentVersion,
+              actualVersion: actualHead,
             })
-          )
-        )
+          }),
+        ),
+      )
 
-        if (config.projections !== undefined) {
-          for (const projection of config.projections) {
-            yield* applyLocalProjection(projection, event, metadata)
-            yield* sql`
+      if (config.projections !== undefined) {
+        for (const projection of config.projections) {
+          yield* applyLocalProjection(projection, event, metadata)
+          yield* sql`
               INSERT INTO es_projections_meta (
                 aggregate_name,
                 aggregate_id,
@@ -567,12 +565,12 @@ export const handleAggregateCommand = Effect.fn("Aggregate.handleCommand")(
                 last_stream_version = excluded.last_stream_version,
                 updated_at = excluded.updated_at
             `
-          }
         }
+      }
 
-        yield* match(outboxMode)
-          .with({ _tag: "PublishOutbox" }, () =>
-            sql`
+      yield* match(outboxMode)
+        .with({ _tag: "PublishOutbox" }, () =>
+          sql`
               INSERT INTO es_outbox (
                 aggregate_name,
                 aggregate_id,
@@ -590,28 +588,28 @@ export const handleAggregateCommand = Effect.fn("Aggregate.handleCommand")(
                 ${metadataJson},
                 ${now}
               )
-            `.pipe(Effect.asVoid)
-          )
-          .with({ _tag: "SuppressOutbox" }, () => Effect.void)
-          .exhaustive()
-      }
-
-      const nowMs = yield* Clock.currentTimeMillis
-      const now = TimestampMs.make(nowMs)
-      const commandResultJson = yield* Schema.encodeEffect(commandResultJsonSchema)(
-        commandResult
-      ).pipe(
-        Effect.mapError(
-          () =>
-            new EventStreamCorruptionError({
-              aggregateName: config.aggregateName,
-              aggregateId,
-              expectedStreamVersion: nextExpectedStreamVersion,
-              actualStreamVersion: nextExpectedStreamVersion
-            })
+            `.pipe(Effect.asVoid),
         )
-      )
-      yield* sql`
+        .with({ _tag: "SuppressOutbox" }, () => Effect.void)
+        .exhaustive()
+    }
+
+    const nowMs = yield* Clock.currentTimeMillis
+    const now = TimestampMs.make(nowMs)
+    const commandResultJson = yield* Schema.encodeEffect(commandResultJsonSchema)(
+      commandResult,
+    ).pipe(
+      Effect.mapError(
+        () =>
+          new EventStreamCorruptionError({
+            aggregateName: config.aggregateName,
+            aggregateId,
+            expectedStreamVersion: nextExpectedStreamVersion,
+            actualStreamVersion: nextExpectedStreamVersion,
+          }),
+      ),
+    )
+    yield* sql`
         INSERT INTO es_commands (
           command_id, aggregate_name, aggregate_id, stream_version, result_json, created_at
         ) VALUES (
@@ -624,14 +622,13 @@ export const handleAggregateCommand = Effect.fn("Aggregate.handleCommand")(
         )
       `
 
-      const handled: HandledCommandResult<State, Event> = {
-        state: activeState,
-        events,
-        result: commandResult
-      }
-      return handled
-    })
+    const handled: HandledCommandResult<State, Event> = {
+      state: activeState,
+      events,
+      result: commandResult,
+    }
+    return handled
+  })
 
-    return yield* sql.withTransaction(txEffect)
-  }
-)
+  return yield* sql.withTransaction(txEffect)
+})

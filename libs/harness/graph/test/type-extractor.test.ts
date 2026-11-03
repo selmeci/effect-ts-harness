@@ -13,7 +13,7 @@ import {
   findCallers,
   findTestsReaching,
   resolveNode,
-  stripCommentsAndTestTitles
+  stripCommentsAndTestTitles,
 } from "../src/index.js"
 import type { EffectFnNode, ServiceLayerNode, VitestCaseNode } from "../src/model.js"
 
@@ -33,7 +33,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
           export class PaymentService extends Context.Service<PaymentService, {
             readonly charge: (cents: number) => Effect.Effect<void, PaymentError>
           }>()("PaymentService") {}
-        `
+        `,
       },
       {
         filePath: "libs/sample/domain/src/checkout.ts",
@@ -46,8 +46,8 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
           export const checkoutSkeleton = Effect.fn("Cart.checkout")(function* (sku: string) {
             return yield* stub<{ readonly orderId: string }, OutOfStockError | PaymentError, InventoryRepo | PaymentService>(sku)
           })
-        `
-      }
+        `,
+      },
     ])
 
     const callees = findCallees(graph, "Cart.checkout")
@@ -55,7 +55,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
       "InventoryRepo",
       "OutOfStockError",
       "PaymentError",
-      "PaymentService"
+      "PaymentService",
     ])
 
     const fnNode = resolveNode(graph, "Cart.checkout") as EffectFnNode
@@ -67,8 +67,8 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
     expect(errorCallers).toEqual([
       expect.objectContaining({
         qualname: "libs/sample/domain/src/checkout.ts#checkoutSkeleton",
-        edgeKind: "FailsWith"
-      })
+        edgeKind: "FailsWith",
+      }),
     ])
   })
 
@@ -87,7 +87,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
           export class AuthService extends Context.Service<AuthService, {
             readonly check: () => Effect.Effect<void, AuthError>
           }>()("AuthService") {}
-        `
+        `,
       },
       {
         filePath: "libs/sample/domain/src/orders.ts",
@@ -102,8 +102,8 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
             const repo = yield* OrderRepo
             return yield* repo.find(orderId)
           })
-        `
-      }
+        `,
+      },
     ])
 
     const callees = findCallees(graph, "Orders.getOrder")
@@ -111,7 +111,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
       "AuthError",
       "AuthService",
       "OrderNotFound",
-      "OrderRepo"
+      "OrderRepo",
     ])
 
     const fnNode = resolveNode(graph, "Orders.getOrder") as EffectFnNode
@@ -136,7 +136,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
           export class UserRepo extends Context.Service<UserRepo, {
             readonly findById: (id: string) => Effect.Effect<string>
           }>()("UserRepo") {}
-        `
+        `,
       },
       {
         filePath: "libs/sample/infra/src/user-repo-live.ts",
@@ -155,13 +155,13 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
               }
             })
           )
-        `
-      }
+        `,
+      },
     ])
 
     const layerNode = resolveNode(
       graph,
-      "libs/sample/infra/src/user-repo-live.ts#UserRepoLive"
+      "libs/sample/infra/src/user-repo-live.ts#UserRepoLive",
     ) as ServiceLayerNode
     expect(layerNode).toBeDefined()
     expect(layerNode._tag).toBe("ServiceLayer")
@@ -172,9 +172,10 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
     const requires = callees.filter((c) => c.edgeKind === "LayerRequires")
 
     expect(provides.map((p) => p.tagId)).toEqual(["UserRepo"])
-    expect(
-      requires.map((r) => r.tagId ?? "").sort((a, b) => a.localeCompare(b))
-    ).toEqual(["CacheService", "DatabaseService"])
+    expect(requires.map((r) => r.tagId ?? "").sort((a, b) => a.localeCompare(b))).toEqual([
+      "CacheService",
+      "DatabaseService",
+    ])
   })
 
   it("assigns layerKind: 'live' for InventoryLive defined in type:infra", () => {
@@ -187,7 +188,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
           export class InventoryRepo extends Context.Service<InventoryRepo, {
             readonly reserve: (sku: string) => Effect.Effect<void>
           }>()("InventoryRepo") {}
-        `
+        `,
       },
       {
         filePath: "libs/sample/infra/src/index.ts",
@@ -199,13 +200,13 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
           export const InventoryLive: Layer.Layer<InventoryRepo> = Layer.succeed(InventoryRepo, {
             reserve: () => Effect.void
           })
-        `
-      }
+        `,
+      },
     ])
 
     const layerNode = resolveNode(
       graph,
-      "libs/sample/infra/src/index.ts#InventoryLive"
+      "libs/sample/infra/src/index.ts#InventoryLive",
     ) as ServiceLayerNode
     expect(layerNode).toBeDefined()
     expect(layerNode._tag).toBe("ServiceLayer")
@@ -222,7 +223,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
           export class CustomServiceClass extends Context.Service<CustomServiceClass, {
             readonly ping: () => Effect.Effect<string>
           }>()("custom.service.tag") {}
-        `
+        `,
       },
       {
         filePath: "libs/sample/domain/src/index.ts",
@@ -235,8 +236,8 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
           export const callCustom = Effect.fn("Sample.callCustom")(function* () {
             return yield* stub<string, never, CustomServiceClass>()
           })
-        `
-      }
+        `,
+      },
     ])
 
     const callees = findCallees(graph, "Sample.callCustom")
@@ -287,8 +288,8 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
           export class MyError extends Schema.TaggedError<MyError>()("MyError", {
             message: Schema.String
           }) {}
-        `
-      }
+        `,
+      },
     ])
 
     const errorNode = resolveNode(graph, "MyError")
@@ -312,8 +313,8 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
           export const evolveCart = (state: CartState, event: CartEvent): CartState => {
             return state
           }
-        `
-      }
+        `,
+      },
     ])
 
     const fnNode = resolveNode(graph, "Cart.evolve") as EffectFnNode
@@ -336,8 +337,8 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
           export function evolveCart(state: CartState, event: CartEvent): CartState {
             return state
           }
-        `
-      }
+        `,
+      },
     ])
 
     const fnNode = resolveNode(graph, "Cart.evolve") as EffectFnNode
@@ -375,7 +376,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
             decide: decideCart,
             evolve: evolveCart
           })
-        `
+        `,
       )
 
       const domainTestDir = path.join(tmpDir, "libs/sample/domain/test")
@@ -391,7 +392,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
               expect(cartDecider).toBeDefined()
             })
           })
-        `
+        `,
       )
 
       const resultGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir))
@@ -428,7 +429,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
               // property test with scalar primitives
             })
           })
-        `
+        `,
       )
 
       fs.writeFileSync(
@@ -440,14 +441,14 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
               // property test with non-primitive arbitrary
             })
           })
-        `
+        `,
       )
 
       const resultGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir))
 
       const primitiveNode = resolveNode(
         resultGraph,
-        "libs/sample/domain/test/primitive.test.ts::suite"
+        "libs/sample/domain/test/primitive.test.ts::suite",
       ) as VitestCaseNode
       expect(primitiveNode).toBeDefined()
       expect(primitiveNode.isPropertyTest).toBe(true)
@@ -455,7 +456,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
 
       const nonPrimitiveNode = resolveNode(
         resultGraph,
-        "libs/sample/domain/test/non-primitive.test.ts::suite"
+        "libs/sample/domain/test/non-primitive.test.ts::suite",
       ) as VitestCaseNode
       expect(nonPrimitiveNode).toBeDefined()
       expect(nonPrimitiveNode.isPropertyTest).toBe(true)
@@ -528,13 +529,13 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
       {
         filePath: "libs/sample/contract/src/index.ts",
         content: contractSource,
-        packageTag: "contract"
+        packageTag: "contract",
       },
       {
         filePath: "libs/sample/domain/src/cart.ts",
         content: domainSource,
-        packageTag: "domain"
-      }
+        packageTag: "domain",
+      },
     ])
 
     const violations = graph.branchingViolations ?? []
@@ -559,7 +560,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
               // property test with scalar object syntax
             })
           })
-        `
+        `,
       )
 
       fs.writeFileSync(
@@ -571,14 +572,14 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
               // property test with non-primitive object syntax
             })
           })
-        `
+        `,
       )
 
       const resultGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir))
 
       const scalarNode = resolveNode(
         resultGraph,
-        "libs/sample/domain/test/scalar-obj.test.ts::suite"
+        "libs/sample/domain/test/scalar-obj.test.ts::suite",
       ) as VitestCaseNode
       expect(scalarNode).toBeDefined()
       expect(scalarNode.isPropertyTest).toBe(true)
@@ -586,7 +587,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
 
       const complexNode = resolveNode(
         resultGraph,
-        "libs/sample/domain/test/complex-obj.test.ts::suite"
+        "libs/sample/domain/test/complex-obj.test.ts::suite",
       ) as VitestCaseNode
       expect(complexNode).toBeDefined()
       expect(complexNode.isPropertyTest).toBe(true)
@@ -606,35 +607,35 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
           line: 10,
           packageTag: "domain",
           successType: "void",
-          isStub: true
-        }
+          isStub: true,
+        },
       ],
       services: [
         {
           tagId: "EventStore",
           name: "EventStore",
           packageTag: "service",
-          file: "libs/sample/service/src/index.ts"
-        }
+          file: "libs/sample/service/src/index.ts",
+        },
       ],
       errors: [
         {
           errorTag: "DeciderConflict",
-          file: "libs/sample/contract/src/errors.ts"
-        }
+          file: "libs/sample/contract/src/errors.ts",
+        },
       ],
       requiresService: [
         {
           callerQualname: "libs/sample/domain/src/decider.ts#thenEventsStub",
-          tagId: "EventStore"
-        }
+          tagId: "EventStore",
+        },
       ],
       failsWith: [
         {
           callerQualname: "libs/sample/domain/src/decider.ts#thenEventsStub",
-          errorTag: "DeciderConflict"
-        }
-      ]
+          errorTag: "DeciderConflict",
+        },
+      ],
     })
 
     const implGraph = buildHarnessGraph({
@@ -646,35 +647,35 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
           line: 10,
           packageTag: "domain",
           successType: "void",
-          isStub: false
-        }
+          isStub: false,
+        },
       ],
       services: [
         {
           tagId: "EventStore",
           name: "EventStore",
           packageTag: "service",
-          file: "libs/sample/service/src/index.ts"
-        }
+          file: "libs/sample/service/src/index.ts",
+        },
       ],
       errors: [
         {
           errorTag: "DeciderConflict",
-          file: "libs/sample/contract/src/errors.ts"
-        }
+          file: "libs/sample/contract/src/errors.ts",
+        },
       ],
       requiresService: [
         {
           callerQualname: "libs/sample/domain/src/decider.ts#thenEventsLive",
-          tagId: "EventStore"
-        }
+          tagId: "EventStore",
+        },
       ],
       failsWith: [
         {
           callerQualname: "libs/sample/domain/src/decider.ts#thenEventsLive",
-          errorTag: "DeciderConflict"
-        }
-      ]
+          errorTag: "DeciderConflict",
+        },
+      ],
     })
 
     const diff = diffHarnessGraphs(implGraph, planGraph)
@@ -693,12 +694,11 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
         content: `
           import { DatabaseSync } from "node:sqlite"
           export const makeMock = () => new DatabaseSync(":memory:")
-        `
-      }
+        `,
+      },
     ])
 
     const res = checkEffectGraph(hg)
     expect(res.violations.some((v) => v.rule === "node-sqlite-in-infra")).toBe(true)
   })
 })
-

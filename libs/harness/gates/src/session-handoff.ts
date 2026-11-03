@@ -22,23 +22,18 @@ export interface SessionHandoffSummary {
 }
 
 export const decideSessionHandoff = Effect.fn("SessionHandoff.decide")(function* (
-  input: SessionHandoffInput
+  input: SessionHandoffInput,
 ) {
   yield* Effect.void
 
-  const recentFrictionCount = input.frictionClusters.reduce(
-    (acc, c) => acc + c.occurrences,
-    0
-  )
+  const recentFrictionCount = input.frictionClusters.reduce((acc, c) => acc + c.occurrences, 0)
   const topFrictionSummary = input.frictionClusters
     .slice(0, 3)
     .map((c) => `[${c.kind} x${c.occurrences}] ${c.summary}`)
 
   const isStuck = input.loopThrashing?.stuck === true
   const stuckLoopEscalation =
-    isStuck && input.loopThrashing?.escalationMessage
-      ? input.loopThrashing.escalationMessage
-      : null
+    isStuck && input.loopThrashing?.escalationMessage ? input.loopThrashing.escalationMessage : null
 
   const hasActiveTask =
     !input.stampValid ||
@@ -59,7 +54,7 @@ export const decideSessionHandoff = Effect.fn("SessionHandoff.decide")(function*
     }
     if (input.missingPlannedFns.length > 0) {
       lines.push(
-        `Missing planned functions from plan-graph-snapshot: ${input.missingPlannedFns.join(", ")}`
+        `Missing planned functions from plan-graph-snapshot: ${input.missingPlannedFns.join(", ")}`,
       )
     }
     if (!input.stampValid) {
@@ -79,10 +74,9 @@ export const decideSessionHandoff = Effect.fn("SessionHandoff.decide")(function*
     recentFrictionCount,
     topFrictionSummary,
     stuckLoopEscalation,
-    handoffMessage
+    handoffMessage,
   } satisfies SessionHandoffSummary
 })
 
-export const buildSessionHandoff = (
-  input: SessionHandoffInput
-): SessionHandoffSummary => Effect.runSync(decideSessionHandoff(input))
+export const buildSessionHandoff = (input: SessionHandoffInput): SessionHandoffSummary =>
+  Effect.runSync(decideSessionHandoff(input))

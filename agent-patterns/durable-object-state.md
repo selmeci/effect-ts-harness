@@ -31,10 +31,10 @@ export const addItemToCart = (input: CartItemInput) =>
         yield* db.insert(cartItemsTable).values({
           id: validatedItem.id,
           name: validatedItem.name,
-          quantity: validatedItem.quantity
+          quantity: validatedItem.quantity,
         })
         return validatedItem
-      })
+      }),
     )
   })
 ```

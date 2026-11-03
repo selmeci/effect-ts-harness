@@ -31,7 +31,7 @@ export const CreateUserInput = Schema.Struct({
   age: AgeYears,
   isActive: Schema.Boolean,
   tags: Schema.Array(TagLabel),
-  nickname: Schema.optional(Nickname)
+  nickname: Schema.optional(Nickname),
 })
 export type CreateUserInput = typeof CreateUserInput.Type
 
@@ -40,7 +40,7 @@ export class User extends Schema.Class<User>("User")({
   id: UserId,
   email: EmailAddress,
   age: AgeYears,
-  createdAt: Schema.Date
+  createdAt: Schema.Date,
 }) {
   get isAdult(): boolean {
     return this.age >= 18
@@ -52,7 +52,7 @@ export const makeUserId = Brand.nominal<UserId>()
 export type PositiveCount = Brand.Branded<number, "PositiveCount">
 export const PositiveCount = Brand.check<PositiveCount>(Schema.isInt(), Schema.isGreaterThan(0))
 export const PositiveCountFromFilter = Brand.make<PositiveCount>((n) =>
-  Number.isInteger(n) && n > 0 ? undefined : `Expected positive integer count, got ${n}`
+  Number.isInteger(n) && n > 0 ? undefined : `Expected positive integer count, got ${n}`,
 )
 export const PositiveCountSchema = Schema.Int.pipe(Schema.fromBrand("PositiveCount", PositiveCount))
 ```
@@ -62,6 +62,7 @@ export const PositiveCountSchema = Schema.Int.pipe(Schema.fromBrand("PositiveCou
 Never write loose handwritten TypeScript interfaces, inline object types (`type X = { ... }` or `input: { readonly id: AlbumId }`), or raw primitive type aliases (`export type UserId = string`). Handwritten inline object types and raw aliases bypass `Schema` validation and branding gates (`harness/syntax-bans`, `unbranded-contract-schema`, `unbranded-primitive-boundary`).
 
 Always define a `Schema` in `type:contract` and derive the TypeScript type directly from the schema:
+
 ```ts
 // For static schemas:
 export const CommandResultSchema = Schema.Union(...)
@@ -84,14 +85,17 @@ Never use `Schema.Int` or `Schema.Number` for quantities, counts, stock, or stre
 ### Mandatory Compile-Time Branded Types (`Schema.brand` & `Brand.Branded`)
 
 Crucially, **`Schema.String`, `Schema.NonEmptyString`, `Schema.Int`, and `Schema.Natural` are decode-time filters whose unbranded TypeScript type is plain `string` or `number`**:
+
 ```ts
 // BANNED in type:contract — unbranded TypeScript type is plain `number`!
 export const StreamVersion = Schema.Natural
 export type StreamVersion = typeof StreamVersion.Type // -> number!
 ```
+
 Because the unbranded TypeScript type is `number` or `string`, in-memory TypeScript code can accidentally swap `(userId, albumId)` or pass `-1` or `1.5` to a function expecting `StreamVersion` without triggering a compiler error.
 
 Therefore, the Harness enforces **Branded Domain Types everywhere (`harness:SPEC-0005` / `harness:ADR-0007`)**:
+
 1. **Contract Scalar Exports (`unbranded-contract-schema`):** Every exported scalar schema in `type:contract` must append `.pipe(Schema.brand("<BrandName>"))` (or `Schema.fromBrand("<BrandName>", BrandCtor)`). Each brand key belongs to one canonical schema; compose wire-level string decoders into that schema via `Schema.FiniteFromString.pipe(Schema.decodeTo(<BrandedSchema>))` rather than calling `Schema.brand("<BrandName>")` on a wider schema.
 2. **Composite Schema Fields (`harness/syntax-bans` & `unbranded-contract-schema`):** Every non-boolean scalar field inside `Schema.Struct` (including piped structs), `Schema.Class`, `Schema.TaggedStruct`, `Schema.TaggedClass`, `Schema.TaggedUnion`, and `Schema.TaggedError` in `type:contract`, `type:domain`, and `type:core` must reference a branded schema rather than raw `Schema.String`, `Schema.NonEmptyString`, `Schema.Int`, `Schema.Natural`, or `Schema.Finite`.
 3. **Domain & Service Boundaries (`unbranded-primitive-boundary` & `harness/syntax-bans`):** Exported `Effect.fn` use cases, `.decide` / `evolve` functions, `stub<A, E, R>` skeletons, and `Context.Service` capability methods must never accept or return raw `string`, `number`, `boolean`, `any`, `unknown`, or inline `{ ... }` object type literals — always use named contract schemas and types.
@@ -104,10 +108,11 @@ export type StreamVersion = typeof StreamVersion.Type // -> number & Brand<"Stre
 
 // Strictly positive quantities (> 0, 0 is invalid, compile-time branded)
 export const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0)).pipe(
-  Schema.brand("PositiveInt")
+  Schema.brand("PositiveInt"),
 )
 export type PositiveInt = typeof PositiveInt.Type // -> number & Brand<"PositiveInt">
 ```
+
 Branded types attach the phantom symbol `"~effect/Brand"` at compile time with zero runtime memory overhead and zero change to JSON / OpenAPI `Encoded` wire formats.
 
 ## Parsing and Decoding Untrusted Input
@@ -202,8 +207,7 @@ Schemas work bi-directionally. Use `Schema.encodeEffect` or `Schema.encodeSync`:
 ```ts
 import { Effect, Schema } from "effect"
 
-export const serializeUser = (user: User) =>
-  Schema.encodeEffect(User)(user)
+export const serializeUser = (user: User) => Schema.encodeEffect(User)(user)
 ```
 
 ## Data Transformations
@@ -213,14 +217,10 @@ Transform data during parsing using `Schema.transform` or `Schema.transformOrFai
 ```ts
 import { Schema } from "effect"
 
-export const TrimmedString = Schema.transform(
-  Schema.String,
-  Schema.String,
-  {
-    decode: (str) => str.trim(),
-    encode: (str) => str
-  }
-)
+export const TrimmedString = Schema.transform(Schema.String, Schema.String, {
+  decode: (str) => str.trim(),
+  encode: (str) => str,
+})
 ```
 
 ## Refinements and Branded Types
@@ -242,7 +242,7 @@ import { Schema } from "effect"
 export const PaymentStatus = Schema.TaggedUnion({
   Pending: { initiatedAt: Schema.Int },
   Paid: { receiptId: Schema.String, paidAt: Schema.Int },
-  Declined: { reason: Schema.String }
+  Declined: { reason: Schema.String },
 })
 export type PaymentStatus = typeof PaymentStatus.Type
 ```
@@ -257,12 +257,10 @@ import { Schema } from "effect"
 export class EntityNotFoundError extends Schema.TaggedError<EntityNotFoundError>()(
   "EntityNotFoundError",
   {
-    entityId: Schema.String
-  }
+    entityId: Schema.String,
+  },
 ) {}
 ```
 
 > [!NOTE]
 > `Schema.TaggedErrorClass` was removed in Effect v4 runtime exports. Always use `Schema.TaggedError<Self>()("Tag", { ... })`.
-
-

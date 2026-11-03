@@ -14,7 +14,7 @@ import {
   resolveNode,
   saveGraphSnapshot,
   structuralSearch,
-  toOmnigraphNdjson
+  toOmnigraphNdjson,
 } from "../src/index.js"
 
 describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
@@ -27,7 +27,7 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
         line: 4,
         packageTag: "domain",
         successType: "string",
-        isStub: false
+        isStub: false,
       },
       {
         qualname: "libs/sample/infra/src/index.ts#PhotoRepo.insert",
@@ -36,8 +36,8 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
         line: 10,
         packageTag: "infra",
         successType: "Photo",
-        isStub: false
-      }
+        isStub: false,
+      },
     ],
     services: [],
     layers: [],
@@ -47,8 +47,8 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
         testId: "libs/sample/domain/test/index.test.ts::greets by name",
         testFile: "libs/sample/domain/test/index.test.ts",
         testName: "greets by name",
-        lastTreeHash: "abc123"
-      }
+        lastTreeHash: "abc123",
+      },
     ],
     patternDocs: [],
     requiresService: [],
@@ -60,28 +60,28 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
         callerQualname: "libs/sample/domain/src/index.ts#greet",
         calleeQualname: "libs/sample/infra/src/index.ts#PhotoRepo.insert",
         callCount: 1,
-        receiverLayer: "PhotoRepoLive"
-      }
+        receiverLayer: "PhotoRepoLive",
+      },
     ],
     exercisesSpans: [
       {
         testId: "libs/sample/domain/test/index.test.ts::greets by name",
         calleeQualname: "libs/sample/domain/src/index.ts#greet",
         callCount: 1,
-        receiverLayer: null
-      }
-    ]
+        receiverLayer: null,
+      },
+    ],
   })
 
   it("resolves tests_reaching transitively from leaf and downstream spans", () => {
     const direct = findTestsReaching(sampleGraph, "Sample.greet")
     expect(direct.map((t) => t.testId)).toEqual([
-      "libs/sample/domain/test/index.test.ts::greets by name"
+      "libs/sample/domain/test/index.test.ts::greets by name",
     ])
 
     const transitive = findTestsReaching(sampleGraph, "PhotoRepo.insert")
     expect(transitive.map((t) => t.testId)).toEqual([
-      "libs/sample/domain/test/index.test.ts::greets by name"
+      "libs/sample/domain/test/index.test.ts::greets by name",
     ])
   })
 
@@ -89,13 +89,13 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
     expect(findCallees(sampleGraph, "Sample.greet")).toEqual([
       expect.objectContaining({
         qualname: "libs/sample/infra/src/index.ts#PhotoRepo.insert",
-        receiverLayer: "PhotoRepoLive"
-      })
+        receiverLayer: "PhotoRepoLive",
+      }),
     ])
     expect(findCallers(sampleGraph, "PhotoRepo.insert")).toEqual([
       expect.objectContaining({
-        qualname: "libs/sample/domain/src/index.ts#greet"
-      })
+        qualname: "libs/sample/domain/src/index.ts#greet",
+      }),
     ])
   })
 
@@ -113,13 +113,13 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
 
     const loaded = loadGraphSnapshot(snapshotPath)
     expect(findTestsReaching(loaded, "PhotoRepo.insert").map((t) => t.testId)).toEqual([
-      "libs/sample/domain/test/index.test.ts::greets by name"
+      "libs/sample/domain/test/index.test.ts::greets by name",
     ])
     expect(findCallees(loaded, "Sample.greet")).toEqual([
       expect.objectContaining({
         qualname: "libs/sample/infra/src/index.ts#PhotoRepo.insert",
-        receiverLayer: "PhotoRepoLive"
-      })
+        receiverLayer: "PhotoRepoLive",
+      }),
     ])
 
     fs.unlinkSync(snapshotPath)
@@ -135,69 +135,69 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
           line: 4,
           packageTag: "domain",
           successType: "string",
-          isStub: false
-        }
+          isStub: false,
+        },
       ],
       services: [
         {
           tagId: "PhotoRepo",
           name: "PhotoRepo",
           packageTag: "service",
-          file: "libs/sample/service/src/index.ts"
-        }
+          file: "libs/sample/service/src/index.ts",
+        },
       ],
       layers: [
         {
           qualname: "PhotoRepoLive",
           layerKind: "live",
           packageTag: "infra",
-          file: "libs/sample/infra/src/index.ts"
-        }
+          file: "libs/sample/infra/src/index.ts",
+        },
       ],
       errors: [
         {
           errorTag: "PhotoNotFound",
-          file: "libs/sample/domain/src/errors.ts"
-        }
+          file: "libs/sample/domain/src/errors.ts",
+        },
       ],
       tests: [
         {
           testId: "libs/sample/domain/test/index.test.ts::greets by name",
           testFile: "libs/sample/domain/test/index.test.ts",
           testName: "greets by name",
-          lastTreeHash: "abc123"
-        }
+          lastTreeHash: "abc123",
+        },
       ],
       patternDocs: [
         {
           slug: "planning",
           path: "agent-patterns/planning.md",
-          summary: "Plan-as-Code markdown template with stub skeleton pattern."
-        }
+          summary: "Plan-as-Code markdown template with stub skeleton pattern.",
+        },
       ],
       requiresService: [
         {
           callerQualname: "libs/sample/domain/src/index.ts#greet",
-          tagId: "PhotoRepo"
-        }
+          tagId: "PhotoRepo",
+        },
       ],
       failsWith: [
         {
           callerQualname: "libs/sample/domain/src/index.ts#greet",
-          errorTag: "PhotoNotFound"
-        }
+          errorTag: "PhotoNotFound",
+        },
       ],
       providesService: [
         {
           layerQualname: "PhotoRepoLive",
-          tagId: "PhotoRepo"
-        }
+          tagId: "PhotoRepo",
+        },
       ],
       layerRequires: [
         {
           layerQualname: "PhotoRepoLive",
-          tagId: "PhotoRepo"
-        }
+          tagId: "PhotoRepo",
+        },
       ],
       tracedCalls: [],
       exercisesSpans: [
@@ -205,9 +205,9 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
           testId: "libs/sample/domain/test/index.test.ts::greets by name",
           calleeQualname: "libs/sample/domain/src/index.ts#greet",
           callCount: 1,
-          receiverLayer: null
-        }
-      ]
+          receiverLayer: null,
+        },
+      ],
     })
 
     const ndjson = toOmnigraphNdjson(fullGraph)
@@ -231,7 +231,9 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
     expect(resolveNode(sampleGraph, "Sample.greet")?._tag).toBe("EffectFn")
     expect(resolveNode(sampleGraph, "libs/sample/domain/src/index.ts#greet")?._tag).toBe("EffectFn")
     expect(resolveNode(sampleGraph, "greet")?._tag).toBe("EffectFn")
-    expect(resolveNode(sampleGraph, "libs/sample/domain/test/index.test.ts::greets by name")?._tag).toBe("VitestCase")
+    expect(
+      resolveNode(sampleGraph, "libs/sample/domain/test/index.test.ts::greets by name")?._tag,
+    ).toBe("VitestCase")
     expect(resolveNode(sampleGraph, "nonexistent")).toBeUndefined()
   })
 
@@ -245,23 +247,23 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
           line: 4,
           packageTag: "domain",
           successType: "string",
-          isStub: true
-        }
+          isStub: true,
+        },
       ],
       services: [
         {
           tagId: "PhotoRepo",
           name: "PhotoRepo",
           packageTag: "service",
-          file: "libs/sample/service/src/index.ts"
-        }
+          file: "libs/sample/service/src/index.ts",
+        },
       ],
       requiresService: [
         {
           callerQualname: "libs/sample/domain/src/index.ts#greet",
-          tagId: "PhotoRepo"
-        }
-      ]
+          tagId: "PhotoRepo",
+        },
+      ],
     })
 
     // 1. Incomplete impl with remaining stub
@@ -274,10 +276,10 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
           line: 4,
           packageTag: "domain",
           successType: "string",
-          isStub: true
-        }
+          isStub: true,
+        },
       ],
-      services: []
+      services: [],
     })
 
     const diff1 = diffHarnessGraphs(incompleteImpl, planGraph)
@@ -296,23 +298,23 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
           line: 4,
           packageTag: "domain",
           successType: "string",
-          isStub: false
-        }
+          isStub: false,
+        },
       ],
       services: [
         {
           tagId: "PhotoRepo",
           name: "PhotoRepo",
           packageTag: "service",
-          file: "libs/sample/service/src/index.ts"
-        }
+          file: "libs/sample/service/src/index.ts",
+        },
       ],
       requiresService: [
         {
           callerQualname: "libs/sample/domain/src/index.ts#greet",
-          tagId: "PhotoRepo"
-        }
-      ]
+          tagId: "PhotoRepo",
+        },
+      ],
     })
 
     const diff2 = diffHarnessGraphs(completeImpl, planGraph)
@@ -326,7 +328,7 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
   it("finds TypeScript ast-grep matches via structuralSearch", () => {
     const results = structuralSearch({
       pattern: "export const $NAME = $_",
-      subDirs: ["libs/harness/graph/src"]
+      subDirs: ["libs/harness/graph/src"],
     })
     expect(results.length).toBeGreaterThan(0)
     const match = results.find((r) => r.text.includes("buildHarnessGraph"))
@@ -341,7 +343,7 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
       const syncService = yield* OmnigraphSync
       return yield* syncService.sync(sampleGraph, {
         snapshotPath: testSnapshotPath,
-        baseUrl: "http://127.0.0.1:9999" // Unreachable port
+        baseUrl: "http://127.0.0.1:9999", // Unreachable port
       })
     }).pipe(Effect.provide(OmnigraphSync.Live))
 

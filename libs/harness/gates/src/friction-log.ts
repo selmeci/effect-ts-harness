@@ -6,7 +6,7 @@ import { resolveHarnessStateDir } from "./worktree.js"
 export const FrictionEventKind = Schema.Literals([
   "route_miss",
   "verify_failure",
-  "guard_escalation"
+  "guard_escalation",
 ])
 export type FrictionEventKind = typeof FrictionEventKind.Type
 
@@ -14,7 +14,7 @@ export const FrictionEvent = Schema.Struct({
   kind: FrictionEventKind,
   timestamp: Schema.String,
   summary: Schema.String,
-  detail: Schema.String
+  detail: Schema.String,
 })
 export type FrictionEvent = typeof FrictionEvent.Type
 
@@ -28,7 +28,7 @@ export interface FrictionCluster {
 }
 
 export const decideFrictionClusters = Effect.fn("Friction.decide")(function* (
-  events: ReadonlyArray<FrictionEvent>
+  events: ReadonlyArray<FrictionEvent>,
 ) {
   yield* Effect.void
   const map = new Map<
@@ -53,7 +53,7 @@ export const decideFrictionClusters = Effect.fn("Friction.decide")(function* (
         summary: event.summary,
         detail: event.detail,
         occurrences: 1,
-        lastSeen: event.timestamp
+        lastSeen: event.timestamp,
       })
     } else {
       existing.occurrences += 1
@@ -83,7 +83,7 @@ export const decideFrictionClusters = Effect.fn("Friction.decide")(function* (
 })
 
 export const summarizeFrictionEvents = (
-  events: ReadonlyArray<FrictionEvent>
+  events: ReadonlyArray<FrictionEvent>,
 ): ReadonlyArray<FrictionCluster> => Effect.runSync(decideFrictionClusters(events))
 
 export interface LoopThrashingStatus {
@@ -97,13 +97,13 @@ export interface LoopThrashingStatus {
 
 export const decideLoopThrashing = Effect.fn("LoopCircuitBreaker.decide")(function* (
   events: ReadonlyArray<FrictionEvent>,
-  threshold: number = 3
+  threshold: number = 3,
 ) {
   yield* Effect.void
   const failures = events.filter(
     (event) =>
       (event.kind === "verify_failure" || event.kind === "guard_escalation") &&
-      !(event.kind === "guard_escalation" && event.detail.startsWith("verdict=allow"))
+      !(event.kind === "guard_escalation" && event.detail.startsWith("verdict=allow")),
   )
   const effectiveThreshold = Math.max(2, threshold)
   if (failures.length === 0) {
@@ -113,7 +113,7 @@ export const decideLoopThrashing = Effect.fn("LoopCircuitBreaker.decide")(functi
       threshold: effectiveThreshold,
       repeatedKey: null,
       summary: null,
-      escalationMessage: null
+      escalationMessage: null,
     } satisfies LoopThrashingStatus
   }
 
@@ -141,13 +141,13 @@ export const decideLoopThrashing = Effect.fn("LoopCircuitBreaker.decide")(functi
     threshold: effectiveThreshold,
     repeatedKey: lastKey,
     summary: last.summary,
-    escalationMessage
+    escalationMessage,
   } satisfies LoopThrashingStatus
 })
 
 export const checkLoopThrashing = (
   events: ReadonlyArray<FrictionEvent>,
-  threshold: number = 3
+  threshold: number = 3,
 ): LoopThrashingStatus => Effect.runSync(decideLoopThrashing(events, threshold))
 
 const decodeFrictionEvent = Schema.decodeOption(Schema.fromJsonString(FrictionEvent))
@@ -159,13 +159,13 @@ export const appendFrictionEvent = (
     readonly summary: string
     readonly detail: string
     readonly timestamp?: string | undefined
-  }
+  },
 ): FrictionEvent => {
   const record: FrictionEvent = {
     kind: input.kind,
     timestamp: input.timestamp ?? new Date().toISOString(),
     summary: input.summary,
-    detail: input.detail
+    detail: input.detail,
   }
   const harnessDir = resolveHarnessStateDir(repoRoot)
   const filePath = join(harnessDir, "friction-log.jsonl")
@@ -175,7 +175,7 @@ export const appendFrictionEvent = (
         mkdirSync(harnessDir, { recursive: true })
       }
       appendFileSync(filePath, JSON.stringify(record) + "\n", "utf-8")
-    }).pipe(Effect.orElseSucceed(() => undefined))
+    }).pipe(Effect.orElseSucceed(() => undefined)),
   )
   return record
 }
@@ -187,7 +187,7 @@ export const readFrictionEvents = (repoRoot: string): ReadonlyArray<FrictionEven
     return []
   }
   const contentOption = Effect.runSync(
-    Effect.try(() => readFileSync(filePath, "utf-8")).pipe(Effect.option)
+    Effect.try(() => readFileSync(filePath, "utf-8")).pipe(Effect.option),
   )
   if (Option.isNone(contentOption)) {
     return []
@@ -214,6 +214,6 @@ export const clearFrictionEvents = (repoRoot: string): void => {
         mkdirSync(harnessDir, { recursive: true })
       }
       writeFileSync(filePath, "", "utf-8")
-    }).pipe(Effect.orElseSucceed(() => undefined))
+    }).pipe(Effect.orElseSucceed(() => undefined)),
   )
 }

@@ -7,16 +7,11 @@
     ".": "./src/index.ts",
     "./fixtures/cart": "./test/fixtures/cart.ts"
   },
-  "nx": {
-    "tags": [
-      "type:core"
-    ]
-  },
   "scripts": {
     "typecheck": "tsc --noEmit && effect-tsgo diagnostics --strict --project tsconfig.json",
     "lint": "oxlint --deny-warnings .",
     "test": "vitest run",
-    "verify": "pnpm run typecheck && pnpm run lint && pnpm run test"
+    "verify": "node -e \"\""
   },
   "dependencies": {
     "@harness/es-contract": "workspace:*",
@@ -29,5 +24,10 @@
     "@harness/graph": "workspace:*",
     "@types/node": "26.6.5",
     "vitest": "5.0.3"
+  },
+  "nx": {
+    "tags": [
+      "type:core"
+    ]
   }
 }

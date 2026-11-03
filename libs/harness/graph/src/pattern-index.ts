@@ -53,7 +53,7 @@ export const loadPatternDocs = (repoRoot: string): ReadonlyArray<PatternDocNode>
       _tag: "PatternDoc",
       slug,
       path: `agent-patterns/${entry.name}`,
-      summary
+      summary,
     })
   }
 

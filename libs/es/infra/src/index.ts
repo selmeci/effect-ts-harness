@@ -7,18 +7,18 @@ export {
   handleAggregateCommand,
   initializeAggregateTables,
   isEventStreamUniqueConflict,
-  loadAggregate
+  loadAggregate,
 } from "./aggregate.js"
 
 const _makeSqliteClientLayer = (
-  config: SqliteClientModule.SqliteClientConfig
+  config: SqliteClientModule.SqliteClientConfig,
 ): Layer.Layer<SqlClient> =>
   Layer.effect(
     SqlClient,
     Effect.gen(function* () {
       const services = yield* Layer.build(SqliteClientModule.layer(config))
       return Context.get(services, SqlClient)
-    })
+    }),
   )
 
 export { _makeSqliteClientLayer as makeSqliteClientLayer }

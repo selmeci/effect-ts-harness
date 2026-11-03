@@ -1,12 +1,7 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Schema } from "effect"
 import { SqlClient } from "effect/sql/SqlClient"
-import {
-  ConstraintError,
-  isSqlError,
-  SqlError,
-  UniqueViolation
-} from "effect/sql/SqlError"
+import { ConstraintError, isSqlError, SqlError, UniqueViolation } from "effect/sql/SqlError"
 import {
   AggregateId,
   AggregateName,
@@ -16,7 +11,7 @@ import {
   ProjectionName,
   ProjectionVersion,
   StreamVersion,
-  TimestampMs
+  TimestampMs,
 } from "@harness/es-contract"
 import {
   type AggregateConfig,
@@ -24,7 +19,7 @@ import {
   Decider,
   LocalProjection,
   queryLocalProjection,
-  rebuildLocalProjection
+  rebuildLocalProjection,
 } from "@harness/es-core"
 import {
   type CartCommand,
@@ -34,14 +29,14 @@ import {
   evolveCart,
   initialCartState,
   ItemId,
-  OrderId
+  OrderId,
 } from "@harness/es-core/fixtures/cart"
 import { match } from "ts-pattern"
 import {
   handleAggregateCommand,
   initializeAggregateTables,
   isEventStreamUniqueConflict,
-  loadAggregate
+  loadAggregate,
 } from "../src/index.js"
 import { SqlClientMemoryLayer } from "../src/memory.js"
 import {
@@ -49,7 +44,7 @@ import {
   CartView,
   cartViewProjection,
   cartViewProjectionV2,
-  initCartViewTable
+  initCartViewTable,
 } from "./fixtures/cart-sqlite.js"
 
 const cid = (v: string) => CartId.make(v)
@@ -84,7 +79,7 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           _tag: "AddItem",
           cartId: cid("cart-idempotency-1"),
           itemId: iid("item-1"),
-          quantity: positiveInt(3)
+          quantity: positiveInt(3),
         }
 
         // 1. First execution creates the stream
@@ -92,7 +87,7 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           cartId,
           command1,
           createCommandId,
-          cartAggregateConfig
+          cartAggregateConfig,
         )
         expect(firstResult.result.processingStatus._tag).toBe("Processed")
         expect(firstResult.result.creationStatus._tag).toBe("CreatedStream")
@@ -104,7 +99,7 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           cartId,
           command1,
           createCommandId,
-          cartAggregateConfig
+          cartAggregateConfig,
         )
         expect(immediateRetry.result.processingStatus._tag).toBe("Deduplicated")
         expect(immediateRetry.result.creationStatus._tag).toBe("CreatedStream")
@@ -116,13 +111,13 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           _tag: "AddItem",
           cartId: cid("cart-idempotency-1"),
           itemId: iid("item-2"),
-          quantity: positiveInt(2)
+          quantity: positiveInt(2),
         }
         const secondResult = yield* handleAggregateCommand(
           cartId,
           command2,
           cmdId("cmd-101"),
-          cartAggregateConfig
+          cartAggregateConfig,
         )
         expect(secondResult.result.processingStatus._tag).toBe("Processed")
         expect(secondResult.result.creationStatus._tag).toBe("ExistingStream")
@@ -133,7 +128,7 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           cartId,
           command1,
           createCommandId,
-          cartAggregateConfig
+          cartAggregateConfig,
         )
         expect(laterRetry.result.processingStatus._tag).toBe("Deduplicated")
         expect(laterRetry.result.creationStatus._tag).toBe("CreatedStream")
@@ -153,10 +148,10 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
             _tag: "AddItem",
             cartId: cid("cart-idempotency-2"),
             itemId: iid("item-1"),
-            quantity: positiveInt(1)
+            quantity: positiveInt(1),
           },
           createCommandId,
-          cartAggregateConfig
+          cartAggregateConfig,
         )
         const mismatchErr = yield* Effect.flip(crossAggregateAttempt)
         match(mismatchErr)
@@ -168,7 +163,7 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           .otherwise(() => {
             expect.unreachable("expected CommandAggregateMismatchError")
           })
-      }).pipe(Effect.provide(SqlClientMemoryLayer))
+      }).pipe(Effect.provide(SqlClientMemoryLayer)),
   )
 
   it.effect(
@@ -188,7 +183,7 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           _tag: "AddItem",
           cartId: payloadCartId,
           itemId: iid("item-A"),
-          quantity: positiveInt(2)
+          quantity: positiveInt(2),
         }
 
         yield* handleAggregateCommand(aggregateId, cmd1, cmdId("cmd-rw-1"), cartAggregateConfig)
@@ -203,7 +198,7 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           _tag: "AddItem",
           cartId: payloadCartId,
           itemId: iid("item-B"),
-          quantity: positiveInt(5)
+          quantity: positiveInt(5),
         }
         yield* handleAggregateCommand(aggregateId, cmd2, cmdId("cmd-rw-2"), cartAggregateConfig)
 
@@ -214,14 +209,14 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
         const cmd3: CartCommand = {
           _tag: "Checkout",
           cartId: payloadCartId,
-          orderId: oid("order-99")
+          orderId: oid("order-99"),
         }
         yield* handleAggregateCommand(aggregateId, cmd3, cmdId("cmd-rw-3"), cartAggregateConfig)
 
         const view3 = yield* queryLocalProjection(projections, cartViewName, aggregateId)
         expect(view3.status).toBe("checked_out")
         expect(view3.totalQuantity).toBe(7)
-      }).pipe(Effect.provide(SqlClientMemoryLayer))
+      }).pipe(Effect.provide(SqlClientMemoryLayer)),
   )
 
   it.effect(
@@ -238,7 +233,7 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
         // 1. First write events with NO projections registered
         const configWithoutProjections = {
           ...cartAggregateConfig,
-          projections: []
+          projections: [],
         }
         yield* handleAggregateCommand(
           cartId,
@@ -246,10 +241,10 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
             _tag: "AddItem",
             cartId: cid("cart-rebuild-version"),
             itemId: iid("item-1"),
-            quantity: positiveInt(4)
+            quantity: positiveInt(4),
           },
           cmdId("cmd-no-proj-1"),
-          configWithoutProjections
+          configWithoutProjections,
         )
 
         // 2. Activate later with v1 projection registered: must rebuild from existing stream!
@@ -260,11 +255,11 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
             Effect.gen(function* () {
               rebuildCalls += 1
               yield* cartViewProjection.rebuild(aggId, events)
-            })
+            }),
         })
         const configTrackedV1 = {
           ...cartAggregateConfig,
-          projections: [trackedProjectionV1]
+          projections: [trackedProjectionV1],
         }
 
         const loaded1 = yield* loadAggregate(cartId, configTrackedV1)
@@ -279,7 +274,7 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
         // 4. Activate with projection version 2: must rebuild and update meta
         const configV2 = {
           ...cartAggregateConfig,
-          projections: [cartViewProjectionV2]
+          projections: [cartViewProjectionV2],
         }
         yield* loadAggregate(cartId, configV2)
 
@@ -300,15 +295,11 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
         `
         yield* loadAggregate(cartId, configV2)
 
-        const healedView = yield* queryLocalProjection(
-          [cartViewProjectionV2],
-          cartViewName,
-          cartId
-        )
+        const healedView = yield* queryLocalProjection([cartViewProjectionV2], cartViewName, cartId)
         expect(healedView.totalQuantity).toBe(4)
         expect(healedView.itemCount).toBe(1)
         expect(healedView.status).toBe("active")
-      }).pipe(Effect.provide(SqlClientMemoryLayer))
+      }).pipe(Effect.provide(SqlClientMemoryLayer)),
   )
 
   it.effect(
@@ -326,10 +317,10 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
             _tag: "AddItem",
             cartId: cid("cart-no-outbox"),
             itemId: iid("item-1"),
-            quantity: positiveInt(1)
+            quantity: positiveInt(1),
           },
           cmdId("cmd-no-pub"),
-          cartAggregateConfig
+          cartAggregateConfig,
         )
 
         const outboxCount1 = yield* sql<CountRow>`
@@ -339,7 +330,7 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
 
         const configWithPublish = {
           ...cartAggregateConfig,
-          outboxMode: { _tag: "PublishOutbox" as const }
+          outboxMode: { _tag: "PublishOutbox" as const },
         }
         const cartIdWithPublish = aid("cart-with-outbox")
         yield* handleAggregateCommand(
@@ -348,17 +339,17 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
             _tag: "AddItem",
             cartId: cid("cart-with-outbox"),
             itemId: iid("item-2"),
-            quantity: positiveInt(2)
+            quantity: positiveInt(2),
           },
           cmdId("cmd-with-pub"),
-          configWithPublish
+          configWithPublish,
         )
 
         const outboxCount2 = yield* sql<CountRow>`
           SELECT count(*) as cnt FROM es_outbox WHERE aggregate_id = ${cartIdWithPublish}
         `
         expect(outboxCount2[0]?.cnt).toBe(2)
-      }).pipe(Effect.provide(SqlClientMemoryLayer))
+      }).pipe(Effect.provide(SqlClientMemoryLayer)),
   )
 
   it.effect(
@@ -386,13 +377,13 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
                   cartId: "cart-concurrency",
                   itemId: "item-sneak",
                   quantity: 1,
-                  version: 1
+                  version: 1,
                 })
                 const eventMeta = JSON.stringify({
                   aggregateId: "cart-concurrency",
                   streamVersion: 2,
                   commandId: "cmd-sneak",
-                  timestamp: now
+                  timestamp: now,
                 })
                 // Insert conflicting version 2 AND a higher version 5 so actual head is 5 (not 2)
                 yield* sql`
@@ -405,13 +396,13 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
               }
             }),
           query: cartViewProjection.query,
-          rebuild: cartViewProjection.rebuild
+          rebuild: cartViewProjection.rebuild,
         })
 
         const configWithCollision = {
           ...cartAggregateConfig,
           projections: [conflictingProjection],
-          outboxMode: { _tag: "PublishOutbox" as const }
+          outboxMode: { _tag: "PublishOutbox" as const },
         }
 
         const attempt = handleAggregateCommand(
@@ -420,10 +411,10 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
             _tag: "AddItem",
             cartId: cid("cart-concurrency"),
             itemId: iid("item-1"),
-            quantity: positiveInt(1)
+            quantity: positiveInt(1),
           },
           cmdId("cmd-conflict"),
-          configWithCollision
+          configWithCollision,
         )
 
         const result = yield* Effect.flip(attempt)
@@ -439,10 +430,14 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           })
 
         // Verify full rollback: events, commands, projection_cart_view, and outbox must be untouched (0 rows)
-        const evCnt = yield* sql<CountRow>`SELECT count(*) as cnt FROM es_events WHERE aggregate_id = ${cartId}`
-        const cmdCnt = yield* sql<CountRow>`SELECT count(*) as cnt FROM es_commands WHERE command_id = 'cmd-conflict'`
-        const projCnt = yield* sql<CountRow>`SELECT count(*) as cnt FROM projection_cart_view WHERE cart_id = ${cartId}`
-        const outboxCnt = yield* sql<CountRow>`SELECT count(*) as cnt FROM es_outbox WHERE aggregate_id = ${cartId}`
+        const evCnt =
+          yield* sql<CountRow>`SELECT count(*) as cnt FROM es_events WHERE aggregate_id = ${cartId}`
+        const cmdCnt =
+          yield* sql<CountRow>`SELECT count(*) as cnt FROM es_commands WHERE command_id = 'cmd-conflict'`
+        const projCnt =
+          yield* sql<CountRow>`SELECT count(*) as cnt FROM projection_cart_view WHERE cart_id = ${cartId}`
+        const outboxCnt =
+          yield* sql<CountRow>`SELECT count(*) as cnt FROM es_outbox WHERE aggregate_id = ${cartId}`
         expect(evCnt[0]?.cnt).toBe(0)
         expect(cmdCnt[0]?.cnt).toBe(0)
         expect(projCnt[0]?.cnt).toBe(0)
@@ -455,10 +450,10 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           model: CartView,
           apply: () =>
             sql`INSERT INTO projection_cart_view (cart_id, item_count, status, total_quantity) VALUES (${null}, 0, 'active', 0)`.pipe(
-              Effect.asVoid
+              Effect.asVoid,
             ),
           query: cartViewProjection.query,
-          rebuild: cartViewProjection.rebuild
+          rebuild: cartViewProjection.rebuild,
         })
 
         const brokenAttempt = handleAggregateCommand(
@@ -467,13 +462,13 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
             _tag: "AddItem",
             cartId: cid("cart-broken-proj"),
             itemId: iid("item-1"),
-            quantity: positiveInt(1)
+            quantity: positiveInt(1),
           },
           cmdId("cmd-broken-proj"),
           {
             ...cartAggregateConfig,
-            projections: [brokenProjection]
-          }
+            projections: [brokenProjection],
+          },
         )
         const brokenErr = yield* Effect.flip(brokenAttempt)
         expect(isSqlError(brokenErr)).toBe(true)
@@ -484,31 +479,31 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
               reason: new UniqueViolation({
                 cause: new Error("unique"),
                 constraint:
-                  "es_events.aggregate_name, es_events.aggregate_id, es_events.stream_version"
-              })
-            })
-          )
+                  "es_events.aggregate_name, es_events.aggregate_id, es_events.stream_version",
+              }),
+            }),
+          ),
         ).toBe(true)
         expect(
           isEventStreamUniqueConflict(
             new SqlError({
               reason: new UniqueViolation({
                 cause: new Error("unique"),
-                constraint: "es_commands.command_id"
-              })
-            })
-          )
+                constraint: "es_commands.command_id",
+              }),
+            }),
+          ),
         ).toBe(false)
         expect(
           isEventStreamUniqueConflict(
             new SqlError({
               reason: new ConstraintError({
-                cause: new Error("NOT NULL constraint failed: es_events.payload")
-              })
-            })
-          )
+                cause: new Error("NOT NULL constraint failed: es_events.payload"),
+              }),
+            }),
+          ),
         ).toBe(false)
-      }).pipe(Effect.provide(SqlClientMemoryLayer))
+      }).pipe(Effect.provide(SqlClientMemoryLayer)),
   )
 
   it.effect(
@@ -524,7 +519,7 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
         const missingAggAttempt = queryLocalProjection(
           projections,
           pName("CartView"),
-          nonExistentId
+          nonExistentId,
         )
         const aggError = yield* Effect.flip(missingAggAttempt)
         match(aggError)
@@ -538,7 +533,7 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
         const unregisteredAttempt = queryLocalProjection(
           projections,
           pName("UnregisteredProjection"),
-          nonExistentId
+          nonExistentId,
         )
         const projError = yield* Effect.flip(unregisteredAttempt)
         match(projError)
@@ -548,7 +543,7 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           .otherwise(() => {
             expect.unreachable("expected LocalProjectionNotFoundError")
           })
-      }).pipe(Effect.provide(SqlClientMemoryLayer))
+      }).pipe(Effect.provide(SqlClientMemoryLayer)),
   )
 
   it.effect(
@@ -566,10 +561,10 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           {
             _tag: "Checkout",
             cartId: cid("cart-rejected"),
-            orderId: oid("ord-1")
+            orderId: oid("ord-1"),
           },
           cmdId("cmd-rejected"),
-          cartAggregateConfig
+          cartAggregateConfig,
         )
         const domainErr = yield* Effect.flip(rejectedAttempt)
         match(domainErr)
@@ -580,19 +575,20 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
             expect.unreachable("expected EmptyCartCheckoutError")
           })
 
-        const rejectedCmdCnt = yield* sql<CountRow>`SELECT count(*) as cnt FROM es_commands WHERE command_id = 'cmd-rejected'`
+        const rejectedCmdCnt =
+          yield* sql<CountRow>`SELECT count(*) as cnt FROM es_commands WHERE command_id = 'cmd-rejected'`
         expect(rejectedCmdCnt[0]?.cnt).toBe(0)
 
         // 2. No-op decision on an empty stream reports NoStream (not CreatedStream)
         const noOpDecider = Decider.make<CartCommand, CartEvent, CartState, never>({
           initialState: initialCartState,
           evolve: evolveCart,
-          decide: Effect.fn("NoOpCart.decide")(() => Effect.succeed([]))
+          decide: Effect.fn("NoOpCart.decide")(() => Effect.succeed([])),
         })
         const noOpConfig: AggregateConfig<CartCommand, CartEvent, CartState, never> = {
           aggregateName: AggregateName.make("NoOpCart"),
           decider: noOpDecider,
-          eventSchema: CartEvent
+          eventSchema: CartEvent,
         }
         const noOpId = aid("cart-noop-empty")
         const noOpRes = yield* handleAggregateCommand(
@@ -601,10 +597,10 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
             _tag: "AddItem",
             cartId: cid("cart-noop-empty"),
             itemId: iid("item-1"),
-            quantity: positiveInt(1)
+            quantity: positiveInt(1),
           },
           cmdId("cmd-noop-1"),
-          noOpConfig
+          noOpConfig,
         )
         expect(noOpRes.result.creationStatus._tag).toBe("NoStream")
         expect(noOpRes.result.nextExpectedStreamVersion).toBe(0)
@@ -617,10 +613,10 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
             _tag: "AddItem",
             cartId: cid("shared-id-1"),
             itemId: iid("item-1"),
-            quantity: positiveInt(2)
+            quantity: positiveInt(2),
           },
           cmdId("cmd-shared-cart"),
-          cartAggregateConfig
+          cartAggregateConfig,
         )
         const otherAggregateLoaded = yield* loadAggregate(sharedId, noOpConfig)
         expect(otherAggregateLoaded.currentVersion).toBe(0)
@@ -634,19 +630,19 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           cartId: "cart-out-of-order",
           itemId: "item-ordered",
           quantity: 5,
-          version: 1
+          version: 1,
         })
         const meta1 = JSON.stringify({
           aggregateId: "cart-out-of-order",
           streamVersion: 1,
           commandId: "c1",
-          timestamp: now
+          timestamp: now,
         })
         const meta2 = JSON.stringify({
           aggregateId: "cart-out-of-order",
           streamVersion: 2,
           commandId: "c2",
-          timestamp: now
+          timestamp: now,
         })
         // Insert version 2 BEFORE version 1
         yield* sql`
@@ -670,7 +666,7 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           aggregateId: "cart-out-of-order",
           streamVersion: 4,
           commandId: "c4",
-          timestamp: now
+          timestamp: now,
         })
         yield* sql`
           INSERT INTO es_events (aggregate_name, aggregate_id, stream_version, command_id, event_type, payload, metadata, created_at)
@@ -708,7 +704,9 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           INSERT INTO es_events (aggregate_name, aggregate_id, stream_version, command_id, event_type, payload, metadata, created_at)
           VALUES ('Cart', ${mismatchMetaId}, 1, 'cm', 'CartCreated', ${ev1}, ${meta1}, ${now})
         `
-        const mismatchMetaErr = yield* Effect.flip(loadAggregate(mismatchMetaId, cartAggregateConfig))
+        const mismatchMetaErr = yield* Effect.flip(
+          loadAggregate(mismatchMetaId, cartAggregateConfig),
+        )
         match(mismatchMetaErr)
           .with({ _tag: "EventStreamCorruptionError" }, (err) => {
             expect(err.expectedStreamVersion).toBe(1)
@@ -730,11 +728,11 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
               _tag: "AddItem",
               cartId: cid("cart-float-ver"),
               itemId: iid("item-1"),
-              quantity: positiveInt(1)
+              quantity: positiveInt(1),
             },
             corruptCmdId,
-            cartAggregateConfig
-          )
+            cartAggregateConfig,
+          ),
         )
         match(corruptCmdErr)
           .with({ _tag: "EventStreamCorruptionError" }, (err) => {
@@ -743,49 +741,47 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           .otherwise(() => {
             expect.unreachable("expected EventStreamCorruptionError")
           })
-      }).pipe(Effect.provide(SqlClientMemoryLayer))
+      }).pipe(Effect.provide(SqlClientMemoryLayer)),
   )
 
-  it.effect("REQ-2.2 & REQ-3.2: direct applyLocalProjection and rebuildLocalProjection update read models cleanly", () =>
-    Effect.gen(function* () {
-      yield* initializeAggregateTables()
-      yield* initCartViewTable
+  it.effect(
+    "REQ-2.2 & REQ-3.2: direct applyLocalProjection and rebuildLocalProjection update read models cleanly",
+    () =>
+      Effect.gen(function* () {
+        yield* initializeAggregateTables()
+        yield* initCartViewTable
 
-      const cartId = aid("cart-direct-ops")
-      const e1: CartEvent = { _tag: "CartCreated", cartId: cid("cart-direct-ops"), version: 1 }
-      const e2: CartEvent = {
-        _tag: "ItemAdded",
-        cartId: cid("cart-direct-ops"),
-        itemId: iid("item-rebuild"),
-        quantity: positiveInt(3),
-        version: 1
-      }
-      const m1 = new EventMetadata({
-        aggregateId: cartId,
-        streamVersion: StreamVersion.make(1),
-        commandId: cmdId("cmd-rb-1"),
-        timestamp: TimestampMs.make(Date.now())
-      })
-      const m2 = new EventMetadata({
-        aggregateId: cartId,
-        streamVersion: StreamVersion.make(2),
-        commandId: cmdId("cmd-rb-2"),
-        timestamp: TimestampMs.make(Date.now())
-      })
+        const cartId = aid("cart-direct-ops")
+        const e1: CartEvent = { _tag: "CartCreated", cartId: cid("cart-direct-ops"), version: 1 }
+        const e2: CartEvent = {
+          _tag: "ItemAdded",
+          cartId: cid("cart-direct-ops"),
+          itemId: iid("item-rebuild"),
+          quantity: positiveInt(3),
+          version: 1,
+        }
+        const m1 = new EventMetadata({
+          aggregateId: cartId,
+          streamVersion: StreamVersion.make(1),
+          commandId: cmdId("cmd-rb-1"),
+          timestamp: TimestampMs.make(Date.now()),
+        })
+        const m2 = new EventMetadata({
+          aggregateId: cartId,
+          streamVersion: StreamVersion.make(2),
+          commandId: cmdId("cmd-rb-2"),
+          timestamp: TimestampMs.make(Date.now()),
+        })
 
-      yield* applyLocalProjection(cartViewProjection, e1, m1)
-      yield* rebuildLocalProjection(cartViewProjection, cartId, [
-        { event: e1, metadata: m1 },
-        { event: e2, metadata: m2 }
-      ])
+        yield* applyLocalProjection(cartViewProjection, e1, m1)
+        yield* rebuildLocalProjection(cartViewProjection, cartId, [
+          { event: e1, metadata: m1 },
+          { event: e2, metadata: m2 },
+        ])
 
-      const view = yield* queryLocalProjection(
-        [cartViewProjection],
-        pName("CartView"),
-        cartId
-      )
-      expect(view.totalQuantity).toBe(3)
-      expect(view.itemCount).toBe(1)
-    }).pipe(Effect.provide(SqlClientMemoryLayer))
+        const view = yield* queryLocalProjection([cartViewProjection], pName("CartView"), cartId)
+        expect(view.totalQuantity).toBe(3)
+        expect(view.itemCount).toBe(1)
+      }).pipe(Effect.provide(SqlClientMemoryLayer)),
   )
 })

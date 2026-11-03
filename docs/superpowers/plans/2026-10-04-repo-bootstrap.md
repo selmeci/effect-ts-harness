@@ -14,33 +14,33 @@
 
 Checked against the npm registry on **2026-10-04**; these are the highest available versions and are pinned **exact** (no carets — `effect/ai` and `@effect/ai-typesafe` are `@stability unstable`, mvp.md requires pinning):
 
-| Package | Version | Notes |
-| --- | --- | --- |
-| pnpm | 12.9.1 | via `packageManager` field; local 11.21.0 is superseded by corepack |
-| Node | ≥ 24.0.0 | vitest 5 requires `^22.12 \|\| ^24`; local machine runs 24.14.1 |
-| nx | 23.2.1 | monorepo orchestration |
-| @nx/js | 23.2.1 | target inference from package.json scripts |
-| @nx/oxlint | 23.2.1 | module boundaries as oxlint JS plugin (experimental upstream) |
-| typescript | 7.0.2 | native TS 7 (typescript-go) — required by @effect/tsgo |
-| @effect/tsgo | 0.48.0 | Effect language service + `effect-tsgo patch` CLI |
-| effect | 4.0.0 | v4 core (includes `effect/ai/*`, `effect/http/*` subpaths) |
-| @effect/vitest | 4.0.0 | peer: effect ^4.0.0, vitest >=5.0.0 <6.0.0 |
-| vitest | 5.0.3 | test runner |
-| @effect/ai-typesafe | 4.0.0 | Clef/System One client for Ollama |
-| oxlint | 1.86.0 | linter |
-| oxlint-tsgolint | 7.0.2003 | type-aware linting backend for oxlint |
-| @modelcontextprotocol/sdk | 1.32.0 | for `apps/harness-mcp` (peer zod ^3.25 \|\| ^4.0) |
-| zod | 4.6.5 | MCP SDK peer |
-| alchemy | 2.0.0-beta.80 | Effect-native IaC (latest tag, published 2026-10-02); **beta — pin exact**, sample app only |
-| @effect/platform-node | 4.0.0 | alchemy's Node runtime per getting-started install set |
-| drizzle-orm | 0.45.3 | D1 / Durable Object queries via `alchemy/Drizzle`; **infra libraries only** |
-| drizzle-kit | 0.31.11 | hand-run migration generation (devDependency of infra) |
-| @effect/sql-d1 | 4.0.0 | peer `effect ^4.0.0` ✔ — under `alchemy/Drizzle`'s `Drizzle.D1` driver (installed in phase 2 with the D1 repository) |
-| @effect/sql-sqlite-do | 4.0.0 | peer `effect ^4.0.0` ✔ — under `Drizzle.DurableObject` (installed in phase 2) |
-| @effect/atom-react | 4.0.0 | peers react ≥19 <20, effect ^4 — web app (installed in phase 2) |
-| react | 19.3.0 | web app (installed in phase 2) |
-| vite | 8.3.2 | web app + `Cloudflare.Website.Vite` (installed in phase 2) |
-| oasdiff | v1.33.0 | breaking-change gate — **Go binary from [GitHub releases](https://github.com/oasdiff/oasdiff/releases), NOT npm**: the npm `oasdiff` package is a "Reserved name placeholder. No functionality." Install via brew/binary download; record the exact version in `docs/dependency-pins.md`. Gate wiring is phase 2 (needs the contract's `openapi.json`). |
+| Package                   | Version       | Notes                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| pnpm                      | 12.9.1        | via `packageManager` field; local 11.21.0 is superseded by corepack                                                                                                                                                                                                                                                                                     |
+| Node                      | ≥ 24.0.0      | vitest 5 requires `^22.12 \|\| ^24`; local machine runs 24.14.1                                                                                                                                                                                                                                                                                         |
+| nx                        | 23.2.1        | monorepo orchestration                                                                                                                                                                                                                                                                                                                                  |
+| @nx/js                    | 23.2.1        | target inference from package.json scripts                                                                                                                                                                                                                                                                                                              |
+| @nx/oxlint                | 23.2.1        | module boundaries as oxlint JS plugin (experimental upstream)                                                                                                                                                                                                                                                                                           |
+| typescript                | 7.0.2         | native TS 7 (typescript-go) — required by @effect/tsgo                                                                                                                                                                                                                                                                                                  |
+| @effect/tsgo              | 0.48.0        | Effect language service + `effect-tsgo patch` CLI                                                                                                                                                                                                                                                                                                       |
+| effect                    | 4.0.0         | v4 core (includes `effect/ai/*`, `effect/http/*` subpaths)                                                                                                                                                                                                                                                                                              |
+| @effect/vitest            | 4.0.0         | peer: effect ^4.0.0, vitest >=5.0.0 <6.0.0                                                                                                                                                                                                                                                                                                              |
+| vitest                    | 5.0.3         | test runner                                                                                                                                                                                                                                                                                                                                             |
+| @effect/ai-typesafe       | 4.0.0         | Clef/System One client for Ollama                                                                                                                                                                                                                                                                                                                       |
+| oxlint                    | 1.86.0        | linter                                                                                                                                                                                                                                                                                                                                                  |
+| oxlint-tsgolint           | 7.0.2003      | type-aware linting backend for oxlint                                                                                                                                                                                                                                                                                                                   |
+| @modelcontextprotocol/sdk | 1.32.0        | for `apps/harness-mcp` (peer zod ^3.25 \|\| ^4.0)                                                                                                                                                                                                                                                                                                       |
+| zod                       | 4.6.5         | MCP SDK peer                                                                                                                                                                                                                                                                                                                                            |
+| alchemy                   | 2.0.0-beta.80 | Effect-native IaC (latest tag, published 2026-10-02); **beta — pin exact**, sample app only                                                                                                                                                                                                                                                             |
+| @effect/platform-node     | 4.0.0         | alchemy's Node runtime per getting-started install set                                                                                                                                                                                                                                                                                                  |
+| drizzle-orm               | 0.45.3        | D1 / Durable Object queries via `alchemy/Drizzle`; **infra libraries only**                                                                                                                                                                                                                                                                             |
+| drizzle-kit               | 0.31.11       | hand-run migration generation (devDependency of infra)                                                                                                                                                                                                                                                                                                  |
+| @effect/sql-d1            | 4.0.0         | peer `effect ^4.0.0` ✔ — under `alchemy/Drizzle`'s `Drizzle.D1` driver (installed in phase 2 with the D1 repository)                                                                                                                                                                                                                                    |
+| @effect/sql-sqlite-do     | 4.0.0         | peer `effect ^4.0.0` ✔ — under `Drizzle.DurableObject` (installed in phase 2)                                                                                                                                                                                                                                                                           |
+| @effect/atom-react        | 4.0.0         | peers react ≥19 <20, effect ^4 — web app (installed in phase 2)                                                                                                                                                                                                                                                                                         |
+| react                     | 19.3.0        | web app (installed in phase 2)                                                                                                                                                                                                                                                                                                                          |
+| vite                      | 8.3.2         | web app + `Cloudflare.Website.Vite` (installed in phase 2)                                                                                                                                                                                                                                                                                              |
+| oasdiff                   | v1.33.0       | breaking-change gate — **Go binary from [GitHub releases](https://github.com/oasdiff/oasdiff/releases), NOT npm**: the npm `oasdiff` package is a "Reserved name placeholder. No functionality." Install via brew/binary download; record the exact version in `docs/dependency-pins.md`. Gate wiring is phase 2 (needs the contract's `openapi.json`). |
 
 - **pnpm only.** No npm/yarn invocations; `packageManager: "pnpm@12.9.1"` enforces the version via corepack.
 - **Exact pins everywhere** (`.npmrc` `save-exact=true`). Re-pin deliberately when upgrading.
@@ -65,11 +65,13 @@ Checked against the npm registry on **2026-10-04**; these are the highest availa
 ### Task 1: pnpm workspace foundation
 
 **Files:**
+
 - Modify: `package.json` (replace WebStorm scaffold)
 - Create: `.npmrc`, `pnpm-workspace.yaml`, `.gitignore` (rewrite)
 - Delete: `src/index.ts`, `tsconfig.json` (old single-package scaffold; replaced by Task 2's `tsconfig.base.json`)
 
 **Interfaces:**
+
 - Consumes: nothing (first task).
 - Produces: pnpm 12.9.1 workspace with `apps/*`, `libs/harness/*`, `libs/sample/*` globs; `.npmrc` with `save-exact=true`; clean git baseline on branch `main`.
 
@@ -159,10 +161,12 @@ git commit -m "chore: pnpm workspace foundation (pnpm 12.9.1, node >=24, save-ex
 ### Task 2: Toolchain dependencies, Nx 23, tsconfig.base, prepare patch
 
 **Files:**
+
 - Modify: `package.json` (devDependencies + scripts)
 - Create: `nx.json`, `tsconfig.base.json`
 
 **Interfaces:**
+
 - Consumes: workspace from Task 1.
 - Produces: `tsconfig.base.json` that every project tsconfig extends (strict, `nodenext`, `@effect/language-service` plugin with Effect diagnostics gating tsc's exit code); `nx.json` with `@nx/js` target inference and `repos/**` excluded; root scripts `prepare`, `lint`, `verify`, `verify:all`.
 
@@ -279,10 +283,12 @@ git commit -m "chore: nx 23 + typescript 7 + @effect/tsgo toolchain with prepare
 ### Task 3: First library (`@harness/sample-domain`) + Effect v4 smoke + floating-effect gate proof
 
 **Files:**
+
 - Create: `libs/sample/domain/package.json`, `libs/sample/domain/tsconfig.json`, `libs/sample/domain/vitest.config.ts`, `libs/sample/domain/src/index.ts`, `libs/sample/domain/test/index.test.ts`
 - Create (temporary, deleted in Step 4): `libs/sample/domain/src/floating-scratch.ts`
 
 **Interfaces:**
+
 - Consumes: `tsconfig.base.json` (Task 2), workspace globs (Task 1).
 - Produces: package `@harness/sample-domain` (Nx tag `type:domain`) with scripts `typecheck` / `lint` / `test` / `verify`; exports `GreetInput` (Schema) and `greet` (`Effect.fn`). Later tasks reuse this package for boundary and ban proofs.
 
@@ -327,8 +333,8 @@ import { defineConfig } from "vitest/config"
 
 export default defineConfig({
   test: {
-    testTimeout: 10_000
-  }
+    testTimeout: 10_000,
+  },
 })
 ```
 
@@ -359,7 +365,7 @@ describe("greet", () => {
     Effect.gen(function* () {
       const out = yield* greet({ name: "Roman" })
       expect(out).toBe("Hello, Roman!")
-    })
+    }),
   )
 })
 ```
@@ -411,10 +417,12 @@ git commit -m "feat(sample-domain): first type:domain lib, Effect v4 smoke test,
 ### Task 4: oxlint with effecttsgo preset + custom syntax bans
 
 **Files:**
+
 - Create: `.oxlintrc.json` (workspace root)
 - Create (temporary, deleted in Step 3): `libs/sample/domain/src/ban-scratch.ts`
 
 **Interfaces:**
+
 - Consumes: `@effect/tsgo`'s oxlint preset (installed in Task 2), libs/apps layout.
 - Produces: root `.oxlintrc.json` that every project's `lint` script picks up; the five custom bans with a single documented escape hatch.
 
@@ -490,7 +498,7 @@ import { integer } from "drizzle-orm"
 
 export const scratch = async (): Promise<string> => {
   try {
-    const parsed: unknown = JSON.parse("{\"a\":1}")
+    const parsed: unknown = JSON.parse('{"a":1}')
     return String(parsed)
   } catch (error) {
     throw error
@@ -524,11 +532,13 @@ git commit -m "feat(gates): oxlint effecttsgo preset + syntax bans for async/try
 ### Task 5: Nx module boundaries gate + `@harness/sample-infra`
 
 **Files:**
+
 - Modify: `.oxlintrc.json` (add `jsPlugins` + boundaries rule)
 - Create: `libs/sample/infra/package.json`, `libs/sample/infra/tsconfig.json`, `libs/sample/infra/vitest.config.ts`, `libs/sample/infra/src/index.ts`, `libs/sample/infra/test/index.test.ts`
 - Modify (temporary, reverted in Step 4): `libs/sample/domain/package.json`, `libs/sample/domain/src/index.ts`
 
 **Interfaces:**
+
 - Consumes: `.oxlintrc.json` (Task 4), tags mechanism from Task 3's `nx.tags`.
 - Produces: package `@harness/sample-infra` (tag `type:infra`) exporting `logToConsole`; enforced depConstraints `type:contract → contract only`, `type:domain → contract+domain`, `type:service → contract+domain+service`, `type:infra → contract+domain+service+infra`, `type:app → all` (the future `web` app gets a stricter `scope:web` constraint when it exists, phase 2).
 
@@ -555,10 +565,33 @@ Inspect what the generator added to `.oxlintrc.json` (`jsPlugins` key and rule n
         "enforceBuildableLibDependency": true,
         "depConstraints": [
           { "sourceTag": "type:contract", "onlyDependOnLibsWithTags": ["type:contract"] },
-          { "sourceTag": "type:domain", "onlyDependOnLibsWithTags": ["type:contract", "type:domain"] },
-          { "sourceTag": "type:service", "onlyDependOnLibsWithTags": ["type:contract", "type:domain", "type:service"] },
-          { "sourceTag": "type:infra", "onlyDependOnLibsWithTags": ["type:contract", "type:domain", "type:service", "type:infra"] },
-          { "sourceTag": "type:app", "onlyDependOnLibsWithTags": ["type:contract", "type:domain", "type:service", "type:infra", "type:app"] },
+          {
+            "sourceTag": "type:domain",
+            "onlyDependOnLibsWithTags": ["type:contract", "type:domain"]
+          },
+          {
+            "sourceTag": "type:service",
+            "onlyDependOnLibsWithTags": ["type:contract", "type:domain", "type:service"]
+          },
+          {
+            "sourceTag": "type:infra",
+            "onlyDependOnLibsWithTags": [
+              "type:contract",
+              "type:domain",
+              "type:service",
+              "type:infra"
+            ]
+          },
+          {
+            "sourceTag": "type:app",
+            "onlyDependOnLibsWithTags": [
+              "type:contract",
+              "type:domain",
+              "type:service",
+              "type:infra",
+              "type:app"
+            ]
+          },
           { "sourceTag": "*", "onlyDependOnLibsWithTags": ["*"] }
         ]
       }
@@ -659,8 +692,8 @@ import { defineConfig } from "vitest/config"
 
 export default defineConfig({
   test: {
-    testTimeout: 10_000
-  }
+    testTimeout: 10_000,
+  },
 })
 ```
 
@@ -687,7 +720,7 @@ describe("logToConsole", () => {
     Effect.gen(function* () {
       yield* logToConsole("harness")
       expect(true).toBe(true)
-    })
+    }),
   )
 })
 ```
@@ -736,6 +769,7 @@ git commit -m "feat(gates): nx module boundaries via @nx/oxlint + type:domain/in
 ### Task 6: Harness package seeds (`ingest`, `decision`, `gates`) + app skeletons (`harness-cli`, `harness-mcp`)
 
 **Files:**
+
 - Create: `libs/harness/ingest/{package.json,tsconfig.json,vitest.config.ts}`, `libs/harness/ingest/src/trace-format.ts`, `libs/harness/ingest/test/trace-format.test.ts`
 - Create: `libs/harness/decision/{package.json,tsconfig.json,vitest.config.ts}`, `libs/harness/decision/src/idiom-router.ts`, `libs/harness/decision/test/idiom-router.test.ts`
 - Create: `libs/harness/gates/{package.json,tsconfig.json,vitest.config.ts}`, `libs/harness/gates/src/policy.ts`, `libs/harness/gates/test/policy.test.ts`
@@ -743,6 +777,7 @@ git commit -m "feat(gates): nx module boundaries via @nx/oxlint + type:domain/in
 - Create: `apps/harness-mcp/{package.json,tsconfig.json,vitest.config.ts}`, `apps/harness-mcp/src/server.ts`, `apps/harness-mcp/test/server.test.ts`
 
 **Interfaces:**
+
 - Consumes: tags/gates from Tasks 3–5; mvp.md's trace interchange format, idiom-router sketch and guard table.
 - Produces:
   - `@harness/ingest` (`type:service`): `TRACE_FORMAT_VERSION`, `TraceHeader` (Schema), `makeTraceHeader(repoRoot: string): TraceHeader` — phase 1 builds the name index and converter on this.
@@ -796,8 +831,8 @@ import { defineConfig } from "vitest/config"
 
 export default defineConfig({
   test: {
-    testTimeout: 10_000
-  }
+    testTimeout: 10_000,
+  },
 })
 ```
 
@@ -814,7 +849,7 @@ export const TraceHeader = Schema.Struct({
   language: Schema.String,
   repo_root: Schema.String,
   tracer: Schema.String,
-  sampled: Schema.Boolean
+  sampled: Schema.Boolean,
 })
 export type TraceHeader = typeof TraceHeader.Type
 
@@ -824,7 +859,7 @@ export const makeTraceHeader = (repoRoot: string): TraceHeader => ({
   language: "javascript",
   repo_root: repoRoot,
   tracer: "effect-span",
-  sampled: false
+  sampled: false,
 })
 ```
 
@@ -845,7 +880,7 @@ describe("trace format", () => {
       language: "javascript",
       repo_root: "/repo",
       tracer: "effect-span",
-      sampled: false
+      sampled: false,
     })
   })
 
@@ -909,7 +944,7 @@ export const IDIOM_BLOCKS = [
   "queue",
   "concurrency",
   "schema",
-  "effect"
+  "effect",
 ] as const
 export type IdiomBlock = (typeof IDIOM_BLOCKS)[number]
 
@@ -918,7 +953,7 @@ export const IdiomRouterV1 = Decision.make({
   input: Schema.Struct({ planStep: Schema.String }),
   decisions: {
     fitsAny: Decision.probability({
-      instructions: "Does this step map to a single Effect building block?"
+      instructions: "Does this step map to a single Effect building block?",
     }),
     block: Decision.classify({
       instructions: "Which Effect building block best implements this step?",
@@ -930,10 +965,10 @@ export const IdiomRouterV1 = Decision.make({
         queue: "Producer/consumer handoff, PubSub",
         concurrency: "Forking fibers, racing, parallel work",
         schema: "Decoding, encoding, validating data at a boundary",
-        effect: "Plain sequential effectful logic"
-      }
-    })
-  }
+        effect: "Plain sequential effectful logic",
+      },
+    }),
+  },
 })
 
 export const routeStep = Effect.fn("Harness.routeStep")(function* (planStep: string) {
@@ -941,7 +976,7 @@ export const routeStep = Effect.fn("Harness.routeStep")(function* (planStep: str
   yield* Effect.annotateCurrentSpan({
     "decision.definition": "IdiomRouterV1",
     "decision.block": answers.block.label,
-    "decision.fitsAny": answers.fitsAny.probability
+    "decision.fitsAny": answers.fitsAny.probability,
   })
   return answers.fitsAny.probability >= 0.7 ? answers.block.label : "review"
 })
@@ -949,7 +984,7 @@ export const routeStep = Effect.fn("Harness.routeStep")(function* (planStep: str
 /** Local Clef-flash through Ollama's System One endpoint. */
 export const LocalDecisionModel = TypeSafeDecisionModel.layer({ model: "clef-flash" }).pipe(
   Layer.provide(TypeSafeClient.layer({ apiUrl: "http://localhost:11434/v1" })),
-  Layer.provide(FetchHttpClient.layer)
+  Layer.provide(FetchHttpClient.layer),
 )
 ```
 
@@ -991,7 +1026,7 @@ export const DENYLIST: ReadonlyArray<{ readonly token: string; readonly reason: 
   { token: "rm -rf", reason: "destructive delete" },
   { token: ".env", reason: "secret file access" },
   { token: "push --force", reason: "force push" },
-  { token: "push -f", reason: "force push" }
+  { token: "push -f", reason: "force push" },
 ]
 
 const containsToken = (command: string, token: string): boolean =>
@@ -1075,8 +1110,8 @@ import { defineConfig } from "vitest/config"
 
 export default defineConfig({
   test: {
-    testTimeout: 10_000
-  }
+    testTimeout: 10_000,
+  },
 })
 ```
 
@@ -1129,7 +1164,7 @@ describe("harness cli", () => {
   it("prints usage on the help command", () => {
     const usage = execFileSync("node", ["src/index.ts", "help"], {
       cwd: new URL("..", import.meta.url).pathname,
-      encoding: "utf8"
+      encoding: "utf8",
     })
     expect(usage).toContain("harness help")
   })
@@ -1210,10 +1245,12 @@ git commit -m "feat(harness): ingest/decision/gates seeds + harness-cli/harness-
 ### Task 7: Knowledge layer — vendored Effect and Alchemy subtrees, editor/agent rules
 
 **Files:**
+
 - Create (via git): `repos/effect/`, `repos/alchemy/` (squashed subtrees)
 - Create: `.vscode/settings.json`, `AGENTS.md`, `CLAUDE.md`, `agent-patterns/README.md`, `docs/dependency-pins.md`, `docs/alchemy-llms.txt`, `docs/alchemy-llms-full.txt` (downloaded snapshots)
 
 **Interfaces:**
+
 - Consumes: clean committed tree (Tasks 1–6), network access to github.com and alchemy.run.
 - Produces: pinned Effect source at `repos/effect` and pinned Alchemy source at `repos/alchemy` (both read-only), recorded pin SHAs, locally vendored Alchemy doc snapshots the agent reads offline (`docs/alchemy-llms*.txt`), agent authority rules including the Alchemy infra/deploy policy, `docs/dependency-pins.md` with the exact version table from Global Constraints.
 
@@ -1390,9 +1427,11 @@ git commit -m "docs(knowledge): vendored effect + alchemy subtrees, alchemy llms
 ### Task 8: Alchemy sample app — `apps/sample` with a single R2 Bucket
 
 **Files:**
+
 - Create: `apps/sample/package.json`, `apps/sample/tsconfig.json`, `apps/sample/alchemy.run.ts`
 
 **Interfaces:**
+
 - Consumes: workspace from Task 1 (the `apps/*` glob picks the package up), pinned alchemy from Global Constraints, `repos/alchemy` source (Task 7) as the API authority.
 - Produces: package `sample-app` (Nx tag `type:app`) with scripts `typecheck` / `lint` / `verify` / `dev` / `deploy`; a default-exported Alchemy Stack with one `Cloudflare.R2.Bucket`. Phase 2 adds the service Layers that own resources/bindings and the `test:emulated` suite.
 
@@ -1444,15 +1483,15 @@ export default Alchemy.Stack(
   "sample",
   {
     providers: Cloudflare.providers(),
-    state: Cloudflare.state()
+    state: Cloudflare.state(),
   },
   Effect.gen(function* () {
     const bucket = yield* Cloudflare.R2.Bucket("Bucket")
 
     return {
-      bucketName: bucket.bucketName
+      bucketName: bucket.bucketName,
     }
-  })
+  }),
 )
 ```
 
@@ -1485,9 +1524,11 @@ git commit -m "feat(sample-app): alchemy v2 stack with single R2 bucket (typeche
 ### Task 9: Guard policy — `ask` verdict for `alchemy deploy` / `destroy` / profile commands
 
 **Files:**
+
 - Modify: `libs/harness/gates/src/policy.ts`, `libs/harness/gates/test/policy.test.ts`
 
 **Interfaces:**
+
 - Consumes: `@harness/gates` from Task 6.
 - Produces: `classifyCommand(cmd: string): "allow" | "deny" | "ask" | "escalate"` — new `ask` verdict for `alchemy deploy` / `alchemy destroy` / `alchemy profile` (mvp.md infra acceptance: "The safety guard asks a human before any agent-run `alchemy deploy` or `alchemy destroy`"); exported `ASKLIST` seed. Local `alchemy dev` stays `escalate` (goes to the decision model like any unknown command).
 
@@ -1542,7 +1583,7 @@ export const DENYLIST: ReadonlyArray<{ readonly token: string; readonly reason: 
   { token: "rm -rf", reason: "destructive delete" },
   { token: ".env", reason: "secret file access" },
   { token: "push --force", reason: "force push" },
-  { token: "push -f", reason: "force push" }
+  { token: "push -f", reason: "force push" },
 ]
 
 /** Human confirmation required, never auto-approved (mvp.md "Infrastructure as Effect",
@@ -1550,7 +1591,7 @@ export const DENYLIST: ReadonlyArray<{ readonly token: string; readonly reason: 
 export const ASKLIST: ReadonlyArray<string> = [
   "alchemy deploy",
   "alchemy destroy",
-  "alchemy profile"
+  "alchemy profile",
 ]
 
 const containsToken = (command: string, token: string): boolean =>
@@ -1591,10 +1632,12 @@ git commit -m "feat(gates): ask verdict for alchemy deploy/destroy/profile comma
 ### Task 10: `@harness/sample-contract` — the `type:contract` tag and its boundary chain
 
 **Files:**
+
 - Create: `libs/sample/contract/package.json`, `libs/sample/contract/tsconfig.json`, `libs/sample/contract/vitest.config.ts`, `libs/sample/contract/src/index.ts`, `libs/sample/contract/test/index.test.ts`
 - Modify: `libs/sample/domain/package.json`, `libs/sample/domain/src/index.ts`
 
 **Interfaces:**
+
 - Consumes: boundaries config from Task 5 (`type:contract` constraints), workspace from Task 1.
 - Produces: package `@harness/sample-contract` (tag `type:contract`, dependency `effect` only) exporting `GreetInput` (Schema + type). The domain lib imports it, proving the `contract → domain` chain. Phase 2 adds the public `HttpApi`, `RpcGroup`s and API errors to this package.
 
@@ -1689,10 +1732,12 @@ git commit -m "feat(sample-contract): type:contract lib, domain imports contract
 ### Task 11: Drizzle on D1 in `@harness/sample-infra` + the migration drift gate
 
 **Files:**
+
 - Modify: `libs/sample/infra/package.json` (dependencies, scripts)
 - Create: `libs/sample/infra/src/db/schema.ts`, `libs/sample/infra/drizzle.config.ts`, `libs/sample/infra/scripts/check-migrations.mjs`, `libs/sample/infra/migrations/` (generated, committed)
 
 **Interfaces:**
+
 - Consumes: `@harness/sample-infra` (Task 5), the `drizzle-orm` import ban and its `**/infra/**` escape (Task 4).
 - Produces: the `photos` D1 table schema (`sqliteTable`, infra-only per mvp.md); committed baseline migration; script `migration:check` wired into sample-infra's `verify` with exit codes `0` in-sync / `1` schema changed without a committed migration / `2` destructive drift (DROP, table rebuild) escalates to the human. The actual `Drizzle.D1` queries (driver `drizzle-orm/effect-d1` on `@effect/sql-d1`) and the Durable Object store arrive in phase 2 with the real repository work.
 
@@ -1737,7 +1782,7 @@ import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core"
 export const photos = sqliteTable("photos", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull(),
-  createdAt: integer("created_at").notNull()
+  createdAt: integer("created_at").notNull(),
 })
 ```
 
@@ -1749,7 +1794,7 @@ import { defineConfig } from "drizzle-kit"
 export default defineConfig({
   dialect: "sqlite",
   schema: "./src/db/schema.ts",
-  out: "./migrations"
+  out: "./migrations",
 })
 ```
 
@@ -1802,9 +1847,9 @@ try {
       "--out",
       outDir,
       "--name",
-      "drift"
+      "drift",
     ],
-    { stdio: "pipe" }
+    { stdio: "pipe" },
   )
 
   const newFiles = (await listSql(outDir)).filter((file) => !before.includes(file))
@@ -1816,12 +1861,14 @@ try {
     const sql = await readFile(join(outDir, file), "utf8")
     if (destructive.test(sql)) {
       console.error(
-        `migration check: ESCALATE — destructive drift requires a human decision (${file}):\n${sql}`
+        `migration check: ESCALATE — destructive drift requires a human decision (${file}):\n${sql}`,
       )
       process.exit(2)
     }
   }
-  console.error(`migration check: FAIL — schema changed without a committed migration:\n${newFiles.join("\n")}`)
+  console.error(
+    `migration check: FAIL — schema changed without a committed migration:\n${newFiles.join("\n")}`,
+  )
   process.exit(1)
 } finally {
   await rm(temp, { recursive: true, force: true })
@@ -1868,9 +1915,11 @@ git commit -m "feat(sample-infra): drizzle d1 schema + committed migration + dri
 ### Task 12: CI workflow, README, fresh-clone rehearsal
 
 **Files:**
+
 - Create: `.github/workflows/ci.yml`, `README.md`
 
 **Interfaces:**
+
 - Consumes: everything from Tasks 1–11.
 - Produces: CI running `nx affected -t verify` (no agent, no Ollama, no Cloudflare, no deploys — mvp.md "Flows outside the task loop" and Alchemy non-goals); a README that gets a fresh clone to green with only pnpm, Docker and Ollama installed (Cloudflare account only when a human later runs `alchemy dev`/`deploy`).
 

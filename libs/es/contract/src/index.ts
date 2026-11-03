@@ -6,7 +6,7 @@ export type StreamVersion = typeof StreamVersion.Type
 
 // Strictly positive quantities (> 0, 0 is invalid)
 export const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0)).pipe(
-  Schema.brand("PositiveInt")
+  Schema.brand("PositiveInt"),
 )
 export type PositiveInt = typeof PositiveInt.Type
 
@@ -42,36 +42,36 @@ export class EventMetadata extends Schema.Class<EventMetadata>("EventMetadata")(
   commandId: CommandId,
   timestamp: TimestampMs,
   correlationId: Schema.optional(CorrelationId),
-  causationId: Schema.optional(CausationId)
+  causationId: Schema.optional(CausationId),
 }) {}
 
 // Lifecycle and publication states modeled as closed discriminated unions (no boolean flags)
 export const StreamCreationStatus = Schema.Union([
   Schema.TaggedStruct("CreatedStream", {}),
   Schema.TaggedStruct("ExistingStream", {}),
-  Schema.TaggedStruct("NoStream", {})
+  Schema.TaggedStruct("NoStream", {}),
 ])
 export type StreamCreationStatus = typeof StreamCreationStatus.Type
 
 export const CommandProcessingStatus = Schema.Union([
   Schema.TaggedStruct("Processed", {}),
-  Schema.TaggedStruct("Deduplicated", {})
+  Schema.TaggedStruct("Deduplicated", {}),
 ])
 export type CommandProcessingStatus = typeof CommandProcessingStatus.Type
 
 export const OutboxPublicationMode = Schema.Union([
   Schema.TaggedStruct("PublishOutbox", {}),
-  Schema.TaggedStruct("SuppressOutbox", {})
+  Schema.TaggedStruct("SuppressOutbox", {}),
 ])
 export type OutboxPublicationMode = typeof OutboxPublicationMode.Type
 
 // Command execution outcome contract
 export class AggregateCommandResult extends Schema.Class<AggregateCommandResult>(
-  "AggregateCommandResult"
+  "AggregateCommandResult",
 )({
   nextExpectedStreamVersion: StreamVersion,
   creationStatus: StreamCreationStatus,
-  processingStatus: CommandProcessingStatus
+  processingStatus: CommandProcessingStatus,
 }) {}
 
 // Typed domain and persistence errors
@@ -80,22 +80,22 @@ export class ConcurrencyConflictError extends Schema.TaggedError<ConcurrencyConf
   {
     aggregateId: AggregateId,
     expectedVersion: StreamVersion,
-    actualVersion: StreamVersion
-  }
+    actualVersion: StreamVersion,
+  },
 ) {}
 
 export class AggregateNotFoundError extends Schema.TaggedError<AggregateNotFoundError>()(
   "AggregateNotFoundError",
   {
-    aggregateId: AggregateId
-  }
+    aggregateId: AggregateId,
+  },
 ) {}
 
 export class LocalProjectionNotFoundError extends Schema.TaggedError<LocalProjectionNotFoundError>()(
   "LocalProjectionNotFoundError",
   {
-    name: ProjectionName
-  }
+    name: ProjectionName,
+  },
 ) {}
 
 export class CommandAggregateMismatchError extends Schema.TaggedError<CommandAggregateMismatchError>()(
@@ -105,8 +105,8 @@ export class CommandAggregateMismatchError extends Schema.TaggedError<CommandAgg
     expectedAggregateName: AggregateName,
     expectedAggregateId: AggregateId,
     actualAggregateName: AggregateName,
-    actualAggregateId: AggregateId
-  }
+    actualAggregateId: AggregateId,
+  },
 ) {}
 
 export class EventStreamCorruptionError extends Schema.TaggedError<EventStreamCorruptionError>()(
@@ -115,6 +115,6 @@ export class EventStreamCorruptionError extends Schema.TaggedError<EventStreamCo
     aggregateName: AggregateName,
     aggregateId: AggregateId,
     expectedStreamVersion: StreamVersion,
-    actualStreamVersion: StreamVersion
-  }
+    actualStreamVersion: StreamVersion,
+  },
 ) {}

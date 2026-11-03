@@ -27,7 +27,7 @@ import {
   type SpecifiesSymbolEdge,
   type TaggedErrorNode,
   type TracedCallEdge,
-  type VitestCaseNode
+  type VitestCaseNode,
 } from "./model.js"
 
 export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph => {
@@ -99,7 +99,7 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
         const edge: RequiresServiceEdge = {
           _tag: "RequiresService",
           callerQualname: srcKey,
-          tagId: r.tagId
+          tagId: r.tagId,
         }
         Graph.addEdge(mutable, srcIdx, dstIdx, edge)
       }
@@ -113,7 +113,7 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
         const edge: FailsWithEdge = {
           _tag: "FailsWith",
           callerQualname: srcKey,
-          errorTag: f.errorTag
+          errorTag: f.errorTag,
         }
         Graph.addEdge(mutable, srcIdx, dstIdx, edge)
       }
@@ -126,7 +126,7 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
         const edge: ProvidesServiceEdge = {
           _tag: "ProvidesService",
           layerQualname: p.layerQualname,
-          tagId: p.tagId
+          tagId: p.tagId,
         }
         Graph.addEdge(mutable, srcIdx, dstIdx, edge)
       }
@@ -139,7 +139,7 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
         const edge: LayerRequiresEdge = {
           _tag: "LayerRequires",
           layerQualname: lr.layerQualname,
-          tagId: lr.tagId
+          tagId: lr.tagId,
         }
         Graph.addEdge(mutable, srcIdx, dstIdx, edge)
       }
@@ -154,7 +154,7 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
           callerQualname: tc.callerQualname,
           calleeQualname: tc.calleeQualname,
           callCount: tc.callCount,
-          receiverLayer: tc.receiverLayer
+          receiverLayer: tc.receiverLayer,
         }
         Graph.addEdge(mutable, srcIdx, dstIdx, edge)
       }
@@ -169,7 +169,7 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
           testId: es.testId,
           calleeQualname: es.calleeQualname,
           callCount: es.callCount,
-          receiverLayer: es.receiverLayer
+          receiverLayer: es.receiverLayer,
         }
         Graph.addEdge(mutable, srcIdx, dstIdx, edge)
       }
@@ -183,7 +183,7 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
           _tag: "GovernsSymbol",
           adrId: g.adrId,
           targetKey: g.targetKey,
-          targetKind: g.targetKind
+          targetKind: g.targetKind,
         }
         Graph.addEdge(mutable, srcIdx, dstIdx, edge)
       }
@@ -197,7 +197,7 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
           _tag: "SpecifiesSymbol",
           specId: s.specId,
           targetKey: s.targetKey,
-          targetKind: s.targetKind
+          targetKind: s.targetKind,
         }
         Graph.addEdge(mutable, srcIdx, dstIdx, edge)
       }
@@ -207,13 +207,13 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
   return {
     graph,
     nodeIndexByKey,
-    branchingViolations: input.branchingViolations
+    branchingViolations: input.branchingViolations,
   }
 }
 
 export const resolveNode = (
   harnessGraph: HarnessGraph,
-  symbolOrSpan: string
+  symbolOrSpan: string,
 ): HarnessNode | undefined => {
   const g = harnessGraph.graph
   const directIdx = harnessGraph.nodeIndexByKey.get(symbolOrSpan)
@@ -245,10 +245,7 @@ export const resolveNode = (
         break
       }
       case "ServiceLayer": {
-        if (
-          node.qualname === symbolOrSpan ||
-          node.qualname.endsWith(`#${symbolOrSpan}`)
-        ) {
+        if (node.qualname === symbolOrSpan || node.qualname.endsWith(`#${symbolOrSpan}`)) {
           return node
         }
         break
@@ -296,7 +293,7 @@ export const resolveNode = (
 
 export const findTestsReaching = (
   harnessGraph: HarnessGraph,
-  targetNameOrQualname: string
+  targetNameOrQualname: string,
 ): ReadonlyArray<VitestCaseNode> => {
   const targetNode = resolveNode(harnessGraph, targetNameOrQualname)
   if (!targetNode) return []
@@ -307,7 +304,7 @@ export const findTestsReaching = (
   const testResults = new Map<string, VitestCaseNode>()
   const walker = Graph.dfs(harnessGraph.graph, {
     start: [targetIndex],
-    direction: "incoming"
+    direction: "incoming",
   })
 
   for (const [, node] of walker) {
@@ -321,7 +318,7 @@ export const findTestsReaching = (
 
 export const findCallees = (
   harnessGraph: HarnessGraph,
-  target: string
+  target: string,
 ): ReadonlyArray<CalleeResult> => {
   const targetNode = resolveNode(harnessGraph, target)
   if (!targetNode) return []
@@ -343,7 +340,7 @@ export const findCallees = (
             spanName: (callee as EffectFnNode).spanName,
             edgeKind: "TracedCall",
             receiverLayer: edge.data.receiverLayer,
-            callCount: edge.data.callCount
+            callCount: edge.data.callCount,
           })
         } else if (edge.data._tag === "RequiresService") {
           const serviceTag = callee as ServiceTagNode
@@ -364,7 +361,7 @@ export const findCallees = (
             name: serviceTag.name,
             edgeKind: "RequiresService",
             receiverLayer: candidateLayers[0] ?? null,
-            candidates: candidateLayers
+            candidates: candidateLayers,
           })
         } else if (edge.data._tag === "ProvidesService" || edge.data._tag === "LayerRequires") {
           const serviceTag = callee as ServiceTagNode
@@ -374,7 +371,7 @@ export const findCallees = (
             tagId: serviceTag.tagId,
             name: serviceTag.name,
             edgeKind: edge.data._tag,
-            receiverLayer: null
+            receiverLayer: null,
           })
         } else if (edge.data._tag === "FailsWith") {
           const errNode = callee as TaggedErrorNode
@@ -382,7 +379,7 @@ export const findCallees = (
             qualname: errNode.errorTag,
             spanName: errNode.errorTag,
             edgeKind: "FailsWith",
-            receiverLayer: null
+            receiverLayer: null,
           })
         } else if (edge.data._tag === "GovernsSymbol" || edge.data._tag === "SpecifiesSymbol") {
           if (callee._tag === "EffectFn") {
@@ -390,7 +387,7 @@ export const findCallees = (
               qualname: callee.qualname,
               spanName: callee.spanName,
               edgeKind: edge.data._tag,
-              receiverLayer: null
+              receiverLayer: null,
             })
           } else if (callee._tag === "ServiceTag") {
             results.push({
@@ -399,14 +396,14 @@ export const findCallees = (
               tagId: callee.tagId,
               name: callee.name,
               edgeKind: edge.data._tag,
-              receiverLayer: null
+              receiverLayer: null,
             })
           } else if (callee._tag === "TaggedError") {
             results.push({
               qualname: callee.errorTag,
               spanName: callee.errorTag,
               edgeKind: edge.data._tag,
-              receiverLayer: null
+              receiverLayer: null,
             })
           }
         }
@@ -419,7 +416,7 @@ export const findCallees = (
 
 export const findCallers = (
   harnessGraph: HarnessGraph,
-  target: string
+  target: string,
 ): ReadonlyArray<CallerResult> => {
   const targetNode = resolveNode(harnessGraph, target)
   if (!targetNode) return []
@@ -441,7 +438,7 @@ export const findCallers = (
             spanName: (caller as EffectFnNode).spanName,
             edgeKind: "TracedCall",
             receiverLayer: edge.data.receiverLayer,
-            callCount: edge.data.callCount
+            callCount: edge.data.callCount,
           })
         } else if (edge.data._tag === "ExercisesSpan") {
           results.push({
@@ -450,27 +447,27 @@ export const findCallers = (
             spanName: (caller as VitestCaseNode).testName,
             edgeKind: "ExercisesSpan",
             receiverLayer: edge.data.receiverLayer,
-            callCount: edge.data.callCount
+            callCount: edge.data.callCount,
           })
         } else if (edge.data._tag === "RequiresService") {
           results.push({
             qualname: (caller as EffectFnNode).qualname,
             spanName: (caller as EffectFnNode).spanName,
             edgeKind: "RequiresService",
-            receiverLayer: null
+            receiverLayer: null,
           })
         } else if (edge.data._tag === "FailsWith") {
           results.push({
             qualname: (caller as EffectFnNode).qualname,
             spanName: (caller as EffectFnNode).spanName,
             edgeKind: "FailsWith",
-            receiverLayer: null
+            receiverLayer: null,
           })
         } else if (edge.data._tag === "ProvidesService" || edge.data._tag === "LayerRequires") {
           results.push({
             qualname: (caller as ServiceLayerNode).qualname,
             edgeKind: edge.data._tag,
-            receiverLayer: null
+            receiverLayer: null,
           })
         } else if (edge.data._tag === "GovernsSymbol" || edge.data._tag === "SpecifiesSymbol") {
           if (caller._tag === "AdrDoc" || caller._tag === "EarsSpec") {
@@ -478,7 +475,7 @@ export const findCallers = (
               qualname: caller.id,
               spanName: caller.title,
               edgeKind: edge.data._tag,
-              receiverLayer: null
+              receiverLayer: null,
             })
           }
         }
@@ -530,7 +527,7 @@ export const renderMermaid = (harnessGraph: HarnessGraph): string => {
         case "SpecifiesSymbol":
           return "specifies"
       }
-    }
+    },
   })
 }
 
@@ -556,9 +553,9 @@ export const toOmnigraphNdjson = (harnessGraph: HarnessGraph): string => {
               isStub: node.isStub,
               archimateLayer: ont.layer,
               archimateAspect: ont.aspect,
-              archimateElementType: ont.elementType
-            }
-          })
+              archimateElementType: ont.elementType,
+            },
+          }),
         )
         break
       }
@@ -574,9 +571,9 @@ export const toOmnigraphNdjson = (harnessGraph: HarnessGraph): string => {
               file: node.file,
               archimateLayer: ont.layer,
               archimateAspect: ont.aspect,
-              archimateElementType: ont.elementType
-            }
-          })
+              archimateElementType: ont.elementType,
+            },
+          }),
         )
         break
       }
@@ -592,9 +589,9 @@ export const toOmnigraphNdjson = (harnessGraph: HarnessGraph): string => {
               file: node.file,
               archimateLayer: ont.layer,
               archimateAspect: ont.aspect,
-              archimateElementType: ont.elementType
-            }
-          })
+              archimateElementType: ont.elementType,
+            },
+          }),
         )
         break
       }
@@ -608,9 +605,9 @@ export const toOmnigraphNdjson = (harnessGraph: HarnessGraph): string => {
               file: node.file,
               archimateLayer: ont.layer,
               archimateAspect: ont.aspect,
-              archimateElementType: ont.elementType
-            }
-          })
+              archimateElementType: ont.elementType,
+            },
+          }),
         )
         break
       }
@@ -627,9 +624,9 @@ export const toOmnigraphNdjson = (harnessGraph: HarnessGraph): string => {
               isPropertyTest: node.isPropertyTest ?? false,
               archimateLayer: ont.layer,
               archimateAspect: ont.aspect,
-              archimateElementType: ont.elementType
-            }
-          })
+              archimateElementType: ont.elementType,
+            },
+          }),
         )
         break
       }
@@ -644,9 +641,9 @@ export const toOmnigraphNdjson = (harnessGraph: HarnessGraph): string => {
               summary: node.summary,
               archimateLayer: ont.layer,
               archimateAspect: ont.aspect,
-              archimateElementType: ont.elementType
-            }
-          })
+              archimateElementType: ont.elementType,
+            },
+          }),
         )
         break
       }
@@ -666,9 +663,9 @@ export const toOmnigraphNdjson = (harnessGraph: HarnessGraph): string => {
               referencedErrors: node.referencedErrors,
               archimateLayer: ont.layer,
               archimateAspect: ont.aspect,
-              archimateElementType: ont.elementType
-            }
-          })
+              archimateElementType: ont.elementType,
+            },
+          }),
         )
         break
       }
@@ -688,9 +685,9 @@ export const toOmnigraphNdjson = (harnessGraph: HarnessGraph): string => {
               referencedErrors: node.referencedErrors,
               archimateLayer: ont.layer,
               archimateAspect: ont.aspect,
-              archimateElementType: ont.elementType
-            }
-          })
+              archimateElementType: ont.elementType,
+            },
+          }),
         )
         break
       }
@@ -708,9 +705,9 @@ export const toOmnigraphNdjson = (harnessGraph: HarnessGraph): string => {
             from: edge.data.callerQualname,
             to: edge.data.tagId,
             data: {
-              archimateRelation: rel
-            }
-          })
+              archimateRelation: rel,
+            },
+          }),
         )
         break
       }
@@ -722,9 +719,9 @@ export const toOmnigraphNdjson = (harnessGraph: HarnessGraph): string => {
             from: edge.data.callerQualname,
             to: edge.data.errorTag,
             data: {
-              archimateRelation: rel
-            }
-          })
+              archimateRelation: rel,
+            },
+          }),
         )
         break
       }
@@ -736,9 +733,9 @@ export const toOmnigraphNdjson = (harnessGraph: HarnessGraph): string => {
             from: edge.data.layerQualname,
             to: edge.data.tagId,
             data: {
-              archimateRelation: rel
-            }
-          })
+              archimateRelation: rel,
+            },
+          }),
         )
         break
       }
@@ -750,9 +747,9 @@ export const toOmnigraphNdjson = (harnessGraph: HarnessGraph): string => {
             from: edge.data.layerQualname,
             to: edge.data.tagId,
             data: {
-              archimateRelation: rel
-            }
-          })
+              archimateRelation: rel,
+            },
+          }),
         )
         break
       }
@@ -766,9 +763,9 @@ export const toOmnigraphNdjson = (harnessGraph: HarnessGraph): string => {
             data: {
               callCount: edge.data.callCount,
               receiverLayer: edge.data.receiverLayer,
-              archimateRelation: rel
-            }
-          })
+              archimateRelation: rel,
+            },
+          }),
         )
         break
       }
@@ -782,9 +779,9 @@ export const toOmnigraphNdjson = (harnessGraph: HarnessGraph): string => {
             data: {
               callCount: edge.data.callCount,
               receiverLayer: edge.data.receiverLayer,
-              archimateRelation: rel
-            }
-          })
+              archimateRelation: rel,
+            },
+          }),
         )
         break
       }
@@ -797,9 +794,9 @@ export const toOmnigraphNdjson = (harnessGraph: HarnessGraph): string => {
             to: edge.data.targetKey,
             data: {
               targetKind: edge.data.targetKind,
-              archimateRelation: rel
-            }
-          })
+              archimateRelation: rel,
+            },
+          }),
         )
         break
       }
@@ -812,9 +809,9 @@ export const toOmnigraphNdjson = (harnessGraph: HarnessGraph): string => {
             to: edge.data.targetKey,
             data: {
               targetKind: edge.data.targetKind,
-              archimateRelation: rel
-            }
-          })
+              archimateRelation: rel,
+            },
+          }),
         )
         break
       }
@@ -824,10 +821,7 @@ export const toOmnigraphNdjson = (harnessGraph: HarnessGraph): string => {
   return lines.join("\n")
 }
 
-export const saveGraphSnapshot = (
-  harnessGraph: HarnessGraph,
-  filePath: string
-): void => {
+export const saveGraphSnapshot = (harnessGraph: HarnessGraph, filePath: string): void => {
   const snapshot = Graph.toSnapshot(harnessGraph.graph)
   const dir = path.dirname(filePath)
   if (!fs.existsSync(dir)) {
@@ -836,17 +830,11 @@ export const saveGraphSnapshot = (
   fs.writeFileSync(filePath, JSON.stringify(snapshot, null, 2), "utf-8")
 }
 
-const decodeJsonToSnapshot = Schema.decodeUnknownSync(
-  Schema.fromJsonString(Schema.Unknown)
-)
+const decodeJsonToSnapshot = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))
 
 export const loadGraphSnapshot = (filePath: string): HarnessGraph => {
   const content = fs.readFileSync(filePath, "utf-8")
-  const raw = decodeJsonToSnapshot(content) as Graph.Snapshot<
-    HarnessNode,
-    HarnessEdge,
-    "directed"
-  >
+  const raw = decodeJsonToSnapshot(content) as Graph.Snapshot<HarnessNode, HarnessEdge, "directed">
   const graph = Graph.fromSnapshot(raw) as Graph.DirectedGraph<HarnessNode, HarnessEdge>
   const nodeIndexByKey = new Map<string, Graph.NodeIndex>()
   for (const [idx, node] of Graph.nodes(graph)) {
@@ -857,12 +845,11 @@ export const loadGraphSnapshot = (filePath: string): HarnessGraph => {
 
 export const saveGraphSnapshotEffect = (
   harnessGraph: HarnessGraph,
-  filePath: string
+  filePath: string,
 ): Effect.Effect<void> => Effect.sync(() => saveGraphSnapshot(harnessGraph, filePath))
 
-export const loadGraphSnapshotEffect = (
-  filePath: string
-): Effect.Effect<HarnessGraph> => Effect.sync(() => loadGraphSnapshot(filePath))
+export const loadGraphSnapshotEffect = (filePath: string): Effect.Effect<HarnessGraph> =>
+  Effect.sync(() => loadGraphSnapshot(filePath))
 
 export interface HarnessGraphDiff {
   readonly missingFns: ReadonlyArray<string>
@@ -875,7 +862,7 @@ export interface HarnessGraphDiff {
 
 export const diffHarnessGraphs = (
   implGraph: HarnessGraph,
-  planGraph: HarnessGraph
+  planGraph: HarnessGraph,
 ): HarnessGraphDiff => {
   const missingFns: Array<string> = []
   const missingServices: Array<string> = []
@@ -889,11 +876,7 @@ export const diffHarnessGraphs = (
       let implNode = resolveNode(implGraph, node.qualname)
       if (!implNode || implNode._tag !== "EffectFn") {
         const fallbackNode = resolveNode(implGraph, node.spanName)
-        if (
-          fallbackNode &&
-          fallbackNode._tag === "EffectFn" &&
-          fallbackNode.file === node.file
-        ) {
+        if (fallbackNode && fallbackNode._tag === "EffectFn" && fallbackNode.file === node.file) {
           implNode = fallbackNode
           qualnameAliasMap.set(node.qualname, fallbackNode.qualname)
         }
@@ -962,7 +945,7 @@ export const diffHarnessGraphs = (
 
   const differenceGraph = Graph.difference(implGraph.graph, planGraph.graph, {
     nodeIdentity: getNodeKey,
-    edgeIdentity: getEdgeKey
+    edgeIdentity: getEdgeKey,
   })
 
   const isGreen =
@@ -977,6 +960,6 @@ export const diffHarnessGraphs = (
     remainingStubs,
     missingEdges,
     differenceGraph,
-    isGreen
+    isGreen,
   }
 }

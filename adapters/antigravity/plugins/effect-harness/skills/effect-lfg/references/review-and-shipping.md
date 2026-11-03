@@ -9,6 +9,7 @@ This reference governs **Stage 4 (4-Lens Specialist Review & Autonomous Fix Loop
 Once package-isolated `flash` implementer subagents have replaced all `stub<A, E, R>()` calls and passed package-level verification (`CI=true pnpm nx run <project>:verify`):
 
 ### Step 4.1 — Dispatch Parallel Specialist Review Lenses (Whole Git Diff)
+
 Select and invoke the read-only specialist review subagents (`Model: "flash"`, `Workspace: "share"`) across the **entire git diff (`git diff main...HEAD`)** — including any modified harness gates (`libs/harness/**`) and linter plugins (`tools/oxlint/**`), not just domain packages:
 
 1. **`effect-ears-test-reviewer` (Always):**
@@ -21,6 +22,7 @@ Select and invoke the read-only specialist review subagents (`Model: "flash"`, `
    Constructs crash-between-steps sequences, duplicate command delivery, out-of-order replay, boundary mutation cases, and adversarial gate evasion vectors (shell wrapper/quoting/subshell bypasses, multi-aggregate / multi-schema scope bleed, and fail-open fallbacks).
 
 ### Step 4.2 — Central Adjudication & Twin Class-Fix Loop
+
 Follow the adjudication rubric from `resolving-effect-review-feedback`:
 
 1. **Adjudicate via Graph MCP:** For every finding reported by the specialist reviewers, verify type and ontology facts with `harness_resolve`, `harness_callers`, `harness_ontology_why`, and `harness_tests_reaching`.
@@ -36,14 +38,16 @@ Follow the adjudication rubric from `resolving-effect-review-feedback`:
 ## 2. Stage 5 — Stamp-Safe Compounding Learnings & Final Deterministic Gate Sequence
 
 > [!IMPORTANT]
-> `.harness/verify-stamp.json` records the SHA-256 hash (`treeHash`) of all tracked workspace files at the moment `harness verify` runs. Editing **any** file (including spec frontmatter, ADRs, or `agent-patterns/*.md` from `harness learn`) *after* `harness verify` invalidates the stamp and causes `harness done` (and the session `Stop` hook) to block completion.
+> `.harness/verify-stamp.json` records the SHA-256 hash (`treeHash`) of all tracked workspace files at the moment `harness verify` runs. Editing **any** file (including spec frontmatter, ADRs, or `agent-patterns/*.md` from `harness learn`) _after_ `harness verify` invalidates the stamp and causes `harness done` (and the session `Stop` hook) to block completion.
 
 Always execute Stage 5 in this exact stamp-safe order:
 
 ### Step 5.1 — Finalize Spec Status (`status: accepted`)
+
 Update `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` (or `docs/specs/`) frontmatter from `status: proposed` to `status: accepted`. Confirm all `enforced_by`, `spans`, `services`, and `errors` entries match the implemented code 1:1.
 
 ### Step 5.2 — Autonomous Compounding Learnings (`harness learn`)
+
 1. Run `harness learn`:
    ```bash
    node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts learn
@@ -58,6 +62,7 @@ Update `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` (or `docs/specs/`) frontma
    ```
 
 ### Step 5.3 — Final Deterministic Gate Sequence (`gc` $\rightarrow$ `ontology` $\rightarrow$ `mutate` $\rightarrow$ `verify` $\rightarrow$ `done`)
+
 With all code, tests, specs, ADRs, and learning promotions written to disk, execute the complete verification sequence (`WaitMsBeforeAsync: 10000` on each command):
 
 ```bash
@@ -77,6 +82,7 @@ CI=true node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts
 ## 3. Stage 6 — Git Commit, Optional Push/PR & Closeout
 
 ### Step 6.1 — Scoped Git Commit (Stamp-Preserving)
+
 1. Inspect modified and untracked files:
    ```bash
    git status --short
@@ -91,6 +97,7 @@ CI=true node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts
    ```
 
 ### Step 6.2 — Shipping Precondition (`git remote`) & PR Creation
+
 Run `git remote` once to determine the shipping path:
 
 1. **No Remote Configured (or User Requested Local-Only):**
@@ -106,6 +113,7 @@ Run `git remote` once to determine the shipping path:
    - Merging always stays with the user unless explicitly granted for this run.
 
 ### Step 6.3 — Final Closeout Output
+
 Present a concise closeout report to the user (worktree/branch path, spec & ADR paths, commit SHA, PR URL if opened, and any explicit assumptions or residual review notes), then end with:
 
 ```text

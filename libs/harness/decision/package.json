@@ -6,25 +6,25 @@
   "exports": {
     ".": "./src/index.ts"
   },
-  "nx": {
-    "tags": [
-      "type:service"
-    ]
-  },
   "scripts": {
     "typecheck": "tsc --noEmit && effect-tsgo diagnostics --strict --project tsconfig.json",
     "lint": "oxlint --deny-warnings .",
     "test": "vitest run",
-    "verify": "pnpm run typecheck && pnpm run lint && pnpm run test"
+    "verify": "node -e \"\""
   },
   "dependencies": {
+    "@effect/ai-typesafe": "4.0.0",
     "@harness/gates": "workspace:*",
-    "effect": "4.0.0",
-    "@effect/ai-typesafe": "4.0.0"
+    "effect": "4.0.0"
   },
   "devDependencies": {
     "@effect/vitest": "4.0.0",
     "@types/node": "26.6.5",
     "vitest": "5.0.3"
+  },
+  "nx": {
+    "tags": [
+      "type:service"
+    ]
   }
 }

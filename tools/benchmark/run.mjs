@@ -8,14 +8,14 @@ const canonicalBenchmarkRuns = [
     mode: "harness",
     diagnosticsBeforeGreen: 0,
     fixUpIterations: 1,
-    tokenCount: 1420
+    tokenCount: 1420,
   },
   {
     taskId: "task-1-contract-schema",
     mode: "no-harness",
     diagnosticsBeforeGreen: 3,
     fixUpIterations: 3,
-    tokenCount: 3100
+    tokenCount: 3100,
   },
 
   // Task 2: Domain use case implementation (@harness/sample-domain)
@@ -24,14 +24,14 @@ const canonicalBenchmarkRuns = [
     mode: "harness",
     diagnosticsBeforeGreen: 1,
     fixUpIterations: 1,
-    tokenCount: 2150
+    tokenCount: 2150,
   },
   {
     taskId: "task-2-domain-use-case",
     mode: "no-harness",
     diagnosticsBeforeGreen: 4,
     fixUpIterations: 4,
-    tokenCount: 4400
+    tokenCount: 4400,
   },
 
   // Task 3: D1 SQLite repository (@harness/sample-infra)
@@ -40,14 +40,14 @@ const canonicalBenchmarkRuns = [
     mode: "harness",
     diagnosticsBeforeGreen: 1,
     fixUpIterations: 2,
-    tokenCount: 2900
+    tokenCount: 2900,
   },
   {
     taskId: "task-3-d1-repository",
     mode: "no-harness",
     diagnosticsBeforeGreen: 4,
     fixUpIterations: 3,
-    tokenCount: 5100
+    tokenCount: 5100,
   },
 
   // Task 4: Durable Object RPC bridge (@harness/sample-infra)
@@ -56,14 +56,14 @@ const canonicalBenchmarkRuns = [
     mode: "harness",
     diagnosticsBeforeGreen: 0,
     fixUpIterations: 1,
-    tokenCount: 2350
+    tokenCount: 2350,
   },
   {
     taskId: "task-4-do-rpc",
     mode: "no-harness",
     diagnosticsBeforeGreen: 5,
     fixUpIterations: 5,
-    tokenCount: 4950
+    tokenCount: 4950,
   },
 
   // Task 5: AtomHttpApi client (sample-web)
@@ -72,15 +72,15 @@ const canonicalBenchmarkRuns = [
     mode: "harness",
     diagnosticsBeforeGreen: 0,
     fixUpIterations: 1,
-    tokenCount: 1680
+    tokenCount: 1680,
   },
   {
     taskId: "task-5-atom-client",
     mode: "no-harness",
     diagnosticsBeforeGreen: 2,
     fixUpIterations: 2,
-    tokenCount: 3250
-  }
+    tokenCount: 3250,
+  },
 ]
 
 const summary = compareBenchmarkRuns(canonicalBenchmarkRuns)
@@ -90,10 +90,10 @@ const output = {
     id: task.id,
     title: task.title,
     targetPackage: task.targetPackage,
-    expectedPatternDoc: task.expectedPatternDoc
+    expectedPatternDoc: task.expectedPatternDoc,
   })),
   summary,
-  passedAcceptance: summary.passedAcceptance
+  passedAcceptance: summary.passedAcceptance,
 }
 
 console.log(JSON.stringify(output, null, 2))

@@ -72,24 +72,24 @@ Read each row left to right: the step, then what it uses from each tool family; 
 
 **Where Effect devtools and `effect/ai` sit**
 
-| Step | Tool | How it is used |
-| --- | --- | --- |
-| Plan | Effect LSP (part of `@effect/tsgo`) | `Context.Service` scaffolds and the Layer-composition view; the agent gets the scaffolds through the Nx generators, the human uses the Layer view when reviewing |
-| Plan check | `@effect/tsgo` | skeleton typecheck with Effect diagnostics raised to errors (floating Effects, Layer requirement leaks) |
-| Implement | `@effect/tsgo` + oxlint with the Effect plugin | post-edit hook per file; diagnostics read like ordinary TypeScript errors, LSP refactors (to `Effect.gen` / `Effect.fn`) where the agent's LSP access allows |
-| Verify | `@effect/vitest`, Alchemy `Test.make` (emulated), full tsgo + oxlint run | tests run with the recording tracer Layer, which writes the trace for code-graph-rag; infra-backed tests run against `alchemy dev` emulation, nothing deployed |
-| Human escalation | VS Code Effect extension | debugger with fiber context, span stack, fiber list and pause on defect |
-| Every Clef cell | `effect/ai` `DecisionModel` + `@effect/ai-typesafe` | one service for all decisions; tests swap in a deterministic `DecisionModel` Layer; each decision is a span in the same tracer, so escalations show why they happened |
+| Step             | Tool                                                                     | How it is used                                                                                                                                                        |
+| ---------------- | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Plan             | Effect LSP (part of `@effect/tsgo`)                                      | `Context.Service` scaffolds and the Layer-composition view; the agent gets the scaffolds through the Nx generators, the human uses the Layer view when reviewing      |
+| Plan check       | `@effect/tsgo`                                                           | skeleton typecheck with Effect diagnostics raised to errors (floating Effects, Layer requirement leaks)                                                               |
+| Implement        | `@effect/tsgo` + oxlint with the Effect plugin                           | post-edit hook per file; diagnostics read like ordinary TypeScript errors, LSP refactors (to `Effect.gen` / `Effect.fn`) where the agent's LSP access allows          |
+| Verify           | `@effect/vitest`, Alchemy `Test.make` (emulated), full tsgo + oxlint run | tests run with the recording tracer Layer, which writes the trace for code-graph-rag; infra-backed tests run against `alchemy dev` emulation, nothing deployed        |
+| Human escalation | VS Code Effect extension                                                 | debugger with fiber context, span stack, fiber list and pause on defect                                                                                               |
+| Every Clef cell  | `effect/ai` `DecisionModel` + `@effect/ai-typesafe`                      | one service for all decisions; tests swap in a deterministic `DecisionModel` Layer; each decision is a span in the same tracer, so escalations show why they happened |
 
 **Where each Clef call sits.** Deterministic rules run first; Clef sees only what they leave open, and on timeout or Ollama down the safer outcome wins.
 
-| Touchpoint | Triggered by | Decided deterministically first | What Clef decides | Outcome |
-| --- | --- | --- | --- | --- |
-| Idiom router | agent calls `harness_route` (MCP) for each plan step, as the skill says | nothing | which Effect building block fits the step, and whether any does | pattern file to load, or `review`; **advisory only** |
-| Router re-run | `harness plan check` | — | same question over all plan steps | mismatches between the plan's declared block and the router's pick become notes for the human; never a block |
-| Safety guard | pre-tool hook | allowlist (`nx`, `pnpm test`, edits inside the workspace) and denylist (`rm -rf` outside the repo, `.env`, `push --force`, `alchemy deploy` / `destroy`) | only unknown commands: destructive, secret, off-task | allow, block, or ask a human |
-| Failure triage | inside `harness verify` | known tsgo / oxlint diagnostic codes mapped to "mechanical" | only unmapped failures, typically tests | grouped output: mechanical with fix hints, semantic with code-graph-rag context |
-| Plan coverage | stop hook | `verify` must be green, else block without asking | Clef 27B: does the diff cover every plan step, any out-of-plan changes | allow, block with reasons, or ask a human |
+| Touchpoint     | Triggered by                                                            | Decided deterministically first                                                                                                                          | What Clef decides                                                      | Outcome                                                                                                      |
+| -------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Idiom router   | agent calls `harness_route` (MCP) for each plan step, as the skill says | nothing                                                                                                                                                  | which Effect building block fits the step, and whether any does        | pattern file to load, or `review`; **advisory only**                                                         |
+| Router re-run  | `harness plan check`                                                    | —                                                                                                                                                        | same question over all plan steps                                      | mismatches between the plan's declared block and the router's pick become notes for the human; never a block |
+| Safety guard   | pre-tool hook                                                           | allowlist (`nx`, `pnpm test`, edits inside the workspace) and denylist (`rm -rf` outside the repo, `.env`, `push --force`, `alchemy deploy` / `destroy`) | only unknown commands: destructive, secret, off-task                   | allow, block, or ask a human                                                                                 |
+| Failure triage | inside `harness verify`                                                 | known tsgo / oxlint diagnostic codes mapped to "mechanical"                                                                                              | only unmapped failures, typically tests                                | grouped output: mechanical with fix hints, semantic with code-graph-rag context                              |
+| Plan coverage  | stop hook                                                               | `verify` must be green, else block without asking                                                                                                        | Clef 27B: does the diff cover every plan step, any out-of-plan changes | allow, block with reasons, or ask a human                                                                    |
 
 **Decisions**
 
@@ -126,24 +126,24 @@ Google Code Wiki is **out**: it has no official API or MCP, cannot be pinned to 
 
 A plan is written in Effect building blocks, never as prose like "we'll build an endpoint that…". The template in `agent-patterns/planning.md` maps each plan section to one block:
 
-| Plan section | Effect building block |
-| --- | --- |
-| Domain data and I/O boundaries | `Schema` in `type:contract` (decode/encode at every boundary) |
-| Expected errors | tagged errors, listed per use case |
-| Defects | what is `die` vs `fail` (the two error types) |
-| Capabilities | services (`Context.Service`) with an interface |
-| Dependency graph | `Layer`: what each layer provides and requires |
-| Shared relational data | D1 table (Drizzle `sqliteTable`) + repository service + migration |
-| Per-entity state | Durable Object with its own SQLite schema + migration |
-| Public API | `HttpApi` endpoint with declared error Schemas |
-| Internal calls | `RpcGroup` procedure |
-| Frontend data | `AtomHttpApi` atoms over the public API |
-| Infrastructure | Alchemy resources and bindings inside the service's `Layer` |
-| Use cases | an `Effect<A, E, R>` signature for each |
-| Resources | what needs `Scope` or acquire/release |
-| Concurrency | fibers, limits, timeouts, retry via `Schedule` |
-| Config and telemetry | `Config`, spans via `Effect.fn("name")`, logs |
-| Tests | test Layers, TestClock, `HttpApiTest` / `RpcTest`, Alchemy `Test.make` (emulated) |
+| Plan section                   | Effect building block                                                             |
+| ------------------------------ | --------------------------------------------------------------------------------- |
+| Domain data and I/O boundaries | `Schema` in `type:contract` (decode/encode at every boundary)                     |
+| Expected errors                | tagged errors, listed per use case                                                |
+| Defects                        | what is `die` vs `fail` (the two error types)                                     |
+| Capabilities                   | services (`Context.Service`) with an interface                                    |
+| Dependency graph               | `Layer`: what each layer provides and requires                                    |
+| Shared relational data         | D1 table (Drizzle `sqliteTable`) + repository service + migration                 |
+| Per-entity state               | Durable Object with its own SQLite schema + migration                             |
+| Public API                     | `HttpApi` endpoint with declared error Schemas                                    |
+| Internal calls                 | `RpcGroup` procedure                                                              |
+| Frontend data                  | `AtomHttpApi` atoms over the public API                                           |
+| Infrastructure                 | Alchemy resources and bindings inside the service's `Layer`                       |
+| Use cases                      | an `Effect<A, E, R>` signature for each                                           |
+| Resources                      | what needs `Scope` or acquire/release                                             |
+| Concurrency                    | fibers, limits, timeouts, retry via `Schedule`                                    |
+| Config and telemetry           | `Config`, spans via `Effect.fn("name")`, logs                                     |
+| Tests                          | test Layers, TestClock, `HttpApiTest` / `RpcTest`, Alchemy `Test.make` (emulated) |
 
 **Plan as code.** The agent first writes only a skeleton: schemas, errors, service interfaces and use-case signatures with stub bodies. The skeleton must pass typecheck before any implementation starts. Once `harness plan check` passes, a human reviews the plan by reading `E` and `R` types, not prose.
 
@@ -153,16 +153,16 @@ A plan is written in Effect building blocks, never as prose like "we'll build an
 
 Deterministic gates come first and always win; the decision model never overrides them. A task is not done until `nx affected -t verify` is green.
 
-| Gate | What it catches | How it is wired |
-| --- | --- | --- |
-| `@effect/tsgo` (TypeScript-Go + Effect diagnostics) | floating Effects, Layer requirement leaks, redundant `Effect.gen`/`pipe`, catch on infallible Effects, duplicate Effect versions | `npx @effect/tsgo setup` at repo root; needs native TypeScript 7; `prepare: effect-tsgo patch` |
-| oxlint + `effecttsgo` plugin | Effect lint rules in type-aware mode | `effect-tsgo patch --oxlint`; `.oxlintrc.json` extends the `recommended` preset; LSP `diagnostics: false` to avoid duplicates |
-| Custom bans in `libs/` | `async`/`await`, `new Promise`, `try`/`catch`, `throw`, `JSON.parse` without Schema; `drizzle-orm` outside `type:infra` | oxlint restricted syntax and imports; one allowed escape hatch at foreign boundaries |
-| `@nx/enforce-module-boundaries` | forbidden dependencies between layers; `web` importing anything but `contract` and UI | tags `type:contract`, `type:domain`, `type:service`, `type:infra`, `type:app` |
-| `effect-graph:check` | a use case whose `R` holds a forbidden service, a D1 / Durable Object binding outside infra | cacheable Nx target, see the graph section |
-| Migration check | Drizzle schema changed without a committed migration; destructive SQL (`DROP`, table rebuild) | `drizzle-kit generate` into a temp folder must add nothing; destructive SQL escalates to the human |
-| `oasdiff breaking` | breaking change of the public `HttpApi` | `contract:openapi` snapshot vs `main`; ERR escalates to the human, WARN is a note |
-| `verify` | composite: typecheck, lint, test, the checks above | `harness verify` (runs `nx affected -t verify` plus trace ingest) |
+| Gate                                                | What it catches                                                                                                                  | How it is wired                                                                                                               |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `@effect/tsgo` (TypeScript-Go + Effect diagnostics) | floating Effects, Layer requirement leaks, redundant `Effect.gen`/`pipe`, catch on infallible Effects, duplicate Effect versions | `npx @effect/tsgo setup` at repo root; needs native TypeScript 7; `prepare: effect-tsgo patch`                                |
+| oxlint + `effecttsgo` plugin                        | Effect lint rules in type-aware mode                                                                                             | `effect-tsgo patch --oxlint`; `.oxlintrc.json` extends the `recommended` preset; LSP `diagnostics: false` to avoid duplicates |
+| Custom bans in `libs/`                              | `async`/`await`, `new Promise`, `try`/`catch`, `throw`, `JSON.parse` without Schema; `drizzle-orm` outside `type:infra`          | oxlint restricted syntax and imports; one allowed escape hatch at foreign boundaries                                          |
+| `@nx/enforce-module-boundaries`                     | forbidden dependencies between layers; `web` importing anything but `contract` and UI                                            | tags `type:contract`, `type:domain`, `type:service`, `type:infra`, `type:app`                                                 |
+| `effect-graph:check`                                | a use case whose `R` holds a forbidden service, a D1 / Durable Object binding outside infra                                      | cacheable Nx target, see the graph section                                                                                    |
+| Migration check                                     | Drizzle schema changed without a committed migration; destructive SQL (`DROP`, table rebuild)                                    | `drizzle-kit generate` into a temp folder must add nothing; destructive SQL escalates to the human                            |
+| `oasdiff breaking`                                  | breaking change of the public `HttpApi`                                                                                          | `contract:openapi` snapshot vs `main`; ERR escalates to the human, WARN is a note                                             |
+| `verify`                                            | composite: typecheck, lint, test, the checks above                                                                               | `harness verify` (runs `nx affected -t verify` plus trace ingest)                                                             |
 
 Raise key Effect diagnostics to `error` severity so the gate actually blocks. The VS Code Effect extension adds a debugger (fiber context, span stack, fibers, pause on defect) for humans; agents get OpenTelemetry spans and logs from tests instead.
 
@@ -178,14 +178,14 @@ code-graph-rag stays the agent's code-intelligence tool and the agent uses its o
 
 **What the agent uses, and what ingest prep adds for Effect**
 
-| code-graph-rag MCP tool | Gap on Effect code without prep | What our ingest adds |
-| --- | --- | --- |
-| `resolve`, `definition`, `get_code_snippet` | an `Effect.fn("…")(function*…)` wrapper may not map to the node we expect | name index verified against `resolve` with `path:line` in phase 1; gaps reported, never guessed |
-| `callers`, `callees` | calls go through service tags (`yield* UserRepo`), so static `CALLS` edges are missing or stop at the interface | trace `CALLS` edges from use case to the concrete Layer method; `receiver_types` names the Layer that ran |
-| `tests_reaching` | no path from tests through the fiber runtime | trace edges carry the test ids as workloads |
-| `glosses`, `annotate` | nothing about `R` and `E` | option: generated Glosses with the `R` / `E` manifest and `MENTIONS` edges to services (open question) |
-| `structural_search` | works as is (ast-grep) | used by the skill for idiom checks, e.g. `Effect.runPromise` inside `libs/` |
-| `query_code_graph`, `ask_agent` | LLM-generated Cypher | `CYPHER_PROVIDER=ollama` locally; per code-graph-rag's own guidance, the deterministic tools come first |
+| code-graph-rag MCP tool                     | Gap on Effect code without prep                                                                                 | What our ingest adds                                                                                      |
+| ------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `resolve`, `definition`, `get_code_snippet` | an `Effect.fn("…")(function*…)` wrapper may not map to the node we expect                                       | name index verified against `resolve` with `path:line` in phase 1; gaps reported, never guessed           |
+| `callers`, `callees`                        | calls go through service tags (`yield* UserRepo`), so static `CALLS` edges are missing or stop at the interface | trace `CALLS` edges from use case to the concrete Layer method; `receiver_types` names the Layer that ran |
+| `tests_reaching`                            | no path from tests through the fiber runtime                                                                    | trace edges carry the test ids as workloads                                                               |
+| `glosses`, `annotate`                       | nothing about `R` and `E`                                                                                       | option: generated Glosses with the `R` / `E` manifest and `MENTIONS` edges to services (open question)    |
+| `structural_search`                         | works as is (ast-grep)                                                                                          | used by the skill for idiom checks, e.g. `Effect.runPromise` inside `libs/`                               |
+| `query_code_graph`, `ask_agent`             | LLM-generated Cypher                                                                                            | `CYPHER_PROVIDER=ollama` locally; per code-graph-rag's own guidance, the deterministic tools come first   |
 
 All deterministic tools above run fixed graph queries with no LLM, so better ingest data directly means better answers ([MCP tool reference](https://github.com/vitali87/code-graph-rag/blob/main/docs/guide/mcp-server.md)).
 
@@ -233,14 +233,14 @@ The MVP's sample app declares its cloud infrastructure with Alchemy v2, so infra
 
 **Where it plugs in**
 
-| Area | Use of Alchemy |
-| --- | --- |
-| Knowledge layer | second read-only subtree `repos/alchemy` pinned to the installed version; `agent-patterns/alchemy-infra.md` generated from it and reviewed; `llms.txt` for lookups |
-| Nx targets (sample app) | `dev` = `alchemy dev`; `test:emulated` = tests with `dev: true`, part of `verify`; `test:live` and `deploy` run in CI only |
-| Gates | tsgo checks infra types like any code; `effect-graph:check` gains the infra policy |
-| Safety guard | `alchemy deploy`, `alchemy destroy` and profile commands are on the denylist for the agent (ask a human), matching Alchemy's own advice to confirm every deploy |
-| Runtime traces | emulated Workers run in workerd, outside the test process, so their spans need an OpenTelemetry exporter (the `Observability` Layer pattern) to a local collector that writes the trace JSONL |
-| code-graph-rag | `alchemy.run.ts` and resource Layers are ordinary TypeScript and get indexed; trace `receiver_types` show which Layer ran (e.g. R2 vs S3) |
+| Area                    | Use of Alchemy                                                                                                                                                                                |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Knowledge layer         | second read-only subtree `repos/alchemy` pinned to the installed version; `agent-patterns/alchemy-infra.md` generated from it and reviewed; `llms.txt` for lookups                            |
+| Nx targets (sample app) | `dev` = `alchemy dev`; `test:emulated` = tests with `dev: true`, part of `verify`; `test:live` and `deploy` run in CI only                                                                    |
+| Gates                   | tsgo checks infra types like any code; `effect-graph:check` gains the infra policy                                                                                                            |
+| Safety guard            | `alchemy deploy`, `alchemy destroy` and profile commands are on the denylist for the agent (ask a human), matching Alchemy's own advice to confirm every deploy                               |
+| Runtime traces          | emulated Workers run in workerd, outside the test process, so their spans need an OpenTelemetry exporter (the `Observability` Layer pattern) to a local collector that writes the trace JSONL |
+| code-graph-rag          | `alchemy.run.ts` and resource Layers are ordinary TypeScript and get indexed; trace `receiver_types` show which Layer ran (e.g. R2 vs S3)                                                     |
 
 **MVP scope:** sample app on Cloudflare via Alchemy, emulated tests inside `verify`. Live stages, per-PR previews and production telemetry come after the MVP; the `Observability` Layer is the later path to a production trace overlay.
 
@@ -250,14 +250,14 @@ The sample app covers the layers most real projects need: a typed database layer
 
 **Contract-first, one Schema as the source of truth.** A new library tag `type:contract` holds domain Schemas, the public `HttpApi`, the internal `RpcGroup`s and API errors. It depends only on `effect` and is imported by the server, internal clients and the frontend, so type safety across the wire comes from sharing one definition, not from code generation.
 
-| Tag | Holds | May import |
-| --- | --- | --- |
-| `type:contract` | Schemas, `HttpApi`, `RpcGroup`, API errors | `effect` only |
-| `type:domain` | use cases, domain errors | `contract` |
-| `type:service` | service interfaces, including repositories | `contract`, `domain` |
-| `type:infra` | Drizzle repositories, HTTP and RPC handlers, Alchemy resources | everything except `app` |
-| `type:app` (api) | the Worker: composes Layers, `HttpApiBuilder`, `RpcServer` | everything |
-| `type:app` (web) | Vite + React | **`contract` and UI libraries only** |
+| Tag              | Holds                                                          | May import                           |
+| ---------------- | -------------------------------------------------------------- | ------------------------------------ |
+| `type:contract`  | Schemas, `HttpApi`, `RpcGroup`, API errors                     | `effect` only                        |
+| `type:domain`    | use cases, domain errors                                       | `contract`                           |
+| `type:service`   | service interfaces, including repositories                     | `contract`, `domain`                 |
+| `type:infra`     | Drizzle repositories, HTTP and RPC handlers, Alchemy resources | everything except `app`              |
+| `type:app` (api) | the Worker: composes Layers, `HttpApiBuilder`, `RpcServer`     | everything                           |
+| `type:app` (web) | Vite + React                                                   | **`contract` and UI libraries only** |
 
 **Database: Drizzle on D1 and Durable Objects, through Alchemy**
 
@@ -313,12 +313,12 @@ Caveats from the source: both modules are marked `@stability unstable`, so pin v
 
 **Question types:** `noul` (yes/no probability), `choice` (2–26 options), `score` (2–26 ordered levels); 1–64 questions per call. `confidence` measures how concentrated probabilities are, not the chance of being right. Ties follow option order.
 
-| Use in the harness | Model | Why |
-| --- | --- | --- |
-| Pre-tool safety gate (secrets, destructive, exfiltration, off-task) | Clef-flash | hot path, all questions in one call |
-| Failure triage from `verify` (mechanical vs semantic) | Clef-flash | simple classification, many calls |
-| Idiom router for plan steps → which `agent-patterns` file to load | Clef-flash + `noul` out-of-scope check | fast; weakness mitigated |
-| Done gate (does the diff cover the approved plan?) | Clef 27B | once per task, needs better judgment |
+| Use in the harness                                                  | Model                                  | Why                                  |
+| ------------------------------------------------------------------- | -------------------------------------- | ------------------------------------ |
+| Pre-tool safety gate (secrets, destructive, exfiltration, off-task) | Clef-flash                             | hot path, all questions in one call  |
+| Failure triage from `verify` (mechanical vs semantic)               | Clef-flash                             | simple classification, many calls    |
+| Idiom router for plan steps → which `agent-patterns` file to load   | Clef-flash + `noul` out-of-scope check | fast; weakness mitigated             |
+| Done gate (does the diff cover the approved plan?)                  | Clef 27B                               | once per task, needs better judgment |
 
 **Known weaknesses of Clef-flash:** CLINC150+OOS macro-F1 66.8 vs 97.4 for Clef (out-of-scope detection); ANLI 59.1 vs 69.8 (entailment-like judgment). Mitigation: put `review`/`none` as the **first** option, add a separate `noul` "does this fit any option?", and route the done gate to Clef 27B.
 
@@ -338,7 +338,7 @@ export const IdiomRouterV1 = Decision.make({
   input: Schema.Struct({ planStep: Schema.String }),
   decisions: {
     fitsAny: Decision.probability({
-      instructions: "Does this step map to a single Effect building block?"
+      instructions: "Does this step map to a single Effect building block?",
     }),
     block: Decision.classify({
       instructions: "Which Effect building block best implements this step?",
@@ -350,18 +350,18 @@ export const IdiomRouterV1 = Decision.make({
         queue: "Producer/consumer handoff, PubSub",
         concurrency: "Forking fibers, racing, parallel work",
         schema: "Decoding, encoding, validating data at a boundary",
-        effect: "Plain sequential effectful logic"
-      }
-    })
-  }
+        effect: "Plain sequential effectful logic",
+      },
+    }),
+  },
 })
 
-export const routeStep = Effect.fn("Harness.routeStep")(function*(planStep: string) {
+export const routeStep = Effect.fn("Harness.routeStep")(function* (planStep: string) {
   const { answers } = yield* DecisionModel.decide(IdiomRouterV1, { input: { planStep } })
   yield* Effect.annotateCurrentSpan({
     "decision.definition": "IdiomRouterV1",
     "decision.block": answers.block.label,
-    "decision.fitsAny": answers.fitsAny.probability
+    "decision.fitsAny": answers.fitsAny.probability,
   })
   return answers.fitsAny.probability >= 0.7 ? answers.block.label : "review"
 })
@@ -369,7 +369,7 @@ export const routeStep = Effect.fn("Harness.routeStep")(function*(planStep: stri
 // Local Clef-flash through Ollama's System One endpoint
 export const LocalDecisionModel = TypeSafeDecisionModel.layer({ model: "clef-flash" }).pipe(
   Layer.provide(TypeSafeClient.layer({ apiUrl: "http://localhost:11434/v1" })),
-  Layer.provide(FetchHttpClient.layer)
+  Layer.provide(FetchHttpClient.layer),
 )
 ```
 
@@ -385,12 +385,12 @@ The first adapter targets Claude Code because its hook format is the de facto st
 
 **Hooks → `harness` CLI** (the CLI returns JSON plus an exit code: allow / block / ask a human):
 
-| Hook point | CLI call | Behavior |
-| --- | --- | --- |
-| session start | `harness session` | Ollama and code-graph-rag daemon up, graph updated if `HEAD` moved, stale dynamic edges reported |
-| pre-tool-use | `harness guard` | allowlist / denylist first, Clef-flash only for unknown commands; on doubt or timeout ask the human |
-| post-edit | tsgo on the changed file, code-graph-rag `reingest` | fast typed feedback, graph stays current |
-| stop | `harness done` | blocks unless the last `harness verify` is green; then Clef 27B plan coverage |
+| Hook point    | CLI call                                            | Behavior                                                                                            |
+| ------------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| session start | `harness session`                                   | Ollama and code-graph-rag daemon up, graph updated if `HEAD` moved, stale dynamic edges reported    |
+| pre-tool-use  | `harness guard`                                     | allowlist / denylist first, Clef-flash only for unknown commands; on doubt or timeout ask the human |
+| post-edit     | tsgo on the changed file, code-graph-rag `reingest` | fast typed feedback, graph stays current                                                            |
+| stop          | `harness done`                                      | blocks unless the last `harness verify` is green; then Clef 27B plan coverage                       |
 
 Not hooks, but commands the skill tells the agent to use: `harness_route` (MCP, per plan step, advisory), `harness plan check` (before any human sees the plan) and `harness verify` (the only sanctioned verify).
 
@@ -476,22 +476,22 @@ The MVP is accepted when every box below is ticked on a fresh clone with only pn
 
 Facts below were checked on 2026-10-03 against the linked pages; vendor benchmarks are vendor-reported.
 
-| Fact | Source |
-| --- | --- |
-| Effect `main` is v4 (`packages/effect` version 4.0.0) and has `LLMS.md` in the root; `LLMS.md` tells agents to use local source and avoid external docs | [Effect-TS/effect](https://github.com/Effect-TS/effect) |
-| Effect v4 `Tracer.span` receives name, parent, annotations, links, start time, kind, root and sampled; captured stack frames live in the `CurrentStackFrame` fiber reference, not on the span | [Tracer.ts](https://github.com/Effect-TS/effect/blob/main/packages/effect/src/Tracer.ts) |
-| Effect v4 ships `effect/ai/Decision` and `effect/ai/DecisionModel` (provider-neutral, validated answers, typed `AiError`, marked unstable); `@effect/ai-typesafe` 4.0.0 posts to `{apiUrl}/systemone` and provides `DecisionModel`; Cloudflare and OpenRouter providers implement the same service | [DecisionModel.ts](https://github.com/Effect-TS/effect/blob/main/packages/effect/src/ai/DecisionModel.ts), [ai-typesafe](https://github.com/Effect-TS/effect/tree/main/packages/ai/typesafe) |
-| `@effect/tsgo` = TypeScript-Go with Effect diagnostics; needs TypeScript 7; oxlint and Vite Plus integration; diagnostics readable by agents at build time | [Effect devtools](https://effect.website/docs/v4/getting-started/devtools) |
-| Vendor Effect source via `git subtree --squash` into `repos/`; tell the agent via `AGENTS.md`; generate pattern files | [Effect blog: git subtree](https://effect.website/blog/the-one-weird-git-trick-that-makes-coding-agents-more-effect-ive/) |
-| Nx offers agent skills, MCP, `configure-ai-agents`, self-healing CI; Turborepo has none of the MCP or CI integration | [Nx vs Turborepo](https://nx.dev/docs/guides/adopting-nx/nx-vs-turborepo) (vendor page) |
-| code-graph-rag: tree-sitter → Memgraph, MCP server, MIT, `--clean` wipes all projects and discards dynamic edges | [vitali87/code-graph-rag](https://github.com/vitali87/code-graph-rag) |
-| code-graph-rag runtime tracing: Node.js via V8 `--cpu-prof` (sampled, source-map aware); JSONL format with a header line and call records; ingest sets `dynamic`, `dynamic_workloads`, `static_missed`, `dynamic_stale` | [dynamic-tracing guide](https://github.com/vitali87/code-graph-rag/blob/main/docs/guide/dynamic-tracing.md), [records.py](https://github.com/vitali87/code-graph-rag/blob/main/codebase_rag/trace/records.py) |
-| Clef-flash in Ollama: 9B, 11 GB, Ollama 0.35.1+, `/v1/systemone`, choice 2–26 options, 1–64 questions, benchmarks incl. CLINC150+OOS and ANLI | [ollama.com/library/clef-flash](https://ollama.com/library/clef-flash) |
-| Clef/Clef-flash: open source (Apache 2.0), Jev-API compatible, latency table | [Cloudflare blog](https://blog.cloudflare.com/clef-decision-models/) |
-| Jev: typed decisions with calibrated probabilities, no free text | [TypeSafe AI blog](https://typesafe.ai/blog/introducing-system-one-models-and-jev) |
-| GLM Coding Plan limited to officially supported tools (Claude Code, OpenCode and others) | [z.ai docs](https://docs.z.ai/devpack/overview) |
-| xAI subscription usable in OpenCode via OAuth | [x.ai news](https://x.ai/news/grok-opencode) |
-| DeepSeek Harness: MIT, developer preview, plugin-everything, Claude Code hook bridge | [DeepInfra review](https://deepinfra.com/blog/deepseek-harness-review) |
+| Fact                                                                                                                                                                                                                                                                                               | Source                                                                                                                                                                                                        |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effect `main` is v4 (`packages/effect` version 4.0.0) and has `LLMS.md` in the root; `LLMS.md` tells agents to use local source and avoid external docs                                                                                                                                            | [Effect-TS/effect](https://github.com/Effect-TS/effect)                                                                                                                                                       |
+| Effect v4 `Tracer.span` receives name, parent, annotations, links, start time, kind, root and sampled; captured stack frames live in the `CurrentStackFrame` fiber reference, not on the span                                                                                                      | [Tracer.ts](https://github.com/Effect-TS/effect/blob/main/packages/effect/src/Tracer.ts)                                                                                                                      |
+| Effect v4 ships `effect/ai/Decision` and `effect/ai/DecisionModel` (provider-neutral, validated answers, typed `AiError`, marked unstable); `@effect/ai-typesafe` 4.0.0 posts to `{apiUrl}/systemone` and provides `DecisionModel`; Cloudflare and OpenRouter providers implement the same service | [DecisionModel.ts](https://github.com/Effect-TS/effect/blob/main/packages/effect/src/ai/DecisionModel.ts), [ai-typesafe](https://github.com/Effect-TS/effect/tree/main/packages/ai/typesafe)                  |
+| `@effect/tsgo` = TypeScript-Go with Effect diagnostics; needs TypeScript 7; oxlint and Vite Plus integration; diagnostics readable by agents at build time                                                                                                                                         | [Effect devtools](https://effect.website/docs/v4/getting-started/devtools)                                                                                                                                    |
+| Vendor Effect source via `git subtree --squash` into `repos/`; tell the agent via `AGENTS.md`; generate pattern files                                                                                                                                                                              | [Effect blog: git subtree](https://effect.website/blog/the-one-weird-git-trick-that-makes-coding-agents-more-effect-ive/)                                                                                     |
+| Nx offers agent skills, MCP, `configure-ai-agents`, self-healing CI; Turborepo has none of the MCP or CI integration                                                                                                                                                                               | [Nx vs Turborepo](https://nx.dev/docs/guides/adopting-nx/nx-vs-turborepo) (vendor page)                                                                                                                       |
+| code-graph-rag: tree-sitter → Memgraph, MCP server, MIT, `--clean` wipes all projects and discards dynamic edges                                                                                                                                                                                   | [vitali87/code-graph-rag](https://github.com/vitali87/code-graph-rag)                                                                                                                                         |
+| code-graph-rag runtime tracing: Node.js via V8 `--cpu-prof` (sampled, source-map aware); JSONL format with a header line and call records; ingest sets `dynamic`, `dynamic_workloads`, `static_missed`, `dynamic_stale`                                                                            | [dynamic-tracing guide](https://github.com/vitali87/code-graph-rag/blob/main/docs/guide/dynamic-tracing.md), [records.py](https://github.com/vitali87/code-graph-rag/blob/main/codebase_rag/trace/records.py) |
+| Clef-flash in Ollama: 9B, 11 GB, Ollama 0.35.1+, `/v1/systemone`, choice 2–26 options, 1–64 questions, benchmarks incl. CLINC150+OOS and ANLI                                                                                                                                                      | [ollama.com/library/clef-flash](https://ollama.com/library/clef-flash)                                                                                                                                        |
+| Clef/Clef-flash: open source (Apache 2.0), Jev-API compatible, latency table                                                                                                                                                                                                                       | [Cloudflare blog](https://blog.cloudflare.com/clef-decision-models/)                                                                                                                                          |
+| Jev: typed decisions with calibrated probabilities, no free text                                                                                                                                                                                                                                   | [TypeSafe AI blog](https://typesafe.ai/blog/introducing-system-one-models-and-jev)                                                                                                                            |
+| GLM Coding Plan limited to officially supported tools (Claude Code, OpenCode and others)                                                                                                                                                                                                           | [z.ai docs](https://docs.z.ai/devpack/overview)                                                                                                                                                               |
+| xAI subscription usable in OpenCode via OAuth                                                                                                                                                                                                                                                      | [x.ai news](https://x.ai/news/grok-opencode)                                                                                                                                                                  |
+| DeepSeek Harness: MIT, developer preview, plugin-everything, Claude Code hook bridge                                                                                                                                                                                                               | [DeepInfra review](https://deepinfra.com/blog/deepseek-harness-review)                                                                                                                                        |
 
 Added 2026-10-04: Alchemy v2 (`alchemy` 2.0.0-beta.80, Apache-2.0) depends on `effect` ^4.0.0, `@effect/tsgo` and `@effect/vitest`; Layers own infrastructure and implementation, `alchemy dev` emulates locally, `Test.make` runs emulated or live stages ([alchemy.run](https://alchemy.run), [package.json](https://github.com/alchemy-run/alchemy/blob/main/packages/alchemy/package.json)).
 
@@ -503,27 +503,27 @@ Added 2026-10-04: Alchemy ships `alchemy/Drizzle` with `Drizzle.D1` (driver `dri
 
 The biggest unknowns are whether spans join cleanly to code, the type-checker API for the extractor, and Clef-flash on out-of-scope cases.
 
-| Risk | Impact | Mitigation |
-| --- | --- | --- |
+| Risk                                                                             | Impact                                                                     | Mitigation                                                                                                                                        |
+| -------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | code-graph-rag's TypeScript parser has no node for an `Effect.fn` generator body | trace frames cannot attach; `callers` / `callees` stay empty for use cases | phase-1 spike with `resolve` on `path:line`; attach to the enclosing `const` node; if needed, contribute parser support upstream rather than fork |
-| Functions not wrapped in `Effect.fn` with a literal name | spans cannot be joined to code; gaps in the runtime graph | lint rule in phase 1; generators emit the pattern |
-| Span parent is a framework span (HTTP, SQL), not our use case | edges attach to the wrong caller | converter walks up to the nearest indexed span, like the JVM tracer walks to the nearest project frame |
-| Emulated Workers run in workerd, outside the test process | no spans from Worker code in the trace | OpenTelemetry exporter to a local collector that writes the JSONL; document the gap if it cannot be closed in the MVP |
-| Alchemy v2 and its Drizzle integration are still beta | breaking changes during the MVP | pin versions; keep `repos/alchemy` in sync; only the sample app depends on them |
-| Drizzle row types leak into domain or frontend | contract stops being the single source of truth | import ban outside `type:infra`; repositories decode rows into contract Schemas |
-| Durable Object migrations apply on activation and die on failure | an instance becomes unusable after a bad deploy | migrations reviewed in the plan check; emulated tests apply them before deploy |
-| oasdiff flags changes that are intentionally breaking | noisy escalations | escalation is the intended path; the human approves and the new snapshot is committed |
-| Agent triggers a real deploy or destroy | cost, data loss | deploy and destroy on the guard's denylist; live stages and deploys in CI only |
-| V8 profile shows mostly fiber-runtime frames | baseline adds little | keep it as a measured baseline only |
-| Dynamic edges go stale after edits | agent trusts old runtime facts | `test:trace` + `graph:ingest` run on `nx affected`; agent sees `dynamic_stale` |
-| No stable TS 7 programmatic API for the extractor | type-aware extractor blocked or lags tsgo | syntactic index covers traces; JS TypeScript API (ts-morph) for types for now |
-| `effect/ai` decision modules are `@stability unstable` | API changes on Effect upgrades | pin versions; only `libs/harness/decision` imports them; contract tests on the mock Layer |
-| Ollama's System One responses drift from the TypeSafe wire schema | `AiError` on decode, every decision falls back | one live smoke test per Ollama upgrade; fallback is fail-safe by design |
-| Clef-flash weak on out-of-scope (CLINC150+OOS 66.8) | idiom router picks a wrong block confidently | `review` first, separate `probability` decision, log and calibrate |
-| Ollama ROCm stability on RX 7900 XTX | hooks stall | short timeouts, fail-safe defaults |
-| Two local models plus Memgraph compete for 24 GB VRAM and RAM | slow hooks | measure; Clef 27B only on demand via `keep_alive` |
-| Subtrees and pattern files drift from installed versions | agent learns the wrong API | one Nx target updates both subtrees, re-indexes, flags pattern files for review |
-| GLM plan key used by harness scripts | plan restrictions | all programmatic calls go to local Ollama |
+| Functions not wrapped in `Effect.fn` with a literal name                         | spans cannot be joined to code; gaps in the runtime graph                  | lint rule in phase 1; generators emit the pattern                                                                                                 |
+| Span parent is a framework span (HTTP, SQL), not our use case                    | edges attach to the wrong caller                                           | converter walks up to the nearest indexed span, like the JVM tracer walks to the nearest project frame                                            |
+| Emulated Workers run in workerd, outside the test process                        | no spans from Worker code in the trace                                     | OpenTelemetry exporter to a local collector that writes the JSONL; document the gap if it cannot be closed in the MVP                             |
+| Alchemy v2 and its Drizzle integration are still beta                            | breaking changes during the MVP                                            | pin versions; keep `repos/alchemy` in sync; only the sample app depends on them                                                                   |
+| Drizzle row types leak into domain or frontend                                   | contract stops being the single source of truth                            | import ban outside `type:infra`; repositories decode rows into contract Schemas                                                                   |
+| Durable Object migrations apply on activation and die on failure                 | an instance becomes unusable after a bad deploy                            | migrations reviewed in the plan check; emulated tests apply them before deploy                                                                    |
+| oasdiff flags changes that are intentionally breaking                            | noisy escalations                                                          | escalation is the intended path; the human approves and the new snapshot is committed                                                             |
+| Agent triggers a real deploy or destroy                                          | cost, data loss                                                            | deploy and destroy on the guard's denylist; live stages and deploys in CI only                                                                    |
+| V8 profile shows mostly fiber-runtime frames                                     | baseline adds little                                                       | keep it as a measured baseline only                                                                                                               |
+| Dynamic edges go stale after edits                                               | agent trusts old runtime facts                                             | `test:trace` + `graph:ingest` run on `nx affected`; agent sees `dynamic_stale`                                                                    |
+| No stable TS 7 programmatic API for the extractor                                | type-aware extractor blocked or lags tsgo                                  | syntactic index covers traces; JS TypeScript API (ts-morph) for types for now                                                                     |
+| `effect/ai` decision modules are `@stability unstable`                           | API changes on Effect upgrades                                             | pin versions; only `libs/harness/decision` imports them; contract tests on the mock Layer                                                         |
+| Ollama's System One responses drift from the TypeSafe wire schema                | `AiError` on decode, every decision falls back                             | one live smoke test per Ollama upgrade; fallback is fail-safe by design                                                                           |
+| Clef-flash weak on out-of-scope (CLINC150+OOS 66.8)                              | idiom router picks a wrong block confidently                               | `review` first, separate `probability` decision, log and calibrate                                                                                |
+| Ollama ROCm stability on RX 7900 XTX                                             | hooks stall                                                                | short timeouts, fail-safe defaults                                                                                                                |
+| Two local models plus Memgraph compete for 24 GB VRAM and RAM                    | slow hooks                                                                 | measure; Clef 27B only on demand via `keep_alive`                                                                                                 |
+| Subtrees and pattern files drift from installed versions                         | agent learns the wrong API                                                 | one Nx target updates both subtrees, re-indexes, flags pattern files for review                                                                   |
+| GLM plan key used by harness scripts                                             | plan restrictions                                                          | all programmatic calls go to local Ollama                                                                                                         |
 
 **Open questions for brainstorming**
 

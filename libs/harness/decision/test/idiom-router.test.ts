@@ -24,7 +24,7 @@ describe("IdiomRouterV1 data constraints", () => {
       "httpapi",
       "rpc",
       "atom",
-      "effect"
+      "effect",
     ])
   })
 
@@ -32,17 +32,17 @@ describe("IdiomRouterV1 data constraints", () => {
     expect(() => assertDecisionLimits(IdiomRouterV1)).not.toThrow()
 
     const tooManyOptions = Object.fromEntries(
-      Array.from({ length: 27 }, (_, idx) => [`opt${idx}`, `Option ${idx}`])
+      Array.from({ length: 27 }, (_, idx) => [`opt${idx}`, `Option ${idx}`]),
     )
     expect(() =>
       assertDecisionLimits({
         decisions: {
           bad: {
             _tag: "Classify",
-            criteria: tooManyOptions
-          }
-        }
-      })
+            criteria: tooManyOptions,
+          },
+        },
+      }),
     ).toThrow(/26/)
   })
 })
