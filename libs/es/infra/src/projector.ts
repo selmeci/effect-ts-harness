@@ -1,4 +1,4 @@
-import { Effect, Schema } from "effect"
+import { Effect, Option, Schema } from "effect"
 import { SqlClient } from "effect/sql/SqlClient"
 import type { SqlError } from "effect/sql/SqlError"
 import * as SqliteMigrator from "@effect/sql-sqlite-do/SqliteMigrator"
@@ -8,6 +8,7 @@ import {
   type AggregateName,
   ErrorMessage,
   EventMetadata,
+  PositiveInt,
   ProcessorId,
   ProjectionArchiveCorruptionError,
   type ProjectionCatchUpStatus,
@@ -24,10 +25,12 @@ import {
 } from "@harness/es-core"
 import { match } from "ts-pattern"
 
+export const PROJECTOR_MIGRATIONS_TABLE = "es_projector_sql_migrations"
+
 export const projectorCoreMigrations: Readonly<
   Record<string, Effect.Effect<void, SqlError, SqlClient>>
 > = {
-  "2_init_es_projector_tables": Effect.gen(function* () {
+  "1_init_es_projector_tables": Effect.gen(function* () {
     const sql = yield* SqlClient
     yield* sql`
       CREATE TABLE IF NOT EXISTS es_event_archive (
@@ -77,6 +80,7 @@ export const initializeProjectorTables = Effect.fn("ProjectorInfra.initTables")(
       ...projectorCoreMigrations,
       ...additionalMigrations,
     }),
+    table: PROJECTOR_MIGRATIONS_TABLE,
   })
 })
 
@@ -245,7 +249,22 @@ export const ingestPublishedEvent = Effect.fn("Projector.ingest")(function* <
         const firstCp = checkpointRows[0]
         const checkpointVersion =
           firstCp !== undefined
-            ? StreamVersion.make(firstCp.last_stream_version)
+            ? yield* match(Schema.decodeOption(StreamVersion)(firstCp.last_stream_version))
+                .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
+                .with({ _tag: "None" }, () =>
+                  Effect.fail(
+                    new ProjectionArchiveCorruptionError({
+                      processorId: projection.processorId,
+                      aggregateName: projection.aggregateName,
+                      aggregateId: envelope.aggregateId,
+                      streamVersion: StreamVersion.make(0),
+                      reason: ErrorMessage.make(
+                        `Invalid checkpoint last_stream_version: ${String(firstCp.last_stream_version)}`,
+                      ),
+                    }),
+                  ),
+                )
+                .exhaustive()
             : StreamVersion.make(0)
 
         const gapRows = yield* sql<{
@@ -260,7 +279,26 @@ export const ingestPublishedEvent = Effect.fn("Projector.ingest")(function* <
             AND aggregate_id = ${envelope.aggregateId}
           ORDER BY stream_version ASC
         `
-        const parkedVersions = gapRows.map((r) => StreamVersion.make(r.stream_version))
+        const parkedVersions: Array<StreamVersion> = []
+        for (const r of gapRows) {
+          const streamVer = yield* match(Schema.decodeOption(PositiveInt)(r.stream_version))
+            .with({ _tag: "Some" }, ({ value }) => Effect.succeed(StreamVersion.make(value)))
+            .with({ _tag: "None" }, () =>
+              Effect.fail(
+                new ProjectionArchiveCorruptionError({
+                  processorId: projection.processorId,
+                  aggregateName: projection.aggregateName,
+                  aggregateId: envelope.aggregateId,
+                  streamVersion: StreamVersion.make(0),
+                  reason: ErrorMessage.make(
+                    `Invalid parked gap stream_version: ${String(r.stream_version)}`,
+                  ),
+                }),
+              ),
+            )
+            .exhaustive()
+          parkedVersions.push(streamVer)
+        }
 
         const decision = yield* decideProjectionSequence({
           checkpointVersion,
@@ -454,21 +492,68 @@ export const rebuildProjectorFromArchive = Effect.fn("Projector.rebuild")(functi
       const archivedEvents: Array<ArchivedEvent<Event>> = []
 
       for (const row of rows) {
-        const aggId = row.aggregate_id
-        const safeAggId = AggregateId.make(aggId.length > 0 ? aggId : "unknown-id")
-        const safeStreamVer = StreamVersion.make(Math.max(0, row.stream_version))
-        const expected = expectedVersionsByAgg.get(aggId) ?? 1
-        if (aggId.length === 0 || row.stream_version !== expected) {
-          return yield* new ProjectionArchiveCorruptionError({
-            processorId: projection.processorId,
-            aggregateName: projection.aggregateName,
-            aggregateId: safeAggId,
-            streamVersion: safeStreamVer,
-            reason: ErrorMessage.make(
-              `Non-contiguous archive stream: expected version ${expected}, got ${row.stream_version}`,
+        const aggIdOpt = Schema.decodeOption(AggregateId)(row.aggregate_id)
+        const streamVerOpt = Schema.decodeOption(StreamVersion)(row.stream_version)
+        const fallbackAggId = match(aggIdOpt)
+          .with({ _tag: "Some" }, ({ value }) => value)
+          .with({ _tag: "None" }, () => AggregateId.make("unknown-id"))
+          .exhaustive()
+        const fallbackStreamVer = match(streamVerOpt)
+          .with({ _tag: "Some" }, ({ value }) => value)
+          .with({ _tag: "None" }, () => StreamVersion.make(0))
+          .exhaustive()
+
+        const expected = expectedVersionsByAgg.get(row.aggregate_id) ?? 1
+
+        const decoded = yield* match({ aggIdOpt, streamVerOpt })
+          .with(
+            { aggIdOpt: { _tag: "Some" }, streamVerOpt: { _tag: "Some" } },
+            ({ aggIdOpt: { value: aggId }, streamVerOpt: { value: streamVer } }) => {
+              if (streamVer !== expected) {
+                return Effect.fail(
+                  new ProjectionArchiveCorruptionError({
+                    processorId: projection.processorId,
+                    aggregateName: projection.aggregateName,
+                    aggregateId: aggId,
+                    streamVersion: streamVer,
+                    reason: ErrorMessage.make(
+                      `Non-contiguous archive stream: expected version ${expected}, got ${row.stream_version}`,
+                    ),
+                  }),
+                )
+              }
+              return Effect.succeed({ aggId, streamVer })
+            },
+          )
+          .with({ aggIdOpt: { _tag: "None" } }, () =>
+            Effect.fail(
+              new ProjectionArchiveCorruptionError({
+                processorId: projection.processorId,
+                aggregateName: projection.aggregateName,
+                aggregateId: fallbackAggId,
+                streamVersion: fallbackStreamVer,
+                reason: ErrorMessage.make(
+                  `Invalid archive aggregate_id: ${String(row.aggregate_id)}`,
+                ),
+              }),
             ),
-          })
-        }
+          )
+          .with({ streamVerOpt: { _tag: "None" } }, () =>
+            Effect.fail(
+              new ProjectionArchiveCorruptionError({
+                processorId: projection.processorId,
+                aggregateName: projection.aggregateName,
+                aggregateId: fallbackAggId,
+                streamVersion: fallbackStreamVer,
+                reason: ErrorMessage.make(
+                  `Invalid archive stream_version: ${String(row.stream_version)}`,
+                ),
+              }),
+            ),
+          )
+          .exhaustive()
+
+        const { aggId, streamVer } = decoded
         expectedVersionsByAgg.set(aggId, expected + 1)
 
         const event = yield* Schema.decodeEffect(Schema.fromJsonString(projection.eventSchema))(
@@ -479,8 +564,8 @@ export const rebuildProjectorFromArchive = Effect.fn("Projector.rebuild")(functi
               new ProjectionArchiveCorruptionError({
                 processorId: projection.processorId,
                 aggregateName: projection.aggregateName,
-                aggregateId: safeAggId,
-                streamVersion: safeStreamVer,
+                aggregateId: aggId,
+                streamVersion: streamVer,
                 reason: ErrorMessage.make(`Corrupt archive event JSON: ${String(cause)}`),
               }),
           ),
@@ -494,31 +579,31 @@ export const rebuildProjectorFromArchive = Effect.fn("Projector.rebuild")(functi
               new ProjectionArchiveCorruptionError({
                 processorId: projection.processorId,
                 aggregateName: projection.aggregateName,
-                aggregateId: safeAggId,
-                streamVersion: safeStreamVer,
+                aggregateId: aggId,
+                streamVersion: streamVer,
                 reason: ErrorMessage.make(`Corrupt archive metadata JSON: ${String(cause)}`),
               }),
           ),
         )
 
-        if (metadata.aggregateId !== safeAggId || metadata.streamVersion !== safeStreamVer) {
+        if (metadata.aggregateId !== aggId || metadata.streamVersion !== streamVer) {
           return yield* new ProjectionArchiveCorruptionError({
             processorId: projection.processorId,
             aggregateName: projection.aggregateName,
-            aggregateId: safeAggId,
-            streamVersion: safeStreamVer,
+            aggregateId: aggId,
+            streamVersion: streamVer,
             reason: ErrorMessage.make("Archive metadata mismatch with row columns"),
           })
         }
 
         lastVersionByAgg.set(aggId, {
-          lastVersion: safeStreamVer,
+          lastVersion: streamVer,
           updatedAt: metadata.timestamp,
         })
 
         archivedEvents.push({
           aggregateName: projection.aggregateName,
-          aggregateId: safeAggId,
+          aggregateId: aggId,
           event,
           metadata,
         })
@@ -578,37 +663,115 @@ export const checkProjectorCatchUp = Effect.fn("Projector.checkCatchUp")(functio
     WHERE processor_id = ${processorId}
       AND aggregate_name = ${aggregateName}
   `
-  const checkpointMap = new Map<string, number>()
+  const checkpointMap = new Map<string, { aggregateId: AggregateId; version: StreamVersion }>()
   for (const cp of checkpoints) {
-    if (cp.aggregate_id.length === 0 || cp.last_stream_version < 0) {
-      return yield* new ProjectionArchiveCorruptionError({
-        processorId,
-        aggregateName,
-        aggregateId: AggregateId.make(cp.aggregate_id.length > 0 ? cp.aggregate_id : "unknown-id"),
-        streamVersion: StreamVersion.make(0),
-        reason: ErrorMessage.make(
-          "Invalid checkpoint aggregate_id or negative last_stream_version",
+    const aggIdOpt = Schema.decodeOption(AggregateId)(cp.aggregate_id)
+    const verOpt = Schema.decodeOption(StreamVersion)(cp.last_stream_version)
+    const fallbackAggId = match(aggIdOpt)
+      .with({ _tag: "Some" }, ({ value }) => value)
+      .with({ _tag: "None" }, () => AggregateId.make("unknown-id"))
+      .exhaustive()
+    const fallbackVer = StreamVersion.make(0)
+
+    const validatedCp = yield* match({ aggIdOpt, verOpt })
+      .with(
+        { aggIdOpt: { _tag: "Some" }, verOpt: { _tag: "Some" } },
+        ({ aggIdOpt: { value: aggregateId }, verOpt: { value: version } }) =>
+          Effect.succeed({ aggregateId, version }),
+      )
+      .with({ aggIdOpt: { _tag: "None" } }, () =>
+        Effect.fail(
+          new ProjectionArchiveCorruptionError({
+            processorId,
+            aggregateName,
+            aggregateId: fallbackAggId,
+            streamVersion: fallbackVer,
+            reason: ErrorMessage.make(
+              `Invalid checkpoint aggregate_id: ${String(cp.aggregate_id)}`,
+            ),
+          }),
         ),
-      })
-    }
-    checkpointMap.set(cp.aggregate_id, cp.last_stream_version)
+      )
+      .with({ verOpt: { _tag: "None" } }, () =>
+        Effect.fail(
+          new ProjectionArchiveCorruptionError({
+            processorId,
+            aggregateName,
+            aggregateId: fallbackAggId,
+            streamVersion: fallbackVer,
+            reason: ErrorMessage.make(
+              `Invalid checkpoint last_stream_version: ${String(cp.last_stream_version)}`,
+            ),
+          }),
+        ),
+      )
+      .exhaustive()
+
+    checkpointMap.set(validatedCp.aggregateId, validatedCp)
   }
 
-  const headMap = new Map<string, number>()
+  const headMap = new Map<string, { aggregateId: AggregateId; version: StreamVersion }>()
   for (const head of archiveHeads) {
-    const maxVer = head.max_version ?? 0
-    headMap.set(head.aggregate_id, maxVer)
+    const aggIdOpt = Schema.decodeOption(AggregateId)(head.aggregate_id)
+    const verOpt =
+      head.max_version !== null && head.max_version > 0
+        ? Schema.decodeOption(StreamVersion)(head.max_version)
+        : Option.none()
+    const fallbackAggId = match(aggIdOpt)
+      .with({ _tag: "Some" }, ({ value }) => value)
+      .with({ _tag: "None" }, () => AggregateId.make("unknown-id"))
+      .exhaustive()
+    const fallbackVer = StreamVersion.make(0)
+
+    const validatedHead = yield* match({ aggIdOpt, verOpt })
+      .with(
+        { aggIdOpt: { _tag: "Some" }, verOpt: { _tag: "Some" } },
+        ({ aggIdOpt: { value: aggregateId }, verOpt: { value: version } }) =>
+          Effect.succeed({ aggregateId, version }),
+      )
+      .with({ aggIdOpt: { _tag: "None" } }, () =>
+        Effect.fail(
+          new ProjectionArchiveCorruptionError({
+            processorId,
+            aggregateName,
+            aggregateId: fallbackAggId,
+            streamVersion: fallbackVer,
+            reason: ErrorMessage.make(
+              `Invalid archive head aggregate_id: ${String(head.aggregate_id)}`,
+            ),
+          }),
+        ),
+      )
+      .with({ verOpt: { _tag: "None" } }, () =>
+        Effect.fail(
+          new ProjectionArchiveCorruptionError({
+            processorId,
+            aggregateName,
+            aggregateId: fallbackAggId,
+            streamVersion: fallbackVer,
+            reason: ErrorMessage.make(
+              `Invalid archive head max_version: ${String(head.max_version)}`,
+            ),
+          }),
+        ),
+      )
+      .exhaustive()
+
+    headMap.set(validatedHead.aggregateId, validatedHead)
   }
 
-  for (const [aggId, cpVer] of checkpointMap.entries()) {
-    const maxVer = headMap.get(aggId) ?? 0
-    if (cpVer > maxVer) {
+  for (const [aggId, cp] of checkpointMap.entries()) {
+    const head = headMap.get(aggId)
+    const headVer = head !== undefined ? head.version : StreamVersion.make(0)
+    if (cp.version > headVer) {
       return yield* new ProjectionArchiveCorruptionError({
         processorId,
         aggregateName,
-        aggregateId: AggregateId.make(aggId),
-        streamVersion: StreamVersion.make(cpVer),
-        reason: ErrorMessage.make(`Checkpoint version ${cpVer} exceeds archive head ${maxVer}`),
+        aggregateId: cp.aggregateId,
+        streamVersion: cp.version,
+        reason: ErrorMessage.make(
+          `Checkpoint version ${cp.version} exceeds archive head ${headVer}`,
+        ),
       })
     }
   }
@@ -621,17 +784,59 @@ export const checkProjectorCatchUp = Effect.fn("Projector.checkCatchUp")(functio
     ORDER BY aggregate_id ASC, stream_version ASC
   `
 
-  if (gapRows.length > 0) {
-    const firstGap = gapRows[0]
-    if (firstGap !== undefined) {
-      const aggId = AggregateId.make(
-        firstGap.aggregate_id.length > 0 ? firstGap.aggregate_id : "unknown-id",
+  const validatedGaps: Array<{ aggregateId: AggregateId; streamVersion: PositiveInt }> = []
+  for (const gap of gapRows) {
+    const aggIdOpt = Schema.decodeOption(AggregateId)(gap.aggregate_id)
+    const verOpt = Schema.decodeOption(PositiveInt)(gap.stream_version)
+    const fallbackAggId = match(aggIdOpt)
+      .with({ _tag: "Some" }, ({ value }) => value)
+      .with({ _tag: "None" }, () => AggregateId.make("unknown-id"))
+      .exhaustive()
+    const fallbackVer = StreamVersion.make(0)
+
+    const validatedGap = yield* match({ aggIdOpt, verOpt })
+      .with(
+        { aggIdOpt: { _tag: "Some" }, verOpt: { _tag: "Some" } },
+        ({ aggIdOpt: { value: aggregateId }, verOpt: { value: streamVersion } }) =>
+          Effect.succeed({ aggregateId, streamVersion }),
       )
-      const cpVer = StreamVersion.make(checkpointMap.get(firstGap.aggregate_id) ?? 0)
-      const headVer = StreamVersion.make(headMap.get(firstGap.aggregate_id) ?? 0)
+      .with({ aggIdOpt: { _tag: "None" } }, () =>
+        Effect.fail(
+          new ProjectionArchiveCorruptionError({
+            processorId,
+            aggregateName,
+            aggregateId: fallbackAggId,
+            streamVersion: fallbackVer,
+            reason: ErrorMessage.make(`Invalid gap aggregate_id: ${String(gap.aggregate_id)}`),
+          }),
+        ),
+      )
+      .with({ verOpt: { _tag: "None" } }, () =>
+        Effect.fail(
+          new ProjectionArchiveCorruptionError({
+            processorId,
+            aggregateName,
+            aggregateId: fallbackAggId,
+            streamVersion: fallbackVer,
+            reason: ErrorMessage.make(`Invalid gap stream_version: ${String(gap.stream_version)}`),
+          }),
+        ),
+      )
+      .exhaustive()
+
+    validatedGaps.push(validatedGap)
+  }
+
+  if (validatedGaps.length > 0) {
+    const firstGap = validatedGaps[0]
+    if (firstGap !== undefined) {
+      const cpEntry = checkpointMap.get(firstGap.aggregateId)
+      const cpVer = cpEntry !== undefined ? cpEntry.version : StreamVersion.make(0)
+      const headEntry = headMap.get(firstGap.aggregateId)
+      const headVer = headEntry !== undefined ? headEntry.version : StreamVersion.make(0)
       const laggingStatus: ProjectionCatchUpStatus = {
         _tag: "Lagging",
-        laggingAggregateId: aggId,
+        laggingAggregateId: firstGap.aggregateId,
         checkpointVersion: cpVer,
         archiveHeadVersion: headVer,
       }
@@ -639,16 +844,15 @@ export const checkProjectorCatchUp = Effect.fn("Projector.checkCatchUp")(functio
     }
   }
 
-  for (const head of archiveHeads) {
-    const aggId = AggregateId.make(head.aggregate_id.length > 0 ? head.aggregate_id : "unknown-id")
-    const headVer = StreamVersion.make(head.max_version ?? 0)
-    const cpVer = StreamVersion.make(checkpointMap.get(head.aggregate_id) ?? 0)
-    if (cpVer < headVer) {
+  for (const head of headMap.values()) {
+    const cpEntry = checkpointMap.get(head.aggregateId)
+    const cpVer = cpEntry !== undefined ? cpEntry.version : StreamVersion.make(0)
+    if (cpVer < head.version) {
       const laggingStatus: ProjectionCatchUpStatus = {
         _tag: "Lagging",
-        laggingAggregateId: aggId,
+        laggingAggregateId: head.aggregateId,
         checkpointVersion: cpVer,
-        archiveHeadVersion: headVer,
+        archiveHeadVersion: head.version,
       }
       return laggingStatus
     }
@@ -656,7 +860,7 @@ export const checkProjectorCatchUp = Effect.fn("Projector.checkCatchUp")(functio
 
   const caughtUpStatus: ProjectionCatchUpStatus = {
     _tag: "CaughtUp",
-    archiveAggregatesCount: AggregateCount.make(archiveHeads.length),
+    archiveAggregatesCount: AggregateCount.make(headMap.size),
   }
   return caughtUpStatus
 })

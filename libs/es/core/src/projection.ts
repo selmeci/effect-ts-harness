@@ -8,7 +8,7 @@ import {
   LocalProjectionNotFoundError,
   type ProcessorId,
   type ProjectionName,
-  type ProjectionSequenceDecision,
+  ProjectionSequenceDecision,
   type ProjectionSequenceInput,
   type ProjectionVersion,
   StreamVersion,
@@ -129,26 +129,30 @@ export const decideProjectionSequence = Effect.fn("ProjectionSequence.decide")((
   input: ProjectionSequenceInput,
 ): Effect.Effect<ProjectionSequenceDecision, never, never> => {
   if (input.incomingVersion <= input.checkpointVersion) {
-    return Effect.succeed({
-      _tag: "SkipDuplicateEvent",
-      checkpointVersion: input.checkpointVersion,
-    })
+    return Effect.succeed(
+      ProjectionSequenceDecision.make({
+        _tag: "SkipDuplicateEvent",
+        checkpointVersion: input.checkpointVersion,
+      }),
+    )
   }
 
   const expectedNext = StreamVersion.make(input.checkpointVersion + 1)
   if (input.incomingVersion > expectedNext) {
-    return Effect.succeed({
-      _tag: "ParkOutOfOrderEvent",
-      expectedVersion: expectedNext,
-      parkedVersion: input.incomingVersion,
-    })
+    return Effect.succeed(
+      ProjectionSequenceDecision.make({
+        _tag: "ParkOutOfOrderEvent",
+        expectedVersion: expectedNext,
+        parkedVersion: input.incomingVersion,
+      }),
+    )
   }
 
   const candidateParked = Array.from(
     new Set(input.parkedVersions.filter((v) => v > input.checkpointVersion)),
   ).sort((a, b) => a - b)
 
-  const versionsToApply: Array<StreamVersion> = [input.incomingVersion]
+  const versionsToApply: [StreamVersion, ...Array<StreamVersion>] = [input.incomingVersion]
   let currentHead: number = input.incomingVersion
 
   for (const v of candidateParked) {
@@ -163,11 +167,13 @@ export const decideProjectionSequence = Effect.fn("ProjectionSequence.decide")((
     break
   }
 
-  return Effect.succeed({
-    _tag: "ApplyContiguousEvents",
-    versionsToApply,
-    newCheckpointVersion: StreamVersion.make(currentHead),
-  })
+  return Effect.succeed(
+    ProjectionSequenceDecision.make({
+      _tag: "ApplyContiguousEvents",
+      versionsToApply,
+      newCheckpointVersion: StreamVersion.make(currentHead),
+    }),
+  )
 })
 
 export const applyCrossProjection = Effect.fn("CrossProjection.apply")(function* <

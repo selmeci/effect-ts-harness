@@ -4,6 +4,7 @@ import { SqlClient } from "effect/sql/SqlClient"
 import {
   AggregateId,
   AggregateName,
+  BatchLimit,
   CommandId,
   CrossProjectionNotFoundError,
   ErrorMessage,
@@ -20,8 +21,8 @@ import {
   StreamVersion,
   TimestampMs,
 } from "@harness/es-contract"
-import { EventBus, queryCrossProjection } from "@harness/es-core"
-import { type CartCommand, CartId, ItemId } from "@harness/es-core/fixtures/cart"
+import { CrossAggregateProjection, EventBus, queryCrossProjection } from "@harness/es-core"
+import { type CartCommand, CartEvent, CartId, ItemId } from "@harness/es-core/fixtures/cart"
 import { match, P } from "ts-pattern"
 import {
   checkProjectorCatchUp,
@@ -38,6 +39,7 @@ import {
   cartAggregateWithOutboxConfig,
   initCartViewTable,
   initOpenCartsProjectionTable,
+  OpenCartsReport,
   openCartsProjection,
   queryOpenCarts,
 } from "./fixtures/cart-sqlite.js"
@@ -294,7 +296,7 @@ describe("Cross-Aggregate Outbox Drain, Projector Checkpoints, Gap Parking, and 
 
   describe("Group 2: Projector Ingestion, Checkpoints, and Gap Parking (REQ-3.1 - REQ-3.6)", () => {
     it.effect(
-      "REQ-3.1: initializeProjectorTables runs idempotently and records 2_init_es_projector_tables migration",
+      "REQ-3.1: initializeProjectorTables runs idempotently and records 1_init_es_projector_tables migration in isolated table",
       () =>
         Effect.gen(function* () {
           const sql = yield* SqlClient
@@ -305,10 +307,10 @@ describe("Cross-Aggregate Outbox Drain, Projector Checkpoints, Gap Parking, and 
             readonly migration_id: number
             readonly name: string
           }>`
-            SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id ASC
+            SELECT migration_id, name FROM es_projector_sql_migrations ORDER BY migration_id ASC
           `
           expect(
-            migrations.some((m) => m.migration_id === 2 && m.name === "init_es_projector_tables"),
+            migrations.some((m) => m.migration_id === 1 && m.name === "init_es_projector_tables"),
           ).toBe(true)
         }).pipe(Effect.provide(SqlClientMemoryLayer)),
     )
@@ -539,21 +541,24 @@ describe("Cross-Aggregate Outbox Drain, Projector Checkpoints, Gap Parking, and 
           yield* initializeProjectorTables()
           yield* initOpenCartsProjectionTable
 
-          const zeroVerEnv = new PublishedEventEnvelope({
-            aggregateName: AggregateName.make("Cart"),
-            aggregateId: AggregateId.make("cart-zero"),
-            streamVersion: StreamVersion.make(0),
-            eventType: EventType.make("CartCreated"),
-            payload: SerializedPayload.make(
-              '{"_tag":"CartCreated","cartId":"cart-zero","version":1}',
-            ),
-            metadata: new EventMetadata({
+          const zeroVerEnv = new PublishedEventEnvelope(
+            {
+              aggregateName: AggregateName.make("Cart"),
               aggregateId: AggregateId.make("cart-zero"),
               streamVersion: StreamVersion.make(0),
-              commandId: CommandId.make("cmd-zero"),
-              timestamp: TimestampMs.make(1700000000000),
-            }),
-          })
+              eventType: EventType.make("CartCreated"),
+              payload: SerializedPayload.make(
+                '{"_tag":"CartCreated","cartId":"cart-zero","version":1}',
+              ),
+              metadata: new EventMetadata({
+                aggregateId: AggregateId.make("cart-zero"),
+                streamVersion: StreamVersion.make(0),
+                commandId: CommandId.make("cmd-zero"),
+                timestamp: TimestampMs.make(1700000000000),
+              }),
+            },
+            { disableChecks: true },
+          )
           const zeroErr = yield* Effect.flip(
             ingestPublishedEvent(zeroVerEnv, [openCartsProjection]),
           )
@@ -591,16 +596,19 @@ describe("Cross-Aggregate Outbox Drain, Projector Checkpoints, Gap Parking, and 
               expect.unreachable("expected ProjectionArchiveCorruptionError for corrupt JSON")
             })
 
-          const mismatchedEnvelope = new PublishedEventEnvelope({
-            aggregateName: AggregateName.make("Cart"),
-            aggregateId: AggregateId.make("cart-err"),
-            streamVersion: StreamVersion.make(2),
-            eventType: EventType.make("CartCreated"),
-            payload: SerializedPayload.make(
-              '{"_tag":"CartCreated","cartId":"cart-err","version":1}',
-            ),
-            metadata: validMeta,
-          })
+          const mismatchedEnvelope = new PublishedEventEnvelope(
+            {
+              aggregateName: AggregateName.make("Cart"),
+              aggregateId: AggregateId.make("cart-err"),
+              streamVersion: StreamVersion.make(2),
+              eventType: EventType.make("CartCreated"),
+              payload: SerializedPayload.make(
+                '{"_tag":"CartCreated","cartId":"cart-err","version":1}',
+              ),
+              metadata: validMeta,
+            },
+            { disableChecks: true },
+          )
 
           const mismatchErr = yield* Effect.flip(
             ingestPublishedEvent(mismatchedEnvelope, [openCartsProjection]),
@@ -918,6 +926,587 @@ describe("Cross-Aggregate Outbox Drain, Projector Checkpoints, Gap Parking, and 
             .otherwise(() => {
               expect.unreachable("expected CrossProjectionNotFoundError")
             })
+        }).pipe(Effect.provide(SqlClientMemoryLayer)),
+    )
+  })
+
+  describe("Group 4: Hardened Guards and Reviewer Edge Cases (F-1, F-2, F-3.1 - F-3.6, F-7)", () => {
+    it.effect(
+      "F-1: running initializeProjectorTables before initializeAggregateTables on the same SQLite DB isolates migration tables",
+      () =>
+        Effect.gen(function* () {
+          const sql = yield* SqlClient
+          yield* initializeProjectorTables()
+          yield* initializeAggregateTables()
+
+          const projMigrations = yield* sql<{ migration_id: number; name: string }>`
+            SELECT migration_id, name FROM es_projector_sql_migrations ORDER BY migration_id ASC
+          `
+          const aggMigrations = yield* sql<{ migration_id: number; name: string }>`
+            SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id ASC
+          `
+          expect(
+            projMigrations.some(
+              (m) => m.migration_id === 1 && m.name === "init_es_projector_tables",
+            ),
+          ).toBe(true)
+          expect(
+            aggMigrations.some((m) => m.migration_id === 1 && m.name === "init_es_core_tables"),
+          ).toBe(true)
+
+          yield* sql`SELECT id FROM es_event_archive LIMIT 1`
+          yield* sql`SELECT processor_id FROM es_projection_checkpoints LIMIT 1`
+          yield* sql`SELECT processor_id FROM es_projection_gaps LIMIT 1`
+          yield* sql`SELECT id FROM es_events LIMIT 1`
+          yield* sql`SELECT command_id FROM es_commands LIMIT 1`
+          yield* sql`SELECT id FROM es_outbox LIMIT 1`
+          yield* sql`SELECT aggregate_id FROM es_projections_meta LIMIT 1`
+        }).pipe(Effect.provide(SqlClientMemoryLayer)),
+    )
+
+    it.effect(
+      "F-2: fractional stream_version (1.5) in SQLite fails with typed ProjectionArchiveCorruptionError instead of defect",
+      () =>
+        Effect.gen(function* () {
+          yield* initializeProjectorTables()
+          yield* initOpenCartsProjectionTable
+          const sql = yield* SqlClient
+
+          const cartId = AggregateId.make("cart-frac")
+          const env = new PublishedEventEnvelope({
+            aggregateName: AggregateName.make("Cart"),
+            aggregateId: cartId,
+            streamVersion: StreamVersion.make(1),
+            eventType: EventType.make("CartCreated"),
+            payload: SerializedPayload.make(
+              '{"_tag":"CartCreated","cartId":"cart-frac","version":1}',
+            ),
+            metadata: new EventMetadata({
+              aggregateId: cartId,
+              streamVersion: StreamVersion.make(1),
+              commandId: CommandId.make("cmd-1"),
+              timestamp: TimestampMs.make(1700000000000),
+            }),
+          })
+
+          // 1. Corrupt checkpoint last_stream_version = 1.5 -> ingestPublishedEvent fails
+          yield* sql`
+            INSERT INTO es_projection_checkpoints (
+              processor_id, aggregate_name, aggregate_id, last_stream_version, updated_at
+            ) VALUES (
+              'open-carts-v1', 'Cart', 'cart-frac', 1.5, 1700000000000
+            )
+          `
+          const ingestCpErr = yield* Effect.flip(ingestPublishedEvent(env, [openCartsProjection]))
+          match(ingestCpErr)
+            .with(P.instanceOf(ProjectionArchiveCorruptionError), (err) => {
+              expect(err.aggregateName).toBe("Cart")
+            })
+            .otherwise(() => {
+              expect.unreachable(
+                "expected ProjectionArchiveCorruptionError for fractional checkpoint",
+              )
+            })
+
+          // 2. Corrupt gap stream_version = 1.5 -> ingestPublishedEvent fails
+          yield* sql`DELETE FROM es_projection_checkpoints`
+          yield* sql`
+            INSERT INTO es_projection_gaps (
+              processor_id, aggregate_name, aggregate_id, stream_version, event_type, payload, metadata, parked_at
+            ) VALUES (
+              'open-carts-v1', 'Cart', 'cart-frac', 1.5, 'CartCreated',
+              '{"_tag":"CartCreated","cartId":"cart-frac","version":1}',
+              '{"aggregateId":"cart-frac","streamVersion":1,"commandId":"cmd-1","timestamp":1700000000000}',
+              1700000000000
+            )
+          `
+          const ingestGapErr = yield* Effect.flip(ingestPublishedEvent(env, [openCartsProjection]))
+          match(ingestGapErr)
+            .with(P.instanceOf(ProjectionArchiveCorruptionError), (err) => {
+              expect(err.aggregateName).toBe("Cart")
+            })
+            .otherwise(() => {
+              expect.unreachable("expected ProjectionArchiveCorruptionError for fractional gap")
+            })
+
+          // 3. Corrupt archive stream_version = 1.5 -> rebuildProjectorFromArchive fails
+          yield* sql`DELETE FROM es_projection_gaps`
+          yield* sql`
+            INSERT INTO es_event_archive (
+              aggregate_name, aggregate_id, stream_version, command_id, event_type, payload, metadata, archived_at
+            ) VALUES (
+              'Cart', 'cart-frac', 1.5, 'cmd-1', 'CartCreated',
+              '{"_tag":"CartCreated","cartId":"cart-frac","version":1}',
+              '{"aggregateId":"cart-frac","streamVersion":1,"commandId":"cmd-1","timestamp":1700000000000}',
+              1700000000000
+            )
+          `
+          const rebuildErr = yield* Effect.flip(rebuildProjectorFromArchive(openCartsProjection))
+          match(rebuildErr)
+            .with(P.instanceOf(ProjectionArchiveCorruptionError), (err) => {
+              expect(err.aggregateName).toBe("Cart")
+            })
+            .otherwise(() => {
+              expect.unreachable(
+                "expected ProjectionArchiveCorruptionError for fractional archive version",
+              )
+            })
+
+          // 4. Corrupt checkpoint last_stream_version = 1.5 -> checkProjectorCatchUp fails
+          yield* sql`DELETE FROM es_event_archive`
+          yield* sql`
+            INSERT INTO es_projection_checkpoints (
+              processor_id, aggregate_name, aggregate_id, last_stream_version, updated_at
+            ) VALUES (
+              'open-carts-v1', 'Cart', 'cart-frac', 1.5, 1700000000000
+            )
+          `
+          const catchUpErr = yield* Effect.flip(
+            checkProjectorCatchUp(ProcessorId.make("open-carts-v1"), AggregateName.make("Cart")),
+          )
+          match(catchUpErr)
+            .with(P.instanceOf(ProjectionArchiveCorruptionError), (err) => {
+              expect(err.aggregateName).toBe("Cart")
+            })
+            .otherwise(() => {
+              expect.unreachable("expected ProjectionArchiveCorruptionError for catch-up check")
+            })
+        }).pipe(Effect.provide(SqlClientMemoryLayer)),
+    )
+
+    it.effect(
+      "F-3.1: metadata identity mismatch in outbox row fails with EventStreamCorruptionError, publish called 0 times, row remains in outbox",
+      () =>
+        Effect.gen(function* () {
+          yield* initializeAggregateTables()
+          const sql = yield* SqlClient
+
+          let publishCalls = 0
+          const bus = EventBus.make({
+            publish: () =>
+              Effect.sync(() => {
+                publishCalls += 1
+              }),
+          })
+
+          yield* sql`
+            INSERT INTO es_outbox (
+              aggregate_name, aggregate_id, stream_version, event_type, payload, metadata, created_at
+            ) VALUES (
+              'Cart', 'cart-1', 1, 'CartCreated',
+              '{"_tag":"CartCreated","cartId":"cart-1","version":1}',
+              '{"aggregateId":"cart-OTHER","streamVersion":1,"commandId":"cmd-1","timestamp":1700000000000}',
+              1700000000000
+            )
+          `
+
+          const err = yield* Effect.flip(drainAggregateOutbox(bus))
+          match(err)
+            .with(P.instanceOf(EventStreamCorruptionError), (e) => {
+              expect(e.aggregateName).toBe("Cart")
+            })
+            .otherwise(() => {
+              expect.unreachable("expected EventStreamCorruptionError")
+            })
+
+          expect(publishCalls).toBe(0)
+          const remainingRows = yield* sql<{ id: number }>`SELECT id FROM es_outbox`
+          expect(remainingRows.length).toBe(1)
+        }).pipe(Effect.provide(SqlClientMemoryLayer)),
+    )
+
+    it.effect(
+      "F-3.2: publish failure on non-last row deletes previously published rows and leaves failed and subsequent rows in outbox",
+      () =>
+        Effect.gen(function* () {
+          yield* initializeAggregateTables()
+          const sql = yield* SqlClient
+
+          yield* sql`
+            INSERT INTO es_outbox (
+              id, aggregate_name, aggregate_id, stream_version, event_type, payload, metadata, created_at
+            ) VALUES
+              (1, 'Cart', 'cart-stream', 1, 'CartCreated', '{"_tag":"CartCreated"}', '{"aggregateId":"cart-stream","streamVersion":1,"commandId":"c1","timestamp":100}', 100),
+              (2, 'Cart', 'cart-stream', 2, 'ItemAdded', '{"_tag":"ItemAdded"}', '{"aggregateId":"cart-stream","streamVersion":2,"commandId":"c2","timestamp":200}', 200),
+              (3, 'Cart', 'cart-stream', 3, 'ItemAdded', '{"_tag":"ItemAdded"}', '{"aggregateId":"cart-stream","streamVersion":3,"commandId":"c3","timestamp":300}', 300)
+          `
+
+          const publishedVersions: Array<number> = []
+          const bus = EventBus.make({
+            publish: (env) => {
+              publishedVersions.push(env.streamVersion)
+              if (env.streamVersion === 2) {
+                return Effect.fail(
+                  new OutboxPublishError({
+                    aggregateName: env.aggregateName,
+                    aggregateId: env.aggregateId,
+                    streamVersion: env.streamVersion,
+                    reason: ErrorMessage.make("Simulated network drop on version 2"),
+                  }),
+                )
+              }
+              return Effect.void
+            },
+          })
+
+          const drainErr = yield* Effect.flip(drainAggregateOutbox(bus))
+          match(drainErr)
+            .with(P.instanceOf(OutboxPublishError), (e) => {
+              expect(e.streamVersion).toBe(2)
+            })
+            .otherwise(() => {
+              expect.unreachable("expected OutboxPublishError")
+            })
+
+          expect(publishedVersions).toEqual([1, 2])
+          const remainingRows = yield* sql<{ id: number; stream_version: number }>`
+            SELECT id, stream_version FROM es_outbox ORDER BY id ASC
+          `
+          expect(remainingRows.length).toBe(2)
+          expect(remainingRows[0]?.stream_version).toBe(2)
+          expect(remainingRows[1]?.stream_version).toBe(3)
+        }).pipe(Effect.provide(SqlClientMemoryLayer)),
+    )
+
+    it.effect("F-7: drainAggregateOutbox respects batchLimit and aggregateName filter", () =>
+      Effect.gen(function* () {
+        yield* initializeAggregateTables()
+        const sql = yield* SqlClient
+
+        yield* sql`
+            INSERT INTO es_outbox (
+              id, aggregate_name, aggregate_id, stream_version, event_type, payload, metadata, created_at
+            ) VALUES
+              (1, 'Cart', 'c-1', 1, 'CartCreated', '{"_tag":"CartCreated"}', '{"aggregateId":"c-1","streamVersion":1,"commandId":"c1","timestamp":100}', 100),
+              (2, 'Cart', 'c-2', 1, 'CartCreated', '{"_tag":"CartCreated"}', '{"aggregateId":"c-2","streamVersion":1,"commandId":"c2","timestamp":200}', 200),
+              (3, 'Cart', 'c-3', 1, 'CartCreated', '{"_tag":"CartCreated"}', '{"aggregateId":"c-3","streamVersion":1,"commandId":"c3","timestamp":300}', 300),
+              (4, 'Order', 'o-1', 1, 'OrderPlaced', '{"_tag":"OrderPlaced"}', '{"aggregateId":"o-1","streamVersion":1,"commandId":"o1","timestamp":400}', 400)
+          `
+
+        const publishedNames: Array<string> = []
+        const bus = EventBus.make({
+          publish: (env) =>
+            Effect.sync(() => {
+              publishedNames.push(env.aggregateName)
+            }),
+        })
+
+        const firstDrain = yield* drainAggregateOutbox(
+          bus,
+          BatchLimit.make(2),
+          AggregateName.make("Cart"),
+        )
+        match(firstDrain)
+          .with({ _tag: "OutboxDrained" }, (d) => {
+            expect(d.drainedCount).toBe(2)
+          })
+          .with({ _tag: "OutboxEmpty" }, () => {
+            expect.unreachable("expected OutboxDrained")
+          })
+          .exhaustive()
+
+        expect(publishedNames).toEqual(["Cart", "Cart"])
+
+        const afterFirst = yield* sql<{ id: number; aggregate_name: string }>`
+            SELECT id, aggregate_name FROM es_outbox ORDER BY id ASC
+          `
+        expect(afterFirst.length).toBe(2)
+        expect(afterFirst[0]?.aggregate_name).toBe("Cart")
+        expect(afterFirst[1]?.aggregate_name).toBe("Order")
+
+        const secondDrain = yield* drainAggregateOutbox(
+          bus,
+          BatchLimit.make(2),
+          AggregateName.make("Cart"),
+        )
+        match(secondDrain)
+          .with({ _tag: "OutboxDrained" }, (d) => {
+            expect(d.drainedCount).toBe(1)
+          })
+          .with({ _tag: "OutboxEmpty" }, () => {
+            expect.unreachable("expected OutboxDrained")
+          })
+          .exhaustive()
+
+        const afterSecond = yield* sql<{ id: number; aggregate_name: string }>`
+            SELECT id, aggregate_name FROM es_outbox ORDER BY id ASC
+          `
+        expect(afterSecond.length).toBe(1)
+        expect(afterSecond[0]?.aggregate_name).toBe("Order")
+      }).pipe(Effect.provide(SqlClientMemoryLayer)),
+    )
+
+    it.effect(
+      "F-3.3: partial gap unblock and duplicate parked version delivery leaves higher gaps parked",
+      () =>
+        Effect.gen(function* () {
+          yield* initializeProjectorTables()
+          yield* initOpenCartsProjectionTable
+          const sql = yield* SqlClient
+
+          const cartId = AggregateId.make("cart-gap-chain")
+
+          const makeEnv = (ver: number) =>
+            new PublishedEventEnvelope({
+              aggregateName: AggregateName.make("Cart"),
+              aggregateId: cartId,
+              streamVersion: StreamVersion.make(ver),
+              eventType: EventType.make(ver === 1 ? "CartCreated" : "ItemAdded"),
+              payload: SerializedPayload.make(
+                ver === 1
+                  ? '{"_tag":"CartCreated","cartId":"cart-gap-chain","version":1}'
+                  : `{"_tag":"ItemAdded","cartId":"cart-gap-chain","itemId":"item-${ver}","quantity":1,"version":1}`,
+              ),
+              metadata: new EventMetadata({
+                aggregateId: cartId,
+                streamVersion: StreamVersion.make(ver),
+                commandId: CommandId.make(`cmd-${ver}`),
+                timestamp: TimestampMs.make(1700000000000 + ver),
+              }),
+            })
+
+          // Ingest version 2 (parked)
+          const d2 = yield* ingestPublishedEvent(makeEnv(2), [openCartsProjection])
+          expect(d2[0]?._tag).toBe("ParkOutOfOrderEvent")
+
+          // Ingest version 2 again (duplicate delivery while parked, ON CONFLICT DO NOTHING)
+          const d2Dup = yield* ingestPublishedEvent(makeEnv(2), [openCartsProjection])
+          expect(d2Dup[0]?._tag).toBe("ParkOutOfOrderEvent")
+
+          // Ingest version 4 (parked)
+          const d4 = yield* ingestPublishedEvent(makeEnv(4), [openCartsProjection])
+          expect(d4[0]?._tag).toBe("ParkOutOfOrderEvent")
+
+          const gapsBefore = yield* sql<{ stream_version: number }>`
+            SELECT stream_version FROM es_projection_gaps WHERE aggregate_id = 'cart-gap-chain' ORDER BY stream_version ASC
+          `
+          expect(gapsBefore.map((g) => g.stream_version)).toEqual([2, 4])
+
+          // Ingest version 1: applies [1, 2], advances checkpoint to 2, deletes 2 from gaps, leaves 4 parked
+          const d1 = yield* ingestPublishedEvent(makeEnv(1), [openCartsProjection])
+          match(d1[0])
+            .with({ _tag: "ApplyContiguousEvents" }, (a) => {
+              expect(a.versionsToApply).toEqual([1, 2])
+              expect(a.newCheckpointVersion).toBe(2)
+            })
+            .otherwise(() => {
+              expect.unreachable("expected ApplyContiguousEvents")
+            })
+
+          const checkpoints = yield* sql<{ last_stream_version: number }>`
+            SELECT last_stream_version FROM es_projection_checkpoints WHERE aggregate_id = 'cart-gap-chain'
+          `
+          expect(checkpoints[0]?.last_stream_version).toBe(2)
+
+          const gapsAfter = yield* sql<{ stream_version: number }>`
+            SELECT stream_version FROM es_projection_gaps WHERE aggregate_id = 'cart-gap-chain' ORDER BY stream_version ASC
+          `
+          expect(gapsAfter.map((g) => g.stream_version)).toEqual([4])
+        }).pipe(Effect.provide(SqlClientMemoryLayer)),
+    )
+
+    it.effect(
+      "F-3.4: multiple projections on the same aggregate isolate checkpoints, gaps, and archive rebuilds",
+      () =>
+        Effect.gen(function* () {
+          yield* initializeProjectorTables()
+          yield* initOpenCartsProjectionTable
+          const sql = yield* SqlClient
+
+          let secondCount = 0
+          const secondProjection = CrossAggregateProjection.make({
+            processorId: ProcessorId.make("cart-audit-v1"),
+            aggregateName: AggregateName.make("Cart"),
+            eventSchema: CartEvent,
+            model: OpenCartsReport,
+            query: () => Effect.succeed(new OpenCartsReport({ carts: [] })),
+            apply: () =>
+              Effect.sync(() => {
+                secondCount += 1
+              }),
+            purge: Effect.sync(() => {
+              secondCount = 0
+            }),
+          })
+
+          const cartId = AggregateId.make("cart-multi")
+          const env1 = new PublishedEventEnvelope({
+            aggregateName: AggregateName.make("Cart"),
+            aggregateId: cartId,
+            streamVersion: StreamVersion.make(1),
+            eventType: EventType.make("CartCreated"),
+            payload: SerializedPayload.make(
+              '{"_tag":"CartCreated","cartId":"cart-multi","version":1}',
+            ),
+            metadata: new EventMetadata({
+              aggregateId: cartId,
+              streamVersion: StreamVersion.make(1),
+              commandId: CommandId.make("cmd-1"),
+              timestamp: TimestampMs.make(1700000000000),
+            }),
+          })
+
+          yield* ingestPublishedEvent(env1, [openCartsProjection, secondProjection])
+
+          // Park a gap for secondProjection
+          yield* sql`
+            INSERT INTO es_projection_gaps (
+              processor_id, aggregate_name, aggregate_id, stream_version, event_type, payload, metadata, parked_at
+            ) VALUES (
+              'cart-audit-v1', 'Cart', 'cart-multi', 3, 'ItemAdded',
+              '{"_tag":"ItemAdded","cartId":"cart-multi","itemId":"apple","quantity":1}',
+              '{"aggregateId":"cart-multi","streamVersion":3,"commandId":"cmd-3","timestamp":1700000000030}',
+              1700000000030
+            )
+          `
+
+          // Call rebuildProjectorFromArchive for openCartsProjection
+          yield* rebuildProjectorFromArchive(openCartsProjection)
+
+          // Verify secondProjection's checkpoint and gap are completely untouched!
+          const secondCp = yield* sql<{ last_stream_version: number }>`
+            SELECT last_stream_version FROM es_projection_checkpoints WHERE processor_id = 'cart-audit-v1'
+          `
+          expect(secondCp.length).toBe(1)
+          expect(secondCp[0]?.last_stream_version).toBe(1)
+
+          const secondGaps = yield* sql<{ stream_version: number }>`
+            SELECT stream_version FROM es_projection_gaps WHERE processor_id = 'cart-audit-v1'
+          `
+          expect(secondGaps.length).toBe(1)
+          expect(secondGaps[0]?.stream_version).toBe(3)
+        }).pipe(Effect.provide(SqlClientMemoryLayer)),
+    )
+
+    it.effect(
+      "F-3.5: checkProjectorCatchUp returns Lagging when checkpoint trails archive head with zero gap rows",
+      () =>
+        Effect.gen(function* () {
+          yield* initializeProjectorTables()
+          const sql = yield* SqlClient
+
+          yield* sql`
+            INSERT INTO es_event_archive (
+              aggregate_name, aggregate_id, stream_version, command_id, event_type, payload, metadata, archived_at
+            ) VALUES
+              ('Cart', 'cart-trail', 1, 'c1', 'CartCreated', '{"_tag":"CartCreated"}', '{"aggregateId":"cart-trail","streamVersion":1,"commandId":"c1","timestamp":100}', 100),
+              ('Cart', 'cart-trail', 2, 'c2', 'ItemAdded', '{"_tag":"ItemAdded"}', '{"aggregateId":"cart-trail","streamVersion":2,"commandId":"c2","timestamp":200}', 200)
+          `
+
+          yield* sql`
+            INSERT INTO es_projection_checkpoints (
+              processor_id, aggregate_name, aggregate_id, last_stream_version, updated_at
+            ) VALUES (
+              'open-carts-v1', 'Cart', 'cart-trail', 1, 100
+            )
+          `
+
+          const gapCount = yield* sql<{
+            count: number
+          }>`SELECT count(*) as count FROM es_projection_gaps`
+          expect(gapCount[0]?.count).toBe(0)
+
+          const status = yield* checkProjectorCatchUp(
+            ProcessorId.make("open-carts-v1"),
+            AggregateName.make("Cart"),
+          )
+
+          match(status)
+            .with({ _tag: "Lagging" }, (l) => {
+              expect(l.laggingAggregateId).toBe("cart-trail")
+              expect(l.checkpointVersion).toBe(1)
+              expect(l.archiveHeadVersion).toBe(2)
+            })
+            .with({ _tag: "CaughtUp" }, () => {
+              expect.unreachable("expected Lagging status")
+            })
+            .exhaustive()
+        }).pipe(Effect.provide(SqlClientMemoryLayer)),
+    )
+
+    it.effect(
+      "F-3.6: failed rebuildProjectorFromArchive rolls back and preserves live read model and checkpoints",
+      () =>
+        Effect.gen(function* () {
+          yield* initializeProjectorTables()
+          yield* initOpenCartsProjectionTable
+          const sql = yield* SqlClient
+
+          const cartId = AggregateId.make("cart-rollback")
+
+          const env1 = new PublishedEventEnvelope({
+            aggregateName: AggregateName.make("Cart"),
+            aggregateId: cartId,
+            streamVersion: StreamVersion.make(1),
+            eventType: EventType.make("CartCreated"),
+            payload: SerializedPayload.make(
+              '{"_tag":"CartCreated","cartId":"cart-rollback","version":1}',
+            ),
+            metadata: new EventMetadata({
+              aggregateId: cartId,
+              streamVersion: StreamVersion.make(1),
+              commandId: CommandId.make("cmd-1"),
+              timestamp: TimestampMs.make(1700000000000),
+            }),
+          })
+
+          const env2 = new PublishedEventEnvelope({
+            aggregateName: AggregateName.make("Cart"),
+            aggregateId: cartId,
+            streamVersion: StreamVersion.make(2),
+            eventType: EventType.make("ItemAdded"),
+            payload: SerializedPayload.make(
+              '{"_tag":"ItemAdded","cartId":"cart-rollback","itemId":"apple","quantity":3,"version":1}',
+            ),
+            metadata: new EventMetadata({
+              aggregateId: cartId,
+              streamVersion: StreamVersion.make(2),
+              commandId: CommandId.make("cmd-2"),
+              timestamp: TimestampMs.make(1700000000010),
+            }),
+          })
+
+          yield* ingestPublishedEvent(env1, [openCartsProjection])
+          yield* ingestPublishedEvent(env2, [openCartsProjection])
+
+          const beforeReport = yield* queryOpenCarts
+          expect(beforeReport.carts.length).toBe(1)
+          expect(beforeReport.carts[0]?.totalQuantity).toBe(3)
+
+          const beforeCp = yield* sql<{ last_stream_version: number }>`
+            SELECT last_stream_version FROM es_projection_checkpoints WHERE aggregate_id = 'cart-rollback'
+          `
+          expect(beforeCp[0]?.last_stream_version).toBe(2)
+
+          // Insert non-contiguous archive row (version 4)
+          yield* sql`
+            INSERT INTO es_event_archive (
+              aggregate_name, aggregate_id, stream_version, command_id, event_type, payload, metadata, archived_at
+            ) VALUES (
+              'Cart', 'cart-rollback', 4, 'cmd-4', 'ItemAdded',
+              '{"_tag":"ItemAdded","cartId":"cart-rollback","itemId":"orange","quantity":1,"version":1}',
+              '{"aggregateId":"cart-rollback","streamVersion":4,"commandId":"cmd-4","timestamp":1700000000020}',
+              1700000000020
+            )
+          `
+
+          const rebuildErr = yield* Effect.flip(rebuildProjectorFromArchive(openCartsProjection))
+          match(rebuildErr)
+            .with(P.instanceOf(ProjectionArchiveCorruptionError), (e) => {
+              expect(e.aggregateId).toBe("cart-rollback")
+            })
+            .otherwise(() => {
+              expect.unreachable("expected ProjectionArchiveCorruptionError")
+            })
+
+          const afterReport = yield* queryOpenCarts
+          expect(afterReport.carts.length).toBe(1)
+          expect(afterReport.carts[0]?.totalQuantity).toBe(3)
+
+          const afterCp = yield* sql<{ last_stream_version: number }>`
+            SELECT last_stream_version FROM es_projection_checkpoints WHERE aggregate_id = 'cart-rollback'
+          `
+          expect(afterCp[0]?.last_stream_version).toBe(2)
         }).pipe(Effect.provide(SqlClientMemoryLayer)),
     )
   })

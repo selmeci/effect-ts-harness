@@ -18,6 +18,7 @@ import {
   StreamVersion,
 } from "@harness/es-contract"
 import type { EventBus } from "@harness/es-core"
+import { match } from "ts-pattern"
 
 export const DEFAULT_OUTBOX_BATCH_LIMIT: BatchLimit = BatchLimit.make(100)
 
@@ -77,33 +78,113 @@ export const drainAggregateOutbox = Effect.fn("Outbox.drain")(function* <BusEnv 
   }
 
   for (const row of rows) {
-    const fallbackAggName = AggregateName.make(
-      row.aggregate_name.length > 0 ? row.aggregate_name : "UnknownAggregate",
-    )
-    const fallbackAggId = AggregateId.make(
-      row.aggregate_id.length > 0 ? row.aggregate_id : "unknown-id",
-    )
+    const idOpt = Schema.decodeOption(OutboxRowId)(row.id)
+    const aggNameOpt = Schema.decodeOption(AggregateName)(row.aggregate_name)
+    const aggIdOpt = Schema.decodeOption(AggregateId)(row.aggregate_id)
+    const posIntOpt = Schema.decodeOption(PositiveInt)(row.stream_version)
+    const streamVerOpt = Schema.decodeOption(StreamVersion)(row.stream_version)
+    const eventTypeOpt = Schema.decodeOption(EventType)(row.event_type)
+    const payloadOpt = Schema.decodeOption(SerializedPayload)(row.payload)
 
-    if (
-      row.id <= 0 ||
-      row.aggregate_name.length === 0 ||
-      row.aggregate_id.length === 0 ||
-      row.stream_version <= 0 ||
-      !Number.isInteger(row.stream_version)
-    ) {
-      return yield* new EventStreamCorruptionError({
-        aggregateName: fallbackAggName,
-        aggregateId: fallbackAggId,
-        expectedStreamVersion: StreamVersion.make(1),
-        actualStreamVersion: StreamVersion.make(0),
-        reason: ErrorMessage.make(`Invalid outbox row or stream_version: ${row.stream_version}`),
-      })
-    }
+    const fallbackAggName = match(aggNameOpt)
+      .with({ _tag: "Some" }, ({ value }) => value)
+      .with({ _tag: "None" }, () => AggregateName.make("UnknownAggregate"))
+      .exhaustive()
+    const fallbackAggId = match(aggIdOpt)
+      .with({ _tag: "Some" }, ({ value }) => value)
+      .with({ _tag: "None" }, () => AggregateId.make("unknown-id"))
+      .exhaustive()
+    const fallbackStreamVer = match(streamVerOpt)
+      .with({ _tag: "Some" }, ({ value }) => value)
+      .with({ _tag: "None" }, () => StreamVersion.make(0))
+      .exhaustive()
 
-    const outboxRowId = OutboxRowId.make(row.id)
-    const aggName = AggregateName.make(row.aggregate_name)
-    const aggId = AggregateId.make(row.aggregate_id)
-    const streamVer = StreamVersion.make(row.stream_version)
+    const validatedStream = yield* match({
+      idOpt,
+      aggNameOpt,
+      aggIdOpt,
+      posIntOpt,
+      streamVerOpt,
+    })
+      .with(
+        {
+          idOpt: { _tag: "Some" },
+          aggNameOpt: { _tag: "Some" },
+          aggIdOpt: { _tag: "Some" },
+          posIntOpt: { _tag: "Some" },
+          streamVerOpt: { _tag: "Some" },
+        },
+        ({
+          idOpt: { value: outboxRowId },
+          aggNameOpt: { value: aggName },
+          aggIdOpt: { value: aggId },
+          streamVerOpt: { value: streamVer },
+        }) => Effect.succeed({ outboxRowId, aggName, aggId, streamVer }),
+      )
+      .with({ idOpt: { _tag: "None" } }, () =>
+        Effect.fail(
+          new EventStreamCorruptionError({
+            aggregateName: fallbackAggName,
+            aggregateId: fallbackAggId,
+            expectedStreamVersion: StreamVersion.make(1),
+            actualStreamVersion: fallbackStreamVer,
+            reason: ErrorMessage.make(`Invalid outbox id: ${String(row.id)}`),
+          }),
+        ),
+      )
+      .with({ aggNameOpt: { _tag: "None" } }, () =>
+        Effect.fail(
+          new EventStreamCorruptionError({
+            aggregateName: fallbackAggName,
+            aggregateId: fallbackAggId,
+            expectedStreamVersion: StreamVersion.make(1),
+            actualStreamVersion: fallbackStreamVer,
+            reason: ErrorMessage.make(
+              `Invalid outbox aggregate_name: ${String(row.aggregate_name)}`,
+            ),
+          }),
+        ),
+      )
+      .with({ aggIdOpt: { _tag: "None" } }, () =>
+        Effect.fail(
+          new EventStreamCorruptionError({
+            aggregateName: fallbackAggName,
+            aggregateId: fallbackAggId,
+            expectedStreamVersion: StreamVersion.make(1),
+            actualStreamVersion: fallbackStreamVer,
+            reason: ErrorMessage.make(`Invalid outbox aggregate_id: ${String(row.aggregate_id)}`),
+          }),
+        ),
+      )
+      .with({ posIntOpt: { _tag: "None" } }, () =>
+        Effect.fail(
+          new EventStreamCorruptionError({
+            aggregateName: fallbackAggName,
+            aggregateId: fallbackAggId,
+            expectedStreamVersion: StreamVersion.make(1),
+            actualStreamVersion: fallbackStreamVer,
+            reason: ErrorMessage.make(
+              `Invalid outbox stream_version: ${String(row.stream_version)}`,
+            ),
+          }),
+        ),
+      )
+      .with({ streamVerOpt: { _tag: "None" } }, () =>
+        Effect.fail(
+          new EventStreamCorruptionError({
+            aggregateName: fallbackAggName,
+            aggregateId: fallbackAggId,
+            expectedStreamVersion: StreamVersion.make(1),
+            actualStreamVersion: fallbackStreamVer,
+            reason: ErrorMessage.make(
+              `Invalid outbox stream_version: ${String(row.stream_version)}`,
+            ),
+          }),
+        ),
+      )
+      .exhaustive()
+
+    const { outboxRowId, aggName, aggId, streamVer } = validatedStream
 
     const metadata = yield* Schema.decodeEffect(Schema.fromJsonString(EventMetadata))(
       row.metadata,
@@ -132,16 +213,37 @@ export const drainAggregateOutbox = Effect.fn("Outbox.drain")(function* <BusEnv 
       })
     }
 
-    if (row.event_type.length === 0 || row.payload.length === 0) {
-      return yield* new EventSerializationError({
-        aggregateName: aggName,
-        aggregateId: aggId,
-        streamVersion: streamVer,
-        reason: ErrorMessage.make("Empty event_type or payload in outbox row"),
-      })
-    }
+    const validatedEvent = yield* match({ eventTypeOpt, payloadOpt })
+      .with(
+        { eventTypeOpt: { _tag: "Some" }, payloadOpt: { _tag: "Some" } },
+        ({ eventTypeOpt: { value: eventType }, payloadOpt: { value: payload } }) =>
+          Effect.succeed({ eventType, payload }),
+      )
+      .with({ eventTypeOpt: { _tag: "None" } }, () =>
+        Effect.fail(
+          new EventSerializationError({
+            aggregateName: aggName,
+            aggregateId: aggId,
+            streamVersion: streamVer,
+            reason: ErrorMessage.make("Empty or invalid event_type in outbox row"),
+          }),
+        ),
+      )
+      .with({ payloadOpt: { _tag: "None" } }, () =>
+        Effect.fail(
+          new EventSerializationError({
+            aggregateName: aggName,
+            aggregateId: aggId,
+            streamVersion: streamVer,
+            reason: ErrorMessage.make("Empty or invalid payload in outbox row"),
+          }),
+        ),
+      )
+      .exhaustive()
 
-    yield* Schema.decodeEffect(Schema.fromJsonString(Schema.Unknown))(row.payload).pipe(
+    const { eventType, payload } = validatedEvent
+
+    yield* Schema.decodeEffect(Schema.fromJsonString(Schema.Unknown))(payload).pipe(
       Effect.mapError(
         (cause) =>
           new EventSerializationError({
@@ -157,8 +259,8 @@ export const drainAggregateOutbox = Effect.fn("Outbox.drain")(function* <BusEnv 
       aggregateName: aggName,
       aggregateId: aggId,
       streamVersion: streamVer,
-      eventType: EventType.make(row.event_type),
-      payload: SerializedPayload.make(row.payload),
+      eventType,
+      payload,
       metadata,
     })
 

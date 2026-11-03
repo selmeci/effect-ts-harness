@@ -71,14 +71,29 @@ export class EventMetadata extends Schema.Class<EventMetadata>("EventMetadata")(
 // Canonical wire envelope for events published from the aggregate outbox to the EventBus
 export class PublishedEventEnvelope extends Schema.Class<PublishedEventEnvelope>(
   "PublishedEventEnvelope",
-)({
-  aggregateName: AggregateName,
-  aggregateId: AggregateId,
-  streamVersion: StreamVersion,
-  eventType: EventType,
-  payload: SerializedPayload,
-  metadata: EventMetadata,
-}) {}
+)(
+  Schema.Struct({
+    aggregateName: AggregateName,
+    aggregateId: AggregateId,
+    streamVersion: StreamVersion,
+    eventType: EventType,
+    payload: SerializedPayload,
+    metadata: EventMetadata,
+  }).pipe(
+    Schema.check(
+      Schema.makeFilter(
+        (e) =>
+          e.streamVersion > 0 &&
+          e.metadata.aggregateId === e.aggregateId &&
+          e.metadata.streamVersion === e.streamVersion,
+        {
+          message:
+            "PublishedEventEnvelope requires streamVersion > 0 and metadata identity (aggregateId, streamVersion) matching the envelope",
+        },
+      ),
+    ),
+  ),
+) {}
 
 // Lifecycle and publication states modeled as closed discriminated unions (no boolean flags)
 export const StreamCreationStatus = Schema.Union([
@@ -123,11 +138,30 @@ export const ProjectionSequenceDecision = Schema.Union([
   Schema.TaggedStruct("ParkOutOfOrderEvent", {
     expectedVersion: StreamVersion,
     parkedVersion: StreamVersion,
-  }),
+  }).pipe(
+    Schema.check(
+      Schema.makeFilter((d) => d.expectedVersion > 0 && d.parkedVersion > d.expectedVersion, {
+        message:
+          "ParkOutOfOrderEvent requires expectedVersion > 0 and parkedVersion > expectedVersion",
+      }),
+    ),
+  ),
   Schema.TaggedStruct("ApplyContiguousEvents", {
-    versionsToApply: Schema.Array(StreamVersion),
+    versionsToApply: Schema.NonEmptyArray(StreamVersion),
     newCheckpointVersion: StreamVersion,
-  }),
+  }).pipe(
+    Schema.check(
+      Schema.makeFilter(
+        (d) =>
+          d.newCheckpointVersion > 0 &&
+          d.versionsToApply[d.versionsToApply.length - 1] === d.newCheckpointVersion,
+        {
+          message:
+            "ApplyContiguousEvents requires newCheckpointVersion > 0 matching the last element of versionsToApply",
+        },
+      ),
+    ),
+  ),
 ])
 export type ProjectionSequenceDecision = typeof ProjectionSequenceDecision.Type
 

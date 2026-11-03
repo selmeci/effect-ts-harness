@@ -43,11 +43,11 @@ Phase 1 and Phase 2 of `effect-es` established pure Deciders (`R = never`), tran
 
 - **Reused Contracts / Primitives:** `AggregateId`, `AggregateName`, `StreamVersion`, `PositiveInt`, `TimestampMs`, `ErrorMessage`, `EventMetadata`, `EventStreamCorruptionError`.
 - **Reused Services:** `effect/sql/SqlClient`, `@effect/sql-sqlite-do/SqliteMigrator`.
-- **New Capabilities Needed:** Branded contract schemas (`OutboxRowId`, `EventType`, `SerializedPayload`, `ProcessorId`, `BatchLimit`, `AggregateCount`), `PublishedEventEnvelope`, `OutboxDrainOutcome`, `ProjectionSequenceInput`, `ProjectionSequenceDecision`, `ProjectionCatchUpStatus`, typed errors (`OutboxPublishError`, `ProjectionArchiveCorruptionError`, `CrossProjectionNotFoundError`), pure sequencing decider (`ProjectionSequence.decide`) and `CrossAggregateProjection` / `EventBus` protocols in `@harness/es-core`, and transactional outbox draining (`Outbox.drain`), projector ingestion (`Projector.ingest`), archive rebuild (`Projector.rebuild`), and catch-up verification (`Projector.checkCatchUp`) in `@harness/es-infra`.
+- **New Capabilities Needed:** Branded contract schemas (`OutboxRowId`, `EventType`, `SerializedPayload`, `ProcessorId`, `BatchLimit`, `AggregateCount`), `PublishedEventEnvelope`, `OutboxDrainOutcome`, `ProjectionSequenceInput`, `ProjectionSequenceDecision`, `ProjectionCatchUpStatus`, typed errors (`OutboxPublishError`, `ProjectionArchiveCorruptionError`, `CrossProjectionNotFoundError`), pure sequencing decider (`ProjectionSequence.decide`) and `CrossAggregateProjection` / `EventBus` protocols in `@harness/es-core`, and at-least-once per-row outbox draining (`Outbox.drain`), projector ingestion (`Projector.ingest`), archive rebuild (`Projector.rebuild`), and catch-up verification (`Projector.checkCatchUp`) in `@harness/es-infra`.
 
 ## Goal
 
-Deliver an end-to-end cross-aggregate event sourcing read path where Durable Object outbox rows are drained at least once to an `EventBus`, consumed idempotently by a projector with per-aggregate stream checkpoints, out-of-order gap parking, and an append-only `es_event_archive`, such that rebuilding any cross-aggregate projection from `es_event_archive` produces the exact same read model rows and checkpoints as live incremental ingestion.
+Deliver an end-to-end cross-aggregate event sourcing read path where Durable Object outbox rows are drained at least once to an `EventBus`, consumed idempotently by a projector with per-aggregate stream checkpoints, out-of-order gap parking, and an append-only `es_event_archive`, such that once all aggregate streams in `es_event_archive` are contiguous (no parked gaps), rebuilding any cross-aggregate projection from `es_event_archive` produces the exact same read model rows and checkpoints as live incremental ingestion.
 
 ## How to read the requirements
 
@@ -72,7 +72,7 @@ The `Verification` column in the EARS table maps each requirement to its determi
 | REQ-1.1 | Event-driven       | **When** Outbox.drain executes against an es_outbox table containing pending rows, Outbox.drain **shall** publish each row in ascending id order through the EventBus and delete each published row from es_outbox before returning OutboxDrained. | Outbox.drain               | UnitTest     |
 | REQ-1.2 | Event-driven       | **When** Outbox.drain executes against an empty es_outbox table, Outbox.drain **shall** return OutboxEmpty without invoking EventBus.publish.                                                                                                      | Outbox.drain               | UnitTest     |
 | REQ-1.3 | Unwanted behaviour | **If** EventBus.publish fails on an outbox row during Outbox.drain, **then** Outbox.drain **shall** fail with OutboxPublishError while leaving the failed row and all subsequent rows in es_outbox for retry on the next alarm.                    | OutboxPublishError         | UnitTest     |
-| REQ-1.4 | Unwanted behaviour | **If** a stored row in es_outbox contains invalid metadata JSON or a corrupt stream_version, **then** Outbox.drain **shall** fail with EventStreamCorruptionError.                                                                                 | EventStreamCorruptionError | UnitTest     |
+| REQ-1.4 | Unwanted behaviour | **If** a stored row in es_outbox contains invalid metadata JSON, metadata disagreeing with the row identity, or a corrupt stream_version, **then** Outbox.drain **shall** fail with EventStreamCorruptionError before invoking EventBus.publish.   | EventStreamCorruptionError | UnitTest     |
 
 ### 2 · Pure Cross-Aggregate Sequencing Decider
 
@@ -90,12 +90,12 @@ The `Verification` column in the EARS table maps each requirement to its determi
 
 | ID      | Pattern            | Requirement                                                                                                                                                                                                                                                                                                  | Effect Symbol                    | Verification |
 | ------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------- | ------------ |
-| REQ-3.1 | Event-driven       | **When** ProjectorInfra.initTables runs on a projector database, ProjectorInfra.initTables **shall** apply numbered SqliteMigrator migrations creating es_event_archive, es_projection_checkpoints, and es_projection_gaps.                                                                                  | ProjectorInfra.initTables        | UnitTest     |
+| REQ-3.1 | Event-driven       | **When** ProjectorInfra.initTables runs on a projector database, ProjectorInfra.initTables **shall** apply numbered SqliteMigrator migrations starting at 1 on the dedicated es_projector_sql_migrations table creating es_event_archive, es_projection_checkpoints, and es_projection_gaps.                 | ProjectorInfra.initTables        | UnitTest     |
 | REQ-3.2 | Event-driven       | **When** Projector.ingest receives a PublishedEventEnvelope whose streamVersion equals the next expected version for a subscribed projection, Projector.ingest **shall** atomically archive the event, invoke CrossProjection.apply for the event and any unblocked parked gaps, and advance the checkpoint. | Projector.ingest                 | UnitTest     |
 | REQ-3.3 | Event-driven       | **When** Projector.ingest receives a duplicate PublishedEventEnvelope at or below a projection's checkpointVersion, Projector.ingest **shall** skip CrossProjection.apply and preserve the existing read model state and checkpoint.                                                                         | Projector.ingest                 | UnitTest     |
 | REQ-3.4 | Event-driven       | **When** Projector.ingest receives an out-of-order PublishedEventEnvelope above checkpointVersion plus one, Projector.ingest **shall** record the event in es_event_archive and es_projection_gaps without advancing the checkpoint until the missing version arrives.                                       | Projector.ingest                 | UnitTest     |
 | REQ-3.5 | Event-driven       | **When** CrossProjection.apply is invoked for a domain event and metadata, CrossProjection.apply **shall** update the cross-aggregate read model table in the projector database.                                                                                                                            | CrossProjection.apply            | UnitTest     |
-| REQ-3.6 | Unwanted behaviour | **If** a PublishedEventEnvelope or parked row has corrupt JSON, a zero streamVersion, a metadata mismatch, or conflicts with an existing archived event payload at the same version, **then** Projector.ingest **shall** roll back and fail with ProjectionArchiveCorruptionError.                           | ProjectionArchiveCorruptionError | UnitTest     |
+| REQ-3.6 | Unwanted behaviour | **If** a PublishedEventEnvelope or parked row has corrupt JSON, a zero or non-integer streamVersion, a metadata mismatch, or conflicts with an existing archived event payload at the same version, **then** Projector.ingest **shall** roll back and fail with ProjectionArchiveCorruptionError.            | ProjectionArchiveCorruptionError | UnitTest     |
 
 ### 4 · Archive Rebuild, Queries, and Catch-Up Verification
 
@@ -112,8 +112,8 @@ The `Verification` column in the EARS table maps each requirement to its determi
 
 ## Assumptions
 
-- **REQ-1.1:** `Outbox.drain` deletes each row from `es_outbox` immediately after `EventBus.publish` succeeds for that row, ensuring that if an alarm crashes or `EventBus.publish` fails mid-batch, any unacknowledged event remains in `es_outbox` for at-least-once redelivery while any already-published event is idempotently deduplicated by `Projector.ingest`.
-- **REQ-3.1:** Both aggregate SQLite and cross-aggregate D1/SQLite projector storage execute over `effect/sql/SqlClient` and `@effect/sql-sqlite-do/SqliteMigrator` against real `workerd` SQLite instances via `@alchemy.run/cloudflare-runtime` in compliance with `harness:SPEC-0006` and `harness:ADR-0008`.
+- **REQ-1.1:** `Outbox.drain` does not wrap the entire batch in a single SQLite transaction because `EventBus.publish` performs external I/O; instead, it deletes each row from `es_outbox` immediately after `EventBus.publish` succeeds for that row, ensuring that if an alarm crashes or `EventBus.publish` fails mid-batch, any unacknowledged event remains in `es_outbox` for at-least-once redelivery while any already-published event is idempotently deduplicated by `Projector.ingest`.
+- **REQ-3.1:** Both aggregate SQLite and cross-aggregate D1/SQLite projector storage execute over `effect/sql/SqlClient` and `@effect/sql-sqlite-do/SqliteMigrator` against real `workerd` SQLite instances via `@alchemy.run/cloudflare-runtime` in compliance with `harness:SPEC-0006` and `harness:ADR-0008`. Projector migrations use a dedicated tracking table (`es_projector_sql_migrations`) numbered from `1` so aggregate and projector migrations can run in any order on either separate or shared SQLite databases without skipping each other.
 - **REQ-4.1:** During `Projector.rebuild`, archived events are replayed ordered by `(aggregate_id ASC, stream_version ASC)` after verifying that each aggregate stream in `es_event_archive` is contiguous starting from version `1`.
 
 ## Out of scope
@@ -124,14 +124,15 @@ The `Verification` column in the EARS table maps each requirement to its determi
 
 ## Known residual risks
 
-- If an aggregate stream skips version `1` and only publishes version `2`, the projector will keep version `2` parked in `es_projection_gaps` and `Projector.checkCatchUp` will report `Lagging` until version `1` is delivered from the outbox.
+- If an aggregate stream skips version `1` and only publishes version `2`, the projector will keep version `2` parked in `es_projection_gaps`, `Projector.checkCatchUp` will report `Lagging`, and `Projector.rebuild` will fail closed with `ProjectionArchiveCorruptionError` (`REQ-4.6`) until version `1` is delivered from the outbox to make the archive contiguous.
+- Because `Outbox.drain` processes rows strictly in `ORDER BY id ASC` and fails closed on corrupt rows (`REQ-1.4`), a corrupt outbox head blocks subsequent outbox rows in that Durable Object until repaired or removed.
 
 ## Acceptance criteria
 
 - All requirement rows pass declared verification methods (`UnitTest`, `PropertyTest`, `GraphCheck`).
 - Killing or failing the outbox drain mid-batch and restarting delivers every outbox event at least once, and the cross-aggregate projection changes once per event.
 - Out-of-order event delivery is parked in `es_projection_gaps` and automatically applied in contiguous order once the missing version arrives.
-- Rebuilding the cross-aggregate projection from `es_event_archive` produces the exact same read model rows and checkpoints as incremental live ingestion.
+- Rebuilding the cross-aggregate projection from a contiguous `es_event_archive` produces the exact same read model rows and checkpoints as incremental live ingestion while preserving checkpoints and gaps belonging to other projection processors.
 
 ## Verified Plan Topology Graph
 

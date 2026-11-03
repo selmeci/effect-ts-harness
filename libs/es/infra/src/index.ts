@@ -15,6 +15,7 @@ import {
   checkProjectorCatchUp,
   ingestPublishedEvent,
   initializeProjectorTables,
+  PROJECTOR_MIGRATIONS_TABLE,
   projectorCoreMigrations,
   rebuildProjectorFromArchive,
 } from "./projector.js"
@@ -32,6 +33,7 @@ export {
   initializeProjectorTables,
   isEventStreamUniqueConflict,
   loadAggregate,
+  PROJECTOR_MIGRATIONS_TABLE,
   projectorCoreMigrations,
   rebuildProjectorFromArchive,
 }
@@ -65,6 +67,7 @@ const _makeProjectorMigratorLayer = (
       ...projectorCoreMigrations,
       ...additionalMigrations,
     }),
+    table: PROJECTOR_MIGRATIONS_TABLE,
   })
 
 export {

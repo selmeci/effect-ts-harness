@@ -164,7 +164,7 @@ Runtime telemetry is continuously validated by deterministic gates:
 
 ### 6.1 `SpanBudget.decide` (Performance & Anti-Pattern Gate)
 
-Defined in `libs/harness/gates/src/span-budget.ts`, this pure decider evaluates captured trace trees against operational thresholds:
+Defined in `libs/harness/gates/src/span-budget.ts`, this pure decider (`decideSpanBudgets` / `checkSpanBudgets`) is invoked inside trace-instrumented tests (alongside `runWithTestTracer`) to evaluate captured trace trees against operational thresholds (it is not invoked automatically by `handleVerify` in the CLI):
 
 1. **N+1 Query Detection (`n-plus-one-call`):**
    - Counts repeated child span invocations under a single parent span (`parentSpanId::childName`).
@@ -173,9 +173,9 @@ Defined in `libs/harness/gates/src/span-budget.ts`, this pure decider evaluates 
 2. **Span Duration Budgets (`span-duration-exceeded`):**
    - Asserts that critical operations do not violate execution latency budgets (`maxSpanDurationMs`).
 
-### 6.2 `harness gc --strict` (`dead-domain-effect-fn`)
+### 6.2 `harness gc --strict` (`untested-effect-fn`)
 
-If a domain function in `type:domain` has **0 reaching tests** (0 incoming `ExercisesSpan` or `TracedCall` edges), the zero-entropy garbage collection gate fails. Untested domain code cannot be merged.
+If a non-stub `Effect.fn` in `type:domain` or `type:contract` has **0 reaching tests** (0 incoming `ExercisesSpan` or `TracedCall` edges), the zero-entropy garbage collection gate (`libs/harness/gates/src/gc-check.ts`) fails with `untested-effect-fn`. During `harness verify` and static workspace graph extraction, `ExercisesSpan` edges are also synthesized by scanning test source files for imported `Effect.fn` references in addition to dynamic `runWithTestTracer` span capture.
 
 ### 6.3 `OntologyInvariants.decide` (`ontology-unverified-requirement`)
 

@@ -58,6 +58,11 @@ Event sourcing reducers (`evolve(state, event)`) must maintain deterministic mon
 - **Terminal State Preservation:** Verify that terminal state variants (e.g. `CheckedOut`, `Cancelled`, `Closed`, `Archived`) cannot be mutated or reverted to non-terminal states by subsequent folded events during event stream replay.
 - **Monotonic Version Sequencing:** Verify that projections and reducers reject or ignore duplicate/out-of-order versions during replay without corrupting state.
 
+### 6. `SqliteMigrator` Table Isolation & Untrusted SQL Row Decoding in `type:infra`
+
+- **Migration Table Isolation:** Effect's `Migrator.make` skips any migration with `id <= latestMigrationId` recorded in the migration tracking table (`effect_sql_migrations` by default) without checking migration names. If a package defines multiple migrators (e.g. aggregate tables vs projector tables), each migrator MUST start at `1_` and specify a distinct `table` option (e.g. `table: "es_projector_sql_migrations"`) in both `SqliteMigrator.run` and `SqliteMigrator.layer`.
+- **No Raw `<Brand>.make(row.*)` on Database Columns:** SQLite `INTEGER` column affinity permits storing floating-point values (`1.5`) or negative numbers, and `<Brand>.make(value)` throws an uncatchable synchronous defect (`Die`) on invalid input. All database row columns in `type:infra` must be decoded via `Schema.decodeUnknownOption` / `Schema.decodeOption` / `Schema.decodeEffect` and mapped to a typed `Schema.TaggedError` in `E`.
+
 ## Confidence Rubric & Quote-the-Line Gate
 
 ### Confidence Levels
