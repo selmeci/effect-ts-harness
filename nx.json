@@ -42,10 +42,7 @@
     },
     "format:check": {
       "cache": true,
-      "inputs": [
-        "default",
-        "{workspaceRoot}/.oxfmtrc.json"
-      ]
+      "inputs": ["default", "{workspaceRoot}/.oxfmtrc.json"]
     },
     "test": {
       "cache": true,
