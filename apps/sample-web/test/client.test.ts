@@ -8,13 +8,13 @@ import {
   type Photo,
   PhotoId,
   PhotoName,
-  SampleApi
+  SampleApi,
 } from "@harness/sample-contract"
 import {
   SampleApiClient,
   listPhotosAtom,
   getPhotoByIdAtom,
-  createPhotoMutation
+  createPhotoMutation,
 } from "../src/client.js"
 import { execSync } from "node:child_process"
 import * as path from "node:path"
@@ -29,14 +29,14 @@ const testPhotos: readonly Photo[] = [
     id: PhotoId.make(1),
     name: PhotoName.make("photo1.jpg"),
     albumId: AlbumId.make("vacation"),
-    createdAt: CreatedAtMillis.make(1000)
+    createdAt: CreatedAtMillis.make(1000),
   },
   {
     id: PhotoId.make(2),
     name: PhotoName.make("photo2.jpg"),
     albumId: AlbumId.make("vacation"),
-    createdAt: CreatedAtMillis.make(2000)
-  }
+    createdAt: CreatedAtMillis.make(2000),
+  },
 ]
 
 const getExecErrorOutput = (err: unknown): string => {
@@ -58,67 +58,70 @@ describe("SampleApiClient and AtomHttpApi", () => {
   })
 
   it("executes typed queries and mutations against SampleApi via AtomRegistry", async () => {
-    class MockSampleApiClient extends AtomHttpApi.Service<MockSampleApiClient>()("MockSampleApiClient", {
-      api: SampleApi,
-      baseUrl: "http://localhost:8787",
-      httpClient: Layer.succeed(
-        HttpClient.HttpClient,
-        HttpClient.make((request) =>
-          Effect.sync(() => {
-            const url = new URL(request.url)
-            if (request.method === "GET" && url.pathname === "/photos") {
-              return HttpClientResponse.fromWeb(request, Response.json(testPhotos))
-            }
-            if (request.method === "GET" && url.pathname === "/photos/1") {
-              return HttpClientResponse.fromWeb(request, Response.json(testPhotos[0]))
-            }
-            if (request.method === "POST" && url.pathname === "/photos") {
-              const newPhoto: Photo = {
-                id: PhotoId.make(3),
-                name: PhotoName.make("new.jpg"),
-                albumId: AlbumId.make("vacation"),
-                createdAt: CreatedAtMillis.make(3000)
+    class MockSampleApiClient extends AtomHttpApi.Service<MockSampleApiClient>()(
+      "MockSampleApiClient",
+      {
+        api: SampleApi,
+        baseUrl: "http://localhost:8787",
+        httpClient: Layer.succeed(
+          HttpClient.HttpClient,
+          HttpClient.make((request) =>
+            Effect.sync(() => {
+              const url = new URL(request.url)
+              if (request.method === "GET" && url.pathname === "/photos") {
+                return HttpClientResponse.fromWeb(request, Response.json(testPhotos))
               }
-              return HttpClientResponse.fromWeb(request, Response.json(newPhoto))
-            }
-            return HttpClientResponse.fromWeb(request, new Response("Not found", { status: 404 }))
-          })
-        )
-      )
-    }) {}
+              if (request.method === "GET" && url.pathname === "/photos/1") {
+                return HttpClientResponse.fromWeb(request, Response.json(testPhotos[0]))
+              }
+              if (request.method === "POST" && url.pathname === "/photos") {
+                const newPhoto: Photo = {
+                  id: PhotoId.make(3),
+                  name: PhotoName.make("new.jpg"),
+                  albumId: AlbumId.make("vacation"),
+                  createdAt: CreatedAtMillis.make(3000),
+                }
+                return HttpClientResponse.fromWeb(request, Response.json(newPhoto))
+              }
+              return HttpClientResponse.fromWeb(request, new Response("Not found", { status: 404 }))
+            }),
+          ),
+        ),
+      },
+    ) {}
 
     const queryAtom = MockSampleApiClient.query("photos", "listPhotos", {})
     const getAtom = MockSampleApiClient.query("photos", "getPhoto", {
-      params: { id: PhotoId.make(1) }
+      params: { id: PhotoId.make(1) },
     })
     const mutation = MockSampleApiClient.mutation("photos", "createPhoto")
 
     const registry = AtomRegistry.make()
     try {
       const photos = await Effect.runPromise(
-        AtomRegistry.getResult(registry, queryAtom, { suspendOnWaiting: true })
+        AtomRegistry.getResult(registry, queryAtom, { suspendOnWaiting: true }),
       )
       expect(photos).toEqual(testPhotos)
 
       const single = await Effect.runPromise(
-        AtomRegistry.getResult(registry, getAtom, { suspendOnWaiting: true })
+        AtomRegistry.getResult(registry, getAtom, { suspendOnWaiting: true }),
       )
       expect(single).toEqual(testPhotos[0])
 
       registry.set(mutation, {
         payload: {
           name: PhotoName.make("new.jpg"),
-          albumId: AlbumId.make("vacation")
-        }
+          albumId: AlbumId.make("vacation"),
+        },
       })
       const created = await Effect.runPromise(
-        AtomRegistry.getResult(registry, mutation, { suspendOnWaiting: true })
+        AtomRegistry.getResult(registry, mutation, { suspendOnWaiting: true }),
       )
       expect(created).toEqual({
         id: 3,
         name: "new.jpg",
         albumId: "vacation",
-        createdAt: 3000
+        createdAt: 3000,
       })
     } finally {
       registry.dispose()
@@ -135,7 +138,7 @@ describe("SampleApiClient and AtomHttpApi", () => {
         output = execSync("pnpm exec oxlint apps/sample-web/src/temp-fetch-ban-test.ts", {
           cwd: repoRoot,
           stdio: "pipe",
-          encoding: "utf-8"
+          encoding: "utf-8",
         })
       } catch (err: unknown) {
         failed = true
@@ -155,7 +158,7 @@ describe("SampleApiClient and AtomHttpApi", () => {
     try {
       fs.writeFileSync(
         tempFile,
-        'import { greet } from "@harness/sample-domain"\nexport const bad = greet\n'
+        'import { greet } from "@harness/sample-domain"\nexport const bad = greet\n',
       )
       let failed = false
       let output = ""
@@ -163,7 +166,7 @@ describe("SampleApiClient and AtomHttpApi", () => {
         output = execSync("pnpm --filter sample-web run lint", {
           cwd: repoRoot,
           stdio: "pipe",
-          encoding: "utf-8"
+          encoding: "utf-8",
         })
       } catch (err: unknown) {
         failed = true
@@ -183,28 +186,28 @@ describe("SampleApiClient and AtomHttpApi", () => {
       {
         file: path.resolve(repoRoot, "apps/sample-web/src/temp-secret-test.ts"),
         code: 'import { Config } from "effect"\nexport const secret = Config.string("API_SECRET")\n',
-        match: /Sensitive configuration keys/
+        match: /Sensitive configuration keys/,
       },
       {
         file: path.resolve(repoRoot, "apps/sample-web/src/temp-sql-test.ts"),
         code: "const db = { prepare: (q: string) => q }; const id = 1;\nexport const q = db.prepare(`SELECT * FROM t WHERE id = ${id}`)\n",
-        match: /SQL injection risk/
+        match: /SQL injection risk/,
       },
       {
         file: path.resolve(repoRoot, "libs/sample/domain/src/temp-impure-test.ts"),
         code: "export const t = Date.now()\n",
-        match: /Impure global/
+        match: /Impure global/,
       },
       {
         file: path.resolve(repoRoot, "apps/sample-web/src/temp-retry-test.ts"),
         code: 'import { Effect, Schedule } from "effect"\nexport const r = Effect.retry(Effect.void, Schedule.forever)\n',
-        match: /Unbounded Effect\.retry/
+        match: /Unbounded Effect\.retry/,
       },
       {
         file: path.resolve(repoRoot, "libs/sample/domain/src/temp-ignore-test.ts"),
         code: 'import { Effect } from "effect"\nexport const ign = Effect.ignore(Effect.void)\n',
-        match: /Swallowing typed errors with Effect\.ignore/
-      }
+        match: /Swallowing typed errors with Effect\.ignore/,
+      },
     ]
 
     for (const { file, code, match } of testCases) {
@@ -216,7 +219,7 @@ describe("SampleApiClient and AtomHttpApi", () => {
           output = execSync(`pnpm exec oxlint ${file}`, {
             cwd: repoRoot,
             stdio: "pipe",
-            encoding: "utf-8"
+            encoding: "utf-8",
           })
         } catch (err: unknown) {
           failed = true
@@ -237,18 +240,18 @@ describe("SampleApiClient and AtomHttpApi", () => {
       {
         file: path.resolve(repoRoot, "apps/sample-web/test/temp-skip-test.ts"),
         code: 'it.skip("skipped test", () => {})\n',
-        match: /Skipping or focusing tests/
+        match: /Skipping or focusing tests/,
       },
       {
         file: path.resolve(repoRoot, "apps/sample-web/test/temp-ts-ignore-test.ts"),
         code: "// @ts-ignore\nexport const x = 1\n",
-        match: /TypeScript suppression/
+        match: /TypeScript suppression/,
       },
       {
         file: path.resolve(repoRoot, "apps/sample-web/src/temp-ts-expect-error-test.ts"),
         code: "// @ts-expect-error\nexport const y = 2\n",
-        match: /TypeScript suppression directives/
-      }
+        match: /TypeScript suppression directives/,
+      },
     ]
 
     for (const { file, code, match } of testCases) {
@@ -260,7 +263,7 @@ describe("SampleApiClient and AtomHttpApi", () => {
           output = execSync(`pnpm exec oxlint ${file}`, {
             cwd: repoRoot,
             stdio: "pipe",
-            encoding: "utf-8"
+            encoding: "utf-8",
           })
         } catch (err: unknown) {
           failed = true
@@ -281,18 +284,18 @@ describe("SampleApiClient and AtomHttpApi", () => {
       {
         file: path.resolve(repoRoot, "apps/sample-web/src/temp-any-ban-test.ts"),
         code: "export const x = 1 as" + " any\n",
-        match: /Explicit 'any'/
+        match: /Explicit 'any'/,
       },
       {
         file: path.resolve(repoRoot, "apps/sample-web/src/temp-never-ban-test.ts"),
         code: "export const y = 1 as" + " never\n",
-        match: /Unsafe 'never'/
+        match: /Unsafe 'never'/,
       },
       {
         file: path.resolve(repoRoot, "apps/sample-web/src/temp-double-cast-ban-test.ts"),
         code: "export const z = 1 as" + " unknown as" + " string\n",
-        match: /Double type assertions/
-      }
+        match: /Double type assertions/,
+      },
     ]
 
     for (const { file, code, match } of testCases) {
@@ -304,7 +307,7 @@ describe("SampleApiClient and AtomHttpApi", () => {
           output = execSync(`pnpm exec oxlint ${file}`, {
             cwd: repoRoot,
             stdio: "pipe",
-            encoding: "utf-8"
+            encoding: "utf-8",
           })
         } catch (err: unknown) {
           failed = true

@@ -33,7 +33,7 @@ export type GreetInput = typeof GreetInput.Type
 
 export const DecideAlbumQuotaInput = Schema.Struct({
   albumId: AlbumId,
-  currentCount: AlbumPhotoCount
+  currentCount: AlbumPhotoCount,
 })
 export type DecideAlbumQuotaInput = typeof DecideAlbumQuotaInput.Type
 
@@ -42,42 +42,42 @@ export const Photo = Schema.Struct({
   id: PhotoId,
   name: PhotoName,
   albumId: AlbumId,
-  createdAt: CreatedAtMillis
+  createdAt: CreatedAtMillis,
 })
 export type Photo = typeof Photo.Type
 
 export const CreatePhotoInput = Schema.Struct({
   name: PhotoName,
-  albumId: AlbumId
+  albumId: AlbumId,
 })
 export type CreatePhotoInput = typeof CreatePhotoInput.Type
 
 // Tagged Errors
 export class PhotoNotFoundError extends Schema.TaggedError<PhotoNotFoundError>()(
   "PhotoNotFoundError",
-  { id: PhotoId }
+  { id: PhotoId },
 ) {}
 
 export class AlbumQuotaExceededError extends Schema.TaggedError<AlbumQuotaExceededError>()(
   "AlbumQuotaExceededError",
-  { albumId: AlbumId, count: AlbumPhotoCount }
+  { albumId: AlbumId, count: AlbumPhotoCount },
 ) {}
 
 // HttpApi Group & API
 export const PhotosApiGroup = HttpApiGroup.make("photos").add(
   HttpApiEndpoint.get("listPhotos", "/photos", {
-    success: Schema.Array(Photo)
+    success: Schema.Array(Photo),
   }),
   HttpApiEndpoint.post("createPhoto", "/photos", {
     payload: CreatePhotoInput,
     success: Photo,
-    error: AlbumQuotaExceededError
+    error: AlbumQuotaExceededError,
   }),
   HttpApiEndpoint.get("getPhoto", "/photos/:id", {
     params: Schema.Struct({ id: PhotoIdFromString }),
     success: Photo,
-    error: PhotoNotFoundError
-  })
+    error: PhotoNotFoundError,
+  }),
 )
 
 export const SampleApi = HttpApi.make("SampleApi").add(PhotosApiGroup)
@@ -89,20 +89,17 @@ export const buildOpenApiSpec = (): unknown => OpenApi.fromApi(SampleApi)
 export const IncrementAlbumCount = Rpc.make("IncrementAlbumCount", {
   payload: Schema.Struct({ albumId: AlbumId }),
   success: AlbumPhotoCount,
-  error: AlbumQuotaExceededError
+  error: AlbumQuotaExceededError,
 })
 export type IncrementAlbumCount = typeof IncrementAlbumCount
 
 export const GetAlbumCount = Rpc.make("GetAlbumCount", {
   payload: Schema.Struct({ albumId: AlbumId }),
-  success: AlbumPhotoCount
+  success: AlbumPhotoCount,
 })
 export type GetAlbumCount = typeof GetAlbumCount
 
-export const PhotoCounterRpc = RpcGroup.make(
-  IncrementAlbumCount,
-  GetAlbumCount
-)
+export const PhotoCounterRpc = RpcGroup.make(IncrementAlbumCount, GetAlbumCount)
 export type PhotoCounterRpc = typeof PhotoCounterRpc
 
 // Pure Breaking Change Detector
@@ -143,7 +140,7 @@ interface OpenApiDocument {
 const checkSchemaProperties = (
   location: string,
   baseline: OpenApiSchemaNode | undefined,
-  current: OpenApiSchemaNode | undefined
+  current: OpenApiSchemaNode | undefined,
 ): ReadonlyArray<string> => {
   if (baseline == null) {
     return []
@@ -160,7 +157,10 @@ const checkSchemaProperties = (
   }
 
   if (baseline.properties != null && typeof baseline.properties === "object") {
-    const currentProps = (current?.properties != null && typeof current.properties === "object") ? current.properties : {}
+    const currentProps =
+      current?.properties != null && typeof current.properties === "object"
+        ? current.properties
+        : {}
     for (const prop of Object.keys(baseline.properties)) {
       if (!(prop in currentProps)) {
         issues.push(`Removed property from ${location}: ${prop}`)
@@ -169,7 +169,8 @@ const checkSchemaProperties = (
   }
 
   if (baseline.items != null && typeof baseline.items === "object") {
-    const currentItems = (current?.items != null && typeof current.items === "object") ? current.items : undefined
+    const currentItems =
+      current?.items != null && typeof current.items === "object" ? current.items : undefined
     issues.push(...checkSchemaProperties(`${location} items`, baseline.items, currentItems))
   }
 
@@ -178,7 +179,7 @@ const checkSchemaProperties = (
 
 export const detectOpenApiBreakingChanges = (
   baselineSpec: unknown,
-  currentSpec: unknown
+  currentSpec: unknown,
 ): ReadonlyArray<string> => {
   if (
     baselineSpec == null ||
@@ -232,8 +233,8 @@ export const detectOpenApiBreakingChanges = (
             ...checkSchemaProperties(
               `${method.toUpperCase()} ${path} ${status}`,
               baselineSchema,
-              currentSchema
-            )
+              currentSchema,
+            ),
           )
         }
       }
@@ -253,8 +254,8 @@ export const detectOpenApiBreakingChanges = (
       ...checkSchemaProperties(
         `schema ${schemaName}`,
         baselineComponentSchema,
-        currentComponentSchema
-      )
+        currentComponentSchema,
+      ),
     )
   }
 

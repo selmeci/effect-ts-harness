@@ -6,7 +6,7 @@ import {
   runWithTestTracer,
   toTraceEdges,
   withRecordedTestSpan,
-  type RecordedSpanEvent
+  type RecordedSpanEvent,
 } from "../src/recording-tracer.js"
 
 const greet = Effect.fn("Sample.greet")(function* (input: { readonly name: string }) {
@@ -27,15 +27,15 @@ describe("recording tracer with synthetic root TestSpan", () => {
           indexEffectFnsInFile(
             "libs/sample/domain/src/index.ts",
             `export const greet = Effect.fn("Sample.greet")(function* () {})`,
-            "domain"
-          )[0]!
-        ]
+            "domain",
+          )[0]!,
+        ],
       ])
 
       const { result, edges } = yield* runWithTestTracer(
         "libs/sample/domain/test/index.test.ts::greets by name",
         greet({ name: "Roman" }),
-        fnIndex
+        fnIndex,
       )
 
       expect(result).toBe("Hello, Roman!")
@@ -44,10 +44,10 @@ describe("recording tracer with synthetic root TestSpan", () => {
           testId: "libs/sample/domain/test/index.test.ts::greets by name",
           calleeQualname: "libs/sample/domain/src/index.ts#greet",
           callCount: 1,
-          receiverLayer: null
-        }
+          receiverLayer: null,
+        },
       ])
-    })
+    }),
   )
 
   it.effect("records both ExercisesSpan and parent->child TracedCall edges", () =>
@@ -58,14 +58,14 @@ describe("recording tracer with synthetic root TestSpan", () => {
         export const greet = Effect.fn("Sample.greet")(function* () {})
         export const helper = Effect.fn("Sample.helper")(function* () {})
         `,
-        "domain"
+        "domain",
       )
       const fnIndex = new Map(fns.map((f) => [f.spanName, f]))
 
       const { edges } = yield* runWithTestTracer(
         "libs/sample/domain/test/index.test.ts::helper calls greet",
         helper("Roman"),
-        fnIndex
+        fnIndex,
       )
 
       expect(edges.tracedCalls).toEqual([
@@ -73,11 +73,11 @@ describe("recording tracer with synthetic root TestSpan", () => {
           callerQualname: "libs/sample/domain/src/index.ts#helper",
           calleeQualname: "libs/sample/domain/src/index.ts#greet",
           callCount: 1,
-          receiverLayer: null
-        }
+          receiverLayer: null,
+        },
       ])
       expect(edges.exercisesSpans).toHaveLength(2)
-    })
+    }),
   )
 
   it.effect("aggregates repeated calls by summing callCount", () =>
@@ -88,7 +88,7 @@ describe("recording tracer with synthetic root TestSpan", () => {
         export const greet = Effect.fn("Sample.greet")(function* () {})
         export const helper = Effect.fn("Sample.helper")(function* () {})
         `,
-        "domain"
+        "domain",
       )
       const fnIndex = new Map(fns.map((f) => [f.spanName, f]))
 
@@ -100,7 +100,7 @@ describe("recording tracer with synthetic root TestSpan", () => {
       const { edges } = yield* runWithTestTracer(
         "libs/sample/domain/test/index.test.ts::repeated calls",
         repeatEffect,
-        fnIndex
+        fnIndex,
       )
 
       expect(edges.tracedCalls).toEqual([
@@ -108,19 +108,19 @@ describe("recording tracer with synthetic root TestSpan", () => {
           callerQualname: "libs/sample/domain/src/index.ts#helper",
           calleeQualname: "libs/sample/domain/src/index.ts#greet",
           callCount: 2,
-          receiverLayer: null
-        }
+          receiverLayer: null,
+        },
       ])
 
       const helperExercise = edges.exercisesSpans.find(
-        (e) => e.calleeQualname === "libs/sample/domain/src/index.ts#helper"
+        (e) => e.calleeQualname === "libs/sample/domain/src/index.ts#helper",
       )
       const greetExercise = edges.exercisesSpans.find(
-        (e) => e.calleeQualname === "libs/sample/domain/src/index.ts#greet"
+        (e) => e.calleeQualname === "libs/sample/domain/src/index.ts#greet",
       )
       expect(helperExercise?.callCount).toBe(2)
       expect(greetExercise?.callCount).toBe(2)
-    })
+    }),
   )
 
   it.effect("links external workerd spans with matching traceId", () =>
@@ -131,7 +131,7 @@ describe("recording tracer with synthetic root TestSpan", () => {
         export const greet = Effect.fn("Sample.greet")(function* () {})
         export const externalHandler = Effect.fn("Sample.externalHandler")(function* () {})
         `,
-        "domain"
+        "domain",
       )
       const fnIndex = new Map(fns.map((f) => [f.spanName, f]))
 
@@ -143,35 +143,28 @@ describe("recording tracer with synthetic root TestSpan", () => {
       })
 
       const testId = "libs/sample/domain/test/index.test.ts::external span test"
-      const res = yield* runWithTestTracer(
-        testId,
-        effectWithCapture,
-        fnIndex
-      )
+      const res = yield* runWithTestTracer(testId, effectWithCapture, fnIndex)
 
       const externalSpan: RecordedSpanEvent = {
         traceId: capturedTraceId,
         spanId: "ext-span-1",
         name: "Sample.externalHandler",
         parentSpanId: res.spans[0]?.spanId ?? null,
-        attributes: {}
+        attributes: {},
       }
 
-      const edgesWithExternal = toTraceEdges(
-        [...res.spans, externalSpan],
-        fnIndex
-      )
+      const edgesWithExternal = toTraceEdges([...res.spans, externalSpan], fnIndex)
 
       const externalExercise = edgesWithExternal.exercisesSpans.find(
-        (e) => e.calleeQualname === "libs/sample/domain/src/index.ts#externalHandler"
+        (e) => e.calleeQualname === "libs/sample/domain/src/index.ts#externalHandler",
       )
       expect(externalExercise).toEqual({
         testId,
         calleeQualname: "libs/sample/domain/src/index.ts#externalHandler",
         callCount: 1,
-        receiverLayer: null
+        receiverLayer: null,
       })
-    })
+    }),
   )
 
   it.effect("respects receiverLayer attribute and default receiverLayer", () =>
@@ -182,16 +175,16 @@ describe("recording tracer with synthetic root TestSpan", () => {
           indexEffectFnsInFile(
             "libs/sample/domain/src/index.ts",
             `export const greet = Effect.fn("Sample.greet")(function* () {})`,
-            "domain"
-          )[0]!
-        ]
+            "domain",
+          )[0]!,
+        ],
       ])
 
       const { edges } = yield* runWithTestTracer(
         "libs/sample/domain/test/index.test.ts::receiverLayer test",
         greet({ name: "Roman" }),
         fnIndex,
-        { receiverLayer: "SampleLive" }
+        { receiverLayer: "SampleLive" },
       )
 
       expect(edges.exercisesSpans).toEqual([
@@ -199,10 +192,10 @@ describe("recording tracer with synthetic root TestSpan", () => {
           testId: "libs/sample/domain/test/index.test.ts::receiverLayer test",
           calleeQualname: "libs/sample/domain/src/index.ts#greet",
           callCount: 1,
-          receiverLayer: "SampleLive"
-        }
+          receiverLayer: "SampleLive",
+        },
       ])
-    })
+    }),
   )
 
   it.effect("withRecordedTestSpan combinator installs tracer and provides SpanRecorder", () =>
@@ -211,14 +204,12 @@ describe("recording tracer with synthetic root TestSpan", () => {
         const res = yield* greet({ name: "Roman" })
         const recorder = yield* SpanRecorder
         return { res, spanCount: recorder.spans.length }
-      }).pipe(
-        withRecordedTestSpan("libs/sample/domain/test/index.test.ts::combinator test")
-      )
+      }).pipe(withRecordedTestSpan("libs/sample/domain/test/index.test.ts::combinator test"))
 
       const { res, spanCount } = yield* effect
       expect(res).toBe("Hello, Roman!")
       expect(spanCount).toBeGreaterThanOrEqual(1)
-    })
+    }),
   )
 
   it.effect(
@@ -231,13 +222,12 @@ describe("recording tracer with synthetic root TestSpan", () => {
             indexEffectFnsInFile(
               "libs/sample/domain/src/index.ts",
               `export const greet = Effect.fn("Sample.greet")(function* () {})`,
-              "domain"
-            )[0]!
-          ]
+              "domain",
+            )[0]!,
+          ],
         ])
 
-        const testId =
-          "libs/sample/domain/test/index.test.ts::receiverLayer from root TestSpan"
+        const testId = "libs/sample/domain/test/index.test.ts::receiverLayer from root TestSpan"
         const effect = Effect.gen(function* () {
           yield* greet({ name: "Roman" })
           const recorder = yield* SpanRecorder
@@ -250,10 +240,10 @@ describe("recording tracer with synthetic root TestSpan", () => {
             testId,
             calleeQualname: "libs/sample/domain/src/index.ts#greet",
             callCount: 1,
-            receiverLayer: "SampleLive"
-          }
+            receiverLayer: "SampleLive",
+          },
         ])
-      })
+      }),
   )
 
   it.effect("tracks durationMs when spans end via makeRecordingTracer", () =>
@@ -264,15 +254,15 @@ describe("recording tracer with synthetic root TestSpan", () => {
           indexEffectFnsInFile(
             "libs/sample/domain/src/index.ts",
             `export const greet = Effect.fn("Sample.greet")(function* () {})`,
-            "domain"
-          )[0]!
-        ]
+            "domain",
+          )[0]!,
+        ],
       ])
 
       const { spans } = yield* runWithTestTracer(
         "libs/sample/domain/test/index.test.ts::duration check",
         greet({ name: "Roman" }),
-        fnIndex
+        fnIndex,
       )
 
       expect(spans.length).toBeGreaterThanOrEqual(1)
@@ -281,6 +271,6 @@ describe("recording tracer with synthetic root TestSpan", () => {
         expect(typeof span.durationMs).toBe("number")
         expect(span.durationMs).toBeGreaterThanOrEqual(0)
       }
-    })
+    }),
   )
 })

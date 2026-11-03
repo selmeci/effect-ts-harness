@@ -115,14 +115,14 @@ graph TD
 
 Architektúra vyžaduje prísnu jednosmernú hierarchiu závislostí riadenú značkami (tags) v `package.json` a kontrolovanú linterom:
 
-| Značka Nx | Účel a zodpovednosť | Povolené importy | Zakázané importy |
-| :--- | :--- | :--- | :--- |
-| `type:contract` | Zdieľané `Schema`, `HttpApi`, `RpcGroup`, doménové a API chyby | Výhradne `effect` | Akékoľvek lokálne knižnice alebo 3rd party I/O |
-| `type:domain` | Prípady použitia a čisté rozhodovače (`.decide`) | `contract`, `service`, (`@harness/gates` len pre `stub` v pláne) | `type:infra`, `alchemy`, `drizzle-orm`, I/O ovládače |
-| `type:service` | Servisné rozhrania (`Context.Service`), kontrakty repozitárov | `contract`, `domain` | `type:infra`, konkrétne databázové knižnice |
-| `type:infra` | Živé vrstvy (`Layer.Live`), Drizzle repozitáre, RPC handlery, Alchemy zdroje | `contract`, `domain`, `service`, `infra` | Žiadne obmedzenia v rámci monorepa |
-| `type:app` | Spojenie vrstiev a runtime entrypoint (`alchemy.run.ts`) | Všetky balíky monorepa | — |
-| `type:app`, `scope:web` | Frontend aplikácia (Vite + React + AtomHttpApi) | `contract` a UI komponenty | `type:infra`, `type:domain`, priamy `fetch(...)` |
+| Značka Nx               | Účel a zodpovednosť                                                          | Povolené importy                                                 | Zakázané importy                                     |
+| :---------------------- | :--------------------------------------------------------------------------- | :--------------------------------------------------------------- | :--------------------------------------------------- |
+| `type:contract`         | Zdieľané `Schema`, `HttpApi`, `RpcGroup`, doménové a API chyby               | Výhradne `effect`                                                | Akékoľvek lokálne knižnice alebo 3rd party I/O       |
+| `type:domain`           | Prípady použitia a čisté rozhodovače (`.decide`)                             | `contract`, `service`, (`@harness/gates` len pre `stub` v pláne) | `type:infra`, `alchemy`, `drizzle-orm`, I/O ovládače |
+| `type:service`          | Servisné rozhrania (`Context.Service`), kontrakty repozitárov                | `contract`, `domain`                                             | `type:infra`, konkrétne databázové knižnice          |
+| `type:infra`            | Živé vrstvy (`Layer.Live`), Drizzle repozitáre, RPC handlery, Alchemy zdroje | `contract`, `domain`, `service`, `infra`                         | Žiadne obmedzenia v rámci monorepa                   |
+| `type:app`              | Spojenie vrstiev a runtime entrypoint (`alchemy.run.ts`)                     | Všetky balíky monorepa                                           | —                                                    |
+| `type:app`, `scope:web` | Frontend aplikácia (Vite + React + AtomHttpApi)                              | `contract` a UI komponenty                                       | `type:infra`, `type:domain`, priamy `fetch(...)`     |
 
 ---
 
@@ -261,6 +261,7 @@ Keď je plán uzamknutý v grafe, nastáva implementácia:
      4. **allow:** až potom shellové operátory a prefixový allowlist.
 
      Podrobnosti sú v `harness:SPEC-0001`.
+
    - **`PostToolUse` hook (`harness ingest`):** Po každej úprave súboru reindexuje `Effect.fn` spany pre okamžitú navigáciu.
    - **`tools/oxlint/syntax-bans.js`:**
      - Zákaz `async` / `await` $\rightarrow$ použite `Effect.gen`.
@@ -341,7 +342,7 @@ sequenceDiagram
 
     Caller->>Layer: DecisionModel.decide(Schema, input)
     activate Layer
-    
+
     par Timeout preteká s inferenciou
         Layer->>Ollama: POST /v1/chat/completions (clef-flash)
         Note over Layer,Ollama: Limit: 1500 ms (1.5 sekundy)
@@ -364,13 +365,13 @@ sequenceDiagram
 
 ### 3.2 Detailný prehľad 5 rozhodovacích schém
 
-| Rozhodovacia schéma | Kedy sa volá | Vstupné dáta | Výstupné polia a kritériá | Rozhodovacie pravidlo v kóde | Deterministický fallback (pri timeoute / offline) |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **1. `IdiomRouterV1`** (`routeStep`) | CLI `harness route` alebo MCP `harness_route` pri tvorbe skeletonu | `{ planStep: string }` | • `fitsAny`: pravdepodobnosť (0.0–1.0)<br/>• `block`: klasifikácia do 15 kategórií | Ak `fitsAny >= 0.7`, vráti sa vybraný `block`, inak `"review"` | `"review"` (žiadny vzor, manuálna kontrola) |
-| **2. `GuardV1`** (`decideGuardCommand`) | CLI `harness guard` (iba ak `classifyCommand` vráti `"escalate"`) | `{ command: string }` | • `destructive`: pravdepodobnosť<br/>• `secretAccess`: pravdepodobnosť<br/>• `exfiltration`: pravdepodobnosť | Ak ľubovoľné $\ge 0.7 \rightarrow$ `"deny"`; ak všetky tri $< 0.3 \rightarrow$ `"allow"`; inak `"ask"` | **`"ask"`** (človek musí potvrdiť; **nikdy nie `"allow"`!**) |
-| **3. `TriageV1`** (`triageFailure`) | Po zlyhaní `verify`, ak sa nezachytilo v statických pravidlách | `{ failureOutput: string }` | • `kind`: `"mechanical"` alebo `"semantic"` | Klasifikácia charakteru chyby pre nápovedu agentovi | `"semantic"` (odporučí analyzovať graf cez `harness_tests_reaching`) |
-| **4. `PlanStepCoverageV1`** (`checkPlanStepCoverage`) | Počas `harness done`, ak boli zadané kroky `planSteps` | `{ stepId, planStep, stepDiff }` | • `implemented`: pravdepodobnosť<br/>• `noOutOfScopeEdits`: pravdepodobnosť | `implemented >= 0.7` A `noOutOfScopeEdits >= 0.7` $\rightarrow$ `covered: true` | `covered: false` (pri zlyhaní decision modelu vyžaduje overenie) |
-| **5. `LearnProposalV1`** (`proposeLearningAction`) | CLI `harness learn` po zistení opakovaného trenia | `{ kind: FrictionEventKind, summary: string, detail: string, occurrences: number }` | • `actionable`: pravdepodobnosť (0.0–1.0)<br/>• `target`: klasifikácia do 4 kategórií (`agent-pattern`, `triage-rule`, `guard-allowlist`, `ast-graph-gate`) | Ak `actionable >= 0.7`, navrhne sa vybraný `target`, inak sa záznam archivuje bez povýšenia | Deterministický fallback: pri `occurrences >= 2` mapuje `kind` priamo na predvolený cieľ |
+| Rozhodovacia schéma                                   | Kedy sa volá                                                       | Vstupné dáta                                                                        | Výstupné polia a kritériá                                                                                                                                   | Rozhodovacie pravidlo v kóde                                                                           | Deterministický fallback (pri timeoute / offline)                                        |
+| :---------------------------------------------------- | :----------------------------------------------------------------- | :---------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------- |
+| **1. `IdiomRouterV1`** (`routeStep`)                  | CLI `harness route` alebo MCP `harness_route` pri tvorbe skeletonu | `{ planStep: string }`                                                              | • `fitsAny`: pravdepodobnosť (0.0–1.0)<br/>• `block`: klasifikácia do 15 kategórií                                                                          | Ak `fitsAny >= 0.7`, vráti sa vybraný `block`, inak `"review"`                                         | `"review"` (žiadny vzor, manuálna kontrola)                                              |
+| **2. `GuardV1`** (`decideGuardCommand`)               | CLI `harness guard` (iba ak `classifyCommand` vráti `"escalate"`)  | `{ command: string }`                                                               | • `destructive`: pravdepodobnosť<br/>• `secretAccess`: pravdepodobnosť<br/>• `exfiltration`: pravdepodobnosť                                                | Ak ľubovoľné $\ge 0.7 \rightarrow$ `"deny"`; ak všetky tri $< 0.3 \rightarrow$ `"allow"`; inak `"ask"` | **`"ask"`** (človek musí potvrdiť; **nikdy nie `"allow"`!**)                             |
+| **3. `TriageV1`** (`triageFailure`)                   | Po zlyhaní `verify`, ak sa nezachytilo v statických pravidlách     | `{ failureOutput: string }`                                                         | • `kind`: `"mechanical"` alebo `"semantic"`                                                                                                                 | Klasifikácia charakteru chyby pre nápovedu agentovi                                                    | `"semantic"` (odporučí analyzovať graf cez `harness_tests_reaching`)                     |
+| **4. `PlanStepCoverageV1`** (`checkPlanStepCoverage`) | Počas `harness done`, ak boli zadané kroky `planSteps`             | `{ stepId, planStep, stepDiff }`                                                    | • `implemented`: pravdepodobnosť<br/>• `noOutOfScopeEdits`: pravdepodobnosť                                                                                 | `implemented >= 0.7` A `noOutOfScopeEdits >= 0.7` $\rightarrow$ `covered: true`                        | `covered: false` (pri zlyhaní decision modelu vyžaduje overenie)                         |
+| **5. `LearnProposalV1`** (`proposeLearningAction`)    | CLI `harness learn` po zistení opakovaného trenia                  | `{ kind: FrictionEventKind, summary: string, detail: string, occurrences: number }` | • `actionable`: pravdepodobnosť (0.0–1.0)<br/>• `target`: klasifikácia do 4 kategórií (`agent-pattern`, `triage-rule`, `guard-allowlist`, `ast-graph-gate`) | Ak `actionable >= 0.7`, navrhne sa vybraný `target`, inak sa záznam archivuje bez povýšenia            | Deterministický fallback: pri `occurrences >= 2` mapuje `kind` priamo na predvolený cieľ |
 
 ---
 
@@ -425,11 +426,12 @@ Volá sa výhradne pri eskalácii neznámeho príkazu (napr. zreťazené shellov
 #### 3. `TriageV1`
 
 Statické pravidlá najskôr hľadajú známe reťazce:
+
 - `"floatingEffect"` $\rightarrow$ neobslúžený Effect hodnota,
 - `"harness/syntax-bans"` $\rightarrow$ zakázaná syntax,
 - `"no-restricted-imports"` $\rightarrow$ nepovolený import infraštruktúry v doméne,
 - `"enforce-module-boundaries"` $\rightarrow$ porušenie Nx hraníc.
-Ak sa žiadny reťazec nenájde, volá sa model:
+  Ak sa žiadny reťazec nenájde, volá sa model:
 
 - **Vstup pre model:**
   ```json
@@ -502,87 +504,117 @@ Harness CLI podporuje bezproblémovú koexistenciu oboch popredných agentickýc
 
 ### 4.1 Porovnávacia tabuľka adaptérov
 
-| Príkaz CLI | Claude Code volanie & I/O | Antigravity volanie & I/O | `exitCode` | Význam a dôsledok pre agenta |
-| :--- | :--- | :--- | :--- | :--- |
-| **`guard`** | **Arg:** `harness guard`<br/>**stdin:** `{"tool_input": {"command": "..."}}`<br/>**stdout (allow):** `""` (prázdny)<br/>**stdout (ask):** `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask", "permissionDecisionReason": "..."}}`<br/>**stderr (deny):** `Blocked by harness guard: <cmd>` | **Arg:** `harness guard --format=antigravity`<br/>**stdin:** `{"toolCall": {"name": "run_command", "args": {"CommandLine": "..."}}}`<br/>**stdout (allow):** `{"decision": "allow"}`<br/>**stdout (ask):** `{"decision": "ask", "reason": "..."}`<br/>**stdout (deny):** `{"decision": "deny", "reason": "..."}` | • `exitCode: 0` pri allow, ask a antigravity deny<br/>• `exitCode: 2` pri Claude deny | **allow:** Príkaz sa okamžite spustí.<br/>**ask:** Používateľ je vyzvaný na schválenie v UI.<br/>**deny:** Príkaz je tvrdo zablokovaný. |
-| **`ingest`** | **Arg:** `harness ingest`<br/>**stdout:** `{"indexedFns": 42}` | **Arg:** `harness ingest --format=antigravity`<br/>**stdout:** `{}` | `exitCode: 0` | Spúšťa sa v `PostToolUse` po každom zápise súboru (`write_to_file`, `replace_file_content`). Aktualizuje index spanov. |
-| **`session` / `doctor`** | **Arg:** `harness session`<br/>**stdout:** `{"nodeVersion": "...", "nodeOk": true, "snapshotDirOk": true, "omnigraphInitialized": true, "modelWarm": true, "handoff": {...}}` | **Arg:** `harness session --format=antigravity`<br/>**stdout:** `{"injectSteps": ["[Harness Context Handoff] Active stub() skeletons remaining: ..."]}` | • `exitCode: 0` (prostredie OK)<br/>• `exitCode: 1` (Node < 24 alebo zlyhanie) | Overuje dostupnosť Node.js 24+, existenciu `.harness/`, dostupnosť Omnigraphu a zahriatie modelu `clef-flash`. Cez `SessionHandoff.decide` automaticky injektuje rozpracovaný stav (`activeStubs`, `missingPlannedFns`, `stampValid`, `frictionClusters`). |
-| **`route`** | **Arg:** `harness route "<step>"`<br/>**stdout:** Názov súboru (napr. `agent-patterns/d1-repository.md` alebo `"review"`) | **Rovnaké CLI volanie** alebo cez MCP nástroj `harness_route` s parametrom `{"planStep": "..."}` | `exitCode: 0` | Nájde zodpovedajúci vzor architektúry Effect/Alchemy. |
-| **`plan-check`** | **Arg:** `harness plan-check`<br/>Voliteľne: `--graph-only`<br/>**stdout:** Kompletný Mermaid diagram grafu<br/>**stderr:** Zoznam chýb a porušení pravidiel | **Rovnaké CLI volanie** (spúšťa sa priamo v termináli agenta) | • `exitCode: 0` (plán overený)<br/>• `exitCode: 1` (chyba typov, duplicitný span, cyklus alebo nepovolená závislosť) | Overuje integritu skeletonu, generuje `.harness/plan-graph-snapshot.json` a ukladá do Omnigraph branch `plan/current`. |
-| **`gc`** | **Arg:** `harness gc`<br/>Voliteľne: `--strict`<br/>**stdout (čisté):** `{"clean": true, "findings": []}`<br/>**stderr (nálezy):** Zoznam `GcFinding` (`unused-service`, `unprovided-service`, `dead-tagged-error`, `orphan-effect-fn`, `untested-effect-fn`, `missing-decider-property-test`, `missing-pattern-doc`, `stale-doc-reference`) | **Rovnaké CLI volanie** (alebo `--format=antigravity`) | • `exitCode: 0` (graf čistý)<br/>• `exitCode: 1` (zistené mŕtve uzly/entropia) | Skenuje `HarnessGraph` cez `GraphGc.decide`. Zabraňuje hromadeniu mŕtvych chýb, nepoužitých služieb, netestovaných deciderov a chýbajúcich vzorov pred `verify` a `done`. |
-| **`mutate`** | **Arg:** `harness mutate`<br/>Voliteľne: `--strict`<br/>**stdout (100% skóre):** `{"totalMutants": 8, "killed": 8, "survived": 0, "mutationScore": 1}`<br/>**stderr (prežité mutanty):** Zoznam prežitých mutantov v `type:domain` | **Rovnaké CLI volanie** (alebo `--format=antigravity`) | • `exitCode: 0` (100% mutantov zabitých)<br/>• `exitCode: 1` (prežité mutanty pri `--strict`) | Cielené AST mutačné testovanie doménovej logiky (`MutationCheck.decide`). Injektuje hraničné a aritmetické operátory (`>=` $\to$ `>`, `+ 1` $\to$ `- 1`) a overuje, že testy majú reálnu diskriminačnú silu. |
-| **`verify`** | **Arg:** `harness verify`<br/>**stdout:** Reťazec pečiatky: `{"treeHash": "...", "timestamp": "...", "taskBranch": "impl/current"}`<br/>**stderr:** Detaily o zlyhaní testov alebo nájdených `stub()` | **Rovnaké CLI volanie** (spúšťa sa priamo v termináli agenta) | • `exitCode: 0` (overenie úspešné)<br/>• `exitCode: 1` (nájdený `stub()`, zlyhanie testu, neplatný graf) | **Jediná autorizovaná brána.** Spúšťa testy s testovacím tracerom, zapisuje `.harness/verify-stamp.json` a branch `impl/current`. |
-| **`done`** | **Arg:** `harness done`<br/>**stdout (úspech):** `""`<br/>**stdout (zlyhanie):** `{"decision": "block", "reason": "..."}` | **Arg:** `harness done --format=antigravity`<br/>**stdin:** `{"fullyIdle": true}`<br/>**stdout (úspech):** `{"decision": "stop"}`<br/>**stdout (pokračovať):** `{"decision": "continue", "reason": "..."}` | `exitCode: 0` | Záverečný `Stop` hook. Kontroluje nezmenenosť stromu cez SHA-256 pečiatku, paritu grafov plánu a implementácie a robí merge v Omnigraphe. |
-| **`learn`** | **Arg:** `harness learn`<br/>Voliteľne: `--clear`<br/>**stdout:** Prehľad klastrov trenia a odporúčaní `LearnProposalV1` | **Rovnaké CLI volanie** | `exitCode: 0` | Analyzuje `.harness/friction-log.jsonl`, navrhuje povýšenia do 4 cieľov pyramídy a s `--clear` vymaže log trenia. |
+| Príkaz CLI               | Claude Code volanie & I/O                                                                                                                                                                                                                                                                                                                    | Antigravity volanie & I/O                                                                                                                                                                                                                                                                                        | `exitCode`                                                                                                           | Význam a dôsledok pre agenta                                                                                                                                                                                                                               |
+| :----------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`guard`**              | **Arg:** `harness guard`<br/>**stdin:** `{"tool_input": {"command": "..."}}`<br/>**stdout (allow):** `""` (prázdny)<br/>**stdout (ask):** `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask", "permissionDecisionReason": "..."}}`<br/>**stderr (deny):** `Blocked by harness guard: <cmd>`                 | **Arg:** `harness guard --format=antigravity`<br/>**stdin:** `{"toolCall": {"name": "run_command", "args": {"CommandLine": "..."}}}`<br/>**stdout (allow):** `{"decision": "allow"}`<br/>**stdout (ask):** `{"decision": "ask", "reason": "..."}`<br/>**stdout (deny):** `{"decision": "deny", "reason": "..."}` | • `exitCode: 0` pri allow, ask a antigravity deny<br/>• `exitCode: 2` pri Claude deny                                | **allow:** Príkaz sa okamžite spustí.<br/>**ask:** Používateľ je vyzvaný na schválenie v UI.<br/>**deny:** Príkaz je tvrdo zablokovaný.                                                                                                                    |
+| **`ingest`**             | **Arg:** `harness ingest`<br/>**stdout:** `{"indexedFns": 42}`                                                                                                                                                                                                                                                                               | **Arg:** `harness ingest --format=antigravity`<br/>**stdout:** `{}`                                                                                                                                                                                                                                              | `exitCode: 0`                                                                                                        | Spúšťa sa v `PostToolUse` po každom zápise súboru (`write_to_file`, `replace_file_content`). Aktualizuje index spanov.                                                                                                                                     |
+| **`session` / `doctor`** | **Arg:** `harness session`<br/>**stdout:** `{"nodeVersion": "...", "nodeOk": true, "snapshotDirOk": true, "omnigraphInitialized": true, "modelWarm": true, "handoff": {...}}`                                                                                                                                                                | **Arg:** `harness session --format=antigravity`<br/>**stdout:** `{"injectSteps": ["[Harness Context Handoff] Active stub() skeletons remaining: ..."]}`                                                                                                                                                          | • `exitCode: 0` (prostredie OK)<br/>• `exitCode: 1` (Node < 24 alebo zlyhanie)                                       | Overuje dostupnosť Node.js 24+, existenciu `.harness/`, dostupnosť Omnigraphu a zahriatie modelu `clef-flash`. Cez `SessionHandoff.decide` automaticky injektuje rozpracovaný stav (`activeStubs`, `missingPlannedFns`, `stampValid`, `frictionClusters`). |
+| **`route`**              | **Arg:** `harness route "<step>"`<br/>**stdout:** Názov súboru (napr. `agent-patterns/d1-repository.md` alebo `"review"`)                                                                                                                                                                                                                    | **Rovnaké CLI volanie** alebo cez MCP nástroj `harness_route` s parametrom `{"planStep": "..."}`                                                                                                                                                                                                                 | `exitCode: 0`                                                                                                        | Nájde zodpovedajúci vzor architektúry Effect/Alchemy.                                                                                                                                                                                                      |
+| **`plan-check`**         | **Arg:** `harness plan-check`<br/>Voliteľne: `--graph-only`<br/>**stdout:** Kompletný Mermaid diagram grafu<br/>**stderr:** Zoznam chýb a porušení pravidiel                                                                                                                                                                                 | **Rovnaké CLI volanie** (spúšťa sa priamo v termináli agenta)                                                                                                                                                                                                                                                    | • `exitCode: 0` (plán overený)<br/>• `exitCode: 1` (chyba typov, duplicitný span, cyklus alebo nepovolená závislosť) | Overuje integritu skeletonu, generuje `.harness/plan-graph-snapshot.json` a ukladá do Omnigraph branch `plan/current`.                                                                                                                                     |
+| **`gc`**                 | **Arg:** `harness gc`<br/>Voliteľne: `--strict`<br/>**stdout (čisté):** `{"clean": true, "findings": []}`<br/>**stderr (nálezy):** Zoznam `GcFinding` (`unused-service`, `unprovided-service`, `dead-tagged-error`, `orphan-effect-fn`, `untested-effect-fn`, `missing-decider-property-test`, `missing-pattern-doc`, `stale-doc-reference`) | **Rovnaké CLI volanie** (alebo `--format=antigravity`)                                                                                                                                                                                                                                                           | • `exitCode: 0` (graf čistý)<br/>• `exitCode: 1` (zistené mŕtve uzly/entropia)                                       | Skenuje `HarnessGraph` cez `GraphGc.decide`. Zabraňuje hromadeniu mŕtvych chýb, nepoužitých služieb, netestovaných deciderov a chýbajúcich vzorov pred `verify` a `done`.                                                                                  |
+| **`mutate`**             | **Arg:** `harness mutate`<br/>Voliteľne: `--strict`<br/>**stdout (100% skóre):** `{"totalMutants": 8, "killed": 8, "survived": 0, "mutationScore": 1}`<br/>**stderr (prežité mutanty):** Zoznam prežitých mutantov v `type:domain`                                                                                                           | **Rovnaké CLI volanie** (alebo `--format=antigravity`)                                                                                                                                                                                                                                                           | • `exitCode: 0` (100% mutantov zabitých)<br/>• `exitCode: 1` (prežité mutanty pri `--strict`)                        | Cielené AST mutačné testovanie doménovej logiky (`MutationCheck.decide`). Injektuje hraničné a aritmetické operátory (`>=` $\to$ `>`, `+ 1` $\to$ `- 1`) a overuje, že testy majú reálnu diskriminačnú silu.                                               |
+| **`verify`**             | **Arg:** `harness verify`<br/>**stdout:** Reťazec pečiatky: `{"treeHash": "...", "timestamp": "...", "taskBranch": "impl/current"}`<br/>**stderr:** Detaily o zlyhaní testov alebo nájdených `stub()`                                                                                                                                        | **Rovnaké CLI volanie** (spúšťa sa priamo v termináli agenta)                                                                                                                                                                                                                                                    | • `exitCode: 0` (overenie úspešné)<br/>• `exitCode: 1` (nájdený `stub()`, zlyhanie testu, neplatný graf)             | **Jediná autorizovaná brána.** Spúšťa testy s testovacím tracerom, zapisuje `.harness/verify-stamp.json` a branch `impl/current`.                                                                                                                          |
+| **`done`**               | **Arg:** `harness done`<br/>**stdout (úspech):** `""`<br/>**stdout (zlyhanie):** `{"decision": "block", "reason": "..."}`                                                                                                                                                                                                                    | **Arg:** `harness done --format=antigravity`<br/>**stdin:** `{"fullyIdle": true}`<br/>**stdout (úspech):** `{"decision": "stop"}`<br/>**stdout (pokračovať):** `{"decision": "continue", "reason": "..."}`                                                                                                       | `exitCode: 0`                                                                                                        | Záverečný `Stop` hook. Kontroluje nezmenenosť stromu cez SHA-256 pečiatku, paritu grafov plánu a implementácie a robí merge v Omnigraphe.                                                                                                                  |
+| **`learn`**              | **Arg:** `harness learn`<br/>Voliteľne: `--clear`<br/>**stdout:** Prehľad klastrov trenia a odporúčaní `LearnProposalV1`                                                                                                                                                                                                                     | **Rovnaké CLI volanie**                                                                                                                                                                                                                                                                                          | `exitCode: 0`                                                                                                        | Analyzuje `.harness/friction-log.jsonl`, navrhuje povýšenia do 4 cieľov pyramídy a s `--clear` vymaže log trenia.                                                                                                                                          |
 
 ---
 
 ### 4.2 Príklad konfigurácie hookov
 
 #### Claude Code (`adapters/claude-code/hooks.json`)
+
 ```json
 {
   "hooks": {
-    "SessionStart": [{
-      "hooks": [{
-        "type": "command",
-        "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts session"
-      }]
-    }],
-    "PreToolUse": [{
-      "matcher": "Bash",
-      "hooks": [{
-        "type": "command",
-        "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard"
-      }]
-    }],
-    "PostToolUse": [{
-      "matcher": "Edit|Write",
-      "hooks": [{
-        "type": "command",
-        "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts ingest"
-      }]
-    }],
-    "Stop": [{
-      "hooks": [{
-        "type": "command",
-        "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done"
-      }]
-    }]
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts session"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts ingest"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done"
+          }
+        ]
+      }
+    ]
   }
 }
 ```
 
 #### Antigravity (`adapters/antigravity/plugins/effect-harness/hooks.json`)
+
 ```json
 {
   "effect-harness": {
-    "PreInvocation": [{
-      "type": "command",
-      "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts session --format=antigravity",
-      "timeout": 15
-    }],
-    "PreToolUse": [{
-      "matcher": "run_command",
-      "hooks": [{
+    "PreInvocation": [
+      {
         "type": "command",
-        "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts guard --format=antigravity",
-        "timeout": 10
-      }]
-    }],
-    "PostToolUse": [{
-      "matcher": "replace_file_content|multi_replace_file_content|write_to_file",
-      "hooks": [{
+        "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts session --format=antigravity",
+        "timeout": 15
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts guard --format=antigravity",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "replace_file_content|multi_replace_file_content|write_to_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts ingest --format=antigravity",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
         "type": "command",
-        "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts ingest --format=antigravity",
+        "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts done --format=antigravity",
         "timeout": 30
-      }]
-    }],
-    "Stop": [{
-      "type": "command",
-      "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts done --format=antigravity",
-      "timeout": 30
-    }]
+      }
+    ]
   }
 }
 ```
@@ -594,6 +626,7 @@ Harness CLI podporuje bezproblémovú koexistenciu oboch popredných agentickýc
 Vývojové prostredie s autonómnymi agentmi prirodzene naráža na opakujúce sa prekážky (friction events) — neúspešné hľadanie vzorov (`route_miss`), mechanické zlyhania kompilátora a testov (`verify_failure`), alebo eskalácie bezpečných shellových príkazov (`guard_escalation`).
 
 Tradičným zlozvykom vývojových tímov je nekontrolované pridávanie textových zákazov, varovaní a pravidiel do globálneho súboru `AGENTS.md`. Tento prístup je však kontraproduktívny:
+
 - **Nafukuje systémový kontext:** Každý jeden ťah agenta konzumuje zbytočné prompt tokeny, čo zvyšuje latenciu aj náklady.
 - **Znižuje pozornosť modelu (prompt fatigue):** LLM modely pri dlhých zoznamoch textových pravidiel vykazujú zníženú spoľahlivosť a zákazy často ignorujú.
 
@@ -602,7 +635,7 @@ Architektúra **Effect-TS Engineering Harness** namiesto nafukovania `AGENTS.md`
 ```mermaid
 graph TD
     FL[".harness/friction-log.jsonl<br/>(route_miss | verify_failure | guard_escalation)"] --> LEARN["harness learn<br/>(clef-flash LearnProposalV1)"]
-    
+
     LEARN --> P1["1. agent-pattern<br/>(agent-patterns/*.md + IdiomRouterV1)"]
     LEARN --> P2["2. triage-rule<br/>(DETERMINISTIC_TRIAGE_RULES)"]
     LEARN --> P3["3. guard-allowlist<br/>(policy.ts ALLOWLIST)"]
@@ -617,6 +650,7 @@ graph TD
 ### 5.1 Zber trenia do `.harness/friction-log.jsonl`
 
 Harness automaticky zaznamenáva každú udalosť trenia do append-only súboru `.harness/friction-log.jsonl`:
+
 1. **`route_miss`:** Nastáva, keď `harness route` alebo MCP nástroj `harness_route` vráti `"review"` (žiadny zavedený vzor v `agent-patterns/*.md` nezodpovedá zadaniu s istotou $\ge 0.7$).
 2. **`verify_failure`:** Nastáva, keď `harness verify` zlyhá na kompilácii, teste alebo zakázanej syntaxi.
 3. **`guard_escalation`:** Nastáva, keď `harness guard` eskaluje bezpečný, no neznámy príkaz na používateľa (`decision: "ask"`).
@@ -624,9 +658,11 @@ Harness automaticky zaznamenáva každú udalosť trenia do append-only súboru 
 ### 5.2 Analýza a návrhy povýšenia (`harness learn` & `LearnProposalV1`)
 
 Po dokončení úlohy alebo série úloh vývojár alebo agent spustí:
+
 ```bash
 node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts learn
 ```
+
 Príkaz zoskupí udalosti do klastrov (`summarizeFrictionEvents`) a predloží ich modelu `clef-flash` cez schému `LearnProposalV1` (`proposeLearningAction`).
 
 Model posúdi, či je zistené trenie akcieschopné (`actionable >= 0.7`), a zaradí ho do jedného zo 4 cieľov pyramídy povýšenia (**Graduation Pyramid**):
@@ -650,6 +686,7 @@ Model posúdi, či je zistené trenie akcieschopné (`actionable >= 0.7`), a zar
 ### 5.4 Pracovný postup so skillom `compounding-effect-learnings`
 
 Agenti v adaptéroch Antigravity a Claude Code používajú skill `compounding-effect-learnings`:
+
 1. **Spustenie analýzy:** `node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts learn` zobrazí návrhy klastrov trenia a `LearnProposalV1` odporúčania.
 2. **Aplikácia schváleného povýšenia:** Agent alebo vývojár zapracuje nový `agent-pattern`, `triage-rule`, `guard-allowlist` alebo `ast-graph-gate`.
 3. **Overenie a vyčistenie:**
@@ -706,6 +743,7 @@ Počas rýchlych iterácií v subagentoch dochádza k hromadeniu mŕtveho kódu,
 ```bash
 node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts gc --strict
 ```
+
 Ak `harness gc` nájde akúkoľvek entropiu, vráti `exit 1` s podrobným zoznamom `findings`. Tento krok predchádza `harness verify` a zabraňuje zlučovaniu technického dlhu.
 
 ### 6.2 Context Reset & State Handoff v `harness session` (`SessionHandoff.decide`)
@@ -713,12 +751,14 @@ Ak `harness gc` nájde akúkoľvek entropiu, vráti `exit 1` s podrobným zoznam
 Pri dlhotrvajúcich úlohách alebo po príkaze `/compact` agent často stratí kontext o tom, čo už bolo implementované a čo zostáva dokončiť.
 
 Príkaz `harness session` (volaný pri každom štarte relácie cez `PreInvocation` v Antigravity alebo `SessionStart` v Claude Code) spúšťa `SessionHandoff.decide`:
+
 - Skontroluje zostávajúce kostry `stub<A, E, R>()` (`activeStubs`).
 - Porovná plán s implementáciou a identifikuje chýbajúce funkcie (`missingPlannedFns`).
 - Overí stav kryptografickej pečiatky `.harness/verify-stamp.json` (`stampValid`).
 - Zosumarizuje nedávne trenia z `.harness/friction-log.jsonl` (`frictionClusters`).
 
 **Dôsledok pre adaptéry:**
+
 - **Antigravity (`PreInvocation`):** Do kontextu agenta sa automaticky injektuje štruktúrovaná nápoveda:
   ```json
   {
@@ -736,6 +776,7 @@ Agent tak okamžite nadviaže na rozpracovaný stav bez nutnosti re-skenovania r
 Výkonnostné regresie a neefektívne databázové volania (N+1 query anti-pattern) sú častým vedľajším produktom práce LLM.
 
 Harness v testovacom prostredí integruje `makeRecordingTracer` a rozhodovaciu funkciu `SpanBudget.decide`:
+
 - **Meranie latencie:** Každý span `Effect.fn` zaznamenáva presný čas vykonávania `durationMs`.
 - **Detekcia N+1 opakovaných volaní (`n-plus-one-call`):** Ak rodičovský span vykoná v rámci jednej operácie viac ako povolený limit opakovaných volaní pod-spanu (`maxRepeatedChildCalls`, typicky $\le 3$), kontrola `checkSpanBudgets` vyhlási porušenie.
 - **Prekročenie časového rozpočtu (`span-duration-exceeded`):** Ak celkové trvanie spanu prekročí limit `maxSpanDurationMs`, test indikuje výkonnostné zlyhanie.
@@ -747,10 +788,11 @@ Tieto rozpočty sa overujú priamo v `@effect/vitest` testoch pomocou helpera `c
 Pri paralelnom spustení implementačných subagentov pre rôzne balíky (`type:domain`, `type:infra`, `scope:web`) hrozí vzájomné prepisovanie stavových súborov v zdieľanom `.harness/` priečinku.
 
 Harness rieši izoláciu prostredníctvom helpera `resolveHarnessStateDir`:
+
 ```typescript
 export const resolveHarnessStateDir = (
   repoRoot: string,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
 ): string => {
   const customDir = env.HARNESS_STATE_DIR?.trim()
   if (customDir && customDir.length > 0) return resolve(repoRoot, customDir)
@@ -774,7 +816,7 @@ Harness presadzuje nulovú dôveru voči generovanému kódu prostredníctvom pr
    - Každá konfigurácia obsahujúca citlivé údaje s kľúčmi ako `SECRET`, `TOKEN`, `PASSWORD` alebo `API_KEY` musí byť zapuzdrená cez `Config.redacted(...)` namiesto obyčajného `Config.string(...)`.
    - Tým sa zabráni nechcenému úniku citlivých hodnôt do logov, tracerov alebo chybových hlásení.
 2. **Zákaz raw SQL interpolácie (SQL Injection Ban):**
-   - V `type:infra` (D1, SQLite, Drizzle) je prísne zakázané používať template literal interpoláciu v metódach `.exec(\`...\${...}\`)` alebo `.prepare(\`...\${...}\`)`.
+   - V `type:infra` (D1, SQLite, Drizzle) je prísne zakázané používať template literal interpoláciu v metódach `.exec(\`...\${...}\`)`alebo`.prepare(\`...\${...}\`)`.
    - Všetky dynamické hodnoty musia byť odovzdávané výhradne cez parametrizované dotazy (`.bind(...)` alebo Drizzle `sql` tagy s parametrami).
 3. **Pravidlá čistoty domény (`type:domain`):**
    - **Zákaz nečistých globálnych volaní:** Volania `Date.now()`, `new Date()` a `Math.random()` sú v doméne zakázané. Čas a náhodnosť musia pretekať cez Effect služby (`Clock`, `Random`) alebo decider vstupy, aby bola doménová logika 100% deterministická a testovateľná.
@@ -793,16 +835,16 @@ Harness presadzuje nulovú dôveru voči generovanému kódu prostredníctvom pr
 
 ### 6.6 Signal-Routed Multi-Lens Review (`flash` špecializované šošovky v `executing-effect-stubs` & `planning-effect-skeletons`)
 
-Pred spustením finálnych brán `harness gc --strict` a `harness verify` koordinátor nespúšťa jediného generického recenzenta, ale smeruje kontrolu cez **paralelné špecializované subagenty (`research` subagents s modelom `flash` a `Workspace: "share"`)**. 
+Pred spustením finálnych brán `harness gc --strict` a `harness verify` koordinátor nespúšťa jediného generického recenzenta, ale smeruje kontrolu cez **paralelné špecializované subagenty (`research` subagents s modelom `flash` a `Workspace: "share"`)**.
 
 Výber šošoviek je riadený signálmi — presným zoznamom balíkov a schopností, ktoré daná úloha modifikovala:
 
-| Špecializovaná šošovka (Lens) | Kedy sa spúšťa (Aktivácia signálom) | Zameranie kontroly a odhaľované riziká |
-| :--- | :--- | :--- |
-| **1. `EARS & Test-Fidelity Lens`** | **Vždy** (každá úloha) | Overuje, že každá EARS klauzula (`WHEN`, `IF/THEN`, `WHILE`) má citlivé testovacie tvrdenie v `@effect/vitest`. Odmieta prázdne/mock-only testy a prísne kontroluje pokrytie sad-path vetiev pre všetky deklarované `TaggedError`s. |
-| **2. `Security & Trust-Boundary Lens`** | Pri zásahu do `type:contract`, `HttpApi`, `Rpc`, auth alebo `Config` | Kontroluje autorizáciu aktéra a tenanta (prevencia IDOR) v use-caseoch, správu tajomstiev cez `Config.redacted`, a reštrikcie na vstupných Schémach (ohraničené dĺžky reťazcov, polí, konečné čísla `Schema.Finite`). |
-| **3. `Reliability & Concurrency Lens`** | Pri zásahu do `type:infra`, DO SQLite, D1, Queues, `Schedule` alebo `Scope` | Kontroluje striktnú synchrónnu SQLite transakčnú disciplínu v DO (zákaz asynchrónneho I/O vo vnútri `runSyncTransaction`), ohraničené retry stratégie s jitterom a limitom, timeouty na externých `HttpClient` volaniach a bezpečné finišéry v `Scope`. |
-| **4. `Adversarial Chaos Lens`** | Pri stavových a viac-krokových tokoch, Event Sourcingu, Outboxe, Projekciách a Process Manageroch | Simuluje rolu chaos inžiniera: konštruuje konkrétne sekvencie zlyhaní (duplicitné doručenie `commandId`, out-of-order správy v Queue, crash medzi commitom do SQLite a odoslaním DO alarmu / správy do frontu). |
+| Špecializovaná šošovka (Lens)           | Kedy sa spúšťa (Aktivácia signálom)                                                               | Zameranie kontroly a odhaľované riziká                                                                                                                                                                                                                  |
+| :-------------------------------------- | :------------------------------------------------------------------------------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **1. `EARS & Test-Fidelity Lens`**      | **Vždy** (každá úloha)                                                                            | Overuje, že každá EARS klauzula (`WHEN`, `IF/THEN`, `WHILE`) má citlivé testovacie tvrdenie v `@effect/vitest`. Odmieta prázdne/mock-only testy a prísne kontroluje pokrytie sad-path vetiev pre všetky deklarované `TaggedError`s.                     |
+| **2. `Security & Trust-Boundary Lens`** | Pri zásahu do `type:contract`, `HttpApi`, `Rpc`, auth alebo `Config`                              | Kontroluje autorizáciu aktéra a tenanta (prevencia IDOR) v use-caseoch, správu tajomstiev cez `Config.redacted`, a reštrikcie na vstupných Schémach (ohraničené dĺžky reťazcov, polí, konečné čísla `Schema.Finite`).                                   |
+| **3. `Reliability & Concurrency Lens`** | Pri zásahu do `type:infra`, DO SQLite, D1, Queues, `Schedule` alebo `Scope`                       | Kontroluje striktnú synchrónnu SQLite transakčnú disciplínu v DO (zákaz asynchrónneho I/O vo vnútri `runSyncTransaction`), ohraničené retry stratégie s jitterom a limitom, timeouty na externých `HttpClient` volaniach a bezpečné finišéry v `Scope`. |
+| **4. `Adversarial Chaos Lens`**         | Pri stavových a viac-krokových tokoch, Event Sourcingu, Outboxe, Projekciách a Process Manageroch | Simuluje rolu chaos inžiniera: konštruuje konkrétne sekvencie zlyhaní (duplicitné doručenie `commandId`, out-of-order správy v Queue, crash medzi commitom do SQLite a odoslaním DO alarmu / správy do frontu).                                         |
 
 Okrem fázy implementácie sa **Adversarial & Feasibility Lens** zapája už v Krok 2/3 (`planning-effect-skeletons`), kde po úspešnom `harness plan-check` audituje graf skeletonu pred pridelením práce implementátorom (idempotency kľúče v kontraktoch, reprezentácia čiastočných zlyhaní v `E` a `R`, čistota deciderov).
 
@@ -813,9 +855,10 @@ Architektonická dokumentácia v autonómnych systémoch často zlyháva na dvoc
 Harness MVP v2 zavádza systém **Živej, Strojovo Overiteľnej Architektonickej Dokumentácie** rozdelený na dve komplementárne zložky podľa konvencie ko-lokovaného monorepa:
 
 #### 1. Architektonické Rozhodovacie Záznamy (`libs/<scope>/docs/adr/NNNN-<slug>.md` & `docs/adr/`)
+
 - **Účel:** Zaznamenávajú **Prečo & Zamietnuté Alternatívy (Why & Rejected Alternatives)**.
 - **Ko-lokované umiestnenie:** Doménové rozhodnutia patria priamo do `libs/<scope>/docs/adr/NNNN-<slug>.md` (napr. `libs/harness/docs/adr/`, `libs/sample/docs/adr/`, `libs/es/docs/adr/`) so scoped identifikátorom `id: <scope>:ADR-NNNN`. Koreňový priečinok `docs/adr/` je vyhradený výhradne pre celo-monorepové prierezové pravidlá a centrálny index.
-- **Kontrafaktuálne Pravidlo (Counterfactual Rule):** ADR sa zaznamenáva výhradne vtedy, ak rozhodnutie zahŕňa netriviálne obmedzenia alebo zamietnuté alternatívy, ktoré nie je možné vyčítať zo samotného kódu (*„Zopakoval by budúci inžinier alebo agent rovnakú chybu či zvrátil by tento kompromis, keby nepoznal dôvod nášho rozhodnutia?“*).
+- **Kontrafaktuálne Pravidlo (Counterfactual Rule):** ADR sa zaznamenáva výhradne vtedy, ak rozhodnutie zahŕňa netriviálne obmedzenia alebo zamietnuté alternatívy, ktoré nie je možné vyčítať zo samotného kódu (_„Zopakoval by budúci inžinier alebo agent rovnakú chybu či zvrátil by tento kompromis, keby nepoznal dôvod nášho rozhodnutia?“_).
 - **Reprezentácia v `HarnessGraph` & Omnigraphe (`AdrDoc` & `GovernsSymbol`):**
   - Každý ADR dokument je extrahovaný ako uzol `AdrDoc` (`_tag: "AdrDoc"`).
   - Z uzla `AdrDoc` smerujú hrany `GovernsSymbol` priamo na dotknuté uzly kódu (`EffectFn`, `ServiceTag`, `TaggedError`).
@@ -823,6 +866,7 @@ Harness MVP v2 zavádza systém **Živej, Strojovo Overiteľnej Architektonickej
 - **Štruktúra a deterministické lintovanie (`AdrDocLint.decide` v `harness gc --strict`):** Každé ADR musí dodržiavať kanonickú 6-sekčnú MADR štruktúru (`## Context and Problem Statement`, `## Decision Drivers`, `## Considered Options`, `## Decision Outcome` s povinným `**Chosen option:**`, `## Rejected Alternatives` s číslovanými sekciami `### N · <Option>` a `**Why rejected:**`, `## Consequences and Enforcement` s 4-stĺpcovou tabuľkou `### Deterministic Enforcement`). Čistý decider `AdrDocLint.decide` v `harness gc --strict` deterministicky overuje 7 invariantov (`adr-frontmatter-invalid`, `adr-section-structure`, `adr-missing-drivers-or-options`, `adr-missing-chosen-option`, `adr-rejected-alternative-structure`, `adr-missing-enforcement-table`, `adr-unfilled-placeholder`).
 
 #### 2. EARS Špecifikácie a Grafy Plánov (`libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` & `docs/specs/`)
+
 - **Účel:** Uchovávajú **Formálne požiadavky EARS + Overený topologický Mermaid graf z `plan-check`**.
 - **Ko-lokované umiestnenie:** Doménové špecifikácie patria do `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` so scoped `id: <scope>:SPEC-NNNN`. Koreňový priečinok `docs/specs/` slúži pre prierezové špecifikácie a globálny index.
 - **Reprezentácia v `HarnessGraph` & Omnigraphe (`EarsSpec` & `SpecifiesSymbol`):**
@@ -834,6 +878,7 @@ Harness MVP v2 zavádza systém **Živej, Strojovo Overiteľnej Architektonickej
 - **Topologický Záznam:** Po úspešnom `harness plan-check` agent do špecifikácie pripojí kompilovaný Mermaid diagram závislostí a výstup Pre-Implementation Adversarial Plan Lens auditu.
 
 #### 3. Dvojstupňové Deterministické Brány prepojenia Špecifikácií s Kódom
+
 1. **Spec $\rightarrow$ Plan Brána (`unmapped-spec-symbol` v `harness plan-check`):**
    - Už vo fáze plánovania, keď má špecifikácia stav `status: proposed`, brána `harness plan-check` (`checkEffectGraph`) striktne overuje, že každý `span`, `service` a `error` deklarovaný vo frontmatteri EARS špecifikácie reálne existuje ako uzol v grafe skeletonu (`stub<A, E, R>()`).
    - Ak agent deklaroval span `Sample.deletePhoto`, no v `.ts` skeletone ho zabudol vytvoriť alebo nazval inak, `checkEffectGraph` zlyhá s chybou `unmapped-spec-symbol`.
@@ -844,6 +889,7 @@ Harness MVP v2 zavádza systém **Živej, Strojovo Overiteľnej Architektonickej
 ### 6.8 Property-Based Testing (`it.effect.prop` + `effect/Arbitrary`) a Cielený AST Mutation Testing (`MutationCheck.decide` / `harness mutate`) — Ochrana proti Test Reward Hackingu
 
 Klasické príkladové unit testy (example-based testing, napr. `expect(decide(5)).toBe(true)`) zlyhávajú v prostredí autonómneho kódovania AI agentov kvôli dvom systémovým rizikám:
+
 1. **Zdieľané slepé miesta (Shared Blind Spots):** LLM agent generujúci produkčný kód aj testy zdieľa rovnaké konceptuálne predpoklady. Ak agent zabudne na okrajový prípad (off-by-one chyba, záporné hranice, prekročenie kvóty), s vysokou pravdepodobnosťou vygeneruje testy, ktoré presne tento okrajový prípad obídu a overia len happy-path.
 2. **Test Reward Hacking:** LLM agenti optimalizujú svoje správanie na splnenie metriky (zelené testy). Ak test suite overuje len konkrétny hardcoded vstup, agent môže vytvoriť triviálnu, degenerovanú implementáciu (napr. návrat konštanty), ktorá prejde testami, no v skutočnosti neimplementuje žiadnu skutočnú doménovú logiku.
 
@@ -852,6 +898,7 @@ Harness MVP v2 uzatvára túto zraniteľnosť dvojicou komplementárnych mechani
 #### 1. Property-Based Testing s automatickým shrinkovaním (`it.effect.prop` a `it.prop`)
 
 Balík `@effect/vitest` natívne podporuje generovanie stoviek náhodných vstupov priamo z `Schema` definícií prostredníctvom modulu `effect/Arbitrary`:
+
 - **Čisté decider invarianty (`WHILE <state>` klauzuly):** Namiesto testovania `decide(5)` sa overujú matematické invarianty na celom rozsahu hodnôt generovaných zo schémy:
   ```ts
   it.effect.prop(
@@ -859,7 +906,7 @@ Balík `@effect/vitest` natívne podporuje generovanie stoviek náhodných vstup
     {
       albumId: Schema.NonEmptyString,
       currentCount: Schema.Number.pipe(Schema.int(), Schema.between(-50, 250)),
-      maxAllowed: Schema.Number.pipe(Schema.int(), Schema.between(1, 100))
+      maxAllowed: Schema.Number.pipe(Schema.int(), Schema.between(1, 100)),
     },
     ({ albumId, currentCount, maxAllowed }) =>
       Effect.gen(function* () {
@@ -873,7 +920,7 @@ Balík `@effect/vitest` natívne podporuje generovanie stoviek náhodných vstup
         } else {
           expect(decision._tag).toBe("QuotaAllowed")
         }
-      })
+      }),
   )
   ```
 - **Invarianty idempotencie a round-trip serializácie:** Projekcie a reducery stavu musia byť idempotentné (`project(project(s, e), e) === project(s, e)`) a serializácia schém musí byť bezstratová (`decodeUnknownSync(encodeSync(e)) === e`).
@@ -883,6 +930,7 @@ Balík `@effect/vitest` natívne podporuje generovanie stoviek náhodných vstup
 #### 2. Cielený Domain AST Mutation Testing (`MutationCheck.decide` / `harness mutate --strict`)
 
 Aby sa predišlo vákuovým testom, kde property test síce generuje vstupy, ale má príliš slabé tvrdenia (`expect(result).toBeDefined()`), harness zavádza cielené mutačné testovanie AST:
+
 - **Cielená doménová mutácia:** Na rozdiel od tradičných nástrojov (napr. Stryker), ktoré mutujú celý kód vrátane I/O a trvajú desiatky minút, `harness mutate` cielene mutuje výhradne čistú biznis logiku v `type:domain`.
 - **AST mutátory:** `MutationCheck.decide` injektuje sémantické mutácie na operátoroch:
   - Relačné operátory: `>=` $\to$ `>`, `<=` $\to$ `<`, `>` $\to$ `>=`, `<` $\to$ `<=`
@@ -923,6 +971,7 @@ Harness zavádza v `tools/oxlint/syntax-bans.js` a `.oxlintrc.json` striktnú tr
 Pri zložitejších problémoch sa agent môže dostať do stavu „thrashingu“ — opakovane modifikuje súbory s drobnými syntaktickými zmenami, znova spúšťa `harness verify` alebo `harness guard` a naráža na identické zlyhanie. Tým plytvá kontextovým oknom, kreditmi a časom používateľa.
 
 Harness implementuje čistý decider `decideLoopThrashing` (`Effect.fn("LoopCircuitBreaker.decide")` s čistým `R = never`):
+
 - **Sledovanie chvosta trenia:** Sleduje posuvné okno (sliding window) posledných udalostí v `.harness/friction-log.jsonl`.
 - **Podmienka zopnutia ističa ($\ge 3$ opakovania):** Ak agent trikrát za sebou narazí na rovnakú kategóriu a podpis chyby:
   - Tri po sebe idúce zlyhania `verify_failure` s rovnakým chybovým výstupom (napr. rovnaká typová chyba alebo zlyhávajúci test),

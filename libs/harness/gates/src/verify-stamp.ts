@@ -7,7 +7,7 @@ import { resolveHarnessStateDir } from "./worktree.js"
 export const VerifyStampSchema = Schema.Struct({
   treeHash: Schema.String,
   timestamp: Schema.String,
-  taskBranch: Schema.String
+  taskBranch: Schema.String,
 })
 
 export type VerifyStamp = Schema.Schema.Type<typeof VerifyStampSchema>
@@ -31,14 +31,14 @@ const IGNORED_NAMES = new Set([
   ".alchemy",
   ".vite",
   ".remember",
-  ".worktrees"
+  ".worktrees",
 ])
 
 const collectFiles = (
   dir: string,
   baseDir: string,
   acc: Array<string>,
-  harnessStateDir: string
+  harnessStateDir: string,
 ): void => {
   if (!existsSync(dir)) return
   const entries = readdirSync(dir, { withFileTypes: true })
@@ -74,15 +74,12 @@ export const computeWorkspaceTreeHash = (repoRoot: string): string => {
   return hasher.digest("hex")
 }
 
-export const writeVerifyStamp = (
-  repoRoot: string,
-  taskBranch?: string
-): VerifyStamp => {
+export const writeVerifyStamp = (repoRoot: string, taskBranch?: string): VerifyStamp => {
   const treeHash = computeWorkspaceTreeHash(repoRoot)
   const stamp: VerifyStamp = {
     treeHash,
     timestamp: new Date().toISOString(),
-    taskBranch: taskBranch ?? "current"
+    taskBranch: taskBranch ?? "current",
   }
   const harnessDir = resolveHarnessStateDir(repoRoot)
   if (!existsSync(harnessDir)) {
@@ -93,9 +90,7 @@ export const writeVerifyStamp = (
   return stamp
 }
 
-const decodeVerifyStamp = Schema.decodeOption(
-  Schema.fromJsonString(VerifyStampSchema)
-)
+const decodeVerifyStamp = Schema.decodeOption(Schema.fromJsonString(VerifyStampSchema))
 
 export const checkVerifyStamp = (repoRoot: string): CheckVerifyStampResult => {
   const harnessDir = resolveHarnessStateDir(repoRoot)
@@ -104,7 +99,7 @@ export const checkVerifyStamp = (repoRoot: string): CheckVerifyStampResult => {
     return {
       valid: false,
       reason:
-        "Missing .harness/verify-stamp.json. Run harness verify after your latest edits before finishing."
+        "Missing .harness/verify-stamp.json. Run harness verify after your latest edits before finishing.",
     }
   }
 
@@ -114,7 +109,7 @@ export const checkVerifyStamp = (repoRoot: string): CheckVerifyStampResult => {
     return {
       valid: false,
       reason:
-        "Invalid .harness/verify-stamp.json. Run harness verify after your latest edits before finishing."
+        "Invalid .harness/verify-stamp.json. Run harness verify after your latest edits before finishing.",
     }
   }
 
@@ -123,12 +118,12 @@ export const checkVerifyStamp = (repoRoot: string): CheckVerifyStampResult => {
     return {
       valid: false,
       reason:
-        "Workspace files changed since last verify. Run harness verify after your latest edits before finishing."
+        "Workspace files changed since last verify. Run harness verify after your latest edits before finishing.",
     }
   }
 
   return {
     valid: true,
-    stamp: decoded.value
+    stamp: decoded.value,
   }
 }

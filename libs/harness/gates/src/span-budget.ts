@@ -22,9 +22,7 @@ export interface SpanBudgetViolation {
   readonly message: string
 }
 
-export const decideSpanBudgets = Effect.fn("SpanBudget.decide")(function* (
-  input: SpanBudgetInput
-) {
+export const decideSpanBudgets = Effect.fn("SpanBudget.decide")(function* (input: SpanBudgetInput) {
   yield* Effect.void
 
   const maxRepeated = input.maxRepeatedChildCalls ?? 5
@@ -51,7 +49,7 @@ export const decideSpanBudgets = Effect.fn("SpanBudget.decide")(function* (
         childGroups.set(key, {
           parentSpanId: span.parentSpanId,
           childName: span.name,
-          count: 1
+          count: 1,
         })
       }
     }
@@ -67,26 +65,23 @@ export const decideSpanBudgets = Effect.fn("SpanBudget.decide")(function* (
         targetSpan: childName,
         count,
         maxAllowed: maxRepeated,
-        message: `N+1 span repetition detected: "${parentName}" invoked "${childName}" ${count} times (budget: ${maxRepeated}). Batch queries or use Effect.all.`
+        message: `N+1 span repetition detected: "${parentName}" invoked "${childName}" ${count} times (budget: ${maxRepeated}). Batch queries or use Effect.all.`,
       })
     }
   }
 
   if (input.maxSpanDurationMs !== undefined) {
     for (const span of input.spans) {
-      if (
-        span.durationMs !== undefined &&
-        span.durationMs > input.maxSpanDurationMs
-      ) {
+      if (span.durationMs !== undefined && span.durationMs > input.maxSpanDurationMs) {
         const parent = span.parentSpanId !== null ? spansById.get(span.parentSpanId) : undefined
-        const parentName = parent?.name ?? (span.parentSpanId ?? "root")
+        const parentName = parent?.name ?? span.parentSpanId ?? "root"
         violations.push({
           kind: "span-duration-exceeded",
           parentSpan: parentName,
           targetSpan: span.name,
           count: Math.round(span.durationMs),
           maxAllowed: input.maxSpanDurationMs,
-          message: `Span duration budget exceeded: "${span.name}" took ${Math.round(span.durationMs)}ms (budget: ${input.maxSpanDurationMs}ms).`
+          message: `Span duration budget exceeded: "${span.name}" took ${Math.round(span.durationMs)}ms (budget: ${input.maxSpanDurationMs}ms).`,
         })
       }
     }
@@ -95,6 +90,5 @@ export const decideSpanBudgets = Effect.fn("SpanBudget.decide")(function* (
   return violations as ReadonlyArray<SpanBudgetViolation>
 })
 
-export const checkSpanBudgets = (
-  input: SpanBudgetInput
-): ReadonlyArray<SpanBudgetViolation> => Effect.runSync(decideSpanBudgets(input))
+export const checkSpanBudgets = (input: SpanBudgetInput): ReadonlyArray<SpanBudgetViolation> =>
+  Effect.runSync(decideSpanBudgets(input))

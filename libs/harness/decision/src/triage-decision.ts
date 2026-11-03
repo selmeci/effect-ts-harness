@@ -10,10 +10,11 @@ export const TriageV1 = Decision.make({
         "Is this test or compilation failure mechanical (syntax, imports, boundaries, typing) or semantic (logic, test expectations)?",
       criteria: {
         mechanical: "Mechanical error: syntax, typecheck, lint, or module boundary issue",
-        semantic: "Semantic error: logical test failure, incorrect behavior, or unexpected runtime state"
-      }
-    })
-  }
+        semantic:
+          "Semantic error: logical test failure, incorrect behavior, or unexpected runtime state",
+      },
+    }),
+  },
 })
 
 export type TriageKind = "mechanical" | "semantic" | "compile"
@@ -34,250 +35,251 @@ export interface DeterministicTriageRule {
 export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> = [
   {
     id: "effect-v3-removed-api",
-    pattern: /\b(?:decodeEither|decodeUnknownEither|encodeEither)\b|has no exported member '(?:Either|ParseResult)'/i,
+    pattern:
+      /\b(?:decodeEither|decodeUnknownEither|encodeEither)\b|has no exported member '(?:Either|ParseResult)'/i,
     kind: "compile",
     hint: "Effect v4 removed Effect/Either, Effect/ParseResult, and Schema.decodeEither/decodeUnknownEither. Use Effect/Result or Effect/Exit with Schema.decodeExit, Schema.decodeUnknownExit, Schema.decodeSync, or Schema.decodeUnknownSync (see repos/effect/LLMS.md).",
     result: {
       kind: "compile",
-      hint: "Effect v4 removed Effect/Either, Effect/ParseResult, and Schema.decodeEither/decodeUnknownEither. Use Effect/Result or Effect/Exit with Schema.decodeExit, Schema.decodeUnknownExit, Schema.decodeSync, or Schema.decodeUnknownSync (see repos/effect/LLMS.md)."
-    }
+      hint: "Effect v4 removed Effect/Either, Effect/ParseResult, and Schema.decodeEither/decodeUnknownEither. Use Effect/Result or Effect/Exit with Schema.decodeExit, Schema.decodeUnknownExit, Schema.decodeSync, or Schema.decodeUnknownSync (see repos/effect/LLMS.md).",
+    },
   },
   {
     id: "schema-decode-sync-unknown-input",
-    pattern: /decodeSync[\s\S]{0,160}Argument of type .* is not assignable to parameter of type|Argument of type .* is not assignable to parameter of type[\s\S]{0,160}decodeSync/i,
+    pattern:
+      /decodeSync[\s\S]{0,160}Argument of type .* is not assignable to parameter of type|Argument of type .* is not assignable to parameter of type[\s\S]{0,160}decodeSync/i,
     kind: "compile",
     hint: "Schema.decodeSync(schema) requires an argument matching the schema's Encoded type. For unvalidated inputs or negative test cases, use Schema.decodeUnknownSync(schema)(input) or Schema.decodeUnknownExit(schema)(input).",
     result: {
       kind: "compile",
-      hint: "Schema.decodeSync(schema) requires an argument matching the schema's Encoded type. For unvalidated inputs or negative test cases, use Schema.decodeUnknownSync(schema)(input) or Schema.decodeUnknownExit(schema)(input)."
-    }
+      hint: "Schema.decodeSync(schema) requires an argument matching the schema's Encoded type. For unvalidated inputs or negative test cases, use Schema.decodeUnknownSync(schema)(input) or Schema.decodeUnknownExit(schema)(input).",
+    },
   },
   {
     pattern: "floatingEffect",
     result: {
       kind: "mechanical",
-      hint: "Unhandled Effect value — yield* the Effect inside Effect.gen or return it (see agent-patterns/services-and-layers.md)."
-    }
+      hint: "Unhandled Effect value — yield* the Effect inside Effect.gen or return it (see agent-patterns/services-and-layers.md).",
+    },
   },
   {
     pattern: "no-restricted-imports",
     result: {
       kind: "mechanical",
-      hint: "Restricted infra import outside type:infra — move drizzle-orm, alchemy, or @effect/sql-* usage to a type:infra library (see agent-patterns/d1-repository.md and agent-patterns/alchemy-infra.md)."
-    }
+      hint: "Restricted infra import outside type:infra — move drizzle-orm, alchemy, or @effect/sql-* usage to a type:infra library (see agent-patterns/d1-repository.md and agent-patterns/alchemy-infra.md).",
+    },
   },
   {
     pattern: "enforce-module-boundaries",
     result: {
       kind: "mechanical",
-      hint: "Nx module boundary violation — check package.json nx.tags against the allowed dependency hierarchy."
-    }
+      hint: "Nx module boundary violation — check package.json nx.tags against the allowed dependency hierarchy.",
+    },
   },
   {
     pattern: "lazy-effect",
     result: {
       kind: "mechanical",
-      hint: "Effect/Layer is already lazy (TS377091) — do not wrap zero-argument Effect or Layer members in `() => Effect<...>` (use `readonly prop: Effect.Effect<...>` or parameterize factory functions; see agent-patterns/services-and-layers.md)."
-    }
+      hint: "Effect/Layer is already lazy (TS377091) — do not wrap zero-argument Effect or Layer members in `() => Effect<...>` (use `readonly prop: Effect.Effect<...>` or parameterize factory functions; see agent-patterns/services-and-layers.md).",
+    },
   },
   {
     pattern: "lazyEffect",
     result: {
       kind: "mechanical",
-      hint: "Effect/Layer is already lazy (TS377091) — do not wrap zero-argument Effect or Layer members in `() => Effect<...>` (use `readonly prop: Effect.Effect<...>` or parameterize factory functions; see agent-patterns/services-and-layers.md)."
-    }
+      hint: "Effect/Layer is already lazy (TS377091) — do not wrap zero-argument Effect or Layer members in `() => Effect<...>` (use `readonly prop: Effect.Effect<...>` or parameterize factory functions; see agent-patterns/services-and-layers.md).",
+    },
   },
   {
     pattern: "redundant-or-die",
     result: {
       kind: "mechanical",
-      hint: "Redundant Effect.orDie inside generator (TS377088) — hoist `Effect.orDie` once to the outer `Effect.gen(...).pipe(Effect.orDie)` or `Effect.fn(..., Effect.orDie)`."
-    }
+      hint: "Redundant Effect.orDie inside generator (TS377088) — hoist `Effect.orDie` once to the outer `Effect.gen(...).pipe(Effect.orDie)` or `Effect.fn(..., Effect.orDie)`.",
+    },
   },
   {
     pattern: "schema-number",
     result: {
       kind: "mechanical",
-      hint: "Non-finite Schema number (TS377087) — use `Schema.Finite` or `Schema.FiniteFromString` (or `Schema.Int`) instead of `Schema.Number` / `Schema.NumberFromString`."
-    }
+      hint: "Non-finite Schema number (TS377087) — use `Schema.Finite` or `Schema.FiniteFromString` (or `Schema.Int`) instead of `Schema.Number` / `Schema.NumberFromString`.",
+    },
   },
   {
     pattern: "prefer-typed-schema-decoder",
     result: {
       kind: "mechanical",
-      hint: "Input is already assignable to Schema Encoded type (TS377092) — use `Schema.decodeSync` / `Schema.decodeEffect` instead of `decodeUnknown*`."
-    }
+      hint: "Input is already assignable to Schema Encoded type (TS377092) — use `Schema.decodeSync` / `Schema.decodeEffect` instead of `decodeUnknown*`.",
+    },
   },
   {
     pattern: "Config.redacted",
     result: {
       kind: "mechanical",
-      hint: "Sensitive configuration keys (SECRET, TOKEN, PASSWORD, API_KEY, PRIVATE_KEY, CREDENTIAL) must use Config.redacted(...) instead of Config.string(...) to prevent leaking secrets in logs and spans."
-    }
+      hint: "Sensitive configuration keys (SECRET, TOKEN, PASSWORD, API_KEY, PRIVATE_KEY, CREDENTIAL) must use Config.redacted(...) instead of Config.string(...) to prevent leaking secrets in logs and spans.",
+    },
   },
   {
     pattern: "SQL injection risk",
     result: {
       kind: "mechanical",
-      hint: "Raw SQL template interpolation in .exec() or .prepare() is banned (SQL injection risk) — use parameterized queries or Drizzle ORM."
-    }
+      hint: "Raw SQL template interpolation in .exec() or .prepare() is banned (SQL injection risk) — use parameterized queries or Drizzle ORM.",
+    },
   },
   {
     pattern: "Impure global",
     result: {
       kind: "mechanical",
-      hint: "Impure global Date.now() / new Date() / Math.random() is banned in type:domain — pass timestamps/randomness via input or use Effect Clock / Random services so domain deciders remain deterministic."
-    }
+      hint: "Impure global Date.now() / new Date() / Math.random() is banned in type:domain — pass timestamps/randomness via input or use Effect Clock / Random services so domain deciders remain deterministic.",
+    },
   },
   {
     pattern: "Schedule.forever",
     result: {
       kind: "mechanical",
-      hint: "Unbounded Effect.retry with Schedule.forever is banned (retry storm risk) — bound retries with Schedule.recurs(n) or Schedule.upTo(duration)."
-    }
+      hint: "Unbounded Effect.retry with Schedule.forever is banned (retry storm risk) — bound retries with Schedule.recurs(n) or Schedule.upTo(duration).",
+    },
   },
   {
     pattern: "Effect.ignore",
     result: {
       kind: "mechanical",
-      hint: "Swallowing typed errors with Effect.ignore is banned in type:domain — surface failures in the E channel or handle them explicitly."
-    }
+      hint: "Swallowing typed errors with Effect.ignore is banned in type:domain — surface failures in the E channel or handle them explicitly.",
+    },
   },
   {
     pattern: "Skipping or focusing tests",
     result: {
       kind: "mechanical",
-      hint: "Skipping or focusing tests (.skip, .only, .todo) is banned by Three-Layer Test Defence (E4 §3) — fix the failing test or implementation instead of bypassing verification."
-    }
+      hint: "Skipping or focusing tests (.skip, .only, .todo) is banned by Three-Layer Test Defence (E4 §3) — fix the failing test or implementation instead of bypassing verification.",
+    },
   },
   {
     pattern: "TypeScript suppression",
     result: {
       kind: "mechanical",
-      hint: "TypeScript suppression directives (@ts-ignore, @ts-expect-error, @ts-nocheck) are banned — fix the underlying type error instead of silencing the compiler."
-    }
+      hint: "TypeScript suppression directives (@ts-ignore, @ts-expect-error, @ts-nocheck) are banned — fix the underlying type error instead of silencing the compiler.",
+    },
   },
   {
     pattern: "Suppressing `effecttsgo/*`",
     result: {
       kind: "mechanical",
-      hint: "Suppressing effecttsgo/* (@effect/language-service) or harness/* diagnostics with oxlint-disable/eslint-disable/@effect-diagnostics is banned — fix the underlying violation instead."
-    }
+      hint: "Suppressing effecttsgo/* (@effect/language-service) or harness/* diagnostics with oxlint-disable/eslint-disable/@effect-diagnostics is banned — fix the underlying violation instead.",
+    },
   },
   {
     pattern: "discriminant-branching",
     result: {
       kind: "mechanical",
-      hint: "Do not branch on union discriminants with if/else or ternary — enumerate all variants explicitly with match(value).with(...).exhaustive() from ts-pattern (see agent-patterns/pattern-matching.md)."
-    }
+      hint: "Do not branch on union discriminants with if/else or ternary — enumerate all variants explicitly with match(value).with(...).exhaustive() from ts-pattern (see agent-patterns/pattern-matching.md).",
+    },
   },
   {
     pattern: "non-exhaustive-union-match",
     result: {
       kind: "mechanical",
-      hint: "Matching on a closed union with .otherwise() hides unhandled variants — enumerate every variant and terminate with .exhaustive() (see agent-patterns/pattern-matching.md)."
-    }
+      hint: "Matching on a closed union with .otherwise() hides unhandled variants — enumerate every variant and terminate with .exhaustive() (see agent-patterns/pattern-matching.md).",
+    },
   },
   {
     pattern: "No switch statements",
     result: {
       kind: "mechanical",
-      hint: "Switch statements are banned in domain/app code — use match(value).with(...).exhaustive() from ts-pattern (see agent-patterns/pattern-matching.md)."
-    }
+      hint: "Switch statements are banned in domain/app code — use match(value).with(...).exhaustive() from ts-pattern (see agent-patterns/pattern-matching.md).",
+    },
   },
   {
     pattern: "enumerate all states with match",
     result: {
       kind: "mechanical",
-      hint: "Branching on discriminated unions or tagged types (_tag, Option, Either, Result) with if/else or ternary is banned — enumerate all variants with match(value).with(...).exhaustive() from ts-pattern (see agent-patterns/pattern-matching.md)."
-    }
+      hint: "Branching on discriminated unions or tagged types (_tag, Option, Either, Result) with if/else or ternary is banned — enumerate all variants with match(value).with(...).exhaustive() from ts-pattern (see agent-patterns/pattern-matching.md).",
+    },
   },
   {
     pattern: "match(...).run() is banned",
     result: {
       kind: "mechanical",
-      hint: "match(...).run() throws at runtime on unhandled states — terminate with .exhaustive() for closed unions or .otherwise() for open primitive types (see agent-patterns/pattern-matching.md)."
-    }
+      hint: "match(...).run() throws at runtime on unhandled states — terminate with .exhaustive() for closed unions or .otherwise() for open primitive types (see agent-patterns/pattern-matching.md).",
+    },
   },
   {
     pattern: "unbranded-contract-schema",
     result: {
       kind: "mechanical",
-      hint: "Exported contract schema resolves to an unbranded primitive type — pipe scalar schemas into Schema.brand('<BrandName>') in type:contract and derive the TypeScript type via typeof <Schema>.Type (see agent-patterns/schema.md)."
-    }
+      hint: "Exported contract schema resolves to an unbranded primitive type — pipe scalar schemas into Schema.brand('<BrandName>') in type:contract and derive the TypeScript type via typeof <Schema>.Type (see agent-patterns/schema.md).",
+    },
   },
   {
     pattern: "unbranded-primitive-boundary",
     result: {
       kind: "mechanical",
-      hint: "Domain use case or Context.Service capability accepts or returns an unbranded primitive or inline object literal — replace raw primitives and inline object types with branded domain types (Schema.brand('<BrandName>')) and Schema.Struct definitions from type:contract (see agent-patterns/schema.md)."
-    }
+      hint: "Domain use case or Context.Service capability accepts or returns an unbranded primitive or inline object literal — replace raw primitives and inline object types with branded domain types (Schema.brand('<BrandName>')) and Schema.Struct definitions from type:contract (see agent-patterns/schema.md).",
+    },
   },
   {
     pattern: "raw primitive type alias",
     result: {
       kind: "mechanical",
-      hint: "Raw primitive type aliases (type X = string | number | boolean) are erased at compile time — define a branded schema in type:contract using Schema.<Base>.pipe(Schema.brand('<Name>')) or Brand.Branded (see agent-patterns/schema.md)."
-    }
+      hint: "Raw primitive type aliases (type X = string | number | boolean) are erased at compile time — define a branded schema in type:contract using Schema.<Base>.pipe(Schema.brand('<Name>')) or Brand.Branded (see agent-patterns/schema.md).",
+    },
   },
   {
     pattern: /Do not (?:declare|use) inline object/i,
     result: {
       kind: "mechanical",
-      hint: "Inline object type literals ({ ... }) bypass runtime Schema validation and branded field checks — define a named Schema.Struct, Schema.Class, or Schema.TaggedStruct in type:contract with branded fields and derive 'export type <Name> = typeof <Name>.Type' (see agent-patterns/schema.md)."
-    }
+      hint: "Inline object type literals ({ ... }) bypass runtime Schema validation and branded field checks — define a named Schema.Struct, Schema.Class, or Schema.TaggedStruct in type:contract with branded fields and derive 'export type <Name> = typeof <Name>.Type' (see agent-patterns/schema.md).",
+    },
   },
   {
     pattern: /Do not use raw primitive (?:type|success type|return type)/i,
     result: {
       kind: "mechanical",
-      hint: "Domain use case or Context.Service capability accepts or returns a raw primitive — replace raw primitives with branded domain types from type:contract defined via Schema.brand('<BrandName>') (see agent-patterns/schema.md)."
-    }
+      hint: "Domain use case or Context.Service capability accepts or returns a raw primitive — replace raw primitives with branded domain types from type:contract defined via Schema.brand('<BrandName>') (see agent-patterns/schema.md).",
+    },
   },
   {
     pattern: "duplicate Schema.brand",
     result: {
       kind: "mechanical",
-      hint: "Each brand key in Schema.brand('<BrandName>') must have a single canonical constructor schema — compose wire or parameter schemas into the canonical branded schema using Schema.decodeTo(<BrandedSchema>) (see agent-patterns/schema.md)."
-    }
+      hint: "Each brand key in Schema.brand('<BrandName>') must have a single canonical constructor schema — compose wire or parameter schemas into the canonical branded schema using Schema.decodeTo(<BrandedSchema>) (see agent-patterns/schema.md).",
+    },
   },
   {
     pattern: "unbranded primitive schema",
     result: {
       kind: "mechanical",
-      hint: "Exported scalar schemas in type:contract must carry a compile-time brand — append .pipe(Schema.brand('<BrandName>')) (see agent-patterns/schema.md)."
-    }
+      hint: "Exported scalar schemas in type:contract must carry a compile-time brand — append .pipe(Schema.brand('<BrandName>')) (see agent-patterns/schema.md).",
+    },
   },
   {
     pattern: "Do not use unbranded Schema.",
     result: {
       kind: "mechanical",
-      hint: "Struct/Class/Error fields in type:contract must reference branded domain schemas rather than raw Schema.String / Schema.Int / Schema.Natural — extract a reusable branded schema with Schema.brand('<BrandName>') (see agent-patterns/schema.md)."
-    }
+      hint: "Struct/Class/Error fields in type:contract must reference branded domain schemas rather than raw Schema.String / Schema.Int / Schema.Natural — extract a reusable branded schema with Schema.brand('<BrandName>') (see agent-patterns/schema.md).",
+    },
   },
   {
     pattern: "Do not bypass brand validation with 'as'",
     result: {
       kind: "mechanical",
-      hint: "Never cast raw values with `as <BrandedType>` — construct branded values via <BrandedSchema>.make(value), Schema.decodeUnknownEffect(<BrandedSchema>)(value), or Effect v4 Brand.nominal / Brand.make / Brand.check (see agent-patterns/schema.md)."
-    }
+      hint: "Never cast raw values with `as <BrandedType>` — construct branded values via <BrandedSchema>.make(value), Schema.decodeUnknownEffect(<BrandedSchema>)(value), or Effect v4 Brand.nominal / Brand.make / Brand.check (see agent-patterns/schema.md).",
+    },
   },
   {
     pattern: /harness(?:\/|\()syntax-bans\)?/,
     result: {
       kind: "mechanical",
-      hint: "Banned syntax in Effect code — use Effect.gen, Schema.fromJsonString, and typed errors instead of async/await, try/catch, throw, or JSON.parse (see agent-patterns/errors.md and agent-patterns/schema.md)."
-    }
-  }
+      hint: "Banned syntax in Effect code — use Effect.gen, Schema.fromJsonString, and typed errors instead of async/await, try/catch, throw, or JSON.parse (see agent-patterns/errors.md and agent-patterns/schema.md).",
+    },
+  },
 ]
 
-export const triageFailure = Effect.fn("Harness.triageFailure")(function* (
-  failureOutput: string
-) {
+export const triageFailure = Effect.fn("Harness.triageFailure")(function* (failureOutput: string) {
   for (const rule of DETERMINISTIC_TRIAGE_RULES) {
-    const matches = typeof rule.pattern === "string"
-      ? failureOutput.includes(rule.pattern)
-      : rule.pattern.test(failureOutput)
+    const matches =
+      typeof rule.pattern === "string"
+        ? failureOutput.includes(rule.pattern)
+        : rule.pattern.test(failureOutput)
     if (matches) {
       return rule.result
     }
@@ -285,31 +287,31 @@ export const triageFailure = Effect.fn("Harness.triageFailure")(function* (
 
   const outcome = yield* DecisionModel.decide(TriageV1, { input: { failureOutput } }).pipe(
     Effect.timeoutOption("1500 millis"),
-    Effect.catchCause(() => Effect.succeedNone)
+    Effect.catchCause(() => Effect.succeedNone),
   )
 
   if (Option.isNone(outcome)) {
     return {
       kind: "semantic" as const,
-      hint: "Inspect failing test and Effect graph neighborhood via harness_tests_reaching / harness_callees."
+      hint: "Inspect failing test and Effect graph neighborhood via harness_tests_reaching / harness_callees.",
     }
   }
 
   const { answers } = outcome.value
   yield* Effect.annotateCurrentSpan({
     "decision.definition": "TriageV1",
-    "decision.kind": answers.kind.label
+    "decision.kind": answers.kind.label,
   })
 
   if (answers.kind.label === "mechanical") {
     return {
       kind: "mechanical" as const,
-      hint: "Mechanical error identified by decision model; inspect syntax, types, or configuration."
+      hint: "Mechanical error identified by decision model; inspect syntax, types, or configuration.",
     }
   }
 
   return {
     kind: "semantic" as const,
-    hint: "Inspect failing test and Effect graph neighborhood via harness_tests_reaching / harness_callees."
+    hint: "Inspect failing test and Effect graph neighborhood via harness_tests_reaching / harness_callees.",
   }
 })

@@ -10,7 +10,7 @@ import {
   readFrictionEvents,
   resolveHarnessStateDir,
   summarizeFrictionEvents,
-  type FrictionEvent
+  type FrictionEvent,
 } from "../src/index.js"
 
 describe("Friction log and clustering", () => {
@@ -21,26 +21,26 @@ describe("Friction log and clustering", () => {
           kind: "route_miss",
           timestamp: "2026-10-26T10:00:00.000Z",
           summary: "Missing D1 Route",
-          detail: "first miss"
+          detail: "first miss",
         },
         {
           kind: "verify_failure",
           timestamp: "2026-10-26T11:00:00.000Z",
           summary: "syntax ban error",
-          detail: "harness/syntax-bans"
+          detail: "harness/syntax-bans",
         },
         {
           kind: "route_miss",
           timestamp: "2026-10-26T12:00:00.000Z",
           summary: " missing d1 route ",
-          detail: "second miss with latest detail"
+          detail: "second miss with latest detail",
         },
         {
           kind: "guard_escalation",
           timestamp: "2026-10-26T09:00:00.000Z",
           summary: "curl command",
-          detail: "curl blocked"
-        }
+          detail: "curl blocked",
+        },
       ]
 
       const clusters = yield* decideFrictionClusters(events)
@@ -53,7 +53,7 @@ describe("Friction log and clustering", () => {
         summary: " missing d1 route ",
         detail: "second miss with latest detail",
         occurrences: 2,
-        lastSeen: "2026-10-26T12:00:00.000Z"
+        lastSeen: "2026-10-26T12:00:00.000Z",
       })
 
       // Ties sorted by key ascending
@@ -66,7 +66,7 @@ describe("Friction log and clustering", () => {
       // summarizeFrictionEvents returns identical clusters via Effect.runSync
       const summarized = summarizeFrictionEvents(events)
       expect(summarized).toEqual(clusters)
-    })
+    }),
   )
 
   it("handles empty events in summarizeFrictionEvents", () => {
@@ -85,7 +85,7 @@ describe("Friction log and clustering", () => {
         kind: "route_miss",
         summary: "Route miss 1",
         detail: "detail 1",
-        timestamp: "2026-10-26T12:00:00.000Z"
+        timestamp: "2026-10-26T12:00:00.000Z",
       })
       expect(ev1.summary).toBe("Route miss 1")
       expect(ev1.timestamp).toBe("2026-10-26T12:00:00.000Z")
@@ -93,7 +93,7 @@ describe("Friction log and clustering", () => {
       const ev2 = appendFrictionEvent(tempDir, {
         kind: "guard_escalation",
         summary: "rm -rf",
-        detail: "blocked destructive command"
+        detail: "blocked destructive command",
       })
       expect(ev2.timestamp).toBeDefined()
 
@@ -113,7 +113,7 @@ describe("Friction log and clustering", () => {
           '{"kind":"unknown_kind","timestamp":"2026-10-26T12:00:00.000Z","summary":"bad","detail":"bad"}\n' +
           '{"missing":"fields"}\n' +
           "\n\n",
-        "utf-8"
+        "utf-8",
       )
 
       // Malformed lines are skipped, original 2 remain

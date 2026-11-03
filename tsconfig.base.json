@@ -37,4 +37,3 @@
   },
   "exclude": ["repos", "node_modules", "dist", "coverage", ".nx"]
 }
-

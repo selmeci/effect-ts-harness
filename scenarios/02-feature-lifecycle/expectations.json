@@ -74,7 +74,10 @@
       "id": "s2-new-error-in-spec",
       "source": "transcript",
       "step": ["s2", "s3"],
-      "where": { "tool~": "replace_file_content|write_to_file|multi_replace|^Edit$|^Write$", "args~": "lock|zamkn|Locked" },
+      "where": {
+        "tool~": "replace_file_content|write_to_file|multi_replace|^Edit$|^Write$",
+        "args~": "lock|zamkn|Locked"
+      },
       "severity": "warn",
       "why": "No edit mentioning the locked-album rule — change may have been dropped"
     },
@@ -156,7 +159,9 @@
       "left": { "source": "telemetry", "where": { "surface": "hook", "toolName": "guard" } },
       "right": {
         "source": "transcript",
-        "where": { "tool~": "^(run_command|replace_file_content|multi_replace_file_content|write_to_file|Bash|Edit|Write|MultiEdit)$" }
+        "where": {
+          "tool~": "^(run_command|replace_file_content|multi_replace_file_content|write_to_file|Bash|Edit|Write|MultiEdit)$"
+        }
       },
       "why": "Some shell/write calls bypassed the guard hook"
     },

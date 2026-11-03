@@ -6,11 +6,6 @@
   "exports": {
     ".": "./src/index.ts"
   },
-  "nx": {
-    "tags": [
-      "type:infra"
-    ]
-  },
   "scripts": {
     "typecheck": "tsc --noEmit && effect-tsgo diagnostics --strict --project tsconfig.json",
     "lint": "oxlint --deny-warnings .",
@@ -36,5 +31,10 @@
     "@types/node": "26.6.5",
     "drizzle-kit": "1.0.0-rc.5-ab785fc",
     "vitest": "5.0.3"
+  },
+  "nx": {
+    "tags": [
+      "type:infra"
+    ]
   }
 }

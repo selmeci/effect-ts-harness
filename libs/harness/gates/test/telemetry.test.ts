@@ -13,7 +13,7 @@ import {
   scopeSessionReportInput,
   type SessionReport,
   TelemetryEvent,
-  writeSessionReportFiles
+  writeSessionReportFiles,
 } from "../src/index.js"
 
 describe("telemetry & session observability", () => {
@@ -27,7 +27,7 @@ describe("telemetry & session observability", () => {
           toolName: "harness_resolve",
           outcome: "ok",
           durationMs: 12,
-          engineSource: "local"
+          engineSource: "local",
         },
         {
           timestamp: "2026-10-27T10:00:01.000Z",
@@ -36,7 +36,7 @@ describe("telemetry & session observability", () => {
           toolName: "harness_callers",
           outcome: "ok",
           durationMs: 18,
-          engineSource: "local"
+          engineSource: "local",
         },
         {
           timestamp: "2026-10-27T10:00:02.000Z",
@@ -45,7 +45,7 @@ describe("telemetry & session observability", () => {
           toolName: "harness_ontology_check",
           outcome: "ok",
           durationMs: 25,
-          engineSource: "decision-model"
+          engineSource: "decision-model",
         },
         {
           timestamp: "2026-10-27T10:00:03.000Z",
@@ -54,7 +54,7 @@ describe("telemetry & session observability", () => {
           toolName: "harness_gq_query",
           outcome: "ok",
           durationMs: 35,
-          engineSource: "omnigraph"
+          engineSource: "omnigraph",
         },
         {
           timestamp: "2026-10-27T10:00:04.000Z",
@@ -62,7 +62,7 @@ describe("telemetry & session observability", () => {
           category: "gate",
           toolName: "plan-check",
           outcome: "ok",
-          durationMs: 400
+          durationMs: 400,
         },
         {
           timestamp: "2026-10-27T10:00:05.000Z",
@@ -70,7 +70,7 @@ describe("telemetry & session observability", () => {
           category: "gate",
           toolName: "verify",
           outcome: "fail",
-          durationMs: 800
+          durationMs: 800,
         },
         {
           timestamp: "2026-10-27T10:00:06.000Z",
@@ -78,7 +78,7 @@ describe("telemetry & session observability", () => {
           category: "gate",
           toolName: "gc",
           outcome: "ok",
-          durationMs: 150
+          durationMs: 150,
         },
         {
           timestamp: "2026-10-27T10:00:07.000Z",
@@ -86,7 +86,7 @@ describe("telemetry & session observability", () => {
           category: "gate",
           toolName: "verify",
           outcome: "ok",
-          durationMs: 750
+          durationMs: 750,
         },
         {
           timestamp: "2026-10-27T10:00:08.000Z",
@@ -94,8 +94,8 @@ describe("telemetry & session observability", () => {
           category: "lifecycle",
           toolName: "done",
           outcome: "ok",
-          durationMs: 50
-        }
+          durationMs: 50,
+        },
       ]
 
       const report = yield* decideSessionReport({ events })
@@ -136,13 +136,13 @@ describe("telemetry & session observability", () => {
       expect(verifyMetric?.maxDurationMs).toBe(800)
 
       expect(report.recommendations).toContain(
-        "Run 'harness gc --strict' and 'harness ontology check --strict' before 'harness verify' to reduce fix-up iterations."
+        "Run 'harness gc --strict' and 'harness ontology check --strict' before 'harness verify' to reduce fix-up iterations.",
       )
 
       const rendered = renderSessionReportMarkdown(report)
       expect(rendered).toContain("# Harness Session Observability Report")
       expect(rendered).toContain("Health Score")
-    })
+    }),
   )
 
   it.effect("penalizes premature done, unverified workflows, and guard escalations", () =>
@@ -154,7 +154,7 @@ describe("telemetry & session observability", () => {
           category: "guard",
           toolName: "guard",
           outcome: "deny",
-          durationMs: 5
+          durationMs: 5,
         },
         {
           timestamp: "2026-10-27T11:00:01.000Z",
@@ -162,7 +162,7 @@ describe("telemetry & session observability", () => {
           category: "guard",
           toolName: "guard",
           outcome: "ask",
-          durationMs: 8
+          durationMs: 8,
         },
         {
           timestamp: "2026-10-27T11:00:02.000Z",
@@ -170,7 +170,7 @@ describe("telemetry & session observability", () => {
           category: "lifecycle",
           toolName: "done",
           outcome: "fail",
-          durationMs: 15
+          durationMs: 15,
         },
         {
           timestamp: "2026-10-27T11:00:03.000Z",
@@ -178,7 +178,7 @@ describe("telemetry & session observability", () => {
           category: "gate",
           toolName: "verify",
           outcome: "ok",
-          durationMs: 300
+          durationMs: 300,
         },
         {
           timestamp: "2026-10-27T11:00:04.000Z",
@@ -186,8 +186,8 @@ describe("telemetry & session observability", () => {
           category: "lifecycle",
           toolName: "done",
           outcome: "ok",
-          durationMs: 20
-        }
+          durationMs: 20,
+        },
       ]
 
       const frictionEvents = [
@@ -195,8 +195,8 @@ describe("telemetry & session observability", () => {
           kind: "route_miss" as const,
           timestamp: "2026-10-27T11:00:01.500Z",
           summary: "test",
-          detail: "route miss"
-        }
+          detail: "route miss",
+        },
       ]
 
       const report = yield* decideSessionReport({ events, frictionEvents })
@@ -212,15 +212,15 @@ describe("telemetry & session observability", () => {
       expect(report.grade).toBe("C")
 
       expect(report.recommendations).toContain(
-        "Execute planning/discovery tools ('harness route', 'harness ontology check', or 'harness plan-check') before running 'harness verify'."
+        "Execute planning/discovery tools ('harness route', 'harness ontology check', or 'harness plan-check') before running 'harness verify'.",
       )
       expect(report.recommendations).toContain(
-        "Avoid invoking 'harness done' before 'harness verify' produces a valid verify-stamp.json."
+        "Avoid invoking 'harness done' before 'harness verify' produces a valid verify-stamp.json.",
       )
       expect(report.recommendations).toContain(
-        "Use semantic MCP graph & ontology tools ('harness_resolve', 'harness_callers', 'harness_ontology_why', 'harness_gq_query') to inspect topology before editing."
+        "Use semantic MCP graph & ontology tools ('harness_resolve', 'harness_callers', 'harness_ontology_why', 'harness_gq_query') to inspect topology before editing.",
       )
-    })
+    }),
   )
 
   it.effect("handles fallback queries and zero-call empty sessions cleanly", () =>
@@ -241,70 +241,72 @@ describe("telemetry & session observability", () => {
           toolName: "harness_gq_query",
           outcome: "fallback",
           durationMs: 50,
-          engineSource: "memory-fallback"
-        }
+          engineSource: "memory-fallback",
+        },
       ]
       const fallbackReport = yield* decideSessionReport({ events: fallbackEvents })
       expect(fallbackReport.kpis.omnigraphLiveRatio).toBe(0)
       expect(fallbackReport.recommendations).toContain(
-        "Queries used deterministic in-memory fallback ('memory-fallback'). Start Omnigraph server if persistent branch queries are needed."
+        "Queries used deterministic in-memory fallback ('memory-fallback'). Start Omnigraph server if persistent branch queries are needed.",
       )
-    })
+    }),
   )
 
-  it.effect("appends, reads, clears telemetry events and writes report files in state directory", () =>
-    Effect.gen(function* () {
-      const tmpDir = mkdtempSync(join(tmpdir(), "harness-telemetry-test-"))
-      yield* Effect.addFinalizer(() =>
-        Effect.sync(() => {
-          rmSync(tmpDir, { recursive: true, force: true })
+  it.effect(
+    "appends, reads, clears telemetry events and writes report files in state directory",
+    () =>
+      Effect.gen(function* () {
+        const tmpDir = mkdtempSync(join(tmpdir(), "harness-telemetry-test-"))
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            rmSync(tmpDir, { recursive: true, force: true })
+          }),
+        )
+
+        expect(readTelemetryEvents(tmpDir)).toEqual([])
+
+        appendTelemetryEvent(tmpDir, {
+          surface: "cli",
+          category: "gate",
+          toolName: "plan-check",
+          outcome: "ok",
+          durationMs: 120,
         })
-      )
 
-      expect(readTelemetryEvents(tmpDir)).toEqual([])
+        appendTelemetryEvent(tmpDir, {
+          surface: "mcp",
+          category: "graph_query",
+          toolName: "harness_resolve",
+          outcome: "ok",
+          durationMs: 15,
+          engineSource: "local",
+        })
 
-      appendTelemetryEvent(tmpDir, {
-        surface: "cli",
-        category: "gate",
-        toolName: "plan-check",
-        outcome: "ok",
-        durationMs: 120
-      })
+        const readBack = readTelemetryEvents(tmpDir)
+        expect(readBack.length).toBe(2)
+        expect(readBack[0]?.toolName).toBe("plan-check")
+        expect(readBack[1]?.toolName).toBe("harness_resolve")
 
-      appendTelemetryEvent(tmpDir, {
-        surface: "mcp",
-        category: "graph_query",
-        toolName: "harness_resolve",
-        outcome: "ok",
-        durationMs: 15,
-        engineSource: "local"
-      })
+        const report: SessionReport = yield* decideSessionReport({ events: readBack })
+        const written = writeSessionReportFiles(tmpDir, report)
+        expect(existsSync(written.jsonPath)).toBe(true)
+        expect(existsSync(written.markdownPath)).toBe(true)
 
-      const readBack = readTelemetryEvents(tmpDir)
-      expect(readBack.length).toBe(2)
-      expect(readBack[0]?.toolName).toBe("plan-check")
-      expect(readBack[1]?.toolName).toBe("harness_resolve")
+        const mdContent = readFileSync(written.markdownPath, "utf-8")
+        expect(mdContent).toContain("# Harness Session Observability Report")
+        expect(mdContent).toContain("plan-check")
+        expect(mdContent).toContain("harness_resolve")
 
-      const report: SessionReport = yield* decideSessionReport({ events: readBack })
-      const written = writeSessionReportFiles(tmpDir, report)
-      expect(existsSync(written.jsonPath)).toBe(true)
-      expect(existsSync(written.markdownPath)).toBe(true)
-
-      const mdContent = readFileSync(written.markdownPath, "utf-8")
-      expect(mdContent).toContain("# Harness Session Observability Report")
-      expect(mdContent).toContain("plan-check")
-      expect(mdContent).toContain("harness_resolve")
-
-      clearTelemetryEvents(tmpDir)
-      expect(readTelemetryEvents(tmpDir)).toEqual([])
-    })
+        clearTelemetryEvents(tmpDir)
+        expect(readTelemetryEvents(tmpDir)).toEqual([])
+      }),
   )
 
   it.effect.prop(
     "SessionReport.decide satisfies bounded score and grade invariant across arbitrary telemetry and friction inputs",
     [
       Schema.Array(TelemetryEvent),
-      Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 0, maximum: 10 })))
+      Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 0, maximum: 10 }))),
     ],
     ([events, frictionCount]) =>
       Effect.gen(function* () {
@@ -312,7 +314,7 @@ describe("telemetry & session observability", () => {
           kind: "route_miss" as const,
           timestamp: "2026-10-27T12:00:00.000Z",
           summary: `friction-${i}`,
-          detail: "detail"
+          detail: "detail",
         }))
 
         const report = yield* decideSessionReport({ events, frictionEvents })
@@ -331,7 +333,7 @@ describe("telemetry & session observability", () => {
         } else {
           expect(report.grade).toBe("D")
         }
-      })
+      }),
   )
 
   it.effect.prop(
@@ -343,7 +345,7 @@ describe("telemetry & session observability", () => {
         expect(report.totalEvents).toBe(events.length)
         expect(report.healthScore).toBeGreaterThanOrEqual(0)
         expect(report.healthScore).toBeLessThanOrEqual(100)
-      })
+      }),
   )
 
   it.effect(
@@ -358,7 +360,7 @@ describe("telemetry & session observability", () => {
             category: "gate",
             toolName: "verify",
             outcome: "fail",
-            durationMs: 500
+            durationMs: 500,
           },
           {
             timestamp: "2026-10-27T09:05:00.000Z",
@@ -366,7 +368,7 @@ describe("telemetry & session observability", () => {
             category: "lifecycle",
             toolName: "done",
             outcome: "ok",
-            durationMs: 20
+            durationMs: 20,
           },
           // Task 2 (active/latest task)
           {
@@ -375,7 +377,7 @@ describe("telemetry & session observability", () => {
             category: "gate",
             toolName: "plan-check",
             outcome: "ok",
-            durationMs: 300
+            durationMs: 300,
           },
           // Automatic Antigravity Stop hook turn handoff after plan-check (should NOT penalize prematureDoneAttempts)
           {
@@ -384,7 +386,7 @@ describe("telemetry & session observability", () => {
             category: "lifecycle",
             toolName: "done",
             outcome: "fail",
-            durationMs: 11
+            durationMs: 11,
           },
           {
             timestamp: "2026-10-28T10:02:00.000Z",
@@ -393,7 +395,7 @@ describe("telemetry & session observability", () => {
             toolName: "harness_ontology_check",
             outcome: "ok",
             durationMs: 40,
-            engineSource: "local"
+            engineSource: "local",
           },
           {
             timestamp: "2026-10-28T10:03:00.000Z",
@@ -401,7 +403,7 @@ describe("telemetry & session observability", () => {
             category: "gate",
             toolName: "verify",
             outcome: "ok",
-            durationMs: 450
+            durationMs: 450,
           },
           {
             timestamp: "2026-10-28T10:04:00.000Z",
@@ -409,8 +411,8 @@ describe("telemetry & session observability", () => {
             category: "lifecycle",
             toolName: "done",
             outcome: "ok",
-            durationMs: 25
-          }
+            durationMs: 25,
+          },
         ]
 
         const frictionEvents = [
@@ -419,8 +421,8 @@ describe("telemetry & session observability", () => {
             kind: "guard_escalation" as const,
             timestamp: "2026-10-27T09:01:00.000Z",
             summary: "old command",
-            detail: "old friction"
-          }
+            detail: "old friction",
+          },
         ]
 
         const scopedReport = yield* decideSessionReport({ events, frictionEvents })
@@ -435,12 +437,12 @@ describe("telemetry & session observability", () => {
         const cumulativeReport = yield* decideSessionReport({
           events,
           frictionEvents,
-          cumulative: true
+          cumulative: true,
         })
         expect(cumulativeReport.totalEvents).toBe(7)
         expect(cumulativeReport.kpis.fixUpIterations).toBe(1)
         expect(cumulativeReport.kpis.frictionCount).toBe(1)
-      })
+      }),
   )
 
   it.effect(
@@ -454,7 +456,7 @@ describe("telemetry & session observability", () => {
             category: "gate",
             toolName: "plan-check",
             outcome: "ok",
-            durationMs: 100
+            durationMs: 100,
           },
           {
             timestamp: "2026-10-27T10:01:00.000Z",
@@ -462,7 +464,7 @@ describe("telemetry & session observability", () => {
             category: "gate",
             toolName: "verify",
             outcome: "ok",
-            durationMs: 200
+            durationMs: 200,
           },
           {
             timestamp: "2026-10-27T10:02:00.000Z",
@@ -470,20 +472,20 @@ describe("telemetry & session observability", () => {
             category: "lifecycle",
             toolName: "done",
             outcome: "ok",
-            durationMs: 50
-          }
+            durationMs: 50,
+          },
         ]
 
         const allowedEscalation: FrictionEvent = {
           kind: "guard_escalation",
           timestamp: "2026-10-27T10:00:30.000Z",
           summary: "safe read command",
-          detail: "verdict=allow; reason=read-only check"
+          detail: "verdict=allow; reason=read-only check",
         }
 
         const reportAllowed = yield* decideSessionReport({
           events,
-          frictionEvents: [allowedEscalation]
+          frictionEvents: [allowedEscalation],
         })
 
         // verdict=allow guard_escalation must not increment frictionCount or deduct points
@@ -494,36 +496,31 @@ describe("telemetry & session observability", () => {
           kind: "guard_escalation",
           timestamp: "2026-10-27T10:00:35.000Z",
           summary: "unsafe command",
-          detail: "verdict=deny; reason=destructive operation"
+          detail: "verdict=deny; reason=destructive operation",
         }
         const routeMiss: FrictionEvent = {
           kind: "route_miss",
           timestamp: "2026-10-27T10:00:40.000Z",
           summary: "route miss summary",
-          detail: "route target missing"
+          detail: "route target missing",
         }
         const verifyFailure: FrictionEvent = {
           kind: "verify_failure",
           timestamp: "2026-10-27T10:00:45.000Z",
           summary: "verify failed",
-          detail: "test assertion failed"
+          detail: "test assertion failed",
         }
 
         const reportMixed = yield* decideSessionReport({
           events,
-          frictionEvents: [
-            allowedEscalation,
-            deniedEscalation,
-            routeMiss,
-            verifyFailure
-          ]
+          frictionEvents: [allowedEscalation, deniedEscalation, routeMiss, verifyFailure],
         })
 
         // Exactly the 3 non-allowed events count: deniedEscalation, routeMiss, verifyFailure
         expect(reportMixed.kpis.frictionCount).toBe(3)
         // 100 - (3 * 5) = 85
         expect(reportMixed.healthScore).toBe(85)
-      })
+      }),
   )
 
   it("scopeSessionReportInput ignores intermediate done events and scopes to active task after completed done", () => {
@@ -535,7 +532,7 @@ describe("telemetry & session observability", () => {
         category: "gate",
         toolName: "plan-check",
         outcome: "ok",
-        durationMs: 100
+        durationMs: 100,
       },
       {
         timestamp: "2026-10-27T09:01:00.000Z",
@@ -544,7 +541,7 @@ describe("telemetry & session observability", () => {
         toolName: "done",
         outcome: "ok",
         detail: "fullyIdle=false",
-        durationMs: 15
+        durationMs: 15,
       },
       {
         timestamp: "2026-10-27T09:02:00.000Z",
@@ -552,8 +549,8 @@ describe("telemetry & session observability", () => {
         category: "gate",
         toolName: "verify",
         outcome: "ok",
-        durationMs: 200
-      }
+        durationMs: 200,
+      },
     ]
     const scopedIdle = scopeSessionReportInput({ events: intermediateFullyIdleEvents })
     expect(scopedIdle.events.length).toBe(3)
@@ -566,7 +563,7 @@ describe("telemetry & session observability", () => {
         category: "gate",
         toolName: "plan-check",
         outcome: "ok",
-        durationMs: 100
+        durationMs: 100,
       },
       {
         timestamp: "2026-10-27T09:01:00.000Z",
@@ -575,7 +572,7 @@ describe("telemetry & session observability", () => {
         toolName: "done",
         outcome: "ok",
         detail: "in-progress",
-        durationMs: 15
+        durationMs: 15,
       },
       {
         timestamp: "2026-10-27T09:02:00.000Z",
@@ -583,8 +580,8 @@ describe("telemetry & session observability", () => {
         category: "gate",
         toolName: "verify",
         outcome: "ok",
-        durationMs: 200
-      }
+        durationMs: 200,
+      },
     ]
     const scopedHook = scopeSessionReportInput({ events: intermediateHookDoneEvents })
     expect(scopedHook.events.length).toBe(3)
@@ -597,7 +594,7 @@ describe("telemetry & session observability", () => {
         category: "gate",
         toolName: "verify",
         outcome: "ok",
-        durationMs: 300
+        durationMs: 300,
       },
       {
         timestamp: "2026-10-27T09:01:00.000Z",
@@ -606,7 +603,7 @@ describe("telemetry & session observability", () => {
         toolName: "done",
         outcome: "ok",
         detail: "completed",
-        durationMs: 20
+        durationMs: 20,
       },
       // Active task window
       {
@@ -615,7 +612,7 @@ describe("telemetry & session observability", () => {
         category: "gate",
         toolName: "plan-check",
         outcome: "ok",
-        durationMs: 150
+        durationMs: 150,
       },
       {
         timestamp: "2026-10-27T10:01:00.000Z",
@@ -623,27 +620,27 @@ describe("telemetry & session observability", () => {
         category: "gate",
         toolName: "verify",
         outcome: "ok",
-        durationMs: 250
-      }
+        durationMs: 250,
+      },
     ]
     const frictionEvents: ReadonlyArray<FrictionEvent> = [
       {
         kind: "route_miss",
         timestamp: "2026-10-27T08:59:00.000Z",
         summary: "stale friction",
-        detail: "from previous task"
+        detail: "from previous task",
       },
       {
         kind: "verify_failure",
         timestamp: "2026-10-27T10:00:30.000Z",
         summary: "active friction",
-        detail: "in current task"
-      }
+        detail: "in current task",
+      },
     ]
 
     const scopedWithDetail = scopeSessionReportInput({
       events: completedWithDetailEvents,
-      frictionEvents
+      frictionEvents,
     })
     expect(scopedWithDetail.events.length).toBe(2)
     expect(scopedWithDetail.events[0]?.toolName).toBe("plan-check")
@@ -659,7 +656,7 @@ describe("telemetry & session observability", () => {
         category: "gate",
         toolName: "verify",
         outcome: "ok",
-        durationMs: 300
+        durationMs: 300,
       },
       {
         timestamp: "2026-10-27T09:01:00.000Z",
@@ -667,7 +664,7 @@ describe("telemetry & session observability", () => {
         category: "lifecycle",
         toolName: "omnigraph:merge-main",
         outcome: "ok",
-        durationMs: 100
+        durationMs: 100,
       },
       {
         timestamp: "2026-10-27T09:02:00.000Z",
@@ -675,7 +672,7 @@ describe("telemetry & session observability", () => {
         category: "lifecycle",
         toolName: "done",
         outcome: "ok",
-        durationMs: 20
+        durationMs: 20,
       },
       // Active task window
       {
@@ -684,13 +681,13 @@ describe("telemetry & session observability", () => {
         category: "gate",
         toolName: "verify",
         outcome: "ok",
-        durationMs: 250
-      }
+        durationMs: 250,
+      },
     ]
 
     const scopedPreceded = scopeSessionReportInput({
       events: completedPrecededByMergeEvents,
-      frictionEvents
+      frictionEvents,
     })
     expect(scopedPreceded.events.length).toBe(1)
     expect(scopedPreceded.events[0]?.toolName).toBe("verify")
@@ -706,7 +703,7 @@ describe("telemetry & session observability", () => {
         category: "gate",
         toolName: "verify",
         outcome: "ok",
-        durationMs: 300
+        durationMs: 300,
       },
       {
         timestamp: "2026-10-27T09:01:00.000Z",
@@ -715,7 +712,7 @@ describe("telemetry & session observability", () => {
         toolName: "done",
         outcome: "ok",
         detail: "completed",
-        durationMs: 20
+        durationMs: 20,
       },
       {
         timestamp: "2026-10-27T09:02:00.000Z",
@@ -723,7 +720,7 @@ describe("telemetry & session observability", () => {
         category: "gate",
         toolName: "ingest",
         outcome: "ok",
-        durationMs: 50
+        durationMs: 50,
       },
       {
         timestamp: "2026-10-27T09:03:00.000Z",
@@ -731,8 +728,8 @@ describe("telemetry & session observability", () => {
         category: "gate",
         toolName: "gc",
         outcome: "ok",
-        durationMs: 30
-      }
+        durationMs: 30,
+      },
     ]
 
     const scoped = scopeSessionReportInput({ events: postDoneEvents })
@@ -750,7 +747,7 @@ describe("telemetry & session observability", () => {
           toolName: "harness_gq_query",
           outcome: "ok",
           durationMs: 35,
-          engineSource: "omnigraph"
+          engineSource: "omnigraph",
         },
         {
           timestamp: "2026-10-30T10:00:01.000Z",
@@ -758,115 +755,119 @@ describe("telemetry & session observability", () => {
           category: "routing",
           toolName: "route",
           outcome: "fallback",
-          durationMs: 400
-        }
+          durationMs: 400,
+        },
       ]
 
       const report = yield* decideSessionReport({ events })
       expect(report.kpis.omnigraphLiveRatio).toBe(1)
-    })
+    }),
   )
 
-  it.effect("REQ-2.2: omnigraph:sync-* and omnigraph:merge-* do not increment graphDiscoveryCalls", () =>
-    Effect.gen(function* () {
-      const events: ReadonlyArray<TelemetryEvent> = [
-        {
-          timestamp: "2026-10-30T10:00:00.000Z",
-          surface: "cli",
-          category: "graph_query",
-          toolName: "omnigraph:sync-plan",
-          outcome: "ok",
-          durationMs: 50
-        },
-        {
-          timestamp: "2026-10-30T10:00:01.000Z",
-          surface: "cli",
-          category: "graph_query",
-          toolName: "omnigraph:sync-impl",
-          outcome: "ok",
-          durationMs: 60
-        },
-        {
-          timestamp: "2026-10-30T10:00:02.000Z",
-          surface: "cli",
-          category: "graph_query",
-          toolName: "omnigraph:merge-main",
-          outcome: "ok",
-          durationMs: 70
-        },
-        {
-          timestamp: "2026-10-30T10:00:03.000Z",
-          surface: "mcp",
-          category: "graph_query",
-          toolName: "harness_resolve",
-          outcome: "ok",
-          durationMs: 15
-        }
-      ]
+  it.effect(
+    "REQ-2.2: omnigraph:sync-* and omnigraph:merge-* do not increment graphDiscoveryCalls",
+    () =>
+      Effect.gen(function* () {
+        const events: ReadonlyArray<TelemetryEvent> = [
+          {
+            timestamp: "2026-10-30T10:00:00.000Z",
+            surface: "cli",
+            category: "graph_query",
+            toolName: "omnigraph:sync-plan",
+            outcome: "ok",
+            durationMs: 50,
+          },
+          {
+            timestamp: "2026-10-30T10:00:01.000Z",
+            surface: "cli",
+            category: "graph_query",
+            toolName: "omnigraph:sync-impl",
+            outcome: "ok",
+            durationMs: 60,
+          },
+          {
+            timestamp: "2026-10-30T10:00:02.000Z",
+            surface: "cli",
+            category: "graph_query",
+            toolName: "omnigraph:merge-main",
+            outcome: "ok",
+            durationMs: 70,
+          },
+          {
+            timestamp: "2026-10-30T10:00:03.000Z",
+            surface: "mcp",
+            category: "graph_query",
+            toolName: "harness_resolve",
+            outcome: "ok",
+            durationMs: 15,
+          },
+        ]
 
-      const report = yield* decideSessionReport({ events })
-      expect(report.kpis.graphDiscoveryCalls).toBe(1)
-    })
+        const report = yield* decideSessionReport({ events })
+        expect(report.kpis.graphDiscoveryCalls).toBe(1)
+      }),
   )
 
-  it.effect("REQ-2.3: recommends in-process MCP tools when bySurface.mcp === 0 and nonHookCalls >= 3", () =>
-    Effect.gen(function* () {
-      const cliEvents: ReadonlyArray<TelemetryEvent> = [
-        {
-          timestamp: "2026-10-30T10:00:00.000Z",
-          surface: "cli",
-          category: "gate",
-          toolName: "plan-check",
-          outcome: "ok",
-          durationMs: 300
-        },
-        {
-          timestamp: "2026-10-30T10:00:01.000Z",
-          surface: "cli",
-          category: "gate",
-          toolName: "verify",
-          outcome: "ok",
-          durationMs: 250
-        },
-        {
-          timestamp: "2026-10-30T10:00:02.000Z",
-          surface: "cli",
-          category: "gate",
-          toolName: "done",
-          outcome: "ok",
-          durationMs: 100
-        }
-      ]
+  it.effect(
+    "REQ-2.3: recommends in-process MCP tools when bySurface.mcp === 0 and nonHookCalls >= 3",
+    () =>
+      Effect.gen(function* () {
+        const cliEvents: ReadonlyArray<TelemetryEvent> = [
+          {
+            timestamp: "2026-10-30T10:00:00.000Z",
+            surface: "cli",
+            category: "gate",
+            toolName: "plan-check",
+            outcome: "ok",
+            durationMs: 300,
+          },
+          {
+            timestamp: "2026-10-30T10:00:01.000Z",
+            surface: "cli",
+            category: "gate",
+            toolName: "verify",
+            outcome: "ok",
+            durationMs: 250,
+          },
+          {
+            timestamp: "2026-10-30T10:00:02.000Z",
+            surface: "cli",
+            category: "gate",
+            toolName: "done",
+            outcome: "ok",
+            durationMs: 100,
+          },
+        ]
 
-      const report = yield* decideSessionReport({ events: cliEvents })
-      expect(report.bySurface.mcp).toBe(0)
-      expect(report.recommendations).toContain(
-        "Zero harness-mcp tool calls recorded (bySurface.mcp = 0). Prefer in-process MCP tools (harness_route, harness_lsp_diagnostics, harness_ontology_check, harness_resolve) over shell CLI subcommands."
-      )
+        const report = yield* decideSessionReport({ events: cliEvents })
+        expect(report.bySurface.mcp).toBe(0)
+        expect(report.recommendations).toContain(
+          "Zero harness-mcp tool calls recorded (bySurface.mcp = 0). Prefer in-process MCP tools (harness_route, harness_lsp_diagnostics, harness_ontology_check, harness_resolve) over shell CLI subcommands.",
+        )
 
-      const twoCliEvents = cliEvents.slice(0, 2)
-      const subThresholdReport = yield* decideSessionReport({ events: twoCliEvents })
-      expect(subThresholdReport.bySurface.mcp).toBe(0)
-      expect(subThresholdReport.recommendations).not.toContain(
-        "Zero harness-mcp tool calls recorded (bySurface.mcp = 0). Prefer in-process MCP tools (harness_route, harness_lsp_diagnostics, harness_ontology_check, harness_resolve) over shell CLI subcommands."
-      )
+        const twoCliEvents = cliEvents.slice(0, 2)
+        const subThresholdReport = yield* decideSessionReport({ events: twoCliEvents })
+        expect(subThresholdReport.bySurface.mcp).toBe(0)
+        expect(subThresholdReport.recommendations).not.toContain(
+          "Zero harness-mcp tool calls recorded (bySurface.mcp = 0). Prefer in-process MCP tools (harness_route, harness_lsp_diagnostics, harness_ontology_check, harness_resolve) over shell CLI subcommands.",
+        )
 
-      const mcpEvents: ReadonlyArray<TelemetryEvent> = [
-        ...cliEvents,
-        {
-          timestamp: "2026-10-30T10:00:03.000Z",
-          surface: "mcp",
-          category: "graph_query",
-          toolName: "harness_resolve",
-          outcome: "ok",
-          durationMs: 20
-        }
-      ]
-      const mcpReport = yield* decideSessionReport({ events: mcpEvents })
-      expect(mcpReport.bySurface.mcp).toBe(1)
-      expect(mcpReport.recommendations).not.toContain(
-        "Zero harness-mcp tool calls recorded (bySurface.mcp = 0). Prefer in-process MCP tools (harness_route, harness_lsp_diagnostics, harness_ontology_check, harness_resolve) over shell CLI subcommands."
-      )
-    })
+        const mcpEvents: ReadonlyArray<TelemetryEvent> = [
+          ...cliEvents,
+          {
+            timestamp: "2026-10-30T10:00:03.000Z",
+            surface: "mcp",
+            category: "graph_query",
+            toolName: "harness_resolve",
+            outcome: "ok",
+            durationMs: 20,
+          },
+        ]
+        const mcpReport = yield* decideSessionReport({ events: mcpEvents })
+        expect(mcpReport.bySurface.mcp).toBe(1)
+        expect(mcpReport.recommendations).not.toContain(
+          "Zero harness-mcp tool calls recorded (bySurface.mcp = 0). Prefer in-process MCP tools (harness_route, harness_lsp_diagnostics, harness_ontology_check, harness_resolve) over shell CLI subcommands.",
+        )
+      }),
   )
 })

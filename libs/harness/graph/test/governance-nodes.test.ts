@@ -10,7 +10,7 @@ import {
   loadWorkspaceGovernanceDocs,
   renderMermaid,
   resolveNode,
-  toOmnigraphNdjson
+  toOmnigraphNdjson,
 } from "../src/index.js"
 
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))
@@ -26,22 +26,22 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
           line: 10,
           packageTag: "domain",
           successType: "Photo",
-          isStub: false
-        }
+          isStub: false,
+        },
       ],
       services: [
         {
           tagId: "PhotoRepo",
           name: "PhotoRepo",
           packageTag: "service",
-          file: "libs/sample/service/src/index.ts"
-        }
+          file: "libs/sample/service/src/index.ts",
+        },
       ],
       errors: [
         {
           errorTag: "PhotoNotFoundError",
-          file: "libs/sample/contract/src/index.ts"
-        }
+          file: "libs/sample/contract/src/index.ts",
+        },
       ],
       adrDocs: [
         {
@@ -52,8 +52,8 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
           enforcedByFiles: ["libs/sample/infra/src/index.ts"],
           referencedSpans: ["Sample.uploadPhoto"],
           referencedServices: ["PhotoRepo"],
-          referencedErrors: ["PhotoNotFoundError"]
-        }
+          referencedErrors: ["PhotoNotFoundError"],
+        },
       ],
       earsSpecs: [
         {
@@ -64,49 +64,51 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
           enforcedByFiles: ["libs/sample/domain/src/index.ts"],
           referencedSpans: ["Sample.uploadPhoto"],
           referencedServices: ["PhotoRepo"],
-          referencedErrors: ["PhotoNotFoundError"]
-        }
+          referencedErrors: ["PhotoNotFoundError"],
+        },
       ],
       governsSymbols: [
         {
           adrId: "sample:ADR-0001",
           targetKey: "libs/sample/domain/src/index.ts#uploadPhoto",
-          targetKind: "EffectFn"
+          targetKind: "EffectFn",
         },
         {
           adrId: "sample:ADR-0001",
           targetKey: "PhotoRepo",
-          targetKind: "ServiceTag"
+          targetKind: "ServiceTag",
         },
         {
           adrId: "sample:ADR-0001",
           targetKey: "PhotoNotFoundError",
-          targetKind: "TaggedError"
-        }
+          targetKind: "TaggedError",
+        },
       ],
       specifiesSymbols: [
         {
           specId: "sample:SPEC-0001",
           targetKey: "libs/sample/domain/src/index.ts#uploadPhoto",
-          targetKind: "EffectFn"
+          targetKind: "EffectFn",
         },
         {
           specId: "sample:SPEC-0001",
           targetKey: "PhotoRepo",
-          targetKind: "ServiceTag"
+          targetKind: "ServiceTag",
         },
         {
           specId: "sample:SPEC-0001",
           targetKey: "PhotoNotFoundError",
-          targetKind: "TaggedError"
-        }
-      ]
+          targetKind: "TaggedError",
+        },
+      ],
     })
 
     // 1. resolveNode
     const adrById = resolveNode(graph, "sample:ADR-0001")
     expect(adrById?._tag).toBe("AdrDoc")
-    expect(adrById && "title" in adrById ? adrById.title : "").toBe("D1 and DO persistence boundaries")
+    expect(adrById && "title" in adrById ? adrById.title : "").toBe(
+      "D1 and DO persistence boundaries",
+    )
 
     const adrByPath = resolveNode(graph, "libs/sample/docs/adr/0001-persistence.md")
     expect(adrByPath?._tag).toBe("AdrDoc")
@@ -129,20 +131,20 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
         expect.objectContaining({
           qualname: "libs/sample/domain/src/index.ts#uploadPhoto",
           spanName: "Sample.uploadPhoto",
-          edgeKind: "GovernsSymbol"
+          edgeKind: "GovernsSymbol",
         }),
         expect.objectContaining({
           qualname: "PhotoRepo",
           tagId: "PhotoRepo",
           name: "PhotoRepo",
-          edgeKind: "GovernsSymbol"
+          edgeKind: "GovernsSymbol",
         }),
         expect.objectContaining({
           qualname: "PhotoNotFoundError",
           spanName: "PhotoNotFoundError",
-          edgeKind: "GovernsSymbol"
-        })
-      ])
+          edgeKind: "GovernsSymbol",
+        }),
+      ]),
     )
 
     const specCallees = findCallees(graph, "sample:SPEC-0001")
@@ -152,20 +154,20 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
         expect.objectContaining({
           qualname: "libs/sample/domain/src/index.ts#uploadPhoto",
           spanName: "Sample.uploadPhoto",
-          edgeKind: "SpecifiesSymbol"
+          edgeKind: "SpecifiesSymbol",
         }),
         expect.objectContaining({
           qualname: "PhotoRepo",
           tagId: "PhotoRepo",
           name: "PhotoRepo",
-          edgeKind: "SpecifiesSymbol"
+          edgeKind: "SpecifiesSymbol",
         }),
         expect.objectContaining({
           qualname: "PhotoNotFoundError",
           spanName: "PhotoNotFoundError",
-          edgeKind: "SpecifiesSymbol"
-        })
-      ])
+          edgeKind: "SpecifiesSymbol",
+        }),
+      ]),
     )
 
     // 3. findCallers
@@ -175,14 +177,14 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
         expect.objectContaining({
           qualname: "sample:ADR-0001",
           spanName: "D1 and DO persistence boundaries",
-          edgeKind: "GovernsSymbol"
+          edgeKind: "GovernsSymbol",
         }),
         expect.objectContaining({
           qualname: "sample:SPEC-0001",
           spanName: "Sample Photo Gallery",
-          edgeKind: "SpecifiesSymbol"
-        })
-      ])
+          edgeKind: "SpecifiesSymbol",
+        }),
+      ]),
     )
 
     const svcCallers = findCallers(graph, "PhotoRepo")
@@ -191,14 +193,14 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
         expect.objectContaining({
           qualname: "sample:ADR-0001",
           spanName: "D1 and DO persistence boundaries",
-          edgeKind: "GovernsSymbol"
+          edgeKind: "GovernsSymbol",
         }),
         expect.objectContaining({
           qualname: "sample:SPEC-0001",
           spanName: "Sample Photo Gallery",
-          edgeKind: "SpecifiesSymbol"
-        })
-      ])
+          edgeKind: "SpecifiesSymbol",
+        }),
+      ]),
     )
 
     const errCallers = findCallers(graph, "PhotoNotFoundError")
@@ -207,14 +209,14 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
         expect.objectContaining({
           qualname: "sample:ADR-0001",
           spanName: "D1 and DO persistence boundaries",
-          edgeKind: "GovernsSymbol"
+          edgeKind: "GovernsSymbol",
         }),
         expect.objectContaining({
           qualname: "sample:SPEC-0001",
           spanName: "Sample Photo Gallery",
-          edgeKind: "SpecifiesSymbol"
-        })
-      ])
+          edgeKind: "SpecifiesSymbol",
+        }),
+      ]),
     )
 
     // 4. renderMermaid
@@ -237,8 +239,8 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
         id: "sample:ADR-0001",
         title: "D1 and DO persistence boundaries",
         status: "accepted",
-        path: "libs/sample/docs/adr/0001-persistence.md"
-      }
+        path: "libs/sample/docs/adr/0001-persistence.md",
+      },
     })
 
     const specJson = objects.find((o) => o.type === "EarsSpec")
@@ -249,30 +251,28 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
         id: "sample:SPEC-0001",
         title: "Sample Photo Gallery",
         status: "accepted",
-        path: "libs/sample/docs/specs/spec-photo.md"
-      }
+        path: "libs/sample/docs/specs/spec-photo.md",
+      },
     })
 
-    const governsEdgeJson = objects.find(
-      (o) => o.edge === "GovernsSymbol" && o.to === "PhotoRepo"
-    )
+    const governsEdgeJson = objects.find((o) => o.edge === "GovernsSymbol" && o.to === "PhotoRepo")
     expect(governsEdgeJson).toMatchObject({
       edge: "GovernsSymbol",
       type: "GovernsSymbol",
       from: "sample:ADR-0001",
       to: "PhotoRepo",
-      data: { targetKind: "ServiceTag" }
+      data: { targetKind: "ServiceTag" },
     })
 
     const specifiesEdgeJson = objects.find(
-      (o) => o.edge === "SpecifiesSymbol" && o.to === "PhotoNotFoundError"
+      (o) => o.edge === "SpecifiesSymbol" && o.to === "PhotoNotFoundError",
     )
     expect(specifiesEdgeJson).toMatchObject({
       edge: "SpecifiesSymbol",
       type: "SpecifiesSymbol",
       from: "sample:SPEC-0001",
       to: "PhotoNotFoundError",
-      data: { targetKind: "TaggedError" }
+      data: { targetKind: "TaggedError" },
     })
   })
 
@@ -287,22 +287,22 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
             line: 5,
             packageTag: "domain",
             successType: "Photo",
-            isStub: false
-          }
+            isStub: false,
+          },
         ],
         services: [
           {
             tagId: "PhotoRepo",
             name: "PhotoRepo",
             packageTag: "service",
-            file: "libs/sample/service/src/index.ts"
-          }
+            file: "libs/sample/service/src/index.ts",
+          },
         ],
         errors: [
           {
             errorTag: "PhotoNotFoundError",
-            file: "libs/sample/contract/src/index.ts"
-          }
+            file: "libs/sample/contract/src/index.ts",
+          },
         ],
         earsSpecs: [
           {
@@ -313,9 +313,9 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
             enforcedByFiles: [],
             referencedSpans: ["Sample.getPhoto"],
             referencedServices: ["PhotoRepo"],
-            referencedErrors: ["PhotoNotFoundError"]
-          }
-        ]
+            referencedErrors: ["PhotoNotFoundError"],
+          },
+        ],
       })
 
       const res = checkEffectGraph(graph)
@@ -331,14 +331,14 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
             tagId: "PhotoRepo",
             name: "PhotoRepo",
             packageTag: "service",
-            file: "libs/sample/service/src/index.ts"
-          }
+            file: "libs/sample/service/src/index.ts",
+          },
         ],
         errors: [
           {
             errorTag: "PhotoNotFoundError",
-            file: "libs/sample/contract/src/index.ts"
-          }
+            file: "libs/sample/contract/src/index.ts",
+          },
         ],
         earsSpecs: [
           {
@@ -349,9 +349,9 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
             enforcedByFiles: [],
             referencedSpans: ["Sample.missingSpan"],
             referencedServices: ["PhotoRepo"],
-            referencedErrors: ["PhotoNotFoundError"]
-          }
-        ]
+            referencedErrors: ["PhotoNotFoundError"],
+          },
+        ],
       })
 
       const res = checkEffectGraph(graph)
@@ -359,7 +359,7 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
       const violation = res.violations.find((v) => v.rule === "unmapped-spec-symbol")
       expect(violation).toBeDefined()
       expect(violation?.message).toBe(
-        "EARS Spec 'sample:SPEC-0001' (docs/specs/photo.md) declares EffectFn span 'Sample.missingSpan', which is missing from the graph"
+        "EARS Spec 'sample:SPEC-0001' (docs/specs/photo.md) declares EffectFn span 'Sample.missingSpan', which is missing from the graph",
       )
       expect(violation?.path).toEqual(["sample:SPEC-0001", "Sample.missingSpan"])
     })
@@ -374,8 +374,8 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
             line: 5,
             packageTag: "domain",
             successType: "Photo",
-            isStub: false
-          }
+            isStub: false,
+          },
         ],
         services: [],
         errors: [],
@@ -388,9 +388,9 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
             enforcedByFiles: [],
             referencedSpans: ["Sample.getPhoto"],
             referencedServices: ["MissingService"],
-            referencedErrors: []
-          }
-        ]
+            referencedErrors: [],
+          },
+        ],
       })
 
       const res = checkEffectGraph(graph)
@@ -398,7 +398,7 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
       const violation = res.violations.find((v) => v.rule === "unmapped-spec-symbol")
       expect(violation).toBeDefined()
       expect(violation?.message).toBe(
-        "EARS Spec 'sample:SPEC-0001' (docs/specs/photo.md) declares ServiceTag 'MissingService', which is missing from the graph"
+        "EARS Spec 'sample:SPEC-0001' (docs/specs/photo.md) declares ServiceTag 'MissingService', which is missing from the graph",
       )
       expect(violation?.path).toEqual(["sample:SPEC-0001", "MissingService"])
     })
@@ -413,8 +413,8 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
             line: 5,
             packageTag: "domain",
             successType: "Photo",
-            isStub: false
-          }
+            isStub: false,
+          },
         ],
         services: [],
         errors: [],
@@ -427,9 +427,9 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
             enforcedByFiles: [],
             referencedSpans: ["Sample.getPhoto"],
             referencedServices: [],
-            referencedErrors: ["MissingError"]
-          }
-        ]
+            referencedErrors: ["MissingError"],
+          },
+        ],
       })
 
       const res = checkEffectGraph(graph)
@@ -437,7 +437,7 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
       const violation = res.violations.find((v) => v.rule === "unmapped-spec-symbol")
       expect(violation).toBeDefined()
       expect(violation?.message).toBe(
-        "EARS Spec 'sample:SPEC-0001' (docs/specs/photo.md) declares TaggedError 'MissingError', which is missing from the graph"
+        "EARS Spec 'sample:SPEC-0001' (docs/specs/photo.md) declares TaggedError 'MissingError', which is missing from the graph",
       )
       expect(violation?.path).toEqual(["sample:SPEC-0001", "MissingError"])
     })
@@ -456,7 +456,7 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
             enforcedByFiles: [],
             referencedSpans: ["Old.span"],
             referencedServices: ["OldService"],
-            referencedErrors: ["OldError"]
+            referencedErrors: ["OldError"],
           },
           {
             id: "sample:SPEC-SUPERSEDED",
@@ -466,9 +466,9 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
             enforcedByFiles: [],
             referencedSpans: ["Super.span"],
             referencedServices: ["SuperService"],
-            referencedErrors: ["SuperError"]
-          }
-        ]
+            referencedErrors: ["SuperError"],
+          },
+        ],
       })
 
       const res = checkEffectGraph(graph)
@@ -488,16 +488,16 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
             line: 4,
             packageTag: "domain",
             successType: "string",
-            isStub: false
-          }
+            isStub: false,
+          },
         ],
         services: [
           {
             tagId: "PhotoRepo",
             name: "PhotoRepo",
             packageTag: "service",
-            file: "libs/sample/service/src/index.ts"
-          }
+            file: "libs/sample/service/src/index.ts",
+          },
         ],
         adrDocs: [
           {
@@ -508,8 +508,8 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
             enforcedByFiles: [],
             referencedSpans: [],
             referencedServices: ["PhotoRepo"],
-            referencedErrors: []
-          }
+            referencedErrors: [],
+          },
         ],
         earsSpecs: [
           {
@@ -520,23 +520,23 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
             enforcedByFiles: [],
             referencedSpans: ["Sample.greet"],
             referencedServices: [],
-            referencedErrors: []
-          }
+            referencedErrors: [],
+          },
         ],
         governsSymbols: [
           {
             adrId: "sample:ADR-0001",
             targetKey: "PhotoRepo",
-            targetKind: "ServiceTag"
-          }
+            targetKind: "ServiceTag",
+          },
         ],
         specifiesSymbols: [
           {
             specId: "sample:SPEC-0001",
             targetKey: "libs/sample/domain/src/index.ts#greet",
-            targetKind: "EffectFn"
-          }
-        ]
+            targetKind: "EffectFn",
+          },
+        ],
       })
 
       // Impl graph has the nodes but is missing the edges
@@ -549,16 +549,16 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
             line: 4,
             packageTag: "domain",
             successType: "string",
-            isStub: false
-          }
+            isStub: false,
+          },
         ],
         services: [
           {
             tagId: "PhotoRepo",
             name: "PhotoRepo",
             packageTag: "service",
-            file: "libs/sample/service/src/index.ts"
-          }
+            file: "libs/sample/service/src/index.ts",
+          },
         ],
         adrDocs: [
           {
@@ -569,8 +569,8 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
             enforcedByFiles: [],
             referencedSpans: [],
             referencedServices: ["PhotoRepo"],
-            referencedErrors: []
-          }
+            referencedErrors: [],
+          },
         ],
         earsSpecs: [
           {
@@ -581,11 +581,11 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
             enforcedByFiles: [],
             referencedSpans: ["Sample.greet"],
             referencedServices: [],
-            referencedErrors: []
-          }
+            referencedErrors: [],
+          },
         ],
         governsSymbols: [],
-        specifiesSymbols: []
+        specifiesSymbols: [],
       })
 
       const diff = diffHarnessGraphs(implGraph, planGraph)
@@ -596,14 +596,14 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
           expect.objectContaining({
             _tag: "GovernsSymbol",
             adrId: "sample:ADR-0001",
-            targetKey: "PhotoRepo"
+            targetKey: "PhotoRepo",
           }),
           expect.objectContaining({
             _tag: "SpecifiesSymbol",
             specId: "sample:SPEC-0001",
-            targetKey: "libs/sample/domain/src/index.ts#greet"
-          })
-        ])
+            targetKey: "libs/sample/domain/src/index.ts#greet",
+          }),
+        ]),
       )
     })
   })

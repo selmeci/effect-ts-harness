@@ -17,17 +17,12 @@ export class UsersGroup extends HttpApiGroup.make("users")
     HttpApiEndpoint.get("getUser", "/users/:id")
       .setPath(Schema.Struct({ id: Schema.String }))
       .addSuccess(User)
-      .addError(UserNotFoundError)
+      .addError(UserNotFoundError),
   )
-  .add(
-    HttpApiEndpoint.post("createUser", "/users")
-      .setPayload(UserInput)
-      .addSuccess(User)
-  ) {}
+  .add(HttpApiEndpoint.post("createUser", "/users").setPayload(UserInput).addSuccess(User)) {}
 
 // Compose groups into an API contract
-export class ApiDefinition extends HttpApi.make("AppApi")
-  .add(UsersGroup) {}
+export class ApiDefinition extends HttpApi.make("AppApi").add(UsersGroup) {}
 ```
 
 ## Implementing Handlers with `HttpApiBuilder`
@@ -46,19 +41,17 @@ export const UsersGroupLive = HttpApiBuilder.group(ApiDefinition, "users", (hand
       Effect.gen(function* () {
         const users = yield* UserService
         return yield* users.getById(path.id)
-      })
+      }),
     )
     .handle("createUser", ({ payload }) =>
       Effect.gen(function* () {
         const users = yield* UserService
         return yield* users.create(payload)
-      })
-    )
+      }),
+    ),
 )
 
-export const ApiLive = HttpApiBuilder.api(ApiDefinition).pipe(
-  Layer.provide(UsersGroupLive)
-)
+export const ApiLive = HttpApiBuilder.api(ApiDefinition).pipe(Layer.provide(UsersGroupLive))
 ```
 
 ## OpenAPI Export & Breaking Change Gates

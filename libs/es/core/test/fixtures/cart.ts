@@ -21,7 +21,7 @@ export type ItemCount = typeof ItemCount.Type
 
 export const CartCreated = Schema.TaggedStruct("CartCreated", {
   cartId: CartId,
-  version: Schema.Literal(1)
+  version: Schema.Literal(1),
 })
 export type CartCreated = typeof CartCreated.Type
 
@@ -29,14 +29,14 @@ export const ItemAdded = Schema.TaggedStruct("ItemAdded", {
   cartId: CartId,
   itemId: ItemId,
   quantity: PositiveInt,
-  version: Schema.Literal(1)
+  version: Schema.Literal(1),
 })
 export type ItemAdded = typeof ItemAdded.Type
 
 export const CartCheckedOut = Schema.TaggedStruct("CartCheckedOut", {
   cartId: CartId,
   orderId: OrderId,
-  version: Schema.Literal(1)
+  version: Schema.Literal(1),
 })
 export type CartCheckedOut = typeof CartCheckedOut.Type
 
@@ -46,13 +46,13 @@ export type CartEvent = typeof CartEvent.Type
 export const AddItem = Schema.TaggedStruct("AddItem", {
   cartId: CartId,
   itemId: ItemId,
-  quantity: PositiveInt
+  quantity: PositiveInt,
 })
 export type AddItem = typeof AddItem.Type
 
 export const Checkout = Schema.TaggedStruct("Checkout", {
   cartId: CartId,
-  orderId: OrderId
+  orderId: OrderId,
 })
 export type Checkout = typeof Checkout.Type
 
@@ -62,28 +62,28 @@ export type CartCommand = typeof CartCommand.Type
 export class CartAlreadyCheckedOutError extends Schema.TaggedError<CartAlreadyCheckedOutError>()(
   "CartAlreadyCheckedOutError",
   {
-    cartId: CartId
-  }
+    cartId: CartId,
+  },
 ) {}
 
 export class EmptyCartCheckoutError extends Schema.TaggedError<EmptyCartCheckoutError>()(
   "EmptyCartCheckoutError",
   {
-    cartId: CartId
-  }
+    cartId: CartId,
+  },
 ) {}
 
 export class CartIdMismatchError extends Schema.TaggedError<CartIdMismatchError>()(
   "CartIdMismatchError",
   {
     expectedCartId: CartId,
-    actualCartId: CartId
-  }
+    actualCartId: CartId,
+  },
 ) {}
 
 export const CartLineItem = Schema.Struct({
   itemId: ItemId,
-  quantity: PositiveInt
+  quantity: PositiveInt,
 })
 export type CartLineItem = typeof CartLineItem.Type
 
@@ -93,14 +93,14 @@ export type EmptyCart = typeof EmptyCart.Type
 export const ActiveCart = Schema.TaggedStruct("ActiveCart", {
   cartId: CartId,
   items: Schema.Array(CartLineItem),
-  itemCount: ItemCount
+  itemCount: ItemCount,
 })
 export type ActiveCart = typeof ActiveCart.Type
 
 export const CheckedOutCart = Schema.TaggedStruct("CheckedOutCart", {
   cartId: CartId,
   orderId: OrderId,
-  totalItems: ItemCount
+  totalItems: ItemCount,
 })
 export type CheckedOutCart = typeof CheckedOutCart.Type
 
@@ -108,7 +108,7 @@ export const CartState = Schema.Union([EmptyCart, ActiveCart, CheckedOutCart])
 export type CartState = typeof CartState.Type
 
 export const initialCartState: CartState = {
-  _tag: "EmptyCart"
+  _tag: "EmptyCart",
 }
 
 export const evolveCart = (state: CartState, event: CartEvent): CartState =>
@@ -119,49 +119,43 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
           _tag: "ActiveCart" as const,
           cartId: e.cartId,
           items: [],
-          itemCount: ItemCount.make(0)
+          itemCount: ItemCount.make(0),
         }))
         .with({ _tag: "ActiveCart" }, () => state)
         .with({ _tag: "CheckedOutCart" }, () => state)
-        .exhaustive()
+        .exhaustive(),
     )
     .with({ _tag: "ItemAdded" }, (e) =>
       match(state)
-        .with(
-          { _tag: "ActiveCart", cartId: P.when((id) => id === e.cartId) },
-          (s) => ({
-            ...s,
-            items: [...s.items, { itemId: e.itemId, quantity: e.quantity }],
-            itemCount: ItemCount.make(s.itemCount + e.quantity)
-          })
-        )
+        .with({ _tag: "ActiveCart", cartId: P.when((id) => id === e.cartId) }, (s) => ({
+          ...s,
+          items: [...s.items, { itemId: e.itemId, quantity: e.quantity }],
+          itemCount: ItemCount.make(s.itemCount + e.quantity),
+        }))
         .with({ _tag: "ActiveCart" }, () => state)
         .with({ _tag: "EmptyCart" }, () => state)
         .with({ _tag: "CheckedOutCart" }, () => state)
-        .exhaustive()
+        .exhaustive(),
     )
     .with({ _tag: "CartCheckedOut" }, (e) =>
       match(state)
-        .with(
-          { _tag: "ActiveCart", cartId: P.when((id) => id === e.cartId) },
-          (s) => ({
-            _tag: "CheckedOutCart" as const,
-            cartId: s.cartId,
-            orderId: e.orderId,
-            totalItems: s.itemCount
-          })
-        )
+        .with({ _tag: "ActiveCart", cartId: P.when((id) => id === e.cartId) }, (s) => ({
+          _tag: "CheckedOutCart" as const,
+          cartId: s.cartId,
+          orderId: e.orderId,
+          totalItems: s.itemCount,
+        }))
         .with({ _tag: "ActiveCart" }, () => state)
         .with({ _tag: "EmptyCart" }, () => state)
         .with({ _tag: "CheckedOutCart" }, () => state)
-        .exhaustive()
+        .exhaustive(),
     )
     .exhaustive()
 
 export const decideCart = Effect.fn("Cart.decide")(
   (
     command: CartCommand,
-    state: CartState
+    state: CartState,
   ): Effect.Effect<
     ReadonlyArray<CartEvent>,
     CartAlreadyCheckedOutError | EmptyCartCheckoutError | CartIdMismatchError,
@@ -178,9 +172,9 @@ export const decideCart = Effect.fn("Cart.decide")(
                 cartId: cmd.cartId,
                 itemId: cmd.itemId,
                 quantity: cmd.quantity,
-                version: 1 as const
-              }
-            ])
+                version: 1 as const,
+              },
+            ]),
           )
           .with(
             { _tag: "ActiveCart" },
@@ -189,9 +183,9 @@ export const decideCart = Effect.fn("Cart.decide")(
               Effect.fail(
                 new CartIdMismatchError({
                   expectedCartId: s.cartId,
-                  actualCartId: cmd.cartId
-                })
-              )
+                  actualCartId: cmd.cartId,
+                }),
+              ),
           )
           .with({ _tag: "ActiveCart" }, () =>
             Effect.succeed([
@@ -200,9 +194,9 @@ export const decideCart = Effect.fn("Cart.decide")(
                 cartId: cmd.cartId,
                 itemId: cmd.itemId,
                 quantity: cmd.quantity,
-                version: 1 as const
-              }
-            ])
+                version: 1 as const,
+              },
+            ]),
           )
           .with(
             { _tag: "CheckedOutCart" },
@@ -211,19 +205,19 @@ export const decideCart = Effect.fn("Cart.decide")(
               Effect.fail(
                 new CartIdMismatchError({
                   expectedCartId: s.cartId,
-                  actualCartId: cmd.cartId
-                })
-              )
+                  actualCartId: cmd.cartId,
+                }),
+              ),
           )
           .with({ _tag: "CheckedOutCart" }, () =>
-            Effect.fail(new CartAlreadyCheckedOutError({ cartId: cmd.cartId }))
+            Effect.fail(new CartAlreadyCheckedOutError({ cartId: cmd.cartId })),
           )
-          .exhaustive()
+          .exhaustive(),
       )
       .with({ _tag: "Checkout" }, (cmd) =>
         match(state)
           .with({ _tag: "EmptyCart" }, () =>
-            Effect.fail(new EmptyCartCheckoutError({ cartId: cmd.cartId }))
+            Effect.fail(new EmptyCartCheckoutError({ cartId: cmd.cartId })),
           )
           .with(
             { _tag: "ActiveCart" },
@@ -232,14 +226,14 @@ export const decideCart = Effect.fn("Cart.decide")(
               Effect.fail(
                 new CartIdMismatchError({
                   expectedCartId: s.cartId,
-                  actualCartId: cmd.cartId
-                })
-              )
+                  actualCartId: cmd.cartId,
+                }),
+              ),
           )
           .with(
             { _tag: "ActiveCart" },
             (s) => s.itemCount <= 0,
-            () => Effect.fail(new EmptyCartCheckoutError({ cartId: cmd.cartId }))
+            () => Effect.fail(new EmptyCartCheckoutError({ cartId: cmd.cartId })),
           )
           .with({ _tag: "ActiveCart" }, () =>
             Effect.succeed([
@@ -247,9 +241,9 @@ export const decideCart = Effect.fn("Cart.decide")(
                 _tag: "CartCheckedOut" as const,
                 cartId: cmd.cartId,
                 orderId: cmd.orderId,
-                version: 1 as const
-              }
-            ])
+                version: 1 as const,
+              },
+            ]),
           )
           .with(
             { _tag: "CheckedOutCart" },
@@ -258,20 +252,20 @@ export const decideCart = Effect.fn("Cart.decide")(
               Effect.fail(
                 new CartIdMismatchError({
                   expectedCartId: s.cartId,
-                  actualCartId: cmd.cartId
-                })
-              )
+                  actualCartId: cmd.cartId,
+                }),
+              ),
           )
           .with({ _tag: "CheckedOutCart" }, () =>
-            Effect.fail(new CartAlreadyCheckedOutError({ cartId: cmd.cartId }))
+            Effect.fail(new CartAlreadyCheckedOutError({ cartId: cmd.cartId })),
           )
-          .exhaustive()
+          .exhaustive(),
       )
-      .exhaustive()
+      .exhaustive(),
 )
 
 export const cartDecider = Decider.make({
   initialState: initialCartState,
   evolve: evolveCart,
-  decide: decideCart
+  decide: decideCart,
 })

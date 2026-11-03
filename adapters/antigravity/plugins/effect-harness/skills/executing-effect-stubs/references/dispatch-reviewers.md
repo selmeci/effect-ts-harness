@@ -8,12 +8,12 @@ This document defines the orchestration protocol for dispatching specialist revi
 
 The controller inspects the files, package boundaries (Nx tags), and Effect capabilities touched by the current task or diff, then routes to the appropriate specialist reviewers:
 
-| Touched Files / Nx Tags / Capabilities | Specialist Agent | Persona Reference | Primary Hunting Ground |
-|---|---|---|---|
-| **Always (Every Task) & Mandatory for Core/Domain/Event Sourcing**<br>Any `*.test.ts`, `*.spec.ts`, `type:domain`, `type:core`, deciders, or EARS acceptance criteria | `effect-ears-test-reviewer` | `references/personas/ears-test-reviewer.md` | 7-Point Anti-Rubber-Stamp Deep Audit, EARS clause test assertions (`WHEN`, `IF/THEN`, `WHILE`), mock over-specification, vacuous tests (`toBeDefined`), `runWithTestTracer`, folded state properties, contract brand reuse, and `checkSpanBudgets` (N+1 query protection). |
+| Touched Files / Nx Tags / Capabilities                                                                                                                                                   | Specialist Agent              | Persona Reference                             | Primary Hunting Ground                                                                                                                                                                                                                                                                                       |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Always (Every Task) & Mandatory for Core/Domain/Event Sourcing**<br>Any `*.test.ts`, `*.spec.ts`, `type:domain`, `type:core`, deciders, or EARS acceptance criteria                    | `effect-ears-test-reviewer`   | `references/personas/ears-test-reviewer.md`   | 7-Point Anti-Rubber-Stamp Deep Audit, EARS clause test assertions (`WHEN`, `IF/THEN`, `WHILE`), mock over-specification, vacuous tests (`toBeDefined`), `runWithTestTracer`, folded state properties, contract brand reuse, and `checkSpanBudgets` (N+1 query protection).                                   |
 | **Mandatory for Core/Domain/Event Sourcing & Stateful Flows**<br>`type:core`, `type:domain`, deciders, event streams, Outbox, Projections, Process Managers, `stub<A, E, R>()` skeletons | `effect-adversarial-reviewer` | `references/personas/adversarial-reviewer.md` | Cross-entity command/event injection, property test generator weakening, protocol tracing enforcement (`Decider.make`), inter-step crash windows (commit vs. publish), duplicate message replay / idempotency deduplication, optimistic concurrency races, schema evolution, and omitted error types in `E`. |
-| **Contracts, APIs, Auth, Secrets**<br>`type:contract`, `HttpApi*`, `Rpc*`, `Config.*`, auth context, sessions | `effect-security-reviewer` | `references/personas/security-reviewer.md` | Multi-tenant IDOR / authorization in use cases, secret leakage via `Redacted.value(...)`, unbounded schemas (`Schema.Finite`, string/array length limits), and indirect injection in `type:infra`. |
-| **Infra, Storage, Retries, Resources**<br>`type:infra`, DO SQLite, D1, Queues, `Schedule.*`, `Scope`, `HttpClient` | `effect-reliability-reviewer` | `references/personas/reliability-reviewer.md` | DO SQLite synchronous transaction discipline (`MixedScheduler("sync")`), pre-transaction schema decoding, commit-order `Ref` mutation, retry storms, missing timeouts, and `Scope` leaks. |
+| **Contracts, APIs, Auth, Secrets**<br>`type:contract`, `HttpApi*`, `Rpc*`, `Config.*`, auth context, sessions                                                                            | `effect-security-reviewer`    | `references/personas/security-reviewer.md`    | Multi-tenant IDOR / authorization in use cases, secret leakage via `Redacted.value(...)`, unbounded schemas (`Schema.Finite`, string/array length limits), and indirect injection in `type:infra`.                                                                                                           |
+| **Infra, Storage, Retries, Resources**<br>`type:infra`, DO SQLite, D1, Queues, `Schedule.*`, `Scope`, `HttpClient`                                                                       | `effect-reliability-reviewer` | `references/personas/reliability-reviewer.md` | DO SQLite synchronous transaction discipline (`MixedScheduler("sync")`), pre-transaction schema decoding, commit-order `Ref` mutation, retry storms, missing timeouts, and `Scope` leaks.                                                                                                                    |
 
 > [!IMPORTANT]
 > **Mandatory Dual-Review for Core / Domain / Event Sourcing:** For any task touching `type:core`, `type:domain`, deciders, or event sourcing, dispatching **BOTH** `effect-ears-test-reviewer` AND `effect-adversarial-reviewer` is strictly mandatory.
@@ -42,7 +42,7 @@ invoke_subagent({
 - Target Files: libs/sample/domain/src/sample.ts, libs/sample/domain/test/sample.test.ts
 - EARS Requirements & ADRs: libs/sample/docs/specs/SPEC-0001.md, libs/sample/docs/adr/0001.md
 - Execute the 7-Point Anti-Rubber-Stamp Deep Audit.
-- Adhere strictly to the Quote-the-Line Gate and False-Positive Suppression List.`
+- Adhere strictly to the Quote-the-Line Gate and False-Positive Suppression List.`,
     },
     {
       TypeName: "effect-adversarial-reviewer",
@@ -52,13 +52,14 @@ invoke_subagent({
       Prompt: `Assume there are at least 3 P0/P1 bugs hiding across the spec, ADR, contract, fixtures, and tests; find them using adversarial falsification. Do not assume any code or test is correct:
 - Target Files: libs/sample/domain/src/sample.ts, libs/sample/domain/test/sample.test.ts
 - Hunt for: Cross-entity command/event injection, property test generator weakening, protocol tracing enforcement in Decider.make, inter-step crashes, idempotency bypass, and optimistic concurrency races.
-- Adhere strictly to the Quote-the-Line Gate and False-Positive Suppression List.`
-    }
-  ]
+- Adhere strictly to the Quote-the-Line Gate and False-Positive Suppression List.`,
+    },
+  ],
 })
 ```
 
 If invoking via the generic `research` subagent:
+
 ```ts
 invoke_subagent({
   Subagents: [
@@ -72,9 +73,9 @@ adapters/antigravity/plugins/effect-harness/skills/executing-effect-stubs/refere
 
 Review the following files:
 - Target Files: libs/sample/infra/src/repository.ts
-- Adhere strictly to the Quote-the-Line Gate and False-Positive Suppression List.`
-    }
-  ]
+- Adhere strictly to the Quote-the-Line Gate and False-Positive Suppression List.`,
+    },
+  ],
 })
 ```
 
@@ -97,7 +98,7 @@ Reviewers MUST suppress findings for issues already enforced by deterministic wo
    - Direct `Effect.retry(..., Schedule.forever)` in `type:domain`.
    - Direct `Effect.ignore` in `type:domain`.
    - Direct `Config.string` with literal sensitive names (`SECRET`, `TOKEN`, `PASSWORD`, etc.).
-   - Direct raw SQL template interpolation in `.exec(\`...\${...}\`)` or `.prepare(\`...\${...}\`)`.
+   - Direct raw SQL template interpolation in `.exec(\`...\${...}\`)`or`.prepare(\`...\${...}\`)`.
 4. **Architectural Graph Gates (`effect-graph:check`, `harness gc --strict`):**
    - Nx project boundary violations (`domain-requires-infra`, `domain-requires-cloud-binding`).
    - Dead `TaggedError`s (`dead-tagged-error`), unused/unprovided `ServiceTag`s, orphan `Effect.fn`s, or missing pattern docs.
@@ -108,11 +109,11 @@ Reviewers MUST suppress findings for issues already enforced by deterministic wo
 
 Reviewers evaluate findings against a 3-tier confidence scale:
 
-| Score | Meaning | Action |
-|---|---|---|
-| **`100`** | **Direct Proof:** Clear, unambiguous bug or violation verifiable purely by inspecting the quoted code (e.g. `expect(res).toBeDefined()`, pre-transaction `Ref.set`, missing authorization check on tenant resource). | **Report as P0/P1.** Blocks completion until remediated. |
-| **`75`** | **High Confidence:** Strong structural evidence of omission or race condition (e.g. unjittered exponential retry loop, crash between commit and outbox publish). | **Report as P0/P1.** Blocks completion until remediated. |
-| **`50`** | **Speculative:** Theoretical risk or stylistic concern that requires human context or external configuration. | **Suppress.** Do not include in blocking review reports unless explicitly requested by caller. |
+| Score     | Meaning                                                                                                                                                                                                              | Action                                                                                         |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| **`100`** | **Direct Proof:** Clear, unambiguous bug or violation verifiable purely by inspecting the quoted code (e.g. `expect(res).toBeDefined()`, pre-transaction `Ref.set`, missing authorization check on tenant resource). | **Report as P0/P1.** Blocks completion until remediated.                                       |
+| **`75`**  | **High Confidence:** Strong structural evidence of omission or race condition (e.g. unjittered exponential retry loop, crash between commit and outbox publish).                                                     | **Report as P0/P1.** Blocks completion until remediated.                                       |
+| **`50`**  | **Speculative:** Theoretical risk or stylistic concern that requires human context or external configuration.                                                                                                        | **Suppress.** Do not include in blocking review reports unless explicitly requested by caller. |
 
 ---
 
@@ -120,19 +121,24 @@ Reviewers evaluate findings against a 3-tier confidence scale:
 
 Every reported `P0` or `P1` finding MUST follow this exact schema:
 
-```markdown
+````markdown
 ### [P0|P1] <Concise Title>
+
 - **Reviewer:** <ears-test | security | reliability | adversarial>
 - **Confidence:** 100 | 75
 - **Evidence:** `<relative_file_path>:<line_number>`
   ```ts
   <exact verbatim lines quoted from the target file>
   ```
+````
+
 - **Why It Matters:** <Observable runtime failure, data corruption risk, exploit vector, or test blindness>
 - **Suggested Fix:**
   ```ts
   <syntactically valid Effect v4 code snippet resolving the issue>
   ```
+
 ```
 
 Findings that fail to quote exact lines or fail to articulate observable runtime consequences are rejected by the controller.
+```

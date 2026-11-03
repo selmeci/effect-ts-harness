@@ -20,7 +20,10 @@ export interface StructuralSearchOptions {
   readonly subDirs?: ReadonlyArray<string>
 }
 
-const findWorkspaceTsFiles = (repoRoot: string, subDirs: ReadonlyArray<string>): ReadonlyArray<string> => {
+const findWorkspaceTsFiles = (
+  repoRoot: string,
+  subDirs: ReadonlyArray<string>,
+): ReadonlyArray<string> => {
   const results: Array<string> = []
 
   const walk = (current: string): void => {
@@ -71,7 +74,7 @@ const resolveRepoRoot = (startDir: string): string => {
 }
 
 export const structuralSearch = (
-  options: StructuralSearchOptions
+  options: StructuralSearchOptions,
 ): ReadonlyArray<StructuralSearchResult> => {
   const repoRoot = options.repoRoot ?? resolveRepoRoot(process.cwd())
   const subDirs = options.subDirs ?? ["libs", "apps"]
@@ -96,14 +99,14 @@ export const structuralSearch = (
           start: {
             line: range.start.line + 1,
             column: range.start.column + 1,
-            index: range.start.index
+            index: range.start.index,
           },
           end: {
             line: range.end.line + 1,
             column: range.end.column + 1,
-            index: range.end.index
-          }
-        }
+            index: range.end.index,
+          },
+        },
       })
     }
   }
@@ -112,6 +115,6 @@ export const structuralSearch = (
 }
 
 export const structuralSearchEffect = (
-  options: StructuralSearchOptions
+  options: StructuralSearchOptions,
 ): Effect.Effect<ReadonlyArray<StructuralSearchResult>> =>
   Effect.sync(() => structuralSearch(options))

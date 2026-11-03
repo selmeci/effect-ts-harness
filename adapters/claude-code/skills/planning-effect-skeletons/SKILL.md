@@ -44,7 +44,7 @@ In this project, the plan IS compilable TypeScript code. Never write long Markdo
      - Always generate `Schema.Array(EventUnionSchema)` (covering empty streams, terminal events like `CheckedOut`, and post-terminal events) and assert chunked fold equivalence (`events.slice(0, k)` + `events.slice(k)` folded sequentially equals folding `events` at once).
 8. **Update Spec and Record ADR (Spec & ADR Governance):**
    - **Update `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md`:** Append the verified Mermaid topology diagram printed by `harness plan-check` under `## 4. Verified Plan Topology Graph` and record the Pre-Implementation Adversarial Plan Lens summary checklist.
-   - **Record Architectural Decisions (ADR):** If the planning phase decided a non-obvious architectural trade-off, boundary constraint, or rejected alternative meeting the **Counterfactual Eligibility Rule** (*"If this ADR did not exist, would a future engineer or autonomous agent reading the final code, types, and tests still be likely to repeat a rejected mistake, violate a hidden runtime constraint, or re-litigate this architectural trade-off?"*), author an ADR in `libs/<scope>/docs/adr/NNNN-<slug>.md` (with scoped `id: <scope>:ADR-NNNN`, or in root `docs/adr/` if workspace-wide) following the [ADR Authoring Guidelines & Canonical Template](references/adr-guidelines.md).
+   - **Record Architectural Decisions (ADR):** If the planning phase decided a non-obvious architectural trade-off, boundary constraint, or rejected alternative meeting the **Counterfactual Eligibility Rule** (_"If this ADR did not exist, would a future engineer or autonomous agent reading the final code, types, and tests still be likely to repeat a rejected mistake, violate a hidden runtime constraint, or re-litigate this architectural trade-off?"_), author an ADR in `libs/<scope>/docs/adr/NNNN-<slug>.md` (with scoped `id: <scope>:ADR-NNNN`, or in root `docs/adr/` if workspace-wide) following the [ADR Authoring Guidelines & Canonical Template](references/adr-guidelines.md).
    - **Canonical 6-Section MADR Structure (Enforced by `AdrDocLint.decide`):**
      1. `## Context and Problem Statement` (current forces, runtime constraints, and what breaks if left undecided)
      2. `## Decision Drivers` (at least 2 `*` bullets naming non-negotiable constraints)
@@ -93,15 +93,15 @@ export const deletePhoto = Effect.fn("Sample.deletePhoto")(function* (id: number
 
 ## Rationalization Table
 
-| Excuse | Reality |
-|---|---|
-| "I'll write the plan in a `.md` file with code blocks first" | Uncompiled Markdown code drifts from `effect@4.0.0` types and burns 2x tokens. Write `.ts` skeletons with `stub<A, E, R>()` instead. |
-| "I'll use `Effect.die('TODO')` instead of `stub<A, E, R>()`" | `Effect.die` erases `A`, `E`, and `R` to `never`, blinding `effect-graph:check`. Always use `stub<A, E, R>(...args)`. |
-| "This feature is small, I'll skip `plan-check` and write the body directly" | `plan-check` snapshots `.harness/plan-graph-snapshot.json` required by `harness done` to verify plan-vs-impl parity. |
-| "I don't need to append the Mermaid graph or record ADRs in docs/" | Omitting the verified topology graph from `libs/<scope>/docs/specs/` deprives reviewer agents of ground truth. ADRs prevent future agents from re-litigating non-obvious trade-offs. |
-| "I'll document future phase errors and commands in the ADR now so we don't forget" | Unimplemented symbols in specs/ADRs violate doc-to-code parity and fail `stale-doc-reference`. Document only what exists in the current phase skeleton. |
-| "I'll add JSON.stringify fallback to BDD assertions for convenience" | JSON stringification masks class prototype mismatch and non-enumerable properties (`fallback-json-equality`). Always use strict `Equal.equals(a, b)`. |
-| "A simple scalar property test [PositiveInt, PositiveInt] is enough for deciders" | Scalar tests only fold happy paths and miss boundary bugs (`shallow-decider-property-test`). Always generate `Schema.Array(EventUnion)` and test chunked fold equivalence. |
+| Excuse                                                                             | Reality                                                                                                                                                                              |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| "I'll write the plan in a `.md` file with code blocks first"                       | Uncompiled Markdown code drifts from `effect@4.0.0` types and burns 2x tokens. Write `.ts` skeletons with `stub<A, E, R>()` instead.                                                 |
+| "I'll use `Effect.die('TODO')` instead of `stub<A, E, R>()`"                       | `Effect.die` erases `A`, `E`, and `R` to `never`, blinding `effect-graph:check`. Always use `stub<A, E, R>(...args)`.                                                                |
+| "This feature is small, I'll skip `plan-check` and write the body directly"        | `plan-check` snapshots `.harness/plan-graph-snapshot.json` required by `harness done` to verify plan-vs-impl parity.                                                                 |
+| "I don't need to append the Mermaid graph or record ADRs in docs/"                 | Omitting the verified topology graph from `libs/<scope>/docs/specs/` deprives reviewer agents of ground truth. ADRs prevent future agents from re-litigating non-obvious trade-offs. |
+| "I'll document future phase errors and commands in the ADR now so we don't forget" | Unimplemented symbols in specs/ADRs violate doc-to-code parity and fail `stale-doc-reference`. Document only what exists in the current phase skeleton.                              |
+| "I'll add JSON.stringify fallback to BDD assertions for convenience"               | JSON stringification masks class prototype mismatch and non-enumerable properties (`fallback-json-equality`). Always use strict `Equal.equals(a, b)`.                                |
+| "A simple scalar property test [PositiveInt, PositiveInt] is enough for deciders"  | Scalar tests only fold happy paths and miss boundary bugs (`shallow-decider-property-test`). Always generate `Schema.Array(EventUnion)` and test chunked fold equivalence.           |
 
 ## Red Flags — STOP
 
@@ -117,4 +117,3 @@ export const deletePhoto = Effect.fn("Sample.deletePhoto")(function* (id: number
 - Writing scalar-only property tests for deciders without `Schema.Array(EventUnion)` chunked-fold invariants (`shallow-decider-property-test`)
 
 **REQUIRED NEXT SKILL:** Once `harness plan-check` exits `0`, outputs the Mermaid graph, and updates the spec, use `executing-effect-stubs`.
-

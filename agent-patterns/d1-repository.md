@@ -19,7 +19,7 @@ export const photosTable = sqliteTable("photos", {
   title: text("title").notNull(),
   url: text("url").notNull(),
   viewCount: integer("view_count").notNull().default(0),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull()
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
 })
 ```
 
@@ -51,7 +51,7 @@ export const PhotoRepoLive = Layer.effect(
     })
 
     return PhotoRepo.of({ findById })
-  })
+  }),
 )
 ```
 

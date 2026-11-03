@@ -5,7 +5,7 @@ import { Effect } from "effect"
 import {
   buildWorkspaceFnIndex,
   indexEffectFnsInFile,
-  validateUniqueSpanNames
+  validateUniqueSpanNames,
 } from "../src/fn-index.js"
 // @ts-expect-error - JS plugin without ambient typings
 // oxlint-disable-next-line @nx/enforce-module-boundaries
@@ -35,7 +35,7 @@ describe("Effect.fn syntactic index", () => {
         file: "libs/sample/domain/src/index.ts",
         line: 4,
         packageTag: "domain",
-        isStub: false
+        isStub: false,
       },
       {
         qualname: "libs/sample/domain/src/index.ts#pending",
@@ -44,41 +44,51 @@ describe("Effect.fn syntactic index", () => {
         file: "libs/sample/domain/src/index.ts",
         line: 7,
         packageTag: "domain",
-        isStub: true
-      }
+        isStub: true,
+      },
     ])
   })
 
   it("reports duplicate spanName across indexed functions", () => {
-    const a = indexEffectFnsInFile("a.ts", `export const f = Effect.fn("Dup")(function* () {})`, "domain")
-    const b = indexEffectFnsInFile("b.ts", `export const g = Effect.fn("Dup")(function* () {})`, "domain")
+    const a = indexEffectFnsInFile(
+      "a.ts",
+      `export const f = Effect.fn("Dup")(function* () {})`,
+      "domain",
+    )
+    const b = indexEffectFnsInFile(
+      "b.ts",
+      `export const g = Effect.fn("Dup")(function* () {})`,
+      "domain",
+    )
     const result = validateUniqueSpanNames([...a, ...b])
     expect(result.duplicates).toEqual(["Dup"])
   })
 
-  it.effect("buildWorkspaceFnIndex indexes workspace and finds Sample.greet and Sample.logToConsole", () =>
-    Effect.gen(function* () {
-      const index = yield* buildWorkspaceFnIndex(repoRoot)
-      expect(index.bySpanName.has("Sample.greet")).toBe(true)
-      const greet = index.bySpanName.get("Sample.greet")
-      expect(greet).toBeDefined()
-      expect(greet?.packageTag).toBe("domain")
-      expect(greet?.exportName).toBe("greet")
-      expect(greet?.file).toBe("libs/sample/domain/src/index.ts")
-      expect(greet?.qualname).toBe("libs/sample/domain/src/index.ts#greet")
-      expect(greet?.isStub).toBe(false)
+  it.effect(
+    "buildWorkspaceFnIndex indexes workspace and finds Sample.greet and Sample.logToConsole",
+    () =>
+      Effect.gen(function* () {
+        const index = yield* buildWorkspaceFnIndex(repoRoot)
+        expect(index.bySpanName.has("Sample.greet")).toBe(true)
+        const greet = index.bySpanName.get("Sample.greet")
+        expect(greet).toBeDefined()
+        expect(greet?.packageTag).toBe("domain")
+        expect(greet?.exportName).toBe("greet")
+        expect(greet?.file).toBe("libs/sample/domain/src/index.ts")
+        expect(greet?.qualname).toBe("libs/sample/domain/src/index.ts#greet")
+        expect(greet?.isStub).toBe(false)
 
-      expect(index.bySpanName.has("Sample.logToConsole")).toBe(true)
-      const logFn = index.bySpanName.get("Sample.logToConsole")
-      expect(logFn).toBeDefined()
-      expect(logFn?.packageTag).toBe("infra")
-      expect(logFn?.exportName).toBe("logToConsole")
-      expect(logFn?.file).toBe("libs/sample/infra/src/index.ts")
-      expect(logFn?.qualname).toBe("libs/sample/infra/src/index.ts#logToConsole")
-      expect(logFn?.isStub).toBe(false)
+        expect(index.bySpanName.has("Sample.logToConsole")).toBe(true)
+        const logFn = index.bySpanName.get("Sample.logToConsole")
+        expect(logFn).toBeDefined()
+        expect(logFn?.packageTag).toBe("infra")
+        expect(logFn?.exportName).toBe("logToConsole")
+        expect(logFn?.file).toBe("libs/sample/infra/src/index.ts")
+        expect(logFn?.qualname).toBe("libs/sample/infra/src/index.ts#logToConsole")
+        expect(logFn?.isStub).toBe(false)
 
-      expect(index.duplicates).toEqual([])
-    })
+        expect(index.duplicates).toEqual([])
+      }),
   )
 
   it("oxlint rule rejects non-literal Effect.fn arguments and uninstrumented domain/infra exports", () => {
@@ -91,7 +101,7 @@ describe("Effect.fn syntactic index", () => {
         filename: "/repo/libs/sample/domain/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.CallExpression({
         type: "CallExpression",
@@ -99,13 +109,13 @@ describe("Effect.fn syntactic index", () => {
           type: "MemberExpression",
           computed: false,
           object: { type: "Identifier", name: "Effect" },
-          property: { type: "Identifier", name: "fn" }
+          property: { type: "Identifier", name: "fn" },
         },
-        arguments: [{ type: "Identifier", name: "dynamicName" }]
+        arguments: [{ type: "Identifier", name: "dynamicName" }],
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toBe(
-        "Effect.fn must be called with a non-empty string literal span name (e.g. Effect.fn('Module.name'))."
+        "Effect.fn must be called with a non-empty string literal span name (e.g. Effect.fn('Module.name')).",
       )
     }
 
@@ -116,7 +126,7 @@ describe("Effect.fn syntactic index", () => {
         filename: "/repo/libs/sample/domain/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.CallExpression({
         type: "CallExpression",
@@ -124,13 +134,13 @@ describe("Effect.fn syntactic index", () => {
           type: "MemberExpression",
           computed: false,
           object: { type: "Identifier", name: "Effect" },
-          property: { type: "Identifier", name: "fn" }
+          property: { type: "Identifier", name: "fn" },
         },
-        arguments: [{ type: "Literal", value: "   " }]
+        arguments: [{ type: "Literal", value: "   " }],
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toBe(
-        "Effect.fn must be called with a non-empty string literal span name (e.g. Effect.fn('Module.name'))."
+        "Effect.fn must be called with a non-empty string literal span name (e.g. Effect.fn('Module.name')).",
       )
     }
 
@@ -141,7 +151,7 @@ describe("Effect.fn syntactic index", () => {
         filename: "/repo/libs/sample/domain/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.CallExpression({
         type: "CallExpression",
@@ -149,13 +159,13 @@ describe("Effect.fn syntactic index", () => {
           type: "MemberExpression",
           computed: false,
           object: { type: "Identifier", name: "Effect" },
-          property: { type: "Identifier", name: "fn" }
+          property: { type: "Identifier", name: "fn" },
         },
-        arguments: []
+        arguments: [],
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toBe(
-        "Effect.fn must be called with a non-empty string literal span name (e.g. Effect.fn('Module.name'))."
+        "Effect.fn must be called with a non-empty string literal span name (e.g. Effect.fn('Module.name')).",
       )
     }
 
@@ -166,7 +176,7 @@ describe("Effect.fn syntactic index", () => {
         filename: "/repo/libs/sample/domain/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.CallExpression({
         type: "CallExpression",
@@ -174,9 +184,9 @@ describe("Effect.fn syntactic index", () => {
           type: "MemberExpression",
           computed: false,
           object: { type: "Identifier", name: "Effect" },
-          property: { type: "Identifier", name: "fn" }
+          property: { type: "Identifier", name: "fn" },
         },
-        arguments: [{ type: "Literal", value: "Valid.span" }]
+        arguments: [{ type: "Literal", value: "Valid.span" }],
       })
       expect(reports).toHaveLength(0)
     }
@@ -188,7 +198,7 @@ describe("Effect.fn syntactic index", () => {
         filename: "/repo/libs/sample/domain/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.ExportNamedDeclaration({
         type: "ExportNamedDeclaration",
@@ -198,14 +208,14 @@ describe("Effect.fn syntactic index", () => {
             {
               type: "VariableDeclarator",
               id: { type: "Identifier", name: "unwrapped" },
-              init: { type: "ArrowFunctionExpression" }
-            }
-          ]
-        }
+              init: { type: "ArrowFunctionExpression" },
+            },
+          ],
+        },
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toBe(
-        "Exported domain functions must use Effect.fn('LiteralName') for runtime trace correlation."
+        "Exported domain functions must use Effect.fn('LiteralName') for runtime trace correlation.",
       )
     }
 
@@ -216,18 +226,18 @@ describe("Effect.fn syntactic index", () => {
         filename: "/repo/libs/sample/domain/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.ExportNamedDeclaration({
         type: "ExportNamedDeclaration",
         declaration: {
           type: "FunctionDeclaration",
-          id: { type: "Identifier", name: "badFn" }
-        }
+          id: { type: "Identifier", name: "badFn" },
+        },
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toBe(
-        "Exported domain functions must use Effect.fn('LiteralName') for runtime trace correlation."
+        "Exported domain functions must use Effect.fn('LiteralName') for runtime trace correlation.",
       )
     }
 
@@ -238,7 +248,7 @@ describe("Effect.fn syntactic index", () => {
         filename: "/repo/libs/sample/domain/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.ExportNamedDeclaration({
         type: "ExportNamedDeclaration",
@@ -254,17 +264,17 @@ describe("Effect.fn syntactic index", () => {
                   type: "MemberExpression",
                   computed: false,
                   object: { type: "Identifier", name: "Effect" },
-                  property: { type: "Identifier", name: "fnUntraced" }
+                  property: { type: "Identifier", name: "fnUntraced" },
                 },
-                arguments: []
-              }
-            }
-          ]
-        }
+                arguments: [],
+              },
+            },
+          ],
+        },
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toBe(
-        "Exported domain functions must use Effect.fn('LiteralName') for runtime trace correlation."
+        "Exported domain functions must use Effect.fn('LiteralName') for runtime trace correlation.",
       )
     }
 
@@ -275,7 +285,7 @@ describe("Effect.fn syntactic index", () => {
         filename: "/repo/libs/sample/domain/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.ExportNamedDeclaration({
         type: "ExportNamedDeclaration",
@@ -293,15 +303,15 @@ describe("Effect.fn syntactic index", () => {
                     type: "MemberExpression",
                     computed: false,
                     object: { type: "Identifier", name: "Effect" },
-                    property: { type: "Identifier", name: "fn" }
+                    property: { type: "Identifier", name: "fn" },
                   },
-                  arguments: [{ type: "Literal", value: "Sample.f" }]
+                  arguments: [{ type: "Literal", value: "Sample.f" }],
                 },
-                arguments: [{ type: "FunctionExpression" }]
-              }
-            }
-          ]
-        }
+                arguments: [{ type: "FunctionExpression" }],
+              },
+            },
+          ],
+        },
       })
       expect(reports).toHaveLength(0)
     }
@@ -313,7 +323,7 @@ describe("Effect.fn syntactic index", () => {
         filename: "/repo/libs/sample/infra/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.ExportNamedDeclaration({
         type: "ExportNamedDeclaration",
@@ -323,14 +333,14 @@ describe("Effect.fn syntactic index", () => {
             {
               type: "VariableDeclarator",
               id: { type: "Identifier", name: "logToConsole" },
-              init: { type: "ArrowFunctionExpression" }
-            }
-          ]
-        }
+              init: { type: "ArrowFunctionExpression" },
+            },
+          ],
+        },
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toBe(
-        "Exported domain functions must use Effect.fn('LiteralName') for runtime trace correlation."
+        "Exported domain functions must use Effect.fn('LiteralName') for runtime trace correlation.",
       )
     }
 
@@ -341,7 +351,7 @@ describe("Effect.fn syntactic index", () => {
         filename: "/repo/libs/sample/contract/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.ExportNamedDeclaration({
         type: "ExportNamedDeclaration",
@@ -351,10 +361,10 @@ describe("Effect.fn syntactic index", () => {
             {
               type: "VariableDeclarator",
               id: { type: "Identifier", name: "helper" },
-              init: { type: "ArrowFunctionExpression" }
-            }
-          ]
-        }
+              init: { type: "ArrowFunctionExpression" },
+            },
+          ],
+        },
       })
       expect(reports).toHaveLength(0)
     }
@@ -366,11 +376,11 @@ describe("Effect.fn syntactic index", () => {
       const visitor = rule.create({
         filename: "/repo/libs/sample/domain/src/index.ts",
         sourceCode: {
-          text: `// ${directivePrefix} floatingEffect:off\nexport const x = 1\n`
+          text: `// ${directivePrefix} floatingEffect:off\nexport const x = 1\n`,
         },
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
       visitor.Program({ type: "Program" })
       expect(reports).toHaveLength(1)
@@ -381,11 +391,11 @@ describe("Effect.fn syntactic index", () => {
       const testVisitor = testRule.create({
         filename: "/repo/libs/sample/domain/test/index.test.ts",
         sourceCode: {
-          text: `// ${directivePrefix}-next-line lazyEffect:off\n`
+          text: `// ${directivePrefix}-next-line lazyEffect:off\n`,
         },
         report: (r: { message: string }) => {
           testReports.push(r)
-        }
+        },
       })
       testVisitor.Program({ type: "Program" })
       expect(testReports).toHaveLength(1)
@@ -397,7 +407,7 @@ describe("Effect.fn syntactic index", () => {
         filename: "/repo/libs/sample/domain/test/index.test.ts",
         report: (r: { message: string }) => {
           switchReports.push(r)
-        }
+        },
       })
       switchVisitor.SwitchStatement({ type: "SwitchStatement" })
       expect(switchReports).toHaveLength(1)
@@ -411,7 +421,7 @@ describe("Effect.fn syntactic index", () => {
         filename: "/repo/libs/sample/domain/src/index.ts",
         report: (r: { message: string }) => {
           reports.push(r)
-        }
+        },
       })
 
       // SwitchStatement is banned
@@ -426,7 +436,7 @@ describe("Effect.fn syntactic index", () => {
           type: "BinaryExpression",
           operator: ">",
           left: { type: "Identifier", name: "count" },
-          right: { type: "Literal", value: 10 }
+          right: { type: "Literal", value: 10 },
         },
         consequent: { type: "BlockStatement", body: [] },
         alternate: {
@@ -435,11 +445,11 @@ describe("Effect.fn syntactic index", () => {
             type: "BinaryExpression",
             operator: ">",
             left: { type: "Identifier", name: "count" },
-            right: { type: "Literal", value: 5 }
+            right: { type: "Literal", value: 5 },
           },
           consequent: { type: "BlockStatement", body: [] },
-          alternate: null
-        }
+          alternate: null,
+        },
       })
       expect(reports).toHaveLength(2)
       expect(reports[1]?.message).toContain("No if/else-if chains")
@@ -454,12 +464,12 @@ describe("Effect.fn syntactic index", () => {
             type: "MemberExpression",
             computed: false,
             object: { type: "Identifier", name: "state" },
-            property: { type: "Identifier", name: "_tag" }
+            property: { type: "Identifier", name: "_tag" },
           },
-          right: { type: "Literal", value: "Active" }
+          right: { type: "Literal", value: "Active" },
         },
         consequent: { type: "BlockStatement", body: [] },
-        alternate: { type: "BlockStatement", body: [] }
+        alternate: { type: "BlockStatement", body: [] },
       })
       expect(reports).toHaveLength(3)
       expect(reports[2]?.message).toContain("enumerate all states with match")
@@ -473,12 +483,12 @@ describe("Effect.fn syntactic index", () => {
             type: "MemberExpression",
             computed: false,
             object: { type: "Identifier", name: "Option" },
-            property: { type: "Identifier", name: "isSome" }
+            property: { type: "Identifier", name: "isSome" },
           },
-          arguments: [{ type: "Identifier", name: "opt" }]
+          arguments: [{ type: "Identifier", name: "opt" }],
         },
         consequent: { type: "Literal", value: 1 },
-        alternate: { type: "Literal", value: 0 }
+        alternate: { type: "Literal", value: 0 },
       })
       expect(reports).toHaveLength(4)
       expect(reports[3]?.message).toContain("enumerate all states with match")
@@ -493,12 +503,12 @@ describe("Effect.fn syntactic index", () => {
             type: "MemberExpression",
             computed: false,
             object: { type: "Identifier", name: "items" },
-            property: { type: "Identifier", name: "length" }
+            property: { type: "Identifier", name: "length" },
           },
-          right: { type: "Literal", value: 0 }
+          right: { type: "Literal", value: 0 },
         },
         consequent: { type: "BlockStatement", body: [] },
-        alternate: { type: "BlockStatement", body: [] }
+        alternate: { type: "BlockStatement", body: [] },
       })
       expect(reports).toHaveLength(4)
 
@@ -516,15 +526,15 @@ describe("Effect.fn syntactic index", () => {
               object: {
                 type: "CallExpression",
                 callee: { type: "Identifier", name: "match" },
-                arguments: [{ type: "Identifier", name: "x" }]
+                arguments: [{ type: "Identifier", name: "x" }],
               },
-              property: { type: "Identifier", name: "with" }
+              property: { type: "Identifier", name: "with" },
             },
-            arguments: [{ type: "Literal", value: 1 }, { type: "ArrowFunctionExpression" }]
+            arguments: [{ type: "Literal", value: 1 }, { type: "ArrowFunctionExpression" }],
           },
-          property: { type: "Identifier", name: "run" }
+          property: { type: "Identifier", name: "run" },
         },
-        arguments: []
+        arguments: [],
       })
       expect(reports).toHaveLength(5)
       expect(reports[4]?.message).toContain("match(...).run() is banned")
@@ -543,9 +553,9 @@ describe("Effect.fn syntactic index", () => {
               object: {
                 type: "CallExpression",
                 callee: { type: "Identifier", name: "match" },
-                arguments: [{ type: "Identifier", name: "x" }]
+                arguments: [{ type: "Identifier", name: "x" }],
               },
-              property: { type: "Identifier", name: "with" }
+              property: { type: "Identifier", name: "with" },
             },
             arguments: [
               {
@@ -554,19 +564,21 @@ describe("Effect.fn syntactic index", () => {
                   {
                     type: "Property",
                     key: { type: "Identifier", name: "_tag" },
-                    value: { type: "Literal", value: "A" }
-                  }
-                ]
+                    value: { type: "Literal", value: "A" },
+                  },
+                ],
               },
-              { type: "ArrowFunctionExpression" }
-            ]
+              { type: "ArrowFunctionExpression" },
+            ],
           },
-          property: { type: "Identifier", name: "otherwise" }
+          property: { type: "Identifier", name: "otherwise" },
         },
-        arguments: [{ type: "ArrowFunctionExpression" }]
+        arguments: [{ type: "ArrowFunctionExpression" }],
       })
       expect(reports).toHaveLength(6)
-      expect(reports[5]?.message).toContain("Do not use .otherwise() when matching on discriminated union tags")
+      expect(reports[5]?.message).toContain(
+        "Do not use .otherwise() when matching on discriminated union tags",
+      )
 
       // match(num).with(1, ...).otherwise(...) on primitive is allowed
       visitor.CallExpression({
@@ -582,15 +594,15 @@ describe("Effect.fn syntactic index", () => {
               object: {
                 type: "CallExpression",
                 callee: { type: "Identifier", name: "match" },
-                arguments: [{ type: "Identifier", name: "num" }]
+                arguments: [{ type: "Identifier", name: "num" }],
               },
-              property: { type: "Identifier", name: "with" }
+              property: { type: "Identifier", name: "with" },
             },
-            arguments: [{ type: "Literal", value: 1 }, { type: "ArrowFunctionExpression" }]
+            arguments: [{ type: "Literal", value: 1 }, { type: "ArrowFunctionExpression" }],
           },
-          property: { type: "Identifier", name: "otherwise" }
+          property: { type: "Identifier", name: "otherwise" },
         },
-        arguments: [{ type: "ArrowFunctionExpression" }]
+        arguments: [{ type: "ArrowFunctionExpression" }],
       })
       expect(reports).toHaveLength(6)
     }

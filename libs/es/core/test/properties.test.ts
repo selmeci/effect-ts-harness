@@ -14,7 +14,7 @@ import {
   ItemCount,
   ItemId,
   OrderId,
-  positiveInt
+  positiveInt,
 } from "./fixtures/cart.js"
 
 const cid = (v: string) => CartId.make(v)
@@ -27,7 +27,7 @@ describe("Cart Reducer Property-Based Tests", () => {
     "satisfies chunked fold equivalence across arbitrary CartEvent streams",
     {
       events: Schema.Array(CartEvent),
-      splitRatio: Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 1 }))
+      splitRatio: Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
     },
     ({ events, splitRatio }) => {
       const k = Math.floor(events.length * splitRatio)
@@ -36,25 +36,25 @@ describe("Cart Reducer Property-Based Tests", () => {
       const chunkedFold = events.slice(k).reduce(evolveCart, firstChunkState)
 
       expect(Equal.equals(chunkedFold, fullFold)).toBe(true)
-    }
+    },
   )
 
   it.prop(
     "produces deterministic state transitions identical across repeated evaluations",
     {
-      events: Schema.Array(CartEvent)
+      events: Schema.Array(CartEvent),
     },
     ({ events }) => {
       const state1 = events.reduce(evolveCart, initialCartState)
       const state2 = events.reduce(evolveCart, initialCartState)
       expect(Equal.equals(state1, state2)).toBe(true)
-    }
+    },
   )
 
   it.prop(
     "preserves terminal status when subsequent events are applied in CheckedOutCart state",
     {
-      subsequentEvents: Schema.Array(CartEvent)
+      subsequentEvents: Schema.Array(CartEvent),
     },
     ({ subsequentEvents }) => {
       const checkedOutState = [
@@ -64,9 +64,14 @@ describe("Cart Reducer Property-Based Tests", () => {
           cartId: cid("c-1"),
           itemId: iid("i-1"),
           quantity: positiveInt(4),
-          version: 1 as const
+          version: 1 as const,
         },
-        { _tag: "CartCheckedOut" as const, cartId: cid("c-1"), orderId: oid("o-1"), version: 1 as const }
+        {
+          _tag: "CartCheckedOut" as const,
+          cartId: cid("c-1"),
+          orderId: oid("o-1"),
+          version: 1 as const,
+        },
       ].reduce(evolveCart, initialCartState)
       const finalState = subsequentEvents.reduce(evolveCart, checkedOutState)
       match(finalState)
@@ -82,25 +87,25 @@ describe("Cart Reducer Property-Based Tests", () => {
           expect.unreachable("Expected CheckedOutCart")
         })
         .exhaustive()
-    }
+    },
   )
 
   it.prop(
     "accumulates items and itemCount accurately across arbitrary ItemAdded batches for the active cart",
     {
-      additions: Schema.Array(ItemAdded)
+      additions: Schema.Array(ItemAdded),
     },
     ({ additions }) => {
       const cartId = cid("cart-prop")
       const normalizedAdditions = additions.map((ev) => ({
         ...ev,
-        cartId
+        cartId,
       }))
       const initialState: CartState = {
         _tag: "ActiveCart",
         cartId,
         items: [],
-        itemCount: icount(0)
+        itemCount: icount(0),
       }
       const finalState = normalizedAdditions.reduce(evolveCart, initialState)
       const expectedTotal = normalizedAdditions.reduce((acc, ev) => acc + ev.quantity, 0)
@@ -112,8 +117,8 @@ describe("Cart Reducer Property-Based Tests", () => {
           expect(
             Equal.equals(
               s.items,
-              normalizedAdditions.map((a) => ({ itemId: a.itemId, quantity: a.quantity }))
-            )
+              normalizedAdditions.map((a) => ({ itemId: a.itemId, quantity: a.quantity })),
+            ),
           ).toBe(true)
         })
         .with({ _tag: "EmptyCart" }, () => {
@@ -123,7 +128,7 @@ describe("Cart Reducer Property-Based Tests", () => {
           expect.unreachable("Expected ActiveCart")
         })
         .exhaustive()
-    }
+    },
   )
 })
 
@@ -131,7 +136,7 @@ describe("Cart Decider Property-Based Tests", () => {
   it.effect.prop(
     "decideCart succeeds and emits ItemAdded for any valid AddItem on active cart",
     {
-      command: AddItem
+      command: AddItem,
     },
     ({ command }) =>
       Effect.gen(function* () {
@@ -139,7 +144,7 @@ describe("Cart Decider Property-Based Tests", () => {
           _tag: "ActiveCart",
           cartId: command.cartId,
           items: [],
-          itemCount: icount(0)
+          itemCount: icount(0),
         }
         const events = yield* decideCart(command, activeState)
         expect(events.length).toBe(1)
@@ -160,13 +165,13 @@ describe("Cart Decider Property-Based Tests", () => {
             expect.unreachable("Expected at least one event")
           })
           .exhaustive()
-      })
+      }),
   )
 
   it.effect.prop(
     "decideCart fails with CartAlreadyCheckedOutError for any command on CheckedOutCart",
     {
-      command: CartCommand
+      command: CartCommand,
     },
     ({ command }) =>
       Effect.gen(function* () {
@@ -174,7 +179,7 @@ describe("Cart Decider Property-Based Tests", () => {
           _tag: "CheckedOutCart",
           cartId: command.cartId,
           orderId: oid("o-1"),
-          totalItems: icount(5)
+          totalItems: icount(5),
         }
         const exit = yield* Effect.exit(decideCart(command, checkedOutState))
         match(exit)
@@ -203,13 +208,13 @@ describe("Cart Decider Property-Based Tests", () => {
             expect.unreachable("Expected decider to fail on checked-out cart")
           })
           .exhaustive()
-      })
+      }),
   )
 
   it.effect.prop(
     "decideCart fails with CartIdMismatchError whenever command.cartId differs from state.cartId",
     {
-      command: CartCommand
+      command: CartCommand,
     },
     ({ command }) =>
       Effect.gen(function* () {
@@ -218,7 +223,7 @@ describe("Cart Decider Property-Based Tests", () => {
           _tag: "ActiveCart",
           cartId: stateCartId,
           items: [],
-          itemCount: icount(0)
+          itemCount: icount(0),
         }
         const activeExit = yield* Effect.exit(decideCart(command, activeState))
         match(activeExit)
@@ -253,7 +258,7 @@ describe("Cart Decider Property-Based Tests", () => {
           _tag: "CheckedOutCart",
           cartId: stateCartId,
           orderId: oid("order-prop"),
-          totalItems: icount(3)
+          totalItems: icount(3),
         }
         const checkedOutExit = yield* Effect.exit(decideCart(command, checkedOutState))
         match(checkedOutExit)
@@ -283,6 +288,6 @@ describe("Cart Decider Property-Based Tests", () => {
             expect.unreachable("Expected CartIdMismatchError on checked out cart")
           })
           .exhaustive()
-      })
+      }),
   )
 })

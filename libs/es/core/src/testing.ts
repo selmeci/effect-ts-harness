@@ -12,7 +12,7 @@ export interface DeciderTestScenario<Command, Event, Err> {
 }
 
 export const makeDeciderTestHarness = <Command, Event, State, Err>(
-  decider: Decider<Command, Event, State, Err>
+  decider: Decider<Command, Event, State, Err>,
 ) => ({
   given: (history: ReadonlyArray<Event>): DeciderTestScenario<Command, Event, Err> => {
     const currentState = history.reduce(decider.evolve, decider.initialState)
@@ -28,7 +28,9 @@ export const makeDeciderTestHarness = <Command, Event, State, Err>(
                 return Effect.void
               })
               .with({ _tag: "Failure" }, (f): Effect.Effect<void, never, never> =>
-                Effect.die(new Error(`Expected events but decider failed: ${Cause.pretty(f.cause)}`))
+                Effect.die(
+                  new Error(`Expected events but decider failed: ${Cause.pretty(f.cause)}`),
+                ),
               )
               .exhaustive()
           }),
@@ -42,7 +44,11 @@ export const makeDeciderTestHarness = <Command, Event, State, Err>(
                 return Effect.void
               })
               .with({ _tag: "Failure" }, (f): Effect.Effect<void, never, never> =>
-                Effect.die(new Error(`Expected empty event list but decider failed: ${Cause.pretty(f.cause)}`))
+                Effect.die(
+                  new Error(
+                    `Expected empty event list but decider failed: ${Cause.pretty(f.cause)}`,
+                  ),
+                ),
               )
               .exhaustive()
           }),
@@ -52,7 +58,11 @@ export const makeDeciderTestHarness = <Command, Event, State, Err>(
             const exit = yield* Effect.exit(decider.decide(command, currentState))
             yield* match(exit)
               .with({ _tag: "Success" }, (s): Effect.Effect<void, never, never> =>
-                Effect.die(new Error(`Expected decider failure but succeeded with ${JSON.stringify(s.value)}`))
+                Effect.die(
+                  new Error(
+                    `Expected decider failure but succeeded with ${JSON.stringify(s.value)}`,
+                  ),
+                ),
               )
               .with({ _tag: "Failure" }, (f): Effect.Effect<void, never, never> => {
                 expect(Cause.hasDies(f.cause)).toBe(false)
@@ -68,8 +78,8 @@ export const makeDeciderTestHarness = <Command, Event, State, Err>(
                 return Effect.void
               })
               .exhaustive()
-          })
-      })
+          }),
+      }),
     }
-  }
+  },
 })

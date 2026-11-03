@@ -54,20 +54,48 @@ const MUTATION_PATTERNS: ReadonlyArray<{
   { original: "- 1", replacement: "+ 1", category: "arithmetic-operator" },
   { original: "return true", replacement: "return false", category: "boolean-return" },
   { original: "return false", replacement: "return true", category: "boolean-return" },
-  { original: "events.reduce(", replacement: "events.slice(0, 1).reduce(", category: "batch-folding" },
-  { original: ".reduce(evolve,", replacement: ".slice(0, 1).reduce(evolve,", category: "batch-folding" },
-  { original: "() => state", replacement: "() => initialState", category: "terminal-state-preservation" },
-  { original: "return state", replacement: "return initialState", category: "terminal-state-preservation" },
+  {
+    original: "events.reduce(",
+    replacement: "events.slice(0, 1).reduce(",
+    category: "batch-folding",
+  },
+  {
+    original: ".reduce(evolve,",
+    replacement: ".slice(0, 1).reduce(evolve,",
+    category: "batch-folding",
+  },
+  {
+    original: "() => state",
+    replacement: "() => initialState",
+    category: "terminal-state-preservation",
+  },
+  {
+    original: "return state",
+    replacement: "return initialState",
+    category: "terminal-state-preservation",
+  },
   {
     original: "!Equal.equals(someErr.value, expectedError)",
     replacement:
       "((someErr.value as { readonly _tag?: unknown })?._tag !== (expectedError as { readonly _tag?: unknown })?._tag)",
-    category: "equality-operator"
+    category: "equality-operator",
   },
-  { original: "if (!Equal.equals(", replacement: "if (false && !Equal.equals(", category: "guard-condition" },
-  { original: "if (Equal.equals(", replacement: "if (true || Equal.equals(", category: "guard-condition" },
-  { original: "if (Exit.isSuccess(", replacement: "if (false && Exit.isSuccess(", category: "guard-condition" },
-  { original: "Effect.die(", replacement: "Effect.succeed(", category: "guard-condition" }
+  {
+    original: "if (!Equal.equals(",
+    replacement: "if (false && !Equal.equals(",
+    category: "guard-condition",
+  },
+  {
+    original: "if (Equal.equals(",
+    replacement: "if (true || Equal.equals(",
+    category: "guard-condition",
+  },
+  {
+    original: "if (Exit.isSuccess(",
+    replacement: "if (false && Exit.isSuccess(",
+    category: "guard-condition",
+  },
+  { original: "Effect.die(", replacement: "Effect.succeed(", category: "guard-condition" },
 ]
 
 const shouldSkipLine = (trimmed: string): boolean => {
@@ -92,7 +120,7 @@ const shouldSkipLine = (trimmed: string): boolean => {
 
 export const discoverDomainMutants = (
   filePath: string,
-  sourceCode: string
+  sourceCode: string,
 ): ReadonlyArray<CodeMutant> => {
   const mutants: Array<CodeMutant> = []
   const newline = sourceCode.includes("\r\n") ? "\r\n" : "\n"
@@ -127,14 +155,14 @@ export const discoverDomainMutants = (
           category: pattern.category,
           original: pattern.original,
           replacement: pattern.replacement,
-          mutatedSource
+          mutatedSource,
         })
       }
     }
 
     // Regex-based line mutations
     const binaryAddMatch = codePart.match(
-      /\b([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\s*\+\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\b/
+      /\b([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\s*\+\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\b/,
     )
     if (binaryAddMatch && binaryAddMatch[1] && binaryAddMatch[2]) {
       const orig = binaryAddMatch[0]
@@ -148,12 +176,12 @@ export const discoverDomainMutants = (
         category: "arithmetic-operator",
         original: orig,
         replacement: repl,
-        mutatedSource: mutatedLines.join(newline)
+        mutatedSource: mutatedLines.join(newline),
       })
     }
 
     const spreadAppendMatch = codePart.match(
-      /\[\s*\.\.\.([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\s*,\s*\{[^[\]]+\}\s*\]/
+      /\[\s*\.\.\.([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\s*,\s*\{[^[\]]+\}\s*\]/,
     )
     if (spreadAppendMatch && spreadAppendMatch[1]) {
       const orig = spreadAppendMatch[0]
@@ -167,12 +195,12 @@ export const discoverDomainMutants = (
         category: "batch-folding",
         original: orig,
         replacement: repl,
-        mutatedSource: mutatedLines.join(newline)
+        mutatedSource: mutatedLines.join(newline),
       })
     }
 
     const counterCopyMatch = codePart.match(
-      /\b(totalItems|totalCount|itemCount)\s*:\s*([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\b/
+      /\b(totalItems|totalCount|itemCount)\s*:\s*([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\b/,
     )
     if (counterCopyMatch && counterCopyMatch[1]) {
       const orig = counterCopyMatch[0]
@@ -186,7 +214,7 @@ export const discoverDomainMutants = (
         category: "arithmetic-operator",
         original: orig,
         replacement: repl,
-        mutatedSource: mutatedLines.join(newline)
+        mutatedSource: mutatedLines.join(newline),
       })
     }
   }
@@ -195,15 +223,13 @@ export const discoverDomainMutants = (
 }
 
 export const decideMutationReport = Effect.fn("MutationCheck.decide")(function* (
-  input: MutationEvaluationInput
+  input: MutationEvaluationInput,
 ) {
   yield* Effect.void
 
   const totalMutants = input.outcomes.length
   const killedCount = input.outcomes.filter((o) => o.status === "killed").length
-  const survivedMutants = input.outcomes
-    .filter((o) => o.status === "survived")
-    .map((o) => o.mutant)
+  const survivedMutants = input.outcomes.filter((o) => o.status === "survived").map((o) => o.mutant)
   const survivedCount = survivedMutants.length
   const mutationScore = totalMutants === 0 ? 1 : killedCount / totalMutants
   const minScore = input.minScore ?? 1
@@ -215,15 +241,14 @@ export const decideMutationReport = Effect.fn("MutationCheck.decide")(function* 
     killedCount,
     survivedCount,
     mutationScore,
-    survivedMutants
+    survivedMutants,
   } satisfies MutationSuiteReport
 })
 
 export const evaluateMutationOutcomes = (
   outcomes: ReadonlyArray<MutantOutcome>,
-  minScore?: number
-): MutationSuiteReport =>
-  Effect.runSync(decideMutationReport({ outcomes, minScore }))
+  minScore?: number,
+): MutationSuiteReport => Effect.runSync(decideMutationReport({ outcomes, minScore }))
 
 interface DomainFile {
   readonly scope: string
@@ -232,19 +257,14 @@ interface DomainFile {
   readonly relFile: string
 }
 
-const findDomainFiles = (
-  repoRoot: string,
-  scope?: string
-): ReadonlyArray<DomainFile> => {
+const findDomainFiles = (repoRoot: string, scope?: string): ReadonlyArray<DomainFile> => {
   const results: Array<DomainFile> = []
   const libsDir = join(repoRoot, "libs")
   if (!existsSync(libsDir)) return results
 
   let cleanScope = scope
   if (cleanScope) {
-    cleanScope = cleanScope
-      .replace(/^@harness\//, "")
-      .replace(/-(domain|core|contract)$/, "")
+    cleanScope = cleanScope.replace(/^@harness\//, "").replace(/-(domain|core|contract)$/, "")
   }
 
   const scopes = cleanScope !== undefined ? [cleanScope] : readdirSync(libsDir)
@@ -259,7 +279,7 @@ const findDomainFiles = (
       { dir: join(scopePath, "domain", "test", "fixtures"), tier: "domain" as const },
       { dir: join(scopePath, "core", "src"), tier: "core" as const },
       { dir: join(scopePath, "core", "test", "fixtures"), tier: "core" as const },
-      { dir: join(scopePath, "contract", "src"), tier: "contract" as const }
+      { dir: join(scopePath, "contract", "src"), tier: "contract" as const },
     ]
 
     for (const { dir, tier } of tiersToScan) {
@@ -302,7 +322,7 @@ const findDomainFiles = (
 
 export const runDomainMutationSuite = (
   repoRoot: string,
-  options?: { readonly scope?: string | undefined }
+  options?: { readonly scope?: string | undefined },
 ): MutationSuiteReport => {
   const domainFiles = findDomainFiles(repoRoot, options?.scope)
   const outcomes: Array<MutantOutcome> = []
@@ -322,21 +342,21 @@ export const runDomainMutationSuite = (
               execFileSync("pnpm", ["test"], {
                 cwd: pkgDir,
                 stdio: "pipe",
-                env: { ...process.env, CI: "true" }
+                env: { ...process.env, CI: "true" },
               })
-            })
+            }),
           ),
           Effect.match({
             onFailure: (): "killed" => "killed",
-            onSuccess: (): "survived" => "survived"
+            onSuccess: (): "survived" => "survived",
           }),
           Effect.map((status): MutantOutcome => ({ mutant, status })),
           Effect.ensuring(
             Effect.sync(() => {
               writeFileSync(file.fullPath, originalContent, "utf8")
-            })
-          )
-        )
+            }),
+          ),
+        ),
       )
       outcomes.push(outcome)
     }

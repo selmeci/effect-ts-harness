@@ -16,12 +16,12 @@ flowchart LR
 
 ## Layout
 
-| File | Committed | Agent may see it? | Purpose |
-|---|---|---|---|
-| `scenarios/<id>/prompt.md` | yes | **yes** (you paste it) | Opening prompt, worded the way a real user would write it |
-| `scenarios/<id>/scenario.md` | yes | **no** | Your hidden script: steps, follow-up prompts, what to watch for |
-| `scenarios/<id>/expectations.json` | yes | **no** | Checks the runner evaluates when the run ends |
-| `.harness/scenario-runs/<run>/` | no (gitignored via `.harness/`) | — | `report.md`, `results.json`, sliced `telemetry.jsonl`, `friction.jsonl`, `transcript-tools.jsonl` |
+| File                               | Committed                       | Agent may see it?      | Purpose                                                                                           |
+| ---------------------------------- | ------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------- |
+| `scenarios/<id>/prompt.md`         | yes                             | **yes** (you paste it) | Opening prompt, worded the way a real user would write it                                         |
+| `scenarios/<id>/scenario.md`       | yes                             | **no**                 | Your hidden script: steps, follow-up prompts, what to watch for                                   |
+| `scenarios/<id>/expectations.json` | yes                             | **no**                 | Checks the runner evaluates when the run ends                                                     |
+| `.harness/scenario-runs/<run>/`    | no (gitignored via `.harness/`) | —                      | `report.md`, `results.json`, sliced `telemetry.jsonl`, `friction.jsonl`, `transcript-tools.jsonl` |
 
 > [!IMPORTANT]
 > The agent must never read `scenarios/` during a run. You can't hide the folder from it, so
@@ -58,41 +58,60 @@ pnpm scenario eval [runDir]             # re-score a finished run (default: last
 ```jsonc
 {
   "title": "Short description",
-  "requires": ["clef"],            // preflight sends a real /v1/systemone request, warns if > 1500 ms or 404
-  "setup": ["mkdir -p libs/x/dist"],  // run by `start` BEFORE the window opens (preconditions)
+  "requires": ["clef"], // preflight sends a real /v1/systemone request, warns if > 1500 ms or 404
+  "setup": ["mkdir -p libs/x/dist"], // run by `start` BEFORE the window opens (preconditions)
   "teardown": ["rm -rf libs/x/dist"], // run by `end` after evaluation
   "checks": [
     // count check (default): min defaults to 1 if neither min nor max is set
-    { "id": "guard-escalated", "source": "friction", "step": "s1",
-      "where": { "kind": "guard_escalation" }, "min": 1,
-      "why": "Chained shell commands must go to clef" },
+    {
+      "id": "guard-escalated",
+      "source": "friction",
+      "step": "s1",
+      "where": { "kind": "guard_escalation" },
+      "min": 1,
+      "why": "Chained shell commands must go to clef",
+    },
     // `key~` = case-insensitive regex, plain key = exact match
-    { "id": "no-clef-fallback", "source": "friction",
-      "where": { "detail~": "DecisionModel unavailable" }, "max": 0 },
+    {
+      "id": "no-clef-fallback",
+      "source": "friction",
+      "where": { "detail~": "DecisionModel unavailable" },
+      "max": 0,
+    },
     // order check: first match of `before` must not come after first match of `after`.
     // Only use it within ONE source: transcript timestamps are when the model emitted the call,
     // so they come before the hook events that the same call triggers.
-    { "id": "plan-before-verify", "type": "order",
+    {
+      "id": "plan-before-verify",
+      "type": "order",
       "before": { "source": "telemetry", "where": { "toolName": "plan-check", "outcome": "ok" } },
-      "after":  { "source": "telemetry", "where": { "toolName": "verify" } } },
+      "after": { "source": "telemetry", "where": { "toolName": "verify" } },
+    },
     // compare check: count(left) >= count(right), e.g. one guard event per guarded tool call
-    { "id": "guard-covers-calls", "type": "compare",
-      "left":  { "source": "telemetry",  "where": { "toolName": "guard" } },
-      "right": { "source": "transcript", "where": { "tool~": "^(run_command|write_to_file)$" } } },
+    {
+      "id": "guard-covers-calls",
+      "type": "compare",
+      "left": { "source": "telemetry", "where": { "toolName": "guard" } },
+      "right": { "source": "transcript", "where": { "tool~": "^(run_command|write_to_file)$" } },
+    },
     // severity "warn" reports without failing the run
-    { "id": "used-lsp-mcp", "source": "transcript", "where": { "tool~": "harness_lsp_diagnostics" },
-      "severity": "warn" }
-  ]
+    {
+      "id": "used-lsp-mcp",
+      "source": "transcript",
+      "where": { "tool~": "harness_lsp_diagnostics" },
+      "severity": "warn",
+    },
+  ],
 }
 ```
 
 Sources and their fields:
 
-| `source` | Origin | Fields |
-|---|---|---|
-| `telemetry` | `<stateDir>/telemetry-log.jsonl` | `timestamp, surface (cli\|mcp\|hook), category, toolName, outcome (ok\|fail\|deny\|ask\|fallback), durationMs, engineSource?, detail?` |
-| `friction` | `<stateDir>/friction-log.jsonl` | `timestamp, kind (guard_escalation\|route_miss\|verify_failure\|…), summary, detail` |
-| `transcript` | agent conversation log | `timestamp, tool` (e.g. `run_command`, `view_file`, `invoke_subagent`, `mcp:<server>/<tool>`, Claude `Skill`, `Bash`), `args` (JSON string) |
+| `source`     | Origin                           | Fields                                                                                                                                      |
+| ------------ | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `telemetry`  | `<stateDir>/telemetry-log.jsonl` | `timestamp, surface (cli\|mcp\|hook), category, toolName, outcome (ok\|fail\|deny\|ask\|fallback), durationMs, engineSource?, detail?`      |
+| `friction`   | `<stateDir>/friction-log.jsonl`  | `timestamp, kind (guard_escalation\|route_miss\|verify_failure\|…), summary, detail`                                                        |
+| `transcript` | agent conversation log           | `timestamp, tool` (e.g. `run_command`, `view_file`, `invoke_subagent`, `mcp:<server>/<tool>`, Claude `Skill`, `Bash`), `args` (JSON string) |
 
 `stateDir` follows `HARNESS_STATE_DIR` / `HARNESS_WORKTREE_ID`, the same as the harness itself.
 

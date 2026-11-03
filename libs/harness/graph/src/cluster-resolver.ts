@@ -9,7 +9,7 @@ export interface GitHeadState {
 }
 
 const resolveGitDirs = (
-  repoRoot: string
+  repoRoot: string,
 ): { readonly gitDir: string; readonly commonGitDir: string } | null => {
   const absRoot = resolve(repoRoot)
   const dotGit = join(absRoot, ".git")
@@ -37,11 +37,7 @@ const resolveGitDirs = (
   return null
 }
 
-const resolveRefSha = (
-  gitDir: string,
-  commonGitDir: string,
-  refPath: string
-): string | null => {
+const resolveRefSha = (gitDir: string, commonGitDir: string, refPath: string): string | null => {
   const localRefFile = join(gitDir, refPath)
   if (existsSync(localRefFile) && statSync(localRefFile).isFile()) {
     const sha = readFileSync(localRefFile, "utf8").trim()
@@ -75,7 +71,7 @@ const resolveRefSha = (
 
 export const resolveGitHeadState = (
   repoRoot: string,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
 ): GitHeadState => {
   const envBranch = env.HARNESS_GIT_BRANCH?.trim()
   const envSha = env.HARNESS_GIT_HEAD_SHA?.trim()
@@ -86,14 +82,14 @@ export const resolveGitHeadState = (
         if (dirs === null) {
           return {
             gitBranch: envBranch && envBranch.length > 0 ? envBranch : null,
-            headSha: envSha && envSha.length > 0 ? envSha : null
+            headSha: envSha && envSha.length > 0 ? envSha : null,
           }
         }
         const headFile = join(dirs.gitDir, "HEAD")
         if (!existsSync(headFile) || !statSync(headFile).isFile()) {
           return {
             gitBranch: envBranch && envBranch.length > 0 ? envBranch : null,
-            headSha: envSha && envSha.length > 0 ? envSha : null
+            headSha: envSha && envSha.length > 0 ? envSha : null,
           }
         }
         const headContent = readFileSync(headFile, "utf8").trim()
@@ -105,48 +101,40 @@ export const resolveGitHeadState = (
           const detectedSha = resolveRefSha(dirs.gitDir, dirs.commonGitDir, refPath)
           return {
             gitBranch: envBranch && envBranch.length > 0 ? envBranch : detectedBranch,
-            headSha: envSha && envSha.length > 0 ? envSha : detectedSha
+            headSha: envSha && envSha.length > 0 ? envSha : detectedSha,
           }
         }
         return {
           gitBranch: envBranch && envBranch.length > 0 ? envBranch : null,
           headSha:
-            envSha && envSha.length > 0
-              ? envSha
-              : headContent.length > 0
-                ? headContent
-                : null
+            envSha && envSha.length > 0 ? envSha : headContent.length > 0 ? headContent : null,
         }
       },
       catch: (): GitHeadState => ({
         gitBranch: envBranch && envBranch.length > 0 ? envBranch : null,
-        headSha: envSha && envSha.length > 0 ? envSha : null
-      })
+        headSha: envSha && envSha.length > 0 ? envSha : null,
+      }),
     }).pipe(
-      Effect.orElseSucceed(
-        (): GitHeadState => ({
-          gitBranch: envBranch && envBranch.length > 0 ? envBranch : null,
-          headSha: envSha && envSha.length > 0 ? envSha : null
-        })
-      )
-    )
+      Effect.orElseSucceed((): GitHeadState => ({
+        gitBranch: envBranch && envBranch.length > 0 ? envBranch : null,
+        headSha: envSha && envSha.length > 0 ? envSha : null,
+      })),
+    ),
   )
 }
 
 export const GraphHeadMetaSchema = Schema.Struct({
   headSha: Schema.NullOr(Schema.String),
   gitBranch: Schema.NullOr(Schema.String),
-  updatedAt: Schema.String
+  updatedAt: Schema.String,
 })
 export type GraphHeadMeta = typeof GraphHeadMetaSchema.Type
 
-const decodeGraphHeadMetaOption = Schema.decodeOption(
-  Schema.fromJsonString(GraphHeadMetaSchema)
-)
+const decodeGraphHeadMetaOption = Schema.decodeOption(Schema.fromJsonString(GraphHeadMetaSchema))
 
 export const readGraphHeadMeta = (
   repoRoot: string,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
 ): GraphHeadMeta | null => {
   const customDir = env.HARNESS_STATE_DIR?.trim()
   const stateDir =
@@ -160,19 +148,19 @@ export const readGraphHeadMeta = (
   return Effect.runSync(
     Effect.try({
       try: () => readFileSync(metaPath, "utf8"),
-      catch: () => ""
+      catch: () => "",
     }).pipe(
       Effect.flatMap((raw) => Effect.fromOption(decodeGraphHeadMetaOption(raw))),
       Effect.option,
-      Effect.map((opt) => Option.getOrNull(opt))
-    )
+      Effect.map((opt) => Option.getOrNull(opt)),
+    ),
   )
 }
 
 export const writeGraphHeadMeta = (
   repoRoot: string,
   headState?: GitHeadState,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
 ): GraphHeadMeta | null => {
   const resolved = headState ?? resolveGitHeadState(repoRoot, env)
   if (resolved.headSha === null && resolved.gitBranch === null) {
@@ -186,7 +174,7 @@ export const writeGraphHeadMeta = (
   const meta: GraphHeadMeta = {
     headSha: resolved.headSha,
     gitBranch: resolved.gitBranch,
-    updatedAt: new Date().toISOString()
+    updatedAt: new Date().toISOString(),
   }
   Effect.runSync(
     Effect.try({
@@ -196,8 +184,8 @@ export const writeGraphHeadMeta = (
         }
         writeFileSync(join(stateDir, "graph-head.json"), JSON.stringify(meta, null, 2), "utf8")
       },
-      catch: () => undefined
-    }).pipe(Effect.orElseSucceed(() => undefined))
+      catch: () => undefined,
+    }).pipe(Effect.orElseSucceed(() => undefined)),
   )
   return meta
 }
@@ -206,7 +194,7 @@ export const OmnigraphReconcileReason = Schema.Literals([
   "up-to-date",
   "missing-snapshot",
   "head-sha-changed",
-  "git-branch-changed"
+  "git-branch-changed",
 ])
 export type OmnigraphReconcileReason = typeof OmnigraphReconcileReason.Type
 
@@ -215,7 +203,7 @@ export const OmnigraphReconcileInput = Schema.Struct({
   recordedHeadSha: Schema.NullOr(Schema.String),
   currentHeadSha: Schema.NullOr(Schema.String),
   recordedGitBranch: Schema.NullOr(Schema.String),
-  currentGitBranch: Schema.NullOr(Schema.String)
+  currentGitBranch: Schema.NullOr(Schema.String),
 })
 export type OmnigraphReconcileInput = typeof OmnigraphReconcileInput.Type
 
@@ -228,57 +216,55 @@ export interface OmnigraphReconcileDecision {
 export const sanitizeOmnigraphBranchSlug = (raw: string): string =>
   raw.replace(/[^a-zA-Z0-9._-]/g, "_")
 
-export const decideOmnigraphReconcile = Effect.fn("OmnigraphReconcile.decide")(
-  function* (input: OmnigraphReconcileInput) {
-    yield* Effect.void
-    const branchTrimmed = input.currentGitBranch?.trim() ?? ""
-    const isFeatureBranch =
-      branchTrimmed.length > 0 &&
-      branchTrimmed !== "main" &&
-      branchTrimmed !== "master"
-    const targetOmnigraphBranch = isFeatureBranch
-      ? `impl/branch-${sanitizeOmnigraphBranchSlug(branchTrimmed)}`
-      : "main"
+export const decideOmnigraphReconcile = Effect.fn("OmnigraphReconcile.decide")(function* (
+  input: OmnigraphReconcileInput,
+) {
+  yield* Effect.void
+  const branchTrimmed = input.currentGitBranch?.trim() ?? ""
+  const isFeatureBranch =
+    branchTrimmed.length > 0 && branchTrimmed !== "main" && branchTrimmed !== "master"
+  const targetOmnigraphBranch = isFeatureBranch
+    ? `impl/branch-${sanitizeOmnigraphBranchSlug(branchTrimmed)}`
+    : "main"
 
-    if (!input.snapshotExists) {
-      return {
-        needsReconcile: true,
-        reason: "missing-snapshot" as const,
-        targetOmnigraphBranch
-      } satisfies OmnigraphReconcileDecision
-    }
-
-    if (
-      input.currentHeadSha !== null &&
-      input.currentHeadSha.length > 0 &&
-      input.recordedHeadSha !== input.currentHeadSha
-    ) {
-      return {
-        needsReconcile: true,
-        reason: "head-sha-changed" as const,
-        targetOmnigraphBranch
-      } satisfies OmnigraphReconcileDecision
-    }
-
-    if (
-      input.currentGitBranch !== null &&
-      input.recordedGitBranch !== null &&
-      input.recordedGitBranch !== input.currentGitBranch
-    ) {
-      return {
-        needsReconcile: true,
-        reason: "git-branch-changed" as const,
-        targetOmnigraphBranch
-      } satisfies OmnigraphReconcileDecision
-    }
-
+  if (!input.snapshotExists) {
     return {
-      needsReconcile: false,
-      reason: "up-to-date" as const,
-      targetOmnigraphBranch
+      needsReconcile: true,
+      reason: "missing-snapshot" as const,
+      targetOmnigraphBranch,
     } satisfies OmnigraphReconcileDecision
   }
-)
+
+  if (
+    input.currentHeadSha !== null &&
+    input.currentHeadSha.length > 0 &&
+    input.recordedHeadSha !== input.currentHeadSha
+  ) {
+    return {
+      needsReconcile: true,
+      reason: "head-sha-changed" as const,
+      targetOmnigraphBranch,
+    } satisfies OmnigraphReconcileDecision
+  }
+
+  if (
+    input.currentGitBranch !== null &&
+    input.recordedGitBranch !== null &&
+    input.recordedGitBranch !== input.currentGitBranch
+  ) {
+    return {
+      needsReconcile: true,
+      reason: "git-branch-changed" as const,
+      targetOmnigraphBranch,
+    } satisfies OmnigraphReconcileDecision
+  }
+
+  return {
+    needsReconcile: false,
+    reason: "up-to-date" as const,
+    targetOmnigraphBranch,
+  } satisfies OmnigraphReconcileDecision
+})
 
 export const resolveCanonicalRepoRoot = (repoRoot: string): string => {
   const absRoot = resolve(repoRoot)
@@ -307,14 +293,14 @@ export const resolveCanonicalRepoRoot = (repoRoot: string): string => {
         }
         return absRoot
       },
-      catch: () => absRoot
-    }).pipe(Effect.orElseSucceed(() => absRoot))
+      catch: () => absRoot,
+    }).pipe(Effect.orElseSucceed(() => absRoot)),
   )
 }
 
 export const resolveOmnigraphClusterDir = (
   repoRoot: string,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
 ): string => {
   const customDir = env.HARNESS_STATE_DIR?.trim()
   if (customDir && customDir.length > 0) {
@@ -332,7 +318,7 @@ export const deriveRepoOmnigraphPort = (repoRoot: string): number => {
 
 export const resolveOmnigraphTaskBranches = (
   repoRoot: string,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
 ): {
   readonly planBranch: string
   readonly implBranch: string
@@ -344,7 +330,7 @@ export const resolveOmnigraphTaskBranches = (
     return {
       planBranch: `plan/wt-${slug}`,
       implBranch: `impl/wt-${slug}`,
-      mainBranch: "main"
+      mainBranch: "main",
     }
   }
   const absRoot = resolve(repoRoot)
@@ -354,7 +340,7 @@ export const resolveOmnigraphTaskBranches = (
     return {
       planBranch: `plan/wt-${slug}`,
       implBranch: `impl/wt-${slug}`,
-      mainBranch: "main"
+      mainBranch: "main",
     }
   }
   const headState = resolveGitHeadState(absRoot, env)
@@ -364,12 +350,12 @@ export const resolveOmnigraphTaskBranches = (
     return {
       planBranch: `plan/branch-${slug}`,
       implBranch: `impl/branch-${slug}`,
-      mainBranch: "main"
+      mainBranch: "main",
     }
   }
   return {
     planBranch: "plan/current",
     implBranch: "impl/current",
-    mainBranch: "main"
+    mainBranch: "main",
   }
 }

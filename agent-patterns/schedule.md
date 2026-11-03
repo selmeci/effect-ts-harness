@@ -29,13 +29,13 @@ import { Duration, Schedule } from "effect"
 // Exponential backoff with a maximum of 5 attempts and jitter
 export const robustRetryPolicy = Schedule.exponential(Duration.millis(100)).pipe(
   Schedule.compose(Schedule.recurs(5)),
-  Schedule.jittered
+  Schedule.jittered,
 )
 
 // Intersecting schedules: terminates when either schedule terminates
 export const cappedSchedule = Schedule.intersect(
   Schedule.spaced(Duration.seconds(2)),
-  Schedule.recurs(10)
+  Schedule.recurs(10),
 )
 ```
 
@@ -46,16 +46,14 @@ Apply schedules to effects that fail:
 ```ts
 import { Effect } from "effect"
 
-export const callFlakyApiWithRetry = flakyApiCall.pipe(
-  Effect.retry(robustRetryPolicy)
-)
+export const callFlakyApiWithRetry = flakyApiCall.pipe(Effect.retry(robustRetryPolicy))
 
 // Conditional retry based on the error tag
 export const retryOnlyTransientErrors = flakyApiCall.pipe(
   Effect.retry({
     schedule: robustRetryPolicy,
-    while: (error) => error._tag === "TransientNetworkError"
-  })
+    while: (error) => error._tag === "TransientNetworkError",
+  }),
 )
 ```
 
@@ -68,7 +66,7 @@ import { Duration, Effect } from "effect"
 
 export const queryWithTimeout = slowDatabaseQuery.pipe(
   // Automatically interrupts the effect if it exceeds 5 seconds
-  Effect.timeout(Duration.seconds(5))
+  Effect.timeout(Duration.seconds(5)),
 )
 ```
 
@@ -82,8 +80,8 @@ import { Duration, Effect, Schedule } from "effect"
 export const pollJobStatus = checkJobStatus.pipe(
   Effect.repeat(
     Schedule.spaced(Duration.seconds(2)).pipe(
-      Schedule.untilOutput((status) => status === "COMPLETED")
-    )
-  )
+      Schedule.untilOutput((status) => status === "COMPLETED"),
+    ),
+  ),
 )
 ```

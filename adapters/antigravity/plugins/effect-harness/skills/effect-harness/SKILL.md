@@ -56,6 +56,7 @@ plan -> skeleton with stub<A, E, R>(...args) -> harness plan-check -> implement 
 ### 1.3 MCP-First Tooling Preference
 
 Always prefer in-process MCP tools over spawning shell subcommands to eliminate process overhead and guard prompt friction:
+
 - **LSP & Type Diagnostics:** `harness_lsp_diagnostics` (replaces slow shell lint/typecheck runs during development).
 - **Ontology & Architecture:** `harness_ontology_check`, `harness_ontology_why`, `harness_ontology_impact` (trace and audit EARS specs and ADR invariants).
 - **Test Impact Analysis:** `harness_tests_reaching` (determines affected test files for touched symbols).
@@ -86,6 +87,7 @@ The plugin provides three complementary MCP servers in `mcp_config.json`:
 ### `@modernrelay/omnigraph-mcp` (Property Graph & Branching)
 
 Exposes parameterized `.gq` graph queries over local Lance storage (`http://127.0.0.1:8080`) under subject `agent-mcp`:
+
 - **Node types:** `EffectFn`, `ServiceTag`, `ServiceLayer`, `TaggedError`, `VitestCase`, `PatternDoc`.
 - **Edge types:** `RequiresService`, `FailsWith`, `ProvidesService`, `LayerRequires`, `TracedCall`, `ExercisesSpan`.
 - **Access control:** Access is constrained by `libs/harness/graph/policies.cedar` to read-only actions on `main` and `plan/*` branches for `agent-mcp`.
@@ -96,11 +98,11 @@ Exposes parameterized `.gq` graph queries over local Lance storage (`http://127.
 
 Enforce strict directional boundaries across project tags:
 
-| Tag | Purpose | Allowed Imports |
-| :--- | :--- | :--- |
-| `type:contract` | Shared Schemas, `HttpApi`, `RpcGroup`, API errors | `effect` only |
-| `type:domain` | Business use cases, domain errors, pure logic | `contract`, `service`, (`@harness/gates` for `stub` during planning); **never** `type:infra` or `alchemy` |
-| `type:service` | Service interfaces (`Context.Service`), repository abstractions | `contract`, `domain` |
-| `type:infra` | Live `Layer` implementations, Drizzle repositories, Alchemy resources | `contract`, `domain`, `service`, `infra` |
-| `type:app` | Worker/API entrypoint composing Layers (`alchemy.run.ts`) | All workspace libraries |
-| `type:app`, `scope:web` | Frontend (Vite + React + `AtomHttpApi`) | `contract` and UI libraries only (no raw `fetch`) |
+| Tag                     | Purpose                                                               | Allowed Imports                                                                                           |
+| :---------------------- | :-------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------- |
+| `type:contract`         | Shared Schemas, `HttpApi`, `RpcGroup`, API errors                     | `effect` only                                                                                             |
+| `type:domain`           | Business use cases, domain errors, pure logic                         | `contract`, `service`, (`@harness/gates` for `stub` during planning); **never** `type:infra` or `alchemy` |
+| `type:service`          | Service interfaces (`Context.Service`), repository abstractions       | `contract`, `domain`                                                                                      |
+| `type:infra`            | Live `Layer` implementations, Drizzle repositories, Alchemy resources | `contract`, `domain`, `service`, `infra`                                                                  |
+| `type:app`              | Worker/API entrypoint composing Layers (`alchemy.run.ts`)             | All workspace libraries                                                                                   |
+| `type:app`, `scope:web` | Frontend (Vite + React + `AtomHttpApi`)                               | `contract` and UI libraries only (no raw `fetch`)                                                         |

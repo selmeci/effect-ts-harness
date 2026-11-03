@@ -23,19 +23,19 @@ import { Schema } from "effect"
 export const SubscriptionTier = Schema.TaggedUnion({
   Free: { maxAlbums: Schema.Int },
   Pro: { maxAlbums: Schema.Int, customDomain: Schema.String },
-  Enterprise: { dedicatedCluster: Schema.String }
+  Enterprise: { dedicatedCluster: Schema.String },
 })
 export type SubscriptionTier = typeof SubscriptionTier.Type
 
 // 2. Class-based variants with Schema.TaggedClass + Schema.Union:
 export class UploadPending extends Schema.TaggedClass<UploadPending>()("UploadPending", {
-  photoId: Schema.String
+  photoId: Schema.String,
 }) {}
 
 export class UploadCompleted extends Schema.TaggedClass<UploadCompleted>()("UploadCompleted", {
   photoId: Schema.String,
   objectKey: Schema.String,
-  sizeBytes: Schema.Int
+  sizeBytes: Schema.Int,
 }) {}
 
 export const UploadState = Schema.Union([UploadPending, UploadCompleted])
@@ -56,7 +56,10 @@ import type { SubscriptionTier, UploadState } from "@harness/sample-contract"
 export const describeUploadState = (state: UploadState): string =>
   match(state)
     .with({ _tag: "UploadPending" }, ({ photoId }) => `Pending: ${photoId}`)
-    .with({ _tag: "UploadCompleted" }, ({ photoId, sizeBytes }) => `Completed: ${photoId} (${sizeBytes}B)`)
+    .with(
+      { _tag: "UploadCompleted" },
+      ({ photoId, sizeBytes }) => `Completed: ${photoId} (${sizeBytes}B)`,
+    )
     .exhaustive()
 
 // Option<A> has 2 states ({ _tag: "None" } | { _tag: "Some", value: A }):
@@ -78,10 +81,14 @@ export const formatOptionalCursor = (cursor: Option.Option<string>): string =>
 ```ts
 import { Effect } from "effect"
 import { match, P } from "ts-pattern"
-import { QuotaExceededError, type AlbumQuotaCommand, type AlbumQuotaEvent } from "@harness/sample-contract"
+import {
+  QuotaExceededError,
+  type AlbumQuotaCommand,
+  type AlbumQuotaEvent,
+} from "@harness/sample-contract"
 
 export const decideAlbumQuota = Effect.fn("Sample.decide")(function* (
-  cmd: AlbumQuotaCommand
+  cmd: AlbumQuotaCommand,
 ): Effect.fn.Return<AlbumQuotaEvent, QuotaExceededError> {
   return yield* match(cmd)
     .with(
@@ -90,14 +97,14 @@ export const decideAlbumQuota = Effect.fn("Sample.decide")(function* (
         new QuotaExceededError({
           albumId: c.albumId,
           currentCount: c.currentCount,
-          maxAllowed: c.maxAllowed
-        })
+          maxAllowed: c.maxAllowed,
+        }),
     )
     .otherwise((c) =>
       Effect.succeed({
         albumId: c.albumId,
-        newCount: c.currentCount + 1
-      })
+        newCount: c.currentCount + 1,
+      }),
     )
 })
 ```
@@ -106,13 +113,13 @@ export const decideAlbumQuota = Effect.fn("Sample.decide")(function* (
 
 ## 4. When `.otherwise()` and Simple `if / else` Are Allowed
 
-| Construct | Verdict | Rule |
-| :--- | :--- | :--- |
-| `match(closedUnion)...exhaustive()` | **Required** | All discriminated unions (`_tag`, `kind`, `status`, custom literal tags, `Option`, `Either`, `Result`) must enumerate every state and end with `.exhaustive()`. |
-| `match(closedUnion)...otherwise(...)` | **Banned** | Blocked by `syntax-bans` and `non-exhaustive-union-match` in `checkEffectGraph`. |
-| `match(openValue)...otherwise(...)` | **Allowed** | Permitted **only** when matching on open/infinite types (`number`, `string`, `unknown`) or single-struct guard refinements (`P.when(...)`) where `.exhaustive()` cannot statically close the type. |
-| `match(...)...run()` | **Banned** | `.run()` throws at runtime on unhandled states; always use `.exhaustive()` or (for open types) `.otherwise()`. |
-| `switch (x) { ... }` | **Banned** | Banned in all domain/service/infra/app code by `syntax-bans`. |
-| `if (...) ... else if (...)` | **Banned** | Multi-branch `if / else if` chains are banned; use `match(...)` with `.with(...)` branches. |
-| `if (union.tag === "A")` / `Option.isSome(x)` | **Banned** | Branching on a union discriminant in `if / else` or ternary `? :` is banned by `syntax-bans` and `discriminant-branching` in `checkEffectGraph` — even for 2 variants. |
-| Simple `if (count <= 0)` | **Allowed** | Simple 1-branch `if` or `if / else` is permitted **only** when the condition does not inspect a discriminant or tag of a union type. |
+| Construct                                     | Verdict      | Rule                                                                                                                                                                                               |
+| :-------------------------------------------- | :----------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `match(closedUnion)...exhaustive()`           | **Required** | All discriminated unions (`_tag`, `kind`, `status`, custom literal tags, `Option`, `Either`, `Result`) must enumerate every state and end with `.exhaustive()`.                                    |
+| `match(closedUnion)...otherwise(...)`         | **Banned**   | Blocked by `syntax-bans` and `non-exhaustive-union-match` in `checkEffectGraph`.                                                                                                                   |
+| `match(openValue)...otherwise(...)`           | **Allowed**  | Permitted **only** when matching on open/infinite types (`number`, `string`, `unknown`) or single-struct guard refinements (`P.when(...)`) where `.exhaustive()` cannot statically close the type. |
+| `match(...)...run()`                          | **Banned**   | `.run()` throws at runtime on unhandled states; always use `.exhaustive()` or (for open types) `.otherwise()`.                                                                                     |
+| `switch (x) { ... }`                          | **Banned**   | Banned in all domain/service/infra/app code by `syntax-bans`.                                                                                                                                      |
+| `if (...) ... else if (...)`                  | **Banned**   | Multi-branch `if / else if` chains are banned; use `match(...)` with `.with(...)` branches.                                                                                                        |
+| `if (union.tag === "A")` / `Option.isSome(x)` | **Banned**   | Branching on a union discriminant in `if / else` or ternary `? :` is banned by `syntax-bans` and `discriminant-branching` in `checkEffectGraph` — even for 2 variants.                             |
+| Simple `if (count <= 0)`                      | **Allowed**  | Simple 1-branch `if` or `if / else` is permitted **only** when the condition does not inspect a discriminant or tag of a union type.                                                               |

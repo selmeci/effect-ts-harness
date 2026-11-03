@@ -2,9 +2,7 @@
   "version": "7",
   "dialect": "sqlite",
   "id": "3e92f353-03ef-433f-95f9-75ea4a6d2a1c",
-  "prevIds": [
-    "00000000-0000-0000-0000-000000000000"
-  ],
+  "prevIds": ["00000000-0000-0000-0000-000000000000"],
   "ddl": [
     {
       "name": "album_counters",
@@ -75,18 +73,14 @@
       "table": "photos"
     },
     {
-      "columns": [
-        "album_id"
-      ],
+      "columns": ["album_id"],
       "nameExplicit": false,
       "name": "album_counters_pk",
       "table": "album_counters",
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "photos_pk",
       "table": "photos",

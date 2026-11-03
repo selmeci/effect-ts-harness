@@ -19,6 +19,7 @@
     "sharedGlobals": [
       "{workspaceRoot}/tsconfig.base.json",
       "{workspaceRoot}/.oxlintrc.json",
+      "{workspaceRoot}/.oxfmtrc.json",
       "{workspaceRoot}/tools/oxlint/syntax-bans.js",
       "{workspaceRoot}/pnpm-lock.yaml",
       "{workspaceRoot}/package.json"
@@ -37,6 +38,13 @@
         "default",
         "{workspaceRoot}/.oxlintrc.json",
         "{workspaceRoot}/tools/oxlint/syntax-bans.js"
+      ]
+    },
+    "format:check": {
+      "cache": true,
+      "inputs": [
+        "default",
+        "{workspaceRoot}/.oxfmtrc.json"
       ]
     },
     "test": {

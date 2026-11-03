@@ -54,16 +54,10 @@ const ALLOWED_VERIFICATION_METHODS = new Set([
   "astgate",
   "graphcheck",
   "analysis",
-  "demonstration"
+  "demonstration",
 ])
 
-const FORBIDDEN_COLUMNS = new Set([
-  "status",
-  "state",
-  "evidence",
-  "proof",
-  "done"
-])
+const FORBIDDEN_COLUMNS = new Set(["status", "state", "evidence", "proof", "done"])
 
 const stripMarkup = (text: string): string => text.replace(/[*_`]/g, "").trim()
 
@@ -92,7 +86,7 @@ interface TableContext {
 }
 
 export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* (
-  input: EarsSpecLintInput
+  input: EarsSpecLintInput,
 ) {
   yield* Effect.void
 
@@ -111,11 +105,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
     }
   }
 
-  const hasH2 = rawLines.some(
-    (line, idx) =>
-      idx > frontmatterEndIdx &&
-      /^##\s+/.test(line)
-  )
+  const hasH2 = rawLines.some((line, idx) => idx > frontmatterEndIdx && /^##\s+/.test(line))
 
   let inRequirementsSection = !hasH2
   let currentAreaNumber: number | null = null
@@ -150,14 +140,11 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
 
     // 1. Unfilled placeholders
     const strippedBackticks = rawLine.replace(/`[^`]*`/g, "")
-    if (
-      strippedBackticks.includes("<!--") ||
-      /<(?!!--)[^<>`\n]{1,60}>/.test(strippedBackticks)
-    ) {
+    if (strippedBackticks.includes("<!--") || /<(?!!--)[^<>`\n]{1,60}>/.test(strippedBackticks)) {
       findings.push({
         line: lineNum,
         kind: "unfilled-placeholder",
-        message: `Line ${lineNum} contains unfilled placeholder or HTML comment.`
+        message: `Line ${lineNum} contains unfilled placeholder or HTML comment.`,
       })
     }
 
@@ -169,7 +156,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
         findings.push({
           line: pendingSourceCheckLine ?? lineNum,
           kind: "area-structure",
-          message: `Area ${pendingSourceCheckForArea} must have '**Source' on the first non-empty line following its heading.`
+          message: `Area ${pendingSourceCheckForArea} must have '**Source' on the first non-empty line following its heading.`,
         })
         pendingSourceCheckForArea = null
       }
@@ -182,7 +169,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
         findings.push({
           line: pendingSourceCheckLine ?? lineNum,
           kind: "area-structure",
-          message: `Area ${pendingSourceCheckForArea} must have '**Source' on the first non-empty line following its heading.`
+          message: `Area ${pendingSourceCheckForArea} must have '**Source' on the first non-empty line following its heading.`,
         })
         pendingSourceCheckForArea = null
       }
@@ -197,7 +184,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
           findings.push({
             line: lineNum,
             kind: "area-structure",
-            message: `Area ${pendingSourceCheckForArea} must have '**Source' on the first non-empty line following its heading.`
+            message: `Area ${pendingSourceCheckForArea} must have '**Source' on the first non-empty line following its heading.`,
           })
         }
         pendingSourceCheckForArea = null
@@ -215,7 +202,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
             findings.push({
               line: lineNum,
               kind: "area-structure",
-              message: `Expected area number ${nextExpectedAreaNumber}, but got ${areaNum}.`
+              message: `Expected area number ${nextExpectedAreaNumber}, but got ${areaNum}.`,
             })
           }
           nextExpectedAreaNumber = areaNum + 1
@@ -226,7 +213,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
           findings.push({
             line: lineNum,
             kind: "area-structure",
-            message: `Area heading '${rawLine}' does not match format '### <n> · <Title>' with sequential numbering.`
+            message: `Area heading '${rawLine}' does not match format '### <n> · <Title>' with sequential numbering.`,
           })
           currentAreaNumber = null
           pendingSourceCheckForArea = null
@@ -247,7 +234,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
           const reqCol = cleanCols.indexOf("requirement")
           const patternCol = cleanCols.indexOf("pattern")
           const effectSymbolCol = cleanCols.findIndex(
-            (c) => c === "effect symbol" || c === "effect_symbol" || c === "symbol"
+            (c) => c === "effect symbol" || c === "effect_symbol" || c === "symbol",
           )
           const verifCol = cleanCols.indexOf("verification")
 
@@ -259,7 +246,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
                 findings.push({
                   line: lineNum,
                   kind: "forbidden-column",
-                  message: `Forbidden column '${col}' in requirements table.`
+                  message: `Forbidden column '${col}' in requirements table.`,
                 })
               }
             }
@@ -268,7 +255,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
               findings.push({
                 line: lineNum,
                 kind: "pattern-keyword-mismatch",
-                message: "Requirements table must contain a 'Pattern' column."
+                message: "Requirements table must contain a 'Pattern' column.",
               })
             }
 
@@ -276,7 +263,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
               findings.push({
                 line: lineNum,
                 kind: "invalid-verification",
-                message: "Requirements table must contain a 'Verification' column."
+                message: "Requirements table must contain a 'Verification' column.",
               })
             }
 
@@ -287,7 +274,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
               reqCol,
               effectSymbolCol,
               verifCol,
-              seenSeparator: false
+              seenSeparator: false,
             }
           }
         }
@@ -309,8 +296,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
             currentTable.patternCol !== -1 && currentTable.patternCol < cells.length
               ? cells[currentTable.patternCol]!
               : ""
-          const rawReq =
-            currentTable.reqCol < cells.length ? cells[currentTable.reqCol]! : ""
+          const rawReq = currentTable.reqCol < cells.length ? cells[currentTable.reqCol]! : ""
           const rawEffectSymbol =
             currentTable.effectSymbolCol !== -1 && currentTable.effectSymbolCol < cells.length
               ? cells[currentTable.effectSymbolCol]
@@ -331,7 +317,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
             findings.push({
               line: lineNum,
               kind: "id-format",
-              message: `Requirement ID '${rawId}' does not match format 'REQ-<group>.<item>' (e.g. REQ-1.1).`
+              message: `Requirement ID '${rawId}' does not match format 'REQ-<group>.<item>' (e.g. REQ-1.1).`,
             })
           } else {
             const group = parseInt(idMatch[1]!, 10)
@@ -341,7 +327,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
               findings.push({
                 line: lineNum,
                 kind: "duplicate-id",
-                message: `Duplicate requirement ID '${cleanId}'.`
+                message: `Duplicate requirement ID '${cleanId}'.`,
               })
             } else {
               seenIds.add(cleanId)
@@ -352,14 +338,14 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
                 findings.push({
                   line: lineNum,
                   kind: "area-structure",
-                  message: `Requirement '${cleanId}' is inside area ${currentAreaNumber}, but group is ${group}.`
+                  message: `Requirement '${cleanId}' is inside area ${currentAreaNumber}, but group is ${group}.`,
                 })
               }
             } else if (inRequirementsSection) {
               findings.push({
                 line: lineNum,
                 kind: "area-structure",
-                message: `Requirement '${cleanId}' must be placed under an area heading (### <n> · <Title>).`
+                message: `Requirement '${cleanId}' must be placed under an area heading (### <n> · <Title>).`,
               })
             }
 
@@ -368,7 +354,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
               findings.push({
                 line: lineNum,
                 kind: "numbering-gap",
-                message: `Requirement ID '${cleanId}' has a numbering gap: expected item ${expectedItem}, got ${item}.`
+                message: `Requirement ID '${cleanId}' has a numbering gap: expected item ${expectedItem}, got ${item}.`,
               })
             }
             lastItemByGroup.set(group, item)
@@ -385,13 +371,13 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
               findings.push({
                 line: lineNum,
                 kind: "weak-modal",
-                message: `${cleanId} uses weak modal instead of 'shall' or 'shall not'.`
+                message: `${cleanId} uses weak modal instead of 'shall' or 'shall not'.`,
               })
             } else {
               findings.push({
                 line: lineNum,
                 kind: "missing-modal",
-                message: `${cleanId} is missing mandatory modal 'shall' or 'shall not'.`
+                message: `${cleanId} is missing mandatory modal 'shall' or 'shall not'.`,
               })
             }
           }
@@ -404,7 +390,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
             findings.push({
               line: lineNum,
               kind: "generic-subject",
-              message: `${cleanId} uses generic subject 'the system shall' — name the specific Effect service, use-case, or decider.`
+              message: `${cleanId} uses generic subject 'the system shall' — name the specific Effect service, use-case, or decider.`,
             })
           }
 
@@ -417,7 +403,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
             findings.push({
               line: lineNum,
               kind: "compound-obligation",
-              message: `${cleanId} joins two obligations with 'and shall' — split into separate REQ rows if they can fail independently, or drop negative restatements.`
+              message: `${cleanId} joins two obligations with 'and shall' — split into separate REQ rows if they can fail independently, or drop negative restatements.`,
             })
           }
 
@@ -429,7 +415,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
             findings.push({
               line: lineNum,
               kind: "defect-polarity-inversion",
-              message: `${cleanId} inverts defect safety polarity ('without dying on ... defects'): in Effect-TS test harnesses, unexpected defects MUST die/fail the assertion rather than being ignored.`
+              message: `${cleanId} inverts defect safety polarity ('without dying on ... defects'): in Effect-TS test harnesses, unexpected defects MUST die/fail the assertion rather than being ignored.`,
             })
           }
 
@@ -444,7 +430,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
             findings.push({
               line: lineNum,
               kind: "legacy-effect-v3-symbol",
-              message: `Requirement ${cleanId} references legacy Effect v3 symbol (use Effect v4 Schema.SchemaError / Context.Service instead).`
+              message: `Requirement ${cleanId} references legacy Effect v3 symbol (use Effect v4 Schema.SchemaError / Context.Service instead).`,
             })
           }
 
@@ -457,7 +443,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
                 findings.push({
                   line: lineNum,
                   kind: "pattern-keyword-mismatch",
-                  message: `${cleanId} is declared as Ubiquitous but starts with conditional keyword (${trimmedReq.split(" ")[0]}).`
+                  message: `${cleanId} is declared as Ubiquitous but starts with conditional keyword (${trimmedReq.split(" ")[0]}).`,
                 })
               }
               break
@@ -467,7 +453,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
                 findings.push({
                   line: lineNum,
                   kind: "pattern-keyword-mismatch",
-                  message: `${cleanId} is declared as Event-driven but does not contain keyword 'when'.`
+                  message: `${cleanId} is declared as Event-driven but does not contain keyword 'when'.`,
                 })
               }
               break
@@ -477,7 +463,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
                 findings.push({
                   line: lineNum,
                   kind: "pattern-keyword-mismatch",
-                  message: `${cleanId} is declared as State-driven but does not contain keyword 'while'.`
+                  message: `${cleanId} is declared as State-driven but does not contain keyword 'while'.`,
                 })
               }
               break
@@ -488,7 +474,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
                 findings.push({
                   line: lineNum,
                   kind: "pattern-keyword-mismatch",
-                  message: `${cleanId} is declared as Unwanted behaviour but does not contain both 'if' and 'then'.`
+                  message: `${cleanId} is declared as Unwanted behaviour but does not contain both 'if' and 'then'.`,
                 })
               }
               break
@@ -498,7 +484,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
                 findings.push({
                   line: lineNum,
                   kind: "pattern-keyword-mismatch",
-                  message: `${cleanId} is declared as Optional feature but does not contain keyword 'where'.`
+                  message: `${cleanId} is declared as Optional feature but does not contain keyword 'where'.`,
                 })
               }
               break
@@ -507,7 +493,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
               findings.push({
                 line: lineNum,
                 kind: "pattern-keyword-mismatch",
-                message: `${cleanId} has unknown EARS pattern '${rawPattern}'. Allowed: Ubiquitous, Event-driven, State-driven, Unwanted behaviour, Optional feature.`
+                message: `${cleanId} has unknown EARS pattern '${rawPattern}'. Allowed: Ubiquitous, Event-driven, State-driven, Unwanted behaviour, Optional feature.`,
               })
               break
             }
@@ -524,7 +510,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
             findings.push({
               line: lineNum,
               kind: "invalid-verification",
-              message: `${cleanId} has missing verification method.`
+              message: `${cleanId} has missing verification method.`,
             })
           } else {
             for (const token of verifTokens) {
@@ -532,7 +518,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
                 findings.push({
                   line: lineNum,
                   kind: "invalid-verification",
-                  message: `${cleanId} has invalid verification method '${token}'. Allowed: test, unittest, propertytest, tracetest, inspection, astgate, graphcheck, analysis, demonstration.`
+                  message: `${cleanId} has invalid verification method '${token}'. Allowed: test, unittest, propertytest, tracetest, inspection, astgate, graphcheck, analysis, demonstration.`,
                 })
               }
             }
@@ -544,7 +530,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
             pattern: rawPattern.trim(),
             requirement: rawReq.trim(),
             effectSymbol: rawEffectSymbol ? rawEffectSymbol.trim() || undefined : undefined,
-            verification: rawVerif.trim()
+            verification: rawVerif.trim(),
           })
         }
       }
@@ -557,7 +543,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
     findings.push({
       line: pendingSourceCheckLine ?? rawLines.length,
       kind: "area-structure",
-      message: `Area ${pendingSourceCheckForArea} must have '**Source' on the first non-empty line following its heading.`
+      message: `Area ${pendingSourceCheckForArea} must have '**Source' on the first non-empty line following its heading.`,
     })
   }
 
@@ -565,7 +551,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
     findings.push({
       line: 1,
       kind: "no-requirements-table",
-      message: "No EARS requirements table with ID and Requirement columns found."
+      message: "No EARS requirements table with ID and Requirement columns found.",
     })
   }
 
@@ -574,11 +560,9 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
     clean: findings.length === 0,
     requirementCount: requirements.length,
     requirements,
-    findings
+    findings,
   } satisfies EarsSpecLintReport
 })
 
-export const lintEarsSpecMarkdown = (
-  docPath: string,
-  markdown: string
-): EarsSpecLintReport => Effect.runSync(decideEarsSpecQuality({ docPath, markdown }))
+export const lintEarsSpecMarkdown = (docPath: string, markdown: string): EarsSpecLintReport =>
+  Effect.runSync(decideEarsSpecQuality({ docPath, markdown }))
