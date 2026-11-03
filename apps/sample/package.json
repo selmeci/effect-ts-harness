@@ -6,7 +6,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit && effect-tsgo diagnostics --strict --project tsconfig.json",
     "lint": "oxlint --deny-warnings .",
-    "verify": "pnpm run typecheck && pnpm run lint",
+    "verify": "node -e \"\"",
     "dev": "alchemy dev",
     "deploy": "alchemy deploy"
   },

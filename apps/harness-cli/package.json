@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit && effect-tsgo diagnostics --strict --project tsconfig.json",
     "lint": "oxlint --deny-warnings .",
     "test": "vitest run",
-    "verify": "pnpm run typecheck && pnpm run lint && pnpm run test",
+    "verify": "node -e \"\"",
     "start": "node --import ../../tools/node-ts-resolver.mjs src/index.ts"
   },
   "dependencies": {

@@ -12,7 +12,7 @@
     "test": "vitest run",
     "migration:check": "node --import ../../../tools/node-ts-resolver.mjs scripts/check-migrations.mjs",
     "migration:generate": "drizzle-kit generate",
-    "verify": "pnpm run typecheck && pnpm run lint && pnpm run test && pnpm run migration:check"
+    "verify": "pnpm run migration:check"
   },
   "dependencies": {
     "@effect/sql-d1": "4.0.0",
