@@ -32,6 +32,7 @@ errors:
   - LocalProjectionNotFoundError
   - CommandAggregateMismatchError
   - EventStreamCorruptionError
+  - EventSerializationError
 ---
 
 # Event Sourcing Aggregate Engine, Local Projections, and Command Idempotency
@@ -109,12 +110,13 @@ The `Verification` column in the EARS table maps each requirement to its determi
 | REQ-5.2 | Unwanted behaviour | **If** a query targets an aggregateId with no recorded projection data, **then** LocalProjection.query **shall** fail with AggregateNotFoundError.                                                                                                       | AggregateNotFoundError       | UnitTest     |
 | REQ-5.3 | Unwanted behaviour | **If** a query specifies an unregistered projection name, **then** LocalProjection.query **shall** fail with LocalProjectionNotFoundError.                                                                                                               | LocalProjectionNotFoundError | UnitTest     |
 | REQ-5.4 | Unwanted behaviour | **If** stored event rows have non-contiguous stream_version numbers or invalid JSON payloads, **then** Aggregate.load **shall** fail with EventStreamCorruptionError.                                                                                    | EventStreamCorruptionError   | UnitTest     |
+| REQ-5.5 | Unwanted behaviour | **If** encoding a newly emitted event, metadata, or command result fails before persistence, **then** Aggregate.handleCommand **shall** roll back the transaction and fail with EventSerializationError preserving the schema failure reason.            | EventSerializationError      | UnitTest     |
 
 ## Assumptions
 
 - **REQ-1.1:** Deduplicated commands decode `es_commands.result_json` and preserve the original `creationStatus` (`CreatedStream`, `ExistingStream`, or `NoStream`) and `nextExpectedStreamVersion` with `processingStatus: { _tag: "Deduplicated" }`.
 - **REQ-2.1:** Events within an aggregate stream are ordered sequentially by `streamVersion` incrementing strictly by 1 starting from 1, and local test layers (`@harness/es-infra/memory`) comply with `harness:SPEC-0006` (`harness:ADR-0008`) by executing against real `workerd` SQLite Durable Object storage (`enableSql: true`) via `@alchemy.run/cloudflare-runtime`.
-- **REQ-4.1:** The default `outboxMode` on `AggregateConfig` is `{ _tag: "SuppressOutbox" }`.
+- **REQ-4.1:** `outboxMode` is a required `OutboxPublicationMode` field on `AggregateConfig`.
 
 ## Out of scope
 

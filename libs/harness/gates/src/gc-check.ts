@@ -6,7 +6,7 @@ import type { GovernanceDocStatus, HarnessGraph } from "@harness/graph"
 import { decideEarsSpecQuality } from "./ears-lint.js"
 import { decideAdrDocQuality } from "./adr-lint.js"
 import { decideOntologyInvariants } from "./ontology-invariants.js"
-import { checkMigrationSqlSafety } from "./migration-check.js"
+import { checkMigrationFiles, checkMigrationSqlSafety } from "./migration-check.js"
 
 export type GcFindingKind =
   | "unused-service"
@@ -948,6 +948,121 @@ const SKIPPED_PACKAGE_DEPS = new Set([
   "drizzle-orm",
 ])
 
+export const extractBalancedBraces = (
+  text: string,
+  openBraceIndex: number,
+): { readonly body: string; readonly endIndex: number } | undefined => {
+  if (text[openBraceIndex] !== "{") return undefined
+  let depth = 0
+  let i = openBraceIndex
+  while (i < text.length) {
+    const ch = text[i]!
+    if (ch === "'" || ch === '"' || ch === "`") {
+      const quote = ch
+      i += 1
+      while (i < text.length) {
+        if (text[i] === "\\") {
+          i += 2
+          continue
+        }
+        if (text[i] === quote) {
+          i += 1
+          break
+        }
+        i += 1
+      }
+      continue
+    }
+    if (ch === "{") {
+      depth += 1
+    } else if (ch === "}") {
+      depth -= 1
+      if (depth === 0) {
+        return {
+          body: text.slice(openBraceIndex + 1, i),
+          endIndex: i,
+        }
+      }
+    }
+    i += 1
+  }
+  return undefined
+}
+
+export const extractTopLevelObjectAnalysis = (
+  objBody: string,
+): { readonly keys: ReadonlyArray<string>; readonly spreads: ReadonlyArray<string> } => {
+  const keys: Array<string> = []
+  const spreads: Array<string> = []
+
+  let braceDepth = 0
+  let parenDepth = 0
+  let bracketDepth = 0
+  let i = 0
+
+  while (i < objBody.length) {
+    const ch = objBody[i]!
+
+    if (braceDepth === 0 && parenDepth === 0 && bracketDepth === 0) {
+      if (objBody.startsWith("...", i)) {
+        const spreadSlice = objBody.slice(i)
+        const spreadMatch = /^\.\.\.([A-Za-z_$][\w$]*)/.exec(spreadSlice)
+        if (spreadMatch !== null) {
+          spreads.push(spreadMatch[1]!)
+          i += spreadMatch[0].length
+          continue
+        }
+      }
+
+      const keySlice = objBody.slice(i)
+      const keyMatch = /^(?:"([^"]+)"|'([^']+)'|([A-Za-z_$][\w$]*))\s*:/.exec(keySlice)
+      if (keyMatch !== null) {
+        const keyName = keyMatch[1] ?? keyMatch[2] ?? keyMatch[3]
+        if (keyName !== undefined) {
+          keys.push(keyName)
+        }
+        i += keyMatch[0].length
+        continue
+      }
+    }
+
+    if (ch === "'" || ch === '"' || ch === "`") {
+      const quote = ch
+      i += 1
+      while (i < objBody.length) {
+        if (objBody[i] === "\\") {
+          i += 2
+          continue
+        }
+        if (objBody[i] === quote) {
+          i += 1
+          break
+        }
+        i += 1
+      }
+      continue
+    }
+
+    if (ch === "{") {
+      braceDepth += 1
+    } else if (ch === "}") {
+      braceDepth = Math.max(0, braceDepth - 1)
+    } else if (ch === "(") {
+      parenDepth += 1
+    } else if (ch === ")") {
+      parenDepth = Math.max(0, parenDepth - 1)
+    } else if (ch === "[") {
+      bracketDepth += 1
+    } else if (ch === "]") {
+      bracketDepth = Math.max(0, bracketDepth - 1)
+    }
+
+    i += 1
+  }
+
+  return { keys, spreads }
+}
+
 export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcFinding> => {
   const libsDir = join(repoRoot, "libs")
   const scopes = Effect.runSync(
@@ -1204,6 +1319,61 @@ export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcF
         if (tier === "infra" && scope !== "harness") {
           const noComments = content.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\r\n]*/g, "")
 
+          const nodeSqliteRegex =
+            /\b(?:import\s*\(\s*|require\s*\(\s*|(?:import|from)\s+)["'](node:sqlite|sqlite|better-sqlite3)["']/g
+          let sqliteMatch: RegExpExecArray | null
+          while ((sqliteMatch = nodeSqliteRegex.exec(noComments)) !== null) {
+            const mod = sqliteMatch[1]!
+            findings.push({
+              kind: "node-sqlite-in-infra",
+              nodeId: `${relFilePath}:${mod}`,
+              location: relFilePath,
+              message: `Do not import '${mod}' in '${relFilePath}' — Cloudflare Durable Object SQLite and D1 storages in type:infra/type:app must execute against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006).`,
+              action: `Remove '${mod}' import and execute storage against @alchemy.run/cloudflare-runtime.`,
+            })
+          }
+
+          const hasMigratorImport = /\bimport\b[\s\S]*?\b(?:SqliteMigrator|Migrator)\b/.test(
+            noComments,
+          )
+
+          const namedMigrationBodies = new Map<string, string>()
+          const allowedDdlSpans: Array<[number, number]> = []
+
+          const migrationsVarRegex =
+            /(?:const|let)\s+([A-Za-z0-9_$]*[Mm]igrations[A-Za-z0-9_$]*)\s*(?::[^=]+)?=\s*\{/g
+          let mvMatch: RegExpExecArray | null
+          while ((mvMatch = migrationsVarRegex.exec(noComments)) !== null) {
+            const varName = mvMatch[1]!
+            const openBraceIdx = mvMatch.index + mvMatch[0].lastIndexOf("{")
+            const balanced = extractBalancedBraces(noComments, openBraceIdx)
+            if (balanced !== undefined) {
+              namedMigrationBodies.set(varName, balanced.body)
+              if (hasMigratorImport) {
+                allowedDdlSpans.push([openBraceIdx, balanced.endIndex])
+              }
+            }
+          }
+
+          const fromRecordBodies: Array<string> = []
+          const fromRecordRegex = /\bfromRecord\s*(?:<[^>]+>)?\s*\(\s*(\{|[A-Za-z_$][\w$]*)/g
+          let frMatch: RegExpExecArray | null
+          while ((frMatch = fromRecordRegex.exec(noComments)) !== null) {
+            const arg = frMatch[1]!
+            if (arg === "{") {
+              const openBraceIdx = frMatch.index + frMatch[0].lastIndexOf("{")
+              const balanced = extractBalancedBraces(noComments, openBraceIdx)
+              if (balanced !== undefined) {
+                fromRecordBodies.push(balanced.body)
+                if (hasMigratorImport) {
+                  allowedDdlSpans.push([openBraceIdx, balanced.endIndex])
+                }
+              }
+            } else {
+              fromRecordBodies.push(`...${arg}`)
+            }
+          }
+
           const sqlRegex = /\bsql\s*`([\s\S]*?)`/g
           let sqlMatch: RegExpExecArray | null
           let reportedUnmanagedDdl = false
@@ -1214,11 +1384,13 @@ export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcF
                 sqlBody,
               )
             ) {
-              const usesMigrator =
-                /\b(?:SqliteMigrator|Migrator)\b/.test(noComments) &&
-                /\b(?:fromRecord|fromGlob|fromFileSystem)\s*\(/.test(noComments)
+              const isInsideAllowedSpan =
+                hasMigratorImport &&
+                allowedDdlSpans.some(
+                  ([start, end]) => sqlMatch!.index >= start && sqlMatch!.index <= end,
+                )
 
-              if (!usesMigrator && !reportedUnmanagedDdl) {
+              if (!isInsideAllowedSpan && !reportedUnmanagedDdl) {
                 reportedUnmanagedDdl = true
                 findings.push({
                   kind: "unmanaged-sql-ddl",
@@ -1242,54 +1414,74 @@ export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcF
             }
           }
 
-          const cleanedForRecord = noComments.replace(/sql`[\s\S]*?`/g, 'sql""')
-          const recordObjectBodies: Array<string> = []
+          const resolveRecordKeys = (
+            initialBody: string,
+            namedBodies: Map<string, string>,
+          ): ReadonlyArray<string> => {
+            const visited = new Set<string>()
+            const allKeys: Array<string> = []
 
-          const migrationsVarRegex =
-            /(?:const|let)\s+[A-Za-z0-9_$]*[Mm]igrations[A-Za-z0-9_$]*\s*(?::[^=]+)?=\s*\{([\s\S]*?)(?:\n\s*\}|\})/g
-          let mvMatch: RegExpExecArray | null
-          while ((mvMatch = migrationsVarRegex.exec(cleanedForRecord)) !== null) {
-            if (mvMatch[1] !== undefined) {
-              recordObjectBodies.push(mvMatch[1])
-            }
-          }
-
-          const fromRecordRegex = /\bfromRecord\s*\(\s*\{([\s\S]*?)\}\s*\)/g
-          let frMatch: RegExpExecArray | null
-          while ((frMatch = fromRecordRegex.exec(cleanedForRecord)) !== null) {
-            if (frMatch[1] !== undefined) {
-              recordObjectBodies.push(frMatch[1])
-            }
-          }
-
-          for (const objBody of recordObjectBodies) {
-            const seenIds = new Set<number>()
-            const propKeyRegex = /(?:^|[,{])\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z_$][\w$]*))\s*:/g
-            let keyMatch: RegExpExecArray | null
-            while ((keyMatch = propKeyRegex.exec(objBody)) !== null) {
-              const keyName = keyMatch[1] ?? keyMatch[2] ?? keyMatch[3]
-              if (keyName === undefined) {
-                continue
+            const collect = (body: string) => {
+              const { keys, spreads } = extractTopLevelObjectAnalysis(body)
+              for (const spread of spreads) {
+                if (!visited.has(spread)) {
+                  visited.add(spread)
+                  const namedBody = namedBodies.get(spread)
+                  if (namedBody !== undefined) {
+                    collect(namedBody)
+                  }
+                }
               }
-              const m = /^([1-9]\d*)_([a-zA-Z0-9_]+)$/.exec(keyName)
+              for (const key of keys) {
+                allKeys.push(key)
+              }
+            }
+
+            collect(initialBody)
+            return allKeys
+          }
+
+          const recordsToValidate: Array<string> = [
+            ...fromRecordBodies,
+            ...namedMigrationBodies.values(),
+          ]
+          const reportedKeyNodeIds = new Set<string>()
+
+          for (const objBody of recordsToValidate) {
+            const keys = resolveRecordKeys(objBody, namedMigrationBodies)
+            const seenIds = new Set<number>()
+
+            for (const keyName of keys) {
+              const m = /^([1-9]\d*)_([a-z0-9_]+)$/.exec(keyName)
               if (!m) {
-                findings.push({
-                  kind: "invalid-migrator-record-key",
-                  nodeId: `${relFilePath}:${keyName}`,
-                  location: relFilePath,
-                  message: `Invalid SqliteMigrator.fromRecord migration key "${keyName}" in "${relFilePath}" — keys must match "<positive_integer>_<snake_case_name>" (e.g. "1_init_tables") because Effect Migrator.fromRecord silently ignores unnumbered keys (harness:ADR-0008, harness:SPEC-0006).`,
-                  action: `Rename migration key to "<positive_integer>_<snake_case_name>" (e.g. "1_init_tables") with an unused integer id.`,
-                })
-              } else if (seenIds.has(Number(m[1]))) {
-                findings.push({
-                  kind: "invalid-migrator-record-key",
-                  nodeId: `${relFilePath}:${keyName}`,
-                  location: relFilePath,
-                  message: `Duplicate SqliteMigrator.fromRecord migration id "${m[1]}" in key "${keyName}" in "${relFilePath}".`,
-                  action: `Assign a unique positive integer id to migration key "${keyName}" in "${relFilePath}".`,
-                })
+                const nodeId = `${relFilePath}:${keyName}`
+                if (!reportedKeyNodeIds.has(nodeId)) {
+                  reportedKeyNodeIds.add(nodeId)
+                  findings.push({
+                    kind: "invalid-migrator-record-key",
+                    nodeId,
+                    location: relFilePath,
+                    message: `Invalid SqliteMigrator.fromRecord migration key "${keyName}" in "${relFilePath}" — keys must match "<positive_integer>_<snake_case_name>" (e.g. "1_init_tables") because Effect Migrator.fromRecord silently ignores unnumbered keys (harness:ADR-0008, harness:SPEC-0006).`,
+                    action: `Rename migration key to "<positive_integer>_<snake_case_name>" (e.g. "1_init_tables") with an unused integer id.`,
+                  })
+                }
               } else {
-                seenIds.add(Number(m[1]))
+                const idNum = Number(m[1])
+                if (seenIds.has(idNum)) {
+                  const nodeId = `${relFilePath}:${keyName}`
+                  if (!reportedKeyNodeIds.has(nodeId)) {
+                    reportedKeyNodeIds.add(nodeId)
+                    findings.push({
+                      kind: "invalid-migrator-record-key",
+                      nodeId,
+                      location: relFilePath,
+                      message: `Duplicate SqliteMigrator.fromRecord migration id "${m[1]}" in key "${keyName}" in "${relFilePath}".`,
+                      action: `Assign a unique positive integer id to migration key "${keyName}" in "${relFilePath}".`,
+                    })
+                  }
+                } else {
+                  seenIds.add(idNum)
+                }
               }
             }
           }
@@ -1350,6 +1542,81 @@ export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcF
           }
         }
       }
+    }
+  }
+
+  const collectSqlFiles = (dir: string): ReadonlyArray<string> =>
+    Effect.runSync(
+      Effect.try({
+        try: () => {
+          if (!existsSync(dir)) {
+            return []
+          }
+          const entries = readdirSync(dir, { withFileTypes: true })
+          const result: Array<string> = []
+          for (const entry of entries) {
+            const full = join(dir, entry.name)
+            if (entry.isDirectory()) {
+              result.push(...collectSqlFiles(full))
+            } else if (entry.isFile() && entry.name.endsWith(".sql")) {
+              result.push(full)
+            }
+          }
+          return result.sort((a, b) => a.localeCompare(b))
+        },
+        catch: () => [],
+      }).pipe(Effect.orElseSucceed(() => [])),
+    )
+
+  const sqlFilesToScan: Array<string> = []
+  sqlFilesToScan.push(...collectSqlFiles(join(repoRoot, "migrations")))
+
+  for (const scope of scopes) {
+    const scopeDir = join(libsDir, scope)
+    const tiers = Effect.runSync(
+      Effect.try({
+        try: () => {
+          if (!existsSync(scopeDir)) return []
+          return readdirSync(scopeDir, { withFileTypes: true })
+            .filter((e) => e.isDirectory())
+            .map((e) => e.name)
+        },
+        catch: () => [],
+      }).pipe(Effect.orElseSucceed(() => [])),
+    )
+    for (const tier of tiers) {
+      sqlFilesToScan.push(...collectSqlFiles(join(scopeDir, tier, "migrations")))
+    }
+  }
+
+  const appsDir = join(repoRoot, "apps")
+  const appNames = Effect.runSync(
+    Effect.try({
+      try: () => {
+        if (!existsSync(appsDir)) return []
+        return readdirSync(appsDir, { withFileTypes: true })
+          .filter((e) => e.isDirectory())
+          .map((e) => e.name)
+      },
+      catch: () => [],
+    }).pipe(Effect.orElseSucceed(() => [])),
+  )
+  for (const app of appNames) {
+    sqlFilesToScan.push(...collectSqlFiles(join(appsDir, app, "migrations")))
+  }
+
+  if (sqlFilesToScan.length > 0) {
+    const sqlReport = checkMigrationFiles(sqlFilesToScan)
+    for (const v of sqlReport.violations) {
+      const relFile = relative(repoRoot, v.file).replace(/\\/g, "/")
+      const message = v.file !== relFile ? v.message.replaceAll(v.file, relFile) : v.message
+      findings.push({
+        kind: "unsafe-sql-migration",
+        nodeId: `${relFile}:${v.kind}`,
+        location: relFile,
+        message,
+        action: `Escalate destructive migration (${v.kind}) to the human or refactor to an additive migration.`,
+      })
     }
   }
 

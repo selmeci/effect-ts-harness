@@ -35,6 +35,9 @@ export type CorrelationId = typeof CorrelationId.Type
 export const CausationId = Schema.NonEmptyString.pipe(Schema.brand("CausationId"))
 export type CausationId = typeof CausationId.Type
 
+export const ErrorMessage = Schema.NonEmptyString.pipe(Schema.brand("ErrorMessage"))
+export type ErrorMessage = typeof ErrorMessage.Type
+
 // Canonical metadata accompanying every persisted and dispatched event
 export class EventMetadata extends Schema.Class<EventMetadata>("EventMetadata")({
   aggregateId: AggregateId,
@@ -68,11 +71,25 @@ export type OutboxPublicationMode = typeof OutboxPublicationMode.Type
 // Command execution outcome contract
 export class AggregateCommandResult extends Schema.Class<AggregateCommandResult>(
   "AggregateCommandResult",
-)({
-  nextExpectedStreamVersion: StreamVersion,
-  creationStatus: StreamCreationStatus,
-  processingStatus: CommandProcessingStatus,
-}) {}
+)(
+  Schema.Struct({
+    nextExpectedStreamVersion: StreamVersion,
+    creationStatus: StreamCreationStatus,
+    processingStatus: CommandProcessingStatus,
+  }).pipe(
+    Schema.check(
+      Schema.makeFilter(
+        (r) =>
+          (r.creationStatus._tag === "NoStream" && r.nextExpectedStreamVersion === 0) ||
+          (r.creationStatus._tag !== "NoStream" && r.nextExpectedStreamVersion > 0),
+        {
+          message:
+            "CreatedStream and ExistingStream require nextExpectedStreamVersion > 0, while NoStream requires nextExpectedStreamVersion === 0",
+        },
+      ),
+    ),
+  ),
+) {}
 
 // Typed domain and persistence errors
 export class ConcurrencyConflictError extends Schema.TaggedError<ConcurrencyConflictError>()(
@@ -115,6 +132,17 @@ export class EventStreamCorruptionError extends Schema.TaggedError<EventStreamCo
     aggregateName: AggregateName,
     aggregateId: AggregateId,
     expectedStreamVersion: StreamVersion,
-    actualStreamVersion: StreamVersion,
+    actualStreamVersion: Schema.optional(StreamVersion),
+    reason: Schema.optional(ErrorMessage),
+  },
+) {}
+
+export class EventSerializationError extends Schema.TaggedError<EventSerializationError>()(
+  "EventSerializationError",
+  {
+    aggregateName: AggregateName,
+    aggregateId: AggregateId,
+    streamVersion: StreamVersion,
+    reason: ErrorMessage,
   },
 ) {}

@@ -28,6 +28,7 @@ errors:
   - LocalProjectionNotFoundError
   - CommandAggregateMismatchError
   - EventStreamCorruptionError
+  - EventSerializationError
 ---
 
 # Pure Effect SQL Engine in Infra and I/O-Free Core Protocols over Drizzle ORM
@@ -88,14 +89,15 @@ In Phase 2 of the Event Sourcing MVP (`docs/mvp_event_sourcing.md`), an aggregat
 
 ### Deterministic Enforcement
 
-| Rule                             | Enforced By                                                                   | Gate / Mechanism                                          | Governed Symbols                            |
-| -------------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------- |
-| Command Idempotency Dedup        | `libs/es/infra/src/aggregate.ts`                                              | `handleAggregateCommand`                                  | `Aggregate.handleCommand`                   |
-| Cross-Aggregate Command Guard    | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`             | `CommandAggregateMismatchError`, `handleAggregateCommand` | `CommandAggregateMismatchError`             |
-| Stream Contiguity & Decode Guard | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`             | `EventStreamCorruptionError`, `loadAggregate`             | `EventStreamCorruptionError`                |
-| Read-Your-Writes Query           | `libs/es/core/src/projection.ts`                                              | `queryLocalProjection`                                    | `LocalProjection.query`                     |
-| Versioned Projection Rebuild     | `libs/es/core/src/projection.ts`, `libs/es/infra/src/aggregate.ts`            | `rebuildLocalProjection`, `loadAggregate`                 | `LocalProjection.rebuild`, `Aggregate.load` |
-| Selective Outbox Isolation       | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`             | `OutboxPublicationMode`, `handleAggregateCommand`         | `Aggregate.handleCommand`                   |
-| Concurrency Conflict Detection   | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`             | `ConcurrencyConflictError`, `handleAggregateCommand`      | `ConcurrencyConflictError`                  |
-| Missing Aggregate Query          | `libs/es/contract/src/index.ts`, `libs/es/infra/test/fixtures/cart-sqlite.ts` | `AggregateNotFoundError`, `queryCartView`                 | `AggregateNotFoundError`                    |
-| Missing Local Projection         | `libs/es/contract/src/index.ts`, `libs/es/core/src/projection.ts`             | `LocalProjectionNotFoundError`, `queryLocalProjection`    | `LocalProjectionNotFoundError`              |
+| Rule                               | Enforced By                                                                   | Gate / Mechanism                                          | Governed Symbols                            |
+| ---------------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------- |
+| Command Idempotency Dedup          | `libs/es/infra/src/aggregate.ts`                                              | `handleAggregateCommand`                                  | `Aggregate.handleCommand`                   |
+| Cross-Aggregate Command Guard      | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`             | `CommandAggregateMismatchError`, `handleAggregateCommand` | `CommandAggregateMismatchError`             |
+| Stream Contiguity & Decode Guard   | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`             | `EventStreamCorruptionError`, `loadAggregate`             | `EventStreamCorruptionError`                |
+| Read-Your-Writes Query             | `libs/es/core/src/projection.ts`                                              | `queryLocalProjection`                                    | `LocalProjection.query`                     |
+| Versioned Projection Rebuild       | `libs/es/core/src/projection.ts`, `libs/es/infra/src/aggregate.ts`            | `rebuildLocalProjection`, `loadAggregate`                 | `LocalProjection.rebuild`, `Aggregate.load` |
+| Selective Outbox Isolation         | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`             | `OutboxPublicationMode`, `handleAggregateCommand`         | `Aggregate.handleCommand`                   |
+| Concurrency Conflict Detection     | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`             | `ConcurrencyConflictError`, `handleAggregateCommand`      | `ConcurrencyConflictError`                  |
+| Missing Aggregate Query            | `libs/es/contract/src/index.ts`, `libs/es/infra/test/fixtures/cart-sqlite.ts` | `AggregateNotFoundError`, `queryCartView`                 | `AggregateNotFoundError`                    |
+| Missing Local Projection           | `libs/es/contract/src/index.ts`, `libs/es/core/src/projection.ts`             | `LocalProjectionNotFoundError`, `queryLocalProjection`    | `LocalProjectionNotFoundError`              |
+| Event & Result Serialization Guard | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`             | `EventSerializationError`, `handleAggregateCommand`       | `EventSerializationError`                   |

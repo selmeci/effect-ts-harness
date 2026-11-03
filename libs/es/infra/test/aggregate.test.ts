@@ -66,7 +66,7 @@ interface MetaRow {
 
 describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
   it.effect(
-    "REQ-1.1 & REQ-1.2: deduplicates duplicate commands, preserves stored creationStatus and version after later commands, and rejects cross-aggregate commandId reuse",
+    "REQ-1.1, REQ-1.2 & REQ-1.3: deduplicates duplicate commands, preserves stored creationStatus and version after later commands, and rejects cross-aggregate commandId reuse",
     () =>
       Effect.gen(function* () {
         yield* initializeAggregateTables()
@@ -162,6 +162,22 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           })
           .otherwise(() => {
             expect.unreachable("expected CommandAggregateMismatchError")
+          })
+
+        // 6. Reusing createCommandId with the SAME cartId but a DIFFERENT aggregateName fails with CommandAggregateMismatchError
+        const crossNameAttempt = handleAggregateCommand(cartId, command1, createCommandId, {
+          ...cartAggregateConfig,
+          aggregateName: AggregateName.make("OtherAggregate"),
+        })
+        const nameMismatchErr = yield* Effect.flip(crossNameAttempt)
+        match(nameMismatchErr)
+          .with({ _tag: "CommandAggregateMismatchError" }, (err) => {
+            expect(err.commandId).toBe(createCommandId)
+            expect(err.expectedAggregateName).toBe("OtherAggregate")
+            expect(err.actualAggregateName).toBe("Cart")
+          })
+          .otherwise(() => {
+            expect.unreachable("expected CommandAggregateMismatchError for aggregateName")
           })
       }).pipe(Effect.provide(SqlClientMemoryLayer)),
   )
@@ -349,6 +365,25 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           SELECT count(*) as cnt FROM es_outbox WHERE aggregate_id = ${cartIdWithPublish}
         `
         expect(outboxCount2[0]?.cnt).toBe(2)
+
+        // Retry with same commandId must deduplicate and not write additional outbox rows
+        const dedupOutboxResult = yield* handleAggregateCommand(
+          cartIdWithPublish,
+          {
+            _tag: "AddItem",
+            cartId: cid("cart-with-outbox"),
+            itemId: iid("item-2"),
+            quantity: positiveInt(2),
+          },
+          cmdId("cmd-with-pub"),
+          configWithPublish,
+        )
+        expect(dedupOutboxResult.result.processingStatus._tag).toBe("Deduplicated")
+
+        const outboxCountAfterDedup = yield* sql<CountRow>`
+          SELECT count(*) as cnt FROM es_outbox WHERE aggregate_id = ${cartIdWithPublish}
+        `
+        expect(outboxCountAfterDedup[0]?.cnt).toBe(2)
       }).pipe(Effect.provide(SqlClientMemoryLayer)),
   )
 
@@ -589,6 +624,7 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           aggregateName: AggregateName.make("NoOpCart"),
           decider: noOpDecider,
           eventSchema: CartEvent,
+          outboxMode: { _tag: "SuppressOutbox" },
         }
         const noOpId = aid("cart-noop-empty")
         const noOpRes = yield* handleAggregateCommand(
@@ -604,6 +640,22 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
         )
         expect(noOpRes.result.creationStatus._tag).toBe("NoStream")
         expect(noOpRes.result.nextExpectedStreamVersion).toBe(0)
+
+        // Retry no-op command on empty stream
+        const noOpRetry = yield* handleAggregateCommand(
+          noOpId,
+          {
+            _tag: "AddItem",
+            cartId: cid("cart-noop-empty"),
+            itemId: iid("item-1"),
+            quantity: positiveInt(1),
+          },
+          cmdId("cmd-noop-1"),
+          noOpConfig,
+        )
+        expect(noOpRetry.result.processingStatus._tag).toBe("Deduplicated")
+        expect(noOpRetry.result.creationStatus._tag).toBe("NoStream")
+        expect(noOpRetry.result.nextExpectedStreamVersion).toBe(0)
 
         // 3. Two different AggregateNames sharing the same AggregateId have isolated streams
         const sharedId = aid("shared-id-1")
@@ -692,7 +744,8 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
         match(floatErr)
           .with({ _tag: "EventStreamCorruptionError" }, (err) => {
             expect(err.expectedStreamVersion).toBe(1)
-            expect(err.actualStreamVersion).toBe(0)
+            expect(err.actualStreamVersion).toBeUndefined()
+            expect(err.reason).toBeDefined()
           })
           .otherwise(() => {
             expect.unreachable("expected EventStreamCorruptionError")
@@ -736,10 +789,85 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
         )
         match(corruptCmdErr)
           .with({ _tag: "EventStreamCorruptionError" }, (err) => {
-            expect(err.actualStreamVersion).toBe(0)
+            expect(err.actualStreamVersion).toBeUndefined()
+            expect(err.reason).toBeDefined()
           })
           .otherwise(() => {
             expect.unreachable("expected EventStreamCorruptionError")
+          })
+
+        // 5. Invalid event JSON payload in es_events fails loadAggregate with EventStreamCorruptionError and defined reason
+        const invalidPayloadId = aid("cart-invalid-payload")
+        yield* sql`
+          INSERT INTO es_events (aggregate_name, aggregate_id, stream_version, command_id, event_type, payload, metadata, created_at)
+          VALUES ('Cart', ${invalidPayloadId}, 1, 'c-bad-json', 'CartCreated', '{not-valid-json', ${meta1}, ${now})
+        `
+        const badPayloadErr = yield* Effect.flip(
+          loadAggregate(invalidPayloadId, cartAggregateConfig),
+        )
+        match(badPayloadErr)
+          .with({ _tag: "EventStreamCorruptionError" }, (err) => {
+            expect(err.expectedStreamVersion).toBe(1)
+            expect(err.reason).toBeDefined()
+          })
+          .otherwise(() => {
+            expect.unreachable("expected EventStreamCorruptionError for invalid json payload")
+          })
+
+        // 6. Corrupt cached result_json in es_commands fails handleAggregateCommand with EventStreamCorruptionError and defined reason
+        const corruptResultCmdId = cmdId("cmd-corrupt-result-json")
+        const validCartId = aid("cart-corrupt-result")
+        yield* sql`
+          INSERT INTO es_commands (command_id, aggregate_name, aggregate_id, stream_version, result_json, created_at)
+          VALUES (${corruptResultCmdId}, 'Cart', ${validCartId}, 1, '{"broken":true}', ${now})
+        `
+        const corruptResultErr = yield* Effect.flip(
+          handleAggregateCommand(
+            validCartId,
+            {
+              _tag: "AddItem",
+              cartId: cid("cart-corrupt-result"),
+              itemId: iid("item-1"),
+              quantity: positiveInt(1),
+            },
+            corruptResultCmdId,
+            cartAggregateConfig,
+          ),
+        )
+        match(corruptResultErr)
+          .with({ _tag: "EventStreamCorruptionError" }, (err) => {
+            expect(err.expectedStreamVersion).toBe(1)
+            expect(err.actualStreamVersion).toBe(1)
+            expect(err.reason).toBeDefined()
+          })
+          .otherwise(() => {
+            expect.unreachable("expected EventStreamCorruptionError for corrupt result_json")
+          })
+
+        // 7. Unencodable new event fails handleAggregateCommand with EventSerializationError and defined reason
+        const unencodableConfig = {
+          ...cartAggregateConfig,
+          eventSchema: CartEvent.check(Schema.makeFilter(() => "Serialization disallowed")),
+        }
+        const unencodableId = aid("cart-unencodable")
+        const unencodableAttempt = handleAggregateCommand(
+          unencodableId,
+          {
+            _tag: "AddItem",
+            cartId: cid("cart-unencodable"),
+            itemId: iid("item-1"),
+            quantity: positiveInt(1),
+          },
+          cmdId("cmd-unencodable"),
+          unencodableConfig,
+        )
+        const serErr = yield* Effect.flip(unencodableAttempt)
+        match(serErr)
+          .with({ _tag: "EventSerializationError" }, (err) => {
+            expect(err.reason).toBeDefined()
+          })
+          .otherwise(() => {
+            expect.unreachable("expected EventSerializationError")
           })
       }).pipe(Effect.provide(SqlClientMemoryLayer)),
   )

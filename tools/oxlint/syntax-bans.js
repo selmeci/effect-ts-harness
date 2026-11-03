@@ -50,6 +50,8 @@ const unsafeNeverBanMessage =
   "Unsafe 'never' ('as never' or explicit ': never' on parameters/variables) is banned — fix the underlying type mismatch or use exhaustive ts-pattern matching (.exhaustive()) instead of bypassing the type checker."
 const doubleTypeAssertionBanMessage =
   "Double type assertions ('as unknown as T') are banned — decode untrusted data with Effect Schema or type the interface properly instead of erasing types."
+const nodeSqliteInfraMessage = (source, filename) =>
+  `Do not import '${source}' in type:infra or type:app ('${filename}') — execute Cloudflare Durable Object SQLite and D1 storages against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006, node-sqlite-in-infra).`
 
 const BOOLEAN_STATE_PROP_REGEX =
   /^(is[A-Z]|has[A-Z]|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|publish|published|expired)$/
@@ -1174,6 +1176,7 @@ const syntaxBans = {
     const unbrandedSchemaVarNames = new Map()
     const declaredBrandKeys = new Map()
     const migrationRecordVars = new Map()
+    const allowedDdlTemplateNodes = new Set()
     let hasSqliteMigratorImport = false
     const reportedNodes = new WeakSet()
 
@@ -1183,6 +1186,83 @@ const syntaxBans = {
         reportedNodes.add(node)
       }
       context.report({ node, message })
+    }
+
+    const markAllowedDdlTemplates = (astNode, visited = new Set()) => {
+      if (astNode == null || typeof astNode !== "object" || visited.has(astNode)) return
+      visited.add(astNode)
+      if (astNode.type === "TaggedTemplateExpression") {
+        allowedDdlTemplateNodes.add(astNode)
+      }
+      if (astNode.type === "Identifier" && typeof astNode.name === "string") {
+        const savedObj = migrationRecordVars.get(astNode.name)
+        if (savedObj != null) {
+          markAllowedDdlTemplates(savedObj, visited)
+        }
+      }
+      for (const key of Object.keys(astNode)) {
+        if (key === "parent" || key === "range" || key === "loc") continue
+        const child = astNode[key]
+        if (Array.isArray(child)) {
+          for (const item of child) markAllowedDdlTemplates(item, visited)
+        } else if (child != null && typeof child === "object") {
+          markAllowedDdlTemplates(child, visited)
+        }
+      }
+    }
+
+    const validateMigrationRecordObject = (expr) => {
+      const visited = new Set()
+      const collectEntries = (e, out) => {
+        if (e == null || typeof e !== "object" || visited.has(e)) return
+        visited.add(e)
+        if (e.type === "Identifier" && typeof e.name === "string") {
+          const saved = migrationRecordVars.get(e.name)
+          if (saved != null) {
+            collectEntries(saved, out)
+          }
+          return
+        }
+        if (e.type === "ObjectExpression" && Array.isArray(e.properties)) {
+          for (const prop of e.properties) {
+            if (prop == null) continue
+            if (prop.type === "SpreadElement" && prop.argument != null) {
+              collectEntries(prop.argument, out)
+            } else if (prop.type === "Property" && prop.key != null) {
+              const keyName =
+                prop.key.type === "Identifier"
+                  ? prop.key.name
+                  : prop.key.type === "Literal" && typeof prop.key.value === "string"
+                    ? prop.key.value
+                    : null
+              if (keyName != null) {
+                out.push({ keyName, node: prop.key })
+              }
+            }
+          }
+        }
+      }
+      const entries = []
+      collectEntries(expr, entries)
+      const seenIds = new Set()
+      for (const entry of entries) {
+        const m = /^([1-9]\d*)_([a-z0-9_]+)$/.exec(entry.keyName)
+        if (m == null) {
+          reportOnce(
+            entry.node,
+            `Invalid SqliteMigrator.fromRecord migration key '${entry.keyName}' (invalid-migrator-record-key) — migration keys must match '<positive_integer>_<snake_case_name>' (e.g. '1_init_tables') because Effect's Migrator.fromRecord silently ignores keys without a numeric prefix (harness:ADR-0008, harness:SPEC-0006).`,
+          )
+        } else {
+          const idNum = Number(m[1])
+          if (seenIds.has(idNum)) {
+            reportOnce(
+              entry.node,
+              `Duplicate SqliteMigrator.fromRecord migration numeric id '${idNum}' in key '${entry.keyName}' (invalid-migrator-record-key) — each migration must have a unique monotonic integer prefix (harness:ADR-0008, harness:SPEC-0006).`,
+            )
+          }
+          seenIds.add(idNum)
+        }
+      }
     }
 
     function getNormalizedFilename() {
@@ -1548,6 +1628,7 @@ const syntaxBans = {
         unbrandedSchemaVarNames.clear()
         declaredBrandKeys.clear()
         migrationRecordVars.clear()
+        allowedDdlTemplateNodes.clear()
         hasSqliteMigratorImport = false
         if (node.body && Array.isArray(node.body)) {
           for (const stmt of node.body) {
@@ -1662,10 +1743,7 @@ const syntaxBans = {
               importSource === "sqlite" ||
               importSource === "better-sqlite3")
           ) {
-            reportOnce(
-              node,
-              `Do not import '${importSource}' in type:infra or type:app ('${filename}') — execute Cloudflare Durable Object SQLite and D1 storages against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006, node-sqlite-in-infra).`,
-            )
+            reportOnce(node, nodeSqliteInfraMessage(importSource, filename))
           }
         }
       },
@@ -1675,9 +1753,28 @@ const syntaxBans = {
       TSTypeAssertion(node) {
         checkAsOrTypeAssertion(context, node)
       },
+      ImportExpression(node) {
+        const filename = getNormalizedFilename()
+        if (isInternalHarnessFile(filename) || filename.includes("/libs/harness/")) return
+        if (/(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename)) {
+          const sourceVal =
+            node.source != null &&
+            node.source.type === "Literal" &&
+            typeof node.source.value === "string"
+              ? node.source.value
+              : null
+          if (
+            sourceVal === "node:sqlite" ||
+            sourceVal === "sqlite" ||
+            sourceVal === "better-sqlite3"
+          ) {
+            reportOnce(node, nodeSqliteInfraMessage(sourceVal, filename))
+          }
+        }
+      },
       TaggedTemplateExpression(node) {
         const filename = getNormalizedFilename()
-        if (isInternalHarnessFile(filename)) return
+        if (isInternalHarnessFile(filename) || filename.includes("/libs/harness/")) return
         if (!/libs\/[^/]+\/infra\/src\//.test(filename)) return
         const tag = node.tag
         const isSqlTag =
@@ -1697,17 +1794,11 @@ const syntaxBans = {
             sqlText,
           )
         if (!hasDdl) return
-        const fullSourceText =
-          context.sourceCode && typeof context.sourceCode.text === "string"
-            ? context.sourceCode.text
-            : ""
-        const hasMigratorInFile =
-          hasSqliteMigratorImport || /\b(?:SqliteMigrator|Migrator)\b/.test(fullSourceText)
-        if (!hasMigratorInFile) {
-          context.report({
+        if (!hasSqliteMigratorImport || !allowedDdlTemplateNodes.has(node)) {
+          reportOnce(
             node,
-            message: `Do not execute ad-hoc SQL DDL ('CREATE TABLE' / 'ALTER TABLE' / 'DROP TABLE') outside SqliteMigrator in type:infra ('${filename}') — manage Durable Object SQLite schema migrations transactionally via @effect/sql-sqlite-do/SqliteMigrator (SqliteMigrator.run / SqliteMigrator.layer with SqliteMigrator.fromRecord) so applied versions are tracked in effect_sql_migrations (harness:ADR-0008, harness:SPEC-0006, unmanaged-sql-ddl).`,
-          })
+            `Do not execute ad-hoc SQL DDL ('CREATE TABLE' / 'ALTER TABLE' / 'DROP TABLE') outside SqliteMigrator in type:infra ('${filename}') — manage Durable Object SQLite schema migrations transactionally via @effect/sql-sqlite-do/SqliteMigrator (SqliteMigrator.run / SqliteMigrator.layer with SqliteMigrator.fromRecord) so applied versions are tracked in effect_sql_migrations (harness:ADR-0008, harness:SPEC-0006, unmanaged-sql-ddl).`,
+          )
         }
       },
       VariableDeclarator(node) {
@@ -1715,6 +1806,15 @@ const syntaxBans = {
         if (node.id != null && node.id.type === "Identifier") {
           if (node.init != null && node.init.type === "ObjectExpression") {
             migrationRecordVars.set(node.id.name, node.init)
+            if (
+              /libs\/[^/]+\/infra\/src\//.test(getNormalizedFilename()) &&
+              !getNormalizedFilename().includes("/libs/harness/") &&
+              hasSqliteMigratorImport &&
+              /[Mm]igrations/.test(node.id.name)
+            ) {
+              markAllowedDdlTemplates(node.init)
+              validateMigrationRecordObject(node.init)
+            }
           }
           if (isDiscriminantMemberAccess(node.init)) {
             discriminantAliasNames.add(node.id.name)
@@ -1940,6 +2040,27 @@ const syntaxBans = {
           }
         }
         if (
+          !isInternalHarnessFile(filename) &&
+          !filename.includes("/libs/harness/") &&
+          /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
+          isIdentifier(node.callee, "require") &&
+          Array.isArray(node.arguments) &&
+          node.arguments.length >= 1
+        ) {
+          const arg0 = node.arguments[0]
+          const sourceVal =
+            arg0 != null && arg0.type === "Literal" && typeof arg0.value === "string"
+              ? arg0.value
+              : null
+          if (
+            sourceVal === "node:sqlite" ||
+            sourceVal === "sqlite" ||
+            sourceVal === "better-sqlite3"
+          ) {
+            reportOnce(node, nodeSqliteInfraMessage(sourceVal, filename))
+          }
+        }
+        if (
           /libs\/[^/]+\/infra\/src\//.test(filename) &&
           !filename.includes("/libs/harness/") &&
           node.callee != null &&
@@ -1949,56 +2070,10 @@ const syntaxBans = {
           Array.isArray(node.arguments) &&
           node.arguments.length >= 1
         ) {
-          const arg0 = node.arguments[0]
-          const collectEntries = (expr, out) => {
-            if (expr == null) return
-            if (expr.type === "Identifier" && typeof expr.name === "string") {
-              const saved = migrationRecordVars.get(expr.name)
-              if (Array.isArray(saved)) {
-                for (const item of saved) out.push(item)
-              }
-              return
-            }
-            if (expr.type === "ObjectExpression" && Array.isArray(expr.properties)) {
-              for (const prop of expr.properties) {
-                if (prop == null) continue
-                if (prop.type === "SpreadElement" && prop.argument != null) {
-                  collectEntries(prop.argument, out)
-                } else if (prop.type === "Property" && prop.key != null) {
-                  const keyName =
-                    prop.key.type === "Identifier"
-                      ? prop.key.name
-                      : prop.key.type === "Literal" && typeof prop.key.value === "string"
-                        ? prop.key.value
-                        : null
-                  if (keyName != null) {
-                    out.push({ keyName, node: prop.key })
-                  }
-                }
-              }
-            }
+          if (hasSqliteMigratorImport) {
+            markAllowedDdlTemplates(node.arguments[0])
           }
-          const entries = []
-          collectEntries(arg0, entries)
-          const seenIds = new Set()
-          for (const entry of entries) {
-            const m = /^([1-9]\d*)_([a-zA-Z0-9_]+)$/.exec(entry.keyName)
-            if (m == null) {
-              reportOnce(
-                entry.node,
-                `Invalid SqliteMigrator.fromRecord migration key '${entry.keyName}' (invalid-migrator-record-key) — migration keys must match '<positive_integer>_<snake_case_name>' (e.g. '1_init_tables') because Effect's Migrator.fromRecord silently ignores keys without a numeric prefix (harness:ADR-0008, harness:SPEC-0006).`,
-              )
-            } else {
-              const idNum = Number(m[1])
-              if (seenIds.has(idNum)) {
-                reportOnce(
-                  entry.node,
-                  `Duplicate SqliteMigrator.fromRecord migration numeric id '${idNum}' in key '${entry.keyName}' (invalid-migrator-record-key) — each migration must have a unique monotonic integer prefix (harness:ADR-0008, harness:SPEC-0006).`,
-                )
-              }
-              seenIds.add(idNum)
-            }
-          }
+          validateMigrationRecordObject(node.arguments[0])
         }
       },
       ExportNamedDeclaration(node) {
@@ -2182,6 +2257,27 @@ const testIntegrity = {
           }
         }
       },
+      ImportExpression(node) {
+        const filename = getNormalizedFilename()
+        if (
+          !isInternalHarnessFile(filename) &&
+          node.source != null &&
+          typeof node.source.value === "string"
+        ) {
+          const importSource = node.source.value
+          if (
+            /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
+            (importSource === "node:sqlite" ||
+              importSource === "sqlite" ||
+              importSource === "better-sqlite3")
+          ) {
+            context.report({
+              node,
+              message: `Do not import '${importSource}' in type:infra or type:app tests ('${filename}') — execute Cloudflare Durable Object SQLite and D1 tests against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006, node-sqlite-in-infra).`,
+            })
+          }
+        }
+      },
       TSAnyKeyword(node) {
         context.report({ node, message: explicitAnyBanMessage })
       },
@@ -2235,6 +2331,29 @@ const testIntegrity = {
           context.report({ node, message: testSkipOrOnlyMessage })
         }
         const filename = getNormalizedFilename()
+        if (
+          !isInternalHarnessFile(filename) &&
+          /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
+          isIdentifier(node.callee, "require") &&
+          Array.isArray(node.arguments) &&
+          node.arguments.length >= 1
+        ) {
+          const arg0 = node.arguments[0]
+          const importSource =
+            arg0 != null && arg0.type === "Literal" && typeof arg0.value === "string"
+              ? arg0.value
+              : null
+          if (
+            importSource === "node:sqlite" ||
+            importSource === "sqlite" ||
+            importSource === "better-sqlite3"
+          ) {
+            context.report({
+              node,
+              message: `Do not import '${importSource}' in type:infra or type:app tests ('${filename}') — execute Cloudflare Durable Object SQLite and D1 tests against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006, node-sqlite-in-infra).`,
+            })
+          }
+        }
         if (!isInternalHarnessFile(filename)) {
           if (isImpreciseFailureAssert(node)) {
             context.report({ node, message: impreciseFailureAssertMessage })

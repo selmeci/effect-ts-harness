@@ -2071,7 +2071,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
   })
 
   it("enforces transactional SQLite migrations via SqliteMigrator and validates migration record keys in type:infra", () => {
-    // 1. TaggedTemplateExpression sql`CREATE TABLE ...` in libs/sample/infra/src/repo.ts without importing SqliteMigrator is flagged with unmanaged-sql-ddl
+    // 1. Raw sql`CREATE TABLE ...` in libs/sample/infra/src/repo.ts without importing SqliteMigrator is flagged with unmanaged-sql-ddl
     {
       const reports: Array<{ message: string }> = []
       const visitor = syntaxBans.create({
@@ -2101,7 +2101,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       expect(reports[0]?.message).toContain("unmanaged-sql-ddl")
     }
 
-    // 2. TaggedTemplateExpression in libs/sample/infra/src/repo.ts when ImportDeclaration for @effect/sql-sqlite-do/SqliteMigrator is present is not flagged
+    // 2. When ImportDeclaration for @effect/sql-sqlite-do/SqliteMigrator is present, a sql`CREATE TABLE ...` INSIDE SqliteMigrator.fromRecord({ "1_init_tables": sql`CREATE TABLE ...` }) produces 0 reports, whereas a second stray sql`CREATE TABLE stray ...` node OUTSIDE fromRecord in the same file IS flagged with unmanaged-sql-ddl
     {
       const reports: Array<{ message: string }> = []
       const visitor = syntaxBans.create({
@@ -2121,7 +2121,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
           },
         ],
       })
-      visitor.TaggedTemplateExpression?.({
+      const insideDdlNode = {
         type: "TaggedTemplateExpression",
         tag: { type: "Identifier", name: "sql" },
         quasi: {
@@ -2130,18 +2130,129 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
             {
               type: "TemplateElement",
               value: {
-                raw: "CREATE TABLE raw_table (id INTEGER PRIMARY KEY)",
-                cooked: "CREATE TABLE raw_table (id INTEGER PRIMARY KEY)",
+                raw: "CREATE TABLE managed_table (id INTEGER PRIMARY KEY)",
+                cooked: "CREATE TABLE managed_table (id INTEGER PRIMARY KEY)",
               },
             },
           ],
           expressions: [],
         },
+      }
+      const strayDdlNode = {
+        type: "TaggedTemplateExpression",
+        tag: { type: "Identifier", name: "sql" },
+        quasi: {
+          type: "TemplateLiteral",
+          quasis: [
+            {
+              type: "TemplateElement",
+              value: {
+                raw: "CREATE TABLE stray_table (id INTEGER PRIMARY KEY)",
+                cooked: "CREATE TABLE stray_table (id INTEGER PRIMARY KEY)",
+              },
+            },
+          ],
+          expressions: [],
+        },
+      }
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "SqliteMigrator" },
+          property: { type: "Identifier", name: "fromRecord" },
+        },
+        arguments: [
+          {
+            type: "ObjectExpression",
+            properties: [
+              {
+                type: "Property",
+                computed: false,
+                key: { type: "Literal", value: "1_init_tables" },
+                value: insideDdlNode,
+              },
+            ],
+          },
+        ],
       })
+      // Inside DDL produces 0 reports
+      visitor.TaggedTemplateExpression?.(insideDdlNode)
       expect(reports).toHaveLength(0)
+
+      // Stray DDL produces unmanaged-sql-ddl
+      visitor.TaggedTemplateExpression?.(strayDdlNode)
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain("unmanaged-sql-ddl")
     }
 
-    // 3. CallExpression SqliteMigrator.fromRecord({ "init_no_number": effect }) is flagged with invalid-migrator-record-key
+    // 3. Named migration variable + spread: const aggregateCoreMigrations = { "1_init_tables": eff1, "bad_key_after": eff2 } followed by SqliteMigrator.fromRecord({ ...aggregateCoreMigrations }) flags "bad_key_after" with invalid-migrator-record-key
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/sample/infra/src/repo.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        },
+      })
+      visitor.ImportDeclaration?.({
+        type: "ImportDeclaration",
+        source: { type: "Literal", value: "@effect/sql-sqlite-do/SqliteMigrator" },
+        specifiers: [
+          {
+            type: "ImportSpecifier",
+            imported: { type: "Identifier", name: "SqliteMigrator" },
+            local: { type: "Identifier", name: "SqliteMigrator" },
+          },
+        ],
+      })
+      visitor.VariableDeclarator?.({
+        type: "VariableDeclarator",
+        id: { type: "Identifier", name: "aggregateCoreMigrations" },
+        init: {
+          type: "ObjectExpression",
+          properties: [
+            {
+              type: "Property",
+              computed: false,
+              key: { type: "Literal", value: "1_init_tables" },
+              value: { type: "Identifier", name: "eff1" },
+            },
+            {
+              type: "Property",
+              computed: false,
+              key: { type: "Literal", value: "bad_key_after" },
+              value: { type: "Identifier", name: "eff2" },
+            },
+          ],
+        },
+      })
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "SqliteMigrator" },
+          property: { type: "Identifier", name: "fromRecord" },
+        },
+        arguments: [
+          {
+            type: "ObjectExpression",
+            properties: [
+              {
+                type: "SpreadElement",
+                argument: { type: "Identifier", name: "aggregateCoreMigrations" },
+              },
+            ],
+          },
+        ],
+      })
+      expect(reports.some((r) => r.message.includes("invalid-migrator-record-key"))).toBe(true)
+      expect(reports.some((r) => r.message.includes("bad_key_after"))).toBe(true)
+    }
+
+    // 4. Uppercase non-snake_case key "1_InitTables" is flagged with invalid-migrator-record-key
     {
       const reports: Array<{ message: string }> = []
       const visitor = syntaxBans.create({
@@ -2165,7 +2276,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
               {
                 type: "Property",
                 computed: false,
-                key: { type: "Literal", value: "init_no_number" },
+                key: { type: "Literal", value: "1_InitTables" },
                 value: { type: "Identifier", name: "effect" },
               },
             ],
@@ -2174,9 +2285,10 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toContain("invalid-migrator-record-key")
+      expect(reports[0]?.message).toContain("1_InitTables")
     }
 
-    // 4. CallExpression SqliteMigrator.fromRecord({ "1_first": effect1, "1_duplicate": effect2 }) is flagged with invalid-migrator-record-key
+    // 5. Duplicate numeric IDs "1_first" and "1_duplicate" are flagged with invalid-migrator-record-key
     {
       const reports: Array<{ message: string }> = []
       const visitor = syntaxBans.create({
@@ -2215,9 +2327,12 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       })
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toContain("invalid-migrator-record-key")
+      expect(reports[0]?.message).toContain(
+        "Duplicate SqliteMigrator.fromRecord migration numeric id '1'",
+      )
     }
 
-    // 5. CallExpression SqliteMigrator.fromRecord({ "1_init_tables": effect1, "2_add_index": effect2 }) produces 0 reports
+    // 6. Valid keys "1_init_tables" and "2_add_index" produce 0 reports
     {
       const reports: Array<{ message: string }> = []
       const visitor = syntaxBans.create({

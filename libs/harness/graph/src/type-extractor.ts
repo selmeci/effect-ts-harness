@@ -1264,6 +1264,36 @@ export const extractTypeAwareGraphFromSource = (
           })
         }
       }
+      for (const callExpr of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+        const expr = callExpr.getExpression()
+        const exprText = expr.getText()
+        const isRequireOrImport =
+          (Node.isIdentifier(expr) && exprText === "require") ||
+          expr.getKind() === SyntaxKind.ImportKeyword ||
+          exprText === "require" ||
+          exprText === "import"
+        if (isRequireOrImport) {
+          const args = callExpr.getArguments()
+          if (args.length > 0) {
+            const firstArg = args[0]
+            const modSpec =
+              firstArg != null && Node.isStringLiteral(firstArg)
+                ? firstArg.getLiteralValue()
+                : firstArg != null && Node.isNoSubstitutionTemplateLiteral(firstArg)
+                  ? firstArg.getLiteralValue()
+                  : undefined
+            if (modSpec === "node:sqlite" || modSpec === "sqlite" || modSpec === "better-sqlite3") {
+              branchingViolations.push({
+                rule: "node-sqlite-in-infra",
+                message: `Do not import '${modSpec}' in '${relPath}' — Cloudflare Durable Object SQLite and D1 storages in type:infra/type:app must execute against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006).`,
+                file: relPath,
+                line: callExpr.getStartLineNumber(),
+                enclosingSymbol: relPath,
+              })
+            }
+          }
+        }
+      }
     }
 
     // Track local variable declarations that alias a discriminant property of a union
@@ -3629,7 +3659,7 @@ export const extractWorkspaceTypeAwareGraph = (repoRoot: string): Effect.Effect<
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i] ?? ""
         const importMatch = line.match(
-          /\b(?:import|from)\s+["'](node:sqlite|sqlite|better-sqlite3)["']/,
+          /\b(?:import\s*\(\s*|require\s*\(\s*|(?:import|from)\s+)["'](node:sqlite|sqlite|better-sqlite3)["']/,
         )
         if (importMatch && importMatch[1]) {
           nodeSqliteTestViolations.push({

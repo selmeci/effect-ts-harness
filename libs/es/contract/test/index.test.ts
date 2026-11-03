@@ -11,7 +11,9 @@ import {
   CommandProcessingStatus,
   ConcurrencyConflictError,
   CorrelationId,
+  ErrorMessage,
   EventMetadata,
+  EventSerializationError,
   EventStreamCorruptionError,
   LocalProjectionNotFoundError,
   OutboxPublicationMode,
@@ -69,13 +71,15 @@ describe("@harness/es-contract", () => {
       expect(Schema.decodeSync(ProjectionName)("cart-view")).toBe("cart-view")
       expect(Schema.decodeSync(CorrelationId)("corr-999")).toBe("corr-999")
       expect(Schema.decodeSync(CausationId)("cause-888")).toBe("cause-888")
+      expect(Schema.decodeSync(ErrorMessage)("stream corrupted")).toBe("stream corrupted")
     })
 
-    it("rejects empty strings for identifiers", () => {
+    it("rejects empty strings for identifiers and error messages", () => {
       expect(() => Schema.decodeSync(CommandId)("")).toThrow()
       expect(() => Schema.decodeSync(AggregateId)("")).toThrow()
       expect(() => Schema.decodeSync(AggregateName)("")).toThrow()
       expect(() => Schema.decodeSync(ProjectionName)("")).toThrow()
+      expect(() => Schema.decodeSync(ErrorMessage)("")).toThrow()
     })
 
     it("decodes natural numbers into ProjectionVersion and TimestampMs", () => {
@@ -146,6 +150,100 @@ describe("@harness/es-contract", () => {
       })
       expect(res2.creationStatus._tag).toBe("ExistingStream")
       expect(res2.processingStatus._tag).toBe("Deduplicated")
+
+      const resNoStream = Schema.decodeSync(AggregateCommandResult)({
+        nextExpectedStreamVersion: 0,
+        creationStatus: { _tag: "NoStream" },
+        processingStatus: { _tag: "Processed" },
+      })
+      expect(resNoStream.nextExpectedStreamVersion).toBe(0)
+      expect(resNoStream.creationStatus._tag).toBe("NoStream")
+    })
+
+    it("accepts valid combinations via constructor and decoding", () => {
+      const c1 = new AggregateCommandResult({
+        nextExpectedStreamVersion: StreamVersion.make(0),
+        creationStatus: { _tag: "NoStream" },
+        processingStatus: { _tag: "Processed" },
+      })
+      expect(c1.nextExpectedStreamVersion).toBe(0)
+      expect(c1.creationStatus._tag).toBe("NoStream")
+
+      const c2 = new AggregateCommandResult({
+        nextExpectedStreamVersion: StreamVersion.make(1),
+        creationStatus: { _tag: "CreatedStream" },
+        processingStatus: { _tag: "Processed" },
+      })
+      expect(c2.nextExpectedStreamVersion).toBe(1)
+      expect(c2.creationStatus._tag).toBe("CreatedStream")
+
+      const c3 = new AggregateCommandResult({
+        nextExpectedStreamVersion: StreamVersion.make(3),
+        creationStatus: { _tag: "ExistingStream" },
+        processingStatus: { _tag: "Processed" },
+      })
+      expect(c3.nextExpectedStreamVersion).toBe(3)
+      expect(c3.creationStatus._tag).toBe("ExistingStream")
+    })
+
+    it("rejects invalid stream version and creation status combinations", () => {
+      // CreatedStream at version 0
+      expect(
+        () =>
+          new AggregateCommandResult({
+            nextExpectedStreamVersion: StreamVersion.make(0),
+            creationStatus: { _tag: "CreatedStream" },
+            processingStatus: { _tag: "Processed" },
+          }),
+      ).toThrow()
+      expect(() =>
+        Schema.decodeSync(AggregateCommandResult)({
+          nextExpectedStreamVersion: 0,
+          creationStatus: { _tag: "CreatedStream" },
+          processingStatus: { _tag: "Processed" },
+        }),
+      ).toThrow()
+
+      // ExistingStream at version 0
+      expect(
+        () =>
+          new AggregateCommandResult({
+            nextExpectedStreamVersion: StreamVersion.make(0),
+            creationStatus: { _tag: "ExistingStream" },
+            processingStatus: { _tag: "Processed" },
+          }),
+      ).toThrow()
+      expect(() =>
+        Schema.decodeSync(AggregateCommandResult)({
+          nextExpectedStreamVersion: 0,
+          creationStatus: { _tag: "ExistingStream" },
+          processingStatus: { _tag: "Processed" },
+        }),
+      ).toThrow()
+
+      // NoStream at version > 0
+      expect(
+        () =>
+          new AggregateCommandResult({
+            nextExpectedStreamVersion: StreamVersion.make(1),
+            creationStatus: { _tag: "NoStream" },
+            processingStatus: { _tag: "Processed" },
+          }),
+      ).toThrow()
+      expect(() =>
+        Schema.decodeSync(AggregateCommandResult)({
+          nextExpectedStreamVersion: 1,
+          creationStatus: { _tag: "NoStream" },
+          processingStatus: { _tag: "Processed" },
+        }),
+      ).toThrow()
+      expect(() =>
+        Schema.decodeSync(AggregateCommandResult)({
+          nextExpectedStreamVersion: 5,
+          creationStatus: { _tag: "NoStream" },
+          processingStatus: { _tag: "Processed" },
+        }),
+      ).toThrow()
     })
   })
 
@@ -178,7 +276,7 @@ describe("@harness/es-contract", () => {
       expect(err.name).toBe("missing-view")
     })
 
-    it("instantiates CommandAggregateMismatchError and EventStreamCorruptionError", () => {
+    it("instantiates CommandAggregateMismatchError", () => {
       const mismatch = new CommandAggregateMismatchError({
         commandId: CommandId.make("cmd-1"),
         expectedAggregateName: AggregateName.make("Cart"),
@@ -187,14 +285,60 @@ describe("@harness/es-contract", () => {
         actualAggregateId: AggregateId.make("cart-2"),
       })
       expect(mismatch._tag).toBe("CommandAggregateMismatchError")
+    })
 
-      const corrupt = new EventStreamCorruptionError({
+    it("instantiates EventStreamCorruptionError with and without optional fields", () => {
+      const corruptFull = new EventStreamCorruptionError({
         aggregateName: AggregateName.make("Cart"),
         aggregateId: AggregateId.make("cart-1"),
         expectedStreamVersion: StreamVersion.make(1),
         actualStreamVersion: StreamVersion.make(3),
+        reason: ErrorMessage.make("Non-contiguous version sequence"),
       })
-      expect(corrupt._tag).toBe("EventStreamCorruptionError")
+      expect(corruptFull._tag).toBe("EventStreamCorruptionError")
+      expect(corruptFull.actualStreamVersion).toBe(3)
+      expect(corruptFull.reason).toBe("Non-contiguous version sequence")
+
+      const corruptMinimal = new EventStreamCorruptionError({
+        aggregateName: AggregateName.make("Cart"),
+        aggregateId: AggregateId.make("cart-1"),
+        expectedStreamVersion: StreamVersion.make(1),
+      })
+      expect(corruptMinimal._tag).toBe("EventStreamCorruptionError")
+      expect(corruptMinimal.actualStreamVersion).toBeUndefined()
+      expect(corruptMinimal.reason).toBeUndefined()
+
+      const corruptOnlyActual = new EventStreamCorruptionError({
+        aggregateName: AggregateName.make("Cart"),
+        aggregateId: AggregateId.make("cart-1"),
+        expectedStreamVersion: StreamVersion.make(1),
+        actualStreamVersion: StreamVersion.make(4),
+      })
+      expect(corruptOnlyActual.actualStreamVersion).toBe(4)
+      expect(corruptOnlyActual.reason).toBeUndefined()
+
+      const corruptOnlyReason = new EventStreamCorruptionError({
+        aggregateName: AggregateName.make("Cart"),
+        aggregateId: AggregateId.make("cart-1"),
+        expectedStreamVersion: StreamVersion.make(1),
+        reason: ErrorMessage.make("Invalid JSON payload"),
+      })
+      expect(corruptOnlyReason.actualStreamVersion).toBeUndefined()
+      expect(corruptOnlyReason.reason).toBe("Invalid JSON payload")
+    })
+
+    it("instantiates EventSerializationError", () => {
+      const serializationErr = new EventSerializationError({
+        aggregateName: AggregateName.make("Cart"),
+        aggregateId: AggregateId.make("cart-1"),
+        streamVersion: StreamVersion.make(2),
+        reason: ErrorMessage.make("Schema decode failed for CartItemAdded"),
+      })
+      expect(serializationErr._tag).toBe("EventSerializationError")
+      expect(serializationErr.aggregateName).toBe("Cart")
+      expect(serializationErr.aggregateId).toBe("cart-1")
+      expect(serializationErr.streamVersion).toBe(2)
+      expect(serializationErr.reason).toBe("Schema decode failed for CartItemAdded")
     })
   })
 })

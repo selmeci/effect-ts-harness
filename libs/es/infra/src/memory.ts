@@ -201,8 +201,16 @@ export class HarnessSqlDurableObject extends DurableObject {
       } else if (cmd.type === "rollback") {
         try {
           txn.rollback();
-        } catch {
-          // ignore duplicate rollback errors cleanly
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (!/rollback|closed|finished|inactive/i.test(msg)) {
+            await this.env.CALLBACK.fetch("http://callback/op-result", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ txId, result: { ok: false, message: msg } })
+            });
+            return;
+          }
         }
         await this.env.CALLBACK.fetch("http://callback/op-result", {
           method: "POST",

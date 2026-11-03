@@ -9,7 +9,9 @@ import {
   CommandAggregateMismatchError,
   type CommandId,
   ConcurrencyConflictError,
+  ErrorMessage,
   EventMetadata,
+  EventSerializationError,
   EventStreamCorruptionError,
   type OutboxPublicationMode,
   StreamVersion,
@@ -58,8 +60,11 @@ interface MaxVersionRow {
   readonly max_version: number | null
 }
 
-const toSafeStreamVersion = (raw: number): StreamVersion =>
-  Number.isInteger(raw) && raw >= 0 ? StreamVersion.make(raw) : StreamVersion.make(0)
+const toErrorMessage = (cause: unknown): ErrorMessage => {
+  const raw = cause instanceof Error ? cause.message : String(cause)
+  const trimmed = raw.trim()
+  return ErrorMessage.make(trimmed.length > 0 ? trimmed : "Schema validation failure")
+}
 
 const extractCauseText = (sqlErr: SqlError): string => {
   const nestedCause = sqlErr.reason.cause
@@ -186,35 +191,44 @@ const loadAggregateInTx = <Command, Event, State, Err, ProjectionEnv, Projection
     let expectedSeq = 1
     for (const row of rows) {
       const expectedStreamVersion = StreamVersion.make(expectedSeq)
-      const actualRowVersion = toSafeStreamVersion(row.stream_version)
-      if (row.stream_version !== expectedSeq) {
+      const decodedRowVersionOpt = Schema.decodeOption(StreamVersion)(row.stream_version)
+      const actualRowVersion = match(decodedRowVersionOpt)
+        .with({ _tag: "Some" }, (v) => v.value)
+        .with({ _tag: "None" }, () => undefined)
+        .exhaustive()
+      if (actualRowVersion !== expectedStreamVersion) {
         return yield* new EventStreamCorruptionError({
           aggregateName: config.aggregateName,
           aggregateId,
           expectedStreamVersion,
           actualStreamVersion: actualRowVersion,
+          reason: ErrorMessage.make(
+            `Expected contiguous stream_version ${String(expectedSeq)} but found ${String(row.stream_version)}`,
+          ),
         })
       }
 
       const event = yield* Schema.decodeEffect(eventJsonSchema)(row.payload).pipe(
         Effect.mapError(
-          () =>
+          (cause) =>
             new EventStreamCorruptionError({
               aggregateName: config.aggregateName,
               aggregateId,
               expectedStreamVersion,
               actualStreamVersion: actualRowVersion,
+              reason: toErrorMessage(cause),
             }),
         ),
       )
       const metadata = yield* Schema.decodeEffect(metadataJsonSchema)(row.metadata).pipe(
         Effect.mapError(
-          () =>
+          (cause) =>
             new EventStreamCorruptionError({
               aggregateName: config.aggregateName,
               aggregateId,
               expectedStreamVersion,
               actualStreamVersion: actualRowVersion,
+              reason: toErrorMessage(cause),
             }),
         ),
       )
@@ -227,7 +241,10 @@ const loadAggregateInTx = <Command, Event, State, Err, ProjectionEnv, Projection
           aggregateName: config.aggregateName,
           aggregateId,
           expectedStreamVersion,
-          actualStreamVersion: toSafeStreamVersion(metadata.streamVersion),
+          actualStreamVersion: metadata.streamVersion,
+          reason: ErrorMessage.make(
+            "Stored event metadata identity or streamVersion does not match row",
+          ),
         })
       }
 
@@ -321,8 +338,7 @@ export const handleAggregateCommand = Effect.fn("Aggregate.handleCommand")(funct
   const commandResultJsonSchema = Schema.fromJsonString(AggregateCommandResult)
   const eventJsonSchema = Schema.fromJsonString(config.eventSchema)
   const metadataJsonSchema = Schema.fromJsonString(EventMetadata)
-  const outboxMode: OutboxPublicationMode =
-    config.outboxMode ?? ({ _tag: "SuppressOutbox" } as const)
+  const outboxMode: OutboxPublicationMode = config.outboxMode
 
   const txEffect = Effect.gen(function* () {
     const existingCommands = yield* sql<CommandRow>`
@@ -332,10 +348,13 @@ export const handleAggregateCommand = Effect.fn("Aggregate.handleCommand")(funct
       `
     const cachedCommand = existingCommands[0]
     if (cachedCommand !== undefined) {
-      const safeCachedVersion = toSafeStreamVersion(cachedCommand.stream_version)
       const decodedNameOpt = Schema.decodeOption(AggregateName)(cachedCommand.aggregate_name)
       const decodedIdOpt = Schema.decodeOption(AggregateId)(cachedCommand.aggregate_id)
       const decodedVersionOpt = Schema.decodeOption(StreamVersion)(cachedCommand.stream_version)
+      const actualCachedVersion = match(decodedVersionOpt)
+        .with({ _tag: "Some" }, (v) => v.value)
+        .with({ _tag: "None" }, () => undefined)
+        .exhaustive()
       const cachedIdentity = yield* match({
         nameOpt: decodedNameOpt,
         idOpt: decodedIdOpt,
@@ -363,8 +382,9 @@ export const handleAggregateCommand = Effect.fn("Aggregate.handleCommand")(funct
               new EventStreamCorruptionError({
                 aggregateName: config.aggregateName,
                 aggregateId,
-                expectedStreamVersion: safeCachedVersion,
-                actualStreamVersion: safeCachedVersion,
+                expectedStreamVersion: StreamVersion.make(0),
+                actualStreamVersion: actualCachedVersion,
+                reason: ErrorMessage.make("Corrupt identity or stream_version in es_commands"),
               }),
             ),
         )
@@ -387,12 +407,13 @@ export const handleAggregateCommand = Effect.fn("Aggregate.handleCommand")(funct
         cachedCommand.result_json,
       ).pipe(
         Effect.mapError(
-          () =>
+          (cause) =>
             new EventStreamCorruptionError({
               aggregateName: config.aggregateName,
               aggregateId,
               expectedStreamVersion: cachedIdentity.storedVersion,
               actualStreamVersion: cachedIdentity.storedVersion,
+              reason: toErrorMessage(cause),
             }),
         ),
       )
@@ -403,6 +424,9 @@ export const handleAggregateCommand = Effect.fn("Aggregate.handleCommand")(funct
           aggregateId,
           expectedStreamVersion: cachedIdentity.storedVersion,
           actualStreamVersion: storedResult.nextExpectedStreamVersion,
+          reason: ErrorMessage.make(
+            "Stored command result_json nextExpectedStreamVersion does not match es_commands.stream_version",
+          ),
         })
       }
 
@@ -440,12 +464,12 @@ export const handleAggregateCommand = Effect.fn("Aggregate.handleCommand")(funct
       })
       const noOpResultJson = yield* Schema.encodeEffect(commandResultJsonSchema)(noOpResult).pipe(
         Effect.mapError(
-          () =>
-            new EventStreamCorruptionError({
+          (cause) =>
+            new EventSerializationError({
               aggregateName: config.aggregateName,
               aggregateId,
-              expectedStreamVersion: currentVersion,
-              actualStreamVersion: currentVersion,
+              streamVersion: currentVersion,
+              reason: toErrorMessage(cause),
             }),
         ),
       )
@@ -491,23 +515,23 @@ export const handleAggregateCommand = Effect.fn("Aggregate.handleCommand")(funct
       })
       const payloadJson = yield* Schema.encodeEffect(eventJsonSchema)(event).pipe(
         Effect.mapError(
-          () =>
-            new EventStreamCorruptionError({
+          (cause) =>
+            new EventSerializationError({
               aggregateName: config.aggregateName,
               aggregateId,
-              expectedStreamVersion: eventVersion,
-              actualStreamVersion: eventVersion,
+              streamVersion: eventVersion,
+              reason: toErrorMessage(cause),
             }),
         ),
       )
       const metadataJson = yield* Schema.encodeEffect(metadataJsonSchema)(metadata).pipe(
         Effect.mapError(
-          () =>
-            new EventStreamCorruptionError({
+          (cause) =>
+            new EventSerializationError({
               aggregateName: config.aggregateName,
               aggregateId,
-              expectedStreamVersion: eventVersion,
-              actualStreamVersion: eventVersion,
+              streamVersion: eventVersion,
+              reason: toErrorMessage(cause),
             }),
         ),
       )
@@ -547,12 +571,30 @@ export const handleAggregateCommand = Effect.fn("Aggregate.handleCommand")(funct
                 FROM es_events
                 WHERE aggregate_name = ${config.aggregateName} AND aggregate_id = ${aggregateId}
               `
-            const actualHead = toSafeStreamVersion(headRows[0]?.max_version ?? 0)
-            return yield* new ConcurrencyConflictError({
-              aggregateId,
-              expectedVersion: currentVersion,
-              actualVersion: actualHead,
-            })
+            const maxVerOpt = Schema.decodeUnknownOption(StreamVersion)(headRows[0]?.max_version)
+            return yield* match(maxVerOpt)
+              .with({ _tag: "Some" }, ({ value: actualHead }) =>
+                Effect.fail(
+                  new ConcurrencyConflictError({
+                    aggregateId,
+                    expectedVersion: currentVersion,
+                    actualVersion: actualHead,
+                  }),
+                ),
+              )
+              .with({ _tag: "None" }, () =>
+                Effect.fail(
+                  new EventStreamCorruptionError({
+                    aggregateName: config.aggregateName,
+                    aggregateId,
+                    expectedStreamVersion: eventVersion,
+                    reason: ErrorMessage.make(
+                      `Corrupt max(stream_version) in es_events: ${String(headRows[0]?.max_version)}`,
+                    ),
+                  }),
+                ),
+              )
+              .exhaustive()
           }),
         ),
       )
@@ -616,12 +658,12 @@ export const handleAggregateCommand = Effect.fn("Aggregate.handleCommand")(funct
       commandResult,
     ).pipe(
       Effect.mapError(
-        () =>
-          new EventStreamCorruptionError({
+        (cause) =>
+          new EventSerializationError({
             aggregateName: config.aggregateName,
             aggregateId,
-            expectedStreamVersion: nextExpectedStreamVersion,
-            actualStreamVersion: nextExpectedStreamVersion,
+            streamVersion: nextExpectedStreamVersion,
+            reason: toErrorMessage(cause),
           }),
       ),
     )

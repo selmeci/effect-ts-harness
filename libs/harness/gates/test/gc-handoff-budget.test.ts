@@ -2609,6 +2609,29 @@ export {};
             `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nexport const dropMigrations = SqliteMigrator.fromRecord({\n  "1_drop_table": sql\`DROP TABLE foo;\`,\n});\n`,
           )
 
+          // 4. multiline-gen.ts: multi-line Effect.gen block with nested object followed by second invalid key "2_InvalidCamel"
+          writeFileSync(
+            join(infraSrcDir, "multiline-gen.ts"),
+            `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nimport { Effect } from "effect";\nexport const complexMigrations = SqliteMigrator.fromRecord({\n  "1_init": Effect.gen(function* () {\n    const nested = { a: 1 };\n    yield* sql\`CREATE TABLE IF NOT EXISTS complex (id INT);\`;\n  }),\n  "2_InvalidCamel": sql\`CREATE TABLE IF NOT EXISTS camel (id INT);\`,\n});\n`,
+          )
+
+          // 5. spread-migrations.ts: spread record with duplicate numeric id "1"
+          writeFileSync(
+            join(infraSrcDir, "spread-migrations.ts"),
+            `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nconst aggregateCoreMigrations = {\n  "1_init": sql\`CREATE TABLE IF NOT EXISTS core (id INT);\`,\n};\nexport const migrations = SqliteMigrator.fromRecord({\n  ...aggregateCoreMigrations,\n  "1_second": sql\`CREATE TABLE IF NOT EXISTS duplicate_id (id INT);\`,\n});\n`,
+          )
+
+          // 6. stray-ddl.ts: file imports SqliteMigrator, has valid fromRecord, but also has stray CREATE TABLE outside migration record
+          writeFileSync(
+            join(infraSrcDir, "stray-ddl.ts"),
+            `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nexport const managedMigrations = SqliteMigrator.fromRecord({\n  "1_init_managed": sql\`CREATE TABLE IF NOT EXISTS managed (id INT);\`,\n});\nexport const strayTable = sql\`CREATE TABLE stray_table (id INT);\`;\n`,
+          )
+
+          // 7. .sql file with destructive DROP TABLE in migrations/
+          const migrationsDir = join(tempDir, "libs", "sample", "infra", "migrations")
+          mkdirSync(migrationsDir, { recursive: true })
+          writeFileSync(join(migrationsDir, "0002_drop.sql"), "DROP TABLE old_table;\n")
+
           const findings = scanWorkspacePackageHygiene(tempDir)
 
           // Check unmanaged-sql-ddl
@@ -2619,6 +2642,16 @@ export {};
           expect(unmanagedFindings).toHaveLength(1)
           expect(unmanagedFindings[0]?.message).toContain(
             'Infrastructure module "libs/sample/infra/src/bad-ddl.ts" executes raw SQL DDL without SqliteMigrator',
+          )
+
+          // Check stray CREATE TABLE outside fromRecord in a file importing SqliteMigrator
+          const strayDdlFinding = findings.find(
+            (f) =>
+              f.kind === "unmanaged-sql-ddl" && f.nodeId === "libs/sample/infra/src/stray-ddl.ts",
+          )
+          expect(strayDdlFinding).toBeDefined()
+          expect(strayDdlFinding?.message).toContain(
+            'Infrastructure module "libs/sample/infra/src/stray-ddl.ts" executes raw SQL DDL without SqliteMigrator',
           )
 
           // Check invalid-migrator-record-key (invalid format and duplicate id)
@@ -2642,7 +2675,29 @@ export {};
             'Duplicate SqliteMigrator.fromRecord migration id "1" in key "1_second"',
           )
 
-          // Check unsafe-sql-migration
+          // Check multiline Effect.gen second key invalid format
+          const camelKeyFinding = findings.find(
+            (f) =>
+              f.kind === "invalid-migrator-record-key" &&
+              f.nodeId === "libs/sample/infra/src/multiline-gen.ts:2_InvalidCamel",
+          )
+          expect(camelKeyFinding).toBeDefined()
+          expect(camelKeyFinding?.message).toContain(
+            'Invalid SqliteMigrator.fromRecord migration key "2_InvalidCamel"',
+          )
+
+          // Check spread record duplicate id detection
+          const spreadDuplicateFinding = findings.find(
+            (f) =>
+              f.kind === "invalid-migrator-record-key" &&
+              f.nodeId === "libs/sample/infra/src/spread-migrations.ts:1_second",
+          )
+          expect(spreadDuplicateFinding).toBeDefined()
+          expect(spreadDuplicateFinding?.message).toContain(
+            'Duplicate SqliteMigrator.fromRecord migration id "1" in key "1_second"',
+          )
+
+          // Check unsafe-sql-migration from TS file
           const unsafeFindings = findings.filter(
             (f) =>
               f.kind === "unsafe-sql-migration" &&
@@ -2652,11 +2707,22 @@ export {};
           expect(unsafeFindings[0]?.message).toContain(
             'Destructive DROP statement in "libs/sample/infra/src/drop.ts" requires human approval (ESCALATE).',
           )
+
+          // Check unsafe-sql-migration from .sql file in migrations/
+          const unsafeSqlFileFinding = findings.find(
+            (f) =>
+              f.kind === "unsafe-sql-migration" &&
+              f.nodeId === "libs/sample/infra/migrations/0002_drop.sql:drop-statement",
+          )
+          expect(unsafeSqlFileFinding).toBeDefined()
+          expect(unsafeSqlFileFinding?.message).toContain(
+            'Destructive DROP statement in "libs/sample/infra/migrations/0002_drop.sql" requires human approval (ESCALATE).',
+          )
         } finally {
           rmSync(tempDir, { recursive: true, force: true })
         }
 
-        // 4. Reports 0 findings when SqliteMigrator.fromRecord({ "1_init_foo": ... }) is used with additive CREATE TABLE IF NOT EXISTS
+        // 8. Reports 0 findings when SqliteMigrator.fromRecord({ ...aggregateCoreMigrations, "2_init_bar": ... }) is used with additive CREATE TABLE IF NOT EXISTS
         const cleanTempDir = mkdtempSync(join(tmpdir(), "harness-sql-clean-test-"))
         try {
           const cleanInfraSrcDir = join(cleanTempDir, "libs", "sample", "infra", "src")
@@ -2664,7 +2730,7 @@ export {};
 
           writeFileSync(
             join(cleanInfraSrcDir, "clean.ts"),
-            `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nexport const cleanMigrations = SqliteMigrator.fromRecord({\n  "1_init_foo": sql\`CREATE TABLE IF NOT EXISTS foo (id INT);\`,\n});\n`,
+            `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nconst aggregateCoreMigrations = {\n  "1_init_foo": sql\`CREATE TABLE IF NOT EXISTS foo (id INT);\`,\n};\nexport const cleanMigrations = SqliteMigrator.fromRecord({\n  ...aggregateCoreMigrations,\n  "2_init_bar": sql\`CREATE TABLE IF NOT EXISTS bar (id INT);\`,\n});\n`,
           )
 
           const cleanFindings = scanWorkspacePackageHygiene(cleanTempDir)

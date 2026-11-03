@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs"
 import { Effect } from "effect"
 
 export type MigrationViolationKind =
@@ -90,3 +91,19 @@ export const decideMigrationSafety = Effect.fn("MigrationSafety.decide")(functio
 export const checkMigrationSqlSafety = (
   files: ReadonlyArray<MigrationSqlFile>,
 ): MigrationSafetyReport => Effect.runSync(decideMigrationSafety({ files }))
+
+export const checkMigrationFiles = (filePaths: ReadonlyArray<string>): MigrationSafetyReport => {
+  const files: Array<MigrationSqlFile> = []
+  for (const file of filePaths) {
+    const sql = Effect.runSync(
+      Effect.try({
+        try: () => (existsSync(file) ? readFileSync(file, "utf8") : ""),
+        catch: () => "",
+      }).pipe(Effect.orElseSucceed(() => "")),
+    )
+    if (sql.length > 0) {
+      files.push({ file, sql })
+    }
+  }
+  return checkMigrationSqlSafety(files)
+}

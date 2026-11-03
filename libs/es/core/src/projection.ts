@@ -13,6 +13,13 @@ export interface HistoricalEvent<Event> {
   readonly metadata: EventMetadata
 }
 
+/**
+ * Strongly-consistent local read-model projection updated inside the aggregate's event transaction.
+ *
+ * Contract (REQ-3.2): implementations of `rebuild(aggregateId, events)` MUST first purge/delete
+ * any existing read-model state for `aggregateId` and then replay `events` in `streamVersion` order
+ * so the resulting read model matches incremental `apply` execution.
+ */
 export interface LocalProjection<Event, ReadModel, Env = never, Err = never> {
   readonly name: ProjectionName
   readonly version: ProjectionVersion
@@ -21,6 +28,13 @@ export interface LocalProjection<Event, ReadModel, Env = never, Err = never> {
   readonly query: (
     aggregateId: AggregateId,
   ) => Effect.Effect<ReadModel, AggregateNotFoundError | Err, Env>
+  /**
+   * Rebuilds the local projection for a given aggregate stream (REQ-3.2).
+   *
+   * Implementations of `rebuild(aggregateId, events)` MUST first purge/delete any existing
+   * read-model state for `aggregateId` and then replay `events` in `streamVersion` order
+   * so the resulting read model matches incremental `apply` execution.
+   */
   readonly rebuild: (
     aggregateId: AggregateId,
     events: ReadonlyArray<HistoricalEvent<Event>>,
@@ -53,6 +67,13 @@ export const queryLocalProjection = Effect.fn("LocalProjection.query")(function*
   return yield* target.query(aggregateId)
 })
 
+/**
+ * Rebuilds a local projection from historical events (REQ-3.2).
+ *
+ * Implementations of `rebuild(aggregateId, events)` MUST first purge/delete any existing
+ * read-model state for `aggregateId` and then replay `events` in `streamVersion` order
+ * so the resulting read model matches incremental `apply` execution.
+ */
 export const rebuildLocalProjection = Effect.fn("LocalProjection.rebuild")(function* <
   Event,
   ReadModel,

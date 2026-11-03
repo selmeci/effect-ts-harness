@@ -22,7 +22,7 @@ export interface AggregateConfig<
   readonly projections?:
     | ReadonlyArray<LocalProjection<Event, unknown, ProjectionEnv, ProjectionErr>>
     | undefined
-  readonly outboxMode?: OutboxPublicationMode | undefined
+  readonly outboxMode: OutboxPublicationMode
 }
 
 export interface LoadedAggregate<State> {
