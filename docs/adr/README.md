@@ -27,7 +27,7 @@ Každý záznam využíva štandardizovaný formát MADR (Markdown Architecture 
 
 ```yaml
 ---
-id: <scope>:ADR-NNNN  # napr. harness:ADR-0001, sample:ADR-0001 (alebo ADR-NNNN pre globálne)
+id: <scope>:ADR-NNNN # napr. harness:ADR-0001, sample:ADR-0001 (alebo ADR-NNNN pre globálne)
 title: Stručný a výstižný názov architektonického rozhodnutia
 status: proposed | accepted | superseded | deprecated
 date: YYYY-MM-DD
@@ -46,6 +46,7 @@ errors:
 ```
 
 ### Povinné polia frontmatteru a parser-safety:
+
 - **`id`**: Unikátny identifikátor v tvare `<scope>:ADR-NNNN` pre domény alebo `ADR-NNNN` pre globálne ADR (napr. `harness:ADR-0001`, `sample:ADR-0001`).
 - **`title`**: Jednoriadkové zhrnutie prijatého rozhodnutia (krátka menná fráza).
 - **`status`**: Životný cyklus rozhodnutia (`proposed`, `accepted`, `superseded`, `deprecated`). Ak je status `superseded`, frontmatter **musí** obsahovať pole `superseded_by: <scope>:ADR-MMMM`.
@@ -92,20 +93,21 @@ Second paragraph explaining what breaks, degrades, or incurs unacceptable risk i
 
 ## Decision Drivers
 
-* Non-negotiable driver or constraint 1 (e.g. latency budget, cloud runtime limitation, memory footprint)
-* Non-negotiable driver or constraint 2 (e.g. data consistency requirement, transactional boundary, type-safety guarantee)
+- Non-negotiable driver or constraint 1 (e.g. latency budget, cloud runtime limitation, memory footprint)
+- Non-negotiable driver or constraint 2 (e.g. data consistency requirement, transactional boundary, type-safety guarantee)
 
 ## Considered Options
 
-* **Option 1:** Short title and description of Option 1
-* **Option 2:** Short title and description of Option 2
-* **Option 3:** Short title and description of Option 3
+- **Option 1:** Short title and description of Option 1
+- **Option 2:** Short title and description of Option 2
+- **Option 3:** Short title and description of Option 3
 
 ## Decision Outcome
 
 **Chosen option:** "Option 1: Short title of Option 1", because detailed justification explaining how it addresses all decision drivers.
 
 ### Architectural Rules and Guarantees
+
 1. Binding architectural rule or invariant 1.
 2. Binding architectural rule or invariant 2.
 3. Boundary rule between layers, services, or storage mechanisms.
@@ -113,27 +115,31 @@ Second paragraph explaining what breaks, degrades, or incurs unacceptable risk i
 ## Rejected Alternatives
 
 ### 1 · Option 2: Short title of Option 2
+
 **Why rejected:** Concrete failure mode, operational cost, or runtime violation that disqualified this option. Explain why future engineers or agents must not attempt this path.
 
 ### 2 · Option 3: Short title of Option 3
+
 **Why rejected:** Concrete failure mode, operational cost, or runtime violation that disqualified this option. Explain why future engineers or agents must not attempt this path.
 
 ## Consequences and Enforcement
 
 ### Positive Consequences
-* Observable architectural or operational benefit 1.
-* Observable architectural or operational benefit 2.
+
+- Observable architectural or operational benefit 1.
+- Observable architectural or operational benefit 2.
 
 ### Negative Consequences and Trade-offs
-* Accepted cost, complexity, or restriction 1.
-* Accepted cost, complexity, or restriction 2.
+
+- Accepted cost, complexity, or restriction 1.
+- Accepted cost, complexity, or restriction 2.
 
 ### Deterministic Enforcement
 
-| Rule | Enforced By | Gate / Mechanism | Governed Symbols |
-| --- | --- | --- | --- |
+| Rule                  | Enforced By                      | Gate / Mechanism      | Governed Symbols      |
+| --------------------- | -------------------------------- | --------------------- | --------------------- |
 | Description of rule 1 | `libs/<scope>/infra/src/file.ts` | `harness gc --strict` | `DomainSymbol.decide` |
-| Description of rule 2 | `tools/oxlint/syntax-bans.js` | AST syntax ban | `SpecificService` |
+| Description of rule 2 | `tools/oxlint/syntax-bans.js`    | AST syntax ban        | `SpecificService`     |
 ```
 
 ---
@@ -145,8 +151,10 @@ Inšpirované metodikou `ce-compound`, Nygard ADR štandardom a ISO/IEC/IEEE 420
 > **Zaznamenajte ADR len vtedy, keď rozhodnutie zahŕňa neobvyklé obmedzenia, kompromisy alebo zamietnuté alternatívy, ktoré budúci inžinier alebo agent nemôže odvodiť zo samotného kódu.**
 
 ### Kontrafaktuálny test:
+
 Pred zapísaním ADR si položte otázku:
-> *"Zopakoval by budúci inžinier alebo autonómny agent rovnakú chybu, zvrátil by tento kompromis, alebo by znovu otvoril túto diskusiu, keby nemal k dispozícii kontext PREČO sme sa takto rozhodli?"*
+
+> _"Zopakoval by budúci inžinier alebo autonómny agent rovnakú chybu, zvrátil by tento kompromis, alebo by znovu otvoril túto diskusiu, keby nemal k dispozícii kontext PREČO sme sa takto rozhodli?"_
 
 - **Ak je odpoveď ÁNO (Nové rozhodnutie):** Vytvorte nový záznam v `libs/<scope>/docs/adr/NNNN-<slug>.md` (alebo `docs/adr/` pre celo-workspace rozhodnutia).
 - **Ak je odpoveď ÁNO (Vývoj existujúceho):** Aktualizujte existujúci ADR priamo na mieste, alebo ho označte ako `status: superseded` s odkazom `superseded_by: <scope>:ADR-MMMM`.
@@ -156,27 +164,29 @@ Pred zapísaním ADR si položte otázku:
 
 ## 4. Ochrana proti zastarávaniu a deterministické kontroly: `AdrDocLint.decide` a `stale-doc-reference` v `harness gc --strict`
 
-Statická dokumentácia je často nebezpečnejšia než žiadna, pretože vytvára falošný pocit istoty. 
+Statická dokumentácia je často nebezpečnejšia než žiadna, pretože vytvára falošný pocit istoty.
 
 V našom harnessi spúšťa príkaz:
+
 ```bash
 node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts gc --strict
 ```
+
 čisté rozhodovacie funkcie **`AdrDocLint.decide`** a **`GraphGc.decide`**, ktoré deterministicky garantujú štrukturálnu integritu aj platnosť prepojenia s kódom.
 
 ### 4.1 Deterministické Kontroly `AdrDocLint.decide`
 
 Každý ADR dokument je automaticky validovaný čistým deciderom `AdrDocLint.decide` voči 7 kľúčovým invariantom:
 
-| Kontrola lintera | Význam a dôvod zlyhania | Spôsob nápravy |
-| :--- | :--- | :--- |
-| **`adr-frontmatter-invalid`** | Chýbajúci YAML frontmatter, chýbajúce povinné polia (`id`, `title`, `status`, `date`, `enforced_by`), neplatný status, status `superseded` bez `superseded_by`, alebo absencia symbolov (`spans`, `services`, `errors`). | Opravte frontmatter, doplňte povinné polia a aspoň jeden zoznam symbolov (`spans`, `services` alebo `errors`). |
-| **`adr-section-structure`** | Chýbajúca alebo nesprávne zoradená niektorá zo 6 kanonických `##` sekcií (`Context and Problem Statement`, `Decision Drivers`, `Considered Options`, `Decision Outcome`, `Rejected Alternatives`, `Consequences and Enforcement`). | Použite presne 6 kanonických `##` sekcií v predpísanom poradí. |
-| **`adr-missing-drivers-or-options`** | Sekcia `## Decision Drivers` obsahuje menej ako 2 odrážky `* ...`, alebo `## Considered Options` obsahuje menej ako 2 položky `* **Option N:** ...`. | Doplňte aspoň 2 záväzné požiadavky (drivers) a aspoň 2 zvažované možnosti (options). |
-| **`adr-missing-chosen-option`** | Sekcia `## Decision Outcome` nezačína predpísanou frázou `**Chosen option:** "<Option Name>"`. | Otvorte sekciu presnou frázou `**Chosen option:** "<Názov zvolenej možnosti>"`. |
-| **`adr-rejected-alternative-structure`** | Sekcia `## Rejected Alternatives` neobsahuje podsekcie vo formáte `### N · <Option Name>` (so stredovou bodkou `·`), alebo podsekcia nezačína vetou `**Why rejected:** <dôvod>`. | Každú zamietnutú alternatívu naformátujte ako `### N · <Názov>` a otvorte vetou `**Why rejected:** <dôvod zlyhania>`. |
-| **`adr-missing-enforcement-table`** | Sekcia `## Consequences and Enforcement` neobsahuje podsekcie `### Positive Consequences`, `### Negative Consequences and Trade-offs` alebo tabuľku `### Deterministic Enforcement`. | Doplňte obe podsekcie dôsledkov a 4-stĺpcovú tabuľku `\| Rule \| Enforced By \| Gate / Mechanism \| Governed Symbols \|`. |
-| **`adr-unfilled-placeholder`** | Záznam obsahuje nevyplnené šablónové zástupné symboly (`<...>` alebo `TODO`). | Nahraďte všetky placeholdery skutočnými technickými špecifikáciami. |
+| Kontrola lintera                         | Význam a dôvod zlyhania                                                                                                                                                                                                            | Spôsob nápravy                                                                                                            |
+| :--------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------ |
+| **`adr-frontmatter-invalid`**            | Chýbajúci YAML frontmatter, chýbajúce povinné polia (`id`, `title`, `status`, `date`, `enforced_by`), neplatný status, status `superseded` bez `superseded_by`, alebo absencia symbolov (`spans`, `services`, `errors`).           | Opravte frontmatter, doplňte povinné polia a aspoň jeden zoznam symbolov (`spans`, `services` alebo `errors`).            |
+| **`adr-section-structure`**              | Chýbajúca alebo nesprávne zoradená niektorá zo 6 kanonických `##` sekcií (`Context and Problem Statement`, `Decision Drivers`, `Considered Options`, `Decision Outcome`, `Rejected Alternatives`, `Consequences and Enforcement`). | Použite presne 6 kanonických `##` sekcií v predpísanom poradí.                                                            |
+| **`adr-missing-drivers-or-options`**     | Sekcia `## Decision Drivers` obsahuje menej ako 2 odrážky `* ...`, alebo `## Considered Options` obsahuje menej ako 2 položky `* **Option N:** ...`.                                                                               | Doplňte aspoň 2 záväzné požiadavky (drivers) a aspoň 2 zvažované možnosti (options).                                      |
+| **`adr-missing-chosen-option`**          | Sekcia `## Decision Outcome` nezačína predpísanou frázou `**Chosen option:** "<Option Name>"`.                                                                                                                                     | Otvorte sekciu presnou frázou `**Chosen option:** "<Názov zvolenej možnosti>"`.                                           |
+| **`adr-rejected-alternative-structure`** | Sekcia `## Rejected Alternatives` neobsahuje podsekcie vo formáte `### N · <Option Name>` (so stredovou bodkou `·`), alebo podsekcia nezačína vetou `**Why rejected:** <dôvod>`.                                                   | Každú zamietnutú alternatívu naformátujte ako `### N · <Názov>` a otvorte vetou `**Why rejected:** <dôvod zlyhania>`.     |
+| **`adr-missing-enforcement-table`**      | Sekcia `## Consequences and Enforcement` neobsahuje podsekcie `### Positive Consequences`, `### Negative Consequences and Trade-offs` alebo tabuľku `### Deterministic Enforcement`.                                               | Doplňte obe podsekcie dôsledkov a 4-stĺpcovú tabuľku `\| Rule \| Enforced By \| Gate / Mechanism \| Governed Symbols \|`. |
+| **`adr-unfilled-placeholder`**           | Záznam obsahuje nevyplnené šablónové zástupné symboly (`<...>` alebo `TODO`).                                                                                                                                                      | Nahraďte všetky placeholdery skutočnými technickými špecifikáciami.                                                       |
 
 ### 4.2 Validácia Odkazov na Kód: `stale-doc-reference`
 
@@ -217,6 +227,7 @@ Autonómni agenti využívajú sadu MCP nástrojov (`apps/harness-mcp`) na obojs
 
 1. **Zistenie riadiacich ADR pre funkciu alebo službu (`harness_callers`):**
    Agent pred úpravou existujúcej služby alebo funkcie spustí dopyt na jej volajúcich:
+
    ```json
    // Nástroj: harness_callers({"qualname": "PhotoRepo"})
    {
@@ -230,10 +241,12 @@ Autonómni agenti využívajú sadu MCP nástrojov (`apps/harness-mcp`) na obojs
      ]
    }
    ```
+
    Vďaka hrane `GovernsSymbol` agent okamžite vidí, že manipulácia s `PhotoRepo` podlieha rozhodnutiu `sample:ADR-0001`, a prečíta si zaznamenané architektonické obmedzenia a zamietnuté alternatívy skôr, než navrhne nekompatibilnú zmenu.
 
 2. **Zistenie všetkých symbolov riadených daným ADR (`harness_callees`):**
    Pre zobrazenie všetkých funkcií, služieb a chýb podliehajúcich danému ADR:
+
    ```json
    // Nástroj: harness_callees({"qualname": "sample:ADR-0001"})
    {
@@ -254,7 +267,7 @@ Autonómni agenti využívajú sadu MCP nástrojov (`apps/harness-mcp`) na obojs
 
 ## 6. Register existujúcich ADR
 
-| Identifikátor | Rozsah (Scope) | Názov | Status | Dátum |
-| :--- | :--- | :--- | :--- | :--- |
-| [harness:ADR-0001](../../libs/harness/docs/adr/0001-deterministic-gates-and-plan-as-code.md) | `harness` | Deterministic Gates and Compilable Plan-as-Code Skeletons Over Prose Plans | `accepted` | 2026-10-25 |
-| [sample:ADR-0001](../../libs/sample/docs/adr/0001-cloudflare-d1-do-sqlite-and-traceparent-boundaries.md) | `sample` | Cloudflare D1 Read Projections, Durable Object Synchronous SQLite State, and W3C Traceparent Propagation | `accepted` | 2026-10-26 |
+| Identifikátor                                                                                            | Rozsah (Scope) | Názov                                                                                                    | Status     | Dátum      |
+| :------------------------------------------------------------------------------------------------------- | :------------- | :------------------------------------------------------------------------------------------------------- | :--------- | :--------- |
+| [harness:ADR-0001](../../libs/harness/docs/adr/0001-deterministic-gates-and-plan-as-code.md)             | `harness`      | Deterministic Gates and Compilable Plan-as-Code Skeletons Over Prose Plans                               | `accepted` | 2026-10-25 |
+| [sample:ADR-0001](../../libs/sample/docs/adr/0001-cloudflare-d1-do-sqlite-and-traceparent-boundaries.md) | `sample`       | Cloudflare D1 Read Projections, Durable Object Synchronous SQLite State, and W3C Traceparent Propagation | `accepted` | 2026-10-26 |

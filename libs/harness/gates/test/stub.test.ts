@@ -3,9 +3,10 @@ import { Context, Data, Effect } from "effect"
 import { stub } from "../src/index.js"
 
 class SampleError extends Data.TaggedError("SampleError")<{ readonly message: string }> {}
-class SampleRepo extends Context.Service<SampleRepo, { readonly find: (id: string) => Effect.Effect<string> }>()(
-  "SampleRepo"
-) {}
+class SampleRepo extends Context.Service<
+  SampleRepo,
+  { readonly find: (id: string) => Effect.Effect<string> }
+>()("SampleRepo") {}
 
 describe("stub<A, E, R>", () => {
   it("preserves exact A, E, R types on Effect.fn skeletons", () => {
@@ -22,6 +23,6 @@ describe("stub<A, E, R>", () => {
     Effect.gen(function* () {
       const exit = yield* Effect.exit(stub<number>("unused-arg"))
       expect(exit._tag).toBe("Failure")
-    })
+    }),
   )
 })

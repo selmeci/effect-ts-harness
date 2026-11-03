@@ -29,6 +29,7 @@ Before modifying any tracked repository file:
 Classify the input request using bounded Graph MCP queries (`harness_resolve`, `harness_ontology_why`) and take the **first** matching route:
 
 ### Route A — Existing EARS Specification Path
+
 - **Trigger:** The prompt names an existing EARS spec file (`libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` or `docs/specs/YYYY-MM-DD-<slug>.md`) or resumes a spec already drafted in the current session.
 - **Action:**
   1. Read the spec and verify its YAML frontmatter (`id`, `title`, `status`, `archetype`, `enforced_by`, `spans`, `services`, `errors`) and EARS table (`WHEN`, `IF/THEN`, `WHILE`, `WHERE`).
@@ -36,12 +37,14 @@ Classify the input request using bounded Graph MCP queries (`harness_resolve`, `
   3. Advance directly to **Stage 2 (`planning-effect-skeletons`)**.
 
 ### Route B — External PR or Code Review Feedback
+
 - **Trigger:** The prompt provides a GitHub PR number/URL (`#42`, `https://github.com/.../pull/42`) or pasted review markdown (from Grok, Codex, Claude, or a human reviewer) asking to resolve feedback.
 - **Action:**
   1. Execute the 5-phase `resolving-effect-review-feedback` workflow autonomously (Ingest $\rightarrow$ Central Graph MCP Adjudication $\rightarrow$ Spec/ADR Sync $\rightarrow$ Package-Isolated `flash` Fixers).
   2. Advance directly to **Stage 5 (Compounding Learnings & Final Deterministic Gate Sequence)** and **Stage 6 (Shipping)**.
 
 ### Route C — Feature Requirement, Behavior Change, or Defect Report
+
 - **Trigger:** Any feature request, enhancement, architectural task, or bug report that changes code and does not yet have a current EARS specification.
 - **Action:** Execute the **Autonomous EARS Specification Protocol** below.
 

@@ -7,7 +7,7 @@ import {
   buildHarnessGraph,
   findTestsReaching,
   loadGraphSnapshot,
-  saveGraphSnapshot
+  saveGraphSnapshot,
 } from "@harness/graph"
 import {
   AlbumId,
@@ -19,16 +19,10 @@ import {
   type Photo,
   PhotoId,
   PhotoName,
-  PhotoNotFoundError
+  PhotoNotFoundError,
 } from "@harness/sample-contract"
 import { AlbumCounterClient, PhotoRepo } from "@harness/sample-service"
-import {
-  decideAlbumQuota,
-  getPhotoById,
-  greet,
-  listPhotos,
-  uploadPhoto
-} from "../src/index.js"
+import { decideAlbumQuota, getPhotoById, greet, listPhotos, uploadPhoto } from "../src/index.js"
 
 const resolveRepoRoot = (startDir: string): string => {
   let curr = path.resolve(startDir)
@@ -51,7 +45,7 @@ describe("greet", () => {
       const { result, edges } = yield* runWithTestTracer(
         testId,
         greet({ name: PersonName.make("Roman") }),
-        fnIndex.bySpanName
+        fnIndex.bySpanName,
       )
       expect(result).toBe("Hello, Roman!")
 
@@ -62,7 +56,7 @@ describe("greet", () => {
         line: fn.line,
         packageTag: fn.packageTag,
         successType: "GreetingMessage",
-        isStub: fn.isStub
+        isStub: fn.isStub,
       }))
 
       const tests = [
@@ -70,8 +64,8 @@ describe("greet", () => {
           testId,
           testFile: "libs/sample/domain/test/index.test.ts",
           testName: "greets by name",
-          lastTreeHash: "current"
-        }
+          lastTreeHash: "current",
+        },
       ]
 
       const graph = buildHarnessGraph({
@@ -82,7 +76,7 @@ describe("greet", () => {
         tests,
         patternDocs: [],
         exercisesSpans: edges.exercisesSpans,
-        tracedCalls: edges.tracedCalls
+        tracedCalls: edges.tracedCalls,
       })
 
       if (process.env.HARNESS_TRACE === "1") {
@@ -95,7 +89,7 @@ describe("greet", () => {
 
       const reaching = findTestsReaching(graph, "Sample.greet")
       expect(reaching.map((t) => t.testId)).toContain(testId)
-    })
+    }),
   )
 })
 
@@ -105,16 +99,16 @@ describe("decideAlbumQuota", () => {
       // Runs with zero Layers (R = never)
       const nextCount = yield* decideAlbumQuota({
         albumId: AlbumId.make("album-vacation"),
-        currentCount: AlbumPhotoCount.make(42)
+        currentCount: AlbumPhotoCount.make(42),
       })
       expect(nextCount).toBe(43)
 
       const atLimitMinusOne = yield* decideAlbumQuota({
         albumId: AlbumId.make("album-vacation"),
-        currentCount: AlbumPhotoCount.make(99)
+        currentCount: AlbumPhotoCount.make(99),
       })
       expect(atLimitMinusOne).toBe(100)
-    })
+    }),
   )
 
   it.effect("fails with AlbumQuotaExceededError when count >= 100", () =>
@@ -122,8 +116,8 @@ describe("decideAlbumQuota", () => {
       const errAt100 = yield* Effect.flip(
         decideAlbumQuota({
           albumId: AlbumId.make("album-vacation"),
-          currentCount: AlbumPhotoCount.make(100)
-        })
+          currentCount: AlbumPhotoCount.make(100),
+        }),
       )
       expect(errAt100).toBeInstanceOf(AlbumQuotaExceededError)
       expect(errAt100._tag).toBe("AlbumQuotaExceededError")
@@ -133,34 +127,28 @@ describe("decideAlbumQuota", () => {
       const errAt150 = yield* Effect.flip(
         decideAlbumQuota({
           albumId: AlbumId.make("album-party"),
-          currentCount: AlbumPhotoCount.make(150)
-        })
+          currentCount: AlbumPhotoCount.make(150),
+        }),
       )
       expect(errAt150).toBeInstanceOf(AlbumQuotaExceededError)
       expect(errAt150._tag).toBe("AlbumQuotaExceededError")
       expect(errAt150.albumId).toBe("album-party")
       expect(errAt150.count).toBe(150)
-    })
+    }),
   )
 
   it.effect.prop(
     "enforces quota invariant and monotonicity across generated inputs",
     {
       albumId: AlbumId.check(Schema.isMinLength(1)),
-      currentCount: AlbumPhotoCount.check(
-        Schema.isBetween({ minimum: 0, maximum: 250 })
-      )
+      currentCount: AlbumPhotoCount.check(Schema.isBetween({ minimum: 0, maximum: 250 })),
     },
     ({ albumId, currentCount }) =>
       Effect.gen(function* () {
-        const exit = yield* Effect.exit(
-          decideAlbumQuota({ albumId, currentCount })
-        )
+        const exit = yield* Effect.exit(decideAlbumQuota({ albumId, currentCount }))
         if (currentCount >= 100) {
           expect(Exit.isFailure(exit) && Cause.hasFails(exit.cause)).toBe(true)
-          const err = yield* Effect.flip(
-            decideAlbumQuota({ albumId, currentCount })
-          )
+          const err = yield* Effect.flip(decideAlbumQuota({ albumId, currentCount }))
           expect(err._tag).toBe("AlbumQuotaExceededError")
           expect(err.albumId).toBe(albumId)
           expect(err.count).toBe(currentCount)
@@ -169,7 +157,7 @@ describe("decideAlbumQuota", () => {
           const next = yield* decideAlbumQuota({ albumId, currentCount })
           expect(next).toBe(currentCount + 1)
         }
-      })
+      }),
   )
 })
 
@@ -185,7 +173,7 @@ const makeTestLayers = (initialCount = 0) => {
           id: PhotoId.make(nextId++),
           name: input.name,
           albumId: input.albumId,
-          createdAt: CreatedAtMillis.make(1000)
+          createdAt: CreatedAtMillis.make(1000),
         }
         photos.push(photo)
         return photo
@@ -198,7 +186,7 @@ const makeTestLayers = (initialCount = 0) => {
         }
         return found
       }),
-    listAll: Effect.sync(() => [...photos])
+    listAll: Effect.sync(() => [...photos]),
   })
 
   const albumCounterLayer = Layer.succeed(AlbumCounterClient, {
@@ -207,7 +195,7 @@ const makeTestLayers = (initialCount = 0) => {
         count++
         return AlbumPhotoCount.make(count)
       }),
-    getCount: (_albumId: AlbumId) => Effect.sync(() => AlbumPhotoCount.make(count))
+    getCount: (_albumId: AlbumId) => Effect.sync(() => AlbumPhotoCount.make(count)),
   })
 
   const testLayer = Layer.merge(photoRepoLayer, albumCounterLayer)
@@ -226,11 +214,9 @@ describe("uploadPhoto", () => {
         testId,
         uploadPhoto({
           name: PhotoName.make("Sunset.jpg"),
-          albumId: AlbumId.make("album-nature")
-        }).pipe(
-          Effect.provide(testLayer)
-        ),
-        fnIndex.bySpanName
+          albumId: AlbumId.make("album-nature"),
+        }).pipe(Effect.provide(testLayer)),
+        fnIndex.bySpanName,
       )
 
       expect(result.id).toBe(1)
@@ -248,15 +234,16 @@ describe("uploadPhoto", () => {
       // Assert tracedCalls records Sample.uploadPhoto -> Album.decide
       const hasTracedCall = edges.tracedCalls.some(
         (e) =>
-          e.callerQualname === uploadPhotoQualname &&
-          e.calleeQualname === decideAlbumQuotaQualname
+          e.callerQualname === uploadPhotoQualname && e.calleeQualname === decideAlbumQuotaQualname,
       )
       expect(hasTracedCall).toBe(true)
 
       // Assert exercisesSpans records both spans
       expect(edges.exercisesSpans.some((e) => e.calleeQualname === uploadPhotoQualname)).toBe(true)
-      expect(edges.exercisesSpans.some((e) => e.calleeQualname === decideAlbumQuotaQualname)).toBe(true)
-    })
+      expect(edges.exercisesSpans.some((e) => e.calleeQualname === decideAlbumQuotaQualname)).toBe(
+        true,
+      )
+    }),
   )
 
   it.effect("fails when album quota is reached without inserting photo", () =>
@@ -266,10 +253,8 @@ describe("uploadPhoto", () => {
       const error = yield* Effect.flip(
         uploadPhoto({
           name: PhotoName.make("OverLimit.jpg"),
-          albumId: AlbumId.make("album-full")
-        }).pipe(
-          Effect.provide(testLayer)
-        )
+          albumId: AlbumId.make("album-full"),
+        }).pipe(Effect.provide(testLayer)),
       )
 
       expect(error._tag).toBe("AlbumQuotaExceededError")
@@ -277,7 +262,7 @@ describe("uploadPhoto", () => {
       expect(error.count).toBe(100)
       expect(photos).toHaveLength(0)
       expect(getCount()).toBe(100)
-    })
+    }),
   )
 })
 
@@ -288,21 +273,15 @@ describe("getPhotoById & listPhotos", () => {
 
       const created = yield* uploadPhoto({
         name: PhotoName.make("Mountains.jpg"),
-        albumId: AlbumId.make("travel")
-      }).pipe(
-        Effect.provide(testLayer)
-      )
+        albumId: AlbumId.make("travel"),
+      }).pipe(Effect.provide(testLayer))
 
-      const fetched = yield* getPhotoById(created.id).pipe(
-        Effect.provide(testLayer)
-      )
+      const fetched = yield* getPhotoById(created.id).pipe(Effect.provide(testLayer))
       expect(fetched).toEqual(created)
 
-      const all = yield* listPhotos().pipe(
-        Effect.provide(testLayer)
-      )
+      const all = yield* listPhotos().pipe(Effect.provide(testLayer))
       expect(all).toEqual([created])
-    })
+    }),
   )
 
   it.effect("fails with PhotoNotFoundError when photo does not exist", () =>
@@ -310,13 +289,11 @@ describe("getPhotoById & listPhotos", () => {
       const { testLayer } = makeTestLayers()
 
       const error = yield* Effect.flip(
-        getPhotoById(PhotoId.make(999)).pipe(
-          Effect.provide(testLayer)
-        )
+        getPhotoById(PhotoId.make(999)).pipe(Effect.provide(testLayer)),
       )
 
       expect(error._tag).toBe("PhotoNotFoundError")
       expect(error.id).toBe(999)
-    })
+    }),
   )
 })

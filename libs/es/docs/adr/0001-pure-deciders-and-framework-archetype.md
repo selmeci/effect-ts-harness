@@ -30,16 +30,16 @@ When implementing Event Sourcing and CQRS on top of Effect v4 and Cloudflare run
 
 ## Decision Drivers
 
-* **Zero Environmental Dependencies (`R = never`):** Business logic and decision validation must be purely functional, testable in milliseconds without mocks or database instances.
-* **Deterministic Event Replay (`E = never`, `R = never`):** Event reducers must be synchronous, total, and infallible to ensure historical streams can be folded identically at any point in time.
-* **Framework vs Application Archetype Separation:** Generic protocols (`Decider`, BDD testing runners, branded version schemas) must reside in generic framework packages (`type:core` / `type:contract`), while concrete business entities belong exclusively to `test/fixtures/` directories.
-* **Assertion and Test Fidelity:** BDD test runners must enforce strict structural equality via `Equal.equals` without loose JSON stringification fallbacks or vacuous error assertions.
+- **Zero Environmental Dependencies (`R = never`):** Business logic and decision validation must be purely functional, testable in milliseconds without mocks or database instances.
+- **Deterministic Event Replay (`E = never`, `R = never`):** Event reducers must be synchronous, total, and infallible to ensure historical streams can be folded identically at any point in time.
+- **Framework vs Application Archetype Separation:** Generic protocols (`Decider`, BDD testing runners, branded version schemas) must reside in generic framework packages (`type:core` / `type:contract`), while concrete business entities belong exclusively to `test/fixtures/` directories.
+- **Assertion and Test Fidelity:** BDD test runners must enforce strict structural equality via `Equal.equals` without loose JSON stringification fallbacks or vacuous error assertions.
 
 ## Considered Options
 
-* **Option 1:** Classic OOP Aggregate Roots with embedded repository and event store side effects.
-* **Option 2:** Pure Decider pattern (`initialState`, `evolve`, `decide`) with framework archetype packaging and strict BDD testing harness.
-* **Option 3:** Effect v3 community event-sourcing libraries adapted via runtime wrappers.
+- **Option 1:** Classic OOP Aggregate Roots with embedded repository and event store side effects.
+- **Option 2:** Pure Decider pattern (`initialState`, `evolve`, `decide`) with framework archetype packaging and strict BDD testing harness.
+- **Option 3:** Effect v3 community event-sourcing libraries adapted via runtime wrappers.
 
 ## Decision Outcome
 
@@ -66,20 +66,20 @@ When implementing Event Sourcing and CQRS on top of Effect v4 and Cloudflare run
 
 ### Positive Consequences
 
-* Aggregate decisions are 100% deterministic and testable without spinning up Cloudflare or SQLite emulation.
-* Mathematical invariants (chunked fold equivalence, deterministic replay, terminal immutability) are proven via property-based tests.
-* The test runner cannot pass vacuously due to strict `Equal.equals` and mandatory error assertions.
+- Aggregate decisions are 100% deterministic and testable without spinning up Cloudflare or SQLite emulation.
+- Mathematical invariants (chunked fold equivalence, deterministic replay, terminal immutability) are proven via property-based tests.
+- The test runner cannot pass vacuously due to strict `Equal.equals` and mandatory error assertions.
 
 ### Negative Consequences and Trade-offs
 
-* Domain services requiring external contextual queries (e.g. inventory lookups) must be queried prior to invoking `decide`, keeping orchestration in application use cases.
-* Reducer functions must exhaustively handle every event and state variant using `ts-pattern`.
+- Domain services requiring external contextual queries (e.g. inventory lookups) must be queried prior to invoking `decide`, keeping orchestration in application use cases.
+- Reducer functions must exhaustively handle every event and state variant using `ts-pattern`.
 
 ### Deterministic Enforcement
 
-| Rule | Enforced By | Gate / Mechanism | Governed Symbols |
-| --- | --- | --- | --- |
-| Pure Decider (`R = never`) | `libs/harness/graph/src/policy-check.ts`, `libs/harness/graph/src/type-extractor.ts`, `libs/es/core/src/decider.ts` | `checkEffectGraph` (`impure-decider`), `extractTypeAwareGraphFromSource` (`untraced-decider`) | `Cart.decide` |
-| Synchronous Infallible Reducer | `libs/harness/graph/src/policy-check.ts`, `libs/harness/graph/src/type-extractor.ts`, `tools/oxlint/syntax-bans.js` | `checkEffectGraph` (`impure-reducer`), `extractTypeAwareGraphFromSource` (`unscoped-effect-run`) | `Cart.evolve` |
-| BDD Assertion Structural Equality | `libs/harness/graph/src/type-extractor.ts`, `libs/es/core/src/testing.ts` | `extractTypeAwareGraphFromSource` (`fallback-json-equality`, `vacuous-error-assertion`), `makeDeciderTestHarness` | `Cart.decide` |
-| Typed Domain Failure Channel | `libs/harness/graph/src/type-extractor.ts`, `libs/es/core/test/fixtures/cart.ts` | `extractTypeAwareGraphFromSource` (`missing-aggregate-id-guard`, `unbranded-schema-field`), `failsWith` | `CartAlreadyCheckedOutError`, `EmptyCartCheckoutError`, `CartIdMismatchError` |
+| Rule                              | Enforced By                                                                                                         | Gate / Mechanism                                                                                                  | Governed Symbols                                                              |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| Pure Decider (`R = never`)        | `libs/harness/graph/src/policy-check.ts`, `libs/harness/graph/src/type-extractor.ts`, `libs/es/core/src/decider.ts` | `checkEffectGraph` (`impure-decider`), `extractTypeAwareGraphFromSource` (`untraced-decider`)                     | `Cart.decide`                                                                 |
+| Synchronous Infallible Reducer    | `libs/harness/graph/src/policy-check.ts`, `libs/harness/graph/src/type-extractor.ts`, `tools/oxlint/syntax-bans.js` | `checkEffectGraph` (`impure-reducer`), `extractTypeAwareGraphFromSource` (`unscoped-effect-run`)                  | `Cart.evolve`                                                                 |
+| BDD Assertion Structural Equality | `libs/harness/graph/src/type-extractor.ts`, `libs/es/core/src/testing.ts`                                           | `extractTypeAwareGraphFromSource` (`fallback-json-equality`, `vacuous-error-assertion`), `makeDeciderTestHarness` | `Cart.decide`                                                                 |
+| Typed Domain Failure Channel      | `libs/harness/graph/src/type-extractor.ts`, `libs/es/core/test/fixtures/cart.ts`                                    | `extractTypeAwareGraphFromSource` (`missing-aggregate-id-guard`, `unbranded-schema-field`), `failsWith`           | `CartAlreadyCheckedOutError`, `EmptyCartCheckoutError`, `CartIdMismatchError` |

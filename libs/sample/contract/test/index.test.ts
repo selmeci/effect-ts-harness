@@ -24,7 +24,7 @@ import {
   PhotoIdFromString,
   PhotoName,
   PhotoNotFoundError,
-  SampleApi
+  SampleApi,
 } from "../src/index.js"
 
 const currentDir = import.meta.dirname ?? fileURLToPath(new URL(".", import.meta.url))
@@ -46,7 +46,7 @@ describe("sample-contract (Schemas, HttpApi, RpcGroup, OpenAPI)", () => {
     expect(input.name).toBe(PhotoName.make("sunset.jpg"))
     const quotaInput = Schema.decodeSync(DecideAlbumQuotaInput)({
       albumId: "vacation",
-      currentCount: 0
+      currentCount: 0,
     })
     expect(quotaInput.albumId).toBe(AlbumId.make("vacation"))
     expect(quotaInput.currentCount).toBe(AlbumPhotoCount.make(0))
@@ -54,7 +54,7 @@ describe("sample-contract (Schemas, HttpApi, RpcGroup, OpenAPI)", () => {
       id: 1,
       name: "sunset.jpg",
       albumId: "vacation",
-      createdAt: 1700000000
+      createdAt: 1700000000,
     })
     expect(photo.id).toBe(PhotoId.make(1))
     expect(photo.createdAt).toBe(CreatedAtMillis.make(1700000000))
@@ -83,7 +83,7 @@ describe("sample-contract (Schemas, HttpApi, RpcGroup, OpenAPI)", () => {
 
     const quota = new AlbumQuotaExceededError({
       albumId: AlbumId.make("vacation"),
-      count: AlbumPhotoCount.make(100)
+      count: AlbumPhotoCount.make(100),
     })
     expect(quota._tag).toBe("AlbumQuotaExceededError")
     expect(quota.albumId).toBe("vacation")
@@ -128,21 +128,22 @@ describe("sample-contract (Schemas, HttpApi, RpcGroup, OpenAPI)", () => {
     const liveSpec = buildOpenApiSpec()
     const baselineSpec: OpenApiDoc = JSON.parse(JSON.stringify(liveSpec))
     const items =
-      baselineSpec.paths?.["/photos"]?.["get"]?.responses?.["200"]?.content?.["application/json"]?.schema?.items
+      baselineSpec.paths?.["/photos"]?.["get"]?.responses?.["200"]?.content?.["application/json"]
+        ?.schema?.items
     if (items) {
       items.required = [...(items.required ?? []), "extraRequiredField"]
       items.properties = { ...items.properties, extraRequiredField: { type: "string" } }
     }
     const tmpBaselineFile = resolve(
       os.tmpdir(),
-      `test-baseline-${Date.now()}-${Math.random().toString(36).slice(2)}.json`
+      `test-baseline-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
     )
     try {
       writeFileSync(tmpBaselineFile, JSON.stringify(baselineSpec, null, 2), "utf8")
       const res = spawnSync(
         process.execPath,
         ["--import", resolverPath, checkScriptPath, "--baseline", tmpBaselineFile],
-        { encoding: "utf8" }
+        { encoding: "utf8" },
       )
       expect(res.status).toBe(2)
       expect(res.stderr).toContain("ESCALATE")
@@ -165,16 +166,16 @@ describe("sample-contract (Schemas, HttpApi, RpcGroup, OpenAPI)", () => {
                         type: "array",
                         items: {
                           type: "object",
-                          required: ["id", "name"]
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
+                          required: ["id", "name"],
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
       }
       expect(detectOpenApiBreakingChanges(baseline, baseline)).toEqual([])
     })
@@ -206,16 +207,16 @@ describe("sample-contract (Schemas, HttpApi, RpcGroup, OpenAPI)", () => {
                         type: "array",
                         items: {
                           type: "object",
-                          required: ["id", "name", "albumId"]
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
+                          required: ["id", "name", "albumId"],
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
       }
       const current = {
         paths: {
@@ -229,16 +230,16 @@ describe("sample-contract (Schemas, HttpApi, RpcGroup, OpenAPI)", () => {
                         type: "array",
                         items: {
                           type: "object",
-                          required: ["id", "name"]
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
+                          required: ["id", "name"],
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
       }
       const changes = detectOpenApiBreakingChanges(baseline, current)
       expect(changes.some((c) => c.includes("albumId"))).toBe(true)

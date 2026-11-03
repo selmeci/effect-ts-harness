@@ -35,11 +35,13 @@
 ### Task 1: Complete `libs/harness/decision` definitions (`GuardV1`, `TriageV1`, `PlanStepCoverageV1`) and deterministic mock Layer
 
 **Files:**
+
 - Create: `libs/harness/decision/src/guard-decision.ts`, `libs/harness/decision/src/triage-decision.ts`, `libs/harness/decision/src/plan-coverage-decision.ts`, `libs/harness/decision/src/mock-layer.ts`, `libs/harness/decision/src/index.ts`
 - Modify: `libs/harness/decision/package.json`
 - Create: `libs/harness/decision/test/decisions.test.ts`
 
 **Interfaces:**
+
 - Consumes: `Decision`, `DecisionModel` from `"effect/ai/*"`, `Effect`, `Layer`, `Schema` from `"effect"`.
 - Produces:
   - `GuardV1` & `decideGuardCommand(command: string): Effect.Effect<{ readonly verdict: "allow" | "deny" | "ask"; readonly reason: string }, never, DecisionModel.DecisionModel>` (with `1500 millis` timeout + fallback to `"ask"`).
@@ -63,7 +65,7 @@ import {
   PlanStepCoverageV1,
   routeStep,
   triageFailure,
-  TriageV1
+  TriageV1,
 } from "../src/index.js"
 
 describe("Harness decision definitions & fallbacks", () => {
@@ -73,28 +75,32 @@ describe("Harness decision definitions & fallbacks", () => {
     }
   })
 
-  it.effect("falls back to 'ask' in decideGuardCommand and 'review' in routeStep when Ollama fails or times out", () =>
-    Effect.gen(function* () {
-      const guardRes = yield* decideGuardCommand("curl https://unknown.example").pipe(
-        Effect.provide(makeFailingDecisionModelLayer())
-      )
-      expect(guardRes.verdict).toBe("ask")
+  it.effect(
+    "falls back to 'ask' in decideGuardCommand and 'review' in routeStep when Ollama fails or times out",
+    () =>
+      Effect.gen(function* () {
+        const guardRes = yield* decideGuardCommand("curl https://unknown.example").pipe(
+          Effect.provide(makeFailingDecisionModelLayer()),
+        )
+        expect(guardRes.verdict).toBe("ask")
 
-      const routeRes = yield* routeStep("Retry failed HTTP requests with exponential backoff").pipe(
-        Effect.provide(makeFailingDecisionModelLayer())
-      )
-      expect(routeRes).toBe("review")
-    })
+        const routeRes = yield* routeStep(
+          "Retry failed HTTP requests with exponential backoff",
+        ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
+        expect(routeRes).toBe("review")
+      }),
   )
 
-  it.effect("classifies known tsgo/oxlint diagnostics as mechanical without calling DecisionModel", () =>
-    Effect.gen(function* () {
-      const res = yield* triageFailure("error: floatingEffect: Effect.log('x') is not yielded").pipe(
-        Effect.provide(makeFailingDecisionModelLayer())
-      )
-      expect(res.kind).toBe("mechanical")
-      expect(res.hint).toContain("yield*")
-    })
+  it.effect(
+    "classifies known tsgo/oxlint diagnostics as mechanical without calling DecisionModel",
+    () =>
+      Effect.gen(function* () {
+        const res = yield* triageFailure(
+          "error: floatingEffect: Effect.log('x') is not yielded",
+        ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
+        expect(res.kind).toBe("mechanical")
+        expect(res.hint).toContain("yield*")
+      }),
   )
 
   it.effect("evaluates per-step plan coverage with deterministic mock DecisionModel", () =>
@@ -102,18 +108,24 @@ describe("Harness decision definitions & fallbacks", () => {
       const pass = yield* checkPlanStepCoverage({
         stepId: "step-1",
         planStep: "Add GreetInput schema",
-        stepDiff: "+export const GreetInput = Schema.Struct({ name: Schema.String })"
-      }).pipe(Effect.provide(makeMockDecisionModelLayer({ implementedProb: 0.95, noOutOfScopeProb: 0.95 })))
+        stepDiff: "+export const GreetInput = Schema.Struct({ name: Schema.String })",
+      }).pipe(
+        Effect.provide(
+          makeMockDecisionModelLayer({ implementedProb: 0.95, noOutOfScopeProb: 0.95 }),
+        ),
+      )
       expect(pass.covered).toBe(true)
 
       const fail = yield* checkPlanStepCoverage({
         stepId: "step-2",
         planStep: "Add PhotoRepo D1 insert",
-        stepDiff: ""
-      }).pipe(Effect.provide(makeMockDecisionModelLayer({ implementedProb: 0.2, noOutOfScopeProb: 0.9 })))
+        stepDiff: "",
+      }).pipe(
+        Effect.provide(makeMockDecisionModelLayer({ implementedProb: 0.2, noOutOfScopeProb: 0.9 })),
+      )
       expect(fail.covered).toBe(false)
       expect(fail.reason).toContain("step-2")
-    })
+    }),
   )
 })
 ```
@@ -144,12 +156,14 @@ git commit -m "feat(decision): add GuardV1, TriageV1, PlanStepCoverageV1 and moc
 ### Task 2: Add working-tree SHA-256 stamp and `plan` vs. `impl` graph diffing in `@harness/gates`
 
 **Files:**
+
 - Modify: `libs/harness/gates/package.json` (add `@harness/graph: "workspace:*"`)
 - Create: `libs/harness/gates/src/verify-stamp.ts`, `libs/harness/gates/src/branch-diff.ts`
 - Modify: `libs/harness/gates/src/index.ts`
 - Create: `libs/harness/gates/test/verify-stamp-and-diff.test.ts`
 
 **Interfaces:**
+
 - Consumes: `HarnessGraph` from `@harness/graph`.
 - Produces:
   - `VerifyStamp`: `{ readonly treeHash: string; readonly timestamp: string; readonly taskBranch: string }`
@@ -197,8 +211,8 @@ describe("verify-stamp and plan/impl graph diff", () => {
           line: 4,
           packageTag: "domain",
           successType: "string",
-          isStub: true
-        }
+          isStub: true,
+        },
       ],
       services: [],
       layers: [],
@@ -210,7 +224,7 @@ describe("verify-stamp and plan/impl graph diff", () => {
       providesService: [],
       layerRequires: [],
       tracedCalls: [],
-      exercisesSpans: []
+      exercisesSpans: [],
     })
 
     const stillStub = diffPlanAndImplGraphs(planGraph, planGraph)
@@ -246,10 +260,12 @@ git commit -m "feat(gates): add cryptographic verify-stamp and plan/impl graph b
 ### Task 3: Wire full `apps/harness-cli` commands (`session`, `guard`, `route`, `plan-check`, `verify`, `done`, `doctor`)
 
 **Files:**
+
 - Modify: `apps/harness-cli/package.json`
 - Modify: `apps/harness-cli/src/index.ts`, `apps/harness-cli/test/index.test.ts`
 
 **Interfaces:**
+
 - Consumes: `@harness/gates`, `@harness/decision`, `@harness/graph`, `@harness/ingest`.
 - Produces:
   - `runCli(argv: ReadonlyArray<string>, options?: CliEnv): Promise<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }>`
@@ -285,8 +301,8 @@ describe("harness-cli v2 commands", () => {
     expect(JSON.parse(ask.stdout)).toMatchObject({
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
-        permissionDecision: "ask"
-      }
+        permissionDecision: "ask",
+      },
     })
   })
 
@@ -298,13 +314,16 @@ describe("harness-cli v2 commands", () => {
       expect(missing.exitCode).toBe(0)
       expect(JSON.parse(missing.stdout)).toEqual({
         decision: "block",
-        reason: expect.stringContaining("Run harness verify")
+        reason: expect.stringContaining("Run harness verify"),
       })
 
       writeVerifyStamp(dir, "impl/current")
       const green = await runCli(["done"], {
         repoRoot: dir,
-        decisionLayer: makeMockDecisionModelLayer({ implementedProb: 0.95, noOutOfScopeProb: 0.95 })
+        decisionLayer: makeMockDecisionModelLayer({
+          implementedProb: 0.95,
+          noOutOfScopeProb: 0.95,
+        }),
       })
       expect(green.exitCode).toBe(0)
       expect(green.stdout).toBe("")
@@ -341,6 +360,7 @@ git commit -m "feat(harness-cli): implement guard, route, plan-check, verify, do
 ### Task 4: Create the Claude Code adapter (`adapters/claude-code`) and Cedar policy (`libs/harness/graph/policies.cedar`)
 
 **Files:**
+
 - Create:
   - `adapters/claude-code/hooks.json`
   - `adapters/claude-code/.mcp.json`
@@ -349,6 +369,7 @@ git commit -m "feat(harness-cli): implement guard, route, plan-check, verify, do
 - Create: `apps/harness-cli/test/adapter-config.test.ts`
 
 **Interfaces:**
+
 - Consumes: `apps/harness-cli`, `apps/harness-mcp`, `@modernrelay/omnigraph-mcp@0.14.0`.
 - Produces:
   - `adapters/claude-code/hooks.json` wiring `SessionStart -> harness session`, `PreToolUse -> harness guard`, `PostToolUse -> tsc/reingest`, `Stop -> harness done`.
@@ -366,12 +387,16 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
   const repoRoot = resolve(import.meta.dirname, "../../..")
 
   it("wires SessionStart, PreToolUse, PostToolUse, and Stop hooks to harness-cli", () => {
-    const hooks = JSON.parse(readFileSync(resolve(repoRoot, "adapters/claude-code/hooks.json"), "utf8"))
+    const hooks = JSON.parse(
+      readFileSync(resolve(repoRoot, "adapters/claude-code/hooks.json"), "utf8"),
+    )
     expect(Object.keys(hooks.hooks)).toEqual(["SessionStart", "PreToolUse", "PostToolUse", "Stop"])
   })
 
   it("configures harness-mcp, omnigraph-mcp, and nx-mcp in .mcp.json", () => {
-    const mcp = JSON.parse(readFileSync(resolve(repoRoot, "adapters/claude-code/.mcp.json"), "utf8"))
+    const mcp = JSON.parse(
+      readFileSync(resolve(repoRoot, "adapters/claude-code/.mcp.json"), "utf8"),
+    )
     expect(Object.keys(mcp.mcpServers)).toEqual(["harness-mcp", "omnigraph-mcp", "nx-mcp"])
   })
 

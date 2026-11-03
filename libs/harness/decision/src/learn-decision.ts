@@ -8,7 +8,7 @@ export const LEARN_TARGETS = [
   "agent-pattern",
   "triage-rule",
   "guard-allowlist",
-  "ast-graph-gate"
+  "ast-graph-gate",
 ] as const
 export type LearnTarget = (typeof LEARN_TARGETS)[number]
 
@@ -17,28 +17,26 @@ export const LearnProposalV1 = Decision.make({
     kind: Schema.String,
     summary: Schema.String,
     detail: Schema.String,
-    occurrences: Schema.Int
+    occurrences: Schema.Int,
   }),
   decisions: {
     actionable: Decision.probability({
       instructions:
-        "Should this recurring development friction be promoted into a reusable pattern, triage hint, guard rule, or AST/graph gate?"
+        "Should this recurring development friction be promoted into a reusable pattern, triage hint, guard rule, or AST/graph gate?",
     }),
     target: Decision.classify({
       instructions:
         "Which harness mechanism best prevents or resolves this friction in future tasks?",
       criteria: {
-        "agent-pattern":
-          "New or updated recipe in agent-patterns/*.md registered in IdiomRouterV1",
+        "agent-pattern": "New or updated recipe in agent-patterns/*.md registered in IdiomRouterV1",
         "triage-rule":
           "Deterministic compiler/test failure pattern and hint in DETERMINISTIC_TRIAGE_RULES",
-        "guard-allowlist":
-          "Safe recurring CLI command prefix for ALLOWLIST in policy.ts",
+        "guard-allowlist": "Safe recurring CLI command prefix for ALLOWLIST in policy.ts",
         "ast-graph-gate":
-          "Strict AST lint rule in tools/oxlint/syntax-bans.js or graph rule in checkEffectGraph"
-      }
-    })
-  }
+          "Strict AST lint rule in tools/oxlint/syntax-bans.js or graph rule in checkEffectGraph",
+      },
+    }),
+  },
 })
 
 assertDecisionLimits(LearnProposalV1)
@@ -58,16 +56,14 @@ export interface LearnProposalResult {
   readonly source: "decision-model" | "deterministic-fallback"
 }
 
-export const deterministicLearnFallback = (
-  input: LearnProposalInput
-): LearnProposalResult => {
+export const deterministicLearnFallback = (input: LearnProposalInput): LearnProposalResult => {
   if (input.kind === "route_miss") {
     return {
       target: "agent-pattern",
       actionable: true,
       confidence: 0.85,
       recommendation: `Create or expand an agent-patterns/*.md recipe for "${input.summary}" and register it in IdiomRouterV1 (11 of 26 slots available).`,
-      source: "deterministic-fallback"
+      source: "deterministic-fallback",
     }
   }
 
@@ -90,7 +86,7 @@ export const deterministicLearnFallback = (
       actionable: true,
       confidence: 0.85,
       recommendation,
-      source: "deterministic-fallback"
+      source: "deterministic-fallback",
     }
   }
 
@@ -99,23 +95,23 @@ export const deterministicLearnFallback = (
     actionable: input.occurrences >= 2,
     confidence: 0.8,
     recommendation: `Review command "${input.summary}" — if safe and recurring, add its prefix to ALLOWLIST in libs/harness/gates/src/policy.ts.`,
-    source: "deterministic-fallback"
+    source: "deterministic-fallback",
   }
 }
 
 export const proposeLearningAction = Effect.fn("Harness.proposeLearningAction")(function* (
-  input: LearnProposalInput
+  input: LearnProposalInput,
 ) {
   const outcome = yield* DecisionModel.decide(LearnProposalV1, {
     input: {
       kind: input.kind,
       summary: input.summary,
       detail: input.detail,
-      occurrences: input.occurrences
-    }
+      occurrences: input.occurrences,
+    },
   }).pipe(
     Effect.timeoutOption("1500 millis"),
-    Effect.catchCause(() => Effect.succeedNone)
+    Effect.catchCause(() => Effect.succeedNone),
   )
 
   if (Option.isNone(outcome)) {
@@ -133,7 +129,7 @@ export const proposeLearningAction = Effect.fn("Harness.proposeLearningAction")(
   yield* Effect.annotateCurrentSpan({
     "decision.definition": "LearnProposalV1",
     "decision.target": target,
-    "decision.actionable": String(prob)
+    "decision.actionable": String(prob),
   })
 
   return {
@@ -141,6 +137,6 @@ export const proposeLearningAction = Effect.fn("Harness.proposeLearningAction")(
     actionable: prob >= 0.6,
     confidence: prob,
     recommendation: fallback.recommendation,
-    source: "decision-model" as const
+    source: "decision-model" as const,
   }
 })

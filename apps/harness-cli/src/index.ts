@@ -15,7 +15,7 @@ import {
   LocalDecisionModel,
   proposeLearningAction,
   routeStep,
-  triageFailure
+  triageFailure,
 } from "@harness/decision"
 import {
   appendFrictionEvent,
@@ -59,7 +59,7 @@ import {
   type TelemetrySurface,
   writeGraphHeadMeta,
   writeSessionReportFiles,
-  writeVerifyStamp
+  writeVerifyStamp,
 } from "@harness/gates"
 import {
   checkEffectGraph,
@@ -74,7 +74,7 @@ import {
   queryOntologyWhy,
   renderOntologyMermaid,
   saveGraphSnapshot,
-  syncToOmnigraphAndSnapshot
+  syncToOmnigraphAndSnapshot,
 } from "@harness/graph"
 import { buildWorkspaceFnIndex } from "@harness/ingest"
 
@@ -92,7 +92,7 @@ export const COMMANDS = [
   "doctor",
   "ontology",
   "report",
-  "help"
+  "help",
 ] as const
 
 export type Command = (typeof COMMANDS)[number]
@@ -106,11 +106,13 @@ export interface CliEnv {
   readonly decisionLayer?: Layer.Layer<DecisionModel.DecisionModel> | undefined
   readonly planGraph?: HarnessGraph | undefined
   readonly implGraph?: HarnessGraph | undefined
-  readonly planSteps?: ReadonlyArray<{
-    readonly stepId: string
-    readonly planStep: string
-    readonly stepDiff: string
-  }> | undefined
+  readonly planSteps?:
+    | ReadonlyArray<{
+        readonly stepId: string
+        readonly planStep: string
+        readonly stepDiff: string
+      }>
+    | undefined
   readonly skipSubprocessVerify?: boolean | undefined
   readonly governanceDocs?: ReadonlyArray<GovernanceDocReference> | undefined
 }
@@ -128,8 +130,8 @@ const PreToolUseStdinSchema = Schema.Struct({
     Schema.Struct({
       command: Schema.optional(Schema.String),
       file_path: Schema.optional(Schema.String),
-      path: Schema.optional(Schema.String)
-    })
+      path: Schema.optional(Schema.String),
+    }),
   ),
   toolCall: Schema.optional(
     Schema.Struct({
@@ -140,16 +142,14 @@ const PreToolUseStdinSchema = Schema.Struct({
           command: Schema.optional(Schema.String),
           TargetFile: Schema.optional(Schema.String),
           AbsolutePath: Schema.optional(Schema.String),
-          file_path: Schema.optional(Schema.String)
-        })
-      )
-    })
-  )
+          file_path: Schema.optional(Schema.String),
+        }),
+      ),
+    }),
+  ),
 })
 
-const decodePreToolUseStdin = Schema.decodeOption(
-  Schema.fromJsonString(PreToolUseStdinSchema)
-)
+const decodePreToolUseStdin = Schema.decodeOption(Schema.fromJsonString(PreToolUseStdinSchema))
 
 const CLI_REPO_ROOT = (() => {
   let curr = resolve(dirname(fileURLToPath(import.meta.url)))
@@ -182,15 +182,12 @@ const isIsolatedExternalWorkspace = (repoRoot: string): boolean => {
   if (explicitEnvUrl) {
     return false
   }
-  return (
-    resolveCanonicalRepoRoot(repoRoot) !==
-    resolveCanonicalRepoRoot(CLI_REPO_ROOT)
-  )
+  return resolveCanonicalRepoRoot(repoRoot) !== resolveCanonicalRepoRoot(CLI_REPO_ROOT)
 }
 
 const ANSI_REGEX = new RegExp(
   `[${String.fromCharCode(27)}${String.fromCharCode(155)}][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]`,
-  "g"
+  "g",
 )
 
 export const stripAnsiCodes = (text: string): string => text.replace(ANSI_REGEX, "")
@@ -222,7 +219,10 @@ export const cleanSubprocessError = (raw: string): string => {
     filtered.push(line)
   }
 
-  const result = filtered.join("\n").replace(/\n{3,}/g, "\n\n").trim()
+  const result = filtered
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
   return result.length > 0 ? result : noAnsi.trim()
 }
 
@@ -257,7 +257,7 @@ export const formatSubprocessError = (err: unknown): string => {
 const handleGuard = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
-  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>
+  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     const isAntigravityFlag = argv.includes("--format=antigravity")
@@ -268,10 +268,15 @@ const handleGuard = (
       .filter((arg) => arg !== "--format=antigravity" && !arg.startsWith("--file="))
 
     let rawStdin = options?.stdin
-    if (positionalArgs.length === 0 && !cliFilePath && rawStdin === undefined && !process.stdin.isTTY) {
+    if (
+      positionalArgs.length === 0 &&
+      !cliFilePath &&
+      rawStdin === undefined &&
+      !process.stdin.isTTY
+    ) {
       rawStdin = yield* Effect.try({
         try: () => readFileSync(0, "utf8"),
-        catch: () => ""
+        catch: () => "",
       }).pipe(Effect.orElseSucceed(() => ""))
     }
 
@@ -284,23 +289,20 @@ const handleGuard = (
         if (decoded.value.toolCall !== undefined) {
           isAntigravityStdin = true
           stdinCmd =
-            decoded.value.toolCall.args?.CommandLine ??
-            decoded.value.toolCall.args?.command
+            decoded.value.toolCall.args?.CommandLine ?? decoded.value.toolCall.args?.command
           stdinFilePath =
             decoded.value.toolCall.args?.TargetFile ??
             decoded.value.toolCall.args?.AbsolutePath ??
             decoded.value.toolCall.args?.file_path
         } else {
           stdinCmd = decoded.value.tool_input?.command
-          stdinFilePath =
-            decoded.value.tool_input?.file_path ??
-            decoded.value.tool_input?.path
+          stdinFilePath = decoded.value.tool_input?.file_path ?? decoded.value.tool_input?.path
         }
       }
     }
     const isAntigravity = isAntigravityFlag || isAntigravityStdin
     const filePath = cliFilePath ?? stdinFilePath
-    const command = positionalArgs.length > 0 ? positionalArgs.join(" ") : stdinCmd ?? ""
+    const command = positionalArgs.length > 0 ? positionalArgs.join(" ") : (stdinCmd ?? "")
 
     if (filePath && command.trim() === "") {
       const fileGuard = classifyFileWrite(filePath)
@@ -310,15 +312,15 @@ const handleGuard = (
             exitCode: 0,
             stdout: JSON.stringify({
               decision: "deny",
-              reason: fileGuard.reason
+              reason: fileGuard.reason,
             }),
-            stderr: ""
+            stderr: "",
           }
         }
         return {
           exitCode: 2,
           stdout: "",
-          stderr: fileGuard.reason ?? `Blocked file write: ${filePath}`
+          stderr: fileGuard.reason ?? `Blocked file write: ${filePath}`,
         }
       }
       if (fileGuard.verdict === "ask") {
@@ -327,9 +329,9 @@ const handleGuard = (
             exitCode: 0,
             stdout: JSON.stringify({
               decision: "ask",
-              reason: fileGuard.reason
+              reason: fileGuard.reason,
             }),
-            stderr: ""
+            stderr: "",
           }
         }
         return {
@@ -338,16 +340,16 @@ const handleGuard = (
             hookSpecificOutput: {
               hookEventName: "PreToolUse",
               permissionDecision: "ask",
-              permissionDecisionReason: fileGuard.reason
-            }
+              permissionDecisionReason: fileGuard.reason,
+            },
           }),
-          stderr: ""
+          stderr: "",
         }
       }
       return {
         exitCode: 0,
         stdout: isAntigravity ? JSON.stringify({ decision: "allow" }) : "",
-        stderr: ""
+        stderr: "",
       }
     }
 
@@ -355,7 +357,7 @@ const handleGuard = (
       return {
         exitCode: 0,
         stdout: isAntigravity ? JSON.stringify({ decision: "allow" }) : "",
-        stderr: ""
+        stderr: "",
       }
     }
 
@@ -372,22 +374,22 @@ const handleGuard = (
           exitCode: 0,
           stdout: JSON.stringify({
             decision: "deny",
-            reason: denyReason
+            reason: denyReason,
           }),
-          stderr: ""
+          stderr: "",
         }
       }
       return {
         exitCode: 2,
         stdout: "",
-        stderr: denyReason
+        stderr: denyReason,
       }
     }
     if (classification === "allow") {
       return {
         exitCode: 0,
         stdout: isAntigravity ? JSON.stringify({ decision: "allow" }) : "",
-        stderr: ""
+        stderr: "",
       }
     }
     if (classification === "ask") {
@@ -396,9 +398,9 @@ const handleGuard = (
           exitCode: 0,
           stdout: JSON.stringify({
             decision: "ask",
-            reason: `Command requires human confirmation: ${command}`
+            reason: `Command requires human confirmation: ${command}`,
           }),
-          stderr: ""
+          stderr: "",
         }
       }
       return {
@@ -407,10 +409,10 @@ const handleGuard = (
           hookSpecificOutput: {
             hookEventName: "PreToolUse",
             permissionDecision: "ask",
-            permissionDecisionReason: `Command requires human confirmation: ${command}`
-          }
+            permissionDecisionReason: `Command requires human confirmation: ${command}`,
+          },
         }),
-        stderr: ""
+        stderr: "",
       }
     }
 
@@ -418,13 +420,11 @@ const handleGuard = (
     if (options?.decisionLayer === undefined && process.env.VITEST === undefined) {
       yield* ensureLocalOllamaReady()
     }
-    const decision = yield* decideGuardCommand(command).pipe(
-      Effect.provide(decisionLayer)
-    )
+    const decision = yield* decideGuardCommand(command).pipe(Effect.provide(decisionLayer))
     recordFriction(options, {
       kind: "guard_escalation",
       summary: command,
-      detail: `verdict=${decision.verdict}; reason=${decision.reason}`
+      detail: `verdict=${decision.verdict}; reason=${decision.reason}`,
     })
 
     if (decision.verdict === "deny") {
@@ -437,22 +437,22 @@ const handleGuard = (
           exitCode: 0,
           stdout: JSON.stringify({
             decision: "deny",
-            reason: denyReason
+            reason: denyReason,
           }),
-          stderr: ""
+          stderr: "",
         }
       }
       return {
         exitCode: 2,
         stdout: "",
-        stderr: denyReason
+        stderr: denyReason,
       }
     }
     if (decision.verdict === "allow") {
       return {
         exitCode: 0,
         stdout: isAntigravity ? JSON.stringify({ decision: "allow" }) : "",
-        stderr: ""
+        stderr: "",
       }
     }
     if (isAntigravity) {
@@ -460,9 +460,9 @@ const handleGuard = (
         exitCode: 0,
         stdout: JSON.stringify({
           decision: "ask",
-          reason: decision.reason
+          reason: decision.reason,
         }),
-        stderr: ""
+        stderr: "",
       }
     }
     return {
@@ -471,10 +471,10 @@ const handleGuard = (
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
           permissionDecision: "ask",
-          permissionDecisionReason: decision.reason
-        }
+          permissionDecisionReason: decision.reason,
+        },
       }),
-      stderr: ""
+      stderr: "",
     }
   })
 
@@ -484,7 +484,7 @@ const recordFriction = (
     readonly kind: FrictionEventKind
     readonly summary: string
     readonly detail: string
-  }
+  },
 ): void => {
   if (options?.repoRoot === undefined && process.env.VITEST !== undefined) {
     return
@@ -503,7 +503,7 @@ const recordTelemetry = (
     readonly durationMs: number
     readonly engineSource?: TelemetryEngineSource | undefined
     readonly detail?: string | undefined
-  }
+  },
 ): void => {
   if (options?.repoRoot === undefined && process.env.VITEST !== undefined) {
     return
@@ -515,7 +515,7 @@ const recordTelemetry = (
 const handleRoute = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
-  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>
+  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     const step = argv.slice(1).join(" ")
@@ -524,31 +524,29 @@ const handleRoute = (
       recordFriction(options, {
         kind: "route_miss",
         summary: step,
-        detail: "IdiomRouterV1 returned review (no matching agent-patterns/*.md with >= 0.7 confidence)"
+        detail:
+          "IdiomRouterV1 returned review (no matching agent-patterns/*.md with >= 0.7 confidence)",
       })
     }
-    const stdout =
-      block === "review" || block === "effect"
-        ? block
-        : `agent-patterns/${block}.md`
+    const stdout = block === "review" || block === "effect" ? block : `agent-patterns/${block}.md`
     return { exitCode: 0, stdout, stderr: "" }
   })
 
 const resolveNxAffectedArgs = (
   repoRoot: string,
-  targets: ReadonlyArray<string>
+  targets: ReadonlyArray<string>,
 ): ReadonlyArray<string> => {
   const hasMain = Effect.runSync(
     Effect.try({
       try: () => {
         execFileSync("git", ["rev-parse", "--verify", "main"], {
           cwd: repoRoot,
-          stdio: "pipe"
+          stdio: "pipe",
         })
         return true
       },
-      catch: () => false
-    }).pipe(Effect.orElseSucceed(() => false))
+      catch: () => false,
+    }).pipe(Effect.orElseSucceed(() => false)),
   )
   if (hasMain) {
     return ["nx", "affected", "--base=main", "-t", ...targets]
@@ -558,12 +556,12 @@ const resolveNxAffectedArgs = (
       try: () => {
         execFileSync("git", ["rev-parse", "--verify", "HEAD~1"], {
           cwd: repoRoot,
-          stdio: "pipe"
+          stdio: "pipe",
         })
         return true
       },
-      catch: () => false
-    }).pipe(Effect.orElseSucceed(() => false))
+      catch: () => false,
+    }).pipe(Effect.orElseSucceed(() => false)),
   )
   if (hasHeadParent) {
     return ["nx", "affected", "--base=HEAD~1", "-t", ...targets]
@@ -573,12 +571,11 @@ const resolveNxAffectedArgs = (
 
 const handlePlanCheck = (
   argv: ReadonlyArray<string>,
-  options: CliEnv | undefined
+  options: CliEnv | undefined,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-    const governanceDocs =
-      options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot)
+    const governanceDocs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot)
     const graphOnly = argv.includes("--graph-only")
 
     const requireOllama =
@@ -594,30 +591,34 @@ const handlePlanCheck = (
           exitCode: 1,
           stdout: "",
           stderr:
-            "[CRITICAL HARNESS BLOCKER] Key component Ollama (clef-flash DecisionModel) is not running and could not be started automatically. Halting execution."
+            "[CRITICAL HARNESS BLOCKER] Key component Ollama (clef-flash DecisionModel) is not running and could not be started automatically. Halting execution.",
         }
       }
     }
 
-    if (!graphOnly && !options?.skipSubprocessVerify && existsSync(join(repoRoot, "package.json"))) {
+    if (
+      !graphOnly &&
+      !options?.skipSubprocessVerify &&
+      existsSync(join(repoRoot, "package.json"))
+    ) {
       const nxArgs = resolveNxAffectedArgs(repoRoot, ["typecheck", "lint"])
       const subprocessErr = yield* Effect.try({
         try: () => {
           execFileSync("pnpm", nxArgs, {
             cwd: repoRoot,
             stdio: "pipe",
-            env: { ...process.env, HARNESS_PLAN_CHECK: "1", CI: "true" }
+            env: { ...process.env, HARNESS_PLAN_CHECK: "1", CI: "true" },
           })
           return null
         },
-        catch: (cause) => formatSubprocessError(cause)
+        catch: (cause) => formatSubprocessError(cause),
       }).pipe(Effect.catch((msg) => Effect.succeed(msg || "Plan check subprocess failed")))
 
       if (subprocessErr !== null) {
         return {
           exitCode: 1,
           stdout: "",
-          stderr: `[GATE FAILURE] plan-check:subprocess\nHINT: Fix compilation or lint errors before plan graph generation.\n\nFAILED OUTPUT:\n${subprocessErr}`
+          stderr: `[GATE FAILURE] plan-check:subprocess\nHINT: Fix compilation or lint errors before plan graph generation.\n\nFAILED OUTPUT:\n${subprocessErr}`,
         }
       }
     }
@@ -627,7 +628,7 @@ const handlePlanCheck = (
       return {
         exitCode: 1,
         stdout: "",
-        stderr: `Duplicate span names found: ${fnIndex.duplicates.join(", ")}`
+        stderr: `Duplicate span names found: ${fnIndex.duplicates.join(", ")}`,
       }
     }
 
@@ -641,7 +642,7 @@ const handlePlanCheck = (
       return {
         exitCode: 1,
         stdout: "",
-        stderr: formattedViolations
+        stderr: formattedViolations,
       }
     }
 
@@ -665,7 +666,7 @@ const handlePlanCheck = (
           for (const errName of doc.referencedErrors ?? []) {
             if (!failsWithErrorTags.has(errName)) {
               violations.push(
-                `[dead-tagged-error] Governance doc '${doc.id}' declares TaggedError '${errName}', which has 0 FailsWith edges in the plan graph`
+                `[dead-tagged-error] Governance doc '${doc.id}' declares TaggedError '${errName}', which has 0 FailsWith edges in the plan graph`,
               )
             }
           }
@@ -674,12 +675,8 @@ const handlePlanCheck = (
       if (violations.length > 0) {
         return {
           exitCode: 1,
-          stdout: JSON.stringify(
-            { step: "type-graph-policy", valid: false, violations },
-            null,
-            2
-          ),
-          stderr: ""
+          stdout: JSON.stringify({ step: "type-graph-policy", valid: false, violations }, null, 2),
+          stderr: "",
         }
       }
     }
@@ -694,12 +691,12 @@ const handlePlanCheck = (
           toolName: "omnigraph:sync-plan",
           outcome: "ok",
           durationMs: 1,
-          engineSource: "local"
+          engineSource: "local",
         })
       } else {
         yield* ensureLocalOmnigraphReady(repoRoot)
         const clusterRepoRoot = existsSync(
-          join(repoRoot, "libs", "harness", "graph", "cluster.yaml")
+          join(repoRoot, "libs", "harness", "graph", "cluster.yaml"),
         )
           ? repoRoot
           : findWorkspaceRoot(repoRoot)
@@ -708,10 +705,14 @@ const handlePlanCheck = (
           repoRoot: clusterRepoRoot,
           branch: taskBranches.planBranch,
           from: taskBranches.mainBranch,
-          snapshotPath
+          snapshotPath,
         }).pipe(
           Effect.provide(OmnigraphSync.Live),
-          Effect.orElseSucceed(() => ({ syncedToOmnigraph: false, snapshotPath, error: undefined }))
+          Effect.orElseSucceed(() => ({
+            syncedToOmnigraph: false,
+            snapshotPath,
+            error: undefined,
+          })),
         )
         recordTelemetry(options, {
           surface: "cli",
@@ -719,13 +720,13 @@ const handlePlanCheck = (
           toolName: "omnigraph:sync-plan",
           outcome: syncRes.syncedToOmnigraph ? "ok" : "fail",
           durationMs: 1,
-          engineSource: syncRes.syncedToOmnigraph ? "omnigraph" : "memory-fallback"
+          engineSource: syncRes.syncedToOmnigraph ? "omnigraph" : "memory-fallback",
         })
         if (!syncRes.syncedToOmnigraph) {
           return {
             exitCode: 1,
             stdout: "",
-            stderr: `Plan check failed: could not sync plan graph to Omnigraph${syncRes.error ? ` (${syncRes.error})` : ""}`
+            stderr: `Plan check failed: could not sync plan graph to Omnigraph${syncRes.error ? ` (${syncRes.error})` : ""}`,
           }
         }
       }
@@ -736,7 +737,7 @@ const handlePlanCheck = (
 
 const handleVerify = (
   options: CliEnv | undefined,
-  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>
+  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
@@ -752,7 +753,7 @@ const handleVerify = (
           exitCode: 1,
           stdout: "",
           stderr:
-            "[CRITICAL HARNESS BLOCKER] Key component Ollama (clef-flash DecisionModel) is not running and could not be started automatically. Halting execution."
+            "[CRITICAL HARNESS BLOCKER] Key component Ollama (clef-flash DecisionModel) is not running and could not be started automatically. Halting execution.",
         }
       }
     }
@@ -763,7 +764,7 @@ const handleVerify = (
       return {
         exitCode: 1,
         stdout: "",
-        stderr: `Verification failed: active stub() found in ${stubs.map((s) => s.spanName).join(", ")}`
+        stderr: `Verification failed: active stub() found in ${stubs.map((s) => s.spanName).join(", ")}`,
       }
     }
 
@@ -778,7 +779,7 @@ const handleVerify = (
       return {
         exitCode: 1,
         stdout: "",
-        stderr: `Verification failed: active stub() found in ${Array.from(new Set(graphStubs)).join(", ")}`
+        stderr: `Verification failed: active stub() found in ${Array.from(new Set(graphStubs)).join(", ")}`,
       }
     }
 
@@ -790,28 +791,27 @@ const handleVerify = (
       recordFriction(options, {
         kind: "verify_failure",
         summary: checkResult.violations[0]?.rule ?? "graph-violation",
-        detail: msg
+        detail: msg,
       })
       const thrashing = checkLoopThrashing(readFrictionEvents(repoRoot))
       if (thrashing.stuck && thrashing.escalationMessage !== null) {
         return {
           exitCode: 2,
           stdout: "",
-          stderr: `${thrashing.escalationMessage}\n${msg}`
+          stderr: `${thrashing.escalationMessage}\n${msg}`,
         }
       }
       return {
         exitCode: 1,
         stdout: "",
-        stderr: msg
+        stderr: msg,
       }
     }
 
-    const governanceDocs =
-      options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot)
+    const governanceDocs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot)
     const ontologyInvariants = yield* decideOntologyInvariants({
       graph,
-      governanceDocs
+      governanceDocs,
     })
     if (!ontologyInvariants.clean) {
       const msg = ontologyInvariants.findings
@@ -820,20 +820,20 @@ const handleVerify = (
       recordFriction(options, {
         kind: "verify_failure",
         summary: ontologyInvariants.findings[0]?.kind ?? "ontology-invariants-failed",
-        detail: msg
+        detail: msg,
       })
       const thrashing = checkLoopThrashing(readFrictionEvents(repoRoot))
       if (thrashing.stuck && thrashing.escalationMessage !== null) {
         return {
           exitCode: 2,
           stdout: "",
-          stderr: `${thrashing.escalationMessage}\n${msg}`
+          stderr: `${thrashing.escalationMessage}\n${msg}`,
         }
       }
       return {
         exitCode: 1,
         stdout: "",
-        stderr: `Verification failed: ontology invariants broken\n${msg}`
+        stderr: `Verification failed: ontology invariants broken\n${msg}`,
       }
     }
 
@@ -849,13 +849,11 @@ const handleVerify = (
         toolName: "omnigraph:sync-impl",
         outcome: "ok",
         durationMs: 1,
-        engineSource: "local"
+        engineSource: "local",
       })
     } else {
       yield* ensureLocalOmnigraphReady(repoRoot)
-      const clusterRepoRoot = existsSync(
-        join(repoRoot, "libs", "harness", "graph", "cluster.yaml")
-      )
+      const clusterRepoRoot = existsSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"))
         ? repoRoot
         : findWorkspaceRoot(repoRoot)
 
@@ -863,10 +861,10 @@ const handleVerify = (
         repoRoot: clusterRepoRoot,
         branch: taskBranches.implBranch,
         from: taskBranches.mainBranch,
-        snapshotPath
+        snapshotPath,
       }).pipe(
         Effect.provide(OmnigraphSync.Live),
-        Effect.orElseSucceed(() => ({ syncedToOmnigraph: false, snapshotPath, error: undefined }))
+        Effect.orElseSucceed(() => ({ syncedToOmnigraph: false, snapshotPath, error: undefined })),
       )
       writeGraphHeadMeta(repoRoot)
       recordTelemetry(options, {
@@ -875,13 +873,13 @@ const handleVerify = (
         toolName: "omnigraph:sync-impl",
         outcome: syncRes.syncedToOmnigraph ? "ok" : "fail",
         durationMs: 1,
-        engineSource: syncRes.syncedToOmnigraph ? "omnigraph" : "memory-fallback"
+        engineSource: syncRes.syncedToOmnigraph ? "omnigraph" : "memory-fallback",
       })
       if (!syncRes.syncedToOmnigraph) {
         return {
           exitCode: 1,
           stdout: "",
-          stderr: `Verification failed: could not sync implementation graph to Omnigraph${syncRes.error ? ` (${syncRes.error})` : ""}`
+          stderr: `Verification failed: could not sync implementation graph to Omnigraph${syncRes.error ? ` (${syncRes.error})` : ""}`,
         }
       }
     }
@@ -893,35 +891,33 @@ const handleVerify = (
           execFileSync("pnpm", nxArgs, {
             cwd: repoRoot,
             stdio: "pipe",
-            env: { ...process.env, CI: "true" }
+            env: { ...process.env, CI: "true" },
           })
           return null
         },
-        catch: (cause) => formatSubprocessError(cause)
+        catch: (cause) => formatSubprocessError(cause),
       }).pipe(Effect.catch((msg) => Effect.succeed(msg || "Verification subprocess failed")))
 
       if (subprocessErr !== null) {
-        const triage = yield* triageFailure(subprocessErr).pipe(
-          Effect.provide(decisionLayer)
-        )
+        const triage = yield* triageFailure(subprocessErr).pipe(Effect.provide(decisionLayer))
         const formattedErr = `[GATE FAILURE] [triage:${triage.kind}] ${triage.hint}\n\nFAILED OUTPUT:\n${subprocessErr}`
         recordFriction(options, {
           kind: "verify_failure",
           summary: `verify:${triage.kind}`,
-          detail: formattedErr
+          detail: formattedErr,
         })
         const thrashing = checkLoopThrashing(readFrictionEvents(repoRoot))
         if (thrashing.stuck && thrashing.escalationMessage !== null) {
           return {
             exitCode: 2,
             stdout: "",
-            stderr: `${thrashing.escalationMessage}\n\n${formattedErr}`
+            stderr: `${thrashing.escalationMessage}\n\n${formattedErr}`,
           }
         }
         return {
           exitCode: 1,
           stdout: "",
-          stderr: formattedErr
+          stderr: formattedErr,
         }
       }
     }
@@ -934,16 +930,14 @@ const StopHookStdinSchema = Schema.Struct({
   fullyIdle: Schema.optional(Schema.Boolean),
   conversationId: Schema.optional(Schema.String),
   workspacePaths: Schema.optional(Schema.Array(Schema.String)),
-  transcriptPath: Schema.optional(Schema.String)
+  transcriptPath: Schema.optional(Schema.String),
 })
 
-const decodeStopHookStdin = Schema.decodeOption(
-  Schema.fromJsonString(StopHookStdinSchema)
-)
+const decodeStopHookStdin = Schema.decodeOption(Schema.fromJsonString(StopHookStdinSchema))
 
 const isSubagentStopContext = (
   repoRoot: string,
-  decoded?: Schema.Schema.Type<typeof StopHookStdinSchema>
+  decoded?: Schema.Schema.Type<typeof StopHookStdinSchema>,
 ): boolean => {
   if (
     process.env.HARNESS_SUBAGENT === "1" ||
@@ -954,7 +948,7 @@ const isSubagentStopContext = (
   }
   if (
     decoded?.workspacePaths?.some(
-      (p) => p.includes("/.gemini/antigravity/worktrees/") || p.includes("/subagent-")
+      (p) => p.includes("/.gemini/antigravity/worktrees/") || p.includes("/subagent-"),
     )
   ) {
     return true
@@ -971,8 +965,8 @@ const isSubagentStopContext = (
             !content.includes('"source":"USER_EXPLICIT"')
           )
         },
-        catch: () => false
-      }).pipe(Effect.orElseSucceed(() => false))
+        catch: () => false,
+      }).pipe(Effect.orElseSucceed(() => false)),
     )
     if (isSubagentTranscript) {
       return true
@@ -984,7 +978,7 @@ const isSubagentStopContext = (
 const handleDone = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
-  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>
+  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
@@ -995,7 +989,7 @@ const handleDone = (
     if (rawStdin === undefined && !process.stdin.isTTY) {
       rawStdin = yield* Effect.try({
         try: () => readFileSync(0, "utf8"),
-        catch: () => ""
+        catch: () => "",
       }).pipe(Effect.orElseSucceed(() => ""))
     }
     let decodedStdin: Schema.Schema.Type<typeof StopHookStdinSchema> | undefined
@@ -1008,7 +1002,7 @@ const handleDone = (
             exitCode: 0,
             stdout: "",
             stderr: "",
-            telemetryDetail: "fullyIdle=false"
+            telemetryDetail: "fullyIdle=false",
           }
         }
       }
@@ -1019,7 +1013,7 @@ const handleDone = (
         exitCode: 0,
         stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "",
         stderr: "",
-        telemetryDetail: "subagent=true"
+        telemetryDetail: "subagent=true",
       }
     }
 
@@ -1030,9 +1024,9 @@ const handleDone = (
         exitCode: 0,
         stdout: JSON.stringify({
           decision: blockDecision,
-          reason: stampCheck.reason
+          reason: stampCheck.reason,
         }),
-        stderr: ""
+        stderr: "",
       }
     }
 
@@ -1054,9 +1048,9 @@ const handleDone = (
           exitCode: 0,
           stdout: JSON.stringify({
             decision: blockDecision,
-            reason: diff.reasons.join("; ")
+            reason: diff.reasons.join("; "),
           }),
-          stderr: ""
+          stderr: "",
         }
       }
     }
@@ -1064,17 +1058,15 @@ const handleDone = (
     // 3. Plan step coverage check
     if (options?.planSteps && options.planSteps.length > 0) {
       for (const step of options.planSteps) {
-        const stepRes = yield* checkPlanStepCoverage(step).pipe(
-          Effect.provide(decisionLayer)
-        )
+        const stepRes = yield* checkPlanStepCoverage(step).pipe(Effect.provide(decisionLayer))
         if (!stepRes.covered) {
           return {
             exitCode: 0,
             stdout: JSON.stringify({
               decision: blockDecision,
-              reason: stepRes.reason
+              reason: stepRes.reason,
             }),
-            stderr: ""
+            stderr: "",
           }
         }
       }
@@ -1089,33 +1081,31 @@ const handleDone = (
         toolName: "omnigraph:merge-main",
         outcome: "ok",
         durationMs: 1,
-        engineSource: "local"
+        engineSource: "local",
       })
     } else {
       yield* ensureLocalOmnigraphReady(repoRoot)
-      const clusterRepoRoot = existsSync(
-        join(repoRoot, "libs", "harness", "graph", "cluster.yaml")
-      )
+      const clusterRepoRoot = existsSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"))
         ? repoRoot
         : findWorkspaceRoot(repoRoot)
       const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
       yield* diffOmnigraphBranches({
         repoRoot: clusterRepoRoot,
         source: taskBranches.implBranch,
-        target: taskBranches.planBranch
+        target: taskBranches.planBranch,
       }).pipe(
         Effect.provide(OmnigraphSync.Live),
-        Effect.orElseSucceed(() => Option.none())
+        Effect.orElseSucceed(() => Option.none()),
       )
 
       const merged = yield* mergeOmnigraphBranch({
         repoRoot: clusterRepoRoot,
         source: taskBranches.implBranch,
         target: taskBranches.mainBranch,
-        cleanupBranches: [taskBranches.implBranch, taskBranches.planBranch]
+        cleanupBranches: [taskBranches.implBranch, taskBranches.planBranch],
       }).pipe(
         Effect.provide(OmnigraphSync.Live),
-        Effect.orElseSucceed(() => false)
+        Effect.orElseSucceed(() => false),
       )
       writeGraphHeadMeta(repoRoot)
       recordTelemetry(options, {
@@ -1124,16 +1114,16 @@ const handleDone = (
         toolName: "omnigraph:merge-main",
         outcome: merged ? "ok" : "fail",
         durationMs: 1,
-        engineSource: merged ? "omnigraph" : "memory-fallback"
+        engineSource: merged ? "omnigraph" : "memory-fallback",
       })
       if (!merged) {
         return {
           exitCode: 0,
           stdout: JSON.stringify({
             decision: blockDecision,
-            reason: `Omnigraph branch merge (${taskBranches.implBranch} -> ${taskBranches.mainBranch}) failed`
+            reason: `Omnigraph branch merge (${taskBranches.implBranch} -> ${taskBranches.mainBranch}) failed`,
           }),
-          stderr: ""
+          stderr: "",
         }
       }
     }
@@ -1143,7 +1133,7 @@ const handleDone = (
       const report = buildSessionReport({
         events: readTelemetryEvents(repoRoot),
         frictionEvents: readFrictionEvents(repoRoot),
-        stampValid: true
+        stampValid: true,
       })
       writeSessionReportFiles(repoRoot, report)
     }
@@ -1152,18 +1142,16 @@ const handleDone = (
       exitCode: 0,
       stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "",
       stderr: "",
-      telemetryDetail: "completed"
+      telemetryDetail: "completed",
     }
   })
 
-const LockJsonSchema = Schema.fromJsonString(
-  Schema.Record(Schema.String, Schema.Unknown)
-)
+const LockJsonSchema = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
 
 function unlockOmnigraphClusterIfNeeded(
   omnigraphBin: string,
   clusterRootDir: string,
-  applyOutput?: string
+  applyOutput?: string,
 ): void {
   const lockIds = new Set<string>()
   if (applyOutput) {
@@ -1189,8 +1177,8 @@ function unlockOmnigraphClusterIfNeeded(
             }
           }
         },
-        catch: () => undefined
-      }).pipe(Effect.orElseSucceed(() => undefined))
+        catch: () => undefined,
+      }).pipe(Effect.orElseSucceed(() => undefined)),
     )
   }
   for (const lockId of lockIds) {
@@ -1200,11 +1188,11 @@ function unlockOmnigraphClusterIfNeeded(
           execFileSync(
             omnigraphBin,
             ["cluster", "force-unlock", lockId, "--target", clusterRootDir],
-            { stdio: "ignore" }
+            { stdio: "ignore" },
           )
         },
-        catch: () => undefined
-      }).pipe(Effect.orElseSucceed(() => undefined))
+        catch: () => undefined,
+      }).pipe(Effect.orElseSucceed(() => undefined)),
     )
   }
 }
@@ -1215,13 +1203,10 @@ function checkOmnigraphServerReady(baseUrl: string): Effect.Effect<boolean> {
       globalThis
         .fetch(`${baseUrl}/readyz`, {
           method: "GET",
-          signal: AbortSignal.timeout(3000)
+          signal: AbortSignal.timeout(3000),
         })
         .then((r) => {
-          if (
-            r.status !== 200 ||
-            r.headers.get("Omnigraph-Http-Api") !== "0.14"
-          ) {
+          if (r.status !== 200 || r.headers.get("Omnigraph-Http-Api") !== "0.14") {
             return Promise.resolve(false)
           }
           return r.json().then((rawBody: unknown) => {
@@ -1240,7 +1225,7 @@ function checkOmnigraphServerReady(baseUrl: string): Effect.Effect<boolean> {
           })
         })
         .catch(() => false),
-    catch: () => false
+    catch: () => false,
   }).pipe(Effect.orElseSucceed(() => false))
 }
 
@@ -1255,10 +1240,10 @@ function computeOmnigraphConfigStamp(configDir: string): string {
 }
 
 export const buildOmnigraphClusterKillArgs = (
-  clusterRootDir: string
+  clusterRootDir: string,
 ): readonly [string, ReadonlyArray<string>] => [
   "pkill",
-  ["-f", `omnigraph-server.*--cluster file://${clusterRootDir}`]
+  ["-f", `omnigraph-server.*--cluster file://${clusterRootDir}`],
 ]
 
 const OmnigraphServerMetaSchema = Schema.Struct({
@@ -1266,22 +1251,18 @@ const OmnigraphServerMetaSchema = Schema.Struct({
   port: Schema.optional(Schema.Finite),
   baseUrl: Schema.optional(Schema.String),
   canonicalRepoRoot: Schema.optional(Schema.String),
-  updatedAt: Schema.optional(Schema.String)
+  updatedAt: Schema.optional(Schema.String),
 })
 
 type OmnigraphServerMeta = Schema.Schema.Type<typeof OmnigraphServerMetaSchema>
 
 const decodeOmnigraphServerMeta = Schema.decodeOption(
-  Schema.fromJsonString(OmnigraphServerMetaSchema)
+  Schema.fromJsonString(OmnigraphServerMetaSchema),
 )
 
-function ensureLocalOmnigraphReady(
-  repoRoot: string
-): Effect.Effect<boolean> {
+function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boolean> {
   return Effect.gen(function* () {
-    const clusterRepoRoot = existsSync(
-      join(repoRoot, "libs", "harness", "graph", "cluster.yaml")
-    )
+    const clusterRepoRoot = existsSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"))
       ? repoRoot
       : findWorkspaceRoot(repoRoot)
     const canonicalRepoRoot = resolveCanonicalRepoRoot(clusterRepoRoot)
@@ -1293,10 +1274,10 @@ function ensureLocalOmnigraphReady(
     if (existsSync(serverJsonPath)) {
       const decodedMetaOpt = yield* Effect.try({
         try: () => readFileSync(serverJsonPath, "utf-8"),
-        catch: () => ""
+        catch: () => "",
       }).pipe(
         Effect.flatMap((raw) => Effect.fromOption(decodeOmnigraphServerMeta(raw))),
-        Effect.option
+        Effect.option,
       )
       if (Option.isSome(decodedMetaOpt)) {
         serverMeta = decodedMetaOpt.value
@@ -1316,9 +1297,7 @@ function ensureLocalOmnigraphReady(
     const configDir = join(clusterRepoRoot, "libs", "harness", "graph")
     const stampPath = join(clusterRootDir, ".config-stamp")
     const expectedStamp = computeOmnigraphConfigStamp(configDir)
-    const currentStamp = existsSync(stampPath)
-      ? readFileSync(stampPath, "utf-8")
-      : ""
+    const currentStamp = existsSync(stampPath) ? readFileSync(stampPath, "utf-8") : ""
     const configDrifted = currentStamp !== expectedStamp
 
     if (configDrifted) {
@@ -1327,7 +1306,7 @@ function ensureLocalOmnigraphReady(
           try: () => {
             process.kill(serverMeta.pid!, "SIGTERM")
           },
-          catch: () => undefined
+          catch: () => undefined,
         }).pipe(Effect.orElseSucceed(() => undefined))
       }
       yield* Effect.try({
@@ -1335,19 +1314,18 @@ function ensureLocalOmnigraphReady(
           const [killBin, killArgs] = buildOmnigraphClusterKillArgs(clusterRootDir)
           execFileSync(killBin, killArgs as string[], { stdio: "ignore" })
         },
-        catch: () => undefined
+        catch: () => undefined,
       }).pipe(Effect.orElseSucceed(() => undefined))
       yield* Effect.sleep("300 millis")
       yield* Effect.try({
         try: () => {
           rmSync(clusterRootDir, { recursive: true, force: true })
         },
-        catch: () => undefined
+        catch: () => undefined,
       }).pipe(Effect.orElseSucceed(() => undefined))
     } else {
       const isReadyCandidate =
-        explicitEnvUrl !== undefined ||
-        serverMeta?.canonicalRepoRoot === canonicalRepoRoot
+        explicitEnvUrl !== undefined || serverMeta?.canonicalRepoRoot === canonicalRepoRoot
       if (isReadyCandidate) {
         const alreadyReady = yield* checkOmnigraphServerReady(targetBaseUrl)
         if (alreadyReady) {
@@ -1367,12 +1345,12 @@ function ensureLocalOmnigraphReady(
             "bash",
             [
               "-c",
-              "curl -fsSL https://raw.githubusercontent.com/ModernRelay/omnigraph/main/scripts/install.sh | VERSION=v0.14.0 bash"
+              "curl -fsSL https://raw.githubusercontent.com/ModernRelay/omnigraph/main/scripts/install.sh | VERSION=v0.14.0 bash",
             ],
-            { stdio: "inherit" }
+            { stdio: "inherit" },
           )
         },
-        catch: () => undefined
+        catch: () => undefined,
       }).pipe(Effect.orElseSucceed(() => undefined))
     }
 
@@ -1400,13 +1378,13 @@ function ensureLocalOmnigraphReady(
               configDir,
               "--as",
               "harness-cli",
-              "--json"
+              "--json",
             ],
             {
               cwd: clusterRepoRoot,
               encoding: "utf-8",
-              stdio: ["ignore", "pipe", "pipe"]
-            }
+              stdio: ["ignore", "pipe", "pipe"],
+            },
           )
           unlockOmnigraphClusterIfNeeded(omnigraphBin, clusterRootDir, out)
           writeFileSync(stampPath, expectedStamp, "utf-8")
@@ -1414,23 +1392,16 @@ function ensureLocalOmnigraphReady(
         unlockOmnigraphClusterIfNeeded(omnigraphBin, clusterRootDir)
 
         const bindHostPort =
-          targetBaseUrl.match(/^https?:\/\/([^/]+)/)?.[1] ??
-          `127.0.0.1:${defaultPort}`
+          targetBaseUrl.match(/^https?:\/\/([^/]+)/)?.[1] ?? `127.0.0.1:${defaultPort}`
 
         const child = spawn(
           omnigraphServerBin,
-          [
-            "--cluster",
-            `file://${clusterRootDir}`,
-            "--bind",
-            bindHostPort,
-            "--unauthenticated"
-          ],
+          ["--cluster", `file://${clusterRootDir}`, "--bind", bindHostPort, "--unauthenticated"],
           {
             cwd: clusterRepoRoot,
             detached: true,
-            stdio: "ignore"
-          }
+            stdio: "ignore",
+          },
         )
         child.unref()
 
@@ -1443,16 +1414,16 @@ function ensureLocalOmnigraphReady(
                 port: defaultPort,
                 baseUrl: targetBaseUrl,
                 canonicalRepoRoot,
-                updatedAt: new Date().toISOString()
+                updatedAt: new Date().toISOString(),
               },
               null,
-              2
+              2,
             ),
-            "utf-8"
+            "utf-8",
           )
         }
       },
-      catch: () => undefined
+      catch: () => undefined,
     }).pipe(Effect.orElseSucceed(() => undefined))
 
     // Wait up to 3 seconds for omnigraph-server /readyz
@@ -1476,10 +1447,9 @@ export interface OllamaReadinessOptions {
 }
 
 export function checkOllamaServerReady(
-  baseUrl: string =
-    process.env.HARNESS_OLLAMA_URL ??
+  baseUrl: string = process.env.HARNESS_OLLAMA_URL ??
     process.env.OLLAMA_HOST ??
-    "http://127.0.0.1:11434"
+    "http://127.0.0.1:11434",
 ): Effect.Effect<boolean> {
   const normalizedUrl = baseUrl.startsWith("http") ? baseUrl : `http://${baseUrl}`
   return Effect.tryPromise({
@@ -1487,7 +1457,7 @@ export function checkOllamaServerReady(
       globalThis
         .fetch(`${normalizedUrl.replace(/\/$/, "")}/api/tags`, {
           method: "GET",
-          signal: AbortSignal.timeout(2000)
+          signal: AbortSignal.timeout(2000),
         })
         .then((r) => {
           if (r.status !== 200) {
@@ -1509,18 +1479,16 @@ export function checkOllamaServerReady(
             return body.models.some(
               (m) =>
                 (typeof m.name === "string" && m.name.startsWith("clef-flash")) ||
-                (typeof m.model === "string" && m.model.startsWith("clef-flash"))
+                (typeof m.model === "string" && m.model.startsWith("clef-flash")),
             )
           })
         })
         .catch(() => false),
-    catch: () => false
+    catch: () => false,
   }).pipe(Effect.orElseSucceed(() => false))
 }
 
-export function ensureLocalOllamaReady(
-  opts?: OllamaReadinessOptions
-): Effect.Effect<boolean> {
+export function ensureLocalOllamaReady(opts?: OllamaReadinessOptions): Effect.Effect<boolean> {
   return Effect.gen(function* () {
     const customUrl = process.env.HARNESS_OLLAMA_URL
     const baseUrl =
@@ -1537,12 +1505,12 @@ export function ensureLocalOllamaReady(
         } else if (customUrl === undefined) {
           const child = spawn("ollama", ["serve"], {
             detached: true,
-            stdio: "ignore"
+            stdio: "ignore",
           })
           child.unref()
         }
       },
-      catch: () => undefined
+      catch: () => undefined,
     }).pipe(Effect.orElseSucceed(() => undefined))
 
     const maxRetries = opts?.maxRetries ?? (customUrl !== undefined ? 2 : 25)
@@ -1562,7 +1530,7 @@ export function ensureLocalOllamaReady(
 const handleDoctorOrSession = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
-  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>
+  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
@@ -1578,7 +1546,7 @@ const handleDoctorOrSession = (
         }
         return true
       },
-      catch: () => false
+      catch: () => false,
     }).pipe(Effect.orElseSucceed(() => false))
 
     const isolatedExternal = isIsolatedExternalWorkspace(repoRoot)
@@ -1591,9 +1559,7 @@ const handleDoctorOrSession = (
       (!isolatedExternal &&
         options?.decisionLayer === undefined &&
         process.env.VITEST === undefined)
-    const ollamaReady = requireLiveOllama
-      ? yield* ensureLocalOllamaReady()
-      : true
+    const ollamaReady = requireLiveOllama ? yield* ensureLocalOllamaReady() : true
 
     const planPath = join(harnessDir, "plan-graph-snapshot.json")
     const implPath = join(harnessDir, "graph-snapshot.json")
@@ -1606,7 +1572,7 @@ const handleDoctorOrSession = (
         recordedHeadSha: recordedMeta?.headSha ?? null,
         currentHeadSha: headState.headSha,
         recordedGitBranch: recordedMeta?.gitBranch ?? null,
-        currentGitBranch: headState.gitBranch
+        currentGitBranch: headState.gitBranch,
       })
       if (reconcileDecision.needsReconcile) {
         const reconciledGraph = yield* extractWorkspaceTypeAwareGraph(repoRoot)
@@ -1615,7 +1581,7 @@ const handleDoctorOrSession = (
           writeGraphHeadMeta(repoRoot, headState)
         } else {
           const clusterRepoRoot = existsSync(
-            join(repoRoot, "libs", "harness", "graph", "cluster.yaml")
+            join(repoRoot, "libs", "harness", "graph", "cluster.yaml"),
           )
             ? repoRoot
             : findWorkspaceRoot(repoRoot)
@@ -1623,14 +1589,14 @@ const handleDoctorOrSession = (
             repoRoot: clusterRepoRoot,
             branch: reconcileDecision.targetOmnigraphBranch,
             from: "main",
-            snapshotPath: implPath
+            snapshotPath: implPath,
           }).pipe(
             Effect.provide(OmnigraphSync.Live),
             Effect.orElseSucceed(() => ({
               syncedToOmnigraph: false,
               snapshotPath: implPath,
-              error: undefined
-            }))
+              error: undefined,
+            })),
           )
           writeGraphHeadMeta(repoRoot, headState)
         }
@@ -1642,7 +1608,7 @@ const handleDoctorOrSession = (
       ? join(repoRoot, "tsconfig.base.json")
       : join(workspaceRoot, "tsconfig.base.json")
     const tsgoPkgPath = existsSync(
-      join(repoRoot, "node_modules", "@effect", "tsgo", "package.json")
+      join(repoRoot, "node_modules", "@effect", "tsgo", "package.json"),
     )
       ? join(repoRoot, "node_modules", "@effect", "tsgo", "package.json")
       : join(workspaceRoot, "node_modules", "@effect", "tsgo", "package.json")
@@ -1654,7 +1620,7 @@ const handleDoctorOrSession = (
         const tsconfigRaw = readFileSync(tsconfigBasePath, "utf-8")
         return tsconfigRaw.includes("@effect/language-service")
       },
-      catch: () => false
+      catch: () => false,
     }).pipe(Effect.orElseSucceed(() => false))
 
     const modelWarm = isAntigravity
@@ -1662,12 +1628,12 @@ const handleDoctorOrSession = (
       : ollamaReady &&
         Option.isSome(
           yield* DecisionModel.decide(IdiomRouterV1, {
-            input: { planStep: "Initialize session" }
+            input: { planStep: "Initialize session" },
           }).pipe(
             Effect.timeoutOption("10 seconds"),
             Effect.catchCause(() => Effect.succeedNone),
-            Effect.provide(decisionLayer)
-          )
+            Effect.provide(decisionLayer),
+          ),
         )
 
     const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
@@ -1686,15 +1652,14 @@ const handleDoctorOrSession = (
     }
 
     const stampCheck = checkVerifyStamp(repoRoot)
-    const hasPlanOrStamp =
-      existsSync(planPath) || existsSync(join(harnessDir, "verify-stamp.json"))
+    const hasPlanOrStamp = existsSync(planPath) || existsSync(join(harnessDir, "verify-stamp.json"))
     const effectiveStampValid = hasPlanOrStamp ? stampCheck.valid : true
     const stampReason = !stampCheck.valid ? stampCheck.reason : undefined
     const rawFrictionEvents = readFrictionEvents(repoRoot)
     const telemetryEvents = readTelemetryEvents(repoRoot)
     const scoped = scopeSessionReportInput({
       events: telemetryEvents,
-      frictionEvents: rawFrictionEvents
+      frictionEvents: rawFrictionEvents,
     })
     const frictionClusters = summarizeFrictionEvents(scoped.frictionEvents)
     const loopThrashing = checkLoopThrashing(scoped.frictionEvents)
@@ -1705,27 +1670,22 @@ const handleDoctorOrSession = (
       activeStubs,
       missingPlannedFns,
       frictionClusters,
-      loopThrashing
+      loopThrashing,
     })
 
     const telemetryReport = buildSessionReport({
       events: telemetryEvents,
       frictionEvents: rawFrictionEvents,
-      stampValid: effectiveStampValid
+      stampValid: effectiveStampValid,
     })
 
-    const ok =
-      nodeOk &&
-      snapshotDirOk &&
-      effectLspOk &&
-      omnigraphInitialized &&
-      ollamaReady
+    const ok = nodeOk && snapshotDirOk && effectLspOk && omnigraphInitialized && ollamaReady
 
     if (isAntigravity) {
       const injected: Array<string> = []
       if (!ollamaReady) {
         injected.push(
-          "[CRITICAL HARNESS BLOCKER] Key component Ollama (clef-flash DecisionModel) is offline and could not be started automatically. Stop all implementation immediately and inform the user."
+          "[CRITICAL HARNESS BLOCKER] Key component Ollama (clef-flash DecisionModel) is offline and could not be started automatically. Stop all implementation immediately and inform the user.",
         )
       }
       if (handoff.handoffMessage !== null) {
@@ -1734,9 +1694,9 @@ const handleDoctorOrSession = (
       return {
         exitCode: 0,
         stdout: JSON.stringify({
-          injectSteps: injected
+          injectSteps: injected,
         }),
-        stderr: ""
+        stderr: "",
       }
     }
 
@@ -1754,18 +1714,18 @@ const handleDoctorOrSession = (
         telemetry: {
           totalEvents: telemetryReport.totalEvents,
           healthScore: telemetryReport.healthScore,
-          grade: telemetryReport.grade
-        }
+          grade: telemetryReport.grade,
+        },
       }),
       stderr: ok
         ? ""
-        : `Doctor check failed: nodeOk=${nodeOk}, snapshotDirOk=${snapshotDirOk}, effectLspOk=${effectLspOk}, omnigraphInitialized=${omnigraphInitialized}, ollamaReady=${ollamaReady}`
+        : `Doctor check failed: nodeOk=${nodeOk}, snapshotDirOk=${snapshotDirOk}, effectLspOk=${effectLspOk}, omnigraphInitialized=${omnigraphInitialized}, ollamaReady=${ollamaReady}`,
     }
   })
 
 const handleGc = (
   argv: ReadonlyArray<string>,
-  options: CliEnv | undefined
+  options: CliEnv | undefined,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
@@ -1777,25 +1737,25 @@ const handleGc = (
       expectedPatterns: hasPatternsDir ? IDIOM_BLOCKS : undefined,
       checkUntestedDomainFns: true,
       checkDeciderPropertyTests: true,
-      governanceDocs
+      governanceDocs,
     })
     const findings = strict
       ? [...report.findings, ...scanWorkspacePackageHygiene(repoRoot)]
       : report.findings
     const finalReport = {
       clean: findings.length === 0,
-      findings
+      findings,
     }
     return {
       exitCode: strict && !finalReport.clean ? 1 : 0,
       stdout: JSON.stringify(finalReport),
-      stderr: ""
+      stderr: "",
     }
   })
 
 const handleMutate = (
   argv: ReadonlyArray<string>,
-  options: CliEnv | undefined
+  options: CliEnv | undefined,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     yield* Effect.void
@@ -1808,13 +1768,13 @@ const handleMutate = (
     return {
       exitCode: strict && !report.passed ? 1 : 0,
       stdout: JSON.stringify(report),
-      stderr: ""
+      stderr: "",
     }
   })
 
 export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
   argv: ReadonlyArray<string>,
-  options: CliEnv | undefined
+  options: CliEnv | undefined,
 ): Effect.fn.Return<CliResult> {
   const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
   const isAntigravity = argv.includes("--format=antigravity")
@@ -1828,7 +1788,7 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
     recordedHeadSha: recordedMeta?.headSha ?? null,
     currentHeadSha: headState.headSha,
     recordedGitBranch: recordedMeta?.gitBranch ?? null,
-    currentGitBranch: headState.gitBranch
+    currentGitBranch: headState.gitBranch,
   })
 
   if (!isAntigravity || reconcileDecision.needsReconcile) {
@@ -1853,16 +1813,14 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
               syncedToOmnigraph: false,
               branch: targetBranch,
               headSha: headState.headSha,
-              reconcileReason: reconcileDecision.reason
+              reconcileReason: reconcileDecision.reason,
             }),
-        stderr: ""
+        stderr: "",
       }
     }
 
     yield* ensureLocalOmnigraphReady(repoRoot)
-    const clusterRepoRoot = existsSync(
-      join(repoRoot, "libs", "harness", "graph", "cluster.yaml")
-    )
+    const clusterRepoRoot = existsSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"))
       ? repoRoot
       : findWorkspaceRoot(repoRoot)
 
@@ -1870,14 +1828,14 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
       repoRoot: clusterRepoRoot,
       branch: targetBranch,
       from: taskBranches.mainBranch,
-      snapshotPath
+      snapshotPath,
     }).pipe(
       Effect.provide(OmnigraphSync.Live),
       Effect.orElseSucceed(() => ({
         syncedToOmnigraph: false,
         snapshotPath,
-        error: undefined
-      }))
+        error: undefined,
+      })),
     )
     writeGraphHeadMeta(repoRoot, headState)
     return {
@@ -1889,9 +1847,9 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
             syncedToOmnigraph: syncRes.syncedToOmnigraph,
             branch: targetBranch,
             headSha: headState.headSha,
-            reconcileReason: reconcileDecision.reason
+            reconcileReason: reconcileDecision.reason,
           }),
-      stderr: ""
+      stderr: "",
     }
   }
 
@@ -1904,16 +1862,16 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
           syncedToOmnigraph: true,
           branch: reconcileDecision.targetOmnigraphBranch,
           headSha: headState.headSha,
-          reconcileReason: reconcileDecision.reason
+          reconcileReason: reconcileDecision.reason,
         }),
-    stderr: ""
+    stderr: "",
   }
 })
 
 const handleLearn = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
-  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>
+  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
@@ -1927,7 +1885,7 @@ const handleLearn = (
         kind: cluster.kind,
         summary: cluster.summary,
         detail: cluster.detail,
-        occurrences: cluster.occurrences
+        occurrences: cluster.occurrences,
       }).pipe(Effect.provide(decisionLayer))
       proposals.push({
         key: cluster.key,
@@ -1935,7 +1893,7 @@ const handleLearn = (
         summary: cluster.summary,
         occurrences: cluster.occurrences,
         lastSeen: cluster.lastSeen,
-        ...proposal
+        ...proposal,
       })
     }
 
@@ -1948,21 +1906,20 @@ const handleLearn = (
       stdout: JSON.stringify({
         totalEvents: events.length,
         proposals,
-        cleared: shouldClear
+        cleared: shouldClear,
       }),
-      stderr: ""
+      stderr: "",
     }
   })
 
 const handleOntology = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
-  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>
+  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-    const graph =
-      options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot))
+    const graph = options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot))
     const sub = argv[1] ?? "layers"
 
     switch (sub) {
@@ -1971,7 +1928,7 @@ const handleOntology = (
         return {
           exitCode: 0,
           stdout: JSON.stringify(queryOntologyWhy(graph, symbol)),
-          stderr: ""
+          stderr: "",
         }
       }
       case "impact": {
@@ -1979,7 +1936,7 @@ const handleOntology = (
         return {
           exitCode: 0,
           stdout: JSON.stringify(queryOntologyImpact(graph, symbol)),
-          stderr: ""
+          stderr: "",
         }
       }
       case "layers": {
@@ -1989,7 +1946,7 @@ const handleOntology = (
           stdout: formatMermaid
             ? renderOntologyMermaid(graph)
             : JSON.stringify(projectOntologyLayers(graph)),
-          stderr: ""
+          stderr: "",
         }
       }
       case "check": {
@@ -1997,25 +1954,24 @@ const handleOntology = (
         const scopeArg = argv.find((arg) => arg.startsWith("--scope="))
         const scope = scopeArg ? scopeArg.slice("--scope=".length) : undefined
 
-        const allDocs =
-          options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot)
+        const allDocs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot)
         const docs = scope
           ? allDocs.filter(
               (doc) =>
                 doc.id.startsWith(`${scope}:`) ||
                 doc.docPath.includes(`libs/${scope}/`) ||
                 doc.docPath.includes(`apps/${scope}/`) ||
-                doc.docPath.includes(`packages/${scope}/`)
+                doc.docPath.includes(`packages/${scope}/`),
             )
           : allDocs
 
         const invariants = yield* decideOntologyInvariants({
           graph,
-          governanceDocs: docs
+          governanceDocs: docs,
         })
         const pairs = extractOntologyConflictPairs(docs, scope)
         const semanticConflicts = yield* evaluateOntologyConflicts(pairs).pipe(
-          Effect.provide(decisionLayer)
+          Effect.provide(decisionLayer),
         )
         const clean = invariants.clean && semanticConflicts.length === 0
 
@@ -2025,16 +1981,16 @@ const handleOntology = (
             clean,
             findings: invariants.findings,
             semanticConflicts,
-            evaluatedPairs: pairs.length
+            evaluatedPairs: pairs.length,
           }),
-          stderr: ""
+          stderr: "",
         }
       }
       default: {
         return {
           exitCode: 1,
           stdout: "",
-          stderr: `unknown ontology subcommand: ${sub}\nusage: harness ontology <why|impact|layers|check>`
+          stderr: `unknown ontology subcommand: ${sub}\nusage: harness ontology <why|impact|layers|check>`,
         }
       }
     }
@@ -2042,7 +1998,7 @@ const handleOntology = (
 
 const handleReport = (
   argv: ReadonlyArray<string>,
-  options: CliEnv | undefined
+  options: CliEnv | undefined,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     yield* Effect.void
@@ -2057,7 +2013,7 @@ const handleReport = (
       events,
       frictionEvents,
       stampValid: stampCheck.valid,
-      cumulative: argv.includes("--all")
+      cumulative: argv.includes("--all"),
     })
     if (options?.repoRoot !== undefined || process.env.VITEST === undefined) {
       writeSessionReportFiles(repoRoot, report)
@@ -2066,27 +2022,25 @@ const handleReport = (
       return {
         exitCode: 0,
         stdout: renderSessionReportMarkdown(report),
-        stderr: ""
+        stderr: "",
       }
     }
     return {
       exitCode: 0,
       stdout: JSON.stringify(report),
-      stderr: ""
+      stderr: "",
     }
   })
 
 export const runCliEffect = (
   argv: ReadonlyArray<string>,
   options?: CliEnv,
-  maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>
+  maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     const requested = argv[0] ?? "help"
     const effectiveOptions =
-      maybeDecisionLayer !== undefined
-        ? { ...options, decisionLayer: maybeDecisionLayer }
-        : options
+      maybeDecisionLayer !== undefined ? { ...options, decisionLayer: maybeDecisionLayer } : options
     const decisionLayer = effectiveOptions?.decisionLayer ?? LocalDecisionModel
     const repoRoot = effectiveOptions?.repoRoot ?? findWorkspaceRoot()
 
@@ -2096,7 +2050,7 @@ export const runCliEffect = (
         mkdirSync(harnessDir, { recursive: true })
         writeFileSync(
           join(harnessDir, "active-workspace.json"),
-          JSON.stringify({ repoRoot, updatedAt: new Date().toISOString() }, null, 2)
+          JSON.stringify({ repoRoot, updatedAt: new Date().toISOString() }, null, 2),
         )
       }).pipe(Effect.ignore)
     }
@@ -2105,7 +2059,7 @@ export const runCliEffect = (
       return {
         exitCode: 1,
         stdout: "",
-        stderr: `unknown command: ${requested}\nusage: harness <${COMMANDS.join("|")}>`
+        stderr: `unknown command: ${requested}\nusage: harness <${COMMANDS.join("|")}>`,
       }
     }
 
@@ -2113,7 +2067,7 @@ export const runCliEffect = (
       return {
         exitCode: 0,
         stdout: `harness help\nusage: harness <${COMMANDS.join("|")}>`,
-        stderr: ""
+        stderr: "",
       }
     }
 
@@ -2164,9 +2118,7 @@ export const runCliEffect = (
     const durationMs = Math.max(0, Math.round(performance.now() - startTime))
 
     const surface: TelemetrySurface =
-      argv.includes("--format=antigravity") || options?.stdin !== undefined
-        ? "hook"
-        : "cli"
+      argv.includes("--format=antigravity") || options?.stdin !== undefined ? "hook" : "cli"
 
     let category: TelemetryCategory = "lifecycle"
     if (requested === "guard") {
@@ -2219,7 +2171,7 @@ export const runCliEffect = (
       toolName: requested === "ontology" ? `ontology:${argv[1] ?? "layers"}` : requested,
       outcome,
       durationMs,
-      ...(res.telemetryDetail !== undefined ? { detail: res.telemetryDetail } : {})
+      ...(res.telemetryDetail !== undefined ? { detail: res.telemetryDetail } : {}),
     })
 
     if (
@@ -2233,7 +2185,7 @@ export const runCliEffect = (
       const finalReport = buildSessionReport({
         events: finalEvents,
         frictionEvents: finalFriction,
-        stampValid: true
+        stampValid: true,
       })
       writeSessionReportFiles(repoRoot, finalReport)
     }
@@ -2244,9 +2196,8 @@ export const runCliEffect = (
 export const runCli = (
   argv: ReadonlyArray<string>,
   options?: CliEnv,
-  maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>
-): Promise<CliResult> =>
-  Effect.runPromise(runCliEffect(argv, options, maybeDecisionLayer))
+  maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>,
+): Promise<CliResult> => Effect.runPromise(runCliEffect(argv, options, maybeDecisionLayer))
 
 export const run = (argv: ReadonlyArray<string>): number => {
   const requested = argv[0] ?? "help"
@@ -2267,14 +2218,10 @@ if (
   void Effect.runPromise(runCliEffect(process.argv.slice(2)))
     .then((res) => {
       if (res.stdout) {
-        process.stdout.write(
-          res.stdout.endsWith("\n") ? res.stdout : res.stdout + "\n"
-        )
+        process.stdout.write(res.stdout.endsWith("\n") ? res.stdout : res.stdout + "\n")
       }
       if (res.stderr) {
-        process.stderr.write(
-          res.stderr.endsWith("\n") ? res.stderr : res.stderr + "\n"
-        )
+        process.stderr.write(res.stderr.endsWith("\n") ? res.stderr : res.stderr + "\n")
       }
       process.exit(res.exitCode)
     })

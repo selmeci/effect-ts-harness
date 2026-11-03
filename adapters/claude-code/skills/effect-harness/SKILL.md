@@ -69,6 +69,7 @@ The harness provides two complementary MCP servers in `.mcp.json`:
 ### `@modernrelay/omnigraph-mcp` (Property Graph & Branching)
 
 Exposes parameterized `.gq` graph queries over local Lance storage (`http://127.0.0.1:8080`) under subject `agent-mcp`:
+
 - **Node types:** `EffectFn`, `ServiceTag`, `ServiceLayer`, `TaggedError`, `VitestCase`, `PatternDoc`.
 - **Edge types:** `RequiresService`, `FailsWith`, `ProvidesService`, `LayerRequires`, `TracedCall`, `ExercisesSpan`.
 - **Queries:** Run graph traversals to inspect dependencies, layer wirings, and test coverage.
@@ -80,14 +81,14 @@ Exposes parameterized `.gq` graph queries over local Lance storage (`http://127.
 
 Enforce strict directional boundaries across project tags:
 
-| Tag | Purpose | Allowed Imports |
-| :--- | :--- | :--- |
-| `type:contract` | Shared Schemas, `HttpApi`, `RpcGroup`, API errors | `effect`, `ts-pattern` |
-| `type:domain` | Business use cases, domain errors, pure logic | `contract`, `ts-pattern`, (`@harness/gates` for `stub` during planning); **never** `type:infra` or `alchemy` |
-| `type:service` | Service interfaces (`Context.Service`), repository abstractions | `contract`, `domain` |
-| `type:infra` | Live `Layer` implementations, Drizzle repositories, Alchemy resources | `contract`, `domain`, `service`, `infra`, `ts-pattern` |
-| `type:app` | Worker/API entrypoint composing Layers (`alchemy.run.ts`) | All workspace libraries |
-| `type:app` (web) | Frontend (Vite + React) | `contract` and UI libraries only |
+| Tag              | Purpose                                                               | Allowed Imports                                                                                              |
+| :--------------- | :-------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------- |
+| `type:contract`  | Shared Schemas, `HttpApi`, `RpcGroup`, API errors                     | `effect`, `ts-pattern`                                                                                       |
+| `type:domain`    | Business use cases, domain errors, pure logic                         | `contract`, `ts-pattern`, (`@harness/gates` for `stub` during planning); **never** `type:infra` or `alchemy` |
+| `type:service`   | Service interfaces (`Context.Service`), repository abstractions       | `contract`, `domain`                                                                                         |
+| `type:infra`     | Live `Layer` implementations, Drizzle repositories, Alchemy resources | `contract`, `domain`, `service`, `infra`, `ts-pattern`                                                       |
+| `type:app`       | Worker/API entrypoint composing Layers (`alchemy.run.ts`)             | All workspace libraries                                                                                      |
+| `type:app` (web) | Frontend (Vite + React)                                               | `contract` and UI libraries only                                                                             |
 
 ---
 

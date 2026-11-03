@@ -15,13 +15,18 @@
     }
   ],
   "namedInputs": {
-    "sharedGlobals": ["{workspaceRoot}/tsconfig.base.json", "{workspaceRoot}/.oxlintrc.json"],
+    "sharedGlobals": [
+      "{workspaceRoot}/tsconfig.base.json",
+      "{workspaceRoot}/.oxlintrc.json",
+      "{workspaceRoot}/.oxfmtrc.json"
+    ],
     "default": ["{projectRoot}/**/*", "sharedGlobals"],
     "production": ["default"]
   },
   "targetDefaults": {
     "typecheck": { "cache": true },
     "lint": { "cache": true },
+    "format:check": { "cache": true },
     "test": { "cache": true },
     "verify": { "cache": true },
     "effect-graph:check": { "cache": true }

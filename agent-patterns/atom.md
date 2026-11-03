@@ -21,12 +21,11 @@ import { FetchHttpClient } from "effect/http"
 
 // Instantiate the typed atoms using the shared contract definition
 export const apiAtoms = AtomHttpApi.make(ApiDefinition, {
-  httpClient: FetchHttpClient.layer
+  httpClient: FetchHttpClient.layer,
 })
 
 // Derive query atoms for specific endpoints
-export const userAtom = (id: string) =>
-  apiAtoms.users.getUser({ path: { id } })
+export const userAtom = (id: string) => apiAtoms.users.getUser({ path: { id } })
 
 // Derive mutation atoms
 export const createUserMutation = apiAtoms.users.createUser
@@ -48,7 +47,9 @@ export const UserProfile: React.FC<{ userId: string }> = ({ userId }) => {
   return (
     <div>
       {userResult._tag === "Success" && (
-        <h1>{userResult.value.name} ({userResult.value.email})</h1>
+        <h1>
+          {userResult.value.name} ({userResult.value.email})
+        </h1>
       )}
       {userResult._tag === "Failure" && (
         <p className="error">Failed to load user: {userResult.error.message}</p>
@@ -65,7 +66,11 @@ export const CreateUserForm: React.FC = () => {
   }
 
   return (
-    <form onSubmit={(e) => { /* ... */ }}>
+    <form
+      onSubmit={(e) => {
+        /* ... */
+      }}
+    >
       {/* Form fields */}
     </form>
   )

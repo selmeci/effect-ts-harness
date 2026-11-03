@@ -8,7 +8,7 @@ export const TraceHeader = Schema.Struct({
   language: Schema.String,
   repo_root: Schema.String,
   tracer: Schema.String,
-  sampled: Schema.Boolean
+  sampled: Schema.Boolean,
 })
 export type TraceHeader = typeof TraceHeader.Type
 
@@ -16,7 +16,7 @@ export const TracedCallEdge = Schema.Struct({
   callerQualname: Schema.String,
   calleeQualname: Schema.String,
   callCount: Schema.Int,
-  receiverLayer: Schema.NullOr(Schema.String)
+  receiverLayer: Schema.NullOr(Schema.String),
 })
 export type TracedCallEdge = typeof TracedCallEdge.Type
 
@@ -24,7 +24,7 @@ export const ExercisesSpanEdge = Schema.Struct({
   testId: Schema.String,
   calleeQualname: Schema.String,
   callCount: Schema.Int,
-  receiverLayer: Schema.NullOr(Schema.String)
+  receiverLayer: Schema.NullOr(Schema.String),
 })
 export type ExercisesSpanEdge = typeof ExercisesSpanEdge.Type
 
@@ -34,5 +34,5 @@ export const makeTraceHeader = (repoRoot: string): TraceHeader => ({
   language: "javascript",
   repo_root: repoRoot,
   tracer: "effect-span",
-  sampled: false
+  sampled: false,
 })

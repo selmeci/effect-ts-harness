@@ -1,12 +1,7 @@
 import { Option } from "effect"
 import * as Graph from "effect/Graph"
 import { findTestsReaching, resolveNode } from "./graph-engine.js"
-import {
-  getNodeKey,
-  type HarnessEdge,
-  type HarnessGraph,
-  type HarnessNode
-} from "./model.js"
+import { getNodeKey, type HarnessEdge, type HarnessGraph, type HarnessNode } from "./model.js"
 
 export type ArchiMateLayer =
   | "Motivation"
@@ -15,11 +10,7 @@ export type ArchiMateLayer =
   | "Technology"
   | "Implementation"
 
-export type ArchiMateAspect =
-  | "Motivation"
-  | "Behavior"
-  | "ActiveStructure"
-  | "PassiveStructure"
+export type ArchiMateAspect = "Motivation" | "Behavior" | "ActiveStructure" | "PassiveStructure"
 
 export type ArchiMateElementType =
   | "DriverOrConstraint"
@@ -119,7 +110,7 @@ export const classifyOntologyNode = (node: HarnessNode): OntologyClassifiedNode 
         layer: "Motivation",
         aspect: "Motivation",
         elementType: "DriverOrConstraint",
-        file: node.path
+        file: node.path,
       }
     case "EarsSpec":
       return {
@@ -129,7 +120,7 @@ export const classifyOntologyNode = (node: HarnessNode): OntologyClassifiedNode 
         layer: "Motivation",
         aspect: "Motivation",
         elementType: "Requirement",
-        file: node.path
+        file: node.path,
       }
     case "EffectFn": {
       if (node.packageTag === "domain") {
@@ -141,7 +132,7 @@ export const classifyOntologyNode = (node: HarnessNode): OntologyClassifiedNode 
           layer: "Business",
           aspect: "Behavior",
           elementType: isRule ? "BusinessRule" : "BusinessProcess",
-          file: node.file
+          file: node.file,
         }
       }
       return {
@@ -151,7 +142,7 @@ export const classifyOntologyNode = (node: HarnessNode): OntologyClassifiedNode 
         layer: "Application",
         aspect: "Behavior",
         elementType: "ApplicationFunction",
-        file: node.file
+        file: node.file,
       }
     }
     case "TaggedError":
@@ -162,7 +153,7 @@ export const classifyOntologyNode = (node: HarnessNode): OntologyClassifiedNode 
         layer: "Business",
         aspect: "PassiveStructure",
         elementType: "BusinessEvent",
-        file: node.file
+        file: node.file,
       }
     case "ServiceTag": {
       const isTech = isTechnologyService(node.tagId, node.name, node.packageTag)
@@ -173,7 +164,7 @@ export const classifyOntologyNode = (node: HarnessNode): OntologyClassifiedNode 
         layer: isTech ? "Technology" : "Application",
         aspect: isTech ? "ActiveStructure" : "Behavior",
         elementType: isTech ? "TechnologyService" : "ApplicationService",
-        file: node.file
+        file: node.file,
       }
     }
     case "ServiceLayer": {
@@ -185,7 +176,7 @@ export const classifyOntologyNode = (node: HarnessNode): OntologyClassifiedNode 
         layer: isInfra ? "Technology" : "Application",
         aspect: "ActiveStructure",
         elementType: "ApplicationComponent",
-        file: node.file
+        file: node.file,
       }
     }
     case "PatternDoc":
@@ -196,7 +187,7 @@ export const classifyOntologyNode = (node: HarnessNode): OntologyClassifiedNode 
         layer: "Technology",
         aspect: "PassiveStructure",
         elementType: "AssessmentPattern",
-        file: node.path
+        file: node.path,
       }
     case "VitestCase":
       return {
@@ -206,7 +197,7 @@ export const classifyOntologyNode = (node: HarnessNode): OntologyClassifiedNode 
         layer: "Implementation",
         aspect: "Behavior",
         elementType: "WorkPackageTest",
-        file: node.testFile
+        file: node.testFile,
       }
   }
 }
@@ -238,7 +229,7 @@ export const renderOntologyMermaid = (harnessGraph: HarnessGraph): string => {
     Business: [],
     Application: [],
     Technology: [],
-    Implementation: []
+    Implementation: [],
   }
 
   const keyToId = new Map<string, string>()
@@ -264,7 +255,7 @@ export const renderOntologyMermaid = (harnessGraph: HarnessGraph): string => {
     "Business",
     "Application",
     "Technology",
-    "Implementation"
+    "Implementation",
   ]
 
   for (const layer of layerOrder) {
@@ -334,7 +325,7 @@ export const projectOntologyLayers = (harnessGraph: HarnessGraph): OntologyLayer
         edgeTag: edge.data._tag,
         relation: classifyOntologyEdge(edge.data),
         fromLayer: srcNode.layer,
-        toLayer: dstNode.layer
+        toLayer: dstNode.layer,
       })
     }
   }
@@ -347,16 +338,16 @@ export const projectOntologyLayers = (harnessGraph: HarnessGraph): OntologyLayer
       Business: business,
       Application: application,
       Technology: technology,
-      Implementation: implementation
+      Implementation: implementation,
     },
     edges,
-    mermaid
+    mermaid,
   }
 }
 
 export const queryOntologyWhy = (
   harnessGraph: HarnessGraph,
-  symbolOrSpan: string
+  symbolOrSpan: string,
 ): OntologyWhyResult => {
   const targetNode = resolveNode(harnessGraph, symbolOrSpan)
   if (!targetNode) {
@@ -365,7 +356,7 @@ export const queryOntologyWhy = (
       justified: false,
       governingAdrs: [],
       realizingSpecs: [],
-      upwardChain: []
+      upwardChain: [],
     }
   }
 
@@ -379,7 +370,7 @@ export const queryOntologyWhy = (
       justified: false,
       governingAdrs: [],
       realizingSpecs: [],
-      upwardChain: []
+      upwardChain: [],
     }
   }
 
@@ -403,7 +394,7 @@ export const queryOntologyWhy = (
       id: targetNode.id,
       title: targetNode.title,
       path: targetNode.path,
-      via: [targetKey]
+      via: [targetKey],
     })
     seenAdrs.add(targetNode.id)
   } else if (targetNode._tag === "EarsSpec") {
@@ -411,7 +402,7 @@ export const queryOntologyWhy = (
       id: targetNode.id,
       title: targetNode.title,
       path: targetNode.path,
-      via: [targetKey]
+      via: [targetKey],
     })
     seenSpecs.add(targetNode.id)
   }
@@ -468,7 +459,7 @@ export const queryOntologyWhy = (
             edgeTag: edge.data._tag,
             relation: classifyOntologyEdge(edge.data),
             fromLayer: fromClassified.layer,
-            toLayer: toClassified.layer
+            toLayer: toClassified.layer,
           })
         }
 
@@ -480,7 +471,7 @@ export const queryOntologyWhy = (
             id: vNode.id,
             title: vNode.title,
             path: vNode.path,
-            via: newPath
+            via: newPath,
           })
         } else if (vNode._tag === "EarsSpec" && !seenSpecs.has(vNode.id)) {
           seenSpecs.add(vNode.id)
@@ -488,7 +479,7 @@ export const queryOntologyWhy = (
             id: vNode.id,
             title: vNode.title,
             path: vNode.path,
-            via: newPath
+            via: newPath,
           })
         }
 
@@ -524,7 +515,7 @@ export const queryOntologyWhy = (
               edgeTag: edge.data._tag,
               relation: classifyOntologyEdge(edge.data),
               fromLayer: fromClassified.layer,
-              toLayer: toClassified.layer
+              toLayer: toClassified.layer,
             })
           }
 
@@ -536,7 +527,7 @@ export const queryOntologyWhy = (
               id: vNode.id,
               title: vNode.title,
               path: vNode.path,
-              via: newPath
+              via: newPath,
             })
           } else if (vNode._tag === "EarsSpec" && !seenSpecs.has(vNode.id)) {
             seenSpecs.add(vNode.id)
@@ -544,7 +535,7 @@ export const queryOntologyWhy = (
               id: vNode.id,
               title: vNode.title,
               path: vNode.path,
-              via: newPath
+              via: newPath,
             })
           }
 
@@ -568,13 +559,13 @@ export const queryOntologyWhy = (
     justified,
     governingAdrs,
     realizingSpecs,
-    upwardChain
+    upwardChain,
   }
 }
 
 export const queryOntologyImpact = (
   harnessGraph: HarnessGraph,
-  symbolOrSpan: string
+  symbolOrSpan: string,
 ): OntologyImpactResult => {
   const targetNode = resolveNode(harnessGraph, symbolOrSpan)
   if (!targetNode) {
@@ -585,11 +576,11 @@ export const queryOntologyImpact = (
         Business: [],
         Application: [],
         Technology: [],
-        Implementation: []
+        Implementation: [],
       },
       affectedSpecs: [],
       affectedAdrs: [],
-      reachingTests: []
+      reachingTests: [],
     }
   }
 
@@ -605,11 +596,11 @@ export const queryOntologyImpact = (
         Business: [],
         Application: [],
         Technology: [],
-        Implementation: []
+        Implementation: [],
       },
       affectedSpecs: [],
       affectedAdrs: [],
-      reachingTests: []
+      reachingTests: [],
     }
   }
 
@@ -624,7 +615,7 @@ export const queryOntologyImpact = (
     Business: [],
     Application: [],
     Technology: [],
-    Implementation: []
+    Implementation: [],
   }
 
   const affectedSpecs: Array<string> = []
@@ -710,6 +701,6 @@ export const queryOntologyImpact = (
     impactByLayer,
     affectedSpecs,
     affectedAdrs,
-    reachingTests
+    reachingTests,
   }
 }

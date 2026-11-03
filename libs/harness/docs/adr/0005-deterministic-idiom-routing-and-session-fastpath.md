@@ -78,9 +78,9 @@ Deleting the `PreInvocation` hook entry in `adapters/antigravity/plugins/effect-
 
 ### Deterministic Enforcement
 
-| Rule | Enforced By | Gate / Mechanism | Governed Symbols |
-| :--- | :--- | :--- | :--- |
-| Unambiguous idiom keywords route deterministically in `0ms` before `IdiomRouterV1` | `libs/harness/decision/src/idiom-router.ts` | `vitest` unit suite (`decisions.test.ts`) | `Harness.routeStep` |
-| Effect v3 removed APIs (`decodeEither`, `Either`, `ParseResult`) and `decodeSync` negative tests triage deterministically | `libs/harness/decision/src/triage-decision.ts` | `vitest` unit suite (`decisions.test.ts`) | `Harness.triageFailure` |
-| `omnigraphLiveRatio` counts only `engineSource === "memory-fallback"` and `graphDiscoveryCalls` excludes `omnigraph:sync-*` / `omnigraph:merge-*` | `libs/harness/gates/src/telemetry.ts` | `vitest` unit suite (`telemetry.test.ts`) | `SessionReport.decide` |
-| `cd <dir>` is denied with `Cwd` hint and `git restore --staged` is allowlisted | `libs/harness/gates/src/policy.ts` | `vitest` unit suite (`policy.test.ts`) | `Harness.decideGuardCommand` |
+| Rule                                                                                                                                              | Enforced By                                    | Gate / Mechanism                          | Governed Symbols             |
+| :------------------------------------------------------------------------------------------------------------------------------------------------ | :--------------------------------------------- | :---------------------------------------- | :--------------------------- |
+| Unambiguous idiom keywords route deterministically in `0ms` before `IdiomRouterV1`                                                                | `libs/harness/decision/src/idiom-router.ts`    | `vitest` unit suite (`decisions.test.ts`) | `Harness.routeStep`          |
+| Effect v3 removed APIs (`decodeEither`, `Either`, `ParseResult`) and `decodeSync` negative tests triage deterministically                         | `libs/harness/decision/src/triage-decision.ts` | `vitest` unit suite (`decisions.test.ts`) | `Harness.triageFailure`      |
+| `omnigraphLiveRatio` counts only `engineSource === "memory-fallback"` and `graphDiscoveryCalls` excludes `omnigraph:sync-*` / `omnigraph:merge-*` | `libs/harness/gates/src/telemetry.ts`          | `vitest` unit suite (`telemetry.test.ts`) | `SessionReport.decide`       |
+| `cd <dir>` is denied with `Cwd` hint and `git restore --staged` is allowlisted                                                                    | `libs/harness/gates/src/policy.ts`             | `vitest` unit suite (`policy.test.ts`)    | `Harness.decideGuardCommand` |

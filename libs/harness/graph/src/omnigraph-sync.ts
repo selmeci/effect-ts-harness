@@ -5,18 +5,18 @@ import { type Diff, type FetchLike, Omnigraph } from "@modernrelay/omnigraph"
 import {
   deriveRepoOmnigraphPort,
   resolveOmnigraphClusterDir,
-  writeGraphHeadMeta
+  writeGraphHeadMeta,
 } from "./cluster-resolver.js"
 import {
   executeNamedGqQueryInMemory,
   HARNESS_GQ_QUERIES,
-  type HarnessGqQueryName
+  type HarnessGqQueryName,
 } from "./gq-queries.js"
 import { loadGraphSnapshot, saveGraphSnapshot, toOmnigraphNdjson } from "./graph-engine.js"
 import type { HarnessGraph } from "./model.js"
 
 const decodeJsonRecordOption = Schema.decodeOption(
-  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
+  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
 )
 
 export const OmnigraphClient = Omnigraph
@@ -43,16 +43,14 @@ const OmnigraphServerMetaSchema = Schema.Struct({
   baseUrl: Schema.optional(Schema.String),
   port: Schema.optional(Schema.Finite),
   pid: Schema.optional(Schema.Finite),
-  canonicalRepoRoot: Schema.optional(Schema.String)
+  canonicalRepoRoot: Schema.optional(Schema.String),
 })
 
-const decodeServerMetaOption = Schema.decodeOption(
-  Schema.fromJsonString(OmnigraphServerMetaSchema)
-)
+const decodeServerMetaOption = Schema.decodeOption(Schema.fromJsonString(OmnigraphServerMetaSchema))
 
 export const resolveOmnigraphBaseUrl = (
   options?: OmnigraphConnectionOptions,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
 ): string => {
   if (options?.baseUrl !== undefined) {
     return options.baseUrl
@@ -67,11 +65,11 @@ export const resolveOmnigraphBaseUrl = (
       const metaOpt = Effect.runSync(
         Effect.try({
           try: () => readFileSync(serverJsonPath, "utf8"),
-          catch: () => ""
+          catch: () => "",
         }).pipe(
           Effect.flatMap((raw) => Effect.fromOption(decodeServerMetaOption(raw))),
-          Effect.option
-        )
+          Effect.option,
+        ),
       )
       if (Option.isSome(metaOpt)) {
         const meta = metaOpt.value
@@ -85,19 +83,16 @@ export const resolveOmnigraphBaseUrl = (
   return env.OMNIGRAPH_URL ?? "http://127.0.0.1:8080"
 }
 
-export const makeOmnigraphClient = (
-  options?: OmnigraphConnectionOptions
-): Omnigraph => {
+export const makeOmnigraphClient = (options?: OmnigraphConnectionOptions): Omnigraph => {
   const baseUrl = resolveOmnigraphBaseUrl(options)
-  const graphId =
-    options?.graphId ?? process.env.OMNIGRAPH_GRAPH_ID ?? "harness"
+  const graphId = options?.graphId ?? process.env.OMNIGRAPH_GRAPH_ID ?? "harness"
   const token = options?.token ?? process.env.OMNIGRAPH_TOKEN
 
   return new Omnigraph({
     baseUrl,
     graphId,
     ...(token ? { token } : {}),
-    ...(options?.fetch ? { fetch: options.fetch } : {})
+    ...(options?.fetch ? { fetch: options.fetch } : {}),
   })
 }
 
@@ -137,8 +132,7 @@ const toOmnigraphServerNdjson = (graph: HarnessGraph): string => {
           : {}
       edgeRecords.push({ edge: edgeName, from, to, data })
       if (edgeName === "GovernsSymbol" || edgeName === "SpecifiesSymbol") {
-        const targetKind =
-          typeof data.targetKind === "string" ? data.targetKind : "EffectFn"
+        const targetKind = typeof data.targetKind === "string" ? data.targetKind : "EffectFn"
         anyNodes.set(to, targetKind)
       }
     } else if (typeof parsed.type === "string") {
@@ -171,9 +165,9 @@ const toOmnigraphServerNdjson = (graph: HarnessGraph): string => {
           targetKind,
           archimateLayer: "Business",
           archimateAspect: "Behavior",
-          archimateElementType: targetKind
-        }
-      })
+          archimateElementType: targetKind,
+        },
+      }),
     )
   }
 
@@ -185,7 +179,7 @@ const toOmnigraphServerNdjson = (graph: HarnessGraph): string => {
     TracedCall: ["EffectFn", "EffectFn"],
     ExercisesSpan: ["VitestCase", "EffectFn"],
     GovernsSymbol: ["AdrDoc", "Any"],
-    SpecifiesSymbol: ["EarsSpec", "Any"]
+    SpecifiesSymbol: ["EarsSpec", "Any"],
   }
 
   const validEdgeLines: Array<string> = []
@@ -196,10 +190,7 @@ const toOmnigraphServerNdjson = (graph: HarnessGraph): string => {
     const [srcType, dstType] = endpoints
     const edgeKey = `${rec.edge}::${rec.from}::${rec.to}`
     if (seenEdges.has(edgeKey)) continue
-    if (
-      nodeKeysByType.get(srcType)?.has(rec.from) &&
-      nodeKeysByType.get(dstType)?.has(rec.to)
-    ) {
+    if (nodeKeysByType.get(srcType)?.has(rec.from) && nodeKeysByType.get(dstType)?.has(rec.to)) {
       seenEdges.add(edgeKey)
       validEdgeLines.push(JSON.stringify(rec))
     }
@@ -215,14 +206,14 @@ export interface OmnigraphSyncShape {
       readonly branch?: string | undefined
       readonly snapshotPath?: string | undefined
       readonly from?: string | undefined
-    }
+    },
   ) => Effect.Effect<OmnigraphSyncResult>
   readonly mergeBranch: (
     options?: OmnigraphConnectionOptions & {
       readonly source?: string | undefined
       readonly target?: string | undefined
       readonly cleanupBranches?: ReadonlyArray<string> | undefined
-    }
+    },
   ) => Effect.Effect<boolean>
   readonly query: (
     input: OmnigraphConnectionOptions & {
@@ -230,7 +221,7 @@ export interface OmnigraphSyncShape {
       readonly name?: string | undefined
       readonly params?: Readonly<Record<string, unknown>> | undefined
       readonly branch?: string | undefined
-    }
+    },
   ) => Effect.Effect<Option.Option<ReadonlyArray<Record<string, unknown>>>>
   readonly invokeNamedQuery: (
     input: OmnigraphConnectionOptions & {
@@ -238,7 +229,7 @@ export interface OmnigraphSyncShape {
       readonly params?: Readonly<Record<string, unknown>> | undefined
       readonly branch?: string | undefined
       readonly fallbackGraph?: HarnessGraph | undefined
-    }
+    },
   ) => Effect.Effect<{
     readonly source: "omnigraph" | "memory-fallback"
     readonly rows: ReadonlyArray<Record<string, unknown>>
@@ -247,25 +238,21 @@ export interface OmnigraphSyncShape {
     input?: OmnigraphConnectionOptions & {
       readonly source?: string | undefined
       readonly target?: string | undefined
-    }
+    },
   ) => Effect.Effect<Option.Option<Diff>>
 }
 
 export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncShape>()(
-  "@harness/graph/OmnigraphSync"
+  "@harness/graph/OmnigraphSync",
 ) {
   static readonly Live: Layer.Layer<OmnigraphSync> = Layer.succeed(
     OmnigraphSync,
     OmnigraphSync.of({
       sync: (graph, options) =>
         Effect.gen(function* () {
-          const snapshotPath =
-            options?.snapshotPath ?? ".harness/graph-snapshot.json"
+          const snapshotPath = options?.snapshotPath ?? ".harness/graph-snapshot.json"
           saveGraphSnapshot(graph, snapshotPath)
-          if (
-            options?.repoRoot &&
-            !snapshotPath.endsWith("plan-graph-snapshot.json")
-          ) {
+          if (options?.repoRoot && !snapshotPath.endsWith("plan-graph-snapshot.json")) {
             writeGraphHeadMeta(options.repoRoot)
           }
 
@@ -278,22 +265,22 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
               if (branch === "main") {
                 yield* Effect.tryPromise({
                   try: () => og.health(),
-                  catch: (cause) => new OmnigraphLoadError({ cause })
+                  catch: (cause) => new OmnigraphLoadError({ cause }),
                 })
                 return true
               }
               const branches = yield* Effect.tryPromise({
                 try: () => og.branches.list(),
-                catch: (cause) => new OmnigraphLoadError({ cause })
+                catch: (cause) => new OmnigraphLoadError({ cause }),
               })
               if (!branches.includes(branch)) {
                 yield* Effect.tryPromise({
                   try: () =>
                     og.branches.create({
                       name: branch,
-                      from: options?.from ?? "main"
+                      from: options?.from ?? "main",
                     }),
-                  catch: (cause) => new OmnigraphLoadError({ cause })
+                  catch: (cause) => new OmnigraphLoadError({ cause }),
                 })
               }
               return true
@@ -301,14 +288,14 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
 
             return {
               syncedToOmnigraph: branchReady,
-              snapshotPath
+              snapshotPath,
             }
           }
 
           if (branch !== "main") {
             yield* Effect.tryPromise({
               try: () => og.branches.delete(branch),
-              catch: (cause) => new OmnigraphLoadError({ cause })
+              catch: (cause) => new OmnigraphLoadError({ cause }),
             }).pipe(Effect.orElseSucceed(() => undefined))
           }
 
@@ -318,24 +305,21 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
                 branch,
                 ...(branch !== "main" ? { from: options?.from ?? "main" } : {}),
                 mode: "merge",
-                data: ndjson
+                data: ndjson,
               }),
-            catch: (cause) => new OmnigraphLoadError({ cause })
+            catch: (cause) => new OmnigraphLoadError({ cause }),
           }).pipe(
             Effect.map(() => ({
               syncedToOmnigraph: true,
-              snapshotPath
+              snapshotPath,
             })),
             Effect.catch((err) =>
               Effect.succeed({
                 syncedToOmnigraph: false,
                 snapshotPath,
-                error:
-                  err.cause instanceof Error
-                    ? err.cause.message
-                    : String(err.cause)
-              })
-            )
+                error: err.cause instanceof Error ? err.cause.message : String(err.cause),
+              }),
+            ),
           )
         }),
 
@@ -348,28 +332,24 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
           return yield* Effect.gen(function* () {
             const branches = yield* Effect.tryPromise({
               try: () => og.branches.list(),
-              catch: (cause) => new OmnigraphLoadError({ cause })
+              catch: (cause) => new OmnigraphLoadError({ cause }),
             })
             if (!branches.includes(source)) {
               yield* Effect.tryPromise({
                 try: () => og.branches.create({ name: source, from: target }),
-                catch: (cause) => new OmnigraphLoadError({ cause })
+                catch: (cause) => new OmnigraphLoadError({ cause }),
               })
             }
             yield* Effect.tryPromise({
               try: () => og.branches.merge({ source, target }),
-              catch: (cause) => new OmnigraphLoadError({ cause })
+              catch: (cause) => new OmnigraphLoadError({ cause }),
             }).pipe(
               Effect.catch((mergeErr) =>
                 Effect.gen(function* () {
                   if (!options?.repoRoot) {
                     return yield* mergeErr
                   }
-                  const fallbackSnap = join(
-                    options.repoRoot,
-                    ".harness",
-                    "graph-snapshot.json"
-                  )
+                  const fallbackSnap = join(options.repoRoot, ".harness", "graph-snapshot.json")
                   if (!existsSync(fallbackSnap)) {
                     return yield* mergeErr
                   }
@@ -381,20 +361,20 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
                         og.load({
                           branch: target,
                           mode: "merge",
-                          data: ndjson
+                          data: ndjson,
                         }),
-                      catch: (cause) => new OmnigraphLoadError({ cause })
+                      catch: (cause) => new OmnigraphLoadError({ cause }),
                     })
                   }
-                })
-              )
+                }),
+              ),
             )
             const cleanup = options?.cleanupBranches ?? []
             for (const branchToDelete of cleanup) {
               if (branchToDelete !== target && branchToDelete !== "main") {
                 yield* Effect.tryPromise({
                   try: () => og.branches.delete(branchToDelete),
-                  catch: (cause) => new OmnigraphLoadError({ cause })
+                  catch: (cause) => new OmnigraphLoadError({ cause }),
                 }).pipe(Effect.orElseSucceed(() => undefined))
               }
             }
@@ -414,16 +394,16 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
                 query: input.query,
                 ...(input.name ? { name: input.name } : {}),
                 ...(input.params ? { params: input.params } : {}),
-                branch: input.branch ?? "main"
+                branch: input.branch ?? "main",
               }),
-            catch: (cause) => new OmnigraphLoadError({ cause })
+            catch: (cause) => new OmnigraphLoadError({ cause }),
           }).pipe(
             Effect.map((res) =>
               Array.isArray(res.rows)
                 ? Option.some(res.rows as ReadonlyArray<Record<string, unknown>>)
-                : Option.none()
+                : Option.none(),
             ),
-            Effect.orElseSucceed(() => Option.none())
+            Effect.orElseSucceed(() => Option.none()),
           )
         }),
 
@@ -437,9 +417,9 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
               og.queries.invoke(input.name, {
                 ...(input.params ? { params: input.params } : {}),
                 branch,
-                expectMutation: false
+                expectMutation: false,
               }),
-            catch: (cause) => new OmnigraphLoadError({ cause })
+            catch: (cause) => new OmnigraphLoadError({ cause }),
           }).pipe(
             Effect.map((res) => {
               if (
@@ -448,21 +428,17 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
                 "rows" in res &&
                 Array.isArray((res as { rows: unknown }).rows)
               ) {
-                return Option.some(
-                  (res as { rows: ReadonlyArray<Record<string, unknown>> }).rows
-                )
+                return Option.some((res as { rows: ReadonlyArray<Record<string, unknown>> }).rows)
               }
               return Option.none<ReadonlyArray<Record<string, unknown>>>()
             }),
-            Effect.orElseSucceed(() =>
-              Option.none<ReadonlyArray<Record<string, unknown>>>()
-            )
+            Effect.orElseSucceed(() => Option.none<ReadonlyArray<Record<string, unknown>>>()),
           )
 
           if (Option.isSome(invokeAttempt)) {
             return {
               source: "omnigraph" as const,
-              rows: invokeAttempt.value
+              rows: invokeAttempt.value,
             }
           }
 
@@ -473,9 +449,9 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
                 query: queryDescriptor.source,
                 name: input.name,
                 ...(input.params ? { params: input.params } : {}),
-                branch
+                branch,
               }),
-            catch: (cause) => new OmnigraphLoadError({ cause })
+            catch: (cause) => new OmnigraphLoadError({ cause }),
           }).pipe(
             Effect.map((res) => {
               if (
@@ -484,35 +460,27 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
                 "rows" in res &&
                 Array.isArray((res as { rows: unknown }).rows)
               ) {
-                return Option.some(
-                  (res as { rows: ReadonlyArray<Record<string, unknown>> }).rows
-                )
+                return Option.some((res as { rows: ReadonlyArray<Record<string, unknown>> }).rows)
               }
               return Option.none<ReadonlyArray<Record<string, unknown>>>()
             }),
-            Effect.orElseSucceed(() =>
-              Option.none<ReadonlyArray<Record<string, unknown>>>()
-            )
+            Effect.orElseSucceed(() => Option.none<ReadonlyArray<Record<string, unknown>>>()),
           )
 
           if (Option.isSome(queryAttempt)) {
             return {
               source: "omnigraph" as const,
-              rows: queryAttempt.value
+              rows: queryAttempt.value,
             }
           }
 
           const fallbackRows = input.fallbackGraph
-            ? executeNamedGqQueryInMemory(
-                input.fallbackGraph,
-                input.name,
-                input.params
-              )
+            ? executeNamedGqQueryInMemory(input.fallbackGraph, input.name, input.params)
             : []
 
           return {
             source: "memory-fallback" as const,
-            rows: fallbackRows
+            rows: fallbackRows,
           }
         }),
 
@@ -524,42 +492,38 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
 
           return yield* Effect.tryPromise({
             try: () => og.branches.diff({ source, target }),
-            catch: (cause) => new OmnigraphLoadError({ cause })
+            catch: (cause) => new OmnigraphLoadError({ cause }),
           }).pipe(
             Effect.asSome,
-            Effect.orElseSucceed(() => Option.none())
+            Effect.orElseSucceed(() => Option.none()),
           )
-        })
-    })
+        }),
+    }),
   )
 }
 
-export const syncToOmnigraphAndSnapshot = Effect.fn("OmnigraphSync.sync")(
-  function* (
-    graph: HarnessGraph,
-    options?: OmnigraphConnectionOptions & {
-      readonly branch?: string | undefined
-      readonly snapshotPath?: string | undefined
-      readonly from?: string | undefined
-    }
-  ) {
-    const service = yield* OmnigraphSync
-    return yield* service.sync(graph, options)
-  }
-)
+export const syncToOmnigraphAndSnapshot = Effect.fn("OmnigraphSync.sync")(function* (
+  graph: HarnessGraph,
+  options?: OmnigraphConnectionOptions & {
+    readonly branch?: string | undefined
+    readonly snapshotPath?: string | undefined
+    readonly from?: string | undefined
+  },
+) {
+  const service = yield* OmnigraphSync
+  return yield* service.sync(graph, options)
+})
 
-export const mergeOmnigraphBranch = Effect.fn("OmnigraphSync.mergeBranch")(
-  function* (
-    options?: OmnigraphConnectionOptions & {
-      readonly source?: string | undefined
-      readonly target?: string | undefined
-      readonly cleanupBranches?: ReadonlyArray<string> | undefined
-    }
-  ) {
-    const service = yield* OmnigraphSync
-    return yield* service.mergeBranch(options)
-  }
-)
+export const mergeOmnigraphBranch = Effect.fn("OmnigraphSync.mergeBranch")(function* (
+  options?: OmnigraphConnectionOptions & {
+    readonly source?: string | undefined
+    readonly target?: string | undefined
+    readonly cleanupBranches?: ReadonlyArray<string> | undefined
+  },
+) {
+  const service = yield* OmnigraphSync
+  return yield* service.mergeBranch(options)
+})
 
 export const queryOmnigraph = (
   input: OmnigraphConnectionOptions & {
@@ -567,12 +531,9 @@ export const queryOmnigraph = (
     readonly name?: string | undefined
     readonly params?: Readonly<Record<string, unknown>> | undefined
     readonly branch?: string | undefined
-  }
-): Effect.Effect<
-  Option.Option<ReadonlyArray<Record<string, unknown>>>,
-  never,
-  OmnigraphSync
-> => Effect.flatMap(OmnigraphSync, (service) => service.query(input))
+  },
+): Effect.Effect<Option.Option<ReadonlyArray<Record<string, unknown>>>, never, OmnigraphSync> =>
+  Effect.flatMap(OmnigraphSync, (service) => service.query(input))
 
 export const invokeOmnigraphNamedQuery = (
   input: OmnigraphConnectionOptions & {
@@ -580,7 +541,7 @@ export const invokeOmnigraphNamedQuery = (
     readonly params?: Readonly<Record<string, unknown>> | undefined
     readonly branch?: string | undefined
     readonly fallbackGraph?: HarnessGraph | undefined
-  }
+  },
 ): Effect.Effect<
   {
     readonly source: "omnigraph" | "memory-fallback"
@@ -594,6 +555,6 @@ export const diffOmnigraphBranches = (
   input?: OmnigraphConnectionOptions & {
     readonly source?: string | undefined
     readonly target?: string | undefined
-  }
+  },
 ): Effect.Effect<Option.Option<Diff>, never, OmnigraphSync> =>
   Effect.flatMap(OmnigraphSync, (service) => service.diffBranches(input))

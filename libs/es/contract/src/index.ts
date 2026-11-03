@@ -6,6 +6,6 @@ export type StreamVersion = typeof StreamVersion.Type
 
 // Strictly positive quantities (> 0, 0 is invalid)
 export const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0)).pipe(
-  Schema.brand("PositiveInt")
+  Schema.brand("PositiveInt"),
 )
 export type PositiveInt = typeof PositiveInt.Type

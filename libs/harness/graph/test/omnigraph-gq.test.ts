@@ -21,12 +21,10 @@ import {
   resolveOmnigraphBaseUrl,
   resolveOmnigraphTaskBranches,
   syncToOmnigraphAndSnapshot,
-  writeGraphHeadMeta
+  writeGraphHeadMeta,
 } from "../src/index.js"
 
-const decodeJson = Schema.decodeUnknownSync(
-  Schema.fromJsonString(Schema.Unknown)
-)
+const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))
 
 interface RecordedRequest {
   readonly url: string
@@ -58,17 +56,17 @@ describe("Omnigraph 0.14.0 schema.pg and queries/harness.gq", () => {
         "node VitestCase",
         "node PatternDoc",
         "node AdrDoc",
-        "node EarsSpec"
+        "node EarsSpec",
       ]
       for (const nodeDecl of expectedNodes) {
         expect(schema).toContain(nodeDecl)
       }
 
       expect(schema).toContain(
-        "archimateLayer: enum(Motivation, Business, Application, Technology, Implementation) @index"
+        "archimateLayer: enum(Motivation, Business, Application, Technology, Implementation) @index",
       )
       expect(schema).toContain(
-        "archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure) @index"
+        "archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure) @index",
       )
       expect(schema).toContain("archimateElementType: String @index")
       expect(schema).toContain("isPropertyTest: Bool @index")
@@ -81,14 +79,14 @@ describe("Omnigraph 0.14.0 schema.pg and queries/harness.gq", () => {
         "edge TracedCall: EffectFn -> EffectFn",
         "edge ExercisesSpan: VitestCase -> EffectFn",
         "edge GovernsSymbol: AdrDoc -> Any",
-        "edge SpecifiesSymbol: EarsSpec -> Any"
+        "edge SpecifiesSymbol: EarsSpec -> Any",
       ]
       for (const edgeDecl of expectedEdges) {
         expect(schema).toContain(edgeDecl)
       }
 
       expect(schema).toContain("archimateRelation: String @index")
-    })
+    }),
   )
 
   it.effect("declares all 8 canonical GQ queries in queries/harness.gq", () =>
@@ -101,7 +99,7 @@ describe("Omnigraph 0.14.0 schema.pg and queries/harness.gq", () => {
         expect(HARNESS_GQ_QUERIES[queryName]).toBeDefined()
         expect(HARNESS_GQ_QUERIES[queryName].name).toBe(queryName)
       }
-    })
+    }),
   )
 })
 
@@ -115,7 +113,7 @@ describe("Deterministic in-memory GQ query execution and fallback", () => {
         line: 4,
         packageTag: "domain",
         successType: "string",
-        isStub: false
+        isStub: false,
       },
       {
         qualname: "libs/sample/domain/src/index.ts#untested",
@@ -124,45 +122,45 @@ describe("Deterministic in-memory GQ query execution and fallback", () => {
         line: 10,
         packageTag: "domain",
         successType: "void",
-        isStub: false
-      }
+        isStub: false,
+      },
     ],
     services: [
       {
         tagId: "PhotoRepo",
         name: "PhotoRepo",
         packageTag: "service",
-        file: "libs/sample/service/src/index.ts"
-      }
+        file: "libs/sample/service/src/index.ts",
+      },
     ],
     layers: [
       {
         qualname: "PhotoRepoLive",
         layerKind: "live",
         packageTag: "infra",
-        file: "libs/sample/infra/src/index.ts"
-      }
+        file: "libs/sample/infra/src/index.ts",
+      },
     ],
     errors: [
       {
         errorTag: "PhotoNotFound",
-        file: "libs/sample/domain/src/errors.ts"
-      }
+        file: "libs/sample/domain/src/errors.ts",
+      },
     ],
     tests: [
       {
         testId: "libs/sample/domain/test/index.test.ts::greets by name",
         testFile: "libs/sample/domain/test/index.test.ts",
         testName: "greets by name",
-        lastTreeHash: "abc123"
-      }
+        lastTreeHash: "abc123",
+      },
     ],
     patternDocs: [
       {
         slug: "planning",
         path: "agent-patterns/planning.md",
-        summary: "Plan-as-Code markdown template with stub skeleton pattern."
-      }
+        summary: "Plan-as-Code markdown template with stub skeleton pattern.",
+      },
     ],
     adrDocs: [
       {
@@ -173,8 +171,8 @@ describe("Deterministic in-memory GQ query execution and fallback", () => {
         enforcedByFiles: [],
         referencedSpans: [],
         referencedServices: ["PhotoRepo"],
-        referencedErrors: []
-      }
+        referencedErrors: [],
+      },
     ],
     earsSpecs: [
       {
@@ -185,109 +183,88 @@ describe("Deterministic in-memory GQ query execution and fallback", () => {
         enforcedByFiles: [],
         referencedSpans: ["Sample.greet"],
         referencedServices: [],
-        referencedErrors: []
-      }
+        referencedErrors: [],
+      },
     ],
     providesService: [
       {
         layerQualname: "PhotoRepoLive",
-        tagId: "PhotoRepo"
-      }
+        tagId: "PhotoRepo",
+      },
     ],
     exercisesSpans: [
       {
         testId: "libs/sample/domain/test/index.test.ts::greets by name",
         calleeQualname: "libs/sample/domain/src/index.ts#greet",
         callCount: 1,
-        receiverLayer: null
-      }
+        receiverLayer: null,
+      },
     ],
     governsSymbols: [
       {
         adrId: "sample:ADR-0001",
         targetKey: "PhotoRepo",
-        targetKind: "ServiceTag"
-      }
+        targetKind: "ServiceTag",
+      },
     ],
     specifiesSymbols: [
       {
         specId: "sample:SPEC-0001",
         targetKey: "libs/sample/domain/src/index.ts#greet",
-        targetKind: "EffectFn"
-      }
-    ]
+        targetKind: "EffectFn",
+      },
+    ],
   })
 
   it.effect("executes all 8 named GQ queries in memory deterministically", () =>
     Effect.gen(function* () {
       yield* Effect.void
-      const fnRows = executeNamedGqQueryInMemory(
-        sampleGraph,
-        "resolve_effect_fn",
-        { spanOrQualname: "Sample.greet" }
-      )
+      const fnRows = executeNamedGqQueryInMemory(sampleGraph, "resolve_effect_fn", {
+        spanOrQualname: "Sample.greet",
+      })
       expect(fnRows).toHaveLength(1)
       expect(fnRows[0]?.spanName).toBe("Sample.greet")
       expect(fnRows[0]?.archimateLayer).toBe("Business")
 
-      const provRows = executeNamedGqQueryInMemory(
-        sampleGraph,
-        "find_service_providers",
-        { tagId: "PhotoRepo" }
-      )
+      const provRows = executeNamedGqQueryInMemory(sampleGraph, "find_service_providers", {
+        tagId: "PhotoRepo",
+      })
       expect(provRows).toHaveLength(1)
       expect(provRows[0]?.layerQualname).toBe("PhotoRepoLive")
       expect(provRows[0]?.tagId).toBe("PhotoRepo")
 
-      const callerRows = executeNamedGqQueryInMemory(
-        sampleGraph,
-        "find_callers",
-        { target: "PhotoRepo" }
-      )
+      const callerRows = executeNamedGqQueryInMemory(sampleGraph, "find_callers", {
+        target: "PhotoRepo",
+      })
       expect(callerRows.some((c) => c.qualname === "sample:ADR-0001")).toBe(true)
 
-      const calleeRows = executeNamedGqQueryInMemory(
-        sampleGraph,
-        "find_callees",
-        { caller: "sample:SPEC-0001" }
+      const calleeRows = executeNamedGqQueryInMemory(sampleGraph, "find_callees", {
+        caller: "sample:SPEC-0001",
+      })
+      expect(calleeRows.some((c) => c.qualname === "libs/sample/domain/src/index.ts#greet")).toBe(
+        true,
       )
-      expect(
-        calleeRows.some(
-          (c) => c.qualname === "libs/sample/domain/src/index.ts#greet"
-        )
-      ).toBe(true)
 
-      const testRows = executeNamedGqQueryInMemory(
-        sampleGraph,
-        "find_tests_reaching",
-        { callee: "Sample.greet" }
-      )
+      const testRows = executeNamedGqQueryInMemory(sampleGraph, "find_tests_reaching", {
+        callee: "Sample.greet",
+      })
       expect(testRows).toHaveLength(1)
-      expect(testRows[0]?.testId).toBe(
-        "libs/sample/domain/test/index.test.ts::greets by name"
-      )
+      expect(testRows[0]?.testId).toBe("libs/sample/domain/test/index.test.ts::greets by name")
 
-      const layerRows = executeNamedGqQueryInMemory(
-        sampleGraph,
-        "ontology_layer_nodes",
-        { layer: "Motivation" }
-      )
+      const layerRows = executeNamedGqQueryInMemory(sampleGraph, "ontology_layer_nodes", {
+        layer: "Motivation",
+      })
       expect(layerRows.length).toBeGreaterThanOrEqual(2)
 
-      const whyRows = executeNamedGqQueryInMemory(
-        sampleGraph,
-        "ontology_governed_by",
-        { symbol: "Sample.greet" }
-      )
+      const whyRows = executeNamedGqQueryInMemory(sampleGraph, "ontology_governed_by", {
+        symbol: "Sample.greet",
+      })
       expect(whyRows.some((w) => w.id === "sample:SPEC-0001")).toBe(true)
 
-      const untestedRows = executeNamedGqQueryInMemory(
-        sampleGraph,
-        "untested_domain_fns"
-      )
+      const untestedRows = executeNamedGqQueryInMemory(sampleGraph, "untested_domain_fns")
       expect(untestedRows).toHaveLength(1)
       expect(untestedRows[0]?.spanName).toBe("Sample.untested")
-    })
+    }),
   )
 
   it.effect("falls back to memory-fallback across all 8 queries when Omnigraph is offline", () =>
@@ -296,8 +273,8 @@ describe("Deterministic in-memory GQ query execution and fallback", () => {
         Promise.resolve(
           new Response("Service Unavailable", {
             status: 503,
-            headers: { "Omnigraph-Http-Api": "0.14" }
-          })
+            headers: { "Omnigraph-Http-Api": "0.14" },
+          }),
         )
 
       for (const queryName of HARNESS_GQ_QUERY_NAMES) {
@@ -312,14 +289,14 @@ describe("Deterministic in-memory GQ query execution and fallback", () => {
             caller: "sample:SPEC-0001",
             callee: "Sample.greet",
             layer: "Motivation",
-            symbol: "Sample.greet"
-          }
+            symbol: "Sample.greet",
+          },
         }).pipe(Effect.provide(OmnigraphSync.Live))
 
         expect(res.source).toBe("memory-fallback")
         expect(Array.isArray(res.rows)).toBe(true)
       }
-    })
+    }),
   )
 })
 
@@ -333,9 +310,9 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
         line: 4,
         packageTag: "domain",
         successType: "string",
-        isStub: false
-      }
-    ]
+        isStub: false,
+      },
+    ],
   })
 
   it.effect("syncs with branch and forks from main using exact Omnigraph 0.14 protocol", () =>
@@ -352,8 +329,8 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
           return Promise.resolve(
             new Response(null, {
               status: 200,
-              headers: { "Omnigraph-Http-Api": "0.14" }
-            })
+              headers: { "Omnigraph-Http-Api": "0.14" },
+            }),
           )
         }
 
@@ -363,24 +340,24 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
               JSON.stringify({
                 outcome: "ok",
                 graphCommitId: "cmt-100",
-                serverRef: "9d92f397"
+                serverRef: "9d92f397",
               }),
               {
                 status: 200,
                 headers: {
                   "Content-Type": "application/json",
-                  "Omnigraph-Http-Api": "0.14"
-                }
-              }
-            )
+                  "Omnigraph-Http-Api": "0.14",
+                },
+              },
+            ),
           )
         }
 
         return Promise.resolve(
           new Response("Not Found", {
             status: 404,
-            headers: { "Omnigraph-Http-Api": "0.14" }
-          })
+            headers: { "Omnigraph-Http-Api": "0.14" },
+          }),
         )
       }
 
@@ -388,7 +365,7 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
         branch: "plan/current",
         from: "main",
         fetch: mockFetch,
-        snapshotPath: ".harness/test-snapshot.json"
+        snapshotPath: ".harness/test-snapshot.json",
       }).pipe(Effect.provide(OmnigraphSync.Live))
 
       expect(syncRes.syncedToOmnigraph).toBe(true)
@@ -402,7 +379,7 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
       }
       expect(parsedBody.branch).toBe("plan/current")
       expect(parsedBody.from).toBe("main")
-    })
+    }),
   )
 
   it.effect("queries live Omnigraph, invokes stored queries, and diffs branches", () =>
@@ -413,8 +390,8 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
           return Promise.resolve(
             new Response(null, {
               status: 200,
-              headers: { "Omnigraph-Http-Api": "0.14" }
-            })
+              headers: { "Omnigraph-Http-Api": "0.14" },
+            }),
           )
         }
 
@@ -426,20 +403,20 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
                 rows: [
                   {
                     qualname: "libs/sample/domain/src/index.ts#greet",
-                    spanName: "Sample.greet"
-                  }
+                    spanName: "Sample.greet",
+                  },
                 ],
                 graphCommitId: "cmt-200",
-                serverRef: "9d92f397"
+                serverRef: "9d92f397",
               }),
               {
                 status: 200,
                 headers: {
                   "Content-Type": "application/json",
-                  "Omnigraph-Http-Api": "0.14"
-                }
-              }
-            )
+                  "Omnigraph-Http-Api": "0.14",
+                },
+              },
+            ),
           )
         }
 
@@ -450,16 +427,16 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
                 outcome: "ok",
                 rows: [{ count: 42 }],
                 graphCommitId: "cmt-300",
-                serverRef: "9d92f397"
+                serverRef: "9d92f397",
               }),
               {
                 status: 200,
                 headers: {
                   "Content-Type": "application/json",
-                  "Omnigraph-Http-Api": "0.14"
-                }
-              }
-            )
+                  "Omnigraph-Http-Api": "0.14",
+                },
+              },
+            ),
           )
         }
 
@@ -471,31 +448,31 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
                 serverRef: "9d92f397",
                 changes: [],
                 netNodeCount: 0,
-                netEdgeCount: 0
+                netEdgeCount: 0,
               }),
               {
                 status: 200,
                 headers: {
                   "Content-Type": "application/json",
-                  "Omnigraph-Http-Api": "0.14"
-                }
-              }
-            )
+                  "Omnigraph-Http-Api": "0.14",
+                },
+              },
+            ),
           )
         }
 
         return Promise.resolve(
           new Response("Not Found", {
             status: 404,
-            headers: { "Omnigraph-Http-Api": "0.14" }
-          })
+            headers: { "Omnigraph-Http-Api": "0.14" },
+          }),
         )
       }
 
       const invokeRes = yield* invokeOmnigraphNamedQuery({
         name: "resolve_effect_fn",
         params: { spanOrQualname: "Sample.greet" },
-        fetch: mockFetch
+        fetch: mockFetch,
       }).pipe(Effect.provide(OmnigraphSync.Live))
 
       expect(invokeRes.source).toBe("omnigraph")
@@ -504,7 +481,7 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
 
       const queryRes = yield* queryOmnigraph({
         query: "query count_nodes { match { $n } return { count: count($n) } }",
-        fetch: mockFetch
+        fetch: mockFetch,
       }).pipe(Effect.provide(OmnigraphSync.Live))
 
       expect(Option.isSome(queryRes)).toBe(true)
@@ -516,14 +493,14 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
       const diffRes = yield* diffOmnigraphBranches({
         source: "impl/current",
         target: "plan/current",
-        fetch: mockFetch
+        fetch: mockFetch,
       }).pipe(Effect.provide(OmnigraphSync.Live))
 
       expect(Option.isSome(diffRes)).toBe(true)
       if (Option.isSome(diffRes)) {
         expect(Array.isArray(diffRes.value.changes)).toBe(true)
       }
-    })
+    }),
   )
 
   it("resolves Omnigraph base URL from server.json and isolates two repositories", () => {
@@ -537,11 +514,11 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
 
       fs.writeFileSync(
         path.join(clusterA, "server.json"),
-        JSON.stringify({ baseUrl: "http://127.0.0.1:19991", canonicalRepoRoot: repoA })
+        JSON.stringify({ baseUrl: "http://127.0.0.1:19991", canonicalRepoRoot: repoA }),
       )
       fs.writeFileSync(
         path.join(clusterB, "server.json"),
-        JSON.stringify({ baseUrl: "http://127.0.0.1:24442", canonicalRepoRoot: repoB })
+        JSON.stringify({ baseUrl: "http://127.0.0.1:24442", canonicalRepoRoot: repoB }),
       )
 
       const urlA = resolveOmnigraphBaseUrl({ repoRoot: repoA }, {})
@@ -567,156 +544,162 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
     }
   })
 
-  it.effect("merges task branch into main, deletes cleanupBranches, and persists graph-head.json", () =>
-    Effect.gen(function* () {
-      const repoDir = fs.mkdtempSync(path.join(tmpdir(), "og-merge-cleanup-"))
-      try {
-        const gitDir = path.join(repoDir, ".git", "refs", "heads", "feat")
-        fs.mkdirSync(gitDir, { recursive: true })
-        fs.writeFileSync(path.join(repoDir, ".git", "HEAD"), "ref: refs/heads/feat/my-pr\n")
-        const commitSha = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
-        fs.writeFileSync(path.join(gitDir, "my-pr"), `${commitSha}\n`)
+  it.effect(
+    "merges task branch into main, deletes cleanupBranches, and persists graph-head.json",
+    () =>
+      Effect.gen(function* () {
+        const repoDir = fs.mkdtempSync(path.join(tmpdir(), "og-merge-cleanup-"))
+        try {
+          const gitDir = path.join(repoDir, ".git", "refs", "heads", "feat")
+          fs.mkdirSync(gitDir, { recursive: true })
+          fs.writeFileSync(path.join(repoDir, ".git", "HEAD"), "ref: refs/heads/feat/my-pr\n")
+          const commitSha = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+          fs.writeFileSync(path.join(gitDir, "my-pr"), `${commitSha}\n`)
 
-        const taskBranches = resolveOmnigraphTaskBranches(repoDir, {})
-        expect(taskBranches).toEqual({
-          planBranch: "plan/branch-feat_my-pr",
-          implBranch: "impl/branch-feat_my-pr",
-          mainBranch: "main"
-        })
+          const taskBranches = resolveOmnigraphTaskBranches(repoDir, {})
+          expect(taskBranches).toEqual({
+            planBranch: "plan/branch-feat_my-pr",
+            implBranch: "impl/branch-feat_my-pr",
+            mainBranch: "main",
+          })
 
-        const recorded: Array<RecordedRequest> = []
-        const mockFetch: FetchLike = (input, init) => {
-          const urlStr = toUrlString(input)
-          const method = init?.method ?? "GET"
-          const body = typeof init?.body === "string" ? init.body : undefined
-          recorded.push({ url: urlStr, method, body })
+          const recorded: Array<RecordedRequest> = []
+          const mockFetch: FetchLike = (input, init) => {
+            const urlStr = toUrlString(input)
+            const method = init?.method ?? "GET"
+            const body = typeof init?.body === "string" ? init.body : undefined
+            recorded.push({ url: urlStr, method, body })
 
-          if (urlStr.endsWith("/healthz")) {
-            return Promise.resolve(
-              new Response(null, {
-                status: 200,
-                headers: { "Omnigraph-Http-Api": "0.14" }
-              })
-            )
-          }
-
-          if (urlStr.endsWith("/graphs/harness/load")) {
-            return Promise.resolve(
-              new Response(
-                JSON.stringify({
-                  outcome: "ok",
-                  graphCommitId: "cmt-load-1",
-                  serverRef: "9d92f397"
-                }),
-                {
+            if (urlStr.endsWith("/healthz")) {
+              return Promise.resolve(
+                new Response(null, {
                   status: 200,
-                  headers: {
-                    "Content-Type": "application/json",
-                    "Omnigraph-Http-Api": "0.14"
-                  }
-                }
-              )
-            )
-          }
-
-          if (urlStr.endsWith("/graphs/harness/branches") && method === "GET") {
-            return Promise.resolve(
-              new Response(
-                JSON.stringify({
-                  outcome: "ok",
-                  branches: [taskBranches.mainBranch, taskBranches.implBranch, taskBranches.planBranch],
-                  serverRef: "9d92f397"
+                  headers: { "Omnigraph-Http-Api": "0.14" },
                 }),
-                {
-                  status: 200,
-                  headers: {
-                    "Content-Type": "application/json",
-                    "Omnigraph-Http-Api": "0.14"
-                  }
-                }
               )
-            )
-          }
+            }
 
-          if (urlStr.includes("/graphs/harness/branches/merge")) {
+            if (urlStr.endsWith("/graphs/harness/load")) {
+              return Promise.resolve(
+                new Response(
+                  JSON.stringify({
+                    outcome: "ok",
+                    graphCommitId: "cmt-load-1",
+                    serverRef: "9d92f397",
+                  }),
+                  {
+                    status: 200,
+                    headers: {
+                      "Content-Type": "application/json",
+                      "Omnigraph-Http-Api": "0.14",
+                    },
+                  },
+                ),
+              )
+            }
+
+            if (urlStr.endsWith("/graphs/harness/branches") && method === "GET") {
+              return Promise.resolve(
+                new Response(
+                  JSON.stringify({
+                    outcome: "ok",
+                    branches: [
+                      taskBranches.mainBranch,
+                      taskBranches.implBranch,
+                      taskBranches.planBranch,
+                    ],
+                    serverRef: "9d92f397",
+                  }),
+                  {
+                    status: 200,
+                    headers: {
+                      "Content-Type": "application/json",
+                      "Omnigraph-Http-Api": "0.14",
+                    },
+                  },
+                ),
+              )
+            }
+
+            if (urlStr.includes("/graphs/harness/branches/merge")) {
+              return Promise.resolve(
+                new Response(
+                  JSON.stringify({
+                    outcome: "already_up_to_date",
+                    source: taskBranches.implBranch,
+                    target: taskBranches.mainBranch,
+                    commit: null,
+                    serverRef: "9d92f397",
+                  }),
+                  {
+                    status: 200,
+                    headers: {
+                      "Content-Type": "application/json",
+                      "Omnigraph-Http-Api": "0.14",
+                    },
+                  },
+                ),
+              )
+            }
+
+            if (method === "DELETE" && urlStr.includes("/graphs/harness/branches/")) {
+              return Promise.resolve(
+                new Response(
+                  JSON.stringify({
+                    outcome: "deleted",
+                    serverRef: "9d92f397",
+                  }),
+                  {
+                    status: 200,
+                    headers: {
+                      "Content-Type": "application/json",
+                      "Omnigraph-Http-Api": "0.14",
+                    },
+                  },
+                ),
+              )
+            }
+
             return Promise.resolve(
-              new Response(
-                JSON.stringify({
-                  outcome: "already_up_to_date",
-                  source: taskBranches.implBranch,
-                  target: taskBranches.mainBranch,
-                  commit: null,
-                  serverRef: "9d92f397"
-                }),
-                {
-                  status: 200,
-                  headers: {
-                    "Content-Type": "application/json",
-                    "Omnigraph-Http-Api": "0.14"
-                  }
-                }
-              )
+              new Response("Not Found", {
+                status: 404,
+                headers: { "Omnigraph-Http-Api": "0.14" },
+              }),
             )
           }
 
-          if (method === "DELETE" && urlStr.includes("/graphs/harness/branches/")) {
-            return Promise.resolve(
-              new Response(
-                JSON.stringify({
-                  outcome: "deleted",
-                  serverRef: "9d92f397"
-                }),
-                {
-                  status: 200,
-                  headers: {
-                    "Content-Type": "application/json",
-                    "Omnigraph-Http-Api": "0.14"
-                  }
-                }
-              )
-            )
-          }
+          const snapshotPath = path.join(repoDir, ".harness", "graph-snapshot.json")
+          const syncRes = yield* syncToOmnigraphAndSnapshot(sampleGraph, {
+            repoRoot: repoDir,
+            branch: taskBranches.implBranch,
+            from: taskBranches.mainBranch,
+            snapshotPath,
+            fetch: mockFetch,
+          }).pipe(Effect.provide(OmnigraphSync.Live))
 
-          return Promise.resolve(
-            new Response("Not Found", {
-              status: 404,
-              headers: { "Omnigraph-Http-Api": "0.14" }
-            })
-          )
+          expect(syncRes.syncedToOmnigraph).toBe(true)
+          const headMeta = readGraphHeadMeta(repoDir)
+          expect(headMeta?.headSha).toBe(commitSha)
+          expect(headMeta?.gitBranch).toBe("feat/my-pr")
+
+          recorded.length = 0
+          const merged = yield* mergeOmnigraphBranch({
+            repoRoot: repoDir,
+            source: taskBranches.implBranch,
+            target: taskBranches.mainBranch,
+            cleanupBranches: [taskBranches.implBranch, taskBranches.planBranch],
+            fetch: mockFetch,
+          }).pipe(Effect.provide(OmnigraphSync.Live))
+
+          expect(merged).toBe(true)
+          const deleteRequests = recorded.filter((r) => r.method === "DELETE")
+          expect(deleteRequests).toHaveLength(2)
+          expect(deleteRequests[0]?.url).toContain("impl%2Fbranch-feat_my-pr")
+          expect(deleteRequests[1]?.url).toContain("plan%2Fbranch-feat_my-pr")
+        } finally {
+          fs.rmSync(repoDir, { recursive: true, force: true })
         }
-
-        const snapshotPath = path.join(repoDir, ".harness", "graph-snapshot.json")
-        const syncRes = yield* syncToOmnigraphAndSnapshot(sampleGraph, {
-          repoRoot: repoDir,
-          branch: taskBranches.implBranch,
-          from: taskBranches.mainBranch,
-          snapshotPath,
-          fetch: mockFetch
-        }).pipe(Effect.provide(OmnigraphSync.Live))
-
-        expect(syncRes.syncedToOmnigraph).toBe(true)
-        const headMeta = readGraphHeadMeta(repoDir)
-        expect(headMeta?.headSha).toBe(commitSha)
-        expect(headMeta?.gitBranch).toBe("feat/my-pr")
-
-        recorded.length = 0
-        const merged = yield* mergeOmnigraphBranch({
-          repoRoot: repoDir,
-          source: taskBranches.implBranch,
-          target: taskBranches.mainBranch,
-          cleanupBranches: [taskBranches.implBranch, taskBranches.planBranch],
-          fetch: mockFetch
-        }).pipe(Effect.provide(OmnigraphSync.Live))
-
-        expect(merged).toBe(true)
-        const deleteRequests = recorded.filter((r) => r.method === "DELETE")
-        expect(deleteRequests).toHaveLength(2)
-        expect(deleteRequests[0]?.url).toContain("impl%2Fbranch-feat_my-pr")
-        expect(deleteRequests[1]?.url).toContain("plan%2Fbranch-feat_my-pr")
-      } finally {
-        fs.rmSync(repoDir, { recursive: true, force: true })
-      }
-    })
+      }),
   )
 })
 
@@ -729,9 +712,7 @@ describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
         const decision = yield* decideOmnigraphReconcile(input)
         const branchTrimmed = input.currentGitBranch?.trim() ?? ""
         const expectedTargetBranch =
-          branchTrimmed.length > 0 &&
-          branchTrimmed !== "main" &&
-          branchTrimmed !== "master"
+          branchTrimmed.length > 0 && branchTrimmed !== "main" && branchTrimmed !== "master"
             ? `impl/branch-${branchTrimmed.replace(/[^a-zA-Z0-9._-]/g, "_")}`
             : "main"
         expect(decision.targetOmnigraphBranch).toBe(expectedTargetBranch)
@@ -739,7 +720,7 @@ describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
           expect(decision).toEqual({
             needsReconcile: true,
             reason: "missing-snapshot",
-            targetOmnigraphBranch: expectedTargetBranch
+            targetOmnigraphBranch: expectedTargetBranch,
           })
         } else if (
           input.currentHeadSha !== null &&
@@ -749,7 +730,7 @@ describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
           expect(decision).toEqual({
             needsReconcile: true,
             reason: "head-sha-changed",
-            targetOmnigraphBranch: expectedTargetBranch
+            targetOmnigraphBranch: expectedTargetBranch,
           })
         } else if (
           input.currentGitBranch !== null &&
@@ -759,16 +740,16 @@ describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
           expect(decision).toEqual({
             needsReconcile: true,
             reason: "git-branch-changed",
-            targetOmnigraphBranch: expectedTargetBranch
+            targetOmnigraphBranch: expectedTargetBranch,
           })
         } else {
           expect(decision).toEqual({
             needsReconcile: false,
             reason: "up-to-date",
-            targetOmnigraphBranch: expectedTargetBranch
+            targetOmnigraphBranch: expectedTargetBranch,
           })
         }
-      })
+      }),
   )
 
   it("resolves Git HEAD state from loose refs, packed-refs, and linked worktrees", () => {
@@ -782,35 +763,35 @@ describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
       fs.writeFileSync(path.join(refsDir, "main"), `${mainSha}\n`)
       fs.writeFileSync(
         path.join(repoDir, ".git", "packed-refs"),
-        `# pack-refs with: peeled fully-peeled sorted\n${packedSha} refs/heads/release/v1\n`
+        `# pack-refs with: peeled fully-peeled sorted\n${packedSha} refs/heads/release/v1\n`,
       )
 
       const mainHead = resolveGitHeadState(repoDir, {})
       expect(mainHead).toEqual({
         headSha: mainSha,
-        gitBranch: "main"
+        gitBranch: "main",
       })
       expect(resolveOmnigraphTaskBranches(repoDir, {})).toEqual({
         planBranch: "plan/current",
         implBranch: "impl/current",
-        mainBranch: "main"
+        mainBranch: "main",
       })
 
       fs.writeFileSync(path.join(repoDir, ".git", "HEAD"), "ref: refs/heads/release/v1\n")
       const packedHead = resolveGitHeadState(repoDir, {})
       expect(packedHead).toEqual({
         headSha: packedSha,
-        gitBranch: "release/v1"
+        gitBranch: "release/v1",
       })
       expect(resolveOmnigraphTaskBranches(repoDir, {})).toEqual({
         planBranch: "plan/branch-release_v1",
         implBranch: "impl/branch-release_v1",
-        mainBranch: "main"
+        mainBranch: "main",
       })
 
       writeGraphHeadMeta(repoDir, {
         headSha: packedSha,
-        gitBranch: "release/v1"
+        gitBranch: "release/v1",
       })
       const persisted = readGraphHeadMeta(repoDir)
       expect(persisted?.headSha).toBe(packedSha)
@@ -820,4 +801,3 @@ describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
     }
   })
 })
-

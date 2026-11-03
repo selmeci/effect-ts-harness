@@ -79,8 +79,8 @@ Bypassing `.harness/graph-snapshot.json` and running `extractWorkspaceTypeAwareG
 
 ### Deterministic Enforcement
 
-| Rule | Enforced By | Gate / Mechanism | Governed Symbols |
-| :--- | :--- | :--- | :--- |
-| Pure reconciliation decision from Git `HEAD` SHA, branch, and snapshot state (`R = never`) | `libs/harness/graph/src/cluster-resolver.ts` | `vitest` property & unit suite (`omnigraph-gq.test.ts`) | `OmnigraphReconcile.decide` |
-| Snapshot synchronization records `.harness/graph-head.json` and `mergeBranch` cleans up merged task branches | `libs/harness/graph/src/omnigraph-sync.ts` | `vitest` unit suite (`omnigraph-gq.test.ts`) | `OmnigraphSync.sync`, `OmnigraphSync.mergeBranch`, `@harness/graph/OmnigraphSync` |
-| `harness ingest` extracts and syncs the full workspace graph and isolates temp workspaces | `apps/harness-cli/src/index.ts` | `vitest` unit suite (`index.test.ts`) | `Harness.ingestWorkspace` |
+| Rule                                                                                                         | Enforced By                                  | Gate / Mechanism                                        | Governed Symbols                                                                  |
+| :----------------------------------------------------------------------------------------------------------- | :------------------------------------------- | :------------------------------------------------------ | :-------------------------------------------------------------------------------- |
+| Pure reconciliation decision from Git `HEAD` SHA, branch, and snapshot state (`R = never`)                   | `libs/harness/graph/src/cluster-resolver.ts` | `vitest` property & unit suite (`omnigraph-gq.test.ts`) | `OmnigraphReconcile.decide`                                                       |
+| Snapshot synchronization records `.harness/graph-head.json` and `mergeBranch` cleans up merged task branches | `libs/harness/graph/src/omnigraph-sync.ts`   | `vitest` unit suite (`omnigraph-gq.test.ts`)            | `OmnigraphSync.sync`, `OmnigraphSync.mergeBranch`, `@harness/graph/OmnigraphSync` |
+| `harness ingest` extracts and syncs the full workspace graph and isolates temp workspaces                    | `apps/harness-cli/src/index.ts`              | `vitest` unit suite (`index.test.ts`)                   | `Harness.ingestWorkspace`                                                         |

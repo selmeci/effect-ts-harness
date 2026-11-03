@@ -5,7 +5,7 @@ import {
   makeTraceHeader,
   TracedCallEdge,
   TraceHeader,
-  TRACE_FORMAT_VERSION
+  TRACE_FORMAT_VERSION,
 } from "../src/trace-format.js"
 
 describe("trace format (v2 Omnigraph & root TestSpan)", () => {
@@ -22,7 +22,7 @@ describe("trace format (v2 Omnigraph & root TestSpan)", () => {
       callerQualname: "libs/sample/domain/src/index.ts#greet",
       calleeQualname: "libs/sample/infra/src/index.ts#PhotoRepo.insert",
       callCount: 1,
-      receiverLayer: "libs/sample/infra/src/index.ts#PhotoRepoLive"
+      receiverLayer: "libs/sample/infra/src/index.ts#PhotoRepoLive",
     }
     const call = Schema.decodeUnknownSync(TracedCallEdge)(rawCall)
     expect(call.callCount).toBe(1)
@@ -31,7 +31,7 @@ describe("trace format (v2 Omnigraph & root TestSpan)", () => {
       testId: "libs/sample/domain/test/index.test.ts::greet greets by name",
       calleeQualname: "libs/sample/domain/src/index.ts#greet",
       callCount: 1,
-      receiverLayer: null
+      receiverLayer: null,
     }
     const exercise = Schema.decodeUnknownSync(ExercisesSpanEdge)(rawExercise)
     expect(exercise.testId).toContain("greet")

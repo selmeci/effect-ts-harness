@@ -28,7 +28,7 @@ export interface MigrationSafetyReport {
 }
 
 export const decideMigrationSafety = Effect.fn("MigrationSafety.decide")(function* (
-  input: MigrationSafetyInput
+  input: MigrationSafetyInput,
 ) {
   yield* Effect.void
 
@@ -54,7 +54,7 @@ export const decideMigrationSafety = Effect.fn("MigrationSafety.decide")(functio
           kind: "drop-statement",
           file,
           statement: stmt,
-          message: `Destructive DROP statement in "${file}" requires human approval (ESCALATE).`
+          message: `Destructive DROP statement in "${file}" requires human approval (ESCALATE).`,
         })
       } else if (
         /\bCREATE\s+TABLE\s+[`"']?__new_/i.test(stmt) ||
@@ -64,7 +64,7 @@ export const decideMigrationSafety = Effect.fn("MigrationSafety.decide")(functio
           kind: "table-rebuild",
           file,
           statement: stmt,
-          message: `SQLite table rebuild (__new_ / foreign_keys=OFF) in "${file}" requires human approval (ESCALATE).`
+          message: `SQLite table rebuild (__new_ / foreign_keys=OFF) in "${file}" requires human approval (ESCALATE).`,
         })
       } else if (
         /\bALTER\s+TABLE\b[\s\S]*?\bADD\b[\s\S]*?\bNOT\s+NULL\b/i.test(stmt) &&
@@ -74,7 +74,7 @@ export const decideMigrationSafety = Effect.fn("MigrationSafety.decide")(functio
           kind: "add-not-null-without-default",
           file,
           statement: stmt,
-          message: `ALTER TABLE ADD COLUMN NOT NULL without DEFAULT in "${file}" fails on non-empty tables and breaks rolling deploys (ESCALATE).`
+          message: `ALTER TABLE ADD COLUMN NOT NULL without DEFAULT in "${file}" fails on non-empty tables and breaks rolling deploys (ESCALATE).`,
         })
       }
     }
@@ -83,11 +83,10 @@ export const decideMigrationSafety = Effect.fn("MigrationSafety.decide")(functio
   return {
     safe: violations.length === 0,
     requiresEscalation: violations.length > 0,
-    violations
+    violations,
   } satisfies MigrationSafetyReport
 })
 
 export const checkMigrationSqlSafety = (
-  files: ReadonlyArray<MigrationSqlFile>
-): MigrationSafetyReport =>
-  Effect.runSync(decideMigrationSafety({ files }))
+  files: ReadonlyArray<MigrationSqlFile>,
+): MigrationSafetyReport => Effect.runSync(decideMigrationSafety({ files }))

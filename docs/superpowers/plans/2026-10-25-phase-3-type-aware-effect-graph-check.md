@@ -32,12 +32,14 @@
 ### Task 1: Type-aware `A / E / R` and `Layer<ROut, E, RIn>` extractor using `ts-morph@28.0.0` (`typescript@5.9.3`)
 
 **Files:**
+
 - Modify: `pnpm-workspace.yaml` (add `ts-morph` TypeScript 5.9.3 overrides)
 - Modify: `libs/harness/graph/package.json` (add `"ts-morph": "28.0.0"`)
 - Create: `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/test/type-extractor.test.ts`
 - Modify: `libs/harness/graph/src/index.ts`
 
 **Interfaces:**
+
 - Consumes: `Project`, `Type` from `"ts-morph"`, `buildHarnessGraph` from `./graph-engine.js`.
 - Produces:
   - `extractTypeAwareGraphFromSource(files: ReadonlyArray<{ readonly filePath: string; readonly content: string; readonly packageTag: PackageTag }>): HarnessGraph`
@@ -65,7 +67,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
           export class PaymentService extends Context.Service<PaymentService, {
             readonly charge: (cents: number) => Effect.Effect<void, PaymentError>
           }>()("PaymentService") {}
-        `
+        `,
       },
       {
         filePath: "libs/sample/domain/src/checkout.ts",
@@ -78,8 +80,8 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
           export const checkoutSkeleton = Effect.fn("Cart.checkout")(function* (sku: string) {
             return yield* stub<{ readonly orderId: string }, OutOfStockError | PaymentError, InventoryRepo | PaymentService>(sku)
           })
-        `
-      }
+        `,
+      },
     ])
 
     const callees = findCallees(graph, "Cart.checkout")
@@ -87,7 +89,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
       "InventoryRepo",
       "OutOfStockError",
       "PaymentError",
-      "PaymentService"
+      "PaymentService",
     ])
   })
 })
@@ -101,10 +103,12 @@ Expected: FAIL (`extractTypeAwareGraphFromSource is not exported`).
 - [ ] **Step 3: Add `ts-morph@28.0.0` with `typescript@5.9.3` workspace override and implement `libs/harness/graph/src/type-extractor.ts`**
 
 In `pnpm-workspace.yaml`, add under `overrides:`:
+
 ```yaml
-  "ts-morph>typescript": "5.9.3"
-  "@ts-morph/common>typescript": "5.9.3"
+"ts-morph>typescript": "5.9.3"
+"@ts-morph/common>typescript": "5.9.3"
 ```
+
 Add `"ts-morph": "28.0.0"` to `libs/harness/graph/package.json`.
 In `libs/harness/graph/src/type-extractor.ts`, inspect exported variable declarations initialized with `Effect.fn(...)` or `Layer.*(...)` and exported classes extending `Context.Service` or `Data.TaggedError`. For each `Effect.fn`, get the call signature's return type `Effect<A, E, R>`, decompose union members of `E` (`FailsWith` edges) and `R` (`RequiresService` edges), and detect `stub(...)` calls (`isStub: true`).
 
@@ -125,10 +129,12 @@ git commit -m "feat(graph): add ts-morph type-aware A/E/R and Layer extractor wi
 ### Task 2: Implement `effect-graph:check` policy verifier (`Graph.simplePaths`, `Graph.findCycle`, decider purity)
 
 **Files:**
+
 - Create: `libs/harness/graph/src/policy-check.ts`, `libs/harness/graph/test/policy-check.test.ts`
 - Modify: `libs/harness/graph/src/index.ts`
 
 **Interfaces:**
+
 - Consumes: `Graph` from `"effect/Graph"`, `HarnessGraph` from `./graph-engine.js`.
 - Produces:
   - `GraphPolicyViolation`: `{ readonly rule: "domain-requires-infra" | "domain-requires-cloud-binding" | "layer-cycle" | "impure-decider"; readonly message: string; readonly path: ReadonlyArray<string> }`
@@ -151,16 +157,16 @@ describe("effect-graph:check policy rules", () => {
           line: 1,
           packageTag: "domain",
           successType: "void",
-          isStub: true
-        }
+          isStub: true,
+        },
       ],
       services: [
         {
           tagId: "Cloudflare.R2.BucketBinding",
           name: "BucketBinding",
           packageTag: "infra",
-          file: "libs/sample/infra/src/index.ts"
-        }
+          file: "libs/sample/infra/src/index.ts",
+        },
       ],
       layers: [],
       errors: [],
@@ -169,14 +175,14 @@ describe("effect-graph:check policy rules", () => {
       requiresService: [
         {
           fnQualname: "libs/sample/domain/src/index.ts#badUseCase",
-          tagId: "Cloudflare.R2.BucketBinding"
-        }
+          tagId: "Cloudflare.R2.BucketBinding",
+        },
       ],
       failsWith: [],
       providesService: [],
       layerRequires: [],
       tracedCalls: [],
-      exercisesSpans: []
+      exercisesSpans: [],
     })
 
     const result = checkEffectGraph(graph)
@@ -184,7 +190,7 @@ describe("effect-graph:check policy rules", () => {
     expect(result.violations[0]?.rule).toBe("domain-requires-infra")
     expect(result.violations[0]?.path).toEqual([
       "libs/sample/domain/src/index.ts#badUseCase",
-      "Cloudflare.R2.BucketBinding"
+      "Cloudflare.R2.BucketBinding",
     ])
   })
 
@@ -193,11 +199,11 @@ describe("effect-graph:check policy rules", () => {
       fns: [],
       services: [
         { tagId: "SvcA", name: "SvcA", packageTag: "service", file: "a.ts" },
-        { tagId: "SvcB", name: "SvcB", packageTag: "service", file: "b.ts" }
+        { tagId: "SvcB", name: "SvcB", packageTag: "service", file: "b.ts" },
       ],
       layers: [
         { qualname: "LayerA", layerKind: "live", packageTag: "infra", file: "a.ts" },
-        { qualname: "LayerB", layerKind: "live", packageTag: "infra", file: "b.ts" }
+        { qualname: "LayerB", layerKind: "live", packageTag: "infra", file: "b.ts" },
       ],
       errors: [],
       tests: [],
@@ -206,14 +212,14 @@ describe("effect-graph:check policy rules", () => {
       failsWith: [],
       providesService: [
         { layerQualname: "LayerA", tagId: "SvcA" },
-        { layerQualname: "LayerB", tagId: "SvcB" }
+        { layerQualname: "LayerB", tagId: "SvcB" },
       ],
       layerRequires: [
         { layerQualname: "LayerA", tagId: "SvcB" },
-        { layerQualname: "LayerB", tagId: "SvcA" }
+        { layerQualname: "LayerB", tagId: "SvcA" },
       ],
       tracedCalls: [],
-      exercisesSpans: []
+      exercisesSpans: [],
     })
 
     const result = checkEffectGraph(graph)
@@ -231,6 +237,7 @@ Expected: FAIL (`checkEffectGraph is not exported`).
 - [ ] **Step 3: Implement `libs/harness/graph/src/policy-check.ts` using `Graph.simplePaths`, `Graph.findCycle`, and `Graph.toMermaid`**
 
 Check:
+
 1. Every `EffectFn` with `packageTag === "domain"` has no path in `graph` (`Graph.simplePaths`) to a `ServiceTag` with `packageTag === "infra"` or `tagId` matching `/^(Cloudflare|Alchemy|Drizzle|Provider|Binding)\b/`.
 2. Any `EffectFn` in `packageTag === "domain"` whose `spanName` ends with `.decide` has zero `RequiresService` edges (`impure-decider`).
 3. The induced Layer dependency graph has no cycle (`Graph.findCycle`).
@@ -252,10 +259,12 @@ git commit -m "feat(graph): implement effect-graph:check rules with Graph.simple
 ### Task 3: Wire `effect-graph:check` into `harness plan-check`, `harness verify`, and workspace Nx targets
 
 **Files:**
+
 - Modify: `package.json`, `nx.json`
 - Modify: `apps/harness-cli/src/index.ts`, `apps/harness-cli/test/index.test.ts`
 
 **Interfaces:**
+
 - Consumes: `extractWorkspaceTypeAwareGraph`, `checkEffectGraph` from `@harness/graph`.
 - Produces:
   - Root script `"effect-graph:check": "node apps/harness-cli/src/index.ts plan-check --graph-only"` and cacheable `effect-graph:check` target in `nx.json`.

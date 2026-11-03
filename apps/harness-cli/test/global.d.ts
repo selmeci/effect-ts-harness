@@ -3,7 +3,7 @@ declare module "node:child_process" {
   export function execFileSync(
     file: string,
     args: ReadonlyArray<string>,
-    options: { readonly cwd: string; readonly encoding: "utf8" }
+    options: { readonly cwd: string; readonly encoding: "utf8" },
   ): string
 }
 
@@ -24,10 +24,14 @@ declare module "*/tools/oxlint/syntax-bans.js" {
     meta: { name: string }
     rules: {
       "syntax-bans": {
-        create: (context: unknown) => Record<string, ((node: Record<string, unknown>) => void) | undefined>
+        create: (
+          context: unknown,
+        ) => Record<string, ((node: Record<string, unknown>) => void) | undefined>
       }
       "test-integrity": {
-        create: (context: unknown) => Record<string, ((node: Record<string, unknown>) => void) | undefined>
+        create: (
+          context: unknown,
+        ) => Record<string, ((node: Record<string, unknown>) => void) | undefined>
       }
     }
   }

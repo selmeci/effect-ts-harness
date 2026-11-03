@@ -14,7 +14,7 @@ export const fetchAllUsers = (userIds: ReadonlyArray<string>) =>
     // Run up to 5 concurrent fetches
     const users = yield* Effect.all(
       userIds.map((id) => fetchUser(id)),
-      { concurrency: 5 }
+      { concurrency: 5 },
     )
     return users
   })
@@ -61,7 +61,7 @@ export const coordinateFibers = Effect.gen(function* () {
     Effect.gen(function* () {
       const message = yield* Deferred.await(signal)
       yield* Effect.logInfo(`Worker received: ${message}`)
-    })
+    }),
   )
 
   // Main fiber completes the deferred
@@ -99,12 +99,8 @@ import { Effect } from "effect"
 export const rateLimitedOperations = Effect.gen(function* () {
   const sem = yield* Effect.makeSemaphore(3)
 
-  const runWithPermit = (task: Effect.Effect<void>) =>
-    sem.withPermit(task)
+  const runWithPermit = (task: Effect.Effect<void>) => sem.withPermit(task)
 
-  yield* Effect.all(
-    tasks.map(runWithPermit),
-    { concurrency: "unbounded" }
-  )
+  yield* Effect.all(tasks.map(runWithPermit), { concurrency: "unbounded" })
 })
 ```

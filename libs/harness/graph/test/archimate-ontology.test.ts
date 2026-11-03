@@ -6,7 +6,7 @@ import {
   projectOntologyLayers,
   queryOntologyImpact,
   queryOntologyWhy,
-  renderOntologyMermaid
+  renderOntologyMermaid,
 } from "../src/index.js"
 
 describe("ArchiMate Ontology Module", () => {
@@ -21,7 +21,7 @@ describe("ArchiMate Ontology Module", () => {
       enforcedByFiles: [],
       referencedSpans: [],
       referencedServices: [],
-      referencedErrors: []
+      referencedErrors: [],
     }
     const adrClassified = classifyOntologyNode(adrNode)
     expect(adrClassified).toEqual({
@@ -31,7 +31,7 @@ describe("ArchiMate Ontology Module", () => {
       layer: "Motivation",
       aspect: "Motivation",
       elementType: "DriverOrConstraint",
-      file: "libs/harness/docs/adr/0001.md"
+      file: "libs/harness/docs/adr/0001.md",
     })
 
     // 2. EarsSpec
@@ -44,7 +44,7 @@ describe("ArchiMate Ontology Module", () => {
       enforcedByFiles: [],
       referencedSpans: [],
       referencedServices: [],
-      referencedErrors: []
+      referencedErrors: [],
     }
     const specClassified = classifyOntologyNode(specNode)
     expect(specClassified).toEqual({
@@ -54,7 +54,7 @@ describe("ArchiMate Ontology Module", () => {
       layer: "Motivation",
       aspect: "Motivation",
       elementType: "Requirement",
-      file: "libs/sample/docs/specs/0001.md"
+      file: "libs/sample/docs/specs/0001.md",
     })
 
     // 3a. EffectFn (domain rule: .decide)
@@ -66,7 +66,7 @@ describe("ArchiMate Ontology Module", () => {
       file: "libs/sample/domain/src/index.ts",
       line: 12,
       successType: "boolean",
-      isStub: false
+      isStub: false,
     }
     expect(classifyOntologyNode(ruleFn)).toEqual({
       key: "libs/sample/domain/src/index.ts#Album.decide",
@@ -75,7 +75,7 @@ describe("ArchiMate Ontology Module", () => {
       layer: "Business",
       aspect: "Behavior",
       elementType: "BusinessRule",
-      file: "libs/sample/domain/src/index.ts"
+      file: "libs/sample/domain/src/index.ts",
     })
 
     // 3b. EffectFn (domain process: uploadPhoto)
@@ -87,7 +87,7 @@ describe("ArchiMate Ontology Module", () => {
       file: "libs/sample/domain/src/index.ts",
       line: 45,
       successType: "Photo",
-      isStub: false
+      isStub: false,
     }
     expect(classifyOntologyNode(processFn)).toEqual({
       key: "libs/sample/domain/src/index.ts#uploadPhoto",
@@ -96,7 +96,7 @@ describe("ArchiMate Ontology Module", () => {
       layer: "Business",
       aspect: "Behavior",
       elementType: "BusinessProcess",
-      file: "libs/sample/domain/src/index.ts"
+      file: "libs/sample/domain/src/index.ts",
     })
 
     // 3c. EffectFn (app function)
@@ -108,7 +108,7 @@ describe("ArchiMate Ontology Module", () => {
       file: "apps/sample/src/index.ts",
       line: 10,
       successType: "void",
-      isStub: false
+      isStub: false,
     }
     expect(classifyOntologyNode(appFn)).toEqual({
       key: "apps/sample/src/index.ts#main",
@@ -117,14 +117,14 @@ describe("ArchiMate Ontology Module", () => {
       layer: "Application",
       aspect: "Behavior",
       elementType: "ApplicationFunction",
-      file: "apps/sample/src/index.ts"
+      file: "apps/sample/src/index.ts",
     })
 
     // 4. TaggedError
     const errorNode = {
       _tag: "TaggedError" as const,
       errorTag: "PhotoNotFoundError",
-      file: "libs/sample/contract/src/index.ts"
+      file: "libs/sample/contract/src/index.ts",
     }
     expect(classifyOntologyNode(errorNode)).toEqual({
       key: "PhotoNotFoundError",
@@ -133,7 +133,7 @@ describe("ArchiMate Ontology Module", () => {
       layer: "Business",
       aspect: "PassiveStructure",
       elementType: "BusinessEvent",
-      file: "libs/sample/contract/src/index.ts"
+      file: "libs/sample/contract/src/index.ts",
     })
 
     // 5a. ServiceTag (Technology: Cloudflare binding)
@@ -142,7 +142,7 @@ describe("ArchiMate Ontology Module", () => {
       tagId: "Cloudflare.Env",
       name: "Cloudflare.Env",
       packageTag: "service" as const,
-      file: "libs/infra/src/index.ts"
+      file: "libs/infra/src/index.ts",
     }
     expect(classifyOntologyNode(cloudSvc)).toEqual({
       key: "Cloudflare.Env",
@@ -151,7 +151,7 @@ describe("ArchiMate Ontology Module", () => {
       layer: "Technology",
       aspect: "ActiveStructure",
       elementType: "TechnologyService",
-      file: "libs/infra/src/index.ts"
+      file: "libs/infra/src/index.ts",
     })
 
     // 5b. ServiceTag (Application Service)
@@ -160,7 +160,7 @@ describe("ArchiMate Ontology Module", () => {
       tagId: "PhotoRepo",
       name: "PhotoRepo",
       packageTag: "service" as const,
-      file: "libs/sample/service/src/index.ts"
+      file: "libs/sample/service/src/index.ts",
     }
     expect(classifyOntologyNode(appSvc)).toEqual({
       key: "PhotoRepo",
@@ -169,7 +169,7 @@ describe("ArchiMate Ontology Module", () => {
       layer: "Application",
       aspect: "Behavior",
       elementType: "ApplicationService",
-      file: "libs/sample/service/src/index.ts"
+      file: "libs/sample/service/src/index.ts",
     })
 
     // 6a. ServiceLayer (infra)
@@ -178,7 +178,7 @@ describe("ArchiMate Ontology Module", () => {
       qualname: "libs/sample/infra/src/index.ts#PhotoRepoLive",
       layerKind: "infra" as const,
       packageTag: "infra" as const,
-      file: "libs/sample/infra/src/index.ts"
+      file: "libs/sample/infra/src/index.ts",
     }
     expect(classifyOntologyNode(infraLayer)).toEqual({
       key: "libs/sample/infra/src/index.ts#PhotoRepoLive",
@@ -187,7 +187,7 @@ describe("ArchiMate Ontology Module", () => {
       layer: "Technology",
       aspect: "ActiveStructure",
       elementType: "ApplicationComponent",
-      file: "libs/sample/infra/src/index.ts"
+      file: "libs/sample/infra/src/index.ts",
     })
 
     // 6b. ServiceLayer (application live)
@@ -196,7 +196,7 @@ describe("ArchiMate Ontology Module", () => {
       qualname: "libs/sample/domain/src/index.ts#PhotoServiceLive",
       layerKind: "live" as const,
       packageTag: "domain" as const,
-      file: "libs/sample/domain/src/index.ts"
+      file: "libs/sample/domain/src/index.ts",
     }
     expect(classifyOntologyNode(liveLayer)).toEqual({
       key: "libs/sample/domain/src/index.ts#PhotoServiceLive",
@@ -205,7 +205,7 @@ describe("ArchiMate Ontology Module", () => {
       layer: "Application",
       aspect: "ActiveStructure",
       elementType: "ApplicationComponent",
-      file: "libs/sample/domain/src/index.ts"
+      file: "libs/sample/domain/src/index.ts",
     })
 
     // 7. PatternDoc
@@ -213,7 +213,7 @@ describe("ArchiMate Ontology Module", () => {
       _tag: "PatternDoc" as const,
       slug: "services-and-layers",
       path: "agent-patterns/services-and-layers.md",
-      summary: "Layer patterns"
+      summary: "Layer patterns",
     }
     expect(classifyOntologyNode(patNode)).toEqual({
       key: "services-and-layers",
@@ -222,7 +222,7 @@ describe("ArchiMate Ontology Module", () => {
       layer: "Technology",
       aspect: "PassiveStructure",
       elementType: "AssessmentPattern",
-      file: "agent-patterns/services-and-layers.md"
+      file: "agent-patterns/services-and-layers.md",
     })
 
     // 8. VitestCase
@@ -231,7 +231,7 @@ describe("ArchiMate Ontology Module", () => {
       testId: "libs/sample/test/photo.test.ts#upload",
       testFile: "libs/sample/test/photo.test.ts",
       testName: "upload photo should succeed",
-      lastTreeHash: "workspace"
+      lastTreeHash: "workspace",
     }
     expect(classifyOntologyNode(testNode)).toEqual({
       key: "libs/sample/test/photo.test.ts#upload",
@@ -240,7 +240,7 @@ describe("ArchiMate Ontology Module", () => {
       layer: "Implementation",
       aspect: "Behavior",
       elementType: "WorkPackageTest",
-      file: "libs/sample/test/photo.test.ts"
+      file: "libs/sample/test/photo.test.ts",
     })
   })
 
@@ -250,8 +250,8 @@ describe("ArchiMate Ontology Module", () => {
         _tag: "GovernsSymbol",
         adrId: "ADR-0001",
         targetKey: "Symbol",
-        targetKind: "EffectFn"
-      })
+        targetKind: "EffectFn",
+      }),
     ).toBe("Influence")
 
     expect(
@@ -259,40 +259,40 @@ describe("ArchiMate Ontology Module", () => {
         _tag: "SpecifiesSymbol",
         specId: "SPEC-0001",
         targetKey: "Symbol",
-        targetKind: "EffectFn"
-      })
+        targetKind: "EffectFn",
+      }),
     ).toBe("Realization")
 
     expect(
       classifyOntologyEdge({
         _tag: "ProvidesService",
         layerQualname: "Layer",
-        tagId: "Tag"
-      })
+        tagId: "Tag",
+      }),
     ).toBe("Realization")
 
     expect(
       classifyOntologyEdge({
         _tag: "RequiresService",
         callerQualname: "Caller",
-        tagId: "Tag"
-      })
+        tagId: "Tag",
+      }),
     ).toBe("Serving")
 
     expect(
       classifyOntologyEdge({
         _tag: "LayerRequires",
         layerQualname: "Layer",
-        tagId: "Tag"
-      })
+        tagId: "Tag",
+      }),
     ).toBe("Serving")
 
     expect(
       classifyOntologyEdge({
         _tag: "FailsWith",
         callerQualname: "Caller",
-        errorTag: "Error"
-      })
+        errorTag: "Error",
+      }),
     ).toBe("Triggering")
 
     expect(
@@ -301,8 +301,8 @@ describe("ArchiMate Ontology Module", () => {
         callerQualname: "Caller",
         calleeQualname: "Callee",
         callCount: 1,
-        receiverLayer: null
-      })
+        receiverLayer: null,
+      }),
     ).toBe("Triggering")
 
     expect(
@@ -311,8 +311,8 @@ describe("ArchiMate Ontology Module", () => {
         testId: "Test",
         calleeQualname: "Callee",
         callCount: 1,
-        receiverLayer: null
-      })
+        receiverLayer: null,
+      }),
     ).toBe("Verification")
   })
 
@@ -327,8 +327,8 @@ describe("ArchiMate Ontology Module", () => {
           enforcedByFiles: [],
           referencedSpans: [],
           referencedServices: [],
-          referencedErrors: []
-        }
+          referencedErrors: [],
+        },
       ],
       fns: [
         {
@@ -338,46 +338,46 @@ describe("ArchiMate Ontology Module", () => {
           line: 1,
           packageTag: "domain",
           successType: "boolean",
-          isStub: false
-        }
+          isStub: false,
+        },
       ],
       services: [
         {
           tagId: "UserRepo",
           name: "UserRepo",
           packageTag: "service",
-          file: "libs/service/src/index.ts"
+          file: "libs/service/src/index.ts",
         },
         {
           tagId: "Cloudflare.D1",
           name: "Cloudflare.D1",
           packageTag: "infra",
-          file: "libs/infra/src/index.ts"
-        }
+          file: "libs/infra/src/index.ts",
+        },
       ],
       tests: [
         {
           testId: "test::decide",
           testFile: "libs/domain/test/decide.test.ts",
           testName: "decide test",
-          lastTreeHash: "workspace"
-        }
+          lastTreeHash: "workspace",
+        },
       ],
       governsSymbols: [
         {
           adrId: "ADR-0001",
           targetKey: "libs/domain/src/index.ts#decide",
-          targetKind: "EffectFn"
-        }
+          targetKind: "EffectFn",
+        },
       ],
       exercisesSpans: [
         {
           testId: "test::decide",
           calleeQualname: "libs/domain/src/index.ts#decide",
           callCount: 1,
-          receiverLayer: null
-        }
-      ]
+          receiverLayer: null,
+        },
+      ],
     })
 
     const projection = projectOntologyLayers(graph)
@@ -410,8 +410,8 @@ describe("ArchiMate Ontology Module", () => {
           enforcedByFiles: [],
           referencedSpans: [],
           referencedServices: [],
-          referencedErrors: []
-        }
+          referencedErrors: [],
+        },
       ],
       earsSpecs: [
         {
@@ -422,62 +422,57 @@ describe("ArchiMate Ontology Module", () => {
           enforcedByFiles: [],
           referencedSpans: [],
           referencedServices: [],
-          referencedErrors: []
-        }
+          referencedErrors: [],
+        },
       ],
       services: [
         {
           tagId: "PhotoRepo",
           name: "PhotoRepo",
           packageTag: "service",
-          file: "libs/sample/service/src/index.ts"
-        }
+          file: "libs/sample/service/src/index.ts",
+        },
       ],
       layers: [
         {
           qualname: "libs/sample/infra/src/index.ts#PhotoRepoLive",
           layerKind: "infra",
           packageTag: "infra",
-          file: "libs/sample/infra/src/index.ts"
-        }
+          file: "libs/sample/infra/src/index.ts",
+        },
       ],
       governsSymbols: [
         {
           adrId: "sample:ADR-0001",
           targetKey: "PhotoRepo",
-          targetKind: "ServiceTag"
-        }
+          targetKind: "ServiceTag",
+        },
       ],
       specifiesSymbols: [
         {
           specId: "sample:SPEC-0001",
           targetKey: "PhotoRepo",
-          targetKind: "ServiceTag"
-        }
+          targetKind: "ServiceTag",
+        },
       ],
       providesService: [
         {
           layerQualname: "libs/sample/infra/src/index.ts#PhotoRepoLive",
-          tagId: "PhotoRepo"
-        }
-      ]
+          tagId: "PhotoRepo",
+        },
+      ],
     })
 
     // Query PhotoRepoLive (ServiceLayer)
-    const whyLive = queryOntologyWhy(
-      graph,
-      "libs/sample/infra/src/index.ts#PhotoRepoLive"
-    )
+    const whyLive = queryOntologyWhy(graph, "libs/sample/infra/src/index.ts#PhotoRepoLive")
     expect(whyLive.justified).toBe(true)
-    expect(whyLive.target?.key).toBe(
-      "libs/sample/infra/src/index.ts#PhotoRepoLive"
-    )
+    expect(whyLive.target?.key).toBe("libs/sample/infra/src/index.ts#PhotoRepoLive")
     expect(whyLive.governingAdrs.length).toBe(1)
     expect(whyLive.governingAdrs[0]?.id).toBe("sample:ADR-0001")
     expect(whyLive.governingAdrs[0]?.via).toEqual([
       "sample:ADR-0001",
       "PhotoRepo",
-      "libs/sample/infra/src/index.ts#PhotoRepoLive"
+      "libs/sample/infra/src/index.ts#PhotoRepoLive",
     ])
 
     expect(whyLive.realizingSpecs.length).toBe(1)
@@ -485,7 +480,7 @@ describe("ArchiMate Ontology Module", () => {
     expect(whyLive.realizingSpecs[0]?.via).toEqual([
       "sample:SPEC-0001",
       "PhotoRepo",
-      "libs/sample/infra/src/index.ts#PhotoRepoLive"
+      "libs/sample/infra/src/index.ts#PhotoRepoLive",
     ])
     expect(whyLive.upwardChain.length).toBeGreaterThanOrEqual(2)
 
@@ -512,8 +507,8 @@ describe("ArchiMate Ontology Module", () => {
           enforcedByFiles: [],
           referencedSpans: [],
           referencedServices: [],
-          referencedErrors: []
-        }
+          referencedErrors: [],
+        },
       ],
       earsSpecs: [
         {
@@ -524,8 +519,8 @@ describe("ArchiMate Ontology Module", () => {
           enforcedByFiles: [],
           referencedSpans: [],
           referencedServices: [],
-          referencedErrors: []
-        }
+          referencedErrors: [],
+        },
       ],
       fns: [
         {
@@ -535,51 +530,51 @@ describe("ArchiMate Ontology Module", () => {
           line: 1,
           packageTag: "domain",
           successType: "boolean",
-          isStub: false
-        }
+          isStub: false,
+        },
       ],
       errors: [
         {
           errorTag: "DomainError",
-          file: "libs/contract/src/index.ts"
-        }
+          file: "libs/contract/src/index.ts",
+        },
       ],
       tests: [
         {
           testId: "test::decide",
           testFile: "libs/domain/test/decide.test.ts",
           testName: "decide test",
-          lastTreeHash: "workspace"
-        }
+          lastTreeHash: "workspace",
+        },
       ],
       governsSymbols: [
         {
           adrId: "ADR-0001",
           targetKey: "libs/domain/src/index.ts#decide",
-          targetKind: "EffectFn"
-        }
+          targetKind: "EffectFn",
+        },
       ],
       specifiesSymbols: [
         {
           specId: "SPEC-0001",
           targetKey: "libs/domain/src/index.ts#decide",
-          targetKind: "EffectFn"
-        }
+          targetKind: "EffectFn",
+        },
       ],
       failsWith: [
         {
           callerQualname: "libs/domain/src/index.ts#decide",
-          errorTag: "DomainError"
-        }
+          errorTag: "DomainError",
+        },
       ],
       exercisesSpans: [
         {
           testId: "test::decide",
           calleeQualname: "libs/domain/src/index.ts#decide",
           callCount: 1,
-          receiverLayer: null
-        }
-      ]
+          receiverLayer: null,
+        },
+      ],
     })
 
     const impact = queryOntologyImpact(graph, "Domain.decide")
@@ -587,9 +582,7 @@ describe("ArchiMate Ontology Module", () => {
     expect(impact.affectedAdrs).toContain("ADR-0001")
     expect(impact.affectedSpecs).toContain("SPEC-0001")
     expect(impact.reachingTests).toContain("test::decide")
-    expect(impact.impactByLayer.Business.some((n) => n.key === "DomainError")).toBe(
-      true
-    )
+    expect(impact.impactByLayer.Business.some((n) => n.key === "DomainError")).toBe(true)
 
     // Non-existent symbol returns empty result
     const missing = queryOntologyImpact(graph, "non-existent")

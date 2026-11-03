@@ -6,21 +6,21 @@ export default Alchemy.Stack(
   "sample",
   {
     providers: Cloudflare.providers(),
-    state: Cloudflare.state()
+    state: Cloudflare.state(),
   },
   Effect.gen(function* () {
     const bucket = yield* Cloudflare.R2.Bucket("Bucket")
     const db = yield* Cloudflare.D1.Database("PhotosDb", {
-      migrations: "../../libs/sample/infra/migrations"
+      migrations: "../../libs/sample/infra/migrations",
     })
     const photoCounterDo = Cloudflare.DurableObject("PhotoCounter", {
-      className: "PhotoCounterDO"
+      className: "PhotoCounterDO",
     })
 
     return {
       bucketName: bucket.bucketName,
       databaseId: db.databaseId,
-      photoCounterDo: photoCounterDo.name
+      photoCounterDo: photoCounterDo.name,
     }
-  })
+  }),
 )

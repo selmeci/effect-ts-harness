@@ -33,14 +33,14 @@ export const CANONICAL_ADR_SECTIONS = [
   "Considered Options",
   "Decision Outcome",
   "Rejected Alternatives",
-  "Consequences and Enforcement"
+  "Consequences and Enforcement",
 ] as const
 
 const EXPECTED_ENFORCEMENT_TABLE_COLS = [
   "rule",
   "enforced by",
   "gate / mechanism",
-  "governed symbols"
+  "governed symbols",
 ] as const
 
 const stripMarkup = (text: string): string => text.replace(/[*_`]/g, "").trim()
@@ -80,9 +80,7 @@ interface ParsedFrontmatter {
   readonly endLineIdx: number
 }
 
-const parseFrontmatter = (
-  rawLines: ReadonlyArray<string>
-): ParsedFrontmatter | null => {
+const parseFrontmatter = (rawLines: ReadonlyArray<string>): ParsedFrontmatter | null => {
   if (rawLines[0]?.trim() !== "---") {
     return null
   }
@@ -159,7 +157,7 @@ interface SectionInfo {
 }
 
 export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
-  input: AdrDocLintInput
+  input: AdrDocLintInput,
 ) {
   yield* Effect.void
 
@@ -172,12 +170,12 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
     findings.push({
       line: 1,
       kind: "adr-frontmatter-invalid",
-      message: "Missing or unclosed YAML frontmatter delimited by '---'."
+      message: "Missing or unclosed YAML frontmatter delimited by '---'.",
     })
     return {
       docPath: input.docPath,
       clean: false,
-      findings
+      findings,
     } satisfies AdrDocLintReport
   }
 
@@ -186,7 +184,7 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
     findings.push({
       line: 1,
       kind: "adr-frontmatter-invalid",
-      message: `Frontmatter 'id' must match format 'ADR-XXXX' or 'scope:ADR-XXXX', got: ${id ?? "missing"}.`
+      message: `Frontmatter 'id' must match format 'ADR-XXXX' or 'scope:ADR-XXXX', got: ${id ?? "missing"}.`,
     })
   }
 
@@ -195,7 +193,7 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
     findings.push({
       line: 1,
       kind: "adr-frontmatter-invalid",
-      message: "Frontmatter 'title' must be a non-empty string."
+      message: "Frontmatter 'title' must be a non-empty string.",
     })
   }
 
@@ -205,7 +203,7 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
     findings.push({
       line: 1,
       kind: "adr-frontmatter-invalid",
-      message: `Frontmatter 'status' must be one of 'proposed', 'accepted', 'superseded', 'deprecated', got: ${status ?? "missing"}.`
+      message: `Frontmatter 'status' must be one of 'proposed', 'accepted', 'superseded', 'deprecated', got: ${status ?? "missing"}.`,
     })
   }
 
@@ -215,7 +213,7 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
       findings.push({
         line: 1,
         kind: "adr-frontmatter-invalid",
-        message: `Frontmatter 'superseded_by' must match format '([a-z0-9-]+:)?ADR-\\d{4}' when status is 'superseded', got: ${supersededBy ?? "missing"}.`
+        message: `Frontmatter 'superseded_by' must match format '([a-z0-9-]+:)?ADR-\\d{4}' when status is 'superseded', got: ${supersededBy ?? "missing"}.`,
       })
     }
   }
@@ -225,7 +223,7 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
     findings.push({
       line: 1,
       kind: "adr-frontmatter-invalid",
-      message: `Frontmatter 'date' must match 'YYYY-MM-DD', got: ${date ?? "missing"}.`
+      message: `Frontmatter 'date' must match 'YYYY-MM-DD', got: ${date ?? "missing"}.`,
     })
   }
 
@@ -234,21 +232,19 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
     findings.push({
       line: 1,
       kind: "adr-frontmatter-invalid",
-      message: "Frontmatter 'enforced_by' must be a list containing at least 1 file path."
+      message: "Frontmatter 'enforced_by' must be a list containing at least 1 file path.",
     })
   }
 
   const spans = fm.lists.get("spans")
   const services = fm.lists.get("services")
   const errors = fm.lists.get("errors")
-  const totalGoverned =
-    (spans?.length ?? 0) + (services?.length ?? 0) + (errors?.length ?? 0)
+  const totalGoverned = (spans?.length ?? 0) + (services?.length ?? 0) + (errors?.length ?? 0)
   if (totalGoverned < 1) {
     findings.push({
       line: 1,
       kind: "adr-frontmatter-invalid",
-      message:
-        "ADR must govern at least one symbol in 'spans', 'services', or 'errors'."
+      message: "ADR must govern at least one symbol in 'spans', 'services', or 'errors'.",
     })
   }
 
@@ -256,14 +252,11 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
   const declaredSymbols = new Set<string>([
     ...(spans ?? []),
     ...(services ?? []),
-    ...(errors ?? [])
+    ...(errors ?? []),
   ])
 
   // Pre-calculate code block lines
-  const isCodeBlock: Array<boolean> = Array.from(
-    { length: rawLines.length },
-    () => false
-  )
+  const isCodeBlock: Array<boolean> = Array.from({ length: rawLines.length }, () => false)
   let inCode = false
   for (let i = 0; i < rawLines.length; i++) {
     const raw = rawLines[i]!
@@ -283,14 +276,11 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
     const rawLine = rawLines[i]!
     const lineNum = i + 1
     const strippedBackticks = rawLine.replace(/`[^`]*`/g, "")
-    if (
-      strippedBackticks.includes("<!--") ||
-      /<(?!!--)[^<>`\n]{1,60}>/.test(strippedBackticks)
-    ) {
+    if (strippedBackticks.includes("<!--") || /<(?!!--)[^<>`\n]{1,60}>/.test(strippedBackticks)) {
       findings.push({
         line: lineNum,
         kind: "adr-unfilled-placeholder",
-        message: `Line ${lineNum} contains unfilled placeholder or HTML comment.`
+        message: `Line ${lineNum} contains unfilled placeholder or HTML comment.`,
       })
     }
   }
@@ -310,7 +300,7 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
         title: headingTitle,
         line: lineNum,
         startLineIdx: i,
-        endLineIdx: rawLines.length
+        endLineIdx: rawLines.length,
       })
     }
   }
@@ -326,14 +316,14 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
 
   for (const sec of sections) {
     const canonicalIdx = CANONICAL_ADR_SECTIONS.indexOf(
-      sec.title as (typeof CANONICAL_ADR_SECTIONS)[number]
+      sec.title as (typeof CANONICAL_ADR_SECTIONS)[number],
     )
 
     if (canonicalIdx === -1) {
       findings.push({
         line: sec.line,
         kind: "adr-section-structure",
-        message: `Unexpected section "## ${sec.title}". Allowed canonical sections are: ${CANONICAL_ADR_SECTIONS.join(", ")}.`
+        message: `Unexpected section "## ${sec.title}". Allowed canonical sections are: ${CANONICAL_ADR_SECTIONS.join(", ")}.`,
       })
       continue
     }
@@ -342,7 +332,7 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
       findings.push({
         line: sec.line,
         kind: "adr-section-structure",
-        message: `Duplicate section "## ${sec.title}". Already defined at line ${seenCanonical.get(sec.title)}.`
+        message: `Duplicate section "## ${sec.title}". Already defined at line ${seenCanonical.get(sec.title)}.`,
       })
     } else {
       seenCanonical.set(sec.title, sec.line)
@@ -350,7 +340,7 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
         findings.push({
           line: sec.line,
           kind: "adr-section-structure",
-          message: `Section "## ${sec.title}" is out of order. Expected order: ${CANONICAL_ADR_SECTIONS.join(" -> ")}.`
+          message: `Section "## ${sec.title}" is out of order. Expected order: ${CANONICAL_ADR_SECTIONS.join(" -> ")}.`,
         })
       } else {
         lastCanonicalIdx = canonicalIdx
@@ -363,7 +353,7 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
       findings.push({
         line: 1,
         kind: "adr-section-structure",
-        message: `Missing canonical section "## ${expectedSec}".`
+        message: `Missing canonical section "## ${expectedSec}".`,
       })
     }
   }
@@ -380,17 +370,21 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
       findings.push({
         line: sec.line,
         kind: "adr-section-structure",
-        message: `Section "## ${sec.title}" has an empty body.`
+        message: `Section "## ${sec.title}" has an empty body.`,
       })
     }
   }
 
   // Helper to extract lines of a section outside code blocks
   const getSectionLines = (
-    secTitle: string
+    secTitle: string,
   ): {
     readonly sec: SectionInfo | undefined
-    readonly lines: ReadonlyArray<{ readonly text: string; readonly line: number; readonly idx: number }>
+    readonly lines: ReadonlyArray<{
+      readonly text: string
+      readonly line: number
+      readonly idx: number
+    }>
   } => {
     const sec = sections.find((s) => s.title === secTitle)
     if (!sec) {
@@ -418,7 +412,7 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
       findings.push({
         line: driversInfo.sec.line,
         kind: "adr-missing-drivers-or-options",
-        message: `Section "## Decision Drivers" must contain at least 2 bullet items (found ${bulletCount}).`
+        message: `Section "## Decision Drivers" must contain at least 2 bullet items (found ${bulletCount}).`,
       })
     }
   }
@@ -435,7 +429,7 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
       findings.push({
         line: optionsInfo.sec.line,
         kind: "adr-missing-drivers-or-options",
-        message: `Section "## Considered Options" must contain at least 2 list items (found ${listCount}).`
+        message: `Section "## Considered Options" must contain at least 2 list items (found ${listCount}).`,
       })
     }
   }
@@ -443,29 +437,26 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
   // 5. Decision Outcome contains "Chosen option:"
   const outcomeInfo = getSectionLines("Decision Outcome")
   if (outcomeInfo.sec) {
-    const hasChosen = outcomeInfo.lines.some((item) =>
-      /chosen option:/i.test(item.text)
-    )
+    const hasChosen = outcomeInfo.lines.some((item) => /chosen option:/i.test(item.text))
     if (!hasChosen) {
       findings.push({
         line: outcomeInfo.sec.line,
         kind: "adr-missing-chosen-option",
         message:
-          'Section "## Decision Outcome" must specify a chosen option containing "Chosen option:".'
+          'Section "## Decision Outcome" must specify a chosen option containing "Chosen option:".',
       })
     }
 
     for (const item of outcomeInfo.lines) {
       if (/\bscope:fixture\b/.test(item.text)) {
-        const isNegated =
-          /\b(?:not configured|do not use|omitted|never use|unconfigured)\b/i.test(
-            item.text
-          )
+        const isNegated = /\b(?:not configured|do not use|omitted|never use|unconfigured)\b/i.test(
+          item.text,
+        )
         if (!isNegated) {
           findings.push({
             line: item.line,
             kind: "adr-enforcement-mismatch",
-            message: `Line ${item.line} references unconfigured Nx tag 'scope:fixture' as a rule — 'scope:fixture' is not configured in nx.json.`
+            message: `Line ${item.line} references unconfigured Nx tag 'scope:fixture' as a rule — 'scope:fixture' is not configured in nx.json.`,
           })
         }
       }
@@ -487,7 +478,7 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
         line: rejectedInfo.sec.line,
         kind: "adr-rejected-alternative-structure",
         message:
-          'Section "## Rejected Alternatives" must contain at least one "### <n> · <Option Name>" subsection.'
+          'Section "## Rejected Alternatives" must contain at least one "### <n> · <Option Name>" subsection.',
       })
     } else {
       let nextExpectedNum = 1
@@ -498,7 +489,7 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
           findings.push({
             line: sub.line,
             kind: "adr-rejected-alternative-structure",
-            message: `Rejected alternative heading '${sub.text}' must match format '### <n> · <Option Name>'.`
+            message: `Rejected alternative heading '${sub.text}' must match format '### <n> · <Option Name>'.`,
           })
         } else {
           const num = parseInt(match[1]!, 10)
@@ -506,16 +497,14 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
             findings.push({
               line: sub.line,
               kind: "adr-rejected-alternative-structure",
-              message: `Expected rejected alternative number ${nextExpectedNum}, but got ${num}.`
+              message: `Expected rejected alternative number ${nextExpectedNum}, but got ${num}.`,
             })
           }
           nextExpectedNum = num + 1
         }
 
         const nextSubIdx =
-          j + 1 < subHeadings.length
-            ? subHeadings[j + 1]!.idx
-            : rejectedInfo.sec.endLineIdx
+          j + 1 < subHeadings.length ? subHeadings[j + 1]!.idx : rejectedInfo.sec.endLineIdx
         let hasWhyRejected = false
         for (let k = sub.idx + 1; k < nextSubIdx; k++) {
           if (!isCodeBlock[k] && rawLines[k]!.includes("**Why rejected:**")) {
@@ -527,7 +516,7 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
           findings.push({
             line: sub.line,
             kind: "adr-rejected-alternative-structure",
-            message: `Subsection '${sub.text}' must contain '**Why rejected:**'.`
+            message: `Subsection '${sub.text}' must contain '**Why rejected:**'.`,
           })
         }
       }
@@ -540,7 +529,7 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
     const requiredSubsections = [
       "Positive Consequences",
       "Negative Consequences and Trade-offs",
-      "Deterministic Enforcement"
+      "Deterministic Enforcement",
     ] as const
 
     const subMap = new Map<string, { line: number; idx: number }>()
@@ -556,7 +545,7 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
         findings.push({
           line: consequencesInfo.sec.line,
           kind: "adr-missing-enforcement-table",
-          message: `Missing required subsection "### ${reqSub}".`
+          message: `Missing required subsection "### ${reqSub}".`,
         })
       }
     }
@@ -581,25 +570,16 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
           const cleanCols = cells.map((c) => stripMarkup(c).toLowerCase())
           if (
             cleanCols.length === EXPECTED_ENFORCEMENT_TABLE_COLS.length &&
-            cleanCols.every(
-              (col, cIdx) => col === EXPECTED_ENFORCEMENT_TABLE_COLS[cIdx]
-            )
+            cleanCols.every((col, cIdx) => col === EXPECTED_ENFORCEMENT_TABLE_COLS[cIdx])
           ) {
             // Found matching header, check separator next
             let sepIdx = i + 1
-            while (
-              sepIdx < detEndIdx &&
-              !isCodeBlock[sepIdx] &&
-              rawLines[sepIdx]!.trim() === ""
-            ) {
+            while (sepIdx < detEndIdx && !isCodeBlock[sepIdx] && rawLines[sepIdx]!.trim() === "") {
               sepIdx++
             }
             if (sepIdx < detEndIdx && !isCodeBlock[sepIdx]) {
               const sepCells = parseTableRow(rawLines[sepIdx]!)
-              if (
-                sepCells.length > 0 &&
-                sepCells.every((c) => /^:?-+:?$/.test(c))
-              ) {
+              if (sepCells.length > 0 && sepCells.every((c) => /^:?-+:?$/.test(c))) {
                 // Count data rows
                 let dataRowCount = 0
                 for (let r = sepIdx + 1; r < detEndIdx; r++) {
@@ -647,16 +627,16 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
                       findings.push({
                         line: lineNum,
                         kind: "adr-enforcement-mismatch",
-                        message: `Row at line ${lineNum} in 'Deterministic Enforcement' table contains empty or placeholder cell.`
+                        message: `Row at line ${lineNum} in 'Deterministic Enforcement' table contains empty or placeholder cell.`,
                       })
                     }
 
                     // b) Verify Enforced By file paths are declared in frontmatter
                     if (enforcedByCell) {
                       const extractedPaths: Array<string> = []
-                      const backticks = Array.from(
-                        enforcedByCell.matchAll(/`([^`]+)`/g)
-                      ).map((m) => m[1]!.trim())
+                      const backticks = Array.from(enforcedByCell.matchAll(/`([^`]+)`/g)).map((m) =>
+                        m[1]!.trim(),
+                      )
                       for (const b of backticks) {
                         if (
                           b.includes("/") &&
@@ -666,9 +646,7 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
                           extractedPaths.push(b)
                         }
                       }
-                      const tokens = enforcedByCell
-                        .replace(/`([^`]+)`/g, " $1 ")
-                        .split(/[,\s]+/)
+                      const tokens = enforcedByCell.replace(/`([^`]+)`/g, " $1 ").split(/[,\s]+/)
                       for (const t of tokens) {
                         const trimmed = t.trim()
                         if (
@@ -685,7 +663,7 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
                           findings.push({
                             line: lineNum,
                             kind: "adr-enforcement-mismatch",
-                            message: `Enforced By file '${p}' at line ${lineNum} is not declared in ADR frontmatter 'enforced_by'.`
+                            message: `Enforced By file '${p}' at line ${lineNum} is not declared in ADR frontmatter 'enforced_by'.`,
                           })
                         }
                       }
@@ -697,31 +675,25 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
                     // matches one of the frontmatter spans, services, or errors (or ends with #<symbol>).
                     if (declaredSymbols.size > 0 && governedSymbolsCell) {
                       const backtickMatches = Array.from(
-                        governedSymbolsCell.matchAll(/`([^`]+)`/g)
+                        governedSymbolsCell.matchAll(/`([^`]+)`/g),
                       ).map((m) => m[1]!.trim())
 
                       for (const sym of backtickMatches) {
-                        if (
-                          sym === "*" ||
-                          sym.includes("/") ||
-                          sym.includes(".ts")
-                        ) {
+                        if (sym === "*" || sym.includes("/") || sym.includes(".ts")) {
                           continue
                         }
 
                         const matches =
                           declaredSymbols.has(sym) ||
                           Array.from(declaredSymbols).some(
-                            (ds) =>
-                              ds.endsWith(`#${sym}`) ||
-                              sym.endsWith(`#${ds}`)
+                            (ds) => ds.endsWith(`#${sym}`) || sym.endsWith(`#${ds}`),
                           )
 
                         if (!matches) {
                           findings.push({
                             line: lineNum,
                             kind: "adr-enforcement-mismatch",
-                            message: `Governed symbol '${sym}' at line ${lineNum} is not declared in ADR frontmatter spans, services, or errors.`
+                            message: `Governed symbol '${sym}' at line ${lineNum} is not declared in ADR frontmatter spans, services, or errors.`,
                           })
                         }
                       }
@@ -743,7 +715,7 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
           line: detEnforcement.line,
           kind: "adr-missing-enforcement-table",
           message:
-            "Subsection '### Deterministic Enforcement' must contain a table with columns ['Rule', 'Enforced By', 'Gate / Mechanism', 'Governed Symbols'] and at least 1 data row."
+            "Subsection '### Deterministic Enforcement' must contain a table with columns ['Rule', 'Enforced By', 'Gate / Mechanism', 'Governed Symbols'] and at least 1 data row.",
         })
       }
     }
@@ -752,11 +724,9 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
   return {
     docPath: input.docPath,
     clean: findings.length === 0,
-    findings
+    findings,
   } satisfies AdrDocLintReport
 })
 
-export const lintAdrDocMarkdown = (
-  docPath: string,
-  markdown: string
-): AdrDocLintReport => Effect.runSync(decideAdrDocQuality({ docPath, markdown }))
+export const lintAdrDocMarkdown = (docPath: string, markdown: string): AdrDocLintReport =>
+  Effect.runSync(decideAdrDocQuality({ docPath, markdown }))
