@@ -1,14 +1,27 @@
 import { Effect, Schema } from "effect"
+import { stub } from "@harness/gates"
 import {
   type AggregateId,
+  type AggregateName,
   type AggregateNotFoundError,
+  type CrossProjectionNotFoundError,
   type EventMetadata,
   LocalProjectionNotFoundError,
+  type ProcessorId,
   type ProjectionName,
+  type ProjectionSequenceDecision,
+  type ProjectionSequenceInput,
   type ProjectionVersion,
 } from "@harness/es-contract"
 
 export interface HistoricalEvent<Event> {
+  readonly event: Event
+  readonly metadata: EventMetadata
+}
+
+export interface ArchivedEvent<Event> {
+  readonly aggregateName: AggregateName
+  readonly aggregateId: AggregateId
   readonly event: Event
   readonly metadata: EventMetadata
 }
@@ -91,4 +104,80 @@ export const LocalProjection = {
   make: <Event, ReadModel, Env = never, Err = never>(
     definition: LocalProjection<Event, ReadModel, Env, Err>,
   ): LocalProjection<Event, ReadModel, Env, Err> => definition,
+}
+
+/**
+ * Eventually-consistent cross-aggregate projection fed via the outbox and event archive.
+ */
+export interface CrossAggregateProjection<
+  Event,
+  ReadModel,
+  QueryInput = void,
+  Env = never,
+  Err = never,
+> {
+  readonly processorId: ProcessorId
+  readonly aggregateName: AggregateName
+  readonly eventSchema: Schema.Codec<Event, unknown>
+  readonly model: Schema.Top & { readonly Type: ReadModel }
+  readonly apply: (event: Event, metadata: EventMetadata) => Effect.Effect<void, Err, Env>
+  readonly query: (input: QueryInput) => Effect.Effect<ReadModel, Err, Env>
+  readonly purge: Effect.Effect<void, Err, Env>
+}
+
+export const decideProjectionSequence = Effect.fn("ProjectionSequence.decide")(function* (
+  input: ProjectionSequenceInput,
+) {
+  return yield* stub<ProjectionSequenceDecision, never, never>(input)
+})
+
+export const applyCrossProjection = Effect.fn("CrossProjection.apply")(function* <
+  Event,
+  ReadModel,
+  QueryInput,
+  Env,
+  Err,
+>(
+  projection: CrossAggregateProjection<Event, ReadModel, QueryInput, Env, Err>,
+  event: Event,
+  metadata: EventMetadata,
+) {
+  return yield* stub<void, Err, Env>(projection, event, metadata)
+})
+
+export const queryCrossProjection = Effect.fn("CrossProjection.query")(function* <
+  Event,
+  ReadModel,
+  QueryInput,
+  Env,
+  Err,
+>(
+  projections: ReadonlyArray<CrossAggregateProjection<Event, ReadModel, QueryInput, Env, Err>>,
+  processorId: ProcessorId,
+  input: QueryInput,
+) {
+  return yield* stub<ReadModel, CrossProjectionNotFoundError | Err, Env>(
+    projections,
+    processorId,
+    input,
+  )
+})
+
+export const rebuildCrossProjection = Effect.fn("CrossProjection.rebuild")(function* <
+  Event,
+  ReadModel,
+  QueryInput,
+  Env,
+  Err,
+>(
+  projection: CrossAggregateProjection<Event, ReadModel, QueryInput, Env, Err>,
+  events: ReadonlyArray<ArchivedEvent<Event>>,
+) {
+  return yield* stub<void, Err, Env>(projection, events)
+})
+
+export const CrossAggregateProjection = {
+  make: <Event, ReadModel, QueryInput = void, Env = never, Err = never>(
+    definition: CrossAggregateProjection<Event, ReadModel, QueryInput, Env, Err>,
+  ): CrossAggregateProjection<Event, ReadModel, QueryInput, Env, Err> => definition,
 }

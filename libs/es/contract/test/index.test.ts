@@ -2,24 +2,38 @@ import { describe, expect, it } from "@effect/vitest"
 import { Schema } from "effect"
 import {
   AggregateCommandResult,
+  AggregateCount,
   AggregateId,
   AggregateName,
   AggregateNotFoundError,
+  BatchLimit,
   CausationId,
   CommandAggregateMismatchError,
   CommandId,
   CommandProcessingStatus,
   ConcurrencyConflictError,
   CorrelationId,
+  CrossProjectionNotFoundError,
   ErrorMessage,
   EventMetadata,
   EventSerializationError,
   EventStreamCorruptionError,
+  EventType,
   LocalProjectionNotFoundError,
+  OutboxDrainOutcome,
   OutboxPublicationMode,
+  OutboxPublishError,
+  OutboxRowId,
   PositiveInt,
+  ProcessorId,
+  ProjectionArchiveCorruptionError,
+  ProjectionCatchUpStatus,
   ProjectionName,
+  ProjectionSequenceDecision,
+  ProjectionSequenceInput,
   ProjectionVersion,
+  PublishedEventEnvelope,
+  SerializedPayload,
   StreamCreationStatus,
   StreamVersion,
   TimestampMs,
@@ -340,5 +354,135 @@ describe("@harness/es-contract", () => {
       expect(serializationErr.streamVersion).toBe(2)
       expect(serializationErr.reason).toBe("Schema decode failed for CartItemAdded")
     })
+
+    it("instantiates OutboxPublishError, ProjectionArchiveCorruptionError, and CrossProjectionNotFoundError", () => {
+      const outboxErr = new OutboxPublishError({
+        aggregateName: AggregateName.make("Cart"),
+        aggregateId: AggregateId.make("cart-1"),
+        streamVersion: StreamVersion.make(1),
+        reason: ErrorMessage.make("Queue publish failed"),
+      })
+      expect(outboxErr._tag).toBe("OutboxPublishError")
+      expect(outboxErr.aggregateName).toBe("Cart")
+      expect(outboxErr.aggregateId).toBe("cart-1")
+      expect(outboxErr.streamVersion).toBe(1)
+      expect(outboxErr.reason).toBe("Queue publish failed")
+
+      const archiveErr = new ProjectionArchiveCorruptionError({
+        processorId: ProcessorId.make("open-carts-v1"),
+        aggregateName: AggregateName.make("Cart"),
+        aggregateId: AggregateId.make("cart-1"),
+        streamVersion: StreamVersion.make(2),
+        reason: ErrorMessage.make("Archive gap detected"),
+      })
+      expect(archiveErr._tag).toBe("ProjectionArchiveCorruptionError")
+      expect(archiveErr.processorId).toBe("open-carts-v1")
+      expect(archiveErr.reason).toBe("Archive gap detected")
+
+      const notFoundErr = new CrossProjectionNotFoundError({
+        processorId: ProcessorId.make("missing-proj"),
+      })
+      expect(notFoundErr._tag).toBe("CrossProjectionNotFoundError")
+      expect(notFoundErr.processorId).toBe("missing-proj")
+    })
+  })
+
+  describe("Phase 3 Outbox & Cross-Aggregate Projection Schemas", () => {
+    it("decodes valid Phase 3 branded scalars and rejects invalid values", () => {
+      expect(Schema.decodeSync(OutboxRowId)(1)).toBe(1)
+      expect(() => Schema.decodeSync(OutboxRowId)(0)).toThrow()
+      expect(() => Schema.decodeSync(OutboxRowId)(-1)).toThrow()
+
+      expect(Schema.decodeSync(EventType)("CartCreated")).toBe("CartCreated")
+      expect(() => Schema.decodeSync(EventType)("")).toThrow()
+
+      expect(Schema.decodeSync(SerializedPayload)('{"_tag":"CartCreated"}')).toBe(
+        '{"_tag":"CartCreated"}',
+      )
+      expect(() => Schema.decodeSync(SerializedPayload)("")).toThrow()
+
+      expect(Schema.decodeSync(ProcessorId)("open-carts-v1")).toBe("open-carts-v1")
+      expect(() => Schema.decodeSync(ProcessorId)("")).toThrow()
+
+      expect(Schema.decodeSync(BatchLimit)(100)).toBe(100)
+      expect(() => Schema.decodeSync(BatchLimit)(0)).toThrow()
+
+      expect(Schema.decodeSync(AggregateCount)(0)).toBe(0)
+      expect(Schema.decodeSync(AggregateCount)(5)).toBe(5)
+      expect(() => Schema.decodeSync(AggregateCount)(-1)).toThrow()
+    })
+
+    it("decodes PublishedEventEnvelope and OutboxDrainOutcome", () => {
+      const envelope = Schema.decodeSync(PublishedEventEnvelope)({
+        aggregateName: "Cart",
+        aggregateId: "cart-1",
+        streamVersion: 1,
+        eventType: "CartCreated",
+        payload: '{"_tag":"CartCreated","cartId":"cart-1"}',
+        metadata: {
+          aggregateId: "cart-1",
+          streamVersion: 1,
+          commandId: "cmd-1",
+          timestamp: 1700000000000,
+        },
+      })
+      expect(envelope.aggregateName).toBe("Cart")
+      expect(envelope.eventType).toBe("CartCreated")
+
+      const emptyOutcome = Schema.decodeSync(OutboxDrainOutcome)({ _tag: "OutboxEmpty" })
+      expect(emptyOutcome._tag).toBe("OutboxEmpty")
+
+      const drainedOutcome = Schema.decodeSync(OutboxDrainOutcome)({
+        _tag: "OutboxDrained",
+        drainedCount: 3,
+      })
+      expect(drainedOutcome._tag).toBe("OutboxDrained")
+    })
+
+    it("decodes ProjectionSequenceInput, ProjectionSequenceDecision, and ProjectionCatchUpStatus", () => {
+      const seqInput = Schema.decodeSync(ProjectionSequenceInput)({
+        checkpointVersion: 1,
+        incomingVersion: 2,
+        parkedVersions: [3, 4],
+      })
+      expect(seqInput.checkpointVersion).toBe(1)
+      expect(seqInput.incomingVersion).toBe(2)
+      expect(seqInput.parkedVersions).toEqual([3, 4])
+
+      const skipDec = Schema.decodeSync(ProjectionSequenceDecision)({
+        _tag: "SkipDuplicateEvent",
+        checkpointVersion: 2,
+      })
+      expect(skipDec._tag).toBe("SkipDuplicateEvent")
+
+      const parkDec = Schema.decodeSync(ProjectionSequenceDecision)({
+        _tag: "ParkOutOfOrderEvent",
+        expectedVersion: 2,
+        parkedVersion: 3,
+      })
+      expect(parkDec._tag).toBe("ParkOutOfOrderEvent")
+
+      const applyDec = Schema.decodeSync(ProjectionSequenceDecision)({
+        _tag: "ApplyContiguousEvents",
+        versionsToApply: [2, 3],
+        newCheckpointVersion: 3,
+      })
+      expect(applyDec._tag).toBe("ApplyContiguousEvents")
+
+      const caughtUp = Schema.decodeSync(ProjectionCatchUpStatus)({
+        _tag: "CaughtUp",
+        archiveAggregatesCount: 2,
+      })
+      expect(caughtUp._tag).toBe("CaughtUp")
+
+      const lagging = Schema.decodeSync(ProjectionCatchUpStatus)({
+        _tag: "Lagging",
+        laggingAggregateId: "cart-1",
+        checkpointVersion: 1,
+        archiveHeadVersion: 3,
+      })
+      expect(lagging._tag).toBe("Lagging")
+    })
   })
 })
+

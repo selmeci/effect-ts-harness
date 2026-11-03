@@ -10,15 +10,30 @@ import {
   isEventStreamUniqueConflict,
   loadAggregate,
 } from "./aggregate.js"
+import { DEFAULT_OUTBOX_BATCH_LIMIT, drainAggregateOutbox } from "./outbox.js"
+import {
+  checkProjectorCatchUp,
+  ingestPublishedEvent,
+  initializeProjectorTables,
+  projectorCoreMigrations,
+  rebuildProjectorFromArchive,
+} from "./projector.js"
 
 export { SqliteClient } from "@effect/sql-sqlite-do/SqliteClient"
 export { SqliteMigrator }
 export {
   aggregateCoreMigrations,
+  checkProjectorCatchUp,
+  DEFAULT_OUTBOX_BATCH_LIMIT,
+  drainAggregateOutbox,
   handleAggregateCommand,
+  ingestPublishedEvent,
   initializeAggregateTables,
+  initializeProjectorTables,
   isEventStreamUniqueConflict,
   loadAggregate,
+  projectorCoreMigrations,
+  rebuildProjectorFromArchive,
 }
 
 const _makeSqliteClientLayer = (
@@ -42,7 +57,18 @@ const _makeAggregateMigratorLayer = (
     }),
   })
 
+const _makeProjectorMigratorLayer = (
+  additionalMigrations?: Readonly<Record<string, Effect.Effect<void, SqlError, SqlClient>>>,
+): Layer.Layer<never, SqliteMigrator.MigrationError | SqlError, SqlClient> =>
+  SqliteMigrator.layer({
+    loader: SqliteMigrator.fromRecord({
+      ...projectorCoreMigrations,
+      ...additionalMigrations,
+    }),
+  })
+
 export {
   _makeAggregateMigratorLayer as makeAggregateMigratorLayer,
+  _makeProjectorMigratorLayer as makeProjectorMigratorLayer,
   _makeSqliteClientLayer as makeSqliteClientLayer,
 }
