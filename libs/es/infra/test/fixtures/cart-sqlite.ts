@@ -6,10 +6,16 @@ import {
   AggregateName,
   AggregateNotFoundError,
   type EventMetadata,
+  ProcessorId,
   ProjectionName,
   ProjectionVersion,
 } from "@harness/es-contract"
-import { type AggregateConfig, type HistoricalEvent, LocalProjection } from "@harness/es-core"
+import {
+  type AggregateConfig,
+  CrossAggregateProjection,
+  type HistoricalEvent,
+  LocalProjection,
+} from "@harness/es-core"
 import {
   type CartAlreadyCheckedOutError,
   type CartCommand,
@@ -156,4 +162,124 @@ export const cartAggregateConfig: AggregateConfig<
   eventSchema: CartEvent,
   projections: [cartViewProjection],
   outboxMode: { _tag: "SuppressOutbox" },
+}
+
+export class OpenCartSummary extends Schema.Class<OpenCartSummary>("OpenCartSummary")({
+  cartId: AggregateId,
+  itemCount: ItemCount,
+  totalQuantity: TotalQuantity,
+  status: CartStatus,
+}) {}
+
+export class OpenCartsReport extends Schema.Class<OpenCartsReport>("OpenCartsReport")({
+  carts: Schema.Array(OpenCartSummary),
+}) {}
+
+export const initOpenCartsProjectionTable: Effect.Effect<void, SqlError, SqlClient> = Effect.gen(
+  function* () {
+    const sql = yield* SqlClient
+    yield* sql`
+      CREATE TABLE IF NOT EXISTS projection_open_carts (
+        cart_id TEXT PRIMARY KEY NOT NULL,
+        item_count INTEGER NOT NULL,
+        total_quantity INTEGER NOT NULL,
+        status TEXT NOT NULL
+      );
+    `
+  },
+)
+
+export const applyOpenCarts = (
+  event: CartEvent,
+  metadata: EventMetadata,
+): Effect.Effect<void, SqlError, SqlClient> =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient
+    const targetAggregateId = metadata.aggregateId
+    yield* match(event)
+      .with({ _tag: "CartCreated" }, () =>
+        sql`
+          INSERT INTO projection_open_carts (cart_id, item_count, total_quantity, status)
+          VALUES (${targetAggregateId}, 0, 0, 'active')
+          ON CONFLICT (cart_id) DO NOTHING
+        `.pipe(Effect.asVoid),
+      )
+      .with({ _tag: "ItemAdded" }, (e) =>
+        sql`
+          INSERT INTO projection_open_carts (cart_id, item_count, total_quantity, status)
+          VALUES (${targetAggregateId}, 1, ${e.quantity}, 'active')
+          ON CONFLICT (cart_id) DO UPDATE SET
+            item_count = item_count + 1,
+            total_quantity = total_quantity + ${e.quantity}
+        `.pipe(Effect.asVoid),
+      )
+      .with({ _tag: "CartCheckedOut" }, () =>
+        sql`
+          INSERT INTO projection_open_carts (cart_id, item_count, total_quantity, status)
+          VALUES (${targetAggregateId}, 0, 0, 'checked_out')
+          ON CONFLICT (cart_id) DO UPDATE SET
+            status = 'checked_out'
+        `.pipe(Effect.asVoid),
+      )
+      .exhaustive()
+  })
+
+export const queryOpenCarts: Effect.Effect<OpenCartsReport, SqlError, SqlClient> = Effect.gen(
+  function* () {
+    const sql = yield* SqlClient
+    const rows = yield* sql<{
+      cart_id: string
+      item_count: number
+      total_quantity: number
+      status: string
+    }>`
+      SELECT cart_id, item_count, total_quantity, status
+      FROM projection_open_carts
+      ORDER BY cart_id ASC
+    `
+    const carts = rows.map(
+      (row) =>
+        new OpenCartSummary({
+          cartId: AggregateId.make(row.cart_id),
+          itemCount: ItemCount.make(row.item_count),
+          totalQuantity: TotalQuantity.make(row.total_quantity),
+          status: CartStatus.make(row.status),
+        }),
+    )
+    return new OpenCartsReport({ carts })
+  },
+)
+
+export const purgeOpenCarts: Effect.Effect<void, SqlError, SqlClient> = Effect.gen(function* () {
+  const sql = yield* SqlClient
+  yield* sql`DELETE FROM projection_open_carts`.pipe(Effect.asVoid)
+})
+
+export const openCartsProjection: CrossAggregateProjection<
+  CartEvent,
+  OpenCartsReport,
+  void,
+  SqlClient,
+  SqlError
+> = CrossAggregateProjection.make({
+  processorId: ProcessorId.make("open-carts-v1"),
+  aggregateName: AggregateName.make("Cart"),
+  eventSchema: CartEvent,
+  model: OpenCartsReport,
+  apply: applyOpenCarts,
+  query: () => queryOpenCarts,
+  purge: purgeOpenCarts,
+})
+
+export const cartAggregateWithOutboxConfig: AggregateConfig<
+  CartCommand,
+  CartEvent,
+  CartState,
+  CartAlreadyCheckedOutError | EmptyCartCheckoutError | CartIdMismatchError,
+  SqlClient,
+  SqlError
+> = {
+  ...cartAggregateConfig,
+  projections: [],
+  outboxMode: { _tag: "PublishOutbox" },
 }

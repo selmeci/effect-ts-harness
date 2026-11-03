@@ -1,4 +1,4 @@
-import type { Effect } from "effect"
+import { Context, type Effect } from "effect"
 import type { OutboxPublishError, PublishedEventEnvelope } from "@harness/es-contract"
 
 /**
@@ -10,6 +10,6 @@ export interface EventBus<Env = never> {
   ) => Effect.Effect<void, OutboxPublishError, Env>
 }
 
-export const EventBus = {
+export const EventBus = Object.assign(Context.Service<EventBus>("EventBus"), {
   make: <Env = never>(definition: EventBus<Env>): EventBus<Env> => definition,
-}
+})

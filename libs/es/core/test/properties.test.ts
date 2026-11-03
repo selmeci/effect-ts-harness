@@ -1,6 +1,8 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Cause, Effect, Equal, Schema } from "effect"
 import { match } from "ts-pattern"
+import { ProjectionSequenceInput, StreamVersion } from "@harness/es-contract"
+import { decideProjectionSequence } from "../src/index.js"
 import {
   AddItem,
   CartCommand,
@@ -288,6 +290,113 @@ describe("Cart Decider Property-Based Tests", () => {
             expect.unreachable("Expected CartIdMismatchError on checked out cart")
           })
           .exhaustive()
+      }),
+  )
+})
+
+describe("ProjectionSequence.decide Property-Based Tests", () => {
+  it.effect.prop(
+    "classifies every ProjectionSequenceInput into a valid decision and preserves version invariants",
+    { input: ProjectionSequenceInput },
+    ({ input }) =>
+      Effect.gen(function* () {
+        const decision = yield* decideProjectionSequence(input)
+
+        match(decision)
+          .with({ _tag: "SkipDuplicateEvent" }, (d) => {
+            expect(input.incomingVersion <= input.checkpointVersion).toBe(true)
+            expect(d.checkpointVersion).toBe(input.checkpointVersion)
+          })
+          .with({ _tag: "ParkOutOfOrderEvent" }, (d) => {
+            expect(input.incomingVersion > input.checkpointVersion + 1).toBe(true)
+            expect(d.expectedVersion).toBe(StreamVersion.make(input.checkpointVersion + 1))
+            expect(d.parkedVersion).toBe(input.incomingVersion)
+          })
+          .with({ _tag: "ApplyContiguousEvents" }, (d) => {
+            expect(input.incomingVersion).toBe(input.checkpointVersion + 1)
+            expect(d.versionsToApply.length).toBeGreaterThanOrEqual(1)
+            expect(d.versionsToApply[0]).toBe(input.checkpointVersion + 1)
+            expect(d.newCheckpointVersion).toBe(d.versionsToApply[d.versionsToApply.length - 1])
+            for (let i = 0; i < d.versionsToApply.length - 1; i++) {
+              const current = d.versionsToApply[i]
+              const next = d.versionsToApply[i + 1]
+              if (current !== undefined && next !== undefined) {
+                expect(next - current).toBe(1)
+              }
+            }
+            const candidateParked = new Set(
+              input.parkedVersions.filter((v) => v > input.checkpointVersion),
+            )
+            expect(candidateParked.has(StreamVersion.make(d.newCheckpointVersion + 1))).toBe(false)
+          })
+          .exhaustive()
+      }),
+  )
+
+  it.effect.prop(
+    "converges to the exact same final checkpoint and applied sequence regardless of permutation order of versions 1..N",
+    {
+      count: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 15 })),
+      seed: Schema.Int,
+    },
+    ({ count, seed }) =>
+      Effect.gen(function* () {
+        const versions = Array.from({ length: count }, (_, i) => StreamVersion.make(i + 1))
+
+        let currentSeed = Math.abs(seed) % 2147483647
+        if (currentSeed === 0) {
+          currentSeed = 1
+        }
+        const nextRand = () => {
+          currentSeed = (currentSeed * 16807) % 2147483647
+          return (currentSeed - 1) / 2147483646
+        }
+        for (let i = versions.length - 1; i > 0; i--) {
+          const j = Math.floor(nextRand() * (i + 1))
+          const current = versions[i]
+          const target = versions[j]
+          if (current !== undefined && target !== undefined) {
+            versions[i] = target
+            versions[j] = current
+          }
+        }
+
+        let currentCheckpoint = StreamVersion.make(0)
+        let parkedVersions: Array<StreamVersion> = []
+        const allApplied: Array<StreamVersion> = []
+
+        for (const incoming of versions) {
+          const input = new ProjectionSequenceInput({
+            checkpointVersion: currentCheckpoint,
+            incomingVersion: incoming,
+            parkedVersions,
+          })
+
+          const decision = yield* decideProjectionSequence(input)
+
+          match(decision)
+            .with({ _tag: "SkipDuplicateEvent" }, () => {
+              // Duplicate skipped
+            })
+            .with({ _tag: "ParkOutOfOrderEvent" }, (d) => {
+              parkedVersions.push(d.parkedVersion)
+            })
+            .with({ _tag: "ApplyContiguousEvents" }, (d) => {
+              for (const v of d.versionsToApply) {
+                allApplied.push(v)
+              }
+              currentCheckpoint = d.newCheckpointVersion
+              const appliedSet = new Set(d.versionsToApply)
+              parkedVersions = parkedVersions.filter((v) => !appliedSet.has(v))
+            })
+            .exhaustive()
+        }
+
+        expect(currentCheckpoint).toBe(count)
+        expect(allApplied).toEqual(
+          Array.from({ length: count }, (_, i) => StreamVersion.make(i + 1)),
+        )
+        expect(parkedVersions.length).toBe(0)
       }),
   )
 })

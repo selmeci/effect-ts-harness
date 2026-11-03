@@ -52,9 +52,7 @@ export type SerializedPayload = typeof SerializedPayload.Type
 export const ProcessorId = Schema.NonEmptyString.pipe(Schema.brand("ProcessorId"))
 export type ProcessorId = typeof ProcessorId.Type
 
-export const BatchLimit = Schema.Int.check(Schema.isGreaterThan(0)).pipe(
-  Schema.brand("BatchLimit"),
-)
+export const BatchLimit = Schema.Int.check(Schema.isGreaterThan(0)).pipe(Schema.brand("BatchLimit"))
 export type BatchLimit = typeof BatchLimit.Type
 
 export const AggregateCount = Schema.Natural.pipe(Schema.brand("AggregateCount"))

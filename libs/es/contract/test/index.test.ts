@@ -389,23 +389,31 @@ describe("@harness/es-contract", () => {
 
   describe("Phase 3 Outbox & Cross-Aggregate Projection Schemas", () => {
     it("decodes valid Phase 3 branded scalars and rejects invalid values", () => {
+      const invalidValues: ReadonlyArray<unknown> = [null, undefined, "1", 1.5, Number.NaN]
       expect(Schema.decodeSync(OutboxRowId)(1)).toBe(1)
       expect(() => Schema.decodeSync(OutboxRowId)(0)).toThrow()
       expect(() => Schema.decodeSync(OutboxRowId)(-1)).toThrow()
+      for (const bad of invalidValues) {
+        expect(() => Schema.decodeUnknownSync(OutboxRowId)(bad)).toThrow()
+        expect(() => Schema.decodeUnknownSync(BatchLimit)(bad)).toThrow()
+        expect(() => Schema.decodeUnknownSync(AggregateCount)(bad)).toThrow()
+      }
 
+      const invalidStrings: ReadonlyArray<unknown> = [null, undefined, 123, ""]
       expect(Schema.decodeSync(EventType)("CartCreated")).toBe("CartCreated")
-      expect(() => Schema.decodeSync(EventType)("")).toThrow()
-
       expect(Schema.decodeSync(SerializedPayload)('{"_tag":"CartCreated"}')).toBe(
         '{"_tag":"CartCreated"}',
       )
-      expect(() => Schema.decodeSync(SerializedPayload)("")).toThrow()
-
       expect(Schema.decodeSync(ProcessorId)("open-carts-v1")).toBe("open-carts-v1")
-      expect(() => Schema.decodeSync(ProcessorId)("")).toThrow()
+      for (const badStr of invalidStrings) {
+        expect(() => Schema.decodeUnknownSync(EventType)(badStr)).toThrow()
+        expect(() => Schema.decodeUnknownSync(SerializedPayload)(badStr)).toThrow()
+        expect(() => Schema.decodeUnknownSync(ProcessorId)(badStr)).toThrow()
+      }
 
       expect(Schema.decodeSync(BatchLimit)(100)).toBe(100)
       expect(() => Schema.decodeSync(BatchLimit)(0)).toThrow()
+      expect(() => Schema.decodeSync(BatchLimit)(-5)).toThrow()
 
       expect(Schema.decodeSync(AggregateCount)(0)).toBe(0)
       expect(Schema.decodeSync(AggregateCount)(5)).toBe(5)
@@ -485,4 +493,3 @@ describe("@harness/es-contract", () => {
     })
   })
 })
-
