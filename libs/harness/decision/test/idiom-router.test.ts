@@ -1,5 +1,12 @@
+import { Effect } from "effect"
 import { describe, expect, it } from "vitest"
-import { assertDecisionLimits, IDIOM_BLOCKS, IdiomRouterV1 } from "../src/idiom-router.js"
+import {
+  assertDecisionLimits,
+  IDIOM_BLOCKS,
+  IdiomRouterV1,
+  routeStep,
+} from "../src/idiom-router.js"
+import { makeMockDecisionModelLayer } from "../src/mock-layer.js"
 
 describe("IdiomRouterV1 data constraints", () => {
   it("puts review first (tie-break mitigation)", () => {
@@ -44,5 +51,57 @@ describe("IdiomRouterV1 data constraints", () => {
         },
       }),
     ).toThrow(/26/)
+  })
+})
+
+describe("Deterministic routing for Phase 4 event schema evolution", () => {
+  const mockModel = makeMockDecisionModelLayer()
+
+  it("routes prompts mentioning event schema upcasters to event-sourcing", async () => {
+    const result1 = await Effect.runPromise(
+      routeStep("Define event schema upcasters for v1 to v2 evolution").pipe(
+        Effect.provide(mockModel),
+      ),
+    )
+    expect(result1).toBe("event-sourcing")
+
+    const result2 = await Effect.runPromise(
+      routeStep("Implement upcaster for OrderCreated event").pipe(Effect.provide(mockModel)),
+    )
+    expect(result2).toBe("event-sourcing")
+  })
+
+  it("routes prompts mentioning toJsonSchemaDocument to schema", async () => {
+    const result = await Effect.runPromise(
+      routeStep("Export event schema to JSON Schema using toJsonSchemaDocument").pipe(
+        Effect.provide(mockModel),
+      ),
+    )
+    expect(result).toBe("schema")
+  })
+
+  it("routes prompts mentioning AggregateApiSpec to httpapi", async () => {
+    const result = await Effect.runPromise(
+      routeStep("Expose aggregate command endpoints via AggregateApiSpec").pipe(
+        Effect.provide(mockModel),
+      ),
+    )
+    expect(result).toBe("httpapi")
+  })
+
+  it("routes prompts mentioning AtomHttpApi to atom", async () => {
+    const result = await Effect.runPromise(
+      routeStep("Manage frontend reactive state with AtomHttpApi").pipe(Effect.provide(mockModel)),
+    )
+    expect(result).toBe("atom")
+  })
+
+  it("routes prompts mentioning event-snapshots to testing", async () => {
+    const result = await Effect.runPromise(
+      routeStep("Run event-snapshots regression suite to detect breaking changes").pipe(
+        Effect.provide(mockModel),
+      ),
+    )
+    expect(result).toBe("testing")
   })
 })

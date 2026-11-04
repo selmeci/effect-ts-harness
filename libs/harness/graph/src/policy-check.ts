@@ -36,6 +36,7 @@ export interface GraphPolicyViolation {
     | "unbranded-contract-schema"
     | "unbranded-primitive-boundary"
     | "node-sqlite-in-infra"
+    | "aggregate-direct-bus-publish"
   readonly message: string
   readonly path: ReadonlyArray<string>
 }
@@ -58,6 +59,15 @@ const isReducerSpan = (spanName: string): boolean =>
   spanName === "evolve" ||
   spanName.endsWith(".fold") ||
   spanName === "fold"
+
+const isAggregateFnNode = (node: EffectFnNode): boolean =>
+  node.spanName.startsWith("Aggregate.") ||
+  node.spanName.startsWith("AggregateInfra.") ||
+  node.spanName.endsWith(".handleCommand") ||
+  /(?:-aggregate|\.aggregate|\/aggregate|^aggregate)\.ts$/.test(node.file) ||
+  ("relPath" in node &&
+    typeof node.relPath === "string" &&
+    /(?:-aggregate|\.aggregate|\/aggregate|^aggregate)\.ts$/.test(node.relPath))
 
 export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphResult => {
   const violations: Array<GraphPolicyViolation> = []
@@ -159,6 +169,59 @@ export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphRe
             message: `Reducer function '${fnNode.qualname}' (${fnNode.spanName}) must be infallible and cannot fail with '${edge.data.errorTag}'`,
             path: [fnNode.qualname, edge.data.errorTag],
           })
+        }
+      }
+    }
+  }
+
+  // Rule 2c: aggregate-direct-bus-publish (aggregates write to outbox, never publish directly to the bus)
+  for (const [fnIdx, fnNode] of Graph.nodes(harnessGraph.graph)) {
+    if (fnNode._tag === "EffectFn" && isAggregateFnNode(fnNode)) {
+      for (const [, edge] of Graph.edges(harnessGraph.graph)) {
+        if (edge.source === fnIdx) {
+          if (edge.data._tag === "RequiresService") {
+            const targetNodeOpt = Graph.getNode(harnessGraph.graph, edge.target)
+            const targetService =
+              Option.isSome(targetNodeOpt) && targetNodeOpt.value._tag === "ServiceTag"
+                ? targetNodeOpt.value
+                : undefined
+            const tagId = edge.data.tagId
+            const isBus =
+              tagId === "EventBus" ||
+              tagId.endsWith("EventBus") ||
+              tagId.endsWith(".EventBus") ||
+              (targetService !== undefined &&
+                (targetService.name === "EventBus" || targetService.name.endsWith("EventBus")))
+
+            if (isBus) {
+              violations.push({
+                rule: "aggregate-direct-bus-publish",
+                message: `Aggregate function '${fnNode.qualname}' (${fnNode.spanName}) cannot require or publish directly to '${edge.data.tagId}' — aggregates must persist events to es_outbox inside the SQLite transaction and let Outbox.drain publish asynchronously.`,
+                path: [fnNode.qualname, edge.data.tagId],
+              })
+            }
+          } else if (edge.data._tag === "TracedCall") {
+            const targetNodeOpt = Graph.getNode(harnessGraph.graph, edge.target)
+            const targetFn =
+              Option.isSome(targetNodeOpt) && targetNodeOpt.value._tag === "EffectFn"
+                ? targetNodeOpt.value
+                : undefined
+            const calleeSpan = targetFn?.spanName ?? ""
+            const calleeQual = targetFn?.qualname ?? ""
+            const isForbiddenCall =
+              calleeSpan === "Outbox.drain" ||
+              calleeSpan === "EventBus.publish" ||
+              calleeQual.includes("Outbox.drain") ||
+              calleeQual.includes("EventBus.publish")
+            if (isForbiddenCall) {
+              const targetIdent = calleeSpan.length > 0 ? calleeSpan : "EventBus.publish"
+              violations.push({
+                rule: "aggregate-direct-bus-publish",
+                message: `Aggregate function '${fnNode.qualname}' (${fnNode.spanName}) cannot require or publish directly to '${targetIdent}' — aggregates must persist events to es_outbox inside the SQLite transaction and let Outbox.drain publish asynchronously.`,
+                path: [fnNode.qualname, targetIdent],
+              })
+            }
+          }
         }
       }
     }

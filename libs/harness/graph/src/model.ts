@@ -232,6 +232,7 @@ export type ViolationRule =
   | "unbranded-contract-schema"
   | "unbranded-primitive-boundary"
   | "node-sqlite-in-infra"
+  | "aggregate-direct-bus-publish"
 
 export interface BranchingViolation {
   readonly rule:

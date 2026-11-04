@@ -1,0 +1,22 @@
+[
+  {
+    "eventType": "CartCreated",
+    "version": 1,
+    "jsonSchema": "{\"definitions\":{},\"dialect\":\"draft-2020-12\",\"schema\":{\"additionalProperties\":false,\"properties\":{\"_tag\":{\"enum\":[\"CartCreated\"],\"type\":\"string\"},\"cartId\":{\"type\":\"string\"},\"version\":{\"enum\":[1],\"type\":\"number\"}},\"required\":[\"_tag\",\"cartId\",\"version\"],\"type\":\"object\"}}"
+  },
+  {
+    "eventType": "ItemAdded",
+    "version": 1,
+    "jsonSchema": "{\"definitions\":{},\"dialect\":\"draft-2020-12\",\"schema\":{\"additionalProperties\":false,\"properties\":{\"_tag\":{\"enum\":[\"ItemAdded\"],\"type\":\"string\"},\"cartId\":{\"type\":\"string\"},\"itemId\":{\"type\":\"string\"},\"quantity\":{\"exclusiveMinimum\":0,\"type\":\"integer\"},\"version\":{\"enum\":[1],\"type\":\"number\"}},\"required\":[\"_tag\",\"cartId\",\"itemId\",\"quantity\",\"version\"],\"type\":\"object\"}}"
+  },
+  {
+    "eventType": "CartCheckedOut",
+    "version": 1,
+    "jsonSchema": "{\"definitions\":{},\"dialect\":\"draft-2020-12\",\"schema\":{\"additionalProperties\":false,\"properties\":{\"_tag\":{\"enum\":[\"CartCheckedOut\"],\"type\":\"string\"},\"cartId\":{\"type\":\"string\"},\"orderId\":{\"type\":\"string\"},\"version\":{\"enum\":[1],\"type\":\"number\"}},\"required\":[\"_tag\",\"cartId\",\"orderId\",\"version\"],\"type\":\"object\"}}"
+  },
+  {
+    "eventType": "CartCheckedOut",
+    "version": 2,
+    "jsonSchema": "{\"definitions\":{},\"dialect\":\"draft-2020-12\",\"schema\":{\"additionalProperties\":false,\"properties\":{\"_tag\":{\"enum\":[\"CartCheckedOut\"],\"type\":\"string\"},\"cartId\":{\"type\":\"string\"},\"channel\":{\"minLength\":1,\"type\":\"string\"},\"orderId\":{\"type\":\"string\"},\"version\":{\"enum\":[2],\"type\":\"number\"}},\"required\":[\"_tag\",\"cartId\",\"orderId\",\"channel\",\"version\"],\"type\":\"object\"}}"
+  }
+]

@@ -381,6 +381,13 @@ const collectUnbrandedObjectProperties = (
     ) {
       return
     }
+    if (
+      target.getProperty("ast") !== undefined &&
+      target.getProperty("Type") !== undefined &&
+      target.getProperty("Encoded") !== undefined
+    ) {
+      return
+    }
     for (const prop of target.getProperties()) {
       const propName = prop.getName()
       if (propName === "_tag" || propName === "~effect/Brand" || propName.startsWith("~")) {
@@ -516,6 +523,7 @@ export const extractTypeAwareGraphFromSource = (
     readonly line: number
   }
   const taggedSchemasByTag = new Map<string, TaggedSchemaInfo>()
+  const taggedSchemasByName = new Map<string, TaggedSchemaInfo>()
   const unionSchemaTagsByName = new Map<string, ReadonlyArray<string>>()
 
   const resolveSchemasForParameter = (
@@ -531,7 +539,8 @@ export const extractTypeAwareGraphFromSource = (
         rawTokens.add(tok)
       }
     }
-    const expandedTags = new Set<string>()
+    const resolvedSchemas: Array<TaggedSchemaInfo> = []
+    const seenSchemas = new Set<TaggedSchemaInfo>()
     const queue = [...rawTokens]
     const visited = new Set<string>()
     while (queue.length > 0) {
@@ -544,18 +553,21 @@ export const extractTypeAwareGraphFromSource = (
           queue.push(member)
         }
       }
-      if (taggedSchemasByTag.has(curr)) {
-        expandedTags.add(curr)
+      const schemaByName = taggedSchemasByName.get(curr)
+      if (schemaByName) {
+        if (!seenSchemas.has(schemaByName)) {
+          seenSchemas.add(schemaByName)
+          resolvedSchemas.push(schemaByName)
+        }
+      } else {
+        const schemaByTag = taggedSchemasByTag.get(curr)
+        if (schemaByTag && !seenSchemas.has(schemaByTag)) {
+          seenSchemas.add(schemaByTag)
+          resolvedSchemas.push(schemaByTag)
+        }
       }
     }
-    const result: Array<TaggedSchemaInfo> = []
-    for (const tag of expandedTags) {
-      const schema = taggedSchemasByTag.get(tag)
-      if (schema) {
-        result.push(schema)
-      }
-    }
-    return result
+    return resolvedSchemas
   }
 
   // 0. Zero-tolerance AST type safety check
@@ -763,14 +775,16 @@ export const extractTypeAwareGraphFromSource = (
               .filter(Node.isPropertyAssignment)
               .map((p) => p.getName())
               .filter((n) => n !== "_tag" && n !== "version")
-            taggedSchemasByTag.set(tag, {
+            const schemaInfo: TaggedSchemaInfo = {
               tag,
               properties: props,
               file: relPath,
               line: c.getStartLineNumber(),
-            })
+            }
+            taggedSchemasByTag.set(tag, schemaInfo)
             const clsName = cls.getName()
             if (clsName) {
+              taggedSchemasByName.set(clsName, schemaInfo)
               unionSchemaTagsByName.set(clsName, [tag])
             }
             break
@@ -795,14 +809,16 @@ export const extractTypeAwareGraphFromSource = (
             .filter(Node.isPropertyAssignment)
             .map((p) => p.getName())
             .filter((n) => n !== "_tag" && n !== "version")
-          taggedSchemasByTag.set(tag, {
+          const schemaInfo: TaggedSchemaInfo = {
             tag,
             properties: props,
             file: relPath,
             line: callExpr.getStartLineNumber(),
-          })
+          }
+          taggedSchemasByTag.set(tag, schemaInfo)
           const parentVar = callExpr.getFirstAncestorByKind(SyntaxKind.VariableDeclaration)
           if (parentVar) {
+            taggedSchemasByName.set(parentVar.getName(), schemaInfo)
             unionSchemaTagsByName.set(parentVar.getName(), [tag])
           }
         }
@@ -2828,6 +2844,7 @@ export const extractTypeAwareGraphFromSource = (
         }
 
         const eventTagSet = new Set<string>()
+        const eventSchemasByTag = new Map<string, TaggedSchemaInfo>()
         const eventTypeText = eventParam ? eventParam.getType().getText() : ""
         if (eventParam) {
           const eventType = eventParam.getType()
@@ -2844,6 +2861,7 @@ export const extractTypeAwareGraphFromSource = (
           }
           for (const evSchema of resolveSchemasForParameter(eventParam)) {
             eventTagSet.add(evSchema.tag)
+            eventSchemasByTag.set(evSchema.tag, evSchema)
           }
         }
 
@@ -2916,7 +2934,7 @@ export const extractTypeAwareGraphFromSource = (
             for (const binding of param.getDescendantsOfKind(SyntaxKind.BindingElement)) {
               const name = binding.getName()
               for (const tag of matchedTagsInWith) {
-                const schema = taggedSchemasByTag.get(tag)
+                const schema = eventSchemasByTag.get(tag) ?? taggedSchemasByTag.get(tag)
                 if (schema && schema.properties.includes(name)) {
                   usedPropsPerTag.get(tag)!.add(name)
                 }
@@ -2930,7 +2948,7 @@ export const extractTypeAwareGraphFromSource = (
           )) {
             const propName = propAccess.getName()
             for (const tag of matchedTagsInWith) {
-              const schema = taggedSchemasByTag.get(tag)
+              const schema = eventSchemasByTag.get(tag) ?? taggedSchemasByTag.get(tag)
               if (schema && schema.properties.includes(propName)) {
                 usedPropsPerTag.get(tag)!.add(propName)
               }
@@ -2945,7 +2963,7 @@ export const extractTypeAwareGraphFromSource = (
             }
             const identText = ident.getText()
             for (const tag of matchedTagsInWith) {
-              const schema = taggedSchemasByTag.get(tag)
+              const schema = eventSchemasByTag.get(tag) ?? taggedSchemasByTag.get(tag)
               if (schema && schema.properties.includes(identText)) {
                 usedPropsPerTag.get(tag)!.add(identText)
               }
@@ -2958,7 +2976,7 @@ export const extractTypeAwareGraphFromSource = (
           if (stateTagSet.has(tag) && !eventTagSet.has(tag)) continue
           if (eventParam && eventTagSet.size > 0 && !isEventVariant(tag)) continue
 
-          const schema = taggedSchemasByTag.get(tag)
+          const schema = eventSchemasByTag.get(tag) ?? taggedSchemasByTag.get(tag)
           if (!schema || schema.properties.length === 0) continue
 
           const usedProps = usedPropsPerTag.get(tag) ?? new Set()

@@ -38,12 +38,24 @@ export const DETERMINISTIC_ROUTE_RULES: ReadonlyArray<DeterministicRouteRule> = 
   {
     id: "schema",
     pattern:
-      /\b(?:brand(?:ed)?(?:\s+type)?|schema\.brand|frombrand|nominal\s+type|primitive\s+obsession)\b/i,
+      /\b(?:brand(?:ed)?(?:\s+type)?|schema\.brand|frombrand|nominal\s+type|primitive\s+obsession|tojsonschemadocument)\b/i,
     block: "schema",
   },
   {
+    id: "httpapi",
+    pattern:
+      /\b(?:httpapi|httpapiendpoint|httpapigroup|httpapibuilder|aggregateapispec|aggregate[-\s]+api[-\s]+spec)\b/i,
+    block: "httpapi",
+  },
+  {
+    id: "testing",
+    pattern: /\b(?:testclock|event[-\s]+snapshots?|snapshot[-\s]+testing|snapshot[-\s]+test)\b/i,
+    block: "testing",
+  },
+  {
     id: "event-sourcing",
-    pattern: /\b(?:event[-\s]+sourcing|decider|evolve|event[-\s]+store|aggregate(?:\s+root)?)\b/i,
+    pattern:
+      /\b(?:event[-\s]+sourcing|decider|evolve|event[-\s]+store|aggregate(?:\s+root)?|upcasters?|event[-\s]+upcasters?)\b/i,
     block: "event-sourcing",
   },
   {
@@ -61,11 +73,6 @@ export const DETERMINISTIC_ROUTE_RULES: ReadonlyArray<DeterministicRouteRule> = 
     id: "durable-object-state",
     pattern: /\b(?:durable[-\s]+object|sqlitedo|runsynctransaction)\b/i,
     block: "durable-object-state",
-  },
-  {
-    id: "httpapi",
-    pattern: /\b(?:httpapi|httpapiendpoint|httpapigroup|httpapibuilder)\b/i,
-    block: "httpapi",
   },
   {
     id: "rpc",

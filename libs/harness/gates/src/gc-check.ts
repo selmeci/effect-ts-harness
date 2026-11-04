@@ -114,6 +114,7 @@ const IGNORED_SERVICES = new Set([
   "SpanRecorder",
   "@harness/ingest/SpanRecorder",
   "SampleApiClient",
+  "CartEsAtomClient",
   "ActiveCounterStore",
 ])
 

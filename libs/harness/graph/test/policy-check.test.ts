@@ -1955,4 +1955,117 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       ),
     ).toBe(true)
   })
+
+  it("fails with aggregate-direct-bus-publish when an Aggregate function has a RequiresService edge to EventBus", () => {
+    const graph = buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/sample/infra/src/aggregate.ts#handleCommand",
+          spanName: "Aggregate.handleCommand",
+          file: "libs/sample/infra/src/aggregate.ts",
+          line: 10,
+          packageTag: "infra",
+          successType: "void",
+          isStub: false,
+        },
+      ],
+      services: [
+        {
+          tagId: "EventBus",
+          name: "EventBus",
+          packageTag: "service",
+          file: "libs/sample/service/src/index.ts",
+        },
+      ],
+      layers: [],
+      errors: [],
+      tests: [],
+      patternDocs: [],
+      requiresService: [
+        {
+          fnQualname: "libs/sample/infra/src/aggregate.ts#handleCommand",
+          tagId: "EventBus",
+        },
+      ],
+      failsWith: [],
+      providesService: [],
+      layerRequires: [],
+      tracedCalls: [],
+      exercisesSpans: [],
+    })
+
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(false)
+    const violation = result.violations.find((v) => v.rule === "aggregate-direct-bus-publish")
+    expect(violation).toBeDefined()
+    expect(violation?.message).toBe(
+      "Aggregate function 'libs/sample/infra/src/aggregate.ts#handleCommand' (Aggregate.handleCommand) cannot require or publish directly to 'EventBus' — aggregates must persist events to es_outbox inside the SQLite transaction and let Outbox.drain publish asynchronously.",
+    )
+    expect(violation?.path).toEqual([
+      "libs/sample/infra/src/aggregate.ts#handleCommand",
+      "EventBus",
+    ])
+  })
+
+  it("passes when Aggregate.handleCommand requires only SqlClient and Outbox.drain requires EventBus", () => {
+    const graph = buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/sample/infra/src/aggregate.ts#handleCommand",
+          spanName: "Aggregate.handleCommand",
+          file: "libs/sample/infra/src/aggregate.ts",
+          line: 10,
+          packageTag: "infra",
+          successType: "void",
+          isStub: false,
+        },
+        {
+          qualname: "libs/sample/infra/src/outbox.ts#drain",
+          spanName: "Outbox.drain",
+          file: "libs/sample/infra/src/outbox.ts",
+          line: 20,
+          packageTag: "infra",
+          successType: "void",
+          isStub: false,
+        },
+      ],
+      services: [
+        {
+          tagId: "SqlClient",
+          name: "SqlClient",
+          packageTag: "infra",
+          file: "libs/sample/infra/src/sql.ts",
+        },
+        {
+          tagId: "EventBus",
+          name: "EventBus",
+          packageTag: "service",
+          file: "libs/sample/service/src/index.ts",
+        },
+      ],
+      layers: [],
+      errors: [],
+      tests: [],
+      patternDocs: [],
+      requiresService: [
+        {
+          fnQualname: "libs/sample/infra/src/aggregate.ts#handleCommand",
+          tagId: "SqlClient",
+        },
+        {
+          fnQualname: "libs/sample/infra/src/outbox.ts#drain",
+          tagId: "EventBus",
+        },
+      ],
+      failsWith: [],
+      providesService: [],
+      layerRequires: [],
+      tracedCalls: [],
+      exercisesSpans: [],
+    })
+
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(true)
+    expect(result.violations).toHaveLength(0)
+  })
 })

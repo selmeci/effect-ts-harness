@@ -58,6 +58,71 @@ export type BatchLimit = typeof BatchLimit.Type
 export const AggregateCount = Schema.Natural.pipe(Schema.brand("AggregateCount"))
 export type AggregateCount = typeof AggregateCount.Type
 
+export const EventSchemaVersion = Schema.Int.check(Schema.isGreaterThan(0)).pipe(
+  Schema.brand("EventSchemaVersion"),
+)
+export type EventSchemaVersion = typeof EventSchemaVersion.Type
+
+export const JsonSchemaText = Schema.NonEmptyString.pipe(Schema.brand("JsonSchemaText"))
+export type JsonSchemaText = typeof JsonSchemaText.Type
+
+export class EventVersionSnapshotEntry extends Schema.Class<EventVersionSnapshotEntry>(
+  "EventVersionSnapshotEntry",
+)({
+  eventType: EventType,
+  version: EventSchemaVersion,
+  jsonSchema: JsonSchemaText,
+}) {}
+
+export class EventUpcasterLink extends Schema.Class<EventUpcasterLink>("EventUpcasterLink")(
+  Schema.Struct({
+    eventType: EventType,
+    fromVersion: EventSchemaVersion,
+    toVersion: EventSchemaVersion,
+  }).pipe(
+    Schema.check(
+      Schema.makeFilter((u) => u.toVersion === u.fromVersion + 1, {
+        message: "EventUpcasterLink requires contiguous toVersion === fromVersion + 1",
+      }),
+    ),
+  ),
+) {}
+
+export class EventSchemaEvolutionInput extends Schema.Class<EventSchemaEvolutionInput>(
+  "EventSchemaEvolutionInput",
+)({
+  committedSnapshots: Schema.Array(EventVersionSnapshotEntry),
+  currentSnapshots: Schema.Array(EventVersionSnapshotEntry),
+  registeredUpcasters: Schema.Array(EventUpcasterLink),
+}) {}
+
+export const SchemaEvolutionValid = Schema.TaggedStruct("SchemaEvolutionValid", {
+  checkedEventCount: AggregateCount,
+})
+export type SchemaEvolutionValid = typeof SchemaEvolutionValid.Type
+
+export const FrozenEventVersionDrifted = Schema.TaggedStruct("FrozenEventVersionDrifted", {
+  eventType: EventType,
+  version: EventSchemaVersion,
+  reason: ErrorMessage,
+})
+export type FrozenEventVersionDrifted = typeof FrozenEventVersionDrifted.Type
+
+export const UnmappedEventVersionJump = Schema.TaggedStruct("UnmappedEventVersionJump", {
+  eventType: EventType,
+  fromVersion: EventSchemaVersion,
+  toVersion: EventSchemaVersion,
+  reason: ErrorMessage,
+})
+export type UnmappedEventVersionJump = typeof UnmappedEventVersionJump.Type
+
+export const EventSchemaEvolutionDecision = Schema.Union([
+  SchemaEvolutionValid,
+  FrozenEventVersionDrifted,
+  UnmappedEventVersionJump,
+])
+export type EventSchemaEvolutionDecision = typeof EventSchemaEvolutionDecision.Type
+
 // Canonical metadata accompanying every persisted and dispatched event
 export class EventMetadata extends Schema.Class<EventMetadata>("EventMetadata")({
   aggregateId: AggregateId,
@@ -203,6 +268,19 @@ export class AggregateCommandResult extends Schema.Class<AggregateCommandResult>
   ),
 ) {}
 
+export const makeHandledCommandResponseSchema = <
+  StateSchema extends Schema.Top,
+  EventSchema extends Schema.Top,
+>(
+  stateSchema: StateSchema,
+  eventSchema: EventSchema,
+) =>
+  Schema.Struct({
+    state: stateSchema,
+    events: Schema.Array(eventSchema),
+    result: AggregateCommandResult,
+  })
+
 // Typed domain and persistence errors
 export class ConcurrencyConflictError extends Schema.TaggedError<ConcurrencyConflictError>()(
   "ConcurrencyConflictError",
@@ -284,5 +362,24 @@ export class CrossProjectionNotFoundError extends Schema.TaggedError<CrossProjec
   "CrossProjectionNotFoundError",
   {
     processorId: ProcessorId,
+  },
+) {}
+
+export class FrozenEventSchemaViolationError extends Schema.TaggedError<FrozenEventSchemaViolationError>()(
+  "FrozenEventSchemaViolationError",
+  {
+    eventType: EventType,
+    version: EventSchemaVersion,
+    reason: ErrorMessage,
+  },
+) {}
+
+export class MissingEventUpcasterError extends Schema.TaggedError<MissingEventUpcasterError>()(
+  "MissingEventUpcasterError",
+  {
+    eventType: EventType,
+    fromVersion: EventSchemaVersion,
+    toVersion: EventSchemaVersion,
+    reason: ErrorMessage,
   },
 ) {}

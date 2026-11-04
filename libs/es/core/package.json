@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit && effect-tsgo diagnostics --strict --project tsconfig.json",
     "lint": "oxlint --deny-warnings .",
     "test": "vitest run",
-    "verify": "node -e \"\""
+    "verify": "node --import ../../../tools/node-ts-resolver.mjs ./scripts/check-event-schemas.mjs"
   },
   "dependencies": {
     "@harness/es-contract": "workspace:*",

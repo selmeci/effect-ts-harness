@@ -10,6 +10,12 @@ import {
   isEventStreamUniqueConflict,
   loadAggregate,
 } from "./aggregate.js"
+import {
+  executeAggregateCommandAndSync,
+  queryAggregateReadModel,
+  queryCrossAggregateReadModel,
+  seedAggregateStream,
+} from "./http.js"
 import { DEFAULT_OUTBOX_BATCH_LIMIT, drainAggregateOutbox } from "./outbox.js"
 import {
   checkProjectorCatchUp,
@@ -27,6 +33,7 @@ export {
   checkProjectorCatchUp,
   DEFAULT_OUTBOX_BATCH_LIMIT,
   drainAggregateOutbox,
+  executeAggregateCommandAndSync,
   handleAggregateCommand,
   ingestPublishedEvent,
   initializeAggregateTables,
@@ -35,7 +42,10 @@ export {
   loadAggregate,
   PROJECTOR_MIGRATIONS_TABLE,
   projectorCoreMigrations,
+  queryAggregateReadModel,
+  queryCrossAggregateReadModel,
   rebuildProjectorFromArchive,
+  seedAggregateStream,
 }
 
 const _makeSqliteClientLayer = (

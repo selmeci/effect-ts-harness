@@ -1,7 +1,7 @@
 import { Cause, Effect, Schema } from "effect"
 import { describe, expect, it } from "@effect/vitest"
 import { match } from "ts-pattern"
-import { makeDeciderTestHarness } from "../src/testing.js"
+import { makeAggregateApiTestHarness, makeDeciderTestHarness } from "../src/testing.js"
 
 class FakeDomainError extends Schema.TaggedError<FakeDomainError>()("FakeDomainError", {
   reason: Schema.String,
@@ -202,6 +202,182 @@ describe("BDD Runner Meta-Tests (Assertion Engine Integrity)", () => {
         })
         .with({ _tag: "Success" }, () => {
           expect.unreachable("Expected runner to fail on mismatched error payload")
+        })
+        .exhaustive()
+    }),
+  )
+})
+
+describe("AggregateApiTestHarness Meta-Tests (Assertion Engine Integrity)", () => {
+  type TestEvent = { readonly _tag: "TestEvent"; readonly value: number }
+  type TestResponse = { readonly status: number; readonly body: string }
+
+  const makeConfig = (appendedEvents: ReadonlyArray<TestEvent> = []) => {
+    let seeded: ReadonlyArray<TestEvent> = []
+    return {
+      seedEvents: (history: ReadonlyArray<TestEvent>) =>
+        Effect.sync(() => {
+          seeded = history
+        }),
+      readAppendedEvents: Effect.sync(() => appendedEvents),
+      getSeeded: () => seeded,
+    }
+  }
+
+  const succeedingRequest: Effect.Effect<TestResponse, FakeDomainError, never> = Effect.succeed({
+    status: 200,
+    body: "ok",
+  })
+
+  const failingRequest: Effect.Effect<TestResponse, FakeDomainError, never> = Effect.fail(
+    new FakeDomainError({ reason: "api boom" }),
+  )
+
+  it.effect("runner succeeds on .thenStatusAndEvents() when response and events match", () => {
+    const config = makeConfig([{ _tag: "TestEvent", value: 10 }])
+    const harness = makeAggregateApiTestHarness<TestEvent, TestResponse, FakeDomainError>(config)
+    return harness
+      .given([])
+      .when(succeedingRequest)
+      .thenStatusAndEvents({ status: 200, body: "ok" }, [{ _tag: "TestEvent", value: 10 }])
+  })
+
+  it.effect("runner dies on .thenStatusAndEvents() on response mismatch", () =>
+    Effect.gen(function* () {
+      const config = makeConfig([{ _tag: "TestEvent", value: 10 }])
+      const harness = makeAggregateApiTestHarness<TestEvent, TestResponse, FakeDomainError>(config)
+      const exit = yield* Effect.exit(
+        harness
+          .given([])
+          .when(succeedingRequest)
+          .thenStatusAndEvents({ status: 201, body: "different" }, [
+            { _tag: "TestEvent", value: 10 },
+          ]),
+      )
+      match(exit)
+        .with({ _tag: "Failure" }, (f) => {
+          expect(Cause.hasDies(f.cause)).toBe(true)
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("Expected runner to die on response mismatch")
+        })
+        .exhaustive()
+    }),
+  )
+
+  it.effect("runner dies on .thenStatusAndEvents() on event length mismatch", () =>
+    Effect.gen(function* () {
+      const config = makeConfig([{ _tag: "TestEvent", value: 10 }])
+      const harness = makeAggregateApiTestHarness<TestEvent, TestResponse, FakeDomainError>(config)
+      const exit = yield* Effect.exit(
+        harness
+          .given([])
+          .when(succeedingRequest)
+          .thenStatusAndEvents({ status: 200, body: "ok" }, [
+            { _tag: "TestEvent", value: 10 },
+            { _tag: "TestEvent", value: 20 },
+          ]),
+      )
+      match(exit)
+        .with({ _tag: "Failure" }, (f) => {
+          expect(Cause.hasDies(f.cause)).toBe(true)
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("Expected runner to die on event count mismatch")
+        })
+        .exhaustive()
+    }),
+  )
+
+  it.effect("runner dies on .thenStatusAndEvents() on event value mismatch", () =>
+    Effect.gen(function* () {
+      const config = makeConfig([{ _tag: "TestEvent", value: 10 }])
+      const harness = makeAggregateApiTestHarness<TestEvent, TestResponse, FakeDomainError>(config)
+      const exit = yield* Effect.exit(
+        harness
+          .given([])
+          .when(succeedingRequest)
+          .thenStatusAndEvents({ status: 200, body: "ok" }, [{ _tag: "TestEvent", value: 999 }]),
+      )
+      match(exit)
+        .with({ _tag: "Failure" }, (f) => {
+          expect(Cause.hasDies(f.cause)).toBe(true)
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("Expected runner to die on event value mismatch")
+        })
+        .exhaustive()
+    }),
+  )
+
+  it.effect("runner dies on .thenStatusAndEvents() when executeRequest unexpectedly fails", () =>
+    Effect.gen(function* () {
+      const config = makeConfig([])
+      const harness = makeAggregateApiTestHarness<TestEvent, TestResponse, FakeDomainError>(config)
+      const exit = yield* Effect.exit(
+        harness.given([]).when(failingRequest).thenStatusAndEvents({ status: 200, body: "ok" }, []),
+      )
+      match(exit)
+        .with({ _tag: "Failure" }, (f) => {
+          expect(Cause.hasDies(f.cause)).toBe(true)
+          expect(Cause.pretty(f.cause)).toContain(
+            "Expected AggregateApiSpec success with events but failed",
+          )
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("Expected runner to die on unexpected failure")
+        })
+        .exhaustive()
+    }),
+  )
+
+  it.effect("runner succeeds on .thenFails() when request fails with expected typed error", () => {
+    const config = makeConfig([])
+    const harness = makeAggregateApiTestHarness<TestEvent, TestResponse, FakeDomainError>(config)
+    return harness
+      .given([])
+      .when(failingRequest)
+      .thenFails(new FakeDomainError({ reason: "api boom" }))
+  })
+
+  it.effect("runner dies on .thenFails() when request unexpectedly succeeds", () =>
+    Effect.gen(function* () {
+      const config = makeConfig([])
+      const harness = makeAggregateApiTestHarness<TestEvent, TestResponse, FakeDomainError>(config)
+      const exit = yield* Effect.exit(
+        harness
+          .given([])
+          .when(succeedingRequest)
+          .thenFails(new FakeDomainError({ reason: "api boom" })),
+      )
+      match(exit)
+        .with({ _tag: "Failure" }, (f) => {
+          expect(Cause.hasDies(f.cause)).toBe(true)
+          expect(Cause.pretty(f.cause)).toContain("Expected AggregateApiSpec failure but succeeded")
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("Expected runner to die when request unexpectedly succeeds")
+        })
+        .exhaustive()
+    }),
+  )
+
+  it.effect("runner dies on .thenFails() when request fails with different typed error", () =>
+    Effect.gen(function* () {
+      const config = makeConfig([])
+      const harness = makeAggregateApiTestHarness<TestEvent, TestResponse, FakeDomainError>(config)
+      const exit = yield* Effect.exit(
+        harness
+          .given([])
+          .when(failingRequest)
+          .thenFails(new FakeDomainError({ reason: "different reason" })),
+      )
+      match(exit)
+        .with({ _tag: "Failure" }, (f) => {
+          expect(Cause.hasDies(f.cause)).toBe(true)
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("Expected runner to die on mismatched error payload")
         })
         .exhaustive()
     }),
