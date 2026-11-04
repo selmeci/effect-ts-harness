@@ -678,6 +678,29 @@ describe("@harness/es-contract", () => {
           newCheckpointVersion: StreamVersion.make(3),
         }),
       ).toThrow()
+
+      // ApplyContiguousEvents rejects non-contiguous versionsToApply [1, 3] or starting at 0 [0, 1]
+      expect(() =>
+        Schema.decodeSync(ProjectionSequenceDecision)({
+          _tag: "ApplyContiguousEvents",
+          versionsToApply: [1, 3],
+          newCheckpointVersion: 3,
+        }),
+      ).toThrow()
+      expect(() =>
+        ProjectionSequenceDecision.make({
+          _tag: "ApplyContiguousEvents",
+          versionsToApply: [StreamVersion.make(1), StreamVersion.make(3)],
+          newCheckpointVersion: StreamVersion.make(3),
+        }),
+      ).toThrow()
+      expect(() =>
+        ProjectionSequenceDecision.make({
+          _tag: "ApplyContiguousEvents",
+          versionsToApply: [StreamVersion.make(0), StreamVersion.make(1)],
+          newCheckpointVersion: StreamVersion.make(1),
+        }),
+      ).toThrow()
     })
   })
 })

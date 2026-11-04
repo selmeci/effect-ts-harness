@@ -609,8 +609,6 @@ export const rebuildProjectorFromArchive = Effect.fn("Projector.rebuild")(functi
         })
       }
 
-      yield* rebuildCrossProjection(projection, archivedEvents)
-
       yield* sql`
         DELETE FROM es_projection_gaps
         WHERE processor_id = ${projection.processorId}
@@ -621,6 +619,8 @@ export const rebuildProjectorFromArchive = Effect.fn("Projector.rebuild")(functi
         WHERE processor_id = ${projection.processorId}
           AND aggregate_name = ${projection.aggregateName}
       `
+
+      yield* rebuildCrossProjection(projection, archivedEvents)
 
       for (const [aggId, info] of lastVersionByAgg.entries()) {
         yield* sql`

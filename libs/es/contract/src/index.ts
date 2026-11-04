@@ -154,10 +154,13 @@ export const ProjectionSequenceDecision = Schema.Union([
       Schema.makeFilter(
         (d) =>
           d.newCheckpointVersion > 0 &&
-          d.versionsToApply[d.versionsToApply.length - 1] === d.newCheckpointVersion,
+          d.versionsToApply[d.versionsToApply.length - 1] === d.newCheckpointVersion &&
+          d.versionsToApply.every((v, idx) =>
+            idx === 0 ? v > 0 : v === d.versionsToApply[idx - 1]! + 1,
+          ),
         {
           message:
-            "ApplyContiguousEvents requires newCheckpointVersion > 0 matching the last element of versionsToApply",
+            "ApplyContiguousEvents requires positive contiguous versionsToApply (step +1) matching newCheckpointVersion",
         },
       ),
     ),

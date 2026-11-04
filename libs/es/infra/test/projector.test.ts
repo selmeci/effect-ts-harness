@@ -35,12 +35,14 @@ import {
 } from "../src/index.js"
 import { SqlClientMemoryLayer } from "../src/memory.js"
 import {
+  applyOpenCarts,
   cartAggregateConfig,
   cartAggregateWithOutboxConfig,
   initCartViewTable,
   initOpenCartsProjectionTable,
   OpenCartsReport,
   openCartsProjection,
+  purgeOpenCarts,
   queryOpenCarts,
 } from "./fixtures/cart-sqlite.js"
 
@@ -1067,15 +1069,85 @@ describe("Cross-Aggregate Outbox Drain, Projector Checkpoints, Gap Parking, and 
           match(catchUpErr)
             .with(P.instanceOf(ProjectionArchiveCorruptionError), (err) => {
               expect(err.aggregateName).toBe("Cart")
+              expect(err.reason).toContain("Invalid checkpoint last_stream_version")
             })
             .otherwise(() => {
               expect.unreachable("expected ProjectionArchiveCorruptionError for catch-up check")
+            })
+
+          // 5. Corrupt archive stream_version = 1.5 with clean checkpoints -> checkProjectorCatchUp fails on archive head
+          yield* sql`DELETE FROM es_projection_checkpoints`
+          yield* sql`
+            INSERT INTO es_event_archive (
+              aggregate_name, aggregate_id, stream_version, command_id, event_type, payload, metadata, archived_at
+            ) VALUES (
+              'Cart', 'cart-frac', 1.5, 'cmd-1', 'CartCreated',
+              '{"_tag":"CartCreated","cartId":"cart-frac","version":1}',
+              '{"aggregateId":"cart-frac","streamVersion":1,"commandId":"cmd-1","timestamp":1700000000000}',
+              1700000000000
+            )
+          `
+          const catchUpHeadErr = yield* Effect.flip(
+            checkProjectorCatchUp(ProcessorId.make("open-carts-v1"), AggregateName.make("Cart")),
+          )
+          match(catchUpHeadErr)
+            .with(P.instanceOf(ProjectionArchiveCorruptionError), (err) => {
+              expect(err.aggregateName).toBe("Cart")
+              expect(err.reason).toContain("Invalid archive head max_version")
+            })
+            .otherwise(() => {
+              expect.unreachable(
+                "expected ProjectionArchiveCorruptionError for fractional archive head in catch-up",
+              )
+            })
+
+          // 6. Corrupt gap stream_version = 1.5 with valid archive and checkpoint -> checkProjectorCatchUp fails on gap row
+          yield* sql`DELETE FROM es_event_archive`
+          yield* sql`
+            INSERT INTO es_event_archive (
+              aggregate_name, aggregate_id, stream_version, command_id, event_type, payload, metadata, archived_at
+            ) VALUES (
+              'Cart', 'cart-frac', 1, 'cmd-1', 'CartCreated',
+              '{"_tag":"CartCreated","cartId":"cart-frac","version":1}',
+              '{"aggregateId":"cart-frac","streamVersion":1,"commandId":"cmd-1","timestamp":1700000000000}',
+              1700000000000
+            )
+          `
+          yield* sql`
+            INSERT INTO es_projection_checkpoints (
+              processor_id, aggregate_name, aggregate_id, last_stream_version, updated_at
+            ) VALUES (
+              'open-carts-v1', 'Cart', 'cart-frac', 1, 1700000000000
+            )
+          `
+          yield* sql`
+            INSERT INTO es_projection_gaps (
+              processor_id, aggregate_name, aggregate_id, stream_version, event_type, payload, metadata, parked_at
+            ) VALUES (
+              'open-carts-v1', 'Cart', 'cart-frac', 1.5, 'ItemAdded',
+              '{"_tag":"ItemAdded","cartId":"cart-frac","itemId":"apple","quantity":1,"version":1}',
+              '{"aggregateId":"cart-frac","streamVersion":2,"commandId":"cmd-2","timestamp":1700000000010}',
+              1700000000010
+            )
+          `
+          const catchUpGapErr = yield* Effect.flip(
+            checkProjectorCatchUp(ProcessorId.make("open-carts-v1"), AggregateName.make("Cart")),
+          )
+          match(catchUpGapErr)
+            .with(P.instanceOf(ProjectionArchiveCorruptionError), (err) => {
+              expect(err.aggregateName).toBe("Cart")
+              expect(err.reason).toContain("Invalid gap stream_version")
+            })
+            .otherwise(() => {
+              expect.unreachable(
+                "expected ProjectionArchiveCorruptionError for fractional gap version in catch-up",
+              )
             })
         }).pipe(Effect.provide(SqlClientMemoryLayer)),
     )
 
     it.effect(
-      "F-3.1: metadata identity mismatch in outbox row fails with EventStreamCorruptionError, publish called 0 times, row remains in outbox",
+      "F-3.1: metadata identity mismatch in outbox row (aggregateId or streamVersion) fails with EventStreamCorruptionError, publish called 0 times, row remains in outbox",
       () =>
         Effect.gen(function* () {
           yield* initializeAggregateTables()
@@ -1089,6 +1161,7 @@ describe("Cross-Aggregate Outbox Drain, Projector Checkpoints, Gap Parking, and 
               }),
           })
 
+          // 1. Mismatched metadata.aggregateId
           yield* sql`
             INSERT INTO es_outbox (
               aggregate_name, aggregate_id, stream_version, event_type, payload, metadata, created_at
@@ -1100,18 +1173,46 @@ describe("Cross-Aggregate Outbox Drain, Projector Checkpoints, Gap Parking, and 
             )
           `
 
-          const err = yield* Effect.flip(drainAggregateOutbox(bus))
-          match(err)
+          const errAggId = yield* Effect.flip(drainAggregateOutbox(bus))
+          match(errAggId)
             .with(P.instanceOf(EventStreamCorruptionError), (e) => {
               expect(e.aggregateName).toBe("Cart")
             })
             .otherwise(() => {
-              expect.unreachable("expected EventStreamCorruptionError")
+              expect.unreachable("expected EventStreamCorruptionError for aggregateId mismatch")
             })
 
           expect(publishCalls).toBe(0)
-          const remainingRows = yield* sql<{ id: number }>`SELECT id FROM es_outbox`
-          expect(remainingRows.length).toBe(1)
+          const remainingAfterAggId = yield* sql<{ id: number }>`SELECT id FROM es_outbox`
+          expect(remainingAfterAggId.length).toBe(1)
+
+          // 2. Mismatched metadata.streamVersion
+          yield* sql`DELETE FROM es_outbox`
+          yield* sql`
+            INSERT INTO es_outbox (
+              aggregate_name, aggregate_id, stream_version, event_type, payload, metadata, created_at
+            ) VALUES (
+              'Cart', 'cart-1', 1, 'CartCreated',
+              '{"_tag":"CartCreated","cartId":"cart-1","version":1}',
+              '{"aggregateId":"cart-1","streamVersion":2,"commandId":"cmd-1","timestamp":1700000000000}',
+              1700000000000
+            )
+          `
+
+          const errVer = yield* Effect.flip(drainAggregateOutbox(bus))
+          match(errVer)
+            .with(P.instanceOf(EventStreamCorruptionError), (e) => {
+              expect(e.aggregateName).toBe("Cart")
+              expect(e.expectedStreamVersion).toBe(1)
+              expect(e.actualStreamVersion).toBe(2)
+            })
+            .otherwise(() => {
+              expect.unreachable("expected EventStreamCorruptionError for streamVersion mismatch")
+            })
+
+          expect(publishCalls).toBe(0)
+          const remainingAfterVer = yield* sql<{ id: number }>`SELECT id FROM es_outbox`
+          expect(remainingAfterVer.length).toBe(1)
         }).pipe(Effect.provide(SqlClientMemoryLayer)),
     )
 
@@ -1168,72 +1269,84 @@ describe("Cross-Aggregate Outbox Drain, Projector Checkpoints, Gap Parking, and 
         }).pipe(Effect.provide(SqlClientMemoryLayer)),
     )
 
-    it.effect("F-7: drainAggregateOutbox respects batchLimit and aggregateName filter", () =>
-      Effect.gen(function* () {
-        yield* initializeAggregateTables()
-        const sql = yield* SqlClient
+    it.effect(
+      "F-7: drainAggregateOutbox respects batchLimit with and without aggregateName filter",
+      () =>
+        Effect.gen(function* () {
+          yield* initializeAggregateTables()
+          const sql = yield* SqlClient
 
-        yield* sql`
+          yield* sql`
             INSERT INTO es_outbox (
               id, aggregate_name, aggregate_id, stream_version, event_type, payload, metadata, created_at
             ) VALUES
               (1, 'Cart', 'c-1', 1, 'CartCreated', '{"_tag":"CartCreated"}', '{"aggregateId":"c-1","streamVersion":1,"commandId":"c1","timestamp":100}', 100),
               (2, 'Cart', 'c-2', 1, 'CartCreated', '{"_tag":"CartCreated"}', '{"aggregateId":"c-2","streamVersion":1,"commandId":"c2","timestamp":200}', 200),
               (3, 'Cart', 'c-3', 1, 'CartCreated', '{"_tag":"CartCreated"}', '{"aggregateId":"c-3","streamVersion":1,"commandId":"c3","timestamp":300}', 300),
-              (4, 'Order', 'o-1', 1, 'OrderPlaced', '{"_tag":"OrderPlaced"}', '{"aggregateId":"o-1","streamVersion":1,"commandId":"o1","timestamp":400}', 400)
+              (4, 'Order', 'o-1', 1, 'OrderPlaced', '{"_tag":"OrderPlaced"}', '{"aggregateId":"o-1","streamVersion":1,"commandId":"o1","timestamp":400}', 400),
+              (5, 'Order', 'o-2', 1, 'OrderPlaced', '{"_tag":"OrderPlaced"}', '{"aggregateId":"o-2","streamVersion":1,"commandId":"o2","timestamp":500}', 500),
+              (6, 'Order', 'o-3', 1, 'OrderPlaced', '{"_tag":"OrderPlaced"}', '{"aggregateId":"o-3","streamVersion":1,"commandId":"o3","timestamp":600}', 600)
           `
 
-        const publishedNames: Array<string> = []
-        const bus = EventBus.make({
-          publish: (env) =>
-            Effect.sync(() => {
-              publishedNames.push(env.aggregateName)
-            }),
-        })
-
-        const firstDrain = yield* drainAggregateOutbox(
-          bus,
-          BatchLimit.make(2),
-          AggregateName.make("Cart"),
-        )
-        match(firstDrain)
-          .with({ _tag: "OutboxDrained" }, (d) => {
-            expect(d.drainedCount).toBe(2)
+          const publishedIds: Array<string> = []
+          const bus = EventBus.make({
+            publish: (env) =>
+              Effect.sync(() => {
+                publishedIds.push(env.aggregateId)
+              }),
           })
-          .with({ _tag: "OutboxEmpty" }, () => {
-            expect.unreachable("expected OutboxDrained")
-          })
-          .exhaustive()
 
-        expect(publishedNames).toEqual(["Cart", "Cart"])
+          // 1. Filtered by aggregateName = "Cart" with batchLimit = 2
+          const firstDrain = yield* drainAggregateOutbox(
+            bus,
+            BatchLimit.make(2),
+            AggregateName.make("Cart"),
+          )
+          match(firstDrain)
+            .with({ _tag: "OutboxDrained" }, (d) => {
+              expect(d.drainedCount).toBe(2)
+            })
+            .with({ _tag: "OutboxEmpty" }, () => {
+              expect.unreachable("expected OutboxDrained")
+            })
+            .exhaustive()
 
-        const afterFirst = yield* sql<{ id: number; aggregate_name: string }>`
-            SELECT id, aggregate_name FROM es_outbox ORDER BY id ASC
+          expect(publishedIds).toEqual(["c-1", "c-2"])
+
+          const secondDrain = yield* drainAggregateOutbox(
+            bus,
+            BatchLimit.make(2),
+            AggregateName.make("Cart"),
+          )
+          match(secondDrain)
+            .with({ _tag: "OutboxDrained" }, (d) => {
+              expect(d.drainedCount).toBe(1)
+            })
+            .with({ _tag: "OutboxEmpty" }, () => {
+              expect.unreachable("expected OutboxDrained")
+            })
+            .exhaustive()
+
+          expect(publishedIds).toEqual(["c-1", "c-2", "c-3"])
+
+          // 2. Unfiltered (aggregateName omitted) with batchLimit = 2 over remaining 3 "Order" rows
+          const thirdDrain = yield* drainAggregateOutbox(bus, BatchLimit.make(2))
+          match(thirdDrain)
+            .with({ _tag: "OutboxDrained" }, (d) => {
+              expect(d.drainedCount).toBe(2)
+            })
+            .with({ _tag: "OutboxEmpty" }, () => {
+              expect.unreachable("expected OutboxDrained for unfiltered batchLimit")
+            })
+            .exhaustive()
+
+          expect(publishedIds).toEqual(["c-1", "c-2", "c-3", "o-1", "o-2"])
+
+          const afterThird = yield* sql<{ aggregate_id: string }>`
+            SELECT aggregate_id FROM es_outbox ORDER BY id ASC
           `
-        expect(afterFirst.length).toBe(2)
-        expect(afterFirst[0]?.aggregate_name).toBe("Cart")
-        expect(afterFirst[1]?.aggregate_name).toBe("Order")
-
-        const secondDrain = yield* drainAggregateOutbox(
-          bus,
-          BatchLimit.make(2),
-          AggregateName.make("Cart"),
-        )
-        match(secondDrain)
-          .with({ _tag: "OutboxDrained" }, (d) => {
-            expect(d.drainedCount).toBe(1)
-          })
-          .with({ _tag: "OutboxEmpty" }, () => {
-            expect.unreachable("expected OutboxDrained")
-          })
-          .exhaustive()
-
-        const afterSecond = yield* sql<{ id: number; aggregate_name: string }>`
-            SELECT id, aggregate_name FROM es_outbox ORDER BY id ASC
-          `
-        expect(afterSecond.length).toBe(1)
-        expect(afterSecond[0]?.aggregate_name).toBe("Order")
-      }).pipe(Effect.provide(SqlClientMemoryLayer)),
+          expect(afterThird.map((r) => r.aggregate_id)).toEqual(["o-3"])
+        }).pipe(Effect.provide(SqlClientMemoryLayer)),
     )
 
     it.effect(
@@ -1379,7 +1492,7 @@ describe("Cross-Aggregate Outbox Drain, Projector Checkpoints, Gap Parking, and 
     )
 
     it.effect(
-      "F-3.5: checkProjectorCatchUp returns Lagging when checkpoint trails archive head with zero gap rows",
+      "F-3.5: checkProjectorCatchUp returns Lagging when checkpoint is missing or trails archive head with zero gap rows",
       () =>
         Effect.gen(function* () {
           yield* initializeProjectorTables()
@@ -1393,6 +1506,29 @@ describe("Cross-Aggregate Outbox Drain, Projector Checkpoints, Gap Parking, and 
               ('Cart', 'cart-trail', 2, 'c2', 'ItemAdded', '{"_tag":"ItemAdded"}', '{"aggregateId":"cart-trail","streamVersion":2,"commandId":"c2","timestamp":200}', 200)
           `
 
+          const gapCount = yield* sql<{
+            count: number
+          }>`SELECT count(*) as count FROM es_projection_gaps`
+          expect(gapCount[0]?.count).toBe(0)
+
+          // 1. No checkpoint row exists at all -> Lagging with checkpointVersion = 0
+          const statusMissingCp = yield* checkProjectorCatchUp(
+            ProcessorId.make("open-carts-v1"),
+            AggregateName.make("Cart"),
+          )
+
+          match(statusMissingCp)
+            .with({ _tag: "Lagging" }, (l) => {
+              expect(l.laggingAggregateId).toBe("cart-trail")
+              expect(l.checkpointVersion).toBe(0)
+              expect(l.archiveHeadVersion).toBe(2)
+            })
+            .with({ _tag: "CaughtUp" }, () => {
+              expect.unreachable("expected Lagging status when checkpoint row is missing")
+            })
+            .exhaustive()
+
+          // 2. Checkpoint row exists at version 1 (< archive head 2) -> Lagging with checkpointVersion = 1
           yield* sql`
             INSERT INTO es_projection_checkpoints (
               processor_id, aggregate_name, aggregate_id, last_stream_version, updated_at
@@ -1401,17 +1537,12 @@ describe("Cross-Aggregate Outbox Drain, Projector Checkpoints, Gap Parking, and 
             )
           `
 
-          const gapCount = yield* sql<{
-            count: number
-          }>`SELECT count(*) as count FROM es_projection_gaps`
-          expect(gapCount[0]?.count).toBe(0)
-
-          const status = yield* checkProjectorCatchUp(
+          const statusTrailingCp = yield* checkProjectorCatchUp(
             ProcessorId.make("open-carts-v1"),
             AggregateName.make("Cart"),
           )
 
-          match(status)
+          match(statusTrailingCp)
             .with({ _tag: "Lagging" }, (l) => {
               expect(l.laggingAggregateId).toBe("cart-trail")
               expect(l.checkpointVersion).toBe(1)
@@ -1425,7 +1556,7 @@ describe("Cross-Aggregate Outbox Drain, Projector Checkpoints, Gap Parking, and 
     )
 
     it.effect(
-      "F-3.6: failed rebuildProjectorFromArchive rolls back and preserves live read model and checkpoints",
+      "F-3.6: failed rebuildProjectorFromArchive after purge and DELETE rolls back within sql.withTransaction and preserves live read model, checkpoints, and gaps",
       () =>
         Effect.gen(function* () {
           yield* initializeProjectorTables()
@@ -1469,6 +1600,18 @@ describe("Cross-Aggregate Outbox Drain, Projector Checkpoints, Gap Parking, and 
           yield* ingestPublishedEvent(env1, [openCartsProjection])
           yield* ingestPublishedEvent(env2, [openCartsProjection])
 
+          // Also park a gap row for open-carts-v1 to verify DELETE FROM es_projection_gaps rolls back
+          yield* sql`
+            INSERT INTO es_projection_gaps (
+              processor_id, aggregate_name, aggregate_id, stream_version, event_type, payload, metadata, parked_at
+            ) VALUES (
+              'open-carts-v1', 'Cart', 'cart-rollback', 4, 'ItemAdded',
+              '{"_tag":"ItemAdded","cartId":"cart-rollback","itemId":"orange","quantity":1,"version":1}',
+              '{"aggregateId":"cart-rollback","streamVersion":4,"commandId":"cmd-4","timestamp":1700000000020}',
+              1700000000020
+            )
+          `
+
           const beforeReport = yield* queryOpenCarts
           expect(beforeReport.carts.length).toBe(1)
           expect(beforeReport.carts[0]?.totalQuantity).toBe(3)
@@ -1478,7 +1621,55 @@ describe("Cross-Aggregate Outbox Drain, Projector Checkpoints, Gap Parking, and 
           `
           expect(beforeCp[0]?.last_stream_version).toBe(2)
 
-          // Insert non-contiguous archive row (version 4)
+          // 1. Mid-rebuild failure AFTER DELETE FROM es_projection_gaps, DELETE FROM es_projection_checkpoints,
+          //    purgeOpenCarts (DELETE FROM projection_open_carts), and event 1 apply (INSERT total_quantity = 0) have executed!
+          let purgeExecuted = false
+          let firstEventApplied = false
+          const failingMidRebuildProjection = CrossAggregateProjection.make({
+            processorId: ProcessorId.make("open-carts-v1"),
+            aggregateName: AggregateName.make("Cart"),
+            eventSchema: CartEvent,
+            model: OpenCartsReport,
+            query: () => queryOpenCarts,
+            purge: Effect.gen(function* () {
+              yield* purgeOpenCarts
+              purgeExecuted = true
+            }),
+            apply: (event, metadata) =>
+              Effect.gen(function* () {
+                if (metadata.streamVersion === 1) {
+                  yield* applyOpenCarts(event, metadata)
+                  firstEventApplied = true
+                  return
+                }
+                yield* sql`INSERT INTO nonexistent_table_during_rebuild (id) VALUES (1)`.pipe(
+                  Effect.asVoid,
+                )
+              }),
+          })
+
+          yield* Effect.flip(rebuildProjectorFromArchive(failingMidRebuildProjection))
+          expect(purgeExecuted).toBe(true)
+          expect(firstEventApplied).toBe(true)
+
+          // Verify sql.withTransaction rolled back purgeOpenCarts, event 1 apply, checkpoint DELETE, and gap DELETE!
+          const afterMidFailReport = yield* queryOpenCarts
+          expect(afterMidFailReport.carts.length).toBe(1)
+          expect(afterMidFailReport.carts[0]?.totalQuantity).toBe(3)
+
+          const afterMidFailCp = yield* sql<{ last_stream_version: number }>`
+            SELECT last_stream_version FROM es_projection_checkpoints WHERE aggregate_id = 'cart-rollback'
+          `
+          expect(afterMidFailCp.length).toBe(1)
+          expect(afterMidFailCp[0]?.last_stream_version).toBe(2)
+
+          const afterMidFailGaps = yield* sql<{ stream_version: number }>`
+            SELECT stream_version FROM es_projection_gaps WHERE processor_id = 'open-carts-v1'
+          `
+          expect(afterMidFailGaps.length).toBe(1)
+          expect(afterMidFailGaps[0]?.stream_version).toBe(4)
+
+          // 2. Non-contiguous archive row (version 4) fails with ProjectionArchiveCorruptionError
           yield* sql`
             INSERT INTO es_event_archive (
               aggregate_name, aggregate_id, stream_version, command_id, event_type, payload, metadata, archived_at

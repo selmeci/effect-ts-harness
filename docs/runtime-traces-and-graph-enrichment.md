@@ -160,7 +160,7 @@ The tool traverses incoming `ExercisesSpan` and `TracedCall` edges to return onl
 
 ## 6. Automated Guardrails & Verification Gates
 
-Runtime telemetry is continuously validated by deterministic gates:
+Span budgets and test-reachability invariants are validated through trace-instrumented tests and deterministic static graph gates:
 
 ### 6.1 `SpanBudget.decide` (Performance & Anti-Pattern Gate)
 
@@ -175,7 +175,7 @@ Defined in `libs/harness/gates/src/span-budget.ts`, this pure decider (`decideSp
 
 ### 6.2 `harness gc --strict` (`untested-effect-fn`)
 
-If a non-stub `Effect.fn` in `type:domain` or `type:contract` has **0 reaching tests** (0 incoming `ExercisesSpan` or `TracedCall` edges), the zero-entropy garbage collection gate (`libs/harness/gates/src/gc-check.ts`) fails with `untested-effect-fn`. During `harness verify` and static workspace graph extraction, `ExercisesSpan` edges are also synthesized by scanning test source files for imported `Effect.fn` references in addition to dynamic `runWithTestTracer` span capture.
+If a non-stub `Effect.fn` in `type:domain` or `type:contract` has **0 reaching tests** (0 incoming `ExercisesSpan` or `TracedCall` edges), the zero-entropy garbage collection gate (`libs/harness/gates/src/gc-check.ts`) fails with `untested-effect-fn`. In `harness verify` (`handleVerify`) and `harness gc --strict`, the CLI builds the workspace graph statically and synthesizes `ExercisesSpan` edges by scanning test source files for imported `Effect.fn` references (`handleVerify` does not load runtime `runWithTestTracer` edges; dynamic `ExercisesSpan` and `TracedCall` edges from `runWithTestTracer` are produced in-process when tests call `enrichGraphWithTraces`).
 
 ### 6.3 `OntologyInvariants.decide` (`ontology-unverified-requirement`)
 
