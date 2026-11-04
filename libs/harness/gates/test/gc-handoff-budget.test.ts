@@ -2730,13 +2730,72 @@ export {};
 
           writeFileSync(
             join(cleanInfraSrcDir, "clean.ts"),
-            `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nconst aggregateCoreMigrations = {\n  "1_init_foo": sql\`CREATE TABLE IF NOT EXISTS foo (id INT);\`,\n};\nexport const cleanMigrations = SqliteMigrator.fromRecord({\n  ...aggregateCoreMigrations,\n  "2_init_bar": sql\`CREATE TABLE IF NOT EXISTS bar (id INT);\`,\n});\n`,
+            `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nconst aggregateCoreMigrations = {\n  "1_init_foo": sql\`CREATE TABLE IF NOT EXISTS foo (id INT);\`,\n};\nexport const cleanMigrations = SqliteMigrator.fromRecord({\n  ...aggregateCoreMigrations,\n  "2_init_bar": sql\`CREATE TABLE IF NOT EXISTS bar (id INT);\`,\n});\nexport const runAggregateMigrations = SqliteMigrator.run({ loader: cleanMigrations });\nexport const projectorCoreMigrations = {\n  "1_init_projector": sql\`CREATE TABLE IF NOT EXISTS proj (id INT);\`,\n};\nexport const runProjectorMigrations = SqliteMigrator.run({\n  loader: SqliteMigrator.fromRecord(projectorCoreMigrations),\n  table: "es_projector_sql_migrations",\n});\n`,
           )
 
           const cleanFindings = scanWorkspacePackageHygiene(cleanTempDir)
           expect(cleanFindings).toHaveLength(0)
         } finally {
           rmSync(cleanTempDir, { recursive: true, force: true })
+        }
+
+        // 9. Detects non-1-based migration sequence, non-contiguous sequence, shared default migration table, and untrusted-row-brand-make
+        const collisionTempDir = mkdtempSync(join(tmpdir(), "harness-sql-collision-test-"))
+        try {
+          const collisionInfraSrcDir = join(collisionTempDir, "libs", "sample", "infra", "src")
+          mkdirSync(collisionInfraSrcDir, { recursive: true })
+
+          writeFileSync(
+            join(collisionInfraSrcDir, "aggregate.ts"),
+            `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nexport const aggregateCoreMigrations = {\n  "1_init_agg": sql\`CREATE TABLE IF NOT EXISTS agg (id INT);\`,\n  "3_skip_two": sql\`CREATE TABLE IF NOT EXISTS agg2 (id INT);\`,\n};\nexport const runAgg = SqliteMigrator.run({ loader: SqliteMigrator.fromRecord(aggregateCoreMigrations) });\n`,
+          )
+
+          writeFileSync(
+            join(collisionInfraSrcDir, "projector.ts"),
+            `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nexport const projectorCoreMigrations = {\n  "2_init_projector": sql\`CREATE TABLE IF NOT EXISTS proj (id INT);\`,\n};\nexport const runProj = SqliteMigrator.run({ loader: SqliteMigrator.fromRecord(projectorCoreMigrations) });\nexport const decodeRow = (row: { readonly stream_version: number }) => StreamVersion.make(Math.max(0, row.stream_version));\n`,
+          )
+
+          const collisionFindings = scanWorkspacePackageHygiene(collisionTempDir)
+
+          const startAtTwoFinding = collisionFindings.find(
+            (f) =>
+              f.kind === "invalid-migrator-record-key" &&
+              f.nodeId === "libs/sample/infra/src/projector.ts:sequence-start-2",
+          )
+          expect(startAtTwoFinding).toBeDefined()
+          expect(startAtTwoFinding?.message).toContain('starts at id "2" instead of "1"')
+
+          const gapFinding = collisionFindings.find(
+            (f) =>
+              f.kind === "invalid-migrator-record-key" &&
+              f.nodeId === "libs/sample/infra/src/aggregate.ts:sequence-gap-1-3",
+          )
+          expect(gapFinding).toBeDefined()
+          expect(gapFinding?.message).toContain('jumps from "1" to "3"')
+
+          const sharedTableFinding = collisionFindings.find(
+            (f) =>
+              f.kind === "invalid-migrator-record-key" &&
+              f.nodeId ===
+                "libs/sample/infra/src/projector.ts:shared-default-migrations-table:projectorCoreMigrations",
+          )
+          expect(sharedTableFinding).toBeDefined()
+          expect(sharedTableFinding?.message).toContain(
+            'Multiple distinct SqliteMigrator loaders (aggregateCoreMigrations, projectorCoreMigrations) in "sample/infra" use the default "effect_sql_migrations" table without a custom "table" option',
+          )
+
+          const brandMakeFinding = collisionFindings.find(
+            (f) =>
+              f.kind === "untrusted-row-brand-make" &&
+              f.nodeId ===
+                "libs/sample/infra/src/projector.ts:StreamVersion.make(row.stream_version)",
+          )
+          expect(brandMakeFinding).toBeDefined()
+          expect(brandMakeFinding?.message).toContain(
+            'Unvalidated "StreamVersion.make(...row.stream_version...)" on SQLite row column',
+          )
+        } finally {
+          rmSync(collisionTempDir, { recursive: true, force: true })
         }
       })
     })

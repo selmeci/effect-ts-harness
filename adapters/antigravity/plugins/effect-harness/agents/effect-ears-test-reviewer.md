@@ -68,17 +68,27 @@ Effect tracing is the foundation of runtime observability and graph verification
 - **Runtime Test Tracer:** Tests must use `runWithTestTracer` to assert recorded call edges (`edges.tracedCalls`) and reaching test edges (`edges.exercisesSpans`).
 - **Span Budget Assertions:** Tests asserting multi-step or batched operations must invoke `checkSpanBudgets` (`SpanBudget.decide`) to protect against N+1 regressions (`maxRepeatedChildCalls` threshold, e.g. $\le 3$) and verify latency constraints (`maxSpanDurationMs`).
 
-## 7-Point Anti-Rubber-Stamp Deep Audit (Mandatory Before PASS)
+### 5. `type:infra` Guard-Deletion Falsification & Multi-Processor / Batch-Limit Coverage
 
-Prior to issuing a PASS recommendation or concluding a review, you MUST systematically execute every check in this 7-point audit and report concrete findings or explicit verification evidence:
+Because `harness mutate --strict` mutates `type:contract`, `type:domain`, and `type:core` (not `type:infra`), you MUST manually perform guard-deletion falsification on `libs/*/infra/src/**`:
 
-1. **Spec-vs-ADR Polarity Check:** Verify no EARS requirement uses inverted negative phrasing (e.g., `"without dying on unexpected defects"`) that contradicts ADR rules or `testing.ts` assertions (`Cause.hasDies`).
+- **Every Fail-Closed `if` Guard & `||` Operand Tested Independently:** Inspect every `if (...)` corruption/mismatch guard and compound condition (`a || b`) in `type:infra` (e.g. outbox metadata disagreeing on `aggregateId` OR `streamVersion` before publish, archive version contiguity, checkpoint missing vs trailing archive head with 0 gap rows). Verify there is a dedicated test in `libs/*/infra/test/**` for EACH operand and that sequential validation loops (`checkpoints` -> `archiveHeads` -> `gapRows`) clean up earlier tables between negative test cases so later loops are actually reached.
+- **Mid-Batch Failure & Partial Gap Unblock:** Verify outbox/batch tests fail on a middle row (e.g. row 2 of 3, proving row 1 is deleted and row 3 is never published), and gap-parking tests verify partial unblocking (e.g. versions 2 and 4 parked; version 1 arrives and unblocks 2 while leaving 4 parked) and duplicate parked delivery (`ON CONFLICT DO NOTHING`).
+- **Multi-Processor Isolation & Mid-Write Rollback Falsification (`sql.withTransaction`):** Verify projections/rebuilds are tested with 2+ processors on the same aggregate (proving rebuilding processor A does not delete processor B's checkpoints or gaps). For any test claiming to verify transactional rollback (`sql.withTransaction`), verify the simulated failure occurs **after** at least one mutating SQL statement (`DELETE`, `INSERT`, `UPDATE`, or `purge`) has already executed inside the transaction (a test that fails during a pre-write read/contiguity loop before any write occurs would pass even if `sql.withTransaction` were deleted!).
+- **Optional Filter & Batch Limit Parameters (With and Without Filter):** Verify optional parameters such as `batchLimit` (both with `aggregateName` provided and with `aggregateName` omitted) have explicit tests.
+
+## 8-Point Anti-Rubber-Stamp Deep Audit (Mandatory Before PASS)
+
+Prior to issuing a PASS recommendation or concluding a review, you MUST systematically execute every check in this 8-point audit and report concrete findings or explicit verification evidence:
+
+1. **Spec-vs-ADR Polarity & Procedural Accuracy Check:** Verify no EARS requirement uses inverted negative phrasing, and verify that ADR rules accurately describe whether operations open a single SQL transaction (`sql.withTransaction`) or perform per-row acknowledgements, whether validation happens before or inside `sql.withTransaction`, and the exact order of operations during rebuilds.
 2. **ADR Enforcement Table Fact-Check:** Use `view_file` or `grep_search` on every file path and gate/rule name in the ADR `### Deterministic Enforcement` table. Confirm the file exists on disk AND actually defines the named rule (`impure-decider`, `vacuous-error-assertion`, etc.).
 3. **Folded State Projection Coverage:** Verify tests do NOT merely test emitted events (`decide`) and tautological self-equality (`Equal.equals(fold1, fold2)`). Tests MUST explicitly assert folded state properties (e.g. `items`, `itemCount`, `totalItems`) against concrete expected values.
 4. **Contract Brand Reuse:** Verify domain code and `test/fixtures/` import and use branded schemas from `@harness/*-contract` (`PositiveInt`, `StreamVersion`) rather than redefining unbranded `Schema.Int.check(...)` or handwritten TypeScript union `type Foo = { _tag: ... }`.
 5. **Meta-Test Failure Arm Coverage:** When reviewing a test runner/harness (`testing.ts`), verify every `.with({ _tag: "Failure" })` and `.with({ _tag: "Success" })` branch in `thenEvents`, `thenNothing`, and `thenFails` has a dedicated meta-test that triggers that exact failure arm.
 6. **Aggregate Identity & Boundary State Invariants:** Verify `decide` and `evolve` validate aggregate ID consistency (`command.cartId === state.cartId`) and empty-active edge states (e.g. `ActiveCart` with `itemCount === 0` on `Checkout`).
 7. **Contract Decode Negative Matrix:** Verify contract schema tests reject non-number/malformed inputs (`"0"`, `null`, `undefined`, `NaN`) in addition to out-of-range numbers.
+8. **`type:infra` Guard-Deletion Audit:** Enumerate every `if (...)` guard and optional parameter in `libs/*/infra/src/**` and cite the exact test in `libs/*/infra/test/**` that falsifies its deletion.
 
 ## Confidence Rubric & Quote-the-Line Gate
 

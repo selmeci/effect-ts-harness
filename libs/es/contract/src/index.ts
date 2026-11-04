@@ -38,6 +38,26 @@ export type CausationId = typeof CausationId.Type
 export const ErrorMessage = Schema.NonEmptyString.pipe(Schema.brand("ErrorMessage"))
 export type ErrorMessage = typeof ErrorMessage.Type
 
+export const OutboxRowId = Schema.Int.check(Schema.isGreaterThan(0)).pipe(
+  Schema.brand("OutboxRowId"),
+)
+export type OutboxRowId = typeof OutboxRowId.Type
+
+export const EventType = Schema.NonEmptyString.pipe(Schema.brand("EventType"))
+export type EventType = typeof EventType.Type
+
+export const SerializedPayload = Schema.NonEmptyString.pipe(Schema.brand("SerializedPayload"))
+export type SerializedPayload = typeof SerializedPayload.Type
+
+export const ProcessorId = Schema.NonEmptyString.pipe(Schema.brand("ProcessorId"))
+export type ProcessorId = typeof ProcessorId.Type
+
+export const BatchLimit = Schema.Int.check(Schema.isGreaterThan(0)).pipe(Schema.brand("BatchLimit"))
+export type BatchLimit = typeof BatchLimit.Type
+
+export const AggregateCount = Schema.Natural.pipe(Schema.brand("AggregateCount"))
+export type AggregateCount = typeof AggregateCount.Type
+
 // Canonical metadata accompanying every persisted and dispatched event
 export class EventMetadata extends Schema.Class<EventMetadata>("EventMetadata")({
   aggregateId: AggregateId,
@@ -47,6 +67,33 @@ export class EventMetadata extends Schema.Class<EventMetadata>("EventMetadata")(
   correlationId: Schema.optional(CorrelationId),
   causationId: Schema.optional(CausationId),
 }) {}
+
+// Canonical wire envelope for events published from the aggregate outbox to the EventBus
+export class PublishedEventEnvelope extends Schema.Class<PublishedEventEnvelope>(
+  "PublishedEventEnvelope",
+)(
+  Schema.Struct({
+    aggregateName: AggregateName,
+    aggregateId: AggregateId,
+    streamVersion: StreamVersion,
+    eventType: EventType,
+    payload: SerializedPayload,
+    metadata: EventMetadata,
+  }).pipe(
+    Schema.check(
+      Schema.makeFilter(
+        (e) =>
+          e.streamVersion > 0 &&
+          e.metadata.aggregateId === e.aggregateId &&
+          e.metadata.streamVersion === e.streamVersion,
+        {
+          message:
+            "PublishedEventEnvelope requires streamVersion > 0 and metadata identity (aggregateId, streamVersion) matching the envelope",
+        },
+      ),
+    ),
+  ),
+) {}
 
 // Lifecycle and publication states modeled as closed discriminated unions (no boolean flags)
 export const StreamCreationStatus = Schema.Union([
@@ -67,6 +114,71 @@ export const OutboxPublicationMode = Schema.Union([
   Schema.TaggedStruct("SuppressOutbox", {}),
 ])
 export type OutboxPublicationMode = typeof OutboxPublicationMode.Type
+
+export const OutboxDrainOutcome = Schema.Union([
+  Schema.TaggedStruct("OutboxEmpty", {}),
+  Schema.TaggedStruct("OutboxDrained", {
+    drainedCount: PositiveInt,
+  }),
+])
+export type OutboxDrainOutcome = typeof OutboxDrainOutcome.Type
+
+export class ProjectionSequenceInput extends Schema.Class<ProjectionSequenceInput>(
+  "ProjectionSequenceInput",
+)({
+  checkpointVersion: StreamVersion,
+  incomingVersion: StreamVersion,
+  parkedVersions: Schema.Array(StreamVersion),
+}) {}
+
+export const ProjectionSequenceDecision = Schema.Union([
+  Schema.TaggedStruct("SkipDuplicateEvent", {
+    checkpointVersion: StreamVersion,
+  }),
+  Schema.TaggedStruct("ParkOutOfOrderEvent", {
+    expectedVersion: StreamVersion,
+    parkedVersion: StreamVersion,
+  }).pipe(
+    Schema.check(
+      Schema.makeFilter((d) => d.expectedVersion > 0 && d.parkedVersion > d.expectedVersion, {
+        message:
+          "ParkOutOfOrderEvent requires expectedVersion > 0 and parkedVersion > expectedVersion",
+      }),
+    ),
+  ),
+  Schema.TaggedStruct("ApplyContiguousEvents", {
+    versionsToApply: Schema.NonEmptyArray(StreamVersion),
+    newCheckpointVersion: StreamVersion,
+  }).pipe(
+    Schema.check(
+      Schema.makeFilter(
+        (d) =>
+          d.newCheckpointVersion > 0 &&
+          d.versionsToApply[d.versionsToApply.length - 1] === d.newCheckpointVersion &&
+          d.versionsToApply.every((v, idx) =>
+            idx === 0 ? v > 0 : v === d.versionsToApply[idx - 1]! + 1,
+          ),
+        {
+          message:
+            "ApplyContiguousEvents requires positive contiguous versionsToApply (step +1) matching newCheckpointVersion",
+        },
+      ),
+    ),
+  ),
+])
+export type ProjectionSequenceDecision = typeof ProjectionSequenceDecision.Type
+
+export const ProjectionCatchUpStatus = Schema.Union([
+  Schema.TaggedStruct("CaughtUp", {
+    archiveAggregatesCount: AggregateCount,
+  }),
+  Schema.TaggedStruct("Lagging", {
+    laggingAggregateId: AggregateId,
+    checkpointVersion: StreamVersion,
+    archiveHeadVersion: StreamVersion,
+  }),
+])
+export type ProjectionCatchUpStatus = typeof ProjectionCatchUpStatus.Type
 
 // Command execution outcome contract
 export class AggregateCommandResult extends Schema.Class<AggregateCommandResult>(
@@ -144,5 +256,33 @@ export class EventSerializationError extends Schema.TaggedError<EventSerializati
     aggregateId: AggregateId,
     streamVersion: StreamVersion,
     reason: ErrorMessage,
+  },
+) {}
+
+export class OutboxPublishError extends Schema.TaggedError<OutboxPublishError>()(
+  "OutboxPublishError",
+  {
+    aggregateName: AggregateName,
+    aggregateId: AggregateId,
+    streamVersion: StreamVersion,
+    reason: ErrorMessage,
+  },
+) {}
+
+export class ProjectionArchiveCorruptionError extends Schema.TaggedError<ProjectionArchiveCorruptionError>()(
+  "ProjectionArchiveCorruptionError",
+  {
+    processorId: ProcessorId,
+    aggregateName: AggregateName,
+    aggregateId: AggregateId,
+    streamVersion: StreamVersion,
+    reason: ErrorMessage,
+  },
+) {}
+
+export class CrossProjectionNotFoundError extends Schema.TaggedError<CrossProjectionNotFoundError>()(
+  "CrossProjectionNotFoundError",
+  {
+    processorId: ProcessorId,
   },
 ) {}

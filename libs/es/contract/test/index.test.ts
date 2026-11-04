@@ -2,24 +2,38 @@ import { describe, expect, it } from "@effect/vitest"
 import { Schema } from "effect"
 import {
   AggregateCommandResult,
+  AggregateCount,
   AggregateId,
   AggregateName,
   AggregateNotFoundError,
+  BatchLimit,
   CausationId,
   CommandAggregateMismatchError,
   CommandId,
   CommandProcessingStatus,
   ConcurrencyConflictError,
   CorrelationId,
+  CrossProjectionNotFoundError,
   ErrorMessage,
   EventMetadata,
   EventSerializationError,
   EventStreamCorruptionError,
+  EventType,
   LocalProjectionNotFoundError,
+  OutboxDrainOutcome,
   OutboxPublicationMode,
+  OutboxPublishError,
+  OutboxRowId,
   PositiveInt,
+  ProcessorId,
+  ProjectionArchiveCorruptionError,
+  ProjectionCatchUpStatus,
   ProjectionName,
+  ProjectionSequenceDecision,
+  ProjectionSequenceInput,
   ProjectionVersion,
+  PublishedEventEnvelope,
+  SerializedPayload,
   StreamCreationStatus,
   StreamVersion,
   TimestampMs,
@@ -339,6 +353,354 @@ describe("@harness/es-contract", () => {
       expect(serializationErr.aggregateId).toBe("cart-1")
       expect(serializationErr.streamVersion).toBe(2)
       expect(serializationErr.reason).toBe("Schema decode failed for CartItemAdded")
+    })
+
+    it("instantiates OutboxPublishError, ProjectionArchiveCorruptionError, and CrossProjectionNotFoundError", () => {
+      const outboxErr = new OutboxPublishError({
+        aggregateName: AggregateName.make("Cart"),
+        aggregateId: AggregateId.make("cart-1"),
+        streamVersion: StreamVersion.make(1),
+        reason: ErrorMessage.make("Queue publish failed"),
+      })
+      expect(outboxErr._tag).toBe("OutboxPublishError")
+      expect(outboxErr.aggregateName).toBe("Cart")
+      expect(outboxErr.aggregateId).toBe("cart-1")
+      expect(outboxErr.streamVersion).toBe(1)
+      expect(outboxErr.reason).toBe("Queue publish failed")
+
+      const archiveErr = new ProjectionArchiveCorruptionError({
+        processorId: ProcessorId.make("open-carts-v1"),
+        aggregateName: AggregateName.make("Cart"),
+        aggregateId: AggregateId.make("cart-1"),
+        streamVersion: StreamVersion.make(2),
+        reason: ErrorMessage.make("Archive gap detected"),
+      })
+      expect(archiveErr._tag).toBe("ProjectionArchiveCorruptionError")
+      expect(archiveErr.processorId).toBe("open-carts-v1")
+      expect(archiveErr.reason).toBe("Archive gap detected")
+
+      const notFoundErr = new CrossProjectionNotFoundError({
+        processorId: ProcessorId.make("missing-proj"),
+      })
+      expect(notFoundErr._tag).toBe("CrossProjectionNotFoundError")
+      expect(notFoundErr.processorId).toBe("missing-proj")
+    })
+  })
+
+  describe("Phase 3 Outbox & Cross-Aggregate Projection Schemas", () => {
+    it("decodes valid Phase 3 branded scalars and rejects invalid values", () => {
+      const invalidValues: ReadonlyArray<unknown> = [null, undefined, "1", 1.5, Number.NaN]
+      expect(Schema.decodeSync(OutboxRowId)(1)).toBe(1)
+      expect(() => Schema.decodeSync(OutboxRowId)(0)).toThrow()
+      expect(() => Schema.decodeSync(OutboxRowId)(-1)).toThrow()
+      for (const bad of invalidValues) {
+        expect(() => Schema.decodeUnknownSync(OutboxRowId)(bad)).toThrow()
+        expect(() => Schema.decodeUnknownSync(BatchLimit)(bad)).toThrow()
+        expect(() => Schema.decodeUnknownSync(AggregateCount)(bad)).toThrow()
+      }
+
+      const invalidStrings: ReadonlyArray<unknown> = [null, undefined, 123, ""]
+      expect(Schema.decodeSync(EventType)("CartCreated")).toBe("CartCreated")
+      expect(Schema.decodeSync(SerializedPayload)('{"_tag":"CartCreated"}')).toBe(
+        '{"_tag":"CartCreated"}',
+      )
+      expect(Schema.decodeSync(ProcessorId)("open-carts-v1")).toBe("open-carts-v1")
+      for (const badStr of invalidStrings) {
+        expect(() => Schema.decodeUnknownSync(EventType)(badStr)).toThrow()
+        expect(() => Schema.decodeUnknownSync(SerializedPayload)(badStr)).toThrow()
+        expect(() => Schema.decodeUnknownSync(ProcessorId)(badStr)).toThrow()
+      }
+
+      expect(Schema.decodeSync(BatchLimit)(100)).toBe(100)
+      expect(() => Schema.decodeSync(BatchLimit)(0)).toThrow()
+      expect(() => Schema.decodeSync(BatchLimit)(-5)).toThrow()
+
+      expect(Schema.decodeSync(AggregateCount)(0)).toBe(0)
+      expect(Schema.decodeSync(AggregateCount)(5)).toBe(5)
+      expect(() => Schema.decodeSync(AggregateCount)(-1)).toThrow()
+    })
+
+    it("decodes PublishedEventEnvelope and OutboxDrainOutcome", () => {
+      const envelope = Schema.decodeSync(PublishedEventEnvelope)({
+        aggregateName: "Cart",
+        aggregateId: "cart-1",
+        streamVersion: 1,
+        eventType: "CartCreated",
+        payload: '{"_tag":"CartCreated","cartId":"cart-1"}',
+        metadata: {
+          aggregateId: "cart-1",
+          streamVersion: 1,
+          commandId: "cmd-1",
+          timestamp: 1700000000000,
+        },
+      })
+      expect(envelope.aggregateName).toBe("Cart")
+      expect(envelope.eventType).toBe("CartCreated")
+
+      const emptyOutcome = Schema.decodeSync(OutboxDrainOutcome)({ _tag: "OutboxEmpty" })
+      expect(emptyOutcome._tag).toBe("OutboxEmpty")
+
+      const drainedOutcome = Schema.decodeSync(OutboxDrainOutcome)({
+        _tag: "OutboxDrained",
+        drainedCount: 3,
+      })
+      expect(drainedOutcome._tag).toBe("OutboxDrained")
+    })
+
+    it("decodes ProjectionSequenceInput, ProjectionSequenceDecision, and ProjectionCatchUpStatus", () => {
+      const seqInput = Schema.decodeSync(ProjectionSequenceInput)({
+        checkpointVersion: 1,
+        incomingVersion: 2,
+        parkedVersions: [3, 4],
+      })
+      expect(seqInput.checkpointVersion).toBe(1)
+      expect(seqInput.incomingVersion).toBe(2)
+      expect(seqInput.parkedVersions).toEqual([3, 4])
+
+      const skipDec = Schema.decodeSync(ProjectionSequenceDecision)({
+        _tag: "SkipDuplicateEvent",
+        checkpointVersion: 2,
+      })
+      expect(skipDec._tag).toBe("SkipDuplicateEvent")
+
+      const parkDec = Schema.decodeSync(ProjectionSequenceDecision)({
+        _tag: "ParkOutOfOrderEvent",
+        expectedVersion: 2,
+        parkedVersion: 3,
+      })
+      expect(parkDec._tag).toBe("ParkOutOfOrderEvent")
+
+      const applyDec = Schema.decodeSync(ProjectionSequenceDecision)({
+        _tag: "ApplyContiguousEvents",
+        versionsToApply: [2, 3],
+        newCheckpointVersion: 3,
+      })
+      expect(applyDec._tag).toBe("ApplyContiguousEvents")
+
+      const caughtUp = Schema.decodeSync(ProjectionCatchUpStatus)({
+        _tag: "CaughtUp",
+        archiveAggregatesCount: 2,
+      })
+      expect(caughtUp._tag).toBe("CaughtUp")
+
+      const lagging = Schema.decodeSync(ProjectionCatchUpStatus)({
+        _tag: "Lagging",
+        laggingAggregateId: "cart-1",
+        checkpointVersion: 1,
+        archiveHeadVersion: 3,
+      })
+      expect(lagging._tag).toBe("Lagging")
+    })
+
+    it("enforces PublishedEventEnvelope invariants on streamVersion > 0 and matching metadata identity", () => {
+      const validEnvelopePayload = {
+        aggregateName: "Cart",
+        aggregateId: "cart-1",
+        streamVersion: 1,
+        eventType: "CartCreated",
+        payload: '{"_tag":"CartCreated"}',
+        metadata: {
+          aggregateId: "cart-1",
+          streamVersion: 1,
+          commandId: "cmd-1",
+          timestamp: 1700000000000,
+        },
+      }
+
+      // Rejects streamVersion: 0
+      expect(() =>
+        Schema.decodeSync(PublishedEventEnvelope)({
+          ...validEnvelopePayload,
+          streamVersion: 0,
+          metadata: {
+            ...validEnvelopePayload.metadata,
+            streamVersion: 0,
+          },
+        }),
+      ).toThrow()
+      expect(
+        () =>
+          new PublishedEventEnvelope({
+            aggregateName: AggregateName.make("Cart"),
+            aggregateId: AggregateId.make("cart-1"),
+            streamVersion: StreamVersion.make(0),
+            eventType: EventType.make("CartCreated"),
+            payload: SerializedPayload.make('{"_tag":"CartCreated"}'),
+            metadata: new EventMetadata({
+              aggregateId: AggregateId.make("cart-1"),
+              streamVersion: StreamVersion.make(0),
+              commandId: CommandId.make("cmd-1"),
+              timestamp: TimestampMs.make(1700000000000),
+            }),
+          }),
+      ).toThrow()
+
+      // Rejects metadata.aggregateId !== aggregateId
+      expect(() =>
+        Schema.decodeSync(PublishedEventEnvelope)({
+          ...validEnvelopePayload,
+          metadata: {
+            ...validEnvelopePayload.metadata,
+            aggregateId: "cart-2",
+          },
+        }),
+      ).toThrow()
+      expect(
+        () =>
+          new PublishedEventEnvelope({
+            aggregateName: AggregateName.make("Cart"),
+            aggregateId: AggregateId.make("cart-1"),
+            streamVersion: StreamVersion.make(1),
+            eventType: EventType.make("CartCreated"),
+            payload: SerializedPayload.make('{"_tag":"CartCreated"}'),
+            metadata: new EventMetadata({
+              aggregateId: AggregateId.make("cart-2"),
+              streamVersion: StreamVersion.make(1),
+              commandId: CommandId.make("cmd-1"),
+              timestamp: TimestampMs.make(1700000000000),
+            }),
+          }),
+      ).toThrow()
+
+      // Rejects metadata.streamVersion !== streamVersion
+      expect(() =>
+        Schema.decodeSync(PublishedEventEnvelope)({
+          ...validEnvelopePayload,
+          metadata: {
+            ...validEnvelopePayload.metadata,
+            streamVersion: 2,
+          },
+        }),
+      ).toThrow()
+      expect(
+        () =>
+          new PublishedEventEnvelope({
+            aggregateName: AggregateName.make("Cart"),
+            aggregateId: AggregateId.make("cart-1"),
+            streamVersion: StreamVersion.make(1),
+            eventType: EventType.make("CartCreated"),
+            payload: SerializedPayload.make('{"_tag":"CartCreated"}'),
+            metadata: new EventMetadata({
+              aggregateId: AggregateId.make("cart-1"),
+              streamVersion: StreamVersion.make(2),
+              commandId: CommandId.make("cmd-1"),
+              timestamp: TimestampMs.make(1700000000000),
+            }),
+          }),
+      ).toThrow()
+    })
+
+    it("enforces ProjectionSequenceDecision invariants on ParkOutOfOrderEvent and ApplyContiguousEvents", () => {
+      // ParkOutOfOrderEvent rejects expectedVersion: 0
+      expect(() =>
+        Schema.decodeSync(ProjectionSequenceDecision)({
+          _tag: "ParkOutOfOrderEvent",
+          expectedVersion: 0,
+          parkedVersion: 2,
+        }),
+      ).toThrow()
+      expect(() =>
+        ProjectionSequenceDecision.make({
+          _tag: "ParkOutOfOrderEvent",
+          expectedVersion: StreamVersion.make(0),
+          parkedVersion: StreamVersion.make(2),
+        }),
+      ).toThrow()
+
+      // ParkOutOfOrderEvent rejects parkedVersion <= expectedVersion
+      expect(() =>
+        Schema.decodeSync(ProjectionSequenceDecision)({
+          _tag: "ParkOutOfOrderEvent",
+          expectedVersion: 2,
+          parkedVersion: 2,
+        }),
+      ).toThrow()
+      expect(() =>
+        ProjectionSequenceDecision.make({
+          _tag: "ParkOutOfOrderEvent",
+          expectedVersion: StreamVersion.make(2),
+          parkedVersion: StreamVersion.make(2),
+        }),
+      ).toThrow()
+
+      expect(() =>
+        Schema.decodeSync(ProjectionSequenceDecision)({
+          _tag: "ParkOutOfOrderEvent",
+          expectedVersion: 3,
+          parkedVersion: 2,
+        }),
+      ).toThrow()
+      expect(() =>
+        ProjectionSequenceDecision.make({
+          _tag: "ParkOutOfOrderEvent",
+          expectedVersion: StreamVersion.make(3),
+          parkedVersion: StreamVersion.make(2),
+        }),
+      ).toThrow()
+
+      // ApplyContiguousEvents rejects empty versionsToApply []
+      expect(() =>
+        Schema.decodeUnknownSync(ProjectionSequenceDecision)({
+          _tag: "ApplyContiguousEvents",
+          versionsToApply: [],
+          newCheckpointVersion: 1,
+        }),
+      ).toThrow()
+
+      // ApplyContiguousEvents rejects newCheckpointVersion: 0
+      expect(() =>
+        Schema.decodeSync(ProjectionSequenceDecision)({
+          _tag: "ApplyContiguousEvents",
+          versionsToApply: [0],
+          newCheckpointVersion: 0,
+        }),
+      ).toThrow()
+      expect(() =>
+        ProjectionSequenceDecision.make({
+          _tag: "ApplyContiguousEvents",
+          versionsToApply: [StreamVersion.make(0)],
+          newCheckpointVersion: StreamVersion.make(0),
+        }),
+      ).toThrow()
+
+      // ApplyContiguousEvents rejects versionsToApply[last] !== newCheckpointVersion
+      expect(() =>
+        Schema.decodeSync(ProjectionSequenceDecision)({
+          _tag: "ApplyContiguousEvents",
+          versionsToApply: [1, 2],
+          newCheckpointVersion: 3,
+        }),
+      ).toThrow()
+      expect(() =>
+        ProjectionSequenceDecision.make({
+          _tag: "ApplyContiguousEvents",
+          versionsToApply: [StreamVersion.make(1), StreamVersion.make(2)],
+          newCheckpointVersion: StreamVersion.make(3),
+        }),
+      ).toThrow()
+
+      // ApplyContiguousEvents rejects non-contiguous versionsToApply [1, 3] or starting at 0 [0, 1]
+      expect(() =>
+        Schema.decodeSync(ProjectionSequenceDecision)({
+          _tag: "ApplyContiguousEvents",
+          versionsToApply: [1, 3],
+          newCheckpointVersion: 3,
+        }),
+      ).toThrow()
+      expect(() =>
+        ProjectionSequenceDecision.make({
+          _tag: "ApplyContiguousEvents",
+          versionsToApply: [StreamVersion.make(1), StreamVersion.make(3)],
+          newCheckpointVersion: StreamVersion.make(3),
+        }),
+      ).toThrow()
+      expect(() =>
+        ProjectionSequenceDecision.make({
+          _tag: "ApplyContiguousEvents",
+          versionsToApply: [StreamVersion.make(0), StreamVersion.make(1)],
+          newCheckpointVersion: StreamVersion.make(1),
+        }),
+      ).toThrow()
     })
   })
 })
