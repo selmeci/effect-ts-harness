@@ -276,7 +276,7 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     pattern: "ontology-broken-realization-chain",
     result: {
       kind: "mechanical",
-      hint: "Every symbol declared in an EARS spec or ADR frontmatter (referencedSpans, referencedServices, referencedErrors) must exist in the codebase and be exercised by at least one Vitest test (ExercisesSpan).",
+      hint: "Every domain/core Effect.fn must be justified by an accepted EARS spec (specifies) and ADR (governs) in the ontology realization chain — add the symbol to the spec EARS table and spec/ADR frontmatter spans (see agent-patterns/planning.md).",
     },
   },
   {

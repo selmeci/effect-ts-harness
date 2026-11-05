@@ -6,7 +6,7 @@ import { Effect, Layer } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import * as AiError from "effect/ai/AiError"
 import { buildHarnessGraph, saveGraphSnapshot } from "@harness/graph"
-import { createServer, executeTool } from "../src/server.js"
+import { createServer, executeTool, runDefaultLspDiagnostics } from "../src/server.js"
 
 describe("harness-mcp tools", () => {
   const graph = buildHarnessGraph({
@@ -461,5 +461,15 @@ describe("harness-mcp tools", () => {
         }),
       ]),
     })
+  })
+
+  it("runDefaultLspDiagnostics resolves project when walking up parent directory with tsconfig.json", async () => {
+    const repoRoot = process.cwd()
+    const testFile = path.join(repoRoot, "libs/sample/domain/src/index.ts")
+    const effect = runDefaultLspDiagnostics(repoRoot, { file: testFile })
+    const res = await Effect.runPromise(effect)
+    expect(res).toBeDefined()
+    expect(typeof res.clean).toBe("boolean")
+    expect(Array.isArray(res.diagnostics)).toBe(true)
   })
 })

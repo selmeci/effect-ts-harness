@@ -37,6 +37,9 @@ describe("guard policy", () => {
     expect(classifyCommand("pnpm format")).toBe("allow")
     expect(classifyCommand("pnpm format:check")).toBe("allow")
     expect(classifyCommand("pnpm oxfmt --check .")).toBe("allow")
+    expect(classifyCommand("gh api repos/selmeci/effect-ts-harness/issues/18/comments")).toBe(
+      "allow",
+    )
   })
 
   it("allows safe read-only piped commands", () => {

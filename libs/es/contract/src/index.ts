@@ -279,7 +279,30 @@ export const makeHandledCommandResponseSchema = <
     state: stateSchema,
     events: Schema.Array(eventSchema),
     result: AggregateCommandResult,
-  })
+  }).pipe(
+    Schema.check(
+      Schema.makeFilter(
+        (r: unknown) => {
+          if (typeof r !== "object" || r === null || !("result" in r) || !("events" in r)) {
+            return false
+          }
+          const result = r.result
+          const events = r.events
+          if (typeof result !== "object" || result === null || !("processingStatus" in result)) {
+            return false
+          }
+          const status = result.processingStatus
+          if (typeof status !== "object" || status === null || !("_tag" in status)) {
+            return false
+          }
+          return status._tag !== "Deduplicated" || (Array.isArray(events) && events.length === 0)
+        },
+        {
+          message: "Deduplicated command response requires an empty events array",
+        },
+      ),
+    ),
+  )
 
 // Typed domain and persistence errors
 export class ConcurrencyConflictError extends Schema.TaggedError<ConcurrencyConflictError>()(

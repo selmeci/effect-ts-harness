@@ -49,13 +49,13 @@ export const DETERMINISTIC_ROUTE_RULES: ReadonlyArray<DeterministicRouteRule> = 
   },
   {
     id: "testing",
-    pattern: /\b(?:testclock|event[-\s]+snapshots?|snapshot[-\s]+testing|snapshot[-\s]+test)\b/i,
+    pattern: /\b(?:testclock|snapshot[-\s]+testing|snapshot[-\s]+tests?)\b/i,
     block: "testing",
   },
   {
     id: "event-sourcing",
     pattern:
-      /\b(?:event[-\s]+sourcing|decider|evolve|event[-\s]+store|aggregate(?:\s+root)?|upcasters?|event[-\s]+upcasters?)\b/i,
+      /\b(?:event[-\s]+sourcing|decider|evolve|event[-\s]+store|aggregate(?:\s+root)?|upcasters?|event[-\s]+upcasters?|event[-\s]+snapshots?)\b/i,
     block: "event-sourcing",
   },
   {

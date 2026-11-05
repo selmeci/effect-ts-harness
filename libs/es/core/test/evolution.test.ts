@@ -471,6 +471,101 @@ describe("EventSchemaEvolution & Upcasting", () => {
       }),
     )
 
+    it.effect(
+      "real version-bump superset case: committed v1 snapshots and current v1+v2 snapshots pass decide and verify",
+      () =>
+        Effect.gen(function* () {
+          const snapshots = yield* makeSnapshots
+          const input = new EventSchemaEvolutionInput({
+            committedSnapshots: [snapshots[0]!, snapshots[1]!, snapshots[2]!],
+            currentSnapshots: snapshots,
+            registeredUpcasters: [cartCheckedOutV1ToV2.link],
+          })
+
+          const decision = yield* decideEventSchemaEvolution(input)
+          match(decision)
+            .with({ _tag: "SchemaEvolutionValid" }, (d) => {
+              expect(d.checkedEventCount).toBe(4)
+            })
+            .with({ _tag: "FrozenEventVersionDrifted" }, () => {
+              expect.unreachable("Expected SchemaEvolutionValid")
+            })
+            .with({ _tag: "UnmappedEventVersionJump" }, () => {
+              expect.unreachable("Expected SchemaEvolutionValid")
+            })
+            .exhaustive()
+
+          const verified = yield* verifyEventSchemaEvolution(input)
+          match(verified)
+            .with({ _tag: "SchemaEvolutionValid" }, (v) => {
+              expect(v.checkedEventCount).toBe(4)
+            })
+            .exhaustive()
+        }),
+    )
+
+    it.effect(
+      "unsorted snapshot versions in currentSnapshots are sorted and pass decideEventSchemaEvolution",
+      () =>
+        Effect.gen(function* () {
+          const snapshots = yield* makeSnapshots
+          const input = new EventSchemaEvolutionInput({
+            committedSnapshots: [snapshots[0]!, snapshots[1]!, snapshots[2]!],
+            currentSnapshots: [snapshots[0]!, snapshots[1]!, snapshots[3]!, snapshots[2]!],
+            registeredUpcasters: [cartCheckedOutV1ToV2.link],
+          })
+
+          const decision = yield* decideEventSchemaEvolution(input)
+          match(decision)
+            .with({ _tag: "SchemaEvolutionValid" }, (d) => {
+              expect(d.checkedEventCount).toBe(4)
+            })
+            .with({ _tag: "FrozenEventVersionDrifted" }, () => {
+              expect.unreachable("Expected SchemaEvolutionValid")
+            })
+            .with({ _tag: "UnmappedEventVersionJump" }, () => {
+              expect.unreachable("Expected SchemaEvolutionValid")
+            })
+            .exhaustive()
+        }),
+    )
+
+    it.effect(
+      "upcaster whose eventType does not match any snapshot returns UnmappedEventVersionJump",
+      () =>
+        Effect.gen(function* () {
+          const snapshots = yield* makeSnapshots
+          const unknownTypeLink = new EventUpcasterLink({
+            eventType: EventType.make("UnknownEvent"),
+            fromVersion: EventSchemaVersion.make(1),
+            toVersion: EventSchemaVersion.make(2),
+          })
+          const input = new EventSchemaEvolutionInput({
+            committedSnapshots: snapshots,
+            currentSnapshots: snapshots,
+            registeredUpcasters: [cartCheckedOutV1ToV2.link, unknownTypeLink],
+          })
+
+          const decision = yield* decideEventSchemaEvolution(input)
+          match(decision)
+            .with({ _tag: "UnmappedEventVersionJump" }, (d) => {
+              expect(d.eventType).toBe("UnknownEvent")
+              expect(d.fromVersion).toBe(1)
+              expect(d.toVersion).toBe(2)
+              expect(d.reason).toContain(
+                "Upcaster links to version not present in currentSnapshots",
+              )
+            })
+            .with({ _tag: "SchemaEvolutionValid" }, () => {
+              expect.unreachable("Expected UnmappedEventVersionJump")
+            })
+            .with({ _tag: "FrozenEventVersionDrifted" }, () => {
+              expect.unreachable("Expected UnmappedEventVersionJump")
+            })
+            .exhaustive()
+        }),
+    )
+
     it.effect("drifted v1 schema causes FrozenEventSchemaViolationError", () =>
       Effect.gen(function* () {
         const snapshots = yield* makeSnapshots

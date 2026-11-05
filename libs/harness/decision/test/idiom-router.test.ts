@@ -96,12 +96,19 @@ describe("Deterministic routing for Phase 4 event schema evolution", () => {
     expect(result).toBe("atom")
   })
 
-  it("routes prompts mentioning event-snapshots to testing", async () => {
-    const result = await Effect.runPromise(
-      routeStep("Run event-snapshots regression suite to detect breaking changes").pipe(
+  it("routes event-snapshots to event-sourcing and snapshot tests to testing", async () => {
+    const esResult = await Effect.runPromise(
+      routeStep("Freeze event-snapshots registry for v1 and v2 schemas").pipe(
         Effect.provide(mockModel),
       ),
     )
-    expect(result).toBe("testing")
+    expect(esResult).toBe("event-sourcing")
+
+    const testResult = await Effect.runPromise(
+      routeStep("Run snapshot test with TestClock to verify timeout").pipe(
+        Effect.provide(mockModel),
+      ),
+    )
+    expect(testResult).toBe("testing")
   })
 })

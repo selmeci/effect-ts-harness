@@ -957,13 +957,8 @@ const isSubagentStopContext = (
     const isSubagentTranscript = Effect.runSync(
       Effect.try({
         try: () => {
-          const content = readFileSync(decoded.transcriptPath!, "utf-8")
-          const firstLine = content.split(/\r?\n/)[0] ?? ""
-          return (
-            firstLine.includes('"source":"SYSTEM"') &&
-            firstLine.includes("[Message]") &&
-            !content.includes('"source":"USER_EXPLICIT"')
-          )
+          const firstLine = readFileSync(decoded.transcriptPath!, "utf-8").split(/\r?\n/)[0] ?? ""
+          return firstLine.includes('"source":"SYSTEM"') && firstLine.includes("[Message]")
         },
         catch: () => false,
       }).pipe(Effect.orElseSucceed(() => false)),

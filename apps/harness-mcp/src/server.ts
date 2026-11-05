@@ -225,7 +225,7 @@ const resolveGraph = (
   )
 }
 
-const runDefaultLspDiagnostics = (
+export const runDefaultLspDiagnostics = (
   repoRoot: string,
   input: {
     readonly file?: string | undefined
@@ -238,6 +238,23 @@ const runDefaultLspDiagnostics = (
       const resolvedFile = path.isAbsolute(input.file)
         ? input.file
         : path.resolve(repoRoot, input.file)
+      if (input.project !== undefined && input.project.trim().length > 0) {
+        const resolvedProject = path.isAbsolute(input.project)
+          ? input.project
+          : path.resolve(repoRoot, input.project)
+        cliArgs.push("--project", resolvedProject)
+      } else {
+        const normalizedRepoRoot = path.resolve(repoRoot)
+        let curr = path.dirname(resolvedFile)
+        while (curr.startsWith(normalizedRepoRoot) && curr !== normalizedRepoRoot) {
+          const candidate = path.join(curr, "tsconfig.json")
+          if (fs.existsSync(candidate)) {
+            cliArgs.push("--project", candidate)
+            break
+          }
+          curr = path.dirname(curr)
+        }
+      }
       cliArgs.push("--file", resolvedFile)
     } else {
       const rawProject = input.project ?? "tsconfig.base.json"

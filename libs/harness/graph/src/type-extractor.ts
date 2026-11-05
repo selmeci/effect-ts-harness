@@ -158,6 +158,29 @@ const decomposeTypeNode = (node: TypeNode): Array<string> => {
   ) {
     return []
   }
+  if (node.getType().isTypeParameter()) {
+    return []
+  }
+  let ancestor: Node | undefined = node.getParent()
+  while (ancestor !== undefined) {
+    if (
+      Node.isFunctionDeclaration(ancestor) ||
+      Node.isFunctionExpression(ancestor) ||
+      Node.isArrowFunction(ancestor) ||
+      Node.isMethodSignature(ancestor) ||
+      Node.isMethodDeclaration(ancestor) ||
+      Node.isCallSignatureDeclaration(ancestor) ||
+      Node.isFunctionTypeNode(ancestor) ||
+      Node.isClassDeclaration(ancestor) ||
+      Node.isInterfaceDeclaration(ancestor) ||
+      Node.isTypeAliasDeclaration(ancestor)
+    ) {
+      if (ancestor.getTypeParameters().some((tp) => tp.getName() === raw)) {
+        return []
+      }
+    }
+    ancestor = ancestor.getParent()
+  }
   return [raw]
 }
 

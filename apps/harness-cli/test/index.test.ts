@@ -618,6 +618,28 @@ enforced_by:
         rmSync(dir, { recursive: true, force: true })
       }
     })
+
+    it("classifies subagent stop context correctly even when transcript mentions USER_EXPLICIT in subsequent lines", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "harness-cli-subagent-user-exp-"))
+      try {
+        const transcriptPath = join(dir, "transcript.jsonl")
+        writeFileSync(
+          transcriptPath,
+          `${JSON.stringify({ step_index: 0, source: "SYSTEM", content: "<SYSTEM_MESSAGE>\n[Message]\nSubagent task" })}\n${JSON.stringify({ step_index: 1, source: "TOOL", content: 'viewed file containing "source":"USER_EXPLICIT"' })}\n`,
+        )
+        const res = await runCli(["done", "--format=antigravity"], {
+          repoRoot: dir,
+          stdin: JSON.stringify({ fullyIdle: true, transcriptPath }),
+        })
+        expect(res.exitCode).toBe(0)
+        expect(res.stdout === "" || res.stdout === JSON.stringify({ decision: "stop" })).toBe(true)
+        expect(
+          res.telemetryDetail === "subagent-skip" || res.telemetryDetail === "subagent=true",
+        ).toBe(true)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
   })
 
   describe("doctor and session", () => {

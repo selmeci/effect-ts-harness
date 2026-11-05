@@ -1095,6 +1095,32 @@ describe("@harness/es-contract", () => {
           },
         }
         expect(() => Schema.decodeUnknownSync(ResponseSchema)(invalidEvent)).toThrow()
+
+        // Valid Deduplicated with empty events
+        const validDeduplicated = Schema.decodeSync(ResponseSchema)({
+          state: { count: 3 },
+          events: [],
+          result: {
+            nextExpectedStreamVersion: 1,
+            creationStatus: { _tag: "ExistingStream" },
+            processingStatus: { _tag: "Deduplicated" },
+          },
+        })
+        expect(validDeduplicated.result.processingStatus._tag).toBe("Deduplicated")
+        expect(validDeduplicated.events).toEqual([])
+
+        // Invalid Deduplicated with non-empty events
+        expect(() =>
+          Schema.decodeSync(ResponseSchema)({
+            state: { count: 3 },
+            events: [{ _tag: "TestEvent", value: "duplicate-event" }],
+            result: {
+              nextExpectedStreamVersion: 1,
+              creationStatus: { _tag: "ExistingStream" },
+              processingStatus: { _tag: "Deduplicated" },
+            },
+          }),
+        ).toThrow(/Deduplicated command response requires an empty events array/)
       })
     })
 

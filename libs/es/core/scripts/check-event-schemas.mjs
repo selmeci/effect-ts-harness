@@ -63,9 +63,9 @@ const main = Effect.gen(function* () {
   }
 
   const raw = readFileSync(snapshotFilePath, "utf-8")
-  const committedSnapshots = yield* Schema.decodeUnknownEffect(
-    Schema.Array(EventVersionSnapshotEntry),
-  )(JSON.parse(raw), { onExcessProperty: "error" })
+  const committedSnapshots = yield* Schema.decodeEffect(
+    Schema.fromJsonString(Schema.Array(EventVersionSnapshotEntry)),
+  )(raw, { onExcessProperty: "error" })
 
   const input = new EventSchemaEvolutionInput({
     committedSnapshots,
@@ -74,6 +74,16 @@ const main = Effect.gen(function* () {
   })
 
   const valid = yield* verifyEventSchemaEvolution(input)
+  const committedKeys = new Set(committedSnapshots.map((s) => `${s.eventType}@v${s.version}`))
+  for (const current of currentSnapshots) {
+    const key = `${current.eventType}@v${current.version}`
+    if (!committedKeys.has(key)) {
+      console.error(
+        `[check-event-schemas] Event version ${key} is missing from ${snapshotFilePath}. Run with --update to freeze the new event version snapshot.`,
+      )
+      process.exit(1)
+    }
+  }
   console.log(
     `[check-event-schemas] Event schema evolution verified: ${valid.checkedEventCount} snapshots valid.`,
   )

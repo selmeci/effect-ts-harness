@@ -48,6 +48,8 @@ export const ALLOWLIST: ReadonlyArray<string> = [
   "gh pr",
   "gh repo",
   "gh auth",
+  "gh api repos/",
+  "gh issue",
   "ls",
   "dir",
   "pwd",
@@ -296,7 +298,7 @@ export const isCommandAllowed = (command: string): boolean => {
   if (trimmed === "") return false
   return ALLOWLIST.some((prefix) => {
     if (trimmed === prefix) return true
-    if (prefix.endsWith(" ")) return trimmed.startsWith(prefix)
+    if (prefix.endsWith(" ") || prefix.endsWith("/")) return trimmed.startsWith(prefix)
     return trimmed.startsWith(prefix + " ")
   })
 }

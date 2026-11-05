@@ -492,6 +492,7 @@ describe("Aggregate HTTP & Evolution Specs", () => {
           yield* initializeProjectorTables()
           yield* initCartViewV2Table
           yield* initOpenCartsProjectionTable
+          const sql = yield* SqlClient
 
           // In-memory HTTP client connecting AtomHttpApi directly to CartEsApi handlers
           const layer = HttpApiBuilder.layer(CartEsApi).pipe(Layer.provide(cartApiLayer))
@@ -590,6 +591,31 @@ describe("Aggregate HTTP & Evolution Specs", () => {
           })
           expect(viewResult2.status).toBe("checked_out")
           expect(viewResult2.checkoutChannel).toBe("mobile")
+
+          const v2EventRows = yield* sql<{ payload: string }>`
+            SELECT payload FROM es_events
+            WHERE aggregate_id = ${cartId} AND event_type = 'CartCheckedOut'
+          `
+          expect(v2EventRows.length).toBe(1)
+          const rawV2Payload = JSON.parse(v2EventRows[0]!.payload) as {
+            readonly _tag: string
+            readonly version: number
+            readonly channel: string
+          }
+          expect(rawV2Payload._tag).toBe("CartCheckedOut")
+          expect(rawV2Payload.version).toBe(2)
+          expect(rawV2Payload.channel).toBe("mobile")
+
+          yield* sql`DELETE FROM projection_cart_view_v2 WHERE cart_id = ${cartId}`
+          yield* sql`DELETE FROM es_projections_meta WHERE aggregate_id = ${cartId}`
+          const reloadedView = yield* queryAggregateReadModel(
+            cartId,
+            ProjectionName.make("CartView"),
+            cartAggregateConfigV2,
+            [cartViewV2Projection],
+          )
+          expect(reloadedView.status).toBe("checked_out")
+          expect(reloadedView.checkoutChannel).toBe("mobile")
 
           // Error: LocalProjectionNotFoundError
           const missingLocalExit = yield* queryAggregateReadModel(
@@ -699,6 +725,30 @@ describe("Aggregate HTTP & Evolution Specs", () => {
           expect(localView.itemCount).toBe(1)
           expect(localView.totalQuantity).toBe(2)
 
+          const verAfterSecondSeed = yield* seedAggregateStream(
+            seedCartId,
+            [
+              {
+                _tag: "CartCheckedOut" as const,
+                version: 2 as const,
+                cartId: CartId.make("cart-seed-direct"),
+                orderId: OrderId.make("order-seed-1"),
+                channel: CheckoutChannel.make("mobile"),
+              },
+            ],
+            cartAggregateConfigV2,
+          )
+          expect(verAfterSecondSeed).toBe(3)
+
+          const localView2 = yield* queryAggregateReadModel(
+            seedCartId,
+            ProjectionName.make("CartView"),
+            cartAggregateConfigV2,
+            [cartViewV2Projection],
+          )
+          expect(localView2.status).toBe("checked_out")
+          expect(localView2.checkoutChannel).toBe("mobile")
+
           // 2. seedAggregateStream fails with EventStreamCorruptionError when max(stream_version) is corrupt (-1)
           const corruptSeedCartId = AggregateId.make("cart-seed-corrupt")
           yield* sql`
@@ -767,6 +817,123 @@ describe("Aggregate HTTP & Evolution Specs", () => {
             })
             .with({ _tag: "Success" }, () => expect.unreachable("expected failure"))
             .exhaustive()
+
+          // 3b. SuppressOutbox on seedAggregateStream and executeAggregateCommandAndSync
+          const suppressOutboxConfig = {
+            ...cartAggregateConfigV2,
+            outboxMode: { _tag: "SuppressOutbox" as const },
+          }
+          const suppressCartId = AggregateId.make("cart-suppress-outbox")
+          const suppressSeedVer = yield* seedAggregateStream(
+            suppressCartId,
+            [
+              {
+                _tag: "CartCreated" as const,
+                version: 1 as const,
+                cartId: CartId.make("cart-suppress-outbox"),
+              },
+            ],
+            suppressOutboxConfig,
+          )
+          expect(suppressSeedVer).toBe(1)
+
+          yield* executeAggregateCommandAndSync(
+            suppressCartId,
+            {
+              _tag: "AddItem" as const,
+              cartId: CartId.make("cart-suppress-outbox"),
+              itemId: ItemId.make("item-suppress-1"),
+              quantity: positiveInt(1),
+            },
+            CommandId.make("cmd-suppress-1"),
+            suppressOutboxConfig,
+            [openCartsProjectionV2],
+          )
+
+          const suppressEvents = yield* sql<{ cnt: number }>`
+            SELECT COUNT(*) as cnt FROM es_events WHERE aggregate_id = ${suppressCartId}
+          `
+          expect(suppressEvents[0]?.cnt).toBe(2)
+
+          const suppressView = yield* queryAggregateReadModel(
+            suppressCartId,
+            ProjectionName.make("CartView"),
+            suppressOutboxConfig,
+            [cartViewV2Projection],
+          )
+          expect(suppressView.itemCount).toBe(1)
+
+          const suppressOutbox = yield* sql<{ cnt: number }>`
+            SELECT COUNT(*) as cnt FROM es_outbox WHERE aggregate_id = ${suppressCartId}
+          `
+          expect(suppressOutbox[0]?.cnt).toBe(0)
+
+          // 3c. Rollback when the second event in seedAggregateStream fails encode
+          const RejectSecondEventSchema = CartEventV2.pipe(
+            Schema.check(
+              Schema.makeFilter((e) =>
+                match(e)
+                  .with({ _tag: "ItemAdded" }, () => "Reject second event during seed")
+                  .with({ _tag: "CartCreated" }, { _tag: "CartCheckedOut" }, () => undefined)
+                  .exhaustive(),
+              ),
+            ),
+          )
+
+          const rollbackCartId = AggregateId.make("cart-seed-rollback")
+          const rollbackExit = yield* seedAggregateStream(
+            rollbackCartId,
+            [
+              {
+                _tag: "CartCreated" as const,
+                version: 1 as const,
+                cartId: CartId.make("cart-seed-rollback"),
+              },
+              {
+                _tag: "ItemAdded" as const,
+                version: 1 as const,
+                cartId: CartId.make("cart-seed-rollback"),
+                itemId: ItemId.make("item-rollback-1"),
+                quantity: positiveInt(1),
+              },
+            ],
+            {
+              ...cartAggregateConfigV2,
+              eventSchema: RejectSecondEventSchema,
+            },
+          ).pipe(Effect.exit)
+
+          match(rollbackExit)
+            .with({ _tag: "Failure" }, (f) => {
+              const err = Cause.findErrorOption(f.cause)
+              match(err)
+                .with({ _tag: "Some" }, ({ value }) => {
+                  expect(value instanceof EventSerializationError).toBe(true)
+                  match(value)
+                    .with({ _tag: "EventSerializationError" }, (serErr) => {
+                      expect(serErr.streamVersion).toBe(2)
+                    })
+                    .otherwise(() => {
+                      expect.unreachable("expected EventSerializationError")
+                    })
+                })
+                .with({ _tag: "None" }, () =>
+                  expect.unreachable("expected EventSerializationError"),
+                )
+                .exhaustive()
+            })
+            .with({ _tag: "Success" }, () => expect.unreachable("expected failure"))
+            .exhaustive()
+
+          const rollbackEventsCount = yield* sql<{ cnt: number }>`
+            SELECT COUNT(*) as cnt FROM es_events WHERE aggregate_id = ${rollbackCartId}
+          `
+          expect(rollbackEventsCount[0]?.cnt).toBe(0)
+
+          const rollbackProjectionCount = yield* sql<{ cnt: number }>`
+            SELECT COUNT(*) as cnt FROM projection_cart_view_v2 WHERE cart_id = ${rollbackCartId}
+          `
+          expect(rollbackProjectionCount[0]?.cnt).toBe(0)
 
           // 4. executeAggregateCommandAndSync fails with OutboxPublishError when cross-aggregate projection fails, preserving es_outbox row
           const outboxFailCartId = AggregateId.make("cart-outbox-fail")
