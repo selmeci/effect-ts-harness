@@ -14,9 +14,11 @@
   },
   "dependencies": {
     "@ast-grep/napi": "0.51.0",
+    "@electric-sql/d2ts": "0.1.8",
     "@modernrelay/omnigraph": "0.14.0",
     "effect": "4.0.0",
-    "ts-morph": "28.0.0"
+    "ts-morph": "28.0.0",
+    "ts-pattern": "5.9.2"
   },
   "devDependencies": {
     "@effect/vitest": "4.0.0",

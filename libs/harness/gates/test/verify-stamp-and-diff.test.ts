@@ -316,9 +316,39 @@ describe("verify-stamp and plan/impl graph diff", () => {
     expect(planImplDiff.ok).toBe(false)
     expect(planImplDiff.reasons).toEqual(
       expect.arrayContaining([
-        "Missing planned GovernsSymbol edge: sample:ADR-0001 -> PhotoRepo",
-        "Missing planned SpecifiesSymbol edge: sample:SPEC-0001 -> libs/sample/domain/src/index.ts#greet",
+        'Missing planned PlaysRole(governing-adr) relation on AdrDoc "sample:ADR-0001" (TraceabilityTuple:governs:sample:ADR-0001->ServiceTag:PhotoRepo -> AdrDoc:sample:ADR-0001)',
+        'Missing planned PlaysRole(specifying-ears) relation on EarsSpec "sample:SPEC-0001" (TraceabilityTuple:specifies:sample:SPEC-0001->EffectFn:libs/sample/domain/src/index.ts#greet -> EarsSpec:sample:SPEC-0001)',
       ]),
+    )
+  })
+
+  it("fails when a planned ServiceLayer or TaggedError is missing in the implementation graph", () => {
+    const planGraph = buildHarnessGraph({
+      layers: [
+        {
+          qualname: "libs/sample/infra/src/index.ts#GreeterLive",
+          layerKind: "live",
+          packageTag: "infra",
+          file: "libs/sample/infra/src/index.ts",
+        },
+      ],
+      errors: [
+        {
+          errorTag: "GreeterError",
+          file: "libs/sample/contract/src/index.ts",
+        },
+      ],
+    })
+
+    const emptyImplGraph = buildHarnessGraph({})
+
+    const diff = diffPlanAndImplGraphs(planGraph, emptyImplGraph)
+    expect(diff.ok).toBe(false)
+    expect(diff.reasons).toContain(
+      "Planned ServiceLayer 'libs/sample/infra/src/index.ts#GreeterLive' is missing in implementation graph",
+    )
+    expect(diff.reasons).toContain(
+      "Planned TaggedError 'GreeterError' is missing in implementation graph",
     )
   })
 })

@@ -1,7 +1,10 @@
 import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { Context, Data, Effect, Layer, Option, Schema } from "effect"
+import * as Graph from "effect/Graph"
 import { type Diff, type FetchLike, Omnigraph } from "@modernrelay/omnigraph"
+import { match } from "ts-pattern"
+import { classifyOntologyEdge, classifyOntologyNode } from "./archimate-ontology.js"
 import {
   deriveRepoOmnigraphPort,
   resolveOmnigraphClusterDir,
@@ -12,14 +15,16 @@ import {
   HARNESS_GQ_QUERIES,
   type HarnessGqQueryName,
 } from "./gq-queries.js"
-import { loadGraphSnapshot, saveGraphSnapshot, toOmnigraphNdjson } from "./graph-engine.js"
-import type { HarnessGraph } from "./model.js"
-
-const decodeJsonRecordOption = Schema.decodeOption(
-  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
-)
+import {
+  findTestsReaching,
+  loadGraphSnapshotEffect,
+  mapPlaysRoleToOmnigraphEdgeName,
+  saveGraphSnapshot,
+} from "./graph-engine.js"
+import { getNodeKey, type HarnessGraph, type HarnessNode, type VitestCaseNode } from "./model.js"
 
 export const OmnigraphClient = Omnigraph
+
 
 export class OmnigraphLoadError extends Data.TaggedError("OmnigraphLoadError")<{
   readonly cause: unknown
@@ -96,104 +101,341 @@ export const makeOmnigraphClient = (options?: OmnigraphConnectionOptions): Omnig
   })
 }
 
+export const omnigraphReachableTests = (
+  graph: HarnessGraph,
+  targetOrSpan: string,
+): ReadonlyArray<VitestCaseNode> => findTestsReaching(graph, targetOrSpan)
+
 const toOmnigraphServerNdjson = (graph: HarnessGraph): string => {
-  const raw = toOmnigraphNdjson(graph)
-  const rawLines = raw.split("\n").filter((l) => l.trim().length > 0)
   const nodeLines: Array<string> = []
-  const edgeRecords: Array<{
-    readonly edge: string
-    readonly from: string
-    readonly to: string
-    readonly data: Record<string, unknown>
-  }> = []
-  const nodeKeysByType = new Map<string, Set<string>>()
-  const anyNodes = new Map<string, string>()
+  const nodeMetaByKey = new Map<string, { readonly tag: HarnessNode["_tag"]; readonly id: string }>()
 
-  const addNodeKey = (type: string, key: string): void => {
-    let set = nodeKeysByType.get(type)
-    if (!set) {
-      set = new Set<string>()
-      nodeKeysByType.set(type, set)
+  for (const [, node] of Graph.nodes(graph.graph)) {
+    const key = getNodeKey(node)
+    const classified = classifyOntologyNode(node)
+    const archimateFields = {
+      archimateLayer: classified.layer,
+      archimateAspect: classified.aspect,
+      archimateElementType: classified.elementType,
     }
-    set.add(key)
-  }
 
-  for (const line of rawLines) {
-    const decoded = decodeJsonRecordOption(line)
-    if (Option.isNone(decoded)) continue
-    const parsed = decoded.value
-    if (typeof parsed.edge === "string") {
-      const edgeName = parsed.edge
-      const from = typeof parsed.from === "string" ? parsed.from : ""
-      const to = typeof parsed.to === "string" ? parsed.to : ""
-      const data =
-        typeof parsed.data === "object" && parsed.data !== null
-          ? { ...(parsed.data as Record<string, unknown>) }
-          : {}
-      edgeRecords.push({ edge: edgeName, from, to, data })
-      if (edgeName === "GovernsSymbol" || edgeName === "SpecifiesSymbol") {
-        const targetKind = typeof data.targetKind === "string" ? data.targetKind : "EffectFn"
-        anyNodes.set(to, targetKind)
-      }
-    } else if (typeof parsed.type === "string") {
-      const nodeType = parsed.type
-      const data =
-        typeof parsed.data === "object" && parsed.data !== null
-          ? { ...(parsed.data as Record<string, unknown>) }
-          : {}
-      if (nodeType === "EffectFn" && data.successType === null) {
-        data.successType = "unknown"
-      }
-      if (nodeType === "VitestCase" && data.lastTreeHash === null) {
-        data.lastTreeHash = ""
-      }
-      const id = typeof parsed.id === "string" ? parsed.id : ""
-      if (id.length > 0) {
-        addNodeKey(nodeType, id)
-      }
-      nodeLines.push(JSON.stringify({ type: nodeType, data }))
-    }
-  }
-
-  for (const [symbolKey, targetKind] of anyNodes.entries()) {
-    addNodeKey("Any", symbolKey)
-    nodeLines.push(
-      JSON.stringify({
-        type: "Any",
-        data: {
-          symbolKey,
-          targetKind,
-          archimateLayer: "Business",
-          archimateAspect: "Behavior",
-          archimateElementType: targetKind,
-        },
-      }),
-    )
-  }
-
-  const edgeEndpoints: Readonly<Record<string, readonly [string, string]>> = {
-    RequiresService: ["EffectFn", "ServiceTag"],
-    FailsWith: ["EffectFn", "TaggedError"],
-    ProvidesService: ["ServiceLayer", "ServiceTag"],
-    LayerRequires: ["ServiceLayer", "ServiceTag"],
-    TracedCall: ["EffectFn", "EffectFn"],
-    ExercisesSpan: ["VitestCase", "EffectFn"],
-    GovernsSymbol: ["AdrDoc", "Any"],
-    SpecifiesSymbol: ["EarsSpec", "Any"],
+    match(node)
+      .with({ _tag: "EffectFn" }, (n) => {
+        if (!n.qualname) return
+        nodeMetaByKey.set(key, { tag: n._tag, id: n.qualname })
+        nodeLines.push(
+          JSON.stringify({
+            type: "EffectFn",
+            data: {
+              qualname: n.qualname,
+              spanName: n.spanName,
+              packageTag: n.packageTag,
+              file: n.file,
+              line: n.line,
+              successType: n.successType ?? "unknown",
+              isStub: n.isStub ?? false,
+              ...(n.payloadSchemas ? { payloadSchemas: n.payloadSchemas } : {}),
+              ...(n.inputSchema ? { inputSchema: n.inputSchema } : {}),
+              ...(n.outputSchema ? { outputSchema: n.outputSchema } : {}),
+              ...archimateFields,
+            },
+          }),
+        )
+      })
+      .with({ _tag: "ServiceTag" }, (n) => {
+        if (!n.tagId) return
+        nodeMetaByKey.set(key, { tag: n._tag, id: n.tagId })
+        nodeLines.push(
+          JSON.stringify({
+            type: "ServiceTag",
+            data: {
+              tagId: n.tagId,
+              qualname: n.qualname ?? n.tagId,
+              name: n.name,
+              ...(n.identifier ? { identifier: n.identifier } : {}),
+              ...(n.packageTag ? { packageTag: n.packageTag } : {}),
+              file: n.file,
+              ...(n.line !== undefined ? { line: n.line } : {}),
+              ...archimateFields,
+            },
+          }),
+        )
+      })
+      .with({ _tag: "ServiceLayer" }, (n) => {
+        if (!n.qualname) return
+        nodeMetaByKey.set(key, { tag: n._tag, id: n.qualname })
+        nodeLines.push(
+          JSON.stringify({
+            type: "ServiceLayer",
+            data: {
+              qualname: n.qualname,
+              ...(n.layerKind ? { layerKind: n.layerKind } : {}),
+              ...(n.packageTag ? { packageTag: n.packageTag } : {}),
+              file: n.file,
+              ...(n.line !== undefined ? { line: n.line } : {}),
+              ...archimateFields,
+            },
+          }),
+        )
+      })
+      .with({ _tag: "TaggedError" }, (n) => {
+        if (!n.errorTag) return
+        nodeMetaByKey.set(key, { tag: n._tag, id: n.errorTag })
+        nodeLines.push(
+          JSON.stringify({
+            type: "TaggedError",
+            data: {
+              errorTag: n.errorTag,
+              qualname: n.qualname ?? n.errorTag,
+              ...(n.tag ? { tag: n.tag } : {}),
+              file: n.file,
+              ...(n.line !== undefined ? { line: n.line } : {}),
+              ...archimateFields,
+            },
+          }),
+        )
+      })
+      .with({ _tag: "SchemaDef" }, (n) => {
+        if (!n.schemaName) return
+        nodeMetaByKey.set(key, { tag: n._tag, id: n.schemaName })
+        nodeLines.push(
+          JSON.stringify({
+            type: "SchemaDef",
+            data: {
+              schemaName: n.schemaName,
+              qualname: n.qualname ?? n.schemaName,
+              name: n.name ?? n.schemaName,
+              ...(n.packageTag ? { packageTag: n.packageTag } : {}),
+              file: n.file,
+              ...(n.line !== undefined ? { line: n.line } : {}),
+              ...(n.isBranded !== undefined ? { isBranded: n.isBranded } : {}),
+              ...archimateFields,
+            },
+          }),
+        )
+      })
+      .with({ _tag: "VitestCase" }, (n) => {
+        if (!n.testId) return
+        nodeMetaByKey.set(key, { tag: n._tag, id: n.testId })
+        nodeLines.push(
+          JSON.stringify({
+            type: "VitestCase",
+            data: {
+              testId: n.testId,
+              qualname: n.qualname ?? n.testId,
+              testFile: n.testFile,
+              testName: n.testName,
+              ...(n.name ? { name: n.name } : {}),
+              ...(n.file ? { file: n.file } : {}),
+              ...(n.line !== undefined ? { line: n.line } : {}),
+              lastTreeHash: n.lastTreeHash ?? "",
+              isPropertyTest: n.isPropertyTest ?? false,
+              ...(n.hasNonPrimitiveArbitrary !== undefined
+                ? { hasNonPrimitiveArbitrary: n.hasNonPrimitiveArbitrary }
+                : {}),
+              ...archimateFields,
+            },
+          }),
+        )
+      })
+      .with({ _tag: "PatternDoc" }, (n) => {
+        if (!n.slug) return
+        nodeMetaByKey.set(key, { tag: n._tag, id: n.slug })
+        nodeLines.push(
+          JSON.stringify({
+            type: "PatternDoc",
+            data: {
+              slug: n.slug,
+              qualname: n.slug,
+              path: n.path,
+              summary: n.summary,
+              ...(n.title ? { title: n.title } : {}),
+              ...(n.coveredSpans ? { coveredSpans: n.coveredSpans } : {}),
+              ...(n.coveredTags ? { coveredTags: n.coveredTags } : {}),
+              ...archimateFields,
+            },
+          }),
+        )
+      })
+      .with({ _tag: "AdrDoc" }, (n) => {
+        if (!n.id) return
+        nodeMetaByKey.set(key, { tag: n._tag, id: n.id })
+        nodeLines.push(
+          JSON.stringify({
+            type: "AdrDoc",
+            data: {
+              id: n.id,
+              qualname: n.id,
+              title: n.title,
+              status: n.status,
+              ...(n.date ? { date: n.date } : {}),
+              path: n.path,
+              enforcedByFiles: n.enforcedByFiles,
+              ...(n.referencedSpans ? { referencedSpans: n.referencedSpans } : {}),
+              ...(n.referencedServices ? { referencedServices: n.referencedServices } : {}),
+              ...(n.referencedErrors ? { referencedErrors: n.referencedErrors } : {}),
+              ...archimateFields,
+            },
+          }),
+        )
+      })
+      .with({ _tag: "EarsSpec" }, (n) => {
+        if (!n.id) return
+        nodeMetaByKey.set(key, { tag: n._tag, id: n.id })
+        nodeLines.push(
+          JSON.stringify({
+            type: "EarsSpec",
+            data: {
+              id: n.id,
+              qualname: n.id,
+              title: n.title,
+              status: n.status,
+              ...(n.date ? { date: n.date } : {}),
+              path: n.path,
+              enforcedByFiles: n.enforcedByFiles,
+              ...(n.informedByAdrs ? { informedByAdrs: n.informedByAdrs } : {}),
+              ...(n.referencedSpans ? { referencedSpans: n.referencedSpans } : {}),
+              ...(n.referencedServices ? { referencedServices: n.referencedServices } : {}),
+              ...(n.referencedErrors ? { referencedErrors: n.referencedErrors } : {}),
+              ...archimateFields,
+            },
+          }),
+        )
+      })
+      .with({ _tag: "EffectSignature" }, (n) => {
+        if (!n.relationId) return
+        nodeMetaByKey.set(key, { tag: n._tag, id: n.relationId })
+        nodeLines.push(
+          JSON.stringify({
+            type: "EffectSignature",
+            data: {
+              relationId: n.relationId,
+              qualname: n.relationId,
+              callerQualname: n.callerQualname,
+              file: n.file,
+              line: n.line,
+            },
+          }),
+        )
+      })
+      .with({ _tag: "LayerFlow" }, (n) => {
+        if (!n.relationId) return
+        nodeMetaByKey.set(key, { tag: n._tag, id: n.relationId })
+        nodeLines.push(
+          JSON.stringify({
+            type: "LayerFlow",
+            data: {
+              relationId: n.relationId,
+              qualname: n.relationId,
+              layerQualname: n.layerQualname,
+              file: n.file,
+              line: n.line,
+            },
+          }),
+        )
+      })
+      .with({ _tag: "TraceabilityTuple" }, (n) => {
+        if (!n.relationId) return
+        nodeMetaByKey.set(key, { tag: n._tag, id: n.relationId })
+        nodeLines.push(
+          JSON.stringify({
+            type: "TraceabilityTuple",
+            data: {
+              relationId: n.relationId,
+              qualname: n.relationId,
+              ...(n.adrId ? { adrId: n.adrId } : {}),
+              ...(n.earsSpecId ? { earsSpecId: n.earsSpecId } : {}),
+              ...(n.requirementId ? { requirementId: n.requirementId } : {}),
+              ...(n.earsPattern ? { earsPattern: n.earsPattern } : {}),
+              targetSymbolQualname: n.targetSymbolQualname,
+            },
+          }),
+        )
+      })
+      .with({ _tag: "HttpEndpointTuple" }, (n) => {
+        if (!n.relationId) return
+        nodeMetaByKey.set(key, { tag: n._tag, id: n.relationId })
+        nodeLines.push(
+          JSON.stringify({
+            type: "HttpEndpointTuple",
+            data: {
+              relationId: n.relationId,
+              qualname: n.relationId,
+              endpointGroup: n.endpointGroup,
+              endpointName: n.endpointName,
+              method: n.method,
+              path: n.path,
+              ...(n.handlerQualname ? { handlerQualname: n.handlerQualname } : {}),
+              file: n.file,
+              line: n.line,
+            },
+          }),
+        )
+      })
+      .with({ _tag: "MigrationTuple" }, (n) => {
+        if (!n.relationId) return
+        nodeMetaByKey.set(key, { tag: n._tag, id: n.relationId })
+        nodeLines.push(
+          JSON.stringify({
+            type: "MigrationTuple",
+            data: {
+              relationId: n.relationId,
+              qualname: n.relationId,
+              migrationId: n.migrationId,
+              engine: n.engine,
+              moduleFile: n.moduleFile,
+              isDestructive: n.isDestructive,
+              line: n.line,
+            },
+          }),
+        )
+      })
+      .exhaustive()
   }
 
   const validEdgeLines: Array<string> = []
   const seenEdges = new Set<string>()
-  for (const rec of edgeRecords) {
-    const endpoints = edgeEndpoints[rec.edge]
-    if (!endpoints) continue
-    const [srcType, dstType] = endpoints
-    const edgeKey = `${rec.edge}::${rec.from}::${rec.to}`
-    if (seenEdges.has(edgeKey)) continue
-    if (nodeKeysByType.get(srcType)?.has(rec.from) && nodeKeysByType.get(dstType)?.has(rec.to)) {
-      seenEdges.add(edgeKey)
-      validEdgeLines.push(JSON.stringify(rec))
+
+  for (const [, edge] of Graph.edges(graph.graph)) {
+    const srcOpt = Graph.getNode(graph.graph, edge.source)
+    const dstOpt = Graph.getNode(graph.graph, edge.target)
+    if (Option.isNone(srcOpt) || Option.isNone(dstOpt)) continue
+    const srcMeta = nodeMetaByKey.get(getNodeKey(srcOpt.value))
+    const dstMeta = nodeMetaByKey.get(getNodeKey(dstOpt.value))
+    if (!srcMeta || !dstMeta) continue
+
+    const omnigraphEdgeName = mapPlaysRoleToOmnigraphEdgeName(
+      srcMeta.tag,
+      dstMeta.tag,
+      edge.data.role,
+    )
+    if (!omnigraphEdgeName) {
+      // oxlint-disable-next-line -- synchronous serializer boundary
+      throw new Error(
+        `Unmappable role '${edge.data.role}' from ${srcMeta.tag} to ${dstMeta.tag} in toOmnigraphServerNdjson`,
+      )
     }
+
+    const dedupKey = `${omnigraphEdgeName}::${srcMeta.id}::${dstMeta.id}::${edge.data.role}`
+    if (seenEdges.has(dedupKey)) continue
+    seenEdges.add(dedupKey)
+
+    const archimateRelation = classifyOntologyEdge(edge.data)
+    validEdgeLines.push(
+      JSON.stringify({
+        edge: omnigraphEdgeName,
+        from: srcMeta.id,
+        to: dstMeta.id,
+        data: {
+          role: edge.data.role,
+          archimateRelation,
+          ...(edge.data.callCount !== undefined ? { callCount: edge.data.callCount } : {}),
+          ...(edge.data.receiverLayer !== undefined && edge.data.receiverLayer !== null
+            ? { receiverLayer: edge.data.receiverLayer }
+            : {}),
+        },
+      }),
+    )
   }
 
   return [...nodeLines, ...validEdgeLines].join("\n")
@@ -353,7 +595,9 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
                   if (!existsSync(fallbackSnap)) {
                     return yield* mergeErr
                   }
-                  const snapGraph = loadGraphSnapshot(fallbackSnap)
+                  const snapGraph = yield* loadGraphSnapshotEffect(fallbackSnap).pipe(
+                    Effect.mapError((cause) => new OmnigraphLoadError({ cause })),
+                  )
                   const ndjson = toOmnigraphServerNdjson(snapGraph)
                   if (ndjson.trim().length > 0) {
                     yield* Effect.tryPromise({

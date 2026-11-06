@@ -17,10 +17,13 @@ import {
   OmnigraphSync,
   queryOmnigraph,
   readGraphHeadMeta,
+  RelationId,
   resolveGitHeadState,
   resolveOmnigraphBaseUrl,
   resolveOmnigraphTaskBranches,
+  saveGraphSnapshot,
   syncToOmnigraphAndSnapshot,
+  toOmnigraphNdjson,
   writeGraphHeadMeta,
 } from "../src/index.js"
 
@@ -43,7 +46,7 @@ describe("Omnigraph 0.14.0 schema.pg and queries/harness.gq", () => {
   const schemaPath = path.join(graphDir, "schema.pg")
   const queriesPath = path.join(graphDir, "queries/harness.gq")
 
-  it.effect("declares all 8 node types and ArchiMate properties in schema.pg", () =>
+  it.effect("declares all PERA EntityNode, RelationNode, and Plays*Role edge types in schema.pg", () =>
     Effect.gen(function* () {
       yield* Effect.void
       const schema = fs.readFileSync(schemaPath, "utf8")
@@ -53,33 +56,43 @@ describe("Omnigraph 0.14.0 schema.pg and queries/harness.gq", () => {
         "node ServiceTag",
         "node ServiceLayer",
         "node TaggedError",
+        "node SchemaDef",
         "node VitestCase",
         "node PatternDoc",
         "node AdrDoc",
         "node EarsSpec",
+        "node EffectSignature",
+        "node LayerFlow",
+        "node TraceabilityTuple",
+        "node HttpEndpointTuple",
+        "node MigrationTuple",
       ]
       for (const nodeDecl of expectedNodes) {
         expect(schema).toContain(nodeDecl)
       }
+      expect(schema).not.toContain("node Any")
 
       expect(schema).toContain(
-        "archimateLayer: enum(Motivation, Business, Application, Technology, Implementation) @index",
+        "archimateLayer: enum(Motivation, Business, Application, Technology, Implementation)? @index",
       )
       expect(schema).toContain(
-        "archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure) @index",
+        "archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure)? @index",
       )
-      expect(schema).toContain("archimateElementType: String @index")
-      expect(schema).toContain("isPropertyTest: Bool @index")
+      expect(schema).toContain("archimateElementType: String? @index")
+      expect(schema).toContain("isPropertyTest: Bool? @index")
 
       const expectedEdges = [
-        "edge RequiresService: EffectFn -> ServiceTag",
-        "edge FailsWith: EffectFn -> TaggedError",
-        "edge ProvidesService: ServiceLayer -> ServiceTag",
-        "edge LayerRequires: ServiceLayer -> ServiceTag",
-        "edge TracedCall: EffectFn -> EffectFn",
-        "edge ExercisesSpan: VitestCase -> EffectFn",
-        "edge GovernsSymbol: AdrDoc -> Any",
-        "edge SpecifiesSymbol: EarsSpec -> Any",
+        "edge PlaysCallerRole: EffectSignature -> EffectFn",
+        "edge PlaysCalleeRole: EffectSignature -> EffectFn",
+        "edge PlaysRequiresServiceRole: EffectSignature -> ServiceTag",
+        "edge PlaysFailsWithRole: EffectSignature -> TaggedError",
+        "edge PlaysProviderLayerRole: LayerFlow -> ServiceLayer",
+        "edge PlaysProvidedServiceRole: LayerFlow -> ServiceTag",
+        "edge PlaysRequiredServiceRole: LayerFlow -> ServiceTag",
+        "edge PlaysGoverningAdrRole: TraceabilityTuple -> AdrDoc",
+        "edge PlaysSpecifyingEarsRole: TraceabilityTuple -> EarsSpec",
+        "edge PlaysExercisingTestRole: TraceabilityTuple -> VitestCase",
+        "edge PlaysExercisedSpanRole: TraceabilityTuple -> EffectFn",
       ]
       for (const edgeDecl of expectedEdges) {
         expect(schema).toContain(edgeDecl)
@@ -313,6 +326,20 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
         isStub: false,
       },
     ],
+    services: [
+      {
+        tagId: "Greeter",
+        name: "Greeter",
+        packageTag: "service",
+        file: "libs/sample/service/src/index.ts",
+      },
+    ],
+    requiresService: [
+      {
+        fnQualname: "libs/sample/domain/src/index.ts#greet",
+        tagId: "Greeter",
+      },
+    ],
   })
 
   it.effect("syncs with branch and forks from main using exact Omnigraph 0.14 protocol", () =>
@@ -376,9 +403,19 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
       const parsedBody = decodeJson(loadReq?.body ?? "{}") as {
         readonly branch: string
         readonly from: string
+        readonly data: string
       }
       expect(parsedBody.branch).toBe("plan/current")
       expect(parsedBody.from).toBe("main")
+
+      const lines = parsedBody.data
+        .split("\n")
+        .filter((l) => l.trim().length > 0)
+        .map((l) => decodeJson(l) as { readonly type?: string; readonly edge?: string })
+      expect(lines.some((l) => l.type === "EffectFn")).toBe(true)
+      expect(lines.some((l) => l.type === "EffectSignature")).toBe(true)
+      expect(lines.some((l) => l.edge === "PlaysCallerRole")).toBe(true)
+      expect(lines.every((l) => l.type !== "Any" && l.edge !== "Any")).toBe(true)
     }),
   )
 
@@ -700,8 +737,480 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
           fs.rmSync(repoDir, { recursive: true, force: true })
         }
       }),
-  )
-})
+    )
+
+    it.effect(
+      "F-15: syncToOmnigraphAndSnapshot returns syncedToOmnigraph: false with error when /load returns HTTP 500",
+      () =>
+        Effect.gen(function* () {
+          const repoDir = fs.mkdtempSync(path.join(tmpdir(), "og-sync-err-"))
+          try {
+            const snapshotPath = path.join(repoDir, ".harness", "graph-snapshot.json")
+            const mockFetch: FetchLike = (input) => {
+              const urlStr = toUrlString(input)
+              if (urlStr.includes("/graphs/harness/load")) {
+                return Promise.resolve(
+                  new Response("Internal Server Error in Omnigraph", {
+                    status: 500,
+                    headers: { "Content-Type": "text/plain", "Omnigraph-Http-Api": "0.14" },
+                  }),
+                )
+              }
+              return Promise.resolve(
+                new Response("{}", {
+                  status: 200,
+                  headers: { "Content-Type": "application/json", "Omnigraph-Http-Api": "0.14" },
+                }),
+              )
+            }
+
+            const res = yield* syncToOmnigraphAndSnapshot(sampleGraph, {
+              repoRoot: repoDir,
+              branch: "impl/test-err",
+              from: "main",
+              snapshotPath,
+              fetch: mockFetch,
+            }).pipe(Effect.provide(OmnigraphSync.Live))
+
+            expect(res.syncedToOmnigraph).toBe(false)
+            expect(res.error).toBeDefined()
+            expect(res.error).toContain("500")
+            expect(fs.existsSync(snapshotPath)).toBe(true)
+          } finally {
+            fs.rmSync(repoDir, { recursive: true, force: true })
+          }
+        }),
+    )
+
+    it.effect(
+      "F-15: mergeOmnigraphBranch falls back to loading .harness/graph-snapshot.json when /branches/merge returns HTTP 500, and returns false when fallback snapshot is missing or corrupt",
+      () =>
+        Effect.gen(function* () {
+          const repoDir = fs.mkdtempSync(path.join(tmpdir(), "og-merge-fallback-"))
+          try {
+            const harnessDir = path.join(repoDir, ".harness")
+            fs.mkdirSync(harnessDir, { recursive: true })
+            const snapshotPath = path.join(harnessDir, "graph-snapshot.json")
+
+            let loadCalledOnFallback = false
+            const mockFetchWithMergeFail: FetchLike = (input, init) => {
+              const urlStr = toUrlString(input)
+              const method =
+                init?.method ??
+                (typeof input === "object" && "method" in input ? input.method : "GET")
+
+              if (urlStr.endsWith("/graphs/harness/branches") && method === "GET") {
+                return Promise.resolve(
+                  new Response(
+                    JSON.stringify({
+                      outcome: "ok",
+                      branches: ["main", "impl/current"],
+                      serverRef: "9d92f397",
+                    }),
+                    {
+                      status: 200,
+                      headers: {
+                        "Content-Type": "application/json",
+                        "Omnigraph-Http-Api": "0.14",
+                      },
+                    },
+                  ),
+                )
+              }
+
+              if (urlStr.includes("/graphs/harness/branches/merge")) {
+                return Promise.resolve(
+                  new Response("Merge failed internally", {
+                    status: 500,
+                    headers: { "Content-Type": "text/plain", "Omnigraph-Http-Api": "0.14" },
+                  }),
+                )
+              }
+
+              if (urlStr.includes("/graphs/harness/load") && method === "POST") {
+                loadCalledOnFallback = true
+                return Promise.resolve(
+                  new Response(
+                    JSON.stringify({
+                      outcome: "loaded",
+                      commit: {
+                        sha: "abc12345",
+                        parentSha: null,
+                        treeSha: "def",
+                        author: "test",
+                        message: "m",
+                        timestamp: "t",
+                      },
+                      serverRef: "9d92f397",
+                    }),
+                    {
+                      status: 200,
+                      headers: {
+                        "Content-Type": "application/json",
+                        "Omnigraph-Http-Api": "0.14",
+                      },
+                    },
+                  ),
+                )
+              }
+
+              return Promise.resolve(
+                new Response("{}", {
+                  status: 200,
+                  headers: { "Content-Type": "application/json", "Omnigraph-Http-Api": "0.14" },
+                }),
+              )
+            }
+
+            // Case A: Missing fallback snapshot -> returns false
+            const mergedMissing = yield* mergeOmnigraphBranch({
+              repoRoot: repoDir,
+              source: "impl/current",
+              target: "main",
+              fetch: mockFetchWithMergeFail,
+            }).pipe(Effect.provide(OmnigraphSync.Live))
+            expect(mergedMissing).toBe(false)
+            expect(loadCalledOnFallback).toBe(false)
+
+            // Case B: Corrupt fallback snapshot -> returns false
+            fs.writeFileSync(snapshotPath, "{ corrupted json: 123", "utf8")
+            const mergedCorrupt = yield* mergeOmnigraphBranch({
+              repoRoot: repoDir,
+              source: "impl/current",
+              target: "main",
+              fetch: mockFetchWithMergeFail,
+            }).pipe(Effect.provide(OmnigraphSync.Live))
+            expect(mergedCorrupt).toBe(false)
+            expect(loadCalledOnFallback).toBe(false)
+
+            // Case C: Valid fallback snapshot exists -> succeeds via /load and returns true
+            saveGraphSnapshot(sampleGraph, snapshotPath)
+            const mergedSuccess = yield* mergeOmnigraphBranch({
+              repoRoot: repoDir,
+              source: "impl/current",
+              target: "main",
+              fetch: mockFetchWithMergeFail,
+            }).pipe(Effect.provide(OmnigraphSync.Live))
+            expect(mergedSuccess).toBe(true)
+            expect(loadCalledOnFallback).toBe(true)
+          } finally {
+            fs.rmSync(repoDir, { recursive: true, force: true })
+          }
+        }),
+    )
+
+    it.effect(
+      "F-29: every edge emitted by toOmnigraphNdjson on a comprehensive graph is declared in schema.pg",
+      () =>
+        Effect.gen(function* () {
+          yield* Effect.void
+          const schemaPath = path.resolve(import.meta.dirname, "../schema.pg")
+          const schema = fs.readFileSync(schemaPath, "utf8")
+          const edgeMatches = schema.matchAll(/^edge\s+([A-Za-z0-9_]+):/gm)
+          const declaredEdgeTypes = new Set<string>()
+          for (const m of edgeMatches) {
+            if (m[1]) {
+              declaredEdgeTypes.add(m[1])
+            }
+          }
+          expect(declaredEdgeTypes.size).toBeGreaterThanOrEqual(25)
+
+          const comprehensiveGraph = buildHarnessGraph({
+            fns: [
+              {
+                qualname: "libs/comprehensive/domain/src/index.ts#callerFn",
+                spanName: "Caller.fn",
+                file: "libs/comprehensive/domain/src/index.ts",
+                line: 1,
+                packageTag: "domain",
+                successType: "string",
+                inputSchema: "InputSchemaDef",
+                outputSchema: "OutputSchemaDef",
+                payloadSchemas: ["UsesSchemaDef"],
+                isStub: false,
+              },
+              {
+                qualname: "libs/comprehensive/domain/src/index.ts#calleeFn",
+                spanName: "Callee.fn",
+                file: "libs/comprehensive/domain/src/index.ts",
+                line: 10,
+                packageTag: "domain",
+                successType: "void",
+                isStub: false,
+              },
+              {
+                qualname: "libs/comprehensive/infra/src/index.ts#httpHandler",
+                spanName: "Http.handler",
+                file: "libs/comprehensive/infra/src/index.ts",
+                line: 20,
+                packageTag: "infra",
+                successType: "void",
+                isStub: false,
+              },
+            ],
+            services: [
+              {
+                tagId: "CompService",
+                name: "CompService",
+                packageTag: "service",
+                file: "libs/comprehensive/service/src/index.ts",
+              },
+              {
+                tagId: "LayerReqService",
+                name: "LayerReqService",
+                packageTag: "service",
+                file: "libs/comprehensive/service/src/index.ts",
+              },
+            ],
+            layers: [
+              {
+                qualname: "CompLayerLive",
+                layerKind: "live",
+                packageTag: "infra",
+                file: "libs/comprehensive/infra/src/layer.ts",
+              },
+            ],
+            errors: [
+              {
+                errorTag: "SigError",
+                file: "libs/comprehensive/contract/src/errors.ts",
+              },
+              {
+                errorTag: "LayerError",
+                file: "libs/comprehensive/contract/src/errors.ts",
+              },
+              {
+                errorTag: "HttpError",
+                file: "libs/comprehensive/contract/src/errors.ts",
+              },
+            ],
+            schemas: [
+              {
+                schemaName: "InputSchemaDef",
+                file: "libs/comprehensive/contract/src/schemas.ts",
+              },
+              {
+                schemaName: "OutputSchemaDef",
+                file: "libs/comprehensive/contract/src/schemas.ts",
+              },
+              {
+                schemaName: "UsesSchemaDef",
+                file: "libs/comprehensive/contract/src/schemas.ts",
+              },
+              {
+                schemaName: "HttpRequestSchema",
+                file: "libs/comprehensive/contract/src/schemas.ts",
+              },
+              {
+                schemaName: "HttpResponseSchema",
+                file: "libs/comprehensive/contract/src/schemas.ts",
+              },
+            ],
+            tests: [
+              {
+                testId: "libs/comprehensive/domain/test/index.test.ts::test 1",
+                testFile: "libs/comprehensive/domain/test/index.test.ts",
+                testName: "test 1",
+              },
+              {
+                testId: "libs/comprehensive/infra/test/mig.test.ts::migration test",
+                testFile: "libs/comprehensive/infra/test/mig.test.ts",
+                testName: "migration test",
+              },
+            ],
+            patternDocs: [
+              {
+                slug: "comp-pattern",
+                path: "agent-patterns/comp.md",
+                summary: "Comprehensive pattern",
+              },
+            ],
+            adrDocs: [
+              {
+                id: "ADR-COMP",
+                title: "Comprehensive ADR",
+                status: "accepted",
+                path: "docs/adr/comp.md",
+                enforcedByFiles: [],
+              },
+            ],
+            earsSpecs: [
+              {
+                id: "SPEC-COMP",
+                title: "Comprehensive Spec",
+                status: "accepted",
+                path: "docs/specs/comp.md",
+                enforcedByFiles: [],
+              },
+            ],
+            requiresService: [
+              {
+                callerQualname: "libs/comprehensive/domain/src/index.ts#callerFn",
+                tagId: "CompService",
+              },
+            ],
+            failsWith: [
+              {
+                callerQualname: "libs/comprehensive/domain/src/index.ts#callerFn",
+                errorTag: "SigError",
+              },
+            ],
+            tracedCalls: [
+              {
+                callerQualname: "libs/comprehensive/domain/src/index.ts#callerFn",
+                calleeQualname: "libs/comprehensive/domain/src/index.ts#calleeFn",
+                callCount: 2,
+                receiverLayer: null,
+              },
+            ],
+            providesService: [
+              {
+                layerQualname: "CompLayerLive",
+                tagId: "CompService",
+              },
+            ],
+            layerRequires: [
+              {
+                layerQualname: "CompLayerLive",
+                tagId: "LayerReqService",
+              },
+            ],
+            layerFlows: [
+              {
+                relationId: RelationId.make("LayerFlow:CompLayerLive"),
+                layerQualname: "CompLayerLive",
+                providesServices: ["CompService"],
+                requiresServices: ["LayerReqService"],
+                emittedErrors: ["LayerError"],
+                file: "libs/comprehensive/infra/src/layer.ts",
+                line: 1,
+              },
+            ],
+            exercisesSpans: [
+              {
+                testId: "libs/comprehensive/domain/test/index.test.ts::test 1",
+                calleeQualname: "libs/comprehensive/domain/src/index.ts#callerFn",
+                callCount: 1,
+                receiverLayer: null,
+              },
+            ],
+            governsSymbols: [
+              {
+                adrId: "ADR-COMP",
+                targetKey: "libs/comprehensive/domain/src/index.ts#callerFn",
+                targetKind: "EffectFn",
+              },
+            ],
+            specifiesSymbols: [
+              {
+                specId: "SPEC-COMP",
+                targetKey: "libs/comprehensive/domain/src/index.ts#callerFn",
+                targetKind: "EffectFn",
+              },
+            ],
+            traceabilityTuples: [
+              {
+                relationId: RelationId.make("TraceabilityTuple:pattern-and-test"),
+                adrId: "ADR-COMP",
+                earsSpecId: "SPEC-COMP",
+                targetSymbolQualname: "libs/comprehensive/domain/src/index.ts#callerFn",
+                verifyingTestQualnames: ["libs/comprehensive/domain/test/index.test.ts::test 1"],
+                enforcingPatternPaths: ["agent-patterns/comp.md"],
+              },
+              {
+                relationId: RelationId.make("TraceabilityTuple:realize-svc"),
+                targetSymbolQualname: "CompService",
+                verifyingTestQualnames: [],
+              },
+              {
+                relationId: RelationId.make("TraceabilityTuple:realize-layer"),
+                targetSymbolQualname: "CompLayerLive",
+                verifyingTestQualnames: [],
+              },
+              {
+                relationId: RelationId.make("TraceabilityTuple:realize-err"),
+                targetSymbolQualname: "SigError",
+                verifyingTestQualnames: [],
+              },
+              {
+                relationId: RelationId.make("TraceabilityTuple:realize-schema"),
+                targetSymbolQualname: "InputSchemaDef",
+                verifyingTestQualnames: [],
+              },
+            ],
+            httpEndpointTuples: [
+              {
+                relationId: RelationId.make("HttpEndpoint:CompEp"),
+                endpointGroup: "Comp",
+                endpointName: "handle",
+                method: "POST",
+                path: "/comp",
+                handlerQualname: "libs/comprehensive/infra/src/index.ts#httpHandler",
+                requestSchemaQualnames: ["HttpRequestSchema"],
+                responseSchemaQualnames: ["HttpResponseSchema"],
+                errorTags: ["HttpError"],
+                file: "libs/comprehensive/infra/src/http.ts",
+                line: 1,
+              },
+            ],
+            migrationTuples: [
+              {
+                relationId: RelationId.make("Migration:1_comp_mig"),
+                migrationId: "1_comp_mig",
+                engine: "SqliteMigrator",
+                moduleFile: "libs/comprehensive/infra/src/mig.ts",
+                isDestructive: false,
+                verifyingTestQualnames: [
+                  "libs/comprehensive/infra/test/mig.test.ts::migration test",
+                ],
+                line: 1,
+              },
+            ],
+          })
+
+          const ndjson = toOmnigraphNdjson(comprehensiveGraph)
+          const emittedEdgeNames = new Set<string>()
+
+          for (const line of ndjson.split("\n")) {
+            if (!line.trim()) continue
+            const parsed = JSON.parse(line) as { readonly edge?: string }
+            if (parsed.edge !== undefined) {
+              emittedEdgeNames.add(parsed.edge)
+              expect(declaredEdgeTypes.has(parsed.edge)).toBe(true)
+            }
+          }
+
+          expect(emittedEdgeNames.size).toBeGreaterThanOrEqual(15)
+          expect(emittedEdgeNames.has("PlaysCallerRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysCalleeRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysRequiresServiceRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysFailsWithRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysInputSchemaRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysOutputSchemaRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysUsesSchemaRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysProviderLayerRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysProvidedServiceRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysRequiredServiceRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysLayerFailsWithRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysGoverningAdrRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysSpecifyingEarsRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysRealizingFnRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysRealizingServiceRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysRealizingLayerRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysRealizingErrorRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysRealizingSchemaRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysVerifyingTestRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysEnforcingPatternRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysExercisingTestRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysExercisedSpanRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysEndpointHandlerRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysRequestSchemaRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysResponseSchemaRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysEndpointErrorRole")).toBe(true)
+          expect(emittedEdgeNames.has("PlaysMigrationVerifyingTestRole")).toBe(true)
+        }),
+    )
+  })
 
 describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
   it.effect.prop(

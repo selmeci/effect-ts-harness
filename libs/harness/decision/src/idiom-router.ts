@@ -126,7 +126,13 @@ export const assertDecisionLimits = (definition: {
   readonly decisions: Readonly<
     Record<
       string,
-      { readonly _tag: string; readonly criteria?: Readonly<Record<string, string>> | undefined }
+      {
+        readonly _tag: string
+        readonly criteria?:
+          | Readonly<Record<string, unknown>>
+          | ReadonlyArray<unknown>
+          | undefined
+      }
     >
   >
 }): void => {
@@ -138,7 +144,9 @@ export const assertDecisionLimits = (definition: {
   }
   for (const [name, question] of entries) {
     if (question.criteria !== undefined) {
-      const optionCount = Object.keys(question.criteria).length
+      const optionCount = Array.isArray(question.criteria)
+        ? question.criteria.length
+        : Object.keys(question.criteria).length
       if (optionCount < 2 || optionCount > 26) {
         Effect.runSync(
           Effect.die(

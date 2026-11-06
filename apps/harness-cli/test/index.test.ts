@@ -2492,6 +2492,18 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
               { name: "view_file", args: { AbsolutePath: "/repo/README.md" } },
               { name: "search_web", args: { query: "TypeDB 3.0" } },
               { name: "run_command", args: { CommandLine: "rg --files libs/harness" } },
+              {
+                name: "invoke_subagent",
+                args: {
+                  Subagents: JSON.stringify([
+                    {
+                      TypeName: "research",
+                      Role: "Literature Researcher",
+                      Prompt: "Search papers",
+                    },
+                  ]),
+                },
+              },
             ],
           }),
         ].join("\n") + "\n",

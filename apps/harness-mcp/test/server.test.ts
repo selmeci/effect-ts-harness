@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest"
 import { Effect, Layer } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import * as AiError from "effect/ai/AiError"
+import { makeMockDecisionModelLayer } from "@harness/decision"
 import { buildHarnessGraph, saveGraphSnapshot } from "@harness/graph"
 import {
   createServer,
@@ -330,7 +331,7 @@ describe("harness-mcp tools", () => {
     await expect(executeTool("unknown_tool", {})).rejects.toThrow()
   })
 
-  it("completes MCP stdio handshake and lists all 12 tools when spawned from Antigravity plugin directory", async () => {
+  it("completes MCP stdio handshake and lists all 14 tools when spawned from Antigravity plugin directory", async () => {
     const { Client } = await import("@modelcontextprotocol/sdk/client/index.js")
     const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js")
     const repoRoot = path.resolve(import.meta.dirname, "../../..")
@@ -362,12 +363,162 @@ describe("harness-mcp tools", () => {
         "harness_ontology_impact",
         "harness_ontology_check",
         "harness_gq_query",
+        "harness_graph_infer",
+        "harness_graph_complete",
         "harness_lsp_diagnostics",
         "harness_telemetry_report",
       ])
     } finally {
       await client.close()
     }
+  })
+
+  it("executes harness_graph_infer and harness_graph_complete over the PERA hypergraph", async () => {
+    const inferRes = (await executeTool(
+      "harness_graph_infer",
+      { symbolOrSpan: "Sample.callGreet" },
+      { graph },
+    )) as {
+      readonly effectiveRequires: ReadonlyArray<{
+        readonly callerKey: string
+        readonly serviceKey: string
+      }>
+      readonly proofs: ReadonlyArray<{ readonly ruleId: string }>
+    }
+    expect(inferRes).toMatchObject({
+      effectiveRequires: expect.arrayContaining([
+        expect.objectContaining({
+          callerKey: "EffectFn:libs/sample/service/src/index.ts#callGreet",
+          serviceKey: "ServiceTag:libs/sample/service/src/index.ts#Greeter",
+        }),
+      ]),
+    })
+    expect(inferRes.proofs.length).toBeGreaterThan(0)
+    expect(inferRes.proofs.some((p) => p.ruleId === "INF-01")).toBe(true)
+
+    const completeRes = (await executeTool(
+      "harness_graph_complete",
+      { minConfidenceMillis: 800, ruleId: "COMP-03" },
+      { graph },
+    )) as {
+      readonly suggestedEdges: ReadonlyArray<{
+        readonly ruleId: string
+        readonly role: string
+        readonly targetEntityKey: string
+      }>
+      readonly proofs: ReadonlyArray<{ readonly ruleId: string }>
+    }
+    expect(completeRes).toMatchObject({
+      suggestedEdges: expect.arrayContaining([
+        expect.objectContaining({
+          ruleId: "COMP-03",
+          role: "provided-service",
+          targetEntityKey: "ServiceTag:libs/sample/service/src/index.ts#Greeter",
+        }),
+      ]),
+    })
+    expect(completeRes.suggestedEdges.every((e) => e.ruleId === "COMP-03")).toBe(true)
+    expect(completeRes.proofs.every((p) => p.ruleId === "COMP-03")).toBe(true)
+
+    const filteredOutRes = (await executeTool(
+      "harness_graph_complete",
+      { minConfidenceMillis: 950, ruleId: "COMP-03" },
+      { graph },
+    )) as {
+      readonly suggestedEdges: ReadonlyArray<unknown>
+    }
+    expect(filteredOutRes.suggestedEdges).toHaveLength(0)
+  })
+
+  it("executes harness_graph_complete with useDecisionPriors: true to evaluate priors and return suggestedEdges and typedHoleBundles", async () => {
+    const graphWithHole = buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/sample/domain/src/cart.ts#addItem",
+          spanName: "Cart.addItem",
+          file: "libs/sample/domain/src/cart.ts",
+          line: 10,
+          packageTag: "domain",
+          successType: "CartUpdated",
+          isStub: true,
+        },
+        {
+          qualname: "libs/sample/domain/src/cart.ts#decide",
+          spanName: "Cart.decide",
+          file: "libs/sample/domain/src/cart.ts",
+          line: 25,
+          packageTag: "domain",
+          successType: "CartEvent",
+          isStub: false,
+        },
+      ],
+      services: [
+        {
+          tagId: "libs/sample/service/src/cart-repo.ts#CartRepo",
+          name: "CartRepo",
+          packageTag: "service",
+          file: "libs/sample/service/src/cart-repo.ts",
+        },
+      ],
+      errors: [
+        {
+          errorTag: "CartLimitExceededError",
+          file: "libs/sample/contract/src/errors.ts",
+        },
+      ],
+      schemas: [
+        {
+          schemaName: "CartItemId",
+          file: "libs/sample/contract/src/schemas.ts",
+          isBranded: true,
+        },
+      ],
+      requiresService: [
+        {
+          fnQualname: "libs/sample/domain/src/cart.ts#addItem",
+          tagId: "libs/sample/service/src/cart-repo.ts#CartRepo",
+        },
+      ],
+      failsWith: [
+        {
+          callerQualname: "libs/sample/domain/src/cart.ts#addItem",
+          errorTag: "CartLimitExceededError",
+        },
+      ],
+    })
+
+    const completeWithPriorsRes = (await executeTool(
+      "harness_graph_complete",
+      { useDecisionPriors: true },
+      {
+        graph: graphWithHole,
+        decisionLayer: makeMockDecisionModelLayer({
+          edgeConfidenceProb: 0.95,
+          candidateRelevanceLabel: "essential",
+        }),
+      },
+    )) as {
+      readonly suggestedEdges: ReadonlyArray<{
+        readonly ruleId: string
+        readonly targetEntityKey: string
+      }>
+      readonly typedHoleBundles: ReadonlyArray<{
+        readonly holeQualname: string
+        readonly spanName: string
+        readonly requiredServiceCapabilities: ReadonlyArray<string>
+      }>
+    }
+
+    expect(completeWithPriorsRes).toBeDefined()
+    expect(Array.isArray(completeWithPriorsRes.suggestedEdges)).toBe(true)
+    expect(Array.isArray(completeWithPriorsRes.typedHoleBundles)).toBe(true)
+    expect(completeWithPriorsRes.typedHoleBundles.length).toBeGreaterThan(0)
+    expect(completeWithPriorsRes.typedHoleBundles[0]?.spanName).toBe("Cart.addItem")
+    expect(
+      completeWithPriorsRes.typedHoleBundles[0]?.requiredServiceCapabilities.some((s) =>
+        s.includes("CartRepo"),
+      ),
+    ).toBe(true)
   })
 
   it("automatically loads plan-graph-snapshot.json when graph-snapshot.json is absent or older, and honours args.repoRoot", async () => {

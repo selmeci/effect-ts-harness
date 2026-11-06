@@ -223,8 +223,8 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
     const mermaid = renderMermaid(graph)
     expect(mermaid).toContain("ADR:sample:ADR-0001")
     expect(mermaid).toContain("Spec:sample:SPEC-0001")
-    expect(mermaid).toContain("governs")
-    expect(mermaid).toContain("specifies")
+    expect(mermaid).toContain("governing-adr")
+    expect(mermaid).toContain("specifying-ears")
 
     // 5. toOmnigraphNdjson
     const ndjson = toOmnigraphNdjson(graph)
@@ -234,8 +234,8 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
     const adrJson = objects.find((o) => o.type === "AdrDoc")
     expect(adrJson).toMatchObject({
       type: "AdrDoc",
-      id: "sample:ADR-0001",
-      data: {
+      key: "sample:ADR-0001",
+      properties: {
         id: "sample:ADR-0001",
         title: "D1 and DO persistence boundaries",
         status: "accepted",
@@ -246,8 +246,8 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
     const specJson = objects.find((o) => o.type === "EarsSpec")
     expect(specJson).toMatchObject({
       type: "EarsSpec",
-      id: "sample:SPEC-0001",
-      data: {
+      key: "sample:SPEC-0001",
+      properties: {
         id: "sample:SPEC-0001",
         title: "Sample Photo Gallery",
         status: "accepted",
@@ -255,24 +255,30 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
       },
     })
 
-    const governsEdgeJson = objects.find((o) => o.edge === "GovernsSymbol" && o.to === "PhotoRepo")
+    const governsEdgeJson = objects.find(
+      (o) =>
+        o.edge === "PlaysGoverningAdrRole" &&
+        o.from === "TraceabilityTuple:governs:sample:ADR-0001->ServiceTag:PhotoRepo" &&
+        o.to === "sample:ADR-0001",
+    )
     expect(governsEdgeJson).toMatchObject({
-      edge: "GovernsSymbol",
-      type: "GovernsSymbol",
-      from: "sample:ADR-0001",
-      to: "PhotoRepo",
-      data: { targetKind: "ServiceTag" },
+      edge: "PlaysGoverningAdrRole",
+      from: "TraceabilityTuple:governs:sample:ADR-0001->ServiceTag:PhotoRepo",
+      to: "sample:ADR-0001",
+      properties: { role: "governing-adr" },
     })
 
     const specifiesEdgeJson = objects.find(
-      (o) => o.edge === "SpecifiesSymbol" && o.to === "PhotoNotFoundError",
+      (o) =>
+        o.edge === "PlaysSpecifyingEarsRole" &&
+        o.from === "TraceabilityTuple:specifies:sample:SPEC-0001->TaggedError:PhotoNotFoundError" &&
+        o.to === "sample:SPEC-0001",
     )
     expect(specifiesEdgeJson).toMatchObject({
-      edge: "SpecifiesSymbol",
-      type: "SpecifiesSymbol",
-      from: "sample:SPEC-0001",
-      to: "PhotoNotFoundError",
-      data: { targetKind: "TaggedError" },
+      edge: "PlaysSpecifyingEarsRole",
+      from: "TraceabilityTuple:specifies:sample:SPEC-0001->TaggedError:PhotoNotFoundError",
+      to: "sample:SPEC-0001",
+      properties: { role: "specifying-ears" },
     })
   })
 
@@ -594,14 +600,17 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
       expect(diff.missingEdges).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
-            _tag: "GovernsSymbol",
-            adrId: "sample:ADR-0001",
-            targetKey: "PhotoRepo",
+            _tag: "PlaysRole",
+            entityKey: "AdrDoc:sample:ADR-0001",
+            relationId: "TraceabilityTuple:governs:sample:ADR-0001->ServiceTag:PhotoRepo",
+            role: "governing-adr",
           }),
           expect.objectContaining({
-            _tag: "SpecifiesSymbol",
-            specId: "sample:SPEC-0001",
-            targetKey: "libs/sample/domain/src/index.ts#greet",
+            _tag: "PlaysRole",
+            entityKey: "EarsSpec:sample:SPEC-0001",
+            relationId:
+              "TraceabilityTuple:specifies:sample:SPEC-0001->EffectFn:libs/sample/domain/src/index.ts#greet",
+            role: "specifying-ears",
           }),
         ]),
       )

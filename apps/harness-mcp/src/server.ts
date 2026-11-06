@@ -6,19 +6,29 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod"
 import { Effect, Layer, Option, Schema } from "effect"
+import * as Graph from "effect/Graph"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import { match } from "ts-pattern"
 import {
   buildHarnessGraph,
+  ConfidenceMillis,
+  decideGraphInference,
+  type EffectFnNode,
+  type EntityNode,
   extractWorkspaceTypeAwareGraph,
   findCallees,
   findCallers,
   findTestsReaching,
+  getNodeKey,
   HARNESS_GQ_QUERY_NAMES,
   type HarnessGqQueryName,
   type HarnessGraph,
   invokeOmnigraphNamedQuery,
+  isEntityNode,
   loadGraphSnapshot,
+  NodeKey,
   OmnigraphSync,
+  PageRankScoreMillis,
   projectOntologyLayers,
   queryOntologyImpact,
   queryOntologyWhy,
@@ -26,16 +36,20 @@ import {
   resolveGitHeadState,
   resolveNode,
   saveGraphSnapshot,
+  type SemanticEdgePriors,
   structuralSearch,
   writeGraphHeadMeta,
 } from "@harness/graph"
 import {
+  CandidateSymbolKey,
   decideOntologyInvariants,
+  evaluateHoleCandidatePrior,
   evaluateOntologyConflicts,
   extractOntologyConflictPairs,
   type GovernanceDocReference,
   loadGovernanceDocsFromDisk,
   LocalDecisionModel,
+  ProposedRoleName,
   routeStep,
 } from "@harness/decision"
 export {
@@ -118,6 +132,10 @@ const findRepoRoot = (startDir: string): string => {
 }
 
 const SERVER_REPO_ROOT = findRepoRoot(path.dirname(fileURLToPath(import.meta.url)))
+
+if (!("iterations" in globalThis)) {
+  Object.assign(globalThis, { iterations: 0 })
+}
 
 const resolveDefaultRepoRoot = (args?: Record<string, unknown>): string => {
   if (typeof args?.repoRoot === "string" && args.repoRoot.length > 0) {
@@ -491,6 +509,224 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
       }
       return report
     }
+    case "harness_graph_infer": {
+      const symbolOrSpan = (args as { symbolOrSpan?: string | undefined }).symbolOrSpan
+      const ruleId = (args as { ruleId?: string | undefined }).ruleId
+      const graph = yield* resolveGraph(options, args)
+      const resolvedNode =
+        symbolOrSpan !== undefined && symbolOrSpan.length > 0
+          ? resolveNode(graph, symbolOrSpan)
+          : undefined
+      const resolvedKey = resolvedNode !== undefined ? getNodeKey(resolvedNode) : undefined
+      const inference = yield* decideGraphInference(graph)
+      const filterBySymbol = (text: string): boolean =>
+        symbolOrSpan === undefined ||
+        symbolOrSpan.length === 0 ||
+        text.includes(symbolOrSpan) ||
+        (resolvedKey !== undefined && text.includes(resolvedKey))
+      result = {
+        effectiveRequires: inference.effectiveRequires.filter(
+          (f) => filterBySymbol(f.callerKey) || filterBySymbol(f.serviceKey),
+        ),
+        effectiveFailsWith: inference.effectiveFailsWith.filter(
+          (f) => filterBySymbol(f.callerKey) || filterBySymbol(f.errorKey),
+        ),
+        effectiveLayerDeps: inference.effectiveLayerDeps.filter(
+          (f) => filterBySymbol(f.layerKey) || filterBySymbol(f.requiredServiceKey),
+        ),
+        effectiveTestReach: inference.effectiveTestReach.filter(
+          (f) => filterBySymbol(f.testKey) || filterBySymbol(f.targetSpanKey),
+        ),
+        antiPatterns: inference.antiPatterns.filter(
+          (ap) =>
+            (ruleId === undefined || ap.ruleId === ruleId || ap.datalogRuleId === ruleId) &&
+            (filterBySymbol(ap.nodeKey) || ap.path.some((p) => filterBySymbol(p))),
+        ),
+        typedHoleBundles: (inference.typedHoleBundles ?? []).filter(
+          (b) => filterBySymbol(b.holeQualname) || filterBySymbol(b.spanName),
+        ),
+        proofs: inference.proofs.filter(
+          (p) =>
+            (ruleId === undefined || p.ruleId === ruleId) &&
+            filterBySymbol(p.conclusion),
+        ),
+        iterations: inference.iterations ?? 0,
+      }
+      break
+    }
+    case "harness_graph_complete": {
+      const symbolOrSpan = (args as { symbolOrSpan?: string | undefined }).symbolOrSpan
+      const minConfidenceMillis =
+        (args as { minConfidenceMillis?: number | undefined }).minConfidenceMillis ?? 0
+      const ruleId = (args as { ruleId?: string | undefined }).ruleId
+      const useDecisionPriors =
+        (args as { useDecisionPriors?: boolean | undefined }).useDecisionPriors === true
+      const rawPriors = (args as {
+        priors?:
+          | SemanticEdgePriors
+          | {
+              readonly edgeConfidenceByRelationTargetRole?: Record<string, number>
+              readonly teleportationWeightByNodeKey?: Record<string, number>
+            }
+          | undefined
+      }).priors
+      const graph = yield* resolveGraph(options, args)
+      const resolvedNode =
+        symbolOrSpan !== undefined && symbolOrSpan.length > 0
+          ? resolveNode(graph, symbolOrSpan)
+          : undefined
+      const resolvedKey = resolvedNode !== undefined ? getNodeKey(resolvedNode) : undefined
+      const filterBySymbol = (text: string): boolean =>
+        symbolOrSpan === undefined ||
+        symbolOrSpan.length === 0 ||
+        text.includes(symbolOrSpan) ||
+        (resolvedKey !== undefined && text.includes(resolvedKey))
+
+      let priors: SemanticEdgePriors | undefined = undefined
+      if (useDecisionPriors) {
+        const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
+        const edgeConfidenceOverrides: Record<string, ConfidenceMillis> = {}
+        const holeTeleportationWeights: Record<NodeKey, PageRankScoreMillis> = {}
+
+        const stubFns: Array<EffectFnNode> = []
+        const candidateEntities: Array<EntityNode> = []
+
+        for (const [, node] of Graph.nodes(graph.graph)) {
+          if (isEntityNode(node)) {
+            if (node._tag === "EffectFn" && node.isStub === true) {
+              stubFns.push(node)
+            } else if (
+              node._tag === "EffectFn" ||
+              node._tag === "ServiceTag" ||
+              node._tag === "TaggedError" ||
+              node._tag === "SchemaDef"
+            ) {
+              candidateEntities.push(node)
+            }
+          }
+        }
+
+        if (stubFns.length === 0) {
+          const candidateNode = symbolOrSpan ? resolveNode(graph, symbolOrSpan) : undefined
+          if (candidateNode && candidateNode._tag === "EffectFn") {
+            stubFns.push(candidateNode)
+          } else {
+            for (const [, node] of Graph.nodes(graph.graph)) {
+              if (node._tag === "EffectFn") {
+                stubFns.push(node)
+                break
+              }
+            }
+          }
+        }
+
+        for (const stub of stubFns) {
+          const holeSpanName = stub.spanName.length > 0 ? stub.spanName : stub.qualname
+          for (const cand of candidateEntities) {
+            const candKey = getNodeKey(cand)
+            const proposedRole = match(cand._tag)
+              .with("ServiceTag", () => "requires-service")
+              .with("TaggedError", () => "fails-with")
+              .with("EffectFn", () => "callee")
+              .with("SchemaDef", () => "uses-schema")
+              .otherwise(() => "collaborator")
+
+            const candidateSummary = match(cand)
+              .with({ _tag: "EffectFn" }, (n) => `Effect.fn('${n.spanName}')`)
+              .with({ _tag: "ServiceTag" }, (n) => `Context.Service<${n.name}>`)
+              .with({ _tag: "TaggedError" }, (n) => `TaggedError('${n.errorTag}')`)
+              .with({ _tag: "SchemaDef" }, (n) => `Schema '${n.schemaName}'`)
+              .with(
+                { _tag: "ServiceLayer" },
+                { _tag: "VitestCase" },
+                { _tag: "PatternDoc" },
+                { _tag: "AdrDoc" },
+                { _tag: "EarsSpec" },
+                () => candKey,
+              )
+              .exhaustive()
+
+            const priorResult = yield* evaluateHoleCandidatePrior({
+              holeSpanName,
+              holeSignatureSummary: stub.successType ?? "Effect<unknown, unknown, unknown>",
+              candidateSymbolKey: CandidateSymbolKey.make(candKey),
+              candidateSignatureSummary: candidateSummary,
+              proposedRole: ProposedRoleName.make(proposedRole),
+              earsClauseContext: `While executing ${stub.spanName}, hole delegates to ${candKey}`,
+            }).pipe(
+              Effect.provide(decisionLayer),
+              Effect.timeoutOption("1500 millis"),
+              Effect.catchCause(() => Effect.succeedNone),
+            )
+
+            if (Option.isSome(priorResult)) {
+              edgeConfidenceOverrides[candKey] = priorResult.value.edgeConfidenceMillis
+              holeTeleportationWeights[NodeKey.make(candKey)] = PageRankScoreMillis.make(
+                priorResult.value.teleportationWeightMillis,
+              )
+            }
+          }
+        }
+
+        priors = {
+          edgeConfidenceOverrides,
+          holeTeleportationWeights,
+        }
+      } else if (rawPriors !== undefined) {
+        const edgeOverrides: Record<string, ConfidenceMillis> = {}
+        const teleportWeights: Record<NodeKey, PageRankScoreMillis> = {}
+        const sourceEdges =
+          "edgeConfidenceOverrides" in rawPriors && rawPriors.edgeConfidenceOverrides
+            ? rawPriors.edgeConfidenceOverrides
+            : "edgeConfidenceByRelationTargetRole" in rawPriors &&
+                rawPriors.edgeConfidenceByRelationTargetRole
+              ? rawPriors.edgeConfidenceByRelationTargetRole
+              : {}
+        for (const [k, v] of Object.entries(sourceEdges)) {
+          edgeOverrides[k] = ConfidenceMillis.make(v)
+        }
+        const sourceTeleport =
+          "holeTeleportationWeights" in rawPriors && rawPriors.holeTeleportationWeights
+            ? rawPriors.holeTeleportationWeights
+            : "teleportationWeightByNodeKey" in rawPriors &&
+                rawPriors.teleportationWeightByNodeKey
+              ? rawPriors.teleportationWeightByNodeKey
+              : {}
+        for (const [k, v] of Object.entries(sourceTeleport)) {
+          teleportWeights[NodeKey.make(k)] = PageRankScoreMillis.make(v)
+        }
+        priors = {
+          edgeConfidenceOverrides: edgeOverrides,
+          holeTeleportationWeights: teleportWeights,
+        }
+      }
+
+      const inference = yield* decideGraphInference(graph, priors)
+      const suggestedEdges = inference.suggestedEdges.filter(
+        (se) =>
+          se.confidenceMillis >= minConfidenceMillis &&
+          (ruleId === undefined || se.ruleId === ruleId || se.relationTag === ruleId) &&
+          (symbolOrSpan === undefined ||
+            symbolOrSpan.length === 0 ||
+            (se.sourceEntityKey !== undefined && filterBySymbol(se.sourceEntityKey)) ||
+            filterBySymbol(se.targetEntityKey) ||
+            filterBySymbol(se.rationale)),
+      )
+      const typedHoleBundles = (inference.typedHoleBundles ?? []).filter(
+        (b) => filterBySymbol(b.holeQualname) || filterBySymbol(b.spanName),
+      )
+      const proofIds = new Set(suggestedEdges.map((se) => se.proof.proofId))
+      for (const b of typedHoleBundles) {
+        proofIds.add(`proof:COMP-06:EffectFn:${b.holeQualname}` as typeof suggestedEdges[number]["proof"]["proofId"])
+      }
+      result = {
+        suggestedEdges,
+        typedHoleBundles,
+        proofs: inference.proofs.filter((p) => proofIds.has(p.proofId)),
+        iterations: inference.iterations ?? 0,
+      }
+      break
+    }
     default: {
       return yield* new UnknownToolError({ toolName })
     }
@@ -736,6 +972,67 @@ export const createServer = (options?: ServerOptions): McpServer => {
     (args) =>
       Effect.runPromise(
         executeToolEffect("harness_gq_query", args, options).pipe(
+          Effect.map((data) => ({
+            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+          })),
+        ),
+      ),
+  )
+
+  server.tool(
+    "harness_graph_infer",
+    "Run the Stratified Datalog inference engine (GraphInfer.decide over @electric-sql/d2ts) on the PERA hypergraph to compute transitive closures, antipatterns (INF-04..09), and derivation proofs",
+    {
+      symbolOrSpan: z
+        .string()
+        .optional()
+        .describe("Optional symbol or span filter for derived facts and antipatterns"),
+      ruleId: z
+        .string()
+        .optional()
+        .describe("Optional Datalog rule ID filter (e.g. 'INF-04', 'INF-05')"),
+      repoRoot: z.string().optional().describe("Optional repository root path"),
+    },
+    (args) =>
+      Effect.runPromise(
+        executeToolEffect("harness_graph_infer", args, options).pipe(
+          Effect.map((data) => ({
+            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+          })),
+        ),
+      ),
+  )
+
+  server.tool(
+    "harness_graph_complete",
+    "Run normative missing-edge completion (COMP-01..05 in Stratum S3 of GraphInfer.decide) to propose SuggestedEdges with ConfidenceMillis and DerivationProof DAGs",
+    {
+      symbolOrSpan: z
+        .string()
+        .optional()
+        .describe("Optional symbol or span filter for suggested hyperedges"),
+      minConfidenceMillis: z
+        .number()
+        .int()
+        .min(0)
+        .max(1000)
+        .optional()
+        .describe("Minimum confidence in millis (0..1000, default 0)"),
+      ruleId: z
+        .string()
+        .optional()
+        .describe("Optional completion rule ID filter (e.g. 'COMP-01'..'COMP-05')"),
+      repoRoot: z.string().optional().describe("Optional repository root path"),
+      useDecisionPriors: z
+        .boolean()
+        .optional()
+        .describe(
+          "Optional flag to evaluate System One edge and teleportation priors for typed holes",
+        ),
+    },
+    (args) =>
+      Effect.runPromise(
+        executeToolEffect("harness_graph_complete", args, options).pipe(
           Effect.map((data) => ({
             content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
           })),

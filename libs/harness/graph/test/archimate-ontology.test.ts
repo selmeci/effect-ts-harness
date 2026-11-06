@@ -3,10 +3,13 @@ import {
   buildHarnessGraph,
   classifyOntologyEdge,
   classifyOntologyNode,
+  NodeKey,
   projectOntologyLayers,
   queryOntologyImpact,
   queryOntologyWhy,
+  RelationId,
   renderOntologyMermaid,
+  RoleName,
 } from "../src/index.js"
 
 describe("ArchiMate Ontology Module", () => {
@@ -244,62 +247,67 @@ describe("ArchiMate Ontology Module", () => {
     })
   })
 
-  it("classifyOntologyEdge maps all 8 HarnessEdge types to ArchiMate relations", () => {
+  it("classifyOntologyEdge maps PERA PlaysRoleEdge roles to ArchiMate relations", () => {
     expect(
       classifyOntologyEdge({
-        _tag: "GovernsSymbol",
-        adrId: "ADR-0001",
-        targetKey: "Symbol",
-        targetKind: "EffectFn",
+        _tag: "PlaysRole",
+        relationId: RelationId.make("TraceabilityTuple:ADR-0001->Symbol"),
+        entityKey: NodeKey.make("AdrDoc:ADR-0001"),
+        role: RoleName.make("governing-adr"),
       }),
     ).toBe("Influence")
 
     expect(
       classifyOntologyEdge({
-        _tag: "SpecifiesSymbol",
-        specId: "SPEC-0001",
-        targetKey: "Symbol",
-        targetKind: "EffectFn",
+        _tag: "PlaysRole",
+        relationId: RelationId.make("TraceabilityTuple:SPEC-0001->Symbol"),
+        entityKey: NodeKey.make("EarsSpec:SPEC-0001"),
+        role: RoleName.make("specifying-ears"),
       }),
     ).toBe("Realization")
 
     expect(
       classifyOntologyEdge({
-        _tag: "ProvidesService",
-        layerQualname: "Layer",
-        tagId: "Tag",
+        _tag: "PlaysRole",
+        relationId: RelationId.make("LayerFlow:Layer"),
+        entityKey: NodeKey.make("ServiceTag:Tag"),
+        role: RoleName.make("provided-service"),
       }),
     ).toBe("Realization")
 
     expect(
       classifyOntologyEdge({
-        _tag: "RequiresService",
-        callerQualname: "Caller",
-        tagId: "Tag",
+        _tag: "PlaysRole",
+        relationId: RelationId.make("EffectSignature:Caller"),
+        entityKey: NodeKey.make("ServiceTag:Tag"),
+        role: RoleName.make("requires-service"),
       }),
     ).toBe("Serving")
 
     expect(
       classifyOntologyEdge({
-        _tag: "LayerRequires",
-        layerQualname: "Layer",
-        tagId: "Tag",
+        _tag: "PlaysRole",
+        relationId: RelationId.make("LayerFlow:Layer"),
+        entityKey: NodeKey.make("ServiceTag:Tag"),
+        role: RoleName.make("required-service"),
       }),
     ).toBe("Serving")
 
     expect(
       classifyOntologyEdge({
-        _tag: "FailsWith",
-        callerQualname: "Caller",
-        errorTag: "Error",
+        _tag: "PlaysRole",
+        relationId: RelationId.make("EffectSignature:Caller"),
+        entityKey: NodeKey.make("TaggedError:Error"),
+        role: RoleName.make("fails-with"),
       }),
     ).toBe("Triggering")
 
     expect(
       classifyOntologyEdge({
-        _tag: "TracedCall",
-        callerQualname: "Caller",
-        calleeQualname: "Callee",
+        _tag: "PlaysRole",
+        relationId: RelationId.make("EffectSignature:Caller"),
+        entityKey: NodeKey.make("EffectFn:Callee"),
+        role: RoleName.make("callee"),
         callCount: 1,
         receiverLayer: null,
       }),
@@ -307,9 +315,10 @@ describe("ArchiMate Ontology Module", () => {
 
     expect(
       classifyOntologyEdge({
-        _tag: "ExercisesSpan",
-        testId: "Test",
-        calleeQualname: "Callee",
+        _tag: "PlaysRole",
+        relationId: RelationId.make("TraceabilityTuple:Test->Callee"),
+        entityKey: NodeKey.make("VitestCase:Test"),
+        role: RoleName.make("exercising-test"),
         callCount: 1,
         receiverLayer: null,
       }),
@@ -387,7 +396,7 @@ describe("ArchiMate Ontology Module", () => {
     expect(projection.layers.Technology.length).toBe(1)
     expect(projection.layers.Implementation.length).toBe(1)
 
-    expect(projection.edges.length).toBe(2)
+    expect(projection.edges.length).toBe(4)
     expect(projection.mermaid).toContain("flowchart TB")
     expect(projection.mermaid).toContain("subgraph Motivation")
     expect(projection.mermaid).toContain("subgraph Business")
