@@ -234,25 +234,19 @@ export type ViolationRule =
   | "node-sqlite-in-infra"
   | "aggregate-direct-bus-publish"
 
+export type BranchingViolationRule = Exclude<
+  ViolationRule,
+  | "domain-requires-infra"
+  | "domain-requires-cloud-binding"
+  | "layer-cycle"
+  | "impure-decider"
+  | "impure-reducer"
+  | "unmapped-spec-symbol"
+  | "aggregate-direct-bus-publish"
+>
+
 export interface BranchingViolation {
-  readonly rule:
-    | "discriminant-branching"
-    | "non-exhaustive-union-match"
-    | "schema-boolean-state"
-    | "dead-event-payload"
-    | "terminal-state-unhandled"
-    | "fallback-json-equality"
-    | "vacuous-error-assertion"
-    | "unscoped-effect-run"
-    | "unbranded-schema-field"
-    | "handwritten-tagged-union"
-    | "untraced-decider"
-    | "missing-aggregate-id-guard"
-    | "unasserted-state-field"
-    | "unsafe-type-cast"
-    | "unbranded-contract-schema"
-    | "unbranded-primitive-boundary"
-    | "node-sqlite-in-infra"
+  readonly rule: BranchingViolationRule
   readonly message: string
   readonly file: string
   readonly line: number

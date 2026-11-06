@@ -53,6 +53,7 @@ import {
   executeAggregateCommandAndSync,
   queryAggregateReadModel,
   queryCrossAggregateReadModel,
+  relayAggregateOutbox,
 } from "../../src/index.js"
 
 export const CartStatus = Schema.String.pipe(Schema.brand("CartStatus"))
@@ -666,13 +667,10 @@ export const makeCartApiLayer = HttpApiBuilder.group(CartEsApi, "carts", (handle
         payload.command,
         payload.commandId,
         cartAggregateConfigV2,
-        [openCartsProjectionV2],
       ).pipe(
         Effect.catchTags({
           EventSerializationError: (err) => Effect.die(err),
           EventStreamCorruptionError: (err) => Effect.die(err),
-          OutboxPublishError: (err) => Effect.die(err),
-          ProjectionArchiveCorruptionError: (err) => Effect.die(err),
           SqlError: (err) => Effect.die(err),
         }),
       )
@@ -691,10 +689,17 @@ export const makeCartApiLayer = HttpApiBuilder.group(CartEsApi, "carts", (handle
       ),
     )
     .handle("getOpenCarts", () =>
-      queryCrossAggregateReadModel(ProcessorId.make("open-carts-v2"), undefined, [
-        openCartsProjectionV2,
-      ]).pipe(
+      Effect.gen(function* () {
+        yield* relayAggregateOutbox(AggregateName.make("Cart"), [openCartsProjectionV2])
+        return yield* queryCrossAggregateReadModel(ProcessorId.make("open-carts-v2"), undefined, [
+          openCartsProjectionV2,
+        ])
+      }).pipe(
         Effect.catchTags({
+          EventSerializationError: (err) => Effect.die(err),
+          EventStreamCorruptionError: (err) => Effect.die(err),
+          OutboxPublishError: (err) => Effect.die(err),
+          ProjectionArchiveCorruptionError: (err) => Effect.die(err),
           SqlError: (err) => Effect.die(err),
         }),
       ),

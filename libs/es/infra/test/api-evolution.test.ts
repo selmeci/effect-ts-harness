@@ -15,8 +15,10 @@ import {
   AggregateCommandResult,
   AggregateId,
   AggregateName,
+  BatchLimit,
   CommandAggregateMismatchError,
   CommandId,
+  ConcurrencyConflictError,
   CrossProjectionNotFoundError,
   EventSerializationError,
   EventStreamCorruptionError,
@@ -28,12 +30,18 @@ import {
   ProjectionName,
   StreamVersion,
 } from "@harness/es-contract"
-import { CrossAggregateProjection, makeAggregateApiTestHarness } from "@harness/es-core"
+import {
+  type AggregateConfig,
+  CrossAggregateProjection,
+  type Decider,
+  makeAggregateApiTestHarness,
+} from "@harness/es-core"
 import {
   CartAlreadyCheckedOutError,
   type CartCommandV2,
   CartEventV2,
   CartId,
+  type CartStateV2,
   CheckoutChannel,
   EmptyCartCheckoutError,
   ItemCount,
@@ -50,6 +58,7 @@ import {
   queryAggregateReadModel,
   queryCrossAggregateReadModel,
   rebuildProjectorFromArchive,
+  relayAggregateOutbox,
   seedAggregateStream,
 } from "../src/index.js"
 import { SqlClientMemoryLayer } from "../src/memory.js"
@@ -175,7 +184,6 @@ describe("Aggregate HTTP & Evolution Specs", () => {
           },
           CommandId.make("cmd-cross-1-add"),
           { ...cartAggregateConfig, outboxMode: { _tag: "PublishOutbox" } },
-          [openCartsProjection],
         )
         yield* executeAggregateCommandAndSync(
           cart1Id,
@@ -186,8 +194,8 @@ describe("Aggregate HTTP & Evolution Specs", () => {
           },
           CommandId.make("cmd-cross-1-checkout"),
           { ...cartAggregateConfig, outboxMode: { _tag: "PublishOutbox" } },
-          [openCartsProjection],
         )
+        yield* relayAggregateOutbox(AggregateName.make("Cart"), [openCartsProjection])
 
         // Cart 2: v2 commands with Checkout (mobile) ingested live
         const cart2Id = AggregateId.make("cart-cross-2")
@@ -201,7 +209,6 @@ describe("Aggregate HTTP & Evolution Specs", () => {
           },
           CommandId.make("cmd-cross-2-add"),
           cartAggregateConfigV2,
-          [openCartsProjectionV2],
         )
         yield* executeAggregateCommandAndSync(
           cart2Id,
@@ -213,8 +220,8 @@ describe("Aggregate HTTP & Evolution Specs", () => {
           },
           CommandId.make("cmd-cross-2-checkout"),
           cartAggregateConfigV2,
-          [openCartsProjectionV2],
         )
+        yield* relayAggregateOutbox(AggregateName.make("Cart"), [openCartsProjectionV2])
 
         // Cart 3: active open cart
         const cart3Id = AggregateId.make("cart-cross-3")
@@ -228,8 +235,8 @@ describe("Aggregate HTTP & Evolution Specs", () => {
           },
           CommandId.make("cmd-cross-3-add"),
           cartAggregateConfigV2,
-          [openCartsProjectionV2],
         )
+        yield* relayAggregateOutbox(AggregateName.make("Cart"), [openCartsProjectionV2])
 
         // Check live report: 3 carts total, cart 3 is active
         const liveReport = yield* queryCrossAggregateReadModel(
@@ -261,7 +268,7 @@ describe("Aggregate HTTP & Evolution Specs", () => {
   )
 
   it.effect(
-    "REQ-3.1, REQ-3.2 & REQ-3.3: AggregateApiSpec seeds streams, asserts responses & appended events over HttpApiTest, and verifies domain errors",
+    "REQ-3.1: AggregateApiSpec asserts response and appended events on successful command execution",
     () =>
       Effect.scoped(
         Effect.gen(function* () {
@@ -286,10 +293,10 @@ describe("Aggregate HTTP & Evolution Specs", () => {
               }),
             readAppendedEvents: Effect.gen(function* () {
               const rows = yield* sql<{ payload: string }>`
-              SELECT payload FROM es_events
-              WHERE aggregate_id = ${cartId} AND stream_version > ${seededCount}
-              ORDER BY stream_version ASC
-            `
+                SELECT payload FROM es_events
+                WHERE aggregate_id = ${cartId} AND stream_version > ${seededCount}
+                ORDER BY stream_version ASC
+              `
               const events: Array<CartEventV2> = []
               for (const r of rows) {
                 const parsed = JSON.parse(r.payload)
@@ -300,7 +307,6 @@ describe("Aggregate HTTP & Evolution Specs", () => {
             }),
           })
 
-          // Subtest 1: Successful command execution asserts response and appended events
           const cmdId1 = CommandId.make("cmd-spec-add-1")
           const addCmd: CartCommandV2 = {
             _tag: "AddItem",
@@ -368,40 +374,66 @@ describe("Aggregate HTTP & Evolution Specs", () => {
               }),
             )
             .thenStatusAndEvents(expectedResponse, expectedAppended)
+        }),
+      ).pipe(Effect.provide(TestEnv)),
+  )
 
-          // Subtest 2: EmptyCartCheckoutError failure verified via thenFails
-          const emptyCartId = AggregateId.make("cart-empty-spec")
-          const emptyHarness = makeAggregateApiTestHarness({
-            seedEvents: (history: ReadonlyArray<CartEventV2>) =>
-              seedAggregateStream(emptyCartId, history, cartAggregateConfigV2).pipe(Effect.orDie),
-            readAppendedEvents: Effect.succeed<ReadonlyArray<CartEventV2>>([]),
-          })
-          const emptyCheckoutCmd: CartCommandV2 = {
-            _tag: "Checkout",
-            cartId: CartId.make("cart-empty-spec"),
-            orderId: OrderId.make("order-empty"),
-            channel: CheckoutChannel.make("web"),
-          }
-          yield* emptyHarness
-            .given([
-              {
-                _tag: "CartCreated",
-                version: 1,
-                cartId: CartId.make("cart-empty-spec"),
+  it.effect("REQ-3.2: AggregateApiSpec asserts EmptyCartCheckoutError failure via thenFails", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* initializeAggregateTables()
+        yield* initializeProjectorTables()
+        yield* initCartViewV2Table
+        yield* initOpenCartsProjectionTable
+        const client = yield* HttpApiTest.groups(CartEsApi, ["carts"]).pipe(
+          Effect.provide(cartApiLayer),
+        )
+        const emptyCartId = AggregateId.make("cart-empty-spec")
+        const emptyHarness = makeAggregateApiTestHarness({
+          seedEvents: (history: ReadonlyArray<CartEventV2>) =>
+            seedAggregateStream(emptyCartId, history, cartAggregateConfigV2).pipe(Effect.orDie),
+          readAppendedEvents: Effect.succeed<ReadonlyArray<CartEventV2>>([]),
+        })
+        const emptyCheckoutCmd: CartCommandV2 = {
+          _tag: "Checkout",
+          cartId: CartId.make("cart-empty-spec"),
+          orderId: OrderId.make("order-empty"),
+          channel: CheckoutChannel.make("web"),
+        }
+        yield* emptyHarness
+          .given([
+            {
+              _tag: "CartCreated",
+              version: 1,
+              cartId: CartId.make("cart-empty-spec"),
+            },
+          ])
+          .when(
+            client.carts.executeCommand({
+              params: { cartId: emptyCartId },
+              payload: {
+                command: emptyCheckoutCmd,
+                commandId: CommandId.make("cmd-empty-checkout"),
               },
-            ])
-            .when(
-              client.carts.executeCommand({
-                params: { cartId: emptyCartId },
-                payload: {
-                  command: emptyCheckoutCmd,
-                  commandId: CommandId.make("cmd-empty-checkout"),
-                },
-              }),
-            )
-            .thenFails(new EmptyCartCheckoutError({ cartId: CartId.make("cart-empty-spec") }))
+            }),
+          )
+          .thenFails(new EmptyCartCheckoutError({ cartId: CartId.make("cart-empty-spec") }))
+      }),
+    ).pipe(Effect.provide(TestEnv)),
+  )
 
-          // Subtest 3: CartAlreadyCheckedOutError failure verified via thenFails
+  it.effect(
+    "REQ-3.2: AggregateApiSpec asserts CartAlreadyCheckedOutError failure via thenFails",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* initializeAggregateTables()
+          yield* initializeProjectorTables()
+          yield* initCartViewV2Table
+          yield* initOpenCartsProjectionTable
+          const client = yield* HttpApiTest.groups(CartEsApi, ["carts"]).pipe(
+            Effect.provide(cartApiLayer),
+          )
           const checkedOutCartId = AggregateId.make("cart-checked-out-spec")
           const checkedOutHarness = makeAggregateApiTestHarness({
             seedEvents: (history: ReadonlyArray<CartEventV2>) =>
@@ -450,12 +482,44 @@ describe("Aggregate HTTP & Evolution Specs", () => {
             .thenFails(
               new CartAlreadyCheckedOutError({ cartId: CartId.make("cart-checked-out-spec") }),
             )
+        }),
+      ).pipe(Effect.provide(TestEnv)),
+  )
 
-          // Subtest 4: CommandAggregateMismatchError when reusing commandId across distinct aggregates
-          const otherCartId = AggregateId.make("cart-spec-other")
+  it.effect(
+    "REQ-3.3: HttpApi executeCommand fails with CommandAggregateMismatchError when reusing commandId across distinct aggregates",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* initializeAggregateTables()
+          yield* initializeProjectorTables()
+          yield* initCartViewV2Table
+          yield* initOpenCartsProjectionTable
+          const client = yield* HttpApiTest.groups(CartEsApi, ["carts"]).pipe(
+            Effect.provide(cartApiLayer),
+          )
+          const cartId1 = AggregateId.make("cart-spec-orig")
+          const cartId2 = AggregateId.make("cart-spec-other")
+          const sharedCmdId = CommandId.make("cmd-spec-shared")
+
+          // Execute on cart 1 first
+          yield* client.carts.executeCommand({
+            params: { cartId: cartId1 },
+            payload: {
+              command: {
+                _tag: "AddItem",
+                cartId: CartId.make("cart-spec-orig"),
+                itemId: ItemId.make("item-1"),
+                quantity: positiveInt(1),
+              },
+              commandId: sharedCmdId,
+            },
+          })
+
+          // Attempt to reuse sharedCmdId on cart 2
           const mismatchExit = yield* client.carts
             .executeCommand({
-              params: { cartId: otherCartId },
+              params: { cartId: cartId2 },
               payload: {
                 command: {
                   _tag: "AddItem",
@@ -463,7 +527,7 @@ describe("Aggregate HTTP & Evolution Specs", () => {
                   itemId: ItemId.make("item-1"),
                   quantity: positiveInt(1),
                 },
-                commandId: cmdId1,
+                commandId: sharedCmdId,
               },
             })
             .pipe(Effect.exit)
@@ -664,7 +728,7 @@ describe("Aggregate HTTP & Evolution Specs", () => {
   )
 
   it.effect(
-    "REQ-3.1, REQ-3.3 & REQ-3.4: seedAggregateStream head version & error paths, executeAggregateCommandAndSync outbox/archive failure preservation, and HTTP CartIdMismatchError",
+    "seedAggregateStream returns StreamVersion, writes es_outbox, updates local projection, and empty [] returns current head",
     () =>
       Effect.scoped(
         Effect.gen(function* () {
@@ -673,11 +737,7 @@ describe("Aggregate HTTP & Evolution Specs", () => {
           yield* initCartViewV2Table
           yield* initOpenCartsProjectionTable
           const sql = yield* SqlClient
-          const client = yield* HttpApiTest.groups(CartEsApi, ["carts"]).pipe(
-            Effect.provide(cartApiLayer),
-          )
 
-          // 1. Direct seedAggregateStream: returns StreamVersion, writes es_outbox, updates local projection, and empty [] returns current head
           const seedCartId = AggregateId.make("cart-seed-direct")
           const emptyVer0 = yield* seedAggregateStream(seedCartId, [], cartAggregateConfigV2)
           expect(emptyVer0).toBe(0)
@@ -748,8 +808,19 @@ describe("Aggregate HTTP & Evolution Specs", () => {
           )
           expect(localView2.status).toBe("checked_out")
           expect(localView2.checkoutChannel).toBe("mobile")
+        }),
+      ).pipe(Effect.provide(TestEnv)),
+  )
 
-          // 2. seedAggregateStream fails with EventStreamCorruptionError when max(stream_version) is corrupt (-1)
+  it.effect(
+    "seedAggregateStream fails with EventStreamCorruptionError when max(stream_version) is corrupt",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* initializeAggregateTables()
+          yield* initializeProjectorTables()
+          const sql = yield* SqlClient
+
           const corruptSeedCartId = AggregateId.make("cart-seed-corrupt")
           yield* sql`
             INSERT INTO es_events (
@@ -783,8 +854,18 @@ describe("Aggregate HTTP & Evolution Specs", () => {
             })
             .with({ _tag: "Success" }, () => expect.unreachable("expected failure"))
             .exhaustive()
+        }),
+      ).pipe(Effect.provide(TestEnv)),
+  )
 
-          // 3. seedAggregateStream fails with EventSerializationError when event fails schema encoding
+  it.effect(
+    "seedAggregateStream fails with EventSerializationError when event fails schema encoding",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* initializeAggregateTables()
+          yield* initializeProjectorTables()
+
           const RejectingCartEventSchema = CartEventV2.pipe(
             Schema.check(Schema.makeFilter(() => "Simulated serialization failure")),
           )
@@ -817,8 +898,97 @@ describe("Aggregate HTTP & Evolution Specs", () => {
             })
             .with({ _tag: "Success" }, () => expect.unreachable("expected failure"))
             .exhaustive()
+        }),
+      ).pipe(Effect.provide(TestEnv)),
+  )
 
-          // 3b. SuppressOutbox on seedAggregateStream and executeAggregateCommandAndSync
+  it.effect(
+    "seedAggregateStream fails with EventSerializationError on domain event with missing or invalid _tag",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* initializeAggregateTables()
+          yield* initializeProjectorTables()
+
+          interface UntaggedEvent {
+            readonly _tag: string
+            readonly cartId: CartId
+            readonly version: 1
+          }
+          const UntaggedEventSchema = Schema.Struct({
+            _tag: Schema.String,
+            cartId: CartId,
+            version: Schema.Literal(1),
+          })
+          const dummyDecider: Decider<
+            CartCommandV2,
+            UntaggedEvent,
+            CartStateV2,
+            CartAlreadyCheckedOutError | EmptyCartCheckoutError
+          > = {
+            initialState: { _tag: "EmptyCart" },
+            decide: () => Effect.succeed([]),
+            evolve: (state) => state,
+          }
+          const invalidTagConfig: AggregateConfig<
+            CartCommandV2,
+            UntaggedEvent,
+            CartStateV2,
+            CartAlreadyCheckedOutError | EmptyCartCheckoutError
+          > = {
+            aggregateName: AggregateName.make("Cart"),
+            decider: dummyDecider,
+            eventSchema: UntaggedEventSchema,
+            outboxMode: { _tag: "SuppressOutbox" },
+          }
+
+          const badTagEvent: UntaggedEvent = {
+            _tag: "",
+            cartId: CartId.make("cart-invalid-tag"),
+            version: 1,
+          }
+
+          const exit = yield* seedAggregateStream(
+            AggregateId.make("cart-invalid-tag"),
+            [badTagEvent],
+            invalidTagConfig,
+          ).pipe(Effect.exit)
+
+          match(exit)
+            .with({ _tag: "Failure" }, (f) => {
+              const err = Cause.findErrorOption(f.cause)
+              match(err)
+                .with({ _tag: "Some" }, ({ value }) => {
+                  expect(value instanceof EventSerializationError).toBe(true)
+                  match(value)
+                    .with({ _tag: "EventSerializationError" }, (serErr) => {
+                      expect(serErr.reason).toBe("Missing or invalid _tag on seeded domain event")
+                    })
+                    .otherwise(() => {
+                      expect.unreachable("expected EventSerializationError")
+                    })
+                })
+                .with({ _tag: "None" }, () =>
+                  expect.unreachable("expected EventSerializationError"),
+                )
+                .exhaustive()
+            })
+            .with({ _tag: "Success" }, () => expect.unreachable("expected failure"))
+            .exhaustive()
+        }),
+      ).pipe(Effect.provide(TestEnv)),
+  )
+
+  it.effect(
+    "seedAggregateStream and executeAggregateCommandAndSync honor SuppressOutbox mode",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* initializeAggregateTables()
+          yield* initializeProjectorTables()
+          yield* initCartViewV2Table
+          const sql = yield* SqlClient
+
           const suppressOutboxConfig = {
             ...cartAggregateConfigV2,
             outboxMode: { _tag: "SuppressOutbox" as const },
@@ -847,7 +1017,6 @@ describe("Aggregate HTTP & Evolution Specs", () => {
             },
             CommandId.make("cmd-suppress-1"),
             suppressOutboxConfig,
-            [openCartsProjectionV2],
           )
 
           const suppressEvents = yield* sql<{ cnt: number }>`
@@ -867,8 +1036,20 @@ describe("Aggregate HTTP & Evolution Specs", () => {
             SELECT COUNT(*) as cnt FROM es_outbox WHERE aggregate_id = ${suppressCartId}
           `
           expect(suppressOutbox[0]?.cnt).toBe(0)
+        }),
+      ).pipe(Effect.provide(TestEnv)),
+  )
 
-          // 3c. Rollback when the second event in seedAggregateStream fails encode
+  it.effect(
+    "seedAggregateStream rolls back transaction when a subsequent event in the batch fails encoding",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* initializeAggregateTables()
+          yield* initializeProjectorTables()
+          yield* initCartViewV2Table
+          const sql = yield* SqlClient
+
           const RejectSecondEventSchema = CartEventV2.pipe(
             Schema.check(
               Schema.makeFilter((e) =>
@@ -934,8 +1115,110 @@ describe("Aggregate HTTP & Evolution Specs", () => {
             SELECT COUNT(*) as cnt FROM projection_cart_view_v2 WHERE cart_id = ${rollbackCartId}
           `
           expect(rollbackProjectionCount[0]?.cnt).toBe(0)
+        }),
+      ).pipe(Effect.provide(TestEnv)),
+  )
 
-          // 4. executeAggregateCommandAndSync fails with OutboxPublishError when cross-aggregate projection fails, preserving es_outbox row
+  it.effect(
+    "relayAggregateOutbox loops across multiple batches until outbox is completely drained",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* initializeAggregateTables()
+          yield* initializeProjectorTables()
+          yield* initCartViewV2Table
+          yield* initOpenCartsProjectionTable
+          const sql = yield* SqlClient
+
+          yield* sql`DELETE FROM es_outbox`
+
+          const cartId = AggregateId.make("cart-multi-batch")
+          const events: ReadonlyArray<CartEventV2> = [
+            { _tag: "CartCreated", version: 1, cartId: CartId.make("cart-multi-batch") },
+            {
+              _tag: "ItemAdded",
+              version: 1,
+              cartId: CartId.make("cart-multi-batch"),
+              itemId: ItemId.make("item-1"),
+              quantity: positiveInt(1),
+            },
+            {
+              _tag: "ItemAdded",
+              version: 1,
+              cartId: CartId.make("cart-multi-batch"),
+              itemId: ItemId.make("item-2"),
+              quantity: positiveInt(2),
+            },
+            {
+              _tag: "ItemAdded",
+              version: 1,
+              cartId: CartId.make("cart-multi-batch"),
+              itemId: ItemId.make("item-3"),
+              quantity: positiveInt(3),
+            },
+            {
+              _tag: "CartCheckedOut",
+              version: 2,
+              cartId: CartId.make("cart-multi-batch"),
+              orderId: OrderId.make("order-mb-1"),
+              channel: CheckoutChannel.make("web"),
+            },
+          ]
+          const head = yield* seedAggregateStream(cartId, events, cartAggregateConfigV2)
+          expect(head).toBe(5)
+
+          const initialOutboxRows = yield* sql<{ cnt: number }>`
+            SELECT COUNT(*) as cnt FROM es_outbox WHERE aggregate_name = 'Cart'
+          `
+          expect(initialOutboxRows[0]?.cnt).toBe(5)
+
+          const outcome = yield* relayAggregateOutbox(
+            AggregateName.make("Cart"),
+            [openCartsProjectionV2],
+            BatchLimit.make(2),
+          )
+          match(outcome)
+            .with({ _tag: "OutboxDrained" }, (d) => {
+              expect(d.drainedCount).toBe(5)
+            })
+            .with({ _tag: "OutboxEmpty" }, () => {
+              expect.unreachable("expected OutboxDrained")
+            })
+            .exhaustive()
+
+          const remainingOutbox = yield* sql<{ cnt: number }>`
+            SELECT COUNT(*) as cnt FROM es_outbox WHERE aggregate_name = 'Cart'
+          `
+          expect(remainingOutbox[0]?.cnt).toBe(0)
+
+          const secondOutcome = yield* relayAggregateOutbox(
+            AggregateName.make("Cart"),
+            [openCartsProjectionV2],
+            BatchLimit.make(2),
+          )
+          match(secondOutcome)
+            .with({ _tag: "OutboxEmpty" }, () => {
+              // successfully empty!
+            })
+            .with({ _tag: "OutboxDrained" }, () => {
+              expect.unreachable("expected OutboxEmpty")
+            })
+            .exhaustive()
+        }),
+      ).pipe(Effect.provide(TestEnv)),
+  )
+
+  it.effect(
+    "relayAggregateOutbox fails with OutboxPublishError when cross-aggregate projection fails, preserving es_outbox row",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* initializeAggregateTables()
+          yield* initializeProjectorTables()
+          yield* initCartViewV2Table
+          yield* initOpenCartsProjectionTable
+          const sql = yield* SqlClient
+
           const outboxFailCartId = AggregateId.make("cart-outbox-fail")
           const failingCrossWithTypedErr = CrossAggregateProjection.make({
             processorId: ProcessorId.make("failing-cross-proj-typed"),
@@ -947,10 +1230,9 @@ describe("Aggregate HTTP & Evolution Specs", () => {
             purge: Effect.void,
           })
 
-          // Clear previous outbox rows first so we isolate outboxFailCartId
           yield* sql`DELETE FROM es_outbox`
 
-          const outboxFailExit = yield* executeAggregateCommandAndSync(
+          yield* executeAggregateCommandAndSync(
             outboxFailCartId,
             {
               _tag: "AddItem",
@@ -960,8 +1242,12 @@ describe("Aggregate HTTP & Evolution Specs", () => {
             },
             CommandId.make("cmd-outbox-fail-1"),
             cartAggregateConfigV2,
-            [failingCrossWithTypedErr],
-          ).pipe(Effect.exit)
+          )
+
+          const outboxFailExit = yield* relayAggregateOutbox(AggregateName.make("Cart"), [
+            failingCrossWithTypedErr,
+          ]).pipe(Effect.exit)
+
           match(outboxFailExit)
             .with({ _tag: "Failure" }, (f) => {
               const err = Cause.findErrorOption(f.cause)
@@ -975,13 +1261,28 @@ describe("Aggregate HTTP & Evolution Specs", () => {
             .with({ _tag: "Success" }, () => expect.unreachable("expected failure"))
             .exhaustive()
 
-          // Unacknowledged row remains in es_outbox!
           const remainingOutbox = yield* sql<{ aggregate_id: string }>`
             SELECT aggregate_id FROM es_outbox WHERE aggregate_id = ${outboxFailCartId}
           `
           expect(remainingOutbox.length).toBeGreaterThan(0)
+        }),
+      ).pipe(Effect.provide(TestEnv)),
+  )
 
-          // 5. executeAggregateCommandAndSync surfaces ProjectionArchiveCorruptionError when cross-projection eventSchema fails to decode outbox payload
+  it.effect(
+    "relayAggregateOutbox surfaces ProjectionArchiveCorruptionError when cross-projection schema fails to decode payload",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* initializeAggregateTables()
+          yield* initializeProjectorTables()
+          yield* initCartViewV2Table
+          yield* initOpenCartsProjectionTable
+          const sql = yield* SqlClient
+
+          const RejectingCartEventSchema = CartEventV2.pipe(
+            Schema.check(Schema.makeFilter(() => "Simulated serialization failure")),
+          )
           yield* sql`DELETE FROM es_outbox`
           const incompatibleCrossProjection = CrossAggregateProjection.make({
             processorId: ProcessorId.make("incompatible-cross-proj"),
@@ -993,7 +1294,7 @@ describe("Aggregate HTTP & Evolution Specs", () => {
             purge: Effect.void,
           })
           const archiveCorruptCartId = AggregateId.make("cart-archive-corrupt")
-          const archiveCorruptExit = yield* executeAggregateCommandAndSync(
+          yield* executeAggregateCommandAndSync(
             archiveCorruptCartId,
             {
               _tag: "AddItem",
@@ -1003,8 +1304,11 @@ describe("Aggregate HTTP & Evolution Specs", () => {
             },
             CommandId.make("cmd-archive-corrupt-1"),
             cartAggregateConfigV2,
-            [incompatibleCrossProjection],
-          ).pipe(Effect.exit)
+          )
+          const archiveCorruptExit = yield* relayAggregateOutbox(AggregateName.make("Cart"), [
+            incompatibleCrossProjection,
+          ]).pipe(Effect.exit)
+
           match(archiveCorruptExit)
             .with({ _tag: "Failure" }, (f) => {
               const err = Cause.findErrorOption(f.cause)
@@ -1019,8 +1323,178 @@ describe("Aggregate HTTP & Evolution Specs", () => {
             })
             .with({ _tag: "Success" }, () => expect.unreachable("expected failure"))
             .exhaustive()
+        }),
+      ).pipe(Effect.provide(TestEnv)),
+  )
 
-          // 6. HTTP executeCommand rejects params.cartId !== payload.command.cartId with CartIdMismatchError
+  it.effect(
+    "seedAggregateStream maps unique insert conflict to ConcurrencyConflictError or EventStreamCorruptionError",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* initializeAggregateTables()
+          yield* initializeProjectorTables()
+          yield* initCartViewV2Table
+          yield* initOpenCartsProjectionTable
+          const sql = yield* SqlClient
+
+          const conflictCartId = AggregateId.make("cart-seed-conflict")
+
+          yield* sql`
+            CREATE TRIGGER IF NOT EXISTS test_seed_conflict_trigger
+            BEFORE INSERT ON es_events
+            FOR EACH ROW
+            WHEN NEW.aggregate_id = 'cart-seed-conflict' AND NEW.command_id LIKE 'seed-%'
+            BEGIN
+              SELECT RAISE(ABORT, 'UNIQUE constraint failed: es_events.aggregate_name, es_events.aggregate_id, es_events.stream_version');
+            END;
+          `
+
+          yield* Effect.addFinalizer(() =>
+            sql`DROP TRIGGER IF EXISTS test_seed_conflict_trigger`.pipe(Effect.orDie),
+          )
+
+          // 1. With existing valid row at stream_version = 1 -> maps unique conflict to ConcurrencyConflictError
+          yield* sql`
+            INSERT INTO es_events (
+              aggregate_name, aggregate_id, stream_version, command_id, event_type, payload, metadata, created_at
+            ) VALUES (
+              'Cart', ${conflictCartId}, 1, 'cmd-valid-1', 'CartCreated', '{}', '{}', 1000
+            )
+          `
+
+          const conflictExit = yield* seedAggregateStream(
+            conflictCartId,
+            [
+              {
+                _tag: "ItemAdded" as const,
+                version: 1 as const,
+                cartId: CartId.make("cart-seed-conflict"),
+                itemId: ItemId.make("item-conf-1"),
+                quantity: positiveInt(1),
+              },
+            ],
+            cartAggregateConfigV2,
+          ).pipe(Effect.exit)
+
+          match(conflictExit)
+            .with({ _tag: "Failure" }, (f) => {
+              const err = Cause.findErrorOption(f.cause)
+              match(err)
+                .with({ _tag: "Some" }, ({ value }) => {
+                  expect(value instanceof ConcurrencyConflictError).toBe(true)
+                  match(value)
+                    .with({ _tag: "ConcurrencyConflictError" }, (cErr) => {
+                      expect(cErr.aggregateId).toBe("cart-seed-conflict")
+                      expect(cErr.expectedVersion).toBe(1)
+                      expect(cErr.actualVersion).toBe(1)
+                    })
+                    .otherwise(() => {
+                      expect.unreachable("expected ConcurrencyConflictError")
+                    })
+                })
+                .with({ _tag: "None" }, () =>
+                  expect.unreachable("expected ConcurrencyConflictError"),
+                )
+                .exhaustive()
+            })
+            .with({ _tag: "Success" }, () => expect.unreachable("expected failure"))
+            .exhaustive()
+
+          // 2. With corrupt row at stream_version = -5 -> maps to EventStreamCorruptionError
+          yield* sql`DELETE FROM es_events WHERE aggregate_id = ${conflictCartId}`
+          yield* sql`
+            INSERT INTO es_events (
+              aggregate_name, aggregate_id, stream_version, command_id, event_type, payload, metadata, created_at
+            ) VALUES (
+              'Cart', ${conflictCartId}, -5, 'cmd-corrupt-5', 'CartCreated', '{}', '{}', 1000
+            )
+          `
+
+          const corruptExit = yield* seedAggregateStream(
+            conflictCartId,
+            [
+              {
+                _tag: "ItemAdded" as const,
+                version: 1 as const,
+                cartId: CartId.make("cart-seed-conflict"),
+                itemId: ItemId.make("item-conf-2"),
+                quantity: positiveInt(1),
+              },
+            ],
+            cartAggregateConfigV2,
+          ).pipe(Effect.exit)
+
+          match(corruptExit)
+            .with({ _tag: "Failure" }, (f) => {
+              const err = Cause.findErrorOption(f.cause)
+              match(err)
+                .with({ _tag: "Some" }, ({ value }) => {
+                  expect(value instanceof EventStreamCorruptionError).toBe(true)
+                })
+                .with({ _tag: "None" }, () =>
+                  expect.unreachable("expected EventStreamCorruptionError"),
+                )
+                .exhaustive()
+            })
+            .with({ _tag: "Success" }, () => expect.unreachable("expected failure"))
+            .exhaustive()
+
+          // 3. Without any existing rows (missing max_version) -> maps to EventStreamCorruptionError
+          yield* sql`DELETE FROM es_events WHERE aggregate_id = ${conflictCartId}`
+
+          const missingExit = yield* seedAggregateStream(
+            conflictCartId,
+            [
+              {
+                _tag: "CartCreated" as const,
+                version: 1 as const,
+                cartId: CartId.make("cart-seed-conflict"),
+              },
+            ],
+            cartAggregateConfigV2,
+          ).pipe(Effect.exit)
+
+          match(missingExit)
+            .with({ _tag: "Failure" }, (f) => {
+              const err = Cause.findErrorOption(f.cause)
+              match(err)
+                .with({ _tag: "Some" }, ({ value }) => {
+                  expect(value instanceof EventStreamCorruptionError).toBe(true)
+                  match(value)
+                    .with({ _tag: "EventStreamCorruptionError" }, (corrErr) => {
+                      expect(corrErr.reason).toContain(
+                        "Missing max(stream_version) during unique conflict resolution",
+                      )
+                    })
+                    .otherwise(() => {
+                      expect.unreachable("expected EventStreamCorruptionError")
+                    })
+                })
+                .with({ _tag: "None" }, () =>
+                  expect.unreachable("expected EventStreamCorruptionError"),
+                )
+                .exhaustive()
+            })
+            .with({ _tag: "Success" }, () => expect.unreachable("expected failure"))
+            .exhaustive()
+        }),
+      ).pipe(Effect.provide(TestEnv)),
+  )
+
+  it.effect(
+    "HttpApi executeCommand rejects params.cartId !== payload.command.cartId with CartIdMismatchError",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* initializeAggregateTables()
+          yield* initializeProjectorTables()
+          yield* initCartViewV2Table
+          yield* initOpenCartsProjectionTable
+          const client = yield* HttpApiTest.groups(CartEsApi, ["carts"]).pipe(
+            Effect.provide(cartApiLayer),
+          )
+
           const mismatchHttpExit = yield* client.carts
             .executeCommand({
               params: { cartId: AggregateId.make("url-cart-id") },

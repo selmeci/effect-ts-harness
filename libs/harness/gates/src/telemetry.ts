@@ -99,6 +99,8 @@ export const scopeSessionReportInput = (
       ev.toolName === "done" &&
       ev.outcome === "ok" &&
       ev.detail !== "fullyIdle=false" &&
+      ev.detail !== "subagent=true" &&
+      ev.detail !== "readOnly=true" &&
       (ev.surface === "cli" ||
         ev.detail === "completed" ||
         allEvents[i - 1]?.toolName === "omnigraph:merge-main")

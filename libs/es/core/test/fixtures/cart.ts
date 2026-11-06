@@ -1,8 +1,16 @@
 import { Effect, Schema } from "effect"
-import { EventSchemaVersion, EventType, PositiveInt, StreamVersion } from "@harness/es-contract"
+import {
+  EventSchemaVersion,
+  EventType,
+  type EventUpcasterLink,
+  type EventVersionSnapshotEntry,
+  type FrozenEventSchemaViolationError,
+  PositiveInt,
+  StreamVersion,
+} from "@harness/es-contract"
 import { match, P } from "ts-pattern"
 import { Decider } from "../../src/decider.js"
-import { makeEventUpcaster } from "../../src/evolution.js"
+import { makeEventUpcaster, toEventVersionSnapshot } from "../../src/evolution.js"
 
 export const positiveInt = Schema.decodeSync(PositiveInt)
 export const streamVersion = Schema.decodeSync(StreamVersion)
@@ -222,6 +230,10 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
     )
     .exhaustive()
 
+/**
+ * Pure state fold for Cart V2 events. Events carrying a mismatched `cartId` are defensively ignored
+ * as no-ops because each aggregate stream is partitioned by `aggregateId`.
+ */
 export const evolveCartV2 = (state: CartStateV2, event: CartEventV2): CartStateV2 =>
   match(event)
     .with({ _tag: "CartCreated" }, (e) =>
@@ -499,4 +511,34 @@ export const cartDeciderV2 = Decider.make({
   initialState: initialCartStateV2,
   evolve: evolveCartV2,
   decide: decideCartV2,
+})
+
+export const cartRegisteredUpcasters: ReadonlyArray<EventUpcasterLink> = [cartCheckedOutV1ToV2.link]
+
+export const computeCartEventSnapshots: Effect.Effect<
+  ReadonlyArray<EventVersionSnapshotEntry>,
+  FrozenEventSchemaViolationError,
+  never
+> = Effect.gen(function* () {
+  const cartCreatedV1 = yield* toEventVersionSnapshot(
+    EventType.make("CartCreated"),
+    EventSchemaVersion.make(1),
+    CartCreated,
+  )
+  const itemAddedV1 = yield* toEventVersionSnapshot(
+    EventType.make("ItemAdded"),
+    EventSchemaVersion.make(1),
+    ItemAdded,
+  )
+  const cartCheckedOutV1 = yield* toEventVersionSnapshot(
+    EventType.make("CartCheckedOut"),
+    EventSchemaVersion.make(1),
+    CartCheckedOut,
+  )
+  const cartCheckedOutV2 = yield* toEventVersionSnapshot(
+    EventType.make("CartCheckedOut"),
+    EventSchemaVersion.make(2),
+    CartCheckedOutV2,
+  )
+  return [cartCreatedV1, itemAddedV1, cartCheckedOutV1, cartCheckedOutV2]
 })

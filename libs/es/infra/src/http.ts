@@ -4,6 +4,7 @@ import type { SqlError } from "effect/sql/SqlError"
 import {
   type AggregateId,
   type AggregateNotFoundError,
+  type CommandAggregateMismatchError,
   CommandId,
   ConcurrencyConflictError,
   type CrossProjectionNotFoundError,
@@ -11,10 +12,9 @@ import {
   EventMetadata,
   EventSerializationError,
   EventStreamCorruptionError,
+  EventType,
   type LocalProjectionNotFoundError,
-  OutboxPublishError,
   type ProcessorId,
-  ProjectionArchiveCorruptionError,
   type ProjectionName,
   StreamVersion,
   TimestampMs,
@@ -23,26 +23,37 @@ import {
   type AggregateConfig,
   applyLocalProjection,
   type CrossAggregateProjection,
-  EventBus,
+  type HandledCommandResult,
   type LocalProjection,
   queryCrossProjection,
   queryLocalProjection,
 } from "@harness/es-core"
 import { match, P } from "ts-pattern"
 import { handleAggregateCommand, isEventStreamUniqueConflict, loadAggregate } from "./aggregate.js"
-import { DEFAULT_OUTBOX_BATCH_LIMIT, drainAggregateOutbox } from "./outbox.js"
-import { ingestPublishedEvent } from "./projector.js"
+import { relayAggregateOutbox } from "./outbox.js"
+
+export { relayAggregateOutbox }
 
 interface MaxVersionRow {
   readonly max_version: number | null
 }
 
-const toErrorMessage = (cause: unknown): ErrorMessage => {
-  const raw = cause instanceof Error ? cause.message : String(cause)
-  const trimmed = raw.trim()
-  return ErrorMessage.make(trimmed.length > 0 ? trimmed : "Schema validation failure")
+const formatErrorCause = (cause: unknown): ErrorMessage => {
+  if (cause instanceof Error) {
+    const trimmed = cause.message.trim()
+    return ErrorMessage.make(trimmed.length > 0 ? trimmed : cause.name || "Error")
+  }
+  const raw = String(cause).trim()
+  return ErrorMessage.make(raw.length > 0 ? raw : "Schema validation failure")
 }
 
+/**
+ * Seeds a stream of historical domain events into `es_events` within a single SQLite transaction,
+ * synchronously updating local same-DO projections (`es_projections_meta`) and `es_outbox` according
+ * to `config.outboxMode`.
+ *
+ * Designed for test fixtures (`makeAggregateApiTestHarness`) and deterministic state setup.
+ */
 export const seedAggregateStream = Effect.fn("AggregateHttp.seedStream")(
   <Command, Event, State, Err, ProjectionEnv = never, ProjectionErr = never>(
     aggregateId: AggregateId,
@@ -111,6 +122,23 @@ export const seedAggregateStream = Effect.fn("AggregateHttp.seedStream")(
               commandId,
               timestamp: now,
             })
+
+            const rawTag =
+              typeof event === "object" && event !== null && "_tag" in event
+                ? event._tag
+                : undefined
+            const eventType = yield* Schema.decodeUnknownEffect(EventType)(rawTag).pipe(
+              Effect.mapError(
+                () =>
+                  new EventSerializationError({
+                    aggregateName: config.aggregateName,
+                    aggregateId,
+                    streamVersion: eventVersion,
+                    reason: ErrorMessage.make("Missing or invalid _tag on seeded domain event"),
+                  }),
+              ),
+            )
+
             const payloadJson = yield* Schema.encodeEffect(eventJsonSchema)(event).pipe(
               Effect.mapError(
                 (cause) =>
@@ -118,7 +146,7 @@ export const seedAggregateStream = Effect.fn("AggregateHttp.seedStream")(
                     aggregateName: config.aggregateName,
                     aggregateId,
                     streamVersion: eventVersion,
-                    reason: toErrorMessage(cause),
+                    reason: formatErrorCause(cause),
                   }),
               ),
             )
@@ -129,17 +157,10 @@ export const seedAggregateStream = Effect.fn("AggregateHttp.seedStream")(
                     aggregateName: config.aggregateName,
                     aggregateId,
                     streamVersion: eventVersion,
-                    reason: toErrorMessage(cause),
+                    reason: formatErrorCause(cause),
                   }),
               ),
             )
-            const eventType =
-              typeof event === "object" &&
-              event !== null &&
-              "_tag" in event &&
-              typeof event._tag === "string"
-                ? event._tag
-                : "Event"
 
             yield* sql`
               INSERT INTO es_events (
@@ -272,72 +293,37 @@ export const seedAggregateStream = Effect.fn("AggregateHttp.seedStream")(
     }),
 )
 
-export const executeAggregateCommandAndSync = Effect.fn("AggregateHttp.executeCommand")(function* <
-  Command,
-  Event,
-  State,
-  Err,
-  ProjectionEnv = never,
-  ProjectionErr = never,
-  CrossReadModel = unknown,
-  CrossQueryInput = void,
-  CrossProjEnv = never,
-  CrossProjErr = never,
->(
-  aggregateId: AggregateId,
-  command: Command,
-  commandId: CommandId,
-  config: AggregateConfig<Command, Event, State, Err, ProjectionEnv, ProjectionErr>,
-  crossProjections?: ReadonlyArray<
-    CrossAggregateProjection<Event, CrossReadModel, CrossQueryInput, CrossProjEnv, CrossProjErr>
-  >,
-) {
-  const handled = yield* handleAggregateCommand(aggregateId, command, commandId, config)
+/**
+ * Executes an aggregate command via `handleAggregateCommand`, committing new events, local same-DO
+ * projections, and `es_outbox` rows atomically in a single SQLite transaction.
+ *
+ * Strictly obeys the transactional outbox boundary (`harness(aggregate-direct-bus-publish)`): never
+ * publishes to `EventBus` or drains `es_outbox` inline during command execution. Cross-aggregate
+ * projections are updated asynchronously via `relayAggregateOutbox` (`Outbox.relay`).
+ */
+export const executeAggregateCommandAndSync = Effect.fn("AggregateHttp.executeCommand")(
+  <Command, Event, State, Err, ProjectionEnv = never, ProjectionErr = never>(
+    aggregateId: AggregateId,
+    command: Command,
+    commandId: CommandId,
+    config: AggregateConfig<Command, Event, State, Err, ProjectionEnv, ProjectionErr>,
+  ): Effect.Effect<
+    HandledCommandResult<State, Event>,
+    | Err
+    | CommandAggregateMismatchError
+    | ConcurrencyConflictError
+    | EventSerializationError
+    | EventStreamCorruptionError
+    | ProjectionErr
+    | SqlError,
+    SqlClient | ProjectionEnv
+  > => handleAggregateCommand(aggregateId, command, commandId, config),
+)
 
-  yield* match(config.outboxMode)
-    .with({ _tag: "PublishOutbox" }, () => {
-      if (crossProjections === undefined || crossProjections.length === 0) {
-        return Effect.void
-      }
-      return Effect.gen(function* () {
-        let capturedArchiveError: ProjectionArchiveCorruptionError | undefined
-        const bus = EventBus.make<SqlClient | CrossProjEnv>({
-          publish: (envelope) =>
-            ingestPublishedEvent(envelope, crossProjections).pipe(
-              Effect.asVoid,
-              Effect.mapError((cause) => {
-                if (cause instanceof ProjectionArchiveCorruptionError) {
-                  capturedArchiveError = cause
-                }
-                return new OutboxPublishError({
-                  aggregateName: config.aggregateName,
-                  aggregateId: envelope.aggregateId,
-                  streamVersion: envelope.streamVersion,
-                  reason: toErrorMessage(cause),
-                })
-              }),
-            ),
-        })
-        return yield* drainAggregateOutbox(
-          bus,
-          DEFAULT_OUTBOX_BATCH_LIMIT,
-          config.aggregateName,
-        ).pipe(
-          Effect.asVoid,
-          Effect.mapError((err) =>
-            err instanceof OutboxPublishError && capturedArchiveError !== undefined
-              ? capturedArchiveError
-              : err,
-          ),
-        )
-      })
-    })
-    .with({ _tag: "SuppressOutbox" }, () => Effect.void)
-    .exhaustive()
-
-  return handled
-})
-
+/**
+ * Queries a local same-DO read model after verifying that the aggregate stream exists and its local
+ * projections are caught up.
+ */
 export const queryAggregateReadModel = Effect.fn("AggregateHttp.queryLocal")(
   <Command, Event, State, Err, ReadModel, ProjectionEnv = never, ProjectionErr = never>(
     aggregateId: AggregateId,
@@ -359,6 +345,9 @@ export const queryAggregateReadModel = Effect.fn("AggregateHttp.queryLocal")(
     }),
 )
 
+/**
+ * Queries a cross-aggregate read model by `processorId`.
+ */
 export const queryCrossAggregateReadModel = Effect.fn("AggregateHttp.queryCross")(
   <Event, ReadModel, QueryInput = void, ProjEnv = never, ProjErr = never>(
     processorId: ProcessorId,

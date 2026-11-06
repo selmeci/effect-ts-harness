@@ -45,11 +45,20 @@ export const ALLOWLIST: ReadonlyArray<string> = [
   "git show",
   "git stash",
   "git grep",
-  "gh pr",
-  "gh repo",
-  "gh auth",
+  "gh pr view",
+  "gh pr list",
+  "gh pr status",
+  "gh pr diff",
+  "gh pr checks",
+  "gh pr create",
+  "gh pr edit",
+  "gh pr comment",
+  "gh repo view",
+  "gh auth status",
   "gh api repos/",
-  "gh issue",
+  "gh issue view",
+  "gh issue list",
+  "gh issue status",
   "ls",
   "dir",
   "pwd",
@@ -259,12 +268,18 @@ export const GIT_DISCARD_PATTERNS: ReadonlyArray<GuardPatternRule> = [
   },
 ]
 
-/** REQ-1.1 / REQ-1.4: find actions that delete or execute. Evaluated on `CommandView.argv`,
- * so quoted flags (`'-delete'`) are caught. Checked BEFORE the prefix allowlist. */
+/** REQ-1.1 / REQ-1.4: find actions that delete or execute, and mutating flags on gh api.
+ * Evaluated on `CommandView.argv`, so quoted flags (`'-delete'`, `'-X' 'DELETE'`) are caught.
+ * Checked BEFORE the prefix allowlist. */
 export const DESTRUCTIVE_ARGUMENT_PATTERNS: ReadonlyArray<GuardPatternRule> = [
   {
     pattern: /\bfind\b.*\s-(?:delete|exec|execdir|ok|okdir)\b/,
     reason: "find action that deletes or executes",
+  },
+  {
+    pattern:
+      /\bgh\s+api\b.*(?:\s-(?:X|f|F)[A-Za-z0-9_=-]*|\s--(?:method|field|raw-field|input)(?:=|\s|$))/,
+    reason: "gh api mutating request method or body field",
   },
 ]
 

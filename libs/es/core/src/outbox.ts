@@ -4,12 +4,13 @@ import type { OutboxPublishError, PublishedEventEnvelope } from "@harness/es-con
 /**
  * Abstract message bus capability for publishing drained outbox envelopes to downstream consumers.
  */
-export interface EventBus<Env = never> {
+export interface EventBus<Env = never, Err = never> {
   readonly publish: (
     envelope: PublishedEventEnvelope,
-  ) => Effect.Effect<void, OutboxPublishError, Env>
+  ) => Effect.Effect<void, OutboxPublishError | Err, Env>
 }
 
 export const EventBus = Object.assign(Context.Service<EventBus>("EventBus"), {
-  make: <Env = never>(definition: EventBus<Env>): EventBus<Env> => definition,
+  make: <Env = never, Err = never>(definition: EventBus<Env, Err>): EventBus<Env, Err> =>
+    definition,
 })

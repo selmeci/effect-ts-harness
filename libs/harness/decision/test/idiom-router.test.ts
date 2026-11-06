@@ -111,4 +111,20 @@ describe("Deterministic routing for Phase 4 event schema evolution", () => {
     )
     expect(testResult).toBe("testing")
   })
+
+  it("verifies precedence when prompt mentions schema evolution (toJsonSchemaDocument, upcaster) and HttpApi", async () => {
+    const schemaPrecedence = await Effect.runPromise(
+      routeStep("Export HttpApi contract to JSON schema using toJsonSchemaDocument").pipe(
+        Effect.provide(mockModel),
+      ),
+    )
+    expect(schemaPrecedence).toBe("schema")
+
+    const httpApiPrecedence = await Effect.runPromise(
+      routeStep("Expose event upcaster endpoints over HttpApi transport").pipe(
+        Effect.provide(mockModel),
+      ),
+    )
+    expect(httpApiPrecedence).toBe("httpapi")
+  })
 })

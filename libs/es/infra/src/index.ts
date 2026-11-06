@@ -16,7 +16,7 @@ import {
   queryCrossAggregateReadModel,
   seedAggregateStream,
 } from "./http.js"
-import { DEFAULT_OUTBOX_BATCH_LIMIT, drainAggregateOutbox } from "./outbox.js"
+import { DEFAULT_OUTBOX_BATCH_LIMIT, drainAggregateOutbox, relayAggregateOutbox } from "./outbox.js"
 import {
   checkProjectorCatchUp,
   ingestPublishedEvent,
@@ -45,6 +45,7 @@ export {
   queryAggregateReadModel,
   queryCrossAggregateReadModel,
   rebuildProjectorFromArchive,
+  relayAggregateOutbox,
   seedAggregateStream,
 }
 

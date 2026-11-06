@@ -225,6 +225,11 @@ const resolveGraph = (
   )
 }
 
+export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolean => {
+  const rel = path.relative(path.resolve(rootDir), path.resolve(candidatePath))
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))
+}
+
 export const runDefaultLspDiagnostics = (
   repoRoot: string,
   input: {
@@ -246,13 +251,17 @@ export const runDefaultLspDiagnostics = (
       } else {
         const normalizedRepoRoot = path.resolve(repoRoot)
         let curr = path.dirname(resolvedFile)
-        while (curr.startsWith(normalizedRepoRoot) && curr !== normalizedRepoRoot) {
+        while (isPathInsideRoot(normalizedRepoRoot, curr) && curr !== normalizedRepoRoot) {
           const candidate = path.join(curr, "tsconfig.json")
           if (fs.existsSync(candidate)) {
             cliArgs.push("--project", candidate)
             break
           }
-          curr = path.dirname(curr)
+          const parent = path.dirname(curr)
+          if (parent === curr) {
+            break
+          }
+          curr = parent
         }
       }
       cliArgs.push("--file", resolvedFile)
@@ -280,31 +289,55 @@ export const runDefaultLspDiagnostics = (
         summary,
       } satisfies LspDiagnosticsReport
     }
+
+    const failureDetails: Array<string> = []
+    if (proc.error) {
+      failureDetails.push(`[lsp-spawn-error] ${proc.error.message}`)
+    }
+    if (proc.signal) {
+      failureDetails.push(`[lsp-signal] Process terminated by signal ${proc.signal}`)
+    }
+    if (typeof proc.status === "number" && proc.status !== 0) {
+      failureDetails.push(`[lsp-exit-${proc.status}] effect-tsgo exited with status ${proc.status}`)
+    }
+    const stderrText = (proc.stderr ?? "").trim()
+    if (stderrText.length > 0) {
+      failureDetails.push(stderrText)
+    } else if (stdout.length > 0) {
+      failureDetails.push(stdout)
+    }
+    if (failureDetails.length === 0) {
+      failureDetails.push("[lsp-error] effect-tsgo produced no valid JSON diagnostic payload")
+    }
+
     return {
       clean: false,
-      diagnostics: proc.stderr ? [proc.stderr.trim()] : [],
+      diagnostics: failureDetails,
       summary: {
         filesChecked: 0,
         filesWithoutPlugin: 0,
         totalFiles: 0,
         errors: 1,
         warnings: 0,
-        messages: 0,
+        messages: failureDetails.length,
       },
     } satisfies LspDiagnosticsReport
   }).pipe(
-    Effect.orElseSucceed((): LspDiagnosticsReport => ({
-      clean: false,
-      diagnostics: [],
-      summary: {
-        filesChecked: 0,
-        filesWithoutPlugin: 0,
-        totalFiles: 0,
-        errors: 1,
-        warnings: 0,
-        messages: 0,
-      },
-    })),
+    Effect.catch((cause): Effect.Effect<LspDiagnosticsReport> => {
+      const msg = `[lsp-exception] ${cause instanceof Error ? cause.message : String(cause)}`
+      return Effect.succeed({
+        clean: false,
+        diagnostics: [msg],
+        summary: {
+          filesChecked: 0,
+          filesWithoutPlugin: 0,
+          totalFiles: 0,
+          errors: 1,
+          warnings: 0,
+          messages: 1,
+        },
+      })
+    }),
   )
 
 export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (

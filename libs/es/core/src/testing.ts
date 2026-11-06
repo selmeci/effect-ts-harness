@@ -69,6 +69,7 @@ export const makeDeciderTestHarness = <Command, Event, State, Err>(
                 const errorOpt = Cause.findErrorOption(f.cause)
                 match(errorOpt)
                   .with({ _tag: "Some" }, (some) => {
+                    expect(some.value).toEqual(expectedError)
                     expect(Equal.equals(some.value, expectedError)).toBe(true)
                   })
                   .with({ _tag: "None" }, () => {
@@ -123,8 +124,10 @@ export const makeAggregateApiTestHarness = <Event, Response, Err, Env = never>(
           )
           yield* match(exit)
             .with({ _tag: "Success" }, (s): Effect.Effect<void, never, never> => {
+              expect(s.value.response).toEqual(expectedResponse)
               expect(Equal.equals(s.value.response, expectedResponse)).toBe(true)
               expect(s.value.appended.length).toBe(expectedAppendedEvents.length)
+              expect(s.value.appended).toEqual(expectedAppendedEvents)
               expect(Equal.equals(s.value.appended, expectedAppendedEvents)).toBe(true)
               return Effect.void
             })
@@ -159,6 +162,7 @@ export const makeAggregateApiTestHarness = <Event, Response, Err, Env = never>(
               const errorOpt = Cause.findErrorOption(f.cause)
               match(errorOpt)
                 .with({ _tag: "Some" }, (some) => {
+                  expect(some.value).toEqual(expectedError)
                   expect(Equal.equals(some.value, expectedError)).toBe(true)
                 })
                 .with({ _tag: "None" }, () => {

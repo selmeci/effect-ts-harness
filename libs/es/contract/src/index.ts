@@ -268,6 +268,11 @@ export class AggregateCommandResult extends Schema.Class<AggregateCommandResult>
   ),
 ) {}
 
+interface HandledCommandResponseCandidate {
+  readonly events?: ReadonlyArray<unknown> | undefined
+  readonly result?: AggregateCommandResult | undefined
+}
+
 export const makeHandledCommandResponseSchema = <
   StateSchema extends Schema.Top,
   EventSchema extends Schema.Top,
@@ -282,21 +287,8 @@ export const makeHandledCommandResponseSchema = <
   }).pipe(
     Schema.check(
       Schema.makeFilter(
-        (r: unknown) => {
-          if (typeof r !== "object" || r === null || !("result" in r) || !("events" in r)) {
-            return false
-          }
-          const result = r.result
-          const events = r.events
-          if (typeof result !== "object" || result === null || !("processingStatus" in result)) {
-            return false
-          }
-          const status = result.processingStatus
-          if (typeof status !== "object" || status === null || !("_tag" in status)) {
-            return false
-          }
-          return status._tag !== "Deduplicated" || (Array.isArray(events) && events.length === 0)
-        },
+        (r: HandledCommandResponseCandidate) =>
+          r.result?.processingStatus._tag !== "Deduplicated" || (r.events?.length ?? 0) === 0,
         {
           message: "Deduplicated command response requires an empty events array",
         },

@@ -935,6 +935,229 @@ const StopHookStdinSchema = Schema.Struct({
 
 const decodeStopHookStdin = Schema.decodeOption(Schema.fromJsonString(StopHookStdinSchema))
 
+const TranscriptToolCallSchema = Schema.Struct({
+  name: Schema.String,
+  args: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+})
+
+const TranscriptStepSchema = Schema.Struct({
+  source: Schema.String,
+  content: Schema.optional(Schema.String),
+  tool_calls: Schema.optional(Schema.Array(TranscriptToolCallSchema)),
+})
+
+const decodeTranscriptStep = Schema.decodeOption(Schema.fromJsonString(TranscriptStepSchema))
+
+const WRITE_TOOL_NAMES = new Set([
+  "write_to_file",
+  "replace_file_content",
+  "multi_replace_file_content",
+  "Write",
+  "Edit",
+  "MultiEdit",
+  "NotebookEdit",
+])
+
+const READ_ONLY_SHELL_PREFIXES = [
+  "rg",
+  "grep",
+  "egrep",
+  "fgrep",
+  "ls",
+  "cat",
+  "head",
+  "tail",
+  "find",
+  "wc",
+  "pwd",
+  "echo",
+  "which",
+  "type",
+  "stat",
+  "file",
+  "du",
+  "df",
+  "ps",
+  "env",
+  "printenv",
+  "true",
+  "false",
+  "git status",
+  "git diff",
+  "git log",
+  "git show",
+  "git branch",
+  "git rev-parse",
+  "git remote",
+  "git config --get",
+  "git config --list",
+]
+
+const unwrapTranscriptStringArg = (val: unknown): string => {
+  if (typeof val !== "string") return ""
+  const trimmed = val.trim()
+  if (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2) {
+    return trimmed.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, "\\")
+  }
+  return trimmed
+}
+
+const isReadOnlyShellCommand = (rawCommand: string): boolean => {
+  const cleaned = rawCommand
+    .replace(/\b2>\s*\/dev\/null\b/g, "")
+    .replace(/\b2>&1\b/g, "")
+    .replace(/\b1?>\s*\/dev\/null\b/g, "")
+    .trim()
+  if (cleaned.length === 0) return true
+  if (/(?:^|[^<>])>>?(?![>&])/.test(cleaned)) {
+    return false
+  }
+  const segments = cleaned
+    .split(/\s*(?:&&|\|\||;|\|)\s*/)
+    .map((s) => s.replace(/^[()\s]+|[()\s]+$/g, "").trim())
+    .filter((s) => s.length > 0)
+  if (segments.length === 0) return true
+
+  return segments.every((seg) => {
+    const withoutEnv = seg.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)+/, "").trim()
+    return READ_ONLY_SHELL_PREFIXES.some(
+      (prefix) =>
+        withoutEnv === prefix ||
+        withoutEnv.startsWith(`${prefix} `) ||
+        withoutEnv.startsWith(`${prefix}\t`),
+    )
+  })
+}
+
+const isMutatingTranscriptToolCall = (
+  tc: Schema.Schema.Type<typeof TranscriptToolCallSchema>,
+): boolean => {
+  if (WRITE_TOOL_NAMES.has(tc.name)) {
+    const targetFile =
+      unwrapTranscriptStringArg(tc.args?.TargetFile) ||
+      unwrapTranscriptStringArg(tc.args?.file_path)
+    if (
+      targetFile.length > 0 &&
+      (targetFile.includes("/.gemini/antigravity/brain/") ||
+        targetFile.includes("/.gemini/antigravity/scratch/"))
+    ) {
+      return false
+    }
+    return true
+  }
+  if (tc.name === "run_command" || tc.name === "Bash") {
+    const cmd =
+      unwrapTranscriptStringArg(tc.args?.CommandLine) || unwrapTranscriptStringArg(tc.args?.command)
+    return !isReadOnlyShellCommand(cmd)
+  }
+  if (tc.name === "call_mcp_tool") {
+    const toolName = unwrapTranscriptStringArg(tc.args?.ToolName)
+    return toolName === "mutate" || toolName === "load" || toolName.startsWith("branches_")
+  }
+  if (tc.name === "invoke_subagent" || tc.name === "Task") {
+    return true
+  }
+  return false
+}
+
+const isSuccessfulVerifyTranscriptStep = (
+  step: Schema.Schema.Type<typeof TranscriptStepSchema>,
+): boolean => {
+  const content = step.content
+  if (typeof content !== "string" || content.length === 0) return false
+  return (
+    content.includes("The command exited with code 0.") &&
+    content.includes('"taskBranch":') &&
+    /"treeHash"\s*:\s*"[0-9a-f]{64}"/.test(content)
+  )
+}
+
+const parseTranscriptSteps = (
+  decoded?: Schema.Schema.Type<typeof StopHookStdinSchema>,
+): ReadonlyArray<Schema.Schema.Type<typeof TranscriptStepSchema>> => {
+  if (!decoded?.transcriptPath || !existsSync(decoded.transcriptPath)) {
+    return []
+  }
+  const transcriptPath = decoded.transcriptPath
+  const fullTranscriptPath = transcriptPath.replace(/transcript\.jsonl$/, "transcript_full.jsonl")
+  const effectivePath =
+    fullTranscriptPath !== transcriptPath && existsSync(fullTranscriptPath)
+      ? fullTranscriptPath
+      : transcriptPath
+
+  return Effect.runSync(
+    Effect.try({
+      try: () => {
+        const lines = readFileSync(effectivePath, "utf-8")
+          .split(/\r?\n/)
+          .filter((line) => line.trim().length > 0)
+        const steps: Array<Schema.Schema.Type<typeof TranscriptStepSchema>> = []
+        for (const line of lines) {
+          const stepOpt = decodeTranscriptStep(line)
+          if (Option.isSome(stepOpt)) {
+            steps.push(stepOpt.value)
+          }
+        }
+        return steps
+      },
+      catch: () => [],
+    }).pipe(Effect.orElseSucceed(() => [])),
+  )
+}
+
+const isReadOnlyStopTurn = (decoded?: Schema.Schema.Type<typeof StopHookStdinSchema>): boolean => {
+  const steps = parseTranscriptSteps(decoded)
+  if (steps.length === 0) return false
+  let lastUserExplicitIdx = -1
+  for (let i = 0; i < steps.length; i++) {
+    if (steps[i]?.source === "USER_EXPLICIT") {
+      lastUserExplicitIdx = i
+    }
+  }
+  if (lastUserExplicitIdx === -1) return false
+  for (let i = lastUserExplicitIdx + 1; i < steps.length; i++) {
+    const step = steps[i]
+    if (!step?.tool_calls) continue
+    for (const tc of step.tool_calls) {
+      if (isMutatingTranscriptToolCall(tc)) {
+        return false
+      }
+    }
+  }
+  return true
+}
+
+const hasVerifiedSinceLastMutation = (
+  decoded?: Schema.Schema.Type<typeof StopHookStdinSchema>,
+): boolean => {
+  const steps = parseTranscriptSteps(decoded)
+  if (steps.length === 0) return false
+  let lastUserExplicitIdx = -1
+  for (let i = 0; i < steps.length; i++) {
+    if (steps[i]?.source === "USER_EXPLICIT") {
+      lastUserExplicitIdx = i
+    }
+  }
+  if (lastUserExplicitIdx === -1) return false
+  let lastMutatingIdx = -1
+  let lastVerifySuccessIdx = -1
+  for (let i = lastUserExplicitIdx + 1; i < steps.length; i++) {
+    const step = steps[i]
+    if (!step) continue
+    if (isSuccessfulVerifyTranscriptStep(step)) {
+      lastVerifySuccessIdx = i
+    }
+    if (step.tool_calls) {
+      for (const tc of step.tool_calls) {
+        if (isMutatingTranscriptToolCall(tc)) {
+          lastMutatingIdx = i
+        }
+      }
+    }
+  }
+  return lastVerifySuccessIdx !== -1 && lastVerifySuccessIdx > lastMutatingIdx
+}
+
 const isSubagentStopContext = (
   repoRoot: string,
   decoded?: Schema.Schema.Type<typeof StopHookStdinSchema>,
@@ -954,13 +1177,41 @@ const isSubagentStopContext = (
     return true
   }
   if (decoded?.transcriptPath && existsSync(decoded.transcriptPath)) {
+    const transcriptPath = decoded.transcriptPath
     const isSubagentTranscript = Effect.runSync(
       Effect.try({
         try: () => {
-          const firstLine = readFileSync(decoded.transcriptPath!, "utf-8").split(/\r?\n/)[0] ?? ""
-          return firstLine.includes('"source":"SYSTEM"') && firstLine.includes("[Message]")
+          const lines = readFileSync(transcriptPath, "utf-8")
+            .split(/\r?\n/)
+            .filter((line) => line.trim().length > 0)
+          const firstLine = lines[0]
+          if (firstLine === undefined) {
+            return false
+          }
+          const firstStepOpt = decodeTranscriptStep(firstLine)
+          if (
+            Option.isNone(firstStepOpt) ||
+            firstStepOpt.value.source !== "SYSTEM" ||
+            !firstStepOpt.value.content?.includes("[Message]")
+          ) {
+            return false
+          }
+          for (const line of lines) {
+            const stepOpt = decodeTranscriptStep(line)
+            if (Option.isSome(stepOpt) && stepOpt.value.source === "USER_EXPLICIT") {
+              return false
+            }
+          }
+          return true
         },
-        catch: () => false,
+        catch: (err) => {
+          process.stderr.write(
+            `[harness] Warning: failed to inspect transcript at ${transcriptPath}: ${
+              err instanceof Error ? err.message : String(err)
+            }\n`,
+          )
+          return false
+        },
       }).pipe(Effect.orElseSucceed(() => false)),
     )
     if (isSubagentTranscript) {
@@ -1012,9 +1263,26 @@ const handleDone = (
       }
     }
 
+    if (isReadOnlyStopTurn(decodedStdin)) {
+      return {
+        exitCode: 0,
+        stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "",
+        stderr: "",
+        telemetryDetail: "readOnly=true",
+      }
+    }
+
     // 1. Stamp check
     const stampCheck = checkVerifyStamp(repoRoot)
     if (!stampCheck.valid) {
+      if (hasVerifiedSinceLastMutation(decodedStdin)) {
+        return {
+          exitCode: 0,
+          stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "",
+          stderr: "",
+          telemetryDetail: "completed",
+        }
+      }
       return {
         exitCode: 0,
         stdout: JSON.stringify({
@@ -2173,6 +2441,8 @@ export const runCliEffect = (
       requested === "done" &&
       outcome === "ok" &&
       res.telemetryDetail !== "fullyIdle=false" &&
+      res.telemetryDetail !== "subagent=true" &&
+      res.telemetryDetail !== "readOnly=true" &&
       (options?.repoRoot !== undefined || process.env.VITEST === undefined)
     ) {
       const finalEvents = readTelemetryEvents(repoRoot)

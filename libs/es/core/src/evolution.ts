@@ -17,6 +17,10 @@ import {
 } from "@harness/es-contract"
 import { match } from "ts-pattern"
 
+/**
+ * Configuration for registering a bidirectional schema transformation between two consecutive versions
+ * of an event payload schema.
+ */
 export interface EventUpcasterConfig<From extends Schema.Top, To extends Schema.Top> {
   readonly eventType: EventType
   readonly fromVersion: EventSchemaVersion
@@ -27,11 +31,17 @@ export interface EventUpcasterConfig<From extends Schema.Top, To extends Schema.
   readonly encode: (to: To["Encoded"]) => From["Type"]
 }
 
+/**
+ * Registered event upcaster combining its metadata link (`EventUpcasterLink`) and composable Effect `Schema.decodeTo` transformation.
+ */
 export interface RegisteredEventUpcaster<From extends Schema.Top, To extends Schema.Top> {
   readonly link: EventUpcasterLink
   readonly schema: Schema.decodeTo<To, From>
 }
 
+/**
+ * Constructs a registered event upcaster using `Schema.decodeTo` and `SchemaTransformation.transform`.
+ */
 export const makeEventUpcaster = <From extends Schema.Top, To extends Schema.Top>(
   config: EventUpcasterConfig<From, To>,
 ): RegisteredEventUpcaster<From, To> => {
@@ -52,42 +62,81 @@ export const makeEventUpcaster = <From extends Schema.Top, To extends Schema.Top
   return { link, schema }
 }
 
+/**
+ * Deterministic UTF-16 code-unit comparator (RFC 8785 JCS ordering), independent of OS/ICU locale settings.
+ */
+const compareCodeUnits = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
+
+/**
+ * Recursively canonicalizes a JSON value by sorting object keys in deterministic UTF-16 code-unit order
+ * and defining properties via `Object.defineProperty` so `"__proto__"` keys are preserved safely.
+ */
 const canonicalizeJsonValue = (value: unknown): unknown => {
   if (Array.isArray(value)) {
     return value.map(canonicalizeJsonValue)
   }
-  if (typeof value === "object" && value) {
-    const entries = Object.entries(value).sort(([a], [b]) => a.localeCompare(b))
+  if (typeof value === "object" && value !== null) {
+    const entries = Object.entries(value).sort(([a], [b]) => compareCodeUnits(a, b))
     const sortedObj: Record<string, unknown> = {}
     for (const [key, val] of entries) {
-      sortedObj[key] = canonicalizeJsonValue(val)
+      Object.defineProperty(sortedObj, key, {
+        value: canonicalizeJsonValue(val),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      })
     }
     return sortedObj
   }
   return value
 }
 
-export const toEventVersionSnapshot = Effect.fn("EventSchemaEvolution.snapshot")((
-  eventType: EventType,
-  version: EventSchemaVersion,
-  schema: Schema.Top,
-): Effect.Effect<EventVersionSnapshotEntry, never, never> => {
-  const doc = Schema.toJsonSchemaDocument(schema, { onExcessProperty: "error" })
-  const canonicalDoc = canonicalizeJsonValue({
-    dialect: doc.dialect,
-    schema: doc.schema,
-    definitions: doc.definitions,
-  })
-  const serialized = JSON.stringify(canonicalDoc)
-  return Effect.succeed(
-    new EventVersionSnapshotEntry({
-      eventType,
-      version,
-      jsonSchema: JsonSchemaText.make(serialized),
+/**
+ * Derives a deterministic, canonical JSON Schema snapshot for a single `(eventType, version)` schema.
+ * Fails with `FrozenEventSchemaViolationError` if the schema cannot be converted to a JSON Schema document.
+ */
+export const toEventVersionSnapshot = Effect.fn("EventSchemaEvolution.snapshot")(
+  (
+    eventType: EventType,
+    version: EventSchemaVersion,
+    schema: Schema.Top,
+  ): Effect.Effect<EventVersionSnapshotEntry, FrozenEventSchemaViolationError, never> =>
+    Effect.try({
+      try: () => {
+        const doc = Schema.toJsonSchemaDocument(schema, { onExcessProperty: "error" })
+        const canonicalDoc = canonicalizeJsonValue({
+          dialect: doc.dialect,
+          schema: doc.schema,
+          definitions: doc.definitions,
+        })
+        const serialized = JSON.stringify(canonicalDoc)
+        return new EventVersionSnapshotEntry({
+          eventType,
+          version,
+          jsonSchema: JsonSchemaText.make(serialized),
+        })
+      },
+      catch: (cause) =>
+        new FrozenEventSchemaViolationError({
+          eventType,
+          version,
+          reason: ErrorMessage.make(
+            `Failed to generate canonical JSON Schema snapshot for ${eventType} v${version}: ${
+              cause instanceof Error ? cause.message : String(cause)
+            }`,
+          ),
+        }),
     }),
-  )
-})
+)
 
+/**
+ * Pure decision function evaluating append-only event schema evolution invariants in deterministic order:
+ * 1. No duplicate `(eventType, version)` entries in `committedSnapshots` or `currentSnapshots` (`FrozenEventVersionDrifted`).
+ * 2. Every committed `(eventType, version)` exists in `currentSnapshots` with an identical canonical `jsonSchema` (`FrozenEventVersionDrifted`).
+ * 3. For each `eventType` (sorted by UTF-16 code units), versions start at `1`, are contiguous (`1..N`), and have a registered upcaster for every `v -> v + 1` step (`UnmappedEventVersionJump`).
+ * 4. No duplicate or dangling upcaster links in `registeredUpcasters` (`UnmappedEventVersionJump`).
+ * 5. Returns `SchemaEvolutionValid({ checkedEventCount })` where `checkedEventCount` is the total number of verified event-version snapshots.
+ */
 export const decideEventSchemaEvolution = Effect.fn("EventSchemaEvolution.decide")((
   input: EventSchemaEvolutionInput,
 ): Effect.Effect<EventSchemaEvolutionDecision, never, never> => {
@@ -151,7 +200,7 @@ export const decideEventSchemaEvolution = Effect.fn("EventSchemaEvolution.decide
     }
   }
 
-  // (c) Group input.currentSnapshots by eventType (sorted by eventType ascending, versions ascending)
+  // (c) Group input.currentSnapshots by eventType (sorted by eventType code units ascending, versions ascending)
   const groups = new Map<EventType, Array<EventSchemaVersion>>()
   for (const snap of input.currentSnapshots) {
     const list = groups.get(snap.eventType)
@@ -162,20 +211,17 @@ export const decideEventSchemaEvolution = Effect.fn("EventSchemaEvolution.decide
     }
   }
 
-  const sortedEventTypes = Array.from(groups.keys()).sort((a, b) => a.localeCompare(b))
+  const sortedEventTypes = Array.from(groups.keys()).sort(compareCodeUnits)
 
   for (const eventType of sortedEventTypes) {
     const versions = (groups.get(eventType) ?? []).sort((a, b) => a - b)
-    if (versions.length === 0) {
-      continue
-    }
-    const firstVersion = versions[0]
-    if (firstVersion === undefined || firstVersion !== 1) {
+    const firstVersion = versions[0]!
+    if (firstVersion !== 1) {
       return Effect.succeed(
         UnmappedEventVersionJump.make({
           eventType,
           fromVersion: EventSchemaVersion.make(1),
-          toVersion: firstVersion ?? EventSchemaVersion.make(1),
+          toVersion: firstVersion,
           reason: ErrorMessage.make("Event version history must start at version 1"),
         }),
       )
@@ -210,8 +256,8 @@ export const decideEventSchemaEvolution = Effect.fn("EventSchemaEvolution.decide
     }
   }
 
-  // (d) Also check if input.registeredUpcasters contains duplicate (eventType, fromVersion, toVersion) links
-  // or links whose fromVersion or toVersion snapshot is missing from input.currentSnapshots for u.eventType
+  // (d) Check if input.registeredUpcasters contains duplicate (eventType, fromVersion, toVersion) links
+  // or links whose fromVersion or toVersion snapshot is missing from input.currentSnapshots
   const seenUpcasters = new Set<string>()
   for (const u of input.registeredUpcasters) {
     const key = `${u.eventType}::${u.fromVersion}::${u.toVersion}`
@@ -251,7 +297,7 @@ export const decideEventSchemaEvolution = Effect.fn("EventSchemaEvolution.decide
     }
   }
 
-  // (e) If all checks pass
+  // (e) All checks passed
   return Effect.succeed(
     SchemaEvolutionValid.make({
       checkedEventCount: AggregateCount.make(input.currentSnapshots.length),
@@ -259,6 +305,10 @@ export const decideEventSchemaEvolution = Effect.fn("EventSchemaEvolution.decide
   )
 })
 
+/**
+ * Verifies event schema evolution invariants and maps invalid decisions to typed errors
+ * (`FrozenEventSchemaViolationError` | `MissingEventUpcasterError`).
+ */
 export const verifyEventSchemaEvolution = Effect.fn("EventSchemaEvolution.verify")(
   (
     input: EventSchemaEvolutionInput,
@@ -291,5 +341,56 @@ export const verifyEventSchemaEvolution = Effect.fn("EventSchemaEvolution.verify
           ),
         )
         .exhaustive()
+    }),
+)
+
+/**
+ * Enforces strict CI snapshot parity: verifies all evolution invariants AND ensures that every snapshot
+ * in `currentSnapshots` has been committed to `committedSnapshots`.
+ */
+export const verifyCommittedSnapshotParity = Effect.fn("EventSchemaEvolution.verifyParity")(
+  (
+    input: EventSchemaEvolutionInput,
+  ): Effect.Effect<
+    SchemaEvolutionValid,
+    FrozenEventSchemaViolationError | MissingEventUpcasterError,
+    never
+  > =>
+    Effect.gen(function* () {
+      const valid = yield* verifyEventSchemaEvolution(input)
+      for (const cur of input.currentSnapshots) {
+        const isCommitted = input.committedSnapshots.some(
+          (c) => c.eventType === cur.eventType && c.version === cur.version,
+        )
+        if (!isCommitted) {
+          return yield* new FrozenEventSchemaViolationError({
+            eventType: cur.eventType,
+            version: cur.version,
+            reason: ErrorMessage.make(
+              `Uncommitted event schema version ${cur.eventType} v${cur.version}; run check-event-schemas.mjs --update to freeze new version`,
+            ),
+          })
+        }
+      }
+      return valid
+    }),
+)
+
+/**
+ * Validates that an `--update` operation is strictly additive and append-only:
+ * runs `verifyEventSchemaEvolution` against the already-committed snapshots FIRST so that any mutation or deletion
+ * of an existing frozen version (or a missing upcaster for a newly added version) is rejected before writing.
+ */
+export const prepareUpdatedEventSnapshots = Effect.fn("EventSchemaEvolution.prepareUpdate")(
+  (
+    input: EventSchemaEvolutionInput,
+  ): Effect.Effect<
+    ReadonlyArray<EventVersionSnapshotEntry>,
+    FrozenEventSchemaViolationError | MissingEventUpcasterError,
+    never
+  > =>
+    Effect.gen(function* () {
+      yield* verifyEventSchemaEvolution(input)
+      return input.currentSnapshots
     }),
 )

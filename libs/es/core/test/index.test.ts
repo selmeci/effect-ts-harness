@@ -82,7 +82,7 @@ describe("EventBus Service & Layer Construction", () => {
         reason: ErrorMessage.make("Kafka broker connection refused"),
       })
 
-      const failingBus = EventBus.make({
+      const failingBus = EventBus.make<never, never>({
         publish: () => Effect.fail(expectedError),
       })
 

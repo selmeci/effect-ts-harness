@@ -549,6 +549,19 @@ export const extractTypeAwareGraphFromSource = (
   const taggedSchemasByName = new Map<string, TaggedSchemaInfo>()
   const unionSchemaTagsByName = new Map<string, ReadonlyArray<string>>()
 
+  const registerTaggedSchemaByTag = (tag: string, schemaInfo: TaggedSchemaInfo): void => {
+    const existing = taggedSchemasByTag.get(tag)
+    if (existing === undefined) {
+      taggedSchemasByTag.set(tag, schemaInfo)
+    } else {
+      const mergedProps = Array.from(new Set([...existing.properties, ...schemaInfo.properties]))
+      taggedSchemasByTag.set(tag, {
+        ...schemaInfo,
+        properties: mergedProps,
+      })
+    }
+  }
+
   const resolveSchemasForParameter = (
     param: ParameterDeclaration,
   ): ReadonlyArray<TaggedSchemaInfo> => {
@@ -570,24 +583,25 @@ export const extractTypeAwareGraphFromSource = (
       const curr = queue.shift()!
       if (visited.has(curr)) continue
       visited.add(curr)
-      const unionMembers = unionSchemaTagsByName.get(curr)
-      if (unionMembers) {
-        for (const member of unionMembers) {
-          queue.push(member)
-        }
-      }
       const schemaByName = taggedSchemasByName.get(curr)
       if (schemaByName) {
         if (!seenSchemas.has(schemaByName)) {
           seenSchemas.add(schemaByName)
           resolvedSchemas.push(schemaByName)
         }
-      } else {
-        const schemaByTag = taggedSchemasByTag.get(curr)
-        if (schemaByTag && !seenSchemas.has(schemaByTag)) {
-          seenSchemas.add(schemaByTag)
-          resolvedSchemas.push(schemaByTag)
+        continue
+      }
+      const unionMembers = unionSchemaTagsByName.get(curr)
+      if (unionMembers) {
+        for (const member of unionMembers) {
+          queue.push(member)
         }
+        continue
+      }
+      const schemaByTag = taggedSchemasByTag.get(curr)
+      if (schemaByTag && !seenSchemas.has(schemaByTag)) {
+        seenSchemas.add(schemaByTag)
+        resolvedSchemas.push(schemaByTag)
       }
     }
     return resolvedSchemas
@@ -804,7 +818,7 @@ export const extractTypeAwareGraphFromSource = (
               file: relPath,
               line: c.getStartLineNumber(),
             }
-            taggedSchemasByTag.set(tag, schemaInfo)
+            registerTaggedSchemaByTag(tag, schemaInfo)
             const clsName = cls.getName()
             if (clsName) {
               taggedSchemasByName.set(clsName, schemaInfo)
@@ -838,7 +852,7 @@ export const extractTypeAwareGraphFromSource = (
             file: relPath,
             line: callExpr.getStartLineNumber(),
           }
-          taggedSchemasByTag.set(tag, schemaInfo)
+          registerTaggedSchemaByTag(tag, schemaInfo)
           const parentVar = callExpr.getFirstAncestorByKind(SyntaxKind.VariableDeclaration)
           if (parentVar) {
             taggedSchemasByName.set(parentVar.getName(), schemaInfo)
@@ -861,7 +875,7 @@ export const extractTypeAwareGraphFromSource = (
                       .map((p) => p.getName())
                       .filter((n) => n !== "_tag" && n !== "version")
                   : []
-              taggedSchemasByTag.set(tag, {
+              registerTaggedSchemaByTag(tag, {
                 tag,
                 properties: props,
                 file: relPath,
@@ -911,6 +925,14 @@ export const extractTypeAwareGraphFromSource = (
           }
           if (members.length > 0) {
             unionSchemaTagsByName.set(aliasName, members)
+          }
+        } else if (typeNode) {
+          const text = typeNode.getText().trim()
+          const matchTypeof = text.match(/^typeof\s+([A-Za-z_$][A-Za-z0-9_$]*)\.Type$/)
+          const targetIdent =
+            matchTypeof?.[1] ?? (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(text) ? text : undefined)
+          if (targetIdent && targetIdent !== aliasName) {
+            unionSchemaTagsByName.set(aliasName, [targetIdent])
           }
         }
       }
@@ -2849,19 +2871,21 @@ export const extractTypeAwareGraphFromSource = (
               stateProps.add(p.getName())
             }
           }
-          for (const stSchema of resolveSchemasForParameter(stateParam)) {
+          const resolvedStateSchemas = resolveSchemasForParameter(stateParam)
+          for (const stSchema of resolvedStateSchemas) {
             stateTagSet.add(stSchema.tag)
             for (const p of stSchema.properties) {
               stateProps.add(p)
             }
           }
-        }
-
-        for (const stateTag of stateTagSet) {
-          const stSchema = taggedSchemasByTag.get(stateTag)
-          if (stSchema) {
-            for (const p of stSchema.properties) {
-              stateProps.add(p)
+          if (resolvedStateSchemas.length === 0) {
+            for (const stateTag of stateTagSet) {
+              const stSchema = taggedSchemasByTag.get(stateTag)
+              if (stSchema) {
+                for (const p of stSchema.properties) {
+                  stateProps.add(p)
+                }
+              }
             }
           }
         }

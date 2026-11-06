@@ -15,4 +15,20 @@ describe("triageFailure ontology realization chain", () => {
       )
     }),
   )
+
+  it.effect("classifies aggregate-direct-bus-publish with Outbox.drain hint", () =>
+    Effect.gen(function* () {
+      const violationPayload = JSON.stringify({
+        rule: "aggregate-direct-bus-publish",
+        message:
+          "Aggregate function 'libs/es/infra/src/aggregate.ts#handleCommand' must not publish directly to EventBus",
+      })
+      const res = yield* triageFailure(violationPayload).pipe(
+        Effect.provide(makeFailingDecisionModelLayer()),
+      )
+      expect(res.kind).toBe("mechanical")
+      expect(res.hint).toContain("es_outbox")
+      expect(res.hint).toContain("Outbox.drain")
+    }),
+  )
 })

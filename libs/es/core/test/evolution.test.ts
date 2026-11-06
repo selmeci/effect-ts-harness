@@ -14,9 +14,34 @@ import {
 import { match } from "ts-pattern"
 import {
   decideEventSchemaEvolution,
+  prepareUpdatedEventSnapshots,
   toEventVersionSnapshot,
+  verifyCommittedSnapshotParity,
   verifyEventSchemaEvolution,
 } from "../src/evolution.js"
+import { makeDeciderTestHarness } from "../src/testing.js"
+
+const compareCodeUnits = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
+
+const canonicalizeJsonValue = (value: unknown): unknown => {
+  if (Array.isArray(value)) {
+    return value.map(canonicalizeJsonValue)
+  }
+  if (typeof value === "object" && value !== null) {
+    const entries = Object.entries(value).sort(([a], [b]) => compareCodeUnits(a, b))
+    const sortedObj: Record<string, unknown> = {}
+    for (const [key, val] of entries) {
+      Object.defineProperty(sortedObj, key, {
+        value: canonicalizeJsonValue(val),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      })
+    }
+    return sortedObj
+  }
+  return value
+}
 import {
   AddItem,
   CartAlreadyCheckedOutError,
@@ -28,8 +53,10 @@ import {
   CartEventV2Codec,
   CartId,
   CartIdMismatchError,
+  cartRegisteredUpcasters,
   CheckoutChannel,
   CheckoutV2,
+  computeCartEventSnapshots,
   DEFAULT_CHECKOUT_CHANNEL,
   EmptyCartCheckoutError,
   initialCartStateV2,
@@ -39,7 +66,75 @@ import {
 } from "./fixtures/cart.js"
 
 describe("EventSchemaEvolution & Upcasting", () => {
+  describe("compareCodeUnits & canonicalizeJsonValue", () => {
+    it("orders UTF-16 code units independently of locale", () => {
+      expect(compareCodeUnits("B", "a")).toBe(-1)
+      expect(compareCodeUnits("a", "B")).toBe(1)
+      expect(compareCodeUnits("a", "a")).toBe(0)
+    })
+
+    it("canonicalizeJsonValue orders object keys in deterministic UTF-16 code-unit order", () => {
+      const res = canonicalizeJsonValue({ a: 1, B: 2, _tag: "X" })
+      if (typeof res === "object" && res !== null) {
+        expect(Object.keys(res)).toEqual(["B", "_tag", "a"])
+      } else {
+        expect.unreachable("expected object from canonicalizeJsonValue")
+      }
+    })
+
+    it("canonicalizeJsonValue preserves __proto__ as an own enumerable data property without polluting Object.prototype", () => {
+      const input: unknown = JSON.parse('{"z":1,"__proto__":{"a":2}}')
+      const res = canonicalizeJsonValue(input)
+      if (typeof res === "object" && res !== null) {
+        expect(Object.prototype.hasOwnProperty.call(res, "__proto__")).toBe(true)
+      } else {
+        expect.unreachable("expected object from canonicalizeJsonValue")
+      }
+      expect(Object.prototype.hasOwnProperty.call(Object.prototype, "a")).toBe(false)
+      const emptyObj: Record<string, unknown> = {}
+      expect(emptyObj["a"]).toBeUndefined()
+    })
+  })
+
   describe("toEventVersionSnapshot", () => {
+    it.effect("fails with typed FrozenEventSchemaViolationError on unsupported schema", () =>
+      Effect.gen(function* () {
+        const UnsupportedEventSchema = Schema.Struct({
+          [Symbol.for("unsupported")]: Schema.String,
+        })
+        const exit = yield* Effect.exit(
+          toEventVersionSnapshot(
+            EventType.make("UnsupportedEvent"),
+            EventSchemaVersion.make(1),
+            UnsupportedEventSchema,
+          ),
+        )
+        match(exit)
+          .with({ _tag: "Failure" }, (f) => {
+            expect(Cause.hasDies(f.cause)).toBe(false)
+            const errOpt = Cause.findErrorOption(f.cause)
+            match(errOpt)
+              .with({ _tag: "Some" }, ({ value }) => {
+                expect(value instanceof FrozenEventSchemaViolationError).toBe(true)
+                match(value)
+                  .with({ _tag: "FrozenEventSchemaViolationError" }, (v) => {
+                    expect(v.eventType).toBe("UnsupportedEvent")
+                    expect(v.version).toBe(1)
+                  })
+                  .exhaustive()
+              })
+              .with({ _tag: "None" }, () => {
+                expect.unreachable("Expected typed error")
+              })
+              .exhaustive()
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected failure")
+          })
+          .exhaustive()
+      }),
+    )
+
     it.effect("produces deterministic JSON Schema snapshots across repeated calls", () =>
       Effect.gen(function* () {
         const snap1 = yield* toEventVersionSnapshot(
@@ -404,6 +499,47 @@ describe("EventSchemaEvolution & Upcasting", () => {
             match(err)
               .with({ _tag: "Some" }, (s) => {
                 expect(s.value instanceof CartAlreadyCheckedOutError).toBe(true)
+              })
+              .with({ _tag: "None" }, () => {
+                expect.unreachable("Expected typed error")
+              })
+              .exhaustive()
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected failure")
+          })
+          .exhaustive()
+
+        // 6. Error precedence: CartIdMismatchError beats EmptyCartCheckoutError (on zero-item ActiveCart) and CartAlreadyCheckedOutError (on CheckedOutCart)
+        const mismatchOnZeroItemsExit = yield* Effect.exit(
+          cartDeciderV2.decide(wrongCartCheckout, zeroItemsActiveState),
+        )
+        match(mismatchOnZeroItemsExit)
+          .with({ _tag: "Failure" }, (f) => {
+            const err = Cause.findErrorOption(f.cause)
+            match(err)
+              .with({ _tag: "Some" }, (s) => {
+                expect(s.value instanceof CartIdMismatchError).toBe(true)
+              })
+              .with({ _tag: "None" }, () => {
+                expect.unreachable("Expected typed error")
+              })
+              .exhaustive()
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected failure")
+          })
+          .exhaustive()
+
+        const mismatchOnCheckedOutExit = yield* Effect.exit(
+          cartDeciderV2.decide(wrongCartCheckout, state2),
+        )
+        match(mismatchOnCheckedOutExit)
+          .with({ _tag: "Failure" }, (f) => {
+            const err = Cause.findErrorOption(f.cause)
+            match(err)
+              .with({ _tag: "Some" }, (s) => {
+                expect(s.value instanceof CartIdMismatchError).toBe(true)
               })
               .with({ _tag: "None" }, () => {
                 expect.unreachable("Expected typed error")
@@ -995,6 +1131,363 @@ describe("EventSchemaEvolution & Upcasting", () => {
             })
             .exhaustive()
         }),
+    )
+
+    describe("decideEventSchemaEvolution precedence order", () => {
+      it.effect(
+        "precedence: duplicate snapshot beats missing upcaster (step a beats step c -> FrozenEventVersionDrifted)",
+        () =>
+          Effect.gen(function* () {
+            const snapV1 = new EventVersionSnapshotEntry({
+              eventType: EventType.make("TestPrecedence"),
+              version: EventSchemaVersion.make(1),
+              jsonSchema: JsonSchemaText.make('{"v":1}'),
+            })
+            const snapV2 = new EventVersionSnapshotEntry({
+              eventType: EventType.make("TestPrecedence"),
+              version: EventSchemaVersion.make(2),
+              jsonSchema: JsonSchemaText.make('{"v":2}'),
+            })
+            // Duplicate snapV1 in currentSnapshots AND missing v1->v2 upcaster in registeredUpcasters
+            const input = new EventSchemaEvolutionInput({
+              committedSnapshots: [snapV1],
+              currentSnapshots: [snapV1, snapV1, snapV2],
+              registeredUpcasters: [],
+            })
+            const decision = yield* decideEventSchemaEvolution(input)
+            match(decision)
+              .with({ _tag: "FrozenEventVersionDrifted" }, (d) => {
+                expect(d.eventType).toBe("TestPrecedence")
+                expect(d.version).toBe(1)
+                expect(d.reason).toContain("Duplicate event version snapshot in currentSnapshots")
+              })
+              .with({ _tag: "UnmappedEventVersionJump" }, () => {
+                expect.unreachable("Expected FrozenEventVersionDrifted (step a to beat step c)")
+              })
+              .with({ _tag: "SchemaEvolutionValid" }, () => {
+                expect.unreachable("Expected FrozenEventVersionDrifted")
+              })
+              .exhaustive()
+          }),
+      )
+
+      it.effect(
+        "precedence: drifted committed snapshot beats non-contiguous gap (step b beats step c -> FrozenEventVersionDrifted)",
+        () =>
+          Effect.gen(function* () {
+            const committedV1 = new EventVersionSnapshotEntry({
+              eventType: EventType.make("TestPrecedence"),
+              version: EventSchemaVersion.make(1),
+              jsonSchema: JsonSchemaText.make('{"v":1}'),
+            })
+            const driftedV1 = new EventVersionSnapshotEntry({
+              eventType: EventType.make("TestPrecedence"),
+              version: EventSchemaVersion.make(1),
+              jsonSchema: JsonSchemaText.make('{"v":"drifted"}'),
+            })
+            const snapV3 = new EventVersionSnapshotEntry({
+              eventType: EventType.make("TestPrecedence"),
+              version: EventSchemaVersion.make(3),
+              jsonSchema: JsonSchemaText.make('{"v":3}'),
+            })
+            // Drifted v1 in currentSnapshots AND non-contiguous version gap (v1 -> v3)
+            const input = new EventSchemaEvolutionInput({
+              committedSnapshots: [committedV1],
+              currentSnapshots: [driftedV1, snapV3],
+              registeredUpcasters: [],
+            })
+            const decision = yield* decideEventSchemaEvolution(input)
+            match(decision)
+              .with({ _tag: "FrozenEventVersionDrifted" }, (d) => {
+                expect(d.eventType).toBe("TestPrecedence")
+                expect(d.version).toBe(1)
+                expect(d.reason).toBe("Committed event version JSON Schema has drifted")
+              })
+              .with({ _tag: "UnmappedEventVersionJump" }, () => {
+                expect.unreachable("Expected FrozenEventVersionDrifted (step b to beat step c)")
+              })
+              .with({ _tag: "SchemaEvolutionValid" }, () => {
+                expect.unreachable("Expected FrozenEventVersionDrifted")
+              })
+              .exhaustive()
+          }),
+      )
+
+      it.effect(
+        "precedence: non-contiguous gap beats dangling upcaster (step c beats step d -> UnmappedEventVersionJump with Non-contiguous event version gap)",
+        () =>
+          Effect.gen(function* () {
+            const snapV1 = new EventVersionSnapshotEntry({
+              eventType: EventType.make("TestPrecedence"),
+              version: EventSchemaVersion.make(1),
+              jsonSchema: JsonSchemaText.make('{"v":1}'),
+            })
+            const snapV3 = new EventVersionSnapshotEntry({
+              eventType: EventType.make("TestPrecedence"),
+              version: EventSchemaVersion.make(3),
+              jsonSchema: JsonSchemaText.make('{"v":3}'),
+            })
+            const danglingUpcaster = new EventUpcasterLink({
+              eventType: EventType.make("DanglingEvent"),
+              fromVersion: EventSchemaVersion.make(1),
+              toVersion: EventSchemaVersion.make(2),
+            })
+            // Non-contiguous gap (v1 -> v3) AND dangling upcaster for nonexistent event
+            const input = new EventSchemaEvolutionInput({
+              committedSnapshots: [snapV1, snapV3],
+              currentSnapshots: [snapV1, snapV3],
+              registeredUpcasters: [danglingUpcaster],
+            })
+            const decision = yield* decideEventSchemaEvolution(input)
+            match(decision)
+              .with({ _tag: "UnmappedEventVersionJump" }, (d) => {
+                expect(d.eventType).toBe("TestPrecedence")
+                expect(d.fromVersion).toBe(1)
+                expect(d.toVersion).toBe(3)
+                expect(d.reason).toBe("Non-contiguous event version gap")
+              })
+              .with({ _tag: "FrozenEventVersionDrifted" }, () => {
+                expect.unreachable("Expected UnmappedEventVersionJump (step c)")
+              })
+              .with({ _tag: "SchemaEvolutionValid" }, () => {
+                expect.unreachable("Expected UnmappedEventVersionJump")
+              })
+              .exhaustive()
+          }),
+      )
+    })
+  })
+
+  describe("verifyCommittedSnapshotParity & prepareUpdatedEventSnapshots", () => {
+    it.effect(
+      "verifyCommittedSnapshotParity succeeds when currentSnapshots and committedSnapshots are identical and valid",
+      () =>
+        Effect.gen(function* () {
+          const snapshots = yield* computeCartEventSnapshots
+          const input = new EventSchemaEvolutionInput({
+            committedSnapshots: snapshots,
+            currentSnapshots: snapshots,
+            registeredUpcasters: cartRegisteredUpcasters,
+          })
+          const verified = yield* verifyCommittedSnapshotParity(input)
+          expect(verified._tag).toBe("SchemaEvolutionValid")
+          expect(verified.checkedEventCount).toBe(4)
+        }),
+    )
+
+    it.effect(
+      "verifyCommittedSnapshotParity fails with FrozenEventSchemaViolationError when currentSnapshots contains uncommitted v2",
+      () =>
+        Effect.gen(function* () {
+          const snapshots = yield* computeCartEventSnapshots
+          const input = new EventSchemaEvolutionInput({
+            committedSnapshots: [snapshots[0]!, snapshots[1]!, snapshots[2]!],
+            currentSnapshots: snapshots,
+            registeredUpcasters: cartRegisteredUpcasters,
+          })
+          const exit = yield* Effect.exit(verifyCommittedSnapshotParity(input))
+          match(exit)
+            .with({ _tag: "Failure" }, (f) => {
+              const errOpt = Cause.findErrorOption(f.cause)
+              match(errOpt)
+                .with({ _tag: "Some" }, ({ value }) => {
+                  expect(value instanceof FrozenEventSchemaViolationError).toBe(true)
+                  match(value)
+                    .with({ _tag: "FrozenEventSchemaViolationError" }, (v) => {
+                      expect(v.eventType).toBe("CartCheckedOut")
+                      expect(v.version).toBe(2)
+                      expect(v.reason).toContain("Uncommitted event schema version")
+                    })
+                    .with({ _tag: "MissingEventUpcasterError" }, () => {
+                      expect.unreachable("Expected FrozenEventSchemaViolationError")
+                    })
+                    .exhaustive()
+                })
+                .with({ _tag: "None" }, () => {
+                  expect.unreachable("Expected typed error")
+                })
+                .exhaustive()
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected failure")
+            })
+            .exhaustive()
+        }),
+    )
+
+    it.effect(
+      "prepareUpdatedEventSnapshots succeeds and returns currentSnapshots when adding v2 on top of frozen v1",
+      () =>
+        Effect.gen(function* () {
+          const snapshots = yield* computeCartEventSnapshots
+          const input = new EventSchemaEvolutionInput({
+            committedSnapshots: [snapshots[0]!, snapshots[1]!, snapshots[2]!],
+            currentSnapshots: snapshots,
+            registeredUpcasters: cartRegisteredUpcasters,
+          })
+          const updated = yield* prepareUpdatedEventSnapshots(input)
+          expect(updated).toEqual(snapshots)
+        }),
+    )
+
+    it.effect(
+      "prepareUpdatedEventSnapshots fails with FrozenEventSchemaViolationError when frozen v1 snapshot was mutated",
+      () =>
+        Effect.gen(function* () {
+          const snapshots = yield* computeCartEventSnapshots
+          const mutatedV1 = new EventVersionSnapshotEntry({
+            eventType: snapshots[0]!.eventType,
+            version: snapshots[0]!.version,
+            jsonSchema: JsonSchemaText.make('{"mutated":true}'),
+          })
+          const input = new EventSchemaEvolutionInput({
+            committedSnapshots: snapshots,
+            currentSnapshots: [mutatedV1, snapshots[1]!, snapshots[2]!, snapshots[3]!],
+            registeredUpcasters: cartRegisteredUpcasters,
+          })
+          const exit = yield* Effect.exit(prepareUpdatedEventSnapshots(input))
+          match(exit)
+            .with({ _tag: "Failure" }, (f) => {
+              const errOpt = Cause.findErrorOption(f.cause)
+              match(errOpt)
+                .with({ _tag: "Some" }, ({ value }) => {
+                  expect(value instanceof FrozenEventSchemaViolationError).toBe(true)
+                  match(value)
+                    .with({ _tag: "FrozenEventSchemaViolationError" }, (v) => {
+                      expect(v.eventType).toBe("CartCreated")
+                      expect(v.version).toBe(1)
+                      expect(v.reason).toBe("Committed event version JSON Schema has drifted")
+                    })
+                    .with({ _tag: "MissingEventUpcasterError" }, () => {
+                      expect.unreachable("Expected FrozenEventSchemaViolationError")
+                    })
+                    .exhaustive()
+                })
+                .with({ _tag: "None" }, () => {
+                  expect.unreachable("Expected typed error")
+                })
+                .exhaustive()
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected failure")
+            })
+            .exhaustive()
+        }),
+    )
+
+    it.effect(
+      "prepareUpdatedEventSnapshots fails with MissingEventUpcasterError when adding v2 without registering upcaster",
+      () =>
+        Effect.gen(function* () {
+          const snapshots = yield* computeCartEventSnapshots
+          const input = new EventSchemaEvolutionInput({
+            committedSnapshots: [snapshots[0]!, snapshots[1]!, snapshots[2]!],
+            currentSnapshots: snapshots,
+            registeredUpcasters: [],
+          })
+          const exit = yield* Effect.exit(prepareUpdatedEventSnapshots(input))
+          match(exit)
+            .with({ _tag: "Failure" }, (f) => {
+              const errOpt = Cause.findErrorOption(f.cause)
+              match(errOpt)
+                .with({ _tag: "Some" }, ({ value }) => {
+                  expect(value instanceof MissingEventUpcasterError).toBe(true)
+                  match(value)
+                    .with({ _tag: "MissingEventUpcasterError" }, (v) => {
+                      expect(v.eventType).toBe("CartCheckedOut")
+                      expect(v.fromVersion).toBe(1)
+                      expect(v.toVersion).toBe(2)
+                      expect(v.reason).toBe("Missing upcaster for event version transition")
+                    })
+                    .with({ _tag: "FrozenEventSchemaViolationError" }, () => {
+                      expect.unreachable("Expected MissingEventUpcasterError")
+                    })
+                    .exhaustive()
+                })
+                .with({ _tag: "None" }, () => {
+                  expect.unreachable("Expected typed error")
+                })
+                .exhaustive()
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected failure")
+            })
+            .exhaustive()
+        }),
+    )
+  })
+
+  describe("makeDeciderTestHarness negative paths", () => {
+    it.effect("dies when decider.decide succeeds unexpectedly while thenFails was called", () =>
+      Effect.gen(function* () {
+        const harness = makeDeciderTestHarness(cartDeciderV2)
+        const addCmd = AddItem.make({
+          cartId: CartId.make("cart-neg-1"),
+          itemId: ItemId.make("item-neg-1"),
+          quantity: PositiveInt.make(1),
+        })
+        const exit = yield* Effect.exit(
+          harness
+            .given([])
+            .when(addCmd)
+            .thenFails(new EmptyCartCheckoutError({ cartId: CartId.make("cart-neg-1") })),
+        )
+        match(exit)
+          .with({ _tag: "Failure" }, (f) => {
+            expect(Cause.hasDies(f.cause)).toBe(true)
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected harness to die when decider unexpectedly succeeded")
+          })
+          .exhaustive()
+      }),
+    )
+
+    it.effect(
+      "dies when decider.decide fails with a different error than expected in thenFails",
+      () =>
+        Effect.gen(function* () {
+          const harness = makeDeciderTestHarness(cartDeciderV2)
+          const checkoutCmd = CheckoutV2.make({
+            cartId: CartId.make("cart-neg-2"),
+            orderId: OrderId.make("order-neg-2"),
+            channel: CheckoutChannel.make("web"),
+          })
+          const exit = yield* Effect.exit(
+            harness
+              .given([])
+              .when(checkoutCmd)
+              .thenFails(new CartAlreadyCheckedOutError({ cartId: CartId.make("cart-neg-2") })),
+          )
+          match(exit)
+            .with({ _tag: "Failure" }, (f) => {
+              expect(Cause.hasDies(f.cause)).toBe(true)
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected harness to die when decider failed with different error")
+            })
+            .exhaustive()
+        }),
+    )
+
+    it.effect("dies when decider.decide fails unexpectedly while thenEvents was called", () =>
+      Effect.gen(function* () {
+        const harness = makeDeciderTestHarness(cartDeciderV2)
+        const checkoutCmd = CheckoutV2.make({
+          cartId: CartId.make("cart-neg-3"),
+          orderId: OrderId.make("order-neg-3"),
+          channel: CheckoutChannel.make("web"),
+        })
+        const exit = yield* Effect.exit(harness.given([]).when(checkoutCmd).thenEvents([]))
+        match(exit)
+          .with({ _tag: "Failure" }, (f) => {
+            expect(Cause.hasDies(f.cause)).toBe(true)
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected harness to die when decider failed during thenEvents")
+          })
+          .exhaustive()
+      }),
     )
   })
 })
