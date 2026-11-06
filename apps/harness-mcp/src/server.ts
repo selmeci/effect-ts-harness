@@ -526,11 +526,16 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
             (ruleId === undefined || ap.ruleId === ruleId || ap.datalogRuleId === ruleId) &&
             (filterBySymbol(ap.nodeKey) || ap.path.some((p) => filterBySymbol(p))),
         ),
+        typedHoleBundles: (inference.typedHoleBundles ?? []).filter(
+          (b) => filterBySymbol(b.holeQualname) || filterBySymbol(b.spanName),
+        ),
         proofs: inference.proofs.filter(
           (p) =>
             (ruleId === undefined || p.ruleId === ruleId) &&
             filterBySymbol(p.conclusion),
         ),
+        iterations: inference.iterations ?? 0,
+        durationMs: inference.durationMs ?? 0,
       }
       break
     }
@@ -561,10 +566,19 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
             filterBySymbol(se.targetEntityKey) ||
             filterBySymbol(se.rationale)),
       )
+      const typedHoleBundles = (inference.typedHoleBundles ?? []).filter(
+        (b) => filterBySymbol(b.holeQualname) || filterBySymbol(b.spanName),
+      )
       const proofIds = new Set(suggestedEdges.map((se) => se.proof.proofId))
+      for (const b of typedHoleBundles) {
+        proofIds.add(`proof:COMP-06:EffectFn:${b.holeQualname}` as typeof suggestedEdges[number]["proof"]["proofId"])
+      }
       result = {
         suggestedEdges,
+        typedHoleBundles,
         proofs: inference.proofs.filter((p) => proofIds.has(p.proofId)),
+        iterations: inference.iterations ?? 0,
+        durationMs: inference.durationMs ?? 0,
       }
       break
     }

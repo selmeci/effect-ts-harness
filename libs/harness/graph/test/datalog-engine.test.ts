@@ -4,11 +4,16 @@ import {
   ConfidenceMillis,
   DatalogRuleId,
   NodeKey,
+  PageRankScoreMillis,
+  ProofHeight,
+  ProofId,
   RelationId,
   RoleName,
   STANDARD_DATALOG_RULES,
   buildHarnessGraph,
   decideGraphInference,
+  flixConfidenceReducer,
+  minHeightReducer,
 } from "../src/index.js"
 
 const CallChainHopSpec = Schema.Struct({
@@ -31,6 +36,66 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
     expect(() => Schema.decodeUnknownSync(ConfidenceMillis)(null)).toThrow()
     expect(() => Schema.decodeSync(ConfidenceMillis)(Number.NaN)).toThrow()
     expect(() => Schema.decodeSync(NodeKey)("")).toThrow()
+  })
+
+  it("reduces Soufflé min-height provenance annotations and Flix confidence lattice elements deterministically", () => {
+    expect(minHeightReducer([])).toEqual([])
+    const reducedHeight = minHeightReducer([
+      [
+        {
+          proofHeight: ProofHeight.make(3),
+          ruleId: DatalogRuleId.make("INF-01"),
+          viaIntermediateKey: NodeKey.make("EffectFn:b"),
+        },
+        1,
+      ],
+      [
+        {
+          proofHeight: ProofHeight.make(1),
+          ruleId: DatalogRuleId.make("INF-01"),
+          witnessRelationId: RelationId.make("EffectSignature:a"),
+          viaIntermediateKey: NodeKey.make("EffectFn:a"),
+        },
+        1,
+      ],
+      [
+        {
+          proofHeight: ProofHeight.make(1),
+          ruleId: DatalogRuleId.make("INF-01"),
+          witnessRelationId: RelationId.make("EffectSignature:0"),
+          viaIntermediateKey: NodeKey.make("EffectFn:0"),
+        },
+        -1,
+      ],
+    ])
+    expect(reducedHeight).toHaveLength(1)
+    expect(reducedHeight[0]?.[0].proofHeight).toBe(1)
+    expect(reducedHeight[0]?.[0].viaIntermediateKey).toBe(NodeKey.make("EffectFn:a"))
+
+    expect(flixConfidenceReducer([])).toEqual([])
+    const reducedFlix = flixConfidenceReducer([
+      [
+        {
+          confidenceMillis: ConfidenceMillis.make(850),
+          parentProofIds: [ProofId.make("proof:2"), ProofId.make("proof:1")],
+        },
+        1,
+      ],
+      [
+        {
+          confidenceMillis: ConfidenceMillis.make(960),
+          parentProofIds: [ProofId.make("proof:1"), ProofId.make("proof:3")],
+        },
+        1,
+      ],
+    ])
+    expect(reducedFlix).toHaveLength(1)
+    expect(reducedFlix[0]?.[0].confidenceMillis).toBe(ConfidenceMillis.make(960))
+    expect(reducedFlix[0]?.[0].parentProofIds).toEqual([
+      ProofId.make("proof:1"),
+      ProofId.make("proof:2"),
+      ProofId.make("proof:3"),
+    ])
   })
 
   it.effect(
@@ -184,7 +249,7 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
           ],
         })
 
-        expect(STANDARD_DATALOG_RULES.length).toBe(14)
+        expect(STANDARD_DATALOG_RULES.length).toBe(15)
 
         const res = yield* decideGraphInference(graph)
 
@@ -592,4 +657,101 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
         }
       }),
   )
+
+  it.effect(
+    "computes COMP-06 TypedHoleContextBundles via 10-iteration Personalized PageRank and merges SemanticEdgePriors overrides",
+    () =>
+      Effect.gen(function* () {
+        const graph = buildHarnessGraph({
+          fns: [
+            {
+              qualname: "libs/sample/domain/src/cart.ts#addItem",
+              spanName: "Cart.addItem",
+              file: "libs/sample/domain/src/cart.ts",
+              line: 10,
+              packageTag: "domain",
+              successType: "CartUpdated",
+              isStub: true,
+            },
+            {
+              qualname: "libs/sample/domain/src/cart.ts#decide",
+              spanName: "Cart.decide",
+              file: "libs/sample/domain/src/cart.ts",
+              line: 25,
+              packageTag: "domain",
+              successType: "CartEvent",
+              isStub: false,
+            },
+          ],
+          services: [
+            {
+              tagId: "CartRepo",
+              name: "CartRepo",
+              packageTag: "service",
+              file: "libs/sample/service/src/cart-repo.ts",
+            },
+          ],
+          errors: [
+            {
+              errorTag: "CartLimitExceededError",
+              file: "libs/sample/contract/src/errors.ts",
+            },
+          ],
+          schemas: [
+            {
+              schemaName: "CartItemId",
+              file: "libs/sample/contract/src/schemas.ts",
+              isBranded: true,
+            },
+          ],
+          requiresService: [
+            {
+              fnQualname: "libs/sample/domain/src/cart.ts#addItem",
+              tagId: "CartRepo",
+            },
+          ],
+          failsWith: [
+            {
+              callerQualname: "libs/sample/domain/src/cart.ts#addItem",
+              errorTag: "CartLimitExceededError",
+            },
+          ],
+        })
+
+        const res = yield* decideGraphInference(graph, {
+          edgeConfidenceOverrides: {
+            "ServiceTag:CartRepo": ConfidenceMillis.make(990),
+          },
+          holeTeleportationWeights: {
+            [NodeKey.make("EffectFn:libs/sample/domain/src/cart.ts#decide")]:
+              PageRankScoreMillis.make(980),
+          },
+        })
+
+        const bundles = res.typedHoleBundles ?? []
+        expect(bundles).toHaveLength(1)
+        const bundle = bundles[0]!
+        expect(bundle.holeQualname).toBe("libs/sample/domain/src/cart.ts#addItem")
+        expect(bundle.spanName).toBe("Cart.addItem")
+        expect(bundle.allowedErrorConstructors).toContain("CartLimitExceededError")
+        expect(bundle.requiredServiceCapabilities).toContain("CartRepo")
+        expect(bundle.estimatedTokens).toBeLessThanOrEqual(1500)
+        expect(
+          bundle.inhabitingCandidates.some(
+            (c) =>
+              c.symbolKey === NodeKey.make("EffectFn:libs/sample/domain/src/cart.ts#decide") &&
+              c.inhabitsChannel === "decider-delegate" &&
+              c.pprScore >= PageRankScoreMillis.make(980),
+          ),
+        ).toBe(true)
+
+        const comp03 = res.suggestedEdges.find(
+          (e) =>
+            e.ruleId === DatalogRuleId.make("COMP-03") &&
+            e.targetEntityKey === NodeKey.make("ServiceTag:CartRepo"),
+        )
+        expect(comp03?.confidenceMillis).toBe(ConfidenceMillis.make(990))
+      }),
+  )
 })
+

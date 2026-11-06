@@ -1,6 +1,7 @@
 import { Effect, Layer } from "effect"
 import * as AiError from "effect/ai/AiError"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import type { HoleRelevanceLevel } from "./hole-prior-decision.js"
 import type { IdiomBlock } from "./idiom-router.js"
 import type { LearnTarget } from "./learn-decision.js"
 import type { OntologyConflictKind } from "./ontology-conflict-decision.js"
@@ -18,6 +19,8 @@ export interface MockDecisionModelOverrides {
   readonly learnTargetLabel?: LearnTarget | undefined
   readonly contradictsProb?: number | undefined
   readonly conflictKindLabel?: OntologyConflictKind | undefined
+  readonly edgeConfidenceProb?: number | undefined
+  readonly candidateRelevanceLabel?: HoleRelevanceLevel | undefined
 }
 
 export const makeMockDecisionModelLayer = (
@@ -55,6 +58,9 @@ export const makeMockDecisionModelLayer = (
               } else if (key === "contradicts") {
                 probability =
                   overrides?.contradictsProb !== undefined ? overrides.contradictsProb : 0.1
+              } else if (key === "edgeConfidence") {
+                probability =
+                  overrides?.edgeConfidenceProb !== undefined ? overrides.edgeConfidenceProb : 0.92
               }
               answers[key] = {
                 _tag: "Probability",
@@ -84,6 +90,24 @@ export const makeMockDecisionModelLayer = (
               answers[key] = {
                 _tag: "Classify",
                 label: chosenLabel,
+                probabilities,
+              }
+            } else if (decision._tag === "Rate") {
+              const labels = decision.criteria
+              let chosenLabel =
+                overrides?.candidateRelevanceLabel ??
+                (labels.includes("essential") ? "essential" : (labels[0] ?? ""))
+              if (!labels.includes(chosenLabel)) {
+                chosenLabel = labels[0] ?? ""
+              }
+              const rating = Math.max(0, labels.indexOf(chosenLabel))
+              const probabilities: Record<string, number> = {}
+              for (const l of labels) {
+                probabilities[l] = l === chosenLabel ? 1 : 0
+              }
+              answers[key] = {
+                _tag: "Rate",
+                rating,
                 probabilities,
               }
             }

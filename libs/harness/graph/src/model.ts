@@ -389,6 +389,20 @@ export class ConceptLatticeCycleError extends Schema.TaggedError<ConceptLatticeC
 export const StratumIndex = Schema.Literals([0, 1, 2, 3])
 export type StratumIndex = typeof StratumIndex.Type
 
+export const ProofHeight = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(1)),
+  Schema.brand("ProofHeight"),
+)
+export type ProofHeight = typeof ProofHeight.Type
+
+export const MinHeightProvenanceAnnotation = Schema.Struct({
+  proofHeight: ProofHeight,
+  ruleId: DatalogRuleId,
+  witnessRelationId: Schema.optional(RelationId),
+  viaIntermediateKey: Schema.optional(Schema.NullOr(NodeKey)),
+})
+export type MinHeightProvenanceAnnotation = typeof MinHeightProvenanceAnnotation.Type
+
 export const DatalogRule = Schema.Struct({
   id: DatalogRuleId,
   stratum: StratumIndex,
@@ -403,8 +417,11 @@ export const DerivationProof = Schema.Struct({
   proofId: ProofId,
   ruleId: DatalogRuleId,
   stratum: StratumIndex,
+  proofHeight: Schema.optional(ProofHeight),
   conclusion: Schema.String,
   premises: Schema.Array(Schema.String),
+  witnessPath: Schema.optional(Schema.Array(Schema.String)),
+  explanation: Schema.optional(Schema.String),
   parentProofIds: Schema.Array(ProofId),
 })
 export type DerivationProof = typeof DerivationProof.Type
@@ -456,6 +473,40 @@ export const SuggestedEdge = Schema.Struct({
 })
 export type SuggestedEdge = typeof SuggestedEdge.Type
 
+export const PageRankScoreMillis = Schema.Int.pipe(
+  Schema.check(Schema.isBetween({ minimum: 0, maximum: 1000 })),
+  Schema.brand("PageRankScoreMillis"),
+)
+export type PageRankScoreMillis = typeof PageRankScoreMillis.Type
+
+export const InhabitingSymbolCandidate = Schema.Struct({
+  symbolKey: NodeKey,
+  inhabitsChannel: Schema.Literals(["A", "E", "R", "decider-delegate"]),
+  signatureSummary: Schema.String,
+  pprScore: PageRankScoreMillis,
+})
+export type InhabitingSymbolCandidate = typeof InhabitingSymbolCandidate.Type
+
+export const TypedHoleContextBundle = Schema.Struct({
+  holeQualname: Schema.String,
+  spanName: Schema.String,
+  successTypeSignature: Schema.String,
+  allowedErrorConstructors: Schema.Array(Schema.String),
+  requiredServiceCapabilities: Schema.Array(Schema.String),
+  inhabitingCandidates: Schema.Array(InhabitingSymbolCandidate),
+  estimatedTokens: Schema.Int,
+})
+export type TypedHoleContextBundle = typeof TypedHoleContextBundle.Type
+
+export const SemanticEdgePriors = Schema.Struct({
+  edgeConfidenceOverrides: Schema.Record(Schema.String, ConfidenceMillis),
+  holeTeleportationWeights: Schema.Record(NodeKey, PageRankScoreMillis),
+})
+export type SemanticEdgePriors = typeof SemanticEdgePriors.Type
+
+export const ZSetWeight = Schema.Literals([-1, 1])
+export type ZSetWeight = typeof ZSetWeight.Type
+
 export const EffectiveServiceRequirement = Schema.Struct({
   callerKey: NodeKey,
   serviceKey: NodeKey,
@@ -501,6 +552,9 @@ export const GraphInferenceResult = Schema.Struct({
   effectiveTestReach: Schema.Array(EffectiveTestReachability),
   antiPatterns: Schema.Array(InferredAntiPattern),
   suggestedEdges: Schema.Array(SuggestedEdge),
+  typedHoleBundles: Schema.optional(Schema.Array(TypedHoleContextBundle)),
+  iterations: Schema.optional(Schema.Int),
+  durationMs: Schema.optional(Schema.Finite),
   proofs: Schema.Array(DerivationProof),
 })
 export type GraphInferenceResult = typeof GraphInferenceResult.Type
