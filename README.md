@@ -1,5 +1,13 @@
 # Effect-TS Engineering Harness
 
+> [!CAUTION]
+>
+> ## ⚠️ Work in Progress — Strictly Experimental
+>
+> This project is currently an **active work-in-progress (WIP)** and is **purely experimental**.
+> **It should NOT be used anywhere** (in production, staging, or any critical workflows).
+> Architecture, public interfaces, and harness behaviors are subject to rapid and breaking changes without notice.
+
 An agentic software engineering harness built in **Effect v4 (`4.0.0-beta.48`)** and **Alchemy v2 (`2.0.0-beta.80`)** on **Cloudflare Workers / D1 / Durable Objects**.
 
 The harness constrains coding agents with deterministic compiler, linter, property-graph, and ontology gates while routing idioms and architectural queries through an embedded structural index and an advisory local language model.
