@@ -13,14 +13,43 @@ import {
   OutboxPublishError,
   OutboxRowId,
   PositiveInt,
+  ProjectionArchiveCorruptionError,
   PublishedEventEnvelope,
   SerializedPayload,
   StreamVersion,
 } from "@harness/es-contract"
-import type { EventBus } from "@harness/es-core"
+import { type CrossAggregateProjection, EventBus } from "@harness/es-core"
 import { match } from "ts-pattern"
+import { ingestPublishedEvent } from "./projector.js"
 
 export const DEFAULT_OUTBOX_BATCH_LIMIT: BatchLimit = BatchLimit.make(100)
+
+/**
+ * Formats an unknown error or tagged error cause into a non-empty `ErrorMessage` without losing `_tag` or `reason`.
+ */
+const formatErrorCause = (cause: unknown): ErrorMessage => {
+  if (cause instanceof Error) {
+    const trimmed = cause.message.trim()
+    return ErrorMessage.make(trimmed.length > 0 ? trimmed : cause.name || "Error")
+  }
+  if (typeof cause === "object" && cause !== null) {
+    const tag = "_tag" in cause && typeof cause._tag === "string" ? cause._tag : undefined
+    const reason =
+      "reason" in cause && typeof cause.reason === "string"
+        ? cause.reason
+        : "message" in cause && typeof cause.message === "string"
+          ? cause.message
+          : undefined
+    if (tag !== undefined && reason !== undefined && reason.trim().length > 0) {
+      return ErrorMessage.make(`${tag}: ${reason.trim()}`)
+    }
+    if (tag !== undefined) {
+      return ErrorMessage.make(tag)
+    }
+  }
+  const raw = String(cause).trim()
+  return ErrorMessage.make(raw.length > 0 ? raw : "Schema validation failure")
+}
 
 interface OutboxRow {
   readonly id: number
@@ -33,8 +62,11 @@ interface OutboxRow {
   readonly created_at: number
 }
 
-export const drainAggregateOutbox = Effect.fn("Outbox.drain")(function* <BusEnv = never>(
-  eventBus: EventBus<BusEnv>,
+export const drainAggregateOutbox = Effect.fn("Outbox.drain")(function* <
+  BusEnv = never,
+  BusErr = never,
+>(
+  eventBus: EventBus<BusEnv, BusErr>,
   batchLimit: BatchLimit = DEFAULT_OUTBOX_BATCH_LIMIT,
   aggregateName?: AggregateName,
 ) {
@@ -265,14 +297,15 @@ export const drainAggregateOutbox = Effect.fn("Outbox.drain")(function* <BusEnv 
     })
 
     yield* eventBus.publish(envelope).pipe(
-      Effect.mapError(
-        (err) =>
-          new OutboxPublishError({
-            aggregateName: aggName,
-            aggregateId: aggId,
-            streamVersion: envelope.streamVersion,
-            reason: err.reason,
-          }),
+      Effect.mapError((err) =>
+        err instanceof OutboxPublishError
+          ? new OutboxPublishError({
+              aggregateName: aggName,
+              aggregateId: aggId,
+              streamVersion: envelope.streamVersion,
+              reason: err.reason,
+            })
+          : err,
       ),
     )
 
@@ -284,4 +317,69 @@ export const drainAggregateOutbox = Effect.fn("Outbox.drain")(function* <BusEnv 
     drainedCount: PositiveInt.make(rows.length),
   }
   return drainedOutcome
+})
+
+/**
+ * Relays all pending outbox batches for an aggregate type into downstream cross-aggregate projections,
+ * looping `drainAggregateOutbox` until `OutboxEmpty` is reached.
+ *
+ * This models the asynchronous Durable Object alarm / message-bus relay step on the read/relay path,
+ * strictly decoupled from the command write transaction (`Aggregate.handleCommand` / `AggregateHttp.executeCommand`).
+ */
+export const relayAggregateOutbox = Effect.fn("Outbox.relay")(function* <
+  Event,
+  CrossReadModel = unknown,
+  CrossQueryInput = void,
+  CrossProjEnv = never,
+  CrossProjErr = never,
+>(
+  aggregateName: AggregateName,
+  crossProjections: ReadonlyArray<
+    CrossAggregateProjection<Event, CrossReadModel, CrossQueryInput, CrossProjEnv, CrossProjErr>
+  >,
+  batchLimit: BatchLimit = DEFAULT_OUTBOX_BATCH_LIMIT,
+) {
+  if (crossProjections.length === 0) {
+    const emptyOutcome: OutboxDrainOutcome = { _tag: "OutboxEmpty" }
+    return emptyOutcome
+  }
+
+  const bus = EventBus.make<SqlClient | CrossProjEnv, ProjectionArchiveCorruptionError>({
+    publish: (envelope) =>
+      ingestPublishedEvent(envelope, crossProjections).pipe(
+        Effect.asVoid,
+        Effect.mapError((cause) =>
+          cause instanceof ProjectionArchiveCorruptionError
+            ? cause
+            : new OutboxPublishError({
+                aggregateName,
+                aggregateId: envelope.aggregateId,
+                streamVersion: envelope.streamVersion,
+                reason: formatErrorCause(cause),
+              }),
+        ),
+      ),
+  })
+
+  let totalDrained = 0
+  while (true) {
+    const outcome = yield* drainAggregateOutbox(bus, batchLimit, aggregateName)
+    const stepCount = match(outcome)
+      .with({ _tag: "OutboxEmpty" }, () => 0)
+      .with({ _tag: "OutboxDrained" }, ({ drainedCount }) => drainedCount)
+      .exhaustive()
+    if (stepCount === 0) {
+      break
+    }
+    totalDrained += stepCount
+    if (stepCount < batchLimit) {
+      break
+    }
+  }
+
+  const finalOutcome: OutboxDrainOutcome =
+    totalDrained === 0
+      ? { _tag: "OutboxEmpty" }
+      : { _tag: "OutboxDrained", drainedCount: PositiveInt.make(totalDrained) }
+  return finalOutcome
 })

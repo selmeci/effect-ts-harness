@@ -2,13 +2,53 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { Effect } from "effect"
+import * as Graph from "effect/Graph"
 import { describe, expect, it } from "vitest"
 import {
   buildHarnessGraph,
   checkEffectGraph,
   extractTypeAwareGraphFromSource,
   extractWorkspaceTypeAwareGraph,
+  isAggregateFnNode,
+  type EffectFnNode,
 } from "../src/index.js"
+
+const makeTestFnNode = (partial: {
+  readonly spanName: string
+  readonly file?: string | undefined
+  readonly qualname?: string | undefined
+}): EffectFnNode => ({
+  _tag: "EffectFn",
+  qualname: partial.qualname ?? `test#${partial.spanName}`,
+  spanName: partial.spanName,
+  file: partial.file ?? "libs/sample/domain/src/index.ts",
+  line: 1,
+  packageTag: "infra",
+  successType: "void",
+  isStub: false,
+})
+
+describe("isAggregateFnNode", () => {
+  it("detects aggregate functions by span name prefixes and suffixes or file patterns", () => {
+    expect(isAggregateFnNode(makeTestFnNode({ spanName: "Aggregate.handleCommand" }))).toBe(true)
+    expect(isAggregateFnNode(makeTestFnNode({ spanName: "AggregateInfra.commit" }))).toBe(true)
+    expect(isAggregateFnNode(makeTestFnNode({ spanName: "AggregateHttp.executeCommand" }))).toBe(
+      true,
+    )
+    expect(isAggregateFnNode(makeTestFnNode({ spanName: "Order.handleCommand" }))).toBe(true)
+    expect(isAggregateFnNode(makeTestFnNode({ spanName: "Order.executeCommand" }))).toBe(true)
+    expect(
+      isAggregateFnNode(
+        makeTestFnNode({ file: "libs/es/infra/src/cart-aggregate.ts", spanName: "other" }),
+      ),
+    ).toBe(true)
+    expect(
+      isAggregateFnNode(
+        makeTestFnNode({ file: "libs/es/infra/src/outbox.ts", spanName: "Outbox.relay" }),
+      ),
+    ).toBe(false)
+  })
+})
 
 describe("effect-graph:check policy rules", () => {
   it("fails when a type:domain Effect.fn requires an infra ServiceTag or cloud binding in R", () => {
@@ -1954,5 +1994,417 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
           v.message.includes("Interface property 'publish' on 'EngineConfig'"),
       ),
     ).toBe(true)
+  })
+
+  it("fails with aggregate-direct-bus-publish when an Aggregate function has a RequiresService edge to EventBus", () => {
+    const graph = buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/sample/infra/src/aggregate.ts#handleCommand",
+          spanName: "Aggregate.handleCommand",
+          file: "libs/sample/infra/src/aggregate.ts",
+          line: 10,
+          packageTag: "infra",
+          successType: "void",
+          isStub: false,
+        },
+      ],
+      services: [
+        {
+          tagId: "EventBus",
+          name: "EventBus",
+          packageTag: "service",
+          file: "libs/sample/service/src/index.ts",
+        },
+      ],
+      layers: [],
+      errors: [],
+      tests: [],
+      patternDocs: [],
+      requiresService: [
+        {
+          fnQualname: "libs/sample/infra/src/aggregate.ts#handleCommand",
+          tagId: "EventBus",
+        },
+      ],
+      failsWith: [],
+      providesService: [],
+      layerRequires: [],
+      tracedCalls: [],
+      exercisesSpans: [],
+    })
+
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(false)
+    const violation = result.violations.find((v) => v.rule === "aggregate-direct-bus-publish")
+    expect(violation).toBeDefined()
+    expect(violation?.rule).toBe("aggregate-direct-bus-publish")
+    expect(violation?.path).toEqual([
+      "libs/sample/infra/src/aggregate.ts#handleCommand",
+      "EventBus",
+    ])
+  })
+
+  it("passes when Aggregate.handleCommand requires only SqlClient and Outbox.drain requires EventBus", () => {
+    const graph = buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/sample/infra/src/aggregate.ts#handleCommand",
+          spanName: "Aggregate.handleCommand",
+          file: "libs/sample/infra/src/aggregate.ts",
+          line: 10,
+          packageTag: "infra",
+          successType: "void",
+          isStub: false,
+        },
+        {
+          qualname: "libs/sample/infra/src/outbox.ts#drain",
+          spanName: "Outbox.drain",
+          file: "libs/sample/infra/src/outbox.ts",
+          line: 20,
+          packageTag: "infra",
+          successType: "void",
+          isStub: false,
+        },
+      ],
+      services: [
+        {
+          tagId: "SqlClient",
+          name: "SqlClient",
+          packageTag: "infra",
+          file: "libs/sample/infra/src/sql.ts",
+        },
+        {
+          tagId: "EventBus",
+          name: "EventBus",
+          packageTag: "service",
+          file: "libs/sample/service/src/index.ts",
+        },
+      ],
+      layers: [],
+      errors: [],
+      tests: [],
+      patternDocs: [],
+      requiresService: [
+        {
+          fnQualname: "libs/sample/infra/src/aggregate.ts#handleCommand",
+          tagId: "SqlClient",
+        },
+        {
+          fnQualname: "libs/sample/infra/src/outbox.ts#drain",
+          tagId: "EventBus",
+        },
+      ],
+      failsWith: [],
+      providesService: [],
+      layerRequires: [],
+      tracedCalls: [],
+      exercisesSpans: [],
+    })
+
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(true)
+    expect(result.violations).toHaveLength(0)
+  })
+
+  it("fails with aggregate-direct-bus-publish when Aggregate.handleCommand has a tracedCalls edge to Outbox.drain", () => {
+    const graph = buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/sample/infra/src/aggregate.ts#handleCommand",
+          spanName: "Aggregate.handleCommand",
+          file: "libs/sample/infra/src/aggregate.ts",
+          line: 10,
+          packageTag: "infra",
+          successType: "void",
+          isStub: false,
+        },
+        {
+          qualname: "libs/sample/infra/src/outbox.ts#drain",
+          spanName: "Outbox.drain",
+          file: "libs/sample/infra/src/outbox.ts",
+          line: 20,
+          packageTag: "infra",
+          successType: "void",
+          isStub: false,
+        },
+      ],
+      services: [],
+      layers: [],
+      errors: [],
+      tests: [],
+      patternDocs: [],
+      requiresService: [],
+      failsWith: [],
+      providesService: [],
+      layerRequires: [],
+      tracedCalls: [
+        {
+          callerQualname: "libs/sample/infra/src/aggregate.ts#handleCommand",
+          calleeQualname: "libs/sample/infra/src/outbox.ts#drain",
+          callCount: 1,
+          receiverLayer: null,
+        },
+      ],
+      exercisesSpans: [],
+    })
+
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(false)
+    const violation = result.violations.find((v) => v.rule === "aggregate-direct-bus-publish")
+    expect(violation).toBeDefined()
+    expect(violation?.rule).toBe("aggregate-direct-bus-publish")
+    expect(violation?.path[0]).toBe("libs/sample/infra/src/aggregate.ts#handleCommand")
+    expect(["libs/sample/infra/src/outbox.ts#drain", "Outbox.drain"]).toContain(violation?.path[1])
+  })
+
+  it("fails with aggregate-direct-bus-publish when Aggregate.handleCommand has a tracedCalls edge to EventBus.publish", () => {
+    const graph = buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/sample/infra/src/aggregate.ts#handleCommand",
+          spanName: "Aggregate.handleCommand",
+          file: "libs/sample/infra/src/aggregate.ts",
+          line: 10,
+          packageTag: "infra",
+          successType: "void",
+          isStub: false,
+        },
+        {
+          qualname: "libs/sample/infra/src/bus.ts#publish",
+          spanName: "EventBus.publish",
+          file: "libs/sample/infra/src/bus.ts",
+          line: 15,
+          packageTag: "infra",
+          successType: "void",
+          isStub: false,
+        },
+      ],
+      services: [],
+      layers: [],
+      errors: [],
+      tests: [],
+      patternDocs: [],
+      requiresService: [],
+      failsWith: [],
+      providesService: [],
+      layerRequires: [],
+      tracedCalls: [
+        {
+          callerQualname: "libs/sample/infra/src/aggregate.ts#handleCommand",
+          calleeQualname: "libs/sample/infra/src/bus.ts#publish",
+          callCount: 1,
+          receiverLayer: null,
+        },
+      ],
+      exercisesSpans: [],
+    })
+
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(false)
+    const violation = result.violations.find((v) => v.rule === "aggregate-direct-bus-publish")
+    expect(violation).toBeDefined()
+    expect(violation?.rule).toBe("aggregate-direct-bus-publish")
+    expect(violation?.path[0]).toBe("libs/sample/infra/src/aggregate.ts#handleCommand")
+    expect(["libs/sample/infra/src/bus.ts#publish", "EventBus.publish"]).toContain(
+      violation?.path[1],
+    )
+  })
+
+  it("fails with aggregate-direct-bus-publish on transitive call chain from AggregateHttp.executeCommand via helper to Outbox.drain", () => {
+    const graph = buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/es/infra/src/http.ts#executeAggregateCommandAndSync",
+          spanName: "AggregateHttp.executeCommand",
+          file: "libs/es/infra/src/http.ts",
+          line: 10,
+          packageTag: "infra",
+          successType: "void",
+          isStub: false,
+        },
+        {
+          qualname: "libs/es/infra/src/http.ts#syncHelper",
+          spanName: "Http.syncHelper",
+          file: "libs/es/infra/src/http.ts",
+          line: 25,
+          packageTag: "infra",
+          successType: "void",
+          isStub: false,
+        },
+        {
+          qualname: "libs/es/infra/src/outbox.ts#drainAggregateOutbox",
+          spanName: "Outbox.drain",
+          file: "libs/es/infra/src/outbox.ts",
+          line: 40,
+          packageTag: "infra",
+          successType: "void",
+          isStub: false,
+        },
+      ],
+      services: [],
+      layers: [],
+      errors: [],
+      tests: [],
+      patternDocs: [],
+      requiresService: [],
+      failsWith: [],
+      providesService: [],
+      layerRequires: [],
+      tracedCalls: [
+        {
+          callerQualname: "libs/es/infra/src/http.ts#executeAggregateCommandAndSync",
+          calleeQualname: "libs/es/infra/src/http.ts#syncHelper",
+          callCount: 1,
+          receiverLayer: null,
+        },
+        {
+          callerQualname: "libs/es/infra/src/http.ts#syncHelper",
+          calleeQualname: "libs/es/infra/src/outbox.ts#drainAggregateOutbox",
+          callCount: 1,
+          receiverLayer: null,
+        },
+      ],
+      exercisesSpans: [],
+    })
+
+    const result = checkEffectGraph(graph)
+    expect(result.ok).toBe(false)
+    const violation = result.violations.find((v) => v.rule === "aggregate-direct-bus-publish")
+    expect(violation).toBeDefined()
+    expect(violation?.rule).toBe("aggregate-direct-bus-publish")
+    expect(violation?.path).toEqual([
+      "libs/es/infra/src/http.ts#executeAggregateCommandAndSync",
+      "libs/es/infra/src/http.ts#syncHelper",
+      "Outbox.drain",
+    ])
+  })
+
+  it("verifies dead-event-payload when multiple schema versions share the same _tag", () => {
+    const contractSource = `
+import { Schema } from "effect"
+
+const CartId = Schema.String.pipe(Schema.brand("CartId"))
+const OrderId = Schema.String.pipe(Schema.brand("OrderId"))
+const Channel = Schema.String.pipe(Schema.brand("Channel"))
+
+export const CartCheckedOut = Schema.TaggedStruct("CartCheckedOut", {
+  cartId: CartId,
+  orderId: OrderId,
+  version: Schema.Literal(1)
+})
+export const CartEvent = Schema.Union([CartCheckedOut])
+export type CartEvent = typeof CartEvent.Type
+
+export const CartCheckedOutV2 = Schema.TaggedStruct("CartCheckedOut", {
+  cartId: CartId,
+  orderId: OrderId,
+  channel: Channel,
+  version: Schema.Literal(2)
+})
+export const CartEventV2 = Schema.Union([CartCheckedOutV2])
+export type CartEventV2 = typeof CartEventV2.Type
+`
+
+    const domainSource = `
+import { match } from "ts-pattern"
+import { CartEvent, CartEventV2 } from "@harness/sample-contract"
+
+export type CartState = {
+  readonly items: ReadonlyArray<string>
+}
+
+export const evolveCart = (state: CartState, event: CartEvent): CartState =>
+  match(event)
+    .with({ _tag: "CartCheckedOut" }, (ev) => ({
+      items: state.items.concat(ev.cartId, ev.orderId)
+    }))
+    .exhaustive()
+
+export const evolveCartV2 = (state: CartState, event: CartEventV2): CartState =>
+  match(event)
+    .with({ _tag: "CartCheckedOut" }, (ev) => ({
+      items: state.items.concat(ev.cartId, ev.orderId)
+    }))
+    .exhaustive()
+`
+
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/contract/src/index.ts",
+        content: contractSource,
+        packageTag: "contract",
+      },
+      {
+        filePath: "libs/sample/domain/src/index.ts",
+        content: domainSource,
+        packageTag: "domain",
+      },
+    ])
+
+    const result = checkEffectGraph(graph)
+    const deadViolations = result.violations.filter((v) => v.rule === "dead-event-payload")
+
+    // evolveCart (v1) should NOT be flagged for channel
+    const v1ChannelViolation = deadViolations.find(
+      (v) =>
+        v.path.some((p) => p.endsWith("#evolveCart") || p === "evolveCart") &&
+        v.message.includes("channel"),
+    )
+    expect(v1ChannelViolation).toBeUndefined()
+
+    // evolveCartV2 (v2) IS flagged for channel
+    const v2ChannelViolation = deadViolations.find(
+      (v) =>
+        v.path.some((p) => p.endsWith("#evolveCartV2") || p === "evolveCartV2") &&
+        v.message.includes("channel"),
+    )
+    expect(v2ChannelViolation).toBeDefined()
+    expect(v2ChannelViolation?.message).toContain("CartCheckedOut")
+    expect(v2ChannelViolation?.message).toContain("channel")
+  })
+
+  it("does not emit type parameters from generic Effect.fn using stub as fake errors or services", () => {
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/generic.ts",
+        packageTag: "domain",
+        content: `
+          import { Context, Data, Effect } from "effect"
+          import { stub } from "@harness/gates"
+
+          export class CustomError extends Data.TaggedError("CustomError")<{ readonly message: string }> {}
+          export class SqlClient extends Context.Service<SqlClient, {}>()("SqlClient") {}
+
+          export const runGeneric = Effect.fn("Generic.run")(function* <Err, ProjectionEnv>() {
+            return yield* stub<void, Err | CustomError, SqlClient | ProjectionEnv>()
+          })
+        `,
+      },
+    ])
+
+    const failsWithErrors = new Set<string>()
+    const requiredServices = new Set<string>()
+    for (const [, edge] of Graph.edges(graph.graph)) {
+      if (edge.data._tag === "FailsWith") {
+        failsWithErrors.add(edge.data.errorTag)
+      } else if (edge.data._tag === "RequiresService") {
+        requiredServices.add(edge.data.tagId)
+      }
+    }
+
+    expect(failsWithErrors.has("CustomError")).toBe(true)
+    expect(failsWithErrors.has("Err")).toBe(false)
+    expect(requiredServices.has("SqlClient")).toBe(true)
+    expect(requiredServices.has("ProjectionEnv")).toBe(false)
+
+    for (const [, node] of Graph.nodes(graph.graph)) {
+      if (node._tag === "TaggedError") {
+        expect(node.errorTag).not.toBe("Err")
+      }
+      if (node._tag === "ServiceTag") {
+        expect(node.tagId).not.toBe("ProjectionEnv")
+      }
+    }
   })
 })

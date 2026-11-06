@@ -618,6 +618,51 @@ enforced_by:
         rmSync(dir, { recursive: true, force: true })
       }
     })
+
+    it("classifies subagent stop context correctly even when transcript mentions USER_EXPLICIT in subsequent lines", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "harness-cli-subagent-user-exp-"))
+      try {
+        const transcriptPath = join(dir, "transcript.jsonl")
+        writeFileSync(
+          transcriptPath,
+          `${JSON.stringify({ step_index: 0, source: "SYSTEM", content: "<SYSTEM_MESSAGE>\n[Message]\nSubagent task" })}\n${JSON.stringify({ step_index: 1, source: "TOOL", content: 'viewed file containing "source":"USER_EXPLICIT"' })}\n`,
+        )
+        const res = await runCli(["done", "--format=antigravity"], {
+          repoRoot: dir,
+          stdin: JSON.stringify({ fullyIdle: true, transcriptPath }),
+        })
+        expect(res.exitCode).toBe(0)
+        expect(res.stdout === "" || res.stdout === JSON.stringify({ decision: "stop" })).toBe(true)
+        expect(
+          res.telemetryDetail === "subagent-skip" || res.telemetryDetail === "subagent=true",
+        ).toBe(true)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it("does not skip as subagent when transcript contains top-level USER_EXPLICIT line", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "harness-cli-user-explicit-"))
+      try {
+        const transcriptPath = join(dir, "transcript.jsonl")
+        writeFileSync(
+          transcriptPath,
+          `${JSON.stringify({ step_index: 0, source: "SYSTEM", content: "<SYSTEM_MESSAGE>\n[Message]\nSystem init" })}\n${JSON.stringify({ step_index: 1, source: "USER_EXPLICIT", content: "user prompt" })}\n${JSON.stringify({ step_index: 2, source: "PLANNER_RESPONSE", tool_calls: [{ name: "write_to_file", args: { TargetFile: "src/index.ts" } }] })}\n`,
+        )
+        const res = await runCli(["done", "--format=antigravity"], {
+          repoRoot: dir,
+          stdin: JSON.stringify({ fullyIdle: true, transcriptPath }),
+        })
+        expect(res.exitCode).toBe(0)
+        expect(res.telemetryDetail).not.toBe("subagent=true")
+        expect(res.telemetryDetail).not.toBe("subagent-skip")
+        const payload = JSON.parse(res.stdout)
+        expect(payload.decision).toBe("continue")
+        expect(payload.reason).toContain("verify")
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
   })
 
   describe("doctor and session", () => {
@@ -2421,6 +2466,89 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       const helpRes = await runCli(["verify", "--help"], { repoRoot: dir })
       expect(helpRes.exitCode).toBe(0)
       expect(helpRes.stdout).toContain("usage: harness")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("allows read-only Q&A Stop hook turn to complete without verify-stamp.json while blocking mutating turns", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-cli-readonly-done-"))
+    try {
+      const readOnlyTranscript = join(dir, "readonly-transcript.jsonl")
+      writeFileSync(
+        readOnlyTranscript,
+        [
+          JSON.stringify({
+            step_index: 0,
+            source: "USER_EXPLICIT",
+            type: "USER_INPUT",
+            content: "Explain TypeDB vs Omnigraph",
+          }),
+          JSON.stringify({
+            step_index: 1,
+            source: "MODEL",
+            type: "PLANNER_RESPONSE",
+            tool_calls: [
+              { name: "view_file", args: { AbsolutePath: "/repo/README.md" } },
+              { name: "search_web", args: { query: "TypeDB 3.0" } },
+              { name: "run_command", args: { CommandLine: "rg --files libs/harness" } },
+            ],
+          }),
+        ].join("\n") + "\n",
+      )
+
+      const readOnlyRes = await runCli(["done", "--format=antigravity"], {
+        repoRoot: dir,
+        stdin: JSON.stringify({
+          fullyIdle: true,
+          transcriptPath: readOnlyTranscript,
+          workspacePaths: [dir],
+        }),
+      })
+      expect(readOnlyRes.exitCode).toBe(0)
+      expect(JSON.parse(readOnlyRes.stdout)).toEqual({ decision: "stop" })
+      const eventsAfterReadOnly = readTelemetryEvents(dir)
+      expect(eventsAfterReadOnly.at(-1)?.detail).toBe("readOnly=true")
+
+      const mutatingTranscript = join(dir, "mutating-transcript.jsonl")
+      writeFileSync(
+        mutatingTranscript,
+        [
+          JSON.stringify({
+            step_index: 0,
+            source: "USER_EXPLICIT",
+            type: "USER_INPUT",
+            content: "Fix the bug",
+          }),
+          JSON.stringify({
+            step_index: 1,
+            source: "MODEL",
+            type: "PLANNER_RESPONSE",
+            tool_calls: [
+              {
+                name: "replace_file_content",
+                args: { TargetFile: "/repo/apps/harness-cli/src/index.ts" },
+              },
+            ],
+          }),
+        ].join("\n") + "\n",
+      )
+
+      const mutatingRes = await runCli(["done", "--format=antigravity"], {
+        repoRoot: dir,
+        stdin: JSON.stringify({
+          fullyIdle: true,
+          transcriptPath: mutatingTranscript,
+          workspacePaths: [dir],
+        }),
+      })
+      expect(mutatingRes.exitCode).toBe(0)
+      const mutatingPayload = JSON.parse(mutatingRes.stdout) as {
+        readonly decision: string
+        readonly reason?: string
+      }
+      expect(mutatingPayload.decision).toBe("continue")
+      expect(mutatingPayload.reason).toContain("Missing .harness/verify-stamp.json")
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

@@ -158,6 +158,29 @@ const decomposeTypeNode = (node: TypeNode): Array<string> => {
   ) {
     return []
   }
+  if (node.getType().isTypeParameter()) {
+    return []
+  }
+  let ancestor: Node | undefined = node.getParent()
+  while (ancestor !== undefined) {
+    if (
+      Node.isFunctionDeclaration(ancestor) ||
+      Node.isFunctionExpression(ancestor) ||
+      Node.isArrowFunction(ancestor) ||
+      Node.isMethodSignature(ancestor) ||
+      Node.isMethodDeclaration(ancestor) ||
+      Node.isCallSignatureDeclaration(ancestor) ||
+      Node.isFunctionTypeNode(ancestor) ||
+      Node.isClassDeclaration(ancestor) ||
+      Node.isInterfaceDeclaration(ancestor) ||
+      Node.isTypeAliasDeclaration(ancestor)
+    ) {
+      if (ancestor.getTypeParameters().some((tp) => tp.getName() === raw)) {
+        return []
+      }
+    }
+    ancestor = ancestor.getParent()
+  }
   return [raw]
 }
 
@@ -381,6 +404,13 @@ const collectUnbrandedObjectProperties = (
     ) {
       return
     }
+    if (
+      target.getProperty("ast") !== undefined &&
+      target.getProperty("Type") !== undefined &&
+      target.getProperty("Encoded") !== undefined
+    ) {
+      return
+    }
     for (const prop of target.getProperties()) {
       const propName = prop.getName()
       if (propName === "_tag" || propName === "~effect/Brand" || propName.startsWith("~")) {
@@ -516,7 +546,21 @@ export const extractTypeAwareGraphFromSource = (
     readonly line: number
   }
   const taggedSchemasByTag = new Map<string, TaggedSchemaInfo>()
+  const taggedSchemasByName = new Map<string, TaggedSchemaInfo>()
   const unionSchemaTagsByName = new Map<string, ReadonlyArray<string>>()
+
+  const registerTaggedSchemaByTag = (tag: string, schemaInfo: TaggedSchemaInfo): void => {
+    const existing = taggedSchemasByTag.get(tag)
+    if (existing === undefined) {
+      taggedSchemasByTag.set(tag, schemaInfo)
+    } else {
+      const mergedProps = Array.from(new Set([...existing.properties, ...schemaInfo.properties]))
+      taggedSchemasByTag.set(tag, {
+        ...schemaInfo,
+        properties: mergedProps,
+      })
+    }
+  }
 
   const resolveSchemasForParameter = (
     param: ParameterDeclaration,
@@ -531,31 +575,36 @@ export const extractTypeAwareGraphFromSource = (
         rawTokens.add(tok)
       }
     }
-    const expandedTags = new Set<string>()
+    const resolvedSchemas: Array<TaggedSchemaInfo> = []
+    const seenSchemas = new Set<TaggedSchemaInfo>()
     const queue = [...rawTokens]
     const visited = new Set<string>()
     while (queue.length > 0) {
       const curr = queue.shift()!
       if (visited.has(curr)) continue
       visited.add(curr)
+      const schemaByName = taggedSchemasByName.get(curr)
+      if (schemaByName) {
+        if (!seenSchemas.has(schemaByName)) {
+          seenSchemas.add(schemaByName)
+          resolvedSchemas.push(schemaByName)
+        }
+        continue
+      }
       const unionMembers = unionSchemaTagsByName.get(curr)
       if (unionMembers) {
         for (const member of unionMembers) {
           queue.push(member)
         }
+        continue
       }
-      if (taggedSchemasByTag.has(curr)) {
-        expandedTags.add(curr)
-      }
-    }
-    const result: Array<TaggedSchemaInfo> = []
-    for (const tag of expandedTags) {
-      const schema = taggedSchemasByTag.get(tag)
-      if (schema) {
-        result.push(schema)
+      const schemaByTag = taggedSchemasByTag.get(curr)
+      if (schemaByTag && !seenSchemas.has(schemaByTag)) {
+        seenSchemas.add(schemaByTag)
+        resolvedSchemas.push(schemaByTag)
       }
     }
-    return result
+    return resolvedSchemas
   }
 
   // 0. Zero-tolerance AST type safety check
@@ -763,14 +812,16 @@ export const extractTypeAwareGraphFromSource = (
               .filter(Node.isPropertyAssignment)
               .map((p) => p.getName())
               .filter((n) => n !== "_tag" && n !== "version")
-            taggedSchemasByTag.set(tag, {
+            const schemaInfo: TaggedSchemaInfo = {
               tag,
               properties: props,
               file: relPath,
               line: c.getStartLineNumber(),
-            })
+            }
+            registerTaggedSchemaByTag(tag, schemaInfo)
             const clsName = cls.getName()
             if (clsName) {
+              taggedSchemasByName.set(clsName, schemaInfo)
               unionSchemaTagsByName.set(clsName, [tag])
             }
             break
@@ -795,14 +846,16 @@ export const extractTypeAwareGraphFromSource = (
             .filter(Node.isPropertyAssignment)
             .map((p) => p.getName())
             .filter((n) => n !== "_tag" && n !== "version")
-          taggedSchemasByTag.set(tag, {
+          const schemaInfo: TaggedSchemaInfo = {
             tag,
             properties: props,
             file: relPath,
             line: callExpr.getStartLineNumber(),
-          })
+          }
+          registerTaggedSchemaByTag(tag, schemaInfo)
           const parentVar = callExpr.getFirstAncestorByKind(SyntaxKind.VariableDeclaration)
           if (parentVar) {
+            taggedSchemasByName.set(parentVar.getName(), schemaInfo)
             unionSchemaTagsByName.set(parentVar.getName(), [tag])
           }
         }
@@ -822,7 +875,7 @@ export const extractTypeAwareGraphFromSource = (
                       .map((p) => p.getName())
                       .filter((n) => n !== "_tag" && n !== "version")
                   : []
-              taggedSchemasByTag.set(tag, {
+              registerTaggedSchemaByTag(tag, {
                 tag,
                 properties: props,
                 file: relPath,
@@ -872,6 +925,14 @@ export const extractTypeAwareGraphFromSource = (
           }
           if (members.length > 0) {
             unionSchemaTagsByName.set(aliasName, members)
+          }
+        } else if (typeNode) {
+          const text = typeNode.getText().trim()
+          const matchTypeof = text.match(/^typeof\s+([A-Za-z_$][A-Za-z0-9_$]*)\.Type$/)
+          const targetIdent =
+            matchTypeof?.[1] ?? (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(text) ? text : undefined)
+          if (targetIdent && targetIdent !== aliasName) {
+            unionSchemaTagsByName.set(aliasName, [targetIdent])
           }
         }
       }
@@ -2810,24 +2871,27 @@ export const extractTypeAwareGraphFromSource = (
               stateProps.add(p.getName())
             }
           }
-          for (const stSchema of resolveSchemasForParameter(stateParam)) {
+          const resolvedStateSchemas = resolveSchemasForParameter(stateParam)
+          for (const stSchema of resolvedStateSchemas) {
             stateTagSet.add(stSchema.tag)
             for (const p of stSchema.properties) {
               stateProps.add(p)
             }
           }
-        }
-
-        for (const stateTag of stateTagSet) {
-          const stSchema = taggedSchemasByTag.get(stateTag)
-          if (stSchema) {
-            for (const p of stSchema.properties) {
-              stateProps.add(p)
+          if (resolvedStateSchemas.length === 0) {
+            for (const stateTag of stateTagSet) {
+              const stSchema = taggedSchemasByTag.get(stateTag)
+              if (stSchema) {
+                for (const p of stSchema.properties) {
+                  stateProps.add(p)
+                }
+              }
             }
           }
         }
 
         const eventTagSet = new Set<string>()
+        const eventSchemasByTag = new Map<string, TaggedSchemaInfo>()
         const eventTypeText = eventParam ? eventParam.getType().getText() : ""
         if (eventParam) {
           const eventType = eventParam.getType()
@@ -2844,6 +2908,7 @@ export const extractTypeAwareGraphFromSource = (
           }
           for (const evSchema of resolveSchemasForParameter(eventParam)) {
             eventTagSet.add(evSchema.tag)
+            eventSchemasByTag.set(evSchema.tag, evSchema)
           }
         }
 
@@ -2916,7 +2981,7 @@ export const extractTypeAwareGraphFromSource = (
             for (const binding of param.getDescendantsOfKind(SyntaxKind.BindingElement)) {
               const name = binding.getName()
               for (const tag of matchedTagsInWith) {
-                const schema = taggedSchemasByTag.get(tag)
+                const schema = eventSchemasByTag.get(tag) ?? taggedSchemasByTag.get(tag)
                 if (schema && schema.properties.includes(name)) {
                   usedPropsPerTag.get(tag)!.add(name)
                 }
@@ -2930,7 +2995,7 @@ export const extractTypeAwareGraphFromSource = (
           )) {
             const propName = propAccess.getName()
             for (const tag of matchedTagsInWith) {
-              const schema = taggedSchemasByTag.get(tag)
+              const schema = eventSchemasByTag.get(tag) ?? taggedSchemasByTag.get(tag)
               if (schema && schema.properties.includes(propName)) {
                 usedPropsPerTag.get(tag)!.add(propName)
               }
@@ -2945,7 +3010,7 @@ export const extractTypeAwareGraphFromSource = (
             }
             const identText = ident.getText()
             for (const tag of matchedTagsInWith) {
-              const schema = taggedSchemasByTag.get(tag)
+              const schema = eventSchemasByTag.get(tag) ?? taggedSchemasByTag.get(tag)
               if (schema && schema.properties.includes(identText)) {
                 usedPropsPerTag.get(tag)!.add(identText)
               }
@@ -2958,7 +3023,7 @@ export const extractTypeAwareGraphFromSource = (
           if (stateTagSet.has(tag) && !eventTagSet.has(tag)) continue
           if (eventParam && eventTagSet.size > 0 && !isEventVariant(tag)) continue
 
-          const schema = taggedSchemasByTag.get(tag)
+          const schema = eventSchemasByTag.get(tag) ?? taggedSchemasByTag.get(tag)
           if (!schema || schema.properties.length === 0) continue
 
           const usedProps = usedPropsPerTag.get(tag) ?? new Set()

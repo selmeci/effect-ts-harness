@@ -1,5 +1,12 @@
+import { Effect } from "effect"
 import { describe, expect, it } from "vitest"
-import { assertDecisionLimits, IDIOM_BLOCKS, IdiomRouterV1 } from "../src/idiom-router.js"
+import {
+  assertDecisionLimits,
+  IDIOM_BLOCKS,
+  IdiomRouterV1,
+  routeStep,
+} from "../src/idiom-router.js"
+import { makeMockDecisionModelLayer } from "../src/mock-layer.js"
 
 describe("IdiomRouterV1 data constraints", () => {
   it("puts review first (tie-break mitigation)", () => {
@@ -44,5 +51,80 @@ describe("IdiomRouterV1 data constraints", () => {
         },
       }),
     ).toThrow(/26/)
+  })
+})
+
+describe("Deterministic routing for Phase 4 event schema evolution", () => {
+  const mockModel = makeMockDecisionModelLayer()
+
+  it("routes prompts mentioning event schema upcasters to event-sourcing", async () => {
+    const result1 = await Effect.runPromise(
+      routeStep("Define event schema upcasters for v1 to v2 evolution").pipe(
+        Effect.provide(mockModel),
+      ),
+    )
+    expect(result1).toBe("event-sourcing")
+
+    const result2 = await Effect.runPromise(
+      routeStep("Implement upcaster for OrderCreated event").pipe(Effect.provide(mockModel)),
+    )
+    expect(result2).toBe("event-sourcing")
+  })
+
+  it("routes prompts mentioning toJsonSchemaDocument to schema", async () => {
+    const result = await Effect.runPromise(
+      routeStep("Export event schema to JSON Schema using toJsonSchemaDocument").pipe(
+        Effect.provide(mockModel),
+      ),
+    )
+    expect(result).toBe("schema")
+  })
+
+  it("routes prompts mentioning AggregateApiSpec to httpapi", async () => {
+    const result = await Effect.runPromise(
+      routeStep("Expose aggregate command endpoints via AggregateApiSpec").pipe(
+        Effect.provide(mockModel),
+      ),
+    )
+    expect(result).toBe("httpapi")
+  })
+
+  it("routes prompts mentioning AtomHttpApi to atom", async () => {
+    const result = await Effect.runPromise(
+      routeStep("Manage frontend reactive state with AtomHttpApi").pipe(Effect.provide(mockModel)),
+    )
+    expect(result).toBe("atom")
+  })
+
+  it("routes event-snapshots to event-sourcing and snapshot tests to testing", async () => {
+    const esResult = await Effect.runPromise(
+      routeStep("Freeze event-snapshots registry for v1 and v2 schemas").pipe(
+        Effect.provide(mockModel),
+      ),
+    )
+    expect(esResult).toBe("event-sourcing")
+
+    const testResult = await Effect.runPromise(
+      routeStep("Run snapshot test with TestClock to verify timeout").pipe(
+        Effect.provide(mockModel),
+      ),
+    )
+    expect(testResult).toBe("testing")
+  })
+
+  it("verifies precedence when prompt mentions schema evolution (toJsonSchemaDocument, upcaster) and HttpApi", async () => {
+    const schemaPrecedence = await Effect.runPromise(
+      routeStep("Export HttpApi contract to JSON schema using toJsonSchemaDocument").pipe(
+        Effect.provide(mockModel),
+      ),
+    )
+    expect(schemaPrecedence).toBe("schema")
+
+    const httpApiPrecedence = await Effect.runPromise(
+      routeStep("Expose event upcaster endpoints over HttpApi transport").pipe(
+        Effect.provide(mockModel),
+      ),
+    )
+    expect(httpApiPrecedence).toBe("httpapi")
   })
 })

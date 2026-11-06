@@ -16,10 +16,20 @@ import {
   CrossProjectionNotFoundError,
   ErrorMessage,
   EventMetadata,
+  EventSchemaEvolutionDecision,
+  EventSchemaEvolutionInput,
+  EventSchemaVersion,
   EventSerializationError,
   EventStreamCorruptionError,
   EventType,
+  EventUpcasterLink,
+  EventVersionSnapshotEntry,
+  FrozenEventSchemaViolationError,
+  FrozenEventVersionDrifted,
+  JsonSchemaText,
   LocalProjectionNotFoundError,
+  makeHandledCommandResponseSchema,
+  MissingEventUpcasterError,
   OutboxDrainOutcome,
   OutboxPublicationMode,
   OutboxPublishError,
@@ -33,10 +43,12 @@ import {
   ProjectionSequenceInput,
   ProjectionVersion,
   PublishedEventEnvelope,
+  SchemaEvolutionValid,
   SerializedPayload,
   StreamCreationStatus,
   StreamVersion,
   TimestampMs,
+  UnmappedEventVersionJump,
 } from "../src/index.js"
 
 describe("@harness/es-contract", () => {
@@ -701,6 +713,443 @@ describe("@harness/es-contract", () => {
           newCheckpointVersion: StreamVersion.make(1),
         }),
       ).toThrow()
+    })
+  })
+
+  describe("Phase 4 Event Schema Evolution & Command Response Schemas", () => {
+    describe("EventSchemaVersion", () => {
+      it("decodes positive integers >= 1", () => {
+        expect(Schema.decodeSync(EventSchemaVersion)(1)).toBe(1)
+        expect(Schema.decodeSync(EventSchemaVersion)(42)).toBe(42)
+        expect(EventSchemaVersion.make(1)).toBe(1)
+        expect(EventSchemaVersion.make(42)).toBe(42)
+      })
+
+      it("rejects 0, negative integers, floats, strings, null, and undefined", () => {
+        const str: unknown = "1"
+        const nil: unknown = null
+        const undef: unknown = undefined
+        expect(() => Schema.decodeSync(EventSchemaVersion)(0)).toThrow()
+        expect(() => Schema.decodeSync(EventSchemaVersion)(-1)).toThrow()
+        expect(() => Schema.decodeSync(EventSchemaVersion)(1.5)).toThrow()
+        expect(() => Schema.decodeUnknownSync(EventSchemaVersion)(str)).toThrow()
+        expect(() => Schema.decodeUnknownSync(EventSchemaVersion)(nil)).toThrow()
+        expect(() => Schema.decodeUnknownSync(EventSchemaVersion)(undef)).toThrow()
+        expect(() => EventSchemaVersion.make(0)).toThrow()
+        expect(() => EventSchemaVersion.make(-1)).toThrow()
+        expect(() => EventSchemaVersion.make(1.5)).toThrow()
+      })
+    })
+
+    describe("JsonSchemaText", () => {
+      it("decodes non-empty strings", () => {
+        expect(Schema.decodeSync(JsonSchemaText)("{}")).toBe("{}")
+        expect(Schema.decodeSync(JsonSchemaText)("schema-text")).toBe("schema-text")
+        expect(JsonSchemaText.make("{}")).toBe("{}")
+      })
+
+      it("rejects empty strings and non-strings", () => {
+        const nil: unknown = null
+        const num: unknown = 123
+        expect(() => Schema.decodeSync(JsonSchemaText)("")).toThrow()
+        expect(() => Schema.decodeUnknownSync(JsonSchemaText)(nil)).toThrow()
+        expect(() => Schema.decodeUnknownSync(JsonSchemaText)(num)).toThrow()
+        expect(() => JsonSchemaText.make("")).toThrow()
+      })
+    })
+
+    describe("EventVersionSnapshotEntry", () => {
+      it("decodes and instantiates valid snapshot entries", () => {
+        const decoded = Schema.decodeSync(EventVersionSnapshotEntry)({
+          eventType: "CartCreated",
+          version: 1,
+          jsonSchema: "{}",
+        })
+        expect(decoded.eventType).toBe("CartCreated")
+        expect(decoded.version).toBe(1)
+        expect(decoded.jsonSchema).toBe("{}")
+
+        const constructed = new EventVersionSnapshotEntry({
+          eventType: EventType.make("CartCreated"),
+          version: EventSchemaVersion.make(1),
+          jsonSchema: JsonSchemaText.make("{}"),
+        })
+        expect(constructed.eventType).toBe("CartCreated")
+        expect(constructed.version).toBe(1)
+        expect(constructed.jsonSchema).toBe("{}")
+      })
+
+      it("rejects invalid versions, empty eventType, and empty jsonSchema", () => {
+        expect(() =>
+          Schema.decodeSync(EventVersionSnapshotEntry)({
+            eventType: "CartCreated",
+            version: 0,
+            jsonSchema: "{}",
+          }),
+        ).toThrow()
+        expect(() =>
+          Schema.decodeSync(EventVersionSnapshotEntry)({
+            eventType: "CartCreated",
+            version: -1,
+            jsonSchema: "{}",
+          }),
+        ).toThrow()
+        expect(() =>
+          Schema.decodeSync(EventVersionSnapshotEntry)({
+            eventType: "",
+            version: 1,
+            jsonSchema: "{}",
+          }),
+        ).toThrow()
+        expect(() =>
+          Schema.decodeSync(EventVersionSnapshotEntry)({
+            eventType: "CartCreated",
+            version: 1,
+            jsonSchema: "",
+          }),
+        ).toThrow()
+      })
+    })
+
+    describe("EventUpcasterLink", () => {
+      it("decodes and instantiates contiguous links where toVersion === fromVersion + 1", () => {
+        const decoded = Schema.decodeSync(EventUpcasterLink)({
+          eventType: "CartCheckedOut",
+          fromVersion: 1,
+          toVersion: 2,
+        })
+        expect(decoded.eventType).toBe("CartCheckedOut")
+        expect(decoded.fromVersion).toBe(1)
+        expect(decoded.toVersion).toBe(2)
+
+        const constructed = new EventUpcasterLink({
+          eventType: EventType.make("CartCheckedOut"),
+          fromVersion: EventSchemaVersion.make(1),
+          toVersion: EventSchemaVersion.make(2),
+        })
+        expect(constructed.eventType).toBe("CartCheckedOut")
+        expect(constructed.fromVersion).toBe(1)
+        expect(constructed.toVersion).toBe(2)
+      })
+
+      it("rejects toVersion === fromVersion, toVersion === fromVersion + 2, and toVersion < fromVersion", () => {
+        // toVersion === fromVersion
+        expect(() =>
+          Schema.decodeSync(EventUpcasterLink)({
+            eventType: "CartCheckedOut",
+            fromVersion: 1,
+            toVersion: 1,
+          }),
+        ).toThrow()
+        expect(
+          () =>
+            new EventUpcasterLink({
+              eventType: EventType.make("CartCheckedOut"),
+              fromVersion: EventSchemaVersion.make(1),
+              toVersion: EventSchemaVersion.make(1),
+            }),
+        ).toThrow()
+
+        // toVersion === fromVersion + 2
+        expect(() =>
+          Schema.decodeSync(EventUpcasterLink)({
+            eventType: "CartCheckedOut",
+            fromVersion: 1,
+            toVersion: 3,
+          }),
+        ).toThrow()
+        expect(
+          () =>
+            new EventUpcasterLink({
+              eventType: EventType.make("CartCheckedOut"),
+              fromVersion: EventSchemaVersion.make(1),
+              toVersion: EventSchemaVersion.make(3),
+            }),
+        ).toThrow()
+
+        // toVersion < fromVersion
+        expect(() =>
+          Schema.decodeSync(EventUpcasterLink)({
+            eventType: "CartCheckedOut",
+            fromVersion: 2,
+            toVersion: 1,
+          }),
+        ).toThrow()
+        expect(
+          () =>
+            new EventUpcasterLink({
+              eventType: EventType.make("CartCheckedOut"),
+              fromVersion: EventSchemaVersion.make(2),
+              toVersion: EventSchemaVersion.make(1),
+            }),
+        ).toThrow()
+      })
+    })
+
+    describe("EventSchemaEvolutionInput and EventSchemaEvolutionDecision", () => {
+      it("decodes and instantiates valid EventSchemaEvolutionInput", () => {
+        const entry = new EventVersionSnapshotEntry({
+          eventType: EventType.make("CartCreated"),
+          version: EventSchemaVersion.make(1),
+          jsonSchema: JsonSchemaText.make("{}"),
+        })
+        const link = new EventUpcasterLink({
+          eventType: EventType.make("CartCheckedOut"),
+          fromVersion: EventSchemaVersion.make(1),
+          toVersion: EventSchemaVersion.make(2),
+        })
+
+        const input = new EventSchemaEvolutionInput({
+          committedSnapshots: [entry],
+          currentSnapshots: [entry],
+          registeredUpcasters: [link],
+        })
+        expect(input.committedSnapshots.length).toBe(1)
+        expect(input.currentSnapshots.length).toBe(1)
+        expect(input.registeredUpcasters.length).toBe(1)
+
+        const decoded = Schema.decodeSync(EventSchemaEvolutionInput)({
+          committedSnapshots: [{ eventType: "CartCreated", version: 1, jsonSchema: "{}" }],
+          currentSnapshots: [{ eventType: "CartCreated", version: 1, jsonSchema: "{}" }],
+          registeredUpcasters: [{ eventType: "CartCheckedOut", fromVersion: 1, toVersion: 2 }],
+        })
+        expect(decoded.committedSnapshots.length).toBe(1)
+      })
+
+      it("rejects non-array or invalid entries in EventSchemaEvolutionInput", () => {
+        const nonArray: unknown = {
+          committedSnapshots: null,
+          currentSnapshots: [],
+          registeredUpcasters: [],
+        }
+        expect(() => Schema.decodeUnknownSync(EventSchemaEvolutionInput)(nonArray)).toThrow()
+        expect(() =>
+          Schema.decodeSync(EventSchemaEvolutionInput)({
+            committedSnapshots: [{ eventType: "CartCreated", version: 0, jsonSchema: "{}" }],
+            currentSnapshots: [],
+            registeredUpcasters: [],
+          }),
+        ).toThrow()
+      })
+
+      it("decodes and instantiates each EventSchemaEvolutionDecision variant", () => {
+        const valid = Schema.decodeSync(SchemaEvolutionValid)({
+          _tag: "SchemaEvolutionValid",
+          checkedEventCount: 4,
+        })
+        expect(valid._tag).toBe("SchemaEvolutionValid")
+        expect(valid.checkedEventCount).toBe(4)
+
+        const validViaUnion = Schema.decodeSync(EventSchemaEvolutionDecision)({
+          _tag: "SchemaEvolutionValid",
+          checkedEventCount: 4,
+        })
+        expect(validViaUnion._tag).toBe("SchemaEvolutionValid")
+
+        const validConstructed = SchemaEvolutionValid.make({
+          checkedEventCount: AggregateCount.make(4),
+        })
+        expect(validConstructed._tag).toBe("SchemaEvolutionValid")
+        expect(validConstructed.checkedEventCount).toBe(4)
+
+        const drifted = Schema.decodeSync(FrozenEventVersionDrifted)({
+          _tag: "FrozenEventVersionDrifted",
+          eventType: "CartCreated",
+          version: 1,
+          reason: "schema modified",
+        })
+        expect(drifted._tag).toBe("FrozenEventVersionDrifted")
+        expect(drifted.eventType).toBe("CartCreated")
+        expect(drifted.version).toBe(1)
+        expect(drifted.reason).toBe("schema modified")
+
+        const driftedViaUnion = Schema.decodeSync(EventSchemaEvolutionDecision)({
+          _tag: "FrozenEventVersionDrifted",
+          eventType: "CartCreated",
+          version: 1,
+          reason: "schema modified",
+        })
+        expect(driftedViaUnion._tag).toBe("FrozenEventVersionDrifted")
+
+        const driftedConstructed = FrozenEventVersionDrifted.make({
+          eventType: EventType.make("CartCreated"),
+          version: EventSchemaVersion.make(1),
+          reason: ErrorMessage.make("schema modified"),
+        })
+        expect(driftedConstructed._tag).toBe("FrozenEventVersionDrifted")
+        expect(driftedConstructed.eventType).toBe("CartCreated")
+
+        const jump = Schema.decodeSync(UnmappedEventVersionJump)({
+          _tag: "UnmappedEventVersionJump",
+          eventType: "CartCheckedOut",
+          fromVersion: 1,
+          toVersion: 3,
+          reason: "gap detected",
+        })
+        expect(jump._tag).toBe("UnmappedEventVersionJump")
+        expect(jump.eventType).toBe("CartCheckedOut")
+        expect(jump.fromVersion).toBe(1)
+        expect(jump.toVersion).toBe(3)
+        expect(jump.reason).toBe("gap detected")
+
+        const jumpViaUnion = Schema.decodeSync(EventSchemaEvolutionDecision)({
+          _tag: "UnmappedEventVersionJump",
+          eventType: "CartCheckedOut",
+          fromVersion: 1,
+          toVersion: 3,
+          reason: "gap detected",
+        })
+        expect(jumpViaUnion._tag).toBe("UnmappedEventVersionJump")
+
+        const jumpConstructed = UnmappedEventVersionJump.make({
+          eventType: EventType.make("CartCheckedOut"),
+          fromVersion: EventSchemaVersion.make(1),
+          toVersion: EventSchemaVersion.make(3),
+          reason: ErrorMessage.make("gap detected"),
+        })
+        expect(jumpConstructed._tag).toBe("UnmappedEventVersionJump")
+        expect(jumpConstructed.fromVersion).toBe(1)
+        expect(jumpConstructed.toVersion).toBe(3)
+      })
+
+      it("rejects unknown tags or missing fields in EventSchemaEvolutionDecision", () => {
+        const unknownDecision: unknown = {
+          _tag: "UnknownDecision",
+        }
+        expect(() =>
+          Schema.decodeUnknownSync(EventSchemaEvolutionDecision)(unknownDecision),
+        ).toThrow()
+        expect(() =>
+          Schema.decodeSync(EventSchemaEvolutionDecision)({
+            _tag: "SchemaEvolutionValid",
+            checkedEventCount: -1,
+          }),
+        ).toThrow()
+        expect(() =>
+          Schema.decodeSync(EventSchemaEvolutionDecision)({
+            _tag: "FrozenEventVersionDrifted",
+            eventType: "CartCreated",
+            version: 0,
+            reason: "bad",
+          }),
+        ).toThrow()
+      })
+    })
+
+    describe("makeHandledCommandResponseSchema", () => {
+      const StateSchema = Schema.Struct({ count: Schema.Finite })
+      const EventSchema = Schema.TaggedStruct("TestEvent", { value: Schema.String })
+      const ResponseSchema = makeHandledCommandResponseSchema(StateSchema, EventSchema)
+
+      it("decodes valid command response envelopes", () => {
+        const decoded = Schema.decodeSync(ResponseSchema)({
+          state: { count: 3 },
+          events: [{ _tag: "TestEvent", value: "hello" }],
+          result: {
+            nextExpectedStreamVersion: 1,
+            creationStatus: { _tag: "CreatedStream" },
+            processingStatus: { _tag: "Processed" },
+          },
+        })
+        expect(decoded.state.count).toBe(3)
+        expect(decoded.events.length).toBe(1)
+        expect(decoded.events[0]?._tag).toBe("TestEvent")
+        expect(decoded.result.nextExpectedStreamVersion).toBe(1)
+        expect(decoded.result.creationStatus._tag).toBe("CreatedStream")
+      })
+
+      it("rejects invalid result, state, or events", () => {
+        // Invalid result (CreatedStream at version 0 violates AggregateCommandResult filter)
+        expect(() =>
+          Schema.decodeSync(ResponseSchema)({
+            state: { count: 3 },
+            events: [],
+            result: {
+              nextExpectedStreamVersion: 0,
+              creationStatus: { _tag: "CreatedStream" },
+              processingStatus: { _tag: "Processed" },
+            },
+          }),
+        ).toThrow()
+
+        // Invalid state
+        const invalidState: unknown = {
+          state: { count: "not-a-number" },
+          events: [],
+          result: {
+            nextExpectedStreamVersion: 0,
+            creationStatus: { _tag: "NoStream" },
+            processingStatus: { _tag: "Processed" },
+          },
+        }
+        expect(() => Schema.decodeUnknownSync(ResponseSchema)(invalidState)).toThrow()
+
+        // Invalid event
+        const invalidEvent: unknown = {
+          state: { count: 1 },
+          events: [{ _tag: "WrongEvent", value: 123 }],
+          result: {
+            nextExpectedStreamVersion: 0,
+            creationStatus: { _tag: "NoStream" },
+            processingStatus: { _tag: "Processed" },
+          },
+        }
+        expect(() => Schema.decodeUnknownSync(ResponseSchema)(invalidEvent)).toThrow()
+
+        // Valid Deduplicated with empty events
+        const validDeduplicated = Schema.decodeSync(ResponseSchema)({
+          state: { count: 3 },
+          events: [],
+          result: {
+            nextExpectedStreamVersion: 1,
+            creationStatus: { _tag: "ExistingStream" },
+            processingStatus: { _tag: "Deduplicated" },
+          },
+        })
+        expect(validDeduplicated.result.processingStatus._tag).toBe("Deduplicated")
+        expect(validDeduplicated.events).toEqual([])
+
+        // Invalid Deduplicated with non-empty events
+        expect(() =>
+          Schema.decodeSync(ResponseSchema)({
+            state: { count: 3 },
+            events: [{ _tag: "TestEvent", value: "duplicate-event" }],
+            result: {
+              nextExpectedStreamVersion: 1,
+              creationStatus: { _tag: "ExistingStream" },
+              processingStatus: { _tag: "Deduplicated" },
+            },
+          }),
+        ).toThrow(/Deduplicated command response requires an empty events array/)
+      })
+    })
+
+    describe("FrozenEventSchemaViolationError and MissingEventUpcasterError", () => {
+      it("instantiates FrozenEventSchemaViolationError with exact fields", () => {
+        const error = new FrozenEventSchemaViolationError({
+          eventType: EventType.make("CartCreated"),
+          version: EventSchemaVersion.make(1),
+          reason: ErrorMessage.make("hash mismatch"),
+        })
+        expect(error._tag).toBe("FrozenEventSchemaViolationError")
+        expect(error.eventType).toBe("CartCreated")
+        expect(error.version).toBe(1)
+        expect(error.reason).toBe("hash mismatch")
+      })
+
+      it("instantiates MissingEventUpcasterError with exact fields", () => {
+        const error = new MissingEventUpcasterError({
+          eventType: EventType.make("CartCheckedOut"),
+          fromVersion: EventSchemaVersion.make(1),
+          toVersion: EventSchemaVersion.make(2),
+          reason: ErrorMessage.make("No link registered"),
+        })
+        expect(error._tag).toBe("MissingEventUpcasterError")
+        expect(error.eventType).toBe("CartCheckedOut")
+        expect(error.fromVersion).toBe(1)
+        expect(error.toVersion).toBe(2)
+        expect(error.reason).toBe("No link registered")
+      })
     })
   })
 })

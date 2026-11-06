@@ -6,7 +6,12 @@ import { Effect, Layer } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import * as AiError from "effect/ai/AiError"
 import { buildHarnessGraph, saveGraphSnapshot } from "@harness/graph"
-import { createServer, executeTool } from "../src/server.js"
+import {
+  createServer,
+  executeTool,
+  isPathInsideRoot,
+  runDefaultLspDiagnostics,
+} from "../src/server.js"
 
 describe("harness-mcp tools", () => {
   const graph = buildHarnessGraph({
@@ -461,5 +466,35 @@ describe("harness-mcp tools", () => {
         }),
       ]),
     })
+  })
+
+  it("runDefaultLspDiagnostics resolves project when walking up parent directory with tsconfig.json", async () => {
+    const repoRoot = process.cwd()
+    const testFile = path.join(repoRoot, "libs/sample/domain/src/index.ts")
+    const effect = runDefaultLspDiagnostics(repoRoot, { file: testFile })
+    const res = await Effect.runPromise(effect)
+    expect(res).toBeDefined()
+    expect(typeof res.clean).toBe("boolean")
+    expect(Array.isArray(res.diagnostics)).toBe(true)
+  })
+
+  it("isPathInsideRoot correctly identifies child, self, and sibling prefix paths", () => {
+    expect(isPathInsideRoot("/tmp/repo", "/tmp/repo/libs/a")).toBe(true)
+    expect(isPathInsideRoot("/tmp/repo", "/tmp/repo")).toBe(true)
+    expect(isPathInsideRoot("/tmp/repo", "/tmp/repo-other/libs/a")).toBe(false)
+  })
+
+  it("runDefaultLspDiagnostics fails cleanly on non-existent repo root", async () => {
+    const effect = runDefaultLspDiagnostics("/tmp/non-existent-repo-for-lsp-test", {})
+    const res = await Effect.runPromise(effect)
+    expect(res.clean).toBe(false)
+    expect(res.summary.errors).toBe(1)
+    expect(res.diagnostics.length).toBeGreaterThanOrEqual(1)
+    const firstDiag = String(res.diagnostics[0])
+    expect(
+      firstDiag.includes("[lsp-spawn-error]") ||
+        firstDiag.includes("[lsp-exit-") ||
+        firstDiag.includes("[lsp-exception]"),
+    ).toBe(true)
   })
 })

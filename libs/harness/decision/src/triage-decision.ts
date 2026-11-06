@@ -266,6 +266,20 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     },
   },
   {
+    pattern: "aggregate-direct-bus-publish",
+    result: {
+      kind: "mechanical",
+      hint: "Aggregate command handlers must never require or publish directly to EventBus — persist events to es_outbox inside the SQLite transaction and let Outbox.drain publish asynchronously (see es:ADR-0003 and es:ADR-0004).",
+    },
+  },
+  {
+    pattern: "ontology-broken-realization-chain",
+    result: {
+      kind: "mechanical",
+      hint: "Every domain/core Effect.fn must be justified by an accepted EARS spec (specifies) and ADR (governs) in the ontology realization chain — add the symbol to the spec EARS table and spec/ADR frontmatter spans (see agent-patterns/planning.md).",
+    },
+  },
+  {
     pattern: /harness(?:\/|\()syntax-bans\)?/,
     result: {
       kind: "mechanical",

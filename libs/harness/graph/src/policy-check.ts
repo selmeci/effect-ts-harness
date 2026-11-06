@@ -1,5 +1,5 @@
-import { Option } from "effect"
 import * as Graph from "effect/Graph"
+import { match } from "ts-pattern"
 import { renderMermaid } from "./graph-engine.js"
 import {
   type EarsSpecNode,
@@ -9,33 +9,11 @@ import {
   type HarnessNode,
   type ServiceTagNode,
   type TaggedErrorNode,
+  type ViolationRule,
 } from "./model.js"
 
 export interface GraphPolicyViolation {
-  readonly rule:
-    | "domain-requires-infra"
-    | "domain-requires-cloud-binding"
-    | "layer-cycle"
-    | "impure-decider"
-    | "impure-reducer"
-    | "dead-event-payload"
-    | "terminal-state-unhandled"
-    | "unmapped-spec-symbol"
-    | "discriminant-branching"
-    | "non-exhaustive-union-match"
-    | "schema-boolean-state"
-    | "fallback-json-equality"
-    | "vacuous-error-assertion"
-    | "unscoped-effect-run"
-    | "unbranded-schema-field"
-    | "handwritten-tagged-union"
-    | "untraced-decider"
-    | "missing-aggregate-id-guard"
-    | "unasserted-state-field"
-    | "unsafe-type-cast"
-    | "unbranded-contract-schema"
-    | "unbranded-primitive-boundary"
-    | "node-sqlite-in-infra"
+  readonly rule: ViolationRule
   readonly message: string
   readonly path: ReadonlyArray<string>
 }
@@ -59,10 +37,48 @@ const isReducerSpan = (spanName: string): boolean =>
   spanName.endsWith(".fold") ||
   spanName === "fold"
 
+export const isAggregateFnNode = (node: EffectFnNode): boolean =>
+  node.spanName.startsWith("Aggregate.") ||
+  node.spanName.startsWith("AggregateInfra.") ||
+  node.spanName.startsWith("AggregateHttp.") ||
+  node.spanName.endsWith(".handleCommand") ||
+  node.spanName.endsWith(".executeCommand") ||
+  /(?:-aggregate|\.aggregate|\/aggregate|^aggregate)\.ts$/.test(node.file)
+
+const isEventBusServiceNode = (node: ServiceTagNode): boolean =>
+  node.tagId === "EventBus" ||
+  node.tagId.endsWith("EventBus") ||
+  node.tagId.endsWith(".EventBus") ||
+  node.name === "EventBus" ||
+  node.name.endsWith("EventBus")
+
+const isOutboxDrainOrBusPublishFnNode = (node: EffectFnNode): boolean =>
+  node.spanName === "Outbox.drain" ||
+  node.spanName === "EventBus.publish" ||
+  node.qualname.includes("Outbox.drain") ||
+  node.qualname.includes("EventBus.publish")
+
+const resolveNodeKey = (
+  graph: Graph.DirectedGraph<HarnessNode, unknown>,
+  nodeIdx: Graph.NodeIndex,
+): string =>
+  match(Graph.getNode(graph, nodeIdx))
+    .with({ _tag: "Some" }, ({ value }) => getNodeKey(value))
+    .with({ _tag: "None" }, () => String(nodeIdx))
+    .exhaustive()
+
 export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphResult => {
   const violations: Array<GraphPolicyViolation> = []
 
   const domainFns: Array<{ readonly index: Graph.NodeIndex; readonly node: EffectFnNode }> = []
+  const deciderFns: Array<{ readonly index: Graph.NodeIndex; readonly node: EffectFnNode }> = []
+  const reducerFns: Array<{ readonly index: Graph.NodeIndex; readonly node: EffectFnNode }> = []
+  const aggregateFns: Array<{ readonly index: Graph.NodeIndex; readonly node: EffectFnNode }> = []
+  const forbiddenOutboxTargets: Array<{
+    readonly index: Graph.NodeIndex
+    readonly ident: string
+    readonly kind: "service" | "call"
+  }> = []
   const allFns: Array<EffectFnNode> = []
   const allServices: Array<ServiceTagNode> = []
   const allErrors: Array<TaggedErrorNode> = []
@@ -73,33 +89,68 @@ export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphRe
     readonly rule: "domain-requires-infra" | "domain-requires-cloud-binding"
   }> = []
 
-  // 1. Collect domain functions, forbidden services, all symbols, and EARS specs
+  // 1. Collect domain functions, aggregate functions, forbidden services/targets, all symbols, and EARS specs in a single pass
   for (const [idx, node] of Graph.nodes(harnessGraph.graph)) {
-    if (node._tag === "EffectFn") {
-      allFns.push(node)
-      if (node.packageTag === "domain") {
-        domainFns.push({ index: idx, node })
-      }
-    } else if (node._tag === "ServiceTag") {
-      allServices.push(node)
-      if (node.packageTag === "infra") {
-        forbiddenServices.push({
-          index: idx,
-          node,
-          rule: "domain-requires-infra",
-        })
-      } else if (isCloudBinding(node)) {
-        forbiddenServices.push({
-          index: idx,
-          node,
-          rule: "domain-requires-cloud-binding",
-        })
-      }
-    } else if (node._tag === "TaggedError") {
-      allErrors.push(node)
-    } else if (node._tag === "EarsSpec") {
-      earsSpecs.push(node)
-    }
+    match(node)
+      .with({ _tag: "EffectFn" }, (fnNode) => {
+        allFns.push(fnNode)
+        if (fnNode.packageTag === "domain") {
+          domainFns.push({ index: idx, node: fnNode })
+        }
+        if (isDeciderSpan(fnNode.spanName)) {
+          deciderFns.push({ index: idx, node: fnNode })
+        }
+        if (isReducerSpan(fnNode.spanName)) {
+          reducerFns.push({ index: idx, node: fnNode })
+        }
+        if (isAggregateFnNode(fnNode)) {
+          aggregateFns.push({ index: idx, node: fnNode })
+        }
+        if (isOutboxDrainOrBusPublishFnNode(fnNode)) {
+          forbiddenOutboxTargets.push({
+            index: idx,
+            ident: fnNode.spanName.length > 0 ? fnNode.spanName : "EventBus.publish",
+            kind: "call",
+          })
+        }
+      })
+      .with({ _tag: "ServiceTag" }, (svcNode) => {
+        allServices.push(svcNode)
+        if (svcNode.packageTag === "infra") {
+          forbiddenServices.push({
+            index: idx,
+            node: svcNode,
+            rule: "domain-requires-infra",
+          })
+        } else if (isCloudBinding(svcNode)) {
+          forbiddenServices.push({
+            index: idx,
+            node: svcNode,
+            rule: "domain-requires-cloud-binding",
+          })
+        }
+        if (isEventBusServiceNode(svcNode)) {
+          forbiddenOutboxTargets.push({
+            index: idx,
+            ident: svcNode.tagId,
+            kind: "service",
+          })
+        }
+      })
+      .with({ _tag: "TaggedError" }, (errNode) => {
+        allErrors.push(errNode)
+      })
+      .with({ _tag: "EarsSpec" }, (specNode) => {
+        earsSpecs.push(specNode)
+      })
+      .with(
+        { _tag: "ServiceLayer" },
+        { _tag: "VitestCase" },
+        { _tag: "AdrDoc" },
+        { _tag: "PatternDoc" },
+        () => undefined,
+      )
+      .exhaustive()
   }
 
   // Rule 1: domain-requires-infra & domain-requires-cloud-binding via Graph.simplePaths
@@ -111,14 +162,21 @@ export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphRe
         limit: 1,
       })
       for (const pathResult of walker) {
-        const pathKeys = pathResult.path.map((nodeIdx) => {
-          const nodeOpt = Graph.getNode(harnessGraph.graph, nodeIdx)
-          return Option.isSome(nodeOpt) ? getNodeKey(nodeOpt.value) : String(nodeIdx)
-        })
-        const message =
-          forbiddenSvc.rule === "domain-requires-infra"
-            ? `Domain function '${domainFn.node.qualname}' forbidden dependency on infra service '${forbiddenSvc.node.tagId}'`
-            : `Domain function '${domainFn.node.qualname}' forbidden dependency on cloud binding '${forbiddenSvc.node.tagId}'`
+        const pathKeys = pathResult.path.map((nodeIdx) =>
+          resolveNodeKey(harnessGraph.graph, nodeIdx),
+        )
+        const message = match(forbiddenSvc.rule)
+          .with(
+            "domain-requires-infra",
+            () =>
+              `Domain function '${domainFn.node.qualname}' forbidden dependency on infra service '${forbiddenSvc.node.tagId}'`,
+          )
+          .with(
+            "domain-requires-cloud-binding",
+            () =>
+              `Domain function '${domainFn.node.qualname}' forbidden dependency on cloud binding '${forbiddenSvc.node.tagId}'`,
+          )
+          .exhaustive()
         violations.push({
           rule: forbiddenSvc.rule,
           message,
@@ -129,37 +187,101 @@ export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphRe
   }
 
   // Rule 2: impure-decider (all decider functions across domain/contract/service cannot require any services)
-  for (const [fnIdx, fnNode] of Graph.nodes(harnessGraph.graph)) {
-    if (fnNode._tag === "EffectFn" && isDeciderSpan(fnNode.spanName)) {
-      for (const [, edge] of Graph.edges(harnessGraph.graph)) {
-        if (edge.source === fnIdx && edge.data._tag === "RequiresService") {
-          violations.push({
-            rule: "impure-decider",
-            message: `Decider function '${fnNode.qualname}' (${fnNode.spanName}) must be pure and cannot require service '${edge.data.tagId}'`,
-            path: [fnNode.qualname, edge.data.tagId],
+  for (const { index: fnIdx, node: fnNode } of deciderFns) {
+    for (const [, edge] of Graph.edges(harnessGraph.graph)) {
+      if (edge.source === fnIdx) {
+        match(edge.data)
+          .with({ _tag: "RequiresService" }, (req) => {
+            violations.push({
+              rule: "impure-decider",
+              message: `Decider function '${fnNode.qualname}' (${fnNode.spanName}) must be pure and cannot require service '${req.tagId}'`,
+              path: [fnNode.qualname, req.tagId],
+            })
           })
-        }
+          .with(
+            { _tag: "FailsWith" },
+            { _tag: "ProvidesService" },
+            { _tag: "LayerRequires" },
+            { _tag: "TracedCall" },
+            { _tag: "ExercisesSpan" },
+            { _tag: "GovernsSymbol" },
+            { _tag: "SpecifiesSymbol" },
+            () => undefined,
+          )
+          .exhaustive()
       }
     }
   }
 
   // Rule 2b: impure-reducer (all reducer/evolve functions must be pure R=never and infallible E=never)
-  for (const [fnIdx, fnNode] of Graph.nodes(harnessGraph.graph)) {
-    if (fnNode._tag === "EffectFn" && isReducerSpan(fnNode.spanName)) {
-      for (const [, edge] of Graph.edges(harnessGraph.graph)) {
-        if (edge.source === fnIdx && edge.data._tag === "RequiresService") {
-          violations.push({
-            rule: "impure-reducer",
-            message: `Reducer function '${fnNode.qualname}' (${fnNode.spanName}) must be pure and cannot require service '${edge.data.tagId}'`,
-            path: [fnNode.qualname, edge.data.tagId],
+  for (const { index: fnIdx, node: fnNode } of reducerFns) {
+    for (const [, edge] of Graph.edges(harnessGraph.graph)) {
+      if (edge.source === fnIdx) {
+        match(edge.data)
+          .with({ _tag: "RequiresService" }, (req) => {
+            violations.push({
+              rule: "impure-reducer",
+              message: `Reducer function '${fnNode.qualname}' (${fnNode.spanName}) must be pure and cannot require service '${req.tagId}'`,
+              path: [fnNode.qualname, req.tagId],
+            })
           })
-        } else if (edge.source === fnIdx && edge.data._tag === "FailsWith") {
-          violations.push({
-            rule: "impure-reducer",
-            message: `Reducer function '${fnNode.qualname}' (${fnNode.spanName}) must be infallible and cannot fail with '${edge.data.errorTag}'`,
-            path: [fnNode.qualname, edge.data.errorTag],
+          .with({ _tag: "FailsWith" }, (fail) => {
+            violations.push({
+              rule: "impure-reducer",
+              message: `Reducer function '${fnNode.qualname}' (${fnNode.spanName}) must be infallible and cannot fail with '${fail.errorTag}'`,
+              path: [fnNode.qualname, fail.errorTag],
+            })
           })
-        }
+          .with(
+            { _tag: "ProvidesService" },
+            { _tag: "LayerRequires" },
+            { _tag: "TracedCall" },
+            { _tag: "ExercisesSpan" },
+            { _tag: "GovernsSymbol" },
+            { _tag: "SpecifiesSymbol" },
+            () => undefined,
+          )
+          .exhaustive()
+      }
+    }
+  }
+
+  // Rule 2c: aggregate-direct-bus-publish via transitive Graph.simplePaths
+  // (aggregates and command handlers write to es_outbox, never require EventBus or invoke Outbox.drain / EventBus.publish directly or transitively)
+  for (const aggFn of aggregateFns) {
+    const reportedTargetIdents = new Set<string>()
+    for (const target of forbiddenOutboxTargets) {
+      if (aggFn.index === target.index || reportedTargetIdents.has(target.ident)) {
+        continue
+      }
+      const walker = Graph.simplePaths(harnessGraph.graph, {
+        source: aggFn.index,
+        target: target.index,
+        limit: 1,
+      })
+      for (const pathResult of walker) {
+        reportedTargetIdents.add(target.ident)
+        const intermediateKeys = pathResult.path
+          .slice(0, -1)
+          .map((nodeIdx) => resolveNodeKey(harnessGraph.graph, nodeIdx))
+        const pathKeys = [...intermediateKeys, target.ident]
+        const message = match(target.kind)
+          .with(
+            "service",
+            () =>
+              `Aggregate function '${aggFn.node.qualname}' (${aggFn.node.spanName}) cannot require or publish directly to '${target.ident}' — aggregates must persist events to es_outbox inside the SQLite transaction and let a separate outbox relay publish asynchronously.`,
+          )
+          .with(
+            "call",
+            () =>
+              `Aggregate function '${aggFn.node.qualname}' (${aggFn.node.spanName}) cannot invoke '${target.ident}' during command execution — aggregates must persist events to es_outbox inside the SQLite transaction and let a separate outbox relay drain asynchronously.`,
+          )
+          .exhaustive()
+        violations.push({
+          rule: "aggregate-direct-bus-publish",
+          message,
+          path: pathKeys,
+        })
       }
     }
   }
@@ -168,44 +290,65 @@ export const checkEffectGraph = (harnessGraph: HarnessGraph): CheckEffectGraphRe
   const nodeMap = new Map<Graph.NodeIndex, Graph.NodeIndex>()
   const depGraph = Graph.directed<HarnessNode, string>((mutable) => {
     for (const [origIdx, node] of Graph.nodes(harnessGraph.graph)) {
-      if (node._tag === "ServiceLayer" || node._tag === "ServiceTag") {
-        const newIdx = Graph.addNode(mutable, node)
-        nodeMap.set(origIdx, newIdx)
-      }
+      match(node)
+        .with({ _tag: "ServiceLayer" }, { _tag: "ServiceTag" }, (svcOrLayer) => {
+          const newIdx = Graph.addNode(mutable, svcOrLayer)
+          nodeMap.set(origIdx, newIdx)
+        })
+        .with(
+          { _tag: "EffectFn" },
+          { _tag: "TaggedError" },
+          { _tag: "VitestCase" },
+          { _tag: "AdrDoc" },
+          { _tag: "EarsSpec" },
+          { _tag: "PatternDoc" },
+          () => undefined,
+        )
+        .exhaustive()
     }
 
     for (const [, edge] of Graph.edges(harnessGraph.graph)) {
-      if (edge.data._tag === "LayerRequires") {
-        const src = nodeMap.get(edge.source)
-        const dst = nodeMap.get(edge.target)
-        if (src !== undefined && dst !== undefined) {
-          Graph.addEdge(mutable, src, dst, "LayerRequires")
-        }
-      } else if (edge.data._tag === "ProvidesService") {
-        // In harnessGraph, edge is Layer -> ServiceTag.
-        // In dependency projection, ServiceTag is provided by Layer, so ServiceTag -> Layer.
-        const src = nodeMap.get(edge.target)
-        const dst = nodeMap.get(edge.source)
-        if (src !== undefined && dst !== undefined) {
-          Graph.addEdge(mutable, src, dst, "ProvidesService")
-        }
-      }
+      match(edge.data)
+        .with({ _tag: "LayerRequires" }, () => {
+          const src = nodeMap.get(edge.source)
+          const dst = nodeMap.get(edge.target)
+          if (src !== undefined && dst !== undefined) {
+            Graph.addEdge(mutable, src, dst, "LayerRequires")
+          }
+        })
+        .with({ _tag: "ProvidesService" }, () => {
+          // In harnessGraph, edge is Layer -> ServiceTag.
+          // In dependency projection, ServiceTag is provided by Layer, so ServiceTag -> Layer.
+          const src = nodeMap.get(edge.target)
+          const dst = nodeMap.get(edge.source)
+          if (src !== undefined && dst !== undefined) {
+            Graph.addEdge(mutable, src, dst, "ProvidesService")
+          }
+        })
+        .with(
+          { _tag: "RequiresService" },
+          { _tag: "FailsWith" },
+          { _tag: "TracedCall" },
+          { _tag: "ExercisesSpan" },
+          { _tag: "GovernsSymbol" },
+          { _tag: "SpecifiesSymbol" },
+          () => undefined,
+        )
+        .exhaustive()
     }
   })
 
-  const cycleOpt = Graph.findCycle(depGraph)
-  if (Option.isSome(cycleOpt)) {
-    const cycle = cycleOpt.value
-    const path = cycle.path.map((idx) => {
-      const nodeOpt = Graph.getNode(depGraph, idx)
-      return Option.isSome(nodeOpt) ? getNodeKey(nodeOpt.value) : String(idx)
+  match(Graph.findCycle(depGraph))
+    .with({ _tag: "Some" }, ({ value: cycle }) => {
+      const path = cycle.path.map((idx) => resolveNodeKey(depGraph, idx))
+      violations.push({
+        rule: "layer-cycle",
+        message: `Layer dependency cycle detected: ${path.join(" -> ")}`,
+        path,
+      })
     })
-    violations.push({
-      rule: "layer-cycle",
-      message: `Layer dependency cycle detected: ${path.join(" -> ")}`,
-      path,
-    })
-  }
+    .with({ _tag: "None" }, () => undefined)
+    .exhaustive()
 
   // Rule 4: unmapped-spec-symbol (every proposed or accepted EarsSpec must map all its declared spans, services, and errors to nodes in the graph via SpecifiesSymbol edges)
   for (const node of earsSpecs) {

@@ -37,6 +37,9 @@ describe("guard policy", () => {
     expect(classifyCommand("pnpm format")).toBe("allow")
     expect(classifyCommand("pnpm format:check")).toBe("allow")
     expect(classifyCommand("pnpm oxfmt --check .")).toBe("allow")
+    expect(classifyCommand("gh api repos/selmeci/effect-ts-harness/issues/18/comments")).toBe(
+      "allow",
+    )
   })
 
   it("allows safe read-only piped commands", () => {
@@ -383,5 +386,30 @@ describe("guard policy", () => {
     expect(classifyCommand("git commit -m 'fix `backticks` and $(sub) in commit message'")).toBe(
       "allow",
     )
+  })
+
+  it("allows read-only gh commands", () => {
+    expect(classifyCommand("gh pr view 18")).toBe("allow")
+    expect(classifyCommand("gh pr list")).toBe("allow")
+    expect(classifyCommand("gh issue view 1")).toBe("allow")
+    expect(classifyCommand("gh repo view")).toBe("allow")
+    expect(classifyCommand("gh api repos/selmeci/effect-ts-harness/pulls/18/comments")).toBe(
+      "allow",
+    )
+  })
+
+  it("escalates destructive and mutating gh subcommands", () => {
+    expect(classifyCommand("gh issue delete 1")).toBe("escalate")
+    expect(classifyCommand("gh repo delete owner/repo")).toBe("escalate")
+    expect(classifyCommand("gh pr close 18")).toBe("escalate")
+    expect(classifyCommand("gh pr merge 18")).toBe("escalate")
+  })
+
+  it("escalates gh api commands with mutating flags", () => {
+    expect(classifyCommand("gh api repos/owner/repo/issues/1 -X DELETE")).toBe("escalate")
+    expect(classifyCommand("gh api repos/owner/repo/issues --method POST")).toBe("escalate")
+    expect(classifyCommand("gh api repos/owner/repo/issues -f title=bug")).toBe("escalate")
+    expect(classifyCommand("gh api repos/owner/repo/issues -F body=@file.txt")).toBe("escalate")
+    expect(classifyCommand("gh api repos/owner/repo/issues --input body.json")).toBe("escalate")
   })
 })

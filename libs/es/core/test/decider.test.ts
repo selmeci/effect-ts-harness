@@ -197,6 +197,17 @@ describe("Cart Decider BDD Scenarios", () => {
         ),
   )
 
+  it.effect(
+    "gives CartIdMismatchError precedence over EmptyCartCheckoutError when checking out a zero-item active cart with mismatched cartId",
+    () =>
+      scenario
+        .given([{ _tag: "CartCreated", cartId: cid("cart-1"), version: 1 }])
+        .when({ _tag: "Checkout", cartId: cid("cart-2"), orderId: oid("order-100") })
+        .thenFails(
+          new CartIdMismatchError({ expectedCartId: cid("cart-1"), actualCartId: cid("cart-2") }),
+        ),
+  )
+
   it.effect("fails with CartAlreadyCheckedOutError when adding item to a checked out cart", () =>
     scenario
       .given([
