@@ -450,11 +450,11 @@ export const isConceptSubtypeOf = (
 
 ### 5.4 Mapping to Omnigraph `schema.pg` Without `node Any` or Binary Edges
 
-In `libs/harness/graph/schema.pg`, we eliminate the untyped `node Any` placeholder and all legacy binary edges (`RequiresService`, `ProvidesService`, `FailsWith`, `GovernsSymbol`, `SpecifiesSymbol`). The schema declares concrete labels for `EntityNode` and `RelationNode` together with the universal role-incidence edge `edge PlaysRole`:
+In `libs/harness/graph/schema.pg`, the untyped `node Any` placeholder and binary edges are absent. Because Omnigraph PG-Schema requires concrete endpoint vertex labels on edge types when `node Any` is absent, `schema.pg` declares concrete labels for `EntityNode` and `RelationNode` together with role-specific `Plays*Role` incidence edges (`PlaysCallerRole`, `PlaysCalleeRole`, `PlaysRequiresServiceRole`, `PlaysFailsWithRole`, `PlaysInputSchemaRole`, `PlaysOutputSchemaRole`, `PlaysSpecifiedTargetRole`, etc.) mapped deterministically from `PlaysRoleEdge` via `mapPlaysRoleToOmnigraphEdgeName`:
 
 ```graphql
 # ==============================================================================
-# Omnigraph PG-Schema (schema.pg) — Clean-Slate PERA Bipartite Model
+# Omnigraph PG-Schema (schema.pg) — PERA Bipartite Levi Incidence Model
 # ==============================================================================
 
 # --- 1. EntityNode Labels (V_E) ---
@@ -557,13 +557,14 @@ node MigrationTuple {
   targetTable: String @index
 }
 
-# --- 3. Universal Role-Incidence Edge (E_role) ---
-# Zero legacy binary edges and zero 'node Any'!
+# --- 3. Role-Specific Incidence Edges (E_role) ---
+# Concrete endpoint signatures without 'node Any':
 
-edge PlaysRole {
+edge PlaysCallerRole (EffectSignature -> EffectFn) {
   role: String @index
   archimateRelation: String? @index
 }
+# ... (28 concrete Plays*Role edge definitions in libs/harness/graph/schema.pg)
 ```
 
 ---
@@ -623,13 +624,13 @@ To avoid writing low-level graph data structures and algorithms from scratch in 
 
 ---
 
-## 8. Ecosystem Impact, Omnigraph PG-Schema & Clean-Slate Cutover
+## 8. Ecosystem Impact & Omnigraph PG-Schema Architecture
 
-- **Zero Backward Compatibility ($E_{\text{bin}}$ Removed):** All legacy binary edges (`RequiresService`, `FailsWith`, `ProvidesService`, `GovernsSymbol`, `SpecifiesSymbol`, $E_{\text{bin}}$), dual-write adapters, shadow-parity modes, and backward binary projections are permanently retired. The graph is strictly a pure bipartite Levi hypergraph:
+- **Pure Bipartite Levi Hypergraph:** The workspace architecture graph is modeled strictly as a bipartite Levi incidence hypergraph:
   $$G_{\text{Levi}} = (V_E \sqcup V_R, E_{\text{role}})$$
-- **Omnigraph PG-Schema (`schema.pg`):** The synthetic `node Any` placeholder and all legacy binary edges are removed from `schema.pg`. The schema contains only concrete labels for `EntityNode`, `RelationNode`, and the single role-incidence edge `edge PlaysRole`.
+- **Omnigraph PG-Schema (`schema.pg`):** `schema.pg` contains concrete labels for `EntityNode` and `RelationNode` connected by role-specific `Plays*Role` edges without `node Any`.
 - **Time and Space Complexity:** For a monorepo with $|V_E| \approx 500$ entity nodes and $|V_R| \approx 200$ relation nodes, constructing and traversing $G_{\text{Levi}}$ in `effect/Graph` (CSR matrix) takes $O(|V_E| + |V_R| + |E_{\text{role}}|) < 2\text{ ms}$ and $< 1\text{ MB}$ of RAM.
-- **Direct Cutover of Existing Tools:** Existing queries and MCP tools (`harness_callers`, `harness_callees`, `harness_tests_reaching`, `gq-queries.ts`, `type-extractor.ts`, `graph-engine.ts`, `policy-check.ts`) query $G_{\text{Levi}}$ directly via stratified Datalog (`GraphInfer.decide`).
+- **Native Hypergraph Tooling:** Existing queries and MCP tools (`harness_callers`, `harness_callees`, `harness_tests_reaching`, `gq-queries.ts`, `type-extractor.ts`, `graph-engine.ts`, `policy-check.ts`) query $G_{\text{Levi}}$ directly via stratified Datalog (`GraphInfer.decide`).
 
 ---
 

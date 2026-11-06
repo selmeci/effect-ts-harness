@@ -67,7 +67,7 @@ A traditional linter acts solely as an **ex-post passive gate**:
    - **$S_3$ (IDB — Normative Edge Completion `COMP-01..06`):** Generation of `SuggestedEdge` facts with `ConfidenceMillis` (reduced via a Flix upper semilattice) and `DerivationProof` DAGs.
 3. Attach **Soufflé-style minimal-height provenance (`MinHeightProvenanceAnnotation` $\to$ `DerivationProof`)** via `reduce(minHeightReducer)`, guaranteeing termination in $\le |V_E|$ iterations even on cyclic call graphs and $O(h)$ witness path reconstruction.
 4. Provide **`DatalogSession` (`Context.Service`)** using **DBSP $\mathbb{Z}$-set incremental deltas (`+1` insertion / `-1` retraction)** in `@electric-sql/d2ts` so single-file edits in IDE/MCP update $S_1 \dots S_3$ in **$< 2\text{ ms}$** ($O(|\Delta|)$ work).
-5. Formalize every `stub<A, E, R>()` node (`isStub: true`) as a **Hazel Bidirectional Typed Hole (`?hole : Effect<A, E, R>`)** and compute a **1-hop Type Inhabitation + Personalized PageRank (PPR) Ego-Graph Context Bundle (`TypedHoleContextBundle`)** capped at $\le 1,500$ tokens.
+5. Formalize every `stub<A, E, R>()` node (`isStub: true`) as a **Hazel Bidirectional Typed Hole (`?hole : Effect<A, E, R>`)** and compute a **Type Inhabitation + 10-Iteration Personalized PageRank (PPR) Ego-Graph Context Bundle (`TypedHoleContextBundle`)** capped at $\le 1,500$ tokens.
 
 ### 3.2 Non-Goals
 
@@ -184,8 +184,8 @@ So that an implementing subagent (`executing-effect-stubs`) never has to blindly
    - Target success type $A$ and its canonical constructors (`Schema.make`, `Schema.TaggedStruct` variants),
    - Closed list of allowed errors $E = E_1 \cup \dots \cup E_k$ with exact constructor field names `new E_i({ ... })`,
    - Required service ports $R = S_1 \cup \dots \cup S_m$ with exact capability method signatures.
-2. **1-Hop Type Inhabitation Search (`COMP-06: SuggestedHoleInhabitant`):**
-   - Via relational join in `@electric-sql/d2ts`, finds all pure `.decide` / `evolve` functions, domain constructors, and service methods in $\Gamma(G_{\text{Levi}})$ whose return type $A'$ or error channel $E'$ inhabits (by `ConceptLattice` / `NodeKey` match) the target $A$ or $E$.
+2. **Type Inhabitation Candidate Search (`COMP-06: SuggestedHoleInhabitant`):**
+   - Finds all pure `.decide` / `evolve` functions, domain constructors, and service methods in $\Gamma(G_{\text{Levi}})$ whose return type $A'$ or error channel $E'$ inhabits (by `ConceptLattice` / `NodeKey` match) the target $A$ or $E$.
 3. **Personalized PageRank (PPR) Ego-Graph Ranking with System One Teleportation Seed (*Aider / RepoGraph, ICLR 2025* + `@effect/ai-typesafe`):**
    - Over the neighborhood of hole `?h` in $G_{\text{Levi}}$, computes the stationary distribution of **Personalized PageRank** with teleportation seed vector $\vec{s}_{?h}$ (damping $\alpha_{\text{PPR}} = 0.85$, 10 power iterations over the `effect/Graph` CSR matrix):
      $$\vec{\pi}^{(t+1)} = (1 - \alpha_{\text{PPR}})\,\vec{s}_{?h} + \alpha_{\text{PPR}}\,P^{\top}\vec{\pi}^{(t)}$$

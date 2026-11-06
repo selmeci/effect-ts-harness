@@ -15,10 +15,16 @@ import {
   HARNESS_GQ_QUERIES,
   type HarnessGqQueryName,
 } from "./gq-queries.js"
-import { loadGraphSnapshot, saveGraphSnapshot, toOmnigraphNdjson } from "./graph-engine.js"
-import { getNodeKey, type HarnessGraph, type HarnessNode } from "./model.js"
+import {
+  findTestsReaching,
+  loadGraphSnapshotEffect,
+  mapPlaysRoleToOmnigraphEdgeName,
+  saveGraphSnapshot,
+} from "./graph-engine.js"
+import { getNodeKey, type HarnessGraph, type HarnessNode, type VitestCaseNode } from "./model.js"
 
 export const OmnigraphClient = Omnigraph
+
 
 export class OmnigraphLoadError extends Data.TaggedError("OmnigraphLoadError")<{
   readonly cause: unknown
@@ -95,56 +101,12 @@ export const makeOmnigraphClient = (options?: OmnigraphConnectionOptions): Omnig
   })
 }
 
-const mapPlaysRoleToOmnigraphEdgeName = (
-  relTag: HarnessNode["_tag"],
-  entityTag: HarnessNode["_tag"],
-  role: string,
-): string | undefined => {
-  if (relTag === "EffectSignature") {
-    if (role === "caller" && entityTag === "EffectFn") return "PlaysCallerRole"
-    if (role === "callee" && entityTag === "EffectFn") return "PlaysCalleeRole"
-    if (role === "requires-service" && entityTag === "ServiceTag") return "PlaysRequiresServiceRole"
-    if (role === "fails-with" && entityTag === "TaggedError") return "PlaysFailsWithRole"
-    if (
-      (role === "uses-schema" || role === "input-schema" || role === "output-schema") &&
-      entityTag === "SchemaDef"
-    ) {
-      return "PlaysUsesSchemaRole"
-    }
-  } else if (relTag === "LayerFlow") {
-    if (role === "provider-layer" && entityTag === "ServiceLayer") return "PlaysProviderLayerRole"
-    if (role === "provided-service" && entityTag === "ServiceTag") return "PlaysProvidedServiceRole"
-    if (role === "required-service" && entityTag === "ServiceTag") return "PlaysRequiredServiceRole"
-    if (role === "fails-with" && entityTag === "TaggedError") return "PlaysLayerFailsWithRole"
-  } else if (relTag === "TraceabilityTuple") {
-    if (role === "governing-adr" && entityTag === "AdrDoc") return "PlaysGoverningAdrRole"
-    if (role === "specifying-ears" && entityTag === "EarsSpec") return "PlaysSpecifyingEarsRole"
-    if (role === "realizing-symbol") {
-      if (entityTag === "EffectFn") return "PlaysRealizingFnRole"
-      if (entityTag === "ServiceTag") return "PlaysRealizingServiceRole"
-      if (entityTag === "ServiceLayer") return "PlaysRealizingLayerRole"
-      if (entityTag === "TaggedError") return "PlaysRealizingErrorRole"
-      if (entityTag === "SchemaDef") return "PlaysRealizingSchemaRole"
-    }
-    if (role === "verifying-test" && entityTag === "VitestCase") return "PlaysVerifyingTestRole"
-    if (role === "enforcing-pattern" && entityTag === "PatternDoc") return "PlaysEnforcingPatternRole"
-    if (role === "exercising-test" && entityTag === "VitestCase") return "PlaysExercisingTestRole"
-    if (role === "exercised-span" && entityTag === "EffectFn") return "PlaysExercisedSpanRole"
-  } else if (relTag === "HttpEndpointTuple") {
-    if (role === "endpoint-handler" && entityTag === "EffectFn") return "PlaysEndpointHandlerRole"
-    if (role === "request-schema" && entityTag === "SchemaDef") return "PlaysRequestSchemaRole"
-    if (role === "response-schema" && entityTag === "SchemaDef") return "PlaysResponseSchemaRole"
-    if (role === "endpoint-error" && entityTag === "TaggedError") return "PlaysEndpointErrorRole"
-  } else if (relTag === "MigrationTuple") {
-    if (role === "verifying-test" && entityTag === "VitestCase") {
-      return "PlaysMigrationVerifyingTestRole"
-    }
-  }
-  return undefined
-}
+export const omnigraphReachableTests = (
+  graph: HarnessGraph,
+  targetOrSpan: string,
+): ReadonlyArray<VitestCaseNode> => findTestsReaching(graph, targetOrSpan)
 
 const toOmnigraphServerNdjson = (graph: HarnessGraph): string => {
-  void toOmnigraphNdjson
   const nodeLines: Array<string> = []
   const nodeMetaByKey = new Map<string, { readonly tag: HarnessNode["_tag"]; readonly id: string }>()
 
@@ -447,7 +409,12 @@ const toOmnigraphServerNdjson = (graph: HarnessGraph): string => {
       dstMeta.tag,
       edge.data.role,
     )
-    if (!omnigraphEdgeName) continue
+    if (!omnigraphEdgeName) {
+      // oxlint-disable-next-line -- synchronous serializer boundary
+      throw new Error(
+        `Unmappable role '${edge.data.role}' from ${srcMeta.tag} to ${dstMeta.tag} in toOmnigraphServerNdjson`,
+      )
+    }
 
     const dedupKey = `${omnigraphEdgeName}::${srcMeta.id}::${dstMeta.id}::${edge.data.role}`
     if (seenEdges.has(dedupKey)) continue
@@ -628,7 +595,9 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
                   if (!existsSync(fallbackSnap)) {
                     return yield* mergeErr
                   }
-                  const snapGraph = loadGraphSnapshot(fallbackSnap)
+                  const snapGraph = yield* loadGraphSnapshotEffect(fallbackSnap).pipe(
+                    Effect.mapError((cause) => new OmnigraphLoadError({ cause })),
+                  )
                   const ndjson = toOmnigraphServerNdjson(snapGraph)
                   if (ndjson.trim().length > 0) {
                     yield* Effect.tryPromise({

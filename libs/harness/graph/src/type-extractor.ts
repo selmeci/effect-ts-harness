@@ -33,10 +33,12 @@ import {
   type PatternDocNode,
   RelationId,
   RoleName,
+  type SchemaDefNode,
   type ServiceLayerNode,
   type ServiceTagNode,
   type TaggedErrorNode,
   type TraceabilityTupleRelation,
+  type UnresolvedGraphReference,
   type VitestCaseNode,
 } from "./model.js"
 import { loadPatternDocs } from "./pattern-index.js"
@@ -530,6 +532,7 @@ export const extractTypeAwareGraphFromSource = (
   const services: Array<ServiceTagNode> = []
   const layers: Array<ServiceLayerNode> = []
   const errors: Array<TaggedErrorNode> = []
+  const schemas: Array<SchemaDefNode> = []
   const requiresService: Array<{ readonly callerQualname: string; readonly tagId: string }> = []
   const failsWith: Array<{ readonly callerQualname: string; readonly errorTag: string }> = []
   const providesService: Array<{ readonly layerQualname: string; readonly tagId: string }> = []
@@ -830,6 +833,28 @@ export const extractTypeAwareGraphFromSource = (
           }
         }
       }
+
+      // Schema.Class / Schema.TaggedClass check
+      if (
+        extText.includes("Schema.Class") ||
+        extText.includes("Schema.TaggedClass") ||
+        extText.includes("TaggedClass") ||
+        extText.includes("Class<")
+      ) {
+        const clsName = cls.getName() ?? ""
+        if (clsName && !schemas.some((s) => s.schemaName === clsName)) {
+          schemas.push({
+            _tag: "SchemaDef",
+            schemaName: clsName,
+            packageTag: filePkgTag,
+            file: relPath,
+            line: cls.getStartLineNumber(),
+            isBranded: false,
+            name: clsName,
+            qualname: `${relPath}#${clsName}`,
+          })
+        }
+      }
     }
 
     // Collect Schema.TaggedStruct, Schema.TaggedUnion, and Schema.Union definitions in sourceFile
@@ -937,6 +962,39 @@ export const extractTypeAwareGraphFromSource = (
             unionSchemaTagsByName.set(aliasName, [targetIdent])
           }
         }
+      }
+    }
+
+    for (const varDecl of sourceFile.getVariableDeclarations()) {
+      if (!varDecl.isExported()) continue
+      const varName = varDecl.getName()
+      const init = varDecl.getInitializer()
+      if (!init) continue
+      const initText = init.getText()
+      const isSchemaDef =
+        initText.includes("Schema.Struct") ||
+        initText.includes("Schema.TaggedStruct") ||
+        initText.includes("Schema.TaggedUnion") ||
+        initText.includes("Schema.Union") ||
+        initText.includes("Schema.Class") ||
+        initText.includes("Schema.brand(") ||
+        initText.includes(".pipe(Schema.brand") ||
+        initText.includes("S.Struct") ||
+        initText.includes("S.TaggedStruct") ||
+        initText.includes("S.TaggedUnion") ||
+        initText.includes("S.brand(")
+
+      if (isSchemaDef && !schemas.some((s) => s.schemaName === varName)) {
+        schemas.push({
+          _tag: "SchemaDef",
+          schemaName: varName,
+          packageTag: filePkgTag,
+          file: relPath,
+          line: varDecl.getStartLineNumber(),
+          isBranded: initText.includes("brand(") || initText.includes("Schema.brand"),
+          name: varName,
+          qualname: `${relPath}#${varName}`,
+        })
       }
     }
   }
@@ -1099,6 +1157,73 @@ export const extractTypeAwareGraphFromSource = (
       let successType = "void"
       const errorTags = new Set<string>()
       const requiredServices = new Set<string>()
+      let inputSchema: string | undefined
+      let outputSchema: string | undefined
+
+      // Inspect inner generator function when declared with Effect.fn("...")(function* (...) { ... })
+      let innerFn: Node | undefined
+      if (init && Node.isCallExpression(init)) {
+        const outerArgs = init.getArguments()
+        if (outerArgs.length > 0 && outerArgs[0]) {
+          innerFn = outerArgs[0]
+        }
+      }
+
+      if (innerFn && (Node.isFunctionExpression(innerFn) || Node.isArrowFunction(innerFn))) {
+        const params = innerFn.getParameters()
+        if (params.length > 0 && params[0]) {
+          const firstParam = params[0]
+          const paramTypeNode = firstParam.getTypeNode()
+          if (paramTypeNode) {
+            const rawParam = cleanName(paramTypeNode.getText())
+              .replace(/typeof\s+/, "")
+              .replace(/\.Type$/, "")
+            if (
+              rawParam &&
+              rawParam !== "string" &&
+              rawParam !== "number" &&
+              rawParam !== "boolean" &&
+              rawParam !== "unknown" &&
+              rawParam !== "any"
+            ) {
+              inputSchema = rawParam
+            }
+          }
+        }
+
+        const fnRetNode = innerFn.getReturnTypeNode()
+        if (fnRetNode) {
+          const effectRef =
+            Node.isTypeReference(fnRetNode) &&
+            (fnRetNode.getText().includes("Effect") || fnRetNode.getText().includes("Return"))
+              ? fnRetNode
+              : fnRetNode.getFirstDescendant(
+                  (n) =>
+                    Node.isTypeReference(n) &&
+                    (n.getText().includes("Effect") || n.getText().includes("Return")),
+                )
+          if (effectRef && Node.isTypeReference(effectRef)) {
+            const typeArgs = effectRef.getTypeArguments()
+            if (
+              typeArgs.length >= 1 &&
+              typeArgs[0] &&
+              (successType === "void" || successType === "unknown" || !successType)
+            ) {
+              successType = cleanName(typeArgs[0].getText())
+            }
+            if (typeArgs.length >= 2 && typeArgs[1]) {
+              for (const err of decomposeTypeNode(typeArgs[1])) {
+                errorTags.add(err)
+              }
+            }
+            if (typeArgs.length >= 3 && typeArgs[2]) {
+              for (const svc of decomposeTypeNode(typeArgs[2])) {
+                requiredServices.add(svc)
+              }
+            }
+          }
+        }
+      }
 
       // Check stub calls
       const calls = init.getDescendantsOfKind(SyntaxKind.CallExpression)
@@ -1131,7 +1256,7 @@ export const extractTypeAwareGraphFromSource = (
         )
         if (effectRef && Node.isTypeReference(effectRef)) {
           const typeArgs = effectRef.getTypeArguments()
-          if (typeArgs.length >= 1 && typeArgs[0] && successType === "void") {
+          if (typeArgs.length >= 1 && typeArgs[0] && (successType === "void" || successType === "unknown")) {
             successType = typeArgs[0].getText()
           }
           if (typeArgs.length >= 2 && typeArgs[1]) {
@@ -1152,9 +1277,9 @@ export const extractTypeAwareGraphFromSource = (
       if (sigs.length > 0 && sigs[0]) {
         const retType = sigs[0].getReturnType()
         const typeArgs = retType.getTypeArguments()
-        if (typeArgs.length >= 1 && typeArgs[0] && successType === "void" && !typeArgs[0].isAny()) {
+        if (typeArgs.length >= 1 && typeArgs[0] && (successType === "void" || successType === "unknown") && !typeArgs[0].isAny()) {
           successType = typeArgs[0].getText()
-        } else if (successType === "void") {
+        } else if (successType === "void" || successType === "unknown") {
           const retNode =
             Node.isArrowFunction(init) || Node.isFunctionExpression(init)
               ? init.getReturnTypeNode()?.getText()
@@ -1182,6 +1307,26 @@ export const extractTypeAwareGraphFromSource = (
           for (const svc of decomposeType(typeArgs[2])) {
             requiredServices.add(svc)
           }
+        }
+      }
+
+      // Derive outputSchema from successType if single type reference name
+      if (successType) {
+        const cleanedSuccess = cleanName(successType)
+          .replace(/typeof\s+/, "")
+          .replace(/\.Type$/, "")
+        if (
+          cleanedSuccess &&
+          cleanedSuccess !== "void" &&
+          cleanedSuccess !== "never" &&
+          cleanedSuccess !== "unknown" &&
+          cleanedSuccess !== "any" &&
+          cleanedSuccess !== "string" &&
+          cleanedSuccess !== "number" &&
+          cleanedSuccess !== "boolean" &&
+          /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(cleanedSuccess)
+        ) {
+          outputSchema = cleanedSuccess
         }
       }
 
@@ -1215,6 +1360,14 @@ export const extractTypeAwareGraphFromSource = (
           }
         }
 
+        if (expr.getKind() === SyntaxKind.NewExpression) {
+          const newExpr = expr as NewExpression
+          const errorId = newExpr.getExpression().getText()
+          if (errorId.endsWith("Error") || errors.some((e) => e.errorTag === errorId) || referencedErrors.has(errorId)) {
+            errorTags.add(errorId)
+          }
+        }
+
         if (expr.getKind() === SyntaxKind.CallExpression) {
           const callExpr = expr as CallExpression
           const calleeText = callExpr.getExpression().getText()
@@ -1228,6 +1381,11 @@ export const extractTypeAwareGraphFromSource = (
               } else if (arg.getKind() === SyntaxKind.Identifier) {
                 errorTags.add(arg.getText())
               }
+            }
+          } else if (calleeText.endsWith(".make")) {
+            const errorId = calleeText.replace(/\.make$/, "")
+            if (errorId.endsWith("Error") || errors.some((e) => e.errorTag === errorId) || referencedErrors.has(errorId)) {
+              errorTags.add(errorId)
             }
           }
         }
@@ -1252,6 +1410,32 @@ export const extractTypeAwareGraphFromSource = (
         }
       }
 
+      // Detect caught errors via Effect.catchTag and Effect.catchTags (F-34)
+      const caughtErrors = new Set<string>()
+      for (const c of calls) {
+        const expr = c.getExpression()
+        const exprText = expr.getText()
+        if (exprText === "Effect.catchTag" || exprText.endsWith(".catchTag")) {
+          const args = c.getArguments()
+          if (args.length > 0 && args[0]) {
+            const firstArg = args[0]
+            if (Node.isStringLiteral(firstArg) || Node.isNoSubstitutionTemplateLiteral(firstArg)) {
+              caughtErrors.add(firstArg.getLiteralText())
+            }
+          }
+        }
+        if (exprText === "Effect.catchTags" || exprText.endsWith(".catchTags")) {
+          const args = c.getArguments()
+          if (args.length > 0 && args[0] && Node.isObjectLiteralExpression(args[0])) {
+            for (const prop of args[0].getProperties()) {
+              if (Node.isPropertyAssignment(prop)) {
+                caughtErrors.add(prop.getName().replace(/^["'`]|["'`]$/g, ""))
+              }
+            }
+          }
+        }
+      }
+
       fns.push({
         _tag: "EffectFn",
         qualname,
@@ -1261,6 +1445,19 @@ export const extractTypeAwareGraphFromSource = (
         line,
         successType,
         isStub,
+        ...(inputSchema ? { inputSchema } : {}),
+        ...(outputSchema ? { outputSchema } : {}),
+        ...(inputSchema || outputSchema
+          ? {
+              payloadSchemas: Array.from(
+                new Set([
+                  ...(inputSchema ? [inputSchema] : []),
+                  ...(outputSchema ? [outputSchema] : []),
+                ]),
+              ),
+            }
+          : {}),
+        ...(caughtErrors.size > 0 ? { caughtErrors: Array.from(caughtErrors) } : {}),
       })
 
       for (const err of errorTags) {
@@ -3091,11 +3288,12 @@ export const extractTypeAwareGraphFromSource = (
     branchingViolations.push(...unasserted)
   }
 
-  return buildHarnessGraph({
+  const baseGraph = buildHarnessGraph({
     fns,
     services,
     layers,
     errors,
+    schemas,
     tests: [],
     patternDocs: options?.patternDocs ?? [],
     requiresService,
@@ -3106,6 +3304,11 @@ export const extractTypeAwareGraphFromSource = (
     exercisesSpans: [],
     branchingViolations,
   })
+
+  return {
+    ...baseGraph,
+    unresolvedReferences: [],
+  }
 }
 
 const checkUnassertedStateFieldsForInputs = (
@@ -3739,6 +3942,7 @@ export const extractWorkspaceTypeAwareGraph = (repoRoot: string): Effect.Effect<
         }
       }
     }
+    const unresolvedReferences: Array<UnresolvedGraphReference> = []
 
     const augmentedGraph = Graph.mutate<HarnessNode, HarnessEdge>(baseGraph.graph, (mutable) => {
       for (const relTestFile of testFiles) {
@@ -3870,8 +4074,8 @@ export const extractWorkspaceTypeAwareGraph = (repoRoot: string): Effect.Effect<
         const docIdx = Graph.addNode(mutable, docNode)
         updatedNodeIndexByKey.set(docKey, docIdx)
 
+        const kindPrefix = docNode._tag === "AdrDoc" ? "governs" : "specifies"
         const addGovernanceTraceability = (targetKey: string, targetIdx: Graph.NodeIndex) => {
-          const kindPrefix = docNode._tag === "AdrDoc" ? "governs" : "specifies"
           const docRole = docNode._tag === "AdrDoc" ? "governing-adr" : "specifying-ears"
           const docArchimate =
             docNode._tag === "AdrDoc" ? ("Influence" as const) : ("Realization" as const)
@@ -3906,12 +4110,14 @@ export const extractWorkspaceTypeAwareGraph = (repoRoot: string): Effect.Effect<
         // 1. Spans -> EffectFn
         const addedFnTargets = new Set<string>()
         for (const span of docNode.referencedSpans ?? []) {
+          let found = false
           for (const fnNode of effectFns) {
             if (
               fnNode.spanName === span ||
               fnNode.qualname === span ||
               fnNode.qualname.endsWith(`#${span}`)
             ) {
+              found = true
               const targetKey = getNodeKey(fnNode)
               if (addedFnTargets.has(targetKey)) continue
               addedFnTargets.add(targetKey)
@@ -3921,13 +4127,23 @@ export const extractWorkspaceTypeAwareGraph = (repoRoot: string): Effect.Effect<
               }
             }
           }
+          if (!found) {
+            unresolvedReferences.push({
+              relationId: `TraceabilityTuple:${kindPrefix}:${docNode.id}->${span}`,
+              role: "realizing-symbol",
+              targetKey: span,
+              file: docNode.path,
+            })
+          }
         }
 
         // 2. Services -> ServiceTag
         const addedSvcTargets = new Set<string>()
         for (const svc of docNode.referencedServices ?? []) {
+          let found = false
           for (const sNode of serviceTags) {
             if (sNode.tagId === svc || sNode.name === svc || sNode.tagId.endsWith(`#${svc}`)) {
+              found = true
               const targetKey = getNodeKey(sNode)
               if (addedSvcTargets.has(targetKey)) continue
               addedSvcTargets.add(targetKey)
@@ -3937,13 +4153,23 @@ export const extractWorkspaceTypeAwareGraph = (repoRoot: string): Effect.Effect<
               }
             }
           }
+          if (!found) {
+            unresolvedReferences.push({
+              relationId: `TraceabilityTuple:${kindPrefix}:${docNode.id}->${svc}`,
+              role: "realizing-symbol",
+              targetKey: svc,
+              file: docNode.path,
+            })
+          }
         }
 
         // 3. Errors -> TaggedError
         const addedErrTargets = new Set<string>()
         for (const err of docNode.referencedErrors ?? []) {
+          let found = false
           for (const eNode of taggedErrors) {
             if (eNode.errorTag === err) {
+              found = true
               const targetKey = getNodeKey(eNode)
               if (addedErrTargets.has(targetKey)) continue
               addedErrTargets.add(targetKey)
@@ -3952,6 +4178,14 @@ export const extractWorkspaceTypeAwareGraph = (repoRoot: string): Effect.Effect<
                 addGovernanceTraceability(targetKey, targetIdx)
               }
             }
+          }
+          if (!found) {
+            unresolvedReferences.push({
+              relationId: `TraceabilityTuple:${kindPrefix}:${docNode.id}->${err}`,
+              role: "realizing-symbol",
+              targetKey: err,
+              file: docNode.path,
+            })
           }
         }
       }
@@ -3967,5 +4201,9 @@ export const extractWorkspaceTypeAwareGraph = (repoRoot: string): Effect.Effect<
       graph: augmentedGraph,
       nodeIndexByKey: updatedNodeIndexByKey,
       branchingViolations: combinedViolations,
+      unresolvedReferences: [
+        ...(baseGraph.unresolvedReferences ?? []),
+        ...unresolvedReferences,
+      ],
     } satisfies HarnessGraph
   })

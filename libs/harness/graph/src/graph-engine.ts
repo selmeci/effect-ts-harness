@@ -1,9 +1,14 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { Schema } from "effect"
+import { Cause, Effect, Exit, Schema } from "effect"
 import * as Graph from "effect/Graph"
 import * as Option from "effect/Option"
 import { match } from "ts-pattern"
+import {
+  HARNESS_PERA_CONCEPT_LATTICE_CONFIG,
+  decideConceptLattice,
+  validateRelationRolesWithLattice,
+} from "./concept-lattice.js"
 import {
   type AdrDocNode,
   type BranchingViolation,
@@ -11,10 +16,13 @@ import {
   type EffectFnNode,
   type EffectSignatureRelation,
   type EntityNode,
+  getArchimateRelationForRole,
   getEdgeKey,
   getNodeKey,
+  GraphSnapshotError,
   HarnessEdge,
   type HarnessGraph,
+  HarnessGraphTypeId,
   HarnessNode,
   type HttpEndpointTupleRelation,
   isEntityNode,
@@ -33,10 +41,12 @@ import {
   type ServiceTagNode,
   type TaggedErrorNode,
   type TraceabilityTupleRelation,
+  UnresolvedGraphReference,
   type VitestCaseNode,
 } from "./model.js"
 
 export type { HarnessGraph }
+
 
 export interface BuildHarnessGraphInput {
   readonly entities?: ReadonlyArray<EntityNode> | undefined
@@ -108,32 +118,122 @@ export interface BuildHarnessGraphInput {
       }>
     | undefined
   readonly branchingViolations?: ReadonlyArray<BranchingViolation> | undefined
+  readonly unresolvedReferences?: ReadonlyArray<UnresolvedGraphReference> | undefined
 }
 
-const ARCHIMATE_BY_ROLE: Readonly<Record<string, string>> = {
-  caller: "Access",
-  callee: "Flow",
-  "requires-service": "Serving",
-  "fails-with": "Access",
-  "uses-schema": "Access",
-  "input-schema": "Access",
-  "output-schema": "Access",
-  "provider-layer": "Realization",
-  "provided-service": "Realization",
-  "required-service": "Serving",
-  "governing-adr": "Influence",
-  "specifying-ears": "Realization",
-  "realizing-symbol": "Realization",
-  "verifying-test": "Realization",
-  "enforcing-pattern": "Influence",
-  "exercising-test": "Realization",
-  "exercised-span": "Realization",
-  "endpoint-handler": "Realization",
-  "request-schema": "Access",
-  "response-schema": "Access",
-  "endpoint-error": "Access",
-  "migration-module": "Realization",
-}
+export const mapPlaysRoleToOmnigraphEdgeName = (
+  relTag: HarnessNode["_tag"],
+  entityTag: HarnessNode["_tag"],
+  role: string,
+): string | undefined =>
+  match(relTag)
+    .with("EffectSignature", () => {
+      if (role === "caller" && entityTag === "EffectFn") return "PlaysCallerRole"
+      if (role === "callee" && entityTag === "EffectFn") return "PlaysCalleeRole"
+      if (role === "requires-service" && entityTag === "ServiceTag") return "PlaysRequiresServiceRole"
+      if (role === "fails-with" && entityTag === "TaggedError") return "PlaysFailsWithRole"
+      if (role === "input-schema" && entityTag === "SchemaDef") return "PlaysInputSchemaRole"
+      if (role === "output-schema" && entityTag === "SchemaDef") return "PlaysOutputSchemaRole"
+      if (role === "uses-schema" && entityTag === "SchemaDef") return "PlaysUsesSchemaRole"
+      return undefined
+    })
+    .with("LayerFlow", () => {
+      if (role === "provider-layer" && entityTag === "ServiceLayer") return "PlaysProviderLayerRole"
+      if (role === "provided-service" && entityTag === "ServiceTag") return "PlaysProvidedServiceRole"
+      if (role === "required-service" && entityTag === "ServiceTag") return "PlaysRequiredServiceRole"
+      if (role === "fails-with" && entityTag === "TaggedError") return "PlaysLayerFailsWithRole"
+      return undefined
+    })
+    .with("TraceabilityTuple", () => {
+      if (role === "governing-adr" && entityTag === "AdrDoc") return "PlaysGoverningAdrRole"
+      if (
+        (role === "specifying-ears" || role === "specifying-spec") &&
+        entityTag === "EarsSpec"
+      ) {
+        return "PlaysSpecifyingEarsRole"
+      }
+      if (role === "realizing-symbol" || role === "governed-symbol") {
+        return match(entityTag)
+          .with("EffectFn", () => "PlaysRealizingFnRole")
+          .with("ServiceTag", () => "PlaysRealizingServiceRole")
+          .with("ServiceLayer", () => "PlaysRealizingLayerRole")
+          .with("TaggedError", () => "PlaysRealizingErrorRole")
+          .with("SchemaDef", () => "PlaysRealizingSchemaRole")
+          .with(
+            "VitestCase",
+            "PatternDoc",
+            "AdrDoc",
+            "EarsSpec",
+            "EffectSignature",
+            "LayerFlow",
+            "TraceabilityTuple",
+            "HttpEndpointTuple",
+            "MigrationTuple",
+            () => undefined,
+          )
+          .exhaustive()
+      }
+      if (role === "specified-target") {
+        return match(entityTag)
+          .with("EffectFn", () => "PlaysSpecifiedTargetFnRole")
+          .with("ServiceTag", () => "PlaysSpecifiedTargetServiceRole")
+          .with("ServiceLayer", () => "PlaysSpecifiedTargetLayerRole")
+          .with("TaggedError", () => "PlaysSpecifiedTargetErrorRole")
+          .with("SchemaDef", () => "PlaysSpecifiedTargetSchemaRole")
+          .with(
+            "VitestCase",
+            "PatternDoc",
+            "AdrDoc",
+            "EarsSpec",
+            "EffectSignature",
+            "LayerFlow",
+            "TraceabilityTuple",
+            "HttpEndpointTuple",
+            "MigrationTuple",
+            () => undefined,
+          )
+          .exhaustive()
+      }
+      if (role === "verifying-test" && entityTag === "VitestCase") return "PlaysVerifyingTestRole"
+      if (role === "enforcing-pattern" && entityTag === "PatternDoc") return "PlaysEnforcingPatternRole"
+      if (role === "exercising-test" && entityTag === "VitestCase") return "PlaysExercisingTestRole"
+      if (role === "exercised-span" && entityTag === "EffectFn") return "PlaysExercisedSpanRole"
+      return undefined
+    })
+    .with("HttpEndpointTuple", () => {
+      if (role === "endpoint-handler" && entityTag === "EffectFn") return "PlaysEndpointHandlerRole"
+      if (role === "request-schema" && entityTag === "SchemaDef") return "PlaysRequestSchemaRole"
+      if (role === "response-schema" && entityTag === "SchemaDef") return "PlaysResponseSchemaRole"
+      if (role === "endpoint-error" && entityTag === "TaggedError") return "PlaysEndpointErrorRole"
+      return undefined
+    })
+    .with("MigrationTuple", () => {
+      if (role === "verifying-test" && entityTag === "VitestCase") {
+        return "PlaysMigrationVerifyingTestRole"
+      }
+      return undefined
+    })
+    .with(
+      "EffectFn",
+      "ServiceTag",
+      "ServiceLayer",
+      "TaggedError",
+      "SchemaDef",
+      "VitestCase",
+      "PatternDoc",
+      "AdrDoc",
+      "EarsSpec",
+      () => undefined,
+    )
+    .exhaustive()
+
+export const isHarnessGraph = (u: unknown): u is HarnessGraph =>
+  typeof u === "object" && u !== null && HarnessGraphTypeId in u
+
+const PERA_CONCEPT_LATTICE_RESULT = Effect.runSync(
+  decideConceptLattice(HARNESS_PERA_CONCEPT_LATTICE_CONFIG),
+)
+
 
 /**
  * Builds the in-memory Clean-Slate PERA Bipartite Levi Hypergraph (`G_Levi = (V_E u V_R, E_role)`).
@@ -143,6 +243,10 @@ const ARCHIMATE_BY_ROLE: Readonly<Record<string, string>> = {
 export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph => {
   const nodeIndexByKey = new Map<string, Graph.NodeIndex>()
   const addedEdgeKeys = new Set<string>()
+  const branchingViolations: Array<BranchingViolation> = [...(input.branchingViolations ?? [])]
+  const unresolvedReferences: Array<UnresolvedGraphReference> = [
+    ...(input.unresolvedReferences ?? []),
+  ]
 
   const graph = Graph.directed<HarnessNode, HarnessEdge>((mutable) => {
     const addOrGetNode = (node: HarnessNode): Graph.NodeIndex => {
@@ -174,7 +278,7 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
         relationId: relId,
         entityKey,
         role,
-        archimateRelation: extra?.archimateRelation ?? ARCHIMATE_BY_ROLE[roleStr] ?? "Association",
+        archimateRelation: extra?.archimateRelation ?? getArchimateRelationForRole(roleStr) ?? "Association",
         ...(extra?.callCount !== undefined ? { callCount: extra.callCount } : {}),
         ...(extra?.receiverLayer !== undefined ? { receiverLayer: extra.receiverLayer } : {}),
       }
@@ -293,21 +397,50 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
           return { idx, key: NodeKey.make(candidate) }
         }
       }
+
+      if (preferredKind !== undefined) {
+        const preferredTag = match(preferredKind)
+          .with("span", "EffectFn", () => "EffectFn" as const)
+          .with("service", "ServiceTag", () => "ServiceTag" as const)
+          .with("error", "TaggedError", () => "TaggedError" as const)
+          .with("schema", () => "SchemaDef" as const)
+          .with("layer", () => "ServiceLayer" as const)
+          .with("test", () => "VitestCase" as const)
+          .with("pattern", () => "PatternDoc" as const)
+          .exhaustive()
+
+        for (const [idx, node] of Graph.nodes(mutable)) {
+          if (!isEntityNode(node) || node._tag !== preferredTag) continue
+          const matched = match(node)
+            .with({ _tag: "EffectFn" }, (n) => n.spanName === targetKey || n.qualname === targetKey)
+            .with({ _tag: "ServiceTag" }, (n) => n.tagId === targetKey || n.name === targetKey)
+            .with({ _tag: "TaggedError" }, (n) => n.errorTag === targetKey)
+            .with({ _tag: "SchemaDef" }, (n) => n.schemaName === targetKey)
+            .with({ _tag: "ServiceLayer" }, (n) => n.qualname === targetKey)
+            .with({ _tag: "VitestCase" }, (n) => n.testId === targetKey || n.testName === targetKey)
+            .with({ _tag: "PatternDoc" }, (n) => n.slug === targetKey || n.path === targetKey)
+            .exhaustive()
+          if (matched) {
+            return { idx, key: getNodeKey(node) }
+          }
+        }
+        return undefined
+      }
+
       for (const [idx, node] of Graph.nodes(mutable)) {
         if (!isEntityNode(node)) continue
-        if (node._tag === "EffectFn" && (node.spanName === targetKey || node.qualname === targetKey)) {
-          return { idx, key: getNodeKey(node) }
-        }
-        if (node._tag === "ServiceTag" && (node.tagId === targetKey || node.name === targetKey)) {
-          return { idx, key: getNodeKey(node) }
-        }
-        if (node._tag === "TaggedError" && node.errorTag === targetKey) {
-          return { idx, key: getNodeKey(node) }
-        }
-        if (node._tag === "SchemaDef" && node.schemaName === targetKey) {
-          return { idx, key: getNodeKey(node) }
-        }
-        if (node._tag === "PatternDoc" && (node.slug === targetKey || node.path === targetKey)) {
+        const matched = match(node)
+          .with({ _tag: "EffectFn" }, (n) => n.spanName === targetKey || n.qualname === targetKey)
+          .with({ _tag: "ServiceTag" }, (n) => n.tagId === targetKey || n.name === targetKey)
+          .with({ _tag: "TaggedError" }, (n) => n.errorTag === targetKey)
+          .with({ _tag: "SchemaDef" }, (n) => n.schemaName === targetKey)
+          .with({ _tag: "ServiceLayer" }, (n) => n.qualname === targetKey)
+          .with({ _tag: "VitestCase" }, (n) => n.testId === targetKey || n.testName === targetKey)
+          .with({ _tag: "PatternDoc" }, (n) => n.slug === targetKey || n.path === targetKey)
+          .with({ _tag: "AdrDoc" }, (n) => n.id === targetKey)
+          .with({ _tag: "EarsSpec" }, (n) => n.id === targetKey)
+          .exhaustive()
+        if (matched) {
           return { idx, key: getNodeKey(node) }
         }
       }
@@ -401,7 +534,16 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
 
     for (const [, b] of sigBuilders) {
       const callerTarget = resolveTargetEntityKey(b.callerQualname, "span")
-      if (callerTarget === undefined) continue
+      if (callerTarget === undefined) {
+        unresolvedReferences.push({
+          relationId: b.relationId,
+          role: RoleName.make("caller"),
+          targetKey: b.callerQualname,
+          file: b.file,
+          line: b.line,
+        })
+        continue
+      }
       const sigNode: EffectSignatureRelation = {
         _tag: "EffectSignature",
         relationId: b.relationId,
@@ -420,12 +562,28 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
         const svcTarget = resolveTargetEntityKey(svcId, "service")
         if (svcTarget !== undefined) {
           addPlaysRole(sigIdx, b.relationId, svcTarget.idx, svcTarget.key, "requires-service")
+        } else {
+          unresolvedReferences.push({
+            relationId: b.relationId,
+            role: RoleName.make("requires-service"),
+            targetKey: svcId,
+            file: b.file,
+            line: b.line,
+          })
         }
       }
       for (const errTag of b.emittedErrors) {
         const errTarget = resolveTargetEntityKey(errTag, "error")
         if (errTarget !== undefined) {
           addPlaysRole(sigIdx, b.relationId, errTarget.idx, errTarget.key, "fails-with")
+        } else {
+          unresolvedReferences.push({
+            relationId: b.relationId,
+            role: RoleName.make("fails-with"),
+            targetKey: errTag,
+            file: b.file,
+            line: b.line,
+          })
         }
       }
       for (const calleeQual of b.calleeQualnames) {
@@ -433,12 +591,64 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
         if (calleeTarget !== undefined) {
           const meta = b.calleeMeta.get(calleeQual)
           addPlaysRole(sigIdx, b.relationId, calleeTarget.idx, calleeTarget.key, "callee", meta)
+        } else {
+          unresolvedReferences.push({
+            relationId: b.relationId,
+            role: RoleName.make("callee"),
+            targetKey: calleeQual,
+            file: b.file,
+            line: b.line,
+          })
         }
       }
       for (const schemaName of b.payloadSchemas) {
         const schemaTarget = resolveTargetEntityKey(schemaName, "schema")
         if (schemaTarget !== undefined) {
           addPlaysRole(sigIdx, b.relationId, schemaTarget.idx, schemaTarget.key, "uses-schema")
+        } else {
+          unresolvedReferences.push({
+            relationId: b.relationId,
+            role: RoleName.make("uses-schema"),
+            targetKey: schemaName,
+            file: b.file,
+            line: b.line,
+          })
+        }
+      }
+
+      const callerNodeOpt = Graph.getNode(mutable, callerTarget.idx)
+      const callerFnNode =
+        Option.isSome(callerNodeOpt) && callerNodeOpt.value._tag === "EffectFn"
+          ? callerNodeOpt.value
+          : undefined
+
+      if (callerFnNode?.inputSchema) {
+        const inputTarget = resolveTargetEntityKey(callerFnNode.inputSchema, "schema")
+        if (inputTarget !== undefined) {
+          addPlaysRole(sigIdx, b.relationId, inputTarget.idx, inputTarget.key, "input-schema")
+        } else {
+          unresolvedReferences.push({
+            relationId: b.relationId,
+            role: RoleName.make("input-schema"),
+            targetKey: callerFnNode.inputSchema,
+            file: b.file,
+            line: b.line,
+          })
+        }
+      }
+
+      if (callerFnNode?.outputSchema) {
+        const outputTarget = resolveTargetEntityKey(callerFnNode.outputSchema, "schema")
+        if (outputTarget !== undefined) {
+          addPlaysRole(sigIdx, b.relationId, outputTarget.idx, outputTarget.key, "output-schema")
+        } else {
+          unresolvedReferences.push({
+            relationId: b.relationId,
+            role: RoleName.make("output-schema"),
+            targetKey: callerFnNode.outputSchema,
+            file: b.file,
+            line: b.line,
+          })
         }
       }
     }
@@ -499,7 +709,16 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
 
     for (const [, b] of layerBuilders) {
       const layerTarget = resolveTargetEntityKey(b.layerQualname, "layer")
-      if (layerTarget === undefined) continue
+      if (layerTarget === undefined) {
+        unresolvedReferences.push({
+          relationId: b.relationId,
+          role: RoleName.make("provider-layer"),
+          targetKey: b.layerQualname,
+          file: b.file,
+          line: b.line,
+        })
+        continue
+      }
       const lfNode: LayerFlowRelation = {
         _tag: "LayerFlow",
         relationId: b.relationId,
@@ -517,18 +736,42 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
         const svcTarget = resolveTargetEntityKey(svcId, "service")
         if (svcTarget !== undefined) {
           addPlaysRole(lfIdx, b.relationId, svcTarget.idx, svcTarget.key, "provided-service")
+        } else {
+          unresolvedReferences.push({
+            relationId: b.relationId,
+            role: RoleName.make("provided-service"),
+            targetKey: svcId,
+            file: b.file,
+            line: b.line,
+          })
         }
       }
       for (const svcId of b.requiresServices) {
         const svcTarget = resolveTargetEntityKey(svcId, "service")
         if (svcTarget !== undefined) {
           addPlaysRole(lfIdx, b.relationId, svcTarget.idx, svcTarget.key, "required-service")
+        } else {
+          unresolvedReferences.push({
+            relationId: b.relationId,
+            role: RoleName.make("required-service"),
+            targetKey: svcId,
+            file: b.file,
+            line: b.line,
+          })
         }
       }
       for (const errTag of b.emittedErrors) {
         const errTarget = resolveTargetEntityKey(errTag, "error")
         if (errTarget !== undefined) {
           addPlaysRole(lfIdx, b.relationId, errTarget.idx, errTarget.key, "fails-with")
+        } else {
+          unresolvedReferences.push({
+            relationId: b.relationId,
+            role: RoleName.make("fails-with"),
+            targetKey: errTag,
+            file: b.file,
+            line: b.line,
+          })
         }
       }
     }
@@ -536,7 +779,14 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
     // 4. Wire TraceabilityTuple relations (explicit + exercisesSpans + governsSymbols + specifiesSymbols)
     for (const tt of input.traceabilityTuples ?? []) {
       const targetEntity = resolveTargetEntityKey(tt.targetSymbolQualname)
-      if (targetEntity === undefined) continue
+      if (targetEntity === undefined) {
+        unresolvedReferences.push({
+          relationId: tt.relationId,
+          role: RoleName.make("realizing-symbol"),
+          targetKey: tt.targetSymbolQualname,
+        })
+        continue
+      }
       const ttNode: TraceabilityTupleRelation = { _tag: "TraceabilityTuple", ...tt }
       const ttIdx = addOrGetNode(ttNode)
       addPlaysRole(ttIdx, tt.relationId, targetEntity.idx, targetEntity.key, "realizing-symbol")
@@ -545,24 +795,48 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
         const adrTarget = resolveTargetEntityKey(`AdrDoc:${tt.adrId}`)
         if (adrTarget !== undefined) {
           addPlaysRole(ttIdx, tt.relationId, adrTarget.idx, adrTarget.key, "governing-adr")
+        } else {
+          unresolvedReferences.push({
+            relationId: tt.relationId,
+            role: RoleName.make("governing-adr"),
+            targetKey: tt.adrId,
+          })
         }
       }
       if (tt.earsSpecId !== undefined) {
         const specTarget = resolveTargetEntityKey(`EarsSpec:${tt.earsSpecId}`)
         if (specTarget !== undefined) {
           addPlaysRole(ttIdx, tt.relationId, specTarget.idx, specTarget.key, "specifying-ears")
+        } else {
+          unresolvedReferences.push({
+            relationId: tt.relationId,
+            role: RoleName.make("specifying-ears"),
+            targetKey: tt.earsSpecId,
+          })
         }
       }
       for (const testQual of tt.verifyingTestQualnames) {
         const testTarget = resolveTargetEntityKey(testQual, "test")
         if (testTarget !== undefined) {
           addPlaysRole(ttIdx, tt.relationId, testTarget.idx, testTarget.key, "verifying-test")
+        } else {
+          unresolvedReferences.push({
+            relationId: tt.relationId,
+            role: RoleName.make("verifying-test"),
+            targetKey: testQual,
+          })
         }
       }
       for (const patPath of tt.enforcingPatternPaths ?? []) {
         const patTarget = resolveTargetEntityKey(patPath, "pattern")
         if (patTarget !== undefined) {
           addPlaysRole(ttIdx, tt.relationId, patTarget.idx, patTarget.key, "enforcing-pattern")
+        } else {
+          unresolvedReferences.push({
+            relationId: tt.relationId,
+            role: RoleName.make("enforcing-pattern"),
+            targetKey: patPath,
+          })
         }
       }
     }
@@ -570,8 +844,8 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
     for (const ex of input.exercisesSpans ?? []) {
       const testTarget = resolveTargetEntityKey(ex.testId, "test")
       const spanTarget = resolveTargetEntityKey(ex.calleeQualname, "span")
+      const relId = RelationId.make(`TraceabilityTuple:exercise:${ex.testId}->${ex.calleeQualname}`)
       if (testTarget !== undefined && spanTarget !== undefined) {
-        const relId = RelationId.make(`TraceabilityTuple:exercise:${ex.testId}->${ex.calleeQualname}`)
         const ttNode: TraceabilityTupleRelation = {
           _tag: "TraceabilityTuple",
           relationId: relId,
@@ -587,14 +861,30 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
           callCount: ex.callCount,
           receiverLayer: ex.receiverLayer,
         })
+      } else {
+        if (testTarget === undefined) {
+          unresolvedReferences.push({
+            relationId: relId,
+            role: RoleName.make("exercising-test"),
+            targetKey: ex.testId,
+          })
+        }
+        if (spanTarget === undefined) {
+          unresolvedReferences.push({
+            relationId: relId,
+            role: RoleName.make("exercised-span"),
+            targetKey: ex.calleeQualname,
+          })
+        }
       }
     }
 
     for (const gov of input.governsSymbols ?? []) {
       const adrTarget = resolveTargetEntityKey(`AdrDoc:${gov.adrId}`)
       const symTarget = resolveTargetEntityKey(gov.targetKey, gov.targetKind)
+      const resolvedKey = symTarget !== undefined ? symTarget.key : gov.targetKey
+      const relId = RelationId.make(`TraceabilityTuple:governs:${gov.adrId}->${resolvedKey}`)
       if (adrTarget !== undefined && symTarget !== undefined) {
-        const relId = RelationId.make(`TraceabilityTuple:governs:${gov.adrId}->${symTarget.key}`)
         const ttNode: TraceabilityTupleRelation = {
           _tag: "TraceabilityTuple",
           relationId: relId,
@@ -605,14 +895,30 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
         const ttIdx = addOrGetNode(ttNode)
         addPlaysRole(ttIdx, relId, adrTarget.idx, adrTarget.key, "governing-adr")
         addPlaysRole(ttIdx, relId, symTarget.idx, symTarget.key, "realizing-symbol")
+      } else {
+        if (adrTarget === undefined) {
+          unresolvedReferences.push({
+            relationId: relId,
+            role: RoleName.make("governing-adr"),
+            targetKey: gov.adrId,
+          })
+        }
+        if (symTarget === undefined) {
+          unresolvedReferences.push({
+            relationId: relId,
+            role: RoleName.make("realizing-symbol"),
+            targetKey: gov.targetKey,
+          })
+        }
       }
     }
 
     for (const spec of input.specifiesSymbols ?? []) {
       const specTarget = resolveTargetEntityKey(`EarsSpec:${spec.specId}`)
       const symTarget = resolveTargetEntityKey(spec.targetKey, spec.targetKind)
+      const resolvedKey = symTarget !== undefined ? symTarget.key : spec.targetKey
+      const relId = RelationId.make(`TraceabilityTuple:specifies:${spec.specId}->${resolvedKey}`)
       if (specTarget !== undefined && symTarget !== undefined) {
-        const relId = RelationId.make(`TraceabilityTuple:specifies:${spec.specId}->${symTarget.key}`)
         const ttNode: TraceabilityTupleRelation = {
           _tag: "TraceabilityTuple",
           relationId: relId,
@@ -624,6 +930,51 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
         const ttIdx = addOrGetNode(ttNode)
         addPlaysRole(ttIdx, relId, specTarget.idx, specTarget.key, "specifying-ears")
         addPlaysRole(ttIdx, relId, symTarget.idx, symTarget.key, "realizing-symbol")
+      } else {
+        if (specTarget === undefined) {
+          unresolvedReferences.push({
+            relationId: relId,
+            role: RoleName.make("specifying-ears"),
+            targetKey: spec.specId,
+          })
+        }
+        if (symTarget === undefined) {
+          unresolvedReferences.push({
+            relationId: relId,
+            role: RoleName.make("realizing-symbol"),
+            targetKey: spec.targetKey,
+          })
+        }
+      }
+    }
+
+    // Connect EarsSpec nodes to matching specifiedSymbols via specified-target role (F-11)
+    if (input.specifiesSymbols === undefined) {
+      for (const [, node] of Graph.nodes(mutable)) {
+        if (node._tag === "EarsSpec") {
+          const specId = node.id
+          const specTarget = resolveTargetEntityKey(`EarsSpec:${specId}`)
+          if (specTarget === undefined) continue
+
+          for (const targetKey of node.specifiedSymbols ?? []) {
+            const matchedTarget = resolveTargetEntityKey(targetKey)
+            if (matchedTarget !== undefined) {
+              const relId = RelationId.make(
+                `TraceabilityTuple:spec-target:${specId}->${matchedTarget.key}`,
+              )
+              const ttNode: TraceabilityTupleRelation = {
+                _tag: "TraceabilityTuple",
+                relationId: relId,
+                earsSpecId: specId,
+                targetSymbolQualname: matchedTarget.key,
+                verifyingTestQualnames: [],
+              }
+              const ttIdx = addOrGetNode(ttNode)
+              addPlaysRole(ttIdx, relId, specTarget.idx, specTarget.key, "specifying-ears")
+              addPlaysRole(ttIdx, relId, matchedTarget.idx, matchedTarget.key, "specified-target")
+            }
+          }
+        }
       }
     }
 
@@ -635,24 +986,56 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
         const handlerTarget = resolveTargetEntityKey(ep.handlerQualname, "span")
         if (handlerTarget !== undefined) {
           addPlaysRole(epIdx, ep.relationId, handlerTarget.idx, handlerTarget.key, "endpoint-handler")
+        } else {
+          unresolvedReferences.push({
+            relationId: ep.relationId,
+            role: RoleName.make("endpoint-handler"),
+            targetKey: ep.handlerQualname,
+            file: ep.file,
+            line: ep.line,
+          })
         }
       }
       for (const reqSchema of ep.requestSchemaQualnames) {
         const scTarget = resolveTargetEntityKey(reqSchema, "schema")
         if (scTarget !== undefined) {
           addPlaysRole(epIdx, ep.relationId, scTarget.idx, scTarget.key, "request-schema")
+        } else {
+          unresolvedReferences.push({
+            relationId: ep.relationId,
+            role: RoleName.make("request-schema"),
+            targetKey: reqSchema,
+            file: ep.file,
+            line: ep.line,
+          })
         }
       }
       for (const resSchema of ep.responseSchemaQualnames) {
         const scTarget = resolveTargetEntityKey(resSchema, "schema")
         if (scTarget !== undefined) {
           addPlaysRole(epIdx, ep.relationId, scTarget.idx, scTarget.key, "response-schema")
+        } else {
+          unresolvedReferences.push({
+            relationId: ep.relationId,
+            role: RoleName.make("response-schema"),
+            targetKey: resSchema,
+            file: ep.file,
+            line: ep.line,
+          })
         }
       }
       for (const errTag of ep.errorTags) {
         const errTarget = resolveTargetEntityKey(errTag, "error")
         if (errTarget !== undefined) {
           addPlaysRole(epIdx, ep.relationId, errTarget.idx, errTarget.key, "endpoint-error")
+        } else {
+          unresolvedReferences.push({
+            relationId: ep.relationId,
+            role: RoleName.make("endpoint-error"),
+            targetKey: errTag,
+            file: ep.file,
+            line: ep.line,
+          })
         }
       }
     }
@@ -664,6 +1047,14 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
         const testTarget = resolveTargetEntityKey(testQual, "test")
         if (testTarget !== undefined) {
           addPlaysRole(migIdx, mig.relationId, testTarget.idx, testTarget.key, "verifying-test")
+        } else {
+          unresolvedReferences.push({
+            relationId: mig.relationId,
+            role: RoleName.make("verifying-test"),
+            targetKey: testQual,
+            file: mig.moduleFile,
+            line: mig.line,
+          })
         }
       }
     }
@@ -696,18 +1087,66 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
           callCount: edge.callCount,
           receiverLayer: edge.receiverLayer,
         })
+      } else {
+        if (relIdx === undefined) {
+          unresolvedReferences.push({
+            relationId: edge.relationId,
+            role: RoleName.make(edge.role),
+            targetKey: edge.relationId,
+          })
+        }
+        if (entityTarget === undefined) {
+          unresolvedReferences.push({
+            relationId: edge.relationId,
+            role: RoleName.make(edge.role),
+            targetKey: edge.entityKey,
+          })
+        }
+      }
+    }
+
+    // 7. Validate all RelationNodes and their PlaysRoleEdges against the PERA Concept Lattice (F-4)
+    for (const [relIdx, node] of Graph.nodes(mutable)) {
+      if (!isRelationNode(node)) continue
+      const roleEdges: Array<{ readonly role: string; readonly entityTag: string }> = []
+      for (const edgeIdx of Graph.outgoingEdges(mutable, relIdx)) {
+        const edgeOpt = Graph.getEdge(mutable, edgeIdx)
+        if (Option.isSome(edgeOpt)) {
+          const targetOpt = Graph.getNode(mutable, edgeOpt.value.target)
+          if (Option.isSome(targetOpt)) {
+            roleEdges.push({
+              role: edgeOpt.value.data.role,
+              entityTag: targetOpt.value._tag,
+            })
+          }
+        }
+      }
+      const violations = validateRelationRolesWithLattice(
+        PERA_CONCEPT_LATTICE_RESULT,
+        node._tag,
+        roleEdges,
+      )
+      for (const v of violations) {
+        branchingViolations.push({
+          rule: "invalid-graph-role",
+          message: v,
+          file: "file" in node ? String(node.file) : "",
+          line: "line" in node ? Number(node.line) : 1,
+          enclosingSymbol: node.relationId,
+        })
       }
     }
   })
 
   return {
+    [HarnessGraphTypeId]: HarnessGraphTypeId,
     graph,
     nodeIndexByKey,
-    ...(input.branchingViolations !== undefined
-      ? { branchingViolations: input.branchingViolations }
-      : {}),
+    ...(branchingViolations.length > 0 ? { branchingViolations } : {}),
+    ...(unresolvedReferences.length > 0 ? { unresolvedReferences } : {}),
   }
 }
+
 
 /**
  * Resolves any `EntityNode` or `RelationNode` by `NodeKey`, `qualname`, `spanName`, `tagId`,
@@ -1091,9 +1530,13 @@ export const findTestsReaching = (
   while (queue.length > 0) {
     const currentEntityIdx = queue.shift()!
     const currentOpt = Graph.getNode(harnessGraph.graph, currentEntityIdx)
-    if (Option.isSome(currentOpt) && currentOpt.value._tag === "VitestCase") {
-      tests.set(currentOpt.value.testId, currentOpt.value)
-    }
+    match(currentOpt)
+      .with({ _tag: "Some", value: { _tag: "VitestCase" } }, ({ value }) => {
+        tests.set(value.testId, value)
+      })
+      .with({ _tag: "Some" }, () => {})
+      .with({ _tag: "None" }, () => {})
+      .exhaustive()
 
     const incoming = Graph.incomingEdges(harnessGraph.graph, currentEntityIdx)
     for (const inEdgeIdx of incoming) {
@@ -1105,10 +1548,19 @@ export const findTestsReaching = (
       const relNode = relOpt.value
 
       // Traverse backwards across EffectSignature (callee -> caller) or TraceabilityTuple (exercised-span/realizing-symbol -> exercising-test/verifying-test)
-      const isTargetRole =
-        (relNode._tag === "EffectSignature" && inEdge.data.role === "callee") ||
-        (relNode._tag === "TraceabilityTuple" &&
-          (inEdge.data.role === "exercised-span" || inEdge.data.role === "realizing-symbol"))
+      const isTargetRole = match(relNode)
+        .with({ _tag: "EffectSignature" }, () => inEdge.data.role === "callee")
+        .with(
+          { _tag: "TraceabilityTuple" },
+          () => inEdge.data.role === "exercised-span" || inEdge.data.role === "realizing-symbol",
+        )
+        .with(
+          { _tag: "LayerFlow" },
+          { _tag: "HttpEndpointTuple" },
+          { _tag: "MigrationTuple" },
+          () => false,
+        )
+        .exhaustive()
 
       if (!isTargetRole) continue
 
@@ -1117,10 +1569,21 @@ export const findTestsReaching = (
         const outEdgeOpt = Graph.getEdge(harnessGraph.graph, outEdgeIdx)
         if (Option.isNone(outEdgeOpt)) continue
         const outEdge = outEdgeOpt.value
-        const isSourceRole =
-          (relNode._tag === "EffectSignature" && outEdge.data.role === "caller") ||
-          (relNode._tag === "TraceabilityTuple" &&
-            (outEdge.data.role === "exercising-test" || outEdge.data.role === "verifying-test"))
+        const isSourceRole = match(relNode)
+          .with({ _tag: "EffectSignature" }, () => outEdge.data.role === "caller")
+          .with(
+            { _tag: "TraceabilityTuple" },
+            () =>
+              outEdge.data.role === "exercising-test" ||
+              outEdge.data.role === "verifying-test",
+          )
+          .with(
+            { _tag: "LayerFlow" },
+            { _tag: "HttpEndpointTuple" },
+            { _tag: "MigrationTuple" },
+            () => false,
+          )
+          .exhaustive()
 
         if (isSourceRole && !visited.has(outEdge.target)) {
           visited.add(outEdge.target)
@@ -1398,9 +1861,21 @@ export const toOmnigraphNdjson = (harnessGraph: HarnessGraph): string => {
     const targetNodeOpt = Graph.getNode(harnessGraph.graph, edge.target)
     if (Option.isNone(sourceNodeOpt) || Option.isNone(targetNodeOpt)) continue
 
+    const edgeName = mapPlaysRoleToOmnigraphEdgeName(
+      sourceNodeOpt.value._tag,
+      targetNodeOpt.value._tag,
+      edge.data.role,
+    )
+    if (!edgeName) {
+      // oxlint-disable-next-line -- synchronous boundary
+      throw new Error(
+        `Unmappable role '${edge.data.role}' from ${sourceNodeOpt.value._tag} to ${targetNodeOpt.value._tag} in toOmnigraphNdjson`,
+      )
+    }
+
     lines.push(
       JSON.stringify({
-        edge: "PlaysRole",
+        edge: edgeName,
         from: getOmnigraphVertexQualname(sourceNodeOpt.value),
         to: getOmnigraphVertexQualname(targetNodeOpt.value),
         properties: {
@@ -1446,25 +1921,71 @@ export const serializeGraphSnapshot = (harnessGraph: HarnessGraph): SerializedGr
   return { nodes, edges }
 }
 
-export const deserializeGraphSnapshot = (snapshot: SerializedGraphSnapshot): HarnessGraph => {
-  const nodeIndexByKey = new Map<string, Graph.NodeIndex>()
+const SerializedGraphSnapshotSchema = Schema.Struct({
+  nodes: Schema.Array(HarnessNode),
+  edges: Schema.Array(
+    Schema.Struct({
+      sourceKey: Schema.String,
+      targetKey: Schema.String,
+      data: HarnessEdge,
+    }),
+  ),
+})
 
-  const graph = Graph.directed<HarnessNode, HarnessEdge>((mutable) => {
-    for (const node of snapshot.nodes) {
-      const idx = Graph.addNode(mutable, node)
-      nodeIndexByKey.set(getNodeKey(node), idx)
-    }
+export const deserializeGraphSnapshotEffect = Effect.fn("GraphEngine.deserializeSnapshot")(
+  function* (snapshot: SerializedGraphSnapshot, snapshotPath = "<in-memory>") {
+    const nodeIndexByKey = new Map<string, Graph.NodeIndex>()
 
-    for (const edge of snapshot.edges) {
-      const s = nodeIndexByKey.get(edge.sourceKey)
-      const t = nodeIndexByKey.get(edge.targetKey)
-      if (s !== undefined && t !== undefined) {
+    let danglingEdge: (typeof snapshot.edges)[number] | undefined
+    const graph = Graph.directed<HarnessNode, HarnessEdge>((mutable) => {
+      for (const node of snapshot.nodes) {
+        const idx = Graph.addNode(mutable, node)
+        nodeIndexByKey.set(getNodeKey(node), idx)
+      }
+
+      for (const edge of snapshot.edges) {
+        const s = nodeIndexByKey.get(edge.sourceKey)
+        const t = nodeIndexByKey.get(edge.targetKey)
+        if (s === undefined || t === undefined) {
+          danglingEdge ??= edge
+          continue
+        }
         Graph.addEdge(mutable, s, t, edge.data)
       }
-    }
-  })
+    })
 
-  return { graph, nodeIndexByKey }
+    if (danglingEdge !== undefined) {
+      return yield* new GraphSnapshotError({
+        path: snapshotPath,
+        reason: "dangling-edge",
+        message: `Snapshot edge references missing node: sourceKey='${danglingEdge.sourceKey}', targetKey='${danglingEdge.targetKey}' at ${snapshotPath}`,
+      })
+    }
+
+    const result: HarnessGraph = {
+      [HarnessGraphTypeId]: HarnessGraphTypeId,
+      graph,
+      nodeIndexByKey,
+    }
+    return result
+  },
+)
+
+export const deserializeGraphSnapshot = (
+  snapshot: SerializedGraphSnapshot,
+  snapshotPath = "<in-memory>",
+): HarnessGraph => {
+  const exit = Effect.runSyncExit(deserializeGraphSnapshotEffect(snapshot, snapshotPath))
+  if (Exit.isFailure(exit)) {
+    const failureOpt = Cause.findErrorOption(exit.cause)
+    if (Option.isSome(failureOpt)) {
+      // oxlint-disable-next-line -- synchronous boundary
+      throw failureOpt.value
+    }
+    // oxlint-disable-next-line -- synchronous boundary
+    throw Cause.squash(exit.cause)
+  }
+  return exit.value
 }
 
 export const saveGraphSnapshot = (
@@ -1477,30 +1998,57 @@ export const saveGraphSnapshot = (
   fs.writeFileSync(snapshotPath, JSON.stringify(serialized, null, 2), "utf8")
 }
 
-const SerializedGraphSnapshotSchema = Schema.Struct({
-  nodes: Schema.Array(HarnessNode),
-  edges: Schema.Array(
-    Schema.Struct({
-      sourceKey: Schema.String,
-      targetKey: Schema.String,
-      data: HarnessEdge,
-    }),
-  ),
-})
+export const loadGraphSnapshotEffect = Effect.fn("GraphEngine.loadSnapshot")(
+  function* (snapshotPath = path.resolve(process.cwd(), ".harness/graph-snapshot.json")) {
+    if (!fs.existsSync(snapshotPath)) {
+      return yield* new GraphSnapshotError({
+        path: snapshotPath,
+        reason: "missing-file",
+        message: `Graph snapshot file does not exist at '${snapshotPath}'`,
+      })
+    }
+
+    const raw = yield* Effect.try({
+      try: () => fs.readFileSync(snapshotPath, "utf8"),
+      catch: (err) =>
+        new GraphSnapshotError({
+          path: snapshotPath,
+          reason: "invalid-json",
+          message: `Failed to read snapshot file at '${snapshotPath}': ${String(err)}`,
+        }),
+    })
+
+    const decoded = yield* Schema.decodeEffect(
+      Schema.fromJsonString(SerializedGraphSnapshotSchema),
+    )(raw).pipe(
+      Effect.mapError(
+        (err) =>
+          new GraphSnapshotError({
+            path: snapshotPath,
+            reason: "invalid-json",
+            message: `Snapshot JSON decoding failed at '${snapshotPath}': ${String(err)}`,
+          }),
+      ),
+    )
+
+    return yield* deserializeGraphSnapshotEffect(decoded, snapshotPath)
+  },
+)
 
 export const loadGraphSnapshot = (
   snapshotPath = path.resolve(process.cwd(), ".harness/graph-snapshot.json"),
 ): HarnessGraph => {
-  if (!fs.existsSync(snapshotPath)) {
-    return buildHarnessGraph({})
+  const exit = Effect.runSyncExit(loadGraphSnapshotEffect(snapshotPath))
+  if (Exit.isFailure(exit)) {
+    const failureOpt = Cause.findErrorOption(exit.cause)
+    if (Option.isSome(failureOpt)) {
+      // oxlint-disable-next-line -- synchronous boundary
+      throw failureOpt.value
+    }
+    // oxlint-disable-next-line -- synchronous boundary
+    throw Cause.squash(exit.cause)
   }
-  const decodedOpt = Schema.decodeOption(
-    Schema.fromJsonString(SerializedGraphSnapshotSchema),
-  )(fs.readFileSync(snapshotPath, "utf8"))
-  return match(decodedOpt)
-    .with({ _tag: "Some" }, ({ value }) => deserializeGraphSnapshot(value))
-    .with({ _tag: "None" }, () => buildHarnessGraph({}))
-    .exhaustive()
+  return exit.value
 }
 
 export interface GraphDiffResult {

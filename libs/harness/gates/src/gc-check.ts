@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { join, relative } from "node:path"
 import { Effect, Option, Schema } from "effect"
+import { match } from "ts-pattern"
 import * as Graph from "effect/Graph"
 import type { GovernanceDocStatus, HarnessGraph } from "@harness/graph"
 import { decideEarsSpecQuality } from "./ears-lint.js"
@@ -122,7 +123,6 @@ const IGNORED_ERRORS = new Set([
   "OmnigraphLoadError",
   "SchemaError",
   "UnknownToolError",
-  "ConceptLatticeCycleError",
 ])
 
 const IGNORED_UNTESTED_FNS = new Set([
@@ -161,104 +161,195 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (input: 
   const incomingRichPropertyTests = new Map<Graph.NodeIndex, number>()
 
   for (const [relIdx, node] of Graph.nodes(g)) {
-    if (node._tag === "EffectSignature") {
-      for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
-        const edgeOpt = Graph.getEdge(g, edgeIdx)
-        if (Option.isNone(edgeOpt)) continue
-        const { target, data } = edgeOpt.value
-        if (data.role === "requires-service") {
-          incomingRequires.set(target, (incomingRequires.get(target) ?? 0) + 1)
-        } else if (data.role === "fails-with") {
-          incomingFailsWith.set(target, (incomingFailsWith.get(target) ?? 0) + 1)
-        } else if (data.role === "callee") {
-          incomingTestOrCall.set(target, (incomingTestOrCall.get(target) ?? 0) + 1)
+    match(node)
+      .with({ _tag: "EffectSignature" }, () => {
+        for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
+          const edgeOpt = Graph.getEdge(g, edgeIdx)
+          match(edgeOpt)
+            .with({ _tag: "Some" }, ({ value: { target, data } }) => {
+              match<string>(data.role)
+                .with("requires-service", () => {
+                  incomingRequires.set(target, (incomingRequires.get(target) ?? 0) + 1)
+                })
+                .with("fails-with", () => {
+                  incomingFailsWith.set(target, (incomingFailsWith.get(target) ?? 0) + 1)
+                })
+                .with("callee", () => {
+                  incomingTestOrCall.set(target, (incomingTestOrCall.get(target) ?? 0) + 1)
+                })
+                .otherwise(() => {})
+            })
+            .with({ _tag: "None" }, () => {})
+            .exhaustive()
         }
-      }
-    } else if (node._tag === "LayerFlow") {
-      let hasProviderLayer = false
-      for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
-        const edgeOpt = Graph.getEdge(g, edgeIdx)
-        if (Option.isSome(edgeOpt) && edgeOpt.value.data.role === "provider-layer") {
-          const tNode = Graph.getNode(g, edgeOpt.value.target)
-          if (Option.isSome(tNode) && tNode.value._tag === "ServiceLayer") {
-            hasProviderLayer = true
-            break
-          }
+      })
+      .with({ _tag: "LayerFlow" }, () => {
+        let hasProviderLayer = false
+        for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
+          const edgeOpt = Graph.getEdge(g, edgeIdx)
+          match(edgeOpt)
+            .with({ _tag: "Some" }, ({ value: { target, data } }) => {
+              match<string>(data.role)
+                .with("provider-layer", () => {
+                  const tNode = Graph.getNode(g, target)
+                  match(tNode)
+                    .with({ _tag: "Some", value: { _tag: "ServiceLayer" } }, () => {
+                      hasProviderLayer = true
+                    })
+                    .with({ _tag: "Some" }, () => {})
+                    .with({ _tag: "None" }, () => {})
+                    .exhaustive()
+                })
+                .otherwise(() => {})
+            })
+            .with({ _tag: "None" }, () => {})
+            .exhaustive()
+          if (hasProviderLayer) break
         }
-      }
-      for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
-        const edgeOpt = Graph.getEdge(g, edgeIdx)
-        if (Option.isNone(edgeOpt)) continue
-        const { target, data } = edgeOpt.value
-        if (data.role === "provided-service" && hasProviderLayer) {
-          incomingProvides.set(target, (incomingProvides.get(target) ?? 0) + 1)
-        } else if (data.role === "required-service") {
-          incomingLayerRequires.set(target, (incomingLayerRequires.get(target) ?? 0) + 1)
-        } else if (data.role === "fails-with") {
-          incomingFailsWith.set(target, (incomingFailsWith.get(target) ?? 0) + 1)
+        for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
+          const edgeOpt = Graph.getEdge(g, edgeIdx)
+          match(edgeOpt)
+            .with({ _tag: "Some" }, ({ value: { target, data } }) => {
+              match<string>(data.role)
+                .with("provided-service", () => {
+                  if (hasProviderLayer) {
+                    incomingProvides.set(target, (incomingProvides.get(target) ?? 0) + 1)
+                  }
+                })
+                .with("required-service", () => {
+                  incomingLayerRequires.set(target, (incomingLayerRequires.get(target) ?? 0) + 1)
+                })
+                .with("fails-with", () => {
+                  incomingFailsWith.set(target, (incomingFailsWith.get(target) ?? 0) + 1)
+                })
+                .otherwise(() => {})
+            })
+            .with({ _tag: "None" }, () => {})
+            .exhaustive()
         }
-      }
-    } else if (node._tag === "TraceabilityTuple") {
-      const testNodes: Array<{
-        readonly isPropertyTest?: boolean | undefined
-        readonly hasNonPrimitiveArbitrary?: boolean | undefined
-      }> = []
-      const spanTargets: Array<Graph.NodeIndex> = []
-      for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
-        const edgeOpt = Graph.getEdge(g, edgeIdx)
-        if (Option.isNone(edgeOpt)) continue
-        const { target, data } = edgeOpt.value
-        if (data.role === "exercising-test" || data.role === "verifying-test") {
-          const tNode = Graph.getNode(g, target)
-          if (Option.isSome(tNode) && tNode.value._tag === "VitestCase") {
-            testNodes.push(tNode.value)
-          }
-        } else if (data.role === "exercised-span" || data.role === "realizing-symbol") {
-          const tNode = Graph.getNode(g, target)
-          if (Option.isSome(tNode) && tNode.value._tag === "EffectFn") {
-            spanTargets.push(target)
-          }
+      })
+      .with({ _tag: "TraceabilityTuple" }, () => {
+        const testNodes: Array<{
+          readonly isPropertyTest?: boolean | undefined
+          readonly hasNonPrimitiveArbitrary?: boolean | undefined
+        }> = []
+        const spanTargets: Array<Graph.NodeIndex> = []
+        for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
+          const edgeOpt = Graph.getEdge(g, edgeIdx)
+          match(edgeOpt)
+            .with({ _tag: "Some" }, ({ value: { target, data } }) => {
+              match<string>(data.role)
+                .with("exercising-test", "verifying-test", () => {
+                  const tNode = Graph.getNode(g, target)
+                  match(tNode)
+                    .with({ _tag: "Some", value: { _tag: "VitestCase" } }, ({ value }) => {
+                      testNodes.push(value)
+                    })
+                    .with({ _tag: "Some" }, () => {})
+                    .with({ _tag: "None" }, () => {})
+                    .exhaustive()
+                })
+                .with("exercised-span", "realizing-symbol", () => {
+                  const tNode = Graph.getNode(g, target)
+                  match(tNode)
+                    .with({ _tag: "Some", value: { _tag: "EffectFn" } }, () => {
+                      spanTargets.push(target)
+                    })
+                    .with({ _tag: "Some" }, () => {})
+                    .with({ _tag: "None" }, () => {})
+                    .exhaustive()
+                })
+                .otherwise(() => {})
+            })
+            .with({ _tag: "None" }, () => {})
+            .exhaustive()
         }
-      }
-      if (testNodes.length > 0) {
-        for (const spanIdx of spanTargets) {
-          incomingTestOrCall.set(
-            spanIdx,
-            (incomingTestOrCall.get(spanIdx) ?? 0) + testNodes.length,
-          )
-          for (const testNode of testNodes) {
-            if (testNode.isPropertyTest === true) {
-              incomingPropertyTests.set(spanIdx, (incomingPropertyTests.get(spanIdx) ?? 0) + 1)
-              if (testNode.hasNonPrimitiveArbitrary !== false) {
-                incomingRichPropertyTests.set(
-                  spanIdx,
-                  (incomingRichPropertyTests.get(spanIdx) ?? 0) + 1,
-                )
+        if (testNodes.length > 0) {
+          for (const spanIdx of spanTargets) {
+            incomingTestOrCall.set(
+              spanIdx,
+              (incomingTestOrCall.get(spanIdx) ?? 0) + testNodes.length,
+            )
+            for (const testNode of testNodes) {
+              if (testNode.isPropertyTest === true) {
+                incomingPropertyTests.set(spanIdx, (incomingPropertyTests.get(spanIdx) ?? 0) + 1)
+                if (testNode.hasNonPrimitiveArbitrary !== false) {
+                  incomingRichPropertyTests.set(
+                    spanIdx,
+                    (incomingRichPropertyTests.get(spanIdx) ?? 0) + 1,
+                  )
+                }
               }
             }
           }
         }
-      }
-    } else if (node._tag === "HttpEndpointTuple") {
-      for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
-        const edgeOpt = Graph.getEdge(g, edgeIdx)
-        if (Option.isNone(edgeOpt)) continue
-        const { target, data } = edgeOpt.value
-        if (data.role === "endpoint-error") {
-          incomingFailsWith.set(target, (incomingFailsWith.get(target) ?? 0) + 1)
-        } else if (data.role === "endpoint-handler") {
-          incomingTestOrCall.set(target, (incomingTestOrCall.get(target) ?? 0) + 1)
+      })
+      .with({ _tag: "HttpEndpointTuple" }, () => {
+        for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
+          const edgeOpt = Graph.getEdge(g, edgeIdx)
+          match(edgeOpt)
+            .with({ _tag: "Some" }, ({ value: { target, data } }) => {
+              match<string>(data.role)
+                .with("endpoint-error", () => {
+                  incomingFailsWith.set(target, (incomingFailsWith.get(target) ?? 0) + 1)
+                })
+                .with("endpoint-handler", () => {
+                  incomingTestOrCall.set(target, (incomingTestOrCall.get(target) ?? 0) + 1)
+                })
+                .otherwise(() => {})
+            })
+            .with({ _tag: "None" }, () => {})
+            .exhaustive()
         }
-      }
-    }
+      })
+      .with({ _tag: "MigrationTuple" }, () => {
+        for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
+          const edgeOpt = Graph.getEdge(g, edgeIdx)
+          match(edgeOpt)
+            .with({ _tag: "Some" }, () => {})
+            .with({ _tag: "None" }, () => {})
+            .exhaustive()
+        }
+      })
+      .with(
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EffectFn" },
+        { _tag: "PatternDoc" },
+        { _tag: "SchemaDef" },
+        { _tag: "ServiceLayer" },
+        { _tag: "ServiceTag" },
+        { _tag: "TaggedError" },
+        { _tag: "VitestCase" },
+        () => {},
+      )
+      .exhaustive()
   }
 
   let hasVitestCases = false
   for (const [, node] of Graph.nodes(g)) {
-    if (node._tag === "VitestCase") {
-      hasVitestCases = true
-      break
-    }
+    match(node)
+      .with({ _tag: "VitestCase" }, () => {
+        hasVitestCases = true
+      })
+      .with(
+        { _tag: "EffectFn" },
+        { _tag: "ServiceTag" },
+        { _tag: "ServiceLayer" },
+        { _tag: "TaggedError" },
+        { _tag: "SchemaDef" },
+        { _tag: "PatternDoc" },
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "HttpEndpointTuple" },
+        { _tag: "MigrationTuple" },
+        () => {},
+      )
+      .exhaustive()
+    if (hasVitestCases) break
   }
 
   // 1. unused-service

@@ -257,12 +257,12 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
 
     const governsEdgeJson = objects.find(
       (o) =>
-        o.edge === "PlaysRole" &&
+        o.edge === "PlaysGoverningAdrRole" &&
         o.from === "TraceabilityTuple:governs:sample:ADR-0001->ServiceTag:PhotoRepo" &&
         o.to === "sample:ADR-0001",
     )
     expect(governsEdgeJson).toMatchObject({
-      edge: "PlaysRole",
+      edge: "PlaysGoverningAdrRole",
       from: "TraceabilityTuple:governs:sample:ADR-0001->ServiceTag:PhotoRepo",
       to: "sample:ADR-0001",
       properties: { role: "governing-adr" },
@@ -270,12 +270,12 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
 
     const specifiesEdgeJson = objects.find(
       (o) =>
-        o.edge === "PlaysRole" &&
+        o.edge === "PlaysSpecifyingEarsRole" &&
         o.from === "TraceabilityTuple:specifies:sample:SPEC-0001->TaggedError:PhotoNotFoundError" &&
         o.to === "sample:SPEC-0001",
     )
     expect(specifiesEdgeJson).toMatchObject({
-      edge: "PlaysRole",
+      edge: "PlaysSpecifyingEarsRole",
       from: "TraceabilityTuple:specifies:sample:SPEC-0001->TaggedError:PhotoNotFoundError",
       to: "sample:SPEC-0001",
       properties: { role: "specifying-ears" },

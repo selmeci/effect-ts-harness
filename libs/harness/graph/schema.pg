@@ -1,6 +1,5 @@
-// Clean-Slate PERA Hypergraph PG-Schema (RFC-0001 / harness:ADR-0009)
+// PERA Bipartite Levi Incidence Hypergraph PG-Schema
 // Bipartite Levi Incidence Graph: V = V_E u V_R, E = E_role (RelationNode -> EntityNode only).
-// Legacy binary edges and catch-all polymorphic vertices are strictly eliminated.
 
 node EffectFn {
   qualname: String @key
@@ -203,6 +202,16 @@ edge PlaysUsesSchemaRole: EffectSignature -> SchemaDef @card(0..) {
   archimateRelation: String @index
 }
 
+edge PlaysInputSchemaRole: EffectSignature -> SchemaDef @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysOutputSchemaRole: EffectSignature -> SchemaDef @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
 edge PlaysProviderLayerRole: LayerFlow -> ServiceLayer @card(0..) {
   role: String @index
   archimateRelation: String @index
@@ -258,6 +267,31 @@ edge PlaysRealizingSchemaRole: TraceabilityTuple -> SchemaDef @card(0..) {
   archimateRelation: String @index
 }
 
+edge PlaysSpecifiedTargetFnRole: TraceabilityTuple -> EffectFn @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysSpecifiedTargetServiceRole: TraceabilityTuple -> ServiceTag @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysSpecifiedTargetLayerRole: TraceabilityTuple -> ServiceLayer @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysSpecifiedTargetErrorRole: TraceabilityTuple -> TaggedError @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysSpecifiedTargetSchemaRole: TraceabilityTuple -> SchemaDef @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
 edge PlaysVerifyingTestRole: TraceabilityTuple -> VitestCase @card(0..) {
   role: String @index
   archimateRelation: String @index
@@ -306,3 +340,4 @@ edge PlaysMigrationVerifyingTestRole: MigrationTuple -> VitestCase @card(0..) {
   role: String @index
   archimateRelation: String @index
 }
+

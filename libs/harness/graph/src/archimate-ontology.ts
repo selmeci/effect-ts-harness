@@ -7,6 +7,7 @@ import {
   resolveNode,
 } from "./graph-engine.js"
 import {
+  getArchimateRelationForRole,
   getNodeKey,
   type HarnessEdge,
   type HarnessNode,
@@ -126,15 +127,54 @@ export interface OntologyImpactResult {
   readonly impactedTests: ReadonlyArray<string>
 }
 
-const isInfraOrCloudIdentifier = (id: string, file: string): boolean =>
-  id.startsWith("Cloudflare.") ||
-  id.includes("D1") ||
-  id.includes("KV") ||
-  id.includes("R2") ||
-  id.includes("DurableObject") ||
-  id.includes("Sql") ||
-  id.includes("Drizzle") ||
-  file.includes("/infra/")
+export const tokenizeCamelOrPath = (raw: string): ReadonlyArray<string> =>
+  raw
+    .split(/[._$/:-]+/)
+    .flatMap((part) =>
+      part
+        .replace(/([a-z])([A-Z])/g, "$1 $2")
+        .replace(/([0-9])([A-Z][a-z])/g, "$1 $2")
+        .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+        .trim()
+        .split(/\s+/)
+        .filter((tok) => tok.length > 0),
+    )
+
+const INFRA_OR_CLOUD_TOKENS = new Set<string>([
+  "KV",
+  "R2",
+  "D1",
+  "Sql",
+  "Drizzle",
+  "Sqlite",
+  "SqlClient",
+  "D1Database",
+  "DurableObjectStorage",
+  "DurableObject",
+  "Cloudflare",
+  "Alchemy",
+])
+
+export const isInfraOrCloudIdentifier = (id: string, file: string): boolean => {
+  if (file.includes("/contract/") || file.includes("/contract.")) {
+    return false
+  }
+  if (id.endsWith("Schema") || id.endsWith("Validator")) {
+    return false
+  }
+  if (
+    id.startsWith("Cloudflare.") ||
+    id.startsWith("@effect/sql") ||
+    id.startsWith("drizzle-orm")
+  ) {
+    return true
+  }
+  if (file.includes("/infra/")) {
+    return true
+  }
+  const tokens = tokenizeCamelOrPath(id)
+  return tokens.some((tok) => INFRA_OR_CLOUD_TOKENS.has(tok))
+}
 
 export const classifyOntologyNode = (node: HarnessNode): OntologyClassifiedNode =>
   match(node)
@@ -285,24 +325,11 @@ export const classifyOntologyNode = (node: HarnessNode): OntologyClassifiedNode 
     }))
     .exhaustive()
 
-export const classifyOntologyEdge = (edge: HarnessEdge): ArchiMateRelationType => {
-  if (edge.archimateRelation !== undefined) {
-    const explicit = match(edge.archimateRelation)
-      .with("Realization", () => "Realization" as const)
-      .with("Serving", () => "Serving" as const)
-      .with("Access", () => "Access" as const)
-      .with("Triggering", () => "Triggering" as const)
-      .with("Flow", () => "Flow" as const)
-      .with("Influence", () => "Influence" as const)
-      .with("Composition", () => "Composition" as const)
-      .with("Association", () => "Association" as const)
-      .with("Verification", () => "Verification" as const)
-      .otherwise(() => undefined)
-    if (explicit !== undefined) {
-      return explicit
-    }
+export const classifyRoleRelation = (role: string): ArchiMateRelationType => {
+  const canonical = getArchimateRelationForRole(role)
+  if (canonical === "Assignment" || canonical === "Verification") {
+    return "Verification"
   }
-  const role: string = edge.role
   return match(role)
     .with("governing-adr", "enforcing-pattern", () => "Influence" as const)
     .with(
@@ -327,7 +354,41 @@ export const classifyOntologyEdge = (edge: HarnessEdge): ArchiMateRelationType =
       "endpoint-error",
       () => "Access" as const,
     )
-    .otherwise(() => "Association" as const)
+    .otherwise(() => {
+      if (canonical !== undefined) {
+        return match(canonical)
+          .with("Realization", () => "Realization" as const)
+          .with("Serving", () => "Serving" as const)
+          .with("Access", () => "Access" as const)
+          .with("Triggering", () => "Triggering" as const)
+          .with("Flow", () => "Flow" as const)
+          .with("Influence", () => "Influence" as const)
+          .with("Composition", () => "Composition" as const)
+          .with("Association", () => "Association" as const)
+          .otherwise(() => "Association" as const)
+      }
+      return "Association" as const
+    })
+}
+
+export const classifyOntologyEdge = (edge: HarnessEdge): ArchiMateRelationType => {
+  if (edge.archimateRelation !== undefined) {
+    const explicit = match(edge.archimateRelation)
+      .with("Realization", () => "Realization" as const)
+      .with("Serving", () => "Serving" as const)
+      .with("Access", () => "Access" as const)
+      .with("Triggering", () => "Triggering" as const)
+      .with("Flow", () => "Flow" as const)
+      .with("Influence", () => "Influence" as const)
+      .with("Composition", () => "Composition" as const)
+      .with("Association", () => "Association" as const)
+      .with("Verification", () => "Verification" as const)
+      .otherwise(() => undefined)
+    if (explicit !== undefined) {
+      return explicit
+    }
+  }
+  return classifyRoleRelation(edge.role)
 }
 
 const renderOntologyMermaidFromParts = (

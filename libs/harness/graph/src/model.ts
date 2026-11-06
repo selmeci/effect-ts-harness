@@ -3,7 +3,7 @@ import type * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
 
 /**
- * Clean-Slate Plan Stub helper for `@harness/graph` deciders during `HARNESS_PLAN_CHECK=1`.
+ * Plan Stub helper for `@harness/graph` deciders during `HARNESS_PLAN_CHECK=1`.
  */
 export const stub = <A, E = never, R = never>(
   ..._usedArgs: ReadonlyArray<unknown>
@@ -84,6 +84,7 @@ export const EffectFnNode = Schema.TaggedStruct("EffectFn", {
   payloadSchemas: Schema.optional(Schema.Array(Schema.String)),
   inputSchema: Schema.optional(Schema.String),
   outputSchema: Schema.optional(Schema.String),
+  caughtErrors: Schema.optional(Schema.Array(Schema.String)),
 })
 export type EffectFnNode = typeof EffectFnNode.Type
 
@@ -289,7 +290,7 @@ export type HarnessNode = typeof HarnessNode.Type
 // 4. Role-Playing Incidence Edges (E_role) — Bipartite Levi Hypergraph
 // ============================================================================
 
-export const StandardRoleName = Schema.Literals([
+export const STANDARD_ROLE_NAMES = [
   "caller",
   "callee",
   "requires-service",
@@ -302,6 +303,7 @@ export const StandardRoleName = Schema.Literals([
   "required-service",
   "governing-adr",
   "specifying-ears",
+  "specified-target",
   "realizing-symbol",
   "verifying-test",
   "enforcing-pattern",
@@ -312,8 +314,42 @@ export const StandardRoleName = Schema.Literals([
   "response-schema",
   "endpoint-error",
   "migration-module",
-])
+] as const
+
+export const StandardRoleName = Schema.Literals(STANDARD_ROLE_NAMES)
 export type StandardRoleName = typeof StandardRoleName.Type
+
+export const ARCHIMATE_BY_ROLE: Readonly<Record<StandardRoleName, string>> = {
+  caller: "Triggering",
+  callee: "Flow",
+  "requires-service": "Serving",
+  "fails-with": "Access",
+  "uses-schema": "Access",
+  "input-schema": "Access",
+  "output-schema": "Access",
+  "provider-layer": "Realization",
+  "provided-service": "Realization",
+  "required-service": "Serving",
+  "governing-adr": "Influence",
+  "specifying-ears": "Realization",
+  "specified-target": "Realization",
+  "realizing-symbol": "Realization",
+  "verifying-test": "Assignment",
+  "enforcing-pattern": "Influence",
+  "exercising-test": "Triggering",
+  "exercised-span": "Triggering",
+  "endpoint-handler": "Triggering",
+  "request-schema": "Access",
+  "response-schema": "Access",
+  "endpoint-error": "Access",
+  "migration-module": "Realization",
+}
+
+export const isStandardRoleName = (role: string): role is StandardRoleName =>
+  Object.prototype.hasOwnProperty.call(ARCHIMATE_BY_ROLE, role)
+
+export const getArchimateRelationForRole = (role: string): string | undefined =>
+  isStandardRoleName(role) ? ARCHIMATE_BY_ROLE[role] : undefined
 
 export const PlaysRoleEdge = Schema.TaggedStruct("PlaysRole", {
   relationId: RelationId,
@@ -335,13 +371,27 @@ export type HarnessEdge = typeof HarnessEdge.Type
 export const ConceptKind = Schema.Literals(["entity", "relation"])
 export type ConceptKind = typeof ConceptKind.Type
 
+export const NonNegativeCardInt = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+)
+
 export const RoleSpec = Schema.Struct({
   role: RoleName,
-  minCard: Schema.Int,
-  maxCard: Schema.NullOr(Schema.Int),
+  minCard: NonNegativeCardInt,
+  maxCard: Schema.NullOr(NonNegativeCardInt),
   allowedPlayers: Schema.Array(ConceptId),
   archimateRelation: Schema.optional(Schema.String),
-})
+}).pipe(
+  Schema.check(
+    Schema.makeFilter(
+      (spec) => spec.maxCard === null || spec.minCard <= spec.maxCard,
+      {
+        title: "ValidRoleCardinality",
+        description: "RoleSpec minCard must be less than or equal to maxCard when maxCard is non-null",
+      },
+    ),
+  ),
+)
 export type RoleSpec = typeof RoleSpec.Type
 
 export const ConceptSpec = Schema.Struct({
@@ -374,10 +424,41 @@ export const ConceptLatticeResult = Schema.Struct({
 })
 export type ConceptLatticeResult = typeof ConceptLatticeResult.Type
 
+export const ConceptLatticeErrorReason = Schema.Literals([
+  "cycle",
+  "dangling-supertype",
+  "duplicate-concept-id",
+  "invalid-role-refinement",
+])
+export type ConceptLatticeErrorReason = typeof ConceptLatticeErrorReason.Type
+
 export class ConceptLatticeCycleError extends Schema.TaggedError<ConceptLatticeCycleError>()(
   "ConceptLatticeCycleError",
   {
     cycle: Schema.Array(ConceptId),
+    message: Schema.String,
+    reason: Schema.optional(ConceptLatticeErrorReason),
+  },
+) {}
+
+export class GraphSnapshotError extends Schema.TaggedError<GraphSnapshotError>()(
+  "GraphSnapshotError",
+  {
+    path: Schema.String,
+    reason: Schema.Literals([
+      "missing-file",
+      "invalid-json",
+      "dangling-edge",
+      "lattice-violation",
+    ]),
+    message: Schema.String,
+  },
+) {}
+
+export class GraphInferenceError extends Schema.TaggedError<GraphInferenceError>()(
+  "GraphInferenceError",
+  {
+    reason: Schema.String,
     message: Schema.String,
   },
 ) {}
@@ -426,7 +507,7 @@ export const DerivationProof = Schema.Struct({
 })
 export type DerivationProof = typeof DerivationProof.Type
 
-export const AntiPatternRuleId = Schema.Literals([
+export const ANTI_PATTERN_RULE_IDS = [
   "domain-requires-infra",
   "domain-requires-cloud-binding",
   "impure-decider",
@@ -437,7 +518,9 @@ export const AntiPatternRuleId = Schema.Literals([
   "aggregate-direct-bus-publish",
   "untested-domain-span",
   "unverified-migration",
-])
+] as const
+
+export const AntiPatternRuleId = Schema.Literals(ANTI_PATTERN_RULE_IDS)
 export type AntiPatternRuleId = typeof AntiPatternRuleId.Type
 
 export const InferredAntiPattern = Schema.Struct({
@@ -451,13 +534,15 @@ export const InferredAntiPattern = Schema.Struct({
 })
 export type InferredAntiPattern = typeof InferredAntiPattern.Type
 
-export const RelationTag = Schema.Literals([
+export const RELATION_TAGS = [
   "EffectSignature",
   "LayerFlow",
   "TraceabilityTuple",
   "HttpEndpointTuple",
   "MigrationTuple",
-])
+] as const
+
+export const RelationTag = Schema.Literals(RELATION_TAGS)
 export type RelationTag = typeof RelationTag.Type
 
 export const SuggestedEdge = Schema.Struct({
@@ -554,7 +639,6 @@ export const GraphInferenceResult = Schema.Struct({
   suggestedEdges: Schema.Array(SuggestedEdge),
   typedHoleBundles: Schema.optional(Schema.Array(TypedHoleContextBundle)),
   iterations: Schema.optional(Schema.Int),
-  durationMs: Schema.optional(Schema.Finite),
   proofs: Schema.Array(DerivationProof),
 })
 export type GraphInferenceResult = typeof GraphInferenceResult.Type
@@ -616,17 +700,7 @@ export const getNodeKey = (node: HarnessNode): NodeKey =>
 export const getEdgeKey = (edge: HarnessEdge): string =>
   `${edge._tag}:${edge.relationId}->${edge.entityKey}:${edge.role}`
 
-export const ViolationRule = Schema.Literals([
-  "domain-requires-infra",
-  "domain-requires-cloud-binding",
-  "impure-decider",
-  "impure-reducer",
-  "layer-cycle",
-  "missing-layer-provider",
-  "unmapped-spec-symbol",
-  "aggregate-direct-bus-publish",
-  "untested-domain-span",
-  "unverified-migration",
+export const AST_VIOLATION_RULE_IDS = [
   "discriminant-branching",
   "non-exhaustive-union-match",
   "node-sqlite-in-infra",
@@ -647,6 +721,13 @@ export const ViolationRule = Schema.Literals([
   "unmanaged-sql-ddl",
   "invalid-migrator-record-key",
   "unsafe-sql-migration",
+  "unresolved-graph-reference",
+  "invalid-graph-role",
+] as const
+
+export const ViolationRule = Schema.Literals([
+  ...ANTI_PATTERN_RULE_IDS,
+  ...AST_VIOLATION_RULE_IDS,
 ])
 export type ViolationRule = typeof ViolationRule.Type
 
@@ -659,9 +740,23 @@ export interface BranchingViolation {
   readonly path?: ReadonlyArray<string> | undefined
 }
 
+export const UnresolvedGraphReference = Schema.Struct({
+  relationId: Schema.String,
+  role: Schema.String,
+  targetKey: Schema.String,
+  file: Schema.optional(Schema.String),
+  line: Schema.optional(Schema.Int),
+})
+export type UnresolvedGraphReference = typeof UnresolvedGraphReference.Type
+
+export const HarnessGraphTypeId: unique symbol = Symbol.for("@harness/graph/HarnessGraph")
+export type HarnessGraphTypeId = typeof HarnessGraphTypeId
+
 export interface HarnessGraph {
+  readonly [HarnessGraphTypeId]?: HarnessGraphTypeId
   readonly graph: Graph.DirectedGraph<HarnessNode, HarnessEdge>
   readonly nodeIndexByKey: ReadonlyMap<string, Graph.NodeIndex>
   readonly branchingViolations?: ReadonlyArray<BranchingViolation> | undefined
+  readonly unresolvedReferences?: ReadonlyArray<UnresolvedGraphReference> | undefined
 }
 

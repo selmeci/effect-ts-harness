@@ -655,6 +655,81 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
             ),
           ).toBe(true)
         }
+
+        // F-17 Soundness Assertion: Every derived effective requirement or error propagation
+        // must correspond to a valid directed call path starting at the caller in hops.
+        const directCalls = new Map<number, Set<number>>()
+        const directReqs = new Map<number, Set<string>>()
+        const directFails = new Map<number, Set<string>>()
+
+        for (const h of hops) {
+          if (!directCalls.has(h.callerIdx)) {
+            directCalls.set(h.callerIdx, new Set())
+          }
+          directCalls.get(h.callerIdx)!.add(h.calleeIdx)
+
+          if (!directReqs.has(h.calleeIdx)) {
+            directReqs.set(h.calleeIdx, new Set())
+          }
+          directReqs.get(h.calleeIdx)!.add(h.serviceSuffix)
+
+          if (!directFails.has(h.calleeIdx)) {
+            directFails.set(h.calleeIdx, new Set())
+          }
+          directFails.get(h.calleeIdx)!.add(h.errorSuffix)
+        }
+
+        const reachableFrom = (startIdx: number): Set<number> => {
+          const visited = new Set<number>()
+          const queue = [startIdx]
+          while (queue.length > 0) {
+            const curr = queue.shift()!
+            const targets = directCalls.get(curr)
+            if (targets !== undefined) {
+              for (const next of targets) {
+                if (!visited.has(next)) {
+                  visited.add(next)
+                  queue.push(next)
+                }
+              }
+            }
+          }
+          return visited
+        }
+
+        for (const req of first.effectiveRequires) {
+          const matchCaller = req.callerKey.match(/#fn(\d+)$/)
+          const matchSvc = req.serviceKey.match(/^ServiceTag:(.+)$/)
+          expect(matchCaller).not.toBeNull()
+          expect(matchSvc).not.toBeNull()
+          const callerIdx = Number(matchCaller![1])
+          const svcTag = matchSvc![1]
+          expect(svcTag).toBeDefined()
+          if (svcTag !== undefined) {
+            const reachable = reachableFrom(callerIdx)
+            const isValidPath =
+              (directReqs.get(callerIdx)?.has(svcTag) ?? false) ||
+              Array.from(reachable).some((c) => directReqs.get(c)?.has(svcTag) ?? false)
+            expect(isValidPath).toBe(true)
+          }
+        }
+
+        for (const fail of first.effectiveFailsWith) {
+          const matchCaller = fail.callerKey.match(/#fn(\d+)$/)
+          const matchErr = fail.errorKey.match(/^TaggedError:(.+)$/)
+          expect(matchCaller).not.toBeNull()
+          expect(matchErr).not.toBeNull()
+          const callerIdx = Number(matchCaller![1])
+          const errTag = matchErr![1]
+          expect(errTag).toBeDefined()
+          if (errTag !== undefined) {
+            const reachable = reachableFrom(callerIdx)
+            const isValidPath =
+              (directFails.get(callerIdx)?.has(errTag) ?? false) ||
+              Array.from(reachable).some((c) => directFails.get(c)?.has(errTag) ?? false)
+            expect(isValidPath).toBe(true)
+          }
+        }
       }),
   )
 
@@ -751,6 +826,342 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
             e.targetEntityKey === NodeKey.make("ServiceTag:CartRepo"),
         )
         expect(comp03?.confidenceMillis).toBe(ConfidenceMillis.make(990))
+      }),
+  )
+
+  it.effect(
+    "F-17: empty graph produces 0 antipatterns, 0 suggested edges, and iterations === 0",
+    () =>
+      Effect.gen(function* () {
+        const emptyGraph = buildHarnessGraph({})
+        const res = yield* decideGraphInference(emptyGraph)
+        expect(res.antiPatterns).toHaveLength(0)
+        expect(res.suggestedEdges).toHaveLength(0)
+        expect(res.effectiveRequires).toHaveLength(0)
+        expect(res.effectiveFailsWith).toHaveLength(0)
+        expect(res.effectiveLayerDeps).toHaveLength(0)
+        expect(res.effectiveTestReach).toHaveLength(0)
+        expect(res.iterations).toBe(0)
+      }),
+  )
+
+  it.effect(
+    "detects impure-reducer (Order.evolve requiring a service) as INF-05 and domain-requires-cloud-binding (Order.checkout requiring CloudflareKV) as INF-04",
+    () =>
+      Effect.gen(function* () {
+        const graph = buildHarnessGraph({
+          fns: [
+            {
+              qualname: "libs/sample/domain/src/order.ts#evolve",
+              spanName: "Order.evolve",
+              file: "libs/sample/domain/src/order.ts",
+              line: 10,
+              packageTag: "domain",
+              successType: "OrderState",
+              isStub: false,
+            },
+            {
+              qualname: "libs/sample/domain/src/order.ts#checkout",
+              spanName: "Order.checkout",
+              file: "libs/sample/domain/src/order.ts",
+              line: 30,
+              packageTag: "domain",
+              successType: "void",
+              isStub: false,
+            },
+          ],
+          services: [
+            {
+              tagId: "OrderRepo",
+              name: "OrderRepo",
+              packageTag: "service",
+              file: "libs/sample/service/src/order-repo.ts",
+            },
+            {
+              tagId: "CloudflareKV",
+              name: "CloudflareKV",
+              packageTag: "service",
+              file: "libs/sample/service/src/kv.ts",
+            },
+          ],
+          requiresService: [
+            {
+              callerQualname: "libs/sample/domain/src/order.ts#evolve",
+              tagId: "OrderRepo",
+            },
+            {
+              callerQualname: "libs/sample/domain/src/order.ts#checkout",
+              tagId: "CloudflareKV",
+            },
+          ],
+        })
+
+        const res = yield* decideGraphInference(graph)
+
+        const impureReducer = res.antiPatterns.find(
+          (ap) =>
+            ap.ruleId === "impure-reducer" &&
+            ap.nodeKey === NodeKey.make("EffectFn:libs/sample/domain/src/order.ts#evolve"),
+        )
+        expect(impureReducer).toBeDefined()
+        expect(impureReducer?.datalogRuleId).toBe(DatalogRuleId.make("INF-05"))
+        expect(impureReducer?.targetKey).toBe(NodeKey.make("ServiceTag:OrderRepo"))
+        expect(impureReducer?.message).toContain("reducer (.evolve/.fold)")
+
+        const domainCloudBinding = res.antiPatterns.find(
+          (ap) =>
+            ap.ruleId === "domain-requires-cloud-binding" &&
+            ap.nodeKey === NodeKey.make("EffectFn:libs/sample/domain/src/order.ts#checkout"),
+        )
+        expect(domainCloudBinding).toBeDefined()
+        expect(domainCloudBinding?.datalogRuleId).toBe(DatalogRuleId.make("INF-04"))
+        expect(domainCloudBinding?.targetKey).toBe(NodeKey.make("ServiceTag:CloudflareKV"))
+        expect(domainCloudBinding?.message).toContain("cloud binding")
+      }),
+  )
+
+  it.effect(
+    "F-34: caughtErrors on EffectFnNode suppresses transitive EffectiveFailsWith (INF-02) and COMP-01 suggestions",
+    () =>
+      Effect.gen(function* () {
+        const graph = buildHarnessGraph({
+          fns: [
+            {
+              qualname: "libs/sample/domain/src/order.ts#caller",
+              spanName: "Order.caller",
+              file: "libs/sample/domain/src/order.ts",
+              line: 1,
+              packageTag: "domain",
+              successType: "void",
+              caughtErrors: ["HandledError"],
+              isStub: false,
+            },
+            {
+              qualname: "libs/sample/domain/src/order.ts#callee",
+              spanName: "Order.callee",
+              file: "libs/sample/domain/src/order.ts",
+              line: 20,
+              packageTag: "domain",
+              successType: "void",
+              isStub: false,
+            },
+          ],
+          errors: [
+            {
+              errorTag: "HandledError",
+              file: "libs/sample/contract/src/errors.ts",
+            },
+            {
+              errorTag: "UnhandledError",
+              file: "libs/sample/contract/src/errors.ts",
+            },
+          ],
+          tracedCalls: [
+            {
+              callerQualname: "libs/sample/domain/src/order.ts#caller",
+              calleeQualname: "libs/sample/domain/src/order.ts#callee",
+              callCount: 1,
+              receiverLayer: null,
+            },
+          ],
+          failsWith: [
+            {
+              callerQualname: "libs/sample/domain/src/order.ts#callee",
+              errorTag: "HandledError",
+            },
+            {
+              callerQualname: "libs/sample/domain/src/order.ts#callee",
+              errorTag: "UnhandledError",
+            },
+          ],
+        })
+
+        const res = yield* decideGraphInference(graph)
+
+        const callerKey = NodeKey.make("EffectFn:libs/sample/domain/src/order.ts#caller")
+        const handledKey = NodeKey.make("TaggedError:HandledError")
+        const unhandledKey = NodeKey.make("TaggedError:UnhandledError")
+
+        const hasHandled = res.effectiveFailsWith.some(
+          (f) => f.callerKey === callerKey && f.errorKey === handledKey,
+        )
+        const hasUnhandled = res.effectiveFailsWith.some(
+          (f) => f.callerKey === callerKey && f.errorKey === unhandledKey,
+        )
+        expect(hasHandled).toBe(false)
+        expect(hasUnhandled).toBe(true)
+
+        const comp01ForHandled = res.suggestedEdges.some(
+          (e) =>
+            e.ruleId === DatalogRuleId.make("COMP-01") &&
+            e.sourceEntityKey === callerKey &&
+            e.targetEntityKey === handledKey,
+        )
+        expect(comp01ForHandled).toBe(false)
+
+        const comp01ForUnhandled = res.suggestedEdges.some(
+          (e) =>
+            e.ruleId === DatalogRuleId.make("COMP-01") &&
+            e.sourceEntityKey === callerKey &&
+            e.targetEntityKey === unhandledKey,
+        )
+        expect(comp01ForUnhandled).toBe(true)
+      }),
+  )
+
+  it("F-20: Z-set negative weight retraction removes tuples with net multiplicity <= 0 in minHeightReducer and flixConfidenceReducer", () => {
+    const itemA = {
+      proofHeight: ProofHeight.make(2),
+      ruleId: DatalogRuleId.make("INF-01"),
+      viaIntermediateKey: NodeKey.make("EffectFn:a"),
+    }
+    const itemB = {
+      proofHeight: ProofHeight.make(3),
+      ruleId: DatalogRuleId.make("INF-01"),
+      viaIntermediateKey: NodeKey.make("EffectFn:b"),
+    }
+
+    // Net multiplicity = 0 -> retracted
+    expect(minHeightReducer([[itemA, 1], [itemA, -1]])).toEqual([])
+
+    // Net multiplicity < 0 -> retracted
+    expect(minHeightReducer([[itemA, 1], [itemA, -2]])).toEqual([])
+
+    // Net multiplicity = 0 on one item while other has net > 0 -> only positive item retained
+    const mixedHeight = minHeightReducer([
+      [itemA, 1],
+      [itemA, -1],
+      [itemB, 1],
+    ])
+    expect(mixedHeight).toHaveLength(1)
+    expect(mixedHeight[0]?.[0].viaIntermediateKey).toBe(NodeKey.make("EffectFn:b"))
+
+    const flixItem1 = {
+      confidenceMillis: ConfidenceMillis.make(800),
+      parentProofIds: [ProofId.make("proof:1")],
+    }
+    const flixItem2 = {
+      confidenceMillis: ConfidenceMillis.make(900),
+      parentProofIds: [ProofId.make("proof:2")],
+    }
+
+    // Flix net <= 0 retraction
+    expect(flixConfidenceReducer([[flixItem1, 1], [flixItem1, -1]])).toEqual([])
+    expect(flixConfidenceReducer([[flixItem1, 1], [flixItem1, -3]])).toEqual([])
+
+    // Flix mixed retraction
+    const mixedFlix = flixConfidenceReducer([
+      [flixItem1, 1],
+      [flixItem1, -1],
+      [flixItem2, 1],
+    ])
+    expect(mixedFlix).toHaveLength(1)
+    expect(mixedFlix[0]?.[0].confidenceMillis).toBe(ConfidenceMillis.make(900))
+    expect(mixedFlix[0]?.[0].parentProofIds).toEqual([ProofId.make("proof:2")])
+  })
+
+  it.effect(
+    "F-28: every emitted proof.ruleId and proof.stratum matches its canonical entry in STANDARD_DATALOG_RULES",
+    () =>
+      Effect.gen(function* () {
+        const ruleMap = new Map<string, { stratum: number; headPredicate: string }>()
+        for (const rule of STANDARD_DATALOG_RULES) {
+          ruleMap.set(rule.id, {
+            stratum: rule.stratum,
+            headPredicate: rule.headPredicate,
+          })
+        }
+
+        const graph = buildHarnessGraph({
+          fns: [
+            {
+              qualname: "libs/sample/domain/src/order.ts#checkout",
+              spanName: "Order.checkout",
+              file: "libs/sample/domain/src/order.ts",
+              line: 1,
+              packageTag: "domain",
+              successType: "void",
+              isStub: false,
+            },
+            {
+              qualname: "libs/sample/domain/src/order.ts#decide",
+              spanName: "Order.decide",
+              file: "libs/sample/domain/src/order.ts",
+              line: 20,
+              packageTag: "domain",
+              successType: "void",
+              isStub: true,
+            },
+          ],
+          services: [
+            {
+              tagId: "OrderRepo",
+              name: "OrderRepo",
+              packageTag: "service",
+              file: "libs/sample/service/src/order-repo.ts",
+            },
+            {
+              tagId: "CloudflareKV",
+              name: "CloudflareKV",
+              packageTag: "infra",
+              file: "libs/sample/infra/src/kv.ts",
+            },
+          ],
+          errors: [
+            {
+              errorTag: "CheckoutFailed",
+              file: "libs/sample/contract/src/errors.ts",
+            },
+          ],
+          tests: [
+            {
+              testId: "libs/sample/domain/test/order.test.ts#checks out",
+              testFile: "libs/sample/domain/test/order.test.ts",
+              testName: "checks out",
+            },
+          ],
+          tracedCalls: [
+            {
+              callerQualname: "libs/sample/domain/src/order.ts#checkout",
+              calleeQualname: "libs/sample/domain/src/order.ts#decide",
+              callCount: 1,
+              receiverLayer: null,
+            },
+          ],
+          requiresService: [
+            {
+              callerQualname: "libs/sample/domain/src/order.ts#decide",
+              tagId: "OrderRepo",
+            },
+            {
+              callerQualname: "libs/sample/domain/src/order.ts#checkout",
+              tagId: "CloudflareKV",
+            },
+          ],
+          failsWith: [
+            {
+              callerQualname: "libs/sample/domain/src/order.ts#decide",
+              errorTag: "CheckoutFailed",
+            },
+          ],
+          exercisesSpans: [
+            {
+              testId: "libs/sample/domain/test/order.test.ts#checks out",
+              calleeQualname: "libs/sample/domain/src/order.ts#checkout",
+              callCount: 1,
+              receiverLayer: null,
+            },
+          ],
+        })
+
+        const res = yield* decideGraphInference(graph)
+        expect(res.proofs.length).toBeGreaterThan(0)
+
+        for (const proof of res.proofs) {
+          const canonical = ruleMap.get(proof.ruleId)
+          expect(canonical).toBeDefined()
+          expect(proof.stratum).toBe(canonical!.stratum)
+        }
       }),
   )
 })

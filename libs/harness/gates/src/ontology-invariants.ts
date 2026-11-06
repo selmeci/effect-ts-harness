@@ -1,4 +1,5 @@
 import { Effect, Option } from "effect"
+import { match } from "ts-pattern"
 import * as Graph from "effect/Graph"
 import { getNodeKey, type HarnessGraph, queryOntologyWhy, resolveNode } from "@harness/graph"
 import { decideEarsSpecQuality, type EarsRequirementRow } from "./ears-lint.js"
@@ -92,55 +93,141 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(f
   const incomingPropertyTests = new Map<Graph.NodeIndex, number>()
 
   for (const [relIdx, node] of Graph.nodes(g)) {
-    if (node._tag === "EffectSignature") {
-      for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
-        const edgeOpt = Graph.getEdge(g, edgeIdx)
-        if (Option.isSome(edgeOpt) && edgeOpt.value.data.role === "callee") {
-          const target = edgeOpt.value.target
-          incomingTestOrCall.set(target, (incomingTestOrCall.get(target) ?? 0) + 1)
+    match(node)
+      .with({ _tag: "EffectSignature" }, () => {
+        for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
+          const edgeOpt = Graph.getEdge(g, edgeIdx)
+          match(edgeOpt)
+            .with({ _tag: "Some" }, ({ value: { target, data } }) => {
+              match<string>(data.role)
+                .with("callee", () => {
+                  incomingTestOrCall.set(target, (incomingTestOrCall.get(target) ?? 0) + 1)
+                })
+                .otherwise(() => {})
+            })
+            .with({ _tag: "None" }, () => {})
+            .exhaustive()
         }
-      }
-    } else if (node._tag === "TraceabilityTuple") {
-      const testNodes: Array<{ readonly isPropertyTest?: boolean | undefined }> = []
-      const spanTargets: Array<Graph.NodeIndex> = []
-      for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
-        const edgeOpt = Graph.getEdge(g, edgeIdx)
-        if (Option.isNone(edgeOpt)) continue
-        const { target, data } = edgeOpt.value
-        if (data.role === "exercising-test" || data.role === "verifying-test") {
-          const tNode = Graph.getNode(g, target)
-          if (Option.isSome(tNode) && tNode.value._tag === "VitestCase") {
-            testNodes.push(tNode.value)
-          }
-        } else if (data.role === "exercised-span" || data.role === "realizing-symbol") {
-          const tNode = Graph.getNode(g, target)
-          if (Option.isSome(tNode) && tNode.value._tag === "EffectFn") {
-            spanTargets.push(target)
-          }
+      })
+      .with({ _tag: "TraceabilityTuple" }, () => {
+        const testNodes: Array<{ readonly isPropertyTest?: boolean | undefined }> = []
+        const spanTargets: Array<Graph.NodeIndex> = []
+        for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
+          const edgeOpt = Graph.getEdge(g, edgeIdx)
+          match(edgeOpt)
+            .with({ _tag: "Some" }, ({ value: { target, data } }) => {
+              match<string>(data.role)
+                .with("exercising-test", "verifying-test", () => {
+                  const tNode = Graph.getNode(g, target)
+                  match(tNode)
+                    .with({ _tag: "Some", value: { _tag: "VitestCase" } }, ({ value }) => {
+                      testNodes.push(value)
+                    })
+                    .with({ _tag: "Some" }, () => {})
+                    .with({ _tag: "None" }, () => {})
+                    .exhaustive()
+                })
+                .with("exercised-span", "realizing-symbol", () => {
+                  const tNode = Graph.getNode(g, target)
+                  match(tNode)
+                    .with({ _tag: "Some", value: { _tag: "EffectFn" } }, () => {
+                      spanTargets.push(target)
+                    })
+                    .with({ _tag: "Some" }, () => {})
+                    .with({ _tag: "None" }, () => {})
+                    .exhaustive()
+                })
+                .otherwise(() => {})
+            })
+            .with({ _tag: "None" }, () => {})
+            .exhaustive()
         }
-      }
-      if (testNodes.length > 0) {
-        for (const spanIdx of spanTargets) {
-          incomingTestOrCall.set(
-            spanIdx,
-            (incomingTestOrCall.get(spanIdx) ?? 0) + testNodes.length,
-          )
-          for (const testNode of testNodes) {
-            if (testNode.isPropertyTest === true) {
-              incomingPropertyTests.set(spanIdx, (incomingPropertyTests.get(spanIdx) ?? 0) + 1)
+        if (testNodes.length > 0) {
+          for (const spanIdx of spanTargets) {
+            incomingTestOrCall.set(
+              spanIdx,
+              (incomingTestOrCall.get(spanIdx) ?? 0) + testNodes.length,
+            )
+            for (const testNode of testNodes) {
+              if (testNode.isPropertyTest === true) {
+                incomingPropertyTests.set(spanIdx, (incomingPropertyTests.get(spanIdx) ?? 0) + 1)
+              }
             }
           }
         }
-      }
-    }
+      })
+      .with({ _tag: "HttpEndpointTuple" }, () => {
+        for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
+          const edgeOpt = Graph.getEdge(g, edgeIdx)
+          match(edgeOpt)
+            .with({ _tag: "Some" }, ({ value: { target, data } }) => {
+              match<string>(data.role)
+                .with("endpoint-handler", () => {
+                  incomingTestOrCall.set(target, (incomingTestOrCall.get(target) ?? 0) + 1)
+                })
+                .otherwise(() => {})
+            })
+            .with({ _tag: "None" }, () => {})
+            .exhaustive()
+        }
+      })
+      .with({ _tag: "LayerFlow" }, () => {
+        for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
+          const edgeOpt = Graph.getEdge(g, edgeIdx)
+          match(edgeOpt)
+            .with({ _tag: "Some" }, () => {})
+            .with({ _tag: "None" }, () => {})
+            .exhaustive()
+        }
+      })
+      .with({ _tag: "MigrationTuple" }, () => {
+        for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
+          const edgeOpt = Graph.getEdge(g, edgeIdx)
+          match(edgeOpt)
+            .with({ _tag: "Some" }, () => {})
+            .with({ _tag: "None" }, () => {})
+            .exhaustive()
+        }
+      })
+      .with(
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EffectFn" },
+        { _tag: "PatternDoc" },
+        { _tag: "SchemaDef" },
+        { _tag: "ServiceLayer" },
+        { _tag: "ServiceTag" },
+        { _tag: "TaggedError" },
+        { _tag: "VitestCase" },
+        () => {},
+      )
+      .exhaustive()
   }
 
   let hasVitestCases = false
   for (const [, node] of Graph.nodes(g)) {
-    if (node._tag === "VitestCase") {
-      hasVitestCases = true
-      break
-    }
+    match(node)
+      .with({ _tag: "VitestCase" }, () => {
+        hasVitestCases = true
+      })
+      .with(
+        { _tag: "EffectFn" },
+        { _tag: "ServiceTag" },
+        { _tag: "ServiceLayer" },
+        { _tag: "TaggedError" },
+        { _tag: "SchemaDef" },
+        { _tag: "PatternDoc" },
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "HttpEndpointTuple" },
+        { _tag: "MigrationTuple" },
+        () => {},
+      )
+      .exhaustive()
+    if (hasVitestCases) break
   }
 
   // 1. Parse all EARS specs
@@ -422,6 +509,62 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(f
         }
       }
     }
+  }
+
+  // Rule 4b: ontology-broken-realization-chain for HttpEndpointTuple
+  for (const [relIdx, node] of Graph.nodes(g)) {
+    match(node)
+      .with({ _tag: "HttpEndpointTuple" }, (epNode) => {
+        let hasHandler = false
+        let hasSchema = false
+        for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
+          const edgeOpt = Graph.getEdge(g, edgeIdx)
+          match(edgeOpt)
+            .with({ _tag: "Some" }, ({ value: { data } }) => {
+              match<string>(data.role)
+                .with("endpoint-handler", () => {
+                  hasHandler = true
+                })
+                .with("request-schema", "response-schema", "uses-schema", () => {
+                  hasSchema = true
+                })
+                .otherwise(() => {})
+            })
+            .with({ _tag: "None" }, () => {})
+            .exhaustive()
+        }
+        if (!hasHandler) {
+          findings.push({
+            kind: "ontology-broken-realization-chain",
+            nodeId: epNode.relationId,
+            message: `HttpEndpointTuple '${epNode.relationId}' (${epNode.method} ${epNode.path}) is missing an endpoint-handler ('handler-fn') role edge.`,
+          })
+        }
+        if (!hasSchema) {
+          findings.push({
+            kind: "ontology-broken-realization-chain",
+            nodeId: epNode.relationId,
+            message: `HttpEndpointTuple '${epNode.relationId}' (${epNode.method} ${epNode.path}) is missing an endpoint-schema ('request-schema' or 'response-schema') role edge.`,
+          })
+        }
+      })
+      .with(
+        { _tag: "EffectFn" },
+        { _tag: "ServiceTag" },
+        { _tag: "ServiceLayer" },
+        { _tag: "TaggedError" },
+        { _tag: "SchemaDef" },
+        { _tag: "VitestCase" },
+        { _tag: "PatternDoc" },
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "MigrationTuple" },
+        () => {},
+      )
+      .exhaustive()
   }
 
   // Rule 5: ontology-unverified-requirement

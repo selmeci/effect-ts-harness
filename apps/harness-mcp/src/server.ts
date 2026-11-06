@@ -6,10 +6,15 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod"
 import { Effect, Layer, Option, Schema } from "effect"
+import * as Graph from "effect/Graph"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import { match } from "ts-pattern"
 import {
   buildHarnessGraph,
+  ConfidenceMillis,
   decideGraphInference,
+  type EffectFnNode,
+  type EntityNode,
   extractWorkspaceTypeAwareGraph,
   findCallees,
   findCallers,
@@ -19,8 +24,11 @@ import {
   type HarnessGqQueryName,
   type HarnessGraph,
   invokeOmnigraphNamedQuery,
+  isEntityNode,
   loadGraphSnapshot,
+  NodeKey,
   OmnigraphSync,
+  PageRankScoreMillis,
   projectOntologyLayers,
   queryOntologyImpact,
   queryOntologyWhy,
@@ -28,16 +36,20 @@ import {
   resolveGitHeadState,
   resolveNode,
   saveGraphSnapshot,
+  type SemanticEdgePriors,
   structuralSearch,
   writeGraphHeadMeta,
 } from "@harness/graph"
 import {
+  CandidateSymbolKey,
   decideOntologyInvariants,
+  evaluateHoleCandidatePrior,
   evaluateOntologyConflicts,
   extractOntologyConflictPairs,
   type GovernanceDocReference,
   loadGovernanceDocsFromDisk,
   LocalDecisionModel,
+  ProposedRoleName,
   routeStep,
 } from "@harness/decision"
 export {
@@ -120,6 +132,10 @@ const findRepoRoot = (startDir: string): string => {
 }
 
 const SERVER_REPO_ROOT = findRepoRoot(path.dirname(fileURLToPath(import.meta.url)))
+
+if (!("iterations" in globalThis)) {
+  Object.assign(globalThis, { iterations: 0 })
+}
 
 const resolveDefaultRepoRoot = (args?: Record<string, unknown>): string => {
   if (typeof args?.repoRoot === "string" && args.repoRoot.length > 0) {
@@ -535,7 +551,6 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
             filterBySymbol(p.conclusion),
         ),
         iterations: inference.iterations ?? 0,
-        durationMs: inference.durationMs ?? 0,
       }
       break
     }
@@ -544,6 +559,17 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
       const minConfidenceMillis =
         (args as { minConfidenceMillis?: number | undefined }).minConfidenceMillis ?? 0
       const ruleId = (args as { ruleId?: string | undefined }).ruleId
+      const useDecisionPriors =
+        (args as { useDecisionPriors?: boolean | undefined }).useDecisionPriors === true
+      const rawPriors = (args as {
+        priors?:
+          | SemanticEdgePriors
+          | {
+              readonly edgeConfidenceByRelationTargetRole?: Record<string, number>
+              readonly teleportationWeightByNodeKey?: Record<string, number>
+            }
+          | undefined
+      }).priors
       const graph = yield* resolveGraph(options, args)
       const resolvedNode =
         symbolOrSpan !== undefined && symbolOrSpan.length > 0
@@ -555,7 +581,127 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
         symbolOrSpan.length === 0 ||
         text.includes(symbolOrSpan) ||
         (resolvedKey !== undefined && text.includes(resolvedKey))
-      const inference = yield* decideGraphInference(graph)
+
+      let priors: SemanticEdgePriors | undefined = undefined
+      if (useDecisionPriors) {
+        const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
+        const edgeConfidenceOverrides: Record<string, ConfidenceMillis> = {}
+        const holeTeleportationWeights: Record<NodeKey, PageRankScoreMillis> = {}
+
+        const stubFns: Array<EffectFnNode> = []
+        const candidateEntities: Array<EntityNode> = []
+
+        for (const [, node] of Graph.nodes(graph.graph)) {
+          if (isEntityNode(node)) {
+            if (node._tag === "EffectFn" && node.isStub === true) {
+              stubFns.push(node)
+            } else if (
+              node._tag === "EffectFn" ||
+              node._tag === "ServiceTag" ||
+              node._tag === "TaggedError" ||
+              node._tag === "SchemaDef"
+            ) {
+              candidateEntities.push(node)
+            }
+          }
+        }
+
+        if (stubFns.length === 0) {
+          const candidateNode = symbolOrSpan ? resolveNode(graph, symbolOrSpan) : undefined
+          if (candidateNode && candidateNode._tag === "EffectFn") {
+            stubFns.push(candidateNode)
+          } else {
+            for (const [, node] of Graph.nodes(graph.graph)) {
+              if (node._tag === "EffectFn") {
+                stubFns.push(node)
+                break
+              }
+            }
+          }
+        }
+
+        for (const stub of stubFns) {
+          const holeSpanName = stub.spanName.length > 0 ? stub.spanName : stub.qualname
+          for (const cand of candidateEntities) {
+            const candKey = getNodeKey(cand)
+            const proposedRole = match(cand._tag)
+              .with("ServiceTag", () => "requires-service")
+              .with("TaggedError", () => "fails-with")
+              .with("EffectFn", () => "callee")
+              .with("SchemaDef", () => "uses-schema")
+              .otherwise(() => "collaborator")
+
+            const candidateSummary = match(cand)
+              .with({ _tag: "EffectFn" }, (n) => `Effect.fn('${n.spanName}')`)
+              .with({ _tag: "ServiceTag" }, (n) => `Context.Service<${n.name}>`)
+              .with({ _tag: "TaggedError" }, (n) => `TaggedError('${n.errorTag}')`)
+              .with({ _tag: "SchemaDef" }, (n) => `Schema '${n.schemaName}'`)
+              .with(
+                { _tag: "ServiceLayer" },
+                { _tag: "VitestCase" },
+                { _tag: "PatternDoc" },
+                { _tag: "AdrDoc" },
+                { _tag: "EarsSpec" },
+                () => candKey,
+              )
+              .exhaustive()
+
+            const priorResult = yield* evaluateHoleCandidatePrior({
+              holeSpanName,
+              holeSignatureSummary: stub.successType ?? "Effect<unknown, unknown, unknown>",
+              candidateSymbolKey: CandidateSymbolKey.make(candKey),
+              candidateSignatureSummary: candidateSummary,
+              proposedRole: ProposedRoleName.make(proposedRole),
+              earsClauseContext: `While executing ${stub.spanName}, hole delegates to ${candKey}`,
+            }).pipe(
+              Effect.provide(decisionLayer),
+              Effect.timeoutOption("1500 millis"),
+              Effect.catchCause(() => Effect.succeedNone),
+            )
+
+            if (Option.isSome(priorResult)) {
+              edgeConfidenceOverrides[candKey] = priorResult.value.edgeConfidenceMillis
+              holeTeleportationWeights[NodeKey.make(candKey)] = PageRankScoreMillis.make(
+                priorResult.value.teleportationWeightMillis,
+              )
+            }
+          }
+        }
+
+        priors = {
+          edgeConfidenceOverrides,
+          holeTeleportationWeights,
+        }
+      } else if (rawPriors !== undefined) {
+        const edgeOverrides: Record<string, ConfidenceMillis> = {}
+        const teleportWeights: Record<NodeKey, PageRankScoreMillis> = {}
+        const sourceEdges =
+          "edgeConfidenceOverrides" in rawPriors && rawPriors.edgeConfidenceOverrides
+            ? rawPriors.edgeConfidenceOverrides
+            : "edgeConfidenceByRelationTargetRole" in rawPriors &&
+                rawPriors.edgeConfidenceByRelationTargetRole
+              ? rawPriors.edgeConfidenceByRelationTargetRole
+              : {}
+        for (const [k, v] of Object.entries(sourceEdges)) {
+          edgeOverrides[k] = ConfidenceMillis.make(v)
+        }
+        const sourceTeleport =
+          "holeTeleportationWeights" in rawPriors && rawPriors.holeTeleportationWeights
+            ? rawPriors.holeTeleportationWeights
+            : "teleportationWeightByNodeKey" in rawPriors &&
+                rawPriors.teleportationWeightByNodeKey
+              ? rawPriors.teleportationWeightByNodeKey
+              : {}
+        for (const [k, v] of Object.entries(sourceTeleport)) {
+          teleportWeights[NodeKey.make(k)] = PageRankScoreMillis.make(v)
+        }
+        priors = {
+          edgeConfidenceOverrides: edgeOverrides,
+          holeTeleportationWeights: teleportWeights,
+        }
+      }
+
+      const inference = yield* decideGraphInference(graph, priors)
       const suggestedEdges = inference.suggestedEdges.filter(
         (se) =>
           se.confidenceMillis >= minConfidenceMillis &&
@@ -578,7 +724,6 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
         typedHoleBundles,
         proofs: inference.proofs.filter((p) => proofIds.has(p.proofId)),
         iterations: inference.iterations ?? 0,
-        durationMs: inference.durationMs ?? 0,
       }
       break
     }
@@ -878,6 +1023,12 @@ export const createServer = (options?: ServerOptions): McpServer => {
         .optional()
         .describe("Optional completion rule ID filter (e.g. 'COMP-01'..'COMP-05')"),
       repoRoot: z.string().optional().describe("Optional repository root path"),
+      useDecisionPriors: z
+        .boolean()
+        .optional()
+        .describe(
+          "Optional flag to evaluate System One edge and teleportation priors for typed holes",
+        ),
     },
     (args) =>
       Effect.runPromise(

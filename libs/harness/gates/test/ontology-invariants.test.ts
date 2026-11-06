@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Schema } from "effect"
-import { buildHarnessGraph } from "@harness/graph"
+import { buildHarnessGraph, RelationId } from "@harness/graph"
 import {
   checkOntologyInvariants,
   decideOntologyInvariants,
@@ -755,6 +755,231 @@ In all test harnesses, unexpected execution failures must result in dying on une
         )
         expect(conflictFinding).toBeDefined()
         expect(conflictFinding?.message).toContain("conflicts with ADR sample:ADR-0001")
+      }),
+  )
+
+  it.effect(
+    "detects untested domain span vs covered via TraceabilityTuple with isPropertyTest: true over PERA hypergraph",
+    () =>
+      Effect.gen(function* () {
+        const fnQualname = "libs/sample/domain/src/index.ts#Order.decide"
+        const testId = "libs/sample/domain/test/order.test.ts::suite"
+
+        const doc: GovernanceDocReference = {
+          id: "sample:SPEC-0002",
+          docPath: "libs/sample/docs/specs/0002.md",
+          status: "accepted",
+          referencedSpans: ["Order.decide"],
+          referencedServices: [],
+          referencedErrors: [],
+          markdown: `---
+id: sample:SPEC-0002
+title: Order Spec
+status: accepted
+date: 2026-10-25
+enforced_by:
+  - libs/sample/domain/src/index.ts
+spans:
+  - Order.decide
+---
+
+# sample:SPEC-0002: Order Spec
+
+## Requirements
+
+### Area 1: Decision
+
+| ID | Pattern | Requirement | Effect Symbol | Verification |
+| --- | --- | --- | --- | --- |
+| REQ-1.1 | State-driven | While order is draft, the engine shall decide checkout. | Order.decide | PropertyTest |
+`,
+        }
+
+        // Case 1: Untested domain span in PERA hypergraph (no reaching TraceabilityTuple)
+        const graphUntested = buildHarnessGraph({
+          fns: [
+            {
+              qualname: fnQualname,
+              spanName: "Order.decide",
+              packageTag: "domain",
+              file: "libs/sample/domain/src/index.ts",
+              line: 20,
+              successType: "boolean",
+              isStub: false,
+            },
+          ],
+          tests: [
+            {
+              testId,
+              testFile: "libs/sample/domain/test/order.test.ts",
+              testName: "order property tests",
+              lastTreeHash: "workspace",
+              isPropertyTest: true,
+            },
+          ],
+        })
+
+        const reportUntested = yield* decideOntologyInvariants({
+          graph: graphUntested,
+          governanceDocs: [doc],
+        })
+
+        expect(reportUntested.clean).toBe(false)
+        const unverified = reportUntested.findings.find(
+          (f) =>
+            f.kind === "ontology-unverified-requirement" &&
+            f.nodeId === "sample:SPEC-0002:REQ-1.1",
+        )
+        expect(unverified).toBeDefined()
+        expect(unverified?.message).toContain(
+          "claims PropertyTest verification for 'Order.decide' but 0 property tests exercise it",
+        )
+
+        // Case 2: Covered via TraceabilityTuple relation with exercising-test and exercised-span
+        const graphCovered = buildHarnessGraph({
+          fns: [
+            {
+              qualname: fnQualname,
+              spanName: "Order.decide",
+              packageTag: "domain",
+              file: "libs/sample/domain/src/index.ts",
+              line: 20,
+              successType: "boolean",
+              isStub: false,
+            },
+          ],
+          tests: [
+            {
+              testId,
+              testFile: "libs/sample/domain/test/order.test.ts",
+              testName: "order property tests",
+              lastTreeHash: "workspace",
+              isPropertyTest: true,
+            },
+          ],
+          exercisesSpans: [
+            {
+              testId,
+              calleeQualname: fnQualname,
+              callCount: 1,
+              receiverLayer: null,
+            },
+          ],
+          specifiesSymbols: [
+            {
+              specId: "sample:SPEC-0002",
+              targetKey: fnQualname,
+              targetKind: "EffectFn",
+            },
+          ],
+        })
+
+        const reportCovered = yield* decideOntologyInvariants({
+          graph: graphCovered,
+          governanceDocs: [doc],
+        })
+
+        const unverifiedFindings = reportCovered.findings.filter(
+          (f) => f.kind === "ontology-unverified-requirement",
+        )
+        expect(unverifiedFindings).toHaveLength(0)
+        expect(reportCovered.clean).toBe(true)
+      }),
+  )
+
+  it.effect(
+    "detects HttpEndpointTuple missing an endpoint-schema or handler-fn role edge over PERA hypergraph",
+    () =>
+      Effect.gen(function* () {
+        const handlerQualname = "libs/sample/infra/src/index.ts#handleGetUser"
+        const schemaName = "UserResponseSchema"
+
+        // Case 1: HttpEndpointTuple missing both handler-fn and endpoint-schema
+        const graphIncomplete = buildHarnessGraph({
+          httpEndpointTuples: [
+            {
+              relationId: RelationId.make("HttpEndpointTuple:users:getUser"),
+              endpointGroup: "UsersApi",
+              endpointName: "getUser",
+              method: "GET",
+              path: "/api/users/:id",
+              requestSchemaQualnames: [],
+              responseSchemaQualnames: [],
+              errorTags: [],
+              file: "libs/sample/contract/src/index.ts",
+              line: 15,
+            },
+          ],
+        })
+
+        const reportIncomplete = yield* decideOntologyInvariants({
+          graph: graphIncomplete,
+        })
+
+        expect(reportIncomplete.clean).toBe(false)
+        const missingHandler = reportIncomplete.findings.find(
+          (f) =>
+            f.kind === "ontology-broken-realization-chain" &&
+            f.nodeId === "HttpEndpointTuple:users:getUser" &&
+            f.message.includes("missing an endpoint-handler ('handler-fn') role edge"),
+        )
+        expect(missingHandler).toBeDefined()
+
+        const missingSchema = reportIncomplete.findings.find(
+          (f) =>
+            f.kind === "ontology-broken-realization-chain" &&
+            f.nodeId === "HttpEndpointTuple:users:getUser" &&
+            f.message.includes("missing an endpoint-schema"),
+        )
+        expect(missingSchema).toBeDefined()
+
+        // Case 2: Clean pass when HttpEndpointTuple has both handler-fn and endpoint-schema edges
+        const graphComplete = buildHarnessGraph({
+          fns: [
+            {
+              qualname: handlerQualname,
+              spanName: "UserHttp.getUser",
+              packageTag: "domain",
+              file: "libs/sample/infra/src/index.ts",
+              line: 25,
+              successType: "User",
+              isStub: false,
+            },
+          ],
+          schemas: [
+            {
+              schemaName,
+              file: "libs/sample/contract/src/index.ts",
+              line: 5,
+            },
+          ],
+          httpEndpointTuples: [
+            {
+              relationId: RelationId.make("HttpEndpointTuple:users:getUser"),
+              endpointGroup: "UsersApi",
+              endpointName: "getUser",
+              method: "GET",
+              path: "/api/users/:id",
+              handlerQualname,
+              requestSchemaQualnames: [],
+              responseSchemaQualnames: [schemaName],
+              errorTags: [],
+              file: "libs/sample/contract/src/index.ts",
+              line: 15,
+            },
+          ],
+        })
+
+        const reportComplete = yield* decideOntologyInvariants({
+          graph: graphComplete,
+        })
+
+        const endpointBrokenFindings = reportComplete.findings.filter(
+          (f) =>
+            f.kind === "ontology-broken-realization-chain" &&
+            f.nodeId === "HttpEndpointTuple:users:getUser",
+        )
+        expect(endpointBrokenFindings).toHaveLength(0)
       }),
   )
 })
