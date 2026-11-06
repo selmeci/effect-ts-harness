@@ -316,8 +316,8 @@ describe("verify-stamp and plan/impl graph diff", () => {
     expect(planImplDiff.ok).toBe(false)
     expect(planImplDiff.reasons).toEqual(
       expect.arrayContaining([
-        "Missing planned GovernsSymbol edge: sample:ADR-0001 -> PhotoRepo",
-        "Missing planned SpecifiesSymbol edge: sample:SPEC-0001 -> libs/sample/domain/src/index.ts#greet",
+        "Missing planned PlaysRole(governing-adr) edge: TraceabilityTuple:governs:sample:ADR-0001->ServiceTag:PhotoRepo -> AdrDoc:sample:ADR-0001",
+        "Missing planned PlaysRole(specifying-ears) edge: TraceabilityTuple:specifies:sample:SPEC-0001->EffectFn:libs/sample/domain/src/index.ts#greet -> EarsSpec:sample:SPEC-0001",
       ]),
     )
   })

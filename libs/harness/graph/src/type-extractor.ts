@@ -17,25 +17,27 @@ import {
   type UnionTypeNode,
 } from "ts-morph"
 import { buildHarnessGraph } from "./graph-engine.js"
-import type {
-  AdrDocNode,
-  BranchingViolation,
-  EarsSpecNode,
-  EffectFnNode,
-  ExercisesSpanEdge,
-  GovernanceDocStatus,
-  GovernsSymbolEdge,
-  HarnessEdge,
-  HarnessGraph,
-  HarnessNode,
-  LayerKind,
-  PackageTag,
-  PatternDocNode,
-  ServiceLayerNode,
-  ServiceTagNode,
-  SpecifiesSymbolEdge,
-  TaggedErrorNode,
-  VitestCaseNode,
+import {
+  type AdrDocNode,
+  type BranchingViolation,
+  type EarsSpecNode,
+  type EffectFnNode,
+  getNodeKey,
+  type GovernanceDocStatus,
+  type HarnessEdge,
+  type HarnessGraph,
+  type HarnessNode,
+  type LayerKind,
+  NodeKey,
+  type PackageTag,
+  type PatternDocNode,
+  RelationId,
+  RoleName,
+  type ServiceLayerNode,
+  type ServiceTagNode,
+  type TaggedErrorNode,
+  type TraceabilityTupleRelation,
+  type VitestCaseNode,
 } from "./model.js"
 import { loadPatternDocs } from "./pattern-index.js"
 
@@ -3776,8 +3778,9 @@ export const extractWorkspaceTypeAwareGraph = (repoRoot: string): Effect.Effect<
           isPropertyTest: hasPropTest,
           ...(hasNonPrimitiveArbitrary !== undefined ? { hasNonPrimitiveArbitrary } : {}),
         }
+        const testKey = getNodeKey(testNode)
         const testIdx = Graph.addNode(mutable, testNode)
-        updatedNodeIndexByKey.set(testNode.testId, testIdx)
+        updatedNodeIndexByKey.set(testKey, testIdx)
 
         const usesTestTracer = strippedContent.includes("runWithTestTracer")
 
@@ -3827,55 +3830,94 @@ export const extractWorkspaceTypeAwareGraph = (repoRoot: string): Effect.Effect<
             deciderAliasMatches
 
           if (matches) {
-            const calleeIdx = updatedNodeIndexByKey.get(fnNode.qualname)
+            const fnKey = getNodeKey(fnNode)
+            const calleeIdx = updatedNodeIndexByKey.get(fnKey)
             if (calleeIdx !== undefined) {
-              const edge: ExercisesSpanEdge = {
-                _tag: "ExercisesSpan",
-                testId: testNode.testId,
-                calleeQualname: fnNode.qualname,
-                callCount: 1,
-                receiverLayer: null,
+              const relId = RelationId.make(
+                `TraceabilityTuple:exercise:${testNode.testId}->${fnNode.qualname}`,
+              )
+              if (!updatedNodeIndexByKey.has(relId)) {
+                const relNode: TraceabilityTupleRelation = {
+                  _tag: "TraceabilityTuple",
+                  relationId: relId,
+                  targetSymbolQualname: fnNode.qualname,
+                  verifyingTestQualnames: [testNode.testId],
+                }
+                const relIdx = Graph.addNode(mutable, relNode)
+                updatedNodeIndexByKey.set(relId, relIdx)
+                Graph.addEdge(mutable, relIdx, testIdx, {
+                  _tag: "PlaysRole",
+                  relationId: relId,
+                  entityKey: NodeKey.make(testKey),
+                  role: RoleName.make("exercising-test"),
+                  archimateRelation: "Triggering",
+                })
+                Graph.addEdge(mutable, relIdx, calleeIdx, {
+                  _tag: "PlaysRole",
+                  relationId: relId,
+                  entityKey: NodeKey.make(fnKey),
+                  role: RoleName.make("exercised-span"),
+                  archimateRelation: "Realization",
+                })
               }
-              Graph.addEdge(mutable, testIdx, calleeIdx, edge)
             }
           }
         }
       }
 
       for (const docNode of governanceDocs) {
+        const docKey = getNodeKey(docNode)
         const docIdx = Graph.addNode(mutable, docNode)
-        updatedNodeIndexByKey.set(docNode.id, docIdx)
+        updatedNodeIndexByKey.set(docKey, docIdx)
+
+        const addGovernanceTraceability = (targetKey: string, targetIdx: Graph.NodeIndex) => {
+          const kindPrefix = docNode._tag === "AdrDoc" ? "governs" : "specifies"
+          const docRole = docNode._tag === "AdrDoc" ? "governing-adr" : "specifying-ears"
+          const docArchimate =
+            docNode._tag === "AdrDoc" ? ("Influence" as const) : ("Realization" as const)
+          const relId = RelationId.make(`TraceabilityTuple:${kindPrefix}:${docNode.id}->${targetKey}`)
+          if (!updatedNodeIndexByKey.has(relId)) {
+            const relNode: TraceabilityTupleRelation = {
+              _tag: "TraceabilityTuple",
+              relationId: relId,
+              ...(docNode._tag === "AdrDoc" ? { adrId: docNode.id } : { earsSpecId: docNode.id }),
+              targetSymbolQualname: targetKey,
+              verifyingTestQualnames: [],
+            }
+            const relIdx = Graph.addNode(mutable, relNode)
+            updatedNodeIndexByKey.set(relId, relIdx)
+            Graph.addEdge(mutable, relIdx, docIdx, {
+              _tag: "PlaysRole",
+              relationId: relId,
+              entityKey: NodeKey.make(docKey),
+              role: RoleName.make(docRole),
+              archimateRelation: docArchimate,
+            })
+            Graph.addEdge(mutable, relIdx, targetIdx, {
+              _tag: "PlaysRole",
+              relationId: relId,
+              entityKey: NodeKey.make(targetKey),
+              role: RoleName.make("realizing-symbol"),
+              archimateRelation: "Realization",
+            })
+          }
+        }
 
         // 1. Spans -> EffectFn
         const addedFnTargets = new Set<string>()
-        for (const span of docNode.referencedSpans) {
+        for (const span of docNode.referencedSpans ?? []) {
           for (const fnNode of effectFns) {
             if (
               fnNode.spanName === span ||
               fnNode.qualname === span ||
               fnNode.qualname.endsWith(`#${span}`)
             ) {
-              if (addedFnTargets.has(fnNode.qualname)) continue
-              addedFnTargets.add(fnNode.qualname)
-              const targetIdx = updatedNodeIndexByKey.get(fnNode.qualname)
+              const targetKey = getNodeKey(fnNode)
+              if (addedFnTargets.has(targetKey)) continue
+              addedFnTargets.add(targetKey)
+              const targetIdx = updatedNodeIndexByKey.get(targetKey)
               if (targetIdx !== undefined) {
-                if (docNode._tag === "AdrDoc") {
-                  const edge: GovernsSymbolEdge = {
-                    _tag: "GovernsSymbol",
-                    adrId: docNode.id,
-                    targetKey: fnNode.qualname,
-                    targetKind: "EffectFn",
-                  }
-                  Graph.addEdge(mutable, docIdx, targetIdx, edge)
-                } else {
-                  const edge: SpecifiesSymbolEdge = {
-                    _tag: "SpecifiesSymbol",
-                    specId: docNode.id,
-                    targetKey: fnNode.qualname,
-                    targetKind: "EffectFn",
-                  }
-                  Graph.addEdge(mutable, docIdx, targetIdx, edge)
-                }
+                addGovernanceTraceability(targetKey, targetIdx)
               }
             }
           }
@@ -3883,30 +3925,15 @@ export const extractWorkspaceTypeAwareGraph = (repoRoot: string): Effect.Effect<
 
         // 2. Services -> ServiceTag
         const addedSvcTargets = new Set<string>()
-        for (const svc of docNode.referencedServices) {
+        for (const svc of docNode.referencedServices ?? []) {
           for (const sNode of serviceTags) {
             if (sNode.tagId === svc || sNode.name === svc || sNode.tagId.endsWith(`#${svc}`)) {
-              if (addedSvcTargets.has(sNode.tagId)) continue
-              addedSvcTargets.add(sNode.tagId)
-              const targetIdx = updatedNodeIndexByKey.get(sNode.tagId)
+              const targetKey = getNodeKey(sNode)
+              if (addedSvcTargets.has(targetKey)) continue
+              addedSvcTargets.add(targetKey)
+              const targetIdx = updatedNodeIndexByKey.get(targetKey)
               if (targetIdx !== undefined) {
-                if (docNode._tag === "AdrDoc") {
-                  const edge: GovernsSymbolEdge = {
-                    _tag: "GovernsSymbol",
-                    adrId: docNode.id,
-                    targetKey: sNode.tagId,
-                    targetKind: "ServiceTag",
-                  }
-                  Graph.addEdge(mutable, docIdx, targetIdx, edge)
-                } else {
-                  const edge: SpecifiesSymbolEdge = {
-                    _tag: "SpecifiesSymbol",
-                    specId: docNode.id,
-                    targetKey: sNode.tagId,
-                    targetKind: "ServiceTag",
-                  }
-                  Graph.addEdge(mutable, docIdx, targetIdx, edge)
-                }
+                addGovernanceTraceability(targetKey, targetIdx)
               }
             }
           }
@@ -3914,30 +3941,15 @@ export const extractWorkspaceTypeAwareGraph = (repoRoot: string): Effect.Effect<
 
         // 3. Errors -> TaggedError
         const addedErrTargets = new Set<string>()
-        for (const err of docNode.referencedErrors) {
+        for (const err of docNode.referencedErrors ?? []) {
           for (const eNode of taggedErrors) {
             if (eNode.errorTag === err) {
-              if (addedErrTargets.has(eNode.errorTag)) continue
-              addedErrTargets.add(eNode.errorTag)
-              const targetIdx = updatedNodeIndexByKey.get(eNode.errorTag)
+              const targetKey = getNodeKey(eNode)
+              if (addedErrTargets.has(targetKey)) continue
+              addedErrTargets.add(targetKey)
+              const targetIdx = updatedNodeIndexByKey.get(targetKey)
               if (targetIdx !== undefined) {
-                if (docNode._tag === "AdrDoc") {
-                  const edge: GovernsSymbolEdge = {
-                    _tag: "GovernsSymbol",
-                    adrId: docNode.id,
-                    targetKey: eNode.errorTag,
-                    targetKind: "TaggedError",
-                  }
-                  Graph.addEdge(mutable, docIdx, targetIdx, edge)
-                } else {
-                  const edge: SpecifiesSymbolEdge = {
-                    _tag: "SpecifiesSymbol",
-                    specId: docNode.id,
-                    targetKey: eNode.errorTag,
-                    targetKind: "TaggedError",
-                  }
-                  Graph.addEdge(mutable, docIdx, targetIdx, edge)
-                }
+                addGovernanceTraceability(targetKey, targetIdx)
               }
             }
           }

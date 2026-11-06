@@ -1,3 +1,6 @@
+// Named GQ Queries for @harness/graph over the Clean-Slate PERA Levi Hypergraph (G_Levi)
+// Bipartite Levi Incidence Graph: V = V_E u V_R, E = E_role (RelationNode -> EntityNode only).
+
 query resolve_effect_fn($spanOrQualname: String) {
   match {
     $fn: EffectFn
@@ -19,10 +22,12 @@ query resolve_effect_fn($spanOrQualname: String) {
 
 query find_service_providers($tagId: String) {
   match {
+    $lf: LayerFlow
     $layer: ServiceLayer
     $tag: ServiceTag
-    $layer providesService $tag
-    $tag.tagId = $tagId or $tag.name = $tagId
+    $lf playsProviderLayerRole $layer
+    $lf playsProvidedServiceRole $tag
+    $tag.tagId = $tagId or $tag.name = $tagId or $tag.qualname = $tagId
   }
   return {
     $layer.qualname as layerQualname,
@@ -35,9 +40,11 @@ query find_service_providers($tagId: String) {
 
 query find_callers($target: String) {
   match {
+    $sig: EffectSignature
     $caller: EffectFn
     $callee: EffectFn
-    $caller $rel:tracedCall $callee
+    $sig playsCallerRole $caller
+    $sig $rel:playsCalleeRole $callee
     $callee.qualname = $target or $callee.spanName = $target
   }
   return {
@@ -49,9 +56,11 @@ query find_callers($target: String) {
 
 query find_callees($caller: String) {
   match {
+    $sig: EffectSignature
     $src: EffectFn
     $callee: EffectFn
-    $src $rel:tracedCall $callee
+    $sig playsCallerRole $src
+    $sig $rel:playsCalleeRole $callee
     $src.qualname = $caller or $src.spanName = $caller
   }
   return {
@@ -63,9 +72,11 @@ query find_callees($caller: String) {
 
 query find_tests_reaching($callee: String) {
   match {
+    $tt: TraceabilityTuple
     $test: VitestCase
     $fn: EffectFn
-    $test exercisesSpan $fn
+    $tt playsExercisingTestRole $test
+    $tt playsExercisedSpanRole $fn
     $fn.qualname = $callee or $fn.spanName = $callee
   }
   return {
@@ -87,9 +98,12 @@ query ontology_layer_nodes($layer: String) {
 
 query ontology_governed_by($symbol: String) {
   match {
+    $tt: TraceabilityTuple
     $doc: AdrDoc
-    $target: Any { symbolKey: $symbol }
-    $doc $rel:governsSymbol $target
+    $target: EffectFn
+    $tt $rel:playsGoverningAdrRole $doc
+    $tt playsRealizingFnRole $target
+    $target.qualname = $symbol or $target.spanName = $symbol
   }
   return {
     $doc,
@@ -103,8 +117,10 @@ query untested_domain_fns() {
     $fn: EffectFn
     ($fn.packageTag = "domain" or $fn.packageTag = "contract") and $fn.isStub = false
     not {
+      $tt: TraceabilityTuple
       $test: VitestCase
-      $test exercisesSpan $fn
+      $tt playsExercisingTestRole $test
+      $tt playsExercisedSpanRole $fn
     }
   }
   return {

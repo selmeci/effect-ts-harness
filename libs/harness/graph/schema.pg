@@ -1,134 +1,308 @@
+// Clean-Slate PERA Hypergraph PG-Schema (RFC-0001 / harness:ADR-0009)
+// Bipartite Levi Incidence Graph: V = V_E u V_R, E = E_role (RelationNode -> EntityNode only).
+// Legacy binary edges and catch-all polymorphic vertices are strictly eliminated.
+
 node EffectFn {
   qualname: String @key
   spanName: String @index
-  packageTag: enum(contract, domain, service, infra, app) @index
+  packageTag: enum(contract, domain, service, infra, app, unknown) @index
   file: String @index
   line: I32
-  successType: String
-  isStub: Bool @index
-  archimateLayer: enum(Motivation, Business, Application, Technology, Implementation) @index
-  archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure) @index
-  archimateElementType: String @index
+  successType: String?
+  isStub: Bool? @index
+  payloadSchemas: [String]?
+  inputSchema: String?
+  outputSchema: String?
+  archimateLayer: enum(Motivation, Business, Application, Technology, Implementation)? @index
+  archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure)? @index
+  archimateElementType: String? @index
 }
 
 node ServiceTag {
   tagId: String @key
+  qualname: String @index
   name: String @index
-  packageTag: enum(contract, domain, service, infra, app) @index
+  identifier: String? @index
+  packageTag: enum(contract, domain, service, infra, app, unknown)? @index
   file: String @index
-  archimateLayer: enum(Motivation, Business, Application, Technology, Implementation) @index
-  archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure) @index
-  archimateElementType: String @index
+  line: I32?
+  archimateLayer: enum(Motivation, Business, Application, Technology, Implementation)? @index
+  archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure)? @index
+  archimateElementType: String? @index
 }
 
 node ServiceLayer {
   qualname: String @key
-  layerKind: enum(live, test, emulated, infra) @index
-  packageTag: enum(contract, domain, service, infra, app) @index
+  layerKind: enum(live, test, emulated, infra)? @index
+  packageTag: enum(contract, domain, service, infra, app, unknown)? @index
   file: String @index
-  archimateLayer: enum(Motivation, Business, Application, Technology, Implementation) @index
-  archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure) @index
-  archimateElementType: String @index
+  line: I32?
+  archimateLayer: enum(Motivation, Business, Application, Technology, Implementation)? @index
+  archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure)? @index
+  archimateElementType: String? @index
 }
 
 node TaggedError {
   errorTag: String @key
+  qualname: String @index
+  tag: String? @index
   file: String @index
-  archimateLayer: enum(Motivation, Business, Application, Technology, Implementation) @index
-  archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure) @index
-  archimateElementType: String @index
+  line: I32?
+  archimateLayer: enum(Motivation, Business, Application, Technology, Implementation)? @index
+  archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure)? @index
+  archimateElementType: String? @index
+}
+
+node SchemaDef {
+  schemaName: String @key
+  qualname: String @index
+  name: String @index
+  packageTag: enum(contract, domain, service, infra, app, unknown)? @index
+  file: String @index
+  line: I32?
+  isBranded: Bool? @index
+  archimateLayer: enum(Motivation, Business, Application, Technology, Implementation)? @index
+  archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure)? @index
+  archimateElementType: String? @index
 }
 
 node VitestCase {
   testId: String @key
+  qualname: String @index
   testFile: String @index
   testName: String @index
-  lastTreeHash: String
-  isPropertyTest: Bool @index
-  archimateLayer: enum(Motivation, Business, Application, Technology, Implementation) @index
-  archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure) @index
-  archimateElementType: String @index
+  name: String? @index
+  file: String? @index
+  line: I32?
+  lastTreeHash: String?
+  isPropertyTest: Bool? @index
+  hasNonPrimitiveArbitrary: Bool? @index
+  archimateLayer: enum(Motivation, Business, Application, Technology, Implementation)? @index
+  archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure)? @index
+  archimateElementType: String? @index
 }
 
 node PatternDoc {
   slug: String @key
+  qualname: String @index
   path: String @index
   summary: String @index
-  archimateLayer: enum(Motivation, Business, Application, Technology, Implementation) @index
-  archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure) @index
-  archimateElementType: String @index
+  title: String? @index
+  coveredSpans: [String]?
+  coveredTags: [String]?
+  archimateLayer: enum(Motivation, Business, Application, Technology, Implementation)? @index
+  archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure)? @index
+  archimateElementType: String? @index
 }
 
 node AdrDoc {
   id: String @key
+  qualname: String @index
   title: String @index
   status: enum(accepted, proposed, superseded, deprecated) @index
+  date: String?
   path: String @index
   enforcedByFiles: [String]
-  referencedSpans: [String]
-  referencedServices: [String]
-  referencedErrors: [String]
-  archimateLayer: enum(Motivation, Business, Application, Technology, Implementation) @index
-  archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure) @index
-  archimateElementType: String @index
+  referencedSpans: [String]?
+  referencedServices: [String]?
+  referencedErrors: [String]?
+  archimateLayer: enum(Motivation, Business, Application, Technology, Implementation)? @index
+  archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure)? @index
+  archimateElementType: String? @index
 }
 
 node EarsSpec {
   id: String @key
+  qualname: String @index
   title: String @index
   status: enum(accepted, proposed, superseded, deprecated) @index
+  date: String?
   path: String @index
   enforcedByFiles: [String]
-  referencedSpans: [String]
-  referencedServices: [String]
-  referencedErrors: [String]
-  archimateLayer: enum(Motivation, Business, Application, Technology, Implementation) @index
-  archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure) @index
-  archimateElementType: String @index
+  informedByAdrs: [String]?
+  referencedSpans: [String]?
+  referencedServices: [String]?
+  referencedErrors: [String]?
+  archimateLayer: enum(Motivation, Business, Application, Technology, Implementation)? @index
+  archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure)? @index
+  archimateElementType: String? @index
 }
 
-node Any {
-  symbolKey: String @key
-  targetKind: String @index
-  archimateLayer: enum(Motivation, Business, Application, Technology, Implementation) @index
-  archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure) @index
-  archimateElementType: String @index
+node EffectSignature {
+  relationId: String @key
+  qualname: String @index
+  callerQualname: String @index
+  file: String @index
+  line: I32
 }
 
-edge RequiresService: EffectFn -> ServiceTag @card(0..) {
+node LayerFlow {
+  relationId: String @key
+  qualname: String @index
+  layerQualname: String @index
+  file: String @index
+  line: I32
+}
+
+node TraceabilityTuple {
+  relationId: String @key
+  qualname: String @index
+  adrId: String? @index
+  earsSpecId: String? @index
+  requirementId: String? @index
+  earsPattern: String? @index
+  targetSymbolQualname: String @index
+}
+
+node HttpEndpointTuple {
+  relationId: String @key
+  qualname: String @index
+  endpointGroup: String @index
+  endpointName: String @index
+  method: String @index
+  path: String @index
+  handlerQualname: String? @index
+  file: String @index
+  line: I32
+}
+
+node MigrationTuple {
+  relationId: String @key
+  qualname: String @index
+  migrationId: String @index
+  engine: String @index
+  moduleFile: String @index
+  isDestructive: Bool @index
+  line: I32
+}
+
+edge PlaysCallerRole: EffectSignature -> EffectFn @card(0..) {
+  role: String @index
   archimateRelation: String @index
 }
 
-edge FailsWith: EffectFn -> TaggedError @card(0..) {
+edge PlaysCalleeRole: EffectSignature -> EffectFn @card(0..) {
+  role: String @index
   archimateRelation: String @index
-}
-
-edge ProvidesService: ServiceLayer -> ServiceTag @card(0..) {
-  archimateRelation: String @index
-}
-
-edge LayerRequires: ServiceLayer -> ServiceTag @card(0..) {
-  archimateRelation: String @index
-}
-
-edge TracedCall: EffectFn -> EffectFn @card(0..) {
-  callCount: I64
+  callCount: I64?
   receiverLayer: String?
+}
+
+edge PlaysRequiresServiceRole: EffectSignature -> ServiceTag @card(0..) {
+  role: String @index
   archimateRelation: String @index
 }
 
-edge ExercisesSpan: VitestCase -> EffectFn @card(0..) {
-  callCount: I64
+edge PlaysFailsWithRole: EffectSignature -> TaggedError @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysUsesSchemaRole: EffectSignature -> SchemaDef @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysProviderLayerRole: LayerFlow -> ServiceLayer @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysProvidedServiceRole: LayerFlow -> ServiceTag @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysRequiredServiceRole: LayerFlow -> ServiceTag @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysLayerFailsWithRole: LayerFlow -> TaggedError @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysGoverningAdrRole: TraceabilityTuple -> AdrDoc @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysSpecifyingEarsRole: TraceabilityTuple -> EarsSpec @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysRealizingFnRole: TraceabilityTuple -> EffectFn @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysRealizingServiceRole: TraceabilityTuple -> ServiceTag @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysRealizingLayerRole: TraceabilityTuple -> ServiceLayer @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysRealizingErrorRole: TraceabilityTuple -> TaggedError @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysRealizingSchemaRole: TraceabilityTuple -> SchemaDef @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysVerifyingTestRole: TraceabilityTuple -> VitestCase @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysEnforcingPatternRole: TraceabilityTuple -> PatternDoc @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysExercisingTestRole: TraceabilityTuple -> VitestCase @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+  callCount: I64?
   receiverLayer: String?
+}
+
+edge PlaysExercisedSpanRole: TraceabilityTuple -> EffectFn @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+  callCount: I64?
+  receiverLayer: String?
+}
+
+edge PlaysEndpointHandlerRole: HttpEndpointTuple -> EffectFn @card(0..) {
+  role: String @index
   archimateRelation: String @index
 }
 
-edge GovernsSymbol: AdrDoc -> Any @card(0..) {
-  targetKind: String @index
+edge PlaysRequestSchemaRole: HttpEndpointTuple -> SchemaDef @card(0..) {
+  role: String @index
   archimateRelation: String @index
 }
 
-edge SpecifiesSymbol: EarsSpec -> Any @card(0..) {
-  targetKind: String @index
+edge PlaysResponseSchemaRole: HttpEndpointTuple -> SchemaDef @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysEndpointErrorRole: HttpEndpointTuple -> TaggedError @card(0..) {
+  role: String @index
+  archimateRelation: String @index
+}
+
+edge PlaysMigrationVerifyingTestRole: MigrationTuple -> VitestCase @card(0..) {
+  role: String @index
   archimateRelation: String @index
 }

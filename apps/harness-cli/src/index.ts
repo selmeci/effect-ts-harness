@@ -655,9 +655,23 @@ const handlePlanCheck = (
     }
     if (hasEffectFnNodes) {
       const failsWithErrorTags = new Set<string>()
+      for (const [, node] of Graph.nodes(graph.graph)) {
+        if (node._tag === "EffectSignature" || node._tag === "LayerFlow") {
+          for (const errTag of node.emittedErrors ?? []) {
+            failsWithErrorTags.add(errTag)
+          }
+        } else if (node._tag === "HttpEndpointTuple") {
+          for (const errTag of node.errorTags) {
+            failsWithErrorTags.add(errTag)
+          }
+        }
+      }
       for (const [, edge] of Graph.edges(graph.graph)) {
-        if (edge.data._tag === "FailsWith") {
-          failsWithErrorTags.add(edge.data.errorTag)
+        if (edge.data.role === "fails-with" || edge.data.role === "endpoint-error") {
+          const targetOpt = Graph.getNode(graph.graph, edge.target)
+          if (Option.isSome(targetOpt) && targetOpt.value._tag === "TaggedError") {
+            failsWithErrorTags.add(targetOpt.value.errorTag)
+          }
         }
       }
       const violations: Array<string> = []
@@ -1039,7 +1053,9 @@ const isMutatingTranscriptToolCall = (
     if (
       targetFile.length > 0 &&
       (targetFile.includes("/.gemini/antigravity/brain/") ||
-        targetFile.includes("/.gemini/antigravity/scratch/"))
+        targetFile.includes("/.gemini/antigravity/scratch/") ||
+        targetFile.includes("/docs/rfcs/") ||
+        targetFile.includes("/.harness/prompts/"))
     ) {
       return false
     }
@@ -1055,6 +1071,36 @@ const isMutatingTranscriptToolCall = (
     return toolName === "mutate" || toolName === "load" || toolName.startsWith("branches_")
   }
   if (tc.name === "invoke_subagent" || tc.name === "Task") {
+    const isReadOnlySubagentType = (typeName: string): boolean => {
+      const normalized = typeName.trim().toLowerCase()
+      return (
+        normalized === "research" || normalized === "explore" || normalized.endsWith("-reviewer")
+      )
+    }
+    const subagentTypeArg = unwrapTranscriptStringArg(tc.args?.subagent_type)
+    if (subagentTypeArg.length > 0 && isReadOnlySubagentType(subagentTypeArg)) {
+      return false
+    }
+    const rawSubagents = tc.args?.Subagents
+    if (typeof rawSubagents === "string") {
+      const unescaped = unwrapTranscriptStringArg(rawSubagents)
+      const typeMatches = Array.from(unescaped.matchAll(/"TypeName"\s*:\s*"([^"]+)"/g))
+      if (typeMatches.length > 0 && typeMatches.every((m) => isReadOnlySubagentType(m[1] ?? ""))) {
+        return false
+      }
+    } else if (Array.isArray(rawSubagents) && rawSubagents.length > 0) {
+      const allReadOnly = rawSubagents.every(
+        (item) =>
+          typeof item === "object" &&
+          item !== null &&
+          "TypeName" in item &&
+          typeof item.TypeName === "string" &&
+          isReadOnlySubagentType(item.TypeName),
+      )
+      if (allReadOnly) {
+        return false
+      }
+    }
     return true
   }
   return false
@@ -1115,7 +1161,28 @@ const isReadOnlyStopTurn = (decoded?: Schema.Schema.Type<typeof StopHookStdinSch
     }
   }
   if (lastUserExplicitIdx === -1) return false
+  let firstStopHookBlockIdx = -1
+  let hasRfcDocEdit = false
   for (let i = lastUserExplicitIdx + 1; i < steps.length; i++) {
+    const content = steps[i]?.content
+    if (typeof content === "string" && content.includes("Stop hook blocked termination:")) {
+      firstStopHookBlockIdx = i
+      break
+    }
+    for (const tc of steps[i]?.tool_calls ?? []) {
+      const targetFile =
+        unwrapTranscriptStringArg(tc.args?.TargetFile) ||
+        unwrapTranscriptStringArg(tc.args?.file_path)
+      if (targetFile.includes("/docs/rfcs/") || targetFile.includes("/.harness/prompts/")) {
+        hasRfcDocEdit = true
+      }
+    }
+  }
+  if (hasRfcDocEdit) {
+    return true
+  }
+  const endIdx = firstStopHookBlockIdx !== -1 ? firstStopHookBlockIdx : steps.length
+  for (let i = lastUserExplicitIdx + 1; i < endIdx; i++) {
     const step = steps[i]
     if (!step?.tool_calls) continue
     for (const tc of step.tool_calls) {

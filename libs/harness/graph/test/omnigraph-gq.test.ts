@@ -43,7 +43,7 @@ describe("Omnigraph 0.14.0 schema.pg and queries/harness.gq", () => {
   const schemaPath = path.join(graphDir, "schema.pg")
   const queriesPath = path.join(graphDir, "queries/harness.gq")
 
-  it.effect("declares all 8 node types and ArchiMate properties in schema.pg", () =>
+  it.effect("declares all PERA EntityNode, RelationNode, and Plays*Role edge types in schema.pg", () =>
     Effect.gen(function* () {
       yield* Effect.void
       const schema = fs.readFileSync(schemaPath, "utf8")
@@ -53,33 +53,43 @@ describe("Omnigraph 0.14.0 schema.pg and queries/harness.gq", () => {
         "node ServiceTag",
         "node ServiceLayer",
         "node TaggedError",
+        "node SchemaDef",
         "node VitestCase",
         "node PatternDoc",
         "node AdrDoc",
         "node EarsSpec",
+        "node EffectSignature",
+        "node LayerFlow",
+        "node TraceabilityTuple",
+        "node HttpEndpointTuple",
+        "node MigrationTuple",
       ]
       for (const nodeDecl of expectedNodes) {
         expect(schema).toContain(nodeDecl)
       }
+      expect(schema).not.toContain("node Any")
 
       expect(schema).toContain(
-        "archimateLayer: enum(Motivation, Business, Application, Technology, Implementation) @index",
+        "archimateLayer: enum(Motivation, Business, Application, Technology, Implementation)? @index",
       )
       expect(schema).toContain(
-        "archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure) @index",
+        "archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure)? @index",
       )
-      expect(schema).toContain("archimateElementType: String @index")
-      expect(schema).toContain("isPropertyTest: Bool @index")
+      expect(schema).toContain("archimateElementType: String? @index")
+      expect(schema).toContain("isPropertyTest: Bool? @index")
 
       const expectedEdges = [
-        "edge RequiresService: EffectFn -> ServiceTag",
-        "edge FailsWith: EffectFn -> TaggedError",
-        "edge ProvidesService: ServiceLayer -> ServiceTag",
-        "edge LayerRequires: ServiceLayer -> ServiceTag",
-        "edge TracedCall: EffectFn -> EffectFn",
-        "edge ExercisesSpan: VitestCase -> EffectFn",
-        "edge GovernsSymbol: AdrDoc -> Any",
-        "edge SpecifiesSymbol: EarsSpec -> Any",
+        "edge PlaysCallerRole: EffectSignature -> EffectFn",
+        "edge PlaysCalleeRole: EffectSignature -> EffectFn",
+        "edge PlaysRequiresServiceRole: EffectSignature -> ServiceTag",
+        "edge PlaysFailsWithRole: EffectSignature -> TaggedError",
+        "edge PlaysProviderLayerRole: LayerFlow -> ServiceLayer",
+        "edge PlaysProvidedServiceRole: LayerFlow -> ServiceTag",
+        "edge PlaysRequiredServiceRole: LayerFlow -> ServiceTag",
+        "edge PlaysGoverningAdrRole: TraceabilityTuple -> AdrDoc",
+        "edge PlaysSpecifyingEarsRole: TraceabilityTuple -> EarsSpec",
+        "edge PlaysExercisingTestRole: TraceabilityTuple -> VitestCase",
+        "edge PlaysExercisedSpanRole: TraceabilityTuple -> EffectFn",
       ]
       for (const edgeDecl of expectedEdges) {
         expect(schema).toContain(edgeDecl)
@@ -313,6 +323,20 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
         isStub: false,
       },
     ],
+    services: [
+      {
+        tagId: "Greeter",
+        name: "Greeter",
+        packageTag: "service",
+        file: "libs/sample/service/src/index.ts",
+      },
+    ],
+    requiresService: [
+      {
+        fnQualname: "libs/sample/domain/src/index.ts#greet",
+        tagId: "Greeter",
+      },
+    ],
   })
 
   it.effect("syncs with branch and forks from main using exact Omnigraph 0.14 protocol", () =>
@@ -376,9 +400,19 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
       const parsedBody = decodeJson(loadReq?.body ?? "{}") as {
         readonly branch: string
         readonly from: string
+        readonly data: string
       }
       expect(parsedBody.branch).toBe("plan/current")
       expect(parsedBody.from).toBe("main")
+
+      const lines = parsedBody.data
+        .split("\n")
+        .filter((l) => l.trim().length > 0)
+        .map((l) => decodeJson(l) as { readonly type?: string; readonly edge?: string })
+      expect(lines.some((l) => l.type === "EffectFn")).toBe(true)
+      expect(lines.some((l) => l.type === "EffectSignature")).toBe(true)
+      expect(lines.some((l) => l.edge === "PlaysCallerRole")).toBe(true)
+      expect(lines.every((l) => l.type !== "Any" && l.edge !== "Any")).toBe(true)
     }),
   )
 

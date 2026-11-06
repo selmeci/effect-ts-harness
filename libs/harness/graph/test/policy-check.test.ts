@@ -2386,10 +2386,10 @@ export const evolveCartV2 = (state: CartState, event: CartEventV2): CartState =>
     const failsWithErrors = new Set<string>()
     const requiredServices = new Set<string>()
     for (const [, edge] of Graph.edges(graph.graph)) {
-      if (edge.data._tag === "FailsWith") {
-        failsWithErrors.add(edge.data.errorTag)
-      } else if (edge.data._tag === "RequiresService") {
-        requiredServices.add(edge.data.tagId)
+      if (edge.data.role === "fails-with") {
+        failsWithErrors.add(edge.data.entityKey.replace(/^TaggedError:/, ""))
+      } else if (edge.data.role === "requires-service") {
+        requiredServices.add(edge.data.entityKey.replace(/^ServiceTag:/, ""))
       }
     }
 

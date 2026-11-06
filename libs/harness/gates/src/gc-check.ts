@@ -118,7 +118,12 @@ const IGNORED_SERVICES = new Set([
   "ActiveCounterStore",
 ])
 
-const IGNORED_ERRORS = new Set(["OmnigraphLoadError", "SchemaError", "UnknownToolError"])
+const IGNORED_ERRORS = new Set([
+  "OmnigraphLoadError",
+  "SchemaError",
+  "UnknownToolError",
+  "ConceptLatticeCycleError",
+])
 
 const IGNORED_UNTESTED_FNS = new Set([
   "Friction.decide",
@@ -155,37 +160,94 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (input: 
   const incomingPropertyTests = new Map<Graph.NodeIndex, number>()
   const incomingRichPropertyTests = new Map<Graph.NodeIndex, number>()
 
-  for (const [, edge] of Graph.edges(g)) {
-    if (edge.data._tag === "RequiresService") {
-      incomingRequires.set(edge.target, (incomingRequires.get(edge.target) ?? 0) + 1)
-    } else if (edge.data._tag === "LayerRequires") {
-      incomingLayerRequires.set(edge.target, (incomingLayerRequires.get(edge.target) ?? 0) + 1)
-    } else if (edge.data._tag === "ProvidesService") {
-      const srcNode = Graph.getNode(g, edge.source)
-      if (Option.isSome(srcNode) && srcNode.value._tag === "ServiceLayer") {
-        incomingProvides.set(edge.target, (incomingProvides.get(edge.target) ?? 0) + 1)
+  for (const [relIdx, node] of Graph.nodes(g)) {
+    if (node._tag === "EffectSignature") {
+      for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
+        const edgeOpt = Graph.getEdge(g, edgeIdx)
+        if (Option.isNone(edgeOpt)) continue
+        const { target, data } = edgeOpt.value
+        if (data.role === "requires-service") {
+          incomingRequires.set(target, (incomingRequires.get(target) ?? 0) + 1)
+        } else if (data.role === "fails-with") {
+          incomingFailsWith.set(target, (incomingFailsWith.get(target) ?? 0) + 1)
+        } else if (data.role === "callee") {
+          incomingTestOrCall.set(target, (incomingTestOrCall.get(target) ?? 0) + 1)
+        }
       }
-    } else if (edge.data._tag === "FailsWith") {
-      incomingFailsWith.set(edge.target, (incomingFailsWith.get(edge.target) ?? 0) + 1)
-    } else if (edge.data._tag === "ExercisesSpan" || edge.data._tag === "TracedCall") {
-      incomingTestOrCall.set(edge.target, (incomingTestOrCall.get(edge.target) ?? 0) + 1)
-      if (edge.data._tag === "ExercisesSpan") {
-        const srcNode = Graph.getNode(g, edge.source)
-        if (
-          Option.isSome(srcNode) &&
-          srcNode.value._tag === "VitestCase" &&
-          srcNode.value.isPropertyTest === true
-        ) {
-          incomingPropertyTests.set(edge.target, (incomingPropertyTests.get(edge.target) ?? 0) + 1)
-          if (
-            (srcNode.value as { readonly hasNonPrimitiveArbitrary?: boolean | undefined })
-              .hasNonPrimitiveArbitrary !== false
-          ) {
-            incomingRichPropertyTests.set(
-              edge.target,
-              (incomingRichPropertyTests.get(edge.target) ?? 0) + 1,
-            )
+    } else if (node._tag === "LayerFlow") {
+      let hasProviderLayer = false
+      for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
+        const edgeOpt = Graph.getEdge(g, edgeIdx)
+        if (Option.isSome(edgeOpt) && edgeOpt.value.data.role === "provider-layer") {
+          const tNode = Graph.getNode(g, edgeOpt.value.target)
+          if (Option.isSome(tNode) && tNode.value._tag === "ServiceLayer") {
+            hasProviderLayer = true
+            break
           }
+        }
+      }
+      for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
+        const edgeOpt = Graph.getEdge(g, edgeIdx)
+        if (Option.isNone(edgeOpt)) continue
+        const { target, data } = edgeOpt.value
+        if (data.role === "provided-service" && hasProviderLayer) {
+          incomingProvides.set(target, (incomingProvides.get(target) ?? 0) + 1)
+        } else if (data.role === "required-service") {
+          incomingLayerRequires.set(target, (incomingLayerRequires.get(target) ?? 0) + 1)
+        } else if (data.role === "fails-with") {
+          incomingFailsWith.set(target, (incomingFailsWith.get(target) ?? 0) + 1)
+        }
+      }
+    } else if (node._tag === "TraceabilityTuple") {
+      const testNodes: Array<{
+        readonly isPropertyTest?: boolean | undefined
+        readonly hasNonPrimitiveArbitrary?: boolean | undefined
+      }> = []
+      const spanTargets: Array<Graph.NodeIndex> = []
+      for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
+        const edgeOpt = Graph.getEdge(g, edgeIdx)
+        if (Option.isNone(edgeOpt)) continue
+        const { target, data } = edgeOpt.value
+        if (data.role === "exercising-test" || data.role === "verifying-test") {
+          const tNode = Graph.getNode(g, target)
+          if (Option.isSome(tNode) && tNode.value._tag === "VitestCase") {
+            testNodes.push(tNode.value)
+          }
+        } else if (data.role === "exercised-span" || data.role === "realizing-symbol") {
+          const tNode = Graph.getNode(g, target)
+          if (Option.isSome(tNode) && tNode.value._tag === "EffectFn") {
+            spanTargets.push(target)
+          }
+        }
+      }
+      if (testNodes.length > 0) {
+        for (const spanIdx of spanTargets) {
+          incomingTestOrCall.set(
+            spanIdx,
+            (incomingTestOrCall.get(spanIdx) ?? 0) + testNodes.length,
+          )
+          for (const testNode of testNodes) {
+            if (testNode.isPropertyTest === true) {
+              incomingPropertyTests.set(spanIdx, (incomingPropertyTests.get(spanIdx) ?? 0) + 1)
+              if (testNode.hasNonPrimitiveArbitrary !== false) {
+                incomingRichPropertyTests.set(
+                  spanIdx,
+                  (incomingRichPropertyTests.get(spanIdx) ?? 0) + 1,
+                )
+              }
+            }
+          }
+        }
+      }
+    } else if (node._tag === "HttpEndpointTuple") {
+      for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
+        const edgeOpt = Graph.getEdge(g, edgeIdx)
+        if (Option.isNone(edgeOpt)) continue
+        const { target, data } = edgeOpt.value
+        if (data.role === "endpoint-error") {
+          incomingFailsWith.set(target, (incomingFailsWith.get(target) ?? 0) + 1)
+        } else if (data.role === "endpoint-handler") {
+          incomingTestOrCall.set(target, (incomingTestOrCall.get(target) ?? 0) + 1)
         }
       }
     }

@@ -91,17 +91,45 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(f
   const incomingTestOrCall = new Map<Graph.NodeIndex, number>()
   const incomingPropertyTests = new Map<Graph.NodeIndex, number>()
 
-  for (const [, edge] of Graph.edges(g)) {
-    if (edge.data._tag === "ExercisesSpan" || edge.data._tag === "TracedCall") {
-      incomingTestOrCall.set(edge.target, (incomingTestOrCall.get(edge.target) ?? 0) + 1)
-      if (edge.data._tag === "ExercisesSpan") {
-        const srcNode = Graph.getNode(g, edge.source)
-        if (
-          Option.isSome(srcNode) &&
-          srcNode.value._tag === "VitestCase" &&
-          srcNode.value.isPropertyTest === true
-        ) {
-          incomingPropertyTests.set(edge.target, (incomingPropertyTests.get(edge.target) ?? 0) + 1)
+  for (const [relIdx, node] of Graph.nodes(g)) {
+    if (node._tag === "EffectSignature") {
+      for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
+        const edgeOpt = Graph.getEdge(g, edgeIdx)
+        if (Option.isSome(edgeOpt) && edgeOpt.value.data.role === "callee") {
+          const target = edgeOpt.value.target
+          incomingTestOrCall.set(target, (incomingTestOrCall.get(target) ?? 0) + 1)
+        }
+      }
+    } else if (node._tag === "TraceabilityTuple") {
+      const testNodes: Array<{ readonly isPropertyTest?: boolean | undefined }> = []
+      const spanTargets: Array<Graph.NodeIndex> = []
+      for (const edgeIdx of Graph.outgoingEdges(g, relIdx)) {
+        const edgeOpt = Graph.getEdge(g, edgeIdx)
+        if (Option.isNone(edgeOpt)) continue
+        const { target, data } = edgeOpt.value
+        if (data.role === "exercising-test" || data.role === "verifying-test") {
+          const tNode = Graph.getNode(g, target)
+          if (Option.isSome(tNode) && tNode.value._tag === "VitestCase") {
+            testNodes.push(tNode.value)
+          }
+        } else if (data.role === "exercised-span" || data.role === "realizing-symbol") {
+          const tNode = Graph.getNode(g, target)
+          if (Option.isSome(tNode) && tNode.value._tag === "EffectFn") {
+            spanTargets.push(target)
+          }
+        }
+      }
+      if (testNodes.length > 0) {
+        for (const spanIdx of spanTargets) {
+          incomingTestOrCall.set(
+            spanIdx,
+            (incomingTestOrCall.get(spanIdx) ?? 0) + testNodes.length,
+          )
+          for (const testNode of testNodes) {
+            if (testNode.isPropertyTest === true) {
+              incomingPropertyTests.set(spanIdx, (incomingPropertyTests.get(spanIdx) ?? 0) + 1)
+            }
+          }
         }
       }
     }
@@ -164,13 +192,32 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(f
             const resolvedKey = getNodeKey(resolved)
             const nodeIdx = input.graph.nodeIndexByKey.get(resolvedKey)
             if (nodeIdx !== undefined) {
-              const outEdges = Graph.outgoingEdges(g, nodeIdx)
-              for (const eIdx of outEdges) {
-                const edgeOpt = Graph.getEdge(g, eIdx)
-                if (Option.isSome(edgeOpt) && edgeOpt.value.data._tag === "RequiresService") {
-                  hasOutgoingRequires = true
-                  break
+              for (const inEdgeIdx of Graph.incomingEdges(g, nodeIdx)) {
+                const inEdgeOpt = Graph.getEdge(g, inEdgeIdx)
+                if (Option.isNone(inEdgeOpt)) continue
+                const relIdx = inEdgeOpt.value.source
+                const relOpt = Graph.getNode(g, relIdx)
+                if (
+                  Option.isSome(relOpt) &&
+                  relOpt.value._tag === "EffectSignature" &&
+                  inEdgeOpt.value.data.role === "caller"
+                ) {
+                  if (relOpt.value.requiredServices.length > 0) {
+                    hasOutgoingRequires = true
+                    break
+                  }
+                  for (const outEdgeIdx of Graph.outgoingEdges(g, relIdx)) {
+                    const outEdgeOpt = Graph.getEdge(g, outEdgeIdx)
+                    if (
+                      Option.isSome(outEdgeOpt) &&
+                      outEdgeOpt.value.data.role === "requires-service"
+                    ) {
+                      hasOutgoingRequires = true
+                      break
+                    }
+                  }
                 }
+                if (hasOutgoingRequires) break
               }
             }
 

@@ -198,3 +198,4 @@ Prechod z overeného plánu do hotovej implementácie je zapečatený dvoma mech
 | Identifikátor                                                                       | Rozsah (Scope) | Názov                                                       | Status     | Dátum      |
 | :---------------------------------------------------------------------------------- | :------------- | :---------------------------------------------------------- | :--------- | :--------- |
 | [sample:SPEC-0001](../../libs/sample/docs/specs/2026-10-25-sample-photo-gallery.md) | `sample`       | Sample Photo Gallery and Durable Object Album Quota Counter | `accepted` | 2026-10-25 |
+| [harness:SPEC-0007](../../libs/harness/docs/specs/2026-11-06-polymorphic-hypergraph-and-datalog-inference.md) | `harness` | Polymorphic Hypergraph & Stratified Datalog Inference Engine | `proposed` | 2026-11-06 |

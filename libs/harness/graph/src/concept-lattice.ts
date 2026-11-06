@@ -1,0 +1,541 @@
+import { Effect } from "effect"
+import * as Graph from "effect/Graph"
+import {
+  type ConceptClosureEntry,
+  ConceptId,
+  type ConceptLatticeConfig,
+  ConceptLatticeCycleError,
+  type ConceptLatticeResult,
+  type ConceptSpec,
+  RoleName,
+  type RoleSpec,
+} from "./model.js"
+
+/**
+ * Canonical PERA (Polymorphic Entity-Relation-Attribute) Concept Lattice
+ * for the Effect-TS Engineering Harness (`RFC-0001` / `harness:ADR-0009`).
+ */
+export const HARNESS_PERA_CONCEPT_LATTICE_CONFIG: ConceptLatticeConfig = {
+  concepts: [
+    // Abstract Entity Supertypes
+    {
+      id: ConceptId.make("Artifact"),
+      kind: "entity",
+      supertypes: [],
+      playsRoles: [RoleName.make("realizing-symbol")],
+    },
+    {
+      id: ConceptId.make("CodeArtifact"),
+      kind: "entity",
+      supertypes: [ConceptId.make("Artifact")],
+      playsRoles: [RoleName.make("migration-module")],
+    },
+    {
+      id: ConceptId.make("GovernanceArtifact"),
+      kind: "entity",
+      supertypes: [ConceptId.make("Artifact")],
+      playsRoles: [],
+    },
+    {
+      id: ConceptId.make("VerificationArtifact"),
+      kind: "entity",
+      supertypes: [ConceptId.make("Artifact")],
+      playsRoles: [
+        RoleName.make("verifying-test"),
+        RoleName.make("exercising-test"),
+      ],
+    },
+    {
+      id: ConceptId.make("ExecutableArtifact"),
+      kind: "entity",
+      supertypes: [ConceptId.make("CodeArtifact")],
+      playsRoles: [
+        RoleName.make("caller"),
+        RoleName.make("callee"),
+        RoleName.make("exercised-span"),
+        RoleName.make("endpoint-handler"),
+      ],
+    },
+    {
+      id: ConceptId.make("CapabilityArtifact"),
+      kind: "entity",
+      supertypes: [ConceptId.make("CodeArtifact")],
+      playsRoles: [],
+    },
+    {
+      id: ConceptId.make("ContractArtifact"),
+      kind: "entity",
+      supertypes: [ConceptId.make("CodeArtifact")],
+      playsRoles: [],
+    },
+
+    // Concrete Entity Concepts (V_E)
+    {
+      id: ConceptId.make("EffectFn"),
+      kind: "entity",
+      supertypes: [ConceptId.make("ExecutableArtifact")],
+      playsRoles: [],
+    },
+    {
+      id: ConceptId.make("ServiceTag"),
+      kind: "entity",
+      supertypes: [ConceptId.make("CapabilityArtifact")],
+      playsRoles: [
+        RoleName.make("requires-service"),
+        RoleName.make("provided-service"),
+        RoleName.make("required-service"),
+      ],
+    },
+    {
+      id: ConceptId.make("ServiceLayer"),
+      kind: "entity",
+      supertypes: [ConceptId.make("CapabilityArtifact")],
+      playsRoles: [RoleName.make("provider-layer")],
+    },
+    {
+      id: ConceptId.make("TaggedError"),
+      kind: "entity",
+      supertypes: [ConceptId.make("ContractArtifact")],
+      playsRoles: [
+        RoleName.make("fails-with"),
+        RoleName.make("endpoint-error"),
+      ],
+    },
+    {
+      id: ConceptId.make("SchemaDef"),
+      kind: "entity",
+      supertypes: [ConceptId.make("ContractArtifact")],
+      playsRoles: [
+        RoleName.make("uses-schema"),
+        RoleName.make("input-schema"),
+        RoleName.make("output-schema"),
+        RoleName.make("request-schema"),
+        RoleName.make("response-schema"),
+      ],
+    },
+    {
+      id: ConceptId.make("VitestCase"),
+      kind: "entity",
+      supertypes: [ConceptId.make("VerificationArtifact")],
+      playsRoles: [],
+    },
+    {
+      id: ConceptId.make("PatternDoc"),
+      kind: "entity",
+      supertypes: [ConceptId.make("GovernanceArtifact")],
+      playsRoles: [RoleName.make("enforcing-pattern")],
+    },
+    {
+      id: ConceptId.make("AdrDoc"),
+      kind: "entity",
+      supertypes: [ConceptId.make("GovernanceArtifact")],
+      playsRoles: [RoleName.make("governing-adr")],
+    },
+    {
+      id: ConceptId.make("EarsSpec"),
+      kind: "entity",
+      supertypes: [ConceptId.make("GovernanceArtifact")],
+      playsRoles: [RoleName.make("specifying-ears")],
+    },
+
+    // Abstract & Concrete Relation Concepts (V_R)
+    {
+      id: ConceptId.make("SemanticRelation"),
+      kind: "relation",
+      supertypes: [],
+      playsRoles: [],
+      relatesRoles: [],
+    },
+    {
+      id: ConceptId.make("EffectSignature"),
+      kind: "relation",
+      supertypes: [ConceptId.make("SemanticRelation")],
+      playsRoles: [],
+      relatesRoles: [
+        {
+          role: RoleName.make("caller"),
+          minCard: 1,
+          maxCard: 1,
+          allowedPlayers: [ConceptId.make("ExecutableArtifact")],
+          archimateRelation: "Access",
+        },
+        {
+          role: RoleName.make("callee"),
+          minCard: 0,
+          maxCard: null,
+          allowedPlayers: [ConceptId.make("ExecutableArtifact")],
+          archimateRelation: "Flow",
+        },
+        {
+          role: RoleName.make("requires-service"),
+          minCard: 0,
+          maxCard: null,
+          allowedPlayers: [ConceptId.make("ServiceTag")],
+          archimateRelation: "Serving",
+        },
+        {
+          role: RoleName.make("fails-with"),
+          minCard: 0,
+          maxCard: null,
+          allowedPlayers: [ConceptId.make("TaggedError")],
+          archimateRelation: "Access",
+        },
+        {
+          role: RoleName.make("uses-schema"),
+          minCard: 0,
+          maxCard: null,
+          allowedPlayers: [ConceptId.make("SchemaDef")],
+          archimateRelation: "Access",
+        },
+      ],
+    },
+    {
+      id: ConceptId.make("LayerFlow"),
+      kind: "relation",
+      supertypes: [ConceptId.make("SemanticRelation")],
+      playsRoles: [],
+      relatesRoles: [
+        {
+          role: RoleName.make("provider-layer"),
+          minCard: 1,
+          maxCard: 1,
+          allowedPlayers: [ConceptId.make("ServiceLayer")],
+          archimateRelation: "Realization",
+        },
+        {
+          role: RoleName.make("provided-service"),
+          minCard: 1,
+          maxCard: null,
+          allowedPlayers: [ConceptId.make("ServiceTag")],
+          archimateRelation: "Realization",
+        },
+        {
+          role: RoleName.make("required-service"),
+          minCard: 0,
+          maxCard: null,
+          allowedPlayers: [ConceptId.make("ServiceTag")],
+          archimateRelation: "Serving",
+        },
+        {
+          role: RoleName.make("fails-with"),
+          minCard: 0,
+          maxCard: null,
+          allowedPlayers: [ConceptId.make("TaggedError")],
+          archimateRelation: "Access",
+        },
+      ],
+    },
+    {
+      id: ConceptId.make("TraceabilityTuple"),
+      kind: "relation",
+      supertypes: [ConceptId.make("SemanticRelation")],
+      playsRoles: [],
+      relatesRoles: [
+        {
+          role: RoleName.make("governing-adr"),
+          minCard: 0,
+          maxCard: 1,
+          allowedPlayers: [ConceptId.make("AdrDoc")],
+          archimateRelation: "Influence",
+        },
+        {
+          role: RoleName.make("specifying-ears"),
+          minCard: 0,
+          maxCard: 1,
+          allowedPlayers: [ConceptId.make("EarsSpec")],
+          archimateRelation: "Realization",
+        },
+        {
+          role: RoleName.make("realizing-symbol"),
+          minCard: 1,
+          maxCard: 1,
+          allowedPlayers: [ConceptId.make("Artifact")],
+          archimateRelation: "Realization",
+        },
+        {
+          role: RoleName.make("verifying-test"),
+          minCard: 0,
+          maxCard: null,
+          allowedPlayers: [ConceptId.make("VerificationArtifact")],
+          archimateRelation: "Realization",
+        },
+        {
+          role: RoleName.make("enforcing-pattern"),
+          minCard: 0,
+          maxCard: null,
+          allowedPlayers: [ConceptId.make("PatternDoc")],
+          archimateRelation: "Influence",
+        },
+      ],
+    },
+    {
+      id: ConceptId.make("HttpEndpointTuple"),
+      kind: "relation",
+      supertypes: [ConceptId.make("SemanticRelation")],
+      playsRoles: [],
+      relatesRoles: [
+        {
+          role: RoleName.make("endpoint-handler"),
+          minCard: 0,
+          maxCard: 1,
+          allowedPlayers: [ConceptId.make("ExecutableArtifact")],
+          archimateRelation: "Realization",
+        },
+        {
+          role: RoleName.make("request-schema"),
+          minCard: 0,
+          maxCard: null,
+          allowedPlayers: [ConceptId.make("SchemaDef")],
+          archimateRelation: "Access",
+        },
+        {
+          role: RoleName.make("response-schema"),
+          minCard: 0,
+          maxCard: null,
+          allowedPlayers: [ConceptId.make("SchemaDef")],
+          archimateRelation: "Access",
+        },
+        {
+          role: RoleName.make("endpoint-error"),
+          minCard: 0,
+          maxCard: null,
+          allowedPlayers: [ConceptId.make("TaggedError")],
+          archimateRelation: "Access",
+        },
+      ],
+    },
+    {
+      id: ConceptId.make("MigrationTuple"),
+      kind: "relation",
+      supertypes: [ConceptId.make("SemanticRelation")],
+      playsRoles: [],
+      relatesRoles: [
+        {
+          role: RoleName.make("migration-module"),
+          minCard: 0,
+          maxCard: 1,
+          allowedPlayers: [ConceptId.make("CodeArtifact")],
+          archimateRelation: "Realization",
+        },
+        {
+          role: RoleName.make("verifying-test"),
+          minCard: 0,
+          maxCard: null,
+          allowedPlayers: [ConceptId.make("VerificationArtifact")],
+          archimateRelation: "Realization",
+        },
+      ],
+    },
+  ],
+}
+
+const findCycleInConceptHierarchy = (
+  conceptsById: ReadonlyMap<ConceptId, ConceptSpec>,
+): ReadonlyArray<ConceptId> | undefined => {
+  // 0 = unvisited, 1 = visiting (on stack), 2 = visited
+  const state = new Map<ConceptId, 0 | 1 | 2>()
+  const stack: Array<ConceptId> = []
+
+  const dfs = (current: ConceptId): ReadonlyArray<ConceptId> | undefined => {
+    state.set(current, 1)
+    stack.push(current)
+
+    const spec = conceptsById.get(current)
+    for (const sup of spec?.supertypes ?? []) {
+      if (sup === current) {
+        return [current, current]
+      }
+      const supState = state.get(sup) ?? 0
+      if (supState === 1) {
+        const cycleStart = stack.indexOf(sup)
+        const cycleSlice = cycleStart >= 0 ? stack.slice(cycleStart) : [current]
+        return [...cycleSlice, sup]
+      }
+      if (supState === 0 && conceptsById.has(sup)) {
+        const found = dfs(sup)
+        if (found !== undefined) {
+          return found
+        }
+      }
+    }
+
+    stack.pop()
+    state.set(current, 2)
+    return undefined
+  }
+
+  for (const id of conceptsById.keys()) {
+    if ((state.get(id) ?? 0) === 0) {
+      const cycle = dfs(id)
+      if (cycle !== undefined) {
+        return cycle
+      }
+    }
+  }
+  return undefined
+}
+
+/**
+ * Pure ontology concept lattice decider (`ConceptLattice.decide`, `R = never`).
+ * Validates acyclicity of the concept hierarchy using `effect/Graph` and computes
+ * reflexive-transitive subtype closure ($\sqsubseteq^*$) and inherited role sets ($\text{roles}^*(c)$).
+ */
+export const decideConceptLattice = Effect.fn("ConceptLattice.decide")(function* (
+  config: ConceptLatticeConfig,
+): Effect.fn.Return<ConceptLatticeResult, ConceptLatticeCycleError, never> {
+  const conceptsById = new Map<ConceptId, ConceptSpec>()
+  for (const c of config.concepts) {
+    conceptsById.set(c.id, c)
+  }
+
+  const nodeIdxById = new Map<ConceptId, Graph.NodeIndex>()
+  const hierarchyGraph = Graph.directed<ConceptId, string>((mutable) => {
+    for (const c of config.concepts) {
+      nodeIdxById.set(c.id, Graph.addNode(mutable, c.id))
+    }
+    for (const c of config.concepts) {
+      const subIdx = nodeIdxById.get(c.id)
+      if (subIdx === undefined) continue
+      for (const supId of c.supertypes) {
+        const supIdx = nodeIdxById.get(supId)
+        if (supIdx !== undefined) {
+          // Edge supertype -> subtype so topological sort orders supertypes first
+          Graph.addEdge(mutable, supIdx, subIdx, "subsumes")
+        }
+      }
+    }
+  })
+
+  const detectedCycle = findCycleInConceptHierarchy(conceptsById)
+  if (detectedCycle !== undefined || !Graph.isAcyclic(hierarchyGraph)) {
+    const cycle =
+      detectedCycle ??
+      (config.concepts[0] !== undefined ? [config.concepts[0].id, config.concepts[0].id] : [])
+    return yield* new ConceptLatticeCycleError({
+      cycle: [...cycle],
+      message: `Concept lattice contains a subtype cycle: ${cycle.join(" -> ")}`,
+    })
+  }
+
+  // Deterministic Kahn's topological sort (supertypes before subtypes)
+  const inDegree = new Map<ConceptId, number>()
+  const directSubtypes = new Map<ConceptId, Array<ConceptId>>()
+  for (const c of config.concepts) {
+    inDegree.set(c.id, 0)
+    directSubtypes.set(c.id, [])
+  }
+  for (const c of config.concepts) {
+    let validSupCount = 0
+    for (const supId of c.supertypes) {
+      if (conceptsById.has(supId)) {
+        validSupCount += 1
+        directSubtypes.get(supId)?.push(c.id)
+      }
+    }
+    inDegree.set(c.id, validSupCount)
+  }
+
+  const ready: Array<ConceptId> = []
+  for (const [id, deg] of inDegree.entries()) {
+    if (deg === 0) {
+      ready.push(id)
+    }
+  }
+  ready.sort((a, b) => a.localeCompare(b))
+
+  const topologicalOrder: Array<ConceptId> = []
+  while (ready.length > 0) {
+    const current = ready.shift()!
+    topologicalOrder.push(current)
+    const subs = directSubtypes.get(current) ?? []
+    for (const subId of subs) {
+      const nextDeg = (inDegree.get(subId) ?? 1) - 1
+      inDegree.set(subId, nextDeg)
+      if (nextDeg === 0) {
+        ready.push(subId)
+        ready.sort((a, b) => a.localeCompare(b))
+      }
+    }
+  }
+
+  // Compute reflexive-transitive supertypesClosure for each concept
+  const supertypesClosureById = new Map<ConceptId, ReadonlyArray<ConceptId>>()
+  for (const id of topologicalOrder) {
+    const spec = conceptsById.get(id)!
+    const closure = new Set<ConceptId>([id])
+    for (const supId of spec.supertypes) {
+      closure.add(supId)
+      for (const ancestor of supertypesClosureById.get(supId) ?? []) {
+        closure.add(ancestor)
+      }
+    }
+    supertypesClosureById.set(id, Array.from(closure))
+  }
+
+  // Compute reflexive-transitive subtypesClosure for each concept
+  const subtypesClosureById = new Map<ConceptId, Set<ConceptId>>()
+  for (const c of config.concepts) {
+    subtypesClosureById.set(c.id, new Set<ConceptId>([c.id]))
+  }
+  for (const [subId, sups] of supertypesClosureById.entries()) {
+    for (const supId of sups) {
+      subtypesClosureById.get(supId)?.add(subId)
+    }
+  }
+
+  // Compute inheritedPlayedRoles and inheritedRelatedRoles
+  const entries: Array<ConceptClosureEntry> = []
+  for (const c of config.concepts) {
+    const sups = supertypesClosureById.get(c.id) ?? [c.id]
+    const subs = Array.from(subtypesClosureById.get(c.id) ?? [c.id])
+
+    const playedRoles = new Set<RoleName>()
+    const relatedRolesMap = new Map<RoleName, RoleSpec>()
+
+    // Traverse from most general ancestors down to `c` in topological order so `c`'s RoleSpec refines ancestor RoleSpec
+    const supsSet = new Set(sups)
+    const orderedAncestors = topologicalOrder.filter((id) => supsSet.has(id))
+    for (const ancId of orderedAncestors) {
+      const ancSpec = conceptsById.get(ancId)
+      if (!ancSpec) continue
+      for (const r of ancSpec.playsRoles) {
+        playedRoles.add(r)
+      }
+      for (const relSpec of ancSpec.relatesRoles ?? []) {
+        relatedRolesMap.set(relSpec.role, relSpec)
+      }
+    }
+
+    entries.push({
+      conceptId: c.id,
+      kind: c.kind,
+      supertypesClosure: [...sups],
+      subtypesClosure: subs,
+      inheritedPlayedRoles: Array.from(playedRoles),
+      inheritedRelatedRoles: Array.from(relatedRolesMap.values()),
+    })
+  }
+
+  return {
+    entries,
+    topologicalOrder,
+  }
+})
+
+export const isConceptSubtypeOf = (
+  lattice: ConceptLatticeResult,
+  subId: ConceptId,
+  supId: ConceptId,
+): boolean => {
+  const entry = lattice.entries.find((e) => e.conceptId === subId)
+  return entry !== undefined && entry.supertypesClosure.includes(supId)
+}
+
+export const canConceptPlayRole = (
+  lattice: ConceptLatticeResult,
+  conceptId: ConceptId,
+  role: RoleName,
+): boolean => {
+  const entry = lattice.entries.find((e) => e.conceptId === conceptId)
+  return entry !== undefined && entry.inheritedPlayedRoles.includes(role)
+}

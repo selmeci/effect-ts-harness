@@ -212,7 +212,7 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
 
     const ndjson = toOmnigraphNdjson(fullGraph)
     const lines = ndjson.split("\n")
-    expect(lines.length).toBe(11) // 6 nodes + 5 edges
+    expect(lines.length).toBe(17) // 6 EntityNodes + 3 RelationNodes + 8 PlaysRole edges
 
     expect(lines.some((l) => l.includes('"type":"EffectFn"'))).toBe(true)
     expect(lines.some((l) => l.includes('"type":"ServiceTag"'))).toBe(true)
@@ -220,11 +220,14 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
     expect(lines.some((l) => l.includes('"type":"TaggedError"'))).toBe(true)
     expect(lines.some((l) => l.includes('"type":"VitestCase"'))).toBe(true)
     expect(lines.some((l) => l.includes('"type":"PatternDoc"'))).toBe(true)
-    expect(lines.some((l) => l.includes('"edge":"RequiresService"'))).toBe(true)
-    expect(lines.some((l) => l.includes('"edge":"FailsWith"'))).toBe(true)
-    expect(lines.some((l) => l.includes('"edge":"ProvidesService"'))).toBe(true)
-    expect(lines.some((l) => l.includes('"edge":"LayerRequires"'))).toBe(true)
-    expect(lines.some((l) => l.includes('"edge":"ExercisesSpan"'))).toBe(true)
+    expect(lines.some((l) => l.includes('"type":"EffectSignature"'))).toBe(true)
+    expect(lines.some((l) => l.includes('"type":"LayerFlow"'))).toBe(true)
+    expect(lines.some((l) => l.includes('"type":"TraceabilityTuple"'))).toBe(true)
+    expect(lines.some((l) => l.includes('"edge":"PlaysRole"') && l.includes('"role":"requires-service"'))).toBe(true)
+    expect(lines.some((l) => l.includes('"edge":"PlaysRole"') && l.includes('"role":"fails-with"'))).toBe(true)
+    expect(lines.some((l) => l.includes('"edge":"PlaysRole"') && l.includes('"role":"provided-service"'))).toBe(true)
+    expect(lines.some((l) => l.includes('"edge":"PlaysRole"') && l.includes('"role":"required-service"'))).toBe(true)
+    expect(lines.some((l) => l.includes('"edge":"PlaysRole"') && l.includes('"role":"exercising-test"'))).toBe(true)
   })
 
   it("resolves nodes across different identifier types via resolveNode", () => {

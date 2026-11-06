@@ -330,7 +330,7 @@ describe("harness-mcp tools", () => {
     await expect(executeTool("unknown_tool", {})).rejects.toThrow()
   })
 
-  it("completes MCP stdio handshake and lists all 12 tools when spawned from Antigravity plugin directory", async () => {
+  it("completes MCP stdio handshake and lists all 14 tools when spawned from Antigravity plugin directory", async () => {
     const { Client } = await import("@modelcontextprotocol/sdk/client/index.js")
     const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js")
     const repoRoot = path.resolve(import.meta.dirname, "../../..")
@@ -362,12 +362,71 @@ describe("harness-mcp tools", () => {
         "harness_ontology_impact",
         "harness_ontology_check",
         "harness_gq_query",
+        "harness_graph_infer",
+        "harness_graph_complete",
         "harness_lsp_diagnostics",
         "harness_telemetry_report",
       ])
     } finally {
       await client.close()
     }
+  })
+
+  it("executes harness_graph_infer and harness_graph_complete over the PERA hypergraph", async () => {
+    const inferRes = (await executeTool(
+      "harness_graph_infer",
+      { symbolOrSpan: "Sample.callGreet" },
+      { graph },
+    )) as {
+      readonly effectiveRequires: ReadonlyArray<{
+        readonly callerKey: string
+        readonly serviceKey: string
+      }>
+      readonly proofs: ReadonlyArray<{ readonly ruleId: string }>
+    }
+    expect(inferRes).toMatchObject({
+      effectiveRequires: expect.arrayContaining([
+        expect.objectContaining({
+          callerKey: "EffectFn:libs/sample/service/src/index.ts#callGreet",
+          serviceKey: "ServiceTag:libs/sample/service/src/index.ts#Greeter",
+        }),
+      ]),
+    })
+    expect(inferRes.proofs.length).toBeGreaterThan(0)
+    expect(inferRes.proofs.some((p) => p.ruleId === "INF-01")).toBe(true)
+
+    const completeRes = (await executeTool(
+      "harness_graph_complete",
+      { minConfidenceMillis: 800, ruleId: "COMP-03" },
+      { graph },
+    )) as {
+      readonly suggestedEdges: ReadonlyArray<{
+        readonly ruleId: string
+        readonly role: string
+        readonly targetEntityKey: string
+      }>
+      readonly proofs: ReadonlyArray<{ readonly ruleId: string }>
+    }
+    expect(completeRes).toMatchObject({
+      suggestedEdges: expect.arrayContaining([
+        expect.objectContaining({
+          ruleId: "COMP-03",
+          role: "provided-service",
+          targetEntityKey: "ServiceTag:libs/sample/service/src/index.ts#Greeter",
+        }),
+      ]),
+    })
+    expect(completeRes.suggestedEdges.every((e) => e.ruleId === "COMP-03")).toBe(true)
+    expect(completeRes.proofs.every((p) => p.ruleId === "COMP-03")).toBe(true)
+
+    const filteredOutRes = (await executeTool(
+      "harness_graph_complete",
+      { minConfidenceMillis: 950, ruleId: "COMP-03" },
+      { graph },
+    )) as {
+      readonly suggestedEdges: ReadonlyArray<unknown>
+    }
+    expect(filteredOutRes.suggestedEdges).toHaveLength(0)
   })
 
   it("automatically loads plan-graph-snapshot.json when graph-snapshot.json is absent or older, and honours args.repoRoot", async () => {

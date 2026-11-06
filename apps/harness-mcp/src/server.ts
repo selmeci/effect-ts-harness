@@ -9,10 +9,12 @@ import { Effect, Layer, Option, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import {
   buildHarnessGraph,
+  decideGraphInference,
   extractWorkspaceTypeAwareGraph,
   findCallees,
   findCallers,
   findTestsReaching,
+  getNodeKey,
   HARNESS_GQ_QUERY_NAMES,
   type HarnessGqQueryName,
   type HarnessGraph,
@@ -491,6 +493,81 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
       }
       return report
     }
+    case "harness_graph_infer": {
+      const symbolOrSpan = (args as { symbolOrSpan?: string | undefined }).symbolOrSpan
+      const ruleId = (args as { ruleId?: string | undefined }).ruleId
+      const graph = yield* resolveGraph(options, args)
+      const resolvedNode =
+        symbolOrSpan !== undefined && symbolOrSpan.length > 0
+          ? resolveNode(graph, symbolOrSpan)
+          : undefined
+      const resolvedKey = resolvedNode !== undefined ? getNodeKey(resolvedNode) : undefined
+      const inference = yield* decideGraphInference(graph)
+      const filterBySymbol = (text: string): boolean =>
+        symbolOrSpan === undefined ||
+        symbolOrSpan.length === 0 ||
+        text.includes(symbolOrSpan) ||
+        (resolvedKey !== undefined && text.includes(resolvedKey))
+      result = {
+        effectiveRequires: inference.effectiveRequires.filter(
+          (f) => filterBySymbol(f.callerKey) || filterBySymbol(f.serviceKey),
+        ),
+        effectiveFailsWith: inference.effectiveFailsWith.filter(
+          (f) => filterBySymbol(f.callerKey) || filterBySymbol(f.errorKey),
+        ),
+        effectiveLayerDeps: inference.effectiveLayerDeps.filter(
+          (f) => filterBySymbol(f.layerKey) || filterBySymbol(f.requiredServiceKey),
+        ),
+        effectiveTestReach: inference.effectiveTestReach.filter(
+          (f) => filterBySymbol(f.testKey) || filterBySymbol(f.targetSpanKey),
+        ),
+        antiPatterns: inference.antiPatterns.filter(
+          (ap) =>
+            (ruleId === undefined || ap.ruleId === ruleId || ap.datalogRuleId === ruleId) &&
+            (filterBySymbol(ap.nodeKey) || ap.path.some((p) => filterBySymbol(p))),
+        ),
+        proofs: inference.proofs.filter(
+          (p) =>
+            (ruleId === undefined || p.ruleId === ruleId) &&
+            filterBySymbol(p.conclusion),
+        ),
+      }
+      break
+    }
+    case "harness_graph_complete": {
+      const symbolOrSpan = (args as { symbolOrSpan?: string | undefined }).symbolOrSpan
+      const minConfidenceMillis =
+        (args as { minConfidenceMillis?: number | undefined }).minConfidenceMillis ?? 0
+      const ruleId = (args as { ruleId?: string | undefined }).ruleId
+      const graph = yield* resolveGraph(options, args)
+      const resolvedNode =
+        symbolOrSpan !== undefined && symbolOrSpan.length > 0
+          ? resolveNode(graph, symbolOrSpan)
+          : undefined
+      const resolvedKey = resolvedNode !== undefined ? getNodeKey(resolvedNode) : undefined
+      const filterBySymbol = (text: string): boolean =>
+        symbolOrSpan === undefined ||
+        symbolOrSpan.length === 0 ||
+        text.includes(symbolOrSpan) ||
+        (resolvedKey !== undefined && text.includes(resolvedKey))
+      const inference = yield* decideGraphInference(graph)
+      const suggestedEdges = inference.suggestedEdges.filter(
+        (se) =>
+          se.confidenceMillis >= minConfidenceMillis &&
+          (ruleId === undefined || se.ruleId === ruleId || se.relationTag === ruleId) &&
+          (symbolOrSpan === undefined ||
+            symbolOrSpan.length === 0 ||
+            (se.sourceEntityKey !== undefined && filterBySymbol(se.sourceEntityKey)) ||
+            filterBySymbol(se.targetEntityKey) ||
+            filterBySymbol(se.rationale)),
+      )
+      const proofIds = new Set(suggestedEdges.map((se) => se.proof.proofId))
+      result = {
+        suggestedEdges,
+        proofs: inference.proofs.filter((p) => proofIds.has(p.proofId)),
+      }
+      break
+    }
     default: {
       return yield* new UnknownToolError({ toolName })
     }
@@ -736,6 +813,61 @@ export const createServer = (options?: ServerOptions): McpServer => {
     (args) =>
       Effect.runPromise(
         executeToolEffect("harness_gq_query", args, options).pipe(
+          Effect.map((data) => ({
+            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+          })),
+        ),
+      ),
+  )
+
+  server.tool(
+    "harness_graph_infer",
+    "Run the Stratified Datalog inference engine (GraphInfer.decide over @electric-sql/d2ts) on the PERA hypergraph to compute transitive closures, antipatterns (INF-04..09), and derivation proofs",
+    {
+      symbolOrSpan: z
+        .string()
+        .optional()
+        .describe("Optional symbol or span filter for derived facts and antipatterns"),
+      ruleId: z
+        .string()
+        .optional()
+        .describe("Optional Datalog rule ID filter (e.g. 'INF-04', 'INF-05')"),
+      repoRoot: z.string().optional().describe("Optional repository root path"),
+    },
+    (args) =>
+      Effect.runPromise(
+        executeToolEffect("harness_graph_infer", args, options).pipe(
+          Effect.map((data) => ({
+            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+          })),
+        ),
+      ),
+  )
+
+  server.tool(
+    "harness_graph_complete",
+    "Run normative missing-edge completion (COMP-01..05 in Stratum S3 of GraphInfer.decide) to propose SuggestedEdges with ConfidenceMillis and DerivationProof DAGs",
+    {
+      symbolOrSpan: z
+        .string()
+        .optional()
+        .describe("Optional symbol or span filter for suggested hyperedges"),
+      minConfidenceMillis: z
+        .number()
+        .int()
+        .min(0)
+        .max(1000)
+        .optional()
+        .describe("Minimum confidence in millis (0..1000, default 0)"),
+      ruleId: z
+        .string()
+        .optional()
+        .describe("Optional completion rule ID filter (e.g. 'COMP-01'..'COMP-05')"),
+      repoRoot: z.string().optional().describe("Optional repository root path"),
+    },
+    (args) =>
+      Effect.runPromise(
+        executeToolEffect("harness_graph_complete", args, options).pipe(
           Effect.map((data) => ({
             content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
           })),
