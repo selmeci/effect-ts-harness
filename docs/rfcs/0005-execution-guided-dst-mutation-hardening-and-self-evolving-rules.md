@@ -211,7 +211,16 @@ $$\text{UnexercisedError}(f, e) \;:-\; e \in \mathcal{E}_{\text{decl}}(f),\; \ne
 Similarly, for every pure `.decide` function returning a `Schema.TaggedUnion` $A = A_1 \sqcup \dots \sqcup A_k$, gate **`shallow-branch-saturation` (`SAT-02`)** verifies that all output variants $\{A_1, \dots, A_k\} \subseteq \mathcal{A}_{\text{obs}}(f)$ were observed during `fast-check` property runs.
 
 - **Filtering Semantically Equivalent Mutants via System One (`MutantEquivalenceV1` in `@harness/decision`):**
-  Mutation testing often produces benign surviving mutants whose mutated branch is already rendered unreachable by upstream `Schema.brand` / `Schema.check` refinements (e.g., mutating `amount >= 0` to `amount > 0` on a `PositiveCents` branded type). `MutantEquivalenceV1` batches up to 64 surviving mutants into a **single System One call** (`Decision.probability` asking *"Is this AST mutation semantically unreachable/equivalent given the upstream `Schema.brand` constraints?"*) so the agent only fixes genuine test gaps.
+  Mutation testing often produces benign surviving mutants whose mutated branch is already rendered unreachable by upstream `Schema.brand` / `Schema.check` refinements (e.g., mutating `amount >= 0` to `amount > 0` on a `PositiveCents` branded type). `MutantEquivalenceV1` batches up to 64 surviving mutants into a **single System One call** (`Decision.probability` asking *"Is this AST mutation semantically unreachable/equivalent given the upstream `Schema.brand` constraints?"*, memoized via the SHA-256 `CachedDecisionModel` from [RFC-0006](./0006-sub-second-incremental-harness-caching-and-performance-architecture.md)) so the agent only fixes genuine test gaps.
+- **Zero-Respawn "Mutant Schemata" & Git-Diff Line Scoping (300× Speedup Over Naive Mutation Runners):**
+  > [!IMPORTANT]
+  > Rewriting a source file on disk and spawning a fresh `vitest run` subprocess for each of $M = 30$ mutants costs $30 \times 1.2\text{ s} \approx 36\text{ s}$ in Vite/Node startup overhead alone. To keep `MutationCheck.decide` under **$< 200\text{ ms}$**:
+  > 1. **Git-Diff Line Scoping:** Candidate mutations are generated **only** for AST nodes intersecting modified line ranges in `git diff main...HEAD` (never on untouched functions in the same module).
+  > 2. **Single-Compilation Mutant Schemata (`globalThis.__HARNESS_ACTIVE_MUTANT_ID`):** All $M$ mutations for a module are woven into a **single instrumented AST buffer in memory** using a runtime switch expression:
+  >    `(globalThis.__HARNESS_ACTIVE_MUTANT_ID === 14 ? (mutatedExpr) : (originalExpr))`
+  > 3. **In-Process Loop over `ExercisesSpan` Tests:** A single warm test worker loads the instrumented module once and iterates `for (const mutantId of [1..M])`, toggling `globalThis.__HARNESS_ACTIVE_MUTANT_ID = mutantId` in RAM and executing only the `ExercisesSpan`-linked `it.effect` cases (`~120 ms` total for 30 mutants).
+- **Two-Tier DST Execution Budget (`fast` Inner Loop vs. `thorough` Gate):**
+  During interactive inner-loop checks (`verify --fast`), `it.effect.dst` executes `10` deterministic `DstSeed` schedules (`< 15 ms` via virtual `TestClock`). During full `pnpm harness verify` and CI, it executes `100` deterministic seeds.
 
 ---
 

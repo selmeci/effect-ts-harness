@@ -117,6 +117,21 @@ $$W_{\text{shadow}} \;=\; W_{\text{disk}} \;\oplus\; \Delta W_{\text{RAM}}, \qqu
      > - if `fileName` is not in `overlays`, it returns the existing AST node `oldProgram.getSourceFile(fileName)` in $O(1)$ time!
    - Only after both checks pass in the Shadow Workspace are the buffers in $\Delta W_{\text{RAM}}$ atomically committed to disk (when `--write` is passed).
 
+### 4.4 Stratum-Boundary Batch Shadow LSP Verification & $O(\log k)$ Binary-Search Fault Isolation
+
+When `GraphRewrite.decide` executes a multi-step rewrite sequence $G_0 \xRightarrow{p_1} G_1 \xRightarrow{p_2} \dots \xRightarrow{p_k} G_k = H$ across $k$ steps (e.g., $k = 12$ repairs across a module), running `createOverlayCompilerHost` and $\alpha(W_{\text{disk}} \oplus \Delta W_{\text{RAM}}^{(i)})$ after **every micro-step $i \in \{1 \dots k\}$** would multiply compiler verification cost by $k$ ($12 \times 35\text{ ms} = 420\text{ ms}$).
+
+To guarantee sub-50 ms end-to-end projection latency:
+1. **Batch Verification at Stratum/Fixpoint Boundaries:** `GraphProjector.decide` folds the sequence of `GraphPatch` operations within a rewrite phase into a single composite overlay $\Delta W_{\text{RAM}}^{(k)}$ and executes the Shadow LSP + Round-Trip check $\alpha(W_{\text{disk}} \oplus \Delta W_{\text{RAM}}^{(k)}) \cong G_k$ **once at the phase normal form $G_k$**.
+2. **Lazy $O(\log k)$ Binary-Search Isolation on Failure:** Only if the composite normal form $\Delta W_{\text{RAM}}^{(k)}$ fails TypeScript compilation or Round-Trip isomorphism does `GraphProjector.decide` bisect the prefix overlays $\Delta W_{\text{RAM}}^{(\lfloor k/2 \rfloor)}$ in at most $\lceil \log_2 k \rceil$ checks to pinpoint and discard the exact offending rewrite step $p_j$.
+
+### 4.5 Incremental Per-File Delta Re-Extraction ($\alpha_{\Delta}$) & Unified In-Memory `harness_lsp_diagnostics`
+
+1. **Incremental Round-Trip Verification ($\alpha_{\Delta}$ + `DatalogSession`):**
+   Because $\Delta W_{\text{RAM}}$ typically modifies only $1..4$ files out of hundreds of workspace files, verifying $\alpha(W_{\text{disk}} \oplus \Delta W_{\text{RAM}}) \cong H$ does **not** re-run AST extraction over untouched files. Using the content-addressable `FileGraphFragment` cache from [RFC-0006](./0006-sub-second-incremental-harness-caching-and-performance-architecture.md), $\alpha_{\Delta}$ re-extracts only the files in $\text{dom}(\Delta W_{\text{RAM}})$ (plus direct importers if exported signatures changed), splices their `EntityNode` and `RelationNode` fragments into the cached base graph, and steps `DatalogSession` with the $+1/-1$ `PlaysRoleEdge` $\mathbb{Z}$-set deltas in **$< 10\text{ ms}$**.
+2. **Eliminating `spawnSync("effect-tsgo")` in `harness_lsp_diagnostics`:**
+   Previously, `runDefaultLspDiagnostics` in [`apps/harness-mcp/src/server.ts`](../../apps/harness-mcp/src/server.ts#L251-L360) spawned a cold child process `node_modules/.bin/effect-tsgo` on every MCP call (`1,000–3,000 ms`). By routing `harness_lsp_diagnostics` through the warm in-memory `createOverlayCompilerHost(options, overlays, oldProgram)` with the `@effect/language-service` plugin attached in RAM, single-file and overlay diagnostics execute in **$< 35\text{ ms}$** with zero subprocess overhead.
+
 ```mermaid
 flowchart LR
   subgraph AST_Space["TypeScript Workspace (Disk + Shadow RAM Overlay)"]
@@ -130,10 +145,10 @@ flowchart LR
     H["Graph H\n(Synthesized EffectFn + ServiceTag + Layer + Test)"]
   end
 
-  W -->|"α = type-extractor.ts"| G
+  W -->|"α = type-extractor.ts (cached)"| G
   G -->|"DPO Rewrite (GraphRewrite.decide)"| H
-  H -->|"γ_RAM = GraphProjector (in-memory)"| W_Shadow
-  W_Shadow -.->|"Shadow Round-Trip: α(W_disk ⊕ ΔW_RAM) ≅ H"| H
+  H -->|"γ_RAM = GraphProjector (stratum batch)"| W_Shadow
+  W_Shadow -.->|"Incremental Round-Trip: α_Δ(W_disk ⊕ ΔW_RAM) ≅ H"| H
   W_Shadow -->|"Atomic commit to disk"| W_Prime
 ```
 
