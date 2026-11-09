@@ -10,25 +10,34 @@ enforced_by:
   - libs/harness/graph/src/model.ts
   - libs/harness/graph/src/concept-lattice.ts
   - libs/harness/graph/src/datalog-engine.ts
+  - libs/harness/graph/src/graph-rewrite.ts
   - libs/harness/graph/src/graph-engine.ts
   - libs/harness/graph/src/policy-check.ts
   - libs/harness/graph/src/omnigraph-sync.ts
   - libs/harness/decision/src/hole-prior-decision.ts
+  - libs/harness/decision/src/dpo-ranker-decision.ts
   - apps/harness-mcp/src/server.ts
 spans:
   - ConceptLattice.decide
   - GraphInfer.decide
+  - DatalogSession.stepFileDelta
+  - GraphRewrite.decide
   - GraphPolicy.decide
   - GraphEngine.loadSnapshot
   - GraphEngine.deserializeSnapshot
   - GraphGc.decide
   - HoleRelevanceAndEdgePrior.evaluate
+  - HoleRelevanceAndEdgePrior.evaluateBatch
+  - DpoCandidateRanker.evaluate
+  - DpoCandidateRanker.evaluateBatch
   - HarnessMcp.executeTool
 services:
   - OmnigraphSync
+  - DatalogSession
 errors:
   - ConceptLatticeCycleError
   - GraphInferenceError
+  - GraphRewriteError
   - GraphSnapshotError
 ---
 
@@ -114,6 +123,7 @@ Maintain 8 binary edge types (`RequiresService`, `FailsWith`, etc.) and `node An
 | :--- | :--- | :--- | :--- |
 | Reified PERA hypergraph contracts (`EntityNode`, `RelationNode`, `PlaysRoleEdge`) with branded scalar keys and snapshot validation | `libs/harness/graph/src/model.ts`, `libs/harness/graph/src/graph-engine.ts` | `PlaysRoleEdge`, `RelationNode`, `EntityNode`, `GraphSnapshotError` | `ConceptLattice.decide`, `GraphInfer.decide` |
 | Acyclic concept lattice validation, covariant role refinement, and inherited role closure ($\sqsubseteq^*$, $\text{roles}^*(c)$) | `libs/harness/graph/src/concept-lattice.ts` | `decideConceptLattice`, `ConceptLatticeCycleError` | `ConceptLattice.decide` |
-| Four-stratum Differential Dataflow inference (`INF-01..09`) and edge completion (`COMP-01..06`) with `R = never` | `libs/harness/graph/src/datalog-engine.ts`, `libs/harness/graph/src/policy-check.ts` | `decideGraphInference`, `GraphInferenceError`, `decideEffectGraphPolicy` | `GraphInfer.decide`, `GraphPolicy.decide`, `GraphGc.decide` |
-| Role-specific Omnigraph PG-Schema synchronization without `node Any` and MCP hypergraph inference tools with System One priors | `libs/harness/graph/src/omnigraph-sync.ts`, `libs/harness/decision/src/hole-prior-decision.ts`, `apps/harness-mcp/src/server.ts` | `OmnigraphSync`, `evaluateHoleCandidatePrior`, `harness_graph_infer`, `harness_graph_complete` | `OmnigraphSync`, `HoleRelevanceAndEdgePrior.evaluate`, `HarnessMcp.executeTool` |
+| Four-stratum Differential Dataflow inference (`INF-01..09`), edge completion (`COMP-01..06`), and incremental DBSP $\mathbb{Z}$-set sessions | `libs/harness/graph/src/datalog-engine.ts`, `libs/harness/graph/src/policy-check.ts` | `decideGraphInference`, `DatalogSession`, `GraphInferenceError`, `decideEffectGraphPolicy` | `GraphInfer.decide`, `DatalogSession.stepFileDelta`, `GraphPolicy.decide`, `GraphGc.decide` |
+| Double-Pushout (DPO) algebraic graph rewriting (`PLAN-01..04`, `REP-01..11`) preserving $V_R \in K$ and strictly decreasing $\mu(G) \in \mathbb{N}^6$ with `R = never` | `libs/harness/graph/src/graph-rewrite.ts`, `libs/harness/decision/src/dpo-ranker-decision.ts` | `decideGraphRewrite`, `GraphRewriteError`, `evaluateDpoCandidateRank`, `evaluateDpoCandidatePriorsBatch` | `GraphRewrite.decide`, `DpoCandidateRanker.evaluate`, `DpoCandidateRanker.evaluateBatch` |
+| Role-specific Omnigraph PG-Schema synchronization without `node Any` and MCP hypergraph inference tools with System One priors | `libs/harness/graph/src/omnigraph-sync.ts`, `libs/harness/decision/src/hole-prior-decision.ts`, `apps/harness-mcp/src/server.ts` | `OmnigraphSync`, `evaluateHoleCandidatePrior`, `evaluateHoleCandidatePriorsBatch`, `harness_graph_infer`, `harness_graph_complete` | `OmnigraphSync`, `HoleRelevanceAndEdgePrior.evaluate`, `HoleRelevanceAndEdgePrior.evaluateBatch`, `HarnessMcp.executeTool` |
 

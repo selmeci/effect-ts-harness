@@ -1,6 +1,7 @@
 import { Effect, Layer } from "effect"
 import * as AiError from "effect/ai/AiError"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import type { DpoCohesionLevel, DpoRepairStrategy } from "./dpo-ranker-decision.js"
 import type { HoleRelevanceLevel } from "./hole-prior-decision.js"
 import type { IdiomBlock } from "./idiom-router.js"
 import type { LearnTarget } from "./learn-decision.js"
@@ -21,6 +22,8 @@ export interface MockDecisionModelOverrides {
   readonly conflictKindLabel?: OntologyConflictKind | undefined
   readonly edgeConfidenceProb?: number | undefined
   readonly candidateRelevanceLabel?: HoleRelevanceLevel | undefined
+  readonly dpoStrategyLabel?: DpoRepairStrategy | undefined
+  readonly dpoCohesionLabel?: DpoCohesionLevel | undefined
 }
 
 export const makeMockDecisionModelLayer = (
@@ -58,7 +61,7 @@ export const makeMockDecisionModelLayer = (
               } else if (key === "contradicts") {
                 probability =
                   overrides?.contradictsProb !== undefined ? overrides.contradictsProb : 0.1
-              } else if (key === "edgeConfidence") {
+              } else if (key === "edgeConfidence" || key.startsWith("edgeConfidence_")) {
                 probability =
                   overrides?.edgeConfidenceProb !== undefined ? overrides.edgeConfidenceProb : 0.92
               }
@@ -82,6 +85,10 @@ export const makeMockDecisionModelLayer = (
               } else if (key === "conflictKind") {
                 chosenLabel =
                   overrides?.conflictKindLabel ?? (labels.includes("none") ? "none" : chosenLabel)
+              } else if (key === "repairStrategy" || key.startsWith("repairStrategy_")) {
+                chosenLabel =
+                  overrides?.dpoStrategyLabel ??
+                  (labels.includes("propagate_in_E") ? "propagate_in_E" : chosenLabel)
               }
               const probabilities: Record<string, number> = {}
               for (const l of labels) {
@@ -94,9 +101,16 @@ export const makeMockDecisionModelLayer = (
               }
             } else if (decision._tag === "Rate") {
               const labels = decision.criteria
-              let chosenLabel =
-                overrides?.candidateRelevanceLabel ??
-                (labels.includes("essential") ? "essential" : (labels[0] ?? ""))
+              let chosenLabel: string
+              if (key === "architecturalCohesion" || key.startsWith("architecturalCohesion_")) {
+                chosenLabel =
+                  overrides?.dpoCohesionLabel ??
+                  (labels.includes("idiomatic") ? "idiomatic" : (labels[0] ?? ""))
+              } else {
+                chosenLabel =
+                  overrides?.candidateRelevanceLabel ??
+                  (labels.includes("essential") ? "essential" : (labels[0] ?? ""))
+              }
               if (!labels.includes(chosenLabel)) {
                 chosenLabel = labels[0] ?? ""
               }

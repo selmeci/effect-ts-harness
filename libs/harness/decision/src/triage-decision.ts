@@ -280,6 +280,26 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     },
   },
   {
+    id: "plan-impl-signature-drift",
+    pattern: /Missing planned (?:Service|Error):|Undeclared (?:Service|Error) added:/,
+    kind: "mechanical",
+    hint: "Plan-vs-Impl signature drift in `harness done` — ensure the implemented Effect.fn preserves the exact R and E channels from `stub<A, E, R>()` (avoid namespace-qualified type aliases if the implementation yields an unqualified ServiceTag or TaggedError, or re-run `harness plan-check` + `harness verify` to refresh `.harness/plan-graph-snapshot.json`).",
+    result: {
+      kind: "mechanical",
+      hint: "Plan-vs-Impl signature drift in `harness done` — ensure the implemented Effect.fn preserves the exact R and E channels from `stub<A, E, R>()` (avoid namespace-qualified type aliases if the implementation yields an unqualified ServiceTag or TaggedError, or re-run `harness plan-check` + `harness verify` to refresh `.harness/plan-graph-snapshot.json`).",
+    },
+  },
+  {
+    id: "pera-levi-bipartite-violation",
+    pattern: /PlaysRoleEdge must connect a reified|BipartitePlaysRoleInvariant|bipartite-relation-deleted/,
+    kind: "mechanical",
+    hint: "PERA Levi hypergraph invariant violation — PlaysRoleEdge must connect a reified relation node in V_R (`EffectSignature:sig:*`, `LayerFlow:flow:*`, `TraceabilityTuple:trace:*`) to an entity node in V_E (`EffectFn:*`, `ServiceTag:*`, `ServiceLayer:*`, `TaggedError:*`, `ContractSchema:*`, `EarsSpec:*`, `AdrDoc:*`, `PatternDoc:*`, `TestSuite:*`) with all required relation fields populated.",
+    result: {
+      kind: "mechanical",
+      hint: "PERA Levi hypergraph invariant violation — PlaysRoleEdge must connect a reified relation node in V_R (`EffectSignature:sig:*`, `LayerFlow:flow:*`, `TraceabilityTuple:trace:*`) to an entity node in V_E (`EffectFn:*`, `ServiceTag:*`, `ServiceLayer:*`, `TaggedError:*`, `ContractSchema:*`, `EarsSpec:*`, `AdrDoc:*`, `PatternDoc:*`, `TestSuite:*`) with all required relation fields populated.",
+    },
+  },
+  {
     pattern: /harness(?:\/|\()syntax-bans\)?/,
     result: {
       kind: "mechanical",

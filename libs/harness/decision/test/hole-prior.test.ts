@@ -1,13 +1,16 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Effect, Exit, Layer, Schema } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import * as AiError from "effect/ai/AiError"
 import type * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import { TestClock } from "effect/testing"
 import {
   CandidateSymbolKey,
   HoleRelevanceAndEdgePriorV1,
   ProposedRoleName,
+  buildBatchedHolePriorDecision,
   evaluateHoleCandidatePrior,
+  evaluateHoleCandidatePriorsBatch,
   makeFailingDecisionModelLayer,
   makeMockDecisionModelLayer,
 } from "../src/index.js"
@@ -60,7 +63,10 @@ describe("HoleRelevanceAndEdgePriorV1 (System One Calibrated Edge & PPR Prior Se
           earsClauseContext: "Where CartRepo is configured",
         }).pipe(Effect.provide(makeFailingDecisionModelLayer()))
 
-        expect(res.source).toEqual({ _tag: "DeterministicFallback" })
+        expect(res.source).toEqual({
+          _tag: "DeterministicFallback",
+          reason: "timeout-or-unavailable",
+        })
         expect(res.edgeConfidenceMillis).toBe(500)
         expect(res.teleportationWeightMillis).toBe(333)
         expect(res.relevanceLabel).toBe("tangential")
@@ -115,32 +121,66 @@ describe("HoleRelevanceAndEdgePriorV1 (System One Calibrated Edge & PPR Prior Se
     }),
   )
 
-  it.effect("falls back to irrelevant (0 weight) on unknown label", () =>
-    Effect.gen(function* () {
-      const unknownLabelLayer = Layer.succeed(DecisionModel.DecisionModel, {
-        [DecisionModel.TypeId]: DecisionModel.TypeId,
-        decide: <Input extends Schema.Constraint, Decisions extends Record<string, Decision.Any>>(
-          _definition: Decision.Definition<Input, Decisions>,
-          _options: DecisionModel.DecideOptions<Input>,
-        ): Effect.Effect<DecisionModel.DecideResponse<Decisions>, AiError.AiError, never> => {
-          const answers = {
-            edgeConfidence: { probability: 0.8 },
-            candidateRelevance: { rating: 0, label: "unknown-label" },
-          } as Decision.Answers<Decisions>
-          return Effect.succeed({
-            answers,
-            usage: new DecisionModel.DecisionUsage({}),
-          })
-        },
-      })
+  it.effect(
+    "returns DeterministicFallback (invalid-output) on unknown relevance label or NaN probability instead of fabricating DecisionModel output",
+    () =>
+      Effect.gen(function* () {
+        const unknownLabelLayer = Layer.succeed(DecisionModel.DecisionModel, {
+          [DecisionModel.TypeId]: DecisionModel.TypeId,
+          decide: <Input extends Schema.Constraint, Decisions extends Record<string, Decision.Any>>(
+            _definition: Decision.Definition<Input, Decisions>,
+            _options: DecisionModel.DecideOptions<Input>,
+          ): Effect.Effect<DecisionModel.DecideResponse<Decisions>, AiError.AiError, never> => {
+            const answers = {
+              edgeConfidence: { probability: 0.8 },
+              candidateRelevance: { rating: 0, label: "unknown-label" },
+            } as Decision.Answers<Decisions>
+            return Effect.succeed({
+              answers,
+              usage: new DecisionModel.DecisionUsage({}),
+            })
+          },
+        })
 
-      const res = yield* evaluateHoleCandidatePrior(defaultInput).pipe(
-        Effect.provide(unknownLabelLayer),
-      )
-      expect(res.source).toEqual({ _tag: "DecisionModel" })
-      expect(res.relevanceLabel).toBe("irrelevant")
-      expect(res.teleportationWeightMillis).toBe(0)
-    }),
+        const res = yield* evaluateHoleCandidatePrior(defaultInput).pipe(
+          Effect.provide(unknownLabelLayer),
+        )
+        expect(res.source).toEqual({
+          _tag: "DeterministicFallback",
+          reason: "invalid-output",
+        })
+        expect(res.edgeConfidenceMillis).toBe(500)
+        expect(res.relevanceLabel).toBe("tangential")
+        expect(res.teleportationWeightMillis).toBe(333)
+
+        const nanProbLayer = Layer.succeed(DecisionModel.DecisionModel, {
+          [DecisionModel.TypeId]: DecisionModel.TypeId,
+          decide: <Input extends Schema.Constraint, Decisions extends Record<string, Decision.Any>>(
+            _definition: Decision.Definition<Input, Decisions>,
+            _options: DecisionModel.DecideOptions<Input>,
+          ): Effect.Effect<DecisionModel.DecideResponse<Decisions>, AiError.AiError, never> => {
+            const answers = {
+              edgeConfidence: { probability: Number.NaN },
+              candidateRelevance: { rating: 3, label: "essential" },
+            } as Decision.Answers<Decisions>
+            return Effect.succeed({
+              answers,
+              usage: new DecisionModel.DecisionUsage({}),
+            })
+          },
+        })
+
+        const nanRes = yield* evaluateHoleCandidatePrior(defaultInput).pipe(
+          Effect.provide(nanProbLayer),
+        )
+        expect(nanRes.source).toEqual({
+          _tag: "DeterministicFallback",
+          reason: "invalid-output",
+        })
+        expect(nanRes.edgeConfidenceMillis).toBe(500)
+        expect(nanRes.relevanceLabel).toBe("tangential")
+        expect(nanRes.teleportationWeightMillis).toBe(333)
+      }),
   )
 
   it.effect("clamps edge confidence probability to [0, 1000]", () =>
@@ -175,7 +215,7 @@ describe("HoleRelevanceAndEdgePriorV1 (System One Calibrated Edge & PPR Prior Se
     }),
   )
 
-  it.live(
+  it.effect(
     "falls back deterministically when DecisionModel times out after 1500ms",
     () =>
       Effect.gen(function* () {
@@ -192,11 +232,16 @@ describe("HoleRelevanceAndEdgePriorV1 (System One Calibrated Edge & PPR Prior Se
           }),
         )
 
-        const res = yield* evaluateHoleCandidatePrior(defaultInput).pipe(
-          Effect.provide(timeoutLayer),
+        const fiber = yield* Effect.forkChild(
+          evaluateHoleCandidatePrior(defaultInput).pipe(Effect.provide(timeoutLayer)),
         )
+        yield* TestClock.adjust("2000 millis")
+        const res = yield* Fiber.join(fiber)
 
-        expect(res.source).toEqual({ _tag: "DeterministicFallback" })
+        expect(res.source).toEqual({
+          _tag: "DeterministicFallback",
+          reason: "timeout-or-unavailable",
+        })
         expect(res.edgeConfidenceMillis).toBe(500)
         expect(res.teleportationWeightMillis).toBe(333)
         expect(res.relevanceLabel).toBe("tangential")
@@ -218,4 +263,86 @@ describe("HoleRelevanceAndEdgePriorV1 (System One Calibrated Edge & PPR Prior Se
       expect(Cause.hasDies(exit.cause)).toBe(true)
     }
   })
+
+  it.effect(
+    "REQ-3.1: evaluates batched HoleRelevanceAndEdgePriorV1 (up to 32 candidates = 64 questions per forward pass) and produces SemanticEdgePriors across multi-chunk batches",
+    () =>
+      Effect.gen(function* () {
+        const batchedDef = buildBatchedHolePriorDecision(32)
+        expect(Object.keys(batchedDef.decisions)).toHaveLength(64)
+
+        const emptyBatch = yield* evaluateHoleCandidatePriorsBatch([]).pipe(
+          Effect.provide(makeMockDecisionModelLayer()),
+        )
+        expect(emptyBatch.results).toHaveLength(0)
+
+        const batchInputs = [
+          defaultInput,
+          {
+            holeSpanName: "Cart.addItem" as const,
+            holeSignatureSummary: "Effect<CartUpdated, CartLimitExceededError, CartRepo>",
+            candidateSymbolKey: CandidateSymbolKey.make("ServiceTag:CartRepo"),
+            candidateSignatureSummary: "Context.Service<CartRepo>",
+            proposedRole: ProposedRoleName.make("requires-service"),
+            earsClauseContext: "Where CartRepo is configured",
+          },
+        ]
+
+        const batchRes = yield* evaluateHoleCandidatePriorsBatch(batchInputs).pipe(
+          Effect.provide(
+            makeMockDecisionModelLayer({
+              edgeConfidenceProb: 0.91,
+              candidateRelevanceLabel: "essential",
+            }),
+          ),
+        )
+
+        expect(batchRes.source).toEqual({ _tag: "DecisionModel" })
+        expect(batchRes.results).toHaveLength(2)
+        expect(
+          batchRes.edgeConfidenceOverrides[
+            "EffectFn:libs/sample/domain/src/cart.ts#decide:callee"
+          ],
+        ).toBe(910)
+        expect(batchRes.edgeConfidenceOverrides["ServiceTag:CartRepo:requires-service"]).toBe(910)
+        expect(
+          batchRes.holeTeleportationWeights[
+            CandidateSymbolKey.make("EffectFn:libs/sample/domain/src/cart.ts#decide")
+          ],
+        ).toBe(1000)
+
+        // Multi-chunk batch (35 candidates => chunk of 32 + chunk of 3)
+        const multiChunkInputs = Array.from({ length: 35 }, (_, idx) => ({
+          ...defaultInput,
+          candidateSymbolKey: CandidateSymbolKey.make(`ServiceTag:Svc${idx}`),
+          proposedRole: ProposedRoleName.make("requires-service"),
+        }))
+        const multiChunkRes = yield* evaluateHoleCandidatePriorsBatch(multiChunkInputs).pipe(
+          Effect.provide(
+            makeMockDecisionModelLayer({
+              edgeConfidenceProb: 0.88,
+              candidateRelevanceLabel: "helpful",
+            }),
+          ),
+        )
+        expect(multiChunkRes.results).toHaveLength(35)
+        expect(multiChunkRes.edgeConfidenceOverrides["ServiceTag:Svc34:requires-service"]).toBe(
+          880,
+        )
+
+        // Fallback on failing model
+        const fallbackBatch = yield* evaluateHoleCandidatePriorsBatch(batchInputs).pipe(
+          Effect.provide(makeFailingDecisionModelLayer()),
+        )
+        expect(fallbackBatch.source).toEqual({
+          _tag: "DeterministicFallback",
+          reason: "timeout-or-unavailable",
+        })
+        expect(fallbackBatch.results).toHaveLength(2)
+        expect(fallbackBatch.edgeConfidenceOverrides["ServiceTag:CartRepo:requires-service"]).toBe(
+          500,
+        )
+      }),
+  )
 })
+

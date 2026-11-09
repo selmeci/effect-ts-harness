@@ -2,9 +2,12 @@ import { describe, expect, it } from "@effect/vitest"
 import { Effect, Schema } from "effect"
 import {
   ConfidenceMillis,
+  DatalogFilePath,
   DatalogRuleId,
+  DatalogSession,
   NodeKey,
   PageRankScoreMillis,
+  PlaysRoleEdge,
   ProofHeight,
   ProofId,
   RelationId,
@@ -13,7 +16,9 @@ import {
   buildHarnessGraph,
   decideGraphInference,
   flixConfidenceReducer,
+  isBipartitePlaysRoleIds,
   minHeightReducer,
+  stepDatalogFileDelta,
 } from "../src/index.js"
 
 const CallChainHopSpec = Schema.Struct({
@@ -252,6 +257,7 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
         expect(STANDARD_DATALOG_RULES.length).toBe(15)
 
         const res = yield* decideGraphInference(graph)
+        expect(res.iterations).toBeLessThanOrEqual(4)
 
         // fnA transitively requires SampleRepo via fnB -> fnC
         const fnAReq = res.effectiveRequires.find(
@@ -1164,5 +1170,397 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
         }
       }),
   )
+
+  it("REQ-1.1: enforces the BipartitePlaysRoleInvariant Schema.check (V_R -> V_E) on PlaysRoleEdge and rejects V_E -> V_E, V_R -> V_R, and V_E -> V_R", () => {
+    const validEdge = Schema.decodeSync(PlaysRoleEdge)({
+      _tag: "PlaysRole",
+      role: "requires-service",
+      relationId: "EffectSignature:libs/sample/domain/src/a.ts#fnA",
+      entityKey: "ServiceTag:SampleRepo",
+    })
+    expect(validEdge.role).toBe(RoleName.make("requires-service"))
+    expect(
+      isBipartitePlaysRoleIds(
+        RelationId.make("EffectSignature:libs/sample/domain/src/a.ts#fnA"),
+        NodeKey.make("ServiceTag:SampleRepo"),
+      ),
+    ).toBe(true)
+
+    // V_E -> V_E is rejected
+    expect(() =>
+      Schema.decodeSync(PlaysRoleEdge)({
+        _tag: "PlaysRole",
+        role: "callee",
+        relationId: "EffectFn:libs/sample/domain/src/a.ts#fnA",
+        entityKey: "EffectFn:libs/sample/domain/src/b.ts#fnB",
+      }),
+    ).toThrow()
+
+    // V_R -> V_R is rejected
+    expect(() =>
+      Schema.decodeSync(PlaysRoleEdge)({
+        _tag: "PlaysRole",
+        role: "callee",
+        relationId: "EffectSignature:libs/sample/domain/src/a.ts#fnA",
+        entityKey: "LayerFlow:libs/sample/infra/src/layer.ts#Live",
+      }),
+    ).toThrow()
+
+    // V_E -> V_R is rejected
+    expect(() =>
+      Schema.decodeSync(PlaysRoleEdge)({
+        _tag: "PlaysRole",
+        role: "caller",
+        relationId: "EffectFn:libs/sample/domain/src/a.ts#fnA",
+        entityKey: "EffectSignature:libs/sample/domain/src/a.ts#fnA",
+      }),
+    ).toThrow()
+  })
+
+  it.effect.prop(
+    "Flix confidence lattice reducer obeys idempotence, commutativity, and associativity across arbitrary confidence scores",
+    [
+      Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 0, maximum: 1000 }))),
+      Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 0, maximum: 1000 }))),
+      Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 0, maximum: 1000 }))),
+    ],
+    ([c1, c2, c3]) =>
+      Effect.sync(() => {
+        const a = {
+          confidenceMillis: ConfidenceMillis.make(c1),
+          parentProofIds: [ProofId.make("proof:a")],
+        }
+        const b = {
+          confidenceMillis: ConfidenceMillis.make(c2),
+          parentProofIds: [ProofId.make("proof:b")],
+        }
+        const c = {
+          confidenceMillis: ConfidenceMillis.make(c3),
+          parentProofIds: [ProofId.make("proof:c")],
+        }
+
+        // Idempotence: join(a, a) == a
+        const idemp = flixConfidenceReducer([
+          [a, 1],
+          [a, 1],
+        ])
+        expect(idemp[0]?.[0]).toEqual(a)
+
+        // Commutativity: join(a, b) == join(b, a)
+        const ab = flixConfidenceReducer([
+          [a, 1],
+          [b, 1],
+        ])
+        const ba = flixConfidenceReducer([
+          [b, 1],
+          [a, 1],
+        ])
+        expect(ab).toEqual(ba)
+
+        // Associativity: join(join(a, b), c) == join(a, join(b, c))
+        const abJoined = ab[0]![0]
+        const bcJoined = flixConfidenceReducer([
+          [b, 1],
+          [c, 1],
+        ])[0]![0]
+        const leftAssoc = flixConfidenceReducer([
+          [abJoined, 1],
+          [c, 1],
+        ])
+        const rightAssoc = flixConfidenceReducer([
+          [a, 1],
+          [bcJoined, 1],
+        ])
+        expect(leftAssoc).toEqual(rightAssoc)
+        expect(leftAssoc[0]?.[0].confidenceMillis).toBe(
+          ConfidenceMillis.make(Math.max(c1, c2, c3)),
+        )
+      }),
+  )
+
+  it.effect(
+    "REQ-1.3: DatalogSession.stepFileDelta steps incremental DBSP Z-set deltas (+1 insertions and -1 retractions) on single-file edits with 100% parity with GraphInfer.decide",
+    () =>
+      Effect.gen(function* () {
+        const initialGraph = buildHarnessGraph({
+          fns: [
+            {
+              qualname: "libs/sample/domain/src/a.ts#fnA",
+              spanName: "Sample.fnA",
+              file: "libs/sample/domain/src/a.ts",
+              line: 1,
+              packageTag: "domain",
+              successType: "void",
+              isStub: false,
+            },
+            {
+              qualname: "libs/sample/domain/src/b.ts#fnB",
+              spanName: "Sample.fnB",
+              file: "libs/sample/domain/src/b.ts",
+              line: 1,
+              packageTag: "domain",
+              successType: "void",
+              isStub: false,
+            },
+          ],
+          services: [
+            {
+              tagId: "RepoA",
+              name: "RepoA",
+              packageTag: "service",
+              file: "libs/sample/service/src/repo.ts",
+            },
+            {
+              tagId: "SqlClient",
+              name: "SqlClient",
+              packageTag: "infra",
+              file: "libs/sample/infra/src/sql.ts",
+            },
+          ],
+          tracedCalls: [
+            {
+              callerQualname: "libs/sample/domain/src/a.ts#fnA",
+              calleeQualname: "libs/sample/domain/src/b.ts#fnB",
+              callCount: 1,
+              receiverLayer: null,
+            },
+          ],
+          requiresService: [
+            {
+              fnQualname: "libs/sample/domain/src/b.ts#fnB",
+              tagId: "SqlClient",
+            },
+          ],
+        })
+
+        const program = Effect.gen(function* () {
+          const session = yield* DatalogSession
+          const initialInf = yield* session.latestInference
+          expect(
+            initialInf.antiPatterns.some((ap) => ap.ruleId === "domain-requires-infra"),
+          ).toBe(true)
+
+          // Edit b.ts so fnB requires RepoA (type:service) instead of SqlClient (type:infra)
+          const editedBSubgraph = buildHarnessGraph({
+            fns: [
+              {
+                qualname: "libs/sample/domain/src/b.ts#fnB",
+                spanName: "Sample.fnB",
+                file: "libs/sample/domain/src/b.ts",
+                line: 1,
+                packageTag: "domain",
+                successType: "void",
+                isStub: false,
+              },
+            ],
+            services: [
+              {
+                tagId: "RepoA",
+                name: "RepoA",
+                packageTag: "service",
+                file: "libs/sample/service/src/repo.ts",
+              },
+            ],
+            requiresService: [
+              {
+                fnQualname: "libs/sample/domain/src/b.ts#fnB",
+                tagId: "RepoA",
+              },
+            ],
+          })
+
+          const step1 = yield* stepDatalogFileDelta({
+            filePath: DatalogFilePath.make("libs/sample/domain/src/b.ts"),
+            nextGraph: editedBSubgraph,
+          })
+
+          expect(step1.epoch).toBe(2)
+          expect(step1.retractedFactCount).toBeGreaterThan(0)
+          expect(step1.insertedFactCount).toBeGreaterThan(0)
+          expect(
+            step1.inference.antiPatterns.some((ap) => ap.ruleId === "domain-requires-infra"),
+          ).toBe(false)
+          expect(
+            step1.inference.effectiveRequires.some(
+              (r) =>
+                r.callerKey === NodeKey.make("EffectFn:libs/sample/domain/src/a.ts#fnA") &&
+                r.serviceKey === NodeKey.make("ServiceTag:RepoA"),
+            ),
+          ).toBe(true)
+
+          const expectedScratchGraph = buildHarnessGraph({
+            fns: [
+              {
+                qualname: "libs/sample/domain/src/a.ts#fnA",
+                spanName: "Sample.fnA",
+                file: "libs/sample/domain/src/a.ts",
+                line: 1,
+                packageTag: "domain",
+                successType: "void",
+                isStub: false,
+              },
+              {
+                qualname: "libs/sample/domain/src/b.ts#fnB",
+                spanName: "Sample.fnB",
+                file: "libs/sample/domain/src/b.ts",
+                line: 1,
+                packageTag: "domain",
+                successType: "void",
+                isStub: false,
+              },
+            ],
+            services: [
+              {
+                tagId: "RepoA",
+                name: "RepoA",
+                packageTag: "service",
+                file: "libs/sample/service/src/repo.ts",
+              },
+              {
+                tagId: "SqlClient",
+                name: "SqlClient",
+                packageTag: "infra",
+                file: "libs/sample/infra/src/sql.ts",
+              },
+            ],
+            tracedCalls: [
+              {
+                callerQualname: "libs/sample/domain/src/a.ts#fnA",
+                calleeQualname: "libs/sample/domain/src/b.ts#fnB",
+                callCount: 1,
+                receiverLayer: null,
+              },
+            ],
+            requiresService: [
+              {
+                fnQualname: "libs/sample/domain/src/b.ts#fnB",
+                tagId: "RepoA",
+              },
+            ],
+          })
+          const batchParity = yield* decideGraphInference(expectedScratchGraph)
+          expect(step1.inference).toEqual(batchParity)
+
+          // Verify atomic snapshot matches current state
+          const snap1 = yield* session.snapshot
+          expect(snap1.epoch).toBe(2)
+          expect(snap1.inference).toEqual(batchParity)
+
+          // Step 2: no-op edit on b.ts produces 0 retractions and 0 insertions
+          const step2 = yield* stepDatalogFileDelta({
+            filePath: DatalogFilePath.make("libs/sample/domain/src/b.ts"),
+            nextGraph: editedBSubgraph,
+          })
+          expect(step2.epoch).toBe(3)
+          expect(step2.retractedFactCount).toBe(0)
+          expect(step2.insertedFactCount).toBe(0)
+          expect(step2.inference).toEqual(batchParity)
+
+          // Step 3 (REQ-1.4): root-slash-only filePath fails with GraphInferenceError without corrupting session state
+          const invalidExit = yield* Effect.exit(
+            stepDatalogFileDelta({
+              filePath: DatalogFilePath.make("/"),
+              nextGraph: editedBSubgraph,
+            }),
+          )
+          expect(invalidExit._tag).toBe("Failure")
+          const latestAfterFailure = yield* session.latestInference
+          expect(latestAfterFailure).toEqual(batchParity)
+
+          // Step 4: target:role confidence override in priors is honoured
+          const stepWithPriors = yield* stepDatalogFileDelta({
+            filePath: DatalogFilePath.make("libs/sample/domain/src/b.ts"),
+            nextGraph: editedBSubgraph,
+            priors: {
+              edgeConfidenceOverrides: {
+                "ServiceTag:RepoA:provided-service": ConfidenceMillis.make(975),
+              },
+              holeTeleportationWeights: {},
+            },
+          })
+          const comp03Override = stepWithPriors.inference.suggestedEdges.find(
+            (s) =>
+              s.ruleId === "COMP-03" &&
+              s.targetEntityKey === NodeKey.make("ServiceTag:RepoA"),
+          )
+          expect(comp03Override?.confidenceMillis).toBe(ConfidenceMillis.make(975))
+
+          // Step 5: deleting b.ts (empty subgraph) retracts all facts for b.ts and removes fnB from currentGraph
+          const deletedBStep = yield* stepDatalogFileDelta({
+            filePath: DatalogFilePath.make("libs/sample/domain/src/b.ts"),
+            nextGraph: buildHarnessGraph({}),
+          })
+          expect(deletedBStep.retractedFactCount).toBeGreaterThan(0)
+          const graphAfterDelete = yield* session.currentGraph
+          expect(
+            graphAfterDelete.nodeIndexByKey.has(
+              NodeKey.make("EffectFn:libs/sample/domain/src/b.ts#fnB"),
+            ),
+          ).toBe(false)
+        })
+
+        yield* program.pipe(Effect.provide(DatalogSession.layer(initialGraph)))
+      }),
+  )
+
+  it.effect(
+    "DatalogSession exact workspace path matching isolates libs/pkg-a/src/index.ts from libs/pkg-b/src/index.ts",
+    () =>
+      Effect.gen(function* () {
+        const twoPkgGraph = buildHarnessGraph({
+          fns: [
+            {
+              qualname: "libs/pkg-a/src/index.ts#fnA",
+              spanName: "PkgA.fnA",
+              file: "libs/pkg-a/src/index.ts",
+              line: 1,
+              packageTag: "domain",
+              successType: "void",
+              isStub: false,
+            },
+            {
+              qualname: "libs/pkg-b/src/index.ts#fnB",
+              spanName: "PkgB.fnB",
+              file: "libs/pkg-b/src/index.ts",
+              line: 1,
+              packageTag: "domain",
+              successType: "void",
+              isStub: false,
+            },
+          ],
+        })
+
+        const editedPkgA = buildHarnessGraph({
+          fns: [
+            {
+              qualname: "libs/pkg-a/src/index.ts#fnAUpdated",
+              spanName: "PkgA.fnAUpdated",
+              file: "libs/pkg-a/src/index.ts",
+              line: 1,
+              packageTag: "domain",
+              successType: "void",
+              isStub: false,
+            },
+          ],
+        })
+
+        const program = Effect.gen(function* () {
+          yield* stepDatalogFileDelta({
+            filePath: DatalogFilePath.make("/workspace/repo/libs/pkg-a/src/index.ts"),
+            nextGraph: editedPkgA,
+          })
+          const snap = yield* (yield* DatalogSession).snapshot
+          expect(
+            snap.graph.nodeIndexByKey.has(NodeKey.make("EffectFn:libs/pkg-a/src/index.ts#fnAUpdated")),
+          ).toBe(true)
+          expect(
+            snap.graph.nodeIndexByKey.has(NodeKey.make("EffectFn:libs/pkg-b/src/index.ts#fnB")),
+          ).toBe(true)
+        })
+
+        yield* program.pipe(Effect.provide(DatalogSession.layer(twoPkgGraph)))
+      }),
+  )
 })
+
 

@@ -5,5 +5,6 @@ export * from "./plan-coverage-decision.js"
 export * from "./learn-decision.js"
 export * from "./ontology-conflict-decision.js"
 export * from "./hole-prior-decision.js"
+export * from "./dpo-ranker-decision.js"
 export * from "./mock-layer.js"
 

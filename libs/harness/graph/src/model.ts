@@ -351,6 +351,60 @@ export const isStandardRoleName = (role: string): role is StandardRoleName =>
 export const getArchimateRelationForRole = (role: string): string | undefined =>
   isStandardRoleName(role) ? ARCHIMATE_BY_ROLE[role] : undefined
 
+export const ENTITY_NODE_TAGS = [
+  "EffectFn",
+  "ServiceTag",
+  "ServiceLayer",
+  "TaggedError",
+  "SchemaDef",
+  "VitestCase",
+  "PatternDoc",
+  "AdrDoc",
+  "EarsSpec",
+] as const
+
+export const EntityNodeTag = Schema.Literals(ENTITY_NODE_TAGS)
+export type EntityNodeTag = typeof EntityNodeTag.Type
+
+export const RELATION_TAGS = [
+  "EffectSignature",
+  "LayerFlow",
+  "TraceabilityTuple",
+  "HttpEndpointTuple",
+  "MigrationTuple",
+] as const
+
+export const RelationTag = Schema.Literals(RELATION_TAGS)
+export type RelationTag = typeof RelationTag.Type
+
+export const isBipartitePlaysRoleIds = (
+  relationId: RelationId,
+  entityKey: NodeKey,
+): boolean => {
+  if ((relationId as string) === (entityKey as string)) {
+    return false
+  }
+  const hasEntityPrefixInRelation = ENTITY_NODE_TAGS.some((tag) =>
+    relationId.startsWith(`${tag}:`),
+  )
+  if (hasEntityPrefixInRelation) {
+    return false
+  }
+  const hasValidEntityPrefix = ENTITY_NODE_TAGS.some((tag) =>
+    entityKey.startsWith(`${tag}:`),
+  )
+  if (hasValidEntityPrefix) {
+    return true
+  }
+  const hasRelationPrefixInEntity =
+    RELATION_TAGS.some((tag) => entityKey.startsWith(`${tag}:`)) ||
+    /^(?:sig|layer-flow|trace|http-endpoint|mig):/.test(entityKey)
+  if (hasRelationPrefixInEntity) {
+    return false
+  }
+  return true
+}
+
 export const PlaysRoleEdge = Schema.TaggedStruct("PlaysRole", {
   relationId: RelationId,
   entityKey: NodeKey,
@@ -358,7 +412,18 @@ export const PlaysRoleEdge = Schema.TaggedStruct("PlaysRole", {
   archimateRelation: Schema.optional(Schema.String),
   callCount: Schema.optional(Schema.Int),
   receiverLayer: Schema.optional(Schema.NullOr(Schema.String)),
-})
+}).pipe(
+  Schema.check(
+    Schema.makeFilter(
+      (edge) => isBipartitePlaysRoleIds(edge.relationId, edge.entityKey),
+      {
+        title: "BipartitePlaysRoleInvariant",
+        description:
+          "PlaysRoleEdge must connect a reified RelationNode (V_R) to an EntityNode (V_E) in G_Levi",
+      },
+    ),
+  ),
+)
 export type PlaysRoleEdge = typeof PlaysRoleEdge.Type
 
 export const HarnessEdge = PlaysRoleEdge
@@ -533,17 +598,6 @@ export const InferredAntiPattern = Schema.Struct({
   proof: DerivationProof,
 })
 export type InferredAntiPattern = typeof InferredAntiPattern.Type
-
-export const RELATION_TAGS = [
-  "EffectSignature",
-  "LayerFlow",
-  "TraceabilityTuple",
-  "HttpEndpointTuple",
-  "MigrationTuple",
-] as const
-
-export const RelationTag = Schema.Literals(RELATION_TAGS)
-export type RelationTag = typeof RelationTag.Type
 
 export const SuggestedEdge = Schema.Struct({
   ruleId: DatalogRuleId,
@@ -759,4 +813,186 @@ export interface HarnessGraph {
   readonly branchingViolations?: ReadonlyArray<BranchingViolation> | undefined
   readonly unresolvedReferences?: ReadonlyArray<UnresolvedGraphReference> | undefined
 }
+
+// ============================================================================
+// 8. Incremental DBSP Z-Set Session Contracts (DatalogSession, RFC-0002 §4.5)
+// ============================================================================
+
+export const DatalogFilePath = Schema.NonEmptyString.pipe(Schema.brand("DatalogFilePath"))
+export type DatalogFilePath = typeof DatalogFilePath.Type
+
+export const NonNegativeCount = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+  Schema.brand("NonNegativeCount"),
+)
+export type NonNegativeCount = typeof NonNegativeCount.Type
+
+export const DatalogFileDeltaResult = Schema.Struct({
+  filePath: DatalogFilePath,
+  epoch: NonNegativeCount,
+  retractedFactCount: NonNegativeCount,
+  insertedFactCount: NonNegativeCount,
+  inference: GraphInferenceResult,
+})
+export type DatalogFileDeltaResult = typeof DatalogFileDeltaResult.Type
+
+// ============================================================================
+// 9. Double-Pushout (DPO) Graph Rewriting Contracts (GraphRewrite.decide, RFC-0003)
+// ============================================================================
+
+export const RewriteRuleId = Schema.NonEmptyString.pipe(Schema.brand("RewriteRuleId"))
+export type RewriteRuleId = typeof RewriteRuleId.Type
+
+export const DpoPriorKey = Schema.NonEmptyString.pipe(Schema.brand("DpoPriorKey"))
+export type DpoPriorKey = typeof DpoPriorKey.Type
+
+export const formatDpoPriorKey = (
+  primaryNodeKey: NodeKey | string,
+  ruleId: RewriteRuleId | string,
+): DpoPriorKey => {
+  const sanitizedRuleId = String(ruleId).replace(/::/g, ":")
+  return DpoPriorKey.make(`${primaryNodeKey}::${sanitizedRuleId}`)
+}
+
+export const parseDpoPriorKey = (
+  priorKey: DpoPriorKey | string,
+): { readonly primaryNodeKey: NodeKey; readonly ruleId: RewriteRuleId } | undefined => {
+  const raw = String(priorKey)
+  const sepIdx = raw.lastIndexOf("::")
+  if (sepIdx <= 0 || sepIdx + 2 >= raw.length) {
+    return undefined
+  }
+  return {
+    primaryNodeKey: NodeKey.make(raw.slice(0, sepIdx)),
+    ruleId: RewriteRuleId.make(raw.slice(sepIdx + 2)),
+  }
+}
+
+export const BOUNDARY_CALLER_PATTERN =
+  /\b(?:http|endpoint|rpc|controller|handler|route|worker|relay)\b/i
+
+export const isBoundaryCallerQualname = (text: string): boolean =>
+  BOUNDARY_CALLER_PATTERN.test(text)
+
+export const REWRITE_PHASES = [
+  "PLAN",
+  "REPAIR_ARCH",
+  "REPAIR_CODE",
+  "CLEANUP",
+] as const
+
+export const RewritePhase = Schema.Literals(REWRITE_PHASES)
+export type RewritePhase = typeof RewritePhase.Type
+
+export const RewriteMode = Schema.Literals([
+  "auto-plan",
+  "auto-repair",
+  "cleanup",
+  "full",
+])
+export type RewriteMode = typeof RewriteMode.Type
+
+export const RewriteRuleCategory = Schema.Literals([
+  "auto-plan",
+  "auto-repair",
+  "cleanup",
+])
+export type RewriteRuleCategory = typeof RewriteRuleCategory.Type
+
+export const GraphMeasure = Schema.Struct({
+  archViolations: NonNegativeCount,
+  unmappedSpecSymbols: NonNegativeCount,
+  codeHygieneViolations: NonNegativeCount,
+  missingLayerProviders: NonNegativeCount,
+  untestedDomainSpans: NonNegativeCount,
+  unresolvedSuggestedEdges: NonNegativeCount,
+})
+export type GraphMeasure = typeof GraphMeasure.Type
+
+export const GraphPatch = Schema.Struct({
+  ruleId: RewriteRuleId,
+  phase: RewritePhase,
+  ruleCategory: RewriteRuleCategory,
+  description: Schema.String,
+  primaryNodeKey: NodeKey,
+  preservedInterfaceKeys: Schema.Array(NodeKey),
+  deletedEntityKeys: Schema.Array(NodeKey),
+  deletedRelationIds: Schema.Array(RelationId),
+  deletedRoleEdges: Schema.Array(PlaysRoleEdge),
+  insertedEntityNodes: Schema.Array(EntityNode),
+  insertedRelationNodes: Schema.Array(RelationNode),
+  insertedRoleEdges: Schema.Array(PlaysRoleEdge),
+  beforeMeasure: GraphMeasure,
+  afterMeasure: GraphMeasure,
+})
+export type GraphPatch = typeof GraphPatch.Type
+
+export const SystemOneScoreMillis = Schema.Int.pipe(
+  Schema.check(Schema.isBetween({ minimum: 0, maximum: 1000 })),
+  Schema.brand("SystemOneScoreMillis"),
+)
+export type SystemOneScoreMillis = typeof SystemOneScoreMillis.Type
+
+export const DpoCandidatePriors = Schema.Record(Schema.String, SystemOneScoreMillis)
+export type DpoCandidatePriors = typeof DpoCandidatePriors.Type
+
+export const CandidateRank = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(1)),
+  Schema.brand("CandidateRank"),
+)
+export type CandidateRank = typeof CandidateRank.Type
+
+export const RewriteCandidate = Schema.Struct({
+  rank: CandidateRank,
+  rationale: Schema.String,
+  patches: Schema.Array(GraphPatch),
+  finalMeasure: GraphMeasure,
+  systemOneTieBreaker: SystemOneScoreMillis,
+  isPolicyClean: Schema.Boolean,
+})
+export type RewriteCandidate = typeof RewriteCandidate.Type
+
+export const GraphRewriteResult = Schema.Struct({
+  mode: RewriteMode,
+  initialMeasure: GraphMeasure,
+  recommendedCandidate: Schema.OptionFromNullOr(RewriteCandidate),
+  alternativeCandidates: Schema.Array(RewriteCandidate),
+})
+export type GraphRewriteResult = typeof GraphRewriteResult.Type
+
+export interface GraphRewriteOutcome {
+  readonly result: GraphRewriteResult
+  readonly targetGraph: HarnessGraph
+}
+
+export const GraphRewriteErrorReason = Schema.Literals([
+  "dangling-edge",
+  "bipartite-relation-deleted",
+  "non-decreasing-measure",
+  "step-bound-exceeded",
+  "concept-lattice-cycle",
+  "invalid-graph",
+  "inference-failed",
+])
+export type GraphRewriteErrorReason = typeof GraphRewriteErrorReason.Type
+
+export class GraphRewriteError extends Schema.TaggedError<GraphRewriteError>()(
+  "GraphRewriteError",
+  {
+    ruleId: Schema.optional(RewriteRuleId),
+    nodeKey: Schema.optional(NodeKey),
+    reason: GraphRewriteErrorReason,
+    message: Schema.String,
+  },
+) {}
+
+export const DpoRuleSpec = Schema.Struct({
+  id: RewriteRuleId,
+  phase: RewritePhase,
+  category: RewriteRuleCategory,
+  description: Schema.String,
+  preservesRelationInK: Schema.Boolean,
+  hasSpecNac: Schema.Boolean,
+})
+export type DpoRuleSpec = typeof DpoRuleSpec.Type
 
