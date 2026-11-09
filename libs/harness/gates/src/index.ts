@@ -14,6 +14,8 @@ export * from "./ears-lint.js"
 export * from "./adr-lint.js"
 export * from "./ontology-invariants.js"
 export * from "./telemetry.js"
+export * from "./ast-cache.js"
+export * from "./bench-check.js"
 export {
   BOUNDARY_CALLER_PATTERN,
   CandidateRank,

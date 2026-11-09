@@ -29,6 +29,7 @@ describe("harness cli baseline", () => {
       "learn",
       "gc",
       "mutate",
+      "bench",
       "ingest",
       "session",
       "doctor",
