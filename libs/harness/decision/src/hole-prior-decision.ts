@@ -10,6 +10,12 @@ export const ConfidenceMillis = Schema.Int.pipe(
 )
 export type ConfidenceMillis = typeof ConfidenceMillis.Type
 
+export const PageRankScoreMillis = Schema.Int.pipe(
+  Schema.check(Schema.isBetween({ minimum: 0, maximum: 1000 })),
+  Schema.brand("PageRankScoreMillis"),
+)
+export type PageRankScoreMillis = typeof PageRankScoreMillis.Type
+
 export const NodeKey = Schema.NonEmptyString.pipe(Schema.brand("NodeKey"))
 export type NodeKey = typeof NodeKey.Type
 
@@ -78,6 +84,34 @@ export const HoleRelevanceAndEdgePriorV1 = Decision.make({
 
 assertDecisionLimits(HoleRelevanceAndEdgePriorV1)
 
+export const MAX_BATCHED_HOLE_CANDIDATES = 32
+
+export const buildBatchedHolePriorDecision = (candidateCount: number) => {
+  const boundedCount = Math.min(MAX_BATCHED_HOLE_CANDIDATES, Math.max(1, candidateCount))
+  const decisions: Record<
+    string,
+    | (typeof HoleRelevanceAndEdgePriorV1.decisions)["edgeConfidence"]
+    | (typeof HoleRelevanceAndEdgePriorV1.decisions)["candidateRelevance"]
+  > = {}
+  for (let i = 0; i < boundedCount; i++) {
+    decisions[`edgeConfidence_${i}`] = Decision.probability({
+      instructions: `Does candidate #${i} genuinely fulfill the proposed hyperedge role for its hole and EARS clause?`,
+    })
+    decisions[`candidateRelevance_${i}`] = Decision.rate({
+      instructions: `How relevant is candidate #${i} as an inhabitant or collaborator when filling the stub<A, E, R>() hole?`,
+      criteria: HOLE_RELEVANCE_LEVELS,
+    })
+  }
+  const definition = Decision.make({
+    input: Schema.Struct({
+      candidatesBatchJson: Schema.String,
+    }),
+    decisions,
+  })
+  assertDecisionLimits(definition)
+  return definition
+}
+
 export const HoleCandidatePriorInput = Schema.Struct({
   holeSpanName: Schema.NonEmptyString,
   holeSignatureSummary: Schema.String,
@@ -97,6 +131,42 @@ export const HoleCandidatePriorResult = Schema.Struct({
   source: PriorSource,
 })
 export type HoleCandidatePriorResult = typeof HoleCandidatePriorResult.Type
+
+export const SemanticEdgePriorsBatchResult = Schema.Struct({
+  edgeConfidenceOverrides: Schema.Record(Schema.String, ConfidenceMillis),
+  holeTeleportationWeights: Schema.Record(NodeKey, PageRankScoreMillis),
+  results: Schema.Array(HoleCandidatePriorResult),
+  source: PriorSource,
+})
+export type SemanticEdgePriorsBatchResult = typeof SemanticEdgePriorsBatchResult.Type
+
+const mapRelevanceLabel = (
+  rawLabel: string,
+): {
+  readonly relevanceLabel: HoleRelevanceLevel
+  readonly teleportationWeightMillis: ConfidenceMillis
+} =>
+  match(rawLabel)
+    .with("irrelevant", () => ({
+      relevanceLabel: "irrelevant" as const,
+      teleportationWeightMillis: RELEVANCE_WEIGHT_MILLIS.irrelevant,
+    }))
+    .with("tangential", () => ({
+      relevanceLabel: "tangential" as const,
+      teleportationWeightMillis: RELEVANCE_WEIGHT_MILLIS.tangential,
+    }))
+    .with("helpful", () => ({
+      relevanceLabel: "helpful" as const,
+      teleportationWeightMillis: RELEVANCE_WEIGHT_MILLIS.helpful,
+    }))
+    .with("essential", () => ({
+      relevanceLabel: "essential" as const,
+      teleportationWeightMillis: RELEVANCE_WEIGHT_MILLIS.essential,
+    }))
+    .otherwise(() => ({
+      relevanceLabel: "irrelevant" as const,
+      teleportationWeightMillis: RELEVANCE_WEIGHT_MILLIS.irrelevant,
+    }))
 
 export const evaluateHoleCandidatePrior = Effect.fn("HoleRelevanceAndEdgePrior.evaluate")(
   function* (input: HoleCandidatePriorInput) {
@@ -127,30 +197,8 @@ export const evaluateHoleCandidatePrior = Effect.fn("HoleRelevanceAndEdgePrior.e
             Math.max(0, Math.round(answers.edgeConfidence.probability * 1000)),
           )
           const edgeConfidenceMillis = ConfidenceMillis.make(clampedEdgeConfidence)
-
           const rawLabel = answers.candidateRelevance.label as string
-
-          const { relevanceLabel, teleportationWeightMillis } = match(rawLabel)
-            .with("irrelevant", () => ({
-              relevanceLabel: "irrelevant" as const,
-              teleportationWeightMillis: RELEVANCE_WEIGHT_MILLIS.irrelevant,
-            }))
-            .with("tangential", () => ({
-              relevanceLabel: "tangential" as const,
-              teleportationWeightMillis: RELEVANCE_WEIGHT_MILLIS.tangential,
-            }))
-            .with("helpful", () => ({
-              relevanceLabel: "helpful" as const,
-              teleportationWeightMillis: RELEVANCE_WEIGHT_MILLIS.helpful,
-            }))
-            .with("essential", () => ({
-              relevanceLabel: "essential" as const,
-              teleportationWeightMillis: RELEVANCE_WEIGHT_MILLIS.essential,
-            }))
-            .otherwise(() => ({
-              relevanceLabel: "irrelevant" as const,
-              teleportationWeightMillis: RELEVANCE_WEIGHT_MILLIS.irrelevant,
-            }))
+          const { relevanceLabel, teleportationWeightMillis } = mapRelevanceLabel(rawLabel)
 
           yield* Effect.annotateCurrentSpan({
             "decision.definition": "HoleRelevanceAndEdgePriorV1",
@@ -172,3 +220,137 @@ export const evaluateHoleCandidatePrior = Effect.fn("HoleRelevanceAndEdgePrior.e
       .exhaustive()
   },
 )
+
+/**
+ * Evaluates up to 32 hole/edge candidates per chunk (up to 64 `Decision.probability` + `Decision.rate`
+ * questions in a single `clef-flash` forward pass, validated via `assertDecisionLimits`, `RFC-0002 §4.4 & §4.6`),
+ * computing `SemanticEdgePriors` (`edgeConfidenceOverrides` and `holeTeleportationWeights`) for `GraphInfer.decide`.
+ */
+export const evaluateHoleCandidatePriorsBatch = Effect.fn(
+  "HoleRelevanceAndEdgePrior.evaluateBatch",
+)(function* (
+  inputs: ReadonlyArray<HoleCandidatePriorInput>,
+): Effect.fn.Return<SemanticEdgePriorsBatchResult, never, DecisionModel.DecisionModel> {
+  if (inputs.length === 0) {
+    return {
+      edgeConfidenceOverrides: {},
+      holeTeleportationWeights: {},
+      results: [],
+      source: { _tag: "DecisionModel" },
+    } satisfies SemanticEdgePriorsBatchResult
+  }
+
+  const edgeConfidenceOverrides: Record<string, ConfidenceMillis> = {}
+  const holeTeleportationWeights: Record<NodeKey, PageRankScoreMillis> = {}
+  const results: Array<HoleCandidatePriorResult> = []
+  let usedFallback = false
+
+  for (let offset = 0; offset < inputs.length; offset += MAX_BATCHED_HOLE_CANDIDATES) {
+    const chunk = inputs.slice(offset, offset + MAX_BATCHED_HOLE_CANDIDATES)
+    const batchedDef = buildBatchedHolePriorDecision(chunk.length)
+    const candidatesBatchJson = JSON.stringify(
+      chunk.map((item, idx) => ({
+        index: idx,
+        holeSpanName: item.holeSpanName,
+        holeSignatureSummary: item.holeSignatureSummary,
+        candidateSymbolKey: item.candidateSymbolKey,
+        candidateSignatureSummary: item.candidateSignatureSummary,
+        proposedRole: item.proposedRole,
+        earsClauseContext: item.earsClauseContext,
+      })),
+    )
+
+    const outcome = yield* DecisionModel.decide(batchedDef, {
+      input: { candidatesBatchJson },
+    }).pipe(
+      Effect.timeoutOption("1500 millis"),
+      Effect.catch(() => Effect.succeedNone),
+    )
+
+    yield* match(outcome)
+      .with({ _tag: "None" }, () =>
+        Effect.sync(() => {
+          usedFallback = true
+          for (const item of chunk) {
+            const fallbackConf = ConfidenceMillis.make(500)
+            const fallbackWeight = RELEVANCE_WEIGHT_MILLIS.tangential
+            edgeConfidenceOverrides[`${item.candidateSymbolKey}:${item.proposedRole}`] =
+              fallbackConf
+            edgeConfidenceOverrides[item.candidateSymbolKey] = fallbackConf
+            holeTeleportationWeights[item.candidateSymbolKey] = PageRankScoreMillis.make(
+              fallbackWeight,
+            )
+            results.push({
+              candidateSymbolKey: item.candidateSymbolKey,
+              proposedRole: item.proposedRole,
+              edgeConfidenceMillis: fallbackConf,
+              teleportationWeightMillis: fallbackWeight,
+              relevanceLabel: "tangential",
+              source: { _tag: "DeterministicFallback", reason: "timeout-or-unavailable" },
+            })
+          }
+        }),
+      )
+      .with({ _tag: "Some" }, ({ value }) =>
+        Effect.sync(() => {
+          const answersRecord = value.answers as Record<
+            string,
+            | { readonly probability?: number; readonly label?: string }
+            | undefined
+          >
+          for (let i = 0; i < chunk.length; i++) {
+            const item = chunk[i]!
+            const probAns = answersRecord[`edgeConfidence_${i}`]
+            const rateAns = answersRecord[`candidateRelevance_${i}`]
+            const rawProb = typeof probAns?.probability === "number" ? probAns.probability : 0.5
+            const clampedConf = Math.min(1000, Math.max(0, Math.round(rawProb * 1000)))
+            const edgeConfidenceMillis = ConfidenceMillis.make(clampedConf)
+            const rawLabel = typeof rateAns?.label === "string" ? rateAns.label : "tangential"
+            const { relevanceLabel, teleportationWeightMillis } = mapRelevanceLabel(rawLabel)
+
+            const roleKey = `${item.candidateSymbolKey}:${item.proposedRole}`
+            const existingConf = edgeConfidenceOverrides[roleKey]
+            edgeConfidenceOverrides[roleKey] =
+              existingConf !== undefined && existingConf > edgeConfidenceMillis
+                ? existingConf
+                : edgeConfidenceMillis
+            const existingSymConf = edgeConfidenceOverrides[item.candidateSymbolKey]
+            edgeConfidenceOverrides[item.candidateSymbolKey] =
+              existingSymConf !== undefined && existingSymConf > edgeConfidenceMillis
+                ? existingSymConf
+                : edgeConfidenceMillis
+
+            const nextPpr = PageRankScoreMillis.make(teleportationWeightMillis)
+            const existingPpr = holeTeleportationWeights[item.candidateSymbolKey]
+            holeTeleportationWeights[item.candidateSymbolKey] =
+              existingPpr !== undefined && existingPpr > nextPpr ? existingPpr : nextPpr
+
+            results.push({
+              candidateSymbolKey: item.candidateSymbolKey,
+              proposedRole: item.proposedRole,
+              edgeConfidenceMillis,
+              teleportationWeightMillis,
+              relevanceLabel,
+              source: { _tag: "DecisionModel" },
+            })
+          }
+        }),
+      )
+      .exhaustive()
+  }
+
+  yield* Effect.annotateCurrentSpan({
+    "decision.definition": "HoleRelevanceAndEdgePriorV1.batch",
+    "decision.batchSize": inputs.length,
+    "decision.usedFallback": usedFallback,
+  })
+
+  return {
+    edgeConfidenceOverrides,
+    holeTeleportationWeights,
+    results,
+    source: usedFallback
+      ? { _tag: "DeterministicFallback", reason: "timeout-or-unavailable" }
+      : { _tag: "DecisionModel" },
+  }
+})

@@ -7,7 +7,9 @@ import {
   CandidateSymbolKey,
   HoleRelevanceAndEdgePriorV1,
   ProposedRoleName,
+  buildBatchedHolePriorDecision,
   evaluateHoleCandidatePrior,
+  evaluateHoleCandidatePriorsBatch,
   makeFailingDecisionModelLayer,
   makeMockDecisionModelLayer,
 } from "../src/index.js"
@@ -218,4 +220,67 @@ describe("HoleRelevanceAndEdgePriorV1 (System One Calibrated Edge & PPR Prior Se
       expect(Cause.hasDies(exit.cause)).toBe(true)
     }
   })
+
+  it.effect(
+    "REQ-3.1: evaluates batched HoleRelevanceAndEdgePriorV1 (up to 32 candidates = 64 questions per forward pass) and produces SemanticEdgePriors",
+    () =>
+      Effect.gen(function* () {
+        const batchedDef = buildBatchedHolePriorDecision(32)
+        expect(Object.keys(batchedDef.decisions)).toHaveLength(64)
+
+        const emptyBatch = yield* evaluateHoleCandidatePriorsBatch([]).pipe(
+          Effect.provide(makeMockDecisionModelLayer()),
+        )
+        expect(emptyBatch.results).toHaveLength(0)
+
+        const batchInputs = [
+          defaultInput,
+          {
+            holeSpanName: "Cart.addItem" as const,
+            holeSignatureSummary: "Effect<CartUpdated, CartLimitExceededError, CartRepo>",
+            candidateSymbolKey: CandidateSymbolKey.make("ServiceTag:CartRepo"),
+            candidateSignatureSummary: "Context.Service<CartRepo>",
+            proposedRole: ProposedRoleName.make("requires-service"),
+            earsClauseContext: "Where CartRepo is configured",
+          },
+        ]
+
+        const batchRes = yield* evaluateHoleCandidatePriorsBatch(batchInputs).pipe(
+          Effect.provide(
+            makeMockDecisionModelLayer({
+              edgeConfidenceProb: 0.91,
+              candidateRelevanceLabel: "essential",
+            }),
+          ),
+        )
+
+        expect(batchRes.source).toEqual({ _tag: "DecisionModel" })
+        expect(batchRes.results).toHaveLength(2)
+        expect(
+          batchRes.edgeConfidenceOverrides[
+            "EffectFn:libs/sample/domain/src/cart.ts#decide:callee"
+          ],
+        ).toBe(910)
+        expect(batchRes.edgeConfidenceOverrides["ServiceTag:CartRepo:requires-service"]).toBe(910)
+        expect(
+          batchRes.holeTeleportationWeights[
+            CandidateSymbolKey.make("EffectFn:libs/sample/domain/src/cart.ts#decide")
+          ],
+        ).toBe(1000)
+
+        // Fallback on failing model
+        const fallbackBatch = yield* evaluateHoleCandidatePriorsBatch(batchInputs).pipe(
+          Effect.provide(makeFailingDecisionModelLayer()),
+        )
+        expect(fallbackBatch.source).toEqual({
+          _tag: "DeterministicFallback",
+          reason: "timeout-or-unavailable",
+        })
+        expect(fallbackBatch.results).toHaveLength(2)
+        expect(fallbackBatch.edgeConfidenceOverrides["ServiceTag:CartRepo:requires-service"]).toBe(
+          500,
+        )
+      }),
+  )
 })
+
