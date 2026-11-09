@@ -5,13 +5,13 @@ import { Effect } from "effect"
 import { describe, expect, it } from "vitest"
 import {
   buildHarnessGraph,
-  checkEffectGraph,
   diffHarnessGraphs,
   extractTypeAwareGraphFromSource,
   extractWorkspaceTypeAwareGraph,
   findCallees,
   findCallers,
   findTestsReaching,
+  isInfraOrCloudIdentifier,
   resolveNode,
   stripCommentsAndTestTitles,
 } from "../src/index.js"
@@ -698,7 +698,106 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
       },
     ])
 
-    const res = checkEffectGraph(hg)
-    expect(res.violations.some((v) => v.rule === "node-sqlite-in-infra")).toBe(true)
+    expect(hg.branchingViolations?.some((v) => v.rule === "node-sqlite-in-infra")).toBe(true)
+  })
+
+  it("extracts failsWith, requiresServices, inputSchema, and outputSchema from Effect.fn with generator return type and yield* new Error", () => {
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/service/src/index.ts",
+        packageTag: "service",
+        content: `
+          import { Context, Data, Effect, Schema } from "effect"
+          export class CustomTaggedError extends Data.TaggedError("CustomTaggedError")<{ readonly message: string }> {}
+          export class MyService extends Context.Service<MyService, {
+            readonly doWork: () => Effect.Effect<void>
+          }>()("MyService") {}
+          export const MyInputSchema = Schema.Struct({ readonly id: Schema.String })
+          export type MyInputSchema = typeof MyInputSchema.Type
+          export const MyResult = Schema.Struct({ readonly success: Schema.Boolean })
+          export type MyResult = typeof MyResult.Type
+        `,
+      },
+      {
+        filePath: "libs/sample/domain/src/operation.ts",
+        packageTag: "domain",
+        content: `
+          import { Effect } from "effect"
+          import { CustomTaggedError, MyInputSchema, MyResult, MyService } from "../../service/src/index.js"
+
+          export const performOp = Effect.fn("Domain.performOp")(
+            function* (input: MyInputSchema): Effect.Effect<MyResult, CustomTaggedError, MyService> {
+              const svc = yield* MyService
+              if (!input.id) {
+                return yield* new CustomTaggedError({ message: "missing id" })
+              }
+              return { success: true }
+            }
+          )
+        `,
+      },
+    ])
+
+    const fnNode = resolveNode(graph, "Domain.performOp") as EffectFnNode
+    expect(fnNode).toBeDefined()
+    expect(fnNode.inputSchema).toBe("MyInputSchema")
+    expect(fnNode.outputSchema).toBe("MyResult")
+
+    const callees = findCallees(graph, "Domain.performOp")
+    const calleeNames = callees.map((c) => c.qualname)
+    expect(calleeNames).toContain("CustomTaggedError")
+    expect(calleeNames).toContain("MyService")
+
+    const errorCallers = findCallers(graph, "CustomTaggedError")
+    expect(errorCallers).toEqual([
+      expect.objectContaining({
+        qualname: "libs/sample/domain/src/operation.ts#performOp",
+        edgeKind: "FailsWith",
+      }),
+    ])
+  })
+
+  it("populates caughtErrors on EffectFnNode when Effect.catchTag is used (F-34)", () => {
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/service/src/index.ts",
+        packageTag: "service",
+        content: `
+          import { Data, Effect } from "effect"
+          export class CustomTaggedError extends Data.TaggedError("CustomTaggedError")<{ readonly message: string }> {}
+        `,
+      },
+      {
+        filePath: "libs/sample/domain/src/safe-op.ts",
+        packageTag: "domain",
+        content: `
+          import { Effect } from "effect"
+          import { CustomTaggedError } from "../../service/src/index.js"
+
+          export const safeOp = Effect.fn("Domain.safeOp")(function* () {
+            return yield* Effect.succeed(1).pipe(
+              Effect.catchTag("CustomTaggedError", () => Effect.succeed(0))
+            )
+          })
+        `,
+      },
+    ])
+
+    const fnNode = resolveNode(graph, "Domain.safeOp") as EffectFnNode
+    expect(fnNode).toBeDefined()
+    expect(fnNode.caughtErrors).toEqual(["CustomTaggedError"])
+  })
+
+  it("isInfraOrCloudIdentifier returns false for contract schemas and true for infra/cloud identifiers (F-31)", () => {
+    expect(isInfraOrCloudIdentifier("KVStoreSchema", "libs/sample/contract/src/index.ts")).toBe(false)
+    expect(isInfraOrCloudIdentifier("KVStoreSchema", "")).toBe(false)
+    expect(isInfraOrCloudIdentifier("R2D2Validator", "libs/sample/contract/src/index.ts")).toBe(false)
+    expect(isInfraOrCloudIdentifier("R2D2Validator", "")).toBe(false)
+
+    expect(isInfraOrCloudIdentifier("CloudflareKV", "libs/sample/infra/src/index.ts")).toBe(true)
+    expect(isInfraOrCloudIdentifier("CloudflareKV", "")).toBe(true)
+    expect(isInfraOrCloudIdentifier("R2Bucket", "libs/sample/infra/src/index.ts")).toBe(true)
+    expect(isInfraOrCloudIdentifier("R2Bucket", "")).toBe(true)
   })
 })
+

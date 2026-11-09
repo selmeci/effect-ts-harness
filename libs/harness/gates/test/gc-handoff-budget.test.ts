@@ -3,7 +3,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { Effect, Schema } from "effect"
-import { buildHarnessGraph, loadGraphSnapshot, saveGraphSnapshot } from "@harness/graph"
+import {
+  buildHarnessGraph,
+  loadGraphSnapshot,
+  RelationId,
+  saveGraphSnapshot,
+} from "@harness/graph"
 import {
   buildSessionHandoff,
   checkLoopThrashing,
@@ -421,6 +426,255 @@ describe("Harness Gates: GC check, Session Handoff, Span Budget, and State Dir",
           )
           expect(missingProp).toBeDefined()
           expect(missingProp?.message).toContain("0 Property-Based Tests")
+        }),
+    )
+
+    it.effect(
+      "decideGraphEntropy: detects unused-service, unprovided-service, and dead-tagged-error over PERA hypergraph relations",
+      () =>
+        Effect.gen(function* () {
+          const fnQualname = "libs/sample/domain/src/index.ts#checkout"
+          const providedService = "PaymentService"
+          const unprovidedService = "UnprovidedService"
+          const unusedService = "UnusedService"
+          const usedError = "PaymentError"
+          const deadError = "DeadPaymentError"
+
+          const graph = buildHarnessGraph({
+            fns: [
+              {
+                qualname: fnQualname,
+                spanName: "Checkout.run",
+                packageTag: "domain",
+                file: "libs/sample/domain/src/index.ts",
+                line: 10,
+                successType: "void",
+                isStub: false,
+              },
+            ],
+            services: [
+              {
+                tagId: providedService,
+                name: providedService,
+                packageTag: "service",
+                file: "libs/sample/service/src/index.ts",
+              },
+              {
+                tagId: unprovidedService,
+                name: unprovidedService,
+                packageTag: "service",
+                file: "libs/sample/service/src/index.ts",
+              },
+              {
+                tagId: unusedService,
+                name: unusedService,
+                packageTag: "service",
+                file: "libs/sample/service/src/index.ts",
+              },
+            ],
+            layers: [
+              {
+                qualname: "libs/sample/infra/src/index.ts#PaymentLive",
+                layerKind: "live",
+                packageTag: "infra",
+                file: "libs/sample/infra/src/index.ts",
+              },
+            ],
+            errors: [
+              {
+                errorTag: usedError,
+                file: "libs/sample/contract/src/index.ts",
+              },
+              {
+                errorTag: deadError,
+                file: "libs/sample/contract/src/index.ts",
+              },
+            ],
+            tests: [
+              {
+                testId: "libs/sample/domain/test/checkout.test.ts::suite",
+                testFile: "libs/sample/domain/test/checkout.test.ts",
+                testName: "checkout suite",
+                lastTreeHash: "workspace",
+              },
+            ],
+            patternDocs: [
+              {
+                slug: "planning",
+                path: "agent-patterns/planning.md",
+                summary: "Planning pattern",
+              },
+            ],
+            effectSignatures: [
+              {
+                relationId: RelationId.make(`EffectSignature:${fnQualname}`),
+                callerQualname: fnQualname,
+                requiredServices: [providedService, unprovidedService],
+                emittedErrors: [usedError],
+                calleeQualnames: [],
+                payloadSchemas: [],
+                file: "libs/sample/domain/src/index.ts",
+                line: 10,
+              },
+            ],
+            layerFlows: [
+              {
+                relationId: RelationId.make("LayerFlow:libs/sample/infra/src/index.ts#PaymentLive"),
+                layerQualname: "libs/sample/infra/src/index.ts#PaymentLive",
+                providesServices: [providedService],
+                requiresServices: [],
+                emittedErrors: [],
+                file: "libs/sample/infra/src/index.ts",
+                line: 1,
+              },
+            ],
+            exercisesSpans: [
+              {
+                testId: "libs/sample/domain/test/checkout.test.ts::suite",
+                calleeQualname: fnQualname,
+                callCount: 1,
+                receiverLayer: null,
+              },
+            ],
+          })
+
+          const report = yield* decideGraphEntropy({
+            graph,
+            expectedPatterns: ["planning", "review", "effect"],
+          })
+
+          expect(report.clean).toBe(false)
+
+          // Detection of an unused ServiceTag (unused-service-tag / unused-service)
+          const unusedSvcFinding = report.findings.find(
+            (f) => f.kind === "unused-service" && f.nodeId === unusedService,
+          )
+          expect(unusedSvcFinding).toBeDefined()
+          expect(unusedSvcFinding?.message).toContain("has no consumers")
+
+          // Detection of an unprovided ServiceTag (missing-layer-provider / unprovided-service)
+          const unprovidedSvcFinding = report.findings.find(
+            (f) => f.kind === "unprovided-service" && f.nodeId === unprovidedService,
+          )
+          expect(unprovidedSvcFinding).toBeDefined()
+          expect(unprovidedSvcFinding?.message).toContain("has no providing ServiceLayer")
+
+          // Detection of an unused TaggedError (unused-error-tag / dead-tagged-error)
+          const deadErrFinding = report.findings.find(
+            (f) => f.kind === "dead-tagged-error" && f.nodeId === deadError,
+          )
+          expect(deadErrFinding).toBeDefined()
+          expect(deadErrFinding?.message).toContain("is never emitted in any E channel")
+
+          // Provided service and emitted error should NOT be flagged
+          expect(report.findings.some((f) => f.nodeId === providedService)).toBe(false)
+          expect(report.findings.some((f) => f.nodeId === usedError)).toBe(false)
+        }),
+    )
+
+    it.effect(
+      "decideGraphEntropy: clean pass over PERA hypergraph when LayerFlow, EffectSignature, and TraceabilityTuple are fully wired",
+      () =>
+        Effect.gen(function* () {
+          const fnQualname = "libs/sample/domain/src/index.ts#checkout"
+          const serviceTagId = "PaymentService"
+          const layerQualname = "libs/sample/infra/src/index.ts#PaymentLive"
+          const errorTag = "PaymentError"
+          const testId = "libs/sample/domain/test/checkout.test.ts::suite"
+
+          const graph = buildHarnessGraph({
+            fns: [
+              {
+                qualname: fnQualname,
+                spanName: "Checkout.run",
+                packageTag: "domain",
+                file: "libs/sample/domain/src/index.ts",
+                line: 10,
+                successType: "void",
+                isStub: false,
+              },
+            ],
+            services: [
+              {
+                tagId: serviceTagId,
+                name: serviceTagId,
+                packageTag: "service",
+                file: "libs/sample/service/src/index.ts",
+              },
+            ],
+            layers: [
+              {
+                qualname: layerQualname,
+                layerKind: "live",
+                packageTag: "infra",
+                file: "libs/sample/infra/src/index.ts",
+              },
+            ],
+            errors: [
+              {
+                errorTag,
+                file: "libs/sample/contract/src/index.ts",
+              },
+            ],
+            tests: [
+              {
+                testId,
+                testFile: "libs/sample/domain/test/checkout.test.ts",
+                testName: "checkout suite",
+                lastTreeHash: "workspace",
+              },
+            ],
+            patternDocs: [
+              {
+                slug: "planning",
+                path: "agent-patterns/planning.md",
+                summary: "Planning pattern",
+              },
+            ],
+            // 1. EffectSignature with requires-service and fails-with edges
+            effectSignatures: [
+              {
+                relationId: RelationId.make(`EffectSignature:${fnQualname}`),
+                callerQualname: fnQualname,
+                requiredServices: [serviceTagId],
+                emittedErrors: [errorTag],
+                calleeQualnames: [],
+                payloadSchemas: [],
+                file: "libs/sample/domain/src/index.ts",
+                line: 10,
+              },
+            ],
+            // 2. LayerFlow with provider-layer and provided-service edges
+            layerFlows: [
+              {
+                relationId: RelationId.make(`LayerFlow:${layerQualname}`),
+                layerQualname,
+                providesServices: [serviceTagId],
+                requiresServices: [],
+                emittedErrors: [],
+                file: "libs/sample/infra/src/index.ts",
+                line: 1,
+              },
+            ],
+            // 3. TraceabilityTuple with exercising-test and exercised-span edges
+            exercisesSpans: [
+              {
+                testId,
+                calleeQualname: fnQualname,
+                callCount: 1,
+                receiverLayer: null,
+              },
+            ],
+          })
+
+          const report = yield* decideGraphEntropy({
+            graph,
+            checkUntestedDomainFns: true,
+            expectedPatterns: ["planning", "review", "effect"],
+          })
+
+          expect(report.clean).toBe(true)
+          expect(report.findings).toHaveLength(0)
         }),
     )
 

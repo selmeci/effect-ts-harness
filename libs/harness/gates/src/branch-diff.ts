@@ -5,6 +5,16 @@ export interface PlanImplDiffResult {
   readonly reasons: ReadonlyArray<string>
 }
 
+export const formatEntityKey = (entityKey: string): string => {
+  const colonIdx = entityKey.indexOf(":")
+  if (colonIdx === -1) {
+    return entityKey
+  }
+  const kind = entityKey.slice(0, colonIdx)
+  const identifier = entityKey.slice(colonIdx + 1)
+  return `${kind} "${identifier}"`
+}
+
 export const diffPlanAndImplGraphs = (
   planGraph: HarnessGraph,
   implGraph: HarnessGraph,
@@ -21,18 +31,16 @@ export const diffPlanAndImplGraphs = (
   for (const service of diff.missingServices) {
     reasons.push(`Missing planned Service: ${service}`)
   }
+  for (const layer of diff.missingLayers) {
+    reasons.push(`Planned ServiceLayer '${layer}' is missing in implementation graph`)
+  }
+  for (const err of diff.missingErrors) {
+    reasons.push(`Planned TaggedError '${err}' is missing in implementation graph`)
+  }
   for (const edge of diff.missingEdges) {
-    if (edge._tag === "RequiresService") {
-      reasons.push(`Missing planned RequiresService edge: ${edge.callerQualname} -> ${edge.tagId}`)
-    } else if (edge._tag === "FailsWith") {
-      reasons.push(`Missing planned FailsWith edge: ${edge.callerQualname} -> ${edge.errorTag}`)
-    } else if (edge._tag === "SpecifiesSymbol") {
-      reasons.push(`Missing planned SpecifiesSymbol edge: ${edge.specId} -> ${edge.targetKey}`)
-    } else if (edge._tag === "GovernsSymbol") {
-      reasons.push(`Missing planned GovernsSymbol edge: ${edge.adrId} -> ${edge.targetKey}`)
-    } else {
-      reasons.push(`Missing planned edge: ${edge._tag}`)
-    }
+    reasons.push(
+      `Missing planned PlaysRole(${edge.role}) relation on ${formatEntityKey(edge.entityKey)} (${edge.relationId} -> ${edge.entityKey})`,
+    )
   }
 
   return {

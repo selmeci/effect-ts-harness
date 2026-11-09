@@ -1,12 +1,13 @@
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import * as Graph from "effect/Graph"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it } from "@effect/vitest"
 import {
   buildHarnessGraph,
   checkEffectGraph,
+  decideEffectGraphPolicy,
   extractTypeAwareGraphFromSource,
   extractWorkspaceTypeAwareGraph,
   isAggregateFnNode,
@@ -2386,10 +2387,10 @@ export const evolveCartV2 = (state: CartState, event: CartEventV2): CartState =>
     const failsWithErrors = new Set<string>()
     const requiredServices = new Set<string>()
     for (const [, edge] of Graph.edges(graph.graph)) {
-      if (edge.data._tag === "FailsWith") {
-        failsWithErrors.add(edge.data.errorTag)
-      } else if (edge.data._tag === "RequiresService") {
-        requiredServices.add(edge.data.tagId)
+      if (edge.data.role === "fails-with") {
+        failsWithErrors.add(edge.data.entityKey.replace(/^TaggedError:/, ""))
+      } else if (edge.data.role === "requires-service") {
+        requiredServices.add(edge.data.entityKey.replace(/^ServiceTag:/, ""))
       }
     }
 
@@ -2407,4 +2408,183 @@ export const evolveCartV2 = (state: CartState, event: CartEventV2): CartState =>
       }
     }
   })
+
+  const PolicyCheckArbitrarySpec = Schema.Struct({
+    hasDomainInfraViolation: Schema.Boolean,
+    hasDeciderViolation: Schema.Boolean,
+    hasUnresolvedRef: Schema.Boolean,
+    hasUntestedDomainSpan: Schema.Boolean,
+    includeLifecycleRules: Schema.Boolean,
+    checkUnresolvedReferences: Schema.Boolean,
+  })
+
+  it.effect.prop(
+    "decideEffectGraphPolicy and checkEffectGraph satisfy policy contracts and equivalence across arbitrary inputs",
+    [PolicyCheckArbitrarySpec],
+    ([spec]) =>
+      Effect.gen(function* () {
+        const fns = [
+          {
+            qualname: "libs/sample/domain/src/order.ts#checkout",
+            spanName: "Order.checkout",
+            file: "libs/sample/domain/src/order.ts",
+            line: 1,
+            packageTag: "domain" as const,
+            successType: "void",
+            isStub: false,
+          },
+          ...(spec.hasDeciderViolation
+            ? [
+                {
+                  qualname: "libs/sample/domain/src/order.ts#decide",
+                  spanName: "Order.decide",
+                  file: "libs/sample/domain/src/order.ts",
+                  line: 20,
+                  packageTag: "domain" as const,
+                  successType: "void",
+                  isStub: false,
+                },
+              ]
+            : []),
+          ...(spec.hasUntestedDomainSpan
+            ? [
+                {
+                  qualname: "libs/sample/domain/src/order.ts#untested",
+                  spanName: "Order.untested",
+                  file: "libs/sample/domain/src/order.ts",
+                  line: 40,
+                  packageTag: "domain" as const,
+                  successType: "void",
+                  isStub: false,
+                },
+              ]
+            : []),
+        ]
+
+        const services = [
+          ...(spec.hasDomainInfraViolation
+            ? [
+                {
+                  tagId: "PhotoRepoLive",
+                  name: "PhotoRepoLive",
+                  packageTag: "infra" as const,
+                  file: "libs/sample/infra/src/photo-repo.ts",
+                },
+              ]
+            : []),
+          ...(spec.hasDeciderViolation
+            ? [
+                {
+                  tagId: "OrderRepo",
+                  name: "OrderRepo",
+                  packageTag: "service" as const,
+                  file: "libs/sample/service/src/order-repo.ts",
+                },
+              ]
+            : []),
+        ]
+
+        const requiresService = [
+          ...(spec.hasDomainInfraViolation
+            ? [
+                {
+                  callerQualname: "libs/sample/domain/src/order.ts#checkout",
+                  tagId: "PhotoRepoLive",
+                },
+              ]
+            : []),
+          ...(spec.hasDeciderViolation
+            ? [
+                {
+                  callerQualname: "libs/sample/domain/src/order.ts#decide",
+                  tagId: "OrderRepo",
+                },
+              ]
+            : []),
+          ...(spec.hasUnresolvedRef
+            ? [
+                {
+                  callerQualname: "libs/sample/domain/src/order.ts#checkout",
+                  tagId: "NonexistentRequiredService",
+                },
+              ]
+            : []),
+        ]
+
+        const tests = [
+          {
+            testId: "libs/sample/domain/test/order.test.ts#checks out",
+            testFile: "libs/sample/domain/test/order.test.ts",
+            testName: "checks out",
+          },
+        ]
+
+        const exercisesSpans = [
+          {
+            testId: "libs/sample/domain/test/order.test.ts#checks out",
+            calleeQualname: "libs/sample/domain/src/order.ts#checkout",
+            callCount: 1,
+            receiverLayer: null,
+          },
+          ...(spec.hasDeciderViolation
+            ? [
+                {
+                  testId: "libs/sample/domain/test/order.test.ts#checks out",
+                  calleeQualname: "libs/sample/domain/src/order.ts#decide",
+                  callCount: 1,
+                  receiverLayer: null,
+                },
+              ]
+            : []),
+        ]
+
+        const graph = buildHarnessGraph({
+          fns,
+          services,
+          requiresService,
+          tests,
+          exercisesSpans,
+        })
+
+        const options = {
+          includeLifecycleRules: spec.includeLifecycleRules,
+          checkUnresolvedReferences: spec.checkUnresolvedReferences,
+        }
+
+        const effectDecision = yield* decideEffectGraphPolicy(graph, options)
+        const syncResult = checkEffectGraph(graph, options)
+
+        // Equivalence between pure Effect decider and synchronous wrapper
+        expect(syncResult.ok).toBe(effectDecision.ok)
+        expect(syncResult.violations).toEqual(effectDecision.violations)
+        expect(syncResult.mermaid).toBe(effectDecision.mermaid)
+
+        // Invariant: ok is true iff violations is empty
+        expect(effectDecision.ok).toBe(effectDecision.violations.length === 0)
+
+        // Invariant: mermaid is a valid non-empty flowchart
+        expect(effectDecision.mermaid.length).toBeGreaterThan(0)
+        expect(effectDecision.mermaid).toContain("flowchart")
+
+        // Domain requires infra gating
+        const hasDomainInfra = effectDecision.violations.some(
+          (v) => v.rule === "domain-requires-infra",
+        )
+        expect(hasDomainInfra).toBe(spec.hasDomainInfraViolation)
+
+        // Impure decider gating
+        const hasImpureDecider = effectDecision.violations.some((v) => v.rule === "impure-decider")
+        expect(hasImpureDecider).toBe(spec.hasDeciderViolation)
+
+        // Unresolved references gating
+        const hasUnresolved = effectDecision.violations.some(
+          (v) => v.rule === "unresolved-graph-reference",
+        )
+        expect(hasUnresolved).toBe(spec.hasUnresolvedRef && spec.checkUnresolvedReferences)
+
+        // Lifecycle rules gating (untested domain span)
+        const hasUntested = effectDecision.violations.some((v) => v.rule === "untested-domain-span")
+        expect(hasUntested).toBe(spec.hasUntestedDomainSpan && spec.includeLifecycleRules)
+      }),
+  )
 })
