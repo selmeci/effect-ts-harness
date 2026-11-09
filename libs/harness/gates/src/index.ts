@@ -29,4 +29,5 @@ export {
   SystemOneScoreMillis,
   formatDpoPriorKey,
   isBoundaryCallerQualname,
+  parseDpoPriorKey,
 } from "@harness/graph"

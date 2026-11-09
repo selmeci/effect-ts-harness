@@ -291,7 +291,7 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
   },
   {
     id: "pera-levi-bipartite-violation",
-    pattern: /PlaysRoleEdge must connect a reified relation node|EffectSignature|LayerFlow|TraceabilityTuple/,
+    pattern: /PlaysRoleEdge must connect a reified|BipartitePlaysRoleInvariant|bipartite-relation-deleted/,
     kind: "mechanical",
     hint: "PERA Levi hypergraph invariant violation — PlaysRoleEdge must connect a reified relation node in V_R (`EffectSignature:sig:*`, `LayerFlow:flow:*`, `TraceabilityTuple:trace:*`) to an entity node in V_E (`EffectFn:*`, `ServiceTag:*`, `ServiceLayer:*`, `TaggedError:*`, `ContractSchema:*`, `EarsSpec:*`, `AdrDoc:*`, `PatternDoc:*`, `TestSuite:*`) with all required relation fields populated.",
     result: {

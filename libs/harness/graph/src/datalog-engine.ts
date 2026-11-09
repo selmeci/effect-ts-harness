@@ -2732,9 +2732,16 @@ export interface DatalogFileDeltaStepInput {
   readonly priors?: SemanticEdgePriors | undefined
 }
 
+export interface DatalogSessionSnapshot {
+  readonly epoch: NonNegativeCount
+  readonly graph: HarnessGraph
+  readonly inference: GraphInferenceResult
+}
+
 export interface DatalogSessionShape {
   readonly currentGraph: Effect.Effect<HarnessGraph>
   readonly latestInference: Effect.Effect<GraphInferenceResult, GraphInferenceError>
+  readonly snapshot: Effect.Effect<DatalogSessionSnapshot>
   readonly stepFileDelta: (
     input: DatalogFileDeltaStepInput,
   ) => Effect.Effect<DatalogFileDeltaResult, GraphInferenceError>
@@ -2755,11 +2762,24 @@ const getEntityNodeFilePath = (node: HarnessNode): string | undefined =>
     .with({ _tag: "MigrationTuple" }, (n) => n.moduleFile)
     .with({ _tag: "EffectSignature" }, (n) => n.file)
     .with({ _tag: "LayerFlow" }, (n) => n.file)
-    .with({ _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, () => undefined)
+    .with({ _tag: "HttpEndpointTuple" }, (n) => n.file)
+    .with({ _tag: "TraceabilityTuple" }, (n) => {
+      const hashIdx = n.targetSymbolQualname.indexOf("#")
+      return hashIdx > 0 ? n.targetSymbolQualname.slice(0, hashIdx) : undefined
+    })
     .exhaustive()
 
-const normalizeWorkspacePath = (p: string): string =>
-  p.replace(/\\/g, "/").replace(/^\.?\//, "").replace(/\/+/g, "/")
+export const normalizeWorkspacePath = (p: string): string => {
+  const forward = p.trim().replace(/\\/g, "/").replace(/\/+/g, "/")
+  const withoutLeadingDot = forward.replace(/^\.\//, "")
+  const workspaceAnchor = /(?:^|\/)((?:libs|apps|packages|tools|docs|samples)\/.+)$/.exec(
+    withoutLeadingDot,
+  )
+  if (workspaceAnchor?.[1] !== undefined) {
+    return workspaceAnchor[1]
+  }
+  return withoutLeadingDot.replace(/^\/+/, "")
+}
 
 const matchesFilePath = (candidateFile: string | undefined, targetFile: string): boolean => {
   if (candidateFile === undefined) {
@@ -2767,33 +2787,47 @@ const matchesFilePath = (candidateFile: string | undefined, targetFile: string):
   }
   const normCandidate = normalizeWorkspacePath(candidateFile)
   const normTarget = normalizeWorkspacePath(targetFile)
-  if (normCandidate.length === 0 || normTarget.length === 0) {
-    return false
+  return normCandidate.length > 0 && normCandidate === normTarget
+}
+
+const computeGraphStructureFingerprint = (graph: HarnessGraph): string => {
+  const nodeEntries: Array<string> = []
+  for (const [, node] of Graph.nodes(graph.graph)) {
+    nodeEntries.push(`${getNodeKey(node)}:${JSON.stringify(node)}`)
   }
-  if (normCandidate === normTarget) {
-    return true
+  nodeEntries.sort()
+
+  const edgeEntries: Array<string> = []
+  for (const [, edge] of Graph.edges(graph.graph)) {
+    edgeEntries.push(`${getEdgeKey(edge.data)}:${JSON.stringify(edge.data)}`)
   }
-  const shorter = normCandidate.length < normTarget.length ? normCandidate : normTarget
-  const longer = normCandidate.length < normTarget.length ? normTarget : normCandidate
-  const segmentCount = shorter.split("/").filter((s) => s.length > 0).length
-  if (segmentCount < 2) {
-    return false
-  }
-  return longer.endsWith(`/${shorter}`)
+  edgeEntries.sort()
+
+  return JSON.stringify({
+    nodes: nodeEntries,
+    edges: edgeEntries,
+    violations: graph.branchingViolations ?? [],
+    unresolved: graph.unresolvedReferences ?? [],
+  })
 }
 
 const extractFileEdbFacts = (
   graph: HarnessGraph,
   targetFile?: string,
 ): Map<string, ReadonlyArray<string>> => {
+  const normalizedTarget =
+    targetFile !== undefined ? normalizeWorkspacePath(targetFile) : undefined
   const nodeFileByKey = new Map<string, string>()
   const factsByFile = new Map<string, Set<string>>()
 
-  const addFact = (file: string, fact: string): void => {
-    if (targetFile !== undefined && !matchesFilePath(file, targetFile)) {
+  const addFact = (rawFile: string, fact: string): void => {
+    const normalizedFile = normalizeWorkspacePath(rawFile)
+    if (normalizedFile.length === 0) {
       return
     }
-    const normalizedFile = targetFile !== undefined ? targetFile : file
+    if (normalizedTarget !== undefined && normalizedFile !== normalizedTarget) {
+      return
+    }
     let set = factsByFile.get(normalizedFile)
     if (set === undefined) {
       set = new Set<string>()
@@ -2804,13 +2838,14 @@ const extractFileEdbFacts = (
 
   for (const [, node] of Graph.nodes(graph.graph)) {
     const key = getNodeKey(node)
-    const file = getEntityNodeFilePath(node)
-    if (file !== undefined) {
-      nodeFileByKey.set(key, file)
+    const rawFile = getEntityNodeFilePath(node) ?? normalizedTarget
+    if (rawFile !== undefined) {
+      const normalizedFile = normalizeWorkspacePath(rawFile)
+      nodeFileByKey.set(key, normalizedFile)
       if (isRelationNode(node)) {
-        nodeFileByKey.set(node.relationId, file)
+        nodeFileByKey.set(node.relationId, normalizedFile)
       }
-      addFact(file, `node:${key}:${JSON.stringify(node)}`)
+      addFact(normalizedFile, `node:${key}:${JSON.stringify(node)}`)
     }
   }
 
@@ -2839,7 +2874,7 @@ const mergeFileSubgraphIntoWorkspace = (
   filePath: string,
   nextGraph: HarnessGraph,
 ): HarnessGraph => {
-  // Retain non-target-file nodes/relations/edges from baseGraph and replace the target file's slice with nextGraph.
+  const normalizedTarget = normalizeWorkspacePath(filePath)
   const removedEntityKeys = new Set<string>()
   const removedRelationIds = new Set<string>()
   const keptNodes = new Map<string, HarnessNode>()
@@ -2847,7 +2882,7 @@ const mergeFileSubgraphIntoWorkspace = (
   for (const [, node] of Graph.nodes(baseGraph.graph)) {
     const key = getNodeKey(node)
     const file = getEntityNodeFilePath(node)
-    if (matchesFilePath(file, filePath)) {
+    if (matchesFilePath(file, normalizedTarget)) {
       if (isEntityNode(node)) {
         removedEntityKeys.add(key)
       } else if (isRelationNode(node)) {
@@ -2926,12 +2961,12 @@ const mergeFileSubgraphIntoWorkspace = (
   })
 
   const preservedViolations = (baseGraph.branchingViolations ?? []).filter(
-    (v) => !matchesFilePath(v.file, filePath),
+    (v) => !matchesFilePath(v.file, normalizedTarget),
   )
   const nextViolations = nextGraph.branchingViolations ?? []
 
   const preservedUnresolved = (baseGraph.unresolvedReferences ?? []).filter(
-    (u) => !matchesFilePath(u.file, filePath),
+    (u) => !matchesFilePath(u.file, normalizedTarget),
   )
   const nextUnresolved = nextGraph.unresolvedReferences ?? []
 
@@ -2969,6 +3004,7 @@ export class DatalogSession extends Context.Service<DatalogSession, DatalogSessi
       const semaphore = yield* Semaphore.make(1)
       let activeGraph = initialGraph
       let activePriors = initialPriors
+      let activeFingerprint = computeGraphStructureFingerprint(initialGraph)
       let activeInference = yield* decideGraphInference(initialGraph, initialPriors).pipe(
         Effect.mapError((err) =>
           match(err)
@@ -2977,7 +3013,7 @@ export class DatalogSession extends Context.Service<DatalogSession, DatalogSessi
               { _tag: "ConceptLatticeCycleError" },
               (e) =>
                 new GraphInferenceError({
-                  reason: "d2ts-execution-failed",
+                  reason: "concept-lattice-cycle",
                   message: e.message,
                 }),
             )
@@ -2992,9 +3028,29 @@ export class DatalogSession extends Context.Service<DatalogSession, DatalogSessi
         fileFactsByPath.set(file, facts)
       }
 
+      const materializedEdbZSet = new Map<string, number>()
       const d2 = new D2({ initialFrontier: 0 })
       const inFileEdb = d2.newInput<KeyValue<string, string>>()
-      inFileEdb.pipe(distinct(), consolidate())
+      inFileEdb.pipe(
+        distinct(),
+        consolidate(),
+        output((msg) => {
+          match(msg)
+            .with({ type: MessageType.DATA }, ({ data }) => {
+              for (const [[fact, file], weight] of data.collection.getInner()) {
+                const compositeKey = `${file}::${fact}`
+                const nextWeight = (materializedEdbZSet.get(compositeKey) ?? 0) + weight
+                if (nextWeight <= 0) {
+                  materializedEdbZSet.delete(compositeKey)
+                } else {
+                  materializedEdbZSet.set(compositeKey, nextWeight)
+                }
+              }
+            })
+            .with({ type: MessageType.FRONTIER }, () => undefined)
+            .exhaustive()
+        }),
+      )
       d2.finalize()
 
       const initialEntries: Array<[KeyValue<string, string>, number]> = []
@@ -3008,8 +3064,11 @@ export class DatalogSession extends Context.Service<DatalogSession, DatalogSessi
           const nextEpoch = currentEpoch + 1
           inFileEdb.sendData(currentEpoch, new MultiSet(initialEntries))
           inFileEdb.sendFrontier(nextEpoch)
-          currentEpoch = nextEpoch
-          return stepD2Bounded(d2)
+          const converged = stepD2Bounded(d2)
+          if (converged) {
+            currentEpoch = nextEpoch
+          }
+          return converged
         },
         catch: (err) =>
           new GraphInferenceError({
@@ -3027,37 +3086,35 @@ export class DatalogSession extends Context.Service<DatalogSession, DatalogSessi
       return DatalogSession.of({
         currentGraph: Effect.sync(() => activeGraph),
         latestInference: Effect.sync(() => activeInference),
+        snapshot: semaphore.withPermits(1)(
+          Effect.sync(() => ({
+            epoch: NonNegativeCount.make(currentEpoch),
+            graph: activeGraph,
+            inference: activeInference,
+          })),
+        ),
         stepFileDelta: (input) =>
           semaphore.withPermits(1)(
             Effect.gen(function* () {
-              const targetFile = input.filePath
-              if (normalizeWorkspacePath(targetFile).length === 0) {
+              const normalizedTarget = normalizeWorkspacePath(input.filePath)
+              if (normalizedTarget.length === 0) {
                 return yield* new GraphInferenceError({
                   reason: "invalid-graph",
-                  message: `Invalid empty or whitespace filePath '${targetFile}' passed to DatalogSession.stepFileDelta.`,
+                  message: `Invalid empty or whitespace filePath '${input.filePath}' passed to DatalogSession.stepFileDelta.`,
                 })
               }
 
+              // Phase 1: Compute merged graph, Z-set delta entries, and next inference BEFORE mutating D2 or session state
               const nextPriors = input.priors !== undefined ? input.priors : activePriors
               const mergedGraph = mergeFileSubgraphIntoWorkspace(
                 activeGraph,
-                targetFile,
+                normalizedTarget,
                 input.nextGraph,
               )
 
-              const matchedOldFileKeys: Array<string> = []
-              const oldFacts = new Set<string>()
-              for (const [existingFile, facts] of Array.from(fileFactsByPath.entries())) {
-                if (matchesFilePath(existingFile, targetFile)) {
-                  matchedOldFileKeys.push(existingFile)
-                  for (const f of facts) {
-                    oldFacts.add(f)
-                  }
-                }
-              }
-
-              const nextFileMap = extractFileEdbFacts(mergedGraph, targetFile)
-              const newFactsArray = nextFileMap.get(targetFile) ?? []
+              const oldFacts = new Set<string>(fileFactsByPath.get(normalizedTarget) ?? [])
+              const nextFileMap = extractFileEdbFacts(mergedGraph, normalizedTarget)
+              const newFactsArray = nextFileMap.get(normalizedTarget) ?? []
               const newFacts = new Set<string>(newFactsArray)
 
               const deltaEntries: Array<[KeyValue<string, string>, number]> = []
@@ -3066,29 +3123,24 @@ export class DatalogSession extends Context.Service<DatalogSession, DatalogSessi
 
               for (const oldFact of oldFacts) {
                 if (!newFacts.has(oldFact)) {
-                  deltaEntries.push([[oldFact, targetFile], -1])
+                  deltaEntries.push([[oldFact, normalizedTarget], -1])
                   retractedFactCount += 1
                 }
               }
               for (const newFact of newFacts) {
                 if (!oldFacts.has(newFact)) {
-                  deltaEntries.push([[newFact, targetFile], 1])
+                  deltaEntries.push([[newFact, normalizedTarget], 1])
                   insertedFactCount += 1
                 }
               }
 
-              const prevViolationsJson = JSON.stringify(activeGraph.branchingViolations ?? [])
-              const nextViolationsJson = JSON.stringify(mergedGraph.branchingViolations ?? [])
-              const prevUnresolvedJson = JSON.stringify(activeGraph.unresolvedReferences ?? [])
-              const nextUnresolvedJson = JSON.stringify(mergedGraph.unresolvedReferences ?? [])
+              const nextFingerprint = computeGraphStructureFingerprint(mergedGraph)
               const isNoOpDelta =
                 retractedFactCount === 0 &&
                 insertedFactCount === 0 &&
                 input.priors === undefined &&
-                prevViolationsJson === nextViolationsJson &&
-                prevUnresolvedJson === nextUnresolvedJson
+                activeFingerprint === nextFingerprint
 
-              // Fast-path when zero EDB facts or priors changed; otherwise evaluate full Stratum S0..S3 inference
               const nextInference = isNoOpDelta
                 ? activeInference
                 : yield* decideGraphInference(mergedGraph, nextPriors).pipe(
@@ -3099,7 +3151,7 @@ export class DatalogSession extends Context.Service<DatalogSession, DatalogSessi
                           { _tag: "ConceptLatticeCycleError" },
                           (e) =>
                             new GraphInferenceError({
-                              reason: "d2ts-execution-failed",
+                              reason: "concept-lattice-cycle",
                               message: e.message,
                             }),
                         )
@@ -3107,12 +3159,12 @@ export class DatalogSession extends Context.Service<DatalogSession, DatalogSessi
                     ),
                   )
 
+              // Phase 2: Commit Z-set delta to D2 and update session state atomically
+              const nextEpoch = currentEpoch + 1
               const stepConverged = yield* Effect.try({
                 try: () => {
-                  const nextEpoch = currentEpoch + 1
                   inFileEdb.sendData(currentEpoch, new MultiSet(deltaEntries))
                   inFileEdb.sendFrontier(nextEpoch)
-                  currentEpoch = nextEpoch
                   return stepD2Bounded(d2)
                 },
                 catch: (err) =>
@@ -3128,14 +3180,15 @@ export class DatalogSession extends Context.Service<DatalogSession, DatalogSessi
                 })
               }
 
-              for (const k of matchedOldFileKeys) {
-                fileFactsByPath.delete(k)
-              }
+              currentEpoch = nextEpoch
               if (newFactsArray.length > 0) {
-                fileFactsByPath.set(targetFile, newFactsArray)
+                fileFactsByPath.set(normalizedTarget, newFactsArray)
+              } else {
+                fileFactsByPath.delete(normalizedTarget)
               }
               activeGraph = mergedGraph
               activePriors = nextPriors
+              activeFingerprint = nextFingerprint
               activeInference = nextInference
 
               return {

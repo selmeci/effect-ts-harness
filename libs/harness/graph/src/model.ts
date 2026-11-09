@@ -378,10 +378,10 @@ export const RelationTag = Schema.Literals(RELATION_TAGS)
 export type RelationTag = typeof RelationTag.Type
 
 export const isBipartitePlaysRoleIds = (
-  relationId: string,
-  entityKey: string,
+  relationId: RelationId,
+  entityKey: NodeKey,
 ): boolean => {
-  if (relationId === entityKey) {
+  if ((relationId as string) === (entityKey as string)) {
     return false
   }
   const hasEntityPrefixInRelation = ENTITY_NODE_TAGS.some((tag) =>
@@ -390,9 +390,15 @@ export const isBipartitePlaysRoleIds = (
   if (hasEntityPrefixInRelation) {
     return false
   }
+  const hasValidEntityPrefix = ENTITY_NODE_TAGS.some((tag) =>
+    entityKey.startsWith(`${tag}:`),
+  )
+  if (hasValidEntityPrefix) {
+    return true
+  }
   const hasRelationPrefixInEntity =
     RELATION_TAGS.some((tag) => entityKey.startsWith(`${tag}:`)) ||
-    /^(?:sig|layer-flow|trace|http|mig):/.test(entityKey)
+    /^(?:sig|layer-flow|trace|http-endpoint|mig):/.test(entityKey)
   if (hasRelationPrefixInEntity) {
     return false
   }
@@ -840,8 +846,27 @@ export type RewriteRuleId = typeof RewriteRuleId.Type
 export const DpoPriorKey = Schema.NonEmptyString.pipe(Schema.brand("DpoPriorKey"))
 export type DpoPriorKey = typeof DpoPriorKey.Type
 
-export const formatDpoPriorKey = (primaryNodeKey: string, ruleId: string): DpoPriorKey =>
-  DpoPriorKey.make(`${primaryNodeKey}::${ruleId}`)
+export const formatDpoPriorKey = (
+  primaryNodeKey: NodeKey | string,
+  ruleId: RewriteRuleId | string,
+): DpoPriorKey => {
+  const sanitizedRuleId = String(ruleId).replace(/::/g, ":")
+  return DpoPriorKey.make(`${primaryNodeKey}::${sanitizedRuleId}`)
+}
+
+export const parseDpoPriorKey = (
+  priorKey: DpoPriorKey | string,
+): { readonly primaryNodeKey: NodeKey; readonly ruleId: RewriteRuleId } | undefined => {
+  const raw = String(priorKey)
+  const sepIdx = raw.lastIndexOf("::")
+  if (sepIdx <= 0 || sepIdx + 2 >= raw.length) {
+    return undefined
+  }
+  return {
+    primaryNodeKey: NodeKey.make(raw.slice(0, sepIdx)),
+    ruleId: RewriteRuleId.make(raw.slice(sepIdx + 2)),
+  }
+}
 
 export const BOUNDARY_CALLER_PATTERN =
   /\b(?:http|endpoint|rpc|controller|handler|route|worker|relay)\b/i
@@ -944,6 +969,8 @@ export const GraphRewriteErrorReason = Schema.Literals([
   "dangling-edge",
   "bipartite-relation-deleted",
   "non-decreasing-measure",
+  "step-bound-exceeded",
+  "concept-lattice-cycle",
   "invalid-graph",
   "inference-failed",
 ])

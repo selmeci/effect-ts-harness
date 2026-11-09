@@ -1181,8 +1181,8 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
     expect(validEdge.role).toBe(RoleName.make("requires-service"))
     expect(
       isBipartitePlaysRoleIds(
-        "EffectSignature:libs/sample/domain/src/a.ts#fnA",
-        "ServiceTag:SampleRepo",
+        RelationId.make("EffectSignature:libs/sample/domain/src/a.ts#fnA"),
+        NodeKey.make("ServiceTag:SampleRepo"),
       ),
     ).toBe(true)
 
@@ -1388,9 +1388,63 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
             ),
           ).toBe(true)
 
-          const currentMerged = yield* session.currentGraph
-          const batchParity = yield* decideGraphInference(currentMerged)
+          const expectedScratchGraph = buildHarnessGraph({
+            fns: [
+              {
+                qualname: "libs/sample/domain/src/a.ts#fnA",
+                spanName: "Sample.fnA",
+                file: "libs/sample/domain/src/a.ts",
+                line: 1,
+                packageTag: "domain",
+                successType: "void",
+                isStub: false,
+              },
+              {
+                qualname: "libs/sample/domain/src/b.ts#fnB",
+                spanName: "Sample.fnB",
+                file: "libs/sample/domain/src/b.ts",
+                line: 1,
+                packageTag: "domain",
+                successType: "void",
+                isStub: false,
+              },
+            ],
+            services: [
+              {
+                tagId: "RepoA",
+                name: "RepoA",
+                packageTag: "service",
+                file: "libs/sample/service/src/repo.ts",
+              },
+              {
+                tagId: "SqlClient",
+                name: "SqlClient",
+                packageTag: "infra",
+                file: "libs/sample/infra/src/sql.ts",
+              },
+            ],
+            tracedCalls: [
+              {
+                callerQualname: "libs/sample/domain/src/a.ts#fnA",
+                calleeQualname: "libs/sample/domain/src/b.ts#fnB",
+                callCount: 1,
+                receiverLayer: null,
+              },
+            ],
+            requiresService: [
+              {
+                fnQualname: "libs/sample/domain/src/b.ts#fnB",
+                tagId: "RepoA",
+              },
+            ],
+          })
+          const batchParity = yield* decideGraphInference(expectedScratchGraph)
           expect(step1.inference).toEqual(batchParity)
+
+          // Verify atomic snapshot matches current state
+          const snap1 = yield* session.snapshot
+          expect(snap1.epoch).toBe(2)
+          expect(snap1.inference).toEqual(batchParity)
 
           // Step 2: no-op edit on b.ts produces 0 retractions and 0 insertions
           const step2 = yield* stepDatalogFileDelta({
@@ -1446,6 +1500,65 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
         })
 
         yield* program.pipe(Effect.provide(DatalogSession.layer(initialGraph)))
+      }),
+  )
+
+  it.effect(
+    "DatalogSession exact workspace path matching isolates libs/pkg-a/src/index.ts from libs/pkg-b/src/index.ts",
+    () =>
+      Effect.gen(function* () {
+        const twoPkgGraph = buildHarnessGraph({
+          fns: [
+            {
+              qualname: "libs/pkg-a/src/index.ts#fnA",
+              spanName: "PkgA.fnA",
+              file: "libs/pkg-a/src/index.ts",
+              line: 1,
+              packageTag: "domain",
+              successType: "void",
+              isStub: false,
+            },
+            {
+              qualname: "libs/pkg-b/src/index.ts#fnB",
+              spanName: "PkgB.fnB",
+              file: "libs/pkg-b/src/index.ts",
+              line: 1,
+              packageTag: "domain",
+              successType: "void",
+              isStub: false,
+            },
+          ],
+        })
+
+        const editedPkgA = buildHarnessGraph({
+          fns: [
+            {
+              qualname: "libs/pkg-a/src/index.ts#fnAUpdated",
+              spanName: "PkgA.fnAUpdated",
+              file: "libs/pkg-a/src/index.ts",
+              line: 1,
+              packageTag: "domain",
+              successType: "void",
+              isStub: false,
+            },
+          ],
+        })
+
+        const program = Effect.gen(function* () {
+          yield* stepDatalogFileDelta({
+            filePath: DatalogFilePath.make("/workspace/repo/libs/pkg-a/src/index.ts"),
+            nextGraph: editedPkgA,
+          })
+          const snap = yield* (yield* DatalogSession).snapshot
+          expect(
+            snap.graph.nodeIndexByKey.has(NodeKey.make("EffectFn:libs/pkg-a/src/index.ts#fnAUpdated")),
+          ).toBe(true)
+          expect(
+            snap.graph.nodeIndexByKey.has(NodeKey.make("EffectFn:libs/pkg-b/src/index.ts#fnB")),
+          ).toBe(true)
+        })
+
+        yield* program.pipe(Effect.provide(DatalogSession.layer(twoPkgGraph)))
       }),
   )
 })

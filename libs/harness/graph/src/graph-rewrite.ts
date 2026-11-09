@@ -5,12 +5,14 @@ import { decideGraphInference } from "./datalog-engine.js"
 import {
   type BranchingViolation,
   CandidateRank,
+  type ConceptLatticeCycleError,
   type DpoCandidatePriors,
   type DpoRuleSpec,
   type EarsSpecNode,
   type EffectFnNode,
   type EffectSignatureRelation,
   type EntityNode,
+  type GraphInferenceError,
   type GraphInferenceResult,
   type GraphMeasure,
   type GraphPatch,
@@ -137,7 +139,7 @@ export const STANDARD_DPO_RULES: ReadonlyArray<DpoRuleSpec> = [
     phase: "REPAIR_ARCH",
     category: "auto-repair",
     description:
-      "Repair unhandled-error / COMP-01 at a boundary by recording the error in caller caughtErrors (Effect.catchTag) while preserving EffectSignature in K.",
+      "Repair unhandled-error / COMP-01 by recording the error in caller caughtErrors (Effect.catchTag) while preserving EffectSignature in K.",
     preservesRelationInK: true,
     hasSpecNac: false,
   },
@@ -175,7 +177,7 @@ export const STANDARD_DPO_RULES: ReadonlyArray<DpoRuleSpec> = [
     phase: "REPAIR_CODE",
     category: "auto-repair",
     description:
-      "Repair untrusted-row-brand-make / unbranded-primitive-boundary by wiring Schema.decodeUnknownEffect error edge in EffectSignature in K.",
+      "Repair untrusted-row-brand-make / unbranded-primitive-boundary by clearing the boundary hygiene violation and recording Schema.decodeUnknownEffect decoding.",
     preservesRelationInK: true,
     hasSpecNac: false,
   },
@@ -193,7 +195,7 @@ export const STANDARD_DPO_RULES: ReadonlyArray<DpoRuleSpec> = [
     phase: "REPAIR_CODE",
     category: "auto-repair",
     description:
-      "Repair stale-doc-reference / unmapped-spec-symbol by rebinding TraceabilityTuple in K to the unique matching symbol in scope.",
+      "Repair stale-doc-reference / unmapped-spec-symbol by rebinding TraceabilityTuple in K (or creating a new TraceabilityTuple) to the unique matching symbol in scope.",
     preservesRelationInK: true,
     hasSpecNac: false,
   },
@@ -204,14 +206,16 @@ export const STANDARD_DPO_RULES: ReadonlyArray<DpoRuleSpec> = [
     phase: "CLEANUP",
     category: "cleanup",
     description:
-      "Prune unused ServiceTag only when NAC_spec holds (unreferenced by any EffectSignature, LayerFlow, TraceabilityTuple, EarsSpec, AdrDoc, or active stub).",
+      "Prune unused ServiceTag only when NAC_spec holds (unreferenced by any EffectSignature, LayerFlow, TraceabilityTuple, EarsSpec, AdrDoc, or active stub; domain/core/contract packages are excluded).",
     preservesRelationInK: true,
     hasSpecNac: true,
   },
 ]
 
 /**
- * Pure verification of strict decrease in `(N^6, <_lex)` guaranteeing rewrite termination (`R = never`, `RFC-0003 §4.3`).
+ * Pure lexicographical comparison `after <_lex before` in `(N^6, <_lex)` (`R = never`, `RFC-0003 §4.3`).
+ * Phases 2 (`REPAIR_ARCH`) and 3 (`REPAIR_CODE`) enforce strict decrease; Phase 1 (`PLAN`) ensures
+ * `archViolations` and `codeHygieneViolations` do not increase, and Phase 4 (`CLEANUP`) requires `after <=_lex before`.
  */
 export const isStrictlyDecreasingMeasure = (
   before: GraphMeasure,
@@ -2671,6 +2675,38 @@ const scoreDraftPatch = (
     .otherwise(() => SystemOneScoreMillis.make(750))
 }
 
+export interface DecideGraphRewriteOptions {
+  readonly maxPhaseSteps?: number
+}
+
+const mapInferenceErrorToRewriteError = (
+  err: GraphInferenceError | ConceptLatticeCycleError,
+  ruleId?: RewriteRuleId,
+  nodeKey?: NodeKey,
+): GraphRewriteError =>
+  match(err)
+    .with(
+      { _tag: "ConceptLatticeCycleError" },
+      (cycleErr) =>
+        new GraphRewriteError({
+          ...(ruleId !== undefined ? { ruleId } : {}),
+          ...(nodeKey !== undefined ? { nodeKey } : {}),
+          reason: "concept-lattice-cycle",
+          message: `[ConceptLatticeCycleError:${cycleErr.reason}] ${cycleErr.message}`,
+        }),
+    )
+    .with(
+      { _tag: "GraphInferenceError" },
+      (infErr) =>
+        new GraphRewriteError({
+          ...(ruleId !== undefined ? { ruleId } : {}),
+          ...(nodeKey !== undefined ? { nodeKey } : {}),
+          reason: infErr.reason === "invalid-graph" ? "invalid-graph" : "inference-failed",
+          message: `[GraphInferenceError:${infErr.reason}] ${infErr.message}`,
+        }),
+    )
+    .exhaustive()
+
 /**
  * Pure Double-Pushout (DPO) Algebraic Graph Rewriting Decider (`GraphRewrite.decide`, `R = never`).
  */
@@ -2678,15 +2714,10 @@ export const decideGraphRewrite = Effect.fn("GraphRewrite.decide")(function* (
   graph: HarnessGraph,
   mode: RewriteMode,
   candidatePriors?: DpoCandidatePriors,
+  options?: DecideGraphRewriteOptions,
 ): Effect.fn.Return<GraphRewriteOutcome, GraphRewriteError, never> {
   const initialInference = yield* decideGraphInference(graph).pipe(
-    Effect.mapError(
-      (err) =>
-        new GraphRewriteError({
-          reason: "inference-failed",
-          message: err.message,
-        }),
-    ),
+    Effect.mapError((err) => mapInferenceErrorToRewriteError(err)),
   )
   const initialMeasure = computeGraphMeasure(graph, initialInference)
   const activePhases = getPhasesForMode(mode)
@@ -2697,248 +2728,231 @@ export const decideGraphRewrite = Effect.fn("GraphRewrite.decide")(function* (
   const appliedPatches: Array<GraphPatch> = []
   const alternativeCandidates: Array<RewriteCandidate> = []
   let branchWinnerScore: SystemOneScoreMillis | undefined
-  const maxSteps = Math.max(64, Graph.nodeCount(graph.graph) * 4)
+  const maxSteps =
+    options?.maxPhaseSteps !== undefined && options.maxPhaseSteps >= 1
+      ? Math.floor(options.maxPhaseSteps)
+      : Math.max(64, Graph.nodeCount(graph.graph) * 4)
 
   for (const phase of activePhases) {
     let phaseSteps = 0
     let converged = false
-    while (phaseSteps < maxSteps) {
-      if (phase === "PLAN") {
-        const planDrafts = findPhase1PlanPatches(currentGraph, currentInference)
-        const draft = planDrafts[0]
-        if (draft === undefined) {
-          converged = true
-          break
-        }
-        phaseSteps += 1
-        const nextGraph = yield* applyDpoPatchToGraph(currentGraph, draft)
-        const nextInference = yield* decideGraphInference(nextGraph).pipe(
-          Effect.mapError(
-            (err) =>
-              new GraphRewriteError({
+    while (phaseSteps < maxSteps && !converged) {
+      yield* match(phase)
+        .with("PLAN", () =>
+          Effect.gen(function* () {
+            const planDrafts = findPhase1PlanPatches(currentGraph, currentInference)
+            const draft = planDrafts[0]
+            if (draft === undefined) {
+              converged = true
+              return
+            }
+            phaseSteps += 1
+            const nextGraph = yield* applyDpoPatchToGraph(currentGraph, draft)
+            const nextInference = yield* decideGraphInference(nextGraph).pipe(
+              Effect.mapError((err) =>
+                mapInferenceErrorToRewriteError(err, draft.ruleId, draft.primaryNodeKey),
+              ),
+            )
+            const nextMeasure = computeGraphMeasure(nextGraph, nextInference)
+            if (
+              nextMeasure.archViolations > currentMeasure.archViolations ||
+              nextMeasure.codeHygieneViolations > currentMeasure.codeHygieneViolations
+            ) {
+              return yield* new GraphRewriteError({
                 ruleId: draft.ruleId,
                 nodeKey: draft.primaryNodeKey,
-                reason: "inference-failed",
-                message: err.message,
-              }),
-          ),
+                reason: "non-decreasing-measure",
+                message: `Planning rule ${draft.ruleId} introduced new architectural or code hygiene violations.`,
+              })
+            }
+            const { clearViolationFilter: _ignored, ...cleanDraft } = draft
+            appliedPatches.push({
+              ...cleanDraft,
+              beforeMeasure: currentMeasure,
+              afterMeasure: nextMeasure,
+            })
+            currentGraph = nextGraph
+            currentInference = nextInference
+            currentMeasure = nextMeasure
+          }),
         )
-        const nextMeasure = computeGraphMeasure(nextGraph, nextInference)
-        if (
-          nextMeasure.archViolations > currentMeasure.archViolations ||
-          nextMeasure.codeHygieneViolations > currentMeasure.codeHygieneViolations
-        ) {
-          return yield* new GraphRewriteError({
-            ruleId: draft.ruleId,
-            nodeKey: draft.primaryNodeKey,
-            reason: "non-decreasing-measure",
-            message: `Planning rule ${draft.ruleId} introduced new architectural or code hygiene violations.`,
-          })
-        }
-        const { clearViolationFilter: _ignored, ...cleanDraft } = draft
-        appliedPatches.push({
-          ...cleanDraft,
-          beforeMeasure: currentMeasure,
-          afterMeasure: nextMeasure,
-        })
-        currentGraph = nextGraph
-        currentInference = nextInference
-        currentMeasure = nextMeasure
-        continue
-      }
+        .with("REPAIR_ARCH", () =>
+          Effect.gen(function* () {
+            const branches = findPhase2ArchRepairBranches(currentGraph, currentInference)
+            if (branches.length === 0) {
+              converged = true
+              return
+            }
+            phaseSteps += 1
 
-      if (phase === "REPAIR_ARCH") {
-        const branches = findPhase2ArchRepairBranches(currentGraph, currentInference)
-        if (branches.length === 0) {
-          converged = true
-          break
-        }
-        phaseSteps += 1
+            // Evaluate all competing branches (e.g. REP-04a vs REP-04b)
+            const evaluatedBranches: Array<{
+              readonly draft: DraftGraphPatch
+              readonly nextGraph: HarnessGraph
+              readonly nextInference: GraphInferenceResult
+              readonly nextMeasure: GraphMeasure
+              readonly scoreMillis: SystemOneScoreMillis
+            }> = []
 
-        // Evaluate all competing branches (e.g. REP-04a vs REP-04b)
-        const evaluatedBranches: Array<{
-          readonly draft: DraftGraphPatch
-          readonly nextGraph: HarnessGraph
-          readonly nextInference: GraphInferenceResult
-          readonly nextMeasure: GraphMeasure
-          readonly scoreMillis: SystemOneScoreMillis
-        }> = []
-
-        for (const branch of branches) {
-          const draft = branch[0]
-          if (draft === undefined) {
-            continue
-          }
-          const nextGraph = yield* applyDpoPatchToGraph(currentGraph, draft)
-          const nextInference = yield* decideGraphInference(nextGraph).pipe(
-            Effect.mapError(
-              (err) =>
-                new GraphRewriteError({
+            for (const branch of branches) {
+              const draft = branch[0]
+              if (draft === undefined) {
+                continue
+              }
+              const nextGraph = yield* applyDpoPatchToGraph(currentGraph, draft)
+              const nextInference = yield* decideGraphInference(nextGraph).pipe(
+                Effect.mapError((err) =>
+                  mapInferenceErrorToRewriteError(err, draft.ruleId, draft.primaryNodeKey),
+                ),
+              )
+              const nextMeasure = computeGraphMeasure(nextGraph, nextInference)
+              if (!isStrictlyDecreasingMeasure(currentMeasure, nextMeasure)) {
+                if (branches.length > 1) {
+                  continue
+                }
+                return yield* new GraphRewriteError({
                   ruleId: draft.ruleId,
                   nodeKey: draft.primaryNodeKey,
-                  reason: "inference-failed",
-                  message: err.message,
-                }),
-            ),
-          )
-          const nextMeasure = computeGraphMeasure(nextGraph, nextInference)
-          if (!isStrictlyDecreasingMeasure(currentMeasure, nextMeasure)) {
-            if (branches.length > 1) {
-              continue
+                  reason: "non-decreasing-measure",
+                  message: `Rule ${draft.ruleId} failed to strictly decrease measure mu(G) in N^6.`,
+                })
+              }
+              const scoreMillis = scoreDraftPatch(draft, currentGraph, candidatePriors)
+              evaluatedBranches.push({
+                draft,
+                nextGraph,
+                nextInference,
+                nextMeasure,
+                scoreMillis,
+              })
             }
-            return yield* new GraphRewriteError({
-              ruleId: draft.ruleId,
-              nodeKey: draft.primaryNodeKey,
-              reason: "non-decreasing-measure",
-              message: `Rule ${draft.ruleId} failed to strictly decrease measure mu(G) in N^6.`,
+
+            if (evaluatedBranches.length === 0) {
+              const fallbackDraft = branches[0]?.[0]
+              return yield* new GraphRewriteError({
+                ...(fallbackDraft !== undefined
+                  ? { ruleId: fallbackDraft.ruleId, nodeKey: fallbackDraft.primaryNodeKey }
+                  : {}),
+                reason: "non-decreasing-measure",
+                message:
+                  "No competing architectural repair branch strictly decreased measure mu(G) in N^6.",
+              })
+            }
+
+            evaluatedBranches.sort((a, b) => {
+              if (isStrictlyDecreasingMeasure(a.nextMeasure, b.nextMeasure)) return 1
+              if (isStrictlyDecreasingMeasure(b.nextMeasure, a.nextMeasure)) return -1
+              if (a.scoreMillis !== b.scoreMillis) return b.scoreMillis - a.scoreMillis
+              return a.draft.ruleId.localeCompare(b.draft.ruleId)
             })
-          }
-          const scoreMillis = scoreDraftPatch(draft, currentGraph, candidatePriors)
-          evaluatedBranches.push({
-            draft,
-            nextGraph,
-            nextInference,
-            nextMeasure,
-            scoreMillis,
-          })
-        }
 
-        if (evaluatedBranches.length === 0) {
-          const fallbackDraft = branches[0]?.[0]
-          return yield* new GraphRewriteError({
-            ...(fallbackDraft !== undefined
-              ? { ruleId: fallbackDraft.ruleId, nodeKey: fallbackDraft.primaryNodeKey }
-              : {}),
-            reason: "non-decreasing-measure",
-            message: "No competing architectural repair branch strictly decreased measure mu(G) in N^6.",
-          })
-        }
+            const winner = evaluatedBranches[0]!
+            if (evaluatedBranches.length > 1 || branchWinnerScore === undefined) {
+              branchWinnerScore = winner.scoreMillis
+            }
+            for (let idx = 1; idx < evaluatedBranches.length; idx++) {
+              const alt = evaluatedBranches[idx]!
+              const { clearViolationFilter: _ignoredAlt, ...cleanAltDraft } = alt.draft
+              const altPatch: GraphPatch = {
+                ...cleanAltDraft,
+                beforeMeasure: currentMeasure,
+                afterMeasure: alt.nextMeasure,
+              }
+              alternativeCandidates.push({
+                rank: CandidateRank.make(alternativeCandidates.length + 2),
+                rationale: `${alt.draft.description} (System One tie-breaker: ${alt.scoreMillis}/1000)`,
+                patches: [...appliedPatches, altPatch],
+                finalMeasure: alt.nextMeasure,
+                systemOneTieBreaker: alt.scoreMillis,
+                isPolicyClean: isZeroMeasure(alt.nextMeasure),
+              })
+            }
 
-        evaluatedBranches.sort((a, b) => {
-          if (isStrictlyDecreasingMeasure(a.nextMeasure, b.nextMeasure)) return 1
-          if (isStrictlyDecreasingMeasure(b.nextMeasure, a.nextMeasure)) return -1
-          if (a.scoreMillis !== b.scoreMillis) return b.scoreMillis - a.scoreMillis
-          return a.draft.ruleId.localeCompare(b.draft.ruleId)
-        })
-
-        const winner = evaluatedBranches[0]!
-        if (evaluatedBranches.length > 1 || branchWinnerScore === undefined) {
-          branchWinnerScore = winner.scoreMillis
-        }
-        for (let idx = 1; idx < evaluatedBranches.length; idx++) {
-          const alt = evaluatedBranches[idx]!
-          const { clearViolationFilter: _ignoredAlt, ...cleanAltDraft } = alt.draft
-          const altPatch: GraphPatch = {
-            ...cleanAltDraft,
-            beforeMeasure: currentMeasure,
-            afterMeasure: alt.nextMeasure,
-          }
-          alternativeCandidates.push({
-            rank: CandidateRank.make(alternativeCandidates.length + 2),
-            rationale: `${alt.draft.description} (System One tie-breaker: ${alt.scoreMillis}/1000)`,
-            patches: [...appliedPatches, altPatch],
-            finalMeasure: alt.nextMeasure,
-            systemOneTieBreaker: alt.scoreMillis,
-            isPolicyClean: isZeroMeasure(alt.nextMeasure),
-          })
-        }
-
-        const { clearViolationFilter: _ignoredWin, ...cleanWinnerDraft } = winner.draft
-        appliedPatches.push({
-          ...cleanWinnerDraft,
-          beforeMeasure: currentMeasure,
-          afterMeasure: winner.nextMeasure,
-        })
-        currentGraph = winner.nextGraph
-        currentInference = winner.nextInference
-        currentMeasure = winner.nextMeasure
-        continue
-      }
-
-      if (phase === "REPAIR_CODE") {
-        const codeDrafts = findPhase3CodeRepairPatches(currentGraph, currentInference)
-        const draft = codeDrafts[0]
-        if (draft === undefined) {
-          converged = true
-          break
-        }
-        phaseSteps += 1
-        const nextGraph = yield* applyDpoPatchToGraph(currentGraph, draft)
-        const nextInference = yield* decideGraphInference(nextGraph).pipe(
-          Effect.mapError(
-            (err) =>
-              new GraphRewriteError({
+            const { clearViolationFilter: _ignoredWin, ...cleanWinnerDraft } = winner.draft
+            appliedPatches.push({
+              ...cleanWinnerDraft,
+              beforeMeasure: currentMeasure,
+              afterMeasure: winner.nextMeasure,
+            })
+            currentGraph = winner.nextGraph
+            currentInference = winner.nextInference
+            currentMeasure = winner.nextMeasure
+          }),
+        )
+        .with("REPAIR_CODE", () =>
+          Effect.gen(function* () {
+            const codeDrafts = findPhase3CodeRepairPatches(currentGraph, currentInference)
+            const draft = codeDrafts[0]
+            if (draft === undefined) {
+              converged = true
+              return
+            }
+            phaseSteps += 1
+            const nextGraph = yield* applyDpoPatchToGraph(currentGraph, draft)
+            const nextInference = yield* decideGraphInference(nextGraph).pipe(
+              Effect.mapError((err) =>
+                mapInferenceErrorToRewriteError(err, draft.ruleId, draft.primaryNodeKey),
+              ),
+            )
+            const nextMeasure = computeGraphMeasure(nextGraph, nextInference)
+            if (!isStrictlyDecreasingMeasure(currentMeasure, nextMeasure)) {
+              return yield* new GraphRewriteError({
                 ruleId: draft.ruleId,
                 nodeKey: draft.primaryNodeKey,
-                reason: "inference-failed",
-                message: err.message,
-              }),
-          ),
+                reason: "non-decreasing-measure",
+                message: `Rule ${draft.ruleId} failed to strictly decrease measure mu(G) in N^6.`,
+              })
+            }
+            const { clearViolationFilter: _ignored, ...cleanDraft } = draft
+            appliedPatches.push({
+              ...cleanDraft,
+              beforeMeasure: currentMeasure,
+              afterMeasure: nextMeasure,
+            })
+            currentGraph = nextGraph
+            currentInference = nextInference
+            currentMeasure = nextMeasure
+          }),
         )
-        const nextMeasure = computeGraphMeasure(nextGraph, nextInference)
-        if (!isStrictlyDecreasingMeasure(currentMeasure, nextMeasure)) {
-          return yield* new GraphRewriteError({
-            ruleId: draft.ruleId,
-            nodeKey: draft.primaryNodeKey,
-            reason: "non-decreasing-measure",
-            message: `Rule ${draft.ruleId} failed to strictly decrease measure mu(G) in N^6.`,
-          })
-        }
-        const { clearViolationFilter: _ignored, ...cleanDraft } = draft
-        appliedPatches.push({
-          ...cleanDraft,
-          beforeMeasure: currentMeasure,
-          afterMeasure: nextMeasure,
-        })
-        currentGraph = nextGraph
-        currentInference = nextInference
-        currentMeasure = nextMeasure
-        continue
-      }
-
-      if (phase === "CLEANUP") {
-        const cleanupDrafts = findPhase4CleanupPatches(currentGraph)
-        const draft = cleanupDrafts[0]
-        if (draft === undefined) {
-          converged = true
-          break
-        }
-        phaseSteps += 1
-        const nextGraph = yield* applyDpoPatchToGraph(currentGraph, draft)
-        const nextInference = yield* decideGraphInference(nextGraph).pipe(
-          Effect.mapError(
-            (err) =>
-              new GraphRewriteError({
+        .with("CLEANUP", () =>
+          Effect.gen(function* () {
+            const cleanupDrafts = findPhase4CleanupPatches(currentGraph)
+            const draft = cleanupDrafts[0]
+            if (draft === undefined) {
+              converged = true
+              return
+            }
+            phaseSteps += 1
+            const nextGraph = yield* applyDpoPatchToGraph(currentGraph, draft)
+            const nextInference = yield* decideGraphInference(nextGraph).pipe(
+              Effect.mapError((err) =>
+                mapInferenceErrorToRewriteError(err, draft.ruleId, draft.primaryNodeKey),
+              ),
+            )
+            const nextMeasure = computeGraphMeasure(nextGraph, nextInference)
+            if (
+              !isStrictlyDecreasingMeasure(currentMeasure, nextMeasure) &&
+              !isEqualMeasure(currentMeasure, nextMeasure)
+            ) {
+              return yield* new GraphRewriteError({
                 ruleId: draft.ruleId,
                 nodeKey: draft.primaryNodeKey,
-                reason: "inference-failed",
-                message: err.message,
-              }),
-          ),
+                reason: "non-decreasing-measure",
+                message: `Cleanup rule ${draft.ruleId} increased measure mu(G) in N^6.`,
+              })
+            }
+            const { clearViolationFilter: _ignored, ...cleanDraft } = draft
+            appliedPatches.push({
+              ...cleanDraft,
+              beforeMeasure: currentMeasure,
+              afterMeasure: nextMeasure,
+            })
+            currentGraph = nextGraph
+            currentInference = nextInference
+            currentMeasure = nextMeasure
+          }),
         )
-        const nextMeasure = computeGraphMeasure(nextGraph, nextInference)
-        if (
-          !isStrictlyDecreasingMeasure(currentMeasure, nextMeasure) &&
-          !isEqualMeasure(currentMeasure, nextMeasure)
-        ) {
-          return yield* new GraphRewriteError({
-            ruleId: draft.ruleId,
-            nodeKey: draft.primaryNodeKey,
-            reason: "non-decreasing-measure",
-            message: `Cleanup rule ${draft.ruleId} increased measure mu(G) in N^6.`,
-          })
-        }
-        const { clearViolationFilter: _ignored, ...cleanDraft } = draft
-        appliedPatches.push({
-          ...cleanDraft,
-          beforeMeasure: currentMeasure,
-          afterMeasure: nextMeasure,
-        })
-        currentGraph = nextGraph
-        currentInference = nextInference
-        currentMeasure = nextMeasure
-        continue
-      }
+        .exhaustive()
     }
     if (!converged) {
       const remainingAtBound = match(phase)
@@ -2955,7 +2969,7 @@ export const decideGraphRewrite = Effect.fn("GraphRewrite.decide")(function* (
         .exhaustive()
       if (remainingAtBound > 0) {
         return yield* new GraphRewriteError({
-          reason: "non-decreasing-measure",
+          reason: "step-bound-exceeded",
           message: `Phase '${phase}' exceeded maximum step bound (${maxSteps}) without reaching a normal form.`,
         })
       }

@@ -4,7 +4,7 @@ import {
   PageRankScoreMillis,
   RoleName,
 } from "@harness/gates"
-import { Cause, Effect, Schema } from "effect"
+import { Effect, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
@@ -21,10 +21,16 @@ export type ProposedRoleName = RoleName
 export const DecisionModelSource = Schema.TaggedStruct("DecisionModel", {})
 export type DecisionModelSource = typeof DecisionModelSource.Type
 
+export const DeterministicFallbackReason = Schema.Literals([
+  "timeout-or-unavailable",
+  "model-error",
+  "timeout",
+  "invalid-output",
+])
+export type DeterministicFallbackReason = typeof DeterministicFallbackReason.Type
+
 export const DeterministicFallbackSource = Schema.TaggedStruct("DeterministicFallback", {
-  reason: Schema.optional(
-    Schema.Literals(["timeout-or-unavailable", "model-error", "timeout", "invalid-output"]),
-  ),
+  reason: Schema.optional(DeterministicFallbackReason),
 })
 export type DeterministicFallbackSource = typeof DeterministicFallbackSource.Type
 
@@ -130,81 +136,106 @@ export const SemanticEdgePriorsBatchResult = Schema.Struct({
 })
 export type SemanticEdgePriorsBatchResult = typeof SemanticEdgePriorsBatchResult.Type
 
-const mapRelevanceLabel = (
-  rawLabel: string,
-): {
+const parseRelevanceLabel = (
+  rawLabel: unknown,
+): Option.Option<{
   readonly relevanceLabel: HoleRelevanceLevel
   readonly teleportationWeightMillis: ConfidenceMillis
-} =>
+}> =>
   match(rawLabel)
-    .with("irrelevant", () => ({
-      relevanceLabel: "irrelevant" as const,
-      teleportationWeightMillis: RELEVANCE_WEIGHT_MILLIS.irrelevant,
-    }))
-    .with("tangential", () => ({
-      relevanceLabel: "tangential" as const,
-      teleportationWeightMillis: RELEVANCE_WEIGHT_MILLIS.tangential,
-    }))
-    .with("helpful", () => ({
-      relevanceLabel: "helpful" as const,
-      teleportationWeightMillis: RELEVANCE_WEIGHT_MILLIS.helpful,
-    }))
-    .with("essential", () => ({
-      relevanceLabel: "essential" as const,
-      teleportationWeightMillis: RELEVANCE_WEIGHT_MILLIS.essential,
-    }))
-    .otherwise(() => ({
-      relevanceLabel: "irrelevant" as const,
-      teleportationWeightMillis: RELEVANCE_WEIGHT_MILLIS.irrelevant,
-    }))
+    .with("irrelevant", () =>
+      Option.some({
+        relevanceLabel: "irrelevant" as const,
+        teleportationWeightMillis: RELEVANCE_WEIGHT_MILLIS.irrelevant,
+      }),
+    )
+    .with("tangential", () =>
+      Option.some({
+        relevanceLabel: "tangential" as const,
+        teleportationWeightMillis: RELEVANCE_WEIGHT_MILLIS.tangential,
+      }),
+    )
+    .with("helpful", () =>
+      Option.some({
+        relevanceLabel: "helpful" as const,
+        teleportationWeightMillis: RELEVANCE_WEIGHT_MILLIS.helpful,
+      }),
+    )
+    .with("essential", () =>
+      Option.some({
+        relevanceLabel: "essential" as const,
+        teleportationWeightMillis: RELEVANCE_WEIGHT_MILLIS.essential,
+      }),
+    )
+    .otherwise(() => Option.none())
+
+const makeFallbackHolePriorResult = (
+  input: HoleCandidatePriorInput,
+  reason: DeterministicFallbackReason,
+): HoleCandidatePriorResult => ({
+  candidateSymbolKey: input.candidateSymbolKey,
+  proposedRole: input.proposedRole,
+  edgeConfidenceMillis: ConfidenceMillis.make(500),
+  teleportationWeightMillis: RELEVANCE_WEIGHT_MILLIS.tangential,
+  relevanceLabel: "tangential",
+  source: { _tag: "DeterministicFallback", reason },
+})
 
 export const evaluateHoleCandidatePrior = Effect.fn("HoleRelevanceAndEdgePrior.evaluate")(
-  function* (input: HoleCandidatePriorInput) {
+  function* (
+    input: HoleCandidatePriorInput,
+  ): Effect.fn.Return<HoleCandidatePriorResult, never, DecisionModel.DecisionModel> {
     const outcome = yield* DecisionModel.decide(HoleRelevanceAndEdgePriorV1, { input }).pipe(
       Effect.timeoutOption("1500 millis"),
-      Effect.catchCauseIf(
-        (cause) => !Cause.hasInterrupts(cause) && !Cause.hasDies(cause),
-        () => Effect.succeedNone,
+      Effect.catch((error) =>
+        Effect.annotateCurrentSpan({
+          "decision.fallback_error": String(error),
+        }).pipe(Effect.as(Option.none())),
       ),
     )
 
     return yield* match(outcome)
       .with({ _tag: "None" }, () =>
-        Effect.succeed({
-          candidateSymbolKey: input.candidateSymbolKey,
-          proposedRole: input.proposedRole,
-          edgeConfidenceMillis: ConfidenceMillis.make(500),
-          teleportationWeightMillis: RELEVANCE_WEIGHT_MILLIS.tangential,
-          relevanceLabel: "tangential" as const,
-          source: { _tag: "DeterministicFallback" },
-        } satisfies HoleCandidatePriorResult),
+        Effect.succeed(makeFallbackHolePriorResult(input, "timeout-or-unavailable")),
       )
       .with({ _tag: "Some" }, ({ value }) =>
         Effect.gen(function* () {
           const { answers } = value
-          const clampedEdgeConfidence = Math.min(
-            1000,
-            Math.max(0, Math.round(answers.edgeConfidence.probability * 1000)),
-          )
-          const edgeConfidenceMillis = ConfidenceMillis.make(clampedEdgeConfidence)
-          const rawLabel = answers.candidateRelevance.label as string
-          const { relevanceLabel, teleportationWeightMillis } = mapRelevanceLabel(rawLabel)
+          const rawProb = answers.edgeConfidence?.probability
+          const parsedRelevance = parseRelevanceLabel(answers.candidateRelevance?.label)
+          if (typeof rawProb !== "number" || !Number.isFinite(rawProb)) {
+            return makeFallbackHolePriorResult(input, "invalid-output")
+          }
+          return yield* match(parsedRelevance)
+            .with({ _tag: "None" }, () =>
+              Effect.succeed(makeFallbackHolePriorResult(input, "invalid-output")),
+            )
+            .with({ _tag: "Some" }, ({ value: { relevanceLabel, teleportationWeightMillis } }) =>
+              Effect.gen(function* () {
+                const clampedEdgeConfidence = Math.min(
+                  1000,
+                  Math.max(0, Math.round(rawProb * 1000)),
+                )
+                const edgeConfidenceMillis = ConfidenceMillis.make(clampedEdgeConfidence)
 
-          yield* Effect.annotateCurrentSpan({
-            "decision.definition": "HoleRelevanceAndEdgePriorV1",
-            "decision.edgeConfidenceMillis": edgeConfidenceMillis,
-            "decision.teleportationWeightMillis": teleportationWeightMillis,
-            "decision.relevanceLabel": relevanceLabel,
-          })
+                yield* Effect.annotateCurrentSpan({
+                  "decision.definition": "HoleRelevanceAndEdgePriorV1",
+                  "decision.edgeConfidenceMillis": edgeConfidenceMillis,
+                  "decision.teleportationWeightMillis": teleportationWeightMillis,
+                  "decision.relevanceLabel": relevanceLabel,
+                })
 
-          return {
-            candidateSymbolKey: input.candidateSymbolKey,
-            proposedRole: input.proposedRole,
-            edgeConfidenceMillis,
-            teleportationWeightMillis,
-            relevanceLabel,
-            source: { _tag: "DecisionModel" },
-          } satisfies HoleCandidatePriorResult
+                return {
+                  candidateSymbolKey: input.candidateSymbolKey,
+                  proposedRole: input.proposedRole,
+                  edgeConfidenceMillis,
+                  teleportationWeightMillis,
+                  relevanceLabel,
+                  source: { _tag: "DecisionModel" },
+                } satisfies HoleCandidatePriorResult
+              }),
+            )
+            .exhaustive()
         }),
       )
       .exhaustive()
@@ -232,8 +263,55 @@ export const evaluateHoleCandidatePriorsBatch = Effect.fn(
 
   const edgeConfidenceOverrides: Record<string, ConfidenceMillis> = {}
   const holeTeleportationWeights: Record<NodeKey, PageRankScoreMillis> = {}
+  const modelBackedEdgeKeys = new Set<string>()
+  const modelBackedTeleportKeys = new Set<NodeKey>()
   const results: Array<HoleCandidatePriorResult> = []
   let usedFallback = false
+  let fallbackReason: DeterministicFallbackReason | undefined
+
+  const mergeConfidence = (
+    key: string,
+    score: ConfidenceMillis,
+    isModelBacked: boolean,
+  ): void => {
+    if (isModelBacked) {
+      if (!modelBackedEdgeKeys.has(key)) {
+        modelBackedEdgeKeys.add(key)
+        edgeConfidenceOverrides[key] = score
+        return
+      }
+      const existing = edgeConfidenceOverrides[key]
+      edgeConfidenceOverrides[key] = existing !== undefined && existing > score ? existing : score
+      return
+    }
+    if (modelBackedEdgeKeys.has(key)) {
+      return
+    }
+    const existing = edgeConfidenceOverrides[key]
+    edgeConfidenceOverrides[key] = existing !== undefined && existing > score ? existing : score
+  }
+
+  const mergeTeleportationWeight = (
+    key: NodeKey,
+    score: PageRankScoreMillis,
+    isModelBacked: boolean,
+  ): void => {
+    if (isModelBacked) {
+      if (!modelBackedTeleportKeys.has(key)) {
+        modelBackedTeleportKeys.add(key)
+        holeTeleportationWeights[key] = score
+        return
+      }
+      const existing = holeTeleportationWeights[key]
+      holeTeleportationWeights[key] = existing !== undefined && existing > score ? existing : score
+      return
+    }
+    if (modelBackedTeleportKeys.has(key)) {
+      return
+    }
+    const existing = holeTeleportationWeights[key]
+    holeTeleportationWeights[key] = existing !== undefined && existing > score ? existing : score
+  }
 
   for (let offset = 0; offset < inputs.length; offset += MAX_BATCHED_HOLE_CANDIDATES) {
     const chunk = inputs.slice(offset, offset + MAX_BATCHED_HOLE_CANDIDATES)
@@ -254,36 +332,29 @@ export const evaluateHoleCandidatePriorsBatch = Effect.fn(
       input: { candidatesBatchJson },
     }).pipe(
       Effect.timeoutOption("1500 millis"),
-      Effect.catch(() => Effect.succeedNone),
+      Effect.catch((error) =>
+        Effect.annotateCurrentSpan({
+          "decision.fallback_error": String(error),
+        }).pipe(Effect.as(Option.none())),
+      ),
     )
 
     yield* match(outcome)
       .with({ _tag: "None" }, () =>
         Effect.sync(() => {
           usedFallback = true
+          fallbackReason = fallbackReason ?? "timeout-or-unavailable"
           for (const item of chunk) {
-            const fallbackConf = ConfidenceMillis.make(500)
-            const fallbackWeight = RELEVANCE_WEIGHT_MILLIS.tangential
+            const fb = makeFallbackHolePriorResult(item, "timeout-or-unavailable")
             const roleKey = `${item.candidateSymbolKey}:${item.proposedRole}`
-            if (edgeConfidenceOverrides[roleKey] === undefined) {
-              edgeConfidenceOverrides[roleKey] = fallbackConf
-            }
-            if (edgeConfidenceOverrides[item.candidateSymbolKey] === undefined) {
-              edgeConfidenceOverrides[item.candidateSymbolKey] = fallbackConf
-            }
-            if (holeTeleportationWeights[item.candidateSymbolKey] === undefined) {
-              holeTeleportationWeights[item.candidateSymbolKey] = PageRankScoreMillis.make(
-                fallbackWeight,
-              )
-            }
-            results.push({
-              candidateSymbolKey: item.candidateSymbolKey,
-              proposedRole: item.proposedRole,
-              edgeConfidenceMillis: fallbackConf,
-              teleportationWeightMillis: fallbackWeight,
-              relevanceLabel: "tangential",
-              source: { _tag: "DeterministicFallback", reason: "timeout-or-unavailable" },
-            })
+            mergeConfidence(roleKey, fb.edgeConfidenceMillis, false)
+            mergeConfidence(item.candidateSymbolKey, fb.edgeConfidenceMillis, false)
+            mergeTeleportationWeight(
+              item.candidateSymbolKey,
+              PageRankScoreMillis.make(fb.teleportationWeightMillis),
+              false,
+            )
+            results.push(fb)
           }
         }),
       )
@@ -298,37 +369,61 @@ export const evaluateHoleCandidatePriorsBatch = Effect.fn(
             const item = chunk[i]!
             const probAns = answersRecord[`edgeConfidence_${i}`]
             const rateAns = answersRecord[`candidateRelevance_${i}`]
-            const rawProb = typeof probAns?.probability === "number" ? probAns.probability : 0.5
-            const clampedConf = Math.min(1000, Math.max(0, Math.round(rawProb * 1000)))
-            const edgeConfidenceMillis = ConfidenceMillis.make(clampedConf)
-            const rawLabel = typeof rateAns?.label === "string" ? rateAns.label : "tangential"
-            const { relevanceLabel, teleportationWeightMillis } = mapRelevanceLabel(rawLabel)
+            const rawProb = probAns?.probability
+            const parsedRelevance = parseRelevanceLabel(rateAns?.label)
 
-            const roleKey = `${item.candidateSymbolKey}:${item.proposedRole}`
-            const existingConf = edgeConfidenceOverrides[roleKey]
-            edgeConfidenceOverrides[roleKey] =
-              existingConf !== undefined && existingConf > edgeConfidenceMillis
-                ? existingConf
-                : edgeConfidenceMillis
-            const existingSymConf = edgeConfidenceOverrides[item.candidateSymbolKey]
-            edgeConfidenceOverrides[item.candidateSymbolKey] =
-              existingSymConf !== undefined && existingSymConf > edgeConfidenceMillis
-                ? existingSymConf
-                : edgeConfidenceMillis
+            if (typeof rawProb !== "number" || !Number.isFinite(rawProb)) {
+              usedFallback = true
+              fallbackReason = fallbackReason ?? "invalid-output"
+              const fb = makeFallbackHolePriorResult(item, "invalid-output")
+              const roleKey = `${item.candidateSymbolKey}:${item.proposedRole}`
+              mergeConfidence(roleKey, fb.edgeConfidenceMillis, false)
+              mergeConfidence(item.candidateSymbolKey, fb.edgeConfidenceMillis, false)
+              mergeTeleportationWeight(
+                item.candidateSymbolKey,
+                PageRankScoreMillis.make(fb.teleportationWeightMillis),
+                false,
+              )
+              results.push(fb)
+              continue
+            }
 
-            const nextPpr = PageRankScoreMillis.make(teleportationWeightMillis)
-            const existingPpr = holeTeleportationWeights[item.candidateSymbolKey]
-            holeTeleportationWeights[item.candidateSymbolKey] =
-              existingPpr !== undefined && existingPpr > nextPpr ? existingPpr : nextPpr
-
-            results.push({
-              candidateSymbolKey: item.candidateSymbolKey,
-              proposedRole: item.proposedRole,
-              edgeConfidenceMillis,
-              teleportationWeightMillis,
-              relevanceLabel,
-              source: { _tag: "DecisionModel" },
-            })
+            match(parsedRelevance)
+              .with({ _tag: "None" }, () => {
+                usedFallback = true
+                fallbackReason = fallbackReason ?? "invalid-output"
+                const fb = makeFallbackHolePriorResult(item, "invalid-output")
+                const roleKey = `${item.candidateSymbolKey}:${item.proposedRole}`
+                mergeConfidence(roleKey, fb.edgeConfidenceMillis, false)
+                mergeConfidence(item.candidateSymbolKey, fb.edgeConfidenceMillis, false)
+                mergeTeleportationWeight(
+                  item.candidateSymbolKey,
+                  PageRankScoreMillis.make(fb.teleportationWeightMillis),
+                  false,
+                )
+                results.push(fb)
+              })
+              .with({ _tag: "Some" }, ({ value: { relevanceLabel, teleportationWeightMillis } }) => {
+                const clampedConf = Math.min(1000, Math.max(0, Math.round(rawProb * 1000)))
+                const edgeConfidenceMillis = ConfidenceMillis.make(clampedConf)
+                const roleKey = `${item.candidateSymbolKey}:${item.proposedRole}`
+                mergeConfidence(roleKey, edgeConfidenceMillis, true)
+                mergeConfidence(item.candidateSymbolKey, edgeConfidenceMillis, true)
+                mergeTeleportationWeight(
+                  item.candidateSymbolKey,
+                  PageRankScoreMillis.make(teleportationWeightMillis),
+                  true,
+                )
+                results.push({
+                  candidateSymbolKey: item.candidateSymbolKey,
+                  proposedRole: item.proposedRole,
+                  edgeConfidenceMillis,
+                  teleportationWeightMillis,
+                  relevanceLabel,
+                  source: { _tag: "DecisionModel" },
+                })
+              })
+              .exhaustive()
           }
         }),
       )
@@ -346,7 +441,10 @@ export const evaluateHoleCandidatePriorsBatch = Effect.fn(
     holeTeleportationWeights,
     results,
     source: usedFallback
-      ? { _tag: "DeterministicFallback", reason: "timeout-or-unavailable" }
+      ? {
+          _tag: "DeterministicFallback",
+          reason: fallbackReason ?? "timeout-or-unavailable",
+        }
       : { _tag: "DecisionModel" },
   }
 })

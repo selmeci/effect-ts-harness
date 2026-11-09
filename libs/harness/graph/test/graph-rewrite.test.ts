@@ -510,16 +510,17 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
     "4-Phase Stratification & NAC_spec: REP-11 prunes truly orphan ServiceTags in Phase 4 (CLEANUP) but never prunes services referenced by an EarsSpec, AdrDoc, or active stub",
     () =>
       Effect.gen(function* () {
-        const graph = buildHarnessGraph({
+        // Case A: No active stubs (isStub: false) â€” SpecProtectedService and AdrProtectedService are protected solely by EarsSpec/AdrDoc, while OrphanService (packageTag: service) and OrphanLegacyService (packageTag: infra) are pruned
+        const noStubGraph = buildHarnessGraph({
           fns: [
             {
-              qualname: "libs/sample/domain/src/order.ts#stubFn",
-              spanName: "Order.stubFn",
+              qualname: "libs/sample/domain/src/order.ts#implFn",
+              spanName: "Order.implFn",
               file: "libs/sample/domain/src/order.ts",
               line: 1,
               packageTag: "domain",
               successType: "void",
-              isStub: true,
+              isStub: false,
             },
           ],
           services: [
@@ -530,16 +531,16 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
               file: "libs/sample/infra/src/orphan.ts",
             },
             {
+              tagId: "OrphanPortService",
+              name: "OrphanPortService",
+              packageTag: "service",
+              file: "libs/sample/service/src/orphan-port.ts",
+            },
+            {
               tagId: "SpecProtectedService",
               name: "SpecProtectedService",
               packageTag: "service",
               file: "libs/sample/service/src/protected.ts",
-            },
-            {
-              tagId: "StubSiblingService",
-              name: "StubSiblingService",
-              packageTag: "domain",
-              file: "libs/sample/domain/src/sibling.ts",
             },
             {
               tagId: "AdrProtectedService",
@@ -555,7 +556,7 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
               status: "accepted",
               path: "libs/sample/docs/specs/0009.md",
               enforcedByFiles: ["libs/sample/domain/src/order.ts"],
-              referencedSpans: ["Order.stubFn"],
+              referencedSpans: ["Order.implFn"],
               referencedServices: ["SpecProtectedService"],
               referencedErrors: [],
             },
@@ -575,32 +576,58 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
           specifiesSymbols: [
             {
               specId: "sample:SPEC-0009",
-              targetKey: "libs/sample/domain/src/order.ts#stubFn",
+              targetKey: "libs/sample/domain/src/order.ts#implFn",
               targetKind: "span",
             },
           ],
         })
 
-        const outcome = yield* decideGraphRewrite(graph, "cleanup")
+        const outcome = yield* decideGraphRewrite(noStubGraph, "cleanup")
         expect(Option.isSome(outcome.result.recommendedCandidate)).toBe(true)
         const rec = Option.getOrThrow(outcome.result.recommendedCandidate)
         const rep11Patches = rec.patches.filter(
           (p) => p.ruleId === RewriteRuleId.make("REP-11"),
         )
-        expect(rep11Patches).toHaveLength(1)
-        expect(rep11Patches[0]?.deletedEntityKeys).toEqual([
+        expect(rep11Patches).toHaveLength(2)
+        expect(rep11Patches.flatMap((p) => p.deletedEntityKeys)).toEqual([
           NodeKey.make("ServiceTag:OrphanLegacyService"),
+          NodeKey.make("ServiceTag:OrphanPortService"),
         ])
 
-        // SpecProtectedService, AdrProtectedService, and StubSiblingService remain in the graph
         expect(
           outcome.targetGraph.nodeIndexByKey.has(NodeKey.make("ServiceTag:SpecProtectedService")),
         ).toBe(true)
         expect(
           outcome.targetGraph.nodeIndexByKey.has(NodeKey.make("ServiceTag:AdrProtectedService")),
         ).toBe(true)
+
+        // Case B: Active stub present (isStub: true) â€” protects unreferenced packageTag: "service" ports while still pruning unreferenced infra ServiceTags
+        const activeStubGraph = buildHarnessGraph({
+          fns: [
+            {
+              qualname: "libs/sample/domain/src/order.ts#stubFn",
+              spanName: "Order.stubFn",
+              file: "libs/sample/domain/src/order.ts",
+              line: 1,
+              packageTag: "domain",
+              successType: "void",
+              isStub: true,
+            },
+          ],
+          services: [
+            {
+              tagId: "OrphanPortDuringStub",
+              name: "OrphanPortDuringStub",
+              packageTag: "service",
+              file: "libs/sample/service/src/port.ts",
+            },
+          ],
+        })
+        const stubOutcome = yield* decideGraphRewrite(activeStubGraph, "cleanup")
         expect(
-          outcome.targetGraph.nodeIndexByKey.has(NodeKey.make("ServiceTag:StubSiblingService")),
+          stubOutcome.targetGraph.nodeIndexByKey.has(
+            NodeKey.make("ServiceTag:OrphanPortDuringStub"),
+          ),
         ).toBe(true)
       }),
   )
@@ -674,11 +701,13 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
         const rec = Option.getOrThrow(outcome.result.recommendedCandidate)
         const rep02 = rec.patches.find((p) => p.ruleId === RewriteRuleId.make("REP-02"))
         expect(rep02).toBeDefined()
-        expect(rep02?.deletedRoleEdges.map((e) => ({
-          relationId: e.relationId,
-          entityKey: e.entityKey,
-          role: e.role,
-        }))).toEqual([
+        expect(
+          rep02?.deletedRoleEdges.map((e) => ({
+            relationId: e.relationId,
+            entityKey: e.entityKey,
+            role: e.role,
+          })),
+        ).toEqual([
           {
             relationId: RelationId.make(
               "EffectSignature:libs/sample/domain/src/order.ts#decide",
@@ -687,11 +716,13 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
             role: RoleName.make("requires-service"),
           },
         ])
-        expect(rep02?.insertedRoleEdges.map((e) => ({
-          relationId: e.relationId,
-          entityKey: e.entityKey,
-          role: e.role,
-        }))).toEqual(
+        expect(
+          rep02?.insertedRoleEdges.map((e) => ({
+            relationId: e.relationId,
+            entityKey: e.entityKey,
+            role: e.role,
+          })),
+        ).toEqual(
           expect.arrayContaining([
             {
               relationId: RelationId.make(
@@ -702,11 +733,81 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
             },
           ]),
         )
+
+        // Transitive impurity: decide calls aaaPureHelper AND zzzImpureHelper (which requires OrderRepo)
+        const transitiveGraph = buildHarnessGraph({
+          fns: [
+            {
+              qualname: "libs/sample/domain/src/order.ts#aaaPureHelper",
+              spanName: "Order.aaaPureHelper",
+              file: "libs/sample/domain/src/order.ts",
+              line: 1,
+              packageTag: "domain",
+              successType: "boolean",
+              isStub: false,
+            },
+            {
+              qualname: "libs/sample/domain/src/order.ts#zzzImpureHelper",
+              spanName: "Order.zzzImpureHelper",
+              file: "libs/sample/domain/src/order.ts",
+              line: 5,
+              packageTag: "domain",
+              successType: "void",
+              isStub: false,
+            },
+            {
+              qualname: "libs/sample/domain/src/order.ts#decide",
+              spanName: "Order.decide",
+              file: "libs/sample/domain/src/order.ts",
+              line: 10,
+              packageTag: "domain",
+              successType: "OrderEvent",
+              isStub: false,
+            },
+          ],
+          services: [
+            {
+              tagId: "OrderRepo",
+              name: "OrderRepo",
+              packageTag: "service",
+              file: "libs/sample/service/src/repo.ts",
+            },
+          ],
+          tracedCalls: [
+            {
+              callerQualname: "libs/sample/domain/src/order.ts#decide",
+              calleeQualname: "libs/sample/domain/src/order.ts#aaaPureHelper",
+              callCount: 1,
+              receiverLayer: null,
+            },
+            {
+              callerQualname: "libs/sample/domain/src/order.ts#decide",
+              calleeQualname: "libs/sample/domain/src/order.ts#zzzImpureHelper",
+              callCount: 1,
+              receiverLayer: null,
+            },
+          ],
+          requiresService: [
+            {
+              fnQualname: "libs/sample/domain/src/order.ts#zzzImpureHelper",
+              tagId: "OrderRepo",
+            },
+          ],
+        })
+
+        const transOutcome = yield* decideGraphRewrite(transitiveGraph, "auto-repair")
+        const transRec = Option.getOrThrow(transOutcome.result.recommendedCandidate)
+        const transRep02 = transRec.patches.find(
+          (p) => p.ruleId === RewriteRuleId.make("REP-02"),
+        )
+        expect(transRep02?.deletedRoleEdges.map((e) => e.entityKey)).toEqual([
+          NodeKey.make("EffectFn:libs/sample/domain/src/order.ts#zzzImpureHelper"),
+        ])
       }),
   )
 
   it.effect(
-    "REP-05 and REP-06 match target symbols accurately without clobbering sibling traced functions or substring schema names",
+    "REP-05 and REP-06 match target symbols accurately without clobbering sibling traced functions or substring schema names, and maxPhaseSteps enforces exact convergence vs step-bound-exceeded",
     () =>
       Effect.gen(function* () {
         const graph = buildHarnessGraph({
@@ -762,7 +863,10 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
           ],
         })
 
-        const outcome = yield* decideGraphRewrite(graph, "auto-repair")
+        // Exactly 4 REPAIR_CODE steps are required (REP-05 + REP-06 + 2 untested-domain-span repairs); maxPhaseSteps: 4 must succeed (exact step-bound convergence!)
+        const outcome = yield* decideGraphRewrite(graph, "auto-repair", undefined, {
+          maxPhaseSteps: 4,
+        })
         expect(Option.isSome(outcome.result.recommendedCandidate)).toBe(true)
         const rec = Option.getOrThrow(outcome.result.recommendedCandidate)
         const rep05 = rec.patches.find((p) => p.ruleId === RewriteRuleId.make("REP-05"))
@@ -771,11 +875,34 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
           NodeKey.make("EffectFn:libs/sample/domain/src/order.ts#decideOrder"),
         )
 
+        // Verify sibling Order.validate kept its spanName while decideOrder gained Order.decide
+        const validateIdx = outcome.targetGraph.nodeIndexByKey.get(
+          NodeKey.make("EffectFn:libs/sample/domain/src/order.ts#validate"),
+        )
+        const decideIdx = outcome.targetGraph.nodeIndexByKey.get(
+          NodeKey.make("EffectFn:libs/sample/domain/src/order.ts#decideOrder"),
+        )
+        expect(validateIdx).toBeDefined()
+        expect(decideIdx).toBeDefined()
+        const validateNode = Option.getOrThrow(Graph.getNode(outcome.targetGraph.graph, validateIdx!))
+        const decideNode = Option.getOrThrow(Graph.getNode(outcome.targetGraph.graph, decideIdx!))
+        if (validateNode._tag === "EffectFn" && decideNode._tag === "EffectFn") {
+          expect(validateNode.spanName).toBe("Order.validate")
+          expect(decideNode.spanName).toBe("Order.decide")
+        }
+
         const rep06 = rec.patches.find((p) => p.ruleId === RewriteRuleId.make("REP-06"))
         expect(rep06).toBeDefined()
         expect(rep06?.primaryNodeKey).toBe(
           NodeKey.make("SchemaDef:OrderIdInput"),
         )
+
+        // With maxPhaseSteps: 1, 1 violation remains at the step bound -> fails with step-bound-exceeded
+        const exceededErr = yield* Effect.flip(
+          decideGraphRewrite(graph, "auto-repair", undefined, { maxPhaseSteps: 1 }),
+        )
+        expect(exceededErr._tag).toBe("GraphRewriteError")
+        expect(exceededErr.reason).toBe("step-bound-exceeded")
       }),
   )
 

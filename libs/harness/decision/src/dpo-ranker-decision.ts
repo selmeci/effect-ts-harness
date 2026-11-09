@@ -5,15 +5,20 @@ import {
   SystemOneScoreMillis,
   formatDpoPriorKey,
   isBoundaryCallerQualname,
+  parseDpoPriorKey,
 } from "@harness/gates"
-import { Effect, Schema } from "effect"
+import { Effect, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
-import { MAX_BATCHED_HOLE_CANDIDATES, PriorSource } from "./hole-prior-decision.js"
+import {
+  type DeterministicFallbackReason,
+  MAX_BATCHED_HOLE_CANDIDATES,
+  PriorSource,
+} from "./hole-prior-decision.js"
 import { assertDecisionLimits } from "./idiom-router.js"
 
-export { DpoPriorKey, RewriteRuleId, SystemOneScoreMillis, formatDpoPriorKey }
+export { DpoPriorKey, RewriteRuleId, SystemOneScoreMillis, formatDpoPriorKey, parseDpoPriorKey }
 
 export const DPO_REPAIR_STRATEGIES = [
   "propagate_in_E",
@@ -141,23 +146,25 @@ export const DpoCandidateBatchResult = Schema.Struct({
 })
 export type DpoCandidateBatchResult = typeof DpoCandidateBatchResult.Type
 
-const normalizeStrategyLabel = (raw: string): DpoRepairStrategy =>
+const parseStrategyLabel = (raw: unknown): Option.Option<DpoRepairStrategy> =>
   match(raw)
-    .with("propagate_in_E", () => "propagate_in_E" as const)
-    .with("catch_and_translate_at_boundary", () => "catch_and_translate_at_boundary" as const)
-    .with("extract_service_port", () => "extract_service_port" as const)
-    .with("split_pure_decider", () => "split_pure_decider" as const)
-    .with("wire_transactional_outbox", () => "wire_transactional_outbox" as const)
-    .with("convert_to_defect", () => "convert_to_defect" as const)
-    .otherwise(() => "propagate_in_E" as const)
+    .with("propagate_in_E", () => Option.some("propagate_in_E" as const))
+    .with("catch_and_translate_at_boundary", () =>
+      Option.some("catch_and_translate_at_boundary" as const),
+    )
+    .with("extract_service_port", () => Option.some("extract_service_port" as const))
+    .with("split_pure_decider", () => Option.some("split_pure_decider" as const))
+    .with("wire_transactional_outbox", () => Option.some("wire_transactional_outbox" as const))
+    .with("convert_to_defect", () => Option.some("convert_to_defect" as const))
+    .otherwise(() => Option.none())
 
-const normalizeCohesionLabel = (raw: string): DpoCohesionLevel =>
+const parseCohesionLabel = (raw: unknown): Option.Option<DpoCohesionLevel> =>
   match(raw)
-    .with("poor", () => "poor" as const)
-    .with("acceptable", () => "acceptable" as const)
-    .with("good", () => "good" as const)
-    .with("idiomatic", () => "idiomatic" as const)
-    .otherwise(() => "acceptable" as const)
+    .with("poor", () => Option.some("poor" as const))
+    .with("acceptable", () => Option.some("acceptable" as const))
+    .with("good", () => Option.some("good" as const))
+    .with("idiomatic", () => Option.some("idiomatic" as const))
+    .otherwise(() => Option.none())
 
 const doesRuleAlignWithStrategy = (
   ruleId: string,
@@ -184,6 +191,7 @@ const computeCandidateScoreMillis = (
 
 const computeDeterministicFallbackRank = (
   input: DpoCandidateRankInput,
+  reason: DeterministicFallbackReason = "timeout-or-unavailable",
 ): DpoCandidateRankResult => {
   const isBoundaryCaller = isBoundaryCallerQualname(input.callerSummary)
   const fallbackStrategy: DpoRepairStrategy = match(input.ruleId as string)
@@ -207,7 +215,7 @@ const computeDeterministicFallbackRank = (
     scoreMillis: fallbackScore,
     strategyLabel: fallbackStrategy,
     cohesionLabel: "acceptable",
-    source: { _tag: "DeterministicFallback", reason: "timeout-or-unavailable" },
+    source: { _tag: "DeterministicFallback", reason },
   }
 }
 
@@ -216,41 +224,60 @@ export const evaluateDpoCandidateRank = Effect.fn("DpoCandidateRanker.evaluate")
 ): Effect.fn.Return<DpoCandidateRankResult, never, DecisionModel.DecisionModel> {
   const outcome = yield* DecisionModel.decide(DpoCandidateRankerV1, { input }).pipe(
     Effect.timeoutOption("1500 millis"),
-    Effect.catch(() => Effect.succeedNone),
+    Effect.catch((error) =>
+      Effect.annotateCurrentSpan({
+        "decision.fallback_error": String(error),
+      }).pipe(Effect.as(Option.none())),
+    ),
   )
 
   return yield* match(outcome)
-    .with({ _tag: "None" }, () => Effect.succeed(computeDeterministicFallbackRank(input)))
+    .with({ _tag: "None" }, () =>
+      Effect.succeed(computeDeterministicFallbackRank(input, "timeout-or-unavailable")),
+    )
     .with({ _tag: "Some" }, ({ value }) =>
       Effect.gen(function* () {
-        const strategyLabel = normalizeStrategyLabel(value.answers.repairStrategy.label as string)
-        const cohesionLabel = normalizeCohesionLabel(
-          value.answers.architecturalCohesion.label as string,
-        )
-        const scoreMillis = computeCandidateScoreMillis(
-          input.ruleId,
-          strategyLabel,
-          cohesionLabel,
-        )
-        const priorKey = formatDpoPriorKey(input.primaryNodeKey, input.ruleId)
+        const parsedStrategy = parseStrategyLabel(value.answers.repairStrategy?.label)
+        const parsedCohesion = parseCohesionLabel(value.answers.architecturalCohesion?.label)
+        return yield* match([parsedStrategy, parsedCohesion] as const)
+          .with([{ _tag: "Some" }, { _tag: "Some" }], ([{ value: strategyLabel }, { value: cohesionLabel }]) =>
+            Effect.gen(function* () {
+              const scoreMillis = computeCandidateScoreMillis(
+                input.ruleId,
+                strategyLabel,
+                cohesionLabel,
+              )
+              const priorKey = formatDpoPriorKey(input.primaryNodeKey, input.ruleId)
 
-        yield* Effect.annotateCurrentSpan({
-          "decision.definition": "DpoCandidateRankerV1",
-          "decision.priorKey": priorKey,
-          "decision.strategyLabel": strategyLabel,
-          "decision.cohesionLabel": cohesionLabel,
-          "decision.scoreMillis": scoreMillis,
-        })
+              yield* Effect.annotateCurrentSpan({
+                "decision.definition": "DpoCandidateRankerV1",
+                "decision.priorKey": priorKey,
+                "decision.strategyLabel": strategyLabel,
+                "decision.cohesionLabel": cohesionLabel,
+                "decision.scoreMillis": scoreMillis,
+              })
 
-        return {
-          primaryNodeKey: input.primaryNodeKey,
-          ruleId: input.ruleId,
-          priorKey,
-          scoreMillis,
-          strategyLabel,
-          cohesionLabel,
-          source: { _tag: "DecisionModel" },
-        } satisfies DpoCandidateRankResult
+              return {
+                primaryNodeKey: input.primaryNodeKey,
+                ruleId: input.ruleId,
+                priorKey,
+                scoreMillis,
+                strategyLabel,
+                cohesionLabel,
+                source: { _tag: "DecisionModel" },
+              } satisfies DpoCandidateRankResult
+            }),
+          )
+          .with([{ _tag: "None" }, { _tag: "Some" }], () =>
+            Effect.succeed(computeDeterministicFallbackRank(input, "invalid-output")),
+          )
+          .with([{ _tag: "Some" }, { _tag: "None" }], () =>
+            Effect.succeed(computeDeterministicFallbackRank(input, "invalid-output")),
+          )
+          .with([{ _tag: "None" }, { _tag: "None" }], () =>
+            Effect.succeed(computeDeterministicFallbackRank(input, "invalid-output")),
+          )
+          .exhaustive()
       }),
     )
     .exhaustive()
@@ -269,8 +296,34 @@ export const evaluateDpoCandidatePriorsBatch = Effect.fn("DpoCandidateRanker.eva
     }
 
     const candidatePriors: Record<string, SystemOneScoreMillis> = {}
+    const modelBackedPriorKeys = new Set<string>()
     const results: Array<DpoCandidateRankResult> = []
     let usedFallback = false
+    let fallbackReason: DeterministicFallbackReason | undefined
+
+    const mergePriorScore = (
+      priorKey: string,
+      scoreMillis: SystemOneScoreMillis,
+      isModelBacked: boolean,
+    ): void => {
+      if (isModelBacked) {
+        if (!modelBackedPriorKeys.has(priorKey)) {
+          modelBackedPriorKeys.add(priorKey)
+          candidatePriors[priorKey] = scoreMillis
+          return
+        }
+        const existing = candidatePriors[priorKey]
+        candidatePriors[priorKey] =
+          existing !== undefined && existing > scoreMillis ? existing : scoreMillis
+        return
+      }
+      if (modelBackedPriorKeys.has(priorKey)) {
+        return
+      }
+      const existing = candidatePriors[priorKey]
+      candidatePriors[priorKey] =
+        existing !== undefined && existing > scoreMillis ? existing : scoreMillis
+    }
 
     for (let offset = 0; offset < inputs.length; offset += MAX_BATCHED_DPO_CANDIDATES) {
       const chunk = inputs.slice(offset, offset + MAX_BATCHED_DPO_CANDIDATES)
@@ -291,18 +344,21 @@ export const evaluateDpoCandidatePriorsBatch = Effect.fn("DpoCandidateRanker.eva
         input: { candidatesBatchJson },
       }).pipe(
         Effect.timeoutOption("1500 millis"),
-        Effect.catch(() => Effect.succeedNone),
+        Effect.catch((error) =>
+          Effect.annotateCurrentSpan({
+            "decision.fallback_error": String(error),
+          }).pipe(Effect.as(Option.none())),
+        ),
       )
 
       yield* match(outcome)
         .with({ _tag: "None" }, () =>
           Effect.sync(() => {
             usedFallback = true
+            fallbackReason = fallbackReason ?? "timeout-or-unavailable"
             for (const item of chunk) {
-              const fb = computeDeterministicFallbackRank(item)
-              if (candidatePriors[fb.priorKey] === undefined) {
-                candidatePriors[fb.priorKey] = fb.scoreMillis
-              }
+              const fb = computeDeterministicFallbackRank(item, "timeout-or-unavailable")
+              mergePriorScore(fb.priorKey, fb.scoreMillis, false)
               results.push(fb)
             }
           }),
@@ -317,32 +373,53 @@ export const evaluateDpoCandidatePriorsBatch = Effect.fn("DpoCandidateRanker.eva
               const item = chunk[i]!
               const stratAns = answersRecord[`repairStrategy_${i}`]
               const cohAns = answersRecord[`architecturalCohesion_${i}`]
-              const strategyLabel = normalizeStrategyLabel(
-                typeof stratAns?.label === "string" ? stratAns.label : "propagate_in_E",
-              )
-              const cohesionLabel = normalizeCohesionLabel(
-                typeof cohAns?.label === "string" ? cohAns.label : "acceptable",
-              )
-              const scoreMillis = computeCandidateScoreMillis(
-                item.ruleId,
-                strategyLabel,
-                cohesionLabel,
-              )
-              const priorKey = formatDpoPriorKey(item.primaryNodeKey, item.ruleId)
-              const existingScore = candidatePriors[priorKey]
-              candidatePriors[priorKey] =
-                existingScore !== undefined && existingScore > scoreMillis
-                  ? existingScore
-                  : scoreMillis
-              results.push({
-                primaryNodeKey: item.primaryNodeKey,
-                ruleId: item.ruleId,
-                priorKey,
-                scoreMillis,
-                strategyLabel,
-                cohesionLabel,
-                source: { _tag: "DecisionModel" },
-              })
+              const parsedStrategy = parseStrategyLabel(stratAns?.label)
+              const parsedCohesion = parseCohesionLabel(cohAns?.label)
+
+              match([parsedStrategy, parsedCohesion] as const)
+                .with(
+                  [{ _tag: "Some" }, { _tag: "Some" }],
+                  ([{ value: strategyLabel }, { value: cohesionLabel }]) => {
+                    const scoreMillis = computeCandidateScoreMillis(
+                      item.ruleId,
+                      strategyLabel,
+                      cohesionLabel,
+                    )
+                    const priorKey = formatDpoPriorKey(item.primaryNodeKey, item.ruleId)
+                    mergePriorScore(priorKey, scoreMillis, true)
+                    results.push({
+                      primaryNodeKey: item.primaryNodeKey,
+                      ruleId: item.ruleId,
+                      priorKey,
+                      scoreMillis,
+                      strategyLabel,
+                      cohesionLabel,
+                      source: { _tag: "DecisionModel" },
+                    })
+                  },
+                )
+                .with([{ _tag: "None" }, { _tag: "Some" }], () => {
+                  usedFallback = true
+                  fallbackReason = fallbackReason ?? "invalid-output"
+                  const fb = computeDeterministicFallbackRank(item, "invalid-output")
+                  mergePriorScore(fb.priorKey, fb.scoreMillis, false)
+                  results.push(fb)
+                })
+                .with([{ _tag: "Some" }, { _tag: "None" }], () => {
+                  usedFallback = true
+                  fallbackReason = fallbackReason ?? "invalid-output"
+                  const fb = computeDeterministicFallbackRank(item, "invalid-output")
+                  mergePriorScore(fb.priorKey, fb.scoreMillis, false)
+                  results.push(fb)
+                })
+                .with([{ _tag: "None" }, { _tag: "None" }], () => {
+                  usedFallback = true
+                  fallbackReason = fallbackReason ?? "invalid-output"
+                  const fb = computeDeterministicFallbackRank(item, "invalid-output")
+                  mergePriorScore(fb.priorKey, fb.scoreMillis, false)
+                  results.push(fb)
+                })
+                .exhaustive()
             }
           }),
         )
@@ -359,7 +436,10 @@ export const evaluateDpoCandidatePriorsBatch = Effect.fn("DpoCandidateRanker.eva
       candidatePriors,
       results,
       source: usedFallback
-        ? { _tag: "DeterministicFallback", reason: "timeout-or-unavailable" }
+        ? {
+            _tag: "DeterministicFallback",
+            reason: fallbackReason ?? "timeout-or-unavailable",
+          }
         : { _tag: "DecisionModel" },
     }
   },

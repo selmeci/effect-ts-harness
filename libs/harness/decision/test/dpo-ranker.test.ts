@@ -127,6 +127,27 @@ describe("DpoCandidateRankerV1 (System One Semantic Tie-Breaker for DPO Graph Re
         }).pipe(Effect.provide(makeFailingDecisionModelLayer()))
         expect(misalignedBoundaryFallback.scoreMillis).toBe(450)
 
+        // REP-04b on a non-boundary caller also scores 450 in fallback (since fallbackStrategy is propagate_in_E)
+        const misalignedNonBoundary04b = yield* evaluateDpoCandidateRank({
+          ...rep04bInput,
+          callerSummary: "Order.domainUseCase (domain use case)",
+        }).pipe(Effect.provide(makeFailingDecisionModelLayer()))
+        expect(misalignedNonBoundary04b.scoreMillis).toBe(450)
+
+        // REP-01, REP-02, REP-03 aligned fallbacks
+        for (const [ruleId, expectedStrategy] of [
+          ["REP-01", "extract_service_port"],
+          ["REP-02", "split_pure_decider"],
+          ["REP-03", "wire_transactional_outbox"],
+        ] as const) {
+          const ruleFb = yield* evaluateDpoCandidateRank({
+            ...rep04aInput,
+            ruleId: RewriteRuleId.make(ruleId),
+          }).pipe(Effect.provide(makeFailingDecisionModelLayer()))
+          expect(ruleFb.strategyLabel).toBe(expectedStrategy)
+          expect(ruleFb.scoreMillis).toBe(750)
+        }
+
         const batchFallback = yield* evaluateDpoCandidatePriorsBatch([
           rep04aInput,
           rep04bInput,
@@ -146,8 +167,8 @@ describe("DpoCandidateRankerV1 (System One Semantic Tie-Breaker for DPO Graph Re
           ],
         ).toBe(750)
 
-        // Multi-chunk batch (19 candidates => chunk of 16 + chunk of 3)
-        const multiChunkInputs = Array.from({ length: 19 }, (_, idx) => ({
+        // Multi-chunk batch (35 candidates => chunk of 32 + chunk of 3)
+        const multiChunkInputs = Array.from({ length: 35 }, (_, idx) => ({
           ...rep04aInput,
           primaryNodeKey: NodeKey.make(`EffectFn:libs/sample/domain/src/order.ts#caller${idx}`),
         }))
@@ -159,17 +180,17 @@ describe("DpoCandidateRankerV1 (System One Semantic Tie-Breaker for DPO Graph Re
             }),
           ),
         )
-        expect(multiChunkRes.results).toHaveLength(19)
+        expect(multiChunkRes.results).toHaveLength(35)
         expect(
           multiChunkRes.candidatePriors[
-            "EffectFn:libs/sample/domain/src/order.ts#caller18::REP-04a"
+            "EffectFn:libs/sample/domain/src/order.ts#caller34::REP-04a"
           ],
         ).toBe(1000)
       }),
   )
 
   it.effect(
-    "falls back deterministically when DecisionModel times out after 1500ms",
+    "falls back deterministically when DecisionModel times out after 1500ms (single and batch)",
     () =>
       Effect.gen(function* () {
         const timeoutLayer = Layer.effect(
@@ -195,6 +216,19 @@ describe("DpoCandidateRankerV1 (System One Semantic Tie-Breaker for DPO Graph Re
           reason: "timeout-or-unavailable",
         })
         expect(res.scoreMillis).toBe(750)
+
+        const batchFiber = yield* Effect.forkChild(
+          evaluateDpoCandidatePriorsBatch([rep04aInput, rep04bInput]).pipe(
+            Effect.provide(timeoutLayer),
+          ),
+        )
+        yield* TestClock.adjust("2000 millis")
+        const batchRes = yield* Fiber.join(batchFiber)
+        expect(batchRes.source).toEqual({
+          _tag: "DeterministicFallback",
+          reason: "timeout-or-unavailable",
+        })
+        expect(batchRes.results).toHaveLength(2)
       }),
   )
 
