@@ -248,24 +248,35 @@ export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolea
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))
 }
 
+export const normalizeProjectPath = (repoRoot: string, rawProject: string): string => {
+  const resolved = path.isAbsolute(rawProject)
+    ? rawProject
+    : path.resolve(repoRoot, rawProject)
+  if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
+    return path.join(resolved, "tsconfig.json")
+  }
+  return resolved
+}
+
 export const runDefaultLspDiagnostics = (
   repoRoot: string,
   input: {
     readonly file?: string | undefined
+    readonly filePath?: string | undefined
     readonly project?: string | undefined
+    readonly tsconfigPath?: string | undefined
   },
 ): Effect.Effect<LspDiagnosticsReport> =>
   Effect.try(() => {
     const cliArgs = ["diagnostics", "--strict", "--format", "json"]
-    if (input.file !== undefined && input.file.trim().length > 0) {
-      const resolvedFile = path.isAbsolute(input.file)
-        ? input.file
-        : path.resolve(repoRoot, input.file)
-      if (input.project !== undefined && input.project.trim().length > 0) {
-        const resolvedProject = path.isAbsolute(input.project)
-          ? input.project
-          : path.resolve(repoRoot, input.project)
-        cliArgs.push("--project", resolvedProject)
+    const effectiveFile = input.file ?? input.filePath
+    const effectiveProject = input.project ?? input.tsconfigPath
+    if (effectiveFile !== undefined && effectiveFile.trim().length > 0) {
+      const resolvedFile = path.isAbsolute(effectiveFile)
+        ? effectiveFile
+        : path.resolve(repoRoot, effectiveFile)
+      if (effectiveProject !== undefined && effectiveProject.trim().length > 0) {
+        cliArgs.push("--project", normalizeProjectPath(repoRoot, effectiveProject))
       } else {
         const normalizedRepoRoot = path.resolve(repoRoot)
         let curr = path.dirname(resolvedFile)
@@ -284,11 +295,8 @@ export const runDefaultLspDiagnostics = (
       }
       cliArgs.push("--file", resolvedFile)
     } else {
-      const rawProject = input.project ?? "tsconfig.base.json"
-      const resolvedProject = path.isAbsolute(rawProject)
-        ? rawProject
-        : path.resolve(repoRoot, rawProject)
-      cliArgs.push("--project", resolvedProject)
+      const rawProject = effectiveProject ?? "tsconfig.base.json"
+      cliArgs.push("--project", normalizeProjectPath(repoRoot, rawProject))
     }
 
     const binPath = path.join(findRepoRoot(repoRoot), "node_modules", ".bin", "effect-tsgo")
@@ -488,8 +496,14 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
       break
     }
     case "harness_lsp_diagnostics": {
-      const file = (args as { file?: string | undefined }).file
-      const project = (args as { project?: string | undefined }).project
+      const typedArgs = args as {
+        file?: string | undefined
+        filePath?: string | undefined
+        project?: string | undefined
+        tsconfigPath?: string | undefined
+      }
+      const file = typedArgs.file ?? typedArgs.filePath
+      const project = typedArgs.project ?? typedArgs.tsconfigPath
       const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
       if (options?.lspDiagnosticsRunner !== undefined) {
         result = options.lspDiagnosticsRunner({ file, project })
@@ -1048,10 +1062,18 @@ export const createServer = (options?: ServerOptions): McpServer => {
         .string()
         .optional()
         .describe("Optional file path to check for Effect Language Service diagnostics"),
+      filePath: z
+        .string()
+        .optional()
+        .describe("Optional alias for file path to check for Effect Language Service diagnostics"),
       project: z
         .string()
         .optional()
         .describe("Optional tsconfig.json path to check (defaults to tsconfig.base.json)"),
+      tsconfigPath: z
+        .string()
+        .optional()
+        .describe("Optional alias for project tsconfig.json path to check"),
     },
     (args) =>
       Effect.runPromise(

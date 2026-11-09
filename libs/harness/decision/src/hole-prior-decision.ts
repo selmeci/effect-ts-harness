@@ -1,26 +1,16 @@
+import {
+  ConfidenceMillis,
+  NodeKey,
+  PageRankScoreMillis,
+  RoleName,
+} from "@harness/gates"
 import { Cause, Effect, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import { assertDecisionLimits } from "./idiom-router.js"
 
-export const ConfidenceMillis = Schema.Int.pipe(
-  Schema.check(Schema.isBetween({ minimum: 0, maximum: 1000 })),
-  Schema.brand("ConfidenceMillis"),
-)
-export type ConfidenceMillis = typeof ConfidenceMillis.Type
-
-export const PageRankScoreMillis = Schema.Int.pipe(
-  Schema.check(Schema.isBetween({ minimum: 0, maximum: 1000 })),
-  Schema.brand("PageRankScoreMillis"),
-)
-export type PageRankScoreMillis = typeof PageRankScoreMillis.Type
-
-export const NodeKey = Schema.NonEmptyString.pipe(Schema.brand("NodeKey"))
-export type NodeKey = typeof NodeKey.Type
-
-export const RoleName = Schema.NonEmptyString.pipe(Schema.brand("RoleName"))
-export type RoleName = typeof RoleName.Type
+export { ConfidenceMillis, NodeKey, PageRankScoreMillis, RoleName }
 
 export const CandidateSymbolKey = NodeKey
 export type CandidateSymbolKey = NodeKey
@@ -274,12 +264,18 @@ export const evaluateHoleCandidatePriorsBatch = Effect.fn(
           for (const item of chunk) {
             const fallbackConf = ConfidenceMillis.make(500)
             const fallbackWeight = RELEVANCE_WEIGHT_MILLIS.tangential
-            edgeConfidenceOverrides[`${item.candidateSymbolKey}:${item.proposedRole}`] =
-              fallbackConf
-            edgeConfidenceOverrides[item.candidateSymbolKey] = fallbackConf
-            holeTeleportationWeights[item.candidateSymbolKey] = PageRankScoreMillis.make(
-              fallbackWeight,
-            )
+            const roleKey = `${item.candidateSymbolKey}:${item.proposedRole}`
+            if (edgeConfidenceOverrides[roleKey] === undefined) {
+              edgeConfidenceOverrides[roleKey] = fallbackConf
+            }
+            if (edgeConfidenceOverrides[item.candidateSymbolKey] === undefined) {
+              edgeConfidenceOverrides[item.candidateSymbolKey] = fallbackConf
+            }
+            if (holeTeleportationWeights[item.candidateSymbolKey] === undefined) {
+              holeTeleportationWeights[item.candidateSymbolKey] = PageRankScoreMillis.make(
+                fallbackWeight,
+              )
+            }
             results.push({
               candidateSymbolKey: item.candidateSymbolKey,
               proposedRole: item.proposedRole,

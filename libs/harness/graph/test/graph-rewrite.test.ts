@@ -3,6 +3,7 @@ import { Effect, Exit, Graph, Option, Schema } from "effect"
 import {
   GraphMeasure,
   NodeKey,
+  NonNegativeCount,
   RelationId,
   RewriteRuleId,
   RoleName,
@@ -30,12 +31,12 @@ const MeasureTupleSchema = Schema.Tuple([
 const toGraphMeasure = (
   tuple: readonly [number, number, number, number, number, number],
 ): GraphMeasure => ({
-  archViolations: tuple[0],
-  unmappedSpecSymbols: tuple[1],
-  codeHygieneViolations: tuple[2],
-  missingLayerProviders: tuple[3],
-  untestedDomainSpans: tuple[4],
-  unresolvedSuggestedEdges: tuple[5],
+  archViolations: NonNegativeCount.make(tuple[0]),
+  unmappedSpecSymbols: NonNegativeCount.make(tuple[1]),
+  codeHygieneViolations: NonNegativeCount.make(tuple[2]),
+  missingLayerProviders: NonNegativeCount.make(tuple[3]),
+  untestedDomainSpans: NonNegativeCount.make(tuple[4]),
+  unresolvedSuggestedEdges: NonNegativeCount.make(tuple[5]),
 })
 
 describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â€” RFC-0003)", () => {
@@ -540,6 +541,12 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
               packageTag: "domain",
               file: "libs/sample/domain/src/sibling.ts",
             },
+            {
+              tagId: "AdrProtectedService",
+              name: "AdrProtectedService",
+              packageTag: "service",
+              file: "libs/sample/service/src/adr-protected.ts",
+            },
           ],
           earsSpecs: [
             {
@@ -550,6 +557,18 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
               enforcedByFiles: ["libs/sample/domain/src/order.ts"],
               referencedSpans: ["Order.stubFn"],
               referencedServices: ["SpecProtectedService"],
+              referencedErrors: [],
+            },
+          ],
+          adrDocs: [
+            {
+              id: "sample:ADR-0009",
+              title: "Protected ADR Service",
+              status: "accepted",
+              path: "libs/sample/docs/adr/0009.md",
+              enforcedByFiles: ["libs/sample/service/src/adr-protected.ts"],
+              referencedSpans: [],
+              referencedServices: ["AdrProtectedService"],
               referencedErrors: [],
             },
           ],
@@ -573,13 +592,190 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
           NodeKey.make("ServiceTag:OrphanLegacyService"),
         ])
 
-        // SpecProtectedService and StubSiblingService remain in the graph
+        // SpecProtectedService, AdrProtectedService, and StubSiblingService remain in the graph
         expect(
           outcome.targetGraph.nodeIndexByKey.has(NodeKey.make("ServiceTag:SpecProtectedService")),
         ).toBe(true)
         expect(
+          outcome.targetGraph.nodeIndexByKey.has(NodeKey.make("ServiceTag:AdrProtectedService")),
+        ).toBe(true)
+        expect(
           outcome.targetGraph.nodeIndexByKey.has(NodeKey.make("ServiceTag:StubSiblingService")),
         ).toBe(true)
+      }),
+  )
+
+  it.effect(
+    "REP-02 preserves pure helper callee edges sorted before impure service edges and handles transitive impurity",
+    () =>
+      Effect.gen(function* () {
+        const graph = buildHarnessGraph({
+          fns: [
+            {
+              qualname: "libs/sample/domain/src/order.ts#validateHelper",
+              spanName: "Order.validateHelper",
+              file: "libs/sample/domain/src/order.ts",
+              line: 1,
+              packageTag: "domain",
+              successType: "boolean",
+              isStub: false,
+            },
+            {
+              qualname: "libs/sample/domain/src/order.ts#decide",
+              spanName: "Order.decide",
+              file: "libs/sample/domain/src/order.ts",
+              line: 10,
+              packageTag: "domain",
+              successType: "OrderEvent",
+              isStub: false,
+            },
+            {
+              qualname: "libs/sample/domain/src/order.ts#placeOrder",
+              spanName: "Order.placeOrder",
+              file: "libs/sample/domain/src/order.ts",
+              line: 25,
+              packageTag: "domain",
+              successType: "OrderEvent",
+              isStub: false,
+            },
+          ],
+          services: [
+            {
+              tagId: "OrderRepo",
+              name: "OrderRepo",
+              packageTag: "service",
+              file: "libs/sample/service/src/repo.ts",
+            },
+          ],
+          tracedCalls: [
+            {
+              callerQualname: "libs/sample/domain/src/order.ts#decide",
+              calleeQualname: "libs/sample/domain/src/order.ts#validateHelper",
+              callCount: 1,
+              receiverLayer: null,
+            },
+            {
+              callerQualname: "libs/sample/domain/src/order.ts#placeOrder",
+              calleeQualname: "libs/sample/domain/src/order.ts#decide",
+              callCount: 1,
+              receiverLayer: null,
+            },
+          ],
+          requiresService: [
+            {
+              fnQualname: "libs/sample/domain/src/order.ts#decide",
+              tagId: "OrderRepo",
+            },
+          ],
+        })
+
+        const outcome = yield* decideGraphRewrite(graph, "auto-repair")
+        expect(Option.isSome(outcome.result.recommendedCandidate)).toBe(true)
+        const rec = Option.getOrThrow(outcome.result.recommendedCandidate)
+        const rep02 = rec.patches.find((p) => p.ruleId === RewriteRuleId.make("REP-02"))
+        expect(rep02).toBeDefined()
+        expect(rep02?.deletedRoleEdges.map((e) => ({
+          relationId: e.relationId,
+          entityKey: e.entityKey,
+          role: e.role,
+        }))).toEqual([
+          {
+            relationId: RelationId.make(
+              "EffectSignature:libs/sample/domain/src/order.ts#decide",
+            ),
+            entityKey: NodeKey.make("ServiceTag:OrderRepo"),
+            role: RoleName.make("requires-service"),
+          },
+        ])
+        expect(rep02?.insertedRoleEdges.map((e) => ({
+          relationId: e.relationId,
+          entityKey: e.entityKey,
+          role: e.role,
+        }))).toEqual(
+          expect.arrayContaining([
+            {
+              relationId: RelationId.make(
+                "EffectSignature:sig:libs/sample/domain/src/order.ts#executeOrder",
+              ),
+              entityKey: NodeKey.make("ServiceTag:OrderRepo"),
+              role: RoleName.make("requires-service"),
+            },
+          ]),
+        )
+      }),
+  )
+
+  it.effect(
+    "REP-05 and REP-06 match target symbols accurately without clobbering sibling traced functions or substring schema names",
+    () =>
+      Effect.gen(function* () {
+        const graph = buildHarnessGraph({
+          fns: [
+            {
+              qualname: "libs/sample/domain/src/order.ts#validate",
+              spanName: "Order.validate",
+              file: "libs/sample/domain/src/order.ts",
+              line: 5,
+              packageTag: "domain",
+              successType: "void",
+              isStub: false,
+            },
+            {
+              qualname: "libs/sample/domain/src/order.ts#decideOrder",
+              spanName: "untraced",
+              file: "libs/sample/domain/src/order.ts",
+              line: 15,
+              packageTag: "domain",
+              successType: "void",
+              isStub: false,
+            },
+          ],
+          schemas: [
+            {
+              schemaName: "OrderId",
+              file: "libs/sample/contract/src/order.ts",
+              packageTag: "contract",
+              isBranded: true,
+            },
+            {
+              schemaName: "OrderIdInput",
+              file: "libs/sample/contract/src/order.ts",
+              packageTag: "contract",
+              isBranded: false,
+            },
+          ],
+          branchingViolations: [
+            {
+              rule: "untraced-decider",
+              message: "Decider decideOrder is untraced",
+              file: "libs/sample/domain/src/order.ts",
+              line: 15,
+              enclosingSymbol: "",
+            },
+            {
+              rule: "unbranded-contract-schema",
+              message: "OrderIdInput is unbranded",
+              file: "libs/sample/contract/src/order.ts",
+              line: 10,
+              enclosingSymbol: "OrderIdInput",
+            },
+          ],
+        })
+
+        const outcome = yield* decideGraphRewrite(graph, "auto-repair")
+        expect(Option.isSome(outcome.result.recommendedCandidate)).toBe(true)
+        const rec = Option.getOrThrow(outcome.result.recommendedCandidate)
+        const rep05 = rec.patches.find((p) => p.ruleId === RewriteRuleId.make("REP-05"))
+        expect(rep05).toBeDefined()
+        expect(rep05?.primaryNodeKey).toBe(
+          NodeKey.make("EffectFn:libs/sample/domain/src/order.ts#decideOrder"),
+        )
+
+        const rep06 = rec.patches.find((p) => p.ruleId === RewriteRuleId.make("REP-06"))
+        expect(rep06).toBeDefined()
+        expect(rep06?.primaryNodeKey).toBe(
+          NodeKey.make("SchemaDef:OrderIdInput"),
+        )
       }),
   )
 

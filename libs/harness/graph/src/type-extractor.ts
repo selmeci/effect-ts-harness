@@ -139,6 +139,9 @@ const cleanName = (raw: string): string => {
   if (name.startsWith("typeof ")) {
     name = name.slice(7).trim()
   }
+  if (!name.includes("<") && name.includes(".")) {
+    name = name.split(".").pop()?.trim() ?? name
+  }
   return name
 }
 

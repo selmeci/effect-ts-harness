@@ -47,6 +47,7 @@ import {
   type MigrationTupleRelation,
   type MinHeightProvenanceAnnotation,
   NodeKey,
+  NonNegativeCount,
   PageRankScoreMillis,
   ProofHeight,
   ProofId,
@@ -2838,19 +2839,6 @@ const mergeFileSubgraphIntoWorkspace = (
   filePath: string,
   nextGraph: HarnessGraph,
 ): HarnessGraph => {
-  let baseHasOtherFiles = false
-  for (const [, node] of Graph.nodes(baseGraph.graph)) {
-    const file = getEntityNodeFilePath(node)
-    if (file !== undefined && !matchesFilePath(file, filePath)) {
-      baseHasOtherFiles = true
-      break
-    }
-  }
-
-  if (!baseHasOtherFiles) {
-    return nextGraph
-  }
-
   // Retain non-target-file nodes/relations/edges from baseGraph and replace the target file's slice with nextGraph.
   const removedEntityKeys = new Set<string>()
   const removedRelationIds = new Set<string>()
@@ -2891,6 +2879,7 @@ const mergeFileSubgraphIntoWorkspace = (
       ) {
         keptNodes.delete(key)
         removedRelationIds.add(node.relationId)
+        removedRelationIds.add(key)
       }
     }
   }
@@ -3005,12 +2994,7 @@ export class DatalogSession extends Context.Service<DatalogSession, DatalogSessi
 
       const d2 = new D2({ initialFrontier: 0 })
       const inFileEdb = d2.newInput<KeyValue<string, string>>()
-      const materializedEdbFacts: Array<KeyValue<string, string>> = []
-      inFileEdb.pipe(
-        distinct(),
-        consolidate(),
-        output(makeOutputCollector(materializedEdbFacts)),
-      )
+      inFileEdb.pipe(distinct(), consolidate())
       d2.finalize()
 
       const initialEntries: Array<[KeyValue<string, string>, number]> = []
@@ -3021,9 +3005,10 @@ export class DatalogSession extends Context.Service<DatalogSession, DatalogSessi
       }
       const initialConverged = yield* Effect.try({
         try: () => {
+          const nextEpoch = currentEpoch + 1
           inFileEdb.sendData(currentEpoch, new MultiSet(initialEntries))
-          currentEpoch += 1
-          inFileEdb.sendFrontier(currentEpoch)
+          inFileEdb.sendFrontier(nextEpoch)
+          currentEpoch = nextEpoch
           return stepD2Bounded(d2)
         },
         catch: (err) =>
@@ -3092,33 +3077,43 @@ export class DatalogSession extends Context.Service<DatalogSession, DatalogSessi
                 }
               }
 
-              // Validate decideGraphInference before committing session state mutations
-              const nextInference = yield* decideGraphInference(mergedGraph, nextPriors).pipe(
-                Effect.mapError((err) =>
-                  match(err)
-                    .with({ _tag: "GraphInferenceError" }, (e) => e)
-                    .with(
-                      { _tag: "ConceptLatticeCycleError" },
-                      (e) =>
-                        new GraphInferenceError({
-                          reason: "d2ts-execution-failed",
-                          message: e.message,
-                        }),
-                    )
-                    .exhaustive(),
-                ),
-              )
+              const prevViolationsJson = JSON.stringify(activeGraph.branchingViolations ?? [])
+              const nextViolationsJson = JSON.stringify(mergedGraph.branchingViolations ?? [])
+              const prevUnresolvedJson = JSON.stringify(activeGraph.unresolvedReferences ?? [])
+              const nextUnresolvedJson = JSON.stringify(mergedGraph.unresolvedReferences ?? [])
+              const isNoOpDelta =
+                retractedFactCount === 0 &&
+                insertedFactCount === 0 &&
+                input.priors === undefined &&
+                prevViolationsJson === nextViolationsJson &&
+                prevUnresolvedJson === nextUnresolvedJson
+
+              // Fast-path when zero EDB facts or priors changed; otherwise evaluate full Stratum S0..S3 inference
+              const nextInference = isNoOpDelta
+                ? activeInference
+                : yield* decideGraphInference(mergedGraph, nextPriors).pipe(
+                    Effect.mapError((err) =>
+                      match(err)
+                        .with({ _tag: "GraphInferenceError" }, (e) => e)
+                        .with(
+                          { _tag: "ConceptLatticeCycleError" },
+                          (e) =>
+                            new GraphInferenceError({
+                              reason: "d2ts-execution-failed",
+                              message: e.message,
+                            }),
+                        )
+                        .exhaustive(),
+                    ),
+                  )
 
               const stepConverged = yield* Effect.try({
                 try: () => {
                   const nextEpoch = currentEpoch + 1
                   inFileEdb.sendData(currentEpoch, new MultiSet(deltaEntries))
                   inFileEdb.sendFrontier(nextEpoch)
-                  const ok = stepD2Bounded(d2)
-                  if (ok) {
-                    currentEpoch = nextEpoch
-                  }
-                  return ok
+                  currentEpoch = nextEpoch
+                  return stepD2Bounded(d2)
                 },
                 catch: (err) =>
                   new GraphInferenceError({
@@ -3136,16 +3131,18 @@ export class DatalogSession extends Context.Service<DatalogSession, DatalogSessi
               for (const k of matchedOldFileKeys) {
                 fileFactsByPath.delete(k)
               }
-              fileFactsByPath.set(targetFile, newFactsArray)
+              if (newFactsArray.length > 0) {
+                fileFactsByPath.set(targetFile, newFactsArray)
+              }
               activeGraph = mergedGraph
               activePriors = nextPriors
               activeInference = nextInference
 
               return {
                 filePath: input.filePath,
-                epoch: currentEpoch,
-                retractedFactCount,
-                insertedFactCount,
+                epoch: NonNegativeCount.make(currentEpoch),
+                retractedFactCount: NonNegativeCount.make(retractedFactCount),
+                insertedFactCount: NonNegativeCount.make(insertedFactCount),
                 inference: activeInference,
               } satisfies DatalogFileDeltaResult
             }),

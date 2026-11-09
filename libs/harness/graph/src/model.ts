@@ -815,7 +815,11 @@ export interface HarnessGraph {
 export const DatalogFilePath = Schema.NonEmptyString.pipe(Schema.brand("DatalogFilePath"))
 export type DatalogFilePath = typeof DatalogFilePath.Type
 
-const NonNegativeCount = Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0)))
+export const NonNegativeCount = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+  Schema.brand("NonNegativeCount"),
+)
+export type NonNegativeCount = typeof NonNegativeCount.Type
 
 export const DatalogFileDeltaResult = Schema.Struct({
   filePath: DatalogFilePath,
@@ -832,6 +836,18 @@ export type DatalogFileDeltaResult = typeof DatalogFileDeltaResult.Type
 
 export const RewriteRuleId = Schema.NonEmptyString.pipe(Schema.brand("RewriteRuleId"))
 export type RewriteRuleId = typeof RewriteRuleId.Type
+
+export const DpoPriorKey = Schema.NonEmptyString.pipe(Schema.brand("DpoPriorKey"))
+export type DpoPriorKey = typeof DpoPriorKey.Type
+
+export const formatDpoPriorKey = (primaryNodeKey: string, ruleId: string): DpoPriorKey =>
+  DpoPriorKey.make(`${primaryNodeKey}::${ruleId}`)
+
+export const BOUNDARY_CALLER_PATTERN =
+  /\b(?:http|endpoint|rpc|controller|handler|route|worker|relay)\b/i
+
+export const isBoundaryCallerQualname = (text: string): boolean =>
+  BOUNDARY_CALLER_PATTERN.test(text)
 
 export const REWRITE_PHASES = [
   "PLAN",
@@ -895,8 +911,14 @@ export type SystemOneScoreMillis = typeof SystemOneScoreMillis.Type
 export const DpoCandidatePriors = Schema.Record(Schema.String, SystemOneScoreMillis)
 export type DpoCandidatePriors = typeof DpoCandidatePriors.Type
 
+export const CandidateRank = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(1)),
+  Schema.brand("CandidateRank"),
+)
+export type CandidateRank = typeof CandidateRank.Type
+
 export const RewriteCandidate = Schema.Struct({
-  rank: Schema.Int,
+  rank: CandidateRank,
   rationale: Schema.String,
   patches: Schema.Array(GraphPatch),
   finalMeasure: GraphMeasure,

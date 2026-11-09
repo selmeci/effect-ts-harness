@@ -4,6 +4,7 @@ import { match } from "ts-pattern"
 import { decideGraphInference } from "./datalog-engine.js"
 import {
   type BranchingViolation,
+  CandidateRank,
   type DpoCandidatePriors,
   type DpoRuleSpec,
   type EarsSpecNode,
@@ -24,6 +25,7 @@ import {
   type LayerFlowRelation,
   type MigrationTupleRelation,
   NodeKey,
+  NonNegativeCount,
   PlaysRoleEdge,
   RelationId,
   type RelationNode,
@@ -39,10 +41,12 @@ import {
   type TaggedErrorNode,
   type TraceabilityTupleRelation,
   type VitestCaseNode,
+  formatDpoPriorKey,
   getArchimateRelationForRole,
   getEdgeKey,
   getNodeKey,
   isBipartitePlaysRoleIds,
+  isBoundaryCallerQualname,
   isEntityNode,
   isRelationNode,
 } from "./model.js"
@@ -282,21 +286,6 @@ export const computeGraphMeasure = (
   }
 
   let codeHygieneViolations = (graph.branchingViolations ?? []).length
-  for (const [, node] of Graph.nodes(graph.graph)) {
-    if (node._tag === "SchemaDef" && node.packageTag === "contract" && node.isBranded === false) {
-      codeHygieneViolations += 1
-    }
-    if (
-      node._tag === "EffectFn" &&
-      (node.packageTag === "domain" || node.packageTag === "contract") &&
-      (isDeciderSpan(node.qualname) ||
-        isReducerSpan(node.qualname) ||
-        /(?:^|#|\.)(?:decide|evolve)/i.test(node.qualname)) &&
-      (node.spanName === "untraced" || node.spanName === "<untraced>")
-    ) {
-      codeHygieneViolations += 1
-    }
-  }
 
   // Also count proposed EARS specs that have no realizing TraceabilityTuple edge yet
   const realizedSpecKeys = new Set<string>()
@@ -306,27 +295,61 @@ export const computeGraphMeasure = (
     }
   }
   for (const [, node] of Graph.nodes(graph.graph)) {
-    if (node._tag === "EarsSpec" && node.status === "proposed") {
-      const specKey = getNodeKey(node)
-      if (!realizedSpecKeys.has(specKey)) {
-        const declaredCount =
-          (node.referencedSpans?.length ?? 0) +
-          (node.referencedServices?.length ?? 0) +
-          (node.referencedErrors?.length ?? 0)
-        if (declaredCount === 0) {
-          unmappedSpecSymbols += 1
+    match(node)
+      .with({ _tag: "SchemaDef" }, (n) => {
+        if (n.packageTag === "contract" && n.isBranded === false) {
+          codeHygieneViolations += 1
         }
-      }
-    }
+      })
+      .with({ _tag: "EffectFn" }, (n) => {
+        if (
+          (n.packageTag === "domain" || n.packageTag === "contract") &&
+          (isDeciderSpan(n.qualname) ||
+            isReducerSpan(n.qualname) ||
+            /(?:^|#|\.)(?:decide|evolve)/i.test(n.qualname)) &&
+          (n.spanName === "untraced" || n.spanName === "<untraced>")
+        ) {
+          codeHygieneViolations += 1
+        }
+      })
+      .with({ _tag: "EarsSpec" }, (n) => {
+        if (n.status === "proposed") {
+          const specKey = getNodeKey(n)
+          if (!realizedSpecKeys.has(specKey)) {
+            const declaredCount =
+              (n.referencedSpans?.length ?? 0) +
+              (n.referencedServices?.length ?? 0) +
+              (n.referencedErrors?.length ?? 0)
+            if (declaredCount === 0) {
+              unmappedSpecSymbols += 1
+            }
+          }
+        }
+      })
+      .with(
+        { _tag: "ServiceTag" },
+        { _tag: "ServiceLayer" },
+        { _tag: "TaggedError" },
+        { _tag: "VitestCase" },
+        { _tag: "PatternDoc" },
+        { _tag: "AdrDoc" },
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "HttpEndpointTuple" },
+        { _tag: "MigrationTuple" },
+        () => undefined,
+      )
+      .exhaustive()
   }
 
   return {
-    archViolations,
-    unmappedSpecSymbols,
-    codeHygieneViolations,
-    missingLayerProviders,
-    untestedDomainSpans,
-    unresolvedSuggestedEdges: inference.suggestedEdges.length,
+    archViolations: NonNegativeCount.make(archViolations),
+    unmappedSpecSymbols: NonNegativeCount.make(unmappedSpecSymbols),
+    codeHygieneViolations: NonNegativeCount.make(codeHygieneViolations),
+    missingLayerProviders: NonNegativeCount.make(missingLayerProviders),
+    untestedDomainSpans: NonNegativeCount.make(untestedDomainSpans),
+    unresolvedSuggestedEdges: NonNegativeCount.make(inference.suggestedEdges.length),
   }
 }
 
@@ -1516,13 +1539,28 @@ const findPhase2ArchRepairBranches = (
 
       if (deciderNode !== undefined && sigRelId !== undefined) {
         const sigEdges = ctx.edgesByRelId.get(sigRelId) ?? []
-        const directEdge = sigEdges.find(
-          (e) =>
-            (e.role === "requires-service" ||
-              e.role === "fails-with" ||
-              e.role === "callee") &&
-            (e.entityKey === targetKey || e.role === "requires-service" || e.role === "callee"),
-        )
+        const firstHopStep = ap.path.length > 2 ? ap.path[1] : undefined
+        const firstHopCalleeKey =
+          firstHopStep !== undefined
+            ? firstHopStep.startsWith("EffectFn:")
+              ? firstHopStep
+              : `EffectFn:${firstHopStep}`
+            : undefined
+        const directEdge =
+          sigEdges.find(
+            (e) =>
+              (e.role === "requires-service" ||
+                e.role === "fails-with" ||
+                e.role === "callee") &&
+              e.entityKey === targetKey,
+          ) ??
+          (firstHopCalleeKey !== undefined
+            ? sigEdges.find(
+                (e) =>
+                  e.role === "callee" &&
+                  (e.entityKey === firstHopCalleeKey || e.entityKey === firstHopStep),
+              )
+            : undefined)
 
         if (directEdge !== undefined) {
           const scopePrefix = deciderNode.spanName.replace(/\.(?:decide|evolve)$/, "")
@@ -1556,6 +1594,9 @@ const findPhase2ArchRepairBranches = (
             makePlaysRoleEdge(ucSigId, ucKey, "caller"),
             makePlaysRoleEdge(ucSigId, deciderKey, "callee"),
           )
+          if (directEdge.role === "callee" && directEdge.entityKey !== deciderKey) {
+            insertedEdges.push(makePlaysRoleEdge(ucSigId, directEdge.entityKey, "callee"))
+          }
 
           if (targetKey.startsWith("ServiceTag:")) {
             const svcNode = ctx.servicesByKey.get(targetKey)
@@ -1606,6 +1647,7 @@ const findPhase2ArchRepairBranches = (
             deciderKey,
             targetKey,
             NodeKey.make(sigRelId),
+            ...(directEdge.entityKey !== targetKey ? [directEdge.entityKey] : []),
           ]
           if (traceRelId !== undefined) {
             preservedKeys.push(NodeKey.make(traceRelId))
@@ -1858,17 +1900,19 @@ const findPhase3CodeRepairPatches = (
 
   // REP-05: untraced-decider
   for (const [fnKey, fnNode] of ctx.fnsByKey.entries()) {
-    const hasUntracedViolation = (graph.branchingViolations ?? []).some(
-      (v) =>
-        v.rule === "untraced-decider" &&
-        (v.enclosingSymbol === fnNode.qualname || v.file === fnNode.file),
-    )
-    const isUntracedDeciderNode =
+    const isDeciderOrReducerCandidate =
       (fnNode.packageTag === "domain" || fnNode.packageTag === "contract") &&
       (isDeciderSpan(fnNode.qualname) ||
         isReducerSpan(fnNode.qualname) ||
-        /(?:^|#|\.)(?:decide|evolve)/i.test(fnNode.qualname)) &&
+        /(?:^|#|\.)(?:decide|evolve)/i.test(fnNode.qualname))
+    const isUntracedDeciderNode =
+      isDeciderOrReducerCandidate &&
       (fnNode.spanName === "untraced" || fnNode.spanName === "<untraced>")
+    const matchesUntracedViolation = (v: BranchingViolation): boolean =>
+      v.rule === "untraced-decider" &&
+      (v.enclosingSymbol === fnNode.qualname ||
+        (isUntracedDeciderNode && v.file === fnNode.file))
+    const hasUntracedViolation = (graph.branchingViolations ?? []).some(matchesUntracedViolation)
 
     if (hasUntracedViolation || isUntracedDeciderNode) {
       const symbolTail = fnNode.qualname.split("#").pop() ?? "Domain"
@@ -1911,9 +1955,7 @@ const findPhase3CodeRepairPatches = (
           ],
           insertedRelationNodes: insertedRelations,
           insertedRoleEdges: insertedEdges,
-          clearViolationFilter: (v) =>
-            v.rule === "untraced-decider" &&
-            (v.enclosingSymbol === fnNode.qualname || v.file === fnNode.file),
+          clearViolationFilter: matchesUntracedViolation,
         },
       ]
     }
@@ -1921,15 +1963,16 @@ const findPhase3CodeRepairPatches = (
 
   // REP-06: unbranded-contract-schema
   for (const [schemaKey, schemaNode] of ctx.schemasByKey.entries()) {
-    const hasUnbrandedViolation = (graph.branchingViolations ?? []).some(
-      (v) =>
-        (v.rule === "unbranded-contract-schema" || v.rule === "unbranded-schema-field") &&
-        (v.enclosingSymbol.includes(schemaNode.schemaName) || v.file === schemaNode.file),
-    )
-    if (
-      (schemaNode.packageTag === "contract" && schemaNode.isBranded === false) ||
-      hasUnbrandedViolation
-    ) {
+    const isUnbrandedContractNode =
+      schemaNode.packageTag === "contract" && schemaNode.isBranded === false
+    const matchesSchemaViolation = (v: BranchingViolation): boolean =>
+      (v.rule === "unbranded-contract-schema" || v.rule === "unbranded-schema-field") &&
+      (v.enclosingSymbol === schemaNode.qualname ||
+        v.enclosingSymbol === schemaNode.schemaName ||
+        v.enclosingSymbol.endsWith(`#${schemaNode.schemaName}`) ||
+        (isUnbrandedContractNode && v.file === schemaNode.file))
+    const hasUnbrandedViolation = (graph.branchingViolations ?? []).some(matchesSchemaViolation)
+    if (isUnbrandedContractNode || hasUnbrandedViolation) {
       return [
         {
           ruleId: RewriteRuleId.make("REP-06"),
@@ -1949,9 +1992,7 @@ const findPhase3CodeRepairPatches = (
           ],
           insertedRelationNodes: [],
           insertedRoleEdges: [],
-          clearViolationFilter: (v) =>
-            (v.rule === "unbranded-contract-schema" || v.rule === "unbranded-schema-field") &&
-            (v.enclosingSymbol.includes(schemaNode.schemaName) || v.file === schemaNode.file),
+          clearViolationFilter: matchesSchemaViolation,
         },
       ]
     }
@@ -2487,12 +2528,29 @@ const findPhase4CleanupPatches = (
   // Collect all services referenced by any EarsSpec or AdrDoc or active stub
   const specProtectedServiceNames = new Set<string>()
   for (const [, node] of Graph.nodes(graph.graph)) {
-    if (node._tag === "EarsSpec" || node._tag === "AdrDoc") {
-      for (const svc of node.referencedServices ?? []) {
-        specProtectedServiceNames.add(svc)
-        specProtectedServiceNames.add(`ServiceTag:${svc}`)
-      }
-    }
+    match(node)
+      .with({ _tag: "EarsSpec" }, { _tag: "AdrDoc" }, (n) => {
+        for (const svc of n.referencedServices ?? []) {
+          specProtectedServiceNames.add(svc)
+          specProtectedServiceNames.add(`ServiceTag:${svc}`)
+        }
+      })
+      .with(
+        { _tag: "EffectFn" },
+        { _tag: "ServiceTag" },
+        { _tag: "ServiceLayer" },
+        { _tag: "TaggedError" },
+        { _tag: "SchemaDef" },
+        { _tag: "VitestCase" },
+        { _tag: "PatternDoc" },
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "HttpEndpointTuple" },
+        { _tag: "MigrationTuple" },
+        () => undefined,
+      )
+      .exhaustive()
   }
 
   const hasActiveStubInWorkspace = Array.from(ctx.fnsByKey.values()).some(
@@ -2565,7 +2623,7 @@ const scoreDraftPatch = (
   graph: HarnessGraph,
   candidatePriors?: DpoCandidatePriors,
 ): SystemOneScoreMillis => {
-  const directPrior = candidatePriors?.[`${patch.primaryNodeKey}::${patch.ruleId}`]
+  const directPrior = candidatePriors?.[formatDpoPriorKey(patch.primaryNodeKey, patch.ruleId)]
   if (directPrior !== undefined) {
     return directPrior
   }
@@ -2574,13 +2632,38 @@ const scoreDraftPatch = (
     return ruleOnlyPrior
   }
 
-  const ctx = indexHarnessGraph(graph)
-  const callerNode = ctx.fnsByKey.get(patch.primaryNodeKey)
-  const isBoundaryCaller =
-    callerNode !== undefined &&
-    (callerNode.packageTag === "infra" ||
-      callerNode.packageTag === "app" ||
-      /\b(?:http|endpoint|rpc|controller|handler|route|relay)\b/i.test(callerNode.qualname))
+  const nodeIdx = graph.nodeIndexByKey.get(patch.primaryNodeKey)
+  const rawNode = nodeIdx !== undefined ? Graph.getNode(graph.graph, nodeIdx) : Option.none()
+  const isBoundaryCaller = match(rawNode)
+    .with({ _tag: "Some" }, ({ value }) =>
+      match(value)
+        .with(
+          { _tag: "EffectFn" },
+          (fn) =>
+            fn.packageTag === "infra" ||
+            fn.packageTag === "app" ||
+            isBoundaryCallerQualname(fn.qualname),
+        )
+        .with(
+          { _tag: "ServiceTag" },
+          { _tag: "ServiceLayer" },
+          { _tag: "TaggedError" },
+          { _tag: "SchemaDef" },
+          { _tag: "VitestCase" },
+          { _tag: "PatternDoc" },
+          { _tag: "AdrDoc" },
+          { _tag: "EarsSpec" },
+          { _tag: "EffectSignature" },
+          { _tag: "LayerFlow" },
+          { _tag: "TraceabilityTuple" },
+          { _tag: "HttpEndpointTuple" },
+          { _tag: "MigrationTuple" },
+          () => false,
+        )
+        .exhaustive(),
+    )
+    .with({ _tag: "None" }, () => false)
+    .exhaustive()
 
   return match(patch.ruleId as string)
     .with("REP-04a", () => SystemOneScoreMillis.make(isBoundaryCaller ? 450 : 800))
@@ -2614,15 +2697,17 @@ export const decideGraphRewrite = Effect.fn("GraphRewrite.decide")(function* (
   const appliedPatches: Array<GraphPatch> = []
   const alternativeCandidates: Array<RewriteCandidate> = []
   let branchWinnerScore: SystemOneScoreMillis | undefined
-  const maxSteps = 64
+  const maxSteps = Math.max(64, Graph.nodeCount(graph.graph) * 4)
 
   for (const phase of activePhases) {
     let phaseSteps = 0
+    let converged = false
     while (phaseSteps < maxSteps) {
       if (phase === "PLAN") {
         const planDrafts = findPhase1PlanPatches(currentGraph, currentInference)
         const draft = planDrafts[0]
         if (draft === undefined) {
+          converged = true
           break
         }
         phaseSteps += 1
@@ -2639,6 +2724,17 @@ export const decideGraphRewrite = Effect.fn("GraphRewrite.decide")(function* (
           ),
         )
         const nextMeasure = computeGraphMeasure(nextGraph, nextInference)
+        if (
+          nextMeasure.archViolations > currentMeasure.archViolations ||
+          nextMeasure.codeHygieneViolations > currentMeasure.codeHygieneViolations
+        ) {
+          return yield* new GraphRewriteError({
+            ruleId: draft.ruleId,
+            nodeKey: draft.primaryNodeKey,
+            reason: "non-decreasing-measure",
+            message: `Planning rule ${draft.ruleId} introduced new architectural or code hygiene violations.`,
+          })
+        }
         const { clearViolationFilter: _ignored, ...cleanDraft } = draft
         appliedPatches.push({
           ...cleanDraft,
@@ -2654,6 +2750,7 @@ export const decideGraphRewrite = Effect.fn("GraphRewrite.decide")(function* (
       if (phase === "REPAIR_ARCH") {
         const branches = findPhase2ArchRepairBranches(currentGraph, currentInference)
         if (branches.length === 0) {
+          converged = true
           break
         }
         phaseSteps += 1
@@ -2737,7 +2834,7 @@ export const decideGraphRewrite = Effect.fn("GraphRewrite.decide")(function* (
             afterMeasure: alt.nextMeasure,
           }
           alternativeCandidates.push({
-            rank: alternativeCandidates.length + 2,
+            rank: CandidateRank.make(alternativeCandidates.length + 2),
             rationale: `${alt.draft.description} (System One tie-breaker: ${alt.scoreMillis}/1000)`,
             patches: [...appliedPatches, altPatch],
             finalMeasure: alt.nextMeasure,
@@ -2762,6 +2859,7 @@ export const decideGraphRewrite = Effect.fn("GraphRewrite.decide")(function* (
         const codeDrafts = findPhase3CodeRepairPatches(currentGraph, currentInference)
         const draft = codeDrafts[0]
         if (draft === undefined) {
+          converged = true
           break
         }
         phaseSteps += 1
@@ -2802,6 +2900,7 @@ export const decideGraphRewrite = Effect.fn("GraphRewrite.decide")(function* (
         const cleanupDrafts = findPhase4CleanupPatches(currentGraph)
         const draft = cleanupDrafts[0]
         if (draft === undefined) {
+          converged = true
           break
         }
         phaseSteps += 1
@@ -2841,11 +2940,25 @@ export const decideGraphRewrite = Effect.fn("GraphRewrite.decide")(function* (
         continue
       }
     }
-    if (phaseSteps >= maxSteps) {
-      return yield* new GraphRewriteError({
-        reason: "non-decreasing-measure",
-        message: `Phase '${phase}' exceeded maximum step bound (${maxSteps}) without reaching a normal form.`,
-      })
+    if (!converged) {
+      const remainingAtBound = match(phase)
+        .with("PLAN", () => findPhase1PlanPatches(currentGraph, currentInference).length)
+        .with(
+          "REPAIR_ARCH",
+          () => findPhase2ArchRepairBranches(currentGraph, currentInference).length,
+        )
+        .with(
+          "REPAIR_CODE",
+          () => findPhase3CodeRepairPatches(currentGraph, currentInference).length,
+        )
+        .with("CLEANUP", () => findPhase4CleanupPatches(currentGraph).length)
+        .exhaustive()
+      if (remainingAtBound > 0) {
+        return yield* new GraphRewriteError({
+          reason: "non-decreasing-measure",
+          message: `Phase '${phase}' exceeded maximum step bound (${maxSteps}) without reaching a normal form.`,
+        })
+      }
     }
   }
 
@@ -2867,7 +2980,7 @@ export const decideGraphRewrite = Effect.fn("GraphRewrite.decide")(function* (
     branchWinnerScore ?? scoreDraftPatch(firstPatch, graph, candidatePriors)
 
   const recommended: RewriteCandidate = {
-    rank: 1,
+    rank: CandidateRank.make(1),
     rationale: `Applied ${appliedPatches.length} DPO rewrite step(s) (${appliedPatches.map((p) => p.ruleId).join(" -> ")}) reaching measure (${currentMeasure.archViolations}, ${currentMeasure.unmappedSpecSymbols}, ${currentMeasure.codeHygieneViolations}, ${currentMeasure.missingLayerProviders}, ${currentMeasure.untestedDomainSpans}, ${currentMeasure.unresolvedSuggestedEdges}).`,
     patches: appliedPatches,
     finalMeasure: currentMeasure,

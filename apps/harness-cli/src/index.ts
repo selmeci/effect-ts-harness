@@ -8,6 +8,7 @@ import * as DecisionModel from "effect/ai/DecisionModel"
 import {
   checkPlanStepCoverage,
   decideGuardCommand,
+  deterministicLearnFallback,
   evaluateOntologyConflicts,
   extractOntologyConflictPairs,
   IDIOM_BLOCKS,
@@ -2209,14 +2210,22 @@ const handleLearn = (
     const events = readFrictionEvents(repoRoot)
     const clusters = summarizeFrictionEvents(events)
     const proposals = []
+    let useFastFallback =
+      (shouldClear && options?.decisionLayer === undefined) || argv.includes("--deterministic")
 
     for (const cluster of clusters) {
-      const proposal = yield* proposeLearningAction({
+      const input = {
         kind: cluster.kind,
         summary: cluster.summary,
         detail: cluster.detail,
         occurrences: cluster.occurrences,
-      }).pipe(Effect.provide(decisionLayer))
+      }
+      const proposal = useFastFallback
+        ? deterministicLearnFallback(input)
+        : yield* proposeLearningAction(input).pipe(Effect.provide(decisionLayer))
+      if (proposal.source === "deterministic-fallback") {
+        useFastFallback = true
+      }
       proposals.push({
         key: cluster.key,
         kind: cluster.kind,

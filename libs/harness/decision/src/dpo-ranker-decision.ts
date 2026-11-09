@@ -1,18 +1,19 @@
+import {
+  DpoPriorKey,
+  NodeKey,
+  RewriteRuleId,
+  SystemOneScoreMillis,
+  formatDpoPriorKey,
+  isBoundaryCallerQualname,
+} from "@harness/gates"
 import { Effect, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
-import { NodeKey, PriorSource } from "./hole-prior-decision.js"
+import { MAX_BATCHED_HOLE_CANDIDATES, PriorSource } from "./hole-prior-decision.js"
 import { assertDecisionLimits } from "./idiom-router.js"
 
-export const RewriteRuleId = Schema.NonEmptyString.pipe(Schema.brand("RewriteRuleId"))
-export type RewriteRuleId = typeof RewriteRuleId.Type
-
-export const SystemOneScoreMillis = Schema.Int.pipe(
-  Schema.check(Schema.isBetween({ minimum: 0, maximum: 1000 })),
-  Schema.brand("SystemOneScoreMillis"),
-)
-export type SystemOneScoreMillis = typeof SystemOneScoreMillis.Type
+export { DpoPriorKey, RewriteRuleId, SystemOneScoreMillis, formatDpoPriorKey }
 
 export const DPO_REPAIR_STRATEGIES = [
   "propagate_in_E",
@@ -83,7 +84,7 @@ export const DpoCandidateRankerV1 = Decision.make({
 
 assertDecisionLimits(DpoCandidateRankerV1)
 
-export const MAX_BATCHED_DPO_CANDIDATES = 32
+export const MAX_BATCHED_DPO_CANDIDATES = MAX_BATCHED_HOLE_CANDIDATES
 
 export const buildBatchedDpoRankerDecision = (candidateCount: number) => {
   const boundedCount = Math.min(MAX_BATCHED_DPO_CANDIDATES, Math.max(1, candidateCount))
@@ -125,7 +126,7 @@ export type DpoCandidateRankInput = typeof DpoCandidateRankInput.Type
 export const DpoCandidateRankResult = Schema.Struct({
   primaryNodeKey: NodeKey,
   ruleId: RewriteRuleId,
-  priorKey: Schema.NonEmptyString,
+  priorKey: DpoPriorKey,
   scoreMillis: SystemOneScoreMillis,
   strategyLabel: Schema.Literals(DPO_REPAIR_STRATEGIES),
   cohesionLabel: Schema.Literals(DPO_COHESION_LEVELS),
@@ -184,8 +185,7 @@ const computeCandidateScoreMillis = (
 const computeDeterministicFallbackRank = (
   input: DpoCandidateRankInput,
 ): DpoCandidateRankResult => {
-  const isBoundaryCaller =
-    /\b(?:http|endpoint|rpc|controller|handler|route|worker|relay)\b/i.test(input.callerSummary)
+  const isBoundaryCaller = isBoundaryCallerQualname(input.callerSummary)
   const fallbackStrategy: DpoRepairStrategy = match(input.ruleId as string)
     .with("REP-04b", () =>
       isBoundaryCaller ? ("catch_and_translate_at_boundary" as const) : ("propagate_in_E" as const),
@@ -203,7 +203,7 @@ const computeDeterministicFallbackRank = (
   return {
     primaryNodeKey: input.primaryNodeKey,
     ruleId: input.ruleId,
-    priorKey: `${input.primaryNodeKey}::${input.ruleId}`,
+    priorKey: formatDpoPriorKey(input.primaryNodeKey, input.ruleId),
     scoreMillis: fallbackScore,
     strategyLabel: fallbackStrategy,
     cohesionLabel: "acceptable",
@@ -232,7 +232,7 @@ export const evaluateDpoCandidateRank = Effect.fn("DpoCandidateRanker.evaluate")
           strategyLabel,
           cohesionLabel,
         )
-        const priorKey = `${input.primaryNodeKey}::${input.ruleId}`
+        const priorKey = formatDpoPriorKey(input.primaryNodeKey, input.ruleId)
 
         yield* Effect.annotateCurrentSpan({
           "decision.definition": "DpoCandidateRankerV1",
@@ -300,7 +300,9 @@ export const evaluateDpoCandidatePriorsBatch = Effect.fn("DpoCandidateRanker.eva
             usedFallback = true
             for (const item of chunk) {
               const fb = computeDeterministicFallbackRank(item)
-              candidatePriors[fb.priorKey] = fb.scoreMillis
+              if (candidatePriors[fb.priorKey] === undefined) {
+                candidatePriors[fb.priorKey] = fb.scoreMillis
+              }
               results.push(fb)
             }
           }),
@@ -326,8 +328,12 @@ export const evaluateDpoCandidatePriorsBatch = Effect.fn("DpoCandidateRanker.eva
                 strategyLabel,
                 cohesionLabel,
               )
-              const priorKey = `${item.primaryNodeKey}::${item.ruleId}`
-              candidatePriors[priorKey] = scoreMillis
+              const priorKey = formatDpoPriorKey(item.primaryNodeKey, item.ruleId)
+              const existingScore = candidatePriors[priorKey]
+              candidatePriors[priorKey] =
+                existingScore !== undefined && existingScore > scoreMillis
+                  ? existingScore
+                  : scoreMillis
               results.push({
                 primaryNodeKey: item.primaryNodeKey,
                 ruleId: item.ruleId,

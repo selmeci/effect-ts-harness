@@ -1,8 +1,9 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Effect, Exit, Layer, Schema } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import * as AiError from "effect/ai/AiError"
 import type * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import { TestClock } from "effect/testing"
 import {
   CandidateSymbolKey,
   HoleRelevanceAndEdgePriorV1,
@@ -177,7 +178,7 @@ describe("HoleRelevanceAndEdgePriorV1 (System One Calibrated Edge & PPR Prior Se
     }),
   )
 
-  it.live(
+  it.effect(
     "falls back deterministically when DecisionModel times out after 1500ms",
     () =>
       Effect.gen(function* () {
@@ -194,9 +195,11 @@ describe("HoleRelevanceAndEdgePriorV1 (System One Calibrated Edge & PPR Prior Se
           }),
         )
 
-        const res = yield* evaluateHoleCandidatePrior(defaultInput).pipe(
-          Effect.provide(timeoutLayer),
+        const fiber = yield* Effect.forkChild(
+          evaluateHoleCandidatePrior(defaultInput).pipe(Effect.provide(timeoutLayer)),
         )
+        yield* TestClock.adjust("2000 millis")
+        const res = yield* Fiber.join(fiber)
 
         expect(res.source).toEqual({ _tag: "DeterministicFallback" })
         expect(res.edgeConfidenceMillis).toBe(500)
@@ -222,7 +225,7 @@ describe("HoleRelevanceAndEdgePriorV1 (System One Calibrated Edge & PPR Prior Se
   })
 
   it.effect(
-    "REQ-3.1: evaluates batched HoleRelevanceAndEdgePriorV1 (up to 32 candidates = 64 questions per forward pass) and produces SemanticEdgePriors",
+    "REQ-3.1: evaluates batched HoleRelevanceAndEdgePriorV1 (up to 32 candidates = 64 questions per forward pass) and produces SemanticEdgePriors across multi-chunk batches",
     () =>
       Effect.gen(function* () {
         const batchedDef = buildBatchedHolePriorDecision(32)
@@ -267,6 +270,25 @@ describe("HoleRelevanceAndEdgePriorV1 (System One Calibrated Edge & PPR Prior Se
             CandidateSymbolKey.make("EffectFn:libs/sample/domain/src/cart.ts#decide")
           ],
         ).toBe(1000)
+
+        // Multi-chunk batch (35 candidates => chunk of 32 + chunk of 3)
+        const multiChunkInputs = Array.from({ length: 35 }, (_, idx) => ({
+          ...defaultInput,
+          candidateSymbolKey: CandidateSymbolKey.make(`ServiceTag:Svc${idx}`),
+          proposedRole: ProposedRoleName.make("requires-service"),
+        }))
+        const multiChunkRes = yield* evaluateHoleCandidatePriorsBatch(multiChunkInputs).pipe(
+          Effect.provide(
+            makeMockDecisionModelLayer({
+              edgeConfidenceProb: 0.88,
+              candidateRelevanceLabel: "helpful",
+            }),
+          ),
+        )
+        expect(multiChunkRes.results).toHaveLength(35)
+        expect(multiChunkRes.edgeConfidenceOverrides["ServiceTag:Svc34:requires-service"]).toBe(
+          880,
+        )
 
         // Fallback on failing model
         const fallbackBatch = yield* evaluateHoleCandidatePriorsBatch(batchInputs).pipe(

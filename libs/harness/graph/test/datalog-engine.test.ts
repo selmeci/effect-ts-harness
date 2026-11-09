@@ -1412,6 +1412,37 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
           expect(invalidExit._tag).toBe("Failure")
           const latestAfterFailure = yield* session.latestInference
           expect(latestAfterFailure).toEqual(batchParity)
+
+          // Step 4: target:role confidence override in priors is honoured
+          const stepWithPriors = yield* stepDatalogFileDelta({
+            filePath: DatalogFilePath.make("libs/sample/domain/src/b.ts"),
+            nextGraph: editedBSubgraph,
+            priors: {
+              edgeConfidenceOverrides: {
+                "ServiceTag:RepoA:provided-service": ConfidenceMillis.make(975),
+              },
+              holeTeleportationWeights: {},
+            },
+          })
+          const comp03Override = stepWithPriors.inference.suggestedEdges.find(
+            (s) =>
+              s.ruleId === "COMP-03" &&
+              s.targetEntityKey === NodeKey.make("ServiceTag:RepoA"),
+          )
+          expect(comp03Override?.confidenceMillis).toBe(ConfidenceMillis.make(975))
+
+          // Step 5: deleting b.ts (empty subgraph) retracts all facts for b.ts and removes fnB from currentGraph
+          const deletedBStep = yield* stepDatalogFileDelta({
+            filePath: DatalogFilePath.make("libs/sample/domain/src/b.ts"),
+            nextGraph: buildHarnessGraph({}),
+          })
+          expect(deletedBStep.retractedFactCount).toBeGreaterThan(0)
+          const graphAfterDelete = yield* session.currentGraph
+          expect(
+            graphAfterDelete.nodeIndexByKey.has(
+              NodeKey.make("EffectFn:libs/sample/domain/src/b.ts#fnB"),
+            ),
+          ).toBe(false)
         })
 
         yield* program.pipe(Effect.provide(DatalogSession.layer(initialGraph)))

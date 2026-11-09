@@ -14,3 +14,19 @@ export * from "./ears-lint.js"
 export * from "./adr-lint.js"
 export * from "./ontology-invariants.js"
 export * from "./telemetry.js"
+export {
+  BOUNDARY_CALLER_PATTERN,
+  CandidateRank,
+  ConfidenceMillis,
+  DpoCandidatePriors,
+  DpoPriorKey,
+  NodeKey,
+  NonNegativeCount,
+  PageRankScoreMillis,
+  RewriteRuleId,
+  RoleName,
+  SemanticEdgePriors,
+  SystemOneScoreMillis,
+  formatDpoPriorKey,
+  isBoundaryCallerQualname,
+} from "@harness/graph"
