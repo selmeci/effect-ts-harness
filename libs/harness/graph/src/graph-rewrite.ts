@@ -571,9 +571,9 @@ export const verifyDpoGluingCondition = (
     }
   })
 
-const applyDpoPatchToGraph = (
+export const applyDpoPatchToGraph = (
   graph: HarnessGraph,
-  patch: DraftGraphPatch,
+  patch: DraftGraphPatch | GraphPatch,
 ): Effect.Effect<HarnessGraph, GraphRewriteError> =>
   Effect.gen(function* () {
     yield* verifyDpoGluingCondition(graph, patch)
@@ -664,7 +664,7 @@ const applyDpoPatchToGraph = (
     })
 
     const nextViolations =
-      patch.clearViolationFilter !== undefined
+      "clearViolationFilter" in patch && patch.clearViolationFilter !== undefined
         ? (graph.branchingViolations ?? []).filter((v) => !patch.clearViolationFilter!(v))
         : (graph.branchingViolations ?? [])
 

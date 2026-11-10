@@ -412,7 +412,7 @@ describe("harness-mcp tools", () => {
     await expect(executeTool("unknown_tool", {})).rejects.toThrow()
   })
 
-  it("completes MCP stdio handshake and lists all 14 tools when spawned from Antigravity plugin directory", async () => {
+  it("completes MCP stdio handshake and lists all 15 tools when spawned from Antigravity plugin directory", async () => {
     const { Client } = await import("@modelcontextprotocol/sdk/client/index.js")
     const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js")
     const repoRoot = path.resolve(import.meta.dirname, "../../..")
@@ -446,6 +446,7 @@ describe("harness-mcp tools", () => {
         "harness_gq_query",
         "harness_graph_infer",
         "harness_graph_complete",
+        "harness_graph_rewrite",
         "harness_lsp_diagnostics",
         "harness_telemetry_report",
       ])
@@ -791,5 +792,81 @@ describe("harness-mcp tools", () => {
       await daemon.close()
       fs.rmSync(tmpDir, { recursive: true, force: true })
     }
+  })
+
+  it("executes harness_graph_rewrite in auto-plan and auto-repair modes", async () => {
+    const planGraph = buildHarnessGraph({
+      earsSpecs: [
+        {
+          id: "order:SPEC-0001",
+          title: "Order Placement Spec",
+          status: "proposed",
+          path: "libs/order/docs/specs/0001-order.md",
+          enforcedByFiles: ["libs/order/domain/src/order.ts"],
+          referencedSpans: ["Order.placeOrder"],
+          referencedServices: ["OrderService"],
+          referencedErrors: ["OrderRejectedError"],
+        },
+      ],
+    })
+
+    const planRes = (await executeTool(
+      "harness_graph_rewrite",
+      { mode: "auto-plan" },
+      { graph: planGraph },
+    )) as {
+      readonly mode: string
+      readonly candidates: ReadonlyArray<unknown>
+      readonly projection: { readonly overlays: ReadonlyArray<unknown> }
+    }
+
+    expect(planRes.mode).toBe("auto-plan")
+    expect(planRes.candidates.length).toBeGreaterThan(0)
+    expect(planRes.projection).toBeDefined()
+    expect(planRes.projection.overlays.length).toBeGreaterThan(0)
+
+    const repairGraph = buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/sample/domain/src/order.ts#decide",
+          spanName: "Order.decide",
+          file: "libs/sample/domain/src/order.ts",
+          line: 10,
+          packageTag: "domain",
+          successType: "void",
+          isStub: false,
+        },
+      ],
+    })
+
+    const repairRes = (await executeTool(
+      "harness_graph_rewrite",
+      { mode: "auto-repair" },
+      { graph: repairGraph },
+    )) as { readonly mode: string; readonly candidates: ReadonlyArray<unknown> }
+
+    expect(repairRes.mode).toBe("auto-repair")
+    expect(Array.isArray(repairRes.candidates)).toBe(true)
+  })
+
+  it("executes harness_lsp_diagnostics with in-memory overlays", async () => {
+    const lspRes = (await executeTool(
+      "harness_lsp_diagnostics",
+      {
+        overlays: {
+          "libs/sample/domain/src/index.ts": "export const valid = 42\n",
+        },
+      },
+      { repoRoot: process.cwd() },
+    )) as {
+      readonly clean: boolean
+      readonly summary: { readonly filesChecked: number; readonly errors: number }
+    }
+
+    expect(lspRes).toBeDefined()
+    expect(typeof lspRes.clean).toBe("boolean")
+    expect(lspRes.clean).toBe(true)
+    expect(lspRes.summary.filesChecked).toBe(1)
+    expect(lspRes.summary.errors).toBe(0)
   })
 })

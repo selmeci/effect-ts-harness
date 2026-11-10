@@ -11,7 +11,9 @@ enforced_by:
   - libs/harness/graph/src/concept-lattice.ts
   - libs/harness/graph/src/datalog-engine.ts
   - libs/harness/graph/src/graph-rewrite.ts
+  - libs/harness/graph/src/graph-projector.ts
   - libs/harness/graph/src/graph-engine.ts
+  - libs/harness/graph/src/type-extractor.ts
   - libs/harness/graph/src/policy-check.ts
   - libs/harness/graph/src/omnigraph-sync.ts
   - libs/harness/decision/src/hole-prior-decision.ts
@@ -22,6 +24,7 @@ spans:
   - GraphInfer.decide
   - DatalogSession.stepFileDelta
   - GraphRewrite.decide
+  - GraphProjector.decide
   - GraphPolicy.decide
   - GraphEngine.loadSnapshot
   - GraphEngine.deserializeSnapshot
@@ -38,6 +41,7 @@ errors:
   - ConceptLatticeCycleError
   - GraphInferenceError
   - GraphRewriteError
+  - GraphProjectorError
   - GraphSnapshotError
 ---
 
@@ -125,4 +129,5 @@ Maintain 8 binary edge types (`RequiresService`, `FailsWith`, etc.) and `node An
 | Acyclic concept lattice validation, covariant role refinement, and inherited role closure ($\sqsubseteq^_$, $\text{roles}^_(c)$)                                       | `libs/harness/graph/src/concept-lattice.ts`                                                                                      | `decideConceptLattice`, `ConceptLatticeCycleError`                                                                                 | `ConceptLattice.decide`                                                                                                    |
 | Four-stratum Differential Dataflow inference (`INF-01..09`), edge completion (`COMP-01..06`), and incremental DBSP $\mathbb{Z}$-set sessions                           | `libs/harness/graph/src/datalog-engine.ts`, `libs/harness/graph/src/policy-check.ts`                                             | `decideGraphInference`, `DatalogSession`, `GraphInferenceError`, `decideEffectGraphPolicy`                                         | `GraphInfer.decide`, `DatalogSession.stepFileDelta`, `GraphPolicy.decide`, `GraphGc.decide`                                |
 | Double-Pushout (DPO) algebraic graph rewriting (`PLAN-01..04`, `REP-01..11`) preserving $V_R \in K$ and strictly decreasing $\mu(G) \in \mathbb{N}^6$ with `R = never` | `libs/harness/graph/src/graph-rewrite.ts`, `libs/harness/decision/src/dpo-ranker-decision.ts`                                    | `decideGraphRewrite`, `GraphRewriteError`, `evaluateDpoCandidateRank`, `evaluateDpoCandidatePriorsBatch`                           | `GraphRewrite.decide`, `DpoCandidateRanker.evaluate`, `DpoCandidateRanker.evaluateBatch`                                   |
+| Bidirectional AST code projection (`GraphProjector.decide`), Nx barrel (`src/index.ts`) co-projection, and Stratum-Batch Shadow LSP round-trip verification            | `libs/harness/graph/src/graph-projector.ts`, `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/graph-engine.ts` | `decideGraphProjection`, `GraphProjectorError`, `createOverlayCompilerHost`, `verifySubgraphMonomorphism`                          | `GraphProjector.decide`, `HarnessMcp.executeTool`                                                                          |
 | Role-specific Omnigraph PG-Schema synchronization without `node Any` and MCP hypergraph inference tools with System One priors                                         | `libs/harness/graph/src/omnigraph-sync.ts`, `libs/harness/decision/src/hole-prior-decision.ts`, `apps/harness-mcp/src/server.ts` | `OmnigraphSync`, `evaluateHoleCandidatePrior`, `evaluateHoleCandidatePriorsBatch`, `harness_graph_infer`, `harness_graph_complete` | `OmnigraphSync`, `HoleRelevanceAndEdgePrior.evaluate`, `HoleRelevanceAndEdgePrior.evaluateBatch`, `HarnessMcp.executeTool` |

@@ -2187,3 +2187,200 @@ export const diffHarnessGraphs = (
     missingEdges,
   }
 }
+
+export interface SubgraphMonomorphismResult {
+  readonly isMonomorphic: boolean
+  readonly missingEntities: ReadonlyArray<string>
+  readonly missingRelations: ReadonlyArray<string>
+  readonly missingRoleEdges: ReadonlyArray<PlaysRoleEdge>
+}
+
+/**
+ * Verifies Bipartite Levi Subgraph Monomorphism $H \hookrightarrow G_{\text{extracted}}$
+ * across entity vertices $V_E$, reified relation vertices $V_R$, and `PlaysRoleEdge` incidences $E_{\text{role}}$.
+ */
+export const verifySubgraphMonomorphism = (
+  extractedGraph: HarnessGraph,
+  targetSubgraph: HarnessGraph,
+  options?: {
+    readonly requiredEntityKeys?: ReadonlySet<string> | undefined
+    readonly requiredRelationIds?: ReadonlySet<string> | undefined
+    readonly requiredRoleEdges?: ReadonlyArray<PlaysRoleEdge> | undefined
+  },
+): SubgraphMonomorphismResult => {
+  const extractedFnsByFileAndSpan = new Map<string, EffectFnNode>()
+  const extractedEntitiesByTail = new Map<string, string>()
+  const extractedNodeKeys = new Set<string>()
+
+  for (const [, node] of Graph.nodes(extractedGraph.graph)) {
+    const key = getNodeKey(node)
+    extractedNodeKeys.add(key)
+    match(node)
+      .with({ _tag: "EffectFn" }, (fn) => {
+        extractedFnsByFileAndSpan.set(`${fn.file}::${fn.spanName}`, fn)
+        extractedEntitiesByTail.set(`EffectFn::${fn.spanName}`, key)
+        const fnShort = fn.qualname.split("#").pop()
+        if (fnShort !== undefined) {
+          extractedEntitiesByTail.set(`EffectFn::${fnShort}`, key)
+        }
+      })
+      .with({ _tag: "ServiceTag" }, (svc) => {
+        extractedEntitiesByTail.set(`ServiceTag::${svc.tagId}`, key)
+        extractedEntitiesByTail.set(`ServiceTag::${svc.name}`, key)
+      })
+      .with({ _tag: "ServiceLayer" }, (lay) => {
+        const layShort = lay.qualname.split("#").pop()
+        if (layShort !== undefined) {
+          extractedEntitiesByTail.set(`ServiceLayer::${layShort}`, key)
+        }
+      })
+      .with({ _tag: "TaggedError" }, (err) => {
+        extractedEntitiesByTail.set(`TaggedError::${err.errorTag}`, key)
+      })
+      .with({ _tag: "SchemaDef" }, (sch) => {
+        extractedEntitiesByTail.set(`SchemaDef::${sch.schemaName}`, key)
+      })
+      .with({ _tag: "VitestCase" }, (vc) => {
+        extractedEntitiesByTail.set(`VitestCase::${vc.testFile}`, key)
+      })
+      .with(
+        { _tag: "PatternDoc" },
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "HttpEndpointTuple" },
+        { _tag: "MigrationTuple" },
+        (relOrDoc) => {
+          if ("relationId" in relOrDoc) {
+            extractedNodeKeys.add(relOrDoc.relationId)
+          }
+        },
+      )
+      .exhaustive()
+  }
+
+  const missingEntities: Array<string> = []
+  const missingRelations: Array<string> = []
+  const missingRoleEdges: Array<PlaysRoleEdge> = []
+  const entityKeyMap = new Map<string, string>()
+
+  for (const [, targetNode] of Graph.nodes(targetSubgraph.graph)) {
+    const key = getNodeKey(targetNode)
+    if (isEntityNode(targetNode)) {
+      if (options?.requiredEntityKeys !== undefined && !options.requiredEntityKeys.has(key)) {
+        continue
+      }
+      if (extractedNodeKeys.has(key)) {
+        entityKeyMap.set(key, key)
+        continue
+      }
+      const mappedKey = match(targetNode)
+        .with({ _tag: "EffectFn" }, (fn) => {
+          const bySpan = extractedFnsByFileAndSpan.get(`${fn.file}::${fn.spanName}`)
+          if (bySpan !== undefined) return getNodeKey(bySpan)
+          const fnShort = fn.qualname.split("#").pop() ?? fn.spanName
+          return (
+            extractedEntitiesByTail.get(`EffectFn::${fn.spanName}`) ??
+            extractedEntitiesByTail.get(`EffectFn::${fnShort}`)
+          )
+        })
+        .with(
+          { _tag: "ServiceTag" },
+          (svc) =>
+            extractedEntitiesByTail.get(`ServiceTag::${svc.tagId}`) ??
+            extractedEntitiesByTail.get(`ServiceTag::${svc.name}`),
+        )
+        .with({ _tag: "ServiceLayer" }, (lay) => {
+          const layShort = lay.qualname.split("#").pop() ?? lay.qualname
+          return extractedEntitiesByTail.get(`ServiceLayer::${layShort}`)
+        })
+        .with({ _tag: "TaggedError" }, (err) =>
+          extractedEntitiesByTail.get(`TaggedError::${err.errorTag}`),
+        )
+        .with({ _tag: "SchemaDef" }, (sch) =>
+          extractedEntitiesByTail.get(`SchemaDef::${sch.schemaName}`),
+        )
+        .with({ _tag: "VitestCase" }, (vc) =>
+          extractedEntitiesByTail.get(`VitestCase::${vc.testFile}`),
+        )
+        .with({ _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, () => key)
+        .exhaustive()
+
+      if (mappedKey !== undefined) {
+        entityKeyMap.set(key, mappedKey)
+      } else {
+        missingEntities.push(key)
+      }
+    } else {
+      const relId = targetNode.relationId
+      if (
+        options?.requiredRelationIds !== undefined &&
+        !options.requiredRelationIds.has(relId) &&
+        !options.requiredRelationIds.has(key)
+      ) {
+        continue
+      }
+      match(targetNode)
+        .with({ _tag: "MigrationTuple" }, (migNode) => {
+          const hasMatchingMigration = Array.from(Graph.nodes(extractedGraph.graph)).some(
+            ([, n]) => n._tag === "MigrationTuple" && n.migrationId === migNode.migrationId,
+          )
+          if (!hasMatchingMigration && !extractedNodeKeys.has(relId) && !extractedNodeKeys.has(key)) {
+            missingRelations.push(relId)
+          }
+        })
+        .with(
+          { _tag: "EffectSignature" },
+          { _tag: "LayerFlow" },
+          { _tag: "TraceabilityTuple" },
+          { _tag: "HttpEndpointTuple" },
+          () => undefined,
+        )
+        .exhaustive()
+    }
+  }
+
+  const extractedRolePairs = new Set<string>()
+  for (const [, edge] of Graph.edges(extractedGraph.graph)) {
+    extractedRolePairs.add(`${edge.data.role}::${edge.data.entityKey}`)
+  }
+
+  const edgesToCheck =
+    options?.requiredRoleEdges ??
+    Array.from(Graph.edges(targetSubgraph.graph)).map(([, e]) => e.data)
+
+  for (const edgeData of edgesToCheck) {
+    if (
+      edgeData.role === "specifying-ears" ||
+      edgeData.role === "governing-adr" ||
+      edgeData.role === "realizing-symbol" ||
+      edgeData.role === "verifying-test" ||
+      edgeData.role === "exercised-span" ||
+      edgeData.role === "exercising-test" ||
+      edgeData.role === "input-schema" ||
+      edgeData.role === "output-schema" ||
+      edgeData.role === "migration-module"
+    ) {
+      continue
+    }
+    const mappedEntity = entityKeyMap.get(edgeData.entityKey) ?? edgeData.entityKey
+    if (
+      !extractedRolePairs.has(`${edgeData.role}::${mappedEntity}`) &&
+      !extractedRolePairs.has(`${edgeData.role}::${edgeData.entityKey}`)
+    ) {
+      missingRoleEdges.push(edgeData)
+    }
+  }
+
+  return {
+    isMonomorphic:
+      missingEntities.length === 0 &&
+      missingRelations.length === 0 &&
+      missingRoleEdges.length === 0,
+    missingEntities,
+    missingRelations,
+    missingRoleEdges,
+  }
+}

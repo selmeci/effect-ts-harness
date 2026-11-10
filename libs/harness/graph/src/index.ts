@@ -11,3 +11,5 @@ export * from "./cluster-resolver.js"
 export * from "./concept-lattice.js"
 export * from "./datalog-engine.js"
 export * from "./graph-rewrite.js"
+export * from "./graph-projector.js"
+

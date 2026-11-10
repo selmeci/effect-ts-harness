@@ -4644,6 +4644,256 @@ export interface ExtractTypeGraphOptions {
   readonly session?: TypeScriptProgramSession | undefined
 }
 
+const resolveTsLibDir = (root: string): string | undefined => {
+  const candidates = [
+    path.join(
+      root,
+      "node_modules/.pnpm/@typescript+typescript-linux-x64@7.0.2/node_modules/@typescript/typescript-linux-x64/lib",
+    ),
+    path.join(root, "node_modules/.pnpm/typescript@5.9.3/node_modules/typescript/lib"),
+    path.join(root, "node_modules/typescript/lib"),
+  ]
+  for (const c of candidates) {
+    if (fs.existsSync(path.join(c, "lib.es2023.full.d.ts"))) return c
+  }
+  const pnpmDir = path.join(root, "node_modules/.pnpm")
+  if (fs.existsSync(pnpmDir)) {
+    const entries = Effect.runSync(
+      Effect.try({
+        try: () => fs.readdirSync(pnpmDir),
+        catch: () => [] as Array<string>,
+      }),
+    )
+    for (const entry of entries) {
+      if (entry.startsWith("typescript@") || entry.startsWith("@typescript+typescript")) {
+        const potential = path.join(
+          pnpmDir,
+          entry,
+          "node_modules",
+          entry.startsWith("@typescript")
+            ? "@typescript/typescript-linux-x64/lib"
+            : "typescript/lib",
+        )
+        if (fs.existsSync(path.join(potential, "lib.es2023.full.d.ts"))) return potential
+      }
+    }
+  }
+  return undefined
+}
+
+export const createOverlayCompilerHost = (
+  options: ts.CompilerOptions,
+  overlays: Readonly<Record<string, string>>,
+  oldProgram?: ts.Program,
+  repoRoot: string = process.cwd(),
+): ts.CompilerHost => {
+  const root = resolveRepoRoot(repoRoot)
+  const normalizedOverlays = new Map<string, string>()
+  const overlayDirectories = new Set<string>()
+  for (const [k, v] of Object.entries(overlays)) {
+    const abs = path.resolve(root, k).replace(/\\/g, "/")
+    const rel = path.relative(root, abs).replace(/\\/g, "/")
+    normalizedOverlays.set(abs, v)
+    normalizedOverlays.set(rel, v)
+    let d = path.dirname(abs)
+    while (d && d !== path.dirname(d)) {
+      overlayDirectories.add(d)
+      d = path.dirname(d)
+    }
+  }
+
+  const findOverlay = (fileName: string): string | undefined => {
+    const norm = fileName.replace(/\\/g, "/")
+    const direct = normalizedOverlays.get(norm)
+    if (direct !== undefined) return direct
+    const abs = path.resolve(root, fileName).replace(/\\/g, "/")
+    const byAbs = normalizedOverlays.get(abs)
+    if (byAbs !== undefined) return byAbs
+    const rel = path.relative(root, abs).replace(/\\/g, "/")
+    return normalizedOverlays.get(rel)
+  }
+
+  const tsLibDir = resolveTsLibDir(root)
+  const baseHost = ts.createCompilerHost(options, true)
+  return {
+    ...baseHost,
+    ...(tsLibDir !== undefined ? { getDefaultLibLocation: () => tsLibDir } : {}),
+    directoryExists: (dirName) => {
+      const norm = dirName.replace(/\\/g, "/")
+      const abs = path.resolve(root, norm).replace(/\\/g, "/")
+      return (
+        overlayDirectories.has(abs) ||
+        overlayDirectories.has(norm) ||
+        (baseHost.directoryExists?.(dirName) ?? false)
+      )
+    },
+    fileExists: (fileName) =>
+      findOverlay(fileName) !== undefined ||
+      (tsLibDir !== undefined &&
+        path.basename(fileName).startsWith("lib.") &&
+        fs.existsSync(path.join(tsLibDir, path.basename(fileName)))) ||
+      baseHost.fileExists(fileName),
+    readFile: (fileName) => {
+      const ov = findOverlay(fileName)
+      if (ov !== undefined) return ov
+      if (
+        tsLibDir !== undefined &&
+        path.basename(fileName).startsWith("lib.") &&
+        fs.existsSync(path.join(tsLibDir, path.basename(fileName)))
+      ) {
+        return fs.readFileSync(path.join(tsLibDir, path.basename(fileName)), "utf8")
+      }
+      return baseHost.readFile(fileName)
+    },
+    getSourceFile: (fileName, languageVersion, onError, shouldCreateNewSourceFile) => {
+      const overlayContent = findOverlay(fileName)
+      if (overlayContent !== undefined) {
+        return ts.createSourceFile(fileName, overlayContent, languageVersion, true)
+      }
+      if (
+        tsLibDir !== undefined &&
+        path.basename(fileName).startsWith("lib.") &&
+        fs.existsSync(path.join(tsLibDir, path.basename(fileName)))
+      ) {
+        return ts.createSourceFile(
+          fileName,
+          fs.readFileSync(path.join(tsLibDir, path.basename(fileName)), "utf8"),
+          languageVersion,
+          true,
+        )
+      }
+      const existing = oldProgram?.getSourceFile(fileName)
+      if (existing !== undefined && !shouldCreateNewSourceFile) {
+        return existing
+      }
+      return baseHost.getSourceFile(fileName, languageVersion, onError, shouldCreateNewSourceFile)
+    },
+  }
+}
+
+export interface OverlayDiagnosticItem {
+  readonly file: string
+  readonly line: number
+  readonly column: number
+  readonly code: string
+  readonly severity: "error" | "warning"
+  readonly message: string
+}
+
+export const evaluateOverlayDiagnostics = (
+  repoRoot: string,
+  overlays: Readonly<Record<string, string>>,
+  session?: TypeScriptProgramSession,
+): ReadonlyArray<OverlayDiagnosticItem> => {
+  const root = resolveRepoRoot(repoRoot)
+  const _activeSession = session ?? getOrCreateWarmProgramSession(root)
+  const overlayEntries = Object.entries(overlays)
+  if (overlayEntries.length === 0) {
+    return []
+  }
+
+  const graphNodeModules = path.join(root, "libs/harness/graph/node_modules")
+  const dynamicPaths: Record<string, Array<string>> = {
+    effect: [
+      path.join(graphNodeModules, "effect/dist/index.d.ts"),
+      path.join(graphNodeModules, "effect"),
+    ],
+    "effect/*": [
+      path.join(graphNodeModules, "effect/dist/*.d.ts"),
+      path.join(graphNodeModules, "effect/*"),
+    ],
+    "ts-pattern": [path.join(root, "node_modules/ts-pattern")],
+    "@harness/gates": [path.join(root, "libs/harness/gates/src/index.ts")],
+    "@harness/graph": [path.join(root, "libs/harness/graph/src/index.ts")],
+    "@harness/decision": [path.join(root, "libs/harness/decision/src/index.ts")],
+    "@harness/ingest": [path.join(root, "libs/harness/ingest/src/index.ts")],
+  }
+  const libsDir = path.join(root, "libs")
+  if (fs.existsSync(libsDir)) {
+    for (const scopeEntry of fs.readdirSync(libsDir, { withFileTypes: true })) {
+      if (!scopeEntry.isDirectory() || scopeEntry.name === "harness") continue
+      const scopeDir = path.join(libsDir, scopeEntry.name)
+      for (const tier of ["contract", "service", "domain", "core", "infra"]) {
+        const entryFile = path.join(scopeDir, tier, "src", "index.ts")
+        dynamicPaths[`@harness/${scopeEntry.name}-${tier}`] = [entryFile]
+        dynamicPaths[`@effect-${scopeEntry.name}/${tier}`] = [entryFile]
+        dynamicPaths[`@${scopeEntry.name}/${tier}`] = [entryFile]
+      }
+    }
+  }
+  for (const [k] of overlayEntries) {
+    const rel = (path.isAbsolute(k) ? path.relative(root, k) : k).replace(/\\/g, "/")
+    const m = rel.match(/^libs\/([^/]+)\/(contract|service|domain|core|infra)\/src\/index\.ts$/)
+    if (m && m[1] && m[2]) {
+      const scopeName = m[1]
+      const tier = m[2]
+      const entryAbs = path.resolve(root, rel)
+      dynamicPaths[`@harness/${scopeName}-${tier}`] = [entryAbs]
+      dynamicPaths[`@effect-${scopeName}/${tier}`] = [entryAbs]
+      dynamicPaths[`@${scopeName}/${tier}`] = [entryAbs]
+    }
+  }
+
+  const compilerOptions: ts.CompilerOptions = {
+    target: ts.ScriptTarget.ESNext,
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    strict: true,
+    esModuleInterop: true,
+    skipLibCheck: true,
+    noEmit: true,
+    baseUrl: root,
+    paths: dynamicPaths,
+  }
+
+  const host = createOverlayCompilerHost(compilerOptions, overlays, undefined, root)
+  const rootNames = overlayEntries
+    .map(([k]) => path.resolve(root, k).replace(/\\/g, "/"))
+    .filter((f) => (f.endsWith(".ts") || f.endsWith(".tsx")) && !f.endsWith(".d.ts"))
+
+  if (rootNames.length === 0) {
+    return []
+  }
+
+  const program = ts.createProgram(rootNames, compilerOptions, host, undefined)
+
+  const diagnostics: Array<OverlayDiagnosticItem> = []
+  for (const fileName of rootNames) {
+    const sf = program.getSourceFile(fileName)
+    if (sf === undefined) continue
+    const allDiags = [
+      ...program.getSyntacticDiagnostics(sf),
+      ...program.getSemanticDiagnostics(sf),
+    ]
+    for (const d of allDiags) {
+      // Ignore unresolved module errors for synthetic standalone snippets without disk node_modules
+      if (d.code === 2307) {
+        const msgText = ts.flattenDiagnosticMessageText(d.messageText, "\n")
+        if (
+          msgText.includes("@effect/sql-sqlite-do") ||
+          msgText.includes("@effect/vitest")
+        ) {
+          continue
+        }
+      }
+      const pos =
+        d.file !== undefined && d.start !== undefined
+          ? d.file.getLineAndCharacterOfPosition(d.start)
+          : { line: 0, character: 0 }
+      const rel = path.relative(root, fileName).replace(/\\/g, "/")
+      diagnostics.push({
+        file: rel.startsWith("..") ? fileName : rel,
+        line: pos.line + 1,
+        column: pos.character + 1,
+        code: `TS${d.code}`,
+        severity: d.category === ts.DiagnosticCategory.Warning ? "warning" : "error",
+        message: ts.flattenDiagnosticMessageText(d.messageText, "\n"),
+      })
+    }
+  }
+  return diagnostics
+}
+
 export const extractTypeGraph = Effect.fn("TypeExtractor.extractWorkspace")(function* (
   options: ExtractTypeGraphOptions,
 ): Effect.fn.Return<HarnessGraph> {
@@ -4669,7 +4919,24 @@ export const extractWorkspaceTypeAwareGraph = (
       }
     }
 
-    const relFiles = findWorkspaceSrcFiles(root)
+    const relFileSet = new Set<string>(findWorkspaceSrcFiles(root))
+    const testFileSet = new Set<string>(findWorkspaceTestFiles(root))
+    for (const overlayRel of normalizedOverlays.keys()) {
+      if (
+        (overlayRel.endsWith(".test.ts") ||
+          overlayRel.endsWith(".spec.ts") ||
+          overlayRel.includes("/test/")) &&
+        !overlayRel.endsWith(".d.ts")
+      ) {
+        testFileSet.add(overlayRel)
+      } else if (
+        (overlayRel.endsWith(".ts") || overlayRel.endsWith(".tsx")) &&
+        !overlayRel.endsWith(".d.ts")
+      ) {
+        relFileSet.add(overlayRel)
+      }
+    }
+    const relFiles = Array.from(relFileSet).sort()
     const inputs: Array<SourceFileInput> = []
     const inputShaMap = new Map<string, string>()
 
@@ -4687,7 +4954,7 @@ export const extractWorkspaceTypeAwareGraph = (
       })
     }
 
-    const testFiles = findWorkspaceTestFiles(root)
+    const testFiles = Array.from(testFileSet).sort()
     const testContentMap = new Map<string, string>()
     const testShaMap = new Map<string, string>()
     for (const relTestFile of testFiles) {

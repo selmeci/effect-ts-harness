@@ -1,7 +1,12 @@
-import { diffHarnessGraphs, type HarnessGraph } from "@harness/graph"
+import {
+  diffHarnessGraphs,
+  type HarnessGraph,
+  verifySubgraphMonomorphism,
+} from "@harness/graph"
 
 export interface PlanImplDiffResult {
   readonly ok: boolean
+  readonly monomorphic: boolean
   readonly reasons: ReadonlyArray<string>
 }
 
@@ -20,6 +25,7 @@ export const diffPlanAndImplGraphs = (
   implGraph: HarnessGraph,
 ): PlanImplDiffResult => {
   const diff = diffHarnessGraphs(implGraph, planGraph)
+  const mono = verifySubgraphMonomorphism(implGraph, planGraph)
   const reasons: Array<string> = []
 
   for (const stub of diff.remainingStubs) {
@@ -45,6 +51,7 @@ export const diffPlanAndImplGraphs = (
 
   return {
     ok: reasons.length === 0,
+    monomorphic: mono.isMonomorphic && reasons.length === 0,
     reasons,
   }
 }
