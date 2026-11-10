@@ -22,7 +22,8 @@ target_specs:
 
 This document proposes upgrading the graph core in `@harness/graph` from a legacy directed binary graph to a **pure typed polymorphic hypergraph built on the PERA (Polymorphic Entity-Relation-Attribute) model** with a **Clean-Slate / Zero Backward Compatibility** cutover—inspired by the type theory of **TypeDB 3.0**, but implemented **100% in-process in pure Effect-TS v4 (`R = never`)** over `effect/Graph` and synchronized to the local `@modernrelay/omnigraph` store.
 
-The core mechanism of the design is a **pure bipartite incidence representation of the hypergraph (the Levi graph $G_{\text{Levi}} = (V_E \sqcup V_R, E_{\text{role}})$)** with zero legacy binary edges ($E_{\text{bin}} = \emptyset$), zero shadow-parity modes, and zero compatibility bridges:
+The core mechanism of the design is a **pure bipartite incidence representation of the hypergraph (the Levi graph $G\_{\text{Levi}} = (V_E \sqcup V_R, E\_{\text{role}})$)** with zero legacy binary edges ($E_{\text{bin}} = \emptyset$), zero shadow-parity modes, and zero compatibility bridges:
+
 - $V_E$ is the finite set of entity nodes (`EntityNode`: `EffectFn`, `ServiceTag`, `ServiceLayer`, `TaggedError`, `SchemaDef`, `VitestCase`, `PatternDoc`, `AdrDoc`, `EarsSpec`).
 - $V_R$ is the finite set of reified $k$-ary relation nodes (`RelationNode`: `EffectSignature`, `LayerFlow`, `TraceabilityTuple`, `HttpEndpointTuple`, `MigrationTuple`).
 - $E_{\text{role}}$ consists exclusively of typed role-incidence edges `PlaysRoleEdge` (`_tag: "PlaysRole"`, `relationId`, `entityKey`, `role`, `archimateRelation`).
@@ -99,11 +100,11 @@ $$\mathcal{M}_{\text{PERA}} = \left(\mathcal{T}_E,\; \mathcal{T}_R,\; \mathcal{K
 
 where:
 
-1. **$\mathcal{T}_E$ (Concrete Entity Types):** Finite set of disjoint entity node tags:
+1. **$\mathcal{T}\_E$ (Concrete Entity Types):** Finite set of disjoint entity node tags:
    $$\mathcal{T}_E = \{\text{EffectFn},\; \text{ServiceTag},\; \text{ServiceLayer},\; \text{TaggedError},\; \text{SchemaDef},\; \text{VitestCase},\; \text{PatternDoc},\; \text{AdrDoc},\; \text{EarsSpec}\}$$
-2. **$\mathcal{T}_R$ (Reified $k$-ary Relation Types):** Finite set of relation node tags:
+2. **$\mathcal{T}\_R$ (Reified $k$-ary Relation Types):** Finite set of relation node tags:
    $$\mathcal{T}_R = \{\text{EffectSignature},\; \text{LayerFlow},\; \text{TraceabilityTuple},\; \text{HttpEndpointTuple},\; \text{MigrationTuple}\}$$
-3. **$\mathcal{K}_{\text{abs}}$ (Abstract Concept Supertypes / Interfaces):**
+3. **$\mathcal{K}\_{\text{abs}}$ (Abstract Concept Supertypes / Interfaces):**
    $$\mathcal{K}_{\text{abs}} = \{\text{Concept},\; \text{CodeSymbol},\; \text{TypeContract},\; \text{RuntimeCapability},\; \text{GovernanceArtifact},\; \text{VerificationArtifact}\}$$
 4. **$\preceq$ (Subtyping Lattice):** A reflexive, antisymmetric, transitive partial order over $(\mathcal{T}_E \cup \mathcal{T}_R \cup \mathcal{K}_{\text{abs}})$:
    - $\text{EffectFn}, \text{ServiceTag}, \text{ServiceLayer}, \text{TaggedError}, \text{SchemaDef} \preceq \text{CodeSymbol} \preceq \text{Concept}$
@@ -111,9 +112,9 @@ where:
    - $\text{ServiceTag}, \text{ServiceLayer} \preceq \text{RuntimeCapability} \preceq \text{CodeSymbol}$
    - $\text{AdrDoc}, \text{EarsSpec}, \text{PatternDoc} \preceq \text{GovernanceArtifact} \preceq \text{Concept}$
    - $\text{VitestCase} \preceq \text{VerificationArtifact} \preceq \text{Concept}$
-5. **$\mathcal{R}_{\text{role}}$ (Typed Role Names):** e.g., `caller`, `callee`, `required-service`, `provided-service`, `emitted-error`, `input-schema`, `output-schema`, `source-spec`, `source-adr`, `governed-target`, `specified-target`, `realized-by`, `guarded-error`, `verified-by`, `endpoint-handler`, `migrated-table`.
+5. **$\mathcal{R}\_{\text{role}}$ (Typed Role Names):** e.g., `caller`, `callee`, `required-service`, `provided-service`, `emitted-error`, `input-schema`, `output-schema`, `source-spec`, `source-adr`, `governed-target`, `specified-target`, `realized-by`, `guarded-error`, `verified-by`, `endpoint-handler`, `migrated-table`.
 6. **$\text{relates}: \mathcal{T}_R \to \mathcal{P}(\mathcal{R}_{\text{role}} \times \text{Card})$:** Maps each relation type to its permitted roles and cardinalities ($\text{Card} \in \{1, 0..1, 1..\infty, 0..\infty\}$).
-7. **$\text{plays} \subseteq (\mathcal{T}_E \cup \mathcal{K}_{\text{abs}}) \times \mathcal{R}_{\text{role}}$:** Defines which entity concepts may play a given role, satisfying **covariant role inheritance along the subtyping lattice**:
+7. **$\text{plays} \subseteq (\mathcal{T}_E \cup \mathcal{K}_{\text{abs}}) \times \mathcal{R}\_{\text{role}}$:** Defines which entity concepts may play a given role, satisfying **covariant role inheritance along the subtyping lattice**:
    $$\forall \tau_1, \tau_2 \in \mathcal{T}_E \cup \mathcal{K}_{\text{abs}},\; \forall \rho \in \mathcal{R}_{\text{role}}:\quad (\tau_1 \preceq \tau_2 \;\land\; \text{plays}(\tau_2, \rho)) \implies \text{plays}(\tau_1, \rho)$$
 
 > [!IMPORTANT]
@@ -127,12 +128,12 @@ Under our **Clean-Slate / Zero Backward Compatibility** architecture, legacy bin
 
 $$G_{\text{Levi}} = \left(V_E \;\sqcup\; V_R,\;\; E_{\text{role}}\right)$$
 
-1. **Vertices of $G_{\text{Levi}}$ are the disjoint union of entities and reified relations:**
+1. **Vertices of $G\_{\text{Levi}}$ are the disjoint union of entities and reified relations:**
    - **$V_E$ (`EntityNode`):** `EffectFn`, `ServiceTag`, `ServiceLayer`, `TaggedError`, `SchemaDef`, `VitestCase`, `PatternDoc`, `AdrDoc`, `EarsSpec`.
    - **$V_R$ (`RelationNode`):** `EffectSignature`, `LayerFlow`, `TraceabilityTuple`, `HttpEndpointTuple`, `MigrationTuple`. Each $k$-ary tuple becomes a distinct relation vertex $r \in V_R$ with a deterministic primary key `relationId`.
-2. **Edges of $G_{\text{Levi}}$ consist exclusively of role-incidence edges:**
-   - **$E_{\text{role}}$:** Consists solely of `PlaysRoleEdge` (`_tag: "PlaysRole"`, `relationId`, `entityKey`, `role`, `archimateRelation`) connecting a relation node $r \in V_R$ to an entity node $u \in V_E$ playing role $\rho \in \mathcal{R}_{\text{role}}$.
-   - **Zero Binary Edges ($E_{\text{bin}} = \emptyset$):** There are no direct entity-to-entity edges (`EffectFn -> ServiceTag`). All structural relationships are reified via $V_R$, and transitive closures (`EffectiveRequires`, `EffectiveFailsWith`, `LayerDependsOn`) are derived declaratively via Datalog in [RFC-0002](./0002-declarative-datalog-inference-and-edge-completion.md).
+2. **Edges of $G\_{\text{Levi}}$ consist exclusively of role-incidence edges:**
+   - **$E\_{\text{role}}$:** Consists solely of `PlaysRoleEdge` (`_tag: "PlaysRole"`, `relationId`, `entityKey`, `role`, `archimateRelation`) connecting a relation node $r \in V_R$ to an entity node $u \in V_E$ playing role $\rho \in \mathcal{R}_{\text{role}}$.
+   - **Zero Binary Edges ($E\_{\text{bin}} = \emptyset$):** There are no direct entity-to-entity edges (`EffectFn -> ServiceTag`). All structural relationships are reified via $V_R$, and transitive closures (`EffectiveRequires`, `EffectiveFailsWith`, `LayerDependsOn`) are derived declaratively via Datalog in [RFC-0002](./0002-declarative-datalog-inference-and-edge-completion.md).
 
 ```mermaid
 flowchart TD
@@ -373,10 +374,7 @@ export type ConceptSupertype =
   | "VerificationArtifact"
 
 /** Pure subtyping check (nodeTag <= supertype) using exhaustive ts-pattern matching (R = never). */
-export const isConceptSubtypeOf = (
-  nodeTag: EntityNodeTag,
-  supertype: ConceptSupertype,
-): boolean =>
+export const isConceptSubtypeOf = (nodeTag: EntityNodeTag, supertype: ConceptSupertype): boolean =>
   match(supertype)
     .with("Concept", () => true)
     .with("CodeSymbol", () =>
@@ -577,7 +575,7 @@ Consider a domain function `Cart.decide` in an Event Sourcing domain. During AST
 
 1. **Reified relation node `EffectSignature` ($V_R$):**
    - **`relationId`**: `"sig:Cart.decide"`
-   - **Role players (`PlaysRole` $\in E_{\text{role}}$):**
+   - **Role players (`PlaysRole` $\in E\_{\text{role}}$):**
      - `caller` $\rightarrow$ `EffectFn("Cart.decide")`
      - `input-schema` $\rightarrow$ `SchemaDef("CheckoutCartCommand")`
      - `emitted-error` $\rightarrow$ `TaggedError("EmptyCartError")`
@@ -585,7 +583,7 @@ Consider a domain function `Cart.decide` in an Event Sourcing domain. During AST
 
 2. **Reified relation node `LayerFlow` ($V_R$):**
    - **`relationId`**: `"flow:CartRepoLive"`
-   - **Role players (`PlaysRole` $\in E_{\text{role}}$):**
+   - **Role players (`PlaysRole` $\in E\_{\text{role}}$):**
      - `provider` $\rightarrow$ `ServiceLayer("CartRepoLive")`
      - `provided-service` $\rightarrow$ `ServiceTag("CartRepo")`
 
@@ -601,7 +599,7 @@ The extractor creates a reified `TraceabilityTuple` relation node:
 
 - `relationId`: `"trace:es:SPEC-0004:REQ-2.1"`
 - `clauseKind`: `"unwanted-behavior"`
-- **Role players (`PlaysRole` $\in E_{\text{role}}$):**
+- **Role players (`PlaysRole` $\in E\_{\text{role}}$):**
   - `source-spec` $\rightarrow$ `EarsSpec("es:SPEC-0004")`
   - `realized-by` $\rightarrow$ `EffectFn("EventUpcaster.upcast")`
   - `guarded-error` $\rightarrow$ `TaggedError("EventUpcastDecodeError")`
@@ -615,12 +613,12 @@ This relation node directly feeds **automated edge completion (`COMP-01..06`)** 
 
 To avoid writing low-level graph data structures and algorithms from scratch in `@harness/graph`, we evaluated existing solutions in the TypeScript ecosystem:
 
-| Evaluated Approach | Architecture | Advantages | Disadvantages & Verdict |
-| :--- | :--- | :--- | :--- |
-| **1. `effect/Graph` (`effect@4.0.0`) + `@modernrelay/omnigraph` (`0.14.0`) — CHOSEN SOLUTION** | Bipartite Levi incidence graph $G_{\text{Levi}} = (V_E \sqcup V_R, E_{\text{role}})$ represented directly over `effect/Graph` (in-memory) and mirrored to `@modernrelay/omnigraph` (Lance CoW branches). | • **Already installed in the repository** (0 new dependencies for `RFC-0001`).<br/>• [`effect/Graph`](../../repos/effect/packages/effect/src/Graph.ts) (8,700 lines in Effect v4) uses a cache-friendly **CSR (*Compressed Sparse Row*) matrix over `Uint32Array`** ([`graphCsr.ts`](../../repos/effect/packages/effect/src/internal/graphCsr.ts)) and provides ready-made algorithms: `stronglyConnectedComponents` (Tarjan), `isAcyclic`, `toposort`, `dijkstra`, `bellmanFord`, `floydWarshall`, `bfs`, `dfs`, `dfsPostOrder`, `externals`, `filterMap`, and `toMermaid`.<br/>• Native integration with `Equal`, `Hash`, `Option`, and `Effect<A, E, never>`. | Requires reifying $k$-ary relations as bipartite incidence vertices `RelationNode` ($V_E \sqcup V_R$), which mathematically preserves 100% of the hypergraph information (bijection $\mathcal{H} \leftrightarrow G_{\text{Levi}}$). |
-| **2. `graphology` (`graphology-operators`, `graphology-traversal`)** | General-purpose TypeScript/JavaScript library for directed attributed multigraphs. | • Ecosystem of packages for community detection (Louvain) and subgraph operators (`subgraph`, `union`). | **Rejected as primary store:** Uses a mutable OOP model with exceptions and untyped/`any` attributes, lacks Effect `Equal`/`Data` integration, and would duplicate 8,700 lines of CSR algorithms already built into `effect/Graph`. |
-| **3. External TypeDB 3.0 Server (`@typedb/driver`)** | Native polymorphic PERA database running as a standalone Rust daemon (gRPC/HTTP). | • Native PERA schema and nested role polymorphism inside the DB engine. | **Rejected:**<br/>1. **Loss of Git-like branching (`plan/<task>` $\rightarrow$ `impl/<task>` $\rightarrow$ `main`):** TypeDB 3.0 lacks Copy-on-Write branches and branch diffing required by `harness plan-check` and `harness done` in Omnigraph.<br/>2. **Violates `R = never` and Zero-Daemon invariants:** Requires an external process and async network I/O, breaking pure sub-millisecond unit tests in `@harness/gates`. |
-| **4. Custom Hypergraph Class and Traversal Algorithms from Scratch** | Hand-rolled adjacency maps and custom Tarjan/BFS/toposort over $n$-ary hyperedges. | • Direct representation of hyperedges as $k$-tuples without reified vertices. | **Rejected:** Unnecessary wheel-reinvention and high maintenance burden for cycle/traversal algorithms already solved and tested in `effect/Graph`. |
+| Evaluated Approach                                                                             | Architecture                                                                                                                                                                                             | Advantages                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Disadvantages & Verdict                                                                                                                                                                                                                                                                                                                                                                                                          |
+| :--------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **1. `effect/Graph` (`effect@4.0.0`) + `@modernrelay/omnigraph` (`0.14.0`) — CHOSEN SOLUTION** | Bipartite Levi incidence graph $G_{\text{Levi}} = (V_E \sqcup V_R, E_{\text{role}})$ represented directly over `effect/Graph` (in-memory) and mirrored to `@modernrelay/omnigraph` (Lance CoW branches). | • **Already installed in the repository** (0 new dependencies for `RFC-0001`).<br/>• [`effect/Graph`](../../repos/effect/packages/effect/src/Graph.ts) (8,700 lines in Effect v4) uses a cache-friendly **CSR (_Compressed Sparse Row_) matrix over `Uint32Array`** ([`graphCsr.ts`](../../repos/effect/packages/effect/src/internal/graphCsr.ts)) and provides ready-made algorithms: `stronglyConnectedComponents` (Tarjan), `isAcyclic`, `toposort`, `dijkstra`, `bellmanFord`, `floydWarshall`, `bfs`, `dfs`, `dfsPostOrder`, `externals`, `filterMap`, and `toMermaid`.<br/>• Native integration with `Equal`, `Hash`, `Option`, and `Effect<A, E, never>`. | Requires reifying $k$-ary relations as bipartite incidence vertices `RelationNode` ($V_E \sqcup V_R$), which mathematically preserves 100% of the hypergraph information (bijection $\mathcal{H} \leftrightarrow G_{\text{Levi}}$).                                                                                                                                                                                              |
+| **2. `graphology` (`graphology-operators`, `graphology-traversal`)**                           | General-purpose TypeScript/JavaScript library for directed attributed multigraphs.                                                                                                                       | • Ecosystem of packages for community detection (Louvain) and subgraph operators (`subgraph`, `union`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | **Rejected as primary store:** Uses a mutable OOP model with exceptions and untyped/`any` attributes, lacks Effect `Equal`/`Data` integration, and would duplicate 8,700 lines of CSR algorithms already built into `effect/Graph`.                                                                                                                                                                                              |
+| **3. External TypeDB 3.0 Server (`@typedb/driver`)**                                           | Native polymorphic PERA database running as a standalone Rust daemon (gRPC/HTTP).                                                                                                                        | • Native PERA schema and nested role polymorphism inside the DB engine.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | **Rejected:**<br/>1. **Loss of Git-like branching (`plan/<task>` $\rightarrow$ `impl/<task>` $\rightarrow$ `main`):** TypeDB 3.0 lacks Copy-on-Write branches and branch diffing required by `harness plan-check` and `harness done` in Omnigraph.<br/>2. **Violates `R = never` and Zero-Daemon invariants:** Requires an external process and async network I/O, breaking pure sub-millisecond unit tests in `@harness/gates`. |
+| **4. Custom Hypergraph Class and Traversal Algorithms from Scratch**                           | Hand-rolled adjacency maps and custom Tarjan/BFS/toposort over $n$-ary hyperedges.                                                                                                                       | • Direct representation of hyperedges as $k$-tuples without reified vertices.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | **Rejected:** Unnecessary wheel-reinvention and high maintenance burden for cycle/traversal algorithms already solved and tested in `effect/Graph`.                                                                                                                                                                                                                                                                              |
 
 ---
 

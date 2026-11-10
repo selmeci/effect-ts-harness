@@ -557,7 +557,11 @@ const handleRoute = (
 const resolveNxAffectedArgs = (
   repoRoot: string,
   targets: ReadonlyArray<string>,
+  explicitFiles?: ReadonlyArray<string>,
 ): ReadonlyArray<string> => {
+  if (explicitFiles !== undefined && explicitFiles.length > 0) {
+    return ["nx", "affected", `--files=${explicitFiles.join(",")}`, "-t", ...targets]
+  }
   const hasMain = Effect.runSync(
     Effect.try({
       try: () => {
@@ -784,7 +788,11 @@ const resolveModifiedFilesSinceStampOrHead = (repoRoot: string): ReadonlyArray<s
         for (const line of raw.split(/\r?\n/)) {
           const trimmed = line.trim()
           if (trimmed.length < 4) continue
-          const relPath = trimmed.slice(2).trim().replace(/^.*->\s*/, "").replace(/^"|"$/g, "")
+          const relPath = trimmed
+            .slice(2)
+            .trim()
+            .replace(/^.*->\s*/, "")
+            .replace(/^"|"$/g, "")
           if (relPath.length > 0) {
             files.add(relPath.replace(/\\/g, "/"))
           }
@@ -811,6 +819,7 @@ const isRootConfigOrSharedCoreChange = (modifiedFiles: ReadonlyArray<string>): b
 export const tryQueryWarmDaemonSocket = (
   repoRoot: string,
   command: "ping" | "extract-graph" | "ast-gates" | "plan-check" | "gc" | "verify" | "bench",
+  files?: ReadonlyArray<string>,
 ): Effect.Effect<Option.Option<Record<string, unknown>>> =>
   Effect.gen(function* () {
     const socketPath = join(repoRoot, ".harness", "daemon.sock")
@@ -830,13 +839,14 @@ export const tryQueryWarmDaemonSocket = (
       const timer = setTimeout(() => {
         client.destroy()
         finish(Option.none())
-      }, 500)
+      }, 1500)
       client.on("connect", () => {
         client.write(
           JSON.stringify({
             id: `${command}-${Date.now()}`,
             command,
             repoRoot,
+            ...(files !== undefined ? { files } : {}),
           }) + "\n",
         )
       })
@@ -904,11 +914,27 @@ const handleVerify = (
         filePath: AstSourceFilePath.make(relPath),
         content: AstSourceContent.make(readFileSync(join(repoRoot, relPath), "utf-8")),
       }))
-      yield* AstGateCache.decide({
+      const astReport = yield* AstGateCache.decide({
         files: astGateFiles,
         ruleVersion: HARNESS_GATE_RULE_VERSION,
         cacheFilePath: AstGateCache.resolveCachePath(repoRoot),
       })
+      const enforcedAstViolations = astReport.violations.filter(
+        (v) =>
+          !v.file.startsWith("libs/harness/") &&
+          !v.file.startsWith("apps/harness-") &&
+          !v.file.startsWith("tools/"),
+      )
+      if (enforcedAstViolations.length > 0) {
+        const msg = enforcedAstViolations
+          .map((v) => `[${v.rule}] ${v.file}:${v.line}: ${v.message}`)
+          .join("\n")
+        return {
+          exitCode: 1,
+          stdout: "",
+          stderr: `[GATE FAILURE] verify:ast-gates\n${msg}`,
+        }
+      }
     }
 
     const graph = yield* extractTypeGraph({ repoRoot })
@@ -1030,12 +1056,13 @@ const handleVerify = (
     if (!options?.skipSubprocessVerify && existsSync(join(repoRoot, "package.json"))) {
       const leafFastPathEligible =
         deltaFiles.length > 0 && !isRootConfigOrSharedCoreChange(deltaFiles)
+      const scopedFiles = leafFastPathEligible ? deltaFiles : undefined
       if (leafFastPathEligible) {
         for (const df of deltaFiles) {
           findTestsReaching(graph, df)
         }
       }
-      const nxArgs = resolveNxAffectedArgs(repoRoot, ["verify"])
+      const nxArgs = resolveNxAffectedArgs(repoRoot, ["verify"], scopedFiles)
       const subprocessErr = yield* Effect.try({
         try: () => {
           execFileSync("pnpm", nxArgs, {
@@ -2248,7 +2275,24 @@ const handleBench = (
     const parsedIter = iterationsArg ? Number(iterationsArg.slice("--iterations=".length)) : 3
     const iterations = Number.isFinite(parsedIter) && parsedIter >= 1 ? Math.floor(parsedIter) : 3
 
-    // 1. Measure cold and warm extractTypeGraph
+    const budgetArg = argv.find((a) => a.startsWith("--budget-ms="))
+    const parsedBudget = budgetArg ? Number(budgetArg.slice("--budget-ms=".length)) : undefined
+    const customBudgetMs =
+      parsedBudget !== undefined && Number.isFinite(parsedBudget) && parsedBudget >= 0
+        ? LatencyMillis.make(parsedBudget)
+        : undefined
+
+    const benchRelFile = existsSync(
+      join(repoRoot, "libs", "harness", "gates", "src", "bench-check.ts"),
+    )
+      ? "libs/harness/gates/src/bench-check.ts"
+      : "libs/sample/domain/src/index.ts"
+    const sampleFilePath = join(repoRoot, benchRelFile)
+    const sampleContent = existsSync(sampleFilePath)
+      ? readFileSync(sampleFilePath, "utf-8")
+      : "export const x = 1\n"
+
+    // 1. Measure cold and warm extractTypeGraph (with signature-preserving body overlay)
     clearWarmProgramSessions()
     const session = getOrCreateWarmProgramSession(repoRoot)
     const coldExtractStart = performance.now()
@@ -2258,9 +2302,17 @@ const handleBench = (
     const warmExtractSamples: Array<number> = []
     for (let i = 0; i < iterations; i++) {
       const t0 = performance.now()
-      yield* extractTypeGraph({ repoRoot, session })
+      yield* extractTypeGraph({
+        repoRoot,
+        session,
+        overlays: {
+          [benchRelFile]: `${sampleContent}\n// warm-bench-${i}\n`,
+        },
+      })
       warmExtractSamples.push(Math.max(0, performance.now() - t0))
     }
+
+    let stageError: string | undefined = undefined
 
     // 2. Measure DatalogSession.stepDelta on warm DatalogSession
     const datalogSamples: Array<number> = []
@@ -2269,23 +2321,34 @@ const handleBench = (
       for (let i = 0; i < iterations; i++) {
         const t0 = performance.now()
         yield* stepDatalogFileDelta({
-          filePath: DatalogFilePath.make("libs/harness/gates/src/bench-check.ts"),
+          filePath: DatalogFilePath.make(benchRelFile),
           nextGraph: initialGraph,
         })
         datalogSamples.push(Math.max(0, performance.now() - t0))
       }
-    }).pipe(Effect.provide(datalogLayer), Effect.ignore)
+    }).pipe(
+      Effect.provide(datalogLayer),
+      Effect.catch((err) =>
+        Effect.sync(() => {
+          stageError = `DatalogSession.stepDelta failed: ${String(err)}`
+        }),
+      ),
+    )
+
+    if (stageError !== undefined) {
+      return {
+        exitCode: 1,
+        stdout: JSON.stringify({ overallStatus: "failed", error: stageError }),
+        stderr: stageError,
+      }
+    }
 
     // 3. Measure AstGateCache (cold prime + warm hits)
-    const sampleFilePath = join(repoRoot, "libs", "harness", "gates", "src", "bench-check.ts")
-    const sampleContent = existsSync(sampleFilePath)
-      ? readFileSync(sampleFilePath, "utf-8")
-      : "export const x = 1\n"
     const cacheFilePath = AstGateCache.resolveCachePath(repoRoot)
     yield* AstGateCache.decide({
       files: [
         {
-          filePath: AstSourceFilePath.make("libs/harness/gates/src/bench-check.ts"),
+          filePath: AstSourceFilePath.make(benchRelFile),
           content: AstSourceContent.make(sampleContent),
         },
       ],
@@ -2299,7 +2362,7 @@ const handleBench = (
       yield* AstGateCache.decide({
         files: [
           {
-            filePath: AstSourceFilePath.make("libs/harness/gates/src/bench-check.ts"),
+            filePath: AstSourceFilePath.make(benchRelFile),
             content: AstSourceContent.make(sampleContent),
           },
         ],
@@ -2314,8 +2377,19 @@ const handleBench = (
     for (let i = 0; i < iterations; i++) {
       const t0 = performance.now()
       yield* decideGraphRewrite(initialGraph, "cleanup", undefined, { maxPhaseSteps: 2 }).pipe(
-        Effect.catch(() => Effect.void),
+        Effect.catch((err) =>
+          Effect.sync(() => {
+            stageError = `GraphRewrite.decide failed: ${String(err)}`
+          }),
+        ),
       )
+      if (stageError !== undefined) {
+        return {
+          exitCode: 1,
+          stdout: JSON.stringify({ overallStatus: "failed", error: stageError }),
+          stderr: stageError,
+        }
+      }
       rewriteSamples.push(Math.max(0, performance.now() - t0))
     }
 
@@ -2324,28 +2398,47 @@ const handleBench = (
         BenchStageName.make("extractTypeGraph.warm"),
         warmExtractSamples,
       ),
-      buildStageLatencyMeasurement(
-        BenchStageName.make("DatalogSession.stepDelta"),
-        datalogSamples,
-      ),
+      buildStageLatencyMeasurement(BenchStageName.make("DatalogSession.stepDelta"), datalogSamples),
       buildStageLatencyMeasurement(BenchStageName.make("AstGateCache.warm"), warmAstSamples),
       buildStageLatencyMeasurement(BenchStageName.make("GraphRewrite.decide"), rewriteSamples),
     ]
 
+    const effectiveBudgets =
+      customBudgetMs !== undefined
+        ? DEFAULT_STAGE_LATENCY_BUDGETS.map((b) => ({
+            stage: b.stage,
+            p50BudgetMs: customBudgetMs,
+            p95BudgetMs: customBudgetMs,
+          }))
+        : DEFAULT_STAGE_LATENCY_BUDGETS
+
     const benchExit = yield* Effect.exit(
       decideHarnessBench({
         measurements,
-        budgets: DEFAULT_STAGE_LATENCY_BUDGETS,
+        budgets: effectiveBudgets,
       }),
     )
 
     return match(benchExit)
       .with({ _tag: "Failure" }, (failure) => {
         const errOpt = Cause.findErrorOption(failure.cause)
-        const violations =
-          Option.isSome(errOpt) && errOpt.value instanceof LatencySloViolationError
-            ? errOpt.value.violations
-            : []
+        const { violations, stderrMsg } = match(errOpt)
+          .with({ _tag: "Some" }, ({ value }) =>
+            value instanceof LatencySloViolationError
+              ? {
+                  violations: value.violations,
+                  stderrMsg: `[LatencySloViolationError] ${value.violations.length} stage(s) exceeded latency budget`,
+                }
+              : {
+                  violations: [],
+                  stderrMsg: "Benchmark SLO evaluation failed",
+                },
+          )
+          .with({ _tag: "None" }, () => ({
+            violations: [],
+            stderrMsg: "Benchmark SLO evaluation failed",
+          }))
+          .exhaustive()
         return {
           exitCode: 1,
           stdout: JSON.stringify({
@@ -2354,17 +2447,16 @@ const handleBench = (
             measurements,
             violations,
           }),
-          stderr:
-            Option.isSome(errOpt) && errOpt.value instanceof LatencySloViolationError
-              ? `[LatencySloViolationError] ${errOpt.value.violations.length} stage(s) exceeded latency budget`
-              : "Benchmark SLO evaluation failed",
+          stderr: stderrMsg,
         }
       })
       .with({ _tag: "Success" }, (success) => ({
         exitCode: 0,
         stdout: JSON.stringify({
+          overallStatus: "passed",
           ...success.value,
           coldExtractMs: LatencyMillis.make(Math.round(coldExtractMs * 100) / 100),
+          measurements,
         }),
         stderr: "",
       }))

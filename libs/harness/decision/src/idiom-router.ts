@@ -128,10 +128,7 @@ export const assertDecisionLimits = (definition: {
       string,
       {
         readonly _tag: string
-        readonly criteria?:
-          | Readonly<Record<string, unknown>>
-          | ReadonlyArray<unknown>
-          | undefined
+        readonly criteria?: Readonly<Record<string, unknown>> | ReadonlyArray<unknown> | undefined
       }
     >
   >

@@ -3,12 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { Effect, Schema } from "effect"
-import {
-  buildHarnessGraph,
-  loadGraphSnapshot,
-  RelationId,
-  saveGraphSnapshot,
-} from "@harness/graph"
+import { buildHarnessGraph, loadGraphSnapshot, RelationId, saveGraphSnapshot } from "@harness/graph"
 import {
   buildSessionHandoff,
   checkLoopThrashing,

@@ -3,6 +3,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { Effect, Option, Schema } from "effect"
 import * as Graph from "effect/Graph"
+import { match } from "ts-pattern"
 import {
   type CallExpression,
   type NewExpression,
@@ -23,7 +24,7 @@ import {
   type AdrDocNode,
   type BranchingViolation,
   type EarsSpecNode,
-  type EffectFnNode,
+  EffectFnNode,
   getNodeKey,
   type GovernanceDocStatus,
   type HarnessEdge,
@@ -31,16 +32,17 @@ import {
   type HarnessNode,
   type LayerKind,
   NodeKey,
-  type PackageTag,
+  PackageTag,
   type PatternDocNode,
   RelationId,
   RoleName,
-  type SchemaDefNode,
-  type ServiceLayerNode,
-  type ServiceTagNode,
-  type TaggedErrorNode,
+  SchemaDefNode,
+  ServiceLayerNode,
+  ServiceTagNode,
+  TaggedErrorNode,
   type TraceabilityTupleRelation,
   type UnresolvedGraphReference,
+  ViolationRule,
   type VitestCaseNode,
 } from "./model.js"
 import { loadPatternDocs } from "./pattern-index.js"
@@ -53,31 +55,40 @@ export interface SourceFileInput {
 
 export interface FileGraphFragment {
   readonly filePath: string
+  readonly packageTag?: PackageTag | undefined
   readonly contentSha256: string
   readonly declHash: string
   readonly importedSpecs: ReadonlyArray<string>
   readonly fns: ReadonlyArray<EffectFnNode>
+  readonly services?: ReadonlyArray<ServiceTagNode> | undefined
   readonly layers: ReadonlyArray<ServiceLayerNode>
+  readonly errors?: ReadonlyArray<TaggedErrorNode> | undefined
+  readonly schemas?: ReadonlyArray<SchemaDefNode> | undefined
   readonly requiresService: ReadonlyArray<{
     readonly callerQualname: string
     readonly tagId: string
   }>
   readonly failsWith: ReadonlyArray<{ readonly callerQualname: string; readonly errorTag: string }>
-  readonly providesService: ReadonlyArray<{ readonly layerQualname: string; readonly tagId: string }>
+  readonly providesService: ReadonlyArray<{
+    readonly layerQualname: string
+    readonly tagId: string
+  }>
   readonly layerRequires: ReadonlyArray<{ readonly layerQualname: string; readonly tagId: string }>
   readonly branchingViolations: ReadonlyArray<BranchingViolation>
 }
 
 export interface TypeScriptProgramSession {
   readonly repoRoot: string
+  persistToDisk?: boolean | undefined
   oldProgram?: ts.Program | undefined
   project?: Project | undefined
   readonly sourceFileCache: Map<
     string,
     {
+      readonly packageTag?: PackageTag | undefined
       readonly contentSha256: string
       readonly declHash: string
-      readonly sourceFile: ts.SourceFile
+      readonly sourceFile?: ts.SourceFile | undefined
       readonly importedSpecs: ReadonlyArray<string>
     }
   >
@@ -91,6 +102,11 @@ export interface TypeScriptProgramSession {
         readonly inputShaMap: ReadonlyMap<string, string>
         readonly testShaMap: ReadonlyMap<string, string>
         readonly govShaMap: ReadonlyMap<string, string>
+        readonly patternShaMap: ReadonlyMap<string, string>
+        readonly baseTopologyHash?: string | undefined
+        readonly domainContractInputHash?: string | undefined
+        readonly unassertedStateViolations?: ReadonlyArray<BranchingViolation> | undefined
+        readonly nodeSqliteTestViolations?: ReadonlyArray<BranchingViolation> | undefined
         readonly graph: HarnessGraph
       }
     | undefined
@@ -104,8 +120,7 @@ export interface TypeExtractorOptions {
   readonly session?: TypeScriptProgramSession | undefined
 }
 
-const sha256Hex = (text: string): string =>
-  createHash("sha256").update(text, "utf8").digest("hex")
+const sha256Hex = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex")
 
 const hasExportModifier = (node: ts.Node): boolean => {
   if (!ts.canHaveModifiers(node)) return false
@@ -131,27 +146,9 @@ export const emitDeclarationSignatureText = (sourceFile: ts.SourceFile): string 
     return stubs
   }
 
-  const extractYieldedEffectTargets = (node: ts.Node): Array<string> => {
-    const yielded: Array<string> = []
-    const walkYield = (n: ts.Node): void => {
-      if (ts.isYieldExpression(n) && n.asteriskToken !== undefined && n.expression !== undefined) {
-        const expr = n.expression
-        if (ts.isIdentifier(expr)) {
-          yielded.push(`yield*:${expr.text}`)
-        } else if (ts.isNewExpression(expr)) {
-          yielded.push(`yield*:new:${expr.expression.getText(sourceFile)}`)
-        } else if (ts.isCallExpression(expr)) {
-          yielded.push(`yield*:call:${expr.expression.getText(sourceFile)}`)
-        }
-      }
-      ts.forEachChild(n, walkYield)
-    }
-    walkYield(node)
-    return yielded
-  }
-
   const formatFnLikeSignature = (
     fn: ts.FunctionExpression | ts.ArrowFunction | ts.FunctionDeclaration,
+    hasOuterExplicitType: boolean = false,
   ): string => {
     const typeParams =
       fn.typeParameters !== undefined
@@ -167,27 +164,38 @@ export const emitDeclarationSignatureText = (sourceFile: ts.SourceFile): string 
       .join(",")
     const retType = fn.type !== undefined ? `: ${fn.type.getText(sourceFile)}` : ""
     const stubs = fn.body !== undefined ? extractStubSignatures(fn.body) : []
-    const inferredYields =
-      fn.type === undefined && fn.body !== undefined ? extractYieldedEffectTargets(fn.body) : []
-    const bodySig = [...stubs, ...inferredYields]
+    const unannotatedBody =
+      fn.type === undefined && !hasOuterExplicitType && stubs.length === 0 && fn.body !== undefined
+        ? [fn.body.getText(sourceFile).replace(/\s+/g, " ").trim()]
+        : []
+    const bodySig = [...stubs, ...unannotatedBody]
     return `(${typeParams}(${params})${retType}${bodySig.length > 0 ? `[${bodySig.join(";")}]` : ""})`
   }
 
   for (const stmt of sourceFile.statements) {
-    if (ts.isImportDeclaration(stmt) || ts.isExportDeclaration(stmt)) {
+    if (
+      ts.isImportDeclaration(stmt) ||
+      ts.isExportDeclaration(stmt) ||
+      ts.isExportAssignment(stmt)
+    ) {
       parts.push(stmt.getText(sourceFile).trim())
       continue
     }
     if (!hasExportModifier(stmt)) {
       continue
     }
-    if (ts.isTypeAliasDeclaration(stmt) || ts.isInterfaceDeclaration(stmt)) {
+    if (
+      ts.isTypeAliasDeclaration(stmt) ||
+      ts.isInterfaceDeclaration(stmt) ||
+      ts.isEnumDeclaration(stmt) ||
+      ts.isModuleDeclaration(stmt)
+    ) {
       parts.push(stmt.getText(sourceFile).trim())
       continue
     }
     if (ts.isFunctionDeclaration(stmt)) {
       const fnName = stmt.name?.text ?? "default"
-      parts.push(`export function ${fnName}${formatFnLikeSignature(stmt)}`)
+      parts.push(`export function ${fnName}${formatFnLikeSignature(stmt, false)}`)
       continue
     }
     if (ts.isClassDeclaration(stmt)) {
@@ -201,7 +209,12 @@ export const emitDeclarationSignatureText = (sourceFile: ts.SourceFile): string 
         if (ts.isMethodDeclaration(m) || ts.isConstructorDeclaration(m)) {
           const mName = m.name !== undefined ? m.name.getText(sourceFile) : "constructor"
           const params = m.parameters.map((p) => p.getText(sourceFile)).join(",")
-          const ret = m.type !== undefined ? `: ${m.type.getText(sourceFile)}` : ""
+          const ret =
+            m.type !== undefined
+              ? `: ${m.type.getText(sourceFile)}`
+              : m.body !== undefined
+                ? ` { ${m.body.getText(sourceFile).replace(/\s+/g, " ").trim()} }`
+                : ""
           memberSigs.push(`${mName}(${params})${ret}`)
         } else {
           memberSigs.push(m.getText(sourceFile).trim())
@@ -213,14 +226,17 @@ export const emitDeclarationSignatureText = (sourceFile: ts.SourceFile): string 
     if (ts.isVariableStatement(stmt)) {
       for (const decl of stmt.declarationList.declarations) {
         const varName = decl.name.getText(sourceFile)
-        const explicitType = decl.type !== undefined ? `: ${decl.type.getText(sourceFile)}` : ""
+        const hasVarType = decl.type !== undefined
+        const explicitType = hasVarType ? `: ${decl.type.getText(sourceFile)}` : ""
         const init = decl.initializer
         if (init === undefined) {
           parts.push(`export const ${varName}${explicitType}`)
           continue
         }
         if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
-          parts.push(`export const ${varName}${explicitType} = ${formatFnLikeSignature(init)}`)
+          parts.push(
+            `export const ${varName}${explicitType} = ${formatFnLikeSignature(init, hasVarType)}`,
+          )
           continue
         }
         if (ts.isCallExpression(init)) {
@@ -235,7 +251,7 @@ export const emitDeclarationSignatureText = (sourceFile: ts.SourceFile): string 
                 (ts.isFunctionExpression(fnArg) || ts.isArrowFunction(fnArg))
               ) {
                 parts.push(
-                  `export const ${varName}${explicitType} = ${innerCalleeText}(${spanArg})${formatFnLikeSignature(fnArg)}`,
+                  `export const ${varName}${explicitType} = ${innerCalleeText}(${spanArg})${formatFnLikeSignature(fnArg, hasVarType)}`,
                 )
                 continue
               }
@@ -247,7 +263,7 @@ export const emitDeclarationSignatureText = (sourceFile: ts.SourceFile): string 
               (ts.isFunctionExpression(fnArg) || ts.isArrowFunction(fnArg))
             ) {
               parts.push(
-                `export const ${varName}${explicitType} = Effect.fnUntraced${formatFnLikeSignature(fnArg)}`,
+                `export const ${varName}${explicitType} = Effect.fnUntraced${formatFnLikeSignature(fnArg, hasVarType)}`,
               )
               continue
             }
@@ -283,6 +299,120 @@ const extractModuleSpecifiers = (sourceFile: ts.SourceFile): ReadonlyArray<strin
   return specs
 }
 
+const FILE_GRAPH_CACHE_VERSION = "file-graph-v1"
+
+const BranchingViolationSchema = Schema.Struct({
+  rule: ViolationRule,
+  message: Schema.String,
+  file: Schema.String,
+  line: Schema.Int,
+  enclosingSymbol: Schema.String,
+  path: Schema.optional(Schema.Array(Schema.String)),
+})
+
+const FileGraphFragmentSchema = Schema.Struct({
+  filePath: Schema.String,
+  packageTag: Schema.optional(PackageTag),
+  contentSha256: Schema.String,
+  declHash: Schema.String,
+  importedSpecs: Schema.Array(Schema.String),
+  fns: Schema.Array(EffectFnNode),
+  services: Schema.optional(Schema.Array(ServiceTagNode)),
+  layers: Schema.Array(ServiceLayerNode),
+  errors: Schema.optional(Schema.Array(TaggedErrorNode)),
+  schemas: Schema.optional(Schema.Array(SchemaDefNode)),
+  requiresService: Schema.Array(
+    Schema.Struct({ callerQualname: Schema.String, tagId: Schema.String }),
+  ),
+  failsWith: Schema.Array(
+    Schema.Struct({ callerQualname: Schema.String, errorTag: Schema.String }),
+  ),
+  providesService: Schema.Array(
+    Schema.Struct({ layerQualname: Schema.String, tagId: Schema.String }),
+  ),
+  layerRequires: Schema.Array(
+    Schema.Struct({ layerQualname: Schema.String, tagId: Schema.String }),
+  ),
+  branchingViolations: Schema.Array(BranchingViolationSchema),
+})
+
+const FileGraphCacheStoreSchema = Schema.Struct({
+  version: Schema.String,
+  fragments: Schema.Record(Schema.String, FileGraphFragmentSchema),
+})
+
+const decodeFileGraphCacheStore = Schema.decodeOption(
+  Schema.fromJsonString(FileGraphCacheStoreSchema),
+)
+
+const resolveFileGraphCachePath = (repoRoot: string): string =>
+  path.join(repoRoot, ".harness", "cache", "file-graph-v1.json")
+
+const loadFileGraphFragmentsFromDisk = (
+  repoRoot: string,
+  session: TypeScriptProgramSession,
+): void => {
+  const cachePath = resolveFileGraphCachePath(repoRoot)
+  if (!fs.existsSync(cachePath)) {
+    return
+  }
+  Effect.runSync(
+    Effect.try({
+      try: () => {
+        const raw = fs.readFileSync(cachePath, "utf8")
+        const decoded = decodeFileGraphCacheStore(raw)
+        match(decoded)
+          .with({ _tag: "Some" }, ({ value }) => {
+            if (value.version !== FILE_GRAPH_CACHE_VERSION) {
+              return
+            }
+            for (const [relPath, frag] of Object.entries(value.fragments)) {
+              session.fileFragmentCache.set(relPath, frag)
+              session.sourceFileCache.set(relPath, {
+                packageTag: frag.packageTag,
+                contentSha256: frag.contentSha256,
+                declHash: frag.declHash,
+                importedSpecs: frag.importedSpecs,
+              })
+            }
+          })
+          .with({ _tag: "None" }, () => undefined)
+          .exhaustive()
+      },
+      catch: () => undefined,
+    }).pipe(Effect.ignore),
+  )
+}
+
+const saveFileGraphFragmentsToDisk = (
+  repoRoot: string,
+  session: TypeScriptProgramSession,
+): void => {
+  if (session.persistToDisk !== true) {
+    return
+  }
+  const cachePath = resolveFileGraphCachePath(repoRoot)
+  Effect.runSync(
+    Effect.try({
+      try: () => {
+        fs.mkdirSync(path.dirname(cachePath), { recursive: true })
+        const fragments: Record<string, FileGraphFragment> = {}
+        for (const [relPath, frag] of session.fileFragmentCache.entries()) {
+          fragments[relPath] = frag
+        }
+        const tmpPath = `${cachePath}.${process.pid}.tmp`
+        fs.writeFileSync(
+          tmpPath,
+          JSON.stringify({ version: FILE_GRAPH_CACHE_VERSION, fragments }),
+          "utf8",
+        )
+        fs.renameSync(tmpPath, cachePath)
+      },
+      catch: () => undefined,
+    }).pipe(Effect.ignore),
+  )
+}
+
 const warmSessionsByRoot = new Map<string, TypeScriptProgramSession>()
 
 export const createTypeScriptProgramSession = (
@@ -302,6 +432,8 @@ export const getOrCreateWarmProgramSession = (repoRoot: string): TypeScriptProgr
   let session = warmSessionsByRoot.get(resolved)
   if (session === undefined) {
     session = createTypeScriptProgramSession(resolved)
+    session.persistToDisk = true
+    loadFileGraphFragmentsFromDisk(resolved, session)
     warmSessionsByRoot.set(resolved, session)
   }
   return session
@@ -748,6 +880,9 @@ export const extractTypeAwareGraphFromSource = (
     "effect/*": [path.join(graphNodeModules, "effect/*")],
     "ts-pattern": [path.join(repoRoot, "node_modules/ts-pattern")],
     "@harness/gates": [path.join(repoRoot, "libs/harness/gates/src/index.ts")],
+    "@harness/graph": [path.join(repoRoot, "libs/harness/graph/src/index.ts")],
+    "@harness/decision": [path.join(repoRoot, "libs/harness/decision/src/index.ts")],
+    "@harness/ingest": [path.join(repoRoot, "libs/harness/ingest/src/index.ts")],
     "@harness/sample-contract": [path.join(repoRoot, "libs/sample/contract/src/index.ts")],
     "@harness/sample-service": [path.join(repoRoot, "libs/sample/service/src/index.ts")],
     "@harness/sample-domain": [path.join(repoRoot, "libs/sample/domain/src/index.ts")],
@@ -777,10 +912,9 @@ export const extractTypeAwareGraphFromSource = (
   }
 
   const effectiveFiles: Array<SourceFileInput> = files.map((f) => {
-    const rel = (path.isAbsolute(f.filePath) ? path.relative(repoRoot, f.filePath) : f.filePath).replace(
-      /\\/g,
-      "/",
-    )
+    const rel = (
+      path.isAbsolute(f.filePath) ? path.relative(repoRoot, f.filePath) : f.filePath
+    ).replace(/\\/g, "/")
     const overlayContent = normalizedOverlays.get(rel) ?? normalizedOverlays.get(f.filePath)
     return overlayContent !== undefined ? { ...f, content: overlayContent } : f
   })
@@ -799,6 +933,21 @@ export const extractTypeAwareGraphFromSource = (
         content: overlayContent,
         packageTag: resolvePackageTag(repoRoot, overlayRel),
       })
+    }
+  }
+
+  for (const f of effectiveFiles) {
+    const rel = (
+      path.isAbsolute(f.filePath) ? path.relative(repoRoot, f.filePath) : f.filePath
+    ).replace(/\\/g, "/")
+    const m = rel.match(/^libs\/([^/]+)\/(contract|service|domain|core|infra)\/src\/index\.ts$/)
+    if (m && m[1] && m[2]) {
+      const scopeName = m[1]
+      const tier = m[2]
+      const entryAbs = path.resolve(repoRoot, rel)
+      dynamicPaths[`@harness/${scopeName}-${tier}`] = [entryAbs]
+      dynamicPaths[`@effect-${scopeName}/${tier}`] = [entryAbs]
+      dynamicPaths[`@${scopeName}/${tier}`] = [entryAbs]
     }
   }
 
@@ -871,14 +1020,12 @@ export const extractTypeAwareGraphFromSource = (
       session !== undefined &&
       prevEntry !== undefined &&
       prevFragment !== undefined &&
-      prevEntry.contentSha256 === contentSha256
+      prevEntry.contentSha256 === contentSha256 &&
+      (prevEntry.packageTag ?? f.packageTag) === f.packageTag
     ) {
       session.warmHitCount += 1
       currentDeclHashes.set(normalizedRelPath, prevEntry.declHash)
       currentSpecs.set(normalizedRelPath, prevEntry.importedSpecs)
-      if (project.getSourceFile(absPath) === undefined) {
-        project.createSourceFile(absPath, f.content, { overwrite: true })
-      }
     } else {
       let sf = project.getSourceFile(absPath)
       if (sf !== undefined) {
@@ -894,14 +1041,17 @@ export const extractTypeAwareGraphFromSource = (
       filesToReextract.add(normalizedRelPath)
 
       if (session !== undefined) {
-        if (prevEntry !== undefined) {
+        if (prevEntry !== undefined && (prevEntry.packageTag ?? f.packageTag) === f.packageTag) {
           if (prevEntry.declHash === newDeclHash) {
             session.signatureCleanCutoffCount += 1
           } else {
             declChangedFiles.add(normalizedRelPath)
           }
+        } else {
+          declChangedFiles.add(normalizedRelPath)
         }
         session.sourceFileCache.set(normalizedRelPath, {
+          packageTag: f.packageTag,
           contentSha256,
           declHash: newDeclHash,
           sourceFile: compilerSf,
@@ -914,6 +1064,15 @@ export const extractTypeAwareGraphFromSource = (
   if (session !== undefined) {
     for (const cachedRel of Array.from(session.sourceFileCache.keys())) {
       if (!fileMap.has(cachedRel)) {
+        const oldDeps = session.reverseImportsByFile.get(cachedRel)
+        if (oldDeps !== undefined) {
+          for (const dep of oldDeps) {
+            if (fileMap.has(dep)) {
+              filesToReextract.add(dep)
+              declChangedFiles.add(dep)
+            }
+          }
+        }
         session.sourceFileCache.delete(cachedRel)
         session.fileFragmentCache.delete(cachedRel)
         const oldSf = project.getSourceFile(path.resolve(repoRoot, cachedRel))
@@ -956,6 +1115,56 @@ export const extractTypeAwareGraphFromSource = (
       }
     }
 
+    for (const normalizedRelPath of fileMap.keys()) {
+      if (
+        !filesToReextract.has(normalizedRelPath) &&
+        !session.fileFragmentCache.has(normalizedRelPath)
+      ) {
+        filesToReextract.add(normalizedRelPath)
+      }
+    }
+
+    const neededProjectFiles = new Set<string>(filesToReextract)
+    if (filesToReextract.size > 0) {
+      const touchedScopes = new Set<string>()
+      for (const rel of filesToReextract) {
+        const m = rel.match(/^libs\/([^/]+)\//)
+        if (m && m[1] && m[1] !== "harness") {
+          touchedScopes.add(`libs/${m[1]}/`)
+        }
+      }
+      if (touchedScopes.size > 0) {
+        for (const rel of fileMap.keys()) {
+          for (const prefix of touchedScopes) {
+            if (rel.startsWith(prefix)) {
+              neededProjectFiles.add(rel)
+            }
+          }
+        }
+      }
+      const fwdQueue = Array.from(neededProjectFiles)
+      while (fwdQueue.length > 0) {
+        const curr = fwdQueue.shift()!
+        for (const spec of currentSpecs.get(curr) ?? []) {
+          const targetRel = resolveImportSpecToRelFile(curr, spec)
+          if (targetRel !== null && !neededProjectFiles.has(targetRel)) {
+            neededProjectFiles.add(targetRel)
+            fwdQueue.push(targetRel)
+          }
+        }
+      }
+      for (const rel of neededProjectFiles) {
+        const f = fileMap.get(rel)
+        if (!f) continue
+        const absPath = path.isAbsolute(f.filePath)
+          ? f.filePath
+          : path.resolve(repoRoot, f.filePath)
+        if (project.getSourceFile(absPath) === undefined) {
+          project.createSourceFile(absPath, f.content, { overwrite: true })
+        }
+      }
+    }
+
     session.lastReextractedFiles = Array.from(filesToReextract)
   }
 
@@ -974,29 +1183,6 @@ export const extractTypeAwareGraphFromSource = (
   const classNameToTagId = new Map<string, string>()
   const referencedServices = new Set<string>()
   const referencedErrors = new Set<string>()
-
-  // Replay cached FileGraphFragments for unmodified & signature-clean files
-  if (session !== undefined) {
-    for (const normalizedRelPath of fileMap.keys()) {
-      if (filesToReextract.has(normalizedRelPath)) continue
-      const cachedFrag = session.fileFragmentCache.get(normalizedRelPath)
-      if (cachedFrag === undefined) {
-        filesToReextract.add(normalizedRelPath)
-        continue
-      }
-      fns.push(...cachedFrag.fns)
-      layers.push(...cachedFrag.layers)
-      requiresService.push(...cachedFrag.requiresService)
-      failsWith.push(...cachedFrag.failsWith)
-      providesService.push(...cachedFrag.providesService)
-      layerRequires.push(...cachedFrag.layerRequires)
-      branchingViolations.push(...cachedFrag.branchingViolations)
-      for (const r of cachedFrag.requiresService) referencedServices.add(r.tagId)
-      for (const p of cachedFrag.providesService) referencedServices.add(p.tagId)
-      for (const lr of cachedFrag.layerRequires) referencedServices.add(lr.tagId)
-      for (const fw of cachedFrag.failsWith) referencedErrors.add(fw.errorTag)
-    }
-  }
 
   interface TaggedSchemaInfo {
     readonly tag: string
@@ -1066,8 +1252,15 @@ export const extractTypeAwareGraphFromSource = (
     return resolvedSchemas
   }
 
+  const sortedSourceFiles = [...project.getSourceFiles()].sort((a, b) =>
+    path
+      .relative(repoRoot, a.getFilePath())
+      .replace(/\\/g, "/")
+      .localeCompare(path.relative(repoRoot, b.getFilePath()).replace(/\\/g, "/")),
+  )
+
   // 0. Zero-tolerance AST type safety check
-  for (const sourceFile of project.getSourceFiles()) {
+  for (const sourceFile of sortedSourceFiles) {
     const relPath = path.relative(repoRoot, sourceFile.getFilePath()).replace(/\\/g, "/")
     const input = fileMap.get(relPath)
     if (!input) continue
@@ -1162,10 +1355,42 @@ export const extractTypeAwareGraphFromSource = (
     checkNode(sourceFile.compilerNode)
   }
 
+  const pass1ScopeFiles = new Set<string>(filesToReextract)
+  if (session !== undefined && filesToReextract.size > 0) {
+    for (const frag of session.fileFragmentCache.values()) {
+      for (const s of frag.services ?? []) {
+        classNameToTagId.set(s.name, s.tagId)
+        classNameToTagId.set(s.tagId, s.tagId)
+      }
+    }
+    for (const rel of filesToReextract) {
+      const m = rel.match(/^libs\/([^/]+)\//)
+      if (m && m[1] && m[1] !== "harness") {
+        const prefix = `libs/${m[1]}/`
+        for (const k of fileMap.keys()) {
+          if (k.startsWith(prefix)) pass1ScopeFiles.add(k)
+        }
+      }
+    }
+    const pass1Queue = Array.from(pass1ScopeFiles)
+    while (pass1Queue.length > 0) {
+      const curr = pass1Queue.shift()!
+      for (const spec of currentSpecs.get(curr) ?? []) {
+        const targetRel = resolveImportSpecToRelFile(curr, spec)
+        if (targetRel !== null && !pass1ScopeFiles.has(targetRel)) {
+          pass1ScopeFiles.add(targetRel)
+          pass1Queue.push(targetRel)
+        }
+      }
+    }
+  }
+
   // 1. First pass: Extract Services, Errors, and Tagged Schemas
-  for (const sourceFile of project.getSourceFiles()) {
+  for (const sourceFile of sortedSourceFiles) {
+    if (session !== undefined && filesToReextract.size === 0) break
     const relPath = path.relative(repoRoot, sourceFile.getFilePath()).replace(/\\/g, "/")
     if (!fileMap.has(relPath)) continue
+    if (session !== undefined && !pass1ScopeFiles.has(relPath)) continue
     const filePkgTag = fileMap.get(relPath)?.packageTag ?? resolvePackageTag(repoRoot, relPath)
 
     for (const cls of sourceFile.getClasses()) {
@@ -1456,7 +1681,7 @@ export const extractTypeAwareGraphFromSource = (
   }
 
   // 2. Second pass: Extract Layers and EffectFns
-  for (const sourceFile of project.getSourceFiles()) {
+  for (const sourceFile of sortedSourceFiles) {
     const relPath = path.relative(repoRoot, sourceFile.getFilePath()).replace(/\\/g, "/")
     if (!fileMap.has(relPath)) continue
     if (session !== undefined && !filesToReextract.has(relPath)) continue
@@ -1714,7 +1939,11 @@ export const extractTypeAwareGraphFromSource = (
         )
         if (effectRef && Node.isTypeReference(effectRef)) {
           const typeArgs = effectRef.getTypeArguments()
-          if (typeArgs.length >= 1 && typeArgs[0] && (successType === "void" || successType === "unknown")) {
+          if (
+            typeArgs.length >= 1 &&
+            typeArgs[0] &&
+            (successType === "void" || successType === "unknown")
+          ) {
             successType = typeArgs[0].getText()
           }
           if (typeArgs.length >= 2 && typeArgs[1]) {
@@ -1735,7 +1964,12 @@ export const extractTypeAwareGraphFromSource = (
       if (sigs.length > 0 && sigs[0]) {
         const retType = sigs[0].getReturnType()
         const typeArgs = retType.getTypeArguments()
-        if (typeArgs.length >= 1 && typeArgs[0] && (successType === "void" || successType === "unknown") && !typeArgs[0].isAny()) {
+        if (
+          typeArgs.length >= 1 &&
+          typeArgs[0] &&
+          (successType === "void" || successType === "unknown") &&
+          !typeArgs[0].isAny()
+        ) {
           successType = typeArgs[0].getText()
         } else if (successType === "void" || successType === "unknown") {
           const retNode =
@@ -1821,7 +2055,11 @@ export const extractTypeAwareGraphFromSource = (
         if (expr.getKind() === SyntaxKind.NewExpression) {
           const newExpr = expr as NewExpression
           const errorId = newExpr.getExpression().getText()
-          if (errorId.endsWith("Error") || errors.some((e) => e.errorTag === errorId) || referencedErrors.has(errorId)) {
+          if (
+            errorId.endsWith("Error") ||
+            errors.some((e) => e.errorTag === errorId) ||
+            referencedErrors.has(errorId)
+          ) {
             errorTags.add(errorId)
           }
         }
@@ -1842,7 +2080,11 @@ export const extractTypeAwareGraphFromSource = (
             }
           } else if (calleeText.endsWith(".make")) {
             const errorId = calleeText.replace(/\.make$/, "")
-            if (errorId.endsWith("Error") || errors.some((e) => e.errorTag === errorId) || referencedErrors.has(errorId)) {
+            if (
+              errorId.endsWith("Error") ||
+              errors.some((e) => e.errorTag === errorId) ||
+              referencedErrors.has(errorId)
+            ) {
               errorTags.add(errorId)
             }
           }
@@ -1957,7 +2199,7 @@ export const extractTypeAwareGraphFromSource = (
   }
 
   // 2b. Type-aware discriminant branching, array predicate branching, non-exhaustive match check, and schema boolean state check
-  for (const sourceFile of project.getSourceFiles()) {
+  for (const sourceFile of sortedSourceFiles) {
     const relPath = path.relative(repoRoot, sourceFile.getFilePath()).replace(/\\/g, "/")
     if (
       !fileMap.has(relPath) ||
@@ -3717,11 +3959,15 @@ export const extractTypeAwareGraphFromSource = (
       const fileQualPrefix = `${relPath}#`
       session.fileFragmentCache.set(relPath, {
         filePath: relPath,
+        packageTag: f.packageTag,
         contentSha256,
         declHash,
         importedSpecs,
         fns: fns.filter((fn) => fn.file === relPath),
+        services: services.filter((s) => s.file === relPath),
         layers: layers.filter((l) => l.file === relPath),
+        errors: errors.filter((e) => e.file === relPath),
+        schemas: schemas.filter((s) => s.file === relPath),
         requiresService: requiresService.filter((r) => r.callerQualname.startsWith(fileQualPrefix)),
         failsWith: failsWith.filter((fw) => fw.callerQualname.startsWith(fileQualPrefix)),
         providesService: providesService.filter((p) => p.layerQualname.startsWith(fileQualPrefix)),
@@ -3729,7 +3975,75 @@ export const extractTypeAwareGraphFromSource = (
         branchingViolations: branchingViolations.filter((bv) => bv.file === relPath),
       })
     }
-    session.oldProgram = project.getProgram().compilerObject
+
+    fns.length = 0
+    services.length = 0
+    layers.length = 0
+    errors.length = 0
+    schemas.length = 0
+    requiresService.length = 0
+    failsWith.length = 0
+    providesService.length = 0
+    layerRequires.length = 0
+    branchingViolations.length = 0
+    referencedServices.clear()
+    referencedErrors.clear()
+    classNameToTagId.clear()
+
+    const sortedRelPaths = Array.from(fileMap.keys()).sort((a, b) => a.localeCompare(b))
+    const seenSchemaNames = new Set<string>()
+    for (const relPath of sortedRelPaths) {
+      const frag = session.fileFragmentCache.get(relPath)
+      if (!frag) continue
+      for (const s of frag.services ?? []) {
+        classNameToTagId.set(s.name, s.tagId)
+        classNameToTagId.set(s.tagId, s.tagId)
+        services.push(s)
+      }
+      for (const e of frag.errors ?? []) {
+        errors.push(e)
+      }
+      for (const sc of frag.schemas ?? []) {
+        if (!seenSchemaNames.has(sc.schemaName)) {
+          seenSchemaNames.add(sc.schemaName)
+          schemas.push(sc)
+        }
+      }
+    }
+
+    for (const relPath of sortedRelPaths) {
+      const frag = session.fileFragmentCache.get(relPath)
+      if (!frag) continue
+      fns.push(...frag.fns)
+      layers.push(...frag.layers)
+      for (const r of frag.requiresService) {
+        const tagId = classNameToTagId.get(r.tagId) ?? r.tagId
+        requiresService.push({ callerQualname: r.callerQualname, tagId })
+        referencedServices.add(tagId)
+      }
+      for (const fw of frag.failsWith) {
+        failsWith.push(fw)
+        referencedErrors.add(fw.errorTag)
+      }
+      for (const p of frag.providesService) {
+        const tagId = classNameToTagId.get(p.tagId) ?? p.tagId
+        providesService.push({ layerQualname: p.layerQualname, tagId })
+        referencedServices.add(tagId)
+      }
+      for (const lr of frag.layerRequires) {
+        const tagId = classNameToTagId.get(lr.tagId) ?? lr.tagId
+        layerRequires.push({ layerQualname: lr.layerQualname, tagId })
+        referencedServices.add(tagId)
+      }
+      branchingViolations.push(...frag.branchingViolations)
+    }
+
+    if (
+      filesToReextract.size > 0 &&
+      (options?.overlays === undefined || Object.keys(options.overlays).length === 0)
+    ) {
+      saveFileGraphFragmentsToDisk(repoRoot, session)
+    }
   }
 
   // 3. Auto-register referenced services
@@ -3825,10 +4139,7 @@ const checkUnassertedStateFieldsForInputs = (
       } else if (ts.isVariableStatement(stmt)) {
         for (const decl of stmt.declarationList.declarations) {
           if (ts.isIdentifier(decl.name) && /^evolve/i.test(decl.name.text) && decl.initializer) {
-            if (
-              ts.isArrowFunction(decl.initializer) ||
-              ts.isFunctionExpression(decl.initializer)
-            ) {
+            if (ts.isArrowFunction(decl.initializer) || ts.isFunctionExpression(decl.initializer)) {
               evolveFns.push(decl.initializer)
             }
           }
@@ -4264,7 +4575,10 @@ const findPackageForRelFile = (
       const opt = decodePackageJson(content)
       const relDir = path.relative(rootResolved, curr).replace(/\\/g, "/")
       const entry = {
-        name: Option.isSome(opt) ? opt.value.name : undefined,
+        name: match(opt)
+          .with({ _tag: "Some" }, ({ value }) => value.name)
+          .with({ _tag: "None" }, () => undefined)
+          .exhaustive(),
         dir: relDir,
       }
       packageJsonCache.set(curr, entry)
@@ -4365,7 +4679,7 @@ export const extractWorkspaceTypeAwareGraph = (
       if (overlayContent === undefined && !fs.existsSync(fullPath)) continue
       const content = overlayContent ?? fs.readFileSync(fullPath, "utf-8")
       const packageTag = resolvePackageTag(root, file)
-      inputShaMap.set(file, sha256Hex(content))
+      inputShaMap.set(file, sha256Hex(`${packageTag}\0${content}`))
       inputs.push({
         filePath: file,
         content,
@@ -4396,50 +4710,141 @@ export const extractWorkspaceTypeAwareGraph = (
       )
     }
 
+    const patternDocs = loadPatternDocs(root)
+    const patternShaMap = new Map<string, string>()
+    for (const pDoc of patternDocs) {
+      patternShaMap.set(
+        pDoc.path,
+        sha256Hex(
+          `${pDoc.slug}:${pDoc.summary}:${(pDoc.coveredSpans ?? []).join(",")}:${(pDoc.coveredTags ?? []).join(",")}`,
+        ),
+      )
+    }
+
     const prevSnap = session.lastWorkspaceSnapshot
-    if (
+    let testsGovPatternsMatch =
       prevSnap !== undefined &&
-      prevSnap.inputShaMap.size === inputShaMap.size &&
       prevSnap.testShaMap.size === testShaMap.size &&
-      prevSnap.govShaMap.size === govShaMap.size
-    ) {
-      let allMatch = true
-      for (const [k, sha] of inputShaMap.entries()) {
-        if (prevSnap.inputShaMap.get(k) !== sha) {
-          allMatch = false
+      prevSnap.govShaMap.size === govShaMap.size &&
+      prevSnap.patternShaMap.size === patternShaMap.size
+
+    if (testsGovPatternsMatch && prevSnap !== undefined) {
+      for (const [k, sha] of testShaMap.entries()) {
+        if (prevSnap.testShaMap.get(k) !== sha) {
+          testsGovPatternsMatch = false
           break
         }
       }
-      if (allMatch) {
-        for (const [k, sha] of testShaMap.entries()) {
-          if (prevSnap.testShaMap.get(k) !== sha) {
-            allMatch = false
-            break
-          }
-        }
-      }
-      if (allMatch) {
+      if (testsGovPatternsMatch) {
         for (const [k, sha] of govShaMap.entries()) {
           if (prevSnap.govShaMap.get(k) !== sha) {
-            allMatch = false
+            testsGovPatternsMatch = false
             break
           }
         }
       }
-      if (allMatch) {
+      if (testsGovPatternsMatch) {
+        for (const [k, sha] of patternShaMap.entries()) {
+          if (prevSnap.patternShaMap.get(k) !== sha) {
+            testsGovPatternsMatch = false
+            break
+          }
+        }
+      }
+    }
+
+    if (
+      testsGovPatternsMatch &&
+      prevSnap !== undefined &&
+      prevSnap.inputShaMap.size === inputShaMap.size
+    ) {
+      let inputsMatch = true
+      for (const [k, sha] of inputShaMap.entries()) {
+        if (prevSnap.inputShaMap.get(k) !== sha) {
+          inputsMatch = false
+          break
+        }
+      }
+      if (inputsMatch) {
         session.warmHitCount += inputShaMap.size
         session.lastReextractedFiles = []
         return prevSnap.graph
       }
     }
 
-    const patternDocs = loadPatternDocs(root)
     const baseGraph = extractTypeAwareGraphFromSource(inputs, {
       repoRoot: root,
       patternDocs,
       session,
-      ...(options?.previousProgram !== undefined ? { previousProgram: options.previousProgram } : {}),
+      ...(options?.overlays !== undefined ? { overlays: options.overlays } : {}),
+      ...(options?.previousProgram !== undefined
+        ? { previousProgram: options.previousProgram }
+        : {}),
     })
+
+    const baseTopologyHash = sha256Hex(
+      JSON.stringify(
+        Array.from(session.fileFragmentCache.keys())
+          .sort((a, b) => a.localeCompare(b))
+          .map((k) => {
+            const frag = session.fileFragmentCache.get(k)
+            return frag === undefined
+              ? null
+              : {
+                  filePath: frag.filePath,
+                  packageTag: frag.packageTag,
+                  fns: frag.fns,
+                  services: frag.services,
+                  layers: frag.layers,
+                  errors: frag.errors,
+                  schemas: frag.schemas,
+                  requiresService: frag.requiresService,
+                  failsWith: frag.failsWith,
+                  providesService: frag.providesService,
+                  layerRequires: frag.layerRequires,
+                }
+          }),
+      ),
+    )
+
+    const domainContractInputHash = sha256Hex(
+      inputs
+        .filter((inp) => inp.packageTag === "contract" || inp.packageTag === "domain")
+        .map((inp) => `${inp.filePath}:${inputShaMap.get(inp.filePath) ?? ""}`)
+        .join("|"),
+    )
+
+    if (
+      testsGovPatternsMatch &&
+      prevSnap !== undefined &&
+      prevSnap.baseTopologyHash === baseTopologyHash &&
+      prevSnap.domainContractInputHash === domainContractInputHash &&
+      prevSnap.unassertedStateViolations !== undefined &&
+      prevSnap.nodeSqliteTestViolations !== undefined
+    ) {
+      const fastGraph: HarnessGraph = {
+        graph: prevSnap.graph.graph,
+        nodeIndexByKey: prevSnap.graph.nodeIndexByKey,
+        branchingViolations: [
+          ...(baseGraph.branchingViolations ?? []),
+          ...prevSnap.unassertedStateViolations,
+          ...prevSnap.nodeSqliteTestViolations,
+        ],
+        unresolvedReferences: prevSnap.graph.unresolvedReferences,
+      }
+      session.lastWorkspaceSnapshot = {
+        inputShaMap,
+        testShaMap,
+        govShaMap,
+        patternShaMap,
+        baseTopologyHash,
+        domainContractInputHash,
+        unassertedStateViolations: prevSnap.unassertedStateViolations,
+        nodeSqliteTestViolations: prevSnap.nodeSqliteTestViolations,
+        graph: fastGraph,
+      }
+      return fastGraph
+    }
 
     const effectFns: Array<EffectFnNode> = []
     const serviceTags: Array<ServiceTagNode> = []
@@ -4571,7 +4976,9 @@ export const extractWorkspaceTypeAwareGraph = (
           if (m[1]) identTokens.add(m[1])
         }
         const callOrArgTokens = new Set<string>()
-        for (const m of strippedContent.matchAll(/(?:\b|\$)([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:\(|\)|,)/g)) {
+        for (const m of strippedContent.matchAll(
+          /(?:\b|\$)([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:\(|\)|,)/g,
+        )) {
           if (m[1]) callOrArgTokens.add(m[1])
         }
         const dottedCallTokens = new Set<string>()
@@ -4668,7 +5075,9 @@ export const extractWorkspaceTypeAwareGraph = (
           const docRole = docNode._tag === "AdrDoc" ? "governing-adr" : "specifying-ears"
           const docArchimate =
             docNode._tag === "AdrDoc" ? ("Influence" as const) : ("Realization" as const)
-          const relId = RelationId.make(`TraceabilityTuple:${kindPrefix}:${docNode.id}->${targetKey}`)
+          const relId = RelationId.make(
+            `TraceabilityTuple:${kindPrefix}:${docNode.id}->${targetKey}`,
+          )
           if (!updatedNodeIndexByKey.has(relId)) {
             const relNode: TraceabilityTupleRelation = {
               _tag: "TraceabilityTuple",
@@ -4790,16 +5199,18 @@ export const extractWorkspaceTypeAwareGraph = (
       graph: augmentedGraph,
       nodeIndexByKey: updatedNodeIndexByKey,
       branchingViolations: combinedViolations,
-      unresolvedReferences: [
-        ...(baseGraph.unresolvedReferences ?? []),
-        ...unresolvedReferences,
-      ],
+      unresolvedReferences: [...(baseGraph.unresolvedReferences ?? []), ...unresolvedReferences],
     }
 
     session.lastWorkspaceSnapshot = {
       inputShaMap,
       testShaMap,
       govShaMap,
+      patternShaMap,
+      baseTopologyHash,
+      domainContractInputHash,
+      unassertedStateViolations,
+      nodeSqliteTestViolations,
       graph: resultGraph,
     }
 

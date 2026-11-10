@@ -54,9 +54,7 @@ describe("DpoCandidateRankerV1 (System One Semantic Tie-Breaker for DPO Graph Re
           ),
         )
         expect(alignedRes.source).toEqual({ _tag: "DecisionModel" })
-        expect(alignedRes.priorKey).toBe(
-          "EffectFn:libs/sample/domain/src/order.ts#caller::REP-04b",
-        )
+        expect(alignedRes.priorKey).toBe("EffectFn:libs/sample/domain/src/order.ts#caller::REP-04b")
         expect(alignedRes.strategyLabel).toBe("catch_and_translate_at_boundary")
         expect(alignedRes.cohesionLabel).toBe("idiomatic")
         expect(alignedRes.scoreMillis).toBe(1000)
@@ -157,14 +155,10 @@ describe("DpoCandidateRankerV1 (System One Semantic Tie-Breaker for DPO Graph Re
           reason: "timeout-or-unavailable",
         })
         expect(
-          batchFallback.candidatePriors[
-            "EffectFn:libs/sample/domain/src/order.ts#caller::REP-04a"
-          ],
+          batchFallback.candidatePriors["EffectFn:libs/sample/domain/src/order.ts#caller::REP-04a"],
         ).toBe(750)
         expect(
-          batchFallback.candidatePriors[
-            "EffectFn:libs/sample/domain/src/order.ts#caller::REP-04b"
-          ],
+          batchFallback.candidatePriors["EffectFn:libs/sample/domain/src/order.ts#caller::REP-04b"],
         ).toBe(750)
 
         // Multi-chunk batch (35 candidates => chunk of 32 + chunk of 3)

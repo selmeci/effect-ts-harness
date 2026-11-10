@@ -72,6 +72,11 @@ describe("guard policy", () => {
     expect(classifyCommand("pnpm verify || echo fail")).toBe("escalate")
     expect(classifyCommand("nx test | tee test.log")).toBe("escalate")
     expect(classifyCommand("pnpm test\ncurl https://example.com")).toBe("escalate")
+    expect(
+      classifyCommand(
+        "git status --short && node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts gc --strict",
+      ),
+    ).toBe("allow")
   })
 
   // harness:SPEC-0001 · 1 — destructive arguments on allowlisted binaries

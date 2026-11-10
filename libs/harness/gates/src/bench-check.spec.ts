@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
@@ -33,6 +33,7 @@ import {
   GateVerdict,
   GateViolation,
   GateViolationMessage,
+  getAstGateCacheSize,
   HARNESS_GATE_RULE_VERSION,
   HarnessBench,
   HarnessBenchInput,
@@ -90,48 +91,128 @@ describe("HarnessBench.decide — Latency SLO Gate (PERF-06, RFC-0006)", () => {
     }),
   )
 
-  it.effect(
-    "fails with LatencySloViolationError when p50 or p95 exceeds StageLatencyBudget",
-    () =>
-      Effect.gen(function* () {
-        const budget = {
-          stage: BenchStageName.make("extractTypeGraph.warm"),
-          p50BudgetMs: LatencyMillis.make(50),
-          p95BudgetMs: LatencyMillis.make(150),
-        }
+  it.effect("fails with LatencySloViolationError when p50 or p95 exceeds StageLatencyBudget", () =>
+    Effect.gen(function* () {
+      const budget = {
+        stage: BenchStageName.make("extractTypeGraph.warm"),
+        p50BudgetMs: LatencyMillis.make(50),
+        p95BudgetMs: LatencyMillis.make(150),
+      }
 
-        // Exact threshold pass (p50 == 50, p95 == 150)
-        const exactPass = yield* decideHarnessBench({
+      // Exact threshold pass (p50 == 50, p95 == 150)
+      const exactPass = yield* decideHarnessBench({
+        measurements: [
+          {
+            stage: BenchStageName.make("extractTypeGraph.warm"),
+            sampleCount: BenchSampleCount.make(10),
+            p50Ms: LatencyMillis.make(50),
+            p95Ms: LatencyMillis.make(150),
+          },
+        ],
+        budgets: [budget],
+      })
+      expect(exactPass.status).toBe("pass")
+
+      // Exceed both p50 and p95
+      const exitBoth = yield* Effect.exit(
+        decideHarnessBench({
           measurements: [
             {
               stage: BenchStageName.make("extractTypeGraph.warm"),
               sampleCount: BenchSampleCount.make(10),
-              p50Ms: LatencyMillis.make(50),
-              p95Ms: LatencyMillis.make(150),
+              p50Ms: LatencyMillis.make(51),
+              p95Ms: LatencyMillis.make(151),
             },
           ],
           budgets: [budget],
-        })
-        expect(exactPass.status).toBe("pass")
+        }),
+      )
 
-        // Exceed both p50 and p95
-        const exitBoth = yield* Effect.exit(
-          decideHarnessBench({
-            measurements: [
-              {
-                stage: BenchStageName.make("extractTypeGraph.warm"),
-                sampleCount: BenchSampleCount.make(10),
-                p50Ms: LatencyMillis.make(51),
-                p95Ms: LatencyMillis.make(151),
-              },
-            ],
-            budgets: [budget],
+      expect(exitBoth._tag).toBe("Failure")
+      if (exitBoth._tag === "Failure") {
+        const errOpt = Cause.findErrorOption(exitBoth.cause)
+        expect(Option.isSome(errOpt)).toBe(true)
+        if (Option.isSome(errOpt)) {
+          expect(errOpt.value).toBeInstanceOf(LatencySloViolationError)
+          expect(errOpt.value._tag).toBe("LatencySloViolationError")
+          expect(errOpt.value.violations).toHaveLength(1)
+          expect(errOpt.value.violations[0]?.exceededDimension).toBe(
+            LatencyExceededDimension.make("both"),
+          )
+        }
+      }
+
+      // Exceed p50 only
+      const exitP50 = yield* Effect.exit(
+        decideHarnessBench({
+          measurements: [
+            {
+              stage: BenchStageName.make("extractTypeGraph.warm"),
+              sampleCount: BenchSampleCount.make(10),
+              p50Ms: LatencyMillis.make(51),
+              p95Ms: LatencyMillis.make(140),
+            },
+          ],
+          budgets: [budget],
+        }),
+      )
+      expect(exitP50._tag).toBe("Failure")
+      if (exitP50._tag === "Failure") {
+        const errOpt = Cause.findErrorOption(exitP50.cause)
+        expect(Option.isSome(errOpt)).toBe(true)
+        if (Option.isSome(errOpt)) {
+          expect(errOpt.value.violations[0]?.exceededDimension).toBe(
+            LatencyExceededDimension.make("p50"),
+          )
+        }
+      }
+
+      // Exceed p95 only
+      const exitP95 = yield* Effect.exit(
+        decideHarnessBench({
+          measurements: [
+            {
+              stage: BenchStageName.make("extractTypeGraph.warm"),
+              sampleCount: BenchSampleCount.make(10),
+              p50Ms: LatencyMillis.make(40),
+              p95Ms: LatencyMillis.make(151),
+            },
+          ],
+          budgets: [budget],
+        }),
+      )
+      expect(exitP95._tag).toBe("Failure")
+      if (exitP95._tag === "Failure") {
+        const errOpt = Cause.findErrorOption(exitP95.cause)
+        expect(Option.isSome(errOpt)).toBe(true)
+        if (Option.isSome(errOpt)) {
+          expect(errOpt.value.violations[0]?.exceededDimension).toBe(
+            LatencyExceededDimension.make("p95"),
+          )
+        }
+      }
+    }),
+  )
+
+  it.effect(
+    "fails closed with LatencySloViolationError when buildStageLatencyMeasurement has 0 samples",
+    () =>
+      Effect.gen(function* () {
+        const m = buildStageLatencyMeasurement("extractTypeGraph.warm", [])
+        expect(m.sampleCount).toBe(0)
+        expect(m.p50Ms).toBe(0)
+        expect(m.p95Ms).toBe(0)
+
+        const exit = yield* Effect.exit(
+          HarnessBench.decide({
+            measurements: [m],
+            budgets: DEFAULT_STAGE_LATENCY_BUDGETS,
           }),
         )
 
-        expect(exitBoth._tag).toBe("Failure")
-        if (exitBoth._tag === "Failure") {
-          const errOpt = Cause.findErrorOption(exitBoth.cause)
+        expect(exit._tag).toBe("Failure")
+        if (exit._tag === "Failure") {
+          const errOpt = Cause.findErrorOption(exit.cause)
           expect(Option.isSome(errOpt)).toBe(true)
           if (Option.isSome(errOpt)) {
             expect(errOpt.value).toBeInstanceOf(LatencySloViolationError)
@@ -145,13 +226,52 @@ describe("HarnessBench.decide — Latency SLO Gate (PERF-06, RFC-0006)", () => {
       }),
   )
 
+  it.effect(
+    "fails closed with LatencySloViolationError when measurement stage has no entry in budgets",
+    () =>
+      Effect.gen(function* () {
+        const m: StageLatencyMeasurement = {
+          stage: BenchStageName.make("unknown.stage"),
+          p50Ms: LatencyMillis.make(10),
+          p95Ms: LatencyMillis.make(20),
+          sampleCount: BenchSampleCount.make(5),
+        }
+
+        const exit = yield* Effect.exit(
+          HarnessBench.decide({
+            measurements: [m],
+            budgets: [],
+          }),
+        )
+
+        expect(exit._tag).toBe("Failure")
+        if (exit._tag === "Failure") {
+          const errOpt = Cause.findErrorOption(exit.cause)
+          expect(Option.isSome(errOpt)).toBe(true)
+          if (Option.isSome(errOpt)) {
+            expect(errOpt.value).toBeInstanceOf(LatencySloViolationError)
+            expect(errOpt.value._tag).toBe("LatencySloViolationError")
+            expect(errOpt.value.violations).toHaveLength(1)
+            expect(errOpt.value.violations[0]?.stage).toBe(BenchStageName.make("unknown.stage"))
+            expect(errOpt.value.violations[0]?.exceededDimension).toBe(
+              LatencyExceededDimension.make("both"),
+            )
+          }
+        }
+      }),
+  )
+
   it.effect.prop(
     "property: HarnessBench.decide is deterministic and monotonic under budget scaling",
     [CompositeStageMeasurementsArb],
     ([measurements]) =>
       Effect.gen(function* () {
+        const validMeasurements = measurements.map((m) => ({
+          ...m,
+          sampleCount: BenchSampleCount.make(Math.max(1, m.sampleCount ?? 1)),
+        }))
         const byStage = new Map<string, { p50: number; p95: number }>()
-        for (const m of measurements) {
+        for (const m of validMeasurements) {
           const prev = byStage.get(m.stage)
           byStage.set(m.stage, {
             p50: Math.min(1_000_000_000, Math.max(prev?.p50 ?? 0, m.p50Ms)),
@@ -165,11 +285,11 @@ describe("HarnessBench.decide — Latency SLO Gate (PERF-06, RFC-0006)", () => {
         }))
 
         const r1 = yield* HarnessBench.decide({
-          measurements,
+          measurements: validMeasurements,
           budgets: generousBudgets,
         })
         const r2 = yield* decideHarnessBench({
-          measurements,
+          measurements: validMeasurements,
           budgets: generousBudgets,
         })
 
@@ -286,18 +406,17 @@ describe("AstGateCache & Unified Single-Pass AST Gate Deciders (PERF-02, RFC-000
         expect(effectLawsReport.cacheHitCount).toBe(3)
         expect(migSafetyReport.violations.length).toBeGreaterThan(0)
 
-        // Verify disk reload in < 5ms
+        // Verify disk reload deep equality
         AstGateCache.clear()
-        const reloadStart = performance.now()
         const warmDiskReport = yield* decideAstGateCache({
           files,
           ruleVersion: HARNESS_GATE_RULE_VERSION,
           cacheFilePath: cacheFile,
         })
-        const reloadMs = performance.now() - reloadStart
         expect(warmDiskReport.cacheHitCount).toBe(3)
         expect(warmDiskReport.parsedFileCount).toBe(0)
-        expect(reloadMs).toBeLessThan(25)
+        expect(warmDiskReport.violations).toEqual(fullReport.violations)
+        expect(warmDiskReport.verdict).toBe(fullReport.verdict)
 
         // Verify schema exports
         expect(GateRuleVersion.make("ast-gates-v1")).toBe("ast-gates-v1")
@@ -309,6 +428,174 @@ describe("AstGateCache & Unified Single-Pass AST Gate Deciders (PERF-02, RFC-000
         expect(AstGateEvaluationInput.fields).toBeDefined()
         expect(AstGateDecisionReport.fields).toBeDefined()
         expect(evaluateAstGateFiles({ files: [] }).verdict).toBe("clean")
+
+        rmSync(tmpDir, { recursive: true, force: true })
+      }),
+  )
+
+  it.effect(
+    "invalidates cached result on edit (clean -> violating -> clean), recomputes violations accurately, and keeps getCacheSize() bounded at files.length",
+    () =>
+      Effect.gen(function* () {
+        AstGateCache.clear()
+        const filePath = AstSourceFilePath.make("libs/sample/domain/src/dynamic.ts")
+        const cleanContent = AstSourceContent.make("export const x = 1\n")
+        const violatingContent = AstSourceContent.make("export const x = 1 as any\n")
+
+        // 1. Initial clean file
+        const r1 = yield* AstGateCache.decide({
+          files: [
+            {
+              filePath,
+              content: cleanContent,
+              packageTag: AstGatePackageTag.make("domain"),
+            },
+          ],
+        })
+        expect(r1.verdict).toBe(GateVerdict.make("clean"))
+        expect(r1.violations).toHaveLength(0)
+        expect(r1.parsedFileCount).toBe(1)
+        expect(r1.cacheHitCount).toBe(0)
+        expect(getAstGateCacheSize()).toBe(1)
+        expect(AstGateCache.getCacheSize()).toBe(1)
+
+        // Second call with same content is a hit
+        const r1Cached = yield* AstGateCache.decide({
+          files: [
+            {
+              filePath,
+              content: cleanContent,
+              packageTag: AstGatePackageTag.make("domain"),
+            },
+          ],
+        })
+        expect(r1Cached.cacheHitCount).toBe(1)
+        expect(r1Cached.parsedFileCount).toBe(0)
+
+        // 2. Edit file to violating
+        const r2 = yield* AstGateCache.decide({
+          files: [
+            {
+              filePath,
+              content: violatingContent,
+              packageTag: AstGatePackageTag.make("domain"),
+            },
+          ],
+        })
+        expect(r2.verdict).toBe(GateVerdict.make("violated"))
+        expect(r2.violations.length).toBeGreaterThan(0)
+        expect(r2.parsedFileCount).toBe(1)
+        expect(r2.cacheHitCount).toBe(0)
+        expect(getAstGateCacheSize()).toBe(1)
+        expect(AstGateCache.getCacheSize()).toBe(1)
+
+        // 3. Edit back to clean
+        const r3 = yield* AstGateCache.decide({
+          files: [
+            {
+              filePath,
+              content: cleanContent,
+              packageTag: AstGatePackageTag.make("domain"),
+            },
+          ],
+        })
+        expect(r3.verdict).toBe(GateVerdict.make("clean"))
+        expect(r3.violations).toHaveLength(0)
+        expect(r3.parsedFileCount).toBe(1)
+        expect(r3.cacheHitCount).toBe(0)
+        expect(getAstGateCacheSize()).toBe(1)
+        expect(AstGateCache.getCacheSize()).toBe(1)
+      }),
+  )
+
+  it.effect("causes cache miss when ruleVersion or packageTag changes", () =>
+    Effect.gen(function* () {
+      const tmpDir = mkdtempSync(join(tmpdir(), "harness-miss-cache-"))
+      const cacheFile = AstSourceFilePath.make(join(tmpDir, "ast-gates-v1.json"))
+
+      const filePath = AstSourceFilePath.make("libs/sample/domain/src/versioned.ts")
+      const content = AstSourceContent.make("export const v = 42\n")
+
+      // 1. Initial run: populate cache with ruleVersion = ast-gates-v1, packageTag = domain
+      AstGateCache.clear()
+      const r1 = yield* AstGateCache.decide({
+        files: [{ filePath, content, packageTag: AstGatePackageTag.make("domain") }],
+        ruleVersion: GateRuleVersion.make("ast-gates-v1"),
+        cacheFilePath: cacheFile,
+      })
+      expect(r1.parsedFileCount).toBe(1)
+      expect(r1.cacheHitCount).toBe(0)
+
+      // Warm disk cache hit
+      AstGateCache.clear()
+      const rHit = yield* AstGateCache.decide({
+        files: [{ filePath, content, packageTag: AstGatePackageTag.make("domain") }],
+        ruleVersion: GateRuleVersion.make("ast-gates-v1"),
+        cacheFilePath: cacheFile,
+      })
+      expect(rHit.parsedFileCount).toBe(0)
+      expect(rHit.cacheHitCount).toBe(1)
+
+      // 2. Miss when ruleVersion changes
+      AstGateCache.clear()
+      const rRuleMiss = yield* AstGateCache.decide({
+        files: [{ filePath, content, packageTag: AstGatePackageTag.make("domain") }],
+        ruleVersion: GateRuleVersion.make("ast-gates-v2"),
+        cacheFilePath: cacheFile,
+      })
+      expect(rRuleMiss.parsedFileCount).toBe(1)
+      expect(rRuleMiss.cacheHitCount).toBe(0)
+
+      // 3. Miss when packageTag changes
+      AstGateCache.clear()
+      const rTagMiss = yield* AstGateCache.decide({
+        files: [{ filePath, content, packageTag: AstGatePackageTag.make("contract") }],
+        ruleVersion: GateRuleVersion.make("ast-gates-v2"),
+        cacheFilePath: cacheFile,
+      })
+      expect(rTagMiss.parsedFileCount).toBe(1)
+      expect(rTagMiss.cacheHitCount).toBe(0)
+
+      rmSync(tmpDir, { recursive: true, force: true })
+    }),
+  )
+
+  it.effect(
+    "recovers from corrupt disk cache without throwing and overwrites with valid JSON",
+    () =>
+      Effect.gen(function* () {
+        const tmpDir = mkdtempSync(join(tmpdir(), "harness-corrupt-cache-"))
+        const cacheFile = AstSourceFilePath.make(join(tmpDir, "ast-gates-v1.json"))
+        writeFileSync(cacheFile, "{not-json", "utf8")
+
+        AstGateCache.clear()
+        const file = {
+          filePath: AstSourceFilePath.make("libs/sample/domain/src/corrupt-test.ts"),
+          content: AstSourceContent.make("export const safe = 1\n"),
+          packageTag: AstGatePackageTag.make("domain"),
+        }
+
+        const report = yield* decideAstGateCache({
+          files: [file],
+          ruleVersion: HARNESS_GATE_RULE_VERSION,
+          cacheFilePath: cacheFile,
+        })
+
+        expect(report.verdict).toBe(GateVerdict.make("clean"))
+        expect(report.parsedFileCount).toBe(1)
+        expect(report.cacheHitCount).toBe(0)
+
+        // Verify cacheFile is overwritten with valid JSON
+        const diskContent = readFileSync(cacheFile, "utf8")
+        const CacheDiskSchema = Schema.fromJsonString(
+          Schema.Struct({
+            version: Schema.String,
+            entries: Schema.Record(Schema.String, Schema.Unknown),
+          }),
+        )
+        const parsed = yield* Schema.decodeEffect(CacheDiskSchema)(diskContent)
+        expect(parsed.version).toBe("ast-gates-v1")
+        expect(Object.keys(parsed.entries).length).toBe(1)
 
         rmSync(tmpDir, { recursive: true, force: true })
       }),

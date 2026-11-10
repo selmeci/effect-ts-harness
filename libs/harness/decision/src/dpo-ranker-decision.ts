@@ -30,12 +30,7 @@ export const DPO_REPAIR_STRATEGIES = [
 ] as const
 export type DpoRepairStrategy = (typeof DPO_REPAIR_STRATEGIES)[number]
 
-export const DPO_COHESION_LEVELS = [
-  "poor",
-  "acceptable",
-  "good",
-  "idiomatic",
-] as const
+export const DPO_COHESION_LEVELS = ["poor", "acceptable", "good", "idiomatic"] as const
 export type DpoCohesionLevel = (typeof DPO_COHESION_LEVELS)[number]
 
 export const COHESION_SCORE_MILLIS: Readonly<Record<DpoCohesionLevel, SystemOneScoreMillis>> = {
@@ -166,10 +161,7 @@ const parseCohesionLabel = (raw: unknown): Option.Option<DpoCohesionLevel> =>
     .with("idiomatic", () => Option.some("idiomatic" as const))
     .otherwise(() => Option.none())
 
-const doesRuleAlignWithStrategy = (
-  ruleId: string,
-  strategy: DpoRepairStrategy,
-): boolean =>
+const doesRuleAlignWithStrategy = (ruleId: string, strategy: DpoRepairStrategy): boolean =>
   match(ruleId)
     .with("REP-04a", () => strategy === "propagate_in_E")
     .with("REP-04b", () => strategy === "catch_and_translate_at_boundary")
@@ -240,33 +232,35 @@ export const evaluateDpoCandidateRank = Effect.fn("DpoCandidateRanker.evaluate")
         const parsedStrategy = parseStrategyLabel(value.answers.repairStrategy?.label)
         const parsedCohesion = parseCohesionLabel(value.answers.architecturalCohesion?.label)
         return yield* match([parsedStrategy, parsedCohesion] as const)
-          .with([{ _tag: "Some" }, { _tag: "Some" }], ([{ value: strategyLabel }, { value: cohesionLabel }]) =>
-            Effect.gen(function* () {
-              const scoreMillis = computeCandidateScoreMillis(
-                input.ruleId,
-                strategyLabel,
-                cohesionLabel,
-              )
-              const priorKey = formatDpoPriorKey(input.primaryNodeKey, input.ruleId)
+          .with(
+            [{ _tag: "Some" }, { _tag: "Some" }],
+            ([{ value: strategyLabel }, { value: cohesionLabel }]) =>
+              Effect.gen(function* () {
+                const scoreMillis = computeCandidateScoreMillis(
+                  input.ruleId,
+                  strategyLabel,
+                  cohesionLabel,
+                )
+                const priorKey = formatDpoPriorKey(input.primaryNodeKey, input.ruleId)
 
-              yield* Effect.annotateCurrentSpan({
-                "decision.definition": "DpoCandidateRankerV1",
-                "decision.priorKey": priorKey,
-                "decision.strategyLabel": strategyLabel,
-                "decision.cohesionLabel": cohesionLabel,
-                "decision.scoreMillis": scoreMillis,
-              })
+                yield* Effect.annotateCurrentSpan({
+                  "decision.definition": "DpoCandidateRankerV1",
+                  "decision.priorKey": priorKey,
+                  "decision.strategyLabel": strategyLabel,
+                  "decision.cohesionLabel": cohesionLabel,
+                  "decision.scoreMillis": scoreMillis,
+                })
 
-              return {
-                primaryNodeKey: input.primaryNodeKey,
-                ruleId: input.ruleId,
-                priorKey,
-                scoreMillis,
-                strategyLabel,
-                cohesionLabel,
-                source: { _tag: "DecisionModel" },
-              } satisfies DpoCandidateRankResult
-            }),
+                return {
+                  primaryNodeKey: input.primaryNodeKey,
+                  ruleId: input.ruleId,
+                  priorKey,
+                  scoreMillis,
+                  strategyLabel,
+                  cohesionLabel,
+                  source: { _tag: "DecisionModel" },
+                } satisfies DpoCandidateRankResult
+              }),
           )
           .with([{ _tag: "None" }, { _tag: "Some" }], () =>
             Effect.succeed(computeDeterministicFallbackRank(input, "invalid-output")),

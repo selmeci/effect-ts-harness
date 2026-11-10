@@ -46,6 +46,7 @@ This RFC defines the **Sub-Second Incremental Harness Architecture (`PERF-01..06
 ### 2.1 Bottleneck 1: Cold `ts-morph` `TypeChecker` Instantiation & $O(|T| \times |F|)$ Regex Compilation (`type-extractor.ts`)
 
 In [`libs/harness/graph/src/type-extractor.ts`](../../libs/harness/graph/src/type-extractor.ts#L511-L529) and [`extractWorkspaceTypeAwareGraph`](../../libs/harness/graph/src/type-extractor.ts#L3836-L4209):
+
 - Every invocation of `pnpm harness plan-check`, `pnpm harness gc --strict`, or `pnpm harness verify` creates a cold `new Project(...)` (`line 511`) and a second `new Project({ useInMemoryFileSystem: true })` in `checkUnassertedStateFieldsForInputs` (`line 3319`).
 - Calling `.getType()`, `isTypeBranded()`, and `getSchemaDecodedType()` forces the TypeScript `TypeChecker` to parse and bind all `node_modules/effect` `.d.ts` declarations from scratch in every CLI subprocess.
 - Furthermore, lines [`3991–4069`](../../libs/harness/graph/src/type-extractor.ts#L3991-L4069) execute a nested loop `for (const relTestFile of testFiles) { for (const fnNode of effectFns) { new RegExp(...) } }`, compiling $|T| \times |F|$ regular expressions on every graph extraction.
@@ -53,24 +54,28 @@ In [`libs/harness/graph/src/type-extractor.ts`](../../libs/harness/graph/src/typ
 ### 2.2 Bottleneck 2: Eager Top-Level Imports on Every Hook Execution (`apps/harness-cli/src/index.ts`)
 
 In [`apps/harness-cli/src/index.ts`](../../apps/harness-cli/src/index.ts#L1-L80):
+
 - Every tool call made by an agent triggers `PreToolUse` (`pnpm harness guard`), `PostToolUse` (`pnpm harness ingest`), and `Stop` (`pnpm harness done`).
 - Because lines `1–80` statically import `@harness/decision`, `@harness/gates`, `@harness/graph`, and `@harness/ingest` at the top level, Node.js loads and resolves `ts-morph`, `typescript`, `@electric-sql/d2ts`, and `effect` (`~350–600 ms`) even when `guard` only needs to inspect a single shell command string in `< 1 ms`. Across 40 tool calls in a session, hook startup overhead alone burns `15–25 seconds`.
 
 ### 2.3 Bottleneck 3: Cold `effect-tsgo` Subprocess Spawning in `harness_lsp_diagnostics` (`apps/harness-mcp/src/server.ts`)
 
 In [`apps/harness-mcp/src/server.ts`](../../apps/harness-mcp/src/server.ts#L251-L360):
+
 - `runDefaultLspDiagnostics` executes `spawnSync(binPath, ["diagnostics", "--strict", "--format", "json", ...])` (`line 295`).
 - Spawning a cold `effect-tsgo` process and initializing the TypeScript project from disk takes `1,000–3,000 ms` per MCP tool call, despite `harness-mcp` already running as a persistent long-lived Node.js process.
 
 ### 2.4 Bottleneck 4: Uncached System One (`clef-flash`) Inference Calls (`libs/harness/decision/src/`)
 
 In [`apps/harness-mcp/src/server.ts`](../../apps/harness-mcp/src/server.ts#L454-L458) and [`libs/harness/decision/src/`](../../libs/harness/decision/src/):
+
 - `evaluateOntologyConflicts(pairs)`, `evaluateHoleCandidatePrior`, and `DpoCandidateRankerV1` invoke the local Ollama `clef-flash` model (`100–300 ms` per HTTP round-trip).
 - Without content-addressable memoization on disk, running `harness_ontology_check` or `verify` repeatedly re-evaluates identical ADR/SPEC pairs and unchanged `stub()` holes over HTTP on every run.
 
 ### 2.5 Bottleneck 5: Redundant Filesystem Scans & Eager Proof Allocations
 
 In [`apps/harness-cli/src/index.ts`](../../apps/harness-cli/src/index.ts#L752-L900):
+
 - A single `pnpm harness verify` walks the workspace directory tree four separate times (`buildWorkspaceFnIndex`, `extractWorkspaceTypeAwareGraph`, `loadGovernanceDocsFromDisk`, and `decideOntologyInvariants`).
 
 ---
@@ -88,15 +93,15 @@ In [`apps/harness-cli/src/index.ts`](../../apps/harness-cli/src/index.ts#L752-L9
 
 ### 3.2 Hard Latency SLO Table (`HarnessBench.decide`)
 
-| Surface / Operation | Current Latency (Unoptimized) | Target Hard SLO (`p95`) | Primary Mechanism |
-| :--- | :---: | :---: | :--- |
-| **`pnpm harness guard` / `ingest` / `done` (hook fast-path)** | `350 – 600 ms` | **$\le 25\text{ ms}$** | `PERF-01` (Lazy dynamic `import()` per CLI subcommand) |
-| **Warm `extractWorkspaceTypeAwareGraph` (0–3 dirty files)** | `1,800 – 3,500 ms` | **$\le 60\text{ ms}$** | `PERF-02` (Content-addressable `FileGraphFragment` cache + `oldProgram`) |
-| **Cold `extractWorkspaceTypeAwareGraph` (full workspace)** | `2,500 – 4,500 ms` | **$\le 900\text{ ms}$** | `PERF-03` (Single `Project`, $O(|T|+|F|)$ precompiled matchers, single VFS pass) |
-| **MCP `harness_lsp_diagnostics` (single file or overlay)** | `1,200 – 3,000 ms` | **$\le 45\text{ ms}$** | `PERF-04` (Warm in-memory `ts.Program` + `@effect/language-service` plugin) |
-| **System One `DecisionModel` call (cached input)** | `120 – 300 ms` / call | **$\le 1\text{ ms}$** | `PERF-05` (SHA-256 `.harness/cache/decisions-v1.jsonl` memoization) |
-| **`GraphInfer.decide` + `GraphRewrite.decide` (2,000 nodes)** | `25 – 60 ms` | **$\le 25\text{ ms}$** | `PERF-06` (Symbol integer interning + root-anchored $O(\text{deg}(v_r))$ DPO lookup) |
-| **Incremental `DatalogSession.step` (1-file $\pm 1$ delta)** | `15 – 40 ms` (full rebuild) | **$\le 2\text{ ms}$** | `PERF-02` + `PERF-06` ($\Delta G_{\text{Levi}}$ diff spliced into open `DatalogSession`) |
+| Surface / Operation                                           | Current Latency (Unoptimized) | Target Hard SLO (`p95`) | Primary Mechanism                                                                        |
+| :------------------------------------------------------------ | :---------------------------: | :---------------------: | :--------------------------------------------------------------------------------------- |
+| **`pnpm harness guard` / `ingest` / `done` (hook fast-path)** |        `350 – 600 ms`         | **$\le 25\text{ ms}$**  | `PERF-01` (Lazy dynamic `import()` per CLI subcommand)                                   |
+| **Warm `extractWorkspaceTypeAwareGraph` (0–3 dirty files)**   |      `1,800 – 3,500 ms`       | **$\le 60\text{ ms}$**  | `PERF-02` (Content-addressable `FileGraphFragment` cache + `oldProgram`)                 |
+| **Cold `extractWorkspaceTypeAwareGraph` (full workspace)**    |      `2,500 – 4,500 ms`       | **$\le 900\text{ ms}$** | `PERF-03` (Single `Project`, $O(                                                         | T   | +   | F   | )$ precompiled matchers, single VFS pass) |
+| **MCP `harness_lsp_diagnostics` (single file or overlay)**    |      `1,200 – 3,000 ms`       | **$\le 45\text{ ms}$**  | `PERF-04` (Warm in-memory `ts.Program` + `@effect/language-service` plugin)              |
+| **System One `DecisionModel` call (cached input)**            |     `120 – 300 ms` / call     |  **$\le 1\text{ ms}$**  | `PERF-05` (SHA-256 `.harness/cache/decisions-v1.jsonl` memoization)                      |
+| **`GraphInfer.decide` + `GraphRewrite.decide` (2,000 nodes)** |         `25 – 60 ms`          | **$\le 25\text{ ms}$**  | `PERF-06` (Symbol integer interning + root-anchored $O(\text{deg}(v_r))$ DPO lookup)     |
+| **Incremental `DatalogSession.step` (1-file $\pm 1$ delta)**  |  `15 – 40 ms` (full rebuild)  |  **$\le 2\text{ ms}$**  | `PERF-02` + `PERF-06` ($\Delta G_{\text{Levi}}$ diff spliced into open `DatalogSession`) |
 
 ---
 
@@ -105,6 +110,7 @@ In [`apps/harness-cli/src/index.ts`](../../apps/harness-cli/src/index.ts#L752-L9
 ### 4.1 Content-Addressable Per-File Graph Functor & Monoidal Graph Splicing (`PERF-02`)
 
 Let $W = \{f_1, f_2, \dots, f_n\}$ be the set of workspace source and test files. In `type-extractor.ts`, the semantic extraction of a single source file $f \in W$ depends **only** on:
+
 1. The raw UTF-8 text of $f$: $\text{content}(f)$,
 2. The compiler configuration hash: $h_{\text{tsconfig}}$,
 3. The exported type signatures of the workspace modules transitively imported by $f$: $\bigoplus_{g \in \text{imports}^*(f)} h_{\text{exports}}(g)$, where $h_{\text{exports}}(g) = \text{sha256}(\text{exportedDeclarationsAst}(g))$.
@@ -113,9 +119,10 @@ We define the **composite cache key** $k(f) \in \text{FileCacheKey}$:
 
 $$k(f) = \text{sha256}\Big(\text{EXTRACTOR\_VERSION} \;\parallel\; h_{\text{tsconfig}} \;\parallel\; \text{sha256}(\text{content}(f)) \;\parallel\; \bigoplus_{g \in \text{imports}^*(f)} h_{\text{exports}}(g)\Big)$$
 
-Notice a critical property of $h_{\text{exports}}(g)$: **when an edit inside file $g$ only modifies a private function body or implementation detail without changing its exported `Effect.fn` / `Schema` / `Context.Service` signature, $h_{\text{exports}}(g)$ remains invariant!** Consequently, importers of $g$ do **not** invalidate their cached `FileGraphFragment`s.
+Notice a critical property of $h_{\text{exports}}(g)$: **when an edit inside file $g$ only modifies a private function body or implementation detail without changing its exported `Effect.fn` / `Schema` / `Context.Service` signature, $h\_{\text{exports}}(g)$ remains invariant!** Consequently, importers of $g$ do **not** invalidate their cached `FileGraphFragment`s.
 
 Each file $f$ maps to an immutable **`FileGraphFragment`** $\mathcal{F}(f) = (V_E^{(f)}, V_R^{(f)}, E_{\text{role}}^{(f)}, B^{(f)}, h_{\text{exports}}(f))$. When a subset of files $\Delta W \subseteq W$ changes ($|\Delta W| \ll |W|$):
+
 1. For every clean file $f \notin \Delta W_{\text{dirty}}$, we load $\mathcal{F}(f)$ directly from `.harness/cache/file-graph-v1.json` in $O(1)$ time.
 2. For every dirty file $f \in \Delta W_{\text{dirty}}$, we update its `ts.SourceFile` inside the cached `oldProgram: ts.Program`, re-extract $\mathcal{F}'(f)$, and compute the exact DBSP $\mathbb{Z}$-set delta:
 
@@ -138,6 +145,7 @@ flowchart LR
 Currently, `extractWorkspaceTypeAwareGraph` (`type-extractor.ts:3991`) iterates over every test file $t \in T$ and every `EffectFnNode` $f \in F$, compiling two `new RegExp(...)` objects per pair $(t, f)$ and scanning `strippedContent` linearly—yielding $O(|T| \times |F| \times |\text{content}(t)|)$ time complexity.
 
 We replace this with an **$O(|T| + |F|)$ Single-Pass Identifier Token Index**:
+
 1. For each test file $t \in T$, we strip comments/titles once and tokenize $t$ in a single linear pass (`/[$A-Za-z_][$A-Za-z0-9_.]*/g`) into a `ReadonlySet<string>` of identifier and dotted-identifier tokens $\text{Tokens}(t)$, plus a `ReadonlySet<string>` of call-site identifiers $\text{CalleeTokens}(t)$ (`/\b([$A-Za-z_][$A-Za-z0-9_.]*)\s*(?:\(|\)|,)/g`).
 2. For each `EffectFnNode` $f \in F$, checking whether $t$ references $f.\text{fnName}$, $f.\text{spanName}$, or its decider aliases is now an **$O(1)$ hash-set lookup** in $\text{CalleeTokens}(t)$ and $\text{Tokens}(t)$ with zero dynamic `RegExp` allocations!
 
@@ -148,6 +156,7 @@ Every System One `DecisionDef<Name, In, Out>` in `@harness/decision` operates at
 $$\text{cacheKey}(D, x) = \text{sha256}\Big(D.\text{name} \;\parallel\; D.\text{version} \;\parallel\; \text{sha256}(D.\text{prompt}(x)) \;\parallel\; \text{canonicalJson}(x)\Big)$$
 
 `CachedDecisionModel` wraps `LocalDecisionModel` (`clef-flash`) with a two-level lookup:
+
 1. **Level 1 (In-Memory `Map<DecisionCacheKey, unknown>`):** $O(1)$ lookup in `< 0.01 ms`.
 2. **Level 2 (Append-Only Disk Cache `.harness/cache/decisions-v1.jsonl`):** Loaded once on startup, compacting duplicate keys on write (`< 0.2 ms`).
 3. **Level 3 (Deterministic Top-$K$ Pre-Filter + `800 ms` Bounded Ollama Call):** Only on a cache miss—and only for the Top $K \le 5$ candidates surviving deterministic scope/lattice pre-filtering—does `CachedDecisionModel` query Ollama with `Effect.timeoutOption("800 millis")`.
@@ -185,9 +194,7 @@ export const LatencyMillis = Schema.Number.pipe(
 )
 export type LatencyMillis = typeof LatencyMillis.Type
 
-export const BenchmarkSurfaceName = Schema.NonEmptyString.pipe(
-  Schema.brand("BenchmarkSurfaceName"),
-)
+export const BenchmarkSurfaceName = Schema.NonEmptyString.pipe(Schema.brand("BenchmarkSurfaceName"))
 export type BenchmarkSurfaceName = typeof BenchmarkSurfaceName.Type
 
 export const FileGraphFragmentSchema = Schema.Struct({
@@ -223,6 +230,7 @@ export type BenchmarkReport = typeof BenchmarkReportSchema.Type
 ### 5.2 Lazy Dynamic CLI Dispatcher (`apps/harness-cli/src/index.ts` — `PERF-01`)
 
 To prevent `guard`, `ingest`, and the read-only fast-path of `done` from loading `ts-morph`, `typescript`, or `@electric-sql/d2ts`:
+
 - `apps/harness-cli/src/index.ts` imports **only** lightweight Node built-ins, `effect`, and the fast command/transcript classifiers on startup.
 - Heavy graph, AST extraction, and Omnigraph modules (`@harness/graph`) are loaded exclusively inside `handlePlanCheck`, `handleVerify`, `handleGc`, `handleOntology`, and the full-merge path of `handleDone` via lazy module resolution.
 
@@ -251,24 +259,24 @@ export const decideHarnessBenchmarks = Effect.fn("HarnessBench.decide")(function
 
 ## 6. Optimization Catalog (`PERF-01..06`) & Impact Walkthrough
 
-| Optimization ID | Target Component | Root Cause Eliminated | Expected Speedup |
-| :--- | :--- | :--- | :--- |
-| **`PERF-01` (`cli-lazy-fastpath`)** | `apps/harness-cli/src/index.ts` | Top-level static imports of `@harness/graph` (`ts-morph`, `typescript`, `d2ts`) during `guard`, `ingest`, and `done` read-only hooks. | `~450 ms` $\to$ **`< 20 ms`** (~22× faster per tool call) |
-| **`PERF-02` (`content-addressable-ast-cache`)** | `libs/harness/graph/src/type-extractor.ts` | Cold re-parsing and typechecking of all untouched workspace files on every `plan-check`, `gc`, and `verify`. | `~2,500 ms` $\to$ **`< 50 ms`** (~50× faster incremental extraction) |
-| **`PERF-03` (`linear-token-reachability`)** | `libs/harness/graph/src/type-extractor.ts` | $O(|T| \times |F|)$ nested `new RegExp(...)` compilation and secondary `new Project` in `checkUnassertedStateFieldsForInputs`. | `~400 ms` $\to$ **`< 10 ms`** (~40× faster test-reach linking) |
-| **`PERF-04` (`in-memory-lsp-diagnostics`)** | `apps/harness-mcp/src/server.ts` | Cold `spawnSync("node_modules/.bin/effect-tsgo")` on every `harness_lsp_diagnostics` MCP call. | `~1,800 ms` $\to$ **`< 40 ms`** (~45× faster diagnostics) |
-| **`PERF-05` (`decision-model-sha256-cache`)** | `libs/harness/decision/src/` | Repeated HTTP calls to Ollama `clef-flash` for identical `(decisionName, version, input)` tuples and unpruned candidate pairs. | `~200 ms/call` $\to$ **`< 0.2 ms`** (>1000× faster on cache hit) |
-| **`PERF-06` (`interned-datalog-and-anchored-dpo`)** | `datalog-engine.ts` & `graph-rewrite.ts` | String allocations in `.iterate()` and full-graph scans during DPO candidate discovery. | Scales to `10,000+` nodes in **`< 35 ms`** |
+| Optimization ID                                     | Target Component                           | Root Cause Eliminated                                                                                                                 | Expected Speedup                                                     |
+| :-------------------------------------------------- | :----------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------ | :------------------------------------------------------------------- |
+| **`PERF-01` (`cli-lazy-fastpath`)**                 | `apps/harness-cli/src/index.ts`            | Top-level static imports of `@harness/graph` (`ts-morph`, `typescript`, `d2ts`) during `guard`, `ingest`, and `done` read-only hooks. | `~450 ms` $\to$ **`< 20 ms`** (~22× faster per tool call)            |
+| **`PERF-02` (`content-addressable-ast-cache`)**     | `libs/harness/graph/src/type-extractor.ts` | Cold re-parsing and typechecking of all untouched workspace files on every `plan-check`, `gc`, and `verify`.                          | `~2,500 ms` $\to$ **`< 50 ms`** (~50× faster incremental extraction) |
+| **`PERF-03` (`linear-token-reachability`)**         | `libs/harness/graph/src/type-extractor.ts` | $O(                                                                                                                                   | T                                                                    | \times | F   | )$ nested `new RegExp(...)` compilation and secondary `new Project` in `checkUnassertedStateFieldsForInputs`. | `~400 ms` $\to$ **`< 10 ms`** (~40× faster test-reach linking) |
+| **`PERF-04` (`in-memory-lsp-diagnostics`)**         | `apps/harness-mcp/src/server.ts`           | Cold `spawnSync("node_modules/.bin/effect-tsgo")` on every `harness_lsp_diagnostics` MCP call.                                        | `~1,800 ms` $\to$ **`< 40 ms`** (~45× faster diagnostics)            |
+| **`PERF-05` (`decision-model-sha256-cache`)**       | `libs/harness/decision/src/`               | Repeated HTTP calls to Ollama `clef-flash` for identical `(decisionName, version, input)` tuples and unpruned candidate pairs.        | `~200 ms/call` $\to$ **`< 0.2 ms`** (>1000× faster on cache hit)     |
+| **`PERF-06` (`interned-datalog-and-anchored-dpo`)** | `datalog-engine.ts` & `graph-rewrite.ts`   | String allocations in `.iterate()` and full-graph scans during DPO candidate discovery.                                               | Scales to `10,000+` nodes in **`< 35 ms`**                           |
 
 ---
 
 ## 7. Evaluated Alternatives & Trade-offs
 
-| Evaluated Approach | Architecture | Advantages | Disadvantages & Verdict |
-| :--- | :--- | :--- | :--- |
-| **1. Content-Addressable Disk Cache (`.harness/cache/`) + Warm In-Memory `oldProgram` in `harness-mcp` — CHOSEN** | Per-file SHA-256 + export-signature hash persisted to `.harness/cache/file-graph-v1.json` combined with warm `oldProgram: ts.Program` reuse in `harness-mcp` and lazy CLI imports. | • Works seamlessly across both stateless CLI calls (`plan-check`, `gc`, `verify`) and stateful MCP calls.<br/>• Zero external daemon management required; cache is 100% deterministic and self-invalidating on content or export changes. | Requires computing `exportSignatureHash` per file from exported AST nodes (takes `< 0.3 ms` per file). |
-| **2. Mandatory Background Unix-Socket Daemon for All CLI Hooks** | Force `guard`, `ingest`, and `done` to connect to a background daemon over a local socket. | • Keeps state in RAM across CLI calls. | **Rejected as sole mechanism:** If the daemon crashes or restarts, hooks either block or fail; lazy imports + `.harness/cache/` achieve `< 20 ms` hook times with zero daemon fragility. |
-| **3. Dropping Type-Aware Extraction in Favor of Syntax-Only `oxc-parser`** | Replace `ts-morph` `TypeChecker` with syntax-only AST parsing. | • Fast cold parse (`~50 ms`). | **Rejected:** Cannot infer `Effect<A, E, R>` channels when return types are inferred from `Effect.gen` bodies or `Layer.effect` compositions, which would blind `GraphInfer.decide`. |
+| Evaluated Approach                                                                                                | Architecture                                                                                                                                                                       | Advantages                                                                                                                                                                                                                                | Disadvantages & Verdict                                                                                                                                                                  |
+| :---------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **1. Content-Addressable Disk Cache (`.harness/cache/`) + Warm In-Memory `oldProgram` in `harness-mcp` — CHOSEN** | Per-file SHA-256 + export-signature hash persisted to `.harness/cache/file-graph-v1.json` combined with warm `oldProgram: ts.Program` reuse in `harness-mcp` and lazy CLI imports. | • Works seamlessly across both stateless CLI calls (`plan-check`, `gc`, `verify`) and stateful MCP calls.<br/>• Zero external daemon management required; cache is 100% deterministic and self-invalidating on content or export changes. | Requires computing `exportSignatureHash` per file from exported AST nodes (takes `< 0.3 ms` per file).                                                                                   |
+| **2. Mandatory Background Unix-Socket Daemon for All CLI Hooks**                                                  | Force `guard`, `ingest`, and `done` to connect to a background daemon over a local socket.                                                                                         | • Keeps state in RAM across CLI calls.                                                                                                                                                                                                    | **Rejected as sole mechanism:** If the daemon crashes or restarts, hooks either block or fail; lazy imports + `.harness/cache/` achieve `< 20 ms` hook times with zero daemon fragility. |
+| **3. Dropping Type-Aware Extraction in Favor of Syntax-Only `oxc-parser`**                                        | Replace `ts-morph` `TypeChecker` with syntax-only AST parsing.                                                                                                                     | • Fast cold parse (`~50 ms`).                                                                                                                                                                                                             | **Rejected:** Cannot infer `Effect<A, E, R>` channels when return types are inferred from `Effect.gen` bodies or `Layer.effect` compositions, which would blind `GraphInfer.decide`.     |
 
 ---
 

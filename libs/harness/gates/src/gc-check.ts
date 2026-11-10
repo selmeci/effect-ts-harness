@@ -119,11 +119,7 @@ const IGNORED_SERVICES = new Set([
   "ActiveCounterStore",
 ])
 
-const IGNORED_ERRORS = new Set([
-  "OmnigraphLoadError",
-  "SchemaError",
-  "UnknownToolError",
-])
+const IGNORED_ERRORS = new Set(["OmnigraphLoadError", "SchemaError", "UnknownToolError"])
 
 const IGNORED_UNTESTED_FNS = new Set([
   "Friction.decide",

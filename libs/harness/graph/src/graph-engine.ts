@@ -47,7 +47,6 @@ import {
 
 export type { HarnessGraph }
 
-
 export interface BuildHarnessGraphInput {
   readonly entities?: ReadonlyArray<EntityNode> | undefined
   readonly relations?: ReadonlyArray<RelationNode> | undefined
@@ -106,14 +105,26 @@ export interface BuildHarnessGraphInput {
     | ReadonlyArray<{
         readonly adrId: string
         readonly targetKey: string
-        readonly targetKind: "span" | "service" | "error" | "EffectFn" | "ServiceTag" | "TaggedError"
+        readonly targetKind:
+          | "span"
+          | "service"
+          | "error"
+          | "EffectFn"
+          | "ServiceTag"
+          | "TaggedError"
       }>
     | undefined
   readonly specifiesSymbols?:
     | ReadonlyArray<{
         readonly specId: string
         readonly targetKey: string
-        readonly targetKind: "span" | "service" | "error" | "EffectFn" | "ServiceTag" | "TaggedError"
+        readonly targetKind:
+          | "span"
+          | "service"
+          | "error"
+          | "EffectFn"
+          | "ServiceTag"
+          | "TaggedError"
         readonly requirementIds?: ReadonlyArray<string> | undefined
       }>
     | undefined
@@ -130,7 +141,8 @@ export const mapPlaysRoleToOmnigraphEdgeName = (
     .with("EffectSignature", () => {
       if (role === "caller" && entityTag === "EffectFn") return "PlaysCallerRole"
       if (role === "callee" && entityTag === "EffectFn") return "PlaysCalleeRole"
-      if (role === "requires-service" && entityTag === "ServiceTag") return "PlaysRequiresServiceRole"
+      if (role === "requires-service" && entityTag === "ServiceTag")
+        return "PlaysRequiresServiceRole"
       if (role === "fails-with" && entityTag === "TaggedError") return "PlaysFailsWithRole"
       if (role === "input-schema" && entityTag === "SchemaDef") return "PlaysInputSchemaRole"
       if (role === "output-schema" && entityTag === "SchemaDef") return "PlaysOutputSchemaRole"
@@ -139,17 +151,16 @@ export const mapPlaysRoleToOmnigraphEdgeName = (
     })
     .with("LayerFlow", () => {
       if (role === "provider-layer" && entityTag === "ServiceLayer") return "PlaysProviderLayerRole"
-      if (role === "provided-service" && entityTag === "ServiceTag") return "PlaysProvidedServiceRole"
-      if (role === "required-service" && entityTag === "ServiceTag") return "PlaysRequiredServiceRole"
+      if (role === "provided-service" && entityTag === "ServiceTag")
+        return "PlaysProvidedServiceRole"
+      if (role === "required-service" && entityTag === "ServiceTag")
+        return "PlaysRequiredServiceRole"
       if (role === "fails-with" && entityTag === "TaggedError") return "PlaysLayerFailsWithRole"
       return undefined
     })
     .with("TraceabilityTuple", () => {
       if (role === "governing-adr" && entityTag === "AdrDoc") return "PlaysGoverningAdrRole"
-      if (
-        (role === "specifying-ears" || role === "specifying-spec") &&
-        entityTag === "EarsSpec"
-      ) {
+      if ((role === "specifying-ears" || role === "specifying-spec") && entityTag === "EarsSpec") {
         return "PlaysSpecifyingEarsRole"
       }
       if (role === "realizing-symbol" || role === "governed-symbol") {
@@ -195,7 +206,8 @@ export const mapPlaysRoleToOmnigraphEdgeName = (
           .exhaustive()
       }
       if (role === "verifying-test" && entityTag === "VitestCase") return "PlaysVerifyingTestRole"
-      if (role === "enforcing-pattern" && entityTag === "PatternDoc") return "PlaysEnforcingPatternRole"
+      if (role === "enforcing-pattern" && entityTag === "PatternDoc")
+        return "PlaysEnforcingPatternRole"
       if (role === "exercising-test" && entityTag === "VitestCase") return "PlaysExercisingTestRole"
       if (role === "exercised-span" && entityTag === "EffectFn") return "PlaysExercisedSpanRole"
       return undefined
@@ -233,7 +245,6 @@ export const isHarnessGraph = (u: unknown): u is HarnessGraph =>
 const PERA_CONCEPT_LATTICE_RESULT = Effect.runSync(
   decideConceptLattice(HARNESS_PERA_CONCEPT_LATTICE_CONFIG),
 )
-
 
 /**
  * Builds the in-memory Clean-Slate PERA Bipartite Levi Hypergraph (`G_Levi = (V_E u V_R, E_role)`).
@@ -278,7 +289,8 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
         relationId: relId,
         entityKey,
         role,
-        archimateRelation: extra?.archimateRelation ?? getArchimateRelationForRole(roleStr) ?? "Association",
+        archimateRelation:
+          extra?.archimateRelation ?? getArchimateRelationForRole(roleStr) ?? "Association",
         ...(extra?.callCount !== undefined ? { callCount: extra.callCount } : {}),
         ...(extra?.receiverLayer !== undefined ? { receiverLayer: extra.receiverLayer } : {}),
       }
@@ -985,7 +997,13 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
       if (ep.handlerQualname !== undefined) {
         const handlerTarget = resolveTargetEntityKey(ep.handlerQualname, "span")
         if (handlerTarget !== undefined) {
-          addPlaysRole(epIdx, ep.relationId, handlerTarget.idx, handlerTarget.key, "endpoint-handler")
+          addPlaysRole(
+            epIdx,
+            ep.relationId,
+            handlerTarget.idx,
+            handlerTarget.key,
+            "endpoint-handler",
+          )
         } else {
           unresolvedReferences.push({
             relationId: ep.relationId,
@@ -1147,7 +1165,6 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
   }
 }
 
-
 /**
  * Resolves any `EntityNode` or `RelationNode` by `NodeKey`, `qualname`, `spanName`, `tagId`,
  * `errorTag`, `schemaName`, `testId`, `slug`, `id`, `relationId`, or `#shortName`.
@@ -1199,10 +1216,7 @@ export const resolveNode = (
       )
       .with({ _tag: "TaggedError" }, (n) => n.errorTag === symbolOrSpan)
       .with({ _tag: "SchemaDef" }, (n) => n.schemaName === symbolOrSpan)
-      .with(
-        { _tag: "VitestCase" },
-        (n) => n.testId === symbolOrSpan || n.testName === symbolOrSpan,
-      )
+      .with({ _tag: "VitestCase" }, (n) => n.testId === symbolOrSpan || n.testName === symbolOrSpan)
       .with(
         { _tag: "PatternDoc" },
         (n) =>
@@ -1573,9 +1587,7 @@ export const findTestsReaching = (
           .with({ _tag: "EffectSignature" }, () => outEdge.data.role === "caller")
           .with(
             { _tag: "TraceabilityTuple" },
-            () =>
-              outEdge.data.role === "exercising-test" ||
-              outEdge.data.role === "verifying-test",
+            () => outEdge.data.role === "exercising-test" || outEdge.data.role === "verifying-test",
           )
           .with(
             { _tag: "LayerFlow" },
@@ -1605,10 +1617,7 @@ export const renderMermaid = (harnessGraph: HarnessGraph): string =>
       match(node)
         .with({ _tag: "EffectFn" }, (n) => `${n.spanName} [${n.packageTag}]`)
         .with({ _tag: "ServiceTag" }, (n) => `Service: ${n.name}`)
-        .with(
-          { _tag: "ServiceLayer" },
-          (n) => `Layer: ${n.qualname} (${n.layerKind ?? "live"})`,
-        )
+        .with({ _tag: "ServiceLayer" }, (n) => `Layer: ${n.qualname} (${n.layerKind ?? "live"})`)
         .with({ _tag: "TaggedError" }, (n) => `Error: ${n.errorTag}`)
         .with({ _tag: "SchemaDef" }, (n) => `Schema: ${n.schemaName}`)
         .with({ _tag: "VitestCase" }, (n) => `Test: ${n.testName}`)
@@ -1618,10 +1627,7 @@ export const renderMermaid = (harnessGraph: HarnessGraph): string =>
         .with({ _tag: "EffectSignature" }, (n) => `Sig: ${n.callerQualname}`)
         .with({ _tag: "LayerFlow" }, (n) => `LayerFlow: ${n.layerQualname}`)
         .with({ _tag: "TraceabilityTuple" }, (n) => `Trace: ${n.relationId}`)
-        .with(
-          { _tag: "HttpEndpointTuple" },
-          (n) => `HTTP: ${n.method} ${n.path}`,
-        )
+        .with({ _tag: "HttpEndpointTuple" }, (n) => `HTTP: ${n.method} ${n.path}`)
         .with({ _tag: "MigrationTuple" }, (n) => `Migration: ${n.migrationId}`)
         .exhaustive(),
     edgeLabel: (edge) => `${edge._tag}:${edge.role}`,
@@ -1998,42 +2004,42 @@ export const saveGraphSnapshot = (
   fs.writeFileSync(snapshotPath, JSON.stringify(serialized, null, 2), "utf8")
 }
 
-export const loadGraphSnapshotEffect = Effect.fn("GraphEngine.loadSnapshot")(
-  function* (snapshotPath = path.resolve(process.cwd(), ".harness/graph-snapshot.json")) {
-    if (!fs.existsSync(snapshotPath)) {
-      return yield* new GraphSnapshotError({
-        path: snapshotPath,
-        reason: "missing-file",
-        message: `Graph snapshot file does not exist at '${snapshotPath}'`,
-      })
-    }
+export const loadGraphSnapshotEffect = Effect.fn("GraphEngine.loadSnapshot")(function* (
+  snapshotPath = path.resolve(process.cwd(), ".harness/graph-snapshot.json"),
+) {
+  if (!fs.existsSync(snapshotPath)) {
+    return yield* new GraphSnapshotError({
+      path: snapshotPath,
+      reason: "missing-file",
+      message: `Graph snapshot file does not exist at '${snapshotPath}'`,
+    })
+  }
 
-    const raw = yield* Effect.try({
-      try: () => fs.readFileSync(snapshotPath, "utf8"),
-      catch: (err) =>
+  const raw = yield* Effect.try({
+    try: () => fs.readFileSync(snapshotPath, "utf8"),
+    catch: (err) =>
+      new GraphSnapshotError({
+        path: snapshotPath,
+        reason: "invalid-json",
+        message: `Failed to read snapshot file at '${snapshotPath}': ${String(err)}`,
+      }),
+  })
+
+  const decoded = yield* Schema.decodeEffect(Schema.fromJsonString(SerializedGraphSnapshotSchema))(
+    raw,
+  ).pipe(
+    Effect.mapError(
+      (err) =>
         new GraphSnapshotError({
           path: snapshotPath,
           reason: "invalid-json",
-          message: `Failed to read snapshot file at '${snapshotPath}': ${String(err)}`,
+          message: `Snapshot JSON decoding failed at '${snapshotPath}': ${String(err)}`,
         }),
-    })
+    ),
+  )
 
-    const decoded = yield* Schema.decodeEffect(
-      Schema.fromJsonString(SerializedGraphSnapshotSchema),
-    )(raw).pipe(
-      Effect.mapError(
-        (err) =>
-          new GraphSnapshotError({
-            path: snapshotPath,
-            reason: "invalid-json",
-            message: `Snapshot JSON decoding failed at '${snapshotPath}': ${String(err)}`,
-          }),
-      ),
-    )
-
-    return yield* deserializeGraphSnapshotEffect(decoded, snapshotPath)
-  },
-)
+  return yield* deserializeGraphSnapshotEffect(decoded, snapshotPath)
+})
 
 export const loadGraphSnapshot = (
   snapshotPath = path.resolve(process.cwd(), ".harness/graph-snapshot.json"),
@@ -2181,4 +2187,3 @@ export const diffHarnessGraphs = (
     missingEdges,
   }
 }
-

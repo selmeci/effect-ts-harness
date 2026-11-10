@@ -1,4 +1,5 @@
 import { Effect, Schema } from "effect"
+import { match } from "ts-pattern"
 
 export const BenchStageName = Schema.NonEmptyString.pipe(Schema.brand("BenchStageName"))
 export type BenchStageName = typeof BenchStageName.Type
@@ -11,7 +12,7 @@ export const LatencyMillis = Schema.Finite.pipe(
 export type LatencyMillis = typeof LatencyMillis.Type
 
 export const BenchSampleCount = Schema.Int.pipe(
-  Schema.check(Schema.isGreaterThanOrEqualTo(1)),
+  Schema.check(Schema.isGreaterThanOrEqualTo(0)),
   Schema.brand("BenchSampleCount"),
 )
 export type BenchSampleCount = typeof BenchSampleCount.Type
@@ -130,12 +131,22 @@ export const computePercentileMillis = (
 export const buildStageLatencyMeasurement = (
   stage: string,
   samplesMs: ReadonlyArray<number>,
-): StageLatencyMeasurement => ({
-  stage: BenchStageName.make(stage),
-  p50Ms: computePercentileMillis(samplesMs, 0.5),
-  p95Ms: computePercentileMillis(samplesMs, 0.95),
-  sampleCount: BenchSampleCount.make(Math.max(1, samplesMs.length)),
-})
+): StageLatencyMeasurement => {
+  if (samplesMs.length === 0) {
+    return {
+      stage: BenchStageName.make(stage),
+      p50Ms: LatencyMillis.make(0),
+      p95Ms: LatencyMillis.make(0),
+      sampleCount: BenchSampleCount.make(0),
+    }
+  }
+  return {
+    stage: BenchStageName.make(stage),
+    p50Ms: computePercentileMillis(samplesMs, 0.5),
+    p95Ms: computePercentileMillis(samplesMs, 0.95),
+    sampleCount: BenchSampleCount.make(samplesMs.length),
+  }
+}
 
 export const decideHarnessBench = Effect.fn("HarnessBench.decide")(function* (
   input: HarnessBenchInput,
@@ -152,23 +163,44 @@ export const decideHarnessBench = Effect.fn("HarnessBench.decide")(function* (
   const violations: Array<StageLatencyViolation> = []
 
   for (const measurement of input.measurements) {
-    const budget = budgetByStage.get(measurement.stage) ?? {
-      stage: measurement.stage,
-      p50BudgetMs: measurement.p50Ms,
-      p95BudgetMs: measurement.p95Ms,
+    const budget = budgetByStage.get(measurement.stage)
+
+    if (budget === undefined || measurement.sampleCount === 0) {
+      const p50BudgetMs = budget !== undefined ? budget.p50BudgetMs : LatencyMillis.make(0)
+      const p95BudgetMs = budget !== undefined ? budget.p95BudgetMs : LatencyMillis.make(0)
+      const exceededDimension = LatencyExceededDimension.make("both")
+      const status = StageLatencyStatus.make("fail")
+
+      evaluations.push({
+        stage: measurement.stage,
+        status,
+        p50Ms: measurement.p50Ms,
+        p50BudgetMs,
+        p95Ms: measurement.p95Ms,
+        p95BudgetMs,
+        exceededDimension,
+      })
+
+      violations.push({
+        stage: measurement.stage,
+        p50Ms: measurement.p50Ms,
+        p50BudgetMs,
+        p95Ms: measurement.p95Ms,
+        p95BudgetMs,
+        exceededDimension,
+      })
+      continue
     }
 
     const p50Over = measurement.p50Ms > budget.p50BudgetMs
     const p95Over = measurement.p95Ms > budget.p95BudgetMs
 
-    const exceededDimension: LatencyExceededDimension =
-      p50Over && p95Over
-        ? LatencyExceededDimension.make("both")
-        : p50Over
-          ? LatencyExceededDimension.make("p50")
-          : p95Over
-            ? LatencyExceededDimension.make("p95")
-            : LatencyExceededDimension.make("none")
+    const exceededDimension: LatencyExceededDimension = match({ p50Over, p95Over })
+      .with({ p50Over: true, p95Over: true }, () => LatencyExceededDimension.make("both"))
+      .with({ p50Over: true, p95Over: false }, () => LatencyExceededDimension.make("p50"))
+      .with({ p50Over: false, p95Over: true }, () => LatencyExceededDimension.make("p95"))
+      .with({ p50Over: false, p95Over: false }, () => LatencyExceededDimension.make("none"))
+      .exhaustive()
 
     const status: StageLatencyStatus =
       p50Over || p95Over ? StageLatencyStatus.make("fail") : StageLatencyStatus.make("pass")

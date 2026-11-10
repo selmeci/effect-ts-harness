@@ -56,6 +56,37 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     },
   },
   {
+    id: "run-effect-inside-effect",
+    pattern: /run-effect-inside-effect|runEffectInsideEffect|TS377024|TS377074/,
+    kind: "mechanical",
+    hint: "Do not call Effect.runSync or Effect.runPromise inside Effect.gen (TS377024/TS377074) — yield* the inner Effect directly, or extract foreign Node.js callback setup (e.g. net.createServer) into a standalone helper outside Effect.gen.",
+    result: {
+      kind: "mechanical",
+      hint: "Do not call Effect.runSync or Effect.runPromise inside Effect.gen (TS377024/TS377074) — yield* the inner Effect directly, or extract foreign Node.js callback setup (e.g. net.createServer) into a standalone helper outside Effect.gen.",
+    },
+  },
+  {
+    id: "outdated-api",
+    pattern: /outdatedApi|TS377052|TS377053/,
+    kind: "mechanical",
+    hint: "Effect v3 API used in an Effect v4 target (TS377052/TS377053) — replace Effect.async with Effect.callback (see repos/effect/LLMS.md).",
+    result: {
+      kind: "mechanical",
+      hint: "Effect v3 API used in an Effect v4 target (TS377052/TS377053) — replace Effect.async with Effect.callback (see repos/effect/LLMS.md).",
+    },
+  },
+  {
+    id: "nx-enforce-module-boundaries-readfile-crash",
+    pattern:
+      /reading 'readFile'[\s\S]{0,200}enforce-module-boundaries|enforce-module-boundaries[\s\S]{0,200}reading 'readFile'/,
+    kind: "mechanical",
+    hint: "@nx/eslint-plugin enforce-module-boundaries crashes on dynamic import('@harness/...') in TS 7 when mixed with static imports — replace dynamic await import('@harness/...') with a top-level static import.",
+    result: {
+      kind: "mechanical",
+      hint: "@nx/eslint-plugin enforce-module-boundaries crashes on dynamic import('@harness/...') in TS 7 when mixed with static imports — replace dynamic await import('@harness/...') with a top-level static import.",
+    },
+  },
+  {
     pattern: "floatingEffect",
     result: {
       kind: "mechanical",
@@ -291,7 +322,8 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
   },
   {
     id: "pera-levi-bipartite-violation",
-    pattern: /PlaysRoleEdge must connect a reified|BipartitePlaysRoleInvariant|bipartite-relation-deleted/,
+    pattern:
+      /PlaysRoleEdge must connect a reified|BipartitePlaysRoleInvariant|bipartite-relation-deleted/,
     kind: "mechanical",
     hint: "PERA Levi hypergraph invariant violation — PlaysRoleEdge must connect a reified relation node in V_R (`EffectSignature:sig:*`, `LayerFlow:flow:*`, `TraceabilityTuple:trace:*`) to an entity node in V_E (`EffectFn:*`, `ServiceTag:*`, `ServiceLayer:*`, `TaggedError:*`, `ContractSchema:*`, `EarsSpec:*`, `AdrDoc:*`, `PatternDoc:*`, `TestSuite:*`) with all required relation fields populated.",
     result: {

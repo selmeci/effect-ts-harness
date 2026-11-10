@@ -29,8 +29,8 @@ This document specifies **`GraphRewrite.decide`**—a pure functional **Algebrai
 
 This mechanism unlocks two capabilities in `effect-ts-harness`:
 
-1. **Automated Architectural & Code Hygiene Repair ($\mathcal{R}_{\text{repair}}$ — `REP-01..11`):** When an architectural or hygiene violation is detected (`domain-requires-infra`, `impure-decider`, `aggregate-direct-bus-publish`, `missing-layer-provider`, `unhandled-error`, `untraced-decider`, `unbranded-contract-schema`, `discriminant-branching`, `untrusted-row-brand-make`, `unmanaged-sql-ddl`, `unused-service`), the engine applies a DPO rewrite step $G \xRightarrow{p, m} H$ that repairs the violation in the graph (e.g., extracting a `ServiceTag` port in `type:service` and rewiring role edges, splitting an impure `.decide` into a pure core and use-case orchestrator, or inserting a transactional `Outbox` + `Outbox.relay`), verifies the validity of $H$, and returns the exact structural diff **`GraphPatch`**.
-2. **Generative Plan Synthesis from EARS Specifications ($\mathcal{G}_{\text{plan}}$ — `PLAN-01..04`):** Given an initial graph containing a new `EarsSpec` node (with parsed `WHEN`, `WHILE`, `IF/THEN`, `WHERE` clauses), it applies forward graph-grammar productions to a fixpoint $G_{\text{plan}}$. The result is a complete, deterministically verified plan topology for the `plan/<task>` branch ready for direct projection into TypeScript `stub<A, E, R>()` skeletons via [RFC-0004](./0004-ast-code-projection-mcp-tools-and-implementation-roadmap.md).
+1. **Automated Architectural & Code Hygiene Repair ($\mathcal{R}\_{\text{repair}}$ — `REP-01..11`):** When an architectural or hygiene violation is detected (`domain-requires-infra`, `impure-decider`, `aggregate-direct-bus-publish`, `missing-layer-provider`, `unhandled-error`, `untraced-decider`, `unbranded-contract-schema`, `discriminant-branching`, `untrusted-row-brand-make`, `unmanaged-sql-ddl`, `unused-service`), the engine applies a DPO rewrite step $G \xRightarrow{p, m} H$ that repairs the violation in the graph (e.g., extracting a `ServiceTag` port in `type:service` and rewiring role edges, splitting an impure `.decide` into a pure core and use-case orchestrator, or inserting a transactional `Outbox` + `Outbox.relay`), verifies the validity of $H$, and returns the exact structural diff **`GraphPatch`**.
+2. **Generative Plan Synthesis from EARS Specifications ($\mathcal{G}\_{\text{plan}}$ — `PLAN-01..04`):** Given an initial graph containing a new `EarsSpec` node (with parsed `WHEN`, `WHILE`, `IF/THEN`, `WHERE` clauses), it applies forward graph-grammar productions to a fixpoint $G_{\text{plan}}$. The result is a complete, deterministically verified plan topology for the `plan/<task>` branch ready for direct projection into TypeScript `stub<A, E, R>()` skeletons via [RFC-0004](./0004-ast-code-projection-mcp-tools-and-implementation-roadmap.md).
 
 ---
 
@@ -53,7 +53,7 @@ In step 2 of our workflow (`planning-effect-skeletons`), mapping EARS clauses to
 - `WHILE` $\rightarrow$ pure `.decide` (`R = never`) + stateful service in `R`
 - `WHERE` $\rightarrow$ `Context.Service` and `Layer` in `R`
 
-Because this mapping is a **homomorphism from the requirement subgraph to the architectural subgraph**, we formalize it as a **deterministic DPO graph grammar $\mathcal{G}_{\text{plan}}$** rather than relying on LLM attention alone.
+Because this mapping is a **homomorphism from the requirement subgraph to the architectural subgraph**, we formalize it as a **deterministic DPO graph grammar $\mathcal{G}\_{\text{plan}}$** rather than relying on LLM attention alone.
 
 ---
 
@@ -88,13 +88,13 @@ where:
 - **$L$ (Left-Hand Side):** Pattern subgraph describing either an architectural antipattern or an unrealized EARS specification clause.
 - **$K$ (Interface / Gluing Graph):** Common interface (nodes and edges from $L$ that are **preserved** during the rewrite and serve as gluing anchors for the new structure).
 - **$R$ (Right-Hand Side):** Target subgraph replacing $L$.
-- **$\text{NAC} = \{n_i: L \hookrightarrow N_i\}_{i=1}^k$ (Negative Application Conditions):** Set of forbidden contexts. A match $m: L \hookrightarrow G$ satisfies $\text{NAC}$ iff there is no $i$ with an injective extension $q_i: N_i \hookrightarrow G$ such that $q_i \circ n_i = m$.
+- **$\text{NAC} = \{n_i: L \hookrightarrow N_i\}\_{i=1}^k$ (Negative Application Conditions):** Set of forbidden contexts. A match $m: L \hookrightarrow G$ satisfies $\text{NAC}$ iff there is no $i$ with an injective extension $q_i: N_i \hookrightarrow G$ such that $q_i \circ n_i = m$.
 
 ### 4.2 Double-Pushout Diagram, Gluing Condition & The Bipartite Levi Relation Preservation Law
 
 Applying production $p$ to host graph $G$ at injective match $m: L \hookrightarrow G$ constructs two categorical pushout squares (Pushout Complement $D$ and Pushout $H$):
 
-$$\begin{array}{ccccc}
+$$ \begin{array}{ccccc}
 L & \xleftarrow{\quad l \quad} & K & \xrightarrow{\quad r \quad} & R \\
 \Big\downarrow\vcenter{\rlap{\scriptstyle m}} & \text{(1) Delete} & \Big\downarrow\vcenter{\rlap{\scriptstyle k}} & \text{(2) Glue/Insert} & \Big\downarrow\vcenter{\rlap{\scriptstyle m^*}} \\
 G & \xleftarrow[\quad f \quad]{} & D & \xrightarrow[\quad g \quad]{} & H
@@ -404,3 +404,4 @@ This RFC is implemented in **Milestone 2** (`GraphRewrite.decide` engine) and **
 
 1. **`libs/harness/docs/adr/0009-bipartite-pera-hypergraph-and-datalog-algebra.md` (`harness:ADR-0009`)** — formal rules for DPO rewriting, the Bipartite Levi Relation Preservation Law ($V_R \in K$), and termination guarantees via $\mu(G) \in \mathbb{N}^6$.
 2. **`libs/harness/docs/specs/2026-11-XX-dpo-graph-rewriting-and-ast-projection.md` (`harness:SPEC-0008`)** — EARS requirements for `GraphRewrite.decide`, $\mathcal{G}_{\text{plan}}$ (`PLAN-01..04`), $\mathcal{R}_{\text{repair}}$ (`REP-01..11`), and `DpoCandidateRankerV1`.
+$$

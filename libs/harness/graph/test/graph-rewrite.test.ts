@@ -418,9 +418,9 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
 
         // Verify mutated targetGraph state: branchingViolations cleared, RawOrderId branded, and OutboxStore added
         expect(outcome.targetGraph.branchingViolations).toHaveLength(0)
-        expect(
-          outcome.targetGraph.nodeIndexByKey.has(NodeKey.make("ServiceTag:OutboxStore")),
-        ).toBe(true)
+        expect(outcome.targetGraph.nodeIndexByKey.has(NodeKey.make("ServiceTag:OutboxStore"))).toBe(
+          true,
+        )
 
         // Verify every applied patch strictly decreases the measure in N^6
         for (const patch of rec.patches) {
@@ -585,9 +585,7 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
         const outcome = yield* decideGraphRewrite(noStubGraph, "cleanup")
         expect(Option.isSome(outcome.result.recommendedCandidate)).toBe(true)
         const rec = Option.getOrThrow(outcome.result.recommendedCandidate)
-        const rep11Patches = rec.patches.filter(
-          (p) => p.ruleId === RewriteRuleId.make("REP-11"),
-        )
+        const rep11Patches = rec.patches.filter((p) => p.ruleId === RewriteRuleId.make("REP-11"))
         expect(rep11Patches).toHaveLength(2)
         expect(rep11Patches.flatMap((p) => p.deletedEntityKeys)).toEqual([
           NodeKey.make("ServiceTag:OrphanLegacyService"),
@@ -709,9 +707,7 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
           })),
         ).toEqual([
           {
-            relationId: RelationId.make(
-              "EffectSignature:libs/sample/domain/src/order.ts#decide",
-            ),
+            relationId: RelationId.make("EffectSignature:libs/sample/domain/src/order.ts#decide"),
             entityKey: NodeKey.make("ServiceTag:OrderRepo"),
             role: RoleName.make("requires-service"),
           },
@@ -797,9 +793,7 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
 
         const transOutcome = yield* decideGraphRewrite(transitiveGraph, "auto-repair")
         const transRec = Option.getOrThrow(transOutcome.result.recommendedCandidate)
-        const transRep02 = transRec.patches.find(
-          (p) => p.ruleId === RewriteRuleId.make("REP-02"),
-        )
+        const transRep02 = transRec.patches.find((p) => p.ruleId === RewriteRuleId.make("REP-02"))
         expect(transRep02?.deletedRoleEdges.map((e) => e.entityKey)).toEqual([
           NodeKey.make("EffectFn:libs/sample/domain/src/order.ts#zzzImpureHelper"),
         ])
@@ -884,7 +878,9 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
         )
         expect(validateIdx).toBeDefined()
         expect(decideIdx).toBeDefined()
-        const validateNode = Option.getOrThrow(Graph.getNode(outcome.targetGraph.graph, validateIdx!))
+        const validateNode = Option.getOrThrow(
+          Graph.getNode(outcome.targetGraph.graph, validateIdx!),
+        )
         const decideNode = Option.getOrThrow(Graph.getNode(outcome.targetGraph.graph, decideIdx!))
         if (validateNode._tag === "EffectFn" && decideNode._tag === "EffectFn") {
           expect(validateNode.spanName).toBe("Order.validate")
@@ -893,9 +889,7 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
 
         const rep06 = rec.patches.find((p) => p.ruleId === RewriteRuleId.make("REP-06"))
         expect(rep06).toBeDefined()
-        expect(rep06?.primaryNodeKey).toBe(
-          NodeKey.make("SchemaDef:OrderIdInput"),
-        )
+        expect(rep06?.primaryNodeKey).toBe(NodeKey.make("SchemaDef:OrderIdInput"))
 
         // With maxPhaseSteps: 1, 1 violation remains at the step bound -> fails with step-bound-exceeded
         const exceededErr = yield* Effect.flip(

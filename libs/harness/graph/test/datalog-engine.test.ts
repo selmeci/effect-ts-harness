@@ -543,8 +543,7 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
           (s) =>
             s.ruleId === "COMP-04" &&
             s.role === RoleName.make("verifying-test") &&
-            s.targetEntityKey ===
-              NodeKey.make("EffectFn:libs/sample/domain/src/order.ts#checkout"),
+            s.targetEntityKey === NodeKey.make("EffectFn:libs/sample/domain/src/order.ts#checkout"),
         )
         const comp05 = res.suggestedEdges.find(
           (s) => s.ruleId === "COMP-05" && s.role === RoleName.make("governing-adr"),
@@ -1028,10 +1027,20 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
     }
 
     // Net multiplicity = 0 -> retracted
-    expect(minHeightReducer([[itemA, 1], [itemA, -1]])).toEqual([])
+    expect(
+      minHeightReducer([
+        [itemA, 1],
+        [itemA, -1],
+      ]),
+    ).toEqual([])
 
     // Net multiplicity < 0 -> retracted
-    expect(minHeightReducer([[itemA, 1], [itemA, -2]])).toEqual([])
+    expect(
+      minHeightReducer([
+        [itemA, 1],
+        [itemA, -2],
+      ]),
+    ).toEqual([])
 
     // Net multiplicity = 0 on one item while other has net > 0 -> only positive item retained
     const mixedHeight = minHeightReducer([
@@ -1052,8 +1061,18 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
     }
 
     // Flix net <= 0 retraction
-    expect(flixConfidenceReducer([[flixItem1, 1], [flixItem1, -1]])).toEqual([])
-    expect(flixConfidenceReducer([[flixItem1, 1], [flixItem1, -3]])).toEqual([])
+    expect(
+      flixConfidenceReducer([
+        [flixItem1, 1],
+        [flixItem1, -1],
+      ]),
+    ).toEqual([])
+    expect(
+      flixConfidenceReducer([
+        [flixItem1, 1],
+        [flixItem1, -3],
+      ]),
+    ).toEqual([])
 
     // Flix mixed retraction
     const mixedFlix = flixConfidenceReducer([
@@ -1272,9 +1291,7 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
           [bcJoined, 1],
         ])
         expect(leftAssoc).toEqual(rightAssoc)
-        expect(leftAssoc[0]?.[0].confidenceMillis).toBe(
-          ConfidenceMillis.make(Math.max(c1, c2, c3)),
-        )
+        expect(leftAssoc[0]?.[0].confidenceMillis).toBe(ConfidenceMillis.make(Math.max(c1, c2, c3)))
       }),
   )
 
@@ -1336,9 +1353,9 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
         const program = Effect.gen(function* () {
           const session = yield* DatalogSession
           const initialInf = yield* session.latestInference
-          expect(
-            initialInf.antiPatterns.some((ap) => ap.ruleId === "domain-requires-infra"),
-          ).toBe(true)
+          expect(initialInf.antiPatterns.some((ap) => ap.ruleId === "domain-requires-infra")).toBe(
+            true,
+          )
 
           // Edit b.ts so fnB requires RepoA (type:service) instead of SqlClient (type:infra)
           const editedBSubgraph = buildHarnessGraph({
@@ -1479,9 +1496,7 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
             },
           })
           const comp03Override = stepWithPriors.inference.suggestedEdges.find(
-            (s) =>
-              s.ruleId === "COMP-03" &&
-              s.targetEntityKey === NodeKey.make("ServiceTag:RepoA"),
+            (s) => s.ruleId === "COMP-03" && s.targetEntityKey === NodeKey.make("ServiceTag:RepoA"),
           )
           expect(comp03Override?.confidenceMillis).toBe(ConfidenceMillis.make(975))
 
@@ -1551,7 +1566,9 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
           })
           const snap = yield* (yield* DatalogSession).snapshot
           expect(
-            snap.graph.nodeIndexByKey.has(NodeKey.make("EffectFn:libs/pkg-a/src/index.ts#fnAUpdated")),
+            snap.graph.nodeIndexByKey.has(
+              NodeKey.make("EffectFn:libs/pkg-a/src/index.ts#fnAUpdated"),
+            ),
           ).toBe(true)
           expect(
             snap.graph.nodeIndexByKey.has(NodeKey.make("EffectFn:libs/pkg-b/src/index.ts#fnB")),
@@ -1562,5 +1579,3 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
       }),
   )
 })
-
-

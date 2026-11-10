@@ -25,7 +25,6 @@ import { getNodeKey, type HarnessGraph, type HarnessNode, type VitestCaseNode } 
 
 export const OmnigraphClient = Omnigraph
 
-
 export class OmnigraphLoadError extends Data.TaggedError("OmnigraphLoadError")<{
   readonly cause: unknown
 }> {}
@@ -108,7 +107,10 @@ export const omnigraphReachableTests = (
 
 const toOmnigraphServerNdjson = (graph: HarnessGraph): string => {
   const nodeLines: Array<string> = []
-  const nodeMetaByKey = new Map<string, { readonly tag: HarnessNode["_tag"]; readonly id: string }>()
+  const nodeMetaByKey = new Map<
+    string,
+    { readonly tag: HarnessNode["_tag"]; readonly id: string }
+  >()
 
   for (const [, node] of Graph.nodes(graph.graph)) {
     const key = getNodeKey(node)

@@ -45,10 +45,7 @@ export const HARNESS_PERA_CONCEPT_LATTICE_CONFIG: ConceptLatticeConfig = {
       id: ConceptId.make("VerificationArtifact"),
       kind: "entity",
       supertypes: [ConceptId.make("Artifact")],
-      playsRoles: [
-        RoleName.make("verifying-test"),
-        RoleName.make("exercising-test"),
-      ],
+      playsRoles: [RoleName.make("verifying-test"), RoleName.make("exercising-test")],
     },
     {
       id: ConceptId.make("ExecutableArtifact"),
@@ -101,10 +98,7 @@ export const HARNESS_PERA_CONCEPT_LATTICE_CONFIG: ConceptLatticeConfig = {
       id: ConceptId.make("TaggedError"),
       kind: "entity",
       supertypes: [ConceptId.make("ContractArtifact")],
-      playsRoles: [
-        RoleName.make("fails-with"),
-        RoleName.make("endpoint-error"),
-      ],
+      playsRoles: [RoleName.make("fails-with"), RoleName.make("endpoint-error")],
     },
     {
       id: ConceptId.make("SchemaDef"),
@@ -140,10 +134,7 @@ export const HARNESS_PERA_CONCEPT_LATTICE_CONFIG: ConceptLatticeConfig = {
       id: ConceptId.make("EarsSpec"),
       kind: "entity",
       supertypes: [ConceptId.make("GovernanceArtifact")],
-      playsRoles: [
-        RoleName.make("specifying-ears"),
-        RoleName.make("specified-target"),
-      ],
+      playsRoles: [RoleName.make("specifying-ears"), RoleName.make("specified-target")],
     },
 
     // Abstract & Concrete Relation Concepts (V_R)
@@ -635,8 +626,8 @@ export const decideConceptLattice = Effect.fn("ConceptLattice.decide")(function*
           // Covariant allowedPlayers: every player in cSpec.allowedPlayers must be a subtype of (or equal to) at least one player in matchedSupRoleSpec.allowedPlayers
           for (const player of cSpec.allowedPlayers) {
             const playerSupertypes = supertypesSetById.get(player)
-            const isSubtypeOfAllowed = matchedSupRoleSpec.allowedPlayers.some((supPlayer) =>
-              playerSupertypes?.has(supPlayer) ?? false,
+            const isSubtypeOfAllowed = matchedSupRoleSpec.allowedPlayers.some(
+              (supPlayer) => playerSupertypes?.has(supPlayer) ?? false,
             )
             if (!isSubtypeOfAllowed) {
               return yield* new ConceptLatticeCycleError({
@@ -753,9 +744,7 @@ export const validateRelationRolesWithLattice = (
   const relationConceptId = ConceptId.make(relationTag)
   const relationEntry = getConceptClosureEntry(lattice, relationConceptId)
   if (relationEntry === undefined || relationEntry.kind !== "relation") {
-    return [
-      `Unknown or non-relation concept tag '${relationTag}' in concept lattice`,
-    ]
+    return [`Unknown or non-relation concept tag '${relationTag}' in concept lattice`]
   }
 
   const roleSpecByRole = new Map<string, RoleSpec>()

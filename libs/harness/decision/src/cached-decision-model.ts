@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
-import { Deferred, Duration, Effect, Exit, Layer, Option, Schema } from "effect"
+import { Deferred, Effect, Layer, Schema } from "effect"
 import * as AiError from "effect/ai/AiError"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { NonNegativeCount, resolveHarnessStateDir } from "@harness/gates"
+import { match } from "ts-pattern"
 
 export const DecisionTaskId = Schema.NonEmptyString.pipe(Schema.brand("DecisionTaskId"))
 export type DecisionTaskId = typeof DecisionTaskId.Type
@@ -56,6 +57,7 @@ const CachedDecisionEntrySchema = Schema.Struct({
   usage: CachedUsageSchema,
   id: Schema.optional(Schema.String),
   modelId: Schema.optional(Schema.String),
+  expiresAt: Schema.optional(Schema.Finite),
 })
 export type CachedDecisionEntry = typeof CachedDecisionEntrySchema.Type
 
@@ -79,6 +81,7 @@ export interface CachedDecisionModelStats {
 export interface CachedDecisionModelOptions {
   readonly taskId?: string | undefined
   readonly promptVersion?: string | undefined
+  readonly modelId?: string | undefined
   readonly cacheFilePath?: string | undefined
   readonly ttlMillis?: number | undefined
   readonly shareGlobalMemoryCache?: boolean | undefined
@@ -120,10 +123,13 @@ export const canonicalJson = (value: unknown): string => {
 export const computeDecisionCacheKey = (params: {
   readonly taskId: string
   readonly promptVersion?: string | undefined
+  readonly modelId?: string | undefined
   readonly input: unknown
 }): DecisionCacheKey => {
   const version = params.promptVersion ?? HARNESS_DECISION_PROMPT_VERSION
-  const payload = `${params.taskId}\0${version}\0${canonicalJson(params.input)}`
+  const modelSegment =
+    params.modelId !== undefined && params.modelId.length > 0 ? `\0${params.modelId}` : ""
+  const payload = `${params.taskId}\0${version}${modelSegment}\0${canonicalJson(params.input)}`
   const digest = createHash("sha256").update(payload, "utf8").digest("hex")
   return DecisionCacheKey.make(digest)
 }
@@ -150,11 +156,18 @@ const loadStoreIntoMap = (
       try: () => {
         const raw = readFileSync(cacheFilePath, "utf8")
         const decoded = decodeDecisionCacheStore(raw)
-        if (Option.isSome(decoded)) {
-          for (const [, entry] of Object.entries(decoded.value.entries)) {
-            targetMap.set(entry.cacheKey, entry)
-          }
-        }
+        match(decoded)
+          .with({ _tag: "Some" }, ({ value }) => {
+            const now = Date.now()
+            for (const [, entry] of Object.entries(value.entries)) {
+              if (entry.expiresAt !== undefined && now > entry.expiresAt) {
+                continue
+              }
+              targetMap.set(entry.cacheKey, entry)
+            }
+          })
+          .with({ _tag: "None" }, () => undefined)
+          .exhaustive()
       },
       catch: () => undefined,
     }).pipe(Effect.ignore),
@@ -178,7 +191,9 @@ const persistMapToDisk = (
           version: promptVersion,
           entries,
         }
-        writeFileSync(cacheFilePath, JSON.stringify(store, null, 2), "utf8")
+        const tmpPath = `${cacheFilePath}.${process.pid}.tmp`
+        writeFileSync(tmpPath, JSON.stringify(store), "utf8")
+        renameSync(tmpPath, cacheFilePath)
       },
       catch: () => undefined,
     }).pipe(Effect.ignore),
@@ -215,21 +230,23 @@ export const decideCachedDecisionLookup = Effect.fn("CachedDecisionModel.decide"
 
   const outcome = yield* DecisionModel.decide(ProbeDecisionDefinition, {
     input: { canonicalInputJson: input.canonicalInputJson },
-  }).pipe(
-    Effect.option,
-    Effect.catchCause(() => Effect.succeedNone),
-  )
+  }).pipe(Effect.option)
 
-  globalDecisionMemoryCache.set(cacheKey, {
-    cacheKey,
-    taskId: input.taskId,
-    promptVersion: input.promptVersion,
-    answers: Option.isSome(outcome) ? outcome.value.answers : {},
-    usage: {
-      inputTokens: Option.isSome(outcome) ? (outcome.value.usage.inputTokens ?? 0) : 0,
-      outputTokens: Option.isSome(outcome) ? (outcome.value.usage.outputTokens ?? 0) : 0,
-    },
-  })
+  match(outcome)
+    .with({ _tag: "Some" }, ({ value }) => {
+      globalDecisionMemoryCache.set(cacheKey, {
+        cacheKey,
+        taskId: input.taskId,
+        promptVersion: input.promptVersion,
+        answers: value.answers,
+        usage: {
+          inputTokens: value.usage.inputTokens ?? 0,
+          outputTokens: value.usage.outputTokens ?? 0,
+        },
+      })
+    })
+    .with({ _tag: "None" }, () => undefined)
+    .exhaustive()
 
   return {
     cacheKey,
@@ -267,10 +284,7 @@ export const makeCachedDecisionModelLayer = (
 
       return DecisionModel.DecisionModel.of({
         [DecisionModel.TypeId]: DecisionModel.TypeId,
-        decide: <
-          Input extends Schema.Constraint,
-          Decisions extends Record<string, Decision.Any>,
-        >(
+        decide: <Input extends Schema.Constraint, Decisions extends Record<string, Decision.Any>>(
           definition: Decision.Definition<Input, Decisions>,
           decideOptions: DecisionModel.DecideOptions<Input>,
         ): Effect.Effect<
@@ -286,23 +300,28 @@ export const makeCachedDecisionModelLayer = (
             const cacheKey = computeDecisionCacheKey({
               taskId: taskIdStr,
               promptVersion,
+              modelId: options?.modelId,
               input: decideOptions.input,
             })
 
             const nowMs = Date.now()
             const expAt = memoryExpiresAt.get(cacheKey)
-            if (expAt !== undefined && nowMs > expAt) {
+            const cached = memoryCache.get(cacheKey)
+            if (
+              (expAt !== undefined && nowMs > expAt) ||
+              (cached?.expiresAt !== undefined && nowMs > cached.expiresAt)
+            ) {
               memoryCache.delete(cacheKey)
               memoryExpiresAt.delete(cacheKey)
             }
 
-            const cached = memoryCache.get(cacheKey)
-            if (cached !== undefined) {
+            const cachedEntry = memoryCache.get(cacheKey)
+            if (cachedEntry !== undefined) {
               return {
-                answers: cached.answers as Decision.Answers<Decisions>,
+                answers: cachedEntry.answers as Decision.Answers<Decisions>,
                 usage: new DecisionModel.DecisionUsage({
-                  inputTokens: cached.usage.inputTokens,
-                  outputTokens: cached.usage.outputTokens,
+                  inputTokens: cachedEntry.usage.inputTokens,
+                  outputTokens: cachedEntry.usage.outputTokens,
                 }),
                 metadata: {},
               }
@@ -324,18 +343,16 @@ export const makeCachedDecisionModelLayer = (
             const deferred = yield* Deferred.make<CachedDecisionEntry, AiError.AiError>()
             inFlight.set(cacheKey, deferred)
 
-            const cachedUnderlying = yield* Effect.cachedWithTTL(
-              inner.decide(definition, decideOptions),
-              Duration.millis(ttlMillis),
-            )
-
-            const response = yield* cachedUnderlying.pipe(
+            const response = yield* inner.decide(definition, decideOptions).pipe(
               Effect.onExit((exit) =>
                 Effect.sync(() => {
                   inFlight.delete(cacheKey)
                 }).pipe(
                   Effect.andThen(
-                    Exit.isFailure(exit) ? Deferred.failCause(deferred, exit.cause) : Effect.void,
+                    match(exit)
+                      .with({ _tag: "Failure" }, ({ cause }) => Deferred.failCause(deferred, cause))
+                      .with({ _tag: "Success" }, () => Effect.void)
+                      .exhaustive(),
                   ),
                 ),
               ),
@@ -350,11 +367,15 @@ export const makeCachedDecisionModelLayer = (
                 inputTokens: response.usage.inputTokens ?? 0,
                 outputTokens: response.usage.outputTokens ?? 0,
               },
+              ...(options?.modelId !== undefined ? { modelId: options.modelId } : {}),
+              expiresAt: Date.now() + ttlMillis,
             }
 
             memoryCache.set(cacheKey, entry)
             memoryExpiresAt.set(cacheKey, Date.now() + ttlMillis)
-            globalDecisionMemoryCache.set(cacheKey, entry)
+            if (options?.shareGlobalMemoryCache === true) {
+              globalDecisionMemoryCache.set(cacheKey, entry)
+            }
             if (options?.cacheFilePath !== undefined) {
               persistMapToDisk(options.cacheFilePath, memoryCache, promptVersion)
             }

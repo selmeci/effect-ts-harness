@@ -1,8 +1,9 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Layer, Schema } from "effect"
+import * as AiError from "effect/ai/AiError"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import {
   CachedDecisionLookupInput,
@@ -19,7 +20,9 @@ import {
   DecisionTaskId,
   evaluateBatchCachedDecisions,
   HARNESS_DECISION_PROMPT_VERSION,
+  IdiomRouterV1,
   makeCachedDecisionModelLayer,
+  makeFailingDecisionModelLayer,
   makeMockDecisionModelLayer,
   resolveDecisionCachePath,
   routeStep,
@@ -44,9 +47,7 @@ const makeCountingDecisionModelLayer = (counter: { count: number }, yieldTicks: 
               answers[key] = { _tag: "Probability", probability: 0.9 }
             } else if (decision._tag === "Classify") {
               const labels = Object.keys(decision.criteria)
-              const chosenLabel = labels.includes("schema")
-                ? "schema"
-                : (labels[0] ?? "effect")
+              const chosenLabel = labels.includes("schema") ? "schema" : (labels[0] ?? "effect")
               const probabilities: Record<string, number> = {}
               for (const l of labels) {
                 probabilities[l] = l === chosenLabel ? 1 : 0
@@ -197,6 +198,221 @@ describe("CachedDecisionModel — Content-Addressable Caching & Request Coalesci
         expect(first.cacheKey).toBe(second.cacheKey)
         expect(first.cacheStatus).toBe("miss")
         expect(second.cacheStatus).toBe("hit")
+      }),
+  )
+
+  it.effect(
+    "does not cache failures in decideCachedDecisionLookup or makeCachedDecisionModelLayer",
+    () =>
+      Effect.gen(function* () {
+        clearGlobalDecisionCache()
+        const sample = {
+          taskId: DecisionTaskId.make("test-failure-caching"),
+          promptVersion: HARNESS_DECISION_PROMPT_VERSION,
+          canonicalInputJson: CanonicalInputJson.make('{"input":"test"}'),
+        }
+
+        // 1. decideCachedDecisionLookup with failing layer does not cache failure
+        const failingLayer = makeFailingDecisionModelLayer("Network timeout")
+        const miss1 = yield* decideCachedDecisionLookup(sample).pipe(Effect.provide(failingLayer))
+        expect(miss1.cacheStatus).toBe("miss")
+
+        // Next call with mock layer should STILL be a miss (because failure was not cached)
+        const mockLayer = makeMockDecisionModelLayer()
+        const miss2 = yield* decideCachedDecisionLookup(sample).pipe(Effect.provide(mockLayer))
+        expect(miss2.cacheStatus).toBe("miss")
+
+        // Now that mockLayer succeeded, it should be cached as a hit
+        const hit = yield* decideCachedDecisionLookup(sample).pipe(Effect.provide(mockLayer))
+        expect(hit.cacheStatus).toBe("hit")
+
+        // 2. makeCachedDecisionModelLayer with dynamic failing/succeeding model
+        let fails = true
+        const counter = { count: 0 }
+        const dynamicLayer = Layer.effect(
+          DecisionModel.DecisionModel,
+          DecisionModel.make({
+            decide: (options) =>
+              Effect.gen(function* () {
+                if (fails) {
+                  return yield* AiError.make({
+                    module: "DecisionModel",
+                    method: "decide",
+                    reason: new AiError.UnknownError({ description: "Model down" }),
+                  })
+                }
+                counter.count += 1
+                const answers: Record<string, DecisionModel.ProviderAnswer> = {}
+                for (const [key, decision] of Object.entries(options.decisions)) {
+                  if (decision._tag === "Probability") {
+                    answers[key] = { _tag: "Probability", probability: 0.95 }
+                  } else if (decision._tag === "Classify") {
+                    const labels = Object.keys(decision.criteria)
+                    const chosenLabel = labels.includes("schema")
+                      ? "schema"
+                      : (labels[0] ?? "effect")
+                    const probabilities: Record<string, number> = {}
+                    for (const l of labels) {
+                      probabilities[l] = l === chosenLabel ? 1 : 0
+                    }
+                    answers[key] = { _tag: "Classify", label: chosenLabel, probabilities }
+                  }
+                }
+                return {
+                  answers,
+                  usage: { inputTokens: 10, outputTokens: 2 },
+                  metadata: {},
+                }
+              }),
+          }),
+        )
+
+        const cachedLayer = wrapDecisionModelLayer(dynamicLayer, {
+          promptVersion: "fail-cache-test",
+        })
+
+        const runDecide = (step: string) =>
+          DecisionModel.decide(IdiomRouterV1, {
+            input: { planStep: step },
+          })
+
+        yield* Effect.gen(function* () {
+          // Call 1: fails
+          const exit1 = yield* runDecide("Perform failure check").pipe(Effect.exit)
+          expect(exit1._tag).toBe("Failure")
+          expect(counter.count).toBe(0)
+
+          // Switch to working model
+          fails = false
+
+          // Call 2: succeeds and increments counter to 1 (not served from cache!)
+          const res2 = yield* runDecide("Perform failure check")
+          expect(res2.answers.block.label).toBe("schema")
+          expect(counter.count).toBe(1)
+
+          // Call 3: hits cache and counter remains 1
+          const res3 = yield* runDecide("Perform failure check")
+          expect(res3.answers.block.label).toBe("schema")
+          expect(counter.count).toBe(1)
+        }).pipe(Effect.provide(cachedLayer))
+      }),
+  )
+
+  it("produces distinct cache keys for different modelId values", () => {
+    const keyModelA = computeDecisionCacheKey({
+      taskId: "route",
+      modelId: "gpt-4o",
+      input: { prompt: "hello" },
+    })
+    const keyModelB = computeDecisionCacheKey({
+      taskId: "route",
+      modelId: "claude-3-5-sonnet",
+      input: { prompt: "hello" },
+    })
+    const keyNoModel = computeDecisionCacheKey({
+      taskId: "route",
+      input: { prompt: "hello" },
+    })
+
+    expect(keyModelA).not.toBe(keyModelB)
+    expect(keyModelA).not.toBe(keyNoModel)
+    expect(keyModelB).not.toBe(keyNoModel)
+  })
+
+  it.effect(
+    "expires cached entries when ttlMillis elapses and re-invokes the underlying model",
+    () => {
+      const counter = { count: 0 }
+      const baseLayer = makeCountingDecisionModelLayer(counter)
+      const shortTtlLayer = wrapDecisionModelLayer(baseLayer, {
+        ttlMillis: 5,
+        promptVersion: "ttl-test-v1",
+      })
+
+      return Effect.gen(function* () {
+        // Call 1 -> count: 1
+        const r1 = yield* routeStep("TTL check step")
+        expect(r1).toBe("schema")
+        expect(counter.count).toBe(1)
+
+        // Immediate Call 2 -> hits cache, count stays 1
+        const r2 = yield* routeStep("TTL check step")
+        expect(r2).toBe("schema")
+        expect(counter.count).toBe(1)
+
+        // Wait 25ms (> 5ms ttl)
+        yield* Effect.callback<void>((resume) => {
+          setTimeout(() => resume(Effect.void), 25)
+        })
+
+        // Call 3 -> expired, re-invokes model, count: 2
+        const r3 = yield* routeStep("TTL check step")
+        expect(r3).toBe("schema")
+        expect(counter.count).toBe(2)
+      }).pipe(Effect.provide(shortTtlLayer))
+    },
+  )
+
+  it.effect("handles corrupt JSON in cache file gracefully without throwing", () =>
+    Effect.gen(function* () {
+      const tmpDir = mkdtempSync(join(tmpdir(), "harness-corrupt-json-"))
+      const cacheFile = join(tmpDir, "decisions-v1.json")
+      writeFileSync(cacheFile, "CORRUPT NOT JSON {[[[", "utf8")
+
+      const counter = { count: 0 }
+      const baseLayer = makeCountingDecisionModelLayer(counter)
+      const diskLayer = wrapDecisionModelLayer(baseLayer, {
+        cacheFilePath: cacheFile,
+        promptVersion: HARNESS_DECISION_PROMPT_VERSION,
+      })
+
+      const res = yield* routeStep("Test after corrupt cache").pipe(Effect.provide(diskLayer))
+      expect(res).toBe("schema")
+      expect(counter.count).toBe(1)
+
+      rmSync(tmpDir, { recursive: true, force: true })
+    }),
+  )
+
+  it.effect(
+    "does not populate globalDecisionMemoryCache when shareGlobalMemoryCache is omitted or false",
+    () =>
+      Effect.gen(function* () {
+        clearGlobalDecisionCache()
+        const counter = { count: 0 }
+        const baseLayer = makeCountingDecisionModelLayer(counter)
+
+        // 1. Without shareGlobalMemoryCache
+        const unsharedLayer = wrapDecisionModelLayer(baseLayer, {
+          promptVersion: "unshared-v1",
+        })
+        yield* routeStep("Evaluate unshared step").pipe(Effect.provide(unsharedLayer))
+        expect(counter.count).toBe(1)
+
+        // The global cache should remain empty
+        const lookup = yield* decideCachedDecisionLookup({
+          taskId: DecisionTaskId.make("route"),
+          promptVersion: DecisionPromptVersion.make("unshared-v1"),
+          canonicalInputJson: CanonicalInputJson.make('{"planStep":"Evaluate unshared step"}'),
+        }).pipe(Effect.provide(baseLayer))
+        expect(lookup.cacheStatus).toBe("miss")
+
+        // 2. With shareGlobalMemoryCache: true
+        clearGlobalDecisionCache()
+        const sharedLayer = wrapDecisionModelLayer(baseLayer, {
+          promptVersion: "shared-v1",
+          shareGlobalMemoryCache: true,
+        })
+        yield* routeStep("Evaluate shared step").pipe(Effect.provide(sharedLayer))
+        expect(counter.count).toBe(3) // 1 from unshared + 1 from probe + 1 from shared
+
+        // Another instance sharing global memory cache should hit memory cache without re-invoking
+        const sharedLayer2 = wrapDecisionModelLayer(baseLayer, {
+          promptVersion: "shared-v1",
+          shareGlobalMemoryCache: true,
+        })
+        yield* routeStep("Evaluate shared step").pipe(Effect.provide(sharedLayer2))
+        expect(counter.count).toBe(3) // No increment! Hit globalDecisionMemoryCache
       }),
   )
 })

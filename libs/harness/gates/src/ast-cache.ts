@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
-import { Effect, Option, Schema } from "effect"
+import { Effect, Schema } from "effect"
+import { match } from "ts-pattern"
 import { NonNegativeCount, ts } from "@harness/graph"
 import { checkMigrationSqlSafety, decideMigrationSafety } from "./migration-check.js"
 import { resolveHarnessStateDir } from "./worktree.js"
@@ -104,9 +105,7 @@ export const AstGateDecisionReport = Schema.Struct({
 })
 export type AstGateDecisionReport = typeof AstGateDecisionReport.Type
 
-const decodeAstGateCacheStore = Schema.decodeOption(
-  Schema.fromJsonString(AstGateCacheStoreSchema),
-)
+const decodeAstGateCacheStore = Schema.decodeOption(Schema.fromJsonString(AstGateCacheStoreSchema))
 
 const inMemoryGateCache = new Map<string, AstGateCacheEntry>()
 const inMemorySourceFileCache = new Map<
@@ -119,12 +118,8 @@ let totalSourceFileParses = 0
 export const computeContentSha256 = (content: string): ContentSha256 =>
   ContentSha256.make(createHash("sha256").update(content, "utf8").digest("hex"))
 
-const makeAstGateCacheKey = (
-  filePath: string,
-  packageTag: string,
-  contentSha256: string,
-  ruleVersion: string,
-): string => `${filePath}\0${packageTag}\0${contentSha256}\0${ruleVersion}`
+const makeAstGateCacheKey = (filePath: string, packageTag: string): string =>
+  `${filePath}\0${packageTag}`
 
 export const resolveAstGateCachePath = (repoRoot: string): AstSourceFilePath =>
   AstSourceFilePath.make(join(resolveHarnessStateDir(repoRoot), "cache", "ast-gates-v1.json"))
@@ -142,18 +137,16 @@ export const loadAstGateCacheFromDisk = (cacheFilePath: string): void => {
       try: () => {
         const raw = readFileSync(cacheFilePath, "utf8")
         const decoded = decodeAstGateCacheStore(raw)
-        if (Option.isSome(decoded)) {
-          for (const [, entry] of Object.entries(decoded.value.entries)) {
-            const pkgTag = entry.packageTag ?? inferPackageTagFromPath(entry.filePath)
-            const key = makeAstGateCacheKey(
-              entry.filePath,
-              pkgTag,
-              entry.contentSha256,
-              entry.ruleVersion,
-            )
-            inMemoryGateCache.set(key, entry)
-          }
-        }
+        match(decoded)
+          .with({ _tag: "Some" }, ({ value }) => {
+            for (const [, entry] of Object.entries(value.entries)) {
+              const pkgTag = entry.packageTag ?? inferPackageTagFromPath(entry.filePath)
+              const key = makeAstGateCacheKey(entry.filePath, pkgTag)
+              inMemoryGateCache.set(key, entry)
+            }
+          })
+          .with({ _tag: "None" }, () => undefined)
+          .exhaustive()
       },
       catch: () => undefined,
     }).pipe(Effect.ignore),
@@ -178,7 +171,9 @@ export const saveAstGateCacheToDisk = (
           version: ruleVersion,
           entries,
         }
-        writeFileSync(cacheFilePath, JSON.stringify(payload, null, 2), "utf8")
+        const tmpPath = `${cacheFilePath}.${process.pid}.tmp`
+        writeFileSync(tmpPath, JSON.stringify(payload), "utf8")
+        renameSync(tmpPath, cacheFilePath)
       },
       catch: () => undefined,
     }).pipe(Effect.ignore),
@@ -192,7 +187,11 @@ export const clearAstGateCache = (): void => {
   totalSourceFileParses = 0
 }
 
+export const getAstGateCacheSize = (): number => inMemoryGateCache.size
+
 export const getAstGateSourceFileParseCount = (): number => totalSourceFileParses
+
+export const MAX_SOURCE_FILE_CACHE_SIZE = 500
 
 export const getOrCreateCachedSourceFile = (
   filePath: string,
@@ -212,6 +211,15 @@ export const getOrCreateCachedSourceFile = (
     true,
     filePath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   )
+  if (
+    !inMemorySourceFileCache.has(filePath) &&
+    inMemorySourceFileCache.size >= MAX_SOURCE_FILE_CACHE_SIZE
+  ) {
+    const oldestKey = inMemorySourceFileCache.keys().next().value
+    if (oldestKey !== undefined) {
+      inMemorySourceFileCache.delete(oldestKey)
+    }
+  }
   inMemorySourceFileCache.set(filePath, { contentSha256: hash, sourceFile })
   return { sourceFile, freshlyParsed: true }
 }
@@ -313,7 +321,7 @@ const visitSourceFileSinglePass = (
   const isDiscriminantCondition = (cond: ts.Expression): boolean => {
     const text = cond.getText(sourceFile)
     if (
-      /\b(?:Option\.isSome|Option\.isNone|Either\.isRight|Either\.isLeft|Result\.isSuccess|Result\.isFailure)\s*\(/.test(
+      /\b(?:Option\.isSome|Option\.isNone|Either\.isRight|Either\.isLeft|Result\.isSuccess|Result\.isFailure|Exit\.isSuccess|Exit\.isFailure)\s*\(/.test(
         text,
       )
     ) {
@@ -497,7 +505,10 @@ const visitSourceFileSinglePass = (
         )
       ) {
         const fullSourceText = sourceFile.text
-        if (!fullSourceText.includes("Cause.findErrorOption") && !fullSourceText.includes(".cause")) {
+        if (
+          !fullSourceText.includes("Cause.findErrorOption") &&
+          !fullSourceText.includes(".cause")
+        ) {
           violations.push({
             category: GateCategory.make("test-integrity"),
             rule: GateRuleId.make("vacuous-error-assertion"),
@@ -515,10 +526,7 @@ const visitSourceFileSinglePass = (
     // 6. BinaryExpression: JSON.stringify(a) === JSON.stringify(b) in tests
     if (ts.isBinaryExpression(node) && isTestFile) {
       const op = node.operatorToken.kind
-      if (
-        op === ts.SyntaxKind.EqualsEqualsEqualsToken ||
-        op === ts.SyntaxKind.EqualsEqualsToken
-      ) {
+      if (op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.EqualsEqualsToken) {
         const leftText = node.left.getText(sourceFile)
         const rightText = node.right.getText(sourceFile)
         if (leftText.startsWith("JSON.stringify(") && rightText.startsWith("JSON.stringify(")) {
@@ -601,10 +609,16 @@ export const evaluateAstGateFiles = (
   for (const file of input.files) {
     const pkgTag = file.packageTag ?? inferPackageTagFromPath(file.filePath)
     const contentSha256 = computeContentSha256(file.content)
-    const cacheKey = makeAstGateCacheKey(file.filePath, pkgTag, contentSha256, ruleVersion)
+    const cacheKey = makeAstGateCacheKey(file.filePath, pkgTag)
     const cached = inMemoryGateCache.get(cacheKey)
 
-    if (cached !== undefined) {
+    const isHit =
+      cached !== undefined &&
+      cached.contentSha256 === contentSha256 &&
+      cached.ruleVersion === ruleVersion &&
+      (cached.packageTag ?? pkgTag) === pkgTag
+
+    if (isHit) {
       cacheHitCount += 1
       for (const v of cached.violations) {
         if (categoryFilter === undefined || v.category === categoryFilter) {
@@ -646,8 +660,7 @@ export const evaluateAstGateFiles = (
   }
 
   return {
-    verdict:
-      allViolations.length === 0 ? GateVerdict.make("clean") : GateVerdict.make("violated"),
+    verdict: allViolations.length === 0 ? GateVerdict.make("clean") : GateVerdict.make("violated"),
     violations: allViolations,
     cacheHitCount: NonNegativeCount.make(cacheHitCount),
     parsedFileCount: NonNegativeCount.make(parsedFileCount),
@@ -692,6 +705,7 @@ export const AstGateCache = {
   loadFromDisk: loadAstGateCacheFromDisk,
   saveToDisk: saveAstGateCacheToDisk,
   clear: clearAstGateCache,
+  getCacheSize: getAstGateCacheSize,
   getSourceFileParseCount: getAstGateSourceFileParseCount,
   getOrCreateCachedSourceFile,
 } as const

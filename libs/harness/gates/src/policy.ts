@@ -480,6 +480,23 @@ export const classifyCommand = (command: string): GuardVerdict => {
         return "allow"
       }
     }
+    if (
+      command.includes("&&") &&
+      !command.includes("||") &&
+      !command.includes(";") &&
+      !command.includes("|") &&
+      !command.includes("\n")
+    ) {
+      const parts = command.split("&&").map((p) => p.trim())
+      if (
+        parts.length >= 2 &&
+        parts.every(
+          (p) => p.length > 0 && isCommandAllowed(p) && !/^\s*git\s+(?:add|commit|push)\b/.test(p),
+        )
+      ) {
+        return "allow"
+      }
+    }
     return "escalate"
   }
   return isCommandAllowed(command) ? "allow" : "escalate"

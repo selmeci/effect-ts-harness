@@ -1,11 +1,7 @@
 import * as Graph from "effect/Graph"
 import * as Option from "effect/Option"
 import { match } from "ts-pattern"
-import {
-  findTestsReaching,
-  type HarnessGraph,
-  resolveNode,
-} from "./graph-engine.js"
+import { findTestsReaching, type HarnessGraph, resolveNode } from "./graph-engine.js"
 import {
   getArchimateRelationForRole,
   getNodeKey,
@@ -22,11 +18,7 @@ export type ArchiMateLayer =
   | "Technology"
   | "Implementation"
 
-export type ArchiMateAspect =
-  | "ActiveStructure"
-  | "Behavior"
-  | "PassiveStructure"
-  | "Motivation"
+export type ArchiMateAspect = "ActiveStructure" | "Behavior" | "PassiveStructure" | "Motivation"
 
 export type ArchiMateElementType =
   | "DriverOrConstraint"
@@ -128,17 +120,15 @@ export interface OntologyImpactResult {
 }
 
 export const tokenizeCamelOrPath = (raw: string): ReadonlyArray<string> =>
-  raw
-    .split(/[._$/:-]+/)
-    .flatMap((part) =>
-      part
-        .replace(/([a-z])([A-Z])/g, "$1 $2")
-        .replace(/([0-9])([A-Z][a-z])/g, "$1 $2")
-        .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
-        .trim()
-        .split(/\s+/)
-        .filter((tok) => tok.length > 0),
-    )
+  raw.split(/[._$/:-]+/).flatMap((part) =>
+    part
+      .replace(/([a-z])([A-Z])/g, "$1 $2")
+      .replace(/([0-9])([A-Z][a-z])/g, "$1 $2")
+      .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+      .trim()
+      .split(/\s+/)
+      .filter((tok) => tok.length > 0),
+  )
 
 const INFRA_OR_CLOUD_TOKENS = new Set<string>([
   "KV",

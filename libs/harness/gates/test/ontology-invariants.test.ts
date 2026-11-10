@@ -827,8 +827,7 @@ spans:
         expect(reportUntested.clean).toBe(false)
         const unverified = reportUntested.findings.find(
           (f) =>
-            f.kind === "ontology-unverified-requirement" &&
-            f.nodeId === "sample:SPEC-0002:REQ-1.1",
+            f.kind === "ontology-unverified-requirement" && f.nodeId === "sample:SPEC-0002:REQ-1.1",
         )
         expect(unverified).toBeDefined()
         expect(unverified?.message).toContain(

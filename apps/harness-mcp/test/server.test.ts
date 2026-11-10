@@ -1,4 +1,5 @@
 import * as fs from "node:fs"
+import * as net from "node:net"
 import * as os from "node:os"
 import * as path from "node:path"
 import { describe, expect, it } from "vitest"
@@ -12,6 +13,7 @@ import {
   executeTool,
   isPathInsideRoot,
   runDefaultLspDiagnostics,
+  startHarnessDaemonServer,
 } from "../src/server.js"
 
 describe("harness-mcp tools", () => {
@@ -647,5 +649,68 @@ describe("harness-mcp tools", () => {
         firstDiag.includes("[lsp-exit-") ||
         firstDiag.includes("[lsp-exception]"),
     ).toBe(true)
+  })
+
+  it("startHarnessDaemonServer handles ping, ast-gates, and rejects path traversal outside workspace root", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-mcp-daemon-"))
+    const sampleDir = path.join(tmpDir, "libs", "sample", "domain", "src")
+    fs.mkdirSync(sampleDir, { recursive: true })
+    fs.writeFileSync(path.join(sampleDir, "index.ts"), "export const x = 1\n", "utf-8")
+
+    const daemon = await startHarnessDaemonServer(tmpDir)
+    const sendDaemonPayload = (payload: string): Promise<Record<string, unknown>> =>
+      Effect.runPromise(
+        Effect.callback<Record<string, unknown>>((resume) => {
+          const client = net.createConnection(daemon.socketPath)
+          let buf = ""
+          client.on("connect", () => {
+            client.write(payload + "\n")
+          })
+          client.on("data", (chunk) => {
+            buf += chunk.toString("utf8")
+            const idx = buf.indexOf("\n")
+            if (idx !== -1) {
+              client.end()
+              resume(Effect.succeed(JSON.parse(buf.slice(0, idx)) as Record<string, unknown>))
+            }
+          })
+        }),
+      )
+
+    try {
+      const pingRes = await sendDaemonPayload(
+        JSON.stringify({ id: "p1", command: "ping", repoRoot: tmpDir }),
+      )
+      expect(pingRes).toMatchObject({ id: "p1", ok: true, status: "warm" })
+
+      const astRes = await sendDaemonPayload(
+        JSON.stringify({
+          id: "a1",
+          command: "ast-gates",
+          repoRoot: tmpDir,
+          files: ["libs/sample/domain/src/index.ts"],
+        }),
+      )
+      expect(astRes).toMatchObject({ id: "a1", ok: true })
+
+      const traversalRes = await sendDaemonPayload(
+        JSON.stringify({
+          id: "t1",
+          command: "ast-gates",
+          repoRoot: tmpDir,
+          files: ["../../../etc/passwd"],
+        }),
+      )
+      expect(traversalRes).toMatchObject({
+        id: "t1",
+        ok: false,
+      })
+      expect(String(traversalRes.error)).toContain(
+        "Path traversal outside workspace root is forbidden",
+      )
+    } finally {
+      await daemon.close()
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
   })
 })

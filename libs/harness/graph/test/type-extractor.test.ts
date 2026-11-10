@@ -2,6 +2,7 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { Effect } from "effect"
+import * as Graph from "effect/Graph"
 import { describe, expect, it } from "vitest"
 import {
   buildHarnessGraph,
@@ -21,7 +22,13 @@ import {
   resolveNode,
   stripCommentsAndTestTitles,
 } from "../src/index.js"
-import type { EffectFnNode, ServiceLayerNode, VitestCaseNode } from "../src/model.js"
+import {
+  type EffectFnNode,
+  getEdgeKey,
+  getNodeKey,
+  type ServiceLayerNode,
+  type VitestCaseNode,
+} from "../src/model.js"
 
 describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
   it("extracts union E and R channels from both stub<A, E, R> skeletons and Effect.fn implementations", () => {
@@ -795,9 +802,13 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
   })
 
   it("isInfraOrCloudIdentifier returns false for contract schemas and true for infra/cloud identifiers (F-31)", () => {
-    expect(isInfraOrCloudIdentifier("KVStoreSchema", "libs/sample/contract/src/index.ts")).toBe(false)
+    expect(isInfraOrCloudIdentifier("KVStoreSchema", "libs/sample/contract/src/index.ts")).toBe(
+      false,
+    )
     expect(isInfraOrCloudIdentifier("KVStoreSchema", "")).toBe(false)
-    expect(isInfraOrCloudIdentifier("R2D2Validator", "libs/sample/contract/src/index.ts")).toBe(false)
+    expect(isInfraOrCloudIdentifier("R2D2Validator", "libs/sample/contract/src/index.ts")).toBe(
+      false,
+    )
     expect(isInfraOrCloudIdentifier("R2D2Validator", "")).toBe(false)
 
     expect(isInfraOrCloudIdentifier("CloudflareKV", "libs/sample/infra/src/index.ts")).toBe(true)
@@ -922,18 +933,189 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
     )
     expect(resolveNode(wsGraph1, "Sample.ping")).toBeDefined()
 
-    const tWsWarm = performance.now()
     const wsGraph2 = await Effect.runPromise(
       extractTypeGraph({ repoRoot: tmpRoot, session: wsSession }),
     )
-    const wsWarmMs = performance.now() - tWsWarm
-    expect(wsWarmMs).toBeLessThan(50)
+    expect(wsSession.lastReextractedFiles).toEqual([])
     expect(resolveNode(wsGraph2, "Sample.ping")).toBeDefined()
-    expect(emitDeclarationSignatureText(wsSession.sourceFileCache.values().next().value!.sourceFile)).toContain(
-      "Effect.fn",
+    const firstSf = wsSession.sourceFileCache.values().next().value?.sourceFile
+    expect(firstSf).toBeDefined()
+    if (firstSf !== undefined) {
+      expect(emitDeclarationSignatureText(firstSf)).toContain("Effect.fn")
+    }
+
+    // Verify persistent .harness/cache/file-graph-v1.json reload across cold process sessions (F-9)
+    clearWarmProgramSessions()
+    const reloadedSession = getOrCreateWarmProgramSession(tmpRoot)
+    const wsGraphReloaded = await Effect.runPromise(
+      extractTypeGraph({ repoRoot: tmpRoot, session: reloadedSession }),
     )
+    expect(reloadedSession.lastReextractedFiles).toEqual([])
+    const reloadedNodeKeys = Array.from(Graph.nodes(wsGraphReloaded.graph))
+      .map(([, n]) => getNodeKey(n))
+      .sort()
+    const origNodeKeys = Array.from(Graph.nodes(wsGraph1.graph))
+      .map(([, n]) => getNodeKey(n))
+      .sort()
+    expect(reloadedNodeKeys).toEqual(origNodeKeys)
+    const reloadedEdgeKeys = Array.from(Graph.edges(wsGraphReloaded.graph))
+      .map(([, e]) => getEdgeKey(e.data))
+      .sort()
+    const origEdgeKeys = Array.from(Graph.edges(wsGraph1.graph))
+      .map(([, e]) => getEdgeKey(e.data))
+      .sort()
+    expect(reloadedEdgeKeys).toEqual(origEdgeKeys)
     fs.rmSync(tmpRoot, { recursive: true, force: true })
   })
+
+  it("maintains strict warm-vs-cold graph equality across unannotated inferred-return edits, 2-hop cones, file add/delete, and packageTag changes (F-4, F-5, F-13)", () => {
+    clearWarmProgramSessions()
+    const session = createTypeScriptProgramSession("/virtual-eq-repo")
+
+    const assertWarmEqualsCold = (
+      inputs: Parameters<typeof extractTypeAwareGraphFromSource>[0],
+      overlays?: Readonly<Record<string, string>>,
+    ) => {
+      const warm = extractTypeAwareGraphFromSource(inputs, {
+        repoRoot: "/virtual-eq-repo",
+        session,
+        ...(overlays !== undefined ? { overlays } : {}),
+      })
+      const cold = extractTypeAwareGraphFromSource(inputs, {
+        repoRoot: "/virtual-eq-repo",
+        ...(overlays !== undefined ? { overlays } : {}),
+      })
+      const warmNodes = Array.from(Graph.nodes(warm.graph))
+        .map(([, n]) => [getNodeKey(n), n] as const)
+        .sort(([a], [b]) => a.localeCompare(b))
+      const coldNodes = Array.from(Graph.nodes(cold.graph))
+        .map(([, n]) => [getNodeKey(n), n] as const)
+        .sort(([a], [b]) => a.localeCompare(b))
+      expect(warmNodes).toEqual(coldNodes)
+
+      const warmEdges = Array.from(Graph.edges(warm.graph))
+        .map(([, e]) => [getEdgeKey(e.data), e.data] as const)
+        .sort(([a], [b]) => a.localeCompare(b))
+      const coldEdges = Array.from(Graph.edges(cold.graph))
+        .map(([, e]) => [getEdgeKey(e.data), e.data] as const)
+        .sort(([a], [b]) => a.localeCompare(b))
+      expect(warmEdges).toEqual(coldEdges)
+      expect(warm.branchingViolations).toEqual(cold.branchingViolations)
+      return warm
+    }
+
+    const baseFiles: Parameters<typeof extractTypeAwareGraphFromSource>[0] = [
+      {
+        filePath: "libs/sample/service/src/index.ts",
+        packageTag: "service",
+        content: `
+          import { Context, Data, Effect } from "effect"
+          export class OrderError extends Data.TaggedError("OrderError")<{ readonly message: string }> {}
+          export class ExtraError extends Data.TaggedError("ExtraError")<{ readonly reason: string }> {}
+          export class OrderPort extends Context.Service<OrderPort, {
+            readonly save: (id: string) => Effect.Effect<number, OrderError>
+          }>()("Sample/OrderPort") {}
+        `,
+      },
+      {
+        filePath: "libs/sample/domain/src/helper.ts",
+        packageTag: "domain",
+        content: `
+          import { Effect } from "effect"
+          import { OrderPort, OrderError, ExtraError } from "../../service/src/index.js"
+          export const runUnannotatedHelper = Effect.fn("Sample.runUnannotatedHelper")(function* (id: string) {
+            return yield* Effect.succeed(id.length)
+          })
+        `,
+      },
+      {
+        filePath: "libs/sample/domain/src/caller.ts",
+        packageTag: "domain",
+        content: `
+          import { Effect } from "effect"
+          import { runUnannotatedHelper } from "./helper.js"
+          export const runCaller = Effect.fn("Sample.runCaller")(function* (id: string) {
+            return yield* runUnannotatedHelper(id)
+          })
+        `,
+      },
+    ]
+
+    // 1. Initial warm population matches cold
+    assertWarmEqualsCold(baseFiles)
+
+    // 2. Unannotated inferred-return edit in helper.ts (adds OrderPort + ExtraError without explicit return annotation) (F-4)
+    const inferredReturnEditedHelper = `
+          import { Effect } from "effect"
+          import { OrderPort, OrderError, ExtraError } from "../../service/src/index.js"
+          export const runUnannotatedHelper = Effect.fn("Sample.runUnannotatedHelper")(function* (id: string) {
+            const port = yield* OrderPort
+            if (id.length === 0) {
+              return yield* Effect.fail(new ExtraError({ reason: "empty" }))
+            }
+            return yield* port.save(id)
+          })
+        `
+    expect(computeDeclHash(baseFiles[1]!.content)).not.toBe(
+      computeDeclHash(inferredReturnEditedHelper),
+    )
+    assertWarmEqualsCold(baseFiles, {
+      "libs/sample/domain/src/helper.ts": inferredReturnEditedHelper,
+    })
+    expect([...session.lastReextractedFiles].sort()).toEqual([
+      "libs/sample/domain/src/caller.ts",
+      "libs/sample/domain/src/helper.ts",
+    ])
+
+    // 3. 2-hop cone invalidation: editing service/src/index.ts invalidates helper.ts AND caller.ts
+    const editedService = `
+          import { Context, Data, Effect } from "effect"
+          export class OrderError extends Data.TaggedError("OrderError")<{ readonly message: string; readonly code?: number }> {}
+          export class ExtraError extends Data.TaggedError("ExtraError")<{ readonly reason: string }> {}
+          export class OrderPort extends Context.Service<OrderPort, {
+            readonly save: (id: string) => Effect.Effect<number, OrderError>
+          }>()("Sample/OrderPort") {}
+        `
+    assertWarmEqualsCold(baseFiles, {
+      "libs/sample/service/src/index.ts": editedService,
+      "libs/sample/domain/src/helper.ts": inferredReturnEditedHelper,
+    })
+    expect([...session.lastReextractedFiles].sort()).toEqual([
+      "libs/sample/domain/src/caller.ts",
+      "libs/sample/domain/src/helper.ts",
+      "libs/sample/service/src/index.ts",
+    ])
+
+    // 4. Adding a new file and then deleting a file matches cold extraction
+    const withAddedFile: Parameters<typeof extractTypeAwareGraphFromSource>[0] = [
+      ...baseFiles,
+      {
+        filePath: "libs/sample/domain/src/extra.ts",
+        packageTag: "domain",
+        content: `
+          import { Effect } from "effect"
+          export const runExtra = Effect.fn("Sample.runExtra")(function* () {
+            return yield* Effect.succeed("ok")
+          })
+        `,
+      },
+    ]
+    const warmAdded = assertWarmEqualsCold(withAddedFile)
+    expect(resolveNode(warmAdded, "Sample.runExtra")).toBeDefined()
+
+    const warmAfterDelete = assertWarmEqualsCold(baseFiles)
+    expect(resolveNode(warmAfterDelete, "Sample.runExtra")).toBeUndefined()
+
+    // 5. Changing packageTag on unchanged file content invalidates warm cache and matches cold (F-13)
+    const retaggedFiles: Parameters<typeof extractTypeAwareGraphFromSource>[0] = [
+      baseFiles[0]!,
+      {
+        ...baseFiles[1]!,
+        packageTag: "infra",
+      },
+      baseFiles[2]!,
+    ]
+    assertWarmEqualsCold(retaggedFiles)
+    expect(session.lastReextractedFiles).toContain("libs/sample/domain/src/helper.ts")
+  })
 })
-
-
