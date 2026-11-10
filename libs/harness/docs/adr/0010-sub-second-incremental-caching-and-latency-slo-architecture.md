@@ -8,12 +8,15 @@ deciders:
 scope: harness
 enforced_by:
   - libs/harness/graph/src/type-extractor.ts
+  - libs/harness/graph/src/structural-search.ts
   - libs/harness/gates/src/ast-cache.ts
   - libs/harness/gates/src/migration-check.ts
   - libs/harness/gates/src/bench-check.ts
   - libs/harness/decision/src/cached-decision-model.ts
+  - apps/harness-mcp/src/server.ts
 spans:
   - TypeExtractor.extractWorkspace
+  - StructuralSearch.decide
   - AstGateCache.decide
   - SyntaxBans.decide
   - TestIntegrity.decide
@@ -83,9 +86,10 @@ Rely exclusively on Nx task-level caching without per-file `FileGraphFragment`, 
 
 ### Deterministic Enforcement
 
-| Rule                                                                                                  | Enforced By                                                                        | Gate / Mechanism                                   | Governed Symbols                                                                                                                         |
-| :---------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------- | :------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------- |
-| Warm `TypeScriptProgramSession`, `declHash` early cut-off, and $O(\|T\| + \|F\|)$ token reachability  | `libs/harness/graph/src/type-extractor.ts`                                         | `pnpm harness verify` & `pnpm harness bench`       | `TypeExtractor.extractWorkspace`                                                                                                         |
-| Unified single-pass AST gate visitor and content-addressable `.harness/cache/ast-gates-v1.json` cache | `libs/harness/gates/src/ast-cache.ts`, `libs/harness/gates/src/migration-check.ts` | `pnpm harness gc --strict` & `pnpm harness verify` | `AstGateCache.decide`, `SyntaxBans.decide`, `TestIntegrity.decide`, `MigrationSafety.decide`, `DomainPurity.decide`, `EffectLaws.decide` |
-| Content-addressable `DecisionModel` memoization and concurrent request coalescing                     | `libs/harness/decision/src/cached-decision-model.ts`                               | `pnpm harness verify`                              | `CachedDecisionModel.decide`                                                                                                             |
-| Stage latency `p50` and `p95` SLO budget verification                                                 | `libs/harness/gates/src/bench-check.ts`                                            | `pnpm harness bench` & `pnpm harness verify`       | `HarnessBench.decide`, `LatencySloViolationError`                                                                                        |
+| Rule                                                                                                               | Enforced By                                                                        | Gate / Mechanism                                   | Governed Symbols                                                                                                                         |
+| :----------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------- | :------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------- |
+| Warm `TypeScriptProgramSession`, `declHash` early cut-off, and $O(\|T\| + \|F\|)$ token reachability               | `libs/harness/graph/src/type-extractor.ts`                                         | `pnpm harness verify` & `pnpm harness bench`       | `TypeExtractor.extractWorkspace`                                                                                                         |
+| Scoped AST and line-locator search across TypeScript and governance/SQL/JSON files with path-traversal containment | `libs/harness/graph/src/structural-search.ts`, `apps/harness-mcp/src/server.ts`    | `pnpm harness gc --strict` & `pnpm harness verify` | `StructuralSearch.decide`                                                                                                                |
+| Unified single-pass AST gate visitor and content-addressable `.harness/cache/ast-gates-v1.json` cache              | `libs/harness/gates/src/ast-cache.ts`, `libs/harness/gates/src/migration-check.ts` | `pnpm harness gc --strict` & `pnpm harness verify` | `AstGateCache.decide`, `SyntaxBans.decide`, `TestIntegrity.decide`, `MigrationSafety.decide`, `DomainPurity.decide`, `EffectLaws.decide` |
+| Content-addressable `DecisionModel` memoization and concurrent request coalescing                                  | `libs/harness/decision/src/cached-decision-model.ts`                               | `pnpm harness verify`                              | `CachedDecisionModel.decide`                                                                                                             |
+| Stage latency `p50` and `p95` SLO budget verification                                                              | `libs/harness/gates/src/bench-check.ts`                                            | `pnpm harness bench` & `pnpm harness verify`       | `HarnessBench.decide`, `LatencySloViolationError`                                                                                        |

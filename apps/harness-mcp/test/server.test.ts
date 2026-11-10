@@ -157,6 +157,68 @@ describe("harness-mcp tools", () => {
     expect(results.some((r) => r.file.includes("libs/sample/domain/src/index.ts"))).toBe(true)
   })
 
+  it("executes structural search with filePath scoped to .ts file", async () => {
+    const results = (await executeTool(
+      "harness_structural_search",
+      {
+        pattern: "export const greet = $$$",
+        filePath: "libs/sample/domain/src/index.ts",
+      },
+      { graph },
+    )) as Array<{ file: string; line: number; text: string }>
+
+    expect(Array.isArray(results)).toBe(true)
+    expect(results.length).toBe(1)
+    expect(results[0]?.file).toBe("libs/sample/domain/src/index.ts")
+    expect(results[0]?.line).toBe(14)
+  })
+
+  it("executes structural search with filePath scoped to .md file", async () => {
+    const results = (await executeTool(
+      "harness_structural_search",
+      {
+        pattern: "ADR-0001",
+        filePath: "libs/sample/docs/adr/0001-cloudflare-d1-do-sqlite-and-traceparent-boundaries.md",
+      },
+      { graph },
+    )) as Array<{ file: string; line: number; text: string }>
+
+    expect(Array.isArray(results)).toBe(true)
+    expect(results.length).toBeGreaterThan(0)
+    expect(
+      results.every(
+        (r) =>
+          r.file ===
+          "libs/sample/docs/adr/0001-cloudflare-d1-do-sqlite-and-traceparent-boundaries.md",
+      ),
+    ).toBe(true)
+    expect(results[0]?.text).toContain("ADR-0001")
+  })
+
+  it("rejects path-traversal search and returns empty array", async () => {
+    const filePathResults = (await executeTool(
+      "harness_structural_search",
+      {
+        pattern: "export const",
+        filePath: "../outside.ts",
+      },
+      { graph },
+    )) as Array<unknown>
+
+    expect(filePathResults).toEqual([])
+
+    const pathsResults = (await executeTool(
+      "harness_structural_search",
+      {
+        pattern: "export const",
+        paths: ["../../outside.ts"],
+      },
+      { graph },
+    )) as Array<unknown>
+
+    expect(pathsResults).toEqual([])
+  })
+
   const makeMockDecisionModel = (
     outcome:
       | { readonly fitsAny: number; readonly block: string }

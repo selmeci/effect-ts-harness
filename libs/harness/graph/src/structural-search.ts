@@ -1,7 +1,55 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { Lang, parse } from "@ast-grep/napi"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
+import { NonNegativeCount } from "./model.js"
+
+export const StructuralSearchPattern = Schema.NonEmptyString.pipe(
+  Schema.brand("StructuralSearchPattern"),
+)
+export type StructuralSearchPattern = typeof StructuralSearchPattern.Type
+
+export const StructuralSearchFilePath = Schema.NonEmptyString.pipe(
+  Schema.brand("StructuralSearchFilePath"),
+)
+export type StructuralSearchFilePath = typeof StructuralSearchFilePath.Type
+
+export const StructuralSearchSubDir = Schema.NonEmptyString.pipe(
+  Schema.brand("StructuralSearchSubDir"),
+)
+export type StructuralSearchSubDir = typeof StructuralSearchSubDir.Type
+
+export const StructuralSearchLineNumber = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(1)),
+  Schema.brand("StructuralSearchLineNumber"),
+)
+export type StructuralSearchLineNumber = typeof StructuralSearchLineNumber.Type
+
+export const StructuralSearchMatchText = Schema.String.pipe(
+  Schema.brand("StructuralSearchMatchText"),
+)
+export type StructuralSearchMatchText = typeof StructuralSearchMatchText.Type
+
+export const StructuralSearchRangePoint = Schema.Struct({
+  line: StructuralSearchLineNumber,
+  column: StructuralSearchLineNumber,
+  index: NonNegativeCount,
+})
+export type StructuralSearchRangePoint = typeof StructuralSearchRangePoint.Type
+
+export const StructuralSearchRange = Schema.Struct({
+  start: StructuralSearchRangePoint,
+  end: StructuralSearchRangePoint,
+})
+export type StructuralSearchRange = typeof StructuralSearchRange.Type
+
+export const StructuralSearchResultSchema = Schema.Struct({
+  file: StructuralSearchFilePath,
+  line: StructuralSearchLineNumber,
+  column: StructuralSearchLineNumber,
+  text: StructuralSearchMatchText,
+  range: StructuralSearchRange,
+})
 
 export interface StructuralSearchResult {
   readonly file: string
@@ -14,52 +62,39 @@ export interface StructuralSearchResult {
   }
 }
 
+export const StructuralSearchInput = Schema.Struct({
+  pattern: StructuralSearchPattern,
+  repoRoot: Schema.optional(StructuralSearchFilePath),
+  filePath: Schema.optional(StructuralSearchFilePath),
+  paths: Schema.optional(Schema.Array(StructuralSearchFilePath)),
+  subDirs: Schema.optional(Schema.Array(StructuralSearchSubDir)),
+})
+export type StructuralSearchInput = typeof StructuralSearchInput.Type
+
 export interface StructuralSearchOptions {
   readonly pattern: string
-  readonly repoRoot?: string
-  readonly subDirs?: ReadonlyArray<string>
+  readonly repoRoot?: string | undefined
+  readonly filePath?: string | undefined
+  readonly paths?: ReadonlyArray<string> | undefined
+  readonly subDirs?: ReadonlyArray<string> | undefined
 }
 
-const findWorkspaceTsFiles = (
-  repoRoot: string,
-  subDirs: ReadonlyArray<string>,
-): ReadonlyArray<string> => {
-  const results: Array<string> = []
-
-  const walk = (current: string): void => {
-    if (!fs.existsSync(current)) return
-    const entries = fs.readdirSync(current, { withFileTypes: true })
-    for (const entry of entries) {
-      const name = entry.name
-      if (
-        name === "node_modules" ||
-        name === "dist" ||
-        name === "repos" ||
-        name === ".nx" ||
-        name === ".git" ||
-        name === ".harness"
-      ) {
-        continue
-      }
-      const full = path.join(current, name)
-      if (entry.isDirectory()) {
-        walk(full)
-      } else if (
-        entry.isFile() &&
-        (name.endsWith(".ts") || name.endsWith(".tsx")) &&
-        !name.endsWith(".d.ts")
-      ) {
-        const rel = path.relative(repoRoot, full).replace(/\\/g, "/")
-        results.push(rel)
-      }
+const isAllowedFile = (fileName: string, allowJsJson: boolean): boolean => {
+  if (fileName.endsWith(".d.ts")) {
+    return false
+  }
+  if (fileName.endsWith(".ts") || fileName.endsWith(".tsx")) {
+    return true
+  }
+  if (fileName.endsWith(".md") || fileName.endsWith(".sql")) {
+    return true
+  }
+  if (allowJsJson) {
+    if (fileName.endsWith(".js") || fileName.endsWith(".mjs") || fileName.endsWith(".json")) {
+      return true
     }
   }
-
-  for (const subDir of subDirs) {
-    walk(path.join(repoRoot, subDir))
-  }
-
-  return results
+  return false
 }
 
 const resolveRepoRoot = (startDir: string): string => {
@@ -73,48 +108,280 @@ const resolveRepoRoot = (startDir: string): string => {
   return startDir
 }
 
-export const structuralSearch = (
+const tryOrUndefined = <A>(fn: () => A): A | undefined =>
+  Effect.runSync(Effect.try(fn).pipe(Effect.orElseSucceed(() => undefined)))
+
+const isContainedInRoot = (repoRoot: string, candidate: string): string | undefined => {
+  const resolved = path.resolve(repoRoot, candidate)
+  const rel = path.relative(repoRoot, resolved).replace(/\\/g, "/")
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    return undefined
+  }
+  if (fs.existsSync(resolved)) {
+    const realInside = tryOrUndefined(() => {
+      const realRepo = fs.realpathSync.native(repoRoot)
+      const realTarget = fs.realpathSync.native(resolved)
+      const realRel = path.relative(realRepo, realTarget).replace(/\\/g, "/")
+      return !realRel.startsWith("..") && !path.isAbsolute(realRel)
+    })
+    if (realInside !== true) {
+      return undefined
+    }
+  }
+  return rel
+}
+
+const walkDir = (
+  repoRoot: string,
+  absDir: string,
+  allowJsJson: boolean,
+  accum: Set<string>,
+): void => {
+  if (!fs.existsSync(absDir)) return
+  const entries = tryOrUndefined(() => fs.readdirSync(absDir, { withFileTypes: true }))
+  if (entries === undefined) return
+  for (const entry of entries) {
+    const name = entry.name
+    if (
+      name === "node_modules" ||
+      name === "dist" ||
+      name === "repos" ||
+      name === ".nx" ||
+      name === ".git" ||
+      name === ".harness"
+    ) {
+      continue
+    }
+    const full = path.join(absDir, name)
+    if (entry.isDirectory()) {
+      walkDir(repoRoot, full, allowJsJson, accum)
+    }
+    if (entry.isFile() && isAllowedFile(name, allowJsJson)) {
+      const rel = isContainedInRoot(repoRoot, full)
+      if (rel !== undefined && rel.length > 0) {
+        accum.add(rel)
+      }
+    }
+  }
+}
+
+const collectSearchFiles = (
+  repoRoot: string,
   options: StructuralSearchOptions,
+): ReadonlyArray<string> => {
+  const hasSpecificFiles =
+    (options.filePath !== undefined && options.filePath.trim().length > 0) ||
+    (options.paths !== undefined && options.paths.length > 0)
+
+  const allowJsJson =
+    hasSpecificFiles || (options.subDirs !== undefined && options.subDirs.length > 0)
+
+  const accum = new Set<string>()
+
+  if (hasSpecificFiles) {
+    const rawPaths: Array<string> = []
+    if (options.filePath !== undefined && options.filePath.trim().length > 0) {
+      rawPaths.push(options.filePath.trim())
+    }
+    if (options.paths !== undefined) {
+      for (const p of options.paths) {
+        if (typeof p === "string" && p.trim().length > 0) {
+          rawPaths.push(p.trim())
+        }
+      }
+    }
+
+    for (const rawPath of rawPaths) {
+      const rel = isContainedInRoot(repoRoot, rawPath)
+      if (rel === undefined) {
+        // Escapes repo root -> reject/skip
+        continue
+      }
+      const abs = path.resolve(repoRoot, rawPath)
+      if (!fs.existsSync(abs)) {
+        continue
+      }
+      const stat = tryOrUndefined(() => fs.statSync(abs))
+      if (stat === undefined) {
+        continue
+      }
+      if (stat.isFile()) {
+        const base = path.basename(abs)
+        if (isAllowedFile(base, allowJsJson)) {
+          accum.add(rel)
+        }
+      }
+      if (stat.isDirectory()) {
+        walkDir(repoRoot, abs, allowJsJson, accum)
+      }
+    }
+  } else {
+    const subDirs = options.subDirs ?? ["libs", "apps"]
+    for (const subDir of subDirs) {
+      if (typeof subDir !== "string" || subDir.trim().length === 0) {
+        continue
+      }
+      const rel = isContainedInRoot(repoRoot, subDir.trim())
+      if (rel === undefined) {
+        // Escapes repo root -> reject/skip
+        continue
+      }
+      const abs = path.resolve(repoRoot, subDir.trim())
+      if (!fs.existsSync(abs)) {
+        continue
+      }
+      const stat = tryOrUndefined(() => fs.statSync(abs))
+      if (stat === undefined) {
+        continue
+      }
+      if (stat.isDirectory()) {
+        walkDir(repoRoot, abs, allowJsJson, accum)
+      }
+      if (stat.isFile()) {
+        const base = path.basename(abs)
+        if (isAllowedFile(base, allowJsJson)) {
+          accum.add(rel)
+        }
+      }
+    }
+  }
+
+  return Array.from(accum).sort()
+}
+
+const searchLinesDeterministic = (
+  relFile: string,
+  source: string,
+  pattern: string,
 ): ReadonlyArray<StructuralSearchResult> => {
-  const repoRoot = options.repoRoot ?? resolveRepoRoot(process.cwd())
-  const subDirs = options.subDirs ?? ["libs", "apps"]
-  const files = findWorkspaceTsFiles(repoRoot, subDirs)
   const results: Array<StructuralSearchResult> = []
+  const lines = source.split("\n")
+  let currentIndex = 0
 
-  for (const relFile of files) {
-    const fullPath = path.join(repoRoot, relFile)
-    if (!fs.existsSync(fullPath)) continue
-    const source = fs.readFileSync(fullPath, "utf-8")
-    const root = parse(Lang.TypeScript, source).root()
-    const matches = root.findAll(options.pattern)
-
-    for (const match of matches) {
-      const range = match.range()
+  for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+    const rawLine = lines[lineIdx]!
+    const lineText = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine
+    let colIdx = lineText.indexOf(pattern)
+    while (colIdx !== -1) {
+      const line = lineIdx + 1
+      const column = colIdx + 1
+      const index = currentIndex + colIdx
       results.push({
         file: relFile,
-        line: range.start.line + 1,
-        column: range.start.column + 1,
-        text: match.text(),
+        line,
+        column,
+        text: lineText.trim(),
         range: {
           start: {
-            line: range.start.line + 1,
-            column: range.start.column + 1,
-            index: range.start.index,
+            line,
+            column,
+            index,
           },
           end: {
-            line: range.end.line + 1,
-            column: range.end.column + 1,
-            index: range.end.index,
+            line,
+            column: column + pattern.length,
+            index: index + pattern.length,
           },
         },
       })
+      colIdx = lineText.indexOf(pattern, colIdx + Math.max(1, pattern.length))
+    }
+    currentIndex += rawLine.length + 1
+  }
+
+  return results
+}
+
+const DEFAULT_MAX_RESULTS = 1000
+
+export const structuralSearch = (
+  options: StructuralSearchOptions,
+): ReadonlyArray<StructuralSearchResult> => {
+  if (options.pattern.trim().length === 0) {
+    return []
+  }
+
+  const repoRoot = path.resolve(options.repoRoot ?? resolveRepoRoot(process.cwd()))
+  const files = collectSearchFiles(repoRoot, options)
+  const results: Array<StructuralSearchResult> = []
+
+  for (const relFile of files) {
+    if (results.length >= DEFAULT_MAX_RESULTS) {
+      break
+    }
+    const fullPath = path.join(repoRoot, relFile)
+    if (!fs.existsSync(fullPath)) continue
+    const source = tryOrUndefined(() => fs.readFileSync(fullPath, "utf-8"))
+    if (source === undefined) {
+      continue
+    }
+
+    const isTs = (relFile.endsWith(".ts") || relFile.endsWith(".tsx")) && !relFile.endsWith(".d.ts")
+
+    if (isTs) {
+      const lang = relFile.endsWith(".tsx") ? Lang.Tsx : Lang.TypeScript
+      const matches =
+        tryOrUndefined(() => parse(lang, source).root().findAll(options.pattern)) ?? []
+
+      if (matches.length > 0) {
+        for (const match of matches) {
+          if (results.length >= DEFAULT_MAX_RESULTS) {
+            break
+          }
+          const range = match.range()
+          results.push({
+            file: relFile,
+            line: range.start.line + 1,
+            column: range.start.column + 1,
+            text: match.text(),
+            range: {
+              start: {
+                line: range.start.line + 1,
+                column: range.start.column + 1,
+                index: range.start.index,
+              },
+              end: {
+                line: range.end.line + 1,
+                column: range.end.column + 1,
+                index: range.end.index,
+              },
+            },
+          })
+        }
+      } else {
+        const lineMatches = searchLinesDeterministic(relFile, source, options.pattern)
+        for (const m of lineMatches) {
+          if (results.length >= DEFAULT_MAX_RESULTS) {
+            break
+          }
+          results.push(m)
+        }
+      }
+    } else {
+      const lineMatches = searchLinesDeterministic(relFile, source, options.pattern)
+      for (const m of lineMatches) {
+        if (results.length >= DEFAULT_MAX_RESULTS) {
+          break
+        }
+        results.push(m)
+      }
     }
   }
 
   return results
 }
 
+export const decideStructuralSearch = Effect.fn("StructuralSearch.decide")(function* (
+  options: StructuralSearchOptions,
+): Effect.fn.Return<ReadonlyArray<StructuralSearchResult>> {
+  return yield* Effect.sync(() => structuralSearch(options))
+})
+
 export const structuralSearchEffect = (
   options: StructuralSearchOptions,
-): Effect.Effect<ReadonlyArray<StructuralSearchResult>> =>
-  Effect.sync(() => structuralSearch(options))
+): Effect.Effect<ReadonlyArray<StructuralSearchResult>> => decideStructuralSearch(options)
+
+export const StructuralSearch = {
+  decide: decideStructuralSearch,
+  search: structuralSearch,
+} as const

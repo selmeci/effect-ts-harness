@@ -2299,6 +2299,15 @@ const handleBench = (
     const initialGraph = yield* extractTypeGraph({ repoRoot, session })
     const coldExtractMs = Math.max(0, performance.now() - coldExtractStart)
 
+    // Ensure ts-morph Program in session is primed for the target file when hydrated from disk cache
+    yield* extractTypeGraph({
+      repoRoot,
+      session,
+      overlays: {
+        [benchRelFile]: `${sampleContent}\n// warm-prime\n`,
+      },
+    })
+
     const warmExtractSamples: Array<number> = []
     for (let i = 0; i < iterations; i++) {
       const t0 = performance.now()

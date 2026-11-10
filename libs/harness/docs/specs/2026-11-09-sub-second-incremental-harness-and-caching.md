@@ -11,12 +11,15 @@ informed_by:
   - harness:ADR-0010
 enforced_by:
   - libs/harness/graph/src/type-extractor.ts
+  - libs/harness/graph/src/structural-search.ts
   - libs/harness/gates/src/ast-cache.ts
   - libs/harness/gates/src/migration-check.ts
   - libs/harness/gates/src/bench-check.ts
   - libs/harness/decision/src/cached-decision-model.ts
+  - apps/harness-mcp/src/server.ts
 spans:
   - TypeExtractor.extractWorkspace
+  - StructuralSearch.decide
   - AstGateCache.decide
   - SyntaxBans.decide
   - TestIntegrity.decide
@@ -41,10 +44,11 @@ This specification defines the behavioral requirements for Milestone 3 (`RFC-000
 3. **`PERF-03` (`libs/harness/decision/src/cached-decision-model.ts`):** Content-addressable `CachedDecisionModel` wrapper around `DecisionModel` computing `cacheKey = SHA256(taskId + "\0" + promptVersion + "\0" + canonicalJson(input))`, backed by `.harness/cache/decisions-v1.json` and concurrent request coalescing.
 4. **`PERF-04` & `PERF-05` (`apps/harness-cli/src/index.ts` & `apps/harness-mcp/src/server.ts`):** Incremental affected-only `verify` fast-path over $\Delta F$ since the last valid `.harness/verify-stamp.json` (or `HEAD`), and optional Unix domain socket daemon delegation (`.harness/daemon.sock`) with seamless in-process fallback.
 5. **`PERF-06` (`libs/harness/gates/src/bench-check.ts` & `apps/harness-cli/src/index.ts`):** Branded schemas and pure `HarnessBench.decide` (`R = never`) latency SLO gate evaluating `StageLatencyMeasurement` against `StageLatencyBudget` (`p50BudgetMs`, `p95BudgetMs`), returning `HarnessBenchReport` or failing with `LatencySloViolationError`, wired to `pnpm harness bench`.
+6. **Scoped Structural & Line-Locator Search (`libs/harness/graph/src/structural-search.ts` & `apps/harness-mcp/src/server.ts`):** Path-scoped AST and line-locator search (`StructuralSearch.decide`) enabling specialist review subagents to locate AST patterns, internal symbols, comments, and governance/SQL/JSON lines in targeted files (`filePath`, `paths`, `subDirs`) without blind full-file pagination or external browser REPL fallbacks.
 
 - **Reused Contracts / Errors:** `HarnessGraph`, `BranchingViolation`, `MigrationViolation`, `DatalogSession`
 - **Reused Services:** `DecisionModel`
-- **New Capabilities Needed:** `TypeScriptProgramSession`, `TypeExtractor.extractWorkspace`, `AstGateCache`, `AstGateCache.decide`, `SyntaxBans.decide`, `TestIntegrity.decide`, `MigrationSafety.decide`, `DomainPurity.decide`, `EffectLaws.decide`, `CachedDecisionModel.decide`, `BenchStageName`, `LatencyMillis`, `StageLatencyBudget`, `StageLatencyMeasurement`, `HarnessBenchReport`, `LatencySloViolationError`, `HarnessBench.decide`
+- **New Capabilities Needed:** `TypeScriptProgramSession`, `TypeExtractor.extractWorkspace`, `StructuralSearch.decide`, `AstGateCache`, `AstGateCache.decide`, `SyntaxBans.decide`, `TestIntegrity.decide`, `MigrationSafety.decide`, `DomainPurity.decide`, `EffectLaws.decide`, `CachedDecisionModel.decide`, `BenchStageName`, `LatencyMillis`, `StageLatencyBudget`, `StageLatencyMeasurement`, `HarnessBenchReport`, `LatencySloViolationError`, `HarnessBench.decide`
 
 ## Goal
 
@@ -94,6 +98,14 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | REQ-4.1 | State-driven       | **While** evaluating a `HarnessBenchInput` containing non-empty `StageLatencyMeasurement` and matching `StageLatencyBudget` records, the `HarnessBench.decide` decider **shall** compute stage pass/fail status purely in-memory with `R = never` and return a `HarnessBenchReport` when all measured stages have `sampleCount >= 1`, a matching budget entry, and `p50Ms <= p50BudgetMs` and `p95Ms <= p95BudgetMs`. | `HarnessBench.decide`      | `PropertyTest` |
 | REQ-4.2 | Unwanted behaviour | **If** any `StageLatencyMeasurement` in `HarnessBenchInput` has `sampleCount === 0`, lacks a matching `StageLatencyBudget` entry, or exceeds its configured `p50BudgetMs` (`p50Ms > p50BudgetMs`) or `p95BudgetMs` (`p95Ms > p95BudgetMs`), **then** the `HarnessBench.decide` span **shall** fail with a typed `LatencySloViolationError` listing every violating stage and budget threshold.                        | `LatencySloViolationError` | `PropertyTest` |
 
+### 5 · Scoped Structural & Line-Locator Search (`StructuralSearch.decide`)
+
+**Source (`harness:ADR-0010`):** Specialist review and research subagents require fast, path-scoped AST and line-locator search across TypeScript and governance/SQL/JSON files without blind 800-line pagination or external browser REPL workarounds.
+
+| ID      | Pattern      | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Effect Symbol             | Verification   |
+| :------ | :----------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------ | :------------- |
+| REQ-5.1 | State-driven | **While** evaluating a `StructuralSearchOptions` input across workspace files or explicit `filePath`, `paths`, and `subDirs` targets, the `StructuralSearch.decide` decider **shall** enforce repository-root path containment (ignoring any path escaping `repoRoot`), match TypeScript AST patterns via `@ast-grep/napi`, and fall back to deterministic 1-indexed line and column matching when locating comments, string literals, or patterns in `.md`, `.sql`, `.json`, or `.js` files. | `StructuralSearch.decide` | `PropertyTest` |
+
 ## Assumptions
 
 - **REQ-1.1:** File contents on disk or in `overlays` are UTF-8 TypeScript/TSX modules whose SHA-256 digest uniquely identifies their lexical content.
@@ -116,8 +128,9 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ```mermaid
 flowchart TD
-    subgraph WarmTypeExtractor["PERF-01: Warm TypeScriptProgramSession & declHash Cut-Off"]
+    subgraph WarmTypeExtractor["PERF-01: Warm TypeScriptProgramSession & Scoped Search"]
         ExtractWorkspace["TypeExtractor.extractWorkspace"]
+        StructuralSearchDecide["StructuralSearch.decide (R = never)"]
     end
 
     subgraph UnifiedAstGates["PERF-02: Unified Single-Pass AstGateCache (.harness/cache/ast-gates-v1.json)"]

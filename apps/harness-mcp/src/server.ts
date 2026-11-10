@@ -38,7 +38,7 @@ import {
   resolveNode,
   saveGraphSnapshot,
   type SemanticEdgePriors,
-  structuralSearch,
+  decideStructuralSearch,
   writeGraphHeadMeta,
 } from "@harness/graph"
 import {
@@ -146,14 +146,25 @@ const resolveDefaultRepoRoot = (args?: Record<string, unknown>): string => {
   if (typeof args?.repoRoot === "string" && args.repoRoot.length > 0) {
     return findRepoRoot(args.repoRoot)
   }
-  const candidate =
-    typeof args?.file === "string" && path.isAbsolute(args.file)
+  const rawFileCandidate =
+    typeof args?.file === "string"
       ? args.file
+      : typeof args?.filePath === "string"
+        ? args.filePath
+        : Array.isArray(args?.paths) && typeof args.paths[0] === "string"
+          ? args.paths[0]
+          : undefined
+  const candidate =
+    typeof rawFileCandidate === "string" && path.isAbsolute(rawFileCandidate)
+      ? rawFileCandidate
       : typeof args?.project === "string" && path.isAbsolute(args.project)
         ? args.project
         : undefined
   if (candidate !== undefined) {
-    return findRepoRoot(path.dirname(candidate))
+    const candidateRoot = findRepoRoot(path.dirname(candidate))
+    if (fs.existsSync(path.join(candidateRoot, "pnpm-workspace.yaml"))) {
+      return candidateRoot
+    }
   }
   const cwdRoot = findRepoRoot(process.cwd())
   if (cwdRoot !== SERVER_REPO_ROOT) {
@@ -404,8 +415,17 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
     }
     case "harness_structural_search": {
       const pattern = (args as { pattern: string }).pattern
+      const filePath = (args as { filePath?: string | undefined }).filePath
+      const paths = (args as { paths?: ReadonlyArray<string> | undefined }).paths
+      const subDirs = (args as { subDirs?: ReadonlyArray<string> | undefined }).subDirs
       const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-      result = structuralSearch({ pattern, repoRoot: root })
+      result = yield* decideStructuralSearch({
+        pattern,
+        repoRoot: root,
+        filePath,
+        paths,
+        subDirs,
+      })
       break
     }
     case "harness_route": {
@@ -882,7 +902,25 @@ export const createServer = (options?: ServerOptions): McpServer => {
     {
       pattern: z
         .string()
+        .min(1)
+        .max(2048)
         .describe("ast-grep pattern to search for across workspace TypeScript files"),
+      filePath: z
+        .string()
+        .min(1)
+        .max(512)
+        .optional()
+        .describe("Optional relative or absolute file path to scope search to a single file"),
+      paths: z
+        .array(z.string().min(1).max(512))
+        .max(100)
+        .optional()
+        .describe("Optional list of file or directory paths to scope search"),
+      subDirs: z
+        .array(z.string().min(1).max(256))
+        .max(50)
+        .optional()
+        .describe("Optional workspace subdirectories to search (defaults to ['libs', 'apps'])"),
     },
     (args) =>
       Effect.runPromise(

@@ -409,4 +409,38 @@ describe("Antigravity adapter & plugin configuration", () => {
       }
     }
   })
+
+  it("enforces MCP tooling & navigation protocol and bans grep_search across all specialist reviewer agents in both adapters", () => {
+    const reviewerNames = [
+      "effect-ears-test-reviewer",
+      "effect-security-reviewer",
+      "effect-reliability-reviewer",
+      "effect-adversarial-reviewer",
+    ]
+    const adapterDirs = [
+      resolve(pluginDir, "agents"),
+      resolve(repoRoot, "adapters/claude-code/agents"),
+    ]
+
+    for (const dir of adapterDirs) {
+      for (const name of reviewerNames) {
+        const filePath = resolve(dir, `${name}.md`)
+        expect(existsSync(filePath), `Reviewer file must exist: ${filePath}`).toBe(true)
+        const content = readFileSync(filePath, "utf8")
+        expect(content, `Expected ${filePath} to contain protocol header`).toContain(
+          "## MCP Tooling & Navigation Protocol",
+        )
+        expect(content, `Expected ${filePath} to reference harness_structural_search`).toContain(
+          "harness_structural_search",
+        )
+        expect(content, `Expected ${filePath} to forbid chrome-devtools-mcp`).toContain(
+          "chrome-devtools-mcp",
+        )
+        expect(
+          content,
+          `Expected ${filePath} not to reference nonexistent grep_search`,
+        ).not.toContain("grep_search")
+      }
+    }
+  })
 })
