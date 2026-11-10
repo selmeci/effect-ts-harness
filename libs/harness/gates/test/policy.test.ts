@@ -46,6 +46,14 @@ describe("guard policy", () => {
     expect(classifyCommand("git status | grep modified")).toBe("allow")
     expect(classifyCommand("git log -n 10 | head -n 5")).toBe("allow")
     expect(classifyCommand("find libs -name '*.ts' | wc -l")).toBe("allow")
+    expect(classifyCommand("find adapters libs/harness/docs -maxdepth 5 -type f | sort")).toBe(
+      "allow",
+    )
+    expect(
+      classifyCommand(
+        "diff -u adapters/claude-code/agents/effect-ears-test-reviewer.md adapters/antigravity/plugins/effect-harness/agents/effect-ears-test-reviewer.md",
+      ),
+    ).toBe("allow")
   })
 
   it("denies rm -rf outside the workspace, .env and force pushes", () => {
@@ -75,6 +83,11 @@ describe("guard policy", () => {
     expect(
       classifyCommand(
         "git status --short && node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts gc --strict",
+      ),
+    ).toBe("allow")
+    expect(
+      classifyCommand(
+        "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts report --clear && find adapters libs/harness/docs -maxdepth 4 -type f | sort",
       ),
     ).toBe("allow")
   })

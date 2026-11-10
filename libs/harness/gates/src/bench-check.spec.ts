@@ -601,6 +601,58 @@ describe("AstGateCache & Unified Single-Pass AST Gate Deciders (PERF-02, RFC-000
       }),
   )
 
+  it.effect(
+    "flags Cause.isFailType/Predicate.isTagged ternaries, Effect.ignore in domain, and hardcoded parse(Lang.TypeScript) in .tsx-aware files",
+    () =>
+      Effect.gen(function* () {
+        AstGateCache.clear()
+        const files = [
+          {
+            filePath: AstSourceFilePath.make("libs/sample/domain/src/guardrail-domain.ts"),
+            content: AstSourceContent.make(
+              [
+                'import { Cause, Effect, Predicate } from "effect"',
+                "export const inspect = (c: Cause.Cause<string>, u: unknown) => {",
+                "  const a = Cause.isFailType(c) ? c.error : 'other'",
+                "  const b = Predicate.isTagged(u, 'MyTag') ? 1 : 0",
+                "  return Effect.fail('boom').pipe(Effect.ignore)",
+                "}",
+              ].join("\n"),
+            ),
+            packageTag: AstGatePackageTag.make("domain"),
+          },
+          {
+            filePath: AstSourceFilePath.make("libs/sample/infra/src/tsx-parser.ts"),
+            content: AstSourceContent.make(
+              [
+                'import { Lang, parse } from "@ast-grep/napi"',
+                "export const runSearch = (file: string, src: string) => {",
+                '  if (file.endsWith(".ts") || file.endsWith(".tsx")) {',
+                "    return parse(Lang.TypeScript, src).root()",
+                "  }",
+                "  return null",
+                "}",
+              ].join("\n"),
+            ),
+            packageTag: AstGatePackageTag.make("infra"),
+          },
+        ]
+
+        const report = yield* decideAstGateCache({ files })
+        expect(report.verdict).toBe(GateVerdict.make("violated"))
+        expect(
+          report.violations.filter((v) => v.rule === GateRuleId.make("discriminant-branching"))
+            .length,
+        ).toBe(2)
+        expect(
+          report.violations.some((v) => v.rule === GateRuleId.make("domain-effect-ignore")),
+        ).toBe(true)
+        expect(
+          report.violations.some((v) => v.rule === GateRuleId.make("ast-grep-tsx-grammar")),
+        ).toBe(true)
+      }),
+  )
+
   it.effect.prop(
     "property: AstGateCache, SyntaxBans, TestIntegrity, DomainPurity, and EffectLaws deciders are idempotent and cache-consistent",
     [CompositeAstGateFilesArb],

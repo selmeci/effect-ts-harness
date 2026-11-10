@@ -76,6 +76,8 @@ export const ALLOWLIST: ReadonlyArray<string> = [
   "git remote",
   "grep",
   "rg",
+  "diff",
+  "sort",
   "omnigraph ",
   "omnigraph-server",
 ]
@@ -457,6 +459,26 @@ export const classifyCommand = (command: string): GuardVerdict => {
     return "escalate"
   }
   if (SHELL_OPERATORS.some((op) => command.includes(op))) {
+    const isAllowedFilter = (p: string): boolean =>
+      p.startsWith("grep ") ||
+      p.startsWith("head ") ||
+      p.startsWith("tail ") ||
+      p.startsWith("wc ") ||
+      p.startsWith("cat ") ||
+      p === "cat" ||
+      p.startsWith("sort ") ||
+      p === "sort"
+
+    const isAllowedPipedSegment = (seg: string): boolean => {
+      if (!seg.includes("|") || seg.includes("||")) {
+        return false
+      }
+      const parts = seg.split("|").map((p) => p.trim())
+      return (
+        parts.length >= 2 && isCommandAllowed(parts[0]!) && parts.slice(1).every(isAllowedFilter)
+      )
+    }
+
     if (
       command.includes("|") &&
       !command.includes("||") &&
@@ -464,19 +486,7 @@ export const classifyCommand = (command: string): GuardVerdict => {
       !command.includes(";") &&
       !command.includes("\n")
     ) {
-      const parts = command.split("|").map((p) => p.trim())
-      const isAllowedFilter = (p: string) =>
-        p.startsWith("grep ") ||
-        p.startsWith("head ") ||
-        p.startsWith("tail ") ||
-        p.startsWith("wc ") ||
-        p.startsWith("cat ") ||
-        p === "cat"
-      if (
-        parts.length >= 2 &&
-        isCommandAllowed(parts[0]!) &&
-        parts.slice(1).every(isAllowedFilter)
-      ) {
+      if (isAllowedPipedSegment(command)) {
         return "allow"
       }
     }
@@ -484,14 +494,16 @@ export const classifyCommand = (command: string): GuardVerdict => {
       command.includes("&&") &&
       !command.includes("||") &&
       !command.includes(";") &&
-      !command.includes("|") &&
       !command.includes("\n")
     ) {
       const parts = command.split("&&").map((p) => p.trim())
       if (
         parts.length >= 2 &&
         parts.every(
-          (p) => p.length > 0 && isCommandAllowed(p) && !/^\s*git\s+(?:add|commit|push)\b/.test(p),
+          (p) =>
+            p.length > 0 &&
+            (isCommandAllowed(p) || isAllowedPipedSegment(p)) &&
+            !/^\s*git\s+(?:add|commit|push)\b/.test(p),
         )
       ) {
         return "allow"

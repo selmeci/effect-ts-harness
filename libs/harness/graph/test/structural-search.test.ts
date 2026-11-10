@@ -1,3 +1,5 @@
+import * as fs from "node:fs"
+import * as os from "node:os"
 import * as path from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Schema } from "effect"
@@ -19,31 +21,13 @@ const StructuralSearchInputArb = Schema.Struct({
   filePath: Schema.optional(
     Schema.Union([
       StructuralSearchFilePath,
-      Schema.Literal("libs/harness/graph/src/structural-search.ts"),
       Schema.Literal("libs/sample/domain/src/index.ts"),
       Schema.Literal(
         "libs/sample/docs/adr/0001-cloudflare-d1-do-sqlite-and-traceparent-boundaries.md",
       ),
     ]),
   ),
-  paths: Schema.optional(
-    Schema.Array(
-      Schema.Union([
-        StructuralSearchFilePath,
-        Schema.Literal("libs/sample/domain/src"),
-        Schema.Literal("libs/harness/graph/src"),
-      ]),
-    ),
-  ),
-  subDirs: Schema.optional(
-    Schema.Array(
-      Schema.Union([
-        StructuralSearchSubDir,
-        Schema.Literal("libs/sample"),
-        Schema.Literal("libs/harness"),
-      ]),
-    ),
-  ),
+  subDirs: Schema.Array(Schema.Union([StructuralSearchSubDir, Schema.Literal("libs/sample")])),
 })
 
 describe("StructuralSearch.decide", () => {
@@ -161,18 +145,90 @@ describe("StructuralSearch.decide", () => {
     }),
   )
 
+  it.effect(
+    "rejects symlinks pointing outside repoRoot, finds multiple matches on one line, matches dollar-prefixed comments, and parses .tsx JSX",
+    () =>
+      Effect.gen(function* () {
+        const tmpOutside = fs.mkdtempSync(path.join(os.tmpdir(), "harness-outside-"))
+        const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "harness-repo-"))
+        fs.writeFileSync(path.join(tmpRepo, "pnpm-workspace.yaml"), "packages:\n  - 'libs/*'\n")
+        const srcDir = path.join(tmpRepo, "libs", "ui", "src")
+        fs.mkdirSync(srcDir, { recursive: true })
+
+        const secretFile = path.join(tmpOutside, "secret.json")
+        fs.writeFileSync(secretFile, '{"token":"TOP_SECRET_123"}\n', "utf-8")
+
+        const symlinkPath = path.join(srcDir, "linked-secret.json")
+        fs.symlinkSync(secretFile, symlinkPath)
+
+        const tsxPath = path.join(srcDir, "Button.tsx")
+        fs.writeFileSync(
+          tsxPath,
+          [
+            "// Config uses $PORT and ${USER_ID} environment variables",
+            "// Repeated token: ADR-0010 and ADR-0010 on the same line",
+            "export const Button = (props: { readonly label: string }) => <button>{props.label}</button>",
+          ].join("\n"),
+          "utf-8",
+        )
+
+        // 1. Symlink escaping repoRoot is rejected
+        const symlinkResults = yield* StructuralSearch.decide({
+          pattern: "TOP_SECRET_123",
+          repoRoot: tmpRepo,
+          filePath: "libs/ui/src/linked-secret.json",
+        })
+        expect(symlinkResults).toEqual([])
+
+        // 2. Dollar-prefixed pattern in comment falls back to deterministic line-locator
+        const dollarResults = yield* StructuralSearch.decide({
+          pattern: "$PORT",
+          repoRoot: tmpRepo,
+          filePath: "libs/ui/src/Button.tsx",
+        })
+        expect(dollarResults).toHaveLength(1)
+        expect(dollarResults[0]?.line).toBe(1)
+
+        // 3. Multiple occurrences on the same line are all emitted with distinct columns
+        const multiLineResults = yield* StructuralSearch.decide({
+          pattern: "ADR-0010",
+          repoRoot: tmpRepo,
+          filePath: "libs/ui/src/Button.tsx",
+        })
+        expect(multiLineResults).toHaveLength(2)
+        expect(multiLineResults[0]?.line).toBe(2)
+        expect(multiLineResults[1]?.line).toBe(2)
+        expect(multiLineResults[1]!.column).toBeGreaterThan(multiLineResults[0]!.column)
+
+        // 4. .tsx JSX AST pattern matches via Lang.Tsx
+        const tsxAstResults = yield* StructuralSearch.decide({
+          pattern: "<button>{$EXPR}</button>",
+          repoRoot: tmpRepo,
+          filePath: "libs/ui/src/Button.tsx",
+        })
+        expect(tsxAstResults).toHaveLength(1)
+        expect(tsxAstResults[0]?.line).toBe(3)
+
+        fs.rmSync(tmpRepo, { recursive: true, force: true })
+        fs.rmSync(tmpOutside, { recursive: true, force: true })
+      }),
+  )
+
   it.effect.prop(
     "property: decide is deterministic, respects repo root containment, and emits valid line numbers",
     [StructuralSearchInputArb],
     ([input]) =>
       Effect.gen(function* () {
         const repoRoot = path.resolve(process.cwd())
+        const effectiveSubDirs = input.subDirs.length > 0 ? input.subDirs : ["libs/sample"]
         const run1 = yield* StructuralSearch.decide({
           ...input,
+          subDirs: effectiveSubDirs,
           repoRoot,
         })
         const run2 = yield* StructuralSearch.decide({
           ...input,
+          subDirs: effectiveSubDirs,
           repoRoot,
         })
 

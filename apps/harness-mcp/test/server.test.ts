@@ -217,6 +217,23 @@ describe("harness-mcp tools", () => {
     )) as Array<unknown>
 
     expect(pathsResults).toEqual([])
+
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-mcp-outside-"))
+    const outsideFile = path.join(outsideDir, "profiles.json")
+    fs.writeFileSync(outsideFile, '{"secret":"CLOUDFLARE_TOKEN"}\n', "utf-8")
+    try {
+      const externalAbsResults = (await executeTool(
+        "harness_structural_search",
+        {
+          pattern: "CLOUDFLARE_TOKEN",
+          filePath: outsideFile,
+        },
+        { graph },
+      )) as Array<unknown>
+      expect(externalAbsResults).toEqual([])
+    } finally {
+      fs.rmSync(outsideDir, { recursive: true, force: true })
+    }
   })
 
   const makeMockDecisionModel = (

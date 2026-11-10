@@ -321,7 +321,7 @@ const visitSourceFileSinglePass = (
   const isDiscriminantCondition = (cond: ts.Expression): boolean => {
     const text = cond.getText(sourceFile)
     if (
-      /\b(?:Option\.isSome|Option\.isNone|Either\.isRight|Either\.isLeft|Result\.isSuccess|Result\.isFailure|Exit\.isSuccess|Exit\.isFailure)\s*\(/.test(
+      /\b(?:Option\.isSome|Option\.isNone|Either\.isRight|Either\.isLeft|Result\.isSuccess|Result\.isFailure|Exit\.isSuccess|Exit\.isFailure|Cause\.isFailType|Cause\.isDieType|Cause\.isInterruptType|Cause\.isEmptyType|Predicate\.isTagged)\s*\(/.test(
         text,
       )
     ) {
@@ -332,6 +332,10 @@ const visitSourceFileSinglePass = (
     }
     return false
   }
+
+  const handlesTsxExtensions =
+    sourceFile.text.includes('".tsx"') || sourceFile.text.includes("'.tsx'")
+  const referencesLangTsx = sourceFile.text.includes("Lang.Tsx")
 
   const walk = (node: ts.Node): void => {
     // 1. Import declarations (domain-purity + syntax-bans + test-integrity)
@@ -428,7 +432,7 @@ const visitSourceFileSinglePass = (
           category: GateCategory.make("effect-laws"),
           rule: GateRuleId.make("discriminant-branching"),
           message: GateViolationMessage.make(
-            `If statement in '${filePath}' inspects union discriminant or Option/Either/Result guard — use match(...).exhaustive().`,
+            `If statement in '${filePath}' inspects union discriminant or Option/Either/Result/Exit/Cause guard — use match(...).exhaustive().`,
           ),
           file: filePath,
           line: getLineNumber(sourceFile, node.getStart(sourceFile)),
@@ -442,7 +446,7 @@ const visitSourceFileSinglePass = (
           category: GateCategory.make("effect-laws"),
           rule: GateRuleId.make("discriminant-branching"),
           message: GateViolationMessage.make(
-            `Ternary expression in '${filePath}' inspects union discriminant or Option/Either/Result guard — use match(...).exhaustive().`,
+            `Ternary expression in '${filePath}' inspects union discriminant or Option/Either/Result/Exit/Cause guard — use match(...).exhaustive().`,
           ),
           file: filePath,
           line: getLineNumber(sourceFile, node.getStart(sourceFile)),
@@ -451,9 +455,52 @@ const visitSourceFileSinglePass = (
       }
     }
 
-    // 5. CallExpressions (effect-laws, domain-purity, test-integrity)
+    // 4b. PropertyAccessExpression: Effect.ignore in domain (domain-purity: domain-effect-ignore)
+    if (
+      ts.isPropertyAccessExpression(node) &&
+      !isTestFile &&
+      !isHarnessInternal &&
+      packageTag === "domain" &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === "Effect" &&
+      node.name.text === "ignore"
+    ) {
+      violations.push({
+        category: GateCategory.make("domain-purity"),
+        rule: GateRuleId.make("domain-effect-ignore"),
+        message: GateViolationMessage.make(
+          `Swallowing typed errors with Effect.ignore in '${filePath}' (domain) is banned — surface failures in the E channel or handle them explicitly.`,
+        ),
+        file: filePath,
+        line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+        enclosingSymbol: resolveEnclosingSymbol(node, filePath),
+      })
+    }
+
+    // 5. CallExpressions (effect-laws, domain-purity, test-integrity, syntax-bans)
     if (ts.isCallExpression(node)) {
       const calleeText = node.expression.getText(sourceFile)
+
+      // @ast-grep/napi parse(Lang.TypeScript, ...) in a .tsx-handling file without Lang.Tsx
+      if (
+        !isTestFile &&
+        calleeText === "parse" &&
+        node.arguments.length >= 2 &&
+        node.arguments[0]?.getText(sourceFile) === "Lang.TypeScript" &&
+        handlesTsxExtensions &&
+        !referencesLangTsx
+      ) {
+        violations.push({
+          category: GateCategory.make("syntax-bans"),
+          rule: GateRuleId.make("ast-grep-tsx-grammar"),
+          message: GateViolationMessage.make(
+            `Hardcoded parse(Lang.TypeScript, ...) in '${filePath}' which handles .tsx files — select Lang.Tsx for .tsx files so JSX syntax parses cleanly.`,
+          ),
+          file: filePath,
+          line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+          enclosingSymbol: resolveEnclosingSymbol(node, filePath),
+        })
+      }
 
       // match(...).run() ban
       if (

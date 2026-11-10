@@ -317,8 +317,9 @@ export const structuralSearch = (
     }
 
     const isTs = (relFile.endsWith(".ts") || relFile.endsWith(".tsx")) && !relFile.endsWith(".d.ts")
+    const isBareDollarVar = /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(options.pattern.trim())
 
-    if (isTs) {
+    if (isTs && !isBareDollarVar) {
       const lang = relFile.endsWith(".tsx") ? Lang.Tsx : Lang.TypeScript
       const matches =
         tryOrUndefined(() => parse(lang, source).root().findAll(options.pattern)) ?? []
@@ -348,7 +349,7 @@ export const structuralSearch = (
             },
           })
         }
-      } else {
+      } else if (!options.pattern.includes("$$$")) {
         const lineMatches = searchLinesDeterministic(relFile, source, options.pattern)
         for (const m of lineMatches) {
           if (results.length >= DEFAULT_MAX_RESULTS) {
