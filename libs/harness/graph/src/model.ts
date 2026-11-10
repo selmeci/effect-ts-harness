@@ -377,22 +377,15 @@ export const RELATION_TAGS = [
 export const RelationTag = Schema.Literals(RELATION_TAGS)
 export type RelationTag = typeof RelationTag.Type
 
-export const isBipartitePlaysRoleIds = (
-  relationId: RelationId,
-  entityKey: NodeKey,
-): boolean => {
+export const isBipartitePlaysRoleIds = (relationId: RelationId, entityKey: NodeKey): boolean => {
   if ((relationId as string) === (entityKey as string)) {
     return false
   }
-  const hasEntityPrefixInRelation = ENTITY_NODE_TAGS.some((tag) =>
-    relationId.startsWith(`${tag}:`),
-  )
+  const hasEntityPrefixInRelation = ENTITY_NODE_TAGS.some((tag) => relationId.startsWith(`${tag}:`))
   if (hasEntityPrefixInRelation) {
     return false
   }
-  const hasValidEntityPrefix = ENTITY_NODE_TAGS.some((tag) =>
-    entityKey.startsWith(`${tag}:`),
-  )
+  const hasValidEntityPrefix = ENTITY_NODE_TAGS.some((tag) => entityKey.startsWith(`${tag}:`))
   if (hasValidEntityPrefix) {
     return true
   }
@@ -414,14 +407,11 @@ export const PlaysRoleEdge = Schema.TaggedStruct("PlaysRole", {
   receiverLayer: Schema.optional(Schema.NullOr(Schema.String)),
 }).pipe(
   Schema.check(
-    Schema.makeFilter(
-      (edge) => isBipartitePlaysRoleIds(edge.relationId, edge.entityKey),
-      {
-        title: "BipartitePlaysRoleInvariant",
-        description:
-          "PlaysRoleEdge must connect a reified RelationNode (V_R) to an EntityNode (V_E) in G_Levi",
-      },
-    ),
+    Schema.makeFilter((edge) => isBipartitePlaysRoleIds(edge.relationId, edge.entityKey), {
+      title: "BipartitePlaysRoleInvariant",
+      description:
+        "PlaysRoleEdge must connect a reified RelationNode (V_R) to an EntityNode (V_E) in G_Levi",
+    }),
   ),
 )
 export type PlaysRoleEdge = typeof PlaysRoleEdge.Type
@@ -436,9 +426,7 @@ export type HarnessEdge = typeof HarnessEdge.Type
 export const ConceptKind = Schema.Literals(["entity", "relation"])
 export type ConceptKind = typeof ConceptKind.Type
 
-export const NonNegativeCardInt = Schema.Int.pipe(
-  Schema.check(Schema.isGreaterThanOrEqualTo(0)),
-)
+export const NonNegativeCardInt = Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0)))
 
 export const RoleSpec = Schema.Struct({
   role: RoleName,
@@ -448,13 +436,11 @@ export const RoleSpec = Schema.Struct({
   archimateRelation: Schema.optional(Schema.String),
 }).pipe(
   Schema.check(
-    Schema.makeFilter(
-      (spec) => spec.maxCard === null || spec.minCard <= spec.maxCard,
-      {
-        title: "ValidRoleCardinality",
-        description: "RoleSpec minCard must be less than or equal to maxCard when maxCard is non-null",
-      },
-    ),
+    Schema.makeFilter((spec) => spec.maxCard === null || spec.minCard <= spec.maxCard, {
+      title: "ValidRoleCardinality",
+      description:
+        "RoleSpec minCard must be less than or equal to maxCard when maxCard is non-null",
+    }),
   ),
 )
 export type RoleSpec = typeof RoleSpec.Type
@@ -510,12 +496,7 @@ export class GraphSnapshotError extends Schema.TaggedError<GraphSnapshotError>()
   "GraphSnapshotError",
   {
     path: Schema.String,
-    reason: Schema.Literals([
-      "missing-file",
-      "invalid-json",
-      "dangling-edge",
-      "lattice-violation",
-    ]),
+    reason: Schema.Literals(["missing-file", "invalid-json", "dangling-edge", "lattice-violation"]),
     message: Schema.String,
   },
 ) {}
@@ -779,10 +760,7 @@ export const AST_VIOLATION_RULE_IDS = [
   "invalid-graph-role",
 ] as const
 
-export const ViolationRule = Schema.Literals([
-  ...ANTI_PATTERN_RULE_IDS,
-  ...AST_VIOLATION_RULE_IDS,
-])
+export const ViolationRule = Schema.Literals([...ANTI_PATTERN_RULE_IDS, ...AST_VIOLATION_RULE_IDS])
 export type ViolationRule = typeof ViolationRule.Type
 
 export interface BranchingViolation {
@@ -874,29 +852,15 @@ export const BOUNDARY_CALLER_PATTERN =
 export const isBoundaryCallerQualname = (text: string): boolean =>
   BOUNDARY_CALLER_PATTERN.test(text)
 
-export const REWRITE_PHASES = [
-  "PLAN",
-  "REPAIR_ARCH",
-  "REPAIR_CODE",
-  "CLEANUP",
-] as const
+export const REWRITE_PHASES = ["PLAN", "REPAIR_ARCH", "REPAIR_CODE", "CLEANUP"] as const
 
 export const RewritePhase = Schema.Literals(REWRITE_PHASES)
 export type RewritePhase = typeof RewritePhase.Type
 
-export const RewriteMode = Schema.Literals([
-  "auto-plan",
-  "auto-repair",
-  "cleanup",
-  "full",
-])
+export const RewriteMode = Schema.Literals(["auto-plan", "auto-repair", "cleanup", "full"])
 export type RewriteMode = typeof RewriteMode.Type
 
-export const RewriteRuleCategory = Schema.Literals([
-  "auto-plan",
-  "auto-repair",
-  "cleanup",
-])
+export const RewriteRuleCategory = Schema.Literals(["auto-plan", "auto-repair", "cleanup"])
 export type RewriteRuleCategory = typeof RewriteRuleCategory.Type
 
 export const GraphMeasure = Schema.Struct({
@@ -995,4 +959,3 @@ export const DpoRuleSpec = Schema.Struct({
   hasSpecNac: Schema.Boolean,
 })
 export type DpoRuleSpec = typeof DpoRuleSpec.Type
-

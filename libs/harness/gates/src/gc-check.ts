@@ -119,11 +119,7 @@ const IGNORED_SERVICES = new Set([
   "ActiveCounterStore",
 ])
 
-const IGNORED_ERRORS = new Set([
-  "OmnigraphLoadError",
-  "SchemaError",
-  "UnknownToolError",
-])
+const IGNORED_ERRORS = new Set(["OmnigraphLoadError", "SchemaError", "UnknownToolError"])
 
 const IGNORED_UNTESTED_FNS = new Set([
   "Friction.decide",
@@ -1392,7 +1388,7 @@ export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcF
         .join("\n")
 
       const nonTestSiblingContent = siblingFiles
-        .filter((f) => !f.endsWith(".test.ts"))
+        .filter((f) => !f.endsWith(".test.ts") && !f.endsWith(".spec.ts"))
         .map((f) =>
           Effect.runSync(
             Effect.try({
@@ -1489,7 +1485,9 @@ export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcF
         continue
       }
 
-      const srcFiles = collectTsFiles(srcDir)
+      const srcFiles = collectTsFiles(srcDir).filter(
+        (f) => !f.endsWith(".test.ts") && !f.endsWith(".spec.ts"),
+      )
       const packageNamedMigrationBodies = new Map<string, string>()
       const defaultTableMigratorRoots = new Map<string, string>()
 

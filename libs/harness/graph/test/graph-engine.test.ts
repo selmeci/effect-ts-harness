@@ -234,11 +234,38 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
     expect(lines.some((l) => l.includes('"type":"EffectSignature"'))).toBe(true)
     expect(lines.some((l) => l.includes('"type":"LayerFlow"'))).toBe(true)
     expect(lines.some((l) => l.includes('"type":"TraceabilityTuple"'))).toBe(true)
-    expect(lines.some((l) => l.includes('"edge":"PlaysRequiresServiceRole"') && l.includes('"role":"requires-service"'))).toBe(true)
-    expect(lines.some((l) => l.includes('"edge":"PlaysFailsWithRole"') && l.includes('"role":"fails-with"'))).toBe(true)
-    expect(lines.some((l) => l.includes('"edge":"PlaysProvidedServiceRole"') && l.includes('"role":"provided-service"'))).toBe(true)
-    expect(lines.some((l) => l.includes('"edge":"PlaysRequiredServiceRole"') && l.includes('"role":"required-service"'))).toBe(true)
-    expect(lines.some((l) => l.includes('"edge":"PlaysExercisingTestRole"') && l.includes('"role":"exercising-test"'))).toBe(true)
+    expect(
+      lines.some(
+        (l) =>
+          l.includes('"edge":"PlaysRequiresServiceRole"') &&
+          l.includes('"role":"requires-service"'),
+      ),
+    ).toBe(true)
+    expect(
+      lines.some(
+        (l) => l.includes('"edge":"PlaysFailsWithRole"') && l.includes('"role":"fails-with"'),
+      ),
+    ).toBe(true)
+    expect(
+      lines.some(
+        (l) =>
+          l.includes('"edge":"PlaysProvidedServiceRole"') &&
+          l.includes('"role":"provided-service"'),
+      ),
+    ).toBe(true)
+    expect(
+      lines.some(
+        (l) =>
+          l.includes('"edge":"PlaysRequiredServiceRole"') &&
+          l.includes('"role":"required-service"'),
+      ),
+    ).toBe(true)
+    expect(
+      lines.some(
+        (l) =>
+          l.includes('"edge":"PlaysExercisingTestRole"') && l.includes('"role":"exercising-test"'),
+      ),
+    ).toBe(true)
   })
 
   it("resolves nodes across different identifier types via resolveNode", () => {
@@ -517,9 +544,9 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
       expect(
         graph.unresolvedReferences?.some((r) => r.targetKey === "NonexistentDatabaseService"),
       ).toBe(true)
-      expect(
-        graph.unresolvedReferences?.some((r) => r.targetKey === "NonexistentEntityKey"),
-      ).toBe(true)
+      expect(graph.unresolvedReferences?.some((r) => r.targetKey === "NonexistentEntityKey")).toBe(
+        true,
+      )
     })
 
     it("records branchingViolations (invalid-graph-role) when a relation has an invalid role or invalid player kind against PERA ConceptLattice", () => {
@@ -625,10 +652,7 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
         graph,
         "TraceabilityTuple:governs:ADR-001->EffectFn:libs/sample/domain/src/order.ts#Order",
       )
-      const adr2Rel = resolveNode(
-        graph,
-        "TraceabilityTuple:governs:ADR-002->ServiceTag:Order",
-      )
+      const adr2Rel = resolveNode(graph, "TraceabilityTuple:governs:ADR-002->ServiceTag:Order")
       expect(adr1Rel).toBeDefined()
       expect(adr2Rel).toBeDefined()
     })

@@ -10,12 +10,7 @@ import {
   projectOntologyLayers,
   queryOntologyWhy,
 } from "./archimate-ontology.js"
-import {
-  findCallees,
-  findCallers,
-  findTestsReaching,
-  resolveNode,
-} from "./graph-engine.js"
+import { findCallees, findCallers, findTestsReaching, resolveNode } from "./graph-engine.js"
 import type { HarnessGraph, ServiceLayerNode, ServiceTagNode } from "./model.js"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -43,9 +38,7 @@ export interface HarnessGqQueryDescriptor {
   readonly source: string
 }
 
-export const HARNESS_GQ_QUERIES: Readonly<
-  Record<HarnessGqQueryName, HarnessGqQueryDescriptor>
-> = {
+export const HARNESS_GQ_QUERIES: Readonly<Record<HarnessGqQueryName, HarnessGqQueryDescriptor>> = {
   resolve_effect_fn: {
     name: "resolve_effect_fn",
     description:
@@ -72,8 +65,7 @@ export const HARNESS_GQ_QUERIES: Readonly<
   },
   find_service_providers: {
     name: "find_service_providers",
-    description:
-      "Find all ServiceLayer implementations that provide a given ServiceTag",
+    description: "Find all ServiceLayer implementations that provide a given ServiceTag",
     params: ["tagId"],
     source: `query find_service_providers($tagId: String) {
   match {
@@ -189,8 +181,7 @@ export const HARNESS_GQ_QUERIES: Readonly<
   },
   untested_domain_fns: {
     name: "untested_domain_fns",
-    description:
-      "Find all non-stub domain Effect functions that lack reaching test coverage",
+    description: "Find all non-stub domain Effect functions that lack reaching test coverage",
     params: [],
     source: `query untested_domain_fns() {
   match {
@@ -212,8 +203,7 @@ export const HARNESS_GQ_QUERIES: Readonly<
   },
 }
 
-export const loadHarnessPgSchemaText = (): string =>
-  fs.readFileSync(HARNESS_PG_SCHEMA_PATH, "utf8")
+export const loadHarnessPgSchemaText = (): string => fs.readFileSync(HARNESS_PG_SCHEMA_PATH, "utf8")
 
 export const loadHarnessGqQueriesText = (): string =>
   fs.readFileSync(HARNESS_GQ_QUERIES_PATH, "utf8")
@@ -308,11 +298,7 @@ export const executeNamedGqQueryInMemory = (
       return findTestsReaching(harnessGraph, callee).map((t) => ({ ...t }))
     })
     .with("ontology_layer_nodes", () => {
-      const layer = getStringParam(
-        params,
-        "layer",
-        "Business",
-      ) as ArchiMateLayer
+      const layer = getStringParam(params, "layer", "Business") as ArchiMateLayer
       const projection = projectOntologyLayers(harnessGraph)
       if (layer in projection.layers) {
         return projection.layers[layer].map((node) => ({ ...node }))

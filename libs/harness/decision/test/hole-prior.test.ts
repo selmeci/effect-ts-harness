@@ -25,52 +25,48 @@ describe("HoleRelevanceAndEdgePriorV1 (System One Calibrated Edge & PPR Prior Se
     earsClauseContext: "While evaluating cart state, Cart.addItem shall delegate to Cart.decide",
   }
 
-  it.effect(
-    "evaluates edgeConfidenceMillis and teleportationWeightMillis via DecisionModel",
-    () =>
-      Effect.gen(function* () {
-        expect(Object.keys(HoleRelevanceAndEdgePriorV1.decisions)).toEqual([
-          "edgeConfidence",
-          "candidateRelevance",
-        ])
+  it.effect("evaluates edgeConfidenceMillis and teleportationWeightMillis via DecisionModel", () =>
+    Effect.gen(function* () {
+      expect(Object.keys(HoleRelevanceAndEdgePriorV1.decisions)).toEqual([
+        "edgeConfidence",
+        "candidateRelevance",
+      ])
 
-        const res = yield* evaluateHoleCandidatePrior(defaultInput).pipe(
-          Effect.provide(
-            makeMockDecisionModelLayer({
-              edgeConfidenceProb: 0.94,
-              candidateRelevanceLabel: "essential",
-            }),
-          ),
-        )
+      const res = yield* evaluateHoleCandidatePrior(defaultInput).pipe(
+        Effect.provide(
+          makeMockDecisionModelLayer({
+            edgeConfidenceProb: 0.94,
+            candidateRelevanceLabel: "essential",
+          }),
+        ),
+      )
 
-        expect(res.source).toEqual({ _tag: "DecisionModel" })
-        expect(res.edgeConfidenceMillis).toBe(940)
-        expect(res.teleportationWeightMillis).toBe(1000)
-        expect(res.relevanceLabel).toBe("essential")
-      }),
+      expect(res.source).toEqual({ _tag: "DecisionModel" })
+      expect(res.edgeConfidenceMillis).toBe(940)
+      expect(res.teleportationWeightMillis).toBe(1000)
+      expect(res.relevanceLabel).toBe("essential")
+    }),
   )
 
-  it.effect(
-    "falls back deterministically when DecisionModel is unavailable or fails",
-    () =>
-      Effect.gen(function* () {
-        const res = yield* evaluateHoleCandidatePrior({
-          holeSpanName: "Cart.addItem",
-          holeSignatureSummary: "Effect<CartUpdated, CartLimitExceededError, CartRepo>",
-          candidateSymbolKey: CandidateSymbolKey.make("ServiceTag:CartRepo"),
-          candidateSignatureSummary: "Context.Service<CartRepo>",
-          proposedRole: ProposedRoleName.make("requires-service"),
-          earsClauseContext: "Where CartRepo is configured",
-        }).pipe(Effect.provide(makeFailingDecisionModelLayer()))
+  it.effect("falls back deterministically when DecisionModel is unavailable or fails", () =>
+    Effect.gen(function* () {
+      const res = yield* evaluateHoleCandidatePrior({
+        holeSpanName: "Cart.addItem",
+        holeSignatureSummary: "Effect<CartUpdated, CartLimitExceededError, CartRepo>",
+        candidateSymbolKey: CandidateSymbolKey.make("ServiceTag:CartRepo"),
+        candidateSignatureSummary: "Context.Service<CartRepo>",
+        proposedRole: ProposedRoleName.make("requires-service"),
+        earsClauseContext: "Where CartRepo is configured",
+      }).pipe(Effect.provide(makeFailingDecisionModelLayer()))
 
-        expect(res.source).toEqual({
-          _tag: "DeterministicFallback",
-          reason: "timeout-or-unavailable",
-        })
-        expect(res.edgeConfidenceMillis).toBe(500)
-        expect(res.teleportationWeightMillis).toBe(333)
-        expect(res.relevanceLabel).toBe("tangential")
-      }),
+      expect(res.source).toEqual({
+        _tag: "DeterministicFallback",
+        reason: "timeout-or-unavailable",
+      })
+      expect(res.edgeConfidenceMillis).toBe(500)
+      expect(res.teleportationWeightMillis).toBe(333)
+      expect(res.relevanceLabel).toBe("tangential")
+    }),
   )
 
   it.effect("maps all 4 relevance labels to their exact millisecond weights", () =>
@@ -215,37 +211,35 @@ describe("HoleRelevanceAndEdgePriorV1 (System One Calibrated Edge & PPR Prior Se
     }),
   )
 
-  it.effect(
-    "falls back deterministically when DecisionModel times out after 1500ms",
-    () =>
-      Effect.gen(function* () {
-        const timeoutLayer = Layer.effect(
-          DecisionModel.DecisionModel,
-          DecisionModel.make({
-            decide: () =>
-              Effect.sleep("5 seconds").pipe(
-                Effect.as({
-                  answers: {},
-                  usage: { inputTokens: 0, outputTokens: 0 },
-                }),
-              ),
-          }),
-        )
+  it.effect("falls back deterministically when DecisionModel times out after 1500ms", () =>
+    Effect.gen(function* () {
+      const timeoutLayer = Layer.effect(
+        DecisionModel.DecisionModel,
+        DecisionModel.make({
+          decide: () =>
+            Effect.sleep("5 seconds").pipe(
+              Effect.as({
+                answers: {},
+                usage: { inputTokens: 0, outputTokens: 0 },
+              }),
+            ),
+        }),
+      )
 
-        const fiber = yield* Effect.forkChild(
-          evaluateHoleCandidatePrior(defaultInput).pipe(Effect.provide(timeoutLayer)),
-        )
-        yield* TestClock.adjust("2000 millis")
-        const res = yield* Fiber.join(fiber)
+      const fiber = yield* Effect.forkChild(
+        evaluateHoleCandidatePrior(defaultInput).pipe(Effect.provide(timeoutLayer)),
+      )
+      yield* TestClock.adjust("2000 millis")
+      const res = yield* Fiber.join(fiber)
 
-        expect(res.source).toEqual({
-          _tag: "DeterministicFallback",
-          reason: "timeout-or-unavailable",
-        })
-        expect(res.edgeConfidenceMillis).toBe(500)
-        expect(res.teleportationWeightMillis).toBe(333)
-        expect(res.relevanceLabel).toBe("tangential")
-      }),
+      expect(res.source).toEqual({
+        _tag: "DeterministicFallback",
+        reason: "timeout-or-unavailable",
+      })
+      expect(res.edgeConfidenceMillis).toBe(500)
+      expect(res.teleportationWeightMillis).toBe(333)
+      expect(res.relevanceLabel).toBe("tangential")
+    }),
   )
 
   it("propagates defect without swallowing it in catchCauseIf", async () => {
@@ -300,9 +294,7 @@ describe("HoleRelevanceAndEdgePriorV1 (System One Calibrated Edge & PPR Prior Se
         expect(batchRes.source).toEqual({ _tag: "DecisionModel" })
         expect(batchRes.results).toHaveLength(2)
         expect(
-          batchRes.edgeConfidenceOverrides[
-            "EffectFn:libs/sample/domain/src/cart.ts#decide:callee"
-          ],
+          batchRes.edgeConfidenceOverrides["EffectFn:libs/sample/domain/src/cart.ts#decide:callee"],
         ).toBe(910)
         expect(batchRes.edgeConfidenceOverrides["ServiceTag:CartRepo:requires-service"]).toBe(910)
         expect(
@@ -326,9 +318,7 @@ describe("HoleRelevanceAndEdgePriorV1 (System One Calibrated Edge & PPR Prior Se
           ),
         )
         expect(multiChunkRes.results).toHaveLength(35)
-        expect(multiChunkRes.edgeConfidenceOverrides["ServiceTag:Svc34:requires-service"]).toBe(
-          880,
-        )
+        expect(multiChunkRes.edgeConfidenceOverrides["ServiceTag:Svc34:requires-service"]).toBe(880)
 
         // Fallback on failing model
         const fallbackBatch = yield* evaluateHoleCandidatePriorsBatch(batchInputs).pipe(
@@ -345,4 +335,3 @@ describe("HoleRelevanceAndEdgePriorV1 (System One Calibrated Edge & PPR Prior Se
       }),
   )
 })
-

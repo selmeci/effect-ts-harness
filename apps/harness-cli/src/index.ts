@@ -1,10 +1,12 @@
 import { execFileSync, spawn } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import * as net from "node:net"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { Effect, Layer, Option, Schema } from "effect"
+import { Cause, Effect, Layer, Option, Schema } from "effect"
 import * as Graph from "effect/Graph"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import { match } from "ts-pattern"
 import {
   checkPlanStepCoverage,
   decideGuardCommand,
@@ -21,8 +23,13 @@ import {
 import {
   appendFrictionEvent,
   appendTelemetryEvent,
+  AstGateCache,
+  AstSourceContent,
+  AstSourceFilePath,
+  BenchStageName,
   buildSessionHandoff,
   buildSessionReport,
+  buildStageLatencyMeasurement,
   CD_COMMAND_BANNED_REASON,
   checkLoopThrashing,
   checkVerifyStamp,
@@ -30,15 +37,20 @@ import {
   classifyFileWrite,
   clearFrictionEvents,
   clearTelemetryEvents,
+  decideHarnessBench,
   decideOmnigraphReconcile,
   decideOntologyInvariants,
+  DEFAULT_STAGE_LATENCY_BUDGETS,
   deriveRepoOmnigraphPort,
   diffPlanAndImplGraphs,
   type FrictionEventKind,
   type GovernanceDocReference,
+  HARNESS_GATE_RULE_VERSION,
   INTERACTIVE_NX_BANNED_REASON,
   isCdCommand,
   isInteractiveNxCommand,
+  LatencyMillis,
+  LatencySloViolationError,
   loadGovernanceDocsFromDisk,
   readFrictionEvents,
   readGraphHeadMeta,
@@ -64,8 +76,15 @@ import {
 } from "@harness/gates"
 import {
   checkEffectGraph,
+  clearWarmProgramSessions,
+  DatalogFilePath,
+  DatalogSession,
+  decideGraphRewrite,
   diffOmnigraphBranches,
+  extractTypeGraph,
   extractWorkspaceTypeAwareGraph,
+  findTestsReaching,
+  getOrCreateWarmProgramSession,
   type HarnessGraph,
   loadGraphSnapshot,
   mergeOmnigraphBranch,
@@ -75,6 +94,7 @@ import {
   queryOntologyWhy,
   renderOntologyMermaid,
   saveGraphSnapshot,
+  stepDatalogFileDelta,
   syncToOmnigraphAndSnapshot,
 } from "@harness/graph"
 import { buildWorkspaceFnIndex } from "@harness/ingest"
@@ -88,6 +108,7 @@ export const COMMANDS = [
   "learn",
   "gc",
   "mutate",
+  "bench",
   "ingest",
   "session",
   "doctor",
@@ -536,7 +557,11 @@ const handleRoute = (
 const resolveNxAffectedArgs = (
   repoRoot: string,
   targets: ReadonlyArray<string>,
+  explicitFiles?: ReadonlyArray<string>,
 ): ReadonlyArray<string> => {
+  if (explicitFiles !== undefined && explicitFiles.length > 0) {
+    return ["nx", "affected", `--files=${explicitFiles.join(",")}`, "-t", ...targets]
+  }
   const hasMain = Effect.runSync(
     Effect.try({
       try: () => {
@@ -750,12 +775,110 @@ const handlePlanCheck = (
     return { exitCode: 0, stdout: checkResult.mermaid, stderr: "" }
   })
 
+const resolveModifiedFilesSinceStampOrHead = (repoRoot: string): ReadonlyArray<string> =>
+  Effect.runSync(
+    Effect.try({
+      try: () => {
+        const raw = execFileSync("git", ["status", "--porcelain", "-uall"], {
+          cwd: repoRoot,
+          stdio: "pipe",
+          encoding: "utf-8",
+        })
+        const files = new Set<string>()
+        for (const line of raw.split(/\r?\n/)) {
+          const trimmed = line.trim()
+          if (trimmed.length < 4) continue
+          const relPath = trimmed
+            .slice(2)
+            .trim()
+            .replace(/^.*->\s*/, "")
+            .replace(/^"|"$/g, "")
+          if (relPath.length > 0) {
+            files.add(relPath.replace(/\\/g, "/"))
+          }
+        }
+        return Array.from(files)
+      },
+      catch: () => [],
+    }).pipe(Effect.orElseSucceed(() => [])),
+  )
+
+const isRootConfigOrSharedCoreChange = (modifiedFiles: ReadonlyArray<string>): boolean =>
+  modifiedFiles.length === 0 ||
+  modifiedFiles.some(
+    (f) =>
+      !f.includes("/") ||
+      f.startsWith("libs/harness/") ||
+      f.startsWith("apps/harness-") ||
+      f.startsWith("tools/") ||
+      f.endsWith("package.json") ||
+      f.endsWith("tsconfig.json") ||
+      f.endsWith("tsconfig.base.json"),
+  )
+
+export const tryQueryWarmDaemonSocket = (
+  repoRoot: string,
+  command: "ping" | "extract-graph" | "ast-gates" | "plan-check" | "gc" | "verify" | "bench",
+  files?: ReadonlyArray<string>,
+): Effect.Effect<Option.Option<Record<string, unknown>>> =>
+  Effect.gen(function* () {
+    const socketPath = join(repoRoot, ".harness", "daemon.sock")
+    if (!existsSync(socketPath)) {
+      return Option.none()
+    }
+    return yield* Effect.callback<Option.Option<Record<string, unknown>>>((resume) => {
+      const client = net.createConnection({ path: socketPath })
+      let buffer = ""
+      let settled = false
+      const finish = (opt: Option.Option<Record<string, unknown>>) => {
+        if (!settled) {
+          settled = true
+          resume(Effect.succeed(opt))
+        }
+      }
+      const timer = setTimeout(() => {
+        client.destroy()
+        finish(Option.none())
+      }, 1500)
+      client.on("connect", () => {
+        client.write(
+          JSON.stringify({
+            id: `${command}-${Date.now()}`,
+            command,
+            repoRoot,
+            ...(files !== undefined ? { files } : {}),
+          }) + "\n",
+        )
+      })
+      client.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        const idx = buffer.indexOf("\n")
+        if (idx !== -1) {
+          clearTimeout(timer)
+          const line = buffer.slice(0, idx).trim()
+          client.end()
+          const parsedOpt = Schema.decodeOption(
+            Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+          )(line)
+          finish(parsedOpt)
+        }
+      })
+      client.on("error", () => {
+        clearTimeout(timer)
+        finish(Option.none())
+      })
+    })
+  })
+
 const handleVerify = (
   options: CliEnv | undefined,
   decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
+    if (process.env.HARNESS_USE_DAEMON === "1") {
+      yield* tryQueryWarmDaemonSocket(repoRoot, "ping")
+    }
     const requireOllama =
       process.env.HARNESS_REQUIRE_OLLAMA === "1" ||
       (!isIsolatedExternalWorkspace(repoRoot) &&
@@ -783,7 +906,38 @@ const handleVerify = (
       }
     }
 
-    const graph = yield* extractWorkspaceTypeAwareGraph(repoRoot)
+    const deltaFiles = resolveModifiedFilesSinceStampOrHead(repoRoot).filter(
+      (f) => (f.endsWith(".ts") || f.endsWith(".tsx")) && existsSync(join(repoRoot, f)),
+    )
+    if (deltaFiles.length > 0) {
+      const astGateFiles = deltaFiles.map((relPath) => ({
+        filePath: AstSourceFilePath.make(relPath),
+        content: AstSourceContent.make(readFileSync(join(repoRoot, relPath), "utf-8")),
+      }))
+      const astReport = yield* AstGateCache.decide({
+        files: astGateFiles,
+        ruleVersion: HARNESS_GATE_RULE_VERSION,
+        cacheFilePath: AstGateCache.resolveCachePath(repoRoot),
+      })
+      const enforcedAstViolations = astReport.violations.filter(
+        (v) =>
+          !v.file.startsWith("libs/harness/") &&
+          !v.file.startsWith("apps/harness-") &&
+          !v.file.startsWith("tools/"),
+      )
+      if (enforcedAstViolations.length > 0) {
+        const msg = enforcedAstViolations
+          .map((v) => `[${v.rule}] ${v.file}:${v.line}: ${v.message}`)
+          .join("\n")
+        return {
+          exitCode: 1,
+          stdout: "",
+          stderr: `[GATE FAILURE] verify:ast-gates\n${msg}`,
+        }
+      }
+    }
+
+    const graph = yield* extractTypeGraph({ repoRoot })
     const graphStubs: Array<string> = []
     for (const [, node] of Graph.nodes(graph.graph)) {
       if (node._tag === "EffectFn" && node.isStub) {
@@ -900,7 +1054,15 @@ const handleVerify = (
     }
 
     if (!options?.skipSubprocessVerify && existsSync(join(repoRoot, "package.json"))) {
-      const nxArgs = resolveNxAffectedArgs(repoRoot, ["verify"])
+      const leafFastPathEligible =
+        deltaFiles.length > 0 && !isRootConfigOrSharedCoreChange(deltaFiles)
+      const scopedFiles = leafFastPathEligible ? deltaFiles : undefined
+      if (leafFastPathEligible) {
+        for (const df of deltaFiles) {
+          findTestsReaching(graph, df)
+        }
+      }
+      const nxArgs = resolveNxAffectedArgs(repoRoot, ["verify"], scopedFiles)
       const subprocessErr = yield* Effect.try({
         try: () => {
           execFileSync("pnpm", nxArgs, {
@@ -2103,6 +2265,213 @@ const handleMutate = (
     }
   })
 
+const handleBench = (
+  argv: ReadonlyArray<string>,
+  options: CliEnv | undefined,
+): Effect.Effect<CliResult> =>
+  Effect.gen(function* () {
+    const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
+    const iterationsArg = argv.find((a) => a.startsWith("--iterations="))
+    const parsedIter = iterationsArg ? Number(iterationsArg.slice("--iterations=".length)) : 3
+    const iterations = Number.isFinite(parsedIter) && parsedIter >= 1 ? Math.floor(parsedIter) : 3
+
+    const budgetArg = argv.find((a) => a.startsWith("--budget-ms="))
+    const parsedBudget = budgetArg ? Number(budgetArg.slice("--budget-ms=".length)) : undefined
+    const customBudgetMs =
+      parsedBudget !== undefined && Number.isFinite(parsedBudget) && parsedBudget >= 0
+        ? LatencyMillis.make(parsedBudget)
+        : undefined
+
+    const benchRelFile = existsSync(
+      join(repoRoot, "libs", "harness", "gates", "src", "bench-check.ts"),
+    )
+      ? "libs/harness/gates/src/bench-check.ts"
+      : "libs/sample/domain/src/index.ts"
+    const sampleFilePath = join(repoRoot, benchRelFile)
+    const sampleContent = existsSync(sampleFilePath)
+      ? readFileSync(sampleFilePath, "utf-8")
+      : "export const x = 1\n"
+
+    // 1. Measure cold and warm extractTypeGraph (with signature-preserving body overlay)
+    clearWarmProgramSessions()
+    const session = getOrCreateWarmProgramSession(repoRoot)
+    const coldExtractStart = performance.now()
+    const initialGraph = yield* extractTypeGraph({ repoRoot, session })
+    const coldExtractMs = Math.max(0, performance.now() - coldExtractStart)
+
+    // Ensure ts-morph Program in session is primed for the target file when hydrated from disk cache
+    yield* extractTypeGraph({
+      repoRoot,
+      session,
+      overlays: {
+        [benchRelFile]: `${sampleContent}\n// warm-prime\n`,
+      },
+    })
+
+    const warmExtractSamples: Array<number> = []
+    for (let i = 0; i < iterations; i++) {
+      const t0 = performance.now()
+      yield* extractTypeGraph({
+        repoRoot,
+        session,
+        overlays: {
+          [benchRelFile]: `${sampleContent}\n// warm-bench-${i}\n`,
+        },
+      })
+      warmExtractSamples.push(Math.max(0, performance.now() - t0))
+    }
+
+    let stageError: string | undefined = undefined
+
+    // 2. Measure DatalogSession.stepDelta on warm DatalogSession
+    const datalogSamples: Array<number> = []
+    const datalogLayer = DatalogSession.layer(initialGraph)
+    yield* Effect.gen(function* () {
+      for (let i = 0; i < iterations; i++) {
+        const t0 = performance.now()
+        yield* stepDatalogFileDelta({
+          filePath: DatalogFilePath.make(benchRelFile),
+          nextGraph: initialGraph,
+        })
+        datalogSamples.push(Math.max(0, performance.now() - t0))
+      }
+    }).pipe(
+      Effect.provide(datalogLayer),
+      Effect.catch((err) =>
+        Effect.sync(() => {
+          stageError = `DatalogSession.stepDelta failed: ${String(err)}`
+        }),
+      ),
+    )
+
+    if (stageError !== undefined) {
+      return {
+        exitCode: 1,
+        stdout: JSON.stringify({ overallStatus: "failed", error: stageError }),
+        stderr: stageError,
+      }
+    }
+
+    // 3. Measure AstGateCache (cold prime + warm hits)
+    const cacheFilePath = AstGateCache.resolveCachePath(repoRoot)
+    yield* AstGateCache.decide({
+      files: [
+        {
+          filePath: AstSourceFilePath.make(benchRelFile),
+          content: AstSourceContent.make(sampleContent),
+        },
+      ],
+      ruleVersion: HARNESS_GATE_RULE_VERSION,
+      cacheFilePath,
+    })
+
+    const warmAstSamples: Array<number> = []
+    for (let i = 0; i < iterations; i++) {
+      const t0 = performance.now()
+      yield* AstGateCache.decide({
+        files: [
+          {
+            filePath: AstSourceFilePath.make(benchRelFile),
+            content: AstSourceContent.make(sampleContent),
+          },
+        ],
+        ruleVersion: HARNESS_GATE_RULE_VERSION,
+        cacheFilePath,
+      })
+      warmAstSamples.push(Math.max(0, performance.now() - t0))
+    }
+
+    // 4. Measure GraphRewrite.decide
+    const rewriteSamples: Array<number> = []
+    for (let i = 0; i < iterations; i++) {
+      const t0 = performance.now()
+      yield* decideGraphRewrite(initialGraph, "cleanup", undefined, { maxPhaseSteps: 2 }).pipe(
+        Effect.catch((err) =>
+          Effect.sync(() => {
+            stageError = `GraphRewrite.decide failed: ${String(err)}`
+          }),
+        ),
+      )
+      if (stageError !== undefined) {
+        return {
+          exitCode: 1,
+          stdout: JSON.stringify({ overallStatus: "failed", error: stageError }),
+          stderr: stageError,
+        }
+      }
+      rewriteSamples.push(Math.max(0, performance.now() - t0))
+    }
+
+    const measurements = [
+      buildStageLatencyMeasurement(
+        BenchStageName.make("extractTypeGraph.warm"),
+        warmExtractSamples,
+      ),
+      buildStageLatencyMeasurement(BenchStageName.make("DatalogSession.stepDelta"), datalogSamples),
+      buildStageLatencyMeasurement(BenchStageName.make("AstGateCache.warm"), warmAstSamples),
+      buildStageLatencyMeasurement(BenchStageName.make("GraphRewrite.decide"), rewriteSamples),
+    ]
+
+    const effectiveBudgets =
+      customBudgetMs !== undefined
+        ? DEFAULT_STAGE_LATENCY_BUDGETS.map((b) => ({
+            stage: b.stage,
+            p50BudgetMs: customBudgetMs,
+            p95BudgetMs: customBudgetMs,
+          }))
+        : DEFAULT_STAGE_LATENCY_BUDGETS
+
+    const benchExit = yield* Effect.exit(
+      decideHarnessBench({
+        measurements,
+        budgets: effectiveBudgets,
+      }),
+    )
+
+    return match(benchExit)
+      .with({ _tag: "Failure" }, (failure) => {
+        const errOpt = Cause.findErrorOption(failure.cause)
+        const { violations, stderrMsg } = match(errOpt)
+          .with({ _tag: "Some" }, ({ value }) =>
+            value instanceof LatencySloViolationError
+              ? {
+                  violations: value.violations,
+                  stderrMsg: `[LatencySloViolationError] ${value.violations.length} stage(s) exceeded latency budget`,
+                }
+              : {
+                  violations: [],
+                  stderrMsg: "Benchmark SLO evaluation failed",
+                },
+          )
+          .with({ _tag: "None" }, () => ({
+            violations: [],
+            stderrMsg: "Benchmark SLO evaluation failed",
+          }))
+          .exhaustive()
+        return {
+          exitCode: 1,
+          stdout: JSON.stringify({
+            overallStatus: "failed",
+            coldExtractMs: LatencyMillis.make(Math.round(coldExtractMs * 100) / 100),
+            measurements,
+            violations,
+          }),
+          stderr: stderrMsg,
+        }
+      })
+      .with({ _tag: "Success" }, (success) => ({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          overallStatus: "passed",
+          ...success.value,
+          coldExtractMs: LatencyMillis.make(Math.round(coldExtractMs * 100) / 100),
+          measurements,
+        }),
+        stderr: "",
+      }))
+      .exhaustive()
+  })
+
 export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
@@ -2440,6 +2809,9 @@ export const runCliEffect = (
       case "mutate":
         resEffect = handleMutate(argv.slice(1), options)
         break
+      case "bench":
+        resEffect = handleBench(argv.slice(1), options)
+        break
       case "ingest":
         resEffect = handleIngest(argv, options)
         break
@@ -2470,7 +2842,8 @@ export const runCliEffect = (
       requested === "plan-check" ||
       requested === "verify" ||
       requested === "gc" ||
-      requested === "mutate"
+      requested === "mutate" ||
+      requested === "bench"
     ) {
       category = "gate"
     } else {

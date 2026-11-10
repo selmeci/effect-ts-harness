@@ -217,10 +217,7 @@ export const STANDARD_DPO_RULES: ReadonlyArray<DpoRuleSpec> = [
  * Phases 2 (`REPAIR_ARCH`) and 3 (`REPAIR_CODE`) enforce strict decrease; Phase 1 (`PLAN`) ensures
  * `archViolations` and `codeHygieneViolations` do not increase, and Phase 4 (`CLEANUP`) requires `after <=_lex before`.
  */
-export const isStrictlyDecreasingMeasure = (
-  before: GraphMeasure,
-  after: GraphMeasure,
-): boolean => {
+export const isStrictlyDecreasingMeasure = (before: GraphMeasure, after: GraphMeasure): boolean => {
   const pairs: ReadonlyArray<readonly [number, number]> = [
     [before.archViolations, after.archViolations],
     [before.unmappedSpecSymbols, after.unmappedSpecSymbols],
@@ -361,11 +358,7 @@ export type DraftGraphPatch = Omit<GraphPatch, "beforeMeasure" | "afterMeasure">
   readonly clearViolationFilter?: ((v: BranchingViolation) => boolean) | undefined
 }
 
-const makePlaysRoleEdge = (
-  relationId: string,
-  entityKey: string,
-  role: string,
-): PlaysRoleEdge => {
+const makePlaysRoleEdge = (relationId: string, entityKey: string, role: string): PlaysRoleEdge => {
   const arch = getArchimateRelationForRole(role)
   return Schema.decodeSync(PlaysRoleEdge)({
     _tag: "PlaysRole",
@@ -418,9 +411,7 @@ const makeTraceabilityTupleNode = (
   verifyingTestQualnames: [],
 })
 
-const makeHttpEndpointTupleNode = (
-  relationId: string,
-): HttpEndpointTupleRelation => ({
+const makeHttpEndpointTupleNode = (relationId: string): HttpEndpointTupleRelation => ({
   _tag: "HttpEndpointTuple",
   relationId: RelationId.make(relationId),
   endpointGroup: "SynthesizedGroup",
@@ -496,8 +487,7 @@ export const verifyDpoGluingCondition = (
     for (const delEdge of patch.deletedRoleEdges) {
       const relId = delEdge.relationId
       const canonicalRelKey = relKeyByRelId.get(relId) ?? relId
-      const isRelDeleted =
-        deletedRelationSet.has(relId) || deletedRelationSet.has(canonicalRelKey)
+      const isRelDeleted = deletedRelationSet.has(relId) || deletedRelationSet.has(canonicalRelKey)
       if (!isRelDeleted) {
         if (!preservedSet.has(relId) && !preservedSet.has(canonicalRelKey)) {
           return yield* new GraphRewriteError({
@@ -663,9 +653,7 @@ const applyDpoPatchToGraph = (
         }
       }
 
-      const sortedEdges = Array.from(edgesByKey.entries()).sort((a, b) =>
-        a[0].localeCompare(b[0]),
-      )
+      const sortedEdges = Array.from(edgesByKey.entries()).sort((a, b) => a[0].localeCompare(b[0]))
       for (const [, edgeData] of sortedEdges) {
         const relIdx = nodeIndexByKey.get(edgeData.relationId)
         const entIdx = nodeIndexByKey.get(edgeData.entityKey)
@@ -846,11 +834,7 @@ const findServiceByTagOrName = (
   svcName: string,
 ): { readonly key: string; readonly node: ServiceTagNode } | undefined => {
   for (const [key, node] of ctx.servicesByKey.entries()) {
-    if (
-      node.tagId === svcName ||
-      node.name === svcName ||
-      node.tagId.endsWith(`#${svcName}`)
-    ) {
+    if (node.tagId === svcName || node.name === svcName || node.tagId.endsWith(`#${svcName}`)) {
       return { key, node }
     }
   }
@@ -869,10 +853,7 @@ const findErrorByTag = (
   return undefined
 }
 
-const hasLayerProviderForService = (
-  ctx: IndexedGraphContext,
-  serviceKey: string,
-): boolean => {
+const hasLayerProviderForService = (ctx: IndexedGraphContext, serviceKey: string): boolean => {
   for (const [relId] of ctx.layerRelationsById.entries()) {
     const edges = ctx.edgesByRelId.get(relId) ?? []
     const hasProvider = edges.some((e) => e.role === "provider-layer")
@@ -897,9 +878,7 @@ const findPhase1PlanPatches = (
   const ctx = indexHarnessGraph(graph)
   const patches: Array<DraftGraphPatch> = []
 
-  const sortedSpecs = Array.from(ctx.specsByKey.entries()).sort((a, b) =>
-    a[0].localeCompare(b[0]),
-  )
+  const sortedSpecs = Array.from(ctx.specsByKey.entries()).sort((a, b) => a[0].localeCompare(b[0]))
 
   for (const [specKey, specNode] of sortedSpecs) {
     if (specNode.status !== "proposed" && specNode.status !== "accepted") {
@@ -907,8 +886,7 @@ const findPhase1PlanPatches = (
     }
 
     const existingTraceRelId = ctx.traceIdBySpecKey.get(specKey)
-    const traceRelId =
-      existingTraceRelId ?? `TraceabilityTuple:trace:${specNode.id}`
+    const traceRelId = existingTraceRelId ?? `TraceabilityTuple:trace:${specNode.id}`
     const traceRelNode: TraceabilityTupleRelation = makeTraceabilityTupleNode(
       traceRelId,
       specNode.id,
@@ -943,7 +921,11 @@ const findPhase1PlanPatches = (
 
       const insertedEntities: Array<EntityNode> = []
       const insertedRelations: Array<RelationNode> = [
-        makeEffectSignatureNode(sigRelId, fnQualname, `libs/domain/src/${cleanId.toLowerCase()}.ts`),
+        makeEffectSignatureNode(
+          sigRelId,
+          fnQualname,
+          `libs/domain/src/${cleanId.toLowerCase()}.ts`,
+        ),
       ]
       if (!traceExists) {
         insertedRelations.push(traceRelNode)
@@ -1141,10 +1123,7 @@ const findPhase1PlanPatches = (
       for (const e of ctx.edgesByRelId.get(existingTraceRelId) ?? []) {
         if (e.role === "realizing-symbol" || e.role === "specified-target") {
           const fnNode = ctx.fnsByKey.get(e.entityKey)
-          if (
-            fnNode !== undefined &&
-            !specRealizingFns.some((item) => item.key === e.entityKey)
-          ) {
+          if (fnNode !== undefined && !specRealizingFns.some((item) => item.key === e.entityKey)) {
             specRealizingFns.push({ key: e.entityKey, node: fnNode })
           }
         }
@@ -1315,8 +1294,7 @@ const findPhase1PlanPatches = (
       for (const targetFn of nonDeciderFns) {
         preservedKeys.push(NodeKey.make(targetFn.key))
         const sigRelId =
-          ctx.sigIdByCallerKey.get(targetFn.key) ??
-          `EffectSignature:sig:${targetFn.node.qualname}`
+          ctx.sigIdByCallerKey.get(targetFn.key) ?? `EffectSignature:sig:${targetFn.node.qualname}`
         if (!ctx.sigRelationsById.has(sigRelId)) {
           insertedRelations.push(
             makeEffectSignatureNode(sigRelId, targetFn.node.qualname, targetFn.node.file),
@@ -1406,7 +1384,12 @@ const findPhase2ArchRepairBranches = (
 
       if (targetSigRelId !== undefined && deletedEdge !== undefined) {
         const rawSvcName =
-          infraSvc?.name ?? infraSvcKey.replace(/^ServiceTag:/, "").split("#").pop() ?? "Infra"
+          infraSvc?.name ??
+          infraSvcKey
+            .replace(/^ServiceTag:/, "")
+            .split("#")
+            .pop() ??
+          "Infra"
         const basePortName = rawSvcName.replace(/^(?:Drizzle|D1|Sqlite|Cloudflare|Live)/, "")
         const portName =
           basePortName.length > 0 && basePortName !== rawSvcName
@@ -1512,11 +1495,7 @@ const findPhase2ArchRepairBranches = (
               ruleCategory: "auto-repair",
               description: `Extract service port '${portName}' in type:service, rewire preserved EffectSignature '${targetSigRelId}' in K, and bind '${layerQual}' in type:infra.`,
               primaryNodeKey: targetCallerKey,
-              preservedInterfaceKeys: [
-                targetCallerKey,
-                infraSvcKey,
-                NodeKey.make(targetSigRelId),
-              ],
+              preservedInterfaceKeys: [targetCallerKey, infraSvcKey, NodeKey.make(targetSigRelId)],
               deletedEntityKeys: [],
               deletedRelationIds: [],
               deletedRoleEdges: [deletedEdge],
@@ -1553,9 +1532,7 @@ const findPhase2ArchRepairBranches = (
         const directEdge =
           sigEdges.find(
             (e) =>
-              (e.role === "requires-service" ||
-                e.role === "fails-with" ||
-                e.role === "callee") &&
+              (e.role === "requires-service" || e.role === "fails-with" || e.role === "callee") &&
               e.entityKey === targetKey,
           ) ??
           (firstHopCalleeKey !== undefined
@@ -1693,8 +1670,7 @@ const findPhase2ArchRepairBranches = (
         const sigEdges = ctx.edgesByRelId.get(sigRelId) ?? []
         const offendingEdge = sigEdges.find(
           (e) =>
-            (e.role === "requires-service" || e.role === "callee") &&
-            e.entityKey === busTargetKey,
+            (e.role === "requires-service" || e.role === "callee") && e.entityKey === busTargetKey,
         )
 
         if (offendingEdge !== undefined) {
@@ -1781,11 +1757,7 @@ const findPhase2ArchRepairBranches = (
                 ruleCategory: "auto-repair",
                 description: `Replace direct EventBus coupling on aggregate '${aggNode.spanName}' EffectSignature '${sigRelId}' in K with transactional OutboxStore port and OutboxRelay worker.`,
                 primaryNodeKey: aggKey,
-                preservedInterfaceKeys: [
-                  aggKey,
-                  busTargetKey,
-                  NodeKey.make(sigRelId),
-                ],
+                preservedInterfaceKeys: [aggKey, busTargetKey, NodeKey.make(sigRelId)],
                 deletedEntityKeys: [],
                 deletedRelationIds: [],
                 deletedRoleEdges: [offendingEdge],
@@ -1825,9 +1797,7 @@ const findPhase2ArchRepairBranches = (
       if (sigExists) {
         basePreserved.push(NodeKey.make(sigRelId))
       } else {
-        baseRelations.push(
-          makeEffectSignatureNode(sigRelId, callerNode.qualname, callerNode.file),
-        )
+        baseRelations.push(makeEffectSignatureNode(sigRelId, callerNode.qualname, callerNode.file))
         baseEdges.push(makePlaysRoleEdge(sigRelId, callerKey, "caller"))
       }
 
@@ -1843,17 +1813,12 @@ const findPhase2ArchRepairBranches = (
         deletedRoleEdges: [],
         insertedEntityNodes: [],
         insertedRelationNodes: baseRelations,
-        insertedRoleEdges: [
-          ...baseEdges,
-          makePlaysRoleEdge(sigRelId, errKey, "fails-with"),
-        ],
+        insertedRoleEdges: [...baseEdges, makePlaysRoleEdge(sigRelId, errKey, "fails-with")],
       }
 
       // REP-04b: Catch and handle error at boundary via Effect.catchTag
       // Updates callerNode.caughtErrors and satisfies any COMP-01 spec expectation
-      const updatedCaught = Array.from(
-        new Set([...(callerNode.caughtErrors ?? []), errTag]),
-      ).sort()
+      const updatedCaught = Array.from(new Set([...(callerNode.caughtErrors ?? []), errTag])).sort()
       const updatedCaller: EffectFnNode = {
         ...callerNode,
         caughtErrors: updatedCaught,
@@ -1914,8 +1879,7 @@ const findPhase3CodeRepairPatches = (
       (fnNode.spanName === "untraced" || fnNode.spanName === "<untraced>")
     const matchesUntracedViolation = (v: BranchingViolation): boolean =>
       v.rule === "untraced-decider" &&
-      (v.enclosingSymbol === fnNode.qualname ||
-        (isUntracedDeciderNode && v.file === fnNode.file))
+      (v.enclosingSymbol === fnNode.qualname || (isUntracedDeciderNode && v.file === fnNode.file))
     const hasUntracedViolation = (graph.branchingViolations ?? []).some(matchesUntracedViolation)
 
     if (hasUntracedViolation || isUntracedDeciderNode) {
@@ -1924,8 +1888,7 @@ const findPhase3CodeRepairPatches = (
       const canonicalSpan = isReducerSpan(fnNode.qualname)
         ? `${cleanScope}.evolve`
         : `${cleanScope}.decide`
-      const sigRelId =
-        ctx.sigIdByCallerKey.get(fnKey) ?? `EffectSignature:sig:${fnNode.qualname}`
+      const sigRelId = ctx.sigIdByCallerKey.get(fnKey) ?? `EffectSignature:sig:${fnNode.qualname}`
       const sigExists = ctx.sigRelationsById.has(sigRelId)
 
       const preservedKeys: Array<NodeKey> = [NodeKey.make(fnKey)]
@@ -1934,9 +1897,7 @@ const findPhase3CodeRepairPatches = (
       if (sigExists) {
         preservedKeys.push(NodeKey.make(sigRelId))
       } else {
-        insertedRelations.push(
-          makeEffectSignatureNode(sigRelId, fnNode.qualname, fnNode.file),
-        )
+        insertedRelations.push(makeEffectSignatureNode(sigRelId, fnNode.qualname, fnNode.file))
         insertedEdges.push(makePlaysRoleEdge(sigRelId, fnKey, "caller"))
       }
 
@@ -2072,8 +2033,7 @@ const findPhase3CodeRepairPatches = (
     if (targetFn !== undefined) {
       preserved.push(primaryKey)
       const sigRelId =
-        ctx.sigIdByCallerKey.get(targetFn.key) ??
-        `EffectSignature:sig:${targetFn.node.qualname}`
+        ctx.sigIdByCallerKey.get(targetFn.key) ?? `EffectSignature:sig:${targetFn.node.qualname}`
       if (ctx.sigRelationsById.has(sigRelId)) {
         preserved.push(NodeKey.make(sigRelId))
       } else {
@@ -2122,9 +2082,7 @@ const findPhase3CodeRepairPatches = (
     const preserved: Array<NodeKey> = []
 
     if (!ctx.migrationRelationsById.has(migRelId)) {
-      insertedRelations.push(
-        makeMigrationTupleNode(migRelId, "1_init_tables", ddlViolation.file),
-      )
+      insertedRelations.push(makeMigrationTupleNode(migRelId, "1_init_tables", ddlViolation.file))
     } else {
       preserved.push(NodeKey.make(migRelId))
     }
@@ -2218,11 +2176,7 @@ const findPhase3CodeRepairPatches = (
           isStub: true,
         })
         insertedRelations.push(
-          makeEffectSignatureNode(
-            sigRelId,
-            fnQual,
-            `libs/domain/src/${cleanSym.toLowerCase()}.ts`,
-          ),
+          makeEffectSignatureNode(sigRelId, fnQual, `libs/domain/src/${cleanSym.toLowerCase()}.ts`),
         )
         insertedEdges.push(
           makePlaysRoleEdge(sigRelId, fnKey, "caller"),
@@ -2250,9 +2204,7 @@ const findPhase3CodeRepairPatches = (
   }
 
   // Also resolve remaining missing-layer-provider, untested-domain-span, or COMP-02..05 suggestedEdges
-  const missingLayerAp = inference.antiPatterns.find(
-    (ap) => ap.ruleId === "missing-layer-provider",
-  )
+  const missingLayerAp = inference.antiPatterns.find((ap) => ap.ruleId === "missing-layer-provider")
   if (missingLayerAp !== undefined && missingLayerAp.targetKey !== undefined) {
     const svcKey = missingLayerAp.targetKey
     const svcNode = ctx.servicesByKey.get(svcKey)
@@ -2289,11 +2241,7 @@ const findPhase3CodeRepairPatches = (
     }
     if (!ctx.layerRelationsById.has(flowId)) {
       insertedRelations.push(
-        makeLayerFlowNode(
-          flowId,
-          layerQual,
-          `libs/infra/src/${svcClean.toLowerCase()}-live.ts`,
-        ),
+        makeLayerFlowNode(flowId, layerQual, `libs/infra/src/${svcClean.toLowerCase()}-live.ts`),
       )
     }
 
@@ -2420,9 +2368,7 @@ const findPhase3CodeRepairPatches = (
           )
           if (nextSuggestion.sourceEntityKey !== undefined) {
             preserved.push(nextSuggestion.sourceEntityKey)
-            insertedEdges.push(
-              makePlaysRoleEdge(relId, nextSuggestion.sourceEntityKey, "caller"),
-            )
+            insertedEdges.push(makePlaysRoleEdge(relId, nextSuggestion.sourceEntityKey, "caller"))
           }
         })
         .with("LayerFlow", () => {
@@ -2484,11 +2430,7 @@ const findPhase3CodeRepairPatches = (
       }
       if (!ctx.layerRelationsById.has(flowId)) {
         insertedRelations.push(
-          makeLayerFlowNode(
-            flowId,
-            layerQual,
-            `libs/infra/src/${svcClean.toLowerCase()}-live.ts`,
-          ),
+          makeLayerFlowNode(flowId, layerQual, `libs/infra/src/${svcClean.toLowerCase()}-live.ts`),
         )
       }
       insertedEdges.push(
@@ -2524,9 +2466,7 @@ const findPhase3CodeRepairPatches = (
 // Phase 4: CLEANUP DPO Candidate Generator (REP-11 with NAC_spec)
 // ============================================================================
 
-const findPhase4CleanupPatches = (
-  graph: HarnessGraph,
-): ReadonlyArray<DraftGraphPatch> => {
+const findPhase4CleanupPatches = (graph: HarnessGraph): ReadonlyArray<DraftGraphPatch> => {
   const ctx = indexHarnessGraph(graph)
 
   // Collect all services referenced by any EarsSpec or AdrDoc or active stub
@@ -2585,9 +2525,7 @@ const findPhase4CleanupPatches = (
       hasActiveStubInWorkspace &&
       svcNode.packageTag !== "infra" &&
       Array.from(ctx.fnsByKey.values()).some(
-        (fn) =>
-          fn.isStub === true &&
-          fn.file.split("/").slice(0, 2).join("/") === svcScopePrefix,
+        (fn) => fn.isStub === true && fn.file.split("/").slice(0, 2).join("/") === svcScopePrefix,
       )
     if (sameScopeStubExists) {
       continue
@@ -2990,8 +2928,7 @@ export const decideGraphRewrite = Effect.fn("GraphRewrite.decide")(function* (
   }
 
   const firstPatch = appliedPatches[0]!
-  const primaryScore =
-    branchWinnerScore ?? scoreDraftPatch(firstPatch, graph, candidatePriors)
+  const primaryScore = branchWinnerScore ?? scoreDraftPatch(firstPatch, graph, candidatePriors)
 
   const recommended: RewriteCandidate = {
     rank: CandidateRank.make(1),

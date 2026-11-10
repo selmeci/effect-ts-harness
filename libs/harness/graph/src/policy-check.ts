@@ -103,64 +103,62 @@ export const DEFAULT_POLICY_CHECK_RULES: ReadonlySet<ViolationRule> = new Set<Vi
  * Pure Effect decider (`GraphPolicy.decide`) evaluating architectural graph policies
  * by delegating to the Stratified Datalog inference engine (`GraphInfer.decide`).
  */
-export const decideEffectGraphPolicy = Effect.fn("GraphPolicy.decide")(
-  function* (
-    harnessGraph: HarnessGraph,
-    options?: CheckEffectGraphOptions,
-  ) {
-    const violations: Array<GraphPolicyViolation> = []
+export const decideEffectGraphPolicy = Effect.fn("GraphPolicy.decide")(function* (
+  harnessGraph: HarnessGraph,
+  options?: CheckEffectGraphOptions,
+) {
+  const violations: Array<GraphPolicyViolation> = []
 
-    const inference = yield* decideGraphInference(harnessGraph)
+  const inference = yield* decideGraphInference(harnessGraph)
 
-    const isRuleActive = (rule: ViolationRule): boolean => {
-      if (options?.rules !== undefined) {
-        return options.rules.has(rule)
-      }
-      if (LIFECYCLE_GATED_RULES.has(rule)) {
-        return options?.includeLifecycleRules === true
-      }
-      return true
+  const isRuleActive = (rule: ViolationRule): boolean => {
+    if (options?.rules !== undefined) {
+      return options.rules.has(rule)
     }
-
-    for (const ap of inference.antiPatterns) {
-      if (isRuleActive(ap.ruleId)) {
-        violations.push({
-          rule: ap.ruleId,
-          message: ap.message,
-          path: ap.path,
-        })
-      }
+    if (LIFECYCLE_GATED_RULES.has(rule)) {
+      return options?.includeLifecycleRules === true
     }
+    return true
+  }
 
-    for (const bv of harnessGraph.branchingViolations ?? []) {
-      if (isRuleActive(bv.rule)) {
-        violations.push({
-          rule: bv.rule,
-          message: bv.message,
-          path: bv.path ?? [bv.file, bv.enclosingSymbol],
-        })
-      }
+  for (const ap of inference.antiPatterns) {
+    if (isRuleActive(ap.ruleId)) {
+      violations.push({
+        rule: ap.ruleId,
+        message: ap.message,
+        path: ap.path,
+      })
     }
+  }
 
-    if (options?.checkUnresolvedReferences === true) {
-      for (const ref of harnessGraph.unresolvedReferences ?? []) {
-        violations.push({
-          rule: "unresolved-graph-reference",
-          message: `Unresolved graph reference on relation '${ref.relationId}' role '${ref.role}' targeting '${ref.targetKey}'`,
-          path: [ref.relationId, ref.role, ref.targetKey],
-        })
-      }
+  for (const bv of harnessGraph.branchingViolations ?? []) {
+    if (isRuleActive(bv.rule)) {
+      violations.push({
+        rule: bv.rule,
+        message: bv.message,
+        path: bv.path ?? [bv.file, bv.enclosingSymbol],
+      })
     }
+  }
 
-    const mermaid = renderMermaid(harnessGraph)
-
-    return {
-      ok: violations.length === 0,
-      violations,
-      mermaid,
+  if (options?.checkUnresolvedReferences === true) {
+    for (const ref of harnessGraph.unresolvedReferences ?? []) {
+      violations.push({
+        rule: "unresolved-graph-reference",
+        message: `Unresolved graph reference on relation '${ref.relationId}' role '${ref.role}' targeting '${ref.targetKey}'`,
+        path: [ref.relationId, ref.role, ref.targetKey],
+      })
     }
-  },
-)
+  }
+
+  const mermaid = renderMermaid(harnessGraph)
+
+  return {
+    ok: violations.length === 0,
+    violations,
+    mermaid,
+  }
+})
 
 /**
  * Evaluates architectural graph policies over the PERA Levi Hypergraph by delegating

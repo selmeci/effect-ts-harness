@@ -1,9 +1,4 @@
-import {
-  ConfidenceMillis,
-  NodeKey,
-  PageRankScoreMillis,
-  RoleName,
-} from "@harness/gates"
+import { ConfidenceMillis, NodeKey, PageRankScoreMillis, RoleName } from "@harness/gates"
 import { Effect, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
@@ -37,12 +32,7 @@ export type DeterministicFallbackSource = typeof DeterministicFallbackSource.Typ
 export const PriorSource = Schema.Union([DecisionModelSource, DeterministicFallbackSource])
 export type PriorSource = typeof PriorSource.Type
 
-export const HOLE_RELEVANCE_LEVELS = [
-  "irrelevant",
-  "tangential",
-  "helpful",
-  "essential",
-] as const
+export const HOLE_RELEVANCE_LEVELS = ["irrelevant", "tangential", "helpful", "essential"] as const
 export type HoleRelevanceLevel = (typeof HOLE_RELEVANCE_LEVELS)[number]
 
 export const RELEVANCE_WEIGHT_MILLIS: Readonly<Record<HoleRelevanceLevel, ConfidenceMillis>> = {
@@ -269,11 +259,7 @@ export const evaluateHoleCandidatePriorsBatch = Effect.fn(
   let usedFallback = false
   let fallbackReason: DeterministicFallbackReason | undefined
 
-  const mergeConfidence = (
-    key: string,
-    score: ConfidenceMillis,
-    isModelBacked: boolean,
-  ): void => {
+  const mergeConfidence = (key: string, score: ConfidenceMillis, isModelBacked: boolean): void => {
     if (isModelBacked) {
       if (!modelBackedEdgeKeys.has(key)) {
         modelBackedEdgeKeys.add(key)
@@ -362,8 +348,7 @@ export const evaluateHoleCandidatePriorsBatch = Effect.fn(
         Effect.sync(() => {
           const answersRecord = value.answers as Record<
             string,
-            | { readonly probability?: number; readonly label?: string }
-            | undefined
+            { readonly probability?: number; readonly label?: string } | undefined
           >
           for (let i = 0; i < chunk.length; i++) {
             const item = chunk[i]!
@@ -403,26 +388,29 @@ export const evaluateHoleCandidatePriorsBatch = Effect.fn(
                 )
                 results.push(fb)
               })
-              .with({ _tag: "Some" }, ({ value: { relevanceLabel, teleportationWeightMillis } }) => {
-                const clampedConf = Math.min(1000, Math.max(0, Math.round(rawProb * 1000)))
-                const edgeConfidenceMillis = ConfidenceMillis.make(clampedConf)
-                const roleKey = `${item.candidateSymbolKey}:${item.proposedRole}`
-                mergeConfidence(roleKey, edgeConfidenceMillis, true)
-                mergeConfidence(item.candidateSymbolKey, edgeConfidenceMillis, true)
-                mergeTeleportationWeight(
-                  item.candidateSymbolKey,
-                  PageRankScoreMillis.make(teleportationWeightMillis),
-                  true,
-                )
-                results.push({
-                  candidateSymbolKey: item.candidateSymbolKey,
-                  proposedRole: item.proposedRole,
-                  edgeConfidenceMillis,
-                  teleportationWeightMillis,
-                  relevanceLabel,
-                  source: { _tag: "DecisionModel" },
-                })
-              })
+              .with(
+                { _tag: "Some" },
+                ({ value: { relevanceLabel, teleportationWeightMillis } }) => {
+                  const clampedConf = Math.min(1000, Math.max(0, Math.round(rawProb * 1000)))
+                  const edgeConfidenceMillis = ConfidenceMillis.make(clampedConf)
+                  const roleKey = `${item.candidateSymbolKey}:${item.proposedRole}`
+                  mergeConfidence(roleKey, edgeConfidenceMillis, true)
+                  mergeConfidence(item.candidateSymbolKey, edgeConfidenceMillis, true)
+                  mergeTeleportationWeight(
+                    item.candidateSymbolKey,
+                    PageRankScoreMillis.make(teleportationWeightMillis),
+                    true,
+                  )
+                  results.push({
+                    candidateSymbolKey: item.candidateSymbolKey,
+                    proposedRole: item.proposedRole,
+                    edgeConfidenceMillis,
+                    teleportationWeightMillis,
+                    relevanceLabel,
+                    source: { _tag: "DecisionModel" },
+                  })
+                },
+              )
               .exhaustive()
           }
         }),

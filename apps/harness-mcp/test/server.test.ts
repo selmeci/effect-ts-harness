@@ -1,4 +1,5 @@
 import * as fs from "node:fs"
+import * as net from "node:net"
 import * as os from "node:os"
 import * as path from "node:path"
 import { describe, expect, it } from "vitest"
@@ -12,6 +13,7 @@ import {
   executeTool,
   isPathInsideRoot,
   runDefaultLspDiagnostics,
+  startHarnessDaemonServer,
 } from "../src/server.js"
 
 describe("harness-mcp tools", () => {
@@ -153,6 +155,85 @@ describe("harness-mcp tools", () => {
 
     expect(Array.isArray(results)).toBe(true)
     expect(results.some((r) => r.file.includes("libs/sample/domain/src/index.ts"))).toBe(true)
+  })
+
+  it("executes structural search with filePath scoped to .ts file", async () => {
+    const results = (await executeTool(
+      "harness_structural_search",
+      {
+        pattern: "export const greet = $$$",
+        filePath: "libs/sample/domain/src/index.ts",
+      },
+      { graph },
+    )) as Array<{ file: string; line: number; text: string }>
+
+    expect(Array.isArray(results)).toBe(true)
+    expect(results.length).toBe(1)
+    expect(results[0]?.file).toBe("libs/sample/domain/src/index.ts")
+    expect(results[0]?.line).toBe(14)
+  })
+
+  it("executes structural search with filePath scoped to .md file", async () => {
+    const results = (await executeTool(
+      "harness_structural_search",
+      {
+        pattern: "ADR-0001",
+        filePath: "libs/sample/docs/adr/0001-cloudflare-d1-do-sqlite-and-traceparent-boundaries.md",
+      },
+      { graph },
+    )) as Array<{ file: string; line: number; text: string }>
+
+    expect(Array.isArray(results)).toBe(true)
+    expect(results.length).toBeGreaterThan(0)
+    expect(
+      results.every(
+        (r) =>
+          r.file ===
+          "libs/sample/docs/adr/0001-cloudflare-d1-do-sqlite-and-traceparent-boundaries.md",
+      ),
+    ).toBe(true)
+    expect(results[0]?.text).toContain("ADR-0001")
+  })
+
+  it("rejects path-traversal search and returns empty array", async () => {
+    const filePathResults = (await executeTool(
+      "harness_structural_search",
+      {
+        pattern: "export const",
+        filePath: "../outside.ts",
+      },
+      { graph },
+    )) as Array<unknown>
+
+    expect(filePathResults).toEqual([])
+
+    const pathsResults = (await executeTool(
+      "harness_structural_search",
+      {
+        pattern: "export const",
+        paths: ["../../outside.ts"],
+      },
+      { graph },
+    )) as Array<unknown>
+
+    expect(pathsResults).toEqual([])
+
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-mcp-outside-"))
+    const outsideFile = path.join(outsideDir, "profiles.json")
+    fs.writeFileSync(outsideFile, '{"secret":"CLOUDFLARE_TOKEN"}\n', "utf-8")
+    try {
+      const externalAbsResults = (await executeTool(
+        "harness_structural_search",
+        {
+          pattern: "CLOUDFLARE_TOKEN",
+          filePath: outsideFile,
+        },
+        { graph },
+      )) as Array<unknown>
+      expect(externalAbsResults).toEqual([])
+    } finally {
+      fs.rmSync(outsideDir, { recursive: true, force: true })
+    }
   })
 
   const makeMockDecisionModel = (
@@ -647,5 +728,68 @@ describe("harness-mcp tools", () => {
         firstDiag.includes("[lsp-exit-") ||
         firstDiag.includes("[lsp-exception]"),
     ).toBe(true)
+  })
+
+  it("startHarnessDaemonServer handles ping, ast-gates, and rejects path traversal outside workspace root", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-mcp-daemon-"))
+    const sampleDir = path.join(tmpDir, "libs", "sample", "domain", "src")
+    fs.mkdirSync(sampleDir, { recursive: true })
+    fs.writeFileSync(path.join(sampleDir, "index.ts"), "export const x = 1\n", "utf-8")
+
+    const daemon = await startHarnessDaemonServer(tmpDir)
+    const sendDaemonPayload = (payload: string): Promise<Record<string, unknown>> =>
+      Effect.runPromise(
+        Effect.callback<Record<string, unknown>>((resume) => {
+          const client = net.createConnection(daemon.socketPath)
+          let buf = ""
+          client.on("connect", () => {
+            client.write(payload + "\n")
+          })
+          client.on("data", (chunk) => {
+            buf += chunk.toString("utf8")
+            const idx = buf.indexOf("\n")
+            if (idx !== -1) {
+              client.end()
+              resume(Effect.succeed(JSON.parse(buf.slice(0, idx)) as Record<string, unknown>))
+            }
+          })
+        }),
+      )
+
+    try {
+      const pingRes = await sendDaemonPayload(
+        JSON.stringify({ id: "p1", command: "ping", repoRoot: tmpDir }),
+      )
+      expect(pingRes).toMatchObject({ id: "p1", ok: true, status: "warm" })
+
+      const astRes = await sendDaemonPayload(
+        JSON.stringify({
+          id: "a1",
+          command: "ast-gates",
+          repoRoot: tmpDir,
+          files: ["libs/sample/domain/src/index.ts"],
+        }),
+      )
+      expect(astRes).toMatchObject({ id: "a1", ok: true })
+
+      const traversalRes = await sendDaemonPayload(
+        JSON.stringify({
+          id: "t1",
+          command: "ast-gates",
+          repoRoot: tmpDir,
+          files: ["../../../etc/passwd"],
+        }),
+      )
+      expect(traversalRes).toMatchObject({
+        id: "t1",
+        ok: false,
+      })
+      expect(String(traversalRes.error)).toContain(
+        "Path traversal outside workspace root is forbidden",
+      )
+    } finally {
+      await daemon.close()
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
   })
 })

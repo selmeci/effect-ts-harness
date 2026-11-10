@@ -18,10 +18,7 @@ import {
 import { Context, Effect, Layer, Semaphore } from "effect"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
-import {
-  HARNESS_PERA_CONCEPT_LATTICE_CONFIG,
-  decideConceptLattice,
-} from "./concept-lattice.js"
+import { HARNESS_PERA_CONCEPT_LATTICE_CONFIG, decideConceptLattice } from "./concept-lattice.js"
 import {
   type AdrDocNode,
   ConfidenceMillis,
@@ -200,8 +197,7 @@ export const STANDARD_DATALOG_RULES: ReadonlyArray<DatalogRule> = [
     id: DatalogRuleId.make("INF-03"),
     stratum: 1,
     headPredicate: "LayerDependsOn",
-    description:
-      "Transitive Layer dependency closure and VitestCase -> EffectFn reachability.",
+    description: "Transitive Layer dependency closure and VitestCase -> EffectFn reachability.",
     hasNegation: false,
     isRecursive: true,
   },
@@ -440,306 +436,306 @@ const findShortestLayerCycle = (
 /**
  * Pure 4-stratum Differential Dataflow / Stratified Datalog decider (`GraphInfer.decide`, `R = never`).
  */
-export const decideGraphInference = Effect.fn("GraphInfer.decide")(
-  function* (
-    harnessGraph: HarnessGraph,
-    priors?: SemanticEdgePriors,
-  ) {
-    yield* decideConceptLattice(HARNESS_PERA_CONCEPT_LATTICE_CONFIG)
+export const decideGraphInference = Effect.fn("GraphInfer.decide")(function* (
+  harnessGraph: HarnessGraph,
+  priors?: SemanticEdgePriors,
+) {
+  yield* decideConceptLattice(HARNESS_PERA_CONCEPT_LATTICE_CONFIG)
 
-    return yield* Effect.try({
-      try: () => {
-        // ======================================================================
-        // Stratum S_0: Extract Extensional Database (EDB) facts from Levi Hypergraph
-        // ======================================================================
-        const fnsByKey = new Map<string, EffectFnNode>()
-        const servicesByKey = new Map<string, ServiceTagNode>()
-        const layersByKey = new Map<string, ServiceLayerNode>()
-        const errorsByKey = new Map<string, TaggedErrorNode>()
-        const schemasByKey = new Map<string, SchemaDefNode>()
-        const testsByKey = new Map<string, VitestCaseNode>()
-        const adrsByKey = new Map<string, AdrDocNode>()
-        const specsByKey = new Map<string, EarsSpecNode>()
-        const migrationsById = new Map<string, MigrationTupleRelation>()
-        const allEntityKeys = new Set<string>()
+  return yield* Effect.try({
+    try: () => {
+      // ======================================================================
+      // Stratum S_0: Extract Extensional Database (EDB) facts from Levi Hypergraph
+      // ======================================================================
+      const fnsByKey = new Map<string, EffectFnNode>()
+      const servicesByKey = new Map<string, ServiceTagNode>()
+      const layersByKey = new Map<string, ServiceLayerNode>()
+      const errorsByKey = new Map<string, TaggedErrorNode>()
+      const schemasByKey = new Map<string, SchemaDefNode>()
+      const testsByKey = new Map<string, VitestCaseNode>()
+      const adrsByKey = new Map<string, AdrDocNode>()
+      const specsByKey = new Map<string, EarsSpecNode>()
+      const migrationsById = new Map<string, MigrationTupleRelation>()
+      const allEntityKeys = new Set<string>()
 
-        const fnQualnameByKey = new Map<string, string>()
-        const svcTagIdByKey = new Map<string, string>()
-        const layerQualnameByKey = new Map<string, string>()
-        const errTagByKey = new Map<string, string>()
+      const fnQualnameByKey = new Map<string, string>()
+      const svcTagIdByKey = new Map<string, string>()
+      const layerQualnameByKey = new Map<string, string>()
+      const errTagByKey = new Map<string, string>()
 
-        // Relation role maps: relationId -> role -> Set<entityKey>
-        const sigRoles = new Map<string, Map<string, Set<string>>>()
-        const sigIdByCallerKey = new Map<string, string>()
-        const layerFlowRoles = new Map<string, Map<string, Set<string>>>()
-        const traceRoles = new Map<string, Map<string, Set<string>>>()
-        const migrationRoles = new Map<string, Map<string, Set<string>>>()
-        const httpRoles = new Map<string, Map<string, Set<string>>>()
+      // Relation role maps: relationId -> role -> Set<entityKey>
+      const sigRoles = new Map<string, Map<string, Set<string>>>()
+      const sigIdByCallerKey = new Map<string, string>()
+      const layerFlowRoles = new Map<string, Map<string, Set<string>>>()
+      const traceRoles = new Map<string, Map<string, Set<string>>>()
+      const migrationRoles = new Map<string, Map<string, Set<string>>>()
+      const httpRoles = new Map<string, Map<string, Set<string>>>()
 
-        for (const [, node] of Graph.nodes(harnessGraph.graph)) {
-          const key = getNodeKey(node)
-          match(node)
-            .with({ _tag: "EffectFn" }, (n) => {
-              fnsByKey.set(key, n)
-              fnQualnameByKey.set(key, n.qualname)
-              allEntityKeys.add(key)
-            })
-            .with({ _tag: "ServiceTag" }, (n) => {
-              servicesByKey.set(key, n)
-              svcTagIdByKey.set(key, n.tagId)
-              allEntityKeys.add(key)
-            })
-            .with({ _tag: "ServiceLayer" }, (n) => {
-              layersByKey.set(key, n)
-              layerQualnameByKey.set(key, n.qualname)
-              allEntityKeys.add(key)
-            })
-            .with({ _tag: "TaggedError" }, (n) => {
-              errorsByKey.set(key, n)
-              errTagByKey.set(key, n.errorTag)
-              allEntityKeys.add(key)
-            })
-            .with({ _tag: "SchemaDef" }, (n) => {
-              schemasByKey.set(key, n)
-              allEntityKeys.add(key)
-            })
-            .with({ _tag: "VitestCase" }, (n) => {
-              testsByKey.set(key, n)
-              allEntityKeys.add(key)
-            })
-            .with({ _tag: "AdrDoc" }, (n) => {
-              adrsByKey.set(key, n)
-              allEntityKeys.add(key)
-            })
-            .with({ _tag: "EarsSpec" }, (n) => {
-              specsByKey.set(key, n)
-              allEntityKeys.add(key)
-            })
-            .with({ _tag: "PatternDoc" }, () => {
-              allEntityKeys.add(key)
-            })
-            .with({ _tag: "EffectSignature" }, (n) => {
-              if (!sigRoles.has(n.relationId)) {
-                sigRoles.set(n.relationId, new Map())
-              }
-            })
-            .with({ _tag: "LayerFlow" }, (n) => {
-              if (!layerFlowRoles.has(n.relationId)) {
-                layerFlowRoles.set(n.relationId, new Map())
-              }
-            })
-            .with({ _tag: "TraceabilityTuple" }, (n) => {
-              if (!traceRoles.has(n.relationId)) {
-                traceRoles.set(n.relationId, new Map())
-              }
-            })
-            .with({ _tag: "MigrationTuple" }, (n) => {
-              migrationsById.set(n.relationId, n)
-              if (!migrationRoles.has(n.relationId)) {
-                migrationRoles.set(n.relationId, new Map())
-              }
-            })
-            .with({ _tag: "HttpEndpointTuple" }, (n) => {
-              if (!httpRoles.has(n.relationId)) {
-                httpRoles.set(n.relationId, new Map())
-              }
-            })
-            .exhaustive()
-        }
-
-        for (const [, edge] of Graph.edges(harnessGraph.graph)) {
-          const { relationId, entityKey, role } = edge.data
-          const targetMap = sigRoles.has(relationId)
-            ? sigRoles.get(relationId)
-            : layerFlowRoles.has(relationId)
-              ? layerFlowRoles.get(relationId)
-              : traceRoles.has(relationId)
-                ? traceRoles.get(relationId)
-                : migrationRoles.has(relationId)
-                  ? migrationRoles.get(relationId)
-                  : httpRoles.has(relationId)
-                    ? httpRoles.get(relationId)
-                    : undefined
-          if (targetMap !== undefined) {
-            let set = targetMap.get(role)
-            if (set === undefined) {
-              set = new Set<string>()
-              targetMap.set(role, set)
+      for (const [, node] of Graph.nodes(harnessGraph.graph)) {
+        const key = getNodeKey(node)
+        match(node)
+          .with({ _tag: "EffectFn" }, (n) => {
+            fnsByKey.set(key, n)
+            fnQualnameByKey.set(key, n.qualname)
+            allEntityKeys.add(key)
+          })
+          .with({ _tag: "ServiceTag" }, (n) => {
+            servicesByKey.set(key, n)
+            svcTagIdByKey.set(key, n.tagId)
+            allEntityKeys.add(key)
+          })
+          .with({ _tag: "ServiceLayer" }, (n) => {
+            layersByKey.set(key, n)
+            layerQualnameByKey.set(key, n.qualname)
+            allEntityKeys.add(key)
+          })
+          .with({ _tag: "TaggedError" }, (n) => {
+            errorsByKey.set(key, n)
+            errTagByKey.set(key, n.errorTag)
+            allEntityKeys.add(key)
+          })
+          .with({ _tag: "SchemaDef" }, (n) => {
+            schemasByKey.set(key, n)
+            allEntityKeys.add(key)
+          })
+          .with({ _tag: "VitestCase" }, (n) => {
+            testsByKey.set(key, n)
+            allEntityKeys.add(key)
+          })
+          .with({ _tag: "AdrDoc" }, (n) => {
+            adrsByKey.set(key, n)
+            allEntityKeys.add(key)
+          })
+          .with({ _tag: "EarsSpec" }, (n) => {
+            specsByKey.set(key, n)
+            allEntityKeys.add(key)
+          })
+          .with({ _tag: "PatternDoc" }, () => {
+            allEntityKeys.add(key)
+          })
+          .with({ _tag: "EffectSignature" }, (n) => {
+            if (!sigRoles.has(n.relationId)) {
+              sigRoles.set(n.relationId, new Map())
             }
-            set.add(entityKey)
+          })
+          .with({ _tag: "LayerFlow" }, (n) => {
+            if (!layerFlowRoles.has(n.relationId)) {
+              layerFlowRoles.set(n.relationId, new Map())
+            }
+          })
+          .with({ _tag: "TraceabilityTuple" }, (n) => {
+            if (!traceRoles.has(n.relationId)) {
+              traceRoles.set(n.relationId, new Map())
+            }
+          })
+          .with({ _tag: "MigrationTuple" }, (n) => {
+            migrationsById.set(n.relationId, n)
+            if (!migrationRoles.has(n.relationId)) {
+              migrationRoles.set(n.relationId, new Map())
+            }
+          })
+          .with({ _tag: "HttpEndpointTuple" }, (n) => {
+            if (!httpRoles.has(n.relationId)) {
+              httpRoles.set(n.relationId, new Map())
+            }
+          })
+          .exhaustive()
+      }
+
+      for (const [, edge] of Graph.edges(harnessGraph.graph)) {
+        const { relationId, entityKey, role } = edge.data
+        const targetMap = sigRoles.has(relationId)
+          ? sigRoles.get(relationId)
+          : layerFlowRoles.has(relationId)
+            ? layerFlowRoles.get(relationId)
+            : traceRoles.has(relationId)
+              ? traceRoles.get(relationId)
+              : migrationRoles.has(relationId)
+                ? migrationRoles.get(relationId)
+                : httpRoles.has(relationId)
+                  ? httpRoles.get(relationId)
+                  : undefined
+        if (targetMap !== undefined) {
+          let set = targetMap.get(role)
+          if (set === undefined) {
+            set = new Set<string>()
+            targetMap.set(role, set)
           }
+          set.add(entityKey)
         }
+      }
 
-        // Direct EDB tuples
-        const directCallPairs: Array<[string, string]> = []
-        const directCallRelIdByPair = new Map<string, string>()
-        const directOutgoingCalls = new Map<string, Array<string>>()
-        const directReqPairs: Array<[string, string]> = []
-        const directFailPairs: Array<[string, string]> = []
+      // Direct EDB tuples
+      const directCallPairs: Array<[string, string]> = []
+      const directCallRelIdByPair = new Map<string, string>()
+      const directOutgoingCalls = new Map<string, Array<string>>()
+      const directReqPairs: Array<[string, string]> = []
+      const directFailPairs: Array<[string, string]> = []
 
-        for (const [relId, roles] of sigRoles.entries()) {
-          const callers = Array.from(roles.get("caller") ?? []).sort()
-          const callees = Array.from(roles.get("callee") ?? []).sort()
-          const reqSvcs = Array.from(roles.get("requires-service") ?? []).sort()
-          const failErrs = Array.from(roles.get("fails-with") ?? []).sort()
+      for (const [relId, roles] of sigRoles.entries()) {
+        const callers = Array.from(roles.get("caller") ?? []).sort()
+        const callees = Array.from(roles.get("callee") ?? []).sort()
+        const reqSvcs = Array.from(roles.get("requires-service") ?? []).sort()
+        const failErrs = Array.from(roles.get("fails-with") ?? []).sort()
 
-          for (const callerKey of callers) {
-            sigIdByCallerKey.set(callerKey, relId)
-            for (const calleeKey of callees) {
-              directCallPairs.push([callerKey, calleeKey])
-              directCallRelIdByPair.set(`${callerKey}->${calleeKey}`, relId)
-              const list = directOutgoingCalls.get(callerKey) ?? []
-              if (!list.includes(calleeKey)) {
-                list.push(calleeKey)
-                list.sort()
-                directOutgoingCalls.set(callerKey, list)
-              }
-            }
-            for (const svcKey of reqSvcs) {
-              directReqPairs.push([callerKey, svcKey])
-            }
-            for (const errKey of failErrs) {
-              const callerNode = fnsByKey.get(callerKey)
-              const errTag = errTagByKey.get(errKey) ?? errKey.replace(/^TaggedError:/, "")
-              if (
-                callerNode?.caughtErrors?.includes(errTag) ||
-                callerNode?.caughtErrors?.includes(errKey)
-              ) {
-                continue
-              }
-              directFailPairs.push([callerKey, errKey])
+        for (const callerKey of callers) {
+          sigIdByCallerKey.set(callerKey, relId)
+          for (const calleeKey of callees) {
+            directCallPairs.push([callerKey, calleeKey])
+            directCallRelIdByPair.set(`${callerKey}->${calleeKey}`, relId)
+            const list = directOutgoingCalls.get(callerKey) ?? []
+            if (!list.includes(calleeKey)) {
+              list.push(calleeKey)
+              list.sort()
+              directOutgoingCalls.set(callerKey, list)
             }
           }
-        }
-
-        const directLayerProvidesPairs: Array<[string, string]> = []
-        const directLayerRequiresPairs: Array<[string, string]> = []
-        for (const [, roles] of layerFlowRoles.entries()) {
-          const layers = Array.from(roles.get("provider-layer") ?? []).sort()
-          const providedSvcs = Array.from(roles.get("provided-service") ?? []).sort()
-          const requiredSvcs = Array.from(roles.get("required-service") ?? []).sort()
-          for (const layerKey of layers) {
-            for (const svcKey of providedSvcs) {
-              directLayerProvidesPairs.push([layerKey, svcKey])
+          for (const svcKey of reqSvcs) {
+            directReqPairs.push([callerKey, svcKey])
+          }
+          for (const errKey of failErrs) {
+            const callerNode = fnsByKey.get(callerKey)
+            const errTag = errTagByKey.get(errKey) ?? errKey.replace(/^TaggedError:/, "")
+            if (
+              callerNode?.caughtErrors?.includes(errTag) ||
+              callerNode?.caughtErrors?.includes(errKey)
+            ) {
+              continue
             }
-            for (const svcKey of requiredSvcs) {
-              directLayerRequiresPairs.push([layerKey, svcKey])
-            }
+            directFailPairs.push([callerKey, errKey])
           }
         }
+      }
 
-        const directTestSpanPairs: Array<[string, string]> = []
-        const traceIdByTargetKey = new Map<string, string>()
-        const existingTraceGoverningAdrs = new Set<string>()
-        const existingSpecToTargetPairs: Array<[string, string]> = []
-        for (const [relId, roles] of traceRoles.entries()) {
-          const tests = Array.from(
-            new Set([
-              ...(roles.get("verifying-test") ?? []),
-              ...(roles.get("exercising-test") ?? []),
-            ]),
-          ).sort()
-          const targets = Array.from(
-            new Set([
-              ...(roles.get("realizing-symbol") ?? []),
-              ...(roles.get("exercised-span") ?? []),
-              ...(roles.get("specified-target") ?? []),
-            ]),
-          ).sort()
-          const specs = Array.from(roles.get("specifying-ears") ?? []).sort()
-          const adrs = Array.from(roles.get("governing-adr") ?? []).sort()
-          for (const targetKey of targets) {
-            traceIdByTargetKey.set(targetKey, relId)
-            for (const testKey of tests) {
-              directTestSpanPairs.push([testKey, targetKey])
-            }
-            for (const specKey of specs) {
-              existingSpecToTargetPairs.push([specKey, targetKey])
-            }
-            for (const adrKey of adrs) {
-              existingTraceGoverningAdrs.add(`${adrKey}->${targetKey}`)
-            }
+      const directLayerProvidesPairs: Array<[string, string]> = []
+      const directLayerRequiresPairs: Array<[string, string]> = []
+      for (const [, roles] of layerFlowRoles.entries()) {
+        const layers = Array.from(roles.get("provider-layer") ?? []).sort()
+        const providedSvcs = Array.from(roles.get("provided-service") ?? []).sort()
+        const requiredSvcs = Array.from(roles.get("required-service") ?? []).sort()
+        for (const layerKey of layers) {
+          for (const svcKey of providedSvcs) {
+            directLayerProvidesPairs.push([layerKey, svcKey])
+          }
+          for (const svcKey of requiredSvcs) {
+            directLayerRequiresPairs.push([layerKey, svcKey])
           }
         }
+      }
 
-        // ======================================================================
-        // Build @electric-sql/d2ts Dataflow Graph across Strata S_0 -> S_1 -> S_2 -> S_3
-        // ======================================================================
-        const d2 = new D2({ initialFrontier: 0 })
+      const directTestSpanPairs: Array<[string, string]> = []
+      const traceIdByTargetKey = new Map<string, string>()
+      const existingTraceGoverningAdrs = new Set<string>()
+      const existingSpecToTargetPairs: Array<[string, string]> = []
+      for (const [relId, roles] of traceRoles.entries()) {
+        const tests = Array.from(
+          new Set([
+            ...(roles.get("verifying-test") ?? []),
+            ...(roles.get("exercising-test") ?? []),
+          ]),
+        ).sort()
+        const targets = Array.from(
+          new Set([
+            ...(roles.get("realizing-symbol") ?? []),
+            ...(roles.get("exercised-span") ?? []),
+            ...(roles.get("specified-target") ?? []),
+          ]),
+        ).sort()
+        const specs = Array.from(roles.get("specifying-ears") ?? []).sort()
+        const adrs = Array.from(roles.get("governing-adr") ?? []).sort()
+        for (const targetKey of targets) {
+          traceIdByTargetKey.set(targetKey, relId)
+          for (const testKey of tests) {
+            directTestSpanPairs.push([testKey, targetKey])
+          }
+          for (const specKey of specs) {
+            existingSpecToTargetPairs.push([specKey, targetKey])
+          }
+          for (const adrKey of adrs) {
+            existingTraceGoverningAdrs.add(`${adrKey}->${targetKey}`)
+          }
+        }
+      }
 
-        // S_0 Inputs
-        const inDirectCalls = d2.newInput<KeyValue<string, MinHeightProvenanceAnnotation>>()
-        const inDirectRequires = d2.newInput<KeyValue<string, string>>()
-        const inDirectFails = d2.newInput<KeyValue<string, string>>()
-        const inLayerProvides = d2.newInput<KeyValue<string, string>>() // key: svcKey, val: providerLayerKey
-        const inLayerRequires = d2.newInput<KeyValue<string, string>>() // key: reqSvcKey, val: consumerLayerKey
-        const inDirectTestSpans = d2.newInput<KeyValue<string, string>>() // key: targetSpanKey, val: testKey
-        const inDomainNonStubFns = d2.newInput<KeyValue<string, string>>() // key: fnKey, val: fnKey
-        const inDestructiveMigrations = d2.newInput<KeyValue<string, string>>() // key: migrationRelId, val: migrationRelId
-        const inMigrationVerifyingTests = d2.newInput<KeyValue<string, string>>() // key: migrationRelId, val: testKey
-        const inSpecExpectedErrors = d2.newInput<KeyValue<string, [string, string, string]>>() // key: `${callerKey}->${errKey}`, val: [specKey, callerKey, errKey]
-        const inSpecExpectedServices = d2.newInput<KeyValue<string, [string, string, string]>>() // key: `${callerKey}->${svcKey}`, val: [specKey, callerKey, svcKey]
-        const inAdrExpectedTargets = d2.newInput<KeyValue<string, [string, string]>>() // key: `${adrKey}->${targetKey}`, val: [adrKey, targetKey]
-        const inExistingTraceAdrs = d2.newInput<KeyValue<string, string>>() // key: `${adrKey}->${targetKey}`, val: adrKey
+      // ======================================================================
+      // Build @electric-sql/d2ts Dataflow Graph across Strata S_0 -> S_1 -> S_2 -> S_3
+      // ======================================================================
+      const d2 = new D2({ initialFrontier: 0 })
 
-        // Inputs for INF-04, INF-05, INF-07, INF-08
-        const inDomainFns = d2.newInput<KeyValue<string, string>>()
-        const inInfraServices = d2.newInput<KeyValue<string, string>>()
-        const inCloudBindingServices = d2.newInput<KeyValue<string, string>>()
-        const inDeciderFns = d2.newInput<KeyValue<string, string>>()
-        const inReducerFns = d2.newInput<KeyValue<string, string>>()
-        const inAggregateFns = d2.newInput<KeyValue<string, string>>()
-        const inEventBusServices = d2.newInput<KeyValue<string, string>>()
-        const inOutboxOrBusPublishFns = d2.newInput<KeyValue<string, string>>()
-        const inSpecDeclaredSpans = d2.newInput<KeyValue<string, [string, string]>>()
-        const inKnownSpans = d2.newInput<KeyValue<string, string>>()
-        const inSpecDeclaredServices = d2.newInput<KeyValue<string, [string, string]>>()
-        const inKnownServices = d2.newInput<KeyValue<string, string>>()
-        const inSpecDeclaredErrors = d2.newInput<KeyValue<string, [string, string]>>()
-        const inKnownErrors = d2.newInput<KeyValue<string, string>>()
+      // S_0 Inputs
+      const inDirectCalls = d2.newInput<KeyValue<string, MinHeightProvenanceAnnotation>>()
+      const inDirectRequires = d2.newInput<KeyValue<string, string>>()
+      const inDirectFails = d2.newInput<KeyValue<string, string>>()
+      const inLayerProvides = d2.newInput<KeyValue<string, string>>() // key: svcKey, val: providerLayerKey
+      const inLayerRequires = d2.newInput<KeyValue<string, string>>() // key: reqSvcKey, val: consumerLayerKey
+      const inDirectTestSpans = d2.newInput<KeyValue<string, string>>() // key: targetSpanKey, val: testKey
+      const inDomainNonStubFns = d2.newInput<KeyValue<string, string>>() // key: fnKey, val: fnKey
+      const inDestructiveMigrations = d2.newInput<KeyValue<string, string>>() // key: migrationRelId, val: migrationRelId
+      const inMigrationVerifyingTests = d2.newInput<KeyValue<string, string>>() // key: migrationRelId, val: testKey
+      const inSpecExpectedErrors = d2.newInput<KeyValue<string, [string, string, string]>>() // key: `${callerKey}->${errKey}`, val: [specKey, callerKey, errKey]
+      const inSpecExpectedServices = d2.newInput<KeyValue<string, [string, string, string]>>() // key: `${callerKey}->${svcKey}`, val: [specKey, callerKey, svcKey]
+      const inAdrExpectedTargets = d2.newInput<KeyValue<string, [string, string]>>() // key: `${adrKey}->${targetKey}`, val: [adrKey, targetKey]
+      const inExistingTraceAdrs = d2.newInput<KeyValue<string, string>>() // key: `${adrKey}->${targetKey}`, val: adrKey
 
-        // ----------------------------------------------------------------------
-        // Stratum S_1: Recursive Positive Closures (.iterate() + reduce(minHeightReducer))
-        // ----------------------------------------------------------------------
-        // 1. Transitive Call Reachability with Soufflé Min-Height Provenance Semiring
-        const maxGraphDepth = Math.max(1, fnsByKey.size + 1)
-        const callReachProvenanceStream = inDirectCalls.pipe(
-          iterate((reach) => {
-            const byCallee = reach.pipe(
-              map(([pairKey, ann]): KeyValue<string, readonly [string, number]> => {
-                const [callerKey = "", calleeKey = ""] = pairKey.split("->")
-                return [calleeKey, [callerKey, ann.proofHeight] as const]
-              }),
-            )
-            const byCaller = reach.pipe(
-              map(([pairKey, ann]): KeyValue<string, readonly [string, number]> => {
-                const [callerKey = "", calleeKey = ""] = pairKey.split("->")
-                return [callerKey, [calleeKey, ann.proofHeight] as const]
-              }),
-            )
-            const stepped = byCallee.pipe(
-              innerJoin(byCaller),
-              map(
-                ([midKey, [[callerKey, h1], [calleeKey, h2]]]): KeyValue<
-                  string,
-                  MinHeightProvenanceAnnotation
-                > => [
-                  `${callerKey}->${calleeKey}`,
-                  {
-                    proofHeight: ProofHeight.make(Math.min(maxGraphDepth, h1 + h2)),
-                    ruleId: DatalogRuleId.make("INF-01"),
-                    viaIntermediateKey: NodeKey.make(midKey),
-                  },
-                ],
-              ),
-            )
-            return reach.pipe(concat(stepped), reduce(minHeightReducer), consolidate())
-          }),
-          consolidate(),
-        )
+      // Inputs for INF-04, INF-05, INF-07, INF-08
+      const inDomainFns = d2.newInput<KeyValue<string, string>>()
+      const inInfraServices = d2.newInput<KeyValue<string, string>>()
+      const inCloudBindingServices = d2.newInput<KeyValue<string, string>>()
+      const inDeciderFns = d2.newInput<KeyValue<string, string>>()
+      const inReducerFns = d2.newInput<KeyValue<string, string>>()
+      const inAggregateFns = d2.newInput<KeyValue<string, string>>()
+      const inEventBusServices = d2.newInput<KeyValue<string, string>>()
+      const inOutboxOrBusPublishFns = d2.newInput<KeyValue<string, string>>()
+      const inSpecDeclaredSpans = d2.newInput<KeyValue<string, [string, string]>>()
+      const inKnownSpans = d2.newInput<KeyValue<string, string>>()
+      const inSpecDeclaredServices = d2.newInput<KeyValue<string, [string, string]>>()
+      const inKnownServices = d2.newInput<KeyValue<string, string>>()
+      const inSpecDeclaredErrors = d2.newInput<KeyValue<string, [string, string]>>()
+      const inKnownErrors = d2.newInput<KeyValue<string, string>>()
 
-        const collectedCallReachProvenance: Array<KeyValue<string, MinHeightProvenanceAnnotation>> = []
-        callReachProvenanceStream.pipe(output(makeOutputCollector(collectedCallReachProvenance)))
+      // ----------------------------------------------------------------------
+      // Stratum S_1: Recursive Positive Closures (.iterate() + reduce(minHeightReducer))
+      // ----------------------------------------------------------------------
+      // 1. Transitive Call Reachability with Soufflé Min-Height Provenance Semiring
+      const maxGraphDepth = Math.max(1, fnsByKey.size + 1)
+      const callReachProvenanceStream = inDirectCalls.pipe(
+        iterate((reach) => {
+          const byCallee = reach.pipe(
+            map(([pairKey, ann]): KeyValue<string, readonly [string, number]> => {
+              const [callerKey = "", calleeKey = ""] = pairKey.split("->")
+              return [calleeKey, [callerKey, ann.proofHeight] as const]
+            }),
+          )
+          const byCaller = reach.pipe(
+            map(([pairKey, ann]): KeyValue<string, readonly [string, number]> => {
+              const [callerKey = "", calleeKey = ""] = pairKey.split("->")
+              return [callerKey, [calleeKey, ann.proofHeight] as const]
+            }),
+          )
+          const stepped = byCallee.pipe(
+            innerJoin(byCaller),
+            map(
+              ([midKey, [[callerKey, h1], [calleeKey, h2]]]): KeyValue<
+                string,
+                MinHeightProvenanceAnnotation
+              > => [
+                `${callerKey}->${calleeKey}`,
+                {
+                  proofHeight: ProofHeight.make(Math.min(maxGraphDepth, h1 + h2)),
+                  ruleId: DatalogRuleId.make("INF-01"),
+                  viaIntermediateKey: NodeKey.make(midKey),
+                },
+              ],
+            ),
+          )
+          return reach.pipe(concat(stepped), reduce(minHeightReducer), consolidate())
+        }),
+        consolidate(),
+      )
+
+      const collectedCallReachProvenance: Array<KeyValue<string, MinHeightProvenanceAnnotation>> =
+        []
+      callReachProvenanceStream.pipe(output(makeOutputCollector(collectedCallReachProvenance)))
 
       const callReachStream = callReachProvenanceStream.pipe(
         map(([pairKey]): KeyValue<string, [string, string]> => {
@@ -789,7 +785,9 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
             return true
           }
           const errTag = errTagByKey.get(errKey) ?? errKey.replace(/^TaggedError:/, "")
-          return !callerNode.caughtErrors.includes(errTag) && !callerNode.caughtErrors.includes(errKey)
+          return (
+            !callerNode.caughtErrors.includes(errTag) && !callerNode.caughtErrors.includes(errKey)
+          )
         }),
         map(([_calleeKey, [callerKey, errKey]]): KeyValue<string, [string, string]> => [
           `${callerKey}->${errKey}`,
@@ -813,10 +811,12 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
       // INF-03a: LayerDependency(consumerLayerKey, providerLayerKey) via .iterate()
       const directLayerDepPairsStream = inLayerRequires.pipe(
         innerJoin(inLayerProvides),
-        map(([_svcKey, [consumerLayerKey, providerLayerKey]]): KeyValue<string, [string, string]> => [
-          `${consumerLayerKey}->${providerLayerKey}`,
-          [consumerLayerKey, providerLayerKey],
-        ]),
+        map(
+          ([_svcKey, [consumerLayerKey, providerLayerKey]]): KeyValue<string, [string, string]> => [
+            `${consumerLayerKey}->${providerLayerKey}`,
+            [consumerLayerKey, providerLayerKey],
+          ],
+        ),
         distinct(),
       )
       const layerReachStream = directLayerDepPairsStream.pipe(
@@ -915,7 +915,9 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
         consolidate(),
       )
       const collectedDomainRequiresCloudBinding: Array<KeyValue<string, [string, string]>> = []
-      domainRequiresCloudBindingStream.pipe(output(makeOutputCollector(collectedDomainRequiresCloudBinding)))
+      domainRequiresCloudBindingStream.pipe(
+        output(makeOutputCollector(collectedDomainRequiresCloudBinding)),
+      )
 
       // INF-05a: impure-decider (effectiveRequires join inDeciderFns)
       const impureDeciderStream = effReqByCaller.pipe(
@@ -1071,18 +1073,12 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
       // Stratum S_3: Normative Missing-Edge Completions (COMP-01..05 via .antiJoin())
       // ----------------------------------------------------------------------
       // COMP-01: Spec expected error on caller antiJoin DirectFailsKeyed
-      const comp01Stream = inSpecExpectedErrors.pipe(
-        antiJoin(directFailsKeyed),
-        consolidate(),
-      )
+      const comp01Stream = inSpecExpectedErrors.pipe(antiJoin(directFailsKeyed), consolidate())
       const collectedComp01: Array<KeyValue<string, [[string, string, string], null]>> = []
       comp01Stream.pipe(output(makeOutputCollector(collectedComp01)))
 
       // COMP-02: Spec expected service on caller antiJoin DirectRequiresKeyed
-      const comp02Stream = inSpecExpectedServices.pipe(
-        antiJoin(directRequiresKeyed),
-        consolidate(),
-      )
+      const comp02Stream = inSpecExpectedServices.pipe(antiJoin(directRequiresKeyed), consolidate())
       const collectedComp02: Array<KeyValue<string, [[string, string, string], null]>> = []
       comp02Stream.pipe(output(makeOutputCollector(collectedComp02)))
 
@@ -1091,18 +1087,12 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
         map(([callerKey, svcKey]): KeyValue<string, string> => [svcKey, callerKey]),
         distinct(),
       )
-      const comp03Stream = fnRequiredBySvcKey.pipe(
-        antiJoin(inLayerProvides),
-        consolidate(),
-      )
+      const comp03Stream = fnRequiredBySvcKey.pipe(antiJoin(inLayerProvides), consolidate())
       const collectedComp03: Array<KeyValue<string, [string, null]>> = []
       comp03Stream.pipe(output(makeOutputCollector(collectedComp03)))
 
       // COMP-05: AdrExpectedTargets antiJoin ExistingTraceAdrs
-      const comp05Stream = inAdrExpectedTargets.pipe(
-        antiJoin(inExistingTraceAdrs),
-        consolidate(),
-      )
+      const comp05Stream = inAdrExpectedTargets.pipe(antiJoin(inExistingTraceAdrs), consolidate())
       const collectedComp05: Array<KeyValue<string, [[string, string], null]>> = []
       comp05Stream.pipe(output(makeOutputCollector(collectedComp05)))
 
@@ -1148,25 +1138,19 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
 
       inLayerProvides.sendData(
         0,
-        new MultiSet(
-          directLayerProvidesPairs.map(([layerKey, svcKey]) => [[svcKey, layerKey], 1]),
-        ),
+        new MultiSet(directLayerProvidesPairs.map(([layerKey, svcKey]) => [[svcKey, layerKey], 1])),
       )
       inLayerProvides.sendFrontier(1)
 
       inLayerRequires.sendData(
         0,
-        new MultiSet(
-          directLayerRequiresPairs.map(([layerKey, svcKey]) => [[svcKey, layerKey], 1]),
-        ),
+        new MultiSet(directLayerRequiresPairs.map(([layerKey, svcKey]) => [[svcKey, layerKey], 1])),
       )
       inLayerRequires.sendFrontier(1)
 
       inDirectTestSpans.sendData(
         0,
-        new MultiSet(
-          directTestSpanPairs.map(([testKey, targetKey]) => [[targetKey, testKey], 1]),
-        ),
+        new MultiSet(directTestSpanPairs.map(([testKey, targetKey]) => [[targetKey, testKey], 1])),
       )
       inDirectTestSpans.sendFrontier(1)
 
@@ -1291,8 +1275,11 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
       inMigrationVerifyingTests.sendFrontier(1)
 
       // Prepare Spec expected error & service triples for COMP-01, COMP-02, and INF-07
-      const specExpectedErrorEntries: Array<[KeyValue<string, [string, string, string]>, number]> = []
-      const specExpectedServiceEntries: Array<[KeyValue<string, [string, string, string]>, number]> = []
+      const specExpectedErrorEntries: Array<[KeyValue<string, [string, string, string]>, number]> =
+        []
+      const specExpectedServiceEntries: Array<
+        [KeyValue<string, [string, string, string]>, number]
+      > = []
       const specDeclaredSpansEntries: Array<[KeyValue<string, [string, string]>, number]> = []
       const specDeclaredSvcEntries: Array<[KeyValue<string, [string, string]>, number]> = []
       const specDeclaredErrEntries: Array<[KeyValue<string, [string, string]>, number]> = []
@@ -1335,7 +1322,11 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
         }
         for (const svcName of specNode.referencedServices ?? []) {
           for (const [svcKey, svcNode] of servicesByKey.entries()) {
-            if (svcNode.tagId === svcName || svcNode.name === svcName || svcNode.tagId.endsWith(`#${svcName}`)) {
+            if (
+              svcNode.tagId === svcName ||
+              svcNode.name === svcName ||
+              svcNode.tagId.endsWith(`#${svcName}`)
+            ) {
               specExpectedServiceEntries.push([
                 [`${targetKey}->${svcKey}`, [specKey, targetKey, svcKey]],
                 1,
@@ -1358,10 +1349,7 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
         for (const enforcedFile of adrNode.enforcedByFiles) {
           for (const [fnKey, fnNode] of fnsByKey.entries()) {
             if (fnNode.file === enforcedFile || fnNode.file.endsWith(enforcedFile)) {
-              adrExpectedEntries.push([
-                [`${adrKey}->${fnKey}`, [adrKey, fnKey]],
-                1,
-              ])
+              adrExpectedEntries.push([[`${adrKey}->${fnKey}`, [adrKey, fnKey]], 1])
             }
           }
         }
@@ -1673,14 +1661,19 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
           continue
         }
         const parentProofId = reqProofByPair.get(pairKey)
-        const req = effectiveRequires.find((r) => r.callerKey === callerKey && r.serviceKey === serviceKey)
+        const req = effectiveRequires.find(
+          (r) => r.callerKey === callerKey && r.serviceKey === serviceKey,
+        )
         const path = req?.path ?? [fnNode.qualname, svcNode.tagId]
         const proof = registerProof({
           proofId: ProofId.make(`proof:INF-04:domain-requires-infra:${callerKey}->${serviceKey}`),
           ruleId: DatalogRuleId.make("INF-04"),
           stratum: StratumIndex.make(2),
           conclusion: `AntiPattern(domain-requires-infra, ${callerKey}, ${serviceKey})`,
-          premises: [`EffectiveRequires(${callerKey}, ${serviceKey})`, `PackageTag(${serviceKey}, infra)`],
+          premises: [
+            `EffectiveRequires(${callerKey}, ${serviceKey})`,
+            `PackageTag(${serviceKey}, infra)`,
+          ],
           parentProofIds: parentProofId !== undefined ? [parentProofId] : [],
         })
         antiPatterns.push({
@@ -1702,7 +1695,9 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
           continue
         }
         const parentProofId = reqProofByPair.get(pairKey)
-        const req = effectiveRequires.find((r) => r.callerKey === callerKey && r.serviceKey === serviceKey)
+        const req = effectiveRequires.find(
+          (r) => r.callerKey === callerKey && r.serviceKey === serviceKey,
+        )
         const path = req?.path ?? [fnNode.qualname, svcNode.tagId]
         const proof = registerProof({
           proofId: ProofId.make(
@@ -1711,7 +1706,10 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
           ruleId: DatalogRuleId.make("INF-04"),
           stratum: StratumIndex.make(2),
           conclusion: `AntiPattern(domain-requires-cloud-binding, ${callerKey}, ${serviceKey})`,
-          premises: [`EffectiveRequires(${callerKey}, ${serviceKey})`, `CloudBinding(${serviceKey})`],
+          premises: [
+            `EffectiveRequires(${callerKey}, ${serviceKey})`,
+            `CloudBinding(${serviceKey})`,
+          ],
           parentProofIds: parentProofId !== undefined ? [parentProofId] : [],
         })
         antiPatterns.push({
@@ -1733,14 +1731,19 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
           continue
         }
         const parentProofId = reqProofByPair.get(pairKey)
-        const req = effectiveRequires.find((r) => r.callerKey === callerKey && r.serviceKey === serviceKey)
+        const req = effectiveRequires.find(
+          (r) => r.callerKey === callerKey && r.serviceKey === serviceKey,
+        )
         const path = req?.path ?? [fnNode.qualname, svcNode.tagId]
         const proof = registerProof({
           proofId: ProofId.make(`proof:INF-05:impure-decider:${callerKey}->${serviceKey}`),
           ruleId: DatalogRuleId.make("INF-05"),
           stratum: StratumIndex.make(2),
           conclusion: `AntiPattern(impure-decider, ${callerKey}, ${serviceKey})`,
-          premises: [`EffectiveRequires(${callerKey}, ${serviceKey})`, `DeciderSpan(${fnNode.spanName})`],
+          premises: [
+            `EffectiveRequires(${callerKey}, ${serviceKey})`,
+            `DeciderSpan(${fnNode.spanName})`,
+          ],
           parentProofIds: parentProofId !== undefined ? [parentProofId] : [],
         })
         antiPatterns.push({
@@ -1762,14 +1765,19 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
           continue
         }
         const parentProofId = reqProofByPair.get(pairKey)
-        const req = effectiveRequires.find((r) => r.callerKey === callerKey && r.serviceKey === serviceKey)
+        const req = effectiveRequires.find(
+          (r) => r.callerKey === callerKey && r.serviceKey === serviceKey,
+        )
         const path = req?.path ?? [fnNode.qualname, svcNode.tagId]
         const proof = registerProof({
           proofId: ProofId.make(`proof:INF-05:impure-reducer:svc:${callerKey}->${serviceKey}`),
           ruleId: DatalogRuleId.make("INF-05"),
           stratum: StratumIndex.make(2),
           conclusion: `AntiPattern(impure-reducer, ${callerKey}, ${serviceKey})`,
-          premises: [`EffectiveRequires(${callerKey}, ${serviceKey})`, `ReducerSpan(${fnNode.spanName})`],
+          premises: [
+            `EffectiveRequires(${callerKey}, ${serviceKey})`,
+            `ReducerSpan(${fnNode.spanName})`,
+          ],
           parentProofIds: parentProofId !== undefined ? [parentProofId] : [],
         })
         antiPatterns.push({
@@ -1791,14 +1799,19 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
           continue
         }
         const parentProofId = failProofByPair.get(pairKey)
-        const fail = effectiveFailsWith.find((f) => f.callerKey === callerKey && f.errorKey === errorKey)
+        const fail = effectiveFailsWith.find(
+          (f) => f.callerKey === callerKey && f.errorKey === errorKey,
+        )
         const path = fail?.path ?? [fnNode.qualname, errNode.errorTag]
         const proof = registerProof({
           proofId: ProofId.make(`proof:INF-05:impure-reducer:err:${callerKey}->${errorKey}`),
           ruleId: DatalogRuleId.make("INF-05"),
           stratum: StratumIndex.make(2),
           conclusion: `AntiPattern(impure-reducer, ${callerKey}, ${errorKey})`,
-          premises: [`EffectiveFailsWith(${callerKey}, ${errorKey})`, `ReducerSpan(${fnNode.spanName})`],
+          premises: [
+            `EffectiveFailsWith(${callerKey}, ${errorKey})`,
+            `ReducerSpan(${fnNode.spanName})`,
+          ],
           parentProofIds: parentProofId !== undefined ? [parentProofId] : [],
         })
         antiPatterns.push({
@@ -1820,14 +1833,20 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
           continue
         }
         const parentProofId = reqProofByPair.get(pairKey)
-        const req = effectiveRequires.find((r) => r.callerKey === callerKey && r.serviceKey === serviceKey)
+        const req = effectiveRequires.find(
+          (r) => r.callerKey === callerKey && r.serviceKey === serviceKey,
+        )
         const path = req?.path ?? [fnNode.qualname, svcNode.tagId]
         const proof = registerProof({
           proofId: ProofId.make(`proof:INF-08:bus-svc:${callerKey}->${serviceKey}`),
           ruleId: DatalogRuleId.make("INF-08"),
           stratum: StratumIndex.make(2),
           conclusion: `AntiPattern(aggregate-direct-bus-publish, ${callerKey}, ${serviceKey})`,
-          premises: [`EffectiveRequires(${callerKey}, ${serviceKey})`, `AggregateFn(${fnNode.qualname})`, `EventBus(${svcNode.tagId})`],
+          premises: [
+            `EffectiveRequires(${callerKey}, ${serviceKey})`,
+            `AggregateFn(${fnNode.qualname})`,
+            `EventBus(${svcNode.tagId})`,
+          ],
           parentProofIds: parentProofId !== undefined ? [parentProofId] : [],
         })
         antiPatterns.push({
@@ -1914,7 +1933,10 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
           ruleId: DatalogRuleId.make("INF-06"),
           stratum: StratumIndex.make(2),
           conclusion: `AntiPattern(missing-layer-provider, ${consumerLayerKey}, ${reqSvcKey})`,
-          premises: [`LayerRequires(${consumerLayerKey}, ${reqSvcKey})`, `!LayerProvides(*, ${reqSvcKey})`],
+          premises: [
+            `LayerRequires(${consumerLayerKey}, ${reqSvcKey})`,
+            `!LayerProvides(*, ${reqSvcKey})`,
+          ],
           parentProofIds: [],
         })
         antiPatterns.push({
@@ -2029,7 +2051,10 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
           ruleId: DatalogRuleId.make("INF-09"),
           stratum: StratumIndex.make(2),
           conclusion: `AntiPattern(unverified-migration, ${migKey})`,
-          premises: [`DestructiveMigration(${migRelId})`, `!PlaysRole(${migRelId}, *, verifying-test)`],
+          premises: [
+            `DestructiveMigration(${migRelId})`,
+            `!PlaysRole(${migRelId}, *, verifying-test)`,
+          ],
           parentProofIds: [],
         })
         antiPatterns.push({
@@ -2526,8 +2551,7 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
 
         // Channel A: output/input SchemaDefs + same-domain SchemaDefs
         for (const [schemaKey, schemaNode] of schemasByKey.entries()) {
-          const isDirectSchema =
-            outputSchemaKeys.has(schemaKey) || inputSchemaKeys.has(schemaKey)
+          const isDirectSchema = outputSchemaKeys.has(schemaKey) || inputSchemaKeys.has(schemaKey)
           const isSameScope = schemaNode.file.startsWith(holePkgPrefix)
           if (isDirectSchema || isSameScope || (ppr.get(schemaKey) ?? 0) > 0) {
             const schemaLabel = schemaNode.name ?? schemaNode.schemaName
@@ -2557,12 +2581,7 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
         for (const svcKey of Array.from(directServiceKeys).sort()) {
           const svcNode = servicesByKey.get(svcKey)
           if (svcNode !== undefined) {
-            pushCandidate(
-              svcKey,
-              "R",
-              `Context.Service<${svcNode.name}>("${svcNode.tagId}")`,
-              0.6,
-            )
+            pushCandidate(svcKey, "R", `Context.Service<${svcNode.name}>("${svcNode.tagId}")`, 0.6)
           }
         }
 
@@ -2633,7 +2652,12 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
         }
 
         const outputSchemaNames = Array.from(outputSchemaKeys)
-          .map((k) => schemasByKey.get(k)?.name ?? schemasByKey.get(k)?.schemaName ?? k.replace(/^SchemaDef:/, ""))
+          .map(
+            (k) =>
+              schemasByKey.get(k)?.name ??
+              schemasByKey.get(k)?.schemaName ??
+              k.replace(/^SchemaDef:/, ""),
+          )
           .sort()
         const successTypeSignature =
           outputSchemaNames.length > 0
@@ -2654,7 +2678,9 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
           conclusion: `SuggestedHoleInhabitant(${holeKey}, candidates=${boundedCandidates.length})`,
           premises: [
             `StubEffectFn(${holeKey})`,
-            ...boundedCandidates.slice(0, 4).map((c) => `Inhabits(${c.symbolKey}, ${c.inhabitsChannel})`),
+            ...boundedCandidates
+              .slice(0, 4)
+              .map((c) => `Inhabits(${c.symbolKey}, ${c.inhabitsChannel})`),
           ],
           parentProofIds: [],
           witnessPath: [holeFn.qualname, ...boundedCandidates.slice(0, 4).map((c) => c.symbolKey)],
@@ -2716,15 +2742,14 @@ export const decideGraphInference = Effect.fn("GraphInfer.decide")(
         proofs,
         iterations,
       }
-      },
-      catch: (err) =>
-        new GraphInferenceError({
-          reason: "d2ts-execution-failed",
-          message: String(err),
-        }),
-    })
-  },
-)
+    },
+    catch: (err) =>
+      new GraphInferenceError({
+        reason: "d2ts-execution-failed",
+        message: String(err),
+      }),
+  })
+})
 
 export interface DatalogFileDeltaStepInput {
   readonly filePath: DatalogFilePath
@@ -2815,8 +2840,7 @@ const extractFileEdbFacts = (
   graph: HarnessGraph,
   targetFile?: string,
 ): Map<string, ReadonlyArray<string>> => {
-  const normalizedTarget =
-    targetFile !== undefined ? normalizeWorkspacePath(targetFile) : undefined
+  const normalizedTarget = targetFile !== undefined ? normalizeWorkspacePath(targetFile) : undefined
   const nodeFileByKey = new Map<string, string>()
   const factsByFile = new Map<string, Set<string>>()
 

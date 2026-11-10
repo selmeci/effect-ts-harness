@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import * as net from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Option } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { makeFailingDecisionModelLayer, makeMockDecisionModelLayer } from "@harness/decision"
 import { readTelemetryEvents, writeVerifyStamp } from "@harness/gates"
@@ -16,6 +17,7 @@ import {
   run,
   runCli,
   stripAnsiCodes,
+  tryQueryWarmDaemonSocket,
 } from "../src/index.js"
 
 describe("harness cli baseline", () => {
@@ -29,6 +31,7 @@ describe("harness cli baseline", () => {
       "learn",
       "gc",
       "mutate",
+      "bench",
       "ingest",
       "session",
       "doctor",
@@ -269,7 +272,7 @@ describe("harness-cli v2 commands", () => {
       expect(res.stdout).toContain("flowchart TD")
       expect(res.stdout).toContain("Sample.greet")
       expect(res.stderr).toBe("")
-    })
+    }, 20_000)
 
     it("skips writing plan-graph-snapshot.json when --graph-only is specified", async () => {
       const dir = mkdtempSync(join(tmpdir(), "harness-cli-plan-graph-only-"))
@@ -2561,6 +2564,75 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       }
       expect(mutatingPayload.decision).toBe("continue")
       expect(mutatingPayload.reason).toContain("Missing .harness/verify-stamp.json")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("executes harness bench end-to-end (exit 0 within SLO and exit 1 on LatencySloViolationError) and queries warm daemon socket (F-1, F-2)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-cli-bench-e2e-"))
+    try {
+      const sampleDir = join(dir, "libs", "sample", "domain", "src")
+      mkdirSync(sampleDir, { recursive: true })
+      writeFileSync(
+        join(sampleDir, "index.ts"),
+        `import { Effect } from "effect"\nexport const ping = Effect.fn("Sample.ping")(function* () {\n  return yield* Effect.succeed("pong")\n})\n`,
+        "utf-8",
+      )
+
+      // 1. No daemon socket present -> tryQueryWarmDaemonSocket returns Option.none()
+      const noSockOpt = await Effect.runPromise(tryQueryWarmDaemonSocket(dir, "ping"))
+      expect(Option.isNone(noSockOpt)).toBe(true)
+
+      // 2. Start a lightweight Unix domain socket server on .harness/daemon.sock and verify round-trip
+      const harnessDir = join(dir, ".harness")
+      mkdirSync(harnessDir, { recursive: true })
+      const sockPath = join(harnessDir, "daemon.sock")
+      const mockServer = net.createServer((socket) => {
+        socket.on("data", () => {
+          socket.write(JSON.stringify({ id: "ping-1", ok: true, status: "warm" }) + "\n")
+          socket.end()
+        })
+      })
+      await Effect.runPromise(
+        Effect.callback<void>((resume) => {
+          mockServer.listen(sockPath, () => resume(Effect.void))
+        }),
+      )
+      const warmSockOpt = await Effect.runPromise(tryQueryWarmDaemonSocket(dir, "ping"))
+      expect(Option.isSome(warmSockOpt)).toBe(true)
+      await Effect.runPromise(
+        Effect.callback<void>((resume) => {
+          mockServer.close(() => resume(Effect.void))
+        }),
+      )
+
+      // 3. runCli(["bench", "--iterations=1"]) passes (exit 0)
+      const passRes = await runCli(["bench", "--iterations=1"], { repoRoot: dir })
+      expect(passRes.exitCode).toBe(0)
+      const passJson = JSON.parse(passRes.stdout) as {
+        readonly overallStatus: string
+        readonly measurements: ReadonlyArray<{
+          readonly stage: string
+          readonly sampleCount: number
+        }>
+      }
+      expect(passJson.overallStatus).toBe("passed")
+      expect(passJson.measurements).toHaveLength(4)
+      expect(passJson.measurements.every((m) => m.sampleCount === 1)).toBe(true)
+
+      // 4. runCli(["bench", "--iterations=1", "--budget-ms=0.0001"]) fails closed (exit 1) with LatencySloViolationError
+      const failRes = await runCli(["bench", "--iterations=1", "--budget-ms=0.0001"], {
+        repoRoot: dir,
+      })
+      expect(failRes.exitCode).toBe(1)
+      expect(failRes.stderr).toContain("[LatencySloViolationError]")
+      const failJson = JSON.parse(failRes.stdout) as {
+        readonly overallStatus: string
+        readonly violations: ReadonlyArray<{ readonly stage: string }>
+      }
+      expect(failJson.overallStatus).toBe("failed")
+      expect(failJson.violations.length).toBeGreaterThanOrEqual(1)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

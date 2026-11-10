@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process"
 import * as fs from "node:fs"
+import * as net from "node:net"
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
@@ -37,7 +38,7 @@ import {
   resolveNode,
   saveGraphSnapshot,
   type SemanticEdgePriors,
-  structuralSearch,
+  decideStructuralSearch,
   writeGraphHeadMeta,
 } from "@harness/graph"
 import {
@@ -64,7 +65,11 @@ export {
 } from "@harness/gates"
 import {
   appendTelemetryEvent,
+  AstGateCache,
+  AstSourceContent,
+  AstSourceFilePath,
   buildSessionReport,
+  HARNESS_GATE_RULE_VERSION,
   readFrictionEvents,
   readTelemetryEvents,
   renderSessionReportMarkdown,
@@ -141,14 +146,25 @@ const resolveDefaultRepoRoot = (args?: Record<string, unknown>): string => {
   if (typeof args?.repoRoot === "string" && args.repoRoot.length > 0) {
     return findRepoRoot(args.repoRoot)
   }
-  const candidate =
-    typeof args?.file === "string" && path.isAbsolute(args.file)
+  const rawFileCandidate =
+    typeof args?.file === "string"
       ? args.file
+      : typeof args?.filePath === "string"
+        ? args.filePath
+        : Array.isArray(args?.paths) && typeof args.paths[0] === "string"
+          ? args.paths[0]
+          : undefined
+  const candidate =
+    typeof rawFileCandidate === "string" && path.isAbsolute(rawFileCandidate)
+      ? rawFileCandidate
       : typeof args?.project === "string" && path.isAbsolute(args.project)
         ? args.project
         : undefined
   if (candidate !== undefined) {
-    return findRepoRoot(path.dirname(candidate))
+    const candidateRoot = findRepoRoot(path.dirname(candidate))
+    if (fs.existsSync(path.join(candidateRoot, "pnpm-workspace.yaml"))) {
+      return candidateRoot
+    }
   }
   const cwdRoot = findRepoRoot(process.cwd())
   if (cwdRoot !== SERVER_REPO_ROOT) {
@@ -249,9 +265,7 @@ export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolea
 }
 
 export const normalizeProjectPath = (repoRoot: string, rawProject: string): string => {
-  const resolved = path.isAbsolute(rawProject)
-    ? rawProject
-    : path.resolve(repoRoot, rawProject)
+  const resolved = path.isAbsolute(rawProject) ? rawProject : path.resolve(repoRoot, rawProject)
   if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
     return path.join(resolved, "tsconfig.json")
   }
@@ -401,8 +415,17 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
     }
     case "harness_structural_search": {
       const pattern = (args as { pattern: string }).pattern
+      const filePath = (args as { filePath?: string | undefined }).filePath
+      const paths = (args as { paths?: ReadonlyArray<string> | undefined }).paths
+      const subDirs = (args as { subDirs?: ReadonlyArray<string> | undefined }).subDirs
       const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-      result = structuralSearch({ pattern, repoRoot: root })
+      result = yield* decideStructuralSearch({
+        pattern,
+        repoRoot: root,
+        filePath,
+        paths,
+        subDirs,
+      })
       break
     }
     case "harness_route": {
@@ -560,9 +583,7 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
           (b) => filterBySymbol(b.holeQualname) || filterBySymbol(b.spanName),
         ),
         proofs: inference.proofs.filter(
-          (p) =>
-            (ruleId === undefined || p.ruleId === ruleId) &&
-            filterBySymbol(p.conclusion),
+          (p) => (ruleId === undefined || p.ruleId === ruleId) && filterBySymbol(p.conclusion),
         ),
         iterations: inference.iterations ?? 0,
       }
@@ -575,15 +596,17 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
       const ruleId = (args as { ruleId?: string | undefined }).ruleId
       const useDecisionPriors =
         (args as { useDecisionPriors?: boolean | undefined }).useDecisionPriors === true
-      const rawPriors = (args as {
-        priors?:
-          | SemanticEdgePriors
-          | {
-              readonly edgeConfidenceByRelationTargetRole?: Record<string, number>
-              readonly teleportationWeightByNodeKey?: Record<string, number>
-            }
-          | undefined
-      }).priors
+      const rawPriors = (
+        args as {
+          priors?:
+            | SemanticEdgePriors
+            | {
+                readonly edgeConfidenceByRelationTargetRole?: Record<string, number>
+                readonly teleportationWeightByNodeKey?: Record<string, number>
+              }
+            | undefined
+        }
+      ).priors
       const graph = yield* resolveGraph(options, args)
       const resolvedNode =
         symbolOrSpan !== undefined && symbolOrSpan.length > 0
@@ -702,8 +725,7 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
         const sourceTeleport =
           "holeTeleportationWeights" in rawPriors && rawPriors.holeTeleportationWeights
             ? rawPriors.holeTeleportationWeights
-            : "teleportationWeightByNodeKey" in rawPriors &&
-                rawPriors.teleportationWeightByNodeKey
+            : "teleportationWeightByNodeKey" in rawPriors && rawPriors.teleportationWeightByNodeKey
               ? rawPriors.teleportationWeightByNodeKey
               : {}
         for (const [k, v] of Object.entries(sourceTeleport)) {
@@ -731,7 +753,9 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
       )
       const proofIds = new Set(suggestedEdges.map((se) => se.proof.proofId))
       for (const b of typedHoleBundles) {
-        proofIds.add(`proof:COMP-06:EffectFn:${b.holeQualname}` as typeof suggestedEdges[number]["proof"]["proofId"])
+        proofIds.add(
+          `proof:COMP-06:EffectFn:${b.holeQualname}` as (typeof suggestedEdges)[number]["proof"]["proofId"],
+        )
       }
       result = {
         suggestedEdges,
@@ -878,7 +902,25 @@ export const createServer = (options?: ServerOptions): McpServer => {
     {
       pattern: z
         .string()
+        .min(1)
+        .max(2048)
         .describe("ast-grep pattern to search for across workspace TypeScript files"),
+      filePath: z
+        .string()
+        .min(1)
+        .max(512)
+        .optional()
+        .describe("Optional relative or absolute file path to scope search to a single file"),
+      paths: z
+        .array(z.string().min(1).max(512))
+        .max(100)
+        .optional()
+        .describe("Optional list of file or directory paths to scope search"),
+      subDirs: z
+        .array(z.string().min(1).max(256))
+        .max(50)
+        .optional()
+        .describe("Optional workspace subdirectories to search (defaults to ['libs', 'apps'])"),
     },
     (args) =>
       Effect.runPromise(
@@ -1107,8 +1149,229 @@ export const createServer = (options?: ServerOptions): McpServer => {
   return server
 }
 
+export interface HarnessDaemonServerHandle {
+  readonly socketPath: string
+  readonly close: () => Promise<void>
+}
+
+const DaemonRequestSchema = Schema.Struct({
+  id: Schema.String,
+  command: Schema.Literals([
+    "ping",
+    "extract-graph",
+    "ast-gates",
+    "plan-check",
+    "gc",
+    "verify",
+    "bench",
+  ]),
+  argv: Schema.optional(Schema.Array(Schema.String)),
+  repoRoot: Schema.optional(Schema.String),
+  files: Schema.optional(Schema.Array(Schema.String)),
+})
+
+const decodeDaemonRequest = Schema.decodeOption(Schema.fromJsonString(DaemonRequestSchema))
+
+export const resolveDaemonSocketPath = (repoRoot: string): string =>
+  path.join(repoRoot, ".harness", "daemon.sock")
+
+const safeUnlinkSocket = (socketPath: string): void => {
+  if (!fs.existsSync(socketPath)) {
+    return
+  }
+  Effect.runSync(
+    Effect.try({
+      try: () => {
+        fs.unlinkSync(socketPath)
+      },
+      catch: () => undefined,
+    }).pipe(Effect.ignore),
+  )
+}
+
+const MAX_DAEMON_BUFFER_BYTES = 1_048_576
+const DAEMON_SOCKET_TIMEOUT_MS = 5000
+
+const isDaemonSocketAlive = (socketPath: string): Effect.Effect<boolean> =>
+  Effect.callback<boolean>((resume) => {
+    if (!fs.existsSync(socketPath)) {
+      resume(Effect.succeed(false))
+      return
+    }
+    const probe = net.createConnection(socketPath)
+    let settled = false
+    const finish = (alive: boolean) => {
+      if (settled) return
+      settled = true
+      probe.destroy()
+      resume(Effect.succeed(alive))
+    }
+    probe.setTimeout(150, () => finish(false))
+    probe.on("connect", () => finish(true))
+    probe.on("error", () => finish(false))
+  })
+
+const createDaemonNetServer = (repoRoot: string): net.Server =>
+  net.createServer((socket) => {
+    socket.setTimeout(DAEMON_SOCKET_TIMEOUT_MS, () => {
+      socket.destroy()
+    })
+    socket.on("error", () => {
+      socket.destroy()
+    })
+    let buffer = ""
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8")
+      if (Buffer.byteLength(buffer, "utf8") > MAX_DAEMON_BUFFER_BYTES) {
+        if (!socket.destroyed && socket.writable) {
+          socket.write(
+            JSON.stringify({ ok: false, error: "Request payload exceeds 1MB limit" }) + "\n",
+          )
+        }
+        socket.destroy()
+        return
+      }
+      const newlineIdx = buffer.indexOf("\n")
+      if (newlineIdx === -1) return
+      const line = buffer.slice(0, newlineIdx).trim()
+      buffer = buffer.slice(newlineIdx + 1)
+      const reqOpt = decodeDaemonRequest(line)
+      match(reqOpt)
+        .with({ _tag: "None" }, () => {
+          if (!socket.destroyed && socket.writable) {
+            socket.write(
+              JSON.stringify({ ok: false, error: "Invalid daemon request payload" }) + "\n",
+            )
+            socket.end()
+          }
+        })
+        .with({ _tag: "Some" }, ({ value: req }) => {
+          const targetRoot = req.repoRoot ?? repoRoot
+          const resolvedRoot = path.resolve(targetRoot)
+          void Effect.runPromise(
+            Effect.gen(function* () {
+              if (req.command === "ping") {
+                return { id: req.id, ok: true, status: "warm" }
+              }
+              if (req.command === "extract-graph") {
+                const graph = yield* extractWorkspaceTypeAwareGraph(resolvedRoot)
+                return {
+                  id: req.id,
+                  ok: true,
+                  nodeCount: Graph.nodeCount(graph.graph),
+                  edgeCount: Graph.edgeCount(graph.graph),
+                  violationCount: (graph.branchingViolations ?? []).length,
+                }
+              }
+              if (req.command === "ast-gates") {
+                const cachePath = AstGateCache.resolveCachePath(resolvedRoot)
+                const requestedRelPaths = req.files ?? []
+                for (const rel of requestedRelPaths) {
+                  const resolvedAbs = path.resolve(resolvedRoot, rel)
+                  if (
+                    resolvedAbs !== resolvedRoot &&
+                    !resolvedAbs.startsWith(`${resolvedRoot}${path.sep}`)
+                  ) {
+                    return {
+                      id: req.id,
+                      ok: false,
+                      error: `Path traversal outside workspace root is forbidden: ${rel}`,
+                    }
+                  }
+                }
+                const loadedFiles = requestedRelPaths.flatMap((rel) => {
+                  const abs = path.resolve(resolvedRoot, rel)
+                  if (!fs.existsSync(abs)) return []
+                  return [
+                    {
+                      filePath: AstSourceFilePath.make(rel),
+                      content: AstSourceContent.make(fs.readFileSync(abs, "utf8")),
+                    },
+                  ]
+                })
+                const report = yield* AstGateCache.decide({
+                  files: loadedFiles,
+                  ruleVersion: HARNESS_GATE_RULE_VERSION,
+                  cacheFilePath: cachePath,
+                })
+                return { id: req.id, ok: true, report }
+              }
+              return { id: req.id, ok: false, fallbackToInProcess: true }
+            }),
+          )
+            .then((res) => {
+              if (!socket.destroyed && socket.writable) {
+                socket.write(JSON.stringify(res) + "\n")
+                socket.end()
+              }
+            })
+            .catch((err: unknown) => {
+              if (!socket.destroyed && socket.writable) {
+                socket.write(
+                  JSON.stringify({
+                    id: req.id,
+                    ok: false,
+                    error: err instanceof Error ? err.message : "Daemon execution error",
+                  }) + "\n",
+                )
+                socket.end()
+              }
+            })
+        })
+        .exhaustive()
+    })
+  })
+
+const closeDaemonNetServer = (server: net.Server, socketPath: string): Promise<void> =>
+  Effect.runPromise(
+    Effect.callback<void>((resume) => {
+      server.close(() => {
+        safeUnlinkSocket(socketPath)
+        resume(Effect.void)
+      })
+    }),
+  )
+
+export const startHarnessDaemonServer = (
+  repoRoot: string = process.cwd(),
+): Promise<HarnessDaemonServerHandle> =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const socketPath = resolveDaemonSocketPath(repoRoot)
+      const dir = path.dirname(socketPath)
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true })
+      }
+      const alreadyAlive = yield* isDaemonSocketAlive(socketPath)
+      if (!alreadyAlive) {
+        safeUnlinkSocket(socketPath)
+      }
+
+      const server = createDaemonNetServer(repoRoot)
+
+      yield* Effect.callback<void, Error>((resume) => {
+        const onError = (err: Error) => {
+          resume(Effect.fail(err))
+        }
+        server.once("error", onError)
+        server.listen(socketPath, () => {
+          server.removeListener("error", onError)
+          resume(Effect.void)
+        })
+      })
+
+      return {
+        socketPath,
+        close: () => closeDaemonNetServer(server, socketPath),
+      }
+    }),
+  )
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const server = createServer()
   const transport = new StdioServerTransport()
   void Effect.runPromise(Effect.tryPromise(() => server.connect(transport)))
+  if (process.env.HARNESS_DAEMON_SOCK !== "0") {
+    void startHarnessDaemonServer(process.cwd()).catch(() => undefined)
+  }
 }
