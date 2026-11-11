@@ -43,6 +43,7 @@ import {
   DEFAULT_STAGE_LATENCY_BUDGETS,
   deriveRepoOmnigraphPort,
   diffPlanAndImplGraphs,
+  DstSeed,
   type FrictionEventKind,
   type GovernanceDocReference,
   HARNESS_GATE_RULE_VERSION,
@@ -1110,7 +1111,15 @@ const handleVerify = (
       }
     }
 
-    const stamp = writeVerifyStamp(repoRoot, taskBranches.implBranch)
+    const parsedDstSeed = Number(process.env.DST_SEED ?? "0")
+    const dstSeed = DstSeed.make(
+      Number.isInteger(parsedDstSeed) && parsedDstSeed >= 0 ? parsedDstSeed : 0,
+    )
+    const dstSeedsRun = process.env.CI === "true" ? 100 : 10
+    const stamp = writeVerifyStamp(repoRoot, taskBranches.implBranch, {
+      dstSeed,
+      dstSeedsRun,
+    })
     return { exitCode: 0, stdout: JSON.stringify(stamp), stderr: "" }
   })
 

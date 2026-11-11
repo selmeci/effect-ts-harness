@@ -1,13 +1,18 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import { indexEffectFnsInFile } from "../src/fn-index.js"
 import {
   SpanRecorder,
+  computeSpanSaturation,
   runWithTestTracer,
   toTraceEdges,
   withRecordedTestSpan,
   type RecordedSpanEvent,
 } from "../src/recording-tracer.js"
+
+class SampleDomainError extends Schema.TaggedError<SampleDomainError>()("SampleDomainError", {
+  reason: Schema.String,
+}) {}
 
 const greet = Effect.fn("Sample.greet")(function* (input: { readonly name: string }) {
   yield* Effect.void
@@ -16,6 +21,18 @@ const greet = Effect.fn("Sample.greet")(function* (input: { readonly name: strin
 
 const helper = Effect.fn("Sample.helper")(function* (name: string) {
   return yield* greet({ name })
+})
+
+const childFailingStep = Effect.fn("Sample.childFailingStep")(function* () {
+  return yield* new SampleDomainError({ reason: "boom" })
+})
+
+const parentCatchingOrchestrator = Effect.fn("Sample.parentCatchingOrchestrator")(function* () {
+  return yield* childFailingStep().pipe(
+    Effect.catchTag("SampleDomainError", () =>
+      Effect.succeed({ _tag: "RecoveredVariant" as const }),
+    ),
+  )
 })
 
 describe("recording tracer with synthetic root TestSpan", () => {
@@ -272,5 +289,38 @@ describe("recording tracer with synthetic root TestSpan", () => {
         expect(span.durationMs).toBeGreaterThanOrEqual(0)
       }
     }),
+  )
+
+  it.effect(
+    "records exitTag, errorTag, valueTag, startTimeMs, endTimeMs and rolls up descendant error tags in computeSpanSaturation",
+    () =>
+      Effect.gen(function* () {
+        const { out, spans } = yield* Effect.gen(function* () {
+          const out = yield* parentCatchingOrchestrator()
+          const recorder = yield* SpanRecorder
+          return { out, spans: recorder.spans }
+        }).pipe(
+          withRecordedTestSpan("libs/sample/domain/test/index.test.ts::saturation check"),
+        )
+        expect(out).toEqual({ _tag: "RecoveredVariant" })
+
+        const childSpan = spans.find((s) => s.name === "Sample.childFailingStep")
+        const parentSpan = spans.find((s) => s.name === "Sample.parentCatchingOrchestrator")
+
+        expect(childSpan?.exitTag).toBe("Failure")
+        expect(childSpan?.errorTag).toBe("SampleDomainError")
+        expect(typeof childSpan?.startTimeMs).toBe("number")
+        expect(typeof childSpan?.endTimeMs).toBe("number")
+
+        expect(parentSpan?.exitTag).toBe("Success")
+        expect(parentSpan?.valueTag).toBe("RecoveredVariant")
+
+        const saturation = computeSpanSaturation(spans)
+        const parentSat = saturation.get("Sample.parentCatchingOrchestrator")
+        const childSat = saturation.get("Sample.childFailingStep")
+        expect(childSat?.failureCount).toBe(1)
+        expect(parentSat?.observedErrorTags).toContain("SampleDomainError")
+        expect(parentSat?.observedValueTags).toContain("RecoveredVariant")
+      }),
   )
 })

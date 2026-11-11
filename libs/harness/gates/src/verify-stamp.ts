@@ -2,12 +2,15 @@ import { createHash } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { join, relative } from "node:path"
 import { Option, Schema } from "effect"
+import { DstSeed } from "./dst-engine.js"
 import { resolveHarnessStateDir } from "./worktree.js"
 
 export const VerifyStampSchema = Schema.Struct({
   treeHash: Schema.String,
   timestamp: Schema.String,
   taskBranch: Schema.String,
+  dstSeed: Schema.optional(DstSeed),
+  dstSeedsRun: Schema.optional(Schema.Int),
 })
 
 export type VerifyStamp = Schema.Schema.Type<typeof VerifyStampSchema>
@@ -74,12 +77,22 @@ export const computeWorkspaceTreeHash = (repoRoot: string): string => {
   return hasher.digest("hex")
 }
 
-export const writeVerifyStamp = (repoRoot: string, taskBranch?: string): VerifyStamp => {
+export const writeVerifyStamp = (
+  repoRoot: string,
+  taskBranch?: string,
+  dstOptions?: { readonly dstSeed?: DstSeed | undefined; readonly dstSeedsRun?: number | undefined },
+): VerifyStamp => {
   const treeHash = computeWorkspaceTreeHash(repoRoot)
+  const resolvedEnvSeed =
+    process.env.DST_SEED !== undefined && /^\d+$/.test(process.env.DST_SEED)
+      ? DstSeed.make(Number(process.env.DST_SEED))
+      : DstSeed.make(0)
   const stamp: VerifyStamp = {
     treeHash,
     timestamp: new Date().toISOString(),
     taskBranch: taskBranch ?? "current",
+    dstSeed: dstOptions?.dstSeed ?? resolvedEnvSeed,
+    ...(dstOptions?.dstSeedsRun !== undefined ? { dstSeedsRun: dstOptions.dstSeedsRun } : {}),
   }
   const harnessDir = resolveHarnessStateDir(repoRoot)
   if (!existsSync(harnessDir)) {

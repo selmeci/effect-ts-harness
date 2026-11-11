@@ -1,5 +1,5 @@
 ---
-id: harness:ADR-0010
+id: harness:ADR-0011
 title: Sub-Second Incremental Harness, Content-Addressable Caching & Latency SLO Architecture
 status: accepted
 date: 2026-11-09
@@ -29,10 +29,10 @@ services: []
 errors:
   - LatencySloViolationError
 informs:
-  - harness:SPEC-0009
+  - harness:SPEC-0010
 ---
 
-# ADR-0010 · Sub-Second Incremental Harness, Content-Addressable Caching & Latency SLO Architecture
+# ADR-0011 · Sub-Second Incremental Harness, Content-Addressable Caching & Latency SLO Architecture
 
 ## Context and Problem Statement
 

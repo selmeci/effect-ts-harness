@@ -118,6 +118,8 @@ const IGNORED_SERVICES = new Set([
   "OmnigraphSync",
   "SpanRecorder",
   "@harness/ingest/SpanRecorder",
+  "ChaosFaultController",
+  "@harness/gates/ChaosFaultController",
   "SampleApiClient",
   "CartEsAtomClient",
   "ActiveCounterStore",
