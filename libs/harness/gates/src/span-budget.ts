@@ -108,38 +108,27 @@ export class SpanCausalityError extends Schema.TaggedError<SpanCausalityError>()
   },
 ) {}
 
-const isTransitiveDescendantOf = (
-  span: SpanSample,
-  targetAncestorName: string,
-  spansById: ReadonlyMap<string, SpanSample>,
-): boolean => {
-  const visited = new Set<string>([span.spanId])
-  let currentParentId = span.parentSpanId
-  while (currentParentId !== null && !visited.has(currentParentId)) {
-    visited.add(currentParentId)
-    const parent = spansById.get(currentParentId)
-    if (parent === undefined) {
-      return false
-    }
-    if (parent.name === targetAncestorName) {
-      return true
-    }
-    currentParentId = parent.parentSpanId
-  }
-  return false
-}
-
-export const evaluateTemporalCausalityRules = (
+export const checkTemporalCausality = (
   spans: ReadonlyArray<SpanSample>,
   rules: ReadonlyArray<TemporalCausalityRule>,
   spansById: ReadonlyMap<string, SpanSample>,
 ): ReadonlyArray<SpanBudgetViolation> => {
   const violations: Array<SpanBudgetViolation> = []
-  const indexedSpans = spans.map((span, index) => ({
-    span,
-    index,
-    startOrder: span.startTimeMs ?? index,
-    endOrder: span.endTimeMs ?? span.startTimeMs ?? index,
+  const allHaveStartTimes = spans.every((s) => s.startTimeMs !== undefined)
+  const orderedSpans = spans.map((span, originalIndex) => ({ span, originalIndex }))
+  if (allHaveStartTimes) {
+    orderedSpans.sort((a, b) => {
+      const diff = (a.span.startTimeMs ?? 0) - (b.span.startTimeMs ?? 0)
+      return diff !== 0 ? diff : a.originalIndex - b.originalIndex
+    })
+  }
+
+  const indexedSpans = orderedSpans.map((item, sortedIndex) => ({
+    span: item.span,
+    index: sortedIndex,
+    originalIndex: item.originalIndex,
+    startTimeMs: item.span.startTimeMs,
+    endTimeMs: item.span.endTimeMs,
   }))
 
   for (const rule of rules) {
@@ -148,16 +137,13 @@ export const evaluateTemporalCausalityRules = (
         const prereqEntries = indexedSpans.filter((e) => e.span.name === prerequisiteSpan)
         const dependentEntries = indexedSpans.filter((e) => e.span.name === dependentSpan)
         for (const dep of dependentEntries) {
-          const hasCompletedPrereq = prereqEntries.some(
-            (pre) => pre.endOrder <= dep.startOrder && pre.index < dep.index,
-          )
-          const hasEarlierPrereqByTime = prereqEntries.some(
-            (pre) =>
-              pre.span.endTimeMs !== undefined &&
-              dep.span.startTimeMs !== undefined &&
-              pre.span.endTimeMs <= dep.span.startTimeMs,
-          )
-          if (!hasCompletedPrereq && !hasEarlierPrereqByTime) {
+          const hasCompletedPrereq = prereqEntries.some((pre) => {
+            if (pre.endTimeMs !== undefined && dep.startTimeMs !== undefined) {
+              return pre.endTimeMs <= dep.startTimeMs
+            }
+            return pre.index < dep.index
+          })
+          if (!hasCompletedPrereq) {
             violations.push({
               ruleId: "CAUS-01",
               kind: "temporal-order-violation",
@@ -172,10 +158,34 @@ export const evaluateTemporalCausalityRules = (
       })
       .with({ _tag: "ForbiddenUnder" }, ({ ancestorSpan, forbiddenDescendantSpan }) => {
         for (const { span } of indexedSpans) {
-          if (
-            span.name === forbiddenDescendantSpan &&
-            isTransitiveDescendantOf(span, ancestorSpan, spansById)
+          if (span.name !== forbiddenDescendantSpan) {
+            continue
+          }
+
+          const visited = new Set<string>([span.spanId])
+          let cursorParentId = span.parentSpanId
+          let isDescendant = false
+          let danglingParentId: string | null = null
+
+          while (
+            cursorParentId !== null &&
+            cursorParentId.length > 0 &&
+            !visited.has(cursorParentId)
           ) {
+            visited.add(cursorParentId)
+            const parent = spansById.get(cursorParentId)
+            if (parent === undefined) {
+              danglingParentId = cursorParentId
+              break
+            }
+            if (parent.name === ancestorSpan) {
+              isDescendant = true
+              break
+            }
+            cursorParentId = parent.parentSpanId
+          }
+
+          if (isDescendant) {
             violations.push({
               ruleId: "CAUS-02",
               kind: "forbidden-descendant-span",
@@ -184,6 +194,16 @@ export const evaluateTemporalCausalityRules = (
               count: 1,
               maxAllowed: 0,
               message: `[CAUS-02] Forbidden descendant span: "${forbiddenDescendantSpan}" was invoked inside restricted ancestor span "${ancestorSpan}".`,
+            })
+          } else if (danglingParentId !== null) {
+            violations.push({
+              ruleId: "CAUS-02",
+              kind: "forbidden-descendant-span",
+              parentSpan: ancestorSpan,
+              targetSpan: forbiddenDescendantSpan,
+              count: 1,
+              maxAllowed: 0,
+              message: `[CAUS-02] Forbidden descendant span: "${span.name}" has a dangling unverified parentSpanId "${danglingParentId}" while checking ForbiddenUnder for "${ancestorSpan}".`,
             })
           }
         }
@@ -201,9 +221,9 @@ export const evaluateTemporalCausalityRules = (
               comp.span.exitTag !== "Failure" &&
               comp.span.exitTag !== "Defect" &&
               (comp.index > failed.index ||
-                (comp.span.startTimeMs !== undefined &&
-                  failed.span.endTimeMs !== undefined &&
-                  comp.span.startTimeMs >= failed.span.endTimeMs)),
+                (comp.startTimeMs !== undefined &&
+                  failed.endTimeMs !== undefined &&
+                  comp.startTimeMs >= failed.endTimeMs)),
           )
           if (!hasSubsequentCompensation) {
             violations.push({
@@ -223,6 +243,8 @@ export const evaluateTemporalCausalityRules = (
 
   return violations
 }
+
+export const evaluateTemporalCausalityRules = checkTemporalCausality
 
 export const decideSpanBudgets = Effect.fn("SpanBudget.decide")(function* (
   input: SpanBudgetInput,
@@ -291,16 +313,18 @@ export const decideSpanBudgets = Effect.fn("SpanBudget.decide")(function* (
     }
   }
 
-  if (input.causalityRules !== undefined && input.causalityRules.length > 0) {
-    const causalityViolations = evaluateTemporalCausalityRules(
+  const causalityRules = input.causalityRules ?? []
+  if (causalityRules.length > 0) {
+    const causalityViolations = checkTemporalCausality(
       input.spans,
-      input.causalityRules,
+      causalityRules,
       spansById,
     )
     violations.push(...causalityViolations)
   }
 
-  if (input.failOnViolation === true && violations.length > 0) {
+  const shouldFail = input.failOnViolation ?? (causalityRules.length > 0)
+  if (shouldFail && violations.length > 0) {
     return yield* new SpanCausalityError({
       violations: violations.map((v) => ({
         ruleId: v.ruleId !== undefined ? SpanBudgetRuleId.make(v.ruleId) : undefined,

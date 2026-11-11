@@ -7,7 +7,7 @@ import {
 import { Effect, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
-import { match } from "ts-pattern"
+import { match, P } from "ts-pattern"
 import { type DeterministicFallbackReason, PriorSource } from "./hole-prior-decision.js"
 import { assertDecisionLimits } from "./idiom-router.js"
 
@@ -76,14 +76,21 @@ const computeDeterministicPlanSearchFallback = (
   input: PlanSearchScoreInput,
   reason: DeterministicFallbackReason = "timeout-or-unavailable",
 ): PlanSearchScoreResult => {
-  let cohesionLabel: PlanSearchCohesionLevel = "adequate"
-  if (input.violationCount > 0) {
-    cohesionLabel = "fragmented"
-  } else if (input.cyclomaticComplexity <= 4) {
-    cohesionLabel = "minimal_complete"
-  } else if (input.cyclomaticComplexity <= 8) {
-    cohesionLabel = "modular"
-  }
+  const cohesionLabel: PlanSearchCohesionLevel = match(input)
+    .with(
+      P.when((i) => i.violationCount > 0),
+      () => "fragmented" as const,
+    )
+    .with(
+      P.when((i) => i.cyclomaticComplexity <= 4),
+      () => "minimal_complete" as const,
+    )
+    .with(
+      P.when((i) => i.cyclomaticComplexity <= 8),
+      () => "modular" as const,
+    )
+    .otherwise(() => "adequate" as const)
+
   return {
     candidateId: input.candidateId,
     cohesionLabel,
@@ -106,7 +113,10 @@ export const evaluatePlanSearchCandidate = Effect.fn("PlanSearchScorer.evaluate"
 
   return yield* match(outcome)
     .with({ _tag: "None" }, () =>
-      Effect.succeed(computeDeterministicPlanSearchFallback(input, "timeout-or-unavailable")),
+      Effect.gen(function* () {
+        yield* Effect.annotateCurrentSpan({ "decision.usedFallback": true })
+        return computeDeterministicPlanSearchFallback(input, "timeout-or-unavailable")
+      }),
     )
     .with({ _tag: "Some" }, ({ value }) =>
       Effect.gen(function* () {
@@ -120,6 +130,7 @@ export const evaluatePlanSearchCandidate = Effect.fn("PlanSearchScorer.evaluate"
                 "decision.candidateId": input.candidateId,
                 "decision.cohesionLabel": cohesionLabel,
                 "decision.cohesionPriorMillis": cohesionPriorMillis,
+                "decision.usedFallback": false,
               })
               return {
                 candidateId: input.candidateId,
@@ -130,7 +141,10 @@ export const evaluatePlanSearchCandidate = Effect.fn("PlanSearchScorer.evaluate"
             }),
           )
           .with({ _tag: "None" }, () =>
-            Effect.succeed(computeDeterministicPlanSearchFallback(input, "invalid-output")),
+            Effect.gen(function* () {
+              yield* Effect.annotateCurrentSpan({ "decision.usedFallback": true })
+              return computeDeterministicPlanSearchFallback(input, "invalid-output")
+            }),
           )
           .exhaustive()
       }),

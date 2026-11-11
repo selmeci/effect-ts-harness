@@ -43,11 +43,39 @@ import {
   DEFAULT_STAGE_LATENCY_BUDGETS,
   deriveRepoOmnigraphPort,
   diffPlanAndImplGraphs,
-  DstSeed,
+  DstErrorTag,
+  DstExecutionTier,
+  decideEarsSpecQuality,
+  decidePlanSearch,
+  decideRuleSynthesizer,
+  decideSpanBudgets,
+  DstMethodName,
+  DstServiceTag,
+  DstStepCount,
+  type DstTargetServiceMethod as DstTargetMethodSpec,
+  EarsClauseId,
+  EarsClausePatternKind,
+  EarsClausePolarity,
+  EarsConsistencyFlag,
+  type EarsConsistencyInput,
+  EarsEffectSymbolName,
+  EarsFilePath,
+  EarsGuardText,
+  EarsOutcomeTag,
+  type EarsSemanticClause,
+  EarsSpecId,
+  EarsVariantTag,
+  evaluateEarsConsistencyReport,
   type FrictionEventKind,
   type GovernanceDocReference,
   HARNESS_GATE_RULE_VERSION,
   INTERACTIVE_NX_BANNED_REASON,
+  normalizeConditionPrefix,
+  parseDstSeedEnv,
+  PlanSearchInput,
+  RuleSynthesizerInput,
+  runDstSeedSuite,
+  type SpanSample,
   isCdCommand,
   isInteractiveNxCommand,
   LatencyMillis,
@@ -780,6 +808,102 @@ const handlePlanCheck = (
       }
     }
 
+    // EARS spec consistency check
+    for (const doc of governanceDocs) {
+      if (
+        doc.markdown !== undefined &&
+        (doc.docPath.includes("/specs/") || doc.id.includes(":SPEC-"))
+      ) {
+        const lintReport = yield* decideEarsSpecQuality({
+          docPath: doc.docPath,
+          markdown: doc.markdown,
+        })
+        if (lintReport.requirements.length > 0) {
+          const clausesBySymbol = new Map<string, Array<EarsSemanticClause>>()
+          for (const req of lintReport.requirements) {
+            const sym = req.effectSymbol?.trim()
+            if (!sym) continue
+
+            const lowerReq = req.requirement.toLowerCase()
+            const isDoubleNegativeAllow = /\bshall\s+not\s+(?:deny|fail|reject)\b/.test(lowerReq)
+            const isNot = lowerReq.includes("shall not") && !isDoubleNegativeAllow
+            const isFail =
+              !isDoubleNegativeAllow &&
+              (lowerReq.includes("shall fail") ||
+                lowerReq.includes("fails with") ||
+                lowerReq.includes("fail with") ||
+                lowerReq.includes("shall return deny") ||
+                lowerReq.includes("shall return escalate"))
+
+            const failMatch = /fail(?:s)? with\s+`?([A-Za-z0-9_]+)`?/i.exec(req.requirement)
+            const errorTag = failMatch?.[1] ?? (isFail ? "Failure" : "Success")
+
+            const patternKind: EarsClausePatternKind = match(req.pattern)
+              .with("Ubiquitous", () => EarsClausePatternKind.make("Ubiquitous"))
+              .with("Event-driven", () => EarsClausePatternKind.make("Event-driven"))
+              .with("State-driven", () => EarsClausePatternKind.make("State-driven"))
+              .with("Unwanted behaviour", () => EarsClausePatternKind.make("Unwanted behaviour"))
+              .with("Optional feature", () => EarsClausePatternKind.make("Optional feature"))
+              .with("Complex", () => EarsClausePatternKind.make("Complex"))
+              .otherwise(() => EarsClausePatternKind.make("Complex"))
+
+            const rawPrefix = normalizeConditionPrefix(req.requirement)
+            const hasExplicitPrecondition = /^(?:when|while|if|where)\b/i.test(rawPrefix)
+            const baseGuardKey = hasExplicitPrecondition
+              ? rawPrefix
+              : lowerReq.replace(/[*_`]/g, "").trim()
+            const effectiveGuardKey = isFail || isNot
+              ? baseGuardKey
+              : `${baseGuardKey}:${req.id || `REQ-${req.line}`}`
+
+            const clause: EarsSemanticClause = {
+              clauseId: EarsClauseId.make(req.id || `REQ-${req.line}`),
+              pattern: patternKind,
+              effectSymbol: EarsEffectSymbolName.make(sym),
+              polarity: isNot
+                ? EarsClausePolarity.make("shall_not")
+                : EarsClausePolarity.make("shall"),
+              outcomeTag: EarsOutcomeTag.make(isFail ? errorTag : "Success"),
+              guardVariant: EarsVariantTag.make(
+                effectiveGuardKey.length > 0 ? effectiveGuardKey : req.id || `REQ-${req.line}`,
+              ),
+              guardText: EarsGuardText.make(
+                effectiveGuardKey.length > 0 ? effectiveGuardKey : req.requirement.slice(0, 100),
+              ),
+            }
+
+            const existing = clausesBySymbol.get(sym) ?? []
+            existing.push(clause)
+            clausesBySymbol.set(sym, existing)
+          }
+
+          for (const [, symbolClauses] of clausesBySymbol) {
+            if (symbolClauses.length >= 2) {
+              const consistencyInput: EarsConsistencyInput = {
+                specId: EarsSpecId.make(doc.id),
+                filePath: EarsFilePath.make(doc.docPath),
+                stateDomainVariants: [],
+                guardDomainVariants: [],
+                clauses: symbolClauses,
+                requireExhaustiveStateCoverage: EarsConsistencyFlag.make(false),
+              }
+              const report = evaluateEarsConsistencyReport(consistencyInput)
+              const blockingViolations = report.violations.filter(
+                (v) => v.ruleId === "EARS-01" || v.ruleId === "EARS-02",
+              )
+              if (blockingViolations.length > 0) {
+                return {
+                  exitCode: 1,
+                  stdout: "",
+                  stderr: `[GATE FAILURE] plan-check:ears-consistency\n${blockingViolations.map((v) => `[${v.ruleId}] ${v.message}`).join("\n")}`,
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
     return { exitCode: 0, stdout: checkResult.mermaid, stderr: "" }
   })
 
@@ -1111,14 +1235,100 @@ const handleVerify = (
       }
     }
 
-    const parsedDstSeed = Number(process.env.DST_SEED ?? "0")
-    const dstSeed = DstSeed.make(
-      Number.isInteger(parsedDstSeed) && parsedDstSeed >= 0 ? parsedDstSeed : 0,
+    const pinnedSeed = parseDstSeedEnv(process.env["DST_SEED"])
+    const dstTier = DstExecutionTier.make(process.env.CI === "true" ? "ci_full" : "fast_local")
+
+    const dstTargets: Array<DstTargetMethodSpec> = []
+    for (const [, node] of Graph.nodes(graph.graph)) {
+      if (node._tag === "ServiceTag") {
+        dstTargets.push({
+          serviceTag: DstServiceTag.make(node.name || node.tagId),
+          methodName: DstMethodName.make("execute"),
+          declaredErrors: [DstErrorTag.make(`${node.name || node.tagId}Error`)],
+        })
+      }
+    }
+    if (dstTargets.length === 0) {
+      dstTargets.push({
+        serviceTag: DstServiceTag.make("HarnessVerificationService"),
+        methodName: DstMethodName.make("verify"),
+        declaredErrors: [DstErrorTag.make("HarnessVerificationError")],
+      })
+    }
+
+    const dstSuiteResult = yield* runDstSeedSuite({
+      tier: dstTier,
+      pinnedSeed,
+      stepCount: DstStepCount.make(8),
+      targets: dstTargets,
+    }).pipe(
+      Effect.map((suite) => ({ _tag: "Ok" as const, suite })),
+      Effect.catchTag("DstScheduleError", (err) =>
+        Effect.succeed({ _tag: "Err" as const, err }),
+      ),
     )
-    const dstSeedsRun = process.env.CI === "true" ? 100 : 10
+
+    if (dstSuiteResult._tag === "Err") {
+      return {
+        exitCode: 1,
+        stdout: "",
+        stderr: `[GATE FAILURE] verify:dst-schedule\n${dstSuiteResult.err.reason ?? dstSuiteResult.err.message}`,
+      }
+    }
+    const dstSuite = dstSuiteResult.suite
+
+    const spanTracePath = join(repoRoot, ".harness", "span-trace.json")
+    let recordedSpans: Array<SpanSample> = []
+    if (existsSync(spanTracePath)) {
+      const rawSpanJson = yield* Effect.try({
+        try: () => readFileSync(spanTracePath, "utf-8"),
+        catch: () => "",
+      }).pipe(Effect.orElseSucceed(() => ""))
+      if (rawSpanJson.length > 0) {
+        const parsedOpt = Schema.decodeOption(Schema.fromJsonString(Schema.Unknown))(
+          rawSpanJson,
+        )
+        if (Option.isSome(parsedOpt)) {
+          const parsed = parsedOpt.value
+          if (Array.isArray(parsed)) {
+            recordedSpans = parsed as Array<SpanSample>
+          } else if (
+            parsed !== null &&
+            typeof parsed === "object" &&
+            Array.isArray((parsed as Record<string, unknown>)["spans"])
+          ) {
+            recordedSpans = (parsed as Record<string, Array<SpanSample>>)["spans"]!
+          }
+        }
+      }
+    }
+
+    const spanBudgetsResult = yield* decideSpanBudgets({
+      spans: recordedSpans,
+      causalityRules: [],
+      failOnViolation: true,
+    }).pipe(
+      Effect.map(() => ({ _tag: "Ok" as const })),
+      Effect.catchTag("SpanCausalityError", (err) =>
+        Effect.succeed({ _tag: "Err" as const, err }),
+      ),
+    )
+
+    const spanExitOpt = match(spanBudgetsResult)
+      .with({ _tag: "Err" }, ({ err }) => ({
+        exitCode: 1,
+        stdout: "",
+        stderr: `[GATE FAILURE] verify:span-budget\n${err.message}`,
+      }))
+      .with({ _tag: "Ok" }, () => undefined)
+      .exhaustive()
+    if (spanExitOpt !== undefined) {
+      return spanExitOpt
+    }
+
     const stamp = writeVerifyStamp(repoRoot, taskBranches.implBranch, {
-      dstSeed,
-      dstSeedsRun,
+      dstSeed: dstSuite.initialSeed,
+      dstSeedsRun: dstSuite.seedsRun,
     })
     return { exitCode: 0, stdout: JSON.stringify(stamp), stderr: "" }
   })
@@ -2273,13 +2483,12 @@ const handleMutate = (
   Effect.gen(function* () {
     yield* Effect.void
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-    const strict = argv.includes("--strict")
     const scopeArg = argv.find((arg) => arg.startsWith("--scope="))
     const scope = scopeArg ? scopeArg.slice("--scope=".length) : undefined
 
     const report = runDomainMutationSuite(repoRoot, { scope })
     return {
-      exitCode: strict && !report.passed ? 1 : 0,
+      exitCode: !report.passed ? 1 : 0,
       stdout: JSON.stringify(report),
       stderr: "",
     }
@@ -2625,6 +2834,75 @@ const handleLearn = (
       })
     }
 
+    let synthesizedRules: ReadonlyArray<unknown> = []
+    const rejectedRules: Array<{ ruleId: string; stage: string; reason: string }> = []
+    let planSearchResults: unknown = undefined
+    const learnedSlicesPath = join(repoRoot, ".harness", "learned-slices.json")
+    if (existsSync(learnedSlicesPath)) {
+      const rawSlices = yield* Effect.try({
+        try: () => readFileSync(learnedSlicesPath, "utf-8"),
+        catch: () => undefined,
+      }).pipe(Effect.orElseSucceed(() => undefined))
+      if (rawSlices !== undefined) {
+        const decodeJson = Schema.decodeUnknownOption(
+          Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+        )
+        const parsedOpt = decodeJson(rawSlices)
+        yield* match(parsedOpt)
+          .with({ _tag: "Some" }, ({ value: parsed }) =>
+            Effect.gen(function* () {
+              if (Array.isArray(parsed["slices"])) {
+                const rules: Array<unknown> = []
+                for (const s of parsed["slices"]) {
+                  const decodedSlice = Schema.decodeUnknownOption(RuleSynthesizerInput)(s)
+                  yield* match(decodedSlice)
+                    .with({ _tag: "Some" }, ({ value: slice }) =>
+                      Effect.gen(function* () {
+                        const synthRes = yield* decideRuleSynthesizer(slice).pipe(
+                          Effect.map((report) => ({ _tag: "Ok" as const, report })),
+                          Effect.catchTag("RuleSynthesisError", (err) =>
+                            Effect.succeed({ _tag: "Err" as const, err }),
+                          ),
+                        )
+                        match(synthRes)
+                          .with({ _tag: "Ok" }, ({ report }) => {
+                            rules.push(report)
+                          })
+                          .with({ _tag: "Err" }, ({ err }) => {
+                            rejectedRules.push({
+                              ruleId: String(slice.taskId),
+                              stage: err.stage ?? "unknown",
+                              reason: err.reason ?? err.message,
+                            })
+                          })
+                          .exhaustive()
+                      }),
+                    )
+                    .with({ _tag: "None" }, () => Effect.void)
+                    .exhaustive()
+                }
+                synthesizedRules = rules
+              }
+              if (Array.isArray(parsed["candidates"])) {
+                const rawPlanInput: unknown = {
+                  candidates: parsed["candidates"],
+                  requireZeroViolations: false,
+                }
+                const decodedPlanSearch = Schema.decodeUnknownOption(PlanSearchInput)(rawPlanInput)
+                planSearchResults = yield* match(decodedPlanSearch)
+                  .with({ _tag: "Some" }, ({ value: input }) =>
+                    decidePlanSearch(input).pipe(Effect.orElseSucceed(() => undefined)),
+                  )
+                  .with({ _tag: "None" }, () => Effect.void)
+                  .exhaustive()
+              }
+            }),
+          )
+          .with({ _tag: "None" }, () => Effect.void)
+          .exhaustive()
+      }
+    }
+
     if (shouldClear) {
       clearFrictionEvents(repoRoot)
     }
@@ -2635,6 +2913,9 @@ const handleLearn = (
         totalEvents: events.length,
         proposals,
         cleared: shouldClear,
+        ...(synthesizedRules.length > 0 ? { synthesizedRules } : {}),
+        ...(rejectedRules.length > 0 ? { rejectedRules } : {}),
+        ...(planSearchResults !== undefined ? { planSearchResults } : {}),
       }),
       stderr: "",
     }

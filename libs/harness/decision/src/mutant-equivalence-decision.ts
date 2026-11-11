@@ -8,14 +8,29 @@ import { assertDecisionLimits } from "./idiom-router.js"
 
 export const EQUIVALENT_MUTANT_THRESHOLD_MILLIS = 850
 
+export const MutantDecisionId = Schema.NonEmptyString.pipe(Schema.brand("MutantDecisionId"))
+export type MutantDecisionId = typeof MutantDecisionId.Type
+
+export const MutantDecisionFilePath = Schema.NonEmptyString.pipe(Schema.brand("MutantDecisionFilePath"))
+export type MutantDecisionFilePath = typeof MutantDecisionFilePath.Type
+
+export const MutantDecisionSpanName = Schema.NonEmptyString.pipe(Schema.brand("MutantDecisionSpanName"))
+export type MutantDecisionSpanName = typeof MutantDecisionSpanName.Type
+
+export const MutantCodeSnippet = Schema.String.pipe(Schema.brand("MutantCodeSnippet"))
+export type MutantCodeSnippet = typeof MutantCodeSnippet.Type
+
+export const MutantAstSummary = Schema.String.pipe(Schema.brand("MutantAstSummary"))
+export type MutantAstSummary = typeof MutantAstSummary.Type
+
 export const MutantEquivalenceV1 = Decision.make({
   input: Schema.Struct({
-    mutantId: Schema.String,
-    filePath: Schema.String,
-    spanName: Schema.String,
-    originalSnippet: Schema.String,
-    mutatedSnippet: Schema.String,
-    enclosingFunctionAstSummary: Schema.String,
+    mutantId: MutantDecisionId,
+    filePath: MutantDecisionFilePath,
+    spanName: MutantDecisionSpanName,
+    originalSnippet: MutantCodeSnippet,
+    mutatedSnippet: MutantCodeSnippet,
+    enclosingFunctionAstSummary: MutantAstSummary,
   }),
   decisions: {
     isEquivalent: Decision.probability({
@@ -28,17 +43,17 @@ export const MutantEquivalenceV1 = Decision.make({
 assertDecisionLimits(MutantEquivalenceV1)
 
 export const MutantEquivalenceInput = Schema.Struct({
-  mutantId: Schema.NonEmptyString,
-  filePath: Schema.NonEmptyString,
-  spanName: Schema.NonEmptyString,
-  originalSnippet: Schema.String,
-  mutatedSnippet: Schema.String,
-  enclosingFunctionAstSummary: Schema.String,
+  mutantId: MutantDecisionId,
+  filePath: MutantDecisionFilePath,
+  spanName: MutantDecisionSpanName,
+  originalSnippet: MutantCodeSnippet,
+  mutatedSnippet: MutantCodeSnippet,
+  enclosingFunctionAstSummary: MutantAstSummary,
 })
 export type MutantEquivalenceInput = typeof MutantEquivalenceInput.Type
 
 export const MutantEquivalenceResult = Schema.Struct({
-  mutantId: Schema.NonEmptyString,
+  mutantId: MutantDecisionId,
   equivalenceProbMillis: ConfidenceMillis,
   isEquivalent: Schema.Boolean,
   source: PriorSource,
@@ -73,12 +88,16 @@ export const evaluateMutantEquivalence = Effect.fn("MutantEquivalence.evaluate")
 
   return yield* match(outcome)
     .with({ _tag: "None" }, () =>
-      Effect.succeed(computeDeterministicMutantFallback(input, "timeout-or-unavailable")),
+      Effect.gen(function* () {
+        yield* Effect.annotateCurrentSpan({ "decision.usedFallback": true })
+        return computeDeterministicMutantFallback(input, "timeout-or-unavailable")
+      }),
     )
     .with({ _tag: "Some" }, ({ value }) =>
       Effect.gen(function* () {
         const rawProb = value.answers.isEquivalent?.probability
         if (typeof rawProb !== "number" || Number.isNaN(rawProb)) {
+          yield* Effect.annotateCurrentSpan({ "decision.usedFallback": true })
           return computeDeterministicMutantFallback(input, "invalid-output")
         }
         const clampedMillis = Math.min(1000, Math.max(0, Math.round(rawProb * 1000)))
@@ -89,6 +108,7 @@ export const evaluateMutantEquivalence = Effect.fn("MutantEquivalence.evaluate")
           "decision.mutantId": input.mutantId,
           "decision.equivalenceProbMillis": equivalenceProbMillis,
           "decision.isEquivalent": isEquivalent,
+          "decision.usedFallback": false,
         })
         return {
           mutantId: input.mutantId,

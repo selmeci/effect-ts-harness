@@ -5,12 +5,18 @@ import { Option, Schema } from "effect"
 import { DstSeed } from "./dst-engine.js"
 import { resolveHarnessStateDir } from "./worktree.js"
 
+export const DstSeedsRunCount = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+  Schema.brand("DstSeedsRunCount"),
+)
+export type DstSeedsRunCount = typeof DstSeedsRunCount.Type
+
 export const VerifyStampSchema = Schema.Struct({
   treeHash: Schema.String,
   timestamp: Schema.String,
   taskBranch: Schema.String,
   dstSeed: Schema.optional(DstSeed),
-  dstSeedsRun: Schema.optional(Schema.Int),
+  dstSeedsRun: Schema.optional(DstSeedsRunCount),
 })
 
 export type VerifyStamp = Schema.Schema.Type<typeof VerifyStampSchema>
@@ -77,22 +83,38 @@ export const computeWorkspaceTreeHash = (repoRoot: string): string => {
   return hasher.digest("hex")
 }
 
+const decodeDstSeedSync = Schema.decodeUnknownSync(DstSeed)
+
+export const parseDstSeedEnv = (raw: string | undefined): DstSeed | undefined => {
+  if (raw === undefined) {
+    return undefined
+  }
+  const trimmed = raw.trim()
+  if (trimmed.length === 0) {
+    return undefined
+  }
+  const numericValue = Number(trimmed)
+  const candidate: unknown =
+    /^\d+$/.test(trimmed) && Number.isSafeInteger(numericValue) ? numericValue : raw
+  return decodeDstSeedSync(candidate)
+}
+
 export const writeVerifyStamp = (
   repoRoot: string,
   taskBranch?: string,
   dstOptions?: { readonly dstSeed?: DstSeed | undefined; readonly dstSeedsRun?: number | undefined },
 ): VerifyStamp => {
   const treeHash = computeWorkspaceTreeHash(repoRoot)
-  const resolvedEnvSeed =
-    process.env.DST_SEED !== undefined && /^\d+$/.test(process.env.DST_SEED)
-      ? DstSeed.make(Number(process.env.DST_SEED))
-      : DstSeed.make(0)
+  const envSeed = parseDstSeedEnv(process.env["DST_SEED"])
+  const resolvedSeed = dstOptions?.dstSeed ?? envSeed ?? DstSeed.make(0)
   const stamp: VerifyStamp = {
     treeHash,
     timestamp: new Date().toISOString(),
     taskBranch: taskBranch ?? "current",
-    dstSeed: dstOptions?.dstSeed ?? resolvedEnvSeed,
-    ...(dstOptions?.dstSeedsRun !== undefined ? { dstSeedsRun: dstOptions.dstSeedsRun } : {}),
+    dstSeed: resolvedSeed,
+    ...(dstOptions?.dstSeedsRun !== undefined
+      ? { dstSeedsRun: DstSeedsRunCount.make(Math.max(0, Math.trunc(dstOptions.dstSeedsRun))) }
+      : {}),
   }
   const harnessDir = resolveHarnessStateDir(repoRoot)
   if (!existsSync(harnessDir)) {

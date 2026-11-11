@@ -12,6 +12,7 @@ enforced_by:
   - libs/harness/gates/src/span-budget.ts
   - libs/harness/gates/src/mutation-check.ts
   - libs/harness/gates/src/rule-synthesizer.ts
+  - libs/harness/gates/src/plan-search.ts
   - libs/harness/gates/src/friction-log.ts
   - libs/harness/ingest/src/recording-tracer.ts
   - libs/harness/decision/src/ears-semantics-decision.ts
@@ -19,6 +20,7 @@ enforced_by:
   - libs/harness/decision/src/mutant-equivalence-decision.ts
   - libs/harness/decision/src/rule-quality-decision.ts
   - libs/harness/decision/src/plan-search-decision.ts
+  - apps/harness-cli/src/index.ts
 spans:
   - EarsConsistency.decide
   - DstEngine.decide
@@ -110,4 +112,4 @@ Allow `pnpm harness learn` to emit arbitrary TypeScript gate code directly into 
 | LISA temporal causality (`MustPrecede`, `ForbiddenUnder`, `RequireCompensationOnFailure` — `CAUS-01`, `CAUS-02`)                   | `libs/harness/gates/src/span-budget.ts`, `libs/harness/ingest/src/recording-tracer.ts`                            | `pnpm harness verify`                                            | `SpanBudget.decide`, `SpanCausalityError`                                                     |
 | Enriched `SpanRecorder` (`exitTag`, `errorTag`, `valueTag`), `SAT-01`/`SAT-02`, Mutant Schemata, and `MutantEquivalenceV1`         | `libs/harness/gates/src/mutation-check.ts`, `libs/harness/decision/src/mutant-equivalence-decision.ts`            | `pnpm harness mutate --strict` & `pnpm harness verify`           | `MutationCheck.decide`, `MutantEquivalence.evaluate`                                          |
 | LGG DPO rule anti-unification (`?Scope`), 4-stage cascade evaluator, Immutable TCB check, and `SynthesizedRuleQualityV1`           | `libs/harness/gates/src/rule-synthesizer.ts`, `libs/harness/decision/src/rule-quality-decision.ts`                | `pnpm harness learn` & `pnpm harness verify`                     | `RuleSynthesizer.decide`, `SynthesizedRuleQuality.evaluate`, `RuleSynthesisError`             |
-| Best-of-$K$ `PlanSearch.decide` candidate skeleton ranking and `LoopCircuitBreaker.decide` integration with `PlanSearchScorerV1`   | `libs/harness/gates/src/friction-log.ts`, `libs/harness/decision/src/plan-search-decision.ts`                     | `pnpm harness plan-check` & `pnpm harness verify`                | `PlanSearch.decide`, `PlanSearchScorer.evaluate`, `PlanSearchError`                           |
+| Best-of-$K$ `PlanSearch.decide` candidate skeleton ranking and `LoopCircuitBreaker.decide` integration with `PlanSearchScorerV1`   | `libs/harness/gates/src/plan-search.ts`, `libs/harness/gates/src/friction-log.ts`, `libs/harness/decision/src/plan-search-decision.ts` | `pnpm harness learn` & `pnpm harness verify`                     | `PlanSearch.decide`, `PlanSearchScorer.evaluate`, `PlanSearchError`                           |

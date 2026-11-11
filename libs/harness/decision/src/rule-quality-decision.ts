@@ -116,7 +116,10 @@ export const evaluateSynthesizedRuleQuality = Effect.fn("SynthesizedRuleQuality.
 
     return yield* match(outcome)
       .with({ _tag: "None" }, () =>
-        Effect.succeed(computeDeterministicRuleQualityFallback(input, "timeout-or-unavailable")),
+        Effect.gen(function* () {
+          yield* Effect.annotateCurrentSpan({ "decision.usedFallback": true })
+          return computeDeterministicRuleQualityFallback(input, "timeout-or-unavailable")
+        }),
       )
       .with({ _tag: "Some" }, ({ value }) =>
         Effect.gen(function* () {
@@ -138,6 +141,7 @@ export const evaluateSynthesizedRuleQuality = Effect.fn("SynthesizedRuleQuality.
                   "decision.generalityLabel": generalityLabel,
                   "decision.nonTautologicalProbMillis": nonTautologicalProbMillis,
                   "decision.qualityScoreMillis": qualityScoreMillis,
+                  "decision.usedFallback": false,
                 })
                 return {
                   ruleId: input.ruleId,
@@ -149,7 +153,10 @@ export const evaluateSynthesizedRuleQuality = Effect.fn("SynthesizedRuleQuality.
               }),
             )
             .otherwise(() =>
-              Effect.succeed(computeDeterministicRuleQualityFallback(input, "invalid-output")),
+              Effect.gen(function* () {
+                yield* Effect.annotateCurrentSpan({ "decision.usedFallback": true })
+                return computeDeterministicRuleQualityFallback(input, "invalid-output")
+              }),
             )
         }),
       )

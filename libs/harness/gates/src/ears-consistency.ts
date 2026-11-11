@@ -42,6 +42,10 @@ export const EarsClausePolarity = Schema.Literals(["shall", "shall_not"]).pipe(
 )
 export type EarsClausePolarity = typeof EarsClausePolarity.Type
 
+export const EARS_CLAUSE_OUTCOME_KINDS = ["succeed", "fail", "transition"] as const
+export const EarsClauseOutcomeKind = Schema.Literals(EARS_CLAUSE_OUTCOME_KINDS)
+export type EarsClauseOutcomeKind = typeof EarsClauseOutcomeKind.Type
+
 export const EARS_GUARD_PAIR_RELATIONS = [
   "equivalent",
   "first_subsumes_second",
@@ -50,10 +54,9 @@ export const EARS_GUARD_PAIR_RELATIONS = [
   "independent_overlapping",
 ] as const
 
-export const EarsGuardPairRelation = Schema.Literals(EARS_GUARD_PAIR_RELATIONS).pipe(
-  Schema.brand("EarsGuardPairRelation"),
-)
+export const EarsGuardPairRelation = Schema.Literals(EARS_GUARD_PAIR_RELATIONS)
 export type EarsGuardPairRelation = typeof EarsGuardPairRelation.Type
+
 
 export const EarsConsistencyRuleId = Schema.Literals(["EARS-01", "EARS-02", "EARS-03"]).pipe(
   Schema.brand("EarsConsistencyRuleId"),
@@ -132,15 +135,15 @@ const normalizeGuardText = (raw: string | undefined): string =>
   (raw ?? "").trim().toLowerCase().replace(/\s+/g, " ")
 
 const invertGuardRelation = (rel: EarsGuardPairRelation): EarsGuardPairRelation =>
-  match(rel as (typeof EARS_GUARD_PAIR_RELATIONS)[number])
-    .with("equivalent", () => EarsGuardPairRelation.make("equivalent"))
-    .with("first_subsumes_second", () => EarsGuardPairRelation.make("second_subsumes_first"))
-    .with("second_subsumes_first", () => EarsGuardPairRelation.make("first_subsumes_second"))
-    .with("mutually_exclusive", () => EarsGuardPairRelation.make("mutually_exclusive"))
-    .with("independent_overlapping", () => EarsGuardPairRelation.make("independent_overlapping"))
+  match(rel)
+    .with("equivalent", () => "equivalent" as const)
+    .with("first_subsumes_second", () => "second_subsumes_first" as const)
+    .with("second_subsumes_first", () => "first_subsumes_second" as const)
+    .with("mutually_exclusive", () => "mutually_exclusive" as const)
+    .with("independent_overlapping", () => "independent_overlapping" as const)
     .exhaustive()
 
-const resolveGuardPairRelation = (
+export const resolveGuardPairRelation = (
   first: EarsSemanticClause,
   second: EarsSemanticClause,
   priors: ReadonlyArray<EarsGuardPairPrior>,
@@ -163,41 +166,41 @@ const resolveGuardPairRelation = (
   const secondUnrestricted = secondGuardVar === undefined && secondGuardStr.length === 0
 
   if (firstUnrestricted && secondUnrestricted) {
-    return EarsGuardPairRelation.make("equivalent")
+    return "equivalent"
   }
   if (firstUnrestricted && !secondUnrestricted) {
-    return EarsGuardPairRelation.make("first_subsumes_second")
+    return "first_subsumes_second"
   }
   if (!firstUnrestricted && secondUnrestricted) {
-    return EarsGuardPairRelation.make("second_subsumes_first")
+    return "second_subsumes_first"
   }
 
   if (firstGuardVar !== undefined && secondGuardVar !== undefined) {
-    return firstGuardVar === secondGuardVar
-      ? EarsGuardPairRelation.make("equivalent")
-      : EarsGuardPairRelation.make("mutually_exclusive")
+    return firstGuardVar === secondGuardVar ? "equivalent" : "mutually_exclusive"
   }
 
   if (firstGuardStr.length > 0 && secondGuardStr.length > 0) {
     if (firstGuardStr === secondGuardStr) {
-      return EarsGuardPairRelation.make("equivalent")
+      return "equivalent"
     }
     if (
       secondGuardStr.includes(firstGuardStr) &&
       (secondGuardStr.includes(" and ") || secondGuardStr.includes(" && "))
     ) {
-      return EarsGuardPairRelation.make("first_subsumes_second")
+      return "first_subsumes_second"
     }
     if (
       firstGuardStr.includes(secondGuardStr) &&
       (firstGuardStr.includes(" and ") || firstGuardStr.includes(" && "))
     ) {
-      return EarsGuardPairRelation.make("second_subsumes_first")
+      return "second_subsumes_first"
     }
   }
 
-  return EarsGuardPairRelation.make("mutually_exclusive")
+  return "independent_overlapping"
 }
+
+export const resolvePairwiseRelation = resolveGuardPairRelation
 
 const doStatesOverlap = (first: EarsSemanticClause, second: EarsSemanticClause): boolean =>
   first.activeStateVariant === undefined ||
@@ -292,13 +295,31 @@ export const evaluateEarsConsistencyReport = (
   }
 
   // EARS-03: State-space completeness over stateDomainVariants
+  const requireExhaustive = input.requireExhaustiveStateCoverage ?? true
+  if (requireExhaustive && (clauses.length === 0 || input.stateDomainVariants.length === 0)) {
+    violations.push({
+      ruleId: EarsConsistencyRuleId.make("EARS-03"),
+      kind: EarsConsistencyViolationKind.make("ears-incomplete-state-coverage"),
+      specId: input.specId,
+      filePath: input.filePath,
+      clauseIds: [],
+      effectSymbol: EarsEffectSymbolName.make(input.specId),
+      message: EarsConsistencyMessage.make(
+        "[EARS-03] EARS specification has empty clauses or undeclared stateDomainVariants under exhaustive coverage",
+      ),
+      uncoveredStateVariants: [...input.stateDomainVariants],
+    })
+  }
+
   const hasStateDrivenClause = clauses.some(
     (c) => c.pattern === "State-driven" || c.activeStateVariant !== undefined,
   )
   const shouldCheckStateCoverage =
     input.stateDomainVariants.length > 0 &&
+    clauses.length > 0 &&
     (input.requireExhaustiveStateCoverage === true ||
       (input.requireExhaustiveStateCoverage !== false && hasStateDrivenClause))
+
 
   if (shouldCheckStateCoverage) {
     const clausesBySymbol = new Map<EarsEffectSymbolName, Array<EarsSemanticClause>>()
@@ -308,56 +329,41 @@ export const evaluateEarsConsistencyReport = (
       clausesBySymbol.set(c.effectSymbol, list)
     }
 
-    if (clausesBySymbol.size === 0) {
-      violations.push({
-        ruleId: EarsConsistencyRuleId.make("EARS-03"),
-        kind: EarsConsistencyViolationKind.make("ears-incomplete-state-coverage"),
-        specId: input.specId,
-        filePath: input.filePath,
-        clauseIds: [],
-        effectSymbol: EarsEffectSymbolName.make(input.specId),
-        message: EarsConsistencyMessage.make(
-          `[EARS-03] Spec '${input.specId}' leaves state variants uncovered: ${input.stateDomainVariants.join(", ")}.`,
-        ),
-        uncoveredStateVariants: [...input.stateDomainVariants],
-      })
-    } else {
-      for (const [symbol, symbolClauses] of clausesBySymbol.entries()) {
-        const symbolUsesState =
-          input.requireExhaustiveStateCoverage === true ||
-          symbolClauses.some(
-            (c) => c.pattern === "State-driven" || c.activeStateVariant !== undefined,
-          )
-        if (!symbolUsesState) {
-          continue
-        }
-        const hasUnrestrictedStateClause = symbolClauses.some(
-          (c) => c.activeStateVariant === undefined && c.pattern === "Ubiquitous",
+    for (const [symbol, symbolClauses] of clausesBySymbol.entries()) {
+      const symbolUsesState =
+        input.requireExhaustiveStateCoverage === true ||
+        symbolClauses.some(
+          (c) => c.pattern === "State-driven" || c.activeStateVariant !== undefined,
         )
-        if (hasUnrestrictedStateClause) {
-          continue
+      if (!symbolUsesState) {
+        continue
+      }
+      const hasUnrestrictedStateClause = symbolClauses.some(
+        (c) => c.activeStateVariant === undefined && c.pattern === "Ubiquitous",
+      )
+      if (hasUnrestrictedStateClause) {
+        continue
+      }
+      const coveredStates = new Set<string>()
+      for (const c of symbolClauses) {
+        if (c.activeStateVariant !== undefined) {
+          coveredStates.add(c.activeStateVariant)
         }
-        const coveredStates = new Set<string>()
-        for (const c of symbolClauses) {
-          if (c.activeStateVariant !== undefined) {
-            coveredStates.add(c.activeStateVariant)
-          }
-        }
-        const uncovered = input.stateDomainVariants.filter((s) => !coveredStates.has(s))
-        if (uncovered.length > 0) {
-          violations.push({
-            ruleId: EarsConsistencyRuleId.make("EARS-03"),
-            kind: EarsConsistencyViolationKind.make("ears-incomplete-state-coverage"),
-            specId: input.specId,
-            filePath: input.filePath,
-            clauseIds: symbolClauses.map((c) => c.clauseId),
-            effectSymbol: symbol,
-            message: EarsConsistencyMessage.make(
-              `[EARS-03] Incomplete state coverage for '${symbol}' in '${input.specId}': missing state variants [${uncovered.join(", ")}].`,
-            ),
-            uncoveredStateVariants: uncovered,
-          })
-        }
+      }
+      const uncovered = input.stateDomainVariants.filter((s) => !coveredStates.has(s))
+      if (uncovered.length > 0) {
+        violations.push({
+          ruleId: EarsConsistencyRuleId.make("EARS-03"),
+          kind: EarsConsistencyViolationKind.make("ears-incomplete-state-coverage"),
+          specId: input.specId,
+          filePath: input.filePath,
+          clauseIds: symbolClauses.map((c) => c.clauseId),
+          effectSymbol: symbol,
+          message: EarsConsistencyMessage.make(
+            `[EARS-03] Incomplete state coverage for '${symbol}' in '${input.specId}': missing state variants [${uncovered.join(", ")}].`,
+          ),
+          uncoveredStateVariants: uncovered,
+        })
       }
     }
   }

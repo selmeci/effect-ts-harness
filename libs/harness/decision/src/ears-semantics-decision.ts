@@ -7,7 +7,7 @@ import {
 import { Effect, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
-import { match } from "ts-pattern"
+import { match, P } from "ts-pattern"
 import { type DeterministicFallbackReason, PriorSource } from "./hole-prior-decision.js"
 import { assertDecisionLimits } from "./idiom-router.js"
 
@@ -136,6 +136,78 @@ const parseGuardPairRelation = (raw: unknown): Option.Option<EarsGuardPairRelati
     )
     .otherwise(() => Option.none())
 
+const isNegatedGuardPair = (a: string, b: string): boolean => {
+  const normA = a.replace(/^(while\s+\w+\s+)?if\s+/i, "").trim()
+  const normB = b.replace(/^(while\s+\w+\s+)?if\s+/i, "").trim()
+
+  if (
+    normB === `not ${normA}` ||
+    normA === `not ${normB}` ||
+    normB === `!${normA}` ||
+    normA === `!${normB}` ||
+    normB === `! ${normA}` ||
+    normA === `! ${normB}` ||
+    normB === `non-${normA}` ||
+    normA === `non-${normB}` ||
+    normB === `no ${normA}` ||
+    normA === `no ${normB}`
+  ) {
+    return true
+  }
+
+  if (
+    normB.includes(`not ${normA}`) ||
+    normA.includes(`not ${normB}`) ||
+    normB.includes(`!${normA}`) ||
+    normA.includes(`!${normB}`)
+  ) {
+    return true
+  }
+
+  const strippedA = normA.replace(/\bnot\s+/g, "").replace(/!\s*/g, "").trim()
+  const strippedB = normB.replace(/\bnot\s+/g, "").replace(/!\s*/g, "").trim()
+  const hasNegationA = /\b(not|never|no|false)\b/i.test(normA) || normA.includes("!")
+  const hasNegationB = /\b(not|never|no|false)\b/i.test(normB) || normB.includes("!")
+
+  if (strippedA === strippedB && hasNegationA !== hasNegationB) {
+    return true
+  }
+
+  if (
+    (normA.includes("valid") && (normB.includes("invalid") || normB.includes("not valid"))) ||
+    (normB.includes("valid") && (normA.includes("invalid") || normA.includes("not valid"))) ||
+    (normA.includes("empty") && (normB.includes("non-empty") || normB.includes("not empty"))) ||
+    (normB.includes("empty") && (normA.includes("non-empty") || normA.includes("not empty")))
+  ) {
+    return true
+  }
+
+  return false
+}
+
+export const computeGuardRelationFallback = (
+  firstLower: string,
+  secondLower: string,
+): EarsGuardPairRelation =>
+  match([firstLower, secondLower] as const)
+    .with(
+      P.when(([a, b]) => a === b && a.length > 0),
+      () => EarsGuardPairRelation.make("equivalent"),
+    )
+    .with(
+      P.when(([a, b]) => isNegatedGuardPair(a, b)),
+      () => EarsGuardPairRelation.make("mutually_exclusive"),
+    )
+    .with(
+      P.when(([a, b]) => b.includes(a) && a.length > 0),
+      () => EarsGuardPairRelation.make("first_subsumes_second"),
+    )
+    .with(
+      P.when(([a, b]) => a.includes(b) && b.length > 0),
+      () => EarsGuardPairRelation.make("second_subsumes_first"),
+    )
+    .otherwise(() => EarsGuardPairRelation.make("independent_overlapping"))
+
 const computeDeterministicEarsFallback = (
   input: EarsClauseSemanticsInput,
   reason: DeterministicFallbackReason = "timeout-or-unavailable",
@@ -153,21 +225,14 @@ const computeDeterministicEarsFallback = (
     input.guardVariants[0] ??
     EarsVariantTag.make("None")
 
-  let relation: EarsGuardPairRelation = EarsGuardPairRelation.make("mutually_exclusive")
-  if (firstLower === secondLower) {
-    relation = EarsGuardPairRelation.make("equivalent")
-  } else if (secondLower.includes(firstLower) && firstLower.length > 0) {
-    relation = EarsGuardPairRelation.make("first_subsumes_second")
-  } else if (firstLower.includes(secondLower) && secondLower.length > 0) {
-    relation = EarsGuardPairRelation.make("second_subsumes_first")
-  }
+  const guardPairRelation = computeGuardRelationFallback(firstLower, secondLower)
 
   return {
     firstClauseId: input.firstClauseId,
     secondClauseId: input.secondClauseId,
     activeStateVariant: matchedState,
     activeGuardVariant: matchedGuard,
-    guardPairRelation: relation,
+    guardPairRelation,
     source: { _tag: "DeterministicFallback", reason },
   }
 }
@@ -196,7 +261,13 @@ export const evaluateEarsClauseSemantics = Effect.fn("EarsClauseSemantics.evalua
 
   return yield* match(outcome)
     .with({ _tag: "None" }, () =>
-      Effect.succeed(computeDeterministicEarsFallback(input, "timeout-or-unavailable")),
+      Effect.gen(function* () {
+        yield* Effect.annotateCurrentSpan({ "decision.usedFallback": true })
+        yield* Effect.logWarning(
+          `DecisionModel offline or timed out; using deterministic fallback for EARS clauses '${input.firstClauseId}' and '${input.secondClauseId}'`,
+        )
+        return computeDeterministicEarsFallback(input, "timeout-or-unavailable")
+      }),
     )
     .with({ _tag: "Some" }, ({ value }) =>
       Effect.gen(function* () {
@@ -227,6 +298,7 @@ export const evaluateEarsClauseSemantics = Effect.fn("EarsClauseSemantics.evalua
                 "decision.activeStateVariant": activeStateVariant,
                 "decision.activeGuardVariant": activeGuardVariant,
                 "decision.guardPairRelation": guardPairRelation,
+                "decision.usedFallback": false,
               })
               return {
                 firstClauseId: input.firstClauseId,
@@ -239,7 +311,13 @@ export const evaluateEarsClauseSemantics = Effect.fn("EarsClauseSemantics.evalua
             }),
           )
           .otherwise(() =>
-            Effect.succeed(computeDeterministicEarsFallback(input, "invalid-output")),
+            Effect.gen(function* () {
+              yield* Effect.annotateCurrentSpan({ "decision.usedFallback": true })
+              yield* Effect.logWarning(
+                `DecisionModel produced invalid output; using deterministic fallback for EARS clauses '${input.firstClauseId}' and '${input.secondClauseId}'`,
+              )
+              return computeDeterministicEarsFallback(input, "invalid-output")
+            }),
           )
       }),
     )

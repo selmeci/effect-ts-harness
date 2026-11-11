@@ -1,6 +1,6 @@
 import { Context, Duration, Effect, Fiber, Layer, Ref, Schedule, Schema } from "effect"
 import { TestClock } from "effect/testing"
-import { match } from "ts-pattern"
+import { match, P } from "ts-pattern"
 
 export const DstSeed = Schema.Int.pipe(
   Schema.check(Schema.isGreaterThanOrEqualTo(0)),
@@ -56,10 +56,16 @@ export const DstHazardRiskLevel = Schema.Literals(DST_HAZARD_RISK_LEVELS).pipe(
 )
 export type DstHazardRiskLevel = typeof DstHazardRiskLevel.Type
 
-export const DstExecutionTier = Schema.Literals(["fast", "full"]).pipe(
+export const DstExecutionTier = Schema.Literals(["fast", "full", "fast_local", "ci_full"]).pipe(
   Schema.brand("DstExecutionTier"),
 )
 export type DstExecutionTier = typeof DstExecutionTier.Type
+
+export const resolveDstSeedCount = (tier: DstExecutionTier): number =>
+  match(tier as "fast" | "full" | "fast_local" | "ci_full")
+    .with("fast_local", "fast", () => 10)
+    .with("ci_full", "full", () => 100)
+    .exhaustive()
 
 export const FAST_DST_SEED_COUNT = DstStepCount.make(10)
 export const FULL_DST_SEED_COUNT = DstStepCount.make(100)
@@ -136,9 +142,13 @@ export const DstSchedule = Schema.Struct({
 })
 export type DstSchedule = typeof DstSchedule.Type
 
+export const DstScheduleReason = Schema.NonEmptyString.pipe(Schema.brand("DstScheduleReason"))
+export type DstScheduleReason = typeof DstScheduleReason.Type
+
 export class DstScheduleError extends Schema.TaggedError<DstScheduleError>()("DstScheduleError", {
   seed: DstSeed,
-  message: DstMessage,
+  message: Schema.optional(DstMessage),
+  reason: Schema.optional(DstScheduleReason),
 }) {}
 
 export const DstSimulationOptions = Schema.Struct({
@@ -217,6 +227,18 @@ export const decideDstSchedule = Effect.fn("DstEngine.decide")(function* (
       ),
     })
   }
+  if (
+    config.baseFailureProbMillis < 0 ||
+    config.baseInterruptProbMillis < 0 ||
+    config.baseDelayProbMillis < 0 ||
+    config.baseFailureProbMillis + config.baseInterruptProbMillis + config.baseDelayProbMillis > 1000
+  ) {
+    return yield* new DstScheduleError({
+      seed: config.seed,
+      reason: DstScheduleReason.make("Probability millis sum exceeds 1000 or is negative"),
+      message: DstMessage.make("Probability millis sum exceeds 1000 or is negative"),
+    })
+  }
 
   const prng = makeXorShift64Star(config.seed)
   const steps: Array<DstFaultStep> = []
@@ -230,28 +252,46 @@ export const decideDstSchedule = Effect.fn("DstEngine.decide")(function* (
       config.maxDelayTicksMs > 0 ? prng.nextInt(config.maxDelayTicksMs + 1) : 0
     const delayMs = DstTickMillis.make(rawDelay)
 
-    let decision: DstFaultDecision
-    if (roll < effectiveFailProb && target.declaredErrors.length > 0) {
-      const errIdx = prng.nextInt(target.declaredErrors.length)
-      const errorTag = target.declaredErrors[errIdx]!
-      decision = DstFailWithError.make({
-        delayMs,
-        errorTag,
+    const failCutoff = target.declaredErrors.length > 0 ? effectiveFailProb : 0
+    const interruptCutoff = failCutoff + config.baseInterruptProbMillis
+    const delayCutoff = interruptCutoff + config.baseDelayProbMillis
+
+    const actionTag = match(roll)
+      .with(
+        P.when((r) => r < failCutoff),
+        () => "fail" as const,
+      )
+      .with(
+        P.when((r) => r < interruptCutoff),
+        () => "interrupt" as const,
+      )
+      .with(
+        P.when((r) => r < delayCutoff),
+        () => "delay" as const,
+      )
+      .otherwise(() => "none" as const)
+
+    const decision: DstFaultDecision = match(actionTag)
+      .with("fail", () => {
+        const errIdx = prng.nextInt(target.declaredErrors.length)
+        const errorTag = target.declaredErrors[errIdx]!
+        return DstFailWithError.make({
+          delayMs,
+          errorTag,
+        })
       })
-    } else if (roll < effectiveFailProb + config.baseInterruptProbMillis) {
-      decision = DstInterruptFiber.make({ delayMs })
-    } else if (
-      roll <
-      effectiveFailProb + config.baseInterruptProbMillis + config.baseDelayProbMillis
-    ) {
-      decision = DstSucceedAfterDelay.make({
-        delayMs: DstTickMillis.make(Math.max(1, rawDelay)),
-      })
-    } else {
-      decision = DstYieldThenContinue.make({
-        delayMs: DstTickMillis.make(0),
-      })
-    }
+      .with("interrupt", () => DstInterruptFiber.make({ delayMs }))
+      .with("delay", () =>
+        DstSucceedAfterDelay.make({
+          delayMs: DstTickMillis.make(Math.max(1, rawDelay)),
+        }),
+      )
+      .with("none", () =>
+        DstYieldThenContinue.make({
+          delayMs: DstTickMillis.make(0),
+        }),
+      )
+      .exhaustive()
 
     steps.push({
       stepIndex: DstStepIndex.make(i),
@@ -271,6 +311,57 @@ export const DstEngine = {
   decide: decideDstSchedule,
 } as const
 
+export class DstStepFailureError extends Schema.TaggedError<DstStepFailureError>()(
+  "DstStepFailureError",
+  {
+    serviceTag: DstServiceTag,
+    methodName: DstMethodName,
+    errorTag: DstErrorTag,
+    stepIndex: Schema.optional(DstStepIndex),
+  },
+) {}
+
+export const DstInjectedFaultError = DstStepFailureError
+export type DstInjectedFaultError = DstStepFailureError
+
+export const applyChaosDecision = (
+  decision: DstFaultDecision,
+  context: {
+    readonly serviceTag: DstServiceTag
+    readonly methodName: DstMethodName
+    readonly stepIndex?: DstStepIndex | undefined
+  },
+  tickMs?: DstTickMillis,
+): Effect.Effect<void, DstStepFailureError> =>
+  match(decision)
+    .with({ _tag: "YieldThenContinue" }, (d) =>
+      d.delayMs > 0 ? Effect.sleep(Duration.millis(d.delayMs)) : Effect.void,
+    )
+    .with({ _tag: "SucceedAfterDelay" }, (d) => {
+      const ms = d.delayMs > 0 ? d.delayMs : (tickMs ?? 10)
+      return Effect.sleep(Duration.millis(ms))
+    })
+    .with({ _tag: "FailWithError" }, (d) =>
+      (d.delayMs > 0 ? Effect.sleep(Duration.millis(d.delayMs)) : Effect.void).pipe(
+        Effect.andThen(
+          Effect.fail(
+            new DstStepFailureError({
+              serviceTag: context.serviceTag,
+              methodName: context.methodName,
+              errorTag: d.errorTag,
+              stepIndex: context.stepIndex,
+            }),
+          ),
+        ),
+      ),
+    )
+    .with({ _tag: "InterruptFiber" }, (d) =>
+      (d.delayMs > 0 ? Effect.sleep(Duration.millis(d.delayMs)) : Effect.void).pipe(
+        Effect.andThen(Effect.interrupt),
+      ),
+    )
+    .exhaustive()
+
 export interface ChaosFaultControllerShape {
   readonly seed: DstSeed
   readonly schedule: DstSchedule
@@ -278,6 +369,11 @@ export interface ChaosFaultControllerShape {
     serviceTag: DstServiceTag,
     methodName: DstMethodName,
   ) => Effect.Effect<DstFaultDecision>
+  readonly executeStepFor: (
+    serviceTag: DstServiceTag,
+    methodName: DstMethodName,
+    tickMs?: DstTickMillis,
+  ) => Effect.Effect<void, DstStepFailureError>
 }
 
 export class ChaosFaultController extends Context.Service<
@@ -291,25 +387,29 @@ export const makeChaosLayer = (
   Layer.effect(
     ChaosFaultController,
     Effect.gen(function* () {
-      const cursorRef = yield* Ref.make(0)
+      const consumedRef = yield* Ref.make<ReadonlySet<number>>(new Set<number>())
       return {
         seed: schedule.seed,
         schedule,
         nextStepFor: (serviceTag, methodName) =>
           Effect.gen(function* () {
-            const decision = yield* Ref.modify(cursorRef, (cursor) => {
+            const decision = yield* Ref.modify(consumedRef, (consumed) => {
               const matchIdx = schedule.steps.findIndex(
                 (s, idx) =>
-                  idx >= cursor && s.serviceTag === serviceTag && s.methodName === methodName,
+                  !consumed.has(idx) &&
+                  s.serviceTag === serviceTag &&
+                  s.methodName === methodName,
               )
               if (matchIdx !== -1) {
-                return [schedule.steps[matchIdx]!.decision, matchIdx + 1] as const
+                const nextConsumed = new Set(consumed)
+                nextConsumed.add(matchIdx)
+                return [schedule.steps[matchIdx]!.decision, nextConsumed] as const
               }
               return [
                 DstYieldThenContinue.make({
                   delayMs: DstTickMillis.make(0),
                 }),
-                cursor + 1,
+                consumed,
               ] as const
             })
 
@@ -320,6 +420,54 @@ export const makeChaosLayer = (
 
             yield* waitEffect
             return decision
+          }),
+        executeStepFor: (serviceTag, methodName, tickMs) =>
+          Effect.gen(function* () {
+            const stepResult = yield* Ref.modify(
+              consumedRef,
+              (
+                consumed,
+              ): readonly [
+                {
+                  readonly decision: DstFaultDecision
+                  readonly stepIndex?: DstStepIndex | undefined
+                },
+                ReadonlySet<number>,
+              ] => {
+                const matchIdx = schedule.steps.findIndex(
+                  (s, idx) =>
+                    !consumed.has(idx) &&
+                    s.serviceTag === serviceTag &&
+                    s.methodName === methodName,
+                )
+                if (matchIdx !== -1) {
+                  const nextConsumed = new Set(consumed)
+                  nextConsumed.add(matchIdx)
+                  return [
+                    {
+                      decision: schedule.steps[matchIdx]!.decision,
+                      stepIndex: schedule.steps[matchIdx]!.stepIndex,
+                    },
+                    nextConsumed,
+                  ] as const
+                }
+                return [
+                  {
+                    decision: DstYieldThenContinue.make({
+                      delayMs: DstTickMillis.make(0),
+                    }),
+                    stepIndex: undefined,
+                  },
+                  consumed,
+                ] as const
+              },
+            )
+
+            yield* applyChaosDecision(
+              stepResult.decision,
+              { serviceTag, methodName, stepIndex: stepResult.stepIndex },
+              tickMs,
+            )
           }),
       }
     }),
@@ -334,8 +482,15 @@ export const makeChaosLayer = (
 export const runWithDecoupledClockDriver = <A, E, R>(
   program: Effect.Effect<A, E, R>,
   options: DstSimulationOptions,
-): Effect.Effect<A, E, R> =>
+): Effect.Effect<A, E | DstScheduleError, R> =>
   Effect.gen(function* () {
+    if (options.tickMs < 1 || options.maxTicks < 1) {
+      return yield* new DstScheduleError({
+        seed: options.seed ?? DstSeed.make(0),
+        reason: DstScheduleReason.make("tickMs and maxTicks must be >= 1"),
+        message: DstMessage.make("tickMs and maxTicks must be >= 1"),
+      })
+    }
     yield* Effect.annotateCurrentSpan({
       "dst.seed": options.seed,
       "dst.reproduce": `DST_SEED=${options.seed}`,
@@ -354,6 +509,10 @@ export const runWithDecoupledClockDriver = <A, E, R>(
     const outcome = yield* Effect.raceFirst(
       Fiber.await(mainFiber).pipe(Effect.map((exit) => ({ _tag: "Program" as const, exit }))),
       Fiber.await(clockDriver).pipe(Effect.as({ _tag: "ClockExhausted" as const })),
+    ).pipe(
+      Effect.ensuring(
+        Fiber.interrupt(clockDriver).pipe(Effect.andThen(Fiber.interrupt(mainFiber))),
+      ),
     )
 
     return yield* match(outcome)
@@ -406,7 +565,66 @@ export const resolveDstSeedsForTier = (
     return [DstSeed.make(Number(rawSeed.trim()))]
   }
   const effectiveTier =
-    tier ?? DstExecutionTier.make(process.env.CI === "true" ? "full" : "fast")
-  const count = effectiveTier === "full" ? FULL_DST_SEED_COUNT : FAST_DST_SEED_COUNT
+    tier ?? DstExecutionTier.make(process.env.CI === "true" ? "ci_full" : "fast_local")
+  const count = resolveDstSeedCount(effectiveTier)
   return Array.from({ length: count }, (_, idx) => DstSeed.make(idx))
 }
+
+export interface DstSeedSuiteOptions {
+  readonly tier?: DstExecutionTier | undefined
+  readonly pinnedSeed?: DstSeed | undefined
+  readonly config?: Omit<DstEngineConfig, "seed"> | undefined
+  readonly configTemplate?: Omit<DstEngineConfig, "seed"> | undefined
+  readonly targets?: ReadonlyArray<DstTargetServiceMethod> | undefined
+  readonly stepCount?: DstStepCount | undefined
+  readonly baseFailureProbMillis?: DstProbabilityMillis | undefined
+  readonly baseDelayProbMillis?: DstProbabilityMillis | undefined
+  readonly baseInterruptProbMillis?: DstProbabilityMillis | undefined
+  readonly maxDelayTicksMs?: DstTickMillis | undefined
+  readonly hazardPriors?: Record<string, DstProbabilityMillis> | undefined
+}
+
+export const runDstSeedSuite = Effect.fn("DstEngine.runSuite")(function* (
+  options: DstSeedSuiteOptions,
+): Effect.fn.Return<
+  {
+    readonly seedsRun: number
+    readonly initialSeed: DstSeed
+    readonly schedules: ReadonlyArray<DstSchedule>
+  },
+  DstScheduleError,
+  never
+> {
+  const tier =
+    options.tier ??
+    DstExecutionTier.make(process.env.CI === "true" ? "ci_full" : "fast_local")
+  const count = options.pinnedSeed !== undefined ? 1 : resolveDstSeedCount(tier)
+  const initialSeed = options.pinnedSeed ?? DstSeed.make(0)
+  const baseConfig: Omit<DstEngineConfig, "seed"> =
+    options.config ??
+    options.configTemplate ?? {
+      stepCount: options.stepCount ?? DstStepCount.make(16),
+      targets: options.targets ?? [],
+      baseFailureProbMillis: options.baseFailureProbMillis ?? DstProbabilityMillis.make(100),
+      baseDelayProbMillis: options.baseDelayProbMillis ?? DstProbabilityMillis.make(100),
+      baseInterruptProbMillis: options.baseInterruptProbMillis ?? DstProbabilityMillis.make(50),
+      maxDelayTicksMs: options.maxDelayTicksMs ?? DstTickMillis.make(10),
+      ...(options.hazardPriors !== undefined ? { hazardPriors: options.hazardPriors } : {}),
+    }
+
+  const schedules: Array<DstSchedule> = []
+  for (let i = 0; i < count; i++) {
+    const seed = options.pinnedSeed !== undefined ? options.pinnedSeed : DstSeed.make(i)
+    const schedule = yield* decideDstSchedule({
+      ...baseConfig,
+      seed,
+    })
+    schedules.push(schedule)
+  }
+
+  return {
+    seedsRun: count,
+    initialSeed,
+    schedules,
+  }
+})

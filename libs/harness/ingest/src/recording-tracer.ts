@@ -3,7 +3,8 @@ import { match } from "ts-pattern"
 import type { IndexedEffectFn } from "./fn-index.js"
 import type { ExercisesSpanEdge, TracedCallEdge } from "./trace-format.js"
 
-export type SpanExitTag = "Success" | "Failure" | "Defect"
+export type RecordedExitTag = "Success" | "Failure" | "Defect" | "Interrupt"
+export type SpanExitTag = RecordedExitTag
 
 export interface RecordedSpanEvent {
   readonly traceId: string
@@ -47,6 +48,42 @@ export const extractRuntimeTag = (val: unknown): string | null => {
   }
   return typeof val
 }
+
+export const extractExitMetadata = <A, E>(
+  exit: Exit.Exit<A, E>,
+): {
+  readonly exitTag: RecordedExitTag
+  readonly errorTag: string | null | undefined
+  readonly valueTag: string | null | undefined
+} =>
+  match(exit)
+    .with({ _tag: "Success" }, ({ value }) => ({
+      exitTag: "Success" as const,
+      errorTag: null,
+      valueTag: extractRuntimeTag(value),
+    }))
+    .with({ _tag: "Failure" }, ({ cause }) => {
+      if (Cause.hasInterruptsOnly(cause)) {
+        return {
+          exitTag: "Interrupt" as const,
+          errorTag: "FiberInterrupt",
+          valueTag: undefined,
+        }
+      }
+      return Option.match(findRecoverableError(cause), {
+        onSome: (err) => ({
+          exitTag: "Failure" as const,
+          errorTag: extractRuntimeTag(err) ?? "UnknownError",
+          valueTag: null,
+        }),
+        onNone: () => ({
+          exitTag: "Defect" as const,
+          errorTag: null,
+          valueTag: null,
+        }),
+      })
+    })
+    .exhaustive()
 
 export interface SpanRecorderShape {
   readonly spans: ReadonlyArray<RecordedSpanEvent>
@@ -146,27 +183,10 @@ export const makeRecordingTracer = (recorder: SpanRecorderShape): Tracer.Tracer 
             ? Number(endTime - span.status.startTime) / 1_000_000
             : undefined
         endTimeMs = typeof endTime === "bigint" ? Number(endTime) / 1_000_000 : undefined
-        Exit.match(exit, {
-          onSuccess: (val) => {
-            exitTag = "Success"
-            errorTag = null
-            valueTag = extractRuntimeTag(val)
-          },
-          onFailure: (cause) => {
-            Option.match(findRecoverableError(cause), {
-              onSome: (err) => {
-                exitTag = "Failure"
-                errorTag = extractRuntimeTag(err) ?? "UnknownError"
-                valueTag = null
-              },
-              onNone: () => {
-                exitTag = "Defect"
-                errorTag = null
-                valueTag = null
-              },
-            })
-          },
-        })
+        const meta = extractExitMetadata(exit)
+        exitTag = meta.exitTag
+        errorTag = meta.errorTag
+        valueTag = meta.valueTag
         origEnd(endTime, exit)
         syncRecord()
       }
@@ -244,6 +264,9 @@ export const computeSpanSaturation = (
         })
         .with("Defect", () => {
           selfEntry.defectCount += 1
+        })
+        .with("Interrupt", () => {
+          // Interrupts do not increment failureCount or defectCount
         })
         .exhaustive()
     }

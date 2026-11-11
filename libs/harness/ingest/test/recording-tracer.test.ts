@@ -1,9 +1,10 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Schema } from "effect"
+import { Cause, Effect, Exit, Schema } from "effect"
 import { indexEffectFnsInFile } from "../src/fn-index.js"
 import {
   SpanRecorder,
   computeSpanSaturation,
+  extractExitMetadata,
   runWithTestTracer,
   toTraceEdges,
   withRecordedTestSpan,
@@ -323,4 +324,12 @@ describe("recording tracer with synthetic root TestSpan", () => {
         expect(parentSat?.observedValueTags).toContain("RecoveredVariant")
       }),
   )
+
+  it("extractExitMetadata returns exitTag: Interrupt and FiberInterrupt for interrupt-only exits", () => {
+    const interruptExit = Exit.failCause(Cause.interrupt())
+    const meta = extractExitMetadata(interruptExit)
+    expect(meta.exitTag).toBe("Interrupt")
+    expect(meta.errorTag).toBe("FiberInterrupt")
+    expect(meta.valueTag).toBeUndefined()
+  })
 })

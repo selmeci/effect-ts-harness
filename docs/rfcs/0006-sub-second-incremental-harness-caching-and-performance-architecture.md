@@ -1,9 +1,9 @@
 ---
 rfc: RFC-0006
 title: Sub-Second Incremental Harness, Content-Addressable AST/Decision Caching & Performance SLO Architecture
-status: draft
+status: implemented
 created: 2026-11-09
-updated: 2026-11-09
+updated: 2026-11-11
 authors:
   - "@Roman Selmeci"
 target_packages:
@@ -17,10 +17,9 @@ depends_on:
   - "RFC-0002"
   - "RFC-0003"
 target_adrs:
-  - "harness:ADR-0009"
+  - "harness:ADR-0011"
 target_specs:
-  - "harness:SPEC-0007"
-  - "harness:SPEC-0008"
+  - "harness:SPEC-0010"
 ---
 
 # RFC-0006: Sub-Second Incremental Harness, Content-Addressable AST/Decision Caching & Performance SLO Architecture

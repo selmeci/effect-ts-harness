@@ -15,6 +15,7 @@ enforced_by:
   - libs/harness/gates/src/span-budget.ts
   - libs/harness/gates/src/mutation-check.ts
   - libs/harness/gates/src/rule-synthesizer.ts
+  - libs/harness/gates/src/plan-search.ts
   - libs/harness/gates/src/friction-log.ts
   - libs/harness/ingest/src/recording-tracer.ts
   - libs/harness/decision/src/ears-semantics-decision.ts
@@ -22,6 +23,7 @@ enforced_by:
   - libs/harness/decision/src/mutant-equivalence-decision.ts
   - libs/harness/decision/src/rule-quality-decision.ts
   - libs/harness/decision/src/plan-search-decision.ts
+  - apps/harness-cli/src/index.ts
 spans:
   - EarsConsistency.decide
   - DstEngine.decide
@@ -96,7 +98,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 | ID      | Pattern      | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Effect Symbol                | Verification   |
 | :------ | :----------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------- | :------------- |
-| REQ-3.1 | State-driven | **While** evaluating `MutationEvaluationInput` records containing `MutantOutcome` results, `MutantEquivalenceV1` probability priors, and span saturation observations, the `MutationCheck.decide` decider **shall** exclude surviving mutants with equivalence probability $\ge 850$ millis from `survivedMutants`, credit `SAT-01` error-channel coverage across both each span $s_f$ and its descendant spans $s_f \prec_{\text{parent}}^+ s_c$, and execute with `R = never`. | `MutationCheck.decide`       | `PropertyTest` |
+| REQ-3.1 | State-driven | **While** evaluating `MutationEvaluationInput` records containing `MutantOutcome` results, `MutantEquivalenceV1` probability priors, and span saturation observations, the `MutationCheck.decide` decider **shall** exclude surviving mutants with equivalence probability $\ge 850$ millis from `survivedMutants` (tracking `equivalentCount` separately, while mutants with priors $< 850$ millis or fallback `0` millis remain in `survivedMutants` and fail the gate), require zero surviving mutants (`survivedCount === 0`) for `passed: true`, credit `SAT-01` error-channel coverage across both each span $s_f$ and its descendant spans $s_f \prec_{\text{parent}}^+ s_c$, and execute with `R = never`. | `MutationCheck.decide`       | `PropertyTest` |
 | REQ-3.2 | Event-driven | **When** `MutantEquivalence.evaluate` inspects a surviving `CodeMutant` snippet and its enclosing function AST summary, the `MutantEquivalence.evaluate` span **shall** estimate semantic equivalence probability via `MutantEquivalenceV1` and fall back deterministically to `0` millis (`non-equivalent`) when the `DecisionModel` is unavailable.                                                                                                                 | `MutantEquivalence.evaluate` | `UnitTest`     |
 
 ### 4 · Self-Evolving DPO Rule Synthesis (`RuleSynthesizer.decide`, `SynthesizedRuleQualityV1`) & `PlanSearch.decide` (`PlanSearchScorerV1`)

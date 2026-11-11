@@ -2,7 +2,7 @@ import type { DstHazardRiskLevel, EarsGuardPairRelation } from "@harness/gates"
 import { Effect, Layer } from "effect"
 import * as AiError from "effect/ai/AiError"
 import * as DecisionModel from "effect/ai/DecisionModel"
-import { match } from "ts-pattern"
+import { match, P } from "ts-pattern"
 import type { DpoCohesionLevel, DpoRepairStrategy } from "./dpo-ranker-decision.js"
 import type { HoleRelevanceLevel } from "./hole-prior-decision.js"
 import type { IdiomBlock } from "./idiom-router.js"
@@ -50,48 +50,22 @@ export const makeMockDecisionModelLayer = (
           for (const [key, decision] of Object.entries(options.decisions)) {
             answers[key] = match(decision)
               .with({ _tag: "Probability" }, (): DecisionModel.ProviderAnswer => {
-                let probability = 0.5
-                if (key === "implemented") {
-                  probability =
-                    overrides?.implementedProb !== undefined ? overrides.implementedProb : 0.9
-                } else if (key === "noOutOfScopeEdits") {
-                  probability =
-                    overrides?.noOutOfScopeProb !== undefined ? overrides.noOutOfScopeProb : 0.9
-                } else if (key === "fitsAny") {
-                  probability = overrides?.fitsAnyProb !== undefined ? overrides.fitsAnyProb : 0.9
-                } else if (key === "destructive") {
-                  probability =
-                    overrides?.destructiveProb !== undefined ? overrides.destructiveProb : 0.0
-                } else if (key === "secretAccess") {
-                  probability =
-                    overrides?.secretAccessProb !== undefined ? overrides.secretAccessProb : 0.0
-                } else if (key === "exfiltration") {
-                  probability =
-                    overrides?.exfiltrationProb !== undefined ? overrides.exfiltrationProb : 0.0
-                } else if (key === "actionable") {
-                  probability =
-                    overrides?.learnActionableProb !== undefined
-                      ? overrides.learnActionableProb
-                      : 0.9
-                } else if (key === "contradicts") {
-                  probability =
-                    overrides?.contradictsProb !== undefined ? overrides.contradictsProb : 0.1
-                } else if (key === "edgeConfidence" || key.startsWith("edgeConfidence_")) {
-                  probability =
-                    overrides?.edgeConfidenceProb !== undefined
-                      ? overrides.edgeConfidenceProb
-                      : 0.92
-                } else if (key === "isEquivalent") {
-                  probability =
-                    overrides?.mutantEquivalentProb !== undefined
-                      ? overrides.mutantEquivalentProb
-                      : 0.1
-                } else if (key === "isNonTautological") {
-                  probability =
-                    overrides?.ruleNonTautologicalProb !== undefined
-                      ? overrides.ruleNonTautologicalProb
-                      : 0.9
-                }
+                const probability = match(key)
+                  .with("implemented", () => overrides?.implementedProb ?? 0.9)
+                  .with("noOutOfScopeEdits", () => overrides?.noOutOfScopeProb ?? 0.9)
+                  .with("fitsAny", () => overrides?.fitsAnyProb ?? 0.9)
+                  .with("destructive", () => overrides?.destructiveProb ?? 0.0)
+                  .with("secretAccess", () => overrides?.secretAccessProb ?? 0.0)
+                  .with("exfiltration", () => overrides?.exfiltrationProb ?? 0.0)
+                  .with("actionable", () => overrides?.learnActionableProb ?? 0.9)
+                  .with("contradicts", () => overrides?.contradictsProb ?? 0.1)
+                  .with(
+                    P.when((k) => k === "edgeConfidence" || k.startsWith("edgeConfidence_")),
+                    () => overrides?.edgeConfidenceProb ?? 0.92,
+                  )
+                  .with("isEquivalent", () => overrides?.mutantEquivalentProb ?? 0.1)
+                  .with("isNonTautological", () => overrides?.ruleNonTautologicalProb ?? 0.9)
+                  .otherwise(() => 0.5)
                 return {
                   _tag: "Probability",
                   probability,
@@ -99,41 +73,43 @@ export const makeMockDecisionModelLayer = (
               })
               .with({ _tag: "Classify" }, (classifyDec): DecisionModel.ProviderAnswer => {
                 const labels = Object.keys(classifyDec.criteria)
-                let chosenLabel = labels[0] ?? ""
-                if (key === "block") {
-                  chosenLabel =
-                    overrides?.blockLabel ?? (labels.includes("effect") ? "effect" : chosenLabel)
-                } else if (key === "kind") {
-                  chosenLabel =
-                    overrides?.triageKind ??
-                    (labels.includes("semantic") ? "semantic" : chosenLabel)
-                } else if (key === "target") {
-                  chosenLabel =
-                    overrides?.learnTargetLabel ??
-                    (labels.includes("agent-pattern") ? "agent-pattern" : chosenLabel)
-                } else if (key === "conflictKind") {
-                  chosenLabel =
-                    overrides?.conflictKindLabel ?? (labels.includes("none") ? "none" : chosenLabel)
-                } else if (key === "repairStrategy" || key.startsWith("repairStrategy_")) {
-                  chosenLabel =
-                    overrides?.dpoStrategyLabel ??
-                    (labels.includes("propagate_in_E") ? "propagate_in_E" : chosenLabel)
-                } else if (key === "activeStateVariant") {
-                  chosenLabel =
-                    overrides?.earsStateVariantLabel ??
-                    (labels.includes("Active") ? "Active" : chosenLabel)
-                } else if (key === "activeGuardVariant") {
-                  chosenLabel =
-                    overrides?.earsGuardVariantLabel ??
-                    (labels.includes("Guarded") ? "Guarded" : chosenLabel)
-                } else if (key === "guardPairRelation") {
-                  chosenLabel =
-                    overrides?.earsGuardRelationLabel ??
-                    (labels.includes("mutually_exclusive") ? "mutually_exclusive" : chosenLabel)
-                }
-                if (!labels.includes(chosenLabel)) {
-                  chosenLabel = labels[0] ?? ""
-                }
+                const defaultLabel = labels[0] ?? ""
+                const rawChosen = match(key)
+                  .with("block", () => overrides?.blockLabel ?? (labels.includes("effect") ? "effect" : defaultLabel))
+                  .with("kind", () => overrides?.triageKind ?? (labels.includes("semantic") ? "semantic" : defaultLabel))
+                  .with(
+                    "target",
+                    () =>
+                      overrides?.learnTargetLabel ??
+                      (labels.includes("agent-pattern") ? "agent-pattern" : defaultLabel),
+                  )
+                  .with(
+                    "conflictKind",
+                    () => overrides?.conflictKindLabel ?? (labels.includes("none") ? "none" : defaultLabel),
+                  )
+                  .with(
+                    P.when((k) => k === "repairStrategy" || k.startsWith("repairStrategy_")),
+                    () =>
+                      overrides?.dpoStrategyLabel ??
+                      (labels.includes("propagate_in_E") ? "propagate_in_E" : defaultLabel),
+                  )
+                  .with(
+                    "activeStateVariant",
+                    () => overrides?.earsStateVariantLabel ?? (labels.includes("Active") ? "Active" : defaultLabel),
+                  )
+                  .with(
+                    "activeGuardVariant",
+                    () => overrides?.earsGuardVariantLabel ?? (labels.includes("Guarded") ? "Guarded" : defaultLabel),
+                  )
+                  .with(
+                    "guardPairRelation",
+                    () =>
+                      overrides?.earsGuardRelationLabel ??
+                      (labels.includes("mutually_exclusive") ? "mutually_exclusive" : defaultLabel),
+                  )
+                  .otherwise(() => defaultLabel)
+
+                const chosenLabel = labels.includes(rawChosen) ? rawChosen : defaultLabel
                 const probabilities: Record<string, number> = {}
                 for (const l of labels) {
                   probabilities[l] = l === chosenLabel ? 1 : 0
@@ -146,33 +122,41 @@ export const makeMockDecisionModelLayer = (
               })
               .with({ _tag: "Rate" }, (rateDec): DecisionModel.ProviderAnswer => {
                 const labels = rateDec.criteria
-                let chosenLabel: string
-                if (key === "architecturalCohesion" || key.startsWith("architecturalCohesion_")) {
-                  chosenLabel =
-                    overrides?.dpoCohesionLabel ??
-                    (labels.includes("idiomatic") ? "idiomatic" : (labels[0] ?? ""))
-                } else if (key === "concurrencyRisk") {
-                  chosenLabel =
-                    overrides?.dstHazardRiskLabel ??
-                    (labels.includes("stateful_mutation")
-                      ? "stateful_mutation"
-                      : (labels[0] ?? ""))
-                } else if (key === "ruleGenerality") {
-                  chosenLabel =
-                    overrides?.ruleGeneralityLabel ??
-                    (labels.includes("reusable_idiom") ? "reusable_idiom" : (labels[0] ?? ""))
-                } else if (key === "decompositionCohesion") {
-                  chosenLabel =
-                    overrides?.planSearchCohesionLabel ??
-                    (labels.includes("modular") ? "modular" : (labels[0] ?? ""))
-                } else {
-                  chosenLabel =
-                    overrides?.candidateRelevanceLabel ??
-                    (labels.includes("essential") ? "essential" : (labels[0] ?? ""))
-                }
-                if (!labels.includes(chosenLabel)) {
-                  chosenLabel = labels[0] ?? ""
-                }
+                const defaultLabel = labels[0] ?? ""
+                const rawChosen = match(key)
+                  .with(
+                    P.when(
+                      (k) => k === "architecturalCohesion" || k.startsWith("architecturalCohesion_"),
+                    ),
+                    () =>
+                      overrides?.dpoCohesionLabel ??
+                      (labels.includes("idiomatic") ? "idiomatic" : defaultLabel),
+                  )
+                  .with(
+                    "concurrencyRisk",
+                    () =>
+                      overrides?.dstHazardRiskLabel ??
+                      (labels.includes("stateful_mutation") ? "stateful_mutation" : defaultLabel),
+                  )
+                  .with(
+                    "ruleGenerality",
+                    () =>
+                      overrides?.ruleGeneralityLabel ??
+                      (labels.includes("reusable_idiom") ? "reusable_idiom" : defaultLabel),
+                  )
+                  .with(
+                    "decompositionCohesion",
+                    () =>
+                      overrides?.planSearchCohesionLabel ??
+                      (labels.includes("modular") ? "modular" : defaultLabel),
+                  )
+                  .otherwise(
+                    () =>
+                      overrides?.candidateRelevanceLabel ??
+                      (labels.includes("essential") ? "essential" : defaultLabel),
+                  )
+
+                const chosenLabel = labels.includes(rawChosen) ? rawChosen : defaultLabel
                 const rating = Math.max(0, labels.indexOf(chosenLabel))
                 const probabilities: Record<string, number> = {}
                 for (const l of labels) {
@@ -197,19 +181,24 @@ export const makeMockDecisionModelLayer = (
     }),
   )
 
+export const makeFailingDecisionModel = (
+  description = "Ollama unreachable",
+): Effect.Effect<DecisionModel.DecisionModel> =>
+  DecisionModel.make({
+    decide: () =>
+      Effect.fail(
+        AiError.make({
+          module: "DecisionModel",
+          method: "decide",
+          reason: new AiError.UnknownError({ description }),
+        }),
+      ),
+  })
+
 export const makeFailingDecisionModelLayer = (
   description = "Ollama unreachable",
 ): Layer.Layer<DecisionModel.DecisionModel> =>
   Layer.effect(
     DecisionModel.DecisionModel,
-    DecisionModel.make({
-      decide: () =>
-        Effect.fail(
-          AiError.make({
-            module: "DecisionModel",
-            method: "decide",
-            reason: new AiError.UnknownError({ description }),
-          }),
-        ),
-    }),
+    makeFailingDecisionModel(description),
   )

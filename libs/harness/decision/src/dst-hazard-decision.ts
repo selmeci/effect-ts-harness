@@ -8,7 +8,7 @@ import {
 import { Effect, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
-import { match } from "ts-pattern"
+import { match, P } from "ts-pattern"
 import { type DeterministicFallbackReason, PriorSource } from "./hole-prior-decision.js"
 import { assertDecisionLimits } from "./idiom-router.js"
 
@@ -67,33 +67,54 @@ const parseHazardRiskLevel = (raw: unknown): Option.Option<DstHazardRiskLevel> =
     )
     .otherwise(() => Option.none())
 
+const LOOKUP_METHOD_PREFIX_REGEX = /^(get|find|list|read|query|is|has|compute|decide)/i
+
+const isSaga = (combined: string): boolean =>
+  combined.includes("saga") || combined.includes("compensat") || combined.includes("outbox")
+
+const isMutation = (combined: string): boolean =>
+  combined.includes("insert") ||
+  combined.includes("update") ||
+  combined.includes("delete") ||
+  combined.includes("write") ||
+  combined.includes("mutate") ||
+  combined.includes("save") ||
+  combined.includes("append")
+
+const isIdempotentIo = (combined: string): boolean =>
+  combined.includes("fetch") ||
+  combined.includes("http") ||
+  combined.includes("query") ||
+  combined.includes("read")
+
+const isPureLookup = (methodName: string): boolean =>
+  LOOKUP_METHOD_PREFIX_REGEX.test(methodName)
+
 const computeDeterministicHazardFallback = (
   input: DstHazardPriorInput,
   reason: DeterministicFallbackReason = "timeout-or-unavailable",
 ): DstHazardPriorResult => {
   const combined =
     `${input.serviceTag} ${input.methodName} ${input.signatureSummary} ${input.earsClauseContext}`.toLowerCase()
-  let riskLevel: DstHazardRiskLevel = DstHazardRiskLevel.make("pure_lookup")
-  if (combined.includes("saga") || combined.includes("compensat") || combined.includes("outbox")) {
-    riskLevel = DstHazardRiskLevel.make("distributed_saga_step")
-  } else if (
-    combined.includes("insert") ||
-    combined.includes("update") ||
-    combined.includes("delete") ||
-    combined.includes("write") ||
-    combined.includes("mutate") ||
-    combined.includes("save") ||
-    combined.includes("append")
-  ) {
-    riskLevel = DstHazardRiskLevel.make("stateful_mutation")
-  } else if (
-    combined.includes("fetch") ||
-    combined.includes("http") ||
-    combined.includes("query") ||
-    combined.includes("read")
-  ) {
-    riskLevel = DstHazardRiskLevel.make("idempotent_io")
-  }
+
+  const riskLevel: DstHazardRiskLevel = match({ combined, methodName: input.methodName })
+    .with(
+      P.when(({ combined }) => isSaga(combined)),
+      () => DstHazardRiskLevel.make("distributed_saga_step"),
+    )
+    .with(
+      P.when(({ combined }) => isMutation(combined)),
+      () => DstHazardRiskLevel.make("stateful_mutation"),
+    )
+    .with(
+      P.when(({ combined }) => isIdempotentIo(combined)),
+      () => DstHazardRiskLevel.make("idempotent_io"),
+    )
+    .with(
+      P.when(({ methodName }) => isPureLookup(methodName)),
+      () => DstHazardRiskLevel.make("pure_lookup"),
+    )
+    .otherwise(() => DstHazardRiskLevel.make("stateful_mutation"))
 
   return {
     serviceTag: input.serviceTag,
@@ -118,7 +139,10 @@ export const evaluateDstHazardPrior = Effect.fn("DstHazardPrior.evaluate")(funct
 
   return yield* match(outcome)
     .with({ _tag: "None" }, () =>
-      Effect.succeed(computeDeterministicHazardFallback(input, "timeout-or-unavailable")),
+      Effect.gen(function* () {
+        yield* Effect.annotateCurrentSpan({ "decision.usedFallback": true })
+        return computeDeterministicHazardFallback(input, "timeout-or-unavailable")
+      }),
     )
     .with({ _tag: "Some" }, ({ value }) =>
       Effect.gen(function* () {
@@ -133,6 +157,7 @@ export const evaluateDstHazardPrior = Effect.fn("DstHazardPrior.evaluate")(funct
                 "decision.methodName": input.methodName,
                 "decision.riskLevel": riskLevel,
                 "decision.hazardProbMillis": hazardProbMillis,
+                "decision.usedFallback": false,
               })
               return {
                 serviceTag: input.serviceTag,
@@ -144,7 +169,10 @@ export const evaluateDstHazardPrior = Effect.fn("DstHazardPrior.evaluate")(funct
             }),
           )
           .with({ _tag: "None" }, () =>
-            Effect.succeed(computeDeterministicHazardFallback(input, "invalid-output")),
+            Effect.gen(function* () {
+              yield* Effect.annotateCurrentSpan({ "decision.usedFallback": true })
+              return computeDeterministicHazardFallback(input, "invalid-output")
+            }),
           )
           .exhaustive()
       }),

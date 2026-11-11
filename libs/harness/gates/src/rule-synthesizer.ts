@@ -104,6 +104,7 @@ export const RuleSynthesizerInput = Schema.Struct({
   healthyCorpusSnapshots: Schema.Array(CascadeCorpusSnapshot),
   targetFiles: Schema.Array(RuleTargetPath),
   qualityPriorMillis: Schema.optional(RuleQualityScoreMillis),
+  minQualityMillis: Schema.optional(RuleQualityScoreMillis),
 })
 export type RuleSynthesizerInput = typeof RuleSynthesizerInput.Type
 
@@ -133,35 +134,177 @@ export class RuleSynthesisError extends Schema.TaggedError<RuleSynthesisError>()
 
 const SCOPE_PATH_REGEX = /\b(libs|apps)\/([a-z0-9_-]+)\//g
 
-const variabilizeGraphToken = (raw: string): {
+export const extractScopePrefix = (token: string): string | undefined => {
+  const match = /\b(?:libs|apps)\/([a-z0-9_-]+)\//.exec(token)
+  return match?.[1]
+}
+
+export const variabilizeGraphTokenWithMap = (
+  raw: string,
+  scopeVarMap: Map<string, string>,
+): {
   readonly variabilized: RuleGraphToken
   readonly usedScopeVar: boolean
+  readonly scopeVars: ReadonlyArray<PatternVariableName>
 } => {
   let usedScopeVar = false
-  const replaced = raw.replace(SCOPE_PATH_REGEX, (_match, rootDir: string) => {
+  const vars: Array<PatternVariableName> = []
+  const replaced = raw.replace(SCOPE_PATH_REGEX, (_match, rootDir: string, scopeName: string) => {
     usedScopeVar = true
-    return `${rootDir}/?Scope/`
+    let varName = scopeVarMap.get(scopeName)
+    if (varName === undefined) {
+      varName = scopeVarMap.size === 0 ? "?Scope" : `?Scope${scopeVarMap.size + 1}`
+      scopeVarMap.set(scopeName, varName)
+    }
+    vars.push(PatternVariableName.make(varName))
+    return `${rootDir}/${varName}/`
   })
   return {
     variabilized: RuleGraphToken.make(replaced),
     usedScopeVar,
+    scopeVars: vars,
   }
 }
 
-const patternToRegex = (patternToken: string): RegExp => {
+export const variabilizeGraphToken = (
+  raw: string,
+): {
+  readonly variabilized: RuleGraphToken
+  readonly usedScopeVar: boolean
+} => variabilizeGraphTokenWithMap(raw, new Map<string, string>())
+
+export interface ComputedLggRule {
+  readonly patternVariables: ReadonlyArray<PatternVariableName>
+  readonly lhsNodes: ReadonlyArray<RuleGraphToken>
+  readonly lhsHyperedges: ReadonlyArray<RuleGraphToken>
+  readonly interfaceNodes: ReadonlyArray<RuleGraphToken>
+  readonly rhsNodes: ReadonlyArray<RuleGraphToken>
+  readonly rhsHyperedges: ReadonlyArray<RuleGraphToken>
+  readonly nacForbiddenHyperedges: ReadonlyArray<RuleGraphToken>
+  readonly nodeMappings: ReadonlyArray<LggNodeMapping>
+  readonly scopeVarMap: ReadonlyMap<string, string>
+}
+
+export const computeLggRule = (
+  badGraphNodes: ReadonlyArray<RuleGraphToken>,
+  badGraphHyperedges: ReadonlyArray<RuleGraphToken>,
+  goodGraphNodes: ReadonlyArray<RuleGraphToken>,
+  goodGraphHyperedges: ReadonlyArray<RuleGraphToken>,
+): ComputedLggRule => {
+  const scopeVarMap = new Map<string, string>()
+  const patternVariables = new Set<PatternVariableName>()
+  const nodeMappings: Array<LggNodeMapping> = []
+
+  const goodNodeSet = new Set<string>(goodGraphNodes)
+  const badEdgeSet = new Set<string>(badGraphHyperedges)
+  const goodEdgeSet = new Set<string>(goodGraphHyperedges)
+
+  const removedEdges = badGraphHyperedges.filter((e) => !goodEdgeSet.has(e))
+  const addedEdges = goodGraphHyperedges.filter((e) => !badEdgeSet.has(e))
+  const preservedRawNodes = badGraphNodes.filter((n) => goodNodeSet.has(n))
+
+  const lhsNodes = Array.from(
+    new Set(
+      badGraphNodes.map((n) => {
+        const v = variabilizeGraphTokenWithMap(n, scopeVarMap)
+        for (const sv of v.scopeVars) patternVariables.add(sv)
+        return v.variabilized
+      }),
+    ),
+  )
+
+  const rhsNodes = Array.from(
+    new Set(
+      goodGraphNodes.map((n) => {
+        const v = variabilizeGraphTokenWithMap(n, scopeVarMap)
+        for (const sv of v.scopeVars) patternVariables.add(sv)
+        return v.variabilized
+      }),
+    ),
+  )
+
+  const interfaceNodes = Array.from(
+    new Set(
+      preservedRawNodes.map((n) => {
+        const v = variabilizeGraphTokenWithMap(n, scopeVarMap)
+        for (const sv of v.scopeVars) patternVariables.add(sv)
+        nodeMappings.push({
+          badNodeKey: n,
+          goodNodeKey: n,
+          patternVar: PatternVariableName.make(
+            v.usedScopeVar && v.scopeVars[0] !== undefined ? v.scopeVars[0] : "?Node",
+          ),
+        })
+        if (!v.usedScopeVar) {
+          patternVariables.add(PatternVariableName.make("?Node"))
+        }
+        return v.variabilized
+      }),
+    ),
+  )
+
+  const lhsHyperedges = Array.from(
+    new Set(
+      (removedEdges.length > 0 ? removedEdges : badGraphHyperedges).map((e) => {
+        const v = variabilizeGraphTokenWithMap(e, scopeVarMap)
+        for (const sv of v.scopeVars) patternVariables.add(sv)
+        return v.variabilized
+      }),
+    ),
+  )
+
+  const rhsHyperedges = Array.from(
+    new Set(
+      (addedEdges.length > 0 ? addedEdges : goodGraphHyperedges).map((e) => {
+        const v = variabilizeGraphTokenWithMap(e, scopeVarMap)
+        for (const sv of v.scopeVars) patternVariables.add(sv)
+        return v.variabilized
+      }),
+    ),
+  )
+
+  const nacForbiddenHyperedges = Array.from(
+    new Set(
+      addedEdges.map((e) => {
+        const v = variabilizeGraphTokenWithMap(e, scopeVarMap)
+        for (const sv of v.scopeVars) patternVariables.add(sv)
+        return v.variabilized
+      }),
+    ),
+  )
+
+  if (patternVariables.size === 0) {
+    patternVariables.add(PatternVariableName.make("?Scope"))
+  }
+
+  return {
+    patternVariables: Array.from(patternVariables),
+    lhsNodes,
+    lhsHyperedges,
+    interfaceNodes,
+    rhsNodes,
+    rhsHyperedges,
+    nacForbiddenHyperedges,
+    nodeMappings,
+    scopeVarMap,
+  }
+}
+
+export const patternToRegex = (patternToken: string): RegExp => {
   const escaped = patternToken.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-  let hasNamedGroup = false
-  const withVars = escaped.replace(/\\\?Scope/g, () => {
-    if (!hasNamedGroup) {
-      hasNamedGroup = true
-      return "(?<Scope>[a-z0-9_-]+)"
+  const seenGroups = new Set<string>()
+  const withVars = escaped.replace(/\\\?Scope(\d*)/g, (_match, digits: string) => {
+    const groupName = digits === "" ? "Scope" : `Scope${digits}`
+    if (!seenGroups.has(groupName)) {
+      seenGroups.add(groupName)
+      return `(?<${groupName}>[a-z0-9_-]+)`
     }
-    return "\\k<Scope>"
+    return `\\k<${groupName}>`
   })
   return new RegExp(`^${withVars}$`)
 }
 
-const doesPatternSetMatchSnapshot = (
+export const subgraphMatchesWithScopeVar = (
   lhsPatterns: ReadonlyArray<RuleGraphToken>,
   nacPatterns: ReadonlyArray<RuleGraphToken>,
   hyperedges: ReadonlyArray<RuleGraphToken>,
@@ -169,6 +312,15 @@ const doesPatternSetMatchSnapshot = (
   if (lhsPatterns.length === 0) {
     return false
   }
+
+  const varNames = Array.from(
+    new Set(
+      [...lhsPatterns, ...nacPatterns].flatMap((p) =>
+        Array.from(p.matchAll(/\?Scope\d*/g), (m) => m[0]),
+      ),
+    ),
+  )
+
   const candidateScopes = new Set<string>(["*"])
   for (const edge of hyperedges) {
     const m = /\b(?:libs|apps)\/([a-z0-9_-]+)\//.exec(edge)
@@ -177,9 +329,36 @@ const doesPatternSetMatchSnapshot = (
     }
   }
 
-  for (const scopeVal of candidateScopes) {
-    const instantiate = (p: string): string =>
-      scopeVal === "*" ? p : p.replace(/\?Scope/g, scopeVal)
+  const scopes = Array.from(candidateScopes)
+  const assignments: Array<Map<string, string>> = []
+  if (varNames.length === 0) {
+    assignments.push(new Map())
+  } else {
+    const generate = (index: number, current: Map<string, string>) => {
+      if (index === varNames.length) {
+        assignments.push(new Map(current))
+        return
+      }
+      const v = varNames[index]!
+      for (const s of scopes) {
+        current.set(v, s)
+        generate(index + 1, current)
+        current.delete(v)
+      }
+    }
+    generate(0, new Map())
+  }
+
+  for (const assignment of assignments) {
+    const instantiate = (p: string): string => {
+      let res = p
+      for (const [varName, scopeVal] of assignment.entries()) {
+        if (scopeVal !== "*") {
+          res = res.replaceAll(varName, scopeVal)
+        }
+      }
+      return res
+    }
 
     const allLhsPresent = lhsPatterns.every((lhs) => {
       const inst = instantiate(lhs)
@@ -203,9 +382,172 @@ const doesPatternSetMatchSnapshot = (
   return false
 }
 
+export const doesPatternSetMatchSnapshot = subgraphMatchesWithScopeVar
+
+export interface PositiveReplayEvaluation {
+  readonly passed: boolean
+  readonly detail: string
+}
+
+export const evaluatePositiveReplay = (
+  lhsPatterns: ReadonlyArray<RuleGraphToken>,
+  nacPatterns: ReadonlyArray<RuleGraphToken>,
+  rhsNodes: ReadonlyArray<RuleGraphToken>,
+  rhsHyperedges: ReadonlyArray<RuleGraphToken>,
+  badNodes: ReadonlyArray<RuleGraphToken>,
+  badHyperedges: ReadonlyArray<RuleGraphToken>,
+  goodNodes: ReadonlyArray<RuleGraphToken>,
+  goodHyperedges: ReadonlyArray<RuleGraphToken>,
+  scopeVarMap: ReadonlyMap<string, string>,
+): PositiveReplayEvaluation => {
+  // 1. L matches G_bad and NAC does not already match G_bad
+  const triggersOnBad = subgraphMatchesWithScopeVar(lhsPatterns, nacPatterns, badHyperedges)
+  if (!triggersOnBad) {
+    return {
+      passed: false,
+      detail: "LHS does not match G_bad or NAC already matches G_bad",
+    }
+  }
+
+  // 2. Build mapping of ?Scope -> concrete scope
+  const varToScope = new Map<string, string>()
+  for (const [concreteScope, varName] of scopeVarMap.entries()) {
+    varToScope.set(varName, concreteScope)
+  }
+
+  const instantiate = (token: string): string => {
+    let res = token
+    for (const [varName, concreteScope] of varToScope.entries()) {
+      res = res.replaceAll(varName, concreteScope)
+    }
+    return res
+  }
+
+  // DPO rewrite: (G_bad \ (L \ K)) ∪ (R \ K)
+  const badEdgeSet = new Set<string>(badHyperedges)
+  const goodEdgeSet = new Set<string>(goodHyperedges)
+  const concreteLhsEdges = new Set(lhsPatterns.map(instantiate))
+  const concreteRhsEdges = new Set(rhsHyperedges.map(instantiate))
+  const removedEdges = new Set(
+    [...concreteLhsEdges].filter((e) => !concreteRhsEdges.has(e) && !goodEdgeSet.has(e)),
+  )
+  const addedEdges = [...concreteRhsEdges].filter((e) => !badEdgeSet.has(e))
+
+  const rewrittenEdges = new Set<string>(badHyperedges.filter((e) => !removedEdges.has(e)))
+  for (const added of addedEdges) {
+    rewrittenEdges.add(added)
+  }
+
+  const badNodeSet = new Set<string>(badNodes)
+  const goodNodeSet = new Set<string>(goodNodes)
+  const concreteRhsNodes = new Set(rhsNodes.map(instantiate))
+  const removedNodes = new Set(badNodes.filter((n) => !concreteRhsNodes.has(n) && !goodNodeSet.has(n)))
+  const addedNodes = [...concreteRhsNodes].filter((n) => !badNodeSet.has(n))
+
+  const rewrittenNodes = new Set<string>(badNodes.filter((n) => !removedNodes.has(n)))
+  for (const added of addedNodes) {
+    rewrittenNodes.add(added)
+  }
+
+  // Verify all required RHS nodes and hyperedges are present in G_rewritten and in G_good
+  for (const rhsNode of rhsNodes) {
+    const concrete = instantiate(rhsNode)
+    if (!rewrittenNodes.has(concrete) || !goodNodeSet.has(concrete)) {
+      return {
+        passed: false,
+        detail: `RHS node '${concrete}' missing in G_rewritten or G_good`,
+      }
+    }
+  }
+
+  for (const rhsEdge of rhsHyperedges) {
+    const concrete = instantiate(rhsEdge)
+    if (!rewrittenEdges.has(concrete) || !goodEdgeSet.has(concrete)) {
+      return {
+        passed: false,
+        detail: `RHS hyperedge '${concrete}' missing in G_rewritten or G_good`,
+      }
+    }
+  }
+
+  // Verify G_rewritten covers all hyperedges of G_good
+  for (const goodEdge of goodHyperedges) {
+    if (!rewrittenEdges.has(goodEdge)) {
+      return {
+        passed: false,
+        detail: `Target hyperedge '${goodEdge}' in G_good was not produced by DPO rewrite`,
+      }
+    }
+  }
+
+  // (L, NAC) must no longer trigger on G_rewritten
+  const triggersOnRewritten = subgraphMatchesWithScopeVar(
+    lhsPatterns,
+    nacPatterns,
+    Array.from(rewrittenEdges).map((e) => RuleGraphToken.make(e)),
+  )
+  if (triggersOnRewritten) {
+    return {
+      passed: false,
+      detail: "(L, NAC) still triggers on G_rewritten after positive rewrite",
+    }
+  }
+
+  return {
+    passed: true,
+    detail: "Verified positive DPO replay on G_bad -> G_good with idempotent NAC termination.",
+  }
+}
+
+export const evaluateZeroFalsePositive = (
+  lhsPatterns: ReadonlyArray<RuleGraphToken>,
+  nacPatterns: ReadonlyArray<RuleGraphToken>,
+  snapshots: ReadonlyArray<CascadeCorpusSnapshot>,
+): {
+  readonly passed: boolean
+  readonly falsePositiveSnapshots: ReadonlyArray<string>
+} => {
+  const healthy = snapshots.filter((s) => s.isHealthy)
+  if (healthy.length === 0) {
+    return {
+      passed: false,
+      falsePositiveSnapshots: ["<empty-healthy-corpus>"],
+    }
+  }
+
+  const falsePositives: Array<string> = []
+  for (const snapshot of healthy) {
+    const matches = subgraphMatchesWithScopeVar(
+      lhsPatterns,
+      nacPatterns,
+      snapshot.hyperedgeSignatures,
+    )
+    if (matches) {
+      falsePositives.push(snapshot.snapshotId)
+    }
+  }
+
+  return {
+    passed: falsePositives.length === 0,
+    falsePositiveSnapshots: falsePositives,
+  }
+}
+
 export const decideRuleSynthesizer = Effect.fn("RuleSynthesizer.decide")(function* (
   input: RuleSynthesizerInput,
 ): Effect.fn.Return<RuleSynthesisReport, RuleSynthesisError, never> {
+  // Hard Invariant: Immutable Trusted Computing Base (TCB) Protection
+  const offendingTcbPaths = input.targetFiles.filter((p) => isImmutableTcbPath(p))
+  if (offendingTcbPaths.length > 0) {
+    return yield* new RuleSynthesisError({
+      stage: RuleSynthesisFailureStage.make("Stage4_ImmutableTcbAndQuality"),
+      reason: RuleSynthesisText.make(
+        `Synthesized rule targets Immutable Trusted Computing Base (TCB) file(s): ${offendingTcbPaths.join(", ")}.`,
+      ),
+      offendingPaths: offendingTcbPaths,
+    })
+  }
+
   const badEdgeSet = new Set<string>(input.badGraphHyperedges)
   const goodEdgeSet = new Set<string>(input.goodGraphHyperedges)
 
@@ -234,37 +576,16 @@ export const decideRuleSynthesizer = Effect.fn("RuleSynthesizer.decide")(functio
     })
   }
 
-  const patternVariables = new Set<PatternVariableName>([
-    PatternVariableName.make("?Scope"),
-  ])
-  const nodeMappings: Array<LggNodeMapping> = []
-
-  const lhsNodes = Array.from(
-    new Set(input.badGraphNodes.map((n) => variabilizeGraphToken(n).variabilized)),
-  )
-  const rhsNodes = Array.from(
-    new Set(input.goodGraphNodes.map((n) => variabilizeGraphToken(n).variabilized)),
-  )
-  const interfaceNodes = Array.from(
-    new Set(
-      preservedRawNodes.map((n) => {
-        const v = variabilizeGraphToken(n)
-        nodeMappings.push({
-          badNodeKey: n,
-          goodNodeKey: n,
-          patternVar: PatternVariableName.make(v.usedScopeVar ? "?Scope" : "?Node"),
-        })
-        if (!v.usedScopeVar) {
-          patternVariables.add(PatternVariableName.make("?Node"))
-        }
-        return v.variabilized
-      }),
-    ),
+  const lgg = computeLggRule(
+    input.badGraphNodes,
+    input.badGraphHyperedges,
+    input.goodGraphNodes,
+    input.goodGraphHyperedges,
   )
 
-  const lhsNodeSet = new Set<string>(lhsNodes)
-  const rhsNodeSet = new Set<string>(rhsNodes)
-  const interfacePreservedInBoth = interfaceNodes.every(
+  const lhsNodeSet = new Set<string>(lgg.lhsNodes)
+  const rhsNodeSet = new Set<string>(lgg.rhsNodes)
+  const interfacePreservedInBoth = lgg.interfaceNodes.every(
     (k) => lhsNodeSet.has(k) && rhsNodeSet.has(k),
   )
   if (!interfacePreservedInBoth) {
@@ -276,53 +597,34 @@ export const decideRuleSynthesizer = Effect.fn("RuleSynthesizer.decide")(functio
     })
   }
 
-  const lhsHyperedges = Array.from(
-    new Set(
-      (removedEdges.length > 0 ? removedEdges : input.badGraphHyperedges).map(
-        (e) => variabilizeGraphToken(e).variabilized,
-      ),
-    ),
-  )
-  const rhsHyperedges = Array.from(
-    new Set(
-      (addedEdges.length > 0 ? addedEdges : input.goodGraphHyperedges).map(
-        (e) => variabilizeGraphToken(e).variabilized,
-      ),
-    ),
-  )
-  const nacForbiddenHyperedges = Array.from(
-    new Set(addedEdges.map((e) => variabilizeGraphToken(e).variabilized)),
-  )
-
   const cascadeResults: Array<CascadeStageResult> = [
     {
       stage: CascadeStageName.make("Stage1_PushoutWellFormedness"),
       passed: RuleSynthesisFlag.make(true),
       detail: RuleSynthesisText.make(
-        `Verified DPO interface K (${interfaceNodes.length} node(s)) and variabilized LGG bindings (${Array.from(patternVariables).join(", ")}).`,
+        `Verified DPO interface K (${lgg.interfaceNodes.length} node(s)) and variabilized LGG bindings (${lgg.patternVariables.join(", ")}).`,
       ),
     },
   ]
 
   // Stage 2: Positive Replay on G_bad -> G_good
-  const matchesBad = doesPatternSetMatchSnapshot(
-    lhsHyperedges,
-    nacForbiddenHyperedges,
+  const replayResult = evaluatePositiveReplay(
+    lgg.lhsHyperedges,
+    lgg.nacForbiddenHyperedges,
+    lgg.rhsNodes,
+    lgg.rhsHyperedges,
+    input.badGraphNodes,
     input.badGraphHyperedges,
+    input.goodGraphNodes,
+    input.goodGraphHyperedges,
+    lgg.scopeVarMap,
   )
-  const matchesGoodAfterRewrite =
-    nacForbiddenHyperedges.length > 0 &&
-    doesPatternSetMatchSnapshot(
-      lhsHyperedges,
-      nacForbiddenHyperedges,
-      input.goodGraphHyperedges,
-    )
 
-  if (!matchesBad || matchesGoodAfterRewrite) {
+  if (!replayResult.passed) {
     return yield* new RuleSynthesisError({
       stage: RuleSynthesisFailureStage.make("Stage2_PositiveReplay"),
       reason: RuleSynthesisText.make(
-        `Positive replay failed for '${input.taskId}': matchesBad=${matchesBad}, matchesGoodAfterRewrite=${matchesGoodAfterRewrite}.`,
+        `Positive replay failed for '${input.taskId}': ${replayResult.detail}.`,
       ),
     })
   }
@@ -330,29 +632,26 @@ export const decideRuleSynthesizer = Effect.fn("RuleSynthesizer.decide")(functio
   cascadeResults.push({
     stage: CascadeStageName.make("Stage2_PositiveReplay"),
     passed: RuleSynthesisFlag.make(true),
-    detail: RuleSynthesisText.make(
-      `Verified positive DPO replay on G_bad -> G_good with idempotent NAC termination.`,
-    ),
+    detail: RuleSynthesisText.make(replayResult.detail),
   })
 
   // Stage 3: Zero False Positives across healthy corpus snapshots
-  for (const snapshot of input.healthyCorpusSnapshots) {
-    if (!snapshot.isHealthy) {
-      continue
-    }
-    const falsePositive = doesPatternSetMatchSnapshot(
-      lhsHyperedges,
-      nacForbiddenHyperedges,
-      snapshot.hyperedgeSignatures,
-    )
-    if (falsePositive) {
-      return yield* new RuleSynthesisError({
-        stage: RuleSynthesisFailureStage.make("Stage3_ZeroFalsePositive"),
-        reason: RuleSynthesisText.make(
-          `Synthesized DPO rule triggered a false positive on healthy corpus snapshot '${snapshot.snapshotId}'.`,
-        ),
-      })
-    }
+  const zeroFpResult = evaluateZeroFalsePositive(
+    lgg.lhsHyperedges,
+    lgg.nacForbiddenHyperedges,
+    input.healthyCorpusSnapshots,
+  )
+
+  if (!zeroFpResult.passed) {
+    const firstFp = zeroFpResult.falsePositiveSnapshots[0]!
+    const reasonText =
+      firstFp === "<empty-healthy-corpus>"
+        ? `Synthesized DPO rule failed zero false positive validation: healthy corpus is empty.`
+        : `Synthesized DPO rule triggered a false positive on healthy corpus snapshot '${firstFp}'.`
+    return yield* new RuleSynthesisError({
+      stage: RuleSynthesisFailureStage.make("Stage3_ZeroFalsePositive"),
+      reason: RuleSynthesisText.make(reasonText),
+    })
   }
 
   cascadeResults.push({
@@ -364,22 +663,14 @@ export const decideRuleSynthesizer = Effect.fn("RuleSynthesizer.decide")(functio
   })
 
   // Stage 4: Immutable TCB Protection & System One Quality Prior
-  const offendingTcbPaths = input.targetFiles.filter((p) => isImmutableTcbPath(p))
-  if (offendingTcbPaths.length > 0) {
-    return yield* new RuleSynthesisError({
-      stage: RuleSynthesisFailureStage.make("Stage4_ImmutableTcbAndQuality"),
-      reason: RuleSynthesisText.make(
-        `Synthesized rule targets Immutable Trusted Computing Base (TCB) file(s): ${offendingTcbPaths.join(", ")}.`,
-      ),
-      offendingPaths: offendingTcbPaths,
-    })
-  }
+  const minQuality = input.minQualityMillis ?? 500
+  const qualityMillis = input.qualityPriorMillis ?? 500
 
-  if (input.qualityPriorMillis !== undefined && input.qualityPriorMillis < 500) {
+  if (qualityMillis < minQuality) {
     return yield* new RuleSynthesisError({
       stage: RuleSynthesisFailureStage.make("Stage4_ImmutableTcbAndQuality"),
       reason: RuleSynthesisText.make(
-        `SynthesizedRuleQualityV1 prior ${input.qualityPriorMillis} millis is below promotion threshold 500 millis.`,
+        `SynthesizedRuleQualityV1 prior ${qualityMillis} millis is below promotion threshold ${minQuality} millis.`,
       ),
     })
   }
@@ -388,7 +679,7 @@ export const decideRuleSynthesizer = Effect.fn("RuleSynthesizer.decide")(functio
     stage: CascadeStageName.make("Stage4_ImmutableTcbAndQuality"),
     passed: RuleSynthesisFlag.make(true),
     detail: RuleSynthesisText.make(
-      `Verified Immutable TCB boundary and quality threshold (score=${input.qualityPriorMillis ?? 800} millis).`,
+      `Verified Immutable TCB boundary and quality threshold (score=${qualityMillis} millis, min=${minQuality} millis).`,
     ),
   })
 
@@ -399,13 +690,13 @@ export const decideRuleSynthesizer = Effect.fn("RuleSynthesizer.decide")(functio
     description: RuleSynthesisText.make(
       `Synthesized via First-Order Graph Anti-Unification (LGG) from G_bad -> G_good for task ${input.taskId}.`,
     ),
-    patternVariables: Array.from(patternVariables),
-    lhsNodes,
-    lhsHyperedges,
-    interfaceNodes,
-    rhsNodes,
-    rhsHyperedges,
-    nacForbiddenHyperedges,
+    patternVariables: [...lgg.patternVariables],
+    lhsNodes: lgg.lhsNodes,
+    lhsHyperedges: lgg.lhsHyperedges,
+    interfaceNodes: lgg.interfaceNodes,
+    rhsNodes: lgg.rhsNodes,
+    rhsHyperedges: lgg.rhsHyperedges,
+    nacForbiddenHyperedges: lgg.nacForbiddenHyperedges,
     targetGateFiles: [...input.targetFiles],
     ...(input.qualityPriorMillis !== undefined
       ? { qualityScoreMillis: input.qualityPriorMillis }
@@ -414,7 +705,7 @@ export const decideRuleSynthesizer = Effect.fn("RuleSynthesizer.decide")(functio
 
   return {
     rule,
-    nodeMappings,
+    nodeMappings: [...lgg.nodeMappings],
     cascadeResults,
     promoted: RuleSynthesisFlag.make(true),
   }
@@ -423,4 +714,14 @@ export const decideRuleSynthesizer = Effect.fn("RuleSynthesizer.decide")(functio
 export const RuleSynthesizer = {
   decide: decideRuleSynthesizer,
   isImmutableTcbPath,
+  extractScopePrefix,
+  variabilizeGraphTokenWithMap,
+  variabilizeGraphToken,
+  computeLggRule,
+  patternToRegex,
+  subgraphMatchesWithScopeVar,
+  doesPatternSetMatchSnapshot,
+  evaluatePositiveReplay,
+  evaluateZeroFalsePositive,
 } as const
+

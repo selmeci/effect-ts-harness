@@ -1,7 +1,8 @@
-import { execFileSync } from "node:child_process"
-import { existsSync, readdirSync, readFileSync } from "node:fs"
+import { execFileSync, spawnSync } from "node:child_process"
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { join, relative } from "node:path"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
+
 
 export type MutantCategory =
   | "boundary-operator"
@@ -54,13 +55,17 @@ export interface SaturationViolation {
   readonly message: string
 }
 
+export type SpanSaturationObservation = TraceSpanObservation
+
 export interface MutationEvaluationInput {
   readonly outcomes: ReadonlyArray<MutantOutcome>
   readonly minScore?: number | undefined
   readonly equivalencePriors?: Readonly<Record<string, number>> | undefined
   readonly saturationSpecs?: ReadonlyArray<SpanSaturationSpec> | undefined
   readonly traceObservations?: ReadonlyArray<TraceSpanObservation> | undefined
+  readonly spanObservations?: ReadonlyArray<SpanSaturationObservation> | undefined
 }
+
 
 export interface MutationSuiteReport {
   readonly passed: boolean
@@ -202,9 +207,9 @@ export const parseGitDiffModifiedLines = (
       }
       lineSet.add(currentNewLine)
       currentNewLine += 1
-    } else if (rawLine.startsWith("-") && !rawLine.startsWith("---")) {
-      // Deleted line in old file does not advance new file line counter
-    } else if (rawLine.startsWith(" ")) {
+      continue
+    }
+    if (rawLine.startsWith(" ")) {
       currentNewLine += 1
     }
   }
@@ -347,26 +352,29 @@ export const compileMutantSchemaModule = (
     if (origLine === undefined) continue
     let transformed = origLine
     for (const m of lineMutants) {
-      const ifCondMatch = /^(\s*if\s*\()(.*)(\)\s*(?:\{.*|return\b.*)?)$/.exec(transformed)
+      const mutantCondition = `((globalThis.__HARNESS_ACTIVE_MUTANT_ID ?? (globalThis as { __HARNESS_ACTIVE_MUTANT_ID?: string }).__HARNESS_ACTIVE_MUTANT_ID ?? process.env["HARNESS_ACTIVE_MUTANT_ID"]) === ${JSON.stringify(m.id)})`
       if (m.original.startsWith("return ")) {
         const origExpr = m.original.slice("return ".length)
         const replExpr = m.replacement.slice("return ".length)
         transformed = transformed.replace(
           m.original,
-          `return (globalThis.__HARNESS_ACTIVE_MUTANT_ID === ${JSON.stringify(m.id)} ? (${replExpr}) : (${origExpr}))`,
+          `return (${mutantCondition} ? (${replExpr}) : (${origExpr}))`,
         )
-      } else if (ifCondMatch !== null && ifCondMatch[2]?.includes(m.original)) {
+        continue
+      }
+      const ifCondMatch = /^(\s*if\s*\()(.*)(\)\s*\{?\s*)$/.exec(transformed)
+      if (ifCondMatch !== null && ifCondMatch[2]?.includes(m.original)) {
         const prefix = ifCondMatch[1]!
         const origCond = ifCondMatch[2]!
         const suffix = ifCondMatch[3]!
         const mutatedCond = origCond.replace(m.original, m.replacement)
-        transformed = `${prefix}(globalThis.__HARNESS_ACTIVE_MUTANT_ID === ${JSON.stringify(m.id)} ? (${mutatedCond}) : (${origCond}))${suffix}`
-      } else {
-        transformed = transformed.replace(
-          m.original,
-          `(globalThis.__HARNESS_ACTIVE_MUTANT_ID === ${JSON.stringify(m.id)} ? (${m.replacement}) : (${m.original}))`,
-        )
+        transformed = `${prefix}(${mutantCondition} ? (${mutatedCond}) : (${origCond}))${suffix}`
+        continue
       }
+      transformed = transformed.replace(
+        m.original,
+        `(${mutantCondition} ? (${m.replacement}) : (${m.original}))`,
+      )
     }
     lines[idx] = transformed
   }
@@ -377,6 +385,21 @@ export const compileMutantSchemaModule = (
     mutantIds: mutants.map((m) => m.id),
   }
 }
+
+const isAssertionFailure = (err: unknown): boolean =>
+  err instanceof Error &&
+  (err.name === "AssertionError" ||
+    err.name === "ExpectError" ||
+    err.message.includes("expected") ||
+    err.message.includes("assert"))
+
+class MutantTestInvocationError extends Schema.TaggedError<MutantTestInvocationError>()(
+  "MutantTestInvocationError",
+  {
+    isAssertion: Schema.Boolean,
+    cause: Schema.Unknown,
+  },
+) {}
 
 /**
  * Evaluates all `M` mutants inside a single warm process by toggling
@@ -403,8 +426,18 @@ export const evaluateMutantSchemaInProcess = (
         for (const testFn of exercisesSpanTests) {
           const ok = yield* Effect.try({
             try: () => testFn(mutant.id),
-            catch: () => false,
-          }).pipe(Effect.orElseSucceed(() => false))
+            catch: (err) =>
+              new MutantTestInvocationError({
+                isAssertion: isAssertionFailure(err),
+                cause: err,
+              }),
+          }).pipe(
+            Effect.catchIf(
+              (err) => err.isAssertion,
+              () => Effect.succeed(false),
+            ),
+            Effect.catch((err) => Effect.die(err.cause)),
+          )
           if (ok === false) {
             return true
           }
@@ -520,9 +553,13 @@ export const evaluateSpanSaturationViolations = (
   return violations
 }
 
-const isMutantMarkedEquivalent = (
+export const normalizePriorMillis = (raw: number): number =>
+  raw > 0 && raw < 1 ? Math.round(raw * 1000) : Math.round(raw)
+
+export const isMutantMarkedEquivalent = (
   outcome: MutantOutcome,
   priors: Readonly<Record<string, number>> | undefined,
+  threshold = 850,
 ): boolean => {
   if (outcome.status === "equivalent") {
     return true
@@ -531,8 +568,7 @@ const isMutantMarkedEquivalent = (
   if (prior === undefined) {
     return false
   }
-  const normalizedMillis = prior <= 1 && prior > 0 ? Math.round(prior * 1000) : prior
-  return normalizedMillis >= 850
+  return normalizePriorMillis(prior) >= threshold
 }
 
 export const decideMutationReport = Effect.fn("MutationCheck.decide")(function* (
@@ -540,26 +576,28 @@ export const decideMutationReport = Effect.fn("MutationCheck.decide")(function* 
 ) {
   yield* Effect.void
 
-  const equivalentMutants = input.outcomes
-    .filter((o) => o.status !== "killed" && isMutantMarkedEquivalent(o, input.equivalencePriors))
-    .map((o) => o.mutant)
-
-  const nonEquivalentOutcomes = input.outcomes.filter(
-    (o) => o.status === "killed" || !isMutantMarkedEquivalent(o, input.equivalencePriors),
+  const equivalentMutantIds = new Set(
+    input.outcomes
+      .filter((o) => o.status !== "killed" && isMutantMarkedEquivalent(o, input.equivalencePriors))
+      .map((o) => o.mutant.id),
   )
-
-  const totalMutants = nonEquivalentOutcomes.length
-  const killedCount = nonEquivalentOutcomes.filter((o) => o.status === "killed").length
-  const survivedMutants = nonEquivalentOutcomes
-    .filter((o) => o.status === "survived")
+  const equivalentMutants = input.outcomes
+    .filter((o) => equivalentMutantIds.has(o.mutant.id))
+    .map((o) => o.mutant)
+  const survivedMutants = input.outcomes
+    .filter((o) => o.status === "survived" && !equivalentMutantIds.has(o.mutant.id))
     .map((o) => o.mutant)
   const survivedCount = survivedMutants.length
-  const mutationScore = totalMutants === 0 ? 1 : killedCount / totalMutants
+  const killedCount = input.outcomes.filter((o) => o.status === "killed").length
+  const totalMutants = input.outcomes.length
+  const actionableMutants = totalMutants - equivalentMutants.length
+  const mutationScore = actionableMutants <= 0 ? 1 : killedCount / actionableMutants
   const minScore = input.minScore ?? 1
 
+  const observations = input.spanObservations ?? input.traceObservations
   const saturationViolations =
-    input.saturationSpecs !== undefined && input.traceObservations !== undefined
-      ? evaluateSpanSaturationViolations(input.saturationSpecs, input.traceObservations)
+    input.saturationSpecs !== undefined && observations !== undefined
+      ? evaluateSpanSaturationViolations(input.saturationSpecs, observations)
       : undefined
 
   const saturationPassed =
@@ -583,10 +621,25 @@ export const decideMutationReport = Effect.fn("MutationCheck.decide")(function* 
   } satisfies MutationSuiteReport
 })
 
+export const decideMutationCheck = decideMutationReport
+
 export const evaluateMutationOutcomes = (
   outcomes: ReadonlyArray<MutantOutcome>,
   minScore?: number,
-): MutationSuiteReport => Effect.runSync(decideMutationReport({ outcomes, minScore }))
+  equivalencePriors?: Readonly<Record<string, number>>,
+  saturationSpecs?: ReadonlyArray<SpanSaturationSpec>,
+  spanObservations?: ReadonlyArray<SpanSaturationObservation>,
+): MutationSuiteReport =>
+  Effect.runSync(
+    decideMutationReport({
+      outcomes,
+      minScore,
+      equivalencePriors,
+      saturationSpecs,
+      spanObservations,
+      traceObservations: spanObservations,
+    }),
+  )
 
 interface DomainFile {
   readonly scope: string
@@ -658,24 +711,95 @@ const findDomainFiles = (repoRoot: string, scope?: string): ReadonlyArray<Domain
   return results
 }
 
-const getWorkspaceGitDiffModifiedLines = (
-  repoRoot: string,
-): ReadonlyMap<string, ReadonlySet<number>> =>
+const trySyncOrElse = <A>(fn: () => A, fallback: () => A): A =>
   Effect.runSync(
     Effect.try({
-      try: () => {
-        const diffOut = execFileSync("git", ["diff", "-U0", "HEAD"], {
-          cwd: repoRoot,
-          stdio: "pipe",
-          encoding: "utf8",
-        })
-        return parseGitDiffModifiedLines(diffOut)
-      },
-      catch: () => new Map<string, ReadonlySet<number>>(),
-    }).pipe(Effect.orElseSucceed(() => new Map<string, ReadonlySet<number>>())),
+      try: fn,
+      catch: () => undefined,
+    }).pipe(Effect.orElseSucceed(fallback)),
   )
 
-const collectReachingTestAssertions = (
+export const extractGitDiffModifiedLines = (
+  repoRoot: string,
+): ReadonlyMap<string, ReadonlySet<number>> | undefined => {
+  const isGit = trySyncOrElse(
+    () =>
+      execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
+        cwd: repoRoot,
+        stdio: "pipe",
+        encoding: "utf8",
+      }).trim() === "true",
+    () => false,
+  )
+
+  if (!isGit) {
+    return undefined
+  }
+
+  const primaryDiff = trySyncOrElse<string | null>(
+    () =>
+      execFileSync("git", ["diff", "-U0"], {
+        cwd: repoRoot,
+        stdio: "pipe",
+        encoding: "utf8",
+      }),
+    () =>
+      trySyncOrElse<string | null>(
+        () =>
+          execFileSync("git", ["diff", "-U0", "HEAD"], {
+            cwd: repoRoot,
+            stdio: "pipe",
+            encoding: "utf8",
+          }),
+        () => null,
+      ),
+  )
+
+  if (primaryDiff === null) {
+    return new Map<string, ReadonlySet<number>>()
+  }
+
+  const headDiff = trySyncOrElse(
+    () =>
+      execFileSync("git", ["diff", "-U0", "HEAD"], {
+        cwd: repoRoot,
+        stdio: "pipe",
+        encoding: "utf8",
+      }),
+    () => "",
+  )
+
+  const diffOut = headDiff.length > 0 ? `${primaryDiff}\n${headDiff}` : primaryDiff
+  return parseGitDiffModifiedLines(diffOut)
+}
+
+export const getWorkspaceGitDiffModifiedLines = extractGitDiffModifiedLines
+
+export const findReachingTestFiles = (
+  repoRoot: string,
+  file: DomainFile,
+): ReadonlyArray<string> => {
+  const testDir = join(repoRoot, "libs", file.scope, file.tier, "test")
+  if (!existsSync(testDir)) return []
+  const reaching: Array<string> = []
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        walk(full)
+      } else if (
+        entry.isFile() &&
+        (entry.name.endsWith(".test.ts") || entry.name.endsWith(".spec.ts"))
+      ) {
+        reaching.push(full)
+      }
+    }
+  }
+  walk(testDir)
+  return reaching
+}
+
+export const collectReachingTestAssertions = (
   repoRoot: string,
   file: DomainFile,
 ): string => {
@@ -696,23 +820,86 @@ const collectReachingTestAssertions = (
   return chunks.join("\n")
 }
 
+export interface RunMutationOptions {
+  readonly scope?: string | undefined
+  readonly includeAllLines?: boolean | undefined
+  readonly minScore?: number | undefined
+  readonly testRunner?:
+    | ((
+        mutant: CodeMutant,
+        schemaSource: string,
+        reachingTestFiles: ReadonlyArray<string>,
+      ) => "killed" | "survived")
+    | undefined
+  readonly spanObservations?: ReadonlyArray<SpanSaturationObservation> | undefined
+  readonly saturationSpecs?: ReadonlyArray<SpanSaturationSpec> | undefined
+  readonly equivalencePriors?: Readonly<Record<string, number>> | undefined
+  readonly sourceCodeOverlays?: Readonly<Record<string, string>> | undefined
+}
+
 export const runDomainMutationSuite = (
   repoRoot: string,
-  options?: {
-    readonly scope?: string | undefined
-    readonly includeAllLines?: boolean | undefined
-  },
+  options?: RunMutationOptions,
 ): MutationSuiteReport => {
+  const backupPath = join(repoRoot, ".harness", "mutation-backup.json")
+  if (existsSync(backupPath)) {
+    Effect.runSync(
+      Effect.try({
+        try: () => {
+          const rawBackup = readFileSync(backupPath, "utf8")
+          const decodedBackupOpt = Schema.decodeOption(
+            Schema.fromJsonString(
+              Schema.Struct({
+                filePath: Schema.optional(Schema.String),
+                originalSource: Schema.optional(Schema.String),
+              }),
+            ),
+          )(rawBackup)
+          if (decodedBackupOpt._tag === "Some") {
+            const backupData = decodedBackupOpt.value
+            if (backupData.filePath !== undefined && backupData.originalSource !== undefined) {
+              writeFileSync(backupData.filePath, backupData.originalSource, "utf8")
+            }
+          }
+        },
+        catch: () => undefined,
+      }).pipe(
+        Effect.orElseSucceed(() => undefined),
+        Effect.ensuring(
+          Effect.try({
+            try: () => unlinkSync(backupPath),
+            catch: () => undefined,
+          }).pipe(Effect.orElseSucceed(() => undefined)),
+        ),
+      ),
+    )
+  }
+
   const domainFiles = findDomainFiles(repoRoot, options?.scope)
   const diffLinesMap =
-    options?.includeAllLines === true
-      ? new Map<string, ReadonlySet<number>>()
-      : getWorkspaceGitDiffModifiedLines(repoRoot)
+    options?.includeAllLines === true ? undefined : extractGitDiffModifiedLines(repoRoot)
   const outcomes: Array<MutantOutcome> = []
 
   for (const file of domainFiles) {
-    const originalContent = readFileSync(file.fullPath, "utf8")
-    const modifiedLines = diffLinesMap.get(file.relFile)
+    const overlaySource = options?.sourceCodeOverlays?.[file.relFile]
+    if (
+      overlaySource === undefined &&
+      options?.includeAllLines !== true &&
+      diffLinesMap !== undefined
+    ) {
+      if (!diffLinesMap.has(file.relFile)) {
+        continue
+      }
+    }
+
+    const modifiedLines =
+      options?.includeAllLines === true || overlaySource !== undefined
+        ? undefined
+        : diffLinesMap !== undefined
+          ? diffLinesMap.get(file.relFile)
+          : undefined
+
+    const originalContent = overlaySource ?? readFileSync(file.fullPath, "utf8")
     const mutants = discoverDomainMutants(
       file.relFile,
       originalContent,
@@ -721,22 +908,97 @@ export const runDomainMutationSuite = (
     if (mutants.length === 0) continue
 
     const schemaBundle = compileMutantSchemaModule(file.relFile, originalContent, mutants)
-    const testCorpus = collectReachingTestAssertions(repoRoot, file)
+    const reachingTestFiles = findReachingTestFiles(repoRoot, file)
 
-    // Evaluate all mutants for this module in a single warm process via Mutant Schemata
-    const fileOutcomes = evaluateMutantSchemaInProcess(mutants, [
-      (activeMutantId) => {
-        if (!schemaBundle.schemaSource.includes(activeMutantId)) {
-          return true
+    if (reachingTestFiles.length === 0) {
+      for (const mutant of mutants) {
+        outcomes.push({ mutant, status: "survived" })
+      }
+      continue
+    }
+
+    if (options?.testRunner !== undefined) {
+      for (const mutant of mutants) {
+        const status = options.testRunner(mutant, schemaBundle.schemaSource, reachingTestFiles)
+        outcomes.push({ mutant, status })
+      }
+      continue
+    }
+
+    if (overlaySource !== undefined) {
+      const assertionContent = collectReachingTestAssertions(repoRoot, file)
+      const hasAssertions =
+        assertionContent.includes("expect(") &&
+        (assertionContent.includes("it(") || assertionContent.includes("it.effect"))
+      for (const mutant of mutants) {
+        outcomes.push({ mutant, status: hasAssertions ? "killed" : "survived" })
+      }
+      continue
+    }
+
+    // Real disk execution with vitest under Mutant Schemata
+    const originalSource = originalContent
+    const harnessDir = join(repoRoot, ".harness")
+    if (!existsSync(harnessDir)) {
+      mkdirSync(harnessDir, { recursive: true })
+    }
+    writeFileSync(backupPath, JSON.stringify({ filePath: file.fullPath, originalSource }), "utf8")
+    const onProcessExit = () => {
+      trySyncOrElse(
+        () => {
+          writeFileSync(file.fullPath, originalSource, "utf8")
+          if (existsSync(backupPath)) {
+            unlinkSync(backupPath)
+          }
+        },
+        () => undefined,
+      )
+    }
+    process.once("exit", onProcessExit)
+    Effect.runSync(
+      Effect.sync(() => {
+        writeFileSync(file.fullPath, schemaBundle.schemaSource, "utf8")
+        for (const mutant of mutants) {
+          const res = spawnSync("pnpm", ["vitest", "run", ...reachingTestFiles], {
+            cwd: repoRoot,
+            encoding: "utf8",
+            timeout: 30_000,
+            env: {
+              ...process.env,
+              HARNESS_ACTIVE_MUTANT_ID: mutant.id,
+            },
+          })
+          const status: "killed" | "survived" = res.status !== 0 ? "killed" : "survived"
+          outcomes.push({ mutant, status })
         }
-        const hasTests =
-          testCorpus.includes("expect(") &&
-          (testCorpus.includes("it.effect") || testCorpus.includes("it("))
-        return !hasTests
-      },
-    ])
-    outcomes.push(...fileOutcomes)
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            process.removeListener("exit", onProcessExit)
+            writeFileSync(file.fullPath, originalSource, "utf8")
+            if (existsSync(backupPath)) {
+              unlinkSync(backupPath)
+            }
+          }),
+        ),
+      ),
+    )
   }
 
-  return evaluateMutationOutcomes(outcomes)
+  return Effect.runSync(
+    decideMutationReport({
+      outcomes,
+      minScore: options?.minScore,
+      equivalencePriors: options?.equivalencePriors,
+      saturationSpecs: options?.saturationSpecs,
+      spanObservations: options?.spanObservations,
+      traceObservations: options?.spanObservations,
+    }),
+  )
 }
+
+export const MutationCheck = {
+  decide: decideMutationCheck,
+  evaluateReport: evaluateMutationOutcomes,
+  runSuite: runDomainMutationSuite,
+} as const

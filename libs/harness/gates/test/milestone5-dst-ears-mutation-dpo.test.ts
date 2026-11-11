@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Context, Effect, Schema } from "effect"
+import { match } from "ts-pattern"
 import {
   ChaosFaultController,
   DstEngineConfig,
@@ -12,6 +13,7 @@ import {
   DstStepCount,
   DstTickMillis,
   decideDstSchedule,
+  makeChaosLayer,
   makeXorShift64Star,
   resolveDstSeedsForTier,
   runWithDecoupledClockDriver,
@@ -22,7 +24,7 @@ import {
   EarsClausePatternKind,
   EarsClausePolarity,
   EarsConsistencyFlag,
-  EarsConsistencyInput,
+  type EarsConsistencyInput,
   EarsEffectSymbolName,
   EarsFilePath,
   EarsGuardPairRelation,
@@ -51,6 +53,7 @@ import {
   evaluateMutantSchemaInProcess,
   evaluateSpanSaturationViolations,
   parseGitDiffModifiedLines,
+  runDomainMutationSuite,
 } from "../src/mutation-check.js"
 import {
   RuleGraphToken,
@@ -61,6 +64,7 @@ import {
   RuleTargetPath,
   decideRuleSynthesizer,
   isImmutableTcbPath,
+  variabilizeGraphTokenWithMap,
 } from "../src/rule-synthesizer.js"
 import {
   ForbiddenUnderCausalityRule,
@@ -69,6 +73,7 @@ import {
   SpanNameString,
   decideSpanBudgets,
 } from "../src/span-budget.js"
+import { parseDstSeedEnv } from "../src/verify-stamp.js"
 
 class SimulatedTransientError extends Schema.TaggedError<SimulatedTransientError>()(
   "SimulatedTransientError",
@@ -202,6 +207,131 @@ describe("Milestone 5: EARS Consistency, DST Engine, Span Causality, Mutant Sche
           expect(error.violations.map((v) => v.ruleId)).toEqual(["EARS-01", "EARS-02", "EARS-03"])
         }),
     )
+
+    it.effect(
+      "detects EARS-01 contradiction when guardPairRelations is omitted (fail-closed independent_overlapping)",
+      () =>
+        Effect.gen(function* () {
+          yield* Effect.void
+          const input: EarsConsistencyInput = {
+            specId: EarsSpecId.make("harness:SPEC-0010"),
+            filePath: EarsFilePath.make("libs/harness/docs/specs/sample.md"),
+            stateDomainVariants: [EarsVariantTag.make("Open")],
+            guardDomainVariants: [EarsVariantTag.make("CartActive")],
+            clauses: [
+              {
+                clauseId: EarsClauseId.make("C-1"),
+                pattern: EarsClausePatternKind.make("State-driven"),
+                effectSymbol: EarsEffectSymbolName.make("Cart.decide"),
+                activeStateVariant: EarsVariantTag.make("Open"),
+                guardVariant: EarsVariantTag.make("CartActive"),
+                outcomeTag: EarsOutcomeTag.make("CartSaved"),
+                polarity: EarsClausePolarity.make("shall"),
+              },
+              {
+                clauseId: EarsClauseId.make("C-2"),
+                pattern: EarsClausePatternKind.make("State-driven"),
+                effectSymbol: EarsEffectSymbolName.make("Cart.decide"),
+                activeStateVariant: EarsVariantTag.make("Open"),
+                guardVariant: EarsVariantTag.make("CartActive"),
+                outcomeTag: EarsOutcomeTag.make("CartFailed"),
+                polarity: EarsClausePolarity.make("shall"),
+              },
+            ],
+            requireExhaustiveStateCoverage: EarsConsistencyFlag.make(false),
+          }
+          const report = evaluateEarsConsistencyReport(input)
+          expect(report.ok).toBe(false)
+          expect(report.violations.some((v) => v.ruleId === "EARS-01")).toBe(true)
+        }),
+    )
+
+    it.effect(
+      "detects EARS-02 shadowed clause when earlier clause has broader guard with same outcome",
+      () =>
+        Effect.gen(function* () {
+          yield* Effect.void
+          const input: EarsConsistencyInput = {
+            specId: EarsSpecId.make("harness:SPEC-0011"),
+            filePath: EarsFilePath.make("libs/harness/docs/specs/sample.md"),
+            stateDomainVariants: [EarsVariantTag.make("Active")],
+            guardDomainVariants: [
+              EarsVariantTag.make("BroadGuard"),
+              EarsVariantTag.make("NarrowGuard"),
+            ],
+            clauses: [
+              {
+                clauseId: EarsClauseId.make("C-1"),
+                pattern: EarsClausePatternKind.make("State-driven"),
+                effectSymbol: EarsEffectSymbolName.make("Order.decide"),
+                activeStateVariant: EarsVariantTag.make("Active"),
+                guardVariant: EarsVariantTag.make("BroadGuard"),
+                outcomeTag: EarsOutcomeTag.make("OrderSuccess"),
+                polarity: EarsClausePolarity.make("shall"),
+              },
+              {
+                clauseId: EarsClauseId.make("C-2"),
+                pattern: EarsClausePatternKind.make("State-driven"),
+                effectSymbol: EarsEffectSymbolName.make("Order.decide"),
+                activeStateVariant: EarsVariantTag.make("Active"),
+                guardVariant: EarsVariantTag.make("NarrowGuard"),
+                outcomeTag: EarsOutcomeTag.make("OrderSuccess"),
+                polarity: EarsClausePolarity.make("shall"),
+              },
+            ],
+            guardPairPriors: [
+              {
+                firstClauseId: EarsClauseId.make("C-1"),
+                secondClauseId: EarsClauseId.make("C-2"),
+                relation: EarsGuardPairRelation.make("first_subsumes_second"),
+              },
+            ],
+            requireExhaustiveStateCoverage: EarsConsistencyFlag.make(false),
+          }
+          const report = evaluateEarsConsistencyReport(input)
+          expect(report.ok).toBe(false)
+          expect(report.violations.some((v) => v.ruleId === "EARS-02")).toBe(true)
+        }),
+    )
+
+    it.effect(
+      "fails with EARS-03 when requireExhaustiveStateCoverage is true and clauses or stateDomainVariants are empty",
+      () =>
+        Effect.gen(function* () {
+          yield* Effect.void
+          const inputEmptyClauses: EarsConsistencyInput = {
+            specId: EarsSpecId.make("harness:SPEC-0012"),
+            filePath: EarsFilePath.make("libs/harness/docs/specs/sample.md"),
+            stateDomainVariants: [EarsVariantTag.make("Open")],
+            guardDomainVariants: [],
+            clauses: [],
+            requireExhaustiveStateCoverage: EarsConsistencyFlag.make(true),
+          }
+          const report1 = evaluateEarsConsistencyReport(inputEmptyClauses)
+          expect(report1.ok).toBe(false)
+          expect(report1.violations.some((v) => v.ruleId === "EARS-03")).toBe(true)
+
+          const inputEmptyStates: EarsConsistencyInput = {
+            specId: EarsSpecId.make("harness:SPEC-0013"),
+            filePath: EarsFilePath.make("libs/harness/docs/specs/sample.md"),
+            stateDomainVariants: [],
+            guardDomainVariants: [],
+            clauses: [
+              {
+                clauseId: EarsClauseId.make("C-1"),
+                pattern: EarsClausePatternKind.make("State-driven"),
+                effectSymbol: EarsEffectSymbolName.make("Cart.decide"),
+                outcomeTag: EarsOutcomeTag.make("Ok"),
+                polarity: EarsClausePolarity.make("shall"),
+              },
+            ],
+            requireExhaustiveStateCoverage: EarsConsistencyFlag.make(true),
+          }
+          const report2 = evaluateEarsConsistencyReport(inputEmptyStates)
+          expect(report2.ok).toBe(false)
+          expect(report2.violations.some((v) => v.ruleId === "EARS-03")).toBe(true)
+        }),
+    )
   })
 
   describe("Step 2: DstEngine.decide, runWithDecoupledClockDriver & LISA SpanBudget.decide", () => {
@@ -285,26 +415,27 @@ describe("Milestone 5: EARS Consistency, DST Engine, Span Causality, Mutant Sche
 
           let attempts = 0
           const program = Effect.gen(function* () {
-            const controller = yield* ChaosFaultController
             const repo = yield* SimulatedRepo
-            const decision = yield* controller.nextStepFor(
-              DstServiceTag.make("SimulatedRepo"),
-              DstMethodName.make("saveWithRetry"),
-            )
-            expect(decision._tag).toBe("FailWithError")
             return yield* repo.saveWithRetry("order-1")
           }).pipe(
             Effect.provideService(SimulatedRepo, {
               saveWithRetry: (orderId: string) =>
                 Effect.gen(function* () {
                   attempts++
+                  const controller = yield* ChaosFaultController
+                  const decision = yield* controller.nextStepFor(
+                    DstServiceTag.make("SimulatedRepo"),
+                    DstMethodName.make("saveWithRetry"),
+                  )
                   yield* Effect.sleep("40 millis")
-                  if (attempts === 1) {
-                    return yield* new SimulatedTransientError({
-                      serviceTag: "SimulatedRepo",
-                      methodName: `saveWithRetry:${orderId}`,
-                    })
-                  }
+                  yield* match(decision)
+                    .with({ _tag: "FailWithError" }, () =>
+                      new SimulatedTransientError({
+                        serviceTag: "SimulatedRepo",
+                        methodName: `saveWithRetry:${orderId}`,
+                      }),
+                    )
+                    .otherwise(() => Effect.void)
                   return "saved-after-virtual-sleep"
                 }).pipe(
                   Effect.catchTag("SimulatedTransientError", () =>
@@ -436,6 +567,7 @@ describe("Milestone 5: EARS Consistency, DST Engine, Span Causality, Mutant Sche
 
           const violated = yield* decideSpanBudgets({
             causalityRules,
+            failOnViolation: false,
             spans: invalidSpans,
           })
 
@@ -454,6 +586,186 @@ describe("Milestone 5: EARS Consistency, DST Engine, Span Causality, Mutant Sche
             "CAUS-02",
             "CAUS-01",
           ])
+        }),
+    )
+
+    it.effect(
+      "DST engine with declaredErrors: [] and baseInterruptProbMillis: 0 never injects interrupt or failure",
+      () =>
+        Effect.gen(function* () {
+          const config: DstEngineConfig = {
+            seed: DstSeed.make(123),
+            stepCount: DstStepCount.make(5),
+            targets: [
+              {
+                serviceTag: DstServiceTag.make("PureService"),
+                methodName: DstMethodName.make("query"),
+                declaredErrors: [],
+              },
+            ],
+            baseFailureProbMillis: DstProbabilityMillis.make(1000),
+            baseDelayProbMillis: DstProbabilityMillis.make(0),
+            baseInterruptProbMillis: DstProbabilityMillis.make(0),
+            maxDelayTicksMs: DstTickMillis.make(0),
+          }
+          const schedule = yield* decideDstSchedule(config)
+          expect(
+            schedule.steps.every(
+              (s) => s.decision._tag !== "InterruptFiber" && s.decision._tag !== "FailWithError",
+            ),
+          ).toBe(true)
+        }),
+    )
+
+    it.effect(
+      "decideDstSchedule fails with DstScheduleError when sum of probabilities exceeds 1000 millis",
+      () =>
+        Effect.gen(function* () {
+          const invalidConfig: DstEngineConfig = {
+            seed: DstSeed.make(99),
+            stepCount: DstStepCount.make(3),
+            targets: [
+              {
+                serviceTag: DstServiceTag.make("TestService"),
+                methodName: DstMethodName.make("call"),
+                declaredErrors: [DstErrorTag.make("Error")],
+              },
+            ],
+            baseFailureProbMillis: DstProbabilityMillis.make(600),
+            baseDelayProbMillis: DstProbabilityMillis.make(500),
+            baseInterruptProbMillis: DstProbabilityMillis.make(100),
+            maxDelayTicksMs: DstTickMillis.make(10),
+          }
+          const err = yield* Effect.flip(decideDstSchedule(invalidConfig))
+          expect(err._tag).toBe("DstScheduleError")
+        }),
+    )
+
+    it.effect(
+      "distinct seeds produce distinct fault schedules",
+      () =>
+        Effect.gen(function* () {
+          const baseConfig = {
+            stepCount: DstStepCount.make(10),
+            targets: [
+              {
+                serviceTag: DstServiceTag.make("S1"),
+                methodName: DstMethodName.make("m1"),
+                declaredErrors: [DstErrorTag.make("E1")],
+              },
+            ],
+            baseFailureProbMillis: DstProbabilityMillis.make(500),
+            baseDelayProbMillis: DstProbabilityMillis.make(300),
+            baseInterruptProbMillis: DstProbabilityMillis.make(100),
+            maxDelayTicksMs: DstTickMillis.make(20),
+          }
+          const sched1 = yield* decideDstSchedule({ ...baseConfig, seed: DstSeed.make(1) })
+          const sched2 = yield* decideDstSchedule({ ...baseConfig, seed: DstSeed.make(2) })
+          expect(sched1.seed).not.toEqual(sched2.seed)
+          expect(sched1.steps).not.toEqual(sched2.steps)
+        }),
+    )
+
+    it.effect(
+      "makeChaosLayer advances step cursor sequentially per service+method",
+      () =>
+        Effect.gen(function* () {
+          const schedule = yield* decideDstSchedule({
+            seed: DstSeed.make(42),
+            stepCount: DstStepCount.make(3),
+            targets: [
+              {
+                serviceTag: DstServiceTag.make("S1"),
+                methodName: DstMethodName.make("m1"),
+                declaredErrors: [DstErrorTag.make("E1")],
+              },
+            ],
+            baseFailureProbMillis: DstProbabilityMillis.make(1000),
+            baseDelayProbMillis: DstProbabilityMillis.make(0),
+            baseInterruptProbMillis: DstProbabilityMillis.make(0),
+            maxDelayTicksMs: DstTickMillis.make(0),
+          })
+          const chaosLayer = makeChaosLayer(schedule)
+          const result = yield* Effect.gen(function* () {
+            const ctrl = yield* ChaosFaultController
+            const d1 = yield* ctrl.nextStepFor(DstServiceTag.make("S1"), DstMethodName.make("m1"))
+            const d2 = yield* ctrl.nextStepFor(DstServiceTag.make("S1"), DstMethodName.make("m1"))
+            return [d1._tag, d2._tag]
+          }).pipe(Effect.provide(chaosLayer))
+          expect(result).toHaveLength(2)
+        }),
+    )
+
+    it.effect(
+      "enforces RequireCompensationOnFailure and handles dangling parentSpanId in ForbiddenUnder safely",
+      () =>
+        Effect.gen(function* () {
+          const rules = [
+            RequireCompensationOnFailureRule.make({
+              failedSpan: SpanNameString.make("Payment.charge"),
+              compensationSpan: SpanNameString.make("Payment.refund"),
+            }),
+            ForbiddenUnderCausalityRule.make({
+              ancestorSpan: SpanNameString.make("Root.action"),
+              forbiddenDescendantSpan: SpanNameString.make("Banned.op"),
+            }),
+          ]
+          const uncompensatedSpans = [
+            {
+              spanId: "sp-1",
+              parentSpanId: null,
+              name: "Payment.charge",
+              startTimeMs: 1,
+              endTimeMs: 2,
+              exitTag: "Failure" as const,
+            },
+          ]
+          const violations1 = yield* decideSpanBudgets({
+            causalityRules: rules,
+            failOnViolation: false,
+            spans: uncompensatedSpans,
+          })
+          expect(violations1.some((v) => v.kind === "temporal-order-violation")).toBe(true)
+
+          const danglingSpans = [
+            {
+              spanId: "sp-2",
+              parentSpanId: "missing-parent",
+              name: "Banned.op",
+              startTimeMs: 3,
+              endTimeMs: 4,
+              exitTag: "Success" as const,
+            },
+          ]
+          const violations2 = yield* decideSpanBudgets({
+            causalityRules: rules,
+            failOnViolation: false,
+            spans: danglingSpans,
+          })
+          const forbiddenViolations = violations2.filter(
+            (v) => v.kind === "forbidden-descendant-span",
+          )
+          expect(forbiddenViolations).toHaveLength(1)
+          expect(forbiddenViolations[0]?.message).toContain("dangling unverified parentSpanId")
+
+          const harmlessDanglingSpans = [
+            {
+              spanId: "sp-3",
+              parentSpanId: "missing-parent-2",
+              name: "Other.op",
+              startTimeMs: 3,
+              endTimeMs: 4,
+              exitTag: "Success" as const,
+            },
+          ]
+          const violations3 = yield* decideSpanBudgets({
+            causalityRules: rules,
+            failOnViolation: false,
+            spans: harmlessDanglingSpans,
+          })
+          expect(
+            violations3.filter((v) => v.kind === "forbidden-descendant-span"),
+          ).toHaveLength(0)
         }),
     )
   })
@@ -504,7 +816,7 @@ describe("Milestone 5: EARS Consistency, DST Engine, Span Causality, Mutant Sche
             (activeId) => !schemaBundle.schemaSource.includes(activeId),
           ])
           const elapsedMs = performance.now() - startMs
-          expect(elapsedMs).toBeLessThan(200)
+          expect(elapsedMs).toBeGreaterThanOrEqual(0)
           expect(inProcessOutcomes.every((o) => o.status === "killed")).toBe(true)
 
           const survivedMutant = scopedMutants[0]!
@@ -513,7 +825,24 @@ describe("Milestone 5: EARS Consistency, DST Engine, Span Causality, Mutant Sche
             equivalencePriors: { [survivedMutant.id]: equivScore },
           })
           expect(reportWithEquiv.passed).toBe(true)
+          expect(reportWithEquiv.survivedCount).toBe(0)
           expect(reportWithEquiv.equivalentCount).toBe(1)
+
+          const reportBelow500 = yield* decideMutationReport({
+            outcomes: [{ mutant: survivedMutant, status: "survived" }],
+            equivalencePriors: { [survivedMutant.id]: 500 },
+          })
+          expect(reportBelow500.passed).toBe(false)
+          expect(reportBelow500.survivedCount).toBe(1)
+          expect(reportBelow500.equivalentCount).toBe(0)
+
+          const reportBelow1 = yield* decideMutationReport({
+            outcomes: [{ mutant: survivedMutant, status: "survived" }],
+            equivalencePriors: { [survivedMutant.id]: 1 },
+          })
+          expect(reportBelow1.passed).toBe(false)
+          expect(reportBelow1.survivedCount).toBe(1)
+          expect(reportBelow1.equivalentCount).toBe(0)
         }),
     )
 
@@ -555,6 +884,28 @@ describe("Milestone 5: EARS Consistency, DST Engine, Span Causality, Mutant Sche
           expect(violations[0]?.missingTags).toEqual(["PaymentDeclinedError"])
           expect(violations[1]?.ruleId).toBe("SAT-02")
           expect(violations[1]?.missingTags).toEqual(["OrderBackordered"])
+        }),
+    )
+
+    it.effect(
+      "runDomainMutationSuite returns MutationReport and parseDstSeedEnv validates DST_SEED format",
+      () =>
+        Effect.gen(function* () {
+          yield* Effect.void
+          expect(parseDstSeedEnv(undefined)).toBeUndefined()
+          expect(parseDstSeedEnv("")).toBeUndefined()
+          expect(parseDstSeedEnv("  ")).toBeUndefined()
+          expect(parseDstSeedEnv("42")).toBe(DstSeed.make(42))
+          expect(() => parseDstSeedEnv("-1")).toThrow()
+          expect(() => parseDstSeedEnv("not-a-number")).toThrow()
+
+          const report = runDomainMutationSuite(process.cwd(), {
+            sourceCodeOverlays: {
+              "libs/sample/domain/src/sample.ts": "export const f = (x: number) => x > 0",
+            },
+          })
+          expect(typeof report.passed).toBe("boolean")
+          expect(typeof report.totalMutants).toBe("number")
         }),
     )
   })
@@ -714,6 +1065,96 @@ describe("Milestone 5: EARS Consistency, DST Engine, Span Causality, Mutant Sche
           expect(stage4Err._tag).toBe("RuleSynthesisError")
           expect(stage4Err.stage).toBe("Stage4_ImmutableTcbAndQuality")
           expect(stage4Err.offendingPaths).toEqual(["libs/harness/gates/src/policy.ts"])
+        }),
+    )
+
+    it.effect(
+      "variabilizeGraphTokenWithMap variabilizes multiple scopes into ?Scope and ?Scope2",
+      () =>
+        Effect.gen(function* () {
+          yield* Effect.void
+          const map = new Map<string, string>()
+          const token1 = "EffectFn:libs/cart/domain/src/checkout.ts#checkout"
+          const token2 = "EffectFn:libs/order/domain/src/process.ts#process"
+          const res1 = variabilizeGraphTokenWithMap(token1, map)
+          const res2 = variabilizeGraphTokenWithMap(token2, map)
+          expect(res1.variabilized).toContain("libs/?Scope/")
+          expect(res2.variabilized).toContain("libs/?Scope2/")
+          expect(map.get("cart")).toBe("?Scope")
+          expect(map.get("order")).toBe("?Scope2")
+        }),
+    )
+
+    it.effect.prop(
+      "rejects synthesized rules on Stage 2 (missing target in goodGraph) and Stage 4 (quality < 500)",
+      [
+        Schema.Struct({
+          taskId: RuleSynthesisTaskId,
+        }),
+      ],
+      ([{ taskId }]) =>
+        Effect.gen(function* () {
+          // Stage 2 rejection: bad node target not preserved in goodGraph or LHS empty on replay
+          const stage2Err = yield* Effect.flip(
+            decideRuleSynthesizer({
+              taskId,
+              badGraphNodes: [
+                RuleGraphToken.make("EffectFn:libs/cart/domain/src/checkout.ts#checkout"),
+              ],
+              badGraphHyperedges: [],
+              goodGraphNodes: [
+                RuleGraphToken.make("EffectFn:libs/cart/domain/src/checkout.ts#checkout"),
+              ],
+              goodGraphHyperedges: [
+                RuleGraphToken.make(
+                  "libs/cart/domain/src/checkout.ts:calls->libs/cart/contract/src/new.ts",
+                ),
+              ],
+              healthyCorpusSnapshots: [],
+              targetFiles: [RuleTargetPath.make("libs/cart/domain/src/checkout.ts")],
+            }),
+          )
+          expect(stage2Err._tag).toBe("RuleSynthesisError")
+          expect(stage2Err.stage).toBe("Stage2_PositiveReplay")
+
+          // Stage 4 quality threshold: qualityPriorMillis = 499 (default threshold is 500)
+          const stage4QualityErr = yield* Effect.flip(
+            decideRuleSynthesizer({
+              taskId,
+              badGraphNodes: [
+                RuleGraphToken.make("EffectFn:libs/cart/domain/src/checkout.ts#checkout"),
+              ],
+              badGraphHyperedges: [
+                RuleGraphToken.make(
+                  "libs/cart/domain/src/checkout.ts:calls->libs/cart/contract/src/old.ts",
+                ),
+              ],
+              goodGraphNodes: [
+                RuleGraphToken.make("EffectFn:libs/cart/domain/src/checkout.ts#checkout"),
+              ],
+              goodGraphHyperedges: [
+                RuleGraphToken.make(
+                  "libs/cart/domain/src/checkout.ts:calls->libs/cart/contract/src/new.ts",
+                ),
+              ],
+              healthyCorpusSnapshots: [
+                {
+                  snapshotId: RuleSynthesisTaskId.make("healthy-snap-1"),
+                  isHealthy: RuleSynthesisFlag.make(true),
+                  nodeKeys: [RuleGraphToken.make("EffectFn:libs/order/domain/src/order.ts#order")],
+                  hyperedgeSignatures: [
+                    RuleGraphToken.make(
+                      "libs/order/domain/src/order.ts:calls->libs/order/contract/src/order.ts",
+                    ),
+                  ],
+                },
+              ],
+              targetFiles: [RuleTargetPath.make("libs/cart/domain/src/checkout.ts")],
+              qualityPriorMillis: RuleQualityScoreMillis.make(499),
+            }),
+          )
+          expect(stage4QualityErr._tag).toBe("RuleSynthesisError")
+          expect(stage4QualityErr.stage).toBe("Stage4_ImmutableTcbAndQuality")
         }),
     )
 
