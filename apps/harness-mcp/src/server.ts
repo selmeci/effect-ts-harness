@@ -46,6 +46,7 @@ import {
   saveGraphSnapshot,
   type SemanticEdgePriors,
   decideStructuralSearch,
+  VerificationStatus,
   writeGraphHeadMeta,
 } from "@harness/graph"
 import {
@@ -539,6 +540,9 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
       const overlays = typedArgs.overlays
       const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
       if (overlays !== undefined && Object.keys(overlays).length > 0) {
+        const compilableKeys = Object.keys(overlays).filter(
+          (k) => (k.endsWith(".ts") || k.endsWith(".tsx")) && !k.endsWith(".d.ts"),
+        )
         const session = getOrCreateWarmProgramSession(root)
         const diags = evaluateOverlayDiagnostics(root, overlays, session)
         const filteredDiags =
@@ -548,10 +552,10 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
         const errors = filteredDiags.filter((d) => d.severity === "error").length
         const warnings = filteredDiags.filter((d) => d.severity === "warning").length
         result = {
-          clean: errors === 0 && warnings === 0,
+          clean: compilableKeys.length > 0 && errors === 0 && warnings === 0,
           diagnostics: filteredDiags,
           summary: {
-            filesChecked: Object.keys(overlays).length,
+            filesChecked: compilableKeys.length,
             filesWithoutPlugin: 0,
             totalFiles: Object.keys(overlays).length,
             errors,
@@ -817,9 +821,7 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
         const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
         const initialRewrite = yield* decideGraphRewrite(graph, mode)
         const initialCandidates = [
-          ...(Option.isSome(initialRewrite.result.recommendedCandidate)
-            ? [initialRewrite.result.recommendedCandidate.value]
-            : []),
+          ...Option.toArray(initialRewrite.result.recommendedCandidate),
           ...initialRewrite.result.alternativeCandidates,
         ]
         const allPatches = initialCandidates.flatMap((c) => c.patches)
@@ -840,9 +842,7 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
 
       const rewriteOutcome = yield* decideGraphRewrite(graph, mode, candidatePriors)
       const candidates = [
-        ...(Option.isSome(rewriteOutcome.result.recommendedCandidate)
-          ? [rewriteOutcome.result.recommendedCandidate.value]
-          : []),
+        ...Option.toArray(rewriteOutcome.result.recommendedCandidate),
         ...rewriteOutcome.result.alternativeCandidates,
       ]
       const selectedCandidate =
@@ -868,7 +868,8 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
           : {
               operations: [],
               overlays: [],
-              roundTripVerified: true,
+              verificationStatus: VerificationStatus.make("Unverified"),
+              roundTripVerified: false,
               compilerDiagnostics: [],
               bisectionProbes: BisectionProbeCount.make(0),
               skippedRuleIds: [],
@@ -879,6 +880,8 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
         initialMeasure: rewriteOutcome.result.initialMeasure,
         finalMeasure: selectedCandidate?.finalMeasure ?? rewriteOutcome.result.initialMeasure,
         totalStepsApplied: selectedCandidate?.patches.length ?? 0,
+        selectedRank: selectedCandidate?.rank ?? null,
+        priorsApplied: candidatePriors !== undefined,
         candidates: candidates.map((c) => ({
           rank: c.rank,
           patches: c.patches,

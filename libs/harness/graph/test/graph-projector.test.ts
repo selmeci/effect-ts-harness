@@ -17,6 +17,8 @@ import {
   type RelationNode,
   type RewritePhase,
   RewriteRuleId,
+  RoleName,
+  verifySubgraphMonomorphism,
 } from "../src/index.js"
 
 const zeroMeasure: GraphMeasure = {
@@ -488,6 +490,7 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
           verifyRoundTrip: true,
         })
 
+        expect(result.verificationStatus).toBe("Verified")
         expect(result.roundTripVerified).toBe(true)
         expect(result.compilerDiagnostics).toEqual([])
         expect(result.overlays.length).toBeGreaterThan(0)
@@ -499,25 +502,36 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
     "REQ-4.3: O(log k) binary-search bisection fault-isolates forced rule failure in 5-patch batch",
     () =>
       Effect.gen(function* () {
+        const targetFile = "libs/sample/domain/src/fn.ts"
         const patch1 = makePatch({
           ruleId: RewriteRuleId.make("REP-05"),
-          primaryNodeKey: NodeKey.make("EffectFn:fn1"),
+          primaryNodeKey: NodeKey.make(`EffectFn:${targetFile}#fn1`),
         })
         const patch2 = makePatch({
           ruleId: RewriteRuleId.make("REP-06"),
           primaryNodeKey: NodeKey.make("SchemaDef:sc1"),
+          insertedEntityNodes: [
+            {
+              _tag: "SchemaDef",
+              schemaName: "sc1",
+              file: targetFile,
+              line: 1,
+              packageTag: "domain",
+              isBranded: true,
+            },
+          ],
         })
         const patch3 = makePatch({
           ruleId: RewriteRuleId.make("REP-07"),
-          primaryNodeKey: NodeKey.make("EffectFn:fn2"),
+          primaryNodeKey: NodeKey.make(`EffectFn:${targetFile}#fn2`),
         })
         const patch4 = makePatch({
           ruleId: RewriteRuleId.make("REP-08"),
-          primaryNodeKey: NodeKey.make("EffectFn:fn3"),
+          primaryNodeKey: NodeKey.make(`EffectFn:${targetFile}#fn3`),
         })
         const patch5 = makePatch({
           ruleId: RewriteRuleId.make("REP-10"),
-          primaryNodeKey: NodeKey.make("EffectFn:fn4"),
+          primaryNodeKey: NodeKey.make(`EffectFn:${targetFile}#fn4`),
         })
 
         const fivePatches = [patch1, patch2, patch3, patch4, patch5]
@@ -526,19 +540,247 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
           initialGraph: emptyGraph,
           targetGraph: emptyGraph,
           patches: fivePatches,
+          existingFiles: {
+            [targetFile]: 'import { Schema } from "effect"\nexport const sc1 = Schema.NonEmptyString\n',
+          },
           verifyRoundTrip: true,
           forceFailRuleIds: [RewriteRuleId.make("REP-06")],
         })
 
         expect(result.skippedRuleIds).toContain(RewriteRuleId.make("REP-06"))
+        expect(result.verificationStatus).toBe("Partial")
         expect(result.roundTripVerified).toBe(false)
         expect(result.bisectionProbes).toBeGreaterThan(0)
-        expect(result.bisectionProbes).toBeLessThanOrEqual(Math.ceil(Math.log2(5)) + 2)
+        expect(result.bisectionProbes).toBeLessThanOrEqual(Math.ceil(Math.log2(5)) + 1)
       }),
   )
 
   it.effect(
-    "REQ-4.4: Fails closed with GraphProjectorError on malformed GraphPatch with empty file path",
+    "REQ-4.3: Real round-trip verification failure (without forceFailRuleIds) skips un-projected graph entity patch",
+    () =>
+      Effect.gen(function* () {
+        const targetFile = "libs/sample/contract/src/schemas.ts"
+        const validPatch = makePatch({
+          ruleId: RewriteRuleId.make("PLAN-01"),
+          phase: "PLAN",
+          primaryNodeKey: NodeKey.make("SchemaDef:ValidItemId"),
+          insertedEntityNodes: [
+            {
+              _tag: "SchemaDef",
+              schemaName: "ValidItemId",
+              file: targetFile,
+              line: 1,
+              packageTag: "contract",
+              isBranded: true,
+            },
+          ],
+        })
+        // Second patch uses REP-11 (which never projects SchemaDef nodes) while claiming SchemaDef:PhantomSchema in H
+        const unextractablePatch = makePatch({
+          ruleId: RewriteRuleId.make("REP-11"),
+          phase: "PLAN",
+          primaryNodeKey: NodeKey.make("SchemaDef:PhantomSchema"),
+          insertedEntityNodes: [
+            {
+              _tag: "SchemaDef",
+              schemaName: "PhantomSchema",
+              file: targetFile,
+              line: 1,
+              packageTag: "contract",
+              isBranded: true,
+            },
+          ],
+        })
+
+        const result = yield* decideGraphProjection({
+          initialGraph: emptyGraph,
+          targetGraph: emptyGraph,
+          patches: [validPatch, unextractablePatch],
+          verifyRoundTrip: true,
+        })
+
+        expect(result.skippedRuleIds).toContain(RewriteRuleId.make("REP-11"))
+        expect(result.verificationStatus).toBe("Partial")
+        expect(result.roundTripVerified).toBe(false)
+      }),
+  )
+
+  it.effect(
+    "REQ-4.1: verifyRoundTrip: false sets verificationStatus to Unverified and roundTripVerified to false",
+    () =>
+      Effect.gen(function* () {
+        const result = yield* decideGraphProjection({
+          initialGraph: emptyGraph,
+          targetGraph: emptyGraph,
+          patches: [],
+          verifyRoundTrip: false,
+        })
+        expect(result.verificationStatus).toBe("Unverified")
+        expect(result.roundTripVerified).toBe(false)
+      }),
+  )
+
+  it.effect(
+    "REQ-4.1: Preserves existing user function and Layer bodies during REP-01..04 repairs (never overwrites with placeholders)",
+    () =>
+      Effect.gen(function* () {
+        const domainFile = "libs/sample/domain/src/order.ts"
+        const infraFile = "libs/sample/infra/src/order-live.ts"
+        const existingDomainCode = [
+          'import { Effect } from "effect"',
+          'export const placeOrder = Effect.fn("Order.placeOrder")(function* (input: OrderId) {',
+          "  const customCalculation = 40 + 2",
+          "  return customCalculation",
+          "})",
+          "",
+        ].join("\n")
+
+        const existingInfraCode = [
+          'import { Effect, Layer } from "effect"',
+          "export const OrderServiceLive = Layer.effect(",
+          "  OrderService,",
+          "  Effect.gen(function* () {",
+          "    const dbConn = yield* SqlClient",
+          "    return { execute: (cmd) => dbConn.run(cmd) }",
+          "  }),",
+          ")",
+          "",
+        ].join("\n")
+
+        const rep02Patch = makePatch({
+          ruleId: RewriteRuleId.make("REP-02"),
+          phase: "REPAIR_ARCH",
+          primaryNodeKey: NodeKey.make(`EffectFn:${domainFile}#placeOrder`),
+          insertedEntityNodes: [
+            {
+              _tag: "EffectFn",
+              qualname: `${domainFile}#placeOrder`,
+              spanName: "Order.placeOrder",
+              file: domainFile,
+              line: 2,
+              packageTag: "domain",
+              isStub: false,
+            },
+            {
+              _tag: "ServiceTag",
+              tagId: "AuditService",
+              name: "AuditService",
+              file: "libs/sample/service/src/ports.ts",
+              packageTag: "service",
+            },
+          ],
+          insertedRelationNodes: [
+            {
+              _tag: "EffectSignature",
+              relationId: RelationId.make(`EffectSignature:${domainFile}#placeOrder`),
+              callerQualname: `${domainFile}#placeOrder`,
+              requiredServices: ["AuditService"],
+              emittedErrors: [],
+              calleeQualnames: [],
+              payloadSchemas: [],
+              file: domainFile,
+              line: 2,
+            },
+          ],
+          insertedRoleEdges: [
+            {
+              _tag: "PlaysRole",
+              relationId: RelationId.make(`EffectSignature:${domainFile}#placeOrder`),
+              entityKey: NodeKey.make(`EffectFn:${domainFile}#placeOrder`),
+              role: RoleName.make("caller"),
+            },
+            {
+              _tag: "PlaysRole",
+              relationId: RelationId.make(`EffectSignature:${domainFile}#placeOrder`),
+              entityKey: NodeKey.make("ServiceTag:AuditService"),
+              role: RoleName.make("requires-service"),
+            },
+          ],
+        })
+
+        const rep04Patch = makePatch({
+          ruleId: RewriteRuleId.make("REP-04a"),
+          phase: "REPAIR_ARCH",
+          primaryNodeKey: NodeKey.make(`ServiceLayer:${infraFile}#OrderServiceLive`),
+          insertedEntityNodes: [
+            {
+              _tag: "ServiceLayer",
+              qualname: `${infraFile}#OrderServiceLive`,
+              layerKind: "live",
+              file: infraFile,
+              packageTag: "infra",
+            },
+          ],
+        })
+
+        const result = yield* decideGraphProjection({
+          initialGraph: emptyGraph,
+          targetGraph: emptyGraph,
+          patches: [rep02Patch, rep04Patch],
+          existingFiles: {
+            [domainFile]: existingDomainCode,
+            [infraFile]: existingInfraCode,
+          },
+          verifyRoundTrip: false,
+        })
+
+        const domainOverlay = result.overlays.find((o) => String(o.targetFile) === domainFile)
+        expect(domainOverlay).toBeDefined()
+        expect(String(domainOverlay?.content)).toContain("const customCalculation = 40 + 2")
+        expect(String(domainOverlay?.content)).toContain("yield* AuditService")
+        expect(String(domainOverlay?.content)).not.toContain("return input")
+
+        const infraOverlay = result.overlays.find((o) => String(o.targetFile) === infraFile)
+        expect(infraOverlay).toBeDefined()
+        expect(String(infraOverlay?.content)).toContain("const dbConn = yield* SqlClient")
+        expect(String(infraOverlay?.content)).not.toContain("execute: () => Effect.void")
+      }),
+  )
+
+  it.effect(
+    "REQ-4.1: No-op REP-05, REP-07, and REP-08 repairs emit 0 operations, add no unused imports, and leave non-match .otherwise() untouched",
+    () =>
+      Effect.gen(function* () {
+        const targetFile = "libs/sample/domain/src/clean.ts"
+        const cleanCode = [
+          "export const compute = (x: number) => {",
+          "  const fallback = someBuilder.otherwise(() => 0)",
+          "  if (x > 10) { return fallback }",
+          "  return x",
+          "}",
+          "",
+        ].join("\n")
+
+        const result = yield* decideGraphProjection({
+          initialGraph: emptyGraph,
+          targetGraph: emptyGraph,
+          patches: [
+            makePatch({
+              ruleId: RewriteRuleId.make("REP-05"),
+              primaryNodeKey: NodeKey.make(`EffectFn:${targetFile}#compute`),
+            }),
+            makePatch({
+              ruleId: RewriteRuleId.make("REP-07"),
+              primaryNodeKey: NodeKey.make(`EffectFn:${targetFile}#compute`),
+            }),
+            makePatch({
+              ruleId: RewriteRuleId.make("REP-08"),
+              primaryNodeKey: NodeKey.make(`EffectFn:${targetFile}#compute`),
+            }),
+          ],
+          existingFiles: {
+            [targetFile]: cleanCode,
+          },
+          verifyRoundTrip: false,
+        })
+
+        expect(result.operations).toHaveLength(0)
+        expect(result.overlays).toHaveLength(0)
+      }),
+  )
+
+  it.effect(
+    "REQ-4.4: Fails closed with GraphProjectorError on malformed GraphPatch with empty file path, path traversal, or missing repair target file",
     () =>
       Effect.gen(function* () {
         const malformedPatch = makePatch({
@@ -556,7 +798,7 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
           ],
         })
 
-        const error = yield* Effect.flip(
+        const emptyPathError = yield* Effect.flip(
           decideGraphProjection({
             targetGraph: emptyGraph,
             patches: [malformedPatch],
@@ -564,12 +806,108 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
           }),
         )
 
-        match(error)
+        match(emptyPathError)
           .with({ _tag: "GraphProjectorError" }, (projErr) => {
-            expect(projErr._tag).toBe("GraphProjectorError")
             expect(projErr.reason).toBe("invalid-patch-target")
           })
           .exhaustive()
+
+        // Path traversal outside repoRoot
+        const traversalPatch = makePatch({
+          ruleId: RewriteRuleId.make("PLAN-01"),
+          primaryNodeKey: NodeKey.make("SchemaDef:Traversal"),
+          insertedEntityNodes: [
+            {
+              _tag: "SchemaDef",
+              schemaName: "Traversal",
+              file: "../../outside-repo.ts",
+              line: 1,
+              packageTag: "contract",
+              isBranded: true,
+            },
+          ],
+        })
+
+        const traversalError = yield* Effect.flip(
+          decideGraphProjection({
+            targetGraph: emptyGraph,
+            patches: [traversalPatch],
+            verifyRoundTrip: false,
+          }),
+        )
+        expect(traversalError.reason).toBe("invalid-patch-target")
+
+        // Missing target file on code repair rule
+        const missingRepairTargetPatch = makePatch({
+          ruleId: RewriteRuleId.make("REP-07"),
+          primaryNodeKey: NodeKey.make("EffectFn:libs/sample/domain/src/does-not-exist.ts#fn"),
+        })
+
+        const missingFileError = yield* Effect.flip(
+          decideGraphProjection({
+            targetGraph: emptyGraph,
+            patches: [missingRepairTargetPatch],
+            verifyRoundTrip: false,
+          }),
+        )
+        expect(missingFileError.reason).toBe("missing-target-file")
       }),
   )
+
+  it("REQ-4.3: verifySubgraphMonomorphism enforces injectivity on entity nodes, relation nodes, and relation-preserving role edges", () => {
+    const fnAlpha = {
+      qualname: "libs/alpha/domain/src/index.ts#decide",
+      spanName: "Alpha.decide",
+      file: "libs/alpha/domain/src/index.ts",
+      line: 1,
+      packageTag: "domain" as const,
+      isStub: false,
+    }
+    const fnBeta = {
+      qualname: "libs/beta/domain/src/index.ts#decide",
+      spanName: "Beta.decide",
+      file: "libs/beta/domain/src/index.ts",
+      line: 1,
+      packageTag: "domain" as const,
+      isStub: false,
+    }
+    const svc = {
+      tagId: "OrderService",
+      name: "OrderService",
+      file: "libs/alpha/service/src/ports.ts",
+      packageTag: "service" as const,
+    }
+
+    // 1. Target graph has 2 distinct #decide functions (Alpha and Beta), extracted graph only has Alpha
+    const targetTwoFns = buildHarnessGraph({ fns: [fnAlpha, fnBeta] })
+    const extractedOneFn = buildHarnessGraph({ fns: [fnAlpha] })
+    const nonInjectiveRes = verifySubgraphMonomorphism(extractedOneFn, targetTwoFns)
+    expect(nonInjectiveRes.isMonomorphic).toBe(false)
+    expect(nonInjectiveRes.missingEntities.length).toBeGreaterThan(0)
+
+    // 2. Target graph has RequiresService (EffectSignature relation + requires-service PlaysRoleEdge), extracted graph omits relation
+    const targetWithSig = buildHarnessGraph({
+      fns: [fnAlpha],
+      services: [svc],
+      requiresService: [
+        { callerQualname: "libs/alpha/domain/src/index.ts#decide", tagId: "OrderService" },
+      ],
+    })
+    const extractedWithoutSig = buildHarnessGraph({
+      fns: [fnAlpha],
+      services: [svc],
+    })
+    const missingRelRes = verifySubgraphMonomorphism(extractedWithoutSig, targetWithSig)
+    expect(missingRelRes.isMonomorphic).toBe(false)
+    expect(
+      missingRelRes.missingRelations.length + missingRelRes.missingRoleEdges.length,
+    ).toBeGreaterThan(0)
+
+    // 3. Positive monomorphism when all entities, relations, and role edges are preserved
+    const validRes = verifySubgraphMonomorphism(targetWithSig, targetWithSig)
+    expect(validRes.isMonomorphic).toBe(true)
+    expect(validRes.missingEntities).toEqual([])
+    expect(validRes.missingRelations).toEqual([])
+    expect(validRes.missingRoleEdges).toEqual([])
+  })
 })

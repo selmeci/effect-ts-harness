@@ -3,6 +3,7 @@ import { Effect, Schema } from "effect"
 import { buildHarnessGraph, RelationId } from "@harness/graph"
 import {
   checkOntologyInvariants,
+  decideGraphEntropy,
   decideOntologyInvariants,
   type GovernanceDocReference,
 } from "../src/index.js"
@@ -979,6 +980,223 @@ spans:
             f.nodeId === "HttpEndpointTuple:users:getUser",
         )
         expect(endpointBrokenFindings).toHaveLength(0)
+      }),
+  )
+
+  it.effect(
+    "preserves multi-word WHILE condition clauses containing 'the' without collapsing to 'while'",
+    () =>
+      Effect.gen(function* () {
+        const graph = buildHarnessGraph({
+          earsSpecs: [
+            {
+              id: "sample:SPEC-0001",
+              title: "State Conditions",
+              status: "accepted",
+              path: "libs/sample/docs/specs/0001.md",
+              enforcedByFiles: ["libs/sample/domain/src/index.ts"],
+              referencedSpans: ["Cart.decide", "Order.decide"],
+              referencedServices: [],
+              referencedErrors: [],
+            },
+          ],
+          fns: [
+            {
+              qualname: "libs/sample/domain/src/index.ts#Cart.decide",
+              spanName: "Cart.decide",
+              packageTag: "domain",
+              file: "libs/sample/domain/src/index.ts",
+              line: 10,
+              successType: "boolean",
+              isStub: false,
+            },
+            {
+              qualname: "libs/sample/domain/src/index.ts#Order.decide",
+              spanName: "Order.decide",
+              packageTag: "domain",
+              file: "libs/sample/domain/src/index.ts",
+              line: 20,
+              successType: "boolean",
+              isStub: false,
+            },
+          ],
+          specifiesSymbols: [
+            {
+              specId: "sample:SPEC-0001",
+              targetKey: "libs/sample/domain/src/index.ts#Cart.decide",
+              targetKind: "EffectFn",
+            },
+            {
+              specId: "sample:SPEC-0001",
+              targetKey: "libs/sample/domain/src/index.ts#Order.decide",
+              targetKind: "EffectFn",
+            },
+          ],
+        })
+
+        const doc: GovernanceDocReference = {
+          id: "sample:SPEC-0001",
+          docPath: "libs/sample/docs/specs/0001.md",
+          status: "accepted",
+          markdown: `---
+id: sample:SPEC-0001
+title: State Conditions
+status: accepted
+date: 2026-10-25
+enforced_by:
+  - libs/sample/domain/src/index.ts
+spans:
+  - Cart.decide
+  - Order.decide
+---
+
+# sample:SPEC-0001: State Conditions
+
+## Requirements
+
+### Area 1: State Rules
+
+| ID | Pattern | Requirement | Effect Symbol | Verification |
+| --- | --- | --- | --- | --- |
+| REQ-1.1 | State-driven | While the cart is open, the system shall approve the item. | Cart.decide | PropertyTest |
+| REQ-1.2 | State-driven | While the order is locked, the system shall reject the item. | Order.decide | PropertyTest |
+`,
+        }
+
+        const report = yield* decideOntologyInvariants({
+          graph,
+          governanceDocs: [doc],
+        })
+
+        const conflicts = report.findings.filter(
+          (f) => f.kind === "ontology-conflicting-requirements",
+        )
+        expect(conflicts).toHaveLength(0)
+      }),
+  )
+
+  it.effect(
+    "augments ontology-invariants and gc-check with Stratified Datalog transitive inference (GraphInfer.decide)",
+    () =>
+      Effect.gen(function* () {
+        // Cart.decide calls helperFn via TracedCall, and helperFn requires PhotoRepo.
+        // Without Datalog INF-01 transitive closure, Cart.decide appears pure (0 direct requires-service edges).
+        // With Datalog INF-01 augmentation, Cart.decide transitively requires PhotoRepo, triggering ontology-while-decider-mismatch.
+        const graph = buildHarnessGraph({
+          earsSpecs: [
+            {
+              id: "sample:SPEC-0001",
+              title: "Transitive Impurity Spec",
+              status: "accepted",
+              path: "libs/sample/docs/specs/0001.md",
+              enforcedByFiles: ["libs/sample/domain/src/index.ts"],
+              referencedSpans: ["Cart.decide"],
+              referencedServices: ["PhotoRepo"],
+              referencedErrors: [],
+            },
+          ],
+          fns: [
+            {
+              qualname: "libs/sample/domain/src/index.ts#Cart.decide",
+              spanName: "Cart.decide",
+              packageTag: "domain",
+              file: "libs/sample/domain/src/index.ts",
+              line: 10,
+              successType: "boolean",
+              isStub: false,
+            },
+            {
+              qualname: "libs/sample/domain/src/index.ts#helperFn",
+              spanName: "Cart.helperFn",
+              packageTag: "domain",
+              file: "libs/sample/domain/src/index.ts",
+              line: 25,
+              successType: "boolean",
+              isStub: false,
+            },
+          ],
+          services: [
+            {
+              tagId: "PhotoRepo",
+              name: "PhotoRepo",
+              packageTag: "service",
+              file: "libs/sample/service/src/index.ts",
+            },
+          ],
+          tracedCalls: [
+            {
+              callerQualname: "libs/sample/domain/src/index.ts#Cart.decide",
+              calleeQualname: "libs/sample/domain/src/index.ts#helperFn",
+              callCount: 1,
+              receiverLayer: null,
+            },
+          ],
+          requiresService: [
+            {
+              callerQualname: "libs/sample/domain/src/index.ts#helperFn",
+              tagId: "PhotoRepo",
+            },
+          ],
+          specifiesSymbols: [
+            {
+              specId: "sample:SPEC-0001",
+              targetKey: "libs/sample/domain/src/index.ts#Cart.decide",
+              targetKind: "EffectFn",
+            },
+          ],
+        })
+
+        const doc: GovernanceDocReference = {
+          id: "sample:SPEC-0001",
+          docPath: "libs/sample/docs/specs/0001.md",
+          status: "accepted",
+          markdown: `---
+id: sample:SPEC-0001
+title: Transitive Impurity Spec
+status: accepted
+date: 2026-10-25
+enforced_by:
+  - libs/sample/domain/src/index.ts
+spans:
+  - Cart.decide
+services:
+  - PhotoRepo
+---
+
+# sample:SPEC-0001: Transitive Impurity Spec
+
+## Requirements
+
+### Area 1: State Rules
+
+| ID | Pattern | Requirement | Effect Symbol | Verification |
+| --- | --- | --- | --- | --- |
+| REQ-1.1 | State-driven | While the cart is active, the engine shall decide checkout. | Cart.decide | PropertyTest |
+`,
+        }
+
+        const report = yield* decideOntologyInvariants({
+          graph,
+          governanceDocs: [doc],
+        })
+
+        expect(
+          report.findings.some(
+            (f) =>
+              f.kind === "ontology-while-decider-mismatch" &&
+              f.nodeId === "sample:SPEC-0001:REQ-1.1",
+          ),
+        ).toBe(true)
+
+        const gcReport = yield* decideGraphEntropy({
+          graph,
+          governanceDocs: [doc],
+        })
+        expect(
+          gcReport.findings.some(
+            (f) => f.kind === "ontology-invariant" && f.nodeId === "sample:SPEC-0001:REQ-1.1",
+          ),
+        ).toBe(true)
       }),
   )
 })

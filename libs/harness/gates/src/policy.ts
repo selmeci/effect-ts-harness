@@ -559,7 +559,7 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
 
   if (
     candidates.some((p) =>
-      /(^|\/)(\.oxlintrc\.json|tools\/oxlint\/.*|libs\/harness\/graph\/policies\.cedar)$/.test(p),
+      /(^|\/)(\.oxlintrc\.json|tools\/oxlint\/.*|.*\.cedar)$/.test(p),
     )
   ) {
     return {

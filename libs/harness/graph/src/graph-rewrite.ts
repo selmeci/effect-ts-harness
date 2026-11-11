@@ -571,9 +571,14 @@ export const verifyDpoGluingCondition = (
     }
   })
 
+/**
+ * Applies a validated DPO `GraphPatch` (or `DraftGraphPatch`) to a `HarnessGraph`,
+ * enforcing the Gluing Condition (Dangling Condition + Bipartite Levi Relation Preservation Law)
+ * and returning the rewritten target hypergraph $H$.
+ */
 export const applyDpoPatchToGraph = (
   graph: HarnessGraph,
-  patch: DraftGraphPatch | GraphPatch,
+  patch: DraftGraphPatch,
 ): Effect.Effect<HarnessGraph, GraphRewriteError> =>
   Effect.gen(function* () {
     yield* verifyDpoGluingCondition(graph, patch)
@@ -663,9 +668,10 @@ export const applyDpoPatchToGraph = (
       }
     })
 
+    const clearFilter = patch.clearViolationFilter
     const nextViolations =
-      "clearViolationFilter" in patch && patch.clearViolationFilter !== undefined
-        ? (graph.branchingViolations ?? []).filter((v) => !patch.clearViolationFilter!(v))
+      clearFilter !== undefined
+        ? (graph.branchingViolations ?? []).filter((v) => !clearFilter(v))
         : (graph.branchingViolations ?? [])
 
     return {

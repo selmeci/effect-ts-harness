@@ -78,7 +78,14 @@ export interface SessionReportInput {
   readonly cumulative?: boolean | undefined
 }
 
-const TASK_WORK_TOOLS = new Set(["plan-check", "verify", "mutate"])
+const TASK_WORK_TOOLS = new Set([
+  "plan-check",
+  "verify",
+  "mutate",
+  "plan-synth",
+  "repair",
+  "ontology",
+])
 
 export const scopeSessionReportInput = (
   input: SessionReportInput,

@@ -6,7 +6,7 @@ import * as Graph from "effect/Graph"
 import { Node, Project, SyntaxKind, ts, VariableDeclarationKind } from "ts-morph"
 import { match } from "ts-pattern"
 import { decideGraphInference } from "./datalog-engine.js"
-import { verifySubgraphMonomorphism } from "./graph-engine.js"
+import { buildHarnessGraph, verifySubgraphMonomorphism } from "./graph-engine.js"
 import { applyDpoPatchToGraph } from "./graph-rewrite.js"
 import {
   type EffectFnNode,
@@ -46,9 +46,7 @@ export type TypeScriptSnippet = typeof TypeScriptSnippet.Type
 export const SpecificationRef = Schema.NonEmptyString.pipe(Schema.brand("SpecificationRef"))
 export type SpecificationRef = typeof SpecificationRef.Type
 
-export const CodeModEngineKind = Schema.Literals(["ts-morph", "ast-grep"]).pipe(
-  Schema.brand("CodeModEngineKind"),
-)
+export const CodeModEngineKind = Schema.Literals(["ts-morph", "ast-grep"])
 export type CodeModEngineKind = typeof CodeModEngineKind.Type
 
 export const CodeModActionKind = Schema.Literals([
@@ -57,8 +55,11 @@ export const CodeModActionKind = Schema.Literals([
   "replace-expression",
   "remove-declaration",
   "ensure-import",
-]).pipe(Schema.brand("CodeModActionKind"))
+])
 export type CodeModActionKind = typeof CodeModActionKind.Type
+
+export const VerificationStatus = Schema.Literals(["Verified", "Partial", "Unverified"])
+export type VerificationStatus = typeof VerificationStatus.Type
 
 export const BisectionProbeCount = Schema.Natural.pipe(Schema.brand("BisectionProbeCount"))
 export type BisectionProbeCount = typeof BisectionProbeCount.Type
@@ -84,6 +85,7 @@ export type ShadowFileOverlay = typeof ShadowFileOverlay.Type
 export const AstProjectionResult = Schema.Struct({
   operations: Schema.Array(AstCodeModOperation),
   overlays: Schema.Array(ShadowFileOverlay),
+  verificationStatus: VerificationStatus,
   roundTripVerified: Schema.Boolean,
   compilerDiagnostics: Schema.Array(Schema.String),
   bisectionProbes: BisectionProbeCount,
@@ -118,11 +120,49 @@ const sanitizeIdentifier = (raw: string): string => {
   return /^[0-9]/.test(cleaned) ? `S_${cleaned}` : cleaned
 }
 
-const normalizeRelPath = (repoRoot: string, rawPath: string): string => {
-  const normalized = (path.isAbsolute(rawPath) ? path.relative(repoRoot, rawPath) : rawPath)
+const validateRelPath = (
+  repoRoot: string,
+  rawPath: string,
+  ruleId?: RewriteRuleId,
+):
+  | { readonly ok: true; readonly relPath: string }
+  | { readonly ok: false; readonly error: GraphProjectorError } => {
+  const trimmed = (rawPath ?? "").trim()
+  if (trimmed.length === 0) {
+    return {
+      ok: false,
+      error: new GraphProjectorError({
+        ...(ruleId !== undefined ? { ruleId } : {}),
+        reason: "invalid-patch-target",
+        message: "Target file path cannot be empty.",
+      }),
+    }
+  }
+  const abs = path.resolve(repoRoot, trimmed)
+  const rel = path
+    .relative(repoRoot, abs)
     .replace(/\\/g, "/")
     .replace(/^\.\//, "")
-  return normalized.length > 0 ? normalized : "libs/domain/src/synthesized.ts"
+  if (rel.length === 0 || rel.startsWith("..") || path.isAbsolute(rel)) {
+    return {
+      ok: false,
+      error: new GraphProjectorError({
+        ...(ruleId !== undefined ? { ruleId } : {}),
+        reason: "invalid-patch-target",
+        message: `Target file path '${rawPath}' escapes workspace root '${repoRoot}'.`,
+      }),
+    }
+  }
+  return { ok: true, relPath: rel }
+}
+
+const normalizeRelPath = (
+  repoRoot: string,
+  rawPath: string,
+  ruleId?: RewriteRuleId,
+): string => {
+  const res = validateRelPath(repoRoot, rawPath, ruleId)
+  return res.ok ? res.relPath : "__invalid_target__"
 }
 
 const computeRelativeModuleSpec = (fromFile: string, toFile: string): string => {
@@ -144,6 +184,7 @@ interface ProjectorContext {
   readonly targetEntitiesByKey: Map<string, EntityNode>
   readonly targetRelationsById: Map<string, RelationNode>
   readonly targetEdgesByRelId: Map<string, Array<PlaysRoleEdge>>
+  pendingError?: GraphProjectorError | undefined
 }
 
 const readInitialFileContent = (
@@ -163,13 +204,33 @@ const readInitialFileContent = (
   return undefined
 }
 
-const getOrCreateSourceFile = (ctx: ProjectorContext, relFile: string) => {
-  const norm = normalizeRelPath(ctx.repoRoot, relFile)
+const getOrCreateSourceFile = (
+  ctx: ProjectorContext,
+  relFile: string,
+  options?: { readonly requireExisting?: boolean | undefined; readonly ruleId?: RewriteRuleId | undefined },
+) => {
+  const validated = validateRelPath(ctx.repoRoot, relFile, options?.ruleId)
+  if (!validated.ok) {
+    ctx.pendingError ??= validated.error
+    const fallbackSf =
+      ctx.project.getSourceFile("/__invalid_target__.ts") ??
+      ctx.project.createSourceFile("/__invalid_target__.ts", "", { overwrite: true })
+    return { sf: fallbackSf, norm: "__invalid_target__.ts" }
+  }
+  const norm = validated.relPath
   const memPath = `/${norm}`
   let sf = ctx.project.getSourceFile(memPath)
   if (sf === undefined) {
-    const initial = ctx.initialContents.get(norm) ?? ""
-    sf = ctx.project.createSourceFile(memPath, initial, { overwrite: true })
+    const initial = ctx.initialContents.get(norm)
+    if (initial === undefined && options?.requireExisting === true) {
+      ctx.pendingError ??= new GraphProjectorError({
+        ...(options.ruleId !== undefined ? { ruleId: options.ruleId } : {}),
+        targetFile: TargetFilePath.make(norm),
+        reason: "missing-target-file",
+        message: `Repair target file '${norm}' does not exist on disk or in existingFiles.`,
+      })
+    }
+    sf = ctx.project.createSourceFile(memPath, initial ?? "", { overwrite: true })
   }
   return { sf, norm }
 }
@@ -278,7 +339,10 @@ const projectSchemaDefNode = (
   ruleId: RewriteRuleId,
   rationale: string,
 ): void => {
-  const { sf, norm } = getOrCreateSourceFile(ctx, node.file)
+  const { sf, norm } = getOrCreateSourceFile(ctx, node.file, {
+    requireExisting: String(ruleId) === "REP-06",
+    ruleId,
+  })
   const schemaIdent = sanitizeIdentifier(node.schemaName)
   ensureNamedImport(ctx, norm, "effect", ["Schema"], ruleId, rationale)
 
@@ -559,8 +623,12 @@ const projectEffectFnNode = (
   node: EffectFnNode,
   ruleId: RewriteRuleId,
   rationale: string,
+  options?: { readonly requireExisting?: boolean | undefined },
 ): void => {
-  const { sf, norm } = getOrCreateSourceFile(ctx, node.file)
+  const { sf, norm } = getOrCreateSourceFile(ctx, node.file, {
+    requireExisting: options?.requireExisting,
+    ruleId,
+  })
   const fnIdent = sanitizeIdentifier(node.qualname.split("#").pop() ?? node.spanName)
   ensureNamedImport(ctx, norm, "effect", ["Effect", "Schema"], ruleId, rationale)
 
@@ -577,8 +645,10 @@ const projectEffectFnNode = (
     rationale,
   )
 
+  const existingVar = sf.getVariableDeclaration(fnIdent)
+
   let effectiveInputType = sigInfo.inputType
-  if (effectiveInputType === "unknown") {
+  if (effectiveInputType === "unknown" && existingVar === undefined) {
     const fallbackInputIdent = `${fnIdent}Input`
     if (
       sf.getVariableDeclaration(fallbackInputIdent) === undefined &&
@@ -620,11 +690,127 @@ const projectEffectFnNode = (
     }
   }
 
-  const existingVar = sf.getVariableDeclaration(fnIdent)
   const catchSuffix =
     node.caughtErrors !== undefined && node.caughtErrors.length > 0
-      ? node.caughtErrors.map((tag) => `.pipe(Effect.catchTag("${tag}", () => Effect.succeed(input)))`).join("")
+      ? node.caughtErrors
+          .map((tag) => `.pipe(Effect.catchTag("${tag}", () => Effect.succeed(input)))`)
+          .join("")
       : ""
+
+  if (existingVar !== undefined) {
+    // Preserve existing function body while updating signature, stub type args, required services, or catchTag
+    const stubCall = existingVar
+      .getDescendantsOfKind(SyntaxKind.CallExpression)
+      .find((c) => c.getExpression().getText() === "stub")
+
+    const innerFn =
+      existingVar.getDescendantsOfKind(SyntaxKind.FunctionExpression)[0] ??
+      existingVar.getDescendantsOfKind(SyntaxKind.ArrowFunction)[0]
+
+    let preservedSuccess = effectiveSuccessType
+    if (innerFn !== undefined) {
+      const existingRetNode = innerFn.getReturnTypeNode()
+      if (
+        (preservedSuccess === "unknown" || preservedSuccess === "void") &&
+        existingRetNode !== undefined &&
+        Node.isTypeReference(existingRetNode)
+      ) {
+        const firstTypeArg = existingRetNode.getTypeArguments()[0]?.getText()
+        if (firstTypeArg !== undefined && firstTypeArg.length > 0) {
+          preservedSuccess = firstTypeArg
+        }
+      }
+      if (
+        preservedSuccess === "unknown" &&
+        innerFn.getParameters()[0]?.getTypeNode() !== undefined
+      ) {
+        preservedSuccess = innerFn.getParameters()[0]!.getTypeNode()!.getText()
+      }
+    }
+    if (preservedSuccess === "unknown") {
+      preservedSuccess = "void"
+    }
+
+    if (stubCall !== undefined) {
+      for (const ta of [...stubCall.getTypeArguments()].reverse()) {
+        stubCall.removeTypeArgument(ta)
+      }
+      stubCall.addTypeArguments([preservedSuccess, eChannel, rChannel])
+    }
+
+    if (innerFn !== undefined) {
+      const firstParam = innerFn.getParameters()[0]
+      const paramName = firstParam?.getName() ?? "input"
+      if (
+        firstParam !== undefined &&
+        firstParam.getTypeNode() === undefined &&
+        effectiveInputType !== "unknown"
+      ) {
+        firstParam.setType(effectiveInputType)
+      }
+
+      innerFn.setReturnType(`Effect.fn.Return<${preservedSuccess}, ${eChannel}, ${rChannel}>`)
+
+      if (Node.isFunctionExpression(innerFn) && innerFn.isGenerator()) {
+        const body = innerFn.getBody()
+        if (Node.isBlock(body)) {
+          if (stubCall === undefined && sigInfo.serviceTypes.length > 0) {
+            const bodyText = body.getText()
+            const missingSvcStmts = sigInfo.serviceTypes
+              .filter((svcName) => !bodyText.includes(svcName))
+              .map((svcName) => `yield* ${svcName}`)
+            if (missingSvcStmts.length > 0) {
+              body.insertStatements(0, missingSvcStmts.join("\n"))
+            }
+          }
+
+          if (node.caughtErrors !== undefined && node.caughtErrors.length > 0) {
+            const paramAwareCatch = node.caughtErrors
+              .map((tag) => `.pipe(Effect.catchTag("${tag}", () => Effect.succeed(${paramName})))`)
+              .join("")
+            const yieldExprs = body.getDescendantsOfKind(SyntaxKind.YieldExpression)
+            const targetYield = yieldExprs[yieldExprs.length - 1]
+            if (targetYield !== undefined) {
+              const yielded = targetYield.getExpression()
+              if (
+                yielded !== undefined &&
+                !yielded.getText().includes("Effect.catchTag")
+              ) {
+                yielded.replaceWithText(`(${yielded.getText()})${paramAwareCatch}`)
+              }
+            } else {
+              const retStmts = body.getStatements().filter(Node.isReturnStatement)
+              const lastRet = retStmts[retStmts.length - 1]
+              const retExpr = lastRet?.getExpression()
+              if (
+                retExpr !== undefined &&
+                !retExpr.getText().includes("Effect.catchTag")
+              ) {
+                retExpr.replaceWithText(
+                  `yield* Effect.succeed(${retExpr.getText()})${paramAwareCatch}`,
+                )
+              }
+            }
+          }
+        }
+      }
+    }
+
+    const updatedSnippet =
+      existingVar.getVariableStatement()?.getText() ?? `export const ${fnIdent} = ${existingVar.getInitializer()?.getText() ?? ""}`
+    ctx.modifiedFiles.add(norm)
+    recordExportedSymbol(ctx, norm, fnIdent)
+    ctx.operations.push({
+      ruleId,
+      engine: CodeModEngineKind.make("ts-morph"),
+      action: CodeModActionKind.make("update-signature"),
+      targetFile: TargetFilePath.make(norm),
+      targetSymbol: NodeKey.make(getNodeKey(node)),
+      snippet: TypeScriptSnippet.make(updatedSnippet),
+      rationale: SpecificationRef.make(rationale),
+    })
+    return
+  }
 
   const bodyStatement =
     catchSuffix.length > 0
@@ -637,22 +823,6 @@ const projectEffectFnNode = (
 
   const fnInitializer = `Effect.fn("${node.spanName}")(function* (\n  input: ${effectiveInputType},\n): Effect.fn.Return<${effectiveSuccessType}, ${eChannel}, ${rChannel}> {\n  ${bodyStatement}\n})`
   const fullSnippet = `export const ${fnIdent} = ${fnInitializer}`
-
-  if (existingVar !== undefined) {
-    existingVar.setInitializer(fnInitializer)
-    ctx.modifiedFiles.add(norm)
-    recordExportedSymbol(ctx, norm, fnIdent)
-    ctx.operations.push({
-      ruleId,
-      engine: CodeModEngineKind.make("ts-morph"),
-      action: CodeModActionKind.make("update-signature"),
-      targetFile: TargetFilePath.make(norm),
-      targetSymbol: NodeKey.make(getNodeKey(node)),
-      snippet: TypeScriptSnippet.make(fullSnippet),
-      rationale: SpecificationRef.make(rationale),
-    })
-    return
-  }
 
   sf.addStatements(fullSnippet)
   ctx.modifiedFiles.add(norm)
@@ -714,19 +884,57 @@ const projectServiceLayerNode = (
   const rIn = requiredNames.length > 0 ? requiredNames.join(" | ") : "never"
 
   const existingVar = sf.getVariableDeclaration(layerIdent)
-  const yieldRequiredLines = requiredNames.map((req) => `  yield* ${req}`).join("\n")
-  const layerInit =
-    primaryProvided !== "never"
-      ? requiredNames.length > 0
-        ? `Layer.effect(\n  ${primaryProvided},\n  Effect.gen(function* () {\n${yieldRequiredLines}\n    return ${primaryProvided}.of({\n      execute: () => Effect.void,\n    })\n  }),\n)`
-        : `Layer.effect(\n  ${primaryProvided},\n  Effect.sync(() => ${primaryProvided}.of({\n    execute: () => Effect.void,\n  })),\n)`
-      : `Layer.empty`
-
-  const declSnippet = `export const ${layerIdent}: Layer.Layer<${rOut}, never, ${rIn}> = ${layerInit}`
+  const yieldRequiredLines = requiredNames.map((req) => `    yield* ${req}`).join("\n")
 
   if (existingVar !== undefined) {
+    // Preserve existing Layer implementation while updating Layer<ROut, E, RIn> type and injecting missing required services
     existingVar.setType(`Layer.Layer<${rOut}, never, ${rIn}>`)
-    existingVar.setInitializer(layerInit)
+    const init = existingVar.getInitializer()
+    if (init !== undefined && requiredNames.length > 0) {
+      const genFn = init
+        .getDescendantsOfKind(SyntaxKind.FunctionExpression)
+        .find((f) => f.isGenerator())
+      if (genFn !== undefined) {
+        const body = genFn.getBody()
+        if (Node.isBlock(body)) {
+          const bodyText = body.getText()
+          const missingYields = requiredNames
+            .filter((req) => !bodyText.includes(req))
+            .map((req) => `yield* ${req}`)
+          if (missingYields.length > 0) {
+            body.insertStatements(0, missingYields.join("\n"))
+          }
+        }
+      } else if (Node.isCallExpression(init) && init.getArguments().length >= 2) {
+        const calleeText = init.getExpression().getText()
+        const tagArg = init.getArguments()[0]!.getText()
+        const implArg = init.getArguments()[1]!.getText()
+        const missingYields = requiredNames
+          .filter((req) => !implArg.includes(req))
+          .map((req) => `    yield* ${req}`)
+          .join("\n")
+        if (
+          missingYields.length > 0 &&
+          (calleeText === "Layer.succeed" ||
+            calleeText === "Layer.sync" ||
+            calleeText === "Layer.effect")
+        ) {
+          const returnExpr =
+            calleeText === "Layer.sync"
+              ? `(${implArg})()`
+              : calleeText === "Layer.effect"
+                ? `yield* (${implArg})`
+                : implArg
+          existingVar.setInitializer(
+            `Layer.effect(\n  ${tagArg},\n  Effect.gen(function* () {\n${missingYields}\n    return ${returnExpr}\n  }),\n)`,
+          )
+        }
+      }
+    }
+
+    const updatedDeclSnippet =
+      existingVar.getVariableStatement()?.getText() ??
+      `export const ${layerIdent}: Layer.Layer<${rOut}, never, ${rIn}> = ${existingVar.getInitializer()?.getText() ?? ""}`
     ctx.modifiedFiles.add(norm)
     recordExportedSymbol(ctx, norm, layerIdent)
     ctx.operations.push({
@@ -735,11 +943,20 @@ const projectServiceLayerNode = (
       action: CodeModActionKind.make("update-signature"),
       targetFile: TargetFilePath.make(norm),
       targetSymbol: NodeKey.make(layerKey),
-      snippet: TypeScriptSnippet.make(declSnippet),
+      snippet: TypeScriptSnippet.make(updatedDeclSnippet),
       rationale: SpecificationRef.make(rationale),
     })
     return
   }
+
+  const layerInit =
+    primaryProvided !== "never"
+      ? requiredNames.length > 0
+        ? `Layer.effect(\n  ${primaryProvided},\n  Effect.gen(function* () {\n${yieldRequiredLines}\n    return ${primaryProvided}.of({\n      execute: () => Effect.void,\n    })\n  }),\n)`
+        : `Layer.effect(\n  ${primaryProvided},\n  Effect.sync(() => ${primaryProvided}.of({\n    execute: () => Effect.void,\n  })),\n)`
+      : `Layer.empty`
+
+  const declSnippet = `export const ${layerIdent}: Layer.Layer<${rOut}, never, ${rIn}> = ${layerInit}`
 
   sf.addStatements(declSnippet)
   ctx.modifiedFiles.add(norm)
@@ -813,7 +1030,10 @@ const projectMigrationTupleRelation = (
   ruleId: RewriteRuleId,
   rationale: string,
 ): void => {
-  const { sf, norm } = getOrCreateSourceFile(ctx, rel.moduleFile)
+  const { sf, norm } = getOrCreateSourceFile(ctx, rel.moduleFile, {
+    requireExisting: true,
+    ruleId,
+  })
   const fullText = sf.getFullText()
   if (fullText.includes("SqliteMigrator.fromRecord") && fullText.includes(rel.migrationId)) {
     return
@@ -872,9 +1092,11 @@ const applyRep05UntracedDeciderRepair = (
   for (const insEnt of patch.insertedEntityNodes) {
     match(insEnt)
       .with({ _tag: "EffectFn" }, (fnEnt) => {
-        const { sf, norm } = getOrCreateSourceFile(ctx, fnEnt.file)
+        const { sf, norm } = getOrCreateSourceFile(ctx, fnEnt.file, {
+          requireExisting: true,
+          ruleId: patch.ruleId,
+        })
         const fnIdent = sanitizeIdentifier(fnEnt.qualname.split("#").pop() ?? fnEnt.spanName)
-        ensureNamedImport(ctx, norm, "effect", ["Effect"], patch.ruleId, rationale)
 
         const varDecl = sf.getVariableDeclaration(fnIdent)
         if (varDecl !== undefined) {
@@ -882,6 +1104,7 @@ const applyRep05UntracedDeciderRepair = (
           if (init !== undefined) {
             const initText = init.getText()
             if (initText.startsWith("Effect.fnUntraced")) {
+              ensureNamedImport(ctx, norm, "effect", ["Effect"], patch.ruleId, rationale)
               const nextInit = initText.replace(
                 /^Effect\.fnUntraced/,
                 `Effect.fn("${fnEnt.spanName}")`,
@@ -901,6 +1124,7 @@ const applyRep05UntracedDeciderRepair = (
               return
             }
             if (!initText.startsWith("Effect.fn(")) {
+              ensureNamedImport(ctx, norm, "effect", ["Effect"], patch.ruleId, rationale)
               const nextInit = `Effect.fn("${fnEnt.spanName}")(${initText})`
               varDecl.setInitializer(nextInit)
               ctx.modifiedFiles.add(norm)
@@ -940,14 +1164,16 @@ const applyRep07DiscriminantMatchRepair = (
   rationale: string,
 ): void => {
   const rawKey = String(patch.primaryNodeKey).replace(/^EffectFn:/, "")
-  const filePart = rawKey.split("#")[0] ?? "libs/domain/src/repaired.ts"
-  const { sf, norm } = getOrCreateSourceFile(ctx, filePart)
-  ensureNamedImport(ctx, norm, "ts-pattern", ["match"], patch.ruleId, rationale)
+  const filePart = rawKey.split("#")[0] ?? ""
+  const { sf, norm } = getOrCreateSourceFile(ctx, filePart, {
+    requireExisting: true,
+    ruleId: patch.ruleId,
+  })
 
   const sourceText = sf.getFullText()
   const root = parse(Lang.TypeScript, sourceText).root()
 
-  // 1. Rewrite `if ($X._tag === $TAG) { return $A } else { return $B }` or `switch ($X._tag)` via @ast-grep/napi + ts-morph
+  // 1. Rewrite `if ($X._tag === $TAG) { return $A } else { return $B }` via @ast-grep/napi + ts-morph
   const ifMatches = root.findAll("if ($COND) { $$$THEN } else { $$$ELSE }")
   let rewrittenSnippet: string | undefined
 
@@ -973,12 +1199,19 @@ const applyRep07DiscriminantMatchRepair = (
           thenRaw.match(/^return\s+(.+?);?$/)?.[1]?.trim() ?? (thenRaw.length > 0 ? thenRaw : "true")
         const elseRet =
           elseRaw.match(/^return\s+(.+?);?$/)?.[1]?.trim() ?? (elseRaw.length > 0 ? elseRaw : "false")
-        ensureNamedImport(ctx, norm, "ts-pattern", ["match", "P"], patch.ruleId, rationale)
         const replacement =
           elseRaw.length > 0
             ? `return match(${subject}).with({ _tag: "${literalTag}" }, () => ${thenRet}).with(P._, () => ${elseRet}).exhaustive()`
             : `return match(${subject}).with({ _tag: "${literalTag}" }, () => ${thenRet}).exhaustive()`
         sf.replaceWithText(sourceText.replace(text, replacement))
+        ensureNamedImport(
+          ctx,
+          norm,
+          "ts-pattern",
+          elseRaw.length > 0 ? ["match", "P"] : ["match"],
+          patch.ruleId,
+          rationale,
+        )
         rewrittenSnippet = replacement
         break
       }
@@ -986,7 +1219,7 @@ const applyRep07DiscriminantMatchRepair = (
   }
 
   if (rewrittenSnippet === undefined) {
-    // Also inspect ts-morph SwitchStatements on `._tag` or `.kind`
+    // 2. Inspect ts-morph SwitchStatements on `._tag` or `.kind`
     for (const sw of sf.getDescendantsOfKind(SyntaxKind.SwitchStatement)) {
       const exprText = sw.getExpression().getText()
       if (exprText.endsWith("._tag") || exprText.endsWith(".kind")) {
@@ -1003,6 +1236,7 @@ const applyRep07DiscriminantMatchRepair = (
         }
         const replacement = `return match(${subject})${arms.join("")}.exhaustive()`
         sw.replaceWithText(replacement)
+        ensureNamedImport(ctx, norm, "ts-pattern", ["match"], patch.ruleId, rationale)
         rewrittenSnippet = replacement
         break
       }
@@ -1010,37 +1244,30 @@ const applyRep07DiscriminantMatchRepair = (
   }
 
   if (rewrittenSnippet === undefined) {
-    // Replace `.otherwise(...)` with `.exhaustive()` on closed union matches via balanced paren scanning
-    const fullNow = sf.getFullText()
-    if (fullNow.includes(".otherwise(")) {
-      let result = fullNow
-      while (true) {
-        const target = ".otherwise("
-        const idx = result.indexOf(target)
-        if (idx === -1) break
-        const openParenIdx = idx + target.length - 1
-        let depth = 1
-        let closeParenIdx = -1
-        for (let i = openParenIdx + 1; i < result.length; i++) {
-          const ch = result[i]
-          if (ch === "(") {
-            depth++
-          } else if (ch === ")") {
-            depth--
-            if (depth === 0) {
-              closeParenIdx = i
-              break
-            }
-          }
-        }
-        if (closeParenIdx === -1) break
-        result = result.slice(0, idx) + ".exhaustive()" + result.slice(closeParenIdx + 1)
+    // 3. Scoped AST replacement of `.otherwise(...)` with `.exhaustive()` on `match(...)` chains over discriminated unions
+    for (const callExpr of sf.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+      const callee = callExpr.getExpression()
+      if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== "otherwise") {
+        continue
       }
-      sf.replaceWithText(result)
-      rewrittenSnippet = "match(...).exhaustive()"
-    } else {
-      rewrittenSnippet = "match(value).exhaustive()"
+      const receiver = callee.getExpression()
+      const receiverText = receiver.getText()
+      if (
+        receiverText.startsWith("match(") &&
+        (receiverText.includes("_tag") || receiverText.includes("kind"))
+      ) {
+        const replacement = `${receiverText}.exhaustive()`
+        callExpr.replaceWithText(replacement)
+        ensureNamedImport(ctx, norm, "ts-pattern", ["match"], patch.ruleId, rationale)
+        rewrittenSnippet = replacement
+        break
+      }
     }
+  }
+
+  if (rewrittenSnippet === undefined) {
+    // No discriminant branching pattern matched in the file — do not emit a fake operation or add unused imports
+    return
   }
 
   ctx.modifiedFiles.add(norm)
@@ -1079,41 +1306,44 @@ const applyRep08DecodeBoundaryRepair = (
       .exhaustive()
   }
   const rawKey = String(patch.primaryNodeKey).replace(/^EffectFn:/, "")
-  const filePart = rawKey.split("#")[0] ?? "libs/infra/src/repaired.ts"
-  const { sf, norm } = getOrCreateSourceFile(ctx, filePart)
-  ensureNamedImport(ctx, norm, "effect", ["Effect", "Schema"], patch.ruleId, rationale)
+  const filePart = rawKey.split("#")[0] ?? ""
+  const { sf, norm } = getOrCreateSourceFile(ctx, filePart, {
+    requireExisting: true,
+    ruleId: patch.ruleId,
+  })
 
   const root = parse(Lang.TypeScript, sf.getFullText()).root()
   const makeMatches = root.findAll("$BRAND.make($ARG)")
-  let snippet = "yield* Schema.decodeUnknownEffect(TargetSchema)(rawValue)"
-
-  if (makeMatches.length > 0) {
-    const first = makeMatches[0]!
-    const brandName = first.getMatch("BRAND")?.text() ?? "TargetSchema"
-    const argText = first.getMatch("ARG")?.text() ?? "rawValue"
-    const matchText = first.text()
-    const matchIdx = sf.getFullText().indexOf(matchText)
-    const nodeAtPos = matchIdx !== -1 ? sf.getDescendantAtPos(matchIdx) : undefined
-
-    let isGenerator = false
-    let current = nodeAtPos
-    while (current !== undefined) {
-      if (
-        (Node.isFunctionDeclaration(current) || Node.isFunctionExpression(current)) &&
-        current.isGenerator()
-      ) {
-        isGenerator = true
-        break
-      }
-      current = current.getParent()
-    }
-
-    snippet = isGenerator
-      ? `yield* Schema.decodeUnknownEffect(${brandName})(${argText})`
-      : `Effect.runSync(Schema.decodeUnknownEffect(${brandName})(${argText}))`
-
-    sf.replaceWithText(sf.getFullText().replace(matchText, snippet))
+  if (makeMatches.length === 0) {
+    return
   }
+
+  ensureNamedImport(ctx, norm, "effect", ["Effect", "Schema"], patch.ruleId, rationale)
+  const first = makeMatches[0]!
+  const brandName = first.getMatch("BRAND")?.text() ?? "TargetSchema"
+  const argText = first.getMatch("ARG")?.text() ?? "rawValue"
+  const matchText = first.text()
+  const matchIdx = sf.getFullText().indexOf(matchText)
+  const nodeAtPos = matchIdx !== -1 ? sf.getDescendantAtPos(matchIdx) : undefined
+
+  let isGenerator = false
+  let current = nodeAtPos
+  while (current !== undefined) {
+    if (
+      (Node.isFunctionDeclaration(current) || Node.isFunctionExpression(current)) &&
+      current.isGenerator()
+    ) {
+      isGenerator = true
+      break
+    }
+    current = current.getParent()
+  }
+
+  const snippet = isGenerator
+    ? `yield* Schema.decodeUnknownEffect(${brandName})(${argText})`
+    : `Effect.runSync(Schema.decodeUnknownEffect(${brandName})(${argText}))`
+
+  sf.replaceWithText(sf.getFullText().replace(matchText, snippet))
 
   ctx.modifiedFiles.add(norm)
   ctx.operations.push({
@@ -1134,8 +1364,13 @@ const applyRep11DeleteUnusedService = (
   rationale: string = "harness:SPEC-0008",
 ): void => {
   for (const delKey of patch.deletedEntityKeys) {
-    let targetFile = "libs/service/src/ports.ts"
-    let svcIdent = sanitizeIdentifier(String(delKey).replace(/^ServiceTag:/, ""))
+    let targetFile = ""
+    const rawKey = String(delKey).replace(/^ServiceTag:/, "")
+    const hashParts = rawKey.split("#")
+    if (hashParts.length >= 2 && hashParts[0]!.endsWith(".ts")) {
+      targetFile = hashParts[0]!
+    }
+    let svcIdent = sanitizeIdentifier(hashParts[hashParts.length - 1] ?? rawKey)
     if (initialGraph !== undefined) {
       const idx = initialGraph.nodeIndexByKey.get(delKey)
       if (idx !== undefined) {
@@ -1169,7 +1404,13 @@ const applyRep11DeleteUnusedService = (
           .exhaustive()
       }
     }
-    const { sf, norm } = getOrCreateSourceFile(ctx, targetFile)
+    if (targetFile.length === 0) {
+      targetFile = "libs/service/src/ports.ts"
+    }
+    const { sf, norm } = getOrCreateSourceFile(ctx, targetFile, {
+      requireExisting: true,
+      ruleId: patch.ruleId,
+    })
     const cls = sf.getClass(svcIdent)
     if (cls !== undefined) {
       cls.remove()
@@ -1294,6 +1535,7 @@ const projectPatchesToInMemoryWorkspace = (
   readonly operations: ReadonlyArray<AstCodeModOperation>
   readonly overlays: ReadonlyArray<ShadowFileOverlay>
   readonly overlayMap: Readonly<Record<string, string>>
+  readonly pendingError: GraphProjectorError | undefined
 } => {
   const project = new Project({
     useInMemoryFileSystem: true,
@@ -1379,7 +1621,10 @@ const projectPatchesToInMemoryWorkspace = (
       .exhaustive()
   }
   for (const f of candidateFiles) {
-    const norm = normalizeRelPath(repoRoot, f)
+    if (typeof f !== "string" || f.trim().length === 0) continue
+    const validated = validateRelPath(repoRoot, f)
+    if (!validated.ok) continue
+    const norm = validated.relPath
     if (!initialContents.has(norm)) {
       const diskContent = readInitialFileContent(repoRoot, norm, existingFiles)
       if (diskContent !== undefined) {
@@ -1455,7 +1700,12 @@ const projectPatchesToInMemoryWorkspace = (
     // 2. Project EffectFn, ServiceLayer, and VitestCase nodes
     for (const insEnt of patch.insertedEntityNodes) {
       match(insEnt)
-        .with({ _tag: "EffectFn" }, (n) => projectEffectFnNode(ctx, n, patch.ruleId, rationale))
+        .with({ _tag: "EffectFn" }, (n) =>
+          projectEffectFnNode(ctx, n, patch.ruleId, rationale, {
+            requireExisting:
+              String(patch.ruleId) === "REP-04a" || String(patch.ruleId) === "REP-04b",
+          }),
+        )
         .with({ _tag: "ServiceLayer" }, (n) =>
           projectServiceLayerNode(ctx, n, patch.ruleId, rationale),
         )
@@ -1492,7 +1742,10 @@ const projectPatchesToInMemoryWorkspace = (
       ) {
         match(callerEnt)
           .with({ _tag: "EffectFn" }, (fnEnt) =>
-            projectEffectFnNode(ctx, fnEnt, patch.ruleId, rationale),
+            projectEffectFnNode(ctx, fnEnt, patch.ruleId, rationale, {
+              requireExisting:
+                String(patch.ruleId) === "REP-04a" || String(patch.ruleId) === "REP-04b",
+            }),
           )
           .with(
             { _tag: "ServiceTag" },
@@ -1547,6 +1800,7 @@ const projectPatchesToInMemoryWorkspace = (
     operations: ctx.operations,
     overlays,
     overlayMap,
+    pendingError: ctx.pendingError,
   }
 }
 
@@ -1554,6 +1808,13 @@ interface BatchVerificationOutcome {
   readonly isClean: boolean
   readonly diagnostics: ReadonlyArray<string>
 }
+
+const CODE_VERIFIABLE_ROLES = new Set<string>([
+  "requires-service",
+  "fails-with",
+  "provided-service",
+  "required-service",
+])
 
 const verifyProjectedSubset = (
   repoRoot: string,
@@ -1610,28 +1871,39 @@ const verifyProjectedSubset = (
       session: undefined,
     })
 
-    // Compute expected subgraph H for this subset of patches
-    let expectedGraph = baseGraph
-    if (expectedGraph !== undefined) {
-      for (const patch of subsetPatches) {
-        const stepped = yield* Effect.exit(applyDpoPatchToGraph(expectedGraph, patch))
-        const shouldContinue = match(stepped)
-          .with({ _tag: "Success" }, (s) => {
-            expectedGraph = s.value
-            return true
-          })
-          .with({ _tag: "Failure" }, () => {
-            expectedGraph = fallbackTargetGraph
-            return false
-          })
-          .exhaustive()
-        if (!shouldContinue) {
-          break
+    // Compute expected subgraph H for this subset of patches (fail closed if DPO replay fails; never substitute fallbackTargetGraph)
+    const effectiveBase =
+      baseGraph ??
+      buildHarnessGraph({
+        fns: [],
+        services: [],
+        layers: [],
+        errors: [],
+        schemas: [],
+        tests: [],
+        patternDocs: [],
+      })
+    let currentGraph = effectiveBase
+    for (const patch of subsetPatches) {
+      const stepped = yield* Effect.exit(applyDpoPatchToGraph(currentGraph, patch))
+      const replayError = match(stepped)
+        .with({ _tag: "Success" }, (s) => {
+          currentGraph = s.value
+          return undefined
+        })
+        .with(
+          { _tag: "Failure" },
+          (f) => `DPO patch replay failed for rule '${patch.ruleId}': ${String(f.cause)}`,
+        )
+        .exhaustive()
+      if (replayError !== undefined) {
+        return {
+          isClean: false,
+          diagnostics: [...errorDiags, replayError],
         }
       }
-    } else {
-      expectedGraph = fallbackTargetGraph
     }
+    const expectedGraph: HarnessGraph = currentGraph
 
     const requiredEntityKeys = new Set<string>()
     const requiredRelationIds = new Set<string>()
@@ -1659,21 +1931,14 @@ const verifyProjectedSubset = (
           )
           .exhaustive()
       }
-      for (const rel of p.insertedRelationNodes) {
-        match(rel)
-          .with({ _tag: "MigrationTuple" }, (r) => {
-            requiredRelationIds.add(r.relationId)
-          })
-          .with(
-            { _tag: "EffectSignature" },
-            { _tag: "LayerFlow" },
-            { _tag: "TraceabilityTuple" },
-            { _tag: "HttpEndpointTuple" },
-            () => undefined,
-          )
-          .exhaustive()
+      for (const delKey of p.deletedEntityKeys) {
+        requiredEntityKeys.delete(delKey)
       }
       for (const edge of p.insertedRoleEdges) {
+        if (!CODE_VERIFIABLE_ROLES.has(edge.role)) {
+          continue
+        }
+        requiredRelationIds.add(edge.relationId)
         requiredRoleEdges.push(edge)
       }
     }
@@ -1687,7 +1952,9 @@ const verifyProjectedSubset = (
     // Also run Datalog inference over the extracted overlay graph to verify no new cycle/lattice errors
     const infExit = yield* Effect.exit(decideGraphInference(extractedOverlayGraph))
     const infDiag = match(infExit)
-      .with({ _tag: "Failure" }, () => ["Datalog verification failed on projected overlay."])
+      .with({ _tag: "Failure" }, (f) => [
+        `Datalog verification failed on projected overlay: ${String(f.cause)}`,
+      ])
       .with({ _tag: "Success" }, () => [])
       .exhaustive()
 
@@ -1718,24 +1985,32 @@ const safeProjectPatchesToInMemoryWorkspace = (
   GraphProjectorError,
   never
 > =>
-  Effect.try({
-    try: () =>
-      projectPatchesToInMemoryWorkspace(
-        repoRoot,
-        targetGraph,
-        patches,
-        initialGraph,
-        existingFiles,
-      ),
-    catch: (err) =>
-      new GraphProjectorError({
-        reason: "ast-parse-error",
-        message: String(err),
-      }),
+  Effect.gen(function* () {
+    const projected = yield* Effect.try({
+      try: () =>
+        projectPatchesToInMemoryWorkspace(
+          repoRoot,
+          targetGraph,
+          patches,
+          initialGraph,
+          existingFiles,
+        ),
+      catch: (err) =>
+        err instanceof GraphProjectorError
+          ? err
+          : new GraphProjectorError({
+              reason: "ast-parse-error",
+              message: err instanceof Error ? err.message : String(err),
+            }),
+    })
+    if (projected.pendingError !== undefined) {
+      return yield* projected.pendingError
+    }
+    return projected
   })
 
 /**
- * Binary-search fault isolation in $O(\log k)$ probes when a composite phase batch overlay fails (`RFC-0004 §4.5`).
+ * Binary-search fault isolation in $O(\log k)$ probes when a composite phase batch overlay fails (`RFC-0004 §4.4`).
  */
 const isolateFirstOffendingPatchIndex = (
   repoRoot: string,
@@ -1786,14 +2061,18 @@ const isolateFirstOffendingPatchIndex = (
   })
 
 /**
- * Pure Bidirectional AST Code Projector (`RFC-0004` §4.3–4.5, §5.1–5.2).
+ * In-Memory Bidirectional AST Code Projector (`RFC-0004 §4.3–4.4, §5.1–5.2, §8`).
  *
  * Maps Double-Pushout `GraphPatch` deltas (`PLAN-01..04`, `REP-01..11`) into in-memory
  * TypeScript overlays (`ShadowFileOverlay`) via `ts-morph` (`{ useInMemoryFileSystem: true }`)
- * and `@ast-grep/napi`, co-projecting Nx package barrel files (`src/index.ts`) and verifying
- * the Stratum-Boundary Batch Shadow LSP Round-Trip Commutativity Law
+ * and `@ast-grep/napi`, co-projecting Nx package barrel files (`src/index.ts`), preserving
+ * existing function and `Layer` implementations during repairs, and verifying the
+ * Stratum-Boundary Batch Shadow LSP Round-Trip Commutativity Law
  * $\alpha_{\Delta}(W_{\text{disk}} \oplus \Delta W_{\text{RAM}}^{(k)}) \cong H$ with $O(\log k)$
- * binary-search fault isolation.
+ * binary-search fault isolation and explicit `VerificationStatus` (`Verified | Partial | Unverified`).
+ *
+ * Never writes to disk (disk persistence is gated in CLI commands by `VerificationStatus === "Verified"`
+ * and `classifyFileWrite` `"allow"` verdicts).
  *
  * Enforces: harness:ADR-0009, harness:SPEC-0008
  */
@@ -1816,27 +2095,32 @@ export const decideGraphProjection = Effect.fn("GraphProjector.decide")(function
       })
     }
     for (const ent of patch.insertedEntityNodes) {
-      if ("file" in ent && String(ent.file).trim().length === 0) {
-        return yield* new GraphProjectorError({
-          ruleId: patch.ruleId,
-          reason: "invalid-patch-target",
-        })
+      if ("file" in ent) {
+        const validated = validateRelPath(repoRoot, String(ent.file), patch.ruleId)
+        if (!validated.ok) {
+          return yield* validated.error
+        }
       }
     }
   }
 
+  const shouldVerifyRoundTrip = input.verifyRoundTrip !== false
+
   if (allPatches.length === 0) {
+    const emptyStatus = shouldVerifyRoundTrip
+      ? VerificationStatus.make("Verified")
+      : VerificationStatus.make("Unverified")
     return {
       operations: [],
       overlays: [],
-      roundTripVerified: true,
+      verificationStatus: emptyStatus,
+      roundTripVerified: shouldVerifyRoundTrip,
       compilerDiagnostics: [],
       bisectionProbes: BisectionProbeCount.make(0),
       skippedRuleIds: [],
     }
   }
 
-  const shouldVerifyRoundTrip = input.verifyRoundTrip !== false
   const forceFailSet =
     input.forceFailRuleIds !== undefined
       ? new Set(input.forceFailRuleIds.map(String))
@@ -1853,14 +2137,15 @@ export const decideGraphProjection = Effect.fn("GraphProjector.decide")(function
     return {
       operations: [...projected.operations],
       overlays: [...projected.overlays],
-      roundTripVerified: true,
+      verificationStatus: VerificationStatus.make("Unverified"),
+      roundTripVerified: false,
       compilerDiagnostics: [],
       bisectionProbes: BisectionProbeCount.make(0),
       skippedRuleIds: [],
     }
   }
 
-  // Group patches by RewritePhase in canonical order (Stratum-Boundary Batch Verification, RFC-0004 §4.5)
+  // Group patches by RewritePhase in canonical order (Stratum-Boundary Batch Verification, RFC-0004 §4.4)
   const phaseOrder: ReadonlyArray<RewritePhase> = [
     "PLAN",
     "REPAIR_ARCH",
@@ -1888,7 +2173,6 @@ export const decideGraphProjection = Effect.fn("GraphProjector.decide")(function
         input.initialGraph,
         input.existingFiles,
       )
-      totalBisectionProbes += 1
       const batchCheck = yield* verifyProjectedSubset(
         repoRoot,
         input.initialGraph,
@@ -1905,6 +2189,7 @@ export const decideGraphProjection = Effect.fn("GraphProjector.decide")(function
       } else {
         collectedDiagnostics.push(...batchCheck.diagnostics)
         if (remainingInPhase.length === 1) {
+          totalBisectionProbes += 1
           skippedRuleIds.push(remainingInPhase[0]!.ruleId)
           remainingInPhase = []
           phaseSettled = true
@@ -1938,10 +2223,18 @@ export const decideGraphProjection = Effect.fn("GraphProjector.decide")(function
     input.existingFiles,
   )
 
+  const verificationStatus =
+    skippedRuleIds.length === 0
+      ? VerificationStatus.make("Verified")
+      : acceptedPatches.length > 0
+        ? VerificationStatus.make("Partial")
+        : VerificationStatus.make("Unverified")
+
   return {
     operations: [...finalProjected.operations],
     overlays: [...finalProjected.overlays],
-    roundTripVerified: skippedRuleIds.length === 0,
+    verificationStatus,
+    roundTripVerified: verificationStatus === "Verified",
     compilerDiagnostics: Array.from(new Set(collectedDiagnostics)),
     bisectionProbes: BisectionProbeCount.make(totalBisectionProbes),
     skippedRuleIds,

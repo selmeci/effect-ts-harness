@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto"
 import * as fs from "node:fs"
+import { createRequire } from "node:module"
 import * as path from "node:path"
 import { Effect, Option, Schema } from "effect"
 import * as Graph from "effect/Graph"
@@ -873,16 +874,44 @@ export const extractTypeAwareGraphFromSource = (
   options?: TypeExtractorOptions,
 ): HarnessGraph => {
   const repoRoot = options?.repoRoot ?? resolveRepoRoot(process.cwd())
-  const graphNodeModules = path.join(repoRoot, "libs/harness/graph/node_modules")
+  const workspaceRoot = fs.existsSync(path.join(repoRoot, "libs/harness/graph/node_modules"))
+    ? repoRoot
+    : resolveRepoRoot(import.meta.dirname)
+  const graphNodeModules = path.join(workspaceRoot, "libs/harness/graph/node_modules")
 
   const dynamicPaths: Record<string, Array<string>> = {
-    effect: [path.join(graphNodeModules, "effect")],
-    "effect/*": [path.join(graphNodeModules, "effect/*")],
-    "ts-pattern": [path.join(repoRoot, "node_modules/ts-pattern")],
-    "@harness/gates": [path.join(repoRoot, "libs/harness/gates/src/index.ts")],
-    "@harness/graph": [path.join(repoRoot, "libs/harness/graph/src/index.ts")],
-    "@harness/decision": [path.join(repoRoot, "libs/harness/decision/src/index.ts")],
-    "@harness/ingest": [path.join(repoRoot, "libs/harness/ingest/src/index.ts")],
+    effect: [
+      path.join(repoRoot, "libs/harness/graph/node_modules/effect/dist/index.d.ts"),
+      path.join(graphNodeModules, "effect/dist/index.d.ts"),
+      path.join(repoRoot, "libs/harness/graph/node_modules/effect"),
+      path.join(graphNodeModules, "effect"),
+    ],
+    "effect/*": [
+      path.join(repoRoot, "libs/harness/graph/node_modules/effect/dist/*.d.ts"),
+      path.join(graphNodeModules, "effect/dist/*.d.ts"),
+      path.join(repoRoot, "libs/harness/graph/node_modules/effect/*"),
+      path.join(graphNodeModules, "effect/*"),
+    ],
+    "ts-pattern": [
+      path.join(repoRoot, "node_modules/ts-pattern"),
+      path.join(workspaceRoot, "node_modules/ts-pattern"),
+    ],
+    "@harness/gates": [
+      path.join(repoRoot, "libs/harness/gates/src/index.ts"),
+      path.join(workspaceRoot, "libs/harness/gates/src/index.ts"),
+    ],
+    "@harness/graph": [
+      path.join(repoRoot, "libs/harness/graph/src/index.ts"),
+      path.join(workspaceRoot, "libs/harness/graph/src/index.ts"),
+    ],
+    "@harness/decision": [
+      path.join(repoRoot, "libs/harness/decision/src/index.ts"),
+      path.join(workspaceRoot, "libs/harness/decision/src/index.ts"),
+    ],
+    "@harness/ingest": [
+      path.join(repoRoot, "libs/harness/ingest/src/index.ts"),
+      path.join(workspaceRoot, "libs/harness/ingest/src/index.ts"),
+    ],
     "@harness/sample-contract": [path.join(repoRoot, "libs/sample/contract/src/index.ts")],
     "@harness/sample-service": [path.join(repoRoot, "libs/sample/service/src/index.ts")],
     "@harness/sample-domain": [path.join(repoRoot, "libs/sample/domain/src/index.ts")],
@@ -962,6 +991,7 @@ export const extractTypeAwareGraphFromSource = (
         strict: true,
         esModuleInterop: true,
         skipLibCheck: true,
+        baseUrl: repoRoot,
         paths: dynamicPaths,
       },
     })
@@ -4645,36 +4675,42 @@ export interface ExtractTypeGraphOptions {
 }
 
 const resolveTsLibDir = (root: string): string | undefined => {
+  const workspaceRoot = resolveRepoRoot(import.meta.dirname)
+  const dynamicResolved = Effect.runSync(
+    Effect.try({
+      try: () => {
+        const req = createRequire(path.join(workspaceRoot, "package.json"))
+        const tsEntry = req.resolve("typescript")
+        return path.dirname(tsEntry)
+      },
+      catch: () => undefined,
+    }),
+  )
   const candidates = [
-    path.join(
-      root,
-      "node_modules/.pnpm/@typescript+typescript-linux-x64@7.0.2/node_modules/@typescript/typescript-linux-x64/lib",
-    ),
-    path.join(root, "node_modules/.pnpm/typescript@5.9.3/node_modules/typescript/lib"),
+    ...(dynamicResolved !== undefined ? [dynamicResolved] : []),
     path.join(root, "node_modules/typescript/lib"),
+    path.join(workspaceRoot, "node_modules/typescript/lib"),
   ]
   for (const c of candidates) {
     if (fs.existsSync(path.join(c, "lib.es2023.full.d.ts"))) return c
   }
-  const pnpmDir = path.join(root, "node_modules/.pnpm")
-  if (fs.existsSync(pnpmDir)) {
-    const entries = Effect.runSync(
-      Effect.try({
-        try: () => fs.readdirSync(pnpmDir),
-        catch: () => [] as Array<string>,
-      }),
-    )
-    for (const entry of entries) {
-      if (entry.startsWith("typescript@") || entry.startsWith("@typescript+typescript")) {
-        const potential = path.join(
-          pnpmDir,
-          entry,
-          "node_modules",
-          entry.startsWith("@typescript")
-            ? "@typescript/typescript-linux-x64/lib"
-            : "typescript/lib",
-        )
-        if (fs.existsSync(path.join(potential, "lib.es2023.full.d.ts"))) return potential
+  for (const baseRoot of [root, workspaceRoot]) {
+    const pnpmDir = path.join(baseRoot, "node_modules/.pnpm")
+    if (fs.existsSync(pnpmDir)) {
+      const entries = Effect.runSync(
+        Effect.try({
+          try: () => fs.readdirSync(pnpmDir),
+          catch: () => [] as Array<string>,
+        }),
+      )
+      for (const entry of entries) {
+        if (entry.startsWith("typescript@") || entry.startsWith("@typescript+typescript")) {
+          const subPkg = entry.startsWith("@typescript+")
+            ? entry.slice(0, entry.lastIndexOf("@")).replace("+", "/")
+            : "typescript"
+          const potential = path.join(pnpmDir, entry, "node_modules", subPkg, "lib")
+          if (fs.existsSync(path.join(potential, "lib.es2023.full.d.ts"))) return potential
+        }
       }
     }
   }
@@ -4750,6 +4786,10 @@ export const createOverlayCompilerHost = (
       if (overlayContent !== undefined) {
         return ts.createSourceFile(fileName, overlayContent, languageVersion, true)
       }
+      const existing = oldProgram?.getSourceFile(fileName)
+      if (existing !== undefined && !shouldCreateNewSourceFile) {
+        return existing
+      }
       if (
         tsLibDir !== undefined &&
         path.basename(fileName).startsWith("lib.") &&
@@ -4761,10 +4801,6 @@ export const createOverlayCompilerHost = (
           languageVersion,
           true,
         )
-      }
-      const existing = oldProgram?.getSourceFile(fileName)
-      if (existing !== undefined && !shouldCreateNewSourceFile) {
-        return existing
       }
       return baseHost.getSourceFile(fileName, languageVersion, onError, shouldCreateNewSourceFile)
     },
@@ -4780,33 +4816,109 @@ export interface OverlayDiagnosticItem {
   readonly message: string
 }
 
+const VIRTUAL_EFFECT_VITEST_DTS = `import type { Effect } from "effect"
+export declare const describe: (name: string, fn: () => void) => void
+export declare const expect: (actual: unknown) => {
+  readonly toBe: (expected: unknown) => void
+  readonly toEqual: (expected: unknown) => void
+  readonly toBeGreaterThan: (expected: number) => void
+  readonly toBeDefined: () => void
+}
+export declare const it: {
+  (name: string, fn: () => unknown): void
+  readonly effect: {
+    <A, E>(name: string, fn: () => Effect.Effect<A, E, never>): void
+    readonly prop: <S extends Record<string, unknown>, A, E>(
+      name: string,
+      schemas: S,
+      fn: (args: { readonly [K in keyof S]: string }) => Effect.Effect<A, E, never>,
+    ) => void
+  }
+}
+`
+
+const VIRTUAL_EFFECT_SQL_SQLITE_DO_DTS = `import type { Context, Effect } from "effect"
+export declare namespace SqliteClient {
+  export interface SqliteClientService {
+    <A = unknown>(strings: TemplateStringsArray, ...args: ReadonlyArray<unknown>): Effect.Effect<ReadonlyArray<A>>
+  }
+  export const SqliteClient: Context.Service<SqliteClientService, SqliteClientService>
+}
+export declare namespace SqliteMigrator {
+  export const fromRecord: (
+    migrations: Readonly<Record<string, Effect.Effect<unknown, unknown, unknown>>>,
+  ) => unknown
+}
+`
+
 export const evaluateOverlayDiagnostics = (
   repoRoot: string,
   overlays: Readonly<Record<string, string>>,
   session?: TypeScriptProgramSession,
 ): ReadonlyArray<OverlayDiagnosticItem> => {
   const root = resolveRepoRoot(repoRoot)
-  const _activeSession = session ?? getOrCreateWarmProgramSession(root)
+  const activeSession = session ?? getOrCreateWarmProgramSession(root)
   const overlayEntries = Object.entries(overlays)
   if (overlayEntries.length === 0) {
     return []
   }
 
-  const graphNodeModules = path.join(root, "libs/harness/graph/node_modules")
+  const virtualVitestPath = path.join(root, ".harness/__virtual_types__/@effect/vitest/index.d.ts")
+  const virtualSqliteDoPath = path.join(
+    root,
+    ".harness/__virtual_types__/@effect/sql-sqlite-do/index.d.ts",
+  )
+
+  const workspaceRoot = fs.existsSync(path.join(root, "libs/harness/graph/node_modules"))
+    ? root
+    : resolveRepoRoot(import.meta.dirname)
+  const graphNodeModules = path.join(workspaceRoot, "libs/harness/graph/node_modules")
   const dynamicPaths: Record<string, Array<string>> = {
     effect: [
+      path.join(root, "libs/harness/graph/node_modules/effect/dist/index.d.ts"),
       path.join(graphNodeModules, "effect/dist/index.d.ts"),
       path.join(graphNodeModules, "effect"),
     ],
     "effect/*": [
+      path.join(root, "libs/harness/graph/node_modules/effect/dist/*.d.ts"),
       path.join(graphNodeModules, "effect/dist/*.d.ts"),
       path.join(graphNodeModules, "effect/*"),
     ],
-    "ts-pattern": [path.join(root, "node_modules/ts-pattern")],
-    "@harness/gates": [path.join(root, "libs/harness/gates/src/index.ts")],
-    "@harness/graph": [path.join(root, "libs/harness/graph/src/index.ts")],
-    "@harness/decision": [path.join(root, "libs/harness/decision/src/index.ts")],
-    "@harness/ingest": [path.join(root, "libs/harness/ingest/src/index.ts")],
+    "ts-pattern": [
+      path.join(root, "node_modules/ts-pattern"),
+      path.join(workspaceRoot, "node_modules/ts-pattern"),
+    ],
+    "@effect/vitest": [
+      path.join(root, "node_modules/@effect/vitest"),
+      path.join(workspaceRoot, "node_modules/@effect/vitest"),
+      virtualVitestPath,
+    ],
+    "@effect/sql-sqlite-do": [
+      path.join(root, "node_modules/@effect/sql-sqlite-do"),
+      path.join(workspaceRoot, "node_modules/@effect/sql-sqlite-do"),
+      virtualSqliteDoPath,
+    ],
+    "@effect/sql-sqlite-do/SqliteMigrator": [
+      path.join(root, "node_modules/@effect/sql-sqlite-do/SqliteMigrator"),
+      path.join(workspaceRoot, "node_modules/@effect/sql-sqlite-do/SqliteMigrator"),
+      virtualSqliteDoPath,
+    ],
+    "@harness/gates": [
+      path.join(root, "libs/harness/gates/src/index.ts"),
+      path.join(workspaceRoot, "libs/harness/gates/src/index.ts"),
+    ],
+    "@harness/graph": [
+      path.join(root, "libs/harness/graph/src/index.ts"),
+      path.join(workspaceRoot, "libs/harness/graph/src/index.ts"),
+    ],
+    "@harness/decision": [
+      path.join(root, "libs/harness/decision/src/index.ts"),
+      path.join(workspaceRoot, "libs/harness/decision/src/index.ts"),
+    ],
+    "@harness/ingest": [
+      path.join(root, "libs/harness/ingest/src/index.ts"),
+      path.join(workspaceRoot, "libs/harness/ingest/src/index.ts"),
+    ],
   }
   const libsDir = path.join(root, "libs")
   if (fs.existsSync(libsDir)) {
@@ -4846,7 +4958,22 @@ export const evaluateOverlayDiagnostics = (
     paths: dynamicPaths,
   }
 
-  const host = createOverlayCompilerHost(compilerOptions, overlays, undefined, root)
+  const rootPkgJsonPath = path.join(root, "package.json")
+  const overlaysWithVirtualTypes: Record<string, string> = {
+    ...(fs.existsSync(rootPkgJsonPath)
+      ? {}
+      : { [rootPkgJsonPath]: JSON.stringify({ name: "overlay-workspace", type: "module" }) }),
+    [virtualVitestPath]: VIRTUAL_EFFECT_VITEST_DTS,
+    [virtualSqliteDoPath]: VIRTUAL_EFFECT_SQL_SQLITE_DO_DTS,
+    ...overlays,
+  }
+
+  const host = createOverlayCompilerHost(
+    compilerOptions,
+    overlaysWithVirtualTypes,
+    activeSession.oldProgram,
+    root,
+  )
   const rootNames = overlayEntries
     .map(([k]) => path.resolve(root, k).replace(/\\/g, "/"))
     .filter((f) => (f.endsWith(".ts") || f.endsWith(".tsx")) && !f.endsWith(".d.ts"))
@@ -4855,7 +4982,8 @@ export const evaluateOverlayDiagnostics = (
     return []
   }
 
-  const program = ts.createProgram(rootNames, compilerOptions, host, undefined)
+  const program = ts.createProgram(rootNames, compilerOptions, host, activeSession.oldProgram)
+  activeSession.oldProgram = program
 
   const diagnostics: Array<OverlayDiagnosticItem> = []
   for (const fileName of rootNames) {
@@ -4866,16 +4994,6 @@ export const evaluateOverlayDiagnostics = (
       ...program.getSemanticDiagnostics(sf),
     ]
     for (const d of allDiags) {
-      // Ignore unresolved module errors for synthetic standalone snippets without disk node_modules
-      if (d.code === 2307) {
-        const msgText = ts.flattenDiagnosticMessageText(d.messageText, "\n")
-        if (
-          msgText.includes("@effect/sql-sqlite-do") ||
-          msgText.includes("@effect/vitest")
-        ) {
-          continue
-        }
-      }
       const pos =
         d.file !== undefined && d.start !== undefined
           ? d.file.getLineAndCharacterOfPosition(d.start)
