@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto"
 import * as fs from "node:fs"
+import { createRequire } from "node:module"
 import * as path from "node:path"
 import { Effect, Option, Schema } from "effect"
 import * as Graph from "effect/Graph"
@@ -873,16 +874,44 @@ export const extractTypeAwareGraphFromSource = (
   options?: TypeExtractorOptions,
 ): HarnessGraph => {
   const repoRoot = options?.repoRoot ?? resolveRepoRoot(process.cwd())
-  const graphNodeModules = path.join(repoRoot, "libs/harness/graph/node_modules")
+  const workspaceRoot = fs.existsSync(path.join(repoRoot, "libs/harness/graph/node_modules"))
+    ? repoRoot
+    : resolveRepoRoot(import.meta.dirname)
+  const graphNodeModules = path.join(workspaceRoot, "libs/harness/graph/node_modules")
 
   const dynamicPaths: Record<string, Array<string>> = {
-    effect: [path.join(graphNodeModules, "effect")],
-    "effect/*": [path.join(graphNodeModules, "effect/*")],
-    "ts-pattern": [path.join(repoRoot, "node_modules/ts-pattern")],
-    "@harness/gates": [path.join(repoRoot, "libs/harness/gates/src/index.ts")],
-    "@harness/graph": [path.join(repoRoot, "libs/harness/graph/src/index.ts")],
-    "@harness/decision": [path.join(repoRoot, "libs/harness/decision/src/index.ts")],
-    "@harness/ingest": [path.join(repoRoot, "libs/harness/ingest/src/index.ts")],
+    effect: [
+      path.join(repoRoot, "libs/harness/graph/node_modules/effect/dist/index.d.ts"),
+      path.join(graphNodeModules, "effect/dist/index.d.ts"),
+      path.join(repoRoot, "libs/harness/graph/node_modules/effect"),
+      path.join(graphNodeModules, "effect"),
+    ],
+    "effect/*": [
+      path.join(repoRoot, "libs/harness/graph/node_modules/effect/dist/*.d.ts"),
+      path.join(graphNodeModules, "effect/dist/*.d.ts"),
+      path.join(repoRoot, "libs/harness/graph/node_modules/effect/*"),
+      path.join(graphNodeModules, "effect/*"),
+    ],
+    "ts-pattern": [
+      path.join(repoRoot, "node_modules/ts-pattern"),
+      path.join(workspaceRoot, "node_modules/ts-pattern"),
+    ],
+    "@harness/gates": [
+      path.join(repoRoot, "libs/harness/gates/src/index.ts"),
+      path.join(workspaceRoot, "libs/harness/gates/src/index.ts"),
+    ],
+    "@harness/graph": [
+      path.join(repoRoot, "libs/harness/graph/src/index.ts"),
+      path.join(workspaceRoot, "libs/harness/graph/src/index.ts"),
+    ],
+    "@harness/decision": [
+      path.join(repoRoot, "libs/harness/decision/src/index.ts"),
+      path.join(workspaceRoot, "libs/harness/decision/src/index.ts"),
+    ],
+    "@harness/ingest": [
+      path.join(repoRoot, "libs/harness/ingest/src/index.ts"),
+      path.join(workspaceRoot, "libs/harness/ingest/src/index.ts"),
+    ],
     "@harness/sample-contract": [path.join(repoRoot, "libs/sample/contract/src/index.ts")],
     "@harness/sample-service": [path.join(repoRoot, "libs/sample/service/src/index.ts")],
     "@harness/sample-domain": [path.join(repoRoot, "libs/sample/domain/src/index.ts")],
@@ -962,6 +991,7 @@ export const extractTypeAwareGraphFromSource = (
         strict: true,
         esModuleInterop: true,
         skipLibCheck: true,
+        baseUrl: repoRoot,
         paths: dynamicPaths,
       },
     })
@@ -4644,6 +4674,344 @@ export interface ExtractTypeGraphOptions {
   readonly session?: TypeScriptProgramSession | undefined
 }
 
+const resolveTsLibDir = (root: string): string | undefined => {
+  const workspaceRoot = resolveRepoRoot(import.meta.dirname)
+  const dynamicResolved = Effect.runSync(
+    Effect.try({
+      try: () => {
+        const req = createRequire(path.join(workspaceRoot, "package.json"))
+        const tsEntry = req.resolve("typescript")
+        return path.dirname(tsEntry)
+      },
+      catch: () => undefined,
+    }),
+  )
+  const candidates = [
+    ...(dynamicResolved !== undefined ? [dynamicResolved] : []),
+    path.join(root, "node_modules/typescript/lib"),
+    path.join(workspaceRoot, "node_modules/typescript/lib"),
+  ]
+  for (const c of candidates) {
+    if (fs.existsSync(path.join(c, "lib.es2023.full.d.ts"))) return c
+  }
+  for (const baseRoot of [root, workspaceRoot]) {
+    const pnpmDir = path.join(baseRoot, "node_modules/.pnpm")
+    if (fs.existsSync(pnpmDir)) {
+      const entries = Effect.runSync(
+        Effect.try({
+          try: () => fs.readdirSync(pnpmDir),
+          catch: () => [] as Array<string>,
+        }),
+      )
+      for (const entry of entries) {
+        if (entry.startsWith("typescript@") || entry.startsWith("@typescript+typescript")) {
+          const subPkg = entry.startsWith("@typescript+")
+            ? entry.slice(0, entry.lastIndexOf("@")).replace("+", "/")
+            : "typescript"
+          const potential = path.join(pnpmDir, entry, "node_modules", subPkg, "lib")
+          if (fs.existsSync(path.join(potential, "lib.es2023.full.d.ts"))) return potential
+        }
+      }
+    }
+  }
+  return undefined
+}
+
+export const createOverlayCompilerHost = (
+  options: ts.CompilerOptions,
+  overlays: Readonly<Record<string, string>>,
+  oldProgram?: ts.Program,
+  repoRoot: string = process.cwd(),
+): ts.CompilerHost => {
+  const root = resolveRepoRoot(repoRoot)
+  const normalizedOverlays = new Map<string, string>()
+  const overlayDirectories = new Set<string>()
+  for (const [k, v] of Object.entries(overlays)) {
+    const abs = path.resolve(root, k).replace(/\\/g, "/")
+    const rel = path.relative(root, abs).replace(/\\/g, "/")
+    normalizedOverlays.set(abs, v)
+    normalizedOverlays.set(rel, v)
+    let d = path.dirname(abs)
+    while (d && d !== path.dirname(d)) {
+      overlayDirectories.add(d)
+      d = path.dirname(d)
+    }
+  }
+
+  const findOverlay = (fileName: string): string | undefined => {
+    const norm = fileName.replace(/\\/g, "/")
+    const direct = normalizedOverlays.get(norm)
+    if (direct !== undefined) return direct
+    const abs = path.resolve(root, fileName).replace(/\\/g, "/")
+    const byAbs = normalizedOverlays.get(abs)
+    if (byAbs !== undefined) return byAbs
+    const rel = path.relative(root, abs).replace(/\\/g, "/")
+    return normalizedOverlays.get(rel)
+  }
+
+  const tsLibDir = resolveTsLibDir(root)
+  const baseHost = ts.createCompilerHost(options, true)
+  return {
+    ...baseHost,
+    ...(tsLibDir !== undefined ? { getDefaultLibLocation: () => tsLibDir } : {}),
+    directoryExists: (dirName) => {
+      const norm = dirName.replace(/\\/g, "/")
+      const abs = path.resolve(root, norm).replace(/\\/g, "/")
+      return (
+        overlayDirectories.has(abs) ||
+        overlayDirectories.has(norm) ||
+        (baseHost.directoryExists?.(dirName) ?? false)
+      )
+    },
+    fileExists: (fileName) =>
+      findOverlay(fileName) !== undefined ||
+      (tsLibDir !== undefined &&
+        path.basename(fileName).startsWith("lib.") &&
+        fs.existsSync(path.join(tsLibDir, path.basename(fileName)))) ||
+      baseHost.fileExists(fileName),
+    readFile: (fileName) => {
+      const ov = findOverlay(fileName)
+      if (ov !== undefined) return ov
+      if (
+        tsLibDir !== undefined &&
+        path.basename(fileName).startsWith("lib.") &&
+        fs.existsSync(path.join(tsLibDir, path.basename(fileName)))
+      ) {
+        return fs.readFileSync(path.join(tsLibDir, path.basename(fileName)), "utf8")
+      }
+      return baseHost.readFile(fileName)
+    },
+    getSourceFile: (fileName, languageVersion, onError, shouldCreateNewSourceFile) => {
+      const overlayContent = findOverlay(fileName)
+      if (overlayContent !== undefined) {
+        return ts.createSourceFile(fileName, overlayContent, languageVersion, true)
+      }
+      const existing = oldProgram?.getSourceFile(fileName)
+      if (existing !== undefined && !shouldCreateNewSourceFile) {
+        return existing
+      }
+      if (
+        tsLibDir !== undefined &&
+        path.basename(fileName).startsWith("lib.") &&
+        fs.existsSync(path.join(tsLibDir, path.basename(fileName)))
+      ) {
+        return ts.createSourceFile(
+          fileName,
+          fs.readFileSync(path.join(tsLibDir, path.basename(fileName)), "utf8"),
+          languageVersion,
+          true,
+        )
+      }
+      return baseHost.getSourceFile(fileName, languageVersion, onError, shouldCreateNewSourceFile)
+    },
+  }
+}
+
+export interface OverlayDiagnosticItem {
+  readonly file: string
+  readonly line: number
+  readonly column: number
+  readonly code: string
+  readonly severity: "error" | "warning"
+  readonly message: string
+}
+
+const VIRTUAL_EFFECT_VITEST_DTS = `import type { Effect } from "effect"
+export declare const describe: (name: string, fn: () => void) => void
+export declare const expect: (actual: unknown) => {
+  readonly toBe: (expected: unknown) => void
+  readonly toEqual: (expected: unknown) => void
+  readonly toBeGreaterThan: (expected: number) => void
+  readonly toBeDefined: () => void
+}
+export declare const it: {
+  (name: string, fn: () => unknown): void
+  readonly effect: {
+    <A, E>(name: string, fn: () => Effect.Effect<A, E, never>): void
+    readonly prop: <S extends Record<string, unknown>, A, E>(
+      name: string,
+      schemas: S,
+      fn: (args: { readonly [K in keyof S]: string }) => Effect.Effect<A, E, never>,
+    ) => void
+  }
+}
+`
+
+const VIRTUAL_EFFECT_SQL_SQLITE_DO_DTS = `import type { Context, Effect } from "effect"
+export declare namespace SqliteClient {
+  export interface SqliteClientService {
+    <A = unknown>(strings: TemplateStringsArray, ...args: ReadonlyArray<unknown>): Effect.Effect<ReadonlyArray<A>>
+  }
+  export const SqliteClient: Context.Service<SqliteClientService, SqliteClientService>
+}
+export declare namespace SqliteMigrator {
+  export const fromRecord: (
+    migrations: Readonly<Record<string, Effect.Effect<unknown, unknown, unknown>>>,
+  ) => unknown
+}
+`
+
+export const evaluateOverlayDiagnostics = (
+  repoRoot: string,
+  overlays: Readonly<Record<string, string>>,
+  session?: TypeScriptProgramSession,
+): ReadonlyArray<OverlayDiagnosticItem> => {
+  const root = resolveRepoRoot(repoRoot)
+  const activeSession = session ?? getOrCreateWarmProgramSession(root)
+  const overlayEntries = Object.entries(overlays)
+  if (overlayEntries.length === 0) {
+    return []
+  }
+
+  const virtualVitestPath = path.join(root, ".harness/__virtual_types__/@effect/vitest/index.d.ts")
+  const virtualSqliteDoPath = path.join(
+    root,
+    ".harness/__virtual_types__/@effect/sql-sqlite-do/index.d.ts",
+  )
+
+  const workspaceRoot = fs.existsSync(path.join(root, "libs/harness/graph/node_modules"))
+    ? root
+    : resolveRepoRoot(import.meta.dirname)
+  const graphNodeModules = path.join(workspaceRoot, "libs/harness/graph/node_modules")
+  const dynamicPaths: Record<string, Array<string>> = {
+    effect: [
+      path.join(root, "libs/harness/graph/node_modules/effect/dist/index.d.ts"),
+      path.join(graphNodeModules, "effect/dist/index.d.ts"),
+      path.join(graphNodeModules, "effect"),
+    ],
+    "effect/*": [
+      path.join(root, "libs/harness/graph/node_modules/effect/dist/*.d.ts"),
+      path.join(graphNodeModules, "effect/dist/*.d.ts"),
+      path.join(graphNodeModules, "effect/*"),
+    ],
+    "ts-pattern": [
+      path.join(root, "node_modules/ts-pattern"),
+      path.join(workspaceRoot, "node_modules/ts-pattern"),
+    ],
+    "@effect/vitest": [
+      path.join(root, "node_modules/@effect/vitest"),
+      path.join(workspaceRoot, "node_modules/@effect/vitest"),
+      virtualVitestPath,
+    ],
+    "@effect/sql-sqlite-do": [
+      path.join(root, "node_modules/@effect/sql-sqlite-do"),
+      path.join(workspaceRoot, "node_modules/@effect/sql-sqlite-do"),
+      virtualSqliteDoPath,
+    ],
+    "@effect/sql-sqlite-do/SqliteMigrator": [
+      path.join(root, "node_modules/@effect/sql-sqlite-do/SqliteMigrator"),
+      path.join(workspaceRoot, "node_modules/@effect/sql-sqlite-do/SqliteMigrator"),
+      virtualSqliteDoPath,
+    ],
+    "@harness/gates": [
+      path.join(root, "libs/harness/gates/src/index.ts"),
+      path.join(workspaceRoot, "libs/harness/gates/src/index.ts"),
+    ],
+    "@harness/graph": [
+      path.join(root, "libs/harness/graph/src/index.ts"),
+      path.join(workspaceRoot, "libs/harness/graph/src/index.ts"),
+    ],
+    "@harness/decision": [
+      path.join(root, "libs/harness/decision/src/index.ts"),
+      path.join(workspaceRoot, "libs/harness/decision/src/index.ts"),
+    ],
+    "@harness/ingest": [
+      path.join(root, "libs/harness/ingest/src/index.ts"),
+      path.join(workspaceRoot, "libs/harness/ingest/src/index.ts"),
+    ],
+  }
+  const libsDir = path.join(root, "libs")
+  if (fs.existsSync(libsDir)) {
+    for (const scopeEntry of fs.readdirSync(libsDir, { withFileTypes: true })) {
+      if (!scopeEntry.isDirectory() || scopeEntry.name === "harness") continue
+      const scopeDir = path.join(libsDir, scopeEntry.name)
+      for (const tier of ["contract", "service", "domain", "core", "infra"]) {
+        const entryFile = path.join(scopeDir, tier, "src", "index.ts")
+        dynamicPaths[`@harness/${scopeEntry.name}-${tier}`] = [entryFile]
+        dynamicPaths[`@effect-${scopeEntry.name}/${tier}`] = [entryFile]
+        dynamicPaths[`@${scopeEntry.name}/${tier}`] = [entryFile]
+      }
+    }
+  }
+  for (const [k] of overlayEntries) {
+    const rel = (path.isAbsolute(k) ? path.relative(root, k) : k).replace(/\\/g, "/")
+    const m = rel.match(/^libs\/([^/]+)\/(contract|service|domain|core|infra)\/src\/index\.ts$/)
+    if (m && m[1] && m[2]) {
+      const scopeName = m[1]
+      const tier = m[2]
+      const entryAbs = path.resolve(root, rel)
+      dynamicPaths[`@harness/${scopeName}-${tier}`] = [entryAbs]
+      dynamicPaths[`@effect-${scopeName}/${tier}`] = [entryAbs]
+      dynamicPaths[`@${scopeName}/${tier}`] = [entryAbs]
+    }
+  }
+
+  const compilerOptions: ts.CompilerOptions = {
+    target: ts.ScriptTarget.ESNext,
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    strict: true,
+    esModuleInterop: true,
+    skipLibCheck: true,
+    noEmit: true,
+    baseUrl: root,
+    paths: dynamicPaths,
+  }
+
+  const rootPkgJsonPath = path.join(root, "package.json")
+  const overlaysWithVirtualTypes: Record<string, string> = {
+    ...(fs.existsSync(rootPkgJsonPath)
+      ? {}
+      : { [rootPkgJsonPath]: JSON.stringify({ name: "overlay-workspace", type: "module" }) }),
+    [virtualVitestPath]: VIRTUAL_EFFECT_VITEST_DTS,
+    [virtualSqliteDoPath]: VIRTUAL_EFFECT_SQL_SQLITE_DO_DTS,
+    ...overlays,
+  }
+
+  const host = createOverlayCompilerHost(
+    compilerOptions,
+    overlaysWithVirtualTypes,
+    activeSession.oldProgram,
+    root,
+  )
+  const rootNames = overlayEntries
+    .map(([k]) => path.resolve(root, k).replace(/\\/g, "/"))
+    .filter((f) => (f.endsWith(".ts") || f.endsWith(".tsx")) && !f.endsWith(".d.ts"))
+
+  if (rootNames.length === 0) {
+    return []
+  }
+
+  const program = ts.createProgram(rootNames, compilerOptions, host, activeSession.oldProgram)
+  activeSession.oldProgram = program
+
+  const diagnostics: Array<OverlayDiagnosticItem> = []
+  for (const fileName of rootNames) {
+    const sf = program.getSourceFile(fileName)
+    if (sf === undefined) continue
+    const allDiags = [
+      ...program.getSyntacticDiagnostics(sf),
+      ...program.getSemanticDiagnostics(sf),
+    ]
+    for (const d of allDiags) {
+      const pos =
+        d.file !== undefined && d.start !== undefined
+          ? d.file.getLineAndCharacterOfPosition(d.start)
+          : { line: 0, character: 0 }
+      const rel = path.relative(root, fileName).replace(/\\/g, "/")
+      diagnostics.push({
+        file: rel.startsWith("..") ? fileName : rel,
+        line: pos.line + 1,
+        column: pos.character + 1,
+        code: `TS${d.code}`,
+        severity: d.category === ts.DiagnosticCategory.Warning ? "warning" : "error",
+        message: ts.flattenDiagnosticMessageText(d.messageText, "\n"),
+      })
+    }
+  }
+  return diagnostics
+}
+
 export const extractTypeGraph = Effect.fn("TypeExtractor.extractWorkspace")(function* (
   options: ExtractTypeGraphOptions,
 ): Effect.fn.Return<HarnessGraph> {
@@ -4669,7 +5037,24 @@ export const extractWorkspaceTypeAwareGraph = (
       }
     }
 
-    const relFiles = findWorkspaceSrcFiles(root)
+    const relFileSet = new Set<string>(findWorkspaceSrcFiles(root))
+    const testFileSet = new Set<string>(findWorkspaceTestFiles(root))
+    for (const overlayRel of normalizedOverlays.keys()) {
+      if (
+        (overlayRel.endsWith(".test.ts") ||
+          overlayRel.endsWith(".spec.ts") ||
+          overlayRel.includes("/test/")) &&
+        !overlayRel.endsWith(".d.ts")
+      ) {
+        testFileSet.add(overlayRel)
+      } else if (
+        (overlayRel.endsWith(".ts") || overlayRel.endsWith(".tsx")) &&
+        !overlayRel.endsWith(".d.ts")
+      ) {
+        relFileSet.add(overlayRel)
+      }
+    }
+    const relFiles = Array.from(relFileSet).sort()
     const inputs: Array<SourceFileInput> = []
     const inputShaMap = new Map<string, string>()
 
@@ -4687,7 +5072,7 @@ export const extractWorkspaceTypeAwareGraph = (
       })
     }
 
-    const testFiles = findWorkspaceTestFiles(root)
+    const testFiles = Array.from(testFileSet).sort()
     const testContentMap = new Map<string, string>()
     const testShaMap = new Map<string, string>()
     for (const relTestFile of testFiles) {

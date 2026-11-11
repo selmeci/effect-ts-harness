@@ -1,7 +1,12 @@
-import { diffHarnessGraphs, type HarnessGraph } from "@harness/graph"
+import {
+  diffHarnessGraphs,
+  type HarnessGraph,
+  verifySubgraphMonomorphism,
+} from "@harness/graph"
 
 export interface PlanImplDiffResult {
   readonly ok: boolean
+  readonly monomorphic: boolean
   readonly reasons: ReadonlyArray<string>
 }
 
@@ -20,6 +25,7 @@ export const diffPlanAndImplGraphs = (
   implGraph: HarnessGraph,
 ): PlanImplDiffResult => {
   const diff = diffHarnessGraphs(implGraph, planGraph)
+  const mono = verifySubgraphMonomorphism(implGraph, planGraph)
   const reasons: Array<string> = []
 
   for (const stub of diff.remainingStubs) {
@@ -43,8 +49,30 @@ export const diffPlanAndImplGraphs = (
     )
   }
 
+  const reasonSet = new Set<string>(reasons)
+  const addReason = (msg: string): void => {
+    if (!reasonSet.has(msg)) {
+      reasonSet.add(msg)
+      reasons.push(msg)
+    }
+  }
+
+  for (const ent of mono.missingEntities) {
+    addReason(`Subgraph monomorphism missing entity: ${formatEntityKey(ent)}`)
+  }
+  for (const rel of mono.missingRelations) {
+    addReason(`Subgraph monomorphism missing relation: ${rel}`)
+  }
+  for (const edge of mono.missingRoleEdges) {
+    addReason(
+      `Missing planned PlaysRole(${edge.role}) relation on ${formatEntityKey(edge.entityKey)} (${edge.relationId} -> ${edge.entityKey})`,
+    )
+  }
+
+  const isClean = reasons.length === 0 && mono.isMonomorphic
   return {
-    ok: reasons.length === 0,
+    ok: isClean,
+    monomorphic: isClean,
     reasons,
   }
 }

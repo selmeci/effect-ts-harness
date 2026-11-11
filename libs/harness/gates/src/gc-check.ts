@@ -3,7 +3,11 @@ import { join, relative } from "node:path"
 import { Effect, Option, Schema } from "effect"
 import { match } from "ts-pattern"
 import * as Graph from "effect/Graph"
-import type { GovernanceDocStatus, HarnessGraph } from "@harness/graph"
+import {
+  decideGraphInference,
+  type GovernanceDocStatus,
+  type HarnessGraph,
+} from "@harness/graph"
 import { decideEarsSpecQuality } from "./ears-lint.js"
 import { decideAdrDocQuality } from "./adr-lint.js"
 import { decideOntologyInvariants } from "./ontology-invariants.js"
@@ -347,6 +351,62 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (input: 
       .exhaustive()
     if (hasVitestCases) break
   }
+
+  // Augment reachability maps with Stratified Datalog S_1/S_2 inference (`GraphInfer.decide` / RFC-0004 §8)
+  const inferredServiceConsumers = new Set<Graph.NodeIndex>()
+  const inferredEmittedErrors = new Set<Graph.NodeIndex>()
+  const inferenceExit = yield* Effect.exit(decideGraphInference(input.graph))
+  match(inferenceExit)
+    .with({ _tag: "Success" }, ({ value: inferred }) => {
+      for (const req of inferred.effectiveRequires) {
+        const svcIdx = input.graph.nodeIndexByKey.get(req.serviceKey)
+        if (svcIdx !== undefined) {
+          inferredServiceConsumers.add(svcIdx)
+          if ((incomingRequires.get(svcIdx) ?? 0) === 0) {
+            incomingRequires.set(svcIdx, 1)
+          }
+        }
+      }
+      for (const fail of inferred.effectiveFailsWith) {
+        const errIdx = input.graph.nodeIndexByKey.get(fail.errorKey)
+        if (errIdx !== undefined) {
+          inferredEmittedErrors.add(errIdx)
+          if ((incomingFailsWith.get(errIdx) ?? 0) === 0) {
+            incomingFailsWith.set(errIdx, 1)
+          }
+        }
+      }
+      for (const layerDep of inferred.effectiveLayerDeps) {
+        const svcIdx = input.graph.nodeIndexByKey.get(layerDep.requiredServiceKey)
+        if (svcIdx !== undefined) {
+          inferredServiceConsumers.add(svcIdx)
+          if ((incomingLayerRequires.get(svcIdx) ?? 0) === 0) {
+            incomingLayerRequires.set(svcIdx, 1)
+          }
+        }
+      }
+      for (const reach of inferred.effectiveTestReach) {
+        const fnIdx = input.graph.nodeIndexByKey.get(reach.targetSpanKey)
+        if (fnIdx !== undefined) {
+          if ((incomingTestOrCall.get(fnIdx) ?? 0) === 0) {
+            incomingTestOrCall.set(fnIdx, 1)
+          }
+          if (reach.isPropertyTest && (incomingPropertyTests.get(fnIdx) ?? 0) === 0) {
+            incomingPropertyTests.set(fnIdx, 1)
+          }
+        }
+      }
+    })
+    .with({ _tag: "Failure" }, (f) => {
+      findings.push({
+        kind: "ontology-invariant",
+        nodeId: "GraphInfer.decide",
+        message: `Stratified Datalog inference failed during GC check: ${String(f.cause)}`,
+        action:
+          "Fix the ConceptLattice cycle or Datalog inference error reported by GraphInfer.decide.",
+      })
+    })
+    .exhaustive()
 
   // 1. unused-service
   for (const [idx, node] of Graph.nodes(g)) {
@@ -1572,9 +1632,10 @@ export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcF
             const openParenIdx = bmMatch.index + bmMatch[0].lastIndexOf("(")
             const parenBalanced = extractBalancedParens(codeWithoutStrings, openParenIdx)
             if (parenBalanced !== undefined) {
-              const colAccessMatch = /\b([A-Za-z_$][\w$]*\.[a-z]+_[a-z0-9_]+)\b/.exec(
-                parenBalanced.body,
-              )
+              const colAccessMatch =
+                /\b([A-Za-z_$][\w$]*\.[a-z]+_[a-z0-9_]+|(?:row|record|entry)\.[a-z][A-Za-z0-9_]*)\b(?!\s*\()/.exec(
+                  parenBalanced.body,
+                )
               if (colAccessMatch !== null) {
                 const colAccess = colAccessMatch[1]!
                 const nodeId = `${relFilePath}:${brandName}.make(${colAccess})`

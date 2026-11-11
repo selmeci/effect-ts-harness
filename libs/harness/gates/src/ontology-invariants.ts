@@ -1,7 +1,13 @@
 import { Effect, Option } from "effect"
 import { match } from "ts-pattern"
 import * as Graph from "effect/Graph"
-import { getNodeKey, type HarnessGraph, queryOntologyWhy, resolveNode } from "@harness/graph"
+import {
+  decideGraphInference,
+  getNodeKey,
+  type HarnessGraph,
+  queryOntologyWhy,
+  resolveNode,
+} from "@harness/graph"
 import { decideEarsSpecQuality, type EarsRequirementRow } from "./ears-lint.js"
 import type { GovernanceDocReference } from "./gc-check.js"
 
@@ -29,15 +35,23 @@ export interface OntologyInvariantsReport {
   readonly findings: ReadonlyArray<OntologyInvariantFinding>
 }
 
-const normalizeConditionPrefix = (requirement: string): string => {
+export const normalizeConditionPrefix = (requirement: string): string => {
   const clean = requirement.replace(/[*_`]/g, "").trim().toLowerCase()
-  const matchWithSubject = clean.match(/^(.*?)(?:,\s*)?(?:then\s+)?the\s+[a-z0-9_-]+\s+shall\b/)
+  const matchWithSubject = clean.match(
+    /^(.*)(?:,\s*|\s+)(?:then\s+)?the\s+[a-z0-9_-]+(?:\s+[a-z0-9_-]+){0,2}\s+shall\b/,
+  )
   if (matchWithSubject && matchWithSubject[1]) {
-    return matchWithSubject[1].trim()
+    return matchWithSubject[1].replace(/,\s*$/, "").trim()
+  }
+  const matchLeadingSubject = clean.match(
+    /^(.*?)(?:,\s*)?(?:then\s+)?the\s+[a-z0-9_-]+(?:\s+[a-z0-9_-]+){0,2}\s+shall\b/,
+  )
+  if (matchLeadingSubject && matchLeadingSubject[1]) {
+    return matchLeadingSubject[1].replace(/,\s*$/, "").trim()
   }
   const matchShall = clean.match(/^(.*?)(?:,\s*)?shall\b/)
   if (matchShall && matchShall[1]) {
-    return matchShall[1].trim()
+    return matchShall[1].replace(/,\s*$/, "").trim()
   }
   return ""
 }
@@ -230,6 +244,38 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(f
     if (hasVitestCases) break
   }
 
+  // Augment reachability & decider purity via Stratified Datalog S_1/S_2 (`GraphInfer.decide` / RFC-0004 §8)
+  const inferredImpureFnKeys = new Set<string>()
+  const inferenceExit = yield* Effect.exit(decideGraphInference(input.graph))
+  match(inferenceExit)
+    .with({ _tag: "Success" }, ({ value: inferred }) => {
+      for (const req of inferred.effectiveRequires) {
+        inferredImpureFnKeys.add(req.callerKey)
+      }
+      for (const anti of inferred.antiPatterns) {
+        if (anti.ruleId === "impure-decider") {
+          inferredImpureFnKeys.add(anti.nodeKey)
+        }
+      }
+      for (const reach of inferred.effectiveTestReach) {
+        const fnIdx = input.graph.nodeIndexByKey.get(reach.targetSpanKey)
+        if (fnIdx !== undefined) {
+          incomingTestOrCall.set(fnIdx, (incomingTestOrCall.get(fnIdx) ?? 0) + 1)
+          if (reach.isPropertyTest) {
+            incomingPropertyTests.set(fnIdx, (incomingPropertyTests.get(fnIdx) ?? 0) + 1)
+          }
+        }
+      }
+    })
+    .with({ _tag: "Failure" }, (f) => {
+      findings.push({
+        kind: "ontology-broken-realization-chain",
+        nodeId: "GraphInfer.decide",
+        message: `Stratified Datalog inference failed during ontology check: ${String(f.cause)}`,
+      })
+    })
+    .exhaustive()
+
   // 1. Parse all EARS specs
   interface ParsedSpec {
     readonly doc: GovernanceDocReference
@@ -275,10 +321,10 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(f
             const isDecider =
               resolved.spanName === "decide" || resolved.spanName.endsWith(".decide")
 
-            let hasOutgoingRequires = false
             const resolvedKey = getNodeKey(resolved)
+            let hasOutgoingRequires = inferredImpureFnKeys.has(resolvedKey)
             const nodeIdx = input.graph.nodeIndexByKey.get(resolvedKey)
-            if (nodeIdx !== undefined) {
+            if (!hasOutgoingRequires && nodeIdx !== undefined) {
               for (const inEdgeIdx of Graph.incomingEdges(g, nodeIdx)) {
                 const inEdgeOpt = Graph.getEdge(g, inEdgeIdx)
                 if (Option.isNone(inEdgeOpt)) continue

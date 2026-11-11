@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url"
 import { Cause, Effect, Layer, Option, Schema } from "effect"
 import * as Graph from "effect/Graph"
 import * as DecisionModel from "effect/ai/DecisionModel"
-import { match } from "ts-pattern"
+import { match, P } from "ts-pattern"
 import {
   checkPlanStepCoverage,
   decideGuardCommand,
@@ -75,15 +75,18 @@ import {
   writeVerifyStamp,
 } from "@harness/gates"
 import {
+  BisectionProbeCount,
   checkEffectGraph,
   clearWarmProgramSessions,
   DatalogFilePath,
   DatalogSession,
+  decideGraphProjection,
   decideGraphRewrite,
   diffOmnigraphBranches,
   extractTypeGraph,
   extractWorkspaceTypeAwareGraph,
   findTestsReaching,
+  getNodeKey,
   getOrCreateWarmProgramSession,
   type HarnessGraph,
   loadGraphSnapshot,
@@ -94,8 +97,10 @@ import {
   queryOntologyWhy,
   renderOntologyMermaid,
   saveGraphSnapshot,
+  type ShadowFileOverlay,
   stepDatalogFileDelta,
   syncToOmnigraphAndSnapshot,
+  VerificationStatus,
 } from "@harness/graph"
 import { buildWorkspaceFnIndex } from "@harness/ingest"
 
@@ -103,6 +108,8 @@ export const COMMANDS = [
   "guard",
   "route",
   "plan-check",
+  "plan-synth",
+  "repair",
   "verify",
   "done",
   "learn",
@@ -866,6 +873,10 @@ export const tryQueryWarmDaemonSocket = (
       client.on("error", () => {
         clearTimeout(timer)
         finish(Option.none())
+      })
+      return Effect.sync(() => {
+        clearTimeout(timer)
+        client.destroy()
       })
     })
   })
@@ -2740,6 +2751,512 @@ const handleReport = (
     }
   })
 
+const formatProjectionError = (err: unknown): string => {
+  if (typeof err === "object" && err !== null) {
+    const rec = err as Record<string, unknown>
+    const tag = typeof rec._tag === "string" ? rec._tag : undefined
+    const reason = typeof rec.reason === "string" ? rec.reason : undefined
+    const msg = typeof rec.message === "string" ? rec.message : undefined
+    if (tag !== undefined && reason !== undefined) {
+      return msg !== undefined ? `${tag} (${reason}): ${msg}` : `${tag} (${reason})`
+    }
+    if (msg !== undefined) {
+      return msg
+    }
+  }
+  return String(err)
+}
+
+const matchesExactSpecToken = (text: string, specId: string): boolean => {
+  const escaped = specId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const tokenRegex = new RegExp(`(?:^|[^A-Za-z0-9_-])${escaped}(?=$|[^A-Za-z0-9_-])`)
+  return tokenRegex.test(text)
+}
+
+const persistVerifiedOverlays = (
+  repoRoot: string,
+  overlays: ReadonlyArray<ShadowFileOverlay>,
+): Effect.Effect<
+  {
+    readonly ok: boolean
+    readonly writtenFiles: ReadonlyArray<string>
+    readonly rejectedFiles: ReadonlyArray<{ readonly file: string; readonly reason: string }>
+    readonly error?: string | undefined
+  },
+  never,
+  never
+> =>
+  Effect.gen(function* () {
+    const canonicalRoot = resolve(repoRoot)
+    const rejectedFiles: Array<{ readonly file: string; readonly reason: string }> = []
+    for (const overlay of overlays) {
+      const absTarget = resolve(canonicalRoot, overlay.targetFile)
+      if (!absTarget.startsWith(`${canonicalRoot}/`) || absTarget === canonicalRoot) {
+        rejectedFiles.push({
+          file: overlay.targetFile,
+          reason: "Target path escapes workspace root.",
+        })
+        continue
+      }
+      const guardDecision = classifyFileWrite(overlay.targetFile)
+      if (guardDecision.verdict !== "allow") {
+        rejectedFiles.push({
+          file: overlay.targetFile,
+          reason: `File write verdict is '${guardDecision.verdict}': ${guardDecision.reason}`,
+        })
+      }
+    }
+
+    if (rejectedFiles.length > 0) {
+      return {
+        ok: false,
+        writtenFiles: [],
+        rejectedFiles,
+        error: `Refusing to write ${rejectedFiles.length} protected or out-of-workspace file(s): ${rejectedFiles.map((r) => `${r.file} (${r.reason})`).join("; ")}`,
+      }
+    }
+
+    const writtenFiles: Array<string> = []
+    const writeExit = yield* Effect.exit(
+      Effect.try({
+        try: () => {
+          for (const overlay of overlays) {
+            const absTarget = resolve(canonicalRoot, overlay.targetFile)
+            mkdirSync(dirname(absTarget), { recursive: true })
+            writeFileSync(absTarget, overlay.content, "utf-8")
+            writtenFiles.push(overlay.targetFile)
+          }
+        },
+        catch: (fsErr) => (fsErr instanceof Error ? fsErr.message : String(fsErr)),
+      }),
+    )
+
+    return match(writeExit)
+      .with({ _tag: "Success" }, () => ({
+        ok: true,
+        writtenFiles,
+        rejectedFiles: [],
+      }))
+      .with({ _tag: "Failure" }, (f) => ({
+        ok: false,
+        writtenFiles,
+        rejectedFiles: [],
+        error: `Filesystem write failed: ${String(f.cause)}`,
+      }))
+      .exhaustive()
+  })
+
+const handlePlanSynth = (
+  argv: ReadonlyArray<string>,
+  options: CliEnv | undefined,
+): Effect.Effect<CliResult> =>
+  Effect.gen(function* () {
+    const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
+    const shouldWrite = argv.includes("--write")
+    const verifyRoundTrip = shouldWrite || argv.includes("--verify")
+    const specId = argv.slice(1).find((arg) => !arg.startsWith("--"))
+
+    if (specId === undefined || specId.trim().length === 0) {
+      return {
+        exitCode: 1,
+        stdout: "",
+        stderr: "usage: harness plan-synth <spec-id> [--write] [--verify]",
+      }
+    }
+
+    const graph = options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot))
+    const rewriteOutcome = yield* decideGraphRewrite(graph, "auto-plan")
+    const candidates = [
+      ...Option.toArray(rewriteOutcome.result.recommendedCandidate),
+      ...rewriteOutcome.result.alternativeCandidates,
+    ]
+    const selected =
+      Option.getOrUndefined(rewriteOutcome.result.recommendedCandidate) ??
+      candidates[0]
+    const filteredPatches =
+      selected !== undefined
+        ? selected.patches.filter(
+            (p) =>
+              matchesExactSpecToken(p.description, specId) ||
+              p.insertedEntityNodes.some((n) => matchesExactSpecToken(getNodeKey(n), specId)) ||
+              p.insertedRoleEdges.some(
+                (e) =>
+                  matchesExactSpecToken(e.entityKey, specId) ||
+                  matchesExactSpecToken(e.relationId, specId),
+              ),
+          )
+        : []
+
+    if (filteredPatches.length === 0) {
+      const msg = `No plan-synth patches matched specification '${specId}'.`
+      return {
+        exitCode: 1,
+        stdout: JSON.stringify({
+          specId,
+          mode: "auto-plan",
+          error: msg,
+          patchCount: 0,
+          operationCount: 0,
+          overlayCount: 0,
+          overlays: [],
+          operations: [],
+          verificationStatus: VerificationStatus.make("Unverified"),
+          roundTripVerified: false,
+          compilerDiagnostics: [],
+          bisectionProbes: BisectionProbeCount.make(0),
+          skippedRuleIds: [],
+          written: false,
+          writtenFiles: [],
+        }),
+        stderr: msg,
+      }
+    }
+
+    const projection = yield* decideGraphProjection({
+      patches: filteredPatches,
+      targetGraph: rewriteOutcome.targetGraph,
+      workspaceRoot: repoRoot,
+      initialGraph: graph,
+      verifyRoundTrip,
+    })
+
+    if (projection.skippedRuleIds.length > 0) {
+      const skipMsg = `Skipped ${projection.skippedRuleIds.length} patch(es) due to round-trip verification failure: ${projection.skippedRuleIds.join(", ")}`
+      if (shouldWrite) {
+        return {
+          exitCode: 1,
+          stdout: JSON.stringify({
+            specId,
+            mode: "auto-plan",
+            error: "Round-trip verification failed; aborting file write.",
+            verificationStatus: projection.verificationStatus,
+            roundTripVerified: false,
+            compilerDiagnostics: projection.compilerDiagnostics,
+            skippedRuleIds: projection.skippedRuleIds,
+            written: false,
+            writtenFiles: [],
+          }),
+          stderr: skipMsg,
+        }
+      }
+      return {
+        exitCode: 1,
+        stdout: JSON.stringify({
+          specId,
+          mode: "auto-plan",
+          totalStepsApplied: selected?.patches.length ?? 0,
+          patchCount: filteredPatches.length,
+          operationCount: projection.operations.length,
+          overlayCount: projection.overlays.length,
+          overlays: projection.overlays,
+          operations: projection.operations,
+          verificationStatus: projection.verificationStatus,
+          roundTripVerified: projection.roundTripVerified,
+          compilerDiagnostics: projection.compilerDiagnostics,
+          bisectionProbes: projection.bisectionProbes,
+          skippedRuleIds: projection.skippedRuleIds,
+          written: false,
+          writtenFiles: [],
+        }),
+        stderr: skipMsg,
+      }
+    }
+
+    if (shouldWrite && projection.verificationStatus !== "Verified") {
+      return {
+        exitCode: 1,
+        stdout: JSON.stringify({
+          specId,
+          mode: "auto-plan",
+          error: "Round-trip verification failed; aborting file write.",
+          verificationStatus: projection.verificationStatus,
+          roundTripVerified: false,
+          compilerDiagnostics: projection.compilerDiagnostics,
+          skippedRuleIds: projection.skippedRuleIds,
+          written: false,
+          writtenFiles: [],
+        }),
+        stderr: "Round-trip verification failed; aborting file write.",
+      }
+    }
+
+    let writtenFiles: ReadonlyArray<string> = []
+    if (shouldWrite) {
+      if (projection.overlays.length === 0) {
+        return {
+          exitCode: 1,
+          stdout: JSON.stringify({
+            specId,
+            mode: "auto-plan",
+            error: "No projected overlays to write.",
+            written: false,
+            writtenFiles: [],
+          }),
+          stderr: "No projected overlays to write.",
+        }
+      }
+      const writeResult = yield* persistVerifiedOverlays(repoRoot, projection.overlays)
+      if (!writeResult.ok) {
+        return {
+          exitCode: 1,
+          stdout: JSON.stringify({
+            specId,
+            mode: "auto-plan",
+            error: writeResult.error,
+            rejectedFiles: writeResult.rejectedFiles,
+            written: false,
+            writtenFiles: writeResult.writtenFiles,
+          }),
+          stderr: writeResult.error ?? "Failed to write overlays.",
+        }
+      }
+      writtenFiles = writeResult.writtenFiles
+    }
+
+    return {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        specId,
+        mode: "auto-plan",
+        totalStepsApplied: selected?.patches.length ?? 0,
+        patchCount: filteredPatches.length,
+        operationCount: projection.operations.length,
+        overlayCount: projection.overlays.length,
+        overlays: projection.overlays,
+        operations: projection.operations,
+        verificationStatus: projection.verificationStatus,
+        roundTripVerified: projection.roundTripVerified,
+        compilerDiagnostics: projection.compilerDiagnostics,
+        bisectionProbes: projection.bisectionProbes,
+        skippedRuleIds: projection.skippedRuleIds,
+        written: shouldWrite,
+        writtenFiles,
+      }),
+      stderr: "",
+    }
+  }).pipe(
+    Effect.catch((err: unknown) =>
+      Effect.succeed<CliResult>({
+        exitCode: 1,
+        stdout: "",
+        stderr: formatProjectionError(err),
+      }),
+    ),
+  )
+
+const handleRepair = (
+  argv: ReadonlyArray<string>,
+  options: CliEnv | undefined,
+): Effect.Effect<CliResult> =>
+  Effect.gen(function* () {
+    const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
+    const shouldWrite = argv.includes("--write")
+    const verifyRoundTrip = shouldWrite || argv.includes("--verify")
+    let ruleFilter: string | undefined = undefined
+    for (let i = 1; i < argv.length; i++) {
+      const arg = argv[i]!
+      const nextArg = argv[i + 1]
+      const parsed = match(arg)
+        .with(P.string.startsWith("--rule="), (a) => ({
+          filter: a.slice("--rule=".length),
+          advance: 0,
+        }))
+        .with("--rule", () =>
+          nextArg !== undefined
+            ? { filter: nextArg, advance: 1 }
+            : { filter: undefined, advance: 0 },
+        )
+        .otherwise(() => ({ filter: undefined, advance: 0 }))
+      if (parsed.filter !== undefined) {
+        ruleFilter = parsed.filter
+        i += parsed.advance
+      }
+    }
+
+    const graph = options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot))
+    const rewriteOutcome = yield* decideGraphRewrite(graph, "auto-repair")
+    const candidates = [
+      ...Option.toArray(rewriteOutcome.result.recommendedCandidate),
+      ...rewriteOutcome.result.alternativeCandidates,
+    ]
+    const selected =
+      Option.getOrUndefined(rewriteOutcome.result.recommendedCandidate) ??
+      candidates[0]
+    const filteredPatches =
+      selected !== undefined
+        ? ruleFilter !== undefined && ruleFilter.length > 0
+          ? selected.patches.filter((p) => p.ruleId === ruleFilter)
+          : selected.patches
+        : []
+
+    if (ruleFilter !== undefined && ruleFilter.length > 0 && filteredPatches.length === 0) {
+      const msg = `No repair patches matched rule filter '${ruleFilter}'.`
+      return {
+        exitCode: 1,
+        stdout: JSON.stringify({
+          mode: "auto-repair",
+          ruleFilter,
+          error: msg,
+          patchCount: 0,
+          operationCount: 0,
+          overlayCount: 0,
+          overlays: [],
+          operations: [],
+          verificationStatus: VerificationStatus.make("Unverified"),
+          roundTripVerified: false,
+          compilerDiagnostics: [],
+          bisectionProbes: BisectionProbeCount.make(0),
+          skippedRuleIds: [],
+          written: false,
+          writtenFiles: [],
+        }),
+        stderr: msg,
+      }
+    }
+
+    const projection =
+      selected !== undefined && filteredPatches.length > 0
+        ? yield* decideGraphProjection({
+            patches: filteredPatches,
+            targetGraph: rewriteOutcome.targetGraph,
+            workspaceRoot: repoRoot,
+            initialGraph: graph,
+            verifyRoundTrip,
+          })
+        : {
+            operations: [],
+            overlays: [],
+            verificationStatus: VerificationStatus.make("Unverified"),
+            roundTripVerified: false,
+            compilerDiagnostics: [],
+            bisectionProbes: BisectionProbeCount.make(0),
+            skippedRuleIds: [],
+          }
+
+    if (projection.skippedRuleIds.length > 0) {
+      const skipMsg = `Skipped ${projection.skippedRuleIds.length} patch(es) due to round-trip verification failure: ${projection.skippedRuleIds.join(", ")}`
+      if (shouldWrite) {
+        return {
+          exitCode: 1,
+          stdout: JSON.stringify({
+            mode: "auto-repair",
+            ruleFilter: ruleFilter ?? null,
+            error: "Round-trip verification failed; aborting file write.",
+            verificationStatus: projection.verificationStatus,
+            roundTripVerified: false,
+            compilerDiagnostics: projection.compilerDiagnostics,
+            skippedRuleIds: projection.skippedRuleIds,
+            written: false,
+            writtenFiles: [],
+          }),
+          stderr: skipMsg,
+        }
+      }
+      return {
+        exitCode: 1,
+        stdout: JSON.stringify({
+          mode: "auto-repair",
+          ruleFilter: ruleFilter ?? null,
+          totalStepsApplied: selected?.patches.length ?? 0,
+          patchCount: filteredPatches.length,
+          operationCount: projection.operations.length,
+          overlayCount: projection.overlays.length,
+          overlays: projection.overlays,
+          operations: projection.operations,
+          verificationStatus: projection.verificationStatus,
+          roundTripVerified: projection.roundTripVerified,
+          compilerDiagnostics: projection.compilerDiagnostics,
+          bisectionProbes: projection.bisectionProbes,
+          skippedRuleIds: projection.skippedRuleIds,
+          written: false,
+          writtenFiles: [],
+        }),
+        stderr: skipMsg,
+      }
+    }
+
+    if (shouldWrite && projection.verificationStatus !== "Verified") {
+      return {
+        exitCode: 1,
+        stdout: JSON.stringify({
+          mode: "auto-repair",
+          ruleFilter: ruleFilter ?? null,
+          error: "Round-trip verification failed; aborting file write.",
+          verificationStatus: projection.verificationStatus,
+          roundTripVerified: false,
+          compilerDiagnostics: projection.compilerDiagnostics,
+          skippedRuleIds: projection.skippedRuleIds,
+          written: false,
+          writtenFiles: [],
+        }),
+        stderr: "Round-trip verification failed; aborting file write.",
+      }
+    }
+
+    let writtenFiles: ReadonlyArray<string> = []
+    if (shouldWrite) {
+      if (projection.overlays.length === 0) {
+        return {
+          exitCode: 1,
+          stdout: JSON.stringify({
+            mode: "auto-repair",
+            ruleFilter: ruleFilter ?? null,
+            error: "No projected overlays to write.",
+            written: false,
+            writtenFiles: [],
+          }),
+          stderr: "No projected overlays to write.",
+        }
+      }
+      const writeResult = yield* persistVerifiedOverlays(repoRoot, projection.overlays)
+      if (!writeResult.ok) {
+        return {
+          exitCode: 1,
+          stdout: JSON.stringify({
+            mode: "auto-repair",
+            ruleFilter: ruleFilter ?? null,
+            error: writeResult.error,
+            rejectedFiles: writeResult.rejectedFiles,
+            written: false,
+            writtenFiles: writeResult.writtenFiles,
+          }),
+          stderr: writeResult.error ?? "Failed to write overlays.",
+        }
+      }
+      writtenFiles = writeResult.writtenFiles
+    }
+
+    return {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        mode: "auto-repair",
+        ruleFilter: ruleFilter ?? null,
+        totalStepsApplied: selected?.patches.length ?? 0,
+        patchCount: filteredPatches.length,
+        operationCount: projection.operations.length,
+        overlayCount: projection.overlays.length,
+        overlays: projection.overlays,
+        operations: projection.operations,
+        verificationStatus: projection.verificationStatus,
+        roundTripVerified: projection.roundTripVerified,
+        compilerDiagnostics: projection.compilerDiagnostics,
+        bisectionProbes: projection.bisectionProbes,
+        skippedRuleIds: projection.skippedRuleIds,
+        written: shouldWrite,
+        writtenFiles,
+      }),
+      stderr: "",
+    }
+  }).pipe(
+    Effect.catch((err: unknown) =>
+      Effect.succeed<CliResult>({
+        exitCode: 1,
+        stdout: "",
+        stderr: formatProjectionError(err),
+      }),
+    ),
+  )
+
 export const runCliEffect = (
   argv: ReadonlyArray<string>,
   options?: CliEnv,
@@ -2793,6 +3310,12 @@ export const runCliEffect = (
         break
       case "plan-check":
         resEffect = handlePlanCheck(argv, options)
+        break
+      case "plan-synth":
+        resEffect = handlePlanSynth(argv, options)
+        break
+      case "repair":
+        resEffect = handleRepair(argv, options)
         break
       case "verify":
         resEffect = handleVerify(options, decisionLayer)

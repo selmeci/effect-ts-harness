@@ -11,7 +11,9 @@ enforced_by:
   - libs/harness/graph/src/concept-lattice.ts
   - libs/harness/graph/src/datalog-engine.ts
   - libs/harness/graph/src/graph-rewrite.ts
+  - libs/harness/graph/src/graph-projector.ts
   - libs/harness/graph/src/graph-engine.ts
+  - libs/harness/graph/src/type-extractor.ts
   - libs/harness/graph/src/policy-check.ts
   - libs/harness/graph/src/omnigraph-sync.ts
   - libs/harness/decision/src/hole-prior-decision.ts
@@ -22,6 +24,7 @@ spans:
   - GraphInfer.decide
   - DatalogSession.stepFileDelta
   - GraphRewrite.decide
+  - GraphProjector.decide
   - GraphPolicy.decide
   - GraphEngine.loadSnapshot
   - GraphEngine.deserializeSnapshot
@@ -38,6 +41,7 @@ errors:
   - ConceptLatticeCycleError
   - GraphInferenceError
   - GraphRewriteError
+  - GraphProjectorError
   - GraphSnapshotError
 ---
 
@@ -49,7 +53,7 @@ Representing a workspace architecture as a flat binary directed graph exhibits t
 
 1. **Loss of $k$-ary Tuple Coherence:** An `Effect.fn("Span")<A, E, R>` signature is an atomic multi-way relation binding a caller span, a set of required services $R$, a set of emitted errors $E$, and input/output schemas $A$. Decomposing this signature into independent binary edges loses the invariant that those channels belong to the same signature declaration; the same loss affects `Layer<ROut, E, RIn>` wiring and `ADR -> EARS -> Span -> Test` governance realization chains.
 2. **Procedural Policy Verification Without Proof Lineage:** Ad-hoc recursive graph traversals (`Graph.dfs`, `Graph.simplePaths`) cannot declaratively compose stratified negation, infer missing architectural edges (`SuggestedEdge`), or emit machine-verifiable `DerivationProof` DAGs explaining _why_ a violation or edge suggestion holds.
-3. **Foundation for Algebraic Graph Rewriting (Milestone 2):** Without reified $k$-ary relations and role edges, future planning and auto-repair (scheduled for Milestone 2 in `RFC-0003` and `RFC-0004`) cannot be formulated over typed hyperedges in an in-process TypeScript engine.
+3. **Foundation for Algebraic Graph Rewriting & Bidirectional AST Projection (`RFC-0003` & `RFC-0004`):** Without reified $k$-ary relations and role edges, DPO planning (`PLAN-01..04`), automated architectural repair (`REP-01..11`), and Stratum-Batch Shadow LSP AST projection (`GraphRewrite.decide` and `GraphProjector.decide`) cannot be formulated over typed hyperedges in an in-process TypeScript engine.
 
 How should the harness represent $k$-ary polymorphic architectural relations and execute recursive and negated architectural inference with proof trees while remaining 100% in-process inside Node.js without external JVM/Rust database daemons?
 
@@ -125,4 +129,5 @@ Maintain 8 binary edge types (`RequiresService`, `FailsWith`, etc.) and `node An
 | Acyclic concept lattice validation, covariant role refinement, and inherited role closure ($\sqsubseteq^_$, $\text{roles}^_(c)$)                                       | `libs/harness/graph/src/concept-lattice.ts`                                                                                      | `decideConceptLattice`, `ConceptLatticeCycleError`                                                                                 | `ConceptLattice.decide`                                                                                                    |
 | Four-stratum Differential Dataflow inference (`INF-01..09`), edge completion (`COMP-01..06`), and incremental DBSP $\mathbb{Z}$-set sessions                           | `libs/harness/graph/src/datalog-engine.ts`, `libs/harness/graph/src/policy-check.ts`                                             | `decideGraphInference`, `DatalogSession`, `GraphInferenceError`, `decideEffectGraphPolicy`                                         | `GraphInfer.decide`, `DatalogSession.stepFileDelta`, `GraphPolicy.decide`, `GraphGc.decide`                                |
 | Double-Pushout (DPO) algebraic graph rewriting (`PLAN-01..04`, `REP-01..11`) preserving $V_R \in K$ and strictly decreasing $\mu(G) \in \mathbb{N}^6$ with `R = never` | `libs/harness/graph/src/graph-rewrite.ts`, `libs/harness/decision/src/dpo-ranker-decision.ts`                                    | `decideGraphRewrite`, `GraphRewriteError`, `evaluateDpoCandidateRank`, `evaluateDpoCandidatePriorsBatch`                           | `GraphRewrite.decide`, `DpoCandidateRanker.evaluate`, `DpoCandidateRanker.evaluateBatch`                                   |
+| Bidirectional AST code projection (`GraphProjector.decide`), Nx barrel (`src/index.ts`) co-projection, and Stratum-Batch Shadow LSP round-trip verification            | `libs/harness/graph/src/graph-projector.ts`, `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/graph-engine.ts` | `decideGraphProjection`, `GraphProjectorError`, `createOverlayCompilerHost`, `verifySubgraphMonomorphism`                          | `GraphProjector.decide`, `HarnessMcp.executeTool`                                                                          |
 | Role-specific Omnigraph PG-Schema synchronization without `node Any` and MCP hypergraph inference tools with System One priors                                         | `libs/harness/graph/src/omnigraph-sync.ts`, `libs/harness/decision/src/hole-prior-decision.ts`, `apps/harness-mcp/src/server.ts` | `OmnigraphSync`, `evaluateHoleCandidatePrior`, `evaluateHoleCandidatePriorsBatch`, `harness_graph_infer`, `harness_graph_complete` | `OmnigraphSync`, `HoleRelevanceAndEdgePrior.evaluate`, `HoleRelevanceAndEdgePrior.evaluateBatch`, `HarnessMcp.executeTool` |

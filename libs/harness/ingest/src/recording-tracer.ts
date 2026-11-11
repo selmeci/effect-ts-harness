@@ -60,7 +60,10 @@ export const makeRecordingTracer = (recorder: SpanRecorderShape): Tracer.Tracer 
   Tracer.make({
     span(options) {
       const span = new Tracer.NativeSpan(options)
-      const parentSpanId = Option.isSome(options.parent) ? options.parent.value.spanId : null
+      const parentSpanId = Option.match(options.parent, {
+        onNone: () => null,
+        onSome: (p) => p.spanId,
+      })
       let durationMs: number | undefined = undefined
 
       const syncRecord = (): void => {

@@ -318,15 +318,18 @@ const visitSourceFileSinglePass = (
     return false
   }
 
-  const isDiscriminantCondition = (cond: ts.Expression): boolean => {
+  const isTagGuardCondition = (cond: ts.Expression): boolean => {
     const text = cond.getText(sourceFile)
-    if (
-      /\b(?:Option\.isSome|Option\.isNone|Either\.isRight|Either\.isLeft|Result\.isSuccess|Result\.isFailure|Exit\.isSuccess|Exit\.isFailure|Cause\.isFailType|Cause\.isDieType|Cause\.isInterruptType|Cause\.isEmptyType|Predicate\.isTagged)\s*\(/.test(
-        text,
-      )
-    ) {
+    return /\b(?:Option\.isSome|Option\.isNone|Either\.isRight|Either\.isLeft|Result\.isSuccess|Result\.isFailure|Exit\.isSuccess|Exit\.isFailure|Cause\.isFailType|Cause\.isDieType|Cause\.isInterruptType|Cause\.isEmptyType|Predicate\.isTagged)\s*\(/.test(
+      text,
+    )
+  }
+
+  const isDiscriminantCondition = (cond: ts.Expression): boolean => {
+    if (isTagGuardCondition(cond)) {
       return true
     }
+    const text = cond.getText(sourceFile)
     if (/\.(?:_tag|kind|status)\s*(?:===|!==|==|!=)\s*["'`]/.test(text)) {
       return true
     }
@@ -440,8 +443,11 @@ const visitSourceFileSinglePass = (
         })
       }
     }
-    if (ts.isConditionalExpression(node) && !isTestFile && !isHarnessInternal) {
-      if (isDiscriminantCondition(node.condition)) {
+    if (ts.isConditionalExpression(node) && !isTestFile) {
+      if (
+        isTagGuardCondition(node.condition) ||
+        (!isHarnessInternal && isDiscriminantCondition(node.condition))
+      ) {
         violations.push({
           category: GateCategory.make("effect-laws"),
           rule: GateRuleId.make("discriminant-branching"),

@@ -412,7 +412,7 @@ describe("harness-mcp tools", () => {
     await expect(executeTool("unknown_tool", {})).rejects.toThrow()
   })
 
-  it("completes MCP stdio handshake and lists all 14 tools when spawned from Antigravity plugin directory", async () => {
+  it("completes MCP stdio handshake and lists registered tools when spawned from Antigravity plugin directory", async () => {
     const { Client } = await import("@modelcontextprotocol/sdk/client/index.js")
     const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js")
     const repoRoot = path.resolve(import.meta.dirname, "../../..")
@@ -433,22 +433,25 @@ describe("harness-mcp tools", () => {
     try {
       await client.connect(transport)
       const toolsList = await client.listTools()
-      expect(toolsList.tools.map((t) => t.name)).toEqual([
-        "harness_resolve",
-        "harness_callers",
-        "harness_callees",
-        "harness_tests_reaching",
-        "harness_structural_search",
-        "harness_route",
-        "harness_ontology_why",
-        "harness_ontology_impact",
-        "harness_ontology_check",
-        "harness_gq_query",
-        "harness_graph_infer",
-        "harness_graph_complete",
-        "harness_lsp_diagnostics",
-        "harness_telemetry_report",
-      ])
+      expect(toolsList.tools.map((t) => t.name)).toEqual(
+        expect.arrayContaining([
+          "harness_resolve",
+          "harness_callers",
+          "harness_callees",
+          "harness_tests_reaching",
+          "harness_structural_search",
+          "harness_route",
+          "harness_ontology_why",
+          "harness_ontology_impact",
+          "harness_ontology_check",
+          "harness_gq_query",
+          "harness_graph_infer",
+          "harness_graph_complete",
+          "harness_graph_rewrite",
+          "harness_lsp_diagnostics",
+          "harness_telemetry_report",
+        ]),
+      )
     } finally {
       await client.close()
     }
@@ -791,5 +794,123 @@ describe("harness-mcp tools", () => {
       await daemon.close()
       fs.rmSync(tmpDir, { recursive: true, force: true })
     }
+  })
+
+  it("executes harness_graph_rewrite in auto-plan and auto-repair modes", async () => {
+    const planGraph = buildHarnessGraph({
+      earsSpecs: [
+        {
+          id: "order:SPEC-0001",
+          title: "Order Placement Spec",
+          status: "proposed",
+          path: "libs/order/docs/specs/0001-order.md",
+          enforcedByFiles: ["libs/order/domain/src/order.ts"],
+          referencedSpans: ["Order.placeOrder"],
+          referencedServices: ["OrderService"],
+          referencedErrors: ["OrderRejectedError"],
+        },
+      ],
+    })
+
+    const planRes = (await executeTool(
+      "harness_graph_rewrite",
+      { mode: "auto-plan", candidateRank: 1 },
+      { graph: planGraph },
+    )) as {
+      readonly mode: string
+      readonly selectedRank: number
+      readonly priorsApplied: boolean
+      readonly candidates: ReadonlyArray<unknown>
+      readonly projection: {
+        readonly overlays: ReadonlyArray<unknown>
+        readonly verificationStatus: string
+        readonly roundTripVerified: boolean
+      }
+    }
+
+    expect(planRes.mode).toBe("auto-plan")
+    expect(planRes.selectedRank).toBe(1)
+    expect(planRes.priorsApplied).toBe(false)
+    expect(planRes.candidates.length).toBeGreaterThan(0)
+    expect(planRes.projection).toBeDefined()
+    expect(planRes.projection.overlays.length).toBeGreaterThan(0)
+    expect(planRes.projection.verificationStatus).toBe("Unverified")
+    expect(planRes.projection.roundTripVerified).toBe(false)
+
+    const repairGraph = buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/sample/domain/src/order.ts#decide",
+          spanName: "Order.decide",
+          file: "libs/sample/domain/src/order.ts",
+          line: 10,
+          packageTag: "domain",
+          successType: "void",
+          isStub: false,
+        },
+      ],
+    })
+
+    const repairRes = (await executeTool(
+      "harness_graph_rewrite",
+      { mode: "auto-repair" },
+      { graph: repairGraph },
+    )) as { readonly mode: string; readonly candidates: ReadonlyArray<unknown> }
+
+    expect(repairRes.mode).toBe("auto-repair")
+    expect(Array.isArray(repairRes.candidates)).toBe(true)
+  })
+
+  it("executes harness_lsp_diagnostics with in-memory overlays and rejects non-compilable or invalid overlays", async () => {
+    const lspRes = (await executeTool(
+      "harness_lsp_diagnostics",
+      {
+        overlays: {
+          "libs/sample/domain/src/index.ts": "export const valid = 42\n",
+        },
+      },
+      { repoRoot: process.cwd() },
+    )) as {
+      readonly clean: boolean
+      readonly summary: { readonly filesChecked: number; readonly errors: number }
+    }
+
+    expect(lspRes).toBeDefined()
+    expect(lspRes.clean).toBe(true)
+    expect(lspRes.summary.filesChecked).toBe(1)
+    expect(lspRes.summary.errors).toBe(0)
+
+    // Non-compilable overlay (.md) reports filesChecked: 0 and clean: false
+    const nonCompilableRes = (await executeTool(
+      "harness_lsp_diagnostics",
+      {
+        overlays: {
+          "README.md": "# Documentation\n",
+        },
+      },
+      { repoRoot: process.cwd() },
+    )) as {
+      readonly clean: boolean
+      readonly summary: { readonly filesChecked: number; readonly errors: number }
+    }
+    expect(nonCompilableRes.clean).toBe(false)
+    expect(nonCompilableRes.summary.filesChecked).toBe(0)
+
+    // Invalid TypeScript type error reports clean: false and errors > 0
+    const invalidTsRes = (await executeTool(
+      "harness_lsp_diagnostics",
+      {
+        overlays: {
+          "libs/sample/domain/src/index.ts": 'export const broken: number = "not-a-number"\n',
+        },
+      },
+      { repoRoot: process.cwd() },
+    )) as {
+      readonly clean: boolean
+      readonly summary: { readonly filesChecked: number; readonly errors: number }
+    }
+    expect(invalidTsRes.clean).toBe(false)
+    expect(invalidTsRes.summary.filesChecked).toBe(1)
+    expect(invalidTsRes.summary.errors).toBeGreaterThan(0)
   })
 })

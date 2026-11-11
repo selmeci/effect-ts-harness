@@ -26,6 +26,8 @@ describe("harness cli baseline", () => {
       "guard",
       "route",
       "plan-check",
+      "plan-synth",
+      "repair",
       "verify",
       "done",
       "learn",

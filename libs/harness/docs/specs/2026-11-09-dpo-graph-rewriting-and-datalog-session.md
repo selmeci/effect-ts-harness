@@ -1,6 +1,6 @@
 ---
 id: harness:SPEC-0008
-title: Double-Pushout (DPO) Graph Rewriting, Incremental Datalog Session & System One Candidate Ranking
+title: Double-Pushout (DPO) Graph Rewriting, Incremental Datalog Session, System One Candidate Ranking & Bidirectional AST Projection
 status: accepted
 date: 2026-11-09
 owners:
@@ -12,40 +12,46 @@ enforced_by:
   - libs/harness/graph/src/model.ts
   - libs/harness/graph/src/datalog-engine.ts
   - libs/harness/graph/src/graph-rewrite.ts
+  - libs/harness/graph/src/graph-projector.ts
   - libs/harness/decision/src/hole-prior-decision.ts
   - libs/harness/decision/src/dpo-ranker-decision.ts
+  - apps/harness-mcp/src/server.ts
 spans:
   - GraphInfer.decide
   - DatalogSession.stepFileDelta
   - GraphRewrite.decide
+  - GraphProjector.decide
   - HoleRelevanceAndEdgePrior.evaluate
   - HoleRelevanceAndEdgePrior.evaluateBatch
   - DpoCandidateRanker.evaluate
   - DpoCandidateRanker.evaluateBatch
+  - HarnessMcp.executeTool
 services:
   - DatalogSession
 errors:
   - GraphInferenceError
   - GraphRewriteError
+  - GraphProjectorError
 ---
 
-# SPEC-0008 · Double-Pushout (DPO) Graph Rewriting, Incremental Datalog Session & System One Candidate Ranking
+# SPEC-0008 · Double-Pushout (DPO) Graph Rewriting, Incremental Datalog Session, System One Candidate Ranking & Bidirectional AST Projection
 
 ## Context
 
-This specification defines the behavioral requirements for Milestone 2 (`RFC-0001` Clean-Slate finalization, `RFC-0002` extensions A.1/A.2, and `RFC-0003` Double-Pushout Graph Rewriting + System One Priors) governed by `harness:ADR-0009`. It extends the PERA bipartite Levi incidence hypergraph $G_{\text{Levi}} = (V_E \sqcup V_R, E_{\text{role}})$ and Stratified Datalog engine (`GraphInfer.decide`) with:
+This specification defines the behavioral requirements for Milestone 2 (`RFC-0001` Clean-Slate finalization, `RFC-0002` extensions A.1/A.2, and `RFC-0003` Double-Pushout Graph Rewriting + System One Priors) and Milestone 4 (`RFC-0004` Bidirectional AST Projection, Stratum-Batch Shadow LSP Overlays, Gate Consolidation & MCP/CLI Integration) governed by `harness:ADR-0009`. It extends the PERA bipartite Levi incidence hypergraph $G_{\text{Levi}} = (V_E \sqcup V_R, E_{\text{role}})$ and Stratified Datalog engine (`GraphInfer.decide`) with:
 
 1. A bipartite `Schema.check` invariant on `PlaysRoleEdge` ($V_R \to V_E$), Soufflé min-height provenance (`reduce(minHeightReducer)`), Flix confidence lattice merging (`reduce(flixConfidenceReducer)`), Hazel typed-hole Personalized PageRank bundles (`COMP-06` $\le 1500$ tokens), and incremental DBSP $\mathbb{Z}$-set file-edit delta stepping (`DatalogSession`).
 2. A pure Double-Pushout (DPO) algebraic graph rewriting engine (`GraphRewrite.decide`, `R = never`) enforcing the Gluing Condition and Bipartite Levi Relation Preservation Law ($V_R \in K$), guaranteed to terminate via a 6-component lexicographical measure $\mu(G) \in \mathbb{N}^6$ and 4-phase stratification (`PLAN` $\prec$ `REPAIR_ARCH` $\prec$ `REPAIR_CODE` $\prec$ `CLEANUP`) over rules `PLAN-01..04` and `REP-01..11`.
 3. System One calibrated sensors (`HoleRelevanceAndEdgePriorV1` batched up to 64 questions and `DpoCandidateRankerV1` tie-breaking $\mu$-equivalent repairs).
+4. A pure Bidirectional AST Code Projector (`GraphProjector.decide`, `R = never`) mapping DPO `GraphPatch` operations into in-memory TypeScript overlays ($\Delta W_{\text{RAM}}$) via `ts-morph` (`{ useInMemoryFileSystem: true }`) and `@ast-grep/napi`, co-projecting Nx barrel exports (`libs/<scope>/<tier>/src/index.ts`), and verifying the Stratum-Boundary Batch Shadow LSP Round-Trip Commutativity Law $\alpha_{\Delta}(W_{\text{disk}} \oplus \Delta W_{\text{RAM}}^{(k)}) \cong H$ with $O(\log k)$ binary-search fault isolation, exposed via `harness_graph_rewrite`, `harness_lsp_diagnostics` (with `overlays`), `pnpm harness plan-synth`, and `pnpm harness repair`.
 
 - **Reused Contracts / Errors:** `HarnessGraph`, `EntityNode`, `RelationNode`, `PlaysRoleEdge`, `GraphInferenceResult`, `GraphInferenceError`, `SemanticEdgePriors`
 - **Reused Services:** `DecisionModel`
-- **New Capabilities Needed:** `DatalogSession`, `DatalogSession.stepFileDelta`, `RewriteRuleId`, `RewritePhase`, `GraphMeasure`, `GraphPatch`, `SystemOneScoreMillis`, `DpoCandidatePriors`, `RewriteCandidate`, `GraphRewriteResult`, `GraphRewriteError`, `GraphRewrite.decide`, `HoleRelevanceAndEdgePrior.evaluateBatch`, `DpoCandidateRankerV1`, `DpoCandidateRanker.evaluate`, `DpoCandidateRanker.evaluateBatch`
+- **New Capabilities Needed:** `DatalogSession`, `DatalogSession.stepFileDelta`, `RewriteRuleId`, `RewritePhase`, `GraphMeasure`, `GraphPatch`, `SystemOneScoreMillis`, `DpoCandidatePriors`, `RewriteCandidate`, `GraphRewriteResult`, `GraphRewriteError`, `GraphRewrite.decide`, `TargetFilePath`, `TypeScriptSnippet`, `CodeModEngineKind`, `CodeModActionKind`, `AstCodeModOperation`, `ShadowFileOverlay`, `AstProjectionResult`, `GraphProjectorError`, `GraphProjector.decide`, `createOverlayCompilerHost`, `verifySubgraphMonomorphism`, `HoleRelevanceAndEdgePrior.evaluateBatch`, `DpoCandidateRankerV1`, `DpoCandidateRanker.evaluate`, `DpoCandidateRanker.evaluateBatch`
 
 ## Goal
 
-Every workspace hypergraph enforces the bipartite $V_R \to V_E$ incidence invariant at schema decode boundaries, supports sub-2ms incremental DBSP $\mathbb{Z}$-set updates via `DatalogSession`, and executes mathematically terminating Double-Pushout (DPO) plan synthesis (`PLAN-01..04`) and antipattern auto-repair (`REP-01..11`) via `GraphRewrite.decide` with System One semantic tie-breaking (`DpoCandidateRankerV1`).
+Every workspace hypergraph enforces the bipartite $V_R \to V_E$ incidence invariant at schema decode boundaries, supports sub-2ms incremental DBSP $\mathbb{Z}$-set updates via `DatalogSession`, executes mathematically terminating Double-Pushout (DPO) plan synthesis (`PLAN-01..04`) and antipattern auto-repair (`REP-01..11`) via `GraphRewrite.decide` with System One semantic tie-breaking (`DpoCandidateRankerV1`), and projects verified TypeScript AST code overlays via `GraphProjector.decide` satisfying the Round-Trip Commutativity Law $\alpha_{\Delta}(W_{\text{disk}} \oplus \Delta W_{\text{RAM}}) \cong H$.
 
 ## How to read the requirements
 
@@ -83,13 +89,25 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | REQ-3.1 | Event-driven | **When** `HoleRelevanceAndEdgePrior.evaluateBatch` evaluates up to 32 candidate hole/edge inputs (up to 64 `Decision.probability` and `Decision.rate` questions in a single `DecisionModel` pass), the `HoleRelevanceAndEdgePrior.evaluateBatch` span **shall** return a calibrated `SemanticEdgePriors` record or fall back deterministically within 1500ms if the model times out or fails.  | `HoleRelevanceAndEdgePrior.evaluateBatch` | `UnitTest`   |
 | REQ-3.2 | Event-driven | **When** `DpoCandidateRanker.evaluate` or `DpoCandidateRanker.evaluateBatch` evaluates competing $\mu$-equivalent DPO repair strategies (`REP-04a` vs. `REP-04b`), the `DpoCandidateRanker.evaluate` span **shall** classify the repair strategy and rate architectural cohesion to produce `DpoCandidatePriors` (`SystemOneScoreMillis` in $[0, 1000]$) with a 1500ms deterministic fallback. | `DpoCandidateRanker.evaluate`             | `UnitTest`   |
 
+### 4 · Bidirectional AST Code Projection, Nx Barrel Co-Projection & Stratum-Batch Shadow LSP Verification (`GraphProjector.decide`)
+
+**Source (`harness:ADR-0009`, `RFC-0004 §4.3–4.4, §5.1–5.2, §8`):** Every DPO `GraphPatch` (`PLAN-01..04`, `REP-01..11`) must project into deterministic in-memory TypeScript AST overlays (`ShadowFileOverlay`) with automatic Nx barrel (`src/index.ts`) re-export co-projection, preservation of existing user function and `Layer` implementations during repairs, and Stratum-Boundary Batch Shadow LSP verification ($\alpha_{\Delta}(W_{\text{disk}} \oplus \Delta W_{\text{RAM}}^{(k)}) \cong H$) with $O(\log k)$ binary-search fault isolation and explicit `VerificationStatus` (`Verified | Partial | Unverified`).
+
+| ID      | Pattern            | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Effect Symbol           | Verification   |
+| :------ | :----------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :---------------------- | :------------- |
+| REQ-4.1 | State-driven       | **While** projecting a `GraphPatch` or sequence of `RewriteCandidate` steps in `GraphProjector.decide`, the `GraphProjector.decide` decider **shall** synthesize all `AstCodeModOperation` and `ShadowFileOverlay` artifacts in an in-memory `ts-morph` filesystem (`{ useInMemoryFileSystem: true }`) and `@ast-grep/napi` (`R = never`), preserving existing function and `Layer` bodies when repairing existing symbols and never writing to disk (disk writes occur exclusively in CLI commands when `VerificationStatus` is `"Verified"` and `classifyFileWrite` is `"allow"`). | `GraphProjector.decide` | `GraphCheck`   |
+| REQ-4.2 | Event-driven       | **When** `GraphProjector.decide` projects a `PLAN-01..04` skeleton or `REP-01..11` repair that adds or updates an exported contract schema, tagged error, service port, domain use case, or infrastructure layer in `libs/<scope>/<tier>/src/*.ts`, the `GraphProjector.decide` span **shall** automatically co-project the corresponding `export { ... } from "./..."` re-export into the package's barrel file (`libs/<scope>/<tier>/src/index.ts`) within $\Delta W_{\text{RAM}}$.                                                                                            | `GraphProjector.decide` | `PropertyTest` |
+| REQ-4.3 | Event-driven       | **When** `GraphProjector.decide` verifies a phase batch of $k$ rewrite steps against the Shadow LSP (`createOverlayCompilerHost`) and incremental hypergraph extractor, the `GraphProjector.decide` span **shall** fold all $k$ steps into a composite overlay $\Delta W_{\text{RAM}}^{(k)}$, verify $\alpha_{\Delta}(W_{\text{disk}} \oplus \Delta W_{\text{RAM}}^{(k)}) \cong H$ via injective subgraph monomorphism and zero compiler errors once per phase, isolate any offending step in $O(\log k)$ bisection probes if the composite check fails, and report `VerificationStatus`. | `GraphProjector.decide` | `UnitTest`     |
+| REQ-4.4 | Unwanted behaviour | **If** `GraphProjector.decide` receives a malformed `GraphPatch`, a target path escaping `repoRoot`, a missing target file for a code repair (`REP-04a..REP-11`), or an unrecoverable AST parse failure during projection, **then** the `GraphProjector.decide` span **shall** fail with a typed `GraphProjectorError`.                                                                                                                                                                                                                                                       | `GraphProjectorError`   | `UnitTest`     |
+
 ## Assumptions
 
 - **REQ-2.1:** Left-hand side patterns $L$ are anchored on typed nodes from `GraphInfer.decide` and `HarnessGraph`, enabling fast in-memory matching and pushout complement verification.
+- **REQ-4.3:** Warm `ts.Program` AST reuse via `createOverlayCompilerHost` (seeded from `activeSession.oldProgram`) and per-file `FileGraphFragment` caching bounds each Shadow LSP + $\alpha_{\Delta}$ round-trip check to sub-35ms in-process execution.
 
 ## Out of scope
 
-- **Physical TypeScript AST Code Projection (`GraphProject.apply`).** Scheduled for Milestone 3 (`RFC-0004`).
+- **External JVM/Rust Graph Daemons.** All Datalog inference, DPO rewriting, and AST projection execute 100% in-process in Node.js.
 
 ## Known residual risks
 
@@ -98,7 +116,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 ## Acceptance criteria
 
 - All requirement rows pass their declared verification method (`GraphCheck`, `PropertyTest`, `UnitTest`).
-- `libs/harness/graph` and `libs/harness/decision` pass `pnpm harness plan-check`, `pnpm harness gc --strict`, and `CI=true pnpm harness verify`.
+- `libs/harness/graph`, `libs/harness/gates`, `libs/harness/decision`, `apps/harness-mcp`, and `apps/harness-cli` pass `pnpm harness plan-check`, `pnpm harness gc --strict`, and `CI=true pnpm harness verify`.
 
 ## Verified Architecture Topology
 
@@ -123,9 +141,18 @@ flowchart TD
         DpoRanker -->|DpoCandidatePriors| Phase2
     end
 
+    subgraph AstProjector["Bidirectional AST Projector (GraphProjector.decide, R = never)"]
+        Projector["GraphProjector.decide (ts-morph + @ast-grep/napi + Barrel Co-Projection)"]
+        ShadowLsp["Stratum-Batch Shadow LSP + Round-Trip Check (O(log k) Bisection)"]
+        Projector --> ShadowLsp
+        ShadowLsp -->|Valid Overlay| ProjOut["AstProjectionResult (ShadowFileOverlay[])"]
+        ShadowLsp -->|Parse / Patch Failure| ProjErr["GraphProjectorError"]
+    end
+
     LeviHypergraph --> GraphInfer
     LeviHypergraph --> Session
     GraphInfer --> Phase1
     Phase4 -->|Valid H + GraphPatch| RewriteOut["GraphRewriteResult (mu(H) <_lex mu(G))"]
     Phase4 -->|Dangling Edge / Cycle| RewriteErr["GraphRewriteError"]
+    RewriteOut --> Projector
 ```

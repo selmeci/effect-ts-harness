@@ -12,15 +12,21 @@ import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import {
   buildHarnessGraph,
+  BisectionProbeCount,
   ConfidenceMillis,
   decideGraphInference,
+  decideGraphProjection,
+  decideGraphRewrite,
+  type DpoCandidatePriors,
   type EffectFnNode,
   type EntityNode,
+  evaluateOverlayDiagnostics,
   extractWorkspaceTypeAwareGraph,
   findCallees,
   findCallers,
   findTestsReaching,
   getNodeKey,
+  getOrCreateWarmProgramSession,
   HARNESS_GQ_QUERY_NAMES,
   type HarnessGqQueryName,
   type HarnessGraph,
@@ -36,14 +42,17 @@ import {
   readGraphHeadMeta,
   resolveGitHeadState,
   resolveNode,
+  type RewriteMode,
   saveGraphSnapshot,
   type SemanticEdgePriors,
   decideStructuralSearch,
+  VerificationStatus,
   writeGraphHeadMeta,
 } from "@harness/graph"
 import {
   CandidateSymbolKey,
   decideOntologyInvariants,
+  evaluateDpoCandidatePriorsBatch,
   evaluateHoleCandidatePrior,
   evaluateOntologyConflicts,
   extractOntologyConflictPairs,
@@ -524,11 +533,37 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
         filePath?: string | undefined
         project?: string | undefined
         tsconfigPath?: string | undefined
+        overlays?: Record<string, string> | undefined
       }
       const file = typedArgs.file ?? typedArgs.filePath
       const project = typedArgs.project ?? typedArgs.tsconfigPath
+      const overlays = typedArgs.overlays
       const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-      if (options?.lspDiagnosticsRunner !== undefined) {
+      if (overlays !== undefined && Object.keys(overlays).length > 0) {
+        const compilableKeys = Object.keys(overlays).filter(
+          (k) => (k.endsWith(".ts") || k.endsWith(".tsx")) && !k.endsWith(".d.ts"),
+        )
+        const session = getOrCreateWarmProgramSession(root)
+        const diags = evaluateOverlayDiagnostics(root, overlays, session)
+        const filteredDiags =
+          file !== undefined && file.length > 0
+            ? diags.filter((d) => d.file === file || d.file.endsWith(file))
+            : diags
+        const errors = filteredDiags.filter((d) => d.severity === "error").length
+        const warnings = filteredDiags.filter((d) => d.severity === "warning").length
+        result = {
+          clean: compilableKeys.length > 0 && errors === 0 && warnings === 0,
+          diagnostics: filteredDiags,
+          summary: {
+            filesChecked: compilableKeys.length,
+            filesWithoutPlugin: 0,
+            totalFiles: Object.keys(overlays).length,
+            errors,
+            warnings,
+            messages: filteredDiags.length,
+          },
+        } satisfies LspDiagnosticsReport
+      } else if (options?.lspDiagnosticsRunner !== undefined) {
         result = options.lspDiagnosticsRunner({ file, project })
       } else {
         result = yield* runDefaultLspDiagnostics(root, { file, project })
@@ -762,6 +797,99 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
         typedHoleBundles,
         proofs: inference.proofs.filter((p) => proofIds.has(p.proofId)),
         iterations: inference.iterations ?? 0,
+      }
+      break
+    }
+    case "harness_graph_rewrite": {
+      const typedArgs = args as {
+        mode?: RewriteMode | undefined
+        ruleId?: string | undefined
+        candidateRank?: number | undefined
+        useDecisionPriors?: boolean | undefined
+        verifyRoundTrip?: boolean | undefined
+      }
+      const mode: RewriteMode = typedArgs.mode ?? "auto-repair"
+      const ruleId = typedArgs.ruleId
+      const candidateRank = typedArgs.candidateRank ?? 1
+      const useDecisionPriors = typedArgs.useDecisionPriors === true
+      const verifyRoundTrip = typedArgs.verifyRoundTrip === true
+      const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+      const graph = yield* resolveGraph(options, args)
+
+      let candidatePriors: DpoCandidatePriors | undefined = undefined
+      if (useDecisionPriors) {
+        const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
+        const initialRewrite = yield* decideGraphRewrite(graph, mode)
+        const initialCandidates = [
+          ...Option.toArray(initialRewrite.result.recommendedCandidate),
+          ...initialRewrite.result.alternativeCandidates,
+        ]
+        const allPatches = initialCandidates.flatMap((c) => c.patches)
+        if (allPatches.length > 0) {
+          const rankerBatch = yield* evaluateDpoCandidatePriorsBatch(
+            allPatches.map((p) => ({
+              primaryNodeKey: p.primaryNodeKey,
+              ruleId: p.ruleId,
+              violationKind: p.ruleId,
+              callerSummary: p.description,
+              candidatePatchSummary: `${p.ruleId} (+${p.insertedEntityNodes.length} entities, +${p.insertedRoleEdges.length} edges)`,
+              earsClauseContext: p.description,
+            })),
+          ).pipe(Effect.provide(decisionLayer))
+          candidatePriors = rankerBatch.candidatePriors
+        }
+      }
+
+      const rewriteOutcome = yield* decideGraphRewrite(graph, mode, candidatePriors)
+      const candidates = [
+        ...Option.toArray(rewriteOutcome.result.recommendedCandidate),
+        ...rewriteOutcome.result.alternativeCandidates,
+      ]
+      const selectedCandidate =
+        candidates.find((c) => c.rank === candidateRank) ??
+        Option.getOrUndefined(rewriteOutcome.result.recommendedCandidate) ??
+        candidates[0]
+      const filteredPatches =
+        selectedCandidate !== undefined
+          ? ruleId !== undefined && ruleId.length > 0
+            ? selectedCandidate.patches.filter((p) => p.ruleId === ruleId)
+            : selectedCandidate.patches
+          : []
+
+      const projection =
+        selectedCandidate !== undefined
+          ? yield* decideGraphProjection({
+              patches: filteredPatches,
+              targetGraph: rewriteOutcome.targetGraph,
+              workspaceRoot: root,
+              initialGraph: graph,
+              verifyRoundTrip,
+            })
+          : {
+              operations: [],
+              overlays: [],
+              verificationStatus: VerificationStatus.make("Unverified"),
+              roundTripVerified: false,
+              compilerDiagnostics: [],
+              bisectionProbes: BisectionProbeCount.make(0),
+              skippedRuleIds: [],
+            }
+
+      result = {
+        mode: rewriteOutcome.result.mode,
+        initialMeasure: rewriteOutcome.result.initialMeasure,
+        finalMeasure: selectedCandidate?.finalMeasure ?? rewriteOutcome.result.initialMeasure,
+        totalStepsApplied: selectedCandidate?.patches.length ?? 0,
+        selectedRank: selectedCandidate?.rank ?? null,
+        priorsApplied: candidatePriors !== undefined,
+        candidates: candidates.map((c) => ({
+          rank: c.rank,
+          patches: c.patches,
+          finalMeasure: c.finalMeasure,
+          systemOneTieBreaker: c.systemOneTieBreaker,
+          isPolicyClean: c.isPolicyClean,
+        })),
+        projection,
       }
       break
     }
@@ -1097,8 +1225,49 @@ export const createServer = (options?: ServerOptions): McpServer => {
   )
 
   server.tool(
+    "harness_graph_rewrite",
+    "Run Double-Pushout (DPO) algebraic hypergraph rewriting (GraphRewrite.decide) and bidirectional AST code projection (GraphProjector.decide) with in-memory ShadowFileOverlay generation",
+    {
+      mode: z
+        .enum(["auto-plan", "auto-repair", "cleanup", "full"])
+        .optional()
+        .describe("Rewrite phase mode (defaults to 'auto-repair')"),
+      ruleId: z
+        .string()
+        .optional()
+        .describe("Optional DPO rule ID filter (e.g. 'PLAN-01'..'PLAN-04', 'REP-01'..'REP-11')"),
+      candidateRank: z
+        .number()
+        .int()
+        .min(1)
+        .max(5)
+        .optional()
+        .describe("Candidate rank to project (1..5, default 1)"),
+      useDecisionPriors: z
+        .boolean()
+        .optional()
+        .describe("Optional flag to evaluate DpoCandidateRankerV1 System One tie-breaking priors"),
+      verifyRoundTrip: z
+        .boolean()
+        .optional()
+        .describe(
+          "Optional flag to verify Stratum-Boundary Batch Shadow LSP & Round-Trip isomorphism with O(log k) bisection",
+        ),
+      repoRoot: z.string().optional().describe("Optional repository root path"),
+    },
+    (args) =>
+      Effect.runPromise(
+        executeToolEffect("harness_graph_rewrite", args, options).pipe(
+          Effect.map((data) => ({
+            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+          })),
+        ),
+      ),
+  )
+
+  server.tool(
     "harness_lsp_diagnostics",
-    "Run Effect Language Service (@effect/tsgo) strict JSON diagnostics on a specific file or tsconfig project",
+    "Run Effect Language Service (@effect/tsgo) strict JSON diagnostics on a specific file or tsconfig project, or evaluate in-memory ShadowFileOverlay content in <35ms",
     {
       file: z
         .string()
@@ -1116,6 +1285,12 @@ export const createServer = (options?: ServerOptions): McpServer => {
         .string()
         .optional()
         .describe("Optional alias for project tsconfig.json path to check"),
+      overlays: z
+        .record(z.string(), z.string())
+        .optional()
+        .describe(
+          "Optional map of relative/absolute file paths to in-memory TypeScript content for Shadow LSP verification",
+        ),
     },
     (args) =>
       Effect.runPromise(
