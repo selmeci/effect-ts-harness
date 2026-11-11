@@ -10,7 +10,7 @@ import {
 } from "@harness/graph"
 import { decideEarsSpecQuality } from "./ears-lint.js"
 import {
-  evaluateEarsConsistencyReport,
+  decideEarsConsistency,
   EarsClauseId,
   EarsClausePatternKind,
   EarsClausePolarity,
@@ -921,7 +921,11 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (input: 
               clauses: symbolClauses,
               requireExhaustiveStateCoverage: EarsConsistencyFlag.make(false),
             }
-            const report = evaluateEarsConsistencyReport(consistencyInput)
+            const report = yield* decideEarsConsistency(consistencyInput).pipe(
+              Effect.catchTag("EarsConsistencyError", (err) =>
+                Effect.succeed({ violations: err.violations }),
+              ),
+            )
             for (const v of report.violations) {
               if (v.ruleId === "EARS-01" || v.ruleId === "EARS-02") {
                 findings.push({

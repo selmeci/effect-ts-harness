@@ -114,13 +114,16 @@ export const scopeSessionReportInput = (
         allEvents[i - 1]?.toolName === "omnigraph:merge-main")
     if (isCompletedDone) {
       const hasSubsequentTaskWork = allEvents.slice(i + 1).some((later) => {
-        const isMergeMainPreceded = allEvents[i - 1]?.toolName === "omnigraph:merge-main"
+        const isHookMergeMainBoundary =
+          ev.surface === "hook" &&
+          allEvents[i - 1]?.toolName === "omnigraph:merge-main" &&
+          later.toolName === "verify"
         const isTaskInitOrEdit =
           TASK_INIT_OR_EDIT_TOOLS.has(later.toolName) &&
           (later.toolName !== "ingest" || later.surface !== "hook")
         const isFailedVerify = later.toolName === "verify" && later.outcome !== "ok"
 
-        return isMergeMainPreceded || isTaskInitOrEdit || isFailedVerify
+        return isHookMergeMainBoundary || isTaskInitOrEdit || isFailedVerify
       })
       if (hasSubsequentTaskWork) {
         boundaryIdx = i
@@ -277,6 +280,9 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
   const fixUpIterations = verifyEvents.filter((e) => e.outcome === "fail").length
   const firstPassVerify = verifyEvents.length === 0 ? null : verifyEvents[0]?.outcome === "ok"
 
+  const isInternalOmnigraphSync = (toolName: string): boolean =>
+    toolName.startsWith("omnigraph:sync-") || toolName.startsWith("omnigraph:merge-")
+
   const firstVerifyIdx = input.events.findIndex((e) => e.toolName === "verify")
   let planBeforeVerify = true
   if (firstVerifyIdx !== -1) {
@@ -284,11 +290,12 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
       .slice(0, firstVerifyIdx)
       .some(
         (e) =>
-          e.toolName === "plan-check" ||
-          e.toolName === "route" ||
-          e.toolName === "harness_route" ||
-          e.category === "ontology" ||
-          e.category === "graph_query",
+          !isInternalOmnigraphSync(e.toolName) &&
+          (e.toolName === "plan-check" ||
+            e.toolName === "route" ||
+            e.toolName === "harness_route" ||
+            e.category === "ontology" ||
+            e.category === "graph_query"),
       )
   }
 
@@ -298,9 +305,6 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
       e.surface !== "hook" &&
       (e.outcome === "fail" || e.outcome === "deny"),
   ).length
-
-  const isInternalOmnigraphSync = (toolName: string): boolean =>
-    toolName.startsWith("omnigraph:sync-") || toolName.startsWith("omnigraph:merge-")
 
   const graphDiscoveryCalls = input.events.filter(
     (e) =>
