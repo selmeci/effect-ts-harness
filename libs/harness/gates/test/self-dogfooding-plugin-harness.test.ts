@@ -1,6 +1,7 @@
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join, relative, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option, Schema } from "effect"
 import { match } from "ts-pattern"
@@ -10,6 +11,7 @@ import { checkSpanBudgets, type SpanSample } from "../src/span-budget.js"
 import {
   ActiveMutantId,
   MaxPluginFileLines,
+  PluginFileLineCount,
   PluginId,
   type SelfDogfoodingInput,
   SelfDogfoodingMessage,
@@ -18,9 +20,11 @@ import {
   SubprocessArg,
   SubprocessCommand,
   SubprocessExitCode,
+  SubprocessMaxBufferBytes,
   SubprocessOutput,
   WorkspaceFileContent,
   WorkspaceFilePath,
+  WorkspaceFsOperation,
 } from "../src/plugins/self-dogfooding-contract.js"
 import { decideSelfDogfooding, SelfDogfooding } from "../src/plugins/self-dogfooding-plugin.js"
 import {
@@ -164,7 +168,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           }))
           .with("nested-effect-run-sync", () => ({
             content: variation
-              ? "export const g = Effect.suspend(() => { Effect.runSync(Effect.succeed(42)) })\n"
+              ? "export const g = Effect.gen(function* () { Effect.runPromise(Effect.succeed(42)) })\n"
               : "export const g = Effect.sync(() => { Effect.runSync(Effect.succeed(42)) })\n",
             maxLines: MaxPluginFileLines.make(800),
           }))
@@ -188,6 +192,10 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         const input: SelfDogfoodingInput = {
           files: [
             {
+              filePath: AstSourceFilePath.make("libs/harness/gates/src/plugins/clean-module.ts"),
+              content: AstSourceContent.make("export const cleanValue = 1\n"),
+            },
+            {
               filePath: AstSourceFilePath.make("libs/harness/gates/src/plugins/bad-module.ts"),
               content: AstSourceContent.make(content),
             },
@@ -196,24 +204,16 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           failOnViolation: true,
         }
 
-        const exit = yield* Effect.exit(SelfDogfooding.decide(input))
-        expect(Exit.isFailure(exit)).toBe(true)
-
-        if (Exit.isFailure(exit)) {
-          const errOpt = Cause.findErrorOption(exit.cause)
-          expect(Option.isSome(errOpt)).toBe(true)
-          if (Option.isSome(errOpt)) {
-            expect(errOpt.value._tag).toBe("SelfDogfoodingViolationError")
-            expect(errOpt.value.violations.length).toBeGreaterThan(0)
-            const rules = errOpt.value.violations.map((v) => v.rule)
-            expect(rules).toContain(violationType)
-          }
-        }
+        const err = yield* Effect.flip(SelfDogfooding.decide(input))
+        expect(err._tag).toBe("SelfDogfoodingViolationError")
+        expect(err.violations.length).toBeGreaterThan(0)
+        const rules = err.violations.map((v) => v.rule)
+        expect(rules).toContain(violationType)
       }),
   )
 
   it.effect(
-    "REQ-1.3: boundary test for maxPluginFileLines on SelfDogfooding.decide (limit - 1, limit, limit + 1)",
+    "REQ-1.1/REQ-1.2 boundary: maxPluginFileLines on SelfDogfooding.decide (limit - 1, limit, limit + 1)",
     () =>
       Effect.gen(function* () {
         const limit = MaxPluginFileLines.make(10)
@@ -924,6 +924,20 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(messages.some((m) => m.includes("Dummy 'yield* Effect.void'"))).toBe(true)
         expect(messages.some((m) => m.includes("Custom plugin detected 'bar'"))).toBe(true)
 
+        const failErr = yield* Effect.flip(
+          evaluateAllGatePlugins({
+            filePaths: [
+              WorkspaceFilePath.make("src/plugins/plugin-void.ts"),
+              WorkspaceFilePath.make("src/plugins/plugin-bar.ts"),
+            ],
+            failOnViolation: true,
+          }).pipe(Effect.provide(customAppLayer)),
+        )
+        expect(failErr._tag).toBe("SelfDogfoodingViolationError")
+        if (failErr._tag === "SelfDogfoodingViolationError") {
+          expect(failErr.violations).toHaveLength(2)
+        }
+
         const budgetViolations = checkSpanBudgets({
           spans: toSpanSamples(spans),
           maxRepeatedChildCalls: 3,
@@ -1060,10 +1074,125 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         const unknownFinding = unknownReport.findings.find(
           (f) => f.kind === "pattern-keyword-mismatch",
         )
-        expect(unknownFinding).toBeDefined()
-        expect(unknownFinding?.message).toContain(
+        expect(unknownFinding).toMatchObject({
+          kind: "pattern-keyword-mismatch",
+        })
+        expect(unknownFinding!.message).toContain(
           "Allowed: Ubiquitous, Event-driven, State-driven, Unwanted behaviour, Optional feature, Complex.",
         )
+
+        // Contract schema negative decode matrix & test file skip & parenthesized double cast
+        expect(Schema.is(MaxPluginFileLines)(0)).toBe(false)
+        expect(Schema.is(MaxPluginFileLines)(-1)).toBe(false)
+        expect(Schema.is(MaxPluginFileLines)(10.5)).toBe(false)
+        expect(Schema.is(MaxPluginFileLines)("10")).toBe(false)
+        expect(Schema.is(PluginFileLineCount)(-1)).toBe(false)
+        expect(Schema.is(PluginFileLineCount)(1.5)).toBe(false)
+        expect(Schema.is(SubprocessMaxBufferBytes)(1023)).toBe(false)
+        expect(Schema.is(WorkspaceFsOperation)("delete")).toBe(false)
+        expect(Schema.is(PluginId)("")).toBe(false)
+        expect(Schema.is(PluginId)("   ")).toBe(false)
+        expect(Schema.is(ActiveMutantId)("")).toBe(false)
+        expect(Schema.is(WorkspaceFilePath)("")).toBe(false)
+
+        const skippedTestReport = yield* SelfDogfooding.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/gates/test/foo.test.ts"),
+              content: AstSourceContent.make(
+                "export const f = Effect.fn('f')(function* () { yield* Effect.void })\n",
+              ),
+            },
+          ],
+          failOnViolation: true,
+        })
+        expect(skippedTestReport.verdict).toBe("clean")
+        expect(skippedTestReport.inspectedFileCount).toBe(0)
+
+        const parenDoubleCastReport = yield* AstGateCache.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/sample/domain/src/double-cast.ts"),
+              content: AstSourceContent.make("export const x = ((1 as unknown) as string)\n"),
+            },
+          ],
+        })
+        expect(parenDoubleCastReport.violations.map((v) => v.rule)).toContain("unsafe-type-cast")
+      }),
+  )
+
+  it.effect(
+    "RFC-0007 Step 2: every source file in libs/harness/gates/src/**/*.ts is <= 800 lines and passes SelfDogfooding.decide",
+    () =>
+      Effect.gen(function* () {
+        const testDir = dirname(fileURLToPath(import.meta.url))
+        const repoRoot = resolve(testDir, "../../../..")
+        const gatesSrcRoot = join(repoRoot, "libs", "harness", "gates", "src")
+
+        const collectTsFiles = (dir: string): Array<string> => {
+          const results: Array<string> = []
+          for (const entry of readdirSync(dir)) {
+            const fullPath = join(dir, entry)
+            const st = statSync(fullPath)
+            if (st.isDirectory()) {
+              results.push(...collectTsFiles(fullPath))
+            } else if (
+              entry.endsWith(".ts") &&
+              !entry.endsWith(".test.ts") &&
+              !entry.endsWith(".spec.ts")
+            ) {
+              results.push(fullPath)
+            }
+          }
+          return results
+        }
+
+        const sourceFiles = collectTsFiles(gatesSrcRoot)
+        expect(sourceFiles.length).toBeGreaterThanOrEqual(30)
+
+        const fileInputs = sourceFiles.map((absPath) => {
+          const relPath = relative(repoRoot, absPath).replace(/\\/g, "/")
+          const content = readFileSync(absPath, "utf-8")
+          const lineCount = content.split(/\r?\n/).length
+          expect(
+            lineCount,
+            `${relPath} has ${lineCount} lines, exceeding 800-line ceiling`,
+          ).toBeLessThanOrEqual(800)
+
+          if (relPath === "libs/harness/gates/src/gc-check.ts") {
+            expect(lineCount).toBeLessThan(200)
+          }
+          if (relPath.startsWith("libs/harness/gates/src/plugins/gc/")) {
+            expect(lineCount).toBeLessThanOrEqual(450)
+          }
+          if (relPath === "libs/harness/gates/src/mutation/mutant-ast-generator.ts") {
+            expect(lineCount).toBeLessThanOrEqual(500)
+          }
+          if (relPath === "libs/harness/gates/src/mutation-check.ts") {
+            expect(lineCount).toBeLessThanOrEqual(550)
+          }
+          if (
+            relPath === "libs/harness/gates/src/plugins/ast-gate-visitors.ts" ||
+            relPath === "libs/harness/gates/src/ast-cache.ts"
+          ) {
+            expect(lineCount).toBeLessThanOrEqual(450)
+          }
+
+          return {
+            filePath: AstSourceFilePath.make(relPath),
+            content: AstSourceContent.make(content),
+          }
+        })
+
+        const report = yield* decideSelfDogfooding({
+          files: fileInputs,
+          maxPluginFileLines: MaxPluginFileLines.make(800),
+          failOnViolation: true,
+        })
+
+        expect(report.verdict).toBe("clean")
+        expect(report.violations).toHaveLength(0)
+        expect(report.inspectedFileCount).toBe(sourceFiles.length)
       }),
   )
 })

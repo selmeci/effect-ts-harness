@@ -921,16 +921,32 @@ const handlePlanCheck = (
     return { exitCode: 0, stdout: checkResult.mermaid, stderr: "" }
   })
 
+const readGitBranchDiffFiles = (repoRoot: string): ReadonlyArray<string> =>
+  Effect.runSync(
+    Effect.try({
+      try: () =>
+        execFileSync("git", ["diff", "--name-only", "main...HEAD"], {
+          cwd: repoRoot,
+          stdio: "pipe",
+          encoding: "utf-8",
+        })
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter((l) => l.length > 0),
+      catch: () => [],
+    }).pipe(Effect.orElseSucceed(() => [])),
+  )
+
 const resolveModifiedFilesSinceStampOrHead = (repoRoot: string): ReadonlyArray<string> =>
   Effect.runSync(
     Effect.try({
       try: () => {
+        const files = new Set<string>()
         const raw = execFileSync("git", ["status", "--porcelain", "-uall"], {
           cwd: repoRoot,
           stdio: "pipe",
           encoding: "utf-8",
         })
-        const files = new Set<string>()
         for (const line of raw.split(/\r?\n/)) {
           const trimmed = line.trim()
           if (trimmed.length < 4) continue
@@ -942,6 +958,9 @@ const resolveModifiedFilesSinceStampOrHead = (repoRoot: string): ReadonlyArray<s
           if (relPath.length > 0) {
             files.add(relPath.replace(/\\/g, "/"))
           }
+        }
+        for (const diffFile of readGitBranchDiffFiles(repoRoot)) {
+          files.add(diffFile.replace(/\\/g, "/"))
         }
         return Array.from(files)
       },
@@ -1098,10 +1117,12 @@ const handleVerify = (
 
       const modularDeltaFiles = deltaFiles.filter(
         (f) =>
+          f.startsWith("libs/harness/gates/src/") ||
           f.includes("/plugins/") ||
           f.includes("/services/") ||
           f.includes("/commands/") ||
-          f.includes("/tools/"),
+          f.includes("/tools/") ||
+          f.includes("/mutation/"),
       )
       if (modularDeltaFiles.length > 0) {
         const pluginExit = yield* evaluateAllGatePlugins({

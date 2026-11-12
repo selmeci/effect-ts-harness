@@ -4,11 +4,25 @@ import { dirname, join } from "node:path"
 import { Effect, Schema } from "effect"
 import { match } from "ts-pattern"
 import { NonNegativeCount, ts } from "@harness/graph"
-import { checkMigrationSqlSafety, decideMigrationSafety } from "./migration-check.js"
+import { decideMigrationSafety } from "./migration-check.js"
+import {
+  getLineNumber,
+  inferPackageTagFromPath,
+  isDummyEffectVoidYield,
+  isImpureDomainSpecifier,
+  MIGRATOR_KEY_REGEX,
+  resolveEnclosingSymbol,
+  SCHEMA_CTORS,
+  SUSPICIOUS_SQL_DDL_REGEX,
+  unwrapAstExpression,
+  visitSourceFileSinglePass,
+} from "./plugins/ast-gate-visitors.js"
 import { resolveHarnessStateDir } from "./worktree.js"
 
 export const GateRuleVersion = Schema.NonEmptyString.pipe(Schema.brand("GateRuleVersion"))
 export type GateRuleVersion = typeof GateRuleVersion.Type
+export const AstRuleVersion = GateRuleVersion
+export type AstRuleVersion = typeof AstRuleVersion.Type
 
 export const HARNESS_GATE_RULE_VERSION: GateRuleVersion = GateRuleVersion.make("ast-gates-v2")
 
@@ -17,6 +31,8 @@ export type AstSourceFilePath = typeof AstSourceFilePath.Type
 
 export const ContentSha256 = Schema.NonEmptyString.pipe(Schema.brand("ContentSha256"))
 export type ContentSha256 = typeof ContentSha256.Type
+export const AstContentSha256 = ContentSha256
+export type AstContentSha256 = typeof AstContentSha256.Type
 
 export const AstSourceContent = Schema.String.pipe(Schema.brand("AstSourceContent"))
 export type AstSourceContent = typeof AstSourceContent.Type
@@ -29,6 +45,10 @@ export const GateCategory = Schema.Literals([
   "effect-laws",
 ]).pipe(Schema.brand("GateCategory"))
 export type GateCategory = typeof GateCategory.Type
+export const AstGateCategory = GateCategory
+export type AstGateCategory = typeof AstGateCategory.Type
+export const GateViolationCategory = GateCategory
+export type GateViolationCategory = typeof GateViolationCategory.Type
 
 export const GateRuleId = Schema.NonEmptyString.pipe(Schema.brand("GateRuleId"))
 export type GateRuleId = typeof GateRuleId.Type
@@ -90,6 +110,8 @@ export const AstGateCacheEntry = Schema.Struct({
   violations: Schema.Array(GateViolation),
 })
 export type AstGateCacheEntry = typeof AstGateCacheEntry.Type
+export const AstGateFileEntry = AstGateCacheEntry
+export type AstGateFileEntry = typeof AstGateFileEntry.Type
 
 export const AstGateCacheStoreSchema = Schema.Struct({
   version: GateRuleVersion,
@@ -104,11 +126,19 @@ export const AstGateDecisionReport = Schema.Struct({
   parsedFileCount: NonNegativeCount,
 })
 export type AstGateDecisionReport = typeof AstGateDecisionReport.Type
+export const AstCategoryGateReport = AstGateDecisionReport
+export type AstCategoryGateReport = typeof AstCategoryGateReport.Type
+
+export const AstCacheHitCount = NonNegativeCount
+export type AstCacheHitCount = typeof AstCacheHitCount.Type
+
+export const AstCacheDurationMs = NonNegativeCount
+export type AstCacheDurationMs = typeof AstCacheDurationMs.Type
 
 const decodeAstGateCacheStore = Schema.decodeOption(Schema.fromJsonString(AstGateCacheStoreSchema))
 
-const inMemoryGateCache = new Map<string, AstGateCacheEntry>()
-const inMemorySourceFileCache = new Map<
+export const inMemoryGateCache = new Map<string, AstGateCacheEntry>()
+export const inMemorySourceFileCache = new Map<
   string,
   { readonly contentSha256: ContentSha256; readonly sourceFile: ts.SourceFile }
 >()
@@ -117,12 +147,14 @@ let totalSourceFileParses = 0
 
 export const computeContentSha256 = (content: string): ContentSha256 =>
   ContentSha256.make(createHash("sha256").update(content, "utf8").digest("hex"))
+export const sha256Hex = computeContentSha256
 
-const makeAstGateCacheKey = (filePath: string, packageTag: string): string =>
+export const makeAstGateCacheKey = (filePath: string, packageTag: string): string =>
   `${filePath}\0${packageTag}`
 
 export const resolveAstGateCachePath = (repoRoot: string): AstSourceFilePath =>
   AstSourceFilePath.make(join(resolveHarnessStateDir(repoRoot), "cache", "ast-gates-v1.json"))
+export const resolveDefaultAstGateCachePath = resolveAstGateCachePath
 
 export const loadAstGateCacheFromDisk = (cacheFilePath: string): void => {
   if (loadedDiskCachePaths.has(cacheFilePath)) {
@@ -156,9 +188,8 @@ export const loadAstGateCacheFromDisk = (cacheFilePath: string): void => {
         process.stderr.write(
           `[harness:ast-cache] Warning: failed to read AST gate cache from ${cacheFilePath}: ${err instanceof Error ? err.message : String(err)}\n`,
         )
-        return undefined
       },
-    }).pipe(Effect.ignore),
+    }).pipe(Effect.orElseSucceed(() => undefined)),
   )
 }
 
@@ -188,22 +219,19 @@ export const saveAstGateCacheToDisk = (
         process.stderr.write(
           `[harness:ast-cache] Warning: failed to persist AST gate cache to ${cacheFilePath}: ${err instanceof Error ? err.message : String(err)}\n`,
         )
-        return undefined
       },
     }).pipe(
+      Effect.orElseSucceed(() => undefined),
       Effect.ensuring(
-        Effect.ignore(
-          Effect.try({
-            try: () => {
-              if (existsSync(tmpPath)) {
-                unlinkSync(tmpPath)
-              }
-            },
-            catch: () => undefined,
-          }),
-        ),
+        Effect.try({
+          try: () => {
+            if (existsSync(tmpPath)) {
+              unlinkSync(tmpPath)
+            }
+          },
+          catch: () => undefined,
+        }).pipe(Effect.orElseSucceed(() => undefined)),
       ),
-      Effect.ignore,
     ),
   )
 }
@@ -214,12 +242,12 @@ export const clearAstGateCache = (): void => {
   loadedDiskCachePaths.clear()
   totalSourceFileParses = 0
 }
+export const clearAstGateInMemoryCache = clearAstGateCache
 
 export const getAstGateCacheSize = (): number => inMemoryGateCache.size
-
 export const getAstGateSourceFileParseCount = (): number => totalSourceFileParses
-
 export const MAX_SOURCE_FILE_CACHE_SIZE = 500
+export const MAX_GATE_CACHE_SIZE = 1000
 
 export const getOrCreateCachedSourceFile = (
   filePath: string,
@@ -250,481 +278,6 @@ export const getOrCreateCachedSourceFile = (
   }
   inMemorySourceFileCache.set(filePath, { contentSha256: hash, sourceFile })
   return { sourceFile, freshlyParsed: true }
-}
-
-const inferPackageTagFromPath = (filePath: string): AstGatePackageTag => {
-  if (filePath.includes("/contract/")) return AstGatePackageTag.make("contract")
-  if (filePath.includes("/domain/") || filePath.includes("/core/")) {
-    return AstGatePackageTag.make("domain")
-  }
-  if (filePath.includes("/service/")) return AstGatePackageTag.make("service")
-  if (filePath.includes("/infra/")) return AstGatePackageTag.make("infra")
-  return AstGatePackageTag.make("app")
-}
-
-export const getLineNumber = (sourceFile: ts.SourceFile, pos: number): SourceLineNumber => {
-  const { line } = sourceFile.getLineAndCharacterOfPosition(Math.max(0, pos))
-  return SourceLineNumber.make(line + 1)
-}
-
-export const resolveEnclosingSymbol = (node: ts.Node, filePath: string): EnclosingSymbolName => {
-  let curr: ts.Node | undefined = node
-  while (curr !== undefined) {
-    if (ts.isVariableDeclaration(curr) && ts.isIdentifier(curr.name)) {
-      return EnclosingSymbolName.make(`${filePath}#${curr.name.text}`)
-    }
-    if (ts.isFunctionDeclaration(curr) && curr.name !== undefined) {
-      return EnclosingSymbolName.make(`${filePath}#${curr.name.text}`)
-    }
-    if (ts.isClassDeclaration(curr) && curr.name !== undefined) {
-      return EnclosingSymbolName.make(`${filePath}#${curr.name.text}`)
-    }
-    curr = curr.parent
-  }
-  return EnclosingSymbolName.make(filePath)
-}
-
-const IMPURE_DOMAIN_MODULES = new Set([
-  "node:fs",
-  "fs",
-  "node:http",
-  "http",
-  "node:https",
-  "https",
-  "node:net",
-  "net",
-  "node:child_process",
-  "child_process",
-  "drizzle-orm",
-  "alchemy",
-])
-
-const isImpureDomainSpecifier = (spec: string): boolean =>
-  IMPURE_DOMAIN_MODULES.has(spec) ||
-  spec.startsWith("drizzle-orm/") ||
-  spec.startsWith("@effect/sql") ||
-  spec.startsWith("alchemy/") ||
-  /^@harness\/[a-z0-9-]+-infra$/.test(spec)
-
-export const unwrapAstExpression = (expr: ts.Expression): ts.Expression => {
-  let curr = expr
-  while (
-    ts.isParenthesizedExpression(curr) ||
-    ts.isAsExpression(curr) ||
-    ts.isTypeAssertionExpression(curr) ||
-    ts.isNonNullExpression(curr)
-  ) {
-    curr = curr.expression
-  }
-  return curr
-}
-
-export const isDummyEffectVoidYield = (
-  expr: ts.Expression,
-  sourceFile: ts.SourceFile,
-): boolean => {
-  const inner = unwrapAstExpression(expr)
-  if (
-    ts.isPropertyAccessExpression(inner) &&
-    inner.expression.getText(sourceFile).trim() === "Effect" &&
-    inner.name.text === "void"
-  ) {
-    return true
-  }
-  if (
-    ts.isCallExpression(inner) &&
-    ts.isPropertyAccessExpression(inner.expression) &&
-    inner.expression.expression.getText(sourceFile).trim() === "Effect" &&
-    inner.expression.name.text === "asVoid"
-  ) {
-    return true
-  }
-  return false
-}
-
-const unwrapExpression = unwrapAstExpression
-
-const visitSourceFileSinglePass = (
-  sourceFile: ts.SourceFile,
-  filePath: AstSourceFilePath,
-  packageTag: AstGatePackageTag,
-): ReadonlyArray<GateViolation> => {
-  const violations: Array<GateViolation> = []
-  const isTestFile = filePath.endsWith(".test.ts") || filePath.endsWith(".spec.ts")
-  const isHarnessInternal =
-    filePath.startsWith("libs/harness/") || filePath.startsWith("apps/harness-")
-  let hasMigratorImport = false
-
-  // Pre-scan top-level imports for SqliteMigrator / Migrator presence
-  for (const stmt of sourceFile.statements) {
-    if (ts.isImportDeclaration(stmt) && ts.isStringLiteral(stmt.moduleSpecifier)) {
-      const modText = stmt.moduleSpecifier.text
-      if (modText.includes("SqliteMigrator") || modText.includes("Migrator")) {
-        hasMigratorImport = true
-      }
-    }
-  }
-
-  const isInsideMigrationsRecord = (node: ts.Node): boolean => {
-    let curr: ts.Node | undefined = node.parent
-    while (curr !== undefined) {
-      if (ts.isCallExpression(curr)) {
-        const exprText = curr.expression.getText(sourceFile)
-        if (exprText.endsWith("fromRecord")) {
-          return true
-        }
-      }
-      if (ts.isVariableDeclaration(curr) && ts.isIdentifier(curr.name)) {
-        if (/migrations/i.test(curr.name.text)) {
-          return true
-        }
-      }
-      curr = curr.parent
-    }
-    return false
-  }
-
-  const isTagGuardCondition = (cond: ts.Expression): boolean => {
-    const text = cond.getText(sourceFile)
-    return /\b(?:Option\.isSome|Option\.isNone|Either\.isRight|Either\.isLeft|Result\.isSuccess|Result\.isFailure|Exit\.isSuccess|Exit\.isFailure|Cause\.isFailType|Cause\.isDieType|Cause\.isInterruptType|Cause\.isEmptyType|Predicate\.isTagged)\s*\(/.test(
-      text,
-    )
-  }
-
-  const isDiscriminantCondition = (cond: ts.Expression): boolean => {
-    if (isTagGuardCondition(cond)) {
-      return true
-    }
-    const text = cond.getText(sourceFile)
-    if (/\.(?:_tag|kind|status)\s*(?:===|!==|==|!=)\s*["'`]/.test(text)) {
-      return true
-    }
-    return false
-  }
-
-  const handlesTsxExtensions =
-    sourceFile.text.includes('".tsx"') || sourceFile.text.includes("'.tsx'")
-  const referencesLangTsx = sourceFile.text.includes("Lang.Tsx")
-
-  const walk = (node: ts.Node): void => {
-    // 1. Import declarations (domain-purity + syntax-bans + test-integrity)
-    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
-      const spec = node.moduleSpecifier.text
-      if (
-        (spec === "node:sqlite" || spec === "sqlite" || spec === "better-sqlite3") &&
-        !isHarnessInternal &&
-        (packageTag === "infra" || packageTag === "app")
-      ) {
-        violations.push({
-          category: GateCategory.make(isTestFile ? "test-integrity" : "syntax-bans"),
-          rule: GateRuleId.make("node-sqlite-in-infra"),
-          message: GateViolationMessage.make(
-            `Do not import '${spec}' in '${filePath}' — use @alchemy.run/cloudflare-runtime workerd storage instead of node:sqlite mocks.`,
-          ),
-          file: filePath,
-          line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-          enclosingSymbol: resolveEnclosingSymbol(node, filePath),
-        })
-      }
-      if (
-        !isTestFile &&
-        !isHarnessInternal &&
-        (packageTag === "domain" || packageTag === "contract") &&
-        isImpureDomainSpecifier(spec)
-      ) {
-        violations.push({
-          category: GateCategory.make("domain-purity"),
-          rule: GateRuleId.make("impure-domain-import"),
-          message: GateViolationMessage.make(
-            `Module '${filePath}' (${packageTag}) imports impure infrastructure dependency '${spec}'.`,
-          ),
-          file: filePath,
-          line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-          enclosingSymbol: resolveEnclosingSymbol(node, filePath),
-        })
-      }
-    }
-
-    // 2. Switch statements (syntax-bans)
-    if (ts.isSwitchStatement(node) && !isTestFile) {
-      violations.push({
-        category: GateCategory.make("syntax-bans"),
-        rule: GateRuleId.make("discriminant-branching"),
-        message: GateViolationMessage.make(
-          `Switch statement in '${filePath}' is banned — use match(value).with(...).exhaustive() from ts-pattern.`,
-        ),
-        file: filePath,
-        line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-        enclosingSymbol: resolveEnclosingSymbol(node, filePath),
-      })
-    }
-
-    // 2b. Dummy yield* Effect.void (effect-laws: effect-fn-dummy-void)
-    if (ts.isYieldExpression(node) && !isTestFile) {
-      if (node.expression !== undefined && isDummyEffectVoidYield(node.expression, sourceFile)) {
-        violations.push({
-          category: GateCategory.make("effect-laws"),
-          rule: GateRuleId.make("effect-fn-dummy-void"),
-          message: GateViolationMessage.make(
-            `Dummy 'yield* Effect.void' in '${filePath}' is banned — use a pure function or Effect.sync(() => ...) instead of a dummy yield.`,
-          ),
-          file: filePath,
-          line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-          enclosingSymbol: resolveEnclosingSymbol(node, filePath),
-        })
-      }
-    }
-
-    // 3. AsExpression / TypeAssertionExpression (syntax-bans: unsafe-type-cast)
-    if (ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) {
-      const typeNode = node.type
-      if (
-        typeNode.kind === ts.SyntaxKind.AnyKeyword ||
-        typeNode.kind === ts.SyntaxKind.NeverKeyword
-      ) {
-        const keyword = typeNode.kind === ts.SyntaxKind.AnyKeyword ? "any" : "never"
-        violations.push({
-          category: GateCategory.make("syntax-bans"),
-          rule: GateRuleId.make("unsafe-type-cast"),
-          message: GateViolationMessage.make(
-            `Unsafe type assertion 'as ${keyword}' in '${filePath}' is banned.`,
-          ),
-          file: filePath,
-          line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-          enclosingSymbol: resolveEnclosingSymbol(node, filePath),
-        })
-      } else if (
-        (ts.isAsExpression(node.expression) || ts.isTypeAssertionExpression(node.expression)) &&
-        node.expression.type.kind === ts.SyntaxKind.UnknownKeyword
-      ) {
-        violations.push({
-          category: GateCategory.make("syntax-bans"),
-          rule: GateRuleId.make("unsafe-type-cast"),
-          message: GateViolationMessage.make(
-            `Double type assertion 'as unknown as T' in '${filePath}' is banned.`,
-          ),
-          file: filePath,
-          line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-          enclosingSymbol: resolveEnclosingSymbol(node, filePath),
-        })
-      }
-    }
-
-    // 4. IfStatement & ConditionalExpression (effect-laws: discriminant-branching)
-    if (ts.isIfStatement(node) && !isTestFile && !isHarnessInternal) {
-      if (isDiscriminantCondition(node.expression)) {
-        violations.push({
-          category: GateCategory.make("effect-laws"),
-          rule: GateRuleId.make("discriminant-branching"),
-          message: GateViolationMessage.make(
-            `If statement in '${filePath}' inspects union discriminant or Option/Either/Result/Exit/Cause guard — use match(...).exhaustive().`,
-          ),
-          file: filePath,
-          line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-          enclosingSymbol: resolveEnclosingSymbol(node, filePath),
-        })
-      }
-    }
-    if (ts.isConditionalExpression(node) && !isTestFile) {
-      if (
-        isTagGuardCondition(node.condition) ||
-        (!isHarnessInternal && isDiscriminantCondition(node.condition))
-      ) {
-        violations.push({
-          category: GateCategory.make("effect-laws"),
-          rule: GateRuleId.make("discriminant-branching"),
-          message: GateViolationMessage.make(
-            `Ternary expression in '${filePath}' inspects union discriminant or Option/Either/Result/Exit/Cause guard — use match(...).exhaustive().`,
-          ),
-          file: filePath,
-          line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-          enclosingSymbol: resolveEnclosingSymbol(node, filePath),
-        })
-      }
-    }
-
-    // 4b. PropertyAccessExpression: Effect.ignore in domain (domain-purity: domain-effect-ignore)
-    if (
-      ts.isPropertyAccessExpression(node) &&
-      !isTestFile &&
-      !isHarnessInternal &&
-      packageTag === "domain" &&
-      ts.isIdentifier(node.expression) &&
-      node.expression.text === "Effect" &&
-      node.name.text === "ignore"
-    ) {
-      violations.push({
-        category: GateCategory.make("domain-purity"),
-        rule: GateRuleId.make("domain-effect-ignore"),
-        message: GateViolationMessage.make(
-          `Swallowing typed errors with Effect.ignore in '${filePath}' (domain) is banned — surface failures in the E channel or handle them explicitly.`,
-        ),
-        file: filePath,
-        line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-        enclosingSymbol: resolveEnclosingSymbol(node, filePath),
-      })
-    }
-
-    // 5. CallExpressions (effect-laws, domain-purity, test-integrity, syntax-bans)
-    if (ts.isCallExpression(node)) {
-      const calleeText = node.expression.getText(sourceFile)
-
-      // @ast-grep/napi parse(Lang.TypeScript, ...) in a .tsx-handling file without Lang.Tsx
-      if (
-        !isTestFile &&
-        calleeText === "parse" &&
-        node.arguments.length >= 2 &&
-        node.arguments[0]?.getText(sourceFile) === "Lang.TypeScript" &&
-        handlesTsxExtensions &&
-        !referencesLangTsx
-      ) {
-        violations.push({
-          category: GateCategory.make("syntax-bans"),
-          rule: GateRuleId.make("ast-grep-tsx-grammar"),
-          message: GateViolationMessage.make(
-            `Hardcoded parse(Lang.TypeScript, ...) in '${filePath}' which handles .tsx files — select Lang.Tsx for .tsx files so JSX syntax parses cleanly.`,
-          ),
-          file: filePath,
-          line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-          enclosingSymbol: resolveEnclosingSymbol(node, filePath),
-        })
-      }
-
-      // match(...).run() ban
-      const unwrappedExpr = unwrapExpression(node.expression)
-      if (
-        !isTestFile &&
-        ts.isPropertyAccessExpression(unwrappedExpr) &&
-        unwrappedExpr.name.text === "run" &&
-        /\bmatch\s*\(/.test(unwrappedExpr.expression.getText(sourceFile))
-      ) {
-        violations.push({
-          category: GateCategory.make("effect-laws"),
-          rule: GateRuleId.make("non-exhaustive-union-match"),
-          message: GateViolationMessage.make(
-            `match(...).run() in '${filePath}' is banned — use .exhaustive() instead.`,
-          ),
-          file: filePath,
-          line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-          enclosingSymbol: resolveEnclosingSymbol(node, filePath),
-        })
-      }
-
-      // Unscoped Effect.runSync / Effect.runPromise in domain/contract/service/infra
-      if (
-        !isTestFile &&
-        !isHarnessInternal &&
-        packageTag !== "app" &&
-        (calleeText === "Effect.runSync" ||
-          calleeText === "Effect.runPromise" ||
-          calleeText === "Effect.runFork")
-      ) {
-        violations.push({
-          category: GateCategory.make("domain-purity"),
-          rule: GateRuleId.make("unscoped-effect-run"),
-          message: GateViolationMessage.make(
-            `Unscoped '${calleeText}' in '${filePath}' (${packageTag}) — compose Effects and run at the app edge.`,
-          ),
-          file: filePath,
-          line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-          enclosingSymbol: resolveEnclosingSymbol(node, filePath),
-        })
-      }
-
-      // Test integrity: vacuous Exit.isFailure assertion
-      if (
-        isTestFile &&
-        calleeText.startsWith("expect(") &&
-        /expect\s*\(\s*Exit\.isFailure\s*\(\s*([A-Za-z0-9_$]+)\s*\)\s*\)/.test(
-          node.expression.getText(sourceFile),
-        )
-      ) {
-        const fullSourceText = sourceFile.text
-        if (
-          !fullSourceText.includes("Cause.findErrorOption") &&
-          !fullSourceText.includes(".cause")
-        ) {
-          violations.push({
-            category: GateCategory.make("test-integrity"),
-            rule: GateRuleId.make("vacuous-error-assertion"),
-            message: GateViolationMessage.make(
-              `Vacuous Exit.isFailure assertion in '${filePath}' without inspecting Cause.findErrorOption or error fields.`,
-            ),
-            file: filePath,
-            line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-            enclosingSymbol: resolveEnclosingSymbol(node, filePath),
-          })
-        }
-      }
-    }
-
-    // 6. BinaryExpression: JSON.stringify(a) === JSON.stringify(b) in tests
-    if (ts.isBinaryExpression(node) && isTestFile) {
-      const op = node.operatorToken.kind
-      if (op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.EqualsEqualsToken) {
-        const leftText = node.left.getText(sourceFile)
-        const rightText = node.right.getText(sourceFile)
-        if (leftText.startsWith("JSON.stringify(") && rightText.startsWith("JSON.stringify(")) {
-          violations.push({
-            category: GateCategory.make("test-integrity"),
-            rule: GateRuleId.make("fallback-json-equality"),
-            message: GateViolationMessage.make(
-              `Fallback JSON.stringify equality comparison in '${filePath}' — use structured equality or Equal.equals.`,
-            ),
-            file: filePath,
-            line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-            enclosingSymbol: resolveEnclosingSymbol(node, filePath),
-          })
-        }
-      }
-    }
-
-    // 7. TaggedTemplateExpression: sql`...` migration safety & unmanaged DDL
-    if (ts.isTaggedTemplateExpression(node)) {
-      const tagText = node.tag.getText(sourceFile)
-      if (tagText === "sql" || tagText.endsWith(".sql")) {
-        const templateText = node.template.getText(sourceFile).slice(1, -1)
-        const isDdl =
-          /\b(?:CREATE\s+(?:TEMP\s+|TEMPORARY\s+)?(?:TABLE|INDEX|UNIQUE\s+INDEX|VIEW|TRIGGER)|ALTER\s+TABLE|DROP\s+(?:TABLE|INDEX|VIEW|TRIGGER))\b/i.test(
-            templateText,
-          )
-        if (isDdl) {
-          if (
-            packageTag === "infra" &&
-            !isHarnessInternal &&
-            (!hasMigratorImport || !isInsideMigrationsRecord(node))
-          ) {
-            violations.push({
-              category: GateCategory.make("migration-safety"),
-              rule: GateRuleId.make("unmanaged-sql-ddl"),
-              message: GateViolationMessage.make(
-                `Raw SQL DDL in '${filePath}' outside SqliteMigrator.fromRecord migration record.`,
-              ),
-              file: filePath,
-              line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-              enclosingSymbol: resolveEnclosingSymbol(node, filePath),
-            })
-          }
-          const safety = checkMigrationSqlSafety([{ file: filePath, sql: templateText }])
-          for (const v of safety.violations) {
-            violations.push({
-              category: GateCategory.make("migration-safety"),
-              rule: GateRuleId.make("unsafe-sql-migration"),
-              message: GateViolationMessage.make(v.message),
-              file: filePath,
-              line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-              enclosingSymbol: resolveEnclosingSymbol(node, filePath),
-            })
-          }
-        }
-      }
-    }
-
-    ts.forEachChild(node, walk)
-  }
-
-  walk(sourceFile)
-  return violations
 }
 
 export const evaluateAstGateFiles = (
@@ -779,6 +332,12 @@ export const evaluateAstGateFiles = (
       ruleVersion,
       packageTag: pkgTag,
       violations: [...fileViolations],
+    }
+    if (!inMemoryGateCache.has(cacheKey) && inMemoryGateCache.size >= MAX_GATE_CACHE_SIZE) {
+      const oldestKey = inMemoryGateCache.keys().next().value
+      if (oldestKey !== undefined) {
+        inMemoryGateCache.delete(oldestKey)
+      }
     }
     inMemoryGateCache.set(cacheKey, entry)
     dirtyCache = true
@@ -864,3 +423,16 @@ export const EffectLaws = {
 export const MigrationSafety = {
   decide: decideMigrationSafety,
 } as const
+
+export {
+  getLineNumber,
+  inferPackageTagFromPath,
+  isDummyEffectVoidYield,
+  isImpureDomainSpecifier,
+  MIGRATOR_KEY_REGEX,
+  resolveEnclosingSymbol,
+  SCHEMA_CTORS,
+  SUSPICIOUS_SQL_DDL_REGEX,
+  unwrapAstExpression,
+  visitSourceFileSinglePass,
+}
