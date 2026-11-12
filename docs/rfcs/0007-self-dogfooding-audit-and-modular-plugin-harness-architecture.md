@@ -1,7 +1,7 @@
 ---
 rfc: RFC-0007
 title: Self-Dogfooding Audit, Effect-TS v4 Paradigm Alignment & Modular Plugin Harness Architecture
-status: draft
+status: implemented
 created: 2026-11-12
 updated: 2026-11-12
 authors:
@@ -29,6 +29,8 @@ target_specs:
 ---
 
 # RFC-0007: Self-Dogfooding Audit, Effect-TS v4 Paradigm Alignment & Modular Plugin Harness Architecture
+
+> **Companion Audit Report (Appendix A):** For the complete initial architectural audit report—including additional diagnostics on `libs/es/infra`, `libs/sample`, `tools/scenario/run.mjs`, and the full target decomposition map of all monolithic files—see **[RFC-0007 Appendix A: Comprehensive Harness Architecture Audit Report](./0007-appendix-a-harness-architecture-audit-report.md)**.
 
 ## 1. Executive Summary
 
