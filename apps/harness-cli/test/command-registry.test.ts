@@ -4,13 +4,16 @@ import { match } from "ts-pattern"
 import { checkSpanBudgets, type SpanSample } from "@harness/gates"
 import { runWithTestTracer, type IndexedEffectFn, type RecordedSpanEvent } from "@harness/ingest"
 import {
+  CANONICAL_CLI_COMMAND_NAMES,
   CliCommandName,
   CliCommandNotFoundError,
+  DEFAULT_CLI_COMMAND_DESCRIPTORS,
   dispatchCliCommand,
   HarnessCommandRegistryLive,
   makeHarnessCommandRegistryLayer,
   type CliCommandPluginDescriptor,
 } from "../src/commands/command-registry.js"
+import { COMMANDS } from "../src/index.js"
 
 const toSpanSamples = (spans: ReadonlyArray<RecordedSpanEvent>): ReadonlyArray<SpanSample> =>
   spans.map((s) => ({
@@ -28,6 +31,22 @@ const toSpanSamples = (spans: ReadonlyArray<RecordedSpanEvent>): ReadonlyArray<S
   }))
 
 describe("HarnessCli.dispatchCommand (SPEC-0011 §4)", () => {
+  it("REQ-4.1: CANONICAL_CLI_COMMAND_NAMES and DEFAULT_CLI_COMMAND_DESCRIPTORS match COMMANDS 1-to-1", () => {
+    expect([...CANONICAL_CLI_COMMAND_NAMES]).toEqual([...COMMANDS])
+    expect(DEFAULT_CLI_COMMAND_DESCRIPTORS.map((d) => d.name)).toEqual([...COMMANDS])
+  })
+
+  it("REQ-4.1: makeHarnessCommandRegistryLayer throws on duplicate command registration", () => {
+    const dupDescriptor: CliCommandPluginDescriptor = {
+      name: CliCommandName.make("guard"),
+      summary: "Duplicate guard descriptor",
+      execute: () => Effect.succeed({ exitCode: 0, stdout: "", stderr: "" }),
+    }
+    expect(() => makeHarnessCommandRegistryLayer([dupDescriptor, dupDescriptor])).toThrow(
+      /Duplicate CLI command registered: guard/,
+    )
+  })
+
   it.effect(
     "REQ-4.1: executes registered command, records HarnessCli.dispatchCommand span, and passes span budgets",
     () =>
@@ -38,14 +57,14 @@ describe("HarnessCli.dispatchCommand (SPEC-0011 §4)", () => {
         const { result, spans } = yield* runWithTestTracer(
           testId,
           dispatchCliCommand({
-            command: "guard",
-            args: ["--strict"],
+            command: "help",
+            args: [],
           }).pipe(Effect.provide(HarnessCommandRegistryLive)),
           emptyFnIndex,
         )
 
         expect(result.exitCode).toBe(0)
-        expect(result.stdout).toBe("guard")
+        expect(result.stdout).toContain("harness help")
         expect(result.stderr).toBe("")
 
         const dispatchSpan = spans.find((s) => s.name === "HarnessCli.dispatchCommand")

@@ -8,7 +8,10 @@ import {
 } from "../ast-cache.js"
 import { NonNegativeCount } from "@harness/graph"
 
-export const PluginId = Schema.NonEmptyString.pipe(Schema.brand("PluginId"))
+export const PluginId = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.brand("PluginId"),
+)
 export type PluginId = typeof PluginId.Type
 
 export const PluginFileLineCount = Schema.Int.pipe(
@@ -16,6 +19,9 @@ export const PluginFileLineCount = Schema.Int.pipe(
   Schema.brand("PluginFileLineCount"),
 )
 export type PluginFileLineCount = typeof PluginFileLineCount.Type
+
+export const computeWorkspaceFileLineCount = (content: string): PluginFileLineCount =>
+  PluginFileLineCount.make(content.length === 0 ? 0 : content.split(/\r?\n/).length)
 
 export const MaxPluginFileLines = Schema.Int.pipe(
   Schema.check(Schema.isGreaterThanOrEqualTo(1)),
@@ -69,6 +75,15 @@ export const SelfDogfoodingReport = Schema.Struct({
 })
 export type SelfDogfoodingReport = typeof SelfDogfoodingReport.Type
 
+export const makeSelfDogfoodingReport = (
+  violations: ReadonlyArray<SelfDogfoodingViolation>,
+  inspectedFileCount: NonNegativeCount,
+): SelfDogfoodingReport => ({
+  verdict: GateVerdict.make(violations.length === 0 ? "clean" : "violated"),
+  violations: [...violations],
+  inspectedFileCount,
+})
+
 export class SelfDogfoodingViolationError extends Schema.TaggedError<SelfDogfoodingViolationError>()(
   "SelfDogfoodingViolationError",
   {
@@ -77,18 +92,29 @@ export class SelfDogfoodingViolationError extends Schema.TaggedError<SelfDogfood
   },
 ) {}
 
-export const WorkspaceFilePath = Schema.NonEmptyString.pipe(Schema.brand("WorkspaceFilePath"))
+export const WorkspaceFilePath = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.brand("WorkspaceFilePath"),
+)
 export type WorkspaceFilePath = typeof WorkspaceFilePath.Type
 
 export const WorkspaceFileContent = Schema.String.pipe(Schema.brand("WorkspaceFileContent"))
 export type WorkspaceFileContent = typeof WorkspaceFileContent.Type
+
+export const WorkspaceFileExistsFlag = Schema.Boolean.pipe(
+  Schema.brand("WorkspaceFileExistsFlag"),
+)
+export type WorkspaceFileExistsFlag = typeof WorkspaceFileExistsFlag.Type
 
 export const WorkspaceFsOperation = Schema.Literals(["read", "write", "stat", "readdir"]).pipe(
   Schema.brand("WorkspaceFsOperation"),
 )
 export type WorkspaceFsOperation = typeof WorkspaceFsOperation.Type
 
-export const ErrorReasonMessage = Schema.NonEmptyString.pipe(Schema.brand("ErrorReasonMessage"))
+export const ErrorReasonMessage = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.brand("ErrorReasonMessage"),
+)
 export type ErrorReasonMessage = typeof ErrorReasonMessage.Type
 
 export const WorkspaceFileStat = Schema.Struct({
@@ -104,11 +130,26 @@ export class WorkspaceFsError extends Schema.TaggedError<WorkspaceFsError>()("Wo
   reason: ErrorReasonMessage,
 }) {}
 
-export const SubprocessCommand = Schema.NonEmptyString.pipe(Schema.brand("SubprocessCommand"))
+export const SubprocessCommand = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.brand("SubprocessCommand"),
+)
 export type SubprocessCommand = typeof SubprocessCommand.Type
 
 export const SubprocessArg = Schema.String.pipe(Schema.brand("SubprocessArg"))
 export type SubprocessArg = typeof SubprocessArg.Type
+
+export const SubprocessTimeoutMs = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(1)),
+  Schema.brand("SubprocessTimeoutMs"),
+)
+export type SubprocessTimeoutMs = typeof SubprocessTimeoutMs.Type
+
+export const SubprocessMaxBufferBytes = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(1024)),
+  Schema.brand("SubprocessMaxBufferBytes"),
+)
+export type SubprocessMaxBufferBytes = typeof SubprocessMaxBufferBytes.Type
 
 export const SubprocessExitCode = Schema.Int.pipe(Schema.brand("SubprocessExitCode"))
 export type SubprocessExitCode = typeof SubprocessExitCode.Type
@@ -120,6 +161,8 @@ export const SubprocessExecInput = Schema.Struct({
   command: SubprocessCommand,
   args: Schema.Array(SubprocessArg),
   cwd: Schema.optional(WorkspaceFilePath),
+  timeoutMs: Schema.optional(SubprocessTimeoutMs),
+  maxBufferBytes: Schema.optional(SubprocessMaxBufferBytes),
 })
 export type SubprocessExecInput = typeof SubprocessExecInput.Type
 
@@ -141,5 +184,8 @@ export class HarnessSubprocessError extends Schema.TaggedError<HarnessSubprocess
   },
 ) {}
 
-export const ActiveMutantId = Schema.NonEmptyString.pipe(Schema.brand("ActiveMutantId"))
+export const ActiveMutantId = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.brand("ActiveMutantId"),
+)
 export type ActiveMutantId = typeof ActiveMutantId.Type

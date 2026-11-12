@@ -4,13 +4,16 @@ import { match } from "ts-pattern"
 import { checkSpanBudgets, type SpanSample } from "@harness/gates"
 import { runWithTestTracer, type IndexedEffectFn, type RecordedSpanEvent } from "@harness/ingest"
 import {
+  CANONICAL_MCP_TOOL_NAMES,
   dispatchMcpTool,
   makeMcpToolRegistryLayer,
   McpToolName,
+  McpToolRegistry,
   McpToolRegistryLive,
   UnknownToolError,
   type McpToolPluginDescriptor,
 } from "../src/tools/tool-registry.js"
+import { makeLiveMcpToolRegistryLayer } from "../src/server.js"
 
 const toSpanSamples = (spans: ReadonlyArray<RecordedSpanEvent>): ReadonlyArray<SpanSample> =>
   spans.map((s) => ({
@@ -29,6 +32,29 @@ const toSpanSamples = (spans: ReadonlyArray<RecordedSpanEvent>): ReadonlyArray<S
 
 describe("HarnessMcp.dispatchTool (SPEC-0011 §4)", () => {
   it.effect(
+    "REQ-4.3: CANONICAL_MCP_TOOL_NAMES matches makeLiveMcpToolRegistryLayer tools 1-to-1",
+    () =>
+      Effect.gen(function* () {
+        const liveLayer = makeLiveMcpToolRegistryLayer()
+        const registry = yield* McpToolRegistry.pipe(Effect.provide(liveLayer))
+        const tools = yield* registry.listTools
+        const registeredNames = tools.map((t) => t.name)
+        expect(registeredNames).toEqual([...CANONICAL_MCP_TOOL_NAMES])
+      }),
+  )
+
+  it("REQ-4.3: makeMcpToolRegistryLayer throws on duplicate tool registration", () => {
+    const dupDescriptor: McpToolPluginDescriptor = {
+      name: McpToolName.make("harness_resolve"),
+      description: "Duplicate tool descriptor",
+      execute: () => Effect.succeed(null),
+    }
+    expect(() => makeMcpToolRegistryLayer([dupDescriptor, dupDescriptor])).toThrow(
+      /Duplicate MCP tool registered: harness_resolve/,
+    )
+  })
+
+  it.effect(
     "REQ-4.3: executes registered MCP tool handler via McpToolRegistryLive, records HarnessMcp.dispatchTool span, and passes span budgets",
     () =>
       Effect.gen(function* () {
@@ -38,15 +64,20 @@ describe("HarnessMcp.dispatchTool (SPEC-0011 §4)", () => {
         const { result, spans } = yield* runWithTestTracer(
           testId,
           dispatchMcpTool({
-            toolName: "harness_resolve",
-            args: { symbolOrSpan: "SampleService" },
+            toolName: "harness_telemetry_report",
+            args: {},
           }).pipe(Effect.provide(McpToolRegistryLive)),
           emptyFnIndex,
         )
 
-        expect(result).toEqual({
-          tool: "harness_resolve",
-          args: { symbolOrSpan: "SampleService" },
+        expect(result).not.toEqual({
+          tool: "harness_telemetry_report",
+          args: {},
+        })
+        expect(result).toMatchObject({
+          totalEvents: expect.any(Number),
+          healthScore: expect.any(Number),
+          grade: expect.any(String),
         })
 
         const dispatchSpan = spans.find((s) => s.name === "HarnessMcp.dispatchTool")
@@ -94,7 +125,7 @@ describe("HarnessMcp.dispatchTool (SPEC-0011 §4)", () => {
   )
 
   it.effect(
-    "REQ-4.3 negative: fails with UnknownToolError when given unregistered tool name",
+    "REQ-4.4: fails with UnknownToolError when given unregistered tool name",
     () =>
       Effect.gen(function* () {
         const testId = "HarnessMcp.dispatchTool::unregistered"

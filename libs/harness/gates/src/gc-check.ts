@@ -27,6 +27,8 @@ import {
 import { decideAdrDocQuality } from "./adr-lint.js"
 import { decideOntologyInvariants, normalizeConditionPrefix } from "./ontology-invariants.js"
 import { checkMigrationFiles, checkMigrationSqlSafety } from "./migration-check.js"
+import { AstSourceContent, AstSourceFilePath } from "./ast-cache.js"
+import { decideSelfDogfooding } from "./plugins/self-dogfooding-plugin.js"
 
 export type GcFindingKind =
   | "unused-service"
@@ -49,6 +51,7 @@ export type GcFindingKind =
   | "invalid-migrator-record-key"
   | "unsafe-sql-migration"
   | "untrusted-row-brand-make"
+  | "architecture-policy-violation"
 
 export interface GcFinding {
   readonly kind: GcFindingKind
@@ -2132,6 +2135,54 @@ export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcF
         location: relFile,
         message,
         action: `Escalate destructive migration (${v.kind}) to the human or refactor to an additive migration.`,
+      })
+    }
+  }
+
+  const candidateModularDirs = [
+    join(repoRoot, "libs", "harness", "gates", "src", "plugins"),
+    join(repoRoot, "libs", "harness", "gates", "src", "services"),
+    join(repoRoot, "libs", "harness", "graph", "src", "services"),
+    join(repoRoot, "apps", "harness-cli", "src", "commands"),
+    join(repoRoot, "apps", "harness-mcp", "src", "tools"),
+  ]
+
+  const dogfoodFiles: Array<{ filePath: AstSourceFilePath; content: AstSourceContent }> = []
+  for (const dir of candidateModularDirs) {
+    if (existsSync(dir)) {
+      const files = collectTsFiles(dir).filter(
+        (f) => !f.endsWith(".test.ts") && !f.endsWith(".spec.ts"),
+      )
+      for (const file of files) {
+        const content = Effect.runSync(
+          Effect.try({
+            try: () => readFileSync(file, "utf8"),
+            catch: () => "",
+          }).pipe(Effect.orElseSucceed(() => "")),
+        )
+        const relPath = relative(repoRoot, file).replace(/\\/g, "/")
+        dogfoodFiles.push({
+          filePath: AstSourceFilePath.make(relPath),
+          content: AstSourceContent.make(content),
+        })
+      }
+    }
+  }
+
+  if (dogfoodFiles.length > 0) {
+    const dogfoodReport = Effect.runSync(
+      decideSelfDogfooding({
+        files: dogfoodFiles,
+        failOnViolation: false,
+      }),
+    )
+    for (const v of dogfoodReport.violations) {
+      findings.push({
+        kind: "architecture-policy-violation",
+        nodeId: `${v.file}:${v.rule}:${String(v.line)}`,
+        location: `${v.file}:${String(v.line)}`,
+        message: v.message,
+        action: `Resolve self-dogfooding violation (${v.rule}) in ${v.file}:${String(v.line)}.`,
       })
     }
   }

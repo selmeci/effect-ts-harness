@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod"
-import { Effect, Layer, Option, Schema } from "effect"
+import { Cause, Effect, Layer, Option, Schema } from "effect"
 import * as Graph from "effect/Graph"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
@@ -94,7 +94,9 @@ import {
   dispatchMcpTool,
   makeMcpToolRegistryLayer,
   McpToolName,
+  type McpToolPluginDescriptor,
   type McpToolRegistry,
+  registerLiveMcpToolHandlers,
   type UnknownToolError,
 } from "./tools/tool-registry.js"
 
@@ -383,6 +385,23 @@ export const runDefaultLspDiagnostics = (
 
     const seen = new Set<string>()
     const mergedDiags: Array<unknown> = []
+    if (
+      Option.isNone(decoded) &&
+      (proc.error !== undefined || (proc.status !== null && proc.status !== 0)) &&
+      Object.keys(overlays).length === 0
+    ) {
+      const errMsg =
+        proc.error !== undefined ? proc.error.message : (proc.stderr ?? "").trim()
+      process.stderr.write(`[harness-mcp] effect-tsgo diagnostic process failure: ${errMsg}\n`)
+      mergedDiags.push({
+        file: resolvedFile ?? repoRoot,
+        line: 1,
+        column: 1,
+        message: `effect-tsgo execution failed: ${errMsg}`,
+        severity: "warning",
+        rule: "lsp-spawn-error",
+      })
+    }
     for (const d of effectGoDiags) {
       const key = formatDiagKey(d)
       if (!seen.has(key)) {
@@ -480,10 +499,9 @@ export const runDefaultLspDiagnostics = (
     }),
   )
 
-export const makeLiveMcpToolRegistryLayer = (
+export const buildLiveMcpToolDescriptors = (
   options?: ServerOptions,
-): Layer.Layer<McpToolRegistry> =>
-  makeMcpToolRegistryLayer([
+): ReadonlyArray<McpToolPluginDescriptor> => [
     {
       name: McpToolName.make("harness_resolve"),
       description: "Resolve a symbol or span in the HarnessGraph.",
@@ -553,7 +571,9 @@ export const makeLiveMcpToolRegistryLayer = (
           const routedOpt = yield* routeStep(planStep).pipe(
             Effect.provide(decisionLayer),
             Effect.timeoutOption("1500 millis"),
-            Effect.catchCause(() => Effect.succeedNone),
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause) ? Effect.interrupt : Effect.succeedNone,
+            ),
           )
           let block: string = Option.getOrElse(routedOpt, () => "review")
           const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
@@ -877,7 +897,9 @@ export const makeLiveMcpToolRegistryLayer = (
                 }).pipe(
                   Effect.provide(decisionLayer),
                   Effect.timeoutOption("1500 millis"),
-                  Effect.catchCause(() => Effect.succeedNone),
+                  Effect.catchCause((cause) =>
+                    Cause.hasInterruptsOnly(cause) ? Effect.interrupt : Effect.succeedNone,
+                  ),
                 )
 
                 if (Option.isSome(priorResult)) {
@@ -1046,7 +1068,14 @@ export const makeLiveMcpToolRegistryLayer = (
           }
         }).pipe(Effect.orDie),
     },
-  ])
+  ]
+
+export const makeLiveMcpToolRegistryLayer = (
+  options?: ServerOptions,
+): Layer.Layer<McpToolRegistry> =>
+  makeMcpToolRegistryLayer(buildLiveMcpToolDescriptors(options))
+
+registerLiveMcpToolHandlers(buildLiveMcpToolDescriptors())
 
 export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
   toolName: string,
@@ -1718,8 +1747,18 @@ export const startHarnessDaemonServer = (
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const server = createServer()
   const transport = new StdioServerTransport()
-  void Effect.runPromise(Effect.tryPromise(() => server.connect(transport)))
+  void Effect.runPromise(Effect.tryPromise(() => server.connect(transport))).catch(
+    (err: unknown) => {
+      process.stderr.write(
+        `[harness-mcp] Fatal error: ${err instanceof Error ? err.message : String(err)}\n`,
+      )
+    },
+  )
   if (process.env.HARNESS_DAEMON_SOCK !== "0") {
-    void startHarnessDaemonServer(process.cwd()).catch(() => undefined)
+    void startHarnessDaemonServer(process.cwd()).catch((err: unknown) => {
+      process.stderr.write(
+        `[harness-mcp] Daemon server warning: ${err instanceof Error ? err.message : String(err)}\n`,
+      )
+    })
   }
 }

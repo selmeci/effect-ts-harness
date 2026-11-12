@@ -1,7 +1,7 @@
 ---
-title: "RFC-0007 Implementation: Self-Dogfooding Audit Resolution & Effect-TS v4 Modular Capability Plugin Harness"
+title: "RFC-0007 Phase 1 Implementation Plan: Self-Dogfooding Audit Resolution & Effect-TS v4 Modular Capability Plugin Harness"
 type: feat
-status: active
+status: completed
 date: 2026-11-12
 artifact_contract: ce-unified-plan/v1
 product_contract_source: ce-brainstorm
@@ -9,7 +9,10 @@ product_contract_source: ce-brainstorm
 
 # Goal Capsule
 
-Eliminate the architectural double standard between the Effect-TS Engineering Harness (`libs/harness/*`, `apps/harness-*`) and the domain packages it governs (`libs/es/*`, `libs/sample/*`) by implementing **RFC-0007**: replacing `Effect.fn` `R = never` imperative wrappers (`yield* Effect.void` and nested `Effect.runSync` inside `Effect.sync` / `Layer.effect`) with genuine Effect-TS v4 **Three-Role Capability Seams** (`Context.Service` + `Layer.scoped` / `Layer.effect` + `Effect.fn` consumers), decomposing monolithic god-files in `@harness/gates`, `@harness/graph`, `harness-cli`, and `harness-mcp` into modular plugins under an 800-line module budget, and enforcing self-dogfooding deterministically via `SelfDogfooding.decide` and `AstGateCache.decide`.
+This document serves as the **Phase 1 Execution Plan** of **RFC-0007**. It eliminates the architectural double standard between the Effect-TS Engineering Harness (`libs/harness/*`, `apps/harness-*`) and the domain packages it governs (`libs/es/*`, `libs/sample/*`) by:
+1. Replacing `Effect.fn` `R = never` imperative wrappers (`yield* Effect.void` and nested `Effect.runSync` inside `Effect.sync` / `Layer.effect`) with genuine Effect-TS v4 **Three-Role Capability Seams** (`Context.Service` + `Layer.effect` (with `Effect.acquireRelease`) + `Effect.fn` consumers).
+2. Introducing and wiring all Phase 1 capability services and registries (`WorkspaceFs`, `HarnessSubprocessRunner`, `ActiveMutantContext`, `GatePluginRegistry`, `TsCompilerOverlayService`, `HarnessCommandRegistry`, and `McpToolRegistry`) directly into production callers (`harness-cli`, `harness-mcp`, `gc-check.ts`, and `mutation-check.ts`).
+3. Enforcing self-dogfooding deterministically via `SelfDogfooding.decide` with `DEFAULT_MAX_PLUGIN_FILE_LINES = 800` hard ceiling across all modular plugin, service, command, and tool files. Subsequent physical decomposition of legacy monoliths (> 800 LOC) is scheduled for Phases 2–4 in `.harness/prompts/rfc-0007-remaining-steps-playbook.md`.
 
 ---
 
@@ -27,7 +30,7 @@ During the `/ce-brainstorm` review of `RFC-0007` against the live repository and
    - **Resolution:** Enforce all new AST self-dogfooding bans (`effect-fn-dummy-void`, `nested-effect-run-sync`, `file-line-budget-exceeded`, and removal of `!isHarnessInternal` exemptions for `SwitchStatement` and `match(...).run()`) directly inside `AstGateCache.decide` (`libs/harness/gates/src/ast-cache.ts`) and `SelfDogfooding.decide` (`libs/harness/gates/src/plugins/self-dogfooding-plugin.ts`), which run automatically on every `pnpm harness gc --strict` and `pnpm harness verify`.
 3. **Mutant Schemata Backwards Compatibility (`ADR-0010` / `SPEC-0009`):**
    - Existing tests in `milestone5-dst-ears-mutation-dpo.test.ts` assert that `compileMutantSchemaModule` emits `globalThis.__HARNESS_ACTIVE_MUTANT_ID` ternary guards in synthesized mutant source strings.
-   - **Resolution:** Preserve `compileMutantSchemaModule`'s codegen expression while introducing the fiber-safe `ActiveMutantContext` (`Context.Service` + `Layer.scoped` with `SynchronizedRef` and `Effect.acquireRelease` cleanup) and `MutationCheck.withActiveMutant` (`Effect.fn("MutationCheck.withActiveMutant")`) for Effect-native scoped mutation execution.
+   - **Resolution:** Preserve `compileMutantSchemaModule`'s codegen expression while introducing the fiber-safe `ActiveMutantContext` (`Context.Service` + `Layer.effect` with `Effect.acquireRelease` and `SynchronizedRef` cleanup) and `MutationCheck.withActiveMutant` (`Effect.fn("MutationCheck.withActiveMutant")`) for Effect-native scoped mutation execution.
 4. **Graph Service Audit (`unused-service` and `unprovided-service` in `GraphGc.decide`):**
    - Every new `Context.Service` (`ServiceTag`) introduced in `libs/harness/*` or `apps/harness-*` must have at least one exported `Layer` providing it (`ProvidesService` edge) AND at least one `Effect.fn` consumer yielding it (`RequiresService` edge) so `GraphGc.decide` passes with zero `unused-service` or `unprovided-service` findings without adding new entries to `IGNORED_SERVICES`.
 5. **Elimination of All 15 `yield* Effect.void` & Nested `Effect.runSync` Anti-Patterns:**
@@ -35,7 +38,7 @@ During the `/ce-brainstorm` review of `RFC-0007` against the live repository and
 
 ## 1.2 Settled Open Questions from `RFC-0007` Section 9
 
-- **OQ-1 (Dual-Layer Cache Lifecycle):** `TsCompilerOverlayService` and `CachedDecisionModel` use a dual-layer strategy: scoped in-memory state (`SynchronizedRef` / warm session map managed by `Layer.scoped` + `Effect.acquireRelease`) backed by atomic disk persistence (`.harness/cache/*.json` via write-to-temp + rename). This works identically in single-shot CLI processes and long-running MCP servers without requiring a mandatory background daemon.
+- **OQ-1 (Dual-Layer Cache Lifecycle):** `TsCompilerOverlayService` and `CachedDecisionModel` use a dual-layer strategy: scoped in-memory state (`SynchronizedRef` / warm session map managed by `Layer.effect` + `Effect.acquireRelease`) backed by atomic disk persistence (`.harness/cache/*.json` via write-to-temp + rename). This works identically in single-shot CLI processes and long-running MCP servers without requiring a mandatory background daemon.
 - **OQ-2 (Modular File Line Budget):** `SelfDogfooding.decide` and `AstGateCache.decide` enforce a strict `MaxPluginFileLines = 800` line budget (`file-line-budget-exceeded`) across all modular plugin, service, command, and tool files (`libs/harness/*/src/plugins/**`, `libs/harness/*/src/services/**`, `apps/harness-cli/src/commands/**`, `apps/harness-mcp/src/tools/**`).
 - **OQ-3 (Static Compile-Time Plugin Composition):** All gate plugins, CLI commands, and MCP tools are composed statically via Effect `Layer`s and typed registries (`GatePluginRegistry`, `HarnessCommandRegistry`, `McpToolRegistry`), preserving 100% static analyzability in `HarnessGraph` and Trusted Computing Base (TCB) integrity.
 
@@ -46,7 +49,7 @@ During the `/ce-brainstorm` review of `RFC-0007` against the live repository and
 ## 2.1 Governance Artifacts (`ADR` & `EARS Spec`)
 
 1. **`libs/harness/docs/adr/0012-self-dogfooding-and-capability-plugin-harness.md` (`harness:ADR-0012`):**
-   - Records the binding architectural decision to adopt Cordis-inspired Three-Role Capability Seams (`Context.Service` + `Layer.scoped`/`Layer.effect` + `Effect.fn` consumers), ban `yield* Effect.void` and nested `Effect.runSync`, remove `isHarnessInternal` `switch` and `match().run()` exemptions, and enforce the 800-line modular plugin budget.
+   - Records the binding architectural decision to adopt Cordis-inspired Three-Role Capability Seams (`Context.Service` + `Layer.effect` (with `Effect.acquireRelease`) + `Effect.fn` consumers), ban `yield* Effect.void` and nested `Effect.runSync`, remove `isHarnessInternal` `switch` and `match().run()` exemptions, and enforce the 800-line modular plugin budget.
    - Register `harness:ADR-0012` in `docs/adr/README.md`.
 2. **`libs/harness/docs/specs/2026-11-12-self-dogfooding-and-capability-plugin-harness.md` (`harness:SPEC-0011`):**
    - Defines testable EARS requirements (`REQ-1.1` through `REQ-5.3`) covering `SelfDogfooding.decide`, `WorkspaceFs`, `HarnessSubprocessRunner`, `ActiveMutantContext`, `GatePluginRegistry`, `TsCompilerOverlayService`, `HarnessCommandRegistry`, `McpToolRegistry`, and `AstGateCache.decide`.
@@ -81,7 +84,7 @@ During the `/ce-brainstorm` review of `RFC-0007` against the live repository and
 - **Gate Plugin Registry & Self-Dogfooding Decider (`libs/harness/gates/src/plugins/*.ts`):**
   - `SelfDogfooding.decide` (`Effect.fn("SelfDogfooding.decide")` with `R = never`): Pure decider inspecting source files for:
     1. `effect-fn-dummy-void`: `yield* Effect.void` inside `Effect.fn` or `Effect.gen`.
-    2. `nested-effect-run-sync`: `Effect.runSync` / `Effect.runPromise` inside `Effect.fn`, `Effect.gen`, `Effect.sync`, `Layer.effect`, or `Layer.scoped`.
+    2. `nested-effect-run-sync`: `Effect.runSync` / `Effect.runPromise` inside `Effect.fn`, `Effect.gen`, `Effect.sync`, or `Layer.*` (including `Layer.effect`).
     3. `file-line-budget-exceeded`: Modular plugin/service/command/tool files exceeding `maxPluginFileLines` (default `800`).
     4. `harness-switch-statement`: `switch (...)` statements in non-test harness files.
   - `GatePluginRegistry` (`Context.Service<GatePluginRegistry, ...>()("@harness/gates/GatePluginRegistry")`) + `GatePluginRegistryLive` (`Layer.succeed`) + consumer `GatePluginRunner.evaluateAll` (`Effect.fn("GatePluginRunner.evaluateAll")`) requiring `GatePluginRegistry` and `WorkspaceFs` and failing with `SelfDogfoodingViolationError | WorkspaceFsError`.
@@ -93,7 +96,7 @@ During the `/ce-brainstorm` review of `RFC-0007` against the live repository and
 ### Unit 3: `@harness/graph` — `TsCompilerOverlayService` & Clean Scoped Lifecycle
 - **`libs/harness/graph/src/services/ts-compiler-overlay-service.ts`:**
   - Define `TsCompilerOverlayError` (`Schema.TaggedError<TsCompilerOverlayError>()("TsCompilerOverlayError", ...)`).
-  - Define `TsCompilerOverlayService` (`Context.Service<TsCompilerOverlayService, ...>()("@harness/graph/TsCompilerOverlayService")`) with `TsCompilerOverlayServiceLive` (`Layer.scoped` using `Effect.acquireRelease` to manage warm `TypeScriptProgramSession` instances per root and release memory on scope exit).
+  - Define `TsCompilerOverlayService` (`Context.Service<TsCompilerOverlayService, ...>()("@harness/graph/TsCompilerOverlayService")`) with `TsCompilerOverlayServiceLive` (`Layer.effect` using `Effect.acquireRelease` to manage warm `TypeScriptProgramSession` instances per root and release memory on scope exit).
   - Define `TsCompilerOverlay.extractGraph` (`Effect.fn("TsCompilerOverlay.extractGraph")`) requiring `TsCompilerOverlayService` and failing with `TsCompilerOverlayError`.
 - **`libs/harness/graph/src/cluster-resolver.ts`:**
   - Remove `yield* Effect.void` from `OmnigraphReconcile.decide`.

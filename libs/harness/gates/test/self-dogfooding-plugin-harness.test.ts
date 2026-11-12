@@ -1,5 +1,8 @@
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Effect, Exit, Layer, Option, Schema } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option, Schema } from "effect"
 import { match } from "ts-pattern"
 import { NonNegativeCount } from "@harness/graph"
 import { type IndexedEffectFn, runWithTestTracer } from "@harness/ingest"
@@ -16,6 +19,7 @@ import {
   SubprocessCommand,
   SubprocessExitCode,
   SubprocessOutput,
+  WorkspaceFileContent,
   WorkspaceFilePath,
 } from "../src/plugins/self-dogfooding-contract.js"
 import { decideSelfDogfooding, SelfDogfooding } from "../src/plugins/self-dogfooding-plugin.js"
@@ -29,12 +33,17 @@ import {
 import {
   makeWorkspaceFsMemoryLayer,
   readAndVerifyWorkspaceFile,
+  WorkspaceFs,
+  WorkspaceFsLive,
 } from "../src/services/workspace-fs.js"
 import {
   execCheckedSubprocess,
+  HarnessSubprocessRunner,
+  HarnessSubprocessRunnerLive,
   makeHarnessSubprocessRunnerTestLayer,
 } from "../src/services/subprocess-runner.js"
 import {
+  ActiveMutantContext,
   ActiveMutantContextLive,
   withActiveMutantEffect,
 } from "../src/services/active-mutant-context.js"
@@ -44,10 +53,12 @@ import {
   AstSourceContent,
   AstSourceFilePath,
   EnclosingSymbolName,
+  GateRuleVersion,
   GateVerdict,
   HARNESS_GATE_RULE_VERSION,
   SourceLineNumber,
 } from "../src/ast-cache.js"
+import { decideEarsSpecLint } from "../src/ears-lint.js"
 
 const toSpanSamples = (
   spans: ReadonlyArray<{
@@ -92,10 +103,10 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
     ({ moduleKind, fileIndex, snippetIndex }) =>
       Effect.gen(function* () {
         const cleanSnippets = [
+          'import { Effect } from "effect"\nexport const cleanOp = Effect.fn("Clean.op")(function* (x: number) { return yield* Effect.succeed(x + 1) })\n',
+          'import { Effect, Layer } from "effect"\nexport const cleanLayer = Layer.effect(Svc, Effect.gen(function* () { return { ok: true } }))\n',
+          'import { match } from "ts-pattern"\nexport const cleanMatch = (tag: "A" | "B") => match(tag).with("A", () => 1).with("B", () => 2).exhaustive()\n',
           "export const add = (a: number, b: number): number => a + b\n",
-          "export const multiply = (x: number, y: number): number => x * y\n",
-          "export const greet = (name: string): string => `Hello, ${name}`\n",
-          "export const isPositive = (n: number): boolean => n > 0\n",
         ]
         const snippet = cleanSnippets[snippetIndex] ?? cleanSnippets[0]!
         const filePath = AstSourceFilePath.make(
@@ -112,10 +123,21 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           failOnViolation: true,
         }
 
-        const report = yield* SelfDogfooding.decide(input)
+        const testId = `SelfDogfooding.decide::prop::${moduleKind}-${fileIndex}`
+        const { result: report, spans } = yield* runWithTestTracer(
+          testId,
+          decideSelfDogfooding(input),
+          emptyFnIndex,
+        )
         expect(report.verdict).toBe("clean")
         expect(report.violations).toHaveLength(0)
         expect(report.inspectedFileCount).toBe(1)
+
+        const budgetViolations = checkSpanBudgets({
+          spans: toSpanSamples(spans),
+          maxRepeatedChildCalls: 3,
+        })
+        expect(budgetViolations).toHaveLength(0)
       }),
   )
 
@@ -333,6 +355,62 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
   )
 
   it.effect(
+    "WorkspaceFs: building two layers from the same makeWorkspaceFsMemoryLayer does not share mutations",
+    () =>
+      Effect.gen(function* () {
+        const memoryLayer = makeWorkspaceFsMemoryLayer({
+          "file.txt": "initial",
+        })
+
+        const fs1 = yield* Effect.provide(WorkspaceFs, memoryLayer)
+        yield* fs1.writeTextFileAtomic(
+          WorkspaceFilePath.make("file.txt"),
+          WorkspaceFileContent.make("mutated-in-fs1"),
+        )
+        const read1 = yield* fs1.readTextFile(WorkspaceFilePath.make("file.txt"))
+        expect(read1).toBe("mutated-in-fs1")
+
+        const fs2 = yield* Effect.provide(WorkspaceFs, memoryLayer)
+        const read2 = yield* fs2.readTextFile(WorkspaceFilePath.make("file.txt"))
+        expect(read2).toBe("initial")
+      }),
+  )
+
+  it.effect(
+    "WorkspaceFsLive: real I/O operations (atomic write, read, exists, missing-file error)",
+    () =>
+      Effect.gen(function* () {
+        const tmpDir = mkdtempSync(join(tmpdir(), "harness-ws-fs-"))
+        try {
+          const testFile = WorkspaceFilePath.make(join(tmpDir, "sub", "test.txt"))
+          const fs = yield* WorkspaceFs
+
+          expect(yield* fs.exists(testFile)).toBe(false)
+
+          yield* fs.writeTextFileAtomic(testFile, WorkspaceFileContent.make("hello atomic world"))
+          expect(yield* fs.exists(testFile)).toBe(true)
+
+          const content = yield* fs.readTextFile(testFile)
+          expect(content).toBe("hello atomic world")
+
+          const missingFile = WorkspaceFilePath.make(join(tmpDir, "non-existent.txt"))
+          const missingExit = yield* Effect.exit(fs.readTextFile(missingFile))
+          expect(Exit.isFailure(missingExit)).toBe(true)
+          if (Exit.isFailure(missingExit)) {
+            const errOpt = Cause.findErrorOption(missingExit.cause)
+            expect(Option.isSome(errOpt)).toBe(true)
+            if (Option.isSome(errOpt)) {
+              expect(errOpt.value._tag).toBe("WorkspaceFsError")
+              expect(errOpt.value.operation).toBe("read")
+            }
+          }
+        } finally {
+          rmSync(tmpDir, { recursive: true, force: true })
+        }
+      }).pipe(Effect.provide(WorkspaceFsLive)),
+  )
+
+  it.effect(
     "REQ-2.3: HarnessSubprocess.execChecked yields runner and returns exitCode 0 result",
     () =>
       Effect.gen(function* () {
@@ -366,7 +444,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
   )
 
   it.effect(
-    "REQ-2.4: HarnessSubprocess.execChecked fails with HarnessSubprocessError on non-zero exit or empty command",
+    "REQ-2.4: HarnessSubprocess.execChecked fails with HarnessSubprocessError on non-zero exit or null bytes",
     () =>
       Effect.gen(function* () {
         const testLayer = makeHarnessSubprocessRunnerTestLayer((input) =>
@@ -401,29 +479,139 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           checkSpanBudgets({ spans: toSpanSamples(spansNonZero), maxRepeatedChildCalls: 3 }),
         ).toHaveLength(0)
 
-        const { result: exitEmpty, spans: spansEmpty } = yield* runWithTestTracer(
-          "HarnessSubprocess.execChecked::empty-command",
+        // SubprocessCommand Schema rejection for empty and whitespace-only
+        expect(Schema.is(SubprocessCommand)("   ")).toBe(false)
+        expect(Schema.is(SubprocessCommand)("")).toBe(false)
+
+        // execCheckedSubprocess null-byte in command rejection
+        const { result: exitNullCmd, spans: spansNullCmd } = yield* runWithTestTracer(
+          "HarnessSubprocess.execChecked::null-byte-command",
           Effect.exit(
             execCheckedSubprocess({
-              command: SubprocessCommand.make("   "),
+              command: SubprocessCommand.make("echo\0null"),
               args: [],
             }).pipe(Effect.provide(testLayer)),
           ),
           emptyFnIndex,
         )
-        expect(Exit.isFailure(exitEmpty)).toBe(true)
-        if (Exit.isFailure(exitEmpty)) {
-          const errOpt = Cause.findErrorOption(exitEmpty.cause)
+        expect(Exit.isFailure(exitNullCmd)).toBe(true)
+        if (Exit.isFailure(exitNullCmd)) {
+          const errOpt = Cause.findErrorOption(exitNullCmd.cause)
           expect(Option.isSome(errOpt)).toBe(true)
           if (Option.isSome(errOpt)) {
             expect(errOpt.value._tag).toBe("HarnessSubprocessError")
-            expect(errOpt.value.reason).toBe("Subprocess command must not be empty")
+            expect(errOpt.value.reason).toBe("Subprocess command contains null bytes")
           }
         }
         expect(
-          checkSpanBudgets({ spans: toSpanSamples(spansEmpty), maxRepeatedChildCalls: 3 }),
+          checkSpanBudgets({ spans: toSpanSamples(spansNullCmd), maxRepeatedChildCalls: 3 }),
+        ).toHaveLength(0)
+
+        // execCheckedSubprocess null-byte in args rejection
+        const { result: exitNullArg, spans: spansNullArg } = yield* runWithTestTracer(
+          "HarnessSubprocess.execChecked::null-byte-arg",
+          Effect.exit(
+            execCheckedSubprocess({
+              command: SubprocessCommand.make("echo"),
+              args: [SubprocessArg.make("hello\0world")],
+            }).pipe(Effect.provide(testLayer)),
+          ),
+          emptyFnIndex,
+        )
+        expect(Exit.isFailure(exitNullArg)).toBe(true)
+        if (Exit.isFailure(exitNullArg)) {
+          const errOpt = Cause.findErrorOption(exitNullArg.cause)
+          expect(Option.isSome(errOpt)).toBe(true)
+          if (Option.isSome(errOpt)) {
+            expect(errOpt.value._tag).toBe("HarnessSubprocessError")
+            expect(errOpt.value.reason).toBe("Subprocess arguments contain null bytes")
+          }
+        }
+        expect(
+          checkSpanBudgets({ spans: toSpanSamples(spansNullArg), maxRepeatedChildCalls: 3 }),
         ).toHaveLength(0)
       }),
+  )
+
+  it.effect(
+    "HarnessSubprocessRunnerLive: real process execution (stdout, non-zero exit, ENOENT, null-byte rejection)",
+    () =>
+      Effect.gen(function* () {
+        const runner = yield* HarnessSubprocessRunner
+
+        // Happy path
+        const success = yield* runner.exec({
+          command: SubprocessCommand.make(process.execPath),
+          args: [SubprocessArg.make("-e"), SubprocessArg.make("process.stdout.write('ok')")],
+        })
+        expect(success.exitCode).toBe(0)
+        expect(success.stdout).toBe("ok")
+
+        // Also call execCheckedSubprocess provided with HarnessSubprocessRunnerLive via runWithTestTracer
+        const { result: checkedLive, spans: checkedSpans } = yield* runWithTestTracer(
+          "HarnessSubprocess.execChecked::live-runner",
+          execCheckedSubprocess({
+            command: SubprocessCommand.make(process.execPath),
+            args: [
+              SubprocessArg.make("-e"),
+              SubprocessArg.make("process.stdout.write('checked-live-ok')"),
+            ],
+          }),
+          emptyFnIndex,
+        )
+        expect(checkedLive.exitCode).toBe(0)
+        expect(checkedLive.stdout).toBe("checked-live-ok")
+        const checkedViolations = checkSpanBudgets({
+          spans: toSpanSamples(checkedSpans),
+          maxRepeatedChildCalls: 3,
+        })
+        expect(checkedViolations).toHaveLength(0)
+
+        // Non-zero exit code
+        const nonZero = yield* runner.exec({
+          command: SubprocessCommand.make(process.execPath),
+          args: [
+            SubprocessArg.make("-e"),
+            SubprocessArg.make("process.stderr.write('bad'); process.exit(3)"),
+          ],
+        })
+        expect(nonZero.exitCode).toBe(3)
+        expect(nonZero.stderr).toBe("bad")
+
+        // Missing binary (spawn ENOENT)
+        const enoentExit = yield* Effect.exit(
+          runner.exec({
+            command: SubprocessCommand.make("non-existent-binary-xyz-123"),
+            args: [],
+          }),
+        )
+        expect(Exit.isFailure(enoentExit)).toBe(true)
+        if (Exit.isFailure(enoentExit)) {
+          const errOpt = Cause.findErrorOption(enoentExit.cause)
+          expect(Option.isSome(errOpt)).toBe(true)
+          if (Option.isSome(errOpt)) {
+            expect(errOpt.value._tag).toBe("HarnessSubprocessError")
+            expect(errOpt.value.reason).toContain("failed to spawn")
+          }
+        }
+
+        // Null-byte rejection in command
+        const nullCmdExit = yield* Effect.exit(
+          runner.exec({
+            command: SubprocessCommand.make("echo\0null"),
+            args: [],
+          }),
+        )
+        expect(Exit.isFailure(nullCmdExit)).toBe(true)
+        if (Exit.isFailure(nullCmdExit)) {
+          const errOpt = Cause.findErrorOption(nullCmdExit.cause)
+          expect(Option.isSome(errOpt)).toBe(true)
+          if (Option.isSome(errOpt)) {
+            expect(errOpt.value._tag).toBe("HarnessSubprocessError")
+            expect(errOpt.value.reason).toBe("Subprocess command contains null bytes")
+          }
+        }
+      }).pipe(Effect.provide(HarnessSubprocessRunnerLive)),
   )
 
   it.effect(
@@ -455,19 +643,22 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         })
         expect(budgetViolations).toHaveLength(0)
 
+        let observedInsideFailure: string | null = null
         const { result: failExit, spans: failSpans } = yield* runWithTestTracer(
           "MutationCheck.withActiveMutant::callback-defect",
           Effect.exit(
-            withActiveMutantEffect(ActiveMutantId.make("mutant-fail-02"), () => {
-              expect(getActiveMutantId()).toBe("mutant-fail-02")
-              throw new Error("simulated mutant callback failure")
+            withActiveMutantEffect(ActiveMutantId.make("mutant-fail-99"), () => {
+              observedInsideFailure = getActiveMutantId() ?? null
+              throw new Error("boom")
             }).pipe(Effect.provide(ActiveMutantContextLive)),
           ),
           emptyFnIndex,
         )
         expect(Exit.isFailure(failExit)).toBe(true)
+        expect(observedInsideFailure).toBe("mutant-fail-99")
         if (Exit.isFailure(failExit)) {
           expect(Cause.hasDies(failExit.cause)).toBe(true)
+          expect(Cause.pretty(failExit.cause)).toContain("boom")
         }
         expect(getActiveMutantId()).toBeUndefined()
 
@@ -477,6 +668,114 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         })
         expect(failBudgetViolations).toHaveLength(0)
       }),
+  )
+
+  it.effect(
+    "ActiveMutantContext: nested runWithMutant calls do not deadlock and restore outer mutant ID",
+    () =>
+      Effect.gen(function* () {
+        const ctx = yield* ActiveMutantContext
+        const outerId = ActiveMutantId.make("mutant-outer")
+        const innerId = ActiveMutantId.make("mutant-inner")
+
+        let observedOuterBefore: string | null = null
+        let observedInner: string | null = null
+        let observedOuterAfter: string | null = null
+
+        yield* ctx.runWithMutant(
+          outerId,
+          Effect.gen(function* () {
+            observedOuterBefore = getActiveMutantId() ?? null
+            yield* ctx.runWithMutant(
+              innerId,
+              Effect.sync(() => {
+                observedInner = getActiveMutantId() ?? null
+              }),
+            )
+            observedOuterAfter = getActiveMutantId() ?? null
+          }),
+        )
+
+        expect(observedOuterBefore).toBe("mutant-outer")
+        expect(observedInner).toBe("mutant-inner")
+        expect(observedOuterAfter).toBe("mutant-outer")
+        expect(getActiveMutantId()).toBeUndefined()
+      }).pipe(Effect.provide(ActiveMutantContextLive)),
+  )
+
+  it.effect(
+    "ActiveMutantContext: fiber interruption restores state and global active mutant",
+    () =>
+      Effect.gen(function* () {
+        const ctx = yield* ActiveMutantContext
+        const mutantId = ActiveMutantId.make("mutant-interrupted")
+        const started = yield* Deferred.make<void>()
+
+        const fiber = yield* ctx
+          .runWithMutant(
+            mutantId,
+            Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
+          )
+          .pipe(Effect.forkChild({ startImmediately: true }))
+
+        yield* Deferred.await(started)
+        expect(getActiveMutantId()).toBe("mutant-interrupted")
+        yield* Fiber.interrupt(fiber)
+
+        const current = yield* ctx.getCurrentMutant
+        expect(current).toEqual(Option.none())
+        expect(getActiveMutantId()).toBeUndefined()
+      }).pipe(Effect.provide(ActiveMutantContextLive)),
+  )
+
+  it.effect(
+    "REQ-2.5 concurrency: Effect.all concurrent runWithMutant calls serialize without interleaving",
+    () =>
+      Effect.gen(function* () {
+        const ctx = yield* ActiveMutantContext
+        const m1 = ActiveMutantId.make("mutant-concurrent-1")
+        const m2 = ActiveMutantId.make("mutant-concurrent-2")
+
+        const executionLog: Array<string> = []
+
+        const task1 = ctx.runWithMutant(
+          m1,
+          Effect.gen(function* () {
+            executionLog.push("start-1")
+            yield* Effect.yieldNow
+            yield* Effect.yieldNow
+            expect(getActiveMutantId()).toBe("mutant-concurrent-1")
+            executionLog.push("end-1")
+          }),
+        )
+
+        const task2 = ctx.runWithMutant(
+          m2,
+          Effect.gen(function* () {
+            executionLog.push("start-2")
+            yield* Effect.yieldNow
+            yield* Effect.yieldNow
+            expect(getActiveMutantId()).toBe("mutant-concurrent-2")
+            executionLog.push("end-2")
+          }),
+        )
+
+        yield* Effect.all([task1, task2], { concurrency: 2 })
+
+        const isOneThenTwo =
+          executionLog[0] === "start-1" &&
+          executionLog[1] === "end-1" &&
+          executionLog[2] === "start-2" &&
+          executionLog[3] === "end-2"
+        const isTwoThenOne =
+          executionLog[0] === "start-2" &&
+          executionLog[1] === "end-2" &&
+          executionLog[2] === "start-1" &&
+          executionLog[3] === "end-1"
+
+        expect(isOneThenTwo || isTwoThenOne).toBe(true)
+        expect(getActiveMutantId()).toBeUndefined()
+      }).pipe(Effect.provide(ActiveMutantContextLive)),
   )
 
   it.effect(
@@ -538,6 +837,33 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(missingBudgetViolations).toHaveLength(0)
       }),
   )
+
+  it("GatePluginRegistry: duplicate plugin ID rejection in makeGatePluginRegistryLayer", () => {
+    const dupPlugin1: GatePluginDescriptor = {
+      pluginId: PluginId.make("dup-id"),
+      description: "Plugin 1",
+      evaluate: () =>
+        Effect.succeed({
+          verdict: GateVerdict.make("clean"),
+          violations: [],
+          inspectedFileCount: NonNegativeCount.make(0),
+        }),
+    }
+    const dupPlugin2: GatePluginDescriptor = {
+      pluginId: PluginId.make("dup-id"),
+      description: "Plugin 2",
+      evaluate: () =>
+        Effect.succeed({
+          verdict: GateVerdict.make("clean"),
+          violations: [],
+          inspectedFileCount: NonNegativeCount.make(0),
+        }),
+    }
+
+    expect(() => makeGatePluginRegistryLayer([dupPlugin1, dupPlugin2])).toThrow(
+      "Duplicate gate plugin ID registered: dup-id",
+    )
+  })
 
   it.effect(
     "REQ-2.7: GatePluginRunner.evaluateAll executes custom registered plugins and aggregates violations",
@@ -607,31 +933,137 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
   )
 
   // ---------------------------------------------------------------------------
-  // 3 · AST Cache Rule Verification
+  // 3 · AST Cache Rule Verification & EARS Lint
   // ---------------------------------------------------------------------------
 
   it.effect(
-    "AstGateCache: HARNESS_GATE_RULE_VERSION is ast-gates-v2 and bans dummy void and switch in harness files",
+    "REQ-1.3: AstGateCache.decide reports effect-fn-dummy-void, discriminant-branching, and non-exhaustive-union-match without isHarnessInternal exemption",
     () =>
-      Effect.sync(() => {
+      Effect.gen(function* () {
         expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v2")
 
-        const report = AstGateCache.evaluateFiles({
-          files: [
-            {
-              filePath: AstSourceFilePath.make("libs/harness/gates/src/dummy-test.ts"),
-              content: AstSourceContent.make(
-                "export const f = Effect.fn('f')(function* () { yield* Effect.void })\n" +
-                  "export const g = (x: number): number => { switch (x) { case 1: return 1; default: return 0; } }\n",
-              ),
-            },
-          ],
-        })
+        const testId = "AstGateCache.decide::REQ-1.3"
+        const { result: report, spans } = yield* runWithTestTracer(
+          testId,
+          AstGateCache.decide({
+            files: [
+              {
+                filePath: AstSourceFilePath.make("libs/harness/gates/src/dummy-test.ts"),
+                content: AstSourceContent.make(
+                  "export const f = Effect.fn('f')(function* () { yield* Effect.void })\n" +
+                    "export const g = (x: number): number => { switch (x) { case 1: return 1; default: return 0; } }\n" +
+                    "export const h = (x: number): number => match(x).with(1, () => 1).run()\n",
+                ),
+              },
+            ],
+          }),
+          emptyFnIndex,
+        )
 
         expect(report.verdict).toBe("violated")
         const rules = report.violations.map((v) => v.rule)
         expect(rules).toContain("effect-fn-dummy-void")
         expect(rules).toContain("discriminant-branching")
+        expect(rules).toContain("non-exhaustive-union-match")
+
+        const budgetViolations = checkSpanBudgets({
+          spans: toSpanSamples(spans),
+          maxRepeatedChildCalls: 3,
+        })
+        expect(budgetViolations).toHaveLength(0)
+      }),
+  )
+
+  it.effect("AstGateCache: ruleVersion cache invalidation on disk", () =>
+    Effect.sync(() => {
+      const tmpDir = mkdtempSync(join(tmpdir(), "harness-ast-cache-"))
+      try {
+        const cachePath = AstSourceFilePath.make(join(tmpDir, "cache.json"))
+        const filePath = AstSourceFilePath.make("libs/harness/gates/src/test-file.ts")
+        const content = AstSourceContent.make("export const x = 1\n")
+
+        const v1Report = AstGateCache.evaluateFiles({
+          files: [{ filePath, content }],
+          ruleVersion: GateRuleVersion.make("rule-v1"),
+          cacheFilePath: cachePath,
+        })
+        expect(v1Report.parsedFileCount).toBe(1)
+        expect(v1Report.cacheHitCount).toBe(0)
+
+        const v1HitReport = AstGateCache.evaluateFiles({
+          files: [{ filePath, content }],
+          ruleVersion: GateRuleVersion.make("rule-v1"),
+          cacheFilePath: cachePath,
+        })
+        expect(v1HitReport.cacheHitCount).toBe(1)
+
+        const v2Report = AstGateCache.evaluateFiles({
+          files: [{ filePath, content }],
+          ruleVersion: GateRuleVersion.make("rule-v2"),
+          cacheFilePath: cachePath,
+        })
+        expect(v2Report.cacheHitCount).toBe(0)
+      } finally {
+        AstGateCache.clear()
+        rmSync(tmpDir, { recursive: true, force: true })
+      }
+    }),
+  )
+
+  it.effect(
+    "EARS Lint: supports Complex pattern keyword validation and includes Complex in unknown pattern error",
+    () =>
+      Effect.gen(function* () {
+        const validComplexDoc = [
+          "| ID | Pattern | Requirement | Verification |",
+          "|:---|:---|:---|:---|",
+          "| SPEC-01 | Complex | When event occurs and while state is active the system shall respond. | Test |",
+        ].join("\n")
+
+        const validReport = yield* decideEarsSpecLint({
+          docPath: "docs/spec.md",
+          markdown: validComplexDoc,
+        })
+        const complexFindings = validReport.findings.filter(
+          (f) => f.kind === "pattern-keyword-mismatch",
+        )
+        expect(complexFindings).toHaveLength(0)
+
+        const invalidComplexDoc = [
+          "| ID | Pattern | Requirement | Verification |",
+          "|:---|:---|:---|:---|",
+          "| SPEC-02 | Complex | The system shall respond unconditionally. | Test |",
+        ].join("\n")
+
+        const invalidReport = yield* decideEarsSpecLint({
+          docPath: "docs/spec.md",
+          markdown: invalidComplexDoc,
+        })
+        expect(
+          invalidReport.findings.some(
+            (f) =>
+              f.kind === "pattern-keyword-mismatch" &&
+              f.message.includes("declared as Complex but does not contain conditional keyword"),
+          ),
+        ).toBe(true)
+
+        const unknownPatternDoc = [
+          "| ID | Pattern | Requirement | Verification |",
+          "|:---|:---|:---|:---|",
+          "| SPEC-03 | CustomPattern | The system shall do something. | Test |",
+        ].join("\n")
+
+        const unknownReport = yield* decideEarsSpecLint({
+          docPath: "docs/spec.md",
+          markdown: unknownPatternDoc,
+        })
+        const unknownFinding = unknownReport.findings.find(
+          (f) => f.kind === "pattern-keyword-mismatch",
+        )
+        expect(unknownFinding).toBeDefined()
+        expect(unknownFinding?.message).toContain(
+          "Allowed: Ubiquitous, Event-driven, State-driven, Unwanted behaviour, Optional feature, Complex.",
+        )
       }),
   )
 })

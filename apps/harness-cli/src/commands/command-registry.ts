@@ -40,11 +40,36 @@ export class HarnessCommandRegistry extends Context.Service<
   HarnessCommandRegistryShape
 >()("harness-cli/HarnessCommandRegistry") {}
 
+export const CANONICAL_CLI_COMMAND_NAMES = [
+  "guard",
+  "route",
+  "plan-check",
+  "plan-synth",
+  "repair",
+  "verify",
+  "done",
+  "learn",
+  "gc",
+  "mutate",
+  "bench",
+  "ingest",
+  "session",
+  "doctor",
+  "ontology",
+  "report",
+  "help",
+] as const
+
+export type CanonicalCliCommandName = (typeof CANONICAL_CLI_COMMAND_NAMES)[number]
+
 export const makeHarnessCommandRegistryLayer = (
   commands: ReadonlyArray<CliCommandPluginDescriptor>,
 ): Layer.Layer<HarnessCommandRegistry> => {
   const byName = new Map<string, CliCommandPluginDescriptor>()
   for (const cmd of commands) {
+    if (byName.has(cmd.name)) {
+      Effect.runSync(Effect.die(new Error(`Duplicate CLI command registered: ${cmd.name}`)))
+    }
     byName.set(cmd.name, cmd)
   }
   return Layer.succeed(HarnessCommandRegistry, {
@@ -53,76 +78,130 @@ export const makeHarnessCommandRegistryLayer = (
   })
 }
 
+export type CliCommandHandler = (args: ReadonlyArray<string>) => Effect.Effect<CliCommandPluginResult>
+
+const liveCommandHandlers = new Map<string, CliCommandHandler>()
+
+export const registerLiveCliCommandHandlers = (
+  handlers:
+    | Record<string, CliCommandHandler>
+    | ReadonlyMap<string, CliCommandHandler>
+    | ReadonlyArray<CliCommandPluginDescriptor>,
+): void => {
+  if (Array.isArray(handlers)) {
+    for (const h of handlers) {
+      liveCommandHandlers.set(h.name, h.execute)
+    }
+  } else if (handlers instanceof Map) {
+    for (const [name, handler] of handlers.entries()) {
+      liveCommandHandlers.set(name, handler)
+    }
+  } else {
+    for (const [name, handler] of Object.entries(handlers)) {
+      liveCommandHandlers.set(name, handler)
+    }
+  }
+}
+
+const makeDefaultExecute =
+  (cmdName: string): ((args: ReadonlyArray<string>) => Effect.Effect<CliCommandPluginResult>) =>
+  (args) => {
+    const liveHandler = liveCommandHandlers.get(cmdName)
+    if (liveHandler !== undefined) {
+      return liveHandler(args)
+    }
+    return Effect.succeed({
+      exitCode: 1,
+      stdout: "",
+      stderr: `Command '${cmdName}' must be executed through makeLiveCliCommandRegistryLayer.`,
+    })
+  }
+
 export const DEFAULT_CLI_COMMAND_DESCRIPTORS: ReadonlyArray<CliCommandPluginDescriptor> = [
   {
     name: CliCommandName.make("guard"),
     summary: "Evaluate deterministic command and file-write guard policies.",
-    execute: () => Effect.succeed({ exitCode: 0, stdout: "guard", stderr: "" }),
+    execute: makeDefaultExecute("guard"),
   },
   {
     name: CliCommandName.make("route"),
     summary: "Route a plan step to canonical agent-patterns/*.md documentation.",
-    execute: () => Effect.succeed({ exitCode: 0, stdout: "route", stderr: "" }),
+    execute: makeDefaultExecute("route"),
   },
   {
     name: CliCommandName.make("plan-check"),
     summary: "Validate compilable stub<A,E,R>() skeletons and snapshot plan/current.",
-    execute: () => Effect.succeed({ exitCode: 0, stdout: "plan-check", stderr: "" }),
+    execute: makeDefaultExecute("plan-check"),
   },
   {
-    name: CliCommandName.make("gc"),
-    summary: "Run zero-entropy graph garbage collection and governance lint.",
-    execute: () => Effect.succeed({ exitCode: 0, stdout: "gc", stderr: "" }),
+    name: CliCommandName.make("plan-synth"),
+    summary: "Synthesize plan graph patches via Double-Pushout (DPO) rules.",
+    execute: makeDefaultExecute("plan-synth"),
+  },
+  {
+    name: CliCommandName.make("repair"),
+    summary: "Repair architectural and code antipatterns via DPO rules.",
+    execute: makeDefaultExecute("repair"),
   },
   {
     name: CliCommandName.make("verify"),
     summary: "Execute affected verify targets, check span budgets, and write verify-stamp.json.",
-    execute: () => Effect.succeed({ exitCode: 0, stdout: "verify", stderr: "" }),
+    execute: makeDefaultExecute("verify"),
   },
   {
     name: CliCommandName.make("done"),
     summary: "Verify stamp freshness, diff plan vs impl graph, and merge impl/current to main.",
-    execute: () => Effect.succeed({ exitCode: 0, stdout: "done", stderr: "" }),
+    execute: makeDefaultExecute("done"),
   },
   {
     name: CliCommandName.make("learn"),
     summary: "Cluster friction-log.jsonl events and propose deterministic promotions.",
-    execute: () => Effect.succeed({ exitCode: 0, stdout: "learn", stderr: "" }),
+    execute: makeDefaultExecute("learn"),
+  },
+  {
+    name: CliCommandName.make("gc"),
+    summary: "Run zero-entropy graph garbage collection and governance lint.",
+    execute: makeDefaultExecute("gc"),
   },
   {
     name: CliCommandName.make("mutate"),
     summary: "Run in-process Mutant Schemata and saturation verification over domain code.",
-    execute: () => Effect.succeed({ exitCode: 0, stdout: "mutate", stderr: "" }),
-  },
-  {
-    name: CliCommandName.make("dst"),
-    summary: "Run execution-guided deterministic simulation testing with ChaosLayer.",
-    execute: () => Effect.succeed({ exitCode: 0, stdout: "dst", stderr: "" }),
+    execute: makeDefaultExecute("mutate"),
   },
   {
     name: CliCommandName.make("bench"),
     summary: "Measure harness stage latencies and enforce p50/p95 SLO budgets.",
-    execute: () => Effect.succeed({ exitCode: 0, stdout: "bench", stderr: "" }),
+    execute: makeDefaultExecute("bench"),
   },
   {
-    name: CliCommandName.make("ontology"),
-    summary: "Audit ArchiMate 3.2 cross-layer traceability and semantic conflicts.",
-    execute: () => Effect.succeed({ exitCode: 0, stdout: "ontology", stderr: "" }),
-  },
-  {
-    name: CliCommandName.make("rewrite"),
-    summary: "Evaluate Double-Pushout (DPO) algebraic graph repair and planning rules.",
-    execute: () => Effect.succeed({ exitCode: 0, stdout: "rewrite", stderr: "" }),
-  },
-  {
-    name: CliCommandName.make("project"),
-    summary: "Project graph deltas to TypeScript AST and verify shadow LSP overlays.",
-    execute: () => Effect.succeed({ exitCode: 0, stdout: "project", stderr: "" }),
+    name: CliCommandName.make("ingest"),
+    summary: "Ingest runtime trace NDJSON events into Omnigraph.",
+    execute: makeDefaultExecute("ingest"),
   },
   {
     name: CliCommandName.make("session"),
     summary: "Inspect active session handoff state and inject pending stubs.",
-    execute: () => Effect.succeed({ exitCode: 0, stdout: "session", stderr: "" }),
+    execute: makeDefaultExecute("session"),
+  },
+  {
+    name: CliCommandName.make("doctor"),
+    summary: "Run workspace health diagnostics and session recovery checks.",
+    execute: makeDefaultExecute("doctor"),
+  },
+  {
+    name: CliCommandName.make("ontology"),
+    summary: "Audit ArchiMate 3.2 cross-layer traceability and semantic conflicts.",
+    execute: makeDefaultExecute("ontology"),
+  },
+  {
+    name: CliCommandName.make("report"),
+    summary: "Generate session telemetry and friction report.",
+    execute: makeDefaultExecute("report"),
+  },
+  {
+    name: CliCommandName.make("help"),
+    summary: "Display CLI usage help and available commands.",
+    execute: makeDefaultExecute("help"),
   },
 ]
 

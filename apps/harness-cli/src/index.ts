@@ -102,12 +102,18 @@ import {
   writeGraphHeadMeta,
   writeSessionReportFiles,
   writeVerifyStamp,
+  evaluateAllGatePlugins,
+  GatePluginRegistryLive,
+  WorkspaceFsLive,
+  WorkspaceFilePath,
 } from "@harness/gates"
 import {
+  CANONICAL_CLI_COMMAND_NAMES,
   CliCommandName,
   dispatchCliCommand,
   type HarnessCommandRegistry,
   makeHarnessCommandRegistryLayer,
+  registerLiveCliCommandHandlers,
 } from "./commands/command-registry.js"
 import {
   BisectionProbeCount,
@@ -118,6 +124,7 @@ import {
   decideGraphProjection,
   decideGraphRewrite,
   diffOmnigraphBranches,
+  extractGraphViaCompilerOverlay,
   extractTypeGraph,
   extractWorkspaceTypeAwareGraph,
   findTestsReaching,
@@ -135,6 +142,7 @@ import {
   type ShadowFileOverlay,
   stepDatalogFileDelta,
   syncToOmnigraphAndSnapshot,
+  TsCompilerOverlayServiceLive,
   VerificationStatus,
 } from "@harness/graph"
 import { buildWorkspaceFnIndex } from "@harness/ingest"
@@ -1061,12 +1069,22 @@ const handleVerify = (
         ruleVersion: HARNESS_GATE_RULE_VERSION,
         cacheFilePath: AstGateCache.resolveCachePath(repoRoot),
       })
-      const enforcedAstViolations = astReport.violations.filter(
-        (v) =>
+      const enforcedAstViolations = astReport.violations.filter((v) => {
+        if (
+          v.rule === "effect-fn-dummy-void" ||
+          v.rule === "switch-statement" ||
+          v.rule === "match-run-statement" ||
+          v.rule === "non-exhaustive-union-match" ||
+          (v.rule === "discriminant-branching" && v.message.startsWith("Switch statement"))
+        ) {
+          return true
+        }
+        return (
           !v.file.startsWith("libs/harness/") &&
           !v.file.startsWith("apps/harness-") &&
-          !v.file.startsWith("tools/"),
-      )
+          !v.file.startsWith("tools/")
+        )
+      })
       if (enforcedAstViolations.length > 0) {
         const msg = enforcedAstViolations
           .map((v) => `[${v.rule}] ${v.file}:${v.line}: ${v.message}`)
@@ -1077,9 +1095,56 @@ const handleVerify = (
           stderr: `[GATE FAILURE] verify:ast-gates\n${msg}`,
         }
       }
+
+      const modularDeltaFiles = deltaFiles.filter(
+        (f) =>
+          f.includes("/plugins/") ||
+          f.includes("/services/") ||
+          f.includes("/commands/") ||
+          f.includes("/tools/"),
+      )
+      if (modularDeltaFiles.length > 0) {
+        const pluginExit = yield* evaluateAllGatePlugins({
+          filePaths: modularDeltaFiles.map((relPath) =>
+            WorkspaceFilePath.make(join(repoRoot, relPath)),
+          ),
+          failOnViolation: true,
+        }).pipe(
+          Effect.provide(Layer.mergeAll(GatePluginRegistryLive, WorkspaceFsLive)),
+          Effect.exit,
+        )
+        if (pluginExit._tag === "Failure") {
+          const errOpt = Cause.findErrorOption(pluginExit.cause)
+          if (Option.isSome(errOpt) && errOpt.value._tag === "SelfDogfoodingViolationError") {
+            const msg = errOpt.value.violations
+              .map((v) => `[${v.rule}] ${v.file}:${v.line}: ${v.message}`)
+              .join("\n")
+            return {
+              exitCode: 1,
+              stdout: "",
+              stderr: `[GATE FAILURE] verify:self-dogfooding-plugins\n${msg}`,
+            }
+          }
+          if (Option.isSome(errOpt) && errOpt.value._tag === "WorkspaceFsError") {
+            return {
+              exitCode: 1,
+              stdout: "",
+              stderr: `[GATE FAILURE] verify:self-dogfooding-plugins\nFailed to read ${errOpt.value.filePath}: ${errOpt.value.reason}`,
+            }
+          }
+          return {
+            exitCode: 1,
+            stdout: "",
+            stderr: `[GATE FAILURE] verify:self-dogfooding-plugins\n${Cause.pretty(pluginExit.cause)}`,
+          }
+        }
+      }
     }
 
-    const graph = yield* extractTypeGraph({ repoRoot })
+    const graph = yield* extractGraphViaCompilerOverlay({ repoRoot }).pipe(
+      Effect.provide(TsCompilerOverlayServiceLive),
+      Effect.catchTag("TsCompilerOverlayError", () => extractTypeGraph({ repoRoot })),
+    )
     const graphStubs: Array<string> = []
     for (const [, node] of Graph.nodes(graph.graph)) {
       if (node._tag === "EffectFn" && node.isStub) {
@@ -2360,7 +2425,9 @@ const handleDoctorOrSession = (
             input: { planStep: "Initialize session" },
           }).pipe(
             Effect.timeoutOption("10 seconds"),
-            Effect.catchCause(() => Effect.succeedNone),
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause) ? Effect.interrupt : Effect.succeedNone,
+            ),
             Effect.provide(decisionLayer),
           ),
         )
@@ -3637,7 +3704,38 @@ export const makeLiveCliCommandRegistryLayer = (
       summary: "Generate session telemetry and friction report.",
       execute: (args) => handleReport(args, options),
     },
+    {
+      name: CliCommandName.make("help"),
+      summary: "Display CLI usage help and available commands.",
+      execute: () =>
+        Effect.succeed({
+          exitCode: 0,
+          stdout: `harness help\nusage: harness <${COMMANDS.join("|")}>`,
+          stderr: "",
+        }),
+    },
   ])
+
+registerLiveCliCommandHandlers(
+  CANONICAL_CLI_COMMAND_NAMES.reduce<
+    Record<string, (args: ReadonlyArray<string>) => Effect.Effect<CliResult>>
+  >((acc, name) => {
+    acc[name] = (args) => {
+      const liveLayer = makeLiveCliCommandRegistryLayer()
+      return dispatchCliCommand({ command: name, args }).pipe(
+        Effect.provide(liveLayer),
+        Effect.catchTag("CliCommandNotFoundError", (e) =>
+          Effect.succeed({
+            exitCode: 1,
+            stdout: "",
+            stderr: `unknown command: ${e.command}\nusage: harness <${COMMANDS.join("|")}>`,
+          }),
+        ),
+      )
+    }
+    return acc
+  }, {}),
+)
 
 export const runCliEffect = (
   argv: ReadonlyArray<string>,
@@ -3651,7 +3749,7 @@ export const runCliEffect = (
     const decisionLayer = effectiveOptions?.decisionLayer ?? LocalDecisionModel
     const repoRoot = effectiveOptions?.repoRoot ?? findWorkspaceRoot()
 
-    if (options?.repoRoot === undefined && process.env.VITEST === undefined) {
+    if (effectiveOptions?.repoRoot === undefined && process.env.VITEST === undefined) {
       yield* Effect.try(() => {
         const harnessDir = join(CLI_REPO_ROOT, ".harness")
         mkdirSync(harnessDir, { recursive: true })
@@ -3670,7 +3768,7 @@ export const runCliEffect = (
       }
     }
 
-    if (requested === "help" || argv.includes("--help") || argv.includes("-h")) {
+    if (argv.includes("--help") || argv.includes("-h")) {
       return {
         exitCode: 0,
         stdout: `harness help\nusage: harness <${COMMANDS.join("|")}>`,
@@ -3678,11 +3776,7 @@ export const runCliEffect = (
       }
     }
 
-    if (requested === "report") {
-      return yield* handleReport(argv, options)
-    }
-
-    const liveCommandLayer = makeLiveCliCommandRegistryLayer(options, decisionLayer)
+    const liveCommandLayer = makeLiveCliCommandRegistryLayer(effectiveOptions, decisionLayer)
     const startTime = performance.now()
     const res: CliResult = yield* dispatchCliCommand({
       command: requested,
@@ -3700,7 +3794,7 @@ export const runCliEffect = (
     const durationMs = Math.max(0, Math.round(performance.now() - startTime))
 
     const surface: TelemetrySurface =
-      argv.includes("--format=antigravity") || options?.stdin !== undefined ? "hook" : "cli"
+      argv.includes("--format=antigravity") || effectiveOptions?.stdin !== undefined ? "hook" : "cli"
 
     let category: TelemetryCategory = "lifecycle"
     if (requested === "guard") {

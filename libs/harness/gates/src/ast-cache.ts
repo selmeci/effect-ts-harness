@@ -145,10 +145,19 @@ export const loadAstGateCacheFromDisk = (cacheFilePath: string): void => {
               inMemoryGateCache.set(key, entry)
             }
           })
-          .with({ _tag: "None" }, () => undefined)
+          .with({ _tag: "None" }, () => {
+            process.stderr.write(
+              `[harness:ast-cache] Warning: failed to parse AST gate cache from ${cacheFilePath}: invalid schema format\n`,
+            )
+          })
           .exhaustive()
       },
-      catch: () => undefined,
+      catch: (err) => {
+        process.stderr.write(
+          `[harness:ast-cache] Warning: failed to read AST gate cache from ${cacheFilePath}: ${err instanceof Error ? err.message : String(err)}\n`,
+        )
+        return undefined
+      },
     }).pipe(Effect.ignore),
   )
 }
@@ -175,7 +184,12 @@ export const saveAstGateCacheToDisk = (
         writeFileSync(tmpPath, JSON.stringify(payload), "utf8")
         renameSync(tmpPath, cacheFilePath)
       },
-      catch: () => undefined,
+      catch: (err) => {
+        process.stderr.write(
+          `[harness:ast-cache] Warning: failed to persist AST gate cache to ${cacheFilePath}: ${err instanceof Error ? err.message : String(err)}\n`,
+        )
+        return undefined
+      },
     }).pipe(
       Effect.ensuring(
         Effect.ignore(
@@ -292,7 +306,7 @@ const isImpureDomainSpecifier = (spec: string): boolean =>
   spec.startsWith("alchemy/") ||
   /^@harness\/[a-z0-9-]+-infra$/.test(spec)
 
-const unwrapExpression = (expr: ts.Expression): ts.Expression => {
+export const unwrapAstExpression = (expr: ts.Expression): ts.Expression => {
   let curr = expr
   while (
     ts.isParenthesizedExpression(curr) ||
@@ -304,6 +318,31 @@ const unwrapExpression = (expr: ts.Expression): ts.Expression => {
   }
   return curr
 }
+
+export const isDummyEffectVoidYield = (
+  expr: ts.Expression,
+  sourceFile: ts.SourceFile,
+): boolean => {
+  const inner = unwrapAstExpression(expr)
+  if (
+    ts.isPropertyAccessExpression(inner) &&
+    inner.expression.getText(sourceFile).trim() === "Effect" &&
+    inner.name.text === "void"
+  ) {
+    return true
+  }
+  if (
+    ts.isCallExpression(inner) &&
+    ts.isPropertyAccessExpression(inner.expression) &&
+    inner.expression.expression.getText(sourceFile).trim() === "Effect" &&
+    inner.expression.name.text === "asVoid"
+  ) {
+    return true
+  }
+  return false
+}
+
+const unwrapExpression = unwrapAstExpression
 
 const visitSourceFileSinglePass = (
   sourceFile: ts.SourceFile,
@@ -422,25 +461,17 @@ const visitSourceFileSinglePass = (
 
     // 2b. Dummy yield* Effect.void (effect-laws: effect-fn-dummy-void)
     if (ts.isYieldExpression(node) && !isTestFile) {
-      if (node.expression !== undefined) {
-        const inner = unwrapExpression(node.expression)
-        const text = inner.getText(sourceFile).trim()
-        if (
-          text === "Effect.void" ||
-          text.startsWith("Effect.void.") ||
-          text.startsWith("Effect.asVoid(")
-        ) {
-          violations.push({
-            category: GateCategory.make("effect-laws"),
-            rule: GateRuleId.make("effect-fn-dummy-void"),
-            message: GateViolationMessage.make(
-              `Dummy 'yield* Effect.void' in '${filePath}' is banned — use Effect.succeed or a real Effect yield.`,
-            ),
-            file: filePath,
-            line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-            enclosingSymbol: resolveEnclosingSymbol(node, filePath),
-          })
-        }
+      if (node.expression !== undefined && isDummyEffectVoidYield(node.expression, sourceFile)) {
+        violations.push({
+          category: GateCategory.make("effect-laws"),
+          rule: GateRuleId.make("effect-fn-dummy-void"),
+          message: GateViolationMessage.make(
+            `Dummy 'yield* Effect.void' in '${filePath}' is banned — use a pure function or Effect.sync(() => ...) instead of a dummy yield.`,
+          ),
+          file: filePath,
+          line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+          enclosingSymbol: resolveEnclosingSymbol(node, filePath),
+        })
       }
     }
 

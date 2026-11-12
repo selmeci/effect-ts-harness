@@ -12,6 +12,7 @@ import {
 import {
   type AdrDocNode,
   type BranchingViolation,
+  type ConceptLatticeResult,
   type EarsSpecNode,
   type EffectFnNode,
   type EffectSignatureRelation,
@@ -242,9 +243,16 @@ export const mapPlaysRoleToOmnigraphEdgeName = (
 export const isHarnessGraph = (u: unknown): u is HarnessGraph =>
   typeof u === "object" && u !== null && HarnessGraphTypeId in u
 
-const PERA_CONCEPT_LATTICE_RESULT = Effect.runSync(
-  decideConceptLattice(HARNESS_PERA_CONCEPT_LATTICE_CONFIG),
-)
+let cachedPeraConceptLatticeResult: ConceptLatticeResult | undefined
+
+export const getPeraConceptLatticeResult = (): ConceptLatticeResult => {
+  if (cachedPeraConceptLatticeResult === undefined) {
+    cachedPeraConceptLatticeResult = Effect.runSync(
+      decideConceptLattice(HARNESS_PERA_CONCEPT_LATTICE_CONFIG),
+    )
+  }
+  return cachedPeraConceptLatticeResult
+}
 
 /**
  * Builds the in-memory Clean-Slate PERA Bipartite Levi Hypergraph (`G_Levi = (V_E u V_R, E_role)`).
@@ -1140,7 +1148,7 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
         }
       }
       const violations = validateRelationRolesWithLattice(
-        PERA_CONCEPT_LATTICE_RESULT,
+        getPeraConceptLatticeResult(),
         node._tag,
         roleEdges,
       )

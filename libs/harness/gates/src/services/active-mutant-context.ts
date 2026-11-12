@@ -20,28 +20,34 @@ export const ActiveMutantContextLive: Layer.Layer<ActiveMutantContext> = Layer.e
   Effect.gen(function* () {
     const stateRef = yield* SynchronizedRef.make<Option.Option<ActiveMutantId>>(Option.none())
     const sem = yield* Semaphore.make(1)
+    let holdingFiberId: number | undefined = undefined
 
     return {
       getCurrentMutant: SynchronizedRef.get(stateRef),
       runWithMutant: <A, E, R>(mutantId: ActiveMutantId, effect: Effect.Effect<A, E, R>) =>
-        sem.withPermits(1)(
-          Effect.acquireUseRelease(
+        Effect.withFiber((fiber) => {
+          const isSameFiber = holdingFiberId !== undefined && holdingFiberId === fiber.id
+          const bracket = Effect.acquireUseRelease(
             SynchronizedRef.modify(stateRef, (prev) => {
               const prevGlobal = getActiveMutantId()
+              const prevHolder = holdingFiberId
+              holdingFiberId = fiber.id
               setActiveMutantId(mutantId)
-              return [{ prevRef: prev, prevGlobal }, Option.some(mutantId)] as const
+              return [{ prevRef: prev, prevGlobal, prevHolder }, Option.some(mutantId)] as const
             }),
             () => effect,
-            ({ prevRef, prevGlobal }) =>
+            ({ prevRef, prevGlobal, prevHolder }) =>
               SynchronizedRef.set(stateRef, prevRef).pipe(
                 Effect.ensuring(
                   Effect.sync(() => {
+                    holdingFiberId = prevHolder
                     setActiveMutantId(prevGlobal)
                   }),
                 ),
               ),
-          ),
-        ),
+          )
+          return isSameFiber ? bracket : sem.withPermits(1)(bracket)
+        }),
     }
   }),
 )

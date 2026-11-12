@@ -165,10 +165,18 @@ const loadStoreIntoMap = (
             targetMap.set(entry.cacheKey, entry)
           }
         })
-        .with({ _tag: "None" }, () => undefined)
+        .with({ _tag: "None" }, () => {
+          process.stderr.write(
+            `[harness:decision-cache] Warning: failed to parse decision cache from ${cacheFilePath}: invalid schema format\n`,
+          )
+        })
         .exhaustive()
     },
-    catch: () => undefined,
+    catch: (err) => {
+      process.stderr.write(
+        `[harness:decision-cache] Warning: failed to read decision cache from ${cacheFilePath}: ${err instanceof Error ? err.message : String(err)}\n`,
+      )
+    },
   }).pipe(Effect.ignore)
 }
 
@@ -193,7 +201,11 @@ const persistMapToDisk = (
         writeFileSync(tmpPath, JSON.stringify(store), "utf8")
         renameSync(tmpPath, cacheFilePath)
       },
-      catch: () => undefined,
+      catch: (err) => {
+        process.stderr.write(
+          `[harness:decision-cache] Warning: failed to persist decision cache to ${cacheFilePath}: ${err instanceof Error ? err.message : String(err)}\n`,
+        )
+      },
     }).pipe(
       Effect.ensuring(
         Effect.ignore(

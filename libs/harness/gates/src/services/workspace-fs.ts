@@ -3,8 +3,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileS
 import { dirname } from "node:path"
 import { Context, Effect, Layer } from "effect"
 import {
+  computeWorkspaceFileLineCount,
   ErrorReasonMessage,
-  PluginFileLineCount,
   WorkspaceFileContent,
   type WorkspaceFilePath,
   type WorkspaceFileStat,
@@ -77,39 +77,41 @@ export const WorkspaceFsLive: Layer.Layer<WorkspaceFs> = Layer.succeed(Workspace
 
 export const makeWorkspaceFsMemoryLayer = (
   initialFiles: Readonly<Record<string, string>> = {},
-): Layer.Layer<WorkspaceFs> => {
-  const store = new Map<string, string>(Object.entries(initialFiles))
-  return Layer.succeed(WorkspaceFs, {
-    readTextFile: (filePath) =>
-      Effect.suspend(() => {
-        const val = store.get(filePath)
-        if (val === undefined) {
-          return Effect.fail(
-            new WorkspaceFsError({
-              filePath,
-              operation: WorkspaceFsOperation.make("read"),
-              reason: ErrorReasonMessage.make(`File not found in memory layer: ${filePath}`),
-            }),
-          )
-        }
-        return Effect.succeed(WorkspaceFileContent.make(val))
-      }),
-    writeTextFileAtomic: (filePath, content) =>
-      Effect.sync(() => {
-        store.set(filePath, content)
-      }),
-    exists: (filePath) => Effect.sync(() => store.has(filePath)),
-  })
-}
+): Layer.Layer<WorkspaceFs> =>
+  Layer.effect(
+    WorkspaceFs,
+    Effect.sync(() => {
+      const store = new Map<string, string>(Object.entries(initialFiles))
+      return {
+        readTextFile: (filePath) =>
+          Effect.suspend(() => {
+            const val = store.get(filePath)
+            if (val === undefined) {
+              return Effect.fail(
+                new WorkspaceFsError({
+                  filePath,
+                  operation: WorkspaceFsOperation.make("read"),
+                  reason: ErrorReasonMessage.make(`File not found in memory layer: ${filePath}`),
+                }),
+              )
+            }
+            return Effect.succeed(WorkspaceFileContent.make(val))
+          }),
+        writeTextFileAtomic: (filePath, content) =>
+          Effect.sync(() => {
+            store.set(filePath, content)
+          }),
+        exists: (filePath) => Effect.sync(() => store.has(filePath)),
+      }
+    }),
+  )
 
 export const readAndVerifyWorkspaceFile = Effect.fn("WorkspaceFs.readAndVerifyFile")(function* (
   filePath: WorkspaceFilePath,
 ): Effect.fn.Return<WorkspaceFileStat, WorkspaceFsError, WorkspaceFs> {
   const fs = yield* WorkspaceFs
   const content = yield* fs.readTextFile(filePath)
-  const lineCount = PluginFileLineCount.make(
-    content.length === 0 ? 0 : content.split(/\r?\n/).length,
-  )
+  const lineCount = computeWorkspaceFileLineCount(content)
   return {
     filePath,
     content,

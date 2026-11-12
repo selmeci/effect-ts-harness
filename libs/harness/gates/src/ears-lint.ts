@@ -495,7 +495,7 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
               findings.push({
                 line: lineNum,
                 kind: "pattern-keyword-mismatch",
-                message: `${cleanId} has unknown EARS pattern '${rawPattern}'. Allowed: Ubiquitous, Event-driven, State-driven, Unwanted behaviour, Optional feature.`,
+                message: `${cleanId} has unknown EARS pattern '${rawPattern}'. Allowed: Ubiquitous, Event-driven, State-driven, Unwanted behaviour, Optional feature, Complex.`,
               })
             })
 
@@ -566,3 +566,5 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
 
 export const lintEarsSpecMarkdown = (docPath: string, markdown: string): EarsSpecLintReport =>
   Effect.runSync(decideEarsSpecQuality({ docPath, markdown }))
+
+export const decideEarsSpecLint = decideEarsSpecQuality

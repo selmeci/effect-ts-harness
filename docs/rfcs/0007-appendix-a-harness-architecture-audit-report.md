@@ -1,7 +1,8 @@
 ---
 rfc: RFC-0007-APPENDIX-A
 title: "Appendix A to RFC-0007: Comprehensive Harness Architecture Audit Report"
-status: implemented
+status: accepted
+implementation_phase: "Phase 1 implemented in PR #24; Phases 2–4 tracked in rollout roadmap"
 created: 2026-11-12
 updated: 2026-11-12
 authors:
@@ -31,7 +32,7 @@ A full-repository audit across all packages revealed a stark contrast between th
 | **File Size (God-Files)** | Small, single-responsibility modules separated by `contract / service / domain / infra` | **11 source files > 800 LOC**, largest reaching **5,603 LOC** | [`type-extractor.ts`](../../libs/harness/graph/src/type-extractor.ts) (5,603 LOC), [`apps/harness-cli/src/index.ts`](../../apps/harness-cli/src/index.ts) (3,759 LOC), [`datalog-engine.ts`](../../libs/harness/graph/src/datalog-engine.ts) (3,255 LOC) |
 | **`Context.Service` Ports (DI)** | Every I/O or stateful capability is a `Context.Service` tracked in the `R` channel | Only **4 services** across all of `libs/harness/*`, **0 services** in `apps/harness-cli` and `apps/harness-mcp` (before `RFC-0007`) | `SpanRecorder`, `ChaosFaultController`, `DatalogSession`, `OmnigraphSync` vs. **277 `Effect.fn` declarations** (almost all with `R = never`) |
 | **Platform Services (`effect/FileSystem`, `effect/process`, `effect/cli`)** | `FileSystem`, `Path`, `ChildProcess`, `Command.make`, `PersistedCache` | **0 usages** across `libs/harness/*` and `apps/harness-*`; instead **45x `node:fs`** and **12x `node:child_process`** | [`apps/harness-cli/src/index.ts`](../../apps/harness-cli/src/index.ts), [`type-extractor.ts`](../../libs/harness/graph/src/type-extractor.ts), [`gc-check.ts`](../../libs/harness/gates/src/gc-check.ts) |
-| **Lifecycle & Cache Management (`Scope`, `Cache`, `PersistedCache`)** | `Layer.effect` / `Layer.scoped` + `Cache.make` / `PersistedCache.make` | **Module-level mutable `new Map()` singletons** and `let counter = 0` | [`ast-cache.ts`](../../libs/harness/gates/src/ast-cache.ts), [`cached-decision-model.ts`](../../libs/harness/decision/src/cached-decision-model.ts), [`type-extractor.ts`](../../libs/harness/graph/src/type-extractor.ts) |
+| **Lifecycle & Cache Management (`Scope`, `Cache`, `PersistedCache`)** | `Layer.effect` (with `Effect.acquireRelease`) + `Cache.make` / `PersistedCache.make` | **Module-level mutable `new Map()` singletons** and `let counter = 0` | [`ast-cache.ts`](../../libs/harness/gates/src/ast-cache.ts), [`cached-decision-model.ts`](../../libs/harness/decision/src/cached-decision-model.ts), [`type-extractor.ts`](../../libs/harness/graph/src/type-extractor.ts) |
 | **Runtime Execution (`Effect.runSync` / `Effect.runPromise`)** | Single `NodeRuntime.runMain` at the application boundary (`type:app`) | **49 calls to `Effect.runSync` / `Effect.runPromise`**, including calling `Effect.runSync` *inside* `Layer.effect` and `.decide`! | [`ast-cache.ts`](../../libs/harness/gates/src/ast-cache.ts), [`cached-decision-model.ts`](../../libs/harness/decision/src/cached-decision-model.ts), [`server.ts`](../../apps/harness-mcp/src/server.ts) |
 | **Boundary Validation (`Schema` vs. `zod`)** | Exclusively `effect/Schema` | `apps/harness-mcp` imports **`zod`** (`4.6.5`) for MCP schemas instead of `Schema` | [`apps/harness-mcp/package.json`](../../apps/harness-mcp/package.json), [`apps/harness-mcp/src/server.ts`](../../apps/harness-mcp/src/server.ts) |
 | **Self-Rule Exemptions** | Uniform enforcement across the entire monorepo | `isInternalHarnessFile` disabled bans on `switch`, `if/else-if`, discriminant `if`, `Schema.brand`, and inline object types for `libs/harness` and `apps/harness-*` | [`tools/oxlint/syntax-bans.js`](../../tools/oxlint/syntax-bans.js), [`libs/harness/gates/src/ast-cache.ts`](../../libs/harness/gates/src/ast-cache.ts) |
@@ -199,16 +200,16 @@ flowchart TB
   end
 
   subgraph Ports["Capability Seams / Service Ports (type:service)"]
-    P_FS["WorkspaceFs\n(readTextFile, writeTextFileAtomic, exists)"]
-    P_GRAPH["TsCompilerOverlayService\n(getSession, extractGraph)"]
-    P_MUT["ActiveMutantContext\n(getCurrentMutant, withMutant)"]
-    P_PROC["HarnessSubprocessRunner\n(exec, execChecked)"]
+    P_FS["WorkspaceFs\n(readTextFile, writeTextFileAtomic, exists)\n+ WorkspaceFs.readAndVerifyFile"]
+    P_GRAPH["TsCompilerOverlayService\n(getSession, extractGraphWithOverlays)\n+ TsCompilerOverlay.extractGraph"]
+    P_MUT["ActiveMutantContext\n(getCurrentMutant, runWithMutant)\n+ MutationCheck.withActiveMutant"]
+    P_PROC["HarnessSubprocessRunner\n(exec, execChecked)\n+ HarnessSubprocess.execChecked"]
     P_CACHE["HarnessCachePort\n(PersistedCache / ScopedCache)"]
   end
 
   subgraph Providers["Live & Test Providers (type:infra)"]
     L_FS["WorkspaceFsLive / makeWorkspaceFsMemoryLayer"]
-    L_TS["TsCompilerOverlayServiceLive\n(Scoped TypeScriptProgramSession)"]
+    L_TS["TsCompilerOverlayServiceLive\n(Layer.effect with Effect.acquireRelease)"]
     L_MUT["ActiveMutantContextLive\n(Ref + Semaphore.make(1))"]
     L_PROC["HarnessSubprocessRunnerLive /\nmakeHarnessSubprocessRunnerTestLayer"]
   end
@@ -238,15 +239,29 @@ flowchart TB
 
 ---
 
-## 6. Phased Remediation Roadmap (Zero-Breakage Strangler-Fig Migration)
+## 6. Phased Remediation Roadmap & Resolution Table (Strangler-Fig Migration)
 
-1. **Phase 1 (`COMPLETED` in `RFC-0007` / `SPEC-0011` / `ADR-0012`) — Self-Dogfooding Gate Plugin, Core Capability Services (`WorkspaceFs`, `HarnessSubprocessRunner`, `ActiveMutantContext`, `TsCompilerOverlayService`), and CLI/MCP Plugin Registries:**
-   - Removed `!isHarnessInternal` exemptions in `ast-cache.ts` (`HARNESS_GATE_RULE_VERSION = "ast-gates-v2"`), banned `effect-fn-dummy-void`, `nested-effect-run-sync`, `harness-switch-statement`, `match-run-statement`, and `file-line-budget-exceeded` (`800` LOC max for plugin/service modules) via `SelfDogfooding.decide` and `GatePluginRunner.evaluateAll`.
-   - Eliminated all 15 `yield* Effect.void` statements, all nested `Effect.runSync` calls, and all `switch` statements in `libs/harness/*`, `apps/harness-cli`, and `apps/harness-mcp`.
-   - Introduced `WorkspaceFs`, `HarnessSubprocessRunner`, `ActiveMutantContext`, `TsCompilerOverlayService`, `HarnessCommandRegistry`, and `McpToolRegistry`.
-2. **Phase 2 — Granular `GatePlugin` & `RewritePlugin` Extraction:**
-   - Extract the remaining 21 procedural checks in `gc-check.ts` and `REP-01..11` in `graph-rewrite.ts` into individual `GatePlugin` and `RewritePlugin` modules under `< 350` LOC each, while keeping `gc-check.ts` and `graph-rewrite.ts` as backward-compatible facade barrels for `ADR-0001..0011` `enforced_by` stability.
-3. **Phase 3 — Decomposition of `libs/harness/graph` God-Files (`type-extractor.ts`, `datalog-engine.ts`, `graph-engine.ts`, `graph-projector.ts`):**
-   - Split the five `2,200–5,600` LOC graph modules into cohesive sub-modules (`< 500` LOC each) behind their existing barrel exports.
-4. **Phase 4 — Declarative CLI Subcommands & `.mjs` Script Migration:**
-   - Migrate individual command handlers from `apps/harness-cli/src/index.ts` and tool handlers from `apps/harness-mcp/src/server.ts` into dedicated plugin files registered in `HarnessCommandRegistry` and `McpToolRegistry`, and port `tools/scenario/run.mjs` and `libs/*/scripts/check-*.mjs` into typed CLI subcommands.
+### 6.1 Audit Finding Resolution Table (Phase 1 Completed vs. Phases 2–4 Scheduled)
+
+| Audit Finding / Architectural Refactoring Item | Remediation Phase | Status | Concrete Implementation & Evidence |
+| :--- | :--- | :--- | :--- |
+| **Elimination of all 15 `yield* Effect.void` dummy yields** | **Phase 1** | **COMPLETED (`PR #24`)** | Removed all 15 dummy yields across `adr-lint.ts`, `ears-lint.ts`, `friction-log.ts` (2), `migration-check.ts`, `mutation-check.ts`, `session-handoff.ts`, `span-budget.ts`, `telemetry.ts`, `ontology-invariants.ts`, `gc-check.ts`, `cluster-resolver.ts`, `apps/harness-cli/src/index.ts` (2), and `libs/sample/domain`. Enforced by `effect-fn-dummy-void` in `SelfDogfooding.decide`. |
+| **Elimination of all 4 banned `switch` statements** | **Phase 1** | **COMPLETED (`PR #24`)** | Replaced `switch` statements with exhaustive `match(...)` in `ears-lint.ts:439`, `apps/harness-cli/src/index.ts` (lines 2934, 3594), and `apps/harness-mcp/src/server.ts:482`. Enforced by `harness-switch-statement` and `ast-cache.ts`. |
+| **Removal of nested `Effect.runSync` / `Effect.runPromise` anti-patterns** | **Phase 1** | **COMPLETED (`PR #24`)** | Converted `buildWorkspaceFnIndex` (`fn-index.ts`), `loadStoreIntoMapEffect` / `persistMapToDiskEffect` (`cached-decision-model.ts`), `ast-cache.ts` write-atomic, and module-scope evaluation in `graph-engine.ts:245` to idiomatic Effect generators. Enforced by `nested-effect-run-sync`. |
+| **7 Cordis-Inspired Capability Services & Registries Wired into Production Callers** | **Phase 1** | **COMPLETED (`PR #24`)** | Created `WorkspaceFs`, `HarnessSubprocessRunner`, `ActiveMutantContext`, `GatePluginRegistry`, `TsCompilerOverlayService`, `HarnessCommandRegistry`, and `McpToolRegistry` (`Context.Service` + `Layer.effect` with `Effect.acquireRelease`) and wired directly into `harness-cli`, `harness-mcp`, `gc-check.ts`, and `mutation-check.ts`. |
+| **Deterministic `DEFAULT_MAX_PLUGIN_FILE_LINES = 800` Ceiling on Modular Plugins** | **Phase 1** | **COMPLETED (`PR #24`)** | Enforced by `file-line-budget-exceeded` in `SelfDogfooding.decide` for all files under `/plugins/`, `/services/`, `/commands/`, `/tools/`. |
+| **Clean-Slate Decomposition of `@harness/gates` Monoliths (`gc-check.ts` 2,141 LOC, `mutation-check.ts` 1,063 LOC, `ast-cache.ts` 835 LOC)** | **Phase 2 (Step 2)** | **SCHEDULED** | Split `gc-check.ts` into 5 cohesive `GatePlugin` modules (`<= 350` LOC each); split `mutation-check.ts` into generator and decider (`<= 500` LOC each); split `ast-cache.ts` into AST visitors and cache manager (`<= 450` LOC each). Tracked in Playbook Step 2. |
+| **Removal of Synchronous `.runSync` Gate Wrappers (`lintAdrDocMarkdown`, `lintEarsSpecMarkdown`, etc.)** | **Phase 2 (Step 2)** | **SCHEDULED** | Direct yield of pure `Effect.fn` deciders inside caller generators, eliminating synchronous `.runSync` shims. Tracked in Playbook Step 2. |
+| **Clean-Slate Decomposition of `@harness/graph` God-Files (`type-extractor.ts` 5,603 LOC, `datalog-engine.ts` 3,255 LOC, `graph-rewrite.ts` 2,957 LOC, `graph-engine.ts` 2,590 LOC, `graph-projector.ts` 2,246 LOC)** | **Phase 3 (Step 3)** | **SCHEDULED** | Decompose the 5 legacy graph monoliths (`~16,650` LOC total) into focused submodules under `< 600–750` LOC each (`< 500` LOC for sub-extractors). Tracked in Playbook Step 3. |
+| **Removal of Synchronous Snapshot Wrappers (`deserializeGraphSnapshot` / `loadGraphSnapshot`)** | **Phase 3 (Step 3)** | **SCHEDULED** | Replace synchronous unwrap helpers with Effect-native snapshot deserialization in `@harness/graph`. Tracked in Playbook Step 3. |
+| **Clean-Slate Decomposition of CLI & MCP Monoliths (`apps/harness-cli` 3,758 LOC, `apps/harness-mcp` 1,654 LOC)** | **Phase 4 (Step 4)** | **SCHEDULED** | Move all 15 CLI command implementations into `apps/harness-cli/src/commands/*.command.ts` (`<= 650` LOC) and MCP tool implementations into `apps/harness-mcp/src/tools/*.tool.ts` (`<= 650` LOC) dispatched via `HarnessCommandRegistry` and `McpToolRegistry`. Tracked in Playbook Step 4. |
+| **Replace `zod` with `effect/Schema` in MCP Tool Schemas** | **Phase 4 (Step 4)** | **SCHEDULED** | Remove `zod` (`4.6.5`) from `apps/harness-mcp/package.json` and decode tool arguments purely via `effect/Schema` (`JsonSchema`). Tracked in Playbook Step 4. |
+| **Removal of Remaining `isInternalHarnessFile` Exemptions in `syntax-bans.js`** | **Phase 4 (Step 4)** | **SCHEDULED** | Remove all remaining `isInternalHarnessFile` exemptions in `tools/oxlint/syntax-bans.js` after monolith decomposition is complete. Tracked in Playbook Step 4. |
+| **Repo-Wide Enforcement of Line Budget Gate (`<= 800` LOC hard ceiling with `< 600` LOC target)** | **Phase 4 (Step 4)** | **SCHEDULED** | Expand `file-line-budget-exceeded` across **every** production `.ts` file monorepo-wide once all 15 legacy monoliths are split. Tracked in Playbook Step 4. |
+
+### 6.2 Phased Remediation Roadmap
+
+1. **Phase 1 (`COMPLETED in PR #24` — `SPEC-0011` / `ADR-0012`):** Core capability services (`WorkspaceFs`, `HarnessSubprocessRunner`, `ActiveMutantContext`, `TsCompilerOverlayService`), plugin registries (`GatePluginRegistry`, `HarnessCommandRegistry`, `McpToolRegistry`), elimination of all 15 `yield* Effect.void` statements, all 4 `switch` statements, nested `Effect.runSync` calls in `fn-index.ts`, `cached-decision-model.ts`, `ast-cache.ts`, and `graph-engine.ts:245`, and self-dogfooding enforcement with `DEFAULT_MAX_PLUGIN_FILE_LINES = 800` ceiling on modular plugin files.
+2. **Phase 2 (`Step 2` in Playbook):** Clean-slate decomposition of `@harness/gates` monoliths (`gc-check.ts`, `mutation-check.ts`, `ast-cache.ts`), removal of synchronous `.runSync` gate wrapper shims, and expanding line budget checks across `@harness/gates`.
+3. **Phase 3 (`Step 3` in Playbook):** Clean-slate decomposition of `@harness/graph` god-files (`type-extractor.ts`, `datalog-engine.ts`, `graph-rewrite.ts`, `graph-engine.ts`, `graph-projector.ts`), removal of synchronous snapshot wrappers, and expanding line budget checks across `@harness/graph`.
+4. **Phase 4 (`Step 4` in Playbook):** Clean-slate decomposition of `apps/harness-cli` and `apps/harness-mcp`, replacing `zod` with `effect/Schema`, removing remaining `isInternalHarnessFile` exemptions in `syntax-bans.js`, porting `.mjs` scripts, and repo-wide line budget enforcement.

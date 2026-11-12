@@ -1,7 +1,8 @@
 import { Context, Effect, Layer } from "effect"
 import { NonNegativeCount } from "@harness/graph"
-import { AstSourceContent, AstSourceFilePath, GateVerdict } from "../ast-cache.js"
+import { AstSourceContent, AstSourceFilePath } from "../ast-cache.js"
 import {
+  makeSelfDogfoodingReport,
   type MaxPluginFileLines,
   PluginId,
   type SelfDogfoodingFileInput,
@@ -13,7 +14,7 @@ import {
   type WorkspaceFsError,
 } from "./self-dogfooding-contract.js"
 import { decideSelfDogfooding } from "./self-dogfooding-plugin.js"
-import { WorkspaceFs } from "../services/workspace-fs.js"
+import { readAndVerifyWorkspaceFile, WorkspaceFs } from "../services/workspace-fs.js"
 
 export interface GatePluginDescriptor {
   readonly pluginId: PluginId
@@ -56,21 +57,39 @@ export const DEFAULT_GATE_PLUGINS: ReadonlyArray<GatePluginDescriptor> = [
 
 export const makeGatePluginRegistryLayer = (
   plugins: ReadonlyArray<GatePluginDescriptor> = DEFAULT_GATE_PLUGINS,
-): Layer.Layer<GatePluginRegistry> =>
-  Layer.succeed(GatePluginRegistry, {
+): Layer.Layer<GatePluginRegistry> => {
+  const seenIds = new Set<string>()
+  for (const plugin of plugins) {
+    if (seenIds.has(plugin.pluginId)) {
+      Effect.runSync(
+        Effect.die(new Error(`Duplicate gate plugin ID registered: ${plugin.pluginId}`)),
+      )
+    }
+    seenIds.add(plugin.pluginId)
+  }
+
+  return Layer.succeed(GatePluginRegistry, {
     listPlugins: Effect.succeed(plugins),
     evaluateFiles: (files, options) =>
       Effect.gen(function* () {
         const allViolations: Array<SelfDogfoodingViolation> = []
+        let maxInspectedCount = 0
         for (const plugin of plugins) {
           const report = yield* plugin.evaluate(files, options?.maxPluginFileLines)
           allViolations.push(...report.violations)
+          if (report.inspectedFileCount > maxInspectedCount) {
+            maxInspectedCount = report.inspectedFileCount
+          }
         }
-        const report: SelfDogfoodingReport = {
-          verdict: GateVerdict.make(allViolations.length === 0 ? "clean" : "violated"),
-          violations: allViolations,
-          inspectedFileCount: NonNegativeCount.make(files.length),
-        }
+        const nonTestFileCount = files.filter(
+          (f) => !f.filePath.endsWith(".test.ts") && !f.filePath.endsWith(".spec.ts"),
+        ).length
+        const inspectedCount = Math.max(maxInspectedCount, nonTestFileCount)
+        const report = makeSelfDogfoodingReport(
+          allViolations,
+          NonNegativeCount.make(inspectedCount),
+        )
+
         if (options?.failOnViolation === true && allViolations.length > 0) {
           return yield* new SelfDogfoodingViolationError({
             message: SelfDogfoodingMessage.make(
@@ -82,6 +101,7 @@ export const makeGatePluginRegistryLayer = (
         return report
       }),
   })
+}
 
 export const GatePluginRegistryLive: Layer.Layer<GatePluginRegistry> =
   makeGatePluginRegistryLayer(DEFAULT_GATE_PLUGINS)
@@ -100,38 +120,17 @@ export const evaluateAllGatePlugins = Effect.fn("GatePluginRunner.evaluateAll")(
   GatePluginRegistry | WorkspaceFs
 > {
   const registry = yield* GatePluginRegistry
-  const fs = yield* WorkspaceFs
-  const plugins = yield* registry.listPlugins
-
   const loadedFiles: Array<SelfDogfoodingFileInput> = []
   for (const filePath of input.filePaths) {
-    const content = yield* fs.readTextFile(filePath)
+    const fileStat = yield* readAndVerifyWorkspaceFile(filePath)
     loadedFiles.push({
       filePath: AstSourceFilePath.make(filePath),
-      content: AstSourceContent.make(content),
+      content: AstSourceContent.make(fileStat.content),
     })
   }
 
-  const allViolations: Array<SelfDogfoodingViolation> = []
-  for (const plugin of plugins) {
-    const report = yield* plugin.evaluate(loadedFiles, input.maxPluginFileLines)
-    allViolations.push(...report.violations)
-  }
-
-  const report: SelfDogfoodingReport = {
-    verdict: GateVerdict.make(allViolations.length === 0 ? "clean" : "violated"),
-    violations: allViolations,
-    inspectedFileCount: NonNegativeCount.make(loadedFiles.length),
-  }
-
-  if (input.failOnViolation === true && allViolations.length > 0) {
-    return yield* new SelfDogfoodingViolationError({
-      message: SelfDogfoodingMessage.make(
-        `GatePluginRunner.evaluateAll found ${allViolations.length} violation(s) across ${plugins.length} plugin(s).`,
-      ),
-      violations: allViolations,
-    })
-  }
-
-  return report
+  return yield* registry.evaluateFiles(loadedFiles, {
+    maxPluginFileLines: input.maxPluginFileLines,
+    failOnViolation: input.failOnViolation,
+  })
 })

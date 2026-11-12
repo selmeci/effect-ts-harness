@@ -13,6 +13,7 @@ import {
   TsCompilerOverlayServiceLive,
 } from "../src/services/ts-compiler-overlay-service.js"
 import { resolveNode } from "../src/graph-engine.js"
+import { type TypeScriptProgramSession } from "../src/type-extractor.js"
 
 describe("TsCompilerOverlayService (harness:SPEC-0011 §3)", () => {
   it.effect(
@@ -20,62 +21,157 @@ describe("TsCompilerOverlayService (harness:SPEC-0011 §3)", () => {
     () =>
       Effect.gen(function* () {
         const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "harness-overlay-ws-"))
-        const sampleSrcDir = path.join(tmpRoot, "libs", "sample", "domain", "src")
-        fs.mkdirSync(sampleSrcDir, { recursive: true })
-        fs.writeFileSync(
-          path.join(sampleSrcDir, "index.ts"),
-          `import { Effect } from "effect"\nexport const base = Effect.fn("Sample.base")(function* () { return yield* Effect.succeed(1) })\n`,
-          "utf-8",
-        )
+        try {
+          const sampleSrcDir = path.join(tmpRoot, "libs", "sample", "domain", "src")
+          fs.mkdirSync(sampleSrcDir, { recursive: true })
+          fs.writeFileSync(
+            path.join(sampleSrcDir, "index.ts"),
+            `import { Effect } from "effect"\nexport const base = Effect.fn("Sample.base")(function* () { return yield* Effect.succeed(1) })\n`,
+            "utf-8",
+          )
 
-        const fnIndex = new Map<string, IndexedEffectFn>([
-          [
-            "TsCompilerOverlay.extractGraph",
-            {
-              spanName: "TsCompilerOverlay.extractGraph",
-              exportName: "extractGraphViaCompilerOverlay",
-              qualname:
-                "libs/harness/graph/src/services/ts-compiler-overlay-service.ts#extractGraphViaCompilerOverlay",
-              file: "libs/harness/graph/src/services/ts-compiler-overlay-service.ts",
-              packageTag: "service",
-              line: 91,
-              isStub: false,
-            },
-          ],
-        ])
+          const fnIndex = new Map<string, IndexedEffectFn>([
+            [
+              "TsCompilerOverlay.extractGraph",
+              {
+                spanName: "TsCompilerOverlay.extractGraph",
+                exportName: "extractGraphViaCompilerOverlay",
+                qualname:
+                  "libs/harness/graph/src/services/ts-compiler-overlay-service.ts#extractGraphViaCompilerOverlay",
+                file: "libs/harness/graph/src/services/ts-compiler-overlay-service.ts",
+                packageTag: "service",
+                line: 91,
+                isStub: false,
+              },
+            ],
+          ])
 
-        const overlayContent = `import { Effect } from "effect"\nexport const ping = Effect.fn("Sample.ping")(function* () { return yield* Effect.succeed(2) })\n`
+          const overlayContent = `import { Effect } from "effect"\nexport const ping = Effect.fn("Sample.ping")(function* () { return yield* Effect.succeed(2) })\n`
 
-        const { result: graph, spans } = yield* runWithTestTracer(
-          "libs/harness/graph/test/ts-compiler-overlay-service.test.ts::REQ-3.1",
-          TsCompilerOverlay.extractGraph({
-            repoRoot: tmpRoot,
-            overlays: {
-              "libs/sample/domain/src/index.ts": overlayContent,
-            },
-          }),
-          fnIndex,
-        )
+          const { result: graph, spans } = yield* runWithTestTracer(
+            "libs/harness/graph/test/ts-compiler-overlay-service.test.ts::REQ-3.1",
+            TsCompilerOverlay.extractGraph({
+              repoRoot: tmpRoot,
+              overlays: {
+                "libs/sample/domain/src/index.ts": overlayContent,
+              },
+            }),
+            fnIndex,
+          )
 
-        const resolvedPing = resolveNode(graph, "Sample.ping")
-        expect(resolvedPing?._tag).toBe("EffectFn")
-        if (resolvedPing?._tag === "EffectFn") {
-          expect(resolvedPing.qualname).toContain("ping")
+          const resolvedPing = resolveNode(graph, "Sample.ping")
+          expect(resolvedPing?._tag).toBe("EffectFn")
+          if (resolvedPing?._tag === "EffectFn") {
+            expect(resolvedPing.qualname).toContain("ping")
+          }
+
+          const overlaySpans = spans.filter((s) => s.name === "TsCompilerOverlay.extractGraph")
+          expect(overlaySpans.length).toBeGreaterThanOrEqual(1)
+          expect(overlaySpans.length).toBeLessThanOrEqual(3)
+          expect(overlaySpans[0]?.exitTag).toBe("Success")
+
+          // Also verify getSession returns a warm TypeScriptProgramSession for a valid CompilerRepoRootPath
+          const svc = yield* TsCompilerOverlayService
+          const validRoot = CompilerRepoRootPath.make(tmpRoot)
+          const session = yield* svc.getSession(validRoot)
+
+          expect(session.repoRoot).toBe(path.resolve(tmpRoot))
+          expect(session.sourceFileCache.size).toBeGreaterThanOrEqual(1)
+
+          // Verify dot path resolves to the exact same warm session instance
+          const dotSession = yield* svc.getSession(CompilerRepoRootPath.make(`${tmpRoot}/.`))
+          expect(dotSession).toBe(session)
+        } finally {
+          fs.rmSync(tmpRoot, { recursive: true, force: true })
         }
-
-        const overlaySpans = spans.filter((s) => s.name === "TsCompilerOverlay.extractGraph")
-        expect(overlaySpans.length).toBeGreaterThanOrEqual(1)
-        expect(overlaySpans.length).toBeLessThanOrEqual(3)
-        expect(overlaySpans[0]?.exitTag).toBe("Success")
-
-        // Also verify getSession returns a warm TypeScriptProgramSession for a valid CompilerRepoRootPath
-        const svc = yield* TsCompilerOverlayService
-        const validRoot = CompilerRepoRootPath.make(tmpRoot)
-        const session = yield* svc.getSession(validRoot)
-
-        expect(session.repoRoot).toBe(tmpRoot)
-        expect(session.sourceFileCache.size).toBeGreaterThanOrEqual(1)
       }).pipe(Effect.provide(TsCompilerOverlayServiceLive)),
+  )
+
+  it.effect(
+    "REQ-3.1: getSession returns identical session reference for canonical and dot/relative repo root paths",
+    () =>
+      Effect.gen(function* () {
+        const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "harness-overlay-resolve-test-"))
+        try {
+          const sampleSrcDir = path.join(tmpRoot, "libs", "sample", "domain", "src")
+          fs.mkdirSync(sampleSrcDir, { recursive: true })
+          fs.writeFileSync(
+            path.join(sampleSrcDir, "index.ts"),
+            `export const x = 1\n`,
+            "utf-8",
+          )
+
+          const svc = yield* TsCompilerOverlayService
+          const session1 = yield* svc.getSession(CompilerRepoRootPath.make(tmpRoot))
+          const session2 = yield* svc.getSession(CompilerRepoRootPath.make(`${tmpRoot}/.`))
+
+          expect(session2).toBe(session1)
+        } finally {
+          fs.rmSync(tmpRoot, { recursive: true, force: true })
+        }
+      }).pipe(Effect.provide(TsCompilerOverlayServiceLive)),
+  )
+
+  it.effect(
+    "REQ-3.1: closing TsCompilerOverlayServiceLive scope clears internally owned sessions but preserves caller-supplied external sessions",
+    () =>
+      Effect.gen(function* () {
+        const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "harness-overlay-scope-test-"))
+        try {
+          const sampleSrcDir = path.join(tmpRoot, "libs", "sample", "domain", "src")
+          fs.mkdirSync(sampleSrcDir, { recursive: true })
+          fs.writeFileSync(
+            path.join(sampleSrcDir, "index.ts"),
+            `import { Effect } from "effect"\nexport const base = Effect.fn("Sample.base")(function* () { return yield* Effect.succeed(1) })\n`,
+            "utf-8",
+          )
+
+          const externalSession: TypeScriptProgramSession = {
+            repoRoot: tmpRoot,
+            sourceFileCache: new Map([
+              [
+                "external-key",
+                {
+                  contentSha256: "abc",
+                  declHash: "def",
+                  importedSpecs: [],
+                },
+              ],
+            ]),
+            fileFragmentCache: new Map(),
+            reverseImportsByFile: new Map(),
+            lastReextractedFiles: [],
+            signatureCleanCutoffCount: 0,
+            warmHitCount: 0,
+          }
+
+          let internalSessionRef: TypeScriptProgramSession | undefined
+
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const svc = yield* TsCompilerOverlayService
+              const session = yield* svc.getSession(CompilerRepoRootPath.make(tmpRoot))
+              internalSessionRef = session
+              session.sourceFileCache.set("internal-key", {
+                contentSha256: "123",
+                declHash: "456",
+                importedSpecs: [],
+              })
+
+              yield* TsCompilerOverlay.extractGraph({
+                repoRoot: tmpRoot,
+                session: externalSession,
+              })
+            }).pipe(Effect.provide(TsCompilerOverlayServiceLive)),
+          )
+
+          expect(internalSessionRef?.sourceFileCache.size).toBe(0)
+          expect(externalSession.sourceFileCache.size).toBeGreaterThanOrEqual(1)
+          expect(externalSession.sourceFileCache.has("libs/sample/domain/src/index.ts")).toBe(true)
+        } finally {
+          fs.rmSync(tmpRoot, { recursive: true, force: true })
+        }
+      }),
   )
 
   it.effect(
