@@ -104,6 +104,12 @@ import {
   writeVerifyStamp,
 } from "@harness/gates"
 import {
+  CliCommandName,
+  dispatchCliCommand,
+  type HarnessCommandRegistry,
+  makeHarnessCommandRegistryLayer,
+} from "./commands/command-registry.js"
+import {
   BisectionProbeCount,
   checkEffectGraph,
   clearWarmProgramSessions,
@@ -3546,6 +3552,93 @@ const handleRepair = (
     ),
   )
 
+export const makeLiveCliCommandRegistryLayer = (
+  options?: CliEnv,
+  decisionLayer: Layer.Layer<DecisionModel.DecisionModel> = LocalDecisionModel,
+): Layer.Layer<HarnessCommandRegistry> =>
+  makeHarnessCommandRegistryLayer([
+    {
+      name: CliCommandName.make("guard"),
+      summary: "Evaluate deterministic command and file-write guard policies.",
+      execute: (args) => handleGuard(args, options, decisionLayer),
+    },
+    {
+      name: CliCommandName.make("route"),
+      summary: "Route a plan step to canonical agent-patterns/*.md documentation.",
+      execute: (args) => handleRoute(args, options, decisionLayer),
+    },
+    {
+      name: CliCommandName.make("plan-check"),
+      summary: "Validate compilable stub<A,E,R>() skeletons and snapshot plan/current.",
+      execute: (args) => handlePlanCheck(args, options),
+    },
+    {
+      name: CliCommandName.make("plan-synth"),
+      summary: "Synthesize plan graph patches via Double-Pushout (DPO) rules.",
+      execute: (args) => handlePlanSynth(args, options),
+    },
+    {
+      name: CliCommandName.make("repair"),
+      summary: "Repair architectural and code antipatterns via DPO rules.",
+      execute: (args) => handleRepair(args, options),
+    },
+    {
+      name: CliCommandName.make("verify"),
+      summary: "Execute affected verify targets, check span budgets, and write verify-stamp.json.",
+      execute: () => handleVerify(options, decisionLayer),
+    },
+    {
+      name: CliCommandName.make("done"),
+      summary: "Verify stamp freshness, diff plan vs impl graph, and merge impl/current to main.",
+      execute: (args) => handleDone(args, options, decisionLayer),
+    },
+    {
+      name: CliCommandName.make("learn"),
+      summary: "Cluster friction-log.jsonl events and propose deterministic promotions.",
+      execute: (args) => handleLearn(args, options, decisionLayer),
+    },
+    {
+      name: CliCommandName.make("gc"),
+      summary: "Run zero-entropy graph garbage collection and governance lint.",
+      execute: (args) => handleGc(args, options),
+    },
+    {
+      name: CliCommandName.make("mutate"),
+      summary: "Run in-process Mutant Schemata and saturation verification over domain code.",
+      execute: (args) => handleMutate(args.slice(1), options),
+    },
+    {
+      name: CliCommandName.make("bench"),
+      summary: "Measure harness stage latencies and enforce p50/p95 SLO budgets.",
+      execute: (args) => handleBench(args.slice(1), options),
+    },
+    {
+      name: CliCommandName.make("ingest"),
+      summary: "Ingest runtime trace NDJSON events into Omnigraph.",
+      execute: (args) => handleIngest(args, options),
+    },
+    {
+      name: CliCommandName.make("session"),
+      summary: "Inspect active session handoff state and inject pending stubs.",
+      execute: (args) => handleDoctorOrSession(args, options, decisionLayer),
+    },
+    {
+      name: CliCommandName.make("doctor"),
+      summary: "Run workspace health diagnostics and session recovery checks.",
+      execute: (args) => handleDoctorOrSession(args, options, decisionLayer),
+    },
+    {
+      name: CliCommandName.make("ontology"),
+      summary: "Audit ArchiMate 3.2 cross-layer traceability and semantic conflicts.",
+      execute: (args) => handleOntology(args, options, decisionLayer),
+    },
+    {
+      name: CliCommandName.make("report"),
+      summary: "Generate session telemetry and friction report.",
+      execute: (args) => handleReport(args, options),
+    },
+  ])
+
 export const runCliEffect = (
   argv: ReadonlyArray<string>,
   options?: CliEnv,
@@ -3589,25 +3682,21 @@ export const runCliEffect = (
       return yield* handleReport(argv, options)
     }
 
-    const resEffect: Effect.Effect<CliResult> = match(requested)
-      .with("guard", () => handleGuard(argv, options, decisionLayer))
-      .with("route", () => handleRoute(argv, options, decisionLayer))
-      .with("plan-check", () => handlePlanCheck(argv, options))
-      .with("plan-synth", () => handlePlanSynth(argv, options))
-      .with("repair", () => handleRepair(argv, options))
-      .with("verify", () => handleVerify(options, decisionLayer))
-      .with("done", () => handleDone(argv, options, decisionLayer))
-      .with("learn", () => handleLearn(argv, options, decisionLayer))
-      .with("gc", () => handleGc(argv, options))
-      .with("mutate", () => handleMutate(argv.slice(1), options))
-      .with("bench", () => handleBench(argv.slice(1), options))
-      .with("ingest", () => handleIngest(argv, options))
-      .with("session", "doctor", () => handleDoctorOrSession(argv, options, decisionLayer))
-      .with("ontology", () => handleOntology(argv, options, decisionLayer))
-      .exhaustive()
-
+    const liveCommandLayer = makeLiveCliCommandRegistryLayer(options, decisionLayer)
     const startTime = performance.now()
-    const res = yield* resEffect
+    const res: CliResult = yield* dispatchCliCommand({
+      command: requested,
+      args: argv,
+    }).pipe(
+      Effect.provide(liveCommandLayer),
+      Effect.catchTag("CliCommandNotFoundError", (e) =>
+        Effect.succeed<CliResult>({
+          exitCode: 1,
+          stdout: "",
+          stderr: `unknown command: ${e.command}\nusage: harness <${COMMANDS.join("|")}>`,
+        }),
+      ),
+    )
     const durationMs = Math.max(0, Math.round(performance.now() - startTime))
 
     const surface: TelemetrySurface =

@@ -2,6 +2,8 @@ import { execFileSync, spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { join, relative } from "node:path"
 import { Effect, Schema } from "effect"
+import { ActiveMutantId } from "./plugins/self-dogfooding-contract.js"
+import { ActiveMutantContextLive, withActiveMutantEffect } from "./services/active-mutant-context.js"
 
 
 export type MutantCategory =
@@ -916,10 +918,18 @@ export const runDomainMutationSuite = (
     }
 
     if (options?.testRunner !== undefined) {
-      for (const mutant of mutants) {
-        const status = options.testRunner(mutant, schemaBundle.schemaSource, reachingTestFiles)
-        outcomes.push({ mutant, status })
-      }
+      const runner = options.testRunner
+      Effect.runSync(
+        Effect.gen(function* () {
+          for (const mutant of mutants) {
+            const killed = yield* withActiveMutantEffect(
+              ActiveMutantId.make(mutant.id),
+              () => runner(mutant, schemaBundle.schemaSource, reachingTestFiles) === "killed",
+            )
+            outcomes.push({ mutant, status: killed ? "killed" : "survived" })
+          }
+        }).pipe(Effect.provide(ActiveMutantContextLive)),
+      )
       continue
     }
 

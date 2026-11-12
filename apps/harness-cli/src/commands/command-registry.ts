@@ -19,6 +19,7 @@ export interface CliCommandPluginResult {
   readonly exitCode: number
   readonly stdout: string
   readonly stderr: string
+  readonly telemetryDetail?: string | undefined
 }
 
 export interface CliCommandPluginDescriptor {
