@@ -1,15 +1,92 @@
+/**
+ * @file ast-gate-visitors.ts
+ * Single-pass AST visitor and leaf gate schema definitions for Effect-TS Engineering Harness.
+ *
+ * Traverses TypeScript ASTs once to enforce architectural invariants across 5 gate categories:
+ * 1. syntax-bans:
+ *    - node-sqlite-in-infra: Bans node:sqlite, sqlite, better-sqlite3 in infra/app code
+ *    - discriminant-branching: Bans switch statements (use ts-pattern match(...).exhaustive())
+ *    - unsafe-type-cast: Bans 'as any', 'as never', and double assertions 'as unknown as T'
+ *    - ast-grep-tsx-grammar: Bans hardcoded Lang.TypeScript parser on .tsx files
+ * 2. test-integrity:
+ *    - node-sqlite-in-infra: Bans node:sqlite mocks in test files
+ *    - vacuous-error-assertion: Bans unverified Exit.isFailure checks lacking cause inspection
+ *    - fallback-json-equality: Bans JSON.stringify equality comparisons in tests
+ * 3. migration-safety:
+ *    - unmanaged-sql-ddl: Bans raw SQL DDL outside SqliteMigrator.fromRecord in infra
+ *    - unsafe-sql-migration: Flags destructive SQL statements (DROP, table rebuilds, un-defaulted NOT NULL)
+ * 4. domain-purity:
+ *    - impure-domain-import: Bans node I/O, Drizzle, SQL, and Alchemy imports in domain/contract packages
+ *    - domain-effect-ignore: Bans Effect.ignore in domain logic swallowing typed errors
+ *    - unscoped-effect-run: Bans Effect.runSync/runPromise/runFork outside app edge runtime
+ * 5. effect-laws:
+ *    - effect-fn-dummy-void: Bans dummy 'yield* Effect.void' in generator functions
+ *    - discriminant-branching: Bans if/ternary discriminant or Option/Either/Exit/Result guard inspection
+ *    - non-exhaustive-union-match: Bans match(...).run() in favor of .exhaustive()
+ */
+
+import { Schema } from "effect"
 import { ts } from "@harness/graph"
-import {
-  AstGatePackageTag,
-  AstSourceFilePath,
-  EnclosingSymbolName,
-  GateCategory,
-  GateRuleId,
-  GateViolation,
-  GateViolationMessage,
-  SourceLineNumber,
-} from "../ast-cache.js"
 import { checkMigrationSqlSafety } from "../migration-check.js"
+
+export const GateRuleVersion = Schema.NonEmptyString.pipe(Schema.brand("GateRuleVersion"))
+export type GateRuleVersion = typeof GateRuleVersion.Type
+export const AstRuleVersion = GateRuleVersion
+export type AstRuleVersion = typeof AstRuleVersion.Type
+export const HARNESS_GATE_RULE_VERSION: GateRuleVersion = GateRuleVersion.make("ast-gates-v2")
+
+export const AstSourceFilePath = Schema.NonEmptyString.pipe(Schema.brand("AstSourceFilePath"))
+export type AstSourceFilePath = typeof AstSourceFilePath.Type
+
+export const ContentSha256 = Schema.NonEmptyString.pipe(Schema.brand("ContentSha256"))
+export type ContentSha256 = typeof ContentSha256.Type
+export const AstContentSha256 = ContentSha256
+export type AstContentSha256 = typeof AstContentSha256.Type
+
+export const AstSourceContent = Schema.String.pipe(Schema.brand("AstSourceContent"))
+export type AstSourceContent = typeof AstSourceContent.Type
+
+export const GateCategory = Schema.Literals([
+  "syntax-bans", "test-integrity", "migration-safety", "domain-purity", "effect-laws",
+]).pipe(Schema.brand("GateCategory"))
+export type GateCategory = typeof GateCategory.Type
+export const AstGateCategory = GateCategory
+export type AstGateCategory = typeof AstGateCategory.Type
+export const GateViolationCategory = GateCategory
+export type GateViolationCategory = typeof GateViolationCategory.Type
+
+export const GateRuleId = Schema.NonEmptyString.pipe(Schema.brand("GateRuleId"))
+export type GateRuleId = typeof GateRuleId.Type
+
+export const GateViolationMessage = Schema.NonEmptyString.pipe(Schema.brand("GateViolationMessage"))
+export type GateViolationMessage = typeof GateViolationMessage.Type
+
+export const SourceLineNumber = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(1)),
+  Schema.brand("SourceLineNumber"),
+)
+export type SourceLineNumber = typeof SourceLineNumber.Type
+
+export const EnclosingSymbolName = Schema.NonEmptyString.pipe(Schema.brand("EnclosingSymbolName"))
+export type EnclosingSymbolName = typeof EnclosingSymbolName.Type
+
+export const GateVerdict = Schema.Literals(["clean", "violated"]).pipe(Schema.brand("GateVerdict"))
+export type GateVerdict = typeof GateVerdict.Type
+
+export const AstGatePackageTag = Schema.Literals([
+  "contract", "domain", "service", "infra", "app", "test",
+]).pipe(Schema.brand("AstGatePackageTag"))
+export type AstGatePackageTag = typeof AstGatePackageTag.Type
+
+export const GateViolation = Schema.Struct({
+  category: GateCategory,
+  rule: GateRuleId,
+  message: GateViolationMessage,
+  file: AstSourceFilePath,
+  line: SourceLineNumber,
+  enclosingSymbol: EnclosingSymbolName,
+})
+export type GateViolation = typeof GateViolation.Type
 
 export const SUSPICIOUS_SQL_DDL_REGEX =
   /\b(?:CREATE\s+(?:TEMP\s+|TEMPORARY\s+)?(?:TABLE|INDEX|UNIQUE\s+INDEX|VIEW|TRIGGER)|ALTER\s+TABLE|DROP\s+(?:TABLE|INDEX|VIEW|TRIGGER))\b/i
@@ -42,12 +119,8 @@ export const getLineNumber = (sourceFile: ts.SourceFile, pos: number): SourceLin
 export const resolveEnclosingSymbol = (node: ts.Node, filePath: string): EnclosingSymbolName => {
   let curr: ts.Node | undefined = node
   while (curr !== undefined) {
-    if (ts.isVariableDeclaration(curr) && ts.isIdentifier(curr.name)) {
-      return EnclosingSymbolName.make(`${filePath}#${curr.name.text}`)
-    }
-    if ((ts.isFunctionDeclaration(curr) || ts.isClassDeclaration(curr)) && curr.name !== undefined) {
-      return EnclosingSymbolName.make(`${filePath}#${curr.name.text}`)
-    }
+    if (ts.isVariableDeclaration(curr) && ts.isIdentifier(curr.name)) return EnclosingSymbolName.make(`${filePath}#${curr.name.text}`)
+    if ((ts.isFunctionDeclaration(curr) || ts.isClassDeclaration(curr)) && curr.name !== undefined) return EnclosingSymbolName.make(`${filePath}#${curr.name.text}`)
     curr = curr.parent
   }
   return EnclosingSymbolName.make(filePath)
@@ -71,22 +144,15 @@ export const isDummyEffectVoidYield = (
   sourceFile: ts.SourceFile,
 ): boolean => {
   const inner = unwrapAstExpression(expr)
-  if (
-    ts.isPropertyAccessExpression(inner) &&
-    inner.expression.getText(sourceFile).trim() === "Effect" &&
-    inner.name.text === "void"
-  ) {
-    return true
-  }
-  if (
-    ts.isCallExpression(inner) &&
-    ts.isPropertyAccessExpression(inner.expression) &&
-    inner.expression.expression.getText(sourceFile).trim() === "Effect" &&
-    inner.expression.name.text === "asVoid"
-  ) {
-    return true
-  }
-  return false
+  return (
+    (ts.isPropertyAccessExpression(inner) &&
+      inner.expression.getText(sourceFile).trim() === "Effect" &&
+      inner.name.text === "void") ||
+    (ts.isCallExpression(inner) &&
+      ts.isPropertyAccessExpression(inner.expression) &&
+      inner.expression.expression.getText(sourceFile).trim() === "Effect" &&
+      inner.expression.name.text === "asVoid")
+  )
 }
 
 const isAstGatePackageTag = (val: string): val is AstGatePackageTag =>
@@ -95,9 +161,7 @@ const isAstGatePackageTag = (val: string): val is AstGatePackageTag =>
 
 export const inferPackageTagFromPath = (filePath: string): AstGatePackageTag => {
   if (filePath.includes("/contract/")) return AstGatePackageTag.make("contract")
-  if (filePath.includes("/domain/") || filePath.includes("/core/")) {
-    return AstGatePackageTag.make("domain")
-  }
+  if (filePath.includes("/domain/") || filePath.includes("/core/")) return AstGatePackageTag.make("domain")
   if (filePath.includes("/service/")) return AstGatePackageTag.make("service")
   if (filePath.includes("/infra/")) return AstGatePackageTag.make("infra")
   return AstGatePackageTag.make("app")
@@ -106,16 +170,8 @@ export const inferPackageTagFromPath = (filePath: string): AstGatePackageTag => 
 const isInsideMigrationsRecord = (node: ts.Node, sourceFile: ts.SourceFile): boolean => {
   let curr: ts.Node | undefined = node.parent
   while (curr !== undefined) {
-    if (ts.isCallExpression(curr) && curr.expression.getText(sourceFile).endsWith("fromRecord")) {
-      return true
-    }
-    if (
-      ts.isVariableDeclaration(curr) &&
-      ts.isIdentifier(curr.name) &&
-      /migrations/i.test(curr.name.text)
-    ) {
-      return true
-    }
+    if (ts.isCallExpression(curr) && curr.expression.getText(sourceFile).endsWith("fromRecord")) return true
+    if (ts.isVariableDeclaration(curr) && ts.isIdentifier(curr.name) && /migrations/i.test(curr.name.text)) return true
     curr = curr.parent
   }
   return false

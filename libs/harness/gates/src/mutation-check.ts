@@ -1,3 +1,6 @@
+/**
+ * @fileoverview Mutation verification gate, mutant discovery, test execution, and span saturation analysis.
+ */
 import { execFileSync } from "node:child_process"
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { join, relative, resolve } from "node:path"
@@ -6,18 +9,13 @@ import {
   ActiveMutantId, SubprocessArg, SubprocessCommand, SubprocessTimeoutMs, WorkspaceFilePath,
 } from "./plugins/self-dogfooding-contract.js"
 import {
-  ActiveMutantContext, ActiveMutantContextLive, withActiveMutantEffect,
+  ActiveMutantContext, ActiveMutantContextLive, getActiveMutantId, setActiveMutantId, withActiveMutantEffect,
 } from "./services/active-mutant-context.js"
-import {
-  execCheckedSubprocess, HarnessSubprocessRunnerLive,
-} from "./services/subprocess-runner.js"
-import {
-  readAndVerifyWorkspaceFile, WorkspaceFsLive,
-} from "./services/workspace-fs.js"
+import { execCheckedSubprocess, HarnessSubprocessRunnerLive } from "./services/subprocess-runner.js"
+import { readAndVerifyWorkspaceFile, WorkspaceFsLive } from "./services/workspace-fs.js"
 import {
   CodeMutant, compileMutantSchemaModule, discoverDomainMutants, evaluateMutantSchemaInProcess,
-  getActiveMutantId, MutantCategory, MutantOutcome, type MutantSchemaModule,
-  parseGitDiffModifiedLines, setActiveMutantId,
+  MutantCategory, MutantOutcome, type MutantSchemaModule, parseGitDiffModifiedLines,
 } from "./mutation/mutant-ast-generator.js"
 
 export {
@@ -25,8 +23,6 @@ export {
   getActiveMutantId, setActiveMutantId, parseGitDiffModifiedLines,
   discoverDomainMutants, compileMutantSchemaModule, evaluateMutantSchemaInProcess,
 }
-
-export const execSubprocessChecked = execCheckedSubprocess
 
 export interface SpanSaturationSpec {
   readonly spanQualname: string
@@ -216,6 +212,10 @@ export const decideMutationReport = Effect.fn("MutationCheck.decide")(function* 
   } satisfies MutationSuiteReport)
 })
 
+/**
+ * Decides whether the mutation suite report passes based on killed mutants,
+ * minimum score threshold, equivalence priors, and span saturation specifications.
+ */
 export const decideMutationCheck = decideMutationReport
 
 export const evaluateMutationOutcomes = (
@@ -255,12 +255,12 @@ const findDomainFiles = (repoRoot: string, scope?: string): ReadonlyArray<Domain
 
   for (const s of scopes) {
     const scopePath = join(libsDir, s)
-    const tiersToScan: ReadonlyArray<{ readonly dir: string; readonly tier: "domain" | "core" | "contract" }> = [
-      { dir: join(scopePath, "domain", "src"), tier: "domain" },
-      { dir: join(scopePath, "domain", "test", "fixtures"), tier: "domain" },
-      { dir: join(scopePath, "core", "src"), tier: "core" },
-      { dir: join(scopePath, "core", "test", "fixtures"), tier: "core" },
-      { dir: join(scopePath, "contract", "src"), tier: "contract" },
+    const tiersToScan = [
+      { dir: join(scopePath, "domain", "src"), tier: "domain" as const },
+      { dir: join(scopePath, "domain", "test", "fixtures"), tier: "domain" as const },
+      { dir: join(scopePath, "core", "src"), tier: "core" as const },
+      { dir: join(scopePath, "core", "test", "fixtures"), tier: "core" as const },
+      { dir: join(scopePath, "contract", "src"), tier: "contract" as const },
     ]
 
     for (const { dir, tier } of tiersToScan) {
@@ -309,10 +309,7 @@ export const extractGitDiffModifiedLines = (
 
   const primaryDiff = trySyncOrElse<string | null>(
     () => execFileSync("git", ["diff", "-U0"], gitOpts),
-    () => trySyncOrElse<string | null>(
-      () => execFileSync("git", ["diff", "-U0", "HEAD"], gitOpts),
-      () => null,
-    ),
+    () => trySyncOrElse<string | null>(() => execFileSync("git", ["diff", "-U0", "HEAD"], gitOpts), () => null),
   )
   if (primaryDiff === null) return new Map<string, ReadonlySet<number>>()
 
@@ -348,13 +345,7 @@ export interface RunMutationOptions {
   readonly scope?: string | undefined
   readonly includeAllLines?: boolean | undefined
   readonly minScore?: number | undefined
-  readonly testRunner?:
-    | ((
-        mutant: CodeMutant,
-        schemaSource: string,
-        reachingTestFiles: ReadonlyArray<string>,
-      ) => "killed" | "survived")
-    | undefined
+  readonly testRunner?: ((mutant: CodeMutant, schemaSource: string, reachingTestFiles: ReadonlyArray<string>) => "killed" | "survived") | undefined
   readonly spanObservations?: ReadonlyArray<SpanSaturationObservation> | undefined
   readonly saturationSpecs?: ReadonlyArray<SpanSaturationSpec> | undefined
   readonly equivalencePriors?: Readonly<Record<string, number>> | undefined
@@ -475,38 +466,45 @@ export const runDomainMutationSuite = (
     if (!existsSync(harnessDir)) mkdirSync(harnessDir, { recursive: true })
     writeFileSync(backupPath, JSON.stringify({ filePath: file.fullPath, originalSource }), "utf8")
     const onProcessExit = () => {
-      trySyncOrElse(
-        () => {
-          writeFileSync(file.fullPath, originalSource, "utf8")
-          if (existsSync(backupPath)) unlinkSync(backupPath)
-        },
-        () => undefined,
-      )
+      trySyncOrElse(() => {
+        writeFileSync(file.fullPath, originalSource, "utf8")
+        if (existsSync(backupPath)) unlinkSync(backupPath)
+      }, () => undefined)
     }
     const onSigInt = () => { onProcessExit(); process.exit(130) }
     const onSigTerm = () => { onProcessExit(); process.exit(143) }
-    process.once("exit", onProcessExit)
-    process.once("SIGINT", onSigInt)
-    process.once("SIGTERM", onSigTerm)
+    process.once("exit", onProcessExit); process.once("SIGINT", onSigInt); process.once("SIGTERM", onSigTerm)
     Effect.runSync(
       Effect.gen(function* () {
         const mutantCtx = yield* ActiveMutantContext
         writeFileSync(file.fullPath, schemaBundle.schemaSource, "utf8")
         for (const mutant of mutants) {
-          const runSubprocess = execCheckedSubprocess({
-            command: SubprocessCommand.make("pnpm"),
-            args: [
-              SubprocessArg.make("vitest"),
-              SubprocessArg.make("run"),
-              ...reachingTestFiles.map((f) => SubprocessArg.make(f)),
-            ],
-            cwd: WorkspaceFilePath.make(repoRoot),
-            timeoutMs: SubprocessTimeoutMs.make(30_000),
-          }).pipe(
-            Effect.map(() => "survived" as const),
-            Effect.catchTag("HarnessSubprocessError", (err) =>
-              Effect.succeed(err.exitCode !== 0 ? ("killed" as const) : ("survived" as const)),
-            ),
+          const runSubprocess = Effect.acquireUseRelease(
+            Effect.sync(() => {
+              const prev = process.env["HARNESS_ACTIVE_MUTANT_ID"]
+              process.env["HARNESS_ACTIVE_MUTANT_ID"] = mutant.id
+              return prev
+            }),
+            () =>
+              execCheckedSubprocess({
+                command: SubprocessCommand.make("pnpm"),
+                args: [SubprocessArg.make("vitest"), SubprocessArg.make("run"), ...reachingTestFiles.map((f) => SubprocessArg.make(f))],
+                cwd: WorkspaceFilePath.make(repoRoot),
+                timeoutMs: SubprocessTimeoutMs.make(30_000),
+              }).pipe(
+                Effect.map(() => "survived" as const),
+                Effect.catchTag("HarnessSubprocessError", (err) =>
+                  Effect.succeed(err.exitCode !== 0 ? ("killed" as const) : ("survived" as const)),
+                ),
+              ),
+            (prev) =>
+              Effect.sync(() => {
+                if (prev === undefined) {
+                  delete process.env["HARNESS_ACTIVE_MUTANT_ID"]
+                } else {
+                  process.env["HARNESS_ACTIVE_MUTANT_ID"] = prev
+                }
+              }),
           )
           const status = yield* mutantCtx.runWithMutant(ActiveMutantId.make(mutant.id), runSubprocess)
           outcomes.push({ mutant, status })

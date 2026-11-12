@@ -1,3 +1,16 @@
+/**
+ * GC Check Helpers, Schemas, and Reachability Context.
+ *
+ * Provides shared types, schemas, and AST/file utilities for garbage-collection
+ * and zero-entropy gates across all GC plugins.
+ *
+ * Types & Schemas:
+ * - GcFindingKind: Discriminated union of all 21 GC finding kinds.
+ * - GcFinding: Finding schema with nodeId, location, message, and action.
+ * - GovernanceDocRef: Reference schema for ADR and EARS governance docs.
+ * - GraphGcReport: Aggregated report schema with clean flag and findings.
+ * - GraphReachabilityContext: Indexed graph reachability and relation counts.
+ */
 import { type Dirent, existsSync, readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { Effect, Schema } from "effect"
@@ -61,11 +74,10 @@ export const IGNORED_ERRORS = new Set([
 
 export const IGNORED_UNTESTED_FNS = new Set([
   "Friction.decide", "GraphGc.decide", "MigrationSafety.decide", "MutationCheck.decide",
-  "SessionHandoff.decide", "SpanBudget.decide", "Harness.decideGuardCommand",
-  "Harness.routeStep", "Harness.proposeLearningAction", "Harness.checkPlanStepCoverage",
-  "Harness.triageFailure", "EarsSpecLint.decide", "AdrDocLint.decide",
-  "OntologyInvariants.decide", "SessionReport.decide", "Harness.checkOntologyPairConflict",
-  "Harness.evaluateOntologyConflicts", "HarnessMcp.executeTool",
+  "SessionHandoff.decide", "SpanBudget.decide", "Harness.decideGuardCommand", "Harness.routeStep",
+  "Harness.proposeLearningAction", "Harness.checkPlanStepCoverage", "Harness.triageFailure",
+  "EarsSpecLint.decide", "AdrDocLint.decide", "OntologyInvariants.decide", "SessionReport.decide",
+  "Harness.checkOntologyPairConflict", "Harness.evaluateOntologyConflicts", "HarnessMcp.executeTool",
 ])
 
 export interface GraphReachabilityContext {
@@ -90,10 +102,8 @@ export const buildGraphReachabilityContext = (harnessGraph: HarnessGraph): Graph
   const providedServiceIds = new Set<string>(), requiredServiceIds = new Set<string>()
   const producedErrorIds = new Set<string>(), handledErrorIds = new Set<string>(), reachableNodeIds = new Set<string>()
   const appEntryIndices: Array<Graph.NodeIndex> = [], exportedTestIndices: Array<Graph.NodeIndex> = []
-  const incomingRequires = new Map<Graph.NodeIndex, number>(), incomingLayerRequires = new Map<Graph.NodeIndex, number>()
-  const incomingProvides = new Map<Graph.NodeIndex, number>(), incomingFailsWith = new Map<Graph.NodeIndex, number>()
-  const incomingTestOrCall = new Map<Graph.NodeIndex, number>(), incomingPropertyTests = new Map<Graph.NodeIndex, number>()
-  const incomingRichPropertyTests = new Map<Graph.NodeIndex, number>()
+  const incomingRequires = new Map<Graph.NodeIndex, number>(), incomingLayerRequires = new Map<Graph.NodeIndex, number>(), incomingProvides = new Map<Graph.NodeIndex, number>()
+  const incomingFailsWith = new Map<Graph.NodeIndex, number>(), incomingTestOrCall = new Map<Graph.NodeIndex, number>(), incomingPropertyTests = new Map<Graph.NodeIndex, number>(), incomingRichPropertyTests = new Map<Graph.NodeIndex, number>()
   let hasVitestCases = false
 
   for (const [idx, node] of Graph.nodes(g)) {
@@ -259,17 +269,12 @@ const extractBalancedPair = (
     if (ch === "'" || ch === '"' || ch === "`") {
       const q = ch; i += 1
       while (i < text.length) {
-        if (text[i] === "\\") { i += 2; continue }
-        if (text[i] === q) { i += 1; break }
-        i += 1
+        if (text[i] === "\\") i += 2; else if (text[i] === q) { i += 1; break } else i += 1
       }
       continue
     }
     if (ch === openCh) depth++
-    else if (ch === closeCh) {
-      depth--
-      if (depth === 0) return { body: text.slice(openIdx + 1, i), endIndex: i }
-    }
+    else if (ch === closeCh && --depth === 0) return { body: text.slice(openIdx + 1, i), endIndex: i }
     i++
   }
   return undefined
@@ -296,9 +301,7 @@ export const extractTopLevelObjectAnalysis = (
     if (ch === "'" || ch === '"' || ch === "`") {
       const q = ch; i += 1
       while (i < objBody.length) {
-        if (objBody[i] === "\\") { i += 2; continue }
-        if (objBody[i] === q) { i += 1; break }
-        i += 1
+        if (objBody[i] === "\\") i += 2; else if (objBody[i] === q) { i += 1; break } else i += 1
       }
       continue
     }
@@ -339,16 +342,15 @@ export const parseGovernanceDocFrontmatter = (
     }
     currentListKey = null
     const kv = rawLine.match(/^([a-zA-Z0-9_-]+)\s*:(.*)$/)
-    if (kv) {
-      const key = kv[1]!.trim(), rest = kv[2]!.trim()
-      if (rest.startsWith("[") && rest.endsWith("]")) {
-        const inner = rest.slice(1, -1).trim()
-        lists.set(key, inner.length === 0 ? [] : inner.split(",").map(stripQuotes).filter((s) => s.length > 0))
-      } else if (rest === "") {
-        lists.set(key, []); currentListKey = key
-      } else {
-        scalars.set(key, stripQuotes(rest))
-      }
+    if (!kv) continue
+    const key = kv[1]!.trim(), rest = kv[2]!.trim()
+    if (rest.startsWith("[") && rest.endsWith("]")) {
+      const inner = rest.slice(1, -1).trim()
+      lists.set(key, inner.length === 0 ? [] : inner.split(",").map(stripQuotes).filter((s) => s.length > 0))
+    } else if (rest === "") {
+      lists.set(key, []); currentListKey = key
+    } else {
+      scalars.set(key, stripQuotes(rest))
     }
   }
 
@@ -377,14 +379,23 @@ export const parseGovernanceDocFrontmatter = (
 }
 
 export const safeFs = <T>(fn: () => T, fallback: T): T =>
-  Effect.runSync(Effect.try({ try: fn, catch: () => fallback }).pipe(Effect.orElseSucceed(() => fallback)))
+  Effect.runSync(
+    Effect.try({
+      try: fn,
+      catch: (err) => {
+        process.stderr.write(
+          `[harness:gc] Warning: filesystem operation failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        )
+        return fallback
+      },
+    }).pipe(Effect.orElseSucceed(() => fallback)),
+  )
 
 export const loadGovernanceDocsFromDisk = (repoRoot: string): ReadonlyArray<GovernanceDocReference> => {
   const relDirs: Array<string> = ["docs/adr", "docs/specs"]
   const listSubs = (p: string): ReadonlyArray<string> => {
     const full = join(repoRoot, p)
-    if (!existsSync(full)) return []
-    return safeFs<ReadonlyArray<Dirent>>(() => readdirSync(full, { withFileTypes: true }), [])
+    return !existsSync(full) ? [] : safeFs<ReadonlyArray<Dirent>>(() => readdirSync(full, { withFileTypes: true }), [])
       .filter((e) => e.isDirectory()).map((e) => e.name).sort((a, b) => a.localeCompare(b))
   }
   for (const s of listSubs("libs")) relDirs.push(`libs/${s}/docs/adr`, `libs/${s}/docs/specs`)
@@ -427,14 +438,9 @@ const collectWorkspaceFiles = (dir: string, predicate: (name: string) => boolean
   }, [])
 }
 
-export const collectWorkspaceTsFiles = (dir: string): ReadonlyArray<string> =>
-  collectWorkspaceFiles(dir, (n) => (n.endsWith(".ts") || n.endsWith(".tsx")) && !n.endsWith(".d.ts"))
-
-export const collectWorkspaceSqlFiles = (dir: string): ReadonlyArray<string> =>
-  collectWorkspaceFiles(dir, (n) => n.endsWith(".sql"))
-
-export const collectWorkspaceAllFiles = (dir: string): ReadonlyArray<string> =>
-  collectWorkspaceFiles(dir, () => true)
+export const collectWorkspaceTsFiles = (dir: string): ReadonlyArray<string> => collectWorkspaceFiles(dir, (n) => (n.endsWith(".ts") || n.endsWith(".tsx")) && !n.endsWith(".d.ts"))
+export const collectWorkspaceSqlFiles = (dir: string): ReadonlyArray<string> => collectWorkspaceFiles(dir, (n) => n.endsWith(".sql"))
+export const collectWorkspaceAllFiles = (dir: string): ReadonlyArray<string> => collectWorkspaceFiles(dir, () => true)
 
 export const collectModularPluginFiles = (repoRoot: string): ReadonlyArray<string> =>
   [...new Set([

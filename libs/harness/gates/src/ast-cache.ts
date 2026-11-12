@@ -1,3 +1,20 @@
+/**
+ * @file ast-cache.ts
+ * Content-addressable AST cache and category deciders for Effect-TS Engineering Harness.
+ *
+ * Implements an in-memory and disk-persisted cache keyed by file path, package tag,
+ * and SHA-256 content digest. Avoids redundant AST parses and visits across repetitive
+ * gate runs.
+ *
+ * Exposes Effect.fn deciders for each gate category:
+ * - AstGateCache.decide: Full multi-file AST evaluation across all 5 gate categories.
+ * - SyntaxBans.decide: Filters report to syntax-bans violations.
+ * - TestIntegrity.decide: Filters report to test-integrity violations.
+ * - DomainPurity.decide: Filters report to domain-purity violations.
+ * - EffectLaws.decide: Filters report to effect-laws violations.
+ * - MigrationSafety.decide: Re-exported from migration-check.ts for SQL DDL safety.
+ */
+
 import { createHash, randomUUID } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
@@ -6,6 +23,23 @@ import { match } from "ts-pattern"
 import { NonNegativeCount, ts } from "@harness/graph"
 import { decideMigrationSafety } from "./migration-check.js"
 import {
+  AstContentSha256,
+  AstGateCategory,
+  AstGatePackageTag,
+  AstRuleVersion,
+  AstSourceContent,
+  AstSourceFilePath,
+  ContentSha256,
+  EnclosingSymbolName,
+  GateCategory,
+  GateRuleId,
+  GateRuleVersion,
+  GateVerdict,
+  GateViolation,
+  GateViolationCategory,
+  GateViolationMessage,
+  HARNESS_GATE_RULE_VERSION,
+  SourceLineNumber,
   getLineNumber,
   inferPackageTagFromPath,
   isDummyEffectVoidYield,
@@ -19,74 +53,26 @@ import {
 } from "./plugins/ast-gate-visitors.js"
 import { resolveHarnessStateDir } from "./worktree.js"
 
-export const GateRuleVersion = Schema.NonEmptyString.pipe(Schema.brand("GateRuleVersion"))
-export type GateRuleVersion = typeof GateRuleVersion.Type
-export const AstRuleVersion = GateRuleVersion
-export type AstRuleVersion = typeof AstRuleVersion.Type
-
-export const HARNESS_GATE_RULE_VERSION: GateRuleVersion = GateRuleVersion.make("ast-gates-v2")
-
-export const AstSourceFilePath = Schema.NonEmptyString.pipe(Schema.brand("AstSourceFilePath"))
-export type AstSourceFilePath = typeof AstSourceFilePath.Type
-
-export const ContentSha256 = Schema.NonEmptyString.pipe(Schema.brand("ContentSha256"))
-export type ContentSha256 = typeof ContentSha256.Type
-export const AstContentSha256 = ContentSha256
-export type AstContentSha256 = typeof AstContentSha256.Type
-
-export const AstSourceContent = Schema.String.pipe(Schema.brand("AstSourceContent"))
-export type AstSourceContent = typeof AstSourceContent.Type
-
-export const GateCategory = Schema.Literals([
-  "syntax-bans",
-  "test-integrity",
-  "migration-safety",
-  "domain-purity",
-  "effect-laws",
-]).pipe(Schema.brand("GateCategory"))
-export type GateCategory = typeof GateCategory.Type
-export const AstGateCategory = GateCategory
-export type AstGateCategory = typeof AstGateCategory.Type
-export const GateViolationCategory = GateCategory
-export type GateViolationCategory = typeof GateViolationCategory.Type
-
-export const GateRuleId = Schema.NonEmptyString.pipe(Schema.brand("GateRuleId"))
-export type GateRuleId = typeof GateRuleId.Type
-
-export const GateViolationMessage = Schema.NonEmptyString.pipe(Schema.brand("GateViolationMessage"))
-export type GateViolationMessage = typeof GateViolationMessage.Type
-
-export const SourceLineNumber = Schema.Int.pipe(
-  Schema.check(Schema.isGreaterThanOrEqualTo(1)),
-  Schema.brand("SourceLineNumber"),
-)
-export type SourceLineNumber = typeof SourceLineNumber.Type
-
-export const EnclosingSymbolName = Schema.NonEmptyString.pipe(Schema.brand("EnclosingSymbolName"))
-export type EnclosingSymbolName = typeof EnclosingSymbolName.Type
-
-export const GateVerdict = Schema.Literals(["clean", "violated"]).pipe(Schema.brand("GateVerdict"))
-export type GateVerdict = typeof GateVerdict.Type
-
-export const AstGatePackageTag = Schema.Literals([
-  "contract",
-  "domain",
-  "service",
-  "infra",
-  "app",
-  "test",
-]).pipe(Schema.brand("AstGatePackageTag"))
-export type AstGatePackageTag = typeof AstGatePackageTag.Type
-
-export const GateViolation = Schema.Struct({
-  category: GateCategory,
-  rule: GateRuleId,
-  message: GateViolationMessage,
-  file: AstSourceFilePath,
-  line: SourceLineNumber,
-  enclosingSymbol: EnclosingSymbolName,
-})
-export type GateViolation = typeof GateViolation.Type
+// Re-export leaf AST gate schemas and contract types defined in ast-gate-visitors
+export {
+  AstContentSha256,
+  AstGateCategory,
+  AstGatePackageTag,
+  AstRuleVersion,
+  AstSourceContent,
+  AstSourceFilePath,
+  ContentSha256,
+  EnclosingSymbolName,
+  GateCategory,
+  GateRuleId,
+  GateRuleVersion,
+  GateVerdict,
+  GateViolation,
+  GateViolationCategory,
+  GateViolationMessage,
+  HARNESS_GATE_RULE_VERSION,
+  SourceLineNumber,
+}
 
 export const AstGateFileInput = Schema.Struct({
   filePath: AstSourceFilePath,
@@ -110,6 +96,10 @@ export const AstGateCacheEntry = Schema.Struct({
   violations: Schema.Array(GateViolation),
 })
 export type AstGateCacheEntry = typeof AstGateCacheEntry.Type
+
+/**
+ * Contract alias for a cached AST evaluation record for a single file.
+ */
 export const AstGateFileEntry = AstGateCacheEntry
 export type AstGateFileEntry = typeof AstGateFileEntry.Type
 
@@ -126,6 +116,10 @@ export const AstGateDecisionReport = Schema.Struct({
   parsedFileCount: NonNegativeCount,
 })
 export type AstGateDecisionReport = typeof AstGateDecisionReport.Type
+
+/**
+ * Contract alias for the aggregate AST decision report for a gate evaluation run.
+ */
 export const AstCategoryGateReport = AstGateDecisionReport
 export type AstCategoryGateReport = typeof AstCategoryGateReport.Type
 

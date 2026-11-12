@@ -1,8 +1,22 @@
+/**
+ * Governance Documents & Architectural Invariants Gate Plugin.
+ *
+ * Verifies references in ADRs and EARS specifications, clause consistency,
+ * MADR structure, and ArchiMate ontology invariants.
+ *
+ * Rules owned:
+ * - stale-doc-reference: Flags missing enforced_by files, unknown spans/services/errors,
+ *   unreferenced enforcement table mechanisms, and invalid/missing YAML frontmatter.
+ * - ears-spec-lint: Validates EARS clause syntax and cross-clause consistency.
+ * - adr-doc-lint: Validates MADR structural compliance and enforcement table rules.
+ * - ontology-invariant: Validates ArchiMate architectural layers and relation invariants.
+ */
 import { Effect } from "effect"
 import { match } from "ts-pattern"
 import * as Graph from "effect/Graph"
 import {
   findClosestMatch,
+  parseGovernanceDocFrontmatter,
   type GcFinding,
   type GovernanceDocReference,
   type GraphEntropyInput,
@@ -35,7 +49,7 @@ export const evaluateGovernanceDocsPlugin = (
     const g = input.graph.graph
     const findings: Array<GcFinding> = []
 
-    // 5. stale-doc-reference
+    // Rule: stale-doc-reference
     const docRefs: Array<GovernanceDocReference> = []
     const seenDocIds = new Set<string>()
     if (input.governanceDocs !== undefined && input.governanceDocs.length > 0) {
@@ -64,6 +78,20 @@ export const evaluateGovernanceDocsPlugin = (
       }
 
       for (const doc of docRefs) {
+        if (
+          doc.id.trim().length === 0 ||
+          (doc.markdown !== undefined && parseGovernanceDocFrontmatter(doc.docPath, doc.markdown) === null)
+        ) {
+          findings.push({
+            kind: "stale-doc-reference",
+            nodeId: doc.id || doc.docPath,
+            location: doc.docPath,
+            message: `Governance document "${doc.docPath}" has missing or unparseable YAML frontmatter.`,
+            action: `Add valid YAML frontmatter (id, title, status) to "${doc.docPath}".`,
+          })
+          continue
+        }
+
         if (doc.status !== "accepted") continue
 
         if (doc.enforcedByFiles !== undefined && doc.existingFiles !== undefined) {
@@ -188,7 +216,7 @@ export const evaluateGovernanceDocsPlugin = (
       }
     }
 
-    // 5c. ears-spec-lint
+    // Rule: ears-spec-lint
     for (const doc of input.governanceDocs ?? []) {
       if (doc.markdown !== undefined && (doc.docPath.includes("/specs/") || doc.id.includes(":SPEC-"))) {
         const lintReport = yield* decideEarsSpecQuality({ docPath: doc.docPath, markdown: doc.markdown })
@@ -270,7 +298,7 @@ export const evaluateGovernanceDocsPlugin = (
       }
     }
 
-    // 5d. adr-doc-lint
+    // Rule: adr-doc-lint
     for (const doc of input.governanceDocs ?? []) {
       if (doc.markdown !== undefined && (doc.docPath.includes("/adr/") || doc.id.includes(":ADR-") || doc.id.startsWith("ADR-"))) {
         const adrLint = yield* decideAdrDocQuality({ docPath: doc.docPath, markdown: doc.markdown })
@@ -284,7 +312,7 @@ export const evaluateGovernanceDocsPlugin = (
       }
     }
 
-    // 5e. ontology-invariants
+    // Rule: ontology-invariant
     const ontologyReport = yield* decideOntologyInvariants({
       graph: input.graph, governanceDocs: input.governanceDocs,
     })

@@ -82,8 +82,8 @@ What is missing:
    }
    ```
    The `exit: Exit.Exit<unknown, unknown>` parameter in `span.end` is **completely ignored**! Neither `RecordedSpanEvent` nor the `ExercisesSpan` edge in `HarnessGraph` knows whether any test ever exercised the error channels declared in `E` (`FailsWithError`). A function can declare `Effect<Order, InsufficientStockError | PaymentDeclinedError, OrderRepo>`, have a single happy-path test (creating an `ExercisesSpan` edge), and pass `verify` 100% green while two error channels were never executed once!
-2. **Line-based string mutations in `mutation-check.ts`:**
-   In [`libs/harness/gates/src/mutation-check.ts`](../../libs/harness/gates/src/mutation-check.ts#L44-L100), mutations are currently generated via 17 line-based `String.includes` replacements (`>=` $\to$ `>`, `===` $\to$ `!==`) and every mutant re-runs the entire package's `vitest` suite. We lack semantic AST mutators for `ts-pattern` (`match(x).with({ _tag: "A" }, ...)`) and test targeting scoped via `ExercisesSpan` edges in $G_{\text{Levi}}$.
+2. **Line-based string mutations in `mutation-check.ts` / `mutant-ast-generator.ts`:**
+   In [`libs/harness/gates/src/mutation/mutant-ast-generator.ts`](../../libs/harness/gates/src/mutation/mutant-ast-generator.ts) (extracted from [`libs/harness/gates/src/mutation-check.ts`](../../libs/harness/gates/src/mutation-check.ts) in `RFC-0007`), mutations were originally generated via 17 line-based `String.includes` replacements (`>=` $\to$ `>`, `===` $\to$ `!==`) and every mutant re-ran the entire package's `vitest` suite. We lack semantic AST mutators for `ts-pattern` (`match(x).with({ _tag: "A" }, ...)`) and test targeting scoped via `ExercisesSpan` edges in $G_{\text{Levi}}$.
 
 ### 2.4 Blind Spot #4: String Clustering in `friction-log.ts` Instead of Algebraic Rule Extraction
 

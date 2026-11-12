@@ -1,3 +1,16 @@
+/**
+ * Topology & Hypergraph Entropy Gate Plugin.
+ *
+ * Evaluates core graph topology and contract reachability rules.
+ *
+ * Rules owned:
+ * - unused-service: Detects declared ServiceTags with 0 consumer edges.
+ * - unprovided-service: Detects ServiceTags without a providing ServiceLayer.
+ * - dead-tagged-error: Detects Schema.TaggedError types never emitted in E channels.
+ * - missing-pattern-doc: Detects registered idiom patterns missing documentation.
+ * - node-sqlite-in-infra: Enforces real workerd storage against branching violations.
+ * - unused-contract-export: Detects dead contract exports not used across tiers.
+ */
 import { type Dirent, existsSync, readdirSync, readFileSync } from "node:fs"
 import { join, relative } from "node:path"
 import * as Graph from "effect/Graph"
@@ -12,16 +25,21 @@ import {
   safeFs,
 } from "./gc-helpers.js"
 
-export const checkUnusedContractExports = (repoRoot: string): ReadonlyArray<GcFinding> => {
+export const checkUnusedContractExports = (
+  repoRoot: string,
+  targetScope?: string,
+): ReadonlyArray<GcFinding> => {
   const libsDir = join(repoRoot, "libs")
   if (!existsSync(libsDir)) return []
-  const scopes = safeFs<ReadonlyArray<string>>(
-    () => {
-      const dirents: ReadonlyArray<Dirent> = readdirSync(libsDir, { withFileTypes: true })
-      return dirents.filter((e) => e.isDirectory()).map((e) => e.name).sort((a, b) => a.localeCompare(b))
-    },
-    [],
-  )
+  const scopes = targetScope !== undefined
+    ? [targetScope]
+    : safeFs<ReadonlyArray<string>>(
+        () => {
+          const dirents: ReadonlyArray<Dirent> = readdirSync(libsDir, { withFileTypes: true })
+          return dirents.filter((e) => e.isDirectory()).map((e) => e.name).sort((a, b) => a.localeCompare(b))
+        },
+        [],
+      )
   const findings: Array<GcFinding> = []
 
   for (const scope of scopes) {
@@ -116,6 +134,26 @@ export const checkUnusedContractExports = (repoRoot: string): ReadonlyArray<GcFi
   return findings
 }
 
+// Rule: node-sqlite-in-infra (branching violations filter)
+export const evaluateBranchingSqliteViolations = (
+  input: GraphEntropyInput,
+): ReadonlyArray<GcFinding> => {
+  const findings: Array<GcFinding> = []
+  for (const bv of input.graph.branchingViolations ?? []) {
+    if (bv.rule === "node-sqlite-in-infra") {
+      findings.push({
+        kind: "node-sqlite-in-infra",
+        nodeId: bv.enclosingSymbol,
+        location: `${bv.file}:${bv.line}`,
+        message: bv.message,
+        action:
+          "Replace node:sqlite with real Cloudflare workerd storage via @alchemy.run/cloudflare-runtime (Workerd SQLite Durable Object or D1.local) per harness:ADR-0008 / harness:SPEC-0006.",
+      })
+    }
+  }
+  return findings
+}
+
 export const evaluateTopologyEntropyPlugin = (
   input: GraphEntropyInput,
   ctx: GraphReachabilityContext,
@@ -123,7 +161,7 @@ export const evaluateTopologyEntropyPlugin = (
   const g = input.graph.graph
   const findings: Array<GcFinding> = []
 
-  // 1. unused-service
+  // Rule: unused-service
   for (const [idx, node] of Graph.nodes(g)) {
     if (node._tag === "ServiceTag") {
       if (IGNORED_SERVICES.has(node.tagId) || IGNORED_SERVICES.has(node.name)) continue
@@ -141,7 +179,7 @@ export const evaluateTopologyEntropyPlugin = (
     }
   }
 
-  // 2. unprovided-service
+  // Rule: unprovided-service
   for (const [idx, node] of Graph.nodes(g)) {
     if (node._tag === "ServiceTag") {
       if (IGNORED_SERVICES.has(node.tagId) || IGNORED_SERVICES.has(node.name)) continue
@@ -159,7 +197,7 @@ export const evaluateTopologyEntropyPlugin = (
     }
   }
 
-  // 3. dead-tagged-error
+  // Rule: dead-tagged-error
   for (const [idx, node] of Graph.nodes(g)) {
     if (node._tag === "TaggedError") {
       if (IGNORED_ERRORS.has(node.errorTag)) continue
@@ -177,7 +215,7 @@ export const evaluateTopologyEntropyPlugin = (
     }
   }
 
-  // 4. missing-pattern-doc
+  // Rule: missing-pattern-doc
   if (input.expectedPatterns !== undefined) {
     const existingPatternSlugs = new Set<string>()
     for (const [, node] of Graph.nodes(g)) {
@@ -202,33 +240,6 @@ export const evaluateTopologyEntropyPlugin = (
         })
       }
     }
-  }
-
-  // 5b & 12. Branching violations (node-sqlite-in-infra & architecture-policy-violation)
-  for (const bv of input.graph.branchingViolations ?? []) {
-    if (bv.rule === "node-sqlite-in-infra") {
-      findings.push({
-        kind: "node-sqlite-in-infra",
-        nodeId: bv.enclosingSymbol,
-        location: `${bv.file}:${bv.line}`,
-        message: bv.message,
-        action:
-          "Replace node:sqlite with real Cloudflare workerd storage via @alchemy.run/cloudflare-runtime (Workerd SQLite Durable Object or D1.local) per harness:ADR-0008 / harness:SPEC-0006.",
-      })
-    } else {
-      findings.push({
-        kind: "architecture-policy-violation",
-        nodeId: `${bv.file}:${bv.rule}:${bv.line}`,
-        location: `${bv.file}:${bv.line}`,
-        message: bv.message,
-        action: "Align code with architecture policy boundary rules.",
-      })
-    }
-  }
-
-  // 11. unused-contract-export if workspaceRoot is provided
-  if (input.workspaceRoot !== undefined) {
-    findings.push(...checkUnusedContractExports(input.workspaceRoot))
   }
 
   return findings

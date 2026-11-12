@@ -1,3 +1,13 @@
+/**
+ * Test & Pure Decider Entropy Gate Plugin.
+ *
+ * Verifies test reachability and property-based test coverage for domain functions.
+ *
+ * Rules owned:
+ * - untested-effect-fn: Flags domain/contract EffectFn symbols with 0 reaching tests.
+ * - missing-decider-property-test: Flags domain deciders lacking property-based test coverage.
+ * - shallow-decider-property-test: Flags deciders exercised only by scalar/primitive arbitraries.
+ */
 import * as Graph from "effect/Graph"
 import {
   type GcFinding,
@@ -13,7 +23,7 @@ export const evaluateTestAndDeciderPlugin = (
   const g = input.graph.graph
   const findings: Array<GcFinding> = []
 
-  // 3. untested-effect-fn
+  // Rule: untested-effect-fn
   if (input.checkUntestedDomainFns === true || ctx.hasVitestCases) {
     for (const [idx, node] of Graph.nodes(g)) {
       if (
@@ -35,7 +45,7 @@ export const evaluateTestAndDeciderPlugin = (
     }
   }
 
-  // 3b. missing-decider-property-test and shallow-decider-property-test
+  // Rules: missing-decider-property-test & shallow-decider-property-test
   if (input.checkDeciderPropertyTests === true) {
     for (const [idx, node] of Graph.nodes(g)) {
       if (

@@ -1,6 +1,23 @@
+/**
+ * Package Hygiene & SQL Migration Gate Plugin.
+ *
+ * Scans workspace package structure, dependencies, SQL DDL migrations,
+ * SqliteMigrator configurations, and architecture policies.
+ *
+ * Rules owned:
+ * - empty-source-module: Flags source files containing only empty exports.
+ * - node-sqlite-in-infra: Banned node:sqlite imports in infra tiers.
+ * - untrusted-row-brand-make: Flags unvalidated Brand.make calls on raw SQLite rows.
+ * - unmanaged-sql-ddl: Flags raw DDL outside SqliteMigrator.fromRecord migrations.
+ * - invalid-migrator-record-key: Enforces migration key format, ordering, and table names.
+ * - unsafe-sql-migration: Flags destructive migration operations (DROP, ALTER without default).
+ * - unused-package-dependency: Flags dependencies in package.json not imported in src/.
+ * - architecture-policy-violation: Self-dogfooding and AST policy violations.
+ * - unused-contract-export: Per-scope unused contract symbols.
+ */
 import { type Dirent, existsSync, readdirSync, readFileSync } from "node:fs"
-import { join, relative } from "node:path"
-import { Effect, Layer, Option, Schema } from "effect"
+import { join, posix, relative } from "node:path"
+import { Cause, Effect, Layer, Option, Schema } from "effect"
 import { match } from "ts-pattern"
 import * as Graph from "effect/Graph"
 import { checkMigrationFiles, checkMigrationSqlSafety } from "../../migration-check.js"
@@ -56,6 +73,9 @@ export const evaluatePackageAndMigrationPlugin = (
     const scopes = listSubdirs(libsDir)
 
     for (const scope of scopes) {
+      // Rule: unused-contract-export & dead-tagged-error (contract)
+      findings.push(...checkUnusedContractExports(repoRoot, scope))
+
       const scopeDir = join(libsDir, scope)
       const tiers = listSubdirs(scopeDir)
       for (const tier of tiers) {
@@ -367,7 +387,7 @@ export const evaluatePackageAndMigrationPlugin = (
         .with({ _tag: "Failure" }, (cause) => {
           findings.push({
             kind: "architecture-policy-violation", nodeId: "GatePluginRunner.evaluateAll",
-            message: `Gate plugin evaluation failed: ${String(cause.cause)}`,
+            message: `Gate plugin evaluation failed: ${Cause.pretty(cause.cause)}`,
             action: "Investigate workspace file resolution and gate plugin execution failures.",
           })
         })
@@ -390,6 +410,31 @@ export const evaluatePackageAndMigrationPlugin = (
             action: `Resolve AST gate violation (${v.rule}) in ${v.file}:${String(v.line)}.`,
           })
         }
+        const adj = new Map<string, Array<string>>()
+        for (const af of astFiles) {
+          const deps: Array<string> = []
+          for (const m of af.content.matchAll(/(?:import|export)\s+(?:type\s+)?(?:[^"']*from\s+)?["'](\.[^"']+)["']/g)) {
+            if (m[1] !== undefined) deps.push(posix.normalize(posix.join(posix.dirname(af.filePath), m[1].replace(/\.js$/, ".ts"))))
+          }
+          adj.set(af.filePath, deps)
+        }
+        const state = new Map<string, number>()
+        const visitCycle = (node: string, stack: Array<string>): void => {
+          state.set(node, 1)
+          for (const next of adj.get(node) ?? []) {
+            const st = state.get(next) ?? 0
+            if (st === 1) {
+              const cyclePath = [...stack.slice(stack.indexOf(next)), next].join(" -> ")
+              findings.push({
+                kind: "architecture-policy-violation", nodeId: `${next}:circular-import`, location: next,
+                message: `Circular relative import detected in modular harness files: ${cyclePath}`,
+                action: `Break the circular import cycle (${cyclePath}) by extracting shared types/helpers into a leaf module.`,
+              })
+            } else if (st === 0 && adj.has(next)) visitCycle(next, [...stack, next])
+          }
+          state.set(node, 2)
+        }
+        for (const node of adj.keys()) { if ((state.get(node) ?? 0) === 0) visitCycle(node, [node]) }
       }
     }
 
@@ -404,7 +449,5 @@ export const scanPackageAndMigrationHygiene = (repoRoot: string): ReadonlyArray<
     }),
   )
 
-export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcFinding> => [
-  ...checkUnusedContractExports(repoRoot),
-  ...scanPackageAndMigrationHygiene(repoRoot),
-]
+export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcFinding> =>
+  scanPackageAndMigrationHygiene(repoRoot)

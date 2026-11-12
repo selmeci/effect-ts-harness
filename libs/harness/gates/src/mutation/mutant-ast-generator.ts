@@ -1,6 +1,16 @@
+/**
+ * @fileoverview AST-based mutant discovery, schema module compilation, and in-process mutant evaluation.
+ */
 import { Effect, Schema } from "effect"
 import { ActiveMutantId } from "../plugins/self-dogfooding-contract.js"
-import { ActiveMutantContextLive, withActiveMutantEffect } from "../services/active-mutant-context.js"
+import {
+  ActiveMutantContextLive,
+  getActiveMutantId,
+  setActiveMutantId,
+  withActiveMutantEffect,
+} from "../services/active-mutant-context.js"
+
+export { getActiveMutantId, setActiveMutantId }
 
 export const MutantCategory = Schema.Literals([
   "boundary-operator",
@@ -36,27 +46,7 @@ export interface MutantSchemaModule {
   readonly mutantIds: ReadonlyArray<string>
 }
 
-interface GlobalWithMutantId {
-  __HARNESS_ACTIVE_MUTANT_ID?: string | undefined
-  __harnessActiveMutant?: string | undefined
-}
-
-export const getActiveMutantId = (): string | undefined =>
-  (globalThis as GlobalWithMutantId).__HARNESS_ACTIVE_MUTANT_ID ??
-  (globalThis as GlobalWithMutantId).__harnessActiveMutant ??
-  process.env["HARNESS_ACTIVE_MUTANT_ID"]
-
-export const setActiveMutantId = (mutantId: string | undefined): void => {
-  ;(globalThis as GlobalWithMutantId).__HARNESS_ACTIVE_MUTANT_ID = mutantId
-  ;(globalThis as GlobalWithMutantId).__harnessActiveMutant = mutantId
-  if (mutantId === undefined) {
-    delete process.env["HARNESS_ACTIVE_MUTANT_ID"]
-  } else {
-    process.env["HARNESS_ACTIVE_MUTANT_ID"] = mutantId
-  }
-}
-
-const MUTATION_PATTERNS: ReadonlyArray<{
+export const MUTATION_PATTERNS: ReadonlyArray<{
   readonly original: string
   readonly replacement: string
   readonly category: MutantCategory
@@ -347,22 +337,34 @@ export const compileMutantSchemaModule = (
   }
 }
 
-const isAssertionFailure = (err: unknown): boolean =>
+export const isAssertionFailure = (err: unknown): boolean =>
   err instanceof Error &&
   (err.name === "AssertionError" ||
     err.name === "ExpectError" ||
-    err.message.includes("expected") ||
-    err.message.includes("assert"))
+    "matcherResult" in err ||
+    /^(?:AssertionError|ExpectError|expect\()/i.test(err.message) ||
+    err.message.includes("toBe") ||
+    err.message.includes("toEqual"))
 
-const invokeMutantTestFn = (
+class MutantExecutionError {
+  readonly _tag = "MutantExecutionError"
+  readonly cause: unknown
+  constructor(cause: unknown) {
+    this.cause = cause
+  }
+}
+
+const runSingleTestFn = (
   testFn: (activeMutantId: string) => boolean | void,
   mutantId: string,
-): "killed" | "defect" | "survived" =>
-  Effect.runSync(
-    Effect.try({
-      try: () => (testFn(mutantId) === false ? ("killed" as const) : ("survived" as const)),
-      catch: (err) => (isAssertionFailure(err) ? ("killed" as const) : ("defect" as const)),
-    }).pipe(Effect.orElseSucceed((status) => status)),
+): Effect.Effect<boolean> =>
+  Effect.try({
+    try: () => testFn(mutantId) === false,
+    catch: (cause) => new MutantExecutionError(cause),
+  }).pipe(
+    Effect.catchTag("MutantExecutionError", (err) =>
+      isAssertionFailure(err.cause) ? Effect.succeed(true) : Effect.die(err.cause),
+    ),
   )
 
 /**
@@ -377,18 +379,16 @@ export const evaluateMutantSchemaInProcess = (
     Effect.gen(function* () {
       const outcomes: Array<MutantOutcome> = []
       for (const mutant of mutants) {
-        const killed = yield* withActiveMutantEffect(ActiveMutantId.make(mutant.id), () => {
-          for (const testFn of exercisesSpanTests) {
-            const res = invokeMutantTestFn(testFn, mutant.id)
-            if (res === "killed") {
-              return true
+        const killed = yield* withActiveMutantEffect(
+          ActiveMutantId.make(mutant.id),
+          Effect.gen(function* () {
+            for (const testFn of exercisesSpanTests) {
+              const killed = yield* runSingleTestFn(testFn, mutant.id)
+              if (killed) return true
             }
-            if (res === "defect") {
-              return false
-            }
-          }
-          return false
-        })
+            return false
+          }),
+        )
         outcomes.push({
           mutant,
           status: killed ? "killed" : "survived",
