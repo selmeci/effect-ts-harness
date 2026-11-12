@@ -219,7 +219,6 @@ export const sanitizeOmnigraphBranchSlug = (raw: string): string =>
 export const decideOmnigraphReconcile = Effect.fn("OmnigraphReconcile.decide")(function* (
   input: OmnigraphReconcileInput,
 ) {
-  yield* Effect.void
   const branchTrimmed = input.currentGitBranch?.trim() ?? ""
   const isFeatureBranch =
     branchTrimmed.length > 0 && branchTrimmed !== "main" && branchTrimmed !== "master"
@@ -228,11 +227,11 @@ export const decideOmnigraphReconcile = Effect.fn("OmnigraphReconcile.decide")(f
     : "main"
 
   if (!input.snapshotExists) {
-    return {
+    return yield* Effect.succeed({
       needsReconcile: true,
       reason: "missing-snapshot" as const,
       targetOmnigraphBranch,
-    } satisfies OmnigraphReconcileDecision
+    } satisfies OmnigraphReconcileDecision)
   }
 
   if (
@@ -240,11 +239,11 @@ export const decideOmnigraphReconcile = Effect.fn("OmnigraphReconcile.decide")(f
     input.currentHeadSha.length > 0 &&
     input.recordedHeadSha !== input.currentHeadSha
   ) {
-    return {
+    return yield* Effect.succeed({
       needsReconcile: true,
       reason: "head-sha-changed" as const,
       targetOmnigraphBranch,
-    } satisfies OmnigraphReconcileDecision
+    } satisfies OmnigraphReconcileDecision)
   }
 
   if (
@@ -252,18 +251,18 @@ export const decideOmnigraphReconcile = Effect.fn("OmnigraphReconcile.decide")(f
     input.recordedGitBranch !== null &&
     input.recordedGitBranch !== input.currentGitBranch
   ) {
-    return {
+    return yield* Effect.succeed({
       needsReconcile: true,
       reason: "git-branch-changed" as const,
       targetOmnigraphBranch,
-    } satisfies OmnigraphReconcileDecision
+    } satisfies OmnigraphReconcileDecision)
   }
 
-  return {
+  return yield* Effect.succeed({
     needsReconcile: false,
     reason: "up-to-date" as const,
     targetOmnigraphBranch,
-  } satisfies OmnigraphReconcileDecision
+  } satisfies OmnigraphReconcileDecision)
 })
 
 export const resolveCanonicalRepoRoot = (repoRoot: string): string => {

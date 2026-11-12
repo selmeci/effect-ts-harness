@@ -12,4 +12,5 @@ export * from "./concept-lattice.js"
 export * from "./datalog-engine.js"
 export * from "./graph-rewrite.js"
 export * from "./graph-projector.js"
+export * from "./services/ts-compiler-overlay-service.js"
 

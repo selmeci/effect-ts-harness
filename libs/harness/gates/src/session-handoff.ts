@@ -24,8 +24,6 @@ export interface SessionHandoffSummary {
 export const decideSessionHandoff = Effect.fn("SessionHandoff.decide")(function* (
   input: SessionHandoffInput,
 ) {
-  yield* Effect.void
-
   const recentFrictionCount = input.frictionClusters.reduce((acc, c) => acc + c.occurrences, 0)
   const topFrictionSummary = input.frictionClusters
     .slice(0, 3)
@@ -66,7 +64,7 @@ export const decideSessionHandoff = Effect.fn("SessionHandoff.decide")(function*
     handoffMessage = lines.join("\n")
   }
 
-  return {
+  return yield* Effect.succeed({
     hasActiveTask,
     stampValid: input.stampValid,
     activeStubs: input.activeStubs,
@@ -75,7 +73,7 @@ export const decideSessionHandoff = Effect.fn("SessionHandoff.decide")(function*
     topFrictionSummary,
     stuckLoopEscalation,
     handoffMessage,
-  } satisfies SessionHandoffSummary
+  } satisfies SessionHandoffSummary)
 })
 
 export const buildSessionHandoff = (input: SessionHandoffInput): SessionHandoffSummary =>

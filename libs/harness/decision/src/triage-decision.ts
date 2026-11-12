@@ -332,6 +332,17 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     },
   },
   {
+    id: "self-dogfooding-and-lazy-effect",
+    pattern:
+      /TS377091|effecttsgo\(lazy-effect\)|effect-fn-dummy-void|nested-effect-run-sync|harness-switch-statement|file-line-budget-exceeded/,
+    kind: "mechanical",
+    hint: "Self-dogfooding or Effect v4 lazyEffect violation — zero-argument service members must be Effect.Effect<A, E, R> properties (not () => Effect.Effect<...>), never use dummy 'yield* Effect.void' (use Effect.succeed or a real yield), never nest Effect.runSync inside Effect/Layer constructors, replace switch with ts-pattern match(...).exhaustive(), and keep modular plugin files under 800 lines (see harness:ADR-0012).",
+    result: {
+      kind: "mechanical",
+      hint: "Self-dogfooding or Effect v4 lazyEffect violation — zero-argument service members must be Effect.Effect<A, E, R> properties (not () => Effect.Effect<...>), never use dummy 'yield* Effect.void' (use Effect.succeed or a real yield), never nest Effect.runSync inside Effect/Layer constructors, replace switch with ts-pattern match(...).exhaustive(), and keep modular plugin files under 800 lines (see harness:ADR-0012).",
+    },
+  },
+  {
     pattern: /harness(?:\/|\()syntax-bans\)?/,
     result: {
       kind: "mechanical",

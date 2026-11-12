@@ -102,7 +102,19 @@ import {
   writeGraphHeadMeta,
   writeSessionReportFiles,
   writeVerifyStamp,
+  evaluateAllGatePlugins,
+  GatePluginRegistryLive,
+  WorkspaceFsLive,
+  WorkspaceFilePath,
 } from "@harness/gates"
+import {
+  CANONICAL_CLI_COMMAND_NAMES,
+  CliCommandName,
+  dispatchCliCommand,
+  type HarnessCommandRegistry,
+  makeHarnessCommandRegistryLayer,
+  registerLiveCliCommandHandlers,
+} from "./commands/command-registry.js"
 import {
   BisectionProbeCount,
   checkEffectGraph,
@@ -112,6 +124,7 @@ import {
   decideGraphProjection,
   decideGraphRewrite,
   diffOmnigraphBranches,
+  extractGraphViaCompilerOverlay,
   extractTypeGraph,
   extractWorkspaceTypeAwareGraph,
   findTestsReaching,
@@ -129,6 +142,7 @@ import {
   type ShadowFileOverlay,
   stepDatalogFileDelta,
   syncToOmnigraphAndSnapshot,
+  TsCompilerOverlayServiceLive,
   VerificationStatus,
 } from "@harness/graph"
 import { buildWorkspaceFnIndex } from "@harness/ingest"
@@ -1055,12 +1069,22 @@ const handleVerify = (
         ruleVersion: HARNESS_GATE_RULE_VERSION,
         cacheFilePath: AstGateCache.resolveCachePath(repoRoot),
       })
-      const enforcedAstViolations = astReport.violations.filter(
-        (v) =>
+      const enforcedAstViolations = astReport.violations.filter((v) => {
+        if (
+          v.rule === "effect-fn-dummy-void" ||
+          v.rule === "switch-statement" ||
+          v.rule === "match-run-statement" ||
+          v.rule === "non-exhaustive-union-match" ||
+          (v.rule === "discriminant-branching" && v.message.startsWith("Switch statement"))
+        ) {
+          return true
+        }
+        return (
           !v.file.startsWith("libs/harness/") &&
           !v.file.startsWith("apps/harness-") &&
-          !v.file.startsWith("tools/"),
-      )
+          !v.file.startsWith("tools/")
+        )
+      })
       if (enforcedAstViolations.length > 0) {
         const msg = enforcedAstViolations
           .map((v) => `[${v.rule}] ${v.file}:${v.line}: ${v.message}`)
@@ -1071,9 +1095,56 @@ const handleVerify = (
           stderr: `[GATE FAILURE] verify:ast-gates\n${msg}`,
         }
       }
+
+      const modularDeltaFiles = deltaFiles.filter(
+        (f) =>
+          f.includes("/plugins/") ||
+          f.includes("/services/") ||
+          f.includes("/commands/") ||
+          f.includes("/tools/"),
+      )
+      if (modularDeltaFiles.length > 0) {
+        const pluginExit = yield* evaluateAllGatePlugins({
+          filePaths: modularDeltaFiles.map((relPath) =>
+            WorkspaceFilePath.make(join(repoRoot, relPath)),
+          ),
+          failOnViolation: true,
+        }).pipe(
+          Effect.provide(Layer.mergeAll(GatePluginRegistryLive, WorkspaceFsLive)),
+          Effect.exit,
+        )
+        if (pluginExit._tag === "Failure") {
+          const errOpt = Cause.findErrorOption(pluginExit.cause)
+          if (Option.isSome(errOpt) && errOpt.value._tag === "SelfDogfoodingViolationError") {
+            const msg = errOpt.value.violations
+              .map((v) => `[${v.rule}] ${v.file}:${v.line}: ${v.message}`)
+              .join("\n")
+            return {
+              exitCode: 1,
+              stdout: "",
+              stderr: `[GATE FAILURE] verify:self-dogfooding-plugins\n${msg}`,
+            }
+          }
+          if (Option.isSome(errOpt) && errOpt.value._tag === "WorkspaceFsError") {
+            return {
+              exitCode: 1,
+              stdout: "",
+              stderr: `[GATE FAILURE] verify:self-dogfooding-plugins\nFailed to read ${errOpt.value.filePath}: ${errOpt.value.reason}`,
+            }
+          }
+          return {
+            exitCode: 1,
+            stdout: "",
+            stderr: `[GATE FAILURE] verify:self-dogfooding-plugins\n${Cause.pretty(pluginExit.cause)}`,
+          }
+        }
+      }
     }
 
-    const graph = yield* extractTypeGraph({ repoRoot })
+    const graph = yield* extractGraphViaCompilerOverlay({ repoRoot }).pipe(
+      Effect.provide(TsCompilerOverlayServiceLive),
+      Effect.catchTag("TsCompilerOverlayError", () => extractTypeGraph({ repoRoot })),
+    )
     const graphStubs: Array<string> = []
     for (const [, node] of Graph.nodes(graph.graph)) {
       if (node._tag === "EffectFn" && node.isStub) {
@@ -2354,7 +2425,9 @@ const handleDoctorOrSession = (
             input: { planStep: "Initialize session" },
           }).pipe(
             Effect.timeoutOption("10 seconds"),
-            Effect.catchCause(() => Effect.succeedNone),
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause) ? Effect.interrupt : Effect.succeedNone,
+            ),
             Effect.provide(decisionLayer),
           ),
         )
@@ -2480,8 +2553,7 @@ const handleMutate = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
 ): Effect.Effect<CliResult> =>
-  Effect.gen(function* () {
-    yield* Effect.void
+  Effect.sync(() => {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     const scopeArg = argv.find((arg) => arg.startsWith("--scope="))
     const scope = scopeArg ? scopeArg.slice("--scope=".length) : undefined
@@ -2931,86 +3003,86 @@ const handleOntology = (
     const graph = options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot))
     const sub = argv[1] ?? "layers"
 
-    switch (sub) {
-      case "why": {
+    return yield* match(sub)
+      .with("why", () => {
         const symbol = argv[2] ?? ""
-        return {
+        return Effect.succeed({
           exitCode: 0,
           stdout: JSON.stringify(queryOntologyWhy(graph, symbol)),
           stderr: "",
-        }
-      }
-      case "impact": {
+        })
+      })
+      .with("impact", () => {
         const symbol = argv[2] ?? ""
-        return {
+        return Effect.succeed({
           exitCode: 0,
           stdout: JSON.stringify(queryOntologyImpact(graph, symbol)),
           stderr: "",
-        }
-      }
-      case "layers": {
+        })
+      })
+      .with("layers", () => {
         const formatMermaid = argv.includes("--format=mermaid")
-        return {
+        return Effect.succeed({
           exitCode: 0,
           stdout: formatMermaid
             ? renderOntologyMermaid(graph)
             : JSON.stringify(projectOntologyLayers(graph)),
           stderr: "",
-        }
-      }
-      case "check": {
-        const strict = argv.includes("--strict")
-        const scopeArg = argv.find((arg) => arg.startsWith("--scope="))
-        const scope = scopeArg ? scopeArg.slice("--scope=".length) : undefined
-
-        const allDocs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot)
-        const docs = scope
-          ? allDocs.filter(
-              (doc) =>
-                doc.id.startsWith(`${scope}:`) ||
-                doc.docPath.includes(`libs/${scope}/`) ||
-                doc.docPath.includes(`apps/${scope}/`) ||
-                doc.docPath.includes(`packages/${scope}/`),
-            )
-          : allDocs
-
-        const invariants = yield* decideOntologyInvariants({
-          graph,
-          governanceDocs: docs,
         })
-        const pairs = extractOntologyConflictPairs(docs, scope)
-        const semanticConflicts = yield* evaluateOntologyConflicts(pairs).pipe(
-          Effect.provide(decisionLayer),
-        )
-        const clean = invariants.clean && semanticConflicts.length === 0
+      })
+      .with("check", () =>
+        Effect.gen(function* () {
+          const strict = argv.includes("--strict")
+          const scopeArg = argv.find((arg) => arg.startsWith("--scope="))
+          const scope = scopeArg ? scopeArg.slice("--scope=".length) : undefined
 
-        return {
-          exitCode: strict && !clean ? 1 : 0,
-          stdout: JSON.stringify({
-            clean,
-            findings: invariants.findings,
-            semanticConflicts,
-            evaluatedPairs: pairs.length,
-          }),
-          stderr: "",
-        }
-      }
-      default: {
-        return {
+          const allDocs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot)
+          const docs = scope
+            ? allDocs.filter(
+                (doc) =>
+                  doc.id.startsWith(`${scope}:`) ||
+                  doc.docPath.includes(`libs/${scope}/`) ||
+                  doc.docPath.includes(`apps/${scope}/`) ||
+                  doc.docPath.includes(`packages/${scope}/`),
+              )
+            : allDocs
+
+          const invariants = yield* decideOntologyInvariants({
+            graph,
+            governanceDocs: docs,
+          })
+          const pairs = extractOntologyConflictPairs(docs, scope)
+          const semanticConflicts = yield* evaluateOntologyConflicts(pairs).pipe(
+            Effect.provide(decisionLayer),
+          )
+          const clean = invariants.clean && semanticConflicts.length === 0
+
+          return {
+            exitCode: strict && !clean ? 1 : 0,
+            stdout: JSON.stringify({
+              clean,
+              findings: invariants.findings,
+              semanticConflicts,
+              evaluatedPairs: pairs.length,
+            }),
+            stderr: "",
+          }
+        }),
+      )
+      .otherwise(() =>
+        Effect.succeed({
           exitCode: 1,
           stdout: "",
           stderr: `unknown ontology subcommand: ${sub}\nusage: harness ontology <why|impact|layers|check>`,
-        }
-      }
-    }
+        }),
+      )
   })
 
 const handleReport = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
 ): Effect.Effect<CliResult> =>
-  Effect.gen(function* () {
-    yield* Effect.void
+  Effect.sync(() => {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     if (argv.includes("--reset") || argv.includes("--clear")) {
       clearTelemetryEvents(repoRoot)
@@ -3547,6 +3619,124 @@ const handleRepair = (
     ),
   )
 
+export const makeLiveCliCommandRegistryLayer = (
+  options?: CliEnv,
+  decisionLayer: Layer.Layer<DecisionModel.DecisionModel> = LocalDecisionModel,
+): Layer.Layer<HarnessCommandRegistry> =>
+  makeHarnessCommandRegistryLayer([
+    {
+      name: CliCommandName.make("guard"),
+      summary: "Evaluate deterministic command and file-write guard policies.",
+      execute: (args) => handleGuard(args, options, decisionLayer),
+    },
+    {
+      name: CliCommandName.make("route"),
+      summary: "Route a plan step to canonical agent-patterns/*.md documentation.",
+      execute: (args) => handleRoute(args, options, decisionLayer),
+    },
+    {
+      name: CliCommandName.make("plan-check"),
+      summary: "Validate compilable stub<A,E,R>() skeletons and snapshot plan/current.",
+      execute: (args) => handlePlanCheck(args, options),
+    },
+    {
+      name: CliCommandName.make("plan-synth"),
+      summary: "Synthesize plan graph patches via Double-Pushout (DPO) rules.",
+      execute: (args) => handlePlanSynth(args, options),
+    },
+    {
+      name: CliCommandName.make("repair"),
+      summary: "Repair architectural and code antipatterns via DPO rules.",
+      execute: (args) => handleRepair(args, options),
+    },
+    {
+      name: CliCommandName.make("verify"),
+      summary: "Execute affected verify targets, check span budgets, and write verify-stamp.json.",
+      execute: () => handleVerify(options, decisionLayer),
+    },
+    {
+      name: CliCommandName.make("done"),
+      summary: "Verify stamp freshness, diff plan vs impl graph, and merge impl/current to main.",
+      execute: (args) => handleDone(args, options, decisionLayer),
+    },
+    {
+      name: CliCommandName.make("learn"),
+      summary: "Cluster friction-log.jsonl events and propose deterministic promotions.",
+      execute: (args) => handleLearn(args, options, decisionLayer),
+    },
+    {
+      name: CliCommandName.make("gc"),
+      summary: "Run zero-entropy graph garbage collection and governance lint.",
+      execute: (args) => handleGc(args, options),
+    },
+    {
+      name: CliCommandName.make("mutate"),
+      summary: "Run in-process Mutant Schemata and saturation verification over domain code.",
+      execute: (args) => handleMutate(args.slice(1), options),
+    },
+    {
+      name: CliCommandName.make("bench"),
+      summary: "Measure harness stage latencies and enforce p50/p95 SLO budgets.",
+      execute: (args) => handleBench(args.slice(1), options),
+    },
+    {
+      name: CliCommandName.make("ingest"),
+      summary: "Ingest runtime trace NDJSON events into Omnigraph.",
+      execute: (args) => handleIngest(args, options),
+    },
+    {
+      name: CliCommandName.make("session"),
+      summary: "Inspect active session handoff state and inject pending stubs.",
+      execute: (args) => handleDoctorOrSession(args, options, decisionLayer),
+    },
+    {
+      name: CliCommandName.make("doctor"),
+      summary: "Run workspace health diagnostics and session recovery checks.",
+      execute: (args) => handleDoctorOrSession(args, options, decisionLayer),
+    },
+    {
+      name: CliCommandName.make("ontology"),
+      summary: "Audit ArchiMate 3.2 cross-layer traceability and semantic conflicts.",
+      execute: (args) => handleOntology(args, options, decisionLayer),
+    },
+    {
+      name: CliCommandName.make("report"),
+      summary: "Generate session telemetry and friction report.",
+      execute: (args) => handleReport(args, options),
+    },
+    {
+      name: CliCommandName.make("help"),
+      summary: "Display CLI usage help and available commands.",
+      execute: () =>
+        Effect.succeed({
+          exitCode: 0,
+          stdout: `harness help\nusage: harness <${COMMANDS.join("|")}>`,
+          stderr: "",
+        }),
+    },
+  ])
+
+registerLiveCliCommandHandlers(
+  CANONICAL_CLI_COMMAND_NAMES.reduce<
+    Record<string, (args: ReadonlyArray<string>) => Effect.Effect<CliResult>>
+  >((acc, name) => {
+    acc[name] = (args) => {
+      const liveLayer = makeLiveCliCommandRegistryLayer()
+      return dispatchCliCommand({ command: name, args }).pipe(
+        Effect.provide(liveLayer),
+        Effect.catchTag("CliCommandNotFoundError", (e) =>
+          Effect.succeed({
+            exitCode: 1,
+            stdout: "",
+            stderr: `unknown command: ${e.command}\nusage: harness <${COMMANDS.join("|")}>`,
+          }),
+        ),
+      )
+    }
+    return acc
+  }, {}),
+)
+
 export const runCliEffect = (
   argv: ReadonlyArray<string>,
   options?: CliEnv,
@@ -3559,7 +3749,7 @@ export const runCliEffect = (
     const decisionLayer = effectiveOptions?.decisionLayer ?? LocalDecisionModel
     const repoRoot = effectiveOptions?.repoRoot ?? findWorkspaceRoot()
 
-    if (options?.repoRoot === undefined && process.env.VITEST === undefined) {
+    if (effectiveOptions?.repoRoot === undefined && process.env.VITEST === undefined) {
       yield* Effect.try(() => {
         const harnessDir = join(CLI_REPO_ROOT, ".harness")
         mkdirSync(harnessDir, { recursive: true })
@@ -3578,7 +3768,7 @@ export const runCliEffect = (
       }
     }
 
-    if (requested === "help" || argv.includes("--help") || argv.includes("-h")) {
+    if (argv.includes("--help") || argv.includes("-h")) {
       return {
         exitCode: 0,
         stdout: `harness help\nusage: harness <${COMMANDS.join("|")}>`,
@@ -3586,63 +3776,25 @@ export const runCliEffect = (
       }
     }
 
-    if (requested === "report") {
-      return yield* handleReport(argv, options)
-    }
-
-    let resEffect: Effect.Effect<CliResult>
-    switch (requested) {
-      case "guard":
-        resEffect = handleGuard(argv, options, decisionLayer)
-        break
-      case "route":
-        resEffect = handleRoute(argv, options, decisionLayer)
-        break
-      case "plan-check":
-        resEffect = handlePlanCheck(argv, options)
-        break
-      case "plan-synth":
-        resEffect = handlePlanSynth(argv, options)
-        break
-      case "repair":
-        resEffect = handleRepair(argv, options)
-        break
-      case "verify":
-        resEffect = handleVerify(options, decisionLayer)
-        break
-      case "done":
-        resEffect = handleDone(argv, options, decisionLayer)
-        break
-      case "learn":
-        resEffect = handleLearn(argv, options, decisionLayer)
-        break
-      case "gc":
-        resEffect = handleGc(argv, options)
-        break
-      case "mutate":
-        resEffect = handleMutate(argv.slice(1), options)
-        break
-      case "bench":
-        resEffect = handleBench(argv.slice(1), options)
-        break
-      case "ingest":
-        resEffect = handleIngest(argv, options)
-        break
-      case "session":
-      case "doctor":
-        resEffect = handleDoctorOrSession(argv, options, decisionLayer)
-        break
-      case "ontology":
-        resEffect = handleOntology(argv, options, decisionLayer)
-        break
-    }
-
+    const liveCommandLayer = makeLiveCliCommandRegistryLayer(effectiveOptions, decisionLayer)
     const startTime = performance.now()
-    const res = yield* resEffect
+    const res: CliResult = yield* dispatchCliCommand({
+      command: requested,
+      args: argv,
+    }).pipe(
+      Effect.provide(liveCommandLayer),
+      Effect.catchTag("CliCommandNotFoundError", (e) =>
+        Effect.succeed<CliResult>({
+          exitCode: 1,
+          stdout: "",
+          stderr: `unknown command: ${e.command}\nusage: harness <${COMMANDS.join("|")}>`,
+        }),
+      ),
+    )
     const durationMs = Math.max(0, Math.round(performance.now() - startTime))
 
     const surface: TelemetrySurface =
-      argv.includes("--format=antigravity") || options?.stdin !== undefined ? "hook" : "cli"
+      argv.includes("--format=antigravity") || effectiveOptions?.stdin !== undefined ? "hook" : "cli"
 
     let category: TelemetryCategory = "lifecycle"
     if (requested === "guard") {
@@ -3725,6 +3877,8 @@ export const runCli = (
   options?: CliEnv,
   maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>,
 ): Promise<CliResult> => Effect.runPromise(runCliEffect(argv, options, maybeDecisionLayer))
+
+export * from "./commands/command-registry.js"
 
 export const run = (argv: ReadonlyArray<string>): number => {
   const requested = argv[0] ?? "help"

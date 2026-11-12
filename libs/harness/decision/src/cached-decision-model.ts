@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { createHash, randomUUID } from "node:crypto"
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { Deferred, Effect, Layer, Schema } from "effect"
 import * as AiError from "effect/ai/AiError"
@@ -147,40 +147,47 @@ const deriveDefinitionTaskId = <
 const loadStoreIntoMap = (
   cacheFilePath: string,
   targetMap: Map<DecisionCacheKey, CachedDecisionEntry>,
-): void => {
+): Effect.Effect<void> => {
   if (!existsSync(cacheFilePath)) {
-    return
+    return Effect.void
   }
-  Effect.runSync(
-    Effect.try({
-      try: () => {
-        const raw = readFileSync(cacheFilePath, "utf8")
-        const decoded = decodeDecisionCacheStore(raw)
-        match(decoded)
-          .with({ _tag: "Some" }, ({ value }) => {
-            const now = Date.now()
-            for (const [, entry] of Object.entries(value.entries)) {
-              if (entry.expiresAt !== undefined && now > entry.expiresAt) {
-                continue
-              }
-              targetMap.set(entry.cacheKey, entry)
+  return Effect.try({
+    try: () => {
+      const raw = readFileSync(cacheFilePath, "utf8")
+      const decoded = decodeDecisionCacheStore(raw)
+      match(decoded)
+        .with({ _tag: "Some" }, ({ value }) => {
+          const now = Date.now()
+          for (const [, entry] of Object.entries(value.entries)) {
+            if (entry.expiresAt !== undefined && now > entry.expiresAt) {
+              continue
             }
-          })
-          .with({ _tag: "None" }, () => undefined)
-          .exhaustive()
-      },
-      catch: () => undefined,
-    }).pipe(Effect.ignore),
-  )
+            targetMap.set(entry.cacheKey, entry)
+          }
+        })
+        .with({ _tag: "None" }, () => {
+          process.stderr.write(
+            `[harness:decision-cache] Warning: failed to parse decision cache from ${cacheFilePath}: invalid schema format\n`,
+          )
+        })
+        .exhaustive()
+    },
+    catch: (err) => {
+      process.stderr.write(
+        `[harness:decision-cache] Warning: failed to read decision cache from ${cacheFilePath}: ${err instanceof Error ? err.message : String(err)}\n`,
+      )
+    },
+  }).pipe(Effect.ignore)
 }
 
 const persistMapToDisk = (
   cacheFilePath: string,
   sourceMap: ReadonlyMap<DecisionCacheKey, CachedDecisionEntry>,
   promptVersion: DecisionPromptVersion,
-): void => {
-  Effect.runSync(
-    Effect.try({
+): Effect.Effect<void> =>
+  Effect.suspend(() => {
+    const tmpPath = `${cacheFilePath}.${process.pid}.${randomUUID()}.tmp`
+    return Effect.try({
       try: () => {
         mkdirSync(dirname(cacheFilePath), { recursive: true })
         const entries: Record<string, CachedDecisionEntry> = {}
@@ -191,14 +198,30 @@ const persistMapToDisk = (
           version: promptVersion,
           entries,
         }
-        const tmpPath = `${cacheFilePath}.${process.pid}.tmp`
         writeFileSync(tmpPath, JSON.stringify(store), "utf8")
         renameSync(tmpPath, cacheFilePath)
       },
-      catch: () => undefined,
-    }).pipe(Effect.ignore),
-  )
-}
+      catch: (err) => {
+        process.stderr.write(
+          `[harness:decision-cache] Warning: failed to persist decision cache to ${cacheFilePath}: ${err instanceof Error ? err.message : String(err)}\n`,
+        )
+      },
+    }).pipe(
+      Effect.ensuring(
+        Effect.ignore(
+          Effect.try({
+            try: () => {
+              if (existsSync(tmpPath)) {
+                unlinkSync(tmpPath)
+              }
+            },
+            catch: () => undefined,
+          }),
+        ),
+      ),
+      Effect.ignore,
+    )
+  })
 
 const ProbeDecisionDefinition = Decision.make({
   input: Schema.Struct({
@@ -274,7 +297,7 @@ export const makeCachedDecisionModelLayer = (
       const memoryExpiresAt = new Map<DecisionCacheKey, number>()
 
       if (options?.cacheFilePath !== undefined) {
-        loadStoreIntoMap(options.cacheFilePath, memoryCache)
+        yield* loadStoreIntoMap(options.cacheFilePath, memoryCache)
       }
 
       const inFlight = new Map<
@@ -365,7 +388,7 @@ export const makeCachedDecisionModelLayer = (
                   globalDecisionMemoryCache.set(cacheKey, entry)
                 }
                 if (options?.cacheFilePath !== undefined) {
-                  persistMapToDisk(options.cacheFilePath, memoryCache, promptVersion)
+                  yield* persistMapToDisk(options.cacheFilePath, memoryCache, promptVersion)
                 }
 
                 return { response, entry }

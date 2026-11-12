@@ -1,4 +1,5 @@
 import { Effect } from "effect"
+import { match } from "ts-pattern"
 
 export type EarsLintFindingKind =
   | "no-requirements-table"
@@ -88,8 +89,6 @@ interface TableContext {
 export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* (
   input: EarsSpecLintInput,
 ) {
-  yield* Effect.void
-
   const findings: Array<EarsLintFinding> = []
   const requirements: Array<EarsRequirementRow> = []
 
@@ -436,8 +435,8 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
 
           // Pattern-keyword agreement
           const cleanPattern = stripMarkup(rawPattern).toLowerCase()
-          switch (cleanPattern) {
-            case "ubiquitous": {
+          match(cleanPattern)
+            .with("ubiquitous", () => {
               const trimmedReq = normalizedPlain.trimStart()
               if (/^(when|while|if|where)\b/.test(trimmedReq)) {
                 findings.push({
@@ -446,9 +445,8 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
                   message: `${cleanId} is declared as Ubiquitous but starts with conditional keyword (${trimmedReq.split(" ")[0]}).`,
                 })
               }
-              break
-            }
-            case "event-driven": {
+            })
+            .with("event-driven", () => {
               if (!/\bwhen\b/.test(normalizedPlain)) {
                 findings.push({
                   line: lineNum,
@@ -456,9 +454,8 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
                   message: `${cleanId} is declared as Event-driven but does not contain keyword 'when'.`,
                 })
               }
-              break
-            }
-            case "state-driven": {
+            })
+            .with("state-driven", () => {
               if (!/\bwhile\b/.test(normalizedPlain)) {
                 findings.push({
                   line: lineNum,
@@ -466,10 +463,8 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
                   message: `${cleanId} is declared as State-driven but does not contain keyword 'while'.`,
                 })
               }
-              break
-            }
-            case "unwanted behaviour":
-            case "unwanted behavior": {
+            })
+            .with("unwanted behaviour", "unwanted behavior", () => {
               if (!/\bif\b/.test(normalizedPlain) || !/\bthen\b/.test(normalizedPlain)) {
                 findings.push({
                   line: lineNum,
@@ -477,9 +472,8 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
                   message: `${cleanId} is declared as Unwanted behaviour but does not contain both 'if' and 'then'.`,
                 })
               }
-              break
-            }
-            case "optional feature": {
+            })
+            .with("optional feature", () => {
               if (!/\bwhere\b/.test(normalizedPlain)) {
                 findings.push({
                   line: lineNum,
@@ -487,17 +481,23 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
                   message: `${cleanId} is declared as Optional feature but does not contain keyword 'where'.`,
                 })
               }
-              break
-            }
-            default: {
+            })
+            .with("complex", () => {
+              if (!/\b(when|while|if|where)\b/.test(normalizedPlain)) {
+                findings.push({
+                  line: lineNum,
+                  kind: "pattern-keyword-mismatch",
+                  message: `${cleanId} is declared as Complex but does not contain conditional keyword.`,
+                })
+              }
+            })
+            .otherwise(() => {
               findings.push({
                 line: lineNum,
                 kind: "pattern-keyword-mismatch",
-                message: `${cleanId} has unknown EARS pattern '${rawPattern}'. Allowed: Ubiquitous, Event-driven, State-driven, Unwanted behaviour, Optional feature.`,
+                message: `${cleanId} has unknown EARS pattern '${rawPattern}'. Allowed: Ubiquitous, Event-driven, State-driven, Unwanted behaviour, Optional feature, Complex.`,
               })
-              break
-            }
-          }
+            })
 
           // Verification method
           const cleanVerif = stripMarkup(rawVerif).toLowerCase()
@@ -555,14 +555,16 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
     })
   }
 
-  return {
+  return yield* Effect.succeed({
     docPath: input.docPath,
     clean: findings.length === 0,
     requirementCount: requirements.length,
     requirements,
     findings,
-  } satisfies EarsSpecLintReport
+  } satisfies EarsSpecLintReport)
 })
 
 export const lintEarsSpecMarkdown = (docPath: string, markdown: string): EarsSpecLintReport =>
   Effect.runSync(decideEarsSpecQuality({ docPath, markdown }))
+
+export const decideEarsSpecLint = decideEarsSpecQuality

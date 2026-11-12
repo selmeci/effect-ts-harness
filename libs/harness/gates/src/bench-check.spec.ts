@@ -594,7 +594,7 @@ describe("AstGateCache & Unified Single-Pass AST Gate Deciders (PERF-02, RFC-000
           }),
         )
         const parsed = yield* Schema.decodeEffect(CacheDiskSchema)(diskContent)
-        expect(parsed.version).toBe("ast-gates-v1")
+        expect(parsed.version).toBe(HARNESS_GATE_RULE_VERSION)
         expect(Object.keys(parsed.entries).length).toBe(1)
 
         rmSync(tmpDir, { recursive: true, force: true })

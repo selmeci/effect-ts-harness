@@ -20,6 +20,12 @@ export * from "./ontology-invariants.js"
 export * from "./telemetry.js"
 export * from "./ast-cache.js"
 export * from "./bench-check.js"
+export * from "./plugins/self-dogfooding-contract.js"
+export * from "./plugins/self-dogfooding-plugin.js"
+export * from "./plugins/gate-plugin-registry.js"
+export * from "./services/workspace-fs.js"
+export * from "./services/subprocess-runner.js"
+export * from "./services/active-mutant-context.js"
 export {
   BOUNDARY_CALLER_PATTERN,
   CandidateRank,

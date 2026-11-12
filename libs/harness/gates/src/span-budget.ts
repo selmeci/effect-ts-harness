@@ -249,8 +249,6 @@ export const evaluateTemporalCausalityRules = checkTemporalCausality
 export const decideSpanBudgets = Effect.fn("SpanBudget.decide")(function* (
   input: SpanBudgetInput,
 ): Effect.fn.Return<ReadonlyArray<SpanBudgetViolation>, SpanCausalityError, never> {
-  yield* Effect.void
-
   const maxRepeated = input.maxRepeatedChildCalls ?? 5
   const spansById = new Map<string, SpanSample>()
   for (const span of input.spans) {

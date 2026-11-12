@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { createHash, randomUUID } from "node:crypto"
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { Effect, Schema } from "effect"
 import { match } from "ts-pattern"
@@ -10,7 +10,7 @@ import { resolveHarnessStateDir } from "./worktree.js"
 export const GateRuleVersion = Schema.NonEmptyString.pipe(Schema.brand("GateRuleVersion"))
 export type GateRuleVersion = typeof GateRuleVersion.Type
 
-export const HARNESS_GATE_RULE_VERSION: GateRuleVersion = GateRuleVersion.make("ast-gates-v1")
+export const HARNESS_GATE_RULE_VERSION: GateRuleVersion = GateRuleVersion.make("ast-gates-v2")
 
 export const AstSourceFilePath = Schema.NonEmptyString.pipe(Schema.brand("AstSourceFilePath"))
 export type AstSourceFilePath = typeof AstSourceFilePath.Type
@@ -145,10 +145,19 @@ export const loadAstGateCacheFromDisk = (cacheFilePath: string): void => {
               inMemoryGateCache.set(key, entry)
             }
           })
-          .with({ _tag: "None" }, () => undefined)
+          .with({ _tag: "None" }, () => {
+            process.stderr.write(
+              `[harness:ast-cache] Warning: failed to parse AST gate cache from ${cacheFilePath}: invalid schema format\n`,
+            )
+          })
           .exhaustive()
       },
-      catch: () => undefined,
+      catch: (err) => {
+        process.stderr.write(
+          `[harness:ast-cache] Warning: failed to read AST gate cache from ${cacheFilePath}: ${err instanceof Error ? err.message : String(err)}\n`,
+        )
+        return undefined
+      },
     }).pipe(Effect.ignore),
   )
 }
@@ -157,6 +166,7 @@ export const saveAstGateCacheToDisk = (
   cacheFilePath: string,
   ruleVersion: GateRuleVersion = HARNESS_GATE_RULE_VERSION,
 ): void => {
+  const tmpPath = `${cacheFilePath}.${process.pid}.${randomUUID()}.tmp`
   Effect.runSync(
     Effect.try({
       try: () => {
@@ -171,12 +181,30 @@ export const saveAstGateCacheToDisk = (
           version: ruleVersion,
           entries,
         }
-        const tmpPath = `${cacheFilePath}.${process.pid}.tmp`
         writeFileSync(tmpPath, JSON.stringify(payload), "utf8")
         renameSync(tmpPath, cacheFilePath)
       },
-      catch: () => undefined,
-    }).pipe(Effect.ignore),
+      catch: (err) => {
+        process.stderr.write(
+          `[harness:ast-cache] Warning: failed to persist AST gate cache to ${cacheFilePath}: ${err instanceof Error ? err.message : String(err)}\n`,
+        )
+        return undefined
+      },
+    }).pipe(
+      Effect.ensuring(
+        Effect.ignore(
+          Effect.try({
+            try: () => {
+              if (existsSync(tmpPath)) {
+                unlinkSync(tmpPath)
+              }
+            },
+            catch: () => undefined,
+          }),
+        ),
+      ),
+      Effect.ignore,
+    ),
   )
 }
 
@@ -234,12 +262,12 @@ const inferPackageTagFromPath = (filePath: string): AstGatePackageTag => {
   return AstGatePackageTag.make("app")
 }
 
-const getLineNumber = (sourceFile: ts.SourceFile, pos: number): SourceLineNumber => {
+export const getLineNumber = (sourceFile: ts.SourceFile, pos: number): SourceLineNumber => {
   const { line } = sourceFile.getLineAndCharacterOfPosition(Math.max(0, pos))
   return SourceLineNumber.make(line + 1)
 }
 
-const resolveEnclosingSymbol = (node: ts.Node, filePath: string): EnclosingSymbolName => {
+export const resolveEnclosingSymbol = (node: ts.Node, filePath: string): EnclosingSymbolName => {
   let curr: ts.Node | undefined = node
   while (curr !== undefined) {
     if (ts.isVariableDeclaration(curr) && ts.isIdentifier(curr.name)) {
@@ -277,6 +305,44 @@ const isImpureDomainSpecifier = (spec: string): boolean =>
   spec.startsWith("@effect/sql") ||
   spec.startsWith("alchemy/") ||
   /^@harness\/[a-z0-9-]+-infra$/.test(spec)
+
+export const unwrapAstExpression = (expr: ts.Expression): ts.Expression => {
+  let curr = expr
+  while (
+    ts.isParenthesizedExpression(curr) ||
+    ts.isAsExpression(curr) ||
+    ts.isTypeAssertionExpression(curr) ||
+    ts.isNonNullExpression(curr)
+  ) {
+    curr = curr.expression
+  }
+  return curr
+}
+
+export const isDummyEffectVoidYield = (
+  expr: ts.Expression,
+  sourceFile: ts.SourceFile,
+): boolean => {
+  const inner = unwrapAstExpression(expr)
+  if (
+    ts.isPropertyAccessExpression(inner) &&
+    inner.expression.getText(sourceFile).trim() === "Effect" &&
+    inner.name.text === "void"
+  ) {
+    return true
+  }
+  if (
+    ts.isCallExpression(inner) &&
+    ts.isPropertyAccessExpression(inner.expression) &&
+    inner.expression.expression.getText(sourceFile).trim() === "Effect" &&
+    inner.expression.name.text === "asVoid"
+  ) {
+    return true
+  }
+  return false
+}
+
+const unwrapExpression = unwrapAstExpression
 
 const visitSourceFileSinglePass = (
   sourceFile: ts.SourceFile,
@@ -380,7 +446,7 @@ const visitSourceFileSinglePass = (
     }
 
     // 2. Switch statements (syntax-bans)
-    if (ts.isSwitchStatement(node) && !isTestFile && !isHarnessInternal) {
+    if (ts.isSwitchStatement(node) && !isTestFile) {
       violations.push({
         category: GateCategory.make("syntax-bans"),
         rule: GateRuleId.make("discriminant-branching"),
@@ -391,6 +457,22 @@ const visitSourceFileSinglePass = (
         line: getLineNumber(sourceFile, node.getStart(sourceFile)),
         enclosingSymbol: resolveEnclosingSymbol(node, filePath),
       })
+    }
+
+    // 2b. Dummy yield* Effect.void (effect-laws: effect-fn-dummy-void)
+    if (ts.isYieldExpression(node) && !isTestFile) {
+      if (node.expression !== undefined && isDummyEffectVoidYield(node.expression, sourceFile)) {
+        violations.push({
+          category: GateCategory.make("effect-laws"),
+          rule: GateRuleId.make("effect-fn-dummy-void"),
+          message: GateViolationMessage.make(
+            `Dummy 'yield* Effect.void' in '${filePath}' is banned — use a pure function or Effect.sync(() => ...) instead of a dummy yield.`,
+          ),
+          file: filePath,
+          line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+          enclosingSymbol: resolveEnclosingSymbol(node, filePath),
+        })
+      }
     }
 
     // 3. AsExpression / TypeAssertionExpression (syntax-bans: unsafe-type-cast)
@@ -509,12 +591,12 @@ const visitSourceFileSinglePass = (
       }
 
       // match(...).run() ban
+      const unwrappedExpr = unwrapExpression(node.expression)
       if (
         !isTestFile &&
-        !isHarnessInternal &&
-        ts.isPropertyAccessExpression(node.expression) &&
-        node.expression.name.text === "run" &&
-        /\bmatch\s*\(/.test(node.expression.expression.getText(sourceFile))
+        ts.isPropertyAccessExpression(unwrappedExpr) &&
+        unwrappedExpr.name.text === "run" &&
+        /\bmatch\s*\(/.test(unwrappedExpr.expression.getText(sourceFile))
       ) {
         violations.push({
           category: GateCategory.make("effect-laws"),
