@@ -164,8 +164,6 @@ export interface SessionReport {
 export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
   rawInput: SessionReportInput,
 ) {
-  yield* Effect.void
-
   const scoped = scopeSessionReportInput(rawInput)
   const input: SessionReportInput = {
     ...rawInput,
@@ -402,7 +400,7 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
     recommendations,
   }
 
-  return report
+  return yield* Effect.succeed(report)
 })
 
 export const buildSessionReport = (input: SessionReportInput): SessionReport =>

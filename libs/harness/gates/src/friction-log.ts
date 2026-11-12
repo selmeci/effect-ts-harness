@@ -30,7 +30,6 @@ export interface FrictionCluster {
 export const decideFrictionClusters = Effect.fn("Friction.decide")(function* (
   events: ReadonlyArray<FrictionEvent>,
 ) {
-  yield* Effect.void
   const map = new Map<
     string,
     {
@@ -79,7 +78,7 @@ export const decideFrictionClusters = Effect.fn("Friction.decide")(function* (
     return a.key < b.key ? -1 : a.key > b.key ? 1 : 0
   })
 
-  return clusters as ReadonlyArray<FrictionCluster>
+  return yield* Effect.succeed(clusters as ReadonlyArray<FrictionCluster>)
 })
 
 export const summarizeFrictionEvents = (
@@ -107,7 +106,6 @@ export const decideLoopThrashing = Effect.fn("LoopCircuitBreaker.decide")(functi
   threshold: number = 3,
   planCandidates?: ReadonlyArray<PlanSearchCandidate>,
 ): Effect.fn.Return<LoopThrashingStatus, never, never> {
-  yield* Effect.void
   const failures = events.filter(
     (event) =>
       (event.kind === "verify_failure" || event.kind === "guard_escalation") &&
@@ -115,14 +113,14 @@ export const decideLoopThrashing = Effect.fn("LoopCircuitBreaker.decide")(functi
   )
   const effectiveThreshold = Math.max(2, threshold)
   if (failures.length === 0) {
-    return {
+    return yield* Effect.succeed({
       stuck: false,
       consecutiveCount: 0,
       threshold: effectiveThreshold,
       repeatedKey: null,
       summary: null,
       escalationMessage: null,
-    } satisfies LoopThrashingStatus
+    } satisfies LoopThrashingStatus)
   }
 
   const last = failures[failures.length - 1]!
@@ -149,7 +147,7 @@ export const decideLoopThrashing = Effect.fn("LoopCircuitBreaker.decide")(functi
     ? `[ESCALATE: STUCK LOOP DETECTED] Repeated ${last.kind} (${last.summary}) ${consecutiveCount} times consecutively (threshold: ${effectiveThreshold}). Stop retrying variations of the same fix and escalate to the human.`
     : null
 
-  return {
+  return yield* Effect.succeed({
     stuck,
     consecutiveCount,
     threshold: effectiveThreshold,
@@ -157,7 +155,7 @@ export const decideLoopThrashing = Effect.fn("LoopCircuitBreaker.decide")(functi
     summary: last.summary,
     escalationMessage,
     ...(recommendedPlanCandidate !== undefined ? { recommendedPlanCandidate } : {}),
-  } satisfies LoopThrashingStatus
+  } satisfies LoopThrashingStatus)
 })
 
 export const checkLoopThrashing = (

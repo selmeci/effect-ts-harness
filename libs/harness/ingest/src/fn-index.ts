@@ -164,18 +164,16 @@ const findSrcTsFiles = (repoRoot: string, subDir: string): ReadonlyArray<string>
 }
 
 export const buildWorkspaceFnIndex = (repoRoot: string): Effect.Effect<WorkspaceFnIndex> =>
-  Effect.sync(() => {
+  Effect.gen(function* () {
     const allFns: Array<IndexedEffectFn> = []
     const files = [...findSrcTsFiles(repoRoot, "libs"), ...findSrcTsFiles(repoRoot, "apps")]
     for (const file of files) {
       const fullPath = path.join(repoRoot, file)
       if (!fs.existsSync(fullPath)) continue
-      const content = Effect.runSync(
-        Effect.try({
-          try: () => fs.readFileSync(fullPath, "utf-8"),
-          catch: () => null,
-        }).pipe(Effect.orElseSucceed(() => null)),
-      )
+      const content = yield* Effect.try({
+        try: () => fs.readFileSync(fullPath, "utf-8"),
+        catch: () => null,
+      }).pipe(Effect.orElseSucceed(() => null))
       if (content === null) continue
       const tag = resolvePackageTag(repoRoot, file)
       const fns = indexEffectFnsInFile(file, content, tag)

@@ -69,7 +69,7 @@ describe("StructuralSearch.decide", () => {
       })
       expect(lineResults.length).toBe(1)
       expect(lineResults[0]?.file).toBe("libs/sample/domain/src/index.ts")
-      expect(lineResults[0]?.line).toBe(16)
+      expect(lineResults[0]?.line).toBe(15)
       expect(lineResults[0]?.column).toBeGreaterThanOrEqual(1)
       expect(lineResults[0]?.text).toContain("Hello,")
     }),

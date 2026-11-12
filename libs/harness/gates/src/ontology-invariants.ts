@@ -98,8 +98,6 @@ const getDocScope = (doc: GovernanceDocReference): string | undefined => {
 export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(function* (
   input: OntologyInvariantsInput,
 ) {
-  yield* Effect.void
-
   const findings: Array<OntologyInvariantFinding> = []
   const g = input.graph.graph
 
@@ -675,10 +673,10 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(f
     }
   }
 
-  return {
+  return yield* Effect.succeed({
     clean: findings.length === 0,
     findings,
-  } satisfies OntologyInvariantsReport
+  } satisfies OntologyInvariantsReport)
 })
 
 export const checkOntologyInvariants = (input: OntologyInvariantsInput): OntologyInvariantsReport =>

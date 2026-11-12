@@ -2480,8 +2480,7 @@ const handleMutate = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
 ): Effect.Effect<CliResult> =>
-  Effect.gen(function* () {
-    yield* Effect.void
+  Effect.sync(() => {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     const scopeArg = argv.find((arg) => arg.startsWith("--scope="))
     const scope = scopeArg ? scopeArg.slice("--scope=".length) : undefined
@@ -2931,86 +2930,86 @@ const handleOntology = (
     const graph = options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot))
     const sub = argv[1] ?? "layers"
 
-    switch (sub) {
-      case "why": {
+    return yield* match(sub)
+      .with("why", () => {
         const symbol = argv[2] ?? ""
-        return {
+        return Effect.succeed({
           exitCode: 0,
           stdout: JSON.stringify(queryOntologyWhy(graph, symbol)),
           stderr: "",
-        }
-      }
-      case "impact": {
+        })
+      })
+      .with("impact", () => {
         const symbol = argv[2] ?? ""
-        return {
+        return Effect.succeed({
           exitCode: 0,
           stdout: JSON.stringify(queryOntologyImpact(graph, symbol)),
           stderr: "",
-        }
-      }
-      case "layers": {
+        })
+      })
+      .with("layers", () => {
         const formatMermaid = argv.includes("--format=mermaid")
-        return {
+        return Effect.succeed({
           exitCode: 0,
           stdout: formatMermaid
             ? renderOntologyMermaid(graph)
             : JSON.stringify(projectOntologyLayers(graph)),
           stderr: "",
-        }
-      }
-      case "check": {
-        const strict = argv.includes("--strict")
-        const scopeArg = argv.find((arg) => arg.startsWith("--scope="))
-        const scope = scopeArg ? scopeArg.slice("--scope=".length) : undefined
-
-        const allDocs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot)
-        const docs = scope
-          ? allDocs.filter(
-              (doc) =>
-                doc.id.startsWith(`${scope}:`) ||
-                doc.docPath.includes(`libs/${scope}/`) ||
-                doc.docPath.includes(`apps/${scope}/`) ||
-                doc.docPath.includes(`packages/${scope}/`),
-            )
-          : allDocs
-
-        const invariants = yield* decideOntologyInvariants({
-          graph,
-          governanceDocs: docs,
         })
-        const pairs = extractOntologyConflictPairs(docs, scope)
-        const semanticConflicts = yield* evaluateOntologyConflicts(pairs).pipe(
-          Effect.provide(decisionLayer),
-        )
-        const clean = invariants.clean && semanticConflicts.length === 0
+      })
+      .with("check", () =>
+        Effect.gen(function* () {
+          const strict = argv.includes("--strict")
+          const scopeArg = argv.find((arg) => arg.startsWith("--scope="))
+          const scope = scopeArg ? scopeArg.slice("--scope=".length) : undefined
 
-        return {
-          exitCode: strict && !clean ? 1 : 0,
-          stdout: JSON.stringify({
-            clean,
-            findings: invariants.findings,
-            semanticConflicts,
-            evaluatedPairs: pairs.length,
-          }),
-          stderr: "",
-        }
-      }
-      default: {
-        return {
+          const allDocs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot)
+          const docs = scope
+            ? allDocs.filter(
+                (doc) =>
+                  doc.id.startsWith(`${scope}:`) ||
+                  doc.docPath.includes(`libs/${scope}/`) ||
+                  doc.docPath.includes(`apps/${scope}/`) ||
+                  doc.docPath.includes(`packages/${scope}/`),
+              )
+            : allDocs
+
+          const invariants = yield* decideOntologyInvariants({
+            graph,
+            governanceDocs: docs,
+          })
+          const pairs = extractOntologyConflictPairs(docs, scope)
+          const semanticConflicts = yield* evaluateOntologyConflicts(pairs).pipe(
+            Effect.provide(decisionLayer),
+          )
+          const clean = invariants.clean && semanticConflicts.length === 0
+
+          return {
+            exitCode: strict && !clean ? 1 : 0,
+            stdout: JSON.stringify({
+              clean,
+              findings: invariants.findings,
+              semanticConflicts,
+              evaluatedPairs: pairs.length,
+            }),
+            stderr: "",
+          }
+        }),
+      )
+      .otherwise(() =>
+        Effect.succeed({
           exitCode: 1,
           stdout: "",
           stderr: `unknown ontology subcommand: ${sub}\nusage: harness ontology <why|impact|layers|check>`,
-        }
-      }
-    }
+        }),
+      )
   })
 
 const handleReport = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
 ): Effect.Effect<CliResult> =>
-  Effect.gen(function* () {
-    yield* Effect.void
+  Effect.sync(() => {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     if (argv.includes("--reset") || argv.includes("--clear")) {
       clearTelemetryEvents(repoRoot)
@@ -3590,52 +3589,22 @@ export const runCliEffect = (
       return yield* handleReport(argv, options)
     }
 
-    let resEffect: Effect.Effect<CliResult>
-    switch (requested) {
-      case "guard":
-        resEffect = handleGuard(argv, options, decisionLayer)
-        break
-      case "route":
-        resEffect = handleRoute(argv, options, decisionLayer)
-        break
-      case "plan-check":
-        resEffect = handlePlanCheck(argv, options)
-        break
-      case "plan-synth":
-        resEffect = handlePlanSynth(argv, options)
-        break
-      case "repair":
-        resEffect = handleRepair(argv, options)
-        break
-      case "verify":
-        resEffect = handleVerify(options, decisionLayer)
-        break
-      case "done":
-        resEffect = handleDone(argv, options, decisionLayer)
-        break
-      case "learn":
-        resEffect = handleLearn(argv, options, decisionLayer)
-        break
-      case "gc":
-        resEffect = handleGc(argv, options)
-        break
-      case "mutate":
-        resEffect = handleMutate(argv.slice(1), options)
-        break
-      case "bench":
-        resEffect = handleBench(argv.slice(1), options)
-        break
-      case "ingest":
-        resEffect = handleIngest(argv, options)
-        break
-      case "session":
-      case "doctor":
-        resEffect = handleDoctorOrSession(argv, options, decisionLayer)
-        break
-      case "ontology":
-        resEffect = handleOntology(argv, options, decisionLayer)
-        break
-    }
+    const resEffect: Effect.Effect<CliResult> = match(requested)
+      .with("guard", () => handleGuard(argv, options, decisionLayer))
+      .with("route", () => handleRoute(argv, options, decisionLayer))
+      .with("plan-check", () => handlePlanCheck(argv, options))
+      .with("plan-synth", () => handlePlanSynth(argv, options))
+      .with("repair", () => handleRepair(argv, options))
+      .with("verify", () => handleVerify(options, decisionLayer))
+      .with("done", () => handleDone(argv, options, decisionLayer))
+      .with("learn", () => handleLearn(argv, options, decisionLayer))
+      .with("gc", () => handleGc(argv, options))
+      .with("mutate", () => handleMutate(argv.slice(1), options))
+      .with("bench", () => handleBench(argv.slice(1), options))
+      .with("ingest", () => handleIngest(argv, options))
+      .with("session", "doctor", () => handleDoctorOrSession(argv, options, decisionLayer))
+      .with("ontology", () => handleOntology(argv, options, decisionLayer))
+      .exhaustive()
 
     const startTime = performance.now()
     const res = yield* resEffect
@@ -3725,6 +3694,8 @@ export const runCli = (
   options?: CliEnv,
   maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>,
 ): Promise<CliResult> => Effect.runPromise(runCliEffect(argv, options, maybeDecisionLayer))
+
+export * from "./commands/command-registry.js"
 
 export const run = (argv: ReadonlyArray<string>): number => {
   const requested = argv[0] ?? "help"

@@ -31,8 +31,6 @@ export interface MigrationSafetyReport {
 export const decideMigrationSafety = Effect.fn("MigrationSafety.decide")(function* (
   input: MigrationSafetyInput,
 ) {
-  yield* Effect.void
-
   const violations: Array<MigrationViolation> = []
 
   for (const { file, sql } of input.files) {
@@ -81,11 +79,11 @@ export const decideMigrationSafety = Effect.fn("MigrationSafety.decide")(functio
     }
   }
 
-  return {
+  return yield* Effect.succeed({
     safe: violations.length === 0,
     requiresEscalation: violations.length > 0,
     violations,
-  } satisfies MigrationSafetyReport
+  } satisfies MigrationSafetyReport)
 })
 
 export const checkMigrationSqlSafety = (

@@ -86,10 +86,9 @@ import {
   type TelemetryEngineSource,
   type TelemetryOutcome,
 } from "@harness/gates"
+import { McpToolInputName, UnknownToolError } from "./tools/tool-registry.js"
 
-export class UnknownToolError extends Schema.TaggedError<UnknownToolError>()("UnknownToolError", {
-  toolName: Schema.String,
-}) {}
+export * from "./tools/tool-registry.js"
 
 export interface LspDiagnosticsReport {
   readonly clean: boolean
@@ -477,515 +476,525 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
   options?: ServerOptions,
 ) {
   const startTime = performance.now()
-  let result: unknown
-
-  switch (toolName) {
-    case "harness_resolve": {
-      const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
-      const graph = yield* resolveGraph(options, args)
-      result = resolveNode(graph, symbolOrSpan) ?? null
-      break
-    }
-    case "harness_callers": {
-      const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
-      const graph = yield* resolveGraph(options, args)
-      result = findCallers(graph, symbolOrSpan)
-      break
-    }
-    case "harness_callees": {
-      const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
-      const graph = yield* resolveGraph(options, args)
-      result = findCallees(graph, symbolOrSpan)
-      break
-    }
-    case "harness_tests_reaching": {
-      const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
-      const graph = yield* resolveGraph(options, args)
-      result = findTestsReaching(graph, symbolOrSpan)
-      break
-    }
-    case "harness_structural_search": {
-      const pattern = (args as { pattern: string }).pattern
-      const filePath = (args as { filePath?: string | undefined }).filePath
-      const paths = (args as { paths?: ReadonlyArray<string> | undefined }).paths
-      const subDirs = (args as { subDirs?: ReadonlyArray<string> | undefined }).subDirs
-      const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-      result = yield* decideStructuralSearch({
-        pattern,
-        repoRoot: root,
-        filePath,
-        paths,
-        subDirs,
-      })
-      break
-    }
-    case "harness_route": {
-      const planStep = (args as { planStep: string }).planStep
-      const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
-      const routedOpt = yield* routeStep(planStep).pipe(
-        Effect.provide(decisionLayer),
-        Effect.timeoutOption("1500 millis"),
-        Effect.catchCause(() => Effect.succeedNone),
-      )
-      let block: string = Option.getOrElse(routedOpt, () => "review")
-      const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-      if (block === "review") {
-        const patternsDir = path.join(root, "agent-patterns")
-        if (fs.existsSync(patternsDir)) {
-          const files = fs.readdirSync(patternsDir)
-          const stepLower = planStep.toLowerCase()
-          const candidates = files
-            .filter((f) => f.endsWith(".md") && f.toLowerCase() !== "readme.md")
-            .map((f) => f.replace(/\.md$/, ""))
-            .sort((a, b) => b.length - a.length)
-          for (const slug of candidates) {
-            const words = slug.split("-").filter((w) => w.length > 0)
-            if (words.length > 0 && words.every((w) => stepLower.includes(w))) {
-              block = slug
-              break
-            }
-          }
-        }
-      }
-      const patternFile =
-        block === "review" || block === "effect" ? null : `agent-patterns/${block}.md`
-      result = { block, patternFile }
-      break
-    }
-    case "harness_ontology_why": {
-      const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
-      const graph = yield* resolveGraph(options, args)
-      result = queryOntologyWhy(graph, symbolOrSpan)
-      break
-    }
-    case "harness_ontology_impact": {
-      const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
-      const graph = yield* resolveGraph(options, args)
-      result = queryOntologyImpact(graph, symbolOrSpan)
-      break
-    }
-    case "harness_ontology_check": {
-      const scope = (args as { scope?: string | undefined }).scope
-      const graph = yield* resolveGraph(options, args)
-      const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-      const docs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(root)
-      const invariants = yield* decideOntologyInvariants({
-        graph,
-        governanceDocs: docs,
-      })
-      const pairs = extractOntologyConflictPairs(docs, scope)
-      const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
-      const semanticConflicts = yield* evaluateOntologyConflicts(pairs).pipe(
-        Effect.provide(decisionLayer),
-      )
-      const projection = projectOntologyLayers(graph)
-      result = {
-        clean: invariants.clean && semanticConflicts.length === 0,
-        findings: invariants.findings,
-        semanticConflicts,
-        evaluatedPairs: pairs.length,
-        layerCounts: {
-          Motivation: projection.layers.Motivation.length,
-          Business: projection.layers.Business.length,
-          Application: projection.layers.Application.length,
-          Technology: projection.layers.Technology.length,
-          Implementation: projection.layers.Implementation.length,
-        },
-      }
-      break
-    }
-    case "harness_gq_query": {
-      const queryName = (args as { queryName: HarnessGqQueryName }).queryName
-      const params = (args as { params?: Record<string, unknown> | undefined }).params
-      const branch = (args as { branch?: string | undefined }).branch
-      const graph = yield* resolveGraph(options, args)
-      const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-      result = yield* invokeOmnigraphNamedQuery({
-        repoRoot: root,
-        name: queryName as HarnessGqQueryName,
-        params,
-        branch,
-        fallbackGraph: graph,
-      }).pipe(Effect.provide(OmnigraphSync.Live))
-      break
-    }
-    case "harness_lsp_diagnostics": {
-      const typedArgs = args as {
-        file?: string | undefined
-        filePath?: string | undefined
-        project?: string | undefined
-        tsconfigPath?: string | undefined
-        overlays?: Record<string, string> | undefined
-      }
-      const file = typedArgs.file ?? typedArgs.filePath
-      const project = typedArgs.project ?? typedArgs.tsconfigPath
-      const overlays = typedArgs.overlays
-      const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-      if (overlays !== undefined && Object.keys(overlays).length > 0) {
-        const compilableKeys = Object.keys(overlays).filter(
-          (k) => (k.endsWith(".ts") || k.endsWith(".tsx")) && !k.endsWith(".d.ts"),
-        )
-        const session = getOrCreateWarmProgramSession(root)
-        const diags = evaluateOverlayDiagnostics(root, overlays, session)
-        const filteredDiags =
-          file !== undefined && file.length > 0
-            ? diags.filter((d) => d.file === file || d.file.endsWith(file))
-            : diags
-        const errors = filteredDiags.filter((d) => d.severity === "error").length
-        const warnings = filteredDiags.filter((d) => d.severity === "warning").length
-        result = {
-          clean: compilableKeys.length > 0 && errors === 0 && warnings === 0,
-          diagnostics: filteredDiags,
-          summary: {
-            filesChecked: compilableKeys.length,
-            filesWithoutPlugin: 0,
-            totalFiles: Object.keys(overlays).length,
-            errors,
-            warnings,
-            messages: filteredDiags.length,
-          },
-        } satisfies LspDiagnosticsReport
-      } else if (options?.lspDiagnosticsRunner !== undefined) {
-        result = options.lspDiagnosticsRunner({ file, project })
-      } else {
-        result = yield* runDefaultLspDiagnostics(root, { file, project })
-      }
-      break
-    }
-    case "harness_telemetry_report": {
-      const format = (args as { format?: "json" | "markdown" | undefined }).format
-      const cumulative = (args as { cumulative?: boolean | undefined }).cumulative
-      const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-      const events = readTelemetryEvents(root)
-      const frictionEvents = readFrictionEvents(root)
-      const report = buildSessionReport({
-        events,
-        frictionEvents,
-        ...(cumulative === true ? { cumulative: true } : {}),
-      })
-      if (format === "markdown") {
-        result = { markdown: renderSessionReportMarkdown(report), report }
-      } else {
-        result = report
-      }
-      break
-    }
-    case "harness_graph_infer": {
-      const symbolOrSpan = (args as { symbolOrSpan?: string | undefined }).symbolOrSpan
-      const ruleId = (args as { ruleId?: string | undefined }).ruleId
-      const graph = yield* resolveGraph(options, args)
-      const resolvedNode =
-        symbolOrSpan !== undefined && symbolOrSpan.length > 0
-          ? resolveNode(graph, symbolOrSpan)
-          : undefined
-      const resolvedKey = resolvedNode !== undefined ? getNodeKey(resolvedNode) : undefined
-      const inference = yield* decideGraphInference(graph)
-      const filterBySymbol = (text: string): boolean =>
-        symbolOrSpan === undefined ||
-        symbolOrSpan.length === 0 ||
-        text.includes(symbolOrSpan) ||
-        (resolvedKey !== undefined && text.includes(resolvedKey))
-      result = {
-        effectiveRequires: inference.effectiveRequires.filter(
-          (f) => filterBySymbol(f.callerKey) || filterBySymbol(f.serviceKey),
-        ),
-        effectiveFailsWith: inference.effectiveFailsWith.filter(
-          (f) => filterBySymbol(f.callerKey) || filterBySymbol(f.errorKey),
-        ),
-        effectiveLayerDeps: inference.effectiveLayerDeps.filter(
-          (f) => filterBySymbol(f.layerKey) || filterBySymbol(f.requiredServiceKey),
-        ),
-        effectiveTestReach: inference.effectiveTestReach.filter(
-          (f) => filterBySymbol(f.testKey) || filterBySymbol(f.targetSpanKey),
-        ),
-        antiPatterns: inference.antiPatterns.filter(
-          (ap) =>
-            (ruleId === undefined || ap.ruleId === ruleId || ap.datalogRuleId === ruleId) &&
-            (filterBySymbol(ap.nodeKey) || ap.path.some((p) => filterBySymbol(p))),
-        ),
-        typedHoleBundles: (inference.typedHoleBundles ?? []).filter(
-          (b) => filterBySymbol(b.holeQualname) || filterBySymbol(b.spanName),
-        ),
-        proofs: inference.proofs.filter(
-          (p) => (ruleId === undefined || p.ruleId === ruleId) && filterBySymbol(p.conclusion),
-        ),
-        iterations: inference.iterations ?? 0,
-      }
-      break
-    }
-    case "harness_graph_complete": {
-      const symbolOrSpan = (args as { symbolOrSpan?: string | undefined }).symbolOrSpan
-      const minConfidenceMillis =
-        (args as { minConfidenceMillis?: number | undefined }).minConfidenceMillis ?? 0
-      const ruleId = (args as { ruleId?: string | undefined }).ruleId
-      const useDecisionPriors =
-        (args as { useDecisionPriors?: boolean | undefined }).useDecisionPriors === true
-      const rawPriors = (
-        args as {
-          priors?:
-            | SemanticEdgePriors
-            | {
-                readonly edgeConfidenceByRelationTargetRole?: Record<string, number>
-                readonly teleportationWeightByNodeKey?: Record<string, number>
-              }
-            | undefined
-        }
-      ).priors
-      const graph = yield* resolveGraph(options, args)
-      const resolvedNode =
-        symbolOrSpan !== undefined && symbolOrSpan.length > 0
-          ? resolveNode(graph, symbolOrSpan)
-          : undefined
-      const resolvedKey = resolvedNode !== undefined ? getNodeKey(resolvedNode) : undefined
-      const filterBySymbol = (text: string): boolean =>
-        symbolOrSpan === undefined ||
-        symbolOrSpan.length === 0 ||
-        text.includes(symbolOrSpan) ||
-        (resolvedKey !== undefined && text.includes(resolvedKey))
-
-      let priors: SemanticEdgePriors | undefined = undefined
-      if (useDecisionPriors) {
+  const result: unknown = yield* match(toolName)
+    .with("harness_resolve", () =>
+      Effect.gen(function* () {
+        const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
+        const graph = yield* resolveGraph(options, args)
+        return resolveNode(graph, symbolOrSpan) ?? null
+      }),
+    )
+    .with("harness_callers", () =>
+      Effect.gen(function* () {
+        const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
+        const graph = yield* resolveGraph(options, args)
+        return findCallers(graph, symbolOrSpan)
+      }),
+    )
+    .with("harness_callees", () =>
+      Effect.gen(function* () {
+        const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
+        const graph = yield* resolveGraph(options, args)
+        return findCallees(graph, symbolOrSpan)
+      }),
+    )
+    .with("harness_tests_reaching", () =>
+      Effect.gen(function* () {
+        const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
+        const graph = yield* resolveGraph(options, args)
+        return findTestsReaching(graph, symbolOrSpan)
+      }),
+    )
+    .with("harness_structural_search", () =>
+      Effect.gen(function* () {
+        const pattern = (args as { pattern: string }).pattern
+        const filePath = (args as { filePath?: string | undefined }).filePath
+        const paths = (args as { paths?: ReadonlyArray<string> | undefined }).paths
+        const subDirs = (args as { subDirs?: ReadonlyArray<string> | undefined }).subDirs
+        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+        return yield* decideStructuralSearch({
+          pattern,
+          repoRoot: root,
+          filePath,
+          paths,
+          subDirs,
+        })
+      }),
+    )
+    .with("harness_route", () =>
+      Effect.gen(function* () {
+        const planStep = (args as { planStep: string }).planStep
         const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
-        const edgeConfidenceOverrides: Record<string, ConfidenceMillis> = {}
-        const holeTeleportationWeights: Record<NodeKey, PageRankScoreMillis> = {}
-
-        const stubFns: Array<EffectFnNode> = []
-        const candidateEntities: Array<EntityNode> = []
-
-        for (const [, node] of Graph.nodes(graph.graph)) {
-          if (isEntityNode(node)) {
-            if (node._tag === "EffectFn" && node.isStub === true) {
-              stubFns.push(node)
-            } else if (
-              node._tag === "EffectFn" ||
-              node._tag === "ServiceTag" ||
-              node._tag === "TaggedError" ||
-              node._tag === "SchemaDef"
-            ) {
-              candidateEntities.push(node)
-            }
-          }
-        }
-
-        if (stubFns.length === 0) {
-          const candidateNode = symbolOrSpan ? resolveNode(graph, symbolOrSpan) : undefined
-          if (candidateNode && candidateNode._tag === "EffectFn") {
-            stubFns.push(candidateNode)
-          } else {
-            for (const [, node] of Graph.nodes(graph.graph)) {
-              if (node._tag === "EffectFn") {
-                stubFns.push(node)
+        const routedOpt = yield* routeStep(planStep).pipe(
+          Effect.provide(decisionLayer),
+          Effect.timeoutOption("1500 millis"),
+          Effect.catchCause(() => Effect.succeedNone),
+        )
+        let block: string = Option.getOrElse(routedOpt, () => "review")
+        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+        if (block === "review") {
+          const patternsDir = path.join(root, "agent-patterns")
+          if (fs.existsSync(patternsDir)) {
+            const files = fs.readdirSync(patternsDir, "utf8")
+            const stepLower = planStep.toLowerCase()
+            const candidates = files
+              .filter((f: string) => f.endsWith(".md") && f.toLowerCase() !== "readme.md")
+              .map((f: string) => f.replace(/\.md$/, ""))
+              .sort((a: string, b: string) => b.length - a.length)
+            for (const slug of candidates) {
+              const words = slug.split("-").filter((w: string) => w.length > 0)
+              if (words.length > 0 && words.every((w: string) => stepLower.includes(w))) {
+                block = slug
                 break
               }
             }
           }
         }
+        const patternFile =
+          block === "review" || block === "effect" ? null : `agent-patterns/${block}.md`
+        return { block, patternFile }
+      }),
+    )
+    .with("harness_ontology_why", () =>
+      Effect.gen(function* () {
+        const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
+        const graph = yield* resolveGraph(options, args)
+        return queryOntologyWhy(graph, symbolOrSpan)
+      }),
+    )
+    .with("harness_ontology_impact", () =>
+      Effect.gen(function* () {
+        const symbolOrSpan = (args as { symbolOrSpan: string }).symbolOrSpan
+        const graph = yield* resolveGraph(options, args)
+        return queryOntologyImpact(graph, symbolOrSpan)
+      }),
+    )
+    .with("harness_ontology_check", () =>
+      Effect.gen(function* () {
+        const scope = (args as { scope?: string | undefined }).scope
+        const graph = yield* resolveGraph(options, args)
+        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+        const docs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(root)
+        const invariants = yield* decideOntologyInvariants({
+          graph,
+          governanceDocs: docs,
+        })
+        const pairs = extractOntologyConflictPairs(docs, scope)
+        const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
+        const semanticConflicts = yield* evaluateOntologyConflicts(pairs).pipe(
+          Effect.provide(decisionLayer),
+        )
+        const projection = projectOntologyLayers(graph)
+        return {
+          clean: invariants.clean && semanticConflicts.length === 0,
+          findings: invariants.findings,
+          semanticConflicts,
+          evaluatedPairs: pairs.length,
+          layerCounts: {
+            Motivation: projection.layers.Motivation.length,
+            Business: projection.layers.Business.length,
+            Application: projection.layers.Application.length,
+            Technology: projection.layers.Technology.length,
+            Implementation: projection.layers.Implementation.length,
+          },
+        }
+      }),
+    )
+    .with("harness_gq_query", () =>
+      Effect.gen(function* () {
+        const queryName = (args as { queryName: HarnessGqQueryName }).queryName
+        const params = (args as { params?: Record<string, unknown> | undefined }).params
+        const branch = (args as { branch?: string | undefined }).branch
+        const graph = yield* resolveGraph(options, args)
+        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+        return yield* invokeOmnigraphNamedQuery({
+          repoRoot: root,
+          name: queryName as HarnessGqQueryName,
+          params,
+          branch,
+          fallbackGraph: graph,
+        }).pipe(Effect.provide(OmnigraphSync.Live))
+      }),
+    )
+    .with("harness_lsp_diagnostics", () =>
+      Effect.gen(function* () {
+        const typedArgs = args as {
+          file?: string | undefined
+          filePath?: string | undefined
+          project?: string | undefined
+          tsconfigPath?: string | undefined
+          overlays?: Record<string, string> | undefined
+        }
+        const file = typedArgs.file ?? typedArgs.filePath
+        const project = typedArgs.project ?? typedArgs.tsconfigPath
+        const overlays = typedArgs.overlays
+        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+        if (overlays !== undefined && Object.keys(overlays).length > 0) {
+          const compilableKeys = Object.keys(overlays).filter(
+            (k) => (k.endsWith(".ts") || k.endsWith(".tsx")) && !k.endsWith(".d.ts"),
+          )
+          const session = getOrCreateWarmProgramSession(root)
+          const diags = evaluateOverlayDiagnostics(root, overlays, session)
+          const filteredDiags =
+            file !== undefined && file.length > 0
+              ? diags.filter((d) => d.file === file || d.file.endsWith(file))
+              : diags
+          const errors = filteredDiags.filter((d) => d.severity === "error").length
+          const warnings = filteredDiags.filter((d) => d.severity === "warning").length
+          return {
+            clean: compilableKeys.length > 0 && errors === 0 && warnings === 0,
+            diagnostics: filteredDiags,
+            summary: {
+              filesChecked: compilableKeys.length,
+              filesWithoutPlugin: 0,
+              totalFiles: Object.keys(overlays).length,
+              errors,
+              warnings,
+              messages: filteredDiags.length,
+            },
+          } satisfies LspDiagnosticsReport
+        } else if (options?.lspDiagnosticsRunner !== undefined) {
+          return options.lspDiagnosticsRunner({ file, project })
+        } else {
+          return yield* runDefaultLspDiagnostics(root, { file, project })
+        }
+      }),
+    )
+    .with("harness_telemetry_report", () =>
+      Effect.sync(() => {
+        const format = (args as { format?: "json" | "markdown" | undefined }).format
+        const cumulative = (args as { cumulative?: boolean | undefined }).cumulative
+        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+        const events = readTelemetryEvents(root)
+        const frictionEvents = readFrictionEvents(root)
+        const report = buildSessionReport({
+          events,
+          frictionEvents,
+          ...(cumulative === true ? { cumulative: true } : {}),
+        })
+        if (format === "markdown") {
+          return { markdown: renderSessionReportMarkdown(report), report }
+        } else {
+          return report
+        }
+      }),
+    )
+    .with("harness_graph_infer", () =>
+      Effect.gen(function* () {
+        const symbolOrSpan = (args as { symbolOrSpan?: string | undefined }).symbolOrSpan
+        const ruleId = (args as { ruleId?: string | undefined }).ruleId
+        const graph = yield* resolveGraph(options, args)
+        const resolvedNode =
+          symbolOrSpan !== undefined && symbolOrSpan.length > 0
+            ? resolveNode(graph, symbolOrSpan)
+            : undefined
+        const resolvedKey = resolvedNode !== undefined ? getNodeKey(resolvedNode) : undefined
+        const inference = yield* decideGraphInference(graph)
+        const filterBySymbol = (text: string): boolean =>
+          symbolOrSpan === undefined ||
+          symbolOrSpan.length === 0 ||
+          text.includes(symbolOrSpan) ||
+          (resolvedKey !== undefined && text.includes(resolvedKey))
+        return {
+          effectiveRequires: inference.effectiveRequires.filter(
+            (f) => filterBySymbol(f.callerKey) || filterBySymbol(f.serviceKey),
+          ),
+          effectiveFailsWith: inference.effectiveFailsWith.filter(
+            (f) => filterBySymbol(f.callerKey) || filterBySymbol(f.errorKey),
+          ),
+          effectiveLayerDeps: inference.effectiveLayerDeps.filter(
+            (f) => filterBySymbol(f.layerKey) || filterBySymbol(f.requiredServiceKey),
+          ),
+          effectiveTestReach: inference.effectiveTestReach.filter(
+            (f) => filterBySymbol(f.testKey) || filterBySymbol(f.targetSpanKey),
+          ),
+          antiPatterns: inference.antiPatterns.filter(
+            (ap) =>
+              (ruleId === undefined || ap.ruleId === ruleId || ap.datalogRuleId === ruleId) &&
+              (filterBySymbol(ap.nodeKey) || ap.path.some((p) => filterBySymbol(p))),
+          ),
+          typedHoleBundles: (inference.typedHoleBundles ?? []).filter(
+            (b) => filterBySymbol(b.holeQualname) || filterBySymbol(b.spanName),
+          ),
+          proofs: inference.proofs.filter(
+            (p) => (ruleId === undefined || p.ruleId === ruleId) && filterBySymbol(p.conclusion),
+          ),
+          iterations: inference.iterations ?? 0,
+        }
+      }),
+    )
+    .with("harness_graph_complete", () =>
+      Effect.gen(function* () {
+        const symbolOrSpan = (args as { symbolOrSpan?: string | undefined }).symbolOrSpan
+        const minConfidenceMillis =
+          (args as { minConfidenceMillis?: number | undefined }).minConfidenceMillis ?? 0
+        const ruleId = (args as { ruleId?: string | undefined }).ruleId
+        const useDecisionPriors =
+          (args as { useDecisionPriors?: boolean | undefined }).useDecisionPriors === true
+        const rawPriors = (
+          args as {
+            priors?:
+              | SemanticEdgePriors
+              | {
+                  readonly edgeConfidenceByRelationTargetRole?: Record<string, number>
+                  readonly teleportationWeightByNodeKey?: Record<string, number>
+                }
+              | undefined
+          }
+        ).priors
+        const graph = yield* resolveGraph(options, args)
+        const resolvedNode =
+          symbolOrSpan !== undefined && symbolOrSpan.length > 0
+            ? resolveNode(graph, symbolOrSpan)
+            : undefined
+        const resolvedKey = resolvedNode !== undefined ? getNodeKey(resolvedNode) : undefined
+        const filterBySymbol = (text: string): boolean =>
+          symbolOrSpan === undefined ||
+          symbolOrSpan.length === 0 ||
+          text.includes(symbolOrSpan) ||
+          (resolvedKey !== undefined && text.includes(resolvedKey))
 
-        for (const stub of stubFns) {
-          const holeSpanName = stub.spanName.length > 0 ? stub.spanName : stub.qualname
-          for (const cand of candidateEntities) {
-            const candKey = getNodeKey(cand)
-            const proposedRole = match(cand._tag)
-              .with("ServiceTag", () => "requires-service")
-              .with("TaggedError", () => "fails-with")
-              .with("EffectFn", () => "callee")
-              .with("SchemaDef", () => "uses-schema")
-              .otherwise(() => "collaborator")
+        let priors: SemanticEdgePriors | undefined = undefined
+        if (useDecisionPriors) {
+          const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
+          const edgeConfidenceOverrides: Record<string, ConfidenceMillis> = {}
+          const holeTeleportationWeights: Record<NodeKey, PageRankScoreMillis> = {}
 
-            const candidateSummary = match(cand)
-              .with({ _tag: "EffectFn" }, (n) => `Effect.fn('${n.spanName}')`)
-              .with({ _tag: "ServiceTag" }, (n) => `Context.Service<${n.name}>`)
-              .with({ _tag: "TaggedError" }, (n) => `TaggedError('${n.errorTag}')`)
-              .with({ _tag: "SchemaDef" }, (n) => `Schema '${n.schemaName}'`)
-              .with(
-                { _tag: "ServiceLayer" },
-                { _tag: "VitestCase" },
-                { _tag: "PatternDoc" },
-                { _tag: "AdrDoc" },
-                { _tag: "EarsSpec" },
-                () => candKey,
-              )
-              .exhaustive()
+          const stubFns: Array<EffectFnNode> = []
+          const candidateEntities: Array<EntityNode> = []
 
-            const priorResult = yield* evaluateHoleCandidatePrior({
-              holeSpanName,
-              holeSignatureSummary: stub.successType ?? "Effect<unknown, unknown, unknown>",
-              candidateSymbolKey: CandidateSymbolKey.make(candKey),
-              candidateSignatureSummary: candidateSummary,
-              proposedRole: ProposedRoleName.make(proposedRole),
-              earsClauseContext: `While executing ${stub.spanName}, hole delegates to ${candKey}`,
-            }).pipe(
-              Effect.provide(decisionLayer),
-              Effect.timeoutOption("1500 millis"),
-              Effect.catchCause(() => Effect.succeedNone),
-            )
-
-            if (Option.isSome(priorResult)) {
-              edgeConfidenceOverrides[candKey] = priorResult.value.edgeConfidenceMillis
-              holeTeleportationWeights[NodeKey.make(candKey)] = PageRankScoreMillis.make(
-                priorResult.value.teleportationWeightMillis,
-              )
+          for (const [, node] of Graph.nodes(graph.graph)) {
+            if (isEntityNode(node)) {
+              if (node._tag === "EffectFn" && node.isStub === true) {
+                stubFns.push(node)
+              } else if (
+                node._tag === "EffectFn" ||
+                node._tag === "ServiceTag" ||
+                node._tag === "TaggedError" ||
+                node._tag === "SchemaDef"
+              ) {
+                candidateEntities.push(node)
+              }
             }
+          }
+
+          if (stubFns.length === 0) {
+            const candidateNode = symbolOrSpan ? resolveNode(graph, symbolOrSpan) : undefined
+            if (candidateNode && candidateNode._tag === "EffectFn") {
+              stubFns.push(candidateNode)
+            } else {
+              for (const [, node] of Graph.nodes(graph.graph)) {
+                if (node._tag === "EffectFn") {
+                  stubFns.push(node)
+                  break
+                }
+              }
+            }
+          }
+
+          for (const stub of stubFns) {
+            const holeSpanName = stub.spanName.length > 0 ? stub.spanName : stub.qualname
+            for (const cand of candidateEntities) {
+              const candKey = getNodeKey(cand)
+              const proposedRole = match(cand._tag)
+                .with("ServiceTag", () => "requires-service")
+                .with("TaggedError", () => "fails-with")
+                .with("EffectFn", () => "callee")
+                .with("SchemaDef", () => "uses-schema")
+                .otherwise(() => "collaborator")
+
+              const candidateSummary = match(cand)
+                .with({ _tag: "EffectFn" }, (n) => `Effect.fn('${n.spanName}')`)
+                .with({ _tag: "ServiceTag" }, (n) => `Context.Service<${n.name}>`)
+                .with({ _tag: "TaggedError" }, (n) => `TaggedError('${n.errorTag}')`)
+                .with({ _tag: "SchemaDef" }, (n) => `Schema '${n.schemaName}'`)
+                .with(
+                  { _tag: "ServiceLayer" },
+                  { _tag: "VitestCase" },
+                  { _tag: "PatternDoc" },
+                  { _tag: "AdrDoc" },
+                  { _tag: "EarsSpec" },
+                  () => candKey,
+                )
+                .exhaustive()
+
+              const priorResult = yield* evaluateHoleCandidatePrior({
+                holeSpanName,
+                holeSignatureSummary: stub.successType ?? "Effect<unknown, unknown, unknown>",
+                candidateSymbolKey: CandidateSymbolKey.make(candKey),
+                candidateSignatureSummary: candidateSummary,
+                proposedRole: ProposedRoleName.make(proposedRole),
+                earsClauseContext: `While executing ${stub.spanName}, hole delegates to ${candKey}`,
+              }).pipe(
+                Effect.provide(decisionLayer),
+                Effect.timeoutOption("1500 millis"),
+                Effect.catchCause(() => Effect.succeedNone),
+              )
+
+              if (Option.isSome(priorResult)) {
+                edgeConfidenceOverrides[candKey] = priorResult.value.edgeConfidenceMillis
+                holeTeleportationWeights[NodeKey.make(candKey)] = PageRankScoreMillis.make(
+                  priorResult.value.teleportationWeightMillis,
+                )
+              }
+            }
+          }
+
+          priors = {
+            edgeConfidenceOverrides,
+            holeTeleportationWeights,
+          }
+        } else if (rawPriors !== undefined) {
+          const edgeOverrides: Record<string, ConfidenceMillis> = {}
+          const teleportWeights: Record<NodeKey, PageRankScoreMillis> = {}
+          const sourceEdges =
+            "edgeConfidenceOverrides" in rawPriors && rawPriors.edgeConfidenceOverrides
+              ? rawPriors.edgeConfidenceOverrides
+              : "edgeConfidenceByRelationTargetRole" in rawPriors &&
+                  rawPriors.edgeConfidenceByRelationTargetRole
+                ? rawPriors.edgeConfidenceByRelationTargetRole
+                : {}
+          for (const [k, v] of Object.entries(sourceEdges)) {
+            edgeOverrides[k] = ConfidenceMillis.make(v)
+          }
+          const sourceTeleport =
+            "holeTeleportationWeights" in rawPriors && rawPriors.holeTeleportationWeights
+              ? rawPriors.holeTeleportationWeights
+              : "teleportationWeightByNodeKey" in rawPriors && rawPriors.teleportationWeightByNodeKey
+                ? rawPriors.teleportationWeightByNodeKey
+                : {}
+          for (const [k, v] of Object.entries(sourceTeleport)) {
+            teleportWeights[NodeKey.make(k)] = PageRankScoreMillis.make(v)
+          }
+          priors = {
+            edgeConfidenceOverrides: edgeOverrides,
+            holeTeleportationWeights: teleportWeights,
           }
         }
 
-        priors = {
-          edgeConfidenceOverrides,
-          holeTeleportationWeights,
-        }
-      } else if (rawPriors !== undefined) {
-        const edgeOverrides: Record<string, ConfidenceMillis> = {}
-        const teleportWeights: Record<NodeKey, PageRankScoreMillis> = {}
-        const sourceEdges =
-          "edgeConfidenceOverrides" in rawPriors && rawPriors.edgeConfidenceOverrides
-            ? rawPriors.edgeConfidenceOverrides
-            : "edgeConfidenceByRelationTargetRole" in rawPriors &&
-                rawPriors.edgeConfidenceByRelationTargetRole
-              ? rawPriors.edgeConfidenceByRelationTargetRole
-              : {}
-        for (const [k, v] of Object.entries(sourceEdges)) {
-          edgeOverrides[k] = ConfidenceMillis.make(v)
-        }
-        const sourceTeleport =
-          "holeTeleportationWeights" in rawPriors && rawPriors.holeTeleportationWeights
-            ? rawPriors.holeTeleportationWeights
-            : "teleportationWeightByNodeKey" in rawPriors && rawPriors.teleportationWeightByNodeKey
-              ? rawPriors.teleportationWeightByNodeKey
-              : {}
-        for (const [k, v] of Object.entries(sourceTeleport)) {
-          teleportWeights[NodeKey.make(k)] = PageRankScoreMillis.make(v)
-        }
-        priors = {
-          edgeConfidenceOverrides: edgeOverrides,
-          holeTeleportationWeights: teleportWeights,
-        }
-      }
-
-      const inference = yield* decideGraphInference(graph, priors)
-      const suggestedEdges = inference.suggestedEdges.filter(
-        (se) =>
-          se.confidenceMillis >= minConfidenceMillis &&
-          (ruleId === undefined || se.ruleId === ruleId || se.relationTag === ruleId) &&
-          (symbolOrSpan === undefined ||
-            symbolOrSpan.length === 0 ||
-            (se.sourceEntityKey !== undefined && filterBySymbol(se.sourceEntityKey)) ||
-            filterBySymbol(se.targetEntityKey) ||
-            filterBySymbol(se.rationale)),
-      )
-      const typedHoleBundles = (inference.typedHoleBundles ?? []).filter(
-        (b) => filterBySymbol(b.holeQualname) || filterBySymbol(b.spanName),
-      )
-      const proofIds = new Set(suggestedEdges.map((se) => se.proof.proofId))
-      for (const b of typedHoleBundles) {
-        proofIds.add(
-          `proof:COMP-06:EffectFn:${b.holeQualname}` as (typeof suggestedEdges)[number]["proof"]["proofId"],
+        const inference = yield* decideGraphInference(graph, priors)
+        const suggestedEdges = inference.suggestedEdges.filter(
+          (se) =>
+            se.confidenceMillis >= minConfidenceMillis &&
+            (ruleId === undefined || se.ruleId === ruleId || se.relationTag === ruleId) &&
+            (symbolOrSpan === undefined ||
+              symbolOrSpan.length === 0 ||
+              (se.sourceEntityKey !== undefined && filterBySymbol(se.sourceEntityKey)) ||
+              filterBySymbol(se.targetEntityKey) ||
+              filterBySymbol(se.rationale)),
         )
-      }
-      result = {
-        suggestedEdges,
-        typedHoleBundles,
-        proofs: inference.proofs.filter((p) => proofIds.has(p.proofId)),
-        iterations: inference.iterations ?? 0,
-      }
-      break
-    }
-    case "harness_graph_rewrite": {
-      const typedArgs = args as {
-        mode?: RewriteMode | undefined
-        ruleId?: string | undefined
-        candidateRank?: number | undefined
-        useDecisionPriors?: boolean | undefined
-        verifyRoundTrip?: boolean | undefined
-      }
-      const mode: RewriteMode = typedArgs.mode ?? "auto-repair"
-      const ruleId = typedArgs.ruleId
-      const candidateRank = typedArgs.candidateRank ?? 1
-      const useDecisionPriors = typedArgs.useDecisionPriors === true
-      const verifyRoundTrip = typedArgs.verifyRoundTrip === true
-      const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-      const graph = yield* resolveGraph(options, args)
-
-      let candidatePriors: DpoCandidatePriors | undefined = undefined
-      if (useDecisionPriors) {
-        const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
-        const initialRewrite = yield* decideGraphRewrite(graph, mode)
-        const initialCandidates = [
-          ...Option.toArray(initialRewrite.result.recommendedCandidate),
-          ...initialRewrite.result.alternativeCandidates,
-        ]
-        const allPatches = initialCandidates.flatMap((c) => c.patches)
-        if (allPatches.length > 0) {
-          const rankerBatch = yield* evaluateDpoCandidatePriorsBatch(
-            allPatches.map((p) => ({
-              primaryNodeKey: p.primaryNodeKey,
-              ruleId: p.ruleId,
-              violationKind: p.ruleId,
-              callerSummary: p.description,
-              candidatePatchSummary: `${p.ruleId} (+${p.insertedEntityNodes.length} entities, +${p.insertedRoleEdges.length} edges)`,
-              earsClauseContext: p.description,
-            })),
-          ).pipe(Effect.provide(decisionLayer))
-          candidatePriors = rankerBatch.candidatePriors
+        const typedHoleBundles = (inference.typedHoleBundles ?? []).filter(
+          (b) => filterBySymbol(b.holeQualname) || filterBySymbol(b.spanName),
+        )
+        const proofIds = new Set(suggestedEdges.map((se) => se.proof.proofId))
+        for (const b of typedHoleBundles) {
+          proofIds.add(
+            `proof:COMP-06:EffectFn:${b.holeQualname}` as (typeof suggestedEdges)[number]["proof"]["proofId"],
+          )
         }
-      }
+        return {
+          suggestedEdges,
+          typedHoleBundles,
+          proofs: inference.proofs.filter((p) => proofIds.has(p.proofId)),
+          iterations: inference.iterations ?? 0,
+        }
+      }),
+    )
+    .with("harness_graph_rewrite", () =>
+      Effect.gen(function* () {
+        const typedArgs = args as {
+          mode?: RewriteMode | undefined
+          ruleId?: string | undefined
+          candidateRank?: number | undefined
+          useDecisionPriors?: boolean | undefined
+          verifyRoundTrip?: boolean | undefined
+        }
+        const mode: RewriteMode = typedArgs.mode ?? "auto-repair"
+        const ruleId = typedArgs.ruleId
+        const candidateRank = typedArgs.candidateRank ?? 1
+        const useDecisionPriors = typedArgs.useDecisionPriors === true
+        const verifyRoundTrip = typedArgs.verifyRoundTrip === true
+        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+        const graph = yield* resolveGraph(options, args)
 
-      const rewriteOutcome = yield* decideGraphRewrite(graph, mode, candidatePriors)
-      const candidates = [
-        ...Option.toArray(rewriteOutcome.result.recommendedCandidate),
-        ...rewriteOutcome.result.alternativeCandidates,
-      ]
-      const selectedCandidate =
-        candidates.find((c) => c.rank === candidateRank) ??
-        Option.getOrUndefined(rewriteOutcome.result.recommendedCandidate) ??
-        candidates[0]
-      const filteredPatches =
-        selectedCandidate !== undefined
-          ? ruleId !== undefined && ruleId.length > 0
-            ? selectedCandidate.patches.filter((p) => p.ruleId === ruleId)
-            : selectedCandidate.patches
-          : []
+        let candidatePriors: DpoCandidatePriors | undefined = undefined
+        if (useDecisionPriors) {
+          const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
+          const initialRewrite = yield* decideGraphRewrite(graph, mode)
+          const initialCandidates = [
+            ...Option.toArray(initialRewrite.result.recommendedCandidate),
+            ...initialRewrite.result.alternativeCandidates,
+          ]
+          const allPatches = initialCandidates.flatMap((c) => c.patches)
+          if (allPatches.length > 0) {
+            const rankerBatch = yield* evaluateDpoCandidatePriorsBatch(
+              allPatches.map((p) => ({
+                primaryNodeKey: p.primaryNodeKey,
+                ruleId: p.ruleId,
+                violationKind: p.ruleId,
+                callerSummary: p.description,
+                candidatePatchSummary: `${p.ruleId} (+${p.insertedEntityNodes.length} entities, +${p.insertedRoleEdges.length} edges)`,
+                earsClauseContext: p.description,
+              })),
+            ).pipe(Effect.provide(decisionLayer))
+            candidatePriors = rankerBatch.candidatePriors
+          }
+        }
 
-      const projection =
-        selectedCandidate !== undefined
-          ? yield* decideGraphProjection({
-              patches: filteredPatches,
-              targetGraph: rewriteOutcome.targetGraph,
-              workspaceRoot: root,
-              initialGraph: graph,
-              verifyRoundTrip,
-            })
-          : {
-              operations: [],
-              overlays: [],
-              verificationStatus: VerificationStatus.make("Unverified"),
-              roundTripVerified: false,
-              compilerDiagnostics: [],
-              bisectionProbes: BisectionProbeCount.make(0),
-              skippedRuleIds: [],
-            }
+        const rewriteOutcome = yield* decideGraphRewrite(graph, mode, candidatePriors)
+        const candidates = [
+          ...Option.toArray(rewriteOutcome.result.recommendedCandidate),
+          ...rewriteOutcome.result.alternativeCandidates,
+        ]
+        const selectedCandidate =
+          candidates.find((c) => c.rank === candidateRank) ??
+          Option.getOrUndefined(rewriteOutcome.result.recommendedCandidate) ??
+          candidates[0]
+        const filteredPatches =
+          selectedCandidate !== undefined
+            ? ruleId !== undefined && ruleId.length > 0
+              ? selectedCandidate.patches.filter((p) => p.ruleId === ruleId)
+              : selectedCandidate.patches
+            : []
 
-      result = {
-        mode: rewriteOutcome.result.mode,
-        initialMeasure: rewriteOutcome.result.initialMeasure,
-        finalMeasure: selectedCandidate?.finalMeasure ?? rewriteOutcome.result.initialMeasure,
-        totalStepsApplied: selectedCandidate?.patches.length ?? 0,
-        selectedRank: selectedCandidate?.rank ?? null,
-        priorsApplied: candidatePriors !== undefined,
-        candidates: candidates.map((c) => ({
-          rank: c.rank,
-          patches: c.patches,
-          finalMeasure: c.finalMeasure,
-          systemOneTieBreaker: c.systemOneTieBreaker,
-          isPolicyClean: c.isPolicyClean,
-        })),
-        projection,
-      }
-      break
-    }
-    default: {
-      return yield* new UnknownToolError({ toolName })
-    }
-  }
+        const projection =
+          selectedCandidate !== undefined
+            ? yield* decideGraphProjection({
+                patches: filteredPatches,
+                targetGraph: rewriteOutcome.targetGraph,
+                workspaceRoot: root,
+                initialGraph: graph,
+                verifyRoundTrip,
+              })
+            : {
+                operations: [],
+                overlays: [],
+                verificationStatus: VerificationStatus.make("Unverified"),
+                roundTripVerified: false,
+                compilerDiagnostics: [],
+                bisectionProbes: BisectionProbeCount.make(0),
+                skippedRuleIds: [],
+              }
+
+        return {
+          mode: rewriteOutcome.result.mode,
+          initialMeasure: rewriteOutcome.result.initialMeasure,
+          finalMeasure: selectedCandidate?.finalMeasure ?? rewriteOutcome.result.initialMeasure,
+          totalStepsApplied: selectedCandidate?.patches.length ?? 0,
+          selectedRank: selectedCandidate?.rank ?? null,
+          priorsApplied: candidatePriors !== undefined,
+          candidates: candidates.map((c) => ({
+            rank: c.rank,
+            patches: c.patches,
+            finalMeasure: c.finalMeasure,
+            systemOneTieBreaker: c.systemOneTieBreaker,
+            isPolicyClean: c.isPolicyClean,
+          })),
+          projection,
+        }
+      }),
+    )
+    .otherwise(() => new UnknownToolError({ toolName: McpToolInputName.make(toolName) }))
 
   const durationMs = Math.max(0, Math.round(performance.now() - startTime))
   if (options?.repoRoot !== undefined || process.env.VITEST === undefined) {

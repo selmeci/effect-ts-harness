@@ -574,8 +574,6 @@ export const isMutantMarkedEquivalent = (
 export const decideMutationReport = Effect.fn("MutationCheck.decide")(function* (
   input: MutationEvaluationInput,
 ) {
-  yield* Effect.void
-
   const equivalentMutantIds = new Set(
     input.outcomes
       .filter((o) => o.status !== "killed" && isMutantMarkedEquivalent(o, input.equivalencePriors))
@@ -604,7 +602,7 @@ export const decideMutationReport = Effect.fn("MutationCheck.decide")(function* 
     saturationViolations === undefined || saturationViolations.length === 0
   const passed = survivedCount === 0 && mutationScore >= minScore && saturationPassed
 
-  return {
+  return yield* Effect.succeed({
     passed,
     totalMutants,
     killedCount,
@@ -618,7 +616,7 @@ export const decideMutationReport = Effect.fn("MutationCheck.decide")(function* 
         }
       : {}),
     ...(saturationViolations !== undefined ? { saturationViolations } : {}),
-  } satisfies MutationSuiteReport
+  } satisfies MutationSuiteReport)
 })
 
 export const decideMutationCheck = decideMutationReport

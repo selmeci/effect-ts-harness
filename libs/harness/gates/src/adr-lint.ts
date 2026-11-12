@@ -159,8 +159,6 @@ interface SectionInfo {
 export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
   input: AdrDocLintInput,
 ) {
-  yield* Effect.void
-
   const findings: Array<AdrLintFinding> = []
   const rawLines = input.markdown.split(/\r?\n/)
 
@@ -172,11 +170,11 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
       kind: "adr-frontmatter-invalid",
       message: "Missing or unclosed YAML frontmatter delimited by '---'.",
     })
-    return {
+    return yield* Effect.succeed({
       docPath: input.docPath,
       clean: false,
       findings,
-    } satisfies AdrDocLintReport
+    } satisfies AdrDocLintReport)
   }
 
   const id = fm.scalars.get("id")
@@ -721,11 +719,11 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
     }
   }
 
-  return {
+  return yield* Effect.succeed({
     docPath: input.docPath,
     clean: findings.length === 0,
     findings,
-  } satisfies AdrDocLintReport
+  } satisfies AdrDocLintReport)
 })
 
 export const lintAdrDocMarkdown = (docPath: string, markdown: string): AdrDocLintReport =>

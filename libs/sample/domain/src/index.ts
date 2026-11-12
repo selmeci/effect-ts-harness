@@ -12,8 +12,7 @@ import {
 import { AlbumCounterClient, PhotoRepo } from "@harness/sample-service"
 
 export const greet = Effect.fn("Sample.greet")(function* (input: GreetInput) {
-  yield* Effect.void
-  return GreetingMessage.make(`Hello, ${input.name}!`)
+  return yield* Effect.succeed(GreetingMessage.make(`Hello, ${input.name}!`))
 })
 
 export const decideAlbumQuota = Effect.fn("Album.decide")(function* (input: DecideAlbumQuotaInput) {

@@ -169,8 +169,6 @@ const IGNORED_UNTESTED_FNS = new Set([
 ])
 
 export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (input: GraphEntropyInput) {
-  yield* Effect.void
-
   const g = input.graph.graph
   const findings: Array<GcFinding> = []
 
