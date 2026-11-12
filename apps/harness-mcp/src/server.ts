@@ -281,6 +281,23 @@ export const normalizeProjectPath = (repoRoot: string, rawProject: string): stri
   return resolved
 }
 
+const formatDiagKey = (d: unknown): string => {
+  if (typeof d === "object" && d !== null) {
+    const rec = d as Record<string, unknown>
+    const file = typeof rec["file"] === "string" ? rec["file"] : ""
+    const line =
+      typeof rec["line"] === "number" || typeof rec["line"] === "string" ? String(rec["line"]) : ""
+    const column =
+      typeof rec["column"] === "number" || typeof rec["column"] === "string"
+        ? String(rec["column"])
+        : ""
+    const code =
+      typeof rec["code"] === "string" || typeof rec["code"] === "number" ? String(rec["code"]) : ""
+    return `${file}:${line}:${column}:${code}`
+  }
+  return typeof d === "string" ? d : JSON.stringify(d)
+}
+
 export const runDefaultLspDiagnostics = (
   repoRoot: string,
   input: {
@@ -294,8 +311,9 @@ export const runDefaultLspDiagnostics = (
     const cliArgs = ["diagnostics", "--strict", "--format", "json"]
     const effectiveFile = input.file ?? input.filePath
     const effectiveProject = input.project ?? input.tsconfigPath
+    let resolvedFile: string | undefined
     if (effectiveFile !== undefined && effectiveFile.trim().length > 0) {
-      const resolvedFile = path.isAbsolute(effectiveFile)
+      resolvedFile = path.isAbsolute(effectiveFile)
         ? effectiveFile
         : path.resolve(repoRoot, effectiveFile)
       if (effectiveProject !== undefined && effectiveProject.trim().length > 0) {
@@ -330,11 +348,75 @@ export const runDefaultLspDiagnostics = (
     })
     const stdout = (proc.stdout ?? "").trim()
     const decoded = decodeLspDiagnosticsPayload(stdout)
+
+    const overlays: Record<string, string> = {}
+    if (
+      resolvedFile !== undefined &&
+      fs.existsSync(resolvedFile) &&
+      !resolvedFile.endsWith(".test.ts") &&
+      !resolvedFile.endsWith(".spec.ts")
+    ) {
+      overlays[resolvedFile] = fs.readFileSync(resolvedFile, "utf-8")
+    }
+
+    const tsDiags =
+      Object.keys(overlays).length > 0
+        ? evaluateOverlayDiagnostics(
+            repoRoot,
+            overlays,
+            getOrCreateWarmProgramSession(repoRoot),
+          ).filter((d) => d.code !== "TS2591" && d.code !== "TS2580")
+        : []
+
+    const effectGoDiags: ReadonlyArray<unknown> = Option.isSome(decoded)
+      ? decoded.value.diagnostics
+      : []
+
+    const seen = new Set<string>()
+    const mergedDiags: Array<unknown> = []
+    for (const d of effectGoDiags) {
+      const key = formatDiagKey(d)
+      if (!seen.has(key)) {
+        seen.add(key)
+        mergedDiags.push(d)
+      }
+    }
+    for (const d of tsDiags) {
+      const key = formatDiagKey(d)
+      if (!seen.has(key)) {
+        seen.add(key)
+        mergedDiags.push(d)
+      }
+    }
+
+    let errorCount = 0
+    let warningCount = 0
+    for (const d of mergedDiags) {
+      if (typeof d === "object" && d !== null) {
+        const sev = (d as Record<string, unknown>)["severity"]
+        if (sev === "warning") {
+          warningCount += 1
+        } else {
+          errorCount += 1
+        }
+      } else {
+        errorCount += 1
+      }
+    }
+
     if (Option.isSome(decoded)) {
-      const { diagnostics, summary } = decoded.value
+      const baseSummary = decoded.value.summary
+      const summary = {
+        filesChecked: Math.max(baseSummary.filesChecked, Object.keys(overlays).length),
+        filesWithoutPlugin: baseSummary.filesWithoutPlugin,
+        totalFiles: Math.max(baseSummary.totalFiles, Object.keys(overlays).length),
+        errors: errorCount,
+        warnings: warningCount,
+        messages: mergedDiags.length,
+      }
       return {
         clean: summary.errors === 0 && summary.warnings === 0 && summary.filesWithoutPlugin === 0,
-        diagnostics,
+        diagnostics: mergedDiags,
         summary,
       } satisfies LspDiagnosticsReport
     }
@@ -572,14 +654,21 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
     }
     case "harness_telemetry_report": {
       const format = (args as { format?: "json" | "markdown" | undefined }).format
+      const cumulative = (args as { cumulative?: boolean | undefined }).cumulative
       const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
       const events = readTelemetryEvents(root)
       const frictionEvents = readFrictionEvents(root)
-      const report = buildSessionReport({ events, frictionEvents })
+      const report = buildSessionReport({
+        events,
+        frictionEvents,
+        ...(cumulative === true ? { cumulative: true } : {}),
+      })
       if (format === "markdown") {
-        return { markdown: renderSessionReportMarkdown(report), report }
+        result = { markdown: renderSessionReportMarkdown(report), report }
+      } else {
+        result = report
       }
-      return report
+      break
     }
     case "harness_graph_infer": {
       const symbolOrSpan = (args as { symbolOrSpan?: string | undefined }).symbolOrSpan
@@ -1310,6 +1399,10 @@ export const createServer = (options?: ServerOptions): McpServer => {
         .enum(["json", "markdown"])
         .optional()
         .describe("Report output format (defaults to 'json')"),
+      cumulative: z
+        .boolean()
+        .optional()
+        .describe("Whether to report cumulative metrics across sessions instead of just the active task"),
     },
     (args) =>
       Effect.runPromise(

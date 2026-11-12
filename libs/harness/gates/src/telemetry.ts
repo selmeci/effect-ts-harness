@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { Effect, Option, Schema } from "effect"
+import { match } from "ts-pattern"
 import type { FrictionEvent } from "./friction-log.js"
 import { resolveHarnessStateDir } from "./worktree.js"
 
@@ -78,12 +79,12 @@ export interface SessionReportInput {
   readonly cumulative?: boolean | undefined
 }
 
-const TASK_WORK_TOOLS = new Set([
+const TASK_INIT_OR_EDIT_TOOLS = new Set([
   "plan-check",
-  "verify",
-  "mutate",
+  "ingest",
   "plan-synth",
   "repair",
+  "mutate",
   "ontology",
 ])
 
@@ -112,9 +113,18 @@ export const scopeSessionReportInput = (
         ev.detail === "completed" ||
         allEvents[i - 1]?.toolName === "omnigraph:merge-main")
     if (isCompletedDone) {
-      const hasSubsequentTaskWork = allEvents
-        .slice(i + 1)
-        .some((later) => TASK_WORK_TOOLS.has(later.toolName))
+      const hasSubsequentTaskWork = allEvents.slice(i + 1).some((later) => {
+        const isHookMergeMainBoundary =
+          ev.surface === "hook" &&
+          allEvents[i - 1]?.toolName === "omnigraph:merge-main" &&
+          later.toolName === "verify"
+        const isTaskInitOrEdit =
+          TASK_INIT_OR_EDIT_TOOLS.has(later.toolName) &&
+          (later.toolName !== "ingest" || later.surface !== "hook")
+        const isFailedVerify = later.toolName === "verify" && later.outcome !== "ok"
+
+        return isHookMergeMainBoundary || isTaskInitOrEdit || isFailedVerify
+      })
       if (hasSubsequentTaskWork) {
         boundaryIdx = i
         break
@@ -209,15 +219,20 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
     const durations: Array<number> = []
 
     for (const e of groupEvents) {
-      if (e.outcome === "ok") {
-        successCount += 1
-      } else if (e.outcome === "fail") {
-        failCount += 1
-      } else if (e.outcome === "deny" || e.outcome === "ask") {
-        denyOrAskCount += 1
-      } else if (e.outcome === "fallback") {
-        fallbackCount += 1
-      }
+      match(e.outcome)
+        .with("ok", () => {
+          successCount += 1
+        })
+        .with("fail", () => {
+          failCount += 1
+        })
+        .with("deny", "ask", () => {
+          denyOrAskCount += 1
+        })
+        .with("fallback", () => {
+          fallbackCount += 1
+        })
+        .exhaustive()
       durations.push(e.durationMs)
       durationSum += e.durationMs
     }
@@ -265,6 +280,9 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
   const fixUpIterations = verifyEvents.filter((e) => e.outcome === "fail").length
   const firstPassVerify = verifyEvents.length === 0 ? null : verifyEvents[0]?.outcome === "ok"
 
+  const isInternalOmnigraphSync = (toolName: string): boolean =>
+    toolName.startsWith("omnigraph:sync-") || toolName.startsWith("omnigraph:merge-")
+
   const firstVerifyIdx = input.events.findIndex((e) => e.toolName === "verify")
   let planBeforeVerify = true
   if (firstVerifyIdx !== -1) {
@@ -272,11 +290,12 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
       .slice(0, firstVerifyIdx)
       .some(
         (e) =>
-          e.toolName === "plan-check" ||
-          e.toolName === "route" ||
-          e.toolName === "harness_route" ||
-          e.category === "ontology" ||
-          e.category === "graph_query",
+          !isInternalOmnigraphSync(e.toolName) &&
+          (e.toolName === "plan-check" ||
+            e.toolName === "route" ||
+            e.toolName === "harness_route" ||
+            e.category === "ontology" ||
+            e.category === "graph_query"),
       )
   }
 
@@ -286,9 +305,6 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
       e.surface !== "hook" &&
       (e.outcome === "fail" || e.outcome === "deny"),
   ).length
-
-  const isInternalOmnigraphSync = (toolName: string): boolean =>
-    toolName.startsWith("omnigraph:sync-") || toolName.startsWith("omnigraph:merge-")
 
   const graphDiscoveryCalls = input.events.filter(
     (e) =>

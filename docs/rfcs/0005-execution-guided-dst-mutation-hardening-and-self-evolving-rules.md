@@ -1,9 +1,9 @@
 ---
 rfc: RFC-0005
 title: Execution-Guided Deterministic Simulation Testing (DST), Semantic Mutations, EARS Consistency & Self-Evolving DPO Rule Synthesis
-status: draft
+status: implemented
 created: 2026-11-06
-updated: 2026-11-06
+updated: 2026-11-11
 authors:
   - "@Roman Selmeci"
 target_packages:
@@ -30,7 +30,7 @@ target_specs:
 
 ## 1. Executive Summary
 
-While [RFC-0001](./0001-polymorphic-hypergraph-and-pera-ontology-model.md) through [RFC-0004](./0004-ast-code-projection-mcp-tools-and-implementation-roadmap.md) establish the **static and algebraic core** of our harness (the bipartite PERA hypergraph $G_{\text{Levi}}$, stratified Datalog `GraphInfer.decide`, Double-Pushout rewriting `GraphRewrite.decide`, and Shadow AST projection `GraphProjector.decide`), **RFC-0005 (Milestone 4)** closes the feedback loop between **formal specifications, deterministic runtime execution, and self-evolving harness rules**.
+While [RFC-0001](./0001-polymorphic-hypergraph-and-pera-ontology-model.md) through [RFC-0004](./0004-ast-code-projection-mcp-tools-and-implementation-roadmap.md) establish the **static and algebraic core** of our harness (the bipartite PERA hypergraph $G_{\text{Levi}}$, stratified Datalog `GraphInfer.decide`, Double-Pushout rewriting `GraphRewrite.decide`, and Shadow AST projection `GraphProjector.decide`), **RFC-0005 (Milestone 5)** closes the feedback loop between **formal specifications, deterministic runtime execution, and self-evolving harness rules**.
 
 Drawing on the comparative research in [RFC-0000](./0000-harness-paradigms-landscape-and-decision-matrix.md), this RFC introduces four interconnected subsystems:
 
@@ -576,29 +576,30 @@ Suppose domain use-case `CheckoutOrder` has signature:
 
 ---
 
-## 10. Rollout & Decomposition Plan (Milestone 4)
+## 10. Rollout & Decomposition Plan (Milestone 5)
 
-Implementation of `RFC-0005` forms **Milestone 4** (following completion of `RFC-0001..0004`) and decomposes into the following binding documents in `libs/harness/docs/`:
+Implementation of `RFC-0005` forms **Milestone 5** (following completion of `RFC-0001..0004` and `RFC-0006`) and decomposes into the following binding documents in `libs/harness/docs/`:
 
 ### 10.1 Template for `libs/harness/docs/adr/0010-execution-guided-dst-saturation-and-dpo-rule-synthesis.md` (`harness:ADR-0010`)
 
 - **Decision:**
-  1. All EARS specifications for `.decide` and `Effect.fn` symbols are verified during `plan-check` for finite pairwise disjointness, non-shadowing, and state-event completeness (`EarsConsistency.decide` + `EarsClauseSemanticsV1`).
+  1. All EARS specifications for `.decide` and `Effect.fn` symbols are verified during `plan-check` and `gc --strict` for finite pairwise disjointness, non-shadowing, and state-event completeness (`EarsConsistency.decide` + `EarsClauseSemanticsV1`).
   2. `makeRecordingTracer` records the actual `Exit` status and recoverable `Schema.TaggedError` `_tag`s of every span; declared error channels `E` in `Effect<A, E, R>` that are never exercised by any test trace (`unexercised-error-channel`, including descendant spans) block `pnpm harness verify`.
   3. Stateful and asynchronous use cases are tested via `ChaosLayer` (`DstEngine.decide` + decoupled `clockDriver` fiber + `DstSeed`).
   4. `pnpm harness learn` uses First-Order LGG Anti-Unification (`RuleSynthesizer.decide` + `SynthesizedRuleQualityV1`) over $(G_{\text{bad}}, G_{\text{good}})$ while strictly preserving an immutable Trusted Computing Base (`@harness/gates`).
 - **Enforced By:**
-  - `libs/harness/core/src/ears-consistency.ts` (`EarsConsistency.decide`)
-  - `libs/harness/core/src/dst-engine.ts` (`DstEngine.decide`)
-  - `libs/harness/core/src/rule-synthesizer.ts` (`RuleSynthesizer.decide`, `PlanSearch.decide`)
+  - `libs/harness/gates/src/ears-consistency.ts` (`EarsConsistency.decide`)
+  - `libs/harness/gates/src/dst-engine.ts` (`DstEngine.decide`)
+  - `libs/harness/gates/src/rule-synthesizer.ts` (`RuleSynthesizer.decide`)
+  - `libs/harness/gates/src/plan-search.ts` (`PlanSearch.decide`)
   - `libs/harness/ingest/src/recording-tracer.ts` (`SpanRecorder`)
   - `libs/harness/gates/src/span-budget.ts` (`SpanBudget.decide`)
   - `libs/harness/gates/src/mutation-check.ts` (`MutationCheck.decide`)
   - `libs/harness/decision/src/` (`EarsClauseSemanticsV1`, `DstHazardPriorV1`, `MutantEquivalenceV1`, `SynthesizedRuleQualityV1`, `PlanSearchScorerV1`)
 
-### 10.2 Milestone 4 Implementation Steps (`harness:SPEC-0009`)
+### 10.2 Milestone 5 Implementation Steps (`harness:SPEC-0009`)
 
-1. **Step 4.1 (`@harness/contract`, `@harness/ingest` & `@harness/decision`):** Add the schemas from §5.1, extend `makeRecordingTracer` in [`libs/harness/ingest/src/recording-tracer.ts`](../../libs/harness/ingest/src/recording-tracer.ts) to capture `exitTag`, `errorTag`, and `valueTag`, and add the System One decision schemas in `libs/harness/decision/src/`.
-2. **Step 4.2 (`EarsConsistency.decide` & `SpanBudget.decide`):** Implement finite EARS table checking in `plan-check` and LISA temporal causality invariants (`MustPrecede`, `ForbiddenUnder`, `RequireCompensationOnFailure`) in `SpanBudget.decide`.
-3. **Step 4.3 (`DstEngine.decide`, `ChaosLayer` & Semantic Mutations):** Implement `withDeterministicFaults(seed)` with a decoupled `clockDriver` fiber over `TestClock`, gates `unexercised-error-channel` / `shallow-branch-saturation` in $S_2$, and `@ast-grep/napi` mutators scoped via `ExercisesSpan`.
-4. **Step 4.4 (`RuleSynthesizer.decide` & `PlanSearch.decide`):** Wire 2-hop slice capture $(G_{\text{bad}}, G_{\text{good}})$ on `verify` failure/success, LGG DPO rule extraction in `pnpm harness learn`, and `PlanSearch` branching when `LoopCircuitBreaker.decide` trips.
+1. **Step 5.1 (`@harness/contract`, `@harness/ingest` & `@harness/decision`):** Add the schemas from §5.1, extend `makeRecordingTracer` in [`libs/harness/ingest/src/recording-tracer.ts`](../../libs/harness/ingest/src/recording-tracer.ts) to capture `exitTag`, `errorTag`, and `valueTag`, and add the System One decision schemas in `libs/harness/decision/src/`.
+2. **Step 5.2 (`EarsConsistency.decide` & `SpanBudget.decide`):** Implement finite EARS table checking in `plan-check` and `gc --strict`, and LISA temporal causality invariants (`MustPrecede`, `ForbiddenUnder`, `RequireCompensationOnFailure`) in `SpanBudget.decide`.
+3. **Step 5.3 (`DstEngine.decide`, `ChaosLayer` & Semantic Mutations):** Implement `withDeterministicFaults(seed)` with a decoupled `clockDriver` fiber over `TestClock`, gates `unexercised-error-channel` / `shallow-branch-saturation` in $S_2$, and `@ast-grep/napi` Mutant Schemata scoped via `ExercisesSpan`.
+4. **Step 5.4 (`RuleSynthesizer.decide` & `PlanSearch.decide`):** Wire 2-hop slice capture $(G_{\text{bad}}, G_{\text{good}})$ on `verify` failure/success, LGG DPO rule extraction in `pnpm harness learn`, and `PlanSearch` branching when `LoopCircuitBreaker.decide` trips.

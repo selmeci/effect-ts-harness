@@ -1,5 +1,5 @@
 ---
-id: harness:SPEC-0009
+id: harness:SPEC-0010
 title: Sub-Second Incremental Harness, Content-Addressable AST/Decision Caching & Latency SLO Gate
 status: accepted
 date: 2026-11-09
@@ -8,7 +8,7 @@ owners:
 scope: harness
 informed_by:
   - harness:ADR-0009
-  - harness:ADR-0010
+  - harness:ADR-0011
 enforced_by:
   - libs/harness/graph/src/type-extractor.ts
   - libs/harness/graph/src/structural-search.ts
@@ -33,11 +33,11 @@ errors:
   - LatencySloViolationError
 ---
 
-# SPEC-0009 · Sub-Second Incremental Harness, Content-Addressable AST/Decision Caching & Latency SLO Gate
+# SPEC-0010 · Sub-Second Incremental Harness, Content-Addressable AST/Decision Caching & Latency SLO Gate
 
 ## Context
 
-This specification defines the behavioral requirements for Milestone 3 (`RFC-0006`: Sub-Second Incremental Harness, Content-Addressable AST/Decision Caching `PERF-01` through `PERF-06`, and `HarnessBench.decide`), governed by `harness:ADR-0009` and `harness:ADR-0010`. It eliminates cold full-workspace recompilation, quadratic test-reachability scanning, redundant multi-gate AST parsing, and duplicate `DecisionModel` evaluations across the CLI and MCP surfaces:
+This specification defines the behavioral requirements for Milestone 3 (`RFC-0006`: Sub-Second Incremental Harness, Content-Addressable AST/Decision Caching `PERF-01` through `PERF-06`, and `HarnessBench.decide`), governed by `harness:ADR-0009` and `harness:ADR-0011`. It eliminates cold full-workspace recompilation, quadratic test-reachability scanning, redundant multi-gate AST parsing, and duplicate `DecisionModel` evaluations across the CLI and MCP surfaces:
 
 1. **`PERF-01` (`libs/harness/graph/src/type-extractor.ts`):** Persistent warm `TypeScriptProgramSession` reusing `ts.Program` and `ts.SourceFile` ASTs keyed by `(filePath, contentSha256)`, exported declaration fingerprint `declHash(f) = SHA256(emitDeclarationOnly(f))` early cut-off on `overlays`, per-file `FileGraphFragment` disk caching (`.harness/cache/file-graph-v1.json`), and $O(|T| + |F|)$ single-pass identifier/callee token indexing for `ExercisesSpan` edges.
 2. **`PERF-02` (`libs/harness/gates/src/ast-cache.ts`):** Unified single-pass AST gate visitor and content-addressable disk cache (`AstGateCache`) keyed by `(filePath, sha256(content), HARNESS_GATE_RULE_VERSION)` persisted in `.harness/cache/ast-gates-v1.json`, backing `AstGateCache.decide`, `SyntaxBans.decide`, `TestIntegrity.decide`, `MigrationSafety.decide`, `DomainPurity.decide`, and `EffectLaws.decide`.
@@ -62,7 +62,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ### 1 · Warm `TypeScriptProgramSession` & Declaration-Signature Early Cut-Off (`PERF-01`)
 
-**Source (`harness:ADR-0009`, `harness:ADR-0010`, `RFC-0006 §4.1–4.2`):** `extractTypeGraph` / `TypeExtractor.extractWorkspace` must reuse warm `ts.Program` and `ts.SourceFile` ASTs, apply `declHash` early cut-off when edited file declaration signatures are unchanged, and index test reachability in $O(|T| + |F|)$.
+**Source (`harness:ADR-0009`, `harness:ADR-0011`, `RFC-0006 §4.1–4.2`):** `extractTypeGraph` / `TypeExtractor.extractWorkspace` must reuse warm `ts.Program` and `ts.SourceFile` ASTs, apply `declHash` early cut-off when edited file declaration signatures are unchanged, and index test reachability in $O(|T| + |F|)$.
 
 | ID      | Pattern      | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Effect Symbol                    | Verification |
 | :------ | :----------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------- | :----------- |
@@ -70,7 +70,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ### 2 · Unified Single-Pass `AstGateCache` & Gate Deciders (`PERF-02`)
 
-**Source (`harness:ADR-0010`, `RFC-0006 §4.5`):** All AST-level static gates (`SyntaxBans.decide`, `TestIntegrity.decide`, `MigrationSafety.decide`, `DomainPurity.decide`, `EffectLaws.decide`) must share a unified single-pass AST visitor and bounded path-keyed cache (`AstGateCache.decide`) persisted atomically in `.harness/cache/ast-gates-v1.json`.
+**Source (`harness:ADR-0011`, `RFC-0006 §4.5`):** All AST-level static gates (`SyntaxBans.decide`, `TestIntegrity.decide`, `MigrationSafety.decide`, `DomainPurity.decide`, `EffectLaws.decide`) must share a unified single-pass AST visitor and bounded path-keyed cache (`AstGateCache.decide`) persisted atomically in `.harness/cache/ast-gates-v1.json`.
 
 | ID      | Pattern      | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Effect Symbol            | Verification   |
 | :------ | :----------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------- | :------------- |
@@ -83,7 +83,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ### 3 · Content-Addressable `CachedDecisionModel` & Request Coalescing (`PERF-03`)
 
-**Source (`harness:ADR-0010`, `RFC-0006 §4.6`):** `DecisionModel` calls must be cached by `SHA256(taskId + "\0" + promptVersion + "\0" + modelId + "\0" + canonicalJson(input))` in memory and `.harness/cache/decisions-v1.json`, coalescing concurrent identical requests and never caching failed model calls.
+**Source (`harness:ADR-0011`, `RFC-0006 §4.6`):** `DecisionModel` calls must be cached by `SHA256(taskId + "\0" + promptVersion + "\0" + modelId + "\0" + canonicalJson(input))` in memory and `.harness/cache/decisions-v1.json`, coalescing concurrent identical requests and never caching failed model calls.
 
 | ID      | Pattern      | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Effect Symbol                | Verification |
 | :------ | :----------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------- | :----------- |
@@ -91,7 +91,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ### 4 · `HarnessBench.decide` Latency SLO Gate (`PERF-06`)
 
-**Source (`harness:ADR-0010`, `RFC-0006 §6`):** Stage latency measurements must be evaluated purely (`R = never`) against `p50BudgetMs` and `p95BudgetMs` SLO budgets and fail closed on empty samples or unbudgeted stages.
+**Source (`harness:ADR-0011`, `RFC-0006 §6`):** Stage latency measurements must be evaluated purely (`R = never`) against `p50BudgetMs` and `p95BudgetMs` SLO budgets and fail closed on empty samples or unbudgeted stages.
 
 | ID      | Pattern            | Requirement                                                                                                                                                                                                                                                                                                                                                                                                           | Effect Symbol              | Verification   |
 | :------ | :----------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------- | :------------- |
@@ -100,7 +100,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ### 5 · Scoped Structural & Line-Locator Search (`StructuralSearch.decide`)
 
-**Source (`harness:ADR-0010`):** Specialist review and research subagents require fast, path-scoped AST and line-locator search across TypeScript and governance/SQL/JSON files without blind 800-line pagination or external browser REPL workarounds.
+**Source (`harness:ADR-0011`):** Specialist review and research subagents require fast, path-scoped AST and line-locator search across TypeScript and governance/SQL/JSON files without blind 800-line pagination or external browser REPL workarounds.
 
 | ID      | Pattern      | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Effect Symbol             | Verification   |
 | :------ | :----------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------ | :------------- |

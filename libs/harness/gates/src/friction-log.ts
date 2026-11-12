@@ -85,6 +85,12 @@ export const decideFrictionClusters = Effect.fn("Friction.decide")(function* (
 export const summarizeFrictionEvents = (
   events: ReadonlyArray<FrictionEvent>,
 ): ReadonlyArray<FrictionCluster> => Effect.runSync(decideFrictionClusters(events))
+export * from "./plan-search.js"
+import {
+  type PlanSearchCandidate,
+  comparePlanSearchCandidates,
+} from "./plan-search.js"
+
 
 export interface LoopThrashingStatus {
   readonly stuck: boolean
@@ -93,12 +99,14 @@ export interface LoopThrashingStatus {
   readonly repeatedKey: string | null
   readonly summary: string | null
   readonly escalationMessage: string | null
+  readonly recommendedPlanCandidate?: PlanSearchCandidate | undefined
 }
 
 export const decideLoopThrashing = Effect.fn("LoopCircuitBreaker.decide")(function* (
   events: ReadonlyArray<FrictionEvent>,
   threshold: number = 3,
-) {
+  planCandidates?: ReadonlyArray<PlanSearchCandidate>,
+): Effect.fn.Return<LoopThrashingStatus, never, never> {
   yield* Effect.void
   const failures = events.filter(
     (event) =>
@@ -131,6 +139,12 @@ export const decideLoopThrashing = Effect.fn("LoopCircuitBreaker.decide")(functi
   }
 
   const stuck = consecutiveCount >= effectiveThreshold
+  let recommendedPlanCandidate: PlanSearchCandidate | undefined = undefined
+  if (planCandidates !== undefined && planCandidates.length > 0 && consecutiveCount >= 2) {
+    const sorted = [...planCandidates].sort(comparePlanSearchCandidates)
+    recommendedPlanCandidate = sorted[0]
+  }
+
   const escalationMessage = stuck
     ? `[ESCALATE: STUCK LOOP DETECTED] Repeated ${last.kind} (${last.summary}) ${consecutiveCount} times consecutively (threshold: ${effectiveThreshold}). Stop retrying variations of the same fix and escalate to the human.`
     : null
@@ -142,13 +156,15 @@ export const decideLoopThrashing = Effect.fn("LoopCircuitBreaker.decide")(functi
     repeatedKey: lastKey,
     summary: last.summary,
     escalationMessage,
+    ...(recommendedPlanCandidate !== undefined ? { recommendedPlanCandidate } : {}),
   } satisfies LoopThrashingStatus
 })
 
 export const checkLoopThrashing = (
   events: ReadonlyArray<FrictionEvent>,
   threshold: number = 3,
-): LoopThrashingStatus => Effect.runSync(decideLoopThrashing(events, threshold))
+  planCandidates?: ReadonlyArray<PlanSearchCandidate>,
+): LoopThrashingStatus => Effect.runSync(decideLoopThrashing(events, threshold, planCandidates))
 
 const decodeFrictionEvent = Schema.decodeOption(Schema.fromJsonString(FrictionEvent))
 
@@ -217,3 +233,4 @@ export const clearFrictionEvents = (repoRoot: string): void => {
     }).pipe(Effect.orElseSucceed(() => undefined)),
   )
 }
+

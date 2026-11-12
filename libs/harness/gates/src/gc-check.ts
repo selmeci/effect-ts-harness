@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs"
+import { type Dirent, existsSync, readdirSync, readFileSync } from "node:fs"
 import { join, relative } from "node:path"
 import { Effect, Option, Schema } from "effect"
 import { match } from "ts-pattern"
@@ -9,8 +9,23 @@ import {
   type HarnessGraph,
 } from "@harness/graph"
 import { decideEarsSpecQuality } from "./ears-lint.js"
+import {
+  decideEarsConsistency,
+  EarsClauseId,
+  EarsClausePatternKind,
+  EarsClausePolarity,
+  EarsConsistencyFlag,
+  type EarsConsistencyInput,
+  EarsEffectSymbolName,
+  EarsFilePath,
+  EarsGuardText,
+  EarsOutcomeTag,
+  EarsSpecId,
+  EarsVariantTag,
+  type EarsSemanticClause,
+} from "./ears-consistency.js"
 import { decideAdrDocQuality } from "./adr-lint.js"
-import { decideOntologyInvariants } from "./ontology-invariants.js"
+import { decideOntologyInvariants, normalizeConditionPrefix } from "./ontology-invariants.js"
 import { checkMigrationFiles, checkMigrationSqlSafety } from "./migration-check.js"
 
 export type GcFindingKind =
@@ -118,12 +133,19 @@ const IGNORED_SERVICES = new Set([
   "OmnigraphSync",
   "SpanRecorder",
   "@harness/ingest/SpanRecorder",
+  "ChaosFaultController",
+  "@harness/gates/ChaosFaultController",
   "SampleApiClient",
   "CartEsAtomClient",
   "ActiveCounterStore",
 ])
 
-const IGNORED_ERRORS = new Set(["OmnigraphLoadError", "SchemaError", "UnknownToolError"])
+const IGNORED_ERRORS = new Set([
+  "OmnigraphLoadError",
+  "SchemaError",
+  "UnknownToolError",
+  "DstStepFailureError",
+])
 
 const IGNORED_UNTESTED_FNS = new Set([
   "Friction.decide",
@@ -827,6 +849,97 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (input: 
           action: `Fix EARS clause syntax at ${doc.docPath}:${f.line} to conform to specifying-ears-with-effect requirements.`,
         })
       }
+
+      if (lintReport.requirements.length > 0) {
+        const clausesBySymbol = new Map<string, Array<EarsSemanticClause>>()
+        for (const req of lintReport.requirements) {
+          const sym = req.effectSymbol?.trim()
+          if (!sym) continue
+
+          const lowerReq = req.requirement.toLowerCase()
+          const isDoubleNegativeAllow = /\bshall\s+not\s+(?:deny|fail|reject)\b/.test(lowerReq)
+          const isNot = lowerReq.includes("shall not") && !isDoubleNegativeAllow
+          const isFail =
+            !isDoubleNegativeAllow &&
+            (lowerReq.includes("shall fail") ||
+              lowerReq.includes("fails with") ||
+              lowerReq.includes("fail with") ||
+              lowerReq.includes("shall return deny") ||
+              lowerReq.includes("shall return escalate"))
+
+          const cleanReq = req.requirement.replace(/[*_`]/g, "")
+          const failMatch = /fail(?:s)? with\s+`?([A-Za-z0-9_]+)`?/i.exec(cleanReq)
+          const errorTag = failMatch?.[1] ?? (isFail ? "Failure" : "Success")
+          const outcomeTag = isFail ? errorTag : "Success"
+
+          const patternKind: EarsClausePatternKind = match(req.pattern)
+            .with("Ubiquitous", () => EarsClausePatternKind.make("Ubiquitous"))
+            .with("Event-driven", () => EarsClausePatternKind.make("Event-driven"))
+            .with("State-driven", () => EarsClausePatternKind.make("State-driven"))
+            .with("Unwanted behaviour", () => EarsClausePatternKind.make("Unwanted behaviour"))
+            .with("Optional feature", () => EarsClausePatternKind.make("Optional feature"))
+            .with("Complex", () => EarsClausePatternKind.make("Complex"))
+            .otherwise(() => EarsClausePatternKind.make("Complex"))
+
+          const rawPrefix = normalizeConditionPrefix(req.requirement)
+          const hasExplicitPrecondition = /^(?:when|while|if|where)\b/i.test(rawPrefix)
+          const baseGuardKey = hasExplicitPrecondition
+            ? rawPrefix
+            : lowerReq.replace(/[*_`]/g, "").trim()
+          const effectiveGuardKey = isFail || isNot
+            ? baseGuardKey
+            : `${baseGuardKey}:${req.id || `REQ-${req.line}`}`
+
+          const clause: EarsSemanticClause = {
+            clauseId: EarsClauseId.make(req.id || `REQ-${req.line}`),
+            pattern: patternKind,
+            effectSymbol: EarsEffectSymbolName.make(sym),
+            polarity: isNot
+              ? EarsClausePolarity.make("shall_not")
+              : EarsClausePolarity.make("shall"),
+            outcomeTag: EarsOutcomeTag.make(outcomeTag),
+            guardVariant: EarsVariantTag.make(
+              effectiveGuardKey.length > 0 ? effectiveGuardKey : req.id || `REQ-${req.line}`,
+            ),
+            guardText: EarsGuardText.make(
+              effectiveGuardKey.length > 0 ? effectiveGuardKey : req.requirement.slice(0, 100),
+            ),
+          }
+
+          const existing = clausesBySymbol.get(sym) ?? []
+          existing.push(clause)
+          clausesBySymbol.set(sym, existing)
+        }
+
+        for (const [sym, symbolClauses] of clausesBySymbol) {
+          if (symbolClauses.length >= 2) {
+            const consistencyInput: EarsConsistencyInput = {
+              specId: EarsSpecId.make(doc.id),
+              filePath: EarsFilePath.make(doc.docPath),
+              stateDomainVariants: [],
+              guardDomainVariants: [],
+              clauses: symbolClauses,
+              requireExhaustiveStateCoverage: EarsConsistencyFlag.make(false),
+            }
+            const report = yield* decideEarsConsistency(consistencyInput).pipe(
+              Effect.catchTag("EarsConsistencyError", (err) =>
+                Effect.succeed({ violations: err.violations }),
+              ),
+            )
+            for (const v of report.violations) {
+              if (v.ruleId === "EARS-01" || v.ruleId === "EARS-02") {
+                findings.push({
+                  kind: "ears-spec-lint",
+                  nodeId: doc.id,
+                  location: `${doc.docPath}`,
+                  message: `EARS spec "${doc.id}" (${doc.docPath}) [${v.kind}]: ${v.message}`,
+                  action: `Resolve EARS clause consistency violation (${v.ruleId}) in ${doc.docPath} for symbol ${sym}.`,
+                })
+              }
+            }
+          }
+        }
+      }
     }
   }
 
@@ -1042,9 +1155,9 @@ export const loadGovernanceDocsFromDisk = (
             return []
           }
           return readdirSync(parentPath, { withFileTypes: true })
-            .filter((entry) => entry.isDirectory())
-            .map((entry) => entry.name)
-            .sort((a, b) => a.localeCompare(b))
+            .filter((entry: Dirent) => entry.isDirectory())
+            .map((entry: Dirent) => entry.name)
+            .sort((a: string, b: string) => a.localeCompare(b))
         },
         catch: () => [],
       }).pipe(Effect.orElseSucceed(() => [])),
@@ -1080,14 +1193,14 @@ export const loadGovernanceDocsFromDisk = (
 
     const files = entries
       .filter(
-        (entry) =>
+        (entry: Dirent) =>
           entry.isFile() &&
           entry.name.endsWith(".md") &&
           entry.name !== "README.md" &&
           entry.name !== "TEMPLATE.md",
       )
-      .map((entry) => entry.name)
-      .sort((a, b) => a.localeCompare(b))
+      .map((entry: Dirent) => entry.name)
+      .sort((a: string, b: string) => a.localeCompare(b))
 
     for (const file of files) {
       const relDocPath = `${relDir}/${file}`

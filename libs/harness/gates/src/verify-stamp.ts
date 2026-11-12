@@ -2,12 +2,21 @@ import { createHash } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { join, relative } from "node:path"
 import { Option, Schema } from "effect"
+import { DstSeed } from "./dst-engine.js"
 import { resolveHarnessStateDir } from "./worktree.js"
+
+export const DstSeedsRunCount = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+  Schema.brand("DstSeedsRunCount"),
+)
+export type DstSeedsRunCount = typeof DstSeedsRunCount.Type
 
 export const VerifyStampSchema = Schema.Struct({
   treeHash: Schema.String,
   timestamp: Schema.String,
   taskBranch: Schema.String,
+  dstSeed: Schema.optional(DstSeed),
+  dstSeedsRun: Schema.optional(DstSeedsRunCount),
 })
 
 export type VerifyStamp = Schema.Schema.Type<typeof VerifyStampSchema>
@@ -74,12 +83,38 @@ export const computeWorkspaceTreeHash = (repoRoot: string): string => {
   return hasher.digest("hex")
 }
 
-export const writeVerifyStamp = (repoRoot: string, taskBranch?: string): VerifyStamp => {
+const decodeDstSeedSync = Schema.decodeUnknownSync(DstSeed)
+
+export const parseDstSeedEnv = (raw: string | undefined): DstSeed | undefined => {
+  if (raw === undefined) {
+    return undefined
+  }
+  const trimmed = raw.trim()
+  if (trimmed.length === 0) {
+    return undefined
+  }
+  const numericValue = Number(trimmed)
+  const candidate: unknown =
+    /^\d+$/.test(trimmed) && Number.isSafeInteger(numericValue) ? numericValue : raw
+  return decodeDstSeedSync(candidate)
+}
+
+export const writeVerifyStamp = (
+  repoRoot: string,
+  taskBranch?: string,
+  dstOptions?: { readonly dstSeed?: DstSeed | undefined; readonly dstSeedsRun?: number | undefined },
+): VerifyStamp => {
   const treeHash = computeWorkspaceTreeHash(repoRoot)
+  const envSeed = parseDstSeedEnv(process.env["DST_SEED"])
+  const resolvedSeed = dstOptions?.dstSeed ?? envSeed ?? DstSeed.make(0)
   const stamp: VerifyStamp = {
     treeHash,
     timestamp: new Date().toISOString(),
     taskBranch: taskBranch ?? "current",
+    dstSeed: resolvedSeed,
+    ...(dstOptions?.dstSeedsRun !== undefined
+      ? { dstSeedsRun: DstSeedsRunCount.make(Math.max(0, Math.trunc(dstOptions.dstSeedsRun))) }
+      : {}),
   }
   const harnessDir = resolveHarnessStateDir(repoRoot)
   if (!existsSync(harnessDir)) {

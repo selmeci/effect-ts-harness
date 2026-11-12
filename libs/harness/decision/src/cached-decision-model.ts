@@ -343,7 +343,34 @@ export const makeCachedDecisionModelLayer = (
             const deferred = yield* Deferred.make<CachedDecisionEntry, AiError.AiError>()
             inFlight.set(cacheKey, deferred)
 
-            const response = yield* inner.decide(definition, decideOptions).pipe(
+            const compute = Effect.uninterruptibleMask((restore) =>
+              Effect.gen(function* () {
+                const response = yield* restore(inner.decide(definition, decideOptions))
+                const entry: CachedDecisionEntry = {
+                  cacheKey,
+                  taskId: DecisionTaskId.make(taskIdStr),
+                  promptVersion,
+                  answers: response.answers as Readonly<Record<string, unknown>>,
+                  usage: {
+                    inputTokens: response.usage.inputTokens ?? 0,
+                    outputTokens: response.usage.outputTokens ?? 0,
+                  },
+                  ...(options?.modelId !== undefined ? { modelId: options.modelId } : {}),
+                  expiresAt: Date.now() + ttlMillis,
+                }
+
+                memoryCache.set(cacheKey, entry)
+                memoryExpiresAt.set(cacheKey, Date.now() + ttlMillis)
+                if (options?.shareGlobalMemoryCache === true) {
+                  globalDecisionMemoryCache.set(cacheKey, entry)
+                }
+                if (options?.cacheFilePath !== undefined) {
+                  persistMapToDisk(options.cacheFilePath, memoryCache, promptVersion)
+                }
+
+                return { response, entry }
+              }),
+            ).pipe(
               Effect.onExit((exit) =>
                 Effect.sync(() => {
                   inFlight.delete(cacheKey)
@@ -351,36 +378,14 @@ export const makeCachedDecisionModelLayer = (
                   Effect.andThen(
                     match(exit)
                       .with({ _tag: "Failure" }, ({ cause }) => Deferred.failCause(deferred, cause))
-                      .with({ _tag: "Success" }, () => Effect.void)
+                      .with({ _tag: "Success" }, ({ value }) => Deferred.succeed(deferred, value.entry))
                       .exhaustive(),
                   ),
                 ),
               ),
             )
 
-            const entry: CachedDecisionEntry = {
-              cacheKey,
-              taskId: DecisionTaskId.make(taskIdStr),
-              promptVersion,
-              answers: response.answers as Readonly<Record<string, unknown>>,
-              usage: {
-                inputTokens: response.usage.inputTokens ?? 0,
-                outputTokens: response.usage.outputTokens ?? 0,
-              },
-              ...(options?.modelId !== undefined ? { modelId: options.modelId } : {}),
-              expiresAt: Date.now() + ttlMillis,
-            }
-
-            memoryCache.set(cacheKey, entry)
-            memoryExpiresAt.set(cacheKey, Date.now() + ttlMillis)
-            if (options?.shareGlobalMemoryCache === true) {
-              globalDecisionMemoryCache.set(cacheKey, entry)
-            }
-            if (options?.cacheFilePath !== undefined) {
-              persistMapToDisk(options.cacheFilePath, memoryCache, promptVersion)
-            }
-
-            yield* Deferred.succeed(deferred, entry)
+            const { response } = yield* compute
             return response
           }),
       })

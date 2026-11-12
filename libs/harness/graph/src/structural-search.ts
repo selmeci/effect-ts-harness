@@ -292,9 +292,10 @@ const searchLinesDeterministic = (
   return results
 }
 
+export const MAX_STRUCTURAL_SEARCH_MATCHES = 200
 const DEFAULT_MAX_RESULTS = 1000
 
-export const structuralSearch = (
+export const runStructuralSearch = (
   options: StructuralSearchOptions,
 ): ReadonlyArray<StructuralSearchResult> => {
   if (options.pattern.trim().length === 0) {
@@ -302,7 +303,24 @@ export const structuralSearch = (
   }
 
   const repoRoot = path.resolve(options.repoRoot ?? resolveRepoRoot(process.cwd()))
-  const files = collectSearchFiles(repoRoot, options)
+  let effectiveOptions = options
+  if (options?.filePath !== undefined && options.filePath.trim().length > 0) {
+    const candidate = path.resolve(repoRoot, options.filePath.trim())
+    if (
+      fs.existsSync(candidate) &&
+      tryOrUndefined(() => fs.statSync(candidate).isDirectory()) === true
+    ) {
+      effectiveOptions = {
+        ...options,
+        filePath: undefined,
+        paths: options.paths
+          ? [...options.paths, options.filePath.trim()]
+          : [options.filePath.trim()],
+      }
+    }
+  }
+
+  const files = collectSearchFiles(repoRoot, effectiveOptions)
   const results: Array<StructuralSearchResult> = []
 
   for (const relFile of files) {
@@ -372,17 +390,54 @@ export const structuralSearch = (
   return results
 }
 
+export const structuralSearch = runStructuralSearch
+
+export interface StructuralSearchMatchList extends ReadonlyArray<StructuralSearchResult> {
+  readonly matchCount: number
+  readonly truncated: boolean
+  readonly matches: ReadonlyArray<StructuralSearchResult>
+}
+
 export const decideStructuralSearch = Effect.fn("StructuralSearch.decide")(function* (
   options: StructuralSearchOptions,
-): Effect.fn.Return<ReadonlyArray<StructuralSearchResult>> {
-  return yield* Effect.sync(() => structuralSearch(options))
+): Effect.fn.Return<StructuralSearchMatchList> {
+  return yield* Effect.sync(() => {
+    const allMatches = runStructuralSearch(options)
+    const matches = allMatches.slice(0, MAX_STRUCTURAL_SEARCH_MATCHES)
+    const out: StructuralSearchMatchList = Object.defineProperties(
+      [...matches] as Array<StructuralSearchResult> & {
+        matchCount: number
+        truncated: boolean
+        matches: ReadonlyArray<StructuralSearchResult>
+      },
+      {
+        matchCount: {
+          value: allMatches.length,
+          enumerable: false,
+          configurable: true,
+        },
+        truncated: {
+          value: allMatches.length > MAX_STRUCTURAL_SEARCH_MATCHES,
+          enumerable: false,
+          configurable: true,
+        },
+        matches: {
+          value: matches,
+          enumerable: false,
+          configurable: true,
+        },
+      },
+    )
+    return out
+  })
 })
 
 export const structuralSearchEffect = (
   options: StructuralSearchOptions,
-): Effect.Effect<ReadonlyArray<StructuralSearchResult>> => decideStructuralSearch(options)
+): Effect.Effect<StructuralSearchMatchList> => decideStructuralSearch(options)
 
 export const StructuralSearch = {
   decide: decideStructuralSearch,
   search: structuralSearch,
+  run: runStructuralSearch,
 } as const
