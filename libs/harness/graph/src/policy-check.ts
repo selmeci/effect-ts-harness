@@ -27,8 +27,8 @@ export interface CheckEffectGraphResult {
 export interface CheckEffectGraphOptions {
   /**
    * When true, includes lifecycle-gated rules:
-   * - `missing-layer-provider` (enforced during Layer composition / `gc-check.ts`)
-   * - `untested-domain-span` (enforced during implementation / `gc-check.ts`)
+   * - `missing-layer-provider` (enforced during Layer composition / `gc-check.ts` / `plugins/gc/gc-topology-entropy.plugin.ts`)
+   * - `untested-domain-span` (enforced during implementation / `gc-check.ts` / `plugins/gc/gc-test-and-decider.plugin.ts`)
    * - `unverified-migration` (enforced during migration gate / `migration-check.ts`)
    *
    * By default, these rules are gated by task lifecycle phases and excluded from standard policy checks.

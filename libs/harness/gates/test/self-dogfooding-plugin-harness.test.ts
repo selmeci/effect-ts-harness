@@ -1,15 +1,17 @@
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join, relative, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option, Schema } from "effect"
 import { match } from "ts-pattern"
-import { NonNegativeCount } from "@harness/graph"
+import { buildHarnessGraph, NonNegativeCount } from "@harness/graph"
 import { type IndexedEffectFn, runWithTestTracer } from "@harness/ingest"
 import { checkSpanBudgets, type SpanSample } from "../src/span-budget.js"
 import {
   ActiveMutantId,
   MaxPluginFileLines,
+  PluginFileLineCount,
   PluginId,
   type SelfDogfoodingInput,
   SelfDogfoodingMessage,
@@ -18,9 +20,11 @@ import {
   SubprocessArg,
   SubprocessCommand,
   SubprocessExitCode,
+  SubprocessMaxBufferBytes,
   SubprocessOutput,
   WorkspaceFileContent,
   WorkspaceFilePath,
+  WorkspaceFsOperation,
 } from "../src/plugins/self-dogfooding-contract.js"
 import { decideSelfDogfooding, SelfDogfooding } from "../src/plugins/self-dogfooding-plugin.js"
 import {
@@ -47,18 +51,38 @@ import {
   ActiveMutantContextLive,
   withActiveMutantEffect,
 } from "../src/services/active-mutant-context.js"
-import { getActiveMutantId } from "../src/mutation-check.js"
+import {
+  decideMutationCheck,
+  discoverDomainMutants,
+  evaluateMutantSchemaInProcess,
+  getActiveMutantId,
+} from "../src/mutation-check.js"
+import { MUTATION_PATTERNS } from "../src/mutation/mutant-ast-generator.js"
 import {
   AstGateCache,
+  AstGatePackageTag,
   AstSourceContent,
   AstSourceFilePath,
+  clearAstGateCache,
   EnclosingSymbolName,
   GateRuleVersion,
   GateVerdict,
+  getAstGateCacheSize,
   HARNESS_GATE_RULE_VERSION,
+  MAX_GATE_CACHE_SIZE,
   SourceLineNumber,
 } from "../src/ast-cache.js"
 import { decideEarsSpecLint } from "../src/ears-lint.js"
+import {
+  decideGraphEntropy,
+  extractBalancedBraces,
+  extractBalancedParens,
+  extractTopLevelObjectAnalysis,
+  findClosestMatch,
+  GcFinding,
+  GcFindingKind,
+  levenshteinDistance,
+} from "../src/gc-check.js"
 
 const toSpanSamples = (
   spans: ReadonlyArray<{
@@ -164,7 +188,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           }))
           .with("nested-effect-run-sync", () => ({
             content: variation
-              ? "export const g = Effect.suspend(() => { Effect.runSync(Effect.succeed(42)) })\n"
+              ? "export const g = Effect.gen(function* () { Effect.runPromise(Effect.succeed(42)) })\n"
               : "export const g = Effect.sync(() => { Effect.runSync(Effect.succeed(42)) })\n",
             maxLines: MaxPluginFileLines.make(800),
           }))
@@ -188,6 +212,10 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         const input: SelfDogfoodingInput = {
           files: [
             {
+              filePath: AstSourceFilePath.make("libs/harness/gates/src/plugins/clean-module.ts"),
+              content: AstSourceContent.make("export const cleanValue = 1\n"),
+            },
+            {
               filePath: AstSourceFilePath.make("libs/harness/gates/src/plugins/bad-module.ts"),
               content: AstSourceContent.make(content),
             },
@@ -196,24 +224,16 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           failOnViolation: true,
         }
 
-        const exit = yield* Effect.exit(SelfDogfooding.decide(input))
-        expect(Exit.isFailure(exit)).toBe(true)
-
-        if (Exit.isFailure(exit)) {
-          const errOpt = Cause.findErrorOption(exit.cause)
-          expect(Option.isSome(errOpt)).toBe(true)
-          if (Option.isSome(errOpt)) {
-            expect(errOpt.value._tag).toBe("SelfDogfoodingViolationError")
-            expect(errOpt.value.violations.length).toBeGreaterThan(0)
-            const rules = errOpt.value.violations.map((v) => v.rule)
-            expect(rules).toContain(violationType)
-          }
-        }
+        const err = yield* Effect.flip(SelfDogfooding.decide(input))
+        expect(err._tag).toBe("SelfDogfoodingViolationError")
+        expect(err.violations.length).toBeGreaterThan(0)
+        const rules = err.violations.map((v) => v.rule)
+        expect(rules).toContain(violationType)
       }),
   )
 
   it.effect(
-    "REQ-1.3: boundary test for maxPluginFileLines on SelfDogfooding.decide (limit - 1, limit, limit + 1)",
+    "REQ-1.1/REQ-1.2 boundary: maxPluginFileLines on SelfDogfooding.decide (limit - 1, limit, limit + 1)",
     () =>
       Effect.gen(function* () {
         const limit = MaxPluginFileLines.make(10)
@@ -924,6 +944,20 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(messages.some((m) => m.includes("Dummy 'yield* Effect.void'"))).toBe(true)
         expect(messages.some((m) => m.includes("Custom plugin detected 'bar'"))).toBe(true)
 
+        const failErr = yield* Effect.flip(
+          evaluateAllGatePlugins({
+            filePaths: [
+              WorkspaceFilePath.make("src/plugins/plugin-void.ts"),
+              WorkspaceFilePath.make("src/plugins/plugin-bar.ts"),
+            ],
+            failOnViolation: true,
+          }).pipe(Effect.provide(customAppLayer)),
+        )
+        expect(failErr._tag).toBe("SelfDogfoodingViolationError")
+        if (failErr._tag === "SelfDogfoodingViolationError") {
+          expect(failErr.violations).toHaveLength(2)
+        }
+
         const budgetViolations = checkSpanBudgets({
           spans: toSpanSamples(spans),
           maxRepeatedChildCalls: 3,
@@ -1060,10 +1094,373 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         const unknownFinding = unknownReport.findings.find(
           (f) => f.kind === "pattern-keyword-mismatch",
         )
-        expect(unknownFinding).toBeDefined()
-        expect(unknownFinding?.message).toContain(
+        expect(unknownFinding).toMatchObject({
+          kind: "pattern-keyword-mismatch",
+        })
+        expect(unknownFinding!.message).toContain(
           "Allowed: Ubiquitous, Event-driven, State-driven, Unwanted behaviour, Optional feature, Complex.",
         )
+
+        // Contract schema negative decode matrix & test file skip & parenthesized double cast
+        expect(Schema.is(MaxPluginFileLines)(0)).toBe(false)
+        expect(Schema.is(MaxPluginFileLines)(-1)).toBe(false)
+        expect(Schema.is(MaxPluginFileLines)(10.5)).toBe(false)
+        expect(Schema.is(MaxPluginFileLines)("10")).toBe(false)
+        expect(Schema.is(PluginFileLineCount)(-1)).toBe(false)
+        expect(Schema.is(PluginFileLineCount)(1.5)).toBe(false)
+        expect(Schema.is(SubprocessMaxBufferBytes)(1023)).toBe(false)
+        expect(Schema.is(WorkspaceFsOperation)("delete")).toBe(false)
+        expect(Schema.is(PluginId)("")).toBe(false)
+        expect(Schema.is(PluginId)("   ")).toBe(false)
+        expect(Schema.is(ActiveMutantId)("")).toBe(false)
+        expect(Schema.is(WorkspaceFilePath)("")).toBe(false)
+
+        const skippedTestReport = yield* SelfDogfooding.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/gates/test/foo.test.ts"),
+              content: AstSourceContent.make(
+                "export const f = Effect.fn('f')(function* () { yield* Effect.void })\n",
+              ),
+            },
+          ],
+          failOnViolation: true,
+        })
+        expect(skippedTestReport.verdict).toBe("clean")
+        expect(skippedTestReport.inspectedFileCount).toBe(0)
+
+        const parenDoubleCastReport = yield* AstGateCache.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/sample/domain/src/double-cast.ts"),
+              content: AstSourceContent.make("export const x = ((1 as unknown) as string)\n"),
+            },
+          ],
+        })
+        expect(parenDoubleCastReport.violations.map((v) => v.rule)).toContain("unsafe-type-cast")
+      }),
+  )
+
+  it.effect(
+    "RFC-0007 Step 2: every source file in libs/harness/gates/src/**/*.ts is <= 800 lines, has zero circular imports, and passes SelfDogfooding.decide",
+    () =>
+      Effect.gen(function* () {
+        const testDir = dirname(fileURLToPath(import.meta.url))
+        const repoRoot = resolve(testDir, "../../../..")
+        const gatesSrcRoot = join(repoRoot, "libs", "harness", "gates", "src")
+
+        const collectTsFiles = (dir: string): Array<string> => {
+          const results: Array<string> = []
+          for (const entry of readdirSync(dir)) {
+            const fullPath = join(dir, entry)
+            const st = statSync(fullPath)
+            if (st.isDirectory()) {
+              results.push(...collectTsFiles(fullPath))
+            } else if (
+              entry.endsWith(".ts") &&
+              !entry.endsWith(".test.ts") &&
+              !entry.endsWith(".spec.ts")
+            ) {
+              results.push(fullPath)
+            }
+          }
+          return results
+        }
+
+        const sourceFiles = collectTsFiles(gatesSrcRoot)
+        expect(sourceFiles.length).toBeGreaterThanOrEqual(30)
+
+        const adj = new Map<string, Array<string>>()
+
+        const fileInputs = sourceFiles.map((absPath) => {
+          const relPath = relative(repoRoot, absPath).replace(/\\/g, "/")
+          const content = readFileSync(absPath, "utf-8")
+          const lineCount = content.split(/\r?\n/).length
+          expect(
+            lineCount,
+            `${relPath} has ${lineCount} lines, exceeding 800-line SPEC-0011 ceiling`,
+          ).toBeLessThanOrEqual(800)
+
+          if (relPath === "libs/harness/gates/src/gc-check.ts") {
+            expect(lineCount).toBeLessThan(200)
+          }
+
+          // Extract relative imports to enforce zero circular dependencies within @harness/gates
+          const imports: Array<string> = []
+          const importRe = /(?:import|export)\s+(?:type\s+)?(?:[^"']*from\s+)?["'](\.[^"']+)["']/g
+          for (const m of content.matchAll(importRe)) {
+            const spec = m[1]
+            if (spec !== undefined) {
+              const resolvedAbs = resolve(dirname(absPath), spec.replace(/\.js$/, ".ts"))
+              const resolvedRel = relative(repoRoot, resolvedAbs).replace(/\\/g, "/")
+              if (resolvedRel.startsWith("libs/harness/gates/src/")) {
+                imports.push(resolvedRel)
+              }
+            }
+          }
+          adj.set(relPath, imports)
+
+          return {
+            filePath: AstSourceFilePath.make(relPath),
+            content: AstSourceContent.make(content),
+          }
+        })
+
+        // Detect any cycle in adj using DFS coloring (0 = unvisited, 1 = visiting, 2 = visited)
+        const state = new Map<string, number>()
+        const cycles: Array<string> = []
+        const visit = (node: string, stack: Array<string>): void => {
+          state.set(node, 1)
+          for (const next of adj.get(node) ?? []) {
+            const nextState = state.get(next) ?? 0
+            if (nextState === 1) {
+              const idx = stack.indexOf(next)
+              cycles.push([...stack.slice(idx), next].join(" -> "))
+            } else if (nextState === 0) {
+              visit(next, [...stack, next])
+            }
+          }
+          state.set(node, 2)
+        }
+        for (const node of adj.keys()) {
+          if ((state.get(node) ?? 0) === 0) {
+            visit(node, [node])
+          }
+        }
+        expect(cycles, `Circular imports found in @harness/gates: ${cycles.join("; ")}`).toEqual([])
+
+        const report = yield* decideSelfDogfooding({
+          files: fileInputs,
+          maxPluginFileLines: MaxPluginFileLines.make(800),
+          failOnViolation: true,
+        })
+
+        expect(report.verdict).toBe("clean")
+        expect(report.violations).toHaveLength(0)
+        expect(report.inspectedFileCount).toBe(sourceFiles.length)
+      }),
+  )
+
+  it.effect(
+    "AstGateCache.decide table-driven rules: impure-domain-import, domain-effect-ignore, ast-grep-tsx-grammar, unscoped-effect-run, fallback-json-equality, and cache eviction",
+    () =>
+      Effect.gen(function* () {
+        const cases: ReadonlyArray<{
+          readonly name: string
+          readonly filePath: string
+          readonly packageTag?: "app" | "contract" | "domain" | "infra" | "service" | "test"
+          readonly content: string
+          readonly expectedRule: string
+        }> = [
+          {
+            name: "impure-domain-import in type:domain",
+            filePath: "libs/sample/domain/src/impure.ts",
+            packageTag: "domain",
+            content: 'import { readFileSync } from "node:fs"\nexport const x = readFileSync("a")\n',
+            expectedRule: "impure-domain-import",
+          },
+          {
+            name: "domain-effect-ignore in type:domain",
+            filePath: "libs/sample/domain/src/ignore.ts",
+            packageTag: "domain",
+            content: "export const f = () => Effect.ignore(Effect.succeed(1))\n",
+            expectedRule: "domain-effect-ignore",
+          },
+          {
+            name: "ast-grep-tsx-grammar for .tsx with parse(Lang.TypeScript, ...)",
+            filePath: "libs/harness/gates/src/sample-tsx-check.ts",
+            content:
+              'export const p = (filePath: string, src: string) => filePath.endsWith(".tsx") ? parse(Lang.TypeScript, src) : null\n',
+            expectedRule: "ast-grep-tsx-grammar",
+          },
+          {
+            name: "unscoped-effect-run inside Effect.fn",
+            filePath: "libs/sample/infra/src/nested-run.ts",
+            packageTag: "infra",
+            content:
+              'export const bad = Effect.fn("bad")(function* () { return Effect.runSync(Effect.succeed(1)) })\n',
+            expectedRule: "unscoped-effect-run",
+          },
+          {
+            name: "fallback-json-equality via JSON.stringify comparison in test file",
+            filePath: "libs/sample/domain/test/json-eq.test.ts",
+            packageTag: "test",
+            content:
+              "export const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)\n",
+            expectedRule: "fallback-json-equality",
+          },
+        ]
+
+        for (const tc of cases) {
+          const report = yield* AstGateCache.decide({
+            files: [
+              {
+                filePath: AstSourceFilePath.make(tc.filePath),
+                content: AstSourceContent.make(tc.content),
+                ...(tc.packageTag !== undefined
+                  ? { packageTag: AstGatePackageTag.make(tc.packageTag) }
+                  : {}),
+              },
+            ],
+          })
+          expect(
+            report.violations.map((v) => v.rule),
+            `Expected ${tc.expectedRule} for case '${tc.name}'`,
+          ).toContain(tc.expectedRule)
+        }
+
+        // Verify cache clear & MAX_GATE_CACHE_SIZE export
+        clearAstGateCache()
+        expect(getAstGateCacheSize()).toBe(0)
+        expect(MAX_GATE_CACHE_SIZE).toBe(1000)
+        yield* AstGateCache.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/sample/domain/src/clean.ts"),
+              content: AstSourceContent.make("export const cleanVal = 42\n"),
+            },
+          ],
+        })
+        expect(getAstGateCacheSize()).toBe(1)
+        clearAstGateCache()
+        expect(getAstGateCacheSize()).toBe(0)
+      }),
+  )
+
+  it.effect(
+    "decideGraphEntropy: covers node-sqlite-in-infra filter, unparseable governance doc frontmatter, architecture-policy-violation, orphan-effect-fn schema, and gc-helpers parsers",
+    () =>
+      Effect.gen(function* () {
+        // 1. Branching violations: only node-sqlite-in-infra is emitted by evaluateBranchingSqliteViolations
+        const baseGraph = buildHarnessGraph({})
+        const report = yield* decideGraphEntropy({
+          graph: {
+            ...baseGraph,
+            branchingViolations: [
+              {
+                rule: "node-sqlite-in-infra",
+                file: "libs/sample/infra/src/sqlite-bad.ts",
+                line: 3,
+                enclosingSymbol: "badImport",
+                message: "Importing node:sqlite is banned in type:infra.",
+              },
+              {
+                rule: "discriminant-branching",
+                file: "libs/sample/domain/src/switch-bad.ts",
+                line: 10,
+                enclosingSymbol: "badSwitch",
+                message: "Switch statement is banned.",
+              },
+            ],
+          },
+          governanceDocs: [
+            {
+              id: "harness:SPEC-BROKEN",
+              docPath: "libs/harness/docs/specs/broken.md",
+              status: "accepted",
+              enforcedByFiles: [],
+              referencedSpans: [],
+              referencedServices: [],
+              referencedErrors: [],
+              markdown: "# Broken doc without YAML frontmatter\n",
+            },
+          ],
+        })
+
+        expect(report.clean).toBe(false)
+        const kinds = report.findings.map((f) => f.kind)
+        expect(kinds).toContain("node-sqlite-in-infra")
+        expect(kinds).toContain("stale-doc-reference")
+        expect(kinds).not.toContain("architecture-policy-violation")
+
+        // 2. orphan-effect-fn is a valid GcFindingKind and decodes through GcFinding
+        expect(Schema.is(GcFindingKind)("orphan-effect-fn")).toBe(true)
+        expect(
+          Schema.is(GcFinding)({
+            kind: "orphan-effect-fn",
+            nodeId: "fn:Sample.orphan",
+            message: "Orphan Effect.fn span",
+            action: "Wire or remove orphan span",
+          }),
+        ).toBe(true)
+
+        // 3. Direct tests for gc-helpers parsers
+        expect(levenshteinDistance("kitten", "sitting")).toBe(3)
+        expect(findClosestMatch("UserServic", ["UserService", "OrderService"])).toBe("UserService")
+        expect(extractBalancedBraces("const x = { a: { b: 1 } };", 10)).toEqual({
+          body: " a: { b: 1 } ",
+          endIndex: 24,
+        })
+        expect(extractBalancedParens("fn(a, (b + c))", 2)).toEqual({
+          body: "a, (b + c)",
+          endIndex: 13,
+        })
+        expect(extractTopLevelObjectAnalysis("a: 1, b: { nested: 2 }, ...rest")).toEqual({
+          keys: ["a", "b"],
+          spreads: ["rest"],
+        })
+
+        // 4. architecture-policy-violation emitted when workspaceRoot has modular plugin or circular-import violations
+        const tmpWs = mkdtempSync(join(tmpdir(), "harness-gc-arch-"))
+        const gatesSrc = join(tmpWs, "libs", "harness", "gates", "src")
+        mkdirSync(gatesSrc, { recursive: true })
+        writeFileSync(
+          join(gatesSrc, "a.ts"),
+          'import { b } from "./b.js"\nexport const a = Effect.fn("a")(function* () { yield* Effect.void; return b })\n',
+        )
+        writeFileSync(
+          join(gatesSrc, "b.ts"),
+          'import { a } from "./a.js"\nexport const b = 1\nexport const ref = a\n',
+        )
+        const wsReport = yield* decideGraphEntropy({
+          graph: baseGraph,
+          workspaceRoot: tmpWs,
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              rmSync(tmpWs, { recursive: true, force: true })
+            }),
+          ),
+        )
+        expect(wsReport.clean).toBe(false)
+        const archFindings = wsReport.findings.filter((f) => f.kind === "architecture-policy-violation")
+        expect(archFindings.some((f) => f.nodeId.includes("effect-fn-dummy-void"))).toBe(true)
+        expect(archFindings.some((f) => f.nodeId.includes("circular-import"))).toBe(true)
+      }),
+  )
+
+  it.effect(
+    "evaluateMutantSchemaInProcess: kills mutant on AssertionError or false, and dies via Effect.die on non-assertion runtime defect",
+    () =>
+      Effect.sync(() => {
+        const mutants = discoverDomainMutants(
+          "libs/sample/domain/src/calc.ts",
+          "export const isPositive = (n: number): boolean => n >= 0\n",
+        )
+        expect(mutants.length).toBeGreaterThan(0)
+        expect(MUTATION_PATTERNS.length).toBeGreaterThanOrEqual(8)
+        expect(typeof decideMutationCheck).toBe("function")
+
+        // 1. Assertion failure (expect(1).toBe(2)) kills the mutant cleanly
+        const killedByAssertion = evaluateMutantSchemaInProcess(mutants, [
+          () => {
+            expect(1).toBe(2)
+          },
+        ])
+        expect(killedByAssertion.every((o) => o.status === "killed")).toBe(true)
+
+        // 2. Returning false kills the mutant cleanly
+        const killedByFalse = evaluateMutantSchemaInProcess(mutants, [() => false])
+        expect(killedByFalse.every((o) => o.status === "killed")).toBe(true)
+
+        // 3. Non-assertion runtime defect (SyntaxError from JSON.parse) dies via Effect.die instead of counting as survived
+        expect(() =>
+          evaluateMutantSchemaInProcess(mutants, [
+            () => {
+              JSON.parse("{broken-json")
+            },
+          ]),
+        ).toThrow()
       }),
   )
 })

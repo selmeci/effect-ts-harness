@@ -14,6 +14,14 @@ enforced_by:
   - libs/harness/gates/src/plugins/self-dogfooding-contract.ts
   - libs/harness/gates/src/plugins/self-dogfooding-plugin.ts
   - libs/harness/gates/src/plugins/gate-plugin-registry.ts
+  - libs/harness/gates/src/plugins/ast-gate-visitors.ts
+  - libs/harness/gates/src/plugins/gc/gc-helpers.ts
+  - libs/harness/gates/src/plugins/gc/gc-topology-entropy.plugin.ts
+  - libs/harness/gates/src/plugins/gc/gc-test-and-decider.plugin.ts
+  - libs/harness/gates/src/plugins/gc/gc-governance-docs.plugin.ts
+  - libs/harness/gates/src/plugins/gc/gc-package-and-migration.plugin.ts
+  - libs/harness/gates/src/mutation/mutant-ast-generator.ts
+  - libs/harness/gates/src/mutation-check.ts
   - libs/harness/gates/src/services/workspace-fs.ts
   - libs/harness/gates/src/services/subprocess-runner.ts
   - libs/harness/gates/src/services/active-mutant-context.ts

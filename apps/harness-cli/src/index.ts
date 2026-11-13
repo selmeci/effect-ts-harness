@@ -1,7 +1,7 @@
 import { execFileSync, spawn } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import * as net from "node:net"
-import { dirname, join, resolve } from "node:path"
+import { dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Cause, Effect, Layer, Option, Schema } from "effect"
 import * as Graph from "effect/Graph"
@@ -37,6 +37,7 @@ import {
   classifyFileWrite,
   clearFrictionEvents,
   clearTelemetryEvents,
+  collectModularPluginFiles,
   decideHarnessBench,
   decideOmnigraphReconcile,
   decideOntologyInvariants,
@@ -921,16 +922,52 @@ const handlePlanCheck = (
     return { exitCode: 0, stdout: checkResult.mermaid, stderr: "" }
   })
 
+const tryGitDiffRange = (repoRoot: string, range: string): Option.Option<ReadonlyArray<string>> =>
+  Effect.runSync(
+    Effect.try({
+      try: () =>
+        Option.some(
+          execFileSync("git", ["diff", "--name-only", range], {
+            cwd: repoRoot,
+            stdio: "pipe",
+            encoding: "utf-8",
+          })
+            .split(/\r?\n/)
+            .map((l) => l.trim())
+            .filter((l) => l.length > 0),
+        ),
+      catch: () => Option.none<ReadonlyArray<string>>(),
+    }).pipe(Effect.orElseSucceed(() => Option.none<ReadonlyArray<string>>())),
+  )
+
+const readGitBranchDiffFiles = (repoRoot: string): ReadonlyArray<string> => {
+  for (const range of ["main...HEAD", "origin/main...HEAD", "HEAD~1...HEAD"]) {
+    const opt = tryGitDiffRange(repoRoot, range)
+    if (Option.isSome(opt) && opt.value.length > 0) {
+      return opt.value
+    }
+  }
+  if (existsSync(join(repoRoot, "libs", "harness", "gates", "src"))) {
+    process.stderr.write(
+      `[harness:verify] Warning: git branch diff failed or returned empty in ${repoRoot}; falling back to scanning all modular gate files.\n`,
+    )
+    return collectModularPluginFiles(repoRoot).map((abs) =>
+      relative(repoRoot, abs).replace(/\\/g, "/"),
+    )
+  }
+  return []
+}
+
 const resolveModifiedFilesSinceStampOrHead = (repoRoot: string): ReadonlyArray<string> =>
   Effect.runSync(
     Effect.try({
       try: () => {
+        const files = new Set<string>()
         const raw = execFileSync("git", ["status", "--porcelain", "-uall"], {
           cwd: repoRoot,
           stdio: "pipe",
           encoding: "utf-8",
         })
-        const files = new Set<string>()
         for (const line of raw.split(/\r?\n/)) {
           const trimmed = line.trim()
           if (trimmed.length < 4) continue
@@ -942,6 +979,9 @@ const resolveModifiedFilesSinceStampOrHead = (repoRoot: string): ReadonlyArray<s
           if (relPath.length > 0) {
             files.add(relPath.replace(/\\/g, "/"))
           }
+        }
+        for (const diffFile of readGitBranchDiffFiles(repoRoot)) {
+          files.add(diffFile.replace(/\\/g, "/"))
         }
         return Array.from(files)
       },
@@ -1096,13 +1136,24 @@ const handleVerify = (
         }
       }
 
-      const modularDeltaFiles = deltaFiles.filter(
+      const rawModularDeltaFiles = deltaFiles.filter(
         (f) =>
+          f.startsWith("libs/harness/gates/src/") ||
           f.includes("/plugins/") ||
           f.includes("/services/") ||
           f.includes("/commands/") ||
-          f.includes("/tools/"),
+          f.includes("/tools/") ||
+          f.includes("/mutation/"),
       )
+      let modularDeltaFiles = rawModularDeltaFiles
+      if (modularDeltaFiles.length === 0 && existsSync(join(repoRoot, "libs", "harness", "gates", "src"))) {
+        process.stderr.write(
+          `[harness:verify] Warning: no modular gate delta files detected in ${repoRoot}; falling back to scanning all modular gate files.\n`,
+        )
+        modularDeltaFiles = collectModularPluginFiles(repoRoot).map((abs) =>
+          relative(repoRoot, abs).replace(/\\/g, "/"),
+        )
+      }
       if (modularDeltaFiles.length > 0) {
         const pluginExit = yield* evaluateAllGatePlugins({
           filePaths: modularDeltaFiles.map((relPath) =>

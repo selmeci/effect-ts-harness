@@ -23,7 +23,10 @@ import {
 
 export const isModularPluginPath = (filePath: string): boolean => {
   const norm = filePath.replace(/\\/g, "/")
-  return /(?:^|\/)(?:plugins|services|commands|tools)\//.test(norm)
+  return (
+    /(?:^|\/)libs\/harness\/gates\/src\/.*\.ts$/.test(norm) ||
+    /(?:^|\/)(?:plugins|services|commands|tools|mutation)\//.test(norm)
+  )
 }
 
 const EFFECT_CONSTRUCTORS = new Set([

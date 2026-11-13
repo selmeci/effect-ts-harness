@@ -50,7 +50,9 @@ export const IMMUTABLE_TCB_PATHS: ReadonlyArray<string> = [
   "libs/harness/gates/src/policy.ts",
   "libs/harness/gates/src/verify-stamp.ts",
   "libs/harness/gates/src/ast-cache.ts",
+  "libs/harness/gates/src/plugins/ast-gate-visitors.ts",
   "libs/harness/gates/src/mutation-check.ts",
+  "libs/harness/gates/src/mutation/mutant-ast-generator.ts",
   "libs/harness/gates/src/rule-synthesizer.ts",
   "apps/harness-cli/src/index.ts",
 ]

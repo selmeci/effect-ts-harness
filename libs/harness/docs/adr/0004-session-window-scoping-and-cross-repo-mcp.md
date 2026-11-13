@@ -7,7 +7,13 @@ enforced_by:
   - libs/harness/gates/src/telemetry.ts
   - libs/harness/gates/src/friction-log.ts
   - libs/harness/gates/src/gc-check.ts
+  - libs/harness/gates/src/plugins/gc/gc-helpers.ts
+  - libs/harness/gates/src/plugins/gc/gc-topology-entropy.plugin.ts
+  - libs/harness/gates/src/plugins/gc/gc-test-and-decider.plugin.ts
+  - libs/harness/gates/src/plugins/gc/gc-governance-docs.plugin.ts
+  - libs/harness/gates/src/plugins/gc/gc-package-and-migration.plugin.ts
   - libs/harness/gates/src/ontology-invariants.ts
+  - libs/harness/gates/src/mutation/mutant-ast-generator.ts
   - libs/harness/gates/src/mutation-check.ts
   - libs/harness/gates/src/worktree.ts
   - libs/harness/graph/src/cluster-resolver.ts
@@ -94,5 +100,5 @@ At the same time, two additional observability distortions, cross-repository Omn
 | Exclude `verdict=allow` guard escalations from score penalty and loop thrashing                                            | `libs/harness/gates/src/telemetry.ts`, `libs/harness/gates/src/friction-log.ts`                                                   | `decideSessionReport` + `decideLoopThrashing`                                                                                                    | `SessionReport.decide`, `LoopCircuitBreaker.decide`                   |
 | Cross-repo active workspace discovery & mtime snapshot selection                                                           | `apps/harness-mcp/src/server.ts`                                                                                                  | `resolveDefaultRepoRoot` + `resolveGraph` + `apps/harness-mcp/test/server.test.ts`                                                               | `SessionReport.decide`                                                |
 | Semantic AST & graph policy rules (`fallback-json-equality`, `vacuous-error-assertion`, `unscoped-effect-run`, `Exit.is*`) | `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/policy-check.ts`                                              | `checkEffectGraph` (`harness plan-check` / `harness verify`)                                                                                     | `GraphGc.decide`                                                      |
-| Property-test depth, Mermaid doc hygiene, empty module & unused dependency checks                                          | `libs/harness/gates/src/gc-check.ts`, `libs/harness/gates/src/ontology-invariants.ts`, `libs/harness/gates/src/mutation-check.ts` | `decideGraphEntropy`, `decideOntologyInvariants`, `discoverDomainMutants` (`harness gc --strict` / `harness mutate --strict`)                    | `GraphGc.decide`, `OntologyInvariants.decide`, `MutationCheck.decide` |
+| Property-test depth, Mermaid doc hygiene, empty module & unused dependency checks                                          | `libs/harness/gates/src/gc-check.ts`, `libs/harness/gates/src/plugins/gc/gc-helpers.ts`, `libs/harness/gates/src/plugins/gc/gc-topology-entropy.plugin.ts`, `libs/harness/gates/src/plugins/gc/gc-test-and-decider.plugin.ts`, `libs/harness/gates/src/plugins/gc/gc-governance-docs.plugin.ts`, `libs/harness/gates/src/plugins/gc/gc-package-and-migration.plugin.ts`, `libs/harness/gates/src/ontology-invariants.ts`, `libs/harness/gates/src/mutation/mutant-ast-generator.ts`, `libs/harness/gates/src/mutation-check.ts` | `decideGraphEntropy`, `decideOntologyInvariants`, `discoverDomainMutants` (`harness gc --strict` / `harness mutate --strict`)                    | `GraphGc.decide`, `OntologyInvariants.decide`, `MutationCheck.decide` |
 | Per-repository Omnigraph port/cluster isolation & shared root cluster across worktrees                                     | `libs/harness/gates/src/worktree.ts`, `libs/harness/graph/src/omnigraph-sync.ts`, `apps/harness-cli/src/index.ts`                 | `resolveCanonicalRepoRoot`, `resolveOmnigraphClusterDir`, `deriveRepoOmnigraphPort`, `resolveOmnigraphTaskBranches`, `ensureLocalOmnigraphReady` | `SessionHandoff.decide`                                               |

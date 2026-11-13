@@ -1,6 +1,23 @@
+/**
+ * @fileoverview ActiveMutantContext service managing scoped mutant activation and isolation.
+ */
 import { Context, Effect, Layer, Option, Semaphore, SynchronizedRef } from "effect"
 import { type ActiveMutantId } from "../plugins/self-dogfooding-contract.js"
-import { getActiveMutantId, setActiveMutantId } from "../mutation-check.js"
+
+interface GlobalWithMutantId {
+  __HARNESS_ACTIVE_MUTANT_ID?: string | undefined
+  __harnessActiveMutant?: string | undefined
+}
+
+export const getActiveMutantId = (): string | undefined =>
+  (globalThis as GlobalWithMutantId).__HARNESS_ACTIVE_MUTANT_ID ??
+  (globalThis as GlobalWithMutantId).__harnessActiveMutant ??
+  process.env["HARNESS_ACTIVE_MUTANT_ID"]
+
+export const setActiveMutantId = (mutantId: string | undefined): void => {
+  ;(globalThis as GlobalWithMutantId).__HARNESS_ACTIVE_MUTANT_ID = mutantId
+  ;(globalThis as GlobalWithMutantId).__harnessActiveMutant = mutantId
+}
 
 export interface ActiveMutantContextShape {
   readonly getCurrentMutant: Effect.Effect<Option.Option<ActiveMutantId>>
@@ -54,8 +71,12 @@ export const ActiveMutantContextLive: Layer.Layer<ActiveMutantContext> = Layer.e
 
 export const withActiveMutantEffect = Effect.fn("MutationCheck.withActiveMutant")(function* (
   mutantId: ActiveMutantId,
-  callback: () => boolean,
+  callbackOrEffect: (() => boolean) | Effect.Effect<boolean>,
 ): Effect.fn.Return<boolean, never, ActiveMutantContext> {
   const ctx = yield* ActiveMutantContext
-  return yield* ctx.runWithMutant(mutantId, Effect.sync(() => callback()))
+  const eff =
+    typeof callbackOrEffect === "function"
+      ? Effect.sync(callbackOrEffect)
+      : callbackOrEffect
+  return yield* ctx.runWithMutant(mutantId, eff)
 })

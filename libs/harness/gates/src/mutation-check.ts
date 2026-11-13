@@ -1,33 +1,27 @@
-import { execFileSync, spawnSync } from "node:child_process"
+/**
+ * @fileoverview Mutation verification gate, mutant discovery, test execution, and span saturation analysis.
+ */
+import { execFileSync } from "node:child_process"
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
-import { join, relative } from "node:path"
-import { Effect, Schema } from "effect"
-import { ActiveMutantId } from "./plugins/self-dogfooding-contract.js"
-import { ActiveMutantContextLive, withActiveMutantEffect } from "./services/active-mutant-context.js"
+import { join, relative, resolve } from "node:path"
+import { Effect, Layer, Schema } from "effect"
+import {
+  ActiveMutantId, SubprocessArg, SubprocessCommand, SubprocessTimeoutMs, WorkspaceFilePath,
+} from "./plugins/self-dogfooding-contract.js"
+import {
+  ActiveMutantContext, ActiveMutantContextLive, getActiveMutantId, setActiveMutantId, withActiveMutantEffect,
+} from "./services/active-mutant-context.js"
+import { execCheckedSubprocess, HarnessSubprocessRunnerLive } from "./services/subprocess-runner.js"
+import { readAndVerifyWorkspaceFile, WorkspaceFsLive } from "./services/workspace-fs.js"
+import {
+  CodeMutant, compileMutantSchemaModule, discoverDomainMutants, evaluateMutantSchemaInProcess,
+  MutantCategory, MutantOutcome, type MutantSchemaModule, parseGitDiffModifiedLines,
+} from "./mutation/mutant-ast-generator.js"
 
-
-export type MutantCategory =
-  | "boundary-operator"
-  | "equality-operator"
-  | "arithmetic-operator"
-  | "boolean-return"
-  | "batch-folding"
-  | "terminal-state-preservation"
-  | "guard-condition"
-
-export interface CodeMutant {
-  readonly id: string
-  readonly file: string
-  readonly line: number
-  readonly category: MutantCategory
-  readonly original: string
-  readonly replacement: string
-  readonly mutatedSource: string
-}
-
-export interface MutantOutcome {
-  readonly mutant: CodeMutant
-  readonly status: "killed" | "survived" | "equivalent"
+export {
+  MutantCategory, CodeMutant, MutantOutcome, type MutantSchemaModule,
+  getActiveMutantId, setActiveMutantId, parseGitDiffModifiedLines,
+  discoverDomainMutants, compileMutantSchemaModule, evaluateMutantSchemaInProcess,
 }
 
 export interface SpanSaturationSpec {
@@ -68,7 +62,6 @@ export interface MutationEvaluationInput {
   readonly spanObservations?: ReadonlyArray<SpanSaturationObservation> | undefined
 }
 
-
 export interface MutationSuiteReport {
   readonly passed: boolean
   readonly totalMutants: number
@@ -81,392 +74,11 @@ export interface MutationSuiteReport {
   readonly saturationViolations?: ReadonlyArray<SaturationViolation> | undefined
 }
 
-export interface MutantSchemaModule {
-  readonly filePath: string
-  readonly schemaSource: string
-  readonly mutantIds: ReadonlyArray<string>
-}
-
-interface GlobalWithMutantId {
-  __HARNESS_ACTIVE_MUTANT_ID?: string | undefined
-}
-
-export const getActiveMutantId = (): string | undefined =>
-  (globalThis as GlobalWithMutantId).__HARNESS_ACTIVE_MUTANT_ID
-
-export const setActiveMutantId = (mutantId: string | undefined): void => {
-  ;(globalThis as GlobalWithMutantId).__HARNESS_ACTIVE_MUTANT_ID = mutantId
-}
-
-const MUTATION_PATTERNS: ReadonlyArray<{
-  readonly original: string
-  readonly replacement: string
-  readonly category: MutantCategory
-}> = [
-  { original: ">=", replacement: ">", category: "boundary-operator" },
-  { original: "<=", replacement: "<", category: "boundary-operator" },
-  { original: "===", replacement: "!==", category: "equality-operator" },
-  { original: "!==", replacement: "===", category: "equality-operator" },
-  { original: "+ 1", replacement: "- 1", category: "arithmetic-operator" },
-  { original: "- 1", replacement: "+ 1", category: "arithmetic-operator" },
-  { original: "return true", replacement: "return false", category: "boolean-return" },
-  { original: "return false", replacement: "return true", category: "boolean-return" },
-  {
-    original: "events.reduce(",
-    replacement: "events.slice(0, 1).reduce(",
-    category: "batch-folding",
-  },
-  {
-    original: ".reduce(evolve,",
-    replacement: ".slice(0, 1).reduce(evolve,",
-    category: "batch-folding",
-  },
-  {
-    original: "() => state",
-    replacement: "() => initialState",
-    category: "terminal-state-preservation",
-  },
-  {
-    original: "return state",
-    replacement: "return initialState",
-    category: "terminal-state-preservation",
-  },
-  {
-    original: "!Equal.equals(someErr.value, expectedError)",
-    replacement:
-      "((someErr.value as { readonly _tag?: unknown })?._tag !== (expectedError as { readonly _tag?: unknown })?._tag)",
-    category: "equality-operator",
-  },
-  {
-    original: "if (!Equal.equals(",
-    replacement: "if (false && !Equal.equals(",
-    category: "guard-condition",
-  },
-  {
-    original: "if (Equal.equals(",
-    replacement: "if (true || Equal.equals(",
-    category: "guard-condition",
-  },
-  {
-    original: "if (Exit.isSuccess(",
-    replacement: "if (false && Exit.isSuccess(",
-    category: "guard-condition",
-  },
-  { original: "Effect.die(", replacement: "Effect.succeed(", category: "guard-condition" },
-]
-
-const shouldSkipLine = (trimmed: string): boolean => {
-  if (trimmed.length === 0) return true
-  if (
-    trimmed.startsWith("//") ||
-    trimmed.startsWith("/*") ||
-    trimmed.startsWith("*") ||
-    trimmed.startsWith("import ") ||
-    trimmed.startsWith("import\t") ||
-    trimmed.startsWith("export type ") ||
-    trimmed.startsWith("export type\t") ||
-    trimmed.startsWith("type ") ||
-    trimmed.startsWith("type\t") ||
-    trimmed.startsWith("interface ") ||
-    trimmed.startsWith("export interface ")
-  ) {
-    return true
-  }
-  return false
-}
-
-export const parseGitDiffModifiedLines = (
-  diffOutput: string,
-): ReadonlyMap<string, ReadonlySet<number>> => {
-  const result = new Map<string, Set<number>>()
-  let currentFile: string | null = null
-  let currentNewLine = 0
-  let inHunk = false
-
-  for (const rawLine of diffOutput.split(/\r?\n/)) {
-    if (rawLine.startsWith("+++ b/")) {
-      currentFile = rawLine.slice(6).trim()
-      inHunk = false
-      continue
-    }
-    if (rawLine.startsWith("--- ")) {
-      continue
-    }
-    const hunkMatch = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(rawLine)
-    if (hunkMatch !== null && currentFile !== null) {
-      currentNewLine = Number(hunkMatch[1] ?? "1")
-      inHunk = true
-      continue
-    }
-    if (!inHunk || currentFile === null) {
-      continue
-    }
-    if (rawLine.startsWith("+") && !rawLine.startsWith("+++")) {
-      let lineSet = result.get(currentFile)
-      if (lineSet === undefined) {
-        lineSet = new Set<number>()
-        result.set(currentFile, lineSet)
-      }
-      lineSet.add(currentNewLine)
-      currentNewLine += 1
-      continue
-    }
-    if (rawLine.startsWith(" ")) {
-      currentNewLine += 1
-    }
-  }
-
-  return result
-}
-
-export const discoverDomainMutants = (
-  filePath: string,
-  sourceCode: string,
-  options?: { readonly modifiedLines?: ReadonlySet<number> | undefined },
-): ReadonlyArray<CodeMutant> => {
-  const mutants: Array<CodeMutant> = []
-  const newline = sourceCode.includes("\r\n") ? "\r\n" : "\n"
-  const lines = sourceCode.split(newline)
-  const modifiedLines = options?.modifiedLines
-  const restrictByModifiedLines = modifiedLines !== undefined && modifiedLines.size > 0
-
-  for (let i = 0; i < lines.length; i++) {
-    const lineNo = i + 1
-    if (restrictByModifiedLines && !modifiedLines.has(lineNo)) {
-      continue
-    }
-
-    const line = lines[i]!
-    const trimmed = line.trim()
-    if (shouldSkipLine(trimmed)) {
-      continue
-    }
-
-    const commentIdx = line.indexOf("//")
-    const codePart = commentIdx >= 0 ? line.slice(0, commentIdx) : line
-    const commentPart = commentIdx >= 0 ? line.slice(commentIdx) : ""
-    if (codePart.trim() === "") {
-      continue
-    }
-
-    for (const pattern of MUTATION_PATTERNS) {
-      if (codePart.includes(pattern.original)) {
-        const mutatedLines = [...lines]
-        mutatedLines[i] = codePart.replace(pattern.original, pattern.replacement) + commentPart
-        const mutatedSource = mutatedLines.join(newline)
-
-        mutants.push({
-          id: `${filePath}:${lineNo}:${pattern.original}->${pattern.replacement}`,
-          file: filePath,
-          line: lineNo,
-          category: pattern.category,
-          original: pattern.original,
-          replacement: pattern.replacement,
-          mutatedSource,
-        })
-      }
-    }
-
-    const binaryAddMatch = codePart.match(
-      /\b([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\s*\+\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\b/,
-    )
-    if (binaryAddMatch && binaryAddMatch[1] && binaryAddMatch[2]) {
-      const orig = binaryAddMatch[0]
-      const repl = `${binaryAddMatch[1]} - ${binaryAddMatch[2]}`
-      const mutatedLines = [...lines]
-      mutatedLines[i] = codePart.replace(orig, repl) + commentPart
-      mutants.push({
-        id: `${filePath}:${lineNo}:${orig}->${repl}`,
-        file: filePath,
-        line: lineNo,
-        category: "arithmetic-operator",
-        original: orig,
-        replacement: repl,
-        mutatedSource: mutatedLines.join(newline),
-      })
-    }
-
-    const spreadAppendMatch = codePart.match(
-      /\[\s*\.\.\.([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\s*,\s*\{[^[\]]+\}\s*\]/,
-    )
-    if (spreadAppendMatch && spreadAppendMatch[1]) {
-      const orig = spreadAppendMatch[0]
-      const repl = spreadAppendMatch[1]
-      const mutatedLines = [...lines]
-      mutatedLines[i] = codePart.replace(orig, repl) + commentPart
-      mutants.push({
-        id: `${filePath}:${lineNo}:${orig}->${repl}`,
-        file: filePath,
-        line: lineNo,
-        category: "batch-folding",
-        original: orig,
-        replacement: repl,
-        mutatedSource: mutatedLines.join(newline),
-      })
-    }
-
-    const counterCopyMatch = codePart.match(
-      /\b(totalItems|totalCount|itemCount)\s*:\s*([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\b/,
-    )
-    if (counterCopyMatch && counterCopyMatch[1]) {
-      const orig = counterCopyMatch[0]
-      const repl = `${counterCopyMatch[1]}: 0`
-      const mutatedLines = [...lines]
-      mutatedLines[i] = codePart.replace(orig, repl) + commentPart
-      mutants.push({
-        id: `${filePath}:${lineNo}:${orig}->${repl}`,
-        file: filePath,
-        line: lineNo,
-        category: "arithmetic-operator",
-        original: orig,
-        replacement: repl,
-        mutatedSource: mutatedLines.join(newline),
-      })
-    }
-  }
-
-  return mutants
-}
-
-/**
- * Compiles all `M` discovered mutations for a module into a single in-memory
- * Mutant Schema AST parameterized by `globalThis.__HARNESS_ACTIVE_MUTANT_ID` (`RFC-0005 §4.3.2`).
- */
-export const compileMutantSchemaModule = (
-  filePath: string,
-  sourceCode: string,
-  mutants: ReadonlyArray<CodeMutant>,
-): MutantSchemaModule => {
-  const newline = sourceCode.includes("\r\n") ? "\r\n" : "\n"
-  const lines = sourceCode.split(newline)
-  const mutantsByLine = new Map<number, Array<CodeMutant>>()
-
-  for (const m of mutants) {
-    if (m.file !== filePath) continue
-    const list = mutantsByLine.get(m.line) ?? []
-    list.push(m)
-    mutantsByLine.set(m.line, list)
-  }
-
-  for (const [lineNo, lineMutants] of mutantsByLine.entries()) {
-    const idx = lineNo - 1
-    const origLine = lines[idx]
-    if (origLine === undefined) continue
-    let transformed = origLine
-    for (const m of lineMutants) {
-      const mutantCondition = `((globalThis.__HARNESS_ACTIVE_MUTANT_ID ?? (globalThis as { __HARNESS_ACTIVE_MUTANT_ID?: string }).__HARNESS_ACTIVE_MUTANT_ID ?? process.env["HARNESS_ACTIVE_MUTANT_ID"]) === ${JSON.stringify(m.id)})`
-      if (m.original.startsWith("return ")) {
-        const origExpr = m.original.slice("return ".length)
-        const replExpr = m.replacement.slice("return ".length)
-        transformed = transformed.replace(
-          m.original,
-          `return (${mutantCondition} ? (${replExpr}) : (${origExpr}))`,
-        )
-        continue
-      }
-      const ifCondMatch = /^(\s*if\s*\()(.*)(\)\s*\{?\s*)$/.exec(transformed)
-      if (ifCondMatch !== null && ifCondMatch[2]?.includes(m.original)) {
-        const prefix = ifCondMatch[1]!
-        const origCond = ifCondMatch[2]!
-        const suffix = ifCondMatch[3]!
-        const mutatedCond = origCond.replace(m.original, m.replacement)
-        transformed = `${prefix}(${mutantCondition} ? (${mutatedCond}) : (${origCond}))${suffix}`
-        continue
-      }
-      transformed = transformed.replace(
-        m.original,
-        `(${mutantCondition} ? (${m.replacement}) : (${m.original}))`,
-      )
-    }
-    lines[idx] = transformed
-  }
-
-  return {
-    filePath,
-    schemaSource: lines.join(newline),
-    mutantIds: mutants.map((m) => m.id),
-  }
-}
-
-const isAssertionFailure = (err: unknown): boolean =>
-  err instanceof Error &&
-  (err.name === "AssertionError" ||
-    err.name === "ExpectError" ||
-    err.message.includes("expected") ||
-    err.message.includes("assert"))
-
-class MutantTestInvocationError extends Schema.TaggedError<MutantTestInvocationError>()(
-  "MutantTestInvocationError",
-  {
-    isAssertion: Schema.Boolean,
-    cause: Schema.Unknown,
-  },
-) {}
-
-/**
- * Evaluates all `M` mutants inside a single warm process by toggling
- * `globalThis.__HARNESS_ACTIVE_MUTANT_ID` across `ExercisesSpan`-linked test callbacks (`RFC-0005 §4.3.2`).
- */
-export const evaluateMutantSchemaInProcess = (
-  mutants: ReadonlyArray<CodeMutant>,
-  exercisesSpanTests: ReadonlyArray<(activeMutantId: string) => boolean | void>,
-): ReadonlyArray<MutantOutcome> => {
-  const outcomes: Array<MutantOutcome> = []
-  const previousMutantId = getActiveMutantId()
-  const restoreMutantId = Effect.sync(() => {
-    if (previousMutantId === undefined) {
-      delete (globalThis as GlobalWithMutantId).__HARNESS_ACTIVE_MUTANT_ID
-    } else {
-      setActiveMutantId(previousMutantId)
-    }
-  })
-
-  for (const mutant of mutants) {
-    const killed = Effect.runSync(
-      Effect.gen(function* () {
-        setActiveMutantId(mutant.id)
-        for (const testFn of exercisesSpanTests) {
-          const ok = yield* Effect.try({
-            try: () => testFn(mutant.id),
-            catch: (err) =>
-              new MutantTestInvocationError({
-                isAssertion: isAssertionFailure(err),
-                cause: err,
-              }),
-          }).pipe(
-            Effect.catchIf(
-              (err) => err.isAssertion,
-              () => Effect.succeed(false),
-            ),
-            Effect.catch((err) => Effect.die(err.cause)),
-          )
-          if (ok === false) {
-            return true
-          }
-        }
-        return false
-      }).pipe(Effect.ensuring(restoreMutantId)),
-    )
-    outcomes.push({
-      mutant,
-      status: killed ? "killed" : "survived",
-    })
-  }
-  return outcomes
-}
-
-/**
- * Evaluates `SAT-01` (`unexercised-error-channel`, crediting failures on both span `s_f`
- * AND its transitive descendant spans `s_c`) and `SAT-02` (`shallow-branch-saturation`).
- */
 export const evaluateSpanSaturationViolations = (
   specs: ReadonlyArray<SpanSaturationSpec>,
   observations: ReadonlyArray<TraceSpanObservation>,
 ): ReadonlyArray<SaturationViolation> => {
-  const byId = new Map<string, TraceSpanObservation>()
-  for (const obs of observations) {
-    byId.set(obs.spanId, obs)
-  }
+  const byId = new Map<string, TraceSpanObservation>(observations.map((o) => [o.spanId, o]))
 
   const getAncestorSpanNamesAndSelf = (obs: TraceSpanObservation): ReadonlySet<string> => {
     const names = new Set<string>([obs.name])
@@ -484,36 +96,23 @@ export const evaluateSpanSaturationViolations = (
 
   const errorTagsBySpan = new Map<string, Set<string>>()
   const branchTagsBySpan = new Map<string, Set<string>>()
+  const recordTag = (map: Map<string, Set<string>>, key: string, val: string) => {
+    let s = map.get(key)
+    if (s === undefined) {
+      s = new Set<string>()
+      map.set(key, s)
+    }
+    s.add(val)
+  }
 
   for (const obs of observations) {
-    const targetSpanNames = getAncestorSpanNamesAndSelf(obs)
-    for (const spanName of targetSpanNames) {
-      if (
-        obs.exitTag === "Failure" &&
-        typeof obs.errorTag === "string" &&
-        obs.errorTag.length > 0
-      ) {
-        let errSet = errorTagsBySpan.get(spanName)
-        if (errSet === undefined) {
-          errSet = new Set<string>()
-          errorTagsBySpan.set(spanName, errSet)
-        }
-        errSet.add(obs.errorTag)
-
-        let brSet = branchTagsBySpan.get(spanName)
-        if (brSet === undefined) {
-          brSet = new Set<string>()
-          branchTagsBySpan.set(spanName, brSet)
-        }
-        brSet.add(obs.errorTag)
+    for (const spanName of getAncestorSpanNamesAndSelf(obs)) {
+      if (obs.exitTag === "Failure" && typeof obs.errorTag === "string" && obs.errorTag.length > 0) {
+        recordTag(errorTagsBySpan, spanName, obs.errorTag)
+        recordTag(branchTagsBySpan, spanName, obs.errorTag)
       }
       if (typeof obs.valueTag === "string" && obs.valueTag.length > 0) {
-        let brSet = branchTagsBySpan.get(spanName)
-        if (brSet === undefined) {
-          brSet = new Set<string>()
-          branchTagsBySpan.set(spanName, brSet)
-        }
-        brSet.add(obs.valueTag)
+        recordTag(branchTagsBySpan, spanName, obs.valueTag)
       }
     }
   }
@@ -563,13 +162,9 @@ export const isMutantMarkedEquivalent = (
   priors: Readonly<Record<string, number>> | undefined,
   threshold = 850,
 ): boolean => {
-  if (outcome.status === "equivalent") {
-    return true
-  }
+  if (outcome.status === "equivalent") return true
   const prior = priors?.[outcome.mutant.id]
-  if (prior === undefined) {
-    return false
-  }
+  if (prior === undefined) return false
   return normalizePriorMillis(prior) >= threshold
 }
 
@@ -600,8 +195,7 @@ export const decideMutationReport = Effect.fn("MutationCheck.decide")(function* 
       ? evaluateSpanSaturationViolations(input.saturationSpecs, observations)
       : undefined
 
-  const saturationPassed =
-    saturationViolations === undefined || saturationViolations.length === 0
+  const saturationPassed = saturationViolations === undefined || saturationViolations.length === 0
   const passed = survivedCount === 0 && mutationScore >= minScore && saturationPassed
 
   return yield* Effect.succeed({
@@ -612,15 +206,16 @@ export const decideMutationReport = Effect.fn("MutationCheck.decide")(function* 
     mutationScore,
     survivedMutants,
     ...(input.equivalencePriors !== undefined || equivalentMutants.length > 0
-      ? {
-          equivalentCount: equivalentMutants.length,
-          equivalentMutants,
-        }
+      ? { equivalentCount: equivalentMutants.length, equivalentMutants }
       : {}),
     ...(saturationViolations !== undefined ? { saturationViolations } : {}),
   } satisfies MutationSuiteReport)
 })
 
+/**
+ * Decides whether the mutation suite report passes based on killed mutants,
+ * minimum score threshold, equivalence priors, and span saturation specifications.
+ */
 export const decideMutationCheck = decideMutationReport
 
 export const evaluateMutationOutcomes = (
@@ -653,19 +248,14 @@ const findDomainFiles = (repoRoot: string, scope?: string): ReadonlyArray<Domain
   const libsDir = join(repoRoot, "libs")
   if (!existsSync(libsDir)) return results
 
-  let cleanScope = scope
-  if (cleanScope) {
-    cleanScope = cleanScope.replace(/^@harness\//, "").replace(/-(domain|core|contract)$/, "")
-  }
-
+  const cleanScope = scope
+    ? scope.replace(/^@harness\//, "").replace(/-(domain|core|contract)$/, "")
+    : undefined
   const scopes = cleanScope !== undefined ? [cleanScope] : readdirSync(libsDir)
 
   for (const s of scopes) {
     const scopePath = join(libsDir, s)
-    const tiersToScan: ReadonlyArray<{
-      readonly dir: string
-      readonly tier: "domain" | "core" | "contract"
-    }> = [
+    const tiersToScan = [
       { dir: join(scopePath, "domain", "src"), tier: "domain" as const },
       { dir: join(scopePath, "domain", "test", "fixtures"), tier: "domain" as const },
       { dir: join(scopePath, "core", "src"), tier: "core" as const },
@@ -674,37 +264,25 @@ const findDomainFiles = (repoRoot: string, scope?: string): ReadonlyArray<Domain
     ]
 
     for (const { dir, tier } of tiersToScan) {
-      if (existsSync(dir)) {
-        const walk = (d: string) => {
-          const entries = readdirSync(d, { withFileTypes: true })
-          for (const entry of entries) {
-            const full = join(d, entry.name)
-            if (entry.isDirectory()) {
-              walk(full)
-            } else if (
-              entry.isFile() &&
-              (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx")) &&
-              !entry.name.endsWith(".d.ts")
-            ) {
-              if (tier === "contract") {
-                const content = readFileSync(full, "utf8")
-                if (
-                  content.includes("Effect.fn") ||
-                  content.includes("Effect.gen") ||
-                  content.includes("match(")
-                ) {
-                  const relFile = relative(repoRoot, full).replace(/\\/g, "/")
-                  results.push({ scope: s, tier, fullPath: full, relFile })
-                }
-              } else {
-                const relFile = relative(repoRoot, full).replace(/\\/g, "/")
-                results.push({ scope: s, tier, fullPath: full, relFile })
+      if (!existsSync(dir)) continue
+      const walk = (d: string) => {
+        for (const entry of readdirSync(d, { withFileTypes: true })) {
+          const full = join(d, entry.name)
+          if (entry.isDirectory()) {
+            walk(full)
+          } else if (entry.isFile() && (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx")) && !entry.name.endsWith(".d.ts")) {
+            if (tier === "contract") {
+              const content = readFileSync(full, "utf8")
+              if (content.includes("Effect.fn") || content.includes("Effect.gen") || content.includes("match(")) {
+                results.push({ scope: s, tier, fullPath: full, relFile: relative(repoRoot, full).replace(/\\/g, "/") })
               }
+            } else {
+              results.push({ scope: s, tier, fullPath: full, relFile: relative(repoRoot, full).replace(/\\/g, "/") })
             }
           }
         }
-        walk(dir)
       }
+      walk(dir)
     }
   }
 
@@ -722,115 +300,52 @@ const trySyncOrElse = <A>(fn: () => A, fallback: () => A): A =>
 export const extractGitDiffModifiedLines = (
   repoRoot: string,
 ): ReadonlyMap<string, ReadonlySet<number>> | undefined => {
+  const gitOpts = { cwd: repoRoot, stdio: "pipe" as const, encoding: "utf8" as const, timeout: 15_000 }
   const isGit = trySyncOrElse(
-    () =>
-      execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
-        cwd: repoRoot,
-        stdio: "pipe",
-        encoding: "utf8",
-      }).trim() === "true",
+    () => execFileSync("git", ["rev-parse", "--is-inside-work-tree"], gitOpts).trim() === "true",
     () => false,
   )
-
-  if (!isGit) {
-    return undefined
-  }
+  if (!isGit) return undefined
 
   const primaryDiff = trySyncOrElse<string | null>(
-    () =>
-      execFileSync("git", ["diff", "-U0"], {
-        cwd: repoRoot,
-        stdio: "pipe",
-        encoding: "utf8",
-      }),
-    () =>
-      trySyncOrElse<string | null>(
-        () =>
-          execFileSync("git", ["diff", "-U0", "HEAD"], {
-            cwd: repoRoot,
-            stdio: "pipe",
-            encoding: "utf8",
-          }),
-        () => null,
-      ),
+    () => execFileSync("git", ["diff", "-U0"], gitOpts),
+    () => trySyncOrElse<string | null>(() => execFileSync("git", ["diff", "-U0", "HEAD"], gitOpts), () => null),
   )
-
-  if (primaryDiff === null) {
-    return new Map<string, ReadonlySet<number>>()
-  }
+  if (primaryDiff === null) return new Map<string, ReadonlySet<number>>()
 
   const headDiff = trySyncOrElse(
-    () =>
-      execFileSync("git", ["diff", "-U0", "HEAD"], {
-        cwd: repoRoot,
-        stdio: "pipe",
-        encoding: "utf8",
-      }),
+    () => execFileSync("git", ["diff", "-U0", "HEAD"], gitOpts),
     () => "",
   )
-
   const diffOut = headDiff.length > 0 ? `${primaryDiff}\n${headDiff}` : primaryDiff
   return parseGitDiffModifiedLines(diffOut)
 }
 
 export const getWorkspaceGitDiffModifiedLines = extractGitDiffModifiedLines
 
-export const findReachingTestFiles = (
-  repoRoot: string,
-  file: DomainFile,
-): ReadonlyArray<string> => {
+export const findReachingTestFiles = (repoRoot: string, file: DomainFile): ReadonlyArray<string> => {
   const testDir = join(repoRoot, "libs", file.scope, file.tier, "test")
   if (!existsSync(testDir)) return []
   const reaching: Array<string> = []
   const walk = (dir: string) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const full = join(dir, entry.name)
-      if (entry.isDirectory()) {
-        walk(full)
-      } else if (
-        entry.isFile() &&
-        (entry.name.endsWith(".test.ts") || entry.name.endsWith(".spec.ts"))
-      ) {
-        reaching.push(full)
-      }
+      if (entry.isDirectory()) walk(full)
+      else if (entry.isFile() && (entry.name.endsWith(".test.ts") || entry.name.endsWith(".spec.ts"))) reaching.push(full)
     }
   }
   walk(testDir)
   return reaching
 }
 
-export const collectReachingTestAssertions = (
-  repoRoot: string,
-  file: DomainFile,
-): string => {
-  const testDir = join(repoRoot, "libs", file.scope, file.tier, "test")
-  if (!existsSync(testDir)) return ""
-  const chunks: Array<string> = []
-  const walk = (dir: string) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const full = join(dir, entry.name)
-      if (entry.isDirectory()) {
-        walk(full)
-      } else if (entry.isFile() && (entry.name.endsWith(".test.ts") || entry.name.endsWith(".spec.ts"))) {
-        chunks.push(readFileSync(full, "utf8"))
-      }
-    }
-  }
-  walk(testDir)
-  return chunks.join("\n")
-}
+export const collectReachingTestAssertions = (repoRoot: string, file: DomainFile): string =>
+  findReachingTestFiles(repoRoot, file).map((full) => readFileSync(full, "utf8")).join("\n")
 
 export interface RunMutationOptions {
   readonly scope?: string | undefined
   readonly includeAllLines?: boolean | undefined
   readonly minScore?: number | undefined
-  readonly testRunner?:
-    | ((
-        mutant: CodeMutant,
-        schemaSource: string,
-        reachingTestFiles: ReadonlyArray<string>,
-      ) => "killed" | "survived")
-    | undefined
+  readonly testRunner?: ((mutant: CodeMutant, schemaSource: string, reachingTestFiles: ReadonlyArray<string>) => "killed" | "survived") | undefined
   readonly spanObservations?: ReadonlyArray<SpanSaturationObservation> | undefined
   readonly saturationSpecs?: ReadonlyArray<SpanSaturationSpec> | undefined
   readonly equivalencePriors?: Readonly<Record<string, number>> | undefined
@@ -843,53 +358,49 @@ export const runDomainMutationSuite = (
 ): MutationSuiteReport => {
   const backupPath = join(repoRoot, ".harness", "mutation-backup.json")
   if (existsSync(backupPath)) {
+    let restoredOk = false
     Effect.runSync(
-      Effect.try({
-        try: () => {
-          const rawBackup = readFileSync(backupPath, "utf8")
-          const decodedBackupOpt = Schema.decodeOption(
-            Schema.fromJsonString(
-              Schema.Struct({
-                filePath: Schema.optional(Schema.String),
-                originalSource: Schema.optional(Schema.String),
-              }),
-            ),
-          )(rawBackup)
-          if (decodedBackupOpt._tag === "Some") {
-            const backupData = decodedBackupOpt.value
-            if (backupData.filePath !== undefined && backupData.originalSource !== undefined) {
-              writeFileSync(backupData.filePath, backupData.originalSource, "utf8")
+      Effect.gen(function* () {
+        const fileStat = yield* readAndVerifyWorkspaceFile(WorkspaceFilePath.make(backupPath))
+        const decodedBackupOpt = Schema.decodeOption(
+          Schema.fromJsonString(
+            Schema.Struct({
+              filePath: Schema.optional(Schema.String),
+              originalSource: Schema.optional(Schema.String),
+            }),
+          ),
+        )(fileStat.content)
+        if (decodedBackupOpt._tag === "Some") {
+          const { filePath, originalSource } = decodedBackupOpt.value
+          if (filePath !== undefined && originalSource !== undefined) {
+            const resolvedTarget = resolve(repoRoot, filePath)
+            const relTarget = relative(resolve(repoRoot), resolvedTarget).replace(/\\/g, "/")
+            if (!relTarget.startsWith("..") && !relTarget.startsWith("/") && (relTarget.startsWith("libs/") || relTarget.startsWith("apps/"))) {
+              writeFileSync(resolvedTarget, originalSource, "utf8")
+              restoredOk = true
             }
           }
-        },
-        catch: () => undefined,
+        }
       }).pipe(
+        Effect.provide(WorkspaceFsLive),
         Effect.orElseSucceed(() => undefined),
         Effect.ensuring(
-          Effect.try({
-            try: () => unlinkSync(backupPath),
-            catch: () => undefined,
-          }).pipe(Effect.orElseSucceed(() => undefined)),
+          Effect.sync(() => {
+            if (restoredOk && existsSync(backupPath)) unlinkSync(backupPath)
+          }),
         ),
       ),
     )
   }
 
   const domainFiles = findDomainFiles(repoRoot, options?.scope)
-  const diffLinesMap =
-    options?.includeAllLines === true ? undefined : extractGitDiffModifiedLines(repoRoot)
+  const diffLinesMap = options?.includeAllLines === true ? undefined : extractGitDiffModifiedLines(repoRoot)
   const outcomes: Array<MutantOutcome> = []
 
   for (const file of domainFiles) {
     const overlaySource = options?.sourceCodeOverlays?.[file.relFile]
-    if (
-      overlaySource === undefined &&
-      options?.includeAllLines !== true &&
-      diffLinesMap !== undefined
-    ) {
-      if (!diffLinesMap.has(file.relFile)) {
-        continue
-      }
+    if (overlaySource === undefined && options?.includeAllLines !== true && diffLinesMap !== undefined) {
+      if (!diffLinesMap.has(file.relFile)) continue
     }
 
     const modifiedLines =
@@ -899,7 +410,15 @@ export const runDomainMutationSuite = (
           ? diffLinesMap.get(file.relFile)
           : undefined
 
-    const originalContent = overlaySource ?? readFileSync(file.fullPath, "utf8")
+    const originalContent =
+      overlaySource ??
+      Effect.runSync(
+        readAndVerifyWorkspaceFile(WorkspaceFilePath.make(file.fullPath)).pipe(
+          Effect.map((s) => s.content),
+          Effect.provide(WorkspaceFsLive),
+          Effect.orElseSucceed(() => readFileSync(file.fullPath, "utf8")),
+        ),
+      )
     const mutants = discoverDomainMutants(
       file.relFile,
       originalContent,
@@ -911,9 +430,7 @@ export const runDomainMutationSuite = (
     const reachingTestFiles = findReachingTestFiles(repoRoot, file)
 
     if (reachingTestFiles.length === 0) {
-      for (const mutant of mutants) {
-        outcomes.push({ mutant, status: "survived" })
-      }
+      for (const mutant of mutants) outcomes.push({ mutant, status: "survived" })
       continue
     }
 
@@ -944,49 +461,63 @@ export const runDomainMutationSuite = (
       continue
     }
 
-    // Real disk execution with vitest under Mutant Schemata
     const originalSource = originalContent
     const harnessDir = join(repoRoot, ".harness")
-    if (!existsSync(harnessDir)) {
-      mkdirSync(harnessDir, { recursive: true })
-    }
+    if (!existsSync(harnessDir)) mkdirSync(harnessDir, { recursive: true })
     writeFileSync(backupPath, JSON.stringify({ filePath: file.fullPath, originalSource }), "utf8")
     const onProcessExit = () => {
-      trySyncOrElse(
-        () => {
-          writeFileSync(file.fullPath, originalSource, "utf8")
-          if (existsSync(backupPath)) {
-            unlinkSync(backupPath)
-          }
-        },
-        () => undefined,
-      )
+      trySyncOrElse(() => {
+        writeFileSync(file.fullPath, originalSource, "utf8")
+        if (existsSync(backupPath)) unlinkSync(backupPath)
+      }, () => undefined)
     }
-    process.once("exit", onProcessExit)
+    const onSigInt = () => { onProcessExit(); process.exit(130) }
+    const onSigTerm = () => { onProcessExit(); process.exit(143) }
+    process.once("exit", onProcessExit); process.once("SIGINT", onSigInt); process.once("SIGTERM", onSigTerm)
     Effect.runSync(
-      Effect.sync(() => {
+      Effect.gen(function* () {
+        const mutantCtx = yield* ActiveMutantContext
         writeFileSync(file.fullPath, schemaBundle.schemaSource, "utf8")
         for (const mutant of mutants) {
-          const res = spawnSync("pnpm", ["vitest", "run", ...reachingTestFiles], {
-            cwd: repoRoot,
-            encoding: "utf8",
-            timeout: 30_000,
-            env: {
-              ...process.env,
-              HARNESS_ACTIVE_MUTANT_ID: mutant.id,
-            },
-          })
-          const status: "killed" | "survived" = res.status !== 0 ? "killed" : "survived"
+          const runSubprocess = Effect.acquireUseRelease(
+            Effect.sync(() => {
+              const prev = process.env["HARNESS_ACTIVE_MUTANT_ID"]
+              process.env["HARNESS_ACTIVE_MUTANT_ID"] = mutant.id
+              return prev
+            }),
+            () =>
+              execCheckedSubprocess({
+                command: SubprocessCommand.make("pnpm"),
+                args: [SubprocessArg.make("vitest"), SubprocessArg.make("run"), ...reachingTestFiles.map((f) => SubprocessArg.make(f))],
+                cwd: WorkspaceFilePath.make(repoRoot),
+                timeoutMs: SubprocessTimeoutMs.make(30_000),
+              }).pipe(
+                Effect.map(() => "survived" as const),
+                Effect.catchTag("HarnessSubprocessError", (err) =>
+                  Effect.succeed(err.exitCode !== 0 ? ("killed" as const) : ("survived" as const)),
+                ),
+              ),
+            (prev) =>
+              Effect.sync(() => {
+                if (prev === undefined) {
+                  delete process.env["HARNESS_ACTIVE_MUTANT_ID"]
+                } else {
+                  process.env["HARNESS_ACTIVE_MUTANT_ID"] = prev
+                }
+              }),
+          )
+          const status = yield* mutantCtx.runWithMutant(ActiveMutantId.make(mutant.id), runSubprocess)
           outcomes.push({ mutant, status })
         }
       }).pipe(
+        Effect.provide(Layer.merge(HarnessSubprocessRunnerLive, ActiveMutantContextLive)),
         Effect.ensuring(
           Effect.sync(() => {
             process.removeListener("exit", onProcessExit)
+            process.removeListener("SIGINT", onSigInt)
+            process.removeListener("SIGTERM", onSigTerm)
             writeFileSync(file.fullPath, originalSource, "utf8")
-            if (existsSync(backupPath)) {
-              unlinkSync(backupPath)
-            }
+            if (existsSync(backupPath)) unlinkSync(backupPath)
           }),
         ),
       ),
@@ -1009,4 +540,5 @@ export const MutationCheck = {
   decide: decideMutationCheck,
   evaluateReport: evaluateMutationOutcomes,
   runSuite: runDomainMutationSuite,
+  withActiveMutant: withActiveMutantEffect,
 } as const

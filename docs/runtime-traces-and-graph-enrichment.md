@@ -175,7 +175,7 @@ Defined in `libs/harness/gates/src/span-budget.ts`, this pure decider (`decideSp
 
 ### 6.2 `harness gc --strict` (`untested-effect-fn`)
 
-If a non-stub `Effect.fn` in `type:domain` or `type:contract` has **0 reaching tests** (0 incoming `ExercisesSpan` or `TracedCall` edges), the zero-entropy garbage collection gate (`libs/harness/gates/src/gc-check.ts`) fails with `untested-effect-fn`. In `harness verify` (`handleVerify`) and `harness gc --strict`, the CLI builds the workspace graph statically and synthesizes `ExercisesSpan` edges by scanning test source files for imported `Effect.fn` references (`handleVerify` does not load runtime `runWithTestTracer` edges; dynamic `ExercisesSpan` and `TracedCall` edges from `runWithTestTracer` are produced in-process when tests call `enrichGraphWithTraces`).
+If a non-stub `Effect.fn` in `type:domain` or `type:contract` has **0 reaching tests** (0 incoming `ExercisesSpan` or `TracedCall` edges), the zero-entropy garbage collection gate (`libs/harness/gates/src/gc-check.ts` / `libs/harness/gates/src/plugins/gc/gc-test-and-decider.plugin.ts`) fails with `untested-effect-fn`. In `harness verify` (`handleVerify`) and `harness gc --strict`, the CLI builds the workspace graph statically and synthesizes `ExercisesSpan` edges by scanning test source files for imported `Effect.fn` references (`handleVerify` does not load runtime `runWithTestTracer` edges; dynamic `ExercisesSpan` and `TracedCall` edges from `runWithTestTracer` are produced in-process when tests call `enrichGraphWithTraces`).
 
 ### 6.3 `OntologyInvariants.decide` (`ontology-unverified-requirement`)
 

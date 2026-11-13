@@ -9,7 +9,7 @@ import {
   resolveNode,
 } from "@harness/graph"
 import { decideEarsSpecQuality, type EarsRequirementRow } from "./ears-lint.js"
-import type { GovernanceDocReference } from "./gc-check.js"
+import type { GovernanceDocReference } from "./plugins/gc/gc-helpers.js"
 
 export type OntologyInvariantFindingKind =
   | "ontology-while-decider-mismatch"
