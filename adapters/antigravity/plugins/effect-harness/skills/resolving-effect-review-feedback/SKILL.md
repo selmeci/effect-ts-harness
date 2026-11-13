@@ -14,7 +14,7 @@ External code reviewers (whether human engineers or external models like Grok an
 To maintain codebase integrity and eliminate thrashing:
 
 - The **Orchestrator** centrally adjudicates all feedback against the harness **Order of Authority** using **in-process Graph MCP (`harness-mcp`)** facts, synchronizes EARS specifications and ADRs first, dispatches execution units, runs monorepo gates, and performs compounding gate promotion.
-- Lightweight **`flash` Fixer Subagents** act purely as execution hands. They receive package-isolated file sets, exact pattern recipe routes, reaching test files, and governing ADR constraints. They never adjudicate, never debate, and never touch whole-monorepo gates or stamps.
+- Lightweight **`gemini-4-hydrogen-medium` Fixer Subagents** act purely as execution hands. They receive package-isolated file sets, exact pattern recipe routes, reaching test files, and governing ADR constraints. They never adjudicate, never debate, and never touch whole-monorepo gates or stamps.
 
 **Violating the letter of the rules is violating the spirit of the rules.**
 
@@ -29,7 +29,7 @@ Phase 2: Central Adjudication via Graph MCP & Order of Authority (Orchestrator O
          ↓
 Phase 3: Contract, EARS Spec & ADR Synchronization First (Orchestrator Only)
          ↓
-Phase 4: Package-Isolated flash Fixer Dispatch (Parallel Subagents)
+Phase 4: Package-Isolated gemini-4-hydrogen-medium Fixer Dispatch (Parallel Subagents)
          ↓
 Phase 5: Whole-Workspace Deterministic Gates & Compounding Promotion (Orchestrator Only)
 ```
@@ -54,7 +54,7 @@ Normalize every finding into a single enumerated list:
 ### Phase 2 — Central Adjudication via Graph MCP & Order of Authority (Orchestrator Only)
 
 > [!IMPORTANT]
-> Never blindly implement reviewer suggestions. Never delegate judgment to `flash` fixer subagents or `clef-flash`. The orchestrator alone must evaluate each item against [references/evaluation-rubric.md](references/evaluation-rubric.md).
+> Never blindly implement reviewer suggestions. Never delegate judgment to `gemini-4-hydrogen-medium` fixer subagents or `clef-flash`. The orchestrator alone must evaluate each item against [references/evaluation-rubric.md](references/evaluation-rubric.md).
 
 For each normalized finding `F-n`, run in-process Graph MCP tools instead of slow shell commands (`grep`, `git blame`):
 
@@ -111,19 +111,20 @@ The orchestrator MUST synchronize documentation and contracts **first**:
 
 ---
 
-### Phase 4 — Package-Isolated `flash` Fixer Dispatch
+### Phase 4 — Package-Isolated `gemini-4-hydrogen-medium` Fixer Dispatch
 
 Group approved `fix` and `class-fix` items by package/directory boundaries so each subagent receives exclusive ownership of a disjoint set of files.
 
 1. **Obtain Pattern Route:** For each group, call `harness_route` (`IdiomRouterV1` via `clef-flash`) to identify the exact sanctioned pattern recipe in `agent-patterns/<block>.md`. If `harness_route` returns `patternFile: null` (e.g. local Ollama offline or timed out), select the matching `agent-patterns/<block>.md` directly from the defect category in [references/evaluation-rubric.md](references/evaluation-rubric.md).
-2. **Dispatch Subagents:** Launch parallel fixer subagents (`TypeName: "self"`, `Model: "flash"`, `Workspace: "share"` or `HARNESS_WORKTREE_ID=<unit>`):
-   - Use the prompt template in [references/effect-fixer-prompt.md](references/effect-fixer-prompt.md).
-   - Supply the 5 mandatory inputs: (1) Assigned Finding IDs, (2) Target Files & Twin Locations, (3) Governing EARS Clauses & ADR Invariants, (4) Pattern Recipe Path, (5) Reaching Test Files & Required Test Assertions.
+2. **Dispatch Subagents Dynamically (`invoke_subagent` vs. `swarm`):**
+   - **Default (`invoke_subagent` — 1–2 packages or self-contained fix batches):** Launch parallel fixer subagents via `invoke_subagent` (`TypeName: "self"`, `Workspace: "share"` or `HARNESS_WORKTREE_ID=<unit>`, `Model: "gemini-4-hydrogen-medium"` if in the `Model` enum, otherwise `"flash"` / `"inherit"`).
+   - **Escalation (`swarm` — 3+ disjoint packages or explicit `gemini-4-hydrogen-medium` model pinning):** Launch fixer workers via `swarm` (`action: "add"`, `name: "fixer-<unit>"`, `model: "gemini-4-hydrogen-medium"`, `workspace: "inherit"` with disjoint file ownership and `HARNESS_WORKTREE_ID=<unit>` so edits land directly in the working tree without requiring subagent `git commit`).
+   - Use the prompt/brief template in [references/effect-fixer-prompt.md](references/effect-fixer-prompt.md) and supply the 5 mandatory inputs: (1) Assigned Finding IDs, (2) Target Files & Twin Locations, (3) Governing EARS Clauses & ADR Invariants, (4) Pattern Recipe Path, (5) Reaching Test Files & Required Test Assertions.
 3. **Subagent Execution Discipline:**
    - Fixers run `harness_lsp_diagnostics` and package-scoped tests (`CI=true pnpm nx run <project>:test`).
    - Fixers MUST NOT run whole-monorepo gates (`harness verify`, `harness done`) or git operations.
    - Fixers MUST return the structured `Fixer Completion Report` and terminate.
-4. **Cleanup:** Kill completed subagent sessions via `manage_subagents(Action: "kill")`.
+4. **Cleanup:** If `swarm` workers were spawned, terminate completed fixer workers via `swarm(action: "kill", name: "fixer-<unit>")` once their changes are in the workspace.
 
 ---
 
@@ -163,7 +164,7 @@ Once all fixer reports are received and merged into the workspace:
 | `harness_tests_reaching`                    | Phase 2 & 4 | Verifying reaching test cases and finding test gaps             | Never assume reaching tests exist without checking graph         |
 | `harness_ontology_check`                    | Phase 3     | Advisory cross-layer semantic conflict detection                | Cannot replace deterministic TypeScript compiler                 |
 | `harness_route` (`clef-flash`)              | Phase 4     | Routing to relevant `agent-patterns/*.md` recipe                | **BANNED** for judging review validity or code correctness       |
-| `flash` Fixer Subagents                     | Phase 4     | Scoped edits, local LSP check, package unit tests               | **BANNED** from running `harness verify`, `harness done`, or git |
+| `gemini-4-hydrogen-medium` Fixer Subagents  | Phase 4     | Scoped edits, local LSP check, package unit tests               | **BANNED** from running `harness verify`, `harness done`, or git |
 | Harness Deterministic Gates (`harness-cli`) | Phase 5     | Monorepo GC, mutation check, verification, stamp creation       | Never run by subagents; orchestrator only                        |
 
 ---

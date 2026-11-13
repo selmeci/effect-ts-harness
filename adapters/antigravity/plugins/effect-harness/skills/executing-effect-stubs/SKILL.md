@@ -7,13 +7,13 @@ description: Use when stub<A, E, R>() skeletons have passed plan-check and are r
 
 ## Overview
 
-Once `harness plan-check` has locked the `type:contract` Schemas, `type:service` interfaces, and `stub<A, E, R>()` signatures, replace every stub with a tested production implementation. For multi-package work, dispatch fast `flash` subagents per package boundary (`type:domain`, `type:infra`, `scope:web`), review their diffs, and close with `harness verify` and `harness done`.
+Once `harness plan-check` has locked the `type:contract` Schemas, `type:service` interfaces, and `stub<A, E, R>()` signatures, replace every stub with a tested production implementation. For multi-package work, dispatch fast subagents (`Gemini 4 Hydrogen (Medium)` / `gemini-4-hydrogen-medium`) per package boundary (`type:domain`, `type:infra`, `scope:web`), review their diffs, and close with `harness verify` and `harness done`.
 
 **Violating the letter of the rules is violating the spirit of the rules.**
 
 ## Execution Recipe
 
-### 1. Partition by Nx Taxonomy (`flash` Subagents)
+### 1. Partition by Nx Taxonomy & Dynamic Dispatch (`invoke_subagent` vs. `swarm`)
 
 Because `type:contract` and `type:service` are already compiled and locked by `plan-check`, work in downstream packages is isolated:
 
@@ -22,9 +22,14 @@ Because `type:contract` and `type:service` are already compiled and locked by `p
 - **Unit B (`type:infra`):** Implement Drizzle D1 / Durable Object `Layer`s (decoding rows into contract Schemas; synchronous DO SQLite transactions; W3C `traceparent` headers) and test with `@effect/vitest`.
 - **Unit C (`scope:web`):** Derive `AtomHttpApi` query/mutation atoms from `type:contract` (zero raw `fetch`).
 
-When launching parallel subagents that run CLI or build commands concurrently, isolate their workspaces using `Workspace: "share"` (in Antigravity `invoke_subagent`) or an isolated git worktree with `HARNESS_WORKTREE_ID=<unit>` (e.g. `HARNESS_WORKTREE_ID=unit-a`) so `.harness/worktrees/<id>` state files and stamps never collide.
+Choose the dispatch mechanism dynamically based on task topology:
 
-When delegating a unit to an implementer subagent via `invoke_subagent` (`TypeName: "self"`, `Model: "flash"`, `Workspace: "share"`), provide this exact 4-part prompt:
+- **Default — Hub-and-Spoke `invoke_subagent` (1–2 downstream packages or one-shot units):**
+  Use `invoke_subagent` (`TypeName: "self"`, `Workspace: "share"`, and `Model: "gemini-4-hydrogen-medium"` if present in the tool's `Model` enum, otherwise `Model: "flash"` or `"inherit"` when the session is already running on Gemini 4 Hydrogen). It has zero message-board overhead and returns results directly in one turn.
+- **Escalation — Multi-Worker `swarm` (`3+` parallel packages, cross-package author $\leftrightarrow$ verifier loops, or explicit model pinning):**
+  Use `swarm` (`action: "add"`, `name: "<unit>"`, `model: "gemini-4-hydrogen-medium"`, `workspace: "inherit"` with disjoint file ownership and `HARNESS_WORKTREE_ID=<unit>` for CLI test commands). Using `workspace: "inherit"` with strict disjoint package ownership ensures edits land directly in the working tree without requiring subagents to run `git commit` before `swarm kill`.
+
+When delegating a unit to an implementer subagent, provide this exact 4-part prompt/brief:
 
 1. **Target Stubs & Files:** Exact file paths and `Effect.fn("SpanName")` stubs to replace.
 2. **EARS Acceptance Clauses:** The `WHEN`, `IF/THEN`, and `WHILE` clauses that must each have a matching `it.effect(...)` test.
@@ -42,7 +47,7 @@ Implement the production code and tests within each package boundary:
 
 ### 3. Final Verification & Closeout (Controller Only)
 
-1. **Signal-Routed Multi-Lens `flash` Review (Parallel Specialist Subagents):** Before running `harness gc --strict` and `harness verify`, the controller selects and dispatches parallel `flash` review lenses using the [Reviewer Dispatch Guide](references/dispatch-reviewers.md) (invoking defined subagents or `TypeName: "research"`, `Model: "flash"`, `Workspace: "share"`) based on the packages and capabilities touched by the task:
+1. **Signal-Routed Multi-Lens Review (Parallel Specialist Subagents):** Before running `harness gc --strict` and `harness verify`, the controller selects and dispatches parallel read-only review lenses using the [Reviewer Dispatch Guide](references/dispatch-reviewers.md) (preferring `invoke_subagent` with defined specialist `TypeName`s and `Workspace: "share"`, or `swarm` with `model: "gemini-4-hydrogen-medium"` when running an active swarm) based on the packages and capabilities touched by the task:
    - **Mandatory Reviewers for Core / Domain / Event Sourcing:** For ANY task touching `type:core`, `type:domain`, deciders, or event sourcing, dispatching **BOTH** `@effect-ears-test-reviewer` AND `@effect-adversarial-reviewer` is strictly mandatory.
    - **Neutral & Adversarial Prompting Protocol:** Prompts dispatched to reviewers MUST be neutral and adversarial ("Assume there are at least 3 P0/P1 bugs hiding across the spec, ADR, contract, fixtures, and tests; find them using the 7-Point Anti-Rubber-Stamp Audit") — never spoon-feed confirmation-biased prompts or assume implementations are correct.
    - **`EARS & Test-Fidelity Lens` ([@effect-ears-test-reviewer](references/personas/ears-test-reviewer.md), Always & Mandatory for Core/Domain):** Reads the feature's `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` (or `docs/specs/`) file, executes the 7-Point Anti-Rubber-Stamp Deep Audit, and verifies that every EARS clause (`WHEN`, `IF/THEN`, `WHILE`) and every declared `spans` / `errors` entry has a behavior-sensitive `@effect/vitest` assertion (rejecting vacuous/mock-only tests, checking sad-path `TaggedError` coverage, folded state properties, and contract brands).
@@ -73,7 +78,7 @@ Implement the production code and tests within each package boundary:
 
 | Excuse                                                               | Reality                                                                                                                                                                                                                                    |
 | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| "I'll implement all 4 layers in one giant turn myself"               | Monolithic edits across `domain`, `infra`, and `web` pollute context. Locked `stub<A, E, R>()` boundaries let `flash` subagents implement each package cleanly.                                                                            |
+| "I'll implement all 4 layers in one giant turn myself"               | Monolithic edits across `domain`, `infra`, and `web` pollute context. Locked `stub<A, E, R>()` boundaries let `gemini-4-hydrogen-medium` subagents implement each package cleanly.                                                                            |
 | "Unit tests passed in `vitest`, so I don't need `harness verify`"    | Only `harness verify` checks for leftover `stub()` calls, runs `checkEffectGraph`, and writes `.harness/verify-stamp.json`. Without it, `harness done` (and the `Stop` hook) blocks completion.                                            |
 | "I tweaked a comment/file after `harness verify`, no need to re-run" | `.harness/verify-stamp.json` hashes the entire working tree via SHA-256. Any post-verify file edit invalidates the stamp.                                                                                                                  |
 | "harness gc isn't necessary if TypeScript builds"                    | TypeScript does not check for unused `TaggedError`s, unprovided service tags in layers, untested domain functions, or missing pattern documentation. `harness gc --strict` stops code entropy before it merges.                            |

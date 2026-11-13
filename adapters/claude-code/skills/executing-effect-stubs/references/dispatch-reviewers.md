@@ -21,18 +21,18 @@ The controller inspects the files, package boundaries (Nx tags), and Effect capa
 
 Specialist reviewers run concurrently as read-only subagents. They never mutate workspace files or run git commands.
 
-### In Antigravity (`invoke_subagent`)
+### In Antigravity (`invoke_subagent` by Default, `swarm` When Pinning `gemini-4-hydrogen-medium`)
 
-When invoking defined specialist agents or generic research agents, use `Workspace: "share"` so workspace isolation is preserved without copying overhead:
+Prefer `invoke_subagent` with `Workspace: "share"` for one-shot read-only specialist reviews (passing `Model: "gemini-4-hydrogen-medium"` if supported by the `Model` enum, otherwise `Model: "flash"` or `"inherit"` when the session runs on Gemini 4 Hydrogen), or use `swarm` (`action: "add"`, `model: "gemini-4-hydrogen-medium"`, `workspace: "inherit"`) when an active swarm is already running or explicit model pinning is needed:
 
 ```ts
-// Dispatching via defined specialist agent:
+// Default: Dispatching via defined specialist agents (invoke_subagent):
 invoke_subagent({
   Subagents: [
     {
       TypeName: "effect-ears-test-reviewer",
       Role: "EARS & Test Fidelity Reviewer",
-      Model: "flash",
+      Model: "flash", // Use "gemini-4-hydrogen-medium" if in Model enum, or "inherit" if session runs on Hydrogen
       Workspace: "share",
       Prompt: `Review touched test and domain files for EARS clause coverage and test fidelity:
 - Target Files: libs/sample/domain/src/sample.ts, libs/sample/domain/test/sample.test.ts
@@ -42,7 +42,7 @@ invoke_subagent({
     {
       TypeName: "effect-security-reviewer",
       Role: "Security & Trust-Boundary Reviewer",
-      Model: "flash",
+      Model: "flash", // Use "gemini-4-hydrogen-medium" if in Model enum, or "inherit" if session runs on Hydrogen
       Workspace: "share",
       Prompt: `Audit touched contract and domain files for authorization (IDOR), secret unwrapping, and schema bounds:
 - Target Files: libs/sample/contract/src/index.ts, libs/sample/domain/src/usecase.ts
@@ -53,24 +53,21 @@ invoke_subagent({
 })
 ```
 
-If invoking via the generic `research` subagent:
+When explicitly pinning `gemini-4-hydrogen-medium` via `swarm`:
 
 ```ts
-invoke_subagent({
-  Subagents: [
-    {
-      TypeName: "research",
-      Role: "Reliability & Concurrency Reviewer",
-      Model: "flash",
-      Workspace: "share",
-      Prompt: `Read the persona instructions at:
+swarm({
+  action: "add",
+  name: "reliability-reviewer",
+  model: "gemini-4-hydrogen-medium",
+  workspace: "inherit",
+  brief: `Read the persona instructions at:
 adapters/antigravity/plugins/effect-harness/skills/executing-effect-stubs/references/personas/reliability-reviewer.md
 
 Review the following files:
 - Target Files: libs/sample/infra/src/repository.ts
-- Adhere strictly to the Quote-the-Line Gate and False-Positive Suppression List.`,
-    },
-  ],
+- Adhere strictly to the Quote-the-Line Gate and False-Positive Suppression List.
+- Post your structured review report to @coordinator when finished.`,
 })
 ```
 

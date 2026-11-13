@@ -40,7 +40,7 @@ Classify the input request using bounded Graph MCP queries (`harness_resolve`, `
 
 - **Trigger:** The prompt provides a GitHub PR number/URL (`#42`, `https://github.com/.../pull/42`) or pasted review markdown (from Grok, Codex, Claude, or a human reviewer) asking to resolve feedback.
 - **Action:**
-  1. Execute the 5-phase `resolving-effect-review-feedback` workflow autonomously (Ingest $\rightarrow$ Central Graph MCP Adjudication $\rightarrow$ Spec/ADR Sync $\rightarrow$ Package-Isolated `flash` Fixers).
+  1. Execute the 5-phase `resolving-effect-review-feedback` workflow autonomously (Ingest $\rightarrow$ Central Graph MCP Adjudication $\rightarrow$ Spec/ADR Sync $\rightarrow$ Package-Isolated `gemini-4-hydrogen-medium` Fixers via `invoke_subagent` or `swarm`).
   2. Advance directly to **Stage 5 (Compounding Learnings & Final Deterministic Gate Sequence)** and **Stage 6 (Shipping)**.
 
 ### Route C — Feature Requirement, Behavior Change, or Defect Report

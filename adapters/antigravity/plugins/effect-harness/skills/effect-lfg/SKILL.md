@@ -21,7 +21,7 @@ When running under `effect-lfg`, apply these three pipeline overrides to the und
 1. **No EARS Approval Pause (`specifying-ears-with-effect` override):**
    Never pause to ask clarifying questions or wait for user approval of `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md`. Resolve existing contracts, services, and ADRs via in-process Graph MCP (`harness_resolve`, `harness_callers`, `harness_ontology_why`, `harness_ontology_impact`). Record any non-blocking product or technical defaults explicitly under `## Assumptions` and `## Out of scope`, verify the spec with `harness gc --strict` and `harness_ontology_check`, and advance immediately to `planning-effect-skeletons`.
 2. **Closed-Loop Specialist Review Auto-Fix (`executing-effect-stubs` + `resolving-effect-review-feedback` override):**
-   After `flash` implementer subagents replace `stub<A, E, R>()` skeletons, dispatch the applicable read-only specialist reviewers (`effect-ears-test-reviewer`, `effect-security-reviewer`, `effect-reliability-reviewer`, `effect-adversarial-reviewer`). Adjudicate findings centrally via Graph MCP, hunt AST twins with `harness_structural_search`, and autonomously apply all valid `fix`, `class-fix`, and `doc-sync-fix` items before final gates.
+   After `gemini-4-hydrogen-medium` implementer subagents replace `stub<A, E, R>()` skeletons, dispatch the applicable read-only specialist reviewers (`effect-ears-test-reviewer`, `effect-security-reviewer`, `effect-reliability-reviewer`, `effect-adversarial-reviewer`) via `invoke_subagent` (default) or `swarm` (`model: "gemini-4-hydrogen-medium"`). Adjudicate findings centrally via Graph MCP, hunt AST twins with `harness_structural_search`, and autonomously apply all valid `fix`, `class-fix`, and `doc-sync-fix` items before final gates.
 3. **Stamp-Safe Compounding Learnings (`compounding-effect-learnings` override):**
    Execute `harness learn` and apply clear mechanical promotions (`triage-rule`, `guard-allowlist`, `agent-pattern`, `ast-graph-gate`, or `adr`) followed by `harness learn --clear` **before** running the final `harness gc --strict` $\rightarrow$ `harness mutate --strict` $\rightarrow$ `harness verify` $\rightarrow$ `harness done` sequence so post-verify file edits never invalidate `.harness/verify-stamp.json`.
 
@@ -51,7 +51,7 @@ Stage 1: Route Intake & Autonomous EARS Specification (specifying-ears-with-effe
   ↓
 Stage 2: Plan-as-Code Skeletons, plan-check & ADR Sync (planning-effect-skeletons)
   ↓
-Stage 3: Package-Isolated flash Implementation & Trace/Prop Tests (executing-effect-stubs)
+Stage 3: Package-Isolated gemini-4-hydrogen-medium Implementation & Trace/Prop Tests (executing-effect-stubs)
   ↓
 Stage 4: 4-Lens Specialist Review & Autonomous Class-Fix Loop (resolving-effect-review-feedback)
   ↓
@@ -86,19 +86,19 @@ Stage 6: Git Commit, Optional Push/PR & <promise>DONE</promise>
 4. Append the verified Mermaid topology diagram printed by `plan-check` into `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` under `## 4. Verified Plan Topology Graph`, apply the Pre-Implementation Adversarial Plan Lens, and author/update `libs/<scope>/docs/adr/NNNN-<slug>.md` when the Counterfactual Eligibility Rule holds.
 5. Verify governance docs with `harness gc --strict` and `harness_ontology_check`.
 
-### Stage 3 — Package-Isolated `flash` Implementation & Tests
+### Stage 3 — Package-Isolated `gemini-4-hydrogen-medium` Implementation & Tests
 
 **REQUIRED SUB-SKILL:** Use `executing-effect-stubs`:
 
 1. Partition implementation by Nx package boundaries (`type:domain` / `type:core`, `type:infra`, `scope:web`).
-2. When 2+ downstream packages have stubs, dispatch parallel `flash` implementer subagents (`TypeName: "self"`, `Model: "flash"`, `Workspace: "share"` or `HARNESS_WORKTREE_ID=<unit>`) with the 4-part prompt (Target Stubs, EARS Clauses, Pattern Reference, Package Gate `CI=true pnpm nx run <project>:verify`). When only a single downstream package has stubs, the controller may implement it inline under the same package gate.
+2. When 2+ downstream packages have stubs, dynamically select the dispatch mechanism: use `invoke_subagent` (`TypeName: "self"`, `Workspace: "share"` or `HARNESS_WORKTREE_ID=<unit>`) by default for 2 packages, or escalate to `swarm` (`action: "add"`, `name: "<unit>"`, `model: "gemini-4-hydrogen-medium"`, `workspace: "inherit"` with disjoint file ownership and `HARNESS_WORKTREE_ID=<unit>`) for 3+ parallel packages or explicit `gemini-4-hydrogen-medium` pinning, providing the 4-part prompt/brief (Target Stubs, EARS Clauses, Pattern Reference, Package Gate `CI=true pnpm nx run <project>:verify`). When only a single downstream package has stubs, the controller may implement it inline under the same package gate.
 3. Ensure every EARS clause is verified by `@effect/vitest` (`it.effect` + `runWithTestTracer` + `checkSpanBudgets`), negative tests assert exact error instances via `Cause.findErrorOption(exit.cause)`, and every pure `*.decide` / reducer has `it.effect.prop` / `it.prop` property-based tests over `Schema.Array(EventUnionSchema)`.
 
 ### Stage 4 — 4-Lens Specialist Review & Autonomous Fix Loop
 
 **REQUIRED SUB-SKILL:** Use `resolving-effect-review-feedback` per [references/review-and-shipping.md](references/review-and-shipping.md):
 
-1. Dispatch parallel read-only `flash` specialist reviewers based on touched signals:
+1. Dispatch parallel read-only `gemini-4-hydrogen-medium` specialist reviewers (`invoke_subagent` by default with `Workspace: "share"`, or `swarm` with `model: "gemini-4-hydrogen-medium"`) based on touched signals:
    - `effect-ears-test-reviewer` (Always)
    - `effect-security-reviewer` (Contracts, `HttpApi`, `Rpc`, auth, SQL, `Config`)
    - `effect-reliability-reviewer` (`type:infra`, DO SQLite, D1, Queues, `Schedule`, `Scope`)
@@ -141,7 +141,7 @@ Follow [references/review-and-shipping.md](references/review-and-shipping.md) to
 | **0. Readiness**   | `effect-harness`                   | `harness session`, `git worktree`                                                              | Isolated clean branch & session state                                                       |
 | **1. EARS Spec**   | `specifying-ears-with-effect`      | `harness_resolve`, `harness_ontology_why`, `harness gc --strict`, `harness_ontology_check`     | `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` (`status: proposed` + `## Assumptions`)      |
 | **2. Skeleton**    | `planning-effect-skeletons`        | `harness_route`, `harness_lsp_diagnostics`, `harness plan-check`                               | Compilable `stub<A,E,R>()` graph, `.harness/plan-graph-snapshot.json`, Mermaid in spec, ADR |
-| **3. Implement**   | `executing-effect-stubs`           | `invoke_subagent` (`flash`), `harness_lsp_diagnostics`, `pnpm nx run <proj>:verify`            | Zero active `stub()` calls, `@effect/vitest` trace + property tests                         |
+| **3. Implement**   | `executing-effect-stubs`           | `invoke_subagent` / `swarm` (`gemini-4-hydrogen-medium`), `harness_lsp_diagnostics`, `pnpm nx run <proj>:verify` | Zero active `stub()` calls, `@effect/vitest` trace + property tests                         |
 | **4. Review**      | `resolving-effect-review-feedback` | 4 specialist reviewers, `harness_structural_search`, `harness_tests_reaching`                  | All valid `fix` / `class-fix` / `doc-sync-fix` items applied                                |
 | **5. Final Gates** | `compounding-effect-learnings`     | `harness learn`, `gc --strict`, `ontology check --strict`, `mutate --strict`, `verify`, `done` | Spec `status: accepted`, fresh `.harness/verify-stamp.json`, Omnigraph merged to `main`     |
 | **6. Ship**        | `effect-lfg`                       | `git commit`, `git remote`, `gh pr create`                                                     | Clean commit (and open PR when applicable) + `<promise>DONE</promise>`                      |
@@ -154,7 +154,7 @@ Follow [references/review-and-shipping.md](references/review-and-shipping.md) to
 | :----------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | "I must stop after drafting the EARS spec and wait for the user to approve it."                                    | In `effect-lfg` autonomous mode, stopping for EARS approval deadlocks the pipeline. Record non-blocking defaults in `## Assumptions`, verify with `gc --strict` and `harness_ontology_check`, and proceed immediately to `planning-effect-skeletons`.                                           |
 | "The user said 'just ship it', so I'll skip the EARS spec and `stub<A, E, R>()` `plan-check`."                     | Skipping EARS or `plan-check` omits `.harness/plan-graph-snapshot.json` and `SpecifiesSymbol` edges, causing deterministic failures in `harness gc --strict` and `harness done`. Autonomous means hands-off, never gate-free.                                                                   |
-| "The change is small, so I don't need the 4 specialist review subagents."                                          | Autonomous runs have no human eyes before completion. Specialist `flash` reviewers (`effect-ears-test-reviewer`, `effect-security-reviewer`, `effect-reliability-reviewer`, `effect-adversarial-reviewer`) catch vacuous tests, IDOR, sync DO violations, and race conditions before `verify`.  |
+| "The change is small, so I don't need the 4 specialist review subagents."                                          | Autonomous runs have no human eyes before completion. Specialist `gemini-4-hydrogen-medium` reviewers (`effect-ears-test-reviewer`, `effect-security-reviewer`, `effect-reliability-reviewer`, `effect-adversarial-reviewer`) catch vacuous tests, IDOR, sync DO violations, and race conditions before `verify`.  |
 | "I'll run `harness learn` or tweak a markdown file after `harness verify` and `harness done`."                     | `.harness/verify-stamp.json` hashes the entire working tree via SHA-256. Any tracked file edit after `harness verify` invalidates the stamp and causes the `Stop` hook to block completion. Always run `learn` and finalize all docs _before_ the final `verify` $\rightarrow$ `done` sequence. |
 | "I'll stop and ask the user whether to promote friction clusters in `harness learn`."                              | In `effect-lfg`, pausing on `harness learn` stalls an unattended run. Autonomously apply clear mechanical promotions (or record deferred architectural questions in the closeout report) and run `harness learn --clear` before final `verify`.                                                 |
 | "Vitest passed, so I can commit and output `<promise>DONE</promise>` without `harness verify` and `harness done`." | Only `harness verify` + `harness done` enforce zero leftover `stub()` calls, check `SpanBudget.decide`, write `.harness/verify-stamp.json`, and merge the Omnigraph `impl/*` branch into `main`.                                                                                                |

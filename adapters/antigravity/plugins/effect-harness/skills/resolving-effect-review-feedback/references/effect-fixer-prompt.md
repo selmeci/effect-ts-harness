@@ -1,6 +1,6 @@
 # Effect Fixer Subagent Prompt Template & Contract
 
-This document specifies the exact dispatch prompt and completion contract used by the orchestrator to delegate adjudicated review fixes to lightweight, package-isolated `flash` fixer subagents (`TypeName: "self"`, `Model: "flash"`, `Workspace: "share"` or `HARNESS_WORKTREE_ID=<unit>`).
+This document specifies the exact dispatch prompt/brief and completion contract used by the orchestrator to delegate adjudicated review fixes to lightweight, package-isolated `gemini-4-hydrogen-medium` fixer subagents — dispatched dynamically via `invoke_subagent` (`TypeName: "self"`, `Workspace: "share"` or `HARNESS_WORKTREE_ID=<unit>`) by default, or via `swarm` (`action: "add"`, `name: "fixer-<unit>"`, `model: "gemini-4-hydrogen-medium"`, `workspace: "inherit"` with disjoint file ownership) for 3+ package batches or explicit model pinning.
 
 ---
 

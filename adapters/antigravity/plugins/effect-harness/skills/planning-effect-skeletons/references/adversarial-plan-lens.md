@@ -61,14 +61,14 @@ Skeletons often declare optimistic, domain-only errors while ignoring operationa
 2. **Review Skeleton Signatures:**
    Check the `E` and `R` channels across all `stub<A, E, R>()` declarations in `type:domain` and `type:infra`.
 3. **Dispatch `@effect-adversarial-reviewer`:**
-   For high-risk, stateful, or event-sourced designs, invoke the adversarial specialist agent on the skeleton files:
+   For high-risk, stateful, or event-sourced designs, invoke the adversarial specialist agent on the skeleton files (using `invoke_subagent` by default with `Model: "gemini-4-hydrogen-medium"` if in the `Model` enum, otherwise `"flash"` / `"inherit"`, or via `swarm` with `model: "gemini-4-hydrogen-medium"` when explicitly pinning):
    ```ts
    invoke_subagent({
      Subagents: [
        {
          TypeName: "effect-adversarial-reviewer",
          Role: "Adversarial Skeleton Reviewer",
-         Model: "flash",
+         Model: "flash", // Use "gemini-4-hydrogen-medium" if in Model enum, or "inherit" if session runs on Hydrogen
          Workspace: "share",
          Prompt:
            "Audit the stub<A, E, R>() skeletons against the Pre-Implementation Adversarial Checklist. Target files: libs/sample/domain/src/skeletons.ts, libs/sample/contract/src/index.ts",

@@ -25,9 +25,10 @@ The controller inspects the files, package boundaries (Nx tags), and Effect capa
 
 Specialist reviewers run concurrently as read-only subagents. They never mutate workspace files or run git commands.
 
-### In Antigravity (`invoke_subagent`)
+### In Antigravity (`invoke_subagent` by Default, `swarm` When Pinning `gemini-4-hydrogen-medium`)
 
-When invoking defined specialist agents or generic research agents, use `Workspace: "share"` so workspace isolation is preserved without copying overhead. Prompts must be neutral and adversarial:
+**Default (`invoke_subagent` — Recommended for Read-Only Reviews):**
+Because specialist reviewers are one-shot, read-only hub-and-spoke inspectors with dedicated agent definitions (`agents/effect-*-reviewer.md`) and no need for peer-to-peer message-board chatter, prefer `invoke_subagent` with `Workspace: "share"` (pass `Model: "gemini-4-hydrogen-medium"` if supported by the `Model` enum, otherwise `Model: "flash"` or `"inherit"` when the active session runs on Gemini 4 Hydrogen):
 
 ```ts
 // Dispatching via defined specialist agents (mandatory dual-review for core/domain):
@@ -36,7 +37,7 @@ invoke_subagent({
     {
       TypeName: "effect-ears-test-reviewer",
       Role: "EARS & Test Fidelity Reviewer",
-      Model: "flash",
+      Model: "flash", // Use "gemini-4-hydrogen-medium" if in Model enum, or "inherit" if session runs on Hydrogen
       Workspace: "share",
       Prompt: `Assume there are at least 3 P0/P1 bugs hiding across the spec, ADR, contract, fixtures, and tests; find them using the 7-Point Anti-Rubber-Stamp Audit. Do not assume any code or test is correct:
 - Target Files: libs/sample/domain/src/sample.ts, libs/sample/domain/test/sample.test.ts
@@ -47,7 +48,7 @@ invoke_subagent({
     {
       TypeName: "effect-adversarial-reviewer",
       Role: "Adversarial Chaos Reviewer",
-      Model: "flash",
+      Model: "flash", // Use "gemini-4-hydrogen-medium" if in Model enum, or "inherit" if session runs on Hydrogen
       Workspace: "share",
       Prompt: `Assume there are at least 3 P0/P1 bugs hiding across the spec, ADR, contract, fixtures, and tests; find them using adversarial falsification. Do not assume any code or test is correct:
 - Target Files: libs/sample/domain/src/sample.ts, libs/sample/domain/test/sample.test.ts
@@ -58,24 +59,21 @@ invoke_subagent({
 })
 ```
 
-If invoking via the generic `research` subagent:
+**Alternative (`swarm` — When Already Running a Swarm or Explicitly Pinning `gemini-4-hydrogen-medium`):**
+If a swarm is already active for multi-package implementation or you need to explicitly pin `model: "gemini-4-hydrogen-medium"` while running the coordinator on another model:
 
 ```ts
-invoke_subagent({
-  Subagents: [
-    {
-      TypeName: "research",
-      Role: "Reliability & Concurrency Reviewer",
-      Model: "flash",
-      Workspace: "share",
-      Prompt: `Read the persona instructions at:
-adapters/antigravity/plugins/effect-harness/skills/executing-effect-stubs/references/personas/reliability-reviewer.md
-
-Review the following files:
-- Target Files: libs/sample/infra/src/repository.ts
-- Adhere strictly to the Quote-the-Line Gate and False-Positive Suppression List.`,
-    },
-  ],
+swarm({
+  action: "add",
+  name: "ears-test-reviewer",
+  model: "gemini-4-hydrogen-medium",
+  workspace: "inherit",
+  brief: `Read the specialist reviewer instructions at adapters/antigravity/plugins/effect-harness/agents/effect-ears-test-reviewer.md.
+Assume there are at least 3 P0/P1 bugs hiding across the spec, ADR, contract, fixtures, and tests; find them using the 7-Point Anti-Rubber-Stamp Audit:
+- Target Files: libs/sample/domain/src/sample.ts, libs/sample/domain/test/sample.test.ts
+- EARS Requirements & ADRs: libs/sample/docs/specs/SPEC-0001.md, libs/sample/docs/adr/0001.md
+- Adhere strictly to the Quote-the-Line Gate and False-Positive Suppression List.
+- Post your structured review report to @coordinator when finished.`,
 })
 ```
 
