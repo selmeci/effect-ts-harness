@@ -1,20 +1,16 @@
 ---
 name: resolving-effect-review-feedback
-description: Use when addressing code review feedback pasted as text (from Grok, Codex, or human reviewers) or left on a GitHub PR in an Effect-TS Harness project, or when review findings expose silent test failures, spec-to-code drift, or gate blind spots.
+description: Use when addressing code review feedback pasted as text (from Grok, Codex, or human reviewers) or left on a GitHub PR in an Effect-TS Harness project, or when review findings expose silent test failures, spec-to-code drift, fail-open fallbacks, or gate blind spots.
 ---
 
 # Resolving Effect Review Feedback (Central Adjudication & Subagent Fix Loop)
 
 ## Overview
 
-This skill establishes the central orchestrator and subagent fix loop for resolving code review feedback in an Effect-TS Engineering Harness workspace, adapted from `ce-resolve-pr-feedback`.
+This skill governs central adjudication and parallel subagent execution for code review feedback in an Effect-TS Engineering Harness workspace:
 
-External code reviewers (whether human engineers or external models like Grok and Codex) frequently produce a mixture of high-signal defect reports, misunderstandings of Effect v4 idioms, and requests that violate established Architectural Decision Records (ADRs).
-
-To maintain codebase integrity and eliminate thrashing:
-
-- The **Orchestrator** centrally adjudicates all feedback against the harness **Order of Authority** using **in-process Graph MCP (`harness-mcp`)** facts, synchronizes EARS specifications and ADRs first, dispatches execution units, runs monorepo gates, and performs compounding gate promotion.
-- Lightweight **`flash` Fixer Subagents** act purely as execution hands. They receive package-isolated file sets, exact pattern recipe routes, reaching test files, and governing ADR constraints. They never adjudicate, never debate, and never touch whole-monorepo gates or stamps.
+- The **Orchestrator** inventories every sub-bullet and `Suggestion` clause 1-to-1, adjudicates centrally via **Order of Authority** and **in-process Graph MCP (`harness-mcp`)**, exposes fail-open bugs masked by passing tests, synchronizes semantic contracts first, dispatches isolated fixers, runs post-edit metric syncs and monorepo gates, and promotes blind spots into deterministic gates.
+- Lightweight **`flash` / `haiku` Fixer Subagents** operate as disjoint execution hands returning a 1-to-1 **`Sub-Bullet Verification Matrix`**. They never adjudicate, never merge assigned sub-IDs, and never run monorepo gates.
 
 **Violating the letter of the rules is violating the spirit of the rules.**
 
@@ -23,173 +19,146 @@ To maintain codebase integrity and eliminate thrashing:
 ## 5-Phase Resolution Recipe
 
 ```text
-Phase 1: Ingest & Normalize Batch
+Phase 1: Inventory & Atomic Decomposition (1 Sub-Claim = 1 Row + Checksum)
          ↓
-Phase 2: Central Adjudication via Graph MCP & Order of Authority (Orchestrator Only)
+Phase 2: Central Adjudication, Fail-Open Audit & Pre-Enumeration (Orchestrator Only)
          ↓
-Phase 3: Contract, EARS Spec & ADR Synchronization First (Orchestrator Only)
+Phase 3: Semantic Contract, EARS, ADR & Prose Sync (NO wc -l / Metric Sync)
          ↓
-Phase 4: Package-Isolated flash Fixer Dispatch (Parallel Subagents)
+Phase 4: Disjoint Fixer Dispatch & Hardened 1-to-1 Diff/Test Acceptance Gate
          ↓
-Phase 5: Whole-Workspace Deterministic Gates & Compounding Promotion (Orchestrator Only)
+Phase 5: Merge → Step 0 Metric/LOC Matrix → Deterministic Gates → Compounding Promotion
 ```
 
 ---
 
-### Phase 1 — Ingest & Normalize Feedback Batch
+### Phase 1 — Ingest & Atomic Sub-Bullet Normalization (`1 Sub-Claim = 1 Row`)
 
-Accept review feedback from either of two ingress sources:
+Accept feedback from:
+1. **Pasted Review Markdown** (`Critical`, `Important`, `Suggestions`, `Nitpicks`, or bulleted lists).
+2. **GitHub PR Comments & Inline Threads:** Run both `gh pr view <number> --comments` AND `gh api repos/{owner}/{repo}/pulls/{number}/comments`.
 
-1. **Pasted Review Markdown:** Review text pasted into the conversation (e.g. from Grok, Codex, Claude, or a human reviewer) structured with severity headers (`Critical`, `Important`, `Suggestions`, `Nitpicks`).
-2. **GitHub PR Threads & Comments:** When given a PR number or URL, fetch both top-level review submissions (`gh pr view <number> --comments`) and inline line-level review threads (`gh api repos/{owner}/{repo}/pulls/{number}/comments`).
+Decompose **EVERY single discrete claim** BEFORE evaluating Out-of-Scope rules — **never group multiple sub-bullets, functions, or clauses into one ID**:
 
-Normalize every finding into a single enumerated list:
+- **Atomic IDs:** `F-<item>.<sub_bullet>` (`Critical`/`Important`) and `S-<item>.<sub_bullet>` (`Suggestions`/`Nitpicks`/inline nits). If one sub-bullet spans multiple files in disjoint fixer units, split further (`F-10.1a`, `F-10.1b`). Split mixed doc findings into semantic (`Assigned Unit: orchestrator-phase3`) vs numeric/LOC (`Assigned Unit: orchestrator-phase5`).
+- **Source Anchor:** Required on every row (`Crit-1.a`, `Imp-10.b`, `Sug-3.a`, `PR-Thread-12345.1`).
+- **Out-of-Scope Predicate (Observable Only — Zero Nuance Clauses):** An inventoried sub-claim may be moved to the `Out-of-Scope Rejection Table` (`out-of-scope`) ONLY IF **BOTH** hold:
+  1. It requests a brand-new product feature absent from the active EARS spec (`REQ-*`); **AND**
+  2. It does **NOT** identify a reliability defect, security boundary gap, resource/listener/stack cleanup leak, error-propagation or error-logging/telemetry loss, fail-open fallback, CLI/MCP input-validation or exit-code defect, documentation/metric parity error, or test-fidelity gap in any workspace file referenced by the PR, its callers, or its package.
 
-- Format: `F-1`, `F-2`, `F-3`, ...
-- Capture for each: `Location` (`file:line`), `Severity` (`Critical`, `Important`, `Suggestion`), and exact `Quoted Claim`.
-- **Filter Out-of-Scope / Untracked Items Immediately:** If a finding demands features not in the active EARS specification, suggests future-phase scope, or requests subjective aesthetic restyling that contradicts existing lint rules, separate it immediately into an **Out-of-Scope** table and do not schedule implementation work for it.
+Any `Suggestion` or `Nitpick` touching reliability, security, error propagation, error logging, exit codes, fail-open fallbacks, lifecycle cleanup, input validation, documentation parity, or test coverage MUST remain in the Adjudication Ledger as `S-n.k`.
 
 ---
 
-### Phase 2 — Central Adjudication via Graph MCP & Order of Authority (Orchestrator Only)
+### Phase 2 — Central Adjudication & Fail-Open Audit (Orchestrator Only)
 
 > [!IMPORTANT]
-> Never blindly implement reviewer suggestions. Never delegate judgment to `flash` fixer subagents or `clef-flash`. The orchestrator alone must evaluate each item against [references/evaluation-rubric.md](references/evaluation-rubric.md).
+> Never blindly apply reviewer suggestions or delegate judgment to fixer subagents or `clef-flash`. Evaluate every row against [references/evaluation-rubric.md](references/evaluation-rubric.md).
 
-For each normalized finding `F-n`, run in-process Graph MCP tools instead of slow shell commands (`grep`, `git blame`):
+For each `F-n.k` / `S-n.k`, gather deterministic facts via Graph MCP:
 
-1. **Signature & Error Channel Resolution (`harness_resolve` & `harness_callers`):**
-   - Resolve the target symbol or `Effect.fn` span name.
-   - Inspect the exact `Effect<A, E, R>` signature, incoming callers, and declared error channel `E`.
-   - Verify whether the reviewer's claim is mathematically correct under Effect semantics.
-2. **Ontology Traceability (`harness_ontology_why` & `harness_ontology_impact`):**
-   - Retrieve governing `AdrDoc` (`<scope>:ADR-NNNN`) and `EarsSpec` (`REQ-*`) nodes.
-   - Determine whether the flagged behavior was an intentional, approved architectural trade-off or genuine spec-to-code drift.
-3. **AST Twin Hunting for Class-Fixes (`harness_structural_search`):**
-   - When a finding is valid, do not fix only the single quoted line.
-   - Run an `@ast-grep/napi` AST search (`pattern` using `$META` metavariables, e.g. `Equal.equals($A, $B) || JSON.stringify($A) === JSON.stringify($B)` or `Effect.runSync($EXPR)`) across the package or workspace to uncover identical anti-patterns.
-   - Cluster all twin occurrences into a single **`class-fix`** finding.
-4. **Test Reachability Inspection (`harness_tests_reaching`):**
-   - Identify all `@effect/vitest` `VitestCase` nodes exercising the target symbol or span.
-   - If the reviewer claims a test gap, verify whether reaching test cases are missing, vacuous (`.thenFails()` with no expected error), or lack negative failure cases.
-5. **Specialist Lens Consultation (Mandatory for Core/Domain/Event Sourcing & Harness Gates):**
-   - For ANY task or contested finding touching `type:core`, `type:domain`, deciders, event sourcing, OR harness gate implementations (`libs/harness/**`, `tools/oxlint/**`), dispatching **BOTH** `effect-ears-test-reviewer` AND `effect-adversarial-reviewer` is strictly mandatory.
-   - **Audit the Entire Git Diff (`git diff main...HEAD`):** Specialist reviewers MUST audit all changed files in the branch — including `libs/harness/gates/**`, `libs/harness/graph/**`, and `tools/oxlint/**` ("Who guards the guards?") — never scope reviewers exclusively to `libs/<domain-scope>/**`.
-   - Prompts to reviewers MUST be neutral and adversarial ("Assume there are at least 3 P0/P1 bugs, false-negative bypasses, or fail-open fallbacks hiding across the diff; find them using the 7-Point Anti-Rubber-Stamp Audit") — never spoon-feed confirmation-biased prompts or assume implementations are correct.
-   - For trust boundaries or infra/resource questions, invoke `effect-security-reviewer` or `effect-reliability-reviewer` as appropriate.
+1. **Signature & Callers (`harness_resolve`, `harness_callers`):** Inspect `Effect<A, E, R>`, callers, and error channel `E`.
+2. **Fail-Open Test Audit (`harness_ontology_why`, `harness_tests_reaching`):**
+   - If a test asserts a fail-open fallback (`[]`, `Graph.empty`, swallowed catch, `exitCode: 0` on invalid input), verify whether a **verbatim accepted `<scope>:ADR-NNNN` or EARS `IF/THEN` (`REQ-*`) clause** names **both the exact error condition AND exact fallback value** (JSDoc, READMEs, RFC prose, and draft docs do NOT count).
+   - **No Explicit Clause = Bug (`BUGGY_TEST_FLIP`):** Assign `fix` / `class-fix` to fail closed with a typed `Schema.TaggedError` / nonzero exit and flip the test. **NEVER** classify undocumented fallbacks as `doc-sync-fix`, edit Phase 3 specs to authorize them retroactively, or escape via `escalate-to-human`.
+3. **AST Twin & Module-Wide Lifecycle Pre-Enumeration (`harness_structural_search`, `harness_callers`):**
+   - Cluster twin defects into `class-fix`.
+   - Whenever a finding touches `txStack`, state collections, workers, sockets, timers, or listeners, pre-enumerate **every** mutation/cleanup site (`push`, `pop`, `shift`, `splice`, `clear`, `Ref.update`, `on`, `once`, `off`, `removeListener`, `removeAllListeners`, `kill`, `terminate`, `close`, `onExit`, `acquireUseRelease`) **across the entire owning module, class, service, and caller/callee chain** for Section 2 of the fixer prompt.
+4. **Adversarial Specialist Consultation:** Follow `executing-effect-stubs` (`references/dispatch-reviewers.md`) across `git diff <base>...HEAD` plus uncommitted changes:
+   - Core/domain/ES or harness gates (`libs/harness/**`, `tools/oxlint/**`): MUST dispatch **both** `effect-ears-test-reviewer` AND `effect-adversarial-reviewer`.
+   - Stateful stacks, workers, sockets, timers, listeners, or concurrency: MUST dispatch `effect-reliability-reviewer`. Trust boundaries: MUST dispatch `effect-security-reviewer`.
+5. **`decline-with-evidence` Predicate:** Permitted ONLY when citing a verbatim rule in `LLMS.md`, `agent-patterns/*.md`, an accepted `ADR-NNNN`, an explicit EARS `REQ-*`, or a **factual premise error** proven by TS/Graph MCP (e.g., symbol already has that parameter). Existing `E = never` caller signatures from swallowed errors or passing fallback tests NEVER justify declining a fix.
 
-Assign each finding one disposition from the rubric:
-
-- `fix`: Single-location valid code defect.
-- `class-fix`: Valid defect with twin AST matches across the workspace.
-- `doc-sync-fix`: Code is intentional; EARS spec or ADR must be updated to match reality.
-- `decline-with-evidence`: Invalid suggestion violating Order of Authority or ADRs.
-- `escalate-to-human`: Ambiguous architectural dilemma requiring human decision.
-
-**Output the complete Adjudication Ledger table before writing any code or dispatching subagents.**
+**Publish Before Phase 3:** Emit all three structures defined in [references/evaluation-rubric.md](references/evaluation-rubric.md) §5: `Phase 1 Checksum`, `Review Feedback Adjudication Ledger`, and `Out-of-Scope Rejection Table`.
 
 ---
 
-### Phase 3 — Contract, EARS Spec & ADR Synchronization First (Orchestrator Only)
+### Phase 3 — Semantic Contract, EARS, ADR & Prose Sync (Orchestrator Only)
 
-If any approved finding (`fix`, `class-fix`, `doc-sync-fix`) impacts:
+If any `fix`, `class-fix`, or semantic/prose `doc-sync-fix` (`orchestrator-phase3`) touches `type:contract`, `type:service`, exported signatures, specs, ADRs, RFC prose, or `agent-patterns/*.md`, update semantics **first**:
 
-- `type:contract` Schemas, `HttpApiEndpoint` / `Rpc` definitions, or API errors
-- `type:service` ports or repository abstractions
-- Exported `Effect.fn` signatures
-- Feature specifications (`libs/<scope>/docs/specs/*.md`) or ADRs (`libs/<scope>/docs/adr/*.md`)
-
-The orchestrator MUST synchronize documentation and contracts **first**:
-
-1. Update the governing EARS specification: update `WHEN`, `IF/THEN`, `WHILE`, and `WHERE` clauses, `spans` / `errors` tables, and Mermaid state diagrams so they reflect the intended reality.
-2. If an architectural invariant changed, update the ADR text and YAML frontmatter (`spans`, `services`, `errors`, `enforced_by`).
-3. Run `harness_ontology_check` to ensure zero semantic conflicts (`OntologyConflictV1`) and run `harness_lsp_diagnostics` on touched contract files.
-4. If new function signatures or service tags were added, execute plan-check to lock the boundary:
+1. Update EARS clauses, ADR text/frontmatter, or RFC/README prose (never downgrading fail-closed invariants).
+2. Run `harness_ontology_check` and `harness_lsp_diagnostics` on touched files.
+3. Run `plan-check` if signatures, tags, or tracked files changed:
    ```bash
    node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts plan-check
    ```
 
----
-
-### Phase 4 — Package-Isolated `flash` Fixer Dispatch
-
-Group approved `fix` and `class-fix` items by package/directory boundaries so each subagent receives exclusive ownership of a disjoint set of files.
-
-1. **Obtain Pattern Route:** For each group, call `harness_route` (`IdiomRouterV1` via `clef-flash`) to identify the exact sanctioned pattern recipe in `agent-patterns/<block>.md`. If `harness_route` returns `patternFile: null` (e.g. local Ollama offline or timed out), select the matching `agent-patterns/<block>.md` directly from the defect category in [references/evaluation-rubric.md](references/evaluation-rubric.md).
-2. **Dispatch Subagents:** Launch parallel fixer subagents (`TypeName: "self"`, `Model: "flash"`, `Workspace: "share"` or `HARNESS_WORKTREE_ID=<unit>`):
-   - Use the prompt template in [references/effect-fixer-prompt.md](references/effect-fixer-prompt.md).
-   - Supply the 5 mandatory inputs: (1) Assigned Finding IDs, (2) Target Files & Twin Locations, (3) Governing EARS Clauses & ADR Invariants, (4) Pattern Recipe Path, (5) Reaching Test Files & Required Test Assertions.
-3. **Subagent Execution Discipline:**
-   - Fixers run `harness_lsp_diagnostics` and package-scoped tests (`CI=true pnpm nx run <project>:test`).
-   - Fixers MUST NOT run whole-monorepo gates (`harness verify`, `harness done`) or git operations.
-   - Fixers MUST return the structured `Fixer Completion Report` and terminate.
-4. **Cleanup:** Kill completed subagent sessions via `manage_subagents(Action: "kill")`.
+> [!CAUTION]
+> **NO `wc -l` OR METRIC SYNC IN PHASE 2 OR PHASE 3:** Do NOT run `wc -l` on code files for doc-sync purposes or edit LOC/test-count tables before Phase 4 finishes. Pre-edit numbers go stale immediately and must not be cached. Handle ALL numeric/LOC sync strictly in Phase 5 Step 0 (`orchestrator-phase5`).
 
 ---
 
-### Phase 5 — Whole-Workspace Deterministic Gates & Compounding Promotion (Orchestrator Only)
+### Phase 4 — Disjoint Fixer Dispatch & Hardened Acceptance Gate
 
-Once all fixer reports are received and merged into the workspace:
+Partition `fix` and `class-fix` `Atomic IDs` by disjoint file ownership.
 
-1. **Execute Deterministic Gates:**
-   Run the full, ordered gate sequence in the root workspace:
-
-   ```bash
-   node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts gc --strict
-   node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts mutate --strict
-   CI=true node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts verify
-   CI=true node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done
-   ```
-
-2. **Compounding Gate Audit & Adversarial Evasion Matrix (`compounding-effect-learnings`):**
-   For every valid `Critical` or `Important` review finding that previously slipped past `harness verify`, conduct the Compounding Audit:
-   - Ask: _"Why did our deterministic gates allow this defect to exist?"_
-   - Examples:
-     - If `fallback-json-equality` was used: add an AST ban to `tools/oxlint/syntax-bans.js` or `libs/harness/graph/src/policy-check.ts`.
-     - If `.thenFails()` had no expected error: add a regex rule or linter check forbidding bare `.thenFails()` without arguments.
-     - If an edge-case mutation survived: add an operator to `libs/harness/gates/src/mutation-check.ts`.
-     - If a recurring architectural question arose: run `node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts learn` and promote an ADR or pattern doc.
-   - **Adversarial Evasion Matrix for New/Modified Gates:** Whenever you add or modify a gate in `libs/harness/gates/src/policy.ts`, `libs/harness/graph/src/type-extractor.ts`, `tools/oxlint/syntax-bans.js`, or `libs/harness/gates/src/mutation-check.ts`, you MUST write unit tests covering adversarial evasion vectors (shell wrapper/quoting/subshell bypasses, multi-aggregate / multi-schema files where global `/Command$/` or `/State$/` regexes would zero out intersections, self-comparison `x.id === x.id` or comment bypasses, and `satisfies`/parenthesized type casts) and run `effect-adversarial-reviewer` directly against the gate implementation.
+1. **Pattern Route:** Call `harness_route` (or use the mapped `Sanctioned Pattern` in [references/evaluation-rubric.md](references/evaluation-rubric.md) §3 if `patternFile: null`).
+2. **Dispatch Fixers:** Launch parallel subagents using the `Agent` tool (`model: "flash"` or `"haiku"`, isolated via `HARNESS_WORKTREE_ID=<unit>` or git worktree isolation) with [references/effect-fixer-prompt.md](references/effect-fixer-prompt.md). Supply every `Atomic ID` row and all pre-enumerated module-wide lifecycle sites.
+3. **Subagent Discipline:** Fixers run `harness_lsp_diagnostics` and `CI=true pnpm nx run <project>:test`, NEVER touch whole-workspace gates (`verify`, `done`, `gc`, `mutate`, `plan-check`) or git, and return the 1-to-1 `Sub-Bullet Verification Matrix`.
+4. **Orchestrator Acceptance Gate (Mandatory Before Merging/Proceeding):**
+   Verify every assigned `Atomic ID` appears as its own row with `Status: FIXED` AND:
+   - Inspect `git diff` / `read_file` at each `File:Line Changed` to verify the fix actually landed (reject `"already handled"`, `"N/A"`, `"deferred"`, or `"partial"`).
+   - Confirm each row names a distinct, newly added/updated assertion in `Reaching Test File & Exact Test Name` (reject duplicated test names across distinct claims unless verified to test all sub-claims).
+   - For `class-fix` or state-stack/worker items, verify `State-Stack / Twin / Caller Checks Performed` lists concrete module-wide `file:line` inspections and nested/interrupt/listener invariants.
+   - On failure: re-dispatch or resume the subagent to complete all missing/failed rows before proceeding to Phase 5.
 
 ---
 
-## Role of Graph MCP vs. Clef (`clef-flash`)
+### Phase 5 — Metric Sync, Deterministic Gates & Compounding Promotion (Orchestrator Only)
 
-| Tool / Subsystem                            | Phase       | Permitted Use                                                   | Strictly Banned Use                                              |
-| ------------------------------------------- | ----------- | --------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `harness_resolve` & `harness_callers`       | Phase 2     | Inspecting exact types, spans, and caller graphs                | Never use slow shell `grep` or `git blame` for type facts        |
-| `harness_ontology_why` & `impact`           | Phase 2     | Traceability to governing ADRs and EARS requirements            | Never guess whether an architectural choice was intentional      |
-| `harness_structural_search`                 | Phase 2     | AST search across workspace to cluster twins into a `class-fix` | Never fix only a single quoted line when twins exist             |
-| `harness_tests_reaching`                    | Phase 2 & 4 | Verifying reaching test cases and finding test gaps             | Never assume reaching tests exist without checking graph         |
-| `harness_ontology_check`                    | Phase 3     | Advisory cross-layer semantic conflict detection                | Cannot replace deterministic TypeScript compiler                 |
-| `harness_route` (`clef-flash`)              | Phase 4     | Routing to relevant `agent-patterns/*.md` recipe                | **BANNED** for judging review validity or code correctness       |
-| `flash` Fixer Subagents                     | Phase 4     | Scoped edits, local LSP check, package unit tests               | **BANNED** from running `harness verify`, `harness done`, or git |
-| Harness Deterministic Gates (`harness-cli`) | Phase 5     | Monorepo GC, mutation check, verification, stamp creation       | Never run by subagents; orchestrator only                        |
+#### Step 0 — Post-Edit Documentation & Numeric/LOC Sync (Mandatory Before Step 1)
+
+1. Merge all Phase 4 worktree branches into the task worktree first.
+2. List every file modified in Phase 4, search **all** `docs/**`, `libs/*/docs/**`, `apps/*/docs/**`, and `README.md` files (even untouched docs) for references to those paths or LOC/test-count tables, and run fresh `wc -l` (plus targeted vitest counts if cited) on every referenced file.
+3. Update all stale numeric/LOC tables and close all `orchestrator-phase5` (`PHASE_5_STEP_0_WC_L`) rows.
+4. Publish a **`Phase 5 Metric Sync Matrix`**:
+   `| Atomic ID / Doc Ref | Target Code/Test File | Fresh Post-Phase-4 wc -l / Count | Updated Doc File:Line |`
+5. If Phase 4 added/moved exported symbols, run `plan-check` to refresh `.harness/plan-graph-snapshot.json`.
+
+#### Step 1 — Deterministic Verification Sequence
+
+Run in exact order in the root workspace:
+
+```bash
+node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts gc --strict
+node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts ontology check --strict
+node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts mutate --strict
+CI=true node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts verify
+CI=true node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done
+```
+
+If `verify` exits with code `2` (`[ESCALATE: STUCK LOOP DETECTED]`), stop immediately and escalate to the user.
+
+#### Step 2 — Compounding Gate Audit & Adversarial Evasion Matrix (`compounding-effect-learnings`)
+
+For every valid `Critical`, `Important`, or `Suggestion` fixed:
+- Ask: _"Why did our deterministic gates allow this defect class, fail-open fallback, or silent omission to pass?"_
+- Promote durable checks into `tools/oxlint/syntax-bans.js`, `libs/harness/gates/src/**`, `libs/harness/graph/src/**`, or `node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts learn`.
+- Whenever modifying gate files, write unit tests for adversarial evasion vectors (shell wrappers/subshells, multi-aggregate files, self-comparisons, `satisfies`/parenthesized casts, mixed causes) and run `effect-adversarial-reviewer` against the gate implementation.
 
 ---
 
 ## Rationalization Table
 
-| Excuse                                                                       | Reality                                                                                                        | Correct Action                                                                                        |
-| ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| "The reviewer suggested this fix, so I'll just change the code immediately." | Reviewers often hallucinate standard TS patterns (`try/catch`, `switch`) that destroy Effect invariants.       | Adjudicate centrally against `references/evaluation-rubric.md` and Order of Authority before editing. |
-| "I fixed the exact line the reviewer quoted, that's enough."                 | Line-level fixes leave twin bugs untouched across the codebase.                                                | Run `harness_structural_search` to find all identical anti-patterns and execute a `class-fix`.        |
-| "The fixer subagent can run `harness verify` to check its work."             | `harness verify` computes monorepo verify-stamps and mutates Omnigraph branches; subagents will corrupt state. | Subagents run package tests only (`pnpm nx run <proj>:test`). Orchestrator runs `verify`.             |
-| "I'll ask `clef-flash` or `harness_route` whether the reviewer is right."    | LLM routers lack the authoritative context to judge code correctness.                                          | Adjudicate using deterministic Graph MCP facts (`harness_resolve`, `harness_ontology_why`).           |
-| "I'll fix the code first and update the EARS spec / ADR later."              | Editing code before syncing specs creates drift and triggers `stale-doc-reference` gate failures.              | Synchronize specs and ADRs in Phase 3 before dispatching code fixers.                                 |
-| "All tests pass now; no need to analyze why gates missed this."              | Without a compounding audit, future agents will repeat the exact same defect.                                  | Run Compounding Gate Audit (`compounding-effect-learnings`) to strengthen AST rules and test gates.   |
-| "I'll let the fixer subagent decide whether the finding is valid."           | Subagents lack global project context and will eagerly apply invalid suggestions.                              | Orchestrator decides disposition and supplies strict instructions to fixers.                          |
+| Excuse | Reality | Correct Action |
+| :--- | :--- | :--- |
+| "Item #10 has 4 sub-bullets; I'll group them as `F-10`." | Grouping lets fixers patch bullet `a` and drop `b`, `c`, `d`. | Split every sub-bullet into `F-10.1`..`F-10.4` (`F-10.1a/b` across units) with `Source Anchor`. |
+| "It's in `Suggestions`/`Nitpicks` or an unchanged file; skip the ledger." | Critical cleanup/exit-code/logging bugs hide under `Suggestions`. | Inventory ALL claims in Phase 1; exclude only if BOTH observable conditions pass in `Out-of-Scope Rejection Table`. |
+| "A test asserts `return []`, so that fallback is an approved contract." | Tests alongside buggy code enshrine bugs; `E = never` callers are downstream symptoms. | Require verbatim accepted `ADR-NNNN`/`REQ-*` naming error + return value; otherwise `BUGGY_TEST_FLIP` -> fail closed + flip test. |
+| "Spec is silent, so I'll update EARS/RFC in Phase 3 to permit fallback." | Retroactive doc edits erase safety invariants. | Never use `doc-sync-fix` to authorize undocumented fallbacks. |
+| "I updated `Appendix A` line counts in Phase 3." | Phase 4 edits shift line counts immediately. | Ban `wc -l` in Phase 2/3; update all referenced docs in Phase 5 Step 0 after merging. |
+| "I fixed `txStack` in `safeRollback()`, so cleanup is done." | Sibling callers (`runTransaction`, `commit`, `savepoint`) double-pop or leak. | Inspect every mutation/cleanup site across the entire owning module + callers/callees and add nested + interrupt tests. |
+| "The fixer checked off all rows; no need to inspect the diff." | Fixers mark sub-bullets `"Already handled"` or reuse one test name. | Inspect `git diff`/`read_file` for each `File:Line Changed` and verify distinct assertions per `Atomic ID`. |
 
 ---
 
 ## Red Flags — STOP
 
-Stop execution immediately and escalate or re-adjudicate if any of the following occur:
+Stop immediately, revert any uncommitted partial edits made outside adjudicated Phase 4 units (`git checkout -- <files>`), and re-adjudicate if any occur:
 
-- Applying a reviewer suggestion without checking against `repos/effect/LLMS.md` and `agent-patterns/*.md` (e.g. accepting `try/catch`, `async/await`, `switch` on `_tag`, or unredacted secrets).
-- Fixing a single instance of a reported defect without running `harness_structural_search` to identify and fix twins.
-- Allowing a fixer subagent to execute `harness verify`, `harness done`, or `@modernrelay/omnigraph-mcp` write tools.
-- Modifying `type:domain` or `type:infra` before updating touched `type:contract` Schemas, EARS specs, or ADRs in Phase 3.
-- Using `clef-flash` or generic LLM prompts to decide if an architectural critique is valid instead of using Graph MCP facts.
-- Closing a review session without asking _"Why did deterministic gates miss this?"_ when a valid `Critical` or `Important` defect was fixed.
-- Adding `@ts-ignore`, `oxlint-disable`, `it.skip`, or dummy variable reads (`const _ = x`) to silence gate errors.
+- Any multi-bullet finding merged into a single `F-n` / `S-n` row, or any omission from `Phase 1 Checksum`.
+- Declining a fail-open bug via existing code, passing tests, JSDoc/RFC prose, or `E = never` caller types without an explicit accepted `ADR-NNNN` / `REQ-*`.
+- Running `wc -l` for doc sync or editing LOC tables during Phase 2/3, or entering Phase 5 Step 1 without `Phase 5 Metric Sync Matrix`.
+- Accepting a fixer report with missing/`DEFERRED` rows, uninspected diffs, or missing module-wide `txStack`/worker/listener audits.
+- Running `verify`/`done` inside a subagent, using `clef-flash` to adjudicate, skipping twin search, or adding `@ts-ignore` / `oxlint-disable` / `it.skip` / `const _ = x`.
