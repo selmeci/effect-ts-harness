@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import * as path from "node:path"
 import { Effect, Schema } from "effect"
@@ -6,23 +6,11 @@ import { match } from "ts-pattern"
 import { type Project, ts } from "ts-morph"
 export { ts }
 import {
-  type BranchingViolation,
-  EffectFnNode,
-  type HarnessGraph,
-  PackageTag,
-  type PatternDocNode,
-  SchemaDefNode,
-  ServiceLayerNode,
-  ServiceTagNode,
-  TaggedErrorNode,
-  ViolationRule,
+  type BranchingViolation, EffectFnNode, type HarnessGraph, PackageTag, type PatternDocNode,
+  SchemaDefNode, ServiceLayerNode, ServiceTagNode, TaggedErrorNode, ViolationRule,
 } from "../model.js"
 import {
-  computeDynamicPaths,
-  hasExportModifier,
-  resolveContainedRelPath,
-  resolveRepoRoot,
-  sha256Hex,
+  computeDynamicPaths, hasExportModifier, resolveContainedRelPath, resolveRepoRoot, sha256Hex,
 } from "./extractor-types-and-helpers.js"
 
 export interface SourceFileInput {
@@ -54,34 +42,29 @@ export interface TypeScriptProgramSession {
   persistToDisk?: boolean | undefined
   oldProgram?: ts.Program | undefined
   project?: Project | undefined
-  readonly sourceFileCache: Map<
-    string,
-    {
-      readonly packageTag?: PackageTag | undefined
-      readonly contentSha256: string
-      readonly declHash: string
-      readonly sourceFile?: ts.SourceFile | undefined
-      readonly importedSpecs: ReadonlyArray<string>
-    }
-  >
+  readonly sourceFileCache: Map<string, {
+    readonly packageTag?: PackageTag | undefined
+    readonly contentSha256: string
+    readonly declHash: string
+    readonly sourceFile?: ts.SourceFile | undefined
+    readonly importedSpecs: ReadonlyArray<string>
+  }>
   readonly fileFragmentCache: Map<string, FileGraphFragment>
   readonly reverseImportsByFile: Map<string, Set<string>>
   lastReextractedFiles: ReadonlyArray<string>
   signatureCleanCutoffCount: number
   warmHitCount: number
-  lastWorkspaceSnapshot?:
-    | {
-        readonly inputShaMap: ReadonlyMap<string, string>
-        readonly testShaMap: ReadonlyMap<string, string>
-        readonly govShaMap: ReadonlyMap<string, string>
-        readonly patternShaMap: ReadonlyMap<string, string>
-        readonly baseTopologyHash?: string | undefined
-        readonly domainContractInputHash?: string | undefined
-        readonly unassertedStateViolations?: ReadonlyArray<BranchingViolation> | undefined
-        readonly nodeSqliteTestViolations?: ReadonlyArray<BranchingViolation> | undefined
-        readonly graph: HarnessGraph
-      }
-    | undefined
+  lastWorkspaceSnapshot?: {
+    readonly inputShaMap: ReadonlyMap<string, string>
+    readonly testShaMap: ReadonlyMap<string, string>
+    readonly govShaMap: ReadonlyMap<string, string>
+    readonly patternShaMap: ReadonlyMap<string, string>
+    readonly baseTopologyHash?: string | undefined
+    readonly domainContractInputHash?: string | undefined
+    readonly unassertedStateViolations?: ReadonlyArray<BranchingViolation> | undefined
+    readonly nodeSqliteTestViolations?: ReadonlyArray<BranchingViolation> | undefined
+    readonly graph: HarnessGraph
+  } | undefined
 }
 
 export interface TypeExtractorOptions {
@@ -114,23 +97,12 @@ export const emitDeclarationSignatureText = (sourceFile: ts.SourceFile): string 
     fn: ts.FunctionExpression | ts.ArrowFunction | ts.FunctionDeclaration,
     hasOuterExplicitType: boolean = false,
   ): string => {
-    const typeParams = fn.typeParameters !== undefined
-      ? `<${fn.typeParameters.map((tp) => tp.getText(sourceFile)).join(",")}>`
-      : ""
-    const params = fn.parameters
-      .map((p) => {
-        const name = p.name.getText(sourceFile)
-        const opt = p.questionToken !== undefined ? "?" : ""
-        const typeText = p.type !== undefined ? `: ${p.type.getText(sourceFile)}` : ""
-        return `${name}${opt}${typeText}`
-      })
-      .join(",")
-    const retType = fn.type !== undefined ? `: ${fn.type.getText(sourceFile)}` : ""
-    const stubs = fn.body !== undefined ? extractStubSignatures(fn.body) : []
-    const unannotatedBody =
-      fn.type === undefined && !hasOuterExplicitType && stubs.length === 0 && fn.body !== undefined
-        ? [fn.body.getText(sourceFile).replace(/\s+/g, " ").trim()]
-        : []
+    const typeParams = fn.typeParameters ? `<${fn.typeParameters.map((tp) => tp.getText(sourceFile)).join(",")}>` : ""
+    const params = fn.parameters.map((p) => `${p.name.getText(sourceFile)}${p.questionToken ? "?" : ""}${p.type ? `: ${p.type.getText(sourceFile)}` : ""}`).join(",")
+    const retType = fn.type ? `: ${fn.type.getText(sourceFile)}` : ""
+    const stubs = fn.body ? extractStubSignatures(fn.body) : []
+    const unannotatedBody = fn.type === undefined && !hasOuterExplicitType && stubs.length === 0 && fn.body
+      ? [fn.body.getText(sourceFile).replace(/\s+/g, " ").trim()] : []
     const bodySig = [...stubs, ...unannotatedBody]
     return `(${typeParams}(${params})${retType}${bodySig.length > 0 ? `[${bodySig.join(";")}]` : ""})`
   }
@@ -155,24 +127,16 @@ export const emitDeclarationSignatureText = (sourceFile: ts.SourceFile): string 
     }
     if (ts.isClassDeclaration(stmt)) {
       const clsName = stmt.name?.text ?? "AnonymousClass"
-      const heritage = stmt.heritageClauses !== undefined
-        ? stmt.heritageClauses.map((h) => h.getText(sourceFile)).join(" ")
-        : ""
-      const memberSigs: Array<string> = []
-      for (const m of stmt.members) {
+      const heritage = stmt.heritageClauses ? stmt.heritageClauses.map((h) => h.getText(sourceFile)).join(" ") : ""
+      const memberSigs = stmt.members.map((m) => {
         if (ts.isMethodDeclaration(m) || ts.isConstructorDeclaration(m)) {
-          const mName = m.name !== undefined ? m.name.getText(sourceFile) : "constructor"
+          const mName = m.name ? m.name.getText(sourceFile) : "constructor"
           const params = m.parameters.map((p) => p.getText(sourceFile)).join(",")
-          const ret = m.type !== undefined
-            ? `: ${m.type.getText(sourceFile)}`
-            : m.body !== undefined
-              ? ` { ${m.body.getText(sourceFile).replace(/\s+/g, " ").trim()} }`
-              : ""
-          memberSigs.push(`${mName}(${params})${ret}`)
-        } else {
-          memberSigs.push(m.getText(sourceFile).trim())
+          const ret = m.type ? `: ${m.type.getText(sourceFile)}` : m.body ? ` { ${m.body.getText(sourceFile).replace(/\s+/g, " ").trim()} }` : ""
+          return `${mName}(${params})${ret}`
         }
-      }
+        return m.getText(sourceFile).trim()
+      })
       parts.push(`export class ${clsName} ${heritage} { ${memberSigs.join("; ")} }`)
       continue
     }
@@ -182,34 +146,26 @@ export const emitDeclarationSignatureText = (sourceFile: ts.SourceFile): string 
         const hasVarType = decl.type !== undefined
         const explicitType = hasVarType ? `: ${decl.type.getText(sourceFile)}` : ""
         const init = decl.initializer
-        if (init === undefined) {
-          parts.push(`export const ${varName}${explicitType}`)
-          continue
-        }
+        if (!init) { parts.push(`export const ${varName}${explicitType}`); continue }
         if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
-          parts.push(`export const ${varName}${explicitType} = ${formatFnLikeSignature(init, hasVarType)}`)
-          continue
+          parts.push(`export const ${varName}${explicitType} = ${formatFnLikeSignature(init, hasVarType)}`); continue
         }
         if (ts.isCallExpression(init)) {
           const outerCallee = init.expression
           if (ts.isCallExpression(outerCallee)) {
-            const innerCalleeText = outerCallee.expression.getText(sourceFile)
-            if (innerCalleeText === "Effect.fn" || innerCalleeText === "Effect.fnUntraced") {
+            const innerText = outerCallee.expression.getText(sourceFile)
+            if (innerText === "Effect.fn" || innerText === "Effect.fnUntraced") {
               const spanArg = outerCallee.arguments[0]?.getText(sourceFile) ?? ""
               const fnArg = init.arguments[0]
-              if (fnArg !== undefined && (ts.isFunctionExpression(fnArg) || ts.isArrowFunction(fnArg))) {
-                parts.push(
-                  `export const ${varName}${explicitType} = ${innerCalleeText}(${spanArg})${formatFnLikeSignature(fnArg, hasVarType)}`,
-                )
+              if (fnArg && (ts.isFunctionExpression(fnArg) || ts.isArrowFunction(fnArg))) {
+                parts.push(`export const ${varName}${explicitType} = ${innerText}(${spanArg})${formatFnLikeSignature(fnArg, hasVarType)}`)
                 continue
               }
             }
           } else if (outerCallee.getText(sourceFile) === "Effect.fnUntraced") {
             const fnArg = init.arguments[0]
-            if (fnArg !== undefined && (ts.isFunctionExpression(fnArg) || ts.isArrowFunction(fnArg))) {
-              parts.push(
-                `export const ${varName}${explicitType} = Effect.fnUntraced${formatFnLikeSignature(fnArg, hasVarType)}`,
-              )
+            if (fnArg && (ts.isFunctionExpression(fnArg) || ts.isArrowFunction(fnArg))) {
+              parts.push(`export const ${varName}${explicitType} = Effect.fnUntraced${formatFnLikeSignature(fnArg, hasVarType)}`)
               continue
             }
           }
@@ -246,25 +202,14 @@ export const extractModuleSpecifiers = (sourceFile: ts.SourceFile): ReadonlyArra
 const FILE_GRAPH_CACHE_VERSION = "file-graph-v1"
 
 const BranchingViolationSchema = Schema.Struct({
-  rule: ViolationRule,
-  message: Schema.String,
-  file: Schema.String,
-  line: Schema.Int,
-  enclosingSymbol: Schema.String,
-  path: Schema.optional(Schema.Array(Schema.String)),
+  rule: ViolationRule, message: Schema.String, file: Schema.String,
+  line: Schema.Int, enclosingSymbol: Schema.String, path: Schema.optional(Schema.Array(Schema.String)),
 })
 
 const FileGraphFragmentSchema = Schema.Struct({
-  filePath: Schema.String,
-  packageTag: Schema.optional(PackageTag),
-  contentSha256: Schema.String,
-  declHash: Schema.String,
-  importedSpecs: Schema.Array(Schema.String),
-  fns: Schema.Array(EffectFnNode),
-  services: Schema.optional(Schema.Array(ServiceTagNode)),
-  layers: Schema.Array(ServiceLayerNode),
-  errors: Schema.optional(Schema.Array(TaggedErrorNode)),
-  schemas: Schema.optional(Schema.Array(SchemaDefNode)),
+  filePath: Schema.String, packageTag: Schema.optional(PackageTag), contentSha256: Schema.String, declHash: Schema.String,
+  importedSpecs: Schema.Array(Schema.String), fns: Schema.Array(EffectFnNode), services: Schema.optional(Schema.Array(ServiceTagNode)),
+  layers: Schema.Array(ServiceLayerNode), errors: Schema.optional(Schema.Array(TaggedErrorNode)), schemas: Schema.optional(Schema.Array(SchemaDefNode)),
   requiresService: Schema.Array(Schema.Struct({ callerQualname: Schema.String, tagId: Schema.String })),
   failsWith: Schema.Array(Schema.Struct({ callerQualname: Schema.String, errorTag: Schema.String })),
   providesService: Schema.Array(Schema.Struct({ layerQualname: Schema.String, tagId: Schema.String })),
@@ -323,18 +268,25 @@ export const saveFileGraphFragmentsToDisk = (
   if (session.persistToDisk !== true) return
   const cachePath = resolveFileGraphCachePath(repoRoot)
   Effect.runSync(
-    Effect.try({
-      try: () => {
-        mkdirSync(path.dirname(cachePath), { recursive: true })
-        const fragments: Record<string, FileGraphFragment> = {}
-        for (const [relPath, frag] of session.fileFragmentCache.entries()) {
-          fragments[relPath] = frag
-        }
-        const tmpPath = `${cachePath}.${process.pid}.tmp`
-        writeFileSync(tmpPath, JSON.stringify({ version: FILE_GRAPH_CACHE_VERSION, fragments }), "utf8")
-        renameSync(tmpPath, cachePath)
-      },
-      catch: () => undefined,
+    Effect.gen(function* () {
+      mkdirSync(path.dirname(cachePath), { recursive: true })
+      const fragments: Record<string, FileGraphFragment> = {}
+      for (const [relPath, frag] of session.fileFragmentCache.entries()) {
+        fragments[relPath] = frag
+      }
+      const tmpPath = `${cachePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`
+      yield* Effect.acquireUseRelease(
+        Effect.void,
+        () =>
+          Effect.sync(() => {
+            writeFileSync(tmpPath, JSON.stringify({ version: FILE_GRAPH_CACHE_VERSION, fragments }), "utf8")
+            renameSync(tmpPath, cachePath)
+          }),
+        () =>
+          Effect.sync(() => {
+            if (existsSync(tmpPath)) unlinkSync(tmpPath)
+          }),
+      )
     }).pipe(Effect.ignore),
   )
 }
@@ -343,18 +295,22 @@ const warmSessionsByRoot = new Map<string, TypeScriptProgramSession>()
 
 export const createTypeScriptProgramSession = (
   repoRoot: string = process.cwd(),
-): TypeScriptProgramSession => ({
-  repoRoot: path.resolve(repoRoot),
-  sourceFileCache: new Map(),
-  fileFragmentCache: new Map(),
-  reverseImportsByFile: new Map(),
-  lastReextractedFiles: [],
-  signatureCleanCutoffCount: 0,
-  warmHitCount: 0,
-})
+): TypeScriptProgramSession => {
+  const root = path.resolve(repoRoot)
+  const realRepoRoot = existsSync(root) ? realpathSync(root) : root
+  return {
+    repoRoot: realRepoRoot,
+    sourceFileCache: new Map(),
+    fileFragmentCache: new Map(),
+    reverseImportsByFile: new Map(),
+    lastReextractedFiles: [],
+    signatureCleanCutoffCount: 0,
+    warmHitCount: 0,
+  }
+}
 
 export const getOrCreateWarmProgramSession = (repoRoot: string): TypeScriptProgramSession => {
-  const resolved = path.resolve(repoRoot)
+  const resolved = existsSync(repoRoot) ? realpathSync(repoRoot) : path.resolve(repoRoot)
   let session = warmSessionsByRoot.get(resolved)
   if (session === undefined) {
     session = createTypeScriptProgramSession(resolved)
@@ -401,19 +357,14 @@ const walkWorkspaceFiles = (
 
 export const findWorkspaceSrcFiles = (repoRoot: string): ReadonlyArray<string> =>
   walkWorkspaceFiles(repoRoot, (rel, name) =>
-    (name.endsWith(".ts") || name.endsWith(".tsx")) &&
-    !name.endsWith(".d.ts") && !name.endsWith(".config.ts") &&
-    !name.endsWith(".test.ts") && !name.endsWith(".spec.ts") &&
-    (rel.includes("/src/") || rel.includes("/test/fixtures/") || rel.endsWith("alchemy.run.ts")),
-    true,
-  )
+    (name.endsWith(".ts") || name.endsWith(".tsx")) && !name.endsWith(".d.ts") &&
+    !name.endsWith(".config.ts") && !name.endsWith(".test.ts") && !name.endsWith(".spec.ts") &&
+    (rel.includes("/src/") || rel.includes("/test/fixtures/") || rel.endsWith("alchemy.run.ts")), true)
 
 export const findWorkspaceTestFiles = (repoRoot: string): ReadonlyArray<string> =>
   walkWorkspaceFiles(repoRoot, (rel, name) =>
     (name.endsWith(".test.ts") || name.endsWith(".spec.ts")) &&
-    (rel.includes("/test/") || name.endsWith(".spec.ts")),
-    false,
-  )
+    (rel.includes("/test/") || name.endsWith(".spec.ts")), false)
 
 export interface ExtractTypeGraphOptions {
   readonly repoRoot: string
@@ -462,6 +413,46 @@ export const resolveTsLibDir = (root: string): string | undefined => {
   return undefined
 }
 
+const resolveCanonicalPath = (root: string, candidate: string): string | null =>
+  Effect.runSync(
+    Effect.try({
+      try: () => {
+        const abs = path.resolve(root, candidate)
+        if (existsSync(abs)) return realpathSync(abs)
+        let cur = abs
+        const suffixParts: Array<string> = []
+        while (!existsSync(cur)) {
+          const parent = path.dirname(cur)
+          if (parent === cur) break
+          suffixParts.unshift(path.basename(cur))
+          cur = parent
+        }
+        return existsSync(cur) ? path.join(realpathSync(cur), ...suffixParts) : abs
+      },
+      catch: () => null,
+    }),
+  )
+
+const isPathWithinRealRoot = (
+  realRepoRoot: string,
+  canonicalPath: string,
+  allowExternalDeps = false,
+  realTsLibDir?: string,
+  realWorkspaceRoot?: string,
+  realWorkspaceNodeModules?: string,
+): boolean => {
+  const normRoot = realRepoRoot.replace(/\\/g, "/"), normPath = canonicalPath.replace(/\\/g, "/")
+  if (normPath === normRoot || normPath.startsWith(normRoot + "/")) return true
+  if (!allowExternalDeps) return false
+  if (normPath === `${normRoot}/node_modules` || normPath.startsWith(`${normRoot}/node_modules/`)) return true
+  if (realWorkspaceNodeModules !== undefined && (normPath === realWorkspaceNodeModules || normPath.startsWith(`${realWorkspaceNodeModules}/`))) return true
+  if (realWorkspaceRoot !== undefined) {
+    const normWs = realWorkspaceRoot.replace(/\\/g, "/")
+    if (normPath === `${normWs}/package.json` || normPath === `${normWs}/node_modules` || normPath.startsWith(`${normWs}/node_modules/`) || normPath.startsWith(`${normWs}/libs/harness/`)) return true
+  }
+  return realTsLibDir !== undefined && (normPath === realTsLibDir || normPath.startsWith(`${realTsLibDir}/`))
+}
+
 export const createOverlayCompilerHost = (
   options: ts.CompilerOptions,
   overlays: Readonly<Record<string, string>>,
@@ -469,17 +460,35 @@ export const createOverlayCompilerHost = (
   repoRoot: string = process.cwd(),
 ): ts.CompilerHost => {
   const root = resolveRepoRoot(repoRoot)
+  const realRepoRoot = existsSync(root) ? realpathSync(root) : path.resolve(root)
+  const workspaceRoot = resolveRepoRoot(import.meta.dirname)
+  const realWorkspaceRoot = existsSync(workspaceRoot) ? realpathSync(workspaceRoot) : path.resolve(workspaceRoot)
+  const wsNodeModules = path.join(realWorkspaceRoot, "node_modules")
+  const realWorkspaceNodeModules = existsSync(wsNodeModules) ? realpathSync(wsNodeModules).replace(/\\/g, "/") : undefined
+  const tsLibDir = resolveTsLibDir(root)
+  const realTsLibDir = tsLibDir && existsSync(tsLibDir) ? realpathSync(tsLibDir).replace(/\\/g, "/") : tsLibDir?.replace(/\\/g, "/")
+  const isTsLibFile = (fileName: string): boolean =>
+    tsLibDir !== undefined && path.basename(fileName).startsWith("lib.") && existsSync(path.join(tsLibDir, path.basename(fileName)))
+
   const normalizedOverlays = new Map<string, string>(), overlayDirectories = new Set<string>()
   for (const [k, v] of Object.entries(overlays)) {
     const rel = resolveContainedRelPath(root, k)
     if (rel === null) continue
+    const canonical = resolveCanonicalPath(root, k)
+    if (canonical === null || !isPathWithinRealRoot(realRepoRoot, canonical, false)) continue
     const abs = path.resolve(root, rel).replace(/\\/g, "/")
     normalizedOverlays.set(abs, v); normalizedOverlays.set(rel, v)
     let d = path.dirname(abs)
     while (d && d !== path.dirname(d)) { overlayDirectories.add(d); d = path.dirname(d) }
   }
 
+  const isHostPathAllowed = (candidate: string): boolean => {
+    const canonical = resolveCanonicalPath(root, candidate)
+    return canonical !== null && isPathWithinRealRoot(realRepoRoot, canonical, true, realTsLibDir, realWorkspaceRoot, realWorkspaceNodeModules)
+  }
+
   const findOverlay = (fileName: string): string | undefined => {
+    if (!isHostPathAllowed(fileName)) return undefined
     const norm = fileName.replace(/\\/g, "/"), direct = normalizedOverlays.get(norm)
     if (direct !== undefined) return direct
     const rel = resolveContainedRelPath(root, fileName)
@@ -488,25 +497,30 @@ export const createOverlayCompilerHost = (
     return normalizedOverlays.get(abs) ?? normalizedOverlays.get(rel)
   }
 
-  const tsLibDir = resolveTsLibDir(root)
   const baseHost = ts.createCompilerHost(options, true)
-  const isTsLibFile = (fileName: string): boolean =>
-    tsLibDir !== undefined && path.basename(fileName).startsWith("lib.") && existsSync(path.join(tsLibDir, path.basename(fileName)))
   return {
     ...baseHost,
     ...(tsLibDir !== undefined ? { getDefaultLibLocation: () => tsLibDir } : {}),
+    getDirectories: (dirName) => isHostPathAllowed(dirName) ? (baseHost.getDirectories?.(dirName) ?? []).filter((e) => isHostPathAllowed(path.join(dirName, e))) : [],
+    realpath: (p) => (isHostPathAllowed(p) && baseHost.realpath ? baseHost.realpath(p) : p),
     directoryExists: (dirName) => {
+      if (!isHostPathAllowed(dirName)) return false
       const norm = dirName.replace(/\\/g, "/"), abs = path.resolve(root, norm).replace(/\\/g, "/")
       return overlayDirectories.has(abs) || overlayDirectories.has(norm) || (baseHost.directoryExists?.(dirName) ?? false)
     },
-    fileExists: (fileName) => findOverlay(fileName) !== undefined || isTsLibFile(fileName) || baseHost.fileExists(fileName),
+    fileExists: (fileName) => {
+      if (!isHostPathAllowed(fileName)) return false
+      return findOverlay(fileName) !== undefined || isTsLibFile(fileName) || baseHost.fileExists(fileName)
+    },
     readFile: (fileName) => {
+      if (!isHostPathAllowed(fileName)) return undefined
       const ov = findOverlay(fileName)
       if (ov !== undefined) return ov
       if (isTsLibFile(fileName) && tsLibDir !== undefined) return readFileSync(path.join(tsLibDir, path.basename(fileName)), "utf8")
       return baseHost.readFile(fileName)
     },
     getSourceFile: (fileName, languageVersion, onError, shouldCreateNewSourceFile) => {
+      if (!isHostPathAllowed(fileName)) return undefined
       const overlayContent = findOverlay(fileName)
       if (overlayContent !== undefined) return ts.createSourceFile(fileName, overlayContent, languageVersion, true)
       if (isTsLibFile(fileName) && tsLibDir !== undefined) {

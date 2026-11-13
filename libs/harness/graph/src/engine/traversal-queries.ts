@@ -15,6 +15,7 @@ import {
   type RoleName,
   type VitestCaseNode,
 } from "../model.js"
+import { matchesNodeTarget } from "./hypergraph-store.js"
 
 /**
  * Resolves any `EntityNode` or `RelationNode` by `NodeKey`, `qualname`, `spanName`, `tagId`,
@@ -46,42 +47,15 @@ export const resolveNode = (
   }
 
   for (const [, node] of Graph.nodes(harnessGraph.graph)) {
-    const matched = match(node)
-      .with(
-        { _tag: "EffectFn" },
-        (n) => n.spanName === symbolOrSpan || n.qualname === symbolOrSpan || n.qualname.endsWith(`#${symbolOrSpan}`),
-      )
-      .with(
-        { _tag: "ServiceTag" },
-        (n) => n.name === symbolOrSpan || n.tagId === symbolOrSpan || n.tagId.endsWith(`#${symbolOrSpan}`),
-      )
-      .with(
-        { _tag: "ServiceLayer" },
-        (n) => n.qualname === symbolOrSpan || n.qualname.endsWith(`#${symbolOrSpan}`),
-      )
-      .with({ _tag: "TaggedError" }, (n) => n.errorTag === symbolOrSpan)
-      .with({ _tag: "SchemaDef" }, (n) => n.schemaName === symbolOrSpan)
-      .with({ _tag: "VitestCase" }, (n) => n.testId === symbolOrSpan || n.testName === symbolOrSpan)
-      .with(
-        { _tag: "PatternDoc" },
-        (n) => n.slug === symbolOrSpan || n.path === symbolOrSpan || n.path.endsWith(`/${symbolOrSpan}`) || n.path.includes(symbolOrSpan),
-      )
-      .with(
-        { _tag: "AdrDoc" },
-        { _tag: "EarsSpec" },
-        (n) => n.id === symbolOrSpan || n.path === symbolOrSpan || n.path.endsWith(`/${symbolOrSpan}`) || n.path.includes(symbolOrSpan),
-      )
-      .with(
-        { _tag: "EffectSignature" },
-        { _tag: "LayerFlow" },
-        { _tag: "TraceabilityTuple" },
-        { _tag: "HttpEndpointTuple" },
-        { _tag: "MigrationTuple" },
-        (n) => n.relationId === symbolOrSpan,
-      )
-      .exhaustive()
-
-    if (matched) return node
+    if (isEntityNode(node)) {
+      if (matchesNodeTarget(node, symbolOrSpan)) return node
+      if ((node._tag === "EffectFn" || node._tag === "ServiceLayer") && node.qualname.endsWith(`#${symbolOrSpan}`)) return node
+      if (node._tag === "ServiceTag" && node.tagId.endsWith(`#${symbolOrSpan}`)) return node
+      if (node._tag === "PatternDoc" && (node.path.endsWith(`/${symbolOrSpan}`) || node.path.includes(symbolOrSpan))) return node
+      if ((node._tag === "AdrDoc" || node._tag === "EarsSpec") && (node.path.endsWith(`/${symbolOrSpan}`) || node.path.includes(symbolOrSpan))) return node
+    } else if (node.relationId === symbolOrSpan) {
+      return node
+    }
   }
   return undefined
 }

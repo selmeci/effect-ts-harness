@@ -62,7 +62,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ### 2 · Type-Aware Graph and Zero-Entropy GC Gate (`node-sqlite-in-infra`)
 
-**Source (`libs/harness/graph/src/type-extractor.ts`, `policy-check.ts`, & `libs/harness/gates/src/gc-check.ts`):** Structural graph policy check and `GraphGc.decide` enforcement.
+**Source (`libs/harness/graph/src/extractor/ast-policy-extractor.ts`, `libs/harness/graph/src/extractor/test-and-governance-extractor.ts`, `libs/harness/graph/src/type-extractor.ts`, `policy-check.ts`, & `libs/harness/gates/src/gc-check.ts`):** Structural graph policy check and `GraphGc.decide` enforcement.
 
 | ID      | Pattern            | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | Effect Symbol          | Verification |
 | :------ | :----------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------- | :----------- |

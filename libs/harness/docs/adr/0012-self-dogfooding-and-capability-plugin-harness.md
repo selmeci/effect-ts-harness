@@ -23,13 +23,44 @@ enforced_by:
   - libs/harness/gates/src/services/active-mutant-context.ts
   - libs/harness/gates/src/ast-cache.ts
   - libs/harness/gates/src/gc-check.ts
+  - libs/harness/graph/src/index.ts
+  - libs/harness/graph/src/model.ts
   - libs/harness/graph/src/model-rewrite-and-cache.ts
+  - libs/harness/graph/src/omnigraph-sync.ts
+  - libs/harness/graph/src/structural-search.ts
+  - libs/harness/graph/src/pattern-index.ts
+  - libs/harness/graph/src/policy-check.ts
+  - libs/harness/graph/src/archimate-ontology.ts
+  - libs/harness/graph/src/gq-queries.ts
+  - libs/harness/graph/src/cluster-resolver.ts
+  - libs/harness/graph/src/concept-lattice.ts
+  - libs/harness/graph/src/type-extractor.ts
+  - libs/harness/graph/src/datalog-engine.ts
+  - libs/harness/graph/src/graph-rewrite.ts
+  - libs/harness/graph/src/graph-engine.ts
+  - libs/harness/graph/src/graph-projector.ts
+  - libs/harness/graph/src/extractor/extractor-types-and-helpers.ts
   - libs/harness/graph/src/extractor/compiler-session.ts
   - libs/harness/graph/src/extractor/ast-policy-extractor.ts
+  - libs/harness/graph/src/extractor/schema-and-brand-extractor.ts
+  - libs/harness/graph/src/extractor/service-and-layer-extractor.ts
+  - libs/harness/graph/src/extractor/effect-fn-extractor.ts
+  - libs/harness/graph/src/extractor/decider-reducer-extractor.ts
+  - libs/harness/graph/src/extractor/test-and-governance-extractor.ts
+  - libs/harness/graph/src/datalog/datalog-types-and-semiring.ts
+  - libs/harness/graph/src/datalog/stratum-1-and-2-rules.ts
+  - libs/harness/graph/src/datalog/stratum-3-completion-and-holes.ts
   - libs/harness/graph/src/datalog/datalog-session.ts
   - libs/harness/graph/src/rewrite/dpo-algebra-core.ts
+  - libs/harness/graph/src/rewrite/plan-rules.plugin.ts
+  - libs/harness/graph/src/rewrite/repair-rules-arch.plugin.ts
+  - libs/harness/graph/src/rewrite/repair-rules-code.plugin.ts
   - libs/harness/graph/src/engine/hypergraph-store.ts
+  - libs/harness/graph/src/engine/traversal-queries.ts
   - libs/harness/graph/src/engine/snapshot-codec.ts
+  - libs/harness/graph/src/engine/graph-diff-monomorphism.ts
+  - libs/harness/graph/src/projector/skeleton-templates.ts
+  - libs/harness/graph/src/projector/ast-codemods.ts
   - libs/harness/graph/src/projector/shadow-bisection-verifier.ts
   - libs/harness/graph/src/services/ts-compiler-overlay-service.ts
   - apps/harness-cli/src/commands/command-registry.ts
@@ -74,7 +105,7 @@ Leaving this architectural double standard unresolved undermines the credibility
 
 - **Zero Double Standard (Self-Dogfooding):** Harness source files (`libs/harness/*`, `apps/harness-*`) must obey the same bans on `switch` statements, `match().run()`, dummy `yield* Effect.void` statements, and nested `Effect.runSync` inside Effect constructors as domain code.
 - **Cordis-Inspired Three-Role Capability Seams in Effect-TS v4:** Every stateful or I/O capability in the harness (filesystem access, subprocess execution, active mutant state, gate plugin registration, TypeScript compiler sessions, CLI command routing, and MCP tool routing) must be modeled via the Three-Role pattern: a `Context.Service` definition, a `Layer` / `Layer.effect` provider (`Effect.acquireRelease`), and `Effect.fn` consumers declaring the service in `R`.
-- **Modular Plugin Decomposition (`<= 800` Lines):** New and decomposed plugin, service, command, tool, and `@harness/graph` modules (`/plugins/`, `/services/`, `/commands/`, `/tools/`, `libs/harness/graph/src/**/*.ts`) must remain under a deterministic 800-line budget (`file-line-budget-exceeded`) while keeping canonical orchestrator `enforced_by` paths and span names intact for `ADR-0001..0011` and `SPEC-0001..0010`.
+- **Modular Plugin Decomposition (`<= 800` Line Deterministic Ceiling, `<= 250` / `<= 750` RFC-0007 Targets):** New and decomposed plugin, service, mutation, command, tool, gates, and `@harness/graph` modules matched by `isModularPluginPath` (`/plugins/`, `/services/`, `/mutation/`, `/commands/`, `/tools/`, `libs/harness/gates/src/**/*.ts`, `libs/harness/graph/src/**/*.ts`) cannot opt out via `isModularPluginFile: false` and must remain under the deterministic `MaxPluginFileLines = 800` ceiling (`file-line-budget-exceeded`), while RFC-0007 targets `<= 250` lines for the 5 `@harness/graph` orchestrators (`< 500` for sub-extractors, `<= 700` for `compiler-session.ts` and `engine/*`, `<= 750` for other submodules) and keeps canonical `enforced_by` paths and span names intact for `ADR-0001..0011` and `SPEC-0001..0010`.
 
 ## Considered Options
 
@@ -117,7 +148,7 @@ Load gate, CLI, and MCP plugins dynamically at runtime via string-based `import(
 
 | Rule                                                                                                                   | Enforced By                                                                                                                    | Gate / Mechanism                                   | Governed Symbols                                                                                                                                                              |
 | :--------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Pure self-dogfooding AST/source decider (`effect-fn-dummy-void`, `nested-effect-run-sync`, `harness-switch-statement`, `match-run-statement`, `file-line-budget-exceeded` across `libs/harness/gates/src/**`, `libs/harness/graph/src/**`, and modular plugin directories) | `libs/harness/gates/src/plugins/self-dogfooding-contract.ts`, `libs/harness/gates/src/plugins/self-dogfooding-plugin.ts`, `libs/harness/gates/src/gc-check.ts`, `libs/harness/gates/src/plugins/gc/gc-helpers.ts`, `libs/harness/gates/src/plugins/gc/gc-topology-entropy.plugin.ts`, `libs/harness/gates/src/plugins/gc/gc-test-and-decider.plugin.ts`, `libs/harness/gates/src/plugins/gc/gc-governance-docs.plugin.ts`, `libs/harness/gates/src/plugins/gc/gc-package-and-migration.plugin.ts`, `libs/harness/graph/src/extractor/compiler-session.ts`, `libs/harness/graph/src/extractor/ast-policy-extractor.ts`, `libs/harness/graph/src/datalog/datalog-session.ts`, `libs/harness/graph/src/rewrite/dpo-algebra-core.ts`, `libs/harness/graph/src/engine/hypergraph-store.ts`, `libs/harness/graph/src/engine/snapshot-codec.ts`, `libs/harness/graph/src/projector/shadow-bisection-verifier.ts`, `libs/harness/graph/src/model-rewrite-and-cache.ts` | `SelfDogfooding.decide` in `pnpm harness gc --strict` & `pnpm harness verify` | `SelfDogfooding.decide`, `SelfDogfoodingViolationError`                                                                                                                       |
+| Pure self-dogfooding AST/source decider (`effect-fn-dummy-void`, `nested-effect-run-sync`, `harness-switch-statement`, `match-run-statement`, `file-line-budget-exceeded` across `libs/harness/gates/src/**`, `libs/harness/graph/src/**`, and modular plugin directories; `isModularPluginPath` overrides `isModularPluginFile: false`) | `libs/harness/gates/src/plugins/self-dogfooding-contract.ts`, `libs/harness/gates/src/plugins/self-dogfooding-plugin.ts`, `libs/harness/gates/src/gc-check.ts`, `libs/harness/gates/src/plugins/gc/gc-helpers.ts`, `libs/harness/gates/src/plugins/gc/gc-topology-entropy.plugin.ts`, `libs/harness/gates/src/plugins/gc/gc-test-and-decider.plugin.ts`, `libs/harness/gates/src/plugins/gc/gc-governance-docs.plugin.ts`, `libs/harness/gates/src/plugins/gc/gc-package-and-migration.plugin.ts`, and all 40 `@harness/graph` source modules listed in `enforced_by` | `SelfDogfooding.decide` in `pnpm harness gc --strict` & `pnpm harness verify` | `SelfDogfooding.decide`, `SelfDogfoodingViolationError`                                                                                                                       |
 | Removal of `isHarnessInternal` `switch` and `match().run()` exemptions & `effect-fn-dummy-void` in unified AST gate    | `libs/harness/gates/src/ast-cache.ts`, `libs/harness/gates/src/plugins/ast-gate-visitors.ts`, `libs/harness/gates/src/gc-check.ts` | `AstGateCache.decide` & `GraphGc.decide`           | `SelfDogfooding.decide`, `GatePluginRunner.evaluateAll`                                                                                                                       |
 | Capability services and layers for filesystem, subprocess, mutant context, and gate plugin registry                    | `libs/harness/gates/src/services/workspace-fs.ts`, `libs/harness/gates/src/services/subprocess-runner.ts`, `libs/harness/gates/src/services/active-mutant-context.ts`, `libs/harness/gates/src/plugins/gate-plugin-registry.ts`, `libs/harness/gates/src/mutation/mutant-ast-generator.ts`, `libs/harness/gates/src/mutation-check.ts` | `pnpm harness gc --strict` & `pnpm harness verify` | `WorkspaceFs.readAndVerifyFile`, `HarnessSubprocess.execChecked`, `MutationCheck.withActiveMutant`, `GatePluginRunner.evaluateAll`, `WorkspaceFsError`, `HarnessSubprocessError` |
 | Scoped TypeScript compiler overlay service with `Effect.acquireRelease` cleanup                                        | `libs/harness/graph/src/services/ts-compiler-overlay-service.ts`                                                               | `pnpm harness gc --strict` & `pnpm harness verify` | `TsCompilerOverlay.extractGraph`, `TsCompilerOverlayError`                                                                                                                    |

@@ -45,7 +45,7 @@ Existing Graph Context:
 
 - **Reused Contracts / Errors:** `Photo`, `CreatePhotoInput`, `GreetInput`, `PhotoNotFoundError`, `AlbumQuotaExceededError` in [`libs/sample/contract/src/index.ts`](file:///home/roan/WebstormProjects/effect-ts-harness/.worktrees/feat/brand-types/libs/sample/contract/src/index.ts).
 - **Reused Services:** `PhotoRepo`, `AlbumCounterClient` in [`libs/sample/service/src/index.ts`](file:///home/roan/WebstormProjects/effect-ts-harness/.worktrees/feat/brand-types/libs/sample/service/src/index.ts).
-- **New Capabilities Needed:** Two-layer enforcement combining fast AST lint rules in [`tools/oxlint/syntax-bans.js`](file:///home/roan/WebstormProjects/effect-ts-harness/.worktrees/feat/brand-types/tools/oxlint/syntax-bans.js) with TypeScript `TypeChecker` `"~effect/Brand"` inspection (`unbranded-contract-schema` and `unbranded-primitive-boundary`) in [`libs/harness/graph/src/type-extractor.ts`](file:///home/roan/WebstormProjects/effect-ts-harness/.worktrees/feat/brand-types/libs/harness/graph/src/type-extractor.ts) and [`libs/harness/graph/src/policy-check.ts`](file:///home/roan/WebstormProjects/effect-ts-harness/.worktrees/feat/brand-types/libs/harness/graph/src/policy-check.ts), deterministic routing/triage in `@harness/decision`, and full branded domain types across `@harness/sample-*`.
+- **New Capabilities Needed:** Two-layer enforcement combining fast AST lint rules in `tools/oxlint/syntax-bans.js` with TypeScript `TypeChecker` `"~effect/Brand"` inspection (`unbranded-contract-schema` and `unbranded-primitive-boundary`) in `libs/harness/graph/src/extractor/schema-and-brand-extractor.ts` (orchestrated by `libs/harness/graph/src/type-extractor.ts`) and `libs/harness/graph/src/policy-check.ts`, deterministic routing/triage in `@harness/decision`, and full branded domain types across `@harness/sample-*`.
 
 ## Goal
 
@@ -71,7 +71,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ### 2 · Type-Aware Graph Gate (`unbranded-contract-schema` & `unbranded-primitive-boundary`)
 
-**Source (`libs/harness/graph/src/type-extractor.ts` & `policy-check.ts`):** Cross-module TypeScript `TypeChecker` inspection of `"~effect/Brand"`.
+**Source (`libs/harness/graph/src/extractor/schema-and-brand-extractor.ts`, `type-extractor.ts` & `policy-check.ts`):** Cross-module TypeScript `TypeChecker` inspection of `"~effect/Brand"`.
 
 | ID      | Pattern            | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Effect Symbol        | Verification |
 | :------ | :----------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------- | :----------- |

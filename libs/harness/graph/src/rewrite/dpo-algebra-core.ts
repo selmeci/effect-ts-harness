@@ -2,7 +2,7 @@ import { Effect, Option, Schema } from "effect"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
 import {
-  type BranchingViolation, type ConceptLatticeCycleError, type DpoCandidatePriors,
+  type BranchingViolation, type ConceptLatticeCycleError, type DpoCandidatePriors, DpoPriorKey,
   type DpoRuleSpec, type EarsSpecNode, type EffectFnNode, type EffectSignatureRelation,
   type GraphInferenceError, type GraphInferenceResult, type GraphMeasure,
   type GraphPatch, GraphRewriteError, type HarnessEdge, type HarnessGraph, HarnessGraphTypeId,
@@ -478,8 +478,6 @@ export interface IndexedHarnessGraph {
   readonly incidentEdgesByEntityKey: Map<string, Array<PlaysRoleEdge>>
 }
 
-export type IndexedGraphContext = IndexedHarnessGraph
-
 export const indexHarnessGraph = (graph: HarnessGraph): IndexedHarnessGraph => {
   const fnsByKey = new Map<string, EffectFnNode>()
   const servicesByKey = new Map<string, ServiceTagNode>()
@@ -609,7 +607,7 @@ export const scoreDraftPatch = (
 ): SystemOneScoreMillis => {
   const directPrior = candidatePriors?.[formatDpoPriorKey(patch.primaryNodeKey, patch.ruleId)]
   if (directPrior !== undefined) return directPrior
-  const ruleOnlyPrior = candidatePriors?.[patch.ruleId]
+  const ruleOnlyPrior = candidatePriors?.[DpoPriorKey.make(patch.ruleId)]
   if (ruleOnlyPrior !== undefined) return ruleOnlyPrior
 
   const nodeIdx = graph.nodeIndexByKey.get(patch.primaryNodeKey)

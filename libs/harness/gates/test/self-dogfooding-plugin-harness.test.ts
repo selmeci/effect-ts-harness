@@ -336,6 +336,35 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
       }),
   )
 
+  it.effect(
+    "REQ-1.2: passing isModularPluginFile: false for isModularPluginPath targets (type-extractor.ts, compiler-session.ts) over 800 lines still emits file-line-budget-exceeded",
+    () =>
+      Effect.gen(function* () {
+        const overLimitContent = Array.from({ length: 801 }, (_, i) => `export const g${i} = ${i}`).join("\n")
+        const report = yield* SelfDogfooding.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/graph/src/type-extractor.ts"),
+              content: AstSourceContent.make(overLimitContent),
+              isModularPluginFile: false,
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/harness/graph/src/extractor/compiler-session.ts"),
+              content: AstSourceContent.make(overLimitContent),
+              isModularPluginFile: false,
+            },
+          ],
+          maxPluginFileLines: MaxPluginFileLines.make(800),
+          failOnViolation: false,
+        })
+        expect(report.verdict).toBe("violated")
+        expect(report.violations).toHaveLength(2)
+        expect(report.violations.every((v) => v.rule === "file-line-budget-exceeded")).toBe(true)
+        expect(report.violations[0]?.file).toBe("libs/harness/graph/src/type-extractor.ts")
+        expect(report.violations[1]?.file).toBe("libs/harness/graph/src/extractor/compiler-session.ts")
+      }),
+  )
+
   // ---------------------------------------------------------------------------
   // 2 · Capability Services for Filesystem, Subprocess & Mutant Context
   // ---------------------------------------------------------------------------
@@ -1312,6 +1341,10 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           const lineCount = content.split(/\r?\n/).length
           expect(
             lineCount,
+            `${relPath} has ${lineCount} lines, exceeding 800-line ceiling`,
+          ).toBeLessThanOrEqual(800)
+          expect(
+            lineCount,
             `${relPath} has ${lineCount} lines, exceeding 750-line RFC-0007 Step 3 budget`,
           ).toBeLessThanOrEqual(750)
 
@@ -1319,6 +1352,8 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
             expect(lineCount, `${relPath} orchestrator exceeded 250 lines`).toBeLessThanOrEqual(250)
           } else if (relPath === "libs/harness/graph/src/extractor/compiler-session.ts") {
             expect(lineCount).toBeLessThanOrEqual(700)
+          } else if (relPath.startsWith("libs/harness/graph/src/engine/")) {
+            expect(lineCount, `${relPath} engine module exceeded 700 lines`).toBeLessThanOrEqual(700)
           } else if (relPath.startsWith("libs/harness/graph/src/extractor/")) {
             expect(lineCount, `${relPath} sub-extractor must be < 500 lines`).toBeLessThan(500)
           }
@@ -1365,7 +1400,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         }
         expect(cycles, `Circular imports found in @harness/graph: ${cycles.join("; ")}`).toEqual([])
 
-        // Also assert that isModularPluginFile: false cannot bypass a modular @harness/graph path
+        // Verify all live @harness/graph source files pass SelfDogfooding.decide without violations (isModularPluginFile: false bypass protection is covered earlier via REQ-1.2)
         const report = yield* decideSelfDogfooding({
           files: fileInputs,
           maxPluginFileLines: MaxPluginFileLines.make(800),

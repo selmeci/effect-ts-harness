@@ -367,7 +367,22 @@ export const saveGraphSnapshot = (
   const dir = path.dirname(snapshotPath)
   fs.mkdirSync(dir, { recursive: true })
   const serialized = serializeGraphSnapshot(harnessGraph)
-  fs.writeFileSync(snapshotPath, JSON.stringify(serialized, null, 2), "utf8")
+  const payload = JSON.stringify(serialized, null, 2)
+  const tmpPath = `${snapshotPath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`
+  Effect.runSync(
+    Effect.acquireUseRelease(
+      Effect.void,
+      () =>
+        Effect.sync(() => {
+          fs.writeFileSync(tmpPath, payload, "utf8")
+          fs.renameSync(tmpPath, snapshotPath)
+        }),
+      () =>
+        Effect.sync(() => {
+          if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath)
+        }),
+    ),
+  )
 }
 
 export const loadGraphSnapshotEffect = Effect.fn("GraphEngine.loadSnapshot")(function* (

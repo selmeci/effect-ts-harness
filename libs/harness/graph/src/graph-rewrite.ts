@@ -20,10 +20,33 @@ import {
   findPhase3CodeRepairPatches, findPhase4CleanupPatches,
 } from "./rewrite/repair-rules-code.plugin.js"
 
-export * from "./rewrite/dpo-algebra-core.js"
-export * from "./rewrite/plan-rules.plugin.js"
-export * from "./rewrite/repair-rules-arch.plugin.js"
-export * from "./rewrite/repair-rules-code.plugin.js"
+export {
+  STANDARD_DPO_RULES,
+  computeGraphMeasure,
+  isEqualMeasure,
+  isStrictlyDecreasingMeasure,
+  isZeroMeasure,
+  verifyDpoGluingCondition,
+  applyDpoPatchToGraph,
+  scoreDraftPatch,
+  type DecideGraphRewriteOptions,
+  type DraftGraphPatch,
+  type Phase2CandidateBranch,
+  type IndexedHarnessGraph,
+} from "./rewrite/dpo-algebra-core.js"
+
+export { findPhase1PlanPatches } from "./rewrite/plan-rules.plugin.js"
+
+export {
+  findPhase2ArchRepairBranches,
+  evaluateAndSelectArchRepairBranch,
+  type EvaluatedArchBranch,
+} from "./rewrite/repair-rules-arch.plugin.js"
+
+export {
+  findPhase3CodeRepairPatches,
+  findPhase4CleanupPatches,
+} from "./rewrite/repair-rules-code.plugin.js"
 
 /**
  * Pure Double-Pushout (DPO) Algebraic Graph Rewriting Decider (`GraphRewrite.decide`, `R = never`).

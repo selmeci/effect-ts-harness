@@ -1,15 +1,17 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Option, Schema } from "effect"
+import { Cause, Effect, Fiber, Option, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   buildHarnessGraph,
   decideGraphProjection,
   decideGraphRewrite,
   type EntityNode,
+  getOrCreateWarmProgramSession,
   type GraphMeasure,
   type GraphPatch,
   GraphProjector,
   type HarnessGraph,
+  isolateFirstOffendingPatchIndex,
   NodeKey,
   NonNegativeCount,
   type PlaysRoleEdge,
@@ -18,6 +20,7 @@ import {
   type RewritePhase,
   RewriteRuleId,
   RoleName,
+  verifyProjectedSubset,
   verifySubgraphMonomorphism,
 } from "../src/index.js"
 
@@ -883,7 +886,9 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
     const extractedOneFn = buildHarnessGraph({ fns: [fnAlpha] })
     const nonInjectiveRes = verifySubgraphMonomorphism(extractedOneFn, targetTwoFns)
     expect(nonInjectiveRes.isMonomorphic).toBe(false)
-    expect(nonInjectiveRes.missingEntities.length).toBeGreaterThan(0)
+    expect(nonInjectiveRes.missingEntities).toEqual([
+      NodeKey.make("EffectFn:libs/beta/domain/src/index.ts#decide"),
+    ])
 
     // 2. Target graph has RequiresService (EffectSignature relation + requires-service PlaysRoleEdge), extracted graph omits relation
     const targetWithSig = buildHarnessGraph({
@@ -899,9 +904,25 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
     })
     const missingRelRes = verifySubgraphMonomorphism(extractedWithoutSig, targetWithSig)
     expect(missingRelRes.isMonomorphic).toBe(false)
-    expect(
-      missingRelRes.missingRelations.length + missingRelRes.missingRoleEdges.length,
-    ).toBeGreaterThan(0)
+    expect(missingRelRes.missingRelations).toEqual([
+      RelationId.make("EffectSignature:libs/alpha/domain/src/index.ts#decide"),
+    ])
+    expect(missingRelRes.missingRoleEdges).toEqual([
+      {
+        _tag: "PlaysRole",
+        relationId: RelationId.make("EffectSignature:libs/alpha/domain/src/index.ts#decide"),
+        entityKey: NodeKey.make("EffectFn:libs/alpha/domain/src/index.ts#decide"),
+        role: RoleName.make("caller"),
+        archimateRelation: "Triggering",
+      },
+      {
+        _tag: "PlaysRole",
+        relationId: RelationId.make("EffectSignature:libs/alpha/domain/src/index.ts#decide"),
+        entityKey: NodeKey.make("ServiceTag:OrderService"),
+        role: RoleName.make("requires-service"),
+        archimateRelation: "Serving",
+      },
+    ])
 
     // 3. Positive monomorphism when all entities, relations, and role edges are preserved
     const validRes = verifySubgraphMonomorphism(targetWithSig, targetWithSig)
@@ -910,4 +931,194 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
     expect(validRes.missingRelations).toEqual([])
     expect(validRes.missingRoleEdges).toEqual([])
   })
+
+  it.effect(
+    "REQ-4.3: isolateFirstOffendingPatchIndex isolates offending index across multi-probe bisection (F-16)",
+    () =>
+      Effect.gen(function* () {
+        const targetFile = "libs/sample/domain/src/multi-probe.ts"
+        const existingFiles = {
+          [targetFile]: 'import { Effect } from "effect"\nexport const base = 1\n',
+        }
+
+        const patches = [
+          makePatch({
+            ruleId: RewriteRuleId.make("REP-05"),
+            primaryNodeKey: NodeKey.make(`EffectFn:${targetFile}#p0`),
+          }),
+          makePatch({
+            ruleId: RewriteRuleId.make("REP-06"),
+            primaryNodeKey: NodeKey.make(`SchemaDef:p1`),
+          }),
+          makePatch({
+            ruleId: RewriteRuleId.make("REP-07"),
+            primaryNodeKey: NodeKey.make(`EffectFn:${targetFile}#p2`),
+          }),
+          makePatch({
+            ruleId: RewriteRuleId.make("REP-08"),
+            primaryNodeKey: NodeKey.make(`EffectFn:${targetFile}#p3`),
+          }),
+          makePatch({
+            ruleId: RewriteRuleId.make("REP-10"),
+            primaryNodeKey: NodeKey.make(`EffectFn:${targetFile}#p4`),
+          }),
+        ]
+
+        // Test A: Fault at index 1 (REP-06)
+        const outcomeA = yield* isolateFirstOffendingPatchIndex(
+          process.cwd(),
+          emptyGraph,
+          emptyGraph,
+          [],
+          patches,
+          existingFiles,
+          new Set(["REP-06"]),
+        )
+        expect(outcomeA.offendingIndex).toBe(1)
+        expect(outcomeA.probes).toBeGreaterThanOrEqual(2)
+        expect(outcomeA.probes).toBeLessThanOrEqual(Math.ceil(Math.log2(5)) + 1)
+
+        // Test B: Fault at index 3 (REP-08)
+        const outcomeB = yield* isolateFirstOffendingPatchIndex(
+          process.cwd(),
+          emptyGraph,
+          emptyGraph,
+          [],
+          patches,
+          existingFiles,
+          new Set(["REP-08"]),
+        )
+        expect(outcomeB.offendingIndex).toBe(3)
+        expect(outcomeB.probes).toBeGreaterThanOrEqual(2)
+        expect(outcomeB.probes).toBeLessThanOrEqual(Math.ceil(Math.log2(5)) + 1)
+      }),
+  )
+
+  it.effect(
+    "REQ-4.3: verifyProjectedSubset preserves interruption under Fiber.interrupt (F-16)",
+    () =>
+      Effect.gen(function* () {
+        const patch = makePatch({
+          ruleId: RewriteRuleId.make("PLAN-01"),
+          primaryNodeKey: NodeKey.make("SchemaDef:InterruptedTarget"),
+        })
+        const fiber = yield* Effect.forkChild(
+          verifyProjectedSubset(
+            process.cwd(),
+            emptyGraph,
+            emptyGraph,
+            [patch],
+            {},
+          ),
+        )
+        yield* Fiber.interrupt(fiber)
+        const exit = yield* Fiber.await(fiber)
+        match(exit)
+          .with({ _tag: "Failure" }, (f) => {
+            expect(Cause.hasInterrupts(f.cause)).toBe(true)
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("expected interrupted exit")
+          })
+          .exhaustive()
+      }),
+  )
+
+  it.effect(
+    "REQ-4.3: isolateFirstOffendingPatchIndex preserves interruption under Fiber.interrupt (F-16)",
+    () =>
+      Effect.gen(function* () {
+        const patches = [
+          makePatch({
+            ruleId: RewriteRuleId.make("REP-05"),
+            primaryNodeKey: NodeKey.make("EffectFn:libs/sample/domain/src/fn.ts#fn1"),
+          }),
+          makePatch({
+            ruleId: RewriteRuleId.make("REP-06"),
+            primaryNodeKey: NodeKey.make("SchemaDef:sc1"),
+          }),
+        ]
+        const fiber = yield* Effect.forkChild(
+          isolateFirstOffendingPatchIndex(
+            process.cwd(),
+            emptyGraph,
+            emptyGraph,
+            [],
+            patches,
+            undefined,
+            new Set(["REP-06"]),
+          ),
+        )
+        yield* Fiber.interrupt(fiber)
+        const exit = yield* Fiber.await(fiber)
+        match(exit)
+          .with({ _tag: "Failure" }, (f) => {
+            expect(Cause.hasInterrupts(f.cause)).toBe(true)
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("expected interrupted exit")
+          })
+          .exhaustive()
+      }),
+  )
+
+  it.effect(
+    "decideGraphProjection round-trip probe does not mutate or wipe warm session fileFragmentCache",
+    () =>
+      Effect.gen(function* () {
+        const repoRoot = process.cwd()
+        const warmSession = getOrCreateWarmProgramSession(repoRoot)
+        const sentinelKey = "__sentinel__/preserve-cache.ts"
+        const hadSentinelBefore = warmSession.fileFragmentCache.has(sentinelKey)
+        warmSession.fileFragmentCache.set(sentinelKey, {
+          filePath: sentinelKey,
+          packageTag: "domain",
+          contentSha256: "0".repeat(64),
+          declHash: "1".repeat(64),
+          importedSpecs: [],
+          fns: [],
+          services: [],
+          layers: [],
+          errors: [],
+          schemas: [],
+          requiresService: [],
+          failsWith: [],
+          providesService: [],
+          layerRequires: [],
+          branchingViolations: [],
+        })
+        try {
+          const specGraph = buildHarnessGraph({
+            earsSpecs: [
+              {
+                id: "sample:SPEC-0001",
+                title: "Probe isolation spec",
+                status: "proposed",
+                path: "libs/sample/docs/specs/probe.md",
+                enforcedByFiles: ["libs/sample/domain/src/probe.ts"],
+                referencedSpans: ["Sample.probe"],
+                referencedServices: ["ProbeService"],
+                referencedErrors: ["ProbeError"],
+              },
+            ],
+          })
+          const rewrite = yield* decideGraphRewrite(specGraph, "auto-plan")
+          const rec = Option.getOrThrow(rewrite.result.recommendedCandidate)
+          const res = yield* decideGraphProjection({
+            workspaceRoot: repoRoot,
+            initialGraph: specGraph,
+            targetGraph: rewrite.targetGraph,
+            patches: rec.patches,
+            verifyRoundTrip: true,
+          })
+          expect(res.verificationStatus).toBe("Verified")
+          expect(res.operations.length).toBeGreaterThan(0)
+          expect(warmSession.fileFragmentCache.has(sentinelKey)).toBe(true)
+        } finally {
+          if (!hadSentinelBefore) {
+            warmSession.fileFragmentCache.delete(sentinelKey)
+          }
+        }
+      }),
+  )
 })

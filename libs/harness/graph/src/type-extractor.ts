@@ -12,36 +12,39 @@ import {
 } from "./model.js"
 import { loadPatternDocs } from "./pattern-index.js"
 import {
-  type TaggedSchemaInfo, computeDynamicPaths, resolveContainedRelPath, resolveImportSpecToRelFile,
-  resolvePackageTag, resolveRepoRoot, sha256Hex,
+  type TaggedSchemaInfo, computeDynamicPaths, resolveContainedRelPath,
+  resolveImportSpecToRelFile, resolvePackageTag, resolveRepoRoot, sha256Hex,
 } from "./extractor/extractor-types-and-helpers.js"
 import {
   type ExtractTypeGraphOptions, type SourceFileInput, type TypeExtractorOptions,
-  checkTopologySnapshotMatch, checkWorkspaceSnapshotMatch, computeBaseTopologyHash, findWorkspaceSrcFiles,
-  findWorkspaceTestFiles, getOrCreateWarmProgramSession,
+  checkTopologySnapshotMatch, checkWorkspaceSnapshotMatch, computeBaseTopologyHash,
+  findWorkspaceSrcFiles, findWorkspaceTestFiles, getOrCreateWarmProgramSession,
 } from "./extractor/compiler-session.js"
 import { checkPass0ZeroToleranceAst, runAstPolicyChecks } from "./extractor/ast-policy-extractor.js"
 import { checkBrandedDomainTypesAndPrimitiveBoundaries, checkSchemaBooleanStateAndBrandedFields, extractSchemaDefinitions } from "./extractor/schema-and-brand-extractor.js"
-import {
-  autoRegisterReferencedEntities, commitSessionFragments, extractLayers,
-  extractServicesAndErrors, syncSessionCacheAndProject,
-} from "./extractor/service-and-layer-extractor.js"
+import { autoRegisterReferencedEntities, commitSessionFragments, extractLayers, extractServicesAndErrors, syncSessionCacheAndProject } from "./extractor/service-and-layer-extractor.js"
 import { extractEffectFns } from "./extractor/effect-fn-extractor.js"
 import { checkDeciderTracing, checkEventSourcingReducers, checkMissingAggregateIdGuard } from "./extractor/decider-reducer-extractor.js"
-import {
-  assembleTestAndGovernanceGraph, checkNodeSqliteTestViolations,
-  checkUnassertedStateFieldsForInputs, loadWorkspaceGovernanceDocs,
-} from "./extractor/test-and-governance-extractor.js"
+import { assembleTestAndGovernanceGraph, checkNodeSqliteTestViolations, checkUnassertedStateFieldsForInputs, loadWorkspaceGovernanceDocs } from "./extractor/test-and-governance-extractor.js"
 
-export * from "./extractor/extractor-types-and-helpers.js"
-export * from "./extractor/compiler-session.js"
-export * from "./extractor/ast-policy-extractor.js"
-export * from "./extractor/schema-and-brand-extractor.js"
-export * from "./extractor/service-and-layer-extractor.js"
-export * from "./extractor/effect-fn-extractor.js"
-export * from "./extractor/decider-reducer-extractor.js"
-export * from "./extractor/test-and-governance-extractor.js"
+export {
+  computeDynamicPaths, resolveContainedRelPath, resolveImportSpecToRelFile,
+  resolvePackageTag, resolveRepoRoot, stripCommentsAndTestTitles, type TaggedSchemaInfo,
+} from "./extractor/extractor-types-and-helpers.js"
+export {
+  ts, createTypeScriptProgramSession, getOrCreateWarmProgramSession,
+  clearWarmProgramSessions, evaluateOverlayDiagnostics, emitDeclarationSignatureText,
+  computeDeclHash, computeBaseTopologyHash, findWorkspaceSrcFiles, findWorkspaceTestFiles,
+  type SourceFileInput, type TypeScriptProgramSession, type TypeExtractorOptions,
+  type ExtractTypeGraphOptions, type OverlayDiagnosticItem, type FileGraphFragment,
+} from "./extractor/compiler-session.js"
+export { loadWorkspaceGovernanceDocs } from "./extractor/test-and-governance-extractor.js"
+export { extractLayers, extractServicesAndErrors } from "./extractor/service-and-layer-extractor.js"
+export { extractEffectFns } from "./extractor/effect-fn-extractor.js"
 
+/**
+ * Extracts a type-aware HarnessGraph from source files, analyzing Effect.fn and Layer definitions.
+ */
 export const extractTypeAwareGraphFromSource = (
   files: ReadonlyArray<SourceFileInput>,
   options?: TypeExtractorOptions,
@@ -65,7 +68,7 @@ export const extractTypeAwareGraphFromSource = (
 
   const session = options?.session
   const project = session?.project ?? new Project({ compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext, strict: true, esModuleInterop: true, skipLibCheck: true, baseUrl: repoRoot, paths: dynamicPaths } })
-  if (session !== undefined) session.project = project
+  if (session !== undefined) { session.project = project; if (JSON.stringify(project.compilerOptions.get().paths ?? {}) !== JSON.stringify(dynamicPaths)) project.compilerOptions.set({ paths: dynamicPaths }) }
 
   const fileMap = new Map<string, SourceFileInput>(), currentShas = new Map<string, string>(), currentDeclHashes = new Map<string, string>(), currentSpecs = new Map<string, ReadonlyArray<string>>()
   const filesToReextract = new Set<string>(), declChangedFiles = new Set<string>()
@@ -149,11 +152,12 @@ export const extractTypeAwareGraphFromSource = (
   }
 }
 
+/**
+ * Extracts a workspace-wide type-aware HarnessGraph with disk snapshot caching.
+ */
 export const extractWorkspaceTypeAwareGraph = (
-  repoRoot: string,
-  options?: Omit<ExtractTypeGraphOptions, "repoRoot">,
-): Effect.Effect<HarnessGraph> =>
-  Effect.sync(() => {
+  repoRoot: string, options?: Omit<ExtractTypeGraphOptions, "repoRoot">,
+): Effect.Effect<HarnessGraph> => Effect.sync(() => {
     const root = resolveRepoRoot(repoRoot), session = options?.session ?? getOrCreateWarmProgramSession(root)
     if (options?.previousProgram !== undefined) session.oldProgram = options.previousProgram
 
@@ -206,13 +210,7 @@ export const extractWorkspaceTypeAwareGraph = (
         .with({ _tag: "EffectFn" }, (n) => { effectFns.push(n) })
         .with({ _tag: "ServiceTag" }, (n) => { serviceTags.push(n) })
         .with({ _tag: "TaggedError" }, (n) => { taggedErrors.push(n) })
-        .with(
-          { _tag: "ServiceLayer" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" },
-          { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" },
-          { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" },
-          { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
-          () => undefined,
-        )
+        .with({ _tag: "ServiceLayer" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" }, () => undefined)
         .exhaustive()
     }
 
@@ -241,8 +239,10 @@ export const extractWorkspaceTypeAwareGraph = (
     return resultGraph
   })
 
-export const extractTypeGraph = Effect.fn("TypeExtractor.extractWorkspace")(function* (
-  options: ExtractTypeGraphOptions,
-): Effect.fn.Return<HarnessGraph> {
-  return yield* extractWorkspaceTypeAwareGraph(options.repoRoot, options)
-})
+/**
+ * TypeExtractor.extractWorkspace effectful entrypoint.
+ */
+export const extractTypeGraph = Effect.fn("TypeExtractor.extractWorkspace")(
+  function* (options: ExtractTypeGraphOptions): Effect.fn.Return<HarnessGraph> {
+    return yield* extractWorkspaceTypeAwareGraph(options.repoRoot, options)
+  })

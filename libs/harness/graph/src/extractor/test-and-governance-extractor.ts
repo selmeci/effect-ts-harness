@@ -1,6 +1,5 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { Schema } from "effect"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
 import { ts } from "ts-morph"
@@ -23,17 +22,11 @@ import {
   getNodeKey,
 } from "../model.js"
 import {
+  decodePackageJson,
   resolveRepoRoot,
   stripCommentsAndTestTitles,
 } from "./extractor-types-and-helpers.js"
 import type { SourceFileInput } from "./compiler-session.js"
-
-
-const PackageJsonSchema = Schema.Struct({
-  name: Schema.optional(Schema.String),
-  nx: Schema.optional(Schema.Struct({ tags: Schema.optional(Schema.Array(Schema.String)) })),
-})
-const decodePackageJson = Schema.decodeOption(Schema.fromJsonString(PackageJsonSchema))
 
 const packageJsonCache = new Map<string, { name?: string | undefined; dir: string }>()
 

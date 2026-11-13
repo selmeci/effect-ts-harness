@@ -11,6 +11,7 @@ import {
 } from "../model.js"
 import {
   type SourceFileInput,
+  type TypeScriptProgramSession,
   createTypeScriptProgramSession,
   evaluateOverlayDiagnostics,
   extractTypeAwareGraphFromSource,
@@ -40,6 +41,7 @@ export const verifyProjectedSubset = (
   overlayMap: Readonly<Record<string, string>>,
   existingFiles?: Readonly<Record<string, string>>,
   forceFailRuleIds?: ReadonlySet<string>,
+  session?: TypeScriptProgramSession,
 ): Effect.Effect<BatchVerificationOutcome, never, never> =>
   Effect.gen(function* () {
     if (subsetPatches.length === 0) {
@@ -61,11 +63,14 @@ export const verifyProjectedSubset = (
       ...overlayMap,
     }
 
-    const session = createTypeScriptProgramSession(repoRoot)
+    const activeSession = session ?? createTypeScriptProgramSession(repoRoot)
     const compilerDiagExit = yield* Effect.try({
-      try: () => evaluateOverlayDiagnostics(repoRoot, combinedOverlays, session),
+      try: () => evaluateOverlayDiagnostics(repoRoot, combinedOverlays, activeSession),
       catch: (err) => (err instanceof Error ? err.message : String(err)),
     }).pipe(Effect.exit)
+    if (compilerDiagExit._tag === "Failure" && Cause.hasInterrupts(compilerDiagExit.cause)) {
+      return yield* Effect.interrupt
+    }
     const compilerDiags = match(compilerDiagExit)
       .with({ _tag: "Success" }, (s) => s.value)
       .with({ _tag: "Failure" }, () => [])
@@ -101,12 +106,12 @@ export const verifyProjectedSubset = (
         extractTypeAwareGraphFromSource(sourceInputs, {
           repoRoot,
           overlays: combinedOverlays,
-          session: undefined,
+          session: activeSession,
         }),
       catch: (err) => (err instanceof Error ? err.message : String(err)),
     }).pipe(Effect.exit)
     if (extractExit._tag === "Failure") {
-      if (Cause.hasInterruptsOnly(extractExit.cause)) {
+      if (Cause.hasInterrupts(extractExit.cause)) {
         return yield* Effect.interrupt
       }
       return {
@@ -130,7 +135,7 @@ export const verifyProjectedSubset = (
     let currentGraph = effectiveBase
     for (const patch of subsetPatches) {
       const stepped = yield* Effect.exit(applyDpoPatchToGraph(currentGraph, patch))
-      if (stepped._tag === "Failure" && Cause.hasInterruptsOnly(stepped.cause)) {
+      if (stepped._tag === "Failure" && Cause.hasInterrupts(stepped.cause)) {
         return yield* Effect.interrupt
       }
       const replayError = match(stepped)
@@ -197,7 +202,7 @@ export const verifyProjectedSubset = (
     })
 
     const infExit = yield* Effect.exit(decideGraphInference(extractedOverlayGraph))
-    if (infExit._tag === "Failure" && Cause.hasInterruptsOnly(infExit.cause)) {
+    if (infExit._tag === "Failure" && Cause.hasInterrupts(infExit.cause)) {
       return yield* Effect.interrupt
     }
     const infDiag = match(infExit)
@@ -266,12 +271,14 @@ export const isolateFirstOffendingPatchIndex = (
   phasePatches: ReadonlyArray<GraphPatch>,
   existingFiles?: Readonly<Record<string, string>>,
   forceFailRuleIds?: ReadonlySet<string>,
+  session?: TypeScriptProgramSession,
 ): Effect.Effect<
   { readonly offendingIndex: number; readonly probes: number },
   GraphProjectorError,
   never
 > =>
   Effect.gen(function* () {
+    const activeSession = session ?? createTypeScriptProgramSession(repoRoot)
     let low = 0
     let high = phasePatches.length - 1
     let probes = 0
@@ -295,6 +302,7 @@ export const isolateFirstOffendingPatchIndex = (
         projected.overlayMap,
         existingFiles,
         forceFailRuleIds,
+        activeSession,
       )
       if (!check.isClean) {
         high = mid

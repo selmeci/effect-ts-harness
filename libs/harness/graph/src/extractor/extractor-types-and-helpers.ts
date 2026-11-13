@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { Schema } from "effect"
+import { Effect, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   Node,
@@ -12,7 +12,7 @@ import {
   type TypeNode,
   type UnionTypeNode,
 } from "ts-morph"
-import { PackageTag } from "../model.js"
+import { type BranchingViolation, PackageTag } from "../model.js"
 
 export interface TypeExtractorViolation {
   readonly rule:
@@ -51,12 +51,31 @@ export const hasExportModifier = (node: ts.Node): boolean => {
   return mods !== undefined && mods.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)
 }
 
-const PackageJsonSchema = Schema.Struct({
+export const addViolation = (
+  violations: Array<BranchingViolation>,
+  rule: BranchingViolation["rule"],
+  message: string,
+  file: string,
+  line: number,
+  enclosingSymbol: string,
+  path?: ReadonlyArray<string>,
+): void => {
+  violations.push({
+    rule,
+    message,
+    file,
+    line,
+    enclosingSymbol,
+    ...(path !== undefined ? { path } : {}),
+  })
+}
+
+export const PackageJsonSchema = Schema.Struct({
   name: Schema.optional(Schema.String),
   nx: Schema.optional(Schema.Struct({ tags: Schema.optional(Schema.Array(Schema.String)) })),
 })
 
-const decodePackageJson = Schema.decodeOption(Schema.fromJsonString(PackageJsonSchema))
+export const decodePackageJson = Schema.decodeOption(Schema.fromJsonString(PackageJsonSchema))
 
 export const resolvePackageTag = (repoRoot: string, relFilePath: string): PackageTag => {
   if (relFilePath.startsWith("apps/") || relFilePath.includes("/apps/")) return "app"
@@ -440,22 +459,26 @@ export const resolveContainedRelPath = (repoRoot: string, rawPath: string): stri
   const abs = path.isAbsolute(trimmed) ? path.resolve(trimmed) : path.resolve(logicalRoot, trimmed)
   const rel = path.relative(logicalRoot, abs).replace(/\\/g, "/")
   if (rel.length === 0 || rel === "." || rel.startsWith("..") || path.isAbsolute(rel)) return null
-  let checkDir = abs
-  while (!fs.existsSync(checkDir) && checkDir !== logicalRoot) {
-    const parent = path.dirname(checkDir)
-    if (parent === checkDir) break
-    checkDir = parent
-  }
-  if (fs.existsSync(repoRoot) && fs.existsSync(checkDir)) {
-    const checkRel = path.relative(logicalRoot, checkDir).replace(/\\/g, "/")
-    if (!checkRel.startsWith("..") && !path.isAbsolute(checkRel)) {
-      const realRoot = fs.realpathSync.native(logicalRoot)
-      const realAncestor = fs.realpathSync.native(checkDir)
-      const realRel = path.relative(realRoot, realAncestor).replace(/\\/g, "/")
-      if (realRel.startsWith("..") || path.isAbsolute(realRel)) return null
-    }
-  }
-  return rel
+  return Effect.runSync(
+    Effect.try({
+      try: () => {
+        if (fs.existsSync(logicalRoot)) {
+          const realRoot = fs.realpathSync.native(logicalRoot)
+          let probe = logicalRoot
+          for (const seg of rel.split("/")) {
+            probe = path.join(probe, seg)
+            const st = fs.lstatSync(probe, { throwIfNoEntry: false })
+            if (st === undefined) break
+            if (st.isSymbolicLink() && !fs.existsSync(probe)) return null
+            const realRel = path.relative(realRoot, fs.realpathSync.native(probe)).replace(/\\/g, "/")
+            if (realRel.startsWith("..") || path.isAbsolute(realRel)) return null
+          }
+        }
+        return rel
+      },
+      catch: () => null,
+    }),
+  )
 }
 
 

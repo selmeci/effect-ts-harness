@@ -275,12 +275,12 @@ export const DpoPriorKey = Schema.NonEmptyString.pipe(Schema.brand("DpoPriorKey"
 export type DpoPriorKey = typeof DpoPriorKey.Type
 
 export const formatDpoPriorKey = (
-  primaryNodeKey: NodeKey | string,
-  ruleId: RewriteRuleId | string,
+  primaryNodeKey: NodeKey,
+  ruleId: RewriteRuleId,
 ): DpoPriorKey => DpoPriorKey.make(`${primaryNodeKey}::${String(ruleId).replace(/::/g, ":")}`)
 
 export const parseDpoPriorKey = (
-  priorKey: DpoPriorKey | string,
+  priorKey: DpoPriorKey,
 ): { readonly primaryNodeKey: NodeKey; readonly ruleId: RewriteRuleId } | undefined => {
   const raw = String(priorKey)
   const sepIdx = raw.lastIndexOf("::")
@@ -322,7 +322,7 @@ export const SystemOneScoreMillis = Schema.Int.pipe(
 )
 export type SystemOneScoreMillis = typeof SystemOneScoreMillis.Type
 
-export const DpoCandidatePriors = Schema.Record(Schema.String, SystemOneScoreMillis)
+export const DpoCandidatePriors = Schema.Record(DpoPriorKey, SystemOneScoreMillis)
 export type DpoCandidatePriors = typeof DpoCandidatePriors.Type
 
 export const CandidateRank = Schema.Int.pipe(

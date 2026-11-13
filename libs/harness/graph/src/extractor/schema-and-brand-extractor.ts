@@ -12,6 +12,7 @@ import {
 } from "../model.js"
 import {
   type TaggedSchemaInfo,
+  addViolation,
   collectUnbrandedObjectProperties,
   containsInlineObjectTypeAst,
   findEnclosingSymbolName,
@@ -22,8 +23,6 @@ import {
 
 const LIFECYCLE_FLAG_REGEX =
   /^(is[A-Z]\w*|has[A-Z]\w*|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|publish|published|expired)$/
-
-const addViolation = (v: Array<BranchingViolation>, r: BranchingViolation["rule"], m: string, f: string, l: number, s: string): void => { v.push({ rule: r, message: m, file: f, line: l, enclosingSymbol: s }) }
 
 const getObjectPropNames = (obj: Node | undefined): ReadonlyArray<string> =>
   obj && Node.isObjectLiteralExpression(obj)

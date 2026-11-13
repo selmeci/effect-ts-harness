@@ -1,9 +1,17 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Exit, Graph, Option, Schema } from "effect"
+import { match } from "ts-pattern"
 import {
+  ConceptId,
+  ConceptLatticeCycleError,
+  type DpoCandidatePriors,
+  DpoPriorKey,
+  formatDpoPriorKey,
+  GraphInferenceError,
   GraphMeasure,
   NodeKey,
   NonNegativeCount,
+  parseDpoPriorKey,
   RelationId,
   RewriteRuleId,
   RoleName,
@@ -18,6 +26,7 @@ import {
   isZeroMeasure,
   verifyDpoGluingCondition,
 } from "../src/index.js"
+import { mapInferenceErrorToRewriteError } from "../src/rewrite/dpo-algebra-core.js"
 
 const MeasureTupleSchema = Schema.Tuple([
   Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 0, maximum: 20 }))),
@@ -165,14 +174,22 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
             insertedRoleEdges: [],
           }),
         )
-        expect(Exit.isFailure(illegalRelationDeleteExit)).toBe(true)
-        if (Exit.isFailure(illegalRelationDeleteExit)) {
-          const failure = Exit.findErrorOption(illegalRelationDeleteExit)
-          expect(failure._tag).toBe("Some")
-          if (failure._tag === "Some") {
-            expect(failure.value.reason).toBe("bipartite-relation-deleted")
-          }
-        }
+        match(illegalRelationDeleteExit)
+          .with({ _tag: "Failure" }, () => {
+            const failure = Exit.findErrorOption(illegalRelationDeleteExit)
+            match(failure)
+              .with({ _tag: "Some" }, (someErr) => {
+                expect(someErr.value.reason).toBe("bipartite-relation-deleted")
+              })
+              .with({ _tag: "None" }, () => {
+                expect.unreachable("expected error in cause")
+              })
+              .exhaustive()
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("expected gluing condition to fail")
+          })
+          .exhaustive()
 
         // 3. Attempting to delete an entity node while leaving an incident PlaysRoleEdge fails with dangling-edge
         const illegalEntityDeleteExit = yield* Effect.exit(
@@ -191,14 +208,22 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
             insertedRoleEdges: [],
           }),
         )
-        expect(Exit.isFailure(illegalEntityDeleteExit)).toBe(true)
-        if (Exit.isFailure(illegalEntityDeleteExit)) {
-          const failure = Exit.findErrorOption(illegalEntityDeleteExit)
-          expect(failure._tag).toBe("Some")
-          if (failure._tag === "Some") {
-            expect(failure.value.reason).toBe("dangling-edge")
-          }
-        }
+        match(illegalEntityDeleteExit)
+          .with({ _tag: "Failure" }, () => {
+            const failure = Exit.findErrorOption(illegalEntityDeleteExit)
+            match(failure)
+              .with({ _tag: "Some" }, (someErr) => {
+                expect(someErr.value.reason).toBe("dangling-edge")
+              })
+              .with({ _tag: "None" }, () => {
+                expect.unreachable("expected error in cause")
+              })
+              .exhaustive()
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("expected gluing condition to fail")
+          })
+          .exhaustive()
 
         // 4. Attempting to delete a PlaysRoleEdge without keeping its source relation in K fails with bipartite-relation-deleted
         const missingFromKExit = yield* Effect.exit(
@@ -226,15 +251,23 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
             insertedRoleEdges: [],
           }),
         )
-        expect(Exit.isFailure(missingFromKExit)).toBe(true)
-        if (Exit.isFailure(missingFromKExit)) {
-          const failure = Exit.findErrorOption(missingFromKExit)
-          expect(failure._tag).toBe("Some")
-          if (failure._tag === "Some") {
-            expect(failure.value._tag).toBe("GraphRewriteError")
-            expect(failure.value.reason).toBe("bipartite-relation-deleted")
-          }
-        }
+        match(missingFromKExit)
+          .with({ _tag: "Failure" }, () => {
+            const failure = Exit.findErrorOption(missingFromKExit)
+            match(failure)
+              .with({ _tag: "Some" }, (someErr) => {
+                expect(someErr.value._tag).toBe("GraphRewriteError")
+                expect(someErr.value.reason).toBe("bipartite-relation-deleted")
+              })
+              .with({ _tag: "None" }, () => {
+                expect.unreachable("expected error in cause")
+              })
+              .exhaustive()
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("expected gluing condition to fail")
+          })
+          .exhaustive()
       }),
   )
 
@@ -485,26 +518,68 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
         const alt0 = defaultOutcome.result.alternativeCandidates[0]!
         expect(alt0.patches[0]?.ruleId).toBe(RewriteRuleId.make("REP-04b"))
 
-        // Both candidates achieve the exact same afterMeasure in N^6!
+        // Both candidates achieve the exact same afterMeasure in N^6 and strictly decrease Lyapunov measure!
         expect(
           isEqualMeasure(defaultRec.patches[0]!.afterMeasure, alt0.patches[0]!.afterMeasure),
         ).toBe(true)
+        expect(
+          isStrictlyDecreasingMeasure(
+            defaultRec.patches[0]!.beforeMeasure,
+            defaultRec.patches[0]!.afterMeasure,
+          ),
+        ).toBe(true)
+        expect(
+          isStrictlyDecreasingMeasure(
+            alt0.patches[0]!.beforeMeasure,
+            alt0.patches[0]!.afterMeasure,
+          ),
+        ).toBe(true)
 
         // 2. With System One DpoCandidatePriors favoring REP-04b (950 vs 300), REP-04b becomes recommendedCandidate!
-        const callerKey = "EffectFn:libs/sample/domain/src/order.ts#caller"
-        const customPriorsOutcome = yield* decideGraphRewrite(graph, "auto-repair", {
-          [`${callerKey}::REP-04a`]: SystemOneScoreMillis.make(300),
-          [`${callerKey}::REP-04b`]: SystemOneScoreMillis.make(950),
-        })
+        const callerKey = NodeKey.make("EffectFn:libs/sample/domain/src/order.ts#caller")
+        const rep04aRule = RewriteRuleId.make("REP-04a")
+        const rep04bRule = RewriteRuleId.make("REP-04b")
+        const priorKeyA = formatDpoPriorKey(callerKey, rep04aRule)
+        const priorKeyB = formatDpoPriorKey(callerKey, rep04bRule)
+
+        const customPriors: DpoCandidatePriors = {
+          [priorKeyA]: SystemOneScoreMillis.make(300),
+          [priorKeyB]: SystemOneScoreMillis.make(950),
+        }
+        const customPriorsOutcome = yield* decideGraphRewrite(graph, "auto-repair", customPriors)
 
         const customRec = Option.getOrThrow(customPriorsOutcome.result.recommendedCandidate)
-        expect(customRec.patches[0]?.ruleId).toBe(RewriteRuleId.make("REP-04b"))
+        expect(customRec.patches[0]?.ruleId).toBe(rep04bRule)
         expect(customRec.systemOneTieBreaker).toBe(SystemOneScoreMillis.make(950))
         expect(customPriorsOutcome.result.alternativeCandidates[0]?.patches[0]?.ruleId).toBe(
-          RewriteRuleId.make("REP-04a"),
+          rep04aRule,
         )
+
+        // 3. Fallback rule-only prior tie-breaking without primaryNodeKey specification
+        const ruleOnlyPriors: DpoCandidatePriors = {
+          [DpoPriorKey.make("REP-04b")]: SystemOneScoreMillis.make(900),
+        }
+        const ruleOnlyOutcome = yield* decideGraphRewrite(graph, "auto-repair", ruleOnlyPriors)
+        const ruleOnlyRec = Option.getOrThrow(ruleOnlyOutcome.result.recommendedCandidate)
+        expect(ruleOnlyRec.patches[0]?.ruleId).toBe(rep04bRule)
+        expect(ruleOnlyRec.systemOneTieBreaker).toBe(SystemOneScoreMillis.make(900))
       }),
   )
+
+  it("formatDpoPriorKey and parseDpoPriorKey roundtrip cleanly with branded types (F-11)", () => {
+    const primaryNode = NodeKey.make("EffectFn:libs/sample/domain/src/order.ts#checkout")
+    const rule = RewriteRuleId.make("REP-04b")
+    const priorKey = formatDpoPriorKey(primaryNode, rule)
+
+    expect(priorKey).toBe(
+      DpoPriorKey.make("EffectFn:libs/sample/domain/src/order.ts#checkout::REP-04b"),
+    )
+
+    const parsed = parseDpoPriorKey(priorKey)
+    expect(parsed).toBeDefined()
+    expect(parsed?.primaryNodeKey).toBe(primaryNode)
+    expect(parsed?.ruleId).toBe(rule)
+  })
 
   it.effect(
     "4-Phase Stratification & NAC_spec: REP-11 prunes truly orphan ServiceTags in Phase 4 (CLEANUP) but never prunes services referenced by an EarsSpec, AdrDoc, or active stub",
@@ -939,6 +1014,12 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
         expect(phases).toContain("PLAN")
         expect(phases).toContain("CLEANUP")
         expect(rec.isPolicyClean).toBe(true)
+        for (const patch of rec.patches) {
+          expect(
+            isStrictlyDecreasingMeasure(patch.beforeMeasure, patch.afterMeasure) ||
+              isEqualMeasure(patch.beforeMeasure, patch.afterMeasure),
+          ).toBe(true)
+        }
         expect(
           fullOutcome.targetGraph.nodeIndexByKey.has(NodeKey.make("ServiceTag:UnusedInfraService")),
         ).toBe(false)
@@ -977,4 +1058,92 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
         }
       }),
   )
+
+  it.effect(
+    "verifyDpoGluingCondition rejects non-bipartite insertedRoleEdges with GraphRewriteError(invalid-graph)",
+    () =>
+      Effect.gen(function* () {
+        const g = buildHarnessGraph({
+          services: [
+            {
+              tagId: "SqlClient",
+              name: "SqlClient",
+              packageTag: "service",
+              file: "libs/sample/domain/src/sql.ts",
+            },
+          ],
+        })
+        const exit = yield* Effect.exit(
+          verifyDpoGluingCondition(g, {
+            ruleId: RewriteRuleId.make("REP-05"),
+            phase: "REPAIR_ARCH",
+            ruleCategory: "auto-repair",
+            primaryNodeKey: NodeKey.make("EffectSignature:bad"),
+            description: "Intentionally inverted endpoints for bipartite invariant test.",
+            preservedInterfaceKeys: [],
+            deletedEntityKeys: [],
+            deletedRelationIds: [],
+            insertedEntityNodes: [],
+            insertedRelationNodes: [],
+            deletedRoleEdges: [],
+            insertedRoleEdges: [
+              {
+                _tag: "PlaysRole",
+                role: RoleName.make("requires-service"),
+                relationId: RelationId.make("ServiceTag:SqlClient"),
+                entityKey: NodeKey.make("EffectSignature:bad"),
+              },
+            ],
+          }),
+        )
+        match(exit)
+          .with({ _tag: "Failure" }, (f) => {
+            expect(f.cause.reasons[0]).toMatchObject({
+              _tag: "Fail",
+              error: {
+                _tag: "GraphRewriteError",
+                reason: "invalid-graph",
+              },
+            })
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("expected invalid-graph failure")
+          })
+          .exhaustive()
+      }),
+  )
+
+  it("mapInferenceErrorToRewriteError preserves concept-lattice-cycle, invalid-graph, and inference-failed reasons", () => {
+    const cycleErr = mapInferenceErrorToRewriteError(
+      new ConceptLatticeCycleError({
+        reason: "cycle",
+        cycle: [ConceptId.make("SvcA"), ConceptId.make("SvcB"), ConceptId.make("SvcA")],
+        message: "cycle detected",
+      }),
+      RewriteRuleId.make("REP-01"),
+      NodeKey.make("EffectFn:a"),
+    )
+    expect(cycleErr._tag).toBe("GraphRewriteError")
+    expect(cycleErr.reason).toBe("concept-lattice-cycle")
+
+    const invalidErr = mapInferenceErrorToRewriteError(
+      new GraphInferenceError({
+        reason: "invalid-graph",
+        message: "bad graph",
+      }),
+      RewriteRuleId.make("REP-01"),
+      NodeKey.make("EffectFn:a"),
+    )
+    expect(invalidErr._tag).toBe("GraphRewriteError")
+    expect(invalidErr.reason).toBe("invalid-graph")
+
+    const failedErr = mapInferenceErrorToRewriteError(
+      new GraphInferenceError({
+        reason: "d2ts-execution-failed",
+        message: "engine error",
+      }),
+    )
+    expect(failedErr._tag).toBe("GraphRewriteError")
+    expect(failedErr.reason).toBe("inference-failed")
+  })
 })

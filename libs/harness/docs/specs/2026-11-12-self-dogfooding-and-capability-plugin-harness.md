@@ -27,13 +27,44 @@ enforced_by:
   - libs/harness/gates/src/services/active-mutant-context.ts
   - libs/harness/gates/src/ast-cache.ts
   - libs/harness/gates/src/gc-check.ts
+  - libs/harness/graph/src/index.ts
+  - libs/harness/graph/src/model.ts
   - libs/harness/graph/src/model-rewrite-and-cache.ts
+  - libs/harness/graph/src/omnigraph-sync.ts
+  - libs/harness/graph/src/structural-search.ts
+  - libs/harness/graph/src/pattern-index.ts
+  - libs/harness/graph/src/policy-check.ts
+  - libs/harness/graph/src/archimate-ontology.ts
+  - libs/harness/graph/src/gq-queries.ts
+  - libs/harness/graph/src/cluster-resolver.ts
+  - libs/harness/graph/src/concept-lattice.ts
+  - libs/harness/graph/src/type-extractor.ts
+  - libs/harness/graph/src/datalog-engine.ts
+  - libs/harness/graph/src/graph-rewrite.ts
+  - libs/harness/graph/src/graph-engine.ts
+  - libs/harness/graph/src/graph-projector.ts
+  - libs/harness/graph/src/extractor/extractor-types-and-helpers.ts
   - libs/harness/graph/src/extractor/compiler-session.ts
   - libs/harness/graph/src/extractor/ast-policy-extractor.ts
+  - libs/harness/graph/src/extractor/schema-and-brand-extractor.ts
+  - libs/harness/graph/src/extractor/service-and-layer-extractor.ts
+  - libs/harness/graph/src/extractor/effect-fn-extractor.ts
+  - libs/harness/graph/src/extractor/decider-reducer-extractor.ts
+  - libs/harness/graph/src/extractor/test-and-governance-extractor.ts
+  - libs/harness/graph/src/datalog/datalog-types-and-semiring.ts
+  - libs/harness/graph/src/datalog/stratum-1-and-2-rules.ts
+  - libs/harness/graph/src/datalog/stratum-3-completion-and-holes.ts
   - libs/harness/graph/src/datalog/datalog-session.ts
   - libs/harness/graph/src/rewrite/dpo-algebra-core.ts
+  - libs/harness/graph/src/rewrite/plan-rules.plugin.ts
+  - libs/harness/graph/src/rewrite/repair-rules-arch.plugin.ts
+  - libs/harness/graph/src/rewrite/repair-rules-code.plugin.ts
   - libs/harness/graph/src/engine/hypergraph-store.ts
+  - libs/harness/graph/src/engine/traversal-queries.ts
   - libs/harness/graph/src/engine/snapshot-codec.ts
+  - libs/harness/graph/src/engine/graph-diff-monomorphism.ts
+  - libs/harness/graph/src/projector/skeleton-templates.ts
+  - libs/harness/graph/src/projector/ast-codemods.ts
   - libs/harness/graph/src/projector/shadow-bisection-verifier.ts
   - libs/harness/graph/src/services/ts-compiler-overlay-service.ts
   - apps/harness-cli/src/commands/command-registry.ts
@@ -95,8 +126,8 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 | ID      | Pattern            | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                    | Effect Symbol                  | Verification   |
 | :------ | :----------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------- | :------------- |
-| REQ-1.1 | State-driven       | **While** evaluating a `SelfDogfoodingInput` batch of workspace source files where every file has zero `yield* Effect.void` statements, zero nested `Effect.runSync` or `Effect.runPromise` calls inside `Effect.fn`, `Effect.gen`, `Effect.sync`, or `Layer`, zero `switch` statements, and line counts within `maxPluginFileLines`, the `SelfDogfooding.decide` decider **shall** return a clean `SelfDogfoodingReport` purely with `R = never`. | `SelfDogfooding.decide`        | `PropertyTest` |
-| REQ-1.2 | Unwanted behaviour | **If** any inspected source file in `SelfDogfoodingInput` contains a `yield* Effect.void` statement (`effect-fn-dummy-void`), a nested `Effect.runSync` or `Effect.runPromise` call inside an Effect constructor (`nested-effect-run-sync`), a `switch` statement (`harness-switch-statement`), or exceeds `maxPluginFileLines` (`file-line-budget-exceeded`) when `failOnViolation` is true, **then** the `SelfDogfooding.decide` span **shall** fail with `SelfDogfoodingViolationError`. | `SelfDogfoodingViolationError` | `PropertyTest` |
+| REQ-1.1 | State-driven       | **While** evaluating a `SelfDogfoodingInput` batch of workspace source files where every file has zero `yield* Effect.void` statements, zero nested `Effect.runSync` or `Effect.runPromise` calls inside `Effect.fn`, `Effect.gen`, `Effect.sync`, or `Layer`, zero `switch` statements, and line counts within `maxPluginFileLines` (enforced across all `isModularPluginPath` targets including `libs/harness/graph/src/**/*.ts` and `libs/harness/gates/src/**/*.ts` regardless of `isModularPluginFile: false`, as well as files with `isModularPluginFile: true`, or files where `isModularPluginFile` is omitted while `input.maxPluginFileLines` is explicitly set), the `SelfDogfooding.decide` decider **shall** return a clean `SelfDogfoodingReport` purely with `R = never`. | `SelfDogfooding.decide`        | `PropertyTest` |
+| REQ-1.2 | Unwanted behaviour | **If** any inspected source file in `SelfDogfoodingInput` contains a `yield* Effect.void` statement (`effect-fn-dummy-void`), a nested `Effect.runSync` or `Effect.runPromise` call inside an Effect constructor (`nested-effect-run-sync`), a `switch` statement (`harness-switch-statement`), or exceeds `maxPluginFileLines` (`file-line-budget-exceeded` when matched by `isModularPluginPath`—even with `isModularPluginFile: false`—or when `isModularPluginFile` is `true`, or when `isModularPluginFile` is omitted while `input.maxPluginFileLines` is set) when `failOnViolation` is true, **then** the `SelfDogfooding.decide` span **shall** fail with `SelfDogfoodingViolationError`. | `SelfDogfoodingViolationError` | `PropertyTest` |
 | REQ-1.3 | Event-driven       | **When** `AstGateCache.decide` evaluates a harness-internal source file containing `yield* Effect.void`, a `switch` statement, or `match(...).run()`, the `AstGateCache.decide` span **shall** report `effect-fn-dummy-void`, `discriminant-branching`, and `non-exhaustive-union-match` violations without `isHarnessInternal` exemption.                                                                                                               | `SelfDogfooding.decide`        | `UnitTest`     |
 
 ### 2 · Capability Services for Filesystem, Subprocess & Scoped Mutant Context (`@harness/gates`)
@@ -135,7 +166,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ## Assumptions
 
-- **REQ-1.1:** Modular plugin, service, command, tool, and graph files under `libs/harness/*/src/plugins/**`, `libs/harness/*/src/services/**`, `libs/harness/graph/src/**/*.ts`, `apps/harness-cli/src/commands/**`, and `apps/harness-mcp/src/tools/**` default to a maximum line budget of `MaxPluginFileLines = 800`.
+- **REQ-1.1:** Modular plugin, service, mutation, command, tool, and graph/gates files matched by `isModularPluginPath` (`libs/harness/*/src/plugins/**`, `libs/harness/*/src/services/**`, `/mutation/`, `libs/harness/gates/src/**/*.ts`, `libs/harness/graph/src/**/*.ts`, `apps/harness-cli/src/commands/**`, and `apps/harness-mcp/src/tools/**`) enforce a maximum line budget of `MaxPluginFileLines = 800` unconditionally—passing `isModularPluginFile: false` cannot opt out a path matched by `isModularPluginPath`.
 - **REQ-2.5:** `ActiveMutantContext` synchronizes with `globalThis.__HARNESS_ACTIVE_MUTANT_ID` inside its scoped `Effect.acquireRelease` bracket so generated Mutant Schemata (`ADR-0010`) and Effect fibers observe identical active mutant state.
 
 ## Out of scope
@@ -144,7 +175,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ## Known residual risks
 
-- Canonical entry orchestrators (`type-extractor.ts`, `datalog-engine.ts`, `graph-rewrite.ts`, `graph-engine.ts`, `graph-projector.ts`, `gc-check.ts`) remain `<= 250` lines and re-export cohesive submodules (`<= 750` lines) to preserve referential integrity for `ADR-0001..0011` and `SPEC-0001..0010`.
+- Canonical `@harness/graph` entry orchestrators (`type-extractor.ts`, `datalog-engine.ts`, `graph-rewrite.ts`, `graph-engine.ts`, `graph-projector.ts`, plus `gc-check.ts`) target `<= 250` lines under RFC-0007 (`< 500` lines for sub-extractors under `extractor/`, `<= 700` lines for `compiler-session.ts` and `engine/*`, and `<= 750` lines for remaining decomposed submodules), whereas `SelfDogfooding.decide` enforces the coarser deterministic hard ceiling of `MaxPluginFileLines = 800` across all `libs/harness/graph/src/**/*.ts` files (`ADR-0001..0011`, `SPEC-0001..0010`).
 
 ## Acceptance criteria
 

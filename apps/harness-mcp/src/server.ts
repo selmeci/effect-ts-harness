@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod"
-import { Cause, Effect, Layer, Option, Schema } from "effect"
+import { Cause, Effect, Layer, Logger, Option, Schema } from "effect"
 import * as Graph from "effect/Graph"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
@@ -28,7 +28,7 @@ import {
   findTestsReaching,
   getNodeKey,
   getOrCreateWarmProgramSession,
-  type GraphInferenceError,
+  GraphInferenceError,
   type GraphProjectorError,
   type GraphRewriteError,
   HARNESS_GQ_QUERY_NAMES,
@@ -254,6 +254,11 @@ const resolveGraph = (
     }
     if (snapshotPath && fs.existsSync(snapshotPath)) {
       return yield* loadGraphSnapshotEffect(snapshotPath).pipe(
+        Effect.tapError((error) =>
+          Effect.logWarning(
+            `Failed to load graph snapshot from '${snapshotPath}' [${error.reason}]: ${error.message}`,
+          ),
+        ),
         Effect.orElseSucceed(() =>
           buildHarnessGraph({
             fns: [],
@@ -309,10 +314,18 @@ export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolea
     if (fs.existsSync(checkPath)) {
       const checkRel = path.relative(logicalRoot, checkPath)
       if (!checkRel.startsWith("..") && !path.isAbsolute(checkRel)) {
-        const realRoot = fs.realpathSync.native(logicalRoot)
-        const realCheck = fs.realpathSync.native(checkPath)
-        const realRel = path.relative(realRoot, realCheck)
-        if (realRel !== "" && (realRel.startsWith("..") || path.isAbsolute(realRel))) {
+        const contained = Effect.runSync(
+          Effect.try({
+            try: () => {
+              const realRoot = fs.realpathSync.native(logicalRoot)
+              const realCheck = fs.realpathSync.native(checkPath)
+              const realRel = path.relative(realRoot, realCheck)
+              return !(realRel !== "" && (realRel.startsWith("..") || path.isAbsolute(realRel)))
+            },
+            catch: () => false,
+          }),
+        )
+        if (!contained) {
           return false
         }
       }
@@ -328,7 +341,12 @@ export const normalizeProjectPath = (repoRoot: string, rawProject: string): stri
     throw new Error(`Project path '${rawProject}' escapes repository root '${repoRoot}'.`)
   }
   if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
-    return path.join(resolved, "tsconfig.json")
+    const joined = path.join(resolved, "tsconfig.json")
+    if (!isPathInsideRoot(repoRoot, joined)) {
+      // oxlint-disable-next-line -- validated boundary failure caught by Effect.try
+      throw new Error(`Project path '${joined}' escapes repository root '${repoRoot}'.`)
+    }
+    return joined
   }
   return resolved
 }
@@ -359,7 +377,8 @@ export const runDefaultLspDiagnostics = (
     readonly tsconfigPath?: string | undefined
   },
 ): Effect.Effect<LspDiagnosticsReport> =>
-  Effect.try(() => {
+  Effect.try({
+    try: () => {
     const cliArgs = ["diagnostics", "--strict", "--format", "json"]
     const effectiveFile = input.file ?? input.filePath
     const effectiveProject = input.project ?? input.tsconfigPath
@@ -527,9 +546,11 @@ export const runDefaultLspDiagnostics = (
         messages: failureDetails.length,
       },
     } satisfies LspDiagnosticsReport
-  }).pipe(
+  },
+  catch: (err) => (err instanceof Error ? err.message : String(err)),
+}).pipe(
     Effect.catch((cause): Effect.Effect<LspDiagnosticsReport> => {
-      const msg = `[lsp-exception] ${cause instanceof Error ? cause.message : String(cause)}`
+      const msg = `[lsp-exception] ${cause}`
       return Effect.succeed({
         clean: false,
         diagnostics: [msg],
@@ -736,18 +757,42 @@ export const buildLiveMcpToolDescriptors = (
           const overlays = typedArgs.overlays
           const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
           if (overlays !== undefined && Object.keys(overlays).length > 0) {
-            const escapedKeys = Object.keys(overlays).filter((k) => {
+            const escapedBoundaryPaths: Array<{ readonly file: string; readonly message: string }> = []
+            for (const k of Object.keys(overlays)) {
               const absKey = path.isAbsolute(k) ? path.resolve(k) : path.resolve(root, k)
-              return !isPathInsideRoot(root, absKey)
-            })
-            if (escapedKeys.length > 0) {
-              const escapeDiags = escapedKeys.map((k) => ({
-                file: k,
+              if (!isPathInsideRoot(root, absKey)) {
+                escapedBoundaryPaths.push({
+                  file: k,
+                  message: `Overlay path '${k}' escapes repository root.`,
+                })
+              }
+            }
+            if (file !== undefined && file.length > 0) {
+              const absFile = path.isAbsolute(file) ? path.resolve(file) : path.resolve(root, file)
+              if (!isPathInsideRoot(root, absFile)) {
+                escapedBoundaryPaths.push({
+                  file,
+                  message: `File path '${file}' escapes repository root.`,
+                })
+              }
+            }
+            if (project !== undefined && project.length > 0) {
+              const absProject = path.isAbsolute(project) ? path.resolve(project) : path.resolve(root, project)
+              if (!isPathInsideRoot(root, absProject)) {
+                escapedBoundaryPaths.push({
+                  file: project,
+                  message: `Project path '${project}' escapes repository root.`,
+                })
+              }
+            }
+            if (escapedBoundaryPaths.length > 0) {
+              const escapeDiags = escapedBoundaryPaths.map((entry) => ({
+                file: entry.file,
                 line: 1,
                 column: 1,
                 code: "PATH_TRAVERSAL",
                 severity: "error" as const,
-                message: `Overlay path '${k}' escapes repository root.`,
+                message: entry.message,
               }))
               return {
                 clean: false,
@@ -762,22 +807,34 @@ export const buildLiveMcpToolDescriptors = (
                 },
               } satisfies LspDiagnosticsReport
             }
+            const toRootRelPosix = (p: string): string =>
+              path.relative(root, path.isAbsolute(p) ? path.resolve(p) : path.resolve(root, p)).replace(/\\/g, "/")
+            const targetRelFile =
+              file !== undefined && file.trim().length > 0 ? toRootRelPosix(file) : undefined
+            const matchesTargetFile = (candidate: string): boolean => {
+              if (targetRelFile === undefined) return true
+              return toRootRelPosix(candidate) === targetRelFile
+            }
             const compilableKeys = Object.keys(overlays).filter(
               (k) => (k.endsWith(".ts") || k.endsWith(".tsx")) && !k.endsWith(".d.ts"),
             )
+            const matchedKeys =
+              targetRelFile !== undefined
+                ? compilableKeys.filter(matchesTargetFile)
+                : compilableKeys
             const session = getOrCreateWarmProgramSession(root)
             const diags = evaluateOverlayDiagnostics(root, overlays, session)
             const filteredDiags =
-              file !== undefined && file.length > 0
-                ? diags.filter((d) => d.file === file || d.file.endsWith(file))
+              targetRelFile !== undefined
+                ? diags.filter((d) => matchesTargetFile(d.file))
                 : diags
             const errors = filteredDiags.filter((d) => d.severity === "error").length
             const warnings = filteredDiags.filter((d) => d.severity === "warning").length
             return {
-              clean: compilableKeys.length > 0 && errors === 0 && warnings === 0,
+              clean: matchedKeys.length > 0 && errors === 0 && warnings === 0,
               diagnostics: filteredDiags,
               summary: {
-                filesChecked: compilableKeys.length,
+                filesChecked: matchedKeys.length,
                 filesWithoutPlugin: 0,
                 totalFiles: Object.keys(overlays).length,
                 errors,
@@ -988,6 +1045,12 @@ export const buildLiveMcpToolDescriptors = (
               holeTeleportationWeights,
             }
           } else if (rawPriors !== undefined) {
+            if (typeof rawPriors !== "object" || rawPriors === null) {
+              return yield* new GraphInferenceError({
+                reason: "invalid-graph",
+                message: "Expected priors to be a non-null object.",
+              })
+            }
             const edgeOverrides: Record<string, ConfidenceMillis> = {}
             const teleportWeights: Record<NodeKey, PageRankScoreMillis> = {}
             const sourceEdges =
@@ -997,8 +1060,18 @@ export const buildLiveMcpToolDescriptors = (
                     rawPriors.edgeConfidenceByRelationTargetRole
                   ? rawPriors.edgeConfidenceByRelationTargetRole
                   : {}
+            const decodeConfidence = Schema.decodeUnknownEffect(ConfidenceMillis)
+            const decodeTeleportWeight = Schema.decodeUnknownEffect(PageRankScoreMillis)
             for (const [k, v] of Object.entries(sourceEdges)) {
-              edgeOverrides[k] = ConfidenceMillis.make(v)
+              edgeOverrides[k] = yield* decodeConfidence(v).pipe(
+                Effect.mapError(
+                  (err) =>
+                    new GraphInferenceError({
+                      reason: "invalid-graph",
+                      message: `Invalid edge confidence prior for '${k}': ${String(err)}`,
+                    }),
+                ),
+              )
             }
             const sourceTeleport =
               "holeTeleportationWeights" in rawPriors && rawPriors.holeTeleportationWeights
@@ -1007,7 +1080,15 @@ export const buildLiveMcpToolDescriptors = (
                   ? rawPriors.teleportationWeightByNodeKey
                   : {}
             for (const [k, v] of Object.entries(sourceTeleport)) {
-              teleportWeights[NodeKey.make(k)] = PageRankScoreMillis.make(v)
+              teleportWeights[NodeKey.make(k)] = yield* decodeTeleportWeight(v).pipe(
+                Effect.mapError(
+                  (err) =>
+                    new GraphInferenceError({
+                      reason: "invalid-graph",
+                      message: `Invalid teleportation weight prior for '${k}': ${String(err)}`,
+                    }),
+                ),
+              )
             }
             priors = {
               edgeConfidenceOverrides: edgeOverrides,
@@ -1166,7 +1247,7 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
   const result: unknown = yield* dispatchMcpTool({
     toolName,
     args,
-  }).pipe(Effect.provide(liveToolRegistryLayer))
+  }).pipe(Effect.provide(liveToolRegistryLayer), Effect.provideService(Logger.LogToStderr, true))
 
   const durationMs = Math.max(0, Math.round(performance.now() - startTime))
   if (options?.repoRoot !== undefined || process.env.VITEST === undefined) {

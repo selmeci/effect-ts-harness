@@ -12,6 +12,7 @@ enforced_by:
   - libs/harness/gates/src/gc-check.ts
   - libs/harness/gates/src/ontology-invariants.ts
   - libs/harness/graph/src/type-extractor.ts
+  - libs/harness/graph/src/extractor/extractor-types-and-helpers.ts
   - libs/harness/graph/src/extractor/ast-policy-extractor.ts
   - libs/harness/graph/src/extractor/decider-reducer-extractor.ts
   - libs/harness/graph/src/extractor/test-and-governance-extractor.ts
@@ -43,7 +44,7 @@ Forensic review of the first Event Sourcing pull request (`selmeci/effect-es#3`,
 
 - **Reused contracts / functions:** `scopeSessionReportInput`, `decideSessionReport` (`libs/harness/gates/src/telemetry.ts`); `decideLoopThrashing` (`libs/harness/gates/src/friction-log.ts`); `classifyCommand`, `isCommandAllowed`, `ALLOWLIST` (`libs/harness/gates/src/policy.ts`); `decideGraphEntropy` (`libs/harness/gates/src/gc-check.ts`); `decideOntologyInvariants` (`libs/harness/gates/src/ontology-invariants.ts`); `discoverDomainMutants` (`libs/harness/gates/src/mutation-check.ts`); `extractTypeAwareGraphFromSource`, `extractWorkspaceTypeAwareGraph` (`libs/harness/graph/src/type-extractor.ts`); `checkEffectGraph` (`libs/harness/graph/src/policy-check.ts`); `IdiomRouterV1` (`libs/harness/decision/src/idiom-router.ts`).
 - **Reused services:** `DecisionModel.DecisionModel`, `OmnigraphSync`.
-- **New capabilities needed:** `fullyIdle=false` hook discrimination in `scopeSessionReportInput`; non-penalizing `verdict=allow` handling in `SessionReport.decide` and `LoopCircuitBreaker.decide`; active workspace breadcrumb resolution and snapshot mtime selection in `harness-mcp`; `TaggedError<`, synchronous reducer, `Decider.make`, `fallback-json-equality`, `vacuous-error-assertion`, `unscoped-effect-run`, and `Exit.is*` `discriminant-branching` support in `type-extractor.ts`; `shallow-decider-property-test`, Mermaid error reference, `empty-source-module`, and `unused-package-dependency` checks in `gc-check.ts`; `guard-condition` mutants in `mutation-check.ts`; and an `"event-sourcing"` block in `IdiomRouterV1`.
+- **New capabilities needed:** `fullyIdle=false` hook discrimination in `scopeSessionReportInput`; non-penalizing `verdict=allow` handling in `SessionReport.decide` and `LoopCircuitBreaker.decide`; active workspace breadcrumb resolution and snapshot mtime selection in `harness-mcp`; `TaggedError<`, synchronous reducer, `Decider.make`, `fallback-json-equality`, `vacuous-error-assertion`, `unscoped-effect-run`, and `Exit.is*` `discriminant-branching` support in `libs/harness/graph/src/extractor/ast-policy-extractor.ts` and `libs/harness/graph/src/extractor/decider-reducer-extractor.ts`; `shallow-decider-property-test`, Mermaid error reference, `empty-source-module`, and `unused-package-dependency` checks in `gc-check.ts`; `guard-condition` mutants in `mutation-check.ts`; and an `"event-sourcing"` block in `IdiomRouterV1`.
 
 ## Goal
 
@@ -78,14 +79,14 @@ Requirements follow EARS syntax. Each requirement is one sentence with bold keyw
 
 ### 3 · Graph extraction, dead-error plan check, and framework archetype support
 
-**Source (forensic audit 2026-10-29, findings 1.3, 2.1, 3.1, and 3.3):** `type-extractor.ts` missed generic `Schema.TaggedError<Self>()(...)`, required `Effect.fn` wrappers on synchronous `evolve` reducers, failed to trace `Decider.make` test edges, and `mutation-check.ts` skipped `type:core`.
+**Source (forensic audit 2026-10-29, findings 1.3, 2.1, 3.1, and 3.3):** Historically `type-extractor.ts` (now decomposed across `libs/harness/graph/src/extractor/{ast-policy-extractor,decider-reducer-extractor,test-and-governance-extractor,extractor-types-and-helpers}.ts`) missed generic `Schema.TaggedError<Self>()(...)`, required `Effect.fn` wrappers on synchronous `evolve` reducers, failed to trace `Decider.make` test edges, and `mutation-check.ts` skipped `type:core`.
 
 | ID      | Pattern            | Requirement                                                                                                                                                                                                                                                                                                     | Effect Symbol        | Verification |
 | ------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- | ------------ |
 | REQ-3.1 | Event-driven       | **When** `extractTypeAwareGraphFromSource` inspects class declarations and synchronous reducer functions (`evolve*` or `*Reducer`), the type extractor **shall** extract generic `Schema.TaggedError` classes (`TaggedError<`) as `TaggedError` nodes and synchronous 2-parameter reducers as `EffectFn` nodes. | SessionReport.decide | test         |
 | REQ-3.2 | Event-driven       | **When** `extractWorkspaceTypeAwareGraph` links Vitest suites to `EffectFn` nodes, the graph extractor **shall** propagate `ExercisesSpan` edges through `Decider.make({ decide, evolve })` bindings and ignore `_tag` and `version` metadata fields in `dead-event-payload`.                                   | SessionReport.decide | test         |
 | REQ-3.3 | Unwanted behaviour | **If** a `TaggedError` declared in an active `EarsSpec` or `AdrDoc` has zero incoming `FailsWith` edges during `plan-check` in a workspace with `EffectFn` nodes, **then** the `handlePlanCheck` gate **shall** reject the plan before writing `plan-graph-snapshot.json`.                                      | SessionReport.decide | test         |
-| REQ-3.4 | Event-driven       | **When** `findDomainFiles` in `mutation-check.ts` and `resolvePackageTag` in `type-extractor.ts` scan a workspace, the harness **shall** treat `libs/*/core/src` (`type:core`) identically to `libs/*/domain/src` (`type:domain`).                                                                              | MutationCheck.decide | test         |
+| REQ-3.4 | Event-driven       | **When** `findDomainFiles` in `mutation-check.ts` and `resolvePackageTag` in `libs/harness/graph/src/extractor/extractor-types-and-helpers.ts` scan a workspace, the harness **shall** treat `libs/*/core/src` (`type:core`) identically to `libs/*/domain/src` (`type:domain`).                                                                              | MutationCheck.decide | test         |
 
 ### 4 · Guard policy ergonomics and Event Sourcing idiom routing
 

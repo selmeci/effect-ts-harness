@@ -135,9 +135,7 @@ export const getPeraConceptLatticeResult = (): ConceptLatticeResult => {
 }
 
 export const pushUnique = <T>(arr: Array<T>, item: T): void => {
-  if (!arr.includes(item)) {
-    arr.push(item)
-  }
+  if (!arr.includes(item)) arr.push(item)
 }
 
 export const addEntityNodeIfMissing = (
@@ -154,18 +152,10 @@ export const addEntityNodeIfMissing = (
 }
 
 type TargetEntityKind =
-  | "span"
-  | "service"
-  | "error"
-  | "schema"
-  | "layer"
-  | "test"
-  | "pattern"
-  | "EffectFn"
-  | "ServiceTag"
-  | "TaggedError"
+  | "span" | "service" | "error" | "schema" | "layer"
+  | "test" | "pattern" | "EffectFn" | "ServiceTag" | "TaggedError"
 
-const matchesNodeTarget = (node: EntityNode, targetKey: string): boolean =>
+export const matchesNodeTarget = (node: EntityNode, targetKey: string): boolean =>
   match(node)
     .with({ _tag: "EffectFn" }, (n) => n.spanName === targetKey || n.qualname === targetKey)
     .with({ _tag: "ServiceTag" }, (n) => n.tagId === targetKey || n.name === targetKey)

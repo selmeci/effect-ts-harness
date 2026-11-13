@@ -10,21 +10,11 @@ import {
   type PackageTag,
 } from "../model.js"
 import {
+  addViolation,
   findEnclosingSymbolName,
   stripCommentsAndTestTitles,
   type TaggedSchemaInfo,
 } from "./extractor-types-and-helpers.js"
-
-const addViolation = (
-  v: Array<BranchingViolation>,
-  r: BranchingViolation["rule"],
-  m: string,
-  f: string,
-  l: number,
-  s: string,
-): void => {
-  v.push({ rule: r, message: m, file: f, line: l, enclosingSymbol: s })
-}
 
 const resolveSchemasForParameter = (
   param: ParameterDeclaration,

@@ -12,7 +12,6 @@ import {
   type DerivationProof,
   type EarsSpecNode,
   type EffectFnNode,
-  type GraphInferenceError,
   type HarnessGraph,
   type MigrationTupleRelation,
   type MinHeightProvenanceAnnotation,
@@ -27,20 +26,9 @@ import {
   getNodeKey,
 } from "../model.js"
 
-export type GraphInferInput = HarnessGraph
-export type GraphInferConfig = SemanticEdgePriors
-export type GraphInferError = GraphInferenceError
-
 export interface FlixConfidenceLatticeElement {
   readonly confidenceMillis: ConfidenceMillis
   readonly parentProofIds: ReadonlyArray<ProofId>
-}
-
-export interface SymbolInternTable {
-  readonly fnQualnameByKey: ReadonlyMap<string, string>
-  readonly svcTagIdByKey: ReadonlyMap<string, string>
-  readonly layerQualnameByKey: ReadonlyMap<string, string>
-  readonly errTagByKey: ReadonlyMap<string, string>
 }
 
 export interface DatalogEvaluationContext {
@@ -57,7 +45,6 @@ export interface DatalogEvaluationContext {
   readonly migrationsById: ReadonlyMap<string, MigrationTupleRelation>
   readonly allEntityKeys: ReadonlySet<string>
 
-  readonly symbols: SymbolInternTable
   readonly fnQualnameByKey: ReadonlyMap<string, string>
   readonly svcTagIdByKey: ReadonlyMap<string, string>
   readonly layerQualnameByKey: ReadonlyMap<string, string>
@@ -606,13 +593,6 @@ export const extractEdbTuplesFromGraph = (
     }
   }
 
-  const symbols: SymbolInternTable = {
-    fnQualnameByKey,
-    svcTagIdByKey,
-    layerQualnameByKey,
-    errTagByKey,
-  }
-
   return {
     harnessGraph,
     priors,
@@ -626,7 +606,6 @@ export const extractEdbTuplesFromGraph = (
     specsByKey,
     migrationsById,
     allEntityKeys,
-    symbols,
     fnQualnameByKey,
     svcTagIdByKey,
     layerQualnameByKey,

@@ -17,11 +17,34 @@ import {
   VerificationStatus,
   validateRelPath,
 } from "./projector/skeleton-templates.js"
-import { resolveRepoRoot } from "./type-extractor.js"
+import { createTypeScriptProgramSession, resolveRepoRoot } from "./type-extractor.js"
 
-export * from "./projector/skeleton-templates.js"
-export * from "./projector/ast-codemods.js"
-export * from "./projector/shadow-bisection-verifier.js"
+export {
+  AstProjectionResult,
+  BisectionProbeCount,
+  VerificationStatus,
+  GraphProjectorError,
+  validateRelPath,
+  type GraphProjectorInput,
+  AstCodeModOperation,
+  ShadowFileOverlay,
+} from "./projector/skeleton-templates.js"
+
+export {
+  projectPatchesToInMemoryWorkspace,
+  applyRep05UntracedDeciderRepair,
+  applyRep07DiscriminantMatchRepair,
+  applyRep08DecodeBoundaryRepair,
+  applyRep11DeleteUnusedService,
+  coProjectBarrelExports,
+} from "./projector/ast-codemods.js"
+
+export {
+  safeProjectPatchesToInMemoryWorkspace,
+  verifyProjectedSubset,
+  isolateFirstOffendingPatchIndex,
+  type BatchVerificationOutcome,
+} from "./projector/shadow-bisection-verifier.js"
 
 /**
  * In-Memory Bidirectional AST Code Projector (`RFC-0004 §4.3–4.4, §5.1–5.2, §8`).
@@ -119,6 +142,7 @@ export const decideGraphProjection = Effect.fn("GraphProjector.decide")(function
   const skippedRuleIds: Array<RewriteRuleId> = []
   const collectedDiagnostics: Array<string> = []
   let totalBisectionProbes = 0
+  const probeSession = createTypeScriptProgramSession(repoRoot)
 
   for (const phase of phaseOrder) {
     let remainingInPhase = allPatches.filter((p) => p.phase === phase)
@@ -144,6 +168,7 @@ export const decideGraphProjection = Effect.fn("GraphProjector.decide")(function
         batchProjected.overlayMap,
         input.existingFiles,
         forceFailSet,
+        probeSession,
       )
 
       if (batchCheck.isClean) {
@@ -165,6 +190,7 @@ export const decideGraphProjection = Effect.fn("GraphProjector.decide")(function
             remainingInPhase,
             input.existingFiles,
             forceFailSet,
+            probeSession,
           )
           totalBisectionProbes += bisected.probes
           const offending = remainingInPhase[bisected.offendingIndex]
