@@ -33,7 +33,7 @@ export const GateRuleVersion = Schema.NonEmptyString.pipe(Schema.brand("GateRule
 export type GateRuleVersion = typeof GateRuleVersion.Type
 export const AstRuleVersion = GateRuleVersion
 export type AstRuleVersion = typeof AstRuleVersion.Type
-export const HARNESS_GATE_RULE_VERSION: GateRuleVersion = GateRuleVersion.make("ast-gates-v2")
+export const HARNESS_GATE_RULE_VERSION: GateRuleVersion = GateRuleVersion.make("ast-gates-v3")
 
 export const AstSourceFilePath = Schema.NonEmptyString.pipe(Schema.brand("AstSourceFilePath"))
 export type AstSourceFilePath = typeof AstSourceFilePath.Type
@@ -422,6 +422,57 @@ export const visitSourceFileSinglePass = (
           `Unscoped '${calleeText}' in '${filePath}' (${packageTag}) — compose Effects and run at the app edge.`,
           node,
         )
+      }
+
+      if (!isTestFile && calleeText === "Cause.hasInterruptsOnly") {
+        let isInsideCatchCause = false
+        let anc: ts.Node | undefined = node.parent
+        while (anc !== undefined) {
+          if (ts.isCallExpression(anc)) {
+            const ancCallee = anc.expression.getText(sourceFile)
+            if (
+              ancCallee === "Effect.catchCause" ||
+              ancCallee.endsWith(".catchCause") ||
+              ancCallee === "catchCause"
+            ) {
+              isInsideCatchCause = true
+              break
+            }
+          }
+          anc = anc.parent
+        }
+        if (isInsideCatchCause) {
+          pushViolation(
+            catEffectLaws,
+            "catch-cause-interrupts-only",
+            "Cause.hasInterruptsOnly(cause) inside Effect.catchCause swallows fiber interruption on composite causes (Fail + Interrupt). Use Cause.hasInterrupts(cause) instead.",
+            node,
+          )
+        }
+      }
+
+      if (
+        isTestFile &&
+        (calleeText === "saveGraphSnapshot" ||
+          calleeText === "saveGraphSnapshotEffect" ||
+          calleeText === "writeFileSync" ||
+          calleeText === "fs.writeFileSync")
+      ) {
+        let hasLiveDotHarnessArg = false
+        for (const arg of node.arguments) {
+          if (/["'`]\.harness\//.test(arg.getText(sourceFile))) {
+            hasLiveDotHarnessArg = true
+            break
+          }
+        }
+        if (hasLiveDotHarnessArg) {
+          pushViolation(
+            catTestIntegrity,
+            "unisolated-dot-harness-test-write",
+            "Test files must not write directly to live .harness/ paths — use os.tmpdir() / fs.mkdtempSync for isolated snapshot and file tests.",
+            node,
+          )
+        }
       }
 
       if (

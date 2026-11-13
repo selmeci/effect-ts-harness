@@ -27,6 +27,45 @@ enforced_by:
   - libs/harness/gates/src/services/active-mutant-context.ts
   - libs/harness/gates/src/ast-cache.ts
   - libs/harness/gates/src/gc-check.ts
+  - libs/harness/graph/src/index.ts
+  - libs/harness/graph/src/model.ts
+  - libs/harness/graph/src/model-rewrite-and-cache.ts
+  - libs/harness/graph/src/omnigraph-sync.ts
+  - libs/harness/graph/src/structural-search.ts
+  - libs/harness/graph/src/pattern-index.ts
+  - libs/harness/graph/src/policy-check.ts
+  - libs/harness/graph/src/archimate-ontology.ts
+  - libs/harness/graph/src/gq-queries.ts
+  - libs/harness/graph/src/cluster-resolver.ts
+  - libs/harness/graph/src/concept-lattice.ts
+  - libs/harness/graph/src/type-extractor.ts
+  - libs/harness/graph/src/datalog-engine.ts
+  - libs/harness/graph/src/graph-rewrite.ts
+  - libs/harness/graph/src/graph-engine.ts
+  - libs/harness/graph/src/graph-projector.ts
+  - libs/harness/graph/src/extractor/extractor-types-and-helpers.ts
+  - libs/harness/graph/src/extractor/compiler-session.ts
+  - libs/harness/graph/src/extractor/ast-policy-extractor.ts
+  - libs/harness/graph/src/extractor/schema-and-brand-extractor.ts
+  - libs/harness/graph/src/extractor/service-and-layer-extractor.ts
+  - libs/harness/graph/src/extractor/effect-fn-extractor.ts
+  - libs/harness/graph/src/extractor/decider-reducer-extractor.ts
+  - libs/harness/graph/src/extractor/test-and-governance-extractor.ts
+  - libs/harness/graph/src/datalog/datalog-types-and-semiring.ts
+  - libs/harness/graph/src/datalog/stratum-1-and-2-rules.ts
+  - libs/harness/graph/src/datalog/stratum-3-completion-and-holes.ts
+  - libs/harness/graph/src/datalog/datalog-session.ts
+  - libs/harness/graph/src/rewrite/dpo-algebra-core.ts
+  - libs/harness/graph/src/rewrite/plan-rules.plugin.ts
+  - libs/harness/graph/src/rewrite/repair-rules-arch.plugin.ts
+  - libs/harness/graph/src/rewrite/repair-rules-code.plugin.ts
+  - libs/harness/graph/src/engine/hypergraph-store.ts
+  - libs/harness/graph/src/engine/traversal-queries.ts
+  - libs/harness/graph/src/engine/snapshot-codec.ts
+  - libs/harness/graph/src/engine/graph-diff-monomorphism.ts
+  - libs/harness/graph/src/projector/skeleton-templates.ts
+  - libs/harness/graph/src/projector/ast-codemods.ts
+  - libs/harness/graph/src/projector/shadow-bisection-verifier.ts
   - libs/harness/graph/src/services/ts-compiler-overlay-service.ts
   - apps/harness-cli/src/commands/command-registry.ts
   - apps/harness-mcp/src/tools/tool-registry.ts
@@ -62,7 +101,7 @@ errors:
 
 This specification defines the behavioral requirements for `RFC-0007` (Self-Dogfooding Audit, Effect-TS v4 Paradigm Alignment & Modular Plugin Harness Architecture), governed by `harness:ADR-0012`. It eliminates the architectural double standard between the harness packages (`libs/harness/*`, `apps/harness-*`) and the application/framework domains (`libs/sample/*`, `libs/es/*`):
 
-1. **Pure Self-Dogfooding Decider (`libs/harness/gates/src/plugins/self-dogfooding-plugin.ts` & `libs/harness/gates/src/ast-cache.ts`):** Pure `SelfDogfooding.decide` (`R = never`) and unified `AstGateCache.decide` enforce zero dummy `yield* Effect.void` statements (`effect-fn-dummy-void`), zero nested `Effect.runSync` / `Effect.runPromise` calls inside `Effect.fn` / `Effect.fnUntraced` / `Effect.gen` / `Effect.sync` / `Layer.*` (`nested-effect-run-sync`), zero `switch` statements (`harness-switch-statement`) or `match(...).run()` calls (`match-run-statement`) across harness source files, and a strict path-scoped 800-line file budget (`file-line-budget-exceeded`) across modular plugin, service, command, and tool files (`/plugins/`, `/services/`, `/commands/`, `/tools/`).
+1. **Pure Self-Dogfooding Decider (`libs/harness/gates/src/plugins/self-dogfooding-plugin.ts` & `libs/harness/gates/src/ast-cache.ts`):** Pure `SelfDogfooding.decide` (`R = never`) and unified `AstGateCache.decide` (`HARNESS_GATE_RULE_VERSION = "ast-gates-v3"`) enforce zero dummy `yield* Effect.void` statements (`effect-fn-dummy-void`), zero nested `Effect.runSync` / `Effect.runPromise` calls inside `Effect.fn` / `Effect.fnUntraced` / `Effect.gen` / `Effect.sync` / `Layer.*` (`nested-effect-run-sync`), zero `switch` statements (`harness-switch-statement`) or `match(...).run()` calls (`match-run-statement`) across harness source files, zero wildcard re-exports on orchestrator facades (`facade-star-reexport`), tiered path-scoped line budgets via `resolvePathSpecificMaxLines` (250 for orchestrator facades, 499 for sub-extractors, 700 for compiler session and engines, 750 for remaining graph modules, and default 800 `MaxPluginFileLines`), proper interruption handling without `Cause.hasInterruptsOnly` in `Effect.catchCause` (`catch-cause-interrupts-only`), and test filesystem isolation without direct writes to live `.harness/` (`unisolated-dot-harness-test-write`).
 2. **Cordis-Inspired Three-Role Capability Seams (`libs/harness/gates/src/services/*.ts` & `libs/harness/gates/src/plugins/gate-plugin-registry.ts`):** Introduces `WorkspaceFs`, `HarnessSubprocessRunner`, `ActiveMutantContext`, and `GatePluginRegistry` (`Context.Service` + `Layer` providers + `Effect.fn` consumers with non-empty `R` and typed `Schema.TaggedError` channels) so I/O, child processes, mutant activation, and gate plugin evaluation are dependency-injected and executed during `pnpm harness gc --strict` and `pnpm harness verify`.
 3. **Scoped TypeScript Compiler Overlay Service (`libs/harness/graph/src/services/ts-compiler-overlay-service.ts`):** Introduces `TsCompilerOverlayService` (`Context.Service` + `Layer.effect` with `Effect.acquireRelease` cleanup of service-owned sessions) and `TsCompilerOverlay.extractGraph` (`Effect.fn`) to manage warm `TypeScriptProgramSession` state with deterministic resource finalization.
 4. **Modular CLI Command & MCP Tool Registries (`apps/harness-cli/src/commands/command-registry.ts` & `apps/harness-mcp/src/tools/tool-registry.ts`):** Introduces `HarnessCommandRegistry` (`HarnessCli.dispatchCommand`) and `McpToolRegistry` (`HarnessMcp.dispatchTool`), replacing monolithic `switch` dispatchers in `apps/harness-cli/src/index.ts` and `apps/harness-mcp/src/server.ts` with typed plugin registries wired to the live command and tool handlers.
@@ -83,13 +122,13 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ### 1 · Pure Self-Dogfooding Gate Decider (`SelfDogfooding.decide`)
 
-**Source (`harness:ADR-0012`, `RFC-0007 §2 & §7`):** The harness must deterministically detect and reject `yield* Effect.void` dummy yields, nested `Effect.runSync`/`Effect.runPromise` inside Effect constructors, `switch` statements in harness source files, and modular plugin files exceeding the 800-line budget.
+**Source (`harness:ADR-0012`, `RFC-0007 §2 & §7`):** The harness must deterministically detect and reject `yield* Effect.void` dummy yields, nested `Effect.runSync`/`Effect.runPromise` inside Effect constructors, `switch` statements in harness source files, wildcard re-exports on orchestrator facades (`facade-star-reexport`), tiered path-scoped file line budgets (`resolvePathSpecificMaxLines`), unsafe `Cause.hasInterruptsOnly` in `Effect.catchCause` (`catch-cause-interrupts-only`), and unisolated live `.harness/` writes in test files (`unisolated-dot-harness-test-write`).
 
 | ID      | Pattern            | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                    | Effect Symbol                  | Verification   |
 | :------ | :----------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------- | :------------- |
-| REQ-1.1 | State-driven       | **While** evaluating a `SelfDogfoodingInput` batch of workspace source files where every file has zero `yield* Effect.void` statements, zero nested `Effect.runSync` or `Effect.runPromise` calls inside `Effect.fn`, `Effect.gen`, `Effect.sync`, or `Layer`, zero `switch` statements, and line counts within `maxPluginFileLines`, the `SelfDogfooding.decide` decider **shall** return a clean `SelfDogfoodingReport` purely with `R = never`. | `SelfDogfooding.decide`        | `PropertyTest` |
-| REQ-1.2 | Unwanted behaviour | **If** any inspected source file in `SelfDogfoodingInput` contains a `yield* Effect.void` statement (`effect-fn-dummy-void`), a nested `Effect.runSync` or `Effect.runPromise` call inside an Effect constructor (`nested-effect-run-sync`), a `switch` statement (`harness-switch-statement`), or exceeds `maxPluginFileLines` (`file-line-budget-exceeded`) when `failOnViolation` is true, **then** the `SelfDogfooding.decide` span **shall** fail with `SelfDogfoodingViolationError`. | `SelfDogfoodingViolationError` | `PropertyTest` |
-| REQ-1.3 | Event-driven       | **When** `AstGateCache.decide` evaluates a harness-internal source file containing `yield* Effect.void`, a `switch` statement, or `match(...).run()`, the `AstGateCache.decide` span **shall** report `effect-fn-dummy-void`, `discriminant-branching`, and `non-exhaustive-union-match` violations without `isHarnessInternal` exemption.                                                                                                               | `SelfDogfooding.decide`        | `UnitTest`     |
+| REQ-1.1 | State-driven       | **While** evaluating a `SelfDogfoodingInput` batch of workspace source files where every file has zero `yield* Effect.void` statements, zero nested `Effect.runSync` or `Effect.runPromise` calls inside `Effect.fn`, `Effect.gen`, `Effect.sync`, or `Layer`, zero `switch` statements, zero wildcard re-exports on orchestrator facades (`facade-star-reexport`), and line counts within tiered budgets resolved via `resolvePathSpecificMaxLines` (`250` for the 5 `@harness/graph` orchestrator facades `type-extractor.ts`, `datalog-engine.ts`, `graph-rewrite.ts`, `graph-engine.ts`, and `graph-projector.ts`; `499` for `libs/harness/graph/src/extractor/*.ts` sub-extractors; `700` for `libs/harness/graph/src/extractor/compiler-session.ts` and `libs/harness/graph/src/engine/*.ts`; `750` for all other `libs/harness/graph/src/**/*.ts`; and the default `MaxPluginFileLines = 800` across all `isModularPluginPath` targets), the `SelfDogfooding.decide` decider **shall** return a clean `SelfDogfoodingReport` purely with `R = never`. | `SelfDogfooding.decide`        | `PropertyTest` |
+| REQ-1.2 | Unwanted behaviour | **If** any inspected source file in `SelfDogfoodingInput` contains a `yield* Effect.void` statement (`effect-fn-dummy-void`), a nested `Effect.runSync` or `Effect.runPromise` call inside an Effect constructor (`nested-effect-run-sync`), a `switch` statement (`harness-switch-statement`), an `export * from` re-export on an orchestrator facade (`facade-star-reexport`), or exceeds its tiered line budget resolved via `resolvePathSpecificMaxLines` (`file-line-budget-exceeded` enforcing `250` lines for the 5 `@harness/graph` orchestrator facades, `499` lines for sub-extractors under `extractor/`, `700` lines for `compiler-session.ts` and engines under `engine/`, `750` lines for remaining graph modules, and the default `MaxPluginFileLines = 800` ceiling for other modular plugin paths) when `failOnViolation` is true, **then** the `SelfDogfooding.decide` span **shall** fail with `SelfDogfoodingViolationError`. | `SelfDogfoodingViolationError` | `PropertyTest` |
+| REQ-1.3 | Event-driven       | **When** `AstGateCache.decide` (under cache version `ast-gates-v3`) evaluates a source or test file, the `SelfDogfooding.decide` decider and unified AST gate **shall** report `effect-fn-dummy-void`, `discriminant-branching`, and `non-exhaustive-union-match` without `isHarnessInternal` exemption, report `catch-cause-interrupts-only` for non-test `Cause.hasInterruptsOnly` inside `Effect.catchCause`, and report `unisolated-dot-harness-test-write` for test files writing directly to live `.harness/` paths. | `SelfDogfooding.decide`        | `UnitTest`     |
 
 ### 2 · Capability Services for Filesystem, Subprocess & Scoped Mutant Context (`@harness/gates`)
 
@@ -127,7 +166,8 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ## Assumptions
 
-- **REQ-1.1:** Modular plugin, service, command, and tool files under `libs/harness/*/src/plugins/**`, `libs/harness/*/src/services/**`, `apps/harness-cli/src/commands/**`, and `apps/harness-mcp/src/tools/**` default to a maximum line budget of `MaxPluginFileLines = 800`.
+- **REQ-1.1:** Modular plugin, service, mutation, command, tool, and graph/gates files matched by `isModularPluginPath` (`libs/harness/*/src/plugins/**`, `libs/harness/*/src/services/**`, `/mutation/`, `libs/harness/gates/src/**/*.ts`, `libs/harness/graph/src/**/*.ts`, `apps/harness-cli/src/commands/**`, and `apps/harness-mcp/src/tools/**`) directly enforce tiered line budgets via `resolvePathSpecificMaxLines`: `250` for the 5 `@harness/graph` orchestrator facades (`type-extractor.ts`, `datalog-engine.ts`, `graph-rewrite.ts`, `graph-engine.ts`, `graph-projector.ts`), `499` (`< 500`) for `libs/harness/graph/src/extractor/*.ts` sub-extractors, `700` for `libs/harness/graph/src/extractor/compiler-session.ts` and `libs/harness/graph/src/engine/*.ts`, `750` for all other `libs/harness/graph/src/**/*.ts`, and the default `MaxPluginFileLines = 800` ceiling unconditionally—passing `isModularPluginFile: false` cannot opt out a path matched by `isModularPluginPath`. Furthermore, orchestrator facades strictly ban wildcard `export * from` re-exports (`facade-star-reexport`).
+- **REQ-1.3:** `AstGateCache.decide` under `HARNESS_GATE_RULE_VERSION = "ast-gates-v3"` invalidates previous AST caches and enforces `catch-cause-interrupts-only` (prohibiting `Cause.hasInterruptsOnly` in non-test `Effect.catchCause` blocks to preserve full interruption safety in favor of `Cause.hasInterrupts`) and `unisolated-dot-harness-test-write` (banning test files from writing directly to live `.harness/` paths instead of isolated temp directories).
 - **REQ-2.5:** `ActiveMutantContext` synchronizes with `globalThis.__HARNESS_ACTIVE_MUTANT_ID` inside its scoped `Effect.acquireRelease` bracket so generated Mutant Schemata (`ADR-0010`) and Effect fibers observe identical active mutant state.
 
 ## Out of scope
@@ -136,11 +176,13 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ## Known residual risks
 
-- Existing canonical entry files (`type-extractor.ts`, `datalog-engine.ts`, `graph-rewrite.ts`, `gc-check.ts`) retain their public exports to preserve referential integrity for `ADR-0001..0011` and `SPEC-0001..0010`.
+- None. Tiered RFC-0007 line budgets (`250` for orchestrator facades, `499` for sub-extractors, `700` for compiler session and engines, `750` for other graph modules, and `800` default) and facade star re-export bans are directly enforced by `SelfDogfooding.decide` via `resolvePathSpecificMaxLines`, eliminating reliance on test-only assertions.
 
 ## Acceptance criteria
 
 - All requirement rows pass their declared verification method (`PropertyTest`, `UnitTest`).
+- `SelfDogfooding.decide` directly verifies zero `yield* Effect.void` statements (`effect-fn-dummy-void`), zero `switch` statements (`harness-switch-statement`), zero `match(...).run()` calls (`match-run-statement`), zero orchestrator facade star re-exports (`facade-star-reexport`), and tiered line budget compliance via `resolvePathSpecificMaxLines` across all source files.
+- `AstGateCache.decide` (`ast-gates-v3`) directly verifies full interruption safety by eliminating `Cause.hasInterruptsOnly` in non-test `Effect.catchCause` handlers (`catch-cause-interrupts-only`) and bans test writes to live `.harness/` paths (`unisolated-dot-harness-test-write`).
 - Zero `yield* Effect.void` statements and zero `switch` statements remain across `libs/` and `apps/` non-test source files.
 - `pnpm harness plan-check`, `pnpm harness gc --strict`, `pnpm harness ontology check --strict`, `pnpm harness mutate --strict`, `CI=true pnpm harness verify`, and `CI=true pnpm harness done` pass with zero errors.
 

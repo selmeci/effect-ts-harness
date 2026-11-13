@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import * as net from "node:net"
 import { dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { Cause, Effect, Layer, Option, Schema } from "effect"
+import { Cause, Effect, Layer, Logger, Option, Schema } from "effect"
 import * as Graph from "effect/Graph"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match, P } from "ts-pattern"
@@ -71,6 +71,7 @@ import {
   type GovernanceDocReference,
   HARNESS_GATE_RULE_VERSION,
   INTERACTIVE_NX_BANNED_REASON,
+  isModularPluginPath,
   normalizeConditionPrefix,
   parseDstSeedEnv,
   PlanSearchInput,
@@ -131,8 +132,9 @@ import {
   findTestsReaching,
   getNodeKey,
   getOrCreateWarmProgramSession,
+  type GraphSnapshotError,
   type HarnessGraph,
-  loadGraphSnapshot,
+  loadGraphSnapshotEffect,
   mergeOmnigraphBranch,
   OmnigraphSync,
   projectOntologyLayers,
@@ -1136,15 +1138,7 @@ const handleVerify = (
         }
       }
 
-      const rawModularDeltaFiles = deltaFiles.filter(
-        (f) =>
-          f.startsWith("libs/harness/gates/src/") ||
-          f.includes("/plugins/") ||
-          f.includes("/services/") ||
-          f.includes("/commands/") ||
-          f.includes("/tools/") ||
-          f.includes("/mutation/"),
-      )
+      const rawModularDeltaFiles = deltaFiles.filter((f) => isModularPluginPath(f))
       let modularDeltaFiles = rawModularDeltaFiles
       if (modularDeltaFiles.length === 0 && existsSync(join(repoRoot, "libs", "harness", "gates", "src"))) {
         process.stderr.write(
@@ -1878,12 +1872,98 @@ const handleDone = (
     // 2. Graph diff check
     let planGraph = options?.planGraph
     let implGraph = options?.implGraph
-    if (!planGraph && !implGraph) {
+    if (!planGraph || !implGraph) {
       const planPath = join(repoRoot, ".harness", "plan-graph-snapshot.json")
       const implPath = join(repoRoot, ".harness", "graph-snapshot.json")
-      if (existsSync(planPath) && existsSync(implPath)) {
-        planGraph = loadGraphSnapshot(planPath)
-        implGraph = loadGraphSnapshot(implPath)
+      const needPlan = planGraph === undefined
+      const needImpl = implGraph === undefined
+      if ((!needPlan || existsSync(planPath)) && (!needImpl || existsSync(implPath))) {
+        const planLoad = needPlan
+          ? yield* loadGraphSnapshotEffect(planPath).pipe(
+              Effect.map((graph) => ({ _tag: "Ok" as const, graph })),
+              Effect.catchTag("GraphSnapshotError", (err: GraphSnapshotError) =>
+                Effect.gen(function* () {
+                  yield* Effect.logError(
+                    `Failed to load plan graph snapshot at '${err.path}' [${err.reason}]: ${err.message}`,
+                  )
+                  return { _tag: "Err" as const, err }
+                }),
+              ),
+            )
+          : { _tag: "Ok" as const, graph: planGraph! }
+        const implLoad = needImpl
+          ? yield* loadGraphSnapshotEffect(implPath).pipe(
+              Effect.map((graph) => ({ _tag: "Ok" as const, graph })),
+              Effect.catchTag("GraphSnapshotError", (err: GraphSnapshotError) =>
+                Effect.gen(function* () {
+                  yield* Effect.logError(
+                    `Failed to load implementation graph snapshot at '${err.path}' [${err.reason}]: ${err.message}`,
+                  )
+                  return { _tag: "Err" as const, err }
+                }),
+              ),
+            )
+          : { _tag: "Ok" as const, graph: implGraph! }
+
+        const loadOutcome = match({ planLoad, implLoad })
+          .with({ planLoad: { _tag: "Err" } }, ({ planLoad: { err } }) => {
+            const reason = `Corrupt plan graph snapshot at '${err.path}' [${err.reason}]: ${err.message}`
+            return {
+              _tag: "Failure" as const,
+              result: {
+                exitCode: isAntigravity ? 0 : 1,
+                stdout: JSON.stringify({
+                  decision: blockDecision,
+                  reason,
+                }),
+                stderr: `[GATE FAILURE] done:plan-graph-snapshot\n${reason}`,
+              } satisfies CliResult,
+            }
+          })
+          .with({ implLoad: { _tag: "Err" } }, ({ implLoad: { err } }) => {
+            const reason = `Corrupt implementation graph snapshot at '${err.path}' [${err.reason}]: ${err.message}`
+            return {
+              _tag: "Failure" as const,
+              result: {
+                exitCode: isAntigravity ? 0 : 1,
+                stdout: JSON.stringify({
+                  decision: blockDecision,
+                  reason,
+                }),
+                stderr: `[GATE FAILURE] done:impl-graph-snapshot\n${reason}`,
+              } satisfies CliResult,
+            }
+          })
+          .with({ planLoad: { _tag: "Ok" }, implLoad: { _tag: "Ok" } }, ({ planLoad, implLoad }) => ({
+            _tag: "Success" as const,
+            planGraph: planLoad.graph,
+            implGraph: implLoad.graph,
+          }))
+          .exhaustive()
+
+        const exitResult = match(loadOutcome)
+          .with({ _tag: "Failure" }, ({ result }) => Option.some(result))
+          .with({ _tag: "Success" }, () => Option.none<CliResult>())
+          .exhaustive()
+
+        const earlyExit = match(exitResult)
+          .with({ _tag: "Some" }, ({ value }) => value)
+          .with({ _tag: "None" }, () => undefined)
+          .exhaustive()
+
+        if (earlyExit !== undefined) {
+          return earlyExit
+        }
+
+        const loadedGraphs = match(loadOutcome)
+          .with({ _tag: "Success" }, (s) => s)
+          .with({ _tag: "Failure" }, () => undefined)
+          .exhaustive()
+
+        if (loadedGraphs !== undefined) {
+          planGraph = loadedGraphs.planGraph
+          implGraph = loadedGraphs.implGraph
+        }
       }
     }
     if (planGraph && implGraph) {
@@ -2477,7 +2557,7 @@ const handleDoctorOrSession = (
           }).pipe(
             Effect.timeoutOption("10 seconds"),
             Effect.catchCause((cause) =>
-              Cause.hasInterruptsOnly(cause) ? Effect.interrupt : Effect.succeedNone,
+              Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeedNone,
             ),
             Effect.provide(decisionLayer),
           ),
@@ -2489,13 +2569,45 @@ const handleDoctorOrSession = (
       .map((fn) => fn.spanName)
 
     let missingPlannedFns: ReadonlyArray<string> = []
+    let snapshotOk = true
     if (existsSync(planPath) && existsSync(implPath)) {
-      const planGraph = loadGraphSnapshot(planPath)
-      const implGraph = loadGraphSnapshot(implPath)
-      const diff = diffPlanAndImplGraphs(planGraph, implGraph)
-      if (!diff.ok) {
-        missingPlannedFns = diff.reasons
-      }
+      const planLoad = yield* loadGraphSnapshotEffect(planPath).pipe(
+        Effect.map((graph) => ({ _tag: "Ok" as const, graph })),
+        Effect.catchTag("GraphSnapshotError", (err: GraphSnapshotError) =>
+          Effect.gen(function* () {
+            yield* Effect.logError(
+              `Failed to load plan graph snapshot at '${err.path}' [${err.reason}]: ${err.message}`,
+            )
+            return { _tag: "Err" as const, err }
+          }),
+        ),
+      )
+      const implLoad = yield* loadGraphSnapshotEffect(implPath).pipe(
+        Effect.map((graph) => ({ _tag: "Ok" as const, graph })),
+        Effect.catchTag("GraphSnapshotError", (err: GraphSnapshotError) =>
+          Effect.gen(function* () {
+            yield* Effect.logError(
+              `Failed to load implementation graph snapshot at '${err.path}' [${err.reason}]: ${err.message}`,
+            )
+            return { _tag: "Err" as const, err }
+          }),
+        ),
+      )
+
+      missingPlannedFns = match({ planLoad, implLoad })
+        .with({ planLoad: { _tag: "Err" } }, ({ planLoad: { err } }) => {
+          snapshotOk = false
+          return [`Corrupt plan graph snapshot at '${err.path}' [${err.reason}]: ${err.message}`]
+        })
+        .with({ implLoad: { _tag: "Err" } }, ({ implLoad: { err } }) => {
+          snapshotOk = false
+          return [`Corrupt implementation graph snapshot at '${err.path}' [${err.reason}]: ${err.message}`]
+        })
+        .with({ planLoad: { _tag: "Ok" }, implLoad: { _tag: "Ok" } }, ({ planLoad, implLoad }) => {
+          const diff = diffPlanAndImplGraphs(planLoad.graph, implLoad.graph)
+          return diff.ok ? [] : diff.reasons
+        })
+        .exhaustive()
     }
 
     const stampCheck = checkVerifyStamp(repoRoot)
@@ -2526,7 +2638,7 @@ const handleDoctorOrSession = (
       stampValid: effectiveStampValid,
     })
 
-    const ok = nodeOk && snapshotDirOk && effectLspOk && omnigraphInitialized && ollamaReady
+    const ok = nodeOk && snapshotDirOk && snapshotOk && effectLspOk && omnigraphInitialized && ollamaReady
 
     if (isAntigravity) {
       const injected: Array<string> = []
@@ -2534,6 +2646,9 @@ const handleDoctorOrSession = (
         injected.push(
           "[CRITICAL HARNESS BLOCKER] Key component Ollama (clef-flash DecisionModel) is offline and could not be started automatically. Stop all implementation immediately and inform the user.",
         )
+      }
+      if (!snapshotOk) {
+        injected.push(...missingPlannedFns)
       }
       if (handoff.handoffMessage !== null) {
         injected.push(handoff.handoffMessage)
@@ -2553,6 +2668,7 @@ const handleDoctorOrSession = (
         nodeVersion: process.versions.node,
         nodeOk,
         snapshotDirOk,
+        snapshotOk,
         effectLspOk,
         omnigraphInitialized,
         ollamaReady,
@@ -2566,7 +2682,7 @@ const handleDoctorOrSession = (
       }),
       stderr: ok
         ? ""
-        : `Doctor check failed: nodeOk=${nodeOk}, snapshotDirOk=${snapshotDirOk}, effectLspOk=${effectLspOk}, omnigraphInitialized=${omnigraphInitialized}, ollamaReady=${ollamaReady}`,
+        : `Doctor check failed: nodeOk=${nodeOk}, snapshotDirOk=${snapshotDirOk}, snapshotOk=${snapshotOk}, effectLspOk=${effectLspOk}, omnigraphInitialized=${omnigraphInitialized}, ollamaReady=${ollamaReady}`,
     }
   })
 
@@ -3921,7 +4037,7 @@ export const runCliEffect = (
     }
 
     return res
-  })
+  }).pipe(Effect.provideService(Logger.LogToStderr, true))
 
 export const runCli = (
   argv: ReadonlyArray<string>,

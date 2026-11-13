@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod"
-import { Cause, Effect, Layer, Option, Schema } from "effect"
+import { Cause, Effect, Layer, Logger, Option, Schema } from "effect"
 import * as Graph from "effect/Graph"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
@@ -28,7 +28,7 @@ import {
   findTestsReaching,
   getNodeKey,
   getOrCreateWarmProgramSession,
-  type GraphInferenceError,
+  GraphInferenceError,
   type GraphProjectorError,
   type GraphRewriteError,
   HARNESS_GQ_QUERY_NAMES,
@@ -36,7 +36,7 @@ import {
   type HarnessGraph,
   invokeOmnigraphNamedQuery,
   isEntityNode,
-  loadGraphSnapshot,
+  loadGraphSnapshotEffect,
   NodeKey,
   OmnigraphSync,
   PageRankScoreMillis,
@@ -253,7 +253,23 @@ const resolveGraph = (
       }
     }
     if (snapshotPath && fs.existsSync(snapshotPath)) {
-      return loadGraphSnapshot(snapshotPath)
+      return yield* loadGraphSnapshotEffect(snapshotPath).pipe(
+        Effect.tapError((error) =>
+          Effect.logWarning(
+            `Failed to load graph snapshot from '${snapshotPath}' [${error.reason}]: ${error.message}`,
+          ),
+        ),
+        Effect.orElseSucceed(() =>
+          buildHarnessGraph({
+            fns: [],
+            services: [],
+            layers: [],
+            errors: [],
+            tests: [],
+            patternDocs: [],
+          }),
+        ),
+      )
     }
     return buildHarnessGraph({
       fns: [],
@@ -280,14 +296,57 @@ const resolveGraph = (
 }
 
 export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolean => {
-  const rel = path.relative(path.resolve(rootDir), path.resolve(candidatePath))
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))
+  const logicalRoot = path.resolve(rootDir)
+  const logicalCandidate = path.isAbsolute(candidatePath)
+    ? path.resolve(candidatePath)
+    : path.resolve(logicalRoot, candidatePath)
+  const rel = path.relative(logicalRoot, logicalCandidate)
+  if (rel !== "" && (rel.startsWith("..") || path.isAbsolute(rel))) {
+    return false
+  }
+  if (fs.existsSync(logicalRoot)) {
+    let checkPath = logicalCandidate
+    while (!fs.existsSync(checkPath) && checkPath !== logicalRoot) {
+      const parent = path.dirname(checkPath)
+      if (parent === checkPath) break
+      checkPath = parent
+    }
+    if (fs.existsSync(checkPath)) {
+      const checkRel = path.relative(logicalRoot, checkPath)
+      if (!checkRel.startsWith("..") && !path.isAbsolute(checkRel)) {
+        const contained = Effect.runSync(
+          Effect.try({
+            try: () => {
+              const realRoot = fs.realpathSync.native(logicalRoot)
+              const realCheck = fs.realpathSync.native(checkPath)
+              const realRel = path.relative(realRoot, realCheck)
+              return !(realRel !== "" && (realRel.startsWith("..") || path.isAbsolute(realRel)))
+            },
+            catch: () => false,
+          }),
+        )
+        if (!contained) {
+          return false
+        }
+      }
+    }
+  }
+  return true
 }
 
 export const normalizeProjectPath = (repoRoot: string, rawProject: string): string => {
-  const resolved = path.isAbsolute(rawProject) ? rawProject : path.resolve(repoRoot, rawProject)
+  const resolved = path.isAbsolute(rawProject) ? path.resolve(rawProject) : path.resolve(repoRoot, rawProject)
+  if (!isPathInsideRoot(repoRoot, resolved)) {
+    // oxlint-disable-next-line -- validated boundary failure caught by Effect.try
+    throw new Error(`Project path '${rawProject}' escapes repository root '${repoRoot}'.`)
+  }
   if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
-    return path.join(resolved, "tsconfig.json")
+    const joined = path.join(resolved, "tsconfig.json")
+    if (!isPathInsideRoot(repoRoot, joined)) {
+      // oxlint-disable-next-line -- validated boundary failure caught by Effect.try
+      throw new Error(`Project path '${joined}' escapes repository root '${repoRoot}'.`)
+    }
+    return joined
   }
   return resolved
 }
@@ -318,15 +377,20 @@ export const runDefaultLspDiagnostics = (
     readonly tsconfigPath?: string | undefined
   },
 ): Effect.Effect<LspDiagnosticsReport> =>
-  Effect.try(() => {
+  Effect.try({
+    try: () => {
     const cliArgs = ["diagnostics", "--strict", "--format", "json"]
     const effectiveFile = input.file ?? input.filePath
     const effectiveProject = input.project ?? input.tsconfigPath
     let resolvedFile: string | undefined
     if (effectiveFile !== undefined && effectiveFile.trim().length > 0) {
       resolvedFile = path.isAbsolute(effectiveFile)
-        ? effectiveFile
+        ? path.resolve(effectiveFile)
         : path.resolve(repoRoot, effectiveFile)
+      if (!isPathInsideRoot(repoRoot, resolvedFile)) {
+        // oxlint-disable-next-line -- validated boundary failure caught by Effect.try
+        throw new Error(`File path '${effectiveFile}' escapes repository root '${repoRoot}'.`)
+      }
       if (effectiveProject !== undefined && effectiveProject.trim().length > 0) {
         cliArgs.push("--project", normalizeProjectPath(repoRoot, effectiveProject))
       } else {
@@ -364,6 +428,7 @@ export const runDefaultLspDiagnostics = (
     if (
       resolvedFile !== undefined &&
       fs.existsSync(resolvedFile) &&
+      (resolvedFile.endsWith(".ts") || resolvedFile.endsWith(".tsx")) &&
       !resolvedFile.endsWith(".test.ts") &&
       !resolvedFile.endsWith(".spec.ts")
     ) {
@@ -481,9 +546,11 @@ export const runDefaultLspDiagnostics = (
         messages: failureDetails.length,
       },
     } satisfies LspDiagnosticsReport
-  }).pipe(
+  },
+  catch: (err) => (err instanceof Error ? err.message : String(err)),
+}).pipe(
     Effect.catch((cause): Effect.Effect<LspDiagnosticsReport> => {
-      const msg = `[lsp-exception] ${cause instanceof Error ? cause.message : String(cause)}`
+      const msg = `[lsp-exception] ${cause}`
       return Effect.succeed({
         clean: false,
         diagnostics: [msg],
@@ -572,7 +639,7 @@ export const buildLiveMcpToolDescriptors = (
             Effect.provide(decisionLayer),
             Effect.timeoutOption("1500 millis"),
             Effect.catchCause((cause) =>
-              Cause.hasInterruptsOnly(cause) ? Effect.interrupt : Effect.succeedNone,
+              Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeedNone,
             ),
           )
           let block: string = Option.getOrElse(routedOpt, () => "review")
@@ -690,22 +757,84 @@ export const buildLiveMcpToolDescriptors = (
           const overlays = typedArgs.overlays
           const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
           if (overlays !== undefined && Object.keys(overlays).length > 0) {
+            const escapedBoundaryPaths: Array<{ readonly file: string; readonly message: string }> = []
+            for (const k of Object.keys(overlays)) {
+              const absKey = path.isAbsolute(k) ? path.resolve(k) : path.resolve(root, k)
+              if (!isPathInsideRoot(root, absKey)) {
+                escapedBoundaryPaths.push({
+                  file: k,
+                  message: `Overlay path '${k}' escapes repository root.`,
+                })
+              }
+            }
+            if (file !== undefined && file.length > 0) {
+              const absFile = path.isAbsolute(file) ? path.resolve(file) : path.resolve(root, file)
+              if (!isPathInsideRoot(root, absFile)) {
+                escapedBoundaryPaths.push({
+                  file,
+                  message: `File path '${file}' escapes repository root.`,
+                })
+              }
+            }
+            if (project !== undefined && project.length > 0) {
+              const absProject = path.isAbsolute(project) ? path.resolve(project) : path.resolve(root, project)
+              if (!isPathInsideRoot(root, absProject)) {
+                escapedBoundaryPaths.push({
+                  file: project,
+                  message: `Project path '${project}' escapes repository root.`,
+                })
+              }
+            }
+            if (escapedBoundaryPaths.length > 0) {
+              const escapeDiags = escapedBoundaryPaths.map((entry) => ({
+                file: entry.file,
+                line: 1,
+                column: 1,
+                code: "PATH_TRAVERSAL",
+                severity: "error" as const,
+                message: entry.message,
+              }))
+              return {
+                clean: false,
+                diagnostics: escapeDiags,
+                summary: {
+                  filesChecked: 0,
+                  filesWithoutPlugin: 0,
+                  totalFiles: Object.keys(overlays).length,
+                  errors: escapeDiags.length,
+                  warnings: 0,
+                  messages: escapeDiags.length,
+                },
+              } satisfies LspDiagnosticsReport
+            }
+            const toRootRelPosix = (p: string): string =>
+              path.relative(root, path.isAbsolute(p) ? path.resolve(p) : path.resolve(root, p)).replace(/\\/g, "/")
+            const targetRelFile =
+              file !== undefined && file.trim().length > 0 ? toRootRelPosix(file) : undefined
+            const matchesTargetFile = (candidate: string): boolean => {
+              if (targetRelFile === undefined) return true
+              return toRootRelPosix(candidate) === targetRelFile
+            }
             const compilableKeys = Object.keys(overlays).filter(
               (k) => (k.endsWith(".ts") || k.endsWith(".tsx")) && !k.endsWith(".d.ts"),
             )
+            const matchedKeys =
+              targetRelFile !== undefined
+                ? compilableKeys.filter(matchesTargetFile)
+                : compilableKeys
             const session = getOrCreateWarmProgramSession(root)
             const diags = evaluateOverlayDiagnostics(root, overlays, session)
             const filteredDiags =
-              file !== undefined && file.length > 0
-                ? diags.filter((d) => d.file === file || d.file.endsWith(file))
+              targetRelFile !== undefined
+                ? diags.filter((d) => matchesTargetFile(d.file))
                 : diags
             const errors = filteredDiags.filter((d) => d.severity === "error").length
             const warnings = filteredDiags.filter((d) => d.severity === "warning").length
             return {
-              clean: compilableKeys.length > 0 && errors === 0 && warnings === 0,
+              clean: matchedKeys.length > 0 && errors === 0 && warnings === 0,
               diagnostics: filteredDiags,
               summary: {
-                filesChecked: compilableKeys.length,
+                filesChecked: matchedKeys.length,
                 filesWithoutPlugin: 0,
                 totalFiles: Object.keys(overlays).length,
                 errors,
@@ -898,7 +1027,7 @@ export const buildLiveMcpToolDescriptors = (
                   Effect.provide(decisionLayer),
                   Effect.timeoutOption("1500 millis"),
                   Effect.catchCause((cause) =>
-                    Cause.hasInterruptsOnly(cause) ? Effect.interrupt : Effect.succeedNone,
+                    Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeedNone,
                   ),
                 )
 
@@ -916,6 +1045,12 @@ export const buildLiveMcpToolDescriptors = (
               holeTeleportationWeights,
             }
           } else if (rawPriors !== undefined) {
+            if (typeof rawPriors !== "object" || rawPriors === null) {
+              return yield* new GraphInferenceError({
+                reason: "invalid-graph",
+                message: "Expected priors to be a non-null object.",
+              })
+            }
             const edgeOverrides: Record<string, ConfidenceMillis> = {}
             const teleportWeights: Record<NodeKey, PageRankScoreMillis> = {}
             const sourceEdges =
@@ -925,8 +1060,18 @@ export const buildLiveMcpToolDescriptors = (
                     rawPriors.edgeConfidenceByRelationTargetRole
                   ? rawPriors.edgeConfidenceByRelationTargetRole
                   : {}
+            const decodeConfidence = Schema.decodeUnknownEffect(ConfidenceMillis)
+            const decodeTeleportWeight = Schema.decodeUnknownEffect(PageRankScoreMillis)
             for (const [k, v] of Object.entries(sourceEdges)) {
-              edgeOverrides[k] = ConfidenceMillis.make(v)
+              edgeOverrides[k] = yield* decodeConfidence(v).pipe(
+                Effect.mapError(
+                  (err) =>
+                    new GraphInferenceError({
+                      reason: "invalid-graph",
+                      message: `Invalid edge confidence prior for '${k}': ${String(err)}`,
+                    }),
+                ),
+              )
             }
             const sourceTeleport =
               "holeTeleportationWeights" in rawPriors && rawPriors.holeTeleportationWeights
@@ -935,7 +1080,15 @@ export const buildLiveMcpToolDescriptors = (
                   ? rawPriors.teleportationWeightByNodeKey
                   : {}
             for (const [k, v] of Object.entries(sourceTeleport)) {
-              teleportWeights[NodeKey.make(k)] = PageRankScoreMillis.make(v)
+              teleportWeights[NodeKey.make(k)] = yield* decodeTeleportWeight(v).pipe(
+                Effect.mapError(
+                  (err) =>
+                    new GraphInferenceError({
+                      reason: "invalid-graph",
+                      message: `Invalid teleportation weight prior for '${k}': ${String(err)}`,
+                    }),
+                ),
+              )
             }
             priors = {
               edgeConfidenceOverrides: edgeOverrides,
@@ -1094,7 +1247,7 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
   const result: unknown = yield* dispatchMcpTool({
     toolName,
     args,
-  }).pipe(Effect.provide(liveToolRegistryLayer))
+  }).pipe(Effect.provide(liveToolRegistryLayer), Effect.provideService(Logger.LogToStderr, true))
 
   const durationMs = Math.max(0, Math.round(performance.now() - startTime))
   if (options?.repoRoot !== undefined || process.env.VITEST === undefined) {
@@ -1247,6 +1400,12 @@ export const createServer = (options?: ServerOptions): McpServer => {
         .max(50)
         .optional()
         .describe("Optional workspace subdirectories to search (defaults to ['libs', 'apps'])"),
+      repoRoot: z
+        .string()
+        .min(1)
+        .max(1024)
+        .optional()
+        .describe("Optional repository or worktree root directory"),
     },
     (args) =>
       Effect.runPromise(
@@ -1484,7 +1643,8 @@ export const createServer = (options?: ServerOptions): McpServer => {
         .optional()
         .describe("Optional alias for project tsconfig.json path to check"),
       overlays: z
-        .record(z.string(), z.string())
+        .record(z.string().min(1).max(512), z.string().max(1_000_000))
+        .refine((rec) => Object.keys(rec).length <= 200, "Too many overlay files (max 200)")
         .optional()
         .describe(
           "Optional map of relative/absolute file paths to in-memory TypeScript content for Shadow LSP verification",
@@ -1626,55 +1786,56 @@ const createDaemonNetServer = (repoRoot: string): net.Server =>
           const targetRoot = req.repoRoot ?? repoRoot
           const resolvedRoot = path.resolve(targetRoot)
           void Effect.runPromise(
-            Effect.gen(function* () {
-              if (req.command === "ping") {
-                return { id: req.id, ok: true, status: "warm" }
-              }
-              if (req.command === "extract-graph") {
-                const graph = yield* extractWorkspaceTypeAwareGraph(resolvedRoot)
-                return {
-                  id: req.id,
-                  ok: true,
-                  nodeCount: Graph.nodeCount(graph.graph),
-                  edgeCount: Graph.edgeCount(graph.graph),
-                  violationCount: (graph.branchingViolations ?? []).length,
-                }
-              }
-              if (req.command === "ast-gates") {
-                const cachePath = AstGateCache.resolveCachePath(resolvedRoot)
-                const requestedRelPaths = req.files ?? []
-                for (const rel of requestedRelPaths) {
-                  const resolvedAbs = path.resolve(resolvedRoot, rel)
-                  if (
-                    resolvedAbs !== resolvedRoot &&
-                    !resolvedAbs.startsWith(`${resolvedRoot}${path.sep}`)
-                  ) {
+            match<typeof req.command, Effect.Effect<Record<string, unknown>>>(req.command)
+              .with("ping", () => Effect.succeed({ id: req.id, ok: true, status: "warm" }))
+                .with("extract-graph", () =>
+                  Effect.gen(function* () {
+                    const graph = yield* extractWorkspaceTypeAwareGraph(resolvedRoot)
                     return {
                       id: req.id,
-                      ok: false,
-                      error: `Path traversal outside workspace root is forbidden: ${rel}`,
+                      ok: true,
+                      nodeCount: Graph.nodeCount(graph.graph),
+                      edgeCount: Graph.edgeCount(graph.graph),
+                      violationCount: (graph.branchingViolations ?? []).length,
                     }
-                  }
-                }
-                const loadedFiles = requestedRelPaths.flatMap((rel) => {
-                  const abs = path.resolve(resolvedRoot, rel)
-                  if (!fs.existsSync(abs)) return []
-                  return [
-                    {
-                      filePath: AstSourceFilePath.make(rel),
-                      content: AstSourceContent.make(fs.readFileSync(abs, "utf8")),
-                    },
-                  ]
-                })
-                const report = yield* AstGateCache.decide({
-                  files: loadedFiles,
-                  ruleVersion: HARNESS_GATE_RULE_VERSION,
-                  cacheFilePath: cachePath,
-                })
-                return { id: req.id, ok: true, report }
-              }
-              return { id: req.id, ok: false, fallbackToInProcess: true }
-            }),
+                  }),
+                )
+                .with("ast-gates", () =>
+                  Effect.gen(function* () {
+                    const cachePath = AstGateCache.resolveCachePath(resolvedRoot)
+                    const requestedRelPaths = req.files ?? []
+                    for (const rel of requestedRelPaths) {
+                      const resolvedAbs = path.resolve(resolvedRoot, rel)
+                      if (!isPathInsideRoot(resolvedRoot, resolvedAbs)) {
+                        return {
+                          id: req.id,
+                          ok: false,
+                          error: `Path traversal outside workspace root is forbidden: ${rel}`,
+                        }
+                      }
+                    }
+                    const loadedFiles = requestedRelPaths.flatMap((rel) => {
+                      const abs = path.resolve(resolvedRoot, rel)
+                      if (!fs.existsSync(abs)) return []
+                      return [
+                        {
+                          filePath: AstSourceFilePath.make(rel),
+                          content: AstSourceContent.make(fs.readFileSync(abs, "utf8")),
+                        },
+                      ]
+                    })
+                    const report = yield* AstGateCache.decide({
+                      files: loadedFiles,
+                      ruleVersion: HARNESS_GATE_RULE_VERSION,
+                      cacheFilePath: cachePath,
+                    })
+                    return { id: req.id, ok: true, report }
+                  }),
+                )
+              .with("plan-check", "gc", "verify", "bench", () =>
+                Effect.succeed({ id: req.id, ok: false, fallbackToInProcess: true }),
+              )
+              .exhaustive(),
           )
             .then((res) => {
               if (!socket.destroyed && socket.writable) {

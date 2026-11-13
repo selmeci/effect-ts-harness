@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { Effect, Schema } from "effect"
-import { buildHarnessGraph, loadGraphSnapshot, RelationId, saveGraphSnapshot } from "@harness/graph"
+import { buildHarnessGraph, loadGraphSnapshotEffect, RelationId, saveGraphSnapshot } from "@harness/graph"
 import {
   buildSessionHandoff,
   checkLoopThrashing,
@@ -43,48 +43,50 @@ import {
 } from "../src/index.js"
 
 describe("Harness Gates: GC check, Session Handoff, Span Budget, and State Dir", () => {
-  it("diffs plan and impl snapshots and confirms 0 missing symbols", () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "harness-gates-snap-"))
-    try {
-      const initialPlanGraph = buildHarnessGraph({
-        fns: [
-          {
-            qualname: "libs/sample/domain/src/index.ts#greet",
-            spanName: "greet",
-            packageTag: "domain",
-            file: "libs/sample/domain/src/index.ts",
-            line: 1,
-            successType: "string",
-            isStub: true,
-          },
-        ],
-      })
-      const initialImplGraph = buildHarnessGraph({
-        fns: [
-          {
-            qualname: "libs/sample/domain/src/index.ts#greet",
-            spanName: "greet",
-            packageTag: "domain",
-            file: "libs/sample/domain/src/index.ts",
-            line: 1,
-            successType: "string",
-            isStub: false,
-          },
-        ],
-      })
-      const planPath = join(tempDir, "plan-graph-snapshot.json")
-      const implPath = join(tempDir, "graph-snapshot.json")
-      saveGraphSnapshot(initialPlanGraph, planPath)
-      saveGraphSnapshot(initialImplGraph, implPath)
-      const planGraph = loadGraphSnapshot(planPath)
-      const implGraph = loadGraphSnapshot(implPath)
-      const diff = diffPlanAndImplGraphs(planGraph, implGraph)
-      expect(diff.ok).toBe(true)
-      expect(diff.reasons).toHaveLength(0)
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true })
-    }
-  })
+  it.effect("diffs plan and impl snapshots and confirms 0 missing symbols", () =>
+    Effect.gen(function* () {
+      const tempDir = mkdtempSync(join(tmpdir(), "harness-gates-snap-"))
+      try {
+        const initialPlanGraph = buildHarnessGraph({
+          fns: [
+            {
+              qualname: "libs/sample/domain/src/index.ts#greet",
+              spanName: "greet",
+              packageTag: "domain",
+              file: "libs/sample/domain/src/index.ts",
+              line: 1,
+              successType: "string",
+              isStub: true,
+            },
+          ],
+        })
+        const initialImplGraph = buildHarnessGraph({
+          fns: [
+            {
+              qualname: "libs/sample/domain/src/index.ts#greet",
+              spanName: "greet",
+              packageTag: "domain",
+              file: "libs/sample/domain/src/index.ts",
+              line: 1,
+              successType: "string",
+              isStub: false,
+            },
+          ],
+        })
+        const planPath = join(tempDir, "plan-graph-snapshot.json")
+        const implPath = join(tempDir, "graph-snapshot.json")
+        saveGraphSnapshot(initialPlanGraph, planPath)
+        saveGraphSnapshot(initialImplGraph, implPath)
+        const planGraph = yield* loadGraphSnapshotEffect(planPath)
+        const implGraph = yield* loadGraphSnapshotEffect(implPath)
+        const diff = diffPlanAndImplGraphs(planGraph, implGraph)
+        expect(diff.ok).toBe(true)
+        expect(diff.reasons).toHaveLength(0)
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true })
+      }
+    }),
+  )
   describe("decideGraphEntropy / scanGraphEntropy", () => {
     it.effect(
       "detects unused-service, unprovided-service, dead-tagged-error, and missing-pattern-doc",

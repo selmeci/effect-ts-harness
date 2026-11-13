@@ -368,6 +368,69 @@ For each mutant injected into a `type:domain` AST:
 
 `harness mutate --strict` requires a **100% mutation score** (0 survived mutants) across all domain deciders. If any mutant survives, it highlights a boundary where tests relied on hand-picked example inputs without checking the exact edge condition.
 
+## Exit Inspection & Filesystem Test Isolation
+
+### Exit Inspection: `runPromiseExit` & `Cause.findErrorOption`
+
+Never wrap an effect in `Effect.exit(...)` before passing it to `Effect.runPromise` or `Effect.runSync`. Doing so triggers the `effecttsgo(run-of-exit-to-run-exit)` diagnostic and degrades stack traces. Always invoke `Effect.runPromiseExit` or `Effect.runSyncExit` directly at test entrypoints.
+
+When inspecting failure exits:
+1. Deconstruct `exit` with `match(exit)` from `ts-pattern` or `Exit.match`.
+2. Use `Cause.findErrorOption(cause)` to extract typed failure channels without masking untyped defects. Avoid `Cause.squash`, which collapses untyped defects and typed errors into a single loose exception.
+
+```ts
+import { describe, expect, it } from "@effect/vitest"
+import { Cause, Effect, Exit, Option } from "effect"
+import { match } from "ts-pattern"
+
+it("inspects failure exit cleanly without run(exit)", async () => {
+  const exit = await Effect.runPromiseExit(failingEffect)
+
+  match(exit)
+    .with({ _tag: "Success" }, () => {
+      expect.unreachable("expected effect to fail")
+    })
+    .with({ _tag: "Failure" }, ({ cause }) => {
+      const errorOpt = Cause.findErrorOption(cause)
+      expect(Option.isSome(errorOpt)).toBe(true)
+      if (Option.isSome(errorOpt)) {
+        expect(errorOpt.value._tag).toBe("ExpectedDomainError")
+      }
+    })
+    .exhaustive()
+})
 ```
 
+### Filesystem Isolation: Dedicated `os.tmpdir()` Sandboxes
+
+Tests must never write directly to repository workspaces such as `path.join(process.cwd(), ".harness/...")`. Shared repository writes contaminate workspace state, cause race conditions or flakiness during parallel test runs, and trigger the `unisolated-dot-harness-test-write` gate.
+
+Always allocate an isolated temporary directory via `fs.mkdtempSync(path.join(os.tmpdir(), "harness-test-"))` and clean it up in an `afterEach` hook or finalizer:
+
+```ts
+import * as fs from "node:fs"
+import * as os from "node:os"
+import * as path from "node:path"
+import { afterEach, beforeEach, describe, expect, it } from "@effect/vitest"
+import { Effect } from "effect"
+
+describe("filesystem isolation", () => {
+  let tmpDir: string
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-test-"))
+  })
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it.effect("persists state within isolated tempdir", () =>
+    Effect.gen(function* () {
+      const targetPath = path.join(tmpDir, "cache.json")
+      // perform writes strictly within tmpDir
+      expect(fs.existsSync(targetPath)).toBe(false)
+    }),
+  )
+})
 ```

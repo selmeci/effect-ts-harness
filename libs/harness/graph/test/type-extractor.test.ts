@@ -7,10 +7,12 @@ import { describe, expect, it } from "vitest"
 import {
   buildHarnessGraph,
   clearWarmProgramSessions,
+  computeBaseTopologyHash,
   computeDeclHash,
   createTypeScriptProgramSession,
   diffHarnessGraphs,
   emitDeclarationSignatureText,
+  evaluateOverlayDiagnostics,
   extractTypeAwareGraphFromSource,
   extractTypeGraph,
   extractWorkspaceTypeAwareGraph,
@@ -920,52 +922,55 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
 
     // Verify extractTypeGraph Effect.fn("TypeExtractor.extractWorkspace") over a temp mini-workspace
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "harness-warm-ws-"))
-    const sampleSrcDir = path.join(tmpRoot, "libs", "sample", "domain", "src")
-    fs.mkdirSync(sampleSrcDir, { recursive: true })
-    fs.writeFileSync(
-      path.join(sampleSrcDir, "index.ts"),
-      `import { Effect } from "effect"\nexport const ping = Effect.fn("Sample.ping")(function* () { return yield* Effect.succeed(1) })\n`,
-      "utf-8",
-    )
-    const wsSession = getOrCreateWarmProgramSession(tmpRoot)
-    const wsGraph1 = await Effect.runPromise(
-      extractTypeGraph({ repoRoot: tmpRoot, session: wsSession }),
-    )
-    expect(resolveNode(wsGraph1, "Sample.ping")).toBeDefined()
+    try {
+      const sampleSrcDir = path.join(tmpRoot, "libs", "sample", "domain", "src")
+      fs.mkdirSync(sampleSrcDir, { recursive: true })
+      fs.writeFileSync(
+        path.join(sampleSrcDir, "index.ts"),
+        `import { Effect } from "effect"\nexport const ping = Effect.fn("Sample.ping")(function* () { return yield* Effect.succeed(1) })\n`,
+        "utf-8",
+      )
+      const wsSession = getOrCreateWarmProgramSession(tmpRoot)
+      const wsGraph1 = await Effect.runPromise(
+        extractTypeGraph({ repoRoot: tmpRoot, session: wsSession }),
+      )
+      expect(resolveNode(wsGraph1, "Sample.ping")?._tag).toBe("EffectFn")
 
-    const wsGraph2 = await Effect.runPromise(
-      extractTypeGraph({ repoRoot: tmpRoot, session: wsSession }),
-    )
-    expect(wsSession.lastReextractedFiles).toEqual([])
-    expect(resolveNode(wsGraph2, "Sample.ping")).toBeDefined()
-    const firstSf = wsSession.sourceFileCache.values().next().value?.sourceFile
-    expect(firstSf).toBeDefined()
-    if (firstSf !== undefined) {
-      expect(emitDeclarationSignatureText(firstSf)).toContain("Effect.fn")
+      const wsGraph2 = await Effect.runPromise(
+        extractTypeGraph({ repoRoot: tmpRoot, session: wsSession }),
+      )
+      expect(wsSession.lastReextractedFiles).toEqual([])
+      expect(resolveNode(wsGraph2, "Sample.ping")?._tag).toBe("EffectFn")
+      const firstSf = wsSession.sourceFileCache.values().next().value?.sourceFile
+      expect(firstSf).toBeDefined()
+      if (firstSf !== undefined) {
+        expect(emitDeclarationSignatureText(firstSf)).toContain("Effect.fn")
+      }
+
+      // Verify persistent .harness/cache/file-graph-v1.json reload across cold process sessions (F-9)
+      clearWarmProgramSessions()
+      const reloadedSession = getOrCreateWarmProgramSession(tmpRoot)
+      const wsGraphReloaded = await Effect.runPromise(
+        extractTypeGraph({ repoRoot: tmpRoot, session: reloadedSession }),
+      )
+      expect(reloadedSession.lastReextractedFiles).toEqual([])
+      const reloadedNodeKeys = Array.from(Graph.nodes(wsGraphReloaded.graph))
+        .map(([, n]) => getNodeKey(n))
+        .sort()
+      const origNodeKeys = Array.from(Graph.nodes(wsGraph1.graph))
+        .map(([, n]) => getNodeKey(n))
+        .sort()
+      expect(reloadedNodeKeys).toEqual(origNodeKeys)
+      const reloadedEdgeKeys = Array.from(Graph.edges(wsGraphReloaded.graph))
+        .map(([, e]) => getEdgeKey(e.data))
+        .sort()
+      const origEdgeKeys = Array.from(Graph.edges(wsGraph1.graph))
+        .map(([, e]) => getEdgeKey(e.data))
+        .sort()
+      expect(reloadedEdgeKeys).toEqual(origEdgeKeys)
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true })
     }
-
-    // Verify persistent .harness/cache/file-graph-v1.json reload across cold process sessions (F-9)
-    clearWarmProgramSessions()
-    const reloadedSession = getOrCreateWarmProgramSession(tmpRoot)
-    const wsGraphReloaded = await Effect.runPromise(
-      extractTypeGraph({ repoRoot: tmpRoot, session: reloadedSession }),
-    )
-    expect(reloadedSession.lastReextractedFiles).toEqual([])
-    const reloadedNodeKeys = Array.from(Graph.nodes(wsGraphReloaded.graph))
-      .map(([, n]) => getNodeKey(n))
-      .sort()
-    const origNodeKeys = Array.from(Graph.nodes(wsGraph1.graph))
-      .map(([, n]) => getNodeKey(n))
-      .sort()
-    expect(reloadedNodeKeys).toEqual(origNodeKeys)
-    const reloadedEdgeKeys = Array.from(Graph.edges(wsGraphReloaded.graph))
-      .map(([, e]) => getEdgeKey(e.data))
-      .sort()
-    const origEdgeKeys = Array.from(Graph.edges(wsGraph1.graph))
-      .map(([, e]) => getEdgeKey(e.data))
-      .sort()
-    expect(reloadedEdgeKeys).toEqual(origEdgeKeys)
-    fs.rmSync(tmpRoot, { recursive: true, force: true })
   })
 
   it("maintains strict warm-vs-cold graph equality across unannotated inferred-return edits, 2-hop cones, file add/delete, and packageTag changes (F-4, F-5, F-13)", () => {
@@ -1117,5 +1122,88 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
     ]
     assertWarmEqualsCold(retaggedFiles)
     expect(session.lastReextractedFiles).toContain("libs/sample/domain/src/helper.ts")
+  })
+
+  it("evicts stale overlay SourceFile when removed from session and matches computeBaseTopologyHash", async () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "harness-overlay-cache-"))
+    try {
+      const domainDir = path.join(tmpRoot, "libs", "sample", "domain", "src")
+      fs.mkdirSync(domainDir, { recursive: true })
+      fs.writeFileSync(path.join(domainDir, "index.ts"), "export const okValue: number = 1\n", "utf-8")
+
+      const session = createTypeScriptProgramSession(tmpRoot)
+      const brokenDiags = evaluateOverlayDiagnostics(
+        tmpRoot,
+        { "libs/sample/domain/src/index.ts": 'export const okValue: number = "broken"\n' },
+        session,
+      )
+      expect(brokenDiags.some((d) => d.severity === "error")).toBe(true)
+
+      // Subsequent check with another file (removing index.ts overlay) must read disk index.ts, not stale overlay AST
+      const cleanDiags = evaluateOverlayDiagnostics(
+        tmpRoot,
+        { "libs/sample/domain/src/extra.ts": 'import { okValue } from "./index.js"\nexport const doubled: number = okValue * 2\n' },
+        session,
+      )
+      expect(cleanDiags.filter((d) => d.severity === "error")).toEqual([])
+
+      const g1 = await Effect.runPromise(extractWorkspaceTypeAwareGraph(tmpRoot, { session }))
+      expect(session.lastWorkspaceSnapshot?.baseTopologyHash).toBe(computeBaseTopologyHash(session))
+      expect(g1.nodeIndexByKey).toBeInstanceOf(Map)
+      expect(g1.branchingViolations).toEqual([])
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects symlink escaping repoRoot and never incorporates external symbols into extracted HarnessGraph (F-5)", async () => {
+    const tmpOutside = fs.mkdtempSync(path.join(os.tmpdir(), "harness-outside-escape-"))
+    const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "harness-repo-escape-"))
+    try {
+      fs.writeFileSync(path.join(tmpRepo, "pnpm-workspace.yaml"), "packages:\n  - 'libs/*'\n")
+      const domainDir = path.join(tmpRepo, "libs", "sample", "domain", "src")
+      fs.mkdirSync(domainDir, { recursive: true })
+
+      // Internal valid domain file
+      fs.writeFileSync(
+        path.join(domainDir, "valid.ts"),
+        `import { Effect } from "effect"\nexport const validFn = Effect.fn("Sample.validFn")(function* () { return yield* Effect.succeed(42) })\n`,
+        "utf-8",
+      )
+
+      // External escaped file located entirely outside repoRoot
+      const externalFile = path.join(tmpOutside, "escaped.ts")
+      fs.writeFileSync(
+        externalFile,
+        `import { Effect } from "effect"\nexport const secretFn = Effect.fn("Sample.secretFn")(function* () { return yield* Effect.succeed("leak") })\n`,
+        "utf-8",
+      )
+
+      // Symlink pointing to external file inside domain src
+      const symlinkPath = path.join(domainDir, "escaped-link.ts")
+      fs.symlinkSync(externalFile, symlinkPath)
+
+      // 1. Direct workspace extraction ignores symlink escaping repoRoot
+      const graph = await Effect.runPromise(extractWorkspaceTypeAwareGraph(tmpRepo))
+      expect(graph.nodeIndexByKey).toBeInstanceOf(Map)
+      expect(resolveNode(graph, "Sample.validFn")?._tag).toBe("EffectFn")
+      expect(resolveNode(graph, "Sample.secretFn")).toBeUndefined()
+
+      // 2. Overlay normalization also rejects symlink escaping repoRoot
+      const overlayResult = await Effect.runPromise(
+        extractWorkspaceTypeAwareGraph(tmpRepo, {
+          overlays: {
+            "libs/sample/domain/src/escaped-link.ts": `import { Effect } from "effect"\nexport const secretFn = Effect.fn("Sample.secretFn")(function* () { return yield* Effect.succeed("overlay-leak") })\n`,
+            "../../outside-escape.ts": `import { Effect } from "effect"\nexport const secretFn = Effect.fn("Sample.secretFn")(function* () { return yield* Effect.succeed("overlay-leak2") })\n`,
+          },
+        }),
+      )
+      expect(overlayResult.nodeIndexByKey).toBeInstanceOf(Map)
+      expect(resolveNode(overlayResult, "Sample.secretFn")).toBeUndefined()
+      expect(resolveNode(overlayResult, "Sample.validFn")?._tag).toBe("EffectFn")
+    } finally {
+      fs.rmSync(tmpOutside, { recursive: true, force: true })
+      fs.rmSync(tmpRepo, { recursive: true, force: true })
+    }
   })
 })

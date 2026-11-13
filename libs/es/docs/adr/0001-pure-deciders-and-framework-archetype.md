@@ -11,6 +11,10 @@ enforced_by:
   - libs/es/core/test/fixtures/cart.ts
   - libs/harness/graph/src/policy-check.ts
   - libs/harness/graph/src/type-extractor.ts
+  - libs/harness/graph/src/extractor/ast-policy-extractor.ts
+  - libs/harness/graph/src/extractor/schema-and-brand-extractor.ts
+  - libs/harness/graph/src/extractor/effect-fn-extractor.ts
+  - libs/harness/graph/src/extractor/decider-reducer-extractor.ts
   - tools/oxlint/syntax-bans.js
 spans:
   - Cart.decide
@@ -79,7 +83,7 @@ When implementing Event Sourcing and CQRS on top of Effect v4 and Cloudflare run
 
 | Rule                              | Enforced By                                                                                                         | Gate / Mechanism                                                                                                  | Governed Symbols                                                              |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| Pure Decider (`R = never`)        | `libs/harness/graph/src/policy-check.ts`, `libs/harness/graph/src/type-extractor.ts`, `libs/es/core/src/decider.ts` | `checkEffectGraph` (`impure-decider`), `extractTypeAwareGraphFromSource` (`untraced-decider`)                     | `Cart.decide`                                                                 |
-| Synchronous Infallible Reducer    | `libs/harness/graph/src/policy-check.ts`, `libs/harness/graph/src/type-extractor.ts`, `tools/oxlint/syntax-bans.js` | `checkEffectGraph` (`impure-reducer`), `extractTypeAwareGraphFromSource` (`unscoped-effect-run`)                  | `Cart.evolve`                                                                 |
-| BDD Assertion Structural Equality | `libs/harness/graph/src/type-extractor.ts`, `libs/es/core/src/testing.ts`                                           | `extractTypeAwareGraphFromSource` (`fallback-json-equality`, `vacuous-error-assertion`), `makeDeciderTestHarness` | `Cart.decide`                                                                 |
-| Typed Domain Failure Channel      | `libs/harness/graph/src/type-extractor.ts`, `libs/es/core/test/fixtures/cart.ts`                                    | `extractTypeAwareGraphFromSource` (`missing-aggregate-id-guard`, `unbranded-schema-field`), `failsWith`           | `CartAlreadyCheckedOutError`, `EmptyCartCheckoutError`, `CartIdMismatchError` |
+| Pure Decider (`R = never`)        | `libs/harness/graph/src/policy-check.ts`, `libs/harness/graph/src/extractor/decider-reducer-extractor.ts`, `libs/es/core/src/decider.ts` | `checkEffectGraph` (`impure-decider`), `checkDeciderTracing` (`untraced-decider`)                                 | `Cart.decide`                                                                 |
+| Synchronous Infallible Reducer    | `libs/harness/graph/src/policy-check.ts`, `libs/harness/graph/src/extractor/ast-policy-extractor.ts`, `tools/oxlint/syntax-bans.js`    | `checkEffectGraph` (`impure-reducer`), `checkUnscopedEffectRun` (`unscoped-effect-run`)                           | `Cart.evolve`                                                                 |
+| BDD Assertion Structural Equality | `libs/harness/graph/src/extractor/ast-policy-extractor.ts`, `libs/es/core/src/testing.ts`                                              | `runAstPolicyChecks` (`fallback-json-equality`, `vacuous-error-assertion`), `makeDeciderTestHarness`              | `Cart.decide`                                                                 |
+| Typed Domain Failure Channel      | `libs/harness/graph/src/extractor/decider-reducer-extractor.ts`, `libs/harness/graph/src/extractor/schema-and-brand-extractor.ts`, `libs/harness/graph/src/extractor/effect-fn-extractor.ts`, `libs/es/core/test/fixtures/cart.ts` | `checkMissingAggregateIdGuard` (`missing-aggregate-id-guard`), `checkSchemaBooleanStateAndBrandedFields` (`unbranded-schema-field`), `failsWith` | `CartAlreadyCheckedOutError`, `EmptyCartCheckoutError`, `CartIdMismatchError` |

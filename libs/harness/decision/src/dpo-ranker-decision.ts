@@ -135,7 +135,7 @@ export const DpoCandidateRankResult = Schema.Struct({
 export type DpoCandidateRankResult = typeof DpoCandidateRankResult.Type
 
 export const DpoCandidateBatchResult = Schema.Struct({
-  candidatePriors: Schema.Record(Schema.String, SystemOneScoreMillis),
+  candidatePriors: Schema.Record(DpoPriorKey, SystemOneScoreMillis),
   results: Schema.Array(DpoCandidateRankResult),
   source: PriorSource,
 })
@@ -289,14 +289,14 @@ export const evaluateDpoCandidatePriorsBatch = Effect.fn("DpoCandidateRanker.eva
       } satisfies DpoCandidateBatchResult
     }
 
-    const candidatePriors: Record<string, SystemOneScoreMillis> = {}
-    const modelBackedPriorKeys = new Set<string>()
+    const candidatePriors: Record<DpoPriorKey, SystemOneScoreMillis> = {}
+    const modelBackedPriorKeys = new Set<DpoPriorKey>()
     const results: Array<DpoCandidateRankResult> = []
     let usedFallback = false
     let fallbackReason: DeterministicFallbackReason | undefined
 
     const mergePriorScore = (
-      priorKey: string,
+      priorKey: DpoPriorKey,
       scoreMillis: SystemOneScoreMillis,
       isModelBacked: boolean,
     ): void => {

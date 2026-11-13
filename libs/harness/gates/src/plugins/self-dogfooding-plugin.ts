@@ -25,8 +25,39 @@ export const isModularPluginPath = (filePath: string): boolean => {
   const norm = filePath.replace(/\\/g, "/")
   return (
     /(?:^|\/)libs\/harness\/gates\/src\/.*\.ts$/.test(norm) ||
+    /(?:^|\/)libs\/harness\/graph\/src\/.*\.ts$/.test(norm) ||
     /(?:^|\/)(?:plugins|services|commands|tools|mutation)\//.test(norm)
   )
+}
+
+export const isGraphOrchestratorFacadePath = (filePath: string): boolean => {
+  const norm = filePath.replace(/\\/g, "/")
+  return /(?:^|\/)libs\/harness\/graph\/src\/(?:type-extractor|datalog-engine|graph-rewrite|graph-engine|graph-projector)\.ts$/.test(
+    norm,
+  )
+}
+
+export const resolvePathSpecificMaxLines = (filePath: string, explicitMax?: number): number => {
+  if (explicitMax !== undefined) {
+    return explicitMax
+  }
+  const norm = filePath.replace(/\\/g, "/")
+  if (isGraphOrchestratorFacadePath(norm)) {
+    return 250
+  }
+  if (/(?:^|\/)libs\/harness\/graph\/src\/extractor\/compiler-session\.ts$/.test(norm)) {
+    return 700
+  }
+  if (/(?:^|\/)libs\/harness\/graph\/src\/extractor\/[^/]+\.ts$/.test(norm)) {
+    return 499
+  }
+  if (/(?:^|\/)libs\/harness\/graph\/src\/engine\/[^/]+\.ts$/.test(norm)) {
+    return 700
+  }
+  if (/(?:^|\/)libs\/harness\/graph\/src\/.*\.ts$/.test(norm)) {
+    return 750
+  }
+  return DEFAULT_MAX_PLUGIN_FILE_LINES
 }
 
 const EFFECT_CONSTRUCTORS = new Set([
@@ -62,7 +93,6 @@ const isBannedParentConstructor = (callExpr: ts.CallExpression): boolean => {
 export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function* (
   input: SelfDogfoodingInput,
 ): Effect.fn.Return<SelfDogfoodingReport, SelfDogfoodingViolationError, never> {
-  const maxLines = input.maxPluginFileLines ?? DEFAULT_MAX_PLUGIN_FILE_LINES
   const violations: Array<SelfDogfoodingViolation> = []
   let inspectedCount = 0
 
@@ -75,16 +105,17 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
     inspectedCount += 1
 
     const lineCount = computeWorkspaceFileLineCount(file.content)
+    const fileMaxLines = resolvePathSpecificMaxLines(file.filePath, input.maxPluginFileLines)
     const shouldCheckLineBudget =
       file.isModularPluginFile === true ||
-      (file.isModularPluginFile === undefined &&
-        (isModularPluginPath(file.filePath) || input.maxPluginFileLines !== undefined))
+      isModularPluginPath(file.filePath) ||
+      (file.isModularPluginFile === undefined && input.maxPluginFileLines !== undefined)
 
-    if (shouldCheckLineBudget && lineCount > maxLines) {
+    if (shouldCheckLineBudget && lineCount > fileMaxLines) {
       violations.push({
         rule: SelfDogfoodingRuleId.make("file-line-budget-exceeded"),
         message: SelfDogfoodingMessage.make(
-          `File '${file.filePath}' has ${lineCount} lines, exceeding maxPluginFileLines budget of ${maxLines}.`,
+          `File '${file.filePath}' has ${lineCount} lines, exceeding maxPluginFileLines budget of ${fileMaxLines}.`,
         ),
         file: file.filePath,
         line: SourceLineNumber.make(Math.max(1, lineCount)),
@@ -93,6 +124,24 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
     }
 
     const { sourceFile } = getOrCreateCachedSourceFile(file.filePath, file.content)
+
+    if (isGraphOrchestratorFacadePath(file.filePath)) {
+      for (const stmt of sourceFile.statements) {
+        if (ts.isExportDeclaration(stmt) && stmt.exportClause === undefined) {
+          violations.push({
+            rule: SelfDogfoodingRuleId.make("facade-star-reexport"),
+            message: SelfDogfoodingMessage.make(
+              `Wildcard 'export *' re-export in '${file.filePath}' is banned — decomposed @harness/graph orchestrator facades must use explicit named re-exports (export { ... } from "./...") instead of export * from so internal submodule helpers do not leak into the public API.`,
+            ),
+            file: file.filePath,
+            line: SourceLineNumber.make(
+              sourceFile.getLineAndCharacterOfPosition(stmt.getStart(sourceFile)).line + 1,
+            ),
+            enclosingSymbol: EnclosingSymbolName.make(file.filePath),
+          })
+        }
+      }
+    }
 
     const walk = (node: ts.Node): void => {
       if (ts.isYieldExpression(node)) {

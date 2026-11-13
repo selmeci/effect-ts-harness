@@ -37,6 +37,7 @@ export const SelfDogfoodingRuleId = Schema.Literals([
   "harness-switch-statement",
   "match-run-statement",
   "file-line-budget-exceeded",
+  "facade-star-reexport",
 ]).pipe(Schema.brand("SelfDogfoodingRuleId"))
 export type SelfDogfoodingRuleId = typeof SelfDogfoodingRuleId.Type
 

@@ -252,11 +252,10 @@ export const executeNamedGqQueryInMemory = (
           const providedTags: Array<ServiceTagNode> = []
           for (const edgeIdx of Graph.outgoingEdges(g, nodeIdx)) {
             const edgeOpt = Graph.getEdge(g, edgeIdx)
-            if (Option.isNone(edgeOpt)) continue
-            const edge = edgeOpt.value
-            const targetOpt = Graph.getNode(g, edge.target)
-            if (Option.isNone(targetOpt)) continue
-            const target = targetOpt.value
+            const edge = Option.getOrUndefined(edgeOpt)
+            if (edge === undefined) continue
+            const target = Option.getOrUndefined(Graph.getNode(g, edge.target))
+            if (target === undefined) continue
             if (edge.data.role === "provider-layer" && target._tag === "ServiceLayer") {
               layerNode = target
             } else if (edge.data.role === "provided-service" && target._tag === "ServiceTag") {
@@ -298,12 +297,13 @@ export const executeNamedGqQueryInMemory = (
       return findTestsReaching(harnessGraph, callee).map((t) => ({ ...t }))
     })
     .with("ontology_layer_nodes", () => {
-      const layer = getStringParam(params, "layer", "Business") as ArchiMateLayer
+      const layerParam = getStringParam(params, "layer", "Business")
+      const validLayer: ArchiMateLayer | undefined = match(layerParam)
+        .with("Motivation", "Business", "Application", "Technology", "Implementation", (l) => l)
+        .otherwise(() => undefined)
+      if (validLayer === undefined) return []
       const projection = projectOntologyLayers(harnessGraph)
-      if (layer in projection.layers) {
-        return projection.layers[layer].map((node) => ({ ...node }))
-      }
-      return []
+      return projection.layers[validLayer].map((node) => ({ ...node }))
     })
     .with("ontology_governed_by", () => {
       const symbol = getStringParam(params, "symbol")

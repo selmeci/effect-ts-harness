@@ -3,11 +3,26 @@ import { match } from "ts-pattern"
 import { decideGraphInference } from "./datalog-engine.js"
 import { renderMermaid } from "./graph-engine.js"
 import {
-  type EffectFnNode,
   type HarnessGraph,
-  type ServiceTagNode,
-  type ViolationRule,
+  ViolationRule,
 } from "./model.js"
+import {
+  isAggregateFnNode,
+  isCloudBinding,
+  isDeciderSpan,
+  isEventBusServiceNode,
+  isOutboxDrainOrBusPublishFnNode,
+  isReducerSpan,
+} from "./datalog/datalog-types-and-semiring.js"
+
+export {
+  isAggregateFnNode,
+  isCloudBinding,
+  isDeciderSpan,
+  isEventBusServiceNode,
+  isOutboxDrainOrBusPublishFnNode,
+  isReducerSpan,
+}
 
 export interface GraphPolicyViolation {
   readonly rule: ViolationRule
@@ -45,39 +60,6 @@ export interface CheckEffectGraphOptions {
   readonly checkUnresolvedReferences?: boolean
 }
 
-export const isCloudBinding = (node: ServiceTagNode): boolean =>
-  /^(Cloudflare|Alchemy|Drizzle|Provider|Binding)(\b|[A-Z])/.test(node.tagId) ||
-  /^(Cloudflare|Alchemy|Drizzle|Provider|Binding)(\b|[A-Z])/.test(node.name)
-
-export const isDeciderSpan = (spanName: string): boolean =>
-  spanName.endsWith(".decide") || spanName === "decide"
-
-export const isReducerSpan = (spanName: string): boolean =>
-  spanName.endsWith(".evolve") ||
-  spanName === "evolve" ||
-  spanName.endsWith(".fold") ||
-  spanName === "fold"
-
-export const isAggregateFnNode = (node: EffectFnNode): boolean =>
-  node.spanName.startsWith("Aggregate.") ||
-  node.spanName.startsWith("AggregateInfra.") ||
-  node.spanName.startsWith("AggregateHttp.") ||
-  node.spanName.endsWith(".handleCommand") ||
-  node.spanName.endsWith(".executeCommand") ||
-  /(?:-aggregate|\.aggregate|\/aggregate|^aggregate)\.ts$/.test(node.file)
-
-export const isEventBusServiceNode = (node: ServiceTagNode): boolean =>
-  node.tagId === "EventBus" ||
-  node.tagId.endsWith("EventBus") ||
-  node.tagId.endsWith(".EventBus") ||
-  node.name === "EventBus" ||
-  node.name.endsWith("EventBus")
-
-export const isOutboxDrainOrBusPublishFnNode = (node: EffectFnNode): boolean =>
-  node.spanName === "Outbox.drain" ||
-  node.spanName === "EventBus.publish" ||
-  node.qualname.includes("Outbox.drain") ||
-  node.qualname.includes("EventBus.publish")
 
 /**
  * Rules that are gated by specific lifecycle gates (`gc-check.ts`, `migration-check.ts`)
@@ -180,7 +162,7 @@ export const checkEffectGraph = (
         ok: false,
         violations: [
           {
-            rule: "unresolved-graph-reference" as ViolationRule,
+            rule: ViolationRule.make("unresolved-graph-reference"),
             message: `Policy engine failed: ${failureMsg}`,
             path: [],
           },

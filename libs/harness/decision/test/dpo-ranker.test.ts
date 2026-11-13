@@ -4,6 +4,7 @@ import * as DecisionModel from "effect/ai/DecisionModel"
 import { TestClock } from "effect/testing"
 import {
   DpoCandidateRankerV1,
+  DpoPriorKey,
   NodeKey,
   RewriteRuleId,
   buildBatchedDpoRankerDecision,
@@ -97,9 +98,13 @@ describe("DpoCandidateRankerV1 (System One Semantic Tie-Breaker for DPO Graph Re
         expect(batchRes.source).toEqual({ _tag: "DecisionModel" })
         expect(batchRes.results).toHaveLength(2)
         const score04a =
-          batchRes.candidatePriors["EffectFn:libs/sample/domain/src/order.ts#caller::REP-04a"]
+          batchRes.candidatePriors[
+            DpoPriorKey.make("EffectFn:libs/sample/domain/src/order.ts#caller::REP-04a")
+          ]
         const score04b =
-          batchRes.candidatePriors["EffectFn:libs/sample/domain/src/order.ts#caller::REP-04b"]
+          batchRes.candidatePriors[
+            DpoPriorKey.make("EffectFn:libs/sample/domain/src/order.ts#caller::REP-04b")
+          ]
         expect(score04a).toBe(550)
         expect(score04b).toBe(850)
       }),
@@ -155,10 +160,14 @@ describe("DpoCandidateRankerV1 (System One Semantic Tie-Breaker for DPO Graph Re
           reason: "timeout-or-unavailable",
         })
         expect(
-          batchFallback.candidatePriors["EffectFn:libs/sample/domain/src/order.ts#caller::REP-04a"],
+          batchFallback.candidatePriors[
+            DpoPriorKey.make("EffectFn:libs/sample/domain/src/order.ts#caller::REP-04a")
+          ],
         ).toBe(750)
         expect(
-          batchFallback.candidatePriors["EffectFn:libs/sample/domain/src/order.ts#caller::REP-04b"],
+          batchFallback.candidatePriors[
+            DpoPriorKey.make("EffectFn:libs/sample/domain/src/order.ts#caller::REP-04b")
+          ],
         ).toBe(750)
 
         // Multi-chunk batch (35 candidates => chunk of 32 + chunk of 3)
@@ -177,7 +186,7 @@ describe("DpoCandidateRankerV1 (System One Semantic Tie-Breaker for DPO Graph Re
         expect(multiChunkRes.results).toHaveLength(35)
         expect(
           multiChunkRes.candidatePriors[
-            "EffectFn:libs/sample/domain/src/order.ts#caller34::REP-04a"
+            DpoPriorKey.make("EffectFn:libs/sample/domain/src/order.ts#caller34::REP-04a")
           ],
         ).toBe(1000)
       }),

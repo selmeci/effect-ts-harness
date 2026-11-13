@@ -11,41 +11,18 @@ import {
   isRelationNode,
 } from "./model.js"
 
-export type ArchiMateLayer =
-  | "Motivation"
-  | "Business"
-  | "Application"
-  | "Technology"
-  | "Implementation"
-
+export type ArchiMateLayer = "Motivation" | "Business" | "Application" | "Technology" | "Implementation"
 export type ArchiMateAspect = "ActiveStructure" | "Behavior" | "PassiveStructure" | "Motivation"
 
 export type ArchiMateElementType =
-  | "DriverOrConstraint"
-  | "Requirement"
-  | "BusinessProcess"
-  | "BusinessRule"
-  | "BusinessEvent"
-  | "DataObject"
-  | "ApplicationService"
-  | "ApplicationFunction"
-  | "ApplicationComponent"
-  | "TechnologyService"
-  | "SystemSoftware"
-  | "WorkPackageTest"
-  | "AssessmentPattern"
-  | "CollaborationRelation"
+  | "DriverOrConstraint" | "Requirement" | "BusinessProcess" | "BusinessRule"
+  | "BusinessEvent" | "DataObject" | "ApplicationService" | "ApplicationFunction"
+  | "ApplicationComponent" | "TechnologyService" | "SystemSoftware" | "WorkPackageTest"
+  | "AssessmentPattern" | "CollaborationRelation"
 
 export type ArchiMateRelationType =
-  | "Realization"
-  | "Serving"
-  | "Access"
-  | "Triggering"
-  | "Flow"
-  | "Influence"
-  | "Composition"
-  | "Association"
-  | "Verification"
+  | "Realization" | "Serving" | "Access" | "Triggering" | "Flow"
+  | "Influence" | "Composition" | "Association" | "Verification"
 
 export interface OntologyClassifiedNode {
   readonly key: string
@@ -168,151 +145,32 @@ export const isInfraOrCloudIdentifier = (id: string, file: string): boolean => {
 
 export const classifyOntologyNode = (node: HarnessNode): OntologyClassifiedNode =>
   match(node)
-    .with({ _tag: "AdrDoc" }, (n) => ({
-      key: n.id,
-      label: n.title,
-      nodeTag: n._tag,
-      layer: "Motivation" as const,
-      aspect: "Motivation" as const,
-      elementType: "DriverOrConstraint" as const,
-      file: n.path,
-    }))
-    .with({ _tag: "EarsSpec" }, (n) => ({
-      key: n.id,
-      label: n.title,
-      nodeTag: n._tag,
-      layer: "Motivation" as const,
-      aspect: "Motivation" as const,
-      elementType: "Requirement" as const,
-      file: n.path,
-    }))
+    .with({ _tag: "AdrDoc" }, (n) => ({ key: n.id, label: n.title, nodeTag: n._tag, layer: "Motivation" as const, aspect: "Motivation" as const, elementType: "DriverOrConstraint" as const, file: n.path }))
+    .with({ _tag: "EarsSpec" }, (n) => ({ key: n.id, label: n.title, nodeTag: n._tag, layer: "Motivation" as const, aspect: "Motivation" as const, elementType: "Requirement" as const, file: n.path }))
     .with({ _tag: "EffectFn" }, (n) => {
       const isRule = n.spanName.endsWith(".decide") || n.spanName === "decide"
       if (n.packageTag === "domain" || n.packageTag === "contract") {
-        return {
-          key: n.qualname,
-          label: n.spanName,
-          nodeTag: n._tag,
-          layer: "Business" as const,
-          aspect: "Behavior" as const,
-          elementType: isRule ? ("BusinessRule" as const) : ("BusinessProcess" as const),
-          file: n.file,
-        }
+        return { key: n.qualname, label: n.spanName, nodeTag: n._tag, layer: "Business" as const, aspect: "Behavior" as const, elementType: isRule ? ("BusinessRule" as const) : ("BusinessProcess" as const), file: n.file }
       }
-      return {
-        key: n.qualname,
-        label: n.spanName,
-        nodeTag: n._tag,
-        layer: "Application" as const,
-        aspect: "Behavior" as const,
-        elementType: "ApplicationFunction" as const,
-        file: n.file,
-      }
+      return { key: n.qualname, label: n.spanName, nodeTag: n._tag, layer: "Application" as const, aspect: "Behavior" as const, elementType: "ApplicationFunction" as const, file: n.file }
     })
-    .with({ _tag: "TaggedError" }, (n) => ({
-      key: n.errorTag,
-      label: n.errorTag,
-      nodeTag: n._tag,
-      layer: "Business" as const,
-      aspect: "PassiveStructure" as const,
-      elementType: "BusinessEvent" as const,
-      file: n.file,
-    }))
-    .with({ _tag: "SchemaDef" }, (n) => ({
-      key: n.schemaName,
-      label: n.schemaName,
-      nodeTag: n._tag,
-      layer: "Business" as const,
-      aspect: "PassiveStructure" as const,
-      elementType: "DataObject" as const,
-      file: n.file,
-    }))
+    .with({ _tag: "TaggedError" }, (n) => ({ key: n.errorTag, label: n.errorTag, nodeTag: n._tag, layer: "Business" as const, aspect: "PassiveStructure" as const, elementType: "BusinessEvent" as const, file: n.file }))
+    .with({ _tag: "SchemaDef" }, (n) => ({ key: n.schemaName, label: n.schemaName, nodeTag: n._tag, layer: "Business" as const, aspect: "PassiveStructure" as const, elementType: "DataObject" as const, file: n.file }))
     .with({ _tag: "ServiceTag" }, (n) => {
       const isTech = isInfraOrCloudIdentifier(n.tagId, n.file)
-      return {
-        key: n.tagId,
-        label: n.name,
-        nodeTag: n._tag,
-        layer: isTech ? ("Technology" as const) : ("Application" as const),
-        aspect: isTech ? ("ActiveStructure" as const) : ("Behavior" as const),
-        elementType: isTech ? ("TechnologyService" as const) : ("ApplicationService" as const),
-        file: n.file,
-      }
+      return { key: n.tagId, label: n.name, nodeTag: n._tag, layer: isTech ? ("Technology" as const) : ("Application" as const), aspect: isTech ? ("ActiveStructure" as const) : ("Behavior" as const), elementType: isTech ? ("TechnologyService" as const) : ("ApplicationService" as const), file: n.file }
     })
     .with({ _tag: "ServiceLayer" }, (n) => {
       const isTech = n.layerKind === "infra" || n.packageTag === "infra"
-      return {
-        key: n.qualname,
-        label: n.qualname.split("#").pop() ?? n.qualname,
-        nodeTag: n._tag,
-        layer: isTech ? ("Technology" as const) : ("Application" as const),
-        aspect: "ActiveStructure" as const,
-        elementType: "ApplicationComponent" as const,
-        file: n.file,
-      }
+      return { key: n.qualname, label: n.qualname.split("#").pop() ?? n.qualname, nodeTag: n._tag, layer: isTech ? ("Technology" as const) : ("Application" as const), aspect: "ActiveStructure" as const, elementType: "ApplicationComponent" as const, file: n.file }
     })
-    .with({ _tag: "PatternDoc" }, (n) => ({
-      key: n.slug,
-      label: n.slug,
-      nodeTag: n._tag,
-      layer: "Technology" as const,
-      aspect: "PassiveStructure" as const,
-      elementType: "AssessmentPattern" as const,
-      file: n.path,
-    }))
-    .with({ _tag: "VitestCase" }, (n) => ({
-      key: n.testId,
-      label: n.testName,
-      nodeTag: n._tag,
-      layer: "Implementation" as const,
-      aspect: "Behavior" as const,
-      elementType: "WorkPackageTest" as const,
-      file: n.testFile,
-    }))
-    .with({ _tag: "EffectSignature" }, (n) => ({
-      key: n.relationId,
-      label: `Sig:${n.callerQualname}`,
-      nodeTag: n._tag,
-      layer: "Application" as const,
-      aspect: "Behavior" as const,
-      elementType: "CollaborationRelation" as const,
-      file: n.file,
-    }))
-    .with({ _tag: "LayerFlow" }, (n) => ({
-      key: n.relationId,
-      label: `LayerFlow:${n.layerQualname}`,
-      nodeTag: n._tag,
-      layer: "Technology" as const,
-      aspect: "ActiveStructure" as const,
-      elementType: "CollaborationRelation" as const,
-      file: n.file,
-    }))
-    .with({ _tag: "TraceabilityTuple" }, (n) => ({
-      key: n.relationId,
-      label: `Trace:${n.targetSymbolQualname}`,
-      nodeTag: n._tag,
-      layer: "Motivation" as const,
-      aspect: "Motivation" as const,
-      elementType: "CollaborationRelation" as const,
-    }))
-    .with({ _tag: "HttpEndpointTuple" }, (n) => ({
-      key: n.relationId,
-      label: `HTTP:${n.method} ${n.path}`,
-      nodeTag: n._tag,
-      layer: "Application" as const,
-      aspect: "Behavior" as const,
-      elementType: "CollaborationRelation" as const,
-      file: n.file,
-    }))
-    .with({ _tag: "MigrationTuple" }, (n) => ({
-      key: n.relationId,
-      label: `Migration:${n.migrationId}`,
-      nodeTag: n._tag,
-      layer: "Technology" as const,
-      aspect: "Behavior" as const,
-      elementType: "CollaborationRelation" as const,
-      file: n.moduleFile,
-    }))
+    .with({ _tag: "PatternDoc" }, (n) => ({ key: n.slug, label: n.slug, nodeTag: n._tag, layer: "Technology" as const, aspect: "PassiveStructure" as const, elementType: "AssessmentPattern" as const, file: n.path }))
+    .with({ _tag: "VitestCase" }, (n) => ({ key: n.testId, label: n.testName, nodeTag: n._tag, layer: "Implementation" as const, aspect: "Behavior" as const, elementType: "WorkPackageTest" as const, file: n.testFile }))
+    .with({ _tag: "EffectSignature" }, (n) => ({ key: n.relationId, label: `Sig:${n.callerQualname}`, nodeTag: n._tag, layer: "Application" as const, aspect: "Behavior" as const, elementType: "CollaborationRelation" as const, file: n.file }))
+    .with({ _tag: "LayerFlow" }, (n) => ({ key: n.relationId, label: `LayerFlow:${n.layerQualname}`, nodeTag: n._tag, layer: "Technology" as const, aspect: "ActiveStructure" as const, elementType: "CollaborationRelation" as const, file: n.file }))
+    .with({ _tag: "TraceabilityTuple" }, (n) => ({ key: n.relationId, label: `Trace:${n.targetSymbolQualname}`, nodeTag: n._tag, layer: "Motivation" as const, aspect: "Motivation" as const, elementType: "CollaborationRelation" as const }))
+    .with({ _tag: "HttpEndpointTuple" }, (n) => ({ key: n.relationId, label: `HTTP:${n.method} ${n.path}`, nodeTag: n._tag, layer: "Application" as const, aspect: "Behavior" as const, elementType: "CollaborationRelation" as const, file: n.file }))
+    .with({ _tag: "MigrationTuple" }, (n) => ({ key: n.relationId, label: `Migration:${n.migrationId}`, nodeTag: n._tag, layer: "Technology" as const, aspect: "Behavior" as const, elementType: "CollaborationRelation" as const, file: n.moduleFile }))
     .exhaustive()
 
 export const classifyRoleRelation = (role: string): ArchiMateRelationType => {

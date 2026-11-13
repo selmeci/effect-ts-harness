@@ -1,11 +1,12 @@
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
-import { Cause, Effect, Exit, Option } from "effect"
+import { Cause, Effect } from "effect"
+import { match } from "ts-pattern"
 import { describe, expect, it } from "vitest"
+import * as GraphApi from "../src/index.js"
 import {
   buildHarnessGraph,
-  deserializeGraphSnapshot,
   deserializeGraphSnapshotEffect,
   diffHarnessGraphs,
   findCallees,
@@ -13,7 +14,6 @@ import {
   findTestsReaching,
   GraphSnapshotError,
   isHarnessGraph,
-  loadGraphSnapshot,
   loadGraphSnapshotEffect,
   NodeKey,
   OmnigraphSync,
@@ -117,23 +117,26 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
     expect(ndjson.split("\n").length).toBeGreaterThanOrEqual(5)
   })
 
-  it("roundtrips graph snapshot via saveGraphSnapshot and loadGraphSnapshot", () => {
-    const snapshotPath = path.join(process.cwd(), ".harness/test-snapshot.json")
-    saveGraphSnapshot(sampleGraph, snapshotPath)
-    expect(fs.existsSync(snapshotPath)).toBe(true)
+  it("roundtrips graph snapshot via saveGraphSnapshot and loadGraphSnapshotEffect", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-snapshot-roundtrip-"))
+    try {
+      const snapshotPath = path.join(tmpDir, "test-snapshot.json")
+      saveGraphSnapshot(sampleGraph, snapshotPath)
+      expect(fs.existsSync(snapshotPath)).toBe(true)
 
-    const loaded = loadGraphSnapshot(snapshotPath)
-    expect(findTestsReaching(loaded, "PhotoRepo.insert").map((t) => t.testId)).toEqual([
-      "libs/sample/domain/test/index.test.ts::greets by name",
-    ])
-    expect(findCallees(loaded, "Sample.greet")).toEqual([
-      expect.objectContaining({
-        qualname: "libs/sample/infra/src/index.ts#PhotoRepo.insert",
-        receiverLayer: "PhotoRepoLive",
-      }),
-    ])
-
-    fs.unlinkSync(snapshotPath)
+      const loaded = Effect.runSync(loadGraphSnapshotEffect(snapshotPath))
+      expect(findTestsReaching(loaded, "PhotoRepo.insert").map((t) => t.testId)).toEqual([
+        "libs/sample/domain/test/index.test.ts::greets by name",
+      ])
+      expect(findCallees(loaded, "Sample.greet")).toEqual([
+        expect.objectContaining({
+          qualname: "libs/sample/infra/src/index.ts#PhotoRepo.insert",
+          receiverLayer: "PhotoRepoLive",
+        }),
+      ])
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
   })
 
   it("serializes all 6 node types and 6 edge types in toOmnigraphNdjson matching schema.pg", () => {
@@ -374,55 +377,55 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
     expect(results.length).toBeGreaterThan(0)
     const match = results.find((r) => r.text.includes("buildHarnessGraph"))
     expect(match).toBeDefined()
-    expect(match?.file).toContain("graph-engine.ts")
+    expect(match?.file).toContain("engine/hypergraph-store.ts")
     expect(match?.line).toBeGreaterThan(0)
   })
 
   it("writes snapshot and handles offline server gracefully via OmnigraphSync", async () => {
     const testSnapshotPath = path.join(process.cwd(), ".harness/sync-test-snapshot.json")
-    const program = Effect.gen(function* () {
-      const syncService = yield* OmnigraphSync
-      return yield* syncService.sync(sampleGraph, {
-        snapshotPath: testSnapshotPath,
-        baseUrl: "http://127.0.0.1:9999", // Unreachable port
-      })
-    }).pipe(Effect.provide(OmnigraphSync.Live))
+    try {
+      const program = Effect.gen(function* () {
+        const syncService = yield* OmnigraphSync
+        return yield* syncService.sync(sampleGraph, {
+          snapshotPath: testSnapshotPath,
+          baseUrl: "http://127.0.0.1:9999", // Unreachable port
+        })
+      }).pipe(Effect.provide(OmnigraphSync.Live))
 
-    const result = await Effect.runPromise(program)
-    expect(result.snapshotPath).toBe(testSnapshotPath)
-    expect(result.syncedToOmnigraph).toBe(false)
-    expect(fs.existsSync(testSnapshotPath)).toBe(true)
-
-    fs.unlinkSync(testSnapshotPath)
+      const result = await Effect.runPromise(program)
+      expect(result.snapshotPath).toBe(testSnapshotPath)
+      expect(result.syncedToOmnigraph).toBe(false)
+      expect(fs.existsSync(testSnapshotPath)).toBe(true)
+    } finally {
+      if (fs.existsSync(testSnapshotPath)) {
+        fs.unlinkSync(testSnapshotPath)
+      }
+    }
   })
 
   describe("F-1: Graph snapshot error handling and validation", () => {
-    it("fails with GraphSnapshotError (reason: missing-file) on nonexistent path in loadGraphSnapshot and loadGraphSnapshotEffect", () => {
+    it("fails with GraphSnapshotError (reason: missing-file) on nonexistent path in loadGraphSnapshotEffect", () => {
       const missingPath = path.join(os.tmpdir(), `nonexistent-snap-${Date.now()}.json`)
-
-      // Synchronous wrapper throws GraphSnapshotError
-      expect(() => loadGraphSnapshot(missingPath)).toThrow(GraphSnapshotError)
-      try {
-        loadGraphSnapshot(missingPath)
-      } catch (err) {
-        expect(err).toBeInstanceOf(GraphSnapshotError)
-        if (err instanceof GraphSnapshotError) {
-          expect(err.reason).toBe("missing-file")
-          expect(err.path).toBe(missingPath)
-        }
-      }
 
       // Effect version returns typed GraphSnapshotError failure
       const exit = Effect.runSyncExit(loadGraphSnapshotEffect(missingPath))
-      expect(Exit.isFailure(exit)).toBe(true)
-      if (Exit.isFailure(exit)) {
-        const errorOpt = Cause.findErrorOption(exit.cause)
-        expect(Option.isSome(errorOpt)).toBe(true)
-        if (Option.isSome(errorOpt)) {
-          expect(errorOpt.value).toBeInstanceOf(GraphSnapshotError)
-          expect(errorOpt.value.reason).toBe("missing-file")
-        }
-      }
+      match(exit)
+        .with({ _tag: "Failure" }, (f) => {
+          const errorOpt = Cause.findErrorOption(f.cause)
+          match(errorOpt)
+            .with({ _tag: "Some" }, (someErr) => {
+              expect(someErr.value).toBeInstanceOf(GraphSnapshotError)
+              expect(someErr.value.reason).toBe("missing-file")
+            })
+            .with({ _tag: "None" }, () => {
+              expect.unreachable("expected GraphSnapshotError in Cause")
+            })
+            .exhaustive()
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("expected loadGraphSnapshotEffect to fail on missing file")
+        })
+        .exhaustive()
     })
 
     it("fails with GraphSnapshotError (reason: invalid-json) on corrupt JSON or invalid snapshot schema", () => {
@@ -430,25 +433,24 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
       fs.writeFileSync(corruptPath, "{ invalid json content: 123", "utf8")
 
       try {
-        expect(() => loadGraphSnapshot(corruptPath)).toThrow(GraphSnapshotError)
-        try {
-          loadGraphSnapshot(corruptPath)
-        } catch (err) {
-          expect(err).toBeInstanceOf(GraphSnapshotError)
-          if (err instanceof GraphSnapshotError) {
-            expect(err.reason).toBe("invalid-json")
-          }
-        }
-
         const exit = Effect.runSyncExit(loadGraphSnapshotEffect(corruptPath))
-        expect(Exit.isFailure(exit)).toBe(true)
-        if (Exit.isFailure(exit)) {
-          const errorOpt = Cause.findErrorOption(exit.cause)
-          expect(Option.isSome(errorOpt)).toBe(true)
-          if (Option.isSome(errorOpt)) {
-            expect(errorOpt.value.reason).toBe("invalid-json")
-          }
-        }
+        match(exit)
+          .with({ _tag: "Failure" }, (f) => {
+            const errorOpt = Cause.findErrorOption(f.cause)
+            match(errorOpt)
+              .with({ _tag: "Some" }, (someErr) => {
+                expect(someErr.value).toBeInstanceOf(GraphSnapshotError)
+                expect(someErr.value.reason).toBe("invalid-json")
+              })
+              .with({ _tag: "None" }, () => {
+                expect.unreachable("expected GraphSnapshotError in Cause")
+              })
+              .exhaustive()
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("expected loadGraphSnapshotEffect to fail on corrupt json")
+          })
+          .exhaustive()
       } finally {
         if (fs.existsSync(corruptPath)) {
           fs.unlinkSync(corruptPath)
@@ -484,28 +486,25 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
         ],
       }
 
-      // Synchronous deserialize throws GraphSnapshotError with reason: dangling-edge
-      expect(() => deserializeGraphSnapshot(snapshotWithDanglingEdge)).toThrow(GraphSnapshotError)
-      try {
-        deserializeGraphSnapshot(snapshotWithDanglingEdge)
-      } catch (err) {
-        expect(err).toBeInstanceOf(GraphSnapshotError)
-        if (err instanceof GraphSnapshotError) {
-          expect(err.reason).toBe("dangling-edge")
-          expect(err.message).toContain("NonexistentService")
-        }
-      }
-
       // Effect version fails with GraphSnapshotError reason: dangling-edge
       const exit = Effect.runSyncExit(deserializeGraphSnapshotEffect(snapshotWithDanglingEdge))
-      expect(Exit.isFailure(exit)).toBe(true)
-      if (Exit.isFailure(exit)) {
-        const errorOpt = Cause.findErrorOption(exit.cause)
-        expect(Option.isSome(errorOpt)).toBe(true)
-        if (Option.isSome(errorOpt)) {
-          expect(errorOpt.value.reason).toBe("dangling-edge")
-        }
-      }
+      match(exit)
+        .with({ _tag: "Failure" }, (f) => {
+          const errorOpt = Cause.findErrorOption(f.cause)
+          match(errorOpt)
+            .with({ _tag: "Some" }, (someErr) => {
+              expect(someErr.value).toBeInstanceOf(GraphSnapshotError)
+              expect(someErr.value.reason).toBe("dangling-edge")
+            })
+            .with({ _tag: "None" }, () => {
+              expect.unreachable("expected GraphSnapshotError in Cause")
+            })
+            .exhaustive()
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("expected deserializeGraphSnapshotEffect to fail on dangling edge")
+        })
+        .exhaustive()
     })
   })
 
@@ -540,12 +539,9 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
       })
 
       expect(graph.unresolvedReferences).toBeDefined()
-      expect(graph.unresolvedReferences?.length).toBeGreaterThanOrEqual(2)
-      expect(
-        graph.unresolvedReferences?.some((r) => r.targetKey === "NonexistentDatabaseService"),
-      ).toBe(true)
-      expect(graph.unresolvedReferences?.some((r) => r.targetKey === "NonexistentEntityKey")).toBe(
-        true,
+      const unref = graph.unresolvedReferences ?? []
+      expect(unref.map((r) => r.targetKey).sort()).toEqual(
+        ["NonexistentDatabaseService", "NonexistentEntityKey"].sort(),
       )
     })
 
@@ -585,9 +581,8 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
         ],
       })
 
-      expect(graph.branchingViolations).toBeDefined()
-      expect(graph.branchingViolations?.length).toBeGreaterThan(0)
-      const roleViolation = graph.branchingViolations?.find((v) => v.rule === "invalid-graph-role")
+      const violations = graph.branchingViolations ?? []
+      const roleViolation = violations.find((v) => v.rule === "invalid-graph-role")
       expect(roleViolation).toBeDefined()
       expect(roleViolation?.message).toContain("disallowed-lattice-role")
     })
@@ -653,8 +648,8 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
         "TraceabilityTuple:governs:ADR-001->EffectFn:libs/sample/domain/src/order.ts#Order",
       )
       const adr2Rel = resolveNode(graph, "TraceabilityTuple:governs:ADR-002->ServiceTag:Order")
-      expect(adr1Rel).toBeDefined()
-      expect(adr2Rel).toBeDefined()
+      expect(adr1Rel?._tag).toBe("TraceabilityTuple")
+      expect(adr2Rel?._tag).toBe("TraceabilityTuple")
     })
 
     it("builds valid PlaysRole edges for HttpEndpointTuple and MigrationTuple relations", () => {
@@ -766,11 +761,11 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
       expect(diff.missingErrors).toEqual(["PhotoAccessDeniedError"])
     })
 
-    it("isHarnessGraph returns true for graphs built via buildHarnessGraph or deserializeGraphSnapshot and false for plain objects", () => {
+    it("isHarnessGraph returns true for graphs built via buildHarnessGraph or deserializeGraphSnapshotEffect and false for plain objects", () => {
       expect(isHarnessGraph(sampleGraph)).toBe(true)
 
       const snapshot = serializeGraphSnapshot(sampleGraph)
-      const restored = deserializeGraphSnapshot(snapshot)
+      const restored = Effect.runSync(deserializeGraphSnapshotEffect(snapshot))
       expect(isHarnessGraph(restored)).toBe(true)
 
       expect(isHarnessGraph({ graph: {}, nodeIndexByKey: new Map() })).toBe(false)
@@ -778,6 +773,29 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
       expect(isHarnessGraph(undefined)).toBe(false)
       expect(isHarnessGraph("plain string")).toBe(false)
       expect(isHarnessGraph(12345)).toBe(false)
+    })
+  })
+
+  describe("F-4: Public export surface guard", () => {
+    it("ensures internal helper symbols are not leaked on public GraphApi while core exports are defined", () => {
+      // Internal helpers must not be exposed on the public package index
+      expect(GraphApi).not.toHaveProperty("pushUnique")
+      expect(GraphApi).not.toHaveProperty("sha256Hex")
+      expect(GraphApi).not.toHaveProperty("makeProofRegistrar")
+      expect(GraphApi).not.toHaveProperty("addEntityNodeIfMissing")
+      expect(GraphApi).not.toHaveProperty("addViolation")
+      expect(GraphApi).not.toHaveProperty("decodePackageJson")
+
+      // Core public APIs must be exported
+      expect(GraphApi.buildHarnessGraph).toBeDefined()
+      expect(GraphApi.resolveNode).toBeDefined()
+      expect(GraphApi.findCallers).toBeDefined()
+      expect(GraphApi.extractWorkspaceTypeAwareGraph).toBeDefined()
+      expect(GraphApi.decideGraphInference).toBeDefined()
+      expect(GraphApi.decideGraphRewrite).toBeDefined()
+      expect(GraphApi.decideGraphProjection).toBeDefined()
+      expect(GraphApi.loadGraphSnapshotEffect).toBeDefined()
+      expect(GraphApi.DatalogSession).toBeDefined()
     })
   })
 })

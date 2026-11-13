@@ -10,9 +10,15 @@ informed_by:
   - harness:ADR-0009
 enforced_by:
   - libs/harness/graph/src/model.ts
+  - libs/harness/graph/src/model-rewrite-and-cache.ts
   - libs/harness/graph/src/concept-lattice.ts
   - libs/harness/graph/src/datalog-engine.ts
+  - libs/harness/graph/src/datalog/datalog-types-and-semiring.ts
+  - libs/harness/graph/src/datalog/stratum-1-and-2-rules.ts
+  - libs/harness/graph/src/datalog/stratum-3-completion-and-holes.ts
   - libs/harness/graph/src/graph-engine.ts
+  - libs/harness/graph/src/engine/hypergraph-store.ts
+  - libs/harness/graph/src/engine/snapshot-codec.ts
   - libs/harness/graph/src/policy-check.ts
   - libs/harness/graph/src/omnigraph-sync.ts
   - libs/harness/decision/src/hole-prior-decision.ts

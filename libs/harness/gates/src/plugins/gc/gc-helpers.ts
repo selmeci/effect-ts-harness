@@ -445,5 +445,6 @@ export const collectWorkspaceAllFiles = (dir: string): ReadonlyArray<string> => 
 export const collectModularPluginFiles = (repoRoot: string): ReadonlyArray<string> =>
   [...new Set([
     "libs/harness/gates/src", "libs/harness/gates/src/plugins", "libs/harness/gates/src/services",
-    "libs/harness/graph/src/services", "apps/harness-cli/src/commands", "apps/harness-mcp/src/tools",
+    "libs/harness/graph/src", "libs/harness/graph/src/services",
+    "apps/harness-cli/src/commands", "apps/harness-mcp/src/tools",
   ].map((d) => join(repoRoot, d)).filter((d) => existsSync(d)).flatMap((d) => collectWorkspaceTsFiles(d).filter((f) => !f.endsWith(".test.ts") && !f.endsWith(".spec.ts"))))].sort((a, b) => a.localeCompare(b))

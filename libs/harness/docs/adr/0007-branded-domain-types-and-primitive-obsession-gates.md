@@ -6,6 +6,8 @@ date: 2026-10-31
 enforced_by:
   - tools/oxlint/syntax-bans.js
   - libs/harness/graph/src/type-extractor.ts
+  - libs/harness/graph/src/extractor/schema-and-brand-extractor.ts
+  - libs/harness/graph/src/extractor/effect-fn-extractor.ts
   - libs/harness/graph/src/policy-check.ts
   - libs/harness/decision/src/idiom-router.ts
   - libs/harness/decision/src/triage-decision.ts
@@ -88,6 +90,6 @@ Wrapping every identifier, count, and timestamp in a runtime class instance (`cl
 | Rule                                                                                                                 | Enforced By                                                                                 | Gate / Mechanism                                    | Governed Symbols                                            |
 | :------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------ | :-------------------------------------------------- | :---------------------------------------------------------- |
 | Ban raw primitive type aliases, unbranded contract schemas, raw primitive boundary annotations, and `as Brand` casts | `tools/oxlint/syntax-bans.js`                                                               | `harness/syntax-bans` (`oxlint --deny-warnings`)    | `Album.decide`, `Sample.uploadPhoto`, `Sample.getPhotoById` |
-| Verify `"~effect/Brand"` presence on `type:contract` schemas and struct/error fields                                 | `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/policy-check.ts`        | `checkEffectGraph` (`unbranded-contract-schema`)    | `PhotoNotFoundError`, `AlbumQuotaExceededError`             |
-| Verify `"~effect/Brand"` presence on `type:service` and `type:domain` parameters, success channels, and `as` casts   | `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/policy-check.ts`        | `checkEffectGraph` (`unbranded-primitive-boundary`) | `PhotoRepo`, `AlbumCounterClient`, `Album.decide`           |
+| Verify `"~effect/Brand"` presence on `type:contract` schemas and struct/error fields                                 | `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/extractor/schema-and-brand-extractor.ts`, `libs/harness/graph/src/policy-check.ts`        | `checkEffectGraph` (`unbranded-contract-schema`)    | `PhotoNotFoundError`, `AlbumQuotaExceededError`             |
+| Verify `"~effect/Brand"` presence on `type:service` and `type:domain` parameters, success channels, and `as` casts   | `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/extractor/schema-and-brand-extractor.ts`, `libs/harness/graph/src/extractor/effect-fn-extractor.ts`, `libs/harness/graph/src/policy-check.ts`        | `checkEffectGraph` (`unbranded-primitive-boundary`) | `PhotoRepo`, `AlbumCounterClient`, `Album.decide`           |
 | Deterministically route and triage branded type steps and failures to `agent-patterns/schema.md`                     | `libs/harness/decision/src/idiom-router.ts`, `libs/harness/decision/src/triage-decision.ts` | `Harness.routeStep`, `Harness.triageFailure`        | `Harness.routeStep`, `Harness.triageFailure`                |

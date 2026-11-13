@@ -6,6 +6,7 @@ date: 2026-10-28
 enforced_by:
   - tools/oxlint/syntax-bans.js
   - libs/harness/graph/src/type-extractor.ts
+  - libs/harness/graph/src/extractor/ast-policy-extractor.ts
   - libs/harness/graph/src/policy-check.ts
 spans:
   - Album.decide
@@ -70,5 +71,5 @@ Restricting pattern matching to `Effect.Match` instead of `ts-pattern`.
 | Rule                                                                                                           | Enforced By                                                                          | Gate / Mechanism                                  | Governed Symbols                                               |
 | :------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------- | :------------------------------------------------ | :------------------------------------------------------------- |
 | Ban `switch`, `if / else if`, `match().run()`, and known discriminant `if` / ternary (`_tag`, `Option.isSome`) | `tools/oxlint/syntax-bans.js`                                                        | `harness/syntax-bans` (`oxlint --deny-warnings`)  | `Album.decide`, `SampleInfra.handleAlbumCounterRpc`            |
-| Ban `if` / ternary narrowing any TypeScript union via literal discriminant property                            | `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/policy-check.ts` | `checkEffectGraph` (`discriminant-branching`)     | `Album.decide`, `PhotoRepo`                                    |
-| Ban `.otherwise()` when `match(arg)` inspects a closed finite union                                            | `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/policy-check.ts` | `checkEffectGraph` (`non-exhaustive-union-match`) | `SampleInfra.handleAlbumCounterRpc`, `AlbumQuotaExceededError` |
+| Ban `if` / ternary narrowing any TypeScript union via literal discriminant property                            | `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/extractor/ast-policy-extractor.ts`, `libs/harness/graph/src/policy-check.ts` | `checkEffectGraph` (`discriminant-branching`)     | `Album.decide`, `PhotoRepo`                                    |
+| Ban `.otherwise()` when `match(arg)` inspects a closed finite union                                            | `libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/extractor/ast-policy-extractor.ts`, `libs/harness/graph/src/policy-check.ts` | `checkEffectGraph` (`non-exhaustive-union-match`) | `SampleInfra.handleAlbumCounterRpc`, `AlbumQuotaExceededError` |

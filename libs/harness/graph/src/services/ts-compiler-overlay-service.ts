@@ -150,7 +150,7 @@ export const TsCompilerOverlayServiceLive: Layer.Layer<TsCompilerOverlayService>
               session,
             }).pipe(
               Effect.catchCause((cause) => {
-                if (Cause.hasInterruptsOnly(cause)) {
+                if (Cause.hasInterrupts(cause)) {
                   return Effect.failCause(cause)
                 }
                 const defectMsg = Cause.pretty(cause)

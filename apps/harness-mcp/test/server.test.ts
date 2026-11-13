@@ -3,18 +3,22 @@ import * as net from "node:net"
 import * as os from "node:os"
 import * as path from "node:path"
 import { describe, expect, it } from "vitest"
-import { Effect, Layer } from "effect"
+import { Cause, Effect, Layer, Option } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import * as AiError from "effect/ai/AiError"
 import { makeMockDecisionModelLayer } from "@harness/decision"
 import { buildHarnessGraph, saveGraphSnapshot } from "@harness/graph"
+import { match } from "ts-pattern"
 import {
   createServer,
+  dispatchMcpTool,
   executeTool,
   isPathInsideRoot,
+  makeLiveMcpToolRegistryLayer,
   runDefaultLspDiagnostics,
   startHarnessDaemonServer,
 } from "../src/server.js"
+import { McpToolInputName } from "../src/tools/tool-registry.js"
 
 describe("harness-mcp tools", () => {
   const graph = buildHarnessGraph({
@@ -85,7 +89,9 @@ describe("harness-mcp tools", () => {
   })
 
   it("resolves EffectFn node and tests_reaching from the graph snapshot", async () => {
-    expect(createServer({ graph })).toBeDefined()
+    const srv = createServer({ graph })
+    expect(typeof srv.connect).toBe("function")
+    expect(typeof srv.close).toBe("function")
     const resolved = await executeTool(
       "harness_resolve",
       { symbolOrSpan: "Sample.greet" },
@@ -409,7 +415,26 @@ describe("harness-mcp tools", () => {
   })
 
   it("rejects unknown tools", async () => {
-    await expect(executeTool("unknown_tool", {})).rejects.toThrow()
+    const exit = await Effect.runPromiseExit(
+      dispatchMcpTool({
+        toolName: McpToolInputName.make("unknown_tool"),
+        args: {},
+      }).pipe(Effect.provide(makeLiveMcpToolRegistryLayer(undefined))),
+    )
+    match(exit)
+      .with({ _tag: "Failure" }, ({ cause }) => {
+        expect(Cause.hasDies(cause)).toBe(false)
+        expect(Cause.hasFails(cause)).toBe(true)
+        const failure = Option.getOrUndefined(Cause.findErrorOption(cause))
+        expect(failure).toMatchObject({
+          _tag: "UnknownToolError",
+          toolName: "unknown_tool",
+        })
+      })
+      .with({ _tag: "Success" }, () => {
+        throw new Error("Expected dispatchMcpTool('unknown_tool') to fail")
+      })
+      .exhaustive()
   })
 
   it("completes MCP stdio handshake and lists registered tools when spawned from Antigravity plugin directory", async () => {
@@ -704,13 +729,14 @@ describe("harness-mcp tools", () => {
   })
 
   it("runDefaultLspDiagnostics resolves project when walking up parent directory with tsconfig.json", async () => {
-    const repoRoot = process.cwd()
+    const repoRoot = path.resolve(import.meta.dirname, "../../..")
     const testFile = path.join(repoRoot, "libs/sample/domain/src/index.ts")
     const effect = runDefaultLspDiagnostics(repoRoot, { file: testFile })
     const res = await Effect.runPromise(effect)
-    expect(res).toBeDefined()
-    expect(typeof res.clean).toBe("boolean")
-    expect(Array.isArray(res.diagnostics)).toBe(true)
+    expect(res.clean).toBe(true)
+    expect(res.summary.filesChecked).toBeGreaterThanOrEqual(1)
+    expect(res.summary.errors).toBe(0)
+    expect(res.diagnostics).toEqual([])
   })
 
   it("isPathInsideRoot correctly identifies child, self, and sibling prefix paths", () => {
@@ -912,5 +938,159 @@ describe("harness-mcp tools", () => {
     expect(invalidTsRes.clean).toBe(false)
     expect(invalidTsRes.summary.filesChecked).toBe(1)
     expect(invalidTsRes.summary.errors).toBeGreaterThan(0)
+
+    const escapedOverlayRes = (await executeTool(
+      "harness_lsp_diagnostics",
+      {
+        overlays: {
+          "../outside-secret.ts": "export const leak = 1\n",
+        },
+      },
+      { repoRoot: process.cwd() },
+    )) as {
+      readonly clean: boolean
+      readonly summary: { readonly filesChecked: number; readonly errors: number }
+      readonly diagnostics: ReadonlyArray<{ readonly code?: string; readonly message?: string }>
+    }
+    expect(escapedOverlayRes.clean).toBe(false)
+    expect(escapedOverlayRes.summary.errors).toBe(1)
+    expect(escapedOverlayRes.diagnostics[0]?.code).toBe("PATH_TRAVERSAL")
+    expect(escapedOverlayRes.diagnostics[0]?.message).toContain("escapes repository root")
+
+    const escapedFileRes = (await executeTool(
+      "harness_lsp_diagnostics",
+      {
+        file: "../outside-file.ts",
+      },
+      { repoRoot: process.cwd() },
+    )) as {
+      readonly clean: boolean
+      readonly summary: { readonly filesChecked: number; readonly errors: number }
+      readonly diagnostics: ReadonlyArray<string>
+    }
+    expect(escapedFileRes.clean).toBe(false)
+    expect(escapedFileRes.summary.errors).toBe(1)
+    expect(String(escapedFileRes.diagnostics[0])).toContain("escapes repository root")
+
+    const escapedProjectRes = (await executeTool(
+      "harness_lsp_diagnostics",
+      {
+        project: "../outside-tsconfig.json",
+      },
+      { repoRoot: process.cwd() },
+    )) as {
+      readonly clean: boolean
+      readonly summary: { readonly filesChecked: number; readonly errors: number }
+      readonly diagnostics: ReadonlyArray<string>
+    }
+    expect(escapedProjectRes.clean).toBe(false)
+    expect(escapedProjectRes.summary.errors).toBe(1)
+    expect(String(escapedProjectRes.diagnostics[0])).toContain("escapes repository root")
+  })
+
+  it("handles corrupt snapshot gracefully with warning and falls back to empty graph", async () => {
+    const corruptSnapshotPath = path.join(os.tmpdir(), `corrupt-snap-${Date.now()}.json`)
+    try {
+      fs.writeFileSync(corruptSnapshotPath, "{ invalid json content: true", "utf-8")
+      const resolved = await executeTool(
+        "harness_resolve",
+        { symbolOrSpan: "Sample.greet" },
+        { snapshotPath: corruptSnapshotPath },
+      )
+      expect(resolved).toBeNull()
+
+      const tests = await executeTool(
+        "harness_tests_reaching",
+        { symbolOrSpan: "Sample.greet" },
+        { snapshotPath: corruptSnapshotPath },
+      )
+      expect(tests).toEqual([])
+    } finally {
+      if (fs.existsSync(corruptSnapshotPath)) {
+        fs.unlinkSync(corruptSnapshotPath)
+      }
+    }
+  })
+
+  it("rejects escaping file/project alongside overlays and broken overlays with non-matching file", async () => {
+    const escapedWithOverlay = (await executeTool(
+      "harness_lsp_diagnostics",
+      {
+        file: "../outside-file.ts",
+        project: "../outside-tsconfig.json",
+        overlays: {
+          "libs/sample/domain/src/index.ts": "export const ok = 1\n",
+        },
+      },
+      { repoRoot: process.cwd() },
+    )) as {
+      readonly clean: boolean
+      readonly summary: { readonly filesChecked: number; readonly errors: number }
+      readonly diagnostics: ReadonlyArray<{ readonly code?: string; readonly message?: string }>
+    }
+    expect(escapedWithOverlay.clean).toBe(false)
+    expect(escapedWithOverlay.summary.errors).toBe(2)
+    expect(escapedWithOverlay.diagnostics.every((d) => d.code === "PATH_TRAVERSAL")).toBe(true)
+
+    const repoRoot = path.resolve(import.meta.dirname, "../../..")
+    const brokenOverlayNonMatchingFile = (await executeTool(
+      "harness_lsp_diagnostics",
+      {
+        file: "libs/sample/infra/src/index.ts",
+        overlays: {
+          "libs/sample/domain/src/index.ts": 'export const broken: number = "not-a-number"\n',
+        },
+      },
+      { repoRoot },
+    )) as {
+      readonly clean: boolean
+      readonly summary: { readonly filesChecked: number; readonly errors: number }
+    }
+    expect(brokenOverlayNonMatchingFile.clean).toBe(false)
+    expect(brokenOverlayNonMatchingFile.summary.filesChecked).toBe(0)
+
+    const brokenOverlayAbsFile = (await executeTool(
+      "harness_lsp_diagnostics",
+      {
+        file: path.join(repoRoot, "libs/sample/domain/src/index.ts"),
+        overlays: {
+          "libs/sample/domain/src/index.ts": 'export const broken: number = "not-a-number"\n',
+        },
+      },
+      { repoRoot },
+    )) as {
+      readonly clean: boolean
+      readonly summary: { readonly filesChecked: number; readonly errors: number }
+    }
+    expect(brokenOverlayAbsFile.clean).toBe(false)
+    expect(brokenOverlayAbsFile.summary.filesChecked).toBe(1)
+    expect(brokenOverlayAbsFile.summary.errors).toBeGreaterThan(0)
+  })
+
+  it("validates raw priors in harness_graph_complete with Schema instead of unsafe cast", async () => {
+    const exit = await Effect.runPromiseExit(
+      dispatchMcpTool({
+        toolName: McpToolInputName.make("harness_graph_complete"),
+        args: {
+          priors: {
+            edgeConfidenceOverrides: {
+              a: -1,
+            },
+          },
+        },
+      }).pipe(Effect.provide(makeLiveMcpToolRegistryLayer({ graph }))),
+    )
+    match(exit)
+      .with({ _tag: "Failure" }, ({ cause }) => {
+        const squashed = Cause.squash(cause)
+        expect(squashed).toMatchObject({
+          _tag: "GraphInferenceError",
+          reason: "invalid-graph",
+        })
+      })
+      .with({ _tag: "Success" }, () => {
+        throw new Error("Expected invalid priors in harness_graph_complete to fail Schema decode")
+      })
+      .exhaustive()
   })
 })

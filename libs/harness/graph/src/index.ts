@@ -1,4 +1,5 @@
 export * from "./model.js"
+export * from "./model-rewrite-and-cache.js"
 export * from "./graph-engine.js"
 export * from "./omnigraph-sync.js"
 export * from "./structural-search.js"

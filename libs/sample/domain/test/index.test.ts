@@ -6,7 +6,7 @@ import { buildWorkspaceFnIndex, runWithTestTracer } from "@harness/ingest"
 import {
   buildHarnessGraph,
   findTestsReaching,
-  loadGraphSnapshot,
+  loadGraphSnapshotEffect,
   saveGraphSnapshot,
 } from "@harness/graph"
 import {
@@ -82,7 +82,7 @@ describe("greet", () => {
       if (process.env.HARNESS_TRACE === "1") {
         const snapshotPath = path.join(repoRoot, ".harness", "graph-snapshot.json")
         saveGraphSnapshot(graph, snapshotPath)
-        const loadedGraph = loadGraphSnapshot(snapshotPath)
+        const loadedGraph = yield* loadGraphSnapshotEffect(snapshotPath)
         const reachingFromLoaded = findTestsReaching(loadedGraph, "Sample.greet")
         expect(reachingFromLoaded.map((t) => t.testId)).toContain(testId)
       }

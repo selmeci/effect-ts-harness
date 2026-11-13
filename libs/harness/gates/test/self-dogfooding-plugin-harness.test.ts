@@ -26,7 +26,12 @@ import {
   WorkspaceFilePath,
   WorkspaceFsOperation,
 } from "../src/plugins/self-dogfooding-contract.js"
-import { decideSelfDogfooding, SelfDogfooding } from "../src/plugins/self-dogfooding-plugin.js"
+import {
+  decideSelfDogfooding,
+  isGraphOrchestratorFacadePath,
+  resolvePathSpecificMaxLines,
+  SelfDogfooding,
+} from "../src/plugins/self-dogfooding-plugin.js"
 import {
   DEFAULT_GATE_PLUGINS,
   evaluateAllGatePlugins,
@@ -306,6 +311,62 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(report.verdict).toBe("violated")
         expect(report.violations.length).toBeGreaterThan(0)
         expect(report.violations[0]?.rule).toBe("effect-fn-dummy-void")
+      }),
+  )
+
+  it.effect(
+    "REQ-1.2: enforces decomposed line budget across libs/harness/graph/src/**/*.ts modules",
+    () =>
+      Effect.gen(function* () {
+        const atLimitContent = Array.from({ length: 750 }, (_, i) => `export const g${i} = ${i}`).join("\n")
+        const overLimitContent = Array.from({ length: 801 }, (_, i) => `export const g${i} = ${i}`).join("\n")
+        const report = yield* SelfDogfooding.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/graph/src/datalog/within-limit.ts"),
+              content: AstSourceContent.make(atLimitContent),
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/harness/graph/src/extractor/over-limit.ts"),
+              content: AstSourceContent.make(overLimitContent),
+              isModularPluginFile: false,
+            },
+          ],
+          failOnViolation: false,
+        })
+        expect(report.verdict).toBe("violated")
+        expect(report.violations).toHaveLength(1)
+        expect(report.violations[0]?.rule).toBe("file-line-budget-exceeded")
+        expect(report.violations[0]?.file).toBe("libs/harness/graph/src/extractor/over-limit.ts")
+      }),
+  )
+
+  it.effect(
+    "REQ-1.2: passing isModularPluginFile: false for isModularPluginPath targets (type-extractor.ts, compiler-session.ts) over 800 lines still emits file-line-budget-exceeded",
+    () =>
+      Effect.gen(function* () {
+        const overLimitContent = Array.from({ length: 801 }, (_, i) => `export const g${i} = ${i}`).join("\n")
+        const report = yield* SelfDogfooding.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/graph/src/type-extractor.ts"),
+              content: AstSourceContent.make(overLimitContent),
+              isModularPluginFile: false,
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/harness/graph/src/extractor/compiler-session.ts"),
+              content: AstSourceContent.make(overLimitContent),
+              isModularPluginFile: false,
+            },
+          ],
+          maxPluginFileLines: MaxPluginFileLines.make(800),
+          failOnViolation: false,
+        })
+        expect(report.verdict).toBe("violated")
+        expect(report.violations).toHaveLength(2)
+        expect(report.violations.every((v) => v.rule === "file-line-budget-exceeded")).toBe(true)
+        expect(report.violations[0]?.file).toBe("libs/harness/graph/src/type-extractor.ts")
+        expect(report.violations[1]?.file).toBe("libs/harness/graph/src/extractor/compiler-session.ts")
       }),
   )
 
@@ -974,7 +1035,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
     "REQ-1.3: AstGateCache.decide reports effect-fn-dummy-void, discriminant-branching, and non-exhaustive-union-match without isHarnessInternal exemption",
     () =>
       Effect.gen(function* () {
-        expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v2")
+        expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v3")
 
         const testId = "AstGateCache.decide::REQ-1.3"
         const { result: report, spans } = yield* runWithTestTracer(
@@ -1242,6 +1303,122 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
   )
 
   it.effect(
+    "RFC-0007 Step 3: every source file in libs/harness/graph/src/**/*.ts respects decomposed LOC budgets, has zero circular imports, and passes SelfDogfooding.decide",
+    () =>
+      Effect.gen(function* () {
+        const testDir = dirname(fileURLToPath(import.meta.url))
+        const repoRoot = resolve(testDir, "../../../..")
+        const graphSrcRoot = join(repoRoot, "libs", "harness", "graph", "src")
+
+        const collectTsFiles = (dir: string): Array<string> => {
+          const results: Array<string> = []
+          for (const entry of readdirSync(dir)) {
+            const fullPath = join(dir, entry)
+            const st = statSync(fullPath)
+            if (st.isDirectory()) {
+              results.push(...collectTsFiles(fullPath))
+            } else if (
+              entry.endsWith(".ts") &&
+              !entry.endsWith(".test.ts") &&
+              !entry.endsWith(".spec.ts")
+            ) {
+              results.push(fullPath)
+            }
+          }
+          return results
+        }
+
+        const sourceFiles = collectTsFiles(graphSrcRoot)
+        expect(sourceFiles.length).toBeGreaterThanOrEqual(35)
+
+        const orchestrators = new Set([
+          "libs/harness/graph/src/type-extractor.ts",
+          "libs/harness/graph/src/datalog-engine.ts",
+          "libs/harness/graph/src/graph-rewrite.ts",
+          "libs/harness/graph/src/graph-engine.ts",
+          "libs/harness/graph/src/graph-projector.ts",
+        ])
+
+        const adj = new Map<string, Array<string>>()
+        const fileInputs = sourceFiles.map((absPath) => {
+          const relPath = relative(repoRoot, absPath).replace(/\\/g, "/")
+          const content = readFileSync(absPath, "utf-8")
+          const lineCount = content.split(/\r?\n/).length
+          expect(
+            lineCount,
+            `${relPath} has ${lineCount} lines, exceeding 800-line ceiling`,
+          ).toBeLessThanOrEqual(800)
+          expect(
+            lineCount,
+            `${relPath} has ${lineCount} lines, exceeding 750-line RFC-0007 Step 3 budget`,
+          ).toBeLessThanOrEqual(750)
+
+          if (orchestrators.has(relPath)) {
+            expect(lineCount, `${relPath} orchestrator exceeded 250 lines`).toBeLessThanOrEqual(250)
+          } else if (relPath === "libs/harness/graph/src/extractor/compiler-session.ts") {
+            expect(lineCount).toBeLessThanOrEqual(700)
+          } else if (relPath.startsWith("libs/harness/graph/src/engine/")) {
+            expect(lineCount, `${relPath} engine module exceeded 700 lines`).toBeLessThanOrEqual(700)
+          } else if (relPath.startsWith("libs/harness/graph/src/extractor/")) {
+            expect(lineCount, `${relPath} sub-extractor must be < 500 lines`).toBeLessThan(500)
+          }
+
+          const imports: Array<string> = []
+          const importRe = /(?:import|export)\s+(?:type\s+)?(?:[^"']*from\s+)?["'](\.[^"']+)["']/g
+          for (const m of content.matchAll(importRe)) {
+            const spec = m[1]
+            if (spec !== undefined) {
+              const resolvedAbs = resolve(dirname(absPath), spec.replace(/\.js$/, ".ts"))
+              const resolvedRel = relative(repoRoot, resolvedAbs).replace(/\\/g, "/")
+              if (resolvedRel.startsWith("libs/harness/graph/src/")) {
+                imports.push(resolvedRel)
+              }
+            }
+          }
+          adj.set(relPath, imports)
+
+          return {
+            filePath: AstSourceFilePath.make(relPath),
+            content: AstSourceContent.make(content),
+          }
+        })
+
+        const state = new Map<string, number>()
+        const cycles: Array<string> = []
+        const visit = (node: string, stack: Array<string>): void => {
+          state.set(node, 1)
+          for (const next of adj.get(node) ?? []) {
+            const nextState = state.get(next) ?? 0
+            if (nextState === 1) {
+              const idx = stack.indexOf(next)
+              cycles.push([...stack.slice(idx), next].join(" -> "))
+            } else if (nextState === 0) {
+              visit(next, [...stack, next])
+            }
+          }
+          state.set(node, 2)
+        }
+        for (const node of adj.keys()) {
+          if ((state.get(node) ?? 0) === 0) {
+            visit(node, [node])
+          }
+        }
+        expect(cycles, `Circular imports found in @harness/graph: ${cycles.join("; ")}`).toEqual([])
+
+        // Verify all live @harness/graph source files pass SelfDogfooding.decide without violations (isModularPluginFile: false bypass protection is covered earlier via REQ-1.2)
+        const report = yield* decideSelfDogfooding({
+          files: fileInputs,
+          maxPluginFileLines: MaxPluginFileLines.make(800),
+          failOnViolation: true,
+        })
+
+        expect(report.verdict).toBe("clean")
+        expect(report.violations).toHaveLength(0)
+        expect(report.inspectedFileCount).toBe(sourceFiles.length)
+      }),
+  )
+
+  it.effect(
     "AstGateCache.decide table-driven rules: impure-domain-import, domain-effect-ignore, ast-grep-tsx-grammar, unscoped-effect-run, fallback-json-equality, and cache eviction",
     () =>
       Effect.gen(function* () {
@@ -1461,6 +1638,171 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
             },
           ]),
         ).toThrow()
+      }),
+  )
+
+  it.effect(
+    "Unit 1: resolvePathSpecificMaxLines enforces path-specific LOC budgets across @harness/graph",
+    () =>
+      Effect.sync(() => {
+        expect(isGraphOrchestratorFacadePath("libs/harness/graph/src/type-extractor.ts")).toBe(true)
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/type-extractor.ts")).toBe(250)
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/datalog-engine.ts")).toBe(250)
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/graph-rewrite.ts")).toBe(250)
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/graph-engine.ts")).toBe(250)
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/graph-projector.ts")).toBe(250)
+
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/extractor/effect-fn-extractor.ts")).toBe(499)
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/extractor/compiler-session.ts")).toBe(700)
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/engine/snapshot-codec.ts")).toBe(700)
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/datalog/datalog-session.ts")).toBe(750)
+        expect(resolvePathSpecificMaxLines("libs/harness/gates/src/plugins/sample.ts")).toBe(800)
+
+        // When explicit maxPluginFileLines is provided, explicit override wins
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/type-extractor.ts", 100)).toBe(100)
+      }),
+  )
+
+  it.effect(
+    "Unit 1: facade-star-reexport flags export * from orchestrator facades while allowing named exports and index.ts export *",
+    () =>
+      Effect.gen(function* () {
+        // 1. Violating: export * from in orchestrator facade
+        const violatingReport = yield* decideSelfDogfooding({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/graph/src/type-extractor.ts"),
+              content: AstSourceContent.make('export * from "./extractor/compiler-session.js"\n'),
+            },
+          ],
+        })
+        expect(violatingReport.verdict).toBe("violated")
+        expect(violatingReport.violations.some((v) => v.rule === "facade-star-reexport")).toBe(true)
+
+        // 2. Allowed: export * from in index.ts
+        const allowedIndexReport = yield* decideSelfDogfooding({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/graph/src/index.ts"),
+              content: AstSourceContent.make('export * from "./model.js"\n'),
+            },
+          ],
+        })
+        expect(allowedIndexReport.violations.filter((v) => v.rule === "facade-star-reexport")).toHaveLength(0)
+
+        // 3. Allowed: explicit named export in orchestrator facade
+        const allowedNamedReport = yield* decideSelfDogfooding({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/graph/src/type-extractor.ts"),
+              content: AstSourceContent.make(
+                'export { createCompilerSession } from "./extractor/compiler-session.js"\n',
+              ),
+            },
+          ],
+        })
+        expect(allowedNamedReport.violations.filter((v) => v.rule === "facade-star-reexport")).toHaveLength(0)
+      }),
+  )
+
+  it.effect(
+    "Unit 1: AstGateCache.decide flags catch-cause-interrupts-only (effect-laws) and unisolated-dot-harness-test-write (test-integrity)",
+    () =>
+      Effect.gen(function* () {
+        // 1. catch-cause-interrupts-only in non-test file
+        const catchCauseReport = yield* AstGateCache.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/sample/infra/src/catch-cause.ts"),
+              packageTag: AstGatePackageTag.make("infra"),
+              content: AstSourceContent.make(
+                'import { Cause, Effect } from "effect"\n' +
+                  "export const op = Effect.catchCause(Effect.succeed(1), (cause) =>\n" +
+                  "  Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.fail(cause),\n" +
+                  ")\n",
+              ),
+            },
+          ],
+        })
+        expect(catchCauseReport.verdict).toBe("violated")
+        const catchCauseViolations = catchCauseReport.violations.filter(
+          (v) => v.rule === "catch-cause-interrupts-only",
+        )
+        expect(catchCauseViolations).toHaveLength(1)
+        expect(catchCauseViolations[0]?.category).toBe("effect-laws")
+
+        // 1b. Cause.hasInterrupts(cause) inside catchCause is allowed
+        const cleanCatchCauseReport = yield* AstGateCache.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/sample/infra/src/catch-cause-clean.ts"),
+              packageTag: AstGatePackageTag.make("infra"),
+              content: AstSourceContent.make(
+                'import { Cause, Effect } from "effect"\n' +
+                  "export const op = Effect.catchCause(Effect.succeed(1), (cause) =>\n" +
+                  "  Cause.hasInterrupts(cause) ? Effect.failCause(cause) : Effect.fail(cause),\n" +
+                  ")\n",
+              ),
+            },
+          ],
+        })
+        expect(
+          cleanCatchCauseReport.violations.filter((v) => v.rule === "catch-cause-interrupts-only"),
+        ).toHaveLength(0)
+
+        // 2. unisolated-dot-harness-test-write in test file
+        const testWriteReport = yield* AstGateCache.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/sample/domain/test/leak.test.ts"),
+              packageTag: AstGatePackageTag.make("test"),
+              content: AstSourceContent.make(
+                'import { saveGraphSnapshot } from "@harness/graph"\n' +
+                  'export const t = () => saveGraphSnapshot({}, ".harness/graph-snapshot.json")\n',
+              ),
+            },
+          ],
+        })
+        expect(testWriteReport.verdict).toBe("violated")
+        const testWriteViolations = testWriteReport.violations.filter(
+          (v) => v.rule === "unisolated-dot-harness-test-write",
+        )
+        expect(testWriteViolations).toHaveLength(1)
+        expect(testWriteViolations[0]?.category).toBe("test-integrity")
+
+        // 2b. writeFileSync directly to .harness/ in test file is flagged
+        const fsWriteReport = yield* AstGateCache.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/sample/domain/test/fs-leak.test.ts"),
+              packageTag: AstGatePackageTag.make("test"),
+              content: AstSourceContent.make(
+                'import fs from "node:fs"\n' +
+                  'export const t = () => fs.writeFileSync(".harness/leak.json", "{}")\n',
+              ),
+            },
+          ],
+        })
+        expect(
+          fsWriteReport.violations.filter((v) => v.rule === "unisolated-dot-harness-test-write"),
+        ).toHaveLength(1)
+
+        // 2c. Writing to tmp directory in test file is allowed
+        const cleanTestWriteReport = yield* AstGateCache.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/sample/domain/test/clean.test.ts"),
+              packageTag: AstGatePackageTag.make("test"),
+              content: AstSourceContent.make(
+                'import { saveGraphSnapshot } from "@harness/graph"\n' +
+                  "export const t = (tmpPath: string) => saveGraphSnapshot({}, tmpPath)\n",
+              ),
+            },
+          ],
+        })
+        expect(
+          cleanTestWriteReport.violations.filter((v) => v.rule === "unisolated-dot-harness-test-write"),
+        ).toHaveLength(0)
       }),
   )
 })
