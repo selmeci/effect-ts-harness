@@ -1,7 +1,7 @@
 import * as fs from "node:fs"
 import * as net from "node:net"
 import * as path from "node:path"
-import { Effect, Schema } from "effect"
+import { Data, Effect, Schema } from "effect"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
 import { extractWorkspaceTypeAwareGraph } from "@harness/graph"
@@ -12,6 +12,11 @@ import {
   HARNESS_GATE_RULE_VERSION,
 } from "@harness/gates"
 import { isPathInsideRoot } from "../tools/mcp-helpers.js"
+
+class DaemonSocketChmodError extends Data.TaggedError("DaemonSocketChmodError")<{
+  readonly socketPath: string
+  readonly message: string
+}> {}
 
 export interface HarnessDaemonServerHandle {
   readonly socketPath: string
@@ -94,9 +99,13 @@ const createDaemonNetServer = (
     socket.on("data", (chunk) => {
       buffer += chunk.toString("utf8")
       if (Buffer.byteLength(buffer, "utf8") > MAX_DAEMON_BUFFER_BYTES) {
+        buffer = ""
         if (!socket.destroyed && socket.writable) {
           socket.end(
             JSON.stringify({ ok: false, error: "Request payload exceeds 1MB limit" }) + "\n",
+            () => {
+              socket.destroy()
+            },
           )
         } else {
           socket.destroy()
@@ -118,8 +127,12 @@ const createDaemonNetServer = (
         })
         .with({ _tag: "Some" }, ({ value: req }) => {
           const baseRoot = path.resolve(repoRoot)
-          const targetRoot = req.repoRoot ?? baseRoot
-          const resolvedRoot = path.resolve(targetRoot)
+          const resolvedRoot =
+            req.repoRoot !== undefined
+              ? path.isAbsolute(req.repoRoot)
+                ? path.resolve(req.repoRoot)
+                : path.resolve(baseRoot, req.repoRoot)
+              : baseRoot
           if (req.repoRoot !== undefined && !isPathInsideRoot(baseRoot, resolvedRoot)) {
             if (!socket.destroyed && socket.writable) {
               socket.end(
@@ -236,9 +249,13 @@ export const startHarnessDaemonServer = (
         fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
       }
       const alreadyAlive = yield* isDaemonSocketAlive(socketPath)
-      if (!alreadyAlive) {
-        safeUnlinkSocket(socketPath)
+      if (alreadyAlive) {
+        return {
+          socketPath,
+          close: () => Promise.resolve(),
+        }
       }
+      safeUnlinkSocket(socketPath)
 
       const openSockets = new Set<net.Socket>()
       const server = createDaemonNetServer(repoRoot, openSockets)
@@ -254,12 +271,28 @@ export const startHarnessDaemonServer = (
         })
       })
 
-      yield* Effect.try({
-        try: () => {
-          fs.chmodSync(socketPath, 0o600)
-        },
-        catch: () => undefined,
-      }).pipe(Effect.ignore)
+      if (process.platform !== "win32") {
+        yield* Effect.try({
+          try: () => {
+            fs.chmodSync(socketPath, 0o600)
+          },
+          catch: (err) =>
+            new DaemonSocketChmodError({
+              socketPath,
+              message: err instanceof Error ? err.message : String(err),
+            }),
+        }).pipe(
+          Effect.catch((err) =>
+            Effect.gen(function* () {
+              process.stderr.write(
+                `[harness-mcp] Failed to chmod daemon socket '${socketPath}': ${err.message}\n`,
+              )
+              yield* Effect.promise(() => closeDaemonNetServer(server, socketPath, openSockets))
+              return yield* err
+            }),
+          ),
+        )
+      }
 
       return {
         socketPath,

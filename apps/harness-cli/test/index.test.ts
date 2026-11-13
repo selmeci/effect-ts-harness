@@ -1,19 +1,36 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
+import * as http from "node:http"
 import * as net from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { Effect, Layer, Option } from "effect"
+import { Effect, Layer, Option, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { makeFailingDecisionModelLayer, makeMockDecisionModelLayer } from "@harness/decision"
 import { readTelemetryEvents, writeVerifyStamp } from "@harness/gates"
-import { buildHarnessGraph } from "@harness/graph"
+import { buildHarnessGraph, ShadowFileOverlay } from "@harness/graph"
 // oxlint-disable-next-line @nx/enforce-module-boundaries
 import syntaxBansPlugin from "../../../tools/oxlint/syntax-bans.js"
+import {
+  formatProjectionError,
+  matchesExactSpecToken,
+  persistVerifiedOverlays,
+} from "../src/commands/plan-ears-and-overlays.js"
+import { readRecordedSpans, runDeltaAstAndPluginGates } from "../src/commands/verify-delta-gates.js"
 import {
   buildOmnigraphClusterKillArgs,
   cleanSubprocessError,
   COMMANDS,
+  ensureLocalOmnigraphReady,
   run,
   runCli,
   stripAnsiCodes,
@@ -2637,6 +2654,213 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       expect(failJson.violations.length).toBeGreaterThanOrEqual(1)
     } finally {
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("reads recorded spans across missing, malformed, array, and { spans } payloads (F-10)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-cli-spans-"))
+    try {
+      expect(await Effect.runPromise(readRecordedSpans(dir))).toEqual([])
+
+      const harnessDir = join(dir, ".harness")
+      mkdirSync(harnessDir, { recursive: true })
+      const spanPath = join(harnessDir, "span-trace.json")
+
+      writeFileSync(spanPath, "{not-valid-json", "utf-8")
+      expect(await Effect.runPromise(readRecordedSpans(dir))).toEqual([])
+
+      const sampleSpans = [{ spanId: "s1", name: "Sample.fn", durationMs: 1 }]
+      writeFileSync(spanPath, JSON.stringify(sampleSpans), "utf-8")
+      expect(await Effect.runPromise(readRecordedSpans(dir))).toEqual(sampleSpans)
+
+      writeFileSync(spanPath, JSON.stringify({ spans: sampleSpans }), "utf-8")
+      expect(await Effect.runPromise(readRecordedSpans(dir))).toEqual(sampleSpans)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("runs delta AST and plugin gates on empty, clean, and violating deltas (F-10)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-cli-delta-gates-"))
+    try {
+      const emptyRes = await Effect.runPromise(runDeltaAstAndPluginGates(dir, []))
+      expect(Option.isNone(emptyRes)).toBe(true)
+
+      const domainDir = join(dir, "libs", "sample", "domain", "src")
+      mkdirSync(domainDir, { recursive: true })
+      const cleanRel = "libs/sample/domain/src/clean.ts"
+      writeFileSync(
+        join(dir, cleanRel),
+        `import { Effect } from "effect"\nexport const ok = Effect.fn("Sample.ok")(function* () {\n  return 1\n})\n`,
+        "utf-8",
+      )
+      const cleanRes = await Effect.runPromise(runDeltaAstAndPluginGates(dir, [cleanRel]))
+      expect(Option.isNone(cleanRes)).toBe(true)
+
+      const badRel = "libs/sample/domain/src/bad.ts"
+      writeFileSync(
+        join(dir, badRel),
+        `export const bad = (x: number): string => {\n  switch (x) {\n    default:\n      return "x"\n  }\n}\n`,
+        "utf-8",
+      )
+      const badRes = await Effect.runPromise(runDeltaAstAndPluginGates(dir, [badRel]))
+      expect(Option.isSome(badRes)).toBe(true)
+      if (Option.isSome(badRes)) {
+        expect(badRes.value.exitCode).toBe(1)
+        expect(badRes.value.stderr).toContain("[GATE FAILURE] verify:ast-gates")
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("matches exact spec tokens, formats projection errors, and rejects out-of-root overlay writes (F-10)", async () => {
+    expect(matchesExactSpecToken("implements SPEC-0001 in domain", "SPEC-0001")).toBe(true)
+    expect(matchesExactSpecToken("SPEC-0001", "SPEC-0001")).toBe(true)
+    expect(matchesExactSpecToken("SPEC-0001: title", "SPEC-0001")).toBe(true)
+    expect(matchesExactSpecToken("SPEC-00010", "SPEC-0001")).toBe(false)
+    expect(matchesExactSpecToken("MY-SPEC-0001", "SPEC-0001")).toBe(false)
+    expect(matchesExactSpecToken("SPEC-0001_v2", "SPEC-0001")).toBe(false)
+
+    expect(
+      formatProjectionError({
+        _tag: "GraphProjectorError",
+        reason: "RoundTripMismatch",
+        message: "differs",
+      }),
+    ).toBe("GraphProjectorError (RoundTripMismatch): differs")
+    expect(formatProjectionError({ _tag: "GraphProjectorError", reason: "InvalidTarget" })).toBe(
+      "GraphProjectorError (InvalidTarget)",
+    )
+    expect(formatProjectionError(new Error("plain error"))).toBe("plain error")
+    expect(formatProjectionError("raw string")).toBe("raw string")
+
+    const dir = mkdtempSync(join(tmpdir(), "harness-cli-overlays-"))
+    const outsideDir = mkdtempSync(join(tmpdir(), "harness-cli-outside-"))
+    try {
+      const decodeOverlay = Schema.decodeUnknownSync(ShadowFileOverlay)
+      const traversalRes = await Effect.runPromise(
+        persistVerifiedOverlays(dir, [
+          decodeOverlay({ targetFile: "../escape.ts", content: "export const x = 1\n" }),
+        ]),
+      )
+      expect(traversalRes.ok).toBe(false)
+      expect(traversalRes.writtenFiles).toEqual([])
+      expect(traversalRes.rejectedFiles[0]?.reason).toContain("escapes workspace root")
+
+      const linkPath = join(dir, "libs", "escape-link")
+      mkdirSync(join(dir, "libs"), { recursive: true })
+      symlinkSync(outsideDir, linkPath)
+      const symlinkRes = await Effect.runPromise(
+        persistVerifiedOverlays(dir, [
+          decodeOverlay({
+            targetFile: "libs/escape-link/leak.ts",
+            content: "export const leak = 1\n",
+          }),
+        ]),
+      )
+      expect(symlinkRes.ok).toBe(false)
+      expect(symlinkRes.writtenFiles).toEqual([])
+      expect(symlinkRes.rejectedFiles[0]?.reason).toContain("symlink escapes workspace root")
+
+      const validRel = "libs/sample/domain/src/overlay.ts"
+      const validRes = await Effect.runPromise(
+        persistVerifiedOverlays(dir, [
+          decodeOverlay({ targetFile: validRel, content: "export const clean = 1\n" }),
+        ]),
+      )
+      expect(validRes.ok).toBe(true)
+      expect(validRes.writtenFiles).toEqual([validRel])
+      expect(readFileSync(join(dir, validRel), "utf-8")).toBe("export const clean = 1\n")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(outsideDir, { recursive: true, force: true })
+    }
+  })
+
+  it("runs handleMutate cleanly with --scope=nonexistent-scope returning totalMutants: 0 (F-10)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-cli-mutate-"))
+    try {
+      const res = await runCli(["mutate", "--scope=nonexistent-scope"], { repoRoot: dir })
+      expect(res.exitCode).toBe(0)
+      const payload = JSON.parse(res.stdout) as { readonly totalMutants: number }
+      expect(payload.totalMutants).toBe(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("falls through to /readyz readiness poll when omnigraph setup throws before spawn (F-2, F-10)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-cli-omnigraph-readyz-"))
+    const homeDir = mkdtempSync(join(tmpdir(), "harness-cli-home-"))
+    let readyzCalls = 0
+    const server = http.createServer((req, res) => {
+      if (req.url === "/readyz") {
+        readyzCalls += 1
+        if (readyzCalls === 1) {
+          res.writeHead(503)
+          res.end()
+          return
+        }
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          "Omnigraph-Http-Api": "0.14",
+        })
+        res.end(JSON.stringify({ ready: true, ready_graph_count: 1 }))
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    })
+    const prevHome = process.env["HOME"]
+    const prevUrl = process.env["OMNIGRAPH_URL"]
+    try {
+      await Effect.runPromise(
+        Effect.callback<void>((resume) => {
+          server.listen(0, "127.0.0.1", () => resume(Effect.void))
+        }),
+      )
+      const address = server.address()
+      const port = typeof address === "object" && address !== null ? address.port : 0
+      expect(port).toBeGreaterThan(0)
+
+      const configDir = join(dir, "libs", "harness", "graph")
+      mkdirSync(join(configDir, "queries"), { recursive: true })
+      writeFileSync(join(configDir, "cluster.yaml"), "name: test\n", "utf-8")
+      writeFileSync(join(configDir, "schema.pg"), "", "utf-8")
+      writeFileSync(join(configDir, "queries", "harness.gq"), "", "utf-8")
+
+      const clusterRootDir = join(dir, ".harness", "omnigraph-cluster")
+      mkdirSync(clusterRootDir, { recursive: true })
+      writeFileSync(join(clusterRootDir, ".config-stamp"), "name: test\n\n---\n\n---\n", "utf-8")
+
+      const localBinDir = join(homeDir, ".local", "bin")
+      mkdirSync(localBinDir, { recursive: true })
+      const omnigraphStub = join(localBinDir, "omnigraph")
+      const omnigraphServerStub = join(localBinDir, "omnigraph-server")
+      writeFileSync(omnigraphStub, "#!/usr/bin/env bash\nexit 1\n", "utf-8")
+      writeFileSync(omnigraphServerStub, "#!/usr/bin/env bash\nexit 0\n", "utf-8")
+      chmodSync(omnigraphStub, 0o755)
+      chmodSync(omnigraphServerStub, 0o755)
+
+      process.env["HOME"] = homeDir
+      process.env["OMNIGRAPH_URL"] = `http://127.0.0.1:${port}`
+
+      const ready = await Effect.runPromise(ensureLocalOmnigraphReady(dir))
+      expect(ready).toBe(true)
+      expect(readyzCalls).toBeGreaterThanOrEqual(2)
+    } finally {
+      if (prevHome === undefined) delete process.env["HOME"]
+      else process.env["HOME"] = prevHome
+      if (prevUrl === undefined) delete process.env["OMNIGRAPH_URL"]
+      else process.env["OMNIGRAPH_URL"] = prevUrl
+      await Effect.runPromise(
+        Effect.callback<void>((resume) => {
+          server.close(() => resume(Effect.void))
+        }),
+      )
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(homeDir, { recursive: true, force: true })
     }
   })
 })

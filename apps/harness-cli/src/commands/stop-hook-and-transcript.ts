@@ -225,24 +225,12 @@ export const isReadOnlyStopTurn = (decoded?: StopHookStdin): boolean => {
   }
   if (lastUserExplicitIdx === -1) return false
   let firstStopHookBlockIdx = -1
-  let hasRfcDocEdit = false
   for (let i = lastUserExplicitIdx + 1; i < steps.length; i++) {
     const content = steps[i]?.content
     if (typeof content === "string" && content.includes("Stop hook blocked termination:")) {
       firstStopHookBlockIdx = i
       break
     }
-    for (const tc of steps[i]?.tool_calls ?? []) {
-      const targetFile =
-        unwrapTranscriptStringArg(tc.args?.TargetFile) ||
-        unwrapTranscriptStringArg(tc.args?.file_path)
-      if (targetFile.includes("/docs/rfcs/") || targetFile.includes("/.harness/prompts/")) {
-        hasRfcDocEdit = true
-      }
-    }
-  }
-  if (hasRfcDocEdit) {
-    return true
   }
   const endIdx = firstStopHookBlockIdx !== -1 ? firstStopHookBlockIdx : steps.length
   for (let i = lastUserExplicitIdx + 1; i < endIdx; i++) {
@@ -250,6 +238,23 @@ export const isReadOnlyStopTurn = (decoded?: StopHookStdin): boolean => {
     if (!step?.tool_calls) continue
     for (const tc of step.tool_calls) {
       if (isMutatingTranscriptToolCall(tc)) {
+        const targetFile =
+          unwrapTranscriptStringArg(tc.args?.TargetFile) ||
+          unwrapTranscriptStringArg(tc.args?.file_path)
+        const isFileEdit =
+          tc.name === "write_file" ||
+          tc.name === "edit_file" ||
+          tc.name === "replace_file_content" ||
+          tc.name === "multi_replace_file_content" ||
+          tc.name === "write_to_file" ||
+          tc.name === "Edit" ||
+          tc.name === "Write"
+        if (
+          isFileEdit &&
+          (targetFile.includes("/docs/rfcs/") || targetFile.includes("/.harness/prompts/"))
+        ) {
+          continue
+        }
         return false
       }
     }

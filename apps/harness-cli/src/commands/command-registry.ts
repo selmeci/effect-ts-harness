@@ -58,25 +58,7 @@ export class HarnessCommandRegistry extends Context.Service<
   HarnessCommandRegistryShape
 >()("harness-cli/HarnessCommandRegistry") {}
 
-export const CANONICAL_CLI_COMMAND_NAMES = [
-  "guard",
-  "route",
-  "plan-check",
-  "plan-synth",
-  "repair",
-  "verify",
-  "done",
-  "learn",
-  "gc",
-  "mutate",
-  "bench",
-  "ingest",
-  "session",
-  "doctor",
-  "ontology",
-  "report",
-  "help",
-] as const
+export const CANONICAL_CLI_COMMAND_NAMES = COMMANDS
 
 export type CanonicalCliCommandName = (typeof CANONICAL_CLI_COMMAND_NAMES)[number]
 
@@ -155,12 +137,12 @@ export const makeLiveCliCommandDescriptors = (
   {
     name: CliCommandName.make("mutate"),
     summary: "Run in-process Mutant Schemata and saturation verification over domain code.",
-    execute: (args) => handleMutate(args.slice(1), options),
+    execute: (args) => handleMutate(args, options),
   },
   {
     name: CliCommandName.make("bench"),
     summary: "Measure harness stage latencies and enforce p50/p95 SLO budgets.",
-    execute: (args) => handleBench(args.slice(1), options),
+    execute: (args) => handleBench(args, options),
   },
   {
     name: CliCommandName.make("ingest"),

@@ -64,7 +64,7 @@ const DISCRIMINANT_CALLBACK_METHODS = new Set(["filter", "find", "some", "every"
 const DISCRIMINANT_PROP_NAMES = new Set(["_tag", "kind", "status", "verdict", "role", "state"])
 
 function isTierOrSampleAppFile(filename) {
-  return /(^|\/)(libs\/[^/]+\/(contract|domain|core|service|infra)|apps\/sample)\//.test(filename)
+  return /(^|\/)(libs\/[^/]+\/(contract|domain|core|service|infra)|apps\/sample(?:-web)?)\//.test(filename)
 }
 
 function isDiscriminantMemberAccess(node) {

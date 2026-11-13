@@ -1,4 +1,5 @@
-import { Context, Effect, Exit, Layer, Scope } from "effect"
+import { Context, Deferred, Effect, Exit, Layer, Scope } from "effect"
+import { match } from "ts-pattern"
 import { SqlClient } from "effect/sql/SqlClient"
 import * as SqliteClientModule from "@effect/sql-sqlite-do/SqliteClient"
 import { Workerd, WorkerdLive } from "@alchemy.run/cloudflare-runtime/core/workerd/Workerd"
@@ -135,7 +136,7 @@ interface SharedWorkerdBridge {
 }
 
 let activeBridge: SharedWorkerdBridge | null = null
-let pendingBridgeInit: Promise<SharedWorkerdBridge> | null = null
+let pendingBridgeDeferred: Deferred.Deferred<SharedWorkerdBridge> | null = null
 let activeRefCount = 0
 let idleCloseTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -149,35 +150,49 @@ const closeSharedBridge = (bridgeToClose: SharedWorkerdBridge): void => {
 
 const BRIDGE_CALL_TIMEOUT_MS = 30_000
 
-const createSharedWorkerdBridgeOnce = (): Promise<SharedWorkerdBridge> => {
-  if (activeBridge !== null) {
-    return Promise.resolve(activeBridge)
-  }
-  if (pendingBridgeInit !== null) {
-    return pendingBridgeInit
-  }
-  pendingBridgeInit = Effect.runPromise(
-    Effect.gen(function* () {
-      const tmpDir = mkdtempSync(join(tmpdir(), "harness-es-workerd-"))
-      const bridgeScope = yield* Scope.make()
+const initSharedWorkerdBridge = (): Effect.Effect<SharedWorkerdBridge> =>
+  Effect.gen(function* () {
+    const tmpDir = mkdtempSync(join(tmpdir(), "harness-es-workerd-"))
+    const bridgeScope = yield* Scope.make()
 
+      let spawnedWorker: Worker | undefined
       const { callbackPort, worker } = yield* Effect.callback<{
         readonly callbackPort: number
         readonly worker: Worker
       }>((resume) => {
         const w = new Worker(BRIDGE_WORKER_SCRIPT, { eval: true })
+        spawnedWorker = w
+        let settled = false
         w.once("message", (msg: { readonly callbackPort: number }) => {
-          resume(Effect.succeed({ callbackPort: msg.callbackPort, worker: w }))
+          if (!settled) {
+            settled = true
+            resume(Effect.succeed({ callbackPort: msg.callbackPort, worker: w }))
+          }
         })
         w.once("error", (err) => {
-          resume(Effect.die(err))
+          if (!settled) {
+            settled = true
+            resume(Effect.die(err))
+          }
+        })
+        w.once("exit", (code) => {
+          if (!settled && code !== 0) {
+            settled = true
+            resume(Effect.die(new Error(`Workerd bridge worker exited with code ${code}`)))
+          }
         })
       }).pipe(
-        Effect.onError(() =>
-          Scope.close(bridgeScope, Exit.void).pipe(
+        Effect.onError(() => {
+          const workerToTerminate = spawnedWorker
+          return Scope.close(bridgeScope, Exit.void).pipe(
+            Effect.andThen(
+              workerToTerminate !== undefined
+                ? Effect.promise(() => workerToTerminate.terminate().then(() => undefined))
+                : Effect.void,
+            ),
             Effect.andThen(Effect.sync(() => rmSync(tmpDir, { recursive: true, force: true }))),
-          ),
-        ),
+          )
+        }),
       )
 
       const workerd = yield* Workerd.pipe(Effect.provide(WorkerdLive))
@@ -288,12 +303,7 @@ const createSharedWorkerdBridgeOnce = (): Promise<SharedWorkerdBridge> => {
       }
       activeBridge = bridge
       return bridge
-    }),
-  ).finally(() => {
-    pendingBridgeInit = null
-  })
-  return pendingBridgeInit
-}
+    })
 
 const acquireSharedWorkerdBridge = (): Effect.Effect<SharedWorkerdBridge, never, Scope.Scope> =>
   Effect.acquireRelease(
@@ -306,11 +316,40 @@ const acquireSharedWorkerdBridge = (): Effect.Effect<SharedWorkerdBridge, never,
         activeRefCount += 1
         return activeBridge
       }
+      if (pendingBridgeDeferred !== null) {
+        activeRefCount += 1
+        return yield* Deferred.await(pendingBridgeDeferred).pipe(
+          Effect.onError(() =>
+            Effect.sync(() => {
+              activeRefCount = Math.max(0, activeRefCount - 1)
+            }),
+          ),
+        )
+      }
+      const deferred = yield* Deferred.make<SharedWorkerdBridge>()
+      pendingBridgeDeferred = deferred
       activeRefCount += 1
-      return yield* Effect.promise(() => createSharedWorkerdBridgeOnce()).pipe(
-        Effect.onError(() =>
+      return yield* Effect.gen(function* () {
+        const exit = yield* Effect.exit(initSharedWorkerdBridge())
+        return yield* match(exit)
+          .with({ _tag: "Success" }, ({ value }) =>
+            Deferred.succeed(deferred, value).pipe(Effect.as(value)),
+          )
+          .with({ _tag: "Failure" }, ({ cause }) =>
+            Deferred.failCause(deferred, cause).pipe(
+              Effect.andThen(
+                Effect.sync(() => {
+                  activeRefCount = Math.max(0, activeRefCount - 1)
+                }),
+              ),
+              Effect.andThen(Effect.failCause(cause)),
+            ),
+          )
+          .exhaustive()
+      }).pipe(
+        Effect.ensuring(
           Effect.sync(() => {
-            activeRefCount = Math.max(0, activeRefCount - 1)
+            pendingBridgeDeferred = null
           }),
         ),
       )
@@ -347,6 +386,9 @@ const createWorkerdDurableObjectStorage = (
       ...bindings: ReadonlyArray<unknown>
     ): SqlStorageCursor<T> {
       const currentTx = txStack[txStack.length - 1]
+      if (currentTx?.rolledBack) {
+        return Effect.runSync(Effect.die(new Error("Transaction already rolled back")))
+      }
       const res = bridge.callSync({
         type: "exec",
         doName,
@@ -395,6 +437,10 @@ const createWorkerdDurableObjectStorage = (
       txStack.push(txEntry)
 
       const safeRollback = (): void => {
+        const idx = txStack.indexOf(txEntry)
+        if (idx !== -1) {
+          txStack.splice(idx, 1)
+        }
         if (!txEntry.rolledBack) {
           txEntry.rolledBack = true
           bridge.callSync({

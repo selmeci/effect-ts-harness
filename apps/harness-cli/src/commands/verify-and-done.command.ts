@@ -275,44 +275,45 @@ export const handleVerify = (
       Effect.catchTag("DstScheduleError", (err) => Effect.succeed({ _tag: "Err" as const, err })),
     )
 
-    const dstOutcome = match(dstSuiteResult)
-      .with({ _tag: "Err" }, ({ err }) => ({
-        _tag: "Fail" as const,
-        result: {
+    return yield* match(dstSuiteResult)
+      .with({ _tag: "Err" }, ({ err }) =>
+        Effect.succeed<CliResult>({
           exitCode: 1,
           stdout: "",
           stderr: `[GATE FAILURE] verify:dst-schedule\n${err.reason ?? err.message}`,
-        },
-      }))
-      .with({ _tag: "Ok" }, ({ suite }) => ({ _tag: "Suite" as const, suite }))
+        }),
+      )
+      .with({ _tag: "Ok" }, ({ suite }) =>
+        Effect.gen(function* () {
+          const recordedSpans = yield* readRecordedSpans(repoRoot)
+          const spanBudgetsResult = yield* decideSpanBudgets({
+            spans: recordedSpans,
+            causalityRules: [],
+            failOnViolation: true,
+          }).pipe(
+            Effect.map(() => ({ _tag: "Ok" as const })),
+            Effect.catchTag("SpanCausalityError", (err) =>
+              Effect.succeed({ _tag: "Err" as const, err }),
+            ),
+          )
+
+          return match(spanBudgetsResult)
+            .with({ _tag: "Err" }, ({ err }) => ({
+              exitCode: 1,
+              stdout: "",
+              stderr: `[GATE FAILURE] verify:span-budget\n${err.message}`,
+            }))
+            .with({ _tag: "Ok" }, () => {
+              const stamp = writeVerifyStamp(repoRoot, taskBranches.implBranch, {
+                dstSeed: suite.initialSeed,
+                dstSeedsRun: suite.seedsRun,
+              })
+              return { exitCode: 0, stdout: JSON.stringify(stamp), stderr: "" }
+            })
+            .exhaustive()
+        }),
+      )
       .exhaustive()
-    if (dstOutcome._tag === "Fail") return dstOutcome.result
-
-    const recordedSpans = yield* readRecordedSpans(repoRoot)
-    const spanBudgetsResult = yield* decideSpanBudgets({
-      spans: recordedSpans,
-      causalityRules: [],
-      failOnViolation: true,
-    }).pipe(
-      Effect.map(() => ({ _tag: "Ok" as const })),
-      Effect.catchTag("SpanCausalityError", (err) => Effect.succeed({ _tag: "Err" as const, err })),
-    )
-
-    const spanExitOpt = match(spanBudgetsResult)
-      .with({ _tag: "Err" }, ({ err }) => ({
-        exitCode: 1,
-        stdout: "",
-        stderr: `[GATE FAILURE] verify:span-budget\n${err.message}`,
-      }))
-      .with({ _tag: "Ok" }, () => undefined)
-      .exhaustive()
-    if (spanExitOpt !== undefined) return spanExitOpt
-
-    const stamp = writeVerifyStamp(repoRoot, taskBranches.implBranch, {
-      dstSeed: dstOutcome.suite.initialSeed,
-      dstSeedsRun: dstOutcome.suite.seedsRun,
-    })
-    return { exitCode: 0, stdout: JSON.stringify(stamp), stderr: "" }
   })
 
 const loadSnapshotPair = (
@@ -423,6 +424,7 @@ export const handleDone = (
       }
     }
 
+    // 1. Subagent bypass
     if (isSubagentStopContext(repoRoot, decodedStdin)) {
       return {
         exitCode: 0,
@@ -432,6 +434,7 @@ export const handleDone = (
       }
     }
 
+    // 2. Read-only turn bypass
     if (isReadOnlyStopTurn(decodedStdin)) {
       return {
         exitCode: 0,
@@ -441,6 +444,7 @@ export const handleDone = (
       }
     }
 
+    // 3. Verify stamp check
     const stampCheck = checkVerifyStamp(repoRoot)
     if (!stampCheck.valid) {
       if (hasVerifiedSinceLastMutation(decodedStdin)) {
@@ -465,93 +469,101 @@ export const handleDone = (
       isAntigravity,
       blockDecision,
     )
-    if (snapshotOutcome._tag === "Done") return snapshotOutcome.result
 
-    const { planGraph, implGraph } = snapshotOutcome
-    if (planGraph && implGraph) {
-      const diff = diffPlanAndImplGraphs(planGraph, implGraph)
-      if (!diff.ok) {
-        return {
-          exitCode: 0,
-          stdout: JSON.stringify({ decision: blockDecision, reason: diff.reasons.join("; ") }),
-          stderr: "",
-        }
-      }
-    }
+    return yield* match(snapshotOutcome)
+      .with({ _tag: "Done" }, ({ result }) => Effect.succeed(result))
+      .with({ _tag: "Graphs" }, ({ planGraph, implGraph }) =>
+        Effect.gen(function* () {
+          // 4. Plan vs implementation graph diff
+          if (planGraph && implGraph) {
+            const diff = diffPlanAndImplGraphs(planGraph, implGraph)
+            if (!diff.ok) {
+              return {
+                exitCode: 0,
+                stdout: JSON.stringify({ decision: blockDecision, reason: diff.reasons.join("; ") }),
+                stderr: "",
+              }
+            }
+          }
 
-    if (options?.planSteps && options.planSteps.length > 0) {
-      for (const step of options.planSteps) {
-        const stepRes = yield* checkPlanStepCoverage(step).pipe(Effect.provide(decisionLayer))
-        if (!stepRes.covered) {
+          // 5. Plan step coverage
+          if (options?.planSteps && options.planSteps.length > 0) {
+            for (const step of options.planSteps) {
+              const stepRes = yield* checkPlanStepCoverage(step).pipe(Effect.provide(decisionLayer))
+              if (!stepRes.covered) {
+                return {
+                  exitCode: 0,
+                  stdout: JSON.stringify({ decision: blockDecision, reason: stepRes.reason }),
+                  stderr: "",
+                }
+              }
+            }
+          }
+
+          // 6. Omnigraph sync & branch merge
+          if (isIsolatedExternalWorkspace(repoRoot)) {
+            writeGraphHeadMeta(repoRoot)
+            recordTelemetry(options, {
+              surface: isAntigravity ? "hook" : "cli",
+              category: "graph_query",
+              toolName: "omnigraph:merge-main",
+              outcome: "ok",
+              durationMs: 1,
+              engineSource: "local",
+            })
+          } else {
+            yield* ensureLocalOmnigraphReady(repoRoot)
+            const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
+            const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
+            yield* diffOmnigraphBranches({
+              repoRoot: clusterRepoRoot,
+              source: taskBranches.implBranch,
+              target: taskBranches.planBranch,
+            }).pipe(Effect.provide(OmnigraphSync.Live), Effect.orElseSucceed(() => Option.none()))
+
+            const merged = yield* mergeOmnigraphBranch({
+              repoRoot: clusterRepoRoot,
+              source: taskBranches.implBranch,
+              target: taskBranches.mainBranch,
+              cleanupBranches: [taskBranches.implBranch, taskBranches.planBranch],
+            }).pipe(Effect.provide(OmnigraphSync.Live), Effect.orElseSucceed(() => false))
+            writeGraphHeadMeta(repoRoot)
+            recordTelemetry(options, {
+              surface: isAntigravity ? "hook" : "cli",
+              category: "graph_query",
+              toolName: "omnigraph:merge-main",
+              outcome: merged ? "ok" : "fail",
+              durationMs: 1,
+              engineSource: merged ? "omnigraph" : "memory-fallback",
+            })
+            if (!merged) {
+              return {
+                exitCode: 0,
+                stdout: JSON.stringify({
+                  decision: blockDecision,
+                  reason: `Omnigraph branch merge (${taskBranches.implBranch} -> ${taskBranches.mainBranch}) failed`,
+                }),
+                stderr: "",
+              }
+            }
+          }
+
+          if (options?.repoRoot !== undefined || process.env.VITEST === undefined) {
+            const report = buildSessionReport({
+              events: readTelemetryEvents(repoRoot),
+              frictionEvents: readFrictionEvents(repoRoot),
+              stampValid: true,
+            })
+            writeSessionReportFiles(repoRoot, report)
+          }
+
           return {
             exitCode: 0,
-            stdout: JSON.stringify({ decision: blockDecision, reason: stepRes.reason }),
+            stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "",
             stderr: "",
+            telemetryDetail: "completed",
           }
-        }
-      }
-    }
-
-    if (isIsolatedExternalWorkspace(repoRoot)) {
-      writeGraphHeadMeta(repoRoot)
-      recordTelemetry(options, {
-        surface: isAntigravity ? "hook" : "cli",
-        category: "graph_query",
-        toolName: "omnigraph:merge-main",
-        outcome: "ok",
-        durationMs: 1,
-        engineSource: "local",
-      })
-    } else {
-      yield* ensureLocalOmnigraphReady(repoRoot)
-      const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
-      const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
-      yield* diffOmnigraphBranches({
-        repoRoot: clusterRepoRoot,
-        source: taskBranches.implBranch,
-        target: taskBranches.planBranch,
-      }).pipe(Effect.provide(OmnigraphSync.Live), Effect.orElseSucceed(() => Option.none()))
-
-      const merged = yield* mergeOmnigraphBranch({
-        repoRoot: clusterRepoRoot,
-        source: taskBranches.implBranch,
-        target: taskBranches.mainBranch,
-        cleanupBranches: [taskBranches.implBranch, taskBranches.planBranch],
-      }).pipe(Effect.provide(OmnigraphSync.Live), Effect.orElseSucceed(() => false))
-      writeGraphHeadMeta(repoRoot)
-      recordTelemetry(options, {
-        surface: isAntigravity ? "hook" : "cli",
-        category: "graph_query",
-        toolName: "omnigraph:merge-main",
-        outcome: merged ? "ok" : "fail",
-        durationMs: 1,
-        engineSource: merged ? "omnigraph" : "memory-fallback",
-      })
-      if (!merged) {
-        return {
-          exitCode: 0,
-          stdout: JSON.stringify({
-            decision: blockDecision,
-            reason: `Omnigraph branch merge (${taskBranches.implBranch} -> ${taskBranches.mainBranch}) failed`,
-          }),
-          stderr: "",
-        }
-      }
-    }
-
-    if (options?.repoRoot !== undefined || process.env.VITEST === undefined) {
-      const report = buildSessionReport({
-        events: readTelemetryEvents(repoRoot),
-        frictionEvents: readFrictionEvents(repoRoot),
-        stampValid: true,
-      })
-      writeSessionReportFiles(repoRoot, report)
-    }
-
-    return {
-      exitCode: 0,
-      stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "",
-      stderr: "",
-      telemetryDetail: "completed",
-    }
+        }),
+      )
+      .exhaustive()
   })

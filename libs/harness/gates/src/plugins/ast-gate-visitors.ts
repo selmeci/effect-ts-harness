@@ -261,7 +261,6 @@ export const visitSourceFileSinglePass = (
       const spec = node.moduleSpecifier.text
       if (
         (spec === "node:sqlite" || spec === "sqlite" || spec === "better-sqlite3") &&
-        !isHarnessInternal &&
         (packageTag === "infra" || packageTag === "app")
       ) {
         pushViolation(
@@ -421,10 +420,8 @@ export const visitSourceFileSinglePass = (
         !isTestFile &&
         !isHarnessInternal &&
         packageTag !== "app" &&
-        !(
-          packageTag === "infra" &&
-          (normalizedFilePath.endsWith("/testing.ts") || normalizedFilePath.endsWith("/memory.ts"))
-        ) &&
+        // libs/es/infra/src/memory.ts bridges the synchronous @cloudflare/workers-types SqlStorage interface to workerd
+        normalizedFilePath !== "libs/es/infra/src/memory.ts" &&
         (calleeText === "Effect.runSync" ||
           calleeText === "Effect.runPromise" ||
           calleeText === "Effect.runFork")

@@ -36,9 +36,19 @@ export class UnknownToolError extends Schema.TaggedError<UnknownToolError>()("Un
   toolName: McpToolInputName,
 }) {}
 
+export class ProjectPathEscapeError extends Schema.TaggedError<ProjectPathEscapeError>()(
+  "ProjectPathEscapeError",
+  {
+    projectPath: Schema.String,
+    repoRoot: Schema.String,
+    message: Schema.String,
+  },
+) {}
+
 export type McpToolExecutionError =
   | UnknownToolError
   | Schema.SchemaError
+  | ProjectPathEscapeError
   | ConceptLatticeCycleError
   | GraphInferenceError
   | GraphRewriteError
@@ -223,7 +233,16 @@ export const resolveGraph = (
       )
     }
     return buildEmptyHarnessGraph()
-  }).pipe(Effect.catchDefect(() => Effect.succeed(buildEmptyHarnessGraph())))
+  }).pipe(
+    Effect.catchDefect((defect) =>
+      Effect.gen(function* () {
+        const message = defect instanceof Error ? defect.message : String(defect)
+        process.stderr.write(`[harness-mcp] Unexpected defect resolving graph: ${message}\n`)
+        yield* Effect.logWarning(`Unexpected defect resolving graph: ${message}`)
+        return buildEmptyHarnessGraph()
+      }),
+    ),
+  )
 }
 
 export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolean => {
@@ -268,29 +287,40 @@ export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolea
 export const normalizeProjectPathEffect = (
   repoRoot: string,
   rawProject: string,
-): Effect.Effect<string, string> => {
+): Effect.Effect<string, ProjectPathEscapeError> => {
   const resolved = path.isAbsolute(rawProject)
     ? path.resolve(rawProject)
     : path.resolve(repoRoot, rawProject)
   if (!isPathInsideRoot(repoRoot, resolved)) {
-    return Effect.fail(`Project path '${rawProject}' escapes repository root '${repoRoot}'.`)
+    return Effect.fail(
+      new ProjectPathEscapeError({
+        projectPath: rawProject,
+        repoRoot,
+        message: `Project path '${rawProject}' escapes repository root '${repoRoot}'.`,
+      }),
+    )
   }
   if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
     const joined = path.join(resolved, "tsconfig.json")
     if (!isPathInsideRoot(repoRoot, joined)) {
-      return Effect.fail(`Project path '${joined}' escapes repository root '${repoRoot}'.`)
+      return Effect.fail(
+        new ProjectPathEscapeError({
+          projectPath: joined,
+          repoRoot,
+          message: `Project path '${joined}' escapes repository root '${repoRoot}'.`,
+        }),
+      )
     }
     return Effect.succeed(joined)
   }
   return Effect.succeed(resolved)
 }
 
-export const normalizeProjectPath = (repoRoot: string, rawProject: string): string =>
-  Effect.runSync(
-    normalizeProjectPathEffect(repoRoot, rawProject).pipe(
-      Effect.catch((message) => Effect.die(new Error(message))),
-    ),
-  )
+export const normalizeProjectPath = (
+  repoRoot: string,
+  rawProject: string,
+): Effect.Effect<string, ProjectPathEscapeError> =>
+  normalizeProjectPathEffect(repoRoot, rawProject)
 
 const extractJsonSchemaProperties = (raw: unknown): Record<string, object> | undefined => {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {

@@ -38,6 +38,11 @@ export const runDeltaAstAndPluginGates = (
         v.rule === "switch-statement" ||
         v.rule === "match-run-statement" ||
         v.rule === "non-exhaustive-union-match" ||
+        v.rule === "catch-cause-interrupts-only" ||
+        v.rule === "unisolated-dot-harness-test-write" ||
+        v.rule === "unsafe-type-cast" ||
+        v.rule === "ast-grep-tsx-grammar" ||
+        v.rule === "node-sqlite-in-infra" ||
         (v.rule === "discriminant-branching" && v.message.startsWith("Switch statement"))
       ) {
         return true

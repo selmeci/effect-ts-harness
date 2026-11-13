@@ -22,7 +22,9 @@ import {
 import {
   isPathInsideRoot,
   normalizeProjectPath,
+  ProjectPathEscapeError,
   recordMcpToolTelemetry,
+  resolveDefaultRepoRoot,
   type ServerOptions,
   toMcpToolInputJsonSchema,
 } from "./tools/mcp-helpers.js"
@@ -77,7 +79,10 @@ export {
   McpToolRegistryLive,
   type McpToolRegistryShape,
   normalizeProjectPath,
+  ProjectPathEscapeError,
+  recordMcpToolTelemetry,
   resolveDaemonSocketPath,
+  resolveDefaultRepoRoot,
   runDefaultLspDiagnostics,
   type ServerOptions,
   startHarnessDaemonServer,
@@ -147,7 +152,7 @@ export const createServer = (options?: ServerOptions): McpServer => {
           content: [{ type: "text" as const, text: JSON.stringify(value ?? null, null, 2) }],
         }))
         .with({ _tag: "Failure" }, ({ cause }) => {
-          if (Cause.hasInterruptsOnly(cause)) {
+          if (Cause.hasInterrupts(cause)) {
             return Promise.reject(
               new McpError(ErrorCode.InternalError, `Tool '${toolName}' execution was interrupted`),
             )
@@ -178,10 +183,49 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   const server = createServer()
   const transport = new StdioServerTransport()
   let daemonHandle: HarnessDaemonServerHandle | undefined = undefined
+  let shuttingDown = false
+  const daemonStartupPromise: Promise<HarnessDaemonServerHandle | undefined> =
+    process.env.HARNESS_DAEMON_SOCK !== "0"
+      ? startHarnessDaemonServer(process.cwd())
+          .then((handle) => {
+            daemonHandle = handle
+            return handle
+          })
+          .catch((err: unknown) => {
+            process.stderr.write(
+              `[harness-mcp] Daemon server warning: ${err instanceof Error ? err.message : String(err)}\n`,
+            )
+            return undefined
+          })
+      : Promise.resolve(undefined)
   const shutdown = () => {
-    void (daemonHandle ? daemonHandle.close() : Promise.resolve())
-      .then(() => server.close())
-      .finally(() => process.exit(0))
+    if (shuttingDown) {
+      return
+    }
+    shuttingDown = true
+    let exitCode = 0
+    void daemonStartupPromise
+      .then((startedHandle) => {
+        const handleToClose = daemonHandle ?? startedHandle
+        if (handleToClose === undefined) {
+          return Promise.resolve()
+        }
+        return handleToClose.close().catch((err: unknown) => {
+          exitCode = 1
+          process.stderr.write(
+            `[harness-mcp] Daemon close error: ${err instanceof Error ? err.message : String(err)}\n`,
+          )
+        })
+      })
+      .then(() =>
+        server.close().catch((err: unknown) => {
+          exitCode = 1
+          process.stderr.write(
+            `[harness-mcp] Server close error: ${err instanceof Error ? err.message : String(err)}\n`,
+          )
+        }),
+      )
+      .finally(() => process.exit(exitCode))
   }
   process.once("SIGINT", shutdown)
   process.once("SIGTERM", shutdown)
@@ -190,17 +234,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
       process.stderr.write(
         `[harness-mcp] Fatal error: ${err instanceof Error ? err.message : String(err)}\n`,
       )
+      process.exit(1)
     },
   )
-  if (process.env.HARNESS_DAEMON_SOCK !== "0") {
-    void startHarnessDaemonServer(process.cwd())
-      .then((handle) => {
-        daemonHandle = handle
-      })
-      .catch((err: unknown) => {
-        process.stderr.write(
-          `[harness-mcp] Daemon server warning: ${err instanceof Error ? err.message : String(err)}\n`,
-        )
-      })
-  }
 }

@@ -79,6 +79,11 @@ const resolveTieredMaxLines = (norm: string): number | undefined => {
   return undefined
 }
 
+/**
+ * Resolves the effective maximum line budget for a file path.
+ * `fallbackMaxLines` serves as an upper-bound cap via `Math.min(tieredMax, fallback)`
+ * so strict callers cannot raise tiered budgets.
+ */
 export const resolvePathSpecificMaxLines = (
   filePath: string,
   fallbackMaxLines?: number,

@@ -8,6 +8,7 @@ import * as DecisionModel from "effect/ai/DecisionModel"
 import * as AiError from "effect/ai/AiError"
 import { makeMockDecisionModelLayer } from "@harness/decision"
 import { buildHarnessGraph, saveGraphSnapshot } from "@harness/graph"
+import { readTelemetryEvents } from "@harness/gates"
 import { match } from "ts-pattern"
 import {
   createServer,
@@ -15,6 +16,11 @@ import {
   executeTool,
   isPathInsideRoot,
   makeLiveMcpToolRegistryLayer,
+  normalizeProjectPath,
+  ProjectPathEscapeError,
+  recordMcpToolTelemetry,
+  resolveDaemonSocketPath,
+  resolveDefaultRepoRoot,
   runDefaultLspDiagnostics,
   startHarnessDaemonServer,
 } from "../src/server.js"
@@ -1183,5 +1189,169 @@ describe("harness-mcp tools", () => {
       await client.close()
       await srv.close()
     }
+  })
+
+  it("daemon rejects repoRoot escape, >1MB payloads, malformed JSON, returns fallbackToInProcess, and cleans stale sockets", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-mcp-daemon-sec-"))
+    const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "harness-mcp-daemon-outside-"))
+    const socketPath = resolveDaemonSocketPath(tmpDir)
+    fs.mkdirSync(path.dirname(socketPath), { recursive: true })
+    fs.writeFileSync(socketPath, "stale-socket-placeholder\n", "utf-8")
+
+    const daemon = await startHarnessDaemonServer(tmpDir)
+    const sendRawPayload = (rawPayload: string): Promise<Record<string, unknown>> =>
+      Effect.runPromise(
+        Effect.callback<Record<string, unknown>>((resume) => {
+          const client = net.createConnection(daemon.socketPath)
+          let buf = ""
+          client.on("connect", () => {
+            client.write(rawPayload)
+          })
+          client.on("data", (chunk) => {
+            buf += chunk.toString("utf8")
+            const idx = buf.indexOf("\n")
+            if (idx !== -1) {
+              client.end()
+              resume(Effect.succeed(JSON.parse(buf.slice(0, idx)) as Record<string, unknown>))
+            }
+          })
+        }),
+      )
+
+    await Effect.runPromise(
+      Effect.promise(async () => {
+        const staleCleanPing = await sendRawPayload(
+          JSON.stringify({ id: "p-stale", command: "ping" }) + "\n",
+        )
+        expect(staleCleanPing).toMatchObject({ id: "p-stale", ok: true, status: "warm" })
+
+        const escapeRes = await sendRawPayload(
+          JSON.stringify({ id: "esc-1", command: "ping", repoRoot: outsideRoot }) + "\n",
+        )
+        expect(escapeRes).toMatchObject({ id: "esc-1", ok: false })
+        expect(String(escapeRes.error)).toContain("escapes daemon root")
+
+        const relEscapeRes = await sendRawPayload(
+          JSON.stringify({ id: "esc-rel", command: "ping", repoRoot: "../outside" }) + "\n",
+        )
+        expect(relEscapeRes).toMatchObject({ id: "esc-rel", ok: false })
+        expect(String(relEscapeRes.error)).toContain("escapes daemon root")
+
+        const oversizedRes = await sendRawPayload("x".repeat(1_048_577) + "\n")
+        expect(oversizedRes).toMatchObject({ ok: false })
+        expect(String(oversizedRes.error)).toContain("exceeds 1MB limit")
+
+        const malformedRes = await sendRawPayload("{ bad json\n")
+        expect(malformedRes).toMatchObject({ ok: false })
+        expect(String(malformedRes.error)).toContain("Invalid daemon request payload")
+
+        const fallbackRes = await sendRawPayload(
+          JSON.stringify({ id: "fb-1", command: "verify" }) + "\n",
+        )
+        expect(fallbackRes).toMatchObject({
+          id: "fb-1",
+          ok: false,
+          fallbackToInProcess: true,
+        })
+      }).pipe(
+        Effect.ensuring(
+          Effect.promise(async () => {
+            await daemon.close()
+            fs.rmSync(tmpDir, { recursive: true, force: true })
+            fs.rmSync(outsideRoot, { recursive: true, force: true })
+          }),
+        ),
+      ),
+    )
+  })
+
+  it("normalizeProjectPath fails with typed ProjectPathEscapeError without dying", async () => {
+    const repoRoot = "/tmp/harness-mcp-normalize-root"
+    const exit = await Effect.runPromiseExit(
+      normalizeProjectPath(repoRoot, "../outside/tsconfig.json"),
+    )
+    match(exit)
+      .with({ _tag: "Failure" }, ({ cause }) => {
+        expect(Cause.hasDies(cause)).toBe(false)
+        expect(Cause.hasFails(cause)).toBe(true)
+        const errorOpt = Cause.findErrorOption(cause)
+        match(errorOpt)
+          .with({ _tag: "Some" }, ({ value }) => {
+            expect(value).toBeInstanceOf(ProjectPathEscapeError)
+            expect(value).toMatchObject({
+              _tag: "ProjectPathEscapeError",
+              projectPath: "../outside/tsconfig.json",
+              repoRoot,
+            })
+          })
+          .with({ _tag: "None" }, () => {
+            expect.unreachable("Expected ProjectPathEscapeError in cause")
+          })
+          .exhaustive()
+      })
+      .with({ _tag: "Success" }, () => {
+        expect.unreachable("Expected normalizeProjectPath to fail with ProjectPathEscapeError")
+      })
+      .exhaustive()
+  })
+
+  it("resolveDefaultRepoRoot honors args.repoRoot and recordMcpToolTelemetry writes telemetry event", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-mcp-telemetry-"))
+    Effect.runSync(
+      Effect.sync(() => {
+        fs.writeFileSync(path.join(tmpDir, "pnpm-workspace.yaml"), "")
+        const nestedDir = path.join(tmpDir, "libs", "nested")
+        fs.mkdirSync(nestedDir, { recursive: true })
+
+        expect(resolveDefaultRepoRoot({ repoRoot: nestedDir })).toBe(tmpDir)
+
+        recordMcpToolTelemetry(
+          "harness_lsp_diagnostics",
+          { repoRoot: tmpDir },
+          { clean: false },
+          15,
+          { repoRoot: tmpDir },
+        )
+
+        const events = readTelemetryEvents(tmpDir)
+        expect(events).toHaveLength(1)
+        expect(events[0]).toMatchObject({
+          surface: "mcp",
+          category: "gate",
+          toolName: "harness_lsp_diagnostics",
+          outcome: "fail",
+          durationMs: 15,
+          engineSource: "local",
+        })
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            fs.rmSync(tmpDir, { recursive: true, force: true })
+          }),
+        ),
+      ),
+    )
+  })
+
+  it("harness_lsp_diagnostics fails closed with [lsp-exception] when lspDiagnosticsRunner throws", async () => {
+    const res = (await executeTool(
+      "harness_lsp_diagnostics",
+      { file: "libs/sample/domain/src/index.ts" },
+      {
+        repoRoot: process.cwd(),
+        lspDiagnosticsRunner: () => {
+          throw new Error("Simulated LSP runner throw")
+        },
+      },
+    )) as {
+      readonly clean: boolean
+      readonly diagnostics: ReadonlyArray<unknown>
+      readonly summary: { readonly errors: number; readonly messages: number }
+    }
+    expect(res.clean).toBe(false)
+    expect(res.summary.errors).toBe(1)
+    expect(res.summary.messages).toBe(1)
+    expect(String(res.diagnostics[0])).toContain("[lsp-exception]")
+    expect(String(res.diagnostics[0])).toContain("Simulated LSP runner throw")
   })
 })

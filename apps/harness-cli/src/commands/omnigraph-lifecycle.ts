@@ -209,7 +209,7 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
         },
         catch: () => undefined,
       }).pipe(Effect.orElseSucceed(() => undefined))
-    } else if (explicitEnvUrl !== undefined || serverMeta?.canonicalRepoRoot === canonicalRepoRoot) {
+    } else {
       const alreadyReady = yield* checkOmnigraphServerReady(targetBaseUrl)
       if (alreadyReady) {
         return true
@@ -240,7 +240,6 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
       return false
     }
 
-    let spawnInitiated = false
     yield* Effect.try({
       try: () => {
         if (!existsSync(clusterRootDir)) {
@@ -285,7 +284,6 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
         child.unref()
 
         if (child.pid !== undefined) {
-          spawnInitiated = true
           writeFileSync(
             join(clusterRootDir, "server.json"),
             JSON.stringify(
@@ -306,10 +304,7 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
       catch: () => undefined,
     }).pipe(Effect.orElseSucceed(() => undefined))
 
-    if (!spawnInitiated) {
-      return false
-    }
-
+    // Wait up to 3 seconds for omnigraph-server /readyz
     for (let i = 0; i < 30; i++) {
       if (yield* checkOmnigraphServerReady(targetBaseUrl)) {
         return true

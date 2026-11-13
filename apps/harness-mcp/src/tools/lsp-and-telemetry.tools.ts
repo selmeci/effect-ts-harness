@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { Effect, Option, Schema } from "effect"
+import { Data, Effect, Option, Schema } from "effect"
 import { evaluateOverlayDiagnostics, getOrCreateWarmProgramSession } from "@harness/graph"
 import {
   buildSessionReport,
@@ -116,6 +116,30 @@ const formatDiagKey = (d: unknown): string => {
   return typeof d === "string" ? d : JSON.stringify(d)
 }
 
+class LspExecutionError extends Data.TaggedError("LspExecutionError")<{
+  readonly cause: unknown
+  readonly message: string
+}> {}
+
+const toLspExecutionError = (cause: unknown): LspExecutionError =>
+  new LspExecutionError({
+    cause,
+    message: cause instanceof Error ? cause.message : String(cause),
+  })
+
+const makeLspExceptionReport = (cause: unknown): LspDiagnosticsReport => ({
+  clean: false,
+  diagnostics: [`[lsp-exception] ${cause instanceof Error ? cause.message : String(cause)}`],
+  summary: {
+    filesChecked: 0,
+    filesWithoutPlugin: 0,
+    totalFiles: 0,
+    errors: 1,
+    warnings: 0,
+    messages: 1,
+  },
+})
+
 export const runDefaultLspDiagnostics = (
   repoRoot: string,
   input: {
@@ -147,7 +171,11 @@ export const runDefaultLspDiagnostics = (
         let curr = path.dirname(resolvedFile)
         while (isPathInsideRoot(normalizedRepoRoot, curr) && curr !== normalizedRepoRoot) {
           const candidate = path.join(curr, "tsconfig.json")
-          if (fs.existsSync(candidate)) {
+          const candidateExists = yield* Effect.try({
+            try: () => fs.existsSync(candidate),
+            catch: toLspExecutionError,
+          })
+          if (candidateExists) {
             cliArgs.push("--project", candidate)
             break
           }
@@ -181,21 +209,35 @@ export const runDefaultLspDiagnostics = (
     const overlays: Record<string, string> = {}
     if (
       resolvedFile !== undefined &&
-      fs.existsSync(resolvedFile) &&
       (resolvedFile.endsWith(".ts") || resolvedFile.endsWith(".tsx")) &&
       !resolvedFile.endsWith(".test.ts") &&
-      !resolvedFile.endsWith(".spec.ts")
+      !resolvedFile.endsWith(".spec.ts") &&
+      !resolvedFile.endsWith(".test.tsx") &&
+      !resolvedFile.endsWith(".spec.tsx")
     ) {
-      overlays[resolvedFile] = fs.readFileSync(resolvedFile, "utf-8")
+      const fileExists = yield* Effect.try({
+        try: () => fs.existsSync(resolvedFile),
+        catch: toLspExecutionError,
+      })
+      if (fileExists) {
+        overlays[resolvedFile] = yield* Effect.try({
+          try: () => fs.readFileSync(resolvedFile, "utf-8"),
+          catch: toLspExecutionError,
+        })
+      }
     }
 
     const tsDiags =
       Object.keys(overlays).length > 0
-        ? evaluateOverlayDiagnostics(
-            repoRoot,
-            overlays,
-            getOrCreateWarmProgramSession(repoRoot),
-          ).filter((d) => d.code !== "TS2591" && d.code !== "TS2580")
+        ? yield* Effect.try({
+            try: () =>
+              evaluateOverlayDiagnostics(
+                repoRoot,
+                overlays,
+                getOrCreateWarmProgramSession(repoRoot),
+              ).filter((d) => d.code !== "TS2591" && d.code !== "TS2580"),
+            catch: toLspExecutionError,
+          })
         : []
 
     const effectGoDiags: ReadonlyArray<unknown> = Option.match(decoded, {
@@ -284,34 +326,27 @@ export const runDefaultLspDiagnostics = (
       failureDetails.push("[lsp-error] effect-tsgo produced no valid JSON diagnostic payload")
     }
 
+    const combinedDiagnostics: Array<unknown> =
+      tsDiags.length > 0 ? [...failureDetails, ...mergedDiags] : failureDetails
     return {
       clean: false,
-      diagnostics: failureDetails,
+      diagnostics: combinedDiagnostics,
       summary: {
-        filesChecked: 0,
+        filesChecked: tsDiags.length > 0 ? Object.keys(overlays).length : 0,
         filesWithoutPlugin: 0,
-        totalFiles: 0,
-        errors: 1,
-        warnings: 0,
-        messages: failureDetails.length,
+        totalFiles: tsDiags.length > 0 ? Object.keys(overlays).length : 0,
+        errors: Math.max(1, errorCount),
+        warnings: warningCount,
+        messages: combinedDiagnostics.length,
       },
     } satisfies LspDiagnosticsReport
   }).pipe(
-    Effect.catch((cause): Effect.Effect<LspDiagnosticsReport> => {
-      const msg = `[lsp-exception] ${cause}`
-      return Effect.succeed({
-        clean: false,
-        diagnostics: [msg],
-        summary: {
-          filesChecked: 0,
-          filesWithoutPlugin: 0,
-          totalFiles: 0,
-          errors: 1,
-          warnings: 0,
-          messages: 1,
-        },
-      })
-    }),
+    Effect.catch((cause): Effect.Effect<LspDiagnosticsReport> =>
+      Effect.succeed(makeLspExceptionReport(cause)),
+    ),
+    Effect.catchDefect((defect): Effect.Effect<LspDiagnosticsReport> =>
+      Effect.succeed(makeLspExceptionReport(defect)),
+    ),
   )
 
 const evaluateOverlaysDiagnostics = (
@@ -423,10 +458,23 @@ export const buildLspAndTelemetryToolDescriptors = (
         const overlays = typedArgs.overlays
         const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
         if (overlays !== undefined && Object.keys(overlays).length > 0) {
-          return evaluateOverlaysDiagnostics(root, overlays, file, project)
+          return yield* Effect.try({
+            try: () => evaluateOverlaysDiagnostics(root, overlays, file, project),
+            catch: toLspExecutionError,
+          }).pipe(
+            Effect.catch((cause) => Effect.succeed(makeLspExceptionReport(cause))),
+            Effect.catchDefect((defect) => Effect.succeed(makeLspExceptionReport(defect))),
+          )
         }
         if (options?.lspDiagnosticsRunner !== undefined) {
-          return options.lspDiagnosticsRunner({ file, project })
+          const runner = options.lspDiagnosticsRunner
+          return yield* Effect.try({
+            try: () => runner({ file, project }),
+            catch: toLspExecutionError,
+          }).pipe(
+            Effect.catch((cause) => Effect.succeed(makeLspExceptionReport(cause))),
+            Effect.catchDefect((defect) => Effect.succeed(makeLspExceptionReport(defect))),
+          )
         }
         return yield* runDefaultLspDiagnostics(root, { file, project })
       }),

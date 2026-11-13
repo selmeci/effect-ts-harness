@@ -106,14 +106,6 @@ export const runCliEffect = (
       }
     }
 
-    if (!isCommand(requested)) {
-      return {
-        exitCode: 1,
-        stdout: "",
-        stderr: `unknown command: ${requested}\nusage: harness <${COMMANDS.join("|")}>`,
-      }
-    }
-
     if (argv.includes("--help") || argv.includes("-h")) {
       return {
         exitCode: 0,
