@@ -1082,15 +1082,106 @@ describe("harness-mcp tools", () => {
     )
     match(exit)
       .with({ _tag: "Failure" }, ({ cause }) => {
-        const squashed = Cause.squash(cause)
-        expect(squashed).toMatchObject({
-          _tag: "GraphInferenceError",
-          reason: "invalid-graph",
-        })
+        expect(Cause.hasDies(cause)).toBe(false)
+        const errorOpt = Cause.findErrorOption(cause)
+        expect(errorOpt._tag).toBe("Some")
+        if (errorOpt._tag === "Some") {
+          expect(errorOpt.value).toMatchObject({
+            _tag: "GraphInferenceError",
+            reason: "invalid-graph",
+          })
+        }
       })
       .with({ _tag: "Success" }, () => {
         throw new Error("Expected invalid priors in harness_graph_complete to fail Schema decode")
       })
       .exhaustive()
+  })
+
+  it("exposes effect/Schema JSON schemas on ListTools and validates CallTool arguments via Schema", async () => {
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js")
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js")
+    const { ErrorCode } = await import("@modelcontextprotocol/sdk/types.js")
+
+    const srv = createServer({ graph })
+    const client = new Client({ name: "in-memory-test-client", version: "1.0.0" })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+
+    await srv.connect(serverTransport)
+    await client.connect(clientTransport)
+    try {
+      const listed = await client.listTools()
+      expect(listed.tools).toHaveLength(15)
+      for (const tool of listed.tools) {
+        expect(tool.description?.length).toBeGreaterThan(0)
+        expect(tool.inputSchema.type).toBe("object")
+        expect(tool.inputSchema.properties).toBeDefined()
+      }
+
+      const byName = new Map(listed.tools.map((t) => [t.name, t.inputSchema]))
+      expect(byName.get("harness_resolve")?.properties).toMatchObject({
+        symbolOrSpan: { type: "string" },
+        repoRoot: {},
+      })
+      expect(byName.get("harness_graph_complete")?.properties).toMatchObject({
+        minConfidenceMillis: {},
+        priors: {},
+        repoRoot: {},
+      })
+
+      const okRes = await client.callTool({
+        name: "harness_resolve",
+        arguments: { symbolOrSpan: "Sample.greet" },
+      })
+      expect(okRes.isError).not.toBe(true)
+      const firstBlock = Array.isArray(okRes.content) ? okRes.content[0] : undefined
+      expect(firstBlock?.type).toBe("text")
+      if (firstBlock?.type === "text") {
+        expect(JSON.parse(firstBlock.text)).toMatchObject({
+          spanName: "Sample.greet",
+        })
+      }
+
+      const nullOptRes = await client.callTool({
+        name: "harness_graph_complete",
+        arguments: { symbolOrSpan: null, minConfidenceMillis: null },
+      })
+      expect(nullOptRes.isError).not.toBe(true)
+
+      const priorsRes = await client.callTool({
+        name: "harness_graph_complete",
+        arguments: { priors: { edgeConfidenceOverrides: { a: -1 } } },
+      })
+      expect(priorsRes.isError).toBe(true)
+      const errBlock = Array.isArray(priorsRes.content) ? priorsRes.content[0] : undefined
+      if (errBlock?.type === "text") {
+        expect(errBlock.text).toContain("edge confidence prior")
+      }
+
+      for (const invalidCall of [
+        { name: "harness_resolve", arguments: {} },
+        { name: "harness_graph_complete", arguments: { minConfidenceMillis: 1001 } },
+        { name: "harness_graph_complete", arguments: { minConfidenceMillis: -1 } },
+        { name: "harness_graph_complete", arguments: { minConfidenceMillis: 1.5 } },
+        { name: "harness_graph_rewrite", arguments: { candidateRank: 0 } },
+        { name: "harness_graph_rewrite", arguments: { candidateRank: 6 } },
+        { name: "harness_graph_rewrite", arguments: { mode: "bogus" } },
+        { name: "harness_gq_query", arguments: { queryName: "bogus" } },
+      ]) {
+        await expect(client.callTool(invalidCall)).rejects.toMatchObject({
+          code: ErrorCode.InvalidParams,
+        })
+      }
+
+      await expect(
+        client.callTool({
+          name: "nonexistent_tool",
+          arguments: {},
+        }),
+      ).rejects.toMatchObject({ code: ErrorCode.MethodNotFound })
+    } finally {
+      await client.close()
+      await srv.close()
+    }
   })
 })

@@ -21,13 +21,26 @@ import {
   SelfDogfoodingViolationError,
 } from "./self-dogfooding-contract.js"
 
+const isExcludedProductionPath = (normPath: string): boolean =>
+  normPath.endsWith(".test.ts") ||
+  normPath.endsWith(".test.tsx") ||
+  normPath.endsWith(".spec.ts") ||
+  normPath.endsWith(".spec.tsx") ||
+  normPath.endsWith(".d.ts") ||
+  normPath.endsWith(".d.tsx") ||
+  normPath.endsWith(".config.ts") ||
+  /(?:^|\/)(?:test|dist|node_modules|repos)\//.test(normPath)
+
 export const isModularPluginPath = (filePath: string): boolean => {
   const norm = filePath.replace(/\\/g, "/")
-  return (
-    /(?:^|\/)libs\/harness\/gates\/src\/.*\.ts$/.test(norm) ||
-    /(?:^|\/)libs\/harness\/graph\/src\/.*\.ts$/.test(norm) ||
-    /(?:^|\/)(?:plugins|services|commands|tools|mutation)\//.test(norm)
-  )
+  const repoMatch = /(?:^|\/)((?:libs|apps)\/.*\.tsx?)$/.exec(norm)
+  if (repoMatch?.[1] !== undefined) {
+    return !isExcludedProductionPath(repoMatch[1])
+  }
+  if (/(?:^|\/)(?:plugins|services|commands|tools|mutation)\/.*\.tsx?$/.test(norm)) {
+    return !isExcludedProductionPath(norm)
+  }
+  return false
 }
 
 export const isGraphOrchestratorFacadePath = (filePath: string): boolean => {
@@ -37,27 +50,43 @@ export const isGraphOrchestratorFacadePath = (filePath: string): boolean => {
   )
 }
 
-export const resolvePathSpecificMaxLines = (filePath: string, explicitMax?: number): number => {
-  if (explicitMax !== undefined) {
-    return explicitMax
-  }
-  const norm = filePath.replace(/\\/g, "/")
-  if (isGraphOrchestratorFacadePath(norm)) {
+const resolveTieredMaxLines = (norm: string): number | undefined => {
+  if (
+    isGraphOrchestratorFacadePath(norm) ||
+    /(?:^|\/)apps\/(?:harness-cli\/src\/index|harness-mcp\/src\/server)\.tsx?$/.test(norm)
+  ) {
     return 250
   }
-  if (/(?:^|\/)libs\/harness\/graph\/src\/extractor\/compiler-session\.ts$/.test(norm)) {
+  if (/(?:^|\/)libs\/harness\/graph\/src\/extractor\/compiler-session\.tsx?$/.test(norm)) {
     return 700
   }
-  if (/(?:^|\/)libs\/harness\/graph\/src\/extractor\/[^/]+\.ts$/.test(norm)) {
+  if (/(?:^|\/)libs\/harness\/graph\/src\/extractor\/.*\.tsx?$/.test(norm)) {
     return 499
   }
-  if (/(?:^|\/)libs\/harness\/graph\/src\/engine\/[^/]+\.ts$/.test(norm)) {
+  if (
+    /(?:^|\/)apps\/harness-cli\/src\/commands\/.*\.tsx?$/.test(norm) ||
+    /(?:^|\/)apps\/harness-mcp\/src\/(?:tools|daemon)\/.*\.tsx?$/.test(norm) ||
+    /(?:^|\/)libs\/es\/infra\/src\/.*\.tsx?$/.test(norm)
+  ) {
+    return 650
+  }
+  if (/(?:^|\/)libs\/harness\/graph\/src\/engine\/.*\.tsx?$/.test(norm)) {
     return 700
   }
-  if (/(?:^|\/)libs\/harness\/graph\/src\/.*\.ts$/.test(norm)) {
+  if (/(?:^|\/)libs\/harness\/graph\/src\/.*\.tsx?$/.test(norm)) {
     return 750
   }
-  return DEFAULT_MAX_PLUGIN_FILE_LINES
+  return undefined
+}
+
+export const resolvePathSpecificMaxLines = (
+  filePath: string,
+  fallbackMaxLines?: number,
+): number => {
+  const norm = filePath.replace(/\\/g, "/")
+  const tieredMax = resolveTieredMaxLines(norm)
+  const fallback = fallbackMaxLines ?? DEFAULT_MAX_PLUGIN_FILE_LINES
+  return tieredMax !== undefined ? Math.min(tieredMax, fallback) : fallback
 }
 
 const EFFECT_CONSTRUCTORS = new Set([
@@ -97,7 +126,11 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
   let inspectedCount = 0
 
   for (const file of input.files) {
-    const isTestFile = file.filePath.endsWith(".test.ts") || file.filePath.endsWith(".spec.ts")
+    const isTestFile =
+      file.filePath.endsWith(".test.ts") ||
+      file.filePath.endsWith(".test.tsx") ||
+      file.filePath.endsWith(".spec.ts") ||
+      file.filePath.endsWith(".spec.tsx")
     if (isTestFile) {
       continue
     }

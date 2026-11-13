@@ -912,4 +912,36 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
         expect(view.itemCount).toBe(1)
       }).pipe(Effect.provide(SqlClientMemoryLayer)),
   )
+
+  it.effect(
+    "loadAggregate rejects metadata.streamVersion mismatch with exact expectedStreamVersion and actualStreamVersion operands",
+    () =>
+      Effect.gen(function* () {
+        yield* initializeAggregateTables()
+        const sql = yield* SqlClient
+        const badVerId = aid("cart-meta-stream-version-mismatch")
+        const now = Date.now()
+        const ev1 = JSON.stringify({ _tag: "CartCreated", cartId: badVerId, version: 1 })
+        const metaMismatched = JSON.stringify({
+          aggregateId: badVerId,
+          streamVersion: 2,
+          commandId: "cmd-ver-mismatch",
+          timestamp: now,
+        })
+        yield* sql`
+          INSERT INTO es_events (aggregate_name, aggregate_id, stream_version, command_id, event_type, payload, metadata, created_at)
+          VALUES ('Cart', ${badVerId}, 1, 'cmd-ver-mismatch', 'CartCreated', ${ev1}, ${metaMismatched}, ${now})
+        `
+        const mismatchErr = yield* Effect.flip(loadAggregate(badVerId, cartAggregateConfig))
+        match(mismatchErr)
+          .with({ _tag: "EventStreamCorruptionError" }, (err) => {
+            expect(err.expectedStreamVersion).toBe(1)
+            expect(err.actualStreamVersion).toBe(2)
+            expect(err.reason).toContain("streamVersion")
+          })
+          .otherwise(() => {
+            expect.unreachable("expected EventStreamCorruptionError on streamVersion mismatch")
+          })
+      }).pipe(Effect.provide(SqlClientMemoryLayer)),
+  )
 })

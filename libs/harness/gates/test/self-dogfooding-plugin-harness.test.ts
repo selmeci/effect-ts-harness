@@ -29,6 +29,7 @@ import {
 import {
   decideSelfDogfooding,
   isGraphOrchestratorFacadePath,
+  isModularPluginPath,
   resolvePathSpecificMaxLines,
   SelfDogfooding,
 } from "../src/plugins/self-dogfooding-plugin.js"
@@ -79,6 +80,7 @@ import {
 } from "../src/ast-cache.js"
 import { decideEarsSpecLint } from "../src/ears-lint.js"
 import {
+  collectModularPluginFiles,
   decideGraphEntropy,
   extractBalancedBraces,
   extractBalancedParens,
@@ -342,20 +344,37 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
   )
 
   it.effect(
-    "REQ-1.2: passing isModularPluginFile: false for isModularPluginPath targets (type-extractor.ts, compiler-session.ts) over 800 lines still emits file-line-budget-exceeded",
+    "REQ-1.2: passing isModularPluginFile: false for isModularPluginPath targets across libs/ and apps/ still emits file-line-budget-exceeded",
     () =>
       Effect.gen(function* () {
-        const overLimitContent = Array.from({ length: 801 }, (_, i) => `export const g${i} = ${i}`).join("\n")
+        const over250Content = Array.from({ length: 251 }, (_, i) => `export const e${i} = ${i}`).join("\n")
+        const over650Content = Array.from({ length: 651 }, (_, i) => `export const p${i} = ${i}`).join("\n")
+        const over800Content = Array.from({ length: 801 }, (_, i) => `export const g${i} = ${i}`).join("\n")
         const report = yield* SelfDogfooding.decide({
           files: [
             {
               filePath: AstSourceFilePath.make("libs/harness/graph/src/type-extractor.ts"),
-              content: AstSourceContent.make(overLimitContent),
+              content: AstSourceContent.make(over250Content),
               isModularPluginFile: false,
             },
             {
               filePath: AstSourceFilePath.make("libs/harness/graph/src/extractor/compiler-session.ts"),
-              content: AstSourceContent.make(overLimitContent),
+              content: AstSourceContent.make(over800Content),
+              isModularPluginFile: false,
+            },
+            {
+              filePath: AstSourceFilePath.make("apps/harness-cli/src/index.ts"),
+              content: AstSourceContent.make(over250Content),
+              isModularPluginFile: false,
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/es/infra/src/projector.ts"),
+              content: AstSourceContent.make(over650Content),
+              isModularPluginFile: false,
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/sample/domain/src/oversized-domain.ts"),
+              content: AstSourceContent.make(over800Content),
               isModularPluginFile: false,
             },
           ],
@@ -363,10 +382,15 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           failOnViolation: false,
         })
         expect(report.verdict).toBe("violated")
-        expect(report.violations).toHaveLength(2)
+        expect(report.violations).toHaveLength(5)
         expect(report.violations.every((v) => v.rule === "file-line-budget-exceeded")).toBe(true)
-        expect(report.violations[0]?.file).toBe("libs/harness/graph/src/type-extractor.ts")
-        expect(report.violations[1]?.file).toBe("libs/harness/graph/src/extractor/compiler-session.ts")
+        expect(report.violations.map((v) => v.file)).toEqual([
+          "libs/harness/graph/src/type-extractor.ts",
+          "libs/harness/graph/src/extractor/compiler-session.ts",
+          "apps/harness-cli/src/index.ts",
+          "libs/es/infra/src/projector.ts",
+          "libs/sample/domain/src/oversized-domain.ts",
+        ])
       }),
   )
 
@@ -1642,7 +1666,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
   )
 
   it.effect(
-    "Unit 1: resolvePathSpecificMaxLines enforces path-specific LOC budgets across @harness/graph",
+    "RFC-0007 Step 4: resolvePathSpecificMaxLines & isModularPluginPath enforce repo-wide tiered LOC budgets across libs/ and apps/",
     () =>
       Effect.sync(() => {
         expect(isGraphOrchestratorFacadePath("libs/harness/graph/src/type-extractor.ts")).toBe(true)
@@ -1651,15 +1675,53 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(resolvePathSpecificMaxLines("libs/harness/graph/src/graph-rewrite.ts")).toBe(250)
         expect(resolvePathSpecificMaxLines("libs/harness/graph/src/graph-engine.ts")).toBe(250)
         expect(resolvePathSpecificMaxLines("libs/harness/graph/src/graph-projector.ts")).toBe(250)
+        expect(resolvePathSpecificMaxLines("apps/harness-cli/src/index.ts")).toBe(250)
+        expect(resolvePathSpecificMaxLines("apps/harness-mcp/src/server.ts")).toBe(250)
+        expect(resolvePathSpecificMaxLines("apps/harness-cli/src/index.ts", 800)).toBe(250)
+        expect(resolvePathSpecificMaxLines("apps/harness-mcp/src/server.ts", 800)).toBe(250)
 
         expect(resolvePathSpecificMaxLines("libs/harness/graph/src/extractor/effect-fn-extractor.ts")).toBe(499)
+
+        expect(resolvePathSpecificMaxLines("apps/harness-cli/src/commands/verify.ts")).toBe(650)
+        expect(resolvePathSpecificMaxLines("apps/harness-mcp/src/tools/graph.ts")).toBe(650)
+        expect(resolvePathSpecificMaxLines("apps/harness-mcp/src/daemon/worker.ts")).toBe(650)
+        expect(resolvePathSpecificMaxLines("libs/es/infra/src/projector.ts")).toBe(650)
+        expect(resolvePathSpecificMaxLines("libs/es/infra/src/memory.ts", 800)).toBe(650)
+
         expect(resolvePathSpecificMaxLines("libs/harness/graph/src/extractor/compiler-session.ts")).toBe(700)
         expect(resolvePathSpecificMaxLines("libs/harness/graph/src/engine/snapshot-codec.ts")).toBe(700)
         expect(resolvePathSpecificMaxLines("libs/harness/graph/src/datalog/datalog-session.ts")).toBe(750)
-        expect(resolvePathSpecificMaxLines("libs/harness/gates/src/plugins/sample.ts")).toBe(800)
 
-        // When explicit maxPluginFileLines is provided, explicit override wins
+        expect(resolvePathSpecificMaxLines("libs/harness/gates/src/plugins/sample.ts")).toBe(800)
+        expect(resolvePathSpecificMaxLines("libs/sample/domain/src/index.ts")).toBe(800)
+        expect(resolvePathSpecificMaxLines("apps/sample/alchemy.run.ts")).toBe(800)
+        expect(resolvePathSpecificMaxLines("apps/sample-web/src/client.ts")).toBe(800)
+
+        // Stricter explicit maxPluginFileLines still tightens tiered budgets
         expect(resolvePathSpecificMaxLines("libs/harness/graph/src/type-extractor.ts", 100)).toBe(100)
+        expect(resolvePathSpecificMaxLines("apps/harness-cli/src/index.ts", 100)).toBe(100)
+
+        // isModularPluginPath matches all production .ts/.tsx files under libs/ and apps/ and excludes test/d.ts/config/build dirs
+        expect(isModularPluginPath("libs/sample/domain/src/index.ts")).toBe(true)
+        expect(isModularPluginPath("libs/es/infra/src/projector.ts")).toBe(true)
+        expect(isModularPluginPath("apps/harness-cli/src/index.ts")).toBe(true)
+        expect(isModularPluginPath("apps/harness-cli/src/commands/verify.ts")).toBe(true)
+        expect(isModularPluginPath("apps/harness-mcp/src/server.ts")).toBe(true)
+        expect(isModularPluginPath("apps/harness-mcp/src/tools/graph.ts")).toBe(true)
+        expect(isModularPluginPath("apps/harness-mcp/src/daemon/worker.ts")).toBe(true)
+        expect(isModularPluginPath("apps/sample/alchemy.run.ts")).toBe(true)
+        expect(isModularPluginPath("apps/sample-web/src/client.tsx")).toBe(true)
+
+        expect(isModularPluginPath("libs/sample/domain/test/index.test.ts")).toBe(false)
+        expect(isModularPluginPath("libs/harness/decision/src/cached-decision-model.spec.ts")).toBe(false)
+        expect(isModularPluginPath("libs/sample/infra/src/global.d.ts")).toBe(false)
+        expect(isModularPluginPath("libs/sample/infra/drizzle.config.ts")).toBe(false)
+        expect(isModularPluginPath("apps/harness-cli/vitest.config.ts")).toBe(false)
+        expect(isModularPluginPath("libs/es/core/test/fixtures/cart.ts")).toBe(false)
+        expect(isModularPluginPath("libs/harness/gates/dist/index.ts")).toBe(false)
+        expect(isModularPluginPath("libs/harness/gates/node_modules/pkg/index.ts")).toBe(false)
+        expect(isModularPluginPath("libs/harness/gates/repos/effect/index.ts")).toBe(false)
+        expect(isModularPluginPath("tools/oxlint/syntax-bans.js")).toBe(false)
       }),
   )
 
@@ -1803,6 +1865,111 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(
           cleanTestWriteReport.violations.filter((v) => v.rule === "unisolated-dot-harness-test-write"),
         ).toHaveLength(0)
+      }),
+  )
+
+  it.effect(
+    "RFC-0007 Step 4: every production .ts file in libs/ and apps/ respects tiered LOC budgets and passes SelfDogfooding.decide, harness-mcp has no zod, and syntax-bans has no isInternalHarnessFile",
+    () =>
+      Effect.gen(function* () {
+        const testDir = dirname(fileURLToPath(import.meta.url))
+        const repoRoot = resolve(testDir, "../../../..")
+
+        const collectedAbsFiles = collectModularPluginFiles(repoRoot)
+        const relFiles = collectedAbsFiles.map((abs) => relative(repoRoot, abs).replace(/\\/g, "/"))
+
+        expect(relFiles.length).toBeGreaterThanOrEqual(100)
+        expect(relFiles.some((f) => f.startsWith("libs/"))).toBe(true)
+        expect(relFiles.some((f) => f.startsWith("apps/"))).toBe(true)
+        expect(
+          relFiles.some(
+            (f) =>
+              f.endsWith(".test.ts") ||
+              f.endsWith(".spec.ts") ||
+              f.endsWith(".d.ts") ||
+              f.endsWith(".config.ts") ||
+              f.includes("/test/") ||
+              f.includes("/dist/") ||
+              f.includes("/node_modules/") ||
+              f.includes("/repos/"),
+          ),
+        ).toBe(false)
+
+        const fileInputs = collectedAbsFiles.map((absPath, idx) => ({
+          filePath: AstSourceFilePath.make(relFiles[idx]!),
+          content: AstSourceContent.make(readFileSync(absPath, "utf8")),
+        }))
+
+        const report = yield* SelfDogfooding.decide({
+          files: fileInputs,
+          maxPluginFileLines: MaxPluginFileLines.make(800),
+          failOnViolation: false,
+        })
+
+        expect(report.inspectedFileCount).toBe(fileInputs.length)
+        expect(report.violations, JSON.stringify(report.violations, null, 2)).toEqual([])
+        expect(report.verdict).toBe("clean")
+
+        const mcpPkgSchema = Schema.fromJsonString(
+          Schema.Struct({
+            dependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+            devDependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+          }),
+        )
+        const mcpPkg = yield* Schema.decodeEffect(mcpPkgSchema)(
+          readFileSync(join(repoRoot, "apps", "harness-mcp", "package.json"), "utf8"),
+        )
+        expect(mcpPkg.dependencies?.zod).toBeUndefined()
+        expect(mcpPkg.devDependencies?.zod).toBeUndefined()
+
+        const syntaxBansSrc = readFileSync(join(repoRoot, "tools", "oxlint", "syntax-bans.js"), "utf8")
+        expect(syntaxBansSrc).not.toMatch(/\bisInternalHarnessFile\b/)
+      }),
+  )
+
+  it.effect(
+    "RFC-0007 Step 4 edge cases: enforces tiered limits across .tsx & nested subdirs and fails on facade-star-reexport when failOnViolation is true",
+    () =>
+      Effect.gen(function* () {
+        const makeLines = (n: number) => Array.from({ length: n }, (_, i) => `export const x${i} = ${i}`).join("\n")
+        const tieredReport = yield* SelfDogfooding.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("apps/harness-cli/src/commands/sub/ui.tsx"),
+              content: AstSourceContent.make(makeLines(651)),
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/harness/graph/src/extractor/nested/helper.ts"),
+              content: AstSourceContent.make(makeLines(500)),
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/harness/graph/src/engine/nested/solver.ts"),
+              content: AstSourceContent.make(makeLines(701)),
+            },
+          ],
+          maxPluginFileLines: MaxPluginFileLines.make(800),
+          failOnViolation: false,
+        })
+        expect(tieredReport.verdict).toBe("violated")
+        expect(tieredReport.violations.map((v) => v.file)).toEqual([
+          "apps/harness-cli/src/commands/sub/ui.tsx",
+          "libs/harness/graph/src/extractor/nested/helper.ts",
+          "libs/harness/graph/src/engine/nested/solver.ts",
+        ])
+
+        const starErr = yield* Effect.flip(
+          SelfDogfooding.decide({
+            files: [
+              {
+                filePath: AstSourceFilePath.make("libs/harness/graph/src/type-extractor.ts"),
+                content: AstSourceContent.make('export * from "./extractor/compiler-session.js"\n'),
+              },
+            ],
+            failOnViolation: true,
+          }),
+        )
+        expect(starErr._tag).toBe("SelfDogfoodingViolationError")
+        expect(starErr.violations.some((v) => v.rule === "facade-star-reexport")).toBe(true)
       }),
   )
 })

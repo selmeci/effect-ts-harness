@@ -1,22 +1,26 @@
-import { Context, Effect, Layer, Option, Schema } from "effect"
+import { Context, Effect, Layer, Option } from "effect"
 import { match } from "ts-pattern"
+import { buildDatalogAndDpoToolDescriptors } from "./datalog-and-dpo.tools.js"
+import { buildGraphNavigationToolDescriptors } from "./graph-navigation.tools.js"
+import { buildLspAndTelemetryToolDescriptors } from "./lsp-and-telemetry.tools.js"
+import {
+  type McpToolExecutionError,
+  McpToolInputName,
+  McpToolName,
+  type McpToolPluginDescriptor,
+  type McpToolInputSchema,
+  type ServerOptions,
+  UnknownToolError,
+} from "./mcp-helpers.js"
+import { buildOntologyAndGqToolDescriptors } from "./ontology-and-gq.tools.js"
 
-export const McpToolName = Schema.NonEmptyString.pipe(Schema.brand("McpToolName"))
-export type McpToolName = typeof McpToolName.Type
-
-export const McpToolInputName = Schema.String.pipe(Schema.brand("McpToolInputName"))
-export type McpToolInputName = typeof McpToolInputName.Type
-
-export class UnknownToolError extends Schema.TaggedError<UnknownToolError>()("UnknownToolError", {
-  toolName: McpToolInputName,
-}) {}
-
-export interface McpToolPluginDescriptor {
-  readonly name: McpToolName
-  readonly description: string
-  readonly execute: (
-    args: Readonly<Record<string, unknown>>,
-  ) => Effect.Effect<unknown, UnknownToolError>
+export {
+  type McpToolExecutionError,
+  McpToolInputName,
+  McpToolName,
+  UnknownToolError,
+  type McpToolInputSchema,
+  type McpToolPluginDescriptor,
 }
 
 export interface McpToolRegistryShape {
@@ -38,70 +42,47 @@ export const makeMcpToolRegistryLayer = (
     }
     byName.set(t.name, t)
   }
+  const readonlyByName: ReadonlyMap<string, McpToolPluginDescriptor> = byName
   return Layer.succeed(McpToolRegistry, {
     listTools: Effect.succeed(tools),
-    resolveTool: (name) => Effect.succeed(Option.fromUndefinedOr(byName.get(name))),
+    resolveTool: (name) => Effect.succeed(Option.fromUndefinedOr(readonlyByName.get(name))),
   })
 }
 
 export type McpToolHandler = (
   args: Readonly<Record<string, unknown>>,
-) => Effect.Effect<unknown, UnknownToolError>
+) => Effect.Effect<unknown, McpToolExecutionError>
 
-const liveMcpToolHandlers = new Map<string, McpToolHandler>()
-
-export const registerLiveMcpToolHandlers = (
-  tools:
-    | ReadonlyArray<McpToolPluginDescriptor>
-    | Record<string, McpToolHandler>
-    | ReadonlyMap<string, McpToolHandler>,
-): void => {
-  if (Array.isArray(tools)) {
-    for (const t of tools) {
-      liveMcpToolHandlers.set(t.name, t.execute)
-    }
-  } else if (tools instanceof Map) {
-    for (const [name, handler] of tools.entries()) {
-      liveMcpToolHandlers.set(name, handler)
-    }
-  } else {
-    for (const [name, handler] of Object.entries(tools)) {
-      liveMcpToolHandlers.set(name, handler)
-    }
-  }
-}
-
-export const CANONICAL_MCP_TOOL_NAMES: ReadonlyArray<McpToolName> = [
-  McpToolName.make("harness_resolve"),
-  McpToolName.make("harness_callers"),
-  McpToolName.make("harness_callees"),
-  McpToolName.make("harness_tests_reaching"),
-  McpToolName.make("harness_structural_search"),
-  McpToolName.make("harness_route"),
-  McpToolName.make("harness_ontology_why"),
-  McpToolName.make("harness_ontology_impact"),
-  McpToolName.make("harness_ontology_check"),
-  McpToolName.make("harness_gq_query"),
-  McpToolName.make("harness_lsp_diagnostics"),
-  McpToolName.make("harness_telemetry_report"),
-  McpToolName.make("harness_graph_infer"),
-  McpToolName.make("harness_graph_complete"),
-  McpToolName.make("harness_graph_rewrite"),
+export const buildLiveMcpToolDescriptors = (
+  options?: ServerOptions,
+): ReadonlyArray<McpToolPluginDescriptor> => [
+  ...buildGraphNavigationToolDescriptors(options),
+  ...buildOntologyAndGqToolDescriptors(options),
+  ...buildLspAndTelemetryToolDescriptors(options),
+  ...buildDatalogAndDpoToolDescriptors(options),
 ]
 
-export const McpToolRegistryLive: Layer.Layer<McpToolRegistry> = makeMcpToolRegistryLayer(
-  CANONICAL_MCP_TOOL_NAMES.map((name) => ({
-    name,
-    description: `Registered handler for ${name}`,
-    execute: (args) => {
-      const live = liveMcpToolHandlers.get(name)
-      if (live !== undefined) {
-        return live(args)
-      }
-      return Effect.fail(new UnknownToolError({ toolName: McpToolInputName.make(name) }))
-    },
-  })),
+const STATIC_LIVE_TOOL_DESCRIPTORS: ReadonlyArray<McpToolPluginDescriptor> =
+  buildLiveMcpToolDescriptors()
+
+const STATIC_LIVE_TOOL_MAP: ReadonlyMap<string, McpToolPluginDescriptor> = new Map(
+  STATIC_LIVE_TOOL_DESCRIPTORS.map((descriptor) => [descriptor.name, descriptor]),
 )
+
+export const CANONICAL_MCP_TOOL_NAMES: ReadonlyArray<McpToolName> =
+  STATIC_LIVE_TOOL_DESCRIPTORS.map((descriptor) => descriptor.name)
+
+export const McpToolRegistryLive: Layer.Layer<McpToolRegistry> = Layer.succeed(McpToolRegistry, {
+  listTools: Effect.succeed(STATIC_LIVE_TOOL_DESCRIPTORS),
+  resolveTool: (name) => Effect.succeed(Option.fromUndefinedOr(STATIC_LIVE_TOOL_MAP.get(name))),
+})
+
+export const makeLiveMcpToolRegistryLayer = (
+  options?: ServerOptions,
+): Layer.Layer<McpToolRegistry> =>
+  options === undefined
+    ? McpToolRegistryLive
+    : makeMcpToolRegistryLayer(buildLiveMcpToolDescriptors(options))
 
 export interface DispatchMcpToolInput {
   readonly toolName: string
@@ -110,7 +91,7 @@ export interface DispatchMcpToolInput {
 
 export const dispatchMcpTool = Effect.fn("HarnessMcp.dispatchTool")(function* (
   input: DispatchMcpToolInput,
-): Effect.fn.Return<unknown, UnknownToolError, McpToolRegistry> {
+): Effect.fn.Return<unknown, McpToolExecutionError, McpToolRegistry> {
   const registry = yield* McpToolRegistry
   const resolved = yield* registry.resolveTool(input.toolName)
   return yield* match(resolved)

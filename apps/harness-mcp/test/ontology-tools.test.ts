@@ -288,7 +288,7 @@ status: accepted
     Effect.gen(function* () {
       const raw = yield* executeToolEffect(
         "harness_gq_query",
-        { queryName: "ontology_layer_nodes", params: { layer: "Business" } },
+        { queryName: "ontology_layer_nodes", params: { layer: "Application" } },
         { graph },
       )
       const res = raw as {
@@ -296,7 +296,7 @@ status: accepted
         readonly rows: ReadonlyArray<Record<string, unknown>>
       }
       expect(["omnigraph", "memory-fallback"]).toContain(res.source)
-      expect(Array.isArray(res.rows)).toBe(true)
+      expect(res.rows.length).toBeGreaterThan(0)
     }),
   )
 

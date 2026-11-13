@@ -12,11 +12,12 @@
  * - GraphReachabilityContext: Indexed graph reachability and relation counts.
  */
 import { type Dirent, existsSync, readdirSync, readFileSync } from "node:fs"
-import { join } from "node:path"
+import { join, relative } from "node:path"
 import { Effect, Schema } from "effect"
 import { match } from "ts-pattern"
 import * as Graph from "effect/Graph"
 import type { GovernanceDocStatus, GraphInferenceResult, HarnessGraph, HarnessNode } from "@harness/graph"
+import { isModularPluginPath } from "../self-dogfooding-plugin.js"
 
 export const GcFindingKind = Schema.Literals([
   "unused-service", "unprovided-service", "dead-tagged-error", "orphan-effect-fn",
@@ -425,14 +426,22 @@ export const loadGovernanceDocsFromDisk = (repoRoot: string): ReadonlyArray<Gove
   return results
 }
 
-const collectWorkspaceFiles = (dir: string, predicate: (name: string) => boolean): ReadonlyArray<string> => {
+const EXCLUDED_WORKSPACE_SCAN_DIRS = new Set(["node_modules", "dist", "repos", ".git", ".nx", "coverage"])
+const EXCLUDED_MODULAR_SCAN_DIRS = new Set([...EXCLUDED_WORKSPACE_SCAN_DIRS, "test"])
+
+const collectWorkspaceFiles = (
+  dir: string,
+  predicate: (name: string) => boolean,
+  excludedDirs: ReadonlySet<string> = EXCLUDED_WORKSPACE_SCAN_DIRS,
+): ReadonlyArray<string> => {
   if (!existsSync(dir)) return []
   return safeFs<ReadonlyArray<string>>(() => {
     const result: Array<string> = []
     for (const e of readdirSync(dir, { withFileTypes: true })) {
       const full = join(dir, e.name)
-      if (e.isDirectory()) result.push(...collectWorkspaceFiles(full, predicate))
-      else if (e.isFile() && predicate(e.name)) result.push(full)
+      if (e.isDirectory()) {
+        if (!excludedDirs.has(e.name)) result.push(...collectWorkspaceFiles(full, predicate, excludedDirs))
+      } else if (e.isFile() && predicate(e.name)) result.push(full)
     }
     return result.sort((a, b) => a.localeCompare(b))
   }, [])
@@ -443,8 +452,4 @@ export const collectWorkspaceSqlFiles = (dir: string): ReadonlyArray<string> => 
 export const collectWorkspaceAllFiles = (dir: string): ReadonlyArray<string> => collectWorkspaceFiles(dir, () => true)
 
 export const collectModularPluginFiles = (repoRoot: string): ReadonlyArray<string> =>
-  [...new Set([
-    "libs/harness/gates/src", "libs/harness/gates/src/plugins", "libs/harness/gates/src/services",
-    "libs/harness/graph/src", "libs/harness/graph/src/services",
-    "apps/harness-cli/src/commands", "apps/harness-mcp/src/tools",
-  ].map((d) => join(repoRoot, d)).filter((d) => existsSync(d)).flatMap((d) => collectWorkspaceTsFiles(d).filter((f) => !f.endsWith(".test.ts") && !f.endsWith(".spec.ts"))))].sort((a, b) => a.localeCompare(b))
+  [...new Set(["libs", "apps"].map((d) => join(repoRoot, d)).filter((d) => existsSync(d)).flatMap((d) => collectWorkspaceFiles(d, (n) => (n.endsWith(".ts") || n.endsWith(".tsx")) && !n.endsWith(".d.ts"), EXCLUDED_MODULAR_SCAN_DIRS).filter((f) => isModularPluginPath(relative(repoRoot, f).replace(/\\/g, "/")))))].sort((a, b) => a.localeCompare(b))

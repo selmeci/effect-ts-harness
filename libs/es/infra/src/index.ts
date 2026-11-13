@@ -18,13 +18,12 @@ import {
 } from "./http.js"
 import { DEFAULT_OUTBOX_BATCH_LIMIT, drainAggregateOutbox, relayAggregateOutbox } from "./outbox.js"
 import {
-  checkProjectorCatchUp,
   ingestPublishedEvent,
   initializeProjectorTables,
   PROJECTOR_MIGRATIONS_TABLE,
   projectorCoreMigrations,
-  rebuildProjectorFromArchive,
 } from "./projector.js"
+import { checkProjectorCatchUp, rebuildProjectorFromArchive } from "./projector-rebuild.js"
 
 export { SqliteClient } from "@effect/sql-sqlite-do/SqliteClient"
 export { SqliteMigrator }

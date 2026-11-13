@@ -194,17 +194,21 @@ export const visitSourceFileSinglePass = (
   _contentOrPackageTag?: string | AstGatePackageTag,
 ): ReadonlyArray<GateViolation> => {
   const filePath = AstSourceFilePath.make(String(filePathOrRelPath))
+  const normalizedFilePath = filePath.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "")
   const packageTag =
     packageTagOrContent !== undefined && isAstGatePackageTag(packageTagOrContent)
       ? AstGatePackageTag.make(packageTagOrContent)
       : _contentOrPackageTag !== undefined && isAstGatePackageTag(_contentOrPackageTag)
         ? AstGatePackageTag.make(_contentOrPackageTag)
-        : inferPackageTagFromPath(filePath)
+        : inferPackageTagFromPath(normalizedFilePath)
 
   const violations: Array<GateViolation> = []
-  const normalizedFilePath = filePath.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "")
   const hasParentTraversal = normalizedFilePath.split("/").includes("..")
-  const isTestFile = filePath.endsWith(".test.ts") || filePath.endsWith(".spec.ts")
+  const isTestFile =
+    normalizedFilePath.endsWith(".test.ts") ||
+    normalizedFilePath.endsWith(".test.tsx") ||
+    normalizedFilePath.endsWith(".spec.ts") ||
+    normalizedFilePath.endsWith(".spec.tsx")
   const isHarnessInternal =
     !hasParentTraversal &&
     (normalizedFilePath.startsWith("libs/harness/") ||
@@ -214,7 +218,12 @@ export const visitSourceFileSinglePass = (
   for (const stmt of sourceFile.statements) {
     if (ts.isImportDeclaration(stmt) && ts.isStringLiteral(stmt.moduleSpecifier)) {
       const modText = stmt.moduleSpecifier.text
-      if (modText.includes("SqliteMigrator") || modText.includes("Migrator")) {
+      const clauseText = stmt.importClause?.getText(sourceFile) ?? ""
+      if (
+        modText.includes("SqliteMigrator") ||
+        modText.includes("Migrator") ||
+        /\b(?:SqliteMigrator|Migrator)\b/.test(clauseText)
+      ) {
         hasMigratorImport = true
       }
     }
@@ -412,6 +421,10 @@ export const visitSourceFileSinglePass = (
         !isTestFile &&
         !isHarnessInternal &&
         packageTag !== "app" &&
+        !(
+          packageTag === "infra" &&
+          (normalizedFilePath.endsWith("/testing.ts") || normalizedFilePath.endsWith("/memory.ts"))
+        ) &&
         (calleeText === "Effect.runSync" ||
           calleeText === "Effect.runPromise" ||
           calleeText === "Effect.runFork")

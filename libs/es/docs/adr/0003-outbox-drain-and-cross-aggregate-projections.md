@@ -11,6 +11,7 @@ enforced_by:
   - libs/es/infra/src/index.ts
   - libs/es/infra/src/outbox.ts
   - libs/es/infra/src/projector.ts
+  - libs/es/infra/src/projector-rebuild.ts
   - libs/es/infra/test/fixtures/cart-sqlite.ts
 spans:
   - ProjectionSequence.decide
@@ -95,7 +96,7 @@ If outbox draining deletes rows before publishing or swallows bus errors, events
 | Outbox Corruption Guard               | `libs/es/infra/src/outbox.ts`, `libs/es/contract/src/index.ts`     | `drainAggregateOutbox`, `EventStreamCorruptionError`       | `EventStreamCorruptionError`                            |
 | Transactional Projector Migrations    | `libs/es/infra/src/projector.ts`                                   | `initializeProjectorTables`, `projectorCoreMigrations`     | `ProjectorInfra.initTables`                             |
 | Idempotent Ingestion & Gap Parking    | `libs/es/infra/src/projector.ts`, `libs/es/core/src/projection.ts` | `ingestPublishedEvent`, `applyCrossProjection`             | `Projector.ingest`, `CrossProjection.apply`             |
-| Archive Rebuild Parity                | `libs/es/infra/src/projector.ts`, `libs/es/core/src/projection.ts` | `rebuildProjectorFromArchive`, `rebuildCrossProjection`    | `Projector.rebuild`, `CrossProjection.rebuild`          |
-| Cross-Projection Query & Lookup Guard | `libs/es/core/src/projection.ts`, `libs/es/contract/src/index.ts`  | `queryCrossProjection`, `CrossProjectionNotFoundError`     | `CrossProjection.query`, `CrossProjectionNotFoundError` |
-| Archive & Envelope Corruption Guard   | `libs/es/infra/src/projector.ts`, `libs/es/contract/src/index.ts`  | `ingestPublishedEvent`, `ProjectionArchiveCorruptionError` | `ProjectionArchiveCorruptionError`                      |
-| Deterministic Catch-Up Inspection     | `libs/es/infra/src/projector.ts`                                   | `checkProjectorCatchUp`                                    | `Projector.checkCatchUp`                                |
+| Archive Rebuild Parity                | `libs/es/infra/src/projector-rebuild.ts`, `libs/es/core/src/projection.ts` | `rebuildProjectorFromArchive`, `rebuildCrossProjection`    | `Projector.rebuild`, `CrossProjection.rebuild`          |
+| Cross-Projection Query & Lookup Guard | `libs/es/core/src/projection.ts`, `libs/es/contract/src/index.ts`          | `queryCrossProjection`, `CrossProjectionNotFoundError`     | `CrossProjection.query`, `CrossProjectionNotFoundError` |
+| Archive & Envelope Corruption Guard   | `libs/es/infra/src/projector.ts`, `libs/es/contract/src/index.ts`          | `ingestPublishedEvent`, `ProjectionArchiveCorruptionError` | `ProjectionArchiveCorruptionError`                      |
+| Deterministic Catch-Up Inspection     | `libs/es/infra/src/projector-rebuild.ts`                                   | `checkProjectorCatchUp`                                    | `Projector.checkCatchUp`                                |

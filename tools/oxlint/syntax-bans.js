@@ -63,8 +63,8 @@ const DISCRIMINANT_CALLBACK_METHODS = new Set(["filter", "find", "some", "every"
 
 const DISCRIMINANT_PROP_NAMES = new Set(["_tag", "kind", "status", "verdict", "role", "state"])
 
-function isInternalHarnessFile(filename) {
-  return /(^|\/)(libs\/harness|apps\/harness-[^/]+)\//.test(filename)
+function isTierOrSampleAppFile(filename) {
+  return /(^|\/)(libs\/[^/]+\/(contract|domain|core|service|infra)|apps\/sample)\//.test(filename)
 }
 
 function isDiscriminantMemberAccess(node) {
@@ -1326,7 +1326,6 @@ const syntaxBans = {
 
     function checkTypeAliasDeclaration(decl, filename) {
       if (decl == null || decl.type !== "TSTypeAliasDeclaration") return
-      if (isInternalHarnessFile(filename)) return
       if (!/libs\/[^/]+\/(contract|domain|core|service|infra)\/src\//.test(filename)) return
       const typeName = decl.id != null ? decl.id.name : null
       if (typeName == null) return
@@ -1417,7 +1416,6 @@ const syntaxBans = {
 
     function checkContextServiceClass(classNode, filename) {
       if (classNode == null || classNode.superClass == null) return
-      if (isInternalHarnessFile(filename)) return
 
       // Also check Schema.TaggedError / Schema.TaggedClass / Schema.Class superClass field objects
       if (classNode.superClass.type === "CallExpression") {
@@ -1714,7 +1712,6 @@ const syntaxBans = {
           }
         }
         if (
-          !isInternalHarnessFile(filename) &&
           node.source != null &&
           typeof node.source.value === "string"
         ) {
@@ -1755,7 +1752,6 @@ const syntaxBans = {
       },
       ImportExpression(node) {
         const filename = getNormalizedFilename()
-        if (isInternalHarnessFile(filename) || filename.includes("/libs/harness/")) return
         if (/(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename)) {
           const sourceVal =
             node.source != null &&
@@ -1774,7 +1770,6 @@ const syntaxBans = {
       },
       TaggedTemplateExpression(node) {
         const filename = getNormalizedFilename()
-        if (isInternalHarnessFile(filename) || filename.includes("/libs/harness/")) return
         if (!/libs\/[^/]+\/infra\/src\//.test(filename)) return
         const tag = node.tag
         const isSqlTag =
@@ -1808,7 +1803,7 @@ const syntaxBans = {
             migrationRecordVars.set(node.id.name, node.init)
             if (
               /libs\/[^/]+\/infra\/src\//.test(getNormalizedFilename()) &&
-              !getNormalizedFilename().includes("/libs/harness/") &&
+              !(/(?:^|\/)libs\/harness\//.test(getNormalizedFilename())) &&
               hasSqliteMigratorImport &&
               /[Mm]igrations/.test(node.id.name)
             ) {
@@ -1822,7 +1817,6 @@ const syntaxBans = {
           recordSchemaDeclarator(node)
           const filename = getNormalizedFilename()
           if (
-            !isInternalHarnessFile(filename) &&
             /libs\/[^/]+\/(contract|domain|core)\/src\//.test(filename) &&
             node.init != null &&
             QUANTITY_OR_VERSION_PROP_REGEX.test(node.id.name)
@@ -1849,7 +1843,6 @@ const syntaxBans = {
       TSAsExpression(node) {
         checkAsOrTypeAssertion(context, node)
         const filename = getNormalizedFilename()
-        if (isInternalHarnessFile(filename)) return
         if (!/libs\/[^/]+\/(contract|domain|core|service|infra)\/src\//.test(filename)) return
         if (containsBrandTypeReference(node.typeAnnotation, brandedTypeNames)) {
           reportOnce(
@@ -1874,14 +1867,11 @@ const syntaxBans = {
         context.report({ node, message: asyncMessage })
       },
       SwitchStatement(node) {
-        const filename = getNormalizedFilename()
-        if (!isInternalHarnessFile(filename)) {
-          context.report({ node, message: switchBanMessage })
-        }
+        context.report({ node, message: switchBanMessage })
       },
       IfStatement(node) {
         const filename = getNormalizedFilename()
-        if (isInternalHarnessFile(filename)) return
+        if (!isTierOrSampleAppFile(filename)) return
         if (
           isDiscriminantTestExpression(node.test) ||
           isAliasedDiscriminantTest(node.test, discriminantAliasNames)
@@ -1895,7 +1885,7 @@ const syntaxBans = {
       },
       ConditionalExpression(node) {
         const filename = getNormalizedFilename()
-        if (isInternalHarnessFile(filename)) return
+        if (!isTierOrSampleAppFile(filename)) return
         if (
           isDiscriminantTestExpression(node.test) ||
           isAliasedDiscriminantTest(node.test, discriminantAliasNames)
@@ -1934,7 +1924,7 @@ const syntaxBans = {
       },
       CallExpression(node) {
         const filename = getNormalizedFilename()
-        if (!isInternalHarnessFile(filename)) {
+        if (isTierOrSampleAppFile(filename)) {
           if (
             node.callee != null &&
             node.callee.type === "MemberExpression" &&
@@ -1953,25 +1943,25 @@ const syntaxBans = {
               context.report({ node, message: discriminantIfBanMessage })
             }
           }
-
-          if (
-            /libs\/[^/]+\/(contract|domain|core|service|infra)\/src\//.test(filename) &&
-            isSchemaBrandCall(node)
-          ) {
-            const brandKey = node.arguments[0].value
-            const firstNode = declaredBrandKeys.get(brandKey)
-            if (firstNode != null && firstNode !== node) {
-              reportOnce(
-                node,
-                `Do not declare duplicate Schema.brand('${brandKey}') across multiple schemas — each brand key must have a single canonical constructor schema so validation invariants cannot be weakened. Compose wire or parameter schemas into the canonical branded schema using Schema.decodeTo(<BrandedSchema>) (e.g. Schema.FiniteFromString.pipe(Schema.decodeTo(${brandKey}))).`,
-              )
-            } else {
-              declaredBrandKeys.set(brandKey, node)
-            }
-          }
-
-          checkSchemaFieldObjects(node, filename)
         }
+
+        if (
+          /libs\/[^/]+\/(contract|domain|core|service|infra)\/src\//.test(filename) &&
+          isSchemaBrandCall(node)
+        ) {
+          const brandKey = node.arguments[0].value
+          const firstNode = declaredBrandKeys.get(brandKey)
+          if (firstNode != null && firstNode !== node) {
+            reportOnce(
+              node,
+              `Do not declare duplicate Schema.brand('${brandKey}') across multiple schemas — each brand key must have a single canonical constructor schema so validation invariants cannot be weakened. Compose wire or parameter schemas into the canonical branded schema using Schema.decodeTo(<BrandedSchema>) (e.g. Schema.FiniteFromString.pipe(Schema.decodeTo(${brandKey}))).`,
+            )
+          } else {
+            declaredBrandKeys.set(brandKey, node)
+          }
+        }
+
+        checkSchemaFieldObjects(node, filename)
 
         if (
           node.callee != null &&
@@ -2040,8 +2030,6 @@ const syntaxBans = {
           }
         }
         if (
-          !isInternalHarnessFile(filename) &&
-          !filename.includes("/libs/harness/") &&
           /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
           isIdentifier(node.callee, "require") &&
           Array.isArray(node.arguments) &&
@@ -2062,7 +2050,7 @@ const syntaxBans = {
         }
         if (
           /libs\/[^/]+\/infra\/src\//.test(filename) &&
-          !filename.includes("/libs/harness/") &&
+          !(/(?:^|\/)libs\/harness\//.test(filename)) &&
           node.callee != null &&
           node.callee.type === "MemberExpression" &&
           node.callee.computed !== true &&
@@ -2078,7 +2066,6 @@ const syntaxBans = {
       },
       ExportNamedDeclaration(node) {
         const filename = getNormalizedFilename()
-        if (isInternalHarnessFile(filename)) return
         if (!/libs\/[^/]+\/(contract|domain|core|service|infra)\/src\//.test(filename)) return
         if (node.declaration == null) return
 
@@ -2239,7 +2226,6 @@ const testIntegrity = {
       ImportDeclaration(node) {
         const filename = getNormalizedFilename()
         if (
-          !isInternalHarnessFile(filename) &&
           node.source != null &&
           typeof node.source.value === "string"
         ) {
@@ -2260,7 +2246,6 @@ const testIntegrity = {
       ImportExpression(node) {
         const filename = getNormalizedFilename()
         if (
-          !isInternalHarnessFile(filename) &&
           node.source != null &&
           typeof node.source.value === "string"
         ) {
@@ -2308,7 +2293,7 @@ const testIntegrity = {
       },
       IfStatement(node) {
         const filename = getNormalizedFilename()
-        if (isInternalHarnessFile(filename)) return
+        if (!isTierOrSampleAppFile(filename)) return
         if (
           isDiscriminantTestExpression(node.test) ||
           isAliasedDiscriminantTest(node.test, discriminantAliasNames)
@@ -2318,7 +2303,7 @@ const testIntegrity = {
       },
       ConditionalExpression(node) {
         const filename = getNormalizedFilename()
-        if (isInternalHarnessFile(filename)) return
+        if (!isTierOrSampleAppFile(filename)) return
         if (
           isDiscriminantTestExpression(node.test) ||
           isAliasedDiscriminantTest(node.test, discriminantAliasNames)
@@ -2332,7 +2317,6 @@ const testIntegrity = {
         }
         const filename = getNormalizedFilename()
         if (
-          !isInternalHarnessFile(filename) &&
           /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
           isIdentifier(node.callee, "require") &&
           Array.isArray(node.arguments) &&
@@ -2354,7 +2338,7 @@ const testIntegrity = {
             })
           }
         }
-        if (!isInternalHarnessFile(filename)) {
+        if (isTierOrSampleAppFile(filename)) {
           if (isImpreciseFailureAssert(node)) {
             context.report({ node, message: impreciseFailureAssertMessage })
           }
