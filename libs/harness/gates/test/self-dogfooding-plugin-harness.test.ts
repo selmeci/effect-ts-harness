@@ -26,7 +26,12 @@ import {
   WorkspaceFilePath,
   WorkspaceFsOperation,
 } from "../src/plugins/self-dogfooding-contract.js"
-import { decideSelfDogfooding, SelfDogfooding } from "../src/plugins/self-dogfooding-plugin.js"
+import {
+  decideSelfDogfooding,
+  isGraphOrchestratorFacadePath,
+  resolvePathSpecificMaxLines,
+  SelfDogfooding,
+} from "../src/plugins/self-dogfooding-plugin.js"
 import {
   DEFAULT_GATE_PLUGINS,
   evaluateAllGatePlugins,
@@ -310,10 +315,10 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
   )
 
   it.effect(
-    "REQ-1.2: enforces default 800-line budget across libs/harness/graph/src/**/*.ts modules",
+    "REQ-1.2: enforces decomposed line budget across libs/harness/graph/src/**/*.ts modules",
     () =>
       Effect.gen(function* () {
-        const atLimitContent = Array.from({ length: 800 }, (_, i) => `export const g${i} = ${i}`).join("\n")
+        const atLimitContent = Array.from({ length: 750 }, (_, i) => `export const g${i} = ${i}`).join("\n")
         const overLimitContent = Array.from({ length: 801 }, (_, i) => `export const g${i} = ${i}`).join("\n")
         const report = yield* SelfDogfooding.decide({
           files: [
@@ -1030,7 +1035,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
     "REQ-1.3: AstGateCache.decide reports effect-fn-dummy-void, discriminant-branching, and non-exhaustive-union-match without isHarnessInternal exemption",
     () =>
       Effect.gen(function* () {
-        expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v2")
+        expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v3")
 
         const testId = "AstGateCache.decide::REQ-1.3"
         const { result: report, spans } = yield* runWithTestTracer(
@@ -1633,6 +1638,171 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
             },
           ]),
         ).toThrow()
+      }),
+  )
+
+  it.effect(
+    "Unit 1: resolvePathSpecificMaxLines enforces path-specific LOC budgets across @harness/graph",
+    () =>
+      Effect.sync(() => {
+        expect(isGraphOrchestratorFacadePath("libs/harness/graph/src/type-extractor.ts")).toBe(true)
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/type-extractor.ts")).toBe(250)
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/datalog-engine.ts")).toBe(250)
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/graph-rewrite.ts")).toBe(250)
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/graph-engine.ts")).toBe(250)
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/graph-projector.ts")).toBe(250)
+
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/extractor/effect-fn-extractor.ts")).toBe(499)
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/extractor/compiler-session.ts")).toBe(700)
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/engine/snapshot-codec.ts")).toBe(700)
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/datalog/datalog-session.ts")).toBe(750)
+        expect(resolvePathSpecificMaxLines("libs/harness/gates/src/plugins/sample.ts")).toBe(800)
+
+        // When explicit maxPluginFileLines is provided, explicit override wins
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/type-extractor.ts", 100)).toBe(100)
+      }),
+  )
+
+  it.effect(
+    "Unit 1: facade-star-reexport flags export * from orchestrator facades while allowing named exports and index.ts export *",
+    () =>
+      Effect.gen(function* () {
+        // 1. Violating: export * from in orchestrator facade
+        const violatingReport = yield* decideSelfDogfooding({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/graph/src/type-extractor.ts"),
+              content: AstSourceContent.make('export * from "./extractor/compiler-session.js"\n'),
+            },
+          ],
+        })
+        expect(violatingReport.verdict).toBe("violated")
+        expect(violatingReport.violations.some((v) => v.rule === "facade-star-reexport")).toBe(true)
+
+        // 2. Allowed: export * from in index.ts
+        const allowedIndexReport = yield* decideSelfDogfooding({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/graph/src/index.ts"),
+              content: AstSourceContent.make('export * from "./model.js"\n'),
+            },
+          ],
+        })
+        expect(allowedIndexReport.violations.filter((v) => v.rule === "facade-star-reexport")).toHaveLength(0)
+
+        // 3. Allowed: explicit named export in orchestrator facade
+        const allowedNamedReport = yield* decideSelfDogfooding({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/graph/src/type-extractor.ts"),
+              content: AstSourceContent.make(
+                'export { createCompilerSession } from "./extractor/compiler-session.js"\n',
+              ),
+            },
+          ],
+        })
+        expect(allowedNamedReport.violations.filter((v) => v.rule === "facade-star-reexport")).toHaveLength(0)
+      }),
+  )
+
+  it.effect(
+    "Unit 1: AstGateCache.decide flags catch-cause-interrupts-only (effect-laws) and unisolated-dot-harness-test-write (test-integrity)",
+    () =>
+      Effect.gen(function* () {
+        // 1. catch-cause-interrupts-only in non-test file
+        const catchCauseReport = yield* AstGateCache.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/sample/infra/src/catch-cause.ts"),
+              packageTag: AstGatePackageTag.make("infra"),
+              content: AstSourceContent.make(
+                'import { Cause, Effect } from "effect"\n' +
+                  "export const op = Effect.catchCause(Effect.succeed(1), (cause) =>\n" +
+                  "  Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.fail(cause),\n" +
+                  ")\n",
+              ),
+            },
+          ],
+        })
+        expect(catchCauseReport.verdict).toBe("violated")
+        const catchCauseViolations = catchCauseReport.violations.filter(
+          (v) => v.rule === "catch-cause-interrupts-only",
+        )
+        expect(catchCauseViolations).toHaveLength(1)
+        expect(catchCauseViolations[0]?.category).toBe("effect-laws")
+
+        // 1b. Cause.hasInterrupts(cause) inside catchCause is allowed
+        const cleanCatchCauseReport = yield* AstGateCache.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/sample/infra/src/catch-cause-clean.ts"),
+              packageTag: AstGatePackageTag.make("infra"),
+              content: AstSourceContent.make(
+                'import { Cause, Effect } from "effect"\n' +
+                  "export const op = Effect.catchCause(Effect.succeed(1), (cause) =>\n" +
+                  "  Cause.hasInterrupts(cause) ? Effect.failCause(cause) : Effect.fail(cause),\n" +
+                  ")\n",
+              ),
+            },
+          ],
+        })
+        expect(
+          cleanCatchCauseReport.violations.filter((v) => v.rule === "catch-cause-interrupts-only"),
+        ).toHaveLength(0)
+
+        // 2. unisolated-dot-harness-test-write in test file
+        const testWriteReport = yield* AstGateCache.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/sample/domain/test/leak.test.ts"),
+              packageTag: AstGatePackageTag.make("test"),
+              content: AstSourceContent.make(
+                'import { saveGraphSnapshot } from "@harness/graph"\n' +
+                  'export const t = () => saveGraphSnapshot({}, ".harness/graph-snapshot.json")\n',
+              ),
+            },
+          ],
+        })
+        expect(testWriteReport.verdict).toBe("violated")
+        const testWriteViolations = testWriteReport.violations.filter(
+          (v) => v.rule === "unisolated-dot-harness-test-write",
+        )
+        expect(testWriteViolations).toHaveLength(1)
+        expect(testWriteViolations[0]?.category).toBe("test-integrity")
+
+        // 2b. writeFileSync directly to .harness/ in test file is flagged
+        const fsWriteReport = yield* AstGateCache.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/sample/domain/test/fs-leak.test.ts"),
+              packageTag: AstGatePackageTag.make("test"),
+              content: AstSourceContent.make(
+                'import fs from "node:fs"\n' +
+                  'export const t = () => fs.writeFileSync(".harness/leak.json", "{}")\n',
+              ),
+            },
+          ],
+        })
+        expect(
+          fsWriteReport.violations.filter((v) => v.rule === "unisolated-dot-harness-test-write"),
+        ).toHaveLength(1)
+
+        // 2c. Writing to tmp directory in test file is allowed
+        const cleanTestWriteReport = yield* AstGateCache.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/sample/domain/test/clean.test.ts"),
+              packageTag: AstGatePackageTag.make("test"),
+              content: AstSourceContent.make(
+                'import { saveGraphSnapshot } from "@harness/graph"\n' +
+                  "export const t = (tmpPath: string) => saveGraphSnapshot({}, tmpPath)\n",
+              ),
+            },
+          ],
+        })
+        expect(
+          cleanTestWriteReport.violations.filter((v) => v.rule === "unisolated-dot-harness-test-write"),
+        ).toHaveLength(0)
       }),
   )
 })

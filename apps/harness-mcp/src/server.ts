@@ -639,7 +639,7 @@ export const buildLiveMcpToolDescriptors = (
             Effect.provide(decisionLayer),
             Effect.timeoutOption("1500 millis"),
             Effect.catchCause((cause) =>
-              Cause.hasInterruptsOnly(cause) ? Effect.interrupt : Effect.succeedNone,
+              Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeedNone,
             ),
           )
           let block: string = Option.getOrElse(routedOpt, () => "review")
@@ -1027,7 +1027,7 @@ export const buildLiveMcpToolDescriptors = (
                   Effect.provide(decisionLayer),
                   Effect.timeoutOption("1500 millis"),
                   Effect.catchCause((cause) =>
-                    Cause.hasInterruptsOnly(cause) ? Effect.interrupt : Effect.succeedNone,
+                    Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeedNone,
                   ),
                 )
 

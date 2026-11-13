@@ -334,12 +334,23 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
   {
     id: "self-dogfooding-and-lazy-effect",
     pattern:
-      /TS377091|effecttsgo\(lazy-effect\)|effect-fn-dummy-void|nested-effect-run-sync|harness-switch-statement|file-line-budget-exceeded/,
+      /TS377091|effecttsgo\(lazy-effect\)|effect-fn-dummy-void|nested-effect-run-sync|harness-switch-statement|file-line-budget-exceeded|facade-star-reexport/,
     kind: "mechanical",
-    hint: "Self-dogfooding or Effect v4 lazyEffect violation — zero-argument service members must be Effect.Effect<A, E, R> properties (not () => Effect.Effect<...>), never use dummy 'yield* Effect.void' (use Effect.succeed or a real yield), never nest Effect.runSync inside Effect/Layer constructors, replace switch with ts-pattern match(...).exhaustive(), and keep modular plugin files under 800 lines (see harness:ADR-0012).",
+    hint: "Self-dogfooding, wildcard re-export, or Effect v4 lazyEffect violation — zero-argument service members must be Effect.Effect<A, E, R> properties (not () => Effect.Effect<...>), never use dummy 'yield* Effect.void' (use Effect.succeed or a real yield), never nest Effect.runSync inside Effect/Layer constructors, replace switch with ts-pattern match(...).exhaustive(), export explicit named symbols instead of 'export *', and keep modular plugin files under 800 lines (see harness:ADR-0012).",
     result: {
       kind: "mechanical",
-      hint: "Self-dogfooding or Effect v4 lazyEffect violation — zero-argument service members must be Effect.Effect<A, E, R> properties (not () => Effect.Effect<...>), never use dummy 'yield* Effect.void' (use Effect.succeed or a real yield), never nest Effect.runSync inside Effect/Layer constructors, replace switch with ts-pattern match(...).exhaustive(), and keep modular plugin files under 800 lines (see harness:ADR-0012).",
+      hint: "Self-dogfooding, wildcard re-export, or Effect v4 lazyEffect violation — zero-argument service members must be Effect.Effect<A, E, R> properties (not () => Effect.Effect<...>), never use dummy 'yield* Effect.void' (use Effect.succeed or a real yield), never nest Effect.runSync inside Effect/Layer constructors, replace switch with ts-pattern match(...).exhaustive(), export explicit named symbols instead of 'export *', and keep modular plugin files under 800 lines (see harness:ADR-0012).",
+    },
+  },
+  {
+    id: "effect-exit-and-interruption-laws",
+    pattern:
+      /effecttsgo\(run-of-exit-to-run-exit\)|catch-cause-interrupts-only|unisolated-dot-harness-test-write/,
+    kind: "mechanical",
+    hint: "Use Effect.runPromiseExit/Effect.runSyncExit instead of Effect.runPromise(Effect.exit(...)), use Cause.hasInterrupts(cause) inside Effect.catchCause so composite causes never swallow interruption, and use os.tmpdir() instead of live .harness/ paths in tests (see agent-patterns/testing.md and agent-patterns/resources-scope.md).",
+    result: {
+      kind: "mechanical",
+      hint: "Use Effect.runPromiseExit/Effect.runSyncExit instead of Effect.runPromise(Effect.exit(...)), use Cause.hasInterrupts(cause) inside Effect.catchCause so composite causes never swallow interruption, and use os.tmpdir() instead of live .harness/ paths in tests (see agent-patterns/testing.md and agent-patterns/resources-scope.md).",
     },
   },
   {

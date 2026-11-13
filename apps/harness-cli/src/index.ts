@@ -2557,7 +2557,7 @@ const handleDoctorOrSession = (
           }).pipe(
             Effect.timeoutOption("10 seconds"),
             Effect.catchCause((cause) =>
-              Cause.hasInterruptsOnly(cause) ? Effect.interrupt : Effect.succeedNone,
+              Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeedNone,
             ),
             Effect.provide(decisionLayer),
           ),
