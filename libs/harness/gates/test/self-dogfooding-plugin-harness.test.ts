@@ -75,6 +75,7 @@ import {
   GateVerdict,
   getAstGateCacheSize,
   HARNESS_GATE_RULE_VERSION,
+  isRepoWideAstRule,
   MAX_GATE_CACHE_SIZE,
   SourceLineNumber,
   visitSourceFileSinglePass,
@@ -1073,7 +1074,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
     "REQ-1.3: AstGateCache.decide reports effect-fn-dummy-void, discriminant-branching, and non-exhaustive-union-match without isHarnessInternal exemption",
     () =>
       Effect.gen(function* () {
-        expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v3")
+        expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v4")
 
         const testId = "AstGateCache.decide::REQ-1.3"
         const { result: report, spans } = yield* runWithTestTracer(
@@ -2108,6 +2109,109 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           infraTag,
         )
         expect(nodeSqliteViolations.some((v) => v.rule === "node-sqlite-in-infra")).toBe(true)
+      }),
+  )
+
+  it.effect(
+    "AST hardening: silent-catch-defect, ignored-chmod-permission, expanded catch-cause-interrupts-only, and isRepoWideAstRule",
+    () =>
+      Effect.gen(function* () {
+        // 1. silent-catch-defect flags silent handler, allows reporting handlers
+        const silentDefectPath = AstSourceFilePath.make("libs/harness/gates/src/silent-defect.ts")
+        const silentDefectSrc = AstSourceContent.make(
+          'import { Effect } from "effect"\n' +
+            "export const bad = Effect.succeed(1).pipe(Effect.catchDefect(() => Effect.void))\n" +
+            'export const okStderr = Effect.succeed(1).pipe(Effect.catchDefect((d) => { process.stderr.write(String(d)); return Effect.void }))\n' +
+            'export const okLog = Effect.succeed(1).pipe(Effect.catchDefect((d) => Effect.logWarning(String(d))))\n' +
+            "export const okReport = Effect.succeed(1).pipe(Effect.catchDefect((d) => Effect.succeed(makeLspExceptionReport(d))))\n",
+        )
+        const silentAstReport = yield* AstGateCache.decide({
+          files: [{ filePath: silentDefectPath, content: silentDefectSrc }],
+        })
+        const silentViolations = silentAstReport.violations.filter(
+          (v) => v.rule === "silent-catch-defect",
+        )
+        expect(silentViolations).toHaveLength(1)
+        expect(silentViolations[0]?.line).toBe(2)
+
+        const silentDogfoodReport = yield* decideSelfDogfooding({
+          files: [{ filePath: silentDefectPath, content: silentDefectSrc }],
+        })
+        expect(
+          silentDogfoodReport.violations.filter((v) => v.rule === "silent-catch-defect"),
+        ).toHaveLength(1)
+
+        // 2. ignored-chmod-permission flags Effect.ignore / Effect.orElseSucceed on chmodSync/fchmodSync, allows fail-closed
+        const chmodPath = AstSourceFilePath.make("libs/harness/gates/src/chmod-hardening.ts")
+        const chmodSrc = AstSourceContent.make(
+          'import { chmodSync, fchmodSync } from "node:fs"\n' +
+            'import { Effect } from "effect"\n' +
+            'export const badIgnore = Effect.sync(() => chmodSync("/tmp/x", 0o600)).pipe(Effect.ignore)\n' +
+            'export const badOrElse = Effect.sync(() => fchmodSync(3, 0o600)).pipe(Effect.orElseSucceed(() => undefined))\n' +
+            'export const okFailClosed = Effect.try({ try: () => chmodSync("/tmp/x", 0o600), catch: (e) => e })\n',
+        )
+        const chmodAstReport = yield* AstGateCache.decide({
+          files: [{ filePath: chmodPath, content: chmodSrc }],
+        })
+        expect(
+          chmodAstReport.violations.filter((v) => v.rule === "ignored-chmod-permission"),
+        ).toHaveLength(2)
+
+        const chmodDogfoodReport = yield* decideSelfDogfooding({
+          files: [{ filePath: chmodPath, content: chmodSrc }],
+        })
+        expect(
+          chmodDogfoodReport.violations.filter((v) => v.rule === "ignored-chmod-permission"),
+        ).toHaveLength(2)
+
+        // 3. Expanded catch-cause-interrupts-only flags Effect.runPromiseExit(...).then(...) and Effect.runSyncExit(...)
+        const exitInspectPath = AstSourceFilePath.make("libs/harness/gates/src/exit-inspect.ts")
+        const exitInspectSrc = AstSourceContent.make(
+          'import { Cause, Effect, Exit } from "effect"\n' +
+            "export const badPromiseExit = Effect.runPromiseExit(Effect.succeed(1)).then((exit) =>\n" +
+            "  Exit.isFailure(exit) ? Cause.hasInterruptsOnly(exit.cause) : false,\n" +
+            ")\n" +
+            "export const badSyncExit = () => {\n" +
+            "  const exit = Effect.runSyncExit(Effect.succeed(1))\n" +
+            "  return Exit.isFailure(exit) ? Cause.hasInterruptsOnly(exit.cause) : false\n" +
+            "}\n" +
+            "export const okPureHelper = (cause: Cause.Cause<unknown>) => Cause.hasInterruptsOnly(cause)\n",
+        )
+        const exitAstReport = yield* AstGateCache.decide({
+          files: [{ filePath: exitInspectPath, content: exitInspectSrc }],
+        })
+        const exitViolations = exitAstReport.violations.filter(
+          (v) => v.rule === "catch-cause-interrupts-only",
+        )
+        expect(exitViolations).toHaveLength(2)
+
+        const exitDogfoodReport = yield* decideSelfDogfooding({
+          files: [{ filePath: exitInspectPath, content: exitInspectSrc }],
+        })
+        expect(
+          exitDogfoodReport.violations.filter((v) => v.rule === "catch-cause-interrupts-only"),
+        ).toHaveLength(2)
+
+        // 4. isRepoWideAstRule covers all repo-wide rules including the new ones
+        const expectedRepoWideRules = [
+          "effect-fn-dummy-void",
+          "switch-statement",
+          "match-run-statement",
+          "non-exhaustive-union-match",
+          "catch-cause-interrupts-only",
+          "unisolated-dot-harness-test-write",
+          "unsafe-type-cast",
+          "ast-grep-tsx-grammar",
+          "node-sqlite-in-infra",
+          "silent-catch-defect",
+          "ignored-chmod-permission",
+        ]
+        for (const rule of expectedRepoWideRules) {
+          expect(isRepoWideAstRule(rule, "msg")).toBe(true)
+        }
+        expect(isRepoWideAstRule("discriminant-branching", "Switch statement in 'a.ts' is banned")).toBe(true)
+        expect(isRepoWideAstRule("discriminant-branching", "If statement in 'a.ts' inspects union")).toBe(false)
+        expect(isRepoWideAstRule("unscoped-effect-run", "Unscoped Effect.runSync")).toBe(false)
       }),
   )
 })

@@ -4,7 +4,10 @@ import {
   EnclosingSymbolName,
   getLineNumber,
   getOrCreateCachedSourceFile,
+  isCatchCauseInterruptsOnlyCall,
   isDummyEffectVoidYield,
+  isIgnoredChmodPermissionCall,
+  isSilentCatchDefectCall,
   resolveEnclosingSymbol,
   SourceLineNumber,
   unwrapAstExpression,
@@ -236,6 +239,42 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
             rule: SelfDogfoodingRuleId.make("match-run-statement"),
             message: SelfDogfoodingMessage.make(
               `match(...).run() in '${file.filePath}' is banned — use .exhaustive() instead.`,
+            ),
+            file: file.filePath,
+            line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+            enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
+          })
+        }
+
+        if (isCatchCauseInterruptsOnlyCall(node, sourceFile)) {
+          violations.push({
+            rule: SelfDogfoodingRuleId.make("catch-cause-interrupts-only"),
+            message: SelfDogfoodingMessage.make(
+              "Cause.hasInterruptsOnly(cause) inside Effect.catchCause / Exit inspection swallows fiber interruption on composite causes (Fail + Interrupt). Use Cause.hasInterrupts(cause) instead.",
+            ),
+            file: file.filePath,
+            line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+            enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
+          })
+        }
+
+        if (isSilentCatchDefectCall(node, sourceFile)) {
+          violations.push({
+            rule: SelfDogfoodingRuleId.make("silent-catch-defect"),
+            message: SelfDogfoodingMessage.make(
+              `Effect.catchDefect handler in '${file.filePath}' silently swallows runtime defects without logging or reporting — log via Effect.logWarning / process.stderr.write or re-fail.`,
+            ),
+            file: file.filePath,
+            line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+            enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
+          })
+        }
+
+        if (isIgnoredChmodPermissionCall(node, sourceFile)) {
+          violations.push({
+            rule: SelfDogfoodingRuleId.make("ignored-chmod-permission"),
+            message: SelfDogfoodingMessage.make(
+              `Ignoring chmodSync/fchmodSync failure with Effect.ignore or Effect.orElseSucceed in '${file.filePath}' is banned — permission hardening must fail closed on error.`,
             ),
             file: file.filePath,
             line: getLineNumber(sourceFile, node.getStart(sourceFile)),

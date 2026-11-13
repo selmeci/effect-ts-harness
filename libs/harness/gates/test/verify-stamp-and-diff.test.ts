@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { buildHarnessGraph } from "@harness/graph"
-import { checkVerifyStamp, diffPlanAndImplGraphs, writeVerifyStamp } from "../src/index.js"
+import { checkVerifyStamp, computeWorkspaceTreeHash, diffPlanAndImplGraphs, writeVerifyStamp } from "../src/index.js"
 
 describe("verify-stamp and plan/impl graph diff", () => {
   it("invalidates verify-stamp.json when a file changes after verify", () => {
@@ -35,6 +35,25 @@ describe("verify-stamp and plan/impl graph diff", () => {
       writeFileSync(join(dir, ".remember", "metadata.json"), '{"lastSeen": 123}\n')
       const afterRememberEdit = checkVerifyStamp(dir)
       expect(afterRememberEdit.valid).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("computeWorkspaceTreeHash skips transient temp-* and __temp_* files cleanly", () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-stamp-temp-"))
+    try {
+      writeFileSync(join(dir, "file.ts"), "export const x = 1\n")
+      const baselineHash = computeWorkspaceTreeHash(dir)
+      writeVerifyStamp(dir, "impl/current")
+
+      writeFileSync(join(dir, "temp-probe-123.ts"), "export const tmp = 1\n")
+      writeFileSync(join(dir, "__temp_scratch.ts"), "export const tmp2 = 2\n")
+      mkdirSync(join(dir, "temp-dir"), { recursive: true })
+      writeFileSync(join(dir, "temp-dir", "nested.ts"), "export const nested = 3\n")
+
+      expect(computeWorkspaceTreeHash(dir)).toBe(baselineHash)
+      expect(checkVerifyStamp(dir).valid).toBe(true)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

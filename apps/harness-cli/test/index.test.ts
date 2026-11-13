@@ -2440,6 +2440,225 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
     }
   })
 
+  it("flags silent-catch-defect, ignored-chmod-permission, and catch-cause-interrupts-only in runPromiseExit while allowing safe forms", () => {
+    // 1. silent-catch-defect: Effect.catchDefect(() => Effect.void) is flagged; reporting/re-fail is allowed
+    {
+      const reports: Array<{ message: string }> = []
+      const silentArg = {
+        type: "ArrowFunctionExpression",
+        rawSource: "() => Effect.void",
+      }
+      const visitor = syntaxBans.create({
+        filename: "/repo/apps/harness-mcp/src/server.ts",
+        sourceCode: {
+          getText: (node: { rawSource?: string }) => node?.rawSource ?? "",
+        },
+        report: (r: { message: string }) => {
+          reports.push(r)
+        },
+      })
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Effect" },
+          property: { type: "Identifier", name: "catchDefect" },
+        },
+        arguments: [silentArg],
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain("silently swallows runtime defects")
+
+      const validReports: Array<{ message: string }> = []
+      const validVisitor = syntaxBans.create({
+        filename: "/repo/apps/harness-mcp/src/server.ts",
+        sourceCode: {
+          getText: (node: { rawSource?: string }) => node?.rawSource ?? "",
+        },
+        report: (r: { message: string }) => {
+          validReports.push(r)
+        },
+      })
+      for (const safeText of [
+        "(d) => Effect.logWarning(String(d))",
+        "(d) => { process.stderr.write(String(d)); return Effect.void }",
+        "(d) => Effect.fail(new DefectError(d))",
+        "(d) => Effect.succeed(makeLspExceptionReport(d))",
+      ]) {
+        validVisitor.CallExpression?.({
+          type: "CallExpression",
+          callee: {
+            type: "MemberExpression",
+            computed: false,
+            object: { type: "Identifier", name: "Effect" },
+            property: { type: "Identifier", name: "catchDefect" },
+          },
+          arguments: [{ type: "ArrowFunctionExpression", rawSource: safeText }],
+        })
+      }
+      expect(validReports).toHaveLength(0)
+    }
+
+    // 2. ignored-chmod-permission: chmodSync/fchmodSync inside .pipe(Effect.ignore / Effect.orElseSucceed) is flagged; fail-closed is allowed
+    {
+      const reports: Array<{ message: string }> = []
+      const pipeParent: Record<string, unknown> = {
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "eff" },
+          property: { type: "Identifier", name: "pipe" },
+        },
+        rawSource: "Effect.try(() => fs.chmodSync(sock, 0o600)).pipe(Effect.ignore)",
+      }
+      const tryCall = {
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Effect" },
+          property: { type: "Identifier", name: "try" },
+        },
+        parent: pipeParent,
+      }
+      const chmodNode = {
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "fs" },
+          property: { type: "Identifier", name: "chmodSync" },
+        },
+        parent: tryCall,
+      }
+      const visitor = syntaxBans.create({
+        filename: "/repo/apps/harness-mcp/src/daemon/unix-socket-daemon.ts",
+        sourceCode: {
+          getText: (node: { rawSource?: string }) => node?.rawSource ?? "",
+        },
+        report: (r: { message: string }) => {
+          reports.push(r)
+        },
+      })
+      visitor.CallExpression?.(chmodNode)
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain("Ignoring chmodSync/fchmodSync failure")
+
+      const directIgnoreReports: Array<{ message: string }> = []
+      const directIgnoreVisitor = syntaxBans.create({
+        filename: "/repo/apps/harness-mcp/src/daemon/unix-socket-daemon.ts",
+        sourceCode: {
+          getText: (node: { rawSource?: string }) => node?.rawSource ?? "",
+        },
+        report: (r: { message: string }) => {
+          directIgnoreReports.push(r)
+        },
+      })
+      const orElseParent = {
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Effect" },
+          property: { type: "Identifier", name: "orElseSucceed" },
+        },
+      }
+      directIgnoreVisitor.CallExpression?.({
+        type: "CallExpression",
+        callee: { type: "Identifier", name: "fchmodSync" },
+        parent: orElseParent,
+      })
+      expect(directIgnoreReports).toHaveLength(1)
+      expect(directIgnoreReports[0]?.message).toContain("Ignoring chmodSync/fchmodSync failure")
+
+      // Fail-closed chmodSync inside Effect.try().pipe(Effect.catch(...)) produces 0 reports
+      const safeReports: Array<{ message: string }> = []
+      const safeVisitor = syntaxBans.create({
+        filename: "/repo/apps/harness-mcp/src/daemon/unix-socket-daemon.ts",
+        sourceCode: {
+          getText: (node: { rawSource?: string }) => node?.rawSource ?? "",
+        },
+        report: (r: { message: string }) => {
+          safeReports.push(r)
+        },
+      })
+      const safePipeParent = {
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "eff" },
+          property: { type: "Identifier", name: "pipe" },
+        },
+        rawSource: "Effect.try(() => fs.chmodSync(sock, 0o600)).pipe(Effect.catch(handleErr))",
+      }
+      safeVisitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "fs" },
+          property: { type: "Identifier", name: "chmodSync" },
+        },
+        parent: safePipeParent,
+      })
+      expect(safeReports).toHaveLength(0)
+    }
+
+    // 3. catch-cause-interrupts-only inside Effect.runPromiseExit / Effect.runSyncExit is flagged; test files and Cause.hasInterrupts are allowed
+    {
+      const reports: Array<{ message: string }> = []
+      const runPromiseExitParent = {
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Effect" },
+          property: { type: "Identifier", name: "runPromiseExit" },
+        },
+      }
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/harness/gates/src/runner.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        },
+      })
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Cause" },
+          property: { type: "Identifier", name: "hasInterruptsOnly" },
+        },
+        parent: runPromiseExitParent,
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain("Cause.hasInterrupts(cause)")
+
+      const testReports: Array<{ message: string }> = []
+      const testVisitor = syntaxBans.create({
+        filename: "/repo/libs/harness/gates/test/runner.test.ts",
+        report: (r: { message: string }) => {
+          testReports.push(r)
+        },
+      })
+      testVisitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Cause" },
+          property: { type: "Identifier", name: "hasInterruptsOnly" },
+        },
+        parent: runPromiseExitParent,
+      })
+      expect(testReports).toHaveLength(0)
+    }
+  })
+
   it("halts execution with [CRITICAL HARNESS BLOCKER] when Ollama is required and unavailable", async () => {
     const prevRequire = process.env["HARNESS_REQUIRE_OLLAMA"]
     const prevUrl = process.env["HARNESS_OLLAMA_URL"]

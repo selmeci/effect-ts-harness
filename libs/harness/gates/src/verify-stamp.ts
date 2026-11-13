@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { join, relative } from "node:path"
-import { Option, Schema } from "effect"
+import { Effect, Option, Schema } from "effect"
 import { DstSeed } from "./dst-engine.js"
 import { resolveHarnessStateDir } from "./worktree.js"
 
@@ -52,7 +52,7 @@ const collectFiles = (
   if (!existsSync(dir)) return
   const entries = readdirSync(dir, { withFileTypes: true })
   for (const entry of entries) {
-    if (IGNORED_NAMES.has(entry.name)) {
+    if (IGNORED_NAMES.has(entry.name) || /^(?:temp-|__temp_)/.test(entry.name)) {
       continue
     }
     const fullPath = join(dir, entry.name)
@@ -75,7 +75,12 @@ export const computeWorkspaceTreeHash = (repoRoot: string): string => {
   files.sort()
   const hasher = createHash("sha256")
   for (const rel of files) {
-    const content = readFileSync(join(repoRoot, rel))
+    const fullPath = join(repoRoot, rel)
+    if (!existsSync(fullPath)) continue
+    const content = Option.getOrUndefined(
+      Effect.runSync(Effect.option(Effect.try(() => readFileSync(fullPath)))),
+    )
+    if (content === undefined) continue
     hasher.update(rel)
     hasher.update("\0")
     hasher.update(content)

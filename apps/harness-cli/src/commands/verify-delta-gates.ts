@@ -11,6 +11,7 @@ import {
   GatePluginRegistryLive,
   HARNESS_GATE_RULE_VERSION,
   isModularPluginPath,
+  isRepoWideAstRule,
   type SpanSample,
   WorkspaceFilePath,
   WorkspaceFsLive,
@@ -33,18 +34,7 @@ export const runDeltaAstAndPluginGates = (
       cacheFilePath: AstGateCache.resolveCachePath(repoRoot),
     })
     const enforcedAstViolations = astReport.violations.filter((v) => {
-      if (
-        v.rule === "effect-fn-dummy-void" ||
-        v.rule === "switch-statement" ||
-        v.rule === "match-run-statement" ||
-        v.rule === "non-exhaustive-union-match" ||
-        v.rule === "catch-cause-interrupts-only" ||
-        v.rule === "unisolated-dot-harness-test-write" ||
-        v.rule === "unsafe-type-cast" ||
-        v.rule === "ast-grep-tsx-grammar" ||
-        v.rule === "node-sqlite-in-infra" ||
-        (v.rule === "discriminant-branching" && v.message.startsWith("Switch statement"))
-      ) {
+      if (isRepoWideAstRule(v.rule, v.message)) {
         return true
       }
       return (

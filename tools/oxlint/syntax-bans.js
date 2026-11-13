@@ -781,6 +781,30 @@ function isImpreciseFailureAssert(node) {
   return false
 }
 
+function isTestFilePath(filename) {
+  return (
+    filename.endsWith(".test.ts") ||
+    filename.endsWith(".test.tsx") ||
+    filename.endsWith(".spec.ts") ||
+    filename.endsWith(".spec.tsx")
+  )
+}
+
+function getCalleeName(callee) {
+  if (callee == null) return ""
+  if (callee.type === "Identifier") return callee.name
+  if (
+    callee.type === "MemberExpression" &&
+    callee.computed !== true &&
+    callee.property != null &&
+    callee.property.type === "Identifier"
+  ) {
+    const objKey = getMemberObjectChainKey(callee.object)
+    return objKey != null ? `${objKey}.${callee.property.name}` : `.${callee.property.name}`
+  }
+  return ""
+}
+
 function getPropertyKeyName(prop) {
   if (prop == null || prop.key == null) return null
   if (prop.key.type === "Identifier") return prop.key.name
@@ -2062,6 +2086,109 @@ const syntaxBans = {
             markAllowedDdlTemplates(node.arguments[0])
           }
           validateMigrationRecordObject(node.arguments[0])
+        }
+
+        const isTest = isTestFilePath(filename)
+        const calleeName = getCalleeName(node.callee)
+
+        if (!isTest && calleeName === "Cause.hasInterruptsOnly") {
+          let anc = node.parent
+          let hasUnsafeAncestor = false
+          while (anc != null) {
+            if (anc.type === "CallExpression") {
+              const ancCallee = getCalleeName(anc.callee)
+              if (
+                ancCallee === "Effect.catchCause" ||
+                ancCallee.endsWith(".catchCause") ||
+                ancCallee === "catchCause" ||
+                ancCallee === "Effect.runPromiseExit" ||
+                ancCallee.endsWith(".runPromiseExit") ||
+                ancCallee === "Effect.runSyncExit" ||
+                ancCallee.endsWith(".runSyncExit")
+              ) {
+                hasUnsafeAncestor = true
+                break
+              }
+            }
+            anc = anc.parent
+          }
+          if (hasUnsafeAncestor) {
+            context.report({
+              node,
+              message:
+                "Cause.hasInterruptsOnly(cause) inside catchCause/runPromiseExit/runSyncExit is banned — use Cause.hasInterrupts(cause) and !Cause.hasFails(cause) && !Cause.hasDies(cause) so composite Fail+Interrupt causes are not misclassified.",
+            })
+          }
+        }
+
+        if (!isTest && (calleeName === "Effect.catchDefect" || calleeName.endsWith(".catchDefect"))) {
+          const handlerArg = Array.isArray(node.arguments)
+            ? node.arguments.length >= 2
+              ? node.arguments[1]
+              : node.arguments[0]
+            : undefined
+          if (handlerArg != null) {
+            const argText = getNodeSourceText(context, handlerArg)
+            const hasReportingOrRethrow =
+              argText.includes("stderr.write") ||
+              argText.includes("logWarning") ||
+              argText.includes("logError") ||
+              argText.includes("Effect.log") ||
+              argText.includes("console.error") ||
+              argText.includes("console.warn") ||
+              argText.includes("Effect.fail") ||
+              argText.includes("Effect.die") ||
+              argText.includes("makeLspExceptionReport") ||
+              argText.includes("ExceptionReport")
+            if (!hasReportingOrRethrow) {
+              context.report({
+                node,
+                message:
+                  "Effect.catchDefect handler silently swallows runtime defects without logging or reporting — log via Effect.logWarning / process.stderr.write or re-fail.",
+              })
+            }
+          }
+        }
+
+        if (
+          !isTest &&
+          (calleeName === "chmodSync" ||
+            calleeName.endsWith(".chmodSync") ||
+            calleeName === "fchmodSync" ||
+            calleeName.endsWith(".fchmodSync"))
+        ) {
+          let anc = node.parent
+          let isIgnored = false
+          for (let depth = 0; depth < 8 && anc != null; depth += 1) {
+            if (anc.type === "CallExpression") {
+              const ancCallee = getCalleeName(anc.callee)
+              if (
+                ancCallee === "Effect.ignore" ||
+                ancCallee === "Effect.orElseSucceed"
+              ) {
+                isIgnored = true
+                break
+              }
+              if (ancCallee === "pipe" || ancCallee.endsWith(".pipe")) {
+                const pipeText = getNodeSourceText(context, anc)
+                if (
+                  pipeText.includes("Effect.ignore") ||
+                  pipeText.includes("Effect.orElseSucceed")
+                ) {
+                  isIgnored = true
+                  break
+                }
+              }
+            }
+            anc = anc.parent
+          }
+          if (isIgnored) {
+            context.report({
+              node,
+              message:
+                "Ignoring chmodSync/fchmodSync failure with Effect.ignore or Effect.orElseSucceed is banned — permission hardening must fail closed on error.",
+            })
+          }
         }
       },
       ExportNamedDeclaration(node) {
