@@ -357,7 +357,6 @@ export const visitSourceFileSinglePass = (
       }
       if (
         !isTestFile &&
-        !isHarnessInternal &&
         (packageTag === "domain" || packageTag === "contract") &&
         isImpureDomainSpecifier(spec)
       ) {
@@ -452,7 +451,6 @@ export const visitSourceFileSinglePass = (
     if (
       ts.isPropertyAccessExpression(node) &&
       !isTestFile &&
-      !isHarnessInternal &&
       packageTag === "domain" &&
       ts.isIdentifier(node.expression) &&
       node.expression.text === "Effect" &&
@@ -617,7 +615,6 @@ export const visitSourceFileSinglePass = (
         if (SUSPICIOUS_SQL_DDL_REGEX.test(templateText)) {
           if (
             packageTag === "infra" &&
-            !isHarnessInternal &&
             (!hasMigratorImport || !isInsideMigrationsRecord(node, sourceFile))
           ) {
             pushViolation(

@@ -43,11 +43,11 @@ Accept review feedback from either of two ingress sources:
 1. **Pasted Review Markdown:** Review text pasted into the conversation (e.g. from Grok, Codex, Claude, or a human reviewer) structured with severity headers (`Critical`, `Important`, `Suggestions`, `Nitpicks`).
 2. **GitHub PR Threads & Comments:** When given a PR number or URL, fetch both top-level review submissions (`gh pr view <number> --comments`) and inline line-level review threads (`gh api repos/{owner}/{repo}/pulls/{number}/comments`).
 
-Normalize every finding into a single enumerated list:
+Normalize every finding using **1-to-1 Atomic Decomposition**:
 
-- Format: `F-1`, `F-2`, `F-3`, ...
-- Capture for each: `Location` (`file:line`), `Severity` (`Critical`, `Important`, `Suggestion`), and exact `Quoted Claim`.
-- **Filter Out-of-Scope / Untracked Items Immediately:** If a finding demands features not in the active EARS specification, suggests future-phase scope, or requests subjective aesthetic restyling that contradicts existing lint rules, separate it immediately into an **Out-of-Scope** table and do not schedule implementation work for it.
+- **Every discrete bullet and sub-bullet** across `Critical`, `Important`, and `Suggestions` (including test gaps, documentation sync items, comments, and UX/CLI flag nits) MUST receive its own normalized ID (`F-1`, `F-2`, ... for `Critical`/`Important`; `S-1`, `S-2`, ... or `F-n` for `Suggestions`). Never merge distinct sub-bullets or silently drop `Suggestions` before adjudication.
+- Capture for each: `ID`, `Location` (`file:line`), `Severity` (`Critical`, `Important`, `Suggestion`), and exact `Quoted Claim`.
+- **Default to Fixing Valid Findings:** Do not filter items out in Phase 1. Every valid defect, test gap, doc drift, or concrete nit defaults to `fix`, `class-fix`, or `doc-sync-fix` in Phase 2 unless an explicit **Order-of-Authority** divert (`decline-with-evidence`) or novel trade-off (`escalate-to-human`) applies.
 
 ---
 
@@ -101,8 +101,9 @@ If any approved finding (`fix`, `class-fix`, `doc-sync-fix`) impacts:
 
 The orchestrator MUST synchronize documentation and contracts **first**:
 
-1. Update the governing EARS specification: update `WHEN`, `IF/THEN`, `WHILE`, and `WHERE` clauses, `spans` / `errors` tables, and Mermaid state diagrams so they reflect the intended reality.
-2. If an architectural invariant changed, update the ADR text and YAML frontmatter (`spans`, `services`, `errors`, `enforced_by`).
+1. Update the governing EARS specification (`specs/*.md`): update `WHEN`, `IF/THEN`, `WHILE`, and `WHERE` clauses, `spans` / `errors` tables, and Mermaid state diagrams so they reflect the intended behavioral contracts.
+2. If an architectural invariant changed, update the ADR text (`adr/*.md`) and YAML frontmatter (`spans`, `services`, `errors`, `enforced_by`).
+   - **Ordering Rule for Numeric Metrics vs. Behavioral Contracts:** Synchronize behavioral contracts (EARS clauses, ADRs, `type:contract` schemas) here in Phase 3 **before** code fixers run. However, **numeric metrics, line counts (`wc -l`), and file-size tables** in appendices or audit reports MUST NOT be finalized in Phase 3—defer those to **Phase 5 AFTER Phase 4 code fixers finish** so final reported counts match the post-fix code.
 3. Run `harness_ontology_check` to ensure zero semantic conflicts (`OntologyConflictV1`) and run `harness_lsp_diagnostics` on touched contract files.
 4. If new function signatures or service tags were added, execute plan-check to lock the boundary:
    ```bash
@@ -132,7 +133,16 @@ Group approved `fix` and `class-fix` items by package/directory boundaries so ea
 
 Once all fixer reports are received and merged into the workspace:
 
-1. **Execute Deterministic Gates:**
+1. **Synchronize Post-Fix Numeric Metrics & Reports:**
+   Update any numeric line counts (`wc -l`), file counts, or status appendices/reports (e.g. RFC audit appendices) **after** all Phase 4 code fixers finish so reported metrics reflect the final post-fix tree.
+
+2. **Pre-Commit 1-to-1 Completeness Audit:**
+   Verify against the Phase 1 atomic inventory that **every single bullet and sub-bullet** from the PR review (`Critical`, `Important`, and `Suggestions`) has either:
+   - a verified code/doc change + passing test, **or**
+   - an explicit `decline-with-evidence` / `escalate-to-human` (`needs-human`) disposition with supporting citation.
+   If any sub-bullet was missed or partially addressed, dispatch the missing fix before running final gates.
+
+3. **Execute Deterministic Gates:**
    Run the full, ordered gate sequence in the root workspace:
 
    ```bash
@@ -142,7 +152,7 @@ Once all fixer reports are received and merged into the workspace:
    CI=true node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done
    ```
 
-2. **Compounding Gate Audit & Adversarial Evasion Matrix (`compounding-effect-learnings`):**
+4. **Compounding Gate Audit & Adversarial Evasion Matrix (`compounding-effect-learnings`):**
    For every valid `Critical` or `Important` review finding that previously slipped past `harness verify`, conduct the Compounding Audit:
    - Ask: _"Why did our deterministic gates allow this defect to exist?"_
    - Examples:
@@ -151,6 +161,11 @@ Once all fixer reports are received and merged into the workspace:
      - If an edge-case mutation survived: add an operator to `libs/harness/gates/src/mutation-check.ts`.
      - If a recurring architectural question arose: run `node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts learn` and promote an ADR or pattern doc.
    - **Adversarial Evasion Matrix for New/Modified Gates:** Whenever you add or modify a gate in `libs/harness/gates/src/policy.ts`, `libs/harness/graph/src/type-extractor.ts`, `tools/oxlint/syntax-bans.js`, or `libs/harness/gates/src/mutation-check.ts`, you MUST write unit tests covering adversarial evasion vectors (shell wrapper/quoting/subshell bypasses, multi-aggregate / multi-schema files where global `/Command$/` or `/State$/` regexes would zero out intersections, self-comparison `x.id === x.id` or comment bypasses, and `satisfies`/parenthesized type casts) and run `effect-adversarial-reviewer` directly against the gate implementation.
+
+5. **Remote Tail (GitHub PR Reply & Re-Fetch Verification):**
+   When resolving feedback on a GitHub PR:
+   - Post the concise resolution summary/reply to the PR or review threads (`gh pr comment` / `gh api ...`).
+   - Re-fetch PR comments and review threads (`gh pr view <number> --comments` and `gh api repos/{owner}/{repo}/pulls/{number}/comments`) to confirm publication and verify no new unresolved review comments arrived during the fix loop.
 
 ---
 

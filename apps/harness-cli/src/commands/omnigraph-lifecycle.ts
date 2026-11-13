@@ -210,9 +210,13 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
         catch: () => undefined,
       }).pipe(Effect.orElseSucceed(() => undefined))
     } else {
-      const alreadyReady = yield* checkOmnigraphServerReady(targetBaseUrl)
-      if (alreadyReady) {
-        return true
+      const belongsToThisRepo =
+        explicitEnvUrl !== undefined || serverMeta?.canonicalRepoRoot === canonicalRepoRoot
+      if (belongsToThisRepo) {
+        const alreadyReady = yield* checkOmnigraphServerReady(targetBaseUrl)
+        if (alreadyReady) {
+          return true
+        }
       }
     }
 
@@ -240,6 +244,7 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
       return false
     }
 
+    let spawnSucceeded = false
     yield* Effect.try({
       try: () => {
         if (!existsSync(clusterRootDir)) {
@@ -282,6 +287,7 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
           { cwd: clusterRepoRoot, detached: true, stdio: "ignore" },
         )
         child.unref()
+        spawnSucceeded = true
 
         if (child.pid !== undefined) {
           writeFileSync(
@@ -301,10 +307,20 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
           )
         }
       },
-      catch: () => undefined,
+      catch: (err) => {
+        process.stderr.write(
+          `[harness:omnigraph] Local omnigraph setup/spawn failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        )
+        return undefined
+      },
     }).pipe(Effect.orElseSucceed(() => undefined))
 
-    // Wait up to 3 seconds for omnigraph-server /readyz
+    // When spawn succeeded, poll /readyz for up to 3 seconds while omnigraph-server binds and loads.
+    // When setup/spawn failed, probe /readyz at most once to fail fast with the logged cause
+    // (while still allowing an externally managed server that just came up to answer).
+    if (!spawnSucceeded) {
+      return yield* checkOmnigraphServerReady(targetBaseUrl)
+    }
     for (let i = 0; i < 30; i++) {
       if (yield* checkOmnigraphServerReady(targetBaseUrl)) {
         return true

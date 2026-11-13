@@ -225,23 +225,22 @@ export const resolveGraph = (
     if (snapshotPath && fs.existsSync(snapshotPath)) {
       return yield* loadGraphSnapshotEffect(snapshotPath).pipe(
         Effect.tapError((error) =>
-          Effect.logWarning(
-            `Failed to load graph snapshot from '${snapshotPath}' [${error.reason}]: ${error.message}`,
-          ),
+          Effect.sync(() => {
+            process.stderr.write(
+              `[harness-mcp] Failed to load graph snapshot from '${snapshotPath}' [${error.reason}]: ${error.message}\n`,
+            )
+          }),
         ),
         Effect.orElseSucceed(buildEmptyHarnessGraph),
       )
     }
     return buildEmptyHarnessGraph()
   }).pipe(
-    Effect.catchDefect((defect) =>
-      Effect.gen(function* () {
-        const message = defect instanceof Error ? defect.message : String(defect)
-        process.stderr.write(`[harness-mcp] Unexpected defect resolving graph: ${message}\n`)
-        yield* Effect.logWarning(`Unexpected defect resolving graph: ${message}`)
-        return buildEmptyHarnessGraph()
-      }),
-    ),
+    Effect.catchDefect((defect) => {
+      const message = defect instanceof Error ? defect.message : String(defect)
+      process.stderr.write(`[harness-mcp] Unexpected defect resolving graph: ${message}\n`)
+      return Effect.die(defect)
+    }),
   )
 }
 

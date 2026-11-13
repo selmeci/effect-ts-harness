@@ -285,31 +285,50 @@ export const handleVerify = (
       )
       .with({ _tag: "Ok" }, ({ suite }) =>
         Effect.gen(function* () {
-          const recordedSpans = yield* readRecordedSpans(repoRoot)
-          const spanBudgetsResult = yield* decideSpanBudgets({
-            spans: recordedSpans,
-            causalityRules: [],
-            failOnViolation: true,
-          }).pipe(
-            Effect.map(() => ({ _tag: "Ok" as const })),
-            Effect.catchTag("SpanCausalityError", (err) =>
-              Effect.succeed({ _tag: "Err" as const, err }),
+          const spanReadResult = yield* readRecordedSpans(repoRoot).pipe(
+            Effect.map((spans) => ({ _tag: "Ok" as const, spans })),
+            Effect.catchTag("SpanTraceReadError", (err) =>
+              Effect.succeed({ _tag: "SpanReadErr" as const, err }),
             ),
           )
 
-          return match(spanBudgetsResult)
-            .with({ _tag: "Err" }, ({ err }) => ({
-              exitCode: 1,
-              stdout: "",
-              stderr: `[GATE FAILURE] verify:span-budget\n${err.message}`,
-            }))
-            .with({ _tag: "Ok" }, () => {
-              const stamp = writeVerifyStamp(repoRoot, taskBranches.implBranch, {
-                dstSeed: suite.initialSeed,
-                dstSeedsRun: suite.seedsRun,
-              })
-              return { exitCode: 0, stdout: JSON.stringify(stamp), stderr: "" }
-            })
+          return yield* match(spanReadResult)
+            .with({ _tag: "SpanReadErr" }, ({ err }) =>
+              Effect.succeed<CliResult>({
+                exitCode: 1,
+                stdout: "",
+                stderr: `[GATE FAILURE] verify:span-budget\n${err.message}`,
+              }),
+            )
+            .with({ _tag: "Ok" }, ({ spans: recordedSpans }) =>
+              Effect.gen(function* () {
+                const spanBudgetsResult = yield* decideSpanBudgets({
+                  spans: recordedSpans,
+                  causalityRules: [],
+                  failOnViolation: true,
+                }).pipe(
+                  Effect.map(() => ({ _tag: "Ok" as const })),
+                  Effect.catchTag("SpanCausalityError", (err) =>
+                    Effect.succeed({ _tag: "Err" as const, err }),
+                  ),
+                )
+
+                return match(spanBudgetsResult)
+                  .with({ _tag: "Err" }, ({ err }) => ({
+                    exitCode: 1,
+                    stdout: "",
+                    stderr: `[GATE FAILURE] verify:span-budget\n${err.message}`,
+                  }))
+                  .with({ _tag: "Ok" }, () => {
+                    const stamp = writeVerifyStamp(repoRoot, taskBranches.implBranch, {
+                      dstSeed: suite.initialSeed,
+                      dstSeedsRun: suite.seedsRun,
+                    })
+                    return { exitCode: 0, stdout: JSON.stringify(stamp), stderr: "" }
+                  })
+                  .exhaustive()
+              }),
+            )
             .exhaustive()
         }),
       )

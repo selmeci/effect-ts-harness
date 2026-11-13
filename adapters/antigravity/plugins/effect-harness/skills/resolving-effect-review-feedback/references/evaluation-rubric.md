@@ -33,8 +33,9 @@ Every reviewer suggestion must be validated against the project's strict hierarc
 
 When review feedback identifies any of the following defect classes, verify with Graph MCP tools (`harness_resolve`, `harness_structural_search`, `harness_tests_reaching`). If confirmed, these findings **always require a `fix` or `class-fix`**:
 
-### A. Silent Test Failure / Vacuous Assertion
+### A. Silent Test Failure / Mistake Enshrinement / Vacuous Assertion
 
+- **Mistake Enshrinement (`ce-resolve-pr-feedback`):** Never decline a valid silent-failure or fail-open finding just because an existing test expects the silent fallback. Existing tests often enshrine an earlier bug rather than an intentional architectural decision (_"correcting a choice that the evidence shows was a mistake rather than a decision"_). Unless an explicit EARS clause or accepted ADR mandates the fallback, fix the fail-open behavior to fail closed with a typed error and flip the test to assert the failure.
 - **`fallback-json-equality`:** Assertions comparing objects via `JSON.stringify(actual) === JSON.stringify(expected)`. This masks `undefined` vs omitted keys, function/symbol properties, and class prototype identities.
   - _Fix:_ Replace with `Equal.equals(actual, expected)` or deep schema equality with `Schema.decodeUnknown`.
 - **`vacuous-error-assertion`:** Assertions using `.thenFails()` without an expected error class, error tag, or schema payload. If the decider crashes with a `NoSuchElementException` or unexpected defect, a bare `.thenFails()` vacuously passes.

@@ -140,12 +140,32 @@ let pendingBridgeDeferred: Deferred.Deferred<SharedWorkerdBridge> | null = null
 let activeRefCount = 0
 let idleCloseTimer: ReturnType<typeof setTimeout> | null = null
 
+const cleanupBridgeResources = (
+  scope: Scope.Closeable,
+  worker: Worker | undefined,
+  tmpDir: string,
+): Effect.Effect<void> =>
+  Scope.close(scope, Exit.void).pipe(
+    Effect.ignoreCause,
+    Effect.andThen(
+      worker !== undefined
+        ? Effect.tryPromise({
+            try: () => worker.terminate().then(() => undefined),
+            catch: () => undefined,
+          }).pipe(Effect.ignoreCause)
+        : Effect.void,
+    ),
+    Effect.andThen(
+      Effect.sync(() => {
+        rmSync(tmpDir, { recursive: true, force: true })
+      }).pipe(Effect.ignoreCause),
+    ),
+  )
+
 const closeSharedBridge = (bridgeToClose: SharedWorkerdBridge): void => {
-  void Effect.runPromise(Scope.close(bridgeToClose.scope, Exit.void))
-    .finally(() => bridgeToClose.worker.terminate())
-    .finally(() => {
-      rmSync(bridgeToClose.tmpDir, { recursive: true, force: true })
-    })
+  void Effect.runPromise(
+    cleanupBridgeResources(bridgeToClose.scope, bridgeToClose.worker, bridgeToClose.tmpDir),
+  )
 }
 
 const BRIDGE_CALL_TIMEOUT_MS = 30_000
@@ -169,30 +189,30 @@ const initSharedWorkerdBridge = (): Effect.Effect<SharedWorkerdBridge> =>
             resume(Effect.succeed({ callbackPort: msg.callbackPort, worker: w }))
           }
         })
-        w.once("error", (err) => {
+        w.on("error", (err) => {
           if (!settled) {
             settled = true
             resume(Effect.die(err))
+          } else {
+            process.stderr.write(
+              `[es-infra:workerd] Late bridge worker error: ${err instanceof Error ? err.message : String(err)}\n`,
+            )
           }
         })
         w.once("exit", (code) => {
-          if (!settled && code !== 0) {
+          if (!settled) {
             settled = true
-            resume(Effect.die(new Error(`Workerd bridge worker exited with code ${code}`)))
+            resume(
+              Effect.die(
+                new Error(
+                  `Workerd bridge worker exited prematurely with code ${code} before initialization`,
+                ),
+              ),
+            )
           }
         })
       }).pipe(
-        Effect.onError(() => {
-          const workerToTerminate = spawnedWorker
-          return Scope.close(bridgeScope, Exit.void).pipe(
-            Effect.andThen(
-              workerToTerminate !== undefined
-                ? Effect.promise(() => workerToTerminate.terminate().then(() => undefined))
-                : Effect.void,
-            ),
-            Effect.andThen(Effect.sync(() => rmSync(tmpDir, { recursive: true, force: true }))),
-          )
-        }),
+        Effect.onError(() => cleanupBridgeResources(bridgeScope, spawnedWorker, tmpDir)),
       )
 
       const workerd = yield* Workerd.pipe(Effect.provide(WorkerdLive))
@@ -255,12 +275,7 @@ const initSharedWorkerdBridge = (): Effect.Effect<SharedWorkerdBridge> =>
         })
         .pipe(
           Scope.provide(bridgeScope),
-          Effect.onError(() =>
-            Scope.close(bridgeScope, Exit.void).pipe(
-              Effect.andThen(Effect.promise(() => worker.terminate().then(() => undefined))),
-              Effect.andThen(Effect.sync(() => rmSync(tmpDir, { recursive: true, force: true }))),
-            ),
-          ),
+          Effect.onError(() => cleanupBridgeResources(bridgeScope, worker, tmpDir)),
           Effect.orDie,
         )
 
@@ -287,9 +302,7 @@ const initSharedWorkerdBridge = (): Effect.Effect<SharedWorkerdBridge> =>
 
       const initRes = callSync({ type: "set-workerd-port", workerdPort: ports.main })
       if (!initRes.ok) {
-        yield* Scope.close(bridgeScope, Exit.void)
-        yield* Effect.promise(() => worker.terminate().then(() => undefined))
-        rmSync(tmpDir, { recursive: true, force: true })
+        yield* cleanupBridgeResources(bridgeScope, worker, tmpDir)
         return yield* Effect.die(
           new Error(initRes.message ?? "Failed to initialize workerd SQLite bridge port"),
         )
@@ -387,6 +400,9 @@ const createWorkerdDurableObjectStorage = (
     ): SqlStorageCursor<T> {
       const currentTx = txStack[txStack.length - 1]
       if (currentTx?.rolledBack) {
+        // Note: libs/es/infra/src/memory.ts carries a narrow `unscoped-effect-run` exemption
+        // because it bridges synchronous `@cloudflare/workers-types` `SqlStorage.exec` callbacks
+        // to the Effect/workerd runtime.
         return Effect.runSync(Effect.die(new Error("Transaction already rolled back")))
       }
       const res = bridge.callSync({
@@ -436,11 +452,15 @@ const createWorkerdDurableObjectStorage = (
 
       txStack.push(txEntry)
 
-      const safeRollback = (): void => {
+      const removeFromTxStack = (): void => {
         const idx = txStack.indexOf(txEntry)
         if (idx !== -1) {
           txStack.splice(idx, 1)
         }
+      }
+
+      const safeRollback = (): void => {
+        removeFromTxStack()
         if (!txEntry.rolledBack) {
           txEntry.rolledBack = true
           bridge.callSync({
@@ -461,7 +481,7 @@ const createWorkerdDurableObjectStorage = (
         .then(() => closure(unsafeCast<DurableObjectTransaction>(txn)))
         .then(
           (result) => {
-            txStack.pop()
+            removeFromTxStack()
             if (!txEntry.rolledBack) {
               const commitRes = bridge.callSync({
                 type: "commit-tx",
@@ -477,7 +497,7 @@ const createWorkerdDurableObjectStorage = (
             return result
           },
           (err: unknown) => {
-            txStack.pop()
+            removeFromTxStack()
             safeRollback()
             return Promise.reject(err)
           },

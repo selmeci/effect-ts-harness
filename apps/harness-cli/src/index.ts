@@ -106,7 +106,7 @@ export const runCliEffect = (
       }
     }
 
-    if (argv.includes("--help") || argv.includes("-h")) {
+    if ((argv.includes("--help") || argv.includes("-h")) && isCommand(requested)) {
       return {
         exitCode: 0,
         stdout: `harness help\nusage: harness <${COMMANDS.join("|")}>`,

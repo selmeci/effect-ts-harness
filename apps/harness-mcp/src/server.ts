@@ -152,7 +152,7 @@ export const createServer = (options?: ServerOptions): McpServer => {
           content: [{ type: "text" as const, text: JSON.stringify(value ?? null, null, 2) }],
         }))
         .with({ _tag: "Failure" }, ({ cause }) => {
-          if (Cause.hasInterrupts(cause)) {
+          if (Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)) {
             return Promise.reject(
               new McpError(ErrorCode.InternalError, `Tool '${toolName}' execution was interrupted`),
             )
@@ -198,12 +198,12 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
             return undefined
           })
       : Promise.resolve(undefined)
-  const shutdown = () => {
+  const shutdown = (initialExitCode = 0) => {
     if (shuttingDown) {
       return
     }
     shuttingDown = true
-    let exitCode = 0
+    let exitCode = initialExitCode
     void daemonStartupPromise
       .then((startedHandle) => {
         const handleToClose = daemonHandle ?? startedHandle
@@ -227,14 +227,14 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
       )
       .finally(() => process.exit(exitCode))
   }
-  process.once("SIGINT", shutdown)
-  process.once("SIGTERM", shutdown)
+  process.once("SIGINT", () => shutdown(0))
+  process.once("SIGTERM", () => shutdown(0))
   void Effect.runPromise(Effect.tryPromise(() => server.connect(transport))).catch(
     (err: unknown) => {
       process.stderr.write(
         `[harness-mcp] Fatal error: ${err instanceof Error ? err.message : String(err)}\n`,
       )
-      process.exit(1)
+      shutdown(1)
     },
   )
 }

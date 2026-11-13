@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs"
 import { join, relative } from "node:path"
-import { Cause, Effect, Layer, Option, Schema } from "effect"
+import { Cause, Data, Effect, Layer, Option, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   AstGateCache,
@@ -34,6 +34,8 @@ export const runDeltaAstAndPluginGates = (
       cacheFilePath: AstGateCache.resolveCachePath(repoRoot),
     })
     const enforcedAstViolations = astReport.violations.filter((v) => {
+      // Repo-wide AST rules enforce uniformly across libs/harness/*, apps/harness-*, and tools/*;
+      // legacy AST rules still exempt internal harness packages during incremental migration.
       if (isRepoWideAstRule(v.rule, v.message)) {
         return true
       }
@@ -98,25 +100,57 @@ export const runDeltaAstAndPluginGates = (
       .exhaustive()
   })
 
-export const readRecordedSpans = (repoRoot: string): Effect.Effect<Array<SpanSample>> =>
-  Effect.gen(function* () {
-    const spanTracePath = join(repoRoot, ".harness", "span-trace.json")
-    if (!existsSync(spanTracePath)) return []
-    const rawSpanJson = yield* Effect.try({
-      try: () => readFileSync(spanTracePath, "utf-8"),
-      catch: () => "",
-    }).pipe(Effect.orElseSucceed(() => ""))
-    if (rawSpanJson.length === 0) return []
-    const parsedOpt = Schema.decodeOption(Schema.fromJsonString(Schema.Unknown))(rawSpanJson)
-    if (Option.isNone(parsedOpt)) return []
-    const parsed = parsedOpt.value
-    if (Array.isArray(parsed)) return parsed as Array<SpanSample>
-    if (
-      parsed !== null &&
-      typeof parsed === "object" &&
-      Array.isArray((parsed as Record<string, unknown>)["spans"])
-    ) {
-      return (parsed as Record<string, Array<SpanSample>>)["spans"] ?? []
-    }
-    return []
+export class SpanTraceReadError extends Data.TaggedError("SpanTraceReadError")<{
+  readonly filePath: string
+  readonly reason: "ReadError" | "ParseError" | "InvalidShapeError"
+  readonly message: string
+}> {}
+
+export const readRecordedSpans = Effect.fn("HarnessCli.readRecordedSpans")(function* (
+  repoRoot: string,
+): Effect.fn.Return<Array<SpanSample>, SpanTraceReadError> {
+  const spanTracePath = join(repoRoot, ".harness", "span-trace.json")
+  if (!existsSync(spanTracePath)) return []
+  const rawSpanJson = yield* Effect.try({
+    try: () => readFileSync(spanTracePath, "utf-8"),
+    catch: (err) =>
+      new SpanTraceReadError({
+        filePath: spanTracePath,
+        reason: "ReadError",
+        message: `Failed to read span trace file '${spanTracePath}': ${err instanceof Error ? err.message : String(err)}`,
+      }),
   })
+  if (rawSpanJson.trim().length === 0) return []
+  const parsedOpt = Schema.decodeOption(Schema.fromJsonString(Schema.Unknown))(rawSpanJson)
+  return yield* match(parsedOpt)
+    .with({ _tag: "None" }, () =>
+      Effect.fail(
+        new SpanTraceReadError({
+          filePath: spanTracePath,
+          reason: "ParseError",
+          message: `Invalid JSON in span trace file '${spanTracePath}'.`,
+        }),
+      ),
+    )
+    .with({ _tag: "Some" }, ({ value: parsed }) => {
+      if (Array.isArray(parsed)) {
+        return Effect.succeed(parsed as Array<SpanSample>)
+      }
+      if (
+        parsed !== null &&
+        typeof parsed === "object" &&
+        "spans" in parsed &&
+        Array.isArray(parsed.spans)
+      ) {
+        return Effect.succeed(parsed.spans as Array<SpanSample>)
+      }
+      return Effect.fail(
+        new SpanTraceReadError({
+          filePath: spanTracePath,
+          reason: "InvalidShapeError",
+          message: `Unexpected JSON shape in span trace file '${spanTracePath}': expected an array or { spans: [...] }.`,
+        }),
+      )
+    })
+    .exhaustive()
+})

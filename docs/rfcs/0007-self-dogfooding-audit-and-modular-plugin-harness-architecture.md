@@ -198,11 +198,11 @@ Eleven source files in the repository exceed `800` lines of code, with the top s
 
 ### 3.1 Goals
 
-1. **Eliminate the Self-Exemption Double Standard (`Zero-Exemption Dogfooding`):** Remove `isInternalHarnessFile` and `isHarnessInternal` so the harness codebase obeys the exact same architectural, branding, pattern-matching, and purity gates as application code.
-2. **Adopt Native Effect v4 Platform, CLI, and Caching Modules:**
-   - Replace manual `process.argv` parsing in `apps/harness-cli` with declarative `effect/cli` (`Command.make`, `Flag`, `Argument`, `Command.withSubcommands`).
-   - Replace direct `node:fs`, `node:path`, and `node:child_process` calls with `FileSystem.FileSystem`, `Path.Path`, and `ChildProcessSpawner.ChildProcessSpawner` provided via `NodeServices.layer` from `@effect/platform-node`.
-   - Replace module-level mutable `new Map()` singletons and `globalThis` mutations with `ScopedCache`, `PersistedCache`, `SynchronizedRef`, `LayerMap.Service`, and `FiberRef`.
+1. **Eliminate the Self-Exemption Double Standard (`Zero-Exemption Dogfooding`):** Remove `isInternalHarnessFile` from `tools/oxlint/syntax-bans.js` and narrow `isHarnessInternal` in `libs/harness/gates/src/plugins/ast-gate-visitors.ts` strictly to the 3 legacy AST checks (`IfStatement`/`ConditionalExpression` discriminant branching, `impure-domain-import`, and `unscoped-effect-run` per `SPEC-0011` `REQ-1.3`), so the harness codebase obeys the same architectural, branding, pattern-matching, and repo-wide AST gates as application code.
+2. **Adopt Native Effect v4 Platform, CLI, and Caching Modules — Target Design (Deferred Post-Step 4):**
+   - *Target Design (Deferred Post-Step 4):* Replace manual `argv` parsing in `apps/harness-cli` with declarative `effect/cli` (`Command.make`, `Flag`, `Argument`, `Command.withSubcommands`), while Step 4 delivers the modular `HarnessCommandRegistry` + `apps/harness-cli/src/commands/*.ts` decomposition.
+   - *Target Design (Deferred Post-Step 4):* Replace direct `node:fs`, `node:path`, and `node:child_process` calls with `FileSystem.FileSystem`, `Path.Path`, and `ChildProcessSpawner.ChildProcessSpawner` provided via `NodeServices.layer` from `@effect/platform-node`. Operational `.mjs` scripts (`tools/node-ts-resolver.mjs`, `tools/scenario/run.mjs`, `tools/benchmark/run.mjs`) remain as operational runners/resolvers.
+   - *Target Design (Deferred Post-Step 4):* Replace remaining module-level mutable `new Map()` singletons and `globalThis` mutations with `ScopedCache`, `PersistedCache`, `SynchronizedRef`, `LayerMap.Service`, and `FiberRef`.
 3. **Architect the Harness as a Modular Plugin System (DeepSeek Harness / Cordis + Effect v4):**
    - Model every AST/graph gate rule, GC check, DPO rewrite rule, CLI subcommand, and MCP tool as a self-contained plugin (`< 250` LOC) wired via **Three-Role Capability Seams** (`Service Definition` in `type:service`, `Service Provider Layer` in `type:infra`, `Consumer` in `type:core` / `type:app`).
 4. **Decompose All God-Files (Phased Line Budget Targets):** Enforce `DEFAULT_MAX_PLUGIN_FILE_LINES = 800` as the deterministic Phase 1 hard ceiling across all modular plugin, service, command, and tool files (`/plugins/`, `/services/`, `/commands/`, `/tools/`), with `< 600` LOC (`< 500` LOC for individual sub-extractors) as the decomposition target for splitting the 15 legacy monoliths in Phases 2–4.
@@ -399,9 +399,9 @@ export const AstGateCacheLive: Layer.Layer<
 )
 ```
 
-### 5.4 Declarative CLI Subcommand Tree via `effect/cli` (`apps/harness-cli`)
+### 5.4 Declarative CLI Subcommand Tree via `effect/cli` (`apps/harness-cli`) — Target Design (Deferred Post-Step 4)
 
-Instead of a 3,759-line `index.ts` with a 15-branch `switch (requested)` and manual `argv` slicing, `apps/harness-cli` is structured as modular `Command.make` plugins composed at the entrypoint:
+Instead of a 3,759-line `index.ts` with a 15-branch `switch (requested)` and manual `argv` slicing, Step 4 decomposes `apps/harness-cli` into `src/index.ts` (`<= 250` LOC) + modular `src/commands/*.ts` (`<= 650` LOC) dispatched via `HarnessCommandRegistry`. As the **Target Design (Deferred Post-Step 4)**, `apps/harness-cli` will migrate to declarative `effect/cli` (`Command.make` plugins composed at the entrypoint), while operational `.mjs` runners/resolvers (`tools/node-ts-resolver.mjs`, `tools/scenario/run.mjs`, `tools/benchmark/run.mjs`) remain as-is:
 
 ```ts
 // apps/harness-cli/src/main.ts

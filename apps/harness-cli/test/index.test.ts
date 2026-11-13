@@ -13,7 +13,7 @@ import * as net from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { Effect, Layer, Option, Schema } from "effect"
+import { Cause, Effect, Exit, Layer, Option, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { makeFailingDecisionModelLayer, makeMockDecisionModelLayer } from "@harness/decision"
 import { readTelemetryEvents, writeVerifyStamp } from "@harness/gates"
@@ -25,7 +25,11 @@ import {
   matchesExactSpecToken,
   persistVerifiedOverlays,
 } from "../src/commands/plan-ears-and-overlays.js"
-import { readRecordedSpans, runDeltaAstAndPluginGates } from "../src/commands/verify-delta-gates.js"
+import {
+  readRecordedSpans,
+  runDeltaAstAndPluginGates,
+  SpanTraceReadError,
+} from "../src/commands/verify-delta-gates.js"
 import {
   buildOmnigraphClusterKillArgs,
   cleanSubprocessError,
@@ -80,6 +84,16 @@ describe("harness cli baseline", () => {
     const res = await runCli(["help"])
     expect(res.exitCode).toBe(0)
     expect(res.stdout).toContain("harness help")
+  })
+
+  it("rejects unknown commands even when --help or -h is passed", async () => {
+    const longHelp = await runCli(["nonexistent-cmd", "--help"])
+    expect(longHelp.exitCode).toBe(1)
+    expect(longHelp.stderr).toContain("unknown command: nonexistent-cmd")
+
+    const shortHelp = await runCli(["nonexistent-cmd", "-h"])
+    expect(shortHelp.exitCode).toBe(1)
+    expect(shortHelp.stderr).toContain("unknown command: nonexistent-cmd")
   })
 
   it("strips ANSI color codes and cleans noisy Nx caching lines", () => {
@@ -2876,7 +2890,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
     }
   })
 
-  it("reads recorded spans across missing, malformed, array, and { spans } payloads (F-10)", async () => {
+  it("reads recorded spans and fails closed on corrupt, unreadable, or malformed span-trace.json (F-10)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "harness-cli-spans-"))
     try {
       expect(await Effect.runPromise(readRecordedSpans(dir))).toEqual([])
@@ -2885,8 +2899,53 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       mkdirSync(harnessDir, { recursive: true })
       const spanPath = join(harnessDir, "span-trace.json")
 
-      writeFileSync(spanPath, "{not-valid-json", "utf-8")
+      writeFileSync(spanPath, "   \n", "utf-8")
       expect(await Effect.runPromise(readRecordedSpans(dir))).toEqual([])
+
+      writeFileSync(spanPath, "{not-valid-json", "utf-8")
+      const parseExit = await Effect.runPromiseExit(readRecordedSpans(dir))
+      expect(Exit.isFailure(parseExit)).toBe(true)
+      if (Exit.isFailure(parseExit)) {
+        const errOpt = Cause.findErrorOption(parseExit.cause)
+        expect(Option.isSome(errOpt)).toBe(true)
+        if (Option.isSome(errOpt)) {
+          expect(errOpt.value).toBeInstanceOf(SpanTraceReadError)
+          expect(errOpt.value.reason).toBe("ParseError")
+        }
+      }
+
+      const verifyCorruptRes = await runCli(["verify"], {
+        repoRoot: dir,
+        skipSubprocessVerify: true,
+      })
+      expect(verifyCorruptRes.exitCode).toBe(1)
+      expect(verifyCorruptRes.stderr).toContain("[GATE FAILURE] verify:span-budget")
+
+      writeFileSync(spanPath, JSON.stringify({ wrong: 1 }), "utf-8")
+      const shapeExit = await Effect.runPromiseExit(readRecordedSpans(dir))
+      expect(Exit.isFailure(shapeExit)).toBe(true)
+      if (Exit.isFailure(shapeExit)) {
+        const errOpt = Cause.findErrorOption(shapeExit.cause)
+        expect(Option.isSome(errOpt)).toBe(true)
+        if (Option.isSome(errOpt)) {
+          expect(errOpt.value).toBeInstanceOf(SpanTraceReadError)
+          expect(errOpt.value.reason).toBe("InvalidShapeError")
+        }
+      }
+
+      rmSync(spanPath, { force: true })
+      mkdirSync(spanPath)
+      const readExit = await Effect.runPromiseExit(readRecordedSpans(dir))
+      expect(Exit.isFailure(readExit)).toBe(true)
+      if (Exit.isFailure(readExit)) {
+        const errOpt = Cause.findErrorOption(readExit.cause)
+        expect(Option.isSome(errOpt)).toBe(true)
+        if (Option.isSome(errOpt)) {
+          expect(errOpt.value).toBeInstanceOf(SpanTraceReadError)
+          expect(errOpt.value.reason).toBe("ReadError")
+        }
+      }
+      rmSync(spanPath, { recursive: true, force: true })
 
       const sampleSpans = [{ spanId: "s1", name: "Sample.fn", durationMs: 1 }]
       writeFileSync(spanPath, JSON.stringify(sampleSpans), "utf-8")
@@ -2899,7 +2958,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
     }
   })
 
-  it("runs delta AST and plugin gates on empty, clean, and violating deltas (F-10)", async () => {
+  it("runs delta AST and plugin gates on empty, clean, and all repo-wide violating deltas (F-10)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "harness-cli-delta-gates-"))
     try {
       const emptyRes = await Effect.runPromise(runDeltaAstAndPluginGates(dir, []))
@@ -2927,6 +2986,57 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       if (Option.isSome(badRes)) {
         expect(badRes.value.exitCode).toBe(1)
         expect(badRes.value.stderr).toContain("[GATE FAILURE] verify:ast-gates")
+      }
+
+      const harnessGatesSrc = join(dir, "libs", "harness", "gates", "src")
+      const harnessGatesTest = join(dir, "libs", "harness", "gates", "test")
+      const harnessCliSrc = join(dir, "apps", "harness-cli", "src")
+      mkdirSync(harnessGatesSrc, { recursive: true })
+      mkdirSync(harnessGatesTest, { recursive: true })
+      mkdirSync(harnessCliSrc, { recursive: true })
+
+      const dotHarnessTarget = [".har", "ness/bad.json"].join("")
+      const repoWideCases: ReadonlyArray<{
+        readonly rel: string
+        readonly content: string
+        readonly rule: string
+      }> = [
+        {
+          rel: "libs/harness/gates/src/catch-cause.ts",
+          content: `import { Cause, Effect } from "effect"\nexport const bad = Effect.void.pipe(Effect.catchCause((c) => (Cause.hasInterruptsOnly(c) ? Effect.void : Effect.fail("err"))))\n`,
+          rule: "catch-cause-interrupts-only",
+        },
+        {
+          rel: "libs/harness/gates/test/unisolated.test.ts",
+          content: `import { writeFileSync } from "node:fs"\nwriteFileSync("${dotHarnessTarget}", "{}")\n`,
+          rule: "unisolated-dot-harness-test-write",
+        },
+        {
+          rel: "libs/harness/gates/src/unsafe-cast.ts",
+          content: `export const bad = (x: unknown): number => x as ${"any"}\n`,
+          rule: "unsafe-type-cast",
+        },
+        {
+          rel: "libs/harness/gates/src/tsx-parse.ts",
+          content: `const ext = ".tsx"\nexport const bad = (src: string, parse: (lang: unknown, s: string) => unknown, Lang: { TypeScript: unknown }) => parse(Lang.TypeScript, src + ext)\n`,
+          rule: "ast-grep-tsx-grammar",
+        },
+        {
+          rel: "apps/harness-cli/src/sqlite-bad.ts",
+          content: `import { DatabaseSync } from "node:sqlite"\nexport const db = DatabaseSync\n`,
+          rule: "node-sqlite-in-infra",
+        },
+      ]
+
+      for (const tc of repoWideCases) {
+        writeFileSync(join(dir, tc.rel), tc.content, "utf-8")
+        const res = await Effect.runPromise(runDeltaAstAndPluginGates(dir, [tc.rel]))
+        expect(Option.isSome(res)).toBe(true)
+        if (Option.isSome(res)) {
+          expect(res.value.exitCode).toBe(1)
+          expect(res.value.stderr).toContain("[GATE FAILURE] verify:ast-gates")
+          expect(res.value.stderr).toContain(`[${tc.rule}]`)
+        }
       }
     } finally {
       rmSync(dir, { recursive: true, force: true })
@@ -3004,6 +3114,31 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       expect(res.exitCode).toBe(0)
       const payload = JSON.parse(res.stdout) as { readonly totalMutants: number }
       expect(payload.totalMutants).toBe(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("runs handleMutate on a non-empty domain scope and fails when mutants survive", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-cli-mutate-demo-"))
+    try {
+      const domainDir = join(dir, "libs", "demo", "domain", "src")
+      mkdirSync(domainDir, { recursive: true })
+      writeFileSync(
+        join(domainDir, "decider.ts"),
+        `export const decideCount = (count: number): boolean => {\n  if (count >= 1) {\n    return true\n  }\n  return false\n}\n`,
+        "utf-8",
+      )
+      const res = await runCli(["mutate", "--scope=demo"], { repoRoot: dir })
+      expect(res.exitCode).toBe(1)
+      const payload = JSON.parse(res.stdout) as {
+        readonly passed: boolean
+        readonly totalMutants: number
+        readonly survivedCount: number
+      }
+      expect(payload.passed).toBe(false)
+      expect(payload.totalMutants).toBeGreaterThan(0)
+      expect(payload.survivedCount).toBe(payload.totalMutants)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

@@ -113,6 +113,8 @@ const isMutatingTranscriptToolCall = (
     const targetFile =
       unwrapTranscriptStringArg(tc.args?.TargetFile) ||
       unwrapTranscriptStringArg(tc.args?.file_path)
+    // Exempt planning, RFC, prompt, and Antigravity brain/scratch files so documentation-only
+    // or planning turns do not count as code mutations for the stop-hook verification guard.
     if (
       targetFile.length > 0 &&
       (targetFile.includes("/.gemini/antigravity/brain/") ||

@@ -16,6 +16,7 @@ import {
   McpToolName,
   type McpToolPluginDescriptor,
   normalizeProjectPathEffect,
+  ProjectPathEscapeError,
   resolveDefaultRepoRoot,
   type ServerOptions,
 } from "./mcp-helpers.js"
@@ -140,6 +141,26 @@ const makeLspExceptionReport = (cause: unknown): LspDiagnosticsReport => ({
   },
 })
 
+const handleLspFailure = (err: unknown): Effect.Effect<LspDiagnosticsReport> =>
+  Effect.sync(() => {
+    const message = err instanceof Error ? err.message : String(err)
+    process.stderr.write(`[harness-mcp] LSP diagnostics error: ${message}\n`)
+    return makeLspExceptionReport(err)
+  })
+
+const runSyncLspBranch = (fn: () => LspDiagnosticsReport): Effect.Effect<LspDiagnosticsReport> =>
+  Effect.try({
+    try: fn,
+    catch: toLspExecutionError,
+  }).pipe(
+    Effect.catch(handleLspFailure),
+    Effect.catchDefect((defect) => {
+      const message = defect instanceof Error ? defect.message : String(defect)
+      process.stderr.write(`[harness-mcp] LSP diagnostics defect: ${message}\n`)
+      return Effect.succeed(makeLspExceptionReport(defect))
+    }),
+  )
+
 export const runDefaultLspDiagnostics = (
   repoRoot: string,
   input: {
@@ -148,7 +169,7 @@ export const runDefaultLspDiagnostics = (
     readonly project?: string | undefined
     readonly tsconfigPath?: string | undefined
   },
-): Effect.Effect<LspDiagnosticsReport> =>
+): Effect.Effect<LspDiagnosticsReport, ProjectPathEscapeError> =>
   Effect.gen(function* () {
     const cliArgs = ["diagnostics", "--strict", "--format", "json"]
     const effectiveFile = input.file ?? input.filePath
@@ -160,9 +181,11 @@ export const runDefaultLspDiagnostics = (
         ? path.resolve(effectiveFile)
         : path.resolve(repoRoot, effectiveFile)
       if (!isPathInsideRoot(repoRoot, resolvedFile)) {
-        return yield* Effect.fail(
-          `File path '${effectiveFile}' escapes repository root '${repoRoot}'.`,
-        )
+        return yield* new ProjectPathEscapeError({
+          projectPath: effectiveFile,
+          repoRoot,
+          message: `File path '${effectiveFile}' escapes repository root '${repoRoot}'.`,
+        })
       }
       if (effectiveProject !== undefined && effectiveProject.trim().length > 0) {
         cliArgs.push("--project", yield* normalizeProjectPathEffect(repoRoot, effectiveProject))
@@ -341,12 +364,15 @@ export const runDefaultLspDiagnostics = (
       },
     } satisfies LspDiagnosticsReport
   }).pipe(
-    Effect.catch((cause): Effect.Effect<LspDiagnosticsReport> =>
-      Effect.succeed(makeLspExceptionReport(cause)),
+    Effect.catchIf(
+      (err): err is LspExecutionError | string => !(err instanceof ProjectPathEscapeError),
+      handleLspFailure,
     ),
-    Effect.catchDefect((defect): Effect.Effect<LspDiagnosticsReport> =>
-      Effect.succeed(makeLspExceptionReport(defect)),
-    ),
+    Effect.catchDefect((defect) => {
+      const message = defect instanceof Error ? defect.message : String(defect)
+      process.stderr.write(`[harness-mcp] LSP diagnostics defect: ${message}\n`)
+      return Effect.succeed(makeLspExceptionReport(defect))
+    }),
   )
 
 const evaluateOverlaysDiagnostics = (
@@ -458,23 +484,11 @@ export const buildLspAndTelemetryToolDescriptors = (
         const overlays = typedArgs.overlays
         const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
         if (overlays !== undefined && Object.keys(overlays).length > 0) {
-          return yield* Effect.try({
-            try: () => evaluateOverlaysDiagnostics(root, overlays, file, project),
-            catch: toLspExecutionError,
-          }).pipe(
-            Effect.catch((cause) => Effect.succeed(makeLspExceptionReport(cause))),
-            Effect.catchDefect((defect) => Effect.succeed(makeLspExceptionReport(defect))),
-          )
+          return yield* runSyncLspBranch(() => evaluateOverlaysDiagnostics(root, overlays, file, project))
         }
         if (options?.lspDiagnosticsRunner !== undefined) {
           const runner = options.lspDiagnosticsRunner
-          return yield* Effect.try({
-            try: () => runner({ file, project }),
-            catch: toLspExecutionError,
-          }).pipe(
-            Effect.catch((cause) => Effect.succeed(makeLspExceptionReport(cause))),
-            Effect.catchDefect((defect) => Effect.succeed(makeLspExceptionReport(defect))),
-          )
+          return yield* runSyncLspBranch(() => runner({ file, project }))
         }
         return yield* runDefaultLspDiagnostics(root, { file, project })
       }),

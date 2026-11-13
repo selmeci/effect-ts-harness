@@ -2,8 +2,18 @@ import * as fs from "node:fs"
 import * as net from "node:net"
 import * as os from "node:os"
 import * as path from "node:path"
-import { describe, expect, it } from "vitest"
-import { Cause, Effect, Layer, Option } from "effect"
+import { describe, expect, it, vi } from "vitest"
+import { Cause, Data, Effect, Layer, Option } from "effect"
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>()
+  return {
+    ...actual,
+    chmodSync: vi.fn(actual.chmodSync),
+    existsSync: vi.fn(actual.existsSync),
+    statSync: vi.fn(actual.statSync),
+  }
+})
 import * as DecisionModel from "effect/ai/DecisionModel"
 import * as AiError from "effect/ai/AiError"
 import { makeMockDecisionModelLayer } from "@harness/decision"
@@ -24,7 +34,65 @@ import {
   runDefaultLspDiagnostics,
   startHarnessDaemonServer,
 } from "../src/server.js"
+import { resolveGraph } from "../src/tools/mcp-helpers.js"
 import { McpToolInputName } from "../src/tools/tool-registry.js"
+
+class DaemonClientError extends Data.TaggedError("DaemonClientError")<{
+  readonly message: string
+  readonly cause?: unknown
+}> {}
+
+const sendDaemonRawPayload = (
+  socketPath: string,
+  rawPayload: string,
+): Promise<Record<string, unknown>> =>
+  Effect.runPromise(
+    Effect.callback<Record<string, unknown>, DaemonClientError>((resume) => {
+      const client = net.createConnection(socketPath)
+      let buf = ""
+      let settled = false
+      const settle = (eff: Effect.Effect<Record<string, unknown>, DaemonClientError>) => {
+        if (settled) return
+        settled = true
+        resume(eff)
+      }
+      client.on("connect", () => {
+        client.write(rawPayload)
+      })
+      client.on("data", (chunk) => {
+        buf += chunk.toString("utf8")
+        const idx = buf.indexOf("\n")
+        if (idx !== -1) {
+          client.end()
+          settle(
+            Effect.try({
+              try: () => JSON.parse(buf.slice(0, idx)) as Record<string, unknown>,
+              catch: (err) =>
+                new DaemonClientError({
+                  message: err instanceof Error ? err.message : String(err),
+                  cause: err,
+                }),
+            }),
+          )
+        }
+      })
+      client.on("error", (err) => {
+        settle(Effect.fail(new DaemonClientError({ message: err.message, cause: err })))
+      })
+      client.on("close", () => {
+        settle(
+          Effect.fail(
+            new DaemonClientError({ message: "Daemon socket closed before response" }),
+          ),
+        )
+      })
+    }),
+  )
+
+const sendDaemonPayload = (
+  socketPath: string,
+  payload: string,
+): Promise<Record<string, unknown>> => sendDaemonRawPayload(socketPath, payload + "\n")
 
 describe("harness-mcp tools", () => {
   const graph = buildHarnessGraph({
@@ -772,32 +840,16 @@ describe("harness-mcp tools", () => {
     fs.writeFileSync(path.join(sampleDir, "index.ts"), "export const x = 1\n", "utf-8")
 
     const daemon = await startHarnessDaemonServer(tmpDir)
-    const sendDaemonPayload = (payload: string): Promise<Record<string, unknown>> =>
-      Effect.runPromise(
-        Effect.callback<Record<string, unknown>>((resume) => {
-          const client = net.createConnection(daemon.socketPath)
-          let buf = ""
-          client.on("connect", () => {
-            client.write(payload + "\n")
-          })
-          client.on("data", (chunk) => {
-            buf += chunk.toString("utf8")
-            const idx = buf.indexOf("\n")
-            if (idx !== -1) {
-              client.end()
-              resume(Effect.succeed(JSON.parse(buf.slice(0, idx)) as Record<string, unknown>))
-            }
-          })
-        }),
-      )
 
     try {
       const pingRes = await sendDaemonPayload(
+        daemon.socketPath,
         JSON.stringify({ id: "p1", command: "ping", repoRoot: tmpDir }),
       )
       expect(pingRes).toMatchObject({ id: "p1", ok: true, status: "warm" })
 
       const astRes = await sendDaemonPayload(
+        daemon.socketPath,
         JSON.stringify({
           id: "a1",
           command: "ast-gates",
@@ -808,6 +860,7 @@ describe("harness-mcp tools", () => {
       expect(astRes).toMatchObject({ id: "a1", ok: true })
 
       const traversalRes = await sendDaemonPayload(
+        daemon.socketPath,
         JSON.stringify({
           id: "t1",
           command: "ast-gates",
@@ -963,59 +1016,80 @@ describe("harness-mcp tools", () => {
     expect(escapedOverlayRes.diagnostics[0]?.code).toBe("PATH_TRAVERSAL")
     expect(escapedOverlayRes.diagnostics[0]?.message).toContain("escapes repository root")
 
-    const escapedFileRes = (await executeTool(
-      "harness_lsp_diagnostics",
-      {
-        file: "../outside-file.ts",
-      },
-      { repoRoot: process.cwd() },
-    )) as {
-      readonly clean: boolean
-      readonly summary: { readonly filesChecked: number; readonly errors: number }
-      readonly diagnostics: ReadonlyArray<string>
-    }
-    expect(escapedFileRes.clean).toBe(false)
-    expect(escapedFileRes.summary.errors).toBe(1)
-    expect(String(escapedFileRes.diagnostics[0])).toContain("escapes repository root")
+    await expect(
+      executeTool(
+        "harness_lsp_diagnostics",
+        {
+          file: "../outside-file.ts",
+        },
+        { repoRoot: process.cwd() },
+      ),
+    ).rejects.toMatchObject({
+      _tag: "ProjectPathEscapeError",
+      projectPath: "../outside-file.ts",
+    })
 
-    const escapedProjectRes = (await executeTool(
-      "harness_lsp_diagnostics",
-      {
-        project: "../outside-tsconfig.json",
-      },
-      { repoRoot: process.cwd() },
-    )) as {
-      readonly clean: boolean
-      readonly summary: { readonly filesChecked: number; readonly errors: number }
-      readonly diagnostics: ReadonlyArray<string>
-    }
-    expect(escapedProjectRes.clean).toBe(false)
-    expect(escapedProjectRes.summary.errors).toBe(1)
-    expect(String(escapedProjectRes.diagnostics[0])).toContain("escapes repository root")
+    await expect(
+      executeTool(
+        "harness_lsp_diagnostics",
+        {
+          project: "../outside-tsconfig.json",
+        },
+        { repoRoot: process.cwd() },
+      ),
+    ).rejects.toMatchObject({
+      _tag: "ProjectPathEscapeError",
+      projectPath: "../outside-tsconfig.json",
+    })
   })
 
-  it("handles corrupt snapshot gracefully with warning and falls back to empty graph", async () => {
+  it("handles corrupt snapshot gracefully with warning to stderr (not stdout) and falls back to empty graph", async () => {
     const corruptSnapshotPath = path.join(os.tmpdir(), `corrupt-snap-${Date.now()}.json`)
-    try {
-      fs.writeFileSync(corruptSnapshotPath, "{ invalid json content: true", "utf-8")
-      const resolved = await executeTool(
-        "harness_resolve",
-        { symbolOrSpan: "Sample.greet" },
-        { snapshotPath: corruptSnapshotPath },
-      )
-      expect(resolved).toBeNull()
+    const stderrChunks: Array<string> = []
+    const stdoutChunks: Array<string> = []
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+      return true
+    })
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+      stdoutChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+      return true
+    })
+    await Effect.runPromise(
+      Effect.promise(async () => {
+        fs.writeFileSync(corruptSnapshotPath, "{ invalid json content: true", "utf-8")
+        const resolved = await executeTool(
+          "harness_resolve",
+          { symbolOrSpan: "Sample.greet" },
+          { snapshotPath: corruptSnapshotPath },
+        )
+        expect(resolved).toBeNull()
 
-      const tests = await executeTool(
-        "harness_tests_reaching",
-        { symbolOrSpan: "Sample.greet" },
-        { snapshotPath: corruptSnapshotPath },
-      )
-      expect(tests).toEqual([])
-    } finally {
-      if (fs.existsSync(corruptSnapshotPath)) {
-        fs.unlinkSync(corruptSnapshotPath)
-      }
-    }
+        const tests = await executeTool(
+          "harness_tests_reaching",
+          { symbolOrSpan: "Sample.greet" },
+          { snapshotPath: corruptSnapshotPath },
+        )
+        expect(tests).toEqual([])
+
+        const stderrOutput = stderrChunks.join("")
+        const stdoutOutput = stdoutChunks.join("")
+        expect(stderrOutput).toContain(
+          `[harness-mcp] Failed to load graph snapshot from '${corruptSnapshotPath}'`,
+        )
+        expect(stdoutOutput).not.toContain("Failed to load graph snapshot")
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            stderrSpy.mockRestore()
+            stdoutSpy.mockRestore()
+            if (fs.existsSync(corruptSnapshotPath)) {
+              fs.unlinkSync(corruptSnapshotPath)
+            }
+          }),
+        ),
+      ),
+    )
   })
 
   it("rejects escaping file/project alongside overlays and broken overlays with non-matching file", async () => {
@@ -1191,61 +1265,40 @@ describe("harness-mcp tools", () => {
     }
   })
 
-  it("daemon rejects repoRoot escape, >1MB payloads, malformed JSON, returns fallbackToInProcess, and cleans stale sockets", async () => {
+  it("daemon rejects repoRoot escape, >1MB payloads, malformed JSON, and returns fallbackToInProcess", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-mcp-daemon-sec-"))
     const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "harness-mcp-daemon-outside-"))
-    const socketPath = resolveDaemonSocketPath(tmpDir)
-    fs.mkdirSync(path.dirname(socketPath), { recursive: true })
-    fs.writeFileSync(socketPath, "stale-socket-placeholder\n", "utf-8")
-
     const daemon = await startHarnessDaemonServer(tmpDir)
-    const sendRawPayload = (rawPayload: string): Promise<Record<string, unknown>> =>
-      Effect.runPromise(
-        Effect.callback<Record<string, unknown>>((resume) => {
-          const client = net.createConnection(daemon.socketPath)
-          let buf = ""
-          client.on("connect", () => {
-            client.write(rawPayload)
-          })
-          client.on("data", (chunk) => {
-            buf += chunk.toString("utf8")
-            const idx = buf.indexOf("\n")
-            if (idx !== -1) {
-              client.end()
-              resume(Effect.succeed(JSON.parse(buf.slice(0, idx)) as Record<string, unknown>))
-            }
-          })
-        }),
-      )
 
     await Effect.runPromise(
       Effect.promise(async () => {
-        const staleCleanPing = await sendRawPayload(
-          JSON.stringify({ id: "p-stale", command: "ping" }) + "\n",
-        )
-        expect(staleCleanPing).toMatchObject({ id: "p-stale", ok: true, status: "warm" })
-
-        const escapeRes = await sendRawPayload(
+        const escapeRes = await sendDaemonRawPayload(
+          daemon.socketPath,
           JSON.stringify({ id: "esc-1", command: "ping", repoRoot: outsideRoot }) + "\n",
         )
         expect(escapeRes).toMatchObject({ id: "esc-1", ok: false })
         expect(String(escapeRes.error)).toContain("escapes daemon root")
 
-        const relEscapeRes = await sendRawPayload(
+        const relEscapeRes = await sendDaemonRawPayload(
+          daemon.socketPath,
           JSON.stringify({ id: "esc-rel", command: "ping", repoRoot: "../outside" }) + "\n",
         )
         expect(relEscapeRes).toMatchObject({ id: "esc-rel", ok: false })
         expect(String(relEscapeRes.error)).toContain("escapes daemon root")
 
-        const oversizedRes = await sendRawPayload("x".repeat(1_048_577) + "\n")
+        const oversizedRes = await sendDaemonRawPayload(
+          daemon.socketPath,
+          "x".repeat(1_048_577) + "\n",
+        )
         expect(oversizedRes).toMatchObject({ ok: false })
         expect(String(oversizedRes.error)).toContain("exceeds 1MB limit")
 
-        const malformedRes = await sendRawPayload("{ bad json\n")
+        const malformedRes = await sendDaemonRawPayload(daemon.socketPath, "{ bad json\n")
         expect(malformedRes).toMatchObject({ ok: false })
         expect(String(malformedRes.error)).toContain("Invalid daemon request payload")
 
-        const fallbackRes = await sendRawPayload(
+        const fallbackRes = await sendDaemonRawPayload(
+          daemon.socketPath,
           JSON.stringify({ id: "fb-1", command: "verify" }) + "\n",
         )
         expect(fallbackRes).toMatchObject({
@@ -1259,6 +1312,200 @@ describe("harness-mcp tools", () => {
             await daemon.close()
             fs.rmSync(tmpDir, { recursive: true, force: true })
             fs.rmSync(outsideRoot, { recursive: true, force: true })
+          }),
+        ),
+      ),
+    )
+  })
+
+  it("daemon cleans up real stale Unix domain socket and unlinks socket on close", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-mcp-daemon-stale-"))
+    const socketPath = resolveDaemonSocketPath(tmpDir)
+    const staleTmpSock = path.join(path.dirname(socketPath), "stale-origin.sock")
+    fs.mkdirSync(path.dirname(socketPath), { recursive: true })
+
+    const staleServer = net.createServer()
+    await new Promise<void>((resolve) => {
+      staleServer.listen(staleTmpSock, () => resolve())
+    })
+    fs.renameSync(staleTmpSock, socketPath)
+    await new Promise<void>((resolve) => {
+      staleServer.close(() => resolve())
+    })
+    expect(fs.statSync(socketPath).isSocket()).toBe(true)
+
+    const daemon = await startHarnessDaemonServer(tmpDir)
+    await Effect.runPromise(
+      Effect.promise(async () => {
+        const pingRes = await sendDaemonPayload(
+          daemon.socketPath,
+          JSON.stringify({ id: "p-stale-sock", command: "ping" }),
+        )
+        expect(pingRes).toMatchObject({ id: "p-stale-sock", ok: true, status: "warm" })
+      }).pipe(
+        Effect.ensuring(
+          Effect.promise(async () => {
+            await daemon.close()
+            expect(fs.existsSync(daemon.socketPath)).toBe(false)
+            fs.rmSync(tmpDir, { recursive: true, force: true })
+          }),
+        ),
+      ),
+    )
+  })
+
+  it("daemon returns no-op handle on alreadyAlive and leaves primary socket alive on close", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-mcp-daemon-alive-"))
+    const primary = await startHarnessDaemonServer(tmpDir)
+    const secondary = await startHarnessDaemonServer(tmpDir)
+
+    await Effect.runPromise(
+      Effect.promise(async () => {
+        expect(secondary.socketPath).toBe(primary.socketPath)
+        await secondary.close()
+        expect(fs.existsSync(primary.socketPath)).toBe(true)
+
+        const pingRes = await sendDaemonPayload(
+          primary.socketPath,
+          JSON.stringify({ id: "p-alive", command: "ping" }),
+        )
+        expect(pingRes).toMatchObject({ id: "p-alive", ok: true, status: "warm" })
+      }).pipe(
+        Effect.ensuring(
+          Effect.promise(async () => {
+            await primary.close()
+            expect(fs.existsSync(primary.socketPath)).toBe(false)
+            fs.rmSync(tmpDir, { recursive: true, force: true })
+          }),
+        ),
+      ),
+    )
+  })
+
+  it("daemon fails closed with DaemonSocketChmodError and unlinks socket when chmodSync fails", async () => {
+    if (process.platform === "win32") {
+      return
+    }
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-mcp-daemon-chmod-"))
+    const socketPath = resolveDaemonSocketPath(tmpDir)
+    const chmodSpy = vi.spyOn(fs, "chmodSync").mockImplementation(() => {
+      const err = Object.assign(new Error("EPERM: operation not permitted, chmod"), {
+        code: "EPERM",
+      })
+      throw err
+    })
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+
+    await Effect.runPromise(
+      Effect.promise(async () => {
+        await expect(startHarnessDaemonServer(tmpDir)).rejects.toMatchObject({
+          _tag: "DaemonSocketChmodError",
+          socketPath,
+        })
+        expect(fs.existsSync(socketPath)).toBe(false)
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            chmodSpy.mockRestore()
+            stderrSpy.mockRestore()
+            fs.rmSync(tmpDir, { recursive: true, force: true })
+          }),
+        ),
+      ),
+    )
+  })
+
+  it("runDefaultLspDiagnostics fails with ProjectPathEscapeError on escaping file/project and fails MCP callTool with isError: true", async () => {
+    const repoRoot = path.resolve(import.meta.dirname, "../../..")
+    for (const badInput of [
+      { file: "../outside-file.ts" },
+      { project: "../outside-tsconfig.json" },
+    ]) {
+      const exit = await Effect.runPromiseExit(runDefaultLspDiagnostics(repoRoot, badInput))
+      match(exit)
+        .with({ _tag: "Failure" }, ({ cause }) => {
+          expect(Cause.hasDies(cause)).toBe(false)
+          expect(Cause.hasFails(cause)).toBe(true)
+          const errorOpt = Cause.findErrorOption(cause)
+          match(errorOpt)
+            .with({ _tag: "Some" }, ({ value }) => {
+              expect(value).toBeInstanceOf(ProjectPathEscapeError)
+              expect(value._tag).toBe("ProjectPathEscapeError")
+            })
+            .with({ _tag: "None" }, () => {
+              expect.unreachable("Expected ProjectPathEscapeError in cause")
+            })
+            .exhaustive()
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("Expected runDefaultLspDiagnostics to fail on path escape")
+        })
+        .exhaustive()
+    }
+
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js")
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js")
+    const srv = createServer({ repoRoot })
+    const client = new Client({ name: "escape-test-client", version: "1.0.0" })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await srv.connect(serverTransport)
+    await client.connect(clientTransport)
+    await Effect.runPromise(
+      Effect.promise(async () => {
+        const res = await client.callTool({
+          name: "harness_lsp_diagnostics",
+          arguments: { file: "../outside-file.ts" },
+        })
+        expect(res.isError).toBe(true)
+        const firstBlock = Array.isArray(res.content) ? res.content[0] : undefined
+        expect(firstBlock?.type).toBe("text")
+        if (firstBlock?.type === "text") {
+          expect(firstBlock.text).toContain("escapes repository root")
+        }
+      }).pipe(
+        Effect.ensuring(
+          Effect.promise(async () => {
+            await client.close()
+            await srv.close()
+          }),
+        ),
+      ),
+    )
+  })
+
+  it("resolveGraph re-throws unexpected defects via Cause.hasDies while logging to stderr", async () => {
+    const tmpSnap = path.join(os.tmpdir(), `defect-snap-${Date.now()}.json`)
+    const stderrChunks: Array<string> = []
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+      return true
+    })
+    const existsSpy = vi.spyOn(fs, "existsSync").mockImplementation((target) => {
+      if (target === tmpSnap) {
+        throw new Error("Simulated fs defect")
+      }
+      return false
+    })
+
+    await Effect.runPromise(
+      Effect.promise(async () => {
+        const exit = await Effect.runPromiseExit(resolveGraph({ snapshotPath: tmpSnap }))
+        match(exit)
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            expect(Cause.hasDies(cause)).toBe(true)
+            expect(stderrChunks.join("")).toContain(
+              "[harness-mcp] Unexpected defect resolving graph: Simulated fs defect",
+            )
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected resolveGraph to die on unexpected defect")
+          })
+          .exhaustive()
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            existsSpy.mockRestore()
+            stderrSpy.mockRestore()
           }),
         ),
       ),
@@ -1295,15 +1542,22 @@ describe("harness-mcp tools", () => {
       .exhaustive()
   })
 
-  it("resolveDefaultRepoRoot honors args.repoRoot and recordMcpToolTelemetry writes telemetry event", () => {
+  it("resolveDefaultRepoRoot honors args.repoRoot, args.file, args.project and recordMcpToolTelemetry handles ok outcome and write failures", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-mcp-telemetry-"))
+    const readOnlyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "harness-mcp-telemetry-ro-"))
     Effect.runSync(
       Effect.sync(() => {
         fs.writeFileSync(path.join(tmpDir, "pnpm-workspace.yaml"), "")
         const nestedDir = path.join(tmpDir, "libs", "nested")
         fs.mkdirSync(nestedDir, { recursive: true })
+        const nestedFile = path.join(nestedDir, "index.ts")
+        const nestedTsconfig = path.join(nestedDir, "tsconfig.json")
+        fs.writeFileSync(nestedFile, "export const n = 1\n", "utf-8")
+        fs.writeFileSync(nestedTsconfig, "{}\n", "utf-8")
 
         expect(resolveDefaultRepoRoot({ repoRoot: nestedDir })).toBe(tmpDir)
+        expect(resolveDefaultRepoRoot({ file: nestedFile })).toBe(tmpDir)
+        expect(resolveDefaultRepoRoot({ project: nestedTsconfig })).toBe(tmpDir)
 
         recordMcpToolTelemetry(
           "harness_lsp_diagnostics",
@@ -1312,9 +1566,16 @@ describe("harness-mcp tools", () => {
           15,
           { repoRoot: tmpDir },
         )
+        recordMcpToolTelemetry(
+          "harness_resolve",
+          { repoRoot: tmpDir },
+          { spanName: "Sample.greet" },
+          7,
+          { repoRoot: tmpDir },
+        )
 
         const events = readTelemetryEvents(tmpDir)
-        expect(events).toHaveLength(1)
+        expect(events).toHaveLength(2)
         expect(events[0]).toMatchObject({
           surface: "mcp",
           category: "gate",
@@ -1323,35 +1584,101 @@ describe("harness-mcp tools", () => {
           durationMs: 15,
           engineSource: "local",
         })
+        expect(events[1]).toMatchObject({
+          surface: "mcp",
+          category: "graph_query",
+          toolName: "harness_resolve",
+          outcome: "ok",
+          durationMs: 7,
+          engineSource: "local",
+        })
+
+        // Write-failure resilience: .harness is a regular file so mkdir/append fails safely
+        fs.writeFileSync(path.join(readOnlyRoot, ".harness"), "blocker-file", "utf-8")
+        expect(() =>
+          recordMcpToolTelemetry(
+            "harness_resolve",
+            { repoRoot: readOnlyRoot },
+            { spanName: "Sample.greet" },
+            4,
+            { repoRoot: readOnlyRoot },
+          ),
+        ).not.toThrow()
+        expect(readTelemetryEvents(readOnlyRoot)).toEqual([])
       }).pipe(
         Effect.ensuring(
           Effect.sync(() => {
             fs.rmSync(tmpDir, { recursive: true, force: true })
+            fs.rmSync(readOnlyRoot, { recursive: true, force: true })
           }),
         ),
       ),
     )
   })
 
-  it("harness_lsp_diagnostics fails closed with [lsp-exception] when lspDiagnosticsRunner throws", async () => {
-    const res = (await executeTool(
-      "harness_lsp_diagnostics",
-      { file: "libs/sample/domain/src/index.ts" },
-      {
-        repoRoot: process.cwd(),
-        lspDiagnosticsRunner: () => {
-          throw new Error("Simulated LSP runner throw")
-        },
-      },
-    )) as {
-      readonly clean: boolean
-      readonly diagnostics: ReadonlyArray<unknown>
-      readonly summary: { readonly errors: number; readonly messages: number }
-    }
-    expect(res.clean).toBe(false)
-    expect(res.summary.errors).toBe(1)
-    expect(res.summary.messages).toBe(1)
-    expect(String(res.diagnostics[0])).toContain("[lsp-exception]")
-    expect(String(res.diagnostics[0])).toContain("Simulated LSP runner throw")
+  it("harness_lsp_diagnostics logs to stderr and returns [lsp-exception] when lspDiagnosticsRunner throws or runDefaultLspDiagnostics hits a defect", async () => {
+    const stderrChunks: Array<string> = []
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+      return true
+    })
+
+    await Effect.runPromise(
+      Effect.promise(async () => {
+        const res = (await executeTool(
+          "harness_lsp_diagnostics",
+          { file: "libs/sample/domain/src/index.ts" },
+          {
+            repoRoot: process.cwd(),
+            lspDiagnosticsRunner: () => {
+              throw new Error("Simulated LSP runner throw")
+            },
+          },
+        )) as {
+          readonly clean: boolean
+          readonly diagnostics: ReadonlyArray<unknown>
+          readonly summary: { readonly errors: number; readonly messages: number }
+        }
+        expect(res.clean).toBe(false)
+        expect(res.summary.errors).toBe(1)
+        expect(res.summary.messages).toBe(1)
+        expect(String(res.diagnostics[0])).toContain("[lsp-exception]")
+        expect(String(res.diagnostics[0])).toContain("Simulated LSP runner throw")
+        expect(stderrChunks.join("")).toContain(
+          "[harness-mcp] LSP diagnostics error: Simulated LSP runner throw",
+        )
+
+        const repoRoot = path.resolve(import.meta.dirname, "../../..")
+        const statSpy = vi.spyOn(fs, "statSync").mockImplementation(() => {
+          throw new Error("Simulated stat defect")
+        })
+        await Effect.runPromise(
+          Effect.promise(async () => {
+            const defectRes = await Effect.runPromise(
+              runDefaultLspDiagnostics(repoRoot, { project: "tsconfig.base.json" }),
+            )
+            expect(defectRes.clean).toBe(false)
+            expect(defectRes.summary.errors).toBe(1)
+            expect(String(defectRes.diagnostics[0])).toContain("[lsp-exception]")
+            expect(String(defectRes.diagnostics[0])).toContain("Simulated stat defect")
+            expect(stderrChunks.join("")).toContain(
+              "[harness-mcp] LSP diagnostics defect: Simulated stat defect",
+            )
+          }).pipe(
+            Effect.ensuring(
+              Effect.sync(() => {
+                statSpy.mockRestore()
+              }),
+            ),
+          ),
+        )
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            stderrSpy.mockRestore()
+          }),
+        ),
+      ),
+    )
   })
 })

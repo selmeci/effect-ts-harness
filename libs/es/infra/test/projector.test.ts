@@ -1787,4 +1787,64 @@ describe("Cross-Aggregate Outbox Drain, Projector Checkpoints, Gap Parking, and 
         }).pipe(Effect.provide(SqlClientMemoryLayer)),
     )
   })
+
+  describe("Group 3: Nested Workerd Transaction Stack & Rollback", () => {
+    it.effect(
+      "nested sql.withTransaction failure does not pop outer txStack entry and outer rollback reverts all inner and outer writes",
+      () =>
+        Effect.gen(function* () {
+          yield* initializeAggregateTables()
+          const sql = yield* SqlClient
+
+          const outerErr = yield* Effect.flip(
+            sql.withTransaction(
+              Effect.gen(function* () {
+                // Outer write 1 (before nested tx)
+                yield* sql`
+                  INSERT INTO es_outbox (
+                    aggregate_name, aggregate_id, stream_version, event_type, payload, metadata, created_at
+                  ) VALUES (
+                    'Cart', 'nested-tx-cart', 1, 'OuterBefore', '{}', '{}', 1700000000001
+                  )
+                `
+
+                // Inner nested tx writes row and fails (triggers txn.rollback() + promise rejection)
+                const innerErr = yield* Effect.flip(
+                  sql.withTransaction(
+                    Effect.gen(function* () {
+                      yield* sql`
+                        INSERT INTO es_outbox (
+                          aggregate_name, aggregate_id, stream_version, event_type, payload, metadata, created_at
+                        ) VALUES (
+                          'Cart', 'nested-tx-cart', 2, 'InnerFailed', '{}', '{}', 1700000000002
+                        )
+                      `
+                      return yield* Effect.fail("inner-tx-failure")
+                    }),
+                  ),
+                )
+                expect(innerErr).toBe("inner-tx-failure")
+
+                // Outer write 2 (after catching inner failure; outer txId must still be active on txStack)
+                yield* sql`
+                  INSERT INTO es_outbox (
+                    aggregate_name, aggregate_id, stream_version, event_type, payload, metadata, created_at
+                  ) VALUES (
+                    'Cart', 'nested-tx-cart', 3, 'OuterAfter', '{}', '{}', 1700000000003
+                  )
+                `
+
+                return yield* Effect.fail("outer-tx-failure")
+              }),
+            ),
+          )
+          expect(outerErr).toBe("outer-tx-failure")
+
+          const rows = yield* sql<{ readonly stream_version: number; readonly event_type: string }>`
+            SELECT stream_version, event_type FROM es_outbox WHERE aggregate_id = 'nested-tx-cart' ORDER BY stream_version ASC
+          `
+          expect(rows).toEqual([])
+        }).pipe(Effect.provide(SqlClientMemoryLayer)),
+    )
+  })
 })
