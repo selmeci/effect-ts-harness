@@ -8,6 +8,8 @@ enforced_by:
   - tools/oxlint/syntax-bans.js
   - libs/harness/graph/src/model.ts
   - libs/harness/graph/src/type-extractor.ts
+  - libs/harness/graph/src/extractor/schema-and-brand-extractor.ts
+  - libs/harness/graph/src/extractor/effect-fn-extractor.ts
   - libs/harness/graph/src/policy-check.ts
   - libs/harness/decision/src/idiom-router.ts
   - libs/harness/decision/src/triage-decision.ts

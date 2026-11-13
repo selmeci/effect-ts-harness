@@ -71,6 +71,7 @@ import {
   type GovernanceDocReference,
   HARNESS_GATE_RULE_VERSION,
   INTERACTIVE_NX_BANNED_REASON,
+  isModularPluginPath,
   normalizeConditionPrefix,
   parseDstSeedEnv,
   PlanSearchInput,
@@ -132,7 +133,7 @@ import {
   getNodeKey,
   getOrCreateWarmProgramSession,
   type HarnessGraph,
-  loadGraphSnapshot,
+  loadGraphSnapshotEffect,
   mergeOmnigraphBranch,
   OmnigraphSync,
   projectOntologyLayers,
@@ -1136,15 +1137,7 @@ const handleVerify = (
         }
       }
 
-      const rawModularDeltaFiles = deltaFiles.filter(
-        (f) =>
-          f.startsWith("libs/harness/gates/src/") ||
-          f.includes("/plugins/") ||
-          f.includes("/services/") ||
-          f.includes("/commands/") ||
-          f.includes("/tools/") ||
-          f.includes("/mutation/"),
-      )
+      const rawModularDeltaFiles = deltaFiles.filter((f) => isModularPluginPath(f))
       let modularDeltaFiles = rawModularDeltaFiles
       if (modularDeltaFiles.length === 0 && existsSync(join(repoRoot, "libs", "harness", "gates", "src"))) {
         process.stderr.write(
@@ -1882,8 +1875,8 @@ const handleDone = (
       const planPath = join(repoRoot, ".harness", "plan-graph-snapshot.json")
       const implPath = join(repoRoot, ".harness", "graph-snapshot.json")
       if (existsSync(planPath) && existsSync(implPath)) {
-        planGraph = loadGraphSnapshot(planPath)
-        implGraph = loadGraphSnapshot(implPath)
+        planGraph = yield* loadGraphSnapshotEffect(planPath).pipe(Effect.orDie)
+        implGraph = yield* loadGraphSnapshotEffect(implPath).pipe(Effect.orDie)
       }
     }
     if (planGraph && implGraph) {
@@ -2490,8 +2483,8 @@ const handleDoctorOrSession = (
 
     let missingPlannedFns: ReadonlyArray<string> = []
     if (existsSync(planPath) && existsSync(implPath)) {
-      const planGraph = loadGraphSnapshot(planPath)
-      const implGraph = loadGraphSnapshot(implPath)
+      const planGraph = yield* loadGraphSnapshotEffect(planPath).pipe(Effect.orDie)
+      const implGraph = yield* loadGraphSnapshotEffect(implPath).pipe(Effect.orDie)
       const diff = diffPlanAndImplGraphs(planGraph, implGraph)
       if (!diff.ok) {
         missingPlannedFns = diff.reasons

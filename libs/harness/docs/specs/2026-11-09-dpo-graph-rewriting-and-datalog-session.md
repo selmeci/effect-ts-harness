@@ -10,9 +10,19 @@ informed_by:
   - harness:ADR-0009
 enforced_by:
   - libs/harness/graph/src/model.ts
+  - libs/harness/graph/src/model-rewrite-and-cache.ts
   - libs/harness/graph/src/datalog-engine.ts
+  - libs/harness/graph/src/datalog/datalog-session.ts
   - libs/harness/graph/src/graph-rewrite.ts
+  - libs/harness/graph/src/rewrite/dpo-algebra-core.ts
+  - libs/harness/graph/src/rewrite/plan-rules.plugin.ts
+  - libs/harness/graph/src/rewrite/repair-rules-arch.plugin.ts
+  - libs/harness/graph/src/rewrite/repair-rules-code.plugin.ts
   - libs/harness/graph/src/graph-projector.ts
+  - libs/harness/graph/src/projector/skeleton-templates.ts
+  - libs/harness/graph/src/projector/ast-codemods.ts
+  - libs/harness/graph/src/projector/shadow-bisection-verifier.ts
+  - libs/harness/graph/src/engine/graph-diff-monomorphism.ts
   - libs/harness/decision/src/hole-prior-decision.ts
   - libs/harness/decision/src/dpo-ranker-decision.ts
   - apps/harness-mcp/src/server.ts

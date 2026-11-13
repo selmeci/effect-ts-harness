@@ -11,6 +11,8 @@ informed_by:
   - harness:ADR-0011
 enforced_by:
   - libs/harness/graph/src/type-extractor.ts
+  - libs/harness/graph/src/extractor/compiler-session.ts
+  - libs/harness/graph/src/extractor/test-and-governance-extractor.ts
   - libs/harness/graph/src/structural-search.ts
   - libs/harness/gates/src/ast-cache.ts
   - libs/harness/gates/src/migration-check.ts

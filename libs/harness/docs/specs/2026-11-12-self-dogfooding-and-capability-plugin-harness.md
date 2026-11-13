@@ -27,6 +27,14 @@ enforced_by:
   - libs/harness/gates/src/services/active-mutant-context.ts
   - libs/harness/gates/src/ast-cache.ts
   - libs/harness/gates/src/gc-check.ts
+  - libs/harness/graph/src/model-rewrite-and-cache.ts
+  - libs/harness/graph/src/extractor/compiler-session.ts
+  - libs/harness/graph/src/extractor/ast-policy-extractor.ts
+  - libs/harness/graph/src/datalog/datalog-session.ts
+  - libs/harness/graph/src/rewrite/dpo-algebra-core.ts
+  - libs/harness/graph/src/engine/hypergraph-store.ts
+  - libs/harness/graph/src/engine/snapshot-codec.ts
+  - libs/harness/graph/src/projector/shadow-bisection-verifier.ts
   - libs/harness/graph/src/services/ts-compiler-overlay-service.ts
   - apps/harness-cli/src/commands/command-registry.ts
   - apps/harness-mcp/src/tools/tool-registry.ts
@@ -62,7 +70,7 @@ errors:
 
 This specification defines the behavioral requirements for `RFC-0007` (Self-Dogfooding Audit, Effect-TS v4 Paradigm Alignment & Modular Plugin Harness Architecture), governed by `harness:ADR-0012`. It eliminates the architectural double standard between the harness packages (`libs/harness/*`, `apps/harness-*`) and the application/framework domains (`libs/sample/*`, `libs/es/*`):
 
-1. **Pure Self-Dogfooding Decider (`libs/harness/gates/src/plugins/self-dogfooding-plugin.ts` & `libs/harness/gates/src/ast-cache.ts`):** Pure `SelfDogfooding.decide` (`R = never`) and unified `AstGateCache.decide` enforce zero dummy `yield* Effect.void` statements (`effect-fn-dummy-void`), zero nested `Effect.runSync` / `Effect.runPromise` calls inside `Effect.fn` / `Effect.fnUntraced` / `Effect.gen` / `Effect.sync` / `Layer.*` (`nested-effect-run-sync`), zero `switch` statements (`harness-switch-statement`) or `match(...).run()` calls (`match-run-statement`) across harness source files, and a strict path-scoped 800-line file budget (`file-line-budget-exceeded`) across modular plugin, service, command, and tool files (`/plugins/`, `/services/`, `/commands/`, `/tools/`).
+1. **Pure Self-Dogfooding Decider (`libs/harness/gates/src/plugins/self-dogfooding-plugin.ts` & `libs/harness/gates/src/ast-cache.ts`):** Pure `SelfDogfooding.decide` (`R = never`) and unified `AstGateCache.decide` enforce zero dummy `yield* Effect.void` statements (`effect-fn-dummy-void`), zero nested `Effect.runSync` / `Effect.runPromise` calls inside `Effect.fn` / `Effect.fnUntraced` / `Effect.gen` / `Effect.sync` / `Layer.*` (`nested-effect-run-sync`), zero `switch` statements (`harness-switch-statement`) or `match(...).run()` calls (`match-run-statement`) across harness source files, and a strict path-scoped 800-line file budget (`file-line-budget-exceeded`) across modular plugin, service, command, tool, and `@harness/graph` files (`/plugins/`, `/services/`, `/commands/`, `/tools/`, `libs/harness/graph/src/**/*.ts`).
 2. **Cordis-Inspired Three-Role Capability Seams (`libs/harness/gates/src/services/*.ts` & `libs/harness/gates/src/plugins/gate-plugin-registry.ts`):** Introduces `WorkspaceFs`, `HarnessSubprocessRunner`, `ActiveMutantContext`, and `GatePluginRegistry` (`Context.Service` + `Layer` providers + `Effect.fn` consumers with non-empty `R` and typed `Schema.TaggedError` channels) so I/O, child processes, mutant activation, and gate plugin evaluation are dependency-injected and executed during `pnpm harness gc --strict` and `pnpm harness verify`.
 3. **Scoped TypeScript Compiler Overlay Service (`libs/harness/graph/src/services/ts-compiler-overlay-service.ts`):** Introduces `TsCompilerOverlayService` (`Context.Service` + `Layer.effect` with `Effect.acquireRelease` cleanup of service-owned sessions) and `TsCompilerOverlay.extractGraph` (`Effect.fn`) to manage warm `TypeScriptProgramSession` state with deterministic resource finalization.
 4. **Modular CLI Command & MCP Tool Registries (`apps/harness-cli/src/commands/command-registry.ts` & `apps/harness-mcp/src/tools/tool-registry.ts`):** Introduces `HarnessCommandRegistry` (`HarnessCli.dispatchCommand`) and `McpToolRegistry` (`HarnessMcp.dispatchTool`), replacing monolithic `switch` dispatchers in `apps/harness-cli/src/index.ts` and `apps/harness-mcp/src/server.ts` with typed plugin registries wired to the live command and tool handlers.
@@ -127,7 +135,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ## Assumptions
 
-- **REQ-1.1:** Modular plugin, service, command, and tool files under `libs/harness/*/src/plugins/**`, `libs/harness/*/src/services/**`, `apps/harness-cli/src/commands/**`, and `apps/harness-mcp/src/tools/**` default to a maximum line budget of `MaxPluginFileLines = 800`.
+- **REQ-1.1:** Modular plugin, service, command, tool, and graph files under `libs/harness/*/src/plugins/**`, `libs/harness/*/src/services/**`, `libs/harness/graph/src/**/*.ts`, `apps/harness-cli/src/commands/**`, and `apps/harness-mcp/src/tools/**` default to a maximum line budget of `MaxPluginFileLines = 800`.
 - **REQ-2.5:** `ActiveMutantContext` synchronizes with `globalThis.__HARNESS_ACTIVE_MUTANT_ID` inside its scoped `Effect.acquireRelease` bracket so generated Mutant Schemata (`ADR-0010`) and Effect fibers observe identical active mutant state.
 
 ## Out of scope
@@ -136,7 +144,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ## Known residual risks
 
-- Existing canonical entry files (`type-extractor.ts`, `datalog-engine.ts`, `graph-rewrite.ts`, `gc-check.ts`) retain their public exports to preserve referential integrity for `ADR-0001..0011` and `SPEC-0001..0010`.
+- Canonical entry orchestrators (`type-extractor.ts`, `datalog-engine.ts`, `graph-rewrite.ts`, `graph-engine.ts`, `graph-projector.ts`, `gc-check.ts`) remain `<= 250` lines and re-export cohesive submodules (`<= 750` lines) to preserve referential integrity for `ADR-0001..0011` and `SPEC-0001..0010`.
 
 ## Acceptance criteria
 

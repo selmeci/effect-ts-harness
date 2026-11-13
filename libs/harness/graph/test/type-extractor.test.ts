@@ -7,10 +7,12 @@ import { describe, expect, it } from "vitest"
 import {
   buildHarnessGraph,
   clearWarmProgramSessions,
+  computeBaseTopologyHash,
   computeDeclHash,
   createTypeScriptProgramSession,
   diffHarnessGraphs,
   emitDeclarationSignatureText,
+  evaluateOverlayDiagnostics,
   extractTypeAwareGraphFromSource,
   extractTypeGraph,
   extractWorkspaceTypeAwareGraph,
@@ -1117,5 +1119,34 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
     ]
     assertWarmEqualsCold(retaggedFiles)
     expect(session.lastReextractedFiles).toContain("libs/sample/domain/src/helper.ts")
+  })
+
+  it("evicts stale overlay SourceFile when removed from session and matches computeBaseTopologyHash", async () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "harness-overlay-cache-"))
+    const domainDir = path.join(tmpRoot, "libs", "sample", "domain", "src")
+    fs.mkdirSync(domainDir, { recursive: true })
+    fs.writeFileSync(path.join(domainDir, "index.ts"), "export const okValue: number = 1\n", "utf-8")
+
+    const session = createTypeScriptProgramSession(tmpRoot)
+    const brokenDiags = evaluateOverlayDiagnostics(
+      tmpRoot,
+      { "libs/sample/domain/src/index.ts": 'export const okValue: number = "broken"\n' },
+      session,
+    )
+    expect(brokenDiags.some((d) => d.severity === "error")).toBe(true)
+
+    // Subsequent check with another file (removing index.ts overlay) must read disk index.ts, not stale overlay AST
+    const cleanDiags = evaluateOverlayDiagnostics(
+      tmpRoot,
+      { "libs/sample/domain/src/extra.ts": 'import { okValue } from "./index.js"\nexport const doubled: number = okValue * 2\n' },
+      session,
+    )
+    expect(cleanDiags.filter((d) => d.severity === "error")).toEqual([])
+
+    const g1 = await Effect.runPromise(extractWorkspaceTypeAwareGraph(tmpRoot, { session }))
+    expect(session.lastWorkspaceSnapshot?.baseTopologyHash).toBe(computeBaseTopologyHash(session))
+    expect(g1).toBeDefined()
+
+    fs.rmSync(tmpRoot, { recursive: true, force: true })
   })
 })

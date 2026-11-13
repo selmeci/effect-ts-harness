@@ -8,6 +8,7 @@ enforced_by:
   - tools/oxlint/syntax-bans.js
   - libs/harness/graph/src/model.ts
   - libs/harness/graph/src/type-extractor.ts
+  - libs/harness/graph/src/extractor/ast-policy-extractor.ts
   - libs/harness/graph/src/policy-check.ts
   - libs/harness/gates/src/gc-check.ts
   - libs/harness/gates/src/migration-check.ts

@@ -25,6 +25,7 @@ export const isModularPluginPath = (filePath: string): boolean => {
   const norm = filePath.replace(/\\/g, "/")
   return (
     /(?:^|\/)libs\/harness\/gates\/src\/.*\.ts$/.test(norm) ||
+    /(?:^|\/)libs\/harness\/graph\/src\/.*\.ts$/.test(norm) ||
     /(?:^|\/)(?:plugins|services|commands|tools|mutation)\//.test(norm)
   )
 }
@@ -77,8 +78,8 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
     const lineCount = computeWorkspaceFileLineCount(file.content)
     const shouldCheckLineBudget =
       file.isModularPluginFile === true ||
-      (file.isModularPluginFile === undefined &&
-        (isModularPluginPath(file.filePath) || input.maxPluginFileLines !== undefined))
+      isModularPluginPath(file.filePath) ||
+      (file.isModularPluginFile === undefined && input.maxPluginFileLines !== undefined)
 
     if (shouldCheckLineBudget && lineCount > maxLines) {
       violations.push({

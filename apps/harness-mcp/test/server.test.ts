@@ -912,5 +912,22 @@ describe("harness-mcp tools", () => {
     expect(invalidTsRes.clean).toBe(false)
     expect(invalidTsRes.summary.filesChecked).toBe(1)
     expect(invalidTsRes.summary.errors).toBeGreaterThan(0)
+
+    const escapedOverlayRes = (await executeTool(
+      "harness_lsp_diagnostics",
+      {
+        overlays: {
+          "../outside-secret.ts": "export const leak = 1\n",
+        },
+      },
+      { repoRoot: process.cwd() },
+    )) as {
+      readonly clean: boolean
+      readonly summary: { readonly filesChecked: number; readonly errors: number }
+      readonly diagnostics: ReadonlyArray<{ readonly code?: string }>
+    }
+    expect(escapedOverlayRes.clean).toBe(false)
+    expect(escapedOverlayRes.summary.errors).toBe(1)
+    expect(escapedOverlayRes.diagnostics[0]?.code).toBe("PATH_TRAVERSAL")
   })
 })

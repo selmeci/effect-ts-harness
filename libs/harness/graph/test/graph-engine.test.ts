@@ -5,7 +5,6 @@ import { Cause, Effect, Exit, Option } from "effect"
 import { describe, expect, it } from "vitest"
 import {
   buildHarnessGraph,
-  deserializeGraphSnapshot,
   deserializeGraphSnapshotEffect,
   diffHarnessGraphs,
   findCallees,
@@ -13,7 +12,6 @@ import {
   findTestsReaching,
   GraphSnapshotError,
   isHarnessGraph,
-  loadGraphSnapshot,
   loadGraphSnapshotEffect,
   NodeKey,
   OmnigraphSync,
@@ -117,12 +115,12 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
     expect(ndjson.split("\n").length).toBeGreaterThanOrEqual(5)
   })
 
-  it("roundtrips graph snapshot via saveGraphSnapshot and loadGraphSnapshot", () => {
+  it("roundtrips graph snapshot via saveGraphSnapshot and loadGraphSnapshotEffect", () => {
     const snapshotPath = path.join(process.cwd(), ".harness/test-snapshot.json")
     saveGraphSnapshot(sampleGraph, snapshotPath)
     expect(fs.existsSync(snapshotPath)).toBe(true)
 
-    const loaded = loadGraphSnapshot(snapshotPath)
+    const loaded = Effect.runSync(loadGraphSnapshotEffect(snapshotPath))
     expect(findTestsReaching(loaded, "PhotoRepo.insert").map((t) => t.testId)).toEqual([
       "libs/sample/domain/test/index.test.ts::greets by name",
     ])
@@ -374,7 +372,7 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
     expect(results.length).toBeGreaterThan(0)
     const match = results.find((r) => r.text.includes("buildHarnessGraph"))
     expect(match).toBeDefined()
-    expect(match?.file).toContain("graph-engine.ts")
+    expect(match?.file).toContain("engine/hypergraph-store.ts")
     expect(match?.line).toBeGreaterThan(0)
   })
 
@@ -397,20 +395,8 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
   })
 
   describe("F-1: Graph snapshot error handling and validation", () => {
-    it("fails with GraphSnapshotError (reason: missing-file) on nonexistent path in loadGraphSnapshot and loadGraphSnapshotEffect", () => {
+    it("fails with GraphSnapshotError (reason: missing-file) on nonexistent path in loadGraphSnapshotEffect", () => {
       const missingPath = path.join(os.tmpdir(), `nonexistent-snap-${Date.now()}.json`)
-
-      // Synchronous wrapper throws GraphSnapshotError
-      expect(() => loadGraphSnapshot(missingPath)).toThrow(GraphSnapshotError)
-      try {
-        loadGraphSnapshot(missingPath)
-      } catch (err) {
-        expect(err).toBeInstanceOf(GraphSnapshotError)
-        if (err instanceof GraphSnapshotError) {
-          expect(err.reason).toBe("missing-file")
-          expect(err.path).toBe(missingPath)
-        }
-      }
 
       // Effect version returns typed GraphSnapshotError failure
       const exit = Effect.runSyncExit(loadGraphSnapshotEffect(missingPath))
@@ -430,16 +416,6 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
       fs.writeFileSync(corruptPath, "{ invalid json content: 123", "utf8")
 
       try {
-        expect(() => loadGraphSnapshot(corruptPath)).toThrow(GraphSnapshotError)
-        try {
-          loadGraphSnapshot(corruptPath)
-        } catch (err) {
-          expect(err).toBeInstanceOf(GraphSnapshotError)
-          if (err instanceof GraphSnapshotError) {
-            expect(err.reason).toBe("invalid-json")
-          }
-        }
-
         const exit = Effect.runSyncExit(loadGraphSnapshotEffect(corruptPath))
         expect(Exit.isFailure(exit)).toBe(true)
         if (Exit.isFailure(exit)) {
@@ -482,18 +458,6 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
             },
           },
         ],
-      }
-
-      // Synchronous deserialize throws GraphSnapshotError with reason: dangling-edge
-      expect(() => deserializeGraphSnapshot(snapshotWithDanglingEdge)).toThrow(GraphSnapshotError)
-      try {
-        deserializeGraphSnapshot(snapshotWithDanglingEdge)
-      } catch (err) {
-        expect(err).toBeInstanceOf(GraphSnapshotError)
-        if (err instanceof GraphSnapshotError) {
-          expect(err.reason).toBe("dangling-edge")
-          expect(err.message).toContain("NonexistentService")
-        }
       }
 
       // Effect version fails with GraphSnapshotError reason: dangling-edge
@@ -766,11 +730,11 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
       expect(diff.missingErrors).toEqual(["PhotoAccessDeniedError"])
     })
 
-    it("isHarnessGraph returns true for graphs built via buildHarnessGraph or deserializeGraphSnapshot and false for plain objects", () => {
+    it("isHarnessGraph returns true for graphs built via buildHarnessGraph or deserializeGraphSnapshotEffect and false for plain objects", () => {
       expect(isHarnessGraph(sampleGraph)).toBe(true)
 
       const snapshot = serializeGraphSnapshot(sampleGraph)
-      const restored = deserializeGraphSnapshot(snapshot)
+      const restored = Effect.runSync(deserializeGraphSnapshotEffect(snapshot))
       expect(isHarnessGraph(restored)).toBe(true)
 
       expect(isHarnessGraph({ graph: {}, nodeIndexByKey: new Map() })).toBe(false)

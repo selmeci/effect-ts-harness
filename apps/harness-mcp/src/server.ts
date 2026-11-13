@@ -36,7 +36,7 @@ import {
   type HarnessGraph,
   invokeOmnigraphNamedQuery,
   isEntityNode,
-  loadGraphSnapshot,
+  loadGraphSnapshotEffect,
   NodeKey,
   OmnigraphSync,
   PageRankScoreMillis,
@@ -253,7 +253,18 @@ const resolveGraph = (
       }
     }
     if (snapshotPath && fs.existsSync(snapshotPath)) {
-      return loadGraphSnapshot(snapshotPath)
+      return yield* loadGraphSnapshotEffect(snapshotPath).pipe(
+        Effect.orElseSucceed(() =>
+          buildHarnessGraph({
+            fns: [],
+            services: [],
+            layers: [],
+            errors: [],
+            tests: [],
+            patternDocs: [],
+          }),
+        ),
+      )
     }
     return buildHarnessGraph({
       fns: [],
@@ -280,12 +291,42 @@ const resolveGraph = (
 }
 
 export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolean => {
-  const rel = path.relative(path.resolve(rootDir), path.resolve(candidatePath))
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))
+  const logicalRoot = path.resolve(rootDir)
+  const logicalCandidate = path.isAbsolute(candidatePath)
+    ? path.resolve(candidatePath)
+    : path.resolve(logicalRoot, candidatePath)
+  const rel = path.relative(logicalRoot, logicalCandidate)
+  if (rel !== "" && (rel.startsWith("..") || path.isAbsolute(rel))) {
+    return false
+  }
+  if (fs.existsSync(logicalRoot)) {
+    let checkPath = logicalCandidate
+    while (!fs.existsSync(checkPath) && checkPath !== logicalRoot) {
+      const parent = path.dirname(checkPath)
+      if (parent === checkPath) break
+      checkPath = parent
+    }
+    if (fs.existsSync(checkPath)) {
+      const checkRel = path.relative(logicalRoot, checkPath)
+      if (!checkRel.startsWith("..") && !path.isAbsolute(checkRel)) {
+        const realRoot = fs.realpathSync.native(logicalRoot)
+        const realCheck = fs.realpathSync.native(checkPath)
+        const realRel = path.relative(realRoot, realCheck)
+        if (realRel !== "" && (realRel.startsWith("..") || path.isAbsolute(realRel))) {
+          return false
+        }
+      }
+    }
+  }
+  return true
 }
 
 export const normalizeProjectPath = (repoRoot: string, rawProject: string): string => {
-  const resolved = path.isAbsolute(rawProject) ? rawProject : path.resolve(repoRoot, rawProject)
+  const resolved = path.isAbsolute(rawProject) ? path.resolve(rawProject) : path.resolve(repoRoot, rawProject)
+  if (!isPathInsideRoot(repoRoot, resolved)) {
+    // oxlint-disable-next-line -- validated boundary failure caught by Effect.try
+    throw new Error(`Project path '${rawProject}' escapes repository root '${repoRoot}'.`)
+  }
   if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
     return path.join(resolved, "tsconfig.json")
   }
@@ -325,8 +366,12 @@ export const runDefaultLspDiagnostics = (
     let resolvedFile: string | undefined
     if (effectiveFile !== undefined && effectiveFile.trim().length > 0) {
       resolvedFile = path.isAbsolute(effectiveFile)
-        ? effectiveFile
+        ? path.resolve(effectiveFile)
         : path.resolve(repoRoot, effectiveFile)
+      if (!isPathInsideRoot(repoRoot, resolvedFile)) {
+        // oxlint-disable-next-line -- validated boundary failure caught by Effect.try
+        throw new Error(`File path '${effectiveFile}' escapes repository root '${repoRoot}'.`)
+      }
       if (effectiveProject !== undefined && effectiveProject.trim().length > 0) {
         cliArgs.push("--project", normalizeProjectPath(repoRoot, effectiveProject))
       } else {
@@ -364,6 +409,7 @@ export const runDefaultLspDiagnostics = (
     if (
       resolvedFile !== undefined &&
       fs.existsSync(resolvedFile) &&
+      (resolvedFile.endsWith(".ts") || resolvedFile.endsWith(".tsx")) &&
       !resolvedFile.endsWith(".test.ts") &&
       !resolvedFile.endsWith(".spec.ts")
     ) {
@@ -690,6 +736,32 @@ export const buildLiveMcpToolDescriptors = (
           const overlays = typedArgs.overlays
           const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
           if (overlays !== undefined && Object.keys(overlays).length > 0) {
+            const escapedKeys = Object.keys(overlays).filter((k) => {
+              const absKey = path.isAbsolute(k) ? path.resolve(k) : path.resolve(root, k)
+              return !isPathInsideRoot(root, absKey)
+            })
+            if (escapedKeys.length > 0) {
+              const escapeDiags = escapedKeys.map((k) => ({
+                file: k,
+                line: 1,
+                column: 1,
+                code: "PATH_TRAVERSAL",
+                severity: "error" as const,
+                message: `Overlay path '${k}' escapes repository root.`,
+              }))
+              return {
+                clean: false,
+                diagnostics: escapeDiags,
+                summary: {
+                  filesChecked: 0,
+                  filesWithoutPlugin: 0,
+                  totalFiles: Object.keys(overlays).length,
+                  errors: escapeDiags.length,
+                  warnings: 0,
+                  messages: escapeDiags.length,
+                },
+              } satisfies LspDiagnosticsReport
+            }
             const compilableKeys = Object.keys(overlays).filter(
               (k) => (k.endsWith(".ts") || k.endsWith(".tsx")) && !k.endsWith(".d.ts"),
             )
@@ -1247,6 +1319,12 @@ export const createServer = (options?: ServerOptions): McpServer => {
         .max(50)
         .optional()
         .describe("Optional workspace subdirectories to search (defaults to ['libs', 'apps'])"),
+      repoRoot: z
+        .string()
+        .min(1)
+        .max(1024)
+        .optional()
+        .describe("Optional repository or worktree root directory"),
     },
     (args) =>
       Effect.runPromise(
@@ -1484,7 +1562,8 @@ export const createServer = (options?: ServerOptions): McpServer => {
         .optional()
         .describe("Optional alias for project tsconfig.json path to check"),
       overlays: z
-        .record(z.string(), z.string())
+        .record(z.string().min(1).max(512), z.string().max(1_000_000))
+        .refine((rec) => Object.keys(rec).length <= 200, "Too many overlay files (max 200)")
         .optional()
         .describe(
           "Optional map of relative/absolute file paths to in-memory TypeScript content for Shadow LSP verification",
@@ -1626,55 +1705,56 @@ const createDaemonNetServer = (repoRoot: string): net.Server =>
           const targetRoot = req.repoRoot ?? repoRoot
           const resolvedRoot = path.resolve(targetRoot)
           void Effect.runPromise(
-            Effect.gen(function* () {
-              if (req.command === "ping") {
-                return { id: req.id, ok: true, status: "warm" }
-              }
-              if (req.command === "extract-graph") {
-                const graph = yield* extractWorkspaceTypeAwareGraph(resolvedRoot)
-                return {
-                  id: req.id,
-                  ok: true,
-                  nodeCount: Graph.nodeCount(graph.graph),
-                  edgeCount: Graph.edgeCount(graph.graph),
-                  violationCount: (graph.branchingViolations ?? []).length,
-                }
-              }
-              if (req.command === "ast-gates") {
-                const cachePath = AstGateCache.resolveCachePath(resolvedRoot)
-                const requestedRelPaths = req.files ?? []
-                for (const rel of requestedRelPaths) {
-                  const resolvedAbs = path.resolve(resolvedRoot, rel)
-                  if (
-                    resolvedAbs !== resolvedRoot &&
-                    !resolvedAbs.startsWith(`${resolvedRoot}${path.sep}`)
-                  ) {
+            match<typeof req.command, Effect.Effect<Record<string, unknown>>>(req.command)
+              .with("ping", () => Effect.succeed({ id: req.id, ok: true, status: "warm" }))
+                .with("extract-graph", () =>
+                  Effect.gen(function* () {
+                    const graph = yield* extractWorkspaceTypeAwareGraph(resolvedRoot)
                     return {
                       id: req.id,
-                      ok: false,
-                      error: `Path traversal outside workspace root is forbidden: ${rel}`,
+                      ok: true,
+                      nodeCount: Graph.nodeCount(graph.graph),
+                      edgeCount: Graph.edgeCount(graph.graph),
+                      violationCount: (graph.branchingViolations ?? []).length,
                     }
-                  }
-                }
-                const loadedFiles = requestedRelPaths.flatMap((rel) => {
-                  const abs = path.resolve(resolvedRoot, rel)
-                  if (!fs.existsSync(abs)) return []
-                  return [
-                    {
-                      filePath: AstSourceFilePath.make(rel),
-                      content: AstSourceContent.make(fs.readFileSync(abs, "utf8")),
-                    },
-                  ]
-                })
-                const report = yield* AstGateCache.decide({
-                  files: loadedFiles,
-                  ruleVersion: HARNESS_GATE_RULE_VERSION,
-                  cacheFilePath: cachePath,
-                })
-                return { id: req.id, ok: true, report }
-              }
-              return { id: req.id, ok: false, fallbackToInProcess: true }
-            }),
+                  }),
+                )
+                .with("ast-gates", () =>
+                  Effect.gen(function* () {
+                    const cachePath = AstGateCache.resolveCachePath(resolvedRoot)
+                    const requestedRelPaths = req.files ?? []
+                    for (const rel of requestedRelPaths) {
+                      const resolvedAbs = path.resolve(resolvedRoot, rel)
+                      if (!isPathInsideRoot(resolvedRoot, resolvedAbs)) {
+                        return {
+                          id: req.id,
+                          ok: false,
+                          error: `Path traversal outside workspace root is forbidden: ${rel}`,
+                        }
+                      }
+                    }
+                    const loadedFiles = requestedRelPaths.flatMap((rel) => {
+                      const abs = path.resolve(resolvedRoot, rel)
+                      if (!fs.existsSync(abs)) return []
+                      return [
+                        {
+                          filePath: AstSourceFilePath.make(rel),
+                          content: AstSourceContent.make(fs.readFileSync(abs, "utf8")),
+                        },
+                      ]
+                    })
+                    const report = yield* AstGateCache.decide({
+                      files: loadedFiles,
+                      ruleVersion: HARNESS_GATE_RULE_VERSION,
+                      cacheFilePath: cachePath,
+                    })
+                    return { id: req.id, ok: true, report }
+                  }),
+                )
+              .with("plan-check", "gc", "verify", "bench", () =>
+                Effect.succeed({ id: req.id, ok: false, fallbackToInProcess: true }),
+              )
+              .exhaustive(),
           )
             .then((res) => {
               if (!socket.destroyed && socket.writable) {

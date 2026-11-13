@@ -309,6 +309,33 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
       }),
   )
 
+  it.effect(
+    "REQ-1.2: enforces default 800-line budget across libs/harness/graph/src/**/*.ts modules",
+    () =>
+      Effect.gen(function* () {
+        const atLimitContent = Array.from({ length: 800 }, (_, i) => `export const g${i} = ${i}`).join("\n")
+        const overLimitContent = Array.from({ length: 801 }, (_, i) => `export const g${i} = ${i}`).join("\n")
+        const report = yield* SelfDogfooding.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/graph/src/datalog/within-limit.ts"),
+              content: AstSourceContent.make(atLimitContent),
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/harness/graph/src/extractor/over-limit.ts"),
+              content: AstSourceContent.make(overLimitContent),
+              isModularPluginFile: false,
+            },
+          ],
+          failOnViolation: false,
+        })
+        expect(report.verdict).toBe("violated")
+        expect(report.violations).toHaveLength(1)
+        expect(report.violations[0]?.rule).toBe("file-line-budget-exceeded")
+        expect(report.violations[0]?.file).toBe("libs/harness/graph/src/extractor/over-limit.ts")
+      }),
+  )
+
   // ---------------------------------------------------------------------------
   // 2 · Capability Services for Filesystem, Subprocess & Mutant Context
   // ---------------------------------------------------------------------------
@@ -1229,6 +1256,116 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         }
         expect(cycles, `Circular imports found in @harness/gates: ${cycles.join("; ")}`).toEqual([])
 
+        const report = yield* decideSelfDogfooding({
+          files: fileInputs,
+          maxPluginFileLines: MaxPluginFileLines.make(800),
+          failOnViolation: true,
+        })
+
+        expect(report.verdict).toBe("clean")
+        expect(report.violations).toHaveLength(0)
+        expect(report.inspectedFileCount).toBe(sourceFiles.length)
+      }),
+  )
+
+  it.effect(
+    "RFC-0007 Step 3: every source file in libs/harness/graph/src/**/*.ts respects decomposed LOC budgets, has zero circular imports, and passes SelfDogfooding.decide",
+    () =>
+      Effect.gen(function* () {
+        const testDir = dirname(fileURLToPath(import.meta.url))
+        const repoRoot = resolve(testDir, "../../../..")
+        const graphSrcRoot = join(repoRoot, "libs", "harness", "graph", "src")
+
+        const collectTsFiles = (dir: string): Array<string> => {
+          const results: Array<string> = []
+          for (const entry of readdirSync(dir)) {
+            const fullPath = join(dir, entry)
+            const st = statSync(fullPath)
+            if (st.isDirectory()) {
+              results.push(...collectTsFiles(fullPath))
+            } else if (
+              entry.endsWith(".ts") &&
+              !entry.endsWith(".test.ts") &&
+              !entry.endsWith(".spec.ts")
+            ) {
+              results.push(fullPath)
+            }
+          }
+          return results
+        }
+
+        const sourceFiles = collectTsFiles(graphSrcRoot)
+        expect(sourceFiles.length).toBeGreaterThanOrEqual(35)
+
+        const orchestrators = new Set([
+          "libs/harness/graph/src/type-extractor.ts",
+          "libs/harness/graph/src/datalog-engine.ts",
+          "libs/harness/graph/src/graph-rewrite.ts",
+          "libs/harness/graph/src/graph-engine.ts",
+          "libs/harness/graph/src/graph-projector.ts",
+        ])
+
+        const adj = new Map<string, Array<string>>()
+        const fileInputs = sourceFiles.map((absPath) => {
+          const relPath = relative(repoRoot, absPath).replace(/\\/g, "/")
+          const content = readFileSync(absPath, "utf-8")
+          const lineCount = content.split(/\r?\n/).length
+          expect(
+            lineCount,
+            `${relPath} has ${lineCount} lines, exceeding 750-line RFC-0007 Step 3 budget`,
+          ).toBeLessThanOrEqual(750)
+
+          if (orchestrators.has(relPath)) {
+            expect(lineCount, `${relPath} orchestrator exceeded 250 lines`).toBeLessThanOrEqual(250)
+          } else if (relPath === "libs/harness/graph/src/extractor/compiler-session.ts") {
+            expect(lineCount).toBeLessThanOrEqual(700)
+          } else if (relPath.startsWith("libs/harness/graph/src/extractor/")) {
+            expect(lineCount, `${relPath} sub-extractor must be < 500 lines`).toBeLessThan(500)
+          }
+
+          const imports: Array<string> = []
+          const importRe = /(?:import|export)\s+(?:type\s+)?(?:[^"']*from\s+)?["'](\.[^"']+)["']/g
+          for (const m of content.matchAll(importRe)) {
+            const spec = m[1]
+            if (spec !== undefined) {
+              const resolvedAbs = resolve(dirname(absPath), spec.replace(/\.js$/, ".ts"))
+              const resolvedRel = relative(repoRoot, resolvedAbs).replace(/\\/g, "/")
+              if (resolvedRel.startsWith("libs/harness/graph/src/")) {
+                imports.push(resolvedRel)
+              }
+            }
+          }
+          adj.set(relPath, imports)
+
+          return {
+            filePath: AstSourceFilePath.make(relPath),
+            content: AstSourceContent.make(content),
+          }
+        })
+
+        const state = new Map<string, number>()
+        const cycles: Array<string> = []
+        const visit = (node: string, stack: Array<string>): void => {
+          state.set(node, 1)
+          for (const next of adj.get(node) ?? []) {
+            const nextState = state.get(next) ?? 0
+            if (nextState === 1) {
+              const idx = stack.indexOf(next)
+              cycles.push([...stack.slice(idx), next].join(" -> "))
+            } else if (nextState === 0) {
+              visit(next, [...stack, next])
+            }
+          }
+          state.set(node, 2)
+        }
+        for (const node of adj.keys()) {
+          if ((state.get(node) ?? 0) === 0) {
+            visit(node, [node])
+          }
+        }
+        expect(cycles, `Circular imports found in @harness/graph: ${cycles.join("; ")}`).toEqual([])
+
+        // Also assert that isModularPluginFile: false cannot bypass a modular @harness/graph path
         const report = yield* decideSelfDogfooding({
           files: fileInputs,
           maxPluginFileLines: MaxPluginFileLines.make(800),
