@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process"
-import { Context, Effect, Layer } from "effect"
+import { Effect, Layer } from "effect"
 import {
   ErrorReasonMessage,
   HarnessSubprocessError,
@@ -7,18 +7,10 @@ import {
   type SubprocessExecResult,
   SubprocessExitCode,
   SubprocessOutput,
-} from "../plugins/self-dogfooding-contract.js"
+} from "@harness/contract"
+import { HarnessSubprocessRunner, type HarnessSubprocessRunnerShape } from "@harness/service"
 
-export interface HarnessSubprocessRunnerShape {
-  readonly exec: (
-    input: SubprocessExecInput,
-  ) => Effect.Effect<SubprocessExecResult, HarnessSubprocessError>
-}
-
-export class HarnessSubprocessRunner extends Context.Service<
-  HarnessSubprocessRunner,
-  HarnessSubprocessRunnerShape
->()("@harness/gates/HarnessSubprocessRunner") {}
+export { HarnessSubprocessRunner, type HarnessSubprocessRunnerShape }
 
 export const validateSubprocessInput = (
   input: SubprocessExecInput,

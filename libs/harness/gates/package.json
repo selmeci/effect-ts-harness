@@ -13,7 +13,9 @@
     "verify": "node -e \"\""
   },
   "dependencies": {
+    "@harness/contract": "workspace:*",
     "@harness/graph": "workspace:*",
+    "@harness/service": "workspace:*",
     "effect": "4.0.0"
   },
   "devDependencies": {
@@ -23,7 +25,6 @@
   },
   "nx": {
     "tags": [
-      "type:contract",
       "type:service"
     ]
   }

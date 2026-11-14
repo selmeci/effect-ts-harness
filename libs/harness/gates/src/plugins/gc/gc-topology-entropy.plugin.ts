@@ -47,14 +47,31 @@ export const checkUnusedContractExports = (
     const contractSrcDir = join(scopeDir, "contract", "src")
     if (!existsSync(contractSrcDir)) continue
 
-    const siblingTierNames = ["core", "domain", "service", "infra"] as const
     const existingSiblingDirs: Array<string> = []
-    for (const sibName of siblingTierNames) {
-      const sibDir = join(scopeDir, sibName)
-      if (existsSync(sibDir)) existingSiblingDirs.push(sibDir)
+    const scopeChildren = safeFs<ReadonlyArray<Dirent>>(
+      () => readdirSync(scopeDir, { withFileTypes: true }),
+      [],
+    )
+    for (const child of scopeChildren) {
+      if (child.isDirectory() && child.name !== "contract" && child.name !== "docs") {
+        existingSiblingDirs.push(join(scopeDir, child.name))
+      }
     }
-    const appScopeDir = join(repoRoot, "apps", scope)
-    if (existsSync(appScopeDir)) existingSiblingDirs.push(appScopeDir)
+    const appsDir = join(repoRoot, "apps")
+    if (existsSync(appsDir)) {
+      const appChildren = safeFs<ReadonlyArray<Dirent>>(
+        () => readdirSync(appsDir, { withFileTypes: true }),
+        [],
+      )
+      for (const appChild of appChildren) {
+        if (
+          appChild.isDirectory() &&
+          (appChild.name === scope || appChild.name.startsWith(`${scope}-`))
+        ) {
+          existingSiblingDirs.push(join(appsDir, appChild.name))
+        }
+      }
+    }
     const contractScriptsDir = join(scopeDir, "contract", "scripts")
     if (existsSync(contractScriptsDir)) existingSiblingDirs.push(contractScriptsDir)
     if (existingSiblingDirs.length === 0) continue

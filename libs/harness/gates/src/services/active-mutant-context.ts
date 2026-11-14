@@ -1,8 +1,11 @@
 /**
  * @fileoverview ActiveMutantContext service managing scoped mutant activation and isolation.
  */
-import { Context, Effect, Layer, Option, Semaphore, SynchronizedRef } from "effect"
-import { type ActiveMutantId } from "../plugins/self-dogfooding-contract.js"
+import { Effect, Layer, Option, Semaphore, SynchronizedRef } from "effect"
+import { type ActiveMutantId } from "@harness/contract"
+import { ActiveMutantContext, type ActiveMutantContextShape } from "@harness/service"
+
+export { ActiveMutantContext, type ActiveMutantContextShape }
 
 interface GlobalWithMutantId {
   __HARNESS_ACTIVE_MUTANT_ID?: string | undefined
@@ -18,19 +21,6 @@ export const setActiveMutantId = (mutantId: string | undefined): void => {
   ;(globalThis as GlobalWithMutantId).__HARNESS_ACTIVE_MUTANT_ID = mutantId
   ;(globalThis as GlobalWithMutantId).__harnessActiveMutant = mutantId
 }
-
-export interface ActiveMutantContextShape {
-  readonly getCurrentMutant: Effect.Effect<Option.Option<ActiveMutantId>>
-  readonly runWithMutant: <A, E, R>(
-    mutantId: ActiveMutantId,
-    effect: Effect.Effect<A, E, R>,
-  ) => Effect.Effect<A, E, R>
-}
-
-export class ActiveMutantContext extends Context.Service<
-  ActiveMutantContext,
-  ActiveMutantContextShape
->()("@harness/gates/ActiveMutantContext") {}
 
 export const ActiveMutantContextLive: Layer.Layer<ActiveMutantContext> = Layer.effect(
   ActiveMutantContext,

@@ -211,6 +211,9 @@ importers:
 
   apps/harness-cli:
     dependencies:
+      '@harness/contract':
+        specifier: workspace:*
+        version: link:../../libs/harness/contract
       '@harness/decision':
         specifier: workspace:*
         version: link:../../libs/harness/decision
@@ -239,6 +242,9 @@ importers:
 
   apps/harness-mcp:
     dependencies:
+      '@harness/contract':
+        specifier: workspace:*
+        version: link:../../libs/harness/contract
       '@harness/decision':
         specifier: workspace:*
         version: link:../../libs/harness/decision
@@ -351,9 +357,9 @@ importers:
       '@effect/vitest':
         specifier: 4.0.0
         version: 4.0.0(effect@4.0.0)(vitest@5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)))
-      '@harness/gates':
+      '@harness/contract':
         specifier: workspace:*
-        version: link:../../harness/gates
+        version: link:../../harness/contract
       '@harness/graph':
         specifier: workspace:*
         version: link:../../harness/graph
@@ -394,12 +400,25 @@ importers:
       '@effect/vitest':
         specifier: 4.0.0
         version: 4.0.0(effect@4.0.0)(vitest@5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)))
-      '@harness/gates':
+      '@harness/contract':
         specifier: workspace:*
-        version: link:../../harness/gates
+        version: link:../../harness/contract
       '@harness/graph':
         specifier: workspace:*
         version: link:../../harness/graph
+      '@types/node':
+        specifier: 26.6.5
+        version: 26.6.5
+      vitest:
+        specifier: 5.0.3
+        version: 5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))
+
+  libs/harness/contract:
+    dependencies:
+      effect:
+        specifier: 4.0.0
+        version: 4.0.0
+    devDependencies:
       '@types/node':
         specifier: 26.6.5
         version: 26.6.5
@@ -431,9 +450,15 @@ importers:
 
   libs/harness/gates:
     dependencies:
+      '@harness/contract':
+        specifier: workspace:*
+        version: link:../contract
       '@harness/graph':
         specifier: workspace:*
         version: link:../graph
+      '@harness/service':
+        specifier: workspace:*
+        version: link:../service
       effect:
         specifier: 4.0.0
         version: 4.0.0
@@ -456,6 +481,9 @@ importers:
       '@electric-sql/d2ts':
         specifier: 0.1.8
         version: 0.1.8
+      '@harness/contract':
+        specifier: workspace:*
+        version: link:../contract
       '@modernrelay/omnigraph':
         specifier: 0.14.0
         version: 0.14.0
@@ -484,6 +512,25 @@ importers:
       '@ast-grep/napi':
         specifier: 0.51.0
         version: 0.51.0
+      effect:
+        specifier: 4.0.0
+        version: 4.0.0
+    devDependencies:
+      '@effect/vitest':
+        specifier: 4.0.0
+        version: 4.0.0(effect@4.0.0)(vitest@5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)))
+      '@types/node':
+        specifier: 26.6.5
+        version: 26.6.5
+      vitest:
+        specifier: 5.0.3
+        version: 5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))
+
+  libs/harness/service:
+    dependencies:
+      '@harness/contract':
+        specifier: workspace:*
+        version: link:../contract
       effect:
         specifier: 4.0.0
         version: 4.0.0
@@ -532,9 +579,9 @@ importers:
       '@effect/vitest':
         specifier: 4.0.0
         version: 4.0.0(effect@4.0.0)(vitest@5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)))
-      '@harness/gates':
+      '@harness/contract':
         specifier: workspace:*
-        version: link:../../harness/gates
+        version: link:../../harness/contract
       '@harness/graph':
         specifier: workspace:*
         version: link:../../harness/graph

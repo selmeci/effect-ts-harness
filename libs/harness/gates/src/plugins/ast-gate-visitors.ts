@@ -26,14 +26,45 @@
  */
 
 import { Schema } from "effect"
+import {
+  AstContentSha256,
+  AstGateCategory,
+  AstGatePackageTag,
+  AstRuleVersion,
+  AstSourceContent,
+  AstSourceFilePath,
+  ContentSha256,
+  EnclosingSymbolName,
+  GateCategory,
+  GateRuleId,
+  GateRuleVersion,
+  GateVerdict,
+  GateViolationCategory,
+  GateViolationMessage,
+  HARNESS_GATE_RULE_VERSION,
+  SourceLineNumber,
+} from "@harness/contract"
 import { ts } from "@harness/graph"
 import { checkMigrationSqlSafety } from "../migration-check.js"
 
-export const GateRuleVersion = Schema.NonEmptyString.pipe(Schema.brand("GateRuleVersion"))
-export type GateRuleVersion = typeof GateRuleVersion.Type
-export const AstRuleVersion = GateRuleVersion
-export type AstRuleVersion = typeof AstRuleVersion.Type
-export const HARNESS_GATE_RULE_VERSION: GateRuleVersion = GateRuleVersion.make("ast-gates-v4")
+export {
+  AstContentSha256,
+  AstGateCategory,
+  AstGatePackageTag,
+  AstRuleVersion,
+  AstSourceContent,
+  AstSourceFilePath,
+  ContentSha256,
+  EnclosingSymbolName,
+  GateCategory,
+  GateRuleId,
+  GateRuleVersion,
+  GateVerdict,
+  GateViolationCategory,
+  GateViolationMessage,
+  HARNESS_GATE_RULE_VERSION,
+  SourceLineNumber,
+}
 
 const REPO_WIDE_AST_RULES = new Set<string>([
   "effect-fn-dummy-void",
@@ -52,49 +83,6 @@ const REPO_WIDE_AST_RULES = new Set<string>([
 export const isRepoWideAstRule = (rule: string, message: string): boolean =>
   REPO_WIDE_AST_RULES.has(rule) ||
   (rule === "discriminant-branching" && message.startsWith("Switch statement"))
-
-export const AstSourceFilePath = Schema.NonEmptyString.pipe(Schema.brand("AstSourceFilePath"))
-export type AstSourceFilePath = typeof AstSourceFilePath.Type
-
-export const ContentSha256 = Schema.NonEmptyString.pipe(Schema.brand("ContentSha256"))
-export type ContentSha256 = typeof ContentSha256.Type
-export const AstContentSha256 = ContentSha256
-export type AstContentSha256 = typeof AstContentSha256.Type
-
-export const AstSourceContent = Schema.String.pipe(Schema.brand("AstSourceContent"))
-export type AstSourceContent = typeof AstSourceContent.Type
-
-export const GateCategory = Schema.Literals([
-  "syntax-bans", "test-integrity", "migration-safety", "domain-purity", "effect-laws",
-]).pipe(Schema.brand("GateCategory"))
-export type GateCategory = typeof GateCategory.Type
-export const AstGateCategory = GateCategory
-export type AstGateCategory = typeof AstGateCategory.Type
-export const GateViolationCategory = GateCategory
-export type GateViolationCategory = typeof GateViolationCategory.Type
-
-export const GateRuleId = Schema.NonEmptyString.pipe(Schema.brand("GateRuleId"))
-export type GateRuleId = typeof GateRuleId.Type
-
-export const GateViolationMessage = Schema.NonEmptyString.pipe(Schema.brand("GateViolationMessage"))
-export type GateViolationMessage = typeof GateViolationMessage.Type
-
-export const SourceLineNumber = Schema.Int.pipe(
-  Schema.check(Schema.isGreaterThanOrEqualTo(1)),
-  Schema.brand("SourceLineNumber"),
-)
-export type SourceLineNumber = typeof SourceLineNumber.Type
-
-export const EnclosingSymbolName = Schema.NonEmptyString.pipe(Schema.brand("EnclosingSymbolName"))
-export type EnclosingSymbolName = typeof EnclosingSymbolName.Type
-
-export const GateVerdict = Schema.Literals(["clean", "violated"]).pipe(Schema.brand("GateVerdict"))
-export type GateVerdict = typeof GateVerdict.Type
-
-export const AstGatePackageTag = Schema.Literals([
-  "contract", "domain", "service", "infra", "app", "test",
-]).pipe(Schema.brand("AstGatePackageTag"))
-export type AstGatePackageTag = typeof AstGatePackageTag.Type
 
 export const GateViolation = Schema.Struct({
   category: GateCategory,

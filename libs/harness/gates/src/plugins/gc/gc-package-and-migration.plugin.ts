@@ -39,10 +39,24 @@ import {
   safeFs,
 } from "./gc-helpers.js"
 import { checkUnusedContractExports } from "./gc-topology-entropy.plugin.js"
+import {
+  decideHarnessTierTopology,
+  NxTierTag,
+  PackageDependencyName,
+  PackageManifestName,
+  PackageManifestPath,
+  type PackageTierManifestInput,
+  type ServiceTierSourceInput,
+} from "../harness-tier-topology.js"
 
 const PackageJsonSchema = Schema.Struct({
   name: Schema.optional(Schema.String),
   dependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  nx: Schema.optional(
+    Schema.Struct({
+      tags: Schema.optional(Schema.Array(Schema.String)),
+    }),
+  ),
 })
 const decodePackageJson = Schema.decodeUnknownOption(Schema.fromJsonString(PackageJsonSchema))
 
@@ -69,6 +83,8 @@ export const evaluatePackageAndMigrationPlugin = (
     if (input.workspaceRoot === undefined) return []
     const repoRoot = input.workspaceRoot
     const findings: Array<GcFinding> = []
+    const tierManifests: Array<PackageTierManifestInput> = []
+    const serviceTierFiles: Array<ServiceTierSourceInput> = []
     const libsDir = join(repoRoot, "libs")
     const scopes = listSubdirs(libsDir)
 
@@ -84,6 +100,14 @@ export const evaluatePackageAndMigrationPlugin = (
         if (!existsSync(srcDir)) continue
 
         const srcFiles = collectWorkspaceTsFiles(srcDir).filter((f) => !f.endsWith(".test.ts") && !f.endsWith(".spec.ts"))
+        if (tier === "service") {
+          for (const file of srcFiles) {
+            serviceTierFiles.push({
+              filePath: AstSourceFilePath.make(relative(repoRoot, file).replace(/\\/g, "/")),
+              content: AstSourceContent.make(safeFs(() => readFileSync(file, "utf8"), "")),
+            })
+          }
+        }
         const packageNamedMigrationBodies = new Map<string, string>()
         const defaultTableMigratorRoots = new Map<string, string>()
 
@@ -321,6 +345,27 @@ export const evaluatePackageAndMigrationPlugin = (
         const pkgContent = safeFs(() => existsSync(pkgJsonPath) ? readFileSync(pkgJsonPath, "utf8") : "", "")
         if (pkgContent.length > 0) {
           const pkgOpt = decodePackageJson(pkgContent)
+          const relPkgPath = relative(repoRoot, pkgJsonPath).replace(/\\/g, "/")
+          match(pkgOpt)
+            .with({ _tag: "Some" }, ({ value: pkgValue }) => {
+              const pkgName = (pkgValue.name ?? `${scope}/${tier}`).trim()
+              const nxTags = (pkgValue.nx?.tags ?? [])
+                .map((t) => t.trim())
+                .filter((t) => t.length > 0)
+                .map((t) => NxTierTag.make(t))
+              const dependencyNames = Object.keys(pkgValue.dependencies ?? {})
+                .map((d) => d.trim())
+                .filter((d) => d.length > 0)
+                .map((d) => PackageDependencyName.make(d))
+              tierManifests.push({
+                manifestPath: PackageManifestPath.make(relPkgPath),
+                packageName: PackageManifestName.make(pkgName),
+                nxTags,
+                dependencyNames,
+              })
+            })
+            .with({ _tag: "None" }, () => undefined)
+            .exhaustive()
           if (Option.isSome(pkgOpt) && pkgOpt.value.dependencies !== undefined) {
             const dependencies = pkgOpt.value.dependencies, pkgName = pkgOpt.value.name ?? `${scope}/${tier}`
             const scriptFiles = safeFs(() => existsSync(join(tierDir, "scripts")) ? collectWorkspaceAllFiles(join(tierDir, "scripts")) : [], [])
@@ -339,6 +384,22 @@ export const evaluatePackageAndMigrationPlugin = (
             }
           }
         }
+      }
+    }
+
+    if (tierManifests.length > 0 || serviceTierFiles.length > 0) {
+      const tierReport = yield* decideHarnessTierTopology({
+        manifests: tierManifests,
+        serviceFiles: serviceTierFiles,
+      })
+      for (const v of tierReport.violations) {
+        findings.push({
+          kind: "architecture-policy-violation",
+          nodeId: `${v.location}:${v.rule}`,
+          location: v.location,
+          message: v.message,
+          action: `Resolve hexagonal tier topology violation (${v.rule}) in ${v.location}.`,
+        })
       }
     }
 

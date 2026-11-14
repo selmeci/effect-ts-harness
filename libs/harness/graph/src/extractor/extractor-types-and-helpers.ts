@@ -389,10 +389,17 @@ export const computeDynamicPaths = (
       path.join(repoRoot, "libs/harness/graph/node_modules/effect/*"),
       path.join(graphNodeModules, "effect/*"),
     ],
+    "effect/cli": [path.join(repoRoot, "libs/harness/graph/node_modules/effect/dist/cli/index.d.ts"), path.join(graphNodeModules, "effect/dist/cli/index.d.ts")],
+    "effect/process": [path.join(repoRoot, "libs/harness/graph/node_modules/effect/dist/process/index.d.ts"), path.join(graphNodeModules, "effect/dist/process/index.d.ts")],
+    "effect/persistence": [path.join(repoRoot, "libs/harness/graph/node_modules/effect/dist/persistence/index.d.ts"), path.join(graphNodeModules, "effect/dist/persistence/index.d.ts")],
+    "@effect/platform-node": [path.join(repoRoot, "apps/sample/node_modules/@effect/platform-node/dist/index.d.ts"), path.join(workspaceRoot, "node_modules/@effect/platform-node")],
     "ts-pattern": [
       path.join(repoRoot, "node_modules/ts-pattern"),
       path.join(workspaceRoot, "node_modules/ts-pattern"),
     ],
+    "@harness/contract": [path.join(repoRoot, "libs/harness/contract/src/index.ts"), path.join(workspaceRoot, "libs/harness/contract/src/index.ts")],
+    "@harness/service": [path.join(repoRoot, "libs/harness/service/src/index.ts"), path.join(workspaceRoot, "libs/harness/service/src/index.ts")],
+    "@harness/infra": [path.join(repoRoot, "libs/harness/infra/src/index.ts"), path.join(workspaceRoot, "libs/harness/infra/src/index.ts")],
     "@harness/gates": [
       path.join(repoRoot, "libs/harness/gates/src/index.ts"),
       path.join(workspaceRoot, "libs/harness/gates/src/index.ts"),

@@ -1,6 +1,11 @@
-import { Context, Effect, Layer, Option, Schema } from "effect"
+import { Context, Effect, Layer, Option } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
+import {
+  CliCommandInput,
+  CliCommandName,
+  CliCommandNotFoundError,
+} from "@harness/contract"
 import { LocalDecisionModel } from "@harness/decision"
 import {
   COMMANDS,
@@ -19,19 +24,7 @@ import {
 } from "./session-learn-report.command.js"
 import { handleDone, handleVerify } from "./verify-and-done.command.js"
 
-export const CliCommandName = Schema.NonEmptyString.pipe(Schema.brand("CliCommandName"))
-export type CliCommandName = typeof CliCommandName.Type
-
-export const CliCommandInput = Schema.String.pipe(Schema.brand("CliCommandInput"))
-export type CliCommandInput = typeof CliCommandInput.Type
-
-export class CliCommandNotFoundError extends Schema.TaggedError<CliCommandNotFoundError>()(
-  "CliCommandNotFoundError",
-  {
-    command: CliCommandInput,
-    availableCommands: Schema.Array(CliCommandName),
-  },
-) {}
+export { CliCommandInput, CliCommandName, CliCommandNotFoundError }
 
 export interface CliCommandPluginResult {
   readonly exitCode: number

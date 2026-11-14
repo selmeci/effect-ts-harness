@@ -23,7 +23,6 @@
   },
   "nx": {
     "tags": [
-      "type:contract",
       "type:service"
     ]
   }

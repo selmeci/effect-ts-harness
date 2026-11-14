@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
-import { Context, Effect, Layer } from "effect"
+import { Effect, Layer } from "effect"
 import {
   computeWorkspaceFileLineCount,
   ErrorReasonMessage,
@@ -10,22 +10,10 @@ import {
   type WorkspaceFileStat,
   WorkspaceFsError,
   WorkspaceFsOperation,
-} from "../plugins/self-dogfooding-contract.js"
+} from "@harness/contract"
+import { WorkspaceFs, type WorkspaceFsShape } from "@harness/service"
 
-export interface WorkspaceFsShape {
-  readonly readTextFile: (
-    filePath: WorkspaceFilePath,
-  ) => Effect.Effect<WorkspaceFileContent, WorkspaceFsError>
-  readonly writeTextFileAtomic: (
-    filePath: WorkspaceFilePath,
-    content: WorkspaceFileContent,
-  ) => Effect.Effect<void, WorkspaceFsError>
-  readonly exists: (filePath: WorkspaceFilePath) => Effect.Effect<boolean, never>
-}
-
-export class WorkspaceFs extends Context.Service<WorkspaceFs, WorkspaceFsShape>()(
-  "@harness/gates/WorkspaceFs",
-) {}
+export { WorkspaceFs, type WorkspaceFsShape }
 
 export const WorkspaceFsLive: Layer.Layer<WorkspaceFs> = Layer.succeed(WorkspaceFs, {
   readTextFile: (filePath) =>
@@ -117,4 +105,15 @@ export const readAndVerifyWorkspaceFile = Effect.fn("WorkspaceFs.readAndVerifyFi
     content,
     lineCount,
   }
+})
+
+export const statAndReadWorkspaceFiles = Effect.fn("WorkspaceFs.statAndReadAll")(function* (
+  filePaths: ReadonlyArray<WorkspaceFilePath>,
+): Effect.fn.Return<ReadonlyArray<WorkspaceFileStat>, WorkspaceFsError, WorkspaceFs> {
+  const stats: Array<WorkspaceFileStat> = []
+  for (const filePath of filePaths) {
+    const stat = yield* readAndVerifyWorkspaceFile(filePath)
+    stats.push(stat)
+  }
+  return stats
 })

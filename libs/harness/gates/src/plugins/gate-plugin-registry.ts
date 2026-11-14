@@ -14,7 +14,7 @@ import {
   type WorkspaceFsError,
 } from "./self-dogfooding-contract.js"
 import { decideSelfDogfooding } from "./self-dogfooding-plugin.js"
-import { readAndVerifyWorkspaceFile, WorkspaceFs } from "../services/workspace-fs.js"
+import { statAndReadWorkspaceFiles, WorkspaceFs } from "../services/workspace-fs.js"
 
 export interface GatePluginDescriptor {
   readonly pluginId: PluginId
@@ -120,14 +120,11 @@ export const evaluateAllGatePlugins = Effect.fn("GatePluginRunner.evaluateAll")(
   GatePluginRegistry | WorkspaceFs
 > {
   const registry = yield* GatePluginRegistry
-  const loadedFiles: Array<SelfDogfoodingFileInput> = []
-  for (const filePath of input.filePaths) {
-    const fileStat = yield* readAndVerifyWorkspaceFile(filePath)
-    loadedFiles.push({
-      filePath: AstSourceFilePath.make(filePath),
-      content: AstSourceContent.make(fileStat.content),
-    })
-  }
+  const stats = yield* statAndReadWorkspaceFiles(input.filePaths)
+  const loadedFiles: ReadonlyArray<SelfDogfoodingFileInput> = stats.map((fileStat) => ({
+    filePath: AstSourceFilePath.make(fileStat.filePath),
+    content: AstSourceContent.make(fileStat.content),
+  }))
 
   return yield* registry.evaluateFiles(loadedFiles, {
     maxPluginFileLines: input.maxPluginFileLines,

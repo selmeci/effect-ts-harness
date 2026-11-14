@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url"
 import { Effect, Layer, Option, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
+import { McpToolInputName, McpToolName, UnknownToolError } from "@harness/contract"
 import {
   appendTelemetryEvent,
   type TelemetryCategory,
@@ -26,15 +27,7 @@ import {
 } from "@harness/graph"
 import type { GovernanceDocReference } from "@harness/decision"
 
-export const McpToolName = Schema.NonEmptyString.pipe(Schema.brand("McpToolName"))
-export type McpToolName = typeof McpToolName.Type
-
-export const McpToolInputName = Schema.String.pipe(Schema.brand("McpToolInputName"))
-export type McpToolInputName = typeof McpToolInputName.Type
-
-export class UnknownToolError extends Schema.TaggedError<UnknownToolError>()("UnknownToolError", {
-  toolName: McpToolInputName,
-}) {}
+export { McpToolInputName, McpToolName, UnknownToolError }
 
 export class ProjectPathEscapeError extends Schema.TaggedError<ProjectPathEscapeError>()(
   "ProjectPathEscapeError",

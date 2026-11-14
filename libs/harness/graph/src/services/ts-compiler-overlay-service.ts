@@ -1,6 +1,12 @@
 import { existsSync, statSync } from "node:fs"
 import { resolve } from "node:path"
-import { Cause, Context, Effect, Layer, Schema, Semaphore } from "effect"
+import { Cause, Context, Effect, Layer, Semaphore } from "effect"
+import {
+  CompilerOverlayErrorReason,
+  CompilerRepoRootInput,
+  CompilerRepoRootPath,
+  TsCompilerOverlayError,
+} from "@harness/contract"
 import { type HarnessGraph } from "../model.js"
 import {
   createTypeScriptProgramSession as createWarmProgramSession,
@@ -9,24 +15,12 @@ import {
   type TypeScriptProgramSession,
 } from "../type-extractor.js"
 
-export const CompilerRepoRootPath = Schema.NonEmptyString.pipe(Schema.brand("CompilerRepoRootPath"))
-export type CompilerRepoRootPath = typeof CompilerRepoRootPath.Type
-
-export const CompilerRepoRootInput = Schema.String.pipe(Schema.brand("CompilerRepoRootInput"))
-export type CompilerRepoRootInput = typeof CompilerRepoRootInput.Type
-
-export const CompilerOverlayErrorReason = Schema.NonEmptyString.pipe(
-  Schema.brand("CompilerOverlayErrorReason"),
-)
-export type CompilerOverlayErrorReason = typeof CompilerOverlayErrorReason.Type
-
-export class TsCompilerOverlayError extends Schema.TaggedError<TsCompilerOverlayError>()(
-  "TsCompilerOverlayError",
-  {
-    repoRoot: CompilerRepoRootInput,
-    reason: CompilerOverlayErrorReason,
-  },
-) {}
+export {
+  CompilerOverlayErrorReason,
+  CompilerRepoRootInput,
+  CompilerRepoRootPath,
+  TsCompilerOverlayError,
+}
 
 export interface TsCompilerOverlayServiceShape {
   readonly getSession: (
