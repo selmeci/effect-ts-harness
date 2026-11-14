@@ -62,12 +62,18 @@ export const SCHEMA_CTORS = new Set([
 
 export const IMPURE_DOMAIN_MODULES = new Set([
   "node:fs", "fs", "node:http", "http", "node:https", "https",
-  "node:net", "net", "node:child_process", "child_process", "drizzle-orm", "alchemy",
+  "node:net", "net", "node:child_process", "child_process", "drizzle-orm", "drizzle-kit", "alchemy",
 ])
+
+export const isDrizzleSpecifier = (spec: string): boolean =>
+  spec === "drizzle-orm" ||
+  spec.startsWith("drizzle-orm/") ||
+  spec === "drizzle-kit" ||
+  spec.startsWith("drizzle-kit/")
 
 export const isImpureDomainSpecifier = (spec: string): boolean =>
   IMPURE_DOMAIN_MODULES.has(spec) ||
-  spec.startsWith("drizzle-orm/") ||
+  isDrizzleSpecifier(spec) ||
   spec.startsWith("@effect/sql") ||
   spec.startsWith("alchemy/") ||
   /^@harness\/[a-z0-9-]+-infra$/.test(spec)
@@ -98,6 +104,24 @@ export const unwrapAstExpression = (expr: ts.Expression): ts.Expression => {
     curr = curr.expression
   }
   return curr
+}
+
+const extractStringOrNoSubTemplateText = (expr: ts.Expression): string | undefined => {
+  const unwrapped = unwrapAstExpression(expr)
+  if (ts.isStringLiteral(unwrapped) || ts.isNoSubstitutionTemplateLiteral(unwrapped)) {
+    return unwrapped.text
+  }
+  return undefined
+}
+
+const getModulePrefixOrStaticString = (expr: ts.Expression): string | undefined => {
+  const staticStr = extractStringOrNoSubTemplateText(expr)
+  if (staticStr !== undefined) return staticStr
+  const unwrapped = unwrapAstExpression(expr)
+  if (ts.isTemplateExpression(unwrapped)) {
+    return unwrapped.head.text
+  }
+  return undefined
 }
 
 export const isDummyEffectVoidYield = (
@@ -270,12 +294,42 @@ export const visitSourceFileSinglePass = (
   const effectNamespaceNames = new Set<string>(["Effect"])
   const isTestOrHelperFile = isTestFile || /(?:^|\/)test\/(?!fixtures\/)/.test(normalizedFilePath)
   const isMemoryWorkerdBridge = /(?:^|\/)libs\/es\/infra\/src\/memory\.ts$/.test(normalizedFilePath)
-  const isHarnessMcpSdkBoundary = /(?:^|\/)apps\/harness-mcp\/src\//.test(normalizedFilePath)
+  const isHarnessMcpRunPromiseExitBoundary =
+    /(?:^|\/)apps\/harness-mcp\/src\/(?:server|daemon\/unix-socket-daemon)\.ts$/.test(normalizedFilePath)
   const isBannedEffectRunMethod = (methodName: string): boolean => {
-    if (methodName === "runSync" || methodName === "runSyncExit") return true
-    if (methodName === "runPromise" || methodName === "runPromiseExit") return !isHarnessMcpSdkBoundary
-    if (methodName === "runFork") return packageTag !== "app"
+    if (
+      methodName === "runSync" ||
+      methodName === "runSyncExit" ||
+      methodName === "runSyncWith" ||
+      methodName === "runCallback" ||
+      methodName === "runCallbackWith" ||
+      methodName === "runPromise" ||
+      methodName === "runPromiseWith"
+    ) {
+      return true
+    }
+    if (methodName === "runPromiseExit") return !isHarnessMcpRunPromiseExitBoundary
+    if (methodName === "runFork" || methodName === "runForkWith") return packageTag !== "app"
     return false
+  }
+
+  const reportDrizzleIfBanned = (spec: string | undefined, node: ts.Node): void => {
+    if (spec === undefined || !isDrizzleSpecifier(spec)) return
+    if (packageTag === "domain" && !isTestFile) {
+      pushViolation(
+        catDomainPurity,
+        "impure-domain-import",
+        `Module '${filePath}' (${packageTag}) imports impure infrastructure dependency '${spec}'.`,
+        node,
+      )
+    } else {
+      pushViolation(
+        isTestFile ? catTestIntegrity : catSyntaxBans,
+        "banned-drizzle-import",
+        `Drizzle import '${spec}' in '${filePath}' is banned across the workspace — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator).`,
+        node,
+      )
+    }
   }
 
   const walk = (node: ts.Node): void => {
@@ -321,8 +375,10 @@ export const visitSourceFileSinglePass = (
           node,
         )
       }
+      reportDrizzleIfBanned(spec, node)
       if (
         !isTestFile &&
+        !isDrizzleSpecifier(spec) &&
         (packageTag === "domain" || packageTag === "contract") &&
         isImpureDomainSpecifier(spec)
       ) {
@@ -333,6 +389,22 @@ export const visitSourceFileSinglePass = (
           node,
         )
       }
+    }
+
+    if (
+      ts.isExportDeclaration(node) &&
+      node.moduleSpecifier !== undefined &&
+      ts.isStringLiteral(node.moduleSpecifier)
+    ) {
+      reportDrizzleIfBanned(node.moduleSpecifier.text, node)
+    }
+
+    if (
+      ts.isImportEqualsDeclaration(node) &&
+      ts.isExternalModuleReference(node.moduleReference) &&
+      ts.isStringLiteral(node.moduleReference.expression)
+    ) {
+      reportDrizzleIfBanned(node.moduleReference.expression.text, node)
     }
 
     // 2. Switch statements (syntax-bans)
@@ -454,6 +526,14 @@ export const visitSourceFileSinglePass = (
 
     // 5. CallExpressions (effect-laws, domain-purity, test-integrity, syntax-bans)
     if (ts.isCallExpression(node)) {
+      const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword
+      const isRequireCall =
+        (ts.isIdentifier(node.expression) && node.expression.text === "require") ||
+        (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "require")
+      if ((isDynamicImport || isRequireCall) && node.arguments.length > 0 && node.arguments[0] !== undefined) {
+        reportDrizzleIfBanned(getModulePrefixOrStaticString(node.arguments[0]), node)
+      }
+
       const calleeText = node.expression.getText(sourceFile)
 
       if (

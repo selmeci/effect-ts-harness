@@ -1,5 +1,5 @@
 import * as path from "node:path"
-import type { SyncHostIo } from "@harness/service"
+import type { SyncHostIo } from "@harness/service/host-io"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
 import { ts } from "ts-morph"

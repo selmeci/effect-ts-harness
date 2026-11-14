@@ -3,7 +3,8 @@ import { EventEmitter } from "node:events"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { Cause, Effect, Exit } from "effect"
+import { Cause, Effect, Exit, Layer } from "effect"
+import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import { afterEach, describe, expect, it } from "vitest"
 import { makeMockDecisionModelLayer } from "@harness/decision"
@@ -170,7 +171,7 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
       const res = await withMockedStdin(mockStdin, () =>
         runCli(["done"], { repoRoot: dir, stdinTimeoutMs: 30 }),
       )
-      expect(res.exitCode).toBe(0)
+      expect(res.exitCode).toBe(2)
       expect(JSON.parse(res.stdout)).toEqual({
         decision: "block",
         reason: expect.stringContaining("failed or timed out reading Stop hook stdin"),
@@ -310,11 +311,12 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
 
       for (const argv of argvs) {
         const sub = argv[0]
+        const isAgy = argv.includes("--format=antigravity")
         const stdin =
           sub === "guard"
             ? JSON.stringify({ tool_name: "Bash", tool_input: { command: "pnpm test" } })
             : sub === "done"
-              ? JSON.stringify({ stop_hook_active: false, fullyIdle: false })
+              ? JSON.stringify({ stop_hook_active: false, fullyIdle: true })
               : JSON.stringify({})
 
         const res = await Effect.runPromise(
@@ -326,6 +328,25 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
             skipAutoSessionReport: true,
           }),
         )
+        expect(res.exitCode).toBe(0)
+        if (sub === "guard") {
+          if (isAgy) {
+            expect(JSON.parse(res.stdout)).toEqual({ decision: "allow" })
+          } else {
+            expect(res.stdout).toBe("")
+          }
+        } else if (sub === "done") {
+          expect(JSON.parse(res.stdout)).toEqual({
+            decision: isAgy ? "continue" : "block",
+            reason: expect.any(String),
+          })
+        } else if (sub === "session") {
+          const parsed = JSON.parse(res.stdout) as Record<string, unknown>
+          expect(typeof parsed).toBe("object")
+          expect(parsed).not.toBeNull()
+        } else if (sub === "ingest") {
+          expect(res.stdout.length).toBeGreaterThan(0)
+        }
         expect(res.stderr).not.toContain("Unrecognized")
         expect(res.stderr).not.toContain("unknown command")
         expect(res.stderr).not.toContain("CLI parse failure")
@@ -334,23 +355,194 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
   })
 
   describe("F-3.1 & F-7.3: teardownCliMain and real subprocess exit-code paths", () => {
-    it("teardownCliMain writes Cause.pretty on defect and sets process.exitCode = 1", () => {
+    it("T-6: teardownCliMain handles all 6 Exit cases, 3-token normalized argv, and Antigravity stdout JSON", () => {
       const prevExitCode = process.exitCode
       const stderrChunks: Array<string> = []
+      const stdoutChunks: Array<string> = []
       const onExitCodes: Array<number> = []
-      try {
+      const reset = () => {
+        onExitCodes.length = 0
+        stderrChunks.length = 0
+        stdoutChunks.length = 0
         process.exitCode = 0
+      }
+      try {
+        // 1. Exit.succeed
+        process.exitCode = 2
         teardownCliMain(
-          Exit.failCause(Cause.die(new Error("boom"))),
+          Exit.succeed(undefined),
           (code) => onExitCodes.push(code),
           (s) => stderrChunks.push(s),
+          ["node", "index.ts", "guard"],
+          (s) => stdoutChunks.push(s),
         )
-        expect(stderrChunks.join("")).toContain("boom")
+        expect(process.exitCode).toBe(2)
+        expect(onExitCodes).toEqual([2])
+
+        // 2. Exit.fail normal (1)
+        reset()
+        teardownCliMain(
+          Exit.fail("verify-err"),
+          (code) => onExitCodes.push(code),
+          (s) => stderrChunks.push(s),
+          ["node", "index.ts", "verify"],
+          (s) => stdoutChunks.push(s),
+        )
+        expect(stderrChunks.join("")).toContain("verify-err")
         expect(process.exitCode).toBe(1)
-        expect(onExitCodes).toEqual([0])
+        expect(onExitCodes).toEqual([1])
+
+        // 3. Exit.fail hook (2)
+        reset()
+        teardownCliMain(
+          Exit.fail("guard-err"),
+          (code) => onExitCodes.push(code),
+          (s) => stderrChunks.push(s),
+          ["node", "index.ts", "guard"],
+          (s) => stdoutChunks.push(s),
+        )
+        expect(stderrChunks.join("")).toContain("guard-err")
+        expect(process.exitCode).toBe(2)
+        expect(onExitCodes).toEqual([2])
+
+        // 4. Exit.die normal (1)
+        reset()
+        teardownCliMain(
+          Exit.failCause(Cause.die(new Error("boom-normal"))),
+          (code) => onExitCodes.push(code),
+          (s) => stderrChunks.push(s),
+          ["node", "index.ts", "verify"],
+          (s) => stdoutChunks.push(s),
+        )
+        expect(stderrChunks.join("")).toContain("boom-normal")
+        expect(process.exitCode).toBe(1)
+        expect(onExitCodes).toEqual([1])
+
+        // 5. Exit.die hook (2) + 3-token normalized argv
+        reset()
+        teardownCliMain(
+          Exit.failCause(Cause.die(new Error("boom-hook"))),
+          (code) => onExitCodes.push(code),
+          (s) => stderrChunks.push(s),
+          ["guard", "--format=claude", "--bogus"],
+          (s) => stdoutChunks.push(s),
+        )
+        expect(stderrChunks.join("")).toContain("boom-hook")
+        expect(process.exitCode).toBe(2)
+        expect(onExitCodes).toEqual([2])
+
+        // 6. Exit.interrupt (130)
+        reset()
+        teardownCliMain(
+          Exit.interrupt(1),
+          (code) => onExitCodes.push(code),
+          (s) => stderrChunks.push(s),
+          ["node", "index.ts", "guard"],
+          (s) => stdoutChunks.push(s),
+        )
+        expect(process.exitCode).toBe(130)
+        expect(onExitCodes).toEqual([130])
+
+        // 7. Antigravity guard & done fail-closed stdout JSON
+        reset()
+        teardownCliMain(
+          Exit.failCause(Cause.die(new Error("agy-guard-die"))),
+          (code) => onExitCodes.push(code),
+          (s) => stderrChunks.push(s),
+          ["guard", "--format=antigravity"],
+          (s) => stdoutChunks.push(s),
+        )
+        expect(JSON.parse(stdoutChunks.join(""))).toEqual({
+          decision: "deny",
+          reason: expect.stringContaining("agy-guard-die"),
+        })
+
+        reset()
+        teardownCliMain(
+          Exit.failCause(Cause.die(new Error("agy-done-die"))),
+          (code) => onExitCodes.push(code),
+          (s) => stderrChunks.push(s),
+          ["done", "--format", "antigravity"],
+          (s) => stdoutChunks.push(s),
+        )
+        expect(JSON.parse(stdoutChunks.join(""))).toEqual({
+          decision: "continue",
+          reason: expect.stringContaining("agy-done-die"),
+        })
       } finally {
         process.exitCode = prevExitCode
       }
+    })
+
+    it("C-3, C-4, C-10, T-6: two-token --format antigravity, done --format=antigravity empty stdin, and decisionLayer Effect.die fail closed", async () => {
+      const twoTokenBogus = await runCli(["guard", "--format", "antigravity", "--bogus"], {
+        stdin: "{}",
+      })
+      expect(twoTokenBogus.exitCode).toBe(0)
+      expect(JSON.parse(twoTokenBogus.stdout)).toEqual({
+        decision: "deny",
+        reason: expect.stringContaining("CLI parse failure"),
+      })
+
+      const agyEmptyDone = await runCli(["done", "--format=antigravity"], { stdin: "" })
+      expect(agyEmptyDone.exitCode).toBe(0)
+      expect(JSON.parse(agyEmptyDone.stdout)).toEqual({
+        decision: "continue",
+        reason: expect.stringContaining("empty Stop hook stdin payload"),
+      })
+
+      const dyingDecisionLayer = Layer.effect(
+        DecisionModel.DecisionModel,
+        Effect.die(new Error("decisionLayer-exploded")),
+      )
+      const dieGuardRes = await Effect.runPromise(
+        runDeclarativeCli(
+          ["guard", "--format=antigravity"],
+          { stdin: JSON.stringify({ tool_name: "Bash", tool_input: { command: "echo hi" } }) },
+          dyingDecisionLayer,
+        ),
+      )
+      expect(dieGuardRes.exitCode).toBe(0)
+      expect(JSON.parse(dieGuardRes.stdout)).toEqual({
+        decision: "deny",
+        reason: expect.stringContaining("decisionLayer-exploded"),
+      })
+    })
+
+    it("C-3, C-4, C-10, T-6: real subprocesses fail closed on empty stdin, guard --format=antigravity --bogus, and done --bogus", () => {
+      const runSub = (args: ReadonlyArray<string>, input?: string) =>
+        spawnSync(
+          process.execPath,
+          ["--import", "./tools/node-ts-resolver.mjs", "apps/harness-cli/src/index.ts", ...args],
+          { cwd: REPO_ROOT, input, encoding: "utf8", timeout: 10_000 },
+        )
+
+      const emptyGuard = runSub(["guard"], "")
+      expect(emptyGuard.status).toBe(2)
+      expect(emptyGuard.stderr).toContain("empty hook stdin payload")
+
+      const emptyDone = runSub(["done"], "")
+      expect(emptyDone.status).toBe(2)
+      expect(JSON.parse(emptyDone.stdout.trim())).toEqual({
+        decision: "block",
+        reason: expect.stringContaining("empty Stop hook stdin payload"),
+      })
+
+      const bogusAgyGuard = runSub(["guard", "--format=antigravity", "--bogus"], "{}")
+      expect(bogusAgyGuard.status).toBe(0)
+      expect(bogusAgyGuard.stdout).not.toContain("USAGE")
+      expect(JSON.parse(bogusAgyGuard.stdout.trim())).toEqual({
+        decision: "deny",
+        reason: expect.stringContaining("CLI parse failure"),
+      })
+
+      const bogusDone = runSub(["done", "--bogus"], "{}")
+      expect(bogusDone.status).toBe(2)
+      expect(bogusDone.stdout).not.toContain("USAGE")
+      expect(JSON.parse(bogusDone.stdout.trim())).toEqual({
+        decision: "block",
+        reason: expect.stringContaining("CLI parse failure"),
+      })
     })
 
     it("executes index.ts via Node subprocess for exit codes 0 (help), 1 (unknown), and 2 (guard deny)", () => {
@@ -376,10 +568,16 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
   })
 
   describe("F-10.1: omnigraph-lifecycle safety checks", () => {
-    it("validates loopback URLs, safe PIDs, and lock.json IDs", () => {
+    it("T-10: validates loopback URLs strictly (rejects evil subdomains, userinfo, 0.0.0.0, ftp), safe PIDs, and lock.json IDs", () => {
       expect(isLoopbackOmnigraphUrl("http://127.0.0.1:8080")).toBe(true)
       expect(isLoopbackOmnigraphUrl("http://localhost:9000")).toBe(true)
+      expect(isLoopbackOmnigraphUrl("http://[::1]:8080")).toBe(true)
       expect(isLoopbackOmnigraphUrl("https://evil.example.com:8080")).toBe(false)
+      expect(isLoopbackOmnigraphUrl("http://127.0.0.1.evil.com")).toBe(false)
+      expect(isLoopbackOmnigraphUrl("http://localhost@evil.com")).toBe(false)
+      expect(isLoopbackOmnigraphUrl("http://user@127.0.0.1:8080")).toBe(false)
+      expect(isLoopbackOmnigraphUrl("http://0.0.0.0:8080")).toBe(false)
+      expect(isLoopbackOmnigraphUrl("ftp://127.0.0.1:8080")).toBe(false)
       expect(isLoopbackOmnigraphUrl("not-a-url")).toBe(false)
 
       expect(isSafeOmnigraphPidToKill(1)).toBe(false)

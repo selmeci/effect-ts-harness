@@ -38,7 +38,7 @@ Always prefer in-process MCP tools over spawning shell subcommands to eliminate 
 - `type:contract` — shared Schemas, `HttpApi`, `RpcGroup`, API errors, event/command protocols; imports `effect` only
 - `type:domain` (in applications) / `type:core` (in frameworks) — use cases, generic engines, and pure logic, no I/O; imports `contract` (and `@harness/contract` for `stub` in skeletons); must not depend on `type:infra`
 - `type:service` — service interfaces and repository ports
-- `type:infra` — live Layer implementations, Drizzle repositories and handlers, Alchemy resources, adapter implementations
+- `type:infra` — live Layer implementations, `@effect/sql-*` repositories and handlers, Alchemy resources, adapter implementations
 - `type:app` — composes Layers and runs the runtime; the `web` app may import `contract` and UI libraries only
 
 ## Planning in Effect idioms
@@ -70,15 +70,15 @@ Plan as code: write the skeleton first (schemas, errors, service interfaces, sig
 - `type:contract` — shared Schemas, `HttpApi`, `RpcGroup`, API errors; imports `effect` only
 - `type:domain` — use cases and pure logic, no I/O; imports `contract` (and `@harness/contract` for `stub` in skeletons); must not depend on `type:infra`
 - `type:service` — service interfaces, including repositories
-- `type:infra` — live Layer implementations, Drizzle repositories and handlers, Alchemy resources
+- `type:infra` — live Layer implementations, `@effect/sql-*` repositories and handlers, Alchemy resources
 - `type:app` — composes Layers and runs the runtime; the `web` app may import `contract` and UI libraries only
 
-## Data layer rules (Effect SQL & Drizzle on D1 / Durable Objects)
+## Data layer rules (Native Effect v4 SQL on D1 / Durable Objects)
 
-- `drizzle-orm` (`1.0.0-rc.5-ab785fc`), `@effect/sql-*`, and table schemas (`sqliteTable`) are imported only in `type:infra`; repositories decode rows into contract Schemas, so Drizzle types never reach the domain or the frontend.
-- **Schema Migrations (`SqliteMigrator` on DO SQLite & `drizzle-kit` on D1 — `harness:SPEC-0006` / `harness:ADR-0008`):**
+- `drizzle-orm` and `drizzle-kit` are **banned across the entire workspace**. Use native Effect v4 SQL (`@effect/sql-d1`, `@effect/sql-sqlite-do`, `SqlClient.SqlClient`, `SqliteMigrator`) exclusively in `type:infra`; repositories decode raw SQL rows into `type:contract` `Schema`s, so SQL/driver types never reach the domain or the frontend.
+- **Schema Migrations (`SqliteMigrator` on DO SQLite & committed `.sql` migrations on D1 — `harness:SPEC-0006` / `harness:ADR-0008`):**
   - **Durable Object SQLite (`@effect/sql-sqlite-do`):** Schema migrations in `type:infra` (`libs/*/infra/src/**`) must be managed and tracked transactionally via `@effect/sql-sqlite-do/SqliteMigrator` (`SqliteMigrator.run` / `SqliteMigrator.layer` with `SqliteMigrator.fromRecord` or `fromGlob`, recording applied versions in `effect_sql_migrations` using `<positive_int>_<lowercase_snake_case>` keys matching `/^[1-9]\d*_[a-z0-9_]+$/` such as `"1_init_tables"`). Ad-hoc `CREATE TABLE` / `ALTER TABLE` / `DROP TABLE` SQL statements in `libs/*/infra/src/**` are allowed only inside `SqliteMigrator.fromRecord` migration records (`*Migrations` / `fromRecord({ ... })`); stray DDL outside migration records and unnumbered or malformed `fromRecord` keys are strictly banned (`harness(syntax-bans)`, `unmanaged-sql-ddl`, `invalid-migrator-record-key`).
-  - **D1 (`@effect/sql-d1` / Drizzle):** Migrations are generated ahead of time with `drizzle-kit generate` into `migrations/` and committed; they are never generated at deploy.
+  - **D1 (`@effect/sql-d1`):** Hand-authored forward `.sql` migrations live in `migrations/`, are committed to git, and are validated with `pnpm harness check-migrations`; they are never generated at deploy.
   - **Destructive Migration Safety (`MigrationSafety.decide`):** Any migration (in `.sql` files or `SqliteMigrator` DDL) containing `DROP`, SQLite table rebuilds (`__new_` / `PRAGMA foreign_keys=OFF`), or `ALTER TABLE ADD COLUMN ... NOT NULL` without `DEFAULT` is flagged (`unsafe-sql-migration`) and escalates to the human.
 - **Real `workerd` Storage Only — Ban on `node:sqlite` Mocks (`harness:SPEC-0006` / `harness:ADR-0008`):** Importing `node:sqlite` (`DatabaseSync`), `sqlite`, or `better-sqlite3` via static `import`, dynamic `import()`, or `require()` or authoring hand-rolled `DurableObjectStorage`, `SqlStorage`, or `D1Database` mocks in `type:infra` or `type:app` packages (`libs/*/infra/**`, `apps/**`) is strictly banned (`harness(syntax-bans)`, `harness(test-integrity)`, `node-sqlite-in-infra`). Local dev and `type:infra` storage tests must run against the real Cloudflare `workerd` runtime via `@alchemy.run/cloudflare-runtime` (`cloudflareVitePlugin`, `getPlatformProxy` / `D1.local`, and `Workerd` SQLite Durable Objects with `enableSql: true`).
 

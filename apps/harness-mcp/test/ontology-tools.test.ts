@@ -1,8 +1,9 @@
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Schema } from "effect"
+import { Effect, Layer, Schema } from "effect"
+import * as DecisionModel from "effect/ai/DecisionModel"
 import { makeMockDecisionModelLayer } from "@harness/decision"
 import { buildHarnessGraph } from "@harness/graph"
 import { executeToolEffect } from "../src/server.js"
@@ -116,6 +117,8 @@ describe("harness-mcp ontology tools", () => {
       }),
     ),
     evaluatedPairs: Schema.Finite,
+    degraded: Schema.optional(Schema.Boolean),
+    evaluationError: Schema.optional(Schema.String),
     layerCounts: Schema.Struct({
       Motivation: Schema.Finite,
       Business: Schema.Finite,
@@ -379,6 +382,81 @@ status: accepted
       expect(cleanRes.clean).toBe(true)
       expect(cleanRes.summary.filesChecked).toBe(1)
       expect(cleanRes.summary.errors).toBe(0)
+    }),
+  )
+
+  it.effect("marks harness_ontology_check degraded and non-clean when decisionLayer fails", () =>
+    Effect.gen(function* () {
+      const conflictingDocs = [
+        {
+          id: "sample:SPEC-0001",
+          docPath: "libs/sample/docs/specs/0001.md",
+          status: "accepted" as const,
+          markdown: `---
+id: sample:SPEC-0001
+title: Sample Gallery
+status: accepted
+---
+
+# Sample Gallery
+
+| ID | Pattern | Requirement | Effect Symbol | Verification |
+|---|---|---|---|---|
+| REQ-1.1 | Event-driven | When upload is submitted, the system shall approve photo upload. | Sample.uploadPhoto | test |
+| REQ-1.2 | Event-driven | When upload is submitted, the system shall reject photo upload. | Sample.uploadPhoto | test |
+`,
+        },
+      ]
+
+      const failingLayer = Layer.effect(
+        DecisionModel.DecisionModel,
+        DecisionModel.make({
+          decide: () => Effect.die("LLM timeout"),
+        }),
+      )
+
+      const raw = yield* executeToolEffect(
+        "harness_ontology_check",
+        { scope: "sample" },
+        {
+          graph,
+          governanceDocs: conflictingDocs,
+          decisionLayer: failingLayer,
+        },
+      )
+
+      const res = decodeCheckResult(raw)
+      expect(res.clean).toBe(false)
+      expect(res.degraded).toBe(true)
+      expect(res.evaluationError).toContain("DecisionModel")
+    }),
+  )
+
+  it.effect("marks harness_ontology_check degraded and non-clean when graph snapshot is corrupt", () =>
+    Effect.gen(function* () {
+      const tmpDir = mkdtempSync(join(tmpdir(), "harness-mcp-corrupt-graph-"))
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          rmSync(tmpDir, { recursive: true, force: true })
+        }),
+      )
+      mkdirSync(join(tmpDir, ".harness"), { recursive: true })
+      writeFileSync(join(tmpDir, ".harness", "graph-snapshot.json"), "{not valid json", "utf8")
+
+      const raw = yield* executeToolEffect(
+        "harness_ontology_check",
+        { scope: "sample" },
+        {
+          repoRoot: tmpDir,
+          governanceDocs: [],
+          decisionLayer: makeMockDecisionModelLayer(),
+        },
+      )
+
+      const res = decodeCheckResult(raw)
+      expect(res.clean).toBe(false)
+      expect(res.degraded).toBe(true)
+      expect(typeof res.evaluationError).toBe("string")
     }),
   )
 })

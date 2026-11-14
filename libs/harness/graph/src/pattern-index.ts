@@ -1,5 +1,5 @@
 import * as path from "node:path"
-import type { SyncHostIo } from "@harness/service"
+import type { SyncHostIo } from "@harness/service/host-io"
 import type { PatternDocNode } from "./model.js"
 
 export const loadPatternDocs = (

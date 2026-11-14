@@ -48,6 +48,9 @@ export const isLoopbackOmnigraphUrl = (rawUrl: string): boolean =>
       if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
         return false
       }
+      if (parsed.username !== "" || parsed.password !== "") {
+        return false
+      }
       return (
         parsed.hostname === "127.0.0.1" ||
         parsed.hostname === "localhost" ||
@@ -70,7 +73,13 @@ export const isSafeOmnigraphPidToKill = (pid: unknown): pid is number => {
     )
     return cmdline.includes("omnigraph")
   }
-  return true
+  const psRes = Result.getOrElse(
+    Result.try(() =>
+      nodeSyncHostIo.execFileSync("ps", ["-p", String(pid), "-o", "args="], { timeoutMs: 2_000 }),
+    ),
+    () => undefined,
+  )
+  return psRes !== undefined && psRes.exitCode === 0 && psRes.stdout.includes("omnigraph")
 }
 
 function unlockOmnigraphClusterIfNeeded(
@@ -276,7 +285,12 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
           try: () => {
             process.kill(serverPid, "SIGTERM")
           },
-          catch: () => undefined,
+          catch: (err) => {
+            process.stderr.write(
+              `[harness:omnigraph] Warning: failed to SIGTERM omnigraph PID ${serverPid}: ${err instanceof Error ? err.message : String(err)}\n`,
+            )
+            return undefined
+          },
         }).pipe(Effect.orElseSucceed(() => undefined))
       }
       if (!safeToKill && serverPid !== undefined) {
@@ -287,16 +301,31 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
       yield* Effect.try({
         try: () => {
           const [killBin, killArgs] = buildOmnigraphClusterKillArgs(clusterRootDir)
-          nodeSyncHostIo.execFileSync(killBin, [...killArgs], { timeoutMs: 5_000 })
+          const killRes = nodeSyncHostIo.execFileSync(killBin, [...killArgs], { timeoutMs: 5_000 })
+          if (killRes.exitCode !== 0 && killRes.exitCode !== 1) {
+            process.stderr.write(
+              `[harness:omnigraph] Warning: pkill returned exitCode=${killRes.exitCode}: ${killRes.stderr || killRes.stdout}\n`,
+            )
+          }
         },
-        catch: () => undefined,
+        catch: (err) => {
+          process.stderr.write(
+            `[harness:omnigraph] Warning: pkill failed: ${err instanceof Error ? err.message : String(err)}\n`,
+          )
+          return undefined
+        },
       }).pipe(Effect.orElseSucceed(() => undefined))
       yield* Effect.sleep("300 millis")
       yield* Effect.try({
         try: () => {
           nodeSyncHostIo.rmRecursiveSync(clusterRootDir)
         },
-        catch: () => undefined,
+        catch: (err) => {
+          process.stderr.write(
+            `[harness:omnigraph] Warning: failed to remove drifted cluster dir '${clusterRootDir}': ${err instanceof Error ? err.message : String(err)}\n`,
+          )
+          return undefined
+        },
       }).pipe(Effect.orElseSucceed(() => undefined))
     } else {
       const belongsToThisRepo =
@@ -361,17 +390,24 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
 
         const bindHostPort =
           targetBaseUrl.match(/^https?:\/\/([^/]+)/)?.[1] ?? `127.0.0.1:${defaultPort}`
-        nodeSyncHostIo.spawnDetached(
+        const spawnRes = nodeSyncHostIo.spawnDetached(
           omnigraphServerBin,
           ["--cluster", `file://${clusterRootDir}`, "--bind", bindHostPort, "--unauthenticated"],
           { cwd: clusterRepoRoot },
         )
+        if (spawnRes.pid === undefined || spawnRes.spawnError !== undefined) {
+          process.stderr.write(
+            `[harness:omnigraph] Failed to spawn omnigraph-server: ${spawnRes.spawnError ?? "missing PID"}\n`,
+          )
+          return
+        }
         spawnSucceeded = true
 
         nodeSyncHostIo.writeTextSync(
           join(clusterRootDir, "server.json"),
           JSON.stringify(
             {
+              pid: spawnRes.pid,
               port: defaultPort,
               baseUrl: targetBaseUrl,
               canonicalRepoRoot,

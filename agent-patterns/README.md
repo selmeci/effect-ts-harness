@@ -15,8 +15,8 @@ in `effect/Graph` and Omnigraph.
 7. [`schedule.md`](./schedule.md) — Retries, exponential backoff, jitter, repetition, and timeouts using `Schedule` and `Effect.retry`.
 8. [`testing.md`](./testing.md) — Unit and integration testing with `@effect/vitest` (`it.effect`, `it.scoped`), test layers, and trace span recording with `@harness/ingest`.
 9. [`alchemy-infra.md`](./alchemy-infra.md) — Cloud infrastructure declarations for Workers, `R2Bucket`, `D1Database`, `DurableObjectNamespace`, `Test.make`, and `type:infra` isolation rules.
-10. [`d1-repository.md`](./d1-repository.md) — Relational D1 persistence with `drizzle-orm/effect-d1` on `@effect/sql-d1`, table isolation in `type:infra`, schema decoding, and versioned migrations.
-11. [`durable-object-state.md`](./durable-object-state.md) — Embedded DO SQLite state with `drizzle-orm/effect-sqlite-do`, synchronous transactions on `MixedScheduler("sync")`, and pre-transaction schema decoding.
+10. [`d1-repository.md`](./d1-repository.md) — Relational D1 persistence with native `@effect/sql-d1` (`D1Client.layer({ db })` + `SqlClient.SqlClient`), schema decoding, and committed `.sql` migrations (`drizzle-orm` / `drizzle-kit` banned).
+11. [`durable-object-state.md`](./durable-object-state.md) — Embedded DO SQLite state with native `@effect/sql-sqlite-do`, `SqliteMigrator`, synchronous transactions on `MixedScheduler("sync")`, and pre-transaction schema decoding.
 12. [`httpapi.md`](./httpapi.md) — Schema-first public HTTP APIs with `HttpApi`, `HttpApiGroup`, `HttpApiEndpoint`, OpenAPI export, and breaking change detection with `oasdiff breaking`.
 13. [`rpc.md`](./rpc.md) — Internal RPC procedures over `Cloudflare.toHttpClient(doStub)` with W3C `traceparent` propagation into Durable Objects.
 14. [`atom.md`](./atom.md) — Reactive frontend client state with `@effect/atom-react` and `AtomHttpApi` consuming backend contracts with zero manual `fetch`.

@@ -24,6 +24,7 @@ export {
   SourceLineNumber,
   WorkspaceFilePath,
   computeWorkspaceFileLineCount,
+  inferAstGatePackageTagFromPath,
   makeSelfDogfoodingReport,
 } from "./ast-and-gate-primitives.js"
 export {
@@ -73,6 +74,7 @@ export {
 export {
   AstGateEvaluationReport,
   AstGateFileBatchInput,
+  type AstGateFileEvaluator,
   AstGateViolationContract,
   DaemonServerError,
   DaemonServerInfo,

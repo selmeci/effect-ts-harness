@@ -44,7 +44,7 @@ Our serverless architecture runs on the Cloudflare Workers edge runtime with dis
 We establish the following architectural data and persistence boundaries:
 
 1. **Dual Persistence Model: D1 Read Projections vs. DO SQLite State:**
-   - **Cloudflare D1 for Read Projections:** All high-volume read models, multi-entity queries, and projections are persisted in D1 and accessed through repositories (e.g., `PhotoRepo`) implemented with Drizzle ORM.
+   - **Cloudflare D1 for Read Projections:** All high-volume read models, multi-entity queries, and projections are persisted in D1 and accessed through repositories (e.g., `PhotoRepo`) implemented with native `@effect/sql-d1` (`D1Client.layer({ db })` + `SqlClient.SqlClient`; `drizzle-orm` and `drizzle-kit` are banned).
    - **Durable Objects with Co-located SQLite for High-Contention Aggregates:** High-contention aggregates, rate limiters, counters, and quotas (such as `AlbumCounterClient`) must reside inside dedicated Durable Objects backed by co-located synchronous SQLite storage (`ctx.storage.transactionSync`).
 
 2. **Synchronous Transaction Discipline in Durable Objects:**
@@ -57,7 +57,7 @@ We establish the following architectural data and persistence boundaries:
    - The receiving Durable Object RPC handler extracts this header and wraps execution within an Effect span using the propagated parent trace ID, maintaining unbroken distributed traces in `runWithTestTracer` and production APM.
 
 4. **Strict Encapsulation in `type:infra`:**
-   - Drizzle schemas (`sqliteTable`), SQL builders, and raw storage drivers are strictly isolated to `type:infra`.
+   - `@effect/sql-*` drivers, SQL queries, and raw storage drivers are strictly isolated to `type:infra` (`drizzle-orm` / `drizzle-kit` are banned).
    - Repositories decode database rows into contract Schemas (`type:contract`) before returning values to `type:domain`. Domain logic never observes raw database types.
 
 ## Rejected Alternatives
@@ -84,12 +84,12 @@ We establish the following architectural data and persistence boundaries:
 
 ### Negative Consequences and Trade-offs
 
-- Requires maintaining two persistence mechanisms: Drizzle migrations for D1 and raw synchronous SQLite tables for Durable Objects.
+- Requires maintaining two persistence mechanisms: committed `.sql` migrations (`pnpm harness check-migrations`) for D1 and `@effect/sql-sqlite-do` `SqliteMigrator` for Durable Objects.
 
 ### Deterministic Enforcement
 
 | Rule                        | Enforced By                            | Gate / Mechanism                     | Governed Symbols                  |
 | --------------------------- | -------------------------------------- | ------------------------------------ | --------------------------------- |
-| D1 Read Projections         | agent-patterns/d1-repository.md        | Drizzle ORM repository in type:infra | `PhotoRepo`                       |
+| D1 Read Projections         | agent-patterns/d1-repository.md        | `@effect/sql-d1` repository in type:infra | `PhotoRepo`                       |
 | DO Synchronous SQLite State | agent-patterns/durable-object-state.md | ctx.storage.transactionSync          | `AlbumCounterClient`              |
 | Encapsulation in type:infra | libs/sample/infra/src/index.ts         | Contract schema decoding             | `PhotoRepo`, `AlbumCounterClient` |

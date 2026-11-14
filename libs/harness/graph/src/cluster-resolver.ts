@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { basename, dirname, join, resolve } from "node:path"
-import type { SyncHostIo } from "@harness/service"
+import type { SyncHostIo } from "@harness/service/host-io"
 import { Effect, Option, Result, Schema } from "effect"
 
 export interface GitHeadState {

@@ -6,7 +6,6 @@ import {
   EnclosingSymbolName,
   GateCategory,
   GateRuleId,
-  GateVerdict,
   GateViolationMessage,
   NonNegativeCount,
   SourceLineNumber,
@@ -56,32 +55,47 @@ export const AstGateViolationContract = Schema.Struct({
 })
 export type AstGateViolationContract = typeof AstGateViolationContract.Type
 
-export const AstGateEvaluationReport = Schema.Struct({
-  verdict: GateVerdict,
-  violations: Schema.Array(AstGateViolationContract),
-  inspectedFileCount: NonNegativeCount,
-  cacheHitCount: NonNegativeCount,
-}).pipe(
-  Schema.check(
-    Schema.makeFilter((report) =>
-      (report.verdict === "clean") === (report.violations.length === 0)
-        ? undefined
-        : "AstGateEvaluationReport verdict and violations length must agree",
-    ),
-  ),
-)
+export type AstGateFileEvaluator = (
+  file: AstGateFileBatchInput,
+) => ReadonlyArray<AstGateViolationContract>
+
+export const AstGateEvaluationReport = Schema.Union([
+  Schema.Struct({
+    verdict: Schema.Literal("clean"),
+    violations: Schema.Tuple([]),
+    inspectedFileCount: NonNegativeCount,
+    cacheHitCount: NonNegativeCount,
+  }),
+  Schema.Struct({
+    verdict: Schema.Literal("violated"),
+    violations: Schema.NonEmptyArray(AstGateViolationContract),
+    inspectedFileCount: NonNegativeCount,
+    cacheHitCount: NonNegativeCount,
+  }),
+])
 export type AstGateEvaluationReport = typeof AstGateEvaluationReport.Type
 
 export const makeAstGateEvaluationReport = (input: {
   readonly violations: ReadonlyArray<AstGateViolationContract>
   readonly inspectedFileCount: NonNegativeCount
   readonly cacheHitCount: NonNegativeCount
-}): AstGateEvaluationReport => ({
-  verdict: input.violations.length === 0 ? "clean" : "violated",
-  violations: [...input.violations],
-  inspectedFileCount: input.inspectedFileCount,
-  cacheHitCount: input.cacheHitCount,
-})
+}): AstGateEvaluationReport => {
+  const [first, ...rest] = input.violations
+  if (first === undefined) {
+    return {
+      verdict: "clean",
+      violations: [],
+      inspectedFileCount: input.inspectedFileCount,
+      cacheHitCount: input.cacheHitCount,
+    }
+  }
+  return {
+    verdict: "violated",
+    violations: [first, ...rest],
+    inspectedFileCount: input.inspectedFileCount,
+    cacheHitCount: input.cacheHitCount,
+  }
+}
 
 export const DaemonSocketPath = Schema.NonEmptyString.pipe(
   Schema.check(Schema.isTrimmed()),

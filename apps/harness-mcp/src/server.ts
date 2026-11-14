@@ -8,7 +8,7 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from "@modelcontextprotocol/sdk/types.js"
-import { Cause, Effect, Logger, Schema } from "effect"
+import { Cause, Effect, Exit, Layer, Logger, ManagedRuntime, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   type HarnessDaemonServerHandle,
@@ -150,22 +150,17 @@ export const createServer = (options?: ServerOptions): McpServer => {
   })
 
   const originalClose = server.close.bind(server)
-  let runtimeDisposed = false
-  const disposeRuntime = (): Promise<void> => {
-    if (runtimeDisposed) return Promise.resolve()
-    runtimeDisposed = true
-    return runtime.dispose()
-  }
-  server.close = (): Promise<void> =>
-    Effect.runPromise(
-      Effect.promise(() => originalClose()).pipe(
-        Effect.ensuring(Effect.promise(disposeRuntime)),
-      ),
-    )
+  let disposePromise: Promise<void> | undefined
+  const disposeRuntime = (): Promise<void> => (disposePromise ??= runtime.dispose())
+  server.close = (): Promise<void> => originalClose().finally(() => disposeRuntime())
   const previousOnClose = server.server.onclose
   server.server.onclose = () => {
     previousOnClose?.()
-    void disposeRuntime()
+    void disposeRuntime().catch((err: unknown) => {
+      process.stderr.write(
+        `[harness-mcp] Runtime dispose error: ${err instanceof Error ? err.message : String(err)}\n`,
+      )
+    })
   }
 
   return server
@@ -174,6 +169,7 @@ export const createServer = (options?: ServerOptions): McpServer => {
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const server = createServer()
   const transport = new StdioServerTransport()
+  const cliRuntime = ManagedRuntime.make(Layer.empty)
   let daemonHandle: HarnessDaemonServerHandle | undefined = undefined
   let shuttingDown = false
   const daemonStartupPromise: Promise<HarnessDaemonServerHandle | undefined> =
@@ -217,24 +213,31 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
           )
         }),
       )
+      .then(() => cliRuntime.dispose().catch(() => undefined))
       .finally(() => process.exit(exitCode))
   }
   process.once("SIGINT", () => shutdown(0))
   process.once("SIGTERM", () => shutdown(0))
   process.stdin.once("end", () => shutdown(0))
   process.stdin.once("close", () => shutdown(0))
-  void Effect.runPromise(Effect.tryPromise(() => server.connect(transport)))
-    .then(() => {
-      const previousTransportOnClose = transport.onclose
-      transport.onclose = () => {
-        previousTransportOnClose?.()
-        shutdown(0)
-      }
-    })
-    .catch((err: unknown) => {
-      process.stderr.write(
-        `[harness-mcp] Fatal error: ${err instanceof Error ? err.message : String(err)}\n`,
-      )
-      shutdown(1)
-    })
+  void cliRuntime
+    .runPromiseExit(Effect.tryPromise(() => server.connect(transport)))
+    .then((exit) =>
+      Exit.match(exit, {
+        onFailure: (cause) => {
+          const squashed = Cause.squash(cause)
+          process.stderr.write(
+            `[harness-mcp] Fatal error: ${squashed instanceof Error ? squashed.message : String(squashed)}\n`,
+          )
+          shutdown(1)
+        },
+        onSuccess: () => {
+          const previousTransportOnClose = transport.onclose
+          transport.onclose = () => {
+            previousTransportOnClose?.()
+            shutdown(0)
+          }
+        },
+      }),
+    )
 }

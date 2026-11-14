@@ -18,7 +18,6 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   SubprocessArg,
@@ -31,7 +30,33 @@ import type {
   SyncHostDirEntry,
   SyncHostExecOptions,
   SyncHostExecResult,
-} from "@harness/service"
+  SyncHostSpawnDetachedResult,
+} from "@harness/service/host-io"
+
+const validateSyncCommandInput = (
+  trimmedCommand: string,
+  args: ReadonlyArray<string>,
+  normalizedCwd?: string,
+): string | undefined => {
+  if (trimmedCommand.length === 0) {
+    return "Subprocess command must not be empty"
+  }
+  if (normalizedCwd !== undefined && normalizedCwd.length === 0) {
+    return "Subprocess cwd must not be empty"
+  }
+  if (normalizedCwd !== undefined && normalizedCwd.includes("\0")) {
+    return "Subprocess cwd contains a disallowed null byte"
+  }
+  const validationErr = validateSubprocessInput({
+    command: SubprocessCommand.make(trimmedCommand),
+    args: args.map((arg) => SubprocessArg.make(arg)),
+    ...(normalizedCwd !== undefined ? { cwd: WorkspaceFilePath.make(normalizedCwd) } : {}),
+  })
+  return match(validationErr)
+    .with({ _tag: "Some" }, ({ value }) => value.reason)
+    .with({ _tag: "None" }, () => undefined)
+    .exhaustive()
+}
 
 /**
  * Concrete Node.js implementation of `ExtendedHostIo`.
@@ -87,29 +112,19 @@ export const nodeSyncHostIo: ExtendedHostIo = {
     options?: SyncHostExecOptions,
   ): SyncHostExecResult => {
     const trimmedCommand = command.trim()
-    const validationErr =
-      trimmedCommand.length === 0
-        ? undefined
-        : validateSubprocessInput({
-            command: SubprocessCommand.make(trimmedCommand),
-            args: args.map((arg) => SubprocessArg.make(arg)),
-            ...(options?.cwd !== undefined ? { cwd: WorkspaceFilePath.make(options.cwd) } : {}),
-          })
-    const invalidReason =
-      validationErr === undefined
-        ? "Subprocess command must not be empty"
-        : match(validationErr)
-            .with({ _tag: "Some" }, ({ value }) => value.reason)
-            .with({ _tag: "None" }, () => undefined)
-            .exhaustive()
+    const normalizedCwd = options?.cwd !== undefined ? options.cwd.trim() : undefined
+    const invalidReason = validateSyncCommandInput(trimmedCommand, args, normalizedCwd)
     if (invalidReason !== undefined) {
-      Schema.decodeSync(
-        Schema.String.pipe(Schema.check(Schema.makeFilter(() => invalidReason))),
-      )("")
+      return {
+        exitCode: -1,
+        stdout: "",
+        stderr: invalidReason,
+        spawnError: invalidReason,
+      }
     }
 
-    const result = spawnSync(command, [...args], {
-      cwd: options?.cwd,
+    const result = spawnSync(trimmedCommand, [...args], {
+      cwd: normalizedCwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: options?.timeoutMs,
@@ -128,7 +143,7 @@ export const nodeSyncHostIo: ExtendedHostIo = {
       stdout: result.stdout ?? "",
       stderr: result.stderr ?? (result.error !== undefined ? result.error.message : ""),
       ...(spawnError !== undefined ? { spawnError } : {}),
-      signal: result.signal,
+      ...(result.signal != null ? { signal: result.signal } : {}),
       timedOut,
     }
   },
@@ -151,13 +166,24 @@ export const nodeSyncHostIo: ExtendedHostIo = {
       readonly cwd?: string | undefined
       readonly env?: Readonly<Record<string, string | undefined>> | undefined
     },
-  ): void => {
-    spawn(command, [...args], {
-      cwd: options?.cwd,
+  ): SyncHostSpawnDetachedResult => {
+    const trimmedCommand = command.trim()
+    const normalizedCwd = options?.cwd !== undefined ? options.cwd.trim() : undefined
+    const invalidReason = validateSyncCommandInput(trimmedCommand, args, normalizedCwd)
+    if (invalidReason !== undefined) {
+      return { spawnError: invalidReason }
+    }
+    const child = spawn(trimmedCommand, [...args], {
+      cwd: normalizedCwd,
       env: options?.env,
       detached: true,
       stdio: "ignore",
       windowsHide: true,
-    }).unref()
+    })
+    child.on("error", () => {})
+    child.unref()
+    return child.pid !== undefined
+      ? { pid: child.pid }
+      : { spawnError: "Detached process failed to allocate PID" }
   },
 }

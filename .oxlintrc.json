@@ -20,8 +20,8 @@
         "enforceBuildableLibDependency": true,
         "depConstraints": [
           { "sourceTag": "scope:web", "onlyDependOnLibsWithTags": ["type:contract"] },
-          { "sourceTag": "type:contract", "onlyDependOnLibsWithTags": ["type:contract"] },
-          { "sourceTag": "type:core", "onlyDependOnLibsWithTags": ["type:contract", "type:core", "type:service"] },
+          { "sourceTag": "type:contract", "onlyDependOnLibsWithTags": [] },
+          { "sourceTag": "type:core", "onlyDependOnLibsWithTags": ["type:contract", "type:service", "type:core"] },
           {
             "sourceTag": "type:domain",
             "onlyDependOnLibsWithTags": [
@@ -79,8 +79,8 @@
           {
             "patterns": [
               {
-                "group": ["drizzle-orm", "drizzle-orm/*"],
-                "message": "drizzle-orm is infra-only — import it only in type:infra libraries; repositories decode rows into contract Schemas (docs/mvp_v2.md §10)."
+                "group": ["drizzle-orm", "drizzle-orm/*", "drizzle-kit", "drizzle-kit/*"],
+                "message": "drizzle-orm and drizzle-kit are banned across the workspace — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator)."
               },
               {
                 "group": ["alchemy", "alchemy/*"],

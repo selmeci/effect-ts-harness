@@ -63,6 +63,7 @@ export const SubprocessFailureKind = Schema.Literals([
   "non-zero-exit",
   "spawn-error",
   "timeout",
+  "signal",
   "max-buffer",
   "invalid-input",
 ])
@@ -92,7 +93,7 @@ export class HarnessSubprocessError extends Schema.TaggedError<HarnessSubprocess
     exitCode: SubprocessExitCode,
     stderr: SubprocessOutput,
     reason: ErrorReasonMessage,
-    failureKind: Schema.optional(SubprocessFailureKind),
+    failureKind: SubprocessFailureKind,
   },
 ) {}
 

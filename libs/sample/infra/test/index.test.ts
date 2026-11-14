@@ -1,10 +1,12 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Layer, Result, type Scope } from "effect"
+import { SqlClient } from "effect/sql/SqlClient"
 import * as nodeFs from "node:fs"
 import { existsSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { D1Client } from "@effect/sql-d1"
+import * as D1Client from "@effect/sql-d1/D1Client"
+import { SqlClientMemoryLayer } from "@harness/es-infra/memory"
 import {
   BINDING_D1_OBJECT,
   D1_OBJECT_CLASS_NAME,
@@ -19,14 +21,23 @@ import { connect } from "@alchemy.run/cloudflare-runtime/core/platform-proxy/con
 import { BINDING_PLATFORM_PROXY_TOKEN } from "@alchemy.run/cloudflare-runtime/core/platform-proxy/PlatformProxyProtocol"
 import type * as WorkerdConfig from "@alchemy.run/cloudflare-runtime/core/workerd/Config"
 import { Workerd, WorkerdLive } from "@alchemy.run/cloudflare-runtime/core/workerd/Workerd"
-import { makeWithDefaults } from "drizzle-orm/effect-d1"
-import { buildWorkspaceFnIndex, runWithTestTracer, type SyncHostIo } from "@harness/ingest"
-import { AlbumId, GreetingMessage, PhotoId, PhotoName } from "@harness/sample-contract"
+import { buildWorkspaceFnIndex, runWithTestTracer } from "@harness/ingest"
+import type { SyncHostIo } from "@harness/service/host-io"
+import {
+  AlbumId,
+  AlbumPhotoCount,
+  GreetingMessage,
+  PhotoId,
+  PhotoName,
+} from "@harness/sample-contract"
 import { uploadPhoto } from "@harness/sample-domain"
 import { PhotoRepo } from "@harness/sample-service"
-import { albumCounters, photos } from "../src/db/schema.js"
 import {
+  ActiveCounterStore,
+  albumCounterMigrations,
+  initializeAlbumCounterTables,
   logToConsole,
+  makeAlbumCounterDoLayer,
   makeAlbumCounterRpcClient,
   makeAlbumCounterRpcHandler,
   makePhotoRepoD1Layer,
@@ -56,8 +67,10 @@ const formatWorkerModules = (bundle: InternalWorkerModule): Array<WorkerdConfig.
   ]
 }
 
-const createWorkerdD1Database: Effect.Effect<D1Database, never, Scope.Scope> = Effect.gen(
-  function* () {
+const createWorkerdD1Database = (
+  options?: { readonly skipSchema?: boolean },
+): Effect.Effect<D1Database, never, Scope.Scope> =>
+  Effect.gen(function* () {
     const tmpDir = yield* Effect.acquireRelease(
       Effect.sync(() => mkdtempSync(join(tmpdir(), "harness-sample-d1-"))),
       (dir) =>
@@ -142,54 +155,43 @@ const createWorkerdD1Database: Effect.Effect<D1Database, never, Scope.Scope> = E
       }),
     )
     const d1 = connected.env.DB
-    yield* Effect.promise(async () => {
-      await d1
-        .prepare(`
-          CREATE TABLE photos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            album_id TEXT NOT NULL,
-            created_at INTEGER NOT NULL
-          )
-        `)
-        .run()
-      await d1
-        .prepare(`
-          CREATE TABLE album_counters (
-            album_id TEXT PRIMARY KEY,
-            count INTEGER NOT NULL
-          )
-        `)
-        .run()
-    })
+    if (!options?.skipSchema) {
+      yield* Effect.promise(async () => {
+        await d1
+          .prepare(`
+            CREATE TABLE photos (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL,
+              album_id TEXT NOT NULL,
+              created_at INTEGER NOT NULL
+            )
+          `)
+          .run()
+        await d1
+          .prepare(`
+            CREATE TABLE album_counters (
+              album_id TEXT PRIMARY KEY,
+              count INTEGER NOT NULL
+            )
+          `)
+          .run()
+      })
+    }
     return d1
-  },
-).pipe(Effect.provide(WorkerdLive), Effect.orDie)
+  }).pipe(Effect.provide(WorkerdLive), Effect.orDie)
 
 describe("sample-infra", () => {
   it.effect("runs logToConsole without failing", () =>
-    Effect.gen(function* () {
-      yield* logToConsole(GreetingMessage.make("harness"))
-      expect(photos.id.name).toBe("id")
-    }),
+    logToConsole(GreetingMessage.make("harness")),
   )
 
-  it("resolves drizzle-orm/effect-d1 from the 1.0.0-rc.5 pin", async () => {
-    const mod = await import("drizzle-orm/effect-d1")
-    expect(mod).toBeDefined()
-  })
-
-  // Test 1: PhotoRepo backed by Drizzle SQLite / D1 queries
+  // Test 1: PhotoRepo backed by Native Effect SQL / D1 queries
   describe("PhotoRepo", () => {
     it.effect("inserts, fetches by ID, lists all photos, and decodes into Photo schema", () =>
       Effect.scoped(
         Effect.gen(function* () {
-          const d1 = yield* createWorkerdD1Database
-          const drizzleDb = yield* makeWithDefaults({}).pipe(
-            Effect.provide(D1Client.layer({ db: d1 })),
-          )
-
-          const repoLayer = makePhotoRepoD1Layer(drizzleDb)
+          const d1 = yield* createWorkerdD1Database()
+          const repoLayer = makePhotoRepoD1Layer(d1)
 
           const program = Effect.gen(function* () {
             const repo = yield* PhotoRepo
@@ -258,20 +260,69 @@ describe("sample-infra", () => {
     )
   })
 
-  // Test 2: Compile-time type safety test
-  describe("schema compile-time type safety", () => {
-    it("enforces schema types with compile-time checks", () => {
-      // @ts-expect-error non_existent_column should not exist on photos table
-      const _badPhotoCol = photos.nonExistentColumn
-      // @ts-expect-error non_existent_column should not exist on albumCounters table
-      const _badCounterCol = albumCounters.nonExistentColumn
+  // Test 2: AlbumCounterStore SQLite upsert & SqliteMigrator idempotency against real workerd
+  describe("AlbumCounterStore & SqliteMigrator", () => {
+    it.effect("runs albumCounterMigrations idempotently and upserts counts in workerd DO SQLite", () =>
+      Effect.gen(function* () {
+        expect(Object.keys(albumCounterMigrations)).toEqual(["1_init_album_counters"])
 
-      expect(photos.name.name).toBe("name")
-      expect(photos.albumId.name).toBe("album_id")
-      expect(photos.createdAt.name).toBe("created_at")
-      expect(albumCounters.albumId.name).toBe("album_id")
-      expect(albumCounters.count.name).toBe("count")
-    })
+        const firstRun = yield* initializeAlbumCounterTables()
+        expect(firstRun).toEqual([[1, "init_album_counters"]])
+
+        // Re-running is a no-op
+        const secondRun = yield* initializeAlbumCounterTables()
+        expect(secondRun).toEqual([])
+
+        const sql = yield* SqlClient
+        const recordedMigrations = yield* sql<{
+          readonly migration_id: number
+          readonly name: string
+        }>`
+          SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id ASC;
+        `
+        expect(recordedMigrations).toEqual([
+          { migration_id: 1, name: "init_album_counters" },
+        ])
+
+        // Test ActiveCounterStore get & upsert
+        const storeProgram = Effect.gen(function* () {
+          const store = yield* ActiveCounterStore
+          const albumId = AlbumId.make("album-upsert")
+
+          const initial = yield* store.get(albumId)
+          expect(initial).toBe(0)
+
+          yield* store.set(albumId, AlbumPhotoCount.make(1))
+          expect(yield* store.get(albumId)).toBe(1)
+
+          yield* store.set(albumId, AlbumPhotoCount.make(42))
+          expect(yield* store.get(albumId)).toBe(42)
+        })
+
+        yield* storeProgram.pipe(Effect.provide(makeAlbumCounterDoLayer(sql)))
+      }).pipe(Effect.provide(SqlClientMemoryLayer)),
+    )
+
+    it.effect("upserts AlbumCounterStore counts in workerd D1", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const d1 = yield* createWorkerdD1Database()
+
+          const storeProgram = Effect.gen(function* () {
+            const store = yield* ActiveCounterStore
+            const albumId = AlbumId.make("album-d1-upsert")
+
+            expect(yield* store.get(albumId)).toBe(0)
+            yield* store.set(albumId, AlbumPhotoCount.make(3))
+            expect(yield* store.get(albumId)).toBe(3)
+            yield* store.set(albumId, AlbumPhotoCount.make(7))
+            expect(yield* store.get(albumId)).toBe(7)
+          })
+
+          yield* storeProgram.pipe(Effect.provide(makeAlbumCounterDoLayer(d1)))
+        }),
+      ),
+    )
   })
 
   // Test 3: Distributed W3C traceparent correlation across Worker/DO boundary
@@ -279,33 +330,59 @@ describe("sample-infra", () => {
     it.effect("propagates traceparent header and links remote DO spans into test trace graph", () =>
       Effect.scoped(
         Effect.gen(function* () {
-const testHostIo: SyncHostIo = {
-  existsSync: (p) => nodeFs.existsSync(p),
-  isFileSync: (p) => Result.getOrElse(Result.try(() => nodeFs.statSync(p).isFile()), () => false),
-  isDirectorySync: (p) => Result.getOrElse(Result.try(() => nodeFs.statSync(p).isDirectory()), () => false),
-  isSymbolicLinkSync: (p) => Result.getOrElse(Result.try(() => nodeFs.lstatSync(p).isSymbolicLink()), () => false),
-  readTextSync: (p) => nodeFs.readFileSync(p, "utf8"),
-  readBytesSync: (p) => nodeFs.readFileSync(p),
-  writeTextSync: (p, c) => { nodeFs.writeFileSync(p, c, "utf8") },
-  appendTextSync: (p, c) => { nodeFs.appendFileSync(p, c, "utf8") },
-  mkdirRecursiveSync: (p, m) => { nodeFs.mkdirSync(p, m === undefined ? { recursive: true } : { recursive: true, mode: m }) },
-  renameSync: (a, b) => { nodeFs.renameSync(a, b) },
-  unlinkSync: (p) => { nodeFs.unlinkSync(p) },
-  readdirSync: (p) => nodeFs.readdirSync(p, { withFileTypes: true }).map((e) => ({ name: e.name, isFile: e.isFile(), isDirectory: e.isDirectory() })),
-  realpathSync: (p) => nodeFs.realpathSync(p),
-  execFileSync: () => ({ exitCode: 1, stdout: "", stderr: "unused in unit test" }),
-}
+          const testHostIo: SyncHostIo = {
+            existsSync: (p) => nodeFs.existsSync(p),
+            isFileSync: (p) =>
+              Result.getOrElse(
+                Result.try(() => nodeFs.statSync(p).isFile()),
+                () => false,
+              ),
+            isDirectorySync: (p) =>
+              Result.getOrElse(
+                Result.try(() => nodeFs.statSync(p).isDirectory()),
+                () => false,
+              ),
+            isSymbolicLinkSync: (p) =>
+              Result.getOrElse(
+                Result.try(() => nodeFs.lstatSync(p).isSymbolicLink()),
+                () => false,
+              ),
+            readTextSync: (p) => nodeFs.readFileSync(p, "utf8"),
+            readBytesSync: (p) => nodeFs.readFileSync(p),
+            writeTextSync: (p, c) => {
+              nodeFs.writeFileSync(p, c, "utf8")
+            },
+            appendTextSync: (p, c) => {
+              nodeFs.appendFileSync(p, c, "utf8")
+            },
+            mkdirRecursiveSync: (p, m) => {
+              nodeFs.mkdirSync(
+                p,
+                m === undefined ? { recursive: true } : { recursive: true, mode: m },
+              )
+            },
+            renameSync: (a, b) => {
+              nodeFs.renameSync(a, b)
+            },
+            unlinkSync: (p) => {
+              nodeFs.unlinkSync(p)
+            },
+            readdirSync: (p) =>
+              nodeFs
+                .readdirSync(p, { withFileTypes: true })
+                .map((e) => ({ name: e.name, isFile: e.isFile(), isDirectory: e.isDirectory() })),
+            realpathSync: (p) => nodeFs.realpathSync(p),
+            execFileSync: () => ({ exitCode: 1, stdout: "", stderr: "unused in unit test" }),
+          }
 
           const testId = "libs/sample/infra/test/index.test.ts::distributed traceparent correlation"
           const repoRoot = resolveRepoRoot(process.cwd())
           const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, testHostIo)
 
-          const d1 = yield* createWorkerdD1Database
-          const drizzleDb = yield* makeWithDefaults({}).pipe(
-            Effect.provide(D1Client.layer({ db: d1 })),
-          )
+          const d1 = yield* createWorkerdD1Database()
+          const sql = yield* SqlClient.pipe(Effect.provide(D1Client.layer({ db: d1 })))
 
-          const doRpcHandler = makeAlbumCounterRpcHandler(drizzleDb)
+          const doRpcHandler = makeAlbumCounterRpcHandler(sql)
           const httpClient = toHttpClient(doRpcHandler)
           const albumCounterLayer = makeAlbumCounterRpcClient(httpClient)
 
@@ -391,7 +468,7 @@ const testHostIo: SyncHostIo = {
     it.effect("propagates AlbumQuotaExceededError across RPC when quota reached", () =>
       Effect.scoped(
         Effect.gen(function* () {
-          const d1 = yield* createWorkerdD1Database
+          const d1 = yield* createWorkerdD1Database()
           // Pre-populate album_counters with count 100 in workerd D1
           yield* Effect.promise(() =>
             d1
@@ -400,11 +477,9 @@ const testHostIo: SyncHostIo = {
               .run(),
           )
 
-          const drizzleDb = yield* makeWithDefaults({}).pipe(
-            Effect.provide(D1Client.layer({ db: d1 })),
-          )
+          const sql = yield* SqlClient.pipe(Effect.provide(D1Client.layer({ db: d1 })))
 
-          const doRpcHandler = makeAlbumCounterRpcHandler(drizzleDb)
+          const doRpcHandler = makeAlbumCounterRpcHandler(sql)
           const httpClient = toHttpClient(doRpcHandler)
           const client = makeAlbumCounterRpcClient(httpClient)
 
@@ -412,6 +487,36 @@ const testHostIo: SyncHostIo = {
           expect(error._tag).toBe("AlbumQuotaExceededError")
           expect(error.albumId).toBe("album-full")
           expect(error.count).toBe(100)
+        }),
+      ),
+    )
+
+    it.effect("atomically enforces quota under concurrent increment calls on workerd D1", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const d1 = yield* createWorkerdD1Database()
+          yield* Effect.promise(() =>
+            d1
+              .prepare("INSERT INTO album_counters (album_id, count) VALUES (?, ?)")
+              .bind("album-race", 99)
+              .run(),
+          )
+
+          const sql = yield* SqlClient.pipe(Effect.provide(D1Client.layer({ db: d1 })))
+          const doRpcHandler = makeAlbumCounterRpcHandler(sql)
+          const client = makeAlbumCounterRpcClient(toHttpClient(doRpcHandler))
+
+          const results = yield* Effect.all(
+            Array.from({ length: 4 }, () =>
+              Effect.exit(client.increment(AlbumId.make("album-race"))),
+            ),
+            { concurrency: "unbounded" },
+          )
+
+          const successes = results.filter((r) => r._tag === "Success")
+          const failures = results.filter((r) => r._tag === "Failure")
+          expect(successes).toHaveLength(1)
+          expect(failures).toHaveLength(3)
         }),
       ),
     )

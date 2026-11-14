@@ -1,6 +1,6 @@
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
-import type { SyncHostIo } from "@harness/service"
+import type { SyncHostIo } from "@harness/service/host-io"
 import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import { type Project, ts } from "ts-morph"

@@ -24,6 +24,7 @@ import {
   evaluateAllGatePlugins,
   GatePluginRegistryLive,
 } from "../src/plugins/gate-plugin-registry.js"
+import { decideAstGateCache } from "../src/ast-cache.js"
 import { decideHarnessTierTopology } from "../src/plugins/harness-tier-topology.js"
 import { execCheckedSubprocess } from "../src/services/subprocess-runner.js"
 import { statAndReadWorkspaceFiles } from "../src/services/workspace-fs.js"
@@ -454,5 +455,148 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
         expect(report.verdict).toBe("clean")
         expect(report.violations).toEqual([])
       }),
+  )
+
+  it.effect("C-9: flags undeclared @harness/* workspace dependency in src/ and normalizes subpath imports", () =>
+    Effect.gen(function* () {
+      const report = yield* decideHarnessTierTopology({
+        manifests: [
+          {
+            manifestPath: PackageManifestPath.make("libs/harness/infra/package.json"),
+            packageName: PackageManifestName.make("@harness/infra"),
+            nxTags: [NxTierTag.make("type:infra")],
+            dependencyNames: [PackageDependencyName.make("@harness/service")],
+          },
+        ],
+        serviceFiles: [],
+        workspaceSourceFiles: [
+          {
+            filePath: AstSourceFilePath.make("libs/harness/infra/src/x.ts"),
+            content: AstSourceContent.make(
+              'import type { SyncHostIo } from "@harness/service/host-io"\nimport { AstGateCache } from "@harness/gates"\nexport type { SyncHostIo }\nexport { AstGateCache }\n',
+            ),
+          },
+        ],
+      })
+      expect(report.verdict).toBe("violated")
+      expect(report.violations.length).toBe(1)
+      expect(report.violations[0]?.rule).toBe("undeclared-workspace-dependency")
+      expect(report.violations[0]?.location).toBe("libs/harness/infra/src/x.ts")
+      expect(report.violations[0]?.message).toContain("@harness/gates")
+    }),
+  )
+
+  it.effect("P0-2: bans drizzle-orm and drizzle-kit across AST imports, exports, dynamic imports, require, tests, and package.json", () =>
+    Effect.gen(function* () {
+      const astReport = yield* decideAstGateCache({
+        files: [
+          {
+            filePath: AstSourceFilePath.make("libs/sample/infra/test/index.test.ts"),
+            content: AstSourceContent.make('import { sql } from "drizzle-orm"\nexport const x = sql\n'),
+          },
+          {
+            filePath: AstSourceFilePath.make("libs/sample/infra/src/index.ts"),
+            content: AstSourceContent.make(
+              'export * from "drizzle-orm"\nexport const load = async () => await import("drizzle-orm")\nexport const kit = require("drizzle-kit")\n',
+            ),
+          },
+        ],
+      })
+      expect(astReport.verdict).toBe("violated")
+      const drizzleRules = astReport.violations.filter((v) => v.rule === "banned-drizzle-import")
+      expect(drizzleRules.length).toBe(4)
+      expect(drizzleRules.some((v) => v.file === "libs/sample/infra/test/index.test.ts" && v.category === "test-integrity")).toBe(true)
+      expect(drizzleRules.filter((v) => v.file === "libs/sample/infra/src/index.ts" && v.category === "syntax-bans").length).toBe(3)
+
+      const manifestReport = yield* decideHarnessTierTopology({
+        manifests: [
+          {
+            manifestPath: PackageManifestPath.make("libs/sample/infra/package.json"),
+            packageName: PackageManifestName.make("@sample/infra"),
+            nxTags: [NxTierTag.make("type:infra")],
+            dependencyNames: [PackageDependencyName.make("drizzle-orm")],
+          },
+        ],
+        serviceFiles: [],
+      })
+      expect(manifestReport.verdict).toBe("violated")
+      expect(manifestReport.violations.some((v) => v.message.includes("drizzle-orm"))).toBe(true)
+    }),
+  )
+
+  it.effect("P1-3: flags relative cross-package escape and undeclared workspace dependencies in type:app", () =>
+    Effect.gen(function* () {
+      const report = yield* decideHarnessTierTopology({
+        manifests: [
+          {
+            manifestPath: PackageManifestPath.make("libs/harness/domain/package.json"),
+            packageName: PackageManifestName.make("@harness/domain"),
+            nxTags: [NxTierTag.make("type:domain")],
+            dependencyNames: [PackageDependencyName.make("effect")],
+          },
+          {
+            manifestPath: PackageManifestPath.make("apps/sample/package.json"),
+            packageName: PackageManifestName.make("sample-app"),
+            nxTags: [NxTierTag.make("type:app")],
+            dependencyNames: [PackageDependencyName.make("effect"), PackageDependencyName.make("alchemy")],
+          },
+          {
+            manifestPath: PackageManifestPath.make("libs/sample/domain/package.json"),
+            packageName: PackageManifestName.make("@sample/domain"),
+            nxTags: [NxTierTag.make("type:domain")],
+            dependencyNames: [PackageDependencyName.make("effect")],
+          },
+        ],
+        serviceFiles: [],
+        workspaceSourceFiles: [
+          {
+            filePath: AstSourceFilePath.make("libs/harness/domain/src/escape.ts"),
+            content: AstSourceContent.make('export { x } from "../../gates/src/index.js"\n'),
+          },
+          {
+            filePath: AstSourceFilePath.make("apps/sample/src/index.ts"),
+            content: AstSourceContent.make('import { y } from "@sample/domain"\nexport { y }\n'),
+          },
+        ],
+      })
+      expect(report.verdict).toBe("violated")
+      expect(report.violations.length).toBe(2)
+      expect(report.violations.every((v) => v.rule === "undeclared-workspace-dependency")).toBe(true)
+      expect(report.violations.some((v) => v.location === "libs/harness/domain/src/escape.ts")).toBe(true)
+      expect(report.violations.some((v) => v.location === "apps/sample/src/index.ts" && v.message.includes("@sample/domain"))).toBe(true)
+    }),
+  )
+
+  it.effect("P1-seal: bans drizzle-kit in nonRuntimeDependencyNames on type:contract and type:infra while allowing vitest", () =>
+    Effect.gen(function* () {
+      const report = yield* decideHarnessTierTopology({
+        manifests: [
+          {
+            manifestPath: PackageManifestPath.make("libs/sample/contract/package.json"),
+            packageName: PackageManifestName.make("@sample/contract"),
+            nxTags: [NxTierTag.make("type:contract")],
+            dependencyNames: [PackageDependencyName.make("effect")],
+            nonRuntimeDependencyNames: [
+              PackageDependencyName.make("vitest"),
+              PackageDependencyName.make("drizzle-kit"),
+            ],
+          },
+          {
+            manifestPath: PackageManifestPath.make("libs/sample/infra/package.json"),
+            packageName: PackageManifestName.make("@sample/infra"),
+            nxTags: [NxTierTag.make("type:infra")],
+            dependencyNames: [PackageDependencyName.make("effect")],
+            nonRuntimeDependencyNames: [PackageDependencyName.make("drizzle-kit")],
+          },
+        ],
+        serviceFiles: [],
+      })
+      expect(report.verdict).toBe("violated")
+      expect(report.violations.length).toBe(2)
+      expect(report.violations.every((v) => v.message.includes("drizzle-kit"))).toBe(true)
+      expect(report.violations.some((v) => v.location === "libs/sample/contract/package.json")).toBe(true)
+      expect(report.violations.some((v) => v.location === "libs/sample/infra/package.json")).toBe(true)
+      expect(report.violations.some((v) => v.message.includes("vitest"))).toBe(false)
+    }),
   )
 })

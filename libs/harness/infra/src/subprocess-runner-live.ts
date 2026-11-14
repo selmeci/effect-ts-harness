@@ -15,11 +15,36 @@ import {
 import {
   HarnessSubprocessRunner,
   type HarnessSubprocessRunnerShape,
-  type SyncHostIo,
 } from "@harness/service"
+import type { SyncHostIo } from "@harness/service/host-io"
 
 const DEFAULT_SUBPROCESS_TIMEOUT_MS = 60_000
 const DEFAULT_MAX_BUFFER_BYTES = 10 * 1024 * 1024
+
+const hasExitCodePlatformReason = (err: unknown): boolean =>
+  typeof err === "object" &&
+  err !== null &&
+  "reason" in err &&
+  typeof err.reason === "object" &&
+  err.reason !== null &&
+  "method" in err.reason &&
+  err.reason.method === "exitCode"
+
+const classifySpawnErrorKind = (err: unknown, message: string): SubprocessFailureKind => {
+  if (/\bENOBUFS\b|maxBuffer/i.test(message)) {
+    return SubprocessFailureKind.make("max-buffer")
+  }
+  if (/\bETIMEDOUT\b|timed out/i.test(message)) {
+    return SubprocessFailureKind.make("timeout")
+  }
+  if (
+    hasExitCodePlatformReason(err) ||
+    /terminated by signal|killed by signal|receipt of signal/i.test(message)
+  ) {
+    return SubprocessFailureKind.make("signal")
+  }
+  return SubprocessFailureKind.make("spawn-error")
+}
 
 const toSubprocessError = (
   command: SubprocessExecInput["command"],
@@ -37,7 +62,7 @@ const toSubprocessError = (
     exitCode: SubprocessExitCode.make(-1),
     stderr: SubprocessOutput.make(message),
     reason: ErrorReasonMessage.make(message),
-    failureKind: SubprocessFailureKind.make("spawn-error"),
+    failureKind: classifySpawnErrorKind(err, message),
   })
 }
 
@@ -184,7 +209,19 @@ const makeHarnessSubprocessRunnerHostIoLayer = (
             exitCode: SubprocessExitCode.make(-1),
             stderr: SubprocessOutput.make(res.stderr),
             reason: ErrorReasonMessage.make(res.spawnError),
-            failureKind: SubprocessFailureKind.make("spawn-error"),
+            failureKind: classifySpawnErrorKind(undefined, res.spawnError),
+          })
+        }
+
+        if (res.signal != null) {
+          return yield* new HarnessSubprocessError({
+            command: input.command,
+            exitCode: SubprocessExitCode.make(res.exitCode),
+            stderr: SubprocessOutput.make(res.stderr),
+            reason: ErrorReasonMessage.make(
+              `Command '${input.command}' terminated by signal ${res.signal}`,
+            ),
+            failureKind: SubprocessFailureKind.make("signal"),
           })
         }
 

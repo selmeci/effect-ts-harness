@@ -124,7 +124,21 @@ describe("tools/oxlint/syntax-bans.js & tools/node-ts-resolver.mjs (S-4.1, S-6.1
     mcpRule.Program({ type: "Program", body: [] })
     mcpRule.MemberExpression(makeRunMember("runSync"))
     mcpRule.MemberExpression(makeRunMember("runPromise"))
-    expect(mcpReports.filter((m) => m.includes("unscoped-effect-run"))).toHaveLength(1)
+    mcpRule.MemberExpression(makeRunMember("runPromiseExit"))
+    expect(mcpReports.filter((m) => m.includes("unscoped-effect-run"))).toHaveLength(3)
+
+    const mcpBoundaryReports: Array<string> = []
+    const mcpBoundaryRule = syntaxBansPlugin.rules["syntax-bans"].create({
+      filename: "apps/harness-mcp/src/server.ts",
+      sourceCode: { text: "export const x = 1" },
+      report: (r: { readonly message: string }) => {
+        mcpBoundaryReports.push(r.message)
+      },
+    })
+    mcpBoundaryRule.Program({ type: "Program", body: [] })
+    mcpBoundaryRule.MemberExpression(makeRunMember("runPromise"))
+    mcpBoundaryRule.MemberExpression(makeRunMember("runPromiseExit"))
+    expect(mcpBoundaryReports.filter((m) => m.includes("unscoped-effect-run"))).toHaveLength(1)
   })
 
   it("S-6.1: node-ts-resolver resolves .js -> .ts workspace imports and logs diagnostics when HARNESS_DEBUG_RESOLVER=1", async () => {

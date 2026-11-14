@@ -59,7 +59,7 @@ Contracts in `type:contract` define trust boundaries for external input (`HttpAp
 
 Static syntax bans catch immediate template literals, but indirect dynamic construction remains dangerous:
 
-- **Indirect SQL Construction:** Intermediate variable string concatenation or string manipulation passed to SQLite `.exec(query)` or `.prepare(query)` instead of parameterized queries or Drizzle ORM.
+- **Indirect SQL Construction:** Intermediate variable string concatenation or string manipulation passed to SQLite `.exec(query)` or `.prepare(query)` instead of parameterized `SqlClient` queries (`sql\`...\``) (`drizzle-orm` / `drizzle-kit` are banned across the workspace).
 - **R2 / Storage Path Traversal:** Unsanitized keys constructed for Cloudflare R2 bucket operations (e.g. `bucket.get(key)`) allowing directory traversal (`../`, absolute path traversal, or unencoded delimiters).
 - **Durable Object ID Injection:** Passing unsanitized, unvalidated client strings directly to `env.DO_NAMESPACE.idFromName(...)` without normalization or length restrictions.
 

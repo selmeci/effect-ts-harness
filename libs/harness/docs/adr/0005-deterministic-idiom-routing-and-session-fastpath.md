@@ -34,7 +34,7 @@ Forensic analysis of live Antigravity session `65596e97-aea2-447f-911a-2c0178874
 
 ## Decision Drivers
 
-- **Zero-latency deterministic routing and triage for unambiguous inputs:** Well-known Effect-TS pattern keywords (`event-sourcing`, `decider`, `ts-pattern`, `drizzle`, `httpapi`, `rpc`, `atom`) and Effect v3-to-v4 migration errors (`decodeEither`, `Either`, `ParseResult`, `decodeSync` negative tests) should resolve in `0ms` without LLM variance.
+- **Zero-latency deterministic routing and triage for unambiguous inputs:** Well-known Effect-TS pattern keywords (`event-sourcing`, `decider`, `ts-pattern`, `d1-repository`, `httpapi`, `rpc`, `atom`) and Effect v3-to-v4 migration errors (`decodeEither`, `Either`, `ParseResult`, `decodeSync` negative tests) should resolve in `0ms` without LLM variance.
 - **Unambiguous telemetry KPIs:** `omnigraphLiveRatio` must reflect solely Omnigraph vs. `memory-fallback` engine execution, and `graphDiscoveryCalls` must reflect genuine agent graph/ontology queries rather than internal CLI branch syncs.
 - **Sub-50ms `PreInvocation` hook execution:** `harness session --format=antigravity` runs on every turn and must not block on Ollama HTTP inference when `modelWarm` is unused.
 - **Backward compatibility with existing eval scenarios:** `scenarios/01-clef-guard` and existing unit tests for `DecisionModel` fallback behavior (`Retry failed HTTP requests with exponential backoff`, `Stream large R2 CSV with Effect Stream`) must remain 100% green.
@@ -55,7 +55,7 @@ Chosen option: **Option 1 — Deterministic pre-filter tables in `routeStep` and
 
 Lowering the confidence threshold from `0.7` to `0.4` without a deterministic keyword pre-filter.
 
-**Why rejected:** Lowering the confidence threshold increases false-positive routing on genuinely ambiguous prompts and still fails when Ollama is cold or unreachable, whereas deterministic keyword matching for explicit pattern terms (`decider`, `event-sourcing`, `ts-pattern`, `drizzle`, `httpapi`, `rpc`, `atom`) is instantaneous (`0ms`) and 100% reproducible.
+**Why rejected:** Lowering the confidence threshold increases false-positive routing on genuinely ambiguous prompts and still fails when Ollama is cold or unreachable, whereas deterministic keyword matching for explicit pattern terms (`decider`, `event-sourcing`, `ts-pattern`, `d1-repository`, `httpapi`, `rpc`, `atom`) is instantaneous (`0ms`) and 100% reproducible.
 
 ### 2 · Remove `harness session` from the Antigravity `PreInvocation` hook
 
@@ -67,7 +67,7 @@ Deleting the `PreInvocation` hook entry in `adapters/antigravity/plugins/effect-
 
 ### Positive Consequences
 
-- `Harness.routeStep` resolves explicit pattern queries (`event sourcing decider core`, `ts-pattern exhaustive match`, `drizzle d1 repository`, `httpapi endpoint`, `rpc group`, `atom state`) in `<1ms` with zero LLM flakiness.
+- `Harness.routeStep` resolves explicit pattern queries (`event sourcing decider core`, `ts-pattern exhaustive match`, `effect sql d1 repository`, `httpapi endpoint`, `rpc group`, `atom state`) in `<1ms` with zero LLM flakiness.
 - `SessionReport.decide` accurately reports `omnigraphLiveRatio = 1` when all graph queries use live Omnigraph, even if `harness route` had `review` fallbacks, and accurately reports `graphDiscoveryCalls = 0` when an agent skips MCP graph/ontology discovery.
 - `Harness.decideGuardCommand` blocks `cd <dir>` shell commands with an actionable `Cwd` tool hint and allows `git restore --staged` without LLM escalation.
 - `harness session --format=antigravity` avoids `DecisionModel` HTTP round-trips on every turn while `harness doctor` and `harness session` (default JSON format) retain full `modelWarm` diagnostics.

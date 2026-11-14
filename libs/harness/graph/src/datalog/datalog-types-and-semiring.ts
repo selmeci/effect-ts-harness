@@ -71,8 +71,8 @@ export interface DatalogEvaluationContext {
 }
 
 export const isCloudBinding = (node: ServiceTagNode): boolean =>
-  /^(Cloudflare|Alchemy|Drizzle|Provider|Binding)(\b|[A-Z])/.test(node.tagId) ||
-  /^(Cloudflare|Alchemy|Drizzle|Provider|Binding)(\b|[A-Z])/.test(node.name)
+  /^(Cloudflare|Alchemy|EffectSql|Provider|Binding)(\b|[A-Z])/.test(node.tagId) ||
+  /^(Cloudflare|Alchemy|EffectSql|Provider|Binding)(\b|[A-Z])/.test(node.name)
 
 export const isDeciderSpan = (spanName: string): boolean =>
   spanName.endsWith(".decide") || spanName === "decide"

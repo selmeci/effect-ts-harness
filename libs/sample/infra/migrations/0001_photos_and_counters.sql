@@ -1,0 +1,11 @@
+CREATE TABLE IF NOT EXISTS album_counters (
+  album_id TEXT PRIMARY KEY,
+  count INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS photos (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  album_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);

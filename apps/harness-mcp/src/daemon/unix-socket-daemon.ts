@@ -1,20 +1,22 @@
 import * as path from "node:path"
-import { Effect, Exit, Schema, Scope } from "effect"
+import { NodeServices } from "@effect/platform-node"
+import { Cause, Effect, Exit, Layer, ManagedRuntime, Schema, Scope } from "effect"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
 import {
   AstSourceContent,
   AstSourceFilePath,
-  HARNESS_GATE_RULE_VERSION,
   WorkspaceFilePath,
 } from "@harness/contract"
 import { AstGateCache } from "@harness/gates"
 import { extractWorkspaceTypeAwareGraph } from "@harness/graph"
 import {
+  makeAstGateCacheLayer,
   nodeSyncHostIo,
   resolveHarnessDaemonSocketPath,
   startScopedUnixSocketDaemon,
   UnixSocketDaemonLive,
+  WorkspaceFsLive,
 } from "@harness/infra"
 import { isPathInsideRoot } from "../tools/mcp-helpers.js"
 
@@ -109,11 +111,20 @@ const createDaemonLineHandler =
                   },
                 ]
               })
-              const report = yield* AstGateCache.decide({
-                files: loadedFiles,
-                ruleVersion: HARNESS_GATE_RULE_VERSION,
-                cacheFilePath: cachePath,
-              })
+              const astGateCacheLayer = makeAstGateCacheLayer({
+                cacheFilePath: WorkspaceFilePath.make(cachePath),
+              }).pipe(Layer.provide(Layer.mergeAll(WorkspaceFsLive, NodeServices.layer)))
+              const report = yield* AstGateCache.evaluateCached(loadedFiles).pipe(
+                Effect.provide(astGateCacheLayer),
+                Effect.catch((err) =>
+                  Effect.succeed({
+                    error: `AST gate cache error: ${err instanceof Error ? err.message : String(err)}`,
+                  }),
+                ),
+              )
+              if ("error" in report) {
+                return { id: req.id, ok: false, error: report.error }
+              }
               return { id: req.id, ok: true, report }
             }),
           )
@@ -137,36 +148,51 @@ const createDaemonLineHandler =
 
 export const startHarnessDaemonServer = (
   repoRoot: string = process.cwd(),
-): Promise<HarnessDaemonServerHandle> =>
-  Effect.runPromise(
-    Effect.gen(function* () {
-      const services = yield* Effect.context<never>()
-      const runPromise = Effect.runPromiseWith(services)
-      const scope = yield* Scope.make()
-      const outcome = yield* startScopedUnixSocketDaemon(WorkspaceFilePath.make(repoRoot), {
-        lineHandler: createDaemonLineHandler(repoRoot),
-      }).pipe(
-        Scope.provide(scope),
-        Effect.provide(UnixSocketDaemonLive),
-        Effect.map(
-          (info): HarnessDaemonServerHandle => ({
-            socketPath: info.socketPath,
-            close: () => runPromise(Scope.close(scope, Exit.void)),
+): Promise<HarnessDaemonServerHandle> => {
+  const daemonRuntime = ManagedRuntime.make(UnixSocketDaemonLive)
+  return daemonRuntime
+    .runPromiseExit(
+      Effect.gen(function* () {
+        const scope = yield* Scope.make()
+        return yield* startScopedUnixSocketDaemon(WorkspaceFilePath.make(repoRoot), {
+          lineHandler: createDaemonLineHandler(repoRoot),
+        }).pipe(
+          Scope.provide(scope),
+          Effect.map(
+            (info): HarnessDaemonServerHandle => ({
+              socketPath: info.socketPath,
+              close: () =>
+                daemonRuntime
+                  .runPromiseExit(Scope.close(scope, Exit.void))
+                  .then((closeExit) =>
+                    Exit.match(closeExit, {
+                      onFailure: (cause) => Promise.reject(Cause.squash(cause)),
+                      onSuccess: () => undefined,
+                    }),
+                  )
+                  .finally(() => daemonRuntime.dispose()),
+            }),
+          ),
+          Effect.catchTag("DaemonServerError", (err) => {
+            if (err.reason.includes("already alive")) {
+              return Scope.close(scope, Exit.void).pipe(
+                Effect.as<HarnessDaemonServerHandle>({
+                  socketPath: err.socketPath,
+                  close: () => daemonRuntime.dispose(),
+                }),
+              )
+            }
+            return Effect.fail(err)
           }),
-        ),
-        Effect.catchTag("DaemonServerError", (err) => {
-          if (err.reason.includes("already alive")) {
-            return Scope.close(scope, Exit.void).pipe(
-              Effect.as<HarnessDaemonServerHandle>({
-                socketPath: err.socketPath,
-                close: () => Promise.resolve(),
-              }),
-            )
-          }
-          return Effect.fail(err)
-        }),
-        Effect.onError(() => Scope.close(scope, Exit.void)),
-      )
-      return outcome
-    }),
-  )
+          Effect.onError(() => Scope.close(scope, Exit.void)),
+        )
+      }),
+    )
+    .then((exit) =>
+      Exit.match(exit, {
+        onFailure: (cause) =>
+          daemonRuntime.dispose().then(() => Promise.reject(Cause.squash(cause))),
+        onSuccess: (handle) => handle,
+      }),
+    )
+}

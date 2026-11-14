@@ -157,7 +157,7 @@ describe("Harness decision definitions & fallbacks", () => {
           ),
         ).toBe("pattern-matching")
         expect(
-          yield* routeStep("d1-repository with drizzle").pipe(Effect.provide(failingLayer)),
+          yield* routeStep("d1-repository with @effect/sql-d1").pipe(Effect.provide(failingLayer)),
         ).toBe("d1-repository")
         expect(
           yield* routeStep("durable-object-state counter").pipe(Effect.provide(failingLayer)),

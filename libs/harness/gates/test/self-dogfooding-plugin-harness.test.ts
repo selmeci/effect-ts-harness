@@ -12,8 +12,8 @@ import {
   AstSourceFilePath,
   EnclosingSymbolName,
   GateRuleVersion,
-  GateVerdict,
   HARNESS_GATE_RULE_VERSION,
+  makeSelfDogfoodingReport,
   MaxPluginFileLines,
   PluginFileLineCount,
   PluginId,
@@ -1023,21 +1023,13 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         pluginId: PluginId.make("dup-id"),
         description: "Plugin 1",
         evaluate: () =>
-          Effect.succeed({
-            verdict: GateVerdict.make("clean"),
-            violations: [],
-            inspectedFileCount: NonNegativeCount.make(0),
-          }),
+          Effect.succeed(makeSelfDogfoodingReport([], NonNegativeCount.make(0))),
       }
       const dupPlugin2: GatePluginDescriptor = {
         pluginId: PluginId.make("dup-id"),
         description: "Plugin 2",
         evaluate: () =>
-          Effect.succeed({
-            verdict: GateVerdict.make("clean"),
-            violations: [],
-            inspectedFileCount: NonNegativeCount.make(0),
-          }),
+          Effect.succeed(makeSelfDogfoodingReport([], NonNegativeCount.make(0))),
       }
 
       const exit = yield* Effect.exit(
@@ -1076,11 +1068,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
                   })
                 }
               }
-              return {
-                verdict: GateVerdict.make(violations.length === 0 ? "clean" : "violated"),
-                violations,
-                inspectedFileCount: NonNegativeCount.make(files.length),
-              }
+              return makeSelfDogfoodingReport(violations, NonNegativeCount.make(files.length))
             }),
         }
 
@@ -1181,51 +1169,42 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
       }),
   )
 
-  it.effect("AstGateCache: ruleVersion cache invalidation on disk", () =>
+  it.effect("AstGateCache: ruleVersion cache invalidation in memory", () =>
     Effect.sync(() => {
-      const tmpDir = mkdtempSync(join(tmpdir(), "harness-ast-cache-"))
-      try {
-        const cachePath = AstSourceFilePath.make(join(tmpDir, "cache.json"))
-        const filePath = AstSourceFilePath.make("libs/harness/gates/src/test-file.ts")
-        const content = AstSourceContent.make("export const x = 1\n")
-        const cacheStore = new Map()
+      const filePath = AstSourceFilePath.make("libs/harness/gates/src/test-file.ts")
+      const content = AstSourceContent.make("export const x = 1\n")
+      const cacheStore = new Map()
 
-        const v1Report = AstGateCache.evaluateFiles(
-          {
-            files: [{ filePath, content }],
-            ruleVersion: GateRuleVersion.make("rule-v1"),
-            cacheFilePath: cachePath,
-          },
-          undefined,
-          cacheStore,
-        )
-        expect(v1Report.parsedFileCount).toBe(1)
-        expect(v1Report.cacheHitCount).toBe(0)
+      const v1Report = AstGateCache.evaluateFiles(
+        {
+          files: [{ filePath, content }],
+          ruleVersion: GateRuleVersion.make("rule-v1"),
+        },
+        undefined,
+        cacheStore,
+      )
+      expect(v1Report.parsedFileCount).toBe(1)
+      expect(v1Report.cacheHitCount).toBe(0)
 
-        const v1HitReport = AstGateCache.evaluateFiles(
-          {
-            files: [{ filePath, content }],
-            ruleVersion: GateRuleVersion.make("rule-v1"),
-            cacheFilePath: cachePath,
-          },
-          undefined,
-          cacheStore,
-        )
-        expect(v1HitReport.cacheHitCount).toBe(1)
+      const v1HitReport = AstGateCache.evaluateFiles(
+        {
+          files: [{ filePath, content }],
+          ruleVersion: GateRuleVersion.make("rule-v1"),
+        },
+        undefined,
+        cacheStore,
+      )
+      expect(v1HitReport.cacheHitCount).toBe(1)
 
-        const v2Report = AstGateCache.evaluateFiles(
-          {
-            files: [{ filePath, content }],
-            ruleVersion: GateRuleVersion.make("rule-v2"),
-            cacheFilePath: cachePath,
-          },
-          undefined,
-          cacheStore,
-        )
-        expect(v2Report.cacheHitCount).toBe(0)
-      } finally {
-        rmSync(tmpDir, { recursive: true, force: true })
-      }
+      const v2Report = AstGateCache.evaluateFiles(
+        {
+          files: [{ filePath, content }],
+          ruleVersion: GateRuleVersion.make("rule-v2"),
+        },
+        undefined,
+        cacheStore,
+      )
+      expect(v2Report.cacheHitCount).toBe(0)
     }),
   )
 

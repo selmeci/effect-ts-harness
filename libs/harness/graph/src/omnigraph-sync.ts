@@ -1,5 +1,5 @@
 import { join } from "node:path"
-import type { SyncHostIo } from "@harness/service"
+import type { SyncHostIo } from "@harness/service/host-io"
 import { Context, Data, Effect, Layer, Option, Result, Schema } from "effect"
 import * as Graph from "effect/Graph"
 import { type Diff, type FetchLike, Omnigraph } from "@modernrelay/omnigraph"

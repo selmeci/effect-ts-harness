@@ -2,6 +2,7 @@ import { Context, type Effect, type Option, type Scope } from "effect"
 import type {
   AstGateEvaluationReport,
   AstGateFileBatchInput,
+  AstGateFileEvaluator,
   DaemonServerError,
   DaemonServerInfo,
   DaemonSocketPath,
@@ -17,9 +18,10 @@ import type {
 export interface AstGateCachePortShape {
   readonly evaluateBatch: (
     files: ReadonlyArray<AstGateFileBatchInput>,
+    evaluateFile: AstGateFileEvaluator,
   ) => Effect.Effect<AstGateEvaluationReport, WorkspaceFsError>
-  readonly clearCache: Effect.Effect<void>
-  readonly cacheSize: Effect.Effect<NonNegativeCount>
+  readonly clearCache: Effect.Effect<void, WorkspaceFsError>
+  readonly cacheSize: Effect.Effect<NonNegativeCount, WorkspaceFsError>
 }
 
 export class AstGateCachePort extends Context.Service<
@@ -41,8 +43,8 @@ export interface DecisionCachePortShape {
     readonly ttlMillis: DecisionCacheTtlMillis
     readonly compute: Effect.Effect<DecisionCachePayloadJson, E, R>
   }) => Effect.Effect<DecisionCachePayloadJson, E | WorkspaceFsError, R>
-  readonly clear: Effect.Effect<void>
-  readonly stats: Effect.Effect<DecisionCacheStatsSnapshot>
+  readonly clear: Effect.Effect<void, WorkspaceFsError>
+  readonly stats: Effect.Effect<DecisionCacheStatsSnapshot, WorkspaceFsError>
 }
 
 export class DecisionCachePort extends Context.Service<

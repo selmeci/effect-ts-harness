@@ -1,5 +1,5 @@
 import { NodeServices } from "@effect/platform-node"
-import { Effect, Layer, Option, Ref } from "effect"
+import { Cause, Console, Effect, Layer, Option, Ref } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { Argument, Command as CliCommand, Flag } from "effect/cli"
 import { match } from "ts-pattern"
@@ -16,6 +16,7 @@ import {
   type CliResult,
   isCommand,
 } from "./daemon-and-omnigraph.service.js"
+import { hasAntigravityFormat, makeDoneBlockResult, makeGuardDenyResult } from "./hook-format.js"
 
 const variadicArgs = Argument.String("args").pipe(Argument.variadic())
 const boolFlag = (name: string) => Flag.Boolean(name).pipe(Flag.withDefault(false))
@@ -276,13 +277,15 @@ export const makeHarnessRootCommand = (
       format: Flag.optional(Flag.String("format")),
       scope: Flag.optional(Flag.String("scope")),
       strict: boolFlag("strict"),
+      deterministic: boolFlag("deterministic"),
       args: variadicArgs,
     },
-    ({ format, scope, strict, args }) => {
+    ({ format, scope, strict, deterministic, args }) => {
       const raw: Array<string> = [...args]
       appendStringFlag(raw, "format", format)
       appendStringFlag(raw, "scope", scope)
       appendBoolFlag(raw, "strict", strict)
+      appendBoolFlag(raw, "deterministic", deterministic)
       return runSubcommand("ontology", raw)
     },
   )
@@ -311,20 +314,16 @@ export const makeHarnessRootCommand = (
     {
       baseline: Flag.optional(Flag.String("baseline")),
       write: boolFlag("write"),
-      schema: Flag.optional(Flag.String("schema")),
       module: Flag.optional(Flag.String("module")),
       out: Flag.optional(Flag.String("out")),
-      update: boolFlag("update"),
       args: variadicArgs,
     },
-    ({ baseline, write, schema, module, out, update, args }) => {
+    ({ baseline, write, module, out, args }) => {
       const raw: Array<string> = [...args]
       appendStringFlag(raw, "baseline", baseline)
       appendBoolFlag(raw, "write", write)
-      appendStringFlag(raw, "schema", schema)
       appendStringFlag(raw, "module", module)
       appendStringFlag(raw, "out", out)
-      appendBoolFlag(raw, "update", update)
       return runSubcommand("check-openapi", raw)
     },
   )
@@ -332,13 +331,13 @@ export const makeHarnessRootCommand = (
   const checkMigrationsCommand = CliCommand.make(
     "check-migrations",
     {
-      dialect: Flag.optional(Flag.String("dialect")),
+      packageName: Flag.optional(Flag.String("package")),
       dir: Flag.optional(Flag.String("dir")),
       args: variadicArgs,
     },
-    ({ dialect, dir, args }) => {
+    ({ packageName, dir, args }) => {
       const raw: Array<string> = [...args]
-      appendStringFlag(raw, "dialect", dialect)
+      appendStringFlag(raw, "package", packageName)
       appendStringFlag(raw, "dir", dir)
       return runSubcommand("check-migrations", raw)
     },
@@ -347,19 +346,17 @@ export const makeHarnessRootCommand = (
   const checkEventSchemasCommand = CliCommand.make(
     "check-event-schemas",
     {
-      name: Flag.optional(Flag.String("name")),
-      version: Flag.optional(Flag.String("version")),
       module: Flag.optional(Flag.String("module")),
       snapshot: Flag.optional(Flag.String("snapshot")),
+      out: Flag.optional(Flag.String("out")),
       update: boolFlag("update"),
       args: variadicArgs,
     },
-    ({ name, version, module, snapshot, update, args }) => {
+    ({ module, snapshot, out, update, args }) => {
       const raw: Array<string> = [...args]
-      appendStringFlag(raw, "name", name)
-      appendStringFlag(raw, "version", version)
       appendStringFlag(raw, "module", module)
       appendStringFlag(raw, "snapshot", snapshot)
+      appendStringFlag(raw, "out", out)
       appendBoolFlag(raw, "update", update)
       return runSubcommand("check-event-schemas", raw)
     },
@@ -368,24 +365,16 @@ export const makeHarnessRootCommand = (
   const scenarioCommand = CliCommand.make(
     "scenario",
     {
-      id: Flag.optional(Flag.String("id")),
-      step: Flag.optional(Flag.String("step")),
       filter: Flag.optional(Flag.String("filter")),
       conversation: Flag.optional(Flag.String("conversation")),
       transcript: Flag.optional(Flag.String("transcript")),
-      out: Flag.optional(Flag.String("out")),
-      keepHidden: boolFlag("keep-hidden"),
       args: variadicArgs,
     },
-    ({ id, step, filter, conversation, transcript, out, keepHidden, args }) => {
+    ({ filter, conversation, transcript, args }) => {
       const raw: Array<string> = [...args]
-      appendStringFlag(raw, "id", id)
-      appendStringFlag(raw, "step", step)
       appendStringFlag(raw, "filter", filter)
       appendStringFlag(raw, "conversation", conversation)
       appendStringFlag(raw, "transcript", transcript)
-      appendStringFlag(raw, "out", out)
-      appendBoolFlag(raw, "keep-hidden", keepHidden)
       return runSubcommand("scenario", raw)
     },
   )
@@ -433,6 +422,18 @@ export const makeHarnessRootCommand = (
 
 export const harnessRootCommand = makeHarnessRootCommand(() => Effect.void)
 
+const makeFailClosedHookResult = (
+  requested: "guard" | "done",
+  argv: ReadonlyArray<string>,
+  reason: string,
+  extraStderr = "",
+): CliResult => {
+  const isAntigravity = hasAntigravityFormat(argv)
+  return requested === "guard"
+    ? makeGuardDenyResult(isAntigravity, reason, extraStderr)
+    : makeDoneBlockResult(isAntigravity, reason, extraStderr)
+}
+
 export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(function* (
   argv: ReadonlyArray<string>,
   options?: CliEnv,
@@ -446,23 +447,16 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
       stderr: "",
     }
   }
-  if (requested === "guard" && (argv.includes("--help") || argv.includes("-h"))) {
-    const isAntigravity = argv.includes("--format=antigravity")
-    const reason = "guard: --help flag is not permitted on guard"
-    return isAntigravity
-      ? {
-          exitCode: 0,
-          stdout: JSON.stringify({ decision: "deny", reason }),
-          stderr: "",
-        }
-      : {
-          exitCode: 2,
-          stdout: "",
-          stderr: reason,
-        }
+  if ((requested === "guard" || requested === "done") && (argv.includes("--help") || argv.includes("-h"))) {
+    return makeFailClosedHookResult(
+      requested,
+      argv,
+      `${requested}: --help flag is not permitted on ${requested}`,
+    )
   }
   if (
     requested !== "guard" &&
+    requested !== "done" &&
     (argv.includes("--help") || argv.includes("-h")) &&
     isCommand(requested)
   ) {
@@ -486,12 +480,50 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
   const liveCommandLayer = makeLiveCliCommandRegistryLayer(effectiveOptions, decisionLayer)
   const resultRef = yield* Ref.make<Option.Option<CliResult>>(Option.none())
   const rootCmd = makeHarnessRootCommand((result) => Ref.set(resultRef, Option.some(result)))
-  const mainLayer = Layer.mergeAll(
-    HarnessInfraLive,
-    decisionLayer,
-    liveCommandLayer,
-    NodeServices.layer,
-  )
+  const stderrBuffer: Array<string> = []
+  const formatConsoleArgs = (args: ReadonlyArray<unknown>): string =>
+    args.map((a) => (typeof a === "string" ? a : String(a))).join(" ")
+  const pushStderrLine = (...args: ReadonlyArray<unknown>): void => {
+    stderrBuffer.push(`${formatConsoleArgs(args)}\n`)
+  }
+  const hookConsole: Console.Console = {
+    assert: (condition: boolean, ...args: ReadonlyArray<unknown>) => {
+      if (!condition) pushStderrLine("Assertion failed:", ...args)
+    },
+    clear: () => {},
+    count: () => {},
+    countReset: () => {},
+    debug: pushStderrLine,
+    dir: (item: unknown) => pushStderrLine(item),
+    dirxml: pushStderrLine,
+    error: pushStderrLine,
+    group: () => {},
+    groupCollapsed: () => {},
+    groupEnd: () => {},
+    info: pushStderrLine,
+    log: pushStderrLine,
+    table: (tabularData: unknown) => pushStderrLine(tabularData),
+    time: () => {},
+    timeEnd: () => {},
+    timeLog: () => {},
+    trace: pushStderrLine,
+    warn: pushStderrLine,
+  }
+  const isHookCommand = requested === "guard" || requested === "done"
+  const mainLayer = isHookCommand
+    ? Layer.mergeAll(
+        HarnessInfraLive,
+        decisionLayer,
+        liveCommandLayer,
+        NodeServices.layer,
+        Layer.succeed(Console.Console, hookConsole),
+      )
+    : Layer.mergeAll(
+        HarnessInfraLive,
+        decisionLayer,
+        liveCommandLayer,
+        NodeServices.layer,
+      )
 
   const normalizedArgv = argv.length === 0 ? ["help"] : argv
   const cliErr = yield* CliCommand.runWith(rootCmd, {
@@ -521,23 +553,22 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
           .exhaustive(),
       ),
     ),
+    Effect.catchCause((cause) => {
+      if (Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)) {
+        return Effect.interrupt
+      }
+      return Effect.succeed(`unexpected defect: ${Cause.pretty(cause)}`)
+    }),
   )
 
   if (cliErr !== undefined) {
-    if (requested === "guard") {
-      const isAntigravity = argv.includes("--format=antigravity")
-      const reason = `guard: CLI parse failure (${cliErr})`
-      return isAntigravity
-        ? {
-            exitCode: 0,
-            stdout: JSON.stringify({ decision: "deny", reason }),
-            stderr: "",
-          }
-        : {
-            exitCode: 2,
-            stdout: "",
-            stderr: reason,
-          }
+    if (requested === "guard" || requested === "done") {
+      return makeFailClosedHookResult(
+        requested,
+        argv,
+        `${requested}: CLI parse failure (${cliErr})`,
+        stderrBuffer.join(""),
+      )
     }
     return {
       exitCode: 1,
@@ -550,20 +581,13 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
   return match(maybeResult)
     .with({ _tag: "Some" }, ({ value }) => value)
     .with({ _tag: "None" }, () => {
-      if (requested === "guard") {
-        const isAntigravity = argv.includes("--format=antigravity")
-        const reason = "guard: subcommand handler did not execute"
-        return isAntigravity
-          ? {
-              exitCode: 0,
-              stdout: JSON.stringify({ decision: "deny", reason }),
-              stderr: "",
-            }
-          : {
-              exitCode: 2,
-              stdout: "",
-              stderr: reason,
-            }
+      if (requested === "guard" || requested === "done") {
+        return makeFailClosedHookResult(
+          requested,
+          argv,
+          `${requested}: subcommand handler did not execute`,
+          stderrBuffer.join(""),
+        )
       }
       return { exitCode: 0, stdout: "", stderr: "" }
     })

@@ -700,9 +700,6 @@ importers:
       '@harness/sample-service':
         specifier: workspace:*
         version: link:../service
-      drizzle-orm:
-        specifier: 1.0.0-rc.5-ab785fc
-        version: 1.0.0-rc.5-ab785fc(@cloudflare/workers-types@5.20261024.1)(@effect/sql-d1@4.0.0(effect@4.0.0))(@effect/sql-sqlite-do@4.0.0(effect@4.0.0))(@electric-sql/pglite@0.3.15)(@libsql/client@0.17.4)(effect@4.0.0)(valibot@1.2.0(typescript@5.9.3))(zod@4.6.5)
       effect:
         specifier: 4.0.0
         version: 4.0.0
@@ -719,6 +716,9 @@ importers:
       '@effect/vitest':
         specifier: 4.0.0
         version: 4.0.0(effect@4.0.0)(vitest@5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)))
+      '@harness/es-infra':
+        specifier: workspace:*
+        version: link:../../es/infra
       '@harness/graph':
         specifier: workspace:*
         version: link:../../harness/graph
@@ -728,9 +728,6 @@ importers:
       '@types/node':
         specifier: 26.6.5
         version: 26.6.5
-      drizzle-kit:
-        specifier: 1.0.0-rc.5-ab785fc
-        version: 1.0.0-rc.5-ab785fc
       vitest:
         specifier: 5.0.3
         version: 5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))
@@ -6170,7 +6167,8 @@ snapshots:
       '@distilled.cloud/core': 1.0.0-rc.13(effect@4.0.0)
       effect: 4.0.0
 
-  '@drizzle-team/brocli@0.12.1': {}
+  '@drizzle-team/brocli@0.12.1':
+    optional: true
 
   '@effect/ai-typesafe@4.0.0(effect@4.0.0)':
     dependencies:
@@ -6629,6 +6627,7 @@ snapshots:
   '@js-temporal/polyfill@0.5.1':
     dependencies:
       jsbi: 4.3.2
+    optional: true
 
   '@keyv/bigmap@1.3.1(keyv@5.6.0)':
     dependencies:
@@ -7831,6 +7830,7 @@ snapshots:
       esbuild: 0.25.12
       get-tsconfig: 4.14.3
       jiti: 2.7.0
+    optional: true
 
   drizzle-orm@1.0.0-rc.5-ab785fc(@cloudflare/workers-types@5.20261024.1)(@effect/sql-d1@4.0.0(effect@4.0.0))(@effect/sql-sqlite-do@4.0.0(effect@4.0.0))(@electric-sql/pglite@0.3.15)(@libsql/client@0.17.4)(effect@4.0.0)(valibot@1.2.0(typescript@5.9.3))(zod@4.6.5):
     optionalDependencies:
@@ -7842,6 +7842,7 @@ snapshots:
       effect: 4.0.0
       valibot: 1.2.0(typescript@5.9.3)
       zod: 4.6.5
+    optional: true
 
   dunder-proto@1.0.1:
     dependencies:
@@ -7916,6 +7917,7 @@ snapshots:
       '@esbuild/win32-arm64': 0.25.12
       '@esbuild/win32-ia32': 0.25.12
       '@esbuild/win32-x64': 0.25.12
+    optional: true
 
   esbuild@0.28.2:
     optionalDependencies:
@@ -8199,6 +8201,7 @@ snapshots:
   get-tsconfig@4.14.3:
     dependencies:
       resolve-pkg-maps: 1.0.0
+    optional: true
 
   glob-parent@6.0.2:
     dependencies:
@@ -8314,7 +8317,8 @@ snapshots:
 
   isexe@2.0.0: {}
 
-  jiti@2.7.0: {}
+  jiti@2.7.0:
+    optional: true
 
   jose@6.2.13: {}
 
@@ -8322,7 +8326,8 @@ snapshots:
 
   js-tokens@4.0.0: {}
 
-  jsbi@4.3.2: {}
+  jsbi@4.3.2:
+    optional: true
 
   jsesc@3.1.0: {}
 
@@ -8893,7 +8898,8 @@ snapshots:
 
   resolve-from@4.0.0: {}
 
-  resolve-pkg-maps@1.0.0: {}
+  resolve-pkg-maps@1.0.0:
+    optional: true
 
   resolve.exports@2.0.3: {}
 

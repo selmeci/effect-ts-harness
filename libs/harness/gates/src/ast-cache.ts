@@ -21,13 +21,13 @@ import { Effect, Schema } from "effect"
 import {
   type AstGateEvaluationReport,
   type AstGateFileBatchInput,
+  type AstGateFileEvaluator,
   AstGatePackageTag,
   AstSourceContent,
   AstSourceFilePath,
   ContentSha256,
   GateCategory,
   GateRuleVersion,
-  GateVerdict,
   HARNESS_GATE_RULE_VERSION,
   type WorkspaceFsError,
 } from "@harness/contract"
@@ -64,7 +64,6 @@ export type AstGateFileInput = typeof AstGateFileInput.Type
 export const AstGateEvaluationInput = Schema.Struct({
   files: Schema.Array(AstGateFileInput),
   ruleVersion: Schema.optional(GateRuleVersion),
-  cacheFilePath: Schema.optional(AstSourceFilePath),
 })
 export type AstGateEvaluationInput = typeof AstGateEvaluationInput.Type
 
@@ -83,13 +82,43 @@ export const AstGateCacheStoreSchema = Schema.Struct({
 })
 export type AstGateCacheStore = typeof AstGateCacheStoreSchema.Type
 
-export const AstGateDecisionReport = Schema.Struct({
-  verdict: GateVerdict,
-  violations: Schema.Array(GateViolation),
-  cacheHitCount: NonNegativeCount,
-  parsedFileCount: NonNegativeCount,
-})
+export const AstGateDecisionReport = Schema.Union([
+  Schema.Struct({
+    verdict: Schema.Literal("clean"),
+    violations: Schema.Tuple([]),
+    cacheHitCount: NonNegativeCount,
+    parsedFileCount: NonNegativeCount,
+  }),
+  Schema.Struct({
+    verdict: Schema.Literal("violated"),
+    violations: Schema.NonEmptyArray(GateViolation),
+    cacheHitCount: NonNegativeCount,
+    parsedFileCount: NonNegativeCount,
+  }),
+])
 export type AstGateDecisionReport = typeof AstGateDecisionReport.Type
+
+export const makeAstGateDecisionReport = (input: {
+  readonly violations: ReadonlyArray<GateViolation>
+  readonly cacheHitCount: NonNegativeCount
+  readonly parsedFileCount: NonNegativeCount
+}): AstGateDecisionReport => {
+  const [first, ...rest] = input.violations
+  if (first === undefined) {
+    return {
+      verdict: "clean",
+      violations: [],
+      cacheHitCount: input.cacheHitCount,
+      parsedFileCount: input.parsedFileCount,
+    }
+  }
+  return {
+    verdict: "violated",
+    violations: [first, ...rest],
+    cacheHitCount: input.cacheHitCount,
+    parsedFileCount: input.parsedFileCount,
+  }
+}
 
 export const AstCacheHitCount = NonNegativeCount
 export type AstCacheHitCount = typeof AstCacheHitCount.Type
@@ -214,12 +243,17 @@ export const evaluateAstGateFiles = (
     }
   }
 
-  return {
-    verdict: allViolations.length === 0 ? GateVerdict.make("clean") : GateVerdict.make("violated"),
+  return makeAstGateDecisionReport({
     violations: allViolations,
     cacheHitCount: NonNegativeCount.make(cacheHitCount),
     parsedFileCount: NonNegativeCount.make(parsedFileCount),
-  }
+  })
+}
+
+export const evaluateSingleAstGateFile: AstGateFileEvaluator = (file) => {
+  const pkgTag = file.packageTag ?? inferPackageTagFromPath(file.filePath)
+  const { sourceFile } = getOrCreateCachedSourceFile(file.filePath, file.content)
+  return visitSourceFileSinglePass(sourceFile, file.filePath, pkgTag)
 }
 
 export const decideAstGateCache = Effect.fn("AstGateCache.decide")(function* (
@@ -233,7 +267,7 @@ export const evaluateCachedAstGates = Effect.fn("AstGateCache.evaluateCached")(f
   files: ReadonlyArray<AstGateFileBatchInput>,
 ): Effect.fn.Return<AstGateEvaluationReport, WorkspaceFsError, AstGateCachePort> {
   const port = yield* AstGateCachePort
-  return yield* port.evaluateBatch(files)
+  return yield* port.evaluateBatch(files, evaluateSingleAstGateFile)
 })
 
 export const decideSyntaxBansGate = Effect.fn("SyntaxBans.decide")(function* (

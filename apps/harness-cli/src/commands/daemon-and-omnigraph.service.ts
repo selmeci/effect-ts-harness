@@ -91,7 +91,7 @@ export interface CliResult {
   readonly telemetryDetail?: string | undefined
 }
 
-const DEFAULT_STDIN_TIMEOUT_MS = 8000
+const DEFAULT_STDIN_TIMEOUT_MS = 4000
 const DEFAULT_STDIN_MAX_BYTES = 2 * 1024 * 1024
 
 export const makeReadStdinEffect = Effect.fn("HarnessCli.readStdin")(function* (stdinOptions?: {

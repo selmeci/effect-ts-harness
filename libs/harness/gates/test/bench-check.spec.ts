@@ -14,6 +14,7 @@ import {
   GateVerdict,
   GateViolationMessage,
   HARNESS_GATE_RULE_VERSION,
+  makeAstGateEvaluationReport,
   NonNegativeCount,
 } from "@harness/contract"
 import { AstGateCachePort } from "@harness/service"
@@ -75,8 +76,7 @@ const makeInMemoryAstGateCachePortLayer = (): Layer.Layer<AstGateCachePort> =>
               undefined,
               store,
             )
-            return {
-              verdict: report.verdict,
+            return makeAstGateEvaluationReport({
               violations: report.violations.map((v) =>
                 AstGateViolationContract.make({
                   category: v.category,
@@ -89,7 +89,7 @@ const makeInMemoryAstGateCachePortLayer = (): Layer.Layer<AstGateCachePort> =>
               ),
               inspectedFileCount: NonNegativeCount.make(files.length),
               cacheHitCount: report.cacheHitCount,
-            } satisfies AstGateEvaluationReport
+            }) satisfies AstGateEvaluationReport
           }),
         clearCache: Effect.sync(() => {
           store.clear()
@@ -490,7 +490,7 @@ describe("AstGateCache & Unified Single-Pass AST Gate Deciders (PERF-02, RFC-000
         expect(GateViolation.fields).toBeDefined()
         expect(AstGateCacheEntry.fields).toBeDefined()
         expect(AstGateEvaluationInput.fields).toBeDefined()
-        expect(AstGateDecisionReport.fields).toBeDefined()
+        expect(AstGateDecisionReport.members).toHaveLength(2)
         expect(evaluateAstGateFiles({ files: [] }).verdict).toBe("clean")
         expect(computeContentSha256("abc")).toHaveLength(64)
         expect(inferPackageTagFromPath("libs/sample/domain/src/a.ts")).toBe("domain")

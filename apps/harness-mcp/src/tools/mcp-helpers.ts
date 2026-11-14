@@ -75,6 +75,7 @@ export interface ServerOptions {
   readonly graph?: HarnessGraph
   readonly snapshotPath?: string
   readonly decisionLayer?: Layer.Layer<DecisionModel.DecisionModel>
+  readonly extraLayer?: Layer.Layer<never>
   readonly repoRoot?: string
   readonly governanceDocs?: ReadonlyArray<GovernanceDocReference>
   readonly skipOmnigraphSpawn?: boolean | undefined
@@ -191,12 +192,18 @@ const selectSnapshotPath = (
   return undefined
 }
 
-export const resolveGraph = (
+export interface GraphResolutionStatus {
+  readonly graph: HarnessGraph
+  readonly degraded: boolean
+  readonly evaluationError?: string | undefined
+}
+
+export const resolveGraphWithStatus = (
   options?: ServerOptions,
   args?: Readonly<Record<string, unknown>>,
-): Effect.Effect<HarnessGraph> => {
+): Effect.Effect<GraphResolutionStatus> => {
   if (options?.graph) {
-    return Effect.succeed(options.graph)
+    return Effect.succeed({ graph: options.graph, degraded: false })
   }
   return Effect.gen(function* () {
     const root = options?.repoRoot ?? resolveDefaultRepoRoot(args, options)
@@ -217,24 +224,26 @@ export const resolveGraph = (
           const freshGraph = yield* extractWorkspaceTypeAwareGraph(root, nodeSyncHostIo)
           saveGraphSnapshot(freshGraph, verifySnap, nodeSyncHostIo)
           writeGraphHeadMeta(root, nodeSyncHostIo, headState)
-          return freshGraph
+          return { graph: freshGraph, degraded: false }
         }
       }
       snapshotPath = selectSnapshotPath(root, verifySnap, planSnap, verifyExists, planExists)
     }
     if (snapshotPath && nodeSyncHostIo.existsSync(snapshotPath)) {
       return yield* loadGraphSnapshotEffect(snapshotPath, nodeSyncHostIo).pipe(
-        Effect.tapError((error) =>
-          Effect.sync(() => {
-            process.stderr.write(
-              `[harness-mcp] Failed to load graph snapshot from '${snapshotPath}' [${error.reason}]: ${error.message}\n`,
-            )
-          }),
-        ),
-        Effect.orElseSucceed(buildEmptyHarnessGraph),
+        Effect.map((graph): GraphResolutionStatus => ({ graph, degraded: false })),
+        Effect.catchTag("GraphSnapshotError", (error) => {
+          const evaluationError = `Failed to load graph snapshot from '${snapshotPath}' [${error.reason}]: ${error.message}`
+          process.stderr.write(`[harness-mcp] ${evaluationError}\n`)
+          return Effect.succeed<GraphResolutionStatus>({
+            graph: buildEmptyHarnessGraph(),
+            degraded: true,
+            evaluationError,
+          })
+        }),
       )
     }
-    return buildEmptyHarnessGraph()
+    return { graph: buildEmptyHarnessGraph(), degraded: false }
   }).pipe(
     Effect.catchDefect((defect) => {
       const message = defect instanceof Error ? defect.message : String(defect)
@@ -243,6 +252,11 @@ export const resolveGraph = (
     }),
   )
 }
+
+export const resolveGraph = (
+  options?: ServerOptions,
+  args?: Readonly<Record<string, unknown>>,
+): Effect.Effect<HarnessGraph> => resolveGraphWithStatus(options, args).pipe(Effect.map((r) => r.graph))
 
 export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolean => {
   const logicalRoot = path.resolve(rootDir)

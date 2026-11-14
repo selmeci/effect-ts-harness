@@ -30,6 +30,8 @@ const mainRepoRoot = resolveMainRepoRoot(repoRoot)
 const WORKSPACE_PACKAGE_PATHS = {
   "@harness/contract": "libs/harness/contract/src/index.ts",
   "@harness/service": "libs/harness/service/src/index.ts",
+  "@harness/service/host-io": "libs/harness/service/src/host-io.ts",
+  "@harness/service/testing": "libs/harness/service/test/test-host-io.ts",
   "@harness/infra": "libs/harness/infra/src/index.ts",
   "@harness/gates": "libs/harness/gates/src/index.ts",
   "@harness/decision": "libs/harness/decision/src/index.ts",

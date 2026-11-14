@@ -18,9 +18,9 @@ import {
 import {
   ActiveMutantContext,
   HarnessSubprocessRunner,
-  type SyncHostIo,
   WorkspaceFs,
 } from "@harness/service"
+import type { SyncHostIo } from "@harness/service/host-io"
 import { getActiveMutantId, setActiveMutantId } from "../../src/services/active-mutant-context.js"
 
 export const makeWorkspaceFsHostIoLayer = (hostIo: SyncHostIo): Layer.Layer<WorkspaceFs> =>
@@ -125,6 +125,7 @@ export const makeHarnessSubprocessRunnerHostIoLayer = (
           catch: (err) =>
             new HarnessSubprocessError({
               command: input.command,
+              failureKind: "spawn-error",
               exitCode: SubprocessExitCode.make(1),
               stderr: SubprocessOutput.make(err instanceof Error ? err.message : String(err)),
               reason: ErrorReasonMessage.make(
@@ -135,6 +136,7 @@ export const makeHarnessSubprocessRunnerHostIoLayer = (
         if (res.spawnError !== undefined) {
           return yield* new HarnessSubprocessError({
             command: input.command,
+            failureKind: "spawn-error",
             exitCode: SubprocessExitCode.make(res.exitCode),
             stderr: SubprocessOutput.make(res.stderr),
             reason: ErrorReasonMessage.make(

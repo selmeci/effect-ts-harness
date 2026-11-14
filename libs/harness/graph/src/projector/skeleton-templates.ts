@@ -1,6 +1,6 @@
 import * as path from "node:path"
 import { Lang, parse } from "@ast-grep/napi"
-import type { SyncHostIo } from "@harness/service"
+import type { SyncHostIo } from "@harness/service/host-io"
 import { Schema } from "effect"
 import { Node, type Project, type SourceFile, SyntaxKind, VariableDeclarationKind } from "ts-morph"
 import { match } from "ts-pattern"

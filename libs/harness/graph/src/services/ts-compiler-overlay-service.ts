@@ -1,5 +1,5 @@
 import { resolve } from "node:path"
-import type { SyncHostIo } from "@harness/service"
+import type { SyncHostIo } from "@harness/service/host-io"
 import { Cause, Context, Effect, Layer, Semaphore } from "effect"
 import {
   CompilerOverlayErrorReason,

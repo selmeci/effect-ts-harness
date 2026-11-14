@@ -2,7 +2,7 @@ import * as path from "node:path"
 import { Lang, parse } from "@ast-grep/napi"
 import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
-import type { SyncHostIo } from "@harness/service"
+import type { SyncHostIo } from "@harness/service/host-io"
 
 export type PackageTag = "contract" | "domain" | "service" | "infra" | "app"
 

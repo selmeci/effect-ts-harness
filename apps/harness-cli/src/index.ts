@@ -46,6 +46,7 @@ import {
   tryQueryWarmDaemonSocket,
 } from "./commands/daemon-and-omnigraph.service.js"
 import { harnessRootCommand, runDeclarativeCli } from "./commands/declarative-cli.js"
+import { hasAntigravityFormat, normalizeProcessArgv } from "./commands/hook-format.js"
 import { handleIngest } from "./commands/session-learn-report.command.js"
 
 export {
@@ -111,17 +112,33 @@ export const teardownCliMain = (
   writeStderr: (s: string) => void = (s) => {
     process.stderr.write(s)
   },
+  argv: ReadonlyArray<string> = process.argv,
+  writeStdout: (s: string) => void = (s) => {
+    process.stdout.write(s)
+  },
 ): void => {
   match(exit)
     .with({ _tag: "Success" }, () => {
-      onExit(0)
+      const code = typeof process.exitCode === "number" ? process.exitCode : 0
+      onExit(code)
     })
     .with({ _tag: "Failure" }, ({ cause }) => {
-      if (Cause.hasFails(cause) || Cause.hasDies(cause)) {
-        writeStderr(`${Cause.pretty(cause)}\n`)
+      if (Cause.hasInterruptsOnly(cause)) {
+        process.exitCode = 130
+        onExit(130)
+        return
       }
-      process.exitCode = 1
-      onExit(0)
+      const pretty = Cause.pretty(cause)
+      writeStderr(`${pretty}\n`)
+      const args = normalizeProcessArgv(argv, isCommand)
+      const target = args.find((arg) => !arg.startsWith("-"))
+      if (hasAntigravityFormat(args) && (target === "guard" || target === "done")) {
+        const decision = target === "guard" ? "deny" : "continue"
+        writeStdout(`${JSON.stringify({ decision, reason: `${target}: uncaught CLI failure (${pretty})` })}\n`)
+      }
+      const failCode = target === "guard" || target === "done" ? 2 : 1
+      process.exitCode = failCode
+      onExit(failCode)
     })
     .exhaustive()
 }
@@ -156,7 +173,7 @@ export const runCliEffect = (
     const durationMs = Math.max(0, Math.round(performance.now() - startTime))
 
     const surface: TelemetrySurface =
-      argv.includes("--format=antigravity") || effectiveOptions?.stdin !== undefined ? "hook" : "cli"
+      hasAntigravityFormat(argv) || effectiveOptions?.stdin !== undefined ? "hook" : "cli"
 
     const category: TelemetryCategory = match(requested)
       .with("guard", () => "guard" as const)
@@ -167,14 +184,16 @@ export const runCliEffect = (
 
     const outcome = resolveCommandTelemetryOutcome(requested, res)
 
-    recordTelemetry(options, {
-      surface,
-      category,
-      toolName: requested === "ontology" ? `ontology:${argv[1] ?? "layers"}` : requested,
-      outcome,
-      durationMs,
-      ...(res.telemetryDetail !== undefined ? { detail: res.telemetryDetail } : {}),
-    })
+    yield* Effect.try(() => {
+      recordTelemetry(options, {
+        surface,
+        category,
+        toolName: requested === "ontology" ? `ontology:${argv[1] ?? "layers"}` : requested,
+        outcome,
+        durationMs,
+        ...(res.telemetryDetail !== undefined ? { detail: res.telemetryDetail } : {}),
+      })
+    }).pipe(Effect.ignore)
 
     if (
       requested === "done" &&
@@ -184,14 +203,16 @@ export const runCliEffect = (
       res.telemetryDetail !== "readOnly=true" &&
       (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true)
     ) {
-      const finalEvents = readTelemetryEvents(repoRoot, nodeSyncHostIo)
-      const finalFriction = readFrictionEvents(repoRoot, nodeSyncHostIo)
-      const finalReport = buildSessionReport({
-        events: finalEvents,
-        frictionEvents: finalFriction,
-        stampValid: true,
-      })
-      writeSessionReportFiles(repoRoot, finalReport, nodeSyncHostIo)
+      yield* Effect.try(() => {
+        const finalEvents = readTelemetryEvents(repoRoot, nodeSyncHostIo)
+        const finalFriction = readFrictionEvents(repoRoot, nodeSyncHostIo)
+        const finalReport = buildSessionReport({
+          events: finalEvents,
+          frictionEvents: finalFriction,
+          stampValid: true,
+        })
+        writeSessionReportFiles(repoRoot, finalReport, nodeSyncHostIo)
+      }).pipe(Effect.ignore)
     }
 
     return res

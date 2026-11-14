@@ -56,11 +56,3 @@ export {
   UnixSocketDaemonPort,
   type UnixSocketDaemonPortShape,
 } from "./cache-and-daemon-ports.js"
-
-export type {
-  ExtendedHostIo,
-  SyncHostDirEntry,
-  SyncHostExecOptions,
-  SyncHostExecResult,
-  SyncHostIo,
-} from "./host-io.js"

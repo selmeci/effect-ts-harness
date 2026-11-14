@@ -28,6 +28,7 @@ export const execCheckedSubprocess = Effect.fn("HarnessSubprocess.execChecked")(
         : `Command '${input.command}' failed with exit code ${result.exitCode}`
     return yield* new HarnessSubprocessError({
       command: input.command,
+      failureKind: "non-zero-exit",
       exitCode: result.exitCode,
       stderr: result.stderr,
       reason: ErrorReasonMessage.make(reasonText),

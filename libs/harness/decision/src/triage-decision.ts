@@ -98,7 +98,7 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     pattern: "no-restricted-imports",
     result: {
       kind: "mechanical",
-      hint: "Restricted infra import outside type:infra — move drizzle-orm, alchemy, or @effect/sql-* usage to a type:infra library (see agent-patterns/d1-repository.md and agent-patterns/alchemy-infra.md).",
+      hint: "Restricted infra import outside type:infra — move alchemy or @effect/sql-* usage to a type:infra library (see agent-patterns/d1-repository.md and agent-patterns/alchemy-infra.md).",
     },
   },
   {
@@ -154,7 +154,7 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     pattern: "SQL injection risk",
     result: {
       kind: "mechanical",
-      hint: "Raw SQL template interpolation in .exec() or .prepare() is banned (SQL injection risk) — use parameterized queries or Drizzle ORM.",
+      hint: "Raw SQL template interpolation in .exec() or .prepare() is banned (SQL injection risk) — use parameterized queries via @effect/sql SqlClient.",
     },
   },
   {

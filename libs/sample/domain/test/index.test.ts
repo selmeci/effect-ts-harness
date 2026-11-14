@@ -2,7 +2,8 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import { Cause, Effect, Exit, Layer, Result, Schema } from "effect"
-import { buildWorkspaceFnIndex, runWithTestTracer, type SyncHostIo } from "@harness/ingest"
+import { buildWorkspaceFnIndex, runWithTestTracer } from "@harness/ingest"
+import type { SyncHostIo } from "@harness/service/host-io"
 import {
   buildHarnessGraph,
   findTestsReaching,

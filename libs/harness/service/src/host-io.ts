@@ -52,6 +52,11 @@ export interface SyncHostIo {
   ) => SyncHostExecResult
 }
 
+export interface SyncHostSpawnDetachedResult {
+  readonly pid?: number | undefined
+  readonly spawnError?: string | undefined
+}
+
 export interface ExtendedHostIo extends SyncHostIo {
   readonly rmRecursiveSync: (targetPath: string) => void
   readonly cpRecursiveSync: (srcPath: string, destPath: string) => void
@@ -65,5 +70,5 @@ export interface ExtendedHostIo extends SyncHostIo {
       readonly cwd?: string | undefined
       readonly env?: Readonly<Record<string, string | undefined>> | undefined
     },
-  ) => void
+  ) => SyncHostSpawnDetachedResult
 }

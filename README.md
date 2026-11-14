@@ -26,7 +26,7 @@ The harness constrains coding agents with deterministic compiler, linter, proper
 
 ## Architecture & Monorepo Topology
 
-The harness is organized as an **Nx (`22.6.1`) + pnpm (`10.27.0`)** monorepo with strict 5-tier architectural boundaries enforced at lint time via `@nx/enforce-module-boundaries`:
+The harness is organized as an **Nx (`22.6.1`) + pnpm (`10.27.0`)** monorepo of **18 workspace packages** (**14** libraries in `libs/` + **4** apps in `apps/`) with strict 5-tier hexagonal boundaries enforced at lint time via `@nx/enforce-module-boundaries` and `HarnessTierTopology.decide`:
 
 ```mermaid
 flowchart TD
@@ -36,56 +36,66 @@ flowchart TD
   end
 
   subgraph Apps["type:app — Entrypoints & Sample Stack"]
-    CLI["@harness/cli\napps/harness-cli"]
-    MCP["@harness/mcp\napps/harness-mcp"]
-    SAMPLE["@harness/sample\napps/sample (Alchemy + Workers + React)"]
+    CLI["@harness/cli\napps/harness-cli (effect/cli + NodeRuntime)"]
+    MCP["@harness/mcp\napps/harness-mcp (ManagedRuntime, 15 tools)"]
+    SAMPLE["@harness/sample\napps/sample (Alchemy + Workers + DO)"]
+    SAMPLE_WEB["@harness/sample-web\napps/sample-web (Vite + React + AtomHttpApi)"]
   end
 
   subgraph Infra["type:infra — Live Layers & Native Bindings"]
-    GRAPH["@harness/graph\nOmnigraph v0.14.0 + .gq + ArchiMate 3.2"]
-    INGEST["@harness/ingest\nOxc + ast-grep + SQLite FTS5/sqlite-vec"]
-    CLEF["@harness/clef\nResident Ollama clef-flash JSON Schema"]
-    SAMPLE_INFRA["@harness/sample-infra\nDrizzle D1 + RpcSerialization.msgPack"]
+    HARNESS_INFRA["@harness/infra\nNodeServices + ScopedCache.makeWith + Ref/Deferred + UnixSocketDaemon"]
+    ES_INFRA["@harness/es-infra\nNative @effect/sql-sqlite-do (zero Drizzle)"]
+    SAMPLE_INFRA["@harness/sample-infra\n@effect/sql-d1 + @effect/sql-sqlite-do + RpcSerialization.msgPack"]
   end
 
-  subgraph Services["type:service — Context.Service Capabilities"]
-    DECISION["@harness/decision\nDecisionModel + 6 Versioned Schemas"]
+  subgraph CoreDomain["type:core / type:domain — Pure Deciders (R = never) & Orchestrators"]
+    GATES["@harness/gates (type:core)\n18+ Pure Deciders & Gate Plugins"]
+    GRAPH["@harness/graph (type:core)\nOmnigraph v0.14.0 + .gq + ArchiMate 3.2"]
+    INGEST["@harness/ingest (type:core)\nOxc + ast-grep + SQLite FTS5/sqlite-vec"]
+    DECISION["@harness/decision (type:core)\nClef DecisionModel + 13 Versioned Schemas"]
+    ES_CORE["@harness/es-core (type:core)\nDecider + AggregateRoot + EventStore"]
+    SAMPLE_DOM["@harness/sample-domain (type:domain)\nCreateItem / ListItems"]
+  end
+
+  subgraph Services["type:service — Pure Context.Service Capabilities"]
+    HARNESS_SVC["@harness/service\nWorkspaceFs, SubprocessRunner, Cache & Daemon Ports"]
     SAMPLE_SVC["@harness/sample-service\nItemRepo Service"]
   end
 
-  subgraph Domain["type:domain / type:core — Pure Deciders (R = never)"]
-    GATES["@harness/gates\nPure Deciders & Gate Plugins"]
-    SAMPLE_DOM["@harness/sample-domain\nCreateItem / ListItems"]
-  end
-
   subgraph Contracts["type:contract — Boundary Schemas, Errors & stub"]
-    HARNESS_CON["@harness/contract\nGate Schemas + stub<A,E,R>()"]
+    HARNESS_CON["@harness/contract\nGate/Cache/Daemon Schemas + stub<A,E,R>()"]
+    ES_CON["@harness/es-contract\nEvent Sourcing Schemas"]
     SAMPLE_CON["@harness/sample-contract\nItem Schemas + ItemRpcGroup"]
   end
 
   Adapters --> CLI
   Adapters --> MCP
-  CLI --> GRAPH & INGEST & CLEF & DECISION & GATES
-  MCP --> GRAPH & INGEST & CLEF & DECISION & GATES
-  GRAPH --> GATES
-  INGEST --> GATES
-  CLEF --> DECISION & GATES
-  DECISION --> GATES
+  CLI --> HARNESS_INFRA & DECISION & GATES & GRAPH & INGEST
+  MCP --> HARNESS_INFRA & DECISION & GATES & GRAPH & INGEST
+  HARNESS_INFRA --> DECISION & GATES & GRAPH & INGEST & HARNESS_SVC & HARNESS_CON
+  DECISION --> GATES & HARNESS_SVC & HARNESS_CON
+  GATES --> GRAPH & HARNESS_SVC & HARNESS_CON
+  GRAPH --> HARNESS_SVC & HARNESS_CON
+  INGEST --> HARNESS_SVC & HARNESS_CON
+  HARNESS_SVC --> HARNESS_CON
   SAMPLE --> SAMPLE_INFRA & SAMPLE_DOM & SAMPLE_CON
-  SAMPLE_INFRA --> SAMPLE_SVC & SAMPLE_CON
-  SAMPLE_DOM --> SAMPLE_SVC & SAMPLE_CON & GATES
+  SAMPLE_WEB --> SAMPLE_CON
+  SAMPLE_INFRA --> SAMPLE_DOM & SAMPLE_SVC & SAMPLE_CON
+  SAMPLE_DOM --> SAMPLE_SVC & SAMPLE_CON & HARNESS_CON
   SAMPLE_SVC --> SAMPLE_CON
+  ES_INFRA --> ES_CORE & ES_CON
+  ES_CORE --> ES_CON
 ```
 
 ### Nx Dependency Taxonomy
 
-| Nx Tag          | Allowed Dependencies                                         | Responsibilities                                                                           | Packages                                                                                                                                                                 |
-| :-------------- | :----------------------------------------------------------- | :----------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `type:contract` | `type:contract` (`effect` only)                              | Shared `Schema.Class`, `Schema.TaggedErrorClass`, `HttpApi`, `RpcGroup`, `stub<A, E, R>()` | `@harness/contract` (`libs/harness/contract`), `@harness/sample-contract` (`libs/sample/contract`), `@harness/es-contract` (`libs/es/contract`)                           |
-| `type:service`  | `type:contract`, `type:service`                              | `Context.Service` capability interfaces (repositories, gateways, model ports)              | `@harness/service` (`libs/harness/service`), `@harness/sample-service` (`libs/sample/service`)                                                                            |
-| `type:core` / `type:domain` | `type:contract`, `type:service`, `type:core`, `type:domain` | Pure business/engine logic and `R = never` deciders; zero host I/O                         | `@harness/{gates,graph,decision,ingest}`, `@harness/es-core`, `@harness/sample-domain`                                                                                    |
-| `type:infra`    | `type:contract`, `type:service`, `type:core`, `type:domain`, `type:infra` | Live `Layer` implementations, Drizzle D1 repositories, Node platform bindings              | `@harness/infra` (`libs/harness/infra`), `@harness/es-infra` (`libs/es/infra`), `@harness/sample-infra` (`libs/sample/infra`)                                             |
-| `type:app`      | All tiers                                                    | Composition root (`Layer.provideMerge`), CLI/MCP servers, Alchemy `alchemy.run.ts`, web UI | `@harness/cli` (`apps/harness-cli`), `@harness/mcp` (`apps/harness-mcp`), `@harness/sample` (`apps/sample`)                                                              |
+| Nx Tag                      | Allowed Dependencies                                                  | Responsibilities                                                                           | Packages                                                                                                                                                                 |
+| :-------------------------- | :-------------------------------------------------------------------- | :----------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type:contract`             | `effect` only (`[]` workspace deps)                                   | Shared `Schema.Class`, `Schema.TaggedErrorClass`, `HttpApi`, `RpcGroup`, `stub<A, E, R>()` | `@harness/contract` (`libs/harness/contract`), `@harness/es-contract` (`libs/es/contract`), `@harness/sample-contract` (`libs/sample/contract`)                           |
+| `type:service`              | `type:contract`, `type:service`                                       | `Context.Service` capability interfaces (ports only, zero `node:*` imports or `Live` layers) | `@harness/service` (`libs/harness/service`), `@harness/sample-service` (`libs/sample/service`)                                                                            |
+| `type:core` / `type:domain` | `type:contract`, `type:service`, `type:core` / `type:domain`          | Pure business/engine logic and `R = never` deciders; zero host I/O                         | `@harness/{gates,graph,decision,ingest}` (`type:core`), `@harness/es-core` (`type:core`), `@harness/sample-domain` (`type:domain`)                                        |
+| `type:infra`                | `type:contract`, `type:service`, `type:core`, `type:domain`, `type:infra` | Live `Layer` implementations, native `@effect/sql-d1` & `@effect/sql-sqlite-do` (zero Drizzle), Node platform bindings | `@harness/infra` (`libs/harness/infra`), `@harness/es-infra` (`libs/es/infra`), `@harness/sample-infra` (`libs/sample/infra`)                                             |
+| `type:app`                  | All tiers (`scope:web` restricted to `contract` + UI)                 | Composition root (`Layer.provideMerge`), CLI/MCP servers, Alchemy `alchemy.run.ts`, web UI | `@harness/cli` (`apps/harness-cli`), `@harness/mcp` (`apps/harness-mcp`), `@harness/sample` (`apps/sample`), `@harness/sample-web` (`apps/sample-web`)                  |
 
 ---
 
@@ -147,7 +157,7 @@ flowchart LR
 | **Motivation**      | `Requirement`, `Principle`, `Constraint`, `Goal`, `Outcome`         | `docs/specs/*.md` (EARS clauses + frontmatter), `docs/adr/*.md`         | `INFLUENCES`                                                           |
 | **Business**        | `BusinessProcess`, `BusinessObject`, `Contract`                     | `type:contract` `Schema.Class`, `Schema.TaggedErrorClass`, `RpcGroup`   | `REALIZES` ($\rightarrow$ Motivation)                                  |
 | **Application**     | `ApplicationService`, `ApplicationComponent`, `ApplicationFunction` | `type:service` `Context.Service`, `type:domain` `Effect.fn` / `.decide` | `REALIZES` ($\rightarrow$ Motivation / Business), `SERVES`, `ACCESSES` |
-| **Technology**      | `SystemSoftware`, `Artifact`, `Node`                                | `type:infra` `Layer`, Drizzle repositories, Alchemy resources           | `REALIZES` ($\rightarrow$ ApplicationService), `ASSIGNED_TO`           |
+| **Technology**      | `SystemSoftware`, `Artifact`, `Node`                                | `type:infra` `Layer`, `@effect/sql-*` repositories, Alchemy resources   | `REALIZES` ($\rightarrow$ ApplicationService), `ASSIGNED_TO`           |
 | **Implementation**  | `WorkPackage`, `Deliverable`                                        | Vitest `it.effect` tests, migration SQL files                           | `TESTS` ($\rightarrow$ Application / Business), `ASSOCIATED_WITH`      |
 
 ### Cross-Layer Invariants (`OntologyInvariants.decide`)
@@ -174,7 +184,7 @@ Agents and gates query the property graph using Omnigraph's `.gq` language via `
 
 ## Deterministic Gates & Advisory Schemas
 
-### 11 Pure Domain Deciders (`@harness/gates`, `R = never`)
+### 18+ Pure Domain Deciders (`@harness/gates`, `R = never`)
 
 | Decider                     | File                                             | Purpose                                                                                                 |
 | :-------------------------- | :----------------------------------------------- | :------------------------------------------------------------------------------------------------------ |
@@ -190,18 +200,25 @@ Agents and gates query the property graph using Omnigraph's `.gq` language via `
 | `Friction.decide`           | `libs/harness/gates/src/friction.ts`             | Clusters `.harness/friction-log.jsonl` events by root cause (`>= 2` occurrences) for `harness learn`.   |
 | `SessionReport.decide`      | `libs/harness/gates/src/session-report.ts`       | Computes session health score (`0–100`), letter grade (`A–D`), gate pass rates, and recommendations.    |
 
-### 6 Versioned `DecisionModel` Schemas (`@harness/decision` + `@harness/clef`)
+### 13 Versioned `DecisionModel` Schemas (`@harness/decision`)
 
-Backed by resident Ollama (`clef-flash` with `keep_alive: -1` and strict JSON Schema decoding; deterministic fallback layer when Ollama is offline):
+Owned by `@harness/decision` and backed by resident Ollama (`clef-flash` with `keep_alive: -1` and strict JSON Schema decoding; deterministic fallback layer when Ollama is offline):
 
-| Schema               | Used By                          | Purpose                                                                                                           |
-| :------------------- | :------------------------------- | :---------------------------------------------------------------------------------------------------------------- |
-| `IdiomRouterV1`      | `harness route`, `harness_route` | Reranks top-K FTS5 / `sqlite-vec` chunks from `repos/effect`, `repos/alchemy`, and `agent-patterns/*.md`.         |
-| `GuardV1`            | `harness guard`                  | Classifies ambiguous shell commands when deterministic regex/path guards return `ask`.                            |
-| `TriageV1`           | `harness verify`                 | Summarizes compiler/test failures and identifies the minimal causal locus when verification fails.                |
-| `PlanStepCoverageV1` | `harness plan-check`             | Audits whether `stub<A, E, R>()` signatures cover all EARS clauses in the plan.                                   |
-| `LearnProposalV1`    | `harness learn`                  | Drafts `oxlint` AST rule specifications or `agent-patterns/*.md` recipes from friction clusters.                  |
-| `OntologyConflictV1` | `harness ontology --with-clef`   | Detects semantic contradictions between EARS requirements/ADRs and implementing `Effect.fn` / `Layer` signatures. |
+| Schema                        | Used By                          | Purpose                                                                                                           |
+| :---------------------------- | :------------------------------- | :---------------------------------------------------------------------------------------------------------------- |
+| `IdiomRouterV1`               | `harness route`, `harness_route` | Reranks top-K FTS5 / `sqlite-vec` chunks from `repos/effect`, `repos/alchemy`, and `agent-patterns/*.md`.         |
+| `GuardV1`                     | `harness guard`                  | Classifies ambiguous shell commands when deterministic regex/path guards return `ask`.                            |
+| `TriageV1`                    | `harness verify`                 | Summarizes compiler/test failures and identifies the minimal causal locus when verification fails.                |
+| `PlanStepCoverageV1`          | `harness plan-check`             | Audits whether `stub<A, E, R>()` signatures cover all EARS clauses in the plan.                                   |
+| `LearnProposalV1`             | `harness learn`                  | Drafts `oxlint` AST rule specifications or `agent-patterns/*.md` recipes from friction clusters.                  |
+| `OntologyConflictV1`          | `harness ontology --with-clef`   | Detects semantic contradictions between EARS requirements/ADRs and implementing `Effect.fn` / `Layer` signatures. |
+| `EarsClauseSemanticsV1`       | `EarsSpecLint`                   | Evaluates semantic clarity and testability of EARS requirement clauses.                                           |
+| `HoleRelevanceAndEdgePriorV1` | `harness_graph_infer`            | Scores candidate graph holes and edge priors during Datalog/Omnigraph inference.                                  |
+| `DstHazardPriorV1`            | `harness mutate`                 | Ranks distributed/async hazard scenarios for deterministic simulation testing.                                    |
+| `MutantEquivalenceV1`         | `harness mutate`                 | Advises on equivalent-mutant classification during mutation testing.                                              |
+| `SynthesizedRuleQualityV1`    | `harness learn`                  | Evaluates quality of synthesized AST/lint rules before graduation.                                                |
+| `DpoCandidateRankerV1`        | `harness_graph_rewrite`          | Ranks double-pushout (DPO) graph rewrite candidates.                                                              |
+| `PlanSearchScorerV1`          | `harness plan-check`             | Scores candidate plan-as-code decomposition paths.                                                                |
 
 ---
 
@@ -214,12 +231,12 @@ Every typecheck (`pnpm typecheck` / `harness verify`) runs `tsgo -b` patched wit
 - `missingStarInYieldEffect: "error"` — `yield` instead of `yield*` inside `Effect.gen` / `Effect.fn` is a compile error.
 - `returnEffectInGen: "error"`, `tryCatchInEffectGen: "error"`, `unnecessaryEffectGen: "error"`, `scopeInLayerEffect: "error"`, `layerMergeAllWithDependencies: "error"`.
 
-In addition, `tools/oxlint/syntax-bans.js` enforces 20+ Effect v4, Alchemy v2, and Drizzle AST rules, including:
+In addition, `tools/oxlint/syntax-bans.js` enforces 20+ Effect v4, Alchemy v2, and SQL AST rules, including:
 
 - `effect-harness/no-effect-diagnostics-suppression` — bans `// @effect-diagnostics` and `/* @effect-diagnostics */` comments so agents cannot silence `@effect/tsgo`.
 - `effect-harness/no-stub-outside-plan-check` — bans `stub()` unless `HARNESS_PLAN_CHECK=1` is set.
 - `effect-harness/no-gen-wrapper` — requires `Effect.fn("SpanName")` or `Effect.fnUntraced` instead of `(...args) => Effect.gen(...)`.
-- `effect-harness/no-run-sync-outside-app`, `effect-harness/no-layer-in-domain`, `effect-harness/no-drizzle-outside-infra`, `effect-harness/no-alchemy-outside-infra`, `effect-harness/no-repos-import`.
+- `effect-harness/no-run-sync-outside-app`, `effect-harness/no-layer-in-domain`, `effect-harness/no-drizzle` (banning `drizzle-orm` / `drizzle-kit`), `effect-harness/no-alchemy-outside-infra`, `effect-harness/no-repos-import`.
 
 ---
 
@@ -247,7 +264,7 @@ Invoke via `node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/inde
 
 ### `harness-mcp` Server (`apps/harness-mcp`)
 
-Exposes 12 structural, ontology, diagnostics, and telemetry MCP tools over stdio:
+Exposes 15 structural, ontology, Datalog/DPO, diagnostics, and telemetry MCP tools over stdio:
 
 | MCP Tool                    | Arguments                      | Description                                                                                                                                                  |
 | :-------------------------- | :----------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -261,6 +278,9 @@ Exposes 12 structural, ontology, diagnostics, and telemetry MCP tools over stdio
 | `harness_ontology_impact`   | `{ nodeId }`                   | Computes downstream blast radius across contracts, domain functions, services, layers, and tests when a requirement or symbol changes.                       |
 | `harness_ontology_check`    | `{}`                           | Runs `OntologyInvariants.decide` across the workspace and returns any cross-layer violations.                                                                |
 | `harness_gq_query`          | `{ queryName?, querySource? }` | Executes a named query from `libs/harness/graph/queries/harness.gq` or an inline `.gq` query against Omnigraph.                                              |
+| `harness_graph_infer`       | `{ ... }`                      | Runs incremental Datalog (`@electric-sql/d2ts`) inference (`S0..S3`) over the workspace property graph.                                                      |
+| `harness_graph_complete`    | `{ ... }`                      | Computes graph completion candidates and missing traceability edges.                                                                                         |
+| `harness_graph_rewrite`     | `{ ... }`                      | Evaluates double-pushout (DPO) graph rewrite rules over the workspace graph.                                                                                 |
 | `harness_lsp_diagnostics`   | `{ project? }`                 | Runs `@effect/tsgo` (`tsgo -b --noEmit`) and returns structured diagnostics (including `@effect/language-service` errors) with file, line, column, and code. |
 | `harness_telemetry_report`  | `{ writeReport? }`             | Computes the current session health report (`SessionReport.decide`) from `.harness/telemetry-log.jsonl`.                                                     |
 
@@ -324,7 +344,7 @@ The harness packages full engineering capabilities into two first-class adapter 
 1. **Route Patterns:** Orchestrator queries `harness_route` (`IdiomRouterV1` via `clef-flash`) for the sanctioned patterns matching each package archetype.
 2. **Partition Package Subagents:** The orchestrator dispatches parallel subagents (`TypeName: "self"`, `Model: "flash"`, `Workspace: "share"` or `HARNESS_WORKTREE_ID=<id>`):
    - **Subagent 1 (`libs/<scope>/domain`):** Replaces pure stubs with `Effect.fn` use-cases and `.decide` deciders.
-   - **Subagent 2 (`libs/<scope>/infra`):** Implements live Drizzle D1 / DO SQLite repositories and Alchemy resource bindings.
+   - **Subagent 2 (`libs/<scope>/infra`):** Implements live `@effect/sql-d1` / `@effect/sql-sqlite-do` repositories and Alchemy resource bindings.
    - **Subagent 3 (`apps/web` or UI):** Implements `@effect/atom-react` state and client contracts.
 3. **Subagent Execution Discipline:** Subagents run `harness_lsp_diagnostics` and package unit tests (`pnpm nx run <project>:test`). Subagents **never** run monorepo `verify` or mutate `.harness/verify-stamp.json`.
 4. **Specialist Review Lenses:** Orchestrator runs read-only specialist subagents (`effect-ears-test-reviewer`, `effect-security-reviewer`, `effect-reliability-reviewer`, `effect-adversarial-reviewer`) against the implementation.
@@ -367,9 +387,9 @@ The harness packages full engineering capabilities into two first-class adapter 
 
 ---
 
-### 5. 16 Indexed Pattern Recipes (`agent-patterns/*.md`)
+### 5. 17 Indexed Pattern Recipes (`agent-patterns/*.md`)
 
-All 16 pattern files are indexed as `PatternDoc` nodes in Omnigraph and routed via `harness route` / `harness_route` (`IdiomRouterV1`):
+All 17 pattern files (`16` recipes + `agent-patterns/README.md` index) are indexed as `PatternDoc` nodes in Omnigraph and routed via `harness route` / `harness_route` (`IdiomRouterV1`):
 
 | Pattern Recipe        | File                                     | Key Effect v4 / Alchemy v2 Constructs                                                    | Gate / AST Ban Enforced                                    |
 | :-------------------- | :--------------------------------------- | :--------------------------------------------------------------------------------------- | :--------------------------------------------------------- |
@@ -382,8 +402,8 @@ All 16 pattern files are indexed as `PatternDoc` nodes in Omnigraph and routed v
 | **Schedule**          | `agent-patterns/schedule.md`             | `Schedule.exponential`, `Schedule.jittered`, `Schedule.recurs`, `Effect.retry`           | `effect-harness/no-unbounded-retry`                        |
 | **Testing**           | `agent-patterns/testing.md`              | `@effect/vitest` (`it.effect`, `it.scoped`), `TestClock`, `Layer.mock`                   | `effect-harness/no-vacuous-assertion`                      |
 | **Alchemy Infra**     | `agent-patterns/alchemy-infra.md`        | `alchemy`, `Worker`, `R2Bucket`, `D1Database`, `DurableObjectNamespace`                  | `effect-harness/no-alchemy-outside-infra`                  |
-| **D1 Repository**     | `agent-patterns/d1-repository.md`        | `drizzle-orm/effect-d1`, `@effect/sql-d1`, `sqliteTable`, row schema decoders            | `effect-harness/no-drizzle-outside-infra`                  |
-| **DO State**          | `agent-patterns/durable-object-state.md` | `drizzle-orm/effect-sqlite-do`, `Scheduler.MixedScheduler("sync")`, `db.withTransaction` | `effect-harness/no-async-in-do-transaction`                |
+| **D1 Repository**     | `agent-patterns/d1-repository.md`        | `@effect/sql-d1`, `D1Client.layer`, `SqlClient`, row schema decoders                      | `no-drizzle` / `no-unparameterized-sql`                   |
+| **DO State**          | `agent-patterns/durable-object-state.md` | `@effect/sql-sqlite-do`, `SqliteMigrator`, `Scheduler.MixedScheduler("sync")`             | `effect-harness/no-async-in-do-transaction`                |
 | **Event Sourcing**    | `agent-patterns/event-sourcing.md`       | `Decider.make`, pure synchronous `evolve<Aggregate>`, effectful `.decide`                | `effect-harness/no-run-sync-outside-app`                   |
 | **HTTP API**          | `agent-patterns/httpapi.md`              | `HttpApi`, `HttpApiGroup`, `HttpApiEndpoint`, OpenAPI generation, `oasdiff breaking`     | `effect-harness/no-untyped-http-response`                  |
 | **RPC**               | `agent-patterns/rpc.md`                  | `RpcGroup`, `Cloudflare.toHttpClient`, W3C `traceparent` propagation                     | `effect-harness/no-untyped-rpc-payload`                    |

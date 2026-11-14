@@ -1,7 +1,6 @@
 import { spawnSync } from "node:child_process"
 import { readFileSync, rmSync, writeFileSync } from "node:fs"
-import os from "node:os"
-import { resolve } from "node:path"
+import { dirname, resolve } from "node:path"
 import process from "node:process"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
@@ -135,8 +134,9 @@ describe("sample-contract (Schemas, HttpApi, RpcGroup, OpenAPI)", () => {
       items.properties = { ...items.properties, extraRequiredField: { type: "string" } }
     }
     const tmpBaselineFile = resolve(
-      os.tmpdir(),
-      `test-baseline-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+      dirname(fileURLToPath(import.meta.url)),
+      `..`,
+      `.tmp-baseline-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
     )
     try {
       writeFileSync(tmpBaselineFile, JSON.stringify(baselineSpec, null, 2), "utf8")

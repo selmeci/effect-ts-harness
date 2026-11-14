@@ -2,7 +2,6 @@ import { Schema } from "effect"
 import {
   AstSourceContent,
   AstSourceFilePath,
-  GateVerdict,
   NonNegativeCount,
   WorkspaceFilePath,
 } from "./ast-and-gate-primitives.js"
@@ -37,6 +36,7 @@ export const TierTopologyRuleId = Schema.Literals([
   "forbidden-service-dependency",
   "forbidden-core-dependency",
   "impure-service-tier-import",
+  "undeclared-workspace-dependency",
 ])
 export type TierTopologyRuleId = typeof TierTopologyRuleId.Type
 
@@ -48,6 +48,7 @@ export const PackageTierManifestInput = Schema.Struct({
   packageName: PackageManifestName,
   nxTags: Schema.Array(NxTierTag),
   dependencyNames: Schema.Array(PackageDependencyName),
+  nonRuntimeDependencyNames: Schema.optional(Schema.Array(PackageDependencyName)),
 })
 export type PackageTierManifestInput = typeof PackageTierManifestInput.Type
 
@@ -60,6 +61,7 @@ export type ServiceTierSourceInput = typeof ServiceTierSourceInput.Type
 export const HarnessTierTopologyInput = Schema.Struct({
   manifests: Schema.Array(PackageTierManifestInput),
   serviceFiles: Schema.Array(ServiceTierSourceInput),
+  workspaceSourceFiles: Schema.optional(Schema.Array(ServiceTierSourceInput)),
 })
 export type HarnessTierTopologyInput = typeof HarnessTierTopologyInput.Type
 
@@ -70,26 +72,35 @@ export const HarnessTierTopologyViolation = Schema.Struct({
 })
 export type HarnessTierTopologyViolation = typeof HarnessTierTopologyViolation.Type
 
-export const HarnessTierTopologyReport = Schema.Struct({
-  verdict: GateVerdict,
-  violations: Schema.Array(HarnessTierTopologyViolation),
-  inspectedPackageCount: NonNegativeCount,
-}).pipe(
-  Schema.check(
-    Schema.makeFilter((report) =>
-      (report.verdict === "clean") === (report.violations.length === 0)
-        ? undefined
-        : "HarnessTierTopologyReport verdict and violations length must agree",
-    ),
-  ),
-)
+export const HarnessTierTopologyReport = Schema.Union([
+  Schema.Struct({
+    verdict: Schema.Literal("clean"),
+    violations: Schema.Tuple([]),
+    inspectedPackageCount: NonNegativeCount,
+  }),
+  Schema.Struct({
+    verdict: Schema.Literal("violated"),
+    violations: Schema.NonEmptyArray(HarnessTierTopologyViolation),
+    inspectedPackageCount: NonNegativeCount,
+  }),
+])
 export type HarnessTierTopologyReport = typeof HarnessTierTopologyReport.Type
 
 export const makeHarnessTierTopologyReport = (
   violations: ReadonlyArray<HarnessTierTopologyViolation>,
   inspectedPackageCount: NonNegativeCount,
-): HarnessTierTopologyReport => ({
-  verdict: violations.length === 0 ? "clean" : "violated",
-  violations: [...violations],
-  inspectedPackageCount,
-})
+): HarnessTierTopologyReport => {
+  const [first, ...rest] = violations
+  if (first === undefined) {
+    return {
+      verdict: "clean",
+      violations: [],
+      inspectedPackageCount,
+    }
+  }
+  return {
+    verdict: "violated",
+    violations: [first, ...rest],
+    inspectedPackageCount,
+  }
+}

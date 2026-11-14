@@ -11,7 +11,6 @@
     "lint": "oxlint --deny-warnings .",
     "test": "vitest run",
     "migration:check": "node --import ../../../tools/node-ts-resolver.mjs ../../../apps/harness-cli/src/index.ts check-migrations",
-    "migration:generate": "drizzle-kit generate",
     "verify": "pnpm run migration:check"
   },
   "dependencies": {
@@ -20,7 +19,6 @@
     "@harness/sample-contract": "workspace:*",
     "@harness/sample-domain": "workspace:*",
     "@harness/sample-service": "workspace:*",
-    "drizzle-orm": "1.0.0-rc.5-ab785fc",
     "effect": "4.0.0",
     "ts-pattern": "5.9.2"
   },
@@ -28,10 +26,10 @@
     "@alchemy.run/cloudflare-runtime": "2.0.0-beta.80",
     "@effect/platform-node": "4.0.0",
     "@effect/vitest": "4.0.0",
+    "@harness/es-infra": "workspace:*",
     "@harness/graph": "workspace:*",
     "@harness/ingest": "workspace:*",
     "@types/node": "26.6.5",
-    "drizzle-kit": "1.0.0-rc.5-ab785fc",
     "vitest": "5.0.3"
   },
   "nx": {

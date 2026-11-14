@@ -3,6 +3,9 @@
 Oct 24, 2026 · @Roman Selmeci  
 Supersedes: [docs/mvp.md](./mvp.md) (MVP v1, Oct 3–4, 2026)
 
+> [!NOTE]
+> **Data Layer Supersession (`DR-5`):** Historical references to `drizzle-orm` / `drizzle-kit` in this MVP brief are superseded. The workspace has **completely abandoned and banned Drizzle (`drizzle-orm`, `drizzle-kit`)** in favor of native Effect v4 SQL (`@effect/sql-d1`, `@effect/sql-sqlite-do`, `SqlClient.SqlClient`, `SqliteMigrator`, `Schema`) in `type:infra`.
+
 ---
 
 ## 0. Why MVP v2 Exists — Research Findings & Architectural Diff vs. MVP v1

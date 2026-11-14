@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import * as path from "node:path"
-import type { SyncHostIo } from "@harness/service"
+import type { SyncHostIo } from "@harness/service/host-io"
 import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {

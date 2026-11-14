@@ -1,4 +1,4 @@
-import { Effect, Layer, Schema } from "effect"
+import { Cause, Effect, Layer, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import { decideGuardCommand, routeStep } from "@harness/decision"
@@ -17,6 +17,7 @@ import {
   makeReadStdinEffect,
   recordFriction,
 } from "./daemon-and-omnigraph.service.js"
+import { hasAntigravityFormat } from "./hook-format.js"
 
 export { classifyCommand, classifyFileWrite }
 
@@ -187,7 +188,7 @@ export const handleGuard = (
   decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
-    const isAntigravityFlag = argv.includes("--format=antigravity")
+    const isAntigravityFlag = hasAntigravityFormat(argv)
     const fileFlag = argv.find((arg) => arg.startsWith("--file="))
     const cliFilePath = fileFlag ? fileFlag.slice("--file=".length) : undefined
     const positionalArgs = argv
@@ -346,7 +347,19 @@ export const handleGuard = (
 
     const cmdDecision = yield* evaluateCommandDecision(command, options, decisionLayer)
     return toGuardCliResult(cmdDecision, isAntigravity)
-  })
+  }).pipe(
+    Effect.catchCause((cause) => {
+      if (Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)) {
+        return Effect.interrupt
+      }
+      const pretty = Cause.pretty(cause)
+      process.stderr.write(`[harness:guard] uncaught cause: ${pretty}\n`)
+      const isAntigravityFlag = hasAntigravityFormat(argv)
+      return Effect.succeed(
+        formatDenyResult(isAntigravityFlag, `guard: uncaught error or defect (${pretty})`),
+      )
+    }),
+  )
 
 export const handleRoute = (
   argv: ReadonlyArray<string>,

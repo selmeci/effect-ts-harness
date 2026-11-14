@@ -37,6 +37,7 @@ import {
   writeGraphHeadMeta,
 } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
+import { hasAntigravityFormat } from "./hook-format.js"
 import { buildWorkspaceFnIndex } from "@harness/ingest"
 import {
   type CliEnv,
@@ -55,7 +56,7 @@ export const handleDoctorOrSession = (
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-    const isAntigravity = argv.includes("--format=antigravity")
+    const isAntigravity = hasAntigravityFormat(argv)
     const nodeMajor = parseInt(process.versions.node.split(".")[0] ?? "0", 10)
     const nodeOk = nodeMajor >= 24
 

@@ -103,6 +103,6 @@ Enforce strict directional boundaries across project tags:
 | `type:contract`         | Shared Schemas, `HttpApi`, `RpcGroup`, API errors                     | `effect` only                                                                                             |
 | `type:domain`           | Business use cases, domain errors, pure logic                         | `contract`, `service`, (`@harness/contract` for `stub` during planning); **never** `type:infra` or `alchemy` |
 | `type:service`          | Service interfaces (`Context.Service`), repository abstractions       | `contract`, `domain`                                                                                      |
-| `type:infra`            | Live `Layer` implementations, Drizzle repositories, Alchemy resources | `contract`, `domain`, `service`, `infra`                                                                  |
+| `type:infra`            | Live `Layer` implementations, `@effect/sql-*` repositories, Alchemy resources (`drizzle-orm`/`drizzle-kit` banned) | `contract`, `domain`, `service`, `infra`                                                                  |
 | `type:app`              | Worker/API entrypoint composing Layers (`alchemy.run.ts`)             | All workspace libraries                                                                                   |
 | `type:app`, `scope:web` | Frontend (Vite + React + `AtomHttpApi`)                               | `contract` and UI libraries only (no raw `fetch`)                                                         |

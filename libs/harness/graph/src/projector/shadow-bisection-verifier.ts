@@ -1,4 +1,4 @@
-import type { SyncHostIo } from "@harness/service"
+import type { SyncHostIo } from "@harness/service/host-io"
 import { Cause, Effect } from "effect"
 import { match } from "ts-pattern"
 import { decideGraphInference } from "../datalog-engine.js"

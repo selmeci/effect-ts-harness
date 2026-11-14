@@ -35,7 +35,7 @@ target_specs:
 > **RFC Status & Phased Implementation:**
 > **Status:** `implemented` (Phases 5A–5D and the Zero-Backward-Compatibility Canonicalization Pass are all implemented and verified).
 > - **Phase 5A (Hexagon Foundation & End of Dual-Tagging):** Created [`@harness/contract`](../../libs/harness/contract/src/index.ts) (`type:contract`, `effect`-only) and [`@harness/service`](../../libs/harness/service/src/index.ts) (`type:service`, `effect` + `@harness/contract`), assigned `type:core` to `libs/harness/{gates,graph,ingest,decision}`, added batched `WorkspaceFs.statAndReadAll`, and enforced package boundaries via [`HarnessTierTopology.decide`](../../libs/harness/gates/src/plugins/harness-tier-topology.ts).
-> - **Phase 5B (Native Effect v4 `@harness/infra` & Pure `.decide` Cores):** Created [`@harness/infra`](../../libs/harness/infra/src/index.ts) (`type:infra`) over `@effect/platform-node` (`NodeServices.layer`, `FileSystem.FileSystem`, `Path.Path`, `ChildProcessSpawner`, `ScopedCache`, `SynchronizedRef`, `Effect.acquireRelease`), eliminated all Node host I/O imports (`node:fs`, `node:child_process`, `node:net`, `node:os`, `node:http`, `node:https`) from non-infra `libs/harness/*/src/**`, replaced global mutable `Map` / `let` caches with scoped `AstGateCacheLive` and `DecisionCacheLive`, and restored true `R = never` purity to `AstGateCache.decide` and `GraphGc.decide`.
+> - **Phase 5B (Native Effect v4 `@harness/infra` & Pure `.decide` Cores):** Created [`@harness/infra`](../../libs/harness/infra/src/index.ts) (`type:infra`) over `@effect/platform-node` (`NodeServices.layer`, `FileSystem.FileSystem`, `Path.Path`, `ChildProcessSpawner`, `ScopedCache.makeWith` for `AstGateCacheLive`, per-key `Ref` + `Deferred` single-flight deduplication for `DecisionCacheLive`, `SynchronizedRef`, `Effect.acquireRelease`), eliminated all Node host I/O imports (`node:fs`, `node:child_process`, `node:net`, `node:os`, `node:http`, `node:https`) from non-infra `libs/harness/*/src/**`, replaced global mutable `Map` / `let` caches with scoped `AstGateCacheLive` and `DecisionCacheLive`, and restored true `R = never` purity to `AstGateCache.decide` and `GraphGc.decide`.
 > - **Phase 5C (Declarative `effect/cli`, `ManagedRuntime` MCP & Zero Production `Effect.runSync`):** Migrated [`apps/harness-cli`](../../apps/harness-cli/src/index.ts) to declarative `effect/cli` (`Command.make`, `Flag`, `Argument`) + `NodeRuntime.runMain` with typed `check-openapi`, `check-migrations`, `check-event-schemas`, `benchmark`, and `scenario` subcommands; migrated [`apps/harness-mcp`](../../apps/harness-mcp/src/managed-runtime.ts) to a scoped `ManagedRuntime` (`HarnessMcp.executeManagedTool`); deleted production `Effect.runSync` calls and legacy synchronous wrapper shims; and cleaned up `Layer.build`-inside-`Layer.effect` and double-wrapped `Effect.fn` in [`libs/es/infra`](../../libs/es/infra/src/memory.ts) and [`libs/sample/infra`](../../libs/sample/infra/src/index.ts).
 > - **Phase 5D (Zero-Exemption Closure & Permanent Gates):** Deleted `isHarnessInternal` from [`ast-gate-visitors.ts`](../../libs/harness/gates/src/plugins/ast-gate-visitors.ts), expanded `isEnforcedWorkspaceFile` in [`tools/oxlint/syntax-bans.js`](../../tools/oxlint/syntax-bans.js) uniformly across `libs/harness/*` and `apps/harness-*` (retaining only the documented single-file `SqlStorage` bridge in [`libs/es/infra/src/memory.ts`](../../libs/es/infra/src/memory.ts)), and locked permanent `SelfDogfooding.decide` hexagonal rules (`no-global-mutable-cache`, `no-node-builtins-outside-infra`, `no-layer-build-in-layer-effect`, `no-double-wrapped-effect-fn`, `test-env-branch-in-src`).
 > - **Zero-Shim Canonicalization Pass:** Removed all transitional backward-compatibility re-export shims (`@harness/gates/src/stub.ts`, transitional `@harness/gates` re-exports, dead `@harness/contract` schema aliases, duplicate `*NodeLive` layer aliases, `isRepoWideAstRule`, `__harnessActiveMutant`, and imperative `run`/`runCli`/`executeTool` wrappers in `src/`).
@@ -77,7 +77,7 @@ After RFC-0007 Phase 4 landed, an empirical cross-check of the live codebase aga
    - *Why it occurred:* Phase 4 focused on splitting large files below `650` LOC rather than redesigning runtime composition at the `type:app` edge.
 
 6. **Gap 6 — Triple AST Walker Duplication & Uncovered `.mjs` Scripts:**
-   - *Empirical state:* Three separate AST walkers existed (`syntax-bans.js` at `2,511` LOC over ESTree, `ast-cache.ts` + `ast-gate-visitors.ts` at `1,080` LOC over `ts.SourceFile`, and `ast-policy-extractor.ts` at `468` LOC over `ts-morph`), while standalone `.mjs` scripts (`tools/scenario/run.mjs`, `check-migrations.mjs`, `check-openapi.mjs`, `check-event-schemas.mjs`) lived outside `effect/cli` and `SelfDogfooding.decide`.
+   - *Empirical state (pre-RFC-0008 baseline):* Three separate AST walkers existed (`syntax-bans.js` at `2,511` LOC over ESTree, `ast-cache.ts` + `ast-gate-visitors.ts` at `1,080` LOC over `ts.SourceFile`, and `ast-policy-extractor.ts` at `468` LOC over `ts-morph` — post-Round-2 `wc -l`: `syntax-bans.js` at `2,779` LOC, `ast-cache.ts` at `340` LOC + `ast-gate-visitors.ts` at `691` LOC = `1,031` LOC, and `ast-policy-extractor.ts` removed), while standalone `.mjs` scripts (`tools/scenario/run.mjs`, `check-migrations.mjs`, `check-openapi.mjs`, `check-event-schemas.mjs`) lived outside `effect/cli` and `SelfDogfooding.decide`.
    - *Why it occurred:* Oxlint requires a synchronous JS ESTree plugin for editor/lint speed whereas graph extraction requires TypeScript's type checker; repository check scripts had not yet been ported into typed CLI subcommands.
 
 7. **Gap 7 — Residual Anti-Patterns in Reference Packages (`libs/es` & `libs/sample`):**
@@ -106,7 +106,7 @@ After RFC-0007 Phase 4 landed, an empirical cross-check of the live codebase aga
 1. Establish physical `@harness/contract` (`type:contract`), `@harness/service` (`type:service`), and `@harness/infra` (`type:infra`) packages and assign every `libs/harness/*` package a single canonical Nx tier tag.
 2. Migrate all filesystem, path, subprocess, caching, and Unix socket daemon I/O in `@harness/infra` to native Effect v4 primitives (`NodeServices.layer`, `FileSystem.FileSystem`, `Path.Path`, `ChildProcessSpawner`, `ScopedCache`, `SynchronizedRef`, `Effect.acquireRelease`).
 3. Eliminate all `61` production `Effect.runSync` calls, replace manual `argv` / `decisionLayer` threading in `apps/harness-cli` with `effect/cli` + `NodeRuntime.runMain`, and run `apps/harness-mcp` on a single scoped `ManagedRuntime`.
-4. Delete `isHarnessInternal`, enforce `syntax-bans.js` and `SelfDogfooding.decide` uniformly across `libs/harness/*` and `apps/harness-*`, and add 4 permanent hexagonal hygiene rules.
+4. Delete `isHarnessInternal`, enforce `syntax-bans.js` and `SelfDogfooding.decide` uniformly across `libs/harness/*` and `apps/harness-*`, and add 5 permanent hexagonal hygiene rules.
 5. Port repository check scripts and scenario runner into typed `effect/cli` subcommands (`check-openapi`, `check-migrations`, `check-event-schemas`, `benchmark`, `scenario`).
 
 ### 3.2 Non-Goals
@@ -134,9 +134,9 @@ $$\text{type:contract} \prec \text{type:service} \prec \{ \text{type:core}, \tex
 
 | Source Package Tier | Allowed Internal Workspace Targets | Allowed External Runtime Dependencies | `R` Channel Discipline |
 | :--- | :--- | :--- | :--- |
-| **`type:contract`** (`@harness/contract`) | `type:contract` only | `effect` only | Pure data schemas, branded types, `TaggedError`s, `stub<A, E, R>()` |
-| **`type:service`** (`@harness/service`) | `type:contract`, `type:service` | `effect` only (`0` `node:*` imports, `0` `Layer.*`) | `Context.Service` ports returning `Effect<A, E, never>` (plus `SyncHostIo` for synchronous `ts.CompilerHost` callbacks) |
-| **`type:core` / `type:domain`** (`@harness/{gates,graph,decision,ingest}`) | `type:contract`, `type:service`, `type:core`, `type:domain` | Pure TS/AST libraries (`ts-morph`, `@electric-sql/d2ts`, `@modernrelay/omnigraph`, `ts-pattern`; pure `node:path`/`node:crypto`/`node:url` helpers permitted, `0` Node host I/O built-ins) | `.decide` functions have `R = never`; orchestrators satisfy $R \subseteq \text{ServicePorts}$ |
+| **`type:contract`** (`@harness/contract`) | `[]` (`0` workspace dependencies) | `effect` only | Pure data schemas, branded types, discriminated `Schema.Union` reports, `TaggedError`s, `stub<A, E, R>()` |
+| **`type:service`** (`@harness/service`) | `type:contract`, `type:service` | `effect` only (`0` `node:*` imports, `0` `Layer.*`) | `Context.Service` ports returning `Effect<A, E, never>` (with `SyncHostIo` / `ExtendedHostIo` isolated on `@harness/service/host-io` for synchronous `ts.CompilerHost` callbacks) |
+| **`type:core`** (`@harness/{gates,graph,decision,ingest}`) / **`type:domain`** | `type:core`: `type:contract`, `type:service`, `type:core` (`type:domain`: `type:contract`, `type:service`, `type:domain`) | Pure TS/AST libraries (`ts-morph`, `@electric-sql/d2ts`, `@modernrelay/omnigraph`, `ts-pattern`; only `{path, path/posix, path/win32, crypto, url}` Node built-ins permitted) | `.decide` functions have `R = never`; pure in-memory registries/overlays (`GatePluginRegistryLive`, `SpanRecorder.layer`) live in `type:core`; `makeLocalDecisionModelLayer` requires `HttpClient` from `infra`/`app`; orchestrators satisfy $R \subseteq \text{ServicePorts}$ |
 | **`type:infra`** (`@harness/infra`) | Any lower tier | `@effect/platform-node`, `node:*` (only inside `type:infra`) | Provides `Layer<Port, E, Platform>` adapters |
 | **`type:app`** (`harness-cli`, `harness-mcp`) | Any tier | `@effect/platform-node` (`NodeRuntime`, `NodeServices`) | Composes `MainLayer` once at the edge; executes via `NodeRuntime.runMain` or `ManagedRuntime` |
 
@@ -150,7 +150,7 @@ flowchart TB
   end
 
   subgraph InfraTier["4. type:infra — Live Adapters & Platform I/O"]
-    INFRA["@harness/infra (NodeServices.layer, FileSystem, ChildProcessSpawner, ScopedCache, SynchronizedRef, UnixSocketDaemonLive)"]
+    INFRA["@harness/infra (NodeServices.layer, FileSystem, ChildProcessSpawner, ScopedCache.makeWith, Ref+Deferred, SynchronizedRef, UnixSocketDaemonLive)"]
   end
 
   subgraph DomainTier["3. type:domain / type:core — Pure Deciders & Orchestrators"]
@@ -213,17 +213,17 @@ flowchart TB
 - **Canonical Ports (`Context.Service`):**
   - [`index.ts`](../../libs/harness/service/src/index.ts): `WorkspaceFs` (`"@harness/service/WorkspaceFs"`), `HarnessSubprocessRunner` (`"@harness/service/HarnessSubprocessRunner"`), `ActiveMutantContext` (`"@harness/service/ActiveMutantContext"`).
   - [`cache-and-daemon-ports.ts`](../../libs/harness/service/src/cache-and-daemon-ports.ts): `AstGateCachePort` (`"@harness/service/AstGateCachePort"`), `DecisionCachePort` (`"@harness/service/DecisionCachePort"`), `UnixSocketDaemonPort` (`"@harness/service/UnixSocketDaemonPort"`).
-  - [`host-io.ts`](../../libs/harness/service/src/host-io.ts): `SyncHostIo` and `ExtendedHostIo` port interfaces for compiler overlay and Omnigraph sync adapters without importing `node:*` in `@harness/graph`.
+  - [`host-io.ts`](../../libs/harness/service/src/host-io.ts): `SyncHostIo` and `ExtendedHostIo` port interfaces isolated on the `@harness/service/host-io` subpath (never exported from `@harness/service` main barrel or `@harness/ingest`), backing synchronous `ts.CompilerHost` callbacks and synchronous gate/extractor bridges (`mutation-check`, `compiler-session`), with an optional `ts.sys` fallback when standalone callers omit `hostIo`.
 
 ### 5.3 `@harness/infra` (`libs/harness/infra`)
 
 - **Dependencies:** `@effect/platform-node` (`NodeServices.layer`, `NodeFileSystem`, `NodePath`, `NodeChildProcessSpawner`) alongside `@harness/service` and `@harness/contract`.
-- **Live Adapters:**
+- **Live Adapters (Host OS filesystem, subprocess, persistent disk cache, and Unix socket daemon Live Layers live exclusively in `@harness/infra`; pure in-memory registries/overlays like `GatePluginRegistryLive` and `SpanRecorder.layer` live in `type:core`, and `makeLocalDecisionModelLayer` requires `HttpClient` provided at the `infra`/`app` composition boundary):**
   - [`workspace-fs-live.ts`](../../libs/harness/infra/src/workspace-fs-live.ts): `WorkspaceFsLive` backed by `FileSystem.FileSystem` and `Path.Path`.
   - [`subprocess-runner-live.ts`](../../libs/harness/infra/src/subprocess-runner-live.ts): `HarnessSubprocessRunnerLive` backed by `ChildProcess.make` and `ChildProcessSpawner.ChildProcessSpawner`.
-  - [`ast-gate-cache-live.ts`](../../libs/harness/infra/src/ast-gate-cache-live.ts): `AstGateCacheLive` / `makeAstGateCacheLayer` backed by `ScopedCache` + `SynchronizedRef` + `FileSystem.FileSystem`, replacing all module-global `Map` and `let` counters.
-  - [`decision-cache-live.ts`](../../libs/harness/infra/src/decision-cache-live.ts): `DecisionCacheLive` / `makeDecisionCacheLayer` backed by `ScopedCache` + `SynchronizedRef` + `FileSystem.FileSystem`.
-  - [`unix-socket-daemon-live.ts`](../../libs/harness/infra/src/unix-socket-daemon-live.ts): `UnixSocketDaemonLive` / `startScopedUnixSocketDaemon` using `Layer.effect` + `Effect.acquireRelease` to bind a `0600` Unix domain socket and deterministically unlink it on scope finalization, failing with `DaemonServerError`.
+  - [`ast-gate-cache-live.ts`](../../libs/harness/infra/src/ast-gate-cache-live.ts): `AstGateCacheLive` / `makeAstGateCacheLayer` wired into production `verify-delta-gates.ts` and `HarnessInfraLive` with disk persistence at `.harness/cache/ast-gates-v1.json`, injected `AstGateFileEvaluator` (zero `infra -> gates` imports), and `ScopedCache.makeWith` (with `Duration.zero` TTL on failure exits so failures are never negative-cached) outside `SynchronizedRef` + `FileSystem.FileSystem`.
+  - [`decision-cache-live.ts`](../../libs/harness/infra/src/decision-cache-live.ts): `DecisionCacheLive` / `makeDecisionCacheLayer` backed by per-key `Deferred` single-flight deduplication (`Ref` + `Deferred`) + `SynchronizedRef` + `FileSystem.FileSystem` (so per-call `ttlMillis` and heterogeneous `R` work cleanly without casts).
+  - [`unix-socket-daemon-live.ts`](../../libs/harness/infra/src/unix-socket-daemon-live.ts): `UnixSocketDaemonLive` / `startScopedUnixSocketDaemon` using `Layer.effect` + `Effect.acquireRelease` to enforce `0o700` on the managed `.harness` socket directory (never `chmod`ing external shared directories when `socketPathOverride` is supplied), bind a `0o600` Unix domain socket, and deterministically unlink it on scope finalization, failing with `DaemonServerError`.
   - [`index.ts`](../../libs/harness/infra/src/index.ts): Exports `HarnessInfraLive` merging all live layers.
 
 ### 5.4 `apps/harness-cli` & `apps/harness-mcp` (`type:app`)
@@ -232,20 +232,23 @@ flowchart TB
   - [`declarative-cli.ts`](../../apps/harness-cli/src/commands/declarative-cli.ts) defines the root `harness` command and subcommands via `effect/cli` (`Command.make`, `Flag`, `Argument`, `Command.withSubcommands`), executed once at [`apps/harness-cli/src/index.ts`](../../apps/harness-cli/src/index.ts) via `NodeRuntime.runMain` with a single composed `MainLayer` (`HarnessInfraLive` + `NodeServices.layer`).
   - [`repo-checks.command.ts`](../../apps/harness-cli/src/commands/repo-checks.command.ts) and [`scenario.command.ts`](../../apps/harness-cli/src/commands/scenario.command.ts) expose typed subcommands `check-openapi`, `check-migrations`, `check-event-schemas`, `benchmark`, and `scenario` (`HarnessCli.checkOpenApi`, `HarnessCli.checkMigrations`, `HarnessCli.checkEventSchemas`, `HarnessCli.runScenario`).
 - **`apps/harness-mcp`:**
-  - [`managed-runtime.ts`](../../apps/harness-mcp/src/managed-runtime.ts) creates a long-lived `ManagedRuntime` (`HarnessMcp.executeManagedTool`) sharing warm `TsCompilerOverlayService`, `AstGateCachePort`, and `NodeServices.layer` across MCP tool invocations and disposing cleanly on shutdown.
+  - [`managed-runtime.ts`](../../apps/harness-mcp/src/managed-runtime.ts) creates a long-lived `ManagedRuntime` (`HarnessMcp.executeManagedTool`) sharing warm `TsCompilerOverlayService`, `AstGateCachePort`, and `NodeServices.layer` across MCP tool invocations and disposing cleanly on shutdown, bridging foreign async callbacks strictly via `ManagedRuntime.runPromiseExit` in `src/server.ts` and `src/daemon/unix-socket-daemon.ts`.
 
 ---
 
 ## 6. Deterministic Gate Rule Catalog
 
+Report schemas (`SelfDogfoodingReport`, `HarnessTierTopologyReport`, `AstGateEvaluationReport`, `AstGateDecisionReport`) are compile-time discriminated `Schema.Union`s (`verdict: "clean"` with an empty tuple `violations: readonly []` vs. `verdict: "violated"` with `NonEmptyArray` `violations`).
+
 ### 6.1 `HarnessTierTopology.decide` (`libs/harness/gates/src/plugins/harness-tier-topology.ts`)
 
 | Rule ID | Condition Checked | Purpose |
 | :--- | :--- | :--- |
-| `dual-contract-tier-tag` | Any workspace `project.json` / `package.json` declares multiple `type:*` tags | Prevents bypassing `@nx/enforce-module-boundaries` via dual tags |
-| `forbidden-contract-dependency` | Any `type:contract` package declares a dependency outside `effect` and `type:contract` | Keeps `@harness/contract` 100% pure and dependency-free |
+| `dual-contract-tier-tag` | Any workspace `project.json` / `package.json` declares `0` or `>1` `type:*` tags | Prevents missing or dual tags from bypassing `@nx/enforce-module-boundaries` |
+| `forbidden-contract-dependency` | Any `type:contract` package declares any workspace dependency (`0` workspace deps; `effect` only) | Keeps `@harness/contract` 100% pure and dependency-free |
 | `forbidden-service-dependency` | Any `type:service` package declares a dependency outside `effect`, `type:contract`, and `type:service` | Prevents service ports from pulling in `core`, `domain`, `gates`, `graph`, or `infra` |
 | `forbidden-core-dependency` | Any `type:core` / `type:domain` package declares a dependency on `type:infra` or `type:app` | Prevents pure core/domain engines from importing live adapters |
+| `undeclared-workspace-dependency` | Any `src/` `@harness/*` import is not declared in the package's `package.json` `dependencies` | Prevents phantom workspace imports outside declared package boundaries |
 | `impure-service-tier-import` | Any `type:service` source file imports `node:*`, `Layer.*`, `type:core`, `type:domain`, or `type:infra` modules | Keeps `Context.Service` definitions free of runtime I/O and layer implementations |
 
 ### 6.2 `SelfDogfooding.decide` Phase 5D Rules (`libs/harness/gates/src/plugins/self-dogfooding-plugin.ts`)
@@ -253,15 +256,15 @@ flowchart TB
 | Rule ID | Condition Checked | Purpose |
 | :--- | :--- | :--- |
 | `no-global-mutable-cache` | Module-scope `let` declarations, empty/Weak module-scope `Map`/`Set`/`WeakMap`/`WeakSet`, or module-scope `.set`/`.add`/`.delete`/`.clear` calls in `src/` | Enforces scoped state (`ScopedCache`, `SynchronizedRef`) over global singletons |
-| `no-node-builtins-outside-infra` | Static or dynamic imports of `node:fs`, `node:child_process`, `node:net`, `node:os`, `node:http`, `node:https` (and bare aliases) outside `type:infra` | Enforces `WorkspaceFs` / `HarnessSubprocessRunner` / `NodeServices` seams |
+| `no-node-builtins-outside-infra` | Static or dynamic imports of any `node:*` or bare Node built-in outside `type:infra` and `type:app` except `{path, path/posix, path/win32, crypto, url}` | Enforces `WorkspaceFs` / `HarnessSubprocessRunner` / `NodeServices` seams |
 | `no-layer-build-in-layer-effect` | `Layer.build(...)` invoked inside `Layer.effect(...)` | Enforces idiomatic `Layer.unwrap` / `Layer.provide` composition |
 | `no-double-wrapped-effect-fn` | `Effect.fn(...)((...) => Effect.gen(...))` or `Effect.fnUntraced(...)((...) => Effect.gen(...))` | Enforces direct generator bodies `Effect.fn("name")(function* (input) { ... })` |
 | `test-env-branch-in-src` | `process.env.VITEST` inspected in production `src/` files | Enforces explicit injected test options over environment sniffing |
 
 ### 6.3 Uniform AST Enforcement Without `isHarnessInternal`
 
-- [`ast-gate-visitors.ts`](../../libs/harness/gates/src/plugins/ast-gate-visitors.ts) removed `isHarnessInternal` completely. `discriminant-branching` and `unscoped-effect-run` run uniformly across `libs/harness/*` and `apps/harness-*`.
-- [`tools/oxlint/syntax-bans.js`](../../tools/oxlint/syntax-bans.js) expanded `isEnforcedWorkspaceFile` to cover `libs/harness/*` and `apps/harness-*`, retaining only the explicitly documented single-file synchronous Cloudflare Durable Object `SqlStorage` callback bridge in [`libs/es/infra/src/memory.ts`](../../libs/es/infra/src/memory.ts).
+- [`ast-gate-visitors.ts`](../../libs/harness/gates/src/plugins/ast-gate-visitors.ts) removed `isHarnessInternal` completely. `discriminant-branching` and `unscoped-effect-run` (banning `runSync`, `runSyncExit`, `runSyncWith`, `runPromise`, `runPromiseExit`, `runPromiseWith`, `runFork`, `runForkWith`, and `runCallback*`) run uniformly across `libs/harness/*` and `apps/harness-*`.
+- [`tools/oxlint/syntax-bans.js`](../../tools/oxlint/syntax-bans.js) expanded `isEnforcedWorkspaceFile` to cover `libs/harness/*` and `apps/harness-*`, retaining only `Effect.runSync(Effect.die(...))` in [`libs/es/infra/src/memory.ts`](../../libs/es/infra/src/memory.ts) solely inside synchronous `SqlStorage.exec` / cursor callbacks.
 
 ---
 

@@ -1,6 +1,6 @@
 import { join } from "node:path"
 import { Effect, Result, Schema } from "effect"
-import type { SyncHostIo } from "@harness/service"
+import type { SyncHostIo } from "@harness/service/host-io"
 import { match } from "ts-pattern"
 import type { FrictionEvent } from "./friction-log.js"
 import { resolveHarnessStateDir } from "./worktree.js"

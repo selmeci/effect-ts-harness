@@ -1,11 +1,11 @@
 import { join, relative } from "node:path"
+import { NodeServices } from "@effect/platform-node"
 import { Cause, Data, Effect, Layer, Option, Schema } from "effect"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
 import {
   AstSourceContent,
   AstSourceFilePath,
-  HARNESS_GATE_RULE_VERSION,
   NxTierTag,
   PackageDependencyName,
   PackageManifestName,
@@ -29,7 +29,7 @@ import {
   type SpanSample,
 } from "@harness/gates"
 import type { HarnessGraph } from "@harness/graph"
-import { nodeSyncHostIo, WorkspaceFsLive } from "@harness/infra"
+import { makeAstGateCacheLayer, nodeSyncHostIo, WorkspaceFsLive } from "@harness/infra"
 import type { CliResult } from "./daemon-and-omnigraph.service.js"
 
 export const buildDstTargetsFromGraph = (graph: HarnessGraph): ReadonlyArray<DstTargetMethodSpec> => {
@@ -74,6 +74,9 @@ export const buildDstTargetsFromGraph = (graph: HarnessGraph): ReadonlyArray<Dst
 const TierPackageJsonSchema = Schema.Struct({
   name: Schema.optional(Schema.String),
   dependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  devDependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  peerDependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  optionalDependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   nx: Schema.optional(
     Schema.Struct({
       tags: Schema.optional(Schema.Array(Schema.String)),
@@ -82,49 +85,140 @@ const TierPackageJsonSchema = Schema.Struct({
 })
 const decodeTierPackageJson = Schema.decodeUnknownOption(Schema.fromJsonString(TierPackageJsonSchema))
 
+const isBannedDrizzleDepName = (dep: string): boolean =>
+  dep === "drizzle-orm" ||
+  dep.startsWith("drizzle-orm/") ||
+  dep === "drizzle-kit" ||
+  dep.startsWith("drizzle-kit/")
+
 export const collectHarnessTierTopologyViolationMessages = (
   repoRoot: string,
 ): Effect.Effect<ReadonlyArray<string>> =>
   Effect.gen(function* () {
     const libsDir = join(repoRoot, "libs")
-    if (!nodeSyncHostIo.existsSync(libsDir)) return []
+    const appsDir = join(repoRoot, "apps")
+    const rootPkgJsonPath = join(repoRoot, "package.json")
+    if (
+      !nodeSyncHostIo.existsSync(libsDir) &&
+      !nodeSyncHostIo.existsSync(appsDir) &&
+      !nodeSyncHostIo.existsSync(rootPkgJsonPath)
+    ) {
+      return []
+    }
     const manifests: Array<PackageTierManifestInput> = []
     const serviceFiles: Array<ServiceTierSourceInput> = []
-    const scopes = nodeSyncHostIo.readdirSync(libsDir).filter((e) => e.isDirectory).map((e) => e.name)
-    for (const scope of scopes) {
-      const scopeDir = join(libsDir, scope)
-      const tiers = nodeSyncHostIo.readdirSync(scopeDir).filter((e) => e.isDirectory).map((e) => e.name)
-      for (const tier of tiers) {
-        const tierDir = join(scopeDir, tier)
-        const pkgJsonPath = join(tierDir, "package.json")
-        if (nodeSyncHostIo.existsSync(pkgJsonPath)) {
-          const raw = nodeSyncHostIo.readTextSync(pkgJsonPath)
-          const relPkgPath = relative(repoRoot, pkgJsonPath).replace(/\\/g, "/")
-          match(decodeTierPackageJson(raw))
-            .with({ _tag: "Some" }, ({ value }) => {
-              manifests.push({
-                manifestPath: PackageManifestPath.make(relPkgPath),
-                packageName: PackageManifestName.make((value.name ?? `${scope}/${tier}`).trim()),
-                nxTags: (value.nx?.tags ?? []).map((t) => t.trim()).filter((t) => t.length > 0).map((t) => NxTierTag.make(t)),
-                dependencyNames: Object.keys(value.dependencies ?? {}).map((d) => d.trim()).filter((d) => d.length > 0).map((d) => PackageDependencyName.make(d)),
-              })
+    const workspaceSourceFiles: Array<ServiceTierSourceInput> = []
+    const manifestDecodeErrors: Array<string> = []
+
+    if (nodeSyncHostIo.existsSync(rootPkgJsonPath)) {
+      const rawRoot = nodeSyncHostIo.readTextSync(rootPkgJsonPath)
+      match(decodeTierPackageJson(rawRoot))
+        .with({ _tag: "Some" }, ({ value }) => {
+          const allRootDeps = [
+            ...Object.keys(value.dependencies ?? {}),
+            ...Object.keys(value.devDependencies ?? {}),
+            ...Object.keys(value.peerDependencies ?? {}),
+            ...Object.keys(value.optionalDependencies ?? {}),
+          ]
+            .map((d) => d.trim())
+            .filter((d) => d.length > 0)
+          for (const dep of allRootDeps) {
+            if (isBannedDrizzleDepName(dep)) {
+              manifestDecodeErrors.push(
+                `[forbidden-core-dependency] package.json: Root package "${(value.name ?? "root").trim()}" declares banned Drizzle dependency "${dep}" in "package.json" — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator).`,
+              )
+            }
+          }
+        })
+        .with({ _tag: "None" }, () => {
+          manifestDecodeErrors.push(
+            `[invalid-package-manifest] package.json: failed to parse or validate package.json`,
+          )
+        })
+        .exhaustive()
+    }
+
+    const collectPackageDir = (pkgDir: string, defaultName: string, isServiceTier: boolean): void => {
+      const pkgJsonPath = join(pkgDir, "package.json")
+      if (nodeSyncHostIo.existsSync(pkgJsonPath)) {
+        const raw = nodeSyncHostIo.readTextSync(pkgJsonPath)
+        const relPkgPath = relative(repoRoot, pkgJsonPath).replace(/\\/g, "/")
+        match(decodeTierPackageJson(raw))
+          .with({ _tag: "Some" }, ({ value }) => {
+            const nonRuntimeDependencyNames = [
+              ...Object.keys(value.devDependencies ?? {}),
+              ...Object.keys(value.peerDependencies ?? {}),
+              ...Object.keys(value.optionalDependencies ?? {}),
+            ]
+              .map((d) => d.trim())
+              .filter((d) => d.length > 0)
+              .map((d) => PackageDependencyName.make(d))
+            manifests.push({
+              manifestPath: PackageManifestPath.make(relPkgPath),
+              packageName: PackageManifestName.make((value.name ?? defaultName).trim()),
+              nxTags: (value.nx?.tags ?? [])
+                .map((t) => t.trim())
+                .filter((t) => t.length > 0)
+                .map((t) => NxTierTag.make(t)),
+              dependencyNames: Object.keys(value.dependencies ?? {})
+                .map((d) => d.trim())
+                .filter((d) => d.length > 0)
+                .map((d) => PackageDependencyName.make(d)),
+              nonRuntimeDependencyNames,
             })
-            .with({ _tag: "None" }, () => undefined)
-            .exhaustive()
-        }
-        if (tier === "service" && nodeSyncHostIo.existsSync(join(tierDir, "src"))) {
-          for (const absFile of collectWorkspaceTsFiles(join(tierDir, "src"), nodeSyncHostIo)) {
-            serviceFiles.push({
-              filePath: AstSourceFilePath.make(relative(repoRoot, absFile).replace(/\\/g, "/")),
-              content: AstSourceContent.make(nodeSyncHostIo.readTextSync(absFile)),
-            })
+          })
+          .with({ _tag: "None" }, () => {
+            manifestDecodeErrors.push(
+              `[invalid-package-manifest] ${relPkgPath}: failed to parse or validate package.json`,
+            )
+          })
+          .exhaustive()
+      }
+      if (nodeSyncHostIo.existsSync(join(pkgDir, "src"))) {
+        for (const absFile of collectWorkspaceTsFiles(join(pkgDir, "src"), nodeSyncHostIo)) {
+          const sourceItem: ServiceTierSourceInput = {
+            filePath: AstSourceFilePath.make(relative(repoRoot, absFile).replace(/\\/g, "/")),
+            content: AstSourceContent.make(nodeSyncHostIo.readTextSync(absFile)),
+          }
+          workspaceSourceFiles.push(sourceItem)
+          if (isServiceTier) {
+            serviceFiles.push(sourceItem)
           }
         }
       }
     }
-    if (manifests.length === 0 && serviceFiles.length === 0) return []
-    const report = yield* decideHarnessTierTopology({ manifests, serviceFiles })
-    return report.violations.map((v) => `[${v.rule}] ${v.location}: ${v.message}`)
+
+    if (nodeSyncHostIo.existsSync(libsDir)) {
+      const scopes = nodeSyncHostIo.readdirSync(libsDir).filter((e) => e.isDirectory).map((e) => e.name)
+      for (const scope of scopes) {
+        const scopeDir = join(libsDir, scope)
+        const tiers = nodeSyncHostIo.readdirSync(scopeDir).filter((e) => e.isDirectory).map((e) => e.name)
+        for (const tier of tiers) {
+          collectPackageDir(join(scopeDir, tier), `${scope}/${tier}`, tier === "service")
+        }
+      }
+    }
+
+    if (nodeSyncHostIo.existsSync(appsDir)) {
+      const appNames = nodeSyncHostIo.readdirSync(appsDir).filter((e) => e.isDirectory).map((e) => e.name)
+      for (const appName of appNames) {
+        collectPackageDir(join(appsDir, appName), appName, false)
+      }
+    }
+
+    if (
+      manifests.length === 0 &&
+      serviceFiles.length === 0 &&
+      workspaceSourceFiles.length === 0 &&
+      manifestDecodeErrors.length === 0
+    ) {
+      return []
+    }
+    const report = yield* decideHarnessTierTopology({ manifests, serviceFiles, workspaceSourceFiles })
+    return [
+      ...manifestDecodeErrors,
+      ...report.violations.map((v) => `[${v.rule}] ${v.location}: ${v.message}`),
+    ]
   })
 
 export const runDeltaAstAndPluginGates = (
@@ -145,17 +239,42 @@ export const runDeltaAstAndPluginGates = (
       filePath: AstSourceFilePath.make(relPath),
       content: AstSourceContent.make(nodeSyncHostIo.readTextSync(join(repoRoot, relPath))),
     }))
-    const astReport = yield* AstGateCache.decide({
-      files: astGateFiles,
-      ruleVersion: HARNESS_GATE_RULE_VERSION,
-      cacheFilePath: AstGateCache.resolveCachePath(repoRoot),
-    })
-    const enforcedAstViolations = astReport.violations.filter((v) => !v.file.startsWith("tools/"))
-    if (enforcedAstViolations.length > 0) {
-      const msg = enforcedAstViolations
-        .map((v) => `[${v.rule}] ${v.file}:${v.line}: ${v.message}`)
-        .join("\n")
-      return Option.some({ exitCode: 1, stdout: "", stderr: `[GATE FAILURE] verify:ast-gates\n${msg}` })
+    const astGateCacheLayer = makeAstGateCacheLayer({
+      cacheFilePath: WorkspaceFilePath.make(AstGateCache.resolveCachePath(repoRoot)),
+    }).pipe(Layer.provide(NodeServices.layer))
+    const astExit = yield* AstGateCache.evaluateCached(astGateFiles).pipe(
+      Effect.provide(astGateCacheLayer),
+      Effect.exit,
+    )
+    const astFailResult = match(astExit)
+      .with({ _tag: "Failure" }, ({ cause }) =>
+        Option.some<CliResult>({
+          exitCode: 1,
+          stdout: "",
+          stderr: `[GATE FAILURE] verify:ast-gates\n${Cause.pretty(cause)}`,
+        }),
+      )
+      .with({ _tag: "Success" }, ({ value: astReport }) => {
+        const enforcedAstViolations = astReport.violations.filter((v) => !v.file.startsWith("tools/"))
+        if (enforcedAstViolations.length > 0) {
+          const msg = enforcedAstViolations
+            .map((v) => `[${v.rule}] ${v.file}:${v.line}: ${v.message}`)
+            .join("\n")
+          return Option.some<CliResult>({
+            exitCode: 1,
+            stdout: "",
+            stderr: `[GATE FAILURE] verify:ast-gates\n${msg}`,
+          })
+        }
+        return Option.none<CliResult>()
+      })
+      .exhaustive()
+    const astGateFailure = match(astFailResult)
+      .with({ _tag: "Some" }, ({ value }) => value)
+      .with({ _tag: "None" }, () => undefined)
+      .exhaustive()
+    if (astGateFailure !== undefined) {
+      return Option.some(astGateFailure)
     }
 
     let modularDeltaFiles = deltaFiles.filter((f) => isModularPluginPath(f))

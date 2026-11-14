@@ -1,13 +1,14 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { NodeServices } from "@effect/platform-node"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Layer, Option } from "effect"
+import { Cause, Effect, Fiber, Layer, Option } from "effect"
 import {
   ActiveMutantId,
   AstSourceContent,
   AstSourceFilePath,
+  computeWorkspaceFileLineCount,
   DaemonSocketPath,
   DecisionCacheKey,
   DecisionCachePayloadJson,
@@ -20,7 +21,6 @@ import {
   WorkspaceFileContent,
   WorkspaceFilePath,
 } from "@harness/contract"
-import { execCheckedSubprocess, statAndReadWorkspaceFiles } from "@harness/gates"
 import {
   ActiveMutantContext,
   AstGateCachePort,
@@ -37,6 +37,7 @@ import {
   HarnessSubprocessRunnerLive,
   makeAstGateCacheLayer,
   makeDecisionCacheLayer,
+  makeHarnessInfraLayer,
   makeHarnessSubprocessRunnerHostIoLayer,
   makeHarnessSubprocessRunnerLayer,
   makeUnixSocketDaemonLayer,
@@ -94,10 +95,7 @@ describe("@harness/infra live adapters", () => {
 
         const content = yield* fs.readTextFile(targetPath)
         expect(content).toBe("line1\nline2\n")
-
-        const stats = yield* statAndReadWorkspaceFiles([targetPath])
-        expect(stats).toHaveLength(1)
-        expect(stats[0]?.lineCount).toBe(3)
+        expect(computeWorkspaceFileLineCount(content)).toBe(3)
 
         const readErr = yield* fs.readTextFile(missingPath).pipe(Effect.flip)
         expect(readErr._tag).toBe("WorkspaceFsError")
@@ -109,7 +107,8 @@ describe("@harness/infra live adapters", () => {
 
   it.live("HarnessSubprocessRunnerLive executes zero, failing, and timed-out commands", () =>
     Effect.gen(function* () {
-      const okResult = yield* execCheckedSubprocess({
+      const runner = yield* HarnessSubprocessRunner
+      const okResult = yield* runner.exec({
         command: SubprocessCommand.make(process.execPath),
         args: [
           SubprocessArg.make("-e"),
@@ -119,26 +118,28 @@ describe("@harness/infra live adapters", () => {
       expect(okResult.exitCode).toBe(0)
       expect(okResult.stdout).toBe("hello-infra")
 
-      const failErr = yield* execCheckedSubprocess({
+      const failRes = yield* runner.exec({
         command: SubprocessCommand.make(process.execPath),
         args: [
           SubprocessArg.make("-e"),
           SubprocessArg.make("process.stderr.write('boom'); process.exit(2)"),
         ],
-      }).pipe(Effect.flip)
-      expect(failErr._tag).toBe("HarnessSubprocessError")
-      expect(failErr.exitCode).toBe(2)
-      expect(failErr.stderr).toContain("boom")
+      })
+      expect(failRes.exitCode).toBe(2)
+      expect(failRes.stderr).toContain("boom")
 
-      const timeoutErr = yield* execCheckedSubprocess({
-        command: SubprocessCommand.make(process.execPath),
-        args: [
-          SubprocessArg.make("-e"),
-          SubprocessArg.make("setTimeout(() => {}, 5000)"),
-        ],
-        timeoutMs: SubprocessTimeoutMs.make(50),
-      }).pipe(Effect.flip)
+      const timeoutErr = yield* runner
+        .exec({
+          command: SubprocessCommand.make(process.execPath),
+          args: [
+            SubprocessArg.make("-e"),
+            SubprocessArg.make("setTimeout(() => {}, 5000)"),
+          ],
+          timeoutMs: SubprocessTimeoutMs.make(50),
+        })
+        .pipe(Effect.flip)
       expect(timeoutErr._tag).toBe("HarnessSubprocessError")
+      expect(timeoutErr.failureKind).toBe("timeout")
     }).pipe(Effect.provide(HarnessSubprocessRunnerLive)),
   )
 
@@ -156,8 +157,8 @@ describe("@harness/infra live adapters", () => {
         const layer1 = makeAstGateCacheLayer({ cacheFilePath }).pipe(Layer.provide(NodeServices.layer))
         const [firstReport, secondReport, sizeAfter] = yield* Effect.gen(function* () {
           const cache = yield* AstGateCachePort
-          const first = yield* cache.evaluateBatch(batch)
-          const second = yield* cache.evaluateBatch(batch)
+          const first = yield* cache.evaluateBatch(batch, () => [])
+          const second = yield* cache.evaluateBatch(batch, () => [])
           const size = yield* cache.cacheSize
           return [first, second, size] as const
         }).pipe(Effect.provide(layer1))
@@ -172,7 +173,7 @@ describe("@harness/infra live adapters", () => {
         const layer2 = makeAstGateCacheLayer({ cacheFilePath }).pipe(Layer.provide(NodeServices.layer))
         const persistedReport = yield* Effect.gen(function* () {
           const cache = yield* AstGateCachePort
-          return yield* cache.evaluateBatch(batch)
+          return yield* cache.evaluateBatch(batch, () => [])
         }).pipe(Effect.provide(layer2))
 
         expect(persistedReport.verdict).toBe("clean")
@@ -314,8 +315,14 @@ describe("@harness/infra live adapters", () => {
     }),
   )
 
-  it.effect("F-4.2: nodeSyncHostIo.execFileSync populates spawnError, timedOut, exitCode: -1, and rejects null bytes", () =>
+  it.effect("F-4.2: nodeSyncHostIo.execFileSync & spawnDetached handle normal, trimmed, missing, timedOut, and invalid inputs safely", () =>
     Effect.sync(() => {
+      const okRes = nodeSyncHostIo.execFileSync(`  ${process.execPath}  `, ["-e", "process.stdout.write('trimmed')"])
+      expect(okRes.exitCode).toBe(0)
+      expect(okRes.stdout).toBe("trimmed")
+      expect(okRes.signal).toBeUndefined()
+      expect("signal" in okRes).toBe(false)
+
       const missingRes = nodeSyncHostIo.execFileSync("definitely-nonexistent-binary-xyz-42", [])
       expect(missingRes.exitCode).toBe(-1)
       expect(missingRes.spawnError).toBeDefined()
@@ -329,11 +336,34 @@ describe("@harness/infra live adapters", () => {
       expect(timeoutRes.exitCode).toBe(-1)
       expect(timeoutRes.timedOut).toBe(true)
 
-      expect(() => nodeSyncHostIo.execFileSync("node\0bad", [])).toThrow()
-      expect(() => nodeSyncHostIo.execFileSync(process.execPath, ["arg\0bad"])).toThrow()
-      expect(() =>
-        nodeSyncHostIo.execFileSync(process.execPath, ["-e", "0"], { cwd: "/tmp/bad\0cwd" }),
-      ).toThrow()
+      const badCmd = nodeSyncHostIo.execFileSync("node\0bad", [])
+      expect(badCmd.exitCode).toBe(-1)
+      expect(badCmd.spawnError).toBeDefined()
+
+      const badArg = nodeSyncHostIo.execFileSync(process.execPath, ["arg\0bad"])
+      expect(badArg.exitCode).toBe(-1)
+      expect(badArg.spawnError).toBeDefined()
+
+      const badCwd = nodeSyncHostIo.execFileSync(process.execPath, ["-e", "0"], { cwd: "/tmp/bad\0cwd" })
+      expect(badCwd.exitCode).toBe(-1)
+      expect(badCwd.spawnError).toBeDefined()
+
+      const emptyCmd = nodeSyncHostIo.execFileSync("   ", [])
+      expect(emptyCmd.exitCode).toBe(-1)
+      expect(emptyCmd.spawnError).toBeDefined()
+
+      const detachedInvalid = nodeSyncHostIo.spawnDetached("  ", [])
+      expect(detachedInvalid.spawnError).toBeDefined()
+
+      const wsCwdExec = nodeSyncHostIo.execFileSync(process.execPath, ["-e", "0"], { cwd: "   " })
+      expect(wsCwdExec.exitCode).toBe(-1)
+      expect(wsCwdExec.spawnError).toBe("Subprocess cwd must not be empty")
+
+      const wsCwdDetached = nodeSyncHostIo.spawnDetached(process.execPath, ["-e", "0"], { cwd: "   " })
+      expect(wsCwdDetached.spawnError).toBe("Subprocess cwd must not be empty")
+
+      const detachedMissing = nodeSyncHostIo.spawnDetached("definitely-nonexistent-binary-xyz-42", [])
+      expect(typeof detachedMissing.spawnError === "string" || typeof detachedMissing.pid === "number").toBe(true)
     }),
   )
 
@@ -391,7 +421,7 @@ describe("@harness/infra live adapters", () => {
     ),
   )
 
-  it.live("F-8.1b & S-1.5: DecisionCacheLive lookupOrCompute deduplicates concurrent calls via ScopedCache", () =>
+  it.live("F-8.1b & S-1.5: DecisionCacheLive lookupOrCompute deduplicates concurrent calls via Deferred single-flight", () =>
     Effect.gen(function* () {
       const cache = yield* DecisionCachePort
       const key = DecisionCacheKey.make("concurrent-key-1")
@@ -462,7 +492,7 @@ describe("@harness/infra live adapters", () => {
         )
         yield* Effect.gen(function* () {
           const cache = yield* AstGateCachePort
-          yield* cache.evaluateBatch([{ filePath, content }])
+          yield* cache.evaluateBatch([{ filePath, content }], () => [])
         }).pipe(Effect.provide(freshLayer))
 
         const parsed = JSON.parse(readFileSync(staleAstPath, "utf8")) as {
@@ -479,7 +509,7 @@ describe("@harness/infra live adapters", () => {
         )
         const report = yield* Effect.gen(function* () {
           const cache = yield* AstGateCachePort
-          return yield* cache.evaluateBatch([{ filePath, content }])
+          return yield* cache.evaluateBatch([{ filePath, content }], () => [])
         }).pipe(Effect.provide(reloadedLayer))
         expect(report.cacheHitCount).toBe(0)
       }),
@@ -489,10 +519,11 @@ describe("@harness/infra live adapters", () => {
   it.effect("F-15.1: DecisionCacheLive and AstGateCacheLive do not commit in-memory state when disk persist fails", () =>
     withTempDir((dir) =>
       Effect.gen(function* () {
-        const blockingFile = join(dir, "blocking-file")
-        writeFileSync(blockingFile, "not-a-dir", "utf8")
-        const unwritableDecisionPath = WorkspaceFilePath.make(join(blockingFile, "decisions.json"))
-        const unwritableAstPath = WorkspaceFilePath.make(join(blockingFile, "ast.json"))
+        const readOnlyDir = join(dir, "read-only-cache-dir")
+        mkdirSync(readOnlyDir, { recursive: true })
+        chmodSync(readOnlyDir, 0o555)
+        const unwritableDecisionPath = WorkspaceFilePath.make(join(readOnlyDir, "decisions.json"))
+        const unwritableAstPath = WorkspaceFilePath.make(join(readOnlyDir, "ast.json"))
 
         const decisionLayer = makeDecisionCacheLayer({
           cacheFilePath: unwritableDecisionPath,
@@ -510,6 +541,7 @@ describe("@harness/infra live adapters", () => {
           return [err, stats] as const
         }).pipe(Effect.provide(decisionLayer))
         expect(storeErr._tag).toBe("WorkspaceFsError")
+        expect(storeErr.operation).toBe("write")
         expect(decisionStats.size).toBe(0)
 
         const astLayer = makeAstGateCacheLayer({ cacheFilePath: unwritableAstPath }).pipe(
@@ -518,19 +550,29 @@ describe("@harness/infra live adapters", () => {
         const [evalErr, astSize] = yield* Effect.gen(function* () {
           const cache = yield* AstGateCachePort
           const err = yield* cache
-            .evaluateBatch([
-              {
-                filePath: AstSourceFilePath.make("libs/sample/domain/src/a.ts"),
-                content: AstSourceContent.make("export const a = 1\n"),
-              },
-            ])
+            .evaluateBatch(
+              [
+                {
+                  filePath: AstSourceFilePath.make("libs/sample/domain/src/a.ts"),
+                  content: AstSourceContent.make("export const a = 1\n"),
+                },
+              ],
+              () => [],
+            )
             .pipe(Effect.flip)
           const size = yield* cache.cacheSize
           return [err, size] as const
         }).pipe(Effect.provide(astLayer))
         expect(evalErr._tag).toBe("WorkspaceFsError")
+        expect(evalErr.operation).toBe("write")
         expect(astSize).toBe(0)
-      }),
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            chmodSync(join(dir, "read-only-cache-dir"), 0o755)
+          }),
+        ),
+      ),
     ),
   )
 
@@ -632,27 +674,127 @@ describe("@harness/infra live adapters", () => {
     ),
   )
 
-  it.effect("S-2.1: make*Layer factories compose with NodeServices.layer and HarnessInfraLive provides all 6 ports", () =>
-    Effect.gen(function* () {
-      const fs = yield* WorkspaceFs
-      const runner = yield* HarnessSubprocessRunner
-      const decisionCache = yield* DecisionCachePort
-      const astCache = yield* AstGateCachePort
-      const daemon = yield* UnixSocketDaemonPort
-      const mutantCtx = yield* ActiveMutantContext
+  it.effect("S-2.1: makeHarnessInfraLayer executes real port operations and persists caches across rebuilds", () =>
+    withTempDir((dir) =>
+      Effect.gen(function* () {
+        const repoRoot = WorkspaceFilePath.make(dir)
+        const infraLayer1 = makeHarnessInfraLayer({ repoRoot })
+        const infraLayer2 = makeHarnessInfraLayer({ repoRoot })
 
-      expect(fs).toBeDefined()
-      expect(runner).toBeDefined()
-      expect(decisionCache).toBeDefined()
-      expect(astCache).toBeDefined()
-      expect(daemon).toBeDefined()
-      expect(Option.isNone(yield* mutantCtx.getCurrentMutant)).toBe(true)
+        const targetFile = WorkspaceFilePath.make(join(dir, "sample.txt"))
+        const astBatch = [
+          {
+            filePath: AstSourceFilePath.make("libs/sample/domain/src/s21.ts"),
+            content: AstSourceContent.make("export const s21 = 1\n"),
+          },
+        ]
+        const decisionKey = DecisionCacheKey.make("s21-decision-key")
+        const decisionPayload = DecisionCachePayloadJson.make('{"ok":true}')
 
-      const composed = Layer.mergeAll(
-        makeWorkspaceFsLayer(),
-        makeHarnessSubprocessRunnerLayer(),
-      ).pipe(Layer.provide(NodeServices.layer))
-      expect(composed).toBeDefined()
-    }).pipe(Effect.provide(HarnessInfraLive)),
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const fs = yield* WorkspaceFs
+            const runner = yield* HarnessSubprocessRunner
+            const decisionCache = yield* DecisionCachePort
+            const astCache = yield* AstGateCachePort
+            const daemon = yield* UnixSocketDaemonPort
+            const mutantCtx = yield* ActiveMutantContext
+
+            yield* fs.writeTextFileAtomic(targetFile, WorkspaceFileContent.make("s21-content"))
+            expect(yield* fs.readTextFile(targetFile)).toBe("s21-content")
+
+            const execRes = yield* runner.exec({
+              command: SubprocessCommand.make(process.execPath),
+              args: [SubprocessArg.make("-e"), SubprocessArg.make("process.stdout.write('s21')")],
+            })
+            expect(execRes.stdout).toBe("s21")
+
+            const astFirst = yield* astCache.evaluateBatch(astBatch, () => [])
+            expect(astFirst.cacheHitCount).toBe(0)
+            yield* decisionCache.store(decisionKey, decisionPayload, DecisionCacheTtlMillis.make(60_000))
+
+            const daemonInfo = yield* daemon.startServer(repoRoot)
+            expect(yield* daemon.isSocketAlive(daemonInfo.socketPath)).toBe(true)
+
+            const active = yield* mutantCtx.runWithMutant(
+              ActiveMutantId.make("m-s21"),
+              mutantCtx.getCurrentMutant,
+            )
+            expect(Option.getOrNull(active)).toBe("m-s21")
+          }),
+        ).pipe(Effect.provide(infraLayer1))
+
+        yield* Effect.gen(function* () {
+          const astCache = yield* AstGateCachePort
+          const decisionCache = yield* DecisionCachePort
+          const astReloaded = yield* astCache.evaluateBatch(astBatch, () => [])
+          expect(astReloaded.cacheHitCount).toBe(1)
+          expect(Option.getOrNull(yield* decisionCache.lookup(decisionKey))).toBe(decisionPayload)
+        }).pipe(Effect.provide(infraLayer2))
+
+        expect(HarnessInfraLive).toBeDefined()
+        expect(
+          Layer.mergeAll(makeWorkspaceFsLayer(), makeHarnessSubprocessRunnerLayer()).pipe(
+            Layer.provide(NodeServices.layer),
+          ),
+        ).toBeDefined()
+      }),
+    ),
   )
+
+  it.effect("UnixSocketDaemonLive handles lineHandler sync throws, Effect failures, and preserves override parent dir mode", () =>
+    withTempDir((dir) =>
+      Effect.gen(function* () {
+        const repoRoot = WorkspaceFilePath.make(dir)
+        const parentDir = join(dir, "shared-parent")
+        mkdirSync(parentDir, { recursive: true })
+        chmodSync(parentDir, 0o755)
+        const overrideSocket = DaemonSocketPath.make(join(parentDir, "override.sock"))
+
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const info = yield* startScopedUnixSocketDaemon(repoRoot, {
+              socketPathOverride: overrideSocket,
+              lineHandler: (line) => {
+                if (line === "throw-sync") {
+                  throw new Error("sync-boom")
+                }
+                return Effect.fail("effect-boom").pipe(Effect.orDie)
+              },
+            })
+            expect(statSync(parentDir).mode & 0o777).toBe(0o755)
+            expect(statSync(info.socketPath).mode & 0o777).toBe(0o600)
+
+            const syncErrReply = yield* queryUnixSocketLine(info.socketPath, "throw-sync", 1000)
+            expect(Option.getOrNull(syncErrReply)).toContain("sync-boom")
+
+            const effErrReply = yield* queryUnixSocketLine(info.socketPath, "fail-effect", 1000)
+            expect(Option.getOrNull(effErrReply)).toContain("effect-boom")
+          }),
+        ).pipe(Effect.provide(UnixSocketDaemonLive))
+      }),
+    ),
+  )
+
+  it.live("AstGateCacheLive does not negative-cache evaluateFile defects across subsequent evaluateBatch calls", () =>
+    Effect.gen(function* () {
+      const cache = yield* AstGateCachePort
+      const batch = [{ filePath: AstSourceFilePath.make("libs/sample/domain/src/retry.ts"), content: AstSourceContent.make("export const r = 1\n") }]
+      let calls = 0
+      const failExit = yield* Effect.exit(cache.evaluateBatch(batch, () => { calls += 1; throw new Error("transient-boom") }))
+      expect(failExit._tag === "Failure" && Cause.hasDies(failExit.cause)).toBe(true)
+      const okReport = yield* cache.evaluateBatch(batch, () => { calls += 1; return [] })
+      expect([okReport.verdict, okReport.cacheHitCount, calls]).toEqual(["clean", 0, 2])
+    }).pipe(Effect.provide(AstGateCacheLive)),
+  )
+  it.live("DecisionCacheLive lookupOrCompute cleans up in-flight Deferred when leader fiber is interrupted", () =>
+    Effect.gen(function* () {
+      const cache = yield* DecisionCachePort
+      const key = DecisionCacheKey.make("interrupt-key-1")
+      const ttl = DecisionCacheTtlMillis.make(60_000)
+      const leader = yield* cache.lookupOrCompute({ key, ttlMillis: ttl, compute: Effect.sleep("5 seconds").pipe(Effect.as(DecisionCachePayloadJson.make('{"v":1}'))) }).pipe(Effect.forkChild)
+      yield* Effect.sleep("15 millis")
+      yield* Fiber.interrupt(leader)
+      expect(yield* cache.lookupOrCompute({ key, ttlMillis: ttl, compute: Effect.succeed(DecisionCachePayloadJson.make('{"v":2}')) })).toBe('{"v":2}')
+    }).pipe(Effect.provide(DecisionCacheLive)))
 })

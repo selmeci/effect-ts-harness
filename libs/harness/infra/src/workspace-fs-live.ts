@@ -9,7 +9,8 @@ import {
   WorkspaceFsError,
   WorkspaceFsOperation,
 } from "@harness/contract"
-import { type SyncHostIo, WorkspaceFs, type WorkspaceFsShape } from "@harness/service"
+import { WorkspaceFs, type WorkspaceFsShape } from "@harness/service"
+import type { SyncHostIo } from "@harness/service/host-io"
 
 const toWorkspaceFsError = (
   filePath: WorkspaceFilePath,

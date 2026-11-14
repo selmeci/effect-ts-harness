@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { Effect } from "effect"
+import { Cause, Effect } from "effect"
+import { match } from "ts-pattern"
 import { runScenarioCommand } from "../src/commands/scenario.command.js"
 
 const tempDirs: Array<string> = []
@@ -158,5 +159,101 @@ describe("scenario.command behavioral suite (F-7.2)", () => {
     expect(failedEnd.exitCode).toBe(1)
     expect(existsSync(join(worktreeDir, "scenarios", "wt-case", "expectations.json"))).toBe(true)
     expect(readFileSync(gitExcludePath, "utf8")).not.toContain("scenario-runner-hide-start")
+  })
+
+  it("T-8: recovers orphan _stashed-scenarios without current.json, cleans up on end failure, and handles dual-directory collision", async () => {
+    // 1. Orphan _stashed-scenarios without current.json recovered by `scenario end`
+    const orphanDir = makeTempDir("harness-cli-scenario-orphan-")
+    const stashedOrphan = join(orphanDir, ".harness", "scenario-runs", "_stashed-scenarios", "orphan-case")
+    mkdirSync(stashedOrphan, { recursive: true })
+    writeFileSync(join(stashedOrphan, "expectations.json"), JSON.stringify({ title: "Orphan", checks: [] }), "utf8")
+    const orphanEnd = await Effect.runPromise(
+      runScenarioCommand(["scenario", "end"], { repoRoot: orphanDir, skipBackgroundDaemons: true }),
+    )
+    expect(orphanEnd.exitCode).toBe(1)
+    expect(orphanEnd.stderr).toContain("Recovered orphaned _stashed-scenarios")
+    expect(existsSync(join(orphanDir, "scenarios", "orphan-case", "expectations.json"))).toBe(true)
+
+    // 2. Failed discovery during `end` removes stale current.json and restores scenarios
+    const failedDir = makeTempDir("harness-cli-scenario-fail-end-")
+    seedScenarioWorkspace(failedDir, "fail-case", "Fail End")
+    const opts = { repoRoot: failedDir, skipBackgroundDaemons: true }
+    const startRes = await Effect.runPromise(runScenarioCommand(["scenario", "start", "fail-case"], opts))
+    expect(startRes.exitCode).toBe(0)
+    expect(existsSync(join(failedDir, ".harness", "scenario-runs", "current.json"))).toBe(true)
+    const endErrRes = await Effect.runPromise(
+      runScenarioCommand(
+        ["scenario", "end", "--transcript", join(failedDir, "missing-transcript.jsonl")],
+        opts,
+      ),
+    )
+    expect(endErrRes.exitCode).toBe(1)
+    expect(existsSync(join(failedDir, ".harness", "scenario-runs", "current.json"))).toBe(false)
+    expect(existsSync(join(failedDir, "scenarios", "fail-case", "expectations.json"))).toBe(true)
+
+    // 3. Dual _stashed-scenarios + scenarios/ collision: restores missing files, refuses to clobber
+    const dualDir = makeTempDir("harness-cli-scenario-dual-")
+    seedScenarioWorkspace(dualDir, "existing-case", "Existing")
+    const dualStashed = join(dualDir, ".harness", "scenario-runs", "_stashed-scenarios")
+    mkdirSync(join(dualStashed, "missing-case"), { recursive: true })
+    writeFileSync(
+      join(dualStashed, "missing-case", "expectations.json"),
+      JSON.stringify({ title: "Missing", checks: [] }),
+      "utf8",
+    )
+    mkdirSync(join(dualStashed, "existing-case"), { recursive: true })
+    writeFileSync(join(dualStashed, "existing-case", "prompt.md"), "STASHED OVERWRITE\n", "utf8")
+
+    const dualList = await Effect.runPromise(
+      runScenarioCommand(["scenario", "list"], { repoRoot: dualDir, skipBackgroundDaemons: true }),
+    )
+    expect(dualList.exitCode).toBe(1)
+    expect(dualList.stderr).toContain("Scenario restore collision")
+    // Missing file was restored, existing file was NOT clobbered
+    expect(existsSync(join(dualDir, "scenarios", "missing-case", "expectations.json"))).toBe(true)
+    expect(readFileSync(join(dualDir, "scenarios", "existing-case", "prompt.md"), "utf8")).toBe(
+      "Run scenario existing-case\n",
+    )
+
+    // 4. Rejects --transcript traversal outside repoRoot while run is active, then defect mid-handleEnd still restores scenarios/ via Effect.ensuring
+    const defectDir = makeTempDir("harness-cli-scenario-defect-")
+    seedScenarioWorkspace(defectDir, "defect-case", "Defect End")
+    const defectOpts = { repoRoot: defectDir, skipBackgroundDaemons: true }
+    const defectStart = await Effect.runPromise(
+      runScenarioCommand(["scenario", "start", "defect-case"], defectOpts),
+    )
+    expect(defectStart.exitCode).toBe(0)
+    expect(existsSync(join(defectDir, "scenarios"))).toBe(false)
+
+    const escapeTranscript = await Effect.runPromise(
+      runScenarioCommand(["scenario", "end", "--transcript", "../../etc/passwd"], defectOpts),
+    )
+    expect(escapeTranscript.exitCode).toBe(1)
+    expect(escapeTranscript.stderr).toContain("escapes repository root")
+    expect(existsSync(join(defectDir, "scenarios", "defect-case", "expectations.json"))).toBe(true)
+
+    // Re-start to test unexpected defect mid-handleEnd
+    const defectRestart = await Effect.runPromise(
+      runScenarioCommand(["scenario", "start", "defect-case"], defectOpts),
+    )
+    expect(defectRestart.exitCode).toBe(0)
+    expect(existsSync(join(defectDir, "scenarios"))).toBe(false)
+
+    // Make transcript path a directory so readTextSync throws EISDIR defect mid-handleEnd
+    const badTranscriptDir = join(defectDir, "dir-as-transcript.jsonl")
+    mkdirSync(badTranscriptDir, { recursive: true })
+    const defectExit = await Effect.runPromiseExit(
+      runScenarioCommand(["scenario", "end", "--transcript", "dir-as-transcript.jsonl"], defectOpts),
+    )
+    match(defectExit)
+      .with({ _tag: "Success" }, () => {
+        expect.fail("Expected defectExit to fail with a defect")
+      })
+      .with({ _tag: "Failure" }, ({ cause }) => {
+        expect(Cause.hasDies(cause)).toBe(true)
+      })
+      .exhaustive()
+    expect(existsSync(join(defectDir, ".harness", "scenario-runs", "current.json"))).toBe(false)
+    expect(existsSync(join(defectDir, "scenarios", "defect-case", "expectations.json"))).toBe(true)
   })
 })

@@ -2,6 +2,7 @@ import { Cause, Effect, Layer, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
+import type * as HttpClient from "effect/http/HttpClient"
 import { TypeSafeClient, TypeSafeDecisionModel } from "@effect/ai-typesafe"
 import { match } from "ts-pattern"
 
@@ -67,7 +68,7 @@ export const DETERMINISTIC_ROUTE_RULES: ReadonlyArray<DeterministicRouteRule> = 
   },
   {
     id: "d1-repository",
-    pattern: /\b(?:d1[-\s]+repository|drizzle|sqlitetable|d1\s+database)\b/i,
+    pattern: /\b(?:d1[-\s]+repository|@effect\/sql-d1|sqlclient|sqlitemigrator|d1\s+database)\b/i,
     block: "d1-repository",
   },
   {
@@ -111,7 +112,7 @@ export const IdiomRouterV1 = Decision.make({
         schedule: "Retries, repetition, backoff, timing policies",
         testing: "@effect/vitest, TestClock, mock Layers, emulated tests",
         "alchemy-infra": "Alchemy cloud resources and bindings inside Layers",
-        "d1-repository": "D1 SQLite tables and Drizzle repositories in type:infra",
+        "d1-repository": "D1 SQLite tables and @effect/sql-d1 SqlClient repositories in type:infra",
         "durable-object-state": "Durable Object SQLite state and synchronous transactions",
         httpapi: "Public HttpApi endpoints with declared error Schemas and OpenAPI",
         rpc: "Internal RpcGroup procedures and Cloudflare.toHttpClient DO calls",
@@ -193,8 +194,15 @@ export const routeStep = Effect.fn("Harness.routeStep")(function* (step: string)
     .exhaustive()
 })
 
+/** Configurable Clef-flash (9B) DecisionModel Layer requiring an explicit HttpClient. */
+export const makeLocalDecisionModelLayer = (options?: {
+  readonly apiUrl?: string
+}): Layer.Layer<DecisionModel.DecisionModel, never, HttpClient.HttpClient> =>
+  TypeSafeDecisionModel.layer({ model: "clef-flash" }).pipe(
+    Layer.provide(TypeSafeClient.layer({ apiUrl: options?.apiUrl ?? "http://localhost:11434/v1" })),
+  )
+
 /** Local resident Clef-flash (9B) through Ollama's System One endpoint. */
-export const LocalDecisionModel = TypeSafeDecisionModel.layer({ model: "clef-flash" }).pipe(
-  Layer.provide(TypeSafeClient.layer({ apiUrl: "http://localhost:11434/v1" })),
+export const LocalDecisionModel = makeLocalDecisionModelLayer().pipe(
   Layer.provide(FetchHttpClient.layer),
 )

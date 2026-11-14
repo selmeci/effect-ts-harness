@@ -1,5 +1,5 @@
 import { join } from "node:path"
-import { Cause, Effect, Layer, Option } from "effect"
+import { Cause, Effect, Layer } from "effect"
 import * as Graph from "effect/Graph"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
@@ -23,7 +23,6 @@ import {
 } from "@harness/gates"
 import {
   checkEffectGraph,
-  diffOmnigraphBranches,
   extractGraphViaCompilerOverlay,
   extractTypeGraph,
   findTestsReaching,
@@ -32,7 +31,6 @@ import {
   loadGraphSnapshotEffect,
   makeOmnigraphSyncLayer,
   makeTsCompilerOverlayLayer,
-  mergeOmnigraphBranch,
   resolveOmnigraphTaskBranches,
   saveGraphSnapshot,
   syncToOmnigraphAndSnapshot,
@@ -57,6 +55,8 @@ import {
   resolveNxAffectedArgs,
   tryQueryWarmDaemonSocket,
 } from "./daemon-and-omnigraph.service.js"
+import { syncOmnigraphOnDone } from "./done-omnigraph-helpers.js"
+import { hasAntigravityFormat, makeDoneBlockResult } from "./hook-format.js"
 import {
   decodeStopHookStdin,
   hasVerifiedSinceLastMutation,
@@ -360,7 +360,6 @@ const loadSnapshotPair = (
   initialPlan: HarnessGraph | undefined,
   initialImpl: HarnessGraph | undefined,
   isAntigravity: boolean,
-  blockDecision: string,
 ): Effect.Effect<
   | { readonly _tag: "Done"; readonly result: CliResult }
   | {
@@ -409,22 +408,14 @@ const loadSnapshotPair = (
         const reason = `Corrupt plan graph snapshot at '${err.path}' [${err.reason}]: ${err.message}`
         return {
           _tag: "Done" as const,
-          result: {
-            exitCode: isAntigravity ? 0 : 1,
-            stdout: JSON.stringify({ decision: blockDecision, reason }),
-            stderr: `[GATE FAILURE] done:plan-graph-snapshot\n${reason}`,
-          },
+          result: makeDoneBlockResult(isAntigravity, reason, "[GATE FAILURE] done:plan-graph-snapshot\n"),
         }
       })
       .with({ implLoad: { _tag: "Err" } }, ({ implLoad: { err } }) => {
         const reason = `Corrupt implementation graph snapshot at '${err.path}' [${err.reason}]: ${err.message}`
         return {
           _tag: "Done" as const,
-          result: {
-            exitCode: isAntigravity ? 0 : 1,
-            stdout: JSON.stringify({ decision: blockDecision, reason }),
-            stderr: `[GATE FAILURE] done:impl-graph-snapshot\n${reason}`,
-          },
+          result: makeDoneBlockResult(isAntigravity, reason, "[GATE FAILURE] done:impl-graph-snapshot\n"),
         }
       })
       .with({ planLoad: { _tag: "Ok" }, implLoad: { _tag: "Ok" } }, ({ planLoad, implLoad }) => ({
@@ -439,11 +430,11 @@ export const handleDone = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
   decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
-): Effect.Effect<CliResult> =>
-  Effect.gen(function* () {
+): Effect.Effect<CliResult> => {
+  const isAntigravity = hasAntigravityFormat(argv)
+  const blockDecision = isAntigravity ? "continue" : "block"
+  return Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-    const isAntigravity = argv.includes("--format=antigravity")
-    const blockDecision = isAntigravity ? "continue" : "block"
 
     let rawStdin = options?.stdin
     if (rawStdin === undefined && process.stdin.isTTY !== true) {
@@ -458,31 +449,34 @@ export const handleDone = (
           rawStdin = success
           return undefined
         })
-        .with({ _tag: "Failure" }, ({ failure }) => ({
-          exitCode: 0,
-          stdout: JSON.stringify({
-            decision: blockDecision,
-            reason: `done: failed or timed out reading Stop hook stdin (${failure.reason})`,
-          }),
-          stderr: "",
-        }))
+        .with({ _tag: "Failure" }, ({ failure }) => {
+          const reason = `done: failed or timed out reading Stop hook stdin (${failure.reason})`
+          return makeDoneBlockResult(isAntigravity, reason)
+        })
         .exhaustive()
       if (stdinErrResult !== undefined) {
         return stdinErrResult
       }
     }
+    if (rawStdin !== undefined && rawStdin.trim().length === 0) {
+      return makeDoneBlockResult(isAntigravity, "done: empty Stop hook stdin payload")
+    }
     let decodedStdin: StopHookStdin | undefined
-    if (rawStdin) {
+    if (rawStdin !== undefined && rawStdin.trim().length > 0) {
       const decoded = decodeStopHookStdin(rawStdin)
-      const fullyIdleFalse = match(decoded)
+      const earlyResult = match(decoded)
         .with({ _tag: "Some" }, ({ value }) => {
           decodedStdin = value
           return value.fullyIdle === false
+            ? ({ exitCode: 0, stdout: "", stderr: "", telemetryDetail: "fullyIdle=false" } satisfies CliResult)
+            : undefined
         })
-        .with({ _tag: "None" }, () => false)
+        .with({ _tag: "None" }, () =>
+          makeDoneBlockResult(isAntigravity, "done: malformed Stop hook stdin JSON payload"),
+        )
         .exhaustive()
-      if (fullyIdleFalse) {
-        return { exitCode: 0, stdout: "", stderr: "", telemetryDetail: "fullyIdle=false" }
+      if (earlyResult !== undefined) {
+        return earlyResult
       }
     }
 
@@ -529,7 +523,6 @@ export const handleDone = (
       options?.planGraph,
       options?.implGraph,
       isAntigravity,
-      blockDecision,
     )
 
     return yield* match(snapshotOutcome)
@@ -563,59 +556,14 @@ export const handleDone = (
           }
 
           // 6. Omnigraph sync & branch merge
-          if (isIsolatedExternalWorkspace(repoRoot)) {
-            writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
-            recordTelemetry(options, {
-              surface: isAntigravity ? "hook" : "cli",
-              category: "graph_query",
-              toolName: "omnigraph:merge-main",
-              outcome: "ok",
-              durationMs: 1,
-              engineSource: "local",
-            })
-          } else {
-            yield* ensureLocalOmnigraphReady(repoRoot)
-            const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
-            const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
-            yield* diffOmnigraphBranches({
-              repoRoot: clusterRepoRoot,
-              source: taskBranches.implBranch,
-              target: taskBranches.planBranch,
-            }).pipe(
-              Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
-              Effect.orElseSucceed(() => Option.none()),
-            )
-
-            const merged = yield* mergeOmnigraphBranch({
-              repoRoot: clusterRepoRoot,
-              source: taskBranches.implBranch,
-              target: taskBranches.mainBranch,
-              cleanupBranches: [taskBranches.implBranch, taskBranches.planBranch],
-            }).pipe(
-              Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
-              Effect.orElseSucceed(() => false),
-            )
-            if (merged) {
-              writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
-            }
-            recordTelemetry(options, {
-              surface: isAntigravity ? "hook" : "cli",
-              category: "graph_query",
-              toolName: "omnigraph:merge-main",
-              outcome: merged ? "ok" : "fail",
-              durationMs: 1,
-              engineSource: merged ? "omnigraph" : "memory-fallback",
-            })
-            if (!merged) {
-              return {
-                exitCode: 0,
-                stdout: JSON.stringify({
-                  decision: blockDecision,
-                  reason: `Omnigraph branch merge (${taskBranches.implBranch} -> ${taskBranches.mainBranch}) failed`,
-                }),
-                stderr: "",
-              }
-            }
+          const omnigraphFailure = yield* syncOmnigraphOnDone(
+            repoRoot,
+            options,
+            isAntigravity,
+            blockDecision,
+          )
+          if (omnigraphFailure !== undefined) {
+            return omnigraphFailure
           }
 
           if (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) {
@@ -636,4 +584,15 @@ export const handleDone = (
         }),
       )
       .exhaustive()
-  })
+  }).pipe(
+    Effect.catchCause((cause) => {
+      if (Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)) {
+        return Effect.interrupt
+      }
+      const pretty = Cause.pretty(cause)
+      process.stderr.write(`[harness:done] uncaught cause: ${pretty}\n`)
+      const reason = `done: uncaught error or defect (${pretty})`
+      return Effect.succeed(makeDoneBlockResult(isAntigravity, reason, `${pretty}\n`))
+    }),
+  )
+}

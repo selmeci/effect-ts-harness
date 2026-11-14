@@ -1,10 +1,10 @@
 /**
  * @fileoverview Mutation verification gate, mutant discovery, test execution, and span saturation analysis.
  */
-import { join, relative, resolve } from "node:path"
+import { join, relative } from "node:path"
 import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
-import type { SyncHostIo } from "@harness/service"
+import type { SyncHostIo } from "@harness/service/host-io"
 import {
   getActiveMutantId, setActiveMutantId, withActiveMutantEffect,
 } from "./services/active-mutant-context.js"
@@ -12,6 +12,14 @@ import {
   CodeMutant, compileMutantSchemaModule, discoverDomainMutants, evaluateMutantSchemaInProcess,
   MutantCategory, MutantOutcome, type MutantSchemaModule, parseGitDiffModifiedLines,
 } from "./mutation/mutant-ast-generator.js"
+import {
+  BackupSchema,
+  extractGitDiffModifiedLinesChecked,
+  type GitDiffExtractionResult,
+  recoverStartupBackup,
+  unlinkBackupChecked,
+  writeMutationBackup,
+} from "./mutation/mutation-backup.js"
 
 export {
   MutantCategory, CodeMutant, MutantOutcome, type MutantSchemaModule,
@@ -315,40 +323,16 @@ const findDomainFiles = (
   return results
 }
 
-const trySyncOrElse = <A>(fn: () => A, fallback: () => A): A =>
-  Result.getOrElse(Result.try(fn), fallback)
-
 export const extractGitDiffModifiedLines = (
   repoRoot: string,
   hostIo: SyncHostIo,
 ): ReadonlyMap<string, ReadonlySet<number>> | undefined => {
-  const gitOpts = { cwd: repoRoot, timeoutMs: 15_000 }
-  const isGit = trySyncOrElse(
-    () => {
-      const res = hostIo.execFileSync("git", ["rev-parse", "--is-inside-work-tree"], gitOpts)
-      return res.exitCode === 0 && res.stdout.trim() === "true"
-    },
-    () => false,
-  )
-  if (!isGit) return undefined
-
-  const runGitDiff = (args: ReadonlyArray<string>): string | null => {
-    const res = hostIo.execFileSync("git", args, gitOpts)
-    return res.exitCode === 0 ? res.stdout : null
-  }
-
-  const primaryDiff = trySyncOrElse<string | null>(
-    () => runGitDiff(["diff", "-U0"]) ?? runGitDiff(["diff", "-U0", "HEAD"]),
-    () => null,
-  )
-  if (primaryDiff === null) return new Map<string, ReadonlySet<number>>()
-
-  const headDiff = trySyncOrElse(
-    () => runGitDiff(["diff", "-U0", "HEAD"]) ?? "",
-    () => "",
-  )
-  const diffOut = headDiff.length > 0 ? `${primaryDiff}\n${headDiff}` : primaryDiff
-  return parseGitDiffModifiedLines(diffOut)
+  const res = extractGitDiffModifiedLinesChecked(repoRoot, hostIo)
+  return match(res)
+    .with({ kind: "ok" }, ({ lines }) => lines)
+    .with({ kind: "not-git" }, () => undefined)
+    .with({ kind: "failed" }, () => undefined)
+    .exhaustive()
 }
 
 export const getWorkspaceGitDiffModifiedLines = extractGitDiffModifiedLines
@@ -423,63 +407,31 @@ export const runDomainMutationSuite = (
   }
 
   const backupPath = join(repoRoot, ".harness", "mutation-backup.json")
-  const BackupSchema = Schema.fromJsonString(
-    Schema.Struct({
-      filePath: Schema.optional(Schema.String),
-      originalSource: Schema.optional(Schema.String),
-    }),
-  )
-
-  if (hostIo.existsSync(backupPath)) {
-    const backupReadRes = Result.try(() => hostIo.readTextSync(backupPath))
-    const restoreFailureReason = match(backupReadRes)
-      .with({ _tag: "Success" }, ({ success: content }) => {
-        const decodedBackupOpt = Schema.decodeOption(BackupSchema)(content)
-        return match(decodedBackupOpt)
-          .with({ _tag: "Some" }, ({ value: { filePath, originalSource } }) => {
-            if (filePath === undefined || originalSource === undefined) {
-              return "Backup JSON missing filePath or originalSource"
-            }
-            const resolvedTarget = resolve(repoRoot, filePath)
-            const relTarget = relative(resolve(repoRoot), resolvedTarget).replace(/\\/g, "/")
-            if (
-              relTarget.startsWith("..") ||
-              relTarget.startsWith("/") ||
-              (!relTarget.startsWith("libs/") && !relTarget.startsWith("apps/"))
-            ) {
-              return `Backup target path '${filePath}' escapes workspace bounds`
-            }
-            const writeRes = Result.try(() => {
-              hostIo.writeTextSync(resolvedTarget, originalSource)
-            })
-            return match(writeRes)
-              .with({ _tag: "Success" }, () => undefined)
-              .with({ _tag: "Failure" }, ({ failure }) =>
-                failure instanceof Error ? failure.message : String(failure),
-              )
-              .exhaustive()
-          })
-          .with({ _tag: "None" }, () => "Backup JSON failed schema decoding")
-          .exhaustive()
-      })
-      .with({ _tag: "Failure" }, ({ failure }) =>
-        failure instanceof Error ? failure.message : String(failure),
-      )
-      .exhaustive()
-
-    if (restoreFailureReason !== undefined) {
-      const diagnostic = `[mutation-check] CRITICAL: Failed to restore startup backup '${backupPath}' (${restoreFailureReason}); aborting without deleting backup.`
-      process.stderr.write(`${diagnostic}\n`)
-      return makeAbortedReport([], diagnostic)
-    }
-
-    if (hostIo.existsSync(backupPath)) {
-      trySyncOrElse(() => hostIo.unlinkSync(backupPath), () => undefined)
-    }
+  const startupDiag = recoverStartupBackup(repoRoot, backupPath, hostIo)
+  if (startupDiag !== undefined) {
+    process.stderr.write(`${startupDiag}\n`)
+    return makeAbortedReport([], startupDiag)
   }
 
   const domainFiles = findDomainFiles(repoRoot, hostIo, options?.scope)
-  const diffLinesMap = options?.includeAllLines === true ? undefined : extractGitDiffModifiedLines(repoRoot, hostIo)
+  const diffResult: GitDiffExtractionResult =
+    options?.includeAllLines === true
+      ? { kind: "not-git" }
+      : extractGitDiffModifiedLinesChecked(repoRoot, hostIo)
+  const diffAbortDiag = match(diffResult)
+    .with({ kind: "failed" }, ({ reason }) => `[mutation-check] Failed to extract git diff modified lines: ${reason}`)
+    .with({ kind: "ok" }, () => undefined)
+    .with({ kind: "not-git" }, () => undefined)
+    .exhaustive()
+  if (diffAbortDiag !== undefined) {
+    process.stderr.write(`${diffAbortDiag}\n`)
+    return makeAbortedReport([], diffAbortDiag)
+  }
+  const diffLinesMap = match(diffResult)
+    .with({ kind: "ok" }, ({ lines }) => lines)
+    .with({ kind: "not-git" }, () => undefined)
+    .with({ kind: "failed" }, () => undefined)
+    .exhaustive()
   const outcomes: Array<MutantOutcome> = []
 
   for (const file of domainFiles) {
@@ -543,21 +495,17 @@ export const runDomainMutationSuite = (
     }
 
     const originalSource = originalContent
-    const harnessDir = join(repoRoot, ".harness")
-    const backupWriteRes = Result.try(() => {
-      if (!hostIo.existsSync(harnessDir)) hostIo.mkdirRecursiveSync(harnessDir)
-      hostIo.writeTextSync(backupPath, JSON.stringify({ filePath: file.fullPath, originalSource }))
-    })
-    const backupWriteErr = match(backupWriteRes)
-      .with({ _tag: "Success" }, () => undefined)
-      .with({ _tag: "Failure" }, ({ failure }) =>
-        failure instanceof Error ? failure.message : String(failure),
-      )
-      .exhaustive()
+    const backupWriteErr = writeMutationBackup(
+      repoRoot,
+      backupPath,
+      file.fullPath,
+      originalSource,
+      schemaBundle.schemaSource,
+      hostIo,
+    )
     if (backupWriteErr !== undefined) {
-      const diag = `[mutation-check] Failed to write mutation backup '${backupPath}': ${backupWriteErr}`
-      process.stderr.write(`${diag}\n`)
-      return makeAbortedReport(outcomes, diag)
+      process.stderr.write(`${backupWriteErr}\n`)
+      return makeAbortedReport(outcomes, backupWriteErr)
     }
 
     const restoreOriginalFile = (): string | undefined => {
@@ -572,8 +520,11 @@ export const runDomainMutationSuite = (
         .exhaustive()
 
       if (primaryError === undefined) {
-        if (hostIo.existsSync(backupPath)) {
-          trySyncOrElse(() => hostIo.unlinkSync(backupPath), () => undefined)
+        const unlinkErr = unlinkBackupChecked(backupPath, hostIo)
+        if (unlinkErr !== undefined) {
+          const diag = `[mutation-check] CRITICAL: Restored '${file.fullPath}' but ${unlinkErr}`
+          process.stderr.write(`${diag}\n`)
+          return diag
         }
         return undefined
       }
@@ -583,7 +534,7 @@ export const runDomainMutationSuite = (
         const raw = hostIo.readTextSync(backupPath)
         const decoded = Schema.decodeOption(BackupSchema)(raw)
         const sourceToWrite = match(decoded)
-          .with({ _tag: "Some" }, ({ value }) => value.originalSource ?? originalSource)
+          .with({ _tag: "Some" }, ({ value }) => value.content ?? value.originalSource ?? originalSource)
           .with({ _tag: "None" }, () => originalSource)
           .exhaustive()
         hostIo.writeTextSync(file.fullPath, sourceToWrite)
@@ -591,8 +542,11 @@ export const runDomainMutationSuite = (
 
       return match(retryRes)
         .with({ _tag: "Success" }, () => {
-          if (hostIo.existsSync(backupPath)) {
-            trySyncOrElse(() => hostIo.unlinkSync(backupPath), () => undefined)
+          const unlinkErr = unlinkBackupChecked(backupPath, hostIo)
+          if (unlinkErr !== undefined) {
+            const diag = `[mutation-check] CRITICAL: Restored '${file.fullPath}' from backup retry but ${unlinkErr}`
+            process.stderr.write(`${diag}\n`)
+            return diag
           }
           return undefined
         })
@@ -661,23 +615,33 @@ export const runDomainMutationSuite = (
       const outcomeOrAbort = match(execRes)
         .with({ _tag: "Success" }, ({ success }) => {
           const combinedOutput = `${success.stdout}\n${success.stderr}`
+          const hasVitestTestFailureEvidence =
+            /\bTests\s+[1-9]\d*\s+failed\b/.test(combinedOutput)
+          const hasModuleLoadOrSyntaxError =
+            /\b(?:SyntaxError:|ERR_MODULE_NOT_FOUND)\b/.test(combinedOutput) ||
+            /\bTests\s+no tests\b/i.test(combinedOutput)
+          const isExit1WithoutTestFailure =
+            success.exitCode === 1 && !hasVitestTestFailureEvidence
           const isRunnerStartupOrCompileError =
             success.exitCode < 0 ||
             success.exitCode > 1 ||
+            hasModuleLoadOrSyntaxError ||
+            isExit1WithoutTestFailure ||
             /\bERR_PNPM_|ERR_MODULE_NOT_FOUND|Command\s+["']?vitest["']?\s+not found|Failed to load config|Failed to resolve import|Cannot find (?:module|package)|No test (?:files|suite) found|Startup Error|Transform failed with \d+ error/i.test(
               combinedOutput,
             )
           if (
-            success.spawnError !== undefined ||
+            success.spawnError != null ||
             success.timedOut === true ||
-            success.signal !== undefined ||
+            success.signal != null ||
             isRunnerStartupOrCompileError
           ) {
             const reasons: Array<string> = []
-            if (success.spawnError !== undefined) reasons.push(`spawnError=${success.spawnError}`)
+            if (success.spawnError != null) reasons.push(`spawnError=${success.spawnError}`)
             if (success.timedOut === true) reasons.push("timedOut=true")
-            if (success.signal !== undefined) reasons.push(`signal=${success.signal}`)
+            if (success.signal != null) reasons.push(`signal=${success.signal}`)
             if (isRunnerStartupOrCompileError) reasons.push(`exitCode=${success.exitCode}`)
+            if (isExit1WithoutTestFailure) reasons.push("missingVitestFailureEvidence=true")
             if (success.stderr.trim().length > 0) reasons.push(`stderr=${success.stderr.trim()}`)
             return {
               kind: "abort" as const,

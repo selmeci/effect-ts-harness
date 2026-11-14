@@ -103,11 +103,10 @@ export const canonicalJson = (value: unknown): string => {
     return `[${value.map((item) => canonicalJson(item)).join(",")}]`
   }
   if (typeof value === "object") {
-    const record = value as Readonly<Record<string, unknown>>
-    const sortedKeys = Object.keys(record)
-      .filter((k) => record[k] !== undefined)
-      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
-    const pairs = sortedKeys.map((k) => `${JSON.stringify(k)}:${canonicalJson(record[k])}`)
+    const entries = Object.entries(value)
+      .filter(([, v]) => v !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    const pairs = entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`)
     return `{${pairs.join(",")}}`
   }
   return "null"
@@ -359,7 +358,7 @@ export const makeCachedDecisionModelLayer = (
                   cacheKey,
                   taskId: DecisionTaskId.make(taskIdStr),
                   promptVersion,
-                  answers: response.answers as Readonly<Record<string, unknown>>,
+                  answers: Object.fromEntries(Object.entries(response.answers)),
                   usage: {
                     inputTokens: response.usage.inputTokens ?? 0,
                     outputTokens: response.usage.outputTokens ?? 0,

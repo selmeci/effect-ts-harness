@@ -1,6 +1,7 @@
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { NodeServices } from "@effect/platform-node"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Layer, Option } from "effect"
 import {
@@ -12,6 +13,7 @@ import {
   DecisionCacheTtlMillis,
   SubprocessArg,
   SubprocessCommand,
+  SubprocessMaxBufferBytes,
   WorkspaceFileContent,
   WorkspaceFilePath,
 } from "@harness/contract"
@@ -27,6 +29,7 @@ import {
   AstGateCacheLive,
   DecisionCacheLive,
   HarnessSubprocessRunnerLive,
+  makeAstGateCacheLayer,
   makeHarnessSubprocessRunnerHostIoLayer,
   makeWorkspaceFsHostIoLayer,
   nodeSyncHostIo,
@@ -146,11 +149,11 @@ describe("@harness/infra port conformance suite", () => {
         },
       ]
 
-      const first = yield* cache.evaluateBatch(batch)
+      const first = yield* cache.evaluateBatch(batch, () => [])
       expect(first.verdict).toBe("clean")
       expect(first.cacheHitCount).toBe(0)
 
-      const second = yield* cache.evaluateBatch(batch)
+      const second = yield* cache.evaluateBatch(batch, () => [])
       expect(second.cacheHitCount).toBe(1)
       expect(yield* cache.cacheSize).toBe(1)
 
@@ -169,5 +172,78 @@ describe("@harness/infra port conformance suite", () => {
       expect(Option.getOrNull(active)).toBe(m1)
       expect(Option.isNone(yield* ctx.getCurrentMutant)).toBe(true)
     }).pipe(Effect.provide(ActiveMutantContextLive)),
+  )
+
+  it.live("AstGateCacheLive deduplicates concurrent evaluateBatch calls and preserves read errors", () =>
+    withTempDir((dir) =>
+      Effect.gen(function* () {
+        const memLayer = makeAstGateCacheLayer().pipe(Layer.provide(NodeServices.layer))
+        let evalCalls = 0
+        const batch = [
+          {
+            filePath: AstSourceFilePath.make("libs/sample/domain/src/concurrent.ts"),
+            content: AstSourceContent.make("export const c = 1\n"),
+          },
+        ]
+        yield* Effect.all(
+          Array.from({ length: 4 }, () =>
+            Effect.gen(function* () {
+              const cache = yield* AstGateCachePort
+              return yield* cache.evaluateBatch(batch, () => {
+                evalCalls += 1
+                return []
+              })
+            }),
+          ),
+          { concurrency: "unbounded" },
+        ).pipe(Effect.provide(memLayer))
+        expect(evalCalls).toBe(1)
+
+        const dirAsCache = WorkspaceFilePath.make(join(dir, "dir-cache"))
+        mkdirSync(dirAsCache, { recursive: true })
+        const badLayer = makeAstGateCacheLayer({ cacheFilePath: dirAsCache }).pipe(
+          Layer.provide(NodeServices.layer),
+        )
+        const [evalErr, sizeErr] = yield* Effect.gen(function* () {
+          const cache = yield* AstGateCachePort
+          const e1 = yield* cache.evaluateBatch(batch, () => []).pipe(Effect.flip)
+          const e2 = yield* cache.cacheSize.pipe(Effect.flip)
+          return [e1, e2] as const
+        }).pipe(Effect.provide(badLayer))
+        expect(evalErr.operation).toBe("read")
+        expect(sizeErr.operation).toBe("read")
+      }),
+    ),
+  )
+
+  it.live("makeHarnessSubprocessRunnerHostIoLayer classifies signal, max-buffer, and spawn-error", () =>
+    Effect.gen(function* () {
+      const runner = yield* HarnessSubprocessRunner
+
+      const sigErr = yield* runner
+        .exec({
+          command: SubprocessCommand.make(process.execPath),
+          args: [SubprocessArg.make("-e"), SubprocessArg.make("process.kill(process.pid, 'SIGTERM')")],
+        })
+        .pipe(Effect.flip)
+      expect(sigErr.failureKind).toBe("signal")
+
+      const bufErr = yield* runner
+        .exec({
+          command: SubprocessCommand.make(process.execPath),
+          args: [SubprocessArg.make("-e"), SubprocessArg.make("process.stdout.write('x'.repeat(4096))")],
+          maxBufferBytes: SubprocessMaxBufferBytes.make(1024),
+        })
+        .pipe(Effect.flip)
+      expect(bufErr.failureKind).toBe("max-buffer")
+
+      const spawnErr = yield* runner
+        .exec({
+          command: SubprocessCommand.make("definitely-nonexistent-binary-xyz-42"),
+          args: [],
+        })
+        .pipe(Effect.flip)
+      expect(spawnErr.failureKind).toBe("spawn-error")
+    }).pipe(Effect.provide(makeHarnessSubprocessRunnerHostIoLayer(nodeSyncHostIo))),
   )
 })

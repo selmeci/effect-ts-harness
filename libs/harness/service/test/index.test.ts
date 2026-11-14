@@ -81,7 +81,7 @@ describe("@harness/service ports", () => {
   it.effect("resolves AstGateCachePort, DecisionCachePort, and UnixSocketDaemonPort from test layers", () =>
     Effect.gen(function* () {
       const astCache = yield* AstGateCachePort
-      const astReport = yield* astCache.evaluateBatch([])
+      const astReport = yield* astCache.evaluateBatch([], () => [])
       expect(astReport.verdict).toBe("clean")
 
       const decCache = yield* DecisionCachePort

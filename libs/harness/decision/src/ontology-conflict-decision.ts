@@ -297,30 +297,62 @@ export const extractOntologyConflictPairs = Effect.fn("OntologyConflict.extractP
   return pairs
 })
 
-export const evaluateOntologyConflicts = Effect.fn("Harness.evaluateOntologyConflicts")(function* (
+export interface OntologyConflictEvaluationReport {
+  readonly conflicts: ReadonlyArray<OntologyConflictResult & OntologyConflictInput>
+  readonly degraded: boolean
+  readonly evaluationError?: string
+}
+
+export const evaluateOntologyConflictsWithStatus = Effect.fn(
+  "Harness.evaluateOntologyConflictsWithStatus",
+)(function* (
   pairs: ReadonlyArray<OntologyConflictInput>,
-) {
+): Effect.fn.Return<OntologyConflictEvaluationReport, never, DecisionModel.DecisionModel> {
   if (pairs.length === 0) {
-    return []
+    return { conflicts: [], degraded: false }
   }
 
   const firstPair = pairs[0]!
   const firstResult = yield* checkOntologyPairConflict(firstPair)
 
   if (firstResult.timedOutOrUnavailable === true) {
-    return []
+    return {
+      conflicts: [],
+      degraded: true,
+      evaluationError: "Semantic conflict DecisionModel timed out or was unavailable",
+    }
   }
 
-  const firstEvaluated = { ...firstPair, ...firstResult }
+  const firstEvaluated: OntologyConflictResult & OntologyConflictInput = {
+    ...firstPair,
+    ...firstResult,
+  }
   const rest = pairs.slice(1)
-  const restEvaluated = yield* Effect.forEach(
-    rest,
-    (pair) => checkOntologyPairConflict(pair).pipe(Effect.map((res) => ({ ...pair, ...res }))),
-    { concurrency: 4 },
-  )
+  const restEvaluated: ReadonlyArray<OntologyConflictResult & OntologyConflictInput> =
+    yield* Effect.forEach(
+      rest,
+      (pair) => checkOntologyPairConflict(pair).pipe(Effect.map((res) => ({ ...pair, ...res }))),
+      { concurrency: 4 },
+    )
 
   const evaluated = [firstEvaluated, ...restEvaluated]
-  return evaluated.filter((res) => res.hasConflict) as ReadonlyArray<
-    OntologyConflictResult & OntologyConflictInput
-  >
+  const anyDegraded = evaluated.some((res) => res.timedOutOrUnavailable === true)
+  const conflicts = evaluated.filter((res) => res.hasConflict)
+  return anyDegraded
+    ? {
+        conflicts,
+        degraded: true,
+        evaluationError: "Semantic conflict DecisionModel timed out or was unavailable",
+      }
+    : {
+        conflicts,
+        degraded: false,
+      }
+})
+
+export const evaluateOntologyConflicts = Effect.fn("Harness.evaluateOntologyConflicts")(function* (
+  pairs: ReadonlyArray<OntologyConflictInput>,
+) {
+  const report = yield* evaluateOntologyConflictsWithStatus(pairs)
+  return report.conflicts
 })

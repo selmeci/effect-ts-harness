@@ -2,6 +2,9 @@
 
 Oct 4, 2026 · @Roman Selmeci
 
+> [!NOTE]
+> **Data Layer Supersession (`DR-5`):** Per `libs/es/docs/adr/0002-pure-effect-sql-and-aggregate-projections.md`, historical references to `drizzle-orm` / `drizzle-kit` in this brief are superseded. The workspace has **completely abandoned and banned Drizzle (`drizzle-orm`, `drizzle-kit`)** in favor of native Effect v4 SQL (`@effect/sql-d1`, `@effect/sql-sqlite-do`, `SqlClient.SqlClient`, `SqliteMigrator`, `Schema`) in `type:infra`.
+
 ## Project intent
 
 We build a thin event sourcing and CQRS module on Effect v4 and Cloudflare, because no maintained Castore-like framework exists for Effect v4. Working name: `effect-es`.

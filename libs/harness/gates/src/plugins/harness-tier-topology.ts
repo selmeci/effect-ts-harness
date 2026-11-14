@@ -1,3 +1,4 @@
+import { posix } from "node:path"
 import { Effect } from "effect"
 import { ts } from "@harness/graph"
 import {
@@ -138,6 +139,11 @@ const isAllowedServiceDependency = (
   return rootPkg === "@harness/contract" || rootPkg.endsWith("-contract")
 }
 
+const isDrizzleDependency = (dep: string): boolean => {
+  const rootPkg = resolvePackageRootName(dep)
+  return rootPkg === "drizzle-orm" || rootPkg === "drizzle-kit"
+}
+
 const isForbiddenCoreDependency = (
   dep: string,
   manifestTagsByPkg: ReadonlyMap<string, ReadonlyArray<NxTierTag>>,
@@ -150,7 +156,6 @@ const isForbiddenCoreDependency = (
   return (
     rootPkg === "@harness/infra" ||
     rootPkg.endsWith("-infra") ||
-    rootPkg === "drizzle-orm" ||
     rootPkg === "alchemy" ||
     rootPkg.startsWith("@alchemy.run/") ||
     rootPkg.startsWith("@effect/sql-") ||
@@ -264,6 +269,111 @@ const collectServiceSourceImpurityViolations = (
   return found
 }
 
+const collectUndeclaredWorkspaceDependencyViolations = (
+  manifest: PackageTierManifestInput,
+  workspaceSourceFiles: ReadonlyArray<ServiceTierSourceInput>,
+  workspacePackageNames: ReadonlySet<string>,
+  manifestDirs: ReadonlyArray<{ readonly pkgDir: string; readonly packageName: string }>,
+): ReadonlyArray<HarnessTierTopologyViolation> => {
+  const pkgDir = manifest.manifestPath.replace(/\/package\.json$/, "")
+  const srcPrefix = `${pkgDir}/src/`
+  const declaredDeps = new Set<string>(manifest.dependencyNames)
+  const reported = new Set<string>()
+  const found: Array<HarnessTierTopologyViolation> = []
+
+  const checkSpecifier = (filePath: WorkspaceFilePath, specifier: string | undefined): void => {
+    if (specifier === undefined) return
+    if (specifier.startsWith(".")) {
+      const resolved = posix.normalize(posix.join(posix.dirname(filePath), specifier))
+      if (resolved !== pkgDir && !resolved.startsWith(`${pkgDir}/`)) {
+        const targetManifest = manifestDirs.find(
+          (m) => resolved === m.pkgDir || resolved.startsWith(`${m.pkgDir}/`),
+        )
+        if (targetManifest !== undefined) {
+          if (
+            targetManifest.packageName !== manifest.packageName &&
+            !declaredDeps.has(targetManifest.packageName) &&
+            !reported.has(targetManifest.packageName)
+          ) {
+            reported.add(targetManifest.packageName)
+            found.push({
+              rule: TierTopologyRuleId.make("undeclared-workspace-dependency"),
+              location: filePath,
+              message: TierTopologyMessage.make(
+                `Source "${filePath}" imports workspace package "${targetManifest.packageName}" via relative path "${specifier}", which is not declared in "${manifest.manifestPath}" dependencies.`,
+              ),
+            })
+          }
+          return
+        }
+        if (
+          (resolved.startsWith("libs/") || resolved.startsWith("apps/")) &&
+          !reported.has(resolved)
+        ) {
+          reported.add(resolved)
+          found.push({
+            rule: TierTopologyRuleId.make("undeclared-workspace-dependency"),
+            location: filePath,
+            message: TierTopologyMessage.make(
+              `Source "${filePath}" imports cross-package relative path "${specifier}" (resolved "${resolved}") outside "${pkgDir}/", bypassing "${manifest.manifestPath}" dependencies.`,
+            ),
+          })
+        }
+      }
+      return
+    }
+    const rootPkg = resolvePackageRootName(specifier)
+    if (rootPkg === manifest.packageName) return
+    if (!workspacePackageNames.has(rootPkg) && !rootPkg.startsWith("@harness/")) return
+    if (declaredDeps.has(rootPkg) || reported.has(rootPkg)) return
+    reported.add(rootPkg)
+    found.push({
+      rule: TierTopologyRuleId.make("undeclared-workspace-dependency"),
+      location: filePath,
+      message: TierTopologyMessage.make(
+        `Source "${filePath}" imports workspace package "${rootPkg}" (via "${specifier}"), which is not declared in "${manifest.manifestPath}" dependencies.`,
+      ),
+    })
+  }
+
+  for (const file of workspaceSourceFiles) {
+    if (!file.filePath.startsWith(srcPrefix) || !/\.(?:ts|tsx|mts|cts)$/.test(file.filePath)) {
+      continue
+    }
+    const { sourceFile } = getOrCreateCachedSourceFile(file.filePath, file.content)
+    const location = WorkspaceFilePath.make(file.filePath)
+    const walk = (node: ts.Node): void => {
+      if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier !== undefined) {
+        if (ts.isStringLiteral(node.moduleSpecifier)) {
+          checkSpecifier(location, node.moduleSpecifier.text)
+        }
+        return
+      }
+      if (
+        ts.isImportEqualsDeclaration(node) &&
+        ts.isExternalModuleReference(node.moduleReference) &&
+        ts.isStringLiteral(node.moduleReference.expression)
+      ) {
+        checkSpecifier(location, node.moduleReference.expression.text)
+        return
+      }
+      if (ts.isCallExpression(node) && node.arguments.length > 0 && node.arguments[0] !== undefined) {
+        const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword
+        const isRequireCall =
+          (ts.isIdentifier(node.expression) && node.expression.text === "require") ||
+          (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "require")
+        if (isDynamicImport || isRequireCall) {
+          checkSpecifier(location, extractStringOrTemplateText(node.arguments[0]))
+        }
+      }
+      ts.forEachChild(node, walk)
+    }
+    walk(sourceFile)
+  }
+
+  return found
+}
+
 export const decideHarnessTierTopology = Effect.fn("HarnessTierTopology.decide")(
   (input: HarnessTierTopologyInput): Effect.Effect<HarnessTierTopologyReport> =>
     Effect.sync(() => {
@@ -273,6 +383,11 @@ export const decideHarnessTierTopology = Effect.fn("HarnessTierTopology.decide")
       const coreTag = NxTierTag.make("type:core")
       const domainTag = NxTierTag.make("type:domain")
       const manifestTagsByPkg = buildManifestTagsByPackage(input.manifests)
+      const workspacePackageNames = new Set(input.manifests.map((m) => m.packageName))
+      const manifestDirs = input.manifests.map((m) => ({
+        pkgDir: m.manifestPath.replace(/\/package\.json$/, ""),
+        packageName: m.packageName,
+      }))
 
       for (const manifest of input.manifests) {
         const location = WorkspaceFilePath.make(manifest.manifestPath)
@@ -290,7 +405,14 @@ export const decideHarnessTierTopology = Effect.fn("HarnessTierTopology.decide")
           })
         }
 
-        if (manifest.nxTags.includes(contractTag)) {
+        const isContract = manifest.nxTags.includes(contractTag)
+        const isService = !isContract && manifest.nxTags.includes(serviceTag)
+        const isCoreOrDomain =
+          !isContract &&
+          !isService &&
+          (manifest.nxTags.includes(coreTag) || manifest.nxTags.includes(domainTag))
+
+        if (isContract) {
           for (const dep of manifest.dependencyNames) {
             if (dep !== "effect") {
               violations.push({
@@ -303,8 +425,7 @@ export const decideHarnessTierTopology = Effect.fn("HarnessTierTopology.decide")
             }
           }
         }
-
-        if (manifest.nxTags.includes(serviceTag)) {
+        if (isService) {
           for (const dep of manifest.dependencyNames) {
             if (!isAllowedServiceDependency(dep, manifestTagsByPkg)) {
               violations.push({
@@ -317,8 +438,23 @@ export const decideHarnessTierTopology = Effect.fn("HarnessTierTopology.decide")
             }
           }
         }
+        const allDependencyNames = [
+          ...manifest.dependencyNames,
+          ...(manifest.nonRuntimeDependencyNames ?? []),
+        ]
+        for (const dep of allDependencyNames) {
+          if (isDrizzleDependency(dep)) {
+            violations.push({
+              rule: TierTopologyRuleId.make("forbidden-core-dependency"),
+              location,
+              message: TierTopologyMessage.make(
+                `Package "${manifest.packageName}" declares banned Drizzle dependency "${dep}" in "${manifest.manifestPath}" — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator).`,
+              ),
+            })
+          }
+        }
 
-        if (manifest.nxTags.includes(coreTag) || manifest.nxTags.includes(domainTag)) {
+        if (isCoreOrDomain) {
           for (const dep of manifest.dependencyNames) {
             if (isForbiddenCoreDependency(dep, manifestTagsByPkg)) {
               violations.push({
@@ -335,6 +471,20 @@ export const decideHarnessTierTopology = Effect.fn("HarnessTierTopology.decide")
 
       for (const file of input.serviceFiles) {
         violations.push(...collectServiceSourceImpurityViolations(file, manifestTagsByPkg))
+      }
+
+      const workspaceSourceFiles = input.workspaceSourceFiles ?? []
+      if (workspaceSourceFiles.length > 0) {
+        for (const manifest of input.manifests) {
+          violations.push(
+            ...collectUndeclaredWorkspaceDependencyViolations(
+              manifest,
+              workspaceSourceFiles,
+              workspacePackageNames,
+              manifestDirs,
+            ),
+          )
+        }
       }
 
       return makeHarnessTierTopologyReport(violations, NonNegativeCount.make(input.manifests.length))

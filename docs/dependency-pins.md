@@ -24,14 +24,12 @@ Aligned with `docs/mvp_v2.md` and `docs/superpowers/plans/2026-10-25-phase-0-v2-
 | zod                                   | 4.6.5              | MCP SDK peer                                                                                                            |
 | alchemy                               | 2.0.0-beta.80      | Effect-native IaC (beta — pin exact, `type:infra` and `apps/sample` only)                                               |
 | @effect/platform-node                 | 4.0.0              | alchemy's Node runtime                                                                                                  |
-| drizzle-orm                           | 1.0.0-rc.5-ab785fc | required by `alchemy@2.0.0-beta.80` for `drizzle-orm/effect-d1` & `drizzle-orm/effect-sqlite-do`; **`type:infra` only** |
-| drizzle-kit                           | 1.0.0-rc.5-ab785fc | hand-run v1 subfolder migration generation (`devDependency` of `type:infra`)                                            |
 | @modernrelay/omnigraph                | 0.14.0             | local Lance-backed property graph client (`libs/harness/graph`, Phase 1)                                                |
 | @modernrelay/omnigraph-mcp            | 0.14.0             | Omnigraph MCP server (`adapters/claude-code/.mcp.json`, Phase 1)                                                        |
 | @ast-grep/napi                        | 0.51.0             | syntactic `Effect.fn` indexing and structural search (Phase 1)                                                          |
 | ts-morph                              | 28.0.0             | type-aware `Effect<A, E, R>` and `Layer<ROut, E, RIn>` extractor over `typescript@5.9.3` (Phase 3)                      |
-| @effect/sql-d1                        | 4.0.0              | peer `effect ^4.0.0` — under `Drizzle.D1` (Phase 4)                                                                     |
-| @effect/sql-sqlite-do                 | 4.0.0              | peer `effect ^4.0.0` — under `Drizzle.DurableObject` (Phase 4)                                                          |
+| @effect/sql-d1                        | 4.0.0              | peer `effect ^4.0.0` — native D1 `SqlClient` (`D1Client.layer({ db })`) in `type:infra` (`drizzle-orm`/`drizzle-kit` banned) |
+| @effect/sql-sqlite-do                 | 4.0.0              | peer `effect ^4.0.0` — native DO SQLite `SqlClient` + `SqliteMigrator` in `type:infra` (`drizzle-orm`/`drizzle-kit` banned) |
 | @effect/atom-react                    | 4.0.0              | peers `react >=19 <20`, `effect ^4` — web app (Phase 4)                                                                 |
 | react                                 | 19.3.0             | web app (Phase 4)                                                                                                       |
 | vite                                  | 8.3.2              | web app + `Cloudflare.Website.Vite` (Phase 4)                                                                           |

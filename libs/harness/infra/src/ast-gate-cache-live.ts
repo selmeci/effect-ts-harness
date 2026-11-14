@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto"
 import { NodeServices } from "@effect/platform-node"
 import {
+  Duration,
   Effect,
   FileSystem,
   Layer,
@@ -14,24 +16,18 @@ import { match, P } from "ts-pattern"
 import {
   type AstGateEvaluationReport,
   type AstGateFileBatchInput,
-  type AstGatePackageTag,
+  type AstGateFileEvaluator,
   AstGateViolationContract,
-  type ContentSha256,
+  ContentSha256,
   ErrorReasonMessage,
   HARNESS_GATE_RULE_VERSION,
+  inferAstGatePackageTagFromPath,
   makeAstGateEvaluationReport,
   NonNegativeCount,
   WorkspaceFilePath,
   WorkspaceFsError,
   WorkspaceFsOperation,
 } from "@harness/contract"
-import {
-  type AstSourceFileCache,
-  computeContentSha256,
-  getOrCreateCachedSourceFile,
-  inferPackageTagFromPath,
-  visitSourceFileSinglePass,
-} from "@harness/gates"
 import { AstGateCachePort, type AstGateCachePortShape } from "@harness/service"
 
 const AST_GATE_SCOPED_CACHE_CAPACITY = 2048
@@ -59,12 +55,18 @@ interface AstGateCacheState {
 
 interface PendingAstEvaluation {
   readonly file: AstGateFileBatchInput
-  readonly pkgTag: AstGatePackageTag
   readonly contentSha256: ContentSha256
-  readonly localSourceFileCache: AstSourceFileCache
+  readonly evaluateFile: AstGateFileEvaluator
+  readonly waiters: number
 }
 
+const computeContentSha256 = (content: string): ContentSha256 =>
+  ContentSha256.make(createHash("sha256").update(content, "utf8").digest("hex"))
+
 const toReadError = (filePath: WorkspaceFilePath, err: unknown): WorkspaceFsError => {
+  if (err instanceof WorkspaceFsError) {
+    return err
+  }
   const message =
     err instanceof Error && err.message.trim().length > 0
       ? err.message.trim()
@@ -77,6 +79,9 @@ const toReadError = (filePath: WorkspaceFilePath, err: unknown): WorkspaceFsErro
 }
 
 const toWriteError = (filePath: WorkspaceFilePath, err: unknown): WorkspaceFsError => {
+  if (err instanceof WorkspaceFsError) {
+    return err
+  }
   const message =
     err instanceof Error && err.message.trim().length > 0
       ? err.message.trim()
@@ -91,10 +96,14 @@ const toWriteError = (filePath: WorkspaceFilePath, err: unknown): WorkspaceFsErr
 /**
  * Constructs an `AstGateCachePort` layer requiring `FileSystem` and `Path`.
  *
- * Architectural rationale ("why"): `ScopedCache` (capacity 2048) provides bounded
- * in-memory single-flight deduplication keyed by `(filePath, packageTag, contentSha256,
- * ruleVersion)`, while `SynchronizedRef` serializes immutable cache snapshots with
- * atomic write-before-commit disk persistence so failed writes never diverge memory from disk.
+ * When `options.cacheFilePath` is omitted, the cache operates in-memory only;
+ * `HarnessInfraLive` / `makeHarnessInfraLayer` wires it to
+ * `.harness/cache/ast-gates-v1.json` under the repository root.
+ *
+ * Architectural rationale ("why"): `ScopedCache` (capacity 2048) runs outside
+ * `SynchronizedRef` so concurrent `evaluateBatch` callers and batch misses share
+ * single-flight evaluation keyed by `(filePath, packageTag, contentSha256, ruleVersion)`,
+ * while `SynchronizedRef` serializes atomic write-before-commit disk persistence.
  */
 const makeAstGateCacheLayer = (options?: {
   readonly cacheFilePath?: WorkspaceFilePath
@@ -184,8 +193,17 @@ const makeAstGateCacheLayer = (options?: {
           )
         })
 
-      const scopedCache = yield* ScopedCache.make<string, PersistedAstCacheEntry, WorkspaceFsError>({
+      const scopedCache = yield* ScopedCache.makeWith<
+        string,
+        PersistedAstCacheEntry,
+        WorkspaceFsError
+      >({
         capacity: AST_GATE_SCOPED_CACHE_CAPACITY,
+        timeToLive: (exit) =>
+          match(exit)
+            .with({ _tag: "Success" }, () => Duration.infinity)
+            .with({ _tag: "Failure" }, () => Duration.zero)
+            .exhaustive(),
         lookup: (lookupKey) =>
           Effect.gen(function* () {
             const pendingMap = yield* Ref.get(pendingEvalRef)
@@ -199,27 +217,7 @@ const makeAstGateCacheLayer = (options?: {
                 ),
               })
             }
-            const { sourceFile } = getOrCreateCachedSourceFile(
-              pending.file.filePath,
-              pending.file.content,
-              pending.contentSha256,
-              pending.localSourceFileCache,
-            )
-            const fileViolations = visitSourceFileSinglePass(
-              sourceFile,
-              pending.file.filePath,
-              pending.pkgTag,
-            )
-            const contractViolations: ReadonlyArray<AstGateViolationContract> = fileViolations.map(
-              (v) => ({
-                category: v.category,
-                rule: v.rule,
-                message: v.message,
-                file: v.file,
-                line: v.line,
-                enclosingSymbol: v.enclosingSymbol,
-              }),
-            )
+            const contractViolations = pending.evaluateFile(pending.file)
             return {
               contentSha256: pending.contentSha256,
               ruleVersion: HARNESS_GATE_RULE_VERSION,
@@ -230,103 +228,150 @@ const makeAstGateCacheLayer = (options?: {
 
       const evaluateBatch = Effect.fn("AstGateCachePort.evaluateBatch")(function* (
         files: ReadonlyArray<AstGateFileBatchInput>,
+        evaluateFile: AstGateFileEvaluator,
       ): Effect.fn.Return<AstGateEvaluationReport, WorkspaceFsError> {
-        const localSourceFileCache: AstSourceFileCache = new Map()
-        return yield* SynchronizedRef.modifyEffect(stateRef, (state) =>
-          Effect.gen(function* () {
-            const loaded = yield* ensureLoaded(state)
-            const nextEntries = new Map(loaded.entries)
-
-            let cacheHitCount = 0
-            let dirty = false
-            const violations: Array<AstGateViolationContract> = []
-
-            for (const file of files) {
-              const pkgTag = file.packageTag ?? inferPackageTagFromPath(file.filePath)
-              const cacheKey = `${file.filePath}\0${pkgTag}`
-              const contentSha256 = computeContentSha256(file.content)
-              const existing = nextEntries.get(cacheKey)
-
-              if (
-                existing !== undefined &&
-                existing.contentSha256 === contentSha256 &&
-                existing.ruleVersion === HARNESS_GATE_RULE_VERSION
-              ) {
-                cacheHitCount += 1
-                violations.push(...existing.violations)
-                continue
-              }
-
-              const scopedKey = `${cacheKey}\0${contentSha256}\0${HARNESS_GATE_RULE_VERSION}`
-              yield* Ref.update(pendingEvalRef, (pending) => {
-                const next = new Map(pending)
-                next.set(scopedKey, {
-                  file,
-                  pkgTag,
-                  contentSha256,
-                  localSourceFileCache,
-                })
-                return next
-              })
-
-              const computed = yield* ScopedCache.get(scopedCache, scopedKey).pipe(
-                Effect.mapError((err) => toWriteError(file.filePath, err)),
-                Effect.ensuring(
-                  Ref.update(pendingEvalRef, (pending) => {
-                    const next = new Map(pending)
-                    next.delete(scopedKey)
-                    return next
-                  }),
-                ),
-              )
-
-              nextEntries.set(cacheKey, computed)
-              dirty = true
-              violations.push(...computed.violations)
-            }
-
-            if (dirty) {
-              yield* persistEntries(nextEntries)
-            }
-
-            const report = makeAstGateEvaluationReport({
-              violations,
-              inspectedFileCount: NonNegativeCount.make(files.length),
-              cacheHitCount: NonNegativeCount.make(cacheHitCount),
-            })
-
-            return [
-              report,
-              {
-                loaded: true,
-                entries: nextEntries,
-              },
-            ] as const
-          }),
+        const snapshot = yield* SynchronizedRef.modifyEffect(stateRef, (state) =>
+          ensureLoaded(state).pipe(Effect.map((loaded) => [loaded, loaded] as const)),
         )
+
+        interface PreparedMiss {
+          readonly cacheKey: string
+          readonly scopedKey: string
+          readonly file: AstGateFileBatchInput
+          readonly contentSha256: ContentSha256
+        }
+
+        const hitMap = new Map<string, PersistedAstCacheEntry>()
+        const misses: Array<PreparedMiss> = []
+        const orderedKeys: Array<string> = []
+        let cacheHitCount = 0
+
+        for (const file of files) {
+          const pkgTag = file.packageTag ?? inferAstGatePackageTagFromPath(file.filePath)
+          const cacheKey = `${file.filePath}\0${pkgTag}`
+          orderedKeys.push(cacheKey)
+          const contentSha256 = computeContentSha256(file.content)
+          const existing = snapshot.entries.get(cacheKey)
+
+          if (
+            existing !== undefined &&
+            existing.contentSha256 === contentSha256 &&
+            existing.ruleVersion === HARNESS_GATE_RULE_VERSION
+          ) {
+            cacheHitCount += 1
+            hitMap.set(cacheKey, existing)
+          } else {
+            const scopedKey = `${cacheKey}\0${contentSha256}\0${HARNESS_GATE_RULE_VERSION}`
+            misses.push({ cacheKey, scopedKey, file, contentSha256 })
+          }
+        }
+
+        const computedMap = new Map<string, PersistedAstCacheEntry>()
+        if (misses.length > 0) {
+          const computedPairs = yield* Effect.forEach(
+            misses,
+            (miss) =>
+              Effect.gen(function* () {
+                yield* Ref.update(pendingEvalRef, (pending) => {
+                  const next = new Map(pending)
+                  const prev = next.get(miss.scopedKey)
+                  next.set(miss.scopedKey, {
+                    file: miss.file,
+                    contentSha256: miss.contentSha256,
+                    evaluateFile,
+                    waiters: (prev?.waiters ?? 0) + 1,
+                  })
+                  return next
+                })
+                const entry = yield* ScopedCache.get(scopedCache, miss.scopedKey).pipe(
+                  Effect.mapError((err) =>
+                    err instanceof WorkspaceFsError ? err : toWriteError(miss.file.filePath, err),
+                  ),
+                  Effect.ensuring(
+                    Ref.update(pendingEvalRef, (pending) => {
+                      const next = new Map(pending)
+                      const prev = next.get(miss.scopedKey)
+                      if (prev === undefined || prev.waiters <= 1) {
+                        next.delete(miss.scopedKey)
+                      } else {
+                        next.set(miss.scopedKey, { ...prev, waiters: prev.waiters - 1 })
+                      }
+                      return next
+                    }),
+                  ),
+                )
+                return [miss.cacheKey, entry] as const
+              }),
+            { concurrency: "unbounded" },
+          )
+
+          for (const [cacheKey, entry] of computedPairs) {
+            computedMap.set(cacheKey, entry)
+          }
+
+          yield* SynchronizedRef.modifyEffect(stateRef, (state) =>
+            Effect.gen(function* () {
+              const loaded = yield* ensureLoaded(state)
+              const nextEntries = new Map(loaded.entries)
+              let dirty = false
+              for (const [cacheKey, entry] of computedMap.entries()) {
+                const prev = nextEntries.get(cacheKey)
+                if (
+                  prev === undefined ||
+                  prev.contentSha256 !== entry.contentSha256 ||
+                  prev.ruleVersion !== entry.ruleVersion
+                ) {
+                  nextEntries.set(cacheKey, entry)
+                  dirty = true
+                }
+              }
+              if (dirty) {
+                yield* persistEntries(nextEntries)
+              }
+              return [undefined, { loaded: true, entries: nextEntries }] as const
+            }),
+          )
+        }
+
+        const violations: Array<AstGateViolationContract> = []
+        for (const cacheKey of orderedKeys) {
+          const entry = hitMap.get(cacheKey) ?? computedMap.get(cacheKey)
+          if (entry !== undefined) {
+            violations.push(...entry.violations)
+          }
+        }
+
+        return makeAstGateEvaluationReport({
+          violations,
+          inspectedFileCount: NonNegativeCount.make(files.length),
+          cacheHitCount: NonNegativeCount.make(cacheHitCount),
+        })
       })
 
-      const clearCache: Effect.Effect<void> = SynchronizedRef.updateEffect(stateRef, () =>
-        Effect.gen(function* () {
-          yield* ScopedCache.invalidateAll(scopedCache)
-          if (options?.cacheFilePath !== undefined) {
-            yield* fs.remove(options.cacheFilePath, { force: true }).pipe(Effect.ignore)
-          }
-          return {
-            loaded: true,
-            entries: new Map<string, PersistedAstCacheEntry>(),
-          }
-        }),
+      const clearCache: Effect.Effect<void, WorkspaceFsError> = SynchronizedRef.updateEffect(
+        stateRef,
+        () =>
+          Effect.gen(function* () {
+            yield* ScopedCache.invalidateAll(scopedCache)
+            if (options?.cacheFilePath !== undefined) {
+              const filePath = options.cacheFilePath
+              yield* fs
+                .remove(filePath, { force: true })
+                .pipe(Effect.mapError((err) => toWriteError(filePath, err)))
+            }
+            return {
+              loaded: true,
+              entries: new Map<string, PersistedAstCacheEntry>(),
+            }
+          }),
       )
 
-      const cacheSize: Effect.Effect<NonNegativeCount> = SynchronizedRef.modifyEffect(
-        stateRef,
-        (state) =>
+      const cacheSize: Effect.Effect<NonNegativeCount, WorkspaceFsError> =
+        SynchronizedRef.modifyEffect(stateRef, (state) =>
           ensureLoaded(state).pipe(
-            Effect.orElseSucceed(() => state),
             Effect.map((loaded) => [NonNegativeCount.make(loaded.entries.size), loaded] as const),
           ),
-      )
+        )
 
       const impl: AstGateCachePortShape = {
         evaluateBatch,

@@ -1,6 +1,6 @@
 import { Effect, Result } from "effect"
 import { match, P } from "ts-pattern"
-import type { SyncHostIo } from "@harness/service"
+import type { SyncHostIo } from "@harness/service/host-io"
 
 export type MigrationViolationKind =
   | "drop-statement"

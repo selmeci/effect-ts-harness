@@ -2,6 +2,9 @@
 
 Oct 3, 2026 · @Roman Selmeci
 
+> [!NOTE]
+> **Data Layer Supersession (`DR-5`):** Historical references to `drizzle-orm` / `drizzle-kit` in this MVP brief are superseded. The workspace has **completely abandoned and banned Drizzle (`drizzle-orm`, `drizzle-kit`)** in favor of native Effect v4 SQL (`@effect/sql-d1`, `@effect/sql-sqlite-do`, `SqlClient.SqlClient`, `SqliteMigrator`, `Schema`) in `type:infra`.
+
 ## Project intent
 
 The goal is a development harness in which an AI agent plans and codes in the idioms and building blocks of Effect-TS v4, enforced rather than merely suggested in a prompt. The repo runs on **pnpm + Nx**, **code-graph-rag** indexes the code structure, and the **Clef-flash decision model via Ollama** makes local decisions.

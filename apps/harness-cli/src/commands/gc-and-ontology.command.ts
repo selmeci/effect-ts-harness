@@ -1,8 +1,13 @@
 import { join } from "node:path"
-import { Effect, Layer } from "effect"
+import { Cause, Effect, Layer } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
-import { evaluateOntologyConflicts, extractOntologyConflictPairs, IDIOM_BLOCKS } from "@harness/decision"
+import {
+  evaluateOntologyConflictsWithStatus,
+  extractOntologyConflictPairs,
+  IDIOM_BLOCKS,
+  type OntologyConflictEvaluationReport,
+} from "@harness/decision"
 import {
   decideGraphEntropy,
   decideOntologyInvariants,
@@ -84,6 +89,7 @@ export const handleOntology = (
       .with("check", () =>
         Effect.gen(function* () {
           const strict = argv.includes("--strict")
+          const deterministic = argv.includes("--deterministic")
           const scopeArg = argv.find((arg) => arg.startsWith("--scope="))
           const scope = scopeArg ? scopeArg.slice("--scope=".length) : undefined
 
@@ -104,17 +110,36 @@ export const handleOntology = (
             governanceDocs: docs,
           })
           const pairs = yield* extractOntologyConflictPairs(docs, scope)
-          const semanticConflicts = yield* evaluateOntologyConflicts(pairs).pipe(
-            Effect.provide(decisionLayer),
-          )
-          const clean = invariants.clean && semanticConflicts.length === 0
+          const semanticReport: OntologyConflictEvaluationReport = deterministic
+            ? { conflicts: [], degraded: false }
+            : yield* evaluateOntologyConflictsWithStatus(pairs).pipe(
+                Effect.provide(decisionLayer),
+                Effect.catchCause((cause) => {
+                  if (Cause.hasInterrupts(cause)) {
+                    return Effect.interrupt
+                  }
+                  const pretty = Cause.pretty(cause)
+                  process.stderr.write(`[harness:ontology] semantic conflict check failed: ${pretty}\n`)
+                  return Effect.succeed<OntologyConflictEvaluationReport>({
+                    conflicts: [],
+                    degraded: true,
+                    evaluationError: pretty,
+                  })
+                }),
+              )
+          const degraded = semanticReport.degraded
+          const clean = invariants.clean && semanticReport.conflicts.length === 0 && !degraded
 
           return {
             exitCode: strict && !clean ? 1 : 0,
             stdout: JSON.stringify({
               clean,
+              degraded,
+              ...(semanticReport.evaluationError !== undefined
+                ? { evaluationError: semanticReport.evaluationError }
+                : {}),
               findings: invariants.findings,
-              semanticConflicts,
+              semanticConflicts: semanticReport.conflicts,
               evaluatedPairs: pairs.length,
             }),
             stderr: "",

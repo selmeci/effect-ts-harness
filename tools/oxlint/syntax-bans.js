@@ -19,7 +19,7 @@ const fetchBanMessage =
 const secretConfigMessage =
   "Sensitive configuration keys (SECRET, TOKEN, PASSWORD, API_KEY, PRIVATE_KEY, CREDENTIAL) must use Config.redacted(...) instead of Config.string(...) to prevent leaking secrets in logs and spans."
 const sqlInterpolationMessage =
-  "Raw SQL template interpolation in .exec(`...${...}`) or .prepare(`...${...}`) is banned (SQL injection risk) — use parameterized queries or Drizzle ORM."
+  "Raw SQL template interpolation in .exec(`...${...}`) or .prepare(`...${...}`) is banned (SQL injection risk) — use parameterized queries via @effect/sql SqlClient."
 const impureDomainGlobalMessage =
   "Impure global Date.now() / new Date() / Math.random() is banned in type:domain — pass timestamps/randomness via input or use Effect Clock / Random services so domain deciders remain deterministic."
 const foreverRetryMessage =
@@ -52,6 +52,61 @@ const doubleTypeAssertionBanMessage =
   "Double type assertions ('as unknown as T') are banned — decode untrusted data with Effect Schema or type the interface properly instead of erasing types."
 const nodeSqliteInfraMessage = (source, filename) =>
   `Do not import '${source}' in type:infra or type:app ('${filename}') — execute Cloudflare Durable Object SQLite and D1 storages against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006, node-sqlite-in-infra).`
+const bannedDrizzleMessage = (source, filename) =>
+  `banned-drizzle-import: '${source}' is banned across the workspace in '${filename}' — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator).`
+
+function isDrizzleSpecifier(spec) {
+  return (
+    typeof spec === "string" &&
+    (spec === "drizzle-orm" ||
+      spec.startsWith("drizzle-orm/") ||
+      spec === "drizzle-kit" ||
+      spec.startsWith("drizzle-kit/"))
+  )
+}
+
+function getStaticModuleString(node) {
+  if (node == null) return null
+  if (node.type === "Literal" && typeof node.value === "string") {
+    return node.value
+  }
+  if (
+    node.type === "TemplateLiteral" &&
+    Array.isArray(node.expressions) &&
+    node.expressions.length === 0 &&
+    Array.isArray(node.quasis) &&
+    node.quasis.length === 1
+  ) {
+    const q = node.quasis[0]
+    return q != null && q.value != null ? (q.value.cooked ?? q.value.raw ?? null) : null
+  }
+  return null
+}
+
+function getModulePrefixOrStaticString(node) {
+  const staticStr = getStaticModuleString(node)
+  if (staticStr != null) return staticStr
+  if (
+    node != null &&
+    node.type === "TemplateLiteral" &&
+    Array.isArray(node.quasis) &&
+    node.quasis.length > 0
+  ) {
+    const q = node.quasis[0]
+    return q != null && q.value != null ? (q.value.cooked ?? q.value.raw ?? null) : null
+  }
+  return null
+}
+
+function isRequireCallee(callee) {
+  if (callee == null) return false
+  if (isIdentifier(callee, "require")) return true
+  return (
+    callee.type === "MemberExpression" &&
+    callee.computed !== true &&
+    isIdentifier(callee.property, "require")
+  )
+}
 
 const BOOLEAN_STATE_PROP_REGEX =
   /^(is[A-Z]|has[A-Z]|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|publish|published|expired)$/
@@ -1797,6 +1852,9 @@ const syntaxBans = {
           ) {
             reportOnce(node, nodeSqliteInfraMessage(importSource, filename))
           }
+          if (isDrizzleSpecifier(importSource)) {
+            reportOnce(node, bannedDrizzleMessage(importSource, filename))
+          }
           if (
             node.importKind !== "type" &&
             (importSource === "effect" || importSource === "effect/Effect") &&
@@ -1806,7 +1864,8 @@ const syntaxBans = {
               !isTestFilePath(filename) &&
               /(?:^|\/)(?:libs\/[^/]+\/[^/]+\/src|apps\/[^/]+\/src)\//.test(filename) &&
               !/(?:^|\/)libs\/es\/infra\/src\/memory\.ts$/.test(filename)
-            const isMcpBoundary = /(?:^|\/)apps\/harness-mcp\/src\//.test(filename)
+            const isMcpRunPromiseExitBoundary =
+              /(?:^|\/)apps\/harness-mcp\/src\/(?:server|daemon\/unix-socket-daemon)\.ts$/.test(filename)
             const isAppSrc = /(?:^|\/)apps\/[^/]+\/src\//.test(filename)
             for (const spec of node.specifiers) {
               if (spec == null || spec.importKind === "type") continue
@@ -1819,12 +1878,19 @@ const syntaxBans = {
                   effectNamespaceNames.add(localName)
                 }
                 if (importSource === "effect/Effect" && isEnforcedSrc && importedName != null) {
-                  const isBannedSync = importedName === "runSync" || importedName === "runSyncExit"
+                  const isBannedSync =
+                    importedName === "runSync" ||
+                    importedName === "runSyncExit" ||
+                    importedName === "runSyncWith"
+                  const isBannedCallback =
+                    importedName === "runCallback" || importedName === "runCallbackWith"
                   const isBannedPromise =
-                    (importedName === "runPromise" || importedName === "runPromiseExit") &&
-                    !isMcpBoundary
-                  const isBannedFork = importedName === "runFork" && !isAppSrc
-                  if (isBannedSync || isBannedPromise || isBannedFork) {
+                    importedName === "runPromise" ||
+                    importedName === "runPromiseWith" ||
+                    (importedName === "runPromiseExit" && !isMcpRunPromiseExitBoundary)
+                  const isBannedFork =
+                    (importedName === "runFork" || importedName === "runForkWith") && !isAppSrc
+                  if (isBannedSync || isBannedCallback || isBannedPromise || isBannedFork) {
                     context.report({
                       node: spec,
                       message: `unscoped-effect-run: 'Effect.${importedName}' import is banned in '${filename}' — compose Effects and execute via NodeRuntime.runMain or ManagedRuntime at the app edge.`,
@@ -1844,19 +1910,38 @@ const syntaxBans = {
       },
       ImportExpression(node) {
         const filename = getNormalizedFilename()
+        const sourceVal = getStaticModuleString(node.source)
+        const drizzleSourceVal = getModulePrefixOrStaticString(node.source)
+        if (drizzleSourceVal != null && isDrizzleSpecifier(drizzleSourceVal)) {
+          reportOnce(node, bannedDrizzleMessage(drizzleSourceVal, filename))
+        }
         if (/(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename)) {
-          const sourceVal =
-            node.source != null &&
-            node.source.type === "Literal" &&
-            typeof node.source.value === "string"
-              ? node.source.value
-              : null
           if (
             sourceVal === "node:sqlite" ||
             sourceVal === "sqlite" ||
             sourceVal === "better-sqlite3"
           ) {
             reportOnce(node, nodeSqliteInfraMessage(sourceVal, filename))
+          }
+        }
+      },
+      TSImportEqualsDeclaration(node) {
+        const filename = getNormalizedFilename()
+        if (
+          node.moduleReference != null &&
+          node.moduleReference.type === "TSExternalModuleReference"
+        ) {
+          const importSource = getStaticModuleString(node.moduleReference.expression)
+          if (importSource != null && isDrizzleSpecifier(importSource)) {
+            reportOnce(node, bannedDrizzleMessage(importSource, filename))
+          }
+          if (
+            /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
+            (importSource === "node:sqlite" ||
+              importSource === "sqlite" ||
+              importSource === "better-sqlite3")
+          ) {
+            reportOnce(node, nodeSqliteInfraMessage(importSource, filename))
           }
         }
       },
@@ -2021,13 +2106,22 @@ const syntaxBans = {
           node.property.type === "Identifier"
         ) {
           const methodName = node.property.name
-          const isBannedSyncRun = methodName === "runSync" || methodName === "runSyncExit"
+          const isMcpRunPromiseExitBoundary =
+            /(?:^|\/)apps\/harness-mcp\/src\/(?:server|daemon\/unix-socket-daemon)\.ts$/.test(filename)
+          const isBannedSyncRun =
+            methodName === "runSync" ||
+            methodName === "runSyncExit" ||
+            methodName === "runSyncWith"
+          const isBannedCallbackRun =
+            methodName === "runCallback" || methodName === "runCallbackWith"
           const isBannedPromiseRun =
-            (methodName === "runPromise" || methodName === "runPromiseExit") &&
-            !/(?:^|\/)apps\/harness-mcp\/src\//.test(filename)
+            methodName === "runPromise" ||
+            methodName === "runPromiseWith" ||
+            (methodName === "runPromiseExit" && !isMcpRunPromiseExitBoundary)
           const isBannedForkRun =
-            methodName === "runFork" && !/(?:^|\/)apps\/[^/]+\/src\//.test(filename)
-          if (isBannedSyncRun || isBannedPromiseRun || isBannedForkRun) {
+            (methodName === "runFork" || methodName === "runForkWith") &&
+            !/(?:^|\/)apps\/[^/]+\/src\//.test(filename)
+          if (isBannedSyncRun || isBannedCallbackRun || isBannedPromiseRun || isBannedForkRun) {
             context.report({
               node,
               message: `unscoped-effect-run: '${node.object.name}.${methodName}' is banned in '${filename}' — compose Effects and execute via NodeRuntime.runMain or ManagedRuntime at the app edge.`,
@@ -2150,20 +2244,21 @@ const syntaxBans = {
           }
         }
         if (
-          /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
-          isIdentifier(node.callee, "require") &&
+          isRequireCallee(node.callee) &&
           Array.isArray(node.arguments) &&
           node.arguments.length >= 1
         ) {
-          const arg0 = node.arguments[0]
-          const sourceVal =
-            arg0 != null && arg0.type === "Literal" && typeof arg0.value === "string"
-              ? arg0.value
-              : null
+          const sourceVal = getStaticModuleString(node.arguments[0])
+          const drizzleSourceVal = getModulePrefixOrStaticString(node.arguments[0])
+          if (drizzleSourceVal != null && isDrizzleSpecifier(drizzleSourceVal)) {
+            reportOnce(node, bannedDrizzleMessage(drizzleSourceVal, filename))
+          }
           if (
-            sourceVal === "node:sqlite" ||
-            sourceVal === "sqlite" ||
-            sourceVal === "better-sqlite3"
+            /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
+            isIdentifier(node.callee, "require") &&
+            (sourceVal === "node:sqlite" ||
+              sourceVal === "sqlite" ||
+              sourceVal === "better-sqlite3")
           ) {
             reportOnce(node, nodeSqliteInfraMessage(sourceVal, filename))
           }
@@ -2287,8 +2382,25 @@ const syntaxBans = {
           }
         }
       },
+      ExportAllDeclaration(node) {
+        const filename = getNormalizedFilename()
+        if (
+          node.source != null &&
+          typeof node.source.value === "string" &&
+          isDrizzleSpecifier(node.source.value)
+        ) {
+          reportOnce(node, bannedDrizzleMessage(node.source.value, filename))
+        }
+      },
       ExportNamedDeclaration(node) {
         const filename = getNormalizedFilename()
+        if (
+          node.source != null &&
+          typeof node.source.value === "string" &&
+          isDrizzleSpecifier(node.source.value)
+        ) {
+          reportOnce(node, bannedDrizzleMessage(node.source.value, filename))
+        }
         if (!/libs\/[^/]+\/(contract|domain|core|service|infra)\/src\//.test(filename)) return
         if (node.declaration == null) return
 
@@ -2459,6 +2571,12 @@ const testIntegrity = {
           typeof node.source.value === "string"
         ) {
           const importSource = node.source.value
+          if (isDrizzleSpecifier(importSource)) {
+            context.report({
+              node,
+              message: bannedDrizzleMessage(importSource, filename),
+            })
+          }
           if (
             /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
             (importSource === "node:sqlite" ||
@@ -2472,22 +2590,66 @@ const testIntegrity = {
           }
         }
       },
-      ImportExpression(node) {
+      ExportNamedDeclaration(node) {
         const filename = getNormalizedFilename()
         if (
           node.source != null &&
-          typeof node.source.value === "string"
+          typeof node.source.value === "string" &&
+          isDrizzleSpecifier(node.source.value)
         ) {
-          const importSource = node.source.value
-          if (
-            /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
-            (importSource === "node:sqlite" ||
-              importSource === "sqlite" ||
-              importSource === "better-sqlite3")
-          ) {
+          context.report({
+            node,
+            message: bannedDrizzleMessage(node.source.value, filename),
+          })
+        }
+      },
+      ExportAllDeclaration(node) {
+        const filename = getNormalizedFilename()
+        if (
+          node.source != null &&
+          typeof node.source.value === "string" &&
+          isDrizzleSpecifier(node.source.value)
+        ) {
+          context.report({
+            node,
+            message: bannedDrizzleMessage(node.source.value, filename),
+          })
+        }
+      },
+      ImportExpression(node) {
+        const filename = getNormalizedFilename()
+        const importSource = getStaticModuleString(node.source)
+        const drizzleSourceVal = getModulePrefixOrStaticString(node.source)
+        if (drizzleSourceVal != null && isDrizzleSpecifier(drizzleSourceVal)) {
+          context.report({
+            node,
+            message: bannedDrizzleMessage(drizzleSourceVal, filename),
+          })
+        }
+        if (
+          importSource != null &&
+          /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
+          (importSource === "node:sqlite" ||
+            importSource === "sqlite" ||
+            importSource === "better-sqlite3")
+        ) {
+          context.report({
+            node,
+            message: `Do not import '${importSource}' in type:infra or type:app tests ('${filename}') — execute Cloudflare Durable Object SQLite and D1 tests against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006, node-sqlite-in-infra).`,
+          })
+        }
+      },
+      TSImportEqualsDeclaration(node) {
+        const filename = getNormalizedFilename()
+        if (
+          node.moduleReference != null &&
+          node.moduleReference.type === "TSExternalModuleReference"
+        ) {
+          const importSource = getStaticModuleString(node.moduleReference.expression)
+          if (importSource != null && isDrizzleSpecifier(importSource)) {
             context.report({
               node,
-              message: `Do not import '${importSource}' in type:infra or type:app tests ('${filename}') — execute Cloudflare Durable Object SQLite and D1 tests against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006, node-sqlite-in-infra).`,
+              message: bannedDrizzleMessage(importSource, filename),
             })
           }
         }
@@ -2546,20 +2708,24 @@ const testIntegrity = {
         }
         const filename = getNormalizedFilename()
         if (
-          /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
-          isIdentifier(node.callee, "require") &&
+          isRequireCallee(node.callee) &&
           Array.isArray(node.arguments) &&
           node.arguments.length >= 1
         ) {
-          const arg0 = node.arguments[0]
-          const importSource =
-            arg0 != null && arg0.type === "Literal" && typeof arg0.value === "string"
-              ? arg0.value
-              : null
+          const importSource = getStaticModuleString(node.arguments[0])
+          const drizzleSourceVal = getModulePrefixOrStaticString(node.arguments[0])
+          if (drizzleSourceVal != null && isDrizzleSpecifier(drizzleSourceVal)) {
+            context.report({
+              node,
+              message: bannedDrizzleMessage(drizzleSourceVal, filename),
+            })
+          }
           if (
-            importSource === "node:sqlite" ||
-            importSource === "sqlite" ||
-            importSource === "better-sqlite3"
+            /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
+            isIdentifier(node.callee, "require") &&
+            (importSource === "node:sqlite" ||
+              importSource === "sqlite" ||
+              importSource === "better-sqlite3")
           ) {
             context.report({
               node,

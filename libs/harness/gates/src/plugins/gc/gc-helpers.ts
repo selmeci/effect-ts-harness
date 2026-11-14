@@ -15,7 +15,7 @@ import { join, relative } from "node:path"
 import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import * as Graph from "effect/Graph"
-import type { SyncHostIo } from "@harness/service"
+import type { SyncHostIo } from "@harness/service/host-io"
 import type { GovernanceDocStatus, GraphInferenceResult, HarnessGraph, HarnessNode } from "@harness/graph"
 import { isModularPluginPath } from "../self-dogfooding-plugin.js"
 

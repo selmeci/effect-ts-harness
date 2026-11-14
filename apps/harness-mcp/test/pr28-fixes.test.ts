@@ -1,6 +1,9 @@
 import * as fs from "node:fs"
+import * as http from "node:http"
 import * as os from "node:os"
 import * as path from "node:path"
+import { Client } from "@modelcontextprotocol/sdk/client/index.js"
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
 import { describe, expect, it, vi } from "vitest"
 import { Cause, Effect, Layer } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
@@ -165,35 +168,79 @@ describe("PR #28 harness-mcp fixes (F-6.1, F-20.1b)", () => {
     }
   })
 
-  it("F-6.1: createServer disposes runtime when transport closes", async () => {
+  it("T-2: createServer disposes ManagedRuntime and runs scoped finalizers on close, rejecting subsequent calls", async () => {
+    let finalizerRan = false
+    const probeLayer = Layer.effectDiscard(
+      Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          finalizerRan = true
+        }),
+      ),
+    )
+
     const server = createServer({
       graph: stubGraph,
+      extraLayer: probeLayer,
       skipOmnigraphSpawn: true,
       skipTelemetry: true,
       skipActiveWorkspaceLookup: true,
     })
 
-    const mockTransport: Parameters<typeof server.connect>[0] = {
-      start: async () => undefined,
-      send: async () => undefined,
-      close: async () => undefined,
-    }
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    const client = new Client({ name: "test-client", version: "0.0.0" })
 
-    await server.connect(mockTransport)
-    expect(typeof mockTransport.onclose).toBe("function")
-    mockTransport.onclose?.()
+    await server.connect(serverTransport)
+    await client.connect(clientTransport)
+
+    const beforeClose = await client.callTool({
+      name: "harness_route",
+      arguments: { planStep: "test" },
+    })
+    expect(beforeClose.isError).not.toBe(true)
+    expect(finalizerRan).toBe(false)
+
     await server.close()
+    await client.close()
+    expect(finalizerRan).toBe(true)
+
+    await expect(
+      client.callTool({
+        name: "harness_route",
+        arguments: { planStep: "after-close" },
+      }),
+    ).rejects.toThrow()
   })
 
-  it("F-20.1b: ServerOptions.skipOmnigraphSpawn controls memory-fallback vs live OMNIGRAPH_URL", async () => {
+  it("T-1: ServerOptions.skipOmnigraphSpawn: true makes 0 HTTP requests while false queries local Omnigraph", async () => {
     const prevUrl = process.env["OMNIGRAPH_URL"]
+    const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "harness-mcp-t1-"))
+    let requestCount = 0
+    const fakeOmnigraph = http.createServer((_req, res) => {
+      requestCount += 1
+      res.statusCode = 503
+      res.end("unavailable")
+    })
+    await new Promise<void>((resolveListen) => {
+      fakeOmnigraph.listen(0, "127.0.0.1", () => resolveListen())
+    })
+    const addr = fakeOmnigraph.address()
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0
     try {
       delete process.env["OMNIGRAPH_URL"]
+      const clusterDir = path.join(tmpRepo, ".harness", "omnigraph-cluster")
+      fs.mkdirSync(clusterDir, { recursive: true })
+      fs.writeFileSync(
+        path.join(clusterDir, "server.json"),
+        JSON.stringify({ baseUrl: `http://127.0.0.1:${port}`, port }),
+        "utf8",
+      )
+
       const skipped = (await Effect.runPromise(
         executeToolEffect(
           "harness_gq_query",
           { queryName: "resolve_effect_fn", params: { spanName: "Sample.helperFn" } },
           {
+            repoRoot: tmpRepo,
             graph: stubGraph,
             skipOmnigraphSpawn: true,
             skipTelemetry: true,
@@ -202,13 +249,14 @@ describe("PR #28 harness-mcp fixes (F-6.1, F-20.1b)", () => {
         ),
       )) as { readonly source: string }
       expect(skipped.source).toBe("memory-fallback")
+      expect(requestCount).toBe(0)
 
-      process.env["OMNIGRAPH_URL"] = "http://127.0.0.1:1"
       const notSkipped = (await Effect.runPromise(
         executeToolEffect(
           "harness_gq_query",
           { queryName: "resolve_effect_fn", params: { spanName: "Sample.helperFn" } },
           {
+            repoRoot: tmpRepo,
             graph: stubGraph,
             skipOmnigraphSpawn: false,
             skipTelemetry: true,
@@ -217,7 +265,12 @@ describe("PR #28 harness-mcp fixes (F-6.1, F-20.1b)", () => {
         ),
       )) as { readonly source: string }
       expect(notSkipped.source).toBe("memory-fallback")
+      expect(requestCount).toBeGreaterThan(0)
     } finally {
+      fs.rmSync(tmpRepo, { recursive: true, force: true })
+      await new Promise<void>((resolveClose) => {
+        fakeOmnigraph.close(() => resolveClose())
+      })
       if (prevUrl === undefined) {
         delete process.env["OMNIGRAPH_URL"]
       } else {

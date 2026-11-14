@@ -3,6 +3,7 @@ import { Effect, Schema } from "effect"
 import { match } from "ts-pattern"
 import { nodeSyncHostIo } from "@harness/infra"
 import { type CliEnv, type CliResult, findWorkspaceRoot } from "./daemon-and-omnigraph.service.js"
+import { resolveRepoPath } from "./repo-path.js"
 import {
   discoverTranscript,
   evaluateScenarioRun,
@@ -199,7 +200,10 @@ const failMsg = (msg: string): CliResult => ({
 
 const handleList = (paths: ScenarioPaths, flags: ScenarioFlags): CliResult => {
   if (!nodeSyncHostIo.existsSync(paths.currentPointer)) {
-    restoreScenariosToWorkspace(paths)
+    const restoreRes = restoreScenariosToWorkspace(paths)
+    if (!restoreRes.ok) {
+      return failMsg(restoreRes.error)
+    }
   }
   const root = activeScenariosDir(paths)
   const filterLower = flags.filter?.trim().toLowerCase()
@@ -237,7 +241,10 @@ const handleStart = (
     if (nodeSyncHostIo.existsSync(paths.currentPointer)) {
       return failMsg("A run is already active. Finish it with `pnpm scenario end` first.")
     }
-    restoreScenariosToWorkspace(paths)
+    const preRestore = restoreScenariosToWorkspace(paths)
+    if (!preRestore.ok) {
+      return failMsg(preRestore.error)
+    }
     const dir = join(paths.scenariosDir, id)
     const expFile = join(dir, "expectations.json")
     if (!nodeSyncHostIo.existsSync(expFile)) {
@@ -283,26 +290,11 @@ const handleStart = (
     saveRun(runDir, { scenario: id, startedAt, stateDir, preflight, marks: [] })
     nodeSyncHostIo.writeTextSync(paths.currentPointer, JSON.stringify({ runDir }))
 
-    const hideExit = yield* Effect.exit(
-      Effect.sync(() => hideScenariosFromWorkspace(paths)).pipe(
-        Effect.tapError(() =>
-          Effect.sync(() => {
-            restoreScenariosToWorkspace(paths)
-            nodeSyncHostIo.rmRecursiveSync(paths.currentPointer)
-          }),
-        ),
-      ),
-    )
-    const hideFailed = match(hideExit)
-      .with({ _tag: "Success" }, () => undefined)
-      .with({ _tag: "Failure" }, ({ cause }) => {
-        restoreScenariosToWorkspace(paths)
-        nodeSyncHostIo.rmRecursiveSync(paths.currentPointer)
-        return failMsg(`Failed to stash scenarios: ${String(cause)}`)
-      })
-      .exhaustive()
-    if (hideFailed !== undefined) {
-      return hideFailed
+    const hideRes = hideScenariosFromWorkspace(paths)
+    if (!hideRes.ok) {
+      restoreScenariosToWorkspace(paths)
+      nodeSyncHostIo.rmRecursiveSync(paths.currentPointer)
+      return failMsg(hideRes.error)
     }
 
     out.push(
@@ -387,6 +379,13 @@ const handleEnd = (paths: ScenarioPaths, flags: ScenarioFlags): Effect.Effect<Cl
   Effect.sync((): CliResult => {
     const loaded = loadCurrentRun(paths)
     if ("error" in loaded) {
+      if (nodeSyncHostIo.existsSync(paths.stashedScenariosDir)) {
+        const preRestore = restoreScenariosToWorkspace(paths)
+    if (!preRestore.ok) {
+      return failMsg(preRestore.error)
+    }
+        return failMsg(`${loaded.error} Recovered orphaned _stashed-scenarios to scenarios/.`)
+      }
       return failMsg(loaded.error)
     }
     const endedAt = new Date().toISOString()
@@ -396,7 +395,15 @@ const handleEnd = (paths: ScenarioPaths, flags: ScenarioFlags): Effect.Effect<Cl
     }
     const telemetry = readJsonl(join(loaded.run.stateDir, "telemetry-log.jsonl")).filter(inRun)
     const friction = readJsonl(join(loaded.run.stateDir, "friction-log.jsonl")).filter(inRun)
-    const discovered = discoverTranscript(paths.repoRoot, paths.homeDir, loaded.run, flags)
+    let safeFlags = flags
+    if (flags.transcript !== undefined && flags.transcript.length > 0) {
+      const safeTranscript = resolveRepoPath(paths.repoRoot, flags.transcript)
+      if (safeTranscript === undefined) {
+        return failMsg(`Transcript path '${flags.transcript}' escapes repository root`)
+      }
+      safeFlags = { ...flags, transcript: safeTranscript }
+    }
+    const discovered = discoverTranscript(paths.repoRoot, paths.homeDir, loaded.run, safeFlags)
     if (discovered.error !== undefined) {
       return failMsg(discovered.error)
     }
@@ -413,7 +420,10 @@ const handleEnd = (paths: ScenarioPaths, flags: ScenarioFlags): Effect.Effect<Cl
     saveRun(loaded.runDir, updatedRun)
     nodeSyncHostIo.writeTextSync(paths.lastPointer, JSON.stringify({ runDir: loaded.runDir }))
     nodeSyncHostIo.rmRecursiveSync(paths.currentPointer)
-    restoreScenariosToWorkspace(paths)
+    const preRestore = restoreScenariosToWorkspace(paths)
+    if (!preRestore.ok) {
+      return failMsg(preRestore.error)
+    }
 
     const expPath = join(activeScenariosDir(paths), updatedRun.scenario, "expectations.json")
     const expectations = readExpectations(expPath)
@@ -438,7 +448,19 @@ const handleEnd = (paths: ScenarioPaths, flags: ScenarioFlags): Effect.Effect<Cl
       }
     }
     return { exitCode: evalRes.exitCode, stdout: `${out.join("\n")}\n`, stderr: "" }
-  }).pipe(Effect.ensuring(Effect.sync(() => restoreScenariosToWorkspace(paths))))
+  }).pipe(
+    Effect.ensuring(
+      Effect.sync(() => {
+        if (nodeSyncHostIo.existsSync(paths.currentPointer)) {
+          nodeSyncHostIo.rmRecursiveSync(paths.currentPointer)
+        }
+        const restoreRes = restoreScenariosToWorkspace(paths)
+        if (!restoreRes.ok) {
+          process.stderr.write(`[harness:scenario] Error restoring scenarios on end: ${restoreRes.error}\n`)
+        }
+      }),
+    ),
+  )
 
 const handleEval = (paths: ScenarioPaths, positional: ReadonlyArray<string>): CliResult => {
   const runDir =

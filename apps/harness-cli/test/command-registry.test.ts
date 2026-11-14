@@ -1,5 +1,7 @@
-import { readFileSync } from "node:fs"
-import { resolve } from "node:path"
+import { spawnSync } from "node:child_process"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join, resolve } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import { Cause, Effect, Exit, Layer } from "effect"
 import { match } from "ts-pattern"
@@ -211,5 +213,59 @@ describe("HarnessCli.dispatchCommand (SPEC-0011 §4)", () => {
     expect(source).not.toMatch(/from\s+["']\.\/scenario\.command\.js["']/)
     expect(source).toContain('import("./repo-checks.command.js")')
     expect(source).toContain('import("./scenario.command.js")')
+  })
+
+  it("C-6: guard subprocess does not load repo-checks, scenario, sample-contract, or cart fixture at runtime", () => {
+    const repoRoot = resolve(import.meta.dirname, "../../..")
+    const tmp = mkdtempSync(join(tmpdir(), "harness-lazy-load-"))
+    try {
+      const logPath = join(tmp, "loaded-urls.txt")
+      const hookPath = join(tmp, "record-loads.mjs")
+      writeFileSync(
+        hookPath,
+        [
+          'import { appendFileSync } from "node:fs"',
+          'import { registerHooks } from "node:module"',
+          `const logPath = ${JSON.stringify(logPath)}`,
+          "registerHooks({",
+          "  load(url, context, nextLoad) {",
+          '    appendFileSync(logPath, `${url}\\n`, "utf8")',
+          "    return nextLoad(url, context)",
+          "  },",
+          "})",
+        ].join("\n"),
+        "utf8",
+      )
+
+      const res = spawnSync(
+        process.execPath,
+        [
+          "--import",
+          "./tools/node-ts-resolver.mjs",
+          "--import",
+          hookPath,
+          "apps/harness-cli/src/index.ts",
+          "guard",
+          "--format=antigravity",
+        ],
+        {
+          cwd: repoRoot,
+          input: JSON.stringify({ tool_name: "Bash", tool_input: { command: "pnpm test" } }),
+          encoding: "utf8",
+          timeout: 15_000,
+        },
+      )
+
+      expect(res.status).toBe(0)
+      expect(JSON.parse(res.stdout.trim())).toEqual({ decision: "allow" })
+      const loaded = readFileSync(logPath, "utf8")
+      expect(loaded).toContain("guard-and-route.command.ts")
+      expect(loaded).not.toContain("repo-checks.command.ts")
+      expect(loaded).not.toContain("scenario.command.ts")
+      expect(loaded).not.toContain("libs/sample/contract")
+      expect(loaded).not.toContain("fixtures/cart")
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
   })
 })

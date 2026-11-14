@@ -1,6 +1,7 @@
 import { NodeServices } from "@effect/platform-node"
 import { Layer } from "effect"
-import { makeOmnigraphSyncLayer, makeTsCompilerOverlayLayer } from "@harness/graph"
+import { WorkspaceFilePath } from "@harness/contract"
+import { makeOmnigraphSyncLayer, makeTsCompilerOverlayLayer, type TsCompilerOverlayService } from "@harness/graph"
 import { ActiveMutantContextLive } from "./active-mutant-context-live.js"
 import { AstGateCacheLive, makeAstGateCacheLayer } from "./ast-gate-cache-live.js"
 import {
@@ -47,16 +48,33 @@ export {
   type UnixSocketDaemonLayerOptions,
 }
 
-export const TsCompilerOverlayServiceLive = makeTsCompilerOverlayLayer(nodeSyncHostIo)
+export const TsCompilerOverlayServiceLive: Layer.Layer<TsCompilerOverlayService> =
+  makeTsCompilerOverlayLayer(nodeSyncHostIo)
 export const OmnigraphSyncLive = makeOmnigraphSyncLayer(nodeSyncHostIo)
 
-export const HarnessInfraLive = Layer.mergeAll(
-  makeWorkspaceFsLayer(),
-  makeHarnessSubprocessRunnerLayer(),
-  makeAstGateCacheLayer(),
-  makeDecisionCacheLayer(),
-  UnixSocketDaemonLive,
-  ActiveMutantContextLive,
-  TsCompilerOverlayServiceLive,
-  OmnigraphSyncLive,
-).pipe(Layer.provide(NodeServices.layer))
+const cacheFileUnderRoot = (repoRoot: WorkspaceFilePath, fileName: string): WorkspaceFilePath =>
+  WorkspaceFilePath.make(`${repoRoot.replace(/\/+$/, "")}/.harness/cache/${fileName}`)
+
+const makeHarnessInfraLayer = (options?: {
+  readonly repoRoot?: WorkspaceFilePath
+}) => {
+  const repoRoot = options?.repoRoot ?? WorkspaceFilePath.make(process.cwd())
+  return Layer.mergeAll(
+    makeWorkspaceFsLayer(),
+    makeHarnessSubprocessRunnerLayer(),
+    makeAstGateCacheLayer({
+      cacheFilePath: cacheFileUnderRoot(repoRoot, "ast-gates-v1.json"),
+    }),
+    makeDecisionCacheLayer({
+      cacheFilePath: cacheFileUnderRoot(repoRoot, "decision-cache-v1.json"),
+    }),
+    UnixSocketDaemonLive,
+    ActiveMutantContextLive,
+    TsCompilerOverlayServiceLive,
+    OmnigraphSyncLive,
+  ).pipe(Layer.provide(NodeServices.layer))
+}
+
+export { makeHarnessInfraLayer }
+
+export const HarnessInfraLive = makeHarnessInfraLayer()

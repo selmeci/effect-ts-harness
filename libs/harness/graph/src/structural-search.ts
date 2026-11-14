@@ -1,6 +1,6 @@
 import * as path from "node:path"
 import { Lang, parse } from "@ast-grep/napi"
-import type { SyncHostIo } from "@harness/service"
+import type { SyncHostIo } from "@harness/service/host-io"
 import { Effect, Result, Schema } from "effect"
 import { NonNegativeCount } from "./model.js"
 

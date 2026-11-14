@@ -16,7 +16,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard"
+            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard",
+            "timeout": 15
           }
         ]
       },
@@ -25,7 +26,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard"
+            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard",
+            "timeout": 15
           }
         ]
       }

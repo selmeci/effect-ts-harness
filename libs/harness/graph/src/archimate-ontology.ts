@@ -112,7 +112,7 @@ const INFRA_OR_CLOUD_TOKENS = new Set<string>([
   "R2",
   "D1",
   "Sql",
-  "Drizzle",
+  "EffectSql",
   "Sqlite",
   "SqlClient",
   "D1Database",
@@ -132,7 +132,7 @@ export const isInfraOrCloudIdentifier = (id: string, file: string): boolean => {
   if (
     id.startsWith("Cloudflare.") ||
     id.startsWith("@effect/sql") ||
-    id.startsWith("drizzle-orm")
+    id.startsWith("EffectSql")
   ) {
     return true
   }

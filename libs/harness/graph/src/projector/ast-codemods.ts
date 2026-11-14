@@ -1,5 +1,5 @@
 import { Lang, parse } from "@ast-grep/napi"
-import type { SyncHostIo } from "@harness/service"
+import type { SyncHostIo } from "@harness/service/host-io"
 import * as Graph from "effect/Graph"
 import { Node, Project, SyntaxKind, ts } from "ts-morph"
 import { match } from "ts-pattern"

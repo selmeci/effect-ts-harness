@@ -62,6 +62,14 @@ export const AstGatePackageTag = Schema.Literals([
 ])
 export type AstGatePackageTag = typeof AstGatePackageTag.Type
 
+export const inferAstGatePackageTagFromPath = (filePath: string): AstGatePackageTag => {
+  if (filePath.includes("/contract/")) return AstGatePackageTag.make("contract")
+  if (filePath.includes("/domain/") || filePath.includes("/core/")) return AstGatePackageTag.make("domain")
+  if (filePath.includes("/service/")) return AstGatePackageTag.make("service")
+  if (filePath.includes("/infra/")) return AstGatePackageTag.make("infra")
+  return AstGatePackageTag.make("app")
+}
+
 export const PluginId = Schema.NonEmptyString.pipe(
   Schema.check(Schema.isTrimmed()),
   Schema.brand("PluginId"),
@@ -117,29 +125,38 @@ export const SelfDogfoodingViolation = Schema.Struct({
 })
 export type SelfDogfoodingViolation = typeof SelfDogfoodingViolation.Type
 
-export const SelfDogfoodingReport = Schema.Struct({
-  verdict: GateVerdict,
-  violations: Schema.Array(SelfDogfoodingViolation),
-  inspectedFileCount: NonNegativeCount,
-}).pipe(
-  Schema.check(
-    Schema.makeFilter((report) =>
-      (report.verdict === "clean") === (report.violations.length === 0)
-        ? undefined
-        : "SelfDogfoodingReport verdict and violations length must agree",
-    ),
-  ),
-)
+export const SelfDogfoodingReport = Schema.Union([
+  Schema.Struct({
+    verdict: Schema.Literal("clean"),
+    violations: Schema.Tuple([]),
+    inspectedFileCount: NonNegativeCount,
+  }),
+  Schema.Struct({
+    verdict: Schema.Literal("violated"),
+    violations: Schema.NonEmptyArray(SelfDogfoodingViolation),
+    inspectedFileCount: NonNegativeCount,
+  }),
+])
 export type SelfDogfoodingReport = typeof SelfDogfoodingReport.Type
 
 export const makeSelfDogfoodingReport = (
   violations: ReadonlyArray<SelfDogfoodingViolation>,
   inspectedFileCount: NonNegativeCount,
-): SelfDogfoodingReport => ({
-  verdict: violations.length === 0 ? "clean" : "violated",
-  violations: [...violations],
-  inspectedFileCount,
-})
+): SelfDogfoodingReport => {
+  const [first, ...rest] = violations
+  if (first === undefined) {
+    return {
+      verdict: "clean",
+      violations: [],
+      inspectedFileCount,
+    }
+  }
+  return {
+    verdict: "violated",
+    violations: [first, ...rest],
+    inspectedFileCount,
+  }
+}
 
 export class SelfDogfoodingViolationError extends Schema.TaggedError<SelfDogfoodingViolationError>()(
   "SelfDogfoodingViolationError",

@@ -26,7 +26,6 @@ import {
 } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
 import { type CliEnv, type CliResult, findWorkspaceRoot } from "./daemon-and-omnigraph.service.js"
-import { runBenchmarkCompare } from "./repo-checks.command.js"
 
 export const handleMutate = (
   argv: ReadonlyArray<string>,
@@ -51,6 +50,9 @@ export const handleBench = (
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     if (argv.includes("--compare")) {
+      const { runBenchmarkCompare } = yield* Effect.promise(
+        () => import("./repo-checks.command.js"),
+      )
       return yield* runBenchmarkCompare(argv, options)
     }
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
@@ -133,7 +135,6 @@ export const handleBench = (
       }
     }
 
-    const cacheFilePath = AstGateCache.resolveCachePath(repoRoot)
     yield* AstGateCache.decide({
       files: [
         {
@@ -142,7 +143,6 @@ export const handleBench = (
         },
       ],
       ruleVersion: HARNESS_GATE_RULE_VERSION,
-      cacheFilePath,
     })
 
     const warmAstSamples: Array<number> = []
@@ -156,7 +156,6 @@ export const handleBench = (
           },
         ],
         ruleVersion: HARNESS_GATE_RULE_VERSION,
-        cacheFilePath,
       })
       warmAstSamples.push(Math.max(0, performance.now() - t0))
     }

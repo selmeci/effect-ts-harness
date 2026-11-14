@@ -19,7 +19,7 @@ Because `type:contract` and `type:service` are already compiled and locked by `p
 
 - **Test Runner Package Boundaries**: In `type:contract` packages, import `{ describe, expect, it } from "vitest"`; in `type:domain`, `type:core`, and `type:infra`, import `{ describe, expect, it } from "@effect/vitest"`.
 - **Unit A (`type:domain`):** Replace `*.decide` and use-case `stub<A, E, R>()` calls; test with `@effect/vitest` (`it.effect`) + `runWithTestTracer` + in-memory test `Layer`s.
-- **Unit B (`type:infra`):** Implement Drizzle D1 / Durable Object `Layer`s (decoding rows into contract Schemas; synchronous DO SQLite transactions; W3C `traceparent` headers) and test with `@effect/vitest`.
+- **Unit B (`type:infra`):** Implement native `@effect/sql-d1` / `@effect/sql-sqlite-do` `Layer`s (`D1Client.layer`, `SqlClient`, `SqliteMigrator`; `drizzle-orm` / `drizzle-kit` banned) decoding rows into contract Schemas, synchronous DO SQLite transactions, and W3C `traceparent` headers, and test with `@effect/vitest`.
 - **Unit C (`scope:web`):** Derive `AtomHttpApi` query/mutation atoms from `type:contract` (zero raw `fetch`).
 
 Choose the dispatch mechanism dynamically based on task topology:

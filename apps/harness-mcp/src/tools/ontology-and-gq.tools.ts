@@ -9,10 +9,11 @@ import {
 } from "@harness/graph"
 import {
   decideOntologyInvariants,
-  evaluateOntologyConflicts,
+  evaluateOntologyConflictsWithStatus,
   extractOntologyConflictPairs,
   loadGovernanceDocsFromDisk,
   LocalDecisionModel,
+  type OntologyConflictEvaluationReport,
 } from "@harness/decision"
 import { nodeSyncHostIo } from "@harness/infra"
 import {
@@ -20,6 +21,7 @@ import {
   type McpToolPluginDescriptor,
   resolveDefaultRepoRoot,
   resolveGraph,
+  resolveGraphWithStatus,
   type ServerOptions,
 } from "./mcp-helpers.js"
 
@@ -119,7 +121,8 @@ export const buildOntologyAndGqToolDescriptors = (
     execute: (args) =>
       Effect.gen(function* () {
         const { scope } = yield* decodeOntologyCheckInput(args)
-        const graph = yield* resolveGraph(options, args)
+        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        const graph = graphStatus.graph
         const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
         const docs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(root, nodeSyncHostIo)
         const invariants = yield* decideOntologyInvariants({
@@ -128,21 +131,33 @@ export const buildOntologyAndGqToolDescriptors = (
         })
         const pairs = yield* extractOntologyConflictPairs(docs, scope)
         const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
-        const semanticConflicts = yield* evaluateOntologyConflicts(pairs).pipe(
+        const semanticReport = yield* evaluateOntologyConflictsWithStatus(pairs).pipe(
           Effect.provide(decisionLayer),
           Effect.catchCause((cause) => {
             if (Cause.hasInterrupts(cause)) {
               return Effect.interrupt
             }
-            process.stderr.write(`[harness-mcp] ontology conflicts fallback: ${Cause.pretty(cause)}\n`)
-            return Effect.succeed([])
+            const pretty = Cause.pretty(cause)
+            process.stderr.write(`[harness-mcp] ontology conflicts fallback: ${pretty}\n`)
+            return Effect.succeed<OntologyConflictEvaluationReport>({
+              conflicts: [],
+              degraded: true,
+              evaluationError: pretty,
+            })
           }),
         )
+        const degraded = graphStatus.degraded || semanticReport.degraded
+        const evaluationError =
+          [graphStatus.evaluationError, semanticReport.evaluationError]
+            .filter((e): e is string => e !== undefined)
+            .join("; ") || undefined
         const projection = projectOntologyLayers(graph)
         return {
-          clean: invariants.clean && semanticConflicts.length === 0,
+          clean: invariants.clean && semanticReport.conflicts.length === 0 && !degraded,
+          degraded,
+          ...(evaluationError !== undefined ? { evaluationError } : {}),
           findings: invariants.findings,
-          semanticConflicts,
+          semanticConflicts: semanticReport.conflicts,
           evaluatedPairs: pairs.length,
           layerCounts: {
             Motivation: projection.layers.Motivation.length,

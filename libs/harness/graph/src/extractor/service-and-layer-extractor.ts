@@ -260,7 +260,7 @@ export const autoRegisterReferencedEntities = (
     const svc = classNameToTagId.get(rawSvc) ?? rawSvc
     if (!existingServiceTags.has(svc)) {
       existingServiceTags.add(svc)
-      const isInfra = /^(Cloudflare|Alchemy|Drizzle|Provider|Binding|SqlClient|SqliteClient|SqlStorage)\b/.test(svc)
+      const isInfra = /^(Cloudflare|Alchemy|EffectSql|Provider|Binding|SqlClient|SqliteClient|SqlStorage)\b/.test(svc)
       services.push({
         _tag: "ServiceTag",
         tagId: svc,

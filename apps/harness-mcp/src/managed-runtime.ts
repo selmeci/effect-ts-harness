@@ -10,13 +10,15 @@ import {
   type McpToolRegistry,
 } from "./tools/tool-registry.js"
 
-export const makeMcpMainLayer = (options?: ServerOptions) =>
-  Layer.mergeAll(
+export const makeMcpMainLayer = (options?: ServerOptions) => {
+  const base = Layer.mergeAll(
     HarnessInfraLive,
     NodeServices.layer,
     makeLiveMcpToolRegistryLayer(options),
     Layer.succeed(Logger.LogToStderr, true),
   )
+  return options?.extraLayer !== undefined ? Layer.mergeAll(base, options.extraLayer) : base
+}
 
 export const makeMcpManagedRuntime = (options?: ServerOptions) =>
   ManagedRuntime.make(makeMcpMainLayer(options))

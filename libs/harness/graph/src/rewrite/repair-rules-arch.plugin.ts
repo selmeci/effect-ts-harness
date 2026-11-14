@@ -54,7 +54,7 @@ export const findPhase2ArchRepairBranches = (
 
       if (targetSigRelId !== undefined && deletedEdge !== undefined) {
         const rawSvcName = infraSvc?.name ?? infraSvcKey.replace(/^ServiceTag:/, "").split("#").pop() ?? "Infra"
-        const basePortName = rawSvcName.replace(/^(?:Drizzle|D1|Sqlite|Cloudflare|Live)/, "")
+        const basePortName = rawSvcName.replace(/^(?:EffectSql|D1|Sqlite|Cloudflare|Live)/, "")
         const portName = basePortName.length > 0 && basePortName !== rawSvcName ? basePortName : `${rawSvcName}Port`
         const portKey = `ServiceTag:${portName}`
         const layerQual = `libs/infra/src/${sanitizeDpoIdentifier(portName).toLowerCase()}-live.ts#${sanitizeDpoIdentifier(portName)}Live`

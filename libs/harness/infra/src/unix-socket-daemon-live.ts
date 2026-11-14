@@ -2,7 +2,7 @@ import * as nodeFs from "node:fs"
 import * as net from "node:net"
 import * as nodePath from "node:path"
 import { NodeServices } from "@effect/platform-node"
-import { Effect, FileSystem, Layer, Option, Path, Schema, type Scope } from "effect"
+import { Cause, Effect, FileSystem, Layer, Option, Path, Queue, Schema, type Scope, Semaphore } from "effect"
 import { match } from "ts-pattern"
 import {
   DaemonServerError,
@@ -253,31 +253,7 @@ const makeUnixSocketDaemonLayer = (
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem
       const path = yield* Path.Path
-      const services = yield* Effect.context<never>()
-      const runFork = Effect.runForkWith(services)
       const lineHandler = options?.lineHandler
-      const runLineHandler =
-        lineHandler !== undefined
-          ? (line: string, socket: net.Socket): void => {
-              const fiber = runFork(lineHandler(line))
-              fiber.addObserver((exit) => {
-                match(exit)
-                  .with({ _tag: "Success" }, ({ value: responseLine }) => {
-                    if (!socket.destroyed && socket.writable) {
-                      socket.end(`${responseLine}\n`)
-                    }
-                  })
-                  .with({ _tag: "Failure" }, () => {
-                    if (!socket.destroyed && socket.writable) {
-                      socket.end(
-                        `${JSON.stringify({ ok: false, error: "Daemon line handler failed" })}\n`,
-                      )
-                    }
-                  })
-                  .exhaustive()
-              })
-            }
-          : undefined
 
       const startServer = (
         repoRoot: WorkspaceFilePath,
@@ -287,19 +263,71 @@ const makeUnixSocketDaemonLayer = (
             options?.socketPathOverride ?? resolveHarnessDaemonSocketPath(repoRoot)
           const dirPath = path.dirname(socketPath)
 
-          // Architectural rationale ("why"): `0o700` parent directory and `0o600` socket
+          // Architectural rationale ("why"): `0o700` parent directory (for owned `.harness`
+          // directories only, never shared parents like `/tmp`) and `0o600` socket
           // permissions prevent cross-UID local IPC hijacking or unauthorized command
           // injection on multi-user hosts.
           yield* fs
             .makeDirectory(dirPath, { recursive: true, mode: 0o700 })
             .pipe(Effect.mapError((err) => toDaemonServerError(socketPath, err)))
-          if (process.platform !== "win32") {
+          if (
+            process.platform !== "win32" &&
+            (options?.socketPathOverride === undefined || path.basename(dirPath) === ".harness")
+          ) {
             yield* Effect.try({
               try: () => {
                 nodeFs.chmodSync(dirPath, 0o700)
               },
               catch: (err) => toDaemonServerError(socketPath, err),
             })
+          }
+
+          let runLineHandler: ((line: string, socket: net.Socket) => void) | undefined
+          if (lineHandler !== undefined) {
+            const lineQueue = yield* Queue.unbounded<{
+              readonly socket: net.Socket
+              readonly line: string
+            }>()
+            const sem = yield* Semaphore.make(4)
+            yield* Effect.forever(
+              Effect.gen(function* () {
+                const { socket, line } = yield* Queue.take(lineQueue)
+                yield* sem
+                  .withPermits(1)(
+                    Effect.gen(function* () {
+                      const exit = yield* Effect.exit(Effect.suspend(() => lineHandler(line)))
+                      yield* match(exit)
+                        .with({ _tag: "Success" }, ({ value: responseLine }) =>
+                          Effect.sync(() => {
+                            if (!socket.destroyed && socket.writable) {
+                              socket.end(`${responseLine}\n`)
+                            }
+                          }),
+                        )
+                        .with({ _tag: "Failure" }, ({ cause }) => {
+                          if (Cause.hasInterruptsOnly(cause)) {
+                            return Effect.interrupt
+                          }
+                          return Effect.sync(() => {
+                            const causeText = Cause.pretty(cause)
+                            process.stderr.write(`[harness-daemon] lineHandler failed: ${causeText}\n`)
+                            if (!socket.destroyed && socket.writable) {
+                              socket.end(
+                                `${JSON.stringify({ ok: false, error: "Daemon line handler failed", cause: causeText })}\n`,
+                              )
+                            }
+                          })
+                        })
+                        .exhaustive()
+                    }),
+                  )
+                  .pipe(Effect.forkScoped)
+              }),
+            ).pipe(Effect.forkScoped)
+            yield* Effect.addFinalizer(() => Queue.shutdown(lineQueue).pipe(Effect.ignore))
+            runLineHandler = (line: string, socket: net.Socket): void => {
+              Queue.offerUnsafe(lineQueue, { socket, line })
+            }
           }
 
           const probeResult = yield* probeSocketState(socketPath)
