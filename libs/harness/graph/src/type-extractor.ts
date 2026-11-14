@@ -174,8 +174,8 @@ export const extractWorkspaceTypeAwareGraph = Effect.fnUntraced(function* (
     }
     const relFileSet = new Set<string>(findWorkspaceSrcFiles(root, hostIo)), testFileSet = new Set<string>(findWorkspaceTestFiles(root, hostIo))
     for (const ov of overlays.keys()) {
-      if ((ov.endsWith(".test.ts") || ov.endsWith(".spec.ts") || ov.includes("/test/")) && !ov.endsWith(".d.ts")) testFileSet.add(ov)
-      else if ((ov.endsWith(".ts") || ov.endsWith(".tsx")) && !ov.endsWith(".d.ts") && !ov.endsWith(".config.ts")) relFileSet.add(ov)
+      if ((ov.endsWith(".test.ts") || ov.endsWith(".spec.ts") || ov.includes("/test/")) && !ov.endsWith(".d.ts")) { testFileSet.add(ov); continue }
+      if ((ov.endsWith(".ts") || ov.endsWith(".tsx")) && !ov.endsWith(".d.ts") && !ov.endsWith(".config.ts")) relFileSet.add(ov)
     }
     const relFiles = Array.from(relFileSet).sort((a, b) => a.localeCompare(b)), testFiles = Array.from(testFileSet).sort((a, b) => a.localeCompare(b))
     const inputs: Array<SourceFileInput> = [], inputShaMap = new Map<string, string>()

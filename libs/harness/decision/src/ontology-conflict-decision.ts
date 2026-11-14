@@ -1,6 +1,7 @@
-import { Effect, Option, Schema } from "effect"
+import { Effect, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import { match } from "ts-pattern"
 import {
   decideEarsSpecLint,
   decideOntologyInvariants,
@@ -82,38 +83,43 @@ export const checkOntologyPairConflict = Effect.fn("Harness.checkOntologyPairCon
     Effect.catchCause(() => Effect.succeedNone),
   )
 
-  if (Option.isNone(outcome)) {
-    return {
-      hasConflict: false,
-      probability: 0,
-      conflictKind: "none" as const,
-      reason:
-        "DecisionModel unavailable or timed out; relying on deterministic ontology invariants.",
-      timedOutOrUnavailable: true,
-    } satisfies OntologyConflictResult
-  }
+  return yield* match(outcome)
+    .with({ _tag: "None" }, () =>
+      Effect.succeed({
+        hasConflict: false,
+        probability: 0,
+        conflictKind: "none" as const,
+        reason:
+          "DecisionModel unavailable or timed out; relying on deterministic ontology invariants.",
+        timedOutOrUnavailable: true,
+      } satisfies OntologyConflictResult),
+    )
+    .with({ _tag: "Some" }, ({ value }) =>
+      Effect.gen(function* () {
+        const { answers } = value
+        yield* Effect.annotateCurrentSpan({
+          "decision.definition": "OntologyConflictV1",
+          "decision.contradicts": answers.contradicts.probability,
+          "decision.conflictKind": answers.conflictKind.label,
+        })
 
-  const { answers } = outcome.value
-  yield* Effect.annotateCurrentSpan({
-    "decision.definition": "OntologyConflictV1",
-    "decision.contradicts": answers.contradicts.probability,
-    "decision.conflictKind": answers.conflictKind.label,
-  })
+        const hasConflict =
+          answers.contradicts.probability >= 0.7 && answers.conflictKind.label !== "none"
 
-  const hasConflict =
-    answers.contradicts.probability >= 0.7 && answers.conflictKind.label !== "none"
-
-  return {
-    hasConflict,
-    probability: answers.contradicts.probability,
-    conflictKind: hasConflict
-      ? (answers.conflictKind.label as OntologyConflictKind)
-      : ("none" as const),
-    reason: hasConflict
-      ? `Semantic conflict (${answers.conflictKind.label}, p=${answers.contradicts.probability}) between ${input.sourceId} and ${input.targetId} on ${input.sharedSymbol}.`
-      : `No semantic conflict detected between ${input.sourceId} and ${input.targetId}.`,
-    timedOutOrUnavailable: false,
-  } satisfies OntologyConflictResult
+        return {
+          hasConflict,
+          probability: answers.contradicts.probability,
+          conflictKind: hasConflict
+            ? (answers.conflictKind.label as OntologyConflictKind)
+            : ("none" as const),
+          reason: hasConflict
+            ? `Semantic conflict (${answers.conflictKind.label}, p=${answers.contradicts.probability}) between ${input.sourceId} and ${input.targetId} on ${input.sharedSymbol}.`
+            : `No semantic conflict detected between ${input.sourceId} and ${input.targetId}.`,
+          timedOutOrUnavailable: false,
+        } satisfies OntologyConflictResult
+      }),
+    )
+    .exhaustive()
 })
 
 const MAX_CANDIDATE_PAIRS = 16
@@ -138,16 +144,20 @@ export const extractOntologyConflictPairs = Effect.fn("OntologyConflict.extractP
   scope?: string,
 ): Effect.fn.Return<ReadonlyArray<OntologyConflictInput>> {
   const activeDocs = governanceDocs.filter((doc) => {
-    if (doc.status !== "accepted" && doc.status !== "proposed") {
+    const isActiveStatus = match(doc.status)
+      .with("accepted", "proposed", () => true)
+      .with("deprecated", "superseded", () => false)
+      .exhaustive()
+    if (!isActiveStatus) {
       return false
     }
     if (scope !== undefined && scope.length > 0) {
-      const match =
+      const matched =
         doc.id.startsWith(`${scope}:`) ||
         doc.docPath.includes(`libs/${scope}/`) ||
         doc.docPath.includes(`apps/${scope}/`) ||
         doc.docPath.includes(`packages/${scope}/`)
-      if (!match) {
+      if (!matched) {
         return false
       }
     }

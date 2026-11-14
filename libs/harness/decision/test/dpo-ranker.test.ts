@@ -1,7 +1,8 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Effect, Exit, Fiber, Layer } from "effect"
+import { Cause, Effect, Fiber, Layer } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { TestClock } from "effect/testing"
+import { match } from "ts-pattern"
 import {
   DpoCandidateRankerV1,
   DpoPriorKey,
@@ -244,9 +245,13 @@ describe("DpoCandidateRankerV1 (System One Semantic Tie-Breaker for DPO Graph Re
     const exit = await Effect.runPromiseExit(
       evaluateDpoCandidateRank(rep04aInput).pipe(Effect.provide(dieLayer)),
     )
-    expect(Exit.isFailure(exit)).toBe(true)
-    if (Exit.isFailure(exit)) {
-      expect(Cause.hasDies(exit.cause)).toBe(true)
-    }
+    match(exit)
+      .with({ _tag: "Failure" }, ({ cause }) => {
+        expect(Cause.hasDies(cause)).toBe(true)
+      })
+      .with({ _tag: "Success" }, () => {
+        expect.unreachable("Expected exit to fail with die")
+      })
+      .exhaustive()
   })
 })

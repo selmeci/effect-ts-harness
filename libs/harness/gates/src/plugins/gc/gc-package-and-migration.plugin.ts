@@ -16,7 +16,7 @@
  * - unused-contract-export: Per-scope unused contract symbols.
  */
 import { join, posix, relative } from "node:path"
-import { Cause, Effect, Layer, Option, Schema } from "effect"
+import { Cause, Effect, Layer, Schema } from "effect"
 import { match } from "ts-pattern"
 import type { SyncHostIo } from "@harness/service"
 import { checkMigrationFiles, checkMigrationSqlSafety } from "../../migration-check.js"
@@ -351,7 +351,8 @@ export const evaluatePackageAndMigrationPlugin = (
           const relPkgPath = relative(repoRoot, pkgJsonPath).replace(/\\/g, "/")
           match(pkgOpt)
             .with({ _tag: "Some" }, ({ value: pkgValue }) => {
-              const pkgName = (pkgValue.name ?? `${scope}/${tier}`).trim()
+              const rawPkgName = pkgValue.name ?? `${scope}/${tier}`
+              const pkgName = rawPkgName.trim()
               const nxTags = (pkgValue.nx?.tags ?? [])
                 .map((t) => t.trim())
                 .filter((t) => t.length > 0)
@@ -366,26 +367,25 @@ export const evaluatePackageAndMigrationPlugin = (
                 nxTags,
                 dependencyNames,
               })
+              if (pkgValue.dependencies !== undefined) {
+                const dependencies = pkgValue.dependencies
+                const scriptFiles = safeFs(() => hostIo.existsSync(join(tierDir, "scripts")) ? collectWorkspaceAllFiles(join(tierDir, "scripts"), hostIo) : [], [])
+                const combinedContent = [...srcFiles, ...scriptFiles].map((f) => safeFs(() => hostIo.readTextSync(f), "")).join("\n")
+                for (const depName of Object.keys(dependencies)) {
+                  if (SKIPPED_PACKAGE_DEPS.has(depName)) continue
+                  const isReferenced = combinedContent.includes(`"${depName}"`) || combinedContent.includes(`'${depName}'`) || combinedContent.includes(`"${depName}/`) || combinedContent.includes(`'${depName}/`)
+                  if (!isReferenced) {
+                    findings.push({
+                      kind: "unused-package-dependency", nodeId: `${rawPkgName}:${depName}`, location: relPkgPath,
+                      message: `Package "${rawPkgName}" declares dependency "${depName}" in package.json, but no file in src/ imports it.`,
+                      action: `Remove "${depName}" from dependencies in ${relPkgPath} or import it in src/.`,
+                    })
+                  }
+                }
+              }
             })
             .with({ _tag: "None" }, () => undefined)
             .exhaustive()
-          if (Option.isSome(pkgOpt) && pkgOpt.value.dependencies !== undefined) {
-            const dependencies = pkgOpt.value.dependencies, pkgName = pkgOpt.value.name ?? `${scope}/${tier}`
-            const scriptFiles = safeFs(() => hostIo.existsSync(join(tierDir, "scripts")) ? collectWorkspaceAllFiles(join(tierDir, "scripts"), hostIo) : [], [])
-            const combinedContent = [...srcFiles, ...scriptFiles].map((f) => safeFs(() => hostIo.readTextSync(f), "")).join("\n")
-            for (const depName of Object.keys(dependencies)) {
-              if (SKIPPED_PACKAGE_DEPS.has(depName)) continue
-              const isReferenced = combinedContent.includes(`"${depName}"`) || combinedContent.includes(`'${depName}'`) || combinedContent.includes(`"${depName}/`) || combinedContent.includes(`'${depName}/`)
-              if (!isReferenced) {
-                const relPkgPath = relative(repoRoot, pkgJsonPath).replace(/\\/g, "/")
-                findings.push({
-                  kind: "unused-package-dependency", nodeId: `${pkgName}:${depName}`, location: relPkgPath,
-                  message: `Package "${pkgName}" declares dependency "${depName}" in package.json, but no file in src/ imports it.`,
-                  action: `Remove "${depName}" from dependencies in ${relPkgPath} or import it in src/.`,
-                })
-              }
-            }
-          }
         }
       }
     }
@@ -487,14 +487,19 @@ export const evaluatePackageAndMigrationPlugin = (
           state.set(node, 1)
           for (const next of adj.get(node) ?? []) {
             const st = state.get(next) ?? 0
-            if (st === 1) {
-              const cyclePath = [...stack.slice(stack.indexOf(next)), next].join(" -> ")
-              findings.push({
-                kind: "architecture-policy-violation", nodeId: `${next}:circular-import`, location: next,
-                message: `Circular relative import detected in modular harness files: ${cyclePath}`,
-                action: `Break the circular import cycle (${cyclePath}) by extracting shared types/helpers into a leaf module.`,
+            match<number>(st)
+              .with(1, () => {
+                const cyclePath = [...stack.slice(stack.indexOf(next)), next].join(" -> ")
+                findings.push({
+                  kind: "architecture-policy-violation", nodeId: `${next}:circular-import`, location: next,
+                  message: `Circular relative import detected in modular harness files: ${cyclePath}`,
+                  action: `Break the circular import cycle (${cyclePath}) by extracting shared types/helpers into a leaf module.`,
+                })
               })
-            } else if (st === 0 && adj.has(next)) visitCycle(next, [...stack, next])
+              .with(0, () => {
+                if (adj.has(next)) visitCycle(next, [...stack, next])
+              })
+              .otherwise(() => {})
           }
           state.set(node, 2)
         }

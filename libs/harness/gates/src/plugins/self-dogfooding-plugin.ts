@@ -108,6 +108,68 @@ const EFFECT_CONSTRUCTORS = new Set([
   "promise",
 ])
 const LAYER_CONSTRUCTORS = new Set(["effect", "succeed", "sync"])
+const COLLECTION_MUTATORS = new Set(["set", "add", "delete", "clear"])
+const NODE_BUILTIN_MODULES = new Set([
+  "node:fs",
+  "node:fs/promises",
+  "fs",
+  "fs/promises",
+  "node:child_process",
+  "child_process",
+  "node:net",
+  "net",
+  "node:os",
+  "os",
+  "node:http",
+  "http",
+  "node:https",
+  "https",
+])
+
+const isMemberCall = (callExpr: ts.CallExpression, objName: string, methodName: string): boolean => {
+  const callee = unwrapAstExpression(callExpr.expression)
+  return (
+    ts.isPropertyAccessExpression(callee) &&
+    ts.isIdentifier(callee.expression) &&
+    callee.expression.text === objName &&
+    callee.name.text === methodName
+  )
+}
+
+const isEffectGenBody = (body: ts.ConciseBody): boolean => {
+  if (ts.isBlock(body)) {
+    if (body.statements.length !== 1) {
+      return false
+    }
+    const onlyStmt = body.statements[0]
+    if (onlyStmt === undefined || !ts.isReturnStatement(onlyStmt) || onlyStmt.expression === undefined) {
+      return false
+    }
+    const returnedExpr = unwrapAstExpression(onlyStmt.expression)
+    return ts.isCallExpression(returnedExpr) && isMemberCall(returnedExpr, "Effect", "gen")
+  }
+  const bodyExpr = unwrapAstExpression(body)
+  return ts.isCallExpression(bodyExpr) && isMemberCall(bodyExpr, "Effect", "gen")
+}
+
+const isDoubleWrappedEffectFn = (callExpr: ts.CallExpression): boolean => {
+  const unwrappedExpr = unwrapAstExpression(callExpr.expression)
+  const isWrappedFn =
+    (ts.isCallExpression(unwrappedExpr) && isMemberCall(unwrappedExpr, "Effect", "fn")) ||
+    isMemberCall(callExpr, "Effect", "fnUntraced")
+  if (!isWrappedFn) {
+    return false
+  }
+  const fnArg = callExpr.arguments[0]
+  if (fnArg === undefined) {
+    return false
+  }
+  const unwrappedArg = unwrapAstExpression(fnArg)
+  if (!ts.isArrowFunction(unwrappedArg) && !ts.isFunctionExpression(unwrappedArg)) {
+    return false
+  }
+  return isEffectGenBody(unwrappedArg.body)
+}
 
 const isBannedParentConstructor = (callExpr: ts.CallExpression): boolean => {
   let callee = unwrapAstExpression(callExpr.expression)
@@ -165,6 +227,79 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
     }
 
     const { sourceFile } = getOrCreateCachedSourceFile(file.filePath, file.content)
+    const normPath = file.filePath.replace(/\\/g, "/")
+    const isInfraSrc = /\/infra\/src\//.test(normPath)
+    const staticCollectionNames = new Set<string>()
+
+    for (const stmt of sourceFile.statements) {
+      if (ts.isVariableStatement(stmt)) {
+        if ((stmt.declarationList.flags & ts.NodeFlags.Let) !== 0) {
+          violations.push({
+            rule: SelfDogfoodingRuleId.make("no-global-mutable-cache"),
+            message: SelfDogfoodingMessage.make(
+              `Module-level 'let' declaration in '${file.filePath}' is banned — avoid global mutable state.`,
+            ),
+            file: file.filePath,
+            line: getLineNumber(sourceFile, stmt.getStart(sourceFile)),
+            enclosingSymbol: EnclosingSymbolName.make(file.filePath),
+          })
+        }
+        for (const decl of stmt.declarationList.declarations) {
+          if (decl.initializer !== undefined) {
+            const init = unwrapAstExpression(decl.initializer)
+            if (ts.isNewExpression(init) && ts.isIdentifier(init.expression)) {
+              const ctorName = init.expression.text
+              if (ctorName === "WeakMap" || ctorName === "WeakSet") {
+                violations.push({
+                  rule: SelfDogfoodingRuleId.make("no-global-mutable-cache"),
+                  message: SelfDogfoodingMessage.make(
+                    `Module-level 'new ${ctorName}(...)' in '${file.filePath}' is banned — avoid global mutable caches.`,
+                  ),
+                  file: file.filePath,
+                  line: getLineNumber(sourceFile, decl.getStart(sourceFile)),
+                  enclosingSymbol: EnclosingSymbolName.make(file.filePath),
+                })
+              }
+              if (ctorName === "Map" || ctorName === "Set") {
+                const argCount = init.arguments?.length ?? 0
+                if (argCount === 0) {
+                  violations.push({
+                    rule: SelfDogfoodingRuleId.make("no-global-mutable-cache"),
+                    message: SelfDogfoodingMessage.make(
+                      `Empty module-level 'new ${ctorName}()' in '${file.filePath}' is banned — avoid global mutable caches.`,
+                    ),
+                    file: file.filePath,
+                    line: getLineNumber(sourceFile, decl.getStart(sourceFile)),
+                    enclosingSymbol: EnclosingSymbolName.make(file.filePath),
+                  })
+                }
+                if (argCount > 0 && ts.isIdentifier(decl.name)) {
+                  staticCollectionNames.add(decl.name.text)
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (
+        !isInfraSrc &&
+        (ts.isImportDeclaration(stmt) || ts.isExportDeclaration(stmt)) &&
+        stmt.moduleSpecifier !== undefined &&
+        ts.isStringLiteral(stmt.moduleSpecifier) &&
+        NODE_BUILTIN_MODULES.has(stmt.moduleSpecifier.text)
+      ) {
+        violations.push({
+          rule: SelfDogfoodingRuleId.make("no-node-builtins-outside-infra"),
+          message: SelfDogfoodingMessage.make(
+            `Node builtin '${stmt.moduleSpecifier.text}' imported/exported in '${file.filePath}' outside infra/src — push I/O behind a service port and implement it in infra.`,
+          ),
+          file: file.filePath,
+          line: getLineNumber(sourceFile, stmt.getStart(sourceFile)),
+          enclosingSymbol: EnclosingSymbolName.make(file.filePath),
+        })
+      }
+    }
 
     if (isGraphOrchestratorFacadePath(file.filePath)) {
       for (const stmt of sourceFile.statements) {
@@ -275,6 +410,59 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
             rule: SelfDogfoodingRuleId.make("ignored-chmod-permission"),
             message: SelfDogfoodingMessage.make(
               `Ignoring chmodSync/fchmodSync failure with Effect.ignore or Effect.orElseSucceed in '${file.filePath}' is banned — permission hardening must fail closed on error.`,
+            ),
+            file: file.filePath,
+            line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+            enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
+          })
+        }
+
+        if (
+          staticCollectionNames.size > 0 &&
+          ts.isPropertyAccessExpression(unwrappedNodeExpr) &&
+          ts.isIdentifier(unwrappedNodeExpr.expression) &&
+          staticCollectionNames.has(unwrappedNodeExpr.expression.text) &&
+          COLLECTION_MUTATORS.has(unwrappedNodeExpr.name.text)
+        ) {
+          violations.push({
+            rule: SelfDogfoodingRuleId.make("no-global-mutable-cache"),
+            message: SelfDogfoodingMessage.make(
+              `Mutating module-level collection '${unwrappedNodeExpr.expression.text}.${unwrappedNodeExpr.name.text}(...)' in '${file.filePath}' is banned — avoid global mutable caches.`,
+            ),
+            file: file.filePath,
+            line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+            enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
+          })
+        }
+
+        if (isMemberCall(node, "Layer", "build")) {
+          let curr: ts.Node | undefined = node.parent
+          let insideLayerEffect = false
+          while (curr !== undefined) {
+            if (ts.isCallExpression(curr) && isMemberCall(curr, "Layer", "effect")) {
+              insideLayerEffect = true
+              break
+            }
+            curr = curr.parent
+          }
+          if (insideLayerEffect) {
+            violations.push({
+              rule: SelfDogfoodingRuleId.make("no-layer-build-in-layer-effect"),
+              message: SelfDogfoodingMessage.make(
+                `Calling 'Layer.build(...)' inside 'Layer.effect(...)' in '${file.filePath}' is banned — compose Layers declaratively instead.`,
+              ),
+              file: file.filePath,
+              line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+              enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
+            })
+          }
+        }
+
+        if (isDoubleWrappedEffectFn(node)) {
+          violations.push({
+            rule: SelfDogfoodingRuleId.make("no-double-wrapped-effect-fn"),
+            message: SelfDogfoodingMessage.make(
+              `Double-wrapped 'Effect.fn(...)(() => Effect.gen(...))' / 'Effect.fnUntraced(() => Effect.gen(...))' in '${file.filePath}' is banned — pass the generator directly to Effect.fn.`,
             ),
             file: file.filePath,
             line: getLineNumber(sourceFile, node.getStart(sourceFile)),

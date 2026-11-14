@@ -95,8 +95,10 @@ const parseFlags = (
       const val = eqIdx === -1 ? argv[++i] : arg.slice(eqIdx + 1)
       if (key === "conversation") {
         conversation = val
-      } else if (key === "transcript") {
-        transcript = val
+      } else {
+        if (key === "transcript") {
+          transcript = val
+        }
       }
     } else {
       positional.push(arg)
@@ -132,8 +134,10 @@ const refreshVerifyStampHash = (repoRoot: string): void => {
       }
       if (entry.isDirectory) {
         walk(full)
-      } else if (entry.isFile) {
-        files.push(full.slice(repoRoot.length + 1).replace(/\\/g, "/"))
+      } else {
+        if (entry.isFile) {
+          files.push(full.slice(repoRoot.length + 1).replace(/\\/g, "/"))
+        }
       }
     }
   }

@@ -1,5 +1,6 @@
 import { join } from "node:path"
-import { Effect, Option, Result, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
+import { match } from "ts-pattern"
 import type { SyncHostIo } from "@harness/service"
 import { resolveHarnessStateDir } from "./worktree.js"
 
@@ -108,10 +109,12 @@ export const checkLoopThrashing = (
   threshold: number = 3,
   planCandidates?: ReadonlyArray<PlanSearchCandidate>,
 ): LoopThrashingStatus => {
-  const failures = events.filter(
-    (event) =>
-      (event.kind === "verify_failure" || event.kind === "guard_escalation") &&
-      !(event.kind === "guard_escalation" && event.detail.startsWith("verdict=allow")),
+  const failures = events.filter((event) =>
+    match(event)
+      .with({ kind: "verify_failure" }, () => true)
+      .with({ kind: "guard_escalation" }, (ev) => !ev.detail.startsWith("verdict=allow"))
+      .with({ kind: "route_miss" }, () => false)
+      .exhaustive(),
   )
   const effectiveThreshold = Math.max(2, threshold)
   if (failures.length === 0) {
@@ -222,9 +225,12 @@ export const readFrictionEvents = (
     const trimmed = line.trim()
     if (trimmed.length === 0) continue
     const decoded = decodeFrictionEvent(trimmed)
-    if (Option.isSome(decoded)) {
-      events.push(decoded.value)
-    }
+    match(decoded)
+      .with({ _tag: "Some" }, ({ value }) => {
+        events.push(value)
+      })
+      .with({ _tag: "None" }, () => {})
+      .exhaustive()
   }
   return events
 }

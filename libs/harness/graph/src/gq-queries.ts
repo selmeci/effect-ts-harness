@@ -239,40 +239,72 @@ export const executeNamedGqQueryInMemory = (
       const results: Array<Record<string, unknown>> = []
       const g = harnessGraph.graph
       for (const [nodeIdx, node] of Graph.nodes(g)) {
-        if (node._tag === "LayerFlow") {
-          let layerNode: ServiceLayerNode | undefined
-          const providedTags: Array<ServiceTagNode> = []
-          for (const edgeIdx of Graph.outgoingEdges(g, nodeIdx)) {
-            const edgeOpt = Graph.getEdge(g, edgeIdx)
-            const edge = Option.getOrUndefined(edgeOpt)
-            if (edge === undefined) continue
-            const target = Option.getOrUndefined(Graph.getNode(g, edge.target))
-            if (target === undefined) continue
-            if (edge.data.role === "provider-layer" && target._tag === "ServiceLayer") {
-              layerNode = target
-            } else if (edge.data.role === "provided-service" && target._tag === "ServiceTag") {
-              providedTags.push(target)
-            }
-          }
-          if (layerNode) {
-            for (const tag of providedTags) {
-              if (
-                tag.tagId === tagIdParam ||
-                tag.name === tagIdParam ||
-                tag.qualname === tagIdParam ||
-                tag.identifier === tagIdParam
-              ) {
-                results.push({
-                  layerQualname: layerNode.qualname,
-                  layerKind: layerNode.layerKind,
-                  packageTag: layerNode.packageTag,
-                  file: layerNode.file,
-                  tagId: tag.tagId,
+        match(node)
+          .with({ _tag: "LayerFlow" }, () => {
+            let layerNode: ServiceLayerNode | undefined
+            const providedTags: Array<ServiceTagNode> = []
+            for (const edgeIdx of Graph.outgoingEdges(g, nodeIdx)) {
+              const edge = Option.getOrUndefined(Graph.getEdge(g, edgeIdx))
+              if (edge === undefined) continue
+              const target = Option.getOrUndefined(Graph.getNode(g, edge.target))
+              if (target === undefined) continue
+              match<string>(edge.data.role)
+                .with("provider-layer", () => {
+                  match(target)
+                    .with({ _tag: "ServiceLayer" }, (t) => { layerNode = t })
+                    .with(
+                      { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "TaggedError" },
+                      { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" },
+                      { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" },
+                      { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" },
+                      { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+                      () => {},
+                    )
+                    .exhaustive()
                 })
+                .with("provided-service", () => {
+                  match(target)
+                    .with({ _tag: "ServiceTag" }, (t) => { providedTags.push(t) })
+                    .with(
+                      { _tag: "EffectFn" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" },
+                      { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" },
+                      { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" },
+                      { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" },
+                      { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+                      () => {},
+                    )
+                    .exhaustive()
+                })
+                .otherwise(() => {})
+            }
+            if (layerNode) {
+              for (const tag of providedTags) {
+                if (
+                  tag.tagId === tagIdParam ||
+                  tag.name === tagIdParam ||
+                  tag.qualname === tagIdParam ||
+                  tag.identifier === tagIdParam
+                ) {
+                  results.push({
+                    layerQualname: layerNode.qualname,
+                    layerKind: layerNode.layerKind,
+                    packageTag: layerNode.packageTag,
+                    file: layerNode.file,
+                    tagId: tag.tagId,
+                  })
+                }
               }
             }
-          }
-        }
+          })
+          .with(
+            { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" },
+            { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" },
+            { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" },
+            { _tag: "EffectSignature" }, { _tag: "TraceabilityTuple" },
+            { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+            () => {},
+          )
+          .exhaustive()
       }
       return results
     })
@@ -309,20 +341,28 @@ export const executeNamedGqQueryInMemory = (
       const results: Array<Record<string, unknown>> = []
       const g = harnessGraph.graph
       for (const [, node] of Graph.nodes(g)) {
-        if (
-          node._tag === "EffectFn" &&
-          (node.packageTag === "domain" || node.packageTag === "contract") &&
-          !node.isStub
-        ) {
-          const reaching = findTestsReaching(harnessGraph, node.qualname)
-          if (reaching.length === 0) {
-            results.push({
-              qualname: node.qualname,
-              spanName: node.spanName,
-              file: node.file,
-            })
-          }
-        }
+        match(node)
+          .with({ _tag: "EffectFn" }, (fn) => {
+            if ((fn.packageTag === "domain" || fn.packageTag === "contract") && !fn.isStub) {
+              const reaching = findTestsReaching(harnessGraph, fn.qualname)
+              if (reaching.length === 0) {
+                results.push({
+                  qualname: fn.qualname,
+                  spanName: fn.spanName,
+                  file: fn.file,
+                })
+              }
+            }
+          })
+          .with(
+            { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" },
+            { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" },
+            { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" },
+            { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" },
+            { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+            () => {},
+          )
+          .exhaustive()
       }
       return results
     })

@@ -291,12 +291,12 @@ export const projectOntologyLayers = (harnessGraph: HarnessGraph): OntologyLayer
 
   const edges: Array<OntologyClassifiedEdge> = []
   for (const [, edge] of Graph.edges(harnessGraph.graph)) {
-    const srcOpt = Graph.getNode(harnessGraph.graph, edge.source)
-    const dstOpt = Graph.getNode(harnessGraph.graph, edge.target)
-    if (Option.isSome(srcOpt) && Option.isSome(dstOpt)) {
+    const src = Option.getOrUndefined(Graph.getNode(harnessGraph.graph, edge.source))
+    const dst = Option.getOrUndefined(Graph.getNode(harnessGraph.graph, edge.target))
+    if (src !== undefined && dst !== undefined) {
       edges.push({
-        sourceKey: getNodeKey(srcOpt.value),
-        targetKey: getNodeKey(dstOpt.value),
+        sourceKey: getNodeKey(src),
+        targetKey: getNodeKey(dst),
         edgeTag: edge.data._tag,
         role: edge.data.role,
         relationId: edge.data.relationId,
@@ -384,78 +384,68 @@ export const queryOntologyWhy = (
 
   while (queue.length > 0) {
     const current = queue.shift()!
-    const currentOpt = Graph.getNode(harnessGraph.graph, current.idx)
-    if (Option.isNone(currentOpt)) continue
-    const currentNode = currentOpt.value
+    const currentNode = Option.getOrUndefined(Graph.getNode(harnessGraph.graph, current.idx))
+    if (currentNode === undefined) continue
 
     if (isEntityNode(currentNode)) {
       upwardChain.push(classifyOntologyNode(currentNode))
     }
 
-    if (currentNode._tag === "AdrDoc") {
-      const via = [...current.keyPath].reverse()
-      if (!governingAdrsMap.has(currentNode.id)) {
-        governingAdrsMap.set(currentNode.id, {
-          id: currentNode.id,
-          title: currentNode.title,
-          status: currentNode.status,
-          path: currentNode.path,
-          via,
-        })
-      }
-      if (current.labelPath.length > 1) {
-        realizationPaths.push([...current.labelPath].reverse())
-      }
-      continue
-    }
-
-    if (currentNode._tag === "EarsSpec") {
-      const via = [...current.keyPath].reverse()
-      const existing = specifyingEarsMap.get(currentNode.id)
-      const reqSet = existing ? existing.requirementIds : new Set<string>()
-      specifyingEarsMap.set(currentNode.id, {
-        id: currentNode.id,
-        title: currentNode.title,
-        status: currentNode.status,
-        path: currentNode.path,
-        via: existing ? existing.via : via,
-        requirementIds: reqSet,
+    const shouldTraverseIncoming = match(currentNode)
+      .with({ _tag: "AdrDoc" }, (adr) => {
+        const via = [...current.keyPath].reverse()
+        if (!governingAdrsMap.has(adr.id)) {
+          governingAdrsMap.set(adr.id, { id: adr.id, title: adr.title, status: adr.status, path: adr.path, via })
+        }
+        if (current.labelPath.length > 1) realizationPaths.push([...current.labelPath].reverse())
+        return false
       })
-      if (current.labelPath.length > 1) {
-        realizationPaths.push([...current.labelPath].reverse())
-      }
-      for (const adrId of currentNode.informedByAdrs ?? []) {
-        const adrIdx = harnessGraph.nodeIndexByKey.get(`AdrDoc:${adrId}`)
-        if (adrIdx !== undefined && !visited.has(adrIdx)) {
-          const adrOpt = Graph.getNode(harnessGraph.graph, adrIdx)
-          if (Option.isSome(adrOpt)) {
-            const adrClassified = classifyOntologyNode(adrOpt.value)
-            visited.add(adrIdx)
-            queue.push({
-              idx: adrIdx,
-              labelPath: [...current.labelPath, adrClassified.label],
-              keyPath: [...current.keyPath, adrClassified.key],
-            })
+      .with({ _tag: "EarsSpec" }, (spec) => {
+        const via = [...current.keyPath].reverse()
+        const existing = specifyingEarsMap.get(spec.id)
+        const reqSet = existing ? existing.requirementIds : new Set<string>()
+        specifyingEarsMap.set(spec.id, {
+          id: spec.id,
+          title: spec.title,
+          status: spec.status,
+          path: spec.path,
+          via: existing ? existing.via : via,
+          requirementIds: reqSet,
+        })
+        if (current.labelPath.length > 1) realizationPaths.push([...current.labelPath].reverse())
+        for (const adrId of spec.informedByAdrs ?? []) {
+          const adrIdx = harnessGraph.nodeIndexByKey.get(`AdrDoc:${adrId}`)
+          if (adrIdx !== undefined && !visited.has(adrIdx)) {
+            const adrNode = Option.getOrUndefined(Graph.getNode(harnessGraph.graph, adrIdx))
+            if (adrNode !== undefined) {
+              const adrClassified = classifyOntologyNode(adrNode)
+              visited.add(adrIdx)
+              queue.push({ idx: adrIdx, labelPath: [...current.labelPath, adrClassified.label], keyPath: [...current.keyPath, adrClassified.key] })
+            }
           }
         }
-      }
-    }
+        return true
+      })
+      .with(
+        { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+        () => true,
+      )
+      .exhaustive()
+    if (!shouldTraverseIncoming) continue
 
     const incoming = Graph.incomingEdges(harnessGraph.graph, current.idx)
     for (const inEdgeIdx of incoming) {
-      const inEdgeOpt = Graph.getEdge(harnessGraph.graph, inEdgeIdx)
-      if (Option.isNone(inEdgeOpt)) continue
-      const inEdge = inEdgeOpt.value
-      const relOpt = Graph.getNode(harnessGraph.graph, inEdge.source)
-      if (Option.isNone(relOpt) || !isRelationNode(relOpt.value)) continue
-      const relNode = relOpt.value
+      const inEdge = Option.getOrUndefined(Graph.getEdge(harnessGraph.graph, inEdgeIdx))
+      if (inEdge === undefined) continue
+      const relRaw = Option.getOrUndefined(Graph.getNode(harnessGraph.graph, inEdge.source))
+      if (relRaw === undefined || !isRelationNode(relRaw)) continue
+      const relNode = relRaw
 
       const outEdges = Graph.outgoingEdges(harnessGraph.graph, inEdge.source)
       for (const outEdgeIdx of outEdges) {
         if (outEdgeIdx === inEdgeIdx) continue
-        const outEdgeOpt = Graph.getEdge(harnessGraph.graph, outEdgeIdx)
-        if (Option.isNone(outEdgeOpt)) continue
-        const outEdge = outEdgeOpt.value
+        const outEdge = Option.getOrUndefined(Graph.getEdge(harnessGraph.graph, outEdgeIdx))
+        if (outEdge === undefined) continue
         const peerIdx = outEdge.target
 
         const canHop =
@@ -472,29 +462,36 @@ export const queryOntologyWhy = (
 
         if (!canHop) continue
 
-        const peerOpt = Graph.getNode(harnessGraph.graph, peerIdx)
-        if (Option.isNone(peerOpt)) continue
-        const peerNode = peerOpt.value
+        const peerNode = Option.getOrUndefined(Graph.getNode(harnessGraph.graph, peerIdx))
+        if (peerNode === undefined) continue
         const peerClassified = classifyOntologyNode(peerNode)
 
-        if (
-          relNode._tag === "TraceabilityTuple" &&
-          peerNode._tag === "EarsSpec" &&
-          relNode.requirementId
-        ) {
-          const existing = specifyingEarsMap.get(peerNode.id)
-          if (existing) {
-            existing.requirementIds.add(relNode.requirementId)
-          } else {
-            specifyingEarsMap.set(peerNode.id, {
-              id: peerNode.id,
-              title: peerNode.title,
-              status: peerNode.status,
-              path: peerNode.path,
-              via: [...current.keyPath, peerClassified.key].reverse(),
-              requirementIds: new Set([relNode.requirementId]),
+        const reqId = match(relNode)
+          .with({ _tag: "TraceabilityTuple" }, (r) => r.requirementId)
+          .with({ _tag: "EffectSignature" }, { _tag: "LayerFlow" }, () => undefined)
+          .exhaustive()
+        if (reqId) {
+          match(peerNode)
+            .with({ _tag: "EarsSpec" }, (peer) => {
+              const existing = specifyingEarsMap.get(peer.id)
+              if (existing) {
+                existing.requirementIds.add(reqId)
+              } else {
+                specifyingEarsMap.set(peer.id, {
+                  id: peer.id,
+                  title: peer.title,
+                  status: peer.status,
+                  path: peer.path,
+                  via: [...current.keyPath, peerClassified.key].reverse(),
+                  requirementIds: new Set([reqId]),
+                })
+              }
             })
-          }
+            .with(
+              { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+              () => {},
+            )
+            .exhaustive()
         }
 
         if (!visited.has(peerIdx)) {
@@ -510,31 +507,26 @@ export const queryOntologyWhy = (
   }
 
   if (classifiedTarget.file) {
+    const targetFile = classifiedTarget.file
     for (const [, node] of Graph.nodes(harnessGraph.graph)) {
-      if (node._tag === "AdrDoc" && node.enforcedByFiles.includes(classifiedTarget.file)) {
-        if (!governingAdrsMap.has(node.id)) {
-          governingAdrsMap.set(node.id, {
-            id: node.id,
-            title: node.title,
-            status: node.status,
-            path: node.path,
-            via: [node.id, classifiedTarget.key],
-          })
-          realizationPaths.push([node.title, classifiedTarget.label])
-        }
-      } else if (node._tag === "EarsSpec" && node.enforcedByFiles.includes(classifiedTarget.file)) {
-        if (!specifyingEarsMap.has(node.id)) {
-          specifyingEarsMap.set(node.id, {
-            id: node.id,
-            title: node.title,
-            status: node.status,
-            path: node.path,
-            via: [node.id, classifiedTarget.key],
-            requirementIds: new Set<string>(),
-          })
-          realizationPaths.push([node.title, classifiedTarget.label])
-        }
-      }
+      match(node)
+        .with({ _tag: "AdrDoc" }, (n) => {
+          if (n.enforcedByFiles.includes(targetFile) && !governingAdrsMap.has(n.id)) {
+            governingAdrsMap.set(n.id, { id: n.id, title: n.title, status: n.status, path: n.path, via: [n.id, classifiedTarget.key] })
+            realizationPaths.push([n.title, classifiedTarget.label])
+          }
+        })
+        .with({ _tag: "EarsSpec" }, (n) => {
+          if (n.enforcedByFiles.includes(targetFile) && !specifyingEarsMap.has(n.id)) {
+            specifyingEarsMap.set(n.id, { id: n.id, title: n.title, status: n.status, path: n.path, via: [n.id, classifiedTarget.key], requirementIds: new Set<string>() })
+            realizationPaths.push([n.title, classifiedTarget.label])
+          }
+        })
+        .with(
+          { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+          () => {},
+        )
+        .exhaustive()
     }
   }
 
@@ -631,9 +623,8 @@ export const queryOntologyImpact = (
 
   while (queue.length > 0) {
     const currentIdx = queue.shift()!
-    const currentOpt = Graph.getNode(harnessGraph.graph, currentIdx)
-    if (Option.isNone(currentOpt)) continue
-    const node = currentOpt.value
+    const node = Option.getOrUndefined(Graph.getNode(harnessGraph.graph, currentIdx))
+    if (node === undefined) continue
 
     if (currentIdx !== sourceIdx && isEntityNode(node)) {
       const classified = classifyOntologyNode(node)
@@ -670,18 +661,17 @@ export const queryOntologyImpact = (
 
     const incoming = Graph.incomingEdges(harnessGraph.graph, currentIdx)
     for (const inEdgeIdx of incoming) {
-      const inEdgeOpt = Graph.getEdge(harnessGraph.graph, inEdgeIdx)
-      if (Option.isNone(inEdgeOpt)) continue
-      const inEdge = inEdgeOpt.value
-      const relOpt = Graph.getNode(harnessGraph.graph, inEdge.source)
-      if (Option.isNone(relOpt) || !isRelationNode(relOpt.value)) continue
+      const inEdge = Option.getOrUndefined(Graph.getEdge(harnessGraph.graph, inEdgeIdx))
+      if (inEdge === undefined) continue
+      const relNode = Option.getOrUndefined(Graph.getNode(harnessGraph.graph, inEdge.source))
+      if (relNode === undefined || !isRelationNode(relNode)) continue
 
       const outEdges = Graph.outgoingEdges(harnessGraph.graph, inEdge.source)
       for (const outEdgeIdx of outEdges) {
         if (outEdgeIdx === inEdgeIdx) continue
-        const outEdgeOpt = Graph.getEdge(harnessGraph.graph, outEdgeIdx)
-        if (Option.isNone(outEdgeOpt)) continue
-        const peerIdx = outEdgeOpt.value.target
+        const outEdge = Option.getOrUndefined(Graph.getEdge(harnessGraph.graph, outEdgeIdx))
+        if (outEdge === undefined) continue
+        const peerIdx = outEdge.target
         if (!visited.has(peerIdx)) {
           visited.add(peerIdx)
           queue.push(peerIdx)

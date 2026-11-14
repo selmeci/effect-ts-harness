@@ -4,6 +4,7 @@ import * as path from "node:path"
 import { Effect, Schema } from "effect"
 import * as Graph from "effect/Graph"
 import { describe, expect, it } from "@effect/vitest"
+import { match } from "ts-pattern"
 import {
   buildHarnessGraph,
   checkEffectGraph,
@@ -2388,11 +2389,10 @@ export const evolveCartV2 = (state: CartState, event: CartEventV2): CartState =>
     const failsWithErrors = new Set<string>()
     const requiredServices = new Set<string>()
     for (const [, edge] of Graph.edges(graph.graph)) {
-      if (edge.data.role === "fails-with") {
-        failsWithErrors.add(edge.data.entityKey.replace(/^TaggedError:/, ""))
-      } else if (edge.data.role === "requires-service") {
-        requiredServices.add(edge.data.entityKey.replace(/^ServiceTag:/, ""))
-      }
+      match<string>(edge.data.role)
+        .with("fails-with", () => { failsWithErrors.add(edge.data.entityKey.replace(/^TaggedError:/, "")) })
+        .with("requires-service", () => { requiredServices.add(edge.data.entityKey.replace(/^ServiceTag:/, "")) })
+        .otherwise(() => {})
     }
 
     expect(failsWithErrors.has("CustomError")).toBe(true)
@@ -2401,12 +2401,17 @@ export const evolveCartV2 = (state: CartState, event: CartEventV2): CartState =>
     expect(requiredServices.has("ProjectionEnv")).toBe(false)
 
     for (const [, node] of Graph.nodes(graph.graph)) {
-      if (node._tag === "TaggedError") {
-        expect(node.errorTag).not.toBe("Err")
-      }
-      if (node._tag === "ServiceTag") {
-        expect(node.tagId).not.toBe("ProjectionEnv")
-      }
+      match(node)
+        .with({ _tag: "TaggedError" }, (n) => { expect(n.errorTag).not.toBe("Err") })
+        .with({ _tag: "ServiceTag" }, (n) => { expect(n.tagId).not.toBe("ProjectionEnv") })
+        .with(
+          { _tag: "EffectFn" }, { _tag: "ServiceLayer" }, { _tag: "SchemaDef" },
+          { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" },
+          { _tag: "EarsSpec" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" },
+          { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+          () => undefined,
+        )
+        .exhaustive()
     }
   })
 

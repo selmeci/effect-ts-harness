@@ -1,6 +1,7 @@
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { Effect, Option, Result, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
+import { match } from "ts-pattern"
 import {
   deriveRepoOmnigraphPort,
   resolveCanonicalRepoRoot,
@@ -56,14 +57,17 @@ function unlockOmnigraphClusterIfNeeded(
         const parsedOpt = Schema.decodeOption(LockJsonSchema)(
           nodeSyncHostIo.readTextSync(lockPath),
         )
-        if (Option.isSome(parsedOpt)) {
-          for (const key of ["lock_id", "id", "lockId", "holder_id"]) {
-            const val = parsedOpt.value[key]
-            if (typeof val === "string" && val.length > 0) {
-              lockIds.add(val)
+        match(parsedOpt)
+          .with({ _tag: "Some" }, ({ value }) => {
+            for (const key of ["lock_id", "id", "lockId", "holder_id"]) {
+              const val = value[key]
+              if (typeof val === "string" && val.length > 0) {
+                lockIds.add(val)
+              }
             }
-          }
-        }
+          })
+          .with({ _tag: "None" }, () => undefined)
+          .exhaustive()
       }),
       () => undefined,
     )
@@ -90,25 +94,29 @@ function checkOmnigraphServerReady(baseUrl: string): Effect.Effect<boolean> {
           method: "GET",
           signal: AbortSignal.timeout(3000),
         })
-        .then((r) => {
-          if (r.status !== 200 || r.headers.get("Omnigraph-Http-Api") !== "0.14") {
-            return Promise.resolve(false)
-          }
-          return r.json().then((rawBody: unknown) => {
-            if (typeof rawBody !== "object" || rawBody === null) {
-              return false
-            }
-            const body = rawBody as {
-              readonly ready?: boolean
-              readonly status?: string
-              readonly ready_graph_count?: number
-            }
-            return (
-              (body.ready === true || body.status === "serving") &&
-              (body.ready_graph_count ?? 0) >= 1
-            )
-          })
-        })
+        .then((r) =>
+          match(r.status)
+            .with(200, () => {
+              if (r.headers.get("Omnigraph-Http-Api") !== "0.14") {
+                return Promise.resolve(false)
+              }
+              return r.json().then((rawBody: unknown) => {
+                if (typeof rawBody !== "object" || rawBody === null) {
+                  return false
+                }
+                const body = rawBody as {
+                  readonly ready?: boolean
+                  readonly status?: string
+                  readonly ready_graph_count?: number
+                }
+                return (
+                  (body.ready === true || body.status === "serving") &&
+                  (body.ready_graph_count ?? 0) >= 1
+                )
+              })
+            })
+            .otherwise(() => Promise.resolve(false)),
+        )
         .catch(() => false),
     catch: () => false,
   }).pipe(Effect.orElseSucceed(() => false))
@@ -161,9 +169,10 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
         Effect.flatMap((raw) => Effect.fromOption(decodeOmnigraphServerMeta(raw))),
         Effect.option,
       )
-      if (Option.isSome(decodedMetaOpt)) {
-        serverMeta = decodedMetaOpt.value
-      }
+      serverMeta = match(decodedMetaOpt)
+        .with({ _tag: "Some" }, ({ value }) => value)
+        .with({ _tag: "None" }, () => undefined)
+        .exhaustive()
     }
 
     const explicitEnvUrl =

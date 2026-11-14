@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option, Schema } from "effect"
+import { Cause, Deferred, Effect, Fiber, Layer, Option, Schema } from "effect"
 import { match } from "ts-pattern"
 import { buildHarnessGraph, NonNegativeCount, ts } from "@harness/graph"
 import { type IndexedEffectFn, runWithTestTracer } from "@harness/ingest"
@@ -455,16 +455,23 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           ),
           emptyFnIndex,
         )
-        expect(Exit.isFailure(exit)).toBe(true)
-        if (Exit.isFailure(exit)) {
-          const errOpt = Cause.findErrorOption(exit.cause)
-          expect(Option.isSome(errOpt)).toBe(true)
-          if (Option.isSome(errOpt)) {
-            expect(errOpt.value._tag).toBe("WorkspaceFsError")
-            expect(errOpt.value.operation).toBe("read")
-            expect(errOpt.value.filePath).toBe("src/plugins/missing.ts")
-          }
-        }
+        match(exit)
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            match(Cause.findErrorOption(cause))
+              .with({ _tag: "Some" }, ({ value }) => {
+                expect(value._tag).toBe("WorkspaceFsError")
+                expect(value.operation).toBe("read")
+                expect(value.filePath).toBe("src/plugins/missing.ts")
+              })
+              .with({ _tag: "None" }, () => {
+                expect.unreachable("Expected typed WorkspaceFsError")
+              })
+              .exhaustive()
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected failure exit")
+          })
+          .exhaustive()
 
         const budgetViolations = yield* decideSpanBudgets({
           spans: toSpanSamples(spans),
@@ -515,15 +522,22 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
 
           const missingFile = WorkspaceFilePath.make(join(tmpDir, "non-existent.txt"))
           const missingExit = yield* Effect.exit(fs.readTextFile(missingFile))
-          expect(Exit.isFailure(missingExit)).toBe(true)
-          if (Exit.isFailure(missingExit)) {
-            const errOpt = Cause.findErrorOption(missingExit.cause)
-            expect(Option.isSome(errOpt)).toBe(true)
-            if (Option.isSome(errOpt)) {
-              expect(errOpt.value._tag).toBe("WorkspaceFsError")
-              expect(errOpt.value.operation).toBe("read")
-            }
-          }
+          match(missingExit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              match(Cause.findErrorOption(cause))
+                .with({ _tag: "Some" }, ({ value }) => {
+                  expect(value._tag).toBe("WorkspaceFsError")
+                  expect(value.operation).toBe("read")
+                })
+                .with({ _tag: "None" }, () => {
+                  expect.unreachable("Expected typed WorkspaceFsError")
+                })
+                .exhaustive()
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected failure exit")
+            })
+            .exhaustive()
         } finally {
           rmSync(tmpDir, { recursive: true, force: true })
         }
@@ -585,16 +599,23 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           ),
           emptyFnIndex,
         )
-        expect(Exit.isFailure(exitNonZero)).toBe(true)
-        if (Exit.isFailure(exitNonZero)) {
-          const errOpt = Cause.findErrorOption(exitNonZero.cause)
-          expect(Option.isSome(errOpt)).toBe(true)
-          if (Option.isSome(errOpt)) {
-            expect(errOpt.value._tag).toBe("HarnessSubprocessError")
-            expect(errOpt.value.exitCode).toBe(127)
-            expect(errOpt.value.stderr).toBe("command not found")
-          }
-        }
+        match(exitNonZero)
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            match(Cause.findErrorOption(cause))
+              .with({ _tag: "Some" }, ({ value }) => {
+                expect(value._tag).toBe("HarnessSubprocessError")
+                expect(value.exitCode).toBe(127)
+                expect(value.stderr).toBe("command not found")
+              })
+              .with({ _tag: "None" }, () => {
+                expect.unreachable("Expected typed HarnessSubprocessError")
+              })
+              .exhaustive()
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected failure exit")
+          })
+          .exhaustive()
         expect(
           yield* decideSpanBudgets({ spans: toSpanSamples(spansNonZero), maxRepeatedChildCalls: 3 }),
         ).toHaveLength(0)
@@ -614,15 +635,22 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           ),
           emptyFnIndex,
         )
-        expect(Exit.isFailure(exitNullCmd)).toBe(true)
-        if (Exit.isFailure(exitNullCmd)) {
-          const errOpt = Cause.findErrorOption(exitNullCmd.cause)
-          expect(Option.isSome(errOpt)).toBe(true)
-          if (Option.isSome(errOpt)) {
-            expect(errOpt.value._tag).toBe("HarnessSubprocessError")
-            expect(errOpt.value.reason).toBe("Subprocess command contains null bytes")
-          }
-        }
+        match(exitNullCmd)
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            match(Cause.findErrorOption(cause))
+              .with({ _tag: "Some" }, ({ value }) => {
+                expect(value._tag).toBe("HarnessSubprocessError")
+                expect(value.reason).toBe("Subprocess command contains null bytes")
+              })
+              .with({ _tag: "None" }, () => {
+                expect.unreachable("Expected typed HarnessSubprocessError")
+              })
+              .exhaustive()
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected failure exit")
+          })
+          .exhaustive()
         expect(
           yield* decideSpanBudgets({ spans: toSpanSamples(spansNullCmd), maxRepeatedChildCalls: 3 }),
         ).toHaveLength(0)
@@ -638,15 +666,22 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           ),
           emptyFnIndex,
         )
-        expect(Exit.isFailure(exitNullArg)).toBe(true)
-        if (Exit.isFailure(exitNullArg)) {
-          const errOpt = Cause.findErrorOption(exitNullArg.cause)
-          expect(Option.isSome(errOpt)).toBe(true)
-          if (Option.isSome(errOpt)) {
-            expect(errOpt.value._tag).toBe("HarnessSubprocessError")
-            expect(errOpt.value.reason).toBe("Subprocess arguments contain null bytes")
-          }
-        }
+        match(exitNullArg)
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            match(Cause.findErrorOption(cause))
+              .with({ _tag: "Some" }, ({ value }) => {
+                expect(value._tag).toBe("HarnessSubprocessError")
+                expect(value.reason).toBe("Subprocess arguments contain null bytes")
+              })
+              .with({ _tag: "None" }, () => {
+                expect.unreachable("Expected typed HarnessSubprocessError")
+              })
+              .exhaustive()
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected failure exit")
+          })
+          .exhaustive()
         expect(
           yield* decideSpanBudgets({ spans: toSpanSamples(spansNullArg), maxRepeatedChildCalls: 3 }),
         ).toHaveLength(0)
@@ -705,15 +740,22 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
             args: [],
           }),
         )
-        expect(Exit.isFailure(enoentExit)).toBe(true)
-        if (Exit.isFailure(enoentExit)) {
-          const errOpt = Cause.findErrorOption(enoentExit.cause)
-          expect(Option.isSome(errOpt)).toBe(true)
-          if (Option.isSome(errOpt)) {
-            expect(errOpt.value._tag).toBe("HarnessSubprocessError")
-            expect(errOpt.value.reason).toContain("failed to spawn")
-          }
-        }
+        match(enoentExit)
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            match(Cause.findErrorOption(cause))
+              .with({ _tag: "Some" }, ({ value }) => {
+                expect(value._tag).toBe("HarnessSubprocessError")
+                expect(value.reason).toContain("failed to spawn")
+              })
+              .with({ _tag: "None" }, () => {
+                expect.unreachable("Expected typed HarnessSubprocessError")
+              })
+              .exhaustive()
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected failure exit")
+          })
+          .exhaustive()
 
         // Null-byte rejection in command
         const nullCmdExit = yield* Effect.exit(
@@ -722,15 +764,22 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
             args: [],
           }),
         )
-        expect(Exit.isFailure(nullCmdExit)).toBe(true)
-        if (Exit.isFailure(nullCmdExit)) {
-          const errOpt = Cause.findErrorOption(nullCmdExit.cause)
-          expect(Option.isSome(errOpt)).toBe(true)
-          if (Option.isSome(errOpt)) {
-            expect(errOpt.value._tag).toBe("HarnessSubprocessError")
-            expect(errOpt.value.reason).toBe("Subprocess command contains null bytes")
-          }
-        }
+        match(nullCmdExit)
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            match(Cause.findErrorOption(cause))
+              .with({ _tag: "Some" }, ({ value }) => {
+                expect(value._tag).toBe("HarnessSubprocessError")
+                expect(value.reason).toBe("Subprocess command contains null bytes")
+              })
+              .with({ _tag: "None" }, () => {
+                expect.unreachable("Expected typed HarnessSubprocessError")
+              })
+              .exhaustive()
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected failure exit")
+          })
+          .exhaustive()
       }).pipe(Effect.provide(makeHarnessSubprocessRunnerHostIoLayer(testHostIo))),
   )
 
@@ -774,12 +823,16 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           ),
           emptyFnIndex,
         )
-        expect(Exit.isFailure(failExit)).toBe(true)
         expect(observedInsideFailure).toBe("mutant-fail-99")
-        if (Exit.isFailure(failExit)) {
-          expect(Cause.hasDies(failExit.cause)).toBe(true)
-          expect(Cause.pretty(failExit.cause)).toContain("boom")
-        }
+        match(failExit)
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            expect(Cause.squash(cause)).toBeInstanceOf(Error)
+            expect(Cause.pretty(cause)).toContain("boom")
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected failure exit")
+          })
+          .exhaustive()
         expect(getActiveMutantId()).toBeUndefined()
 
         const failBudgetViolations = yield* decideSpanBudgets({
@@ -941,14 +994,21 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           ),
           emptyFnIndex,
         )
-        expect(Exit.isFailure(missingExit)).toBe(true)
-        if (Exit.isFailure(missingExit)) {
-          const errOpt = Cause.findErrorOption(missingExit.cause)
-          expect(Option.isSome(errOpt)).toBe(true)
-          if (Option.isSome(errOpt)) {
-            expect(errOpt.value._tag).toBe("WorkspaceFsError")
-          }
-        }
+        match(missingExit)
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            match(Cause.findErrorOption(cause))
+              .with({ _tag: "Some" }, ({ value }) => {
+                expect(value._tag).toBe("WorkspaceFsError")
+              })
+              .with({ _tag: "None" }, () => {
+                expect.unreachable("Expected typed WorkspaceFsError")
+              })
+              .exhaustive()
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected failure exit")
+          })
+          .exhaustive()
 
         const missingBudgetViolations = yield* decideSpanBudgets({
           spans: toSpanSamples(missingSpans),
@@ -984,10 +1044,14 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
       const exit = yield* Effect.exit(
         Effect.scoped(Layer.build(makeGatePluginRegistryLayer([dupPlugin1, dupPlugin2]))),
       )
-      expect(Exit.isFailure(exit)).toBe(true)
-      if (Exit.isFailure(exit)) {
-        expect(Cause.hasDies(exit.cause)).toBe(true)
-      }
+      match(exit)
+        .with({ _tag: "Failure" }, ({ cause }) => {
+          expect(Cause.pretty(cause)).toContain("dup-id")
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("Expected failure exit")
+        })
+        .exhaustive()
     }),
   )
 
@@ -1059,10 +1123,14 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
             failOnViolation: true,
           }).pipe(Effect.provide(customAppLayer)),
         )
-        expect(failErr._tag).toBe("SelfDogfoodingViolationError")
-        if (failErr._tag === "SelfDogfoodingViolationError") {
-          expect(failErr.violations).toHaveLength(2)
-        }
+        match(failErr)
+          .with({ _tag: "SelfDogfoodingViolationError" }, (err) => {
+            expect(err.violations).toHaveLength(2)
+          })
+          .with({ _tag: "WorkspaceFsError" }, () => {
+            expect.unreachable("Expected SelfDogfoodingViolationError")
+          })
+          .exhaustive()
 
         const budgetViolations = yield* decideSpanBudgets({
           spans: toSpanSamples(spans),
@@ -2233,6 +2301,153 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(isRepoWideAstRule("discriminant-branching", "Switch statement in 'a.ts' is banned")).toBe(true)
         expect(isRepoWideAstRule("discriminant-branching", "If statement in 'a.ts' inspects union")).toBe(false)
         expect(isRepoWideAstRule("unscoped-effect-run", "Unscoped Effect.runSync")).toBe(false)
+      }),
+  )
+
+  // ---------------------------------------------------------------------------
+  // 5 · Phase 5D Hexagonal Self-Dogfooding & AstGateCache Permanent Gates
+  // ---------------------------------------------------------------------------
+
+  it.effect(
+    "REQ-5.1: SelfDogfooding.decide enforces no-global-mutable-cache while allowing static lookup collections",
+    () =>
+      Effect.gen(function* () {
+        const badPath = AstSourceFilePath.make("libs/harness/gates/src/mutable-cache.ts")
+        const badSrc = AstSourceContent.make(
+          "let counter = 0\n" +
+            "const cache = new Map()\n" +
+            "const seen = new Set()\n" +
+            "const weak = new WeakMap()\n" +
+            'const mutatedSet = new Set(["a"])\n' +
+            'export const touch = () => { counter += 1; mutatedSet.add("b"); return { cache, seen, weak, counter } }\n',
+        )
+        const badReport = yield* decideSelfDogfooding({
+          files: [{ filePath: badPath, content: badSrc }],
+        })
+        const badHits = badReport.violations.filter((v) => v.rule === "no-global-mutable-cache")
+        expect(badHits).toHaveLength(5)
+
+        const goodPath = AstSourceFilePath.make("libs/harness/gates/src/static-lookup.ts")
+        const goodSrc = AstSourceContent.make(
+          'const STATIC_SET = new Set(["a", "b"])\n' +
+            'const STATIC_MAP = new Map([["a", 1]])\n' +
+            "export const lookup = (k: string) => STATIC_SET.has(k) ? STATIC_MAP.get(k) : undefined\n",
+        )
+        const goodReport = yield* decideSelfDogfooding({
+          files: [{ filePath: goodPath, content: goodSrc }],
+        })
+        expect(
+          goodReport.violations.filter((v) => v.rule === "no-global-mutable-cache"),
+        ).toHaveLength(0)
+      }),
+  )
+
+  it.effect(
+    "REQ-5.2: SelfDogfooding.decide enforces no-node-builtins-outside-infra outside */infra/src/*",
+    () =>
+      Effect.gen(function* () {
+        const srcContent = AstSourceContent.make(
+          'import { readFileSync } from "node:fs"\n' +
+            'export { tmpdir } from "os"\n' +
+            "export const read = (p: string) => readFileSync(p, 'utf8')\n",
+        )
+
+        const nonInfraReport = yield* decideSelfDogfooding({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/gates/src/x.ts"),
+              content: srcContent,
+            },
+          ],
+        })
+        expect(
+          nonInfraReport.violations.filter((v) => v.rule === "no-node-builtins-outside-infra"),
+        ).toHaveLength(2)
+
+        const infraReport = yield* decideSelfDogfooding({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/infra/src/x.ts"),
+              content: srcContent,
+            },
+          ],
+        })
+        expect(
+          infraReport.violations.filter((v) => v.rule === "no-node-builtins-outside-infra"),
+        ).toHaveLength(0)
+      }),
+  )
+
+  it.effect(
+    "REQ-5.3: SelfDogfooding.decide enforces no-layer-build-in-layer-effect",
+    () =>
+      Effect.gen(function* () {
+        const filePath = AstSourceFilePath.make("libs/harness/gates/src/layer-build.ts")
+        const content = AstSourceContent.make(
+          'import { Context, Effect, Layer } from "effect"\n' +
+            'const Tag = Context.Service<{ value: number }>("Tag")\n' +
+            "export const badLayer = Layer.effect(Tag, Effect.gen(function* () {\n" +
+            "  const scope = yield* Effect.scope\n" +
+            "  return yield* Layer.build(Layer.empty)\n" +
+            "}))\n" +
+            "export const okProgram = Effect.scoped(Layer.build(Layer.empty))\n",
+        )
+        const report = yield* decideSelfDogfooding({
+          files: [{ filePath, content }],
+        })
+        expect(
+          report.violations.filter((v) => v.rule === "no-layer-build-in-layer-effect"),
+        ).toHaveLength(1)
+      }),
+  )
+
+  it.effect(
+    "REQ-5.4: SelfDogfooding.decide enforces no-double-wrapped-effect-fn",
+    () =>
+      Effect.gen(function* () {
+        const filePath = AstSourceFilePath.make("libs/harness/gates/src/double-wrap.ts")
+        const content = AstSourceContent.make(
+          'import { Effect } from "effect"\n' +
+            'export const badArrow = Effect.fn("badArrow")(() => Effect.gen(function* () { return 1 }))\n' +
+            'export const badBlock = Effect.fn("badBlock")((x: number) => { return Effect.gen(function* () { return x }) })\n' +
+            "export const badUntraced = Effect.fnUntraced(() => Effect.gen(function* () { return 2 }))\n" +
+            'export const okFn = Effect.fn("okFn")(function* () { return 3 })\n' +
+            "export const okUntraced = Effect.fnUntraced(function* () { return 4 })\n",
+        )
+        const report = yield* decideSelfDogfooding({
+          files: [{ filePath, content }],
+        })
+        expect(
+          report.violations.filter((v) => v.rule === "no-double-wrapped-effect-fn"),
+        ).toHaveLength(3)
+      }),
+  )
+
+  it.effect(
+    "REQ-5.5: AstGateCache.decide reports IfStatement discriminant-branching and unscoped-effect-run on libs/harness/gates/src/dummy-test.ts",
+    () =>
+      Effect.gen(function* () {
+        const filePath = AstSourceFilePath.make("libs/harness/gates/src/dummy-test.ts")
+        const content = AstSourceContent.make(
+          'import { Effect } from "effect"\n' +
+            'type State = { readonly _tag: "A" } | { readonly _tag: "B" }\n' +
+            "export const inspect = (s: State) => {\n" +
+            '  if (s._tag === "A") {\n' +
+            "    return 1\n" +
+            "  }\n" +
+            "  return 2\n" +
+            "}\n" +
+            "export const runIt = () => Effect.runSync(Effect.succeed(1))\n",
+        )
+        const report = yield* AstGateCache.decide({
+          files: [{ filePath, content, packageTag: AstGatePackageTag.make("domain") }],
+        })
+        expect(
+          report.violations.filter((v) => v.rule === "discriminant-branching"),
+        ).toHaveLength(1)
+        expect(
+          report.violations.filter((v) => v.rule === "unscoped-effect-run"),
+        ).toHaveLength(1)
       }),
   )
 })

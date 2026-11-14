@@ -13,6 +13,7 @@
  */
 import { join, relative } from "node:path"
 import * as Graph from "effect/Graph"
+import { match } from "ts-pattern"
 import type { SyncHostIo } from "@harness/service"
 import {
   collectWorkspaceAllFiles,
@@ -179,70 +180,142 @@ export const evaluateTopologyEntropyPlugin = (
 
   // Rule: unused-service
   for (const [idx, node] of Graph.nodes(g)) {
-    if (node._tag === "ServiceTag") {
-      if (IGNORED_SERVICES.has(node.tagId) || IGNORED_SERVICES.has(node.name)) continue
-      const totalConsumers = (ctx.incomingRequires.get(idx) ?? 0) + (ctx.incomingLayerRequires.get(idx) ?? 0)
-      if (totalConsumers === 0) {
-        const location = node.file ? (typeof node.line === "number" ? `${node.file}:${node.line}` : node.file) : undefined
-        findings.push({
-          kind: "unused-service",
-          nodeId: node.tagId,
-          location,
-          message: `ServiceTag "${node.tagId}" has no consumers (0 RequiresService / LayerRequires edges).`,
-          action: `Either inject ServiceTag "${node.tagId}" into an Effect generator (yield* ${node.name}) or remove the unused declaration.`,
-        })
-      }
-    }
+    match(node)
+      .with({ _tag: "ServiceTag" }, (n) => {
+        if (IGNORED_SERVICES.has(n.tagId) || IGNORED_SERVICES.has(n.name)) return
+        const totalConsumers = (ctx.incomingRequires.get(idx) ?? 0) + (ctx.incomingLayerRequires.get(idx) ?? 0)
+        if (totalConsumers === 0) {
+          const location = n.file ? (typeof n.line === "number" ? `${n.file}:${n.line}` : n.file) : undefined
+          findings.push({
+            kind: "unused-service",
+            nodeId: n.tagId,
+            location,
+            message: `ServiceTag "${n.tagId}" has no consumers (0 RequiresService / LayerRequires edges).`,
+            action: `Either inject ServiceTag "${n.tagId}" into an Effect generator (yield* ${n.name}) or remove the unused declaration.`,
+          })
+        }
+      })
+      .with(
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EffectFn" },
+        { _tag: "PatternDoc" },
+        { _tag: "SchemaDef" },
+        { _tag: "ServiceLayer" },
+        { _tag: "TaggedError" },
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "HttpEndpointTuple" },
+        { _tag: "MigrationTuple" },
+        { _tag: "VitestCase" },
+        () => {},
+      )
+      .exhaustive()
   }
 
   // Rule: unprovided-service
   for (const [idx, node] of Graph.nodes(g)) {
-    if (node._tag === "ServiceTag") {
-      if (IGNORED_SERVICES.has(node.tagId) || IGNORED_SERVICES.has(node.name)) continue
-      const providers = ctx.incomingProvides.get(idx) ?? 0
-      if (providers === 0) {
-        const location = node.file ? (typeof node.line === "number" ? `${node.file}:${node.line}` : node.file) : undefined
-        findings.push({
-          kind: "unprovided-service",
-          nodeId: node.tagId,
-          location,
-          message: `ServiceTag "${node.tagId}" has no providing ServiceLayer (0 ProvidesService edges).`,
-          action: `Provide a live layer implementing "${node.tagId}" (e.g. Layer.succeed / Layer.effect) in type:infra.`,
-        })
-      }
-    }
+    match(node)
+      .with({ _tag: "ServiceTag" }, (n) => {
+        if (IGNORED_SERVICES.has(n.tagId) || IGNORED_SERVICES.has(n.name)) return
+        const providers = ctx.incomingProvides.get(idx) ?? 0
+        if (providers === 0) {
+          const location = n.file ? (typeof n.line === "number" ? `${n.file}:${n.line}` : n.file) : undefined
+          findings.push({
+            kind: "unprovided-service",
+            nodeId: n.tagId,
+            location,
+            message: `ServiceTag "${n.tagId}" has no providing ServiceLayer (0 ProvidesService edges).`,
+            action: `Provide a live layer implementing "${n.tagId}" (e.g. Layer.succeed / Layer.effect) in type:infra.`,
+          })
+        }
+      })
+      .with(
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EffectFn" },
+        { _tag: "PatternDoc" },
+        { _tag: "SchemaDef" },
+        { _tag: "ServiceLayer" },
+        { _tag: "TaggedError" },
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "HttpEndpointTuple" },
+        { _tag: "MigrationTuple" },
+        { _tag: "VitestCase" },
+        () => {},
+      )
+      .exhaustive()
   }
 
   // Rule: dead-tagged-error
   for (const [idx, node] of Graph.nodes(g)) {
-    if (node._tag === "TaggedError") {
-      if (IGNORED_ERRORS.has(node.errorTag)) continue
-      const failsWithCount = ctx.incomingFailsWith.get(idx) ?? 0
-      if (failsWithCount === 0) {
-        const location = node.file ? (typeof node.line === "number" ? `${node.file}:${node.line}` : node.file) : undefined
-        findings.push({
-          kind: "dead-tagged-error",
-          nodeId: node.errorTag,
-          location,
-          message: `TaggedError "${node.errorTag}" is never emitted in any E channel (0 FailsWith edges).`,
-          action: `Fail with this error using Effect.fail(new ${node.errorTag}(...)) in a domain use case or prune unused error definition.`,
-        })
-      }
-    }
+    match(node)
+      .with({ _tag: "TaggedError" }, (n) => {
+        if (IGNORED_ERRORS.has(n.errorTag)) return
+        const failsWithCount = ctx.incomingFailsWith.get(idx) ?? 0
+        if (failsWithCount === 0) {
+          const location = n.file ? (typeof n.line === "number" ? `${n.file}:${n.line}` : n.file) : undefined
+          findings.push({
+            kind: "dead-tagged-error",
+            nodeId: n.errorTag,
+            location,
+            message: `TaggedError "${n.errorTag}" is never emitted in any E channel (0 FailsWith edges).`,
+            action: `Fail with this error using Effect.fail(new ${n.errorTag}(...)) in a domain use case or prune unused error definition.`,
+          })
+        }
+      })
+      .with(
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EffectFn" },
+        { _tag: "PatternDoc" },
+        { _tag: "SchemaDef" },
+        { _tag: "ServiceLayer" },
+        { _tag: "ServiceTag" },
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "HttpEndpointTuple" },
+        { _tag: "MigrationTuple" },
+        { _tag: "VitestCase" },
+        () => {},
+      )
+      .exhaustive()
   }
 
   // Rule: missing-pattern-doc
   if (input.expectedPatterns !== undefined) {
     const existingPatternSlugs = new Set<string>()
     for (const [, node] of Graph.nodes(g)) {
-      if (node._tag === "PatternDoc") {
-        existingPatternSlugs.add(node.slug)
-        if (typeof node.patternName === "string") existingPatternSlugs.add(node.patternName)
-        if (typeof node.path === "string" && node.path.endsWith(".md")) {
-          const base = node.path.split("/").pop()?.replace(/\.md$/, "")
-          if (base) existingPatternSlugs.add(base)
-        }
-      }
+      match(node)
+        .with({ _tag: "PatternDoc" }, (n) => {
+          existingPatternSlugs.add(n.slug)
+          if (typeof n.patternName === "string") existingPatternSlugs.add(n.patternName)
+          if (typeof n.path === "string" && n.path.endsWith(".md")) {
+            const base = n.path.split("/").pop()?.replace(/\.md$/, "")
+            if (base) existingPatternSlugs.add(base)
+          }
+        })
+        .with(
+          { _tag: "AdrDoc" },
+          { _tag: "EarsSpec" },
+          { _tag: "EffectFn" },
+          { _tag: "SchemaDef" },
+          { _tag: "ServiceLayer" },
+          { _tag: "ServiceTag" },
+          { _tag: "TaggedError" },
+          { _tag: "EffectSignature" },
+          { _tag: "LayerFlow" },
+          { _tag: "TraceabilityTuple" },
+          { _tag: "HttpEndpointTuple" },
+          { _tag: "MigrationTuple" },
+          { _tag: "VitestCase" },
+          () => {},
+        )
+        .exhaustive()
     }
     for (const p of input.expectedPatterns) {
       if (p === "review" || p === "effect") continue

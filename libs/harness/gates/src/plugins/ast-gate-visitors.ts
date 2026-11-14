@@ -26,6 +26,7 @@
  */
 
 import { Schema } from "effect"
+import { match, P } from "ts-pattern"
 import {
   AstContentSha256,
   AstGateCategory,
@@ -276,16 +277,11 @@ export const visitSourceFileSinglePass = (
         : inferPackageTagFromPath(normalizedFilePath)
 
   const violations: Array<GateViolation> = []
-  const hasParentTraversal = normalizedFilePath.split("/").includes("..")
   const isTestFile =
     normalizedFilePath.endsWith(".test.ts") ||
     normalizedFilePath.endsWith(".test.tsx") ||
     normalizedFilePath.endsWith(".spec.ts") ||
     normalizedFilePath.endsWith(".spec.tsx")
-  const isHarnessInternal =
-    !hasParentTraversal &&
-    (normalizedFilePath.startsWith("libs/harness/") ||
-      normalizedFilePath.startsWith("apps/harness-"))
   let hasMigratorImport = false
 
   for (const stmt of sourceFile.statements) {
@@ -386,32 +382,40 @@ export const visitSourceFileSinglePass = (
       while (ts.isParenthesizedExpression(innerExpr)) {
         innerExpr = innerExpr.expression
       }
-      if (
-        typeNode.kind === ts.SyntaxKind.AnyKeyword ||
-        typeNode.kind === ts.SyntaxKind.NeverKeyword
-      ) {
-        const keyword = typeNode.kind === ts.SyntaxKind.AnyKeyword ? "any" : "never"
-        pushViolation(
-          catSyntaxBans,
-          "unsafe-type-cast",
-          `Unsafe type assertion 'as ${keyword}' in '${filePath}' is banned.`,
-          node,
-        )
-      } else if (
-        (ts.isAsExpression(innerExpr) || ts.isTypeAssertionExpression(innerExpr)) &&
-        innerExpr.type.kind === ts.SyntaxKind.UnknownKeyword
-      ) {
-        pushViolation(
-          catSyntaxBans,
-          "unsafe-type-cast",
-          `Double type assertion 'as unknown as T' in '${filePath}' is banned.`,
-          node,
-        )
-      }
+      match(typeNode.kind)
+        .with(ts.SyntaxKind.AnyKeyword, () => {
+          pushViolation(
+            catSyntaxBans,
+            "unsafe-type-cast",
+            `Unsafe type assertion 'as any' in '${filePath}' is banned.`,
+            node,
+          )
+        })
+        .with(ts.SyntaxKind.NeverKeyword, () => {
+          pushViolation(
+            catSyntaxBans,
+            "unsafe-type-cast",
+            `Unsafe type assertion 'as never' in '${filePath}' is banned.`,
+            node,
+          )
+        })
+        .otherwise(() => {
+          if (
+            (ts.isAsExpression(innerExpr) || ts.isTypeAssertionExpression(innerExpr)) &&
+            innerExpr.type.kind === ts.SyntaxKind.UnknownKeyword
+          ) {
+            pushViolation(
+              catSyntaxBans,
+              "unsafe-type-cast",
+              `Double type assertion 'as unknown as T' in '${filePath}' is banned.`,
+              node,
+            )
+          }
+        })
     }
 
     // 4. IfStatement & ConditionalExpression (effect-laws: discriminant-branching)
-    if (ts.isIfStatement(node) && !isTestFile && !isHarnessInternal) {
+    if (ts.isIfStatement(node) && !isTestFile) {
       if (isDiscriminantCondition(node.expression, sourceFile)) {
         pushViolation(
           catEffectLaws,
@@ -424,7 +428,7 @@ export const visitSourceFileSinglePass = (
     if (ts.isConditionalExpression(node) && !isTestFile) {
       if (
         isTagGuardCondition(node.condition, sourceFile) ||
-        (!isHarnessInternal && isDiscriminantCondition(node.condition, sourceFile))
+        isDiscriminantCondition(node.condition, sourceFile)
       ) {
         pushViolation(
           catEffectLaws,
@@ -489,7 +493,6 @@ export const visitSourceFileSinglePass = (
 
       if (
         !isTestFile &&
-        !isHarnessInternal &&
         packageTag !== "app" &&
         // libs/es/infra/src/memory.ts bridges the synchronous @cloudflare/workers-types SqlStorage interface to workerd
         normalizedFilePath !== "libs/es/infra/src/memory.ts" &&
@@ -580,19 +583,20 @@ export const visitSourceFileSinglePass = (
 
     // 6. BinaryExpression: JSON.stringify(a) === JSON.stringify(b) in tests
     if (ts.isBinaryExpression(node) && isTestFile) {
-      const op = node.operatorToken.kind
-      if (op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.EqualsEqualsToken) {
-        const leftText = node.left.getText(sourceFile)
-        const rightText = node.right.getText(sourceFile)
-        if (leftText.startsWith("JSON.stringify(") && rightText.startsWith("JSON.stringify(")) {
-          pushViolation(
-            catTestIntegrity,
-            "fallback-json-equality",
-            `Fallback JSON.stringify equality comparison in '${filePath}' — use structured equality or Equal.equals.`,
-            node,
-          )
-        }
-      }
+      match(node.operatorToken.kind)
+        .with(P.union(ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.EqualsEqualsToken), () => {
+          const leftText = node.left.getText(sourceFile)
+          const rightText = node.right.getText(sourceFile)
+          if (leftText.startsWith("JSON.stringify(") && rightText.startsWith("JSON.stringify(")) {
+            pushViolation(
+              catTestIntegrity,
+              "fallback-json-equality",
+              `Fallback JSON.stringify equality comparison in '${filePath}' — use structured equality or Equal.equals.`,
+              node,
+            )
+          }
+        })
+        .otherwise(() => {})
     }
 
     // 7. TaggedTemplateExpression: sql`...` migration safety & unmanaged DDL

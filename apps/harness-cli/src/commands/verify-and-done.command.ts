@@ -88,13 +88,31 @@ const verifyFailureWithThrashing = (
 const buildDstTargetsFromGraph = (graph: HarnessGraph): ReadonlyArray<DstTargetMethodSpec> => {
   const dstTargets: Array<DstTargetMethodSpec> = []
   for (const [, node] of Graph.nodes(graph.graph)) {
-    if (node._tag === "ServiceTag") {
-      dstTargets.push({
-        serviceTag: DstServiceTag.make(node.name || node.tagId),
-        methodName: DstMethodName.make("execute"),
-        declaredErrors: [DstErrorTag.make(`${node.name || node.tagId}Error`)],
+    match(node)
+      .with({ _tag: "ServiceTag" }, (n) => {
+        dstTargets.push({
+          serviceTag: DstServiceTag.make(n.name || n.tagId),
+          methodName: DstMethodName.make("execute"),
+          declaredErrors: [DstErrorTag.make(`${n.name || n.tagId}Error`)],
+        })
       })
-    }
+      .with(
+        { _tag: "EffectFn" },
+        { _tag: "ServiceLayer" },
+        { _tag: "TaggedError" },
+        { _tag: "SchemaDef" },
+        { _tag: "VitestCase" },
+        { _tag: "PatternDoc" },
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "HttpEndpointTuple" },
+        { _tag: "MigrationTuple" },
+        () => undefined,
+      )
+      .exhaustive()
   }
   if (dstTargets.length === 0) {
     dstTargets.push({
@@ -144,7 +162,11 @@ export const handleVerify = (
         (f.endsWith(".ts") || f.endsWith(".tsx")) && nodeSyncHostIo.existsSync(join(repoRoot, f)),
     )
     const astGateFail = yield* runDeltaAstAndPluginGates(repoRoot, deltaFiles)
-    if (Option.isSome(astGateFail)) return astGateFail.value
+    const astGateResult = match(astGateFail)
+      .with({ _tag: "Some" }, ({ value }) => value)
+      .with({ _tag: "None" }, () => undefined)
+      .exhaustive()
+    if (astGateResult !== undefined) return astGateResult
 
     const graph = yield* extractGraphViaCompilerOverlay({ repoRoot }).pipe(
       Effect.provide(makeTsCompilerOverlayLayer(nodeSyncHostIo)),
@@ -154,7 +176,27 @@ export const handleVerify = (
     )
     const graphStubs: Array<string> = []
     for (const [, node] of Graph.nodes(graph.graph)) {
-      if (node._tag === "EffectFn" && node.isStub) graphStubs.push(node.spanName)
+      match(node)
+        .with({ _tag: "EffectFn" }, (n) => {
+          if (n.isStub) graphStubs.push(n.spanName)
+        })
+        .with(
+          { _tag: "ServiceTag" },
+          { _tag: "ServiceLayer" },
+          { _tag: "TaggedError" },
+          { _tag: "SchemaDef" },
+          { _tag: "VitestCase" },
+          { _tag: "PatternDoc" },
+          { _tag: "AdrDoc" },
+          { _tag: "EarsSpec" },
+          { _tag: "EffectSignature" },
+          { _tag: "LayerFlow" },
+          { _tag: "TraceabilityTuple" },
+          { _tag: "HttpEndpointTuple" },
+          { _tag: "MigrationTuple" },
+          () => undefined,
+        )
+        .exhaustive()
     }
     if (graphStubs.length > 0) {
       return {
@@ -435,11 +477,15 @@ export const handleDone = (
     let decodedStdin: StopHookStdin | undefined
     if (rawStdin) {
       const decoded = decodeStopHookStdin(rawStdin)
-      if (Option.isSome(decoded)) {
-        decodedStdin = decoded.value
-        if (decoded.value.fullyIdle === false) {
-          return { exitCode: 0, stdout: "", stderr: "", telemetryDetail: "fullyIdle=false" }
-        }
+      const fullyIdleFalse = match(decoded)
+        .with({ _tag: "Some" }, ({ value }) => {
+          decodedStdin = value
+          return value.fullyIdle === false
+        })
+        .with({ _tag: "None" }, () => false)
+        .exhaustive()
+      if (fullyIdleFalse) {
+        return { exitCode: 0, stdout: "", stderr: "", telemetryDetail: "fullyIdle=false" }
       }
     }
 

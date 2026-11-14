@@ -1,6 +1,7 @@
 import * as path from "node:path"
 import { Lang, parse } from "@ast-grep/napi"
-import { Effect, Option, Result, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
+import { match } from "ts-pattern"
 import type { SyncHostIo } from "@harness/service"
 
 export type PackageTag = "contract" | "domain" | "service" | "infra" | "app"
@@ -120,15 +121,21 @@ const resolvePackageTag = (
     if (hostIo.existsSync(pkgPath)) {
       const content = hostIo.readTextSync(pkgPath)
       const opt = decodePackageJson(content)
-      if (Option.isSome(opt) && opt.value.nx?.tags) {
-        const tags = opt.value.nx.tags
-        if (tags.includes("type:domain")) return "domain"
-        if (tags.includes("type:infra")) return "infra"
-        if (tags.includes("type:app")) return "app"
-        if (tags.includes("type:contract") && !tags.includes("type:service")) return "contract"
-        if (tags.includes("type:service")) return "service"
-        if (tags.includes("type:contract")) return "contract"
-      }
+      const resolvedTag = match(opt)
+        .with({ _tag: "Some" }, ({ value }): PackageTag | undefined => {
+          const tags = value.nx?.tags
+          if (!tags) return undefined
+          if (tags.includes("type:domain")) return "domain"
+          if (tags.includes("type:infra")) return "infra"
+          if (tags.includes("type:app")) return "app"
+          if (tags.includes("type:contract") && !tags.includes("type:service")) return "contract"
+          if (tags.includes("type:service")) return "service"
+          if (tags.includes("type:contract")) return "contract"
+          return undefined
+        })
+        .with({ _tag: "None" }, () => undefined)
+        .exhaustive()
+      if (resolvedTag !== undefined) return resolvedTag
       break
     }
     const parent = path.dirname(currentDir)
@@ -159,10 +166,12 @@ const findSrcTsFiles = (
       const full = path.join(current, e.name)
       if (e.isDirectory) {
         walk(full)
-      } else if (e.isFile && e.name.endsWith(".ts") && !e.name.endsWith(".d.ts")) {
-        const rel = path.relative(repoRoot, full).replace(/\\/g, "/")
-        if (rel.includes("/src/")) {
-          results.push(rel)
+      } else {
+        if (e.isFile && e.name.endsWith(".ts") && !e.name.endsWith(".d.ts")) {
+          const rel = path.relative(repoRoot, full).replace(/\\/g, "/")
+          if (rel.includes("/src/")) {
+            results.push(rel)
+          }
         }
       }
     }

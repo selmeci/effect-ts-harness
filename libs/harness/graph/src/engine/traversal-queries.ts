@@ -47,15 +47,15 @@ export const resolveNode = (
   }
 
   for (const [, node] of Graph.nodes(harnessGraph.graph)) {
-    if (isEntityNode(node)) {
-      if (matchesNodeTarget(node, symbolOrSpan)) return node
-      if ((node._tag === "EffectFn" || node._tag === "ServiceLayer") && node.qualname.endsWith(`#${symbolOrSpan}`)) return node
-      if (node._tag === "ServiceTag" && node.tagId.endsWith(`#${symbolOrSpan}`)) return node
-      if (node._tag === "PatternDoc" && (node.path.endsWith(`/${symbolOrSpan}`) || node.path.includes(symbolOrSpan))) return node
-      if ((node._tag === "AdrDoc" || node._tag === "EarsSpec") && (node.path.endsWith(`/${symbolOrSpan}`) || node.path.includes(symbolOrSpan))) return node
-    } else if (node.relationId === symbolOrSpan) {
-      return node
-    }
+    const matched = match(node)
+      .with({ _tag: "EffectFn" }, (n) => matchesNodeTarget(n, symbolOrSpan) || n.qualname.endsWith(`#${symbolOrSpan}`))
+      .with({ _tag: "ServiceLayer" }, (n) => matchesNodeTarget(n, symbolOrSpan) || n.qualname.endsWith(`#${symbolOrSpan}`))
+      .with({ _tag: "ServiceTag" }, (n) => matchesNodeTarget(n, symbolOrSpan) || n.tagId.endsWith(`#${symbolOrSpan}`))
+      .with({ _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, (n) => matchesNodeTarget(n, symbolOrSpan) || n.path.endsWith(`/${symbolOrSpan}`) || n.path.includes(symbolOrSpan))
+      .with({ _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, (n) => matchesNodeTarget(n, symbolOrSpan))
+      .with({ _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" }, (n) => n.relationId === symbolOrSpan)
+      .exhaustive()
+    if (matched) return node
   }
   return undefined
 }
@@ -187,8 +187,10 @@ export const findCallers = (
       const peerNode = Option.getOrUndefined(Graph.getNode(harnessGraph.graph, outEdge.target))
       if (peerNode === undefined || !isEntityNode(peerNode)) continue
 
-      const effectiveRole =
-        relNode._tag === "TraceabilityTuple" ? outEdge.data.role : inEdge.data.role
+      const effectiveRole = match(relNode._tag)
+        .with("TraceabilityTuple", () => outEdge.data.role)
+        .with("EffectSignature", "LayerFlow", "HttpEndpointTuple", "MigrationTuple", () => inEdge.data.role)
+        .exhaustive()
       const matchEntry = buildCallerMatchFromPeer(
         peerNode,
         relNode,
@@ -227,16 +229,16 @@ export const findCallees = (
   if (isRelationNode(sourceNode)) {
     const outEdges = Graph.outgoingEdges(harnessGraph.graph, sourceIdx)
     for (const outEdgeIdx of outEdges) {
-      const outEdgeOpt = Graph.getEdge(harnessGraph.graph, outEdgeIdx)
-      if (Option.isNone(outEdgeOpt)) continue
-      const peerOpt = Graph.getNode(harnessGraph.graph, outEdgeOpt.value.target)
-      if (Option.isNone(peerOpt) || !isEntityNode(peerOpt.value)) continue
+      const outEdge = Option.getOrUndefined(Graph.getEdge(harnessGraph.graph, outEdgeIdx))
+      if (outEdge === undefined) continue
+      const peerNode = Option.getOrUndefined(Graph.getNode(harnessGraph.graph, outEdge.target))
+      if (peerNode === undefined || !isEntityNode(peerNode)) continue
       results.push(
         buildCallerMatchFromPeer(
-          peerOpt.value,
+          peerNode,
           sourceNode,
-          outEdgeOpt.value.data,
-          outEdgeOpt.value.data.role,
+          outEdge.data,
+          outEdge.data.role,
         ),
       )
     }
@@ -245,12 +247,10 @@ export const findCallees = (
 
   const incoming = Graph.incomingEdges(harnessGraph.graph, sourceIdx)
   for (const inEdgeIdx of incoming) {
-    const inEdgeOpt = Graph.getEdge(harnessGraph.graph, inEdgeIdx)
-    if (Option.isNone(inEdgeOpt)) continue
-    const inEdge = inEdgeOpt.value
-    const relOpt = Graph.getNode(harnessGraph.graph, inEdge.source)
-    if (Option.isNone(relOpt) || !isRelationNode(relOpt.value)) continue
-    const relNode = relOpt.value
+    const inEdge = Option.getOrUndefined(Graph.getEdge(harnessGraph.graph, inEdgeIdx))
+    if (inEdge === undefined) continue
+    const relNode = Option.getOrUndefined(Graph.getNode(harnessGraph.graph, inEdge.source))
+    if (relNode === undefined || !isRelationNode(relNode)) continue
 
     const subjectRoles = SUBJECT_ROLES_BY_RELATION[relNode._tag]
     if (!subjectRoles.has(inEdge.data.role)) continue
@@ -259,29 +259,28 @@ export const findCallees = (
     const outEdges = Graph.outgoingEdges(harnessGraph.graph, inEdge.source)
     for (const outEdgeIdx of outEdges) {
       if (outEdgeIdx === inEdgeIdx) continue
-      const outEdgeOpt = Graph.getEdge(harnessGraph.graph, outEdgeIdx)
-      if (Option.isNone(outEdgeOpt)) continue
-      const outEdge = outEdgeOpt.value
+      const outEdge = Option.getOrUndefined(Graph.getEdge(harnessGraph.graph, outEdgeIdx))
+      if (outEdge === undefined) continue
       if (!objectRoles.has(outEdge.data.role)) continue
-      const peerOpt = Graph.getNode(harnessGraph.graph, outEdge.target)
-      if (Option.isNone(peerOpt) || !isEntityNode(peerOpt.value)) continue
+      const peerNode = Option.getOrUndefined(Graph.getNode(harnessGraph.graph, outEdge.target))
+      if (peerNode === undefined || !isEntityNode(peerNode)) continue
 
-      const effectiveRole =
-        relNode._tag === "TraceabilityTuple" &&
-        (inEdge.data.role === "governing-adr" ||
-          inEdge.data.role === "specifying-ears" ||
-          inEdge.data.role === "verifying-test" ||
-          inEdge.data.role === "exercising-test")
-          ? inEdge.data.role
-          : outEdge.data.role
+      const effectiveRole = match(relNode._tag)
+        .with("TraceabilityTuple", () =>
+          match<string>(inEdge.data.role)
+            .with("governing-adr", "specifying-ears", "verifying-test", "exercising-test", () => inEdge.data.role)
+            .otherwise(() => outEdge.data.role),
+        )
+        .with("EffectSignature", "LayerFlow", "HttpEndpointTuple", "MigrationTuple", () => outEdge.data.role)
+        .exhaustive()
 
       const matchEntry = buildCallerMatchFromPeer(
-        peerOpt.value,
+        peerNode,
         relNode,
         outEdge.data,
         effectiveRole,
       )
-      const dedupKey = `${relNode.relationId}:${getNodeKey(peerOpt.value)}:${effectiveRole}`
+      const dedupKey = `${relNode.relationId}:${getNodeKey(peerNode)}:${effectiveRole}`
       if (!seen.has(dedupKey)) {
         seen.add(dedupKey)
         results.push(matchEntry)
@@ -322,12 +321,10 @@ export const findTestsReaching = (
 
     const incoming = Graph.incomingEdges(harnessGraph.graph, currentEntityIdx)
     for (const inEdgeIdx of incoming) {
-      const inEdgeOpt = Graph.getEdge(harnessGraph.graph, inEdgeIdx)
-      if (Option.isNone(inEdgeOpt)) continue
-      const inEdge = inEdgeOpt.value
-      const relOpt = Graph.getNode(harnessGraph.graph, inEdge.source)
-      if (Option.isNone(relOpt) || !isRelationNode(relOpt.value)) continue
-      const relNode = relOpt.value
+      const inEdge = Option.getOrUndefined(Graph.getEdge(harnessGraph.graph, inEdgeIdx))
+      if (inEdge === undefined) continue
+      const relNode = Option.getOrUndefined(Graph.getNode(harnessGraph.graph, inEdge.source))
+      if (relNode === undefined || !isRelationNode(relNode)) continue
 
       const isTargetRole = match(relNode)
         .with({ _tag: "EffectSignature" }, () => inEdge.data.role === "callee")
@@ -342,9 +339,8 @@ export const findTestsReaching = (
 
       const outEdges = Graph.outgoingEdges(harnessGraph.graph, inEdge.source)
       for (const outEdgeIdx of outEdges) {
-        const outEdgeOpt = Graph.getEdge(harnessGraph.graph, outEdgeIdx)
-        if (Option.isNone(outEdgeOpt)) continue
-        const outEdge = outEdgeOpt.value
+        const outEdge = Option.getOrUndefined(Graph.getEdge(harnessGraph.graph, outEdgeIdx))
+        if (outEdge === undefined) continue
         const isSourceRole = match(relNode)
           .with({ _tag: "EffectSignature" }, () => outEdge.data.role === "caller")
           .with(

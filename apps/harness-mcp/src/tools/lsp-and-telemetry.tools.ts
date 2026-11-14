@@ -1,5 +1,6 @@
 import * as path from "node:path"
 import { Data, Effect, Option, Schema } from "effect"
+import { match } from "ts-pattern"
 import { createTypeScriptProgramSession, evaluateOverlayDiagnostics } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
 import {
@@ -268,22 +269,23 @@ export const runDefaultLspDiagnostics = (
 
     const seen = new Set<string>()
     const mergedDiags: Array<unknown> = []
-    if (
-      Option.isNone(decoded) &&
-      proc.exitCode !== 0 &&
-      Object.keys(overlays).length === 0
-    ) {
-      const errMsg = proc.stderr.trim()
-      process.stderr.write(`[harness-mcp] effect-tsgo diagnostic process failure: ${errMsg}\n`)
-      mergedDiags.push({
-        file: resolvedFile ?? repoRoot,
-        line: 1,
-        column: 1,
-        message: `effect-tsgo execution failed: ${errMsg}`,
-        severity: "warning",
-        rule: "lsp-spawn-error",
+    match(decoded)
+      .with({ _tag: "None" }, () => {
+        if (proc.exitCode !== 0 && Object.keys(overlays).length === 0) {
+          const errMsg = proc.stderr.trim()
+          process.stderr.write(`[harness-mcp] effect-tsgo diagnostic process failure: ${errMsg}\n`)
+          mergedDiags.push({
+            file: resolvedFile ?? repoRoot,
+            line: 1,
+            column: 1,
+            message: `effect-tsgo execution failed: ${errMsg}`,
+            severity: "warning",
+            rule: "lsp-spawn-error",
+          })
+        }
       })
-    }
+      .with({ _tag: "Some" }, () => undefined)
+      .exhaustive()
     for (const d of effectGoDiags) {
       const key = formatDiagKey(d)
       if (!seen.has(key)) {
@@ -309,54 +311,57 @@ export const runDefaultLspDiagnostics = (
       }
     }
 
-    if (Option.isSome(decoded)) {
-      const baseSummary = decoded.value.summary
-      const summary = {
-        filesChecked: Math.max(baseSummary.filesChecked, Object.keys(overlays).length),
-        filesWithoutPlugin: baseSummary.filesWithoutPlugin,
-        totalFiles: Math.max(baseSummary.totalFiles, Object.keys(overlays).length),
-        errors: errorCount,
-        warnings: warningCount,
-        messages: mergedDiags.length,
-      }
-      return {
-        clean: summary.errors === 0 && summary.warnings === 0 && summary.filesWithoutPlugin === 0,
-        diagnostics: mergedDiags,
-        summary,
-      } satisfies LspDiagnosticsReport
-    }
+    return match(decoded)
+      .with({ _tag: "Some" }, ({ value }) => {
+        const baseSummary = value.summary
+        const summary = {
+          filesChecked: Math.max(baseSummary.filesChecked, Object.keys(overlays).length),
+          filesWithoutPlugin: baseSummary.filesWithoutPlugin,
+          totalFiles: Math.max(baseSummary.totalFiles, Object.keys(overlays).length),
+          errors: errorCount,
+          warnings: warningCount,
+          messages: mergedDiags.length,
+        }
+        return {
+          clean: summary.errors === 0 && summary.warnings === 0 && summary.filesWithoutPlugin === 0,
+          diagnostics: mergedDiags,
+          summary,
+        } satisfies LspDiagnosticsReport
+      })
+      .with({ _tag: "None" }, () => {
+        const failureDetails: Array<string> = []
+        if (proc.exitCode !== 0) {
+          failureDetails.push(
+            `[lsp-exit-${proc.exitCode}] effect-tsgo exited with status ${proc.exitCode}`,
+          )
+        }
+        const stderrText = proc.stderr.trim()
+        if (stderrText.length > 0) {
+          failureDetails.push(stderrText)
+        }
+        if (stderrText.length === 0 && stdout.length > 0) {
+          failureDetails.push(stdout)
+        }
+        if (failureDetails.length === 0) {
+          failureDetails.push("[lsp-error] effect-tsgo produced no valid JSON diagnostic payload")
+        }
 
-    const failureDetails: Array<string> = []
-    if (proc.exitCode !== 0) {
-      failureDetails.push(
-        `[lsp-exit-${proc.exitCode}] effect-tsgo exited with status ${proc.exitCode}`,
-      )
-    }
-    const stderrText = proc.stderr.trim()
-    if (stderrText.length > 0) {
-      failureDetails.push(stderrText)
-    }
-    if (stderrText.length === 0 && stdout.length > 0) {
-      failureDetails.push(stdout)
-    }
-    if (failureDetails.length === 0) {
-      failureDetails.push("[lsp-error] effect-tsgo produced no valid JSON diagnostic payload")
-    }
-
-    const combinedDiagnostics: Array<unknown> =
-      tsDiags.length > 0 ? [...failureDetails, ...mergedDiags] : failureDetails
-    return {
-      clean: false,
-      diagnostics: combinedDiagnostics,
-      summary: {
-        filesChecked: tsDiags.length > 0 ? Object.keys(overlays).length : 0,
-        filesWithoutPlugin: 0,
-        totalFiles: tsDiags.length > 0 ? Object.keys(overlays).length : 0,
-        errors: Math.max(1, errorCount),
-        warnings: warningCount,
-        messages: combinedDiagnostics.length,
-      },
-    } satisfies LspDiagnosticsReport
+        const combinedDiagnostics: Array<unknown> =
+          tsDiags.length > 0 ? [...failureDetails, ...mergedDiags] : failureDetails
+        return {
+          clean: false,
+          diagnostics: combinedDiagnostics,
+          summary: {
+            filesChecked: tsDiags.length > 0 ? Object.keys(overlays).length : 0,
+            filesWithoutPlugin: 0,
+            totalFiles: tsDiags.length > 0 ? Object.keys(overlays).length : 0,
+            errors: Math.max(1, errorCount),
+            warnings: warningCount,
+            messages: combinedDiagnostics.length,
+          },
+        } satisfies LspDiagnosticsReport
+      })
+      .exhaustive()
   }).pipe(
     Effect.catchIf(
       (err): err is LspExecutionError | string => !(err instanceof ProjectPathEscapeError),

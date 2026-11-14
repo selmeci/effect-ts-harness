@@ -142,28 +142,83 @@ const resolveDecisionPriors = Effect.fn("HarnessMcp.resolveDecisionPriors")(func
 
   for (const [, node] of Graph.nodes(graph.graph)) {
     if (isEntityNode(node)) {
-      if (node._tag === "EffectFn" && node.isStub === true) {
-        stubFns.push(node)
-      }
-      if (
-        (node._tag === "EffectFn" && node.isStub !== true) ||
-        node._tag === "ServiceTag" ||
-        node._tag === "TaggedError" ||
-        node._tag === "SchemaDef"
-      ) {
-        candidateEntities.push(node)
-      }
+      match(node)
+        .with({ _tag: "EffectFn" }, (n) => {
+          if (n.isStub === true) {
+            stubFns.push(n)
+          } else {
+            candidateEntities.push(n)
+          }
+        })
+        .with(
+          { _tag: "ServiceTag" },
+          { _tag: "TaggedError" },
+          { _tag: "SchemaDef" },
+          (n) => {
+            candidateEntities.push(n)
+          },
+        )
+        .with(
+          { _tag: "ServiceLayer" },
+          { _tag: "VitestCase" },
+          { _tag: "PatternDoc" },
+          { _tag: "AdrDoc" },
+          { _tag: "EarsSpec" },
+          () => undefined,
+        )
+        .exhaustive()
     }
   }
 
   if (stubFns.length === 0) {
     const candidateNode = symbolOrSpan ? resolveNode(graph, symbolOrSpan) : undefined
-    if (candidateNode && candidateNode._tag === "EffectFn") {
-      stubFns.push(candidateNode)
+    const matchedCandidate =
+      candidateNode !== undefined
+        ? match(candidateNode)
+            .with({ _tag: "EffectFn" }, (n) => n)
+            .with(
+              { _tag: "ServiceTag" },
+              { _tag: "ServiceLayer" },
+              { _tag: "TaggedError" },
+              { _tag: "SchemaDef" },
+              { _tag: "VitestCase" },
+              { _tag: "PatternDoc" },
+              { _tag: "AdrDoc" },
+              { _tag: "EarsSpec" },
+              { _tag: "EffectSignature" },
+              { _tag: "LayerFlow" },
+              { _tag: "TraceabilityTuple" },
+              { _tag: "HttpEndpointTuple" },
+              { _tag: "MigrationTuple" },
+              () => undefined,
+            )
+            .exhaustive()
+        : undefined
+    if (matchedCandidate !== undefined) {
+      stubFns.push(matchedCandidate)
     } else {
       for (const [, node] of Graph.nodes(graph.graph)) {
-        if (node._tag === "EffectFn") {
-          stubFns.push(node)
+        const matchedFn = match(node)
+          .with({ _tag: "EffectFn" }, (n) => n)
+          .with(
+            { _tag: "ServiceTag" },
+            { _tag: "ServiceLayer" },
+            { _tag: "TaggedError" },
+            { _tag: "SchemaDef" },
+            { _tag: "VitestCase" },
+            { _tag: "PatternDoc" },
+            { _tag: "AdrDoc" },
+            { _tag: "EarsSpec" },
+            { _tag: "EffectSignature" },
+            { _tag: "LayerFlow" },
+            { _tag: "TraceabilityTuple" },
+            { _tag: "HttpEndpointTuple" },
+            { _tag: "MigrationTuple" },
+            () => undefined,
+          )
+          .exhaustive()
+        if (matchedFn !== undefined) {
+          stubFns.push(matchedFn)
           break
         }
       }
@@ -211,12 +266,15 @@ const resolveDecisionPriors = Effect.fn("HarnessMcp.resolveDecisionPriors")(func
         ),
       )
 
-      if (Option.isSome(priorResult)) {
-        edgeConfidenceOverrides[candKey] = priorResult.value.edgeConfidenceMillis
-        holeTeleportationWeights[NodeKey.make(candKey)] = PageRankScoreMillis.make(
-          priorResult.value.teleportationWeightMillis,
-        )
-      }
+      match(priorResult)
+        .with({ _tag: "Some" }, ({ value }) => {
+          edgeConfidenceOverrides[candKey] = value.edgeConfidenceMillis
+          holeTeleportationWeights[NodeKey.make(candKey)] = PageRankScoreMillis.make(
+            value.teleportationWeightMillis,
+          )
+        })
+        .with({ _tag: "None" }, () => undefined)
+        .exhaustive()
     }
   }
 

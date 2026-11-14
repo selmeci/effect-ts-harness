@@ -1,9 +1,10 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Effect, Exit, Fiber, Layer, Schema } from "effect"
+import { Cause, Effect, Fiber, Layer, Schema } from "effect"
 import * as AiError from "effect/ai/AiError"
 import type * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { TestClock } from "effect/testing"
+import { match } from "ts-pattern"
 import {
   CandidateSymbolKey,
   HoleRelevanceAndEdgePriorV1,
@@ -252,10 +253,14 @@ describe("HoleRelevanceAndEdgePriorV1 (System One Calibrated Edge & PPR Prior Se
       evaluateHoleCandidatePrior(defaultInput).pipe(Effect.provide(dieLayer)),
     )
 
-    expect(Exit.isFailure(exit)).toBe(true)
-    if (Exit.isFailure(exit)) {
-      expect(Cause.hasDies(exit.cause)).toBe(true)
-    }
+    match(exit)
+      .with({ _tag: "Failure" }, ({ cause }) => {
+        expect(Cause.hasDies(cause)).toBe(true)
+      })
+      .with({ _tag: "Success" }, () => {
+        expect.unreachable("Expected exit to fail with die")
+      })
+      .exhaustive()
   })
 
   it.effect(

@@ -1,5 +1,6 @@
 import { Effect } from "effect"
 import * as Graph from "effect/Graph"
+import { match } from "ts-pattern"
 import { HARNESS_PERA_CONCEPT_LATTICE_CONFIG, decideConceptLattice } from "../concept-lattice.js"
 import {
   type DatalogEvaluationContext,
@@ -81,7 +82,10 @@ export const runStratum3CompletionAndHoles = (
     if (!fail.isDirect) {
       const relId = ctx.sigIdByCallerKey.get(fail.callerKey) ?? `EffectSignature:${ctx.fnQualnameByKey.get(fail.callerKey) ?? fail.callerKey}`
       const alreadySuggested = suggestedEdges.some(
-        (s) => s.relationId === relId && s.role === "fails-with" && s.targetEntityKey === fail.errorKey,
+        (s) =>
+          s.relationId === relId &&
+          match<string>(s.role).with("fails-with", () => true).otherwise(() => false) &&
+          s.targetEntityKey === fail.errorKey,
       )
       if (!alreadySuggested) {
         const proof = registerProof({
@@ -284,15 +288,14 @@ export const runStratum3CompletionAndHoles = (
     const directErrorKeys = new Set<string>(roles?.get("fails-with") ?? [])
     const directServiceKeys = new Set<string>(roles?.get("requires-service") ?? [])
 
-    if (holeFn.outputSchema !== undefined) {
+    const targetOutputType =
+      holeFn.outputSchema ??
+      (holeFn.successType !== undefined && holeFn.successType !== "void" && holeFn.successType !== "never"
+        ? holeFn.successType
+        : undefined)
+    if (targetOutputType !== undefined) {
       for (const [sKey, sNode] of ctx.schemasByKey.entries()) {
-        if (sNode.schemaName === holeFn.outputSchema || sNode.name === holeFn.outputSchema || sKey === `SchemaDef:${holeFn.outputSchema}`) {
-          outputSchemaKeys.add(sKey)
-        }
-      }
-    } else if (holeFn.successType !== undefined && holeFn.successType !== "void" && holeFn.successType !== "never") {
-      for (const [sKey, sNode] of ctx.schemasByKey.entries()) {
-        if (sNode.schemaName === holeFn.successType || sNode.name === holeFn.successType || sKey === `SchemaDef:${holeFn.successType}`) {
+        if (sNode.schemaName === targetOutputType || sNode.name === targetOutputType || sKey === `SchemaDef:${targetOutputType}`) {
           outputSchemaKeys.add(sKey)
         }
       }

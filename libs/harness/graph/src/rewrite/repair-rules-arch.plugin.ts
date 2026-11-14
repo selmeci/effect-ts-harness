@@ -1,4 +1,5 @@
 import { Effect } from "effect"
+import { match } from "ts-pattern"
 import { decideGraphInference } from "../datalog-engine.js"
 import {
   type DpoCandidatePriors, type EffectFnNode, type EntityNode, type GraphInferenceResult,
@@ -41,8 +42,8 @@ export const findPhase2ArchRepairBranches = (
       let deletedEdge: PlaysRoleEdge | undefined
 
       for (const [relId, edges] of ctx.edgesByRelId.entries()) {
-        const reqEdge = edges.find((e) => e.role === "requires-service" && e.entityKey === infraSvcKey)
-        const callerEdge = edges.find((e) => e.role === "caller")
+        const reqEdge = edges.find((e) => e.entityKey === infraSvcKey && match<string>(e.role).with("requires-service", () => true).otherwise(() => false))
+        const callerEdge = edges.find((e) => match<string>(e.role).with("caller", () => true).otherwise(() => false))
         if (reqEdge !== undefined && callerEdge !== undefined) {
           targetSigRelId = relId
           targetCallerKey = callerEdge.entityKey
@@ -153,8 +154,8 @@ export const findPhase2ArchRepairBranches = (
         const firstHopCalleeKey =
           firstHopStep !== undefined ? (firstHopStep.startsWith("EffectFn:") ? firstHopStep : `EffectFn:${firstHopStep}`) : undefined
         const directEdge =
-          sigEdges.find((e) => (e.role === "requires-service" || e.role === "fails-with" || e.role === "callee") && e.entityKey === targetKey) ??
-          (firstHopCalleeKey !== undefined ? sigEdges.find((e) => e.role === "callee" && (e.entityKey === firstHopCalleeKey || e.entityKey === firstHopStep)) : undefined)
+          sigEdges.find((e) => e.entityKey === targetKey && match<string>(e.role).with("requires-service", "fails-with", "callee", () => true).otherwise(() => false)) ??
+          (firstHopCalleeKey !== undefined ? sigEdges.find((e) => (e.entityKey === firstHopCalleeKey || e.entityKey === firstHopStep) && match<string>(e.role).with("callee", () => true).otherwise(() => false)) : undefined)
 
         if (directEdge !== undefined) {
           const scopePrefix = deciderNode.spanName.replace(/\.(?:decide|evolve)$/, "")
@@ -183,9 +184,9 @@ export const findPhase2ArchRepairBranches = (
             makePlaysRoleEdge(ucSigId, ucKey, "caller"),
             makePlaysRoleEdge(ucSigId, deciderKey, "callee"),
           )
-          if (directEdge.role === "callee" && directEdge.entityKey !== deciderKey) {
-            insertedEdges.push(makePlaysRoleEdge(ucSigId, directEdge.entityKey, "callee"))
-          }
+          match<string>(directEdge.role)
+            .with("callee", () => { if (directEdge.entityKey !== deciderKey) insertedEdges.push(makePlaysRoleEdge(ucSigId, directEdge.entityKey, "callee")) })
+            .otherwise(() => {})
 
           if (targetKey.startsWith("ServiceTag:")) {
             const svcNode = ctx.servicesByKey.get(targetKey)
@@ -254,7 +255,7 @@ export const findPhase2ArchRepairBranches = (
       if (aggNode !== undefined && sigRelId !== undefined) {
         const sigEdges = ctx.edgesByRelId.get(sigRelId) ?? []
         const offendingEdge = sigEdges.find(
-          (e) => (e.role === "requires-service" || e.role === "callee") && e.entityKey === busTargetKey,
+          (e) => e.entityKey === busTargetKey && match<string>(e.role).with("requires-service", "callee", () => true).otherwise(() => false),
         )
 
         if (offendingEdge !== undefined) {
@@ -295,7 +296,8 @@ export const findPhase2ArchRepairBranches = (
           )
           if (busTargetKey.startsWith("ServiceTag:")) {
             insertedEdges.push(makePlaysRoleEdge(relaySigId, busTargetKey, "requires-service"))
-          } else if (busTargetKey.startsWith("EffectFn:")) {
+          }
+          if (busTargetKey.startsWith("EffectFn:")) {
             insertedEdges.push(makePlaysRoleEdge(relaySigId, busTargetKey, "callee"))
           }
 
@@ -336,14 +338,14 @@ export const findPhase2ArchRepairBranches = (
 
   // 4. REP-04a vs REP-04b: Multi-candidate resolution of unhandled-error / COMP-01
   const comp01Suggestion = inference.suggestedEdges.find(
-    (s) => s.ruleId === "COMP-01" && s.role === "fails-with",
+    (s) => s.ruleId === "COMP-01" && match<string>(s.role).with("fails-with", () => true).otherwise(() => false),
   )
   if (comp01Suggestion !== undefined) {
     const sigRelId = comp01Suggestion.relationId
     const errKey = comp01Suggestion.targetEntityKey
     const errNode = ctx.errorsByKey.get(errKey)
     const errTag = errNode?.errorTag ?? errKey.replace(/^TaggedError:/, "")
-    const callerEdge = (ctx.edgesByRelId.get(sigRelId) ?? []).find((e) => e.role === "caller")
+    const callerEdge = (ctx.edgesByRelId.get(sigRelId) ?? []).find((e) => match<string>(e.role).with("caller", () => true).otherwise(() => false))
     const callerKey =
       comp01Suggestion.sourceEntityKey ??
       callerEdge?.entityKey ??

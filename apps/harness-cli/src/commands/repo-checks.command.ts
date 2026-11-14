@@ -223,8 +223,10 @@ const collectSqlFiles = (dir: string, prefix = ""): ReadonlyArray<string> => {
     const fullPath = join(dir, entry.name)
     if (entry.isDirectory) {
       collected.push(...collectSqlFiles(fullPath, relPath))
-    } else if (entry.isFile && entry.name.endsWith(".sql")) {
-      collected.push(relPath)
+    } else {
+      if (entry.isFile && entry.name.endsWith(".sql")) {
+        collected.push(relPath)
+      }
     }
   }
   return collected.sort()

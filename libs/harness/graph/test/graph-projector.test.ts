@@ -401,7 +401,7 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
         const pkgTag = "packageTag" in node && node.packageTag !== undefined ? node.packageTag : "contract"
         const barrelFile = `libs/${scope}/${pkgTag}/src/index.ts`
         const barrelOverlay = result.overlays.find((o) => String(o.targetFile) === barrelFile)
-        expect(barrelOverlay).toBeDefined()
+        expect(barrelOverlay?.targetFile).toBe(barrelFile)
         const barrelContent = String(barrelOverlay?.content)
         expect(barrelContent).toContain(symbol)
       }),

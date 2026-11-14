@@ -1,4 +1,5 @@
-import { Option, Result, Schema } from "effect"
+import { Result, Schema } from "effect"
+import { match } from "ts-pattern"
 import { nodeSyncHostIo } from "@harness/infra"
 
 export const StopHookStdinSchema = Schema.Struct({
@@ -153,17 +154,19 @@ const isMutatingTranscriptToolCall = (
       if (typeMatches.length > 0 && typeMatches.every((m) => isReadOnlySubagentType(m[1] ?? ""))) {
         return false
       }
-    } else if (Array.isArray(rawSubagents) && rawSubagents.length > 0) {
-      const allReadOnly = rawSubagents.every(
-        (item) =>
-          typeof item === "object" &&
-          item !== null &&
-          "TypeName" in item &&
-          typeof item.TypeName === "string" &&
-          isReadOnlySubagentType(item.TypeName),
-      )
-      if (allReadOnly) {
-        return false
+    } else {
+      if (Array.isArray(rawSubagents) && rawSubagents.length > 0) {
+        const allReadOnly = rawSubagents.every(
+          (item) =>
+            typeof item === "object" &&
+            item !== null &&
+            "TypeName" in item &&
+            typeof item.TypeName === "string" &&
+            isReadOnlySubagentType(item.TypeName),
+        )
+        if (allReadOnly) {
+          return false
+        }
       }
     }
     return true
@@ -205,9 +208,12 @@ const parseTranscriptSteps = (
       const steps: Array<Schema.Schema.Type<typeof TranscriptStepSchema>> = []
       for (const line of lines) {
         const stepOpt = decodeTranscriptStep(line)
-        if (Option.isSome(stepOpt)) {
-          steps.push(stepOpt.value)
-        }
+        match(stepOpt)
+          .with({ _tag: "Some" }, ({ value }) => {
+            steps.push(value)
+          })
+          .with({ _tag: "None" }, () => undefined)
+          .exhaustive()
       }
       return steps
     }),
@@ -321,16 +327,23 @@ export const isSubagentStopContext = (repoRoot: string, decoded?: StopHookStdin)
             return false
           }
           const firstStepOpt = decodeTranscriptStep(firstLine)
-          if (
-            Option.isNone(firstStepOpt) ||
-            firstStepOpt.value.source !== "SYSTEM" ||
-            !firstStepOpt.value.content?.includes("[Message]")
-          ) {
+          const isSystemMessage = match(firstStepOpt)
+            .with(
+              { _tag: "Some" },
+              ({ value }) => value.source === "SYSTEM" && Boolean(value.content?.includes("[Message]")),
+            )
+            .with({ _tag: "None" }, () => false)
+            .exhaustive()
+          if (!isSystemMessage) {
             return false
           }
           for (const line of lines) {
             const stepOpt = decodeTranscriptStep(line)
-            if (Option.isSome(stepOpt) && stepOpt.value.source === "USER_EXPLICIT") {
+            const isUserExplicit = match(stepOpt)
+              .with({ _tag: "Some" }, ({ value }) => value.source === "USER_EXPLICIT")
+              .with({ _tag: "None" }, () => false)
+              .exhaustive()
+            if (isUserExplicit) {
               return false
             }
           }

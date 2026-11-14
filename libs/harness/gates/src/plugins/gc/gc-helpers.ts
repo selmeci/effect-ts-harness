@@ -154,7 +154,17 @@ export const buildGraphReachabilityContext = (harnessGraph: HarnessGraph): Graph
         }
       })
       .with({ _tag: "LayerFlow" }, () => {
-        const hasProvider = outEdges.some((e) => e.data.role === "provider-layer" && match(Graph.getNode(g, e.target)).with({ _tag: "Some", value: { _tag: "ServiceLayer" } }, () => true).with({ _tag: "Some" }, () => false).with({ _tag: "None" }, () => false).exhaustive())
+        const hasProvider = outEdges.some((e) =>
+          match<string, boolean>(e.data.role)
+            .with("provider-layer", () =>
+              match(Graph.getNode(g, e.target))
+                .with({ _tag: "Some", value: { _tag: "ServiceLayer" } }, () => true)
+                .with({ _tag: "Some" }, () => false)
+                .with({ _tag: "None" }, () => false)
+                .exhaustive(),
+            )
+            .otherwise(() => false),
+        )
         for (const { target, data } of outEdges) {
           match<string>(data.role)
             .with("provided-service", () => {
@@ -272,12 +282,24 @@ const extractBalancedPair = (
     if (ch === "'" || ch === '"' || ch === "`") {
       const q = ch; i += 1
       while (i < text.length) {
-        if (text[i] === "\\") i += 2; else if (text[i] === q) { i += 1; break } else i += 1
+        if (text[i] === "\\") {
+          i += 2
+          continue
+        }
+        if (text[i] === q) {
+          i += 1
+          break
+        }
+        i += 1
       }
       continue
     }
-    if (ch === openCh) depth++
-    else if (ch === closeCh && --depth === 0) return { body: text.slice(openIdx + 1, i), endIndex: i }
+    if (ch === openCh) {
+      depth++
+      i++
+      continue
+    }
+    if (ch === closeCh && --depth === 0) return { body: text.slice(openIdx + 1, i), endIndex: i }
     i++
   }
   return undefined
@@ -304,13 +326,26 @@ export const extractTopLevelObjectAnalysis = (
     if (ch === "'" || ch === '"' || ch === "`") {
       const q = ch; i += 1
       while (i < objBody.length) {
-        if (objBody[i] === "\\") i += 2; else if (objBody[i] === q) { i += 1; break } else i += 1
+        if (objBody[i] === "\\") {
+          i += 2
+          continue
+        }
+        if (objBody[i] === q) {
+          i += 1
+          break
+        }
+        i += 1
       }
       continue
     }
-    if (ch === "{") b++; else if (ch === "}") b = Math.max(0, b - 1)
-    else if (ch === "(") p++; else if (ch === ")") p = Math.max(0, p - 1)
-    else if (ch === "[") k++; else if (ch === "]") k = Math.max(0, k - 1)
+    match<string>(ch)
+      .with("{", () => { b++ })
+      .with("}", () => { b = Math.max(0, b - 1) })
+      .with("(", () => { p++ })
+      .with(")", () => { p = Math.max(0, p - 1) })
+      .with("[", () => { k++ })
+      .with("]", () => { k = Math.max(0, k - 1) })
+      .otherwise(() => {})
     i++
   }
   return { keys, spreads }
@@ -350,11 +385,14 @@ export const parseGovernanceDocFrontmatter = (
     if (rest.startsWith("[") && rest.endsWith("]")) {
       const inner = rest.slice(1, -1).trim()
       lists.set(key, inner.length === 0 ? [] : inner.split(",").map(stripQuotes).filter((s) => s.length > 0))
-    } else if (rest === "") {
-      lists.set(key, []); currentListKey = key
-    } else {
-      scalars.set(key, stripQuotes(rest))
+      continue
     }
+    if (rest === "") {
+      lists.set(key, [])
+      currentListKey = key
+      continue
+    }
+    scalars.set(key, stripQuotes(rest))
   }
 
   const id = scalars.get("id")
@@ -441,7 +479,9 @@ const collectWorkspaceFiles = (
       const full = join(dir, e.name)
       if (e.isDirectory) {
         if (!excludedDirs.has(e.name)) result.push(...collectWorkspaceFiles(full, hostIo, predicate, excludedDirs))
-      } else if (e.isFile && predicate(e.name)) result.push(full)
+        continue
+      }
+      if (e.isFile && predicate(e.name)) result.push(full)
     }
     return result.sort((a, b) => a.localeCompare(b))
   }, [])

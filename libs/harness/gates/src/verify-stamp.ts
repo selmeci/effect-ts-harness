@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
 import { join, relative } from "node:path"
-import { Option, Result, Schema } from "effect"
+import { Result, Schema } from "effect"
+import { match } from "ts-pattern"
 import type { SyncHostIo } from "@harness/service"
 import { DstSeed } from "./dst-engine.js"
 import { resolveHarnessStateDir } from "./worktree.js"
@@ -60,12 +61,16 @@ const collectFiles = (
     if (fullPath === harnessStateDir || fullPath.startsWith(harnessStateDir + "/")) {
       continue
     }
-    if (entry.isDirectory) {
-      collectFiles(fullPath, baseDir, acc, harnessStateDir, hostIo)
-    } else if (entry.isFile) {
-      const rel = relative(baseDir, fullPath).replace(/\\/g, "/")
-      acc.push(rel)
-    }
+    match({ isDirectory: entry.isDirectory, isFile: entry.isFile })
+      .with({ isDirectory: true }, () => {
+        collectFiles(fullPath, baseDir, acc, harnessStateDir, hostIo)
+      })
+      .with({ isDirectory: false, isFile: true }, () => {
+        const rel = relative(baseDir, fullPath).replace(/\\/g, "/")
+        acc.push(rel)
+      })
+      .with({ isDirectory: false, isFile: false }, () => {})
+      .exhaustive()
   }
 }
 
@@ -151,25 +156,26 @@ export const checkVerifyStamp = (
 
   const content = hostIo.readTextSync(stampPath)
   const decoded = decodeVerifyStamp(content)
-  if (Option.isNone(decoded)) {
-    return {
-      valid: false,
+  return match(decoded)
+    .with({ _tag: "None" }, () => ({
+      valid: false as const,
       reason:
         "Invalid .harness/verify-stamp.json. Run harness verify after your latest edits before finishing.",
-    }
-  }
+    }))
+    .with({ _tag: "Some" }, ({ value: stamp }) => {
+      const currentTreeHash = computeWorkspaceTreeHash(repoRoot, hostIo)
+      if (stamp.treeHash !== currentTreeHash) {
+        return {
+          valid: false as const,
+          reason:
+            "Workspace files changed since last verify. Run harness verify after your latest edits before finishing.",
+        }
+      }
 
-  const currentTreeHash = computeWorkspaceTreeHash(repoRoot, hostIo)
-  if (decoded.value.treeHash !== currentTreeHash) {
-    return {
-      valid: false,
-      reason:
-        "Workspace files changed since last verify. Run harness verify after your latest edits before finishing.",
-    }
-  }
-
-  return {
-    valid: true,
-    stamp: decoded.value,
-  }
+      return {
+        valid: true as const,
+        stamp,
+      }
+    })
+    .exhaustive()
 }

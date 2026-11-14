@@ -187,9 +187,11 @@ export const ensureNamedImport = (
         addedNames.push(name)
       }
     }
-  } else if (namedImports.length > 0) {
-    sf.insertImportDeclaration(0, { moduleSpecifier: moduleSpec, namedImports: [...namedImports] })
-    addedNames.push(...namedImports)
+  } else {
+    if (namedImports.length > 0) {
+      sf.insertImportDeclaration(0, { moduleSpecifier: moduleSpec, namedImports: [...namedImports] })
+      addedNames.push(...namedImports)
+    }
   }
   if (addedNames.length > 0) {
     ctx.modifiedFiles.add(norm)
@@ -364,18 +366,16 @@ export const collectSignatureTypesForFn = (
   let inputSchemaFromEdge: string | undefined, outputSchemaFromEdge: string | undefined
 
   for (const [, edges] of ctx.targetEdgesByRelId.entries()) {
-    if (!edges.some((e) => e.role === "caller" && e.entityKey === fnKey)) continue
+    if (!edges.some((e) => e.entityKey === fnKey && match<string>(e.role).with("caller", () => true).otherwise(() => false))) continue
     for (const e of edges) {
       const name = resolveExportNameForEntityKey(ctx, e.entityKey)
-      if (e.role === "fails-with" && name !== undefined && !errorTypes.includes(name)) {
-        errorTypes.push(name); errorEntityKeys.push(e.entityKey)
-      } else if (e.role === "requires-service" && name !== undefined && !serviceTypes.includes(name)) {
-        serviceTypes.push(name); serviceEntityKeys.push(e.entityKey)
-      } else if (e.role === "input-schema" && name !== undefined) {
-        inputSchemaFromEdge = name; schemaEntityKeys.push(e.entityKey)
-      } else if (e.role === "output-schema" && name !== undefined) {
-        outputSchemaFromEdge = name; schemaEntityKeys.push(e.entityKey)
-      }
+      if (name === undefined) continue
+      match<string>(e.role)
+        .with("fails-with", () => { if (!errorTypes.includes(name)) { errorTypes.push(name); errorEntityKeys.push(e.entityKey) } })
+        .with("requires-service", () => { if (!serviceTypes.includes(name)) { serviceTypes.push(name); serviceEntityKeys.push(e.entityKey) } })
+        .with("input-schema", () => { inputSchemaFromEdge = name; schemaEntityKeys.push(e.entityKey) })
+        .with("output-schema", () => { outputSchemaFromEdge = name; schemaEntityKeys.push(e.entityKey) })
+        .otherwise(() => {})
     }
   }
 
@@ -549,10 +549,12 @@ export const projectServiceLayerNode = (
   const providedServiceKeys: Array<string> = [], requiredServiceKeys: Array<string> = []
 
   for (const [, edges] of ctx.targetEdgesByRelId.entries()) {
-    if (!edges.some((e) => e.role === "provider-layer" && e.entityKey === layerKey)) continue
+    if (!edges.some((e) => e.entityKey === layerKey && match<string>(e.role).with("provider-layer", () => true).otherwise(() => false))) continue
     for (const e of edges) {
-      if (e.role === "provided-service") providedServiceKeys.push(e.entityKey)
-      else if (e.role === "required-service") requiredServiceKeys.push(e.entityKey)
+      match<string>(e.role)
+        .with("provided-service", () => { providedServiceKeys.push(e.entityKey) })
+        .with("required-service", () => { requiredServiceKeys.push(e.entityKey) })
+        .otherwise(() => {})
     }
   }
 
@@ -578,14 +580,16 @@ export const projectServiceLayerNode = (
           const missingYields = requiredNames.filter((req) => !bodyText.includes(req)).map((req) => `yield* ${req}`)
           if (missingYields.length > 0) body.insertStatements(0, missingYields.join("\n"))
         }
-      } else if (Node.isCallExpression(init) && init.getArguments().length >= 2) {
-        const calleeText = init.getExpression().getText()
-        const tagArg = init.getArguments()[0]!.getText()
-        const implArg = init.getArguments()[1]!.getText()
-        const missingYields = requiredNames.filter((req) => !implArg.includes(req)).map((req) => `    yield* ${req}`).join("\n")
-        if (missingYields.length > 0 && (calleeText === "Layer.succeed" || calleeText === "Layer.sync" || calleeText === "Layer.effect")) {
-          const returnExpr = calleeText === "Layer.sync" ? `(${implArg})()` : calleeText === "Layer.effect" ? `yield* (${implArg})` : implArg
-          existingVar.setInitializer(`Layer.effect(\n  ${tagArg},\n  Effect.gen(function* () {\n${missingYields}\n    return ${returnExpr}\n  }),\n)`)
+      } else {
+        if (Node.isCallExpression(init) && init.getArguments().length >= 2) {
+          const calleeText = init.getExpression().getText()
+          const tagArg = init.getArguments()[0]!.getText()
+          const implArg = init.getArguments()[1]!.getText()
+          const missingYields = requiredNames.filter((req) => !implArg.includes(req)).map((req) => `    yield* ${req}`).join("\n")
+          if (missingYields.length > 0 && (calleeText === "Layer.succeed" || calleeText === "Layer.sync" || calleeText === "Layer.effect")) {
+            const returnExpr = calleeText === "Layer.sync" ? `(${implArg})()` : calleeText === "Layer.effect" ? `yield* (${implArg})` : implArg
+            existingVar.setInitializer(`Layer.effect(\n  ${tagArg},\n  Effect.gen(function* () {\n${missingYields}\n    return ${returnExpr}\n  }),\n)`)
+          }
         }
       }
     }
@@ -630,10 +634,10 @@ export const projectVitestCaseNode = (
   const testKey = getNodeKey(node)
   const exercisedFnKeys: Array<string> = []
   for (const [, edges] of ctx.targetEdgesByRelId.entries()) {
-    if (!edges.some((e) => (e.role === "verifying-test" || e.role === "exercising-test") && e.entityKey === testKey)) continue
+    if (!edges.some((e) => e.entityKey === testKey && match<string>(e.role).with("verifying-test", "exercising-test", () => true).otherwise(() => false))) continue
     for (const e of edges) {
-      if ((e.role === "realizing-symbol" || e.role === "exercised-span") && e.entityKey.startsWith("EffectFn:")) {
-        exercisedFnKeys.push(e.entityKey)
+      if (e.entityKey.startsWith("EffectFn:")) {
+        match<string>(e.role).with("realizing-symbol", "exercised-span", () => { exercisedFnKeys.push(e.entityKey) }).otherwise(() => {})
       }
     }
   }

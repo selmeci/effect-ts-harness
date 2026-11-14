@@ -17,6 +17,8 @@ enforced_by:
   - libs/harness/service/src/cache-and-daemon-ports.ts
   - libs/harness/service/src/host-io.ts
   - libs/harness/gates/src/plugins/harness-tier-topology.ts
+  - libs/harness/gates/src/plugins/self-dogfooding-plugin.ts
+  - libs/harness/gates/src/plugins/ast-gate-visitors.ts
   - libs/harness/gates/src/services/workspace-fs.ts
   - libs/harness/infra/src/index.ts
   - libs/harness/infra/src/workspace-fs-live.ts
@@ -29,9 +31,12 @@ enforced_by:
   - apps/harness-cli/src/commands/repo-checks.command.ts
   - apps/harness-cli/src/commands/scenario.command.ts
   - apps/harness-cli/src/commands/scenario-eval.ts
+  - apps/harness-cli/src/commands/verify-delta-gates.ts
   - apps/harness-mcp/src/managed-runtime.ts
 spans:
   - HarnessTierTopology.decide
+  - SelfDogfooding.decide
+  - AstGateCache.decide
   - WorkspaceFs.statAndReadAll
   - WorkspaceFs.readAndVerifyFile
   - HarnessSubprocess.execChecked
@@ -99,6 +104,8 @@ Leaving these dual tier tags and mixed contract-service-infra boundaries in plac
 6. Non-infra `libs/harness/*` packages (`type:contract`, `type:service`, `type:core`, `type:domain`) must maintain zero `node:*` imports and zero global mutable caches; all stateful caching and Node runtime bindings live in `@harness/infra`.
 7. `apps/harness-cli` routes all CLI invocations declaratively through `effect/cli` (`Command.make`, `Flag`, `Argument`) and `NodeRuntime.runMain` in `HarnessCli.runDeclarativeCli`, exposing typed subcommands (`check-openapi`, `check-migrations`, `check-event-schemas`, `benchmark`, `scenario`) with zero production `Effect.runSync` calls.
 8. `apps/harness-mcp` executes MCP tool requests through a scoped `ManagedRuntime` (`HarnessMcp.executeManagedTool`) over `McpToolRegistryLive` and `NodeServices.layer` with zero production `Effect.runSync` calls.
+9. `ast-gate-visitors.ts` deletes the `isHarnessInternal` exemption and `tools/oxlint/syntax-bans.js` (`isTierOrSampleAppFile`) enforces `discriminant-branching` and `unscoped-effect-run` uniformly across `libs/harness/*` and `apps/harness-*`, retaining only the single-file synchronous `SqlStorage` bridge exemption in `libs/es/infra/src/memory.ts`.
+10. `SelfDogfooding.decide` permanently enforces four hexagonal hygiene rules across production source files: `no-global-mutable-cache` (banning module-scope `let` variables, empty/Weak module-scope `Map`/`Set`/`WeakMap`/`WeakSet`, and module-scope `Map`/`Set` mutations), `no-node-builtins-outside-infra` (banning Node I/O built-ins outside `type:infra`), `no-layer-build-in-layer-effect` (banning `Layer.build` inside `Layer.effect`), and `no-double-wrapped-effect-fn` (banning functions returning `Effect.gen` wrapped inside `Effect.fn` or `Effect.fnUntraced`).
 
 ## Rejected Alternatives
 
@@ -139,3 +146,5 @@ Merge `ingest`, `decision`, `gates`, `graph`, `contract`, and `service` into one
 | Native Effect v4 `@harness/infra` (`type:infra`) adapters over `@effect/platform-node` (`NodeServices.layer`, `FileSystem.FileSystem`, `Path.Path`, `ChildProcessSpawner`, `ScopedCache`, `SynchronizedRef`, `Effect.acquireRelease`) with zero `node:*` or global mutable caches in non-infra `libs/harness/*` | `libs/harness/infra/src/index.ts`, `libs/harness/infra/src/ast-gate-cache-live.ts`, `libs/harness/infra/src/decision-cache-live.ts`, `libs/harness/infra/src/unix-socket-daemon-live.ts`, `libs/harness/infra/src/subprocess-runner-live.ts`, `libs/harness/infra/src/node-host-io.ts` | `pnpm harness gc --strict` & `pnpm harness verify`  | `AstGateCache.evaluateCached`, `DecisionCache.lookupOrCompute`, `UnixSocketDaemon.startScoped`, `@harness/service/AstGateCachePort`, `@harness/service/DecisionCachePort`, `@harness/service/UnixSocketDaemonPort`, `DaemonServerError` |
 | Declarative `effect/cli` + `NodeRuntime.runMain` entry with typed repo-check & scenario subcommands (`check-openapi`, `check-migrations`, `check-event-schemas`, `benchmark`, `scenario`) and zero production `Effect.runSync` | `apps/harness-cli/src/commands/declarative-cli.ts`, `apps/harness-cli/src/commands/repo-checks.command.ts`, `apps/harness-cli/src/commands/scenario.command.ts`, `apps/harness-cli/src/commands/scenario-eval.ts` | `pnpm harness gc --strict` & `pnpm harness verify`  | `HarnessCli.runDeclarativeCli`, `HarnessCli.checkOpenApi`, `HarnessCli.checkMigrations`, `HarnessCli.checkEventSchemas`, `HarnessCli.runScenario` |
 | Scoped `ManagedRuntime` MCP tool execution in `apps/harness-mcp` with zero production `Effect.runSync` | `apps/harness-mcp/src/managed-runtime.ts` | `pnpm harness gc --strict` & `pnpm harness verify`  | `HarnessMcp.executeManagedTool` |
+| Uniform AST enforcement across `libs/harness/*` and `apps/harness-*` without `isHarnessInternal` (`discriminant-branching`, `unscoped-effect-run`, and `isTierOrSampleAppFile` lint checks, retaining only `libs/es/infra/src/memory.ts` `SqlStorage` bridge exemption) | `libs/harness/gates/src/plugins/ast-gate-visitors.ts`, `apps/harness-cli/src/commands/verify-delta-gates.ts` | `AstGateCache.decide` (`pnpm harness gc --strict` & `pnpm harness verify`) | `AstGateCache.decide` |
+| Permanent hexagonal self-dogfooding rules (`no-global-mutable-cache`, `no-node-builtins-outside-infra`, `no-layer-build-in-layer-effect`, `no-double-wrapped-effect-fn`) | `libs/harness/gates/src/plugins/self-dogfooding-plugin.ts` | `SelfDogfooding.decide` (`pnpm harness gc --strict` & `pnpm harness verify`) | `SelfDogfooding.decide` |

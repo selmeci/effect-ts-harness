@@ -164,7 +164,8 @@ export const emitDeclarationSignatureText = (sourceFile: ts.SourceFile): string 
                 continue
               }
             }
-          } else if (outerCallee.getText(sourceFile) === "Effect.fnUntraced") {
+          }
+          if (!ts.isCallExpression(outerCallee) && outerCallee.getText(sourceFile) === "Effect.fnUntraced") {
             const fnArg = init.arguments[0]
             if (fnArg && (ts.isFunctionExpression(fnArg) || ts.isArrowFunction(fnArg))) {
               parts.push(`export const ${varName}${explicitType} = Effect.fnUntraced${formatFnLikeSignature(fnArg, hasVarType)}`)
@@ -322,8 +323,8 @@ const walkWorkspaceFiles = (
         continue
       }
       const full = path.join(current, e.name)
-      if (e.isDirectory) walk(full)
-      else if (e.isFile) {
+      if (e.isDirectory) { walk(full); continue }
+      if (e.isFile) {
         const rel = path.relative(repoRoot, full).replace(/\\/g, "/")
         if (filterFile(rel, e.name)) results.push(rel)
       }

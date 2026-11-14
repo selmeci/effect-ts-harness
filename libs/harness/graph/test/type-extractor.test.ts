@@ -4,6 +4,7 @@ import * as path from "node:path"
 import { Effect } from "effect"
 import * as Graph from "effect/Graph"
 import { describe, expect, it } from "vitest"
+import { match } from "ts-pattern"
 import {
   buildHarnessGraph,
   computeBaseTopologyHash,
@@ -308,12 +309,25 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
     ])
 
     const errorNode = resolveNode(graph, "MyError")
-    expect(errorNode).toBeDefined()
     expect(errorNode?._tag).toBe("TaggedError")
-    if (errorNode && errorNode._tag === "TaggedError") {
-      expect(errorNode.errorTag).toBe("MyError")
-      expect(errorNode.file).toBe("libs/sample/contract/src/errors.ts")
+    if (errorNode === undefined) {
+      expect.unreachable("Expected TaggedError node")
+      return
     }
+    match(errorNode)
+      .with({ _tag: "TaggedError" }, (n) => {
+        expect(n.errorTag).toBe("MyError")
+        expect(n.file).toBe("libs/sample/contract/src/errors.ts")
+      })
+      .with(
+        { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" },
+        { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" },
+        { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" },
+        { _tag: "MigrationTuple" },
+        () => expect.unreachable("Expected TaggedError node"),
+      )
+      .exhaustive()
   })
 
   it("extracts synchronous reducer evolveCart in domain as an EffectFn node with spanName Cart.evolve", () => {

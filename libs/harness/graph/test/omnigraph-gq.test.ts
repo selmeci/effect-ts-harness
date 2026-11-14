@@ -3,7 +3,8 @@ import { tmpdir } from "node:os"
 import * as path from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import type { FetchLike } from "@modernrelay/omnigraph"
-import { Effect, Option, Schema } from "effect"
+import { Effect, Schema } from "effect"
+import { match } from "ts-pattern"
 import {
   buildHarnessGraph,
   decideOmnigraphReconcile,
@@ -528,11 +529,15 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
         fetch: mockFetch,
       }).pipe(Effect.provide(OmnigraphSyncLive))
 
-      expect(Option.isSome(queryRes)).toBe(true)
-      if (Option.isSome(queryRes)) {
-        expect(queryRes.value).toHaveLength(1)
-        expect(queryRes.value[0]?.count).toBe(42)
-      }
+      match(queryRes)
+        .with({ _tag: "Some" }, ({ value }) => {
+          expect(value).toHaveLength(1)
+          expect(value[0]?.count).toBe(42)
+        })
+        .with({ _tag: "None" }, () => {
+          expect.unreachable("Expected queryRes to be Some")
+        })
+        .exhaustive()
 
       const diffRes = yield* diffOmnigraphBranches({
         source: "impl/current",
@@ -540,10 +545,14 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
         fetch: mockFetch,
       }).pipe(Effect.provide(OmnigraphSyncLive))
 
-      expect(Option.isSome(diffRes)).toBe(true)
-      if (Option.isSome(diffRes)) {
-        expect(Array.isArray(diffRes.value.changes)).toBe(true)
-      }
+      match(diffRes)
+        .with({ _tag: "Some" }, ({ value }) => {
+          expect(Array.isArray(value.changes)).toBe(true)
+        })
+        .with({ _tag: "None" }, () => {
+          expect.unreachable("Expected diffRes to be Some")
+        })
+        .exhaustive()
     }),
   )
 

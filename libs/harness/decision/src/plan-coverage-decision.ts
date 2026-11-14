@@ -1,6 +1,7 @@
-import { Effect, Option, Schema } from "effect"
+import { Effect, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import { match } from "ts-pattern"
 
 export const PlanStepCoverageV1 = Decision.make({
   input: Schema.Struct({
@@ -37,29 +38,34 @@ export const checkPlanStepCoverage = Effect.fn("Harness.checkPlanStepCoverage")(
     Effect.catchCause(() => Effect.succeedNone),
   )
 
-  if (Option.isNone(outcome)) {
-    return {
-      covered: false,
-      reason: `Plan step ${input.stepId} coverage check failed: DecisionModel unavailable or timed out.`,
-    }
-  }
+  return yield* match(outcome)
+    .with({ _tag: "None" }, () =>
+      Effect.succeed({
+        covered: false,
+        reason: `Plan step ${input.stepId} coverage check failed: DecisionModel unavailable or timed out.`,
+      }),
+    )
+    .with({ _tag: "Some" }, ({ value }) =>
+      Effect.gen(function* () {
+        const { answers } = value
+        yield* Effect.annotateCurrentSpan({
+          "decision.definition": "PlanStepCoverageV1",
+          "decision.implemented": answers.implemented.probability,
+          "decision.noOutOfScopeEdits": answers.noOutOfScopeEdits.probability,
+        })
 
-  const { answers } = outcome.value
-  yield* Effect.annotateCurrentSpan({
-    "decision.definition": "PlanStepCoverageV1",
-    "decision.implemented": answers.implemented.probability,
-    "decision.noOutOfScopeEdits": answers.noOutOfScopeEdits.probability,
-  })
+        if (answers.implemented.probability >= 0.7 && answers.noOutOfScopeEdits.probability >= 0.7) {
+          return {
+            covered: true,
+            reason: `Plan step ${input.stepId} covered.`,
+          }
+        }
 
-  if (answers.implemented.probability >= 0.7 && answers.noOutOfScopeEdits.probability >= 0.7) {
-    return {
-      covered: true,
-      reason: `Plan step ${input.stepId} covered.`,
-    }
-  }
-
-  return {
-    covered: false,
-    reason: `Plan step ${input.stepId} failed coverage check (implemented=${answers.implemented.probability}, noOutOfScopeEdits=${answers.noOutOfScopeEdits.probability}).`,
-  }
+        return {
+          covered: false,
+          reason: `Plan step ${input.stepId} failed coverage check (implemented=${answers.implemented.probability}, noOutOfScopeEdits=${answers.noOutOfScopeEdits.probability}).`,
+        }
+      }),
+    )
+    .exhaustive()
 })

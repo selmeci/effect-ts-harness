@@ -1,6 +1,7 @@
-import { Effect, Option, Schema } from "effect"
+import { Effect, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import { match } from "ts-pattern"
 
 export const TriageV1 = Decision.make({
   input: Schema.Struct({ failureOutput: Schema.String }),
@@ -420,28 +421,33 @@ export const triageFailure = Effect.fn("Harness.triageFailure")(function* (failu
     Effect.catchCause(() => Effect.succeedNone),
   )
 
-  if (Option.isNone(outcome)) {
-    return {
-      kind: "semantic" as const,
-      hint: "Inspect failing test and Effect graph neighborhood via harness_tests_reaching / harness_callees.",
-    }
-  }
+  return yield* match(outcome)
+    .with({ _tag: "None" }, () =>
+      Effect.succeed({
+        kind: "semantic" as const,
+        hint: "Inspect failing test and Effect graph neighborhood via harness_tests_reaching / harness_callees.",
+      }),
+    )
+    .with({ _tag: "Some" }, ({ value }) =>
+      Effect.gen(function* () {
+        const { answers } = value
+        yield* Effect.annotateCurrentSpan({
+          "decision.definition": "TriageV1",
+          "decision.kind": answers.kind.label,
+        })
 
-  const { answers } = outcome.value
-  yield* Effect.annotateCurrentSpan({
-    "decision.definition": "TriageV1",
-    "decision.kind": answers.kind.label,
-  })
+        if (answers.kind.label === "mechanical") {
+          return {
+            kind: "mechanical" as const,
+            hint: "Mechanical error identified by decision model; inspect syntax, types, or configuration.",
+          }
+        }
 
-  if (answers.kind.label === "mechanical") {
-    return {
-      kind: "mechanical" as const,
-      hint: "Mechanical error identified by decision model; inspect syntax, types, or configuration.",
-    }
-  }
-
-  return {
-    kind: "semantic" as const,
-    hint: "Inspect failing test and Effect graph neighborhood via harness_tests_reaching / harness_callees.",
-  }
+        return {
+          kind: "semantic" as const,
+          hint: "Inspect failing test and Effect graph neighborhood via harness_tests_reaching / harness_callees.",
+        }
+      }),
+    )
+    .exhaustive()
 })

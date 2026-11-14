@@ -1,5 +1,6 @@
 import { Effect, Result } from "effect"
 import * as Graph from "effect/Graph"
+import { match } from "ts-pattern"
 import {
   ARCHIMATE_BY_ROLE,
   type ConceptClosureEntry,
@@ -501,12 +502,16 @@ export const validateRelationRolesWithLattice = (
 ): ReadonlyArray<string> => {
   const relationConceptId = ConceptId.make(relationTag)
   const relationEntry = getConceptClosureEntry(lattice, relationConceptId)
-  if (relationEntry === undefined || relationEntry.kind !== "relation") {
+  const validRelationEntry = match(relationEntry)
+    .with({ kind: "relation" }, (entry) => entry)
+    .with({ kind: "entity" }, undefined, () => undefined)
+    .exhaustive()
+  if (validRelationEntry === undefined) {
     return [`Unknown or non-relation concept tag '${relationTag}' in concept lattice`]
   }
 
   const roleSpecByRole = new Map<string, RoleSpec>()
-  for (const spec of relationEntry.inheritedRelatedRoles) {
+  for (const spec of validRelationEntry.inheritedRelatedRoles) {
     roleSpecByRole.set(spec.role, spec)
   }
 
@@ -551,7 +556,7 @@ export const validateRelationRolesWithLattice = (
     }
   }
 
-  for (const roleSpec of relationEntry.inheritedRelatedRoles) {
+  for (const roleSpec of validRelationEntry.inheritedRelatedRoles) {
     const count = roleCounts.get(roleSpec.role) ?? 0
     if (count < roleSpec.minCard) {
       violations.push(

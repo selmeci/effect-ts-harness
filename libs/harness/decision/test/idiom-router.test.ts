@@ -1,5 +1,6 @@
 import { Cause, Effect, Exit } from "effect"
 import { describe, expect, it } from "vitest"
+import { match } from "ts-pattern"
 import {
   IDIOM_BLOCKS,
   IdiomRouterV1,
@@ -52,10 +53,14 @@ describe("IdiomRouterV1 data constraints", () => {
         },
       }),
     )
-    expect(Exit.isFailure(invalidExit)).toBe(true)
-    if (Exit.isFailure(invalidExit)) {
-      expect(Cause.hasDies(invalidExit.cause)).toBe(true)
-    }
+    match(invalidExit)
+      .with({ _tag: "Failure" }, ({ cause }) => {
+        expect(Cause.hasDies(cause)).toBe(true)
+      })
+      .with({ _tag: "Success" }, () => {
+        expect.unreachable("Expected invalidExit to fail with die")
+      })
+      .exhaustive()
   })
 })
 

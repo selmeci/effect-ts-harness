@@ -625,7 +625,7 @@ export const projectPatchesToInMemoryWorkspace = (
     for (const edge of [...patch.insertedRoleEdges, ...patch.deletedRoleEdges]) {
       const relEdges = ctx.targetEdgesByRelId.get(edge.relationId) ?? []
       for (const re of relEdges) {
-        if (re.role === "caller") touchedCallerKeys.add(re.entityKey)
+        match<string>(re.role).with("caller", () => { touchedCallerKeys.add(re.entityKey) }).otherwise(() => {})
       }
     }
     for (const callerKey of touchedCallerKeys) {

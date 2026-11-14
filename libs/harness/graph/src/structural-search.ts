@@ -213,7 +213,9 @@ const collectSearchFiles = (
         if (isAllowedFile(base, allowJsJson)) {
           accum.add(rel)
         }
-      } else if (hostIo.isDirectorySync(abs)) {
+        continue
+      }
+      if (hostIo.isDirectorySync(abs)) {
         walkDir(repoRoot, abs, allowJsJson, accum, hostIo)
       }
     }
@@ -234,7 +236,9 @@ const collectSearchFiles = (
       }
       if (hostIo.isDirectorySync(abs)) {
         walkDir(repoRoot, abs, allowJsJson, accum, hostIo)
-      } else if (hostIo.isFileSync(abs)) {
+        continue
+      }
+      if (hostIo.isFileSync(abs)) {
         const base = path.basename(abs)
         if (isAllowedFile(base, allowJsJson)) {
           accum.add(rel)
@@ -362,7 +366,9 @@ export const runStructuralSearch = (
             },
           })
         }
-      } else if (!options.pattern.includes("$$$")) {
+        continue
+      }
+      if (!options.pattern.includes("$$$")) {
         const lineMatches = searchLinesDeterministic(relFile, source, options.pattern)
         for (const m of lineMatches) {
           if (results.length >= DEFAULT_MAX_RESULTS) {

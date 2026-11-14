@@ -156,12 +156,15 @@ export const isMutantMarkedEquivalent = (
   outcome: MutantOutcome,
   priors: Readonly<Record<string, number>> | undefined,
   threshold = 850,
-): boolean => {
-  if (outcome.status === "equivalent") return true
-  const prior = priors?.[outcome.mutant.id]
-  if (prior === undefined) return false
-  return normalizePriorMillis(prior) >= threshold
-}
+): boolean =>
+  match(outcome.status)
+    .with("equivalent", () => true)
+    .with("killed", "survived", () => {
+      const prior = priors?.[outcome.mutant.id]
+      if (prior === undefined) return false
+      return normalizePriorMillis(prior) >= threshold
+    })
+    .exhaustive()
 
 export const evaluateMutationOutcomes = (
   outcomes: ReadonlyArray<MutantOutcome>,
@@ -172,17 +175,32 @@ export const evaluateMutationOutcomes = (
 ): MutationSuiteReport => {
   const equivalentMutantIds = new Set(
     outcomes
-      .filter((o) => o.status !== "killed" && isMutantMarkedEquivalent(o, equivalencePriors))
+      .filter((o) =>
+        match(o.status)
+          .with("killed", () => false)
+          .with("survived", "equivalent", () => isMutantMarkedEquivalent(o, equivalencePriors))
+          .exhaustive(),
+      )
       .map((o) => o.mutant.id),
   )
   const equivalentMutants = outcomes
     .filter((o) => equivalentMutantIds.has(o.mutant.id))
     .map((o) => o.mutant)
   const survivedMutants = outcomes
-    .filter((o) => o.status === "survived" && !equivalentMutantIds.has(o.mutant.id))
+    .filter((o) =>
+      match(o.status)
+        .with("survived", () => !equivalentMutantIds.has(o.mutant.id))
+        .with("killed", "equivalent", () => false)
+        .exhaustive(),
+    )
     .map((o) => o.mutant)
   const survivedCount = survivedMutants.length
-  const killedCount = outcomes.filter((o) => o.status === "killed").length
+  const killedCount = outcomes.filter((o) =>
+    match(o.status)
+      .with("killed", () => true)
+      .with("survived", "equivalent", () => false)
+      .exhaustive(),
+  ).length
   const totalMutants = outcomes.length
   const actionableMutants = totalMutants - equivalentMutants.length
   const mutationScore = actionableMutants <= 0 ? 1 : killedCount / actionableMutants
@@ -269,18 +287,24 @@ const findDomainFiles = (
       const walk = (d: string) => {
         for (const entry of hostIo.readdirSync(d)) {
           const full = join(d, entry.name)
-          if (entry.isDirectory) {
-            walk(full)
-          } else if (entry.isFile && (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx")) && !entry.name.endsWith(".d.ts")) {
-            if (tier === "contract") {
-              const content = hostIo.readTextSync(full)
-              if (content.includes("Effect.fn") || content.includes("Effect.gen") || content.includes("match(")) {
-                results.push({ scope: s, tier, fullPath: full, relFile: relative(repoRoot, full).replace(/\\/g, "/") })
+          match({ isDirectory: entry.isDirectory, isFile: entry.isFile })
+            .with({ isDirectory: true }, () => {
+              walk(full)
+            })
+            .with({ isDirectory: false, isFile: true }, () => {
+              if ((entry.name.endsWith(".ts") || entry.name.endsWith(".tsx")) && !entry.name.endsWith(".d.ts")) {
+                if (tier === "contract") {
+                  const content = hostIo.readTextSync(full)
+                  if (content.includes("Effect.fn") || content.includes("Effect.gen") || content.includes("match(")) {
+                    results.push({ scope: s, tier, fullPath: full, relFile: relative(repoRoot, full).replace(/\\/g, "/") })
+                  }
+                } else {
+                  results.push({ scope: s, tier, fullPath: full, relFile: relative(repoRoot, full).replace(/\\/g, "/") })
+                }
               }
-            } else {
-              results.push({ scope: s, tier, fullPath: full, relFile: relative(repoRoot, full).replace(/\\/g, "/") })
-            }
-          }
+            })
+            .with({ isDirectory: false, isFile: false }, () => {})
+            .exhaustive()
         }
       }
       walk(dir)
@@ -339,8 +363,17 @@ export const findReachingTestFiles = (
   const walk = (dir: string) => {
     for (const entry of hostIo.readdirSync(dir)) {
       const full = join(dir, entry.name)
-      if (entry.isDirectory) walk(full)
-      else if (entry.isFile && (entry.name.endsWith(".test.ts") || entry.name.endsWith(".spec.ts"))) reaching.push(full)
+      match({ isDirectory: entry.isDirectory, isFile: entry.isFile })
+        .with({ isDirectory: true }, () => {
+          walk(full)
+        })
+        .with({ isDirectory: false, isFile: true }, () => {
+          if (entry.name.endsWith(".test.ts") || entry.name.endsWith(".spec.ts")) {
+            reaching.push(full)
+          }
+        })
+        .with({ isDirectory: false, isFile: false }, () => {})
+        .exhaustive()
     }
   }
   walk(testDir)

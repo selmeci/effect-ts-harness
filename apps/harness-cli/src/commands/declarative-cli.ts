@@ -1,7 +1,7 @@
 import { NodeServices } from "@effect/platform-node"
 import { Effect, Layer, Option, Ref } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
-import { Argument, CliError, Command as CliCommand, Flag } from "effect/cli"
+import { Argument, Command as CliCommand, Flag } from "effect/cli"
 import { match } from "ts-pattern"
 import { LocalDecisionModel } from "@harness/decision"
 import { HarnessInfraLive } from "@harness/infra"
@@ -431,11 +431,23 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
     Effect.as<string | undefined>(undefined),
     Effect.catch((err) =>
       Effect.succeed(
-        CliError.isCliError(err) && err._tag === "ShowHelp"
-          ? err.errors.map((e) => e.message).join("; ") || err.message
-          : typeof err === "object" && err !== null && "message" in err
-            ? String(err.message)
-            : String(err),
+        match(err)
+          .with(
+            { _tag: "ShowHelp" },
+            (e) => e.errors.map((sub) => sub.message).join("; ") || e.message,
+          )
+          .with(
+            { _tag: "UnrecognizedOption" },
+            { _tag: "DuplicateOption" },
+            { _tag: "MissingOption" },
+            { _tag: "MissingArgument" },
+            { _tag: "UnexpectedArgument" },
+            { _tag: "InvalidValue" },
+            { _tag: "UnknownSubcommand" },
+            { _tag: "UserError" },
+            (e) => e.message,
+          )
+          .exhaustive(),
       ),
     ),
   )

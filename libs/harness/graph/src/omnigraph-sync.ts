@@ -74,11 +74,14 @@ export const resolveOmnigraphBaseUrl = (
         () => "",
       )
       const metaOpt = decodeServerMetaOption(raw)
-      if (Option.isSome(metaOpt)) {
-        const meta = metaOpt.value
-        if (meta.baseUrl && meta.baseUrl.length > 0) {
-          return meta.baseUrl
-        }
+      const baseUrlFromMeta = match(metaOpt)
+        .with({ _tag: "Some" }, ({ value: meta }) =>
+          meta.baseUrl && meta.baseUrl.length > 0 ? meta.baseUrl : undefined,
+        )
+        .with({ _tag: "None" }, () => undefined)
+        .exhaustive()
+      if (baseUrlFromMeta !== undefined) {
+        return baseUrlFromMeta
       }
     }
     return `http://127.0.0.1:${deriveRepoOmnigraphPort(options.repoRoot, effectiveHostIo)}`
@@ -623,21 +626,18 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
             Effect.orElseSucceed(() => Option.none<ReadonlyArray<Record<string, unknown>>>()),
           )
 
-          if (Option.isSome(queryAttempt)) {
-            return {
+          return match(queryAttempt)
+            .with({ _tag: "Some" }, ({ value }) => ({
               source: "omnigraph" as const,
-              rows: queryAttempt.value,
-            }
-          }
-
-          const fallbackRows = input.fallbackGraph
-            ? executeNamedGqQueryInMemory(input.fallbackGraph, input.name, input.params)
-            : []
-
-          return {
-            source: "memory-fallback" as const,
-            rows: fallbackRows,
-          }
+              rows: value,
+            }))
+            .with({ _tag: "None" }, () => ({
+              source: "memory-fallback" as const,
+              rows: input.fallbackGraph
+                ? executeNamedGqQueryInMemory(input.fallbackGraph, input.name, input.params)
+                : [],
+            }))
+            .exhaustive()
         }),
 
       diffBranches: (input) =>

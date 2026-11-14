@@ -110,7 +110,26 @@ export const handlePlanCheck = (
 
     let hasEffectFnNodes = false
     for (const [, node] of Graph.nodes(graph.graph)) {
-      if (node._tag === "EffectFn") {
+      const isEffectFn = match(node)
+        .with({ _tag: "EffectFn" }, () => true)
+        .with(
+          { _tag: "ServiceTag" },
+          { _tag: "ServiceLayer" },
+          { _tag: "TaggedError" },
+          { _tag: "SchemaDef" },
+          { _tag: "VitestCase" },
+          { _tag: "PatternDoc" },
+          { _tag: "AdrDoc" },
+          { _tag: "EarsSpec" },
+          { _tag: "EffectSignature" },
+          { _tag: "LayerFlow" },
+          { _tag: "TraceabilityTuple" },
+          { _tag: "HttpEndpointTuple" },
+          { _tag: "MigrationTuple" },
+          () => false,
+        )
+        .exhaustive()
+      if (isEffectFn) {
         hasEffectFnNodes = true
         break
       }
@@ -118,23 +137,69 @@ export const handlePlanCheck = (
     if (hasEffectFnNodes) {
       const failsWithErrorTags = new Set<string>()
       for (const [, node] of Graph.nodes(graph.graph)) {
-        if (node._tag === "EffectSignature" || node._tag === "LayerFlow") {
-          for (const errTag of node.emittedErrors ?? []) failsWithErrorTags.add(errTag)
-        } else if (node._tag === "HttpEndpointTuple") {
-          for (const errTag of node.errorTags) failsWithErrorTags.add(errTag)
-        }
+        match(node)
+          .with({ _tag: "EffectSignature" }, { _tag: "LayerFlow" }, (n) => {
+            for (const errTag of n.emittedErrors ?? []) failsWithErrorTags.add(errTag)
+          })
+          .with({ _tag: "HttpEndpointTuple" }, (n) => {
+            for (const errTag of n.errorTags) failsWithErrorTags.add(errTag)
+          })
+          .with(
+            { _tag: "EffectFn" },
+            { _tag: "ServiceTag" },
+            { _tag: "ServiceLayer" },
+            { _tag: "TaggedError" },
+            { _tag: "SchemaDef" },
+            { _tag: "VitestCase" },
+            { _tag: "PatternDoc" },
+            { _tag: "AdrDoc" },
+            { _tag: "EarsSpec" },
+            { _tag: "TraceabilityTuple" },
+            { _tag: "MigrationTuple" },
+            () => undefined,
+          )
+          .exhaustive()
       }
       for (const [, edge] of Graph.edges(graph.graph)) {
-        if (edge.data.role === "fails-with" || edge.data.role === "endpoint-error") {
-          const targetOpt = Graph.getNode(graph.graph, edge.target)
-          if (Option.isSome(targetOpt) && targetOpt.value._tag === "TaggedError") {
-            failsWithErrorTags.add(targetOpt.value.errorTag)
-          }
-        }
+        match<string>(edge.data.role)
+          .with("fails-with", "endpoint-error", () => {
+            const targetOpt = Graph.getNode(graph.graph, edge.target)
+            match(targetOpt)
+              .with({ _tag: "Some" }, ({ value }) => {
+                match(value)
+                  .with({ _tag: "TaggedError" }, (errNode) => {
+                    failsWithErrorTags.add(errNode.errorTag)
+                  })
+                  .with(
+                    { _tag: "EffectFn" },
+                    { _tag: "ServiceTag" },
+                    { _tag: "ServiceLayer" },
+                    { _tag: "SchemaDef" },
+                    { _tag: "VitestCase" },
+                    { _tag: "PatternDoc" },
+                    { _tag: "AdrDoc" },
+                    { _tag: "EarsSpec" },
+                    { _tag: "EffectSignature" },
+                    { _tag: "LayerFlow" },
+                    { _tag: "TraceabilityTuple" },
+                    { _tag: "HttpEndpointTuple" },
+                    { _tag: "MigrationTuple" },
+                    () => undefined,
+                  )
+                  .exhaustive()
+              })
+              .with({ _tag: "None" }, () => undefined)
+              .exhaustive()
+          })
+          .otherwise(() => undefined)
       }
       const violations: Array<string> = []
       for (const doc of governanceDocs) {
-        if (doc.status === "accepted" || doc.status === "proposed") {
+        const isActive = match(doc.status)
+          .with("accepted", "proposed", () => true)
+          .with("deprecated", "superseded", () => false)
+          .exhaustive()
+        if (isActive) {
           for (const errName of doc.referencedErrors ?? []) {
             if (!failsWithErrorTags.has(errName)) {
               violations.push(
@@ -200,10 +265,10 @@ export const handlePlanCheck = (
     }
 
     const earsErr = yield* checkPlanEarsConsistency(governanceDocs)
-    if (Option.isSome(earsErr)) {
-      return earsErr.value
-    }
-    return { exitCode: 0, stdout: checkResult.mermaid, stderr: "" }
+    return match(earsErr)
+      .with({ _tag: "Some" }, ({ value }) => value)
+      .with({ _tag: "None" }, () => ({ exitCode: 0, stdout: checkResult.mermaid, stderr: "" }))
+      .exhaustive()
   })
 
 export const handlePlanSynth = (

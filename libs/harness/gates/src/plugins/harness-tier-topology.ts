@@ -135,18 +135,22 @@ const collectServiceSourceImpurityViolations = (
     }
   }
 
-  const walk = (node: ts.Node): void => {
+  const visitNode = (node: ts.Node): void => {
     if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier !== undefined) {
       if (ts.isStringLiteral(node.moduleSpecifier)) {
         checkSpecifier(node.moduleSpecifier.text)
       }
-    } else if (ts.isCallExpression(node) && node.arguments.length > 0 && node.arguments[0] !== undefined) {
+      return
+    }
+    if (ts.isCallExpression(node) && node.arguments.length > 0 && node.arguments[0] !== undefined) {
       const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword
       const isRequireCall = ts.isIdentifier(node.expression) && node.expression.text === "require"
       if (isDynamicImport || isRequireCall) {
         checkSpecifier(extractStringOrTemplateText(node.arguments[0]))
       }
-    } else if (
+      return
+    }
+    if (
       ts.isPropertyAccessExpression(node) &&
       ts.isIdentifier(node.expression) &&
       node.expression.text === "Layer"
@@ -159,6 +163,10 @@ const collectServiceSourceImpurityViolations = (
         ),
       })
     }
+  }
+
+  const walk = (node: ts.Node): void => {
+    visitNode(node)
     ts.forEachChild(node, walk)
   }
 

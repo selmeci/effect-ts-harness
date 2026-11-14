@@ -1,7 +1,8 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Layer, Option, Schema } from "effect"
+import { Cause, Effect, Layer, Option, Schema } from "effect"
 import * as AiError from "effect/ai/AiError"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import { match } from "ts-pattern"
 import {
   DecisionCachePayloadJson,
   DecisionCacheTtlMillis,
@@ -86,17 +87,23 @@ const makeCountingDecisionModelLayer = (counter: { count: number }, yieldTicks: 
           }
           const answers: Record<string, DecisionModel.ProviderAnswer> = {}
           for (const [key, decision] of Object.entries(options.decisions)) {
-            if (decision._tag === "Probability") {
-              answers[key] = { _tag: "Probability", probability: 0.9 }
-            } else if (decision._tag === "Classify") {
-              const labels = Object.keys(decision.criteria)
-              const chosenLabel = labels.includes("schema") ? "schema" : (labels[0] ?? "effect")
-              const probabilities: Record<string, number> = {}
-              for (const l of labels) {
-                probabilities[l] = l === chosenLabel ? 1 : 0
-              }
-              answers[key] = { _tag: "Classify", label: chosenLabel, probabilities }
-            }
+            match(decision)
+              .with({ _tag: "Probability" }, () => {
+                answers[key] = { _tag: "Probability", probability: 0.9 }
+              })
+              .with({ _tag: "Classify" }, (d) => {
+                const labels = Object.keys(d.criteria)
+                const chosenLabel = labels.includes("schema") ? "schema" : (labels[0] ?? "effect")
+                const probabilities: Record<string, number> = {}
+                for (const l of labels) {
+                  probabilities[l] = l === chosenLabel ? 1 : 0
+                }
+                answers[key] = { _tag: "Classify", label: chosenLabel, probabilities }
+              })
+              .with({ _tag: "Rate" }, () => {
+                throw new Error("Unexpected Rate decision")
+              })
+              .exhaustive()
           }
           return {
             answers,
@@ -281,19 +288,25 @@ describe("CachedDecisionModel — Content-Addressable Caching & Request Coalesci
                 counter.count += 1
                 const answers: Record<string, DecisionModel.ProviderAnswer> = {}
                 for (const [key, decision] of Object.entries(options.decisions)) {
-                  if (decision._tag === "Probability") {
-                    answers[key] = { _tag: "Probability", probability: 0.95 }
-                  } else if (decision._tag === "Classify") {
-                    const labels = Object.keys(decision.criteria)
-                    const chosenLabel = labels.includes("schema")
-                      ? "schema"
-                      : (labels[0] ?? "effect")
-                    const probabilities: Record<string, number> = {}
-                    for (const l of labels) {
-                      probabilities[l] = l === chosenLabel ? 1 : 0
-                    }
-                    answers[key] = { _tag: "Classify", label: chosenLabel, probabilities }
-                  }
+                  match(decision)
+                    .with({ _tag: "Probability" }, () => {
+                      answers[key] = { _tag: "Probability", probability: 0.95 }
+                    })
+                    .with({ _tag: "Classify" }, (d) => {
+                      const labels = Object.keys(d.criteria)
+                      const chosenLabel = labels.includes("schema")
+                        ? "schema"
+                        : (labels[0] ?? "effect")
+                      const probabilities: Record<string, number> = {}
+                      for (const l of labels) {
+                        probabilities[l] = l === chosenLabel ? 1 : 0
+                      }
+                      answers[key] = { _tag: "Classify", label: chosenLabel, probabilities }
+                    })
+                    .with({ _tag: "Rate" }, () => {
+                      throw new Error("Unexpected Rate decision")
+                    })
+                    .exhaustive()
                 }
                 return {
                   answers,
@@ -316,7 +329,14 @@ describe("CachedDecisionModel — Content-Addressable Caching & Request Coalesci
         yield* Effect.gen(function* () {
           // Call 1: fails
           const exit1 = yield* runDecide("Perform failure check").pipe(Effect.exit)
-          expect(exit1._tag).toBe("Failure")
+          match(exit1)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(Cause.hasFails(cause)).toBe(true)
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected exit1 to fail")
+            })
+            .exhaustive()
           expect(counter.count).toBe(0)
 
           // Switch to working model

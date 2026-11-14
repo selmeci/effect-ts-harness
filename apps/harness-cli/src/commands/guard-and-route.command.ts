@@ -1,4 +1,4 @@
-import { Effect, Layer, Option, Schema } from "effect"
+import { Effect, Layer, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import { decideGuardCommand, routeStep } from "@harness/decision"
@@ -120,20 +120,22 @@ export const handleGuard = (
     let isAntigravityStdin = false
     if (rawStdin) {
       const decoded = decodePreToolUseStdin(rawStdin)
-      if (Option.isSome(decoded)) {
-        if (decoded.value.toolCall !== undefined) {
-          isAntigravityStdin = true
-          stdinCmd =
-            decoded.value.toolCall.args?.CommandLine ?? decoded.value.toolCall.args?.command
-          stdinFilePath =
-            decoded.value.toolCall.args?.TargetFile ??
-            decoded.value.toolCall.args?.AbsolutePath ??
-            decoded.value.toolCall.args?.file_path
-        } else {
-          stdinCmd = decoded.value.tool_input?.command
-          stdinFilePath = decoded.value.tool_input?.file_path ?? decoded.value.tool_input?.path
-        }
-      }
+      match(decoded)
+        .with({ _tag: "Some" }, ({ value }) => {
+          if (value.toolCall !== undefined) {
+            isAntigravityStdin = true
+            stdinCmd = value.toolCall.args?.CommandLine ?? value.toolCall.args?.command
+            stdinFilePath =
+              value.toolCall.args?.TargetFile ??
+              value.toolCall.args?.AbsolutePath ??
+              value.toolCall.args?.file_path
+          } else {
+            stdinCmd = value.tool_input?.command
+            stdinFilePath = value.tool_input?.file_path ?? value.tool_input?.path
+          }
+        })
+        .with({ _tag: "None" }, () => undefined)
+        .exhaustive()
     }
     const isAntigravity = isAntigravityFlag || isAntigravityStdin
     const filePath = cliFilePath ?? stdinFilePath

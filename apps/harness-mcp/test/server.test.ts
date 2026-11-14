@@ -330,24 +330,30 @@ describe("harness-mcp tools", () => {
           }
           const answers: Record<string, DecisionModel.ProviderAnswer> = {}
           for (const [key, decision] of Object.entries(options.decisions)) {
-            if (decision._tag === "Probability") {
-              answers[key] = {
-                _tag: "Probability",
-                probability: key === "fitsAny" ? outcome.fitsAny : 0.9,
-              }
-            } else if (decision._tag === "Classify") {
-              const labels = Object.keys(decision.criteria)
-              const chosen = key === "block" ? outcome.block : (labels[0] ?? "")
-              const probabilities: Record<string, number> = {}
-              for (const l of labels) {
-                probabilities[l] = l === chosen ? 1 : 0
-              }
-              answers[key] = {
-                _tag: "Classify",
-                label: chosen,
-                probabilities,
-              }
-            }
+            match(decision)
+              .with({ _tag: "Probability" }, () => {
+                answers[key] = {
+                  _tag: "Probability",
+                  probability: key === "fitsAny" ? outcome.fitsAny : 0.9,
+                }
+              })
+              .with({ _tag: "Classify" }, (d) => {
+                const labels = Object.keys(d.criteria)
+                const chosen = key === "block" ? outcome.block : (labels[0] ?? "")
+                const probabilities: Record<string, number> = {}
+                for (const l of labels) {
+                  probabilities[l] = l === chosen ? 1 : 0
+                }
+                answers[key] = {
+                  _tag: "Classify",
+                  label: chosen,
+                  probabilities,
+                }
+              })
+              .with({ _tag: "Rate" }, () => {
+                throw new Error("Unexpected Rate decision")
+              })
+              .exhaustive()
           }
           return Effect.succeed({
             answers,
@@ -1165,13 +1171,17 @@ describe("harness-mcp tools", () => {
       .with({ _tag: "Failure" }, ({ cause }) => {
         expect(Cause.hasDies(cause)).toBe(false)
         const errorOpt = Cause.findErrorOption(cause)
-        expect(errorOpt._tag).toBe("Some")
-        if (errorOpt._tag === "Some") {
-          expect(errorOpt.value).toMatchObject({
-            _tag: "GraphInferenceError",
-            reason: "invalid-graph",
+        match(errorOpt)
+          .with({ _tag: "Some" }, ({ value }) => {
+            expect(value).toMatchObject({
+              _tag: "GraphInferenceError",
+              reason: "invalid-graph",
+            })
           })
-        }
+          .with({ _tag: "None" }, () => {
+            expect.unreachable("Expected errorOpt to be Some")
+          })
+          .exhaustive()
       })
       .with({ _tag: "Success" }, () => {
         throw new Error("Expected invalid priors in harness_graph_complete to fail Schema decode")

@@ -23,7 +23,8 @@
     "@harness/ingest": "workspace:*",
     "@harness/service": "workspace:*",
     "@modelcontextprotocol/sdk": "1.32.0",
-    "effect": "4.0.0"
+    "effect": "4.0.0",
+    "ts-pattern": "5.9.2"
   },
   "devDependencies": {
     "@effect/vitest": "4.0.0",

@@ -13,8 +13,9 @@ import * as net from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { Cause, Effect, Exit, Layer, Option, Schema } from "effect"
+import { Cause, Effect, Layer, Option, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import { match } from "ts-pattern"
 import { makeFailingDecisionModelLayer, makeMockDecisionModelLayer } from "@harness/decision"
 import { readTelemetryEvents, writeVerifyStamp } from "@harness/gates"
 import { buildHarnessGraph, ShadowFileOverlay } from "@harness/graph"
@@ -2910,15 +2911,24 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
 
       writeFileSync(spanPath, "{not-valid-json", "utf-8")
       const parseExit = await Effect.runPromiseExit(readRecordedSpans(dir))
-      expect(Exit.isFailure(parseExit)).toBe(true)
-      if (Exit.isFailure(parseExit)) {
-        const errOpt = Cause.findErrorOption(parseExit.cause)
-        expect(Option.isSome(errOpt)).toBe(true)
-        if (Option.isSome(errOpt)) {
-          expect(errOpt.value).toBeInstanceOf(SpanTraceReadError)
-          expect(errOpt.value.reason).toBe("ParseError")
-        }
-      }
+      match(parseExit)
+        .with({ _tag: "Failure" }, ({ cause }) => {
+          expect(Cause.hasFails(cause)).toBe(true)
+          const errOpt = Cause.findErrorOption(cause)
+          match(errOpt)
+            .with({ _tag: "Some" }, ({ value }) => {
+              expect(value).toBeInstanceOf(SpanTraceReadError)
+              expect(value.reason).toBe("ParseError")
+            })
+            .with({ _tag: "None" }, () => {
+              expect.unreachable("Expected errOpt to be Some")
+            })
+            .exhaustive()
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("Expected parseExit to fail")
+        })
+        .exhaustive()
 
       const verifyCorruptRes = await runCli(["verify"], {
         repoRoot: dir,
@@ -2929,28 +2939,46 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
 
       writeFileSync(spanPath, JSON.stringify({ wrong: 1 }), "utf-8")
       const shapeExit = await Effect.runPromiseExit(readRecordedSpans(dir))
-      expect(Exit.isFailure(shapeExit)).toBe(true)
-      if (Exit.isFailure(shapeExit)) {
-        const errOpt = Cause.findErrorOption(shapeExit.cause)
-        expect(Option.isSome(errOpt)).toBe(true)
-        if (Option.isSome(errOpt)) {
-          expect(errOpt.value).toBeInstanceOf(SpanTraceReadError)
-          expect(errOpt.value.reason).toBe("InvalidShapeError")
-        }
-      }
+      match(shapeExit)
+        .with({ _tag: "Failure" }, ({ cause }) => {
+          expect(Cause.hasFails(cause)).toBe(true)
+          const errOpt = Cause.findErrorOption(cause)
+          match(errOpt)
+            .with({ _tag: "Some" }, ({ value }) => {
+              expect(value).toBeInstanceOf(SpanTraceReadError)
+              expect(value.reason).toBe("InvalidShapeError")
+            })
+            .with({ _tag: "None" }, () => {
+              expect.unreachable("Expected errOpt to be Some")
+            })
+            .exhaustive()
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("Expected shapeExit to fail")
+        })
+        .exhaustive()
 
       rmSync(spanPath, { force: true })
       mkdirSync(spanPath)
       const readExit = await Effect.runPromiseExit(readRecordedSpans(dir))
-      expect(Exit.isFailure(readExit)).toBe(true)
-      if (Exit.isFailure(readExit)) {
-        const errOpt = Cause.findErrorOption(readExit.cause)
-        expect(Option.isSome(errOpt)).toBe(true)
-        if (Option.isSome(errOpt)) {
-          expect(errOpt.value).toBeInstanceOf(SpanTraceReadError)
-          expect(errOpt.value.reason).toBe("ReadError")
-        }
-      }
+      match(readExit)
+        .with({ _tag: "Failure" }, ({ cause }) => {
+          expect(Cause.hasFails(cause)).toBe(true)
+          const errOpt = Cause.findErrorOption(cause)
+          match(errOpt)
+            .with({ _tag: "Some" }, ({ value }) => {
+              expect(value).toBeInstanceOf(SpanTraceReadError)
+              expect(value.reason).toBe("ReadError")
+            })
+            .with({ _tag: "None" }, () => {
+              expect.unreachable("Expected errOpt to be Some")
+            })
+            .exhaustive()
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("Expected readExit to fail")
+        })
+        .exhaustive()
       rmSync(spanPath, { recursive: true, force: true })
 
       const sampleSpans = [{ spanId: "s1", name: "Sample.fn", durationMs: 1 }]
@@ -2988,11 +3016,15 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         "utf-8",
       )
       const badRes = await Effect.runPromise(runDeltaAstAndPluginGates(dir, [badRel]))
-      expect(Option.isSome(badRes)).toBe(true)
-      if (Option.isSome(badRes)) {
-        expect(badRes.value.exitCode).toBe(1)
-        expect(badRes.value.stderr).toContain("[GATE FAILURE] verify:ast-gates")
-      }
+      match(badRes)
+        .with({ _tag: "Some" }, ({ value }) => {
+          expect(value.exitCode).toBe(1)
+          expect(value.stderr).toContain("[GATE FAILURE] verify:ast-gates")
+        })
+        .with({ _tag: "None" }, () => {
+          expect.unreachable("Expected badRes to be Some")
+        })
+        .exhaustive()
 
       const harnessGatesSrc = join(dir, "libs", "harness", "gates", "src")
       const harnessGatesTest = join(dir, "libs", "harness", "gates", "test")
@@ -3037,12 +3069,16 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       for (const tc of repoWideCases) {
         writeFileSync(join(dir, tc.rel), tc.content, "utf-8")
         const res = await Effect.runPromise(runDeltaAstAndPluginGates(dir, [tc.rel]))
-        expect(Option.isSome(res)).toBe(true)
-        if (Option.isSome(res)) {
-          expect(res.value.exitCode).toBe(1)
-          expect(res.value.stderr).toContain("[GATE FAILURE] verify:ast-gates")
-          expect(res.value.stderr).toContain(`[${tc.rule}]`)
-        }
+        match(res)
+          .with({ _tag: "Some" }, ({ value }) => {
+            expect(value.exitCode).toBe(1)
+            expect(value.stderr).toContain("[GATE FAILURE] verify:ast-gates")
+            expect(value.stderr).toContain(`[${tc.rule}]`)
+          })
+          .with({ _tag: "None" }, () => {
+            expect.unreachable(`Expected res for ${tc.rel} to be Some`)
+          })
+          .exhaustive()
       }
     } finally {
       rmSync(dir, { recursive: true, force: true })

@@ -21,6 +21,8 @@ enforced_by:
   - libs/harness/service/src/cache-and-daemon-ports.ts
   - libs/harness/service/src/host-io.ts
   - libs/harness/gates/src/plugins/harness-tier-topology.ts
+  - libs/harness/gates/src/plugins/self-dogfooding-plugin.ts
+  - libs/harness/gates/src/plugins/ast-gate-visitors.ts
   - libs/harness/gates/src/services/workspace-fs.ts
   - libs/harness/infra/src/index.ts
   - libs/harness/infra/src/workspace-fs-live.ts
@@ -33,9 +35,12 @@ enforced_by:
   - apps/harness-cli/src/commands/repo-checks.command.ts
   - apps/harness-cli/src/commands/scenario.command.ts
   - apps/harness-cli/src/commands/scenario-eval.ts
+  - apps/harness-cli/src/commands/verify-delta-gates.ts
   - apps/harness-mcp/src/managed-runtime.ts
 spans:
   - HarnessTierTopology.decide
+  - SelfDogfooding.decide
+  - AstGateCache.decide
   - WorkspaceFs.statAndReadAll
   - WorkspaceFs.readAndVerifyFile
   - HarnessSubprocess.execChecked
@@ -129,6 +134,18 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | REQ-4.4 | Event-driven | **When** the `check-event-schemas` subcommand is executed through `HarnessCli.checkEventSchemas`, the `HarnessCli.checkEventSchemas` subcommand **shall** validate event-sourcing schemas against `@harness/es-contract` and return a `CliResult`. | `HarnessCli.checkEventSchemas`  | `UnitTest`     |
 | REQ-4.5 | Event-driven | **When** the `scenario` subcommand is executed through `HarnessCli.runScenario`, the `HarnessCli.runScenario` subcommand **shall** evaluate typed scenario steps and return a `CliResult`.                                                      | `HarnessCli.runScenario`        | `UnitTest`     |
 | REQ-4.6 | Event-driven | **When** `HarnessMcp.executeManagedTool` is invoked with a `DispatchMcpToolInput` request, the `HarnessMcp.executeManagedTool` runtime handler **shall** execute the tool through a scoped `ManagedRuntime` without `Effect.runSync`.            | `HarnessMcp.executeManagedTool` | `UnitTest`     |
+
+### 5 · Permanent Self-Dogfooding Hexagonal Gates and Uniform AST Enforcement
+
+**Source (`harness:ADR-0013`):** `SelfDogfooding.decide` and `AstGateCache.decide` must permanently enforce hexagonal hygiene (banning global mutable caches, Node I/O built-ins outside `type:infra`, `Layer.build` inside `Layer.effect`, and double-wrapped `Effect.fn`) and remove `isHarnessInternal` AST exemptions across `libs/harness/*` and `apps/harness-*`.
+
+| ID      | Pattern            | Requirement                                                                                                                                                                                                                                   | Effect Symbol           | Verification |
+| :------ | :----------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :---------------------- | :----------- |
+| REQ-5.1 | Unwanted behaviour | **If** any production source file in `SelfDogfoodingInput` declares a module-scope `let` variable, an empty or Weak module-scope `Map`/`Set`/`WeakMap`/`WeakSet`, or mutates a module-scope `Map`/`Set` via `.set`, `.add`, `.delete`, or `.clear`, **then** the `SelfDogfooding.decide` decider **shall** report a `no-global-mutable-cache` violation. | `SelfDogfooding.decide` | `UnitTest`     |
+| REQ-5.2 | Unwanted behaviour | **If** any non-`type:infra` production source file in `SelfDogfoodingInput` imports a Node I/O built-in module (`node:fs`, `node:fs/promises`, `fs`, `fs/promises`, `node:child_process`, `child_process`, `node:net`, `net`, `node:os`, `os`, `node:http`, `http`, `node:https`, `https`), **then** the `SelfDogfooding.decide` decider **shall** report a `no-node-builtins-outside-infra` violation. | `SelfDogfooding.decide` | `UnitTest`     |
+| REQ-5.3 | Unwanted behaviour | **If** any production source file in `SelfDogfoodingInput` invokes `Layer.build` inside `Layer.effect`, **then** the `SelfDogfooding.decide` decider **shall** report a `no-layer-build-in-layer-effect` violation. | `SelfDogfooding.decide` | `UnitTest`     |
+| REQ-5.4 | Unwanted behaviour | **If** any production source file in `SelfDogfoodingInput` wraps a function returning `Effect.gen` inside `Effect.fn` or `Effect.fnUntraced`, **then** the `SelfDogfooding.decide` decider **shall** report a `no-double-wrapped-effect-fn` violation. | `SelfDogfooding.decide` | `UnitTest`     |
+| REQ-5.5 | Event-driven       | **When** `AstGateCache.decide` evaluates source files under `libs/harness/*` or `apps/harness-*`, the `AstGateCache.decide` visitor **shall** enforce `discriminant-branching` and `unscoped-effect-run` uniformly without `isHarnessInternal` exemptions. | `AstGateCache.decide`   | `UnitTest`     |
 
 ## Assumptions
 

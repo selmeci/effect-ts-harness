@@ -1,5 +1,5 @@
 import { join } from "node:path"
-import { Effect, Option, Result, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
 import type { SyncHostIo } from "@harness/service"
 import { match } from "ts-pattern"
 import type { FrictionEvent } from "./friction-log.js"
@@ -324,7 +324,10 @@ export const buildSessionReport = (rawInput: SessionReportInput): SessionReport 
   ).length
 
   const isActionableFriction = (f: FrictionEvent): boolean =>
-    !(f.kind === "guard_escalation" && f.detail.startsWith("verdict=allow"))
+    match(f)
+      .with({ kind: "guard_escalation" }, (ev) => !ev.detail.startsWith("verdict=allow"))
+      .with({ kind: "route_miss" }, { kind: "verify_failure" }, () => true)
+      .exhaustive()
   const actionableFriction = (input.frictionEvents ?? []).filter(isActionableFriction)
   const frictionCount = actionableFriction.length
 
@@ -536,9 +539,12 @@ export const readTelemetryEvents = (
     const trimmed = line.trim()
     if (trimmed.length === 0) continue
     const decoded = decodeTelemetryEvent(trimmed)
-    if (Option.isSome(decoded)) {
-      events.push(decoded.value)
-    }
+    match(decoded)
+      .with({ _tag: "Some" }, ({ value }) => {
+        events.push(value)
+      })
+      .with({ _tag: "None" }, () => {})
+      .exhaustive()
   }
   return events
 }

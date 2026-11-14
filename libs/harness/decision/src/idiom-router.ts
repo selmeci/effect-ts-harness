@@ -1,8 +1,9 @@
-import { Effect, Layer, Option, Schema } from "effect"
+import { Effect, Layer, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import { TypeSafeClient, TypeSafeDecisionModel } from "@effect/ai-typesafe"
+import { match } from "ts-pattern"
 
 /** Ordered building blocks for MVP v2 (docs/mvp_v2.md §5 & §11); `review` first is a
  * deliberate mitigation for Clef-flash's weak out-of-scope detection (ties follow option order). */
@@ -170,17 +171,20 @@ export const routeStep = Effect.fn("Harness.routeStep")(function* (step: string)
     Effect.catchCause(() => Effect.succeedNone),
   )
 
-  if (Option.isNone(outcome)) {
-    return "review" as const
-  }
-
-  const { answers } = outcome.value
-  yield* Effect.annotateCurrentSpan({
-    "decision.definition": "IdiomRouterV1",
-    "decision.block": answers.block.label,
-    "decision.fitsAny": answers.fitsAny.probability,
-  })
-  return answers.fitsAny.probability >= 0.7 ? answers.block.label : "review"
+  return yield* match(outcome)
+    .with({ _tag: "None" }, () => Effect.succeed("review" as const))
+    .with({ _tag: "Some" }, ({ value }) =>
+      Effect.gen(function* () {
+        const { answers } = value
+        yield* Effect.annotateCurrentSpan({
+          "decision.definition": "IdiomRouterV1",
+          "decision.block": answers.block.label,
+          "decision.fitsAny": answers.fitsAny.probability,
+        })
+        return answers.fitsAny.probability >= 0.7 ? answers.block.label : "review"
+      }),
+    )
+    .exhaustive()
 })
 
 /** Local resident Clef-flash (9B) through Ollama's System One endpoint. */

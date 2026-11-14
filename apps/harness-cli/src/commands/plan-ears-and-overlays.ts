@@ -1,6 +1,6 @@
 import { dirname, relative, resolve } from "node:path"
 import { Effect, Option } from "effect"
-import { match } from "ts-pattern"
+import { match, P } from "ts-pattern"
 import {
   classifyFileWrite,
   decideEarsSpecQuality,
@@ -126,7 +126,9 @@ export const checkPlanEarsConsistency = (
 export const formatProjectionError = (err: unknown): string => {
   if (typeof err === "object" && err !== null) {
     const rec = err as Record<string, unknown>
-    const tag = typeof rec._tag === "string" ? rec._tag : undefined
+    const tag = match(Reflect.get(rec, "_tag"))
+      .with(P.string, (t) => t)
+      .otherwise(() => undefined)
     const reason = typeof rec.reason === "string" ? rec.reason : undefined
     const msg = typeof rec.message === "string" ? rec.message : undefined
     if (tag !== undefined && reason !== undefined) {
@@ -183,12 +185,15 @@ export const persistVerifiedOverlays = (
         }
       }
       const guardDecision = classifyFileWrite(overlay.targetFile)
-      if (guardDecision.verdict !== "allow") {
-        rejectedFiles.push({
-          file: overlay.targetFile,
-          reason: `File write verdict is '${guardDecision.verdict}': ${guardDecision.reason}`,
+      match(guardDecision.verdict)
+        .with("allow", () => undefined)
+        .with("deny", "ask", (verdict) => {
+          rejectedFiles.push({
+            file: overlay.targetFile,
+            reason: `File write verdict is '${verdict}': ${guardDecision.reason}`,
+          })
         })
-      }
+        .exhaustive()
     }
 
     if (rejectedFiles.length > 0) {

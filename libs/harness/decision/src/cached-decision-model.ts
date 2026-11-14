@@ -172,47 +172,50 @@ export const decideCachedDecisionLookup = Effect.fn("CachedDecisionModel.decide"
     .with({ _tag: "None" }, () => Option.none<CachedDecisionLookupResult>())
     .exhaustive()
 
-  if (Option.isSome(hitResult)) {
-    return hitResult.value
-  }
+  return yield* match(hitResult)
+    .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
+    .with({ _tag: "None" }, () =>
+      Effect.gen(function* () {
+        const outcome = yield* DecisionModel.decide(ProbeDecisionDefinition, {
+          input: { canonicalInputJson: input.canonicalInputJson },
+        }).pipe(Effect.option)
 
-  const outcome = yield* DecisionModel.decide(ProbeDecisionDefinition, {
-    input: { canonicalInputJson: input.canonicalInputJson },
-  }).pipe(Effect.option)
-
-  yield* match(outcome)
-    .with({ _tag: "Some" }, ({ value }) => {
-      const entry: CachedDecisionEntry = {
-        cacheKey,
-        taskId: input.taskId,
-        promptVersion: input.promptVersion,
-        answers: value.answers,
-        usage: {
-          inputTokens: value.usage.inputTokens ?? 0,
-          outputTokens: value.usage.outputTokens ?? 0,
-        },
-      }
-      return match(cachePortOpt)
-        .with({ _tag: "Some" }, ({ value: port }) =>
-          port
-            .store(
+        yield* match(outcome)
+          .with({ _tag: "Some" }, ({ value }) => {
+            const entry: CachedDecisionEntry = {
               cacheKey,
-              DecisionCachePayloadJson.make(JSON.stringify(entry)),
-              DecisionCacheTtlMillis.make(300_000),
-            )
-            .pipe(Effect.ignore),
-        )
-        .with({ _tag: "None" }, () => Effect.void)
-        .exhaustive()
-    })
-    .with({ _tag: "None" }, () => Effect.void)
-    .exhaustive()
+              taskId: input.taskId,
+              promptVersion: input.promptVersion,
+              answers: value.answers,
+              usage: {
+                inputTokens: value.usage.inputTokens ?? 0,
+                outputTokens: value.usage.outputTokens ?? 0,
+              },
+            }
+            return match(cachePortOpt)
+              .with({ _tag: "Some" }, ({ value: port }) =>
+                port
+                  .store(
+                    cacheKey,
+                    DecisionCachePayloadJson.make(JSON.stringify(entry)),
+                    DecisionCacheTtlMillis.make(300_000),
+                  )
+                  .pipe(Effect.ignore),
+              )
+              .with({ _tag: "None" }, () => Effect.void)
+              .exhaustive()
+          })
+          .with({ _tag: "None" }, () => Effect.void)
+          .exhaustive()
 
-  return {
-    cacheKey,
-    cacheStatus: DecisionCacheHitStatus.make("miss"),
-    coalescedFiberCount: NonNegativeCount.make(1),
-  }
+        return {
+          cacheKey,
+          cacheStatus: DecisionCacheHitStatus.make("miss"),
+          coalescedFiberCount: NonNegativeCount.make(1),
+        }
+      }),
+    )
+    .exhaustive()
 })
 
 export const makeCachedDecisionModelLayer = (
@@ -290,19 +293,26 @@ export const makeCachedDecisionModelLayer = (
               .with({ _tag: "None" }, () => Option.none<CachedDecisionEntry>())
               .exhaustive()
 
-            if (Option.isSome(portEntryOpt)) {
-              const portEntry = portEntryOpt.value
-              if (portEntry.expiresAt === undefined || nowMs <= portEntry.expiresAt) {
-                memoryCache.set(cacheKey, portEntry)
-                return {
-                  answers: portEntry.answers as Decision.Answers<Decisions>,
-                  usage: new DecisionModel.DecisionUsage({
-                    inputTokens: portEntry.usage.inputTokens,
-                    outputTokens: portEntry.usage.outputTokens,
-                  }),
-                  metadata: {},
+            const cachedFromPort = match(portEntryOpt)
+              .with({ _tag: "Some" }, ({ value: portEntry }) => {
+                if (portEntry.expiresAt === undefined || nowMs <= portEntry.expiresAt) {
+                  memoryCache.set(cacheKey, portEntry)
+                  return {
+                    answers: portEntry.answers as Decision.Answers<Decisions>,
+                    usage: new DecisionModel.DecisionUsage({
+                      inputTokens: portEntry.usage.inputTokens,
+                      outputTokens: portEntry.usage.outputTokens,
+                    }),
+                    metadata: {},
+                  }
                 }
-              }
+                return undefined
+              })
+              .with({ _tag: "None" }, () => undefined)
+              .exhaustive()
+
+            if (cachedFromPort !== undefined) {
+              return cachedFromPort
             }
 
             const existingDeferred = inFlight.get(cacheKey)

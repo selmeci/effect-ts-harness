@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Effect, Layer, Option, Schema } from "effect"
+import { Cause, Effect, Layer, Schema } from "effect"
+import { match } from "ts-pattern"
 import {
   type AstGateEvaluationReport,
   AstGateViolationContract,
@@ -172,19 +173,26 @@ describe("HarnessBench.decide — Latency SLO Gate (PERF-06, RFC-0006)", () => {
         }),
       )
 
-      expect(exitBoth._tag).toBe("Failure")
-      if (exitBoth._tag === "Failure") {
-        const errOpt = Cause.findErrorOption(exitBoth.cause)
-        expect(Option.isSome(errOpt)).toBe(true)
-        if (Option.isSome(errOpt)) {
-          expect(errOpt.value).toBeInstanceOf(LatencySloViolationError)
-          expect(errOpt.value._tag).toBe("LatencySloViolationError")
-          expect(errOpt.value.violations).toHaveLength(1)
-          expect(errOpt.value.violations[0]?.exceededDimension).toBe(
-            LatencyExceededDimension.make("both"),
-          )
-        }
-      }
+      match(exitBoth)
+        .with({ _tag: "Success" }, () => {
+          expect.fail("Expected LatencySloViolationError failure, got Success")
+        })
+        .with({ _tag: "Failure" }, ({ cause }) =>
+          match(Cause.findErrorOption(cause))
+            .with({ _tag: "None" }, () => {
+              expect.fail("Expected typed LatencySloViolationError in Cause")
+            })
+            .with({ _tag: "Some" }, ({ value }) => {
+              expect(value).toBeInstanceOf(LatencySloViolationError)
+              expect(value._tag).toBe("LatencySloViolationError")
+              expect(value.violations).toHaveLength(1)
+              expect(value.violations[0]?.exceededDimension).toBe(
+                LatencyExceededDimension.make("both"),
+              )
+            })
+            .exhaustive(),
+        )
+        .exhaustive()
 
       // Exceed p50 only
       const exitP50 = yield* Effect.exit(
@@ -200,16 +208,23 @@ describe("HarnessBench.decide — Latency SLO Gate (PERF-06, RFC-0006)", () => {
           budgets: [budget],
         }),
       )
-      expect(exitP50._tag).toBe("Failure")
-      if (exitP50._tag === "Failure") {
-        const errOpt = Cause.findErrorOption(exitP50.cause)
-        expect(Option.isSome(errOpt)).toBe(true)
-        if (Option.isSome(errOpt)) {
-          expect(errOpt.value.violations[0]?.exceededDimension).toBe(
-            LatencyExceededDimension.make("p50"),
-          )
-        }
-      }
+      match(exitP50)
+        .with({ _tag: "Success" }, () => {
+          expect.fail("Expected LatencySloViolationError failure, got Success")
+        })
+        .with({ _tag: "Failure" }, ({ cause }) =>
+          match(Cause.findErrorOption(cause))
+            .with({ _tag: "None" }, () => {
+              expect.fail("Expected typed LatencySloViolationError in Cause")
+            })
+            .with({ _tag: "Some" }, ({ value }) => {
+              expect(value.violations[0]?.exceededDimension).toBe(
+                LatencyExceededDimension.make("p50"),
+              )
+            })
+            .exhaustive(),
+        )
+        .exhaustive()
 
       // Exceed p95 only
       const exitP95 = yield* Effect.exit(
@@ -225,16 +240,23 @@ describe("HarnessBench.decide — Latency SLO Gate (PERF-06, RFC-0006)", () => {
           budgets: [budget],
         }),
       )
-      expect(exitP95._tag).toBe("Failure")
-      if (exitP95._tag === "Failure") {
-        const errOpt = Cause.findErrorOption(exitP95.cause)
-        expect(Option.isSome(errOpt)).toBe(true)
-        if (Option.isSome(errOpt)) {
-          expect(errOpt.value.violations[0]?.exceededDimension).toBe(
-            LatencyExceededDimension.make("p95"),
-          )
-        }
-      }
+      match(exitP95)
+        .with({ _tag: "Success" }, () => {
+          expect.fail("Expected LatencySloViolationError failure, got Success")
+        })
+        .with({ _tag: "Failure" }, ({ cause }) =>
+          match(Cause.findErrorOption(cause))
+            .with({ _tag: "None" }, () => {
+              expect.fail("Expected typed LatencySloViolationError in Cause")
+            })
+            .with({ _tag: "Some" }, ({ value }) => {
+              expect(value.violations[0]?.exceededDimension).toBe(
+                LatencyExceededDimension.make("p95"),
+              )
+            })
+            .exhaustive(),
+        )
+        .exhaustive()
     }),
   )
 
@@ -254,19 +276,26 @@ describe("HarnessBench.decide — Latency SLO Gate (PERF-06, RFC-0006)", () => {
           }),
         )
 
-        expect(exit._tag).toBe("Failure")
-        if (exit._tag === "Failure") {
-          const errOpt = Cause.findErrorOption(exit.cause)
-          expect(Option.isSome(errOpt)).toBe(true)
-          if (Option.isSome(errOpt)) {
-            expect(errOpt.value).toBeInstanceOf(LatencySloViolationError)
-            expect(errOpt.value._tag).toBe("LatencySloViolationError")
-            expect(errOpt.value.violations).toHaveLength(1)
-            expect(errOpt.value.violations[0]?.exceededDimension).toBe(
-              LatencyExceededDimension.make("both"),
-            )
-          }
-        }
+        match(exit)
+          .with({ _tag: "Success" }, () => {
+            expect.fail("Expected LatencySloViolationError failure, got Success")
+          })
+          .with({ _tag: "Failure" }, ({ cause }) =>
+            match(Cause.findErrorOption(cause))
+              .with({ _tag: "None" }, () => {
+                expect.fail("Expected typed LatencySloViolationError in Cause")
+              })
+              .with({ _tag: "Some" }, ({ value }) => {
+                expect(value).toBeInstanceOf(LatencySloViolationError)
+                expect(value._tag).toBe("LatencySloViolationError")
+                expect(value.violations).toHaveLength(1)
+                expect(value.violations[0]?.exceededDimension).toBe(
+                  LatencyExceededDimension.make("both"),
+                )
+              })
+              .exhaustive(),
+          )
+          .exhaustive()
       }),
   )
 
@@ -288,20 +317,27 @@ describe("HarnessBench.decide — Latency SLO Gate (PERF-06, RFC-0006)", () => {
           }),
         )
 
-        expect(exit._tag).toBe("Failure")
-        if (exit._tag === "Failure") {
-          const errOpt = Cause.findErrorOption(exit.cause)
-          expect(Option.isSome(errOpt)).toBe(true)
-          if (Option.isSome(errOpt)) {
-            expect(errOpt.value).toBeInstanceOf(LatencySloViolationError)
-            expect(errOpt.value._tag).toBe("LatencySloViolationError")
-            expect(errOpt.value.violations).toHaveLength(1)
-            expect(errOpt.value.violations[0]?.stage).toBe(BenchStageName.make("unknown.stage"))
-            expect(errOpt.value.violations[0]?.exceededDimension).toBe(
-              LatencyExceededDimension.make("both"),
-            )
-          }
-        }
+        match(exit)
+          .with({ _tag: "Success" }, () => {
+            expect.fail("Expected LatencySloViolationError failure, got Success")
+          })
+          .with({ _tag: "Failure" }, ({ cause }) =>
+            match(Cause.findErrorOption(cause))
+              .with({ _tag: "None" }, () => {
+                expect.fail("Expected typed LatencySloViolationError in Cause")
+              })
+              .with({ _tag: "Some" }, ({ value }) => {
+                expect(value).toBeInstanceOf(LatencySloViolationError)
+                expect(value._tag).toBe("LatencySloViolationError")
+                expect(value.violations).toHaveLength(1)
+                expect(value.violations[0]?.stage).toBe(BenchStageName.make("unknown.stage"))
+                expect(value.violations[0]?.exceededDimension).toBe(
+                  LatencyExceededDimension.make("both"),
+                )
+              })
+              .exhaustive(),
+          )
+          .exhaustive()
       }),
   )
 

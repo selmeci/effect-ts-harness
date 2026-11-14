@@ -70,7 +70,11 @@ export const verifyProjectedSubset = (
       try: () => evaluateOverlayDiagnostics(repoRoot, combinedOverlays, activeSession, hostIo),
       catch: (err) => (err instanceof Error ? err.message : String(err)),
     }).pipe(Effect.exit)
-    if (compilerDiagExit._tag === "Failure" && Cause.hasInterrupts(compilerDiagExit.cause)) {
+    const isDiagInterrupted = match(compilerDiagExit)
+      .with({ _tag: "Failure" }, (f) => Cause.hasInterrupts(f.cause))
+      .with({ _tag: "Success" }, () => false)
+      .exhaustive()
+    if (isDiagInterrupted) {
       return yield* Effect.interrupt
     }
     const compilerDiags = match(compilerDiagExit)
@@ -113,16 +117,18 @@ export const verifyProjectedSubset = (
         }),
       catch: (err) => (err instanceof Error ? err.message : String(err)),
     }).pipe(Effect.exit)
-    if (extractExit._tag === "Failure") {
-      if (Cause.hasInterrupts(extractExit.cause)) {
-        return yield* Effect.interrupt
-      }
-      return {
-        isClean: false,
-        diagnostics: [...errorDiags, `Overlay type-aware extraction failed: ${String(extractExit.cause)}`],
-      }
+    const extractResult = yield* match(extractExit)
+      .with({ _tag: "Failure" }, (f) =>
+        Cause.hasInterrupts(f.cause)
+          ? Effect.interrupt
+          : Effect.succeed({ ok: false as const, diags: [...errorDiags, `Overlay type-aware extraction failed: ${String(f.cause)}`] }),
+      )
+      .with({ _tag: "Success" }, (s) => Effect.succeed({ ok: true as const, value: s.value }))
+      .exhaustive()
+    if (!extractResult.ok) {
+      return { isClean: false, diagnostics: extractResult.diags }
     }
-    const extractedOverlayGraph = extractExit.value
+    const extractedOverlayGraph = extractResult.value
 
     const effectiveBase =
       baseGraph ??
@@ -138,23 +144,21 @@ export const verifyProjectedSubset = (
     let currentGraph = effectiveBase
     for (const patch of subsetPatches) {
       const stepped = yield* Effect.exit(applyDpoPatchToGraph(currentGraph, patch))
-      if (stepped._tag === "Failure" && Cause.hasInterrupts(stepped.cause)) {
-        return yield* Effect.interrupt
-      }
-      const replayError = match(stepped)
+      const stepOutcome = yield* match(stepped)
+        .with({ _tag: "Failure" }, (f) =>
+          Cause.hasInterrupts(f.cause)
+            ? Effect.interrupt
+            : Effect.succeed({ ok: false as const, err: `DPO patch replay failed for rule '${patch.ruleId}': ${String(f.cause)}` }),
+        )
         .with({ _tag: "Success" }, (s) => {
           currentGraph = s.value
-          return undefined
+          return Effect.succeed({ ok: true as const })
         })
-        .with(
-          { _tag: "Failure" },
-          (f) => `DPO patch replay failed for rule '${patch.ruleId}': ${String(f.cause)}`,
-        )
         .exhaustive()
-      if (replayError !== undefined) {
+      if (!stepOutcome.ok) {
         return {
           isClean: false,
-          diagnostics: [...errorDiags, replayError],
+          diagnostics: [...errorDiags, stepOutcome.err],
         }
       }
     }
@@ -205,14 +209,13 @@ export const verifyProjectedSubset = (
     })
 
     const infExit = yield* Effect.exit(decideGraphInference(extractedOverlayGraph))
-    if (infExit._tag === "Failure" && Cause.hasInterrupts(infExit.cause)) {
-      return yield* Effect.interrupt
-    }
-    const infDiag = match(infExit)
-      .with({ _tag: "Failure" }, (f) => [
-        `Datalog verification failed on projected overlay: ${String(f.cause)}`,
-      ])
-      .with({ _tag: "Success" }, () => [])
+    const infDiag = yield* match(infExit)
+      .with({ _tag: "Failure" }, (f) =>
+        Cause.hasInterrupts(f.cause)
+          ? Effect.interrupt
+          : Effect.succeed([`Datalog verification failed on projected overlay: ${String(f.cause)}`]),
+      )
+      .with({ _tag: "Success" }, () => Effect.succeed([] as Array<string>))
       .exhaustive()
 
     const monoDiags: Array<string> = [

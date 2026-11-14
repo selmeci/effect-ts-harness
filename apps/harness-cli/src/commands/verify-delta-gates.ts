@@ -34,15 +34,11 @@ export const runDeltaAstAndPluginGates = (
     })
     const enforcedAstViolations = astReport.violations.filter((v) => {
       // Repo-wide AST rules enforce uniformly across libs/harness/*, apps/harness-*, and tools/*;
-      // legacy AST rules still exempt internal harness packages during incremental migration.
+      // legacy AST rules still exempt tools/* only.
       if (isRepoWideAstRule(v.rule, v.message)) {
         return true
       }
-      return (
-        !v.file.startsWith("libs/harness/") &&
-        !v.file.startsWith("apps/harness-") &&
-        !v.file.startsWith("tools/")
-      )
+      return !v.file.startsWith("tools/")
     })
     if (enforcedAstViolations.length > 0) {
       const msg = enforcedAstViolations
@@ -73,28 +69,36 @@ export const runDeltaAstAndPluginGates = (
       .with({ _tag: "Success" }, () => Option.none<CliResult>())
       .with({ _tag: "Failure" }, ({ cause }) => {
         const errOpt = Cause.findErrorOption(cause)
-        if (Option.isSome(errOpt) && errOpt.value._tag === "SelfDogfoodingViolationError") {
-          const msg = errOpt.value.violations
-            .map((v) => `[${v.rule}] ${v.file}:${v.line}: ${v.message}`)
-            .join("\n")
-          return Option.some({
-            exitCode: 1,
-            stdout: "",
-            stderr: `[GATE FAILURE] verify:self-dogfooding-plugins\n${msg}`,
-          })
-        }
-        if (Option.isSome(errOpt) && errOpt.value._tag === "WorkspaceFsError") {
-          return Option.some({
-            exitCode: 1,
-            stdout: "",
-            stderr: `[GATE FAILURE] verify:self-dogfooding-plugins\nFailed to read ${errOpt.value.filePath}: ${errOpt.value.reason}`,
-          })
-        }
-        return Option.some({
-          exitCode: 1,
-          stdout: "",
-          stderr: `[GATE FAILURE] verify:self-dogfooding-plugins\n${Cause.pretty(cause)}`,
-        })
+        return match(errOpt)
+          .with({ _tag: "Some" }, ({ value }) =>
+            match(value)
+              .with({ _tag: "SelfDogfoodingViolationError" }, (err) => {
+                const msg = err.violations
+                  .map((v) => `[${v.rule}] ${v.file}:${v.line}: ${v.message}`)
+                  .join("\n")
+                return Option.some({
+                  exitCode: 1,
+                  stdout: "",
+                  stderr: `[GATE FAILURE] verify:self-dogfooding-plugins\n${msg}`,
+                })
+              })
+              .with({ _tag: "WorkspaceFsError" }, (err) =>
+                Option.some({
+                  exitCode: 1,
+                  stdout: "",
+                  stderr: `[GATE FAILURE] verify:self-dogfooding-plugins\nFailed to read ${err.filePath}: ${err.reason}`,
+                }),
+              )
+              .exhaustive(),
+          )
+          .with({ _tag: "None" }, () =>
+            Option.some({
+              exitCode: 1,
+              stdout: "",
+              stderr: `[GATE FAILURE] verify:self-dogfooding-plugins\n${Cause.pretty(cause)}`,
+            }),
+          )
+          .exhaustive()
       })
       .exhaustive()
   })

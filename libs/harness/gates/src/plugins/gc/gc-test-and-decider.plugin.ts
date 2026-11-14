@@ -9,6 +9,7 @@
  * - shallow-decider-property-test: Flags deciders exercised only by scalar/primitive arbitraries.
  */
 import * as Graph from "effect/Graph"
+import { match } from "ts-pattern"
 import {
   type GcFinding,
   type GraphEntropyInput,
@@ -26,53 +27,92 @@ export const evaluateTestAndDeciderPlugin = (
   // Rule: untested-effect-fn
   if (input.checkUntestedDomainFns === true || ctx.hasVitestCases) {
     for (const [idx, node] of Graph.nodes(g)) {
-      if (
-        node._tag === "EffectFn" &&
-        (node.packageTag === "domain" || node.packageTag === "contract") &&
-        !node.isStub &&
-        !IGNORED_UNTESTED_FNS.has(node.spanName)
-      ) {
-        if ((ctx.incomingTestOrCall.get(idx) ?? 0) === 0) {
-          findings.push({
-            kind: "untested-effect-fn",
-            nodeId: node.spanName,
-            location: `${node.file}:${node.line}`,
-            message: `Domain EffectFn "${node.spanName}" (${node.qualname}) has 0 reaching tests (0 ExercisesSpan / TracedCall edges).`,
-            action: `Add a unit/integration test importing and calling "${node.spanName}" to verify domain behavior.`,
-          })
-        }
-      }
+      match(node)
+        .with({ _tag: "EffectFn" }, (n) => {
+          if (
+            (n.packageTag === "domain" || n.packageTag === "contract") &&
+            !n.isStub &&
+            !IGNORED_UNTESTED_FNS.has(n.spanName) &&
+            (ctx.incomingTestOrCall.get(idx) ?? 0) === 0
+          ) {
+            findings.push({
+              kind: "untested-effect-fn",
+              nodeId: n.spanName,
+              location: `${n.file}:${n.line}`,
+              message: `Domain EffectFn "${n.spanName}" (${n.qualname}) has 0 reaching tests (0 ExercisesSpan / TracedCall edges).`,
+              action: `Add a unit/integration test importing and calling "${n.spanName}" to verify domain behavior.`,
+            })
+          }
+        })
+        .with(
+          { _tag: "AdrDoc" },
+          { _tag: "EarsSpec" },
+          { _tag: "PatternDoc" },
+          { _tag: "SchemaDef" },
+          { _tag: "ServiceLayer" },
+          { _tag: "ServiceTag" },
+          { _tag: "TaggedError" },
+          { _tag: "EffectSignature" },
+          { _tag: "LayerFlow" },
+          { _tag: "TraceabilityTuple" },
+          { _tag: "HttpEndpointTuple" },
+          { _tag: "MigrationTuple" },
+          { _tag: "VitestCase" },
+          () => {},
+        )
+        .exhaustive()
     }
   }
 
   // Rules: missing-decider-property-test & shallow-decider-property-test
   if (input.checkDeciderPropertyTests === true) {
     for (const [idx, node] of Graph.nodes(g)) {
-      if (
-        node._tag === "EffectFn" &&
-        (node.packageTag === "domain" || node.packageTag === "contract") &&
-        !node.isStub &&
-        (node.spanName.endsWith(".decide") || node.spanName === "decide") &&
-        !IGNORED_UNTESTED_FNS.has(node.spanName)
-      ) {
-        if ((ctx.incomingPropertyTests.get(idx) ?? 0) === 0) {
-          findings.push({
-            kind: "missing-decider-property-test",
-            nodeId: node.spanName,
-            location: `${node.file}:${node.line}`,
-            message: `Pure domain decider "${node.spanName}" (${node.qualname}) has 0 Property-Based Tests (use it.effect.prop / it.prop with Schema arbitraries to prevent example-only blind spots).`,
-            action: `Create a property-based test with it.effect.prop / it.prop using fast-check / Schema arbitraries exercising "${node.spanName}".`,
-          })
-        } else if ((ctx.incomingRichPropertyTests.get(idx) ?? 0) === 0) {
-          findings.push({
-            kind: "shallow-decider-property-test",
-            nodeId: node.spanName,
-            location: `${node.file}:${node.line}`,
-            message: `Pure domain decider "${node.spanName}" (${node.qualname}) is only exercised by scalar/primitive property tests — generate domain Event or Command schemas (e.g. Schema.Array(EventSchema)) in it.prop / it.effect.prop.`,
-            action: `Replace scalar arguments in it.prop / it.effect.prop with composite domain generators (e.g. Schema.Array(EventSchema)).`,
-          })
-        }
-      }
+      match(node)
+        .with({ _tag: "EffectFn" }, (n) => {
+          if (
+            (n.packageTag === "domain" || n.packageTag === "contract") &&
+            !n.isStub &&
+            (n.spanName.endsWith(".decide") || n.spanName === "decide") &&
+            !IGNORED_UNTESTED_FNS.has(n.spanName)
+          ) {
+            if ((ctx.incomingPropertyTests.get(idx) ?? 0) === 0) {
+              findings.push({
+                kind: "missing-decider-property-test",
+                nodeId: n.spanName,
+                location: `${n.file}:${n.line}`,
+                message: `Pure domain decider "${n.spanName}" (${n.qualname}) has 0 Property-Based Tests (use it.effect.prop / it.prop with Schema arbitraries to prevent example-only blind spots).`,
+                action: `Create a property-based test with it.effect.prop / it.prop using fast-check / Schema arbitraries exercising "${n.spanName}".`,
+              })
+              return
+            }
+            if ((ctx.incomingRichPropertyTests.get(idx) ?? 0) === 0) {
+              findings.push({
+                kind: "shallow-decider-property-test",
+                nodeId: n.spanName,
+                location: `${n.file}:${n.line}`,
+                message: `Pure domain decider "${n.spanName}" (${n.qualname}) is only exercised by scalar/primitive property tests — generate domain Event or Command schemas (e.g. Schema.Array(EventSchema)) in it.prop / it.effect.prop.`,
+                action: `Replace scalar arguments in it.prop / it.effect.prop with composite domain generators (e.g. Schema.Array(EventSchema)).`,
+              })
+            }
+          }
+        })
+        .with(
+          { _tag: "AdrDoc" },
+          { _tag: "EarsSpec" },
+          { _tag: "PatternDoc" },
+          { _tag: "SchemaDef" },
+          { _tag: "ServiceLayer" },
+          { _tag: "ServiceTag" },
+          { _tag: "TaggedError" },
+          { _tag: "EffectSignature" },
+          { _tag: "LayerFlow" },
+          { _tag: "TraceabilityTuple" },
+          { _tag: "HttpEndpointTuple" },
+          { _tag: "MigrationTuple" },
+          { _tag: "VitestCase" },
+          () => {},
+        )
+        .exhaustive()
     }
   }
 

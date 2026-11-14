@@ -957,10 +957,30 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
           Graph.getNode(outcome.targetGraph.graph, validateIdx!),
         )
         const decideNode = Option.getOrThrow(Graph.getNode(outcome.targetGraph.graph, decideIdx!))
-        if (validateNode._tag === "EffectFn" && decideNode._tag === "EffectFn") {
-          expect(validateNode.spanName).toBe("Order.validate")
-          expect(decideNode.spanName).toBe("Order.decide")
-        }
+        const validateSpan = match(validateNode)
+          .with({ _tag: "EffectFn" }, (n) => n.spanName)
+          .with(
+            { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" },
+            { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" },
+            { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" },
+            { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" },
+            { _tag: "MigrationTuple" },
+            () => undefined,
+          )
+          .exhaustive()
+        const decideSpan = match(decideNode)
+          .with({ _tag: "EffectFn" }, (n) => n.spanName)
+          .with(
+            { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" },
+            { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" },
+            { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" },
+            { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" },
+            { _tag: "MigrationTuple" },
+            () => undefined,
+          )
+          .exhaustive()
+        expect(validateSpan).toBe("Order.validate")
+        expect(decideSpan).toBe("Order.decide")
 
         const rep06 = rec.patches.find((p) => p.ruleId === RewriteRuleId.make("REP-06"))
         expect(rep06).toBeDefined()

@@ -1,6 +1,7 @@
 import { join, relative } from "node:path"
 import { Effect, Layer, Option, Result, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import { match } from "ts-pattern"
 import {
   appendFrictionEvent,
   appendTelemetryEvent,
@@ -270,8 +271,12 @@ export const tryGitDiffRange = (
 export const readGitBranchDiffFiles = (repoRoot: string): ReadonlyArray<string> => {
   for (const range of ["main...HEAD", "origin/main...HEAD", "HEAD~1...HEAD"]) {
     const opt = tryGitDiffRange(repoRoot, range)
-    if (Option.isSome(opt) && opt.value.length > 0) {
-      return opt.value
+    const nonEmpty = match(opt)
+      .with({ _tag: "Some" }, ({ value }) => (value.length > 0 ? value : undefined))
+      .with({ _tag: "None" }, () => undefined)
+      .exhaustive()
+    if (nonEmpty !== undefined) {
+      return nonEmpty
     }
   }
   if (nodeSyncHostIo.existsSync(join(repoRoot, "libs", "harness", "gates", "src"))) {
@@ -370,30 +375,31 @@ export function checkOllamaServerReady(
           method: "GET",
           signal: AbortSignal.timeout(2000),
         })
-        .then((r) => {
-          if (r.status !== 200) {
-            return Promise.resolve(false)
-          }
-          return r.json().then((rawBody: unknown) => {
-            if (typeof rawBody !== "object" || rawBody === null) {
-              return false
-            }
-            const body = rawBody as {
-              readonly models?: ReadonlyArray<{
-                readonly name?: string
-                readonly model?: string
-              }>
-            }
-            if (!Array.isArray(body.models)) {
-              return false
-            }
-            return body.models.some(
-              (m) =>
-                (typeof m.name === "string" && m.name.startsWith("clef-flash")) ||
-                (typeof m.model === "string" && m.model.startsWith("clef-flash")),
+        .then((r) =>
+          match(r.status)
+            .with(200, () =>
+              r.json().then((rawBody: unknown) => {
+                if (typeof rawBody !== "object" || rawBody === null) {
+                  return false
+                }
+                const body = rawBody as {
+                  readonly models?: ReadonlyArray<{
+                    readonly name?: string
+                    readonly model?: string
+                  }>
+                }
+                if (!Array.isArray(body.models)) {
+                  return false
+                }
+                return body.models.some(
+                  (m) =>
+                    (typeof m.name === "string" && m.name.startsWith("clef-flash")) ||
+                    (typeof m.model === "string" && m.model.startsWith("clef-flash")),
+                )
+              }),
             )
-          })
-        })
+            .otherwise(() => Promise.resolve(false)),
+        )
         .catch(() => false),
     catch: () => false,
   }).pipe(Effect.orElseSucceed(() => false))
@@ -412,8 +418,10 @@ export function ensureLocalOllamaReady(opts?: OllamaReadinessOptions): Effect.Ef
       try: () => {
         if (opts?.spawnOllama !== undefined) {
           opts.spawnOllama()
-        } else if (customUrl === undefined) {
-          nodeSyncHostIo.spawnDetached("ollama", ["serve"])
+        } else {
+          if (customUrl === undefined) {
+            nodeSyncHostIo.spawnDetached("ollama", ["serve"])
+          }
         }
       },
       catch: () => undefined,

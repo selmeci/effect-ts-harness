@@ -90,7 +90,9 @@ export const testImportsFn = (
         resolved.replace(/\.js$/, "") === fnFullFile.replace(/\.tsx?$/, "") ||
         resolved.startsWith(fnFullDir) || (fnPkgFullDir && resolved.startsWith(fnPkgFullDir))
       ) return true
-    } else if (fnPkg?.dir && spec.includes(fnPkg.dir)) return true
+      continue
+    }
+    if (fnPkg?.dir && spec.includes(fnPkg.dir)) return true
   }
   return false
 }
@@ -130,12 +132,10 @@ export const parseGovernanceDocFile = (
       if (rest.startsWith("[") && rest.endsWith("]")) {
         const inner = rest.slice(1, -1).trim()
         lists.set(key, inner.length === 0 ? [] : inner.split(",").map(stripQuotes).filter((s) => s.length > 0))
-      } else if (rest === "") {
-        lists.set(key, [])
-        currentListKey = key
-      } else {
-        scalars.set(key, stripQuotes(rest))
+        continue
       }
+      if (rest === "") { lists.set(key, []); currentListKey = key; continue }
+      scalars.set(key, stripQuotes(rest))
     }
   }
 
@@ -203,10 +203,10 @@ const splitTopLevelCommas = (input: string): Array<string> => {
   let depth = 0, current = ""
   for (let i = 0; i < input.length; i++) {
     const char = input[i]
-    if (char === "(" || char === "[" || char === "{") { depth++; current += char }
-    else if (char === ")" || char === "]" || char === "}") { if (depth > 0) depth--; current += char }
-    else if (char === "," && depth === 0) { items.push(current); current = "" }
-    else { current += char }
+    if (char === "(" || char === "[" || char === "{") { depth++; current += char; continue }
+    if (char === ")" || char === "]" || char === "}") { if (depth > 0) depth--; current += char; continue }
+    if (char === "," && depth === 0) { items.push(current); current = ""; continue }
+    current += char
   }
   if (current.length > 0) items.push(current)
   return items
@@ -258,8 +258,8 @@ export const checkUnassertedStateFieldsForInputs = (
     const sf = ts.createSourceFile(input.filePath, input.content, ts.ScriptTarget.Latest, true)
     const evolveFns: Array<ts.Node> = []
     for (const stmt of sf.statements) {
-      if (ts.isFunctionDeclaration(stmt) && stmt.name && /^evolve/i.test(stmt.name.text)) evolveFns.push(stmt)
-      else if (ts.isVariableStatement(stmt)) {
+      if (ts.isFunctionDeclaration(stmt) && stmt.name && /^evolve/i.test(stmt.name.text)) { evolveFns.push(stmt); continue }
+      if (ts.isVariableStatement(stmt)) {
         for (const decl of stmt.declarationList.declarations) {
           if (ts.isIdentifier(decl.name) && /^evolve/i.test(decl.name.text) && decl.initializer && (ts.isArrowFunction(decl.initializer) || ts.isFunctionExpression(decl.initializer))) {
             evolveFns.push(decl.initializer)
@@ -272,9 +272,7 @@ export const checkUnassertedStateFieldsForInputs = (
     const collectProps = (node: ts.Node): void => {
       if (ts.isObjectLiteralExpression(node)) {
         for (const p of node.properties) {
-          let pName: string | null = null
-          if (ts.isPropertyAssignment(p) && p.name) pName = p.name.getText(sf).replace(/^["'`]|["'`]$/g, "")
-          else if (ts.isShorthandPropertyAssignment(p)) pName = p.name.text
+          const pName = ts.isPropertyAssignment(p) && p.name ? p.name.getText(sf).replace(/^["'`]|["'`]$/g, "") : ts.isShorthandPropertyAssignment(p) ? p.name.text : null
           if (pName && pName !== "_tag" && !pName.endsWith("Id") && pName !== "id") assignedFields.add(pName)
         }
       }
@@ -447,16 +445,16 @@ export const assembleTestAndGovernanceGraph = (
   for (const docNode of governanceDocs) {
     const docKey = getNodeKey(docNode), docIdx = Graph.addNode(mutable, docNode)
     updatedNodeIndexByKey.set(docKey, docIdx)
-    const kindPrefix = docNode._tag === "AdrDoc" ? "governs" : "specifies"
+    const { kindPrefix, docRole, docArchimate, docIdField } = match(docNode)
+      .with({ _tag: "AdrDoc" }, (d) => ({ kindPrefix: "governs", docRole: "governing-adr", docArchimate: "Influence" as const, docIdField: { adrId: d.id } }))
+      .with({ _tag: "EarsSpec" }, (d) => ({ kindPrefix: "specifies", docRole: "specifying-ears", docArchimate: "Realization" as const, docIdField: { earsSpecId: d.id } }))
+      .exhaustive()
 
     const addGovernanceTraceability = (targetKey: string, targetIdx: Graph.NodeIndex) => {
-      const docRole = docNode._tag === "AdrDoc" ? "governing-adr" : "specifying-ears"
-      const docArchimate = docNode._tag === "AdrDoc" ? ("Influence" as const) : ("Realization" as const)
       const relId = RelationId.make(`TraceabilityTuple:${kindPrefix}:${docNode.id}->${targetKey}`)
       if (!updatedNodeIndexByKey.has(relId)) {
         const relNode: TraceabilityTupleRelation = {
-          _tag: "TraceabilityTuple", relationId: relId,
-          ...(docNode._tag === "AdrDoc" ? { adrId: docNode.id } : { earsSpecId: docNode.id }),
+          _tag: "TraceabilityTuple", relationId: relId, ...docIdField,
           targetSymbolQualname: targetKey, verifyingTestQualnames: [],
         }
         const relIdx = Graph.addNode(mutable, relNode)
