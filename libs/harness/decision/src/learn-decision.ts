@@ -1,8 +1,8 @@
-import { Effect, Option, Schema } from "effect"
+import { Cause, Effect, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import { match } from "ts-pattern"
 import type { FrictionEventKind } from "@harness/gates"
-import { assertDecisionLimits } from "./idiom-router.js"
 
 export const LEARN_TARGETS = [
   "agent-pattern",
@@ -39,8 +39,6 @@ export const LearnProposalV1 = Decision.make({
   },
 })
 
-assertDecisionLimits(LearnProposalV1)
-
 export interface LearnProposalInput {
   readonly kind: FrictionEventKind
   readonly summary: string
@@ -56,48 +54,45 @@ export interface LearnProposalResult {
   readonly source: "decision-model" | "deterministic-fallback"
 }
 
-export const deterministicLearnFallback = (input: LearnProposalInput): LearnProposalResult => {
-  if (input.kind === "route_miss") {
-    return {
-      target: "agent-pattern",
+export const deterministicLearnFallback = (input: LearnProposalInput): LearnProposalResult =>
+  match(input.kind)
+    .with("route_miss", () => ({
+      target: "agent-pattern" as const,
       actionable: true,
       confidence: 0.85,
       recommendation: `Create or expand an agent-patterns/*.md recipe for "${input.summary}" and register it in IdiomRouterV1 (11 of 26 slots available).`,
-      source: "deterministic-fallback",
-    }
-  }
-
-  if (input.kind === "verify_failure") {
-    const isAstGraphGate =
-      input.detail.includes("domain-requires-") ||
-      input.detail.includes("impure-decider") ||
-      input.detail.includes("layer-cycle") ||
-      input.detail.includes("discriminant-branching") ||
-      input.detail.includes("non-exhaustive-union-match") ||
-      input.detail.includes("unbranded-contract-schema") ||
-      input.detail.includes("unbranded-primitive-boundary") ||
-      input.detail.includes("harness/syntax-bans")
-    const target: LearnTarget = isAstGraphGate ? "ast-graph-gate" : "triage-rule"
-    const recommendation = isAstGraphGate
-      ? `Strengthen AST/graph gate in tools/oxlint/syntax-bans.js or checkEffectGraph for recurring violation: ${input.summary}`
-      : `Add deterministic pattern and hint to DETERMINISTIC_TRIAGE_RULES in libs/harness/decision/src/triage-decision.ts for: ${input.summary}`
-    return {
-      target,
-      actionable: true,
-      confidence: 0.85,
-      recommendation,
-      source: "deterministic-fallback",
-    }
-  }
-
-  return {
-    target: "guard-allowlist",
-    actionable: input.occurrences >= 2,
-    confidence: 0.8,
-    recommendation: `Review command "${input.summary}" — if safe and recurring, add its prefix to ALLOWLIST in libs/harness/gates/src/policy.ts.`,
-    source: "deterministic-fallback",
-  }
-}
+      source: "deterministic-fallback" as const,
+    }))
+    .with("verify_failure", () => {
+      const isAstGraphGate =
+        input.detail.includes("domain-requires-") ||
+        input.detail.includes("impure-decider") ||
+        input.detail.includes("layer-cycle") ||
+        input.detail.includes("discriminant-branching") ||
+        input.detail.includes("non-exhaustive-union-match") ||
+        input.detail.includes("unbranded-contract-schema") ||
+        input.detail.includes("unbranded-primitive-boundary") ||
+        input.detail.includes("harness/syntax-bans")
+      const target: LearnTarget = isAstGraphGate ? "ast-graph-gate" : "triage-rule"
+      const recommendation = isAstGraphGate
+        ? `Strengthen AST/graph gate in tools/oxlint/syntax-bans.js or checkEffectGraph for recurring violation: ${input.summary}`
+        : `Add deterministic pattern and hint to DETERMINISTIC_TRIAGE_RULES in libs/harness/decision/src/triage-decision.ts for: ${input.summary}`
+      return {
+        target,
+        actionable: true,
+        confidence: 0.85,
+        recommendation,
+        source: "deterministic-fallback" as const,
+      }
+    })
+    .with("guard_escalation", () => ({
+      target: "guard-allowlist" as const,
+      actionable: input.occurrences >= 2,
+      confidence: 0.8,
+      recommendation: `Review command "${input.summary}" — if safe and recurring, add its prefix to ALLOWLIST in libs/harness/gates/src/policy.ts.`,
+      source: "deterministic-fallback" as const,
+    }))
+    .exhaustive()
 
 export const proposeLearningAction = Effect.fn("Harness.proposeLearningAction")(function* (
   input: LearnProposalInput,
@@ -111,32 +106,41 @@ export const proposeLearningAction = Effect.fn("Harness.proposeLearningAction")(
     },
   }).pipe(
     Effect.timeoutOption("1500 millis"),
-    Effect.catchCause(() => Effect.succeedNone),
+    Effect.catchCause((cause) =>
+      Cause.hasInterrupts(cause)
+        ? Effect.interrupt
+        : Effect.logWarning(`Decision model fallback: ${Cause.pretty(cause)}`).pipe(
+            Effect.as(Option.none()),
+          ),
+    ),
   )
 
-  if (Option.isNone(outcome)) {
-    return deterministicLearnFallback(input)
-  }
+  return yield* match(outcome)
+    .with({ _tag: "None" }, () => Effect.succeed(deterministicLearnFallback(input)))
+    .with({ _tag: "Some" }, ({ value }) =>
+      Effect.gen(function* () {
+        const { answers } = value
+        const prob = answers.actionable.probability
+        const fallback = deterministicLearnFallback(input)
+        const rawTarget = answers.target.label
+        const target: LearnTarget = (LEARN_TARGETS as ReadonlyArray<string>).includes(rawTarget)
+          ? (rawTarget as LearnTarget)
+          : fallback.target
 
-  const { answers } = outcome.value
-  const prob = answers.actionable.probability
-  const fallback = deterministicLearnFallback(input)
-  const rawTarget = answers.target.label
-  const target: LearnTarget = (LEARN_TARGETS as ReadonlyArray<string>).includes(rawTarget)
-    ? (rawTarget as LearnTarget)
-    : fallback.target
+        yield* Effect.annotateCurrentSpan({
+          "decision.definition": "LearnProposalV1",
+          "decision.target": target,
+          "decision.actionable": String(prob),
+        })
 
-  yield* Effect.annotateCurrentSpan({
-    "decision.definition": "LearnProposalV1",
-    "decision.target": target,
-    "decision.actionable": String(prob),
-  })
-
-  return {
-    target,
-    actionable: prob >= 0.6,
-    confidence: prob,
-    recommendation: fallback.recommendation,
-    source: "decision-model" as const,
-  }
+        return {
+          target,
+          actionable: prob >= 0.6,
+          confidence: prob,
+          recommendation: fallback.recommendation,
+          source: "decision-model" as const,
+        }
+      }),
+    )
+    .exhaustive()
 })

@@ -11,11 +11,11 @@
  * - GraphGcReport: Aggregated report schema with clean flag and findings.
  * - GraphReachabilityContext: Indexed graph reachability and relation counts.
  */
-import { type Dirent, existsSync, readdirSync, readFileSync } from "node:fs"
 import { join, relative } from "node:path"
-import { Effect, Schema } from "effect"
+import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import * as Graph from "effect/Graph"
+import type { SyncHostIo } from "@harness/service"
 import type { GovernanceDocStatus, GraphInferenceResult, HarnessGraph, HarnessNode } from "@harness/graph"
 import { isModularPluginPath } from "../self-dogfooding-plugin.js"
 
@@ -56,7 +56,8 @@ export type GcReport = GraphGcReport
 
 export interface GraphEntropyInput {
   readonly graph: HarnessGraph; readonly governanceDocs?: ReadonlyArray<GovernanceDocReference> | undefined
-  readonly workspaceRoot?: string | undefined; readonly expectedPatterns?: ReadonlyArray<string> | undefined
+  readonly workspaceRoot?: string | undefined; readonly hostIo?: SyncHostIo | undefined
+  readonly expectedPatterns?: ReadonlyArray<string> | undefined
   readonly checkUntestedDomainFns?: boolean | undefined; readonly checkDeciderPropertyTests?: boolean | undefined
   readonly documentedSymbols?: ReadonlyArray<string> | undefined; readonly testedSpanNames?: ReadonlyArray<string> | undefined
   readonly propertyTestedSpanNames?: ReadonlyArray<string> | undefined
@@ -64,6 +65,7 @@ export interface GraphEntropyInput {
 }
 
 export const IGNORED_SERVICES = new Set([
+  "Scope", "Scope.Scope",
   "DecisionModel", "DecisionModel.DecisionModel", "OmnigraphSync", "SpanRecorder",
   "@harness/ingest/SpanRecorder", "ChaosFaultController", "@harness/gates/ChaosFaultController",
   "SampleApiClient", "CartEsAtomClient", "ActiveCounterStore",
@@ -152,7 +154,17 @@ export const buildGraphReachabilityContext = (harnessGraph: HarnessGraph): Graph
         }
       })
       .with({ _tag: "LayerFlow" }, () => {
-        const hasProvider = outEdges.some((e) => e.data.role === "provider-layer" && match(Graph.getNode(g, e.target)).with({ _tag: "Some", value: { _tag: "ServiceLayer" } }, () => true).with({ _tag: "Some" }, () => false).with({ _tag: "None" }, () => false).exhaustive())
+        const hasProvider = outEdges.some((e) =>
+          match<string, boolean>(e.data.role)
+            .with("provider-layer", () =>
+              match(Graph.getNode(g, e.target))
+                .with({ _tag: "Some", value: { _tag: "ServiceLayer" } }, () => true)
+                .with({ _tag: "Some" }, () => false)
+                .with({ _tag: "None" }, () => false)
+                .exhaustive(),
+            )
+            .otherwise(() => false),
+        )
         for (const { target, data } of outEdges) {
           match<string>(data.role)
             .with("provided-service", () => {
@@ -270,12 +282,24 @@ const extractBalancedPair = (
     if (ch === "'" || ch === '"' || ch === "`") {
       const q = ch; i += 1
       while (i < text.length) {
-        if (text[i] === "\\") i += 2; else if (text[i] === q) { i += 1; break } else i += 1
+        if (text[i] === "\\") {
+          i += 2
+          continue
+        }
+        if (text[i] === q) {
+          i += 1
+          break
+        }
+        i += 1
       }
       continue
     }
-    if (ch === openCh) depth++
-    else if (ch === closeCh && --depth === 0) return { body: text.slice(openIdx + 1, i), endIndex: i }
+    if (ch === openCh) {
+      depth++
+      i++
+      continue
+    }
+    if (ch === closeCh && --depth === 0) return { body: text.slice(openIdx + 1, i), endIndex: i }
     i++
   }
   return undefined
@@ -302,13 +326,26 @@ export const extractTopLevelObjectAnalysis = (
     if (ch === "'" || ch === '"' || ch === "`") {
       const q = ch; i += 1
       while (i < objBody.length) {
-        if (objBody[i] === "\\") i += 2; else if (objBody[i] === q) { i += 1; break } else i += 1
+        if (objBody[i] === "\\") {
+          i += 2
+          continue
+        }
+        if (objBody[i] === q) {
+          i += 1
+          break
+        }
+        i += 1
       }
       continue
     }
-    if (ch === "{") b++; else if (ch === "}") b = Math.max(0, b - 1)
-    else if (ch === "(") p++; else if (ch === ")") p = Math.max(0, p - 1)
-    else if (ch === "[") k++; else if (ch === "]") k = Math.max(0, k - 1)
+    match<string>(ch)
+      .with("{", () => { b++ })
+      .with("}", () => { b = Math.max(0, b - 1) })
+      .with("(", () => { p++ })
+      .with(")", () => { p = Math.max(0, p - 1) })
+      .with("[", () => { k++ })
+      .with("]", () => { k = Math.max(0, k - 1) })
+      .otherwise(() => {})
     i++
   }
   return { keys, spreads }
@@ -348,11 +385,14 @@ export const parseGovernanceDocFrontmatter = (
     if (rest.startsWith("[") && rest.endsWith("]")) {
       const inner = rest.slice(1, -1).trim()
       lists.set(key, inner.length === 0 ? [] : inner.split(",").map(stripQuotes).filter((s) => s.length > 0))
-    } else if (rest === "") {
-      lists.set(key, []); currentListKey = key
-    } else {
-      scalars.set(key, stripQuotes(rest))
+      continue
     }
+    if (rest === "") {
+      lists.set(key, [])
+      currentListKey = key
+      continue
+    }
+    scalars.set(key, stripQuotes(rest))
   }
 
   const id = scalars.get("id")
@@ -380,24 +420,21 @@ export const parseGovernanceDocFrontmatter = (
 }
 
 export const safeFs = <T>(fn: () => T, fallback: T): T =>
-  Effect.runSync(
-    Effect.try({
-      try: fn,
-      catch: (err) => {
-        process.stderr.write(
-          `[harness:gc] Warning: filesystem operation failed: ${err instanceof Error ? err.message : String(err)}\n`,
-        )
-        return fallback
-      },
-    }).pipe(Effect.orElseSucceed(() => fallback)),
-  )
+  Result.getOrElse(Result.try(fn), () => fallback)
 
-export const loadGovernanceDocsFromDisk = (repoRoot: string): ReadonlyArray<GovernanceDocReference> => {
+export const loadGovernanceDocsFromDisk = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+): ReadonlyArray<GovernanceDocReference> => {
   const relDirs: Array<string> = ["docs/adr", "docs/specs"]
   const listSubs = (p: string): ReadonlyArray<string> => {
     const full = join(repoRoot, p)
-    return !existsSync(full) ? [] : safeFs<ReadonlyArray<Dirent>>(() => readdirSync(full, { withFileTypes: true }), [])
-      .filter((e) => e.isDirectory()).map((e) => e.name).sort((a, b) => a.localeCompare(b))
+    return !hostIo.existsSync(full)
+      ? []
+      : safeFs(() => hostIo.readdirSync(full), [])
+          .filter((e) => e.isDirectory)
+          .map((e) => e.name)
+          .sort((a, b) => a.localeCompare(b))
   }
   for (const s of listSubs("libs")) relDirs.push(`libs/${s}/docs/adr`, `libs/${s}/docs/specs`)
   for (const a of listSubs("apps")) relDirs.push(`apps/${a}/docs/adr`, `apps/${a}/docs/specs`)
@@ -405,19 +442,19 @@ export const loadGovernanceDocsFromDisk = (repoRoot: string): ReadonlyArray<Gove
   const results: Array<GovernanceDocReference> = []
   for (const relDir of relDirs) {
     const fullDir = join(repoRoot, relDir)
-    if (!existsSync(fullDir)) continue
-    const files = safeFs<ReadonlyArray<Dirent>>(() => readdirSync(fullDir, { withFileTypes: true }), [])
-      .filter((e) => e.isFile() && e.name.endsWith(".md") && e.name !== "README.md" && e.name !== "TEMPLATE.md")
+    if (!hostIo.existsSync(fullDir)) continue
+    const files = safeFs(() => hostIo.readdirSync(fullDir), [])
+      .filter((e) => e.isFile && e.name.endsWith(".md") && e.name !== "README.md" && e.name !== "TEMPLATE.md")
       .map((e) => e.name).sort((a, b) => a.localeCompare(b))
     for (const file of files) {
       const relDocPath = `${relDir}/${file}`
-      const content = safeFs(() => readFileSync(join(repoRoot, relDocPath), "utf8"), "")
-      const parsed = parseGovernanceDocFrontmatter(relDocPath, content, (rel) => existsSync(join(repoRoot, rel)))
+      const content = safeFs(() => hostIo.readTextSync(join(repoRoot, relDocPath)), "")
+      const parsed = parseGovernanceDocFrontmatter(relDocPath, content, (rel) => hostIo.existsSync(join(repoRoot, rel)))
       if (parsed === null) continue
       const enforcedByFileContents: Record<string, string> = {}
       for (const ef of parsed.enforcedByFiles ?? []) {
         const fullEf = join(repoRoot, ef)
-        if (existsSync(fullEf)) enforcedByFileContents[ef] = safeFs(() => readFileSync(fullEf, "utf8"), "")
+        if (hostIo.existsSync(fullEf)) enforcedByFileContents[ef] = safeFs(() => hostIo.readTextSync(fullEf), "")
       }
       const isSpecOrAdr = relDir.endsWith("/specs") || relDir.endsWith("/adr") || parsed.id.includes(":SPEC-") || parsed.id.includes(":ADR-") || parsed.id.startsWith("ADR-") || parsed.id.startsWith("SPEC-")
       results.push({ ...parsed, ...(isSpecOrAdr ? { markdown: content } : {}), enforcedByFileContents })
@@ -431,25 +468,31 @@ const EXCLUDED_MODULAR_SCAN_DIRS = new Set([...EXCLUDED_WORKSPACE_SCAN_DIRS, "te
 
 const collectWorkspaceFiles = (
   dir: string,
+  hostIo: SyncHostIo,
   predicate: (name: string) => boolean,
   excludedDirs: ReadonlySet<string> = EXCLUDED_WORKSPACE_SCAN_DIRS,
 ): ReadonlyArray<string> => {
-  if (!existsSync(dir)) return []
+  if (!hostIo.existsSync(dir)) return []
   return safeFs<ReadonlyArray<string>>(() => {
     const result: Array<string> = []
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
+    for (const e of hostIo.readdirSync(dir)) {
       const full = join(dir, e.name)
-      if (e.isDirectory()) {
-        if (!excludedDirs.has(e.name)) result.push(...collectWorkspaceFiles(full, predicate, excludedDirs))
-      } else if (e.isFile() && predicate(e.name)) result.push(full)
+      if (e.isDirectory) {
+        if (!excludedDirs.has(e.name)) result.push(...collectWorkspaceFiles(full, hostIo, predicate, excludedDirs))
+        continue
+      }
+      if (e.isFile && predicate(e.name)) result.push(full)
     }
     return result.sort((a, b) => a.localeCompare(b))
   }, [])
 }
 
-export const collectWorkspaceTsFiles = (dir: string): ReadonlyArray<string> => collectWorkspaceFiles(dir, (n) => (n.endsWith(".ts") || n.endsWith(".tsx")) && !n.endsWith(".d.ts"))
-export const collectWorkspaceSqlFiles = (dir: string): ReadonlyArray<string> => collectWorkspaceFiles(dir, (n) => n.endsWith(".sql"))
-export const collectWorkspaceAllFiles = (dir: string): ReadonlyArray<string> => collectWorkspaceFiles(dir, () => true)
+export const collectWorkspaceTsFiles = (dir: string, hostIo: SyncHostIo): ReadonlyArray<string> =>
+  collectWorkspaceFiles(dir, hostIo, (n) => (n.endsWith(".ts") || n.endsWith(".tsx")) && !n.endsWith(".d.ts"))
+export const collectWorkspaceSqlFiles = (dir: string, hostIo: SyncHostIo): ReadonlyArray<string> =>
+  collectWorkspaceFiles(dir, hostIo, (n) => n.endsWith(".sql"))
+export const collectWorkspaceAllFiles = (dir: string, hostIo: SyncHostIo): ReadonlyArray<string> =>
+  collectWorkspaceFiles(dir, hostIo, () => true)
 
-export const collectModularPluginFiles = (repoRoot: string): ReadonlyArray<string> =>
-  [...new Set(["libs", "apps"].map((d) => join(repoRoot, d)).filter((d) => existsSync(d)).flatMap((d) => collectWorkspaceFiles(d, (n) => (n.endsWith(".ts") || n.endsWith(".tsx")) && !n.endsWith(".d.ts"), EXCLUDED_MODULAR_SCAN_DIRS).filter((f) => isModularPluginPath(relative(repoRoot, f).replace(/\\/g, "/")))))].sort((a, b) => a.localeCompare(b))
+export const collectModularPluginFiles = (repoRoot: string, hostIo: SyncHostIo): ReadonlyArray<string> =>
+  [...new Set(["libs", "apps"].map((d) => join(repoRoot, d)).filter((d) => hostIo.existsSync(d)).flatMap((d) => collectWorkspaceFiles(d, hostIo, (n) => (n.endsWith(".ts") || n.endsWith(".tsx")) && !n.endsWith(".d.ts"), EXCLUDED_MODULAR_SCAN_DIRS).filter((f) => isModularPluginPath(relative(repoRoot, f).replace(/\\/g, "/")))))].sort((a, b) => a.localeCompare(b))

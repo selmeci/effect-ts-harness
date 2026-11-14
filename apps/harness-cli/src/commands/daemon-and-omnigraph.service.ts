@@ -1,22 +1,21 @@
-import { execFileSync, spawn } from "node:child_process"
-import { existsSync } from "node:fs"
-import * as net from "node:net"
 import { join, relative } from "node:path"
-import { Effect, Layer, Option, Schema } from "effect"
+import { Effect, Layer, Option, Result, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import { match } from "ts-pattern"
+import { ErrorReasonMessage, StdinReadError } from "@harness/contract"
 import {
   appendFrictionEvent,
   appendTelemetryEvent,
   collectModularPluginFiles,
   type FrictionEventKind,
   type GovernanceDocReference,
-  resolveCanonicalRepoRoot,
   type TelemetryCategory,
   type TelemetryEngineSource,
   type TelemetryOutcome,
   type TelemetrySurface,
 } from "@harness/gates"
-import type { HarnessGraph } from "@harness/graph"
+import { type HarnessGraph, resolveCanonicalRepoRoot } from "@harness/graph"
+import { nodeSyncHostIo, queryUnixSocketLine } from "@harness/infra"
 import {
   buildOmnigraphClusterKillArgs,
   CLI_REPO_ROOT,
@@ -45,11 +44,16 @@ export const COMMANDS = [
   "gc",
   "mutate",
   "bench",
+  "benchmark",
   "ingest",
   "session",
   "doctor",
   "ontology",
   "report",
+  "check-openapi",
+  "check-migrations",
+  "check-event-schemas",
+  "scenario",
   "help",
 ] as const
 
@@ -60,6 +64,7 @@ export const isCommand = (value: string): value is Command =>
 
 export interface CliEnv {
   readonly repoRoot?: string | undefined
+  readonly cwd?: string | undefined
   readonly stdin?: string | undefined
   readonly decisionLayer?: Layer.Layer<DecisionModel.DecisionModel> | undefined
   readonly planGraph?: HarnessGraph | undefined
@@ -72,6 +77,10 @@ export interface CliEnv {
       }>
     | undefined
   readonly skipSubprocessVerify?: boolean | undefined
+  readonly skipBackgroundDaemons?: boolean | undefined
+  readonly skipAutoSessionReport?: boolean | undefined
+  readonly stdinTimeoutMs?: number | undefined
+  readonly stdinMaxBytes?: number | undefined
   readonly governanceDocs?: ReadonlyArray<GovernanceDocReference> | undefined
 }
 
@@ -82,8 +91,75 @@ export interface CliResult {
   readonly telemetryDetail?: string | undefined
 }
 
+const DEFAULT_STDIN_TIMEOUT_MS = 8000
+const DEFAULT_STDIN_MAX_BYTES = 2 * 1024 * 1024
+
+export const makeReadStdinEffect = Effect.fn("HarnessCli.readStdin")(function* (stdinOptions?: {
+  readonly timeoutMs?: number | undefined
+  readonly maxBytes?: number | undefined
+}): Effect.fn.Return<string, StdinReadError> {
+  if (process.stdin.isTTY === true) {
+    return ""
+  }
+  const timeoutMs = stdinOptions?.timeoutMs ?? DEFAULT_STDIN_TIMEOUT_MS
+  const maxBytes = stdinOptions?.maxBytes ?? DEFAULT_STDIN_MAX_BYTES
+  return yield* Effect.callback<string, StdinReadError>((resume) => {
+    const chunks: Array<Buffer> = []
+    let totalBytes = 0
+    let settled = false
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined = undefined
+    const cleanup = () => {
+      if (timeoutTimer !== undefined) {
+        clearTimeout(timeoutTimer)
+        timeoutTimer = undefined
+      }
+      process.stdin.off("data", onData)
+      process.stdin.off("end", onEnd)
+      process.stdin.off("error", onError)
+      process.stdin.pause()
+    }
+    const succeed = (value: string) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resume(Effect.succeed(value))
+    }
+    const fail = (reason: string) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resume(Effect.fail(new StdinReadError({ reason: ErrorReasonMessage.make(reason.trim() || "stdin read error") })))
+    }
+    const onData = (c: Buffer | string) => {
+      const buf = Buffer.isBuffer(c) ? c : Buffer.from(String(c))
+      totalBytes += buf.byteLength
+      if (totalBytes > maxBytes) {
+        fail(`Stdin payload exceeded maximum size of ${maxBytes} bytes`)
+        return
+      }
+      chunks.push(buf)
+    }
+    const onEnd = () => {
+      succeed(Buffer.concat(chunks).toString("utf8"))
+    }
+    const onError = (err: unknown) => {
+      fail(`Stdin stream error: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    timeoutTimer = setTimeout(() => {
+      fail(`Timed out reading stdin after ${timeoutMs}ms`)
+    }, timeoutMs)
+    process.stdin.on("data", onData)
+    process.stdin.once("end", onEnd)
+    process.stdin.once("error", onError)
+    process.stdin.resume()
+    return Effect.sync(cleanup)
+  })
+})
+
+export const readStdinEffect: Effect.Effect<string, StdinReadError> = makeReadStdinEffect()
+
 export const isIsolatedExternalWorkspace = (repoRoot: string): boolean => {
-  if (existsSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"))) {
+  if (nodeSyncHostIo.existsSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"))) {
     return false
   }
   const explicitEnvUrl =
@@ -91,7 +167,10 @@ export const isIsolatedExternalWorkspace = (repoRoot: string): boolean => {
   if (explicitEnvUrl) {
     return false
   }
-  return resolveCanonicalRepoRoot(repoRoot) !== resolveCanonicalRepoRoot(CLI_REPO_ROOT)
+  return (
+    resolveCanonicalRepoRoot(repoRoot, nodeSyncHostIo) !==
+    resolveCanonicalRepoRoot(CLI_REPO_ROOT, nodeSyncHostIo)
+  )
 }
 
 export const recordFriction = (
@@ -102,10 +181,10 @@ export const recordFriction = (
     readonly detail: string
   },
 ): void => {
-  if (options?.repoRoot === undefined && process.env.VITEST !== undefined) {
+  if (options?.repoRoot === undefined && options?.skipBackgroundDaemons === true) {
     return
   }
-  appendFrictionEvent(options?.repoRoot ?? findWorkspaceRoot(), event)
+  appendFrictionEvent(options?.repoRoot ?? findWorkspaceRoot(), event, nodeSyncHostIo)
 }
 
 export const recordTelemetry = (
@@ -120,10 +199,10 @@ export const recordTelemetry = (
     readonly detail?: string | undefined
   },
 ): void => {
-  if (options?.repoRoot === undefined && process.env.VITEST !== undefined) {
+  if (options?.repoRoot === undefined && options?.skipBackgroundDaemons === true) {
     return
   }
-  appendTelemetryEvent(options?.repoRoot ?? findWorkspaceRoot(), event)
+  appendTelemetryEvent(options?.repoRoot ?? findWorkspaceRoot(), event, nodeSyncHostIo)
 }
 
 export const ANSI_REGEX = new RegExp(
@@ -172,14 +251,14 @@ export const formatSubprocessError = (err: unknown): string => {
 }
 
 const hasGitRef = (repoRoot: string, ref: string): boolean =>
-  Effect.runSync(
-    Effect.try({
-      try: () => {
-        execFileSync("git", ["rev-parse", "--verify", ref], { cwd: repoRoot, stdio: "pipe" })
-        return true
-      },
-      catch: () => false,
-    }).pipe(Effect.orElseSucceed(() => false)),
+  Result.getOrElse(
+    Result.try(() => {
+      const res = nodeSyncHostIo.execFileSync("git", ["rev-parse", "--verify", ref], {
+        cwd: repoRoot,
+      })
+      return res.exitCode === 0
+    }),
+    () => false,
   )
 
 export const resolveNxAffectedArgs = (
@@ -203,35 +282,40 @@ export const tryGitDiffRange = (
   repoRoot: string,
   range: string,
 ): Option.Option<ReadonlyArray<string>> =>
-  Effect.runSync(
-    Effect.try({
-      try: () =>
-        Option.some(
-          execFileSync("git", ["diff", "--name-only", range], {
-            cwd: repoRoot,
-            stdio: "pipe",
-            encoding: "utf-8",
-          })
-            .split(/\r?\n/)
-            .map((l) => l.trim())
-            .filter((l) => l.length > 0),
-        ),
-      catch: () => Option.none<ReadonlyArray<string>>(),
-    }).pipe(Effect.orElseSucceed(() => Option.none<ReadonlyArray<string>>())),
+  Result.getOrElse(
+    Result.try(() => {
+      const res = nodeSyncHostIo.execFileSync("git", ["diff", "--name-only", range], {
+        cwd: repoRoot,
+      })
+      if (res.exitCode !== 0) {
+        return Option.none<ReadonlyArray<string>>()
+      }
+      return Option.some(
+        res.stdout
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter((l) => l.length > 0),
+      )
+    }),
+    () => Option.none<ReadonlyArray<string>>(),
   )
 
 export const readGitBranchDiffFiles = (repoRoot: string): ReadonlyArray<string> => {
   for (const range of ["main...HEAD", "origin/main...HEAD", "HEAD~1...HEAD"]) {
     const opt = tryGitDiffRange(repoRoot, range)
-    if (Option.isSome(opt) && opt.value.length > 0) {
-      return opt.value
+    const nonEmpty = match(opt)
+      .with({ _tag: "Some" }, ({ value }) => (value.length > 0 ? value : undefined))
+      .with({ _tag: "None" }, () => undefined)
+      .exhaustive()
+    if (nonEmpty !== undefined) {
+      return nonEmpty
     }
   }
-  if (existsSync(join(repoRoot, "libs", "harness", "gates", "src"))) {
+  if (nodeSyncHostIo.existsSync(join(repoRoot, "libs", "harness", "gates", "src"))) {
     process.stderr.write(
       `[harness:verify] Warning: git branch diff failed or returned empty in ${repoRoot}; falling back to scanning all modular gate files.\n`,
     )
-    return collectModularPluginFiles(repoRoot).map((abs) =>
+    return collectModularPluginFiles(repoRoot, nodeSyncHostIo).map((abs) =>
       relative(repoRoot, abs).replace(/\\/g, "/"),
     )
   }
@@ -239,16 +323,14 @@ export const readGitBranchDiffFiles = (repoRoot: string): ReadonlyArray<string> 
 }
 
 export const resolveModifiedFilesSinceStampOrHead = (repoRoot: string): ReadonlyArray<string> =>
-  Effect.runSync(
-    Effect.try({
-      try: () => {
-        const files = new Set<string>()
-        const raw = execFileSync("git", ["status", "--porcelain", "-uall"], {
-          cwd: repoRoot,
-          stdio: "pipe",
-          encoding: "utf-8",
-        })
-        for (const line of raw.split(/\r?\n/)) {
+  Result.getOrElse(
+    Result.try(() => {
+      const files = new Set<string>()
+      const res = nodeSyncHostIo.execFileSync("git", ["status", "--porcelain", "-uall"], {
+        cwd: repoRoot,
+      })
+      if (res.exitCode === 0) {
+        for (const line of res.stdout.split(/\r?\n/)) {
           const trimmed = line.trim()
           if (trimmed.length < 4) continue
           const relPath = trimmed
@@ -260,13 +342,13 @@ export const resolveModifiedFilesSinceStampOrHead = (repoRoot: string): Readonly
             files.add(relPath.replace(/\\/g, "/"))
           }
         }
-        for (const diffFile of readGitBranchDiffFiles(repoRoot)) {
-          files.add(diffFile.replace(/\\/g, "/"))
-        }
-        return Array.from(files)
-      },
-      catch: () => [],
-    }).pipe(Effect.orElseSucceed(() => [])),
+      }
+      for (const diffFile of readGitBranchDiffFiles(repoRoot)) {
+        files.add(diffFile.replace(/\\/g, "/"))
+      }
+      return Array.from(files)
+    }),
+    () => [],
   )
 
 export const isRootConfigOrSharedCoreChange = (modifiedFiles: ReadonlyArray<string>): boolean =>
@@ -289,67 +371,20 @@ export const tryQueryWarmDaemonSocket = (
 ): Effect.Effect<Option.Option<Record<string, unknown>>> =>
   Effect.gen(function* () {
     const socketPath = join(repoRoot, ".harness", "daemon.sock")
-    if (!existsSync(socketPath)) {
+    if (!nodeSyncHostIo.existsSync(socketPath)) {
       return Option.none()
     }
-    return yield* Effect.callback<Option.Option<Record<string, unknown>>>((resume) => {
-      const client = net.createConnection({ path: socketPath })
-      const reqId = `${command}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-      let buffer = ""
-      let settled = false
-      const finish = (opt: Option.Option<Record<string, unknown>>) => {
-        if (!settled) {
-          settled = true
-          clearTimeout(timer)
-          resume(Effect.succeed(opt))
-        }
-      }
-      const timer = setTimeout(() => {
-        client.destroy()
-        finish(Option.none())
-      }, 1500)
-      client.on("connect", () => {
-        client.write(
-          JSON.stringify({
-            id: reqId,
-            command,
-            repoRoot,
-            ...(files !== undefined ? { files } : {}),
-          }) + "\n",
-        )
-      })
-      client.on("data", (chunk) => {
-        buffer += chunk.toString("utf8")
-        if (Buffer.byteLength(buffer, "utf8") > 1_048_576) {
-          client.destroy()
-          finish(Option.none())
-          return
-        }
-        const idx = buffer.indexOf("\n")
-        if (idx !== -1) {
-          const line = buffer.slice(0, idx).trim()
-          client.end()
-          const parsedOpt = Schema.decodeOption(
-            Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
-          )(line)
-          finish(parsedOpt)
-        }
-      })
-      client.once("end", () => {
-        finish(Option.none())
-      })
-      client.once("close", () => {
-        finish(Option.none())
-      })
-      client.on("error", () => {
-        client.destroy()
-        finish(Option.none())
-      })
-      return Effect.sync(() => {
-        clearTimeout(timer)
-        client.destroy()
-      })
+    const reqId = `${command}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const payload = JSON.stringify({
+      id: reqId,
+      command,
+      repoRoot,
+      ...(files !== undefined ? { files } : {}),
     })
+    const lineOpt = yield* queryUnixSocketLine(socketPath, payload, 1500)
+    return Option.flatMap(lineOpt, (line) =>
+      Schema.decodeOption(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)))(line),
+    )
   })
 
 export interface OllamaReadinessOptions {
@@ -372,30 +407,31 @@ export function checkOllamaServerReady(
           method: "GET",
           signal: AbortSignal.timeout(2000),
         })
-        .then((r) => {
-          if (r.status !== 200) {
-            return Promise.resolve(false)
-          }
-          return r.json().then((rawBody: unknown) => {
-            if (typeof rawBody !== "object" || rawBody === null) {
-              return false
-            }
-            const body = rawBody as {
-              readonly models?: ReadonlyArray<{
-                readonly name?: string
-                readonly model?: string
-              }>
-            }
-            if (!Array.isArray(body.models)) {
-              return false
-            }
-            return body.models.some(
-              (m) =>
-                (typeof m.name === "string" && m.name.startsWith("clef-flash")) ||
-                (typeof m.model === "string" && m.model.startsWith("clef-flash")),
+        .then((r) =>
+          match(r.status)
+            .with(200, () =>
+              r.json().then((rawBody: unknown) => {
+                if (typeof rawBody !== "object" || rawBody === null) {
+                  return false
+                }
+                const body = rawBody as {
+                  readonly models?: ReadonlyArray<{
+                    readonly name?: string
+                    readonly model?: string
+                  }>
+                }
+                if (!Array.isArray(body.models)) {
+                  return false
+                }
+                return body.models.some(
+                  (m) =>
+                    (typeof m.name === "string" && m.name.startsWith("clef-flash")) ||
+                    (typeof m.model === "string" && m.model.startsWith("clef-flash")),
+                )
+              }),
             )
-          })
-        })
+            .otherwise(() => Promise.resolve(false)),
+        )
         .catch(() => false),
     catch: () => false,
   }).pipe(Effect.orElseSucceed(() => false))
@@ -414,9 +450,10 @@ export function ensureLocalOllamaReady(opts?: OllamaReadinessOptions): Effect.Ef
       try: () => {
         if (opts?.spawnOllama !== undefined) {
           opts.spawnOllama()
-        } else if (customUrl === undefined) {
-          const child = spawn("ollama", ["serve"], { detached: true, stdio: "ignore" })
-          child.unref()
+        } else {
+          if (customUrl === undefined) {
+            nodeSyncHostIo.spawnDetached("ollama", ["serve"])
+          }
         }
       },
       catch: () => undefined,

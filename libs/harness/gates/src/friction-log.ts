@@ -1,6 +1,7 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { Effect, Option, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
+import { match } from "ts-pattern"
+import type { SyncHostIo } from "@harness/service"
 import { resolveHarnessStateDir } from "./worktree.js"
 
 export const FrictionEventKind = Schema.Literals([
@@ -27,9 +28,9 @@ export interface FrictionCluster {
   readonly lastSeen: string
 }
 
-export const decideFrictionClusters = Effect.fn("Friction.decide")(function* (
+export const summarizeFrictionEvents = (
   events: ReadonlyArray<FrictionEvent>,
-) {
+): ReadonlyArray<FrictionCluster> => {
   const map = new Map<
     string,
     {
@@ -78,12 +79,14 @@ export const decideFrictionClusters = Effect.fn("Friction.decide")(function* (
     return a.key < b.key ? -1 : a.key > b.key ? 1 : 0
   })
 
-  return yield* Effect.succeed(clusters as ReadonlyArray<FrictionCluster>)
-})
+  return clusters as ReadonlyArray<FrictionCluster>
+}
 
-export const summarizeFrictionEvents = (
+export const decideFrictionClusters = Effect.fn("Friction.decide")(function* (
   events: ReadonlyArray<FrictionEvent>,
-): ReadonlyArray<FrictionCluster> => Effect.runSync(decideFrictionClusters(events))
+) {
+  return yield* Effect.succeed(summarizeFrictionEvents(events))
+})
 export * from "./plan-search.js"
 import {
   type PlanSearchCandidate,
@@ -101,26 +104,28 @@ export interface LoopThrashingStatus {
   readonly recommendedPlanCandidate?: PlanSearchCandidate | undefined
 }
 
-export const decideLoopThrashing = Effect.fn("LoopCircuitBreaker.decide")(function* (
+export const checkLoopThrashing = (
   events: ReadonlyArray<FrictionEvent>,
   threshold: number = 3,
   planCandidates?: ReadonlyArray<PlanSearchCandidate>,
-): Effect.fn.Return<LoopThrashingStatus, never, never> {
-  const failures = events.filter(
-    (event) =>
-      (event.kind === "verify_failure" || event.kind === "guard_escalation") &&
-      !(event.kind === "guard_escalation" && event.detail.startsWith("verdict=allow")),
+): LoopThrashingStatus => {
+  const failures = events.filter((event) =>
+    match(event)
+      .with({ kind: "verify_failure" }, () => true)
+      .with({ kind: "guard_escalation" }, (ev) => !ev.detail.startsWith("verdict=allow"))
+      .with({ kind: "route_miss" }, () => false)
+      .exhaustive(),
   )
   const effectiveThreshold = Math.max(2, threshold)
   if (failures.length === 0) {
-    return yield* Effect.succeed({
+    return {
       stuck: false,
       consecutiveCount: 0,
       threshold: effectiveThreshold,
       repeatedKey: null,
       summary: null,
       escalationMessage: null,
-    } satisfies LoopThrashingStatus)
+    } satisfies LoopThrashingStatus
   }
 
   const last = failures[failures.length - 1]!
@@ -147,7 +152,7 @@ export const decideLoopThrashing = Effect.fn("LoopCircuitBreaker.decide")(functi
     ? `[ESCALATE: STUCK LOOP DETECTED] Repeated ${last.kind} (${last.summary}) ${consecutiveCount} times consecutively (threshold: ${effectiveThreshold}). Stop retrying variations of the same fix and escalate to the human.`
     : null
 
-  return yield* Effect.succeed({
+  return {
     stuck,
     consecutiveCount,
     threshold: effectiveThreshold,
@@ -155,14 +160,16 @@ export const decideLoopThrashing = Effect.fn("LoopCircuitBreaker.decide")(functi
     summary: last.summary,
     escalationMessage,
     ...(recommendedPlanCandidate !== undefined ? { recommendedPlanCandidate } : {}),
-  } satisfies LoopThrashingStatus)
-})
+  } satisfies LoopThrashingStatus
+}
 
-export const checkLoopThrashing = (
+export const decideLoopThrashing = Effect.fn("LoopCircuitBreaker.decide")(function* (
   events: ReadonlyArray<FrictionEvent>,
   threshold: number = 3,
   planCandidates?: ReadonlyArray<PlanSearchCandidate>,
-): LoopThrashingStatus => Effect.runSync(decideLoopThrashing(events, threshold, planCandidates))
+): Effect.fn.Return<LoopThrashingStatus, never, never> {
+  return yield* Effect.succeed(checkLoopThrashing(events, threshold, planCandidates))
+})
 
 const decodeFrictionEvent = Schema.decodeOption(Schema.fromJsonString(FrictionEvent))
 
@@ -174,6 +181,7 @@ export const appendFrictionEvent = (
     readonly detail: string
     readonly timestamp?: string | undefined
   },
+  hostIo: SyncHostIo,
 ): FrictionEvent => {
   const record: FrictionEvent = {
     kind: input.kind,
@@ -183,52 +191,61 @@ export const appendFrictionEvent = (
   }
   const harnessDir = resolveHarnessStateDir(repoRoot)
   const filePath = join(harnessDir, "friction-log.jsonl")
-  Effect.runSync(
-    Effect.try(() => {
-      if (!existsSync(harnessDir)) {
-        mkdirSync(harnessDir, { recursive: true })
+  Result.getOrElse(
+    Result.try(() => {
+      if (!hostIo.existsSync(harnessDir)) {
+        hostIo.mkdirRecursiveSync(harnessDir)
       }
-      appendFileSync(filePath, JSON.stringify(record) + "\n", "utf-8")
-    }).pipe(Effect.orElseSucceed(() => undefined)),
+      hostIo.appendTextSync(filePath, JSON.stringify(record) + "\n")
+    }),
+    () => undefined,
   )
   return record
 }
 
-export const readFrictionEvents = (repoRoot: string): ReadonlyArray<FrictionEvent> => {
+export const readFrictionEvents = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+): ReadonlyArray<FrictionEvent> => {
   const harnessDir = resolveHarnessStateDir(repoRoot)
   const filePath = join(harnessDir, "friction-log.jsonl")
-  if (!existsSync(filePath)) {
+  if (!hostIo.existsSync(filePath)) {
     return []
   }
-  const contentOption = Effect.runSync(
-    Effect.try(() => readFileSync(filePath, "utf-8")).pipe(Effect.option),
+  const content = Result.getOrElse(
+    Result.try(() => hostIo.readTextSync(filePath)),
+    () => null,
   )
-  if (Option.isNone(contentOption)) {
+  if (content === null) {
     return []
   }
-  const lines = contentOption.value.split("\n")
+  const lines = content.split("\n")
   const events: Array<FrictionEvent> = []
   for (const line of lines) {
     const trimmed = line.trim()
     if (trimmed.length === 0) continue
     const decoded = decodeFrictionEvent(trimmed)
-    if (Option.isSome(decoded)) {
-      events.push(decoded.value)
-    }
+    match(decoded)
+      .with({ _tag: "Some" }, ({ value }) => {
+        events.push(value)
+      })
+      .with({ _tag: "None" }, () => {})
+      .exhaustive()
   }
   return events
 }
 
-export const clearFrictionEvents = (repoRoot: string): void => {
+export const clearFrictionEvents = (repoRoot: string, hostIo: SyncHostIo): void => {
   const harnessDir = resolveHarnessStateDir(repoRoot)
   const filePath = join(harnessDir, "friction-log.jsonl")
-  Effect.runSync(
-    Effect.try(() => {
-      if (!existsSync(harnessDir)) {
-        mkdirSync(harnessDir, { recursive: true })
+  Result.getOrElse(
+    Result.try(() => {
+      if (!hostIo.existsSync(harnessDir)) {
+        hostIo.mkdirRecursiveSync(harnessDir)
       }
-      writeFileSync(filePath, "", "utf-8")
-    }).pipe(Effect.orElseSucceed(() => undefined)),
+      hostIo.writeTextSync(filePath, "")
+    }),
+    () => undefined,
   )
 }
 

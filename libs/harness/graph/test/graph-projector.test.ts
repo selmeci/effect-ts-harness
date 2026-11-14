@@ -3,10 +3,10 @@ import { Cause, Effect, Fiber, Option, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   buildHarnessGraph,
+  createTypeScriptProgramSession,
   decideGraphProjection,
   decideGraphRewrite,
   type EntityNode,
-  getOrCreateWarmProgramSession,
   type GraphMeasure,
   type GraphPatch,
   GraphProjector,
@@ -23,6 +23,7 @@ import {
   verifyProjectedSubset,
   verifySubgraphMonomorphism,
 } from "../src/index.js"
+import { testHostIo } from "./helpers/test-host-io.js"
 
 const zeroMeasure: GraphMeasure = {
   archViolations: NonNegativeCount.make(0),
@@ -400,7 +401,7 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
         const pkgTag = "packageTag" in node && node.packageTag !== undefined ? node.packageTag : "contract"
         const barrelFile = `libs/${scope}/${pkgTag}/src/index.ts`
         const barrelOverlay = result.overlays.find((o) => String(o.targetFile) === barrelFile)
-        expect(barrelOverlay).toBeDefined()
+        expect(barrelOverlay?.targetFile).toBe(barrelFile)
         const barrelContent = String(barrelOverlay?.content)
         expect(barrelContent).toContain(symbol)
       }),
@@ -1067,7 +1068,7 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
     () =>
       Effect.gen(function* () {
         const repoRoot = process.cwd()
-        const warmSession = getOrCreateWarmProgramSession(repoRoot)
+        const warmSession = createTypeScriptProgramSession(repoRoot, testHostIo)
         const sentinelKey = "__sentinel__/preserve-cache.ts"
         const hadSentinelBefore = warmSession.fileFragmentCache.has(sentinelKey)
         warmSession.fileFragmentCache.set(sentinelKey, {

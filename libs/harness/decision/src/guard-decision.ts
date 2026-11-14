@@ -1,6 +1,7 @@
-import { Effect, Option, Schema } from "effect"
+import { Cause, Effect, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import { match } from "ts-pattern"
 import { CD_COMMAND_BANNED_REASON, classifyCommand, isCdCommand } from "@harness/gates"
 
 export const GuardV1 = Decision.make({
@@ -50,48 +51,59 @@ export const decideGuardCommand = Effect.fn("Harness.decideGuardCommand")(functi
 
   const outcome = yield* DecisionModel.decide(GuardV1, { input: { command } }).pipe(
     Effect.timeoutOption("1500 millis"),
-    Effect.catchCause(() => Effect.succeedNone),
+    Effect.catchCause((cause) =>
+      Cause.hasInterrupts(cause)
+        ? Effect.interrupt
+        : Effect.logWarning(`Decision model fallback: ${Cause.pretty(cause)}`).pipe(
+            Effect.as(Option.none()),
+          ),
+    ),
   )
 
-  if (Option.isNone(outcome)) {
-    return {
-      verdict: "ask" as const,
-      reason: "DecisionModel unavailable or timed out; requires human confirmation.",
-    }
-  }
+  return yield* match(outcome)
+    .with({ _tag: "None" }, () =>
+      Effect.succeed({
+        verdict: "ask" as const,
+        reason: "DecisionModel unavailable or timed out; requires human confirmation.",
+      }),
+    )
+    .with({ _tag: "Some" }, ({ value }) =>
+      Effect.gen(function* () {
+        const { answers } = value
+        yield* Effect.annotateCurrentSpan({
+          "decision.definition": "GuardV1",
+          "decision.destructive": answers.destructive.probability,
+          "decision.secretAccess": answers.secretAccess.probability,
+          "decision.exfiltration": answers.exfiltration.probability,
+        })
 
-  const { answers } = outcome.value
-  yield* Effect.annotateCurrentSpan({
-    "decision.definition": "GuardV1",
-    "decision.destructive": answers.destructive.probability,
-    "decision.secretAccess": answers.secretAccess.probability,
-    "decision.exfiltration": answers.exfiltration.probability,
-  })
+        if (
+          answers.destructive.probability >= 0.7 ||
+          answers.secretAccess.probability >= 0.7 ||
+          answers.exfiltration.probability >= 0.7
+        ) {
+          return {
+            verdict: "deny" as const,
+            reason: `High risk command detected (destructive=${answers.destructive.probability}, secretAccess=${answers.secretAccess.probability}, exfiltration=${answers.exfiltration.probability}).`,
+          }
+        }
 
-  if (
-    answers.destructive.probability >= 0.7 ||
-    answers.secretAccess.probability >= 0.7 ||
-    answers.exfiltration.probability >= 0.7
-  ) {
-    return {
-      verdict: "deny" as const,
-      reason: `High risk command detected (destructive=${answers.destructive.probability}, secretAccess=${answers.secretAccess.probability}, exfiltration=${answers.exfiltration.probability}).`,
-    }
-  }
+        if (
+          answers.destructive.probability < 0.3 &&
+          answers.secretAccess.probability < 0.3 &&
+          answers.exfiltration.probability < 0.3
+        ) {
+          return {
+            verdict: "allow" as const,
+            reason: "Command deemed safe by decision model.",
+          }
+        }
 
-  if (
-    answers.destructive.probability < 0.3 &&
-    answers.secretAccess.probability < 0.3 &&
-    answers.exfiltration.probability < 0.3
-  ) {
-    return {
-      verdict: "allow" as const,
-      reason: "Command deemed safe by decision model.",
-    }
-  }
-
-  return {
-    verdict: "ask" as const,
-    reason: "Ambiguous risk; requires human confirmation.",
-  }
+        return {
+          verdict: "ask" as const,
+          reason: "Ambiguous risk; requires human confirmation.",
+        }
+      }),
+    )
+    .exhaustive()
 })

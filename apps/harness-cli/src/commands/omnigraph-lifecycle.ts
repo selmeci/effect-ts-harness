@@ -1,18 +1,18 @@
-import { execFileSync, spawn } from "node:child_process"
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { Effect, Option, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
+import { match } from "ts-pattern"
 import {
   deriveRepoOmnigraphPort,
   resolveCanonicalRepoRoot,
   resolveOmnigraphClusterDir,
-} from "@harness/gates"
+} from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 
 export const CLI_REPO_ROOT = (() => {
   let curr = resolve(dirname(fileURLToPath(import.meta.url)))
   while (curr !== dirname(curr)) {
-    if (existsSync(join(curr, "pnpm-workspace.yaml"))) {
+    if (nodeSyncHostIo.existsSync(join(curr, "pnpm-workspace.yaml"))) {
       return curr
     }
     curr = dirname(curr)
@@ -23,7 +23,7 @@ export const CLI_REPO_ROOT = (() => {
 export const findWorkspaceRoot = (startDir: string = process.cwd()): string => {
   let curr = resolve(startDir)
   while (curr !== dirname(curr)) {
-    if (existsSync(join(curr, "pnpm-workspace.yaml"))) {
+    if (nodeSyncHostIo.existsSync(join(curr, "pnpm-workspace.yaml"))) {
       return curr
     }
     curr = dirname(curr)
@@ -32,11 +32,46 @@ export const findWorkspaceRoot = (startDir: string = process.cwd()): string => {
 }
 
 export const resolveClusterRepoRoot = (repoRoot: string): string =>
-  existsSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"))
+  nodeSyncHostIo.existsSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"))
     ? repoRoot
     : findWorkspaceRoot(repoRoot)
 
 const LockJsonSchema = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
+const LOCK_ID_PATTERN = /^[A-Za-z0-9._-]+$/
+
+export const isValidLockId = (value: string): boolean => LOCK_ID_PATTERN.test(value)
+
+export const isLoopbackOmnigraphUrl = (rawUrl: string): boolean =>
+  Result.getOrElse(
+    Result.try(() => {
+      const parsed = new URL(rawUrl)
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return false
+      }
+      return (
+        parsed.hostname === "127.0.0.1" ||
+        parsed.hostname === "localhost" ||
+        parsed.hostname === "::1" ||
+        parsed.hostname === "[::1]"
+      )
+    }),
+    () => false,
+  )
+
+export const isSafeOmnigraphPidToKill = (pid: unknown): pid is number => {
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 1 || pid === process.pid) {
+    return false
+  }
+  const procCmdlinePath = `/proc/${pid}/cmdline`
+  if (nodeSyncHostIo.existsSync(procCmdlinePath)) {
+    const cmdline = Result.getOrElse(
+      Result.try(() => nodeSyncHostIo.readTextSync(procCmdlinePath)),
+      () => "",
+    )
+    return cmdline.includes("omnigraph")
+  }
+  return true
+}
 
 function unlockOmnigraphClusterIfNeeded(
   omnigraphBin: string,
@@ -45,42 +80,58 @@ function unlockOmnigraphClusterIfNeeded(
 ): void {
   const lockIds = new Set<string>()
   if (applyOutput) {
-    const lockMatch = applyOutput.match(/Admission lock:\s*([A-Za-z0-9_-]+)/)
-    if (lockMatch?.[1]) {
+    const lockMatch = applyOutput.match(/Admission lock:\s*([A-Za-z0-9._-]+)/)
+    if (lockMatch?.[1] && isValidLockId(lockMatch[1])) {
       lockIds.add(lockMatch[1])
     }
   }
   const lockPath = join(clusterRootDir, "__cluster", "lock.json")
-  if (existsSync(lockPath)) {
-    Effect.runSync(
-      Effect.try({
-        try: () => {
-          const parsedOpt = Schema.decodeOption(LockJsonSchema)(readFileSync(lockPath, "utf-8"))
-          if (Option.isSome(parsedOpt)) {
+  if (nodeSyncHostIo.existsSync(lockPath)) {
+    Result.getOrElse(
+      Result.try(() => {
+        const parsedOpt = Schema.decodeOption(LockJsonSchema)(
+          nodeSyncHostIo.readTextSync(lockPath),
+        )
+        match(parsedOpt)
+          .with({ _tag: "Some" }, ({ value }) => {
             for (const key of ["lock_id", "id", "lockId", "holder_id"]) {
-              const val = parsedOpt.value[key]
+              const val = value[key]
               if (typeof val === "string" && val.length > 0) {
-                lockIds.add(val)
+                if (isValidLockId(val)) {
+                  lockIds.add(val)
+                } else {
+                  process.stderr.write(
+                    `[harness:omnigraph] Ignoring invalid lock.json ${key}: ${val}\n`,
+                  )
+                }
               }
             }
-          }
-        },
-        catch: () => undefined,
-      }).pipe(Effect.orElseSucceed(() => undefined)),
+          })
+          .with({ _tag: "None" }, () => {
+            process.stderr.write(
+              `[harness:omnigraph] Warning: failed to decode ${lockPath} as JSON\n`,
+            )
+          })
+          .exhaustive()
+      }),
+      () => undefined,
     )
   }
   for (const lockId of lockIds) {
-    Effect.runSync(
-      Effect.try({
-        try: () => {
-          execFileSync(
-            omnigraphBin,
-            ["cluster", "force-unlock", lockId, "--target", clusterRootDir],
-            { stdio: "ignore", timeout: 5_000 },
+    Result.getOrElse(
+      Result.try(() => {
+        const res = nodeSyncHostIo.execFileSync(
+          omnigraphBin,
+          ["cluster", "force-unlock", lockId, "--target", clusterRootDir],
+          { timeoutMs: 5_000 },
+        )
+        if (res.exitCode !== 0) {
+          process.stderr.write(
+            `[harness:omnigraph] force-unlock failed for ${lockId} (exitCode=${res.exitCode}): ${res.stderr || res.stdout}\n`,
           )
-        },
-        catch: () => undefined,
-      }).pipe(Effect.orElseSucceed(() => undefined)),
+        }
+      }),
+      () => undefined,
     )
   }
 }
@@ -93,25 +144,29 @@ function checkOmnigraphServerReady(baseUrl: string): Effect.Effect<boolean> {
           method: "GET",
           signal: AbortSignal.timeout(3000),
         })
-        .then((r) => {
-          if (r.status !== 200 || r.headers.get("Omnigraph-Http-Api") !== "0.14") {
-            return Promise.resolve(false)
-          }
-          return r.json().then((rawBody: unknown) => {
-            if (typeof rawBody !== "object" || rawBody === null) {
-              return false
-            }
-            const body = rawBody as {
-              readonly ready?: boolean
-              readonly status?: string
-              readonly ready_graph_count?: number
-            }
-            return (
-              (body.ready === true || body.status === "serving") &&
-              (body.ready_graph_count ?? 0) >= 1
-            )
-          })
-        })
+        .then((r) =>
+          match(r.status)
+            .with(200, () => {
+              if (r.headers.get("Omnigraph-Http-Api") !== "0.14") {
+                return Promise.resolve(false)
+              }
+              return r.json().then((rawBody: unknown) => {
+                if (typeof rawBody !== "object" || rawBody === null) {
+                  return false
+                }
+                const body = rawBody as {
+                  readonly ready?: boolean
+                  readonly status?: string
+                  readonly ready_graph_count?: number
+                }
+                return (
+                  (body.ready === true || body.status === "serving") &&
+                  (body.ready_graph_count ?? 0) >= 1
+                )
+              })
+            })
+            .otherwise(() => Promise.resolve(false)),
+        )
         .catch(() => false),
     catch: () => false,
   }).pipe(Effect.orElseSucceed(() => false))
@@ -121,7 +176,7 @@ function computeOmnigraphConfigStamp(configDir: string): string {
   return ["cluster.yaml", "schema.pg", "queries/harness.gq"]
     .map((f) => {
       const p = join(configDir, f)
-      return existsSync(p) ? readFileSync(p, "utf-8") : ""
+      return nodeSyncHostIo.existsSync(p) ? nodeSyncHostIo.readTextSync(p) : ""
     })
     .join("\n---\n")
 }
@@ -150,23 +205,42 @@ const decodeOmnigraphServerMeta = Schema.decodeOption(
 export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boolean> {
   return Effect.gen(function* () {
     const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
-    const canonicalRepoRoot = resolveCanonicalRepoRoot(clusterRepoRoot)
-    const clusterRootDir = resolveOmnigraphClusterDir(clusterRepoRoot)
-    const defaultPort = deriveRepoOmnigraphPort(canonicalRepoRoot)
+    const canonicalRepoRoot = resolveCanonicalRepoRoot(clusterRepoRoot, nodeSyncHostIo)
+    const clusterRootDir = resolveOmnigraphClusterDir(clusterRepoRoot, nodeSyncHostIo)
+    const defaultPort = deriveRepoOmnigraphPort(canonicalRepoRoot, nodeSyncHostIo)
 
     let serverMeta: OmnigraphServerMeta | undefined
     const serverJsonPath = join(clusterRootDir, "server.json")
-    if (existsSync(serverJsonPath)) {
+    if (nodeSyncHostIo.existsSync(serverJsonPath)) {
       const decodedMetaOpt = yield* Effect.try({
-        try: () => readFileSync(serverJsonPath, "utf-8"),
-        catch: () => "",
+        try: () => nodeSyncHostIo.readTextSync(serverJsonPath),
+        catch: (err) => {
+          process.stderr.write(
+            `[harness:omnigraph] Warning: failed to read ${serverJsonPath}: ${err instanceof Error ? err.message : String(err)}\n`,
+          )
+          return ""
+        },
       }).pipe(
-        Effect.flatMap((raw) => Effect.fromOption(decodeOmnigraphServerMeta(raw))),
+        Effect.flatMap((raw) => {
+          const decoded = decodeOmnigraphServerMeta(raw)
+          match(decoded)
+            .with({ _tag: "None" }, () => {
+              if (raw.length > 0) {
+                process.stderr.write(
+                  `[harness:omnigraph] Warning: failed to decode ${serverJsonPath} as OmnigraphServerMeta JSON\n`,
+                )
+              }
+            })
+            .with({ _tag: "Some" }, () => undefined)
+            .exhaustive()
+          return Effect.fromOption(decoded)
+        }),
         Effect.option,
       )
-      if (Option.isSome(decodedMetaOpt)) {
-        serverMeta = decodedMetaOpt.value
-      }
+      serverMeta = match(decodedMetaOpt)
+        .with({ _tag: "Some" }, ({ value }) => value)
+        .with({ _tag: "None" }, () => undefined)
+        .exhaustive()
     }
 
     const explicitEnvUrl =
@@ -179,15 +253,25 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
         ? serverMeta.baseUrl
         : `http://127.0.0.1:${defaultPort}`)
 
+    if (!isLoopbackOmnigraphUrl(targetBaseUrl)) {
+      process.stderr.write(
+        `[harness:omnigraph] Refusing non-loopback Omnigraph URL/bind host: ${targetBaseUrl}\n`,
+      )
+      return false
+    }
+
     const configDir = join(clusterRepoRoot, "libs", "harness", "graph")
     const stampPath = join(clusterRootDir, ".config-stamp")
     const expectedStamp = computeOmnigraphConfigStamp(configDir)
-    const currentStamp = existsSync(stampPath) ? readFileSync(stampPath, "utf-8") : ""
+    const currentStamp = nodeSyncHostIo.existsSync(stampPath)
+      ? nodeSyncHostIo.readTextSync(stampPath)
+      : ""
     const configDrifted = currentStamp !== expectedStamp
 
     if (configDrifted) {
       const serverPid = serverMeta?.pid
-      if (typeof serverPid === "number") {
+      const safeToKill = isSafeOmnigraphPidToKill(serverPid)
+      if (safeToKill) {
         yield* Effect.try({
           try: () => {
             process.kill(serverPid, "SIGTERM")
@@ -195,17 +279,22 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
           catch: () => undefined,
         }).pipe(Effect.orElseSucceed(() => undefined))
       }
+      if (!safeToKill && serverPid !== undefined) {
+        process.stderr.write(
+          `[harness:omnigraph] Skipping process.kill for unsafe or non-omnigraph PID: ${String(serverPid)}\n`,
+        )
+      }
       yield* Effect.try({
         try: () => {
           const [killBin, killArgs] = buildOmnigraphClusterKillArgs(clusterRootDir)
-          execFileSync(killBin, [...killArgs], { stdio: "ignore", timeout: 5_000 })
+          nodeSyncHostIo.execFileSync(killBin, [...killArgs], { timeoutMs: 5_000 })
         },
         catch: () => undefined,
       }).pipe(Effect.orElseSucceed(() => undefined))
       yield* Effect.sleep("300 millis")
       yield* Effect.try({
         try: () => {
-          rmSync(clusterRootDir, { recursive: true, force: true })
+          nodeSyncHostIo.rmRecursiveSync(clusterRootDir)
         },
         catch: () => undefined,
       }).pipe(Effect.orElseSucceed(() => undefined))
@@ -224,37 +313,24 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
     const omnigraphBin = join(homeBin, "omnigraph")
     const omnigraphServerBin = join(homeBin, "omnigraph-server")
 
-    if (!existsSync(omnigraphBin) || !existsSync(omnigraphServerBin)) {
-      yield* Effect.try({
-        try: () => {
-          execFileSync(
-            "bash",
-            [
-              "-c",
-              "curl -fsSL https://raw.githubusercontent.com/ModernRelay/omnigraph/main/scripts/install.sh | VERSION=v0.14.0 bash",
-            ],
-            { stdio: "inherit", timeout: 60_000 },
-          )
-        },
-        catch: () => undefined,
-      }).pipe(Effect.orElseSucceed(() => undefined))
-    }
-
-    if (!existsSync(omnigraphBin) || !existsSync(omnigraphServerBin)) {
+    if (!nodeSyncHostIo.existsSync(omnigraphBin) || !nodeSyncHostIo.existsSync(omnigraphServerBin)) {
+      process.stderr.write(
+        `[harness:omnigraph] Missing omnigraph binaries (${omnigraphBin}, ${omnigraphServerBin}). Install omnigraph v0.14.0 into ~/.local/bin before retrying.\n`,
+      )
       return false
     }
 
     let spawnSucceeded = false
     yield* Effect.try({
       try: () => {
-        if (!existsSync(clusterRootDir)) {
-          mkdirSync(clusterRootDir, { recursive: true })
+        if (!nodeSyncHostIo.existsSync(clusterRootDir)) {
+          nodeSyncHostIo.mkdirRecursiveSync(clusterRootDir)
         }
         unlockOmnigraphClusterIfNeeded(omnigraphBin, clusterRootDir)
 
         const graphOmniDir = join(clusterRootDir, "graphs", "harness.omni")
-        if (!existsSync(graphOmniDir)) {
-          const out = execFileSync(
+        if (!nodeSyncHostIo.existsSync(graphOmniDir)) {
+          const outRes = nodeSyncHostIo.execFileSync(
             omnigraphBin,
             [
               "cluster",
@@ -269,43 +345,42 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
             ],
             {
               cwd: clusterRepoRoot,
-              encoding: "utf-8",
-              stdio: ["ignore", "pipe", "pipe"],
-              timeout: 30_000,
+              timeoutMs: 30_000,
             },
           )
-          unlockOmnigraphClusterIfNeeded(omnigraphBin, clusterRootDir, out)
-          writeFileSync(stampPath, expectedStamp, "utf-8")
+          if (outRes.exitCode !== 0) {
+            process.stderr.write(
+              `[harness:omnigraph] Local omnigraph cluster apply failed: ${outRes.stderr || outRes.stdout || "unknown error"}\n`,
+            )
+            return
+          }
+          unlockOmnigraphClusterIfNeeded(omnigraphBin, clusterRootDir, outRes.stdout)
+          nodeSyncHostIo.writeTextSync(stampPath, expectedStamp)
         }
         unlockOmnigraphClusterIfNeeded(omnigraphBin, clusterRootDir)
 
         const bindHostPort =
           targetBaseUrl.match(/^https?:\/\/([^/]+)/)?.[1] ?? `127.0.0.1:${defaultPort}`
-        const child = spawn(
+        nodeSyncHostIo.spawnDetached(
           omnigraphServerBin,
           ["--cluster", `file://${clusterRootDir}`, "--bind", bindHostPort, "--unauthenticated"],
-          { cwd: clusterRepoRoot, detached: true, stdio: "ignore" },
+          { cwd: clusterRepoRoot },
         )
-        child.unref()
         spawnSucceeded = true
 
-        if (child.pid !== undefined) {
-          writeFileSync(
-            join(clusterRootDir, "server.json"),
-            JSON.stringify(
-              {
-                pid: child.pid,
-                port: defaultPort,
-                baseUrl: targetBaseUrl,
-                canonicalRepoRoot,
-                updatedAt: new Date().toISOString(),
-              },
-              null,
-              2,
-            ),
-            "utf-8",
-          )
-        }
+        nodeSyncHostIo.writeTextSync(
+          join(clusterRootDir, "server.json"),
+          JSON.stringify(
+            {
+              port: defaultPort,
+              baseUrl: targetBaseUrl,
+              canonicalRepoRoot,
+              updatedAt: new Date().toISOString(),
+            },
+            null,
+            2,
+          ),
+        )
       },
       catch: (err) => {
         process.stderr.write(

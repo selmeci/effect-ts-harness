@@ -1,9 +1,9 @@
-import * as fs from "node:fs"
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
-import { Effect, Layer, Option, Schema } from "effect"
+import { Effect, Layer, Option, Result, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
+import { McpToolInputName, McpToolName, UnknownToolError } from "@harness/contract"
 import {
   appendTelemetryEvent,
   type TelemetryCategory,
@@ -25,16 +25,9 @@ import {
   writeGraphHeadMeta,
 } from "@harness/graph"
 import type { GovernanceDocReference } from "@harness/decision"
+import { nodeSyncHostIo } from "@harness/infra"
 
-export const McpToolName = Schema.NonEmptyString.pipe(Schema.brand("McpToolName"))
-export type McpToolName = typeof McpToolName.Type
-
-export const McpToolInputName = Schema.String.pipe(Schema.brand("McpToolInputName"))
-export type McpToolInputName = typeof McpToolInputName.Type
-
-export class UnknownToolError extends Schema.TaggedError<UnknownToolError>()("UnknownToolError", {
-  toolName: McpToolInputName,
-}) {}
+export { McpToolInputName, McpToolName, UnknownToolError }
 
 export class ProjectPathEscapeError extends Schema.TaggedError<ProjectPathEscapeError>()(
   "ProjectPathEscapeError",
@@ -84,6 +77,9 @@ export interface ServerOptions {
   readonly decisionLayer?: Layer.Layer<DecisionModel.DecisionModel>
   readonly repoRoot?: string
   readonly governanceDocs?: ReadonlyArray<GovernanceDocReference>
+  readonly skipOmnigraphSpawn?: boolean | undefined
+  readonly skipTelemetry?: boolean | undefined
+  readonly skipActiveWorkspaceLookup?: boolean | undefined
   readonly lspDiagnosticsRunner?: (input: {
     readonly file?: string | undefined
     readonly project?: string | undefined
@@ -93,7 +89,7 @@ export interface ServerOptions {
 export const findRepoRoot = (startDir: string): string => {
   let curr = path.resolve(startDir)
   while (curr !== path.dirname(curr)) {
-    if (fs.existsSync(path.join(curr, "pnpm-workspace.yaml"))) {
+    if (nodeSyncHostIo.existsSync(path.join(curr, "pnpm-workspace.yaml"))) {
       return curr
     }
     curr = path.dirname(curr)
@@ -107,7 +103,10 @@ const decodeActiveWorkspace = Schema.decodeUnknownOption(
   Schema.fromJsonString(Schema.Struct({ repoRoot: Schema.String })),
 )
 
-export const resolveDefaultRepoRoot = (args?: Readonly<Record<string, unknown>>): string => {
+export const resolveDefaultRepoRoot = (
+  args?: Readonly<Record<string, unknown>>,
+  options?: Pick<ServerOptions, "skipActiveWorkspaceLookup" | "skipOmnigraphSpawn">,
+): string => {
   const rawRepoRoot = args?.["repoRoot"]
   if (typeof rawRepoRoot === "string" && rawRepoRoot.length > 0) {
     return findRepoRoot(rawRepoRoot)
@@ -132,7 +131,7 @@ export const resolveDefaultRepoRoot = (args?: Readonly<Record<string, unknown>>)
         : undefined
   if (candidate !== undefined) {
     const candidateRoot = findRepoRoot(path.dirname(candidate))
-    if (fs.existsSync(path.join(candidateRoot, "pnpm-workspace.yaml"))) {
+    if (nodeSyncHostIo.existsSync(path.join(candidateRoot, "pnpm-workspace.yaml"))) {
       return candidateRoot
     }
   }
@@ -140,17 +139,18 @@ export const resolveDefaultRepoRoot = (args?: Readonly<Record<string, unknown>>)
   if (cwdRoot !== SERVER_REPO_ROOT) {
     return cwdRoot
   }
-  if (process.env.VITEST === undefined) {
+  if (options?.skipActiveWorkspaceLookup !== true && options?.skipOmnigraphSpawn !== true) {
     const activeWorkspacePath = path.join(SERVER_REPO_ROOT, ".harness", "active-workspace.json")
-    if (fs.existsSync(activeWorkspacePath)) {
-      const resolvedActiveRoot = Effect.runSync(
-        Effect.try(() => {
-          const raw = fs.readFileSync(activeWorkspacePath, "utf-8")
+    if (nodeSyncHostIo.existsSync(activeWorkspacePath)) {
+      const resolvedActiveRoot = Result.getOrElse(
+        Result.try(() => {
+          const raw = nodeSyncHostIo.readTextSync(activeWorkspacePath)
           const parsed = Option.getOrUndefined(decodeActiveWorkspace(raw))
-          return parsed !== undefined && fs.existsSync(parsed.repoRoot)
+          return parsed !== undefined && nodeSyncHostIo.existsSync(parsed.repoRoot)
             ? parsed.repoRoot
             : undefined
-        }).pipe(Effect.orElseSucceed(() => undefined)),
+        }),
+        () => undefined,
       )
       if (resolvedActiveRoot !== undefined) {
         return resolvedActiveRoot
@@ -178,8 +178,8 @@ const selectSnapshotPath = (
   planExists: boolean,
 ): string | undefined => {
   if (verifyExists && planExists) {
-    const verifyMtime = fs.statSync(verifySnap).mtimeMs
-    const planMtime = fs.statSync(planSnap).mtimeMs
+    const verifyMtime = nodeSyncHostIo.statMtimeMsSync(verifySnap) ?? 0
+    const planMtime = nodeSyncHostIo.statMtimeMsSync(planSnap) ?? 0
     return planMtime > verifyMtime ? planSnap : verifySnap
   }
   if (verifyExists) {
@@ -199,31 +199,31 @@ export const resolveGraph = (
     return Effect.succeed(options.graph)
   }
   return Effect.gen(function* () {
-    const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+    const root = options?.repoRoot ?? resolveDefaultRepoRoot(args, options)
     let snapshotPath = options?.snapshotPath
     if (!snapshotPath) {
       const verifySnap = path.join(root, ".harness", "graph-snapshot.json")
       const planSnap = path.join(root, ".harness", "plan-graph-snapshot.json")
-      const verifyExists = fs.existsSync(verifySnap)
-      const planExists = fs.existsSync(planSnap)
+      const verifyExists = nodeSyncHostIo.existsSync(verifySnap)
+      const planExists = nodeSyncHostIo.existsSync(planSnap)
       if (verifyExists) {
-        const recordedMeta = readGraphHeadMeta(root)
-        const headState = resolveGitHeadState(root)
+        const recordedMeta = readGraphHeadMeta(root, nodeSyncHostIo)
+        const headState = resolveGitHeadState(root, nodeSyncHostIo)
         if (
           recordedMeta !== null &&
           headState.headSha !== null &&
           recordedMeta.headSha !== headState.headSha
         ) {
-          const freshGraph = yield* extractWorkspaceTypeAwareGraph(root)
-          saveGraphSnapshot(freshGraph, verifySnap)
-          writeGraphHeadMeta(root, headState)
+          const freshGraph = yield* extractWorkspaceTypeAwareGraph(root, nodeSyncHostIo)
+          saveGraphSnapshot(freshGraph, verifySnap, nodeSyncHostIo)
+          writeGraphHeadMeta(root, nodeSyncHostIo, headState)
           return freshGraph
         }
       }
       snapshotPath = selectSnapshotPath(root, verifySnap, planSnap, verifyExists, planExists)
     }
-    if (snapshotPath && fs.existsSync(snapshotPath)) {
-      return yield* loadGraphSnapshotEffect(snapshotPath).pipe(
+    if (snapshotPath && nodeSyncHostIo.existsSync(snapshotPath)) {
+      return yield* loadGraphSnapshotEffect(snapshotPath, nodeSyncHostIo).pipe(
         Effect.tapError((error) =>
           Effect.sync(() => {
             process.stderr.write(
@@ -253,26 +253,30 @@ export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolea
   if (rel !== "" && (rel.startsWith("..") || path.isAbsolute(rel))) {
     return false
   }
-  if (fs.existsSync(logicalRoot)) {
+  if (nodeSyncHostIo.existsSync(logicalRoot)) {
     let checkPath = logicalCandidate
-    while (!fs.existsSync(checkPath) && checkPath !== logicalRoot) {
+    while (!nodeSyncHostIo.existsSync(checkPath)) {
+      if (nodeSyncHostIo.isSymbolicLinkSync(checkPath)) {
+        return false
+      }
+      if (checkPath === logicalRoot) {
+        break
+      }
       const parent = path.dirname(checkPath)
       if (parent === checkPath) break
       checkPath = parent
     }
-    if (fs.existsSync(checkPath)) {
+    if (nodeSyncHostIo.existsSync(checkPath)) {
       const checkRel = path.relative(logicalRoot, checkPath)
       if (!checkRel.startsWith("..") && !path.isAbsolute(checkRel)) {
-        const contained = Effect.runSync(
-          Effect.try({
-            try: () => {
-              const realRoot = fs.realpathSync.native(logicalRoot)
-              const realCheck = fs.realpathSync.native(checkPath)
-              const realRel = path.relative(realRoot, realCheck)
-              return !(realRel !== "" && (realRel.startsWith("..") || path.isAbsolute(realRel)))
-            },
-            catch: () => false,
+        const contained = Result.getOrElse(
+          Result.try(() => {
+            const realRoot = nodeSyncHostIo.realpathSync(logicalRoot)
+            const realCheck = nodeSyncHostIo.realpathSync(checkPath)
+            const realRel = path.relative(realRoot, realCheck)
+            return !(realRel !== "" && (realRel.startsWith("..") || path.isAbsolute(realRel)))
           }),
+          () => false,
         )
         if (!contained) {
           return false
@@ -299,7 +303,7 @@ export const normalizeProjectPathEffect = (
       }),
     )
   }
-  if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
+  if (nodeSyncHostIo.existsSync(resolved) && nodeSyncHostIo.isDirectorySync(resolved)) {
     const joined = path.join(resolved, "tsconfig.json")
     if (!isPathInsideRoot(repoRoot, joined)) {
       return Effect.fail(
@@ -360,10 +364,13 @@ export const recordMcpToolTelemetry = (
   durationMs: number,
   options?: ServerOptions,
 ): void => {
-  if (options?.repoRoot === undefined && process.env.VITEST !== undefined) {
+  if (
+    options?.skipTelemetry === true ||
+    (options?.repoRoot === undefined && options?.skipOmnigraphSpawn === true)
+  ) {
     return
   }
-  const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+  const root = options?.repoRoot ?? resolveDefaultRepoRoot(args, options)
   const category: TelemetryCategory = match(toolName)
     .with(
       "harness_ontology_why",
@@ -398,12 +405,16 @@ export const recordMcpToolTelemetry = (
         ? "fail"
         : "ok"
 
-  appendTelemetryEvent(root, {
-    surface: "mcp",
-    category,
-    toolName,
-    outcome,
-    durationMs,
-    engineSource,
-  })
+  appendTelemetryEvent(
+    root,
+    {
+      surface: "mcp",
+      category,
+      toolName,
+      outcome,
+      durationMs,
+      engineSource,
+    },
+    nodeSyncHostIo,
+  )
 }

@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit && effect-tsgo diagnostics --strict --project tsconfig.json",
     "lint": "oxlint --deny-warnings .",
     "test": "vitest run",
-    "verify": "node --import ../../../tools/node-ts-resolver.mjs ./scripts/check-event-schemas.mjs"
+    "verify": "node --import ../../../tools/node-ts-resolver.mjs ../../../apps/harness-cli/src/index.ts check-event-schemas"
   },
   "dependencies": {
     "@harness/es-contract": "workspace:*",
@@ -20,7 +20,7 @@
   },
   "devDependencies": {
     "@effect/vitest": "4.0.0",
-    "@harness/gates": "workspace:*",
+    "@harness/contract": "workspace:*",
     "@harness/graph": "workspace:*",
     "@types/node": "26.6.5",
     "vitest": "5.0.3"

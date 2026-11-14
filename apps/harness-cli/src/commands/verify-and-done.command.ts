@@ -1,7 +1,5 @@
-import { execFileSync } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
-import { Effect, Layer, Option } from "effect"
+import { Cause, Effect, Layer, Option } from "effect"
 import * as Graph from "effect/Graph"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
@@ -13,19 +11,13 @@ import {
   decideOntologyInvariants,
   decideSpanBudgets,
   diffPlanAndImplGraphs,
-  DstErrorTag,
   DstExecutionTier,
-  DstMethodName,
-  DstServiceTag,
   DstStepCount,
-  type DstTargetServiceMethod as DstTargetMethodSpec,
   loadGovernanceDocsFromDisk,
   parseDstSeedEnv,
   readFrictionEvents,
   readTelemetryEvents,
-  resolveOmnigraphTaskBranches,
   runDstSeedSuite,
-  writeGraphHeadMeta,
   writeSessionReportFiles,
   writeVerifyStamp,
 } from "@harness/gates"
@@ -38,12 +30,15 @@ import {
   type GraphSnapshotError,
   type HarnessGraph,
   loadGraphSnapshotEffect,
+  makeOmnigraphSyncLayer,
+  makeTsCompilerOverlayLayer,
   mergeOmnigraphBranch,
-  OmnigraphSync,
+  resolveOmnigraphTaskBranches,
   saveGraphSnapshot,
   syncToOmnigraphAndSnapshot,
-  TsCompilerOverlayServiceLive,
+  writeGraphHeadMeta,
 } from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 import { buildWorkspaceFnIndex } from "@harness/ingest"
 import {
   type CliEnv,
@@ -54,6 +49,7 @@ import {
   formatSubprocessError,
   isIsolatedExternalWorkspace,
   isRootConfigOrSharedCoreChange,
+  makeReadStdinEffect,
   recordFriction,
   recordTelemetry,
   resolveClusterRepoRoot,
@@ -68,7 +64,11 @@ import {
   isSubagentStopContext,
   type StopHookStdin,
 } from "./stop-hook-and-transcript.js"
-import { readRecordedSpans, runDeltaAstAndPluginGates } from "./verify-delta-gates.js"
+import {
+  buildDstTargetsFromGraph,
+  readRecordedSpans,
+  runDeltaAstAndPluginGates,
+} from "./verify-delta-gates.js"
 
 const verifyFailureWithThrashing = (
   options: CliEnv | undefined,
@@ -78,32 +78,11 @@ const verifyFailureWithThrashing = (
   stderrMsg: string,
 ): CliResult => {
   recordFriction(options, { kind: "verify_failure", summary, detail })
-  const thrashing = checkLoopThrashing(readFrictionEvents(repoRoot))
+  const thrashing = checkLoopThrashing(readFrictionEvents(repoRoot, nodeSyncHostIo))
   if (thrashing.stuck && thrashing.escalationMessage !== null) {
     return { exitCode: 2, stdout: "", stderr: `${thrashing.escalationMessage}\n${stderrMsg}` }
   }
   return { exitCode: 1, stdout: "", stderr: stderrMsg }
-}
-
-const buildDstTargetsFromGraph = (graph: HarnessGraph): ReadonlyArray<DstTargetMethodSpec> => {
-  const dstTargets: Array<DstTargetMethodSpec> = []
-  for (const [, node] of Graph.nodes(graph.graph)) {
-    if (node._tag === "ServiceTag") {
-      dstTargets.push({
-        serviceTag: DstServiceTag.make(node.name || node.tagId),
-        methodName: DstMethodName.make("execute"),
-        declaredErrors: [DstErrorTag.make(`${node.name || node.tagId}Error`)],
-      })
-    }
-  }
-  if (dstTargets.length === 0) {
-    dstTargets.push({
-      serviceTag: DstServiceTag.make("HarnessVerificationService"),
-      methodName: DstMethodName.make("verify"),
-      declaredErrors: [DstErrorTag.make("HarnessVerificationError")],
-    })
-  }
-  return dstTargets
 }
 
 export const handleVerify = (
@@ -119,7 +98,7 @@ export const handleVerify = (
       process.env.HARNESS_REQUIRE_OLLAMA === "1" ||
       (!isIsolatedExternalWorkspace(repoRoot) &&
         options?.decisionLayer === undefined &&
-        process.env.VITEST === undefined)
+        options?.skipBackgroundDaemons !== true)
     if (requireOllama && !(yield* ensureLocalOllamaReady())) {
       return {
         exitCode: 1,
@@ -129,7 +108,7 @@ export const handleVerify = (
       }
     }
 
-    const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
+    const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, nodeSyncHostIo)
     const stubs = Array.from(fnIndex.bySpanName.values()).filter((fn) => fn.isStub)
     if (stubs.length > 0) {
       return {
@@ -140,18 +119,50 @@ export const handleVerify = (
     }
 
     const deltaFiles = resolveModifiedFilesSinceStampOrHead(repoRoot).filter(
-      (f) => (f.endsWith(".ts") || f.endsWith(".tsx")) && existsSync(join(repoRoot, f)),
+      (f) =>
+        (f.endsWith(".ts") || f.endsWith(".tsx")) && nodeSyncHostIo.existsSync(join(repoRoot, f)),
     )
     const astGateFail = yield* runDeltaAstAndPluginGates(repoRoot, deltaFiles)
-    if (Option.isSome(astGateFail)) return astGateFail.value
+    const astGateResult = match(astGateFail)
+      .with({ _tag: "Some" }, ({ value }) => value)
+      .with({ _tag: "None" }, () => undefined)
+      .exhaustive()
+    if (astGateResult !== undefined) return astGateResult
 
     const graph = yield* extractGraphViaCompilerOverlay({ repoRoot }).pipe(
-      Effect.provide(TsCompilerOverlayServiceLive),
-      Effect.catchTag("TsCompilerOverlayError", () => extractTypeGraph({ repoRoot })),
+      Effect.provide(makeTsCompilerOverlayLayer(nodeSyncHostIo)),
+      Effect.catchTag("TsCompilerOverlayError", (err) =>
+        Effect.gen(function* () {
+          process.stderr.write(
+            `[harness:verify] Warning: TsCompilerOverlayService failed (${err.reason}); falling back to extractTypeGraph.\n`,
+          )
+          return yield* extractTypeGraph({ repoRoot, hostIo: nodeSyncHostIo })
+        }),
+      ),
     )
     const graphStubs: Array<string> = []
     for (const [, node] of Graph.nodes(graph.graph)) {
-      if (node._tag === "EffectFn" && node.isStub) graphStubs.push(node.spanName)
+      match(node)
+        .with({ _tag: "EffectFn" }, (n) => {
+          if (n.isStub) graphStubs.push(n.spanName)
+        })
+        .with(
+          { _tag: "ServiceTag" },
+          { _tag: "ServiceLayer" },
+          { _tag: "TaggedError" },
+          { _tag: "SchemaDef" },
+          { _tag: "VitestCase" },
+          { _tag: "PatternDoc" },
+          { _tag: "AdrDoc" },
+          { _tag: "EarsSpec" },
+          { _tag: "EffectSignature" },
+          { _tag: "LayerFlow" },
+          { _tag: "TraceabilityTuple" },
+          { _tag: "HttpEndpointTuple" },
+          { _tag: "MigrationTuple" },
+          () => undefined,
+        )
+        .exhaustive()
     }
     if (graphStubs.length > 0) {
       return {
@@ -175,7 +186,8 @@ export const handleVerify = (
       )
     }
 
-    const governanceDocs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot)
+    const governanceDocs =
+      options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot, nodeSyncHostIo)
     const ontologyInvariants = yield* decideOntologyInvariants({ graph, governanceDocs })
     if (!ontologyInvariants.clean) {
       const msg = ontologyInvariants.findings
@@ -190,11 +202,11 @@ export const handleVerify = (
       )
     }
 
-    const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
+    const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
     const snapshotPath = join(repoRoot, ".harness", "graph-snapshot.json")
     if (isIsolatedExternalWorkspace(repoRoot)) {
-      saveGraphSnapshot(graph, snapshotPath)
-      writeGraphHeadMeta(repoRoot)
+      saveGraphSnapshot(graph, snapshotPath, nodeSyncHostIo)
+      writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
       recordTelemetry(options, {
         surface: "cli",
         category: "graph_query",
@@ -211,10 +223,19 @@ export const handleVerify = (
         from: taskBranches.mainBranch,
         snapshotPath,
       }).pipe(
-        Effect.provide(OmnigraphSync.Live),
-        Effect.orElseSucceed(() => ({ syncedToOmnigraph: false, snapshotPath, error: undefined })),
+        Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
+        Effect.catchCause((cause) => {
+          if (Cause.hasInterrupts(cause)) return Effect.interrupt
+          return Effect.succeed({
+            syncedToOmnigraph: false,
+            snapshotPath,
+            error: Cause.pretty(cause),
+          })
+        }),
       )
-      writeGraphHeadMeta(repoRoot)
+      if (syncRes.syncedToOmnigraph) {
+        writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
+      }
       recordTelemetry(options, {
         surface: "cli",
         category: "graph_query",
@@ -232,7 +253,7 @@ export const handleVerify = (
       }
     }
 
-    if (!options?.skipSubprocessVerify && existsSync(join(repoRoot, "package.json"))) {
+    if (!options?.skipSubprocessVerify && nodeSyncHostIo.existsSync(join(repoRoot, "package.json"))) {
       const leafFastPathEligible =
         deltaFiles.length > 0 && !isRootConfigOrSharedCoreChange(deltaFiles)
       const scopedFiles = leafFastPathEligible ? deltaFiles : undefined
@@ -242,12 +263,11 @@ export const handleVerify = (
       const nxArgs = resolveNxAffectedArgs(repoRoot, ["verify"], scopedFiles)
       const subprocessErr = yield* Effect.try({
         try: () => {
-          execFileSync("pnpm", nxArgs, {
+          const res = nodeSyncHostIo.execFileSync("pnpm", nxArgs, {
             cwd: repoRoot,
-            stdio: "pipe",
             env: { ...process.env, CI: "true" },
           })
-          return null
+          return res.exitCode === 0 ? null : formatSubprocessError(res)
         },
         catch: (cause) => formatSubprocessError(cause),
       }).pipe(Effect.catch((msg) => Effect.succeed(msg || "Verification subprocess failed")))
@@ -320,7 +340,7 @@ export const handleVerify = (
                     stderr: `[GATE FAILURE] verify:span-budget\n${err.message}`,
                   }))
                   .with({ _tag: "Ok" }, () => {
-                    const stamp = writeVerifyStamp(repoRoot, taskBranches.implBranch, {
+                    const stamp = writeVerifyStamp(repoRoot, nodeSyncHostIo, taskBranches.implBranch, {
                       dstSeed: suite.initialSeed,
                       dstSeedsRun: suite.seedsRun,
                     })
@@ -356,14 +376,14 @@ const loadSnapshotPair = (
     const planPath = join(repoRoot, ".harness", "plan-graph-snapshot.json")
     const implPath = join(repoRoot, ".harness", "graph-snapshot.json")
     if (
-      (initialPlan === undefined && !existsSync(planPath)) ||
-      (initialImpl === undefined && !existsSync(implPath))
+      (initialPlan === undefined && !nodeSyncHostIo.existsSync(planPath)) ||
+      (initialImpl === undefined && !nodeSyncHostIo.existsSync(implPath))
     ) {
       return { _tag: "Graphs" as const, planGraph: initialPlan, implGraph: initialImpl }
     }
 
     const loadOne = (path: string, label: string) =>
-      loadGraphSnapshotEffect(path).pipe(
+      loadGraphSnapshotEffect(path, nodeSyncHostIo).pipe(
         Effect.map((graph) => ({ _tag: "Ok" as const, graph })),
         Effect.catchTag("GraphSnapshotError", (err: GraphSnapshotError) =>
           Effect.gen(function* () {
@@ -426,20 +446,43 @@ export const handleDone = (
     const blockDecision = isAntigravity ? "continue" : "block"
 
     let rawStdin = options?.stdin
-    if (rawStdin === undefined && !process.stdin.isTTY) {
-      rawStdin = yield* Effect.try({
-        try: () => readFileSync(0, "utf8"),
-        catch: () => "",
-      }).pipe(Effect.orElseSucceed(() => ""))
+    if (rawStdin === undefined && process.stdin.isTTY !== true) {
+      const stdinRes = yield* Effect.result(
+        makeReadStdinEffect({
+          timeoutMs: options?.stdinTimeoutMs,
+          maxBytes: options?.stdinMaxBytes,
+        }),
+      )
+      const stdinErrResult = match(stdinRes)
+        .with({ _tag: "Success" }, ({ success }) => {
+          rawStdin = success
+          return undefined
+        })
+        .with({ _tag: "Failure" }, ({ failure }) => ({
+          exitCode: 0,
+          stdout: JSON.stringify({
+            decision: blockDecision,
+            reason: `done: failed or timed out reading Stop hook stdin (${failure.reason})`,
+          }),
+          stderr: "",
+        }))
+        .exhaustive()
+      if (stdinErrResult !== undefined) {
+        return stdinErrResult
+      }
     }
     let decodedStdin: StopHookStdin | undefined
     if (rawStdin) {
       const decoded = decodeStopHookStdin(rawStdin)
-      if (Option.isSome(decoded)) {
-        decodedStdin = decoded.value
-        if (decoded.value.fullyIdle === false) {
-          return { exitCode: 0, stdout: "", stderr: "", telemetryDetail: "fullyIdle=false" }
-        }
+      const fullyIdleFalse = match(decoded)
+        .with({ _tag: "Some" }, ({ value }) => {
+          decodedStdin = value
+          return value.fullyIdle === false
+        })
+        .with({ _tag: "None" }, () => false)
+        .exhaustive()
+      if (fullyIdleFalse) {
+        return { exitCode: 0, stdout: "", stderr: "", telemetryDetail: "fullyIdle=false" }
       }
     }
 
@@ -464,7 +507,7 @@ export const handleDone = (
     }
 
     // 3. Verify stamp check
-    const stampCheck = checkVerifyStamp(repoRoot)
+    const stampCheck = checkVerifyStamp(repoRoot, nodeSyncHostIo)
     if (!stampCheck.valid) {
       if (hasVerifiedSinceLastMutation(decodedStdin)) {
         return {
@@ -521,7 +564,7 @@ export const handleDone = (
 
           // 6. Omnigraph sync & branch merge
           if (isIsolatedExternalWorkspace(repoRoot)) {
-            writeGraphHeadMeta(repoRoot)
+            writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
             recordTelemetry(options, {
               surface: isAntigravity ? "hook" : "cli",
               category: "graph_query",
@@ -533,20 +576,28 @@ export const handleDone = (
           } else {
             yield* ensureLocalOmnigraphReady(repoRoot)
             const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
-            const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
+            const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
             yield* diffOmnigraphBranches({
               repoRoot: clusterRepoRoot,
               source: taskBranches.implBranch,
               target: taskBranches.planBranch,
-            }).pipe(Effect.provide(OmnigraphSync.Live), Effect.orElseSucceed(() => Option.none()))
+            }).pipe(
+              Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
+              Effect.orElseSucceed(() => Option.none()),
+            )
 
             const merged = yield* mergeOmnigraphBranch({
               repoRoot: clusterRepoRoot,
               source: taskBranches.implBranch,
               target: taskBranches.mainBranch,
               cleanupBranches: [taskBranches.implBranch, taskBranches.planBranch],
-            }).pipe(Effect.provide(OmnigraphSync.Live), Effect.orElseSucceed(() => false))
-            writeGraphHeadMeta(repoRoot)
+            }).pipe(
+              Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
+              Effect.orElseSucceed(() => false),
+            )
+            if (merged) {
+              writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
+            }
             recordTelemetry(options, {
               surface: isAntigravity ? "hook" : "cli",
               category: "graph_query",
@@ -567,13 +618,13 @@ export const handleDone = (
             }
           }
 
-          if (options?.repoRoot !== undefined || process.env.VITEST === undefined) {
+          if (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) {
             const report = buildSessionReport({
-              events: readTelemetryEvents(repoRoot),
-              frictionEvents: readFrictionEvents(repoRoot),
+              events: readTelemetryEvents(repoRoot, nodeSyncHostIo),
+              frictionEvents: readFrictionEvents(repoRoot, nodeSyncHostIo),
               stampValid: true,
             })
-            writeSessionReportFiles(repoRoot, report)
+            writeSessionReportFiles(repoRoot, report, nodeSyncHostIo)
           }
 
           return {

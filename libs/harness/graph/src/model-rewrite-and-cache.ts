@@ -1,4 +1,7 @@
 import { Schema } from "effect"
+import { NonNegativeCount } from "@harness/contract"
+
+export { NonNegativeCount }
 
 export const RELATION_TAGS = [
   "EffectSignature",
@@ -248,12 +251,6 @@ export type UnresolvedGraphReference = typeof UnresolvedGraphReference.Type
 
 export const DatalogFilePath = Schema.NonEmptyString.pipe(Schema.brand("DatalogFilePath"))
 export type DatalogFilePath = typeof DatalogFilePath.Type
-
-export const NonNegativeCount = Schema.Int.pipe(
-  Schema.check(Schema.isGreaterThanOrEqualTo(0)),
-  Schema.brand("NonNegativeCount"),
-)
-export type NonNegativeCount = typeof NonNegativeCount.Type
 
 export const DatalogFileDeltaResult = Schema.Struct({
   filePath: DatalogFilePath,

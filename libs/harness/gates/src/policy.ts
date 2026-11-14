@@ -4,6 +4,7 @@
  * matching Alchemy's own advice to confirm every deploy). */
 
 import * as path from "node:path"
+import { match, P } from "ts-pattern"
 
 export type GuardVerdict = "allow" | "deny" | "ask" | "escalate"
 
@@ -355,21 +356,42 @@ const unwrapCommandSegment = (words: ReadonlyArray<string>): UnwrappedSegment =>
       i++
       while (i < words.length) {
         const arg = words[i]!
-        if (WRAPPER_VALUE_FLAGS.has(arg)) {
-          i += 2
-        } else if (arg === "--") {
-          i++
-          break
-        } else if (arg.startsWith("-")) {
-          i++
-        } else if (WRAPPER_SUBCOMMANDS.has(arg)) {
-          i++
-        } else if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(arg)) {
-          envAssignments.push(arg)
-          i++
-        } else {
-          break
-        }
+        const shouldBreak = match(arg)
+          .with(
+            P.when((a) => WRAPPER_VALUE_FLAGS.has(a)),
+            () => {
+              i += 2
+              return false
+            },
+          )
+          .with("--", () => {
+            i++
+            return true
+          })
+          .with(
+            P.when((a) => a.startsWith("-")),
+            () => {
+              i++
+              return false
+            },
+          )
+          .with(
+            P.when((a) => WRAPPER_SUBCOMMANDS.has(a)),
+            () => {
+              i++
+              return false
+            },
+          )
+          .with(
+            P.when((a) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(a)),
+            (a) => {
+              envAssignments.push(a)
+              i++
+              return false
+            },
+          )
+          .otherwise(() => true)
+        if (shouldBreak) break
       }
       continue
     }

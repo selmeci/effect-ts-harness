@@ -93,7 +93,7 @@ graph TD
 
 7. **`libs/sample/contract` (`type:contract`):**
    - Definuje zdieľané dátové schémy (`Schema.Struct`), verejné API kontrakty (`HttpApiEndpoint`, `RpcGroup`) a typované chyby (`Schema.TaggedErrorClass`).
-   - Obsahuje kanonický súbor `openapi.json` a skript spätnej kompatibility `scripts/check-openapi.mjs`.
+   - Obsahuje kanonický súbor `openapi.json` overovaný cez typovaný príkaz `harness check-openapi`.
    - Importuje **výhradne** balík `effect`.
 8. **`libs/sample/service` (`type:service`):**
    - Definuje abstraktné servisné identifikátory a rozhrania (`Context.Service`), napríklad `PhotoRepo` a `AlbumCounterClient`.
@@ -118,8 +118,8 @@ Architektúra vyžaduje prísnu jednosmernú hierarchiu závislostí riadenú zn
 | Značka Nx               | Účel a zodpovednosť                                                          | Povolené importy                                                 | Zakázané importy                                     |
 | :---------------------- | :--------------------------------------------------------------------------- | :--------------------------------------------------------------- | :--------------------------------------------------- |
 | `type:contract`         | Zdieľané `Schema`, `HttpApi`, `RpcGroup`, doménové a API chyby               | Výhradne `effect`                                                | Akékoľvek lokálne knižnice alebo 3rd party I/O       |
-| `type:domain`           | Prípady použitia a čisté rozhodovače (`.decide`)                             | `contract`, `service`, (`@harness/gates` len pre `stub` v pláne) | `type:infra`, `alchemy`, `drizzle-orm`, I/O ovládače |
-| `type:service`          | Servisné rozhrania (`Context.Service`), kontrakty repozitárov                | `contract`, `domain`                                             | `type:infra`, konkrétne databázové knižnice          |
+| `type:domain`           | Prípady použitia a čisté rozhodovače (`.decide`)                             | `contract`, `service`, (`@harness/contract` pre `stub` v pláne)  | `type:infra`, `alchemy`, `drizzle-orm`, I/O ovládače |
+| `type:service`          | Servisné rozhrania (`Context.Service`), kontrakty repozitárov                | `contract`, `service`                                            | `type:infra`, konkrétne databázové knižnice          |
 | `type:infra`            | Živé vrstvy (`Layer.Live`), Drizzle repozitáre, RPC handlery, Alchemy zdroje | `contract`, `domain`, `service`, `infra`                         | Žiadne obmedzenia v rámci monorepa                   |
 | `type:app`              | Spojenie vrstiev a runtime entrypoint (`alchemy.run.ts`)                     | Všetky balíky monorepa                                           | —                                                    |
 | `type:app`, `scope:web` | Frontend aplikácia (Vite + React + AtomHttpApi)                              | `contract` a UI komponenty                                       | `type:infra`, `type:domain`, priamy `fetch(...)`     |
@@ -199,11 +199,11 @@ flowchart TD
 - **Postup:**
   - V tomto systéme **plán JE kompilovateľný kód**. Nevytvárajú sa žiadne rozsiahle textové `.md` dokumenty s neoverenými ukážkami kódu.
   - Vytvoria sa typové definície v `type:contract` (`Schema.Struct`, `TaggedError`), servisné rozhrania v `type:service` (`Context.Service`) a kostry funkcií v `type:domain` a `type:infra`.
-  - Telá funkcií volajú helper `stub<A, E, R>(...args)` z balíka `@harness/gates`. Tento helper spotrebuje argumenty (aby prešiel `oxlint`) a zaistí zachovanie typovej informácie kanálov `A`, `E` a `R`:
+  - Telá funkcií volajú helper `stub<A, E, R>(...args)` z balíka `@harness/contract`. Tento helper spotrebuje argumenty (aby prešiel `oxlint`) a zaistí zachovanie typovej informácie kanálov `A`, `E` a `R`:
 
 ```typescript
 import { Effect } from "effect"
-import { stub } from "@harness/gates"
+import { stub } from "@harness/contract"
 import { PhotoNotFoundError } from "@harness/sample-contract"
 import { AlbumCounterClient, PhotoRepo } from "@harness/sample-service"
 

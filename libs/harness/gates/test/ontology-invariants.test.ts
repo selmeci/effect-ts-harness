@@ -2,7 +2,6 @@ import { describe, expect, it } from "@effect/vitest"
 import { Effect, Schema } from "effect"
 import { buildHarnessGraph, RelationId } from "@harness/graph"
 import {
-  checkOntologyInvariants,
   decideGraphEntropy,
   decideOntologyInvariants,
   type GovernanceDocReference,
@@ -105,12 +104,6 @@ errors:
 
       expect(report.clean).toBe(true)
       expect(report.findings).toEqual([])
-
-      const syncReport = checkOntologyInvariants({
-        graph,
-        governanceDocs: [doc],
-      })
-      expect(syncReport.clean).toBe(true)
     }),
   )
 

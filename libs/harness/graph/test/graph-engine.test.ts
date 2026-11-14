@@ -15,6 +15,7 @@ import {
   GraphSnapshotError,
   isHarnessGraph,
   loadGraphSnapshotEffect,
+  makeOmnigraphSyncLayer,
   NodeKey,
   OmnigraphSync,
   RelationId,
@@ -27,6 +28,7 @@ import {
   toOmnigraphNdjson,
   type SerializedGraphSnapshot,
 } from "../src/index.js"
+import { testHostIo } from "./helpers/test-host-io.js"
 
 describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
   const sampleGraph = buildHarnessGraph({
@@ -121,10 +123,10 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-snapshot-roundtrip-"))
     try {
       const snapshotPath = path.join(tmpDir, "test-snapshot.json")
-      saveGraphSnapshot(sampleGraph, snapshotPath)
+      saveGraphSnapshot(sampleGraph, snapshotPath, testHostIo)
       expect(fs.existsSync(snapshotPath)).toBe(true)
 
-      const loaded = Effect.runSync(loadGraphSnapshotEffect(snapshotPath))
+      const loaded = Effect.runSync(loadGraphSnapshotEffect(snapshotPath, testHostIo))
       expect(findTestsReaching(loaded, "PhotoRepo.insert").map((t) => t.testId)).toEqual([
         "libs/sample/domain/test/index.test.ts::greets by name",
       ])
@@ -372,6 +374,7 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
   it("finds TypeScript ast-grep matches via structuralSearch", () => {
     const results = structuralSearch({
       pattern: "export const $NAME = $_",
+      hostIo: testHostIo,
       subDirs: ["libs/harness/graph/src"],
     })
     expect(results.length).toBeGreaterThan(0)
@@ -390,7 +393,7 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
           snapshotPath: testSnapshotPath,
           baseUrl: "http://127.0.0.1:9999", // Unreachable port
         })
-      }).pipe(Effect.provide(OmnigraphSync.Live))
+      }).pipe(Effect.provide(makeOmnigraphSyncLayer(testHostIo)))
 
       const result = await Effect.runPromise(program)
       expect(result.snapshotPath).toBe(testSnapshotPath)
@@ -408,7 +411,7 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
       const missingPath = path.join(os.tmpdir(), `nonexistent-snap-${Date.now()}.json`)
 
       // Effect version returns typed GraphSnapshotError failure
-      const exit = Effect.runSyncExit(loadGraphSnapshotEffect(missingPath))
+      const exit = Effect.runSyncExit(loadGraphSnapshotEffect(missingPath, testHostIo))
       match(exit)
         .with({ _tag: "Failure" }, (f) => {
           const errorOpt = Cause.findErrorOption(f.cause)
@@ -433,7 +436,7 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
       fs.writeFileSync(corruptPath, "{ invalid json content: 123", "utf8")
 
       try {
-        const exit = Effect.runSyncExit(loadGraphSnapshotEffect(corruptPath))
+        const exit = Effect.runSyncExit(loadGraphSnapshotEffect(corruptPath, testHostIo))
         match(exit)
           .with({ _tag: "Failure" }, (f) => {
             const errorOpt = Cause.findErrorOption(f.cause)

@@ -1,4 +1,4 @@
-import { Context, Effect, Layer } from "effect"
+import { Effect, Layer } from "effect"
 import { SqlClient } from "effect/sql/SqlClient"
 import type { SqlError } from "effect/sql/SqlError"
 import * as SqliteClientModule from "@effect/sql-sqlite-do/SqliteClient"
@@ -50,14 +50,7 @@ export {
 
 const _makeSqliteClientLayer = (
   config: SqliteClientModule.SqliteClientConfig,
-): Layer.Layer<SqlClient> =>
-  Layer.effect(
-    SqlClient,
-    Effect.gen(function* () {
-      const services = yield* Layer.build(SqliteClientModule.layer(config))
-      return Context.get(services, SqlClient)
-    }),
-  )
+): Layer.Layer<SqlClient> => SqliteClientModule.layer(config)
 
 const _makeAggregateMigratorLayer = (
   additionalMigrations?: Readonly<Record<string, Effect.Effect<void, SqlError, SqlClient>>>,

@@ -1,5 +1,5 @@
-import * as fs from "node:fs"
 import * as path from "node:path"
+import type { SyncHostIo } from "@harness/service"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
 import { ts } from "ts-morph"
@@ -28,26 +28,33 @@ import {
 } from "./extractor-types-and-helpers.js"
 import type { SourceFileInput } from "./compiler-session.js"
 
-const packageJsonCache = new Map<string, { name?: string | undefined; dir: string }>()
+export interface PackageJsonEntry {
+  readonly name?: string | undefined
+  readonly dir: string
+}
 
 export const findPackageForRelFile = (
   root: string,
   relFile: string,
-): { name?: string | undefined; dir: string } | null => {
+  hostIo?: SyncHostIo,
+  packageJsonCache?: Map<string, PackageJsonEntry>,
+): PackageJsonEntry | null => {
+  if (hostIo === undefined) return null
   let curr = path.dirname(path.join(root, relFile))
   const rootResolved = path.resolve(root)
   while (curr.startsWith(rootResolved)) {
-    if (packageJsonCache.has(curr)) return packageJsonCache.get(curr)!
+    const cached = packageJsonCache?.get(curr)
+    if (cached !== undefined) return cached
     const pkgPath = path.join(curr, "package.json")
-    if (fs.existsSync(pkgPath)) {
-      const content = fs.readFileSync(pkgPath, "utf-8")
+    if (hostIo.existsSync(pkgPath)) {
+      const content = hostIo.readTextSync(pkgPath)
       const opt = decodePackageJson(content)
       const relDir = path.relative(rootResolved, curr).replace(/\\/g, "/")
-      const entry = {
+      const entry: PackageJsonEntry = {
         name: match(opt).with({ _tag: "Some" }, ({ value }) => value.name).with({ _tag: "None" }, () => undefined).exhaustive(),
         dir: relDir,
       }
-      packageJsonCache.set(curr, entry)
+      packageJsonCache?.set(curr, entry)
       return entry
     }
     const parent = path.dirname(curr)
@@ -62,8 +69,10 @@ export const testImportsFn = (
   testRelPath: string,
   testContent: string,
   fnFile: string,
+  hostIo?: SyncHostIo,
+  packageJsonCache?: Map<string, PackageJsonEntry>,
 ): boolean => {
-  const fnPkg = findPackageForRelFile(root, fnFile)
+  const fnPkg = findPackageForRelFile(root, fnFile, hostIo, packageJsonCache)
   if (fnPkg?.name && (testContent.includes(`"${fnPkg.name}"`) || testContent.includes(`'${fnPkg.name}'`) || testContent.includes(`"${fnPkg.name}/`) || testContent.includes(`'${fnPkg.name}/`))) {
     return true
   }
@@ -81,7 +90,9 @@ export const testImportsFn = (
         resolved.replace(/\.js$/, "") === fnFullFile.replace(/\.tsx?$/, "") ||
         resolved.startsWith(fnFullDir) || (fnPkgFullDir && resolved.startsWith(fnPkgFullDir))
       ) return true
-    } else if (fnPkg?.dir && spec.includes(fnPkg.dir)) return true
+      continue
+    }
+    if (fnPkg?.dir && spec.includes(fnPkg.dir)) return true
   }
   return false
 }
@@ -121,12 +132,10 @@ export const parseGovernanceDocFile = (
       if (rest.startsWith("[") && rest.endsWith("]")) {
         const inner = rest.slice(1, -1).trim()
         lists.set(key, inner.length === 0 ? [] : inner.split(",").map(stripQuotes).filter((s) => s.length > 0))
-      } else if (rest === "") {
-        lists.set(key, [])
-        currentListKey = key
-      } else {
-        scalars.set(key, stripQuotes(rest))
+        continue
       }
+      if (rest === "") { lists.set(key, []); currentListKey = key; continue }
+      scalars.set(key, stripQuotes(rest))
     }
   }
 
@@ -156,23 +165,33 @@ export const parseGovernanceDocFile = (
 
 export const loadWorkspaceGovernanceDocs = (
   repoRoot: string,
+  hostIo: SyncHostIo,
 ): ReadonlyArray<AdrDocNode | EarsSpecNode> => {
-  const root = resolveRepoRoot(repoRoot)
+  const root = resolveRepoRoot(repoRoot, hostIo)
   const candidateRelDirs: Array<string> = ["docs/adr", "docs/specs"]
-  const listSubdirs = (p: string) => !fs.existsSync(path.join(root, p)) ? [] : fs.readdirSync(path.join(root, p), { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort((a, b) => a.localeCompare(b))
+  const listSubdirs = (p: string) =>
+    !hostIo.existsSync(path.join(root, p))
+      ? []
+      : hostIo
+          .readdirSync(path.join(root, p))
+          .filter((e) => e.isDirectory)
+          .map((e) => e.name)
+          .sort((a, b) => a.localeCompare(b))
   for (const s of listSubdirs("libs")) candidateRelDirs.push(`libs/${s}/docs/adr`, `libs/${s}/docs/specs`)
   for (const a of listSubdirs("apps")) candidateRelDirs.push(`apps/${a}/docs/adr`, `apps/${a}/docs/specs`)
 
   const results: Array<AdrDocNode | EarsSpecNode> = []
   for (const relDir of candidateRelDirs) {
     const fullDir = path.join(root, relDir)
-    if (!fs.existsSync(fullDir)) continue
-    const files = fs.readdirSync(fullDir, { withFileTypes: true })
-      .filter((e) => e.isFile() && e.name.endsWith(".md") && e.name !== "README.md" && e.name !== "TEMPLATE.md")
-      .map((e) => e.name).sort((a, b) => a.localeCompare(b))
+    if (!hostIo.existsSync(fullDir)) continue
+    const files = hostIo
+      .readdirSync(fullDir)
+      .filter((e) => e.isFile && e.name.endsWith(".md") && e.name !== "README.md" && e.name !== "TEMPLATE.md")
+      .map((e) => e.name)
+      .sort((a, b) => a.localeCompare(b))
     for (const file of files) {
       const relDocPath = `${relDir}/${file}`
-      const parsed = parseGovernanceDocFile(relDocPath, fs.readFileSync(path.join(root, relDocPath), "utf-8"))
+      const parsed = parseGovernanceDocFile(relDocPath, hostIo.readTextSync(path.join(root, relDocPath)))
       if (parsed !== null) results.push(parsed)
     }
   }
@@ -184,10 +203,10 @@ const splitTopLevelCommas = (input: string): Array<string> => {
   let depth = 0, current = ""
   for (let i = 0; i < input.length; i++) {
     const char = input[i]
-    if (char === "(" || char === "[" || char === "{") { depth++; current += char }
-    else if (char === ")" || char === "]" || char === "}") { if (depth > 0) depth--; current += char }
-    else if (char === "," && depth === 0) { items.push(current); current = "" }
-    else { current += char }
+    if (char === "(" || char === "[" || char === "{") { depth++; current += char; continue }
+    if (char === ")" || char === "]" || char === "}") { if (depth > 0) depth--; current += char; continue }
+    if (char === "," && depth === 0) { items.push(current); current = ""; continue }
+    current += char
   }
   if (current.length > 0) items.push(current)
   return items
@@ -239,8 +258,8 @@ export const checkUnassertedStateFieldsForInputs = (
     const sf = ts.createSourceFile(input.filePath, input.content, ts.ScriptTarget.Latest, true)
     const evolveFns: Array<ts.Node> = []
     for (const stmt of sf.statements) {
-      if (ts.isFunctionDeclaration(stmt) && stmt.name && /^evolve/i.test(stmt.name.text)) evolveFns.push(stmt)
-      else if (ts.isVariableStatement(stmt)) {
+      if (ts.isFunctionDeclaration(stmt) && stmt.name && /^evolve/i.test(stmt.name.text)) { evolveFns.push(stmt); continue }
+      if (ts.isVariableStatement(stmt)) {
         for (const decl of stmt.declarationList.declarations) {
           if (ts.isIdentifier(decl.name) && /^evolve/i.test(decl.name.text) && decl.initializer && (ts.isArrowFunction(decl.initializer) || ts.isFunctionExpression(decl.initializer))) {
             evolveFns.push(decl.initializer)
@@ -253,9 +272,7 @@ export const checkUnassertedStateFieldsForInputs = (
     const collectProps = (node: ts.Node): void => {
       if (ts.isObjectLiteralExpression(node)) {
         for (const p of node.properties) {
-          let pName: string | null = null
-          if (ts.isPropertyAssignment(p) && p.name) pName = p.name.getText(sf).replace(/^["'`]|["'`]$/g, "")
-          else if (ts.isShorthandPropertyAssignment(p)) pName = p.name.text
+          const pName = ts.isPropertyAssignment(p) && p.name ? p.name.getText(sf).replace(/^["'`]|["'`]$/g, "") : ts.isShorthandPropertyAssignment(p) ? p.name.text : null
           if (pName && pName !== "_tag" && !pName.endsWith("Id") && pName !== "id") assignedFields.add(pName)
         }
       }
@@ -319,7 +336,9 @@ export const assembleTestAndGovernanceGraph = (
   updatedNodeIndexByKey: Map<string, Graph.NodeIndex>,
   unresolvedReferences: Array<UnresolvedGraphReference>,
   repoRoot: string,
+  hostIo?: SyncHostIo,
 ): void => {
+  const packageJsonCache = new Map<string, PackageJsonEntry>()
   const deciderAliasesByFnName = new Map<string, Set<string>>()
   for (const input of inputs) {
     for (const m of input.content.matchAll(/(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=\s*(?:Decider\.)?make\s*(?:<[\s\S]*?>)?\s*\(\s*\{([\s\S]*?)\}\s*\)/g)) {
@@ -380,7 +399,7 @@ export const assembleTestAndGovernanceGraph = (
       if (testScope && fnScope && testScope !== fnScope && fnNode.file) {
         let importsFn = importCheckedByFnFile.get(fnNode.file)
         if (importsFn === undefined) {
-          importsFn = testImportsFn(repoRoot, relTestFile, content, fnNode.file)
+          importsFn = testImportsFn(repoRoot, relTestFile, content, fnNode.file, hostIo, packageJsonCache)
           importCheckedByFnFile.set(fnNode.file, importsFn)
         }
         if (!importsFn) continue
@@ -426,16 +445,16 @@ export const assembleTestAndGovernanceGraph = (
   for (const docNode of governanceDocs) {
     const docKey = getNodeKey(docNode), docIdx = Graph.addNode(mutable, docNode)
     updatedNodeIndexByKey.set(docKey, docIdx)
-    const kindPrefix = docNode._tag === "AdrDoc" ? "governs" : "specifies"
+    const { kindPrefix, docRole, docArchimate, docIdField } = match(docNode)
+      .with({ _tag: "AdrDoc" }, (d) => ({ kindPrefix: "governs", docRole: "governing-adr", docArchimate: "Influence" as const, docIdField: { adrId: d.id } }))
+      .with({ _tag: "EarsSpec" }, (d) => ({ kindPrefix: "specifies", docRole: "specifying-ears", docArchimate: "Realization" as const, docIdField: { earsSpecId: d.id } }))
+      .exhaustive()
 
     const addGovernanceTraceability = (targetKey: string, targetIdx: Graph.NodeIndex) => {
-      const docRole = docNode._tag === "AdrDoc" ? "governing-adr" : "specifying-ears"
-      const docArchimate = docNode._tag === "AdrDoc" ? ("Influence" as const) : ("Realization" as const)
       const relId = RelationId.make(`TraceabilityTuple:${kindPrefix}:${docNode.id}->${targetKey}`)
       if (!updatedNodeIndexByKey.has(relId)) {
         const relNode: TraceabilityTupleRelation = {
-          _tag: "TraceabilityTuple", relationId: relId,
-          ...(docNode._tag === "AdrDoc" ? { adrId: docNode.id } : { earsSpecId: docNode.id }),
+          _tag: "TraceabilityTuple", relationId: relId, ...docIdField,
           targetSymbolQualname: targetKey, verifyingTestQualnames: [],
         }
         const relIdx = Graph.addNode(mutable, relNode)

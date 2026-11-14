@@ -21,7 +21,7 @@
   },
   "devDependencies": {
     "@effect/vitest": "4.0.0",
-    "@harness/gates": "workspace:*",
+    "@harness/contract": "workspace:*",
     "@harness/graph": "workspace:*",
     "@harness/ingest": "workspace:*",
     "@types/node": "26.6.5",

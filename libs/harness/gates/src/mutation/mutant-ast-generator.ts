@@ -1,13 +1,11 @@
 /**
  * @fileoverview AST-based mutant discovery, schema module compilation, and in-process mutant evaluation.
  */
-import { Effect, Schema } from "effect"
-import { ActiveMutantId } from "../plugins/self-dogfooding-contract.js"
+import { Result, Schema } from "effect"
+import { match } from "ts-pattern"
 import {
-  ActiveMutantContextLive,
   getActiveMutantId,
   setActiveMutantId,
-  withActiveMutantEffect,
 } from "../services/active-mutant-context.js"
 
 export { getActiveMutantId, setActiveMutantId }
@@ -278,8 +276,7 @@ export const discoverDomainMutants = (
 
 /**
  * Compiles all `M` discovered mutations for a module into a single in-memory
- * Mutant Schema AST parameterized by `globalThis.__HARNESS_ACTIVE_MUTANT_ID` and
- * `globalThis.__harnessActiveMutant` (`RFC-0005 §4.3.2`).
+ * Mutant Schema AST parameterized by `globalThis.__HARNESS_ACTIVE_MUTANT_ID` (`RFC-0005 §4.3.2`).
  */
 export const compileMutantSchemaModule = (
   filePath: string,
@@ -303,7 +300,7 @@ export const compileMutantSchemaModule = (
     if (origLine === undefined) continue
     let transformed = origLine
     for (const m of lineMutants) {
-      const mutantCondition = `((globalThis.__HARNESS_ACTIVE_MUTANT_ID ?? (globalThis as { __HARNESS_ACTIVE_MUTANT_ID?: string }).__HARNESS_ACTIVE_MUTANT_ID ?? (globalThis as { __harnessActiveMutant?: string }).__harnessActiveMutant ?? process.env["HARNESS_ACTIVE_MUTANT_ID"]) === ${JSON.stringify(m.id)})`
+      const mutantCondition = `((globalThis.__HARNESS_ACTIVE_MUTANT_ID ?? (globalThis as { __HARNESS_ACTIVE_MUTANT_ID?: string }).__HARNESS_ACTIVE_MUTANT_ID ?? process.env["HARNESS_ACTIVE_MUTANT_ID"]) === ${JSON.stringify(m.id)})`
       if (m.original.startsWith("return ")) {
         const origExpr = m.original.slice("return ".length)
         const replExpr = m.replacement.slice("return ".length)
@@ -346,27 +343,6 @@ export const isAssertionFailure = (err: unknown): boolean =>
     err.message.includes("toBe") ||
     err.message.includes("toEqual"))
 
-class MutantExecutionError {
-  readonly _tag = "MutantExecutionError"
-  readonly cause: unknown
-  constructor(cause: unknown) {
-    this.cause = cause
-  }
-}
-
-const runSingleTestFn = (
-  testFn: (activeMutantId: string) => boolean | void,
-  mutantId: string,
-): Effect.Effect<boolean> =>
-  Effect.try({
-    try: () => testFn(mutantId) === false,
-    catch: (cause) => new MutantExecutionError(cause),
-  }).pipe(
-    Effect.catchTag("MutantExecutionError", (err) =>
-      isAssertionFailure(err.cause) ? Effect.succeed(true) : Effect.die(err.cause),
-    ),
-  )
-
 /**
  * Evaluates all `M` mutants inside a single warm process by toggling
  * `ActiveMutantContext` / `globalThis.__HARNESS_ACTIVE_MUTANT_ID` across `ExercisesSpan`-linked test callbacks (`RFC-0005 §4.3.2`).
@@ -374,26 +350,30 @@ const runSingleTestFn = (
 export const evaluateMutantSchemaInProcess = (
   mutants: ReadonlyArray<CodeMutant>,
   exercisesSpanTests: ReadonlyArray<(activeMutantId: string) => boolean | void>,
-): ReadonlyArray<MutantOutcome> =>
-  Effect.runSync(
-    Effect.gen(function* () {
-      const outcomes: Array<MutantOutcome> = []
-      for (const mutant of mutants) {
-        const killed = yield* withActiveMutantEffect(
-          ActiveMutantId.make(mutant.id),
-          Effect.gen(function* () {
-            for (const testFn of exercisesSpanTests) {
-              const killed = yield* runSingleTestFn(testFn, mutant.id)
-              if (killed) return true
-            }
-            return false
-          }),
-        )
-        outcomes.push({
-          mutant,
-          status: killed ? "killed" : "survived",
-        })
+): ReadonlyArray<MutantOutcome> => {
+  const outcomes: Array<MutantOutcome> = []
+  const prevGlobal = getActiveMutantId()
+
+  for (const mutant of mutants) {
+    setActiveMutantId(mutant.id)
+    let mutantKilled = false
+    for (const testFn of exercisesSpanTests) {
+      const res = Result.try(() => testFn(mutant.id) === false)
+      const killed = match(res)
+        .with({ _tag: "Success" }, ({ success }) => success)
+        .with({ _tag: "Failure" }, ({ failure }) => isAssertionFailure(failure))
+        .exhaustive()
+      if (killed) {
+        mutantKilled = true
+        break
       }
-      return outcomes
-    }).pipe(Effect.provide(ActiveMutantContextLive)),
-  )
+    }
+    setActiveMutantId(prevGlobal)
+    outcomes.push({
+      mutant,
+      status: mutantKilled ? "killed" : "survived",
+    })
+  }
+
+  return outcomes
+}

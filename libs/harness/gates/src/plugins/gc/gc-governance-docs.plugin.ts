@@ -59,22 +59,65 @@ export const evaluateGovernanceDocsPlugin = (
     }
 
     for (const [, node] of Graph.nodes(g)) {
-      if ((node._tag === "AdrDoc" || node._tag === "EarsSpec") && !seenDocIds.has(node.id)) {
-        seenDocIds.add(node.id)
-        docRefs.push({
-          docPath: node.path, id: node.id, status: node.status,
-          enforcedByFiles: node.enforcedByFiles, referencedSpans: node.referencedSpans,
-          referencedServices: node.referencedServices, referencedErrors: node.referencedErrors,
+      match(node)
+        .with({ _tag: "AdrDoc" }, { _tag: "EarsSpec" }, (n) => {
+          if (!seenDocIds.has(n.id)) {
+            seenDocIds.add(n.id)
+            docRefs.push({
+              docPath: n.path, id: n.id, status: n.status,
+              enforcedByFiles: n.enforcedByFiles, referencedSpans: n.referencedSpans,
+              referencedServices: n.referencedServices, referencedErrors: n.referencedErrors,
+            })
+          }
         })
-      }
+        .with(
+          { _tag: "EffectFn" },
+          { _tag: "ServiceTag" },
+          { _tag: "TaggedError" },
+          { _tag: "PatternDoc" },
+          { _tag: "SchemaDef" },
+          { _tag: "ServiceLayer" },
+          { _tag: "EffectSignature" },
+          { _tag: "LayerFlow" },
+          { _tag: "TraceabilityTuple" },
+          { _tag: "HttpEndpointTuple" },
+          { _tag: "MigrationTuple" },
+          { _tag: "VitestCase" },
+          () => {},
+        )
+        .exhaustive()
     }
 
     if (docRefs.length > 0) {
       const knownSpans = new Set<string>(), knownServices = new Set<string>(), knownErrors = new Set<string>()
       for (const [, node] of Graph.nodes(g)) {
-        if (node._tag === "EffectFn") { knownSpans.add(node.spanName); knownSpans.add(node.qualname) }
-        else if (node._tag === "ServiceTag") { knownServices.add(node.tagId); knownServices.add(node.name) }
-        else if (node._tag === "TaggedError") { knownErrors.add(node.errorTag) }
+        match(node)
+          .with({ _tag: "EffectFn" }, (n) => {
+            knownSpans.add(n.spanName)
+            knownSpans.add(n.qualname)
+          })
+          .with({ _tag: "ServiceTag" }, (n) => {
+            knownServices.add(n.tagId)
+            knownServices.add(n.name)
+          })
+          .with({ _tag: "TaggedError" }, (n) => {
+            knownErrors.add(n.errorTag)
+          })
+          .with(
+            { _tag: "AdrDoc" },
+            { _tag: "EarsSpec" },
+            { _tag: "PatternDoc" },
+            { _tag: "SchemaDef" },
+            { _tag: "ServiceLayer" },
+            { _tag: "EffectSignature" },
+            { _tag: "LayerFlow" },
+            { _tag: "TraceabilityTuple" },
+            { _tag: "HttpEndpointTuple" },
+            { _tag: "MigrationTuple" },
+            { _tag: "VitestCase" },
+            () => {},
+          )
+          .exhaustive()
       }
 
       for (const doc of docRefs) {
@@ -92,7 +135,11 @@ export const evaluateGovernanceDocsPlugin = (
           continue
         }
 
-        if (doc.status !== "accepted") continue
+        const isAccepted = match(doc.status)
+          .with("accepted", () => true)
+          .with("proposed", "superseded", "deprecated", () => false)
+          .exhaustive()
+        if (!isAccepted) continue
 
         if (doc.enforcedByFiles !== undefined && doc.existingFiles !== undefined) {
           const existingSet = new Set(doc.existingFiles)

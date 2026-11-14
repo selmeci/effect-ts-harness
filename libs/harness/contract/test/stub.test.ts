@@ -1,5 +1,5 @@
-import { describe, expect, expectTypeOf, it } from "@effect/vitest"
-import { Context, Data, Effect } from "effect"
+import { Cause, Context, Data, Effect, Exit } from "effect"
+import { describe, expect, expectTypeOf, it } from "vitest"
 import { stub } from "../src/index.js"
 
 class SampleError extends Data.TaggedError("SampleError")<{ readonly message: string }> {}
@@ -19,10 +19,16 @@ describe("stub<A, E, R>", () => {
     >()
   })
 
-  it.effect("dies with HARNESS_PLAN_STUB if executed at runtime", () =>
-    Effect.gen(function* () {
-      const exit = yield* Effect.exit(stub<number>("unused-arg"))
-      expect(exit._tag).toBe("Failure")
-    }),
-  )
+  it("dies with HARNESS_PLAN_STUB if executed at runtime", () => {
+    const exit = Effect.runSyncExit(stub<number>("unused-arg"))
+    Exit.match(exit, {
+      onSuccess: () => {
+        expect.fail("Expected stub to die with HARNESS_PLAN_STUB, got Success")
+      },
+      onFailure: (cause) => {
+        expect(Cause.hasDies(cause)).toBe(true)
+        expect(String(Cause.squash(cause))).toContain("HARNESS_PLAN_STUB")
+      },
+    })
+  })
 })

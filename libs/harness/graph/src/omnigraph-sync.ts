@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
-import { Context, Data, Effect, Layer, Option, Schema } from "effect"
+import type { SyncHostIo } from "@harness/service"
+import { Context, Data, Effect, Layer, Option, Result, Schema } from "effect"
 import * as Graph from "effect/Graph"
 import { type Diff, type FetchLike, Omnigraph } from "@modernrelay/omnigraph"
 import { match } from "ts-pattern"
@@ -41,6 +41,7 @@ export interface OmnigraphConnectionOptions {
   readonly graphId?: string | undefined
   readonly token?: string | undefined
   readonly fetch?: FetchLike | undefined
+  readonly hostIo?: SyncHostIo | undefined
 }
 
 const OmnigraphServerMetaSchema = Schema.Struct({
@@ -55,6 +56,7 @@ const decodeServerMetaOption = Schema.decodeOption(Schema.fromJsonString(Omnigra
 export const resolveOmnigraphBaseUrl = (
   options?: OmnigraphConnectionOptions,
   env: NodeJS.ProcessEnv = process.env,
+  hostIo?: SyncHostIo,
 ): string => {
   if (options?.baseUrl !== undefined) {
     return options.baseUrl
@@ -62,33 +64,36 @@ export const resolveOmnigraphBaseUrl = (
   if (env.OMNIGRAPH_URL && env.OMNIGRAPH_URL !== "http://127.0.0.1:8080") {
     return env.OMNIGRAPH_URL
   }
-  if (options?.repoRoot) {
-    const clusterDir = resolveOmnigraphClusterDir(options.repoRoot, env)
+  const effectiveHostIo = hostIo ?? options?.hostIo
+  if (options?.repoRoot && effectiveHostIo !== undefined) {
+    const clusterDir = resolveOmnigraphClusterDir(options.repoRoot, effectiveHostIo, env)
     const serverJsonPath = join(clusterDir, "server.json")
-    if (existsSync(serverJsonPath)) {
-      const metaOpt = Effect.runSync(
-        Effect.try({
-          try: () => readFileSync(serverJsonPath, "utf8"),
-          catch: () => "",
-        }).pipe(
-          Effect.flatMap((raw) => Effect.fromOption(decodeServerMetaOption(raw))),
-          Effect.option,
-        ),
+    if (effectiveHostIo.existsSync(serverJsonPath)) {
+      const raw = Result.getOrElse(
+        Result.try(() => effectiveHostIo.readTextSync(serverJsonPath)),
+        () => "",
       )
-      if (Option.isSome(metaOpt)) {
-        const meta = metaOpt.value
-        if (meta.baseUrl && meta.baseUrl.length > 0) {
-          return meta.baseUrl
-        }
+      const metaOpt = decodeServerMetaOption(raw)
+      const baseUrlFromMeta = match(metaOpt)
+        .with({ _tag: "Some" }, ({ value: meta }) =>
+          meta.baseUrl && meta.baseUrl.length > 0 ? meta.baseUrl : undefined,
+        )
+        .with({ _tag: "None" }, () => undefined)
+        .exhaustive()
+      if (baseUrlFromMeta !== undefined) {
+        return baseUrlFromMeta
       }
     }
-    return `http://127.0.0.1:${deriveRepoOmnigraphPort(options.repoRoot)}`
+    return `http://127.0.0.1:${deriveRepoOmnigraphPort(options.repoRoot, effectiveHostIo)}`
   }
   return env.OMNIGRAPH_URL ?? "http://127.0.0.1:8080"
 }
 
-export const makeOmnigraphClient = (options?: OmnigraphConnectionOptions): Omnigraph => {
-  const baseUrl = resolveOmnigraphBaseUrl(options)
+export const makeOmnigraphClient = (
+  options?: OmnigraphConnectionOptions,
+  hostIo?: SyncHostIo,
+): Omnigraph => {
+  const baseUrl = resolveOmnigraphBaseUrl(options, process.env, hostIo)
   const graphId = options?.graphId ?? process.env.OMNIGRAPH_GRAPH_ID ?? "harness"
   const token = options?.token ?? process.env.OMNIGRAPH_TOKEN
 
@@ -393,20 +398,22 @@ export interface OmnigraphSyncShape {
 
 export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncShape>()(
   "@harness/graph/OmnigraphSync",
-) {
-  static readonly Live: Layer.Layer<OmnigraphSync> = Layer.succeed(
+) {}
+
+export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<OmnigraphSync> =>
+  Layer.succeed(
     OmnigraphSync,
     OmnigraphSync.of({
       sync: (graph, options) =>
         Effect.gen(function* () {
           const snapshotPath = options?.snapshotPath ?? ".harness/graph-snapshot.json"
-          saveGraphSnapshot(graph, snapshotPath)
+          saveGraphSnapshot(graph, snapshotPath, hostIo)
           if (options?.repoRoot && !snapshotPath.endsWith("plan-graph-snapshot.json")) {
-            writeGraphHeadMeta(options.repoRoot)
+            writeGraphHeadMeta(options.repoRoot, hostIo)
           }
 
           const branch = options?.branch ?? "main"
-          const og = makeOmnigraphClient(options)
+          const og = makeOmnigraphClient(options, hostIo)
           const ndjson = toOmnigraphServerNdjson(graph)
 
           if (ndjson.trim().length === 0) {
@@ -476,7 +483,7 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
         Effect.gen(function* () {
           const source = options?.source ?? "impl/current"
           const target = options?.target ?? "main"
-          const og = makeOmnigraphClient(options)
+          const og = makeOmnigraphClient(options, hostIo)
 
           return yield* Effect.gen(function* () {
             const branches = yield* Effect.tryPromise({
@@ -499,10 +506,10 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
                     return yield* mergeErr
                   }
                   const fallbackSnap = join(options.repoRoot, ".harness", "graph-snapshot.json")
-                  if (!existsSync(fallbackSnap)) {
+                  if (!hostIo.existsSync(fallbackSnap)) {
                     return yield* mergeErr
                   }
-                  const snapGraph = yield* loadGraphSnapshotEffect(fallbackSnap).pipe(
+                  const snapGraph = yield* loadGraphSnapshotEffect(fallbackSnap, hostIo).pipe(
                     Effect.mapError((cause) => new OmnigraphLoadError({ cause })),
                   )
                   const ndjson = toOmnigraphServerNdjson(snapGraph)
@@ -530,7 +537,7 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
               }
             }
             if (options?.repoRoot) {
-              writeGraphHeadMeta(options.repoRoot)
+              writeGraphHeadMeta(options.repoRoot, hostIo)
             }
             return true
           }).pipe(Effect.orElseSucceed(() => false))
@@ -538,7 +545,7 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
 
       query: (input) =>
         Effect.gen(function* () {
-          const og = makeOmnigraphClient(input)
+          const og = makeOmnigraphClient(input, hostIo)
           return yield* Effect.tryPromise({
             try: () =>
               og.query({
@@ -560,7 +567,7 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
 
       invokeNamedQuery: (input) =>
         Effect.gen(function* () {
-          const og = makeOmnigraphClient(input)
+          const og = makeOmnigraphClient(input, hostIo)
           const branch = input.branch ?? "main"
 
           const invokeAttempt = yield* Effect.tryPromise({
@@ -619,26 +626,23 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
             Effect.orElseSucceed(() => Option.none<ReadonlyArray<Record<string, unknown>>>()),
           )
 
-          if (Option.isSome(queryAttempt)) {
-            return {
+          return match(queryAttempt)
+            .with({ _tag: "Some" }, ({ value }) => ({
               source: "omnigraph" as const,
-              rows: queryAttempt.value,
-            }
-          }
-
-          const fallbackRows = input.fallbackGraph
-            ? executeNamedGqQueryInMemory(input.fallbackGraph, input.name, input.params)
-            : []
-
-          return {
-            source: "memory-fallback" as const,
-            rows: fallbackRows,
-          }
+              rows: value,
+            }))
+            .with({ _tag: "None" }, () => ({
+              source: "memory-fallback" as const,
+              rows: input.fallbackGraph
+                ? executeNamedGqQueryInMemory(input.fallbackGraph, input.name, input.params)
+                : [],
+            }))
+            .exhaustive()
         }),
 
       diffBranches: (input) =>
         Effect.gen(function* () {
-          const og = makeOmnigraphClient(input)
+          const og = makeOmnigraphClient(input, hostIo)
           const source = input?.source ?? "impl/current"
           const target = input?.target ?? "plan/current"
 
@@ -652,7 +656,6 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
         }),
     }),
   )
-}
 
 export const syncToOmnigraphAndSnapshot = Effect.fn("OmnigraphSync.sync")(function* (
   graph: HarnessGraph,

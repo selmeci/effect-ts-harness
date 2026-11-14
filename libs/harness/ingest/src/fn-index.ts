@@ -1,7 +1,8 @@
-import * as fs from "node:fs"
 import * as path from "node:path"
 import { Lang, parse } from "@ast-grep/napi"
-import { Effect, Option, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
+import { match } from "ts-pattern"
+import type { SyncHostIo } from "@harness/service"
 
 export type PackageTag = "contract" | "domain" | "service" | "infra" | "app"
 
@@ -106,25 +107,35 @@ export const validateUniqueSpanNames = (fns: ReadonlyArray<IndexedEffectFn>): Wo
   }
 }
 
-const resolvePackageTag = (repoRoot: string, relFilePath: string): PackageTag => {
+const resolvePackageTag = (
+  repoRoot: string,
+  relFilePath: string,
+  hostIo: SyncHostIo,
+): PackageTag => {
   if (relFilePath.startsWith("apps/") || relFilePath.includes("/apps/")) {
     return "app"
   }
   let currentDir = path.dirname(path.join(repoRoot, relFilePath))
   while (currentDir.length >= repoRoot.length) {
     const pkgPath = path.join(currentDir, "package.json")
-    if (fs.existsSync(pkgPath)) {
-      const content = fs.readFileSync(pkgPath, "utf-8")
+    if (hostIo.existsSync(pkgPath)) {
+      const content = hostIo.readTextSync(pkgPath)
       const opt = decodePackageJson(content)
-      if (Option.isSome(opt) && opt.value.nx?.tags) {
-        const tags = opt.value.nx.tags
-        if (tags.includes("type:domain")) return "domain"
-        if (tags.includes("type:infra")) return "infra"
-        if (tags.includes("type:app")) return "app"
-        if (tags.includes("type:contract") && !tags.includes("type:service")) return "contract"
-        if (tags.includes("type:service")) return "service"
-        if (tags.includes("type:contract")) return "contract"
-      }
+      const resolvedTag = match(opt)
+        .with({ _tag: "Some" }, ({ value }): PackageTag | undefined => {
+          const tags = value.nx?.tags
+          if (!tags) return undefined
+          if (tags.includes("type:domain") || tags.includes("type:core")) return "domain"
+          if (tags.includes("type:infra")) return "infra"
+          if (tags.includes("type:app")) return "app"
+          if (tags.includes("type:contract") && !tags.includes("type:service")) return "contract"
+          if (tags.includes("type:service")) return "service"
+          if (tags.includes("type:contract")) return "contract"
+          return undefined
+        })
+        .with({ _tag: "None" }, () => undefined)
+        .exhaustive()
+      if (resolvedTag !== undefined) return resolvedTag
       break
     }
     const parent = path.dirname(currentDir)
@@ -139,22 +150,28 @@ const resolvePackageTag = (repoRoot: string, relFilePath: string): PackageTag =>
   return "service"
 }
 
-const findSrcTsFiles = (repoRoot: string, subDir: string): ReadonlyArray<string> => {
+const findSrcTsFiles = (
+  repoRoot: string,
+  subDir: string,
+  hostIo: SyncHostIo,
+): ReadonlyArray<string> => {
   const results: Array<string> = []
   const walk = (current: string): void => {
-    if (!fs.existsSync(current)) return
-    const entries = fs.readdirSync(current, { withFileTypes: true })
+    if (!hostIo.existsSync(current)) return
+    const entries = hostIo.readdirSync(current)
     for (const e of entries) {
       if (e.name === "node_modules" || e.name === "dist" || e.name === ".nx" || e.name === "test") {
         continue
       }
       const full = path.join(current, e.name)
-      if (e.isDirectory()) {
+      if (e.isDirectory) {
         walk(full)
-      } else if (e.isFile() && e.name.endsWith(".ts") && !e.name.endsWith(".d.ts")) {
-        const rel = path.relative(repoRoot, full).replace(/\\/g, "/")
-        if (rel.includes("/src/")) {
-          results.push(rel)
+      } else {
+        if (e.isFile && e.name.endsWith(".ts") && !e.name.endsWith(".d.ts")) {
+          const rel = path.relative(repoRoot, full).replace(/\\/g, "/")
+          if (rel.includes("/src/")) {
+            results.push(rel)
+          }
         }
       }
     }
@@ -163,19 +180,25 @@ const findSrcTsFiles = (repoRoot: string, subDir: string): ReadonlyArray<string>
   return results
 }
 
-export const buildWorkspaceFnIndex = (repoRoot: string): Effect.Effect<WorkspaceFnIndex> =>
-  Effect.gen(function* () {
+export const buildWorkspaceFnIndex = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+): Effect.Effect<WorkspaceFnIndex> =>
+  Effect.sync(() => {
     const allFns: Array<IndexedEffectFn> = []
-    const files = [...findSrcTsFiles(repoRoot, "libs"), ...findSrcTsFiles(repoRoot, "apps")]
+    const files = [
+      ...findSrcTsFiles(repoRoot, "libs", hostIo),
+      ...findSrcTsFiles(repoRoot, "apps", hostIo),
+    ]
     for (const file of files) {
       const fullPath = path.join(repoRoot, file)
-      if (!fs.existsSync(fullPath)) continue
-      const content = yield* Effect.try({
-        try: () => fs.readFileSync(fullPath, "utf-8"),
-        catch: () => null,
-      }).pipe(Effect.orElseSucceed(() => null))
+      if (!hostIo.existsSync(fullPath)) continue
+      const content = Result.getOrElse(
+        Result.try(() => hostIo.readTextSync(fullPath)),
+        () => null,
+      )
       if (content === null) continue
-      const tag = resolvePackageTag(repoRoot, file)
+      const tag = resolvePackageTag(repoRoot, file, hostIo)
       const fns = indexEffectFnsInFile(file, content, tag)
       allFns.push(...fns)
     }

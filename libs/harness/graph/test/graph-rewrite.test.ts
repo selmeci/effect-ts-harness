@@ -27,6 +27,7 @@ import {
   verifyDpoGluingCondition,
 } from "../src/index.js"
 import { mapInferenceErrorToRewriteError } from "../src/rewrite/dpo-algebra-core.js"
+import { evaluateAndSelectArchRepairBranch } from "../src/rewrite/repair-rules-arch.plugin.js"
 
 const MeasureTupleSchema = Schema.Tuple([
   Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 0, maximum: 20 }))),
@@ -957,10 +958,30 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
           Graph.getNode(outcome.targetGraph.graph, validateIdx!),
         )
         const decideNode = Option.getOrThrow(Graph.getNode(outcome.targetGraph.graph, decideIdx!))
-        if (validateNode._tag === "EffectFn" && decideNode._tag === "EffectFn") {
-          expect(validateNode.spanName).toBe("Order.validate")
-          expect(decideNode.spanName).toBe("Order.decide")
-        }
+        const validateSpan = match(validateNode)
+          .with({ _tag: "EffectFn" }, (n) => n.spanName)
+          .with(
+            { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" },
+            { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" },
+            { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" },
+            { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" },
+            { _tag: "MigrationTuple" },
+            () => undefined,
+          )
+          .exhaustive()
+        const decideSpan = match(decideNode)
+          .with({ _tag: "EffectFn" }, (n) => n.spanName)
+          .with(
+            { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" },
+            { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" },
+            { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" },
+            { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" },
+            { _tag: "MigrationTuple" },
+            () => undefined,
+          )
+          .exhaustive()
+        expect(validateSpan).toBe("Order.validate")
+        expect(decideSpan).toBe("Order.decide")
 
         const rep06 = rec.patches.find((p) => p.ruleId === RewriteRuleId.make("REP-06"))
         expect(rep06).toBeDefined()
@@ -1146,4 +1167,23 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
     expect(failedErr._tag).toBe("GraphRewriteError")
     expect(failedErr.reason).toBe("inference-failed")
   })
+
+  it.effect("calls evaluateAndSelectArchRepairBranch directly", () =>
+    Effect.gen(function* () {
+      const emptyGraph = buildHarnessGraph({})
+      const inference = yield* decideGraphInference(emptyGraph)
+      const zeroMeasure = computeGraphMeasure(emptyGraph, inference)
+      const exit = yield* Effect.exit(
+        evaluateAndSelectArchRepairBranch([], emptyGraph, zeroMeasure),
+      )
+      match(exit)
+        .with({ _tag: "Failure" }, () => {
+          expect(true).toBe(true)
+        })
+        .with({ _tag: "Success" }, ({ value }) => {
+          expect(value.winner).toBeDefined()
+        })
+        .exhaustive()
+    }),
+  )
 })

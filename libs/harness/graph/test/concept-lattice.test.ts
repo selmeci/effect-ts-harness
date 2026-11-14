@@ -152,9 +152,11 @@ describe("ConceptLattice.decide (PERA Polymorphic Concept Hierarchy)", () => {
             ],
           }),
         )
-        expect(Exit.isFailure(selfCycleExit)).toBe(true)
         const selfCycleError = match(selfCycleExit)
-          .with({ _tag: "Failure" }, ({ cause }) => Cause.findErrorOption(cause))
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            expect(Cause.hasFails(cause)).toBe(true)
+            return Cause.findErrorOption(cause)
+          })
           .with({ _tag: "Success" }, () => {
             throw new Error("Expected failure")
           })
@@ -237,9 +239,11 @@ describe("ConceptLattice.decide (PERA Polymorphic Concept Hierarchy)", () => {
           ],
         }
         const exit = yield* Effect.exit(decideConceptLattice(config))
-        expect(Exit.isFailure(exit)).toBe(true)
         const errorOpt = match(exit)
-          .with({ _tag: "Failure" }, ({ cause }) => Cause.findErrorOption(cause))
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            expect(Cause.hasFails(cause)).toBe(true)
+            return Cause.findErrorOption(cause)
+          })
           .with({ _tag: "Success" }, () => {
             throw new Error("Expected decideConceptLattice to fail")
           })
@@ -280,9 +284,11 @@ describe("ConceptLattice.decide (PERA Polymorphic Concept Hierarchy)", () => {
           ],
         }
         const exit = yield* Effect.exit(decideConceptLattice(config))
-        expect(Exit.isFailure(exit)).toBe(true)
         const errorOpt = match(exit)
-          .with({ _tag: "Failure" }, ({ cause }) => Cause.findErrorOption(cause))
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            expect(Cause.hasFails(cause)).toBe(true)
+            return Cause.findErrorOption(cause)
+          })
           .with({ _tag: "Success" }, () => {
             throw new Error("Expected decideConceptLattice to fail")
           })
@@ -330,9 +336,11 @@ describe("ConceptLattice.decide (PERA Polymorphic Concept Hierarchy)", () => {
           ],
         }
         const exit = yield* Effect.exit(decideConceptLattice(config))
-        expect(Exit.isFailure(exit)).toBe(true)
         const error = match(exit)
-          .with({ _tag: "Failure" }, ({ cause }) => Cause.findErrorOption(cause))
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            expect(Cause.hasFails(cause)).toBe(true)
+            return Cause.findErrorOption(cause)
+          })
           .with({ _tag: "Success" }, () => {
             throw new Error("Expected failure")
           })
@@ -371,9 +379,11 @@ describe("ConceptLattice.decide (PERA Polymorphic Concept Hierarchy)", () => {
           ],
         }
         const exit = yield* Effect.exit(decideConceptLattice(config))
-        expect(Exit.isFailure(exit)).toBe(true)
         const error = match(exit)
-          .with({ _tag: "Failure" }, ({ cause }) => Cause.findErrorOption(cause))
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            expect(Cause.hasFails(cause)).toBe(true)
+            return Cause.findErrorOption(cause)
+          })
           .with({ _tag: "Success" }, () => {
             throw new Error("Expected failure")
           })
@@ -435,9 +445,11 @@ describe("ConceptLattice.decide (PERA Polymorphic Concept Hierarchy)", () => {
             ],
           }
           const exit = yield* Effect.exit(decideConceptLattice(config))
-          expect(Exit.isFailure(exit)).toBe(true)
           const error = match(exit)
-            .with({ _tag: "Failure" }, ({ cause }) => Cause.findErrorOption(cause))
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(Cause.hasFails(cause)).toBe(true)
+              return Cause.findErrorOption(cause)
+            })
             .with({ _tag: "Success" }, () => {
               throw new Error("Expected failure")
             })
@@ -499,9 +511,11 @@ describe("ConceptLattice.decide (PERA Polymorphic Concept Hierarchy)", () => {
             ],
           }
           const exit = yield* Effect.exit(decideConceptLattice(config))
-          expect(Exit.isFailure(exit)).toBe(true)
           const error = match(exit)
-            .with({ _tag: "Failure" }, ({ cause }) => Cause.findErrorOption(cause))
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(Cause.hasFails(cause)).toBe(true)
+              return Cause.findErrorOption(cause)
+            })
             .with({ _tag: "Success" }, () => {
               throw new Error("Expected failure")
             })
@@ -567,9 +581,11 @@ describe("ConceptLattice.decide (PERA Polymorphic Concept Hierarchy)", () => {
           ],
         }
         const exit = yield* Effect.exit(decideConceptLattice(config))
-        expect(Exit.isFailure(exit)).toBe(true)
         const error = match(exit)
-          .with({ _tag: "Failure" }, ({ cause }) => Cause.findErrorOption(cause))
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            expect(Cause.hasFails(cause)).toBe(true)
+            return Cause.findErrorOption(cause)
+          })
           .with({ _tag: "Success" }, () => {
             throw new Error("Expected failure")
           })
@@ -624,9 +640,11 @@ describe("ConceptLattice.decide (PERA Polymorphic Concept Hierarchy)", () => {
           ],
         }
         const exit = yield* Effect.exit(decideConceptLattice(config))
-        expect(Exit.isFailure(exit)).toBe(true)
         const error = match(exit)
-          .with({ _tag: "Failure" }, ({ cause }) => Cause.findErrorOption(cause))
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            expect(Cause.hasFails(cause)).toBe(true)
+            return Cause.findErrorOption(cause)
+          })
           .with({ _tag: "Success" }, () => {
             throw new Error("Expected failure")
           })

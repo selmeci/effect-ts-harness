@@ -34,20 +34,24 @@ export class McpToolRegistry extends Context.Service<McpToolRegistry, McpToolReg
 
 export const makeMcpToolRegistryLayer = (
   tools: ReadonlyArray<McpToolPluginDescriptor>,
-): Layer.Layer<McpToolRegistry> => {
-  const byName = new Map<string, McpToolPluginDescriptor>()
-  for (const t of tools) {
-    if (byName.has(t.name)) {
-      Effect.runSync(Effect.die(new Error(`Duplicate MCP tool registered: ${t.name}`)))
-    }
-    byName.set(t.name, t)
-  }
-  const readonlyByName: ReadonlyMap<string, McpToolPluginDescriptor> = byName
-  return Layer.succeed(McpToolRegistry, {
-    listTools: Effect.succeed(tools),
-    resolveTool: (name) => Effect.succeed(Option.fromUndefinedOr(readonlyByName.get(name))),
-  })
-}
+): Layer.Layer<McpToolRegistry> =>
+  Layer.effect(
+    McpToolRegistry,
+    Effect.gen(function* () {
+      const byName = new Map<string, McpToolPluginDescriptor>()
+      for (const t of tools) {
+        if (byName.has(t.name)) {
+          return yield* Effect.die(new Error(`Duplicate MCP tool registered: ${t.name}`))
+        }
+        byName.set(t.name, t)
+      }
+      const readonlyByName: ReadonlyMap<string, McpToolPluginDescriptor> = byName
+      return McpToolRegistry.of({
+        listTools: Effect.succeed(tools),
+        resolveTool: (name) => Effect.succeed(Option.fromUndefinedOr(readonlyByName.get(name))),
+      })
+    }),
+  )
 
 export type McpToolHandler = (
   args: Readonly<Record<string, unknown>>,

@@ -1,3 +1,4 @@
+import { match } from "ts-pattern"
 import {
   Node,
   type ParameterDeclaration,
@@ -88,66 +89,67 @@ export const extractSchemaDefinitions = (
 
   for (const callExpr of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
     const calleeText = callExpr.getExpression().getText()
-    if (calleeText === "Schema.TaggedStruct" || calleeText === "S.TaggedStruct") {
-      const args = callExpr.getArguments()
-      if (args.length >= 2 && Node.isStringLiteral(args[0]) && Node.isObjectLiteralExpression(args[1])) {
-        const tag = args[0].getLiteralText()
-        const schemaInfo: TaggedSchemaInfo = { tag, properties: getObjectPropNames(args[1]), file: relPath, line: callExpr.getStartLineNumber() }
-        registerTaggedSchemaByTag(tag, schemaInfo)
-        const parentVar = callExpr.getFirstAncestorByKind(SyntaxKind.VariableDeclaration)
-        if (parentVar) {
-          taggedSchemasByName.set(parentVar.getName(), schemaInfo)
-          unionSchemaTagsByName.set(parentVar.getName(), [tag])
+    match(calleeText)
+      .with("Schema.TaggedStruct", "S.TaggedStruct", () => {
+        const args = callExpr.getArguments()
+        if (args.length >= 2 && Node.isStringLiteral(args[0]) && Node.isObjectLiteralExpression(args[1])) {
+          const tag = args[0].getLiteralText()
+          const schemaInfo: TaggedSchemaInfo = { tag, properties: getObjectPropNames(args[1]), file: relPath, line: callExpr.getStartLineNumber() }
+          registerTaggedSchemaByTag(tag, schemaInfo)
+          const parentVar = callExpr.getFirstAncestorByKind(SyntaxKind.VariableDeclaration)
+          if (parentVar) { taggedSchemasByName.set(parentVar.getName(), schemaInfo); unionSchemaTagsByName.set(parentVar.getName(), [tag]) }
         }
-      }
-    } else if (calleeText === "Schema.TaggedUnion" || calleeText === "S.TaggedUnion") {
-      const args = callExpr.getArguments()
-      if (args.length >= 1 && Node.isObjectLiteralExpression(args[0])) {
-        const memberTags: Array<string> = []
-        for (const prop of args[0].getProperties()) {
-          if (Node.isPropertyAssignment(prop)) {
-            const tag = prop.getName().replace(/^["'`]|["'`]$/g, "")
-            registerTaggedSchemaByTag(tag, { tag, properties: getObjectPropNames(prop.getInitializer()), file: relPath, line: prop.getStartLineNumber() })
-            memberTags.push(tag)
+      })
+      .with("Schema.TaggedUnion", "S.TaggedUnion", () => {
+        const args = callExpr.getArguments()
+        if (args.length >= 1 && Node.isObjectLiteralExpression(args[0])) {
+          const memberTags: Array<string> = []
+          for (const prop of args[0].getProperties()) {
+            if (Node.isPropertyAssignment(prop)) {
+              const tag = prop.getName().replace(/^["'`]|["'`]$/g, "")
+              registerTaggedSchemaByTag(tag, { tag, properties: getObjectPropNames(prop.getInitializer()), file: relPath, line: prop.getStartLineNumber() })
+              memberTags.push(tag)
+            }
           }
+          const parentVar = callExpr.getFirstAncestorByKind(SyntaxKind.VariableDeclaration)
+          if (parentVar && memberTags.length > 0) unionSchemaTagsByName.set(parentVar.getName(), memberTags)
         }
+      })
+      .with("Schema.Union", "S.Union", () => {
         const parentVar = callExpr.getFirstAncestorByKind(SyntaxKind.VariableDeclaration)
-        if (parentVar && memberTags.length > 0) unionSchemaTagsByName.set(parentVar.getName(), memberTags)
-      }
-    } else if (calleeText === "Schema.Union" || calleeText === "S.Union") {
-      const parentVar = callExpr.getFirstAncestorByKind(SyntaxKind.VariableDeclaration)
-      if (parentVar && parentVar.getInitializer() === callExpr) {
-        const memberNames: Array<string> = []
-        for (const arg of callExpr.getArguments()) {
-          if (Node.isArrayLiteralExpression(arg)) {
-            for (const el of arg.getElements()) { if (Node.isIdentifier(el)) memberNames.push(el.getText()) }
-          } else if (Node.isIdentifier(arg)) {
-            memberNames.push(arg.getText())
+        if (parentVar && parentVar.getInitializer() === callExpr) {
+          const memberNames: Array<string> = []
+          for (const arg of callExpr.getArguments()) {
+            if (Node.isArrayLiteralExpression(arg)) {
+              for (const el of arg.getElements()) { if (Node.isIdentifier(el)) memberNames.push(el.getText()) }
+              continue
+            }
+            if (Node.isIdentifier(arg)) memberNames.push(arg.getText())
           }
+          if (memberNames.length > 0) unionSchemaTagsByName.set(parentVar.getName(), memberNames)
         }
-        if (memberNames.length > 0) unionSchemaTagsByName.set(parentVar.getName(), memberNames)
-      }
-    }
+      })
+      .otherwise(() => {})
   }
 
   for (const typeAlias of sourceFile.getTypeAliases()) {
     const aliasName = typeAlias.getName()
-    if (!unionSchemaTagsByName.has(aliasName)) {
-      const typeNode = typeAlias.getTypeNode()
-      if (typeNode && Node.isUnionTypeNode(typeNode)) {
-        const members: Array<string> = []
-        for (const part of typeNode.getTypeNodes()) {
-          const text = part.getText().trim()
-          if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(text)) members.push(text)
-        }
-        if (members.length > 0) unionSchemaTagsByName.set(aliasName, members)
-      } else if (typeNode) {
-        const text = typeNode.getText().trim()
-        const matchTypeof = text.match(/^typeof\s+([A-Za-z_$][A-Za-z0-9_$]*)\.Type$/)
-        const targetIdent = matchTypeof?.[1] ?? (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(text) ? text : undefined)
-        if (targetIdent && targetIdent !== aliasName) unionSchemaTagsByName.set(aliasName, [targetIdent])
+    if (unionSchemaTagsByName.has(aliasName)) continue
+    const typeNode = typeAlias.getTypeNode()
+    if (!typeNode) continue
+    if (Node.isUnionTypeNode(typeNode)) {
+      const members: Array<string> = []
+      for (const part of typeNode.getTypeNodes()) {
+        const text = part.getText().trim()
+        if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(text)) members.push(text)
       }
+      if (members.length > 0) unionSchemaTagsByName.set(aliasName, members)
+      continue
     }
+    const text = typeNode.getText().trim()
+    const matchTypeof = text.match(/^typeof\s+([A-Za-z_$][A-Za-z0-9_$]*)\.Type$/)
+    const targetIdent = matchTypeof?.[1] ?? (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(text) ? text : undefined)
+    if (targetIdent && targetIdent !== aliasName) unionSchemaTagsByName.set(aliasName, [targetIdent])
   }
 
   for (const varDecl of sourceFile.getVariableDeclarations()) {
@@ -190,9 +192,10 @@ export const checkSchemaBooleanStateAndBrandedFields = (
     if (!isStruct && !isTaggedStruct && !isTaggedClass) continue
 
     const args = callExpr.getArguments()
-    let objLit: Node | undefined
-    if (isStruct && args.length >= 1 && Node.isObjectLiteralExpression(args[0])) objLit = args[0]
-    else if ((isTaggedStruct || isTaggedClass) && args.length >= 2 && Node.isObjectLiteralExpression(args[1])) objLit = args[1]
+    const objLit: Node | undefined =
+      isStruct && args.length >= 1 && Node.isObjectLiteralExpression(args[0]) ? args[0]
+        : (isTaggedStruct || isTaggedClass) && args.length >= 2 && Node.isObjectLiteralExpression(args[1]) ? args[1]
+          : undefined
     if (!objLit || !Node.isObjectLiteralExpression(objLit)) continue
 
     const propAssignments: Array<{ name: string; node: Node; init: Node }> = []
@@ -295,7 +298,9 @@ const checkBoundaryParamsAndReturn = (
     const paramPrim = isOpenUnbrandedPrimitiveType(paramType, param)
     if (paramPrim !== null) {
       addViolation(violations, "unbranded-primitive-boundary", `${symbolCategory} '${fnName}' parameter '${param.getName()}' in '${enclosingSymbol}' uses unbranded primitive '${paramPrim}' without '~effect/Brand' — use a branded domain type from type:contract.`, relPath, param.getStartLineNumber(), enclosingSymbol)
-    } else if (!paramType.isUnion()) {
+      continue
+    }
+    if (!paramType.isUnion()) {
       for (const { propName, prim, line } of collectUnbrandedObjectProperties(paramType, param)) {
         addViolation(violations, "unbranded-primitive-boundary", `${symbolCategory} '${fnName}' parameter property '${propName}' in '${enclosingSymbol}' uses unbranded primitive '${prim}' without '~effect/Brand' — use a branded domain type from type:contract.`, relPath, line, enclosingSymbol)
       }
@@ -313,7 +318,8 @@ const checkBoundaryParamsAndReturn = (
     const retPrim = isOpenUnbrandedPrimitiveType(retSuccess, retLocNode)
     if (retPrim !== null) {
       addViolation(violations, "unbranded-primitive-boundary", `${symbolCategory} '${fnName}' return ${symbolCategory === "Domain function" ? "success " : ""}type in '${enclosingSymbol}' resolves to unbranded primitive '${retPrim}' without '~effect/Brand' — use a branded domain type from type:contract.`, relPath, declLine, enclosingSymbol)
-    } else if (!retSuccess.isUnion()) {
+    }
+    if (retPrim === null && !retSuccess.isUnion()) {
       for (const { propName, prim, line } of collectUnbrandedObjectProperties(retSuccess, explicitRetNode ?? params[0] ?? declNode)) {
         addViolation(violations, "unbranded-primitive-boundary", `${symbolCategory} '${fnName}' return property '${propName}' in '${enclosingSymbol}' uses unbranded primitive '${prim}' without '~effect/Brand' — use a branded domain type from type:contract.`, relPath, line, enclosingSymbol)
       }
@@ -352,7 +358,9 @@ export const checkBrandedDomainTypesAndPrimitiveBoundaries = (
         const prim = isOpenUnbrandedPrimitiveType(typeAlias.getType(), typeAlias)
         if (prim !== null) {
           addViolation(violations, "unbranded-contract-schema", `Exported type alias '${aliasName}' in '${enclosingSymbol}' resolves to unbranded primitive '${prim}' without '~effect/Brand' — define a branded schema with Schema.brand("${aliasName}") in type:contract.`, relPath, typeAlias.getStartLineNumber(), enclosingSymbol)
-        } else if (containsInlineObjectTypeAst(typeAlias.getTypeNode()) && !isTypeBranded(typeAlias.getType())) {
+          continue
+        }
+        if (containsInlineObjectTypeAst(typeAlias.getTypeNode()) && !isTypeBranded(typeAlias.getType())) {
           addViolation(violations, "unbranded-contract-schema", `Exported type alias '${aliasName}' in '${enclosingSymbol}' uses an inline object type literal without a runtime Schema — define a Schema.Struct or Schema.Class in type:contract with branded fields and derive 'export type ${aliasName} = typeof ${aliasName}.Type'.`, relPath, typeAlias.getStartLineNumber(), enclosingSymbol)
         }
       }
@@ -366,9 +374,11 @@ export const checkBrandedDomainTypesAndPrimitiveBoundaries = (
         if (arg0 && Node.isStringLiteral(arg0)) {
           const brandKey = arg0.getLiteralValue(), enclosingSymbol = findEnclosingSymbolName(callExpr, relPath)
           const firstSymbol = declaredBrandKeys.get(brandKey)
-          if (firstSymbol && firstSymbol !== enclosingSymbol) {
-            addViolation(violations, "unbranded-contract-schema", `Duplicate Schema.brand('${brandKey}') in '${enclosingSymbol}' (already declared in '${firstSymbol}') — each brand key must have a single canonical constructor schema; compose wire schemas using Schema.decodeTo(${brandKey}).`, relPath, callExpr.getStartLineNumber(), enclosingSymbol)
-          } else if (!firstSymbol) {
+          if (firstSymbol) {
+            if (firstSymbol !== enclosingSymbol) {
+              addViolation(violations, "unbranded-contract-schema", `Duplicate Schema.brand('${brandKey}') in '${enclosingSymbol}' (already declared in '${firstSymbol}') — each brand key must have a single canonical constructor schema; compose wire schemas using Schema.decodeTo(${brandKey}).`, relPath, callExpr.getStartLineNumber(), enclosingSymbol)
+            }
+          } else {
             declaredBrandKeys.set(brandKey, enclosingSymbol)
           }
         }
@@ -467,7 +477,9 @@ export const checkBrandedDomainTypesAndPrimitiveBoundaries = (
         ) {
           checkExportedDomainFn(varDecl.getName(), init.getArguments()[0], varDecl)
         }
-      } else if (Node.isArrowFunction(init) || Node.isFunctionExpression(init)) {
+        continue
+      }
+      if (Node.isArrowFunction(init) || Node.isFunctionExpression(init)) {
         checkExportedDomainFn(varDecl.getName(), init, varDecl)
       }
     }

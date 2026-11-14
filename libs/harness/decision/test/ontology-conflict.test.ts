@@ -3,8 +3,6 @@ import { Effect, Layer } from "effect"
 import * as AiError from "effect/ai/AiError"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import {
-  assertDecisionLimits,
-  checkOntologyInvariants,
   checkOntologyPairConflict,
   decideOntologyInvariants,
   evaluateOntologyConflicts,
@@ -14,12 +12,13 @@ import {
   makeFailingDecisionModelLayer,
   makeMockDecisionModelLayer,
   OntologyConflictV1,
+  validateDecisionLimits,
 } from "../src/index.js"
 
 describe("Ontology Conflict Decision", () => {
-  it("keeps OntologyConflictV1 within Ollama System One limits", () => {
-    expect(() => assertDecisionLimits(OntologyConflictV1)).not.toThrow()
-  })
+  it.effect("keeps OntologyConflictV1 within Ollama System One limits", () =>
+    validateDecisionLimits(OntologyConflictV1),
+  )
 
   it.effect(
     "detects conflict when contradicts probability is high and conflictKind is non-none",
@@ -85,11 +84,11 @@ describe("Ontology Conflict Decision", () => {
 
   it("re-exports ontology gates utilities correctly", () => {
     expect(typeof decideOntologyInvariants).toBe("function")
-    expect(typeof checkOntologyInvariants).toBe("function")
     expect(typeof loadGovernanceDocsFromDisk).toBe("function")
   })
 
-  it("extracts candidate conflict pairs from EARS specs and ADRs", () => {
+  it.effect("extracts candidate conflict pairs from EARS specs and ADRs", () =>
+    Effect.gen(function* () {
     const validSpecMd = `---
 id: SPEC-0001
 title: Photo Upload Spec
@@ -154,7 +153,7 @@ How to persist photos.
       },
     ]
 
-    const pairs = extractOntologyConflictPairs(docs, "sample")
+    const pairs = yield* extractOntologyConflictPairs(docs, "sample")
     expect(pairs.length).toBeGreaterThanOrEqual(2)
 
     const specPair = pairs.find((p) => p.targetId === "sample:SPEC-0001#REQ-1.2")
@@ -165,7 +164,7 @@ How to persist photos.
     const adrPair = pairs.find((p) => p.targetId === "sample:ADR-0001")
     expect(adrPair).toBeDefined()
     expect(adrPair?.targetText).toContain("Reject all synchronous photo processing")
-  })
+  }))
 
   it.effect("evaluates candidate pairs and collects semantic conflicts", () =>
     Effect.gen(function* () {

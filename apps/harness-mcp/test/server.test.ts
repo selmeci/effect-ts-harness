@@ -19,11 +19,11 @@ import * as AiError from "effect/ai/AiError"
 import { makeMockDecisionModelLayer } from "@harness/decision"
 import { buildHarnessGraph, saveGraphSnapshot } from "@harness/graph"
 import { readTelemetryEvents } from "@harness/gates"
+import { nodeSyncHostIo } from "@harness/infra"
 import { match } from "ts-pattern"
 import {
   createServer,
   dispatchMcpTool,
-  executeTool,
   isPathInsideRoot,
   makeLiveMcpToolRegistryLayer,
   normalizeProjectPath,
@@ -34,6 +34,7 @@ import {
   runDefaultLspDiagnostics,
   startHarnessDaemonServer,
 } from "../src/server.js"
+import { executeTool } from "./execute-tool-helper.js"
 import { resolveGraph } from "../src/tools/mcp-helpers.js"
 import { McpToolInputName } from "../src/tools/tool-registry.js"
 
@@ -329,24 +330,30 @@ describe("harness-mcp tools", () => {
           }
           const answers: Record<string, DecisionModel.ProviderAnswer> = {}
           for (const [key, decision] of Object.entries(options.decisions)) {
-            if (decision._tag === "Probability") {
-              answers[key] = {
-                _tag: "Probability",
-                probability: key === "fitsAny" ? outcome.fitsAny : 0.9,
-              }
-            } else if (decision._tag === "Classify") {
-              const labels = Object.keys(decision.criteria)
-              const chosen = key === "block" ? outcome.block : (labels[0] ?? "")
-              const probabilities: Record<string, number> = {}
-              for (const l of labels) {
-                probabilities[l] = l === chosen ? 1 : 0
-              }
-              answers[key] = {
-                _tag: "Classify",
-                label: chosen,
-                probabilities,
-              }
-            }
+            match(decision)
+              .with({ _tag: "Probability" }, () => {
+                answers[key] = {
+                  _tag: "Probability",
+                  probability: key === "fitsAny" ? outcome.fitsAny : 0.9,
+                }
+              })
+              .with({ _tag: "Classify" }, (d) => {
+                const labels = Object.keys(d.criteria)
+                const chosen = key === "block" ? outcome.block : (labels[0] ?? "")
+                const probabilities: Record<string, number> = {}
+                for (const l of labels) {
+                  probabilities[l] = l === chosen ? 1 : 0
+                }
+                answers[key] = {
+                  _tag: "Classify",
+                  label: chosen,
+                  probabilities,
+                }
+              })
+              .with({ _tag: "Rate" }, () => {
+                throw new Error("Unexpected Rate decision")
+              })
+              .exhaustive()
           }
           return Effect.succeed({
             answers,
@@ -470,7 +477,7 @@ describe("harness-mcp tools", () => {
   it("resolves reaching tests from disk snapshot when snapshotPath is provided", async () => {
     const tempSnapshotPath = path.join(os.tmpdir(), `test-snapshot-${Date.now()}.json`)
     try {
-      saveGraphSnapshot(graph, tempSnapshotPath)
+      saveGraphSnapshot(graph, tempSnapshotPath, nodeSyncHostIo)
       const tests = await executeTool(
         "harness_tests_reaching",
         { symbolOrSpan: "Sample.greet" },
@@ -742,7 +749,7 @@ describe("harness-mcp tools", () => {
       const verifyPath = path.join(harnessDir, "graph-snapshot.json")
 
       // 1. Case A: graph-snapshot.json is absent, plan-graph-snapshot.json is present
-      saveGraphSnapshot(planGraph, planPath)
+      saveGraphSnapshot(planGraph, planPath, nodeSyncHostIo)
       const resPlanOnly = await executeTool("harness_resolve", {
         symbolOrSpan: "Sample.planFn",
         repoRoot: tmpDir,
@@ -752,7 +759,7 @@ describe("harness-mcp tools", () => {
       })
 
       // 2. Case B: graph-snapshot.json exists, but plan-graph-snapshot.json is newer
-      saveGraphSnapshot(verifyGraph, verifyPath)
+      saveGraphSnapshot(verifyGraph, verifyPath, nodeSyncHostIo)
       const past = new Date(Date.now() - 100000)
       const now = new Date()
       fs.utimesSync(verifyPath, past, past)
@@ -1164,13 +1171,17 @@ describe("harness-mcp tools", () => {
       .with({ _tag: "Failure" }, ({ cause }) => {
         expect(Cause.hasDies(cause)).toBe(false)
         const errorOpt = Cause.findErrorOption(cause)
-        expect(errorOpt._tag).toBe("Some")
-        if (errorOpt._tag === "Some") {
-          expect(errorOpt.value).toMatchObject({
-            _tag: "GraphInferenceError",
-            reason: "invalid-graph",
+        match(errorOpt)
+          .with({ _tag: "Some" }, ({ value }) => {
+            expect(value).toMatchObject({
+              _tag: "GraphInferenceError",
+              reason: "invalid-graph",
+            })
           })
-        }
+          .with({ _tag: "None" }, () => {
+            expect.unreachable("Expected errorOpt to be Some")
+          })
+          .exhaustive()
       })
       .with({ _tag: "Success" }, () => {
         throw new Error("Expected invalid priors in harness_graph_complete to fail Schema decode")
@@ -1382,7 +1393,7 @@ describe("harness-mcp tools", () => {
     )
   })
 
-  it("daemon fails closed with DaemonSocketChmodError and unlinks socket when chmodSync fails", async () => {
+  it("daemon fails closed with DaemonServerError and unlinks socket when chmodSync fails", async () => {
     if (process.platform === "win32") {
       return
     }
@@ -1399,7 +1410,7 @@ describe("harness-mcp tools", () => {
     await Effect.runPromise(
       Effect.promise(async () => {
         await expect(startHarnessDaemonServer(tmpDir)).rejects.toMatchObject({
-          _tag: "DaemonSocketChmodError",
+          _tag: "DaemonServerError",
           socketPath,
         })
         expect(fs.existsSync(socketPath)).toBe(false)
@@ -1574,7 +1585,7 @@ describe("harness-mcp tools", () => {
           { repoRoot: tmpDir },
         )
 
-        const events = readTelemetryEvents(tmpDir)
+        const events = readTelemetryEvents(tmpDir, nodeSyncHostIo)
         expect(events).toHaveLength(2)
         expect(events[0]).toMatchObject({
           surface: "mcp",
@@ -1604,7 +1615,7 @@ describe("harness-mcp tools", () => {
             { repoRoot: readOnlyRoot },
           ),
         ).not.toThrow()
-        expect(readTelemetryEvents(readOnlyRoot)).toEqual([])
+        expect(readTelemetryEvents(readOnlyRoot, nodeSyncHostIo)).toEqual([])
       }).pipe(
         Effect.ensuring(
           Effect.sync(() => {

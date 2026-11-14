@@ -13,7 +13,7 @@
  */
 import { Effect } from "effect"
 import { match } from "ts-pattern"
-import { decideGraphInference, type HarnessGraph } from "@harness/graph"
+import { decideGraphInference } from "@harness/graph"
 import {
   augmentReachabilityWithInference,
   buildGraphReachabilityContext,
@@ -66,8 +66,6 @@ export { evaluateTestAndDeciderPlugin } from "./plugins/gc/gc-test-and-decider.p
 export { evaluateGovernanceDocsPlugin } from "./plugins/gc/gc-governance-docs.plugin.js"
 export {
   evaluatePackageAndMigrationPlugin,
-  scanPackageAndMigrationHygiene,
-  scanWorkspacePackageHygiene,
 } from "./plugins/gc/gc-package-and-migration.plugin.js"
 
 // ADR-0008 & SPEC-0006 Deterministic Enforcement literals:
@@ -118,19 +116,3 @@ export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
     findings,
   } satisfies GraphGcReport
 })
-
-export const detectGraphEntropy = (
-  graph: HarnessGraph,
-  options?: Omit<GraphEntropyInput, "graph">,
-): GraphGcReport =>
-  Effect.runSync(
-    decideGraphEntropy({
-      graph,
-      ...options,
-    }),
-  )
-
-export const scanGraphEntropy = (
-  graph: HarnessGraph,
-  options?: Omit<GraphEntropyInput, "graph">,
-): GraphGcReport => detectGraphEntropy(graph, options)

@@ -1,22 +1,22 @@
-import * as fs from "node:fs"
-import * as net from "node:net"
 import * as path from "node:path"
-import { Data, Effect, Schema } from "effect"
+import { Effect, Exit, Schema, Scope } from "effect"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
-import { extractWorkspaceTypeAwareGraph } from "@harness/graph"
 import {
-  AstGateCache,
   AstSourceContent,
   AstSourceFilePath,
   HARNESS_GATE_RULE_VERSION,
-} from "@harness/gates"
+  WorkspaceFilePath,
+} from "@harness/contract"
+import { AstGateCache } from "@harness/gates"
+import { extractWorkspaceTypeAwareGraph } from "@harness/graph"
+import {
+  nodeSyncHostIo,
+  resolveHarnessDaemonSocketPath,
+  startScopedUnixSocketDaemon,
+  UnixSocketDaemonLive,
+} from "@harness/infra"
 import { isPathInsideRoot } from "../tools/mcp-helpers.js"
-
-class DaemonSocketChmodError extends Data.TaggedError("DaemonSocketChmodError")<{
-  readonly socketPath: string
-  readonly message: string
-}> {}
 
 export interface HarnessDaemonServerHandle {
   readonly socketPath: string
@@ -42,261 +42,131 @@ const DaemonRequestSchema = Schema.Struct({
 const decodeDaemonRequest = Schema.decodeOption(Schema.fromJsonString(DaemonRequestSchema))
 
 export const resolveDaemonSocketPath = (repoRoot: string): string =>
-  path.join(repoRoot, ".harness", "daemon.sock")
+  resolveHarnessDaemonSocketPath(repoRoot)
 
-const safeUnlinkSocket = (socketPath: string): void => {
-  if (!fs.existsSync(socketPath)) {
-    return
-  }
-  Effect.runSync(
-    Effect.try({
-      try: () => {
-        fs.unlinkSync(socketPath)
-      },
-      catch: () => undefined,
-    }).pipe(Effect.ignore),
-  )
-}
-
-const MAX_DAEMON_BUFFER_BYTES = 1_048_576
-const DAEMON_SOCKET_TIMEOUT_MS = 5000
-
-const isDaemonSocketAlive = (socketPath: string): Effect.Effect<boolean> =>
-  Effect.callback<boolean>((resume) => {
-    if (!fs.existsSync(socketPath)) {
-      resume(Effect.succeed(false))
-      return
-    }
-    const probe = net.createConnection(socketPath)
-    let settled = false
-    const finish = (alive: boolean) => {
-      if (settled) return
-      settled = true
-      probe.destroy()
-      resume(Effect.succeed(alive))
-    }
-    probe.setTimeout(150, () => finish(false))
-    probe.on("connect", () => finish(true))
-    probe.on("error", () => finish(false))
-  })
-
-const createDaemonNetServer = (
-  repoRoot: string,
-  openSockets: Set<net.Socket>,
-): net.Server =>
-  net.createServer((socket) => {
-    openSockets.add(socket)
-    socket.once("close", () => {
-      openSockets.delete(socket)
-    })
-    socket.setTimeout(DAEMON_SOCKET_TIMEOUT_MS, () => {
-      socket.destroy()
-    })
-    socket.on("error", () => {
-      socket.destroy()
-    })
-    let buffer = ""
-    socket.on("data", (chunk) => {
-      buffer += chunk.toString("utf8")
-      if (Buffer.byteLength(buffer, "utf8") > MAX_DAEMON_BUFFER_BYTES) {
-        buffer = ""
-        if (!socket.destroyed && socket.writable) {
-          socket.end(
-            JSON.stringify({ ok: false, error: "Request payload exceeds 1MB limit" }) + "\n",
-            () => {
-              socket.destroy()
-            },
+const createDaemonLineHandler =
+  (repoRoot: string) =>
+  (line: string): Effect.Effect<string> => {
+    const reqOpt = decodeDaemonRequest(line.trim())
+    return match(reqOpt)
+      .with({ _tag: "None" }, () =>
+        Effect.succeed(JSON.stringify({ ok: false, error: "Invalid daemon request payload" })),
+      )
+      .with({ _tag: "Some" }, ({ value: req }) => {
+        const baseRoot = path.resolve(repoRoot)
+        const resolvedRoot =
+          req.repoRoot !== undefined
+            ? path.isAbsolute(req.repoRoot)
+              ? path.resolve(req.repoRoot)
+              : path.resolve(baseRoot, req.repoRoot)
+            : baseRoot
+        if (req.repoRoot !== undefined && !isPathInsideRoot(baseRoot, resolvedRoot)) {
+          return Effect.succeed(
+            JSON.stringify({
+              id: req.id,
+              ok: false,
+              error: `Requested repoRoot '${req.repoRoot}' escapes daemon root`,
+            }),
           )
-        } else {
-          socket.destroy()
         }
-        return
-      }
-      const newlineIdx = buffer.indexOf("\n")
-      if (newlineIdx === -1) return
-      const line = buffer.slice(0, newlineIdx).trim()
-      buffer = buffer.slice(newlineIdx + 1)
-      const reqOpt = decodeDaemonRequest(line)
-      match(reqOpt)
-        .with({ _tag: "None" }, () => {
-          if (!socket.destroyed && socket.writable) {
-            socket.end(
-              JSON.stringify({ ok: false, error: "Invalid daemon request payload" }) + "\n",
-            )
-          }
-        })
-        .with({ _tag: "Some" }, ({ value: req }) => {
-          const baseRoot = path.resolve(repoRoot)
-          const resolvedRoot =
-            req.repoRoot !== undefined
-              ? path.isAbsolute(req.repoRoot)
-                ? path.resolve(req.repoRoot)
-                : path.resolve(baseRoot, req.repoRoot)
-              : baseRoot
-          if (req.repoRoot !== undefined && !isPathInsideRoot(baseRoot, resolvedRoot)) {
-            if (!socket.destroyed && socket.writable) {
-              socket.end(
-                JSON.stringify({
-                  id: req.id,
-                  ok: false,
-                  error: `Requested repoRoot '${req.repoRoot}' escapes daemon root`,
-                }) + "\n",
-              )
-            }
-            return
-          }
-          void Effect.runPromise(
-            match<typeof req.command, Effect.Effect<Record<string, unknown>>>(req.command)
-              .with("ping", () => Effect.succeed({ id: req.id, ok: true, status: "warm" }))
-              .with("extract-graph", () =>
-                Effect.gen(function* () {
-                  const graph = yield* extractWorkspaceTypeAwareGraph(resolvedRoot)
+        return match<typeof req.command, Effect.Effect<Record<string, unknown>>>(
+          req.command,
+        )
+          .with("ping", () => Effect.succeed({ id: req.id, ok: true, status: "warm" }))
+          .with("extract-graph", () =>
+            Effect.gen(function* () {
+              const graph = yield* extractWorkspaceTypeAwareGraph(resolvedRoot, nodeSyncHostIo)
+              return {
+                id: req.id,
+                ok: true,
+                nodeCount: Graph.nodeCount(graph.graph),
+                edgeCount: Graph.edgeCount(graph.graph),
+                violationCount: (graph.branchingViolations ?? []).length,
+              }
+            }),
+          )
+          .with("ast-gates", () =>
+            Effect.gen(function* () {
+              const cachePath = AstGateCache.resolveCachePath(resolvedRoot)
+              const requestedRelPaths = req.files ?? []
+              for (const rel of requestedRelPaths) {
+                const resolvedAbs = path.resolve(resolvedRoot, rel)
+                if (!isPathInsideRoot(resolvedRoot, resolvedAbs)) {
                   return {
                     id: req.id,
-                    ok: true,
-                    nodeCount: Graph.nodeCount(graph.graph),
-                    edgeCount: Graph.edgeCount(graph.graph),
-                    violationCount: (graph.branchingViolations ?? []).length,
-                  }
-                }),
-              )
-              .with("ast-gates", () =>
-                Effect.gen(function* () {
-                  const cachePath = AstGateCache.resolveCachePath(resolvedRoot)
-                  const requestedRelPaths = req.files ?? []
-                  for (const rel of requestedRelPaths) {
-                    const resolvedAbs = path.resolve(resolvedRoot, rel)
-                    if (!isPathInsideRoot(resolvedRoot, resolvedAbs)) {
-                      return {
-                        id: req.id,
-                        ok: false,
-                        error: `Path traversal outside workspace root is forbidden: ${rel}`,
-                      }
-                    }
-                  }
-                  const loadedFiles = requestedRelPaths.flatMap((rel) => {
-                    const abs = path.resolve(resolvedRoot, rel)
-                    if (!fs.existsSync(abs)) return []
-                    return [
-                      {
-                        filePath: AstSourceFilePath.make(rel),
-                        content: AstSourceContent.make(fs.readFileSync(abs, "utf8")),
-                      },
-                    ]
-                  })
-                  const report = yield* AstGateCache.decide({
-                    files: loadedFiles,
-                    ruleVersion: HARNESS_GATE_RULE_VERSION,
-                    cacheFilePath: cachePath,
-                  })
-                  return { id: req.id, ok: true, report }
-                }),
-              )
-              .with("plan-check", "gc", "verify", "bench", () =>
-                Effect.succeed({ id: req.id, ok: false, fallbackToInProcess: true }),
-              )
-              .exhaustive(),
-          )
-            .then((res) => {
-              if (!socket.destroyed && socket.writable) {
-                socket.write(JSON.stringify(res) + "\n")
-                socket.end()
-              }
-            })
-            .catch((err: unknown) => {
-              if (!socket.destroyed && socket.writable) {
-                socket.write(
-                  JSON.stringify({
-                    id: req.id,
                     ok: false,
-                    error: err instanceof Error ? err.message : "Daemon execution error",
-                  }) + "\n",
-                )
-                socket.end()
+                    error: `Path traversal outside workspace root is forbidden: ${rel}`,
+                  }
+                }
               }
-            })
-        })
-        .exhaustive()
-    })
-  })
-
-const closeDaemonNetServer = (
-  server: net.Server,
-  socketPath: string,
-  openSockets: Set<net.Socket>,
-): Promise<void> =>
-  Effect.runPromise(
-    Effect.callback<void>((resume) => {
-      server.close(() => {
-        safeUnlinkSocket(socketPath)
-        resume(Effect.void)
+              const loadedFiles = requestedRelPaths.flatMap((rel) => {
+                const abs = path.resolve(resolvedRoot, rel)
+                if (!nodeSyncHostIo.existsSync(abs)) return []
+                return [
+                  {
+                    filePath: AstSourceFilePath.make(rel),
+                    content: AstSourceContent.make(nodeSyncHostIo.readTextSync(abs)),
+                  },
+                ]
+              })
+              const report = yield* AstGateCache.decide({
+                files: loadedFiles,
+                ruleVersion: HARNESS_GATE_RULE_VERSION,
+                cacheFilePath: cachePath,
+              })
+              return { id: req.id, ok: true, report }
+            }),
+          )
+          .with("plan-check", "gc", "verify", "bench", () =>
+            Effect.succeed({ id: req.id, ok: false, fallbackToInProcess: true }),
+          )
+          .exhaustive()
+          .pipe(
+            Effect.map((res) => JSON.stringify(res)),
+            Effect.catchDefect((defect: unknown) =>
+              Effect.sync(() => {
+                const message = defect instanceof Error ? defect.message : "Daemon execution error"
+                process.stderr.write(`[harness-mcp] Daemon line handler defect: ${message}\n`)
+                return JSON.stringify({ id: req.id, ok: false, error: message })
+              }),
+            ),
+          )
       })
-      for (const socket of openSockets) {
-        socket.destroy()
-      }
-      openSockets.clear()
-    }),
-  )
+      .exhaustive()
+  }
 
 export const startHarnessDaemonServer = (
   repoRoot: string = process.cwd(),
 ): Promise<HarnessDaemonServerHandle> =>
   Effect.runPromise(
     Effect.gen(function* () {
-      const socketPath = resolveDaemonSocketPath(repoRoot)
-      const dir = path.dirname(socketPath)
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
-      }
-      const alreadyAlive = yield* isDaemonSocketAlive(socketPath)
-      if (alreadyAlive) {
-        return {
-          socketPath,
-          close: () => Promise.resolve(),
-        }
-      }
-      safeUnlinkSocket(socketPath)
-
-      const openSockets = new Set<net.Socket>()
-      const server = createDaemonNetServer(repoRoot, openSockets)
-
-      yield* Effect.callback<void, Error>((resume) => {
-        const onError = (err: Error) => {
-          resume(Effect.fail(err))
-        }
-        server.once("error", onError)
-        server.listen(socketPath, () => {
-          server.removeListener("error", onError)
-          resume(Effect.void)
-        })
-      })
-
-      if (process.platform !== "win32") {
-        yield* Effect.try({
-          try: () => {
-            fs.chmodSync(socketPath, 0o600)
-          },
-          catch: (err) =>
-            new DaemonSocketChmodError({
-              socketPath,
-              message: err instanceof Error ? err.message : String(err),
-            }),
-        }).pipe(
-          Effect.catch((err) =>
-            Effect.gen(function* () {
-              process.stderr.write(
-                `[harness-mcp] Failed to chmod daemon socket '${socketPath}': ${err.message}\n`,
-              )
-              yield* Effect.promise(() => closeDaemonNetServer(server, socketPath, openSockets))
-              return yield* err
-            }),
-          ),
-        )
-      }
-
-      return {
-        socketPath,
-        close: () => closeDaemonNetServer(server, socketPath, openSockets),
-      }
+      const services = yield* Effect.context<never>()
+      const runPromise = Effect.runPromiseWith(services)
+      const scope = yield* Scope.make()
+      const outcome = yield* startScopedUnixSocketDaemon(WorkspaceFilePath.make(repoRoot), {
+        lineHandler: createDaemonLineHandler(repoRoot),
+      }).pipe(
+        Scope.provide(scope),
+        Effect.provide(UnixSocketDaemonLive),
+        Effect.map(
+          (info): HarnessDaemonServerHandle => ({
+            socketPath: info.socketPath,
+            close: () => runPromise(Scope.close(scope, Exit.void)),
+          }),
+        ),
+        Effect.catchTag("DaemonServerError", (err) => {
+          if (err.reason.includes("already alive")) {
+            return Scope.close(scope, Exit.void).pipe(
+              Effect.as<HarnessDaemonServerHandle>({
+                socketPath: err.socketPath,
+                close: () => Promise.resolve(),
+              }),
+            )
+          }
+          return Effect.fail(err)
+        }),
+        Effect.onError(() => Scope.close(scope, Exit.void)),
+      )
+      return outcome
     }),
   )

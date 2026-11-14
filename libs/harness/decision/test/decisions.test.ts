@@ -1,7 +1,7 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
 import {
-  assertDecisionLimits,
+  validateDecisionLimits,
   checkPlanStepCoverage,
   decideGuardCommand,
   GuardV1,
@@ -17,18 +17,20 @@ import {
 } from "../src/index.js"
 
 describe("Harness decision definitions & fallbacks", () => {
-  it("keeps all decision definitions within Ollama System One limits (<=26 options, <=64 questions)", () => {
-    for (const def of [
-      IdiomRouterV1,
-      GuardV1,
-      TriageV1,
-      PlanStepCoverageV1,
-      LearnProposalV1,
-      OntologyConflictV1,
-    ]) {
-      expect(() => assertDecisionLimits(def)).not.toThrow()
-    }
-  })
+  it.effect("keeps all decision definitions within Ollama System One limits (<=26 options, <=64 questions)", () =>
+    Effect.gen(function* () {
+      for (const def of [
+        IdiomRouterV1,
+        GuardV1,
+        TriageV1,
+        PlanStepCoverageV1,
+        LearnProposalV1,
+        OntologyConflictV1,
+      ]) {
+        yield* validateDecisionLimits(def)
+      }
+    }),
+  )
 
   it.effect(
     "falls back to 'ask' in decideGuardCommand and 'review' in routeStep when Ollama fails or times out",

@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit && effect-tsgo diagnostics --strict --project tsconfig.json",
     "lint": "oxlint --deny-warnings .",
     "test": "vitest run",
-    "migration:check": "node --import ../../../tools/node-ts-resolver.mjs scripts/check-migrations.mjs",
+    "migration:check": "node --import ../../../tools/node-ts-resolver.mjs ../../../apps/harness-cli/src/index.ts check-migrations",
     "migration:generate": "drizzle-kit generate",
     "verify": "pnpm run migration:check"
   },

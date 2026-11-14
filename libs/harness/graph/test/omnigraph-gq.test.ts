@@ -3,7 +3,8 @@ import { tmpdir } from "node:os"
 import * as path from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import type { FetchLike } from "@modernrelay/omnigraph"
-import { Effect, Option, Schema } from "effect"
+import { Effect, Schema } from "effect"
+import { match } from "ts-pattern"
 import {
   buildHarnessGraph,
   decideOmnigraphReconcile,
@@ -12,9 +13,11 @@ import {
   HARNESS_GQ_QUERIES,
   HARNESS_GQ_QUERY_NAMES,
   invokeOmnigraphNamedQuery,
+  loadHarnessGqQueriesText,
+  loadHarnessPgSchemaText,
+  makeOmnigraphSyncLayer,
   mergeOmnigraphBranch,
   OmnigraphReconcileInput,
-  OmnigraphSync,
   queryOmnigraph,
   readGraphHeadMeta,
   RelationId,
@@ -26,6 +29,9 @@ import {
   toOmnigraphNdjson,
   writeGraphHeadMeta,
 } from "../src/index.js"
+import { testHostIo } from "./helpers/test-host-io.js"
+
+const OmnigraphSyncLive = makeOmnigraphSyncLayer(testHostIo)
 
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))
 
@@ -306,7 +312,7 @@ describe("Deterministic in-memory GQ query execution and fallback", () => {
             layer: "Motivation",
             symbol: "Sample.greet",
           },
-        }).pipe(Effect.provide(OmnigraphSync.Live))
+        }).pipe(Effect.provide(OmnigraphSyncLive))
 
         expect(res.source).toBe("memory-fallback")
         expect(Array.isArray(res.rows)).toBe(true)
@@ -395,7 +401,7 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
         from: "main",
         fetch: mockFetch,
         snapshotPath: ".harness/test-snapshot.json",
-      }).pipe(Effect.provide(OmnigraphSync.Live))
+      }).pipe(Effect.provide(OmnigraphSyncLive))
 
       expect(syncRes.syncedToOmnigraph).toBe(true)
       const loadReq = recorded.find((r) => r.url.endsWith("/load"))
@@ -512,7 +518,7 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
         name: "resolve_effect_fn",
         params: { spanOrQualname: "Sample.greet" },
         fetch: mockFetch,
-      }).pipe(Effect.provide(OmnigraphSync.Live))
+      }).pipe(Effect.provide(OmnigraphSyncLive))
 
       expect(invokeRes.source).toBe("omnigraph")
       expect(invokeRes.rows).toHaveLength(1)
@@ -521,24 +527,32 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
       const queryRes = yield* queryOmnigraph({
         query: "query count_nodes { match { $n } return { count: count($n) } }",
         fetch: mockFetch,
-      }).pipe(Effect.provide(OmnigraphSync.Live))
+      }).pipe(Effect.provide(OmnigraphSyncLive))
 
-      expect(Option.isSome(queryRes)).toBe(true)
-      if (Option.isSome(queryRes)) {
-        expect(queryRes.value).toHaveLength(1)
-        expect(queryRes.value[0]?.count).toBe(42)
-      }
+      match(queryRes)
+        .with({ _tag: "Some" }, ({ value }) => {
+          expect(value).toHaveLength(1)
+          expect(value[0]?.count).toBe(42)
+        })
+        .with({ _tag: "None" }, () => {
+          expect.unreachable("Expected queryRes to be Some")
+        })
+        .exhaustive()
 
       const diffRes = yield* diffOmnigraphBranches({
         source: "impl/current",
         target: "plan/current",
         fetch: mockFetch,
-      }).pipe(Effect.provide(OmnigraphSync.Live))
+      }).pipe(Effect.provide(OmnigraphSyncLive))
 
-      expect(Option.isSome(diffRes)).toBe(true)
-      if (Option.isSome(diffRes)) {
-        expect(Array.isArray(diffRes.value.changes)).toBe(true)
-      }
+      match(diffRes)
+        .with({ _tag: "Some" }, ({ value }) => {
+          expect(Array.isArray(value.changes)).toBe(true)
+        })
+        .with({ _tag: "None" }, () => {
+          expect.unreachable("Expected diffRes to be Some")
+        })
+        .exhaustive()
     }),
   )
 
@@ -560,8 +574,8 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
         JSON.stringify({ baseUrl: "http://127.0.0.1:24442", canonicalRepoRoot: repoB }),
       )
 
-      const urlA = resolveOmnigraphBaseUrl({ repoRoot: repoA }, {})
-      const urlB = resolveOmnigraphBaseUrl({ repoRoot: repoB }, {})
+      const urlA = resolveOmnigraphBaseUrl({ repoRoot: repoA }, {}, testHostIo)
+      const urlB = resolveOmnigraphBaseUrl({ repoRoot: repoB }, {}, testHostIo)
 
       expect(urlA).toBe("http://127.0.0.1:19991")
       expect(urlB).toBe("http://127.0.0.1:24442")
@@ -570,7 +584,7 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
       // When server.json does not exist, port is derived deterministically from repoRoot
       const repoC = fs.mkdtempSync(path.join(tmpdir(), "og-repo-c-"))
       try {
-        const urlC = resolveOmnigraphBaseUrl({ repoRoot: repoC }, {})
+        const urlC = resolveOmnigraphBaseUrl({ repoRoot: repoC }, {}, testHostIo)
         expect(urlC).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
         expect(urlC).not.toBe(urlA)
         expect(urlC).not.toBe(urlB)
@@ -595,7 +609,7 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
           const commitSha = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
           fs.writeFileSync(path.join(gitDir, "my-pr"), `${commitSha}\n`)
 
-          const taskBranches = resolveOmnigraphTaskBranches(repoDir, {})
+          const taskBranches = resolveOmnigraphTaskBranches(repoDir, testHostIo, {})
           expect(taskBranches).toEqual({
             planBranch: "plan/branch-feat_my-pr",
             implBranch: "impl/branch-feat_my-pr",
@@ -714,10 +728,10 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
             from: taskBranches.mainBranch,
             snapshotPath,
             fetch: mockFetch,
-          }).pipe(Effect.provide(OmnigraphSync.Live))
+          }).pipe(Effect.provide(OmnigraphSyncLive))
 
           expect(syncRes.syncedToOmnigraph).toBe(true)
-          const headMeta = readGraphHeadMeta(repoDir)
+          const headMeta = readGraphHeadMeta(repoDir, testHostIo)
           expect(headMeta?.headSha).toBe(commitSha)
           expect(headMeta?.gitBranch).toBe("feat/my-pr")
 
@@ -728,7 +742,7 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
             target: taskBranches.mainBranch,
             cleanupBranches: [taskBranches.implBranch, taskBranches.planBranch],
             fetch: mockFetch,
-          }).pipe(Effect.provide(OmnigraphSync.Live))
+          }).pipe(Effect.provide(OmnigraphSyncLive))
 
           expect(merged).toBe(true)
           const deleteRequests = recorded.filter((r) => r.method === "DELETE")
@@ -772,7 +786,7 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
             from: "main",
             snapshotPath,
             fetch: mockFetch,
-          }).pipe(Effect.provide(OmnigraphSync.Live))
+          }).pipe(Effect.provide(OmnigraphSyncLive))
 
           expect(res.syncedToOmnigraph).toBe(false)
           expect(res.error).toBeDefined()
@@ -870,7 +884,7 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
             source: "impl/current",
             target: "main",
             fetch: mockFetchWithMergeFail,
-          }).pipe(Effect.provide(OmnigraphSync.Live))
+          }).pipe(Effect.provide(OmnigraphSyncLive))
           expect(mergedMissing).toBe(false)
           expect(loadCalledOnFallback).toBe(false)
 
@@ -881,18 +895,18 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
             source: "impl/current",
             target: "main",
             fetch: mockFetchWithMergeFail,
-          }).pipe(Effect.provide(OmnigraphSync.Live))
+          }).pipe(Effect.provide(OmnigraphSyncLive))
           expect(mergedCorrupt).toBe(false)
           expect(loadCalledOnFallback).toBe(false)
 
           // Case C: Valid fallback snapshot exists -> succeeds via /load and returns true
-          saveGraphSnapshot(sampleGraph, snapshotPath)
+          saveGraphSnapshot(sampleGraph, snapshotPath, testHostIo)
           const mergedSuccess = yield* mergeOmnigraphBranch({
             repoRoot: repoDir,
             source: "impl/current",
             target: "main",
             fetch: mockFetchWithMergeFail,
-          }).pipe(Effect.provide(OmnigraphSync.Live))
+          }).pipe(Effect.provide(OmnigraphSyncLive))
           expect(mergedSuccess).toBe(true)
           expect(loadCalledOnFallback).toBe(true)
         } finally {
@@ -1275,38 +1289,48 @@ describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
         `# pack-refs with: peeled fully-peeled sorted\n${packedSha} refs/heads/release/v1\n`,
       )
 
-      const mainHead = resolveGitHeadState(repoDir, {})
+      const mainHead = resolveGitHeadState(repoDir, testHostIo, {})
       expect(mainHead).toEqual({
         headSha: mainSha,
         gitBranch: "main",
       })
-      expect(resolveOmnigraphTaskBranches(repoDir, {})).toEqual({
+      expect(resolveOmnigraphTaskBranches(repoDir, testHostIo, {})).toEqual({
         planBranch: "plan/current",
         implBranch: "impl/current",
         mainBranch: "main",
       })
 
       fs.writeFileSync(path.join(repoDir, ".git", "HEAD"), "ref: refs/heads/release/v1\n")
-      const packedHead = resolveGitHeadState(repoDir, {})
+      const packedHead = resolveGitHeadState(repoDir, testHostIo, {})
       expect(packedHead).toEqual({
         headSha: packedSha,
         gitBranch: "release/v1",
       })
-      expect(resolveOmnigraphTaskBranches(repoDir, {})).toEqual({
+      expect(resolveOmnigraphTaskBranches(repoDir, testHostIo, {})).toEqual({
         planBranch: "plan/branch-release_v1",
         implBranch: "impl/branch-release_v1",
         mainBranch: "main",
       })
 
-      writeGraphHeadMeta(repoDir, {
+      writeGraphHeadMeta(repoDir, testHostIo, {
         headSha: packedSha,
         gitBranch: "release/v1",
       })
-      const persisted = readGraphHeadMeta(repoDir)
+      const persisted = readGraphHeadMeta(repoDir, testHostIo)
       expect(persisted?.headSha).toBe(packedSha)
       expect(persisted?.gitBranch).toBe("release/v1")
     } finally {
       fs.rmSync(repoDir, { recursive: true, force: true })
     }
+  })
+
+  it("serves embedded schema.pg and queries/harness.gq assets verbatim", () => {
+    const graphPkgDir = path.resolve(import.meta.dirname, "..")
+    expect(loadHarnessPgSchemaText()).toBe(
+      fs.readFileSync(path.resolve(graphPkgDir, "schema.pg"), "utf8"),
+    )
+    expect(loadHarnessGqQueriesText()).toBe(
+      fs.readFileSync(path.resolve(graphPkgDir, "queries/harness.gq"), "utf8"),
+    )
   })
 })

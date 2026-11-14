@@ -1,5 +1,5 @@
 import { Effect } from "effect"
-import { match } from "ts-pattern"
+import { match, P } from "ts-pattern"
 
 export type EarsLintFindingKind =
   | "no-requirements-table"
@@ -148,31 +148,43 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
     }
 
     // Check heading transitions
-    if (/^##\s+Requirements\b/i.test(rawLine)) {
-      inRequirementsSection = true
-      currentAreaNumber = null
-      if (pendingSourceCheckForArea !== null) {
-        findings.push({
-          line: pendingSourceCheckLine ?? lineNum,
-          kind: "area-structure",
-          message: `Area ${pendingSourceCheckForArea} must have '**Source' on the first non-empty line following its heading.`,
-        })
-        pendingSourceCheckForArea = null
-      }
-      currentTable = null
-      continue
-    } else if (/^##\s+/.test(rawLine)) {
-      inRequirementsSection = false
-      currentAreaNumber = null
-      if (pendingSourceCheckForArea !== null) {
-        findings.push({
-          line: pendingSourceCheckLine ?? lineNum,
-          kind: "area-structure",
-          message: `Area ${pendingSourceCheckForArea} must have '**Source' on the first non-empty line following its heading.`,
-        })
-        pendingSourceCheckForArea = null
-      }
-      currentTable = null
+    const handledHeading = match(rawLine)
+      .with(
+        P.when((l) => /^##\s+Requirements\b/i.test(l)),
+        () => {
+          inRequirementsSection = true
+          currentAreaNumber = null
+          if (pendingSourceCheckForArea !== null) {
+            findings.push({
+              line: pendingSourceCheckLine ?? lineNum,
+              kind: "area-structure",
+              message: `Area ${pendingSourceCheckForArea} must have '**Source' on the first non-empty line following its heading.`,
+            })
+            pendingSourceCheckForArea = null
+          }
+          currentTable = null
+          return true
+        },
+      )
+      .with(
+        P.when((l) => /^##\s+/.test(l)),
+        () => {
+          inRequirementsSection = false
+          currentAreaNumber = null
+          if (pendingSourceCheckForArea !== null) {
+            findings.push({
+              line: pendingSourceCheckLine ?? lineNum,
+              kind: "area-structure",
+              message: `Area ${pendingSourceCheckForArea} must have '**Source' on the first non-empty line following its heading.`,
+            })
+            pendingSourceCheckForArea = null
+          }
+          currentTable = null
+          return true
+        },
+      )
+      .otherwise(() => false)
+    if (handledHeading) {
       continue
     }
 
@@ -332,21 +344,25 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
               seenIds.add(cleanId)
             }
 
-            if (currentAreaNumber !== null) {
-              if (group !== currentAreaNumber) {
+            match({ currentAreaNumber, inRequirementsSection })
+              .with({ currentAreaNumber: P.number }, ({ currentAreaNumber: areaNum }) => {
+                if (group !== areaNum) {
+                  findings.push({
+                    line: lineNum,
+                    kind: "area-structure",
+                    message: `Requirement '${cleanId}' is inside area ${areaNum}, but group is ${group}.`,
+                  })
+                }
+              })
+              .with({ currentAreaNumber: null, inRequirementsSection: true }, () => {
                 findings.push({
                   line: lineNum,
                   kind: "area-structure",
-                  message: `Requirement '${cleanId}' is inside area ${currentAreaNumber}, but group is ${group}.`,
+                  message: `Requirement '${cleanId}' must be placed under an area heading (### <n> · <Title>).`,
                 })
-              }
-            } else if (inRequirementsSection) {
-              findings.push({
-                line: lineNum,
-                kind: "area-structure",
-                message: `Requirement '${cleanId}' must be placed under an area heading (### <n> · <Title>).`,
               })
-            }
+              .with({ currentAreaNumber: null, inRequirementsSection: false }, () => {})
+              .exhaustive()
 
             const expectedItem = (lastItemByGroup.get(group) ?? 0) + 1
             if (item !== expectedItem) {
@@ -563,8 +579,5 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
     findings,
   } satisfies EarsSpecLintReport)
 })
-
-export const lintEarsSpecMarkdown = (docPath: string, markdown: string): EarsSpecLintReport =>
-  Effect.runSync(decideEarsSpecQuality({ docPath, markdown }))
 
 export const decideEarsSpecLint = decideEarsSpecQuality

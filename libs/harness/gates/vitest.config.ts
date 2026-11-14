@@ -8,6 +8,7 @@ export default defineConfig({
     },
   },
   test: {
+    include: ["test/**/*.{test,spec}.ts"],
     testTimeout: 10_000,
   },
 })

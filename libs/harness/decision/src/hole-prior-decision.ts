@@ -1,9 +1,8 @@
-import { ConfidenceMillis, NodeKey, PageRankScoreMillis, RoleName } from "@harness/gates"
+import { ConfidenceMillis, NodeKey, PageRankScoreMillis, RoleName } from "@harness/graph"
 import { Effect, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
-import { assertDecisionLimits } from "./idiom-router.js"
 
 export { ConfidenceMillis, NodeKey, PageRankScoreMillis, RoleName }
 
@@ -68,8 +67,6 @@ export const HoleRelevanceAndEdgePriorV1 = Decision.make({
   },
 })
 
-assertDecisionLimits(HoleRelevanceAndEdgePriorV1)
-
 export const MAX_BATCHED_HOLE_CANDIDATES = 32
 
 export const buildBatchedHolePriorDecision = (candidateCount: number) => {
@@ -94,7 +91,6 @@ export const buildBatchedHolePriorDecision = (candidateCount: number) => {
     }),
     decisions,
   })
-  assertDecisionLimits(definition)
   return definition
 }
 

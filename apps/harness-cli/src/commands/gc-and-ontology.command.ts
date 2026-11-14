@@ -1,14 +1,12 @@
-import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { Effect, Layer } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import { evaluateOntologyConflicts, extractOntologyConflictPairs, IDIOM_BLOCKS } from "@harness/decision"
 import {
+  decideGraphEntropy,
   decideOntologyInvariants,
   loadGovernanceDocsFromDisk,
-  scanGraphEntropy,
-  scanWorkspacePackageHygiene,
 } from "@harness/gates"
 import {
   extractWorkspaceTypeAwareGraph,
@@ -17,6 +15,7 @@ import {
   queryOntologyWhy,
   renderOntologyMermaid,
 } from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 import { type CliEnv, type CliResult, findWorkspaceRoot } from "./daemon-and-omnigraph.service.js"
 
 export const handleGc = (
@@ -26,22 +25,17 @@ export const handleGc = (
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     const strict = argv.includes("--strict")
-    const graph = yield* extractWorkspaceTypeAwareGraph(repoRoot)
-    const hasPatternsDir = existsSync(join(repoRoot, "agent-patterns"))
-    const governanceDocs = loadGovernanceDocsFromDisk(repoRoot)
-    const report = scanGraphEntropy(graph, {
+    const graph = yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo)
+    const hasPatternsDir = nodeSyncHostIo.existsSync(join(repoRoot, "agent-patterns"))
+    const governanceDocs = loadGovernanceDocsFromDisk(repoRoot, nodeSyncHostIo)
+    const finalReport = yield* decideGraphEntropy({
+      graph,
       expectedPatterns: hasPatternsDir ? IDIOM_BLOCKS : undefined,
       checkUntestedDomainFns: true,
       checkDeciderPropertyTests: true,
       governanceDocs,
+      ...(strict ? { workspaceRoot: repoRoot, hostIo: nodeSyncHostIo } : {}),
     })
-    const findings = strict
-      ? [...report.findings, ...scanWorkspacePackageHygiene(repoRoot)]
-      : report.findings
-    const finalReport = {
-      clean: findings.length === 0,
-      findings,
-    }
     return {
       exitCode: strict && !finalReport.clean ? 1 : 0,
       stdout: JSON.stringify(finalReport),
@@ -56,7 +50,8 @@ export const handleOntology = (
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-    const graph = options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot))
+    const graph =
+      options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo))
     const sub = argv[1] ?? "layers"
 
     return yield* match(sub)
@@ -92,7 +87,8 @@ export const handleOntology = (
           const scopeArg = argv.find((arg) => arg.startsWith("--scope="))
           const scope = scopeArg ? scopeArg.slice("--scope=".length) : undefined
 
-          const allDocs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot)
+          const allDocs =
+            options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot, nodeSyncHostIo)
           const docs = scope
             ? allDocs.filter(
                 (doc) =>
@@ -107,7 +103,7 @@ export const handleOntology = (
             graph,
             governanceDocs: docs,
           })
-          const pairs = extractOntologyConflictPairs(docs, scope)
+          const pairs = yield* extractOntologyConflictPairs(docs, scope)
           const semanticConflicts = yield* evaluateOntologyConflicts(pairs).pipe(
             Effect.provide(decisionLayer),
           )

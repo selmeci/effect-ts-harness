@@ -1,5 +1,6 @@
-import { existsSync, readFileSync } from "node:fs"
-import { Effect, Option, Schema } from "effect"
+import { Result, Schema } from "effect"
+import { match } from "ts-pattern"
+import { nodeSyncHostIo } from "@harness/infra"
 
 export const StopHookStdinSchema = Schema.Struct({
   fullyIdle: Schema.optional(Schema.Boolean),
@@ -153,17 +154,19 @@ const isMutatingTranscriptToolCall = (
       if (typeMatches.length > 0 && typeMatches.every((m) => isReadOnlySubagentType(m[1] ?? ""))) {
         return false
       }
-    } else if (Array.isArray(rawSubagents) && rawSubagents.length > 0) {
-      const allReadOnly = rawSubagents.every(
-        (item) =>
-          typeof item === "object" &&
-          item !== null &&
-          "TypeName" in item &&
-          typeof item.TypeName === "string" &&
-          isReadOnlySubagentType(item.TypeName),
-      )
-      if (allReadOnly) {
-        return false
+    } else {
+      if (Array.isArray(rawSubagents) && rawSubagents.length > 0) {
+        const allReadOnly = rawSubagents.every(
+          (item) =>
+            typeof item === "object" &&
+            item !== null &&
+            "TypeName" in item &&
+            typeof item.TypeName === "string" &&
+            isReadOnlySubagentType(item.TypeName),
+        )
+        if (allReadOnly) {
+          return false
+        }
       }
     }
     return true
@@ -186,33 +189,35 @@ const isSuccessfulVerifyTranscriptStep = (
 const parseTranscriptSteps = (
   decoded?: StopHookStdin,
 ): ReadonlyArray<Schema.Schema.Type<typeof TranscriptStepSchema>> => {
-  if (!decoded?.transcriptPath || !existsSync(decoded.transcriptPath)) {
+  if (!decoded?.transcriptPath || !nodeSyncHostIo.existsSync(decoded.transcriptPath)) {
     return []
   }
   const transcriptPath = decoded.transcriptPath
   const fullTranscriptPath = transcriptPath.replace(/transcript\.jsonl$/, "transcript_full.jsonl")
   const effectivePath =
-    fullTranscriptPath !== transcriptPath && existsSync(fullTranscriptPath)
+    fullTranscriptPath !== transcriptPath && nodeSyncHostIo.existsSync(fullTranscriptPath)
       ? fullTranscriptPath
       : transcriptPath
 
-  return Effect.runSync(
-    Effect.try({
-      try: () => {
-        const lines = readFileSync(effectivePath, "utf-8")
-          .split(/\r?\n/)
-          .filter((line) => line.trim().length > 0)
-        const steps: Array<Schema.Schema.Type<typeof TranscriptStepSchema>> = []
-        for (const line of lines) {
-          const stepOpt = decodeTranscriptStep(line)
-          if (Option.isSome(stepOpt)) {
-            steps.push(stepOpt.value)
-          }
-        }
-        return steps
-      },
-      catch: () => [],
-    }).pipe(Effect.orElseSucceed(() => [])),
+  return Result.getOrElse(
+    Result.try(() => {
+      const lines = nodeSyncHostIo
+        .readTextSync(effectivePath)
+        .split(/\r?\n/)
+        .filter((line) => line.trim().length > 0)
+      const steps: Array<Schema.Schema.Type<typeof TranscriptStepSchema>> = []
+      for (const line of lines) {
+        const stepOpt = decodeTranscriptStep(line)
+        match(stepOpt)
+          .with({ _tag: "Some" }, ({ value }) => {
+            steps.push(value)
+          })
+          .with({ _tag: "None" }, () => undefined)
+          .exhaustive()
+      }
+      return steps
+    }),
+    () => [],
   )
 }
 
@@ -308,12 +313,13 @@ export const isSubagentStopContext = (repoRoot: string, decoded?: StopHookStdin)
   ) {
     return true
   }
-  if (decoded?.transcriptPath && existsSync(decoded.transcriptPath)) {
+  if (decoded?.transcriptPath && nodeSyncHostIo.existsSync(decoded.transcriptPath)) {
     const transcriptPath = decoded.transcriptPath
-    const isSubagentTranscript = Effect.runSync(
-      Effect.try({
+    const isSubagentTranscript = Result.getOrElse(
+      Result.try({
         try: () => {
-          const lines = readFileSync(transcriptPath, "utf-8")
+          const lines = nodeSyncHostIo
+            .readTextSync(transcriptPath)
             .split(/\r?\n/)
             .filter((line) => line.trim().length > 0)
           const firstLine = lines[0]
@@ -321,16 +327,23 @@ export const isSubagentStopContext = (repoRoot: string, decoded?: StopHookStdin)
             return false
           }
           const firstStepOpt = decodeTranscriptStep(firstLine)
-          if (
-            Option.isNone(firstStepOpt) ||
-            firstStepOpt.value.source !== "SYSTEM" ||
-            !firstStepOpt.value.content?.includes("[Message]")
-          ) {
+          const isSystemMessage = match(firstStepOpt)
+            .with(
+              { _tag: "Some" },
+              ({ value }) => value.source === "SYSTEM" && Boolean(value.content?.includes("[Message]")),
+            )
+            .with({ _tag: "None" }, () => false)
+            .exhaustive()
+          if (!isSystemMessage) {
             return false
           }
           for (const line of lines) {
             const stepOpt = decodeTranscriptStep(line)
-            if (Option.isSome(stepOpt) && stepOpt.value.source === "USER_EXPLICIT") {
+            const isUserExplicit = match(stepOpt)
+              .with({ _tag: "Some" }, ({ value }) => value.source === "USER_EXPLICIT")
+              .with({ _tag: "None" }, () => false)
+              .exhaustive()
+            if (isUserExplicit) {
               return false
             }
           }
@@ -344,7 +357,8 @@ export const isSubagentStopContext = (repoRoot: string, decoded?: StopHookStdin)
           )
           return false
         },
-      }).pipe(Effect.orElseSucceed(() => false)),
+      }),
+      () => false,
     )
     if (isSubagentTranscript) {
       return true

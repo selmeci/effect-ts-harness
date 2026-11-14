@@ -36,7 +36,7 @@ Always prefer in-process MCP tools over spawning shell subcommands to eliminate 
   - **Application Archetype:** Standard user-facing domain models live in `type:domain` (`*.decide`, business use cases).
   - **Framework / Library Archetype:** The repo produces generic engines, protocols, and abstractions (e.g. `AggregateRoot`, `EventStore`, `Decider`). Business domains (e.g. `Cart`, `Inventory`, `Order`) **MUST NEVER** be created in production libraries. Domain models belong strictly to `test/fixtures` or `samples/` tagged with `scope:fixture`.
 - `type:contract` — shared Schemas, `HttpApi`, `RpcGroup`, API errors, event/command protocols; imports `effect` only
-- `type:domain` (in applications) / `type:core` (in frameworks) — use cases, generic engines, and pure logic, no I/O; imports `contract` (and `@harness/gates` for `stub` in skeletons); must not depend on `type:infra`
+- `type:domain` (in applications) / `type:core` (in frameworks) — use cases, generic engines, and pure logic, no I/O; imports `contract` (and `@harness/contract` for `stub` in skeletons); must not depend on `type:infra`
 - `type:service` — service interfaces and repository ports
 - `type:infra` — live Layer implementations, Drizzle repositories and handlers, Alchemy resources, adapter implementations
 - `type:app` — composes Layers and runs the runtime; the `web` app may import `contract` and UI libraries only
@@ -46,7 +46,7 @@ Always prefer in-process MCP tools over spawning shell subcommands to eliminate 
 A plan maps each section (including EARS requirements: `WHEN` → input Schema & `A`, `IF/THEN` → `Schema.TaggedError<Self>()("Tag", { ... })` in `E`, `WHILE` → pure `.decide` with `R = never` + stateful service in `R`, `WHERE` → `Layer`/`Config` in `R`; see `agent-patterns/planning.md`) to an Effect building block: Schema at boundaries, tagged errors,
 `Context.Service` capabilities, `Layer` dependency graph, `Effect<A, E, R>` use-case signatures,
 `Scope` for resources, `Schedule` for retry/concurrency, `Config` + `Effect.fn("name")` spans, test Layers.
-Plan as code: write the skeleton first (schemas, errors, service interfaces, signatures using `stub<A, E, R>(...args)` from `@harness/gates`) — it must pass typecheck with preserved `A`, `E`, `R` types before implementation starts. `stub()` is allowed during `HARNESS_PLAN_CHECK=1` and banned in `harness verify`.
+Plan as code: write the skeleton first (schemas, errors, service interfaces, signatures using `stub<A, E, R>(...args)` from `@harness/contract`) — it must pass typecheck with preserved `A`, `E`, `R` types before implementation starts. `stub()` is allowed during `HARNESS_PLAN_CHECK=1` and banned in `harness verify`.
 
 ## Code style (from `repos/effect/LLMS.md` & `agent-patterns/pattern-matching.md`)
 
@@ -68,7 +68,7 @@ Plan as code: write the skeleton first (schemas, errors, service interfaces, sig
 ## Nx taxonomy
 
 - `type:contract` — shared Schemas, `HttpApi`, `RpcGroup`, API errors; imports `effect` only
-- `type:domain` — use cases and pure logic, no I/O; imports `contract` (and `@harness/gates` for `stub` in skeletons); must not depend on `type:infra`
+- `type:domain` — use cases and pure logic, no I/O; imports `contract` (and `@harness/contract` for `stub` in skeletons); must not depend on `type:infra`
 - `type:service` — service interfaces, including repositories
 - `type:infra` — live Layer implementations, Drizzle repositories and handlers, Alchemy resources
 - `type:app` — composes Layers and runs the runtime; the `web` app may import `contract` and UI libraries only

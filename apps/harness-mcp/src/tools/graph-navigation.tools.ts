@@ -1,4 +1,3 @@
-import * as fs from "node:fs"
 import * as path from "node:path"
 import { Cause, Effect, Option, Schema } from "effect"
 import {
@@ -9,6 +8,7 @@ import {
   resolveNode,
 } from "@harness/graph"
 import { LocalDecisionModel, routeStep } from "@harness/decision"
+import { nodeSyncHostIo } from "@harness/infra"
 import {
   isPathInsideRoot,
   McpToolName,
@@ -171,6 +171,7 @@ export const buildGraphNavigationToolDescriptors = (
           filePath: input.filePath,
           paths: input.paths,
           subDirs: input.subDirs,
+          hostIo: nodeSyncHostIo,
         })
       }),
   },
@@ -186,16 +187,20 @@ export const buildGraphNavigationToolDescriptors = (
         const routedOpt = yield* routeStep(planStep).pipe(
           Effect.provide(decisionLayer),
           Effect.timeoutOption("1500 millis"),
-          Effect.catchCause((cause) =>
-            Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeedNone,
-          ),
+          Effect.catchCause((cause) => {
+            if (Cause.hasInterrupts(cause)) {
+              return Effect.interrupt
+            }
+            process.stderr.write(`[harness-mcp] decision fallback: ${Cause.pretty(cause)}\n`)
+            return Effect.succeedNone
+          }),
         )
         let block: string = Option.getOrElse(routedOpt, () => "review")
         const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
         if (block === "review") {
           const patternsDir = path.join(root, "agent-patterns")
-          if (fs.existsSync(patternsDir)) {
-            const files = fs.readdirSync(patternsDir, "utf8")
+          if (nodeSyncHostIo.existsSync(patternsDir)) {
+            const files = nodeSyncHostIo.readdirSync(patternsDir).map((entry) => entry.name)
             const stepLower = planStep.toLowerCase()
             const candidates = files
               .filter((f: string) => f.endsWith(".md") && f.toLowerCase() !== "readme.md")

@@ -12,6 +12,7 @@ import {
   summarizeFrictionEvents,
   type FrictionEvent,
 } from "../src/index.js"
+import { testHostIo } from "./helpers/test-host-io.js"
 
 describe("Friction log and clustering", () => {
   it.effect("clusters and sorts friction events deterministically", () =>
@@ -78,26 +79,34 @@ describe("Friction log and clustering", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "harness-friction-test-"))
     try {
       // 1. readFrictionEvents on non-existent dir/file returns empty
-      expect(readFrictionEvents(tempDir)).toEqual([])
+      expect(readFrictionEvents(tempDir, testHostIo)).toEqual([])
 
       // 2. appendFrictionEvent creates .harness dir and appends JSONL
-      const ev1 = appendFrictionEvent(tempDir, {
-        kind: "route_miss",
-        summary: "Route miss 1",
-        detail: "detail 1",
-        timestamp: "2026-10-26T12:00:00.000Z",
-      })
+      const ev1 = appendFrictionEvent(
+        tempDir,
+        {
+          kind: "route_miss",
+          summary: "Route miss 1",
+          detail: "detail 1",
+          timestamp: "2026-10-26T12:00:00.000Z",
+        },
+        testHostIo,
+      )
       expect(ev1.summary).toBe("Route miss 1")
       expect(ev1.timestamp).toBe("2026-10-26T12:00:00.000Z")
 
-      const ev2 = appendFrictionEvent(tempDir, {
-        kind: "guard_escalation",
-        summary: "rm -rf",
-        detail: "blocked destructive command",
-      })
+      const ev2 = appendFrictionEvent(
+        tempDir,
+        {
+          kind: "guard_escalation",
+          summary: "rm -rf",
+          detail: "blocked destructive command",
+        },
+        testHostIo,
+      )
       expect(ev2.timestamp).toBeDefined()
 
-      const readBack = readFrictionEvents(tempDir)
+      const readBack = readFrictionEvents(tempDir, testHostIo)
       expect(readBack.length).toBe(2)
       expect(readBack[0]).toEqual(ev1)
       expect(readBack[1]?.summary).toBe("rm -rf")
@@ -117,20 +126,20 @@ describe("Friction log and clustering", () => {
       )
 
       // Malformed lines are skipped, original 2 remain
-      const readFiltered = readFrictionEvents(tempDir)
+      const readFiltered = readFrictionEvents(tempDir, testHostIo)
       expect(readFiltered.length).toBe(2)
       expect(readFiltered[0]).toEqual(ev1)
 
       // 4. clearFrictionEvents clears the file
-      clearFrictionEvents(tempDir)
-      expect(readFrictionEvents(tempDir)).toEqual([])
+      clearFrictionEvents(tempDir, testHostIo)
+      expect(readFrictionEvents(tempDir, testHostIo)).toEqual([])
       expect(readFileSync(filePath, "utf-8")).toBe("")
 
       // 5. clearFrictionEvents works when .harness dir does not exist
       const freshTempDir = mkdtempSync(join(tmpdir(), "harness-friction-fresh-"))
       try {
-        clearFrictionEvents(freshTempDir)
-        expect(readFrictionEvents(freshTempDir)).toEqual([])
+        clearFrictionEvents(freshTempDir, testHostIo)
+        expect(readFrictionEvents(freshTempDir, testHostIo)).toEqual([])
       } finally {
         rmSync(freshTempDir, { recursive: true, force: true })
       }

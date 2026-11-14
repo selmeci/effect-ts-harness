@@ -1,6 +1,6 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { Effect, Option, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
+import type { SyncHostIo } from "@harness/service"
 import { match } from "ts-pattern"
 import type { FrictionEvent } from "./friction-log.js"
 import { resolveHarnessStateDir } from "./worktree.js"
@@ -161,9 +161,7 @@ export interface SessionReport {
   readonly recommendations: ReadonlyArray<string>
 }
 
-export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
-  rawInput: SessionReportInput,
-) {
+export const buildSessionReport = (rawInput: SessionReportInput): SessionReport => {
   const scoped = scopeSessionReportInput(rawInput)
   const input: SessionReportInput = {
     ...rawInput,
@@ -326,7 +324,10 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
   ).length
 
   const isActionableFriction = (f: FrictionEvent): boolean =>
-    !(f.kind === "guard_escalation" && f.detail.startsWith("verdict=allow"))
+    match(f)
+      .with({ kind: "guard_escalation" }, (ev) => !ev.detail.startsWith("verdict=allow"))
+      .with({ kind: "route_miss" }, { kind: "verify_failure" }, () => true)
+      .exhaustive()
   const actionableFriction = (input.frictionEvents ?? []).filter(isActionableFriction)
   const frictionCount = actionableFriction.length
 
@@ -400,11 +401,14 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
     recommendations,
   }
 
-  return yield* Effect.succeed(report)
-})
+  return report
+}
 
-export const buildSessionReport = (input: SessionReportInput): SessionReport =>
-  Effect.runSync(decideSessionReport(input))
+export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
+  rawInput: SessionReportInput,
+) {
+  return yield* Effect.succeed(buildSessionReport(rawInput))
+})
 
 export const renderSessionReportMarkdown = (report: SessionReport): string => {
   const lines: Array<string> = []
@@ -487,6 +491,7 @@ export const appendTelemetryEvent = (
     readonly detail?: string | undefined
     readonly timestamp?: string | undefined
   },
+  hostIo: SyncHostIo,
 ): TelemetryEvent => {
   const record: TelemetryEvent = {
     timestamp: input.timestamp ?? new Date().toISOString(),
@@ -500,70 +505,81 @@ export const appendTelemetryEvent = (
   }
   const harnessDir = resolveHarnessStateDir(repoRoot)
   const filePath = join(harnessDir, "telemetry-log.jsonl")
-  Effect.runSync(
-    Effect.try(() => {
-      if (!existsSync(harnessDir)) {
-        mkdirSync(harnessDir, { recursive: true })
+  Result.getOrElse(
+    Result.try(() => {
+      if (!hostIo.existsSync(harnessDir)) {
+        hostIo.mkdirRecursiveSync(harnessDir)
       }
-      appendFileSync(filePath, JSON.stringify(record) + "\n", "utf-8")
-    }).pipe(Effect.orElseSucceed(() => undefined)),
+      hostIo.appendTextSync(filePath, JSON.stringify(record) + "\n")
+    }),
+    () => undefined,
   )
   return record
 }
 
-export const readTelemetryEvents = (repoRoot: string): ReadonlyArray<TelemetryEvent> => {
+export const readTelemetryEvents = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+): ReadonlyArray<TelemetryEvent> => {
   const harnessDir = resolveHarnessStateDir(repoRoot)
   const filePath = join(harnessDir, "telemetry-log.jsonl")
-  if (!existsSync(filePath)) {
+  if (!hostIo.existsSync(filePath)) {
     return []
   }
-  const contentOption = Effect.runSync(
-    Effect.try(() => readFileSync(filePath, "utf-8")).pipe(Effect.option),
+  const content = Result.getOrElse(
+    Result.try(() => hostIo.readTextSync(filePath)),
+    () => null,
   )
-  if (Option.isNone(contentOption)) {
+  if (content === null) {
     return []
   }
-  const lines = contentOption.value.split("\n")
+  const lines = content.split("\n")
   const events: Array<TelemetryEvent> = []
   for (const line of lines) {
     const trimmed = line.trim()
     if (trimmed.length === 0) continue
     const decoded = decodeTelemetryEvent(trimmed)
-    if (Option.isSome(decoded)) {
-      events.push(decoded.value)
-    }
+    match(decoded)
+      .with({ _tag: "Some" }, ({ value }) => {
+        events.push(value)
+      })
+      .with({ _tag: "None" }, () => {})
+      .exhaustive()
   }
   return events
 }
 
-export const clearTelemetryEvents = (repoRoot: string): void => {
+export const clearTelemetryEvents = (repoRoot: string, hostIo: SyncHostIo): void => {
   const harnessDir = resolveHarnessStateDir(repoRoot)
   const filePath = join(harnessDir, "telemetry-log.jsonl")
-  Effect.runSync(
-    Effect.try(() => {
-      if (!existsSync(harnessDir)) {
-        mkdirSync(harnessDir, { recursive: true })
+  Result.getOrElse(
+    Result.try(() => {
+      if (!hostIo.existsSync(harnessDir)) {
+        hostIo.mkdirRecursiveSync(harnessDir)
       }
-      writeFileSync(filePath, "", "utf-8")
-    }).pipe(Effect.orElseSucceed(() => undefined)),
+      hostIo.writeTextSync(filePath, "")
+    }),
+    () => undefined,
   )
 }
 
 export const writeSessionReportFiles = (
   repoRoot: string,
   report: SessionReport,
+  hostIo: SyncHostIo,
 ): { readonly jsonPath: string; readonly markdownPath: string } => {
   const harnessDir = resolveHarnessStateDir(repoRoot)
   const jsonPath = join(harnessDir, "session-report.json")
   const markdownPath = join(harnessDir, "session-report.md")
-  Effect.runSync(
-    Effect.try(() => {
-      if (!existsSync(harnessDir)) {
-        mkdirSync(harnessDir, { recursive: true })
+  Result.getOrElse(
+    Result.try(() => {
+      if (!hostIo.existsSync(harnessDir)) {
+        hostIo.mkdirRecursiveSync(harnessDir)
       }
-      writeFileSync(jsonPath, JSON.stringify(report, null, 2), "utf-8")
-      writeFileSync(markdownPath, renderSessionReportMarkdown(report), "utf-8")
-    }).pipe(Effect.orElseSucceed(() => undefined)),
+      hostIo.writeTextSync(jsonPath, JSON.stringify(report, null, 2))
+      hostIo.writeTextSync(markdownPath, renderSessionReportMarkdown(report))
+    }),
+    () => undefined,
   )
   return { jsonPath, markdownPath }
 }

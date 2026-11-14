@@ -1,10 +1,11 @@
-import { Effect } from "effect"
+import { Cause, Effect, Exit } from "effect"
 import { describe, expect, it } from "vitest"
+import { match } from "ts-pattern"
 import {
-  assertDecisionLimits,
   IDIOM_BLOCKS,
   IdiomRouterV1,
   routeStep,
+  validateDecisionLimits,
 } from "../src/idiom-router.js"
 import { makeMockDecisionModelLayer } from "../src/mock-layer.js"
 
@@ -35,14 +36,15 @@ describe("IdiomRouterV1 data constraints", () => {
     ])
   })
 
-  it("enforces Ollama's 2-26 option limit and 1-64 question limit via assertDecisionLimits", () => {
-    expect(() => assertDecisionLimits(IdiomRouterV1)).not.toThrow()
+  it("enforces Ollama's 2-26 option limit and 1-64 question limit via validateDecisionLimits", async () => {
+    const validExit = await Effect.runPromiseExit(validateDecisionLimits(IdiomRouterV1))
+    expect(Exit.isSuccess(validExit)).toBe(true)
 
     const tooManyOptions = Object.fromEntries(
       Array.from({ length: 27 }, (_, idx) => [`opt${idx}`, `Option ${idx}`]),
     )
-    expect(() =>
-      assertDecisionLimits({
+    const invalidExit = await Effect.runPromiseExit(
+      validateDecisionLimits({
         decisions: {
           bad: {
             _tag: "Classify",
@@ -50,7 +52,15 @@ describe("IdiomRouterV1 data constraints", () => {
           },
         },
       }),
-    ).toThrow(/26/)
+    )
+    match(invalidExit)
+      .with({ _tag: "Failure" }, ({ cause }) => {
+        expect(Cause.hasDies(cause)).toBe(true)
+      })
+      .with({ _tag: "Success" }, () => {
+        expect.unreachable("Expected invalidExit to fail with die")
+      })
+      .exhaustive()
   })
 })
 

@@ -1,6 +1,11 @@
-import { Context, Effect, Layer, Option, Schema } from "effect"
+import { Context, Effect, Layer, Option } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
+import {
+  CliCommandInput,
+  CliCommandName,
+  CliCommandNotFoundError,
+} from "@harness/contract"
 import { LocalDecisionModel } from "@harness/decision"
 import {
   COMMANDS,
@@ -10,7 +15,11 @@ import {
 import { handleGc, handleOntology } from "./gc-and-ontology.command.js"
 import { handleGuard, handleRoute } from "./guard-and-route.command.js"
 import { handleBench, handleMutate } from "./mutate-and-bench.command.js"
-import { handlePlanCheck, handlePlanSynth, handleRepair } from "./plan-and-repair.command.js"
+import {
+  handlePlanCheck,
+  handlePlanSynth,
+  handleRepair,
+} from "./plan-and-repair.command.js"
 import {
   handleDoctorOrSession,
   handleIngest,
@@ -19,19 +28,7 @@ import {
 } from "./session-learn-report.command.js"
 import { handleDone, handleVerify } from "./verify-and-done.command.js"
 
-export const CliCommandName = Schema.NonEmptyString.pipe(Schema.brand("CliCommandName"))
-export type CliCommandName = typeof CliCommandName.Type
-
-export const CliCommandInput = Schema.String.pipe(Schema.brand("CliCommandInput"))
-export type CliCommandInput = typeof CliCommandInput.Type
-
-export class CliCommandNotFoundError extends Schema.TaggedError<CliCommandNotFoundError>()(
-  "CliCommandNotFoundError",
-  {
-    command: CliCommandInput,
-    availableCommands: Schema.Array(CliCommandName),
-  },
-) {}
+export { CliCommandInput, CliCommandName, CliCommandNotFoundError }
 
 export interface CliCommandPluginResult {
   readonly exitCode: number
@@ -64,24 +61,23 @@ export type CanonicalCliCommandName = (typeof CANONICAL_CLI_COMMAND_NAMES)[numbe
 
 export const makeHarnessCommandRegistryLayer = (
   commands: ReadonlyArray<CliCommandPluginDescriptor>,
-): Layer.Layer<HarnessCommandRegistry> => {
-  const commandMap: ReadonlyMap<string, CliCommandPluginDescriptor> = commands.reduce(
-    (acc, cmd) => {
-      if (acc.has(cmd.name)) {
-        return Effect.runSync(
-          Effect.die(new Error(`Duplicate CLI command registered: ${cmd.name}`)),
-        )
+): Layer.Layer<HarnessCommandRegistry> =>
+  Layer.effect(
+    HarnessCommandRegistry,
+    Effect.gen(function* () {
+      const commandMap = new Map<string, CliCommandPluginDescriptor>()
+      for (const cmd of commands) {
+        if (commandMap.has(cmd.name)) {
+          return yield* Effect.die(new Error(`Duplicate CLI command registered: ${cmd.name}`))
+        }
+        commandMap.set(cmd.name, cmd)
       }
-      acc.set(cmd.name, cmd)
-      return acc
-    },
-    new Map<string, CliCommandPluginDescriptor>(),
+      return HarnessCommandRegistry.of({
+        listCommands: Effect.succeed(commands),
+        resolveCommand: (name) => Effect.succeed(Option.fromUndefinedOr(commandMap.get(name))),
+      })
+    }),
   )
-  return Layer.succeed(HarnessCommandRegistry, {
-    listCommands: Effect.succeed(commands),
-    resolveCommand: (name) => Effect.succeed(Option.fromUndefinedOr(commandMap.get(name))),
-  })
-}
 
 export type CliCommandHandler = (args: ReadonlyArray<string>) => Effect.Effect<CliResult>
 
@@ -145,6 +141,14 @@ export const makeLiveCliCommandDescriptors = (
     execute: (args) => handleBench(args, options),
   },
   {
+    name: CliCommandName.make("benchmark"),
+    summary: "Compare canonical harness benchmark runs against acceptance criteria.",
+    execute: (args) =>
+      Effect.promise(() => import("./repo-checks.command.js")).pipe(
+        Effect.flatMap((m) => m.runBenchmarkCompare(args, options)),
+      ),
+  },
+  {
     name: CliCommandName.make("ingest"),
     summary: "Ingest runtime trace NDJSON events into Omnigraph.",
     execute: (args) => handleIngest(args, options),
@@ -168,6 +172,38 @@ export const makeLiveCliCommandDescriptors = (
     name: CliCommandName.make("report"),
     summary: "Generate session telemetry and friction report.",
     execute: (args) => handleReport(args, options),
+  },
+  {
+    name: CliCommandName.make("check-openapi"),
+    summary: "Validate OpenAPI contract specifications.",
+    execute: (args) =>
+      Effect.promise(() => import("./repo-checks.command.js")).pipe(
+        Effect.flatMap((m) => m.runCheckOpenApi(args, options)),
+      ),
+  },
+  {
+    name: CliCommandName.make("check-migrations"),
+    summary: "Validate database schema migrations for safety.",
+    execute: (args) =>
+      Effect.promise(() => import("./repo-checks.command.js")).pipe(
+        Effect.flatMap((m) => m.runCheckMigrations(args, options)),
+      ),
+  },
+  {
+    name: CliCommandName.make("check-event-schemas"),
+    summary: "Validate event-sourcing schema evolution compatibility.",
+    execute: (args) =>
+      Effect.promise(() => import("./repo-checks.command.js")).pipe(
+        Effect.flatMap((m) => m.runCheckEventSchemas(args, options)),
+      ),
+  },
+  {
+    name: CliCommandName.make("scenario"),
+    summary: "List or execute harness evaluation scenarios.",
+    execute: (args) =>
+      Effect.promise(() => import("./scenario.command.js")).pipe(
+        Effect.flatMap((m) => m.runScenarioCommand(args, options)),
+      ),
   },
   {
     name: CliCommandName.make("help"),

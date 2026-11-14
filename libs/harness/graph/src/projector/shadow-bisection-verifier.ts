@@ -1,3 +1,4 @@
+import type { SyncHostIo } from "@harness/service"
 import { Cause, Effect } from "effect"
 import { match } from "ts-pattern"
 import { decideGraphInference } from "../datalog-engine.js"
@@ -42,6 +43,7 @@ export const verifyProjectedSubset = (
   existingFiles?: Readonly<Record<string, string>>,
   forceFailRuleIds?: ReadonlySet<string>,
   session?: TypeScriptProgramSession,
+  hostIo?: SyncHostIo,
 ): Effect.Effect<BatchVerificationOutcome, never, never> =>
   Effect.gen(function* () {
     if (subsetPatches.length === 0) {
@@ -63,12 +65,16 @@ export const verifyProjectedSubset = (
       ...overlayMap,
     }
 
-    const activeSession = session ?? createTypeScriptProgramSession(repoRoot)
+    const activeSession = session ?? createTypeScriptProgramSession(repoRoot, hostIo)
     const compilerDiagExit = yield* Effect.try({
-      try: () => evaluateOverlayDiagnostics(repoRoot, combinedOverlays, activeSession),
+      try: () => evaluateOverlayDiagnostics(repoRoot, combinedOverlays, activeSession, hostIo),
       catch: (err) => (err instanceof Error ? err.message : String(err)),
     }).pipe(Effect.exit)
-    if (compilerDiagExit._tag === "Failure" && Cause.hasInterrupts(compilerDiagExit.cause)) {
+    const isDiagInterrupted = match(compilerDiagExit)
+      .with({ _tag: "Failure" }, (f) => Cause.hasInterrupts(f.cause))
+      .with({ _tag: "Success" }, () => false)
+      .exhaustive()
+    if (isDiagInterrupted) {
       return yield* Effect.interrupt
     }
     const compilerDiags = match(compilerDiagExit)
@@ -88,7 +94,7 @@ export const verifyProjectedSubset = (
 
     const sourceInputs: Array<SourceFileInput> = []
     for (const [relFile, content] of Object.entries(combinedOverlays)) {
-      const contained = resolveContainedRelPath(repoRoot, relFile)
+      const contained = resolveContainedRelPath(repoRoot, relFile, hostIo)
       if (contained === null) continue
       const norm = contained
       if (norm.includes("/test/") || norm.endsWith(".test.ts") || norm.endsWith(".spec.ts")) {
@@ -97,7 +103,7 @@ export const verifyProjectedSubset = (
       sourceInputs.push({
         filePath: norm,
         content,
-        packageTag: resolvePackageTag(repoRoot, norm),
+        packageTag: resolvePackageTag(repoRoot, norm, hostIo),
       })
     }
 
@@ -107,19 +113,22 @@ export const verifyProjectedSubset = (
           repoRoot,
           overlays: combinedOverlays,
           session: activeSession,
+          ...(hostIo !== undefined ? { hostIo } : {}),
         }),
       catch: (err) => (err instanceof Error ? err.message : String(err)),
     }).pipe(Effect.exit)
-    if (extractExit._tag === "Failure") {
-      if (Cause.hasInterrupts(extractExit.cause)) {
-        return yield* Effect.interrupt
-      }
-      return {
-        isClean: false,
-        diagnostics: [...errorDiags, `Overlay type-aware extraction failed: ${String(extractExit.cause)}`],
-      }
+    const extractResult = yield* match(extractExit)
+      .with({ _tag: "Failure" }, (f) =>
+        Cause.hasInterrupts(f.cause)
+          ? Effect.interrupt
+          : Effect.succeed({ ok: false as const, diags: [...errorDiags, `Overlay type-aware extraction failed: ${String(f.cause)}`] }),
+      )
+      .with({ _tag: "Success" }, (s) => Effect.succeed({ ok: true as const, value: s.value }))
+      .exhaustive()
+    if (!extractResult.ok) {
+      return { isClean: false, diagnostics: extractResult.diags }
     }
-    const extractedOverlayGraph = extractExit.value
+    const extractedOverlayGraph = extractResult.value
 
     const effectiveBase =
       baseGraph ??
@@ -135,23 +144,21 @@ export const verifyProjectedSubset = (
     let currentGraph = effectiveBase
     for (const patch of subsetPatches) {
       const stepped = yield* Effect.exit(applyDpoPatchToGraph(currentGraph, patch))
-      if (stepped._tag === "Failure" && Cause.hasInterrupts(stepped.cause)) {
-        return yield* Effect.interrupt
-      }
-      const replayError = match(stepped)
+      const stepOutcome = yield* match(stepped)
+        .with({ _tag: "Failure" }, (f) =>
+          Cause.hasInterrupts(f.cause)
+            ? Effect.interrupt
+            : Effect.succeed({ ok: false as const, err: `DPO patch replay failed for rule '${patch.ruleId}': ${String(f.cause)}` }),
+        )
         .with({ _tag: "Success" }, (s) => {
           currentGraph = s.value
-          return undefined
+          return Effect.succeed({ ok: true as const })
         })
-        .with(
-          { _tag: "Failure" },
-          (f) => `DPO patch replay failed for rule '${patch.ruleId}': ${String(f.cause)}`,
-        )
         .exhaustive()
-      if (replayError !== undefined) {
+      if (!stepOutcome.ok) {
         return {
           isClean: false,
-          diagnostics: [...errorDiags, replayError],
+          diagnostics: [...errorDiags, stepOutcome.err],
         }
       }
     }
@@ -202,14 +209,13 @@ export const verifyProjectedSubset = (
     })
 
     const infExit = yield* Effect.exit(decideGraphInference(extractedOverlayGraph))
-    if (infExit._tag === "Failure" && Cause.hasInterrupts(infExit.cause)) {
-      return yield* Effect.interrupt
-    }
-    const infDiag = match(infExit)
-      .with({ _tag: "Failure" }, (f) => [
-        `Datalog verification failed on projected overlay: ${String(f.cause)}`,
-      ])
-      .with({ _tag: "Success" }, () => [])
+    const infDiag = yield* match(infExit)
+      .with({ _tag: "Failure" }, (f) =>
+        Cause.hasInterrupts(f.cause)
+          ? Effect.interrupt
+          : Effect.succeed([`Datalog verification failed on projected overlay: ${String(f.cause)}`]),
+      )
+      .with({ _tag: "Success" }, () => Effect.succeed([] as Array<string>))
       .exhaustive()
 
     const monoDiags: Array<string> = [
@@ -234,6 +240,7 @@ export const safeProjectPatchesToInMemoryWorkspace = (
   patches: ReadonlyArray<GraphPatch>,
   initialGraph?: HarnessGraph,
   existingFiles?: Readonly<Record<string, string>>,
+  hostIo?: SyncHostIo,
 ): Effect.Effect<
   ReturnType<typeof projectPatchesToInMemoryWorkspace>,
   GraphProjectorError,
@@ -248,6 +255,7 @@ export const safeProjectPatchesToInMemoryWorkspace = (
           patches,
           initialGraph,
           existingFiles,
+          hostIo,
         ),
       catch: (err) =>
         err instanceof GraphProjectorError
@@ -272,13 +280,14 @@ export const isolateFirstOffendingPatchIndex = (
   existingFiles?: Readonly<Record<string, string>>,
   forceFailRuleIds?: ReadonlySet<string>,
   session?: TypeScriptProgramSession,
+  hostIo?: SyncHostIo,
 ): Effect.Effect<
   { readonly offendingIndex: number; readonly probes: number },
   GraphProjectorError,
   never
 > =>
   Effect.gen(function* () {
-    const activeSession = session ?? createTypeScriptProgramSession(repoRoot)
+    const activeSession = session ?? createTypeScriptProgramSession(repoRoot, hostIo)
     let low = 0
     let high = phasePatches.length - 1
     let probes = 0
@@ -293,6 +302,7 @@ export const isolateFirstOffendingPatchIndex = (
         candidateSlice,
         baseGraph,
         existingFiles,
+        hostIo,
       )
       const check = yield* verifyProjectedSubset(
         repoRoot,
@@ -303,6 +313,7 @@ export const isolateFirstOffendingPatchIndex = (
         existingFiles,
         forceFailRuleIds,
         activeSession,
+        hostIo,
       )
       if (!check.isClean) {
         high = mid

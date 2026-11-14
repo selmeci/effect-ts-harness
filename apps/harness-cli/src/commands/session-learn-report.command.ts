@@ -1,4 +1,3 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { Cause, Effect, Layer, Option, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
@@ -11,32 +10,33 @@ import {
   checkVerifyStamp,
   clearFrictionEvents,
   clearTelemetryEvents,
-  decideOmnigraphReconcile,
   decidePlanSearch,
   decideRuleSynthesizer,
   diffPlanAndImplGraphs,
   PlanSearchInput,
   readFrictionEvents,
-  readGraphHeadMeta,
   readTelemetryEvents,
   renderSessionReportMarkdown,
-  resolveGitHeadState,
   resolveHarnessStateDir,
-  resolveOmnigraphTaskBranches,
   RuleSynthesizerInput,
   scopeSessionReportInput,
   summarizeFrictionEvents,
-  writeGraphHeadMeta,
   writeSessionReportFiles,
 } from "@harness/gates"
 import {
+  decideOmnigraphReconcile,
   extractWorkspaceTypeAwareGraph,
   type GraphSnapshotError,
   loadGraphSnapshotEffect,
-  OmnigraphSync,
+  makeOmnigraphSyncLayer,
+  readGraphHeadMeta,
+  resolveGitHeadState,
+  resolveOmnigraphTaskBranches,
   saveGraphSnapshot,
   syncToOmnigraphAndSnapshot,
+  writeGraphHeadMeta,
 } from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 import { buildWorkspaceFnIndex } from "@harness/ingest"
 import {
   type CliEnv,
@@ -62,8 +62,8 @@ export const handleDoctorOrSession = (
     const harnessDir = resolveHarnessStateDir(repoRoot)
     const snapshotDirOk = yield* Effect.try({
       try: () => {
-        if (!existsSync(harnessDir)) {
-          mkdirSync(harnessDir, { recursive: true })
+        if (!nodeSyncHostIo.existsSync(harnessDir)) {
+          nodeSyncHostIo.mkdirRecursiveSync(harnessDir)
         }
         return true
       },
@@ -79,61 +79,66 @@ export const handleDoctorOrSession = (
       process.env.HARNESS_REQUIRE_OLLAMA === "1" ||
       (!isolatedExternal &&
         options?.decisionLayer === undefined &&
-        process.env.VITEST === undefined)
+        options?.skipBackgroundDaemons !== true)
     const ollamaReady = requireLiveOllama ? yield* ensureLocalOllamaReady() : true
 
     const planPath = join(harnessDir, "plan-graph-snapshot.json")
     const implPath = join(harnessDir, "graph-snapshot.json")
 
-    const headState = resolveGitHeadState(repoRoot)
-    const recordedMeta = readGraphHeadMeta(repoRoot)
+    const headState = resolveGitHeadState(repoRoot, nodeSyncHostIo)
+    const recordedMeta = readGraphHeadMeta(repoRoot, nodeSyncHostIo)
     if (!isolatedExternal || recordedMeta !== null) {
       const reconcileDecision = yield* decideOmnigraphReconcile({
-        snapshotExists: existsSync(implPath),
+        snapshotExists: nodeSyncHostIo.existsSync(implPath),
         recordedHeadSha: recordedMeta?.headSha ?? null,
         currentHeadSha: headState.headSha,
         recordedGitBranch: recordedMeta?.gitBranch ?? null,
         currentGitBranch: headState.gitBranch,
       })
       if (reconcileDecision.needsReconcile) {
-        const reconciledGraph = yield* extractWorkspaceTypeAwareGraph(repoRoot)
+        const reconciledGraph = yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo)
         if (isolatedExternal) {
-          saveGraphSnapshot(reconciledGraph, implPath)
-          writeGraphHeadMeta(repoRoot, headState)
+          saveGraphSnapshot(reconciledGraph, implPath, nodeSyncHostIo)
+          writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
         } else {
-          yield* syncToOmnigraphAndSnapshot(reconciledGraph, {
+          const reconcileSyncRes = yield* syncToOmnigraphAndSnapshot(reconciledGraph, {
             repoRoot: resolveClusterRepoRoot(repoRoot),
             branch: reconcileDecision.targetOmnigraphBranch,
             from: "main",
             snapshotPath: implPath,
           }).pipe(
-            Effect.provide(OmnigraphSync.Live),
-            Effect.orElseSucceed(() => ({
-              syncedToOmnigraph: false,
-              snapshotPath: implPath,
-              error: undefined,
-            })),
+            Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
+            Effect.catchCause((cause) => {
+              if (Cause.hasInterrupts(cause)) return Effect.interrupt
+              return Effect.succeed({
+                syncedToOmnigraph: false,
+                snapshotPath: implPath,
+                error: Cause.pretty(cause),
+              })
+            }),
           )
-          writeGraphHeadMeta(repoRoot, headState)
+          if (reconcileSyncRes.syncedToOmnigraph) {
+            writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
+          }
         }
       }
     }
 
     const workspaceRoot = findWorkspaceRoot()
-    const tsconfigBasePath = existsSync(join(repoRoot, "tsconfig.base.json"))
+    const tsconfigBasePath = nodeSyncHostIo.existsSync(join(repoRoot, "tsconfig.base.json"))
       ? join(repoRoot, "tsconfig.base.json")
       : join(workspaceRoot, "tsconfig.base.json")
-    const tsgoPkgPath = existsSync(
+    const tsgoPkgPath = nodeSyncHostIo.existsSync(
       join(repoRoot, "node_modules", "@effect", "tsgo", "package.json"),
     )
       ? join(repoRoot, "node_modules", "@effect", "tsgo", "package.json")
       : join(workspaceRoot, "node_modules", "@effect", "tsgo", "package.json")
     const effectLspOk = yield* Effect.try({
       try: () => {
-        if (!existsSync(tsconfigBasePath) || !existsSync(tsgoPkgPath)) {
+        if (!nodeSyncHostIo.existsSync(tsconfigBasePath) || !nodeSyncHostIo.existsSync(tsgoPkgPath)) {
           return false
         }
-        return readFileSync(tsconfigBasePath, "utf-8").includes("@effect/language-service")
+        return nodeSyncHostIo.readTextSync(tsconfigBasePath).includes("@effect/language-service")
       },
       catch: () => false,
     }).pipe(Effect.orElseSucceed(() => false))
@@ -146,23 +151,26 @@ export const handleDoctorOrSession = (
             input: { planStep: "Initialize session" },
           }).pipe(
             Effect.timeoutOption("10 seconds"),
-            Effect.catchCause((cause) =>
-              Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeedNone,
-            ),
+            Effect.catchCause((cause) => {
+              if (Cause.hasInterrupts(cause)) return Effect.interrupt
+              return Effect.sync(() => {
+                process.stderr.write(`[harness learn] decision model fallback: ${Cause.pretty(cause)}\n`)
+              }).pipe(Effect.as(Option.none()))
+            }),
             Effect.provide(decisionLayer),
           ),
         )
 
-    const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
+    const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, nodeSyncHostIo)
     const activeStubs = Array.from(fnIndex.bySpanName.values())
       .filter((fn) => fn.isStub)
       .map((fn) => fn.spanName)
 
     let missingPlannedFns: ReadonlyArray<string> = []
     let snapshotOk = true
-    if (existsSync(planPath) && existsSync(implPath)) {
+    if (nodeSyncHostIo.existsSync(planPath) && nodeSyncHostIo.existsSync(implPath)) {
       const loadSnap = (path: string, label: string) =>
-        loadGraphSnapshotEffect(path).pipe(
+        loadGraphSnapshotEffect(path, nodeSyncHostIo).pipe(
           Effect.map((graph) => ({ _tag: "Ok" as const, graph })),
           Effect.catchTag("GraphSnapshotError", (err: GraphSnapshotError) =>
             Effect.gen(function* () {
@@ -194,13 +202,14 @@ export const handleDoctorOrSession = (
         .exhaustive()
     }
 
-    const stampCheck = checkVerifyStamp(repoRoot)
+    const stampCheck = checkVerifyStamp(repoRoot, nodeSyncHostIo)
     const hasPlanOrStamp =
-      existsSync(planPath) || existsSync(join(harnessDir, "verify-stamp.json"))
+      nodeSyncHostIo.existsSync(planPath) ||
+      nodeSyncHostIo.existsSync(join(harnessDir, "verify-stamp.json"))
     const effectiveStampValid = hasPlanOrStamp ? stampCheck.valid : true
     const stampReason = !stampCheck.valid ? stampCheck.reason : undefined
-    const rawFrictionEvents = readFrictionEvents(repoRoot)
-    const telemetryEvents = readTelemetryEvents(repoRoot)
+    const rawFrictionEvents = readFrictionEvents(repoRoot, nodeSyncHostIo)
+    const telemetryEvents = readTelemetryEvents(repoRoot, nodeSyncHostIo)
     const scoped = scopeSessionReportInput({
       events: telemetryEvents,
       frictionEvents: rawFrictionEvents,
@@ -275,13 +284,13 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
 ): Effect.fn.Return<CliResult> {
   const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
   const isAntigravity = argv.includes("--format=antigravity")
-  const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
+  const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, nodeSyncHostIo)
   const harnessDir = resolveHarnessStateDir(repoRoot)
   const snapshotPath = join(harnessDir, "graph-snapshot.json")
-  const headState = resolveGitHeadState(repoRoot)
-  const recordedMeta = readGraphHeadMeta(repoRoot)
+  const headState = resolveGitHeadState(repoRoot, nodeSyncHostIo)
+  const recordedMeta = readGraphHeadMeta(repoRoot, nodeSyncHostIo)
   const reconcileDecision = yield* decideOmnigraphReconcile({
-    snapshotExists: existsSync(snapshotPath),
+    snapshotExists: nodeSyncHostIo.existsSync(snapshotPath),
     recordedHeadSha: recordedMeta?.headSha ?? null,
     currentHeadSha: headState.headSha,
     recordedGitBranch: recordedMeta?.gitBranch ?? null,
@@ -289,8 +298,8 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
   })
 
   if (!isAntigravity || reconcileDecision.needsReconcile) {
-    const graph = yield* extractWorkspaceTypeAwareGraph(repoRoot)
-    const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
+    const graph = yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo)
+    const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
     const targetBranch =
       headState.gitBranch === null ||
       headState.gitBranch === "main" ||
@@ -299,8 +308,8 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
         : taskBranches.implBranch
 
     if (isIsolatedExternalWorkspace(repoRoot)) {
-      saveGraphSnapshot(graph, snapshotPath)
-      writeGraphHeadMeta(repoRoot, headState)
+      saveGraphSnapshot(graph, snapshotPath, nodeSyncHostIo)
+      writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
       return {
         exitCode: 0,
         stdout: isAntigravity
@@ -323,14 +332,19 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
       from: taskBranches.mainBranch,
       snapshotPath,
     }).pipe(
-      Effect.provide(OmnigraphSync.Live),
-      Effect.orElseSucceed(() => ({
-        syncedToOmnigraph: false,
-        snapshotPath,
-        error: undefined,
-      })),
+      Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
+      Effect.catchCause((cause) => {
+        if (Cause.hasInterrupts(cause)) return Effect.interrupt
+        return Effect.succeed({
+          syncedToOmnigraph: false,
+          snapshotPath,
+          error: Cause.pretty(cause),
+        })
+      }),
     )
-    writeGraphHeadMeta(repoRoot, headState)
+    if (syncRes.syncedToOmnigraph) {
+      writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
+    }
     return {
       exitCode: 0,
       stdout: isAntigravity
@@ -369,7 +383,7 @@ export const handleLearn = (
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     const shouldClear = argv.includes("--clear")
-    const events = readFrictionEvents(repoRoot)
+    const events = readFrictionEvents(repoRoot, nodeSyncHostIo)
     const clusters = summarizeFrictionEvents(events)
     const proposals = []
     let useFastFallback =
@@ -402,9 +416,9 @@ export const handleLearn = (
     const rejectedRules: Array<{ ruleId: string; stage: string; reason: string }> = []
     let planSearchResults: unknown = undefined
     const learnedSlicesPath = join(repoRoot, ".harness", "learned-slices.json")
-    if (existsSync(learnedSlicesPath)) {
+    if (nodeSyncHostIo.existsSync(learnedSlicesPath)) {
       const rawSlices = yield* Effect.try({
-        try: () => readFileSync(learnedSlicesPath, "utf-8"),
+        try: () => nodeSyncHostIo.readTextSync(learnedSlicesPath),
         catch: () => undefined,
       }).pipe(Effect.orElseSucceed(() => undefined))
       if (rawSlices !== undefined) {
@@ -468,7 +482,7 @@ export const handleLearn = (
     }
 
     if (shouldClear) {
-      clearFrictionEvents(repoRoot)
+      clearFrictionEvents(repoRoot, nodeSyncHostIo)
     }
 
     return {
@@ -492,19 +506,19 @@ export const handleReport = (
   Effect.sync(() => {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     if (argv.includes("--reset") || argv.includes("--clear")) {
-      clearTelemetryEvents(repoRoot)
+      clearTelemetryEvents(repoRoot, nodeSyncHostIo)
     }
-    const events = readTelemetryEvents(repoRoot)
-    const frictionEvents = readFrictionEvents(repoRoot)
-    const stampCheck = checkVerifyStamp(repoRoot)
+    const events = readTelemetryEvents(repoRoot, nodeSyncHostIo)
+    const frictionEvents = readFrictionEvents(repoRoot, nodeSyncHostIo)
+    const stampCheck = checkVerifyStamp(repoRoot, nodeSyncHostIo)
     const report = buildSessionReport({
       events,
       frictionEvents,
       stampValid: stampCheck.valid,
       cumulative: argv.includes("--all"),
     })
-    if (options?.repoRoot !== undefined || process.env.VITEST === undefined) {
-      writeSessionReportFiles(repoRoot, report)
+    if (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) {
+      writeSessionReportFiles(repoRoot, report, nodeSyncHostIo)
     }
     if (argv.includes("--format=markdown")) {
       return {

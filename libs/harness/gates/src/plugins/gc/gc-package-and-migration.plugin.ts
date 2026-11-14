@@ -15,16 +15,28 @@
  * - architecture-policy-violation: Self-dogfooding and AST policy violations.
  * - unused-contract-export: Per-scope unused contract symbols.
  */
-import { type Dirent, existsSync, readdirSync, readFileSync } from "node:fs"
-import { join, posix, relative } from "node:path"
-import { Cause, Effect, Layer, Option, Schema } from "effect"
+import { dirname, join, posix, relative } from "node:path"
+import { Cause, Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
-import * as Graph from "effect/Graph"
+import {
+  AstSourceContent,
+  AstSourceFilePath,
+  ErrorReasonMessage,
+  NxTierTag,
+  PackageDependencyName,
+  PackageManifestName,
+  PackageManifestPath,
+  type PackageTierManifestInput,
+  type ServiceTierSourceInput,
+  WorkspaceFileContent,
+  WorkspaceFilePath,
+  WorkspaceFsError,
+  WorkspaceFsOperation,
+} from "@harness/contract"
+import { type SyncHostIo, WorkspaceFs } from "@harness/service"
 import { checkMigrationFiles, checkMigrationSqlSafety } from "../../migration-check.js"
-import { AstSourceContent, AstSourceFilePath, decideAstGateCache, type AstGateFileInput } from "../../ast-cache.js"
+import { decideAstGateCache, type AstGateFileInput } from "../../ast-cache.js"
 import { evaluateAllGatePlugins, GatePluginRegistryLive } from "../gate-plugin-registry.js"
-import { WorkspaceFsLive } from "../../services/workspace-fs.js"
-import { WorkspaceFilePath } from "../self-dogfooding-contract.js"
 import {
   collectModularPluginFiles,
   collectWorkspaceAllFiles,
@@ -39,24 +51,37 @@ import {
   safeFs,
 } from "./gc-helpers.js"
 import { checkUnusedContractExports } from "./gc-topology-entropy.plugin.js"
+import { decideHarnessTierTopology } from "../harness-tier-topology.js"
 
 const PackageJsonSchema = Schema.Struct({
   name: Schema.optional(Schema.String),
   dependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  nx: Schema.optional(
+    Schema.Struct({
+      tags: Schema.optional(Schema.Array(Schema.String)),
+    }),
+  ),
 })
 const decodePackageJson = Schema.decodeUnknownOption(Schema.fromJsonString(PackageJsonSchema))
+
+const ProjectJsonSchema = Schema.Struct({
+  tags: Schema.optional(Schema.Array(Schema.String)),
+})
+const decodeProjectJson = Schema.decodeUnknownOption(Schema.fromJsonString(ProjectJsonSchema))
 
 const SKIPPED_PACKAGE_DEPS = new Set([
   "effect", "@effect/sql-d1", "@effect/sql-sqlite-do", "@effect/ai-typesafe", "drizzle-orm",
 ])
 
-const listSubdirs = (dir: string): ReadonlyArray<string> => {
-  if (!existsSync(dir)) return []
+const listSubdirs = (dir: string, hostIo: SyncHostIo): ReadonlyArray<string> => {
+  if (!hostIo.existsSync(dir)) return []
   return safeFs<ReadonlyArray<string>>(
-    () => {
-      const dirents: ReadonlyArray<Dirent> = readdirSync(dir, { withFileTypes: true })
-      return dirents.filter((e) => e.isDirectory()).map((e) => e.name).sort((a, b) => a.localeCompare(b))
-    },
+    () =>
+      hostIo
+        .readdirSync(dir)
+        .filter((e) => e.isDirectory)
+        .map((e) => e.name)
+        .sort((a, b) => a.localeCompare(b)),
     [],
   )
 }
@@ -66,30 +91,80 @@ export const evaluatePackageAndMigrationPlugin = (
   _ctx?: GraphReachabilityContext,
 ): Effect.Effect<ReadonlyArray<GcFinding>> =>
   Effect.gen(function* () {
-    if (input.workspaceRoot === undefined) return []
+    if (input.workspaceRoot === undefined || input.hostIo === undefined) return []
     const repoRoot = input.workspaceRoot
+    const hostIo = input.hostIo
+    const workspaceFsImpl = {
+      readTextFile: (filePath: WorkspaceFilePath) =>
+        Effect.try({
+          try: () => WorkspaceFileContent.make(hostIo.readTextSync(filePath)),
+          catch: (err) =>
+            new WorkspaceFsError({
+              filePath,
+              operation: WorkspaceFsOperation.make("read"),
+              reason: ErrorReasonMessage.make(
+                err instanceof Error && err.message.trim().length > 0 ? err.message : "Read failed",
+              ),
+            }),
+        }),
+      writeTextFileAtomic: (filePath: WorkspaceFilePath, content: WorkspaceFileContent) =>
+        Effect.suspend(() => {
+          const tmpPath = `${filePath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
+          return Effect.try({
+            try: () => {
+              hostIo.mkdirRecursiveSync(dirname(filePath))
+              hostIo.writeTextSync(tmpPath, content)
+              hostIo.renameSync(tmpPath, filePath)
+            },
+            catch: (err) =>
+              new WorkspaceFsError({
+                filePath,
+                operation: WorkspaceFsOperation.make("write"),
+                reason: ErrorReasonMessage.make(
+                  err instanceof Error && err.message.trim().length > 0 ? err.message : "Write failed",
+                ),
+              }),
+          }).pipe(
+            Effect.ensuring(
+              Effect.ignore(
+                Effect.try({
+                  try: () => {
+                    if (hostIo.existsSync(tmpPath)) {
+                      hostIo.unlinkSync(tmpPath)
+                    }
+                  },
+                  catch: () => undefined,
+                }),
+              ),
+            ),
+          )
+        }),
+      exists: (filePath: WorkspaceFilePath) => Effect.sync(() => hostIo.existsSync(filePath)),
+    }
     const findings: Array<GcFinding> = []
+    const tierManifests: Array<PackageTierManifestInput> = []
+    const serviceTierFiles: Array<ServiceTierSourceInput> = []
     const libsDir = join(repoRoot, "libs")
-    const scopes = listSubdirs(libsDir)
+    const scopes = listSubdirs(libsDir, hostIo)
 
     for (const scope of scopes) {
       // Rule: unused-contract-export & dead-tagged-error (contract)
-      findings.push(...checkUnusedContractExports(repoRoot, scope))
+      findings.push(...checkUnusedContractExports(repoRoot, hostIo, scope))
 
       const scopeDir = join(libsDir, scope)
-      const tiers = listSubdirs(scopeDir)
+      const tiers = listSubdirs(scopeDir, hostIo)
       for (const tier of tiers) {
         const tierDir = join(scopeDir, tier)
         const srcDir = join(tierDir, "src")
-        if (!existsSync(srcDir)) continue
+        if (!hostIo.existsSync(srcDir)) continue
 
-        const srcFiles = collectWorkspaceTsFiles(srcDir).filter((f) => !f.endsWith(".test.ts") && !f.endsWith(".spec.ts"))
+        const srcFiles = collectWorkspaceTsFiles(srcDir, hostIo).filter((f) => !f.endsWith(".test.ts") && !f.endsWith(".spec.ts"))
         const packageNamedMigrationBodies = new Map<string, string>()
         const defaultTableMigratorRoots = new Map<string, string>()
 
         if (tier === "infra" && scope !== "harness") {
           for (const file of srcFiles) {
-            const content = safeFs(() => readFileSync(file, "utf8"), "")
+            const content = safeFs(() => hostIo.readTextSync(file), "")
             const noComments = content.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\r\n]*/g, "")
             const mvRegex = /(?:const|let)\s+([A-Za-z0-9_$]*[Mm]igrations[A-Za-z0-9_$]*)\s*(?::[^=]+)?=\s*\{/g
             let mvMatch: RegExpExecArray | null
@@ -102,7 +177,7 @@ export const evaluatePackageAndMigrationPlugin = (
 
         for (const file of srcFiles) {
           const relFilePath = relative(repoRoot, file).replace(/\\/g, "/")
-          const content = safeFs(() => readFileSync(file, "utf8"), "")
+          const content = safeFs(() => hostIo.readTextSync(file), "")
           const stripped = content.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\r\n]*/g, "").replace(/\s+/g, "")
           if (stripped === "" || stripped === "export{}" || stripped === "export{};") {
             findings.push({
@@ -318,43 +393,129 @@ export const evaluatePackageAndMigrationPlugin = (
         }
 
         const pkgJsonPath = join(tierDir, "package.json")
-        const pkgContent = safeFs(() => existsSync(pkgJsonPath) ? readFileSync(pkgJsonPath, "utf8") : "", "")
-        if (pkgContent.length > 0) {
-          const pkgOpt = decodePackageJson(pkgContent)
-          if (Option.isSome(pkgOpt) && pkgOpt.value.dependencies !== undefined) {
-            const dependencies = pkgOpt.value.dependencies, pkgName = pkgOpt.value.name ?? `${scope}/${tier}`
-            const scriptFiles = safeFs(() => existsSync(join(tierDir, "scripts")) ? collectWorkspaceAllFiles(join(tierDir, "scripts")) : [], [])
-            const combinedContent = [...srcFiles, ...scriptFiles].map((f) => safeFs(() => readFileSync(f, "utf8"), "")).join("\n")
-            for (const depName of Object.keys(dependencies)) {
-              if (SKIPPED_PACKAGE_DEPS.has(depName)) continue
-              const isReferenced = combinedContent.includes(`"${depName}"`) || combinedContent.includes(`'${depName}'`) || combinedContent.includes(`"${depName}/`) || combinedContent.includes(`'${depName}/`)
-              if (!isReferenced) {
-                const relPkgPath = relative(repoRoot, pkgJsonPath).replace(/\\/g, "/")
-                findings.push({
-                  kind: "unused-package-dependency", nodeId: `${pkgName}:${depName}`, location: relPkgPath,
-                  message: `Package "${pkgName}" declares dependency "${depName}" in package.json, but no file in src/ imports it.`,
-                  action: `Remove "${depName}" from dependencies in ${relPkgPath} or import it in src/.`,
-                })
+        if (hostIo.existsSync(pkgJsonPath)) {
+          const relPkgPath = relative(repoRoot, pkgJsonPath).replace(/\\/g, "/")
+          const pkgReadRes = Result.try(() => hostIo.readTextSync(pkgJsonPath))
+          const pkgContent = match(pkgReadRes)
+            .with({ _tag: "Success" }, ({ success }) => success)
+            .with({ _tag: "Failure" }, ({ failure }) => {
+              findings.push({
+                kind: "architecture-policy-violation",
+                nodeId: `${relPkgPath}:unreadable-manifest`,
+                location: relPkgPath,
+                message: `Failed to read package manifest "${relPkgPath}": ${failure instanceof Error ? failure.message : String(failure)}`,
+                action: `Ensure "${relPkgPath}" is readable valid JSON.`,
+              })
+              return undefined
+            })
+            .exhaustive()
+          if (pkgContent !== undefined) {
+            const pkgOpt = decodePackageJson(pkgContent)
+            const projectJsonPath = join(tierDir, "project.json")
+            const projectTags: Array<string> = []
+            if (hostIo.existsSync(projectJsonPath)) {
+              const projContent = safeFs(() => hostIo.readTextSync(projectJsonPath), "")
+              if (projContent.length > 0) {
+                const projOpt = decodeProjectJson(projContent)
+                match(projOpt)
+                  .with({ _tag: "Some" }, ({ value: projValue }) => {
+                    for (const t of projValue.tags ?? []) {
+                      const trimmed = t.trim()
+                      if (trimmed.length > 0) projectTags.push(trimmed)
+                    }
+                  })
+                  .with({ _tag: "None" }, () => undefined)
+                  .exhaustive()
               }
             }
+            match(pkgOpt)
+              .with({ _tag: "Some" }, ({ value: pkgValue }) => {
+                const rawPkgName = pkgValue.name ?? `${scope}/${tier}`
+                const pkgName = rawPkgName.trim()
+                const mergedTagSet = new Set<string>([
+                  ...(pkgValue.nx?.tags ?? []).map((t) => t.trim()).filter((t) => t.length > 0),
+                  ...projectTags,
+                ])
+                const nxTags = Array.from(mergedTagSet).map((t) => NxTierTag.make(t))
+                const dependencyNames = Object.keys(pkgValue.dependencies ?? {})
+                  .map((d) => d.trim())
+                  .filter((d) => d.length > 0)
+                  .map((d) => PackageDependencyName.make(d))
+                tierManifests.push({
+                  manifestPath: PackageManifestPath.make(relPkgPath),
+                  packageName: PackageManifestName.make(pkgName),
+                  nxTags,
+                  dependencyNames,
+                })
+                if (nxTags.includes(NxTierTag.make("type:service"))) {
+                  for (const file of srcFiles) {
+                    serviceTierFiles.push({
+                      filePath: AstSourceFilePath.make(relative(repoRoot, file).replace(/\\/g, "/")),
+                      content: AstSourceContent.make(safeFs(() => hostIo.readTextSync(file), "")),
+                    })
+                  }
+                }
+                if (pkgValue.dependencies !== undefined) {
+                  const dependencies = pkgValue.dependencies
+                  const scriptFiles = safeFs(() => hostIo.existsSync(join(tierDir, "scripts")) ? collectWorkspaceAllFiles(join(tierDir, "scripts"), hostIo) : [], [])
+                  const combinedContent = [...srcFiles, ...scriptFiles].map((f) => safeFs(() => hostIo.readTextSync(f), "")).join("\n")
+                  for (const depName of Object.keys(dependencies)) {
+                    if (SKIPPED_PACKAGE_DEPS.has(depName)) continue
+                    const isReferenced = combinedContent.includes(`"${depName}"`) || combinedContent.includes(`'${depName}'`) || combinedContent.includes(`"${depName}/`) || combinedContent.includes(`'${depName}/`)
+                    if (!isReferenced) {
+                      findings.push({
+                        kind: "unused-package-dependency", nodeId: `${rawPkgName}:${depName}`, location: relPkgPath,
+                        message: `Package "${rawPkgName}" declares dependency "${depName}" in package.json, but no file in src/ imports it.`,
+                        action: `Remove "${depName}" from dependencies in ${relPkgPath} or import it in src/.`,
+                      })
+                    }
+                  }
+                }
+              })
+              .with({ _tag: "None" }, () => {
+                findings.push({
+                  kind: "architecture-policy-violation",
+                  nodeId: `${relPkgPath}:corrupt-manifest`,
+                  location: relPkgPath,
+                  message: `Package manifest "${relPkgPath}" is invalid JSON or failed schema validation.`,
+                  action: `Fix JSON syntax and schema in "${relPkgPath}".`,
+                })
+              })
+              .exhaustive()
           }
         }
       }
     }
 
-    const sqlFilesToScan: Array<string> = [...collectWorkspaceSqlFiles(join(repoRoot, "migrations"))]
+    if (tierManifests.length > 0 || serviceTierFiles.length > 0) {
+      const tierReport = yield* decideHarnessTierTopology({
+        manifests: tierManifests,
+        serviceFiles: serviceTierFiles,
+      })
+      for (const v of tierReport.violations) {
+        findings.push({
+          kind: "architecture-policy-violation",
+          nodeId: `${v.location}:${v.rule}`,
+          location: v.location,
+          message: v.message,
+          action: `Resolve hexagonal tier topology violation (${v.rule}) in ${v.location}.`,
+        })
+      }
+    }
+
+    const sqlFilesToScan: Array<string> = [...collectWorkspaceSqlFiles(join(repoRoot, "migrations"), hostIo)]
     for (const scope of scopes) {
       const scopeDir = join(libsDir, scope)
-      for (const tier of listSubdirs(scopeDir)) {
-        sqlFilesToScan.push(...collectWorkspaceSqlFiles(join(scopeDir, tier, "migrations")))
+      for (const tier of listSubdirs(scopeDir, hostIo)) {
+        sqlFilesToScan.push(...collectWorkspaceSqlFiles(join(scopeDir, tier, "migrations"), hostIo))
       }
     }
     const appsDir = join(repoRoot, "apps")
-    for (const app of listSubdirs(appsDir)) {
-      sqlFilesToScan.push(...collectWorkspaceSqlFiles(join(appsDir, app, "migrations")))
+    for (const app of listSubdirs(appsDir, hostIo)) {
+      sqlFilesToScan.push(...collectWorkspaceSqlFiles(join(appsDir, app, "migrations"), hostIo))
     }
     if (sqlFilesToScan.length > 0) {
-      for (const v of checkMigrationFiles(sqlFilesToScan).violations) {
+      for (const v of checkMigrationFiles(sqlFilesToScan, hostIo).violations) {
         const relFile = relative(repoRoot, v.file).replace(/\\/g, "/")
         findings.push({
           kind: "unsafe-sql-migration", nodeId: `${relFile}:${v.kind}`, location: relFile,
@@ -364,13 +525,14 @@ export const evaluatePackageAndMigrationPlugin = (
       }
     }
 
-    const modularFiles = collectModularPluginFiles(repoRoot)
+    const modularFiles = collectModularPluginFiles(repoRoot, hostIo)
     if (modularFiles.length > 0) {
       const gateExit = yield* evaluateAllGatePlugins({
         filePaths: modularFiles.map((f) => WorkspaceFilePath.make(f.replace(/\\/g, "/"))),
         failOnViolation: false,
       }).pipe(
-        Effect.provide(Layer.mergeAll(GatePluginRegistryLive, WorkspaceFsLive)),
+        Effect.provideService(WorkspaceFs, workspaceFsImpl),
+        Effect.provide(GatePluginRegistryLive),
         Effect.exit,
       )
       match(gateExit)
@@ -395,7 +557,7 @@ export const evaluatePackageAndMigrationPlugin = (
 
       const astFiles: Array<AstGateFileInput> = []
       for (const f of modularFiles) {
-        const content = safeFs(() => readFileSync(f, "utf8"), "")
+        const content = safeFs(() => hostIo.readTextSync(f), "")
         astFiles.push({
           filePath: AstSourceFilePath.make(relative(repoRoot, f).replace(/\\/g, "/")),
           content: AstSourceContent.make(content),
@@ -423,14 +585,19 @@ export const evaluatePackageAndMigrationPlugin = (
           state.set(node, 1)
           for (const next of adj.get(node) ?? []) {
             const st = state.get(next) ?? 0
-            if (st === 1) {
-              const cyclePath = [...stack.slice(stack.indexOf(next)), next].join(" -> ")
-              findings.push({
-                kind: "architecture-policy-violation", nodeId: `${next}:circular-import`, location: next,
-                message: `Circular relative import detected in modular harness files: ${cyclePath}`,
-                action: `Break the circular import cycle (${cyclePath}) by extracting shared types/helpers into a leaf module.`,
+            match<number>(st)
+              .with(1, () => {
+                const cyclePath = [...stack.slice(stack.indexOf(next)), next].join(" -> ")
+                findings.push({
+                  kind: "architecture-policy-violation", nodeId: `${next}:circular-import`, location: next,
+                  message: `Circular relative import detected in modular harness files: ${cyclePath}`,
+                  action: `Break the circular import cycle (${cyclePath}) by extracting shared types/helpers into a leaf module.`,
+                })
               })
-            } else if (st === 0 && adj.has(next)) visitCycle(next, [...stack, next])
+              .with(0, () => {
+                if (adj.has(next)) visitCycle(next, [...stack, next])
+              })
+              .otherwise(() => {})
           }
           state.set(node, 2)
         }
@@ -440,14 +607,3 @@ export const evaluatePackageAndMigrationPlugin = (
 
     return findings
   })
-
-export const scanPackageAndMigrationHygiene = (repoRoot: string): ReadonlyArray<GcFinding> =>
-  Effect.runSync(
-    evaluatePackageAndMigrationPlugin({
-      graph: { graph: Graph.directed(), nodeIndexByKey: new Map() },
-      workspaceRoot: repoRoot,
-    }),
-  )
-
-export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcFinding> =>
-  scanPackageAndMigrationHygiene(repoRoot)

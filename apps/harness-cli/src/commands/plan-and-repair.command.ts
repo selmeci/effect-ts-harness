@@ -1,10 +1,8 @@
-import { execFileSync } from "node:child_process"
-import { existsSync } from "node:fs"
 import { join } from "node:path"
-import { Effect, Option } from "effect"
+import { Cause, Effect, Option } from "effect"
 import * as Graph from "effect/Graph"
 import { match, P } from "ts-pattern"
-import { loadGovernanceDocsFromDisk, resolveOmnigraphTaskBranches } from "@harness/gates"
+import { loadGovernanceDocsFromDisk } from "@harness/gates"
 import {
   BisectionProbeCount,
   checkEffectGraph,
@@ -12,11 +10,13 @@ import {
   decideGraphRewrite,
   extractWorkspaceTypeAwareGraph,
   getNodeKey,
-  OmnigraphSync,
+  makeOmnigraphSyncLayer,
+  resolveOmnigraphTaskBranches,
   saveGraphSnapshot,
   syncToOmnigraphAndSnapshot,
   VerificationStatus,
 } from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 import { buildWorkspaceFnIndex } from "@harness/ingest"
 import {
   type CliEnv,
@@ -43,7 +43,8 @@ export const handlePlanCheck = (
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-    const governanceDocs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot)
+    const governanceDocs =
+      options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot, nodeSyncHostIo)
     const graphOnly = argv.includes("--graph-only")
 
     const requireOllama =
@@ -51,7 +52,7 @@ export const handlePlanCheck = (
       (!graphOnly &&
         !isIsolatedExternalWorkspace(repoRoot) &&
         options?.decisionLayer === undefined &&
-        process.env.VITEST === undefined)
+        options?.skipBackgroundDaemons !== true)
     if (requireOllama && !(yield* ensureLocalOllamaReady())) {
       return {
         exitCode: 1,
@@ -64,17 +65,16 @@ export const handlePlanCheck = (
     if (
       !graphOnly &&
       !options?.skipSubprocessVerify &&
-      existsSync(join(repoRoot, "package.json"))
+      nodeSyncHostIo.existsSync(join(repoRoot, "package.json"))
     ) {
       const nxArgs = resolveNxAffectedArgs(repoRoot, ["typecheck", "lint"])
       const subprocessErr = yield* Effect.try({
         try: () => {
-          execFileSync("pnpm", nxArgs, {
+          const res = nodeSyncHostIo.execFileSync("pnpm", nxArgs, {
             cwd: repoRoot,
-            stdio: "pipe",
             env: { ...process.env, HARNESS_PLAN_CHECK: "1", CI: "true" },
           })
-          return null
+          return res.exitCode === 0 ? null : formatSubprocessError(res)
         },
         catch: (cause) => formatSubprocessError(cause),
       }).pipe(Effect.catch((msg) => Effect.succeed(msg || "Plan check subprocess failed")))
@@ -88,7 +88,7 @@ export const handlePlanCheck = (
       }
     }
 
-    const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
+    const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, nodeSyncHostIo)
     if (fnIndex.duplicates.length > 0) {
       return {
         exitCode: 1,
@@ -97,7 +97,7 @@ export const handlePlanCheck = (
       }
     }
 
-    const graph = yield* extractWorkspaceTypeAwareGraph(repoRoot)
+    const graph = yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo)
     const checkResult = checkEffectGraph(graph)
     if (!checkResult.ok) {
       return {
@@ -111,7 +111,26 @@ export const handlePlanCheck = (
 
     let hasEffectFnNodes = false
     for (const [, node] of Graph.nodes(graph.graph)) {
-      if (node._tag === "EffectFn") {
+      const isEffectFn = match(node)
+        .with({ _tag: "EffectFn" }, () => true)
+        .with(
+          { _tag: "ServiceTag" },
+          { _tag: "ServiceLayer" },
+          { _tag: "TaggedError" },
+          { _tag: "SchemaDef" },
+          { _tag: "VitestCase" },
+          { _tag: "PatternDoc" },
+          { _tag: "AdrDoc" },
+          { _tag: "EarsSpec" },
+          { _tag: "EffectSignature" },
+          { _tag: "LayerFlow" },
+          { _tag: "TraceabilityTuple" },
+          { _tag: "HttpEndpointTuple" },
+          { _tag: "MigrationTuple" },
+          () => false,
+        )
+        .exhaustive()
+      if (isEffectFn) {
         hasEffectFnNodes = true
         break
       }
@@ -119,23 +138,69 @@ export const handlePlanCheck = (
     if (hasEffectFnNodes) {
       const failsWithErrorTags = new Set<string>()
       for (const [, node] of Graph.nodes(graph.graph)) {
-        if (node._tag === "EffectSignature" || node._tag === "LayerFlow") {
-          for (const errTag of node.emittedErrors ?? []) failsWithErrorTags.add(errTag)
-        } else if (node._tag === "HttpEndpointTuple") {
-          for (const errTag of node.errorTags) failsWithErrorTags.add(errTag)
-        }
+        match(node)
+          .with({ _tag: "EffectSignature" }, { _tag: "LayerFlow" }, (n) => {
+            for (const errTag of n.emittedErrors ?? []) failsWithErrorTags.add(errTag)
+          })
+          .with({ _tag: "HttpEndpointTuple" }, (n) => {
+            for (const errTag of n.errorTags) failsWithErrorTags.add(errTag)
+          })
+          .with(
+            { _tag: "EffectFn" },
+            { _tag: "ServiceTag" },
+            { _tag: "ServiceLayer" },
+            { _tag: "TaggedError" },
+            { _tag: "SchemaDef" },
+            { _tag: "VitestCase" },
+            { _tag: "PatternDoc" },
+            { _tag: "AdrDoc" },
+            { _tag: "EarsSpec" },
+            { _tag: "TraceabilityTuple" },
+            { _tag: "MigrationTuple" },
+            () => undefined,
+          )
+          .exhaustive()
       }
       for (const [, edge] of Graph.edges(graph.graph)) {
-        if (edge.data.role === "fails-with" || edge.data.role === "endpoint-error") {
-          const targetOpt = Graph.getNode(graph.graph, edge.target)
-          if (Option.isSome(targetOpt) && targetOpt.value._tag === "TaggedError") {
-            failsWithErrorTags.add(targetOpt.value.errorTag)
-          }
-        }
+        match<string>(edge.data.role)
+          .with("fails-with", "endpoint-error", () => {
+            const targetOpt = Graph.getNode(graph.graph, edge.target)
+            match(targetOpt)
+              .with({ _tag: "Some" }, ({ value }) => {
+                match(value)
+                  .with({ _tag: "TaggedError" }, (errNode) => {
+                    failsWithErrorTags.add(errNode.errorTag)
+                  })
+                  .with(
+                    { _tag: "EffectFn" },
+                    { _tag: "ServiceTag" },
+                    { _tag: "ServiceLayer" },
+                    { _tag: "SchemaDef" },
+                    { _tag: "VitestCase" },
+                    { _tag: "PatternDoc" },
+                    { _tag: "AdrDoc" },
+                    { _tag: "EarsSpec" },
+                    { _tag: "EffectSignature" },
+                    { _tag: "LayerFlow" },
+                    { _tag: "TraceabilityTuple" },
+                    { _tag: "HttpEndpointTuple" },
+                    { _tag: "MigrationTuple" },
+                    () => undefined,
+                  )
+                  .exhaustive()
+              })
+              .with({ _tag: "None" }, () => undefined)
+              .exhaustive()
+          })
+          .otherwise(() => undefined)
       }
       const violations: Array<string> = []
       for (const doc of governanceDocs) {
-        if (doc.status === "accepted" || doc.status === "proposed") {
+        const isActive = match(doc.status)
+          .with("accepted", "proposed", () => true)
+          .with("deprecated", "superseded", () => false)
+          .exhaustive()
+        if (isActive) {
           for (const errName of doc.referencedErrors ?? []) {
             if (!failsWithErrorTags.has(errName)) {
               violations.push(
@@ -157,7 +222,7 @@ export const handlePlanCheck = (
     if (!graphOnly) {
       const snapshotPath = join(repoRoot, ".harness", "plan-graph-snapshot.json")
       if (isIsolatedExternalWorkspace(repoRoot)) {
-        saveGraphSnapshot(graph, snapshotPath)
+        saveGraphSnapshot(graph, snapshotPath, nodeSyncHostIo)
         recordTelemetry(options, {
           surface: "cli",
           category: "graph_query",
@@ -168,19 +233,22 @@ export const handlePlanCheck = (
         })
       } else {
         yield* ensureLocalOmnigraphReady(repoRoot)
-        const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
+        const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
         const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
           repoRoot: resolveClusterRepoRoot(repoRoot),
           branch: taskBranches.planBranch,
           from: taskBranches.mainBranch,
           snapshotPath,
         }).pipe(
-          Effect.provide(OmnigraphSync.Live),
-          Effect.orElseSucceed(() => ({
-            syncedToOmnigraph: false,
-            snapshotPath,
-            error: undefined,
-          })),
+          Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
+          Effect.catchCause((cause) => {
+            if (Cause.hasInterrupts(cause)) return Effect.interrupt
+            return Effect.succeed({
+              syncedToOmnigraph: false,
+              snapshotPath,
+              error: Cause.pretty(cause),
+            })
+          }),
         )
         recordTelemetry(options, {
           surface: "cli",
@@ -201,10 +269,10 @@ export const handlePlanCheck = (
     }
 
     const earsErr = yield* checkPlanEarsConsistency(governanceDocs)
-    if (Option.isSome(earsErr)) {
-      return earsErr.value
-    }
-    return { exitCode: 0, stdout: checkResult.mermaid, stderr: "" }
+    return match(earsErr)
+      .with({ _tag: "Some" }, ({ value }) => value)
+      .with({ _tag: "None" }, () => ({ exitCode: 0, stdout: checkResult.mermaid, stderr: "" }))
+      .exhaustive()
   })
 
 export const handlePlanSynth = (
@@ -225,7 +293,8 @@ export const handlePlanSynth = (
       }
     }
 
-    const graph = options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot))
+    const graph =
+      options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo))
     const rewriteOutcome = yield* decideGraphRewrite(graph, "auto-plan")
     const selected =
       Option.getOrUndefined(rewriteOutcome.result.recommendedCandidate) ??
@@ -275,6 +344,7 @@ export const handlePlanSynth = (
       workspaceRoot: repoRoot,
       initialGraph: graph,
       verifyRoundTrip,
+      hostIo: nodeSyncHostIo,
     })
 
     return yield* finalizeProjectionCliResult({
@@ -322,7 +392,8 @@ export const handleRepair = (
       }
     }
 
-    const graph = options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot))
+    const graph =
+      options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo))
     const rewriteOutcome = yield* decideGraphRewrite(graph, "auto-repair")
     const selected =
       Option.getOrUndefined(rewriteOutcome.result.recommendedCandidate) ??
@@ -367,6 +438,7 @@ export const handleRepair = (
             workspaceRoot: repoRoot,
             initialGraph: graph,
             verifyRoundTrip,
+            hostIo: nodeSyncHostIo,
           })
         : {
             operations: [],

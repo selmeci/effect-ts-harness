@@ -1,10 +1,10 @@
 # Planning in Effect Idioms
 
-A plan maps each section to an Effect v4 and Alchemy v2 building block, using stub<A, E, R> from @harness/gates to verify type-checked skeletons before implementation.
+A plan maps each section to an Effect v4 and Alchemy v2 building block, using stub<A, E, R> from @harness/contract to verify type-checked skeletons before implementation.
 
 ## Overview
 
-Planning in the Effect-TS Engineering Harness adheres to **Plan-as-Code**. Before writing any production implementation, the agent maps every component of the feature to an Effect or Alchemy architectural primitive, creates a complete type-checked skeleton using `stub<A, E, R>(...args)` from `@harness/gates`, and verifies the plan with `harness plan-check`.
+Planning in the Effect-TS Engineering Harness adheres to **Plan-as-Code**. Before writing any production implementation, the agent maps every component of the feature to an Effect or Alchemy architectural primitive, creates a complete type-checked skeleton using `stub<A, E, R>(...args)` from `@harness/contract`, and verifies the plan with `harness plan-check`.
 
 ## Plan-as-Code Mapping Table
 
@@ -35,7 +35,7 @@ Every feature plan must map each concern to one of the 18 Effect v4 + Alchemy v2
 
 During the planning phase, you create code skeletons that preserve full type safety without implementing business logic. Using `Effect.die("TODO")` directly is problematic because TypeScript infers `Effect<never, never, never>`, losing the planned return type `A`, error channel `E`, and requirement channel `R`.
 
-To solve this, `@harness/gates` exports `stub`:
+To solve this, `@harness/contract` exports `stub`:
 
 ```ts
 import { Effect } from "effect"
@@ -49,7 +49,7 @@ export const stub = <A, E = never, R = never>(
 
 ```ts
 import { Effect } from "effect"
-import { stub } from "@harness/gates"
+import { stub } from "@harness/contract"
 import type { CheckoutInput, CheckoutReceipt } from "contract/cart"
 import type { OutOfStockError, PaymentError } from "contract/errors"
 import type { InventoryRepo } from "service/inventory"
@@ -119,7 +119,7 @@ The agent inspects existing domain nodes via `harness_resolve` / `harness_caller
 
 ```ts
 import { Effect } from "effect"
-import { stub } from "@harness/gates"
+import { stub } from "@harness/contract"
 import {
   type AlbumPhotoCount,
   type DecideAlbumDecrementInput,
@@ -150,7 +150,7 @@ Before advancing a plan from skeleton to implementation, verify complete doc-to-
 - [ ] **No Future-Phase Leakage:** Never copy unimplemented future-phase symbols (e.g., `DeciderInvariantError`, `commandId` idempotency deduplication, partial event matching, or unconfigured `scope:fixture` Nx tags) into the current phase's EARS Spec or ADR. Only plan and declare what is being built in the active phase.
 - [ ] **1:1 Symbol Parity:** Every method name (e.g. `.thenEvents`, `.thenNothing`, `.thenFails`), every `*Error` symbol mentioned in prose or Mermaid diagrams, and every Nx tag in the Spec/ADR must match the current skeleton 1:1. Any symbol in an ADR or Spec that does not exist in code violates `stale-doc-reference`.
 - [ ] **No Empty Source Modules (`empty-source-module` gate):** Never leave placeholder `export {}` files in `src/`. Every source file must contain real domain schemas, service interfaces, or `stub<A, E, R>` signatures.
-- [ ] **Clean Dependency Manifests (`unused-package-dependency` gate):** Never leave unused packages in `package.json` `dependencies`. Note: `@harness/gates` and `@harness/graph` belong in `devDependencies` during planning for `stub()`, and must not remain in runtime `dependencies` once implementation replaces stubs.
+- [ ] **Clean Dependency Manifests (`unused-package-dependency` gate):** Never leave unused packages in `package.json` `dependencies`. Note: `@harness/contract` (when only used for `stub()`) belongs in `devDependencies` once implementation replaces stubs, and must not remain unused in runtime `dependencies`.
 
 ---
 

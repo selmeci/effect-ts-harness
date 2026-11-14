@@ -14,11 +14,19 @@
     "start": "node --import ../../tools/node-ts-resolver.mjs src/index.ts"
   },
   "dependencies": {
+    "@effect/platform-node": "4.0.0",
+    "@harness/contract": "workspace:*",
     "@harness/decision": "workspace:*",
+    "@harness/es-contract": "workspace:*",
+    "@harness/es-core": "workspace:*",
     "@harness/gates": "workspace:*",
     "@harness/graph": "workspace:*",
+    "@harness/infra": "workspace:*",
     "@harness/ingest": "workspace:*",
-    "effect": "4.0.0"
+    "@harness/sample-contract": "workspace:*",
+    "@harness/service": "workspace:*",
+    "effect": "4.0.0",
+    "ts-pattern": "5.9.2"
   },
   "devDependencies": {
     "@effect/vitest": "4.0.0",

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Effect, Schema } from "effect"
+import { Cause, Effect, Exit, Layer, Schema } from "effect"
 import { match } from "ts-pattern"
-import { checkSpanBudgets, type SpanSample } from "@harness/gates"
+import { decideSpanBudgets, type SpanSample } from "@harness/gates"
 import { runWithTestTracer, type IndexedEffectFn, type RecordedSpanEvent } from "@harness/ingest"
 import {
   CANONICAL_MCP_TOOL_NAMES,
@@ -13,7 +13,12 @@ import {
   UnknownToolError,
   type McpToolPluginDescriptor,
 } from "../src/tools/tool-registry.js"
-import { makeLiveMcpToolRegistryLayer } from "../src/server.js"
+import {
+  createServer,
+  executeManagedMcpTool,
+  makeLiveMcpToolRegistryLayer,
+  makeMcpMainLayer,
+} from "../src/server.js"
 
 const toSpanSamples = (spans: ReadonlyArray<RecordedSpanEvent>): ReadonlyArray<SpanSample> =>
   spans.map((s) => ({
@@ -43,17 +48,20 @@ describe("HarnessMcp.dispatchTool (SPEC-0011 §4)", () => {
       }),
   )
 
-  it("REQ-4.3: makeMcpToolRegistryLayer throws on duplicate tool registration", () => {
-    const dupDescriptor: McpToolPluginDescriptor = {
-      name: McpToolName.make("harness_resolve"),
-      description: "Duplicate tool descriptor",
-      inputSchema: Schema.Struct({}),
-      execute: () => Effect.succeed(null),
-    }
-    expect(() => makeMcpToolRegistryLayer([dupDescriptor, dupDescriptor])).toThrow(
-      /Duplicate MCP tool registered: harness_resolve/,
-    )
-  })
+  it.effect("REQ-4.3: makeMcpToolRegistryLayer dies on duplicate tool registration", () =>
+    Effect.gen(function* () {
+      const dupDescriptor: McpToolPluginDescriptor = {
+        name: McpToolName.make("harness_resolve"),
+        description: "Duplicate tool descriptor",
+        inputSchema: Schema.Struct({}),
+        execute: () => Effect.succeed(null),
+      }
+      const exit = yield* Effect.exit(
+        Effect.scoped(Layer.build(makeMcpToolRegistryLayer([dupDescriptor, dupDescriptor]))),
+      )
+      expect(Exit.isFailure(exit) && Cause.hasDies(exit.cause)).toBe(true)
+    }),
+  )
 
   it.effect(
     "REQ-4.3: executes registered MCP tool handler via McpToolRegistryLive, records HarnessMcp.dispatchTool span, and passes span budgets",
@@ -85,7 +93,7 @@ describe("HarnessMcp.dispatchTool (SPEC-0011 §4)", () => {
         expect(dispatchSpan?.name).toBe("HarnessMcp.dispatchTool")
         expect(dispatchSpan?.exitTag).toBe("Success")
 
-        const violations = checkSpanBudgets({ spans: toSpanSamples(spans) })
+        const violations = yield* decideSpanBudgets({ spans: toSpanSamples(spans) })
         expect(violations).toHaveLength(0)
       }),
   )
@@ -121,7 +129,7 @@ describe("HarnessMcp.dispatchTool (SPEC-0011 §4)", () => {
         expect(dispatchSpan?.name).toBe("HarnessMcp.dispatchTool")
         expect(dispatchSpan?.exitTag).toBe("Success")
 
-        const violations = checkSpanBudgets({ spans: toSpanSamples(spans) })
+        const violations = yield* decideSpanBudgets({ spans: toSpanSamples(spans) })
         expect(violations).toHaveLength(0)
       }),
   )
@@ -149,7 +157,10 @@ describe("HarnessMcp.dispatchTool (SPEC-0011 §4)", () => {
         expect(dispatchSpan?.name).toBe("HarnessMcp.dispatchTool")
         expect(dispatchSpan?.exitTag).toBe("Failure")
 
-        const violations = checkSpanBudgets({ spans: toSpanSamples(spans), maxRepeatedChildCalls: 3 })
+        const violations = yield* decideSpanBudgets({
+          spans: toSpanSamples(spans),
+          maxRepeatedChildCalls: 3,
+        })
         expect(violations).toHaveLength(0)
 
         match(exit)
@@ -172,6 +183,43 @@ describe("HarnessMcp.dispatchTool (SPEC-0011 §4)", () => {
             expect.fail("Expected dispatchMcpTool to fail for unregistered tool")
           })
           .exhaustive()
+      }),
+  )
+
+  it.effect(
+    "REQ-4.6: executeManagedMcpTool records HarnessMcp.executeManagedTool span and createServer disposes ManagedRuntime cleanly on close",
+    () =>
+      Effect.gen(function* () {
+        const testId = "HarnessMcp.executeManagedTool::req-4-6"
+        const emptyFnIndex = new Map<string, IndexedEffectFn>()
+
+        const { result, spans } = yield* runWithTestTracer(
+          testId,
+          executeManagedMcpTool({
+            toolName: "harness_telemetry_report",
+            args: {},
+          }).pipe(Effect.provide(makeMcpMainLayer())),
+          emptyFnIndex,
+        )
+
+        expect(result).toMatchObject({
+          totalEvents: expect.any(Number),
+          healthScore: expect.any(Number),
+          grade: expect.any(String),
+        })
+
+        const managedSpan = spans.find((s) => s.name === "HarnessMcp.executeManagedTool")
+        expect(managedSpan?.name).toBe("HarnessMcp.executeManagedTool")
+        expect(managedSpan?.exitTag).toBe("Success")
+
+        const violations = yield* decideSpanBudgets({ spans: toSpanSamples(spans) })
+        expect(violations).toHaveLength(0)
+
+        const srv = createServer()
+        yield* Effect.promise(async () => {
+          await srv.close()
+          await srv.close()
+        })
       }),
   )
 })

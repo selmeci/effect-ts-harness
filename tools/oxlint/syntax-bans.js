@@ -63,8 +63,8 @@ const DISCRIMINANT_CALLBACK_METHODS = new Set(["filter", "find", "some", "every"
 
 const DISCRIMINANT_PROP_NAMES = new Set(["_tag", "kind", "status", "verdict", "role", "state"])
 
-function isTierOrSampleAppFile(filename) {
-  return /(^|\/)(libs\/[^/]+\/(contract|domain|core|service|infra)|apps\/sample(?:-web)?)\//.test(filename)
+export function isEnforcedWorkspaceFile(filename) {
+  return /(^|\/)(libs\/[^/]+\/[^/]+|apps\/[^/]+)\//.test(filename)
 }
 
 function isDiscriminantMemberAccess(node) {
@@ -812,32 +812,55 @@ function getPropertyKeyName(prop) {
   return null
 }
 
+function getSourceCode(context) {
+  if (context == null) return undefined
+  if (context.sourceCode != null) return context.sourceCode
+  if (typeof context.getSourceCode === "function") {
+    try {
+      return context.getSourceCode()
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
+}
+
+function readFullSourceText(sc, programNode) {
+  if (sc == null) return undefined
+  const hasBody = Array.isArray(programNode?.body) && programNode.body.length > 0
+  if (typeof sc.text === "string") {
+    if (sc.text.length === 0 && hasBody) return undefined
+    return sc.text
+  }
+  if (typeof sc.getText === "function") {
+    try {
+      const text = sc.getText(programNode)
+      if (typeof text === "string") {
+        if (text.length === 0 && hasBody) return undefined
+        return text
+      }
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
+}
+
 function getNodeSourceText(context, node) {
   if (node == null) return ""
   if (node.rawSource && typeof node.rawSource === "string") {
     return node.rawSource
   }
-  if (context.sourceCode && typeof context.sourceCode.getText === "function") {
+  const sc = getSourceCode(context)
+  if (sc && typeof sc.getText === "function") {
     try {
-      const text = context.sourceCode.getText(node)
+      const text = sc.getText(node)
       if (typeof text === "string" && text.length > 0) return text
     } catch {
       // fallback
     }
   }
-  if (typeof context.getSourceCode === "function") {
-    try {
-      const sc = context.getSourceCode()
-      if (sc && typeof sc.getText === "function") {
-        const text = sc.getText(node)
-        if (typeof text === "string" && text.length > 0) return text
-      }
-    } catch {
-      // fallback
-    }
-  }
-  const fullText =
-    context.sourceCode && typeof context.sourceCode.text === "string" ? context.sourceCode.text : ""
+  const fullText = sc && typeof sc.text === "string" ? sc.text : ""
   if (fullText) {
     if (Array.isArray(node.range) && node.range.length >= 2) {
       return fullText.slice(node.range[0], node.range[1])
@@ -845,7 +868,6 @@ function getNodeSourceText(context, node) {
     if (typeof node.start === "number" && typeof node.end === "number") {
       return fullText.slice(node.start, node.end)
     }
-    return fullText
   }
   return ""
 }
@@ -1201,6 +1223,7 @@ const syntaxBans = {
     const declaredBrandKeys = new Map()
     const migrationRecordVars = new Map()
     const allowedDdlTemplateNodes = new Set()
+    const effectNamespaceNames = new Set(["Effect"])
     let hasSqliteMigratorImport = false
     const reportedNodes = new WeakSet()
 
@@ -1644,6 +1667,15 @@ const syntaxBans = {
 
     return {
       Program(node) {
+        const sc = getSourceCode(context)
+        const rawText = readFullSourceText(sc, node)
+        if (rawText === undefined) {
+          context.report({
+            node,
+            message:
+              "missing-source-code: Unable to access sourceCode.text or sourceCode.getText() for AST inspection.",
+          })
+        }
         discriminantAliasNames.clear()
         schemaVarNames.clear()
         brandedTypeNames.clear()
@@ -1651,6 +1683,8 @@ const syntaxBans = {
         declaredBrandKeys.clear()
         migrationRecordVars.clear()
         allowedDdlTemplateNodes.clear()
+        effectNamespaceNames.clear()
+        effectNamespaceNames.add("Effect")
         hasSqliteMigratorImport = false
         if (node.body && Array.isArray(node.body)) {
           for (const stmt of node.body) {
@@ -1695,10 +1729,7 @@ const syntaxBans = {
             }
           }
         }
-        const text =
-          context.sourceCode && typeof context.sourceCode.text === "string"
-            ? context.sourceCode.text
-            : ""
+        const text = rawText ?? ""
         if (
           /^\s*(\/\/|\/\*)\s*(oxlint-disable|eslint-disable)[^\n]*(effecttsgo\/|harness\/)/m.test(
             text,
@@ -1765,6 +1796,43 @@ const syntaxBans = {
               importSource === "better-sqlite3")
           ) {
             reportOnce(node, nodeSqliteInfraMessage(importSource, filename))
+          }
+          if (
+            node.importKind !== "type" &&
+            (importSource === "effect" || importSource === "effect/Effect") &&
+            Array.isArray(node.specifiers)
+          ) {
+            const isEnforcedSrc =
+              !isTestFilePath(filename) &&
+              /(?:^|\/)(?:libs\/[^/]+\/[^/]+\/src|apps\/[^/]+\/src)\//.test(filename) &&
+              !/(?:^|\/)libs\/es\/infra\/src\/memory\.ts$/.test(filename)
+            const isMcpBoundary = /(?:^|\/)apps\/harness-mcp\/src\//.test(filename)
+            const isAppSrc = /(?:^|\/)apps\/[^/]+\/src\//.test(filename)
+            for (const spec of node.specifiers) {
+              if (spec == null || spec.importKind === "type") continue
+              if (spec.type === "ImportNamespaceSpecifier" && spec.local?.name) {
+                effectNamespaceNames.add(spec.local.name)
+              } else if (spec.type === "ImportSpecifier") {
+                const importedName = spec.imported?.name ?? spec.local?.name
+                const localName = spec.local?.name
+                if (importSource === "effect" && importedName === "Effect" && localName) {
+                  effectNamespaceNames.add(localName)
+                }
+                if (importSource === "effect/Effect" && isEnforcedSrc && importedName != null) {
+                  const isBannedSync = importedName === "runSync" || importedName === "runSyncExit"
+                  const isBannedPromise =
+                    (importedName === "runPromise" || importedName === "runPromiseExit") &&
+                    !isMcpBoundary
+                  const isBannedFork = importedName === "runFork" && !isAppSrc
+                  if (isBannedSync || isBannedPromise || isBannedFork) {
+                    context.report({
+                      node: spec,
+                      message: `unscoped-effect-run: 'Effect.${importedName}' import is banned in '${filename}' — compose Effects and execute via NodeRuntime.runMain or ManagedRuntime at the app edge.`,
+                    })
+                  }
+                }
+              }
+            }
           }
         }
       },
@@ -1895,7 +1963,7 @@ const syntaxBans = {
       },
       IfStatement(node) {
         const filename = getNormalizedFilename()
-        if (!isTierOrSampleAppFile(filename)) return
+        if (!isEnforcedWorkspaceFile(filename)) return
         if (
           isDiscriminantTestExpression(node.test) ||
           isAliasedDiscriminantTest(node.test, discriminantAliasNames)
@@ -1909,7 +1977,7 @@ const syntaxBans = {
       },
       ConditionalExpression(node) {
         const filename = getNormalizedFilename()
-        if (!isTierOrSampleAppFile(filename)) return
+        if (!isEnforcedWorkspaceFile(filename)) return
         if (
           isDiscriminantTestExpression(node.test) ||
           isAliasedDiscriminantTest(node.test, discriminantAliasNames)
@@ -1934,10 +2002,37 @@ const syntaxBans = {
         if (
           /libs\/[^/]+\/(?:domain|core)\/src\//.test(filename) &&
           node.computed !== true &&
-          isIdentifier(node.object, "Effect") &&
+          node.object != null &&
+          node.object.type === "Identifier" &&
+          effectNamespaceNames.has(node.object.name) &&
           isIdentifier(node.property, "ignore")
         ) {
           context.report({ node, message: domainEffectIgnoreMessage })
+        }
+        if (
+          !isTestFilePath(filename) &&
+          /(?:^|\/)(?:libs\/[^/]+\/[^/]+\/src|apps\/[^/]+\/src)\//.test(filename) &&
+          !/(?:^|\/)libs\/es\/infra\/src\/memory\.ts$/.test(filename) &&
+          node.computed !== true &&
+          node.object != null &&
+          node.object.type === "Identifier" &&
+          effectNamespaceNames.has(node.object.name) &&
+          node.property != null &&
+          node.property.type === "Identifier"
+        ) {
+          const methodName = node.property.name
+          const isBannedSyncRun = methodName === "runSync" || methodName === "runSyncExit"
+          const isBannedPromiseRun =
+            (methodName === "runPromise" || methodName === "runPromiseExit") &&
+            !/(?:^|\/)apps\/harness-mcp\/src\//.test(filename)
+          const isBannedForkRun =
+            methodName === "runFork" && !/(?:^|\/)apps\/[^/]+\/src\//.test(filename)
+          if (isBannedSyncRun || isBannedPromiseRun || isBannedForkRun) {
+            context.report({
+              node,
+              message: `unscoped-effect-run: '${node.object.name}.${methodName}' is banned in '${filename}' — compose Effects and execute via NodeRuntime.runMain or ManagedRuntime at the app edge.`,
+            })
+          }
         }
       },
       TryStatement(node) {
@@ -1948,7 +2043,8 @@ const syntaxBans = {
       },
       CallExpression(node) {
         const filename = getNormalizedFilename()
-        if (isTierOrSampleAppFile(filename)) {
+
+        if (isEnforcedWorkspaceFile(filename)) {
           if (
             node.callee != null &&
             node.callee.type === "MemberExpression" &&
@@ -2333,11 +2429,17 @@ const testIntegrity = {
 
     return {
       Program(node) {
+        const sc = getSourceCode(context)
+        const rawText = readFullSourceText(sc, node)
+        if (rawText === undefined) {
+          context.report({
+            node,
+            message:
+              "missing-source-code: Unable to access sourceCode.text or sourceCode.getText() for AST inspection.",
+          })
+        }
         discriminantAliasNames.clear()
-        const text =
-          context.sourceCode && typeof context.sourceCode.text === "string"
-            ? context.sourceCode.text
-            : ""
+        const text = rawText ?? ""
         if (
           /^\s*(\/\/|\/\*)\s*(oxlint-disable|eslint-disable)[^\n]*(harness\/test-integrity|effecttsgo\/)/m.test(
             text,
@@ -2420,7 +2522,7 @@ const testIntegrity = {
       },
       IfStatement(node) {
         const filename = getNormalizedFilename()
-        if (!isTierOrSampleAppFile(filename)) return
+        if (!isEnforcedWorkspaceFile(filename)) return
         if (
           isDiscriminantTestExpression(node.test) ||
           isAliasedDiscriminantTest(node.test, discriminantAliasNames)
@@ -2430,7 +2532,7 @@ const testIntegrity = {
       },
       ConditionalExpression(node) {
         const filename = getNormalizedFilename()
-        if (!isTierOrSampleAppFile(filename)) return
+        if (!isEnforcedWorkspaceFile(filename)) return
         if (
           isDiscriminantTestExpression(node.test) ||
           isAliasedDiscriminantTest(node.test, discriminantAliasNames)
@@ -2465,7 +2567,7 @@ const testIntegrity = {
             })
           }
         }
-        if (isTierOrSampleAppFile(filename)) {
+        if (isEnforcedWorkspaceFile(filename)) {
           if (isImpreciseFailureAssert(node)) {
             context.report({ node, message: impreciseFailureAssertMessage })
           }

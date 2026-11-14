@@ -6,7 +6,7 @@ import {
   formatDpoPriorKey,
   isBoundaryCallerQualname,
   parseDpoPriorKey,
-} from "@harness/gates"
+} from "@harness/graph"
 import { Effect, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
@@ -16,7 +16,6 @@ import {
   MAX_BATCHED_HOLE_CANDIDATES,
   PriorSource,
 } from "./hole-prior-decision.js"
-import { assertDecisionLimits } from "./idiom-router.js"
 
 export { DpoPriorKey, RewriteRuleId, SystemOneScoreMillis, formatDpoPriorKey, parseDpoPriorKey }
 
@@ -82,8 +81,6 @@ export const DpoCandidateRankerV1 = Decision.make({
   },
 })
 
-assertDecisionLimits(DpoCandidateRankerV1)
-
 export const MAX_BATCHED_DPO_CANDIDATES = MAX_BATCHED_HOLE_CANDIDATES
 
 export const buildBatchedDpoRankerDecision = (candidateCount: number) => {
@@ -109,7 +106,6 @@ export const buildBatchedDpoRankerDecision = (candidateCount: number) => {
     }),
     decisions,
   })
-  assertDecisionLimits(definition)
   return definition
 }
 

@@ -1,20 +1,18 @@
-import { Effect, Option, Schema } from "effect"
+import { Cause, Effect, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import { match } from "ts-pattern"
 import {
-  checkOntologyInvariants,
+  decideEarsSpecLint,
   decideOntologyInvariants,
   type EarsRequirementRow,
   type GovernanceDocReference,
-  lintEarsSpecMarkdown,
   loadGovernanceDocsFromDisk,
   type OntologyInvariantFinding,
   type OntologyInvariantsReport,
 } from "@harness/gates"
-import { assertDecisionLimits } from "./idiom-router.js"
 
 export {
-  checkOntologyInvariants,
   decideOntologyInvariants,
   type GovernanceDocReference,
   loadGovernanceDocsFromDisk,
@@ -61,8 +59,6 @@ export const OntologyConflictV1 = Decision.make({
   },
 })
 
-assertDecisionLimits(OntologyConflictV1)
-
 export interface OntologyConflictInput {
   readonly sourceId: string
   readonly sourceText: string
@@ -84,41 +80,52 @@ export const checkOntologyPairConflict = Effect.fn("Harness.checkOntologyPairCon
 ) {
   const outcome = yield* DecisionModel.decide(OntologyConflictV1, { input }).pipe(
     Effect.timeoutOption("1500 millis"),
-    Effect.catchCause(() => Effect.succeedNone),
+    Effect.catchCause((cause) =>
+      Cause.hasInterrupts(cause)
+        ? Effect.interrupt
+        : Effect.logWarning(`Decision model fallback: ${Cause.pretty(cause)}`).pipe(
+            Effect.as(Option.none()),
+          ),
+    ),
   )
 
-  if (Option.isNone(outcome)) {
-    return {
-      hasConflict: false,
-      probability: 0,
-      conflictKind: "none" as const,
-      reason:
-        "DecisionModel unavailable or timed out; relying on deterministic ontology invariants.",
-      timedOutOrUnavailable: true,
-    } satisfies OntologyConflictResult
-  }
+  return yield* match(outcome)
+    .with({ _tag: "None" }, () =>
+      Effect.succeed({
+        hasConflict: false,
+        probability: 0,
+        conflictKind: "none" as const,
+        reason:
+          "DecisionModel unavailable or timed out; relying on deterministic ontology invariants.",
+        timedOutOrUnavailable: true,
+      } satisfies OntologyConflictResult),
+    )
+    .with({ _tag: "Some" }, ({ value }) =>
+      Effect.gen(function* () {
+        const { answers } = value
+        yield* Effect.annotateCurrentSpan({
+          "decision.definition": "OntologyConflictV1",
+          "decision.contradicts": answers.contradicts.probability,
+          "decision.conflictKind": answers.conflictKind.label,
+        })
 
-  const { answers } = outcome.value
-  yield* Effect.annotateCurrentSpan({
-    "decision.definition": "OntologyConflictV1",
-    "decision.contradicts": answers.contradicts.probability,
-    "decision.conflictKind": answers.conflictKind.label,
-  })
+        const hasConflict =
+          answers.contradicts.probability >= 0.7 && answers.conflictKind.label !== "none"
 
-  const hasConflict =
-    answers.contradicts.probability >= 0.7 && answers.conflictKind.label !== "none"
-
-  return {
-    hasConflict,
-    probability: answers.contradicts.probability,
-    conflictKind: hasConflict
-      ? (answers.conflictKind.label as OntologyConflictKind)
-      : ("none" as const),
-    reason: hasConflict
-      ? `Semantic conflict (${answers.conflictKind.label}, p=${answers.contradicts.probability}) between ${input.sourceId} and ${input.targetId} on ${input.sharedSymbol}.`
-      : `No semantic conflict detected between ${input.sourceId} and ${input.targetId}.`,
-    timedOutOrUnavailable: false,
-  } satisfies OntologyConflictResult
+        return {
+          hasConflict,
+          probability: answers.contradicts.probability,
+          conflictKind: hasConflict
+            ? (answers.conflictKind.label as OntologyConflictKind)
+            : ("none" as const),
+          reason: hasConflict
+            ? `Semantic conflict (${answers.conflictKind.label}, p=${answers.contradicts.probability}) between ${input.sourceId} and ${input.targetId} on ${input.sharedSymbol}.`
+            : `No semantic conflict detected between ${input.sourceId} and ${input.targetId}.`,
+          timedOutOrUnavailable: false,
+        } satisfies OntologyConflictResult
+      }),
+    )
+    .exhaustive()
 })
 
 const MAX_CANDIDATE_PAIRS = 16
@@ -138,21 +145,25 @@ const extractAdrSummary = (markdown: string, fallbackId: string): string => {
   return fallbackId
 }
 
-export const extractOntologyConflictPairs = (
+export const extractOntologyConflictPairs = Effect.fn("OntologyConflict.extractPairs")(function* (
   governanceDocs: ReadonlyArray<GovernanceDocReference>,
   scope?: string,
-): ReadonlyArray<OntologyConflictInput> => {
+): Effect.fn.Return<ReadonlyArray<OntologyConflictInput>> {
   const activeDocs = governanceDocs.filter((doc) => {
-    if (doc.status !== "accepted" && doc.status !== "proposed") {
+    const isActiveStatus = match(doc.status)
+      .with("accepted", "proposed", () => true)
+      .with("deprecated", "superseded", () => false)
+      .exhaustive()
+    if (!isActiveStatus) {
       return false
     }
     if (scope !== undefined && scope.length > 0) {
-      const match =
+      const matched =
         doc.id.startsWith(`${scope}:`) ||
         doc.docPath.includes(`libs/${scope}/`) ||
         doc.docPath.includes(`apps/${scope}/`) ||
         doc.docPath.includes(`packages/${scope}/`)
-      if (!match) {
+      if (!matched) {
         return false
       }
     }
@@ -176,7 +187,7 @@ export const extractOntologyConflictPairs = (
       doc.markdown !== undefined &&
       (doc.docPath.includes("/specs/") || doc.id.includes(":SPEC-") || doc.id.startsWith("SPEC-"))
     ) {
-      const lintReport = lintEarsSpecMarkdown(doc.docPath, doc.markdown)
+      const lintReport = yield* decideEarsSpecLint({ docPath: doc.docPath, markdown: doc.markdown })
       for (const row of lintReport.requirements) {
         if (
           row.id.startsWith("REQ-") &&
@@ -284,7 +295,7 @@ export const extractOntologyConflictPairs = (
   }
 
   return pairs
-}
+})
 
 export const evaluateOntologyConflicts = Effect.fn("Harness.evaluateOntologyConflicts")(function* (
   pairs: ReadonlyArray<OntologyConflictInput>,

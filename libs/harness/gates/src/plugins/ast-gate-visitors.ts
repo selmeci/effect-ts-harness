@@ -26,75 +26,18 @@
  */
 
 import { Schema } from "effect"
+import { match, P } from "ts-pattern"
+import {
+  AstGatePackageTag,
+  AstSourceFilePath,
+  EnclosingSymbolName,
+  GateCategory,
+  GateRuleId,
+  GateViolationMessage,
+  SourceLineNumber,
+} from "@harness/contract"
 import { ts } from "@harness/graph"
 import { checkMigrationSqlSafety } from "../migration-check.js"
-
-export const GateRuleVersion = Schema.NonEmptyString.pipe(Schema.brand("GateRuleVersion"))
-export type GateRuleVersion = typeof GateRuleVersion.Type
-export const AstRuleVersion = GateRuleVersion
-export type AstRuleVersion = typeof AstRuleVersion.Type
-export const HARNESS_GATE_RULE_VERSION: GateRuleVersion = GateRuleVersion.make("ast-gates-v4")
-
-const REPO_WIDE_AST_RULES = new Set<string>([
-  "effect-fn-dummy-void",
-  "switch-statement",
-  "match-run-statement",
-  "non-exhaustive-union-match",
-  "catch-cause-interrupts-only",
-  "unisolated-dot-harness-test-write",
-  "unsafe-type-cast",
-  "ast-grep-tsx-grammar",
-  "node-sqlite-in-infra",
-  "silent-catch-defect",
-  "ignored-chmod-permission",
-])
-
-export const isRepoWideAstRule = (rule: string, message: string): boolean =>
-  REPO_WIDE_AST_RULES.has(rule) ||
-  (rule === "discriminant-branching" && message.startsWith("Switch statement"))
-
-export const AstSourceFilePath = Schema.NonEmptyString.pipe(Schema.brand("AstSourceFilePath"))
-export type AstSourceFilePath = typeof AstSourceFilePath.Type
-
-export const ContentSha256 = Schema.NonEmptyString.pipe(Schema.brand("ContentSha256"))
-export type ContentSha256 = typeof ContentSha256.Type
-export const AstContentSha256 = ContentSha256
-export type AstContentSha256 = typeof AstContentSha256.Type
-
-export const AstSourceContent = Schema.String.pipe(Schema.brand("AstSourceContent"))
-export type AstSourceContent = typeof AstSourceContent.Type
-
-export const GateCategory = Schema.Literals([
-  "syntax-bans", "test-integrity", "migration-safety", "domain-purity", "effect-laws",
-]).pipe(Schema.brand("GateCategory"))
-export type GateCategory = typeof GateCategory.Type
-export const AstGateCategory = GateCategory
-export type AstGateCategory = typeof AstGateCategory.Type
-export const GateViolationCategory = GateCategory
-export type GateViolationCategory = typeof GateViolationCategory.Type
-
-export const GateRuleId = Schema.NonEmptyString.pipe(Schema.brand("GateRuleId"))
-export type GateRuleId = typeof GateRuleId.Type
-
-export const GateViolationMessage = Schema.NonEmptyString.pipe(Schema.brand("GateViolationMessage"))
-export type GateViolationMessage = typeof GateViolationMessage.Type
-
-export const SourceLineNumber = Schema.Int.pipe(
-  Schema.check(Schema.isGreaterThanOrEqualTo(1)),
-  Schema.brand("SourceLineNumber"),
-)
-export type SourceLineNumber = typeof SourceLineNumber.Type
-
-export const EnclosingSymbolName = Schema.NonEmptyString.pipe(Schema.brand("EnclosingSymbolName"))
-export type EnclosingSymbolName = typeof EnclosingSymbolName.Type
-
-export const GateVerdict = Schema.Literals(["clean", "violated"]).pipe(Schema.brand("GateVerdict"))
-export type GateVerdict = typeof GateVerdict.Type
-
-export const AstGatePackageTag = Schema.Literals([
-  "contract", "domain", "service", "infra", "app", "test",
-]).pipe(Schema.brand("AstGatePackageTag"))
-export type AstGatePackageTag = typeof AstGatePackageTag.Type
 
 export const GateViolation = Schema.Struct({
   category: GateCategory,
@@ -172,10 +115,6 @@ export const isDummyEffectVoidYield = (
       inner.expression.name.text === "asVoid")
   )
 }
-
-const isAstGatePackageTag = (val: string): val is AstGatePackageTag =>
-  val === "contract" || val === "domain" || val === "service" ||
-  val === "infra" || val === "app" || val === "test"
 
 export const inferPackageTagFromPath = (filePath: string): AstGatePackageTag => {
   if (filePath.includes("/contract/")) return AstGatePackageTag.make("contract")
@@ -275,29 +214,18 @@ export const isIgnoredChmodPermissionCall = (node: ts.CallExpression, sf: ts.Sou
 export const visitSourceFileSinglePass = (
   sourceFile: ts.SourceFile,
   filePathOrRelPath: string | AstSourceFilePath,
-  packageTagOrContent?: AstGatePackageTag | string,
-  _contentOrPackageTag?: string | AstGatePackageTag,
+  packageTagParam?: AstGatePackageTag,
 ): ReadonlyArray<GateViolation> => {
   const filePath = AstSourceFilePath.make(String(filePathOrRelPath))
   const normalizedFilePath = filePath.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "")
-  const packageTag =
-    packageTagOrContent !== undefined && isAstGatePackageTag(packageTagOrContent)
-      ? AstGatePackageTag.make(packageTagOrContent)
-      : _contentOrPackageTag !== undefined && isAstGatePackageTag(_contentOrPackageTag)
-        ? AstGatePackageTag.make(_contentOrPackageTag)
-        : inferPackageTagFromPath(normalizedFilePath)
+  const packageTag = packageTagParam ?? inferPackageTagFromPath(normalizedFilePath)
 
   const violations: Array<GateViolation> = []
-  const hasParentTraversal = normalizedFilePath.split("/").includes("..")
   const isTestFile =
     normalizedFilePath.endsWith(".test.ts") ||
     normalizedFilePath.endsWith(".test.tsx") ||
     normalizedFilePath.endsWith(".spec.ts") ||
     normalizedFilePath.endsWith(".spec.tsx")
-  const isHarnessInternal =
-    !hasParentTraversal &&
-    (normalizedFilePath.startsWith("libs/harness/") ||
-      normalizedFilePath.startsWith("apps/harness-"))
   let hasMigratorImport = false
 
   for (const stmt of sourceFile.statements) {
@@ -339,11 +267,49 @@ export const visitSourceFileSinglePass = (
   const handlesTsxExtensions =
     sourceFile.text.includes('".tsx"') || sourceFile.text.includes("'.tsx'")
   const referencesLangTsx = sourceFile.text.includes("Lang.Tsx")
+  const effectNamespaceNames = new Set<string>(["Effect"])
+  const isTestOrHelperFile = isTestFile || /(?:^|\/)test\/(?!fixtures\/)/.test(normalizedFilePath)
+  const isMemoryWorkerdBridge = /(?:^|\/)libs\/es\/infra\/src\/memory\.ts$/.test(normalizedFilePath)
+  const isHarnessMcpSdkBoundary = /(?:^|\/)apps\/harness-mcp\/src\//.test(normalizedFilePath)
+  const isBannedEffectRunMethod = (methodName: string): boolean => {
+    if (methodName === "runSync" || methodName === "runSyncExit") return true
+    if (methodName === "runPromise" || methodName === "runPromiseExit") return !isHarnessMcpSdkBoundary
+    if (methodName === "runFork") return packageTag !== "app"
+    return false
+  }
 
   const walk = (node: ts.Node): void => {
     // 1. Import declarations (domain-purity + syntax-bans + test-integrity)
     if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
       const spec = node.moduleSpecifier.text
+      if (!node.importClause?.isTypeOnly && (spec === "effect" || spec === "effect/Effect")) {
+        const bindings = node.importClause?.namedBindings
+        if (bindings !== undefined && ts.isNamespaceImport(bindings)) {
+          effectNamespaceNames.add(bindings.name.text)
+        }
+        if (bindings !== undefined && ts.isNamedImports(bindings)) {
+          for (const el of bindings.elements) {
+            if (el.isTypeOnly) continue
+            const importedName = (el.propertyName ?? el.name).text
+            if (spec === "effect" && importedName === "Effect") {
+              effectNamespaceNames.add(el.name.text)
+            }
+            if (
+              spec === "effect/Effect" &&
+              !isTestOrHelperFile &&
+              !isMemoryWorkerdBridge &&
+              isBannedEffectRunMethod(importedName)
+            ) {
+              pushViolation(
+                catDomainPurity,
+                "unscoped-effect-run",
+                `Unscoped 'Effect.${importedName}' import in '${filePath}' (${packageTag}) — compose Effects and run via NodeRuntime.runMain or ManagedRuntime at the app edge.`,
+                node,
+              )
+            }
+          }
+        }
+      }
       if (
         (spec === "node:sqlite" || spec === "sqlite" || spec === "better-sqlite3") &&
         (packageTag === "infra" || packageTag === "app")
@@ -398,32 +364,40 @@ export const visitSourceFileSinglePass = (
       while (ts.isParenthesizedExpression(innerExpr)) {
         innerExpr = innerExpr.expression
       }
-      if (
-        typeNode.kind === ts.SyntaxKind.AnyKeyword ||
-        typeNode.kind === ts.SyntaxKind.NeverKeyword
-      ) {
-        const keyword = typeNode.kind === ts.SyntaxKind.AnyKeyword ? "any" : "never"
-        pushViolation(
-          catSyntaxBans,
-          "unsafe-type-cast",
-          `Unsafe type assertion 'as ${keyword}' in '${filePath}' is banned.`,
-          node,
-        )
-      } else if (
-        (ts.isAsExpression(innerExpr) || ts.isTypeAssertionExpression(innerExpr)) &&
-        innerExpr.type.kind === ts.SyntaxKind.UnknownKeyword
-      ) {
-        pushViolation(
-          catSyntaxBans,
-          "unsafe-type-cast",
-          `Double type assertion 'as unknown as T' in '${filePath}' is banned.`,
-          node,
-        )
-      }
+      match(typeNode.kind)
+        .with(ts.SyntaxKind.AnyKeyword, () => {
+          pushViolation(
+            catSyntaxBans,
+            "unsafe-type-cast",
+            `Unsafe type assertion 'as any' in '${filePath}' is banned.`,
+            node,
+          )
+        })
+        .with(ts.SyntaxKind.NeverKeyword, () => {
+          pushViolation(
+            catSyntaxBans,
+            "unsafe-type-cast",
+            `Unsafe type assertion 'as never' in '${filePath}' is banned.`,
+            node,
+          )
+        })
+        .otherwise(() => {
+          if (
+            (ts.isAsExpression(innerExpr) || ts.isTypeAssertionExpression(innerExpr)) &&
+            innerExpr.type.kind === ts.SyntaxKind.UnknownKeyword
+          ) {
+            pushViolation(
+              catSyntaxBans,
+              "unsafe-type-cast",
+              `Double type assertion 'as unknown as T' in '${filePath}' is banned.`,
+              node,
+            )
+          }
+        })
     }
 
     // 4. IfStatement & ConditionalExpression (effect-laws: discriminant-branching)
-    if (ts.isIfStatement(node) && !isTestFile && !isHarnessInternal) {
+    if (ts.isIfStatement(node) && !isTestFile) {
       if (isDiscriminantCondition(node.expression, sourceFile)) {
         pushViolation(
           catEffectLaws,
@@ -436,7 +410,7 @@ export const visitSourceFileSinglePass = (
     if (ts.isConditionalExpression(node) && !isTestFile) {
       if (
         isTagGuardCondition(node.condition, sourceFile) ||
-        (!isHarnessInternal && isDiscriminantCondition(node.condition, sourceFile))
+        isDiscriminantCondition(node.condition, sourceFile)
       ) {
         pushViolation(
           catEffectLaws,
@@ -447,21 +421,35 @@ export const visitSourceFileSinglePass = (
       }
     }
 
-    // 4b. PropertyAccessExpression: Effect.ignore in domain (domain-purity: domain-effect-ignore)
-    if (
-      ts.isPropertyAccessExpression(node) &&
-      !isTestFile &&
-      packageTag === "domain" &&
-      ts.isIdentifier(node.expression) &&
-      node.expression.text === "Effect" &&
-      node.name.text === "ignore"
-    ) {
-      pushViolation(
-        catDomainPurity,
-        "domain-effect-ignore",
-        `Swallowing typed errors with Effect.ignore in '${filePath}' (domain) is banned — surface failures in the E channel or handle them explicitly.`,
-        node,
-      )
+    // 4b. PropertyAccessExpression: Effect.ignore in domain & unscoped Effect.run*
+    if (ts.isPropertyAccessExpression(node) && !isTestFile) {
+      if (
+        packageTag === "domain" &&
+        ts.isIdentifier(node.expression) &&
+        effectNamespaceNames.has(node.expression.text) &&
+        node.name.text === "ignore"
+      ) {
+        pushViolation(
+          catDomainPurity,
+          "domain-effect-ignore",
+          `Swallowing typed errors with Effect.ignore in '${filePath}' (domain) is banned — surface failures in the E channel or handle them explicitly.`,
+          node,
+        )
+      }
+      if (
+        !isTestOrHelperFile &&
+        !isMemoryWorkerdBridge &&
+        ts.isIdentifier(node.expression) &&
+        effectNamespaceNames.has(node.expression.text) &&
+        isBannedEffectRunMethod(node.name.text)
+      ) {
+        pushViolation(
+          catDomainPurity,
+          "unscoped-effect-run",
+          `Unscoped '${node.expression.text}.${node.name.text}' in '${filePath}' (${packageTag}) — compose Effects and run via NodeRuntime.runMain or ManagedRuntime at the app edge.`,
+          node,
+        )
+      }
     }
 
     // 5. CallExpressions (effect-laws, domain-purity, test-integrity, syntax-bans)
@@ -495,24 +483,6 @@ export const visitSourceFileSinglePass = (
           catEffectLaws,
           "non-exhaustive-union-match",
           `match(...).run() in '${filePath}' is banned — use .exhaustive() instead.`,
-          node,
-        )
-      }
-
-      if (
-        !isTestFile &&
-        !isHarnessInternal &&
-        packageTag !== "app" &&
-        // libs/es/infra/src/memory.ts bridges the synchronous @cloudflare/workers-types SqlStorage interface to workerd
-        normalizedFilePath !== "libs/es/infra/src/memory.ts" &&
-        (calleeText === "Effect.runSync" ||
-          calleeText === "Effect.runPromise" ||
-          calleeText === "Effect.runFork")
-      ) {
-        pushViolation(
-          catDomainPurity,
-          "unscoped-effect-run",
-          `Unscoped '${calleeText}' in '${filePath}' (${packageTag}) — compose Effects and run at the app edge.`,
           node,
         )
       }
@@ -592,19 +562,20 @@ export const visitSourceFileSinglePass = (
 
     // 6. BinaryExpression: JSON.stringify(a) === JSON.stringify(b) in tests
     if (ts.isBinaryExpression(node) && isTestFile) {
-      const op = node.operatorToken.kind
-      if (op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.EqualsEqualsToken) {
-        const leftText = node.left.getText(sourceFile)
-        const rightText = node.right.getText(sourceFile)
-        if (leftText.startsWith("JSON.stringify(") && rightText.startsWith("JSON.stringify(")) {
-          pushViolation(
-            catTestIntegrity,
-            "fallback-json-equality",
-            `Fallback JSON.stringify equality comparison in '${filePath}' — use structured equality or Equal.equals.`,
-            node,
-          )
-        }
-      }
+      match(node.operatorToken.kind)
+        .with(P.union(ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.EqualsEqualsToken), () => {
+          const leftText = node.left.getText(sourceFile)
+          const rightText = node.right.getText(sourceFile)
+          if (leftText.startsWith("JSON.stringify(") && rightText.startsWith("JSON.stringify(")) {
+            pushViolation(
+              catTestIntegrity,
+              "fallback-json-equality",
+              `Fallback JSON.stringify equality comparison in '${filePath}' — use structured equality or Equal.equals.`,
+              node,
+            )
+          }
+        })
+        .otherwise(() => {})
     }
 
     // 7. TaggedTemplateExpression: sql`...` migration safety & unmanaged DDL

@@ -9,6 +9,7 @@ import {
   StructuralSearchPattern,
   StructuralSearchSubDir,
 } from "../src/index.js"
+import { testHostIo } from "./helpers/test-host-io.js"
 
 const StructuralSearchInputArb = Schema.Struct({
   pattern: Schema.Union([
@@ -34,6 +35,7 @@ describe("StructuralSearch.decide", () => {
   it.effect("finds TypeScript AST patterns across workspace TypeScript files", () =>
     Effect.gen(function* () {
       const results = yield* StructuralSearch.decide({
+        hostIo: testHostIo,
         pattern: "export const greet = $$$",
       })
 
@@ -55,6 +57,7 @@ describe("StructuralSearch.decide", () => {
     Effect.gen(function* () {
       // 1. AST pattern in single .ts file
       const astResults = yield* StructuralSearch.decide({
+        hostIo: testHostIo,
         pattern: "export const greet = $$$",
         filePath: "libs/sample/domain/src/index.ts",
       })
@@ -64,6 +67,7 @@ describe("StructuralSearch.decide", () => {
 
       // 2. Fallback line-locator in .ts file (comments/strings without ast metavariables)
       const lineResults = yield* StructuralSearch.decide({
+        hostIo: testHostIo,
         pattern: "Hello,",
         filePath: "libs/sample/domain/src/index.ts",
       })
@@ -78,6 +82,7 @@ describe("StructuralSearch.decide", () => {
   it.effect("scopes search to a single markdown .md file using line-locator", () =>
     Effect.gen(function* () {
       const mdResults = yield* StructuralSearch.decide({
+        hostIo: testHostIo,
         pattern: "ADR-0001",
         filePath: "libs/sample/docs/adr/0001-cloudflare-d1-do-sqlite-and-traceparent-boundaries.md",
       })
@@ -100,6 +105,7 @@ describe("StructuralSearch.decide", () => {
   it.effect("scopes search by paths array and subDirs filtering", () =>
     Effect.gen(function* () {
       const scopedPathsResults = yield* StructuralSearch.decide({
+        hostIo: testHostIo,
         pattern: "greet",
         paths: ["libs/sample/domain/src"],
       })
@@ -109,6 +115,7 @@ describe("StructuralSearch.decide", () => {
       )
 
       const scopedSubDirsResults = yield* StructuralSearch.decide({
+        hostIo: testHostIo,
         pattern: "greet",
         subDirs: ["libs/sample"],
       })
@@ -120,24 +127,28 @@ describe("StructuralSearch.decide", () => {
   it.effect("rejects path traversal escaping repoRoot and returns empty array", () =>
     Effect.gen(function* () {
       const escapingFilePath = yield* StructuralSearch.decide({
+        hostIo: testHostIo,
         pattern: "export const",
         filePath: "../outside.ts",
       })
       expect(escapingFilePath).toEqual([])
 
       const escapingPaths = yield* StructuralSearch.decide({
+        hostIo: testHostIo,
         pattern: "export const",
         paths: ["../../outside.ts"],
       })
       expect(escapingPaths).toEqual([])
 
       const escapingSubDirs = yield* StructuralSearch.decide({
+        hostIo: testHostIo,
         pattern: "export const",
         subDirs: ["../../outside"],
       })
       expect(escapingSubDirs).toEqual([])
 
       const whitespacePattern = yield* StructuralSearch.decide({
+        hostIo: testHostIo,
         pattern: "   ",
         filePath: "libs/sample/domain/src/index.ts",
       })
@@ -174,6 +185,7 @@ describe("StructuralSearch.decide", () => {
 
         // 1. Symlink escaping repoRoot is rejected
         const symlinkResults = yield* StructuralSearch.decide({
+        hostIo: testHostIo,
           pattern: "TOP_SECRET_123",
           repoRoot: tmpRepo,
           filePath: "libs/ui/src/linked-secret.json",
@@ -182,6 +194,7 @@ describe("StructuralSearch.decide", () => {
 
         // 2. Dollar-prefixed pattern in comment falls back to deterministic line-locator
         const dollarResults = yield* StructuralSearch.decide({
+        hostIo: testHostIo,
           pattern: "$PORT",
           repoRoot: tmpRepo,
           filePath: "libs/ui/src/Button.tsx",
@@ -191,6 +204,7 @@ describe("StructuralSearch.decide", () => {
 
         // 3. Multiple occurrences on the same line are all emitted with distinct columns
         const multiLineResults = yield* StructuralSearch.decide({
+        hostIo: testHostIo,
           pattern: "ADR-0010",
           repoRoot: tmpRepo,
           filePath: "libs/ui/src/Button.tsx",
@@ -202,6 +216,7 @@ describe("StructuralSearch.decide", () => {
 
         // 4. .tsx JSX AST pattern matches via Lang.Tsx
         const tsxAstResults = yield* StructuralSearch.decide({
+        hostIo: testHostIo,
           pattern: "<button>{$EXPR}</button>",
           repoRoot: tmpRepo,
           filePath: "libs/ui/src/Button.tsx",
@@ -222,11 +237,13 @@ describe("StructuralSearch.decide", () => {
         const repoRoot = path.resolve(process.cwd())
         const effectiveSubDirs = input.subDirs.length > 0 ? input.subDirs : ["libs/sample"]
         const run1 = yield* StructuralSearch.decide({
+        hostIo: testHostIo,
           ...input,
           subDirs: effectiveSubDirs,
           repoRoot,
         })
         const run2 = yield* StructuralSearch.decide({
+        hostIo: testHostIo,
           ...input,
           subDirs: effectiveSubDirs,
           repoRoot,

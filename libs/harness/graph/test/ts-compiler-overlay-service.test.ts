@@ -7,13 +7,16 @@ import { match } from "ts-pattern"
 import { type IndexedEffectFn, runWithTestTracer } from "@harness/ingest"
 import {
   CompilerRepoRootPath,
+  makeTsCompilerOverlayLayer,
   TsCompilerOverlay,
   TsCompilerOverlayError,
   TsCompilerOverlayService,
-  TsCompilerOverlayServiceLive,
 } from "../src/services/ts-compiler-overlay-service.js"
 import { resolveNode } from "../src/graph-engine.js"
 import { type TypeScriptProgramSession } from "../src/type-extractor.js"
+import { testHostIo } from "./helpers/test-host-io.js"
+
+const TsCompilerOverlayServiceLive = makeTsCompilerOverlayLayer(testHostIo)
 
 describe("TsCompilerOverlayService (harness:SPEC-0011 §3)", () => {
   it.effect(

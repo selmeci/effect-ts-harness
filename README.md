@@ -17,7 +17,7 @@ The harness constrains coding agents with deterministic compiler, linter, proper
 ## Core Design Principles
 
 1. **Deterministic Gates Always Win:** `@effect/tsgo` (`tsgo` + `@effect/language-service`), `oxlint` (20+ custom AST rules + Nx module boundary rules), Vitest, `GraphGc.decide`, `OntologyInvariants.decide`, and `SpanBudget.decide` hold absolute veto power. The local advisory model (`DecisionModel` / `clef-flash`) never overrides a deterministic check.
-2. **Plan-as-Code (`stub<A, E, R>()`):** Before writing implementation bodies, agents translate EARS requirements and ADR decisions into compilable TypeScript skeletons using `stub<A, E, R>(...args)` from `@harness/gates`. `harness plan-check` verifies that `A` (success), `E` (`Schema.TaggedErrorClass` union), and `R` (`Context.Service` capabilities) typecheck across the workspace before implementation begins.
+2. **Plan-as-Code (`stub<A, E, R>()`):** Before writing implementation bodies, agents translate EARS requirements and ADR decisions into compilable TypeScript skeletons using `stub<A, E, R>(...args)` from `@harness/contract`. `harness plan-check` verifies that `A` (success), `E` (`Schema.TaggedErrorClass` union), and `R` (`Context.Service` capabilities) typecheck across the workspace before implementation begins.
 3. **ArchiMate 3.2 + Omnigraph Property Graph:** Requirements, ADRs, domain contracts, services, layers, handlers, and tests are indexed into a single property graph backed by `@modernrelay/omnigraph-core` (`v0.14.0` Rust NAPI + SQLite + `sqlite-vec`) and queried via declarative `.gq` pattern-matching queries.
 4. **Zero-Docker, Zero-Python Local Stack:** All parsing, AST extraction, graph traversal, and vector search run in-process on Node.js `>=24.10.0` via Rust NAPI addons (`oxc-parser`, `@ast-grep/napi`, `@modernrelay/omnigraph-core`, `sqlite-vec`).
 5. **Compounding Learnings Without Context Bloat:** Verification failures and route misses are recorded in `.harness/friction-log.jsonl` and `.harness/telemetry-log.jsonl`. Instead of appending prose rules to `AGENTS.md`, `harness learn` clusters recurring friction into executable `oxlint` rules, deterministic gate tests, or indexed `agent-patterns/*.md` recipes.
@@ -53,12 +53,13 @@ flowchart TD
     SAMPLE_SVC["@harness/sample-service\nItemRepo Service"]
   end
 
-  subgraph Domain["type:domain — Pure Deciders (R = never)"]
-    GATES["@harness/gates\n11 Pure Deciders + stub<A,E,R>()"]
+  subgraph Domain["type:domain / type:core — Pure Deciders (R = never)"]
+    GATES["@harness/gates\nPure Deciders & Gate Plugins"]
     SAMPLE_DOM["@harness/sample-domain\nCreateItem / ListItems"]
   end
 
-  subgraph Contracts["type:contract — Boundary Schemas & Errors"]
+  subgraph Contracts["type:contract — Boundary Schemas, Errors & stub"]
+    HARNESS_CON["@harness/contract\nGate Schemas + stub<A,E,R>()"]
     SAMPLE_CON["@harness/sample-contract\nItem Schemas + ItemRpcGroup"]
   end
 
@@ -80,10 +81,10 @@ flowchart TD
 
 | Nx Tag          | Allowed Dependencies                                         | Responsibilities                                                                           | Packages                                                                                                                                                                 |
 | :-------------- | :----------------------------------------------------------- | :----------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `type:contract` | `type:contract` (`effect` only)                              | Shared `Schema.Class`, `Schema.TaggedErrorClass`, `HttpApi`, `RpcGroup`                    | `@harness/sample-contract` (`libs/sample/contract`), `@harness/<scope>-contract`                                                                                         |
-| `type:service`  | `type:contract`, `type:service`                              | `Context.Service` capability interfaces (repositories, gateways, model ports)              | `@harness/decision` (`libs/harness/decision`), `@harness/sample-service` (`libs/sample/service`)                                                                         |
-| `type:domain`   | `type:contract`, `type:service`, `type:domain`               | Pure business logic and `R = never` deciders; zero I/O, zero `Layer` construction          | `@harness/gates` (`libs/harness/gates`), `@harness/sample-domain` (`libs/sample/domain`)                                                                                 |
-| `type:infra`    | `type:contract`, `type:service`, `type:domain`, `type:infra` | Live `Layer` implementations, Drizzle D1 repositories, Omnigraph, SQLite, Ollama HTTP      | `@harness/clef` (`libs/harness/clef`), `@harness/ingest` (`libs/harness/ingest`), `@harness/graph` (`libs/harness/graph`), `@harness/sample-infra` (`libs/sample/infra`) |
+| `type:contract` | `type:contract` (`effect` only)                              | Shared `Schema.Class`, `Schema.TaggedErrorClass`, `HttpApi`, `RpcGroup`, `stub<A, E, R>()` | `@harness/contract` (`libs/harness/contract`), `@harness/sample-contract` (`libs/sample/contract`), `@harness/es-contract` (`libs/es/contract`)                           |
+| `type:service`  | `type:contract`, `type:service`                              | `Context.Service` capability interfaces (repositories, gateways, model ports)              | `@harness/service` (`libs/harness/service`), `@harness/sample-service` (`libs/sample/service`)                                                                            |
+| `type:core` / `type:domain` | `type:contract`, `type:service`, `type:core`, `type:domain` | Pure business/engine logic and `R = never` deciders; zero host I/O                         | `@harness/{gates,graph,decision,ingest}`, `@harness/es-core`, `@harness/sample-domain`                                                                                    |
+| `type:infra`    | `type:contract`, `type:service`, `type:core`, `type:domain`, `type:infra` | Live `Layer` implementations, Drizzle D1 repositories, Node platform bindings              | `@harness/infra` (`libs/harness/infra`), `@harness/es-infra` (`libs/es/infra`), `@harness/sample-infra` (`libs/sample/infra`)                                             |
 | `type:app`      | All tiers                                                    | Composition root (`Layer.provideMerge`), CLI/MCP servers, Alchemy `alchemy.run.ts`, web UI | `@harness/cli` (`apps/harness-cli`), `@harness/mcp` (`apps/harness-mcp`), `@harness/sample` (`apps/sample`)                                                              |
 
 ---
@@ -112,7 +113,7 @@ flowchart LR
    - `IF <condition> THEN <outcome>` $\rightarrow$ `Schema.TaggedErrorClass` in error channel `E`
    - `WHILE <state>` $\rightarrow$ pure `decide(state, input)` function with `R = never` + stateful `Context.Service` in `R`
    - `WHERE <feature>` $\rightarrow$ `Layer` / `Config` dependency in `R`
-     Write function signatures returning `stub<A, E, R>(...args)` from `@harness/gates` and add `@harness-Requirement: REQ-...` JSDoc tags.
+     Write function signatures returning `stub<A, E, R>(...args)` from `@harness/contract` and add `@harness-Requirement: REQ-...` JSDoc tags.
 3. **Plan Gate (`harness plan-check`):**
    Runs `HARNESS_PLAN_CHECK=1 tsgo -b --noEmit` + `oxlint` (allowing `stub()` calls) + `PlanStepCoverageV1`. Checkpoints the verified skeleton onto `plan/<task>`.
 4. **Implementation (`executing-effect-stubs`):**
@@ -315,7 +316,7 @@ The harness packages full engineering capabilities into two first-class adapter 
    - `IF <condition> THEN <outcome>` $\rightarrow$ `Schema.TaggedErrorClass` in error channel `E`.
    - `WHILE <state>` $\rightarrow$ pure `decide(state, input)` function (`R = never`) + stateful `Context.Service` in `R`.
    - `WHERE <feature>` $\rightarrow$ `Layer` / `Config` dependency in `R`.
-5. **Write Typed Skeletons:** Write signatures in `type:domain` and `type:service` returning `stub<A, E, R>(...args)` from `@harness/gates` with `@harness-Requirement: REQ-...` annotations.
+5. **Write Typed Skeletons:** Write signatures in `type:domain` and `type:service` returning `stub<A, E, R>(...args)` from `@harness/contract` with `@harness-Requirement: REQ-...` JSDoc tags.
 6. **Execute Plan Gate:** Run `harness plan-check` (`HARNESS_PLAN_CHECK=1`) to lock boundaries and checkpoint `plan/<task>`.
 
 #### Recipe B: Implementing with Package-Isolated `flash` Subagents (`executing-effect-stubs`)

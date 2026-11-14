@@ -1,8 +1,9 @@
-import { Effect, Layer, Option, Schema } from "effect"
+import { Cause, Effect, Layer, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import { TypeSafeClient, TypeSafeDecisionModel } from "@effect/ai-typesafe"
+import { match } from "ts-pattern"
 
 /** Ordered building blocks for MVP v2 (docs/mvp_v2.md §5 & §11); `review` first is a
  * deliberate mitigation for Clef-flash's weak out-of-scope detection (ties follow option order). */
@@ -122,7 +123,7 @@ export const IdiomRouterV1 = Decision.make({
 })
 
 /** Validates Ollama System One limits (1–64 questions per call, 2–26 options per choice/score). */
-export const assertDecisionLimits = (definition: {
+export const validateDecisionLimits = Effect.fn("Harness.validateDecisionLimits")(function* (definition: {
   readonly decisions: Readonly<
     Record<
       string,
@@ -132,11 +133,11 @@ export const assertDecisionLimits = (definition: {
       }
     >
   >
-}): void => {
+}): Effect.fn.Return<void> {
   const entries = Object.entries(definition.decisions)
   if (entries.length < 1 || entries.length > 64) {
-    Effect.runSync(
-      Effect.die(new Error(`Decision definition must have 1..64 questions, got ${entries.length}`)),
+    return yield* Effect.die(
+      new Error(`Decision definition must have 1..64 questions, got ${entries.length}`),
     )
   }
   for (const [name, question] of entries) {
@@ -145,15 +146,13 @@ export const assertDecisionLimits = (definition: {
         ? question.criteria.length
         : Object.keys(question.criteria).length
       if (optionCount < 2 || optionCount > 26) {
-        Effect.runSync(
-          Effect.die(
-            new Error(`Decision question "${name}" must have 2..26 options, got ${optionCount}`),
-          ),
+        return yield* Effect.die(
+          new Error(`Decision question "${name}" must have 2..26 options, got ${optionCount}`),
         )
       }
     }
   }
-}
+})
 
 export const routeStep = Effect.fn("Harness.routeStep")(function* (step: string) {
   const trimmed = step.trim()
@@ -169,20 +168,29 @@ export const routeStep = Effect.fn("Harness.routeStep")(function* (step: string)
 
   const outcome = yield* DecisionModel.decide(IdiomRouterV1, { input: { planStep: step } }).pipe(
     Effect.timeoutOption("1500 millis"),
-    Effect.catchCause(() => Effect.succeedNone),
+    Effect.catchCause((cause) =>
+      Cause.hasInterrupts(cause)
+        ? Effect.interrupt
+        : Effect.logWarning(`Decision model fallback: ${Cause.pretty(cause)}`).pipe(
+            Effect.as(Option.none()),
+          ),
+    ),
   )
 
-  if (Option.isNone(outcome)) {
-    return "review" as const
-  }
-
-  const { answers } = outcome.value
-  yield* Effect.annotateCurrentSpan({
-    "decision.definition": "IdiomRouterV1",
-    "decision.block": answers.block.label,
-    "decision.fitsAny": answers.fitsAny.probability,
-  })
-  return answers.fitsAny.probability >= 0.7 ? answers.block.label : "review"
+  return yield* match(outcome)
+    .with({ _tag: "None" }, () => Effect.succeed("review" as const))
+    .with({ _tag: "Some" }, ({ value }) =>
+      Effect.gen(function* () {
+        const { answers } = value
+        yield* Effect.annotateCurrentSpan({
+          "decision.definition": "IdiomRouterV1",
+          "decision.block": answers.block.label,
+          "decision.fitsAny": answers.fitsAny.probability,
+        })
+        return answers.fitsAny.probability >= 0.7 ? answers.block.label : "review"
+      }),
+    )
+    .exhaustive()
 })
 
 /** Local resident Clef-flash (9B) through Ollama's System One endpoint. */

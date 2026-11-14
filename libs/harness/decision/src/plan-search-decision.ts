@@ -9,7 +9,6 @@ import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match, P } from "ts-pattern"
 import { type DeterministicFallbackReason, PriorSource } from "./hole-prior-decision.js"
-import { assertDecisionLimits } from "./idiom-router.js"
 
 export const PLAN_SEARCH_COHESION_LEVELS = [
   "fragmented",
@@ -44,8 +43,6 @@ export const PlanSearchScorerV1 = Decision.make({
     }),
   },
 })
-
-assertDecisionLimits(PlanSearchScorerV1)
 
 export const PlanSearchScoreInput = Schema.Struct({
   candidateId: PlanSearchCandidateId,

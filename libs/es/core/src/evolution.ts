@@ -310,38 +310,37 @@ export const decideEventSchemaEvolution = Effect.fn("EventSchemaEvolution.decide
  * (`FrozenEventSchemaViolationError` | `MissingEventUpcasterError`).
  */
 export const verifyEventSchemaEvolution = Effect.fn("EventSchemaEvolution.verify")(
-  (
+  function* (
     input: EventSchemaEvolutionInput,
-  ): Effect.Effect<
+  ): Effect.fn.Return<
     SchemaEvolutionValid,
     FrozenEventSchemaViolationError | MissingEventUpcasterError,
     never
-  > =>
-    Effect.gen(function* () {
-      const decision = yield* decideEventSchemaEvolution(input)
-      return yield* match(decision)
-        .with({ _tag: "SchemaEvolutionValid" }, (d) => Effect.succeed(d))
-        .with({ _tag: "FrozenEventVersionDrifted" }, (d) =>
-          Effect.fail(
-            new FrozenEventSchemaViolationError({
-              eventType: d.eventType,
-              version: d.version,
-              reason: d.reason,
-            }),
-          ),
-        )
-        .with({ _tag: "UnmappedEventVersionJump" }, (d) =>
-          Effect.fail(
-            new MissingEventUpcasterError({
-              eventType: d.eventType,
-              fromVersion: d.fromVersion,
-              toVersion: d.toVersion,
-              reason: d.reason,
-            }),
-          ),
-        )
-        .exhaustive()
-    }),
+  > {
+    const decision = yield* decideEventSchemaEvolution(input)
+    return yield* match(decision)
+      .with({ _tag: "SchemaEvolutionValid" }, (d) => Effect.succeed(d))
+      .with({ _tag: "FrozenEventVersionDrifted" }, (d) =>
+        Effect.fail(
+          new FrozenEventSchemaViolationError({
+            eventType: d.eventType,
+            version: d.version,
+            reason: d.reason,
+          }),
+        ),
+      )
+      .with({ _tag: "UnmappedEventVersionJump" }, (d) =>
+        Effect.fail(
+          new MissingEventUpcasterError({
+            eventType: d.eventType,
+            fromVersion: d.fromVersion,
+            toVersion: d.toVersion,
+            reason: d.reason,
+          }),
+        ),
+      )
+      .exhaustive()
+  },
 )
 
 /**
@@ -349,31 +348,30 @@ export const verifyEventSchemaEvolution = Effect.fn("EventSchemaEvolution.verify
  * in `currentSnapshots` has been committed to `committedSnapshots`.
  */
 export const verifyCommittedSnapshotParity = Effect.fn("EventSchemaEvolution.verifyParity")(
-  (
+  function* (
     input: EventSchemaEvolutionInput,
-  ): Effect.Effect<
+  ): Effect.fn.Return<
     SchemaEvolutionValid,
     FrozenEventSchemaViolationError | MissingEventUpcasterError,
     never
-  > =>
-    Effect.gen(function* () {
-      const valid = yield* verifyEventSchemaEvolution(input)
-      for (const cur of input.currentSnapshots) {
-        const isCommitted = input.committedSnapshots.some(
-          (c) => c.eventType === cur.eventType && c.version === cur.version,
-        )
-        if (!isCommitted) {
-          return yield* new FrozenEventSchemaViolationError({
-            eventType: cur.eventType,
-            version: cur.version,
-            reason: ErrorMessage.make(
-              `Uncommitted event schema version ${cur.eventType} v${cur.version}; run check-event-schemas.mjs --update to freeze new version`,
-            ),
-          })
-        }
+  > {
+    const valid = yield* verifyEventSchemaEvolution(input)
+    for (const cur of input.currentSnapshots) {
+      const isCommitted = input.committedSnapshots.some(
+        (c) => c.eventType === cur.eventType && c.version === cur.version,
+      )
+      if (!isCommitted) {
+        return yield* new FrozenEventSchemaViolationError({
+          eventType: cur.eventType,
+          version: cur.version,
+          reason: ErrorMessage.make(
+            `Uncommitted event schema version ${cur.eventType} v${cur.version}; run harness check-event-schemas --update to freeze new version`,
+          ),
+        })
       }
-      return valid
-    }),
+    }
+    return valid
+  },
 )
 
 /**
@@ -382,15 +380,14 @@ export const verifyCommittedSnapshotParity = Effect.fn("EventSchemaEvolution.ver
  * of an existing frozen version (or a missing upcaster for a newly added version) is rejected before writing.
  */
 export const prepareUpdatedEventSnapshots = Effect.fn("EventSchemaEvolution.prepareUpdate")(
-  (
+  function* (
     input: EventSchemaEvolutionInput,
-  ): Effect.Effect<
+  ): Effect.fn.Return<
     ReadonlyArray<EventVersionSnapshotEntry>,
     FrozenEventSchemaViolationError | MissingEventUpcasterError,
     never
-  > =>
-    Effect.gen(function* () {
-      yield* verifyEventSchemaEvolution(input)
-      return input.currentSnapshots
-    }),
+  > {
+    yield* verifyEventSchemaEvolution(input)
+    return input.currentSnapshots
+  },
 )

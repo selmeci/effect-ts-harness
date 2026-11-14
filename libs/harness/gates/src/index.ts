@@ -1,5 +1,4 @@
 export * from "./policy.js"
-export * from "./stub.js"
 export * from "./verify-stamp.js"
 export * from "./branch-diff.js"
 export * from "./benchmark.js"
@@ -22,6 +21,7 @@ export * from "./ast-cache.js"
 export * from "./bench-check.js"
 export * from "./plugins/self-dogfooding-contract.js"
 export * from "./plugins/self-dogfooding-plugin.js"
+export * from "./plugins/harness-tier-topology.js"
 export * from "./plugins/gate-plugin-registry.js"
 export * from "./plugins/ast-gate-visitors.js"
 export * from "./plugins/gc/gc-helpers.js"
@@ -33,20 +33,3 @@ export * from "./mutation/mutant-ast-generator.js"
 export * from "./services/workspace-fs.js"
 export * from "./services/subprocess-runner.js"
 export * from "./services/active-mutant-context.js"
-export {
-  BOUNDARY_CALLER_PATTERN,
-  CandidateRank,
-  ConfidenceMillis,
-  DpoCandidatePriors,
-  DpoPriorKey,
-  NodeKey,
-  NonNegativeCount,
-  PageRankScoreMillis,
-  RewriteRuleId,
-  RoleName,
-  SemanticEdgePriors,
-  SystemOneScoreMillis,
-  formatDpoPriorKey,
-  isBoundaryCallerQualname,
-  parseDpoPriorKey,
-} from "@harness/graph"

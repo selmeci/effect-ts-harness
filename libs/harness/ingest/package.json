@@ -14,7 +14,9 @@
   },
   "dependencies": {
     "@ast-grep/napi": "0.51.0",
-    "effect": "4.0.0"
+    "@harness/service": "workspace:*",
+    "effect": "4.0.0",
+    "ts-pattern": "5.9.2"
   },
   "devDependencies": {
     "@effect/vitest": "4.0.0",
@@ -23,8 +25,7 @@
   },
   "nx": {
     "tags": [
-      "type:contract",
-      "type:service"
+      "type:core"
     ]
   }
 }
