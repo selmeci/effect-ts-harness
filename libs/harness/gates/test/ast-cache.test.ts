@@ -46,4 +46,24 @@ describe("AstGateCache Drizzle interpolated template specifier ban", () => {
       ).toBe(2)
     }),
   )
+
+  it.effect("flags invalid generative/chat clef endpoints in src/ files", () =>
+    Effect.gen(function* () {
+      const report = yield* decideAstGateCache({
+        files: [
+          {
+            filePath: AstSourceFilePath.make("libs/sample/infra/src/bad-clef.ts"),
+            content: AstSourceContent.make(
+              'export const badUrl = "http://localhost:11434/api/generate"\n',
+            ),
+          },
+        ],
+      })
+
+      expect(report.verdict).toBe("violated")
+      const clefViolations = report.violations.filter((v) => v.rule === "invalid-clef-endpoint")
+      expect(clefViolations.length).toBe(1)
+      expect(clefViolations[0]?.message).toContain("[invalid-clef-endpoint]")
+    }),
+  )
 })

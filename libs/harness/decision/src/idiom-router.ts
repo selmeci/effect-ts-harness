@@ -25,6 +25,7 @@ export const IDIOM_BLOCKS = [
   "httpapi",
   "rpc",
   "atom",
+  "decision-model",
   "effect",
 ] as const
 export type IdiomBlock = (typeof IDIOM_BLOCKS)[number]
@@ -86,6 +87,12 @@ export const DETERMINISTIC_ROUTE_RULES: ReadonlyArray<DeterministicRouteRule> = 
     pattern: /\b(?:atomhttpapi|useatom|effect[-\s]+atom)\b/i,
     block: "atom",
   },
+  {
+    id: "decision-model",
+    pattern:
+      /\b(?:decision[-\s]*model|clef(?:-flash)?|system\s*one|systemone|ai-typesafe|typesafedecisionmodel|typesafeclient)\b/i,
+    block: "decision-model",
+  },
 ]
 
 /** Versioned decision definition: reviewed data, not a prompt string. */
@@ -117,6 +124,8 @@ export const IdiomRouterV1 = Decision.make({
         httpapi: "Public HttpApi endpoints with declared error Schemas and OpenAPI",
         rpc: "Internal RpcGroup procedures and Cloudflare.toHttpClient DO calls",
         atom: "Frontend AtomHttpApi reactive state over the public contract",
+        "decision-model":
+          "Advisory System One decisions: Decision.make (classify, rate, probability), DecisionModel.decide, @effect/ai-typesafe TypeSafeDecisionModel & TypeSafeClient over POST /v1/systemone",
         effect: "Plain sequential effectful logic with Effect.gen / Effect.fn",
       },
     }),
@@ -197,10 +206,21 @@ export const routeStep = Effect.fn("Harness.routeStep")(function* (step: string)
 /** Configurable Clef-flash (9B) DecisionModel Layer requiring an explicit HttpClient. */
 export const makeLocalDecisionModelLayer = (options?: {
   readonly apiUrl?: string
-}): Layer.Layer<DecisionModel.DecisionModel, never, HttpClient.HttpClient> =>
-  TypeSafeDecisionModel.layer({ model: "clef-flash" }).pipe(
-    Layer.provide(TypeSafeClient.layer({ apiUrl: options?.apiUrl ?? "http://localhost:11434/v1" })),
+  readonly model?: string
+}): Layer.Layer<DecisionModel.DecisionModel, never, HttpClient.HttpClient> => {
+  const rawUrl = (
+    options?.apiUrl ??
+    process.env.HARNESS_OLLAMA_URL ??
+    process.env.OLLAMA_HOST ??
+    "http://localhost:11434/v1"
+  ).replace(/\/$/, "")
+  const withScheme = /^https?:\/\//i.test(rawUrl) ? rawUrl : `http://${rawUrl}`
+  const apiUrl = withScheme.endsWith("/v1") ? withScheme : `${withScheme}/v1`
+  const model = options?.model ?? process.env.HARNESS_CLEF_MODEL ?? "clef-flash"
+  return TypeSafeDecisionModel.layer({ model }).pipe(
+    Layer.provide(TypeSafeClient.layer({ apiUrl })),
   )
+}
 
 /** Local resident Clef-flash (9B) through Ollama's System One endpoint. */
 export const LocalDecisionModel = makeLocalDecisionModelLayer().pipe(

@@ -8,6 +8,7 @@ import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import { afterEach, describe, expect, it } from "vitest"
 import { makeMockDecisionModelLayer } from "@harness/decision"
+import { CLEF_SYSTEMONE_ONLY_BANNED_REASON } from "@harness/gates"
 import {
   ensureLocalOmnigraphReady,
   isLoopbackOmnigraphUrl,
@@ -257,6 +258,21 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         stdin: JSON.stringify({ unexpected: 123 }),
       })
       expect(unrecognized.exitCode).toBe(2)
+
+      const invalidClefEndpoint = await runCli(["guard", "--format=antigravity"], {
+        stdin: JSON.stringify({
+          tool_name: "Bash",
+          tool_input: {
+            command:
+              'curl -s http://localhost:11434/api/generate -d \'{"model":"clef-flash","prompt":"hi"}\'',
+          },
+        }),
+      })
+      expect(invalidClefEndpoint.exitCode).toBe(0)
+      expect(JSON.parse(invalidClefEndpoint.stdout)).toMatchObject({
+        decision: "deny",
+        reason: expect.stringContaining(CLEF_SYSTEMONE_ONLY_BANNED_REASON),
+      })
     })
   })
 

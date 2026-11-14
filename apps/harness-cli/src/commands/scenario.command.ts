@@ -87,9 +87,17 @@ class ClefRequestError extends Schema.TaggedError<ClefRequestError>()("ClefReque
 const callClef = (clefModel: string) =>
   Effect.gen(function* () {
     const started = performance.now()
+    const rawBase = (
+      process.env.HARNESS_OLLAMA_URL ??
+      process.env.OLLAMA_HOST ??
+      "http://localhost:11434"
+    )
+      .replace(/\/v1\/?$/, "")
+      .replace(/\/$/, "")
+    const baseUrl = /^https?:\/\//i.test(rawBase) ? rawBase : `http://${rawBase}`
     const res = yield* Effect.tryPromise({
       try: () =>
-        fetch("http://localhost:11434/v1/systemone", {
+        fetch(`${baseUrl}/v1/systemone`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           signal: AbortSignal.timeout(20_000),

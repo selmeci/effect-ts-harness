@@ -4,9 +4,11 @@ import { decideLoopThrashing, type FrictionEvent } from "../src/friction-log.js"
 import {
   CD_COMMAND_BANNED_REASON,
   classifyCommand,
+  CLEF_SYSTEMONE_ONLY_BANNED_REASON,
   INTERACTIVE_NX_BANNED_REASON,
   isCdCommand,
   isInteractiveNxCommand,
+  isInvalidClefEndpointCommand,
 } from "../src/policy.js"
 
 describe("guard policy", () => {
@@ -429,5 +431,33 @@ describe("guard policy", () => {
     expect(classifyCommand("gh api repos/owner/repo/issues -f title=bug")).toBe("escalate")
     expect(classifyCommand("gh api repos/owner/repo/issues -F body=@file.txt")).toBe("escalate")
     expect(classifyCommand("gh api repos/owner/repo/issues --input body.json")).toBe("escalate")
+  })
+
+  it("denies invalid generative/chat endpoints or ollama run on clef/clef-flash while allowing systemone and search/vcs commands", () => {
+    expect(
+      isInvalidClefEndpointCommand(
+        'curl -s http://localhost:11434/api/generate -d \'{"model":"clef-flash:latest","prompt":"hi"}\'',
+      ),
+    ).toBe(true)
+    expect(
+      classifyCommand(
+        'curl -s http://localhost:11434/api/generate -d \'{"model":"clef-flash:latest","prompt":"hi"}\'',
+      ),
+    ).toBe("deny")
+    expect(
+      classifyCommand(
+        'curl http://127.0.0.1:11434/v1/chat/completions -d \'{"model":"clef-flash"}\'',
+      ),
+    ).toBe("deny")
+    expect(classifyCommand("ollama run clef-flash")).toBe("deny")
+
+    expect(
+      classifyCommand(
+        'curl -s http://localhost:11434/v1/systemone -d \'{"model":"clef-flash","state":{},"questions":{}}\'',
+      ),
+    ).toBe("escalate")
+    expect(classifyCommand('grep -rn "/api/generate" libs')).toBe("allow")
+    expect(classifyCommand('git commit -m "ban /api/generate on clef"')).toBe("allow")
+    expect(CLEF_SYSTEMONE_ONLY_BANNED_REASON).toContain("/v1/systemone")
   })
 })

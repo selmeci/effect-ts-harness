@@ -4,7 +4,7 @@ import { loadPatternDocs } from "../src/pattern-index.js"
 import { testHostIo } from "./helpers/test-host-io.js"
 
 describe("agent-patterns index", () => {
-  it("loads all 16 reviewed pattern files with non-empty summaries", () => {
+  it("loads all 17 reviewed pattern files with non-empty summaries", () => {
     const repoRoot = resolve(import.meta.dirname, "../../../..")
     const docs = loadPatternDocs(repoRoot, testHostIo)
     expect(docs.map((d) => d.slug).sort()).toEqual([
@@ -12,6 +12,7 @@ describe("agent-patterns index", () => {
       "atom",
       "concurrency",
       "d1-repository",
+      "decision-model",
       "durable-object-state",
       "errors",
       "event-sourcing",

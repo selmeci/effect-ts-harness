@@ -202,7 +202,7 @@ Agents and gates query the property graph using Omnigraph's `.gq` language via `
 
 ### 13 Versioned `DecisionModel` Schemas (`@harness/decision`)
 
-Owned by `@harness/decision` and backed by resident Ollama (`clef-flash` with `keep_alive: -1` and strict JSON Schema decoding; deterministic fallback layer when Ollama is offline):
+Owned by `@harness/decision` and backed by resident Ollama (`clef-flash` via `POST /v1/systemone` using `@effect/ai-typesafe` `TypeSafeDecisionModel` + `TypeSafeClient`, `OLLAMA_KEEP_ALIVE=-1`, and deterministic fallback when Ollama is offline; System One models do not use `/api/generate` or `/v1/chat/completions`):
 
 | Schema                        | Used By                          | Purpose                                                                                                           |
 | :---------------------------- | :------------------------------- | :---------------------------------------------------------------------------------------------------------------- |
@@ -387,9 +387,9 @@ The harness packages full engineering capabilities into two first-class adapter 
 
 ---
 
-### 5. 17 Indexed Pattern Recipes (`agent-patterns/*.md`)
+### 5. 18 Indexed Pattern Recipes (`agent-patterns/*.md`)
 
-All 17 pattern files (`16` recipes + `agent-patterns/README.md` index) are indexed as `PatternDoc` nodes in Omnigraph and routed via `harness route` / `harness_route` (`IdiomRouterV1`):
+All 18 pattern files (`17` recipes + `agent-patterns/README.md` index) are indexed as `PatternDoc` nodes in Omnigraph and routed via `harness route` / `harness_route` (`IdiomRouterV1`):
 
 | Pattern Recipe        | File                                     | Key Effect v4 / Alchemy v2 Constructs                                                    | Gate / AST Ban Enforced                                    |
 | :-------------------- | :--------------------------------------- | :--------------------------------------------------------------------------------------- | :--------------------------------------------------------- |
@@ -409,6 +409,7 @@ All 17 pattern files (`16` recipes + `agent-patterns/README.md` index) are index
 | **RPC**               | `agent-patterns/rpc.md`                  | `RpcGroup`, `Cloudflare.toHttpClient`, W3C `traceparent` propagation                     | `effect-harness/no-untyped-rpc-payload`                    |
 | **Atom State**        | `agent-patterns/atom.md`                 | `@effect/atom-react`, `AtomHttpApi`, client state without manual `fetch`                 | `effect-harness/no-manual-fetch-in-ui`                     |
 | **Pattern Matching**  | `agent-patterns/pattern-matching.md`     | `ts-pattern` (`match(value)...exhaustive()`), closed discriminated unions                | `effect-harness/no-switch-on-tag`, `no-union-if-else`      |
+| **Decision Model**    | `agent-patterns/decision-model.md`       | `Decision.make`, `DecisionModel.decide`, `@effect/ai-typesafe`, System One `/v1/systemone` | `effect-harness/no-clef-chat-endpoint`                     |
 
 ---
 
@@ -417,9 +418,9 @@ All 17 pattern files (`16` recipes + `agent-patterns/README.md` index) are index
 ### Prerequisites
 
 - **Node.js `>=24.10.0`** and **pnpm `10.27.0`**
-- **Ollama** (optional, recommended for advisory `DecisionModel`):
+- **Ollama** (optional, recommended for advisory `DecisionModel` via `POST /v1/systemone`; set `OLLAMA_KEEP_ALIVE=-1` to keep weights resident in VRAM):
   ```bash
-  ollama create clef-flash -f tools/clef/Modelfile
+  ollama pull clef-flash
   ```
 
 ### Installation & Index Bootstrap

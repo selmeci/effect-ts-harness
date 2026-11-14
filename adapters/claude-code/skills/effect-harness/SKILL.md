@@ -66,6 +66,8 @@ The harness provides two complementary MCP servers in `.mcp.json`:
 - **`harness_structural_search`** (`pattern: string`): Performs fast AST pattern matching using `@ast-grep/napi`.
 - **`harness_route`** (`planStep: string`): Consults the advisory `clef-flash` idiom router to determine the optimal pattern doc in `agent-patterns/*.md`.
 
+> **Advisory `clef-flash` (TypeSafe System One API):** `clef-flash` is a structured System One model (`POST http://localhost:11434/v1/systemone` via `DecisionModel.decide` + `@effect/ai-typesafe`), never a generative/chat LLM. Use `pnpm harness doctor` for warm-up/health checks; `/api/generate`, `/api/chat`, `/v1/chat/completions`, `/v1/completions`, and `ollama run clef-flash` are unsupported and blocked.
+
 ### `@modernrelay/omnigraph-mcp` (Property Graph & Branching)
 
 Exposes parameterized `.gq` graph queries over local Lance storage (`http://127.0.0.1:8080`) under subject `agent-mcp`:

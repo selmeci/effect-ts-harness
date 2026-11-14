@@ -32,6 +32,7 @@ describe("IdiomRouterV1 data constraints", () => {
       "httpapi",
       "rpc",
       "atom",
+      "decision-model",
       "effect",
     ])
   })
@@ -136,5 +137,12 @@ describe("Deterministic routing for Phase 4 event schema evolution", () => {
       ),
     )
     expect(httpApiPrecedence).toBe("httpapi")
+  })
+
+  it("routes prompts mentioning clef-flash System One DecisionModel to decision-model", async () => {
+    const result = await Effect.runPromise(
+      routeStep("Configure clef-flash System One DecisionModel").pipe(Effect.provide(mockModel)),
+    )
+    expect(result).toBe("decision-model")
   })
 })

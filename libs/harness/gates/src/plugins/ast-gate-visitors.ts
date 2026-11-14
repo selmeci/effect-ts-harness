@@ -54,6 +54,13 @@ export const SUSPICIOUS_SQL_DDL_REGEX =
 
 export const MIGRATOR_KEY_REGEX = /^[1-9]\d*_[a-z0-9_]+$/
 
+const INVALID_CLEF_ENDPOINT_MESSAGE =
+  "[invalid-clef-endpoint] System One models (clef-flash) only expose POST /v1/systemone (and GET /v1/models or GET /api/tags). Never call /api/generate, /api/chat, or /v1/chat/completions — use DecisionModel.decide (@effect/ai-typesafe) per agent-patterns/decision-model.md."
+
+const isInvalidClefEndpointUrlText = (text: string): boolean =>
+  /11434\/(?:api\/(?:generate|chat)|v1\/(?:chat\/completions|completions))\b/i.test(text) ||
+  (/(?:11434|\bclef(?:-flash)?\b)/i.test(text) && /\/api\/(?:generate|chat)\b/i.test(text))
+
 export const SCHEMA_CTORS = new Set([
   "Struct", "Class", "TaggedClass", "TaggedStruct", "TaggedUnion", "Union",
   "Record", "Array", "Tuple", "String", "Number", "Boolean", "Int",
@@ -293,6 +300,10 @@ export const visitSourceFileSinglePass = (
   const referencesLangTsx = sourceFile.text.includes("Lang.Tsx")
   const effectNamespaceNames = new Set<string>(["Effect"])
   const isTestOrHelperFile = isTestFile || /(?:^|\/)test\/(?!fixtures\/)/.test(normalizedFilePath)
+  const isClefEndpointCheckedSrcFile =
+    !isTestFile &&
+    /(?:^|\/)src\//.test(normalizedFilePath) &&
+    !/(?:^|\/)(?:triage-decision|policy|ast-gate-visitors)\.ts$/.test(normalizedFilePath)
   const isMemoryWorkerdBridge = /(?:^|\/)libs\/es\/infra\/src\/memory\.ts$/.test(normalizedFilePath)
   const isHarnessMcpRunPromiseExitBoundary =
     /(?:^|\/)apps\/harness-mcp\/src\/(?:server|daemon\/unix-socket-daemon)\.ts$/.test(normalizedFilePath)
@@ -680,6 +691,20 @@ export const visitSourceFileSinglePass = (
             pushViolation(catMigrationSafety, "unsafe-sql-migration", v.message, node)
           }
         }
+      }
+    }
+
+    if (
+      isClefEndpointCheckedSrcFile &&
+      (ts.isStringLiteral(node) ||
+        ts.isNoSubstitutionTemplateLiteral(node) ||
+        ts.isTemplateExpression(node))
+    ) {
+      const literalText = ts.isTemplateExpression(node)
+        ? `${node.head.text}${node.templateSpans.map((s) => s.literal.text).join("")}`
+        : node.text
+      if (isInvalidClefEndpointUrlText(literalText)) {
+        pushViolation(catSyntaxBans, "invalid-clef-endpoint", INVALID_CLEF_ENDPOINT_MESSAGE, node)
       }
     }
 

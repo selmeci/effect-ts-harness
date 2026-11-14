@@ -427,6 +427,60 @@ export const isCdCommand = (trimmed: string): boolean =>
 export const INTERACTIVE_NX_BANNED_REASON =
   "Running 'nx show' without 'CI=true' can hang on interactive prompts; prefix with 'CI=true' or use harness MCP tools."
 
+export const CLEF_SYSTEMONE_ONLY_BANNED_REASON =
+  "clef (clef-flash) is a TypeSafe System One structured decision model, NOT a generative text/chat model — /api/generate, /api/chat, /v1/chat/completions, /v1/completions, and 'ollama run clef*' do not exist for System One models and return HTTP errors. Use DecisionModel.decide (@effect/ai-typesafe TypeSafeDecisionModel) or POST http://localhost:11434/v1/systemone ({ model: 'clef-flash', state, questions }), or run 'pnpm harness doctor' to warm/verify the model."
+
+const IGNORED_CLEF_GUARD_BINARIES: ReadonlySet<string> = new Set([
+  "grep",
+  "rg",
+  "git",
+  "gh",
+  "vitest",
+])
+
+const CLEF_HTTP_OR_SCRIPT_BINARIES: ReadonlySet<string> = new Set([
+  "curl",
+  "wget",
+  "http",
+  "https",
+  "xh",
+  "fetch",
+  "python",
+  "python3",
+  "node",
+  "bun",
+  "tsx",
+  "deno",
+])
+
+const CLEF_MODEL_NAME_PATTERN = /\bclef(?:-flash)?\b/i
+const CLEF_INVALID_ENDPOINT_PATTERN =
+  /(?:\/api\/(?:generate|chat|embeddings|embed)|\/v1\/(?:chat\/completions|completions|responses|embeddings))\b/i
+
+export const isInvalidClefEndpointCommand = (command: string): boolean =>
+  extractCommandSegments(command).some((seg) => {
+    const rawBin = seg.commandWords[0]
+    if (rawBin === undefined) {
+      return false
+    }
+    const bin = rawBin.includes("/") ? rawBin.slice(rawBin.lastIndexOf("/") + 1) : rawBin
+    if (IGNORED_CLEF_GUARD_BINARIES.has(bin)) {
+      return false
+    }
+    if (
+      bin === "ollama" &&
+      seg.commandWords[1] === "run" &&
+      seg.commandWords.slice(2).some((w) => /^clef(?:-|:|$)/i.test(w))
+    ) {
+      return true
+    }
+    if (CLEF_HTTP_OR_SCRIPT_BINARIES.has(bin)) {
+      const segText = seg.commandWords.join(" ")
+      return CLEF_MODEL_NAME_PATTERN.test(segText) && CLEF_INVALID_ENDPOINT_PATTERN.test(segText)
+    }
+    return false
+  })
+
 export const isInteractiveNxCommand = (command: string): boolean =>
   extractCommandSegments(command).some((seg) => {
     const bin = seg.commandWords[0]
@@ -457,6 +511,9 @@ export const classifyCommand = (command: string): GuardVerdict => {
     return "deny"
   }
   if (isInteractiveNxCommand(trimmed)) {
+    return "deny"
+  }
+  if (isInvalidClefEndpointCommand(trimmed)) {
     return "deny"
   }
   const view = toCommandView(command)

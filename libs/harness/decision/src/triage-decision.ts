@@ -395,6 +395,17 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     },
   },
   {
+    id: "clef-systemone-endpoint-mismatch",
+    pattern:
+      /does not support (?:generate|chat)|\/api\/(?:generate|chat)\b[\s\S]{0,120}\bclef|\bclef[\s\S]{0,120}\/api\/(?:generate|chat)\b/i,
+    kind: "semantic",
+    hint: "clef (clef-flash) is a TypeSafe System One decision model — use @effect/ai-typesafe (DecisionModel.decide / POST /v1/systemone), not /api/generate or /api/chat (see agent-patterns/decision-model.md).",
+    result: {
+      kind: "semantic",
+      hint: "clef (clef-flash) is a TypeSafe System One decision model — use @effect/ai-typesafe (DecisionModel.decide / POST /v1/systemone), not /api/generate or /api/chat (see agent-patterns/decision-model.md).",
+    },
+  },
+  {
     pattern: /harness(?:\/|\()syntax-bans\)?/,
     result: {
       kind: "mechanical",

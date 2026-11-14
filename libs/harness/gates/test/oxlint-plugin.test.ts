@@ -118,4 +118,22 @@ describe("oxlint syntax-bans & test-integrity Drizzle sealing", () => {
     })
     expect(testReports.filter((r) => r.message.includes("banned-drizzle-import")).length).toBe(2)
   })
+
+  it("flags invalid generative/chat clef endpoints in src/ files via syntax-bans", async () => {
+    const plugin = await loadSyntaxBansPlugin()
+    const syntaxBans = plugin.rules["syntax-bans"]
+
+    const srcReports: Array<{ message: string }> = []
+    const srcVisitor = syntaxBans.create({
+      filename: "/repo/libs/sample/infra/src/bad-clef.ts",
+      report: (r: { message: string }) => {
+        srcReports.push(r)
+      },
+    })
+    srcVisitor.Literal?.({
+      type: "Literal",
+      value: "http://localhost:11434/api/generate",
+    })
+    expect(srcReports.some((r) => r.message.includes("[invalid-clef-endpoint]"))).toBe(true)
+  })
 })

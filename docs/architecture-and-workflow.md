@@ -357,7 +357,7 @@ sequenceDiagram
     activate Layer
 
     par Timeout preteká s inferenciou
-        Layer->>Ollama: POST /v1/chat/completions (clef-flash)
+        Layer->>Ollama: POST /v1/systemone (clef-flash)
         Note over Layer,Ollama: Limit: 1500 ms (1.5 sekundy)
     and Časovač (1500 millis)
         Layer->>Layer: Effect.timeoutOption("1500 millis")
@@ -373,6 +373,8 @@ sequenceDiagram
     end
     deactivate Layer
 ```
+
+> **Poznámka k protokolu:** `clef-flash` je štruktúrovaný **TypeSafe System One** model (`@effect/ai-typesafe`), nie generatívny chatový LLM — jediný podporovaný inferenčný endpoint je `POST /v1/systemone`; `/api/generate`, `/api/chat` a `/v1/chat/completions` nie sú podporované.
 
 ---
 

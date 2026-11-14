@@ -64,6 +64,7 @@ Always prefer in-process MCP tools over spawning shell subcommands to eliminate 
 - **Graph Queries:** `harness_gq_query`, `harness_structural_search`.
 - **Task Lifecycle Gates (CLI only):** Use `pnpm harness <cmd>` (`plan-check`, `gc --strict`, `mutate --strict`, `verify`, `done`) strictly for task state transitions and cryptographic verify-stamp generation.
 - **Long-Running CLI Gate Execution (`WaitMsBeforeAsync`):** When running CLI lifecycle gates (`pnpm harness plan-check`, `pnpm harness gc --strict`, `pnpm harness mutate --strict`, `pnpm harness verify`, `pnpm harness done`), always pass `WaitMsBeforeAsync: 10000` to `run_command`. If a command goes to the background, rely on Antigravity's reactive wakeup — never poll in a loop with `manage_task status` or `schedule` timers.
+- **Advisory `clef-flash` (TypeSafe System One API):** `clef-flash` is a structured System One model (`POST http://localhost:11434/v1/systemone` via `DecisionModel.decide` + `@effect/ai-typesafe`), never a generative/chat LLM. Use `pnpm harness doctor` for warm-up/health checks; `/api/generate`, `/api/chat`, `/v1/chat/completions`, `/v1/completions`, and `ollama run clef-flash` are unsupported and blocked.
 
 ---
 

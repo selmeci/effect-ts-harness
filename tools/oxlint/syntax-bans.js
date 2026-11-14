@@ -54,6 +54,23 @@ const nodeSqliteInfraMessage = (source, filename) =>
   `Do not import '${source}' in type:infra or type:app ('${filename}') — execute Cloudflare Durable Object SQLite and D1 storages against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006, node-sqlite-in-infra).`
 const bannedDrizzleMessage = (source, filename) =>
   `banned-drizzle-import: '${source}' is banned across the workspace in '${filename}' — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator).`
+const invalidClefEndpointMessage =
+  "[invalid-clef-endpoint] System One models (clef-flash) only expose POST /v1/systemone (and GET /v1/models or GET /api/tags). Never call /api/generate, /api/chat, or /v1/chat/completions — use DecisionModel.decide (@effect/ai-typesafe) per agent-patterns/decision-model.md."
+
+function isInvalidClefEndpointLiteralText(text) {
+  if (typeof text !== "string" || text.length === 0) return false
+  if (/11434\/(?:api\/(?:generate|chat)|v1\/(?:chat\/completions|completions))\b/i.test(text)) {
+    return true
+  }
+  return /(?:11434|\bclef(?:-flash)?\b)/i.test(text) && /\/api\/(?:generate|chat)\b/i.test(text)
+}
+
+function isClefEndpointCheckedSrcFile(filename) {
+  if (typeof filename !== "string") return false
+  if (/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(filename)) return false
+  if (!/(?:^|\/)src\//.test(filename)) return false
+  return !/(?:^|\/)(?:triage-decision|policy|ast-gate-visitors)\.ts$/.test(filename)
+}
 
 function isDrizzleSpecifier(spec) {
   return (
@@ -2523,6 +2540,23 @@ const syntaxBans = {
             }
             checkDomainBoundaryVarDeclarator(varDecl, filename)
           }
+        }
+      },
+      Literal(node) {
+        if (typeof node.value !== "string") return
+        const filename = getNormalizedFilename()
+        if (isClefEndpointCheckedSrcFile(filename) && isInvalidClefEndpointLiteralText(node.value)) {
+          reportOnce(node, invalidClefEndpointMessage)
+        }
+      },
+      TemplateLiteral(node) {
+        const filename = getNormalizedFilename()
+        if (!isClefEndpointCheckedSrcFile(filename) || !Array.isArray(node.quasis)) return
+        const text = node.quasis
+          .map((q) => (q != null && q.value != null ? (q.value.cooked ?? q.value.raw ?? "") : ""))
+          .join("")
+        if (isInvalidClefEndpointLiteralText(text)) {
+          reportOnce(node, invalidClefEndpointMessage)
         }
       },
     }

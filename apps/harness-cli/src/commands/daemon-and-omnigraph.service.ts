@@ -452,7 +452,12 @@ export function ensureLocalOllamaReady(opts?: OllamaReadinessOptions): Effect.Ef
           opts.spawnOllama()
         } else {
           if (customUrl === undefined) {
-            nodeSyncHostIo.spawnDetached("ollama", ["serve"])
+            nodeSyncHostIo.spawnDetached("ollama", ["serve"], {
+              env: {
+                ...process.env,
+                OLLAMA_KEEP_ALIVE: process.env.OLLAMA_KEEP_ALIVE ?? "-1",
+              },
+            })
           }
         }
       },

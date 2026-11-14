@@ -90,6 +90,12 @@ Plan as code: write the skeleton first (schemas, errors, service interfaces, sig
 - Cloudflare credentials live in Alchemy profiles: `alchemy profile edit --add Cloudflare` saves them to `~/.alchemy/profiles.json`. Never export `CLOUDFLARE_ACCOUNT_ID` or `CLOUDFLARE_API_TOKEN`, never put them in `.env`.
 - For Alchemy lookups read the pinned source in `repos/alchemy` and the vendored doc snapshots `docs/alchemy-llms.txt` (index) and `docs/alchemy-llms-full.txt` (per-resource reference — grep it locally, do not fetch). The live https://alchemy.run/llms.txt documents the newest release and drifts from our pin; use it only to refresh the snapshots. Tutorial: https://alchemy.run/cloudflare/tutorial/part-1 through part-5.
 
+## Advisory DecisionModel (`clef-flash` — TypeSafe System One API)
+
+- `clef-flash` (`clef-*`) in Ollama is a **TypeSafe System One** model (`@effect/ai-typesafe`), **never** a generative/chat LLM — `/api/generate`, `/api/chat`, `/v1/chat/completions`, `/v1/completions`, and `ollama run clef-flash` **do not exist** on System One models, return HTTP errors, and are blocked by the harness guard and AST linter.
+- Always invoke in code via `DecisionModel.decide` + `@effect/ai-typesafe` (`TypeSafeDecisionModel` + `TypeSafeClient` against `http://localhost:11434/v1`, see `agent-patterns/decision-model.md`).
+- For CLI readiness/warm-up, use `pnpm harness doctor` (never `curl /api/generate`); if probing raw HTTP in diagnostics, only `POST http://localhost:11434/v1/systemone` (`{ model: "clef-flash", state, questions }`) and `GET /v1/models` / `GET /api/tags` are valid, with `OLLAMA_KEEP_ALIVE=-1` keeping weights resident.
+
 ## Definition of done
 
 `nx affected -t verify` green (typecheck + lint + test per project). Deterministic gates always

@@ -1,4 +1,4 @@
-import { Cause, Effect, Option, Schema } from "effect"
+import { Cause, Duration, Effect, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
@@ -75,57 +75,65 @@ export interface OntologyConflictResult {
   readonly timedOutOrUnavailable?: boolean
 }
 
+const runCheckOntologyPairConflict = (
+  input: OntologyConflictInput,
+  timeout: Duration.Input,
+) =>
+  Effect.gen(function* () {
+    const outcome = yield* DecisionModel.decide(OntologyConflictV1, { input }).pipe(
+      Effect.timeoutOption(timeout),
+      Effect.catchCause((cause) =>
+        Cause.hasInterrupts(cause)
+          ? Effect.interrupt
+          : Effect.logWarning(`Decision model fallback: ${Cause.pretty(cause)}`).pipe(
+              Effect.as(Option.none()),
+            ),
+      ),
+    )
+
+    return yield* match(outcome)
+      .with({ _tag: "None" }, () =>
+        Effect.succeed({
+          hasConflict: false,
+          probability: 0,
+          conflictKind: "none" as const,
+          reason:
+            "DecisionModel unavailable or timed out; relying on deterministic ontology invariants.",
+          timedOutOrUnavailable: true,
+        } satisfies OntologyConflictResult),
+      )
+      .with({ _tag: "Some" }, ({ value }) =>
+        Effect.gen(function* () {
+          const { answers } = value
+          yield* Effect.annotateCurrentSpan({
+            "decision.definition": "OntologyConflictV1",
+            "decision.contradicts": answers.contradicts.probability,
+            "decision.conflictKind": answers.conflictKind.label,
+          })
+
+          const hasConflict =
+            answers.contradicts.probability >= 0.7 && answers.conflictKind.label !== "none"
+
+          return {
+            hasConflict,
+            probability: answers.contradicts.probability,
+            conflictKind: hasConflict
+              ? (answers.conflictKind.label as OntologyConflictKind)
+              : ("none" as const),
+            reason: hasConflict
+              ? `Semantic conflict (${answers.conflictKind.label}, p=${answers.contradicts.probability}) between ${input.sourceId} and ${input.targetId} on ${input.sharedSymbol}.`
+              : `No semantic conflict detected between ${input.sourceId} and ${input.targetId}.`,
+            timedOutOrUnavailable: false,
+          } satisfies OntologyConflictResult
+        }),
+      )
+      .exhaustive()
+  })
+
 export const checkOntologyPairConflict = Effect.fn("Harness.checkOntologyPairConflict")(function* (
   input: OntologyConflictInput,
 ) {
-  const outcome = yield* DecisionModel.decide(OntologyConflictV1, { input }).pipe(
-    Effect.timeoutOption("1500 millis"),
-    Effect.catchCause((cause) =>
-      Cause.hasInterrupts(cause)
-        ? Effect.interrupt
-        : Effect.logWarning(`Decision model fallback: ${Cause.pretty(cause)}`).pipe(
-            Effect.as(Option.none()),
-          ),
-    ),
-  )
-
-  return yield* match(outcome)
-    .with({ _tag: "None" }, () =>
-      Effect.succeed({
-        hasConflict: false,
-        probability: 0,
-        conflictKind: "none" as const,
-        reason:
-          "DecisionModel unavailable or timed out; relying on deterministic ontology invariants.",
-        timedOutOrUnavailable: true,
-      } satisfies OntologyConflictResult),
-    )
-    .with({ _tag: "Some" }, ({ value }) =>
-      Effect.gen(function* () {
-        const { answers } = value
-        yield* Effect.annotateCurrentSpan({
-          "decision.definition": "OntologyConflictV1",
-          "decision.contradicts": answers.contradicts.probability,
-          "decision.conflictKind": answers.conflictKind.label,
-        })
-
-        const hasConflict =
-          answers.contradicts.probability >= 0.7 && answers.conflictKind.label !== "none"
-
-        return {
-          hasConflict,
-          probability: answers.contradicts.probability,
-          conflictKind: hasConflict
-            ? (answers.conflictKind.label as OntologyConflictKind)
-            : ("none" as const),
-          reason: hasConflict
-            ? `Semantic conflict (${answers.conflictKind.label}, p=${answers.contradicts.probability}) between ${input.sourceId} and ${input.targetId} on ${input.sharedSymbol}.`
-            : `No semantic conflict detected between ${input.sourceId} and ${input.targetId}.`,
-          timedOutOrUnavailable: false,
-        } satisfies OntologyConflictResult
-      }),
-    )
-    .exhaustive()
+  return yield* runCheckOntologyPairConflict(input, "1500 millis")
 })
 
 const MAX_CANDIDATE_PAIRS = 16
@@ -313,7 +321,7 @@ export const evaluateOntologyConflictsWithStatus = Effect.fn(
   }
 
   const firstPair = pairs[0]!
-  const firstResult = yield* checkOntologyPairConflict(firstPair)
+  const firstResult = yield* runCheckOntologyPairConflict(firstPair, "10 seconds")
 
   if (firstResult.timedOutOrUnavailable === true) {
     return {

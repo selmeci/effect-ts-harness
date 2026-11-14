@@ -6,9 +6,11 @@ import {
   CD_COMMAND_BANNED_REASON,
   classifyCommand,
   classifyFileWrite,
+  CLEF_SYSTEMONE_ONLY_BANNED_REASON,
   INTERACTIVE_NX_BANNED_REASON,
   isCdCommand,
   isInteractiveNxCommand,
+  isInvalidClefEndpointCommand,
 } from "@harness/gates"
 import {
   type CliEnv,
@@ -116,7 +118,9 @@ const formatCommandDenyReason = (command: string): string =>
     ? `Blocked by harness guard: ${command} (${CD_COMMAND_BANNED_REASON})`
     : isInteractiveNxCommand(command)
       ? `Blocked by harness guard: ${command} (${INTERACTIVE_NX_BANNED_REASON})`
-      : `Blocked by harness guard: ${command}`
+      : isInvalidClefEndpointCommand(command)
+        ? `Blocked by harness guard: ${command} (${CLEF_SYSTEMONE_ONLY_BANNED_REASON})`
+        : `Blocked by harness guard: ${command}`
 
 type GuardVerdictDecision =
   | { readonly verdict: "deny"; readonly reason: string }
@@ -175,7 +179,9 @@ const evaluateCommandDecision = (
         verdict: "deny",
         reason: isInteractiveNxCommand(command)
           ? `Blocked by harness guard: ${command} (${INTERACTIVE_NX_BANNED_REASON})`
-          : `Blocked by harness guard: ${command}`,
+          : isInvalidClefEndpointCommand(command)
+            ? `Blocked by harness guard: ${command} (${CLEF_SYSTEMONE_ONLY_BANNED_REASON})`
+            : `Blocked by harness guard: ${command}`,
       }))
       .with("allow", () => ({ verdict: "allow" }))
       .with("ask", () => ({ verdict: "ask", reason: decision.reason }))

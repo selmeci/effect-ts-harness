@@ -287,6 +287,12 @@ describe("Harness decision definitions & fallbacks", () => {
         ).pipe(Effect.provide(failingLayer))
         expect(socketChmodRes.kind).toBe("mechanical")
         expect(socketChmodRes.hint).toContain("DaemonSocketChmodError")
+
+        const clefEndpointRes = yield* triageFailure(
+          'error: model "clef-flash" does not support generate',
+        ).pipe(Effect.provide(failingLayer))
+        expect(clefEndpointRes.kind).toBe("semantic")
+        expect(clefEndpointRes.hint).toContain("@effect/ai-typesafe")
       }),
   )
 })
