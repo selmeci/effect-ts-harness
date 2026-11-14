@@ -1,4 +1,4 @@
-import { Effect, Schema } from "effect"
+import { Cause, Effect, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
@@ -51,7 +51,13 @@ export const decideGuardCommand = Effect.fn("Harness.decideGuardCommand")(functi
 
   const outcome = yield* DecisionModel.decide(GuardV1, { input: { command } }).pipe(
     Effect.timeoutOption("1500 millis"),
-    Effect.catchCause(() => Effect.succeedNone),
+    Effect.catchCause((cause) =>
+      Cause.hasInterrupts(cause)
+        ? Effect.interrupt
+        : Effect.logWarning(`Decision model fallback: ${Cause.pretty(cause)}`).pipe(
+            Effect.as(Option.none()),
+          ),
+    ),
   )
 
   return yield* match(outcome)

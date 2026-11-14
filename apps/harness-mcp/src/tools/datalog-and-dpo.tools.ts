@@ -261,9 +261,13 @@ const resolveDecisionPriors = Effect.fn("HarnessMcp.resolveDecisionPriors")(func
       }).pipe(
         Effect.provide(decisionLayer),
         Effect.timeoutOption("1500 millis"),
-        Effect.catchCause((cause) =>
-          Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeedNone,
-        ),
+        Effect.catchCause((cause) => {
+          if (Cause.hasInterrupts(cause)) {
+            return Effect.interrupt
+          }
+          process.stderr.write(`[harness-mcp] decision fallback: ${Cause.pretty(cause)}\n`)
+          return Effect.succeedNone
+        }),
       )
 
       match(priorResult)

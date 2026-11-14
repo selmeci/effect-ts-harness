@@ -1,5 +1,5 @@
 import { join } from "node:path"
-import { Effect, Option } from "effect"
+import { Cause, Effect, Option } from "effect"
 import * as Graph from "effect/Graph"
 import { match, P } from "ts-pattern"
 import { loadGovernanceDocsFromDisk } from "@harness/gates"
@@ -52,7 +52,7 @@ export const handlePlanCheck = (
       (!graphOnly &&
         !isIsolatedExternalWorkspace(repoRoot) &&
         options?.decisionLayer === undefined &&
-        process.env.VITEST === undefined)
+        options?.skipBackgroundDaemons !== true)
     if (requireOllama && !(yield* ensureLocalOllamaReady())) {
       return {
         exitCode: 1,
@@ -241,11 +241,14 @@ export const handlePlanCheck = (
           snapshotPath,
         }).pipe(
           Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
-          Effect.orElseSucceed(() => ({
-            syncedToOmnigraph: false,
-            snapshotPath,
-            error: undefined,
-          })),
+          Effect.catchCause((cause) => {
+            if (Cause.hasInterrupts(cause)) return Effect.interrupt
+            return Effect.succeed({
+              syncedToOmnigraph: false,
+              snapshotPath,
+              error: Cause.pretty(cause),
+            })
+          }),
         )
         recordTelemetry(options, {
           surface: "cli",

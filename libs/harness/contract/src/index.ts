@@ -22,6 +22,7 @@ export {
   SelfDogfoodingViolation,
   SelfDogfoodingViolationError,
   SourceLineNumber,
+  WorkspaceFilePath,
   computeWorkspaceFileLineCount,
   makeSelfDogfoodingReport,
 } from "./ast-and-gate-primitives.js"
@@ -37,21 +38,23 @@ export {
   HarnessSubprocessError,
   McpToolInputName,
   McpToolName,
+  StdinReadError,
   SubprocessArg,
   SubprocessCommand,
   SubprocessExecInput,
   SubprocessExecResult,
   SubprocessExitCode,
+  SubprocessFailureKind,
   SubprocessMaxBufferBytes,
   SubprocessOutput,
   SubprocessTimeoutMs,
   TsCompilerOverlayError,
   UnknownToolError,
   WorkspaceFileContent,
-  WorkspaceFilePath,
   WorkspaceFileStat,
   WorkspaceFsError,
   WorkspaceFsOperation,
+  validateSubprocessInput,
 } from "./workspace-and-process.js"
 export {
   HarnessTierTopologyInput,
@@ -65,6 +68,7 @@ export {
   ServiceTierSourceInput,
   TierTopologyMessage,
   TierTopologyRuleId,
+  makeHarnessTierTopologyReport,
 } from "./tier-topology.js"
 export {
   AstGateEvaluationReport,
@@ -77,4 +81,5 @@ export {
   DecisionCachePayloadJson,
   DecisionCacheStatsSnapshot,
   DecisionCacheTtlMillis,
+  makeAstGateEvaluationReport,
 } from "./cache-and-daemon.js"

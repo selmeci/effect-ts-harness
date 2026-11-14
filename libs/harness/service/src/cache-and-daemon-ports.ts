@@ -30,12 +30,17 @@ export class AstGateCachePort extends Context.Service<
 export interface DecisionCachePortShape {
   readonly lookup: (
     key: DecisionCacheKey,
-  ) => Effect.Effect<Option.Option<DecisionCachePayloadJson>>
+  ) => Effect.Effect<Option.Option<DecisionCachePayloadJson>, WorkspaceFsError>
   readonly store: (
     key: DecisionCacheKey,
     payload: DecisionCachePayloadJson,
     ttlMillis: DecisionCacheTtlMillis,
   ) => Effect.Effect<void, WorkspaceFsError>
+  readonly lookupOrCompute: <E, R>(input: {
+    readonly key: DecisionCacheKey
+    readonly ttlMillis: DecisionCacheTtlMillis
+    readonly compute: Effect.Effect<DecisionCachePayloadJson, E, R>
+  }) => Effect.Effect<DecisionCachePayloadJson, E | WorkspaceFsError, R>
   readonly clear: Effect.Effect<void>
   readonly stats: Effect.Effect<DecisionCacheStatsSnapshot>
 }

@@ -1220,4 +1220,25 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
       fs.rmSync(tmpRepo, { recursive: true, force: true })
     }
   })
+
+  it("F-21.1: excludes .spec.ts files from production type-graph extraction", async () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "type-extractor-spec-"))
+    try {
+      const graph = await Effect.runPromise(
+        extractTypeGraph({
+          repoRoot: tmpRoot,
+          hostIo: testHostIo,
+          overlays: {
+            "libs/sample/domain/src/logic.ts": `import { Effect } from "effect"\nexport const runLogic = Effect.fn("Sample.runLogic")(function* () { return 1 })\n`,
+            "libs/sample/domain/test/logic.spec.ts": `import { expect, it } from "vitest"\nit("runs", () => { expect(1).toBe(1) })\n`,
+          },
+        }),
+      )
+      const nodes = Array.from(Graph.nodes(graph.graph)).map(([, n]) => n)
+      expect(nodes.some((n) => n._tag === "EffectFn" && n.spanName === "Sample.runLogic")).toBe(true)
+      expect(nodes.some((n) => "file" in n && String(n.file).endsWith(".spec.ts"))).toBe(false)
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
+  })
 })

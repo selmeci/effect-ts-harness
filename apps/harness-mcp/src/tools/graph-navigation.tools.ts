@@ -187,9 +187,13 @@ export const buildGraphNavigationToolDescriptors = (
         const routedOpt = yield* routeStep(planStep).pipe(
           Effect.provide(decisionLayer),
           Effect.timeoutOption("1500 millis"),
-          Effect.catchCause((cause) =>
-            Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeedNone,
-          ),
+          Effect.catchCause((cause) => {
+            if (Cause.hasInterrupts(cause)) {
+              return Effect.interrupt
+            }
+            process.stderr.write(`[harness-mcp] decision fallback: ${Cause.pretty(cause)}\n`)
+            return Effect.succeedNone
+          }),
         )
         let block: string = Option.getOrElse(routedOpt, () => "review")
         const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)

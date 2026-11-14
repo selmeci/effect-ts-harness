@@ -79,7 +79,7 @@ export const handleDoctorOrSession = (
       process.env.HARNESS_REQUIRE_OLLAMA === "1" ||
       (!isolatedExternal &&
         options?.decisionLayer === undefined &&
-        process.env.VITEST === undefined)
+        options?.skipBackgroundDaemons !== true)
     const ollamaReady = requireLiveOllama ? yield* ensureLocalOllamaReady() : true
 
     const planPath = join(harnessDir, "plan-graph-snapshot.json")
@@ -101,20 +101,25 @@ export const handleDoctorOrSession = (
           saveGraphSnapshot(reconciledGraph, implPath, nodeSyncHostIo)
           writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
         } else {
-          yield* syncToOmnigraphAndSnapshot(reconciledGraph, {
+          const reconcileSyncRes = yield* syncToOmnigraphAndSnapshot(reconciledGraph, {
             repoRoot: resolveClusterRepoRoot(repoRoot),
             branch: reconcileDecision.targetOmnigraphBranch,
             from: "main",
             snapshotPath: implPath,
           }).pipe(
             Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
-            Effect.orElseSucceed(() => ({
-              syncedToOmnigraph: false,
-              snapshotPath: implPath,
-              error: undefined,
-            })),
+            Effect.catchCause((cause) => {
+              if (Cause.hasInterrupts(cause)) return Effect.interrupt
+              return Effect.succeed({
+                syncedToOmnigraph: false,
+                snapshotPath: implPath,
+                error: Cause.pretty(cause),
+              })
+            }),
           )
-          writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
+          if (reconcileSyncRes.syncedToOmnigraph) {
+            writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
+          }
         }
       }
     }
@@ -146,9 +151,12 @@ export const handleDoctorOrSession = (
             input: { planStep: "Initialize session" },
           }).pipe(
             Effect.timeoutOption("10 seconds"),
-            Effect.catchCause((cause) =>
-              Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeedNone,
-            ),
+            Effect.catchCause((cause) => {
+              if (Cause.hasInterrupts(cause)) return Effect.interrupt
+              return Effect.sync(() => {
+                process.stderr.write(`[harness learn] decision model fallback: ${Cause.pretty(cause)}\n`)
+              }).pipe(Effect.as(Option.none()))
+            }),
             Effect.provide(decisionLayer),
           ),
         )
@@ -325,13 +333,18 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
       snapshotPath,
     }).pipe(
       Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
-      Effect.orElseSucceed(() => ({
-        syncedToOmnigraph: false,
-        snapshotPath,
-        error: undefined,
-      })),
+      Effect.catchCause((cause) => {
+        if (Cause.hasInterrupts(cause)) return Effect.interrupt
+        return Effect.succeed({
+          syncedToOmnigraph: false,
+          snapshotPath,
+          error: Cause.pretty(cause),
+        })
+      }),
     )
-    writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
+    if (syncRes.syncedToOmnigraph) {
+      writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
+    }
     return {
       exitCode: 0,
       stdout: isAntigravity
@@ -504,7 +517,7 @@ export const handleReport = (
       stampValid: stampCheck.valid,
       cumulative: argv.includes("--all"),
     })
-    if (options?.repoRoot !== undefined || process.env.VITEST === undefined) {
+    if (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) {
       writeSessionReportFiles(repoRoot, report, nodeSyncHostIo)
     }
     if (argv.includes("--format=markdown")) {

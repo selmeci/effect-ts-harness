@@ -66,15 +66,33 @@ describe("AlbumCounterClient", () => {
 describe("Effect language-service & oxlint gates (TS377091 lazyEffect)", () => {
   it("rejects zero-argument () => Effect service members and oxlint-disable effecttsgo/* suppressions", async () => {
     const { spawnSync } = await import("node:child_process")
-    const { rmSync, writeFileSync } = await import("node:fs")
-    const { resolve } = await import("node:path")
+    const { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } = await import("node:fs")
+    const { tmpdir } = await import("node:os")
+    const { join, resolve } = await import("node:path")
     const { fileURLToPath } = await import("node:url")
 
     const currentDir = import.meta.dirname ?? fileURLToPath(new URL(".", import.meta.url))
     const repoRoot = resolve(currentDir, "../../../..")
-    const tempFile = resolve(currentDir, "../src/__temp_lazy_effect_check__.ts")
+    const tempRoot = mkdtempSync(join(tmpdir(), "harness-lazy-effect-"))
+    const tempSrcDir = join(tempRoot, "libs", "sample", "service", "src")
+    const tempFile = join(tempSrcDir, "__temp_lazy_effect_check__.ts")
 
     try {
+      mkdirSync(tempSrcDir, { recursive: true })
+      symlinkSync(join(repoRoot, "node_modules"), join(tempRoot, "node_modules"), "dir")
+      symlinkSync(
+        join(repoRoot, "libs", "sample", "service", "node_modules"),
+        join(tempRoot, "libs", "sample", "service", "node_modules"),
+        "dir",
+      )
+      symlinkSync(join(repoRoot, "tools"), join(tempRoot, "tools"), "dir")
+      copyFileSync(join(repoRoot, ".oxlintrc.json"), join(tempRoot, ".oxlintrc.json"))
+      copyFileSync(join(repoRoot, "tsconfig.base.json"), join(tempRoot, "tsconfig.base.json"))
+      copyFileSync(
+        join(repoRoot, "libs", "sample", "service", "tsconfig.json"),
+        join(tempRoot, "libs", "sample", "service", "tsconfig.json"),
+      )
+
       writeFileSync(
         tempFile,
         [
@@ -85,10 +103,14 @@ describe("Effect language-service & oxlint gates (TS377091 lazyEffect)", () => {
         ].join("\n"),
         "utf8",
       )
-      const resLazy = spawnSync("pnpm", ["exec", "oxlint", "--deny-warnings", tempFile], {
-        cwd: repoRoot,
-        encoding: "utf8",
-      })
+      const resLazy = spawnSync(
+        "pnpm",
+        ["--dir", repoRoot, "exec", "oxlint", "-c", join(tempRoot, ".oxlintrc.json"), "--deny-warnings", tempFile],
+        {
+          cwd: tempRoot,
+          encoding: "utf8",
+        },
+      )
       expect(resLazy.status).not.toBe(0)
       expect(resLazy.stdout + resLazy.stderr).toContain("lazy-effect")
 
@@ -97,14 +119,18 @@ describe("Effect language-service & oxlint gates (TS377091 lazyEffect)", () => {
         ["// oxlint-disable-next-line effecttsgo/lazy-effect", "export const x = 1"].join("\n"),
         "utf8",
       )
-      const resDisable = spawnSync("pnpm", ["exec", "oxlint", "--deny-warnings", tempFile], {
-        cwd: repoRoot,
-        encoding: "utf8",
-      })
+      const resDisable = spawnSync(
+        "pnpm",
+        ["--dir", repoRoot, "exec", "oxlint", "-c", join(tempRoot, ".oxlintrc.json"), "--deny-warnings", tempFile],
+        {
+          cwd: tempRoot,
+          encoding: "utf8",
+        },
+      )
       expect(resDisable.status).not.toBe(0)
       expect(resDisable.stdout + resDisable.stderr).toContain("Suppressing `effecttsgo/*`")
     } finally {
-      rmSync(tempFile, { force: true })
+      rmSync(tempRoot, { recursive: true, force: true })
     }
   })
 })

@@ -97,34 +97,87 @@ export const resolvePathSpecificMaxLines = (
   return tieredMax !== undefined ? Math.min(tieredMax, fallback) : fallback
 }
 
-const EFFECT_CONSTRUCTORS = new Set([
-  "fn",
-  "fnUntraced",
-  "gen",
-  "sync",
-  "suspend",
-  "try",
-  "tryPromise",
-  "promise",
-])
+const EFFECT_CONSTRUCTORS = new Set(["fn", "fnUntraced", "gen", "sync", "suspend", "try", "tryPromise", "promise"])
 const LAYER_CONSTRUCTORS = new Set(["effect", "succeed", "sync"])
 const COLLECTION_MUTATORS = new Set(["set", "add", "delete", "clear"])
-const NODE_BUILTIN_MODULES = new Set([
-  "node:fs",
-  "node:fs/promises",
-  "fs",
-  "fs/promises",
-  "node:child_process",
-  "child_process",
-  "node:net",
-  "net",
-  "node:os",
-  "os",
-  "node:http",
-  "http",
-  "node:https",
-  "https",
+const ALLOWED_PURE_NODE_SUBPATHS = new Set(["path", "path/posix", "path/win32", "crypto", "url"])
+const BANNED_BARE_NODE_BUILTINS = new Set([
+  "fs", "fs/promises", "child_process", "net", "os", "http", "https", "http2", "tls", "dgram",
+  "dns", "dns/promises", "cluster", "worker_threads", "sqlite", "module", "vm", "readline",
+  "readline/promises", "inspector", "inspector/promises", "v8", "perf_hooks", "process", "repl",
+  "tty", "wasi", "zlib", "stream", "stream/promises", "stream/web", "stream/consumers", "timers",
+  "timers/promises", "async_hooks", "diagnostics_channel", "events", "buffer", "util", "util/types",
+  "assert", "assert/strict", "querystring", "string_decoder", "punycode", "trace_events", "domain", "constants", "sys",
 ])
+
+const isBannedNodeBuiltinSpecifier = (specifier: string): boolean => {
+  const trimmed = specifier.trim()
+  if (trimmed.startsWith("node:")) {
+    return !ALLOWED_PURE_NODE_SUBPATHS.has(trimmed.slice("node:".length))
+  }
+  return BANNED_BARE_NODE_BUILTINS.has(trimmed)
+}
+
+const extractSpecifierText = (node: ts.Expression): string | undefined => {
+  const unwrapped = unwrapAstExpression(node)
+  if (ts.isStringLiteral(unwrapped) || ts.isNoSubstitutionTemplateLiteral(unwrapped)) {
+    return unwrapped.text
+  }
+  if (ts.isTemplateExpression(unwrapped)) {
+    if (unwrapped.head.text.startsWith("node:")) {
+      return unwrapped.head.text
+    }
+    return `${unwrapped.head.text}${unwrapped.templateSpans.map((s) => s.literal.text).join("")}`
+  }
+  return undefined
+}
+
+const extractCtorIdentifierName = (expr: ts.LeftHandSideExpression): string | undefined => {
+  const unwrapped = unwrapAstExpression(expr)
+  if (ts.isIdentifier(unwrapped)) {
+    return unwrapped.text
+  }
+  if (
+    ts.isPropertyAccessExpression(unwrapped) &&
+    ts.isIdentifier(unwrapped.expression) &&
+    unwrapped.expression.text === "globalThis"
+  ) {
+    return unwrapped.name.text
+  }
+  return undefined
+}
+
+const hasConstAssertion = (expr: ts.Expression): boolean => {
+  if (ts.isAsExpression(expr) || ts.isTypeAssertionExpression(expr)) {
+    return ts.isTypeReferenceNode(expr.type) && expr.type.typeName.getText() === "const"
+  }
+  return false
+}
+
+const isProcessEnvExpression = (expr: ts.Expression): boolean => {
+  const unwrapped = unwrapAstExpression(expr)
+  if (!ts.isPropertyAccessExpression(unwrapped) || unwrapped.name.text !== "env") {
+    return false
+  }
+  const target = unwrapAstExpression(unwrapped.expression)
+  if (ts.isIdentifier(target) && target.text === "process") {
+    return true
+  }
+  return (
+    ts.isPropertyAccessExpression(target) &&
+    ts.isIdentifier(target.expression) &&
+    target.expression.text === "globalThis" &&
+    target.name.text === "process"
+  )
+}
+
+const isLiteralVitestKey = (expr: ts.Expression): boolean => {
+  const unwrapped = unwrapAstExpression(expr)
+  return (
+    (ts.isStringLiteral(unwrapped) || ts.isNoSubstitutionTemplateLiteral(unwrapped)) &&
+    unwrapped.text === "VITEST"
+  )
+}
 
 const isMemberCall = (callExpr: ts.CallExpression, objName: string, methodName: string): boolean => {
   const callee = unwrapAstExpression(callExpr.expression)
@@ -230,14 +283,20 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
     const normPath = file.filePath.replace(/\\/g, "/")
     const isInfraSrc = /\/infra\/src\//.test(normPath)
     const staticCollectionNames = new Set<string>()
+    const envAliasNames = new Set<string>()
 
     for (const stmt of sourceFile.statements) {
       if (ts.isVariableStatement(stmt)) {
-        if ((stmt.declarationList.flags & ts.NodeFlags.Let) !== 0) {
+        const isConstOrUsing =
+          (stmt.declarationList.flags &
+            (ts.NodeFlags.Const | ts.NodeFlags.Using | ts.NodeFlags.AwaitUsing)) !==
+          0
+        if (!isConstOrUsing) {
+          const declKeyword = (stmt.declarationList.flags & ts.NodeFlags.Let) !== 0 ? "let" : "var"
           violations.push({
             rule: SelfDogfoodingRuleId.make("no-global-mutable-cache"),
             message: SelfDogfoodingMessage.make(
-              `Module-level 'let' declaration in '${file.filePath}' is banned — avoid global mutable state.`,
+              `Module-level '${declKeyword}' declaration in '${file.filePath}' is banned — avoid global mutable state.`,
             ),
             file: file.filePath,
             line: getLineNumber(sourceFile, stmt.getStart(sourceFile)),
@@ -247,8 +306,23 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
         for (const decl of stmt.declarationList.declarations) {
           if (decl.initializer !== undefined) {
             const init = unwrapAstExpression(decl.initializer)
-            if (ts.isNewExpression(init) && ts.isIdentifier(init.expression)) {
-              const ctorName = init.expression.text
+            if (
+              ((ts.isObjectLiteralExpression(init) && init.properties.length === 0) ||
+                (ts.isArrayLiteralExpression(init) && init.elements.length === 0)) &&
+              !hasConstAssertion(decl.initializer)
+            ) {
+              violations.push({
+                rule: SelfDogfoodingRuleId.make("no-global-mutable-cache"),
+                message: SelfDogfoodingMessage.make(
+                  `Empty module-level literal '${ts.isArrayLiteralExpression(init) ? "[]" : "{}"}' in '${file.filePath}' is banned — avoid global mutable caches.`,
+                ),
+                file: file.filePath,
+                line: getLineNumber(sourceFile, decl.getStart(sourceFile)),
+                enclosingSymbol: EnclosingSymbolName.make(file.filePath),
+              })
+            }
+            if (ts.isNewExpression(init)) {
+              const ctorName = extractCtorIdentifierName(init.expression)
               if (ctorName === "WeakMap" || ctorName === "WeakSet") {
                 violations.push({
                   rule: SelfDogfoodingRuleId.make("no-global-mutable-cache"),
@@ -287,7 +361,7 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
         (ts.isImportDeclaration(stmt) || ts.isExportDeclaration(stmt)) &&
         stmt.moduleSpecifier !== undefined &&
         ts.isStringLiteral(stmt.moduleSpecifier) &&
-        NODE_BUILTIN_MODULES.has(stmt.moduleSpecifier.text)
+        isBannedNodeBuiltinSpecifier(stmt.moduleSpecifier.text)
       ) {
         violations.push({
           rule: SelfDogfoodingRuleId.make("no-node-builtins-outside-infra"),
@@ -335,6 +409,26 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
       }
 
       if (ts.isCallExpression(node)) {
+        if (!isInfraSrc && node.arguments.length > 0 && node.arguments[0] !== undefined) {
+          const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword
+          const isRequireCall =
+            (ts.isIdentifier(node.expression) && node.expression.text === "require") ||
+            (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "require")
+          if (isDynamicImport || isRequireCall) {
+            const spec = extractSpecifierText(node.arguments[0])
+            if (spec !== undefined && isBannedNodeBuiltinSpecifier(spec)) {
+              violations.push({
+                rule: SelfDogfoodingRuleId.make("no-node-builtins-outside-infra"),
+                message: SelfDogfoodingMessage.make(
+                  `Node builtin '${spec}' dynamically imported/required in '${file.filePath}' outside infra/src — push I/O behind a service port and implement it in infra.`,
+                ),
+                file: file.filePath,
+                line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+                enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
+              })
+            }
+          }
+        }
         const unwrappedNodeExpr = unwrapAstExpression(node.expression)
         if (
           ts.isPropertyAccessExpression(unwrappedNodeExpr) &&
@@ -469,6 +563,49 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
             enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
           })
         }
+      }
+
+      if (
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.initializer !== undefined &&
+        isProcessEnvExpression(node.initializer)
+      ) {
+        envAliasNames.add(node.name.text)
+      }
+      const isEnvTarget = (expr: ts.Expression): boolean => {
+        const u = unwrapAstExpression(expr)
+        return isProcessEnvExpression(u) || (ts.isIdentifier(u) && envAliasNames.has(u.text))
+      }
+      const isVitestEnvAccess =
+        (ts.isPropertyAccessExpression(node) && node.name.text === "VITEST" && isEnvTarget(node.expression)) ||
+        (ts.isElementAccessExpression(node) && isLiteralVitestKey(node.argumentExpression) && isEnvTarget(node.expression)) ||
+        (ts.isBinaryExpression(node) &&
+          node.operatorToken.kind === ts.SyntaxKind.InKeyword &&
+          isLiteralVitestKey(node.left) &&
+          isEnvTarget(node.right)) ||
+        (ts.isVariableDeclaration(node) &&
+          ts.isObjectBindingPattern(node.name) &&
+          node.initializer !== undefined &&
+          isEnvTarget(node.initializer) &&
+          node.name.elements.some((el) => {
+            const propName = el.propertyName ?? el.name
+            return (
+              ((ts.isIdentifier(propName) || ts.isStringLiteral(propName)) && propName.text === "VITEST") ||
+              (ts.isComputedPropertyName(propName) && isLiteralVitestKey(propName.expression))
+            )
+          }))
+
+      if (isVitestEnvAccess) {
+        violations.push({
+          rule: SelfDogfoodingRuleId.make("test-env-branch-in-src"),
+          message: SelfDogfoodingMessage.make(
+            `Test environment branch referencing 'process.env.VITEST' in '${file.filePath}' is banned in production src/ — pass explicit options instead.`,
+          ),
+          file: file.filePath,
+          line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+          enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
+        })
       }
 
       if (ts.isSwitchStatement(node)) {

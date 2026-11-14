@@ -148,7 +148,7 @@ const ProbeDecisionDefinition = Decision.make({
   },
 })
 
-export const decideCachedDecisionLookup = Effect.fn("CachedDecisionModel.decide")(function* (
+export const decideCachedDecisionLookup = Effect.fn("CachedDecisionModel.lookup")(function* (
   input: CachedDecisionLookupInput,
 ): Effect.fn.Return<CachedDecisionLookupResult, never, DecisionModel.DecisionModel> {
   const cacheKey = computeDecisionCacheKey({
@@ -158,7 +158,15 @@ export const decideCachedDecisionLookup = Effect.fn("CachedDecisionModel.decide"
   })
   const cachePortOpt = yield* Effect.serviceOption(DecisionCachePort)
   const existingOpt = yield* match(cachePortOpt)
-    .with({ _tag: "Some" }, ({ value }) => value.lookup(cacheKey))
+    .with({ _tag: "Some" }, ({ value }) =>
+      value.lookup(cacheKey).pipe(
+        Effect.catchTag("WorkspaceFsError", (err) =>
+          Effect.logWarning(`Decision cache lookup failed: ${err.reason}`).pipe(
+            Effect.as(Option.none<DecisionCachePayloadJson>()),
+          ),
+        ),
+      ),
+    )
     .with({ _tag: "None" }, () => Effect.succeed(Option.none<DecisionCachePayloadJson>()))
     .exhaustive()
 
@@ -201,7 +209,11 @@ export const decideCachedDecisionLookup = Effect.fn("CachedDecisionModel.decide"
                     DecisionCachePayloadJson.make(JSON.stringify(entry)),
                     DecisionCacheTtlMillis.make(300_000),
                   )
-                  .pipe(Effect.ignore),
+                  .pipe(
+                    Effect.catchTag("WorkspaceFsError", (err) =>
+                      Effect.logWarning(`Decision cache store failed: ${err.reason}`),
+                    ),
+                  ),
               )
               .with({ _tag: "None" }, () => Effect.void)
               .exhaustive()
@@ -285,7 +297,15 @@ export const makeCachedDecisionModelLayer = (
             }
 
             const portPayloadOpt = yield* match(cachePortOpt)
-              .with({ _tag: "Some" }, ({ value: port }) => port.lookup(cacheKey))
+              .with({ _tag: "Some" }, ({ value: port }) =>
+                port.lookup(cacheKey).pipe(
+                  Effect.catchTag("WorkspaceFsError", (err) =>
+                    Effect.logWarning(`Decision cache lookup failed: ${err.reason}`).pipe(
+                      Effect.as(Option.none<DecisionCachePayloadJson>()),
+                    ),
+                  ),
+                ),
+              )
               .with({ _tag: "None" }, () => Effect.succeed(Option.none<DecisionCachePayloadJson>()))
               .exhaustive()
 
@@ -358,7 +378,11 @@ export const makeCachedDecisionModelLayer = (
                         DecisionCachePayloadJson.make(JSON.stringify(entry)),
                         DecisionCacheTtlMillis.make(ttlMillis),
                       )
-                      .pipe(Effect.ignore),
+                      .pipe(
+                        Effect.catchTag("WorkspaceFsError", (err) =>
+                          Effect.logWarning(`Decision cache store failed: ${err.reason}`),
+                        ),
+                      ),
                   )
                   .with({ _tag: "None" }, () => Effect.void)
                   .exhaustive()
@@ -404,17 +428,7 @@ export const lookupOrComputeDecisionPayload = Effect.fn("DecisionCache.lookupOrC
     readonly compute: Effect.Effect<DecisionCachePayloadJson, WorkspaceFsError>
   }): Effect.fn.Return<DecisionCachePayloadJson, WorkspaceFsError, DecisionCachePort> {
     const cache = yield* DecisionCachePort
-    const existing = yield* cache.lookup(input.key)
-    return yield* match(existing)
-      .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
-      .with({ _tag: "None" }, () =>
-        Effect.gen(function* () {
-          const computed = yield* input.compute
-          yield* cache.store(input.key, computed, input.ttlMillis)
-          return computed
-        }),
-      )
-      .exhaustive()
+    return yield* cache.lookupOrCompute(input)
   },
 )
 

@@ -21,6 +21,7 @@ import {
   minHeightReducer,
   stepDatalogFileDelta,
 } from "../src/index.js"
+import { runGraphInferencePipeline } from "../src/datalog/stratum-3-completion-and-holes.js"
 
 const CallChainHopSpec = Schema.Struct({
   callerIdx: Schema.Literals([0, 1, 2]),
@@ -1580,6 +1581,9 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
         })
 
         yield* program.pipe(Effect.provide(DatalogSession.layer(twoPkgGraph)))
+
+        const directPipeline = yield* runGraphInferencePipeline(twoPkgGraph)
+        expect(directPipeline.iterations).toBeGreaterThanOrEqual(1)
       }),
   )
 })

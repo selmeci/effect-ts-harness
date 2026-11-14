@@ -29,7 +29,7 @@
   },
   "nx": {
     "tags": [
-      "type:service"
+      "type:core"
     ]
   }
 }

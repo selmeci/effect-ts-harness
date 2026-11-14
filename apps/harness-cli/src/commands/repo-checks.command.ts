@@ -1,16 +1,15 @@
-import { join, resolve } from "node:path"
-import { Effect, Schema } from "effect"
+import { dirname, isAbsolute, join, relative, resolve } from "node:path"
+import { pathToFileURL } from "node:url"
+import { Cause, Effect, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   EventSchemaEvolutionInput,
-  EventSchemaVersion,
-  EventType,
+  type EventVersionSnapshotEntry as EventVersionSnapshotEntryType,
   EventVersionSnapshotEntry,
+  type EventUpcasterLink,
   FrozenEventSchemaViolationError,
-  ErrorMessage,
 } from "@harness/es-contract"
 import { prepareUpdatedEventSnapshots, verifyCommittedSnapshotParity } from "@harness/es-core"
-import { cartRegisteredUpcasters, computeCartEventSnapshots } from "@harness/es-core/fixtures/cart"
 import {
   BENCHMARK_TASKS,
   type BenchmarkRunMetrics,
@@ -18,7 +17,6 @@ import {
   compareBenchmarkRuns,
 } from "@harness/gates"
 import { nodeSyncHostIo } from "@harness/infra"
-import { buildOpenApiSpec, detectOpenApiBreakingChanges } from "@harness/sample-contract"
 import { type CliEnv, type CliResult, findWorkspaceRoot } from "./daemon-and-omnigraph.service.js"
 
 const decodeUnknownJson = Schema.decodeOption(Schema.fromJsonString(Schema.Unknown))
@@ -26,27 +24,155 @@ const decodeSnapshotArray = Schema.decodeEffect(
   Schema.fromJsonString(Schema.Array(EventVersionSnapshotEntry)),
 )
 
-const extractBaselineFlag = (subArgs: ReadonlyArray<string>): string | undefined => {
+const extractFlag = (subArgs: ReadonlyArray<string>, flagName: string): string | undefined => {
   for (let i = 0; i < subArgs.length; i++) {
     const arg = subArgs[i]
-    if (arg === "--baseline" && i + 1 < subArgs.length) {
+    if (arg === flagName && i + 1 < subArgs.length) {
       return subArgs[i + 1]
     }
-    if (arg !== undefined && arg.startsWith("--baseline=")) {
-      return arg.slice("--baseline=".length)
+    if (arg !== undefined && arg.startsWith(`${flagName}=`)) {
+      return arg.slice(flagName.length + 1)
     }
   }
   return undefined
 }
+
+const isInsideRoot = (rootDir: string, candidatePath: string): boolean => {
+  const rel = relative(resolve(rootDir), resolve(candidatePath))
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))
+}
+
+const resolveRepoPath = (repoRoot: string, targetPath: string): string | undefined => {
+  const resolved = resolve(repoRoot, targetPath)
+  return isInsideRoot(repoRoot, resolved) ? resolved : undefined
+}
+
+const failResult = (stderr: string, exitCode = 1): CliResult => ({ exitCode, stdout: "", stderr })
+
+const decodeJsonResult = (
+  raw: string,
+  errorLabel: string,
+): { readonly ok: true; readonly value: unknown } | { readonly ok: false; readonly result: CliResult } =>
+  match(decodeUnknownJson(raw))
+    .with({ _tag: "None" }, () => ({ ok: false as const, result: failResult(`ERROR: ${errorLabel}\n`) }))
+    .with({ _tag: "Some" }, ({ value }) => ({ ok: true as const, value }))
+    .exhaustive()
+
+const resolveRepoRoot = (options?: CliEnv): string =>
+  options?.repoRoot ?? findWorkspaceRoot()
+
+interface OpenApiModuleShape {
+  readonly buildOpenApiSpec: () => unknown
+  readonly detectOpenApiBreakingChanges: (
+    baseline: unknown,
+    current: unknown,
+  ) => ReadonlyArray<string>
+}
+
+interface EventModuleShape {
+  readonly computeSnapshots: Effect.Effect<
+    ReadonlyArray<EventVersionSnapshotEntryType>,
+    RepoCheckCliError
+  >
+  readonly registeredUpcasters: ReadonlyArray<EventUpcasterLink>
+}
+
+class RepoCheckCliError extends Schema.TaggedError<RepoCheckCliError>()(
+  "RepoCheckCliError",
+  {
+    message: Schema.String,
+  },
+) {}
+
+const isSnapshotsEffect = (
+  value: unknown,
+): value is Effect.Effect<ReadonlyArray<EventVersionSnapshotEntryType>> => Effect.isEffect(value)
+
+const resolveModuleSpecifier = (
+  repoRoot: string,
+  moduleFlag: string | undefined,
+  defaultSpecifier: string,
+): Effect.Effect<string, RepoCheckCliError> => {
+  if (moduleFlag === undefined) {
+    return Effect.succeed(defaultSpecifier)
+  }
+  const resolved = resolveRepoPath(repoRoot, moduleFlag)
+  if (resolved === undefined) {
+    return Effect.fail(
+      new RepoCheckCliError({ message: `Module path '${moduleFlag}' escapes repository root` }),
+    )
+  }
+  return Effect.succeed(pathToFileURL(resolved).href)
+}
+
+const importModuleRecord = Effect.fn("HarnessCli.importModuleRecord")(function* (
+  repoRoot: string,
+  moduleFlag: string | undefined,
+  defaultSpecifier: string,
+): Effect.fn.Return<{ readonly specifier: string; readonly mod: Record<string, unknown> }, RepoCheckCliError> {
+  const specifier = yield* resolveModuleSpecifier(repoRoot, moduleFlag, defaultSpecifier)
+  const mod = yield* Effect.tryPromise({
+    try: () => import(specifier) as Promise<Record<string, unknown>>,
+    catch: (error) =>
+      new RepoCheckCliError({
+        message: error instanceof Error ? error.message : String(error),
+      }),
+  })
+  return { specifier, mod }
+})
+
+const loadOpenApiModule = Effect.fn("HarnessCli.loadOpenApiModule")(function* (
+  repoRoot: string,
+  moduleFlag: string | undefined,
+): Effect.fn.Return<OpenApiModuleShape, RepoCheckCliError> {
+  const { specifier, mod } = yield* importModuleRecord(repoRoot, moduleFlag, "@harness/sample-contract")
+  const buildOpenApiSpec = mod["buildOpenApiSpec"]
+  const detectOpenApiBreakingChanges = mod["detectOpenApiBreakingChanges"]
+  if (typeof buildOpenApiSpec !== "function" || typeof detectOpenApiBreakingChanges !== "function") {
+    return yield* new RepoCheckCliError({
+      message: `Module '${specifier}' must export buildOpenApiSpec and detectOpenApiBreakingChanges`,
+    })
+  }
+  return {
+    buildOpenApiSpec: buildOpenApiSpec as () => unknown,
+    detectOpenApiBreakingChanges: detectOpenApiBreakingChanges as (baseline: unknown, current: unknown) => ReadonlyArray<string>,
+  }
+})
+
+const loadEventModule = Effect.fn("HarnessCli.loadEventModule")(function* (
+  repoRoot: string,
+  moduleFlag: string | undefined,
+): Effect.fn.Return<EventModuleShape, RepoCheckCliError> {
+  const { specifier, mod } = yield* importModuleRecord(repoRoot, moduleFlag, "@harness/es-core/fixtures/cart")
+  const computeSnapshots = mod["computeEventSnapshots"] ?? mod["computeCartEventSnapshots"]
+  const registeredUpcasters = mod["registeredUpcasters"] ?? mod["cartRegisteredUpcasters"]
+  if ((!isSnapshotsEffect(computeSnapshots) && typeof computeSnapshots !== "function") || !Array.isArray(registeredUpcasters)) {
+    return yield* new RepoCheckCliError({
+      message: `Module '${specifier}' must export computeEventSnapshots/computeCartEventSnapshots and registeredUpcasters/cartRegisteredUpcasters`,
+    })
+  }
+  const snapshotsEffect = isSnapshotsEffect(computeSnapshots)
+    ? computeSnapshots
+    : Effect.tryPromise({
+        try: () => Promise.resolve((computeSnapshots as () => ReadonlyArray<EventVersionSnapshotEntryType>)()),
+        catch: (error) => new RepoCheckCliError({ message: error instanceof Error ? error.message : String(error) }),
+      })
+  return {
+    computeSnapshots: snapshotsEffect.pipe(
+      Effect.mapError((error) => (error instanceof RepoCheckCliError ? error : new RepoCheckCliError({ message: String(error) }))),
+    ),
+    registeredUpcasters: registeredUpcasters as ReadonlyArray<EventUpcasterLink>,
+  }
+})
 
 const resolveOpenApiBaseline = (
   repoRoot: string,
   subArgs: ReadonlyArray<string>,
   committedJson: string,
 ): { readonly json: string; readonly source: string } => {
-  const cliBaselinePath = extractBaselineFlag(subArgs)
+  const cliBaselinePath = extractFlag(subArgs, "--baseline")
   if (cliBaselinePath !== undefined) {
-    const resolvedPath = resolve(cliBaselinePath)
+    const resolvedPath = resolve(repoRoot, cliBaselinePath)
     if (nodeSyncHostIo.existsSync(resolvedPath)) {
       return { json: nodeSyncHostIo.readTextSync(resolvedPath), source: `file:${cliBaselinePath}` }
     }
@@ -118,17 +244,41 @@ export const runCheckOpenApi = Effect.fn("HarnessCli.checkOpenApi")(function* (
   options?: CliEnv,
 ): Effect.fn.Return<CliResult> {
   const subArgs = args[0] === "check-openapi" ? args.slice(1) : args
-  const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
+  const repoRoot = resolveRepoRoot(options)
+  const outFlag = extractFlag(subArgs, "--out")
+  const moduleFlag = extractFlag(subArgs, "--module")
   const envSpecPath = process.env.OPENAPI_SPEC_PATH
-  const openApiPath =
-    envSpecPath !== undefined && envSpecPath.length > 0
-      ? resolve(repoRoot, envSpecPath)
-      : join(repoRoot, "libs", "sample", "contract", "openapi.json")
+  const rawSpecPath =
+    outFlag ??
+    (envSpecPath !== undefined && envSpecPath.length > 0
+      ? envSpecPath
+      : join("libs", "sample", "contract", "openapi.json"))
+  const openApiPath = resolveRepoPath(repoRoot, rawSpecPath)
+  if (openApiPath === undefined) {
+    return failResult(`ERROR: OpenAPI spec path '${rawSpecPath}' escapes repository root\n`)
+  }
 
-  const currentSpec = buildOpenApiSpec()
+  const modExit = yield* Effect.exit(loadOpenApiModule(repoRoot, moduleFlag))
+  const modResult = match(modExit)
+    .with({ _tag: "Failure" }, ({ cause }) => ({
+      ok: false as const,
+      result: {
+        exitCode: 1,
+        stdout: "",
+        stderr: `ERROR: Failed to load OpenAPI module: ${Cause.pretty(cause)}\n`,
+      } satisfies CliResult,
+    }))
+    .with({ _tag: "Success" }, ({ value }) => ({ ok: true as const, value }))
+    .exhaustive()
+  if (!modResult.ok) {
+    return modResult.result
+  }
+
+  const currentSpec = modResult.value.buildOpenApiSpec()
   const currentJson = `${JSON.stringify(currentSpec, null, 2)}\n`
 
   if (subArgs.includes("--write")) {
+    nodeSyncHostIo.mkdirRecursiveSync(dirname(openApiPath))
     nodeSyncHostIo.writeTextSync(openApiPath, currentJson)
     return {
       exitCode: 0,
@@ -138,46 +288,22 @@ export const runCheckOpenApi = Effect.fn("HarnessCli.checkOpenApi")(function* (
   }
 
   if (!nodeSyncHostIo.existsSync(openApiPath)) {
-    return {
-      exitCode: 1,
-      stdout: "",
-      stderr:
-        "ERROR: openapi.json does not exist. Run `pnpm --filter @harness/sample-contract openapi:check -- --write` to generate it.\n",
-    }
+    return failResult(
+      "ERROR: openapi.json does not exist. Run `pnpm --filter @harness/sample-contract openapi:check -- --write` to generate it.\n",
+    )
   }
 
   const committedJson = nodeSyncHostIo.readTextSync(openApiPath)
-  const committedOpt = decodeUnknownJson(committedJson)
-  const committedResult = match(committedOpt)
-    .with({ _tag: "None" }, () => ({
-      ok: false as const,
-      result: {
-        exitCode: 1,
-        stdout: "",
-        stderr: "ERROR: Failed to parse committed openapi.json\n",
-      } satisfies CliResult,
-    }))
-    .with({ _tag: "Some" }, ({ value }) => ({ ok: true as const, value }))
-    .exhaustive()
-
+  const committedResult = decodeJsonResult(committedJson, "Failed to parse committed openapi.json")
   if (!committedResult.ok) {
     return committedResult.result
   }
 
   const baseline = resolveOpenApiBaseline(repoRoot, subArgs, committedJson)
-  const baselineOpt = decodeUnknownJson(baseline.json)
-  const baselineResult = match(baselineOpt)
-    .with({ _tag: "None" }, () => ({
-      ok: false as const,
-      result: {
-        exitCode: 1,
-        stdout: "",
-        stderr: `ERROR: Failed to parse baseline JSON from ${baseline.source}\n`,
-      } satisfies CliResult,
-    }))
-    .with({ _tag: "Some" }, ({ value }) => ({ ok: true as const, value }))
-    .exhaustive()
-
+  const baselineResult = decodeJsonResult(
+    baseline.json,
+    `Failed to parse baseline JSON from ${baseline.source}`,
+  )
   if (!baselineResult.ok) {
     return baselineResult.result
   }
@@ -187,23 +313,22 @@ export const runCheckOpenApi = Effect.fn("HarnessCli.checkOpenApi")(function* (
     return oasdiffFailure
   }
 
-  const breakingChanges = detectOpenApiBreakingChanges(baselineResult.value, currentSpec)
+  const breakingChanges = modResult.value.detectOpenApiBreakingChanges(
+    baselineResult.value,
+    currentSpec,
+  )
   if (breakingChanges.length > 0) {
     const formatted = breakingChanges.map((change) => ` - ${change}`).join("\n")
-    return {
-      exitCode: 2,
-      stdout: "",
-      stderr: `openapi check: ESCALATE — breaking OpenAPI changes require human confirmation:\n${formatted}\n`,
-    }
+    return failResult(
+      `openapi check: ESCALATE — breaking OpenAPI changes require human confirmation:\n${formatted}\n`,
+      2,
+    )
   }
 
   if (JSON.stringify(committedResult.value) !== JSON.stringify(currentSpec)) {
-    return {
-      exitCode: 1,
-      stdout: "",
-      stderr:
-        "ERROR: openapi.json is stale and does not match SampleApi.\nRun `pnpm --filter @harness/sample-contract openapi:check -- --write` to update it.\n",
-    }
+    return failResult(
+      "ERROR: openapi.json is stale and does not match SampleApi.\nRun `pnpm --filter @harness/sample-contract openapi:check -- --write` to update it.\n",
+    )
   }
 
   return yield* Effect.succeed({
@@ -239,17 +364,38 @@ export const runCheckMigrations = Effect.fn("HarnessCli.checkMigrations")(functi
   args: ReadonlyArray<string>,
   options?: CliEnv,
 ): Effect.fn.Return<CliResult> {
-  const _subArgs = args[0] === "check-migrations" ? args.slice(1) : args
-  const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-  const packageRoot = join(repoRoot, "libs", "sample", "infra")
+  const subArgs = args[0] === "check-migrations" ? args.slice(1) : args
+  const repoRoot = resolveRepoRoot(options)
+  const packageFlag = extractFlag(subArgs, "--package") ?? join("libs", "sample", "infra")
+  const packageRoot = resolveRepoPath(repoRoot, packageFlag)
+  if (packageRoot === undefined) {
+    return failResult(`migration check: FAIL — package path '${packageFlag}' escapes repository root\n`)
+  }
   const migrationsDir = join(packageRoot, "migrations")
   const schemaPath = join(packageRoot, "src", "db", "schema.ts")
 
   if (!nodeSyncHostIo.isDirectorySync(migrationsDir)) {
+    return failResult("migration check: FAIL — no committed baseline migration in migrations/\n")
+  }
+
+  const committedFiles = collectSqlFiles(migrationsDir)
+  const committedSqlFiles = committedFiles.map((file) => ({
+    file,
+    sql: nodeSyncHostIo.readTextSync(join(migrationsDir, file)),
+  }))
+  const committedReport = checkMigrationSqlSafety(committedSqlFiles)
+  if (committedReport.requiresEscalation) {
+    const stderr = `${committedReport.violations
+      .map((v) => `migration check: ESCALATE — ${v.message} (${v.file}):\n${v.statement}`)
+      .join("\n")}\n`
+    return { exitCode: 2, stdout: "", stderr }
+  }
+
+  if (!nodeSyncHostIo.existsSync(schemaPath)) {
     return {
-      exitCode: 1,
-      stdout: "",
-      stderr: "migration check: FAIL — no committed baseline migration in migrations/\n",
+      exitCode: 0,
+      stdout: "migration check: committed migrations are additive and safe\n",
+      stderr: "",
     }
   }
 
@@ -325,24 +471,33 @@ export const runCheckEventSchemas = Effect.fn("HarnessCli.checkEventSchemas")(fu
   options?: CliEnv,
 ): Effect.fn.Return<CliResult> {
   const subArgs = args[0] === "check-event-schemas" ? args.slice(1) : args
-  const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-  const snapshotFilePath = join(repoRoot, "libs", "es", "core", "event-snapshots.json")
+  const repoRoot = resolveRepoRoot(options)
+  const snapshotFlag =
+    extractFlag(subArgs, "--snapshot") ??
+    extractFlag(subArgs, "--out") ??
+    join("libs", "es", "core", "event-snapshots.json")
+  const snapshotFilePath = resolveRepoPath(repoRoot, snapshotFlag)
+  if (snapshotFilePath === undefined) {
+    return {
+      exitCode: 1,
+      stdout: "",
+      stderr: `[check-event-schemas] Snapshot path '${snapshotFlag}' escapes repository root\n`,
+    }
+  }
+  const moduleFlag = extractFlag(subArgs, "--module")
   const isUpdate = subArgs.includes("--update")
 
   const inner = Effect.gen(function* () {
-    const currentSnapshots = yield* computeCartEventSnapshots
+    const eventMod = yield* loadEventModule(repoRoot, moduleFlag)
+    const currentSnapshots = yield* eventMod.computeSnapshots
 
     const committedSnapshots = yield* Effect.gen(function* () {
       if (!nodeSyncHostIo.existsSync(snapshotFilePath)) {
         if (isUpdate) {
-          return [] as ReadonlyArray<EventVersionSnapshotEntry>
+          return [] as ReadonlyArray<EventVersionSnapshotEntryType>
         }
-        return yield* new FrozenEventSchemaViolationError({
-          eventType: EventType.make("EventSnapshotsFile"),
-          version: EventSchemaVersion.make(1),
-          reason: ErrorMessage.make(
-            `Snapshot file not found at ${snapshotFilePath}. Run with --update to generate.`,
-          ),
+        return yield* new RepoCheckCliError({
+          message: `Snapshot file not found at ${snapshotFilePath}. Run with --update to generate.`,
         })
       }
       const raw = nodeSyncHostIo.readTextSync(snapshotFilePath)
@@ -352,12 +507,13 @@ export const runCheckEventSchemas = Effect.fn("HarnessCli.checkEventSchemas")(fu
     const input = new EventSchemaEvolutionInput({
       committedSnapshots,
       currentSnapshots,
-      registeredUpcasters: cartRegisteredUpcasters,
+      registeredUpcasters: eventMod.registeredUpcasters,
     })
 
     if (isUpdate) {
       const validatedSnapshots = yield* prepareUpdatedEventSnapshots(input)
       const serialized = `${JSON.stringify(validatedSnapshots, null, 2)}\n`
+      nodeSyncHostIo.mkdirRecursiveSync(dirname(snapshotFilePath))
       nodeSyncHostIo.writeTextSync(snapshotFilePath, serialized)
       return {
         exitCode: 0,
@@ -377,109 +533,113 @@ export const runCheckEventSchemas = Effect.fn("HarnessCli.checkEventSchemas")(fu
   const exit = yield* Effect.exit(inner)
   return match(exit)
     .with({ _tag: "Success" }, ({ value }) => value)
-    .with({ _tag: "Failure" }, ({ cause }) => ({
-      exitCode: 1,
-      stdout: "",
-      stderr: `[check-event-schemas] Verification failed: ${String(cause)}\n`,
-    }))
+    .with({ _tag: "Failure" }, ({ cause }) => {
+      const squashed = Cause.squash(cause)
+      const isFrozenViolation = squashed instanceof FrozenEventSchemaViolationError
+      return {
+        exitCode: isFrozenViolation ? 2 : 1,
+        stdout: "",
+        stderr: `[check-event-schemas] Verification failed: ${squashed instanceof Error ? squashed.message : String(squashed)}\n`,
+      }
+    })
     .exhaustive()
 })
 
+const BenchmarkRunMetricsSchema = Schema.Struct({
+  taskId: Schema.String,
+  mode: Schema.Literals(["harness", "no-harness"]),
+  diagnosticsBeforeGreen: Schema.Finite,
+  fixUpIterations: Schema.Finite,
+  tokenCount: Schema.Finite,
+})
+
+const decodeBenchmarkRuns = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Array(BenchmarkRunMetricsSchema)),
+)
+
 const canonicalBenchmarkRuns: ReadonlyArray<BenchmarkRunMetrics> = [
-  {
-    taskId: "task-1-contract-schema",
-    mode: "harness",
-    diagnosticsBeforeGreen: 0,
-    fixUpIterations: 1,
-    tokenCount: 1420,
-  },
-  {
-    taskId: "task-1-contract-schema",
-    mode: "no-harness",
-    diagnosticsBeforeGreen: 3,
-    fixUpIterations: 3,
-    tokenCount: 3100,
-  },
-  {
-    taskId: "task-2-domain-use-case",
-    mode: "harness",
-    diagnosticsBeforeGreen: 1,
-    fixUpIterations: 1,
-    tokenCount: 2150,
-  },
-  {
-    taskId: "task-2-domain-use-case",
-    mode: "no-harness",
-    diagnosticsBeforeGreen: 4,
-    fixUpIterations: 4,
-    tokenCount: 4400,
-  },
-  {
-    taskId: "task-3-d1-repository",
-    mode: "harness",
-    diagnosticsBeforeGreen: 1,
-    fixUpIterations: 2,
-    tokenCount: 2900,
-  },
-  {
-    taskId: "task-3-d1-repository",
-    mode: "no-harness",
-    diagnosticsBeforeGreen: 4,
-    fixUpIterations: 3,
-    tokenCount: 5100,
-  },
-  {
-    taskId: "task-4-do-rpc",
-    mode: "harness",
-    diagnosticsBeforeGreen: 0,
-    fixUpIterations: 1,
-    tokenCount: 2350,
-  },
-  {
-    taskId: "task-4-do-rpc",
-    mode: "no-harness",
-    diagnosticsBeforeGreen: 5,
-    fixUpIterations: 5,
-    tokenCount: 4950,
-  },
-  {
-    taskId: "task-5-atom-client",
-    mode: "harness",
-    diagnosticsBeforeGreen: 0,
-    fixUpIterations: 1,
-    tokenCount: 1680,
-  },
-  {
-    taskId: "task-5-atom-client",
-    mode: "no-harness",
-    diagnosticsBeforeGreen: 2,
-    fixUpIterations: 2,
-    tokenCount: 3250,
-  },
+  { taskId: "task-1-contract-schema", mode: "harness", diagnosticsBeforeGreen: 0, fixUpIterations: 1, tokenCount: 1420 },
+  { taskId: "task-1-contract-schema", mode: "no-harness", diagnosticsBeforeGreen: 3, fixUpIterations: 3, tokenCount: 3100 },
+  { taskId: "task-2-domain-use-case", mode: "harness", diagnosticsBeforeGreen: 1, fixUpIterations: 1, tokenCount: 2150 },
+  { taskId: "task-2-domain-use-case", mode: "no-harness", diagnosticsBeforeGreen: 4, fixUpIterations: 4, tokenCount: 4400 },
+  { taskId: "task-3-d1-repository", mode: "harness", diagnosticsBeforeGreen: 1, fixUpIterations: 2, tokenCount: 2900 },
+  { taskId: "task-3-d1-repository", mode: "no-harness", diagnosticsBeforeGreen: 4, fixUpIterations: 3, tokenCount: 5100 },
+  { taskId: "task-4-do-rpc", mode: "harness", diagnosticsBeforeGreen: 0, fixUpIterations: 1, tokenCount: 2350 },
+  { taskId: "task-4-do-rpc", mode: "no-harness", diagnosticsBeforeGreen: 5, fixUpIterations: 5, tokenCount: 4950 },
+  { taskId: "task-5-atom-client", mode: "harness", diagnosticsBeforeGreen: 0, fixUpIterations: 1, tokenCount: 1680 },
+  { taskId: "task-5-atom-client", mode: "no-harness", diagnosticsBeforeGreen: 2, fixUpIterations: 2, tokenCount: 3250 },
 ]
 
 /**
  * Typed `benchmark` subcommand.
  */
-export const runBenchmarkCompare = (
-  _args: ReadonlyArray<string>,
-  _options?: CliEnv,
-): Effect.Effect<CliResult> =>
-  Effect.sync(() => {
-    const summary = compareBenchmarkRuns(canonicalBenchmarkRuns)
-    const output = {
-      tasks: BENCHMARK_TASKS.map((task) => ({
-        id: task.id,
-        title: task.title,
-        targetPackage: task.targetPackage,
-        expectedPatternDoc: task.expectedPatternDoc,
-      })),
-      summary,
-      passedAcceptance: summary.passedAcceptance,
+export const runBenchmarkCompare = Effect.fn("HarnessCli.benchmarkCompare")(function* (
+  args: ReadonlyArray<string>,
+  options?: CliEnv,
+): Effect.fn.Return<CliResult> {
+  const subArgs = args[0] === "benchmark" ? args.slice(1) : args
+  const repoRoot = resolveRepoRoot(options)
+  const baselineFlag = extractFlag(subArgs, "--baseline")
+  const outFlag = extractFlag(subArgs, "--out")
+
+  let runs: ReadonlyArray<BenchmarkRunMetrics> = canonicalBenchmarkRuns
+  if (baselineFlag !== undefined) {
+    const baselinePath = resolveRepoPath(repoRoot, baselineFlag)
+    if (baselinePath === undefined || !nodeSyncHostIo.existsSync(baselinePath)) {
+      return {
+        exitCode: 1,
+        stdout: "",
+        stderr: `benchmark: FAIL — baseline file not found or escapes root: ${baselineFlag}\n`,
+      }
     }
-    return {
-      exitCode: summary.passedAcceptance ? 0 : 1,
-      stdout: `${JSON.stringify(output, null, 2)}\n`,
-      stderr: "",
+    const raw = nodeSyncHostIo.readTextSync(baselinePath)
+    const parsedExit = yield* Effect.exit(decodeBenchmarkRuns(raw))
+    const parsed = match(parsedExit)
+      .with({ _tag: "Failure" }, ({ cause }) => ({
+        ok: false as const,
+        result: {
+          exitCode: 1,
+          stdout: "",
+          stderr: `benchmark: FAIL — invalid baseline JSON: ${Cause.pretty(cause)}\n`,
+        } satisfies CliResult,
+      }))
+      .with({ _tag: "Success" }, ({ value }) => ({ ok: true as const, value }))
+      .exhaustive()
+    if (!parsed.ok) {
+      return parsed.result
     }
-  })
+    runs = parsed.value
+  }
+
+  const summary = compareBenchmarkRuns(runs)
+  const output = {
+    tasks: BENCHMARK_TASKS.map((task) => ({
+      id: task.id,
+      title: task.title,
+      targetPackage: task.targetPackage,
+      expectedPatternDoc: task.expectedPatternDoc,
+    })),
+    summary,
+    passedAcceptance: summary.passedAcceptance,
+  }
+  const serialized = `${JSON.stringify(output, null, 2)}\n`
+
+  if (outFlag !== undefined) {
+    const outPath = resolveRepoPath(repoRoot, outFlag)
+    if (outPath === undefined) {
+      return {
+        exitCode: 1,
+        stdout: "",
+        stderr: `benchmark: FAIL — output path escapes repository root: ${outFlag}\n`,
+      }
+    }
+    nodeSyncHostIo.mkdirRecursiveSync(dirname(outPath))
+    nodeSyncHostIo.writeTextSync(outPath, serialized)
+  }
+
+  return {
+    exitCode: summary.passedAcceptance ? 0 : 1,
+    stdout: serialized,
+    stderr: "",
+  }
+})

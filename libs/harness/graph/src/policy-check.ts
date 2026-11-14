@@ -1,6 +1,6 @@
-import { Cause, Effect } from "effect"
+import { Effect, Result } from "effect"
 import { match } from "ts-pattern"
-import { decideGraphInference } from "./datalog-engine.js"
+import { runGraphInferenceSync } from "./datalog/datalog-session.js"
 import { renderMermaid } from "./graph-engine.js"
 import {
   type HarnessGraph,
@@ -81,17 +81,13 @@ export const DEFAULT_POLICY_CHECK_RULES: ReadonlySet<ViolationRule> = new Set<Vi
   "unmapped-spec-symbol",
 ])
 
-/**
- * Pure Effect decider (`GraphPolicy.decide`) evaluating architectural graph policies
- * by delegating to the Stratified Datalog inference engine (`GraphInfer.decide`).
- */
-export const decideEffectGraphPolicy = Effect.fn("GraphPolicy.decide")(function* (
+export const evaluateEffectGraphPolicy = (
   harnessGraph: HarnessGraph,
   options?: CheckEffectGraphOptions,
-) {
+): CheckEffectGraphResult => {
   const violations: Array<GraphPolicyViolation> = []
 
-  const inference = yield* decideGraphInference(harnessGraph)
+  const inference = runGraphInferenceSync(harnessGraph)
 
   const isRuleActive = (rule: ViolationRule): boolean => {
     if (options?.rules !== undefined) {
@@ -140,24 +136,30 @@ export const decideEffectGraphPolicy = Effect.fn("GraphPolicy.decide")(function*
     violations,
     mermaid,
   }
-})
+}
+
+/**
+ * Pure Effect decider (`GraphPolicy.decide`) evaluating architectural graph policies
+ * by delegating to `evaluateEffectGraphPolicy`.
+ */
+export const decideEffectGraphPolicy = Effect.fn("GraphPolicy.decide")(
+  (harnessGraph: HarnessGraph, options?: CheckEffectGraphOptions) =>
+    Effect.sync(() => evaluateEffectGraphPolicy(harnessGraph, options)),
+)
 
 /**
  * Evaluates architectural graph policies over the PERA Levi Hypergraph by delegating
- * to `decideEffectGraphPolicy` (`GraphPolicy.decide`).
- *
- * Catches any engine failures safely via `Effect.runSyncExit`, converting failure causes
- * into structured `GraphPolicyViolation` records rather than throwing unhandled `FiberFailure`.
+ * to `evaluateEffectGraphPolicy` synchronously without `Effect.runSyncExit`.
  */
 export const checkEffectGraph = (
   harnessGraph: HarnessGraph,
   options?: CheckEffectGraphOptions,
 ): CheckEffectGraphResult => {
-  const exit = Effect.runSyncExit(decideEffectGraphPolicy(harnessGraph, options))
-  return match(exit)
-    .with({ _tag: "Success" }, ({ value }) => value)
-    .with({ _tag: "Failure" }, ({ cause }) => {
-      const failureMsg = Cause.pretty(cause)
+  const res = Result.try(() => evaluateEffectGraphPolicy(harnessGraph, options))
+  return match(res)
+    .with({ _tag: "Success" }, ({ success }) => success)
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      const failureMsg = failure instanceof Error ? failure.message : String(failure)
       return {
         ok: false,
         violations: [

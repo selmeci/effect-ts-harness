@@ -2591,6 +2591,14 @@ export const evolveCartV2 = (state: CartState, event: CartEventV2): CartState =>
         // Lifecycle rules gating (untested domain span)
         const hasUntested = effectDecision.violations.some((v) => v.rule === "untested-domain-span")
         expect(hasUntested).toBe(spec.hasUntestedDomainSpan && spec.includeLifecycleRules)
+
+        // F-8.2a: decideEffectGraphPolicy and checkEffectGraph return identical violations
+        const f82aSyncResult = checkEffectGraph(graph, {
+          includeLifecycleRules: spec.includeLifecycleRules,
+          checkUnresolvedReferences: spec.checkUnresolvedReferences,
+        })
+        expect(f82aSyncResult.violations).toEqual(effectDecision.violations)
+        expect(f82aSyncResult.ok).toBe(effectDecision.ok)
       }),
   )
 })

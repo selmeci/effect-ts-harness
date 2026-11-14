@@ -24,7 +24,7 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
     )
 
     const postHook = hooks.hooks.PostToolUse[0]
-    expect(postHook.matcher).toBe("Edit|Write")
+    expect(postHook.matcher).toBe("Edit|Write|MultiEdit")
     expect(postHook.hooks[0].command).toBe(
       "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts ingest",
     )

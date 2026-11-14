@@ -2,6 +2,7 @@ import { join, relative } from "node:path"
 import { Effect, Layer, Option, Result, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
+import { ErrorReasonMessage, StdinReadError } from "@harness/contract"
 import {
   appendFrictionEvent,
   appendTelemetryEvent,
@@ -63,6 +64,7 @@ export const isCommand = (value: string): value is Command =>
 
 export interface CliEnv {
   readonly repoRoot?: string | undefined
+  readonly cwd?: string | undefined
   readonly stdin?: string | undefined
   readonly decisionLayer?: Layer.Layer<DecisionModel.DecisionModel> | undefined
   readonly planGraph?: HarnessGraph | undefined
@@ -75,6 +77,10 @@ export interface CliEnv {
       }>
     | undefined
   readonly skipSubprocessVerify?: boolean | undefined
+  readonly skipBackgroundDaemons?: boolean | undefined
+  readonly skipAutoSessionReport?: boolean | undefined
+  readonly stdinTimeoutMs?: number | undefined
+  readonly stdinMaxBytes?: number | undefined
   readonly governanceDocs?: ReadonlyArray<GovernanceDocReference> | undefined
 }
 
@@ -85,45 +91,72 @@ export interface CliResult {
   readonly telemetryDetail?: string | undefined
 }
 
-export const readStdinEffect: Effect.Effect<string> = Effect.callback<string>((resume) => {
-  const chunks: Array<Buffer> = []
-  let hasData = false
-  let settled = false
-  const cleanup = () => {
-    clearTimeout(idleTimer)
-    process.stdin.off("data", onData)
-    process.stdin.off("end", onEnd)
-    process.stdin.off("error", onError)
+const DEFAULT_STDIN_TIMEOUT_MS = 8000
+const DEFAULT_STDIN_MAX_BYTES = 2 * 1024 * 1024
+
+export const makeReadStdinEffect = Effect.fn("HarnessCli.readStdin")(function* (stdinOptions?: {
+  readonly timeoutMs?: number | undefined
+  readonly maxBytes?: number | undefined
+}): Effect.fn.Return<string, StdinReadError> {
+  if (process.stdin.isTTY === true) {
+    return ""
   }
-  const finish = (value: string) => {
-    if (settled) return
-    settled = true
-    cleanup()
-    resume(Effect.succeed(value))
-  }
-  const onData = (c: Buffer | string) => {
-    hasData = true
-    clearTimeout(idleTimer)
-    chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(String(c)))
-  }
-  const onEnd = () => {
-    finish(Buffer.concat(chunks).toString("utf8"))
-  }
-  const onError = () => {
-    finish("")
-  }
-  const idleTimer = setTimeout(() => {
-    if (!hasData) {
+  const timeoutMs = stdinOptions?.timeoutMs ?? DEFAULT_STDIN_TIMEOUT_MS
+  const maxBytes = stdinOptions?.maxBytes ?? DEFAULT_STDIN_MAX_BYTES
+  return yield* Effect.callback<string, StdinReadError>((resume) => {
+    const chunks: Array<Buffer> = []
+    let totalBytes = 0
+    let settled = false
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined = undefined
+    const cleanup = () => {
+      if (timeoutTimer !== undefined) {
+        clearTimeout(timeoutTimer)
+        timeoutTimer = undefined
+      }
+      process.stdin.off("data", onData)
+      process.stdin.off("end", onEnd)
+      process.stdin.off("error", onError)
       process.stdin.pause()
-      finish("")
     }
-  }, 50)
-  process.stdin.on("data", onData)
-  process.stdin.once("end", onEnd)
-  process.stdin.once("error", onError)
-  process.stdin.resume()
-  return Effect.sync(cleanup)
+    const succeed = (value: string) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resume(Effect.succeed(value))
+    }
+    const fail = (reason: string) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resume(Effect.fail(new StdinReadError({ reason: ErrorReasonMessage.make(reason.trim() || "stdin read error") })))
+    }
+    const onData = (c: Buffer | string) => {
+      const buf = Buffer.isBuffer(c) ? c : Buffer.from(String(c))
+      totalBytes += buf.byteLength
+      if (totalBytes > maxBytes) {
+        fail(`Stdin payload exceeded maximum size of ${maxBytes} bytes`)
+        return
+      }
+      chunks.push(buf)
+    }
+    const onEnd = () => {
+      succeed(Buffer.concat(chunks).toString("utf8"))
+    }
+    const onError = (err: unknown) => {
+      fail(`Stdin stream error: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    timeoutTimer = setTimeout(() => {
+      fail(`Timed out reading stdin after ${timeoutMs}ms`)
+    }, timeoutMs)
+    process.stdin.on("data", onData)
+    process.stdin.once("end", onEnd)
+    process.stdin.once("error", onError)
+    process.stdin.resume()
+    return Effect.sync(cleanup)
+  })
 })
+
+export const readStdinEffect: Effect.Effect<string, StdinReadError> = makeReadStdinEffect()
 
 export const isIsolatedExternalWorkspace = (repoRoot: string): boolean => {
   if (nodeSyncHostIo.existsSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"))) {
@@ -148,7 +181,7 @@ export const recordFriction = (
     readonly detail: string
   },
 ): void => {
-  if (options?.repoRoot === undefined && process.env.VITEST !== undefined) {
+  if (options?.repoRoot === undefined && options?.skipBackgroundDaemons === true) {
     return
   }
   appendFrictionEvent(options?.repoRoot ?? findWorkspaceRoot(), event, nodeSyncHostIo)
@@ -166,7 +199,7 @@ export const recordTelemetry = (
     readonly detail?: string | undefined
   },
 ): void => {
-  if (options?.repoRoot === undefined && process.env.VITEST !== undefined) {
+  if (options?.repoRoot === undefined && options?.skipBackgroundDaemons === true) {
     return
   }
   appendTelemetryEvent(options?.repoRoot ?? findWorkspaceRoot(), event, nodeSyncHostIo)

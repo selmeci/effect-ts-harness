@@ -1,3 +1,5 @@
+import { existsSync, readdirSync, readFileSync } from "node:fs"
+import { join, resolve as resolvePath } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import { Cause, Effect, Schema } from "effect"
 import { match } from "ts-pattern"
@@ -23,14 +25,12 @@ import {
   GatePluginRegistryLive,
 } from "../src/plugins/gate-plugin-registry.js"
 import { decideHarnessTierTopology } from "../src/plugins/harness-tier-topology.js"
+import { execCheckedSubprocess } from "../src/services/subprocess-runner.js"
+import { statAndReadWorkspaceFiles } from "../src/services/workspace-fs.js"
 import {
-  execCheckedSubprocess,
   makeHarnessSubprocessRunnerTestLayer,
-} from "../src/services/subprocess-runner.js"
-import {
   makeWorkspaceFsMemoryLayer,
-  statAndReadWorkspaceFiles,
-} from "../src/services/workspace-fs.js"
+} from "./helpers/test-layers.js"
 
 const CleanTierTopologySpec = Schema.Struct({
   scope: Schema.Literals(["harness", "sample", "billing"]),
@@ -199,7 +199,7 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
       })
 
       expect(report.verdict).toBe("violated")
-      expect(report.violations).toHaveLength(6)
+      expect(report.violations).toHaveLength(7)
       expect(report.violations.every((v) => v.rule === "impure-service-tier-import")).toBe(true)
       expect(
         report.violations.some((v) => v.location === "libs/harness/service/src/clean-string-literal.ts"),
@@ -345,5 +345,114 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
       expect(narrowedErr).toBeInstanceOf(SelfDogfoodingViolationError)
       expect(narrowedErr.violations[0]?.rule).toBe("harness-switch-statement")
     }),
+  )
+
+  it.effect(
+    "F-8.3b & S-3.2: enforces tag-based topology across arbitrary package names, dual tags, type:core, and relative escapes",
+    () =>
+      Effect.gen(function* () {
+        const report = yield* decideHarnessTierTopology({
+          manifests: [
+            {
+              manifestPath: PackageManifestPath.make("libs/acme/ports/package.json"),
+              packageName: PackageManifestName.make("@acme/custom-ports"),
+              nxTags: [NxTierTag.make("type:service")],
+              dependencyNames: [
+                PackageDependencyName.make("effect"),
+                PackageDependencyName.make("@acme/shared-types"),
+                PackageDependencyName.make("@acme/custom-domain"),
+              ],
+            },
+            {
+              manifestPath: PackageManifestPath.make("libs/acme/types/package.json"),
+              packageName: PackageManifestName.make("@acme/shared-types"),
+              nxTags: [NxTierTag.make("type:contract")],
+              dependencyNames: [PackageDependencyName.make("effect")],
+            },
+            {
+              manifestPath: PackageManifestPath.make("libs/acme/domain/package.json"),
+              packageName: PackageManifestName.make("@acme/custom-domain"),
+              nxTags: [NxTierTag.make("type:core")],
+              dependencyNames: [PackageDependencyName.make("@acme/custom-adapters")],
+            },
+            {
+              manifestPath: PackageManifestPath.make("libs/acme/adapters/package.json"),
+              packageName: PackageManifestName.make("@acme/custom-adapters"),
+              nxTags: [NxTierTag.make("type:infra")],
+              dependencyNames: [],
+            },
+            {
+              manifestPath: PackageManifestPath.make("libs/acme/dual/package.json"),
+              packageName: PackageManifestName.make("@acme/dual-tier"),
+              nxTags: [NxTierTag.make("type:service"), NxTierTag.make("type:core")],
+              dependencyNames: [],
+            },
+          ],
+          serviceFiles: [
+            {
+              filePath: AstSourceFilePath.make("libs/acme/ports/src/index.ts"),
+              content: AstSourceContent.make(
+                'import { x } from "@acme/shared-types"\nimport { y } from "@acme/custom-adapters"\nimport { z } from "../infra/db.js"\nexport { x, y, z }\n',
+              ),
+            },
+          ],
+        })
+
+        expect(report.verdict).toBe("violated")
+        const rules = report.violations.map((v) => v.rule)
+        expect(rules).toContain("forbidden-service-dependency")
+        expect(rules).toContain("forbidden-core-dependency")
+        expect(rules).toContain("dual-contract-tier-tag")
+        expect(rules).toContain("impure-service-tier-import")
+        // @acme/shared-types (type:contract without -contract suffix) is allowed!
+        expect(report.violations.some((v) => v.message.includes("@acme/shared-types"))).toBe(false)
+        // @acme/custom-adapters (type:infra without -infra suffix) is caught in both manifest and source!
+        expect(report.violations.some((v) => v.message.includes("@acme/custom-adapters"))).toBe(true)
+      }),
+  )
+
+  it.effect(
+    "F-18.1: real libs/harness/* manifests and @harness/service source files pass HarnessTierTopology.decide cleanly",
+    () =>
+      Effect.gen(function* () {
+        const harnessDir = resolvePath(process.cwd(), "..")
+        const manifests: Array<{
+          readonly manifestPath: PackageManifestPath
+          readonly packageName: PackageManifestName
+          readonly nxTags: Array<NxTierTag>
+          readonly dependencyNames: Array<PackageDependencyName>
+        }> = []
+        for (const pkgDir of readdirSync(harnessDir).sort()) {
+          const pkgJsonPath = join(harnessDir, pkgDir, "package.json")
+          if (!existsSync(pkgJsonPath)) continue
+          const parsed = JSON.parse(readFileSync(pkgJsonPath, "utf8")) as {
+            readonly name?: string
+            readonly dependencies?: Readonly<Record<string, string>>
+            readonly nx?: { readonly tags?: ReadonlyArray<string> }
+          }
+          if (!parsed.name) continue
+          manifests.push({
+            manifestPath: PackageManifestPath.make(`libs/harness/${pkgDir}/package.json`),
+            packageName: PackageManifestName.make(parsed.name),
+            nxTags: (parsed.nx?.tags ?? []).map((t) => NxTierTag.make(t)),
+            dependencyNames: Object.keys(parsed.dependencies ?? {}).map((d) =>
+              PackageDependencyName.make(d),
+            ),
+          })
+        }
+
+        const serviceSrcDir = join(harnessDir, "service", "src")
+        const serviceFiles = readdirSync(serviceSrcDir)
+          .filter((f) => f.endsWith(".ts"))
+          .sort()
+          .map((f) => ({
+            filePath: AstSourceFilePath.make(`libs/harness/service/src/${f}`),
+            content: AstSourceContent.make(readFileSync(join(serviceSrcDir, f), "utf8")),
+          }))
+
+        const report = yield* decideHarnessTierTopology({ manifests, serviceFiles })
+        expect(report.verdict).toBe("clean")
+        expect(report.violations).toEqual([])
+      }),
   )
 })

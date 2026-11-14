@@ -41,10 +41,20 @@ const WORKSPACE_PACKAGE_PATHS = {
   "@harness/sample-infra": "libs/sample/infra/src/index.ts",
 }
 
+const logResolverFallback = (specifier, error, stage) => {
+  const code = error && typeof error === "object" && "code" in error ? String(error.code) : undefined
+  const isExpectedNotFound = code === "ERR_MODULE_NOT_FOUND" || code === "ENOENT"
+  if (!isExpectedNotFound || process.env.HARNESS_DEBUG_RESOLVER === "1") {
+    const detail = error instanceof Error ? error.message : String(error)
+    process.stderr.write(`[node-ts-resolver] ${stage} fallback for '${specifier}'${code ? ` (${code})` : ""}: ${detail}\n`)
+  }
+}
+
 export async function resolve(specifier, context, nextResolve) {
   try {
     return await nextResolve(specifier, context)
   } catch (error) {
+    logResolverFallback(specifier, error, "primary")
     if (specifier.endsWith(".js") && context.parentURL?.startsWith("file://")) {
       const tsUrl = new URL(specifier.slice(0, -3) + ".ts", context.parentURL)
       if (existsSync(fileURLToPath(tsUrl))) {
@@ -80,7 +90,8 @@ export async function resolve(specifier, context, nextResolve) {
           ...context,
           parentURL: mappedParentURL,
         })
-      } catch {
+      } catch (fallbackError) {
+        logResolverFallback(specifier, fallbackError, "worktree-parent")
         return nextResolve(specifier, {
           ...context,
           parentURL: pathToFileURL(join(mainRepoRoot, "apps/harness-cli/package.json")).href,

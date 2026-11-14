@@ -162,6 +162,11 @@ export const createServer = (options?: ServerOptions): McpServer => {
         Effect.ensuring(Effect.promise(disposeRuntime)),
       ),
     )
+  const previousOnClose = server.server.onclose
+  server.server.onclose = () => {
+    previousOnClose?.()
+    void disposeRuntime()
+  }
 
   return server
 }
@@ -216,12 +221,20 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   }
   process.once("SIGINT", () => shutdown(0))
   process.once("SIGTERM", () => shutdown(0))
-  void Effect.runPromise(Effect.tryPromise(() => server.connect(transport))).catch(
-    (err: unknown) => {
+  process.stdin.once("end", () => shutdown(0))
+  process.stdin.once("close", () => shutdown(0))
+  void Effect.runPromise(Effect.tryPromise(() => server.connect(transport)))
+    .then(() => {
+      const previousTransportOnClose = transport.onclose
+      transport.onclose = () => {
+        previousTransportOnClose?.()
+        shutdown(0)
+      }
+    })
+    .catch((err: unknown) => {
       process.stderr.write(
         `[harness-mcp] Fatal error: ${err instanceof Error ? err.message : String(err)}\n`,
       )
       shutdown(1)
-    },
-  )
+    })
 }

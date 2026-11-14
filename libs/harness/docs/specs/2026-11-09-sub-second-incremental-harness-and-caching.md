@@ -28,7 +28,7 @@ spans:
   - MigrationSafety.decide
   - DomainPurity.decide
   - EffectLaws.decide
-  - CachedDecisionModel.decide
+  - CachedDecisionModel.lookup
   - HarnessBench.decide
 services: []
 errors:
@@ -50,7 +50,7 @@ This specification defines the behavioral requirements for Milestone 3 (`RFC-000
 
 - **Reused Contracts / Errors:** `HarnessGraph`, `BranchingViolation`, `MigrationViolation`, `DatalogSession`
 - **Reused Services:** `DecisionModel`
-- **New Capabilities Needed:** `TypeScriptProgramSession`, `TypeExtractor.extractWorkspace`, `StructuralSearch.decide`, `AstGateCache`, `AstGateCache.decide`, `SyntaxBans.decide`, `TestIntegrity.decide`, `MigrationSafety.decide`, `DomainPurity.decide`, `EffectLaws.decide`, `CachedDecisionModel.decide`, `BenchStageName`, `LatencyMillis`, `StageLatencyBudget`, `StageLatencyMeasurement`, `HarnessBenchReport`, `LatencySloViolationError`, `HarnessBench.decide`
+- **New Capabilities Needed:** `TypeScriptProgramSession`, `TypeExtractor.extractWorkspace`, `StructuralSearch.decide`, `AstGateCache`, `AstGateCache.decide`, `SyntaxBans.decide`, `TestIntegrity.decide`, `MigrationSafety.decide`, `DomainPurity.decide`, `EffectLaws.decide`, `CachedDecisionModel.lookup`, `BenchStageName`, `LatencyMillis`, `StageLatencyBudget`, `StageLatencyMeasurement`, `HarnessBenchReport`, `LatencySloViolationError`, `HarnessBench.decide`
 
 ## Goal
 
@@ -89,7 +89,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 | ID      | Pattern      | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Effect Symbol                | Verification |
 | :------ | :----------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------- | :----------- |
-| REQ-3.1 | Event-driven | **When** `CachedDecisionModel.decide` (or a `DecisionModel` wrapped by `makeCachedDecisionModelLayer`) receives decision requests with identical `(taskId, promptVersion, modelId, canonicalJson(input))` sequentially or concurrently across fibers, the `CachedDecisionModel.decide` span **shall** coalesce concurrent in-flight requests into a single underlying `DecisionModel` invocation, atomically persist only successful (`Option.Some`) answers to `.harness/cache/decisions-v1.json` with TTL expiration, and trigger a cache miss whenever `input`, `promptVersion`, or `modelId` changes. | `CachedDecisionModel.decide` | `UnitTest`   |
+| REQ-3.1 | Event-driven | **When** `CachedDecisionModel.lookup` (or a `DecisionModel` wrapped by `makeCachedDecisionModelLayer`) receives decision requests with identical `(taskId, promptVersion, modelId, canonicalJson(input))` sequentially or concurrently across fibers, the `CachedDecisionModel.lookup` span **shall** coalesce concurrent in-flight requests into a single underlying `DecisionModel` invocation, atomically persist only successful (`Option.Some`) answers to `.harness/cache/decisions-v1.json` with TTL expiration, and trigger a cache miss whenever `input`, `promptVersion`, or `modelId` changes. | `CachedDecisionModel.lookup` | `UnitTest`   |
 
 ### 4 · `HarnessBench.decide` Latency SLO Gate (`PERF-06`)
 
@@ -150,7 +150,7 @@ flowchart TD
     end
 
     subgraph DecisionCaching["PERF-03: Content-Addressable CachedDecisionModel (.harness/cache/decisions-v1.json)"]
-        CachedDecision["CachedDecisionModel.decide (DecisionModel)"]
+        CachedDecision["CachedDecisionModel.lookup (DecisionModel)"]
     end
 
     subgraph LatencySloGate["PERF-06: Latency SLO Gate (HarnessBench.decide)"]

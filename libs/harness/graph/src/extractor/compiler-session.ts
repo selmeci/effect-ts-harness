@@ -1,5 +1,5 @@
-import { createRequire } from "node:module"
 import * as path from "node:path"
+import { fileURLToPath } from "node:url"
 import type { SyncHostIo } from "@harness/service"
 import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
@@ -369,8 +369,7 @@ export const resolveTsLibDir = (root: string, hostIo?: SyncHostIo): string | und
       : ts.sys.getDirectories(p)
   const dynamicResolved = Result.getOrElse(
     Result.try(() => {
-      const req = createRequire(path.join(workspaceRoot, "package.json"))
-      const tsEntry = req.resolve("typescript")
+      const tsEntry = fileURLToPath(import.meta.resolve("typescript"))
       return path.dirname(tsEntry)
     }),
     () => undefined,

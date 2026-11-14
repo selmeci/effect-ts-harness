@@ -6,4 +6,12 @@ export const executeTool = (
   toolName: string,
   args: Readonly<Record<string, unknown>>,
   options?: ServerOptions,
-): Promise<unknown> => Effect.runPromise(executeToolEffect(toolName, args, options))
+): Promise<unknown> =>
+  Effect.runPromise(
+    executeToolEffect(toolName, args, {
+      skipOmnigraphSpawn: true,
+      skipTelemetry: options?.repoRoot === undefined,
+      skipActiveWorkspaceLookup: true,
+      ...options,
+    }),
+  )

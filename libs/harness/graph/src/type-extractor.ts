@@ -137,10 +137,12 @@ export const extractTypeAwareGraphFromSource = (
   }
 
   autoRegisterReferencedEntities(services, errors, referencedServices, referencedErrors, classNameToTagId)
-  const inMemoryTests = effectiveFiles.filter((f) => f.filePath.includes(".test.ts"))
+  const isInMemoryTestFile = (filePath: string): boolean =>
+    filePath.includes(".test.ts") || filePath.endsWith(".spec.ts") || filePath.endsWith(".spec.tsx")
+  const inMemoryTests = effectiveFiles.filter((f) => isInMemoryTestFile(f.filePath))
   if (inMemoryTests.length > 0) {
     branchingViolations.push(...checkUnassertedStateFieldsForInputs(
-      effectiveFiles.filter((f) => !f.filePath.includes(".test.ts")),
+      effectiveFiles.filter((f) => !isInMemoryTestFile(f.filePath)),
       inMemoryTests.map((t) => ({ filePath: t.filePath, getContent: () => t.content })),
     ))
   }

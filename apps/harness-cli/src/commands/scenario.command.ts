@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto"
 import { join, resolve } from "node:path"
 import { Effect, Schema } from "effect"
 import { match } from "ts-pattern"
@@ -19,70 +18,29 @@ import {
   type ScenarioRunState,
   writeJsonl,
 } from "./scenario-eval.js"
+import {
+  activeScenariosDir,
+  extractStepGuide,
+  hideScenariosFromWorkspace,
+  listScenarios,
+  makeScenarioPaths,
+  resolveStateDir,
+  restoreScenariosToWorkspace,
+  type ScenarioPaths,
+} from "./scenario-fs.js"
 
-const EXCLUDE_START = "# --- scenario-runner-hide-start ---"
-const EXCLUDE_END = "# --- scenario-runner-hide-end ---"
 const CLEF_BUDGET_MS = 1500
+const SAFE_SEGMENT_RE = /^[A-Za-z0-9._-]+$/
 
-const STAMP_IGNORED = new Set([
-  ".git",
-  ".harness",
-  "node_modules",
-  "dist",
-  "coverage",
-  ".nx",
-  ".superpowers",
-  "repos",
-  ".idea",
-  ".vscode",
-  ".DS_Store",
-  ".alchemy",
-  ".vite",
-  ".remember",
-])
-
-interface ScenarioPaths {
-  readonly repoRoot: string
-  readonly homeDir: string
-  readonly scenariosDir: string
-  readonly runsDir: string
-  readonly stashedScenariosDir: string
-  readonly currentPointer: string
-  readonly lastPointer: string
-  readonly gitExcludeFile: string
-}
-
-const makeScenarioPaths = (repoRoot: string): ScenarioPaths => {
-  const runsDir = join(repoRoot, ".harness", "scenario-runs")
-  return {
-    repoRoot,
-    homeDir: process.env.HOME ?? "/root",
-    scenariosDir: join(repoRoot, "scenarios"),
-    runsDir,
-    stashedScenariosDir: join(runsDir, "_stashed-scenarios"),
-    currentPointer: join(runsDir, "current.json"),
-    lastPointer: join(runsDir, "last.json"),
-    gitExcludeFile: join(repoRoot, ".git", "info", "exclude"),
-  }
-}
-
-const resolveStateDir = (repoRoot: string): string => {
-  const custom = process.env.HARNESS_STATE_DIR?.trim()
-  if (custom !== undefined && custom.length > 0) {
-    return resolve(repoRoot, custom)
-  }
-  const worktreeId = process.env.HARNESS_WORKTREE_ID?.trim()
-  if (worktreeId !== undefined && worktreeId.length > 0) {
-    return join(repoRoot, ".harness", "worktrees", worktreeId.replace(/[^a-zA-Z0-9._-]/g, "_"))
-  }
-  return join(repoRoot, ".harness")
-}
+const isValidSafeSegment = (value: string): boolean =>
+  SAFE_SEGMENT_RE.test(value) && value !== "." && value !== ".."
 
 const parseFlags = (
   argv: ReadonlyArray<string>,
 ): { readonly flags: ScenarioFlags; readonly positional: ReadonlyArray<string> } => {
   let conversation: string | undefined
   let transcript: string | undefined
+  let filter: string | undefined
   const positional: Array<string> = []
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
@@ -98,144 +56,17 @@ const parseFlags = (
       } else {
         if (key === "transcript") {
           transcript = val
+        } else {
+          if (key === "filter") {
+            filter = val
+          }
         }
       }
     } else {
       positional.push(arg)
     }
   }
-  return { flags: { conversation, transcript }, positional }
-}
-
-const activeScenariosDir = (paths: ScenarioPaths): string =>
-  nodeSyncHostIo.existsSync(paths.stashedScenariosDir)
-    ? paths.stashedScenariosDir
-    : paths.scenariosDir
-
-const decodeJsonRecord = Schema.decodeOption(
-  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
-)
-
-const refreshVerifyStampHash = (repoRoot: string): void => {
-  const stateDir = resolveStateDir(repoRoot)
-  const stampPath = join(stateDir, "verify-stamp.json")
-  if (!nodeSyncHostIo.existsSync(stampPath)) {
-    return
-  }
-  const files: Array<string> = []
-  const walk = (dir: string): void => {
-    for (const entry of nodeSyncHostIo.readdirSync(dir)) {
-      if (STAMP_IGNORED.has(entry.name)) {
-        continue
-      }
-      const full = join(dir, entry.name)
-      if (full === stateDir || full.startsWith(`${stateDir}/`)) {
-        continue
-      }
-      if (entry.isDirectory) {
-        walk(full)
-      } else {
-        if (entry.isFile) {
-          files.push(full.slice(repoRoot.length + 1).replace(/\\/g, "/"))
-        }
-      }
-    }
-  }
-  walk(repoRoot)
-  files.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
-  const hasher = createHash("sha256")
-  for (const rel of files) {
-    hasher.update(rel)
-    hasher.update("\0")
-    hasher.update(nodeSyncHostIo.readBytesSync(join(repoRoot, rel)))
-  }
-  const stampOpt = decodeJsonRecord(nodeSyncHostIo.readTextSync(stampPath))
-  match(stampOpt)
-    .with({ _tag: "Some" }, ({ value }) => {
-      const updated = { ...value, treeHash: hasher.digest("hex") }
-      nodeSyncHostIo.writeTextSync(stampPath, `${JSON.stringify(updated, null, 2)}\n`)
-    })
-    .with({ _tag: "None" }, () => undefined)
-    .exhaustive()
-}
-
-const hideScenariosFromWorkspace = (paths: ScenarioPaths): void => {
-  nodeSyncHostIo.mkdirRecursiveSync(paths.runsDir)
-  if (
-    nodeSyncHostIo.existsSync(paths.scenariosDir) &&
-    !nodeSyncHostIo.existsSync(paths.stashedScenariosDir)
-  ) {
-    nodeSyncHostIo.renameSync(paths.scenariosDir, paths.stashedScenariosDir)
-  }
-  if (nodeSyncHostIo.existsSync(paths.gitExcludeFile)) {
-    const raw = nodeSyncHostIo.readTextSync(paths.gitExcludeFile)
-    if (!raw.includes(EXCLUDE_START)) {
-      const suffix = `${raw.endsWith("\n") ? "" : "\n"}${EXCLUDE_START}\n/scenarios/\n/tools/scenario/\n${EXCLUDE_END}\n`
-      nodeSyncHostIo.writeTextSync(paths.gitExcludeFile, raw + suffix)
-    }
-  }
-  refreshVerifyStampHash(paths.repoRoot)
-}
-
-const restoreScenariosToWorkspace = (paths: ScenarioPaths): void => {
-  let changed = false
-  if (
-    nodeSyncHostIo.existsSync(paths.stashedScenariosDir) &&
-    !nodeSyncHostIo.existsSync(paths.scenariosDir)
-  ) {
-    nodeSyncHostIo.renameSync(paths.stashedScenariosDir, paths.scenariosDir)
-    changed = true
-  }
-  if (nodeSyncHostIo.existsSync(paths.gitExcludeFile)) {
-    const raw = nodeSyncHostIo.readTextSync(paths.gitExcludeFile)
-    if (raw.includes(EXCLUDE_START)) {
-      const cleaned = raw.replace(
-        new RegExp(`\\n?${EXCLUDE_START}[\\s\\S]*?${EXCLUDE_END}\\n?`, "g"),
-        "\n",
-      )
-      nodeSyncHostIo.writeTextSync(paths.gitExcludeFile, cleaned)
-      changed = true
-    }
-  }
-  if (changed) {
-    refreshVerifyStampHash(paths.repoRoot)
-  }
-}
-
-const extractStepGuide = (scenarioDir: string, label: string): string | undefined => {
-  const mdFile = join(scenarioDir, "scenario.md")
-  if (!nodeSyncHostIo.existsSync(mdFile)) {
-    return undefined
-  }
-  const lines = nodeSyncHostIo.readTextSync(mdFile).split("\n")
-  const headerRe = new RegExp(`^##\\s+${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i")
-  const startIdx = lines.findIndex((l) => headerRe.test(l))
-  if (startIdx === -1) {
-    return undefined
-  }
-  const body: Array<string> = []
-  for (let i = startIdx + 1; i < lines.length; i++) {
-    const line = lines[i]
-    if (line === undefined || /^##\s+|^---\s*$/.test(line)) {
-      break
-    }
-    body.push(line)
-  }
-  return body.join("\n").trim()
-}
-
-const listScenarios = (paths: ScenarioPaths): ReadonlyArray<string> => {
-  const root = activeScenariosDir(paths)
-  if (!nodeSyncHostIo.isDirectorySync(root)) {
-    return []
-  }
-  return nodeSyncHostIo
-    .readdirSync(root)
-    .map((entry) => entry.name)
-    .filter(
-      (name) =>
-        !name.startsWith("_") && nodeSyncHostIo.existsSync(join(root, name, "expectations.json")),
-    )
+  return { flags: { conversation, transcript, filter }, positional }
 }
 
 const ClefBodySchema = Schema.Struct({
@@ -366,15 +197,23 @@ const failMsg = (msg: string): CliResult => ({
   stderr: `✖ ${msg}\n`,
 })
 
-const handleList = (paths: ScenarioPaths): CliResult => {
+const handleList = (paths: ScenarioPaths, flags: ScenarioFlags): CliResult => {
   if (!nodeSyncHostIo.existsSync(paths.currentPointer)) {
     restoreScenariosToWorkspace(paths)
   }
   const root = activeScenariosDir(paths)
-  const lines = listScenarios(paths).map((id) => {
-    const exp = readExpectations(join(root, id, "expectations.json"))
-    return `${id.padEnd(32)} ${exp?.title ?? ""}`
-  })
+  const filterLower = flags.filter?.trim().toLowerCase()
+  const lines = listScenarios(paths)
+    .map((id) => {
+      const exp = readExpectations(join(root, id, "expectations.json"))
+      return { id, title: exp?.title ?? "" }
+    })
+    .filter(({ id, title }) =>
+      filterLower === undefined || filterLower.length === 0
+        ? true
+        : id.toLowerCase().includes(filterLower) || title.toLowerCase().includes(filterLower),
+    )
+    .map(({ id, title }) => `${id.padEnd(32)} ${title}`)
   return {
     exitCode: 0,
     stdout: lines.length > 0 ? `${lines.join("\n")}\n` : "",
@@ -385,11 +224,15 @@ const handleList = (paths: ScenarioPaths): CliResult => {
 const handleStart = (
   paths: ScenarioPaths,
   positional: ReadonlyArray<string>,
+  options?: CliEnv,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     const id = positional[0]
     if (id === undefined || id.length === 0) {
       return failMsg("usage: pnpm scenario start <id>")
+    }
+    if (!isValidSafeSegment(id)) {
+      return failMsg(`Invalid scenario id '${id}'. Must match /^[A-Za-z0-9._-]+$/.`)
     }
     if (nodeSyncHostIo.existsSync(paths.currentPointer)) {
       return failMsg("A run is already active. Finish it with `pnpm scenario end` first.")
@@ -404,9 +247,16 @@ const handleStart = (
     if (expectations === undefined) {
       return failMsg(`Invalid expectations.json in ${dir}`)
     }
-    const openingPrompt = nodeSyncHostIo.readTextSync(join(dir, "prompt.md")).trim()
+    const promptFile = join(dir, "prompt.md")
+    if (!nodeSyncHostIo.existsSync(promptFile)) {
+      return failMsg(`Missing prompt.md in ${dir}`)
+    }
+    const openingPrompt = nodeSyncHostIo.readTextSync(promptFile).trim()
     const clefModel = process.env.HARNESS_CLEF_MODEL ?? "clef-flash"
-    const preflight = yield* preflightClef(clefModel)
+    const preflight: ScenarioPreflight =
+      options?.skipBackgroundDaemons === true
+        ? { clefModel: false, detail: `${clefModel}: skipped in test mode` }
+        : yield* preflightClef(clefModel)
 
     const out: Array<string> = []
     for (const cmd of expectations.setup ?? []) {
@@ -426,13 +276,34 @@ const handleStart = (
       }
     }
 
-    hideScenariosFromWorkspace(paths)
     const startedAt = new Date().toISOString()
     const runDir = join(paths.runsDir, `${startedAt.replace(/[:.]/g, "-")}_${id}`)
     nodeSyncHostIo.mkdirRecursiveSync(runDir)
     const stateDir = resolveStateDir(paths.repoRoot)
     saveRun(runDir, { scenario: id, startedAt, stateDir, preflight, marks: [] })
     nodeSyncHostIo.writeTextSync(paths.currentPointer, JSON.stringify({ runDir }))
+
+    const hideExit = yield* Effect.exit(
+      Effect.sync(() => hideScenariosFromWorkspace(paths)).pipe(
+        Effect.tapError(() =>
+          Effect.sync(() => {
+            restoreScenariosToWorkspace(paths)
+            nodeSyncHostIo.rmRecursiveSync(paths.currentPointer)
+          }),
+        ),
+      ),
+    )
+    const hideFailed = match(hideExit)
+      .with({ _tag: "Success" }, () => undefined)
+      .with({ _tag: "Failure" }, ({ cause }) => {
+        restoreScenariosToWorkspace(paths)
+        nodeSyncHostIo.rmRecursiveSync(paths.currentPointer)
+        return failMsg(`Failed to stash scenarios: ${String(cause)}`)
+      })
+      .exhaustive()
+    if (hideFailed !== undefined) {
+      return hideFailed
+    }
 
     out.push(
       `▶ Scenario run started: ${id}`,
@@ -512,66 +383,67 @@ const handleStatus = (paths: ScenarioPaths): CliResult => {
   return { exitCode: 0, stdout: `${lines.join("\n")}\n`, stderr: "" }
 }
 
-const handleEnd = (paths: ScenarioPaths, flags: ScenarioFlags): CliResult => {
-  const loaded = loadCurrentRun(paths)
-  if ("error" in loaded) {
-    return failMsg(loaded.error)
-  }
-  const endedAt = new Date().toISOString()
-  const inRun = (row: { readonly timestamp?: unknown }): boolean => {
-    const ts = typeof row.timestamp === "string" ? row.timestamp : ""
-    return ts >= loaded.run.startedAt && ts <= endedAt
-  }
-  const telemetry = readJsonl(join(loaded.run.stateDir, "telemetry-log.jsonl")).filter(inRun)
-  const friction = readJsonl(join(loaded.run.stateDir, "friction-log.jsonl")).filter(inRun)
-  const discovered = discoverTranscript(paths.repoRoot, paths.homeDir, loaded.run, flags)
-  if (discovered.error !== undefined) {
-    return failMsg(discovered.error)
-  }
-  const transcript =
-    discovered.file !== undefined ? normaliseTranscript(discovered.file).filter(inRun) : []
-  const updatedRun: ScenarioRunState = {
-    ...loaded.run,
-    endedAt,
-    transcriptFile: discovered.file,
-  }
-  writeJsonl(join(loaded.runDir, "telemetry.jsonl"), telemetry)
-  writeJsonl(join(loaded.runDir, "friction.jsonl"), friction)
-  writeJsonl(join(loaded.runDir, "transcript-tools.jsonl"), transcript)
-  saveRun(loaded.runDir, updatedRun)
-  nodeSyncHostIo.writeTextSync(paths.lastPointer, JSON.stringify({ runDir: loaded.runDir }))
-  nodeSyncHostIo.rmRecursiveSync(paths.currentPointer)
-  restoreScenariosToWorkspace(paths)
-
-  const expPath = join(activeScenariosDir(paths), updatedRun.scenario, "expectations.json")
-  const expectations = readExpectations(expPath)
-  if (expectations === undefined) {
-    return failMsg(`Invalid expectations.json at ${expPath}`)
-  }
-
-  const evalRes = evaluateScenarioRun(
-    loaded.runDir,
-    updatedRun,
-    { telemetry, friction, transcript },
-    expectations,
-  )
-  const out: Array<string> = [evalRes.stdout.trimEnd()]
-  for (const cmd of expectations.teardown ?? []) {
-    out.push(`  teardown: ${cmd}`)
-    const teardownRes = nodeSyncHostIo.execFileSync("/bin/bash", ["-lc", cmd], {
-      cwd: paths.repoRoot,
-    })
-    if (teardownRes.stdout.length > 0) {
-      out.push(teardownRes.stdout.trimEnd())
+const handleEnd = (paths: ScenarioPaths, flags: ScenarioFlags): Effect.Effect<CliResult> =>
+  Effect.sync((): CliResult => {
+    const loaded = loadCurrentRun(paths)
+    if ("error" in loaded) {
+      return failMsg(loaded.error)
     }
-  }
-  return { exitCode: evalRes.exitCode, stdout: `${out.join("\n")}\n`, stderr: "" }
-}
+    const endedAt = new Date().toISOString()
+    const inRun = (row: { readonly timestamp?: unknown }): boolean => {
+      const ts = typeof row.timestamp === "string" ? row.timestamp : ""
+      return ts >= loaded.run.startedAt && ts <= endedAt
+    }
+    const telemetry = readJsonl(join(loaded.run.stateDir, "telemetry-log.jsonl")).filter(inRun)
+    const friction = readJsonl(join(loaded.run.stateDir, "friction-log.jsonl")).filter(inRun)
+    const discovered = discoverTranscript(paths.repoRoot, paths.homeDir, loaded.run, flags)
+    if (discovered.error !== undefined) {
+      return failMsg(discovered.error)
+    }
+    const transcript =
+      discovered.file !== undefined ? normaliseTranscript(discovered.file).filter(inRun) : []
+    const updatedRun: ScenarioRunState = {
+      ...loaded.run,
+      endedAt,
+      transcriptFile: discovered.file,
+    }
+    writeJsonl(join(loaded.runDir, "telemetry.jsonl"), telemetry)
+    writeJsonl(join(loaded.runDir, "friction.jsonl"), friction)
+    writeJsonl(join(loaded.runDir, "transcript-tools.jsonl"), transcript)
+    saveRun(loaded.runDir, updatedRun)
+    nodeSyncHostIo.writeTextSync(paths.lastPointer, JSON.stringify({ runDir: loaded.runDir }))
+    nodeSyncHostIo.rmRecursiveSync(paths.currentPointer)
+    restoreScenariosToWorkspace(paths)
+
+    const expPath = join(activeScenariosDir(paths), updatedRun.scenario, "expectations.json")
+    const expectations = readExpectations(expPath)
+    if (expectations === undefined) {
+      return failMsg(`Invalid expectations.json at ${expPath}`)
+    }
+
+    const evalRes = evaluateScenarioRun(
+      loaded.runDir,
+      updatedRun,
+      { telemetry, friction, transcript },
+      expectations,
+    )
+    const out: Array<string> = [evalRes.stdout.trimEnd()]
+    for (const cmd of expectations.teardown ?? []) {
+      out.push(`  teardown: ${cmd}`)
+      const teardownRes = nodeSyncHostIo.execFileSync("/bin/bash", ["-lc", cmd], {
+        cwd: paths.repoRoot,
+      })
+      if (teardownRes.stdout.length > 0) {
+        out.push(teardownRes.stdout.trimEnd())
+      }
+    }
+    return { exitCode: evalRes.exitCode, stdout: `${out.join("\n")}\n`, stderr: "" }
+  }).pipe(Effect.ensuring(Effect.sync(() => restoreScenariosToWorkspace(paths))))
 
 const handleEval = (paths: ScenarioPaths, positional: ReadonlyArray<string>): CliResult => {
   const runDir =
     positional[0] !== undefined && positional[0].length > 0
-      ? resolve(positional[0])
+      ? resolve(paths.repoRoot, positional[0])
       : nodeSyncHostIo.existsSync(paths.lastPointer)
         ? readPointerRunDir(paths.lastPointer)
         : undefined
@@ -610,15 +482,20 @@ export const runScenarioCommand = Effect.fn("HarnessCli.runScenario")(function* 
   const subArgs = args[0] === "scenario" ? args.slice(1) : args
   const [cmd = "list", ...rest] = subArgs
   const { flags, positional } = parseFlags(rest)
+  if (flags.conversation !== undefined && !isValidSafeSegment(flags.conversation)) {
+    return failMsg(
+      `Invalid conversation id '${flags.conversation}'. Must match /^[A-Za-z0-9._-]+$/.`,
+    )
+  }
   const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
   const paths = makeScenarioPaths(repoRoot)
 
   return yield* match(cmd)
-    .with("list", () => Effect.succeed(handleList(paths)))
-    .with("start", () => handleStart(paths, positional))
+    .with("list", () => Effect.succeed(handleList(paths, flags)))
+    .with("start", () => handleStart(paths, positional, options))
     .with("mark", () => Effect.succeed(handleMark(paths, positional)))
     .with("status", () => Effect.succeed(handleStatus(paths)))
-    .with("end", () => Effect.succeed(handleEnd(paths, flags)))
+    .with("end", () => handleEnd(paths, flags))
     .with("eval", () => Effect.succeed(handleEval(paths, positional)))
     .otherwise(() =>
       Effect.succeed(failMsg(`unknown command '${cmd}' (list|start|mark|status|end|eval)`)),

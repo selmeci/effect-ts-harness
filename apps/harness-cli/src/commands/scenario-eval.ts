@@ -121,6 +121,7 @@ export interface ScenarioSources {
 export interface ScenarioFlags {
   readonly conversation?: string | undefined
   readonly transcript?: string | undefined
+  readonly filter?: string | undefined
 }
 
 const decodeJsonRecordOption = Schema.decodeOption(
@@ -164,23 +165,35 @@ export const readNormalisedTranscript = (filePath: string): ReadonlyArray<Normal
     args: typeof row.args === "string" ? row.args : JSON.stringify(row.args ?? {}),
   }))
 
-export const readScenarioRun = (filePath: string): ScenarioRunState | undefined =>
-  match(decodeRunStateOption(nodeSyncHostIo.readTextSync(filePath)))
+export const readScenarioRun = (filePath: string): ScenarioRunState | undefined => {
+  if (!nodeSyncHostIo.existsSync(filePath)) {
+    return undefined
+  }
+  return match(decodeRunStateOption(nodeSyncHostIo.readTextSync(filePath)))
     .with({ _tag: "Some" }, ({ value }) => value)
     .with({ _tag: "None" }, () => undefined)
     .exhaustive()
+}
 
-export const readPointerRunDir = (filePath: string): string | undefined =>
-  match(decodePointerOption(nodeSyncHostIo.readTextSync(filePath)))
+export const readPointerRunDir = (filePath: string): string | undefined => {
+  if (!nodeSyncHostIo.existsSync(filePath)) {
+    return undefined
+  }
+  return match(decodePointerOption(nodeSyncHostIo.readTextSync(filePath)))
     .with({ _tag: "Some" }, ({ value }) => value.runDir)
     .with({ _tag: "None" }, () => undefined)
     .exhaustive()
+}
 
-export const readExpectations = (filePath: string): ScenarioExpectations | undefined =>
-  match(decodeExpectationsOption(nodeSyncHostIo.readTextSync(filePath)))
+export const readExpectations = (filePath: string): ScenarioExpectations | undefined => {
+  if (!nodeSyncHostIo.existsSync(filePath)) {
+    return undefined
+  }
+  return match(decodeExpectationsOption(nodeSyncHostIo.readTextSync(filePath)))
     .with({ _tag: "Some" }, ({ value }) => value)
     .with({ _tag: "None" }, () => undefined)
     .exhaustive()
+}
 
 const unwrapJsonValue = (value: unknown): unknown => {
   if (typeof value !== "string") {
@@ -221,7 +234,11 @@ export const discoverTranscript = (
   flags: ScenarioFlags,
 ): { readonly file?: string | undefined; readonly error?: string | undefined } => {
   if (flags.transcript !== undefined && flags.transcript.length > 0) {
-    return { file: resolve(flags.transcript) }
+    const file = resolve(flags.transcript)
+    if (!nodeSyncHostIo.existsSync(file)) {
+      return { error: `Transcript not found: ${file}` }
+    }
+    return { file }
   }
   const antigravityBrain = join(homeDir, ".gemini", "antigravity", "brain")
   if (flags.conversation !== undefined && flags.conversation.length > 0) {

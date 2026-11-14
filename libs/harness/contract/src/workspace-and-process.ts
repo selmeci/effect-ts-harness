@@ -1,18 +1,12 @@
-import { Schema } from "effect"
-import { PluginFileLineCount } from "./ast-and-gate-primitives.js"
+import { Option, Schema } from "effect"
+import { PluginFileLineCount, WorkspaceFilePath } from "./ast-and-gate-primitives.js"
 
-export const WorkspaceFilePath = Schema.NonEmptyString.pipe(
-  Schema.check(Schema.isTrimmed()),
-  Schema.brand("WorkspaceFilePath"),
-)
-export type WorkspaceFilePath = typeof WorkspaceFilePath.Type
+export { WorkspaceFilePath }
 
 export const WorkspaceFileContent = Schema.String.pipe(Schema.brand("WorkspaceFileContent"))
 export type WorkspaceFileContent = typeof WorkspaceFileContent.Type
 
-export const WorkspaceFsOperation = Schema.Literals(["read", "write", "stat", "readdir"]).pipe(
-  Schema.brand("WorkspaceFsOperation"),
-)
+export const WorkspaceFsOperation = Schema.Literals(["read", "write", "stat", "readdir"])
 export type WorkspaceFsOperation = typeof WorkspaceFsOperation.Type
 
 export const ErrorReasonMessage = Schema.NonEmptyString.pipe(
@@ -31,6 +25,10 @@ export type WorkspaceFileStat = typeof WorkspaceFileStat.Type
 export class WorkspaceFsError extends Schema.TaggedError<WorkspaceFsError>()("WorkspaceFsError", {
   filePath: WorkspaceFilePath,
   operation: WorkspaceFsOperation,
+  reason: ErrorReasonMessage,
+}) {}
+
+export class StdinReadError extends Schema.TaggedError<StdinReadError>()("StdinReadError", {
   reason: ErrorReasonMessage,
 }) {}
 
@@ -61,6 +59,15 @@ export type SubprocessExitCode = typeof SubprocessExitCode.Type
 export const SubprocessOutput = Schema.String.pipe(Schema.brand("SubprocessOutput"))
 export type SubprocessOutput = typeof SubprocessOutput.Type
 
+export const SubprocessFailureKind = Schema.Literals([
+  "non-zero-exit",
+  "spawn-error",
+  "timeout",
+  "max-buffer",
+  "invalid-input",
+])
+export type SubprocessFailureKind = typeof SubprocessFailureKind.Type
+
 export const SubprocessExecInput = Schema.Struct({
   command: SubprocessCommand,
   args: Schema.Array(SubprocessArg),
@@ -85,8 +92,48 @@ export class HarnessSubprocessError extends Schema.TaggedError<HarnessSubprocess
     exitCode: SubprocessExitCode,
     stderr: SubprocessOutput,
     reason: ErrorReasonMessage,
+    failureKind: Schema.optional(SubprocessFailureKind),
   },
 ) {}
+
+export const validateSubprocessInput = (
+  input: SubprocessExecInput,
+): Option.Option<HarnessSubprocessError> => {
+  if (input.command.includes("\0")) {
+    return Option.some(
+      new HarnessSubprocessError({
+        command: input.command,
+        exitCode: SubprocessExitCode.make(-1),
+        stderr: SubprocessOutput.make(""),
+        reason: ErrorReasonMessage.make("Subprocess command contains a disallowed null byte"),
+        failureKind: "invalid-input",
+      }),
+    )
+  }
+  if (input.args.some((arg) => arg.includes("\0"))) {
+    return Option.some(
+      new HarnessSubprocessError({
+        command: input.command,
+        exitCode: SubprocessExitCode.make(-1),
+        stderr: SubprocessOutput.make(""),
+        reason: ErrorReasonMessage.make("Subprocess arguments contain a disallowed null byte"),
+        failureKind: "invalid-input",
+      }),
+    )
+  }
+  if (input.cwd !== undefined && input.cwd.includes("\0")) {
+    return Option.some(
+      new HarnessSubprocessError({
+        command: input.command,
+        exitCode: SubprocessExitCode.make(-1),
+        stderr: SubprocessOutput.make(""),
+        reason: ErrorReasonMessage.make("Subprocess cwd contains a disallowed null byte"),
+        failureKind: "invalid-input",
+      }),
+    )
+  }
+  return Option.none()
+}
 
 export const ActiveMutantId = Schema.NonEmptyString.pipe(
   Schema.check(Schema.isTrimmed()),
@@ -94,10 +141,8 @@ export const ActiveMutantId = Schema.NonEmptyString.pipe(
 )
 export type ActiveMutantId = typeof ActiveMutantId.Type
 
-export const CompilerRepoRootPath = Schema.NonEmptyString.pipe(
-  Schema.brand("CompilerRepoRootPath"),
-)
-export type CompilerRepoRootPath = typeof CompilerRepoRootPath.Type
+export const CompilerRepoRootPath = WorkspaceFilePath
+export type CompilerRepoRootPath = WorkspaceFilePath
 
 export const CompilerRepoRootInput = Schema.String.pipe(Schema.brand("CompilerRepoRootInput"))
 export type CompilerRepoRootInput = typeof CompilerRepoRootInput.Type

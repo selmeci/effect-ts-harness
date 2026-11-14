@@ -267,11 +267,49 @@ export const visitSourceFileSinglePass = (
   const handlesTsxExtensions =
     sourceFile.text.includes('".tsx"') || sourceFile.text.includes("'.tsx'")
   const referencesLangTsx = sourceFile.text.includes("Lang.Tsx")
+  const effectNamespaceNames = new Set<string>(["Effect"])
+  const isTestOrHelperFile = isTestFile || /(?:^|\/)test\/(?!fixtures\/)/.test(normalizedFilePath)
+  const isMemoryWorkerdBridge = /(?:^|\/)libs\/es\/infra\/src\/memory\.ts$/.test(normalizedFilePath)
+  const isHarnessMcpSdkBoundary = /(?:^|\/)apps\/harness-mcp\/src\//.test(normalizedFilePath)
+  const isBannedEffectRunMethod = (methodName: string): boolean => {
+    if (methodName === "runSync" || methodName === "runSyncExit") return true
+    if (methodName === "runPromise" || methodName === "runPromiseExit") return !isHarnessMcpSdkBoundary
+    if (methodName === "runFork") return packageTag !== "app"
+    return false
+  }
 
   const walk = (node: ts.Node): void => {
     // 1. Import declarations (domain-purity + syntax-bans + test-integrity)
     if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
       const spec = node.moduleSpecifier.text
+      if (!node.importClause?.isTypeOnly && (spec === "effect" || spec === "effect/Effect")) {
+        const bindings = node.importClause?.namedBindings
+        if (bindings !== undefined && ts.isNamespaceImport(bindings)) {
+          effectNamespaceNames.add(bindings.name.text)
+        }
+        if (bindings !== undefined && ts.isNamedImports(bindings)) {
+          for (const el of bindings.elements) {
+            if (el.isTypeOnly) continue
+            const importedName = (el.propertyName ?? el.name).text
+            if (spec === "effect" && importedName === "Effect") {
+              effectNamespaceNames.add(el.name.text)
+            }
+            if (
+              spec === "effect/Effect" &&
+              !isTestOrHelperFile &&
+              !isMemoryWorkerdBridge &&
+              isBannedEffectRunMethod(importedName)
+            ) {
+              pushViolation(
+                catDomainPurity,
+                "unscoped-effect-run",
+                `Unscoped 'Effect.${importedName}' import in '${filePath}' (${packageTag}) — compose Effects and run via NodeRuntime.runMain or ManagedRuntime at the app edge.`,
+                node,
+              )
+            }
+          }
+        }
+      }
       if (
         (spec === "node:sqlite" || spec === "sqlite" || spec === "better-sqlite3") &&
         (packageTag === "infra" || packageTag === "app")
@@ -383,21 +421,35 @@ export const visitSourceFileSinglePass = (
       }
     }
 
-    // 4b. PropertyAccessExpression: Effect.ignore in domain (domain-purity: domain-effect-ignore)
-    if (
-      ts.isPropertyAccessExpression(node) &&
-      !isTestFile &&
-      packageTag === "domain" &&
-      ts.isIdentifier(node.expression) &&
-      node.expression.text === "Effect" &&
-      node.name.text === "ignore"
-    ) {
-      pushViolation(
-        catDomainPurity,
-        "domain-effect-ignore",
-        `Swallowing typed errors with Effect.ignore in '${filePath}' (domain) is banned — surface failures in the E channel or handle them explicitly.`,
-        node,
-      )
+    // 4b. PropertyAccessExpression: Effect.ignore in domain & unscoped Effect.run*
+    if (ts.isPropertyAccessExpression(node) && !isTestFile) {
+      if (
+        packageTag === "domain" &&
+        ts.isIdentifier(node.expression) &&
+        effectNamespaceNames.has(node.expression.text) &&
+        node.name.text === "ignore"
+      ) {
+        pushViolation(
+          catDomainPurity,
+          "domain-effect-ignore",
+          `Swallowing typed errors with Effect.ignore in '${filePath}' (domain) is banned — surface failures in the E channel or handle them explicitly.`,
+          node,
+        )
+      }
+      if (
+        !isTestOrHelperFile &&
+        !isMemoryWorkerdBridge &&
+        ts.isIdentifier(node.expression) &&
+        effectNamespaceNames.has(node.expression.text) &&
+        isBannedEffectRunMethod(node.name.text)
+      ) {
+        pushViolation(
+          catDomainPurity,
+          "unscoped-effect-run",
+          `Unscoped '${node.expression.text}.${node.name.text}' in '${filePath}' (${packageTag}) — compose Effects and run via NodeRuntime.runMain or ManagedRuntime at the app edge.`,
+          node,
+        )
+      }
     }
 
     // 5. CallExpressions (effect-laws, domain-purity, test-integrity, syntax-bans)
@@ -431,23 +483,6 @@ export const visitSourceFileSinglePass = (
           catEffectLaws,
           "non-exhaustive-union-match",
           `match(...).run() in '${filePath}' is banned — use .exhaustive() instead.`,
-          node,
-        )
-      }
-
-      if (
-        !isTestFile &&
-        packageTag !== "app" &&
-        // libs/es/infra/src/memory.ts bridges the synchronous @cloudflare/workers-types SqlStorage interface to workerd
-        normalizedFilePath !== "libs/es/infra/src/memory.ts" &&
-        (calleeText === "Effect.runSync" ||
-          calleeText === "Effect.runPromise" ||
-          calleeText === "Effect.runFork")
-      ) {
-        pushViolation(
-          catDomainPurity,
-          "unscoped-effect-run",
-          `Unscoped '${calleeText}' in '${filePath}' (${packageTag}) — compose Effects and run at the app edge.`,
           node,
         )
       }

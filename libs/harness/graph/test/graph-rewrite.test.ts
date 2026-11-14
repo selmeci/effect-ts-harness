@@ -27,6 +27,7 @@ import {
   verifyDpoGluingCondition,
 } from "../src/index.js"
 import { mapInferenceErrorToRewriteError } from "../src/rewrite/dpo-algebra-core.js"
+import { evaluateAndSelectArchRepairBranch } from "../src/rewrite/repair-rules-arch.plugin.js"
 
 const MeasureTupleSchema = Schema.Tuple([
   Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 0, maximum: 20 }))),
@@ -1166,4 +1167,23 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
     expect(failedErr._tag).toBe("GraphRewriteError")
     expect(failedErr.reason).toBe("inference-failed")
   })
+
+  it.effect("calls evaluateAndSelectArchRepairBranch directly", () =>
+    Effect.gen(function* () {
+      const emptyGraph = buildHarnessGraph({})
+      const inference = yield* decideGraphInference(emptyGraph)
+      const zeroMeasure = computeGraphMeasure(emptyGraph, inference)
+      const exit = yield* Effect.exit(
+        evaluateAndSelectArchRepairBranch([], emptyGraph, zeroMeasure),
+      )
+      match(exit)
+        .with({ _tag: "Failure" }, () => {
+          expect(true).toBe(true)
+        })
+        .with({ _tag: "Success" }, ({ value }) => {
+          expect(value.winner).toBeDefined()
+        })
+        .exhaustive()
+    }),
+  )
 })

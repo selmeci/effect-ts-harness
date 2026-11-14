@@ -21,13 +21,6 @@ import {
   handleRepair,
 } from "./plan-and-repair.command.js"
 import {
-  runBenchmarkCompare,
-  runCheckEventSchemas,
-  runCheckMigrations,
-  runCheckOpenApi,
-} from "./repo-checks.command.js"
-import { runScenarioCommand } from "./scenario.command.js"
-import {
   handleDoctorOrSession,
   handleIngest,
   handleLearn,
@@ -150,7 +143,10 @@ export const makeLiveCliCommandDescriptors = (
   {
     name: CliCommandName.make("benchmark"),
     summary: "Compare canonical harness benchmark runs against acceptance criteria.",
-    execute: (args) => runBenchmarkCompare(args, options),
+    execute: (args) =>
+      Effect.promise(() => import("./repo-checks.command.js")).pipe(
+        Effect.flatMap((m) => m.runBenchmarkCompare(args, options)),
+      ),
   },
   {
     name: CliCommandName.make("ingest"),
@@ -180,22 +176,34 @@ export const makeLiveCliCommandDescriptors = (
   {
     name: CliCommandName.make("check-openapi"),
     summary: "Validate OpenAPI contract specifications.",
-    execute: (args) => runCheckOpenApi(args, options),
+    execute: (args) =>
+      Effect.promise(() => import("./repo-checks.command.js")).pipe(
+        Effect.flatMap((m) => m.runCheckOpenApi(args, options)),
+      ),
   },
   {
     name: CliCommandName.make("check-migrations"),
     summary: "Validate database schema migrations for safety.",
-    execute: (args) => runCheckMigrations(args, options),
+    execute: (args) =>
+      Effect.promise(() => import("./repo-checks.command.js")).pipe(
+        Effect.flatMap((m) => m.runCheckMigrations(args, options)),
+      ),
   },
   {
     name: CliCommandName.make("check-event-schemas"),
     summary: "Validate event-sourcing schema evolution compatibility.",
-    execute: (args) => runCheckEventSchemas(args, options),
+    execute: (args) =>
+      Effect.promise(() => import("./repo-checks.command.js")).pipe(
+        Effect.flatMap((m) => m.runCheckEventSchemas(args, options)),
+      ),
   },
   {
     name: CliCommandName.make("scenario"),
     summary: "List or execute harness evaluation scenarios.",
-    execute: (args) => runScenarioCommand(args, options),
+    execute: (args) =>
+      Effect.promise(() => import("./scenario.command.js")).pipe(
+        Effect.flatMap((m) => m.runScenarioCommand(args, options)),
+      ),
   },
   {
     name: CliCommandName.make("help"),

@@ -6,4 +6,15 @@ export const runCli = (
   argv: ReadonlyArray<string>,
   options?: CliEnv,
   maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>,
-): Promise<CliResult> => Effect.runPromise(runCliEffect(argv, options, maybeDecisionLayer))
+): Promise<CliResult> =>
+  Effect.runPromise(
+    runCliEffect(
+      argv,
+      {
+        skipBackgroundDaemons: true,
+        skipAutoSessionReport: true,
+        ...options,
+      },
+      maybeDecisionLayer,
+    ),
+  )

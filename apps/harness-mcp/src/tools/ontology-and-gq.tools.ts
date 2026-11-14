@@ -1,4 +1,4 @@
-import { Effect, Schema } from "effect"
+import { Cause, Effect, Schema } from "effect"
 import {
   HARNESS_GQ_QUERY_NAMES,
   invokeOmnigraphNamedQuery,
@@ -130,6 +130,13 @@ export const buildOntologyAndGqToolDescriptors = (
         const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
         const semanticConflicts = yield* evaluateOntologyConflicts(pairs).pipe(
           Effect.provide(decisionLayer),
+          Effect.catchCause((cause) => {
+            if (Cause.hasInterrupts(cause)) {
+              return Effect.interrupt
+            }
+            process.stderr.write(`[harness-mcp] ontology conflicts fallback: ${Cause.pretty(cause)}\n`)
+            return Effect.succeed([])
+          }),
         )
         const projection = projectOntologyLayers(graph)
         return {
@@ -156,13 +163,15 @@ export const buildOntologyAndGqToolDescriptors = (
       Effect.gen(function* () {
         const { queryName, params, branch } = yield* decodeGqQueryInput(args)
         const graph = yield* resolveGraph(options, args)
-        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args, options)
+        const skipSpawn = options?.skipOmnigraphSpawn === true && !process.env["OMNIGRAPH_URL"]
         return yield* invokeOmnigraphNamedQuery({
           repoRoot: root,
           name: queryName,
           params,
           branch,
           fallbackGraph: graph,
+          ...(skipSpawn ? { baseUrl: "http://127.0.0.1:1" } : {}),
         }).pipe(Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)))
       }),
   },

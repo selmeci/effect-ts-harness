@@ -10,7 +10,8 @@ import {
 import { Context, Effect, Layer, Semaphore } from "effect"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
-import { runGraphInferencePipeline } from "./stratum-3-completion-and-holes.js"
+import { runGraphInferencePipeline, runGraphInferenceSync } from "./stratum-3-completion-and-holes.js"
+export { runGraphInferenceSync }
 import {
   type DatalogFileDeltaResult,
   type DatalogFilePath,

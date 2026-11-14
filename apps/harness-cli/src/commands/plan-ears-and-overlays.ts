@@ -165,6 +165,13 @@ export const persistVerifiedOverlays = (
         rejectedFiles.push({ file: overlay.targetFile, reason: "Target path escapes workspace root." })
         continue
       }
+      if (nodeSyncHostIo.isSymbolicLinkSync(absTarget)) {
+        rejectedFiles.push({
+          file: overlay.targetFile,
+          reason: "Target file is a symbolic link.",
+        })
+        continue
+      }
       let checkDir = absTarget
       while (
         !nodeSyncHostIo.existsSync(checkDir) &&

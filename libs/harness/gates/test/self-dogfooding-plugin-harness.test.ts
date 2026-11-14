@@ -49,21 +49,17 @@ import {
   GatePluginRegistryLive,
   makeGatePluginRegistryLayer,
 } from "../src/plugins/gate-plugin-registry.js"
-import {
-  makeWorkspaceFsHostIoLayer,
-  makeWorkspaceFsMemoryLayer,
-  readAndVerifyWorkspaceFile,
-} from "../src/services/workspace-fs.js"
-import {
-  execCheckedSubprocess,
-  makeHarnessSubprocessRunnerHostIoLayer,
-  makeHarnessSubprocessRunnerTestLayer,
-} from "../src/services/subprocess-runner.js"
+import { readAndVerifyWorkspaceFile } from "../src/services/workspace-fs.js"
+import { execCheckedSubprocess } from "../src/services/subprocess-runner.js"
 import { testHostIo } from "./helpers/test-host-io.js"
+import { withActiveMutantEffect } from "../src/services/active-mutant-context.js"
 import {
   ActiveMutantContextLive,
-  withActiveMutantEffect,
-} from "../src/services/active-mutant-context.js"
+  makeHarnessSubprocessRunnerHostIoLayer,
+  makeHarnessSubprocessRunnerTestLayer,
+  makeWorkspaceFsHostIoLayer,
+  makeWorkspaceFsMemoryLayer,
+} from "./helpers/test-layers.js"
 import {
   decideMutationCheck,
   discoverDomainMutants,
@@ -637,7 +633,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
             match(Cause.findErrorOption(cause))
               .with({ _tag: "Some" }, ({ value }) => {
                 expect(value._tag).toBe("HarnessSubprocessError")
-                expect(value.reason).toBe("Subprocess command contains null bytes")
+                expect(value.reason).toBe("Subprocess command contains a disallowed null byte")
               })
               .with({ _tag: "None" }, () => {
                 expect.unreachable("Expected typed HarnessSubprocessError")
@@ -668,7 +664,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
             match(Cause.findErrorOption(cause))
               .with({ _tag: "Some" }, ({ value }) => {
                 expect(value._tag).toBe("HarnessSubprocessError")
-                expect(value.reason).toBe("Subprocess arguments contain null bytes")
+                expect(value.reason).toBe("Subprocess arguments contain a disallowed null byte")
               })
               .with({ _tag: "None" }, () => {
                 expect.unreachable("Expected typed HarnessSubprocessError")
@@ -766,7 +762,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
             match(Cause.findErrorOption(cause))
               .with({ _tag: "Some" }, ({ value }) => {
                 expect(value._tag).toBe("HarnessSubprocessError")
-                expect(value.reason).toBe("Subprocess command contains null bytes")
+                expect(value.reason).toBe("Subprocess command contains a disallowed null byte")
               })
               .with({ _tag: "None" }, () => {
                 expect.unreachable("Expected typed HarnessSubprocessError")
@@ -2429,6 +2425,30 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         ).toHaveLength(1)
         expect(
           report.violations.filter((v) => v.rule === "unscoped-effect-run"),
+        ).toHaveLength(1)
+      }),
+  )
+
+  it.effect(
+    "F-8.3b: SelfDogfooding.decide catches process.env.VITEST (test-env-branch-in-src) and dynamic import('node:fs') (no-node-builtins-outside-infra)",
+    () =>
+      Effect.gen(function* () {
+        const report = yield* SelfDogfooding.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/gates/src/bad-env-and-dyn.ts"),
+              content: AstSourceContent.make(
+                'export const isTest = process.env.VITEST === "true" || process.env["VITEST"] === "1"\n' +
+                  'export const loadFs = () => import("node:fs")\n',
+              ),
+            },
+          ],
+          failOnViolation: false,
+        })
+        expect(report.verdict).toBe("violated")
+        expect(report.violations.filter((v) => v.rule === "test-env-branch-in-src")).toHaveLength(2)
+        expect(
+          report.violations.filter((v) => v.rule === "no-node-builtins-outside-infra"),
         ).toHaveLength(1)
       }),
   )

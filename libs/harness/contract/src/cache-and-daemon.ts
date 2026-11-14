@@ -10,8 +10,9 @@ import {
   GateViolationMessage,
   NonNegativeCount,
   SourceLineNumber,
+  WorkspaceFilePath,
 } from "./ast-and-gate-primitives.js"
-import { ErrorReasonMessage, WorkspaceFilePath } from "./workspace-and-process.js"
+import { ErrorReasonMessage } from "./workspace-and-process.js"
 
 export const DecisionCacheKey = Schema.NonEmptyString.pipe(
   Schema.check(Schema.isTrimmed()),
@@ -60,8 +61,27 @@ export const AstGateEvaluationReport = Schema.Struct({
   violations: Schema.Array(AstGateViolationContract),
   inspectedFileCount: NonNegativeCount,
   cacheHitCount: NonNegativeCount,
-})
+}).pipe(
+  Schema.check(
+    Schema.makeFilter((report) =>
+      (report.verdict === "clean") === (report.violations.length === 0)
+        ? undefined
+        : "AstGateEvaluationReport verdict and violations length must agree",
+    ),
+  ),
+)
 export type AstGateEvaluationReport = typeof AstGateEvaluationReport.Type
+
+export const makeAstGateEvaluationReport = (input: {
+  readonly violations: ReadonlyArray<AstGateViolationContract>
+  readonly inspectedFileCount: NonNegativeCount
+  readonly cacheHitCount: NonNegativeCount
+}): AstGateEvaluationReport => ({
+  verdict: input.violations.length === 0 ? "clean" : "violated",
+  violations: [...input.violations],
+  inspectedFileCount: input.inspectedFileCount,
+  cacheHitCount: input.cacheHitCount,
+})
 
 export const DaemonSocketPath = Schema.NonEmptyString.pipe(
   Schema.check(Schema.isTrimmed()),

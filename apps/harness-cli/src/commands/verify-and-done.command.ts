@@ -1,5 +1,5 @@
 import { join } from "node:path"
-import { Effect, Layer, Option } from "effect"
+import { Cause, Effect, Layer, Option } from "effect"
 import * as Graph from "effect/Graph"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
@@ -11,12 +11,8 @@ import {
   decideOntologyInvariants,
   decideSpanBudgets,
   diffPlanAndImplGraphs,
-  DstErrorTag,
   DstExecutionTier,
-  DstMethodName,
-  DstServiceTag,
   DstStepCount,
-  type DstTargetServiceMethod as DstTargetMethodSpec,
   loadGovernanceDocsFromDisk,
   parseDstSeedEnv,
   readFrictionEvents,
@@ -53,7 +49,7 @@ import {
   formatSubprocessError,
   isIsolatedExternalWorkspace,
   isRootConfigOrSharedCoreChange,
-  readStdinEffect,
+  makeReadStdinEffect,
   recordFriction,
   recordTelemetry,
   resolveClusterRepoRoot,
@@ -68,7 +64,11 @@ import {
   isSubagentStopContext,
   type StopHookStdin,
 } from "./stop-hook-and-transcript.js"
-import { readRecordedSpans, runDeltaAstAndPluginGates } from "./verify-delta-gates.js"
+import {
+  buildDstTargetsFromGraph,
+  readRecordedSpans,
+  runDeltaAstAndPluginGates,
+} from "./verify-delta-gates.js"
 
 const verifyFailureWithThrashing = (
   options: CliEnv | undefined,
@@ -85,45 +85,6 @@ const verifyFailureWithThrashing = (
   return { exitCode: 1, stdout: "", stderr: stderrMsg }
 }
 
-const buildDstTargetsFromGraph = (graph: HarnessGraph): ReadonlyArray<DstTargetMethodSpec> => {
-  const dstTargets: Array<DstTargetMethodSpec> = []
-  for (const [, node] of Graph.nodes(graph.graph)) {
-    match(node)
-      .with({ _tag: "ServiceTag" }, (n) => {
-        dstTargets.push({
-          serviceTag: DstServiceTag.make(n.name || n.tagId),
-          methodName: DstMethodName.make("execute"),
-          declaredErrors: [DstErrorTag.make(`${n.name || n.tagId}Error`)],
-        })
-      })
-      .with(
-        { _tag: "EffectFn" },
-        { _tag: "ServiceLayer" },
-        { _tag: "TaggedError" },
-        { _tag: "SchemaDef" },
-        { _tag: "VitestCase" },
-        { _tag: "PatternDoc" },
-        { _tag: "AdrDoc" },
-        { _tag: "EarsSpec" },
-        { _tag: "EffectSignature" },
-        { _tag: "LayerFlow" },
-        { _tag: "TraceabilityTuple" },
-        { _tag: "HttpEndpointTuple" },
-        { _tag: "MigrationTuple" },
-        () => undefined,
-      )
-      .exhaustive()
-  }
-  if (dstTargets.length === 0) {
-    dstTargets.push({
-      serviceTag: DstServiceTag.make("HarnessVerificationService"),
-      methodName: DstMethodName.make("verify"),
-      declaredErrors: [DstErrorTag.make("HarnessVerificationError")],
-    })
-  }
-  return dstTargets
-}
-
 export const handleVerify = (
   options: CliEnv | undefined,
   decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
@@ -137,7 +98,7 @@ export const handleVerify = (
       process.env.HARNESS_REQUIRE_OLLAMA === "1" ||
       (!isIsolatedExternalWorkspace(repoRoot) &&
         options?.decisionLayer === undefined &&
-        process.env.VITEST === undefined)
+        options?.skipBackgroundDaemons !== true)
     if (requireOllama && !(yield* ensureLocalOllamaReady())) {
       return {
         exitCode: 1,
@@ -170,8 +131,13 @@ export const handleVerify = (
 
     const graph = yield* extractGraphViaCompilerOverlay({ repoRoot }).pipe(
       Effect.provide(makeTsCompilerOverlayLayer(nodeSyncHostIo)),
-      Effect.catchTag("TsCompilerOverlayError", () =>
-        extractTypeGraph({ repoRoot, hostIo: nodeSyncHostIo }),
+      Effect.catchTag("TsCompilerOverlayError", (err) =>
+        Effect.gen(function* () {
+          process.stderr.write(
+            `[harness:verify] Warning: TsCompilerOverlayService failed (${err.reason}); falling back to extractTypeGraph.\n`,
+          )
+          return yield* extractTypeGraph({ repoRoot, hostIo: nodeSyncHostIo })
+        }),
       ),
     )
     const graphStubs: Array<string> = []
@@ -258,9 +224,18 @@ export const handleVerify = (
         snapshotPath,
       }).pipe(
         Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
-        Effect.orElseSucceed(() => ({ syncedToOmnigraph: false, snapshotPath, error: undefined })),
+        Effect.catchCause((cause) => {
+          if (Cause.hasInterrupts(cause)) return Effect.interrupt
+          return Effect.succeed({
+            syncedToOmnigraph: false,
+            snapshotPath,
+            error: Cause.pretty(cause),
+          })
+        }),
       )
-      writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
+      if (syncRes.syncedToOmnigraph) {
+        writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
+      }
       recordTelemetry(options, {
         surface: "cli",
         category: "graph_query",
@@ -471,8 +446,30 @@ export const handleDone = (
     const blockDecision = isAntigravity ? "continue" : "block"
 
     let rawStdin = options?.stdin
-    if (rawStdin === undefined && !process.stdin.isTTY) {
-      rawStdin = yield* readStdinEffect
+    if (rawStdin === undefined && process.stdin.isTTY !== true) {
+      const stdinRes = yield* Effect.result(
+        makeReadStdinEffect({
+          timeoutMs: options?.stdinTimeoutMs,
+          maxBytes: options?.stdinMaxBytes,
+        }),
+      )
+      const stdinErrResult = match(stdinRes)
+        .with({ _tag: "Success" }, ({ success }) => {
+          rawStdin = success
+          return undefined
+        })
+        .with({ _tag: "Failure" }, ({ failure }) => ({
+          exitCode: 0,
+          stdout: JSON.stringify({
+            decision: blockDecision,
+            reason: `done: failed or timed out reading Stop hook stdin (${failure.reason})`,
+          }),
+          stderr: "",
+        }))
+        .exhaustive()
+      if (stdinErrResult !== undefined) {
+        return stdinErrResult
+      }
     }
     let decodedStdin: StopHookStdin | undefined
     if (rawStdin) {
@@ -598,7 +595,9 @@ export const handleDone = (
               Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
               Effect.orElseSucceed(() => false),
             )
-            writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
+            if (merged) {
+              writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
+            }
             recordTelemetry(options, {
               surface: isAntigravity ? "hook" : "cli",
               category: "graph_query",
@@ -619,7 +618,7 @@ export const handleDone = (
             }
           }
 
-          if (options?.repoRoot !== undefined || process.env.VITEST === undefined) {
+          if (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) {
             const report = buildSessionReport({
               events: readTelemetryEvents(repoRoot, nodeSyncHostIo),
               frictionEvents: readFrictionEvents(repoRoot, nodeSyncHostIo),

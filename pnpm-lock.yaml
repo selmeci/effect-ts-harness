@@ -566,9 +566,6 @@ importers:
       '@harness/contract':
         specifier: workspace:*
         version: link:../contract
-      '@harness/gates':
-        specifier: workspace:*
-        version: link:../gates
       '@harness/graph':
         specifier: workspace:*
         version: link:../graph

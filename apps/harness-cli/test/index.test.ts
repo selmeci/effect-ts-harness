@@ -37,9 +37,11 @@ import {
   cleanSubprocessError,
   COMMANDS,
   ensureLocalOmnigraphReady,
+  resolveCommandTelemetryOutcome,
   stripAnsiCodes,
   tryQueryWarmDaemonSocket,
 } from "../src/index.js"
+import { recordTelemetry } from "../src/commands/daemon-and-omnigraph.service.js"
 import { runCli } from "./run-cli-helper.js"
 
 describe("harness cli baseline", () => {
@@ -535,7 +537,7 @@ enforced_by:
       const dir = mkdtempSync(join(tmpdir(), "harness-cli-done-"))
       try {
         writeFileSync(join(dir, "a.ts"), "export const a = 1\n")
-        const missing = await runCli(["done"], { repoRoot: dir })
+        const missing = await runCli(["done"], { repoRoot: dir, stdin: "{}" })
         expect(missing.exitCode).toBe(0)
         expect(JSON.parse(missing.stdout)).toEqual({
           decision: "block",
@@ -545,6 +547,7 @@ enforced_by:
         writeVerifyStamp(dir, nodeSyncHostIo, "impl/current")
         const green = await runCli(["done"], {
           repoRoot: dir,
+          stdin: "{}",
           decisionLayer: makeMockDecisionModelLayer({
             implementedProb: 0.95,
             noOutOfScopeProb: 0.95,
@@ -557,7 +560,7 @@ enforced_by:
 
         // Mutate a file to make stamp stale
         writeFileSync(join(dir, "a.ts"), "export const a = 2\n")
-        const stale = await runCli(["done"], { repoRoot: dir })
+        const stale = await runCli(["done"], { repoRoot: dir, stdin: "{}" })
         expect(stale.exitCode).toBe(0)
         expect(JSON.parse(stale.stdout)).toEqual({
           decision: "block",
@@ -592,6 +595,7 @@ enforced_by:
 
         const res = await runCli(["done"], {
           repoRoot: dir,
+          stdin: "{}",
           planGraph,
           implGraph,
         })
@@ -617,6 +621,7 @@ enforced_by:
 
         const res = await runCli(["done"], {
           repoRoot: dir,
+          stdin: "{}",
           decisionLayer: failingCovLayer,
           planSteps: [
             {
@@ -991,6 +996,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       const reports: Array<{ message: string }> = []
       const visitor = syntaxBans.create({
         filename: "/repo/libs/sample/domain/src/index.ts",
+        sourceCode: { text: "export const x = 1" },
         report: (r: { message: string }) => {
           reports.push(r)
         },
@@ -1371,6 +1377,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
     const reports: Array<{ message: string }> = []
     const visitor = syntaxBans.create({
       filename: "/repo/libs/es/contract/src/index.ts",
+      sourceCode: { text: "export const x = 1" },
       report: (r: { message: string }) => {
         reports.push(r)
       },
@@ -1842,6 +1849,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       const reports: Array<{ message: string }> = []
       const visitor = syntaxBans.create({
         filename: "/repo/libs/sample/domain/src/index.ts",
+        sourceCode: { text: "export const x = 1" },
         report: (r: { message: string }) => {
           reports.push(r)
         },
@@ -1882,6 +1890,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       const reports: Array<{ message: string }> = []
       const visitor = syntaxBans.create({
         filename: "/repo/libs/sample/contract/src/index.ts",
+        sourceCode: { text: "export const x = 1" },
         report: (r: { message: string }) => {
           reports.push(r)
         },
@@ -1911,6 +1920,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       const reports: Array<{ message: string }> = []
       const visitor = syntaxBans.create({
         filename: "/repo/libs/sample/contract/src/index.ts",
+        sourceCode: { text: "export const x = 1" },
         report: (r: { message: string }) => {
           reports.push(r)
         },
@@ -2024,6 +2034,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       const reports: Array<{ message: string }> = []
       const visitor = syntaxBans.create({
         filename: "/repo/libs/sample/domain/src/index.ts",
+        sourceCode: { text: "export const x = 1" },
         report: (r: { message: string }) => {
           reports.push(r)
         },
@@ -3249,6 +3260,154 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       )
       rmSync(dir, { recursive: true, force: true })
       rmSync(homeDir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("PR #28 adjudicated review fixes (F-6.2, F-8.3c, F-11.1, F-12.1, F-14.1, F-20.1a)", () => {
+  it("F-6.2: emits stderr diagnostic when DecisionModel dies in session/doctor while preserving interrupt", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-f62-"))
+    const stderrChunks: Array<string> = []
+    const origWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      stderrChunks.push(String(chunk))
+      return true
+    }) as typeof process.stderr.write
+
+    try {
+      const dyingDecisionLayer = Layer.succeed(
+        DecisionModel.DecisionModel,
+        DecisionModel.DecisionModel.of({
+          [DecisionModel.TypeId]: DecisionModel.TypeId,
+          decide: () => Effect.die(new Error("boom")),
+        }),
+      )
+
+      const res = await runCli(["session"], { repoRoot: dir }, dyingDecisionLayer)
+      expect(res.exitCode).toBe(0)
+      expect(stderrChunks.join("")).toContain("[harness learn] decision model fallback:")
+      expect(stderrChunks.join("")).toContain("boom")
+    } finally {
+      process.stderr.write = origWrite
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("F-8.3c: runDeltaAstAndPluginGates fails when workspace has a HarnessTierTopology violation", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-f83c-"))
+    try {
+      mkdirSync(join(dir, "libs", "sample", "contract", "src"), { recursive: true })
+      writeFileSync(
+        join(dir, "libs", "sample", "contract", "package.json"),
+        JSON.stringify({
+          name: "@sample/contract",
+          nx: { tags: ["scope:sample", "type:contract"] },
+          dependencies: { "@sample/infra": "workspace:*" },
+        }),
+      )
+      const gateResult = await Effect.runPromise(runDeltaAstAndPluginGates(dir, []))
+      match(gateResult)
+        .with({ _tag: "Some" }, ({ value }) => {
+          expect(value.exitCode).toBe(1)
+          expect(value.stderr).toContain("verify:tier-topology")
+          expect(value.stderr).toContain("forbidden-contract-dependency")
+        })
+        .with({ _tag: "None" }, () => {
+          expect.fail("Expected gateResult to be Some")
+        })
+        .exhaustive()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("F-11.1: does not write graph-head.json when Omnigraph sync fails in non-isolated workspace", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-f111-"))
+    const fakeHome = mkdtempSync(join(tmpdir(), "harness-f111-home-"))
+    const origHome = process.env.HOME
+    const origUrl = process.env.OMNIGRAPH_URL
+    try {
+      process.env.HOME = fakeHome
+      Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
+      mkdirSync(join(dir, "libs", "harness", "graph"), { recursive: true })
+      writeFileSync(join(dir, "pnpm-workspace.yaml"), "packages:\n  - 'libs/*'\n")
+      writeFileSync(join(dir, "libs", "harness", "graph", "cluster.yaml"), "name: test\n")
+
+      const res = await runCli(["ingest"], { repoRoot: dir })
+      expect(res.exitCode).toBe(0)
+      const parsed = JSON.parse(res.stdout) as { readonly syncedToOmnigraph: boolean }
+      expect(parsed.syncedToOmnigraph).toBe(false)
+      expect(existsSync(join(dir, ".harness", "graph-head.json"))).toBe(false)
+    } finally {
+      if (origHome !== undefined) process.env.HOME = origHome
+      else Reflect.deleteProperty(process.env, "HOME")
+      if (origUrl !== undefined) process.env.OMNIGRAPH_URL = origUrl
+      else Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(fakeHome, { recursive: true, force: true })
+    }
+  })
+
+  it("F-12.1: logs warning with err.reason when TsCompilerOverlayService falls back to extractTypeGraph", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-f121-"))
+    const stderrChunks: Array<string> = []
+    const origWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      stderrChunks.push(String(chunk))
+      return true
+    }) as typeof process.stderr.write
+
+    try {
+      await runCli(["verify"], { repoRoot: join(dir, "nonexistent-repo"), skipSubprocessVerify: true })
+      expect(stderrChunks.join("")).toContain("TsCompilerOverlayService failed")
+      expect(stderrChunks.join("")).toContain("Repository root path does not exist")
+    } finally {
+      process.stderr.write = origWrite
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("F-14.1: resolveCommandTelemetryOutcome checks exitCode and block/continue decisions for done", () => {
+    expect(
+      resolveCommandTelemetryOutcome("done", { exitCode: 1, stdout: "{}", stderr: "err" }),
+    ).toBe("fail")
+    expect(
+      resolveCommandTelemetryOutcome("done", {
+        exitCode: 0,
+        stdout: '{"decision":"block"}',
+        stderr: "",
+      }),
+    ).toBe("fail")
+    expect(
+      resolveCommandTelemetryOutcome("done", {
+        exitCode: 0,
+        stdout: '{"decision":"continue"}',
+        stderr: "",
+      }),
+    ).toBe("fail")
+    expect(
+      resolveCommandTelemetryOutcome("done", { exitCode: 0, stdout: "{}", stderr: "" }),
+    ).toBe("ok")
+  })
+
+  it("F-20.1a: recordTelemetry writes telemetry when skipBackgroundDaemons is false", () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-f201a-"))
+    try {
+      recordTelemetry(
+        { repoRoot: dir, skipBackgroundDaemons: false },
+        {
+          surface: "cli",
+          category: "lifecycle",
+          toolName: "help",
+          outcome: "ok",
+          durationMs: 1,
+        },
+      )
+      const events = readTelemetryEvents(dir, nodeSyncHostIo)
+      expect(events.length).toBe(1)
+      expect(events[0]?.toolName).toBe("help")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 })

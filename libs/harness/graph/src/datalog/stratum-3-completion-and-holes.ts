@@ -487,6 +487,58 @@ export const runStratum3CompletionAndHoles = (
   }
 }
 
+export const runGraphInferenceSync = (
+  harnessGraph: HarnessGraph,
+  priors?: SemanticEdgePriors,
+): GraphInferenceResult => {
+  const ctx = extractEdbTuplesFromGraph(harnessGraph, priors)
+  const proofReg = makeProofRegistrar()
+  const s12 = runStratum1And2(ctx, proofReg)
+  const s3 = runStratum3CompletionAndHoles(ctx, s12, proofReg, priors)
+
+  const antiPatterns = [...s12.stratum2.antiPatterns].sort((a, b) =>
+    a.ruleId !== b.ruleId
+      ? a.ruleId.localeCompare(b.ruleId)
+      : a.nodeKey !== b.nodeKey
+        ? a.nodeKey.localeCompare(b.nodeKey)
+        : (a.targetKey ?? "").localeCompare(b.targetKey ?? ""),
+  )
+
+  const suggestedEdges = [...s3.suggestedEdges].sort((a, b) =>
+    a.ruleId !== b.ruleId
+      ? a.ruleId.localeCompare(b.ruleId)
+      : a.relationId !== b.relationId
+        ? a.relationId.localeCompare(b.relationId)
+        : a.targetEntityKey.localeCompare(b.targetEntityKey),
+  )
+
+  const proofs = Array.from(proofReg.proofsById.values()).sort((a, b) =>
+    a.stratum !== b.stratum ? a.stratum - b.stratum : a.proofId.localeCompare(b.proofId),
+  )
+
+  let maxDepth = 0
+  for (const [, ann] of s12.stratum1.collectedCallReachProvenance) {
+    if (ann.proofHeight > maxDepth) maxDepth = ann.proofHeight
+  }
+  for (const proof of proofReg.proofsById.values()) {
+    if (proof.proofHeight !== undefined && proof.proofHeight > maxDepth) maxDepth = proof.proofHeight
+  }
+  const hasGraphContent = Graph.nodeCount(harnessGraph.graph) > 0 || ctx.directCallPairs.length > 0
+  const iterations = hasGraphContent ? Math.max(1, maxDepth) : 0
+
+  return {
+    effectiveRequires: s12.stratum1.effectiveRequires,
+    effectiveFailsWith: s12.stratum1.effectiveFailsWith,
+    effectiveLayerDeps: s12.stratum1.effectiveLayerDeps,
+    effectiveTestReach: s12.stratum1.effectiveTestReach,
+    antiPatterns,
+    suggestedEdges,
+    typedHoleBundles: s3.typedHoleBundles,
+    proofs,
+    iterations,
+  }
+}
+
 export const runGraphInferencePipeline = Effect.fn("GraphInfer.runPipeline")(function* (
   harnessGraph: HarnessGraph,
   priors?: SemanticEdgePriors,
@@ -494,54 +546,7 @@ export const runGraphInferencePipeline = Effect.fn("GraphInfer.runPipeline")(fun
   yield* decideConceptLattice(HARNESS_PERA_CONCEPT_LATTICE_CONFIG)
 
   return yield* Effect.try({
-    try: (): GraphInferenceResult => {
-      const ctx = extractEdbTuplesFromGraph(harnessGraph, priors)
-      const proofReg = makeProofRegistrar()
-      const s12 = runStratum1And2(ctx, proofReg)
-      const s3 = runStratum3CompletionAndHoles(ctx, s12, proofReg, priors)
-
-      const antiPatterns = [...s12.stratum2.antiPatterns].sort((a, b) =>
-        a.ruleId !== b.ruleId
-          ? a.ruleId.localeCompare(b.ruleId)
-          : a.nodeKey !== b.nodeKey
-            ? a.nodeKey.localeCompare(b.nodeKey)
-            : (a.targetKey ?? "").localeCompare(b.targetKey ?? ""),
-      )
-
-      const suggestedEdges = [...s3.suggestedEdges].sort((a, b) =>
-        a.ruleId !== b.ruleId
-          ? a.ruleId.localeCompare(b.ruleId)
-          : a.relationId !== b.relationId
-            ? a.relationId.localeCompare(b.relationId)
-            : a.targetEntityKey.localeCompare(b.targetEntityKey),
-      )
-
-      const proofs = Array.from(proofReg.proofsById.values()).sort((a, b) =>
-        a.stratum !== b.stratum ? a.stratum - b.stratum : a.proofId.localeCompare(b.proofId),
-      )
-
-      let maxDepth = 0
-      for (const [, ann] of s12.stratum1.collectedCallReachProvenance) {
-        if (ann.proofHeight > maxDepth) maxDepth = ann.proofHeight
-      }
-      for (const proof of proofReg.proofsById.values()) {
-        if (proof.proofHeight !== undefined && proof.proofHeight > maxDepth) maxDepth = proof.proofHeight
-      }
-      const hasGraphContent = Graph.nodeCount(harnessGraph.graph) > 0 || ctx.directCallPairs.length > 0
-      const iterations = hasGraphContent ? Math.max(1, maxDepth) : 0
-
-      return {
-        effectiveRequires: s12.stratum1.effectiveRequires,
-        effectiveFailsWith: s12.stratum1.effectiveFailsWith,
-        effectiveLayerDeps: s12.stratum1.effectiveLayerDeps,
-        effectiveTestReach: s12.stratum1.effectiveTestReach,
-        antiPatterns,
-        suggestedEdges,
-        typedHoleBundles: s3.typedHoleBundles,
-        proofs,
-        iterations,
-      }
-    },
+    try: (): GraphInferenceResult => runGraphInferenceSync(harnessGraph, priors),
     catch: (err) =>
       new GraphInferenceError({
         reason: "d2ts-execution-failed",

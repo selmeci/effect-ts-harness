@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs"
+import { resolve } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import { Cause, Effect, Exit, Layer } from "effect"
 import { match } from "ts-pattern"
@@ -201,4 +203,13 @@ describe("HarnessCli.dispatchCommand (SPEC-0011 §4)", () => {
         }
       }).pipe(Effect.provide(HarnessCommandRegistryLive)),
   )
+
+  it("F-9.1a: command-registry.ts has zero static imports of repo-checks.command or scenario.command", () => {
+    const registryPath = resolve(import.meta.dirname, "../src/commands/command-registry.ts")
+    const source = readFileSync(registryPath, "utf8")
+    expect(source).not.toMatch(/from\s+["']\.\/repo-checks\.command\.js["']/)
+    expect(source).not.toMatch(/from\s+["']\.\/scenario\.command\.js["']/)
+    expect(source).toContain('import("./repo-checks.command.js")')
+    expect(source).toContain('import("./scenario.command.js")')
+  })
 })

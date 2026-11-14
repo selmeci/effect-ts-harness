@@ -125,7 +125,7 @@ const resolvePackageTag = (
         .with({ _tag: "Some" }, ({ value }): PackageTag | undefined => {
           const tags = value.nx?.tags
           if (!tags) return undefined
-          if (tags.includes("type:domain")) return "domain"
+          if (tags.includes("type:domain") || tags.includes("type:core")) return "domain"
           if (tags.includes("type:infra")) return "infra"
           if (tags.includes("type:app")) return "app"
           if (tags.includes("type:contract") && !tags.includes("type:service")) return "contract"

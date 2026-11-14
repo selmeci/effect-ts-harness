@@ -18,6 +18,14 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { Schema } from "effect"
+import { match } from "ts-pattern"
+import {
+  SubprocessArg,
+  SubprocessCommand,
+  validateSubprocessInput,
+  WorkspaceFilePath,
+} from "@harness/contract"
 import type {
   ExtendedHostIo,
   SyncHostDirEntry,
@@ -25,6 +33,16 @@ import type {
   SyncHostExecResult,
 } from "@harness/service"
 
+/**
+ * Concrete Node.js implementation of `ExtendedHostIo`.
+ *
+ * Architectural rationale ("why"): TypeScript's `ts.CompilerHost` (`ts.createProgram`)
+ * and `ts-morph` require strictly synchronous filesystem callbacks (`fileExists`,
+ * `readFile`, `realpath`, `getDirectories`) that cannot yield Effect fibers. Isolating
+ * those synchronous bindings here keeps `@harness/graph`, `@harness/gates`, and
+ * `@harness/ingest` free of direct `node:fs` / `node:child_process` imports while
+ * Effect-native async workflows use `WorkspaceFs` and `HarnessSubprocessRunner`.
+ */
 export const nodeSyncHostIo: ExtendedHostIo = {
   existsSync: (filePath: string): boolean => existsSync(filePath),
   isFileSync: (filePath: string): boolean => {
@@ -68,6 +86,28 @@ export const nodeSyncHostIo: ExtendedHostIo = {
     args: ReadonlyArray<string>,
     options?: SyncHostExecOptions,
   ): SyncHostExecResult => {
+    const trimmedCommand = command.trim()
+    const validationErr =
+      trimmedCommand.length === 0
+        ? undefined
+        : validateSubprocessInput({
+            command: SubprocessCommand.make(trimmedCommand),
+            args: args.map((arg) => SubprocessArg.make(arg)),
+            ...(options?.cwd !== undefined ? { cwd: WorkspaceFilePath.make(options.cwd) } : {}),
+          })
+    const invalidReason =
+      validationErr === undefined
+        ? "Subprocess command must not be empty"
+        : match(validationErr)
+            .with({ _tag: "Some" }, ({ value }) => value.reason)
+            .with({ _tag: "None" }, () => undefined)
+            .exhaustive()
+    if (invalidReason !== undefined) {
+      Schema.decodeSync(
+        Schema.String.pipe(Schema.check(Schema.makeFilter(() => invalidReason))),
+      )("")
+    }
+
     const result = spawnSync(command, [...args], {
       cwd: options?.cwd,
       encoding: "utf8",
@@ -77,10 +117,19 @@ export const nodeSyncHostIo: ExtendedHostIo = {
       env: options?.env,
       windowsHide: true,
     })
+    const errCode =
+      result.error !== undefined && "code" in result.error && typeof result.error.code === "string"
+        ? result.error.code
+        : undefined
+    const timedOut = errCode === "ETIMEDOUT"
+    const spawnError = result.error !== undefined ? result.error.message : undefined
     return {
-      exitCode: result.status ?? (result.error !== undefined ? 1 : 0),
+      exitCode: result.status ?? -1,
       stdout: result.stdout ?? "",
       stderr: result.stderr ?? (result.error !== undefined ? result.error.message : ""),
+      ...(spawnError !== undefined ? { spawnError } : {}),
+      signal: result.signal,
+      timedOut,
     }
   },
   rmRecursiveSync: (targetPath: string): void => {

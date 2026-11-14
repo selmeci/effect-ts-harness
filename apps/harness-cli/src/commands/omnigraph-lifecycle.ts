@@ -37,6 +37,41 @@ export const resolveClusterRepoRoot = (repoRoot: string): string =>
     : findWorkspaceRoot(repoRoot)
 
 const LockJsonSchema = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
+const LOCK_ID_PATTERN = /^[A-Za-z0-9._-]+$/
+
+export const isValidLockId = (value: string): boolean => LOCK_ID_PATTERN.test(value)
+
+export const isLoopbackOmnigraphUrl = (rawUrl: string): boolean =>
+  Result.getOrElse(
+    Result.try(() => {
+      const parsed = new URL(rawUrl)
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return false
+      }
+      return (
+        parsed.hostname === "127.0.0.1" ||
+        parsed.hostname === "localhost" ||
+        parsed.hostname === "::1" ||
+        parsed.hostname === "[::1]"
+      )
+    }),
+    () => false,
+  )
+
+export const isSafeOmnigraphPidToKill = (pid: unknown): pid is number => {
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 1 || pid === process.pid) {
+    return false
+  }
+  const procCmdlinePath = `/proc/${pid}/cmdline`
+  if (nodeSyncHostIo.existsSync(procCmdlinePath)) {
+    const cmdline = Result.getOrElse(
+      Result.try(() => nodeSyncHostIo.readTextSync(procCmdlinePath)),
+      () => "",
+    )
+    return cmdline.includes("omnigraph")
+  }
+  return true
+}
 
 function unlockOmnigraphClusterIfNeeded(
   omnigraphBin: string,
@@ -45,8 +80,8 @@ function unlockOmnigraphClusterIfNeeded(
 ): void {
   const lockIds = new Set<string>()
   if (applyOutput) {
-    const lockMatch = applyOutput.match(/Admission lock:\s*([A-Za-z0-9_-]+)/)
-    if (lockMatch?.[1]) {
+    const lockMatch = applyOutput.match(/Admission lock:\s*([A-Za-z0-9._-]+)/)
+    if (lockMatch?.[1] && isValidLockId(lockMatch[1])) {
       lockIds.add(lockMatch[1])
     }
   }
@@ -62,11 +97,21 @@ function unlockOmnigraphClusterIfNeeded(
             for (const key of ["lock_id", "id", "lockId", "holder_id"]) {
               const val = value[key]
               if (typeof val === "string" && val.length > 0) {
-                lockIds.add(val)
+                if (isValidLockId(val)) {
+                  lockIds.add(val)
+                } else {
+                  process.stderr.write(
+                    `[harness:omnigraph] Ignoring invalid lock.json ${key}: ${val}\n`,
+                  )
+                }
               }
             }
           })
-          .with({ _tag: "None" }, () => undefined)
+          .with({ _tag: "None" }, () => {
+            process.stderr.write(
+              `[harness:omnigraph] Warning: failed to decode ${lockPath} as JSON\n`,
+            )
+          })
           .exhaustive()
       }),
       () => undefined,
@@ -75,11 +120,16 @@ function unlockOmnigraphClusterIfNeeded(
   for (const lockId of lockIds) {
     Result.getOrElse(
       Result.try(() => {
-        nodeSyncHostIo.execFileSync(
+        const res = nodeSyncHostIo.execFileSync(
           omnigraphBin,
           ["cluster", "force-unlock", lockId, "--target", clusterRootDir],
           { timeoutMs: 5_000 },
         )
+        if (res.exitCode !== 0) {
+          process.stderr.write(
+            `[harness:omnigraph] force-unlock failed for ${lockId} (exitCode=${res.exitCode}): ${res.stderr || res.stdout}\n`,
+          )
+        }
       }),
       () => undefined,
     )
@@ -164,9 +214,27 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
     if (nodeSyncHostIo.existsSync(serverJsonPath)) {
       const decodedMetaOpt = yield* Effect.try({
         try: () => nodeSyncHostIo.readTextSync(serverJsonPath),
-        catch: () => "",
+        catch: (err) => {
+          process.stderr.write(
+            `[harness:omnigraph] Warning: failed to read ${serverJsonPath}: ${err instanceof Error ? err.message : String(err)}\n`,
+          )
+          return ""
+        },
       }).pipe(
-        Effect.flatMap((raw) => Effect.fromOption(decodeOmnigraphServerMeta(raw))),
+        Effect.flatMap((raw) => {
+          const decoded = decodeOmnigraphServerMeta(raw)
+          match(decoded)
+            .with({ _tag: "None" }, () => {
+              if (raw.length > 0) {
+                process.stderr.write(
+                  `[harness:omnigraph] Warning: failed to decode ${serverJsonPath} as OmnigraphServerMeta JSON\n`,
+                )
+              }
+            })
+            .with({ _tag: "Some" }, () => undefined)
+            .exhaustive()
+          return Effect.fromOption(decoded)
+        }),
         Effect.option,
       )
       serverMeta = match(decodedMetaOpt)
@@ -185,6 +253,13 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
         ? serverMeta.baseUrl
         : `http://127.0.0.1:${defaultPort}`)
 
+    if (!isLoopbackOmnigraphUrl(targetBaseUrl)) {
+      process.stderr.write(
+        `[harness:omnigraph] Refusing non-loopback Omnigraph URL/bind host: ${targetBaseUrl}\n`,
+      )
+      return false
+    }
+
     const configDir = join(clusterRepoRoot, "libs", "harness", "graph")
     const stampPath = join(clusterRootDir, ".config-stamp")
     const expectedStamp = computeOmnigraphConfigStamp(configDir)
@@ -195,13 +270,19 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
 
     if (configDrifted) {
       const serverPid = serverMeta?.pid
-      if (typeof serverPid === "number") {
+      const safeToKill = isSafeOmnigraphPidToKill(serverPid)
+      if (safeToKill) {
         yield* Effect.try({
           try: () => {
             process.kill(serverPid, "SIGTERM")
           },
           catch: () => undefined,
         }).pipe(Effect.orElseSucceed(() => undefined))
+      }
+      if (!safeToKill && serverPid !== undefined) {
+        process.stderr.write(
+          `[harness:omnigraph] Skipping process.kill for unsafe or non-omnigraph PID: ${String(serverPid)}\n`,
+        )
       }
       yield* Effect.try({
         try: () => {
@@ -233,22 +314,9 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
     const omnigraphServerBin = join(homeBin, "omnigraph-server")
 
     if (!nodeSyncHostIo.existsSync(omnigraphBin) || !nodeSyncHostIo.existsSync(omnigraphServerBin)) {
-      yield* Effect.try({
-        try: () => {
-          nodeSyncHostIo.execFileSync(
-            "bash",
-            [
-              "-c",
-              "curl -fsSL https://raw.githubusercontent.com/ModernRelay/omnigraph/main/scripts/install.sh | VERSION=v0.14.0 bash",
-            ],
-            { timeoutMs: 60_000 },
-          )
-        },
-        catch: () => undefined,
-      }).pipe(Effect.orElseSucceed(() => undefined))
-    }
-
-    if (!nodeSyncHostIo.existsSync(omnigraphBin) || !nodeSyncHostIo.existsSync(omnigraphServerBin)) {
+      process.stderr.write(
+        `[harness:omnigraph] Missing omnigraph binaries (${omnigraphBin}, ${omnigraphServerBin}). Install omnigraph v0.14.0 into ~/.local/bin before retrying.\n`,
+      )
       return false
     }
 

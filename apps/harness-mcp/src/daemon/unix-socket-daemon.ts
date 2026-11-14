@@ -143,16 +143,30 @@ export const startHarnessDaemonServer = (
       const services = yield* Effect.context<never>()
       const runPromise = Effect.runPromiseWith(services)
       const scope = yield* Scope.make()
-      const info = yield* startScopedUnixSocketDaemon(WorkspaceFilePath.make(repoRoot), {
+      const outcome = yield* startScopedUnixSocketDaemon(WorkspaceFilePath.make(repoRoot), {
         lineHandler: createDaemonLineHandler(repoRoot),
       }).pipe(
         Scope.provide(scope),
         Effect.provide(UnixSocketDaemonLive),
+        Effect.map(
+          (info): HarnessDaemonServerHandle => ({
+            socketPath: info.socketPath,
+            close: () => runPromise(Scope.close(scope, Exit.void)),
+          }),
+        ),
+        Effect.catchTag("DaemonServerError", (err) => {
+          if (err.reason.includes("already alive")) {
+            return Scope.close(scope, Exit.void).pipe(
+              Effect.as<HarnessDaemonServerHandle>({
+                socketPath: err.socketPath,
+                close: () => Promise.resolve(),
+              }),
+            )
+          }
+          return Effect.fail(err)
+        }),
         Effect.onError(() => Scope.close(scope, Exit.void)),
       )
-      return {
-        socketPath: info.socketPath,
-        close: () => runPromise(Scope.close(scope, Exit.void)),
-      }
+      return outcome
     }),
   )

@@ -1,12 +1,16 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Effect, Layer, Option, Schema } from "effect"
+import { Cause, Effect, Layer, Logger, Option, Schema } from "effect"
 import * as AiError from "effect/ai/AiError"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import {
   DecisionCachePayloadJson,
   DecisionCacheTtlMillis,
+  ErrorReasonMessage,
   NonNegativeCount,
+  WorkspaceFilePath,
+  WorkspaceFsError,
+  WorkspaceFsOperation,
 } from "@harness/contract"
 import { DecisionCachePort } from "@harness/service"
 import {
@@ -42,24 +46,44 @@ const makeInMemoryDecisionCachePortLayer = (): Layer.Layer<DecisionCachePort> =>
   >()
   let hits = 0
   let misses = 0
+  const lookup = (key: DecisionCacheKey) =>
+    Effect.sync(() => {
+      const entry = entries.get(key)
+      if (entry === undefined || Date.now() > entry.expiresAtMs) {
+        if (entry !== undefined) entries.delete(key)
+        misses += 1
+        return Option.none<DecisionCachePayloadJson>()
+      }
+      hits += 1
+      return Option.some(entry.payload)
+    })
+  const store = (
+    key: DecisionCacheKey,
+    payload: DecisionCachePayloadJson,
+    ttlMillis: DecisionCacheTtlMillis,
+  ) =>
+    Effect.sync(() => {
+      entries.set(key, {
+        payload,
+        expiresAtMs: Date.now() + ttlMillis,
+      })
+    })
   return Layer.succeed(DecisionCachePort, {
-    lookup: (key) =>
-      Effect.sync(() => {
-        const entry = entries.get(key)
-        if (entry === undefined || Date.now() > entry.expiresAtMs) {
-          if (entry !== undefined) entries.delete(key)
-          misses += 1
-          return Option.none<DecisionCachePayloadJson>()
-        }
-        hits += 1
-        return Option.some(entry.payload)
-      }),
-    store: (key, payload, ttlMillis) =>
-      Effect.sync(() => {
-        entries.set(key, {
-          payload,
-          expiresAtMs: Date.now() + ttlMillis,
-        })
+    lookup,
+    store,
+    lookupOrCompute: ({ key, ttlMillis, compute }) =>
+      Effect.gen(function* () {
+        const existing = yield* lookup(key)
+        return yield* match(existing)
+          .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
+          .with({ _tag: "None" }, () =>
+            Effect.gen(function* () {
+              const computed = yield* compute
+              yield* store(key, computed, ttlMillis)
+              return computed
+            }),
+          )
+          .exhaustive()
       }),
     clear: Effect.sync(() => {
       entries.clear()
@@ -467,5 +491,95 @@ describe("CachedDecisionModel — Content-Addressable Caching & Request Coalesci
         expect(stats.misses).toBe(1)
         expect(stats.size).toBe(1)
       }).pipe(Effect.provide(makeInMemoryDecisionCachePortLayer())),
+  )
+
+  it.effect(
+    "F-15.2: lookupOrComputeDecisionPayload delegates directly to DecisionCachePort.lookupOrCompute",
+    () =>
+      Effect.gen(function* () {
+        let delegatedCalls = 0
+        const delegatedLayer = Layer.succeed(DecisionCachePort, {
+          lookup: () => Effect.succeed(Option.none<DecisionCachePayloadJson>()),
+          store: () => Effect.void,
+          lookupOrCompute: () =>
+            Effect.sync(() => {
+              delegatedCalls += 1
+              return DecisionCachePayloadJson.make('{"delegated":true}')
+            }),
+          clear: Effect.void,
+          stats: Effect.succeed({
+            hits: NonNegativeCount.make(0),
+            misses: NonNegativeCount.make(0),
+            coalescedRequests: NonNegativeCount.make(0),
+            size: NonNegativeCount.make(0),
+          }),
+        })
+
+        const key = computeDecisionCacheKey({
+          taskId: "f-15-2-delegate",
+          input: { step: "delegate" },
+        })
+        const result = yield* lookupOrComputeDecisionPayload({
+          key,
+          ttlMillis: DecisionCacheTtlMillis.make(1000),
+          compute: Effect.succeed(DecisionCachePayloadJson.make('{"delegated":false}')),
+        }).pipe(Effect.provide(delegatedLayer))
+
+        expect(delegatedCalls).toBe(1)
+        expect(result).toBe('{"delegated":true}')
+      }),
+  )
+
+  it.effect(
+    "F-15.2: WorkspaceFsError on lookup/store logs warning and degrades cleanly to innerModel",
+    () =>
+      Effect.gen(function* () {
+        const warnings: Array<string> = []
+        const captureLogger = Logger.make((opts) => {
+          if (opts.logLevel === "Warn") {
+            warnings.push(String(opts.message))
+          }
+        })
+        const counter = { count: 0 }
+        const failingCachePort = Layer.succeed(DecisionCachePort, {
+          lookup: () =>
+            Effect.fail(
+              new WorkspaceFsError({
+                filePath: WorkspaceFilePath.make("/tmp/cache.json"),
+                operation: WorkspaceFsOperation.make("read"),
+                reason: ErrorReasonMessage.make("simulated lookup EACCES"),
+              }),
+            ),
+          store: () =>
+            Effect.fail(
+              new WorkspaceFsError({
+                filePath: WorkspaceFilePath.make("/tmp/cache.json"),
+                operation: WorkspaceFsOperation.make("write"),
+                reason: ErrorReasonMessage.make("simulated store ENOSPC"),
+              }),
+            ),
+          lookupOrCompute: ({ compute }) => compute,
+          clear: Effect.void,
+          stats: Effect.succeed({
+            hits: NonNegativeCount.make(0),
+            misses: NonNegativeCount.make(0),
+            coalescedRequests: NonNegativeCount.make(0),
+            size: NonNegativeCount.make(0),
+          }),
+        })
+
+        const wrappedLayer = wrapDecisionModelLayer(makeCountingDecisionModelLayer(counter), {
+          taskId: "f-15-2-fallback",
+        }).pipe(Layer.provideMerge(failingCachePort))
+
+        const result = yield* routeStep("Use Schema for boundaries").pipe(
+          Effect.provide(Layer.mergeAll(wrappedLayer, Logger.layer([captureLogger]))),
+        )
+
+        expect(counter.count).toBe(1)
+        expect(result).toBe("schema")
+        expect(warnings.some((w) => w.includes("Decision cache lookup failed"))).toBe(true)
+        expect(warnings.some((w) => w.includes("Decision cache store failed"))).toBe(true)
+      }),
   )
 })

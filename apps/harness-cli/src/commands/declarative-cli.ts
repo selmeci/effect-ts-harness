@@ -90,8 +90,17 @@ export const makeHarnessRootCommand = (
     },
   )
 
-  const routeCommand = CliCommand.make("route", { args: variadicArgs }, ({ args }) =>
-    runSubcommand("route", args),
+  const routeCommand = CliCommand.make(
+    "route",
+    {
+      format: Flag.optional(Flag.String("format")),
+      args: variadicArgs,
+    },
+    ({ format, args }) => {
+      const raw: Array<string> = [...args]
+      appendStringFlag(raw, "format", format)
+      return runSubcommand("route", raw)
+    },
   )
 
   const planCheckCommand = CliCommand.make(
@@ -113,11 +122,13 @@ export const makeHarnessRootCommand = (
     "plan-synth",
     {
       write: boolFlag("write"),
+      verify: boolFlag("verify"),
       args: variadicArgs,
     },
-    ({ write, args }) => {
+    ({ write, verify, args }) => {
       const raw: Array<string> = [...args]
       appendBoolFlag(raw, "write", write)
+      appendBoolFlag(raw, "verify", verify)
       return runSubcommand("plan-synth", raw)
     },
   )
@@ -127,18 +138,29 @@ export const makeHarnessRootCommand = (
     {
       rule: Flag.optional(Flag.String("rule")),
       write: boolFlag("write"),
+      verify: boolFlag("verify"),
       args: variadicArgs,
     },
-    ({ rule, write, args }) => {
+    ({ rule, write, verify, args }) => {
       const raw: Array<string> = [...args]
       appendStringFlag(raw, "rule", rule)
       appendBoolFlag(raw, "write", write)
+      appendBoolFlag(raw, "verify", verify)
       return runSubcommand("repair", raw)
     },
   )
 
-  const verifyCommand = CliCommand.make("verify", { args: variadicArgs }, ({ args }) =>
-    runSubcommand("verify", args),
+  const verifyCommand = CliCommand.make(
+    "verify",
+    {
+      format: Flag.optional(Flag.String("format")),
+      args: variadicArgs,
+    },
+    ({ format, args }) => {
+      const raw: Array<string> = [...args]
+      appendStringFlag(raw, "format", format)
+      return runSubcommand("verify", raw)
+    },
   )
 
   const doneCommand = CliCommand.make(
@@ -221,8 +243,17 @@ export const makeHarnessRootCommand = (
       },
     )
 
-  const ingestCommand = CliCommand.make("ingest", { args: variadicArgs }, ({ args }) =>
-    runSubcommand("ingest", args),
+  const ingestCommand = CliCommand.make(
+    "ingest",
+    {
+      format: Flag.optional(Flag.String("format")),
+      args: variadicArgs,
+    },
+    ({ format, args }) => {
+      const raw: Array<string> = [...args]
+      appendStringFlag(raw, "format", format)
+      return runSubcommand("ingest", raw)
+    },
   )
 
   const makeSessionSubcommand = (name: "session" | "doctor") =>
@@ -281,15 +312,17 @@ export const makeHarnessRootCommand = (
       baseline: Flag.optional(Flag.String("baseline")),
       write: boolFlag("write"),
       schema: Flag.optional(Flag.String("schema")),
+      module: Flag.optional(Flag.String("module")),
       out: Flag.optional(Flag.String("out")),
       update: boolFlag("update"),
       args: variadicArgs,
     },
-    ({ baseline, write, schema, out, update, args }) => {
+    ({ baseline, write, schema, module, out, update, args }) => {
       const raw: Array<string> = [...args]
       appendStringFlag(raw, "baseline", baseline)
       appendBoolFlag(raw, "write", write)
       appendStringFlag(raw, "schema", schema)
+      appendStringFlag(raw, "module", module)
       appendStringFlag(raw, "out", out)
       appendBoolFlag(raw, "update", update)
       return runSubcommand("check-openapi", raw)
@@ -300,11 +333,13 @@ export const makeHarnessRootCommand = (
     "check-migrations",
     {
       dialect: Flag.optional(Flag.String("dialect")),
+      dir: Flag.optional(Flag.String("dir")),
       args: variadicArgs,
     },
-    ({ dialect, args }) => {
+    ({ dialect, dir, args }) => {
       const raw: Array<string> = [...args]
       appendStringFlag(raw, "dialect", dialect)
+      appendStringFlag(raw, "dir", dir)
       return runSubcommand("check-migrations", raw)
     },
   )
@@ -314,13 +349,17 @@ export const makeHarnessRootCommand = (
     {
       name: Flag.optional(Flag.String("name")),
       version: Flag.optional(Flag.String("version")),
+      module: Flag.optional(Flag.String("module")),
+      snapshot: Flag.optional(Flag.String("snapshot")),
       update: boolFlag("update"),
       args: variadicArgs,
     },
-    ({ name, version, update, args }) => {
+    ({ name, version, module, snapshot, update, args }) => {
       const raw: Array<string> = [...args]
       appendStringFlag(raw, "name", name)
       appendStringFlag(raw, "version", version)
+      appendStringFlag(raw, "module", module)
+      appendStringFlag(raw, "snapshot", snapshot)
       appendBoolFlag(raw, "update", update)
       return runSubcommand("check-event-schemas", raw)
     },
@@ -329,22 +368,39 @@ export const makeHarnessRootCommand = (
   const scenarioCommand = CliCommand.make(
     "scenario",
     {
+      id: Flag.optional(Flag.String("id")),
+      step: Flag.optional(Flag.String("step")),
       filter: Flag.optional(Flag.String("filter")),
       conversation: Flag.optional(Flag.String("conversation")),
       transcript: Flag.optional(Flag.String("transcript")),
+      out: Flag.optional(Flag.String("out")),
+      keepHidden: boolFlag("keep-hidden"),
       args: variadicArgs,
     },
-    ({ filter, conversation, transcript, args }) => {
+    ({ id, step, filter, conversation, transcript, out, keepHidden, args }) => {
       const raw: Array<string> = [...args]
+      appendStringFlag(raw, "id", id)
+      appendStringFlag(raw, "step", step)
       appendStringFlag(raw, "filter", filter)
       appendStringFlag(raw, "conversation", conversation)
       appendStringFlag(raw, "transcript", transcript)
+      appendStringFlag(raw, "out", out)
+      appendBoolFlag(raw, "keep-hidden", keepHidden)
       return runSubcommand("scenario", raw)
     },
   )
 
-  const helpCommand = CliCommand.make("help", { args: variadicArgs }, ({ args }) =>
-    runSubcommand("help", args),
+  const helpCommand = CliCommand.make(
+    "help",
+    {
+      format: Flag.optional(Flag.String("format")),
+      args: variadicArgs,
+    },
+    ({ format, args }) => {
+      const raw: Array<string> = [...args]
+      appendStringFlag(raw, "format", format)
+      return runSubcommand("help", raw)
+    },
   )
 
   return CliCommand.make("harness").pipe(
@@ -390,7 +446,26 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
       stderr: "",
     }
   }
-  if ((argv.includes("--help") || argv.includes("-h")) && isCommand(requested)) {
+  if (requested === "guard" && (argv.includes("--help") || argv.includes("-h"))) {
+    const isAntigravity = argv.includes("--format=antigravity")
+    const reason = "guard: --help flag is not permitted on guard"
+    return isAntigravity
+      ? {
+          exitCode: 0,
+          stdout: JSON.stringify({ decision: "deny", reason }),
+          stderr: "",
+        }
+      : {
+          exitCode: 2,
+          stdout: "",
+          stderr: reason,
+        }
+  }
+  if (
+    requested !== "guard" &&
+    (argv.includes("--help") || argv.includes("-h")) &&
+    isCommand(requested)
+  ) {
     return {
       exitCode: 0,
       stdout: `harness help\nusage: harness <${COMMANDS.join("|")}>`,
@@ -409,12 +484,8 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
     maybeDecisionLayer !== undefined ? { ...options, decisionLayer: maybeDecisionLayer } : options
   const decisionLayer = effectiveOptions?.decisionLayer ?? LocalDecisionModel
   const liveCommandLayer = makeLiveCliCommandRegistryLayer(effectiveOptions, decisionLayer)
-  const resultRef = yield* Ref.make<CliResult>({
-    exitCode: 0,
-    stdout: "",
-    stderr: "",
-  })
-  const rootCmd = makeHarnessRootCommand((result) => Ref.set(resultRef, result))
+  const resultRef = yield* Ref.make<Option.Option<CliResult>>(Option.none())
+  const rootCmd = makeHarnessRootCommand((result) => Ref.set(resultRef, Option.some(result)))
   const mainLayer = Layer.mergeAll(
     HarnessInfraLive,
     decisionLayer,
@@ -453,6 +524,21 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
   )
 
   if (cliErr !== undefined) {
+    if (requested === "guard") {
+      const isAntigravity = argv.includes("--format=antigravity")
+      const reason = `guard: CLI parse failure (${cliErr})`
+      return isAntigravity
+        ? {
+            exitCode: 0,
+            stdout: JSON.stringify({ decision: "deny", reason }),
+            stderr: "",
+          }
+        : {
+            exitCode: 2,
+            stdout: "",
+            stderr: reason,
+          }
+    }
     return {
       exitCode: 1,
       stdout: "",
@@ -460,5 +546,26 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
     }
   }
 
-  return yield* Ref.get(resultRef)
+  const maybeResult = yield* Ref.get(resultRef)
+  return match(maybeResult)
+    .with({ _tag: "Some" }, ({ value }) => value)
+    .with({ _tag: "None" }, () => {
+      if (requested === "guard") {
+        const isAntigravity = argv.includes("--format=antigravity")
+        const reason = "guard: subcommand handler did not execute"
+        return isAntigravity
+          ? {
+              exitCode: 0,
+              stdout: JSON.stringify({ decision: "deny", reason }),
+              stderr: "",
+            }
+          : {
+              exitCode: 2,
+              stdout: "",
+              stderr: reason,
+            }
+      }
+      return { exitCode: 0, stdout: "", stderr: "" }
+    })
+    .exhaustive()
 })

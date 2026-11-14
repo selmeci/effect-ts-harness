@@ -15,10 +15,13 @@ import { UnixSocketDaemonPort, type UnixSocketDaemonPortShape } from "@harness/s
 
 const MAX_DAEMON_BUFFER_BYTES = 1_048_576
 const DAEMON_SOCKET_TIMEOUT_MS = 5000
+const PROBE_SOCKET_TIMEOUT_MS = 1500
+
+type SocketProbeResult = "absent" | "dead-socket" | "alive" | "unknown-error"
 
 const DaemonLineRequestSchema = Schema.Struct({
   id: Schema.optional(Schema.String),
-  command: Schema.Literals(["ping", "diagnostics", "ast-gates", "extract-graph"]),
+  command: Schema.Literals(["plan-check", "gc", "verify", "bench"]),
 })
 
 const decodeDaemonLineRequest = Schema.decodeOption(
@@ -88,34 +91,51 @@ export const queryUnixSocketLine = Effect.fn("UnixSocketDaemon.queryLine")(funct
   })
 })
 
-const probeSocketAlive = (
-  fs: FileSystem.FileSystem,
-  socketPath: DaemonSocketPath,
-): Effect.Effect<boolean> =>
+const probeSocketState = (socketPath: DaemonSocketPath): Effect.Effect<SocketProbeResult> =>
   Effect.gen(function* () {
-    const exists = yield* fs.exists(socketPath).pipe(Effect.orElseSucceed(() => false))
-    if (!exists) {
-      return false
+    const statResult = yield* Effect.try({
+      try: () => nodeFs.lstatSync(socketPath),
+      catch: (err): SocketProbeResult => {
+        const code =
+          err instanceof Error && "code" in err && typeof err.code === "string"
+            ? err.code
+            : undefined
+        return code === "ENOENT" ? "absent" : "unknown-error"
+      },
+    }).pipe(
+      Effect.map((stat): SocketProbeResult | nodeFs.Stats => stat),
+      Effect.catch((probeErr) => Effect.succeed<SocketProbeResult>(probeErr)),
+    )
+
+    if (typeof statResult === "string") {
+      return statResult
     }
-    return yield* Effect.callback<boolean>((resume) => {
+
+    if (!statResult.isSocket()) {
+      return "unknown-error"
+    }
+
+    return yield* Effect.callback<SocketProbeResult>((resume) => {
       const socket = net.createConnection(socketPath)
       let settled = false
-      const finish = (alive: boolean) => {
+      const finish = (result: SocketProbeResult) => {
         if (settled) {
           return
         }
         settled = true
         socket.destroy()
-        resume(Effect.succeed(alive))
+        resume(Effect.succeed(result))
       }
-      socket.setTimeout(200, () => finish(false))
-      socket.on("error", () => finish(false))
-      socket.on("connect", () => {
-        finish(true)
+      socket.setTimeout(PROBE_SOCKET_TIMEOUT_MS, () => finish("unknown-error"))
+      socket.on("error", (err: NodeJS.ErrnoException) => {
+        if (err.code === "ECONNREFUSED" || err.code === "ENOENT") {
+          finish("dead-socket")
+          return
+        }
+        finish("unknown-error")
       })
-      socket.on("data", (chunk) => {
-        const text = chunk.toString("utf8")
-        finish(text.includes('"ok":true'))
+      socket.on("connect", () => {
+        finish("alive")
       })
     })
   })
@@ -125,6 +145,7 @@ const closeNetServer = (
   server: net.Server,
   socketPath: DaemonSocketPath,
   openSockets: Set<net.Socket>,
+  shouldUnlinkSocket: () => boolean,
 ): Effect.Effect<void> =>
   Effect.callback<void>((resume) => {
     for (const socket of openSockets) {
@@ -135,7 +156,11 @@ const closeNetServer = (
       resume(Effect.void)
     })
   }).pipe(
-    Effect.andThen(fs.remove(socketPath, { force: true }).pipe(Effect.ignore)),
+    Effect.andThen(
+      shouldUnlinkSocket()
+        ? fs.remove(socketPath, { force: true }).pipe(Effect.ignore)
+        : Effect.void,
+    ),
     Effect.ignore,
   )
 
@@ -199,14 +224,15 @@ const createDaemonNetServer = (
         })
         .with({ _tag: "Some" }, ({ value: req }) => {
           const response = match(req.command)
-            .with("ping", () => ({
+            .with("bench", () => ({
               ...(req.id !== undefined ? { id: req.id } : {}),
               ok: true,
-              status: "warm",
+              command: "bench",
             }))
-            .with("diagnostics", "ast-gates", "extract-graph", () => ({
+            .with("plan-check", "gc", "verify", (command) => ({
               ...(req.id !== undefined ? { id: req.id } : {}),
               ok: false,
+              command,
               fallbackToInProcess: true,
             }))
             .exhaustive()
@@ -221,7 +247,7 @@ const createDaemonNetServer = (
 
 const makeUnixSocketDaemonLayer = (
   options?: UnixSocketDaemonLayerOptions,
-): Layer.Layer<UnixSocketDaemonPort> =>
+): Layer.Layer<UnixSocketDaemonPort, never, FileSystem.FileSystem | Path.Path> =>
   Layer.effect(
     UnixSocketDaemonPort,
     Effect.gen(function* () {
@@ -261,24 +287,61 @@ const makeUnixSocketDaemonLayer = (
             options?.socketPathOverride ?? resolveHarnessDaemonSocketPath(repoRoot)
           const dirPath = path.dirname(socketPath)
 
+          // Architectural rationale ("why"): `0o700` parent directory and `0o600` socket
+          // permissions prevent cross-UID local IPC hijacking or unauthorized command
+          // injection on multi-user hosts.
           yield* fs
             .makeDirectory(dirPath, { recursive: true, mode: 0o700 })
             .pipe(Effect.mapError((err) => toDaemonServerError(socketPath, err)))
-
-          const alreadyAlive = yield* probeSocketAlive(fs, socketPath)
-          if (alreadyAlive) {
-            return {
-              socketPath,
-              repoRoot,
-            } satisfies DaemonServerInfo
+          if (process.platform !== "win32") {
+            yield* Effect.try({
+              try: () => {
+                nodeFs.chmodSync(dirPath, 0o700)
+              },
+              catch: (err) => toDaemonServerError(socketPath, err),
+            })
           }
 
-          yield* fs.remove(socketPath, { force: true }).pipe(Effect.ignore)
+          const probeResult = yield* probeSocketState(socketPath)
+          yield* match(probeResult)
+            .with("absent", () => Effect.void)
+            .with("dead-socket", () =>
+              Effect.try({
+                try: () => {
+                  nodeFs.unlinkSync(socketPath)
+                },
+                catch: (err) => toDaemonServerError(socketPath, err),
+              }),
+            )
+            .with("alive", () =>
+              Effect.fail(
+                new DaemonServerError({
+                  socketPath,
+                  reason: ErrorReasonMessage.make(
+                    `Daemon socket '${socketPath}' is already alive`,
+                  ),
+                }),
+              ),
+            )
+            .with("unknown-error", () =>
+              Effect.fail(
+                new DaemonServerError({
+                  socketPath,
+                  reason: ErrorReasonMessage.make(
+                    `Refusing to unlink non-socket or unreadable path '${socketPath}'`,
+                  ),
+                }),
+              ),
+            )
+            .exhaustive()
 
           interface AcquiredServer {
             readonly server: net.Server
             readonly openSockets: Set<net.Socket>
           }
+
+          let serverListening = false
+          const shouldUnlinkSocket = () => serverListening
 
           yield* Effect.acquireRelease(
             Effect.gen(function* () {
@@ -292,10 +355,13 @@ const makeUnixSocketDaemonLayer = (
                 server.once("error", onError)
                 server.listen(socketPath, () => {
                   server.removeListener("error", onError)
+                  serverListening = true
                   resume(Effect.void)
                 })
               }).pipe(
-                Effect.tapError(() => closeNetServer(fs, server, socketPath, openSockets)),
+                Effect.tapError(() =>
+                  closeNetServer(fs, server, socketPath, openSockets, shouldUnlinkSocket),
+                ),
               )
 
               if (process.platform !== "win32") {
@@ -305,13 +371,16 @@ const makeUnixSocketDaemonLayer = (
                   },
                   catch: (err) => toDaemonServerError(socketPath, err),
                 }).pipe(
-                  Effect.tapError(() => closeNetServer(fs, server, socketPath, openSockets)),
+                  Effect.tapError(() =>
+                    closeNetServer(fs, server, socketPath, openSockets, shouldUnlinkSocket),
+                  ),
                 )
               }
 
               return { server, openSockets } satisfies AcquiredServer
             }),
-            ({ server, openSockets }) => closeNetServer(fs, server, socketPath, openSockets),
+            ({ server, openSockets }) =>
+              closeNetServer(fs, server, socketPath, openSockets, shouldUnlinkSocket),
           )
 
           return {
@@ -321,7 +390,7 @@ const makeUnixSocketDaemonLayer = (
         })
 
       const isSocketAlive = (socketPath: DaemonSocketPath): Effect.Effect<boolean> =>
-        probeSocketAlive(fs, socketPath)
+        probeSocketState(socketPath).pipe(Effect.map((state) => state === "alive"))
 
       const impl: UnixSocketDaemonPortShape = {
         startServer,
@@ -330,11 +399,12 @@ const makeUnixSocketDaemonLayer = (
 
       return impl
     }),
-  ).pipe(Layer.provide(NodeServices.layer))
+  )
 
 export { makeUnixSocketDaemonLayer }
 
-export const UnixSocketDaemonLive: Layer.Layer<UnixSocketDaemonPort> = makeUnixSocketDaemonLayer()
+export const UnixSocketDaemonLive: Layer.Layer<UnixSocketDaemonPort> =
+  makeUnixSocketDaemonLayer().pipe(Layer.provide(NodeServices.layer))
 
 export const startScopedUnixSocketDaemon = Effect.fn("UnixSocketDaemon.startScoped")(function* (
   repoRoot: WorkspaceFilePath,
@@ -344,7 +414,7 @@ export const startScopedUnixSocketDaemon = Effect.fn("UnixSocketDaemon.startScop
     return yield* Effect.gen(function* () {
       const port = yield* UnixSocketDaemonPort
       return yield* port.startServer(repoRoot)
-    }).pipe(Effect.provide(makeUnixSocketDaemonLayer(options)))
+    }).pipe(Effect.provide(makeUnixSocketDaemonLayer(options).pipe(Layer.provide(NodeServices.layer))))
   }
   const port = yield* UnixSocketDaemonPort
   return yield* port.startServer(repoRoot)

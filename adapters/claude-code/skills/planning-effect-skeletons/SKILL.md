@@ -32,7 +32,7 @@ In this project, the plan IS compilable TypeScript code. Never write long Markdo
    - **No Future-Phase Leakage:** Never copy unimplemented future-phase symbols (e.g., `DeciderInvariantError`, `commandId` idempotency deduplication, partial event matching, or unconfigured `scope:fixture` Nx tags) into the current phase's EARS Spec or ADR.
    - **1:1 Symbol Parity:** Every method name (e.g. `.thenEvents`, `.thenNothing`, `.thenFails`), every `*Error` in prose or Mermaid diagrams, and every Nx tag in the Spec/ADR must match the current skeleton 1:1.
    - **No Empty Source Modules (`empty-source-module` gate):** Never leave placeholder `export {}` files in `src/`.
-   - **Clean Dependency Manifests (`unused-package-dependency` gate):** Never leave unused dependencies in `package.json` `dependencies`. Move `@harness/contract` (when only used for `stub()`), `@harness/gates`, and `@harness/graph` to `devDependencies` once implementation replaces `stub()`.
+   - **Clean Dependency Manifests (`unused-package-dependency` gate):** Never leave unused dependencies in `package.json` `dependencies`. Move `@harness/contract` (when only used for `stub()`) to `devDependencies` once implementation replaces `stub()`.
 7. **Specify Adversarial & Negative Test Matrix in the Plan:**
    - **Contract Schemas (`type:contract`):** Plan both positive decode tests and negative rejection tests (`-1`, `1.5`, `""`, missing fields) for all constrained schemas (`Schema.Int`, `Schema.Natural`, `PositiveInt`, `NonEmptyString`). Clarify that `Schema.Int`/`Schema.Natural` are decode-time checks whose TypeScript type is `number`; add `.pipe(Schema.brand("..."))` when compile-time branding is needed for in-memory construction.
    - **BDD / Test Runners (`testing.ts` in `type:core`):**
@@ -83,7 +83,7 @@ export const deletePhoto = Effect.fn("Sample.deletePhoto")(function* (id: number
 - [ ] **No Future-Phase Leakage:** Unimplemented future-phase symbols (`DeciderInvariantError`, `commandId` deduplication, partial event matching, unconfigured `scope:fixture` Nx tags) are omitted from current Spec and ADR.
 - [ ] **Exact Symbol Parity:** Every method name (`.thenEvents`, `.thenNothing`, `.thenFails`), every `*Error` in prose/Mermaid diagrams, and every Nx tag matches the current skeleton 1:1.
 - [ ] **No Empty Modules (`empty-source-module`):** Zero placeholder `export {}` files in `src/`.
-- [ ] **Clean Dependencies (`unused-package-dependency`):** `@harness/gates` and `@harness/graph` in `devDependencies`, no unused runtime dependencies.
+- [ ] **Clean Dependencies (`unused-package-dependency`):** `@harness/contract` (when only used for `stub()`) in `devDependencies`, no unused runtime dependencies.
 
 ## Adversarial & Negative Test Matrix Checklist
 

@@ -1,3 +1,14 @@
+/**
+ * Synchronous host I/O adapter contract (`SyncHostIo` / `ExtendedHostIo`).
+ *
+ * Architectural rationale ("why"): TypeScript's `ts.CompilerHost` (`ts.createProgram`)
+ * and `ts-morph` require strictly synchronous filesystem callbacks (`fileExists`,
+ * `readFile`, `realpath`, `getDirectories`) that cannot yield Effect fibers. Isolating
+ * those synchronous callbacks behind `SyncHostIo` keeps `@harness/graph`, `@harness/gates`,
+ * and `@harness/ingest` free of direct `node:fs` / `node:child_process` imports while
+ * `@harness/infra` (`nodeSyncHostIo`) owns the concrete Node binding. All Effect-native
+ * asynchronous workflows should prefer `WorkspaceFs` and `HarnessSubprocessRunner`.
+ */
 export interface SyncHostDirEntry {
   readonly name: string
   readonly isFile: boolean
@@ -8,6 +19,9 @@ export interface SyncHostExecResult {
   readonly exitCode: number
   readonly stdout: string
   readonly stderr: string
+  readonly spawnError?: string | undefined
+  readonly signal?: string | null | undefined
+  readonly timedOut?: boolean | undefined
 }
 
 export interface SyncHostExecOptions {

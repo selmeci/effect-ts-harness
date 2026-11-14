@@ -1,5 +1,7 @@
+import { NodeServices } from "@effect/platform-node"
 import { Layer } from "effect"
 import { makeOmnigraphSyncLayer, makeTsCompilerOverlayLayer } from "@harness/graph"
+import { ActiveMutantContextLive } from "./active-mutant-context-live.js"
 import { AstGateCacheLive, makeAstGateCacheLayer } from "./ast-gate-cache-live.js"
 import {
   DecisionCacheLive,
@@ -7,7 +9,11 @@ import {
   makeDecisionCacheLayer,
 } from "./decision-cache-live.js"
 import { nodeSyncHostIo } from "./node-host-io.js"
-import { HarnessSubprocessRunnerLive } from "./subprocess-runner-live.js"
+import {
+  HarnessSubprocessRunnerLive,
+  makeHarnessSubprocessRunnerHostIoLayer,
+  makeHarnessSubprocessRunnerLayer,
+} from "./subprocess-runner-live.js"
 import {
   makeUnixSocketDaemonLayer,
   queryUnixSocketLine,
@@ -16,11 +22,20 @@ import {
   UnixSocketDaemonLive,
   type UnixSocketDaemonLayerOptions,
 } from "./unix-socket-daemon-live.js"
-import { WorkspaceFsLive } from "./workspace-fs-live.js"
+import {
+  makeWorkspaceFsHostIoLayer,
+  makeWorkspaceFsLayer,
+  WorkspaceFsLive,
+} from "./workspace-fs-live.js"
 
 export { nodeSyncHostIo }
-export { WorkspaceFsLive }
-export { HarnessSubprocessRunnerLive }
+export { ActiveMutantContextLive }
+export { makeWorkspaceFsHostIoLayer, makeWorkspaceFsLayer, WorkspaceFsLive }
+export {
+  HarnessSubprocessRunnerLive,
+  makeHarnessSubprocessRunnerHostIoLayer,
+  makeHarnessSubprocessRunnerLayer,
+}
 export { AstGateCacheLive, makeAstGateCacheLayer }
 export { DecisionCacheLive, makeDecisionCacheLayer, type DecisionCacheStatsSnapshot }
 export {
@@ -36,11 +51,12 @@ export const TsCompilerOverlayServiceLive = makeTsCompilerOverlayLayer(nodeSyncH
 export const OmnigraphSyncLive = makeOmnigraphSyncLayer(nodeSyncHostIo)
 
 export const HarnessInfraLive = Layer.mergeAll(
-  WorkspaceFsLive,
-  HarnessSubprocessRunnerLive,
-  AstGateCacheLive,
-  DecisionCacheLive,
+  makeWorkspaceFsLayer(),
+  makeHarnessSubprocessRunnerLayer(),
+  makeAstGateCacheLayer(),
+  makeDecisionCacheLayer(),
   UnixSocketDaemonLive,
+  ActiveMutantContextLive,
   TsCompilerOverlayServiceLive,
   OmnigraphSyncLive,
-)
+).pipe(Layer.provide(NodeServices.layer))

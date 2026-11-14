@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { NodeRuntime } from "@effect/platform-node"
-import { Effect, Layer, Logger } from "effect"
+import { Cause, Effect, Exit, Layer, Logger } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import { nodeSyncHostIo } from "@harness/infra"
@@ -78,6 +78,54 @@ export {
   tryQueryWarmDaemonSocket,
 }
 
+export const resolveCommandTelemetryOutcome = (
+  command: string,
+  res: CliResult,
+): TelemetryOutcome =>
+  match(command)
+    .with("guard", () => {
+      if (res.exitCode !== 0 || res.stdout.includes('"decision":"deny"')) {
+        return "deny" as const
+      }
+      if (
+        res.stdout.includes('"decision":"ask"') ||
+        res.stdout.includes('"permissionDecision":"ask"')
+      ) {
+        return "ask" as const
+      }
+      return "ok" as const
+    })
+    .with("done", () =>
+      res.exitCode !== 0 ||
+      res.stdout.includes('"decision":"continue"') ||
+      res.stdout.includes('"decision":"block"')
+        ? ("fail" as const)
+        : ("ok" as const),
+    )
+    .with("route", () => (res.stdout === "review" ? ("fallback" as const) : ("ok" as const)))
+    .otherwise(() => (res.exitCode === 0 ? ("ok" as const) : ("fail" as const)))
+
+export const teardownCliMain = (
+  exit: Exit.Exit<unknown, unknown>,
+  onExit: (code: number) => void,
+  writeStderr: (s: string) => void = (s) => {
+    process.stderr.write(s)
+  },
+): void => {
+  match(exit)
+    .with({ _tag: "Success" }, () => {
+      onExit(0)
+    })
+    .with({ _tag: "Failure" }, ({ cause }) => {
+      if (Cause.hasFails(cause) || Cause.hasDies(cause)) {
+        writeStderr(`${Cause.pretty(cause)}\n`)
+      }
+      process.exitCode = 1
+      onExit(0)
+    })
+    .exhaustive()
+}
+
 export const runCliEffect = (
   argv: ReadonlyArray<string>,
   options?: CliEnv,
@@ -89,7 +137,10 @@ export const runCliEffect = (
       maybeDecisionLayer !== undefined ? { ...options, decisionLayer: maybeDecisionLayer } : options
     const repoRoot = effectiveOptions?.repoRoot ?? findWorkspaceRoot()
 
-    if (effectiveOptions?.repoRoot === undefined && process.env.VITEST === undefined) {
+    if (
+      effectiveOptions?.repoRoot === undefined &&
+      effectiveOptions?.skipBackgroundDaemons !== true
+    ) {
       yield* Effect.try(() => {
         const harnessDir = join(CLI_REPO_ROOT, ".harness")
         nodeSyncHostIo.mkdirRecursiveSync(harnessDir)
@@ -114,26 +165,7 @@ export const runCliEffect = (
       .with("plan-check", "verify", "gc", "mutate", "bench", "benchmark", () => "gate" as const)
       .otherwise(() => "lifecycle" as const)
 
-    const outcome: TelemetryOutcome = match(requested)
-      .with("guard", () => {
-        if (res.exitCode !== 0 || res.stdout.includes('"decision":"deny"')) {
-          return "deny" as const
-        }
-        if (
-          res.stdout.includes('"decision":"ask"') ||
-          res.stdout.includes('"permissionDecision":"ask"')
-        ) {
-          return "ask" as const
-        }
-        return "ok" as const
-      })
-      .with("done", () =>
-        res.stdout.includes('"decision":"continue"') || res.stdout.includes('"decision":"block"')
-          ? ("fail" as const)
-          : ("ok" as const),
-      )
-      .with("route", () => (res.stdout === "review" ? ("fallback" as const) : ("ok" as const)))
-      .otherwise(() => (res.exitCode === 0 ? ("ok" as const) : ("fail" as const)))
+    const outcome = resolveCommandTelemetryOutcome(requested, res)
 
     recordTelemetry(options, {
       surface,
@@ -150,7 +182,7 @@ export const runCliEffect = (
       res.telemetryDetail !== "fullyIdle=false" &&
       res.telemetryDetail !== "subagent=true" &&
       res.telemetryDetail !== "readOnly=true" &&
-      (options?.repoRoot !== undefined || process.env.VITEST === undefined)
+      (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true)
     ) {
       const finalEvents = readTelemetryEvents(repoRoot, nodeSyncHostIo)
       const finalFriction = readFrictionEvents(repoRoot, nodeSyncHostIo)
@@ -184,16 +216,7 @@ if (
     ),
     NodeRuntime.runMain({
       disableErrorReporting: true,
-      teardown: (exit, onExit) => {
-        onExit(
-          match(exit)
-            .with({ _tag: "Success" }, () =>
-              typeof process.exitCode === "number" ? process.exitCode : 0,
-            )
-            .with({ _tag: "Failure" }, () => 1)
-            .exhaustive(),
-        )
-      },
+      teardown: (exit, onExit) => teardownCliMain(exit, onExit),
     }),
   )
 }

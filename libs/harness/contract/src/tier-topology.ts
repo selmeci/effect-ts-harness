@@ -4,6 +4,7 @@ import {
   AstSourceFilePath,
   GateVerdict,
   NonNegativeCount,
+  WorkspaceFilePath,
 } from "./ast-and-gate-primitives.js"
 
 export const PackageManifestPath = Schema.NonEmptyString.pipe(
@@ -34,8 +35,9 @@ export const TierTopologyRuleId = Schema.Literals([
   "dual-contract-tier-tag",
   "forbidden-contract-dependency",
   "forbidden-service-dependency",
+  "forbidden-core-dependency",
   "impure-service-tier-import",
-]).pipe(Schema.brand("TierTopologyRuleId"))
+])
 export type TierTopologyRuleId = typeof TierTopologyRuleId.Type
 
 export const TierTopologyMessage = Schema.NonEmptyString.pipe(Schema.brand("TierTopologyMessage"))
@@ -63,7 +65,7 @@ export type HarnessTierTopologyInput = typeof HarnessTierTopologyInput.Type
 
 export const HarnessTierTopologyViolation = Schema.Struct({
   rule: TierTopologyRuleId,
-  location: PackageManifestPath,
+  location: WorkspaceFilePath,
   message: TierTopologyMessage,
 })
 export type HarnessTierTopologyViolation = typeof HarnessTierTopologyViolation.Type
@@ -72,5 +74,22 @@ export const HarnessTierTopologyReport = Schema.Struct({
   verdict: GateVerdict,
   violations: Schema.Array(HarnessTierTopologyViolation),
   inspectedPackageCount: NonNegativeCount,
-})
+}).pipe(
+  Schema.check(
+    Schema.makeFilter((report) =>
+      (report.verdict === "clean") === (report.violations.length === 0)
+        ? undefined
+        : "HarnessTierTopologyReport verdict and violations length must agree",
+    ),
+  ),
+)
 export type HarnessTierTopologyReport = typeof HarnessTierTopologyReport.Type
+
+export const makeHarnessTierTopologyReport = (
+  violations: ReadonlyArray<HarnessTierTopologyViolation>,
+  inspectedPackageCount: NonNegativeCount,
+): HarnessTierTopologyReport => ({
+  verdict: violations.length === 0 ? "clean" : "violated",
+  violations: [...violations],
+  inspectedPackageCount,
+})

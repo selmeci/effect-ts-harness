@@ -77,6 +77,9 @@ export interface ServerOptions {
   readonly decisionLayer?: Layer.Layer<DecisionModel.DecisionModel>
   readonly repoRoot?: string
   readonly governanceDocs?: ReadonlyArray<GovernanceDocReference>
+  readonly skipOmnigraphSpawn?: boolean | undefined
+  readonly skipTelemetry?: boolean | undefined
+  readonly skipActiveWorkspaceLookup?: boolean | undefined
   readonly lspDiagnosticsRunner?: (input: {
     readonly file?: string | undefined
     readonly project?: string | undefined
@@ -100,7 +103,10 @@ const decodeActiveWorkspace = Schema.decodeUnknownOption(
   Schema.fromJsonString(Schema.Struct({ repoRoot: Schema.String })),
 )
 
-export const resolveDefaultRepoRoot = (args?: Readonly<Record<string, unknown>>): string => {
+export const resolveDefaultRepoRoot = (
+  args?: Readonly<Record<string, unknown>>,
+  options?: Pick<ServerOptions, "skipActiveWorkspaceLookup" | "skipOmnigraphSpawn">,
+): string => {
   const rawRepoRoot = args?.["repoRoot"]
   if (typeof rawRepoRoot === "string" && rawRepoRoot.length > 0) {
     return findRepoRoot(rawRepoRoot)
@@ -133,7 +139,7 @@ export const resolveDefaultRepoRoot = (args?: Readonly<Record<string, unknown>>)
   if (cwdRoot !== SERVER_REPO_ROOT) {
     return cwdRoot
   }
-  if (process.env.VITEST === undefined) {
+  if (options?.skipActiveWorkspaceLookup !== true && options?.skipOmnigraphSpawn !== true) {
     const activeWorkspacePath = path.join(SERVER_REPO_ROOT, ".harness", "active-workspace.json")
     if (nodeSyncHostIo.existsSync(activeWorkspacePath)) {
       const resolvedActiveRoot = Result.getOrElse(
@@ -193,7 +199,7 @@ export const resolveGraph = (
     return Effect.succeed(options.graph)
   }
   return Effect.gen(function* () {
-    const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+    const root = options?.repoRoot ?? resolveDefaultRepoRoot(args, options)
     let snapshotPath = options?.snapshotPath
     if (!snapshotPath) {
       const verifySnap = path.join(root, ".harness", "graph-snapshot.json")
@@ -249,7 +255,13 @@ export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolea
   }
   if (nodeSyncHostIo.existsSync(logicalRoot)) {
     let checkPath = logicalCandidate
-    while (!nodeSyncHostIo.existsSync(checkPath) && checkPath !== logicalRoot) {
+    while (!nodeSyncHostIo.existsSync(checkPath)) {
+      if (nodeSyncHostIo.isSymbolicLinkSync(checkPath)) {
+        return false
+      }
+      if (checkPath === logicalRoot) {
+        break
+      }
       const parent = path.dirname(checkPath)
       if (parent === checkPath) break
       checkPath = parent
@@ -352,10 +364,13 @@ export const recordMcpToolTelemetry = (
   durationMs: number,
   options?: ServerOptions,
 ): void => {
-  if (options?.repoRoot === undefined && process.env.VITEST !== undefined) {
+  if (
+    options?.skipTelemetry === true ||
+    (options?.repoRoot === undefined && options?.skipOmnigraphSpawn === true)
+  ) {
     return
   }
-  const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+  const root = options?.repoRoot ?? resolveDefaultRepoRoot(args, options)
   const category: TelemetryCategory = match(toolName)
     .with(
       "harness_ontology_why",
