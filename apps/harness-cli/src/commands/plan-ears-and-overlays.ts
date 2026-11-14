@@ -1,4 +1,3 @@
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs"
 import { dirname, relative, resolve } from "node:path"
 import { Effect, Option } from "effect"
 import { match } from "ts-pattern"
@@ -22,6 +21,7 @@ import {
   normalizeConditionPrefix,
 } from "@harness/gates"
 import type { ShadowFileOverlay } from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 import type { CliResult } from "./daemon-and-omnigraph.service.js"
 
 export const checkPlanEarsConsistency = (
@@ -153,8 +153,8 @@ export const persistVerifiedOverlays = (
 }> =>
   Effect.gen(function* () {
     const canonicalRoot = resolve(repoRoot)
-    const realCanonicalRoot = existsSync(canonicalRoot)
-      ? realpathSync(canonicalRoot)
+    const realCanonicalRoot = nodeSyncHostIo.existsSync(canonicalRoot)
+      ? nodeSyncHostIo.realpathSync(canonicalRoot)
       : canonicalRoot
     const rejectedFiles: Array<{ readonly file: string; readonly reason: string }> = []
     for (const overlay of overlays) {
@@ -164,11 +164,15 @@ export const persistVerifiedOverlays = (
         continue
       }
       let checkDir = absTarget
-      while (!existsSync(checkDir) && checkDir !== canonicalRoot && dirname(checkDir) !== checkDir) {
+      while (
+        !nodeSyncHostIo.existsSync(checkDir) &&
+        checkDir !== canonicalRoot &&
+        dirname(checkDir) !== checkDir
+      ) {
         checkDir = dirname(checkDir)
       }
-      if (existsSync(checkDir)) {
-        const realExisting = realpathSync(checkDir)
+      if (nodeSyncHostIo.existsSync(checkDir)) {
+        const realExisting = nodeSyncHostIo.realpathSync(checkDir)
         const rel = relative(realCanonicalRoot, realExisting)
         if (rel.startsWith("..") || rel === "..") {
           rejectedFiles.push({
@@ -202,8 +206,8 @@ export const persistVerifiedOverlays = (
         try: () => {
           for (const overlay of overlays) {
             const absTarget = resolve(canonicalRoot, overlay.targetFile)
-            mkdirSync(dirname(absTarget), { recursive: true })
-            writeFileSync(absTarget, overlay.content, "utf-8")
+            nodeSyncHostIo.mkdirRecursiveSync(dirname(absTarget))
+            nodeSyncHostIo.writeTextSync(absTarget, overlay.content)
             writtenFiles.push(overlay.targetFile)
           }
         },

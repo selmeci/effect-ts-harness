@@ -725,6 +725,3 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
     findings,
   } satisfies AdrDocLintReport)
 })
-
-export const lintAdrDocMarkdown = (docPath: string, markdown: string): AdrDocLintReport =>
-  Effect.runSync(decideAdrDocQuality({ docPath, markdown }))

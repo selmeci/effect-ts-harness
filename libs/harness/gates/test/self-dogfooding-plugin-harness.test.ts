@@ -7,7 +7,7 @@ import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option, Schema } from "eff
 import { match } from "ts-pattern"
 import { buildHarnessGraph, NonNegativeCount, ts } from "@harness/graph"
 import { type IndexedEffectFn, runWithTestTracer } from "@harness/ingest"
-import { checkSpanBudgets, type SpanSample } from "../src/span-budget.js"
+import { decideSpanBudgets, type SpanSample } from "../src/span-budget.js"
 import {
   ActiveMutantId,
   MaxPluginFileLines,
@@ -166,7 +166,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(report.violations).toHaveLength(0)
         expect(report.inspectedFileCount).toBe(1)
 
-        const budgetViolations = checkSpanBudgets({
+        const budgetViolations = yield* decideSpanBudgets({
           spans: toSpanSamples(spans),
           maxRepeatedChildCalls: 3,
         })
@@ -432,7 +432,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(result.content).toBe("export const a = 1\nexport const b = 2\n")
         expect(result.lineCount).toBe(3)
 
-        const budgetViolations = checkSpanBudgets({
+        const budgetViolations = yield* decideSpanBudgets({
           spans: toSpanSamples(spans),
           maxRepeatedChildCalls: 3,
         })
@@ -466,7 +466,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           }
         }
 
-        const budgetViolations = checkSpanBudgets({
+        const budgetViolations = yield* decideSpanBudgets({
           spans: toSpanSamples(spans),
           maxRepeatedChildCalls: 3,
         })
@@ -555,7 +555,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(result.exitCode).toBe(0)
         expect(result.stdout).toBe("execution success")
 
-        const budgetViolations = checkSpanBudgets({
+        const budgetViolations = yield* decideSpanBudgets({
           spans: toSpanSamples(spans),
           maxRepeatedChildCalls: 3,
         })
@@ -596,7 +596,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           }
         }
         expect(
-          checkSpanBudgets({ spans: toSpanSamples(spansNonZero), maxRepeatedChildCalls: 3 }),
+          yield* decideSpanBudgets({ spans: toSpanSamples(spansNonZero), maxRepeatedChildCalls: 3 }),
         ).toHaveLength(0)
 
         // SubprocessCommand Schema rejection for empty and whitespace-only
@@ -624,7 +624,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           }
         }
         expect(
-          checkSpanBudgets({ spans: toSpanSamples(spansNullCmd), maxRepeatedChildCalls: 3 }),
+          yield* decideSpanBudgets({ spans: toSpanSamples(spansNullCmd), maxRepeatedChildCalls: 3 }),
         ).toHaveLength(0)
 
         // execCheckedSubprocess null-byte in args rejection
@@ -648,7 +648,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           }
         }
         expect(
-          checkSpanBudgets({ spans: toSpanSamples(spansNullArg), maxRepeatedChildCalls: 3 }),
+          yield* decideSpanBudgets({ spans: toSpanSamples(spansNullArg), maxRepeatedChildCalls: 3 }),
         ).toHaveLength(0)
       }),
   )
@@ -681,7 +681,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         )
         expect(checkedLive.exitCode).toBe(0)
         expect(checkedLive.stdout).toBe("checked-live-ok")
-        const checkedViolations = checkSpanBudgets({
+        const checkedViolations = yield* decideSpanBudgets({
           spans: toSpanSamples(checkedSpans),
           maxRepeatedChildCalls: 3,
         })
@@ -757,7 +757,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(observedInside).toBe("mutant-core-decider-01")
         expect(getActiveMutantId()).toBeUndefined()
 
-        const budgetViolations = checkSpanBudgets({
+        const budgetViolations = yield* decideSpanBudgets({
           spans: toSpanSamples(spans),
           maxRepeatedChildCalls: 3,
         })
@@ -782,7 +782,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         }
         expect(getActiveMutantId()).toBeUndefined()
 
-        const failBudgetViolations = checkSpanBudgets({
+        const failBudgetViolations = yield* decideSpanBudgets({
           spans: toSpanSamples(failSpans),
           maxRepeatedChildCalls: 3,
         })
@@ -925,7 +925,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(result.violations).toHaveLength(0)
         expect(result.inspectedFileCount).toBe(2)
 
-        const budgetViolations = checkSpanBudgets({
+        const budgetViolations = yield* decideSpanBudgets({
           spans: toSpanSamples(spans),
           maxRepeatedChildCalls: 3,
         })
@@ -950,7 +950,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           }
         }
 
-        const missingBudgetViolations = checkSpanBudgets({
+        const missingBudgetViolations = yield* decideSpanBudgets({
           spans: toSpanSamples(missingSpans),
           maxRepeatedChildCalls: 3,
         })
@@ -958,32 +958,38 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
       }),
   )
 
-  it("GatePluginRegistry: duplicate plugin ID rejection in makeGatePluginRegistryLayer", () => {
-    const dupPlugin1: GatePluginDescriptor = {
-      pluginId: PluginId.make("dup-id"),
-      description: "Plugin 1",
-      evaluate: () =>
-        Effect.succeed({
-          verdict: GateVerdict.make("clean"),
-          violations: [],
-          inspectedFileCount: NonNegativeCount.make(0),
-        }),
-    }
-    const dupPlugin2: GatePluginDescriptor = {
-      pluginId: PluginId.make("dup-id"),
-      description: "Plugin 2",
-      evaluate: () =>
-        Effect.succeed({
-          verdict: GateVerdict.make("clean"),
-          violations: [],
-          inspectedFileCount: NonNegativeCount.make(0),
-        }),
-    }
+  it.effect("GatePluginRegistry: duplicate plugin ID rejection in makeGatePluginRegistryLayer", () =>
+    Effect.gen(function* () {
+      const dupPlugin1: GatePluginDescriptor = {
+        pluginId: PluginId.make("dup-id"),
+        description: "Plugin 1",
+        evaluate: () =>
+          Effect.succeed({
+            verdict: GateVerdict.make("clean"),
+            violations: [],
+            inspectedFileCount: NonNegativeCount.make(0),
+          }),
+      }
+      const dupPlugin2: GatePluginDescriptor = {
+        pluginId: PluginId.make("dup-id"),
+        description: "Plugin 2",
+        evaluate: () =>
+          Effect.succeed({
+            verdict: GateVerdict.make("clean"),
+            violations: [],
+            inspectedFileCount: NonNegativeCount.make(0),
+          }),
+      }
 
-    expect(() => makeGatePluginRegistryLayer([dupPlugin1, dupPlugin2])).toThrow(
-      "Duplicate gate plugin ID registered: dup-id",
-    )
-  })
+      const exit = yield* Effect.exit(
+        Effect.scoped(Layer.build(makeGatePluginRegistryLayer([dupPlugin1, dupPlugin2]))),
+      )
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        expect(Cause.hasDies(exit.cause)).toBe(true)
+      }
+    }),
+  )
 
   it.effect(
     "REQ-2.7: GatePluginRunner.evaluateAll executes custom registered plugins and aggregates violations",
@@ -1058,7 +1064,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           expect(failErr.violations).toHaveLength(2)
         }
 
-        const budgetViolations = checkSpanBudgets({
+        const budgetViolations = yield* decideSpanBudgets({
           spans: toSpanSamples(spans),
           maxRepeatedChildCalls: 3,
         })
@@ -1100,7 +1106,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(rules).toContain("discriminant-branching")
         expect(rules).toContain("non-exhaustive-union-match")
 
-        const budgetViolations = checkSpanBudgets({
+        const budgetViolations = yield* decideSpanBudgets({
           spans: toSpanSamples(spans),
           maxRepeatedChildCalls: 3,
         })
@@ -1662,7 +1668,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
   )
 
   it.effect(
-    "evaluateMutantSchemaInProcess: kills mutant on AssertionError or false, and dies via Effect.die on non-assertion runtime defect",
+    "evaluateMutantSchemaInProcess: kills mutant on AssertionError or false, and does not kill on non-assertion runtime defect",
     () =>
       Effect.sync(() => {
         const mutants = discoverDomainMutants(
@@ -1685,14 +1691,13 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         const killedByFalse = evaluateMutantSchemaInProcess(mutants, [() => false])
         expect(killedByFalse.every((o) => o.status === "killed")).toBe(true)
 
-        // 3. Non-assertion runtime defect (SyntaxError from JSON.parse) dies via Effect.die instead of counting as survived
-        expect(() =>
-          evaluateMutantSchemaInProcess(mutants, [
-            () => {
-              JSON.parse("{broken-json")
-            },
-          ]),
-        ).toThrow()
+        // 3. Non-assertion runtime defect (SyntaxError from JSON.parse) does not count as killed
+        const nonAssertionOutcomes = evaluateMutantSchemaInProcess(mutants, [
+          () => {
+            JSON.parse("{broken-json")
+          },
+        ])
+        expect(nonAssertionOutcomes.every((o) => o.status === "survived")).toBe(true)
       }),
   )
 

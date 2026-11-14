@@ -122,7 +122,7 @@ export const IdiomRouterV1 = Decision.make({
 })
 
 /** Validates Ollama System One limits (1–64 questions per call, 2–26 options per choice/score). */
-export const assertDecisionLimits = (definition: {
+export const validateDecisionLimits = Effect.fn("Harness.validateDecisionLimits")(function* (definition: {
   readonly decisions: Readonly<
     Record<
       string,
@@ -132,11 +132,11 @@ export const assertDecisionLimits = (definition: {
       }
     >
   >
-}): void => {
+}): Effect.fn.Return<void> {
   const entries = Object.entries(definition.decisions)
   if (entries.length < 1 || entries.length > 64) {
-    Effect.runSync(
-      Effect.die(new Error(`Decision definition must have 1..64 questions, got ${entries.length}`)),
+    return yield* Effect.die(
+      new Error(`Decision definition must have 1..64 questions, got ${entries.length}`),
     )
   }
   for (const [name, question] of entries) {
@@ -145,15 +145,13 @@ export const assertDecisionLimits = (definition: {
         ? question.criteria.length
         : Object.keys(question.criteria).length
       if (optionCount < 2 || optionCount > 26) {
-        Effect.runSync(
-          Effect.die(
-            new Error(`Decision question "${name}" must have 2..26 options, got ${optionCount}`),
-          ),
+        return yield* Effect.die(
+          new Error(`Decision question "${name}" must have 2..26 options, got ${optionCount}`),
         )
       }
     }
   }
-}
+})
 
 export const routeStep = Effect.fn("Harness.routeStep")(function* (step: string) {
   const trimmed = step.trim()

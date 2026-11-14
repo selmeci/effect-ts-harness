@@ -12,7 +12,7 @@
  * - GraphReachabilityContext: Indexed graph reachability and relation counts.
  */
 import { join, relative } from "node:path"
-import { Effect, Schema } from "effect"
+import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import * as Graph from "effect/Graph"
 import type { SyncHostIo } from "@harness/service"
@@ -382,17 +382,7 @@ export const parseGovernanceDocFrontmatter = (
 }
 
 export const safeFs = <T>(fn: () => T, fallback: T): T =>
-  Effect.runSync(
-    Effect.try({
-      try: fn,
-      catch: (err) => {
-        process.stderr.write(
-          `[harness:gc] Warning: filesystem operation failed: ${err instanceof Error ? err.message : String(err)}\n`,
-        )
-        return fallback
-      },
-    }).pipe(Effect.orElseSucceed(() => fallback)),
-  )
+  Result.getOrElse(Result.try(fn), () => fallback)
 
 export const loadGovernanceDocsFromDisk = (
   repoRoot: string,

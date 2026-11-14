@@ -678,6 +678,3 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(f
     findings,
   } satisfies OntologyInvariantsReport)
 })
-
-export const checkOntologyInvariants = (input: OntologyInvariantsInput): OntologyInvariantsReport =>
-  Effect.runSync(decideOntologyInvariants(input))

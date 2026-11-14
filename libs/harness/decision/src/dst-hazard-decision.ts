@@ -10,7 +10,6 @@ import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match, P } from "ts-pattern"
 import { type DeterministicFallbackReason, PriorSource } from "./hole-prior-decision.js"
-import { assertDecisionLimits } from "./idiom-router.js"
 
 export const getHazardProbabilityMillis = (
   riskLevel: DstHazardRiskLevel,
@@ -37,8 +36,6 @@ export const DstHazardPriorV1 = Decision.make({
     }),
   },
 })
-
-assertDecisionLimits(DstHazardPriorV1)
 
 export const DstHazardPriorInput = Schema.Struct({
   serviceTag: DstServiceTag,

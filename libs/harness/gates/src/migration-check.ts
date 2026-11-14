@@ -28,12 +28,12 @@ export interface MigrationSafetyReport {
   readonly violations: ReadonlyArray<MigrationViolation>
 }
 
-export const decideMigrationSafety = Effect.fn("MigrationSafety.decide")(function* (
-  input: MigrationSafetyInput,
-) {
+export const checkMigrationSqlSafety = (
+  files: ReadonlyArray<MigrationSqlFile>,
+): MigrationSafetyReport => {
   const violations: Array<MigrationViolation> = []
 
-  for (const { file, sql } of input.files) {
+  for (const { file, sql } of files) {
     const commentStrippedSql = sql
       .replace(/--> statement-breakpoint/g, ";")
       .replace(/--[^\n]*/g, "")
@@ -79,16 +79,18 @@ export const decideMigrationSafety = Effect.fn("MigrationSafety.decide")(functio
     }
   }
 
-  return yield* Effect.succeed({
+  return {
     safe: violations.length === 0,
     requiresEscalation: violations.length > 0,
     violations,
-  } satisfies MigrationSafetyReport)
-})
+  } satisfies MigrationSafetyReport
+}
 
-export const checkMigrationSqlSafety = (
-  files: ReadonlyArray<MigrationSqlFile>,
-): MigrationSafetyReport => Effect.runSync(decideMigrationSafety({ files }))
+export const decideMigrationSafety = Effect.fn("MigrationSafety.decide")(function* (
+  input: MigrationSafetyInput,
+) {
+  return yield* Effect.succeed(checkMigrationSqlSafety(input.files))
+})
 
 export const checkMigrationFiles = (
   filePaths: ReadonlyArray<string>,

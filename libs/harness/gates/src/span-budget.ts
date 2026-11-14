@@ -345,6 +345,3 @@ export const decideSpanBudgets = Effect.fn("SpanBudget.decide")(function* (
 export const SpanBudget = {
   decide: decideSpanBudgets,
 } as const
-
-export const checkSpanBudgets = (input: SpanBudgetInput): ReadonlyArray<SpanBudgetViolation> =>
-  Effect.runSync(decideSpanBudgets(input))

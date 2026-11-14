@@ -1,14 +1,12 @@
-import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { Effect, Layer } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import { evaluateOntologyConflicts, extractOntologyConflictPairs, IDIOM_BLOCKS } from "@harness/decision"
 import {
+  decideGraphEntropy,
   decideOntologyInvariants,
   loadGovernanceDocsFromDisk,
-  scanGraphEntropy,
-  scanWorkspacePackageHygiene,
 } from "@harness/gates"
 import {
   extractWorkspaceTypeAwareGraph,
@@ -28,21 +26,16 @@ export const handleGc = (
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     const strict = argv.includes("--strict")
     const graph = yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo)
-    const hasPatternsDir = existsSync(join(repoRoot, "agent-patterns"))
+    const hasPatternsDir = nodeSyncHostIo.existsSync(join(repoRoot, "agent-patterns"))
     const governanceDocs = loadGovernanceDocsFromDisk(repoRoot, nodeSyncHostIo)
-    const report = scanGraphEntropy(graph, {
+    const finalReport = yield* decideGraphEntropy({
+      graph,
       expectedPatterns: hasPatternsDir ? IDIOM_BLOCKS : undefined,
       checkUntestedDomainFns: true,
       checkDeciderPropertyTests: true,
       governanceDocs,
+      ...(strict ? { workspaceRoot: repoRoot, hostIo: nodeSyncHostIo } : {}),
     })
-    const findings = strict
-      ? [...report.findings, ...scanWorkspacePackageHygiene(repoRoot, nodeSyncHostIo)]
-      : report.findings
-    const finalReport = {
-      clean: findings.length === 0,
-      findings,
-    }
     return {
       exitCode: strict && !finalReport.clean ? 1 : 0,
       stdout: JSON.stringify(finalReport),
@@ -110,7 +103,7 @@ export const handleOntology = (
             graph,
             governanceDocs: docs,
           })
-          const pairs = extractOntologyConflictPairs(docs, scope)
+          const pairs = yield* extractOntologyConflictPairs(docs, scope)
           const semanticConflicts = yield* evaluateOntologyConflicts(pairs).pipe(
             Effect.provide(decisionLayer),
           )

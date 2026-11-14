@@ -2,7 +2,6 @@ import { Effect, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import type { FrictionEventKind } from "@harness/gates"
-import { assertDecisionLimits } from "./idiom-router.js"
 
 export const LEARN_TARGETS = [
   "agent-pattern",
@@ -38,8 +37,6 @@ export const LearnProposalV1 = Decision.make({
     }),
   },
 })
-
-assertDecisionLimits(LearnProposalV1)
 
 export interface LearnProposalInput {
   readonly kind: FrictionEventKind

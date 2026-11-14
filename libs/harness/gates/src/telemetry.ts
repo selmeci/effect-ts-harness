@@ -161,9 +161,7 @@ export interface SessionReport {
   readonly recommendations: ReadonlyArray<string>
 }
 
-export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
-  rawInput: SessionReportInput,
-) {
+export const buildSessionReport = (rawInput: SessionReportInput): SessionReport => {
   const scoped = scopeSessionReportInput(rawInput)
   const input: SessionReportInput = {
     ...rawInput,
@@ -400,11 +398,14 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
     recommendations,
   }
 
-  return yield* Effect.succeed(report)
-})
+  return report
+}
 
-export const buildSessionReport = (input: SessionReportInput): SessionReport =>
-  Effect.runSync(decideSessionReport(input))
+export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
+  rawInput: SessionReportInput,
+) {
+  return yield* Effect.succeed(buildSessionReport(rawInput))
+})
 
 export const renderSessionReportMarkdown = (report: SessionReport): string => {
   const lines: Array<string> = []

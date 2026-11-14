@@ -1,4 +1,3 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { Cause, Effect, Layer, Option, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
@@ -63,8 +62,8 @@ export const handleDoctorOrSession = (
     const harnessDir = resolveHarnessStateDir(repoRoot)
     const snapshotDirOk = yield* Effect.try({
       try: () => {
-        if (!existsSync(harnessDir)) {
-          mkdirSync(harnessDir, { recursive: true })
+        if (!nodeSyncHostIo.existsSync(harnessDir)) {
+          nodeSyncHostIo.mkdirRecursiveSync(harnessDir)
         }
         return true
       },
@@ -90,7 +89,7 @@ export const handleDoctorOrSession = (
     const recordedMeta = readGraphHeadMeta(repoRoot, nodeSyncHostIo)
     if (!isolatedExternal || recordedMeta !== null) {
       const reconcileDecision = yield* decideOmnigraphReconcile({
-        snapshotExists: existsSync(implPath),
+        snapshotExists: nodeSyncHostIo.existsSync(implPath),
         recordedHeadSha: recordedMeta?.headSha ?? null,
         currentHeadSha: headState.headSha,
         recordedGitBranch: recordedMeta?.gitBranch ?? null,
@@ -121,20 +120,20 @@ export const handleDoctorOrSession = (
     }
 
     const workspaceRoot = findWorkspaceRoot()
-    const tsconfigBasePath = existsSync(join(repoRoot, "tsconfig.base.json"))
+    const tsconfigBasePath = nodeSyncHostIo.existsSync(join(repoRoot, "tsconfig.base.json"))
       ? join(repoRoot, "tsconfig.base.json")
       : join(workspaceRoot, "tsconfig.base.json")
-    const tsgoPkgPath = existsSync(
+    const tsgoPkgPath = nodeSyncHostIo.existsSync(
       join(repoRoot, "node_modules", "@effect", "tsgo", "package.json"),
     )
       ? join(repoRoot, "node_modules", "@effect", "tsgo", "package.json")
       : join(workspaceRoot, "node_modules", "@effect", "tsgo", "package.json")
     const effectLspOk = yield* Effect.try({
       try: () => {
-        if (!existsSync(tsconfigBasePath) || !existsSync(tsgoPkgPath)) {
+        if (!nodeSyncHostIo.existsSync(tsconfigBasePath) || !nodeSyncHostIo.existsSync(tsgoPkgPath)) {
           return false
         }
-        return readFileSync(tsconfigBasePath, "utf-8").includes("@effect/language-service")
+        return nodeSyncHostIo.readTextSync(tsconfigBasePath).includes("@effect/language-service")
       },
       catch: () => false,
     }).pipe(Effect.orElseSucceed(() => false))
@@ -161,7 +160,7 @@ export const handleDoctorOrSession = (
 
     let missingPlannedFns: ReadonlyArray<string> = []
     let snapshotOk = true
-    if (existsSync(planPath) && existsSync(implPath)) {
+    if (nodeSyncHostIo.existsSync(planPath) && nodeSyncHostIo.existsSync(implPath)) {
       const loadSnap = (path: string, label: string) =>
         loadGraphSnapshotEffect(path, nodeSyncHostIo).pipe(
           Effect.map((graph) => ({ _tag: "Ok" as const, graph })),
@@ -197,7 +196,8 @@ export const handleDoctorOrSession = (
 
     const stampCheck = checkVerifyStamp(repoRoot, nodeSyncHostIo)
     const hasPlanOrStamp =
-      existsSync(planPath) || existsSync(join(harnessDir, "verify-stamp.json"))
+      nodeSyncHostIo.existsSync(planPath) ||
+      nodeSyncHostIo.existsSync(join(harnessDir, "verify-stamp.json"))
     const effectiveStampValid = hasPlanOrStamp ? stampCheck.valid : true
     const stampReason = !stampCheck.valid ? stampCheck.reason : undefined
     const rawFrictionEvents = readFrictionEvents(repoRoot, nodeSyncHostIo)
@@ -282,7 +282,7 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
   const headState = resolveGitHeadState(repoRoot, nodeSyncHostIo)
   const recordedMeta = readGraphHeadMeta(repoRoot, nodeSyncHostIo)
   const reconcileDecision = yield* decideOmnigraphReconcile({
-    snapshotExists: existsSync(snapshotPath),
+    snapshotExists: nodeSyncHostIo.existsSync(snapshotPath),
     recordedHeadSha: recordedMeta?.headSha ?? null,
     currentHeadSha: headState.headSha,
     recordedGitBranch: recordedMeta?.gitBranch ?? null,
@@ -403,9 +403,9 @@ export const handleLearn = (
     const rejectedRules: Array<{ ruleId: string; stage: string; reason: string }> = []
     let planSearchResults: unknown = undefined
     const learnedSlicesPath = join(repoRoot, ".harness", "learned-slices.json")
-    if (existsSync(learnedSlicesPath)) {
+    if (nodeSyncHostIo.existsSync(learnedSlicesPath)) {
       const rawSlices = yield* Effect.try({
-        try: () => readFileSync(learnedSlicesPath, "utf-8"),
+        try: () => nodeSyncHostIo.readTextSync(learnedSlicesPath),
         catch: () => undefined,
       }).pipe(Effect.orElseSucceed(() => undefined))
       if (rawSlices !== undefined) {

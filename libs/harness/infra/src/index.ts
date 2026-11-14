@@ -13,9 +13,11 @@ import {
 } from "./subprocess-runner-live.js"
 import {
   makeUnixSocketDaemonLayer,
+  queryUnixSocketLine,
   resolveHarnessDaemonSocketPath,
   startScopedUnixSocketDaemon,
   UnixSocketDaemonLive,
+  type UnixSocketDaemonLayerOptions,
 } from "./unix-socket-daemon-live.js"
 import { WorkspaceFsLive, WorkspaceFsNodeLive } from "./workspace-fs-live.js"
 
@@ -26,9 +28,11 @@ export { AstGateCacheLive, makeAstGateCacheLayer }
 export { DecisionCacheLive, makeDecisionCacheLayer, type DecisionCacheStatsSnapshot }
 export {
   makeUnixSocketDaemonLayer,
+  queryUnixSocketLine,
   resolveHarnessDaemonSocketPath,
   startScopedUnixSocketDaemon,
   UnixSocketDaemonLive,
+  type UnixSocketDaemonLayerOptions,
 }
 
 export const TsCompilerOverlayServiceLive = makeTsCompilerOverlayLayer(nodeSyncHostIo)

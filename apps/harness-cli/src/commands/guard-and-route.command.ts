@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs"
 import { Effect, Layer, Option, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
@@ -15,6 +14,7 @@ import {
   type CliEnv,
   type CliResult,
   ensureLocalOllamaReady,
+  readStdinEffect,
   recordFriction,
 } from "./daemon-and-omnigraph.service.js"
 
@@ -112,10 +112,7 @@ export const handleGuard = (
       rawStdin === undefined &&
       !process.stdin.isTTY
     ) {
-      rawStdin = yield* Effect.try({
-        try: () => readFileSync(0, "utf8"),
-        catch: () => "",
-      }).pipe(Effect.orElseSucceed(() => ""))
+      rawStdin = yield* readStdinEffect
     }
 
     let stdinCmd: string | undefined

@@ -564,7 +564,4 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
   } satisfies EarsSpecLintReport)
 })
 
-export const lintEarsSpecMarkdown = (docPath: string, markdown: string): EarsSpecLintReport =>
-  Effect.runSync(decideEarsSpecQuality({ docPath, markdown }))
-
 export const decideEarsSpecLint = decideEarsSpecQuality

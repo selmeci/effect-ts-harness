@@ -1,20 +1,31 @@
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import {
   appendFileSync,
+  chmodSync,
+  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
+  rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs"
-import type { SyncHostDirEntry, SyncHostExecOptions, SyncHostExecResult, SyncHostIo } from "@harness/service"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import type {
+  ExtendedHostIo,
+  SyncHostDirEntry,
+  SyncHostExecOptions,
+  SyncHostExecResult,
+} from "@harness/service"
 
-export const nodeSyncHostIo: SyncHostIo = {
+export const nodeSyncHostIo: ExtendedHostIo = {
   existsSync: (filePath: string): boolean => existsSync(filePath),
   isFileSync: (filePath: string): boolean => {
     const st = statSync(filePath, { throwIfNoEntry: false })
@@ -71,5 +82,33 @@ export const nodeSyncHostIo: SyncHostIo = {
       stdout: result.stdout ?? "",
       stderr: result.stderr ?? (result.error !== undefined ? result.error.message : ""),
     }
+  },
+  rmRecursiveSync: (targetPath: string): void => {
+    rmSync(targetPath, { recursive: true, force: true })
+  },
+  cpRecursiveSync: (srcPath: string, destPath: string): void => {
+    cpSync(srcPath, destPath, { recursive: true })
+  },
+  mkdtempSync: (prefix: string): string => mkdtempSync(join(tmpdir(), prefix)),
+  statMtimeMsSync: (filePath: string): number | undefined =>
+    statSync(filePath, { throwIfNoEntry: false })?.mtimeMs,
+  chmodSync: (filePath: string, mode: number): void => {
+    chmodSync(filePath, mode)
+  },
+  spawnDetached: (
+    command: string,
+    args: ReadonlyArray<string>,
+    options?: {
+      readonly cwd?: string | undefined
+      readonly env?: Readonly<Record<string, string | undefined>> | undefined
+    },
+  ): void => {
+    spawn(command, [...args], {
+      cwd: options?.cwd,
+      env: options?.env,
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    }).unref()
   },
 }

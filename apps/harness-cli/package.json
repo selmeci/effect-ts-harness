@@ -17,10 +17,13 @@
     "@effect/platform-node": "4.0.0",
     "@harness/contract": "workspace:*",
     "@harness/decision": "workspace:*",
+    "@harness/es-contract": "workspace:*",
+    "@harness/es-core": "workspace:*",
     "@harness/gates": "workspace:*",
     "@harness/graph": "workspace:*",
     "@harness/infra": "workspace:*",
     "@harness/ingest": "workspace:*",
+    "@harness/sample-contract": "workspace:*",
     "@harness/service": "workspace:*",
     "effect": "4.0.0"
   },

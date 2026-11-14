@@ -27,6 +27,7 @@ import {
   makeDecisionCacheLayer,
   makeUnixSocketDaemonLayer,
   nodeSyncHostIo,
+  queryUnixSocketLine,
   resolveHarnessDaemonSocketPath,
   startScopedUnixSocketDaemon,
   UnixSocketDaemonLive,
@@ -246,5 +247,50 @@ describe("@harness/infra live adapters", () => {
         expect(err.socketPath).toBe(badSocketPath)
       }),
     ),
+  )
+
+  it.effect("queryUnixSocketLine communicates with lineHandler daemon and returns None when missing", () =>
+    withTempDir((dir) =>
+      Effect.gen(function* () {
+        const repoRoot = WorkspaceFilePath.make(dir)
+        const missingReply = yield* queryUnixSocketLine(join(dir, "missing.sock"), "ping", 200)
+        expect(Option.isNone(missingReply)).toBe(true)
+
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const info = yield* startScopedUnixSocketDaemon(repoRoot, {
+              lineHandler: (line) => Effect.succeed(`echo:${line}`),
+            })
+            const reply = yield* queryUnixSocketLine(info.socketPath, "hello-daemon", 1000)
+            expect(Option.getOrNull(reply)).toBe("echo:hello-daemon")
+          }),
+        ).pipe(Effect.provide(UnixSocketDaemonLive))
+      }),
+    ),
+  )
+
+  it.effect("ExtendedHostIo supports mkdtempSync, cpRecursiveSync, statMtimeMsSync, and rmRecursiveSync", () =>
+    Effect.sync(() => {
+      const tempRoot = nodeSyncHostIo.mkdtempSync("harness-extended-io-")
+      try {
+        const srcDir = join(tempRoot, "src")
+        const destDir = join(tempRoot, "dest")
+        const srcFile = join(srcDir, "nested.txt")
+        nodeSyncHostIo.mkdirRecursiveSync(srcDir)
+        nodeSyncHostIo.writeTextSync(srcFile, "hello-extended-io")
+
+        const mtime = nodeSyncHostIo.statMtimeMsSync(srcFile)
+        expect(typeof mtime).toBe("number")
+        expect(nodeSyncHostIo.statMtimeMsSync(join(tempRoot, "missing.txt"))).toBeUndefined()
+
+        nodeSyncHostIo.cpRecursiveSync(srcDir, destDir)
+        expect(nodeSyncHostIo.readTextSync(join(destDir, "nested.txt"))).toBe("hello-extended-io")
+
+        nodeSyncHostIo.rmRecursiveSync(destDir)
+        expect(nodeSyncHostIo.existsSync(destDir)).toBe(false)
+      } finally {
+        nodeSyncHostIo.rmRecursiveSync(tempRoot)
+      }
+    }),
   )
 })

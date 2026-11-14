@@ -4,7 +4,6 @@ import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import { type DeterministicFallbackReason, PriorSource } from "./hole-prior-decision.js"
-import { assertDecisionLimits } from "./idiom-router.js"
 
 export const EQUIVALENT_MUTANT_THRESHOLD_MILLIS = 850
 
@@ -39,8 +38,6 @@ export const MutantEquivalenceV1 = Decision.make({
     }),
   },
 })
-
-assertDecisionLimits(MutantEquivalenceV1)
 
 export const MutantEquivalenceInput = Schema.Struct({
   mutantId: MutantDecisionId,

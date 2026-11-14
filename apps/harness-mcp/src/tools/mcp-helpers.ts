@@ -1,7 +1,6 @@
-import * as fs from "node:fs"
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
-import { Effect, Layer, Option, Schema } from "effect"
+import { Effect, Layer, Option, Result, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import { McpToolInputName, McpToolName, UnknownToolError } from "@harness/contract"
@@ -87,7 +86,7 @@ export interface ServerOptions {
 export const findRepoRoot = (startDir: string): string => {
   let curr = path.resolve(startDir)
   while (curr !== path.dirname(curr)) {
-    if (fs.existsSync(path.join(curr, "pnpm-workspace.yaml"))) {
+    if (nodeSyncHostIo.existsSync(path.join(curr, "pnpm-workspace.yaml"))) {
       return curr
     }
     curr = path.dirname(curr)
@@ -126,7 +125,7 @@ export const resolveDefaultRepoRoot = (args?: Readonly<Record<string, unknown>>)
         : undefined
   if (candidate !== undefined) {
     const candidateRoot = findRepoRoot(path.dirname(candidate))
-    if (fs.existsSync(path.join(candidateRoot, "pnpm-workspace.yaml"))) {
+    if (nodeSyncHostIo.existsSync(path.join(candidateRoot, "pnpm-workspace.yaml"))) {
       return candidateRoot
     }
   }
@@ -136,15 +135,16 @@ export const resolveDefaultRepoRoot = (args?: Readonly<Record<string, unknown>>)
   }
   if (process.env.VITEST === undefined) {
     const activeWorkspacePath = path.join(SERVER_REPO_ROOT, ".harness", "active-workspace.json")
-    if (fs.existsSync(activeWorkspacePath)) {
-      const resolvedActiveRoot = Effect.runSync(
-        Effect.try(() => {
-          const raw = fs.readFileSync(activeWorkspacePath, "utf-8")
+    if (nodeSyncHostIo.existsSync(activeWorkspacePath)) {
+      const resolvedActiveRoot = Result.getOrElse(
+        Result.try(() => {
+          const raw = nodeSyncHostIo.readTextSync(activeWorkspacePath)
           const parsed = Option.getOrUndefined(decodeActiveWorkspace(raw))
-          return parsed !== undefined && fs.existsSync(parsed.repoRoot)
+          return parsed !== undefined && nodeSyncHostIo.existsSync(parsed.repoRoot)
             ? parsed.repoRoot
             : undefined
-        }).pipe(Effect.orElseSucceed(() => undefined)),
+        }),
+        () => undefined,
       )
       if (resolvedActiveRoot !== undefined) {
         return resolvedActiveRoot
@@ -172,8 +172,8 @@ const selectSnapshotPath = (
   planExists: boolean,
 ): string | undefined => {
   if (verifyExists && planExists) {
-    const verifyMtime = fs.statSync(verifySnap).mtimeMs
-    const planMtime = fs.statSync(planSnap).mtimeMs
+    const verifyMtime = nodeSyncHostIo.statMtimeMsSync(verifySnap) ?? 0
+    const planMtime = nodeSyncHostIo.statMtimeMsSync(planSnap) ?? 0
     return planMtime > verifyMtime ? planSnap : verifySnap
   }
   if (verifyExists) {
@@ -198,8 +198,8 @@ export const resolveGraph = (
     if (!snapshotPath) {
       const verifySnap = path.join(root, ".harness", "graph-snapshot.json")
       const planSnap = path.join(root, ".harness", "plan-graph-snapshot.json")
-      const verifyExists = fs.existsSync(verifySnap)
-      const planExists = fs.existsSync(planSnap)
+      const verifyExists = nodeSyncHostIo.existsSync(verifySnap)
+      const planExists = nodeSyncHostIo.existsSync(planSnap)
       if (verifyExists) {
         const recordedMeta = readGraphHeadMeta(root, nodeSyncHostIo)
         const headState = resolveGitHeadState(root, nodeSyncHostIo)
@@ -216,7 +216,7 @@ export const resolveGraph = (
       }
       snapshotPath = selectSnapshotPath(root, verifySnap, planSnap, verifyExists, planExists)
     }
-    if (snapshotPath && fs.existsSync(snapshotPath)) {
+    if (snapshotPath && nodeSyncHostIo.existsSync(snapshotPath)) {
       return yield* loadGraphSnapshotEffect(snapshotPath, nodeSyncHostIo).pipe(
         Effect.tapError((error) =>
           Effect.sync(() => {
@@ -247,26 +247,24 @@ export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolea
   if (rel !== "" && (rel.startsWith("..") || path.isAbsolute(rel))) {
     return false
   }
-  if (fs.existsSync(logicalRoot)) {
+  if (nodeSyncHostIo.existsSync(logicalRoot)) {
     let checkPath = logicalCandidate
-    while (!fs.existsSync(checkPath) && checkPath !== logicalRoot) {
+    while (!nodeSyncHostIo.existsSync(checkPath) && checkPath !== logicalRoot) {
       const parent = path.dirname(checkPath)
       if (parent === checkPath) break
       checkPath = parent
     }
-    if (fs.existsSync(checkPath)) {
+    if (nodeSyncHostIo.existsSync(checkPath)) {
       const checkRel = path.relative(logicalRoot, checkPath)
       if (!checkRel.startsWith("..") && !path.isAbsolute(checkRel)) {
-        const contained = Effect.runSync(
-          Effect.try({
-            try: () => {
-              const realRoot = fs.realpathSync.native(logicalRoot)
-              const realCheck = fs.realpathSync.native(checkPath)
-              const realRel = path.relative(realRoot, realCheck)
-              return !(realRel !== "" && (realRel.startsWith("..") || path.isAbsolute(realRel)))
-            },
-            catch: () => false,
+        const contained = Result.getOrElse(
+          Result.try(() => {
+            const realRoot = nodeSyncHostIo.realpathSync(logicalRoot)
+            const realCheck = nodeSyncHostIo.realpathSync(checkPath)
+            const realRel = path.relative(realRoot, realCheck)
+            return !(realRel !== "" && (realRel.startsWith("..") || path.isAbsolute(realRel)))
           }),
+          () => false,
         )
         if (!contained) {
           return false
@@ -293,7 +291,7 @@ export const normalizeProjectPathEffect = (
       }),
     )
   }
-  if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
+  if (nodeSyncHostIo.existsSync(resolved) && nodeSyncHostIo.isDirectorySync(resolved)) {
     const joined = path.join(resolved, "tsconfig.json")
     if (!isPathInsideRoot(repoRoot, joined)) {
       return Effect.fail(

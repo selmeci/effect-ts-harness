@@ -1,7 +1,7 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Effect } from "effect"
+import { Cause, Effect, Exit, Layer } from "effect"
 import { match } from "ts-pattern"
-import { checkSpanBudgets, type SpanSample } from "@harness/gates"
+import { decideSpanBudgets, type SpanSample } from "@harness/gates"
 import { runWithTestTracer, type IndexedEffectFn, type RecordedSpanEvent } from "@harness/ingest"
 import {
   CANONICAL_CLI_COMMAND_NAMES,
@@ -9,11 +9,12 @@ import {
   CliCommandNotFoundError,
   DEFAULT_CLI_COMMAND_DESCRIPTORS,
   dispatchCliCommand,
+  HarnessCommandRegistry,
   HarnessCommandRegistryLive,
   makeHarnessCommandRegistryLayer,
   type CliCommandPluginDescriptor,
 } from "../src/commands/command-registry.js"
-import { COMMANDS } from "../src/index.js"
+import { COMMANDS, runDeclarativeCli } from "../src/index.js"
 
 const toSpanSamples = (spans: ReadonlyArray<RecordedSpanEvent>): ReadonlyArray<SpanSample> =>
   spans.map((s) => ({
@@ -36,16 +37,19 @@ describe("HarnessCli.dispatchCommand (SPEC-0011 §4)", () => {
     expect(DEFAULT_CLI_COMMAND_DESCRIPTORS.map((d) => d.name)).toEqual([...COMMANDS])
   })
 
-  it("REQ-4.1: makeHarnessCommandRegistryLayer throws on duplicate command registration", () => {
-    const dupDescriptor: CliCommandPluginDescriptor = {
-      name: CliCommandName.make("guard"),
-      summary: "Duplicate guard descriptor",
-      execute: () => Effect.succeed({ exitCode: 0, stdout: "", stderr: "" }),
-    }
-    expect(() => makeHarnessCommandRegistryLayer([dupDescriptor, dupDescriptor])).toThrow(
-      /Duplicate CLI command registered: guard/,
-    )
-  })
+  it.effect("REQ-4.1: makeHarnessCommandRegistryLayer dies on duplicate command registration", () =>
+    Effect.gen(function* () {
+      const dupDescriptor: CliCommandPluginDescriptor = {
+        name: CliCommandName.make("guard"),
+        summary: "Duplicate guard descriptor",
+        execute: () => Effect.succeed({ exitCode: 0, stdout: "", stderr: "" }),
+      }
+      const exit = yield* Effect.exit(
+        Effect.scoped(Layer.build(makeHarnessCommandRegistryLayer([dupDescriptor, dupDescriptor]))),
+      )
+      expect(Exit.isFailure(exit) && Cause.hasDies(exit.cause)).toBe(true)
+    }),
+  )
 
   it.effect(
     "REQ-4.1: executes registered command, records HarnessCli.dispatchCommand span, and passes span budgets",
@@ -71,7 +75,7 @@ describe("HarnessCli.dispatchCommand (SPEC-0011 §4)", () => {
         expect(dispatchSpan?.name).toBe("HarnessCli.dispatchCommand")
         expect(dispatchSpan?.exitTag).toBe("Success")
 
-        const violations = checkSpanBudgets({ spans: toSpanSamples(spans) })
+        const violations = yield* decideSpanBudgets({ spans: toSpanSamples(spans) })
         expect(violations).toHaveLength(0)
       }),
   )
@@ -112,7 +116,7 @@ describe("HarnessCli.dispatchCommand (SPEC-0011 §4)", () => {
         expect(dispatchSpan?.name).toBe("HarnessCli.dispatchCommand")
         expect(dispatchSpan?.exitTag).toBe("Success")
 
-        const violations = checkSpanBudgets({ spans: toSpanSamples(spans) })
+        const violations = yield* decideSpanBudgets({ spans: toSpanSamples(spans) })
         expect(violations).toHaveLength(0)
       }),
   )
@@ -140,7 +144,10 @@ describe("HarnessCli.dispatchCommand (SPEC-0011 §4)", () => {
         expect(dispatchSpan?.name).toBe("HarnessCli.dispatchCommand")
         expect(dispatchSpan?.exitTag).toBe("Failure")
 
-        const violations = checkSpanBudgets({ spans: toSpanSamples(spans), maxRepeatedChildCalls: 3 })
+        const violations = yield* decideSpanBudgets({
+          spans: toSpanSamples(spans),
+          maxRepeatedChildCalls: 3,
+        })
         expect(violations).toHaveLength(0)
 
         match(exit)
@@ -164,5 +171,34 @@ describe("HarnessCli.dispatchCommand (SPEC-0011 §4)", () => {
           })
           .exhaustive()
       }),
+  )
+
+  it.effect("REQ-4.1: runDeclarativeCli executes help and guard via effect/cli", () =>
+    Effect.gen(function* () {
+      const helpRes = yield* runDeclarativeCli(["help"])
+      expect(helpRes.exitCode).toBe(0)
+      expect(helpRes.stdout).toContain("harness help")
+
+      const guardRes = yield* runDeclarativeCli(["guard", "pnpm test"])
+      expect(guardRes.exitCode).toBe(0)
+    }),
+  )
+
+  it.effect(
+    "REQ-4.2..4.5: registers check-openapi, check-migrations, check-event-schemas, benchmark, and scenario",
+    () =>
+      Effect.gen(function* () {
+        const registry = yield* HarnessCommandRegistry
+        for (const name of [
+          "check-openapi",
+          "check-migrations",
+          "check-event-schemas",
+          "benchmark",
+          "scenario",
+        ] as const) {
+          const resolved = yield* registry.resolveCommand(name)
+          expect(resolved._tag).toBe("Some")
+        }
+      }).pipe(Effect.provide(HarnessCommandRegistryLive)),
   )
 })

@@ -1,4 +1,4 @@
-import { Context, Deferred, Effect, Exit, Layer, Scope } from "effect"
+import { Deferred, Effect, Exit, Layer, Scope } from "effect"
 import { match } from "ts-pattern"
 import { SqlClient } from "effect/sql/SqlClient"
 import * as SqliteClientModule from "@effect/sql-sqlite-do/SqliteClient"
@@ -508,13 +508,11 @@ const createWorkerdDurableObjectStorage = (
   return unsafeCast<DurableObjectStorage>(doStorage)
 }
 
-export const SqlClientMemoryLayer: Layer.Layer<SqlClient> = Layer.effect(
-  SqlClient,
+export const SqlClientMemoryLayer: Layer.Layer<SqlClient> = Layer.unwrap(
   Effect.gen(function* () {
     const bridge = yield* acquireSharedWorkerdBridge()
     const doName = crypto.randomUUID()
     const storage = createWorkerdDurableObjectStorage(bridge, doName)
-    const services = yield* Layer.build(SqliteClientModule.layer({ storage }))
-    return Context.get(services, SqlClient)
+    return SqliteClientModule.layer({ storage })
   }),
 )

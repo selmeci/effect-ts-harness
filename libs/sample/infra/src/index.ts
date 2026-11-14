@@ -39,31 +39,26 @@ export const PhotoRepoMemoryLayer: Layer.Layer<PhotoRepo> = Layer.effect(
     const itemsRef = yield* Ref.make<ReadonlyArray<Photo>>([])
     let nextId = 1
 
-    const insert = Effect.fn("PhotoRepo.insert")((input: CreatePhotoInput): Effect.Effect<Photo> =>
-      Effect.gen(function* () {
-        const raw = {
-          id: nextId++,
-          name: input.name,
-          albumId: input.albumId,
-          createdAt: Math.floor(Date.now()),
-        }
-        const photo = yield* Schema.decodeEffect(Photo)(raw).pipe(Effect.orDie)
-        yield* Ref.update(itemsRef, (items) => [...items, photo])
-        return photo
-      }),
-    )
+    const insert = Effect.fn("PhotoRepo.insert")(function* (input: CreatePhotoInput) {
+      const raw = {
+        id: nextId++,
+        name: input.name,
+        albumId: input.albumId,
+        createdAt: Math.floor(Date.now()),
+      }
+      const photo = yield* Schema.decodeEffect(Photo)(raw).pipe(Effect.orDie)
+      yield* Ref.update(itemsRef, (items) => [...items, photo])
+      return photo
+    })
 
-    const findById = Effect.fn("PhotoRepo.findById")(
-      (id: PhotoId): Effect.Effect<Photo, PhotoNotFoundError> =>
-        Effect.gen(function* () {
-          const items = yield* Ref.get(itemsRef)
-          const found = items.find((p) => p.id === id)
-          if (!found) {
-            return yield* new PhotoNotFoundError({ id })
-          }
-          return found
-        }),
-    )
+    const findById = Effect.fn("PhotoRepo.findById")(function* (id: PhotoId) {
+      const items = yield* Ref.get(itemsRef)
+      const found = items.find((p) => p.id === id)
+      if (!found) {
+        return yield* new PhotoNotFoundError({ id })
+      }
+      return found
+    })
 
     const listAll: Effect.Effect<ReadonlyArray<Photo>> = Ref.get(itemsRef).pipe(
       Effect.withSpan("PhotoRepo.listAll"),
@@ -78,8 +73,8 @@ export type EffectD1Database = EffectSQLiteD1Database
 export type DrizzleDatabase = EffectSQLiteD1Database
 
 const _makePhotoRepoDrizzle = (db: DrizzleDatabase) => {
-  const insert = Effect.fn("PhotoRepo.insert")((input: CreatePhotoInput): Effect.Effect<Photo> =>
-    Effect.gen(function* () {
+  const insert = Effect.fn("PhotoRepo.insert")(
+    function* (input: CreatePhotoInput) {
       const createdAt = Math.floor(Date.now())
       const insertEffect = db
         .insert(photos)
@@ -92,20 +87,18 @@ const _makePhotoRepoDrizzle = (db: DrizzleDatabase) => {
 
       const rows = yield* insertEffect
       return yield* Schema.decodeUnknownEffect(Photo)(rows[0])
-    }).pipe(Effect.orDie),
+    },
+    Effect.orDie,
   )
 
-  const findById = Effect.fn("PhotoRepo.findById")(
-    (id: PhotoId): Effect.Effect<Photo, PhotoNotFoundError> =>
-      Effect.gen(function* () {
-        const selectEffect = db.select().from(photos).where(eq(photos.id, id))
-        const rows = yield* Effect.orDie(selectEffect)
-        if (!rows || rows.length === 0) {
-          return yield* new PhotoNotFoundError({ id })
-        }
-        return yield* Schema.decodeUnknownEffect(Photo)(rows[0]).pipe(Effect.orDie)
-      }),
-  )
+  const findById = Effect.fn("PhotoRepo.findById")(function* (id: PhotoId) {
+    const selectEffect = db.select().from(photos).where(eq(photos.id, id))
+    const rows = yield* Effect.orDie(selectEffect)
+    if (!rows || rows.length === 0) {
+      return yield* new PhotoNotFoundError({ id })
+    }
+    return yield* Schema.decodeUnknownEffect(Photo)(rows[0]).pipe(Effect.orDie)
+  })
 
   const listAll: Effect.Effect<ReadonlyArray<Photo>> = Effect.gen(function* () {
     const selectEffect = db.select().from(photos)

@@ -63,7 +63,9 @@ export const checkUnusedContractExports = (
       for (const appChild of appChildren) {
         if (
           appChild.isDirectory &&
-          (appChild.name === scope || appChild.name.startsWith(`${scope}-`))
+          (appChild.name === scope ||
+            appChild.name.startsWith(`${scope}-`) ||
+            appChild.name === "harness-cli")
         ) {
           existingSiblingDirs.push(join(appsDir, appChild.name))
         }

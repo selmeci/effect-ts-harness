@@ -220,6 +220,12 @@ importers:
       '@harness/decision':
         specifier: workspace:*
         version: link:../../libs/harness/decision
+      '@harness/es-contract':
+        specifier: workspace:*
+        version: link:../../libs/es/contract
+      '@harness/es-core':
+        specifier: workspace:*
+        version: link:../../libs/es/core
       '@harness/gates':
         specifier: workspace:*
         version: link:../../libs/harness/gates
@@ -232,6 +238,9 @@ importers:
       '@harness/ingest':
         specifier: workspace:*
         version: link:../../libs/harness/ingest
+      '@harness/sample-contract':
+        specifier: workspace:*
+        version: link:../../libs/sample/contract
       '@harness/service':
         specifier: workspace:*
         version: link:../../libs/harness/service

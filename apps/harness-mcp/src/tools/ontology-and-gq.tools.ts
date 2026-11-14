@@ -126,7 +126,7 @@ export const buildOntologyAndGqToolDescriptors = (
           graph,
           governanceDocs: docs,
         })
-        const pairs = extractOntologyConflictPairs(docs, scope)
+        const pairs = yield* extractOntologyConflictPairs(docs, scope)
         const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
         const semanticConflicts = yield* evaluateOntologyConflicts(pairs).pipe(
           Effect.provide(decisionLayer),

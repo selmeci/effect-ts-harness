@@ -367,7 +367,7 @@ export const verifyCommittedSnapshotParity = Effect.fn("EventSchemaEvolution.ver
             eventType: cur.eventType,
             version: cur.version,
             reason: ErrorMessage.make(
-              `Uncommitted event schema version ${cur.eventType} v${cur.version}; run check-event-schemas.mjs --update to freeze new version`,
+              `Uncommitted event schema version ${cur.eventType} v${cur.version}; run harness check-event-schemas --update to freeze new version`,
             ),
           })
         }

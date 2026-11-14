@@ -1,7 +1,8 @@
+import * as nodeFs from "node:fs"
 import * as net from "node:net"
 import * as nodePath from "node:path"
 import { NodeServices } from "@effect/platform-node"
-import { Effect, FileSystem, Layer, Path, Schema, type Scope } from "effect"
+import { Effect, FileSystem, Layer, Option, Path, Schema, type Scope } from "effect"
 import { match } from "ts-pattern"
 import {
   DaemonServerError,
@@ -40,6 +41,53 @@ const toDaemonServerError = (socketPath: DaemonSocketPath, err: unknown): Daemon
   })
 }
 
+export interface UnixSocketDaemonLayerOptions {
+  readonly socketPathOverride?: DaemonSocketPath
+  readonly lineHandler?: (line: string) => Effect.Effect<string>
+}
+
+export const queryUnixSocketLine = Effect.fn("UnixSocketDaemon.queryLine")(function* (
+  socketPath: string,
+  linePayload: string,
+  timeoutMs: number = 1500,
+): Effect.fn.Return<Option.Option<string>> {
+  return yield* Effect.callback<Option.Option<string>>((resume) => {
+    const socket = net.createConnection(socketPath)
+    let settled = false
+    let buffer = ""
+    const finish = (result: Option.Option<string>) => {
+      if (settled) {
+        return
+      }
+      settled = true
+      socket.destroy()
+      resume(Effect.succeed(result))
+    }
+    socket.setTimeout(timeoutMs, () => finish(Option.none()))
+    socket.on("error", () => finish(Option.none()))
+    socket.on("connect", () => {
+      const payload = linePayload.endsWith("\n") ? linePayload : `${linePayload}\n`
+      socket.write(payload)
+    })
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8")
+      if (Buffer.byteLength(buffer, "utf8") > MAX_DAEMON_BUFFER_BYTES) {
+        finish(Option.none())
+        return
+      }
+      const newlineIdx = buffer.indexOf("\n")
+      if (newlineIdx !== -1) {
+        finish(Option.some(buffer.slice(0, newlineIdx).trim()))
+      }
+    })
+    socket.on("end", () => {
+      const trimmed = buffer.trim()
+      finish(trimmed.length > 0 ? Option.some(trimmed) : Option.none())
+    })
+    socket.on("close", () => finish(Option.none()))
+  })
+})
+
 const probeSocketAlive = (
   fs: FileSystem.FileSystem,
   socketPath: DaemonSocketPath,
@@ -63,7 +111,7 @@ const probeSocketAlive = (
       socket.setTimeout(200, () => finish(false))
       socket.on("error", () => finish(false))
       socket.on("connect", () => {
-        socket.write("ping\n")
+        finish(true)
       })
       socket.on("data", (chunk) => {
         const text = chunk.toString("utf8")
@@ -91,7 +139,10 @@ const closeNetServer = (
     Effect.ignore,
   )
 
-const createDaemonNetServer = (openSockets: Set<net.Socket>): net.Server =>
+const createDaemonNetServer = (
+  openSockets: Set<net.Socket>,
+  runLineHandler?: (line: string, socket: net.Socket) => void,
+): net.Server =>
   net.createServer((socket) => {
     openSockets.add(socket)
     socket.once("close", () => {
@@ -126,6 +177,11 @@ const createDaemonNetServer = (openSockets: Set<net.Socket>): net.Server =>
       }
       const line = buffer.slice(0, newlineIdx).trim()
       buffer = buffer.slice(newlineIdx + 1)
+
+      if (runLineHandler !== undefined) {
+        runLineHandler(line, socket)
+        return
+      }
 
       if (line === "ping") {
         if (!socket.destroyed && socket.writable) {
@@ -163,14 +219,39 @@ const createDaemonNetServer = (openSockets: Set<net.Socket>): net.Server =>
     })
   })
 
-const makeUnixSocketDaemonLayer = (options?: {
-  readonly socketPathOverride?: DaemonSocketPath
-}): Layer.Layer<UnixSocketDaemonPort> =>
+const makeUnixSocketDaemonLayer = (
+  options?: UnixSocketDaemonLayerOptions,
+): Layer.Layer<UnixSocketDaemonPort> =>
   Layer.effect(
     UnixSocketDaemonPort,
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem
       const path = yield* Path.Path
+      const services = yield* Effect.context<never>()
+      const runFork = Effect.runForkWith(services)
+      const lineHandler = options?.lineHandler
+      const runLineHandler =
+        lineHandler !== undefined
+          ? (line: string, socket: net.Socket): void => {
+              const fiber = runFork(lineHandler(line))
+              fiber.addObserver((exit) => {
+                match(exit)
+                  .with({ _tag: "Success" }, ({ value: responseLine }) => {
+                    if (!socket.destroyed && socket.writable) {
+                      socket.end(`${responseLine}\n`)
+                    }
+                  })
+                  .with({ _tag: "Failure" }, () => {
+                    if (!socket.destroyed && socket.writable) {
+                      socket.end(
+                        `${JSON.stringify({ ok: false, error: "Daemon line handler failed" })}\n`,
+                      )
+                    }
+                  })
+                  .exhaustive()
+              })
+            }
+          : undefined
 
       const startServer = (
         repoRoot: WorkspaceFilePath,
@@ -202,7 +283,7 @@ const makeUnixSocketDaemonLayer = (options?: {
           yield* Effect.acquireRelease(
             Effect.gen(function* () {
               const openSockets = new Set<net.Socket>()
-              const server = createDaemonNetServer(openSockets)
+              const server = createDaemonNetServer(openSockets, runLineHandler)
 
               yield* Effect.callback<void, DaemonServerError>((resume) => {
                 const onError = (err: Error) => {
@@ -218,8 +299,12 @@ const makeUnixSocketDaemonLayer = (options?: {
               )
 
               if (process.platform !== "win32") {
-                yield* fs.chmod(socketPath, 0o600).pipe(
-                  Effect.mapError((err) => toDaemonServerError(socketPath, err)),
+                yield* Effect.try({
+                  try: () => {
+                    nodeFs.chmodSync(socketPath, 0o600)
+                  },
+                  catch: (err) => toDaemonServerError(socketPath, err),
+                }).pipe(
                   Effect.tapError(() => closeNetServer(fs, server, socketPath, openSockets)),
                 )
               }
@@ -253,7 +338,14 @@ export const UnixSocketDaemonLive: Layer.Layer<UnixSocketDaemonPort> = makeUnixS
 
 export const startScopedUnixSocketDaemon = Effect.fn("UnixSocketDaemon.startScoped")(function* (
   repoRoot: WorkspaceFilePath,
+  options?: UnixSocketDaemonLayerOptions,
 ): Effect.fn.Return<DaemonServerInfo, DaemonServerError, UnixSocketDaemonPort | Scope.Scope> {
+  if (options !== undefined) {
+    return yield* Effect.gen(function* () {
+      const port = yield* UnixSocketDaemonPort
+      return yield* port.startServer(repoRoot)
+    }).pipe(Effect.provide(makeUnixSocketDaemonLayer(options)))
+  }
   const port = yield* UnixSocketDaemonPort
   return yield* port.startServer(repoRoot)
 })

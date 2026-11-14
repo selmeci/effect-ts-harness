@@ -56,11 +56,16 @@ describe("harness cli baseline", () => {
       "gc",
       "mutate",
       "bench",
+      "benchmark",
       "ingest",
       "session",
       "doctor",
       "ontology",
       "report",
+      "check-openapi",
+      "check-migrations",
+      "check-event-schemas",
+      "scenario",
       "help",
     ])
     for (const command of COMMANDS) {

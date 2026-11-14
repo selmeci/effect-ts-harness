@@ -4,7 +4,6 @@ import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import { type DeterministicFallbackReason, PriorSource } from "./hole-prior-decision.js"
-import { assertDecisionLimits } from "./idiom-router.js"
 
 export const RULE_GENERALITY_LEVELS = [
   "overfitted_to_single_file",
@@ -43,8 +42,6 @@ export const SynthesizedRuleQualityV1 = Decision.make({
     }),
   },
 })
-
-assertDecisionLimits(SynthesizedRuleQualityV1)
 
 export const SynthesizedRuleQualityInput = Schema.Struct({
   ruleId: SynthesizedRuleId,

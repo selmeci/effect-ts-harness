@@ -37,3 +37,19 @@ export interface SyncHostIo {
     options?: SyncHostExecOptions,
   ) => SyncHostExecResult
 }
+
+export interface ExtendedHostIo extends SyncHostIo {
+  readonly rmRecursiveSync: (targetPath: string) => void
+  readonly cpRecursiveSync: (srcPath: string, destPath: string) => void
+  readonly mkdtempSync: (prefix: string) => string
+  readonly statMtimeMsSync: (filePath: string) => number | undefined
+  readonly chmodSync: (filePath: string, mode: number) => void
+  readonly spawnDetached: (
+    command: string,
+    args: ReadonlyArray<string>,
+    options?: {
+      readonly cwd?: string | undefined
+      readonly env?: Readonly<Record<string, string | undefined>> | undefined
+    },
+  ) => void
+}

@@ -1,4 +1,3 @@
-import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { Cause, Effect } from "effect"
 import { match } from "ts-pattern"
@@ -25,6 +24,7 @@ import {
 } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
 import { type CliEnv, type CliResult, findWorkspaceRoot } from "./daemon-and-omnigraph.service.js"
+import { runBenchmarkCompare } from "./repo-checks.command.js"
 
 export const handleMutate = (
   argv: ReadonlyArray<string>,
@@ -48,6 +48,9 @@ export const handleBench = (
   options: CliEnv | undefined,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
+    if (argv.includes("--compare")) {
+      return yield* runBenchmarkCompare(argv, options)
+    }
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     const iterationsArg = argv.find((a) => a.startsWith("--iterations="))
     const parsedIter = iterationsArg ? Number(iterationsArg.slice("--iterations=".length)) : 3
@@ -60,14 +63,14 @@ export const handleBench = (
         ? LatencyMillis.make(parsedBudget)
         : undefined
 
-    const benchRelFile = existsSync(
+    const benchRelFile = nodeSyncHostIo.existsSync(
       join(repoRoot, "libs", "harness", "gates", "src", "bench-check.ts"),
     )
       ? "libs/harness/gates/src/bench-check.ts"
       : "libs/sample/domain/src/index.ts"
     const sampleFilePath = join(repoRoot, benchRelFile)
-    const sampleContent = existsSync(sampleFilePath)
-      ? readFileSync(sampleFilePath, "utf-8")
+    const sampleContent = nodeSyncHostIo.existsSync(sampleFilePath)
+      ? nodeSyncHostIo.readTextSync(sampleFilePath)
       : "export const x = 1\n"
 
     const session = createTypeScriptProgramSession(repoRoot, nodeSyncHostIo)

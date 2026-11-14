@@ -37,10 +37,6 @@ import {
   type ServerOptions,
 } from "./mcp-helpers.js"
 
-if (!("iterations" in globalThis)) {
-  Object.assign(globalThis, { iterations: 0 })
-}
-
 const GraphInferInputSchema = Schema.Struct({
   symbolOrSpan: Schema.optional(
     Schema.String.annotate({

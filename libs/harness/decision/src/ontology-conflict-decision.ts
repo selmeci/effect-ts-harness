@@ -2,19 +2,16 @@ import { Effect, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import {
-  checkOntologyInvariants,
+  decideEarsSpecLint,
   decideOntologyInvariants,
   type EarsRequirementRow,
   type GovernanceDocReference,
-  lintEarsSpecMarkdown,
   loadGovernanceDocsFromDisk,
   type OntologyInvariantFinding,
   type OntologyInvariantsReport,
 } from "@harness/gates"
-import { assertDecisionLimits } from "./idiom-router.js"
 
 export {
-  checkOntologyInvariants,
   decideOntologyInvariants,
   type GovernanceDocReference,
   loadGovernanceDocsFromDisk,
@@ -60,8 +57,6 @@ export const OntologyConflictV1 = Decision.make({
     }),
   },
 })
-
-assertDecisionLimits(OntologyConflictV1)
 
 export interface OntologyConflictInput {
   readonly sourceId: string
@@ -138,10 +133,10 @@ const extractAdrSummary = (markdown: string, fallbackId: string): string => {
   return fallbackId
 }
 
-export const extractOntologyConflictPairs = (
+export const extractOntologyConflictPairs = Effect.fn("OntologyConflict.extractPairs")(function* (
   governanceDocs: ReadonlyArray<GovernanceDocReference>,
   scope?: string,
-): ReadonlyArray<OntologyConflictInput> => {
+): Effect.fn.Return<ReadonlyArray<OntologyConflictInput>> {
   const activeDocs = governanceDocs.filter((doc) => {
     if (doc.status !== "accepted" && doc.status !== "proposed") {
       return false
@@ -176,7 +171,7 @@ export const extractOntologyConflictPairs = (
       doc.markdown !== undefined &&
       (doc.docPath.includes("/specs/") || doc.id.includes(":SPEC-") || doc.id.startsWith("SPEC-"))
     ) {
-      const lintReport = lintEarsSpecMarkdown(doc.docPath, doc.markdown)
+      const lintReport = yield* decideEarsSpecLint({ docPath: doc.docPath, markdown: doc.markdown })
       for (const row of lintReport.requirements) {
         if (
           row.id.startsWith("REQ-") &&
@@ -284,7 +279,7 @@ export const extractOntologyConflictPairs = (
   }
 
   return pairs
-}
+})
 
 export const evaluateOntologyConflicts = Effect.fn("Harness.evaluateOntologyConflicts")(function* (
   pairs: ReadonlyArray<OntologyConflictInput>,

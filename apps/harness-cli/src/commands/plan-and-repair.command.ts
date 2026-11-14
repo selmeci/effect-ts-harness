@@ -1,5 +1,3 @@
-import { execFileSync } from "node:child_process"
-import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { Effect, Option } from "effect"
 import * as Graph from "effect/Graph"
@@ -66,17 +64,16 @@ export const handlePlanCheck = (
     if (
       !graphOnly &&
       !options?.skipSubprocessVerify &&
-      existsSync(join(repoRoot, "package.json"))
+      nodeSyncHostIo.existsSync(join(repoRoot, "package.json"))
     ) {
       const nxArgs = resolveNxAffectedArgs(repoRoot, ["typecheck", "lint"])
       const subprocessErr = yield* Effect.try({
         try: () => {
-          execFileSync("pnpm", nxArgs, {
+          const res = nodeSyncHostIo.execFileSync("pnpm", nxArgs, {
             cwd: repoRoot,
-            stdio: "pipe",
             env: { ...process.env, HARNESS_PLAN_CHECK: "1", CI: "true" },
           })
-          return null
+          return res.exitCode === 0 ? null : formatSubprocessError(res)
         },
         catch: (cause) => formatSubprocessError(cause),
       }).pipe(Effect.catch((msg) => Effect.succeed(msg || "Plan check subprocess failed")))

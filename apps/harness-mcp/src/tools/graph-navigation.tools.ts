@@ -1,4 +1,3 @@
-import * as fs from "node:fs"
 import * as path from "node:path"
 import { Cause, Effect, Option, Schema } from "effect"
 import {
@@ -196,8 +195,8 @@ export const buildGraphNavigationToolDescriptors = (
         const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
         if (block === "review") {
           const patternsDir = path.join(root, "agent-patterns")
-          if (fs.existsSync(patternsDir)) {
-            const files = fs.readdirSync(patternsDir, "utf8")
+          if (nodeSyncHostIo.existsSync(patternsDir)) {
+            const files = nodeSyncHostIo.readdirSync(patternsDir).map((entry) => entry.name)
             const stepLower = planStep.toLowerCase()
             const candidates = files
               .filter((f: string) => f.endsWith(".md") && f.toLowerCase() !== "readme.md")

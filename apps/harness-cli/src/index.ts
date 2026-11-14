@@ -1,10 +1,9 @@
-import { mkdirSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+import { NodeRuntime } from "@effect/platform-node"
 import { Effect, Layer, Logger } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
-import { LocalDecisionModel } from "@harness/decision"
 import { nodeSyncHostIo } from "@harness/infra"
 import {
   buildSessionReport,
@@ -46,6 +45,7 @@ import {
   stripAnsiCodes,
   tryQueryWarmDaemonSocket,
 } from "./commands/daemon-and-omnigraph.service.js"
+import { harnessRootCommand, runDeclarativeCli } from "./commands/declarative-cli.js"
 import { handleIngest } from "./commands/session-learn-report.command.js"
 
 export {
@@ -68,10 +68,12 @@ export {
   handleIngest,
   HarnessCommandRegistry,
   HarnessCommandRegistryLive,
+  harnessRootCommand,
   isCommand,
   makeHarnessCommandRegistryLayer,
   makeLiveCliCommandRegistryLayer,
   type OllamaReadinessOptions,
+  runDeclarativeCli,
   stripAnsiCodes,
   tryQueryWarmDaemonSocket,
 }
@@ -85,51 +87,21 @@ export const runCliEffect = (
     const requested = argv[0] ?? "help"
     const effectiveOptions =
       maybeDecisionLayer !== undefined ? { ...options, decisionLayer: maybeDecisionLayer } : options
-    const decisionLayer = effectiveOptions?.decisionLayer ?? LocalDecisionModel
     const repoRoot = effectiveOptions?.repoRoot ?? findWorkspaceRoot()
 
     if (effectiveOptions?.repoRoot === undefined && process.env.VITEST === undefined) {
       yield* Effect.try(() => {
         const harnessDir = join(CLI_REPO_ROOT, ".harness")
-        mkdirSync(harnessDir, { recursive: true })
-        writeFileSync(
+        nodeSyncHostIo.mkdirRecursiveSync(harnessDir)
+        nodeSyncHostIo.writeTextSync(
           join(harnessDir, "active-workspace.json"),
           JSON.stringify({ repoRoot, updatedAt: new Date().toISOString() }, null, 2),
         )
       }).pipe(Effect.ignore)
     }
 
-    if (requested === "--help" || requested === "-h") {
-      return {
-        exitCode: 0,
-        stdout: `harness help\nusage: harness <${COMMANDS.join("|")}>`,
-        stderr: "",
-      }
-    }
-
-    if ((argv.includes("--help") || argv.includes("-h")) && isCommand(requested)) {
-      return {
-        exitCode: 0,
-        stdout: `harness help\nusage: harness <${COMMANDS.join("|")}>`,
-        stderr: "",
-      }
-    }
-
-    const liveCommandLayer = makeLiveCliCommandRegistryLayer(effectiveOptions, decisionLayer)
     const startTime = performance.now()
-    const res: CliResult = yield* dispatchCliCommand({
-      command: requested,
-      args: argv,
-    }).pipe(
-      Effect.provide(liveCommandLayer),
-      Effect.catchTag("CliCommandNotFoundError", (e) =>
-        Effect.succeed<CliResult>({
-          exitCode: 1,
-          stdout: "",
-          stderr: `unknown command: ${e.command}\nusage: harness <${COMMANDS.join("|")}>`,
-        }),
-      ),
-    )
+    const res: CliResult = yield* runDeclarativeCli(argv, effectiveOptions, maybeDecisionLayer)
     const durationMs = Math.max(0, Math.round(performance.now() - startTime))
 
     const surface: TelemetrySurface =
@@ -215,18 +187,30 @@ if (
   (fileURLToPath(import.meta.url) === resolve(process.argv[1]) ||
     process.argv[1].endsWith("index.ts"))
 ) {
-  void Effect.runPromise(runCliEffect(process.argv.slice(2)))
-    .then((res) => {
-      if (res.stdout) {
-        process.stdout.write(res.stdout.endsWith("\n") ? res.stdout : res.stdout + "\n")
-      }
-      if (res.stderr) {
-        process.stderr.write(res.stderr.endsWith("\n") ? res.stderr : res.stderr + "\n")
-      }
-      process.exit(res.exitCode)
-    })
-    .catch((err: unknown) => {
-      console.error(String(err))
-      process.exit(1)
-    })
+  runCliEffect(process.argv.slice(2)).pipe(
+    Effect.tap((res) =>
+      Effect.sync(() => {
+        if (res.stdout) {
+          process.stdout.write(res.stdout.endsWith("\n") ? res.stdout : `${res.stdout}\n`)
+        }
+        if (res.stderr) {
+          process.stderr.write(res.stderr.endsWith("\n") ? res.stderr : `${res.stderr}\n`)
+        }
+        process.exitCode = res.exitCode
+      }),
+    ),
+    NodeRuntime.runMain({
+      disableErrorReporting: true,
+      teardown: (exit, onExit) => {
+        onExit(
+          match(exit)
+            .with({ _tag: "Success" }, () =>
+              typeof process.exitCode === "number" ? process.exitCode : 0,
+            )
+            .with({ _tag: "Failure" }, () => 1)
+            .exhaustive(),
+        )
+      },
+    }),
+  )
 }

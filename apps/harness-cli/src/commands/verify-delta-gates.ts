@@ -1,4 +1,3 @@
-import { existsSync, readFileSync } from "node:fs"
 import { join, relative } from "node:path"
 import { Cause, Data, Effect, Layer, Option, Schema } from "effect"
 import { match } from "ts-pattern"
@@ -26,7 +25,7 @@ export const runDeltaAstAndPluginGates = (
     if (deltaFiles.length === 0) return Option.none()
     const astGateFiles = deltaFiles.map((relPath) => ({
       filePath: AstSourceFilePath.make(relPath),
-      content: AstSourceContent.make(readFileSync(join(repoRoot, relPath), "utf-8")),
+      content: AstSourceContent.make(nodeSyncHostIo.readTextSync(join(repoRoot, relPath))),
     }))
     const astReport = yield* AstGateCache.decide({
       files: astGateFiles,
@@ -55,7 +54,7 @@ export const runDeltaAstAndPluginGates = (
     let modularDeltaFiles = deltaFiles.filter((f) => isModularPluginPath(f))
     if (
       modularDeltaFiles.length === 0 &&
-      existsSync(join(repoRoot, "libs", "harness", "gates", "src"))
+      nodeSyncHostIo.existsSync(join(repoRoot, "libs", "harness", "gates", "src"))
     ) {
       process.stderr.write(
         `[harness:verify] Warning: no modular gate delta files detected in ${repoRoot}; falling back to scanning all modular gate files.\n`,
@@ -110,9 +109,9 @@ export const readRecordedSpans = Effect.fn("HarnessCli.readRecordedSpans")(funct
   repoRoot: string,
 ): Effect.fn.Return<Array<SpanSample>, SpanTraceReadError> {
   const spanTracePath = join(repoRoot, ".harness", "span-trace.json")
-  if (!existsSync(spanTracePath)) return []
+  if (!nodeSyncHostIo.existsSync(spanTracePath)) return []
   const rawSpanJson = yield* Effect.try({
-    try: () => readFileSync(spanTracePath, "utf-8"),
+    try: () => nodeSyncHostIo.readTextSync(spanTracePath),
     catch: (err) =>
       new SpanTraceReadError({
         filePath: spanTracePath,

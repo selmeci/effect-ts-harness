@@ -18,7 +18,6 @@
 import { join, posix, relative } from "node:path"
 import { Cause, Effect, Layer, Option, Schema } from "effect"
 import { match } from "ts-pattern"
-import * as Graph from "effect/Graph"
 import type { SyncHostIo } from "@harness/service"
 import { checkMigrationFiles, checkMigrationSqlSafety } from "../../migration-check.js"
 import { AstSourceContent, AstSourceFilePath, decideAstGateCache, type AstGateFileInput } from "../../ast-cache.js"
@@ -505,20 +504,3 @@ export const evaluatePackageAndMigrationPlugin = (
 
     return findings
   })
-
-export const scanPackageAndMigrationHygiene = (
-  repoRoot: string,
-  hostIo: SyncHostIo,
-): ReadonlyArray<GcFinding> =>
-  Effect.runSync(
-    evaluatePackageAndMigrationPlugin({
-      graph: { graph: Graph.directed(), nodeIndexByKey: new Map() },
-      workspaceRoot: repoRoot,
-      hostIo,
-    }),
-  )
-
-export const scanWorkspacePackageHygiene = (
-  repoRoot: string,
-  hostIo: SyncHostIo,
-): ReadonlyArray<GcFinding> => scanPackageAndMigrationHygiene(repoRoot, hostIo)

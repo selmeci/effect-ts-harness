@@ -58,6 +58,7 @@ export {
 } from "./cache-and-daemon-ports.js"
 
 export type {
+  ExtendedHostIo,
   SyncHostDirEntry,
   SyncHostExecOptions,
   SyncHostExecResult,

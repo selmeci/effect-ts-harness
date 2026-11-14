@@ -1,5 +1,3 @@
-import { execFileSync } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { Effect, Layer, Option } from "effect"
 import * as Graph from "effect/Graph"
@@ -55,6 +53,7 @@ import {
   formatSubprocessError,
   isIsolatedExternalWorkspace,
   isRootConfigOrSharedCoreChange,
+  readStdinEffect,
   recordFriction,
   recordTelemetry,
   resolveClusterRepoRoot,
@@ -141,7 +140,8 @@ export const handleVerify = (
     }
 
     const deltaFiles = resolveModifiedFilesSinceStampOrHead(repoRoot).filter(
-      (f) => (f.endsWith(".ts") || f.endsWith(".tsx")) && existsSync(join(repoRoot, f)),
+      (f) =>
+        (f.endsWith(".ts") || f.endsWith(".tsx")) && nodeSyncHostIo.existsSync(join(repoRoot, f)),
     )
     const astGateFail = yield* runDeltaAstAndPluginGates(repoRoot, deltaFiles)
     if (Option.isSome(astGateFail)) return astGateFail.value
@@ -236,7 +236,7 @@ export const handleVerify = (
       }
     }
 
-    if (!options?.skipSubprocessVerify && existsSync(join(repoRoot, "package.json"))) {
+    if (!options?.skipSubprocessVerify && nodeSyncHostIo.existsSync(join(repoRoot, "package.json"))) {
       const leafFastPathEligible =
         deltaFiles.length > 0 && !isRootConfigOrSharedCoreChange(deltaFiles)
       const scopedFiles = leafFastPathEligible ? deltaFiles : undefined
@@ -246,12 +246,11 @@ export const handleVerify = (
       const nxArgs = resolveNxAffectedArgs(repoRoot, ["verify"], scopedFiles)
       const subprocessErr = yield* Effect.try({
         try: () => {
-          execFileSync("pnpm", nxArgs, {
+          const res = nodeSyncHostIo.execFileSync("pnpm", nxArgs, {
             cwd: repoRoot,
-            stdio: "pipe",
             env: { ...process.env, CI: "true" },
           })
-          return null
+          return res.exitCode === 0 ? null : formatSubprocessError(res)
         },
         catch: (cause) => formatSubprocessError(cause),
       }).pipe(Effect.catch((msg) => Effect.succeed(msg || "Verification subprocess failed")))
@@ -360,8 +359,8 @@ const loadSnapshotPair = (
     const planPath = join(repoRoot, ".harness", "plan-graph-snapshot.json")
     const implPath = join(repoRoot, ".harness", "graph-snapshot.json")
     if (
-      (initialPlan === undefined && !existsSync(planPath)) ||
-      (initialImpl === undefined && !existsSync(implPath))
+      (initialPlan === undefined && !nodeSyncHostIo.existsSync(planPath)) ||
+      (initialImpl === undefined && !nodeSyncHostIo.existsSync(implPath))
     ) {
       return { _tag: "Graphs" as const, planGraph: initialPlan, implGraph: initialImpl }
     }
@@ -431,10 +430,7 @@ export const handleDone = (
 
     let rawStdin = options?.stdin
     if (rawStdin === undefined && !process.stdin.isTTY) {
-      rawStdin = yield* Effect.try({
-        try: () => readFileSync(0, "utf8"),
-        catch: () => "",
-      }).pipe(Effect.orElseSucceed(() => ""))
+      rawStdin = yield* readStdinEffect
     }
     let decodedStdin: StopHookStdin | undefined
     if (rawStdin) {

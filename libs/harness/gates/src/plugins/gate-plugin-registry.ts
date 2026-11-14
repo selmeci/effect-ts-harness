@@ -57,51 +57,55 @@ export const DEFAULT_GATE_PLUGINS: ReadonlyArray<GatePluginDescriptor> = [
 
 export const makeGatePluginRegistryLayer = (
   plugins: ReadonlyArray<GatePluginDescriptor> = DEFAULT_GATE_PLUGINS,
-): Layer.Layer<GatePluginRegistry> => {
-  const seenIds = new Set<string>()
-  for (const plugin of plugins) {
-    if (seenIds.has(plugin.pluginId)) {
-      Effect.runSync(
-        Effect.die(new Error(`Duplicate gate plugin ID registered: ${plugin.pluginId}`)),
-      )
-    }
-    seenIds.add(plugin.pluginId)
-  }
-
-  return Layer.succeed(GatePluginRegistry, {
-    listPlugins: Effect.succeed(plugins),
-    evaluateFiles: (files, options) =>
-      Effect.gen(function* () {
-        const allViolations: Array<SelfDogfoodingViolation> = []
-        let maxInspectedCount = 0
-        for (const plugin of plugins) {
-          const report = yield* plugin.evaluate(files, options?.maxPluginFileLines)
-          allViolations.push(...report.violations)
-          if (report.inspectedFileCount > maxInspectedCount) {
-            maxInspectedCount = report.inspectedFileCount
-          }
+): Layer.Layer<GatePluginRegistry> =>
+  Layer.effect(
+    GatePluginRegistry,
+    Effect.gen(function* () {
+      const seenIds = new Set<string>()
+      for (const plugin of plugins) {
+        if (seenIds.has(plugin.pluginId)) {
+          return yield* Effect.die(
+            new Error(`Duplicate gate plugin ID registered: ${plugin.pluginId}`),
+          )
         }
-        const nonTestFileCount = files.filter(
-          (f) => !f.filePath.endsWith(".test.ts") && !f.filePath.endsWith(".spec.ts"),
-        ).length
-        const inspectedCount = Math.max(maxInspectedCount, nonTestFileCount)
-        const report = makeSelfDogfoodingReport(
-          allViolations,
-          NonNegativeCount.make(inspectedCount),
-        )
+        seenIds.add(plugin.pluginId)
+      }
 
-        if (options?.failOnViolation === true && allViolations.length > 0) {
-          return yield* new SelfDogfoodingViolationError({
-            message: SelfDogfoodingMessage.make(
-              `GatePluginRegistry found ${allViolations.length} violation(s) across ${plugins.length} plugin(s).`,
-            ),
-            violations: allViolations,
-          })
-        }
-        return report
-      }),
-  })
-}
+      return GatePluginRegistry.of({
+        listPlugins: Effect.succeed(plugins),
+        evaluateFiles: (files, options) =>
+          Effect.gen(function* () {
+            const allViolations: Array<SelfDogfoodingViolation> = []
+            let maxInspectedCount = 0
+            for (const plugin of plugins) {
+              const report = yield* plugin.evaluate(files, options?.maxPluginFileLines)
+              allViolations.push(...report.violations)
+              if (report.inspectedFileCount > maxInspectedCount) {
+                maxInspectedCount = report.inspectedFileCount
+              }
+            }
+            const nonTestFileCount = files.filter(
+              (f) => !f.filePath.endsWith(".test.ts") && !f.filePath.endsWith(".spec.ts"),
+            ).length
+            const inspectedCount = Math.max(maxInspectedCount, nonTestFileCount)
+            const report = makeSelfDogfoodingReport(
+              allViolations,
+              NonNegativeCount.make(inspectedCount),
+            )
+
+            if (options?.failOnViolation === true && allViolations.length > 0) {
+              return yield* new SelfDogfoodingViolationError({
+                message: SelfDogfoodingMessage.make(
+                  `GatePluginRegistry found ${allViolations.length} violation(s) across ${plugins.length} plugin(s).`,
+                ),
+                violations: allViolations,
+              })
+            }
+            return report
+          }),
+      })
+    }),
+  )
 
 export const GatePluginRegistryLive: Layer.Layer<GatePluginRegistry> =
   makeGatePluginRegistryLayer(DEFAULT_GATE_PLUGINS)

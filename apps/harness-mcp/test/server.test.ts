@@ -1383,7 +1383,7 @@ describe("harness-mcp tools", () => {
     )
   })
 
-  it("daemon fails closed with DaemonSocketChmodError and unlinks socket when chmodSync fails", async () => {
+  it("daemon fails closed with DaemonServerError and unlinks socket when chmodSync fails", async () => {
     if (process.platform === "win32") {
       return
     }
@@ -1400,7 +1400,7 @@ describe("harness-mcp tools", () => {
     await Effect.runPromise(
       Effect.promise(async () => {
         await expect(startHarnessDaemonServer(tmpDir)).rejects.toMatchObject({
-          _tag: "DaemonSocketChmodError",
+          _tag: "DaemonServerError",
           socketPath,
         })
         expect(fs.existsSync(socketPath)).toBe(false)

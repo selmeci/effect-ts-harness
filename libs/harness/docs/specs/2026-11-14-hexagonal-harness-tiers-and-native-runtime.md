@@ -29,6 +29,11 @@ enforced_by:
   - libs/harness/infra/src/decision-cache-live.ts
   - libs/harness/infra/src/unix-socket-daemon-live.ts
   - libs/harness/infra/src/node-host-io.ts
+  - apps/harness-cli/src/commands/declarative-cli.ts
+  - apps/harness-cli/src/commands/repo-checks.command.ts
+  - apps/harness-cli/src/commands/scenario.command.ts
+  - apps/harness-cli/src/commands/scenario-eval.ts
+  - apps/harness-mcp/src/managed-runtime.ts
 spans:
   - HarnessTierTopology.decide
   - WorkspaceFs.statAndReadAll
@@ -38,6 +43,12 @@ spans:
   - AstGateCache.evaluateCached
   - DecisionCache.lookupOrCompute
   - UnixSocketDaemon.startScoped
+  - HarnessCli.runDeclarativeCli
+  - HarnessCli.checkOpenApi
+  - HarnessCli.checkMigrations
+  - HarnessCli.checkEventSchemas
+  - HarnessCli.runScenario
+  - HarnessMcp.executeManagedTool
 services:
   - "@harness/gates/WorkspaceFs"
   - "@harness/gates/HarnessSubprocessRunner"
@@ -105,6 +116,19 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | REQ-3.2 | Event-driven       | **When** `DecisionCache.lookupOrCompute` is invoked with a `DecisionCacheKey` and computation effect, the `DecisionCache.lookupOrCompute` use-case **shall** yield `DecisionCachePort` from `R` and memoize the serialized payload within the scoped cache. | `DecisionCache.lookupOrCompute`  | `UnitTest`   |
 | REQ-3.3 | Event-driven       | **When** `UnixSocketDaemon.startScoped` is invoked within an Effect `Scope`, the `UnixSocketDaemon.startScoped` use-case **shall** yield `UnixSocketDaemonPort` from `R`, bind a `0600` Unix socket, and remove the socket file upon scope finalization. | `UnixSocketDaemon.startScoped`   | `UnitTest`   |
 | REQ-3.4 | Unwanted behaviour | **If** binding or hardening the Unix socket in `UnixSocketDaemon.startScoped` fails, **then** the `UnixSocketDaemon.startScoped` use-case **shall** fail with a typed `DaemonServerError`. | `DaemonServerError`              | `UnitTest`   |
+
+### 4 · Declarative Effect CLI, Typed Repo-Check Subcommands, and ManagedRuntime MCP Server
+
+**Source (`harness:ADR-0013`):** `apps/harness-cli` and `apps/harness-mcp` must eliminate manual `Effect.runSync` dispatch in favor of declarative `effect/cli` + `NodeRuntime.runMain`, typed repository check and scenario subcommands (`check-openapi`, `check-migrations`, `check-event-schemas`, `benchmark`, `scenario`), and a scoped `ManagedRuntime` MCP tool executor.
+
+| ID      | Pattern      | Requirement                                                                                                                                                                                                                                     | Effect Symbol                   | Verification |
+| :------ | :----------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------ | :----------- |
+| REQ-4.1 | Event-driven | **When** `HarnessCli.runDeclarativeCli` is invoked with CLI argument vectors and `CliEnv` options, the `HarnessCli.runDeclarativeCli` command runner **shall** parse flags via `effect/cli` and execute the matched subcommand via Effect runtime without `Effect.runSync`. | `HarnessCli.runDeclarativeCli`  | `UnitTest`     |
+| REQ-4.2 | Event-driven | **When** the `check-openapi` subcommand is executed through `HarnessCli.checkOpenApi`, the `HarnessCli.checkOpenApi` subcommand **shall** validate OpenAPI schema consistency and return a `CliResult`.                                         | `HarnessCli.checkOpenApi`       | `UnitTest`     |
+| REQ-4.3 | Event-driven | **When** the `check-migrations` subcommand is executed through `HarnessCli.checkMigrations`, the `HarnessCli.checkMigrations` subcommand **shall** verify migration safety and return a `CliResult`.                                            | `HarnessCli.checkMigrations`    | `UnitTest`     |
+| REQ-4.4 | Event-driven | **When** the `check-event-schemas` subcommand is executed through `HarnessCli.checkEventSchemas`, the `HarnessCli.checkEventSchemas` subcommand **shall** validate event-sourcing schemas against `@harness/es-contract` and return a `CliResult`. | `HarnessCli.checkEventSchemas`  | `UnitTest`     |
+| REQ-4.5 | Event-driven | **When** the `scenario` subcommand is executed through `HarnessCli.runScenario`, the `HarnessCli.runScenario` subcommand **shall** evaluate typed scenario steps and return a `CliResult`.                                                      | `HarnessCli.runScenario`        | `UnitTest`     |
+| REQ-4.6 | Event-driven | **When** `HarnessMcp.executeManagedTool` is invoked with a `DispatchMcpToolInput` request, the `HarnessMcp.executeManagedTool` runtime handler **shall** execute the tool through a scoped `ManagedRuntime` without `Effect.runSync`.            | `HarnessMcp.executeManagedTool` | `UnitTest`     |
 
 ## Assumptions
 
