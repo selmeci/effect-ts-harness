@@ -73,7 +73,7 @@ informs:
 
 ## Context and Problem Statement
 
-Previously, the harness packages under `libs/harness/gates`, `libs/harness/graph`, and `libs/harness/ingest` carried dual Nx tags (`["type:contract", "type:service"]`) and co-located `effect/Schema` wire contracts, `Context.Service` capability ports, pure `*.decide` functions, and live Node/filesystem `Layer` implementations inside the same packages. Because `stub<A, E, R>` and shared gate schemas lived inside `@harness/gates`, `type:core` and `type:domain` libraries could not import `stub` or harness contract schemas without transitively pulling in `@harness/gates` infrastructure and Node-specific dependencies.
+As documented in [RFC-0008](../../../../docs/rfcs/0008-true-hexagonal-closure-and-effect-v4-runtime.md), previously the harness packages under `libs/harness/gates`, `libs/harness/graph`, and `libs/harness/ingest` carried dual Nx tags (`["type:contract", "type:service"]`) and co-located `effect/Schema` wire contracts, `Context.Service` capability ports, pure `*.decide` functions, and live Node/filesystem `Layer` implementations inside the same packages. Because `stub<A, E, R>` and shared gate schemas lived inside `@harness/gates`, `type:core` and `type:domain` libraries could not import `stub` or harness contract schemas without transitively pulling in `@harness/gates` infrastructure and Node-specific dependencies.
 
 Leaving these dual tier tags and mixed contract-service-infra boundaries in place allows circular architectural coupling across harness packages, violates the five-tier hexagonal Nx taxonomy (`type:contract` → `type:service` → `type:domain`/`type:core` → `type:infra` → `type:app`), and prevents deterministic graph verification of pure contract and service boundaries.
 
@@ -89,6 +89,7 @@ Leaving these dual tier tags and mixed contract-service-infra boundaries in plac
 - **Option 1:** Extract dedicated @harness/contract and @harness/service packages and eliminate dual Nx tier tags
 - **Option 2:** Retain dual-tagged ["type:contract", "type:service"] packages
 - **Option 3:** Collapse all harness libraries into a single monolithic package
+- **Option 4:** Retain transitional backward-compatibility re-export shims in @harness/gates and duplicate layer aliases in @harness/infra
 
 ## Decision Outcome
 
@@ -106,6 +107,7 @@ Leaving these dual tier tags and mixed contract-service-infra boundaries in plac
 8. `apps/harness-mcp` executes MCP tool requests through a scoped `ManagedRuntime` (`HarnessMcp.executeManagedTool`) over `McpToolRegistryLive` and `NodeServices.layer` with zero production `Effect.runSync` calls.
 9. `ast-gate-visitors.ts` deletes the `isHarnessInternal` exemption and `tools/oxlint/syntax-bans.js` (`isTierOrSampleAppFile`) enforces `discriminant-branching` and `unscoped-effect-run` uniformly across `libs/harness/*` and `apps/harness-*`, retaining only the single-file synchronous `SqlStorage` bridge exemption in `libs/es/infra/src/memory.ts`.
 10. `SelfDogfooding.decide` permanently enforces four hexagonal hygiene rules across production source files: `no-global-mutable-cache` (banning module-scope `let` variables, empty/Weak module-scope `Map`/`Set`/`WeakMap`/`WeakSet`, and module-scope `Map`/`Set` mutations), `no-node-builtins-outside-infra` (banning Node I/O built-ins outside `type:infra`), `no-layer-build-in-layer-effect` (banning `Layer.build` inside `Layer.effect`), and `no-double-wrapped-effect-fn` (banning functions returning `Effect.gen` wrapped inside `Effect.fn` or `Effect.fnUntraced`).
+11. Zero transitional backward-compatibility re-export shims or duplicate layer aliases may remain in `@harness/gates` or `@harness/infra`: all consumers import contracts and `stub` directly from `@harness/contract`, canonical `@harness/service/*` ports from `@harness/service`, and canonical `WorkspaceFsLive`/`HarnessSubprocessRunnerLive` layers from `@harness/infra`, with zero imperative `Effect.runPromise` CLI or MCP wrappers in `apps/harness-cli/src/` and `apps/harness-mcp/src/`.
 
 ## Rejected Alternatives
 
@@ -120,6 +122,12 @@ Keep schemas, `stub`, `Context.Service` ports, and live Node `Layer` implementat
 Merge `ingest`, `decision`, `gates`, `graph`, `contract`, and `service` into one `@harness/core` package.
 
 **Why rejected:** A monolithic harness package erases compile-time tier boundaries, slows incremental `nx affected` builds, and makes it impossible to enforce pure `R = never` deciders separately from stateful `Layer` providers.
+
+### 3 · Option 4: Retain transitional backward-compatibility re-export shims in @harness/gates and duplicate layer aliases in @harness/infra
+
+Keep `@harness/gates/src/stub.ts`, 60+ `@harness/contract` / `@harness/service` re-exports in `@harness/gates`, and duplicate `*NodeLive` layer aliases in `@harness/infra` as transitional compatibility shims.
+
+**Why rejected:** Transitional re-export shims preserve indirect coupling to `@harness/gates`, mask dead exports from `GraphGc.decide` (`unused-contract-export` immediately surfaced 5 dead schema aliases in `@harness/contract` once the shims were deleted), and perpetuate ambiguous `@harness/service/*` vs. legacy service tag IDs.
 
 ## Consequences and Enforcement
 

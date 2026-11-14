@@ -72,7 +72,7 @@ errors:
 
 ## Context
 
-This specification defines the behavioral requirements for the five-tier hexagonal split of `libs/harness/*` governed by `harness:ADR-0013`. It separates pure `effect`-only contracts (`@harness/contract`) and pure `Context.Service` ports (`@harness/service`) from live `Layer` implementations (`@harness/gates`, `@harness/graph`), eliminating dual `["type:contract", "type:service"]` Nx tags and adding batched workspace file stat/read support to `WorkspaceFs`.
+This specification defines the behavioral requirements for the five-tier hexagonal split of `libs/harness/*` governed by [RFC-0008](../../../../docs/rfcs/0008-true-hexagonal-closure-and-effect-v4-runtime.md) and `harness:ADR-0013`. It separates pure `effect`-only contracts (`@harness/contract`) and pure `Context.Service` ports (`@harness/service`) from live `Layer` implementations (`@harness/infra`, `@harness/gates`, `@harness/graph`), eliminating dual `["type:contract", "type:service"]` Nx tags and adding batched workspace file stat/read support to `WorkspaceFs`.
 
 - **Reused Contracts / Errors:** `WorkspaceFsError`, `HarnessSubprocessError`, `SelfDogfoodingViolationError`
 - **Reused Services:** `@harness/service/WorkspaceFs`, `@harness/service/HarnessSubprocessRunner`, `@harness/service/ActiveMutantContext`
