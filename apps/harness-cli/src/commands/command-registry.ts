@@ -1,5 +1,23 @@
 import { Context, Effect, Layer, Option, Schema } from "effect"
+import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
+import { LocalDecisionModel } from "@harness/decision"
+import {
+  COMMANDS,
+  type CliEnv,
+  type CliResult,
+} from "./daemon-and-omnigraph.service.js"
+import { handleGc, handleOntology } from "./gc-and-ontology.command.js"
+import { handleGuard, handleRoute } from "./guard-and-route.command.js"
+import { handleBench, handleMutate } from "./mutate-and-bench.command.js"
+import { handlePlanCheck, handlePlanSynth, handleRepair } from "./plan-and-repair.command.js"
+import {
+  handleDoctorOrSession,
+  handleIngest,
+  handleLearn,
+  handleReport,
+} from "./session-learn-report.command.js"
+import { handleDone, handleVerify } from "./verify-and-done.command.js"
 
 export const CliCommandName = Schema.NonEmptyString.pipe(Schema.brand("CliCommandName"))
 export type CliCommandName = typeof CliCommandName.Type
@@ -40,170 +58,137 @@ export class HarnessCommandRegistry extends Context.Service<
   HarnessCommandRegistryShape
 >()("harness-cli/HarnessCommandRegistry") {}
 
-export const CANONICAL_CLI_COMMAND_NAMES = [
-  "guard",
-  "route",
-  "plan-check",
-  "plan-synth",
-  "repair",
-  "verify",
-  "done",
-  "learn",
-  "gc",
-  "mutate",
-  "bench",
-  "ingest",
-  "session",
-  "doctor",
-  "ontology",
-  "report",
-  "help",
-] as const
+export const CANONICAL_CLI_COMMAND_NAMES = COMMANDS
 
 export type CanonicalCliCommandName = (typeof CANONICAL_CLI_COMMAND_NAMES)[number]
 
 export const makeHarnessCommandRegistryLayer = (
   commands: ReadonlyArray<CliCommandPluginDescriptor>,
 ): Layer.Layer<HarnessCommandRegistry> => {
-  const byName = new Map<string, CliCommandPluginDescriptor>()
-  for (const cmd of commands) {
-    if (byName.has(cmd.name)) {
-      Effect.runSync(Effect.die(new Error(`Duplicate CLI command registered: ${cmd.name}`)))
-    }
-    byName.set(cmd.name, cmd)
-  }
+  const commandMap: ReadonlyMap<string, CliCommandPluginDescriptor> = commands.reduce(
+    (acc, cmd) => {
+      if (acc.has(cmd.name)) {
+        return Effect.runSync(
+          Effect.die(new Error(`Duplicate CLI command registered: ${cmd.name}`)),
+        )
+      }
+      acc.set(cmd.name, cmd)
+      return acc
+    },
+    new Map<string, CliCommandPluginDescriptor>(),
+  )
   return Layer.succeed(HarnessCommandRegistry, {
     listCommands: Effect.succeed(commands),
-    resolveCommand: (name) => Effect.succeed(Option.fromUndefinedOr(byName.get(name))),
+    resolveCommand: (name) => Effect.succeed(Option.fromUndefinedOr(commandMap.get(name))),
   })
 }
 
-export type CliCommandHandler = (args: ReadonlyArray<string>) => Effect.Effect<CliCommandPluginResult>
+export type CliCommandHandler = (args: ReadonlyArray<string>) => Effect.Effect<CliResult>
 
-const liveCommandHandlers = new Map<string, CliCommandHandler>()
-
-export const registerLiveCliCommandHandlers = (
-  handlers:
-    | Record<string, CliCommandHandler>
-    | ReadonlyMap<string, CliCommandHandler>
-    | ReadonlyArray<CliCommandPluginDescriptor>,
-): void => {
-  if (Array.isArray(handlers)) {
-    for (const h of handlers) {
-      liveCommandHandlers.set(h.name, h.execute)
-    }
-  } else if (handlers instanceof Map) {
-    for (const [name, handler] of handlers.entries()) {
-      liveCommandHandlers.set(name, handler)
-    }
-  } else {
-    for (const [name, handler] of Object.entries(handlers)) {
-      liveCommandHandlers.set(name, handler)
-    }
-  }
-}
-
-const makeDefaultExecute =
-  (cmdName: string): ((args: ReadonlyArray<string>) => Effect.Effect<CliCommandPluginResult>) =>
-  (args) => {
-    const liveHandler = liveCommandHandlers.get(cmdName)
-    if (liveHandler !== undefined) {
-      return liveHandler(args)
-    }
-    return Effect.succeed({
-      exitCode: 1,
-      stdout: "",
-      stderr: `Command '${cmdName}' must be executed through makeLiveCliCommandRegistryLayer.`,
-    })
-  }
-
-export const DEFAULT_CLI_COMMAND_DESCRIPTORS: ReadonlyArray<CliCommandPluginDescriptor> = [
+export const makeLiveCliCommandDescriptors = (
+  options?: CliEnv,
+  decisionLayer: Layer.Layer<DecisionModel.DecisionModel> = LocalDecisionModel,
+): ReadonlyArray<CliCommandPluginDescriptor> => [
   {
     name: CliCommandName.make("guard"),
     summary: "Evaluate deterministic command and file-write guard policies.",
-    execute: makeDefaultExecute("guard"),
+    execute: (args) => handleGuard(args, options, decisionLayer),
   },
   {
     name: CliCommandName.make("route"),
     summary: "Route a plan step to canonical agent-patterns/*.md documentation.",
-    execute: makeDefaultExecute("route"),
+    execute: (args) => handleRoute(args, options, decisionLayer),
   },
   {
     name: CliCommandName.make("plan-check"),
     summary: "Validate compilable stub<A,E,R>() skeletons and snapshot plan/current.",
-    execute: makeDefaultExecute("plan-check"),
+    execute: (args) => handlePlanCheck(args, options),
   },
   {
     name: CliCommandName.make("plan-synth"),
     summary: "Synthesize plan graph patches via Double-Pushout (DPO) rules.",
-    execute: makeDefaultExecute("plan-synth"),
+    execute: (args) => handlePlanSynth(args, options),
   },
   {
     name: CliCommandName.make("repair"),
     summary: "Repair architectural and code antipatterns via DPO rules.",
-    execute: makeDefaultExecute("repair"),
+    execute: (args) => handleRepair(args, options),
   },
   {
     name: CliCommandName.make("verify"),
     summary: "Execute affected verify targets, check span budgets, and write verify-stamp.json.",
-    execute: makeDefaultExecute("verify"),
+    execute: () => handleVerify(options, decisionLayer),
   },
   {
     name: CliCommandName.make("done"),
     summary: "Verify stamp freshness, diff plan vs impl graph, and merge impl/current to main.",
-    execute: makeDefaultExecute("done"),
+    execute: (args) => handleDone(args, options, decisionLayer),
   },
   {
     name: CliCommandName.make("learn"),
     summary: "Cluster friction-log.jsonl events and propose deterministic promotions.",
-    execute: makeDefaultExecute("learn"),
+    execute: (args) => handleLearn(args, options, decisionLayer),
   },
   {
     name: CliCommandName.make("gc"),
     summary: "Run zero-entropy graph garbage collection and governance lint.",
-    execute: makeDefaultExecute("gc"),
+    execute: (args) => handleGc(args, options),
   },
   {
     name: CliCommandName.make("mutate"),
     summary: "Run in-process Mutant Schemata and saturation verification over domain code.",
-    execute: makeDefaultExecute("mutate"),
+    execute: (args) => handleMutate(args, options),
   },
   {
     name: CliCommandName.make("bench"),
     summary: "Measure harness stage latencies and enforce p50/p95 SLO budgets.",
-    execute: makeDefaultExecute("bench"),
+    execute: (args) => handleBench(args, options),
   },
   {
     name: CliCommandName.make("ingest"),
     summary: "Ingest runtime trace NDJSON events into Omnigraph.",
-    execute: makeDefaultExecute("ingest"),
+    execute: (args) => handleIngest(args, options),
   },
   {
     name: CliCommandName.make("session"),
     summary: "Inspect active session handoff state and inject pending stubs.",
-    execute: makeDefaultExecute("session"),
+    execute: (args) => handleDoctorOrSession(args, options, decisionLayer),
   },
   {
     name: CliCommandName.make("doctor"),
     summary: "Run workspace health diagnostics and session recovery checks.",
-    execute: makeDefaultExecute("doctor"),
+    execute: (args) => handleDoctorOrSession(args, options, decisionLayer),
   },
   {
     name: CliCommandName.make("ontology"),
     summary: "Audit ArchiMate 3.2 cross-layer traceability and semantic conflicts.",
-    execute: makeDefaultExecute("ontology"),
+    execute: (args) => handleOntology(args, options, decisionLayer),
   },
   {
     name: CliCommandName.make("report"),
     summary: "Generate session telemetry and friction report.",
-    execute: makeDefaultExecute("report"),
+    execute: (args) => handleReport(args, options),
   },
   {
     name: CliCommandName.make("help"),
     summary: "Display CLI usage help and available commands.",
-    execute: makeDefaultExecute("help"),
+    execute: () =>
+      Effect.succeed({
+        exitCode: 0,
+        stdout: `harness help\nusage: harness <${COMMANDS.join("|")}>`,
+        stderr: "",
+      }),
   },
 ]
+
+export const DEFAULT_CLI_COMMAND_DESCRIPTORS: ReadonlyArray<CliCommandPluginDescriptor> =
+  makeLiveCliCommandDescriptors()
+
+export const makeLiveCliCommandRegistryLayer = (
+  options?: CliEnv,
+  decisionLayer: Layer.Layer<DecisionModel.DecisionModel> = LocalDecisionModel,
+): Layer.Layer<HarnessCommandRegistry> =>
+  makeHarnessCommandRegistryLayer(makeLiveCliCommandDescriptors(options, decisionLayer))
 
 export const HarnessCommandRegistryLive: Layer.Layer<HarnessCommandRegistry> =
   makeHarnessCommandRegistryLayer(DEFAULT_CLI_COMMAND_DESCRIPTORS)

@@ -15,7 +15,7 @@ export type TraceHeader = typeof TraceHeader.Type
 export const TracedCallEdge = Schema.Struct({
   callerQualname: Schema.String,
   calleeQualname: Schema.String,
-  callCount: Schema.Int,
+  callCount: Schema.Natural,
   receiverLayer: Schema.NullOr(Schema.String),
 })
 export type TracedCallEdge = typeof TracedCallEdge.Type
@@ -23,7 +23,7 @@ export type TracedCallEdge = typeof TracedCallEdge.Type
 export const ExercisesSpanEdge = Schema.Struct({
   testId: Schema.String,
   calleeQualname: Schema.String,
-  callCount: Schema.Int,
+  callCount: Schema.Natural,
   receiverLayer: Schema.NullOr(Schema.String),
 })
 export type ExercisesSpanEdge = typeof ExercisesSpanEdge.Type

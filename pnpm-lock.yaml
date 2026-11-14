@@ -257,9 +257,6 @@ importers:
       effect:
         specifier: 4.0.0
         version: 4.0.0
-      zod:
-        specifier: 4.6.5
-        version: 4.6.5
     devDependencies:
       '@effect/vitest':
         specifier: 4.0.0
@@ -387,7 +384,7 @@ importers:
     devDependencies:
       '@alchemy.run/cloudflare-runtime':
         specifier: 2.0.0-beta.80
-        version: 2.0.0-beta.80(@distilled.cloud/cloudflare@1.0.0-rc.13(effect@4.0.0))(@effect/platform-node@4.0.0(effect@4.0.0)(redis@6.3.0))(@types/node@26.6.5)(effect@4.0.0)(rolldown@1.2.5)(typescript@7.0.2)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))
+        version: 2.0.0-beta.80(@distilled.cloud/cloudflare@1.0.0-rc.13(effect@4.0.0))(@effect/platform-node@4.0.0(effect@4.0.0)(redis@6.3.0))(@types/node@26.6.5)(effect@4.0.0)(rolldown@1.2.5)(typescript@5.9.3)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))
       '@cloudflare/workers-types':
         specifier: 5.20261024.1
         version: 5.20261024.1
@@ -5122,29 +5119,6 @@ snapshots:
       - proxy-agent
       - typescript
 
-  '@alchemy.run/cloudflare-runtime@2.0.0-beta.80(@distilled.cloud/cloudflare@1.0.0-rc.13(effect@4.0.0))(@effect/platform-node@4.0.0(effect@4.0.0)(redis@6.3.0))(@types/node@26.6.5)(effect@4.0.0)(rolldown@1.2.5)(typescript@7.0.2)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))':
-    dependencies:
-      '@alchemy.run/node-utils': 2.0.0-beta.80
-      '@cloudflare/unenv-preset': 2.16.2(unenv@2.0.0-rc.24)(workerd@1.20260918.1)
-      '@distilled.cloud/cloudflare': 1.0.0-rc.13(effect@4.0.0)
-      '@puppeteer/browsers': 3.2.6(yauzl@3.4.0)
-      capnp-es: 0.0.16(typescript@7.0.2)
-      effect: 4.0.0
-      magic-string: 0.30.21
-      mime: 4.1.1
-      sharp: 0.35.5(@types/node@26.6.5)
-      unenv: 2.0.0-rc.24
-      workerd: 1.20260918.1
-      yauzl: 3.4.0
-    optionalDependencies:
-      '@effect/platform-node': 4.0.0(effect@4.0.0)(redis@6.3.0)
-      rolldown: 1.2.5
-      vite: 8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)
-    transitivePeerDependencies:
-      - '@types/node'
-      - proxy-agent
-      - typescript
-
   '@alchemy.run/floci@2.0.0-beta.80(effect@4.0.0)':
     dependencies:
       effect: 4.0.0
@@ -7575,10 +7549,6 @@ snapshots:
   capnp-es@0.0.16(typescript@5.9.3):
     optionalDependencies:
       typescript: 5.9.3
-
-  capnp-es@0.0.16(typescript@7.0.2):
-    optionalDependencies:
-      typescript: 7.0.2
 
   capnweb@0.12.0: {}
 

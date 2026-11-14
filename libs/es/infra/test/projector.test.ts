@@ -1700,5 +1700,151 @@ describe("Cross-Aggregate Outbox Drain, Projector Checkpoints, Gap Parking, and 
           expect(afterCp[0]?.last_stream_version).toBe(2)
         }).pipe(Effect.provide(SqlClientMemoryLayer)),
     )
+
+    it.effect(
+      "REQ-3.6: rejects metadata aggregateId or streamVersion mismatches during ingestion, parked gap drain, and archive rebuild",
+      () =>
+        Effect.gen(function* () {
+          yield* initializeAggregateTables()
+          yield* initializeProjectorTables()
+          yield* initOpenCartsProjectionTable
+          const sql = yield* SqlClient
+
+          // 1. Envelope metadata mismatch during ingestPublishedEvent
+          const badEnvelope: PublishedEventEnvelope = {
+            aggregateName: AggregateName.make("Cart"),
+            aggregateId: AggregateId.make("cart-meta-bad"),
+            streamVersion: StreamVersion.make(1),
+            eventType: EventType.make("ItemAdded"),
+            payload: SerializedPayload.make(
+              '{"_tag":"ItemAdded","cartId":"cart-meta-bad","itemId":"apple","quantity":1,"version":1}',
+            ),
+            metadata: EventMetadata.make({
+              aggregateId: AggregateId.make("other-cart"),
+              streamVersion: StreamVersion.make(1),
+              commandId: CommandId.make("cmd-meta-1"),
+              timestamp: TimestampMs.make(1700000000001),
+            }),
+          }
+          const ingestErr = yield* Effect.flip(
+            ingestPublishedEvent(badEnvelope, [openCartsProjection]),
+          )
+          expect(ingestErr._tag).toBe("ProjectionArchiveCorruptionError")
+          expect(String(ingestErr.reason)).toContain(
+            "Metadata aggregateId or streamVersion mismatch with envelope",
+          )
+
+          // 2. Parked gap metadata mismatch when draining contiguous gap v2 on arrival of v1
+          yield* sql`
+            INSERT INTO es_projection_gaps (
+              processor_id, aggregate_name, aggregate_id, stream_version, event_type, payload, metadata, parked_at
+            ) VALUES (
+              'open-carts-v1', 'Cart', 'cart-gap-bad', 2, 'ItemAdded',
+              '{"_tag":"ItemAdded","cartId":"cart-gap-bad","itemId":"apple","quantity":1,"version":1}',
+              '{"aggregateId":"wrong-agg","streamVersion":2,"commandId":"cmd-g2","timestamp":1700000000002}',
+              1700000000002
+            )
+          `
+          const validFirstEnvelope = PublishedEventEnvelope.make({
+            aggregateName: AggregateName.make("Cart"),
+            aggregateId: AggregateId.make("cart-gap-bad"),
+            streamVersion: StreamVersion.make(1),
+            eventType: EventType.make("ItemAdded"),
+            payload: SerializedPayload.make(
+              '{"_tag":"ItemAdded","cartId":"cart-gap-bad","itemId":"apple","quantity":1,"version":1}',
+            ),
+            metadata: EventMetadata.make({
+              aggregateId: AggregateId.make("cart-gap-bad"),
+              streamVersion: StreamVersion.make(1),
+              commandId: CommandId.make("cmd-g1"),
+              timestamp: TimestampMs.make(1700000000001),
+            }),
+          })
+          const gapErr = yield* Effect.flip(
+            ingestPublishedEvent(validFirstEnvelope, [openCartsProjection]),
+          )
+          expect(gapErr._tag).toBe("ProjectionArchiveCorruptionError")
+          expect(String(gapErr.reason)).toContain("Parked gap metadata mismatch")
+
+          // 3. Archive row metadata mismatch during rebuildProjectorFromArchive
+          yield* sql`
+            INSERT INTO es_event_archive (
+              aggregate_name, aggregate_id, stream_version, command_id, event_type, payload, metadata, archived_at
+            ) VALUES (
+              'Cart', 'cart-arch-bad', 1, 'cmd-a1', 'ItemAdded',
+              '{"_tag":"ItemAdded","cartId":"cart-arch-bad","itemId":"pear","quantity":1,"version":1}',
+              '{"aggregateId":"cart-arch-bad","streamVersion":99,"commandId":"cmd-a1","timestamp":1700000000003}',
+              1700000000003
+            )
+          `
+          const rebuildMetaErr = yield* Effect.flip(
+            rebuildProjectorFromArchive(openCartsProjection),
+          )
+          expect(rebuildMetaErr._tag).toBe("ProjectionArchiveCorruptionError")
+          expect(String(rebuildMetaErr.reason)).toContain(
+            "Archive metadata mismatch with row columns",
+          )
+        }).pipe(Effect.provide(SqlClientMemoryLayer)),
+    )
+  })
+
+  describe("Group 3: Nested Workerd Transaction Stack & Rollback", () => {
+    it.effect(
+      "nested sql.withTransaction failure does not pop outer txStack entry and outer rollback reverts all inner and outer writes",
+      () =>
+        Effect.gen(function* () {
+          yield* initializeAggregateTables()
+          const sql = yield* SqlClient
+
+          const outerErr = yield* Effect.flip(
+            sql.withTransaction(
+              Effect.gen(function* () {
+                // Outer write 1 (before nested tx)
+                yield* sql`
+                  INSERT INTO es_outbox (
+                    aggregate_name, aggregate_id, stream_version, event_type, payload, metadata, created_at
+                  ) VALUES (
+                    'Cart', 'nested-tx-cart', 1, 'OuterBefore', '{}', '{}', 1700000000001
+                  )
+                `
+
+                // Inner nested tx writes row and fails (triggers txn.rollback() + promise rejection)
+                const innerErr = yield* Effect.flip(
+                  sql.withTransaction(
+                    Effect.gen(function* () {
+                      yield* sql`
+                        INSERT INTO es_outbox (
+                          aggregate_name, aggregate_id, stream_version, event_type, payload, metadata, created_at
+                        ) VALUES (
+                          'Cart', 'nested-tx-cart', 2, 'InnerFailed', '{}', '{}', 1700000000002
+                        )
+                      `
+                      return yield* Effect.fail("inner-tx-failure")
+                    }),
+                  ),
+                )
+                expect(innerErr).toBe("inner-tx-failure")
+
+                // Outer write 2 (after catching inner failure; outer txId must still be active on txStack)
+                yield* sql`
+                  INSERT INTO es_outbox (
+                    aggregate_name, aggregate_id, stream_version, event_type, payload, metadata, created_at
+                  ) VALUES (
+                    'Cart', 'nested-tx-cart', 3, 'OuterAfter', '{}', '{}', 1700000000003
+                  )
+                `
+
+                return yield* Effect.fail("outer-tx-failure")
+              }),
+            ),
+          )
+          expect(outerErr).toBe("outer-tx-failure")
+
+          const rows = yield* sql<{ readonly stream_version: number; readonly event_type: string }>`
+            SELECT stream_version, event_type FROM es_outbox WHERE aggregate_id = 'nested-tx-cart' ORDER BY stream_version ASC
+          `
+          expect(rows).toEqual([])
+        }).pipe(Effect.provide(SqlClientMemoryLayer)),
+    )
   })
 })

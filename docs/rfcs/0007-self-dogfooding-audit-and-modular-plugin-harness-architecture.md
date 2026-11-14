@@ -1,8 +1,8 @@
 ---
 rfc: RFC-0007
 title: Self-Dogfooding Audit, Effect-TS v4 Paradigm Alignment & Modular Plugin Harness Architecture
-status: accepted
-implementation_phase: "Phases 1–3 (Steps 1–3) implemented in PR #24, PR #25, and PR #26; Phase 4 (Step 4) tracked in rollout roadmap"
+status: implemented
+implementation_phase: "All 4 phases (Steps 1–4) implemented"
 created: 2026-11-12
 updated: 2026-11-13
 authors:
@@ -33,11 +33,11 @@ target_specs:
 
 > [!NOTE]
 > **RFC Status & Phased Implementation:**
-> **Status:** `accepted` (Phases 1–3 / Steps 1–3 implemented in PR #24, PR #25, and PR #26; Phase 4 / Step 4 tracked in rollout roadmap).
+> **Status:** `implemented` (Phases 1–3 / Steps 1–3 implemented in PR #24, PR #25, and PR #26; Phase 4 / Step 4 completed in full).
 > - **Phase 1 (Implemented in PR #24):** Eliminated all 15 `yield* Effect.void` dummy yields, eliminated all 4 `switch` statements in harness source files, introduced the 7 Cordis-inspired `Context.Service` + `Layer` capability services and registries wired into `harness-cli`, `harness-mcp`, `gc-check.ts`, and `mutation-check.ts` (`WorkspaceFs`, `HarnessSubprocessRunner`, `ActiveMutantContext`, `GatePluginRegistry`, `TsCompilerOverlayService`, `HarnessCommandRegistry`, and `McpToolRegistry`), and enforced `SelfDogfooding.decide` with deterministic `DEFAULT_MAX_PLUGIN_FILE_LINES = 800` hard ceiling on all modular plugin, service, command, and tool files.
 > - **Phase 2 / Step 2 (Implemented in PR #25):** Decomposed `@harness/gates` monoliths (`gc-check.ts`, `mutation-check.ts`, `ast-cache.ts`), removed synchronous `.runSync` gate wrapper shims, and expanded `file-line-budget-exceeded` across `libs/harness/gates/src/**/*.ts`.
 > - **Phase 3 / Step 3 (Implemented in PR #26):** Decomposed all 5 `@harness/graph` God-files (`type-extractor.ts`, `datalog-engine.ts`, `graph-rewrite.ts`, `graph-engine.ts`, `graph-projector.ts`) into cohesive submodules (`<= 250` LOC orchestrator facades, `< 500` LOC sub-extractors, `<= 700`–`750` LOC engine/datalog/rewrite/projector modules), removed synchronous snapshot wrappers `deserializeGraphSnapshot`/`loadGraphSnapshot`, and promoted tiered RFC-0007 line budgets (`resolvePathSpecificMaxLines`) + `facade-star-reexport` + `catch-cause-interrupts-only` + `unisolated-dot-harness-test-write` into `SelfDogfooding.decide` and `AstGateCache.decide` (`ast-gates-v3`).
-> - **Phase 4 / Step 4 (Scheduled):** Physical decomposition of CLI & MCP monoliths (`apps/harness-cli/src/index.ts`, `apps/harness-mcp/src/server.ts`), removing remaining `isInternalHarnessFile` syntax-ban exemptions in `syntax-bans.js`, and replacing `zod` in MCP SDK registration with `effect/Schema`.
+> - **Phase 4 / Step 4 (Implemented):** Physically decomposed CLI & MCP monoliths (`apps/harness-cli/src/index.ts` and `apps/harness-mcp/src/server.ts` into `< 250` LOC entrypoints + `<= 650` LOC command/tool/daemon modules), replaced `zod` in MCP SDK registration with `effect/Schema`, decomposed `libs/es/infra` (`projector.ts`, `memory.ts`, `aggregate.ts` <= 650 LOC), removed `isInternalHarnessFile` exemptions in `tools/oxlint/syntax-bans.js`, and enabled repo-wide `file-line-budget-exceeded` (`<= 800` LOC) across all `libs/**/*.ts` and `apps/**/*.ts`.
 >
 > **Companion Audit Report (Appendix A):** For the complete initial architectural audit report—including additional diagnostics on `libs/es/infra`, `libs/sample`, `tools/scenario/run.mjs`, and the full target decomposition map of all monolithic files—see **[RFC-0007 Appendix A: Comprehensive Harness Architecture Audit Report](./0007-appendix-a-harness-architecture-audit-report.md)**.
 
@@ -198,11 +198,11 @@ Eleven source files in the repository exceed `800` lines of code, with the top s
 
 ### 3.1 Goals
 
-1. **Eliminate the Self-Exemption Double Standard (`Zero-Exemption Dogfooding`):** Remove `isInternalHarnessFile` and `isHarnessInternal` so the harness codebase obeys the exact same architectural, branding, pattern-matching, and purity gates as application code.
-2. **Adopt Native Effect v4 Platform, CLI, and Caching Modules:**
-   - Replace manual `process.argv` parsing in `apps/harness-cli` with declarative `effect/cli` (`Command.make`, `Flag`, `Argument`, `Command.withSubcommands`).
-   - Replace direct `node:fs`, `node:path`, and `node:child_process` calls with `FileSystem.FileSystem`, `Path.Path`, and `ChildProcessSpawner.ChildProcessSpawner` provided via `NodeServices.layer` from `@effect/platform-node`.
-   - Replace module-level mutable `new Map()` singletons and `globalThis` mutations with `ScopedCache`, `PersistedCache`, `SynchronizedRef`, `LayerMap.Service`, and `FiberRef`.
+1. **Eliminate the Self-Exemption Double Standard (`Zero-Exemption Dogfooding`):** Remove `isInternalHarnessFile` from `tools/oxlint/syntax-bans.js` and narrow `isHarnessInternal` in `libs/harness/gates/src/plugins/ast-gate-visitors.ts` strictly to the 3 legacy AST checks (`IfStatement`/`ConditionalExpression` discriminant branching, `impure-domain-import`, and `unscoped-effect-run` per `SPEC-0011` `REQ-1.3`), so the harness codebase obeys the same architectural, branding, pattern-matching, and repo-wide AST gates as application code.
+2. **Adopt Native Effect v4 Platform, CLI, and Caching Modules — Target Design (Deferred Post-Step 4):**
+   - *Target Design (Deferred Post-Step 4):* Replace manual `argv` parsing in `apps/harness-cli` with declarative `effect/cli` (`Command.make`, `Flag`, `Argument`, `Command.withSubcommands`), while Step 4 delivers the modular `HarnessCommandRegistry` + `apps/harness-cli/src/commands/*.ts` decomposition.
+   - *Target Design (Deferred Post-Step 4):* Replace direct `node:fs`, `node:path`, and `node:child_process` calls with `FileSystem.FileSystem`, `Path.Path`, and `ChildProcessSpawner.ChildProcessSpawner` provided via `NodeServices.layer` from `@effect/platform-node`. Operational `.mjs` scripts (`tools/node-ts-resolver.mjs`, `tools/scenario/run.mjs`, `tools/benchmark/run.mjs`) remain as operational runners/resolvers.
+   - *Target Design (Deferred Post-Step 4):* Replace remaining module-level mutable `new Map()` singletons and `globalThis` mutations with `ScopedCache`, `PersistedCache`, `SynchronizedRef`, `LayerMap.Service`, and `FiberRef`.
 3. **Architect the Harness as a Modular Plugin System (DeepSeek Harness / Cordis + Effect v4):**
    - Model every AST/graph gate rule, GC check, DPO rewrite rule, CLI subcommand, and MCP tool as a self-contained plugin (`< 250` LOC) wired via **Three-Role Capability Seams** (`Service Definition` in `type:service`, `Service Provider Layer` in `type:infra`, `Consumer` in `type:core` / `type:app`).
 4. **Decompose All God-Files (Phased Line Budget Targets):** Enforce `DEFAULT_MAX_PLUGIN_FILE_LINES = 800` as the deterministic Phase 1 hard ceiling across all modular plugin, service, command, and tool files (`/plugins/`, `/services/`, `/commands/`, `/tools/`), with `< 600` LOC (`< 500` LOC for individual sub-extractors) as the decomposition target for splitting the 15 legacy monoliths in Phases 2–4.
@@ -399,9 +399,9 @@ export const AstGateCacheLive: Layer.Layer<
 )
 ```
 
-### 5.4 Declarative CLI Subcommand Tree via `effect/cli` (`apps/harness-cli`)
+### 5.4 Declarative CLI Subcommand Tree via `effect/cli` (`apps/harness-cli`) — Target Design (Deferred Post-Step 4)
 
-Instead of a 3,759-line `index.ts` with a 15-branch `switch (requested)` and manual `argv` slicing, `apps/harness-cli` is structured as modular `Command.make` plugins composed at the entrypoint:
+Instead of a 3,759-line `index.ts` with a 15-branch `switch (requested)` and manual `argv` slicing, Step 4 decomposes `apps/harness-cli` into `src/index.ts` (`<= 250` LOC) + modular `src/commands/*.ts` (`<= 650` LOC) dispatched via `HarnessCommandRegistry`. As the **Target Design (Deferred Post-Step 4)**, `apps/harness-cli` will migrate to declarative `effect/cli` (`Command.make` plugins composed at the entrypoint), while operational `.mjs` runners/resolvers (`tools/node-ts-resolver.mjs`, `tools/scenario/run.mjs`, `tools/benchmark/run.mjs`) remain as-is:
 
 ```ts
 // apps/harness-cli/src/main.ts
@@ -460,7 +460,7 @@ Command.run(harnessRootCommand, { version: "2.0.0" }).pipe(
 
 To guarantee the harness never regresses into procedural God-files or "Effect-washing", we introduce four new deterministic checks enforced across **all** workspace packages (including `libs/harness/*` and `apps/harness-*`):
 
-1. **`no-internal-harness-exemption`:** Delete `isInternalHarnessFile` from [`tools/oxlint/syntax-bans.js`](../../tools/oxlint/syntax-bans.js) and `isHarnessInternal` from [`libs/harness/gates/src/ast-cache.ts`](../../libs/harness/gates/src/ast-cache.ts).
+1. **`no-internal-harness-exemption`:** Delete `isInternalHarnessFile` from [`tools/oxlint/syntax-bans.js`](../../tools/oxlint/syntax-bans.js) so `SwitchStatement`, `match().run()`, and `node-sqlite-in-infra` apply repo-wide, and brand/schema and `ExportNamedDeclaration` checks apply uniformly across all `libs/<pkg>/(contract|domain|core|service|infra)/src/` packages (while `isTierOrSampleAppFile` in `syntax-bans.js` and `isHarnessInternal` in [`libs/harness/gates/src/plugins/ast-gate-visitors.ts`](../../libs/harness/gates/src/plugins/ast-gate-visitors.ts) scope discriminant `IfStatement`/`ConditionalExpression` and legacy `unscoped-effect-run` checks to tier/sample-app packages).
 2. **`max-file-lines` (`DEFAULT_MAX_PLUGIN_FILE_LINES = 800` in Phase 1; `< 600` LOC monorepo target in Phases 2–4):** In Phase 1, `DEFAULT_MAX_PLUGIN_FILE_LINES = 800` is enforced as a deterministic hard ceiling across all modular plugin, service, command, and tool files (`/plugins/`, `/services/`, `/commands/`, `/tools/`). As legacy monoliths are decomposed to `< 600` LOC (`< 500` LOC for sub-extractors) in Phases 2–4, the rule expands monorepo-wide.
 3. **`no-effect-washing`:**
    - Bans `yield* Effect.void` dummy statements at the start of `Effect.fn` / `Effect.gen` generators.
@@ -488,8 +488,8 @@ Each phase is executed as an isolated, verify-stamped task (`plan-check` $\right
 - **Phase 3 — Clean-Slate Decomposition of `@harness/graph` God-Files (`Step 3` in Playbook — `COMPLETED in PR #26`):**
   - Split `type-extractor.ts`, `datalog-engine.ts`, `graph-rewrite.ts`, `graph-engine.ts`, and `graph-projector.ts` into cohesive `<= 250` LOC orchestrator facades and modular `< 500–750` LOC submodules (`src/extractor/*`, `src/datalog/*`, `src/rewrite/*`, `src/engine/*`, `src/projector/*`).
   - Removed synchronous snapshot wrappers `deserializeGraphSnapshot`/`loadGraphSnapshot` and enforced tiered RFC-0007 line budgets (`250`/`499`/`700`/`750`/`800` via `resolvePathSpecificMaxLines`) and `facade-star-reexport` across all of `@harness/graph`.
-- **Phase 4 — Declarative `effect/cli`, Modular MCP Server & Full Monorepo Enforcement (`Step 4` in Playbook — `SCHEDULED`):**
-  - Decompose `apps/harness-cli/src/index.ts` (`3,759` LOC) into modular `src/commands/*.command.ts` (`<= 650` LOC).
-  - Decompose `apps/harness-mcp/src/server.ts` (`1,645` LOC) into modular `src/tools/*.tool.ts` (`<= 650` LOC) and replace `zod` in MCP tool registration with `effect/Schema`.
-  - Remove remaining `isInternalHarnessFile` exemptions in `tools/oxlint/syntax-bans.js`.
-  - Refactor `libs/es/infra/src/{projector,aggregate}.ts` mega-functions, port `.mjs` scripts into typed Effect CLI subcommands, and enable `file-line-budget-exceeded` (`<= 800` LOC with `< 600` LOC target) monorepo-wide.
+- **Phase 4 — Modular CLI Command Registry, Modular MCP Server & Full Monorepo Enforcement (`Step 4` in Playbook — `COMPLETED in PR #27`):**
+  - Decompose `apps/harness-cli/src/index.ts` (`3,759` LOC) into a `< 250` LOC entrypoint (`apps/harness-cli/src/index.ts`) and modular `apps/harness-cli/src/commands/*.ts` command/service files (`<= 650` LOC) dispatched directly via `HarnessCommandRegistry` (`HarnessCommandRegistryLive`).
+  - Decompose `apps/harness-mcp/src/server.ts` (`1,645` LOC) into a `< 250` LOC server (`apps/harness-mcp/src/server.ts`), modular `apps/harness-mcp/src/tools/*.ts` modules, and `apps/harness-mcp/src/daemon/unix-socket-daemon.ts` (`<= 650` LOC), and replace `zod` in MCP tool registration with `effect/Schema`.
+  - Remove `isInternalHarnessFile` from `tools/oxlint/syntax-bans.js` (scoping discriminant `IfStatement`/`ConditionalExpression` checks to tier/sample-app packages via `isTierOrSampleAppFile` while enforcing `SwitchStatement`, `match().run()`, schema/brand, and SQLite bans repo-wide).
+  - Refactor `libs/es/infra/src/{projector,aggregate}.ts` mega-functions (`<= 650` LOC per file) and enable `file-line-budget-exceeded` (`<= 800` LOC ceiling, with tiered module budgets) across all production `.ts`/`.tsx` files under `libs/` and `apps/`.

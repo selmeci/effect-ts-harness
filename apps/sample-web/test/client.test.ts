@@ -19,10 +19,41 @@ import {
 import { execSync } from "node:child_process"
 import * as path from "node:path"
 import * as fs from "node:fs"
+import * as os from "node:os"
+import { createRequire } from "node:module"
 import { fileURLToPath } from "node:url"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(__dirname, "../../..")
+const require = createRequire(import.meta.url)
+
+const createIsolatedOxlintRoot = (): {
+  readonly tmpRepoRoot: string
+  readonly configPath: string
+} => {
+  const tmpRepoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "sample-web-oxlint-"))
+  const rawConfig = JSON.parse(
+    fs.readFileSync(path.join(repoRoot, ".oxlintrc.json"), "utf-8"),
+  ) as {
+    extends?: Array<string>
+    jsPlugins?: Array<string>
+    [key: string]: unknown
+  }
+  const config = {
+    ...rawConfig,
+    extends: (rawConfig.extends ?? []).map((entry) =>
+      entry.startsWith("./") ? path.join(repoRoot, entry) : entry,
+    ),
+    jsPlugins: (rawConfig.jsPlugins ?? []).map((entry) =>
+      entry.startsWith("./")
+        ? path.join(repoRoot, entry)
+        : require.resolve(entry, { paths: [repoRoot] }),
+    ),
+  }
+  const configPath = path.join(tmpRepoRoot, ".oxlintrc.json")
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2))
+  return { tmpRepoRoot, configPath }
+}
 
 const testPhotos: readonly Photo[] = [
   {
@@ -129,13 +160,15 @@ describe("SampleApiClient and AtomHttpApi", () => {
   })
 
   it("enforces fetch ban in apps/sample-web/src via oxlint", () => {
-    const tempFile = path.resolve(__dirname, "../src/temp-fetch-ban-test.ts")
+    const { tmpRepoRoot, configPath } = createIsolatedOxlintRoot()
     try {
+      const tempFile = path.join(tmpRepoRoot, "apps/sample-web/src/temp-fetch-ban-test.ts")
+      fs.mkdirSync(path.dirname(tempFile), { recursive: true })
       fs.writeFileSync(tempFile, 'export const bad = fetch("http://localhost:8787/photos")\n')
       let failed = false
       let output = ""
       try {
-        output = execSync("pnpm exec oxlint apps/sample-web/src/temp-fetch-ban-test.ts", {
+        output = execSync(`pnpm exec oxlint -c ${configPath} ${tempFile}`, {
           cwd: repoRoot,
           stdio: "pipe",
           encoding: "utf-8",
@@ -147,9 +180,7 @@ describe("SampleApiClient and AtomHttpApi", () => {
       expect(failed).toBe(true)
       expect(output).toMatch(/fetch/i)
     } finally {
-      if (fs.existsSync(tempFile)) {
-        fs.unlinkSync(tempFile)
-      }
+      fs.rmSync(tmpRepoRoot, { recursive: true, force: true })
     }
   })
 
@@ -182,41 +213,43 @@ describe("SampleApiClient and AtomHttpApi", () => {
   })
 
   it("enforces 5 security and reliability AST bans via oxlint", () => {
+    const { tmpRepoRoot, configPath } = createIsolatedOxlintRoot()
     const testCases = [
       {
-        file: path.resolve(repoRoot, "apps/sample-web/src/temp-secret-test.ts"),
+        file: path.join(tmpRepoRoot, "apps/sample-web/src/temp-secret-test.ts"),
         code: 'import { Config } from "effect"\nexport const secret = Config.string("API_SECRET")\n',
         match: /Sensitive configuration keys/,
       },
       {
-        file: path.resolve(repoRoot, "apps/sample-web/src/temp-sql-test.ts"),
+        file: path.join(tmpRepoRoot, "apps/sample-web/src/temp-sql-test.ts"),
         code: "const db = { prepare: (q: string) => q }; const id = 1;\nexport const q = db.prepare(`SELECT * FROM t WHERE id = ${id}`)\n",
         match: /SQL injection risk/,
       },
       {
-        file: path.resolve(repoRoot, "libs/sample/domain/src/temp-impure-test.ts"),
+        file: path.join(tmpRepoRoot, "libs/sample/domain/src/temp-impure-test.ts"),
         code: "export const t = Date.now()\n",
         match: /Impure global/,
       },
       {
-        file: path.resolve(repoRoot, "apps/sample-web/src/temp-retry-test.ts"),
+        file: path.join(tmpRepoRoot, "apps/sample-web/src/temp-retry-test.ts"),
         code: 'import { Effect, Schedule } from "effect"\nexport const r = Effect.retry(Effect.void, Schedule.forever)\n',
         match: /Unbounded Effect\.retry/,
       },
       {
-        file: path.resolve(repoRoot, "libs/sample/domain/src/temp-ignore-test.ts"),
+        file: path.join(tmpRepoRoot, "libs/sample/domain/src/temp-ignore-test.ts"),
         code: 'import { Effect } from "effect"\nexport const ign = Effect.ignore(Effect.void)\n',
         match: /Swallowing typed errors with Effect\.ignore/,
       },
     ]
 
-    for (const { file, code, match } of testCases) {
-      try {
+    try {
+      for (const { file, code, match } of testCases) {
+        fs.mkdirSync(path.dirname(file), { recursive: true })
         fs.writeFileSync(file, code)
         let failed = false
         let output = ""
         try {
-          output = execSync(`pnpm exec oxlint ${file}`, {
+          output = execSync(`pnpm exec oxlint -c ${configPath} ${file}`, {
             cwd: repoRoot,
             stdio: "pipe",
             encoding: "utf-8",
@@ -227,40 +260,40 @@ describe("SampleApiClient and AtomHttpApi", () => {
         }
         expect(failed).toBe(true)
         expect(output).toMatch(match)
-      } finally {
-        if (fs.existsSync(file)) {
-          fs.unlinkSync(file)
-        }
       }
+    } finally {
+      fs.rmSync(tmpRepoRoot, { recursive: true, force: true })
     }
   })
 
   it("enforces test-integrity and TypeScript suppression bans via oxlint", () => {
+    const { tmpRepoRoot, configPath } = createIsolatedOxlintRoot()
     const testCases = [
       {
-        file: path.resolve(repoRoot, "apps/sample-web/test/temp-skip-test.ts"),
+        file: path.join(tmpRepoRoot, "apps/sample-web/test/temp-skip-test.ts"),
         code: 'it.skip("skipped test", () => {})\n',
         match: /Skipping or focusing tests/,
       },
       {
-        file: path.resolve(repoRoot, "apps/sample-web/test/temp-ts-ignore-test.ts"),
+        file: path.join(tmpRepoRoot, "apps/sample-web/test/temp-ts-ignore-test.ts"),
         code: "// @ts-ignore\nexport const x = 1\n",
         match: /TypeScript suppression/,
       },
       {
-        file: path.resolve(repoRoot, "apps/sample-web/src/temp-ts-expect-error-test.ts"),
+        file: path.join(tmpRepoRoot, "apps/sample-web/src/temp-ts-expect-error-test.ts"),
         code: "// @ts-expect-error\nexport const y = 2\n",
         match: /TypeScript suppression directives/,
       },
     ]
 
-    for (const { file, code, match } of testCases) {
-      try {
+    try {
+      for (const { file, code, match } of testCases) {
+        fs.mkdirSync(path.dirname(file), { recursive: true })
         fs.writeFileSync(file, code)
         let failed = false
         let output = ""
         try {
-          output = execSync(`pnpm exec oxlint ${file}`, {
+          output = execSync(`pnpm exec oxlint -c ${configPath} ${file}`, {
             cwd: repoRoot,
             stdio: "pipe",
             encoding: "utf-8",
@@ -271,40 +304,40 @@ describe("SampleApiClient and AtomHttpApi", () => {
         }
         expect(failed).toBe(true)
         expect(output).toMatch(match)
-      } finally {
-        if (fs.existsSync(file)) {
-          fs.unlinkSync(file)
-        }
       }
+    } finally {
+      fs.rmSync(tmpRepoRoot, { recursive: true, force: true })
     }
   })
 
   it("enforces type-safety bans on any, never, and double type assertions via oxlint", () => {
+    const { tmpRepoRoot, configPath } = createIsolatedOxlintRoot()
     const testCases = [
       {
-        file: path.resolve(repoRoot, "apps/sample-web/src/temp-any-ban-test.ts"),
+        file: path.join(tmpRepoRoot, "apps/sample-web/src/temp-any-ban-test.ts"),
         code: "export const x = 1 as" + " any\n",
         match: /Explicit 'any'/,
       },
       {
-        file: path.resolve(repoRoot, "apps/sample-web/src/temp-never-ban-test.ts"),
+        file: path.join(tmpRepoRoot, "apps/sample-web/src/temp-never-ban-test.ts"),
         code: "export const y = 1 as" + " never\n",
         match: /Unsafe 'never'/,
       },
       {
-        file: path.resolve(repoRoot, "apps/sample-web/src/temp-double-cast-ban-test.ts"),
+        file: path.join(tmpRepoRoot, "apps/sample-web/src/temp-double-cast-ban-test.ts"),
         code: "export const z = 1 as" + " unknown as" + " string\n",
         match: /Double type assertions/,
       },
     ]
 
-    for (const { file, code, match } of testCases) {
-      try {
+    try {
+      for (const { file, code, match } of testCases) {
+        fs.mkdirSync(path.dirname(file), { recursive: true })
         fs.writeFileSync(file, code)
         let failed = false
         let output = ""
         try {
-          output = execSync(`pnpm exec oxlint ${file}`, {
+          output = execSync(`pnpm exec oxlint -c ${configPath} ${file}`, {
             cwd: repoRoot,
             stdio: "pipe",
             encoding: "utf-8",
@@ -315,11 +348,9 @@ describe("SampleApiClient and AtomHttpApi", () => {
         }
         expect(failed).toBe(true)
         expect(output).toMatch(match)
-      } finally {
-        if (fs.existsSync(file)) {
-          fs.unlinkSync(file)
-        }
       }
+    } finally {
+      fs.rmSync(tmpRepoRoot, { recursive: true, force: true })
     }
   })
 })

@@ -1,4 +1,5 @@
-import { Context, Effect, Exit, Layer, Scope } from "effect"
+import { Context, Deferred, Effect, Exit, Layer, Scope } from "effect"
+import { match } from "ts-pattern"
 import { SqlClient } from "effect/sql/SqlClient"
 import * as SqliteClientModule from "@effect/sql-sqlite-do/SqliteClient"
 import { Workerd, WorkerdLive } from "@alchemy.run/cloudflare-runtime/core/workerd/Workerd"
@@ -13,6 +14,7 @@ import type {
   SqlStorageCursor,
   SqlStorageValue,
 } from "@cloudflare/workers-types"
+import { BRIDGE_WORKER_SCRIPT, DO_WORKER_ES_MODULE } from "./workerd-scripts.js"
 
 const unsafeCast = <T>(value: unknown): T => value as T
 
@@ -117,307 +119,6 @@ class WorkerdSqlCursor<T extends Record<string, SqlStorageValue>> {
 
 class WorkerdSqlStatement {}
 
-const DO_WORKER_ES_MODULE = `
-import { DurableObject } from "cloudflare:workers";
-
-export class HarnessSqlDurableObject extends DurableObject {
-  constructor(ctx, env) {
-    super(ctx, env);
-  }
-
-  #execSql(query, bindings) {
-    const realBindings = bindings.map((b) =>
-      b !== null && typeof b === "object" && Array.isArray(b.__uint8)
-        ? new Uint8Array(b.__uint8).buffer
-        : b
-    );
-    const cursor = this.ctx.storage.sql.exec(query, ...realBindings);
-    const rawRows = Array.from(cursor.raw()).map((row) =>
-      row.map((val) =>
-        val instanceof ArrayBuffer ? { __ab: Array.from(new Uint8Array(val)) } : val
-      )
-    );
-    return {
-      ok: true,
-      columnNames: cursor.columnNames,
-      rawRows,
-      rowsRead: cursor.rowsRead,
-      rowsWritten: cursor.rowsWritten
-    };
-  }
-
-  async #runTransactionLoop(txId, txn) {
-    while (true) {
-      const stepRes = await this.env.CALLBACK.fetch("http://callback/next-op", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ txId })
-      });
-      const cmd = await stepRes.json();
-      if (cmd.type === "exec") {
-        try {
-          const result = this.#execSql(cmd.query, cmd.bindings);
-          await this.env.CALLBACK.fetch("http://callback/op-result", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ txId, result })
-          });
-        } catch (err) {
-          await this.env.CALLBACK.fetch("http://callback/op-result", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              txId,
-              result: {
-                ok: false,
-                message: err instanceof Error ? err.message : String(err)
-              }
-            })
-          });
-        }
-      } else if (cmd.type === "nested-tx") {
-        try {
-          await this.ctx.storage.transaction(async (childTxn) => {
-            await this.#runTransactionLoop(cmd.childTxId, childTxn);
-          });
-          await this.env.CALLBACK.fetch("http://callback/op-result", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ txId, result: { ok: true } })
-          });
-        } catch (err) {
-          await this.env.CALLBACK.fetch("http://callback/op-result", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              txId,
-              result: {
-                ok: false,
-                message: err instanceof Error ? err.message : String(err)
-              }
-            })
-          });
-        }
-      } else if (cmd.type === "rollback") {
-        try {
-          txn.rollback();
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          if (!/rollback|closed|finished|inactive/i.test(msg)) {
-            await this.env.CALLBACK.fetch("http://callback/op-result", {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ txId, result: { ok: false, message: msg } })
-            });
-            return;
-          }
-        }
-        await this.env.CALLBACK.fetch("http://callback/op-result", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ txId, result: { ok: true } })
-        });
-        return;
-      } else if (cmd.type === "commit") {
-        return;
-      }
-    }
-  }
-
-  async fetch(request) {
-    const url = new URL(request.url);
-    if (url.pathname === "/exec") {
-      const { query, bindings } = await request.json();
-      try {
-        return Response.json(this.#execSql(query, bindings));
-      } catch (err) {
-        return Response.json({
-          ok: false,
-          message: err instanceof Error ? err.message : String(err)
-        });
-      }
-    }
-    if (url.pathname === "/transaction") {
-      const { txId } = await request.json();
-      try {
-        await this.ctx.storage.transaction(async (txn) => {
-          await this.#runTransactionLoop(txId, txn);
-        });
-        return Response.json({ ok: true });
-      } catch (err) {
-        return Response.json({
-          ok: false,
-          message: err instanceof Error ? err.message : String(err)
-        });
-      }
-    }
-    return new Response("Not Found", { status: 404 });
-  }
-}
-
-export default {
-  async fetch(request, env) {
-    const doName = request.headers.get("x-do-name") || "default";
-    const id = env.DO.idFromName(doName);
-    return env.DO.get(id).fetch(request);
-  }
-};
-`
-
-const BRIDGE_WORKER_SCRIPT = `
-const { parentPort } = require("node:worker_threads");
-const http = require("node:http");
-
-const pendingNextOp = new Map();
-const pendingOpResult = new Map();
-const pendingTxComplete = new Map();
-let workerdPort = 0;
-
-const callbackServer = http.createServer((req, res) => {
-  let body = "";
-  req.on("data", (chunk) => { body += chunk; });
-  req.on("end", () => {
-    const parsed = JSON.parse(body);
-    if (req.url === "/next-op") {
-      pendingNextOp.set(parsed.txId, (cmd) => {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(cmd));
-      });
-      const readyWaiter = pendingOpResult.get(parsed.txId + ":ready");
-      if (readyWaiter) {
-        pendingOpResult.delete(parsed.txId + ":ready");
-        readyWaiter({ ok: true });
-      }
-    } else if (req.url === "/op-result") {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ack: true }));
-      const waiter = pendingOpResult.get(parsed.txId);
-      if (waiter) {
-        pendingOpResult.delete(parsed.txId);
-        waiter(parsed.result);
-      }
-    }
-  });
-});
-
-const waitForNextOp = (txId) =>
-  new Promise((resolve) => {
-    if (pendingNextOp.has(txId)) {
-      resolve({ ok: true });
-    } else {
-      pendingOpResult.set(txId + ":ready", resolve);
-    }
-  });
-
-const sendOpAndWait = (txId, cmd) =>
-  new Promise((resolve) => {
-    const respond = pendingNextOp.get(txId);
-    pendingNextOp.delete(txId);
-    pendingOpResult.set(txId, resolve);
-    respond(cmd);
-  });
-
-callbackServer.listen(0, "127.0.0.1", () => {
-  const callbackPort = callbackServer.address().port;
-  parentPort.postMessage({ type: "ready", callbackPort });
-});
-
-parentPort.on("message", async (msg) => {
-  if (msg.type === "set-workerd-port") {
-    workerdPort = msg.workerdPort;
-    if (msg.port) {
-      msg.port.postMessage({ ok: true });
-    }
-    if (msg.sab) {
-      const i32 = new Int32Array(msg.sab);
-      Atomics.store(i32, 0, 1);
-      Atomics.notify(i32, 0);
-    }
-    return;
-  }
-
-  const finishSync = (result) => {
-    msg.port.postMessage(result);
-    const i32 = new Int32Array(msg.sab);
-    Atomics.store(i32, 0, 1);
-    Atomics.notify(i32, 0);
-  };
-
-  try {
-    if (msg.type === "exec") {
-      if (msg.txId) {
-        await waitForNextOp(msg.txId);
-        const result = await sendOpAndWait(msg.txId, {
-          type: "exec",
-          query: msg.query,
-          bindings: msg.bindings
-        });
-        finishSync(result);
-      } else {
-        const res = await fetch("http://127.0.0.1:" + workerdPort + "/exec", {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-do-name": msg.doName
-          },
-          body: JSON.stringify({ query: msg.query, bindings: msg.bindings })
-        });
-        const result = await res.json();
-        finishSync(result);
-      }
-    } else if (msg.type === "begin-tx") {
-      if (msg.parentTxId) {
-        await waitForNextOp(msg.parentTxId);
-        const respondParent = pendingNextOp.get(msg.parentTxId);
-        pendingNextOp.delete(msg.parentTxId);
-        const nestedDone = new Promise((resolve) => {
-          pendingOpResult.set(msg.parentTxId, resolve);
-        });
-        pendingTxComplete.set(msg.txId, nestedDone);
-        respondParent({ type: "nested-tx", childTxId: msg.txId });
-        await waitForNextOp(msg.txId);
-        finishSync({ ok: true });
-      } else {
-        const txPromise = fetch("http://127.0.0.1:" + workerdPort + "/transaction", {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-do-name": msg.doName
-          },
-          body: JSON.stringify({ txId: msg.txId })
-        }).then((r) => r.json());
-        pendingTxComplete.set(msg.txId, txPromise);
-        await waitForNextOp(msg.txId);
-        finishSync({ ok: true });
-      }
-    } else if (msg.type === "commit-tx") {
-      await waitForNextOp(msg.txId);
-      const respond = pendingNextOp.get(msg.txId);
-      pendingNextOp.delete(msg.txId);
-      respond({ type: "commit" });
-      const txDone = pendingTxComplete.get(msg.txId);
-      pendingTxComplete.delete(msg.txId);
-      const finalRes = txDone ? await txDone : { ok: true };
-      finishSync(finalRes);
-    } else if (msg.type === "rollback-tx") {
-      await waitForNextOp(msg.txId);
-      await sendOpAndWait(msg.txId, { type: "rollback" });
-      const txDone = pendingTxComplete.get(msg.txId);
-      pendingTxComplete.delete(msg.txId);
-      if (txDone) {
-        await txDone;
-      }
-      finishSync({ ok: true });
-    }
-  } catch (err) {
-    finishSync({
-      ok: false,
-      message: err instanceof Error ? err.message : String(err)
-    });
-  }
-});
-`
-
 interface BridgeExecResult {
   readonly ok: boolean
   readonly message?: string
@@ -435,44 +136,84 @@ interface SharedWorkerdBridge {
 }
 
 let activeBridge: SharedWorkerdBridge | null = null
+let pendingBridgeDeferred: Deferred.Deferred<SharedWorkerdBridge> | null = null
 let activeRefCount = 0
 let idleCloseTimer: ReturnType<typeof setTimeout> | null = null
 
+const cleanupBridgeResources = (
+  scope: Scope.Closeable,
+  worker: Worker | undefined,
+  tmpDir: string,
+): Effect.Effect<void> =>
+  Scope.close(scope, Exit.void).pipe(
+    Effect.ignoreCause,
+    Effect.andThen(
+      worker !== undefined
+        ? Effect.tryPromise({
+            try: () => worker.terminate().then(() => undefined),
+            catch: () => undefined,
+          }).pipe(Effect.ignoreCause)
+        : Effect.void,
+    ),
+    Effect.andThen(
+      Effect.sync(() => {
+        rmSync(tmpDir, { recursive: true, force: true })
+      }).pipe(Effect.ignoreCause),
+    ),
+  )
+
 const closeSharedBridge = (bridgeToClose: SharedWorkerdBridge): void => {
-  void Effect.runPromise(Scope.close(bridgeToClose.scope, Exit.void))
-    .finally(() => bridgeToClose.worker.terminate())
-    .finally(() => {
-      rmSync(bridgeToClose.tmpDir, { recursive: true, force: true })
-    })
+  void Effect.runPromise(
+    cleanupBridgeResources(bridgeToClose.scope, bridgeToClose.worker, bridgeToClose.tmpDir),
+  )
 }
 
-const acquireSharedWorkerdBridge = (): Effect.Effect<SharedWorkerdBridge, never, Scope.Scope> =>
-  Effect.acquireRelease(
-    Effect.gen(function* () {
-      if (idleCloseTimer !== null) {
-        clearTimeout(idleCloseTimer)
-        idleCloseTimer = null
-      }
-      activeRefCount += 1
-      if (activeBridge !== null) {
-        return activeBridge
-      }
+const BRIDGE_CALL_TIMEOUT_MS = 30_000
 
-      const tmpDir = mkdtempSync(join(tmpdir(), "harness-es-workerd-"))
-      const bridgeScope = yield* Scope.make()
+const initSharedWorkerdBridge = (): Effect.Effect<SharedWorkerdBridge> =>
+  Effect.gen(function* () {
+    const tmpDir = mkdtempSync(join(tmpdir(), "harness-es-workerd-"))
+    const bridgeScope = yield* Scope.make()
 
+      let spawnedWorker: Worker | undefined
       const { callbackPort, worker } = yield* Effect.callback<{
         readonly callbackPort: number
         readonly worker: Worker
       }>((resume) => {
         const w = new Worker(BRIDGE_WORKER_SCRIPT, { eval: true })
+        spawnedWorker = w
+        let settled = false
         w.once("message", (msg: { readonly callbackPort: number }) => {
-          resume(Effect.succeed({ callbackPort: msg.callbackPort, worker: w }))
+          if (!settled) {
+            settled = true
+            resume(Effect.succeed({ callbackPort: msg.callbackPort, worker: w }))
+          }
         })
-        w.once("error", (err) => {
-          resume(Effect.die(err))
+        w.on("error", (err) => {
+          if (!settled) {
+            settled = true
+            resume(Effect.die(err))
+          } else {
+            process.stderr.write(
+              `[es-infra:workerd] Late bridge worker error: ${err instanceof Error ? err.message : String(err)}\n`,
+            )
+          }
         })
-      })
+        w.once("exit", (code) => {
+          if (!settled) {
+            settled = true
+            resume(
+              Effect.die(
+                new Error(
+                  `Workerd bridge worker exited prematurely with code ${code} before initialization`,
+                ),
+              ),
+            )
+          }
+        })
+      }).pipe(
+        Effect.onError(() => cleanupBridgeResources(bridgeScope, spawnedWorker, tmpDir)),
+      )
 
       const workerd = yield* Workerd.pipe(Effect.provide(WorkerdLive))
 
@@ -532,14 +273,25 @@ const acquireSharedWorkerdBridge = (): Effect.Effect<SharedWorkerdBridge, never,
             },
           ],
         })
-        .pipe(Scope.provide(bridgeScope), Effect.orDie)
+        .pipe(
+          Scope.provide(bridgeScope),
+          Effect.onError(() => cleanupBridgeResources(bridgeScope, worker, tmpDir)),
+          Effect.orDie,
+        )
 
       const callSync = (payload: Record<string, unknown>): BridgeExecResult => {
         const sab = new SharedArrayBuffer(4)
         const i32 = new Int32Array(sab)
         const { port1, port2 } = new MessageChannel()
         worker.postMessage({ ...payload, sab, port: port2 }, [port2])
-        Atomics.wait(i32, 0, 0)
+        const waitResult = Atomics.wait(i32, 0, 0, BRIDGE_CALL_TIMEOUT_MS)
+        if (waitResult === "timed-out") {
+          port1.close()
+          return {
+            ok: false,
+            message: `Workerd SQLite bridge timed out after ${BRIDGE_CALL_TIMEOUT_MS}ms`,
+          }
+        }
         const received = receiveMessageOnPort(port1)
         port1.close()
         if (received === undefined) {
@@ -548,7 +300,13 @@ const acquireSharedWorkerdBridge = (): Effect.Effect<SharedWorkerdBridge, never,
         return received.message as BridgeExecResult
       }
 
-      callSync({ type: "set-workerd-port", workerdPort: ports.main })
+      const initRes = callSync({ type: "set-workerd-port", workerdPort: ports.main })
+      if (!initRes.ok) {
+        yield* cleanupBridgeResources(bridgeScope, worker, tmpDir)
+        return yield* Effect.die(
+          new Error(initRes.message ?? "Failed to initialize workerd SQLite bridge port"),
+        )
+      }
 
       const bridge: SharedWorkerdBridge = {
         worker,
@@ -558,6 +316,56 @@ const acquireSharedWorkerdBridge = (): Effect.Effect<SharedWorkerdBridge, never,
       }
       activeBridge = bridge
       return bridge
+    })
+
+const acquireSharedWorkerdBridge = (): Effect.Effect<SharedWorkerdBridge, never, Scope.Scope> =>
+  Effect.acquireRelease(
+    Effect.gen(function* () {
+      if (idleCloseTimer !== null) {
+        clearTimeout(idleCloseTimer)
+        idleCloseTimer = null
+      }
+      if (activeBridge !== null) {
+        activeRefCount += 1
+        return activeBridge
+      }
+      if (pendingBridgeDeferred !== null) {
+        activeRefCount += 1
+        return yield* Deferred.await(pendingBridgeDeferred).pipe(
+          Effect.onError(() =>
+            Effect.sync(() => {
+              activeRefCount = Math.max(0, activeRefCount - 1)
+            }),
+          ),
+        )
+      }
+      const deferred = yield* Deferred.make<SharedWorkerdBridge>()
+      pendingBridgeDeferred = deferred
+      activeRefCount += 1
+      return yield* Effect.gen(function* () {
+        const exit = yield* Effect.exit(initSharedWorkerdBridge())
+        return yield* match(exit)
+          .with({ _tag: "Success" }, ({ value }) =>
+            Deferred.succeed(deferred, value).pipe(Effect.as(value)),
+          )
+          .with({ _tag: "Failure" }, ({ cause }) =>
+            Deferred.failCause(deferred, cause).pipe(
+              Effect.andThen(
+                Effect.sync(() => {
+                  activeRefCount = Math.max(0, activeRefCount - 1)
+                }),
+              ),
+              Effect.andThen(Effect.failCause(cause)),
+            ),
+          )
+          .exhaustive()
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            pendingBridgeDeferred = null
+          }),
+        ),
+      )
     }),
     () =>
       Effect.sync(() => {
@@ -591,6 +399,12 @@ const createWorkerdDurableObjectStorage = (
       ...bindings: ReadonlyArray<unknown>
     ): SqlStorageCursor<T> {
       const currentTx = txStack[txStack.length - 1]
+      if (currentTx?.rolledBack) {
+        // Note: libs/es/infra/src/memory.ts carries a narrow `unscoped-effect-run` exemption
+        // because it bridges synchronous `@cloudflare/workers-types` `SqlStorage.exec` callbacks
+        // to the Effect/workerd runtime.
+        return Effect.runSync(Effect.die(new Error("Transaction already rolled back")))
+      }
       const res = bridge.callSync({
         type: "exec",
         doName,
@@ -638,7 +452,15 @@ const createWorkerdDurableObjectStorage = (
 
       txStack.push(txEntry)
 
+      const removeFromTxStack = (): void => {
+        const idx = txStack.indexOf(txEntry)
+        if (idx !== -1) {
+          txStack.splice(idx, 1)
+        }
+      }
+
       const safeRollback = (): void => {
+        removeFromTxStack()
         if (!txEntry.rolledBack) {
           txEntry.rolledBack = true
           bridge.callSync({
@@ -659,7 +481,7 @@ const createWorkerdDurableObjectStorage = (
         .then(() => closure(unsafeCast<DurableObjectTransaction>(txn)))
         .then(
           (result) => {
-            txStack.pop()
+            removeFromTxStack()
             if (!txEntry.rolledBack) {
               const commitRes = bridge.callSync({
                 type: "commit-tx",
@@ -675,7 +497,7 @@ const createWorkerdDurableObjectStorage = (
             return result
           },
           (err: unknown) => {
-            txStack.pop()
+            removeFromTxStack()
             safeRollback()
             return Promise.reject(err)
           },

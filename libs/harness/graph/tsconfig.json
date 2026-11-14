@@ -1,7 +1,10 @@
 {
   "extends": "../../../tsconfig.base.json",
   "compilerOptions": {
-    "types": ["node"]
+    "types": ["node"],
+    "paths": {
+      "@harness/ingest": ["../ingest/src/index.ts"]
+    }
   },
   "include": ["src", "test"]
 }

@@ -38,6 +38,9 @@ export const SelfDogfoodingRuleId = Schema.Literals([
   "match-run-statement",
   "file-line-budget-exceeded",
   "facade-star-reexport",
+  "catch-cause-interrupts-only",
+  "silent-catch-defect",
+  "ignored-chmod-permission",
 ]).pipe(Schema.brand("SelfDogfoodingRuleId"))
 export type SelfDogfoodingRuleId = typeof SelfDogfoodingRuleId.Type
 

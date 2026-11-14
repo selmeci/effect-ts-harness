@@ -16,6 +16,7 @@ enforced_by:
   - libs/es/infra/src/index.ts
   - libs/es/infra/src/outbox.ts
   - libs/es/infra/src/projector.ts
+  - libs/es/infra/src/projector-rebuild.ts
   - libs/es/infra/test/fixtures/cart-sqlite.ts
 spans:
   - ProjectionSequence.decide

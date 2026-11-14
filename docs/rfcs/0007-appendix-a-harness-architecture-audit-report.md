@@ -1,8 +1,8 @@
 ---
 rfc: RFC-0007-APPENDIX-A
 title: "Appendix A to RFC-0007: Comprehensive Harness Architecture Audit Report"
-status: accepted
-implementation_phase: "Phases 1–3 (Steps 1–3) implemented in PR #24, PR #25, and PR #26; Phase 4 (Step 4) tracked in rollout roadmap"
+status: implemented
+implementation_phase: "All 4 phases (Steps 1–4) implemented"
 created: 2026-11-12
 updated: 2026-11-13
 authors:
@@ -241,7 +241,7 @@ flowchart TB
 
 ## 6. Phased Remediation Roadmap & Resolution Table (Strangler-Fig Migration)
 
-### 6.1 Audit Finding Resolution Table (Phases 1–3 Completed vs. Phase 4 Scheduled)
+### 6.1 Audit Finding Resolution Table (Phases 1–4 Completed)
 
 | Audit Finding / Architectural Refactoring Item | Remediation Phase | Status | Concrete Implementation & Evidence |
 | :--- | :--- | :--- | :--- |
@@ -254,14 +254,14 @@ flowchart TB
 | **Removal of Synchronous `.runSync` Gate Wrappers (`lintAdrDocMarkdown`, `lintEarsSpecMarkdown`, etc.)** | **Phase 2 (Step 2)** | **COMPLETED (`PR #24` / `PR #25`)** | Direct yield of pure `Effect.fn` deciders inside caller generators, eliminating synchronous `.runSync` shims. |
 | **Clean-Slate Decomposition of `@harness/graph` God-Files (`type-extractor.ts` 5,603 LOC, `datalog-engine.ts` 3,255 LOC, `graph-rewrite.ts` 2,957 LOC, `graph-engine.ts` 2,590 LOC, `graph-projector.ts` 2,246 LOC)** | **Phase 3 (Step 3)** | **COMPLETED (`PR #26`)** | Split all 5 `@harness/graph` God-files into `<= 250` LOC orchestrator facades and focused submodules (`extractor/*` `< 500` / `<= 700` LOC, `engine/*` `<= 700` LOC, `datalog/*`, `rewrite/*`, `projector/*` `<= 750` LOC); enforced tiered budgets via `resolvePathSpecificMaxLines` and `facade-star-reexport` in `SelfDogfooding.decide`. |
 | **Removal of Synchronous Snapshot Wrappers (`deserializeGraphSnapshot` / `loadGraphSnapshot`)** | **Phase 3 (Step 3)** | **COMPLETED (`PR #26`)** | Removed synchronous unwrap helpers and switched all `@harness/graph`, `harness-cli`, and test callers to Effect-native `deserializeGraphSnapshotEffect` / `loadGraphSnapshotEffect`. |
-| **Clean-Slate Decomposition of CLI & MCP Monoliths (`apps/harness-cli` 3,758 LOC, `apps/harness-mcp` 1,654 LOC)** | **Phase 4 (Step 4)** | **SCHEDULED** | Move all 15 CLI command implementations into `apps/harness-cli/src/commands/*.command.ts` (`<= 650` LOC) and MCP tool implementations into `apps/harness-mcp/src/tools/*.tool.ts` (`<= 650` LOC) dispatched via `HarnessCommandRegistry` and `McpToolRegistry`. Tracked in Playbook Step 4. |
-| **Replace `zod` with `effect/Schema` in MCP Tool Schemas** | **Phase 4 (Step 4)** | **SCHEDULED** | Remove `zod` (`4.6.5`) from `apps/harness-mcp/package.json` and decode tool arguments purely via `effect/Schema` (`JsonSchema`). Tracked in Playbook Step 4. |
-| **Removal of Remaining `isInternalHarnessFile` Exemptions in `syntax-bans.js`** | **Phase 4 (Step 4)** | **SCHEDULED** | Remove all remaining `isInternalHarnessFile` exemptions in `tools/oxlint/syntax-bans.js` after monolith decomposition is complete. Tracked in Playbook Step 4. |
-| **Repo-Wide Enforcement of Line Budget Gate (`<= 800` LOC hard ceiling with `< 600` LOC target)** | **Phase 4 (Step 4)** | **SCHEDULED** | Expand `file-line-budget-exceeded` across **every** production `.ts` file monorepo-wide once all 15 legacy monoliths are split. Tracked in Playbook Step 4. |
+| **Clean-Slate Decomposition of CLI & MCP Monoliths (`apps/harness-cli` 3,758 LOC, `apps/harness-mcp` 1,654 LOC)** | **Phase 4 (Step 4)** | **COMPLETED (`PR #27`)** | Decomposed `apps/harness-cli/src/index.ts` (`231` LOC) + modular `apps/harness-cli/src/commands/*.ts` (`<= 588` LOC) dispatched via `HarnessCommandRegistryLive`, and decomposed `apps/harness-mcp/src/server.ts` (`240` LOC) + `apps/harness-mcp/src/tools/*.ts` + `apps/harness-mcp/src/daemon/unix-socket-daemon.ts` (`<= 518` LOC) dispatched via `McpToolRegistryLive`. |
+| **Replace `zod` with `effect/Schema` in MCP Tool Schemas** | **Phase 4 (Step 4)** | **COMPLETED (`PR #27`)** | Removed `zod` from `apps/harness-mcp/package.json` and generated/decoded MCP JSON schemas directly via `effect/Schema` (`Schema.toJsonSchemaDocument` / `Schema.toCodecJson`). |
+| **Removal of `isInternalHarnessFile` in `syntax-bans.js`** | **Phase 4 (Step 4)** | **COMPLETED (`PR #27`)** | Removed `isInternalHarnessFile` from `tools/oxlint/syntax-bans.js`; `SwitchStatement`, `match().run()`, and `node-sqlite-in-infra` now enforce repo-wide, brand/schema and `ExportNamedDeclaration` checks apply across all `libs/<pkg>/(contract|domain|core|service|infra)/src/` packages, and `isTierOrSampleAppFile` scopes discriminant `IfStatement`/`ConditionalExpression` and assertion checks to tier/sample packages. |
+| **Repo-Wide Enforcement of Line Budget Gate (`<= 800` LOC ceiling with tiered budgets)** | **Phase 4 (Step 4)** | **COMPLETED (`PR #27`)** | Enabled `file-line-budget-exceeded` across every production `.ts`/`.tsx` file in `libs/**/*.ts` and `apps/**/*.ts` (`250`/`499`/`650`/`700`/`750`/`800` tiered caps via `resolvePathSpecificMaxLines`) and split `libs/es/infra/src/{projector,aggregate}.ts` (`<= 599` LOC per file). |
 
 ### 6.2 Phased Remediation Roadmap
 
 1. **Phase 1 (`COMPLETED in PR #24` — `SPEC-0011` / `ADR-0012`):** Core capability services (`WorkspaceFs`, `HarnessSubprocessRunner`, `ActiveMutantContext`, `TsCompilerOverlayService`), plugin registries (`GatePluginRegistry`, `HarnessCommandRegistry`, `McpToolRegistry`), elimination of all 15 `yield* Effect.void` statements, all 4 `switch` statements, nested `Effect.runSync` calls in `fn-index.ts`, `cached-decision-model.ts`, `ast-cache.ts`, and `graph-engine.ts:245`, and self-dogfooding enforcement with `DEFAULT_MAX_PLUGIN_FILE_LINES = 800` ceiling on modular plugin files.
 2. **Phase 2 (`Step 2` in Playbook — `COMPLETED in PR #25`):** Clean-slate decomposition of `@harness/gates` monoliths (`gc-check.ts`, `mutation-check.ts`, `ast-cache.ts`), removal of synchronous `.runSync` gate wrapper shims, and expanding line budget checks across `@harness/gates`.
 3. **Phase 3 (`Step 3` in Playbook — `COMPLETED in PR #26`):** Clean-slate decomposition of `@harness/graph` god-files (`type-extractor.ts`, `datalog-engine.ts`, `graph-rewrite.ts`, `graph-engine.ts`, `graph-projector.ts`), removal of synchronous snapshot wrappers, and enforcing tiered line budgets (`resolvePathSpecificMaxLines`) across `@harness/graph`.
-4. **Phase 4 (`Step 4` in Playbook — `SCHEDULED`):** Clean-slate decomposition of `apps/harness-cli` and `apps/harness-mcp`, replacing `zod` with `effect/Schema`, removing remaining `isInternalHarnessFile` exemptions in `syntax-bans.js`, porting `.mjs` scripts, and repo-wide line budget enforcement.
+4. **Phase 4 (`Step 4` in Playbook — `COMPLETED in PR #27`):** Clean-slate decomposition of `apps/harness-cli`, `apps/harness-mcp`, and `libs/es/infra/src/*.ts`, replacing `zod` with `effect/Schema`, removing `isInternalHarnessFile` from `syntax-bans.js`, and enabling repo-wide `file-line-budget-exceeded` (`<= 800` LOC) enforcement.

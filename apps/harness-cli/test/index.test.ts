@@ -1,19 +1,40 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
+import * as http from "node:http"
 import * as net from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { Effect, Layer, Option } from "effect"
+import { Cause, Effect, Exit, Layer, Option, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { makeFailingDecisionModelLayer, makeMockDecisionModelLayer } from "@harness/decision"
 import { readTelemetryEvents, writeVerifyStamp } from "@harness/gates"
-import { buildHarnessGraph } from "@harness/graph"
+import { buildHarnessGraph, ShadowFileOverlay } from "@harness/graph"
 // oxlint-disable-next-line @nx/enforce-module-boundaries
 import syntaxBansPlugin from "../../../tools/oxlint/syntax-bans.js"
+import {
+  formatProjectionError,
+  matchesExactSpecToken,
+  persistVerifiedOverlays,
+} from "../src/commands/plan-ears-and-overlays.js"
+import {
+  readRecordedSpans,
+  runDeltaAstAndPluginGates,
+  SpanTraceReadError,
+} from "../src/commands/verify-delta-gates.js"
 import {
   buildOmnigraphClusterKillArgs,
   cleanSubprocessError,
   COMMANDS,
+  ensureLocalOmnigraphReady,
   run,
   runCli,
   stripAnsiCodes,
@@ -51,7 +72,7 @@ describe("harness cli baseline", () => {
     expect(bin).toBe("pkill")
     expect(args).toEqual([
       "-f",
-      "omnigraph-server.*--cluster file:///tmp/test-repo/.harness/omnigraph-cluster",
+      "omnigraph-server.*--cluster file:///tmp/test-repo/\\.harness/omnigraph-cluster",
     ])
   })
 
@@ -63,6 +84,16 @@ describe("harness cli baseline", () => {
     const res = await runCli(["help"])
     expect(res.exitCode).toBe(0)
     expect(res.stdout).toContain("harness help")
+  })
+
+  it("rejects unknown commands even when --help or -h is passed", async () => {
+    const longHelp = await runCli(["nonexistent-cmd", "--help"])
+    expect(longHelp.exitCode).toBe(1)
+    expect(longHelp.stderr).toContain("unknown command: nonexistent-cmd")
+
+    const shortHelp = await runCli(["nonexistent-cmd", "-h"])
+    expect(shortHelp.exitCode).toBe(1)
+    expect(shortHelp.stderr).toContain("unknown command: nonexistent-cmd")
   })
 
   it("strips ANSI color codes and cleans noisy Nx caching lines", () => {
@@ -2423,6 +2454,225 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
     }
   })
 
+  it("flags silent-catch-defect, ignored-chmod-permission, and catch-cause-interrupts-only in runPromiseExit while allowing safe forms", () => {
+    // 1. silent-catch-defect: Effect.catchDefect(() => Effect.void) is flagged; reporting/re-fail is allowed
+    {
+      const reports: Array<{ message: string }> = []
+      const silentArg = {
+        type: "ArrowFunctionExpression",
+        rawSource: "() => Effect.void",
+      }
+      const visitor = syntaxBans.create({
+        filename: "/repo/apps/harness-mcp/src/server.ts",
+        sourceCode: {
+          getText: (node: { rawSource?: string }) => node?.rawSource ?? "",
+        },
+        report: (r: { message: string }) => {
+          reports.push(r)
+        },
+      })
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Effect" },
+          property: { type: "Identifier", name: "catchDefect" },
+        },
+        arguments: [silentArg],
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain("silently swallows runtime defects")
+
+      const validReports: Array<{ message: string }> = []
+      const validVisitor = syntaxBans.create({
+        filename: "/repo/apps/harness-mcp/src/server.ts",
+        sourceCode: {
+          getText: (node: { rawSource?: string }) => node?.rawSource ?? "",
+        },
+        report: (r: { message: string }) => {
+          validReports.push(r)
+        },
+      })
+      for (const safeText of [
+        "(d) => Effect.logWarning(String(d))",
+        "(d) => { process.stderr.write(String(d)); return Effect.void }",
+        "(d) => Effect.fail(new DefectError(d))",
+        "(d) => Effect.succeed(makeLspExceptionReport(d))",
+      ]) {
+        validVisitor.CallExpression?.({
+          type: "CallExpression",
+          callee: {
+            type: "MemberExpression",
+            computed: false,
+            object: { type: "Identifier", name: "Effect" },
+            property: { type: "Identifier", name: "catchDefect" },
+          },
+          arguments: [{ type: "ArrowFunctionExpression", rawSource: safeText }],
+        })
+      }
+      expect(validReports).toHaveLength(0)
+    }
+
+    // 2. ignored-chmod-permission: chmodSync/fchmodSync inside .pipe(Effect.ignore / Effect.orElseSucceed) is flagged; fail-closed is allowed
+    {
+      const reports: Array<{ message: string }> = []
+      const pipeParent: Record<string, unknown> = {
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "eff" },
+          property: { type: "Identifier", name: "pipe" },
+        },
+        rawSource: "Effect.try(() => fs.chmodSync(sock, 0o600)).pipe(Effect.ignore)",
+      }
+      const tryCall = {
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Effect" },
+          property: { type: "Identifier", name: "try" },
+        },
+        parent: pipeParent,
+      }
+      const chmodNode = {
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "fs" },
+          property: { type: "Identifier", name: "chmodSync" },
+        },
+        parent: tryCall,
+      }
+      const visitor = syntaxBans.create({
+        filename: "/repo/apps/harness-mcp/src/daemon/unix-socket-daemon.ts",
+        sourceCode: {
+          getText: (node: { rawSource?: string }) => node?.rawSource ?? "",
+        },
+        report: (r: { message: string }) => {
+          reports.push(r)
+        },
+      })
+      visitor.CallExpression?.(chmodNode)
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain("Ignoring chmodSync/fchmodSync failure")
+
+      const directIgnoreReports: Array<{ message: string }> = []
+      const directIgnoreVisitor = syntaxBans.create({
+        filename: "/repo/apps/harness-mcp/src/daemon/unix-socket-daemon.ts",
+        sourceCode: {
+          getText: (node: { rawSource?: string }) => node?.rawSource ?? "",
+        },
+        report: (r: { message: string }) => {
+          directIgnoreReports.push(r)
+        },
+      })
+      const orElseParent = {
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Effect" },
+          property: { type: "Identifier", name: "orElseSucceed" },
+        },
+      }
+      directIgnoreVisitor.CallExpression?.({
+        type: "CallExpression",
+        callee: { type: "Identifier", name: "fchmodSync" },
+        parent: orElseParent,
+      })
+      expect(directIgnoreReports).toHaveLength(1)
+      expect(directIgnoreReports[0]?.message).toContain("Ignoring chmodSync/fchmodSync failure")
+
+      // Fail-closed chmodSync inside Effect.try().pipe(Effect.catch(...)) produces 0 reports
+      const safeReports: Array<{ message: string }> = []
+      const safeVisitor = syntaxBans.create({
+        filename: "/repo/apps/harness-mcp/src/daemon/unix-socket-daemon.ts",
+        sourceCode: {
+          getText: (node: { rawSource?: string }) => node?.rawSource ?? "",
+        },
+        report: (r: { message: string }) => {
+          safeReports.push(r)
+        },
+      })
+      const safePipeParent = {
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "eff" },
+          property: { type: "Identifier", name: "pipe" },
+        },
+        rawSource: "Effect.try(() => fs.chmodSync(sock, 0o600)).pipe(Effect.catch(handleErr))",
+      }
+      safeVisitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "fs" },
+          property: { type: "Identifier", name: "chmodSync" },
+        },
+        parent: safePipeParent,
+      })
+      expect(safeReports).toHaveLength(0)
+    }
+
+    // 3. catch-cause-interrupts-only inside Effect.runPromiseExit / Effect.runSyncExit is flagged; test files and Cause.hasInterrupts are allowed
+    {
+      const reports: Array<{ message: string }> = []
+      const runPromiseExitParent = {
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Effect" },
+          property: { type: "Identifier", name: "runPromiseExit" },
+        },
+      }
+      const visitor = syntaxBans.create({
+        filename: "/repo/libs/harness/gates/src/runner.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        },
+      })
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Cause" },
+          property: { type: "Identifier", name: "hasInterruptsOnly" },
+        },
+        parent: runPromiseExitParent,
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain("Cause.hasInterrupts(cause)")
+
+      const testReports: Array<{ message: string }> = []
+      const testVisitor = syntaxBans.create({
+        filename: "/repo/libs/harness/gates/test/runner.test.ts",
+        report: (r: { message: string }) => {
+          testReports.push(r)
+        },
+      })
+      testVisitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Cause" },
+          property: { type: "Identifier", name: "hasInterruptsOnly" },
+        },
+        parent: runPromiseExitParent,
+      })
+      expect(testReports).toHaveLength(0)
+    }
+  })
+
   it("halts execution with [CRITICAL HARNESS BLOCKER] when Ollama is required and unavailable", async () => {
     const prevRequire = process.env["HARNESS_REQUIRE_OLLAMA"]
     const prevUrl = process.env["HARNESS_OLLAMA_URL"]
@@ -2637,6 +2887,334 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       expect(failJson.violations.length).toBeGreaterThanOrEqual(1)
     } finally {
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("reads recorded spans and fails closed on corrupt, unreadable, or malformed span-trace.json (F-10)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-cli-spans-"))
+    try {
+      expect(await Effect.runPromise(readRecordedSpans(dir))).toEqual([])
+
+      const harnessDir = join(dir, ".harness")
+      mkdirSync(harnessDir, { recursive: true })
+      const spanPath = join(harnessDir, "span-trace.json")
+
+      writeFileSync(spanPath, "   \n", "utf-8")
+      expect(await Effect.runPromise(readRecordedSpans(dir))).toEqual([])
+
+      writeFileSync(spanPath, "{not-valid-json", "utf-8")
+      const parseExit = await Effect.runPromiseExit(readRecordedSpans(dir))
+      expect(Exit.isFailure(parseExit)).toBe(true)
+      if (Exit.isFailure(parseExit)) {
+        const errOpt = Cause.findErrorOption(parseExit.cause)
+        expect(Option.isSome(errOpt)).toBe(true)
+        if (Option.isSome(errOpt)) {
+          expect(errOpt.value).toBeInstanceOf(SpanTraceReadError)
+          expect(errOpt.value.reason).toBe("ParseError")
+        }
+      }
+
+      const verifyCorruptRes = await runCli(["verify"], {
+        repoRoot: dir,
+        skipSubprocessVerify: true,
+      })
+      expect(verifyCorruptRes.exitCode).toBe(1)
+      expect(verifyCorruptRes.stderr).toContain("[GATE FAILURE] verify:span-budget")
+
+      writeFileSync(spanPath, JSON.stringify({ wrong: 1 }), "utf-8")
+      const shapeExit = await Effect.runPromiseExit(readRecordedSpans(dir))
+      expect(Exit.isFailure(shapeExit)).toBe(true)
+      if (Exit.isFailure(shapeExit)) {
+        const errOpt = Cause.findErrorOption(shapeExit.cause)
+        expect(Option.isSome(errOpt)).toBe(true)
+        if (Option.isSome(errOpt)) {
+          expect(errOpt.value).toBeInstanceOf(SpanTraceReadError)
+          expect(errOpt.value.reason).toBe("InvalidShapeError")
+        }
+      }
+
+      rmSync(spanPath, { force: true })
+      mkdirSync(spanPath)
+      const readExit = await Effect.runPromiseExit(readRecordedSpans(dir))
+      expect(Exit.isFailure(readExit)).toBe(true)
+      if (Exit.isFailure(readExit)) {
+        const errOpt = Cause.findErrorOption(readExit.cause)
+        expect(Option.isSome(errOpt)).toBe(true)
+        if (Option.isSome(errOpt)) {
+          expect(errOpt.value).toBeInstanceOf(SpanTraceReadError)
+          expect(errOpt.value.reason).toBe("ReadError")
+        }
+      }
+      rmSync(spanPath, { recursive: true, force: true })
+
+      const sampleSpans = [{ spanId: "s1", name: "Sample.fn", durationMs: 1 }]
+      writeFileSync(spanPath, JSON.stringify(sampleSpans), "utf-8")
+      expect(await Effect.runPromise(readRecordedSpans(dir))).toEqual(sampleSpans)
+
+      writeFileSync(spanPath, JSON.stringify({ spans: sampleSpans }), "utf-8")
+      expect(await Effect.runPromise(readRecordedSpans(dir))).toEqual(sampleSpans)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("runs delta AST and plugin gates on empty, clean, and all repo-wide violating deltas (F-10)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-cli-delta-gates-"))
+    try {
+      const emptyRes = await Effect.runPromise(runDeltaAstAndPluginGates(dir, []))
+      expect(Option.isNone(emptyRes)).toBe(true)
+
+      const domainDir = join(dir, "libs", "sample", "domain", "src")
+      mkdirSync(domainDir, { recursive: true })
+      const cleanRel = "libs/sample/domain/src/clean.ts"
+      writeFileSync(
+        join(dir, cleanRel),
+        `import { Effect } from "effect"\nexport const ok = Effect.fn("Sample.ok")(function* () {\n  return 1\n})\n`,
+        "utf-8",
+      )
+      const cleanRes = await Effect.runPromise(runDeltaAstAndPluginGates(dir, [cleanRel]))
+      expect(Option.isNone(cleanRes)).toBe(true)
+
+      const badRel = "libs/sample/domain/src/bad.ts"
+      writeFileSync(
+        join(dir, badRel),
+        `export const bad = (x: number): string => {\n  switch (x) {\n    default:\n      return "x"\n  }\n}\n`,
+        "utf-8",
+      )
+      const badRes = await Effect.runPromise(runDeltaAstAndPluginGates(dir, [badRel]))
+      expect(Option.isSome(badRes)).toBe(true)
+      if (Option.isSome(badRes)) {
+        expect(badRes.value.exitCode).toBe(1)
+        expect(badRes.value.stderr).toContain("[GATE FAILURE] verify:ast-gates")
+      }
+
+      const harnessGatesSrc = join(dir, "libs", "harness", "gates", "src")
+      const harnessGatesTest = join(dir, "libs", "harness", "gates", "test")
+      const harnessCliSrc = join(dir, "apps", "harness-cli", "src")
+      mkdirSync(harnessGatesSrc, { recursive: true })
+      mkdirSync(harnessGatesTest, { recursive: true })
+      mkdirSync(harnessCliSrc, { recursive: true })
+
+      const dotHarnessTarget = [".har", "ness/bad.json"].join("")
+      const repoWideCases: ReadonlyArray<{
+        readonly rel: string
+        readonly content: string
+        readonly rule: string
+      }> = [
+        {
+          rel: "libs/harness/gates/src/catch-cause.ts",
+          content: `import { Cause, Effect } from "effect"\nexport const bad = Effect.void.pipe(Effect.catchCause((c) => (Cause.hasInterruptsOnly(c) ? Effect.void : Effect.fail("err"))))\n`,
+          rule: "catch-cause-interrupts-only",
+        },
+        {
+          rel: "libs/harness/gates/test/unisolated.test.ts",
+          content: `import { writeFileSync } from "node:fs"\nwriteFileSync("${dotHarnessTarget}", "{}")\n`,
+          rule: "unisolated-dot-harness-test-write",
+        },
+        {
+          rel: "libs/harness/gates/src/unsafe-cast.ts",
+          content: `export const bad = (x: unknown): number => x as ${"any"}\n`,
+          rule: "unsafe-type-cast",
+        },
+        {
+          rel: "libs/harness/gates/src/tsx-parse.ts",
+          content: `const ext = ".tsx"\nexport const bad = (src: string, parse: (lang: unknown, s: string) => unknown, Lang: { TypeScript: unknown }) => parse(Lang.TypeScript, src + ext)\n`,
+          rule: "ast-grep-tsx-grammar",
+        },
+        {
+          rel: "apps/harness-cli/src/sqlite-bad.ts",
+          content: `import { DatabaseSync } from "node:sqlite"\nexport const db = DatabaseSync\n`,
+          rule: "node-sqlite-in-infra",
+        },
+      ]
+
+      for (const tc of repoWideCases) {
+        writeFileSync(join(dir, tc.rel), tc.content, "utf-8")
+        const res = await Effect.runPromise(runDeltaAstAndPluginGates(dir, [tc.rel]))
+        expect(Option.isSome(res)).toBe(true)
+        if (Option.isSome(res)) {
+          expect(res.value.exitCode).toBe(1)
+          expect(res.value.stderr).toContain("[GATE FAILURE] verify:ast-gates")
+          expect(res.value.stderr).toContain(`[${tc.rule}]`)
+        }
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("matches exact spec tokens, formats projection errors, and rejects out-of-root overlay writes (F-10)", async () => {
+    expect(matchesExactSpecToken("implements SPEC-0001 in domain", "SPEC-0001")).toBe(true)
+    expect(matchesExactSpecToken("SPEC-0001", "SPEC-0001")).toBe(true)
+    expect(matchesExactSpecToken("SPEC-0001: title", "SPEC-0001")).toBe(true)
+    expect(matchesExactSpecToken("SPEC-00010", "SPEC-0001")).toBe(false)
+    expect(matchesExactSpecToken("MY-SPEC-0001", "SPEC-0001")).toBe(false)
+    expect(matchesExactSpecToken("SPEC-0001_v2", "SPEC-0001")).toBe(false)
+
+    expect(
+      formatProjectionError({
+        _tag: "GraphProjectorError",
+        reason: "RoundTripMismatch",
+        message: "differs",
+      }),
+    ).toBe("GraphProjectorError (RoundTripMismatch): differs")
+    expect(formatProjectionError({ _tag: "GraphProjectorError", reason: "InvalidTarget" })).toBe(
+      "GraphProjectorError (InvalidTarget)",
+    )
+    expect(formatProjectionError(new Error("plain error"))).toBe("plain error")
+    expect(formatProjectionError("raw string")).toBe("raw string")
+
+    const dir = mkdtempSync(join(tmpdir(), "harness-cli-overlays-"))
+    const outsideDir = mkdtempSync(join(tmpdir(), "harness-cli-outside-"))
+    try {
+      const decodeOverlay = Schema.decodeUnknownSync(ShadowFileOverlay)
+      const traversalRes = await Effect.runPromise(
+        persistVerifiedOverlays(dir, [
+          decodeOverlay({ targetFile: "../escape.ts", content: "export const x = 1\n" }),
+        ]),
+      )
+      expect(traversalRes.ok).toBe(false)
+      expect(traversalRes.writtenFiles).toEqual([])
+      expect(traversalRes.rejectedFiles[0]?.reason).toContain("escapes workspace root")
+
+      const linkPath = join(dir, "libs", "escape-link")
+      mkdirSync(join(dir, "libs"), { recursive: true })
+      symlinkSync(outsideDir, linkPath)
+      const symlinkRes = await Effect.runPromise(
+        persistVerifiedOverlays(dir, [
+          decodeOverlay({
+            targetFile: "libs/escape-link/leak.ts",
+            content: "export const leak = 1\n",
+          }),
+        ]),
+      )
+      expect(symlinkRes.ok).toBe(false)
+      expect(symlinkRes.writtenFiles).toEqual([])
+      expect(symlinkRes.rejectedFiles[0]?.reason).toContain("symlink escapes workspace root")
+
+      const validRel = "libs/sample/domain/src/overlay.ts"
+      const validRes = await Effect.runPromise(
+        persistVerifiedOverlays(dir, [
+          decodeOverlay({ targetFile: validRel, content: "export const clean = 1\n" }),
+        ]),
+      )
+      expect(validRes.ok).toBe(true)
+      expect(validRes.writtenFiles).toEqual([validRel])
+      expect(readFileSync(join(dir, validRel), "utf-8")).toBe("export const clean = 1\n")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(outsideDir, { recursive: true, force: true })
+    }
+  })
+
+  it("runs handleMutate cleanly with --scope=nonexistent-scope returning totalMutants: 0 (F-10)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-cli-mutate-"))
+    try {
+      const res = await runCli(["mutate", "--scope=nonexistent-scope"], { repoRoot: dir })
+      expect(res.exitCode).toBe(0)
+      const payload = JSON.parse(res.stdout) as { readonly totalMutants: number }
+      expect(payload.totalMutants).toBe(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("runs handleMutate on a non-empty domain scope and fails when mutants survive", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-cli-mutate-demo-"))
+    try {
+      const domainDir = join(dir, "libs", "demo", "domain", "src")
+      mkdirSync(domainDir, { recursive: true })
+      writeFileSync(
+        join(domainDir, "decider.ts"),
+        `export const decideCount = (count: number): boolean => {\n  if (count >= 1) {\n    return true\n  }\n  return false\n}\n`,
+        "utf-8",
+      )
+      const res = await runCli(["mutate", "--scope=demo"], { repoRoot: dir })
+      expect(res.exitCode).toBe(1)
+      const payload = JSON.parse(res.stdout) as {
+        readonly passed: boolean
+        readonly totalMutants: number
+        readonly survivedCount: number
+      }
+      expect(payload.passed).toBe(false)
+      expect(payload.totalMutants).toBeGreaterThan(0)
+      expect(payload.survivedCount).toBe(payload.totalMutants)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("falls through to /readyz readiness poll when omnigraph setup throws before spawn (F-2, F-10)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-cli-omnigraph-readyz-"))
+    const homeDir = mkdtempSync(join(tmpdir(), "harness-cli-home-"))
+    let readyzCalls = 0
+    const server = http.createServer((req, res) => {
+      if (req.url === "/readyz") {
+        readyzCalls += 1
+        if (readyzCalls === 1) {
+          res.writeHead(503)
+          res.end()
+          return
+        }
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          "Omnigraph-Http-Api": "0.14",
+        })
+        res.end(JSON.stringify({ ready: true, ready_graph_count: 1 }))
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    })
+    const prevHome = process.env["HOME"]
+    const prevUrl = process.env["OMNIGRAPH_URL"]
+    try {
+      await Effect.runPromise(
+        Effect.callback<void>((resume) => {
+          server.listen(0, "127.0.0.1", () => resume(Effect.void))
+        }),
+      )
+      const address = server.address()
+      const port = typeof address === "object" && address !== null ? address.port : 0
+      expect(port).toBeGreaterThan(0)
+
+      const configDir = join(dir, "libs", "harness", "graph")
+      mkdirSync(join(configDir, "queries"), { recursive: true })
+      writeFileSync(join(configDir, "cluster.yaml"), "name: test\n", "utf-8")
+      writeFileSync(join(configDir, "schema.pg"), "", "utf-8")
+      writeFileSync(join(configDir, "queries", "harness.gq"), "", "utf-8")
+
+      const clusterRootDir = join(dir, ".harness", "omnigraph-cluster")
+      mkdirSync(clusterRootDir, { recursive: true })
+      writeFileSync(join(clusterRootDir, ".config-stamp"), "name: test\n\n---\n\n---\n", "utf-8")
+
+      const localBinDir = join(homeDir, ".local", "bin")
+      mkdirSync(localBinDir, { recursive: true })
+      const omnigraphStub = join(localBinDir, "omnigraph")
+      const omnigraphServerStub = join(localBinDir, "omnigraph-server")
+      writeFileSync(omnigraphStub, "#!/usr/bin/env bash\nexit 1\n", "utf-8")
+      writeFileSync(omnigraphServerStub, "#!/usr/bin/env bash\nexit 0\n", "utf-8")
+      chmodSync(omnigraphStub, 0o755)
+      chmodSync(omnigraphServerStub, 0o755)
+
+      process.env["HOME"] = homeDir
+      process.env["OMNIGRAPH_URL"] = `http://127.0.0.1:${port}`
+
+      const ready = await Effect.runPromise(ensureLocalOmnigraphReady(dir))
+      expect(ready).toBe(true)
+      expect(readyzCalls).toBeGreaterThanOrEqual(2)
+    } finally {
+      if (prevHome === undefined) delete process.env["HOME"]
+      else process.env["HOME"] = prevHome
+      if (prevUrl === undefined) delete process.env["OMNIGRAPH_URL"]
+      else process.env["OMNIGRAPH_URL"] = prevUrl
+      await Effect.runPromise(
+        Effect.callback<void>((resume) => {
+          server.close(() => resume(Effect.void))
+        }),
+      )
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(homeDir, { recursive: true, force: true })
     }
   })
 })

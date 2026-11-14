@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Effect } from "effect"
+import { Cause, Effect, Schema } from "effect"
 import { match } from "ts-pattern"
 import { checkSpanBudgets, type SpanSample } from "@harness/gates"
 import { runWithTestTracer, type IndexedEffectFn, type RecordedSpanEvent } from "@harness/ingest"
@@ -47,6 +47,7 @@ describe("HarnessMcp.dispatchTool (SPEC-0011 §4)", () => {
     const dupDescriptor: McpToolPluginDescriptor = {
       name: McpToolName.make("harness_resolve"),
       description: "Duplicate tool descriptor",
+      inputSchema: Schema.Struct({}),
       execute: () => Effect.succeed(null),
     }
     expect(() => makeMcpToolRegistryLayer([dupDescriptor, dupDescriptor])).toThrow(
@@ -99,6 +100,7 @@ describe("HarnessMcp.dispatchTool (SPEC-0011 §4)", () => {
         const customDescriptor: McpToolPluginDescriptor = {
           name: McpToolName.make("custom_tool"),
           description: "Custom test tool",
+          inputSchema: Schema.Record(Schema.String, Schema.Unknown),
           execute: (args) => Effect.succeed({ handled: true, payload: args }),
         }
 
@@ -156,8 +158,10 @@ describe("HarnessMcp.dispatchTool (SPEC-0011 §4)", () => {
             match(errOpt)
               .with({ _tag: "Some" }, ({ value }) => {
                 expect(value).toBeInstanceOf(UnknownToolError)
-                expect(value._tag).toBe("UnknownToolError")
-                expect(value.toolName).toBe("unknown_nonexistent_tool")
+                expect(value).toMatchObject({
+                  _tag: "UnknownToolError",
+                  toolName: "unknown_nonexistent_tool",
+                })
               })
               .with({ _tag: "None" }, () => {
                 expect.fail("Expected UnknownToolError in failure cause")

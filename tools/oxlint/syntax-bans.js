@@ -63,8 +63,8 @@ const DISCRIMINANT_CALLBACK_METHODS = new Set(["filter", "find", "some", "every"
 
 const DISCRIMINANT_PROP_NAMES = new Set(["_tag", "kind", "status", "verdict", "role", "state"])
 
-function isInternalHarnessFile(filename) {
-  return /(^|\/)(libs\/harness|apps\/harness-[^/]+)\//.test(filename)
+function isTierOrSampleAppFile(filename) {
+  return /(^|\/)(libs\/[^/]+\/(contract|domain|core|service|infra)|apps\/sample(?:-web)?)\//.test(filename)
 }
 
 function isDiscriminantMemberAccess(node) {
@@ -781,6 +781,30 @@ function isImpreciseFailureAssert(node) {
   return false
 }
 
+function isTestFilePath(filename) {
+  return (
+    filename.endsWith(".test.ts") ||
+    filename.endsWith(".test.tsx") ||
+    filename.endsWith(".spec.ts") ||
+    filename.endsWith(".spec.tsx")
+  )
+}
+
+function getCalleeName(callee) {
+  if (callee == null) return ""
+  if (callee.type === "Identifier") return callee.name
+  if (
+    callee.type === "MemberExpression" &&
+    callee.computed !== true &&
+    callee.property != null &&
+    callee.property.type === "Identifier"
+  ) {
+    const objKey = getMemberObjectChainKey(callee.object)
+    return objKey != null ? `${objKey}.${callee.property.name}` : `.${callee.property.name}`
+  }
+  return ""
+}
+
 function getPropertyKeyName(prop) {
   if (prop == null || prop.key == null) return null
   if (prop.key.type === "Identifier") return prop.key.name
@@ -1326,7 +1350,6 @@ const syntaxBans = {
 
     function checkTypeAliasDeclaration(decl, filename) {
       if (decl == null || decl.type !== "TSTypeAliasDeclaration") return
-      if (isInternalHarnessFile(filename)) return
       if (!/libs\/[^/]+\/(contract|domain|core|service|infra)\/src\//.test(filename)) return
       const typeName = decl.id != null ? decl.id.name : null
       if (typeName == null) return
@@ -1417,7 +1440,6 @@ const syntaxBans = {
 
     function checkContextServiceClass(classNode, filename) {
       if (classNode == null || classNode.superClass == null) return
-      if (isInternalHarnessFile(filename)) return
 
       // Also check Schema.TaggedError / Schema.TaggedClass / Schema.Class superClass field objects
       if (classNode.superClass.type === "CallExpression") {
@@ -1714,7 +1736,6 @@ const syntaxBans = {
           }
         }
         if (
-          !isInternalHarnessFile(filename) &&
           node.source != null &&
           typeof node.source.value === "string"
         ) {
@@ -1755,7 +1776,6 @@ const syntaxBans = {
       },
       ImportExpression(node) {
         const filename = getNormalizedFilename()
-        if (isInternalHarnessFile(filename) || filename.includes("/libs/harness/")) return
         if (/(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename)) {
           const sourceVal =
             node.source != null &&
@@ -1774,7 +1794,6 @@ const syntaxBans = {
       },
       TaggedTemplateExpression(node) {
         const filename = getNormalizedFilename()
-        if (isInternalHarnessFile(filename) || filename.includes("/libs/harness/")) return
         if (!/libs\/[^/]+\/infra\/src\//.test(filename)) return
         const tag = node.tag
         const isSqlTag =
@@ -1808,7 +1827,7 @@ const syntaxBans = {
             migrationRecordVars.set(node.id.name, node.init)
             if (
               /libs\/[^/]+\/infra\/src\//.test(getNormalizedFilename()) &&
-              !getNormalizedFilename().includes("/libs/harness/") &&
+              !(/(?:^|\/)libs\/harness\//.test(getNormalizedFilename())) &&
               hasSqliteMigratorImport &&
               /[Mm]igrations/.test(node.id.name)
             ) {
@@ -1822,7 +1841,6 @@ const syntaxBans = {
           recordSchemaDeclarator(node)
           const filename = getNormalizedFilename()
           if (
-            !isInternalHarnessFile(filename) &&
             /libs\/[^/]+\/(contract|domain|core)\/src\//.test(filename) &&
             node.init != null &&
             QUANTITY_OR_VERSION_PROP_REGEX.test(node.id.name)
@@ -1849,7 +1867,6 @@ const syntaxBans = {
       TSAsExpression(node) {
         checkAsOrTypeAssertion(context, node)
         const filename = getNormalizedFilename()
-        if (isInternalHarnessFile(filename)) return
         if (!/libs\/[^/]+\/(contract|domain|core|service|infra)\/src\//.test(filename)) return
         if (containsBrandTypeReference(node.typeAnnotation, brandedTypeNames)) {
           reportOnce(
@@ -1874,14 +1891,11 @@ const syntaxBans = {
         context.report({ node, message: asyncMessage })
       },
       SwitchStatement(node) {
-        const filename = getNormalizedFilename()
-        if (!isInternalHarnessFile(filename)) {
-          context.report({ node, message: switchBanMessage })
-        }
+        context.report({ node, message: switchBanMessage })
       },
       IfStatement(node) {
         const filename = getNormalizedFilename()
-        if (isInternalHarnessFile(filename)) return
+        if (!isTierOrSampleAppFile(filename)) return
         if (
           isDiscriminantTestExpression(node.test) ||
           isAliasedDiscriminantTest(node.test, discriminantAliasNames)
@@ -1895,7 +1909,7 @@ const syntaxBans = {
       },
       ConditionalExpression(node) {
         const filename = getNormalizedFilename()
-        if (isInternalHarnessFile(filename)) return
+        if (!isTierOrSampleAppFile(filename)) return
         if (
           isDiscriminantTestExpression(node.test) ||
           isAliasedDiscriminantTest(node.test, discriminantAliasNames)
@@ -1934,7 +1948,7 @@ const syntaxBans = {
       },
       CallExpression(node) {
         const filename = getNormalizedFilename()
-        if (!isInternalHarnessFile(filename)) {
+        if (isTierOrSampleAppFile(filename)) {
           if (
             node.callee != null &&
             node.callee.type === "MemberExpression" &&
@@ -1953,25 +1967,25 @@ const syntaxBans = {
               context.report({ node, message: discriminantIfBanMessage })
             }
           }
-
-          if (
-            /libs\/[^/]+\/(contract|domain|core|service|infra)\/src\//.test(filename) &&
-            isSchemaBrandCall(node)
-          ) {
-            const brandKey = node.arguments[0].value
-            const firstNode = declaredBrandKeys.get(brandKey)
-            if (firstNode != null && firstNode !== node) {
-              reportOnce(
-                node,
-                `Do not declare duplicate Schema.brand('${brandKey}') across multiple schemas — each brand key must have a single canonical constructor schema so validation invariants cannot be weakened. Compose wire or parameter schemas into the canonical branded schema using Schema.decodeTo(<BrandedSchema>) (e.g. Schema.FiniteFromString.pipe(Schema.decodeTo(${brandKey}))).`,
-              )
-            } else {
-              declaredBrandKeys.set(brandKey, node)
-            }
-          }
-
-          checkSchemaFieldObjects(node, filename)
         }
+
+        if (
+          /libs\/[^/]+\/(contract|domain|core|service|infra)\/src\//.test(filename) &&
+          isSchemaBrandCall(node)
+        ) {
+          const brandKey = node.arguments[0].value
+          const firstNode = declaredBrandKeys.get(brandKey)
+          if (firstNode != null && firstNode !== node) {
+            reportOnce(
+              node,
+              `Do not declare duplicate Schema.brand('${brandKey}') across multiple schemas — each brand key must have a single canonical constructor schema so validation invariants cannot be weakened. Compose wire or parameter schemas into the canonical branded schema using Schema.decodeTo(<BrandedSchema>) (e.g. Schema.FiniteFromString.pipe(Schema.decodeTo(${brandKey}))).`,
+            )
+          } else {
+            declaredBrandKeys.set(brandKey, node)
+          }
+        }
+
+        checkSchemaFieldObjects(node, filename)
 
         if (
           node.callee != null &&
@@ -2040,8 +2054,6 @@ const syntaxBans = {
           }
         }
         if (
-          !isInternalHarnessFile(filename) &&
-          !filename.includes("/libs/harness/") &&
           /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
           isIdentifier(node.callee, "require") &&
           Array.isArray(node.arguments) &&
@@ -2062,7 +2074,7 @@ const syntaxBans = {
         }
         if (
           /libs\/[^/]+\/infra\/src\//.test(filename) &&
-          !filename.includes("/libs/harness/") &&
+          !(/(?:^|\/)libs\/harness\//.test(filename)) &&
           node.callee != null &&
           node.callee.type === "MemberExpression" &&
           node.callee.computed !== true &&
@@ -2075,10 +2087,112 @@ const syntaxBans = {
           }
           validateMigrationRecordObject(node.arguments[0])
         }
+
+        const isTest = isTestFilePath(filename)
+        const calleeName = getCalleeName(node.callee)
+
+        if (!isTest && calleeName === "Cause.hasInterruptsOnly") {
+          let anc = node.parent
+          let hasUnsafeAncestor = false
+          while (anc != null) {
+            if (anc.type === "CallExpression") {
+              const ancCallee = getCalleeName(anc.callee)
+              if (
+                ancCallee === "Effect.catchCause" ||
+                ancCallee.endsWith(".catchCause") ||
+                ancCallee === "catchCause" ||
+                ancCallee === "Effect.runPromiseExit" ||
+                ancCallee.endsWith(".runPromiseExit") ||
+                ancCallee === "Effect.runSyncExit" ||
+                ancCallee.endsWith(".runSyncExit")
+              ) {
+                hasUnsafeAncestor = true
+                break
+              }
+            }
+            anc = anc.parent
+          }
+          if (hasUnsafeAncestor) {
+            context.report({
+              node,
+              message:
+                "Cause.hasInterruptsOnly(cause) inside catchCause/runPromiseExit/runSyncExit is banned — use Cause.hasInterrupts(cause) and !Cause.hasFails(cause) && !Cause.hasDies(cause) so composite Fail+Interrupt causes are not misclassified.",
+            })
+          }
+        }
+
+        if (!isTest && (calleeName === "Effect.catchDefect" || calleeName.endsWith(".catchDefect"))) {
+          const handlerArg = Array.isArray(node.arguments)
+            ? node.arguments.length >= 2
+              ? node.arguments[1]
+              : node.arguments[0]
+            : undefined
+          if (handlerArg != null) {
+            const argText = getNodeSourceText(context, handlerArg)
+            const hasReportingOrRethrow =
+              argText.includes("stderr.write") ||
+              argText.includes("logWarning") ||
+              argText.includes("logError") ||
+              argText.includes("Effect.log") ||
+              argText.includes("console.error") ||
+              argText.includes("console.warn") ||
+              argText.includes("Effect.fail") ||
+              argText.includes("Effect.die") ||
+              argText.includes("makeLspExceptionReport") ||
+              argText.includes("ExceptionReport")
+            if (!hasReportingOrRethrow) {
+              context.report({
+                node,
+                message:
+                  "Effect.catchDefect handler silently swallows runtime defects without logging or reporting — log via Effect.logWarning / process.stderr.write or re-fail.",
+              })
+            }
+          }
+        }
+
+        if (
+          !isTest &&
+          (calleeName === "chmodSync" ||
+            calleeName.endsWith(".chmodSync") ||
+            calleeName === "fchmodSync" ||
+            calleeName.endsWith(".fchmodSync"))
+        ) {
+          let anc = node.parent
+          let isIgnored = false
+          for (let depth = 0; depth < 8 && anc != null; depth += 1) {
+            if (anc.type === "CallExpression") {
+              const ancCallee = getCalleeName(anc.callee)
+              if (
+                ancCallee === "Effect.ignore" ||
+                ancCallee === "Effect.orElseSucceed"
+              ) {
+                isIgnored = true
+                break
+              }
+              if (ancCallee === "pipe" || ancCallee.endsWith(".pipe")) {
+                const pipeText = getNodeSourceText(context, anc)
+                if (
+                  pipeText.includes("Effect.ignore") ||
+                  pipeText.includes("Effect.orElseSucceed")
+                ) {
+                  isIgnored = true
+                  break
+                }
+              }
+            }
+            anc = anc.parent
+          }
+          if (isIgnored) {
+            context.report({
+              node,
+              message:
+                "Ignoring chmodSync/fchmodSync failure with Effect.ignore or Effect.orElseSucceed is banned — permission hardening must fail closed on error.",
+            })
+          }
+        }
       },
       ExportNamedDeclaration(node) {
         const filename = getNormalizedFilename()
-        if (isInternalHarnessFile(filename)) return
         if (!/libs\/[^/]+\/(contract|domain|core|service|infra)\/src\//.test(filename)) return
         if (node.declaration == null) return
 
@@ -2239,7 +2353,6 @@ const testIntegrity = {
       ImportDeclaration(node) {
         const filename = getNormalizedFilename()
         if (
-          !isInternalHarnessFile(filename) &&
           node.source != null &&
           typeof node.source.value === "string"
         ) {
@@ -2260,7 +2373,6 @@ const testIntegrity = {
       ImportExpression(node) {
         const filename = getNormalizedFilename()
         if (
-          !isInternalHarnessFile(filename) &&
           node.source != null &&
           typeof node.source.value === "string"
         ) {
@@ -2308,7 +2420,7 @@ const testIntegrity = {
       },
       IfStatement(node) {
         const filename = getNormalizedFilename()
-        if (isInternalHarnessFile(filename)) return
+        if (!isTierOrSampleAppFile(filename)) return
         if (
           isDiscriminantTestExpression(node.test) ||
           isAliasedDiscriminantTest(node.test, discriminantAliasNames)
@@ -2318,7 +2430,7 @@ const testIntegrity = {
       },
       ConditionalExpression(node) {
         const filename = getNormalizedFilename()
-        if (isInternalHarnessFile(filename)) return
+        if (!isTierOrSampleAppFile(filename)) return
         if (
           isDiscriminantTestExpression(node.test) ||
           isAliasedDiscriminantTest(node.test, discriminantAliasNames)
@@ -2332,7 +2444,6 @@ const testIntegrity = {
         }
         const filename = getNormalizedFilename()
         if (
-          !isInternalHarnessFile(filename) &&
           /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
           isIdentifier(node.callee, "require") &&
           Array.isArray(node.arguments) &&
@@ -2354,7 +2465,7 @@ const testIntegrity = {
             })
           }
         }
-        if (!isInternalHarnessFile(filename)) {
+        if (isTierOrSampleAppFile(filename)) {
           if (isImpreciseFailureAssert(node)) {
             context.report({ node, message: impreciseFailureAssertMessage })
           }

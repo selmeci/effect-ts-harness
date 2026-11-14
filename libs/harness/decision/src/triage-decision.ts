@@ -171,6 +171,46 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     },
   },
   {
+    id: "silent-catch-defect",
+    pattern: /silent-catch-defect|silently swallows runtime defects without logging/,
+    kind: "mechanical",
+    hint: "Effect.catchDefect handler silently swallows runtime defects without logging or reporting — log via Effect.logWarning / process.stderr.write or re-fail with Effect.fail / Effect.die.",
+    result: {
+      kind: "mechanical",
+      hint: "Effect.catchDefect handler silently swallows runtime defects without logging or reporting — log via Effect.logWarning / process.stderr.write or re-fail with Effect.fail / Effect.die.",
+    },
+  },
+  {
+    id: "ignored-chmod-permission",
+    pattern: /ignored-chmod-permission|Ignoring chmodSync\/fchmodSync failure/,
+    kind: "mechanical",
+    hint: "Ignoring chmodSync/fchmodSync permission errors with Effect.ignore or Effect.orElseSucceed is banned — permission hardening must fail closed on error.",
+    result: {
+      kind: "mechanical",
+      hint: "Ignoring chmodSync/fchmodSync permission errors with Effect.ignore or Effect.orElseSucceed is banned — permission hardening must fail closed on error.",
+    },
+  },
+  {
+    id: "project-path-escape-error",
+    pattern: /ProjectPathEscapeError/,
+    kind: "mechanical",
+    hint: "ProjectPathEscapeError: requested project path escapes the repository root boundary — pass a canonical relative path or subdirectory inside repoRoot.",
+    result: {
+      kind: "mechanical",
+      hint: "ProjectPathEscapeError: requested project path escapes the repository root boundary — pass a canonical relative path or subdirectory inside repoRoot.",
+    },
+  },
+  {
+    id: "daemon-socket-chmod-error",
+    pattern: /DaemonSocketChmodError/,
+    kind: "mechanical",
+    hint: "DaemonSocketChmodError: failed to set 0o600 permissions on the Unix socket — verify socket directory ownership/permissions and fail closed instead of ignoring chmodSync errors.",
+    result: {
+      kind: "mechanical",
+      hint: "DaemonSocketChmodError: failed to set 0o600 permissions on the Unix socket — verify socket directory ownership/permissions and fail closed instead of ignoring chmodSync errors.",
+    },
+  },
+  {
     pattern: "Effect.ignore",
     result: {
       kind: "mechanical",
@@ -363,11 +403,13 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
 ]
 
 export const triageFailure = Effect.fn("Harness.triageFailure")(function* (failureOutput: string) {
+  const strippedOutput = failureOutput.replace(/^\s*[✓✔]\s+.*$/gm, "").trim()
+  const targetOutput = strippedOutput.length > 0 ? strippedOutput : failureOutput
   for (const rule of DETERMINISTIC_TRIAGE_RULES) {
     const matches =
       typeof rule.pattern === "string"
-        ? failureOutput.includes(rule.pattern)
-        : rule.pattern.test(failureOutput)
+        ? targetOutput.includes(rule.pattern)
+        : rule.pattern.test(targetOutput)
     if (matches) {
       return rule.result
     }

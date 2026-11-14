@@ -33,7 +33,25 @@ export const GateRuleVersion = Schema.NonEmptyString.pipe(Schema.brand("GateRule
 export type GateRuleVersion = typeof GateRuleVersion.Type
 export const AstRuleVersion = GateRuleVersion
 export type AstRuleVersion = typeof AstRuleVersion.Type
-export const HARNESS_GATE_RULE_VERSION: GateRuleVersion = GateRuleVersion.make("ast-gates-v3")
+export const HARNESS_GATE_RULE_VERSION: GateRuleVersion = GateRuleVersion.make("ast-gates-v4")
+
+const REPO_WIDE_AST_RULES = new Set<string>([
+  "effect-fn-dummy-void",
+  "switch-statement",
+  "match-run-statement",
+  "non-exhaustive-union-match",
+  "catch-cause-interrupts-only",
+  "unisolated-dot-harness-test-write",
+  "unsafe-type-cast",
+  "ast-grep-tsx-grammar",
+  "node-sqlite-in-infra",
+  "silent-catch-defect",
+  "ignored-chmod-permission",
+])
+
+export const isRepoWideAstRule = (rule: string, message: string): boolean =>
+  REPO_WIDE_AST_RULES.has(rule) ||
+  (rule === "discriminant-branching" && message.startsWith("Switch statement"))
 
 export const AstSourceFilePath = Schema.NonEmptyString.pipe(Schema.brand("AstSourceFilePath"))
 export type AstSourceFilePath = typeof AstSourceFilePath.Type
@@ -187,6 +205,73 @@ const isDiscriminantCondition = (cond: ts.Expression, sourceFile: ts.SourceFile)
   return /\.(?:_tag|kind|status)\s*(?:===|!==|==|!=)\s*["'`]/.test(cond.getText(sourceFile))
 }
 
+const CATCH_DEFECT_REPORTING_TOKENS = [
+  "stderr.write", "logWarning", "logError", "Effect.log", "console.error",
+  "console.warn", "Effect.fail", "Effect.die", "makeLspExceptionReport", "ExceptionReport",
+] as const
+
+const isCatchCauseOrExitRunCallee = (c: string): boolean =>
+  c === "Effect.catchCause" || c.endsWith(".catchCause") || c === "catchCause" ||
+  c === "Effect.runPromiseExit" || c.endsWith(".runPromiseExit") ||
+  c === "Effect.runSyncExit" || c.endsWith(".runSyncExit")
+
+const callOrReceiverMatchesExitOrCatch = (call: ts.CallExpression, sf: ts.SourceFile): boolean => {
+  let curr: ts.CallExpression | undefined = call
+  while (curr !== undefined) {
+    const callee = curr.expression.getText(sf)
+    if (isCatchCauseOrExitRunCallee(callee)) return true
+    if (callee === "match" && curr.arguments.some((a) => ts.isCallExpression(a) && isCatchCauseOrExitRunCallee(a.expression.getText(sf)))) return true
+    curr = ts.isPropertyAccessExpression(curr.expression) && ts.isCallExpression(curr.expression.expression) ? curr.expression.expression : undefined
+  }
+  return false
+}
+
+export const isCatchCauseInterruptsOnlyCall = (node: ts.CallExpression, sf: ts.SourceFile): boolean => {
+  if (node.expression.getText(sf) !== "Cause.hasInterruptsOnly") return false
+  let anc: ts.Node | undefined = node.parent
+  let crossedFn = false
+  const nodeStart = node.getStart(sf)
+  while (anc !== undefined) {
+    if (ts.isCallExpression(anc) && callOrReceiverMatchesExitOrCatch(anc, sf)) return true
+    if (!crossedFn && (ts.isBlock(anc) || ts.isSourceFile(anc))) {
+      for (const stmt of anc.statements) {
+        if (stmt.getStart(sf) >= nodeStart) break
+        if (/\b(?:Effect\.)?(?:runSyncExit|runPromiseExit)\s*\(/.test(stmt.getText(sf))) return true
+      }
+    }
+    if (ts.isFunctionLike(anc)) crossedFn = true
+    anc = anc.parent
+  }
+  return false
+}
+
+export const isSilentCatchDefectCall = (node: ts.CallExpression, sf: ts.SourceFile): boolean => {
+  const callee = node.expression.getText(sf)
+  if (callee !== "Effect.catchDefect" && !callee.endsWith(".catchDefect")) return false
+  const cb = node.arguments.length >= 2 ? node.arguments[1] : node.arguments[0]
+  if (cb === undefined) return false
+  const cbText = cb.getText(sf)
+  return !CATCH_DEFECT_REPORTING_TOKENS.some((tok) => cbText.includes(tok))
+}
+
+export const isIgnoredChmodPermissionCall = (node: ts.CallExpression, sf: ts.SourceFile): boolean => {
+  const callee = node.expression.getText(sf)
+  if (callee !== "chmodSync" && !callee.endsWith(".chmodSync") && callee !== "fchmodSync" && !callee.endsWith(".fchmodSync")) return false
+  let anc: ts.Node | undefined = node.parent
+  let callDepth = 0
+  while (anc !== undefined && callDepth < 6) {
+    if (ts.isFunctionDeclaration(anc) || ts.isMethodDeclaration(anc)) break
+    if (ts.isCallExpression(anc)) {
+      callDepth += 1
+      const ancCallee = anc.expression.getText(sf)
+      if (ancCallee === "Effect.ignore" || ancCallee === "Effect.orElseSucceed" || ancCallee.endsWith(".ignore") || ancCallee.endsWith(".orElseSucceed")) return true
+      if (ancCallee.endsWith(".pipe") && anc.arguments.some((a) => { const t = a.getText(sf); return t.includes("Effect.ignore") || t.includes("Effect.orElseSucceed") })) return true
+    }
+    anc = anc.parent
+  }
+  return false
+}
+
 export const visitSourceFileSinglePass = (
   sourceFile: ts.SourceFile,
   filePathOrRelPath: string | AstSourceFilePath,
@@ -194,17 +279,21 @@ export const visitSourceFileSinglePass = (
   _contentOrPackageTag?: string | AstGatePackageTag,
 ): ReadonlyArray<GateViolation> => {
   const filePath = AstSourceFilePath.make(String(filePathOrRelPath))
+  const normalizedFilePath = filePath.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "")
   const packageTag =
     packageTagOrContent !== undefined && isAstGatePackageTag(packageTagOrContent)
       ? AstGatePackageTag.make(packageTagOrContent)
       : _contentOrPackageTag !== undefined && isAstGatePackageTag(_contentOrPackageTag)
         ? AstGatePackageTag.make(_contentOrPackageTag)
-        : inferPackageTagFromPath(filePath)
+        : inferPackageTagFromPath(normalizedFilePath)
 
   const violations: Array<GateViolation> = []
-  const normalizedFilePath = filePath.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "")
   const hasParentTraversal = normalizedFilePath.split("/").includes("..")
-  const isTestFile = filePath.endsWith(".test.ts") || filePath.endsWith(".spec.ts")
+  const isTestFile =
+    normalizedFilePath.endsWith(".test.ts") ||
+    normalizedFilePath.endsWith(".test.tsx") ||
+    normalizedFilePath.endsWith(".spec.ts") ||
+    normalizedFilePath.endsWith(".spec.tsx")
   const isHarnessInternal =
     !hasParentTraversal &&
     (normalizedFilePath.startsWith("libs/harness/") ||
@@ -214,7 +303,12 @@ export const visitSourceFileSinglePass = (
   for (const stmt of sourceFile.statements) {
     if (ts.isImportDeclaration(stmt) && ts.isStringLiteral(stmt.moduleSpecifier)) {
       const modText = stmt.moduleSpecifier.text
-      if (modText.includes("SqliteMigrator") || modText.includes("Migrator")) {
+      const clauseText = stmt.importClause?.getText(sourceFile) ?? ""
+      if (
+        modText.includes("SqliteMigrator") ||
+        modText.includes("Migrator") ||
+        /\b(?:SqliteMigrator|Migrator)\b/.test(clauseText)
+      ) {
         hasMigratorImport = true
       }
     }
@@ -252,7 +346,6 @@ export const visitSourceFileSinglePass = (
       const spec = node.moduleSpecifier.text
       if (
         (spec === "node:sqlite" || spec === "sqlite" || spec === "better-sqlite3") &&
-        !isHarnessInternal &&
         (packageTag === "infra" || packageTag === "app")
       ) {
         pushViolation(
@@ -264,7 +357,6 @@ export const visitSourceFileSinglePass = (
       }
       if (
         !isTestFile &&
-        !isHarnessInternal &&
         (packageTag === "domain" || packageTag === "contract") &&
         isImpureDomainSpecifier(spec)
       ) {
@@ -359,7 +451,6 @@ export const visitSourceFileSinglePass = (
     if (
       ts.isPropertyAccessExpression(node) &&
       !isTestFile &&
-      !isHarnessInternal &&
       packageTag === "domain" &&
       ts.isIdentifier(node.expression) &&
       node.expression.text === "Effect" &&
@@ -412,6 +503,8 @@ export const visitSourceFileSinglePass = (
         !isTestFile &&
         !isHarnessInternal &&
         packageTag !== "app" &&
+        // libs/es/infra/src/memory.ts bridges the synchronous @cloudflare/workers-types SqlStorage interface to workerd
+        normalizedFilePath !== "libs/es/infra/src/memory.ts" &&
         (calleeText === "Effect.runSync" ||
           calleeText === "Effect.runPromise" ||
           calleeText === "Effect.runFork")
@@ -424,31 +517,31 @@ export const visitSourceFileSinglePass = (
         )
       }
 
-      if (!isTestFile && calleeText === "Cause.hasInterruptsOnly") {
-        let isInsideCatchCause = false
-        let anc: ts.Node | undefined = node.parent
-        while (anc !== undefined) {
-          if (ts.isCallExpression(anc)) {
-            const ancCallee = anc.expression.getText(sourceFile)
-            if (
-              ancCallee === "Effect.catchCause" ||
-              ancCallee.endsWith(".catchCause") ||
-              ancCallee === "catchCause"
-            ) {
-              isInsideCatchCause = true
-              break
-            }
-          }
-          anc = anc.parent
-        }
-        if (isInsideCatchCause) {
-          pushViolation(
-            catEffectLaws,
-            "catch-cause-interrupts-only",
-            "Cause.hasInterruptsOnly(cause) inside Effect.catchCause swallows fiber interruption on composite causes (Fail + Interrupt). Use Cause.hasInterrupts(cause) instead.",
-            node,
-          )
-        }
+      if (!isTestFile && isCatchCauseInterruptsOnlyCall(node, sourceFile)) {
+        pushViolation(
+          catEffectLaws,
+          "catch-cause-interrupts-only",
+          "Cause.hasInterruptsOnly(cause) inside Effect.catchCause / Exit inspection swallows fiber interruption on composite causes (Fail + Interrupt). Use Cause.hasInterrupts(cause) instead.",
+          node,
+        )
+      }
+
+      if (!isTestFile && isSilentCatchDefectCall(node, sourceFile)) {
+        pushViolation(
+          catEffectLaws,
+          "silent-catch-defect",
+          `Effect.catchDefect handler in '${filePath}' silently swallows runtime defects without logging or reporting — log via Effect.logWarning / process.stderr.write or re-fail.`,
+          node,
+        )
+      }
+
+      if (!isTestFile && isIgnoredChmodPermissionCall(node, sourceFile)) {
+        pushViolation(
+          catSyntaxBans,
+          "ignored-chmod-permission",
+          `Ignoring chmodSync/fchmodSync failure with Effect.ignore or Effect.orElseSucceed in '${filePath}' is banned — permission hardening must fail closed on error.`,
+          node,
+        )
       }
 
       if (
@@ -522,7 +615,6 @@ export const visitSourceFileSinglePass = (
         if (SUSPICIOUS_SQL_DDL_REGEX.test(templateText)) {
           if (
             packageTag === "infra" &&
-            !isHarnessInternal &&
             (!hasMigratorImport || !isInsideMigrationsRecord(node, sourceFile))
           ) {
             pushViolation(

@@ -33,7 +33,8 @@ const formatErrorCause = (cause: unknown): ErrorMessage => {
     return ErrorMessage.make(trimmed.length > 0 ? trimmed : cause.name || "Error")
   }
   if (typeof cause === "object" && cause !== null) {
-    const tag = "_tag" in cause && typeof cause._tag === "string" ? cause._tag : undefined
+    const rawTag = Reflect.get(cause, "_tag")
+    const tag = typeof rawTag === "string" ? rawTag : undefined
     const reason =
       "reason" in cause && typeof cause.reason === "string"
         ? cause.reason

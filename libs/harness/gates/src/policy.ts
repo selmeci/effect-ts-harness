@@ -438,7 +438,10 @@ export const classifyCommand = (command: string): GuardVerdict => {
     return "deny"
   }
   const view = toCommandView(command)
-  if (DENYLIST.some((entry) => containsToken(view.argv, entry.token))) {
+  if (
+    DENYLIST.some((entry) => containsToken(view.argv, entry.token)) ||
+    /\bgit\s+(?:\S+\s+)*push\b.*(?:\s|^)(?:--force|-f)(?:\s|$)/.test(view.argv)
+  ) {
     return "deny"
   }
   if (SECRET_FILE_PATTERN.test(view.argv) || GUARD_SELF_INVOCATION_PATTERN.test(view.argv)) {

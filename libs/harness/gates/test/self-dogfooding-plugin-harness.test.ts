@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option, Schema } from "effect"
 import { match } from "ts-pattern"
-import { buildHarnessGraph, NonNegativeCount } from "@harness/graph"
+import { buildHarnessGraph, NonNegativeCount, ts } from "@harness/graph"
 import { type IndexedEffectFn, runWithTestTracer } from "@harness/ingest"
 import { checkSpanBudgets, type SpanSample } from "../src/span-budget.js"
 import {
@@ -29,6 +29,7 @@ import {
 import {
   decideSelfDogfooding,
   isGraphOrchestratorFacadePath,
+  isModularPluginPath,
   resolvePathSpecificMaxLines,
   SelfDogfooding,
 } from "../src/plugins/self-dogfooding-plugin.js"
@@ -74,11 +75,14 @@ import {
   GateVerdict,
   getAstGateCacheSize,
   HARNESS_GATE_RULE_VERSION,
+  isRepoWideAstRule,
   MAX_GATE_CACHE_SIZE,
   SourceLineNumber,
+  visitSourceFileSinglePass,
 } from "../src/ast-cache.js"
 import { decideEarsSpecLint } from "../src/ears-lint.js"
 import {
+  collectModularPluginFiles,
   decideGraphEntropy,
   extractBalancedBraces,
   extractBalancedParens,
@@ -178,39 +182,52 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         "nested-effect-run-sync",
         "harness-switch-statement",
         "match-run-statement",
+        "facade-star-reexport",
         "file-line-budget-exceeded",
       ]),
       variation: Schema.Boolean,
     },
     ({ violationType, variation }) =>
       Effect.gen(function* () {
-        const { content, maxLines } = match(violationType)
+        const { content, maxLines, targetFile } = match(violationType)
           .with("effect-fn-dummy-void", () => ({
             content: variation
               ? "export const f = Effect.fn('test')(function* () { yield* (Effect.void) })\n"
               : "export const f = Effect.fn('test')(function* () { yield* Effect.void })\n",
             maxLines: MaxPluginFileLines.make(800),
+            targetFile: "libs/harness/gates/src/plugins/bad-module.ts",
           }))
           .with("nested-effect-run-sync", () => ({
             content: variation
               ? "export const g = Effect.gen(function* () { Effect.runPromise(Effect.succeed(42)) })\n"
               : "export const g = Effect.sync(() => { Effect.runSync(Effect.succeed(42)) })\n",
             maxLines: MaxPluginFileLines.make(800),
+            targetFile: "libs/harness/gates/src/plugins/bad-module.ts",
           }))
           .with("harness-switch-statement", () => ({
             content:
               "export const h = (x: number): number => { switch (x) { case 1: return 1; default: return 0; } }\n",
             maxLines: MaxPluginFileLines.make(800),
+            targetFile: "libs/harness/gates/src/plugins/bad-module.ts",
           }))
           .with("match-run-statement", () => ({
             content: variation
               ? "export const m = (x: number): number => (match(x).with(1, () => 1).run())\n"
               : "export const m = (x: number): number => match(x).with(1, () => 1).run()\n",
             maxLines: MaxPluginFileLines.make(800),
+            targetFile: "libs/harness/gates/src/plugins/bad-module.ts",
+          }))
+          .with("facade-star-reexport", () => ({
+            content: variation
+              ? 'export * from "./extractor/compiler-session.js"\n'
+              : 'export * from "./datalog/fact-store.js"\n',
+            maxLines: MaxPluginFileLines.make(800),
+            targetFile: "libs/harness/graph/src/type-extractor.ts",
           }))
           .with("file-line-budget-exceeded", () => ({
             content: "// line\n".repeat(20),
             maxLines: MaxPluginFileLines.make(10),
+            targetFile: "libs/harness/gates/src/plugins/bad-module.ts",
           }))
           .exhaustive()
 
@@ -221,7 +238,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
               content: AstSourceContent.make("export const cleanValue = 1\n"),
             },
             {
-              filePath: AstSourceFilePath.make("libs/harness/gates/src/plugins/bad-module.ts"),
+              filePath: AstSourceFilePath.make(targetFile),
               content: AstSourceContent.make(content),
             },
           ],
@@ -342,20 +359,37 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
   )
 
   it.effect(
-    "REQ-1.2: passing isModularPluginFile: false for isModularPluginPath targets (type-extractor.ts, compiler-session.ts) over 800 lines still emits file-line-budget-exceeded",
+    "REQ-1.2: passing isModularPluginFile: false for isModularPluginPath targets across libs/ and apps/ still emits file-line-budget-exceeded",
     () =>
       Effect.gen(function* () {
-        const overLimitContent = Array.from({ length: 801 }, (_, i) => `export const g${i} = ${i}`).join("\n")
+        const over250Content = Array.from({ length: 251 }, (_, i) => `export const e${i} = ${i}`).join("\n")
+        const over650Content = Array.from({ length: 651 }, (_, i) => `export const p${i} = ${i}`).join("\n")
+        const over800Content = Array.from({ length: 801 }, (_, i) => `export const g${i} = ${i}`).join("\n")
         const report = yield* SelfDogfooding.decide({
           files: [
             {
               filePath: AstSourceFilePath.make("libs/harness/graph/src/type-extractor.ts"),
-              content: AstSourceContent.make(overLimitContent),
+              content: AstSourceContent.make(over250Content),
               isModularPluginFile: false,
             },
             {
               filePath: AstSourceFilePath.make("libs/harness/graph/src/extractor/compiler-session.ts"),
-              content: AstSourceContent.make(overLimitContent),
+              content: AstSourceContent.make(over800Content),
+              isModularPluginFile: false,
+            },
+            {
+              filePath: AstSourceFilePath.make("apps/harness-cli/src/index.ts"),
+              content: AstSourceContent.make(over250Content),
+              isModularPluginFile: false,
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/es/infra/src/projector.ts"),
+              content: AstSourceContent.make(over650Content),
+              isModularPluginFile: false,
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/sample/domain/src/oversized-domain.ts"),
+              content: AstSourceContent.make(over800Content),
               isModularPluginFile: false,
             },
           ],
@@ -363,10 +397,15 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           failOnViolation: false,
         })
         expect(report.verdict).toBe("violated")
-        expect(report.violations).toHaveLength(2)
+        expect(report.violations).toHaveLength(5)
         expect(report.violations.every((v) => v.rule === "file-line-budget-exceeded")).toBe(true)
-        expect(report.violations[0]?.file).toBe("libs/harness/graph/src/type-extractor.ts")
-        expect(report.violations[1]?.file).toBe("libs/harness/graph/src/extractor/compiler-session.ts")
+        expect(report.violations.map((v) => v.file)).toEqual([
+          "libs/harness/graph/src/type-extractor.ts",
+          "libs/harness/graph/src/extractor/compiler-session.ts",
+          "apps/harness-cli/src/index.ts",
+          "libs/es/infra/src/projector.ts",
+          "libs/sample/domain/src/oversized-domain.ts",
+        ])
       }),
   )
 
@@ -1035,7 +1074,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
     "REQ-1.3: AstGateCache.decide reports effect-fn-dummy-void, discriminant-branching, and non-exhaustive-union-match without isHarnessInternal exemption",
     () =>
       Effect.gen(function* () {
-        expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v3")
+        expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v4")
 
         const testId = "AstGateCache.decide::REQ-1.3"
         const { result: report, spans } = yield* runWithTestTracer(
@@ -1642,7 +1681,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
   )
 
   it.effect(
-    "Unit 1: resolvePathSpecificMaxLines enforces path-specific LOC budgets across @harness/graph",
+    "RFC-0007 Step 4: resolvePathSpecificMaxLines & isModularPluginPath enforce repo-wide tiered LOC budgets across libs/ and apps/",
     () =>
       Effect.sync(() => {
         expect(isGraphOrchestratorFacadePath("libs/harness/graph/src/type-extractor.ts")).toBe(true)
@@ -1651,15 +1690,53 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(resolvePathSpecificMaxLines("libs/harness/graph/src/graph-rewrite.ts")).toBe(250)
         expect(resolvePathSpecificMaxLines("libs/harness/graph/src/graph-engine.ts")).toBe(250)
         expect(resolvePathSpecificMaxLines("libs/harness/graph/src/graph-projector.ts")).toBe(250)
+        expect(resolvePathSpecificMaxLines("apps/harness-cli/src/index.ts")).toBe(250)
+        expect(resolvePathSpecificMaxLines("apps/harness-mcp/src/server.ts")).toBe(250)
+        expect(resolvePathSpecificMaxLines("apps/harness-cli/src/index.ts", 800)).toBe(250)
+        expect(resolvePathSpecificMaxLines("apps/harness-mcp/src/server.ts", 800)).toBe(250)
 
         expect(resolvePathSpecificMaxLines("libs/harness/graph/src/extractor/effect-fn-extractor.ts")).toBe(499)
+
+        expect(resolvePathSpecificMaxLines("apps/harness-cli/src/commands/verify.ts")).toBe(650)
+        expect(resolvePathSpecificMaxLines("apps/harness-mcp/src/tools/graph.ts")).toBe(650)
+        expect(resolvePathSpecificMaxLines("apps/harness-mcp/src/daemon/worker.ts")).toBe(650)
+        expect(resolvePathSpecificMaxLines("libs/es/infra/src/projector.ts")).toBe(650)
+        expect(resolvePathSpecificMaxLines("libs/es/infra/src/memory.ts", 800)).toBe(650)
+
         expect(resolvePathSpecificMaxLines("libs/harness/graph/src/extractor/compiler-session.ts")).toBe(700)
         expect(resolvePathSpecificMaxLines("libs/harness/graph/src/engine/snapshot-codec.ts")).toBe(700)
         expect(resolvePathSpecificMaxLines("libs/harness/graph/src/datalog/datalog-session.ts")).toBe(750)
-        expect(resolvePathSpecificMaxLines("libs/harness/gates/src/plugins/sample.ts")).toBe(800)
 
-        // When explicit maxPluginFileLines is provided, explicit override wins
+        expect(resolvePathSpecificMaxLines("libs/harness/gates/src/plugins/sample.ts")).toBe(800)
+        expect(resolvePathSpecificMaxLines("libs/sample/domain/src/index.ts")).toBe(800)
+        expect(resolvePathSpecificMaxLines("apps/sample/alchemy.run.ts")).toBe(800)
+        expect(resolvePathSpecificMaxLines("apps/sample-web/src/client.ts")).toBe(800)
+
+        // Stricter explicit maxPluginFileLines still tightens tiered budgets
         expect(resolvePathSpecificMaxLines("libs/harness/graph/src/type-extractor.ts", 100)).toBe(100)
+        expect(resolvePathSpecificMaxLines("apps/harness-cli/src/index.ts", 100)).toBe(100)
+
+        // isModularPluginPath matches all production .ts/.tsx files under libs/ and apps/ and excludes test/d.ts/config/build dirs
+        expect(isModularPluginPath("libs/sample/domain/src/index.ts")).toBe(true)
+        expect(isModularPluginPath("libs/es/infra/src/projector.ts")).toBe(true)
+        expect(isModularPluginPath("apps/harness-cli/src/index.ts")).toBe(true)
+        expect(isModularPluginPath("apps/harness-cli/src/commands/verify.ts")).toBe(true)
+        expect(isModularPluginPath("apps/harness-mcp/src/server.ts")).toBe(true)
+        expect(isModularPluginPath("apps/harness-mcp/src/tools/graph.ts")).toBe(true)
+        expect(isModularPluginPath("apps/harness-mcp/src/daemon/worker.ts")).toBe(true)
+        expect(isModularPluginPath("apps/sample/alchemy.run.ts")).toBe(true)
+        expect(isModularPluginPath("apps/sample-web/src/client.tsx")).toBe(true)
+
+        expect(isModularPluginPath("libs/sample/domain/test/index.test.ts")).toBe(false)
+        expect(isModularPluginPath("libs/harness/decision/src/cached-decision-model.spec.ts")).toBe(false)
+        expect(isModularPluginPath("libs/sample/infra/src/global.d.ts")).toBe(false)
+        expect(isModularPluginPath("libs/sample/infra/drizzle.config.ts")).toBe(false)
+        expect(isModularPluginPath("apps/harness-cli/vitest.config.ts")).toBe(false)
+        expect(isModularPluginPath("libs/es/core/test/fixtures/cart.ts")).toBe(false)
+        expect(isModularPluginPath("libs/harness/gates/dist/index.ts")).toBe(false)
+        expect(isModularPluginPath("libs/harness/gates/node_modules/pkg/index.ts")).toBe(false)
+        expect(isModularPluginPath("libs/harness/gates/repos/effect/index.ts")).toBe(false)
+        expect(isModularPluginPath("tools/oxlint/syntax-bans.js")).toBe(false)
       }),
   )
 
@@ -1803,6 +1880,338 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(
           cleanTestWriteReport.violations.filter((v) => v.rule === "unisolated-dot-harness-test-write"),
         ).toHaveLength(0)
+      }),
+  )
+
+  it.effect(
+    "RFC-0007 Step 4: every production .ts file in libs/ and apps/ respects tiered LOC budgets and passes SelfDogfooding.decide, harness-mcp has no zod, and syntax-bans has no isInternalHarnessFile",
+    () =>
+      Effect.gen(function* () {
+        const testDir = dirname(fileURLToPath(import.meta.url))
+        const repoRoot = resolve(testDir, "../../../..")
+
+        const collectedAbsFiles = collectModularPluginFiles(repoRoot)
+        const relFiles = collectedAbsFiles.map((abs) => relative(repoRoot, abs).replace(/\\/g, "/"))
+
+        expect(relFiles.length).toBeGreaterThanOrEqual(100)
+        expect(relFiles.some((f) => f.startsWith("libs/"))).toBe(true)
+        expect(relFiles.some((f) => f.startsWith("apps/"))).toBe(true)
+        expect(
+          relFiles.some(
+            (f) =>
+              f.endsWith(".test.ts") ||
+              f.endsWith(".spec.ts") ||
+              f.endsWith(".d.ts") ||
+              f.endsWith(".config.ts") ||
+              f.includes("/test/") ||
+              f.includes("/dist/") ||
+              f.includes("/node_modules/") ||
+              f.includes("/repos/"),
+          ),
+        ).toBe(false)
+
+        const fileInputs = collectedAbsFiles.map((absPath, idx) => ({
+          filePath: AstSourceFilePath.make(relFiles[idx]!),
+          content: AstSourceContent.make(readFileSync(absPath, "utf8")),
+        }))
+
+        const report = yield* SelfDogfooding.decide({
+          files: fileInputs,
+          maxPluginFileLines: MaxPluginFileLines.make(800),
+          failOnViolation: false,
+        })
+
+        expect(report.inspectedFileCount).toBe(fileInputs.length)
+        expect(report.violations, JSON.stringify(report.violations, null, 2)).toEqual([])
+        expect(report.verdict).toBe("clean")
+
+        const mcpPkgSchema = Schema.fromJsonString(
+          Schema.Struct({
+            dependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+            devDependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+          }),
+        )
+        const mcpPkg = yield* Schema.decodeEffect(mcpPkgSchema)(
+          readFileSync(join(repoRoot, "apps", "harness-mcp", "package.json"), "utf8"),
+        )
+        expect(mcpPkg.dependencies?.zod).toBeUndefined()
+        expect(mcpPkg.devDependencies?.zod).toBeUndefined()
+
+        const syntaxBansSrc = readFileSync(join(repoRoot, "tools", "oxlint", "syntax-bans.js"), "utf8")
+        expect(syntaxBansSrc).not.toMatch(/\bisInternalHarnessFile\b/)
+      }),
+  )
+
+  it.effect(
+    "RFC-0007 Step 4 edge cases: enforces tiered limits across .tsx & nested subdirs and fails on facade-star-reexport when failOnViolation is true",
+    () =>
+      Effect.gen(function* () {
+        const makeLines = (n: number) => Array.from({ length: n }, (_, i) => `export const x${i} = ${i}`).join("\n")
+        const tieredReport = yield* SelfDogfooding.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("apps/harness-cli/src/commands/sub/ui.tsx"),
+              content: AstSourceContent.make(makeLines(651)),
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/harness/graph/src/extractor/nested/helper.ts"),
+              content: AstSourceContent.make(makeLines(500)),
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/harness/graph/src/engine/nested/solver.ts"),
+              content: AstSourceContent.make(makeLines(701)),
+            },
+          ],
+          maxPluginFileLines: MaxPluginFileLines.make(800),
+          failOnViolation: false,
+        })
+        expect(tieredReport.verdict).toBe("violated")
+        expect(tieredReport.violations.map((v) => v.file)).toEqual([
+          "apps/harness-cli/src/commands/sub/ui.tsx",
+          "libs/harness/graph/src/extractor/nested/helper.ts",
+          "libs/harness/graph/src/engine/nested/solver.ts",
+        ])
+
+        const starErr = yield* Effect.flip(
+          SelfDogfooding.decide({
+            files: [
+              {
+                filePath: AstSourceFilePath.make("libs/harness/graph/src/type-extractor.ts"),
+                content: AstSourceContent.make('export * from "./extractor/compiler-session.js"\n'),
+              },
+            ],
+            failOnViolation: true,
+          }),
+        )
+        expect(starErr._tag).toBe("SelfDogfoodingViolationError")
+        expect(starErr.violations.some((v) => v.rule === "facade-star-reexport")).toBe(true)
+      }),
+  )
+
+  it.effect(
+    "F-10: decideSelfDogfooding enforces exact tiered LOC boundaries (250/251, 499/500, 650/651, 800/801)",
+    () =>
+      Effect.gen(function* () {
+        const makeLines = (n: number) =>
+          Array.from({ length: n }, (_, i) => `export const b${i} = ${i}`).join("\n")
+
+        const boundaryCases: ReadonlyArray<{
+          readonly filePath: string
+          readonly limit: number
+        }> = [
+          { filePath: "apps/harness-cli/src/index.ts", limit: 250 },
+          { filePath: "libs/harness/graph/src/extractor/foo.ts", limit: 499 },
+          { filePath: "apps/harness-cli/src/commands/foo.ts", limit: 650 },
+          { filePath: "libs/sample/domain/src/foo.ts", limit: 800 },
+        ]
+
+        for (const { filePath, limit } of boundaryCases) {
+          const atLimitReport = yield* decideSelfDogfooding({
+            files: [
+              {
+                filePath: AstSourceFilePath.make(filePath),
+                content: AstSourceContent.make(makeLines(limit)),
+              },
+            ],
+            maxPluginFileLines: MaxPluginFileLines.make(800),
+            failOnViolation: false,
+          })
+          expect(atLimitReport.verdict, `${filePath} at ${limit} lines`).toBe("clean")
+          expect(atLimitReport.violations).toHaveLength(0)
+
+          const overLimitReport = yield* decideSelfDogfooding({
+            files: [
+              {
+                filePath: AstSourceFilePath.make(filePath),
+                content: AstSourceContent.make(makeLines(limit + 1)),
+              },
+            ],
+            maxPluginFileLines: MaxPluginFileLines.make(800),
+            failOnViolation: false,
+          })
+          expect(overLimitReport.verdict, `${filePath} at ${limit + 1} lines`).toBe("violated")
+          expect(overLimitReport.violations).toHaveLength(1)
+          expect(overLimitReport.violations[0]?.rule).toBe("file-line-budget-exceeded")
+          expect(overLimitReport.violations[0]?.file).toBe(filePath)
+        }
+      }),
+  )
+
+  it.effect(
+    "F-10: visitSourceFileSinglePass flags unscoped-effect-run in sample infra testing.ts/memory.ts while exempting libs/es/infra/src/memory.ts",
+    () =>
+      Effect.sync(() => {
+        const sourceText =
+          'import { Effect } from "effect"\nexport const runIt = () => Effect.runPromise(Effect.succeed(1))\n'
+        const infraTag = AstGatePackageTag.make("infra")
+
+        const sampleTestingPath = "libs/sample/infra/src/testing.ts"
+        const sampleTestingViolations = visitSourceFileSinglePass(
+          ts.createSourceFile(sampleTestingPath, sourceText, ts.ScriptTarget.Latest, true),
+          AstSourceFilePath.make(sampleTestingPath),
+          infraTag,
+        )
+        expect(sampleTestingViolations.some((v) => v.rule === "unscoped-effect-run")).toBe(true)
+
+        const sampleMemoryPath = "libs/sample/infra/src/memory.ts"
+        const sampleMemoryViolations = visitSourceFileSinglePass(
+          ts.createSourceFile(sampleMemoryPath, sourceText, ts.ScriptTarget.Latest, true),
+          AstSourceFilePath.make(sampleMemoryPath),
+          infraTag,
+        )
+        expect(sampleMemoryViolations.some((v) => v.rule === "unscoped-effect-run")).toBe(true)
+
+        const esMemoryPath = "libs/es/infra/src/memory.ts"
+        const esMemoryViolations = visitSourceFileSinglePass(
+          ts.createSourceFile(esMemoryPath, sourceText, ts.ScriptTarget.Latest, true),
+          AstSourceFilePath.make(esMemoryPath),
+          infraTag,
+        )
+        expect(esMemoryViolations.some((v) => v.rule === "unscoped-effect-run")).toBe(false)
+      }),
+  )
+
+  it.effect(
+    "REQ-1.3: visitSourceFileSinglePass flags catch-cause-interrupts-only, unisolated-dot-harness-test-write, and node-sqlite-in-infra on libs/harness/ paths without exemption",
+    () =>
+      Effect.sync(() => {
+        const infraTag = AstGatePackageTag.make("infra")
+        const domainTag = AstGatePackageTag.make("domain")
+        const testTag = AstGatePackageTag.make("test")
+
+        const interruptPath = "libs/harness/gates/src/sample-interrupt.ts"
+        const interruptSrc =
+          'import { Cause, Effect } from "effect"\nexport const bad = Effect.succeed(1).pipe(Effect.catchCause((c) => Cause.hasInterruptsOnly(c) ? Effect.fail("int") : Effect.fail("err")))\n'
+        const interruptViolations = visitSourceFileSinglePass(
+          ts.createSourceFile(interruptPath, interruptSrc, ts.ScriptTarget.Latest, true),
+          AstSourceFilePath.make(interruptPath),
+          domainTag,
+        )
+        expect(interruptViolations.some((v) => v.rule === "catch-cause-interrupts-only")).toBe(true)
+
+        const dotHarnessTestPath = "libs/harness/gates/test/unsafe-write.test.ts"
+        const dotHarnessSrc =
+          'import { writeFileSync } from "node:fs"\nexport const w = () => writeFileSync(".harness/verify-stamp.json", "{}")\n'
+        const dotHarnessViolations = visitSourceFileSinglePass(
+          ts.createSourceFile(dotHarnessTestPath, dotHarnessSrc, ts.ScriptTarget.Latest, true),
+          AstSourceFilePath.make(dotHarnessTestPath),
+          testTag,
+        )
+        expect(
+          dotHarnessViolations.some((v) => v.rule === "unisolated-dot-harness-test-write"),
+        ).toBe(true)
+
+        const nodeSqlitePath = "libs/harness/infra/src/bad-sqlite.ts"
+        const nodeSqliteSrc = 'import { DatabaseSync } from "node:sqlite"\nexport const d = DatabaseSync\n'
+        const nodeSqliteViolations = visitSourceFileSinglePass(
+          ts.createSourceFile(nodeSqlitePath, nodeSqliteSrc, ts.ScriptTarget.Latest, true),
+          AstSourceFilePath.make(nodeSqlitePath),
+          infraTag,
+        )
+        expect(nodeSqliteViolations.some((v) => v.rule === "node-sqlite-in-infra")).toBe(true)
+      }),
+  )
+
+  it.effect(
+    "AST hardening: silent-catch-defect, ignored-chmod-permission, expanded catch-cause-interrupts-only, and isRepoWideAstRule",
+    () =>
+      Effect.gen(function* () {
+        // 1. silent-catch-defect flags silent handler, allows reporting handlers
+        const silentDefectPath = AstSourceFilePath.make("libs/harness/gates/src/silent-defect.ts")
+        const silentDefectSrc = AstSourceContent.make(
+          'import { Effect } from "effect"\n' +
+            "export const bad = Effect.succeed(1).pipe(Effect.catchDefect(() => Effect.void))\n" +
+            'export const okStderr = Effect.succeed(1).pipe(Effect.catchDefect((d) => { process.stderr.write(String(d)); return Effect.void }))\n' +
+            'export const okLog = Effect.succeed(1).pipe(Effect.catchDefect((d) => Effect.logWarning(String(d))))\n' +
+            "export const okReport = Effect.succeed(1).pipe(Effect.catchDefect((d) => Effect.succeed(makeLspExceptionReport(d))))\n",
+        )
+        const silentAstReport = yield* AstGateCache.decide({
+          files: [{ filePath: silentDefectPath, content: silentDefectSrc }],
+        })
+        const silentViolations = silentAstReport.violations.filter(
+          (v) => v.rule === "silent-catch-defect",
+        )
+        expect(silentViolations).toHaveLength(1)
+        expect(silentViolations[0]?.line).toBe(2)
+
+        const silentDogfoodReport = yield* decideSelfDogfooding({
+          files: [{ filePath: silentDefectPath, content: silentDefectSrc }],
+        })
+        expect(
+          silentDogfoodReport.violations.filter((v) => v.rule === "silent-catch-defect"),
+        ).toHaveLength(1)
+
+        // 2. ignored-chmod-permission flags Effect.ignore / Effect.orElseSucceed on chmodSync/fchmodSync, allows fail-closed
+        const chmodPath = AstSourceFilePath.make("libs/harness/gates/src/chmod-hardening.ts")
+        const chmodSrc = AstSourceContent.make(
+          'import { chmodSync, fchmodSync } from "node:fs"\n' +
+            'import { Effect } from "effect"\n' +
+            'export const badIgnore = Effect.sync(() => chmodSync("/tmp/x", 0o600)).pipe(Effect.ignore)\n' +
+            'export const badOrElse = Effect.sync(() => fchmodSync(3, 0o600)).pipe(Effect.orElseSucceed(() => undefined))\n' +
+            'export const okFailClosed = Effect.try({ try: () => chmodSync("/tmp/x", 0o600), catch: (e) => e })\n',
+        )
+        const chmodAstReport = yield* AstGateCache.decide({
+          files: [{ filePath: chmodPath, content: chmodSrc }],
+        })
+        expect(
+          chmodAstReport.violations.filter((v) => v.rule === "ignored-chmod-permission"),
+        ).toHaveLength(2)
+
+        const chmodDogfoodReport = yield* decideSelfDogfooding({
+          files: [{ filePath: chmodPath, content: chmodSrc }],
+        })
+        expect(
+          chmodDogfoodReport.violations.filter((v) => v.rule === "ignored-chmod-permission"),
+        ).toHaveLength(2)
+
+        // 3. Expanded catch-cause-interrupts-only flags Effect.runPromiseExit(...).then(...) and Effect.runSyncExit(...)
+        const exitInspectPath = AstSourceFilePath.make("libs/harness/gates/src/exit-inspect.ts")
+        const exitInspectSrc = AstSourceContent.make(
+          'import { Cause, Effect, Exit } from "effect"\n' +
+            "export const badPromiseExit = Effect.runPromiseExit(Effect.succeed(1)).then((exit) =>\n" +
+            "  Exit.isFailure(exit) ? Cause.hasInterruptsOnly(exit.cause) : false,\n" +
+            ")\n" +
+            "export const badSyncExit = () => {\n" +
+            "  const exit = Effect.runSyncExit(Effect.succeed(1))\n" +
+            "  return Exit.isFailure(exit) ? Cause.hasInterruptsOnly(exit.cause) : false\n" +
+            "}\n" +
+            "export const okPureHelper = (cause: Cause.Cause<unknown>) => Cause.hasInterruptsOnly(cause)\n",
+        )
+        const exitAstReport = yield* AstGateCache.decide({
+          files: [{ filePath: exitInspectPath, content: exitInspectSrc }],
+        })
+        const exitViolations = exitAstReport.violations.filter(
+          (v) => v.rule === "catch-cause-interrupts-only",
+        )
+        expect(exitViolations).toHaveLength(2)
+
+        const exitDogfoodReport = yield* decideSelfDogfooding({
+          files: [{ filePath: exitInspectPath, content: exitInspectSrc }],
+        })
+        expect(
+          exitDogfoodReport.violations.filter((v) => v.rule === "catch-cause-interrupts-only"),
+        ).toHaveLength(2)
+
+        // 4. isRepoWideAstRule covers all repo-wide rules including the new ones
+        const expectedRepoWideRules = [
+          "effect-fn-dummy-void",
+          "switch-statement",
+          "match-run-statement",
+          "non-exhaustive-union-match",
+          "catch-cause-interrupts-only",
+          "unisolated-dot-harness-test-write",
+          "unsafe-type-cast",
+          "ast-grep-tsx-grammar",
+          "node-sqlite-in-infra",
+          "silent-catch-defect",
+          "ignored-chmod-permission",
+        ]
+        for (const rule of expectedRepoWideRules) {
+          expect(isRepoWideAstRule(rule, "msg")).toBe(true)
+        }
+        expect(isRepoWideAstRule("discriminant-branching", "Switch statement in 'a.ts' is banned")).toBe(true)
+        expect(isRepoWideAstRule("discriminant-branching", "If statement in 'a.ts' inspects union")).toBe(false)
+        expect(isRepoWideAstRule("unscoped-effect-run", "Unscoped Effect.runSync")).toBe(false)
       }),
   )
 })

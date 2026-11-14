@@ -14,6 +14,7 @@ enforced_by:
   - libs/es/infra/src/index.ts
   - libs/es/infra/src/aggregate.ts
   - libs/es/infra/src/memory.ts
+  - libs/es/infra/src/workerd-scripts.ts
   - libs/es/infra/test/fixtures/cart-sqlite.ts
 spans:
   - Aggregate.handleCommand

@@ -244,4 +244,47 @@ describe("Harness decision definitions & fallbacks", () => {
         expect(restoreStagedRes.verdict).toBe("allow")
       }),
   )
+
+  it.effect(
+    "ignores passing Vitest stdout check lines and triages security/defect/permission rules deterministically",
+    () =>
+      Effect.gen(function* () {
+        const failingLayer = makeFailingDecisionModelLayer()
+
+        // Passing ✓ lines in Vitest stdout must not false-trigger mechanical rules when an unrelated semantic failure happens
+        const mixedOutput = [
+          " ✓ apps/harness-cli/test/index.test.ts > flags raw primitive type aliases (3 ms)",
+          " ✔ apps/harness-cli/test/index.test.ts > enforces Config.redacted and Effect.ignore (2 ms)",
+          " FAIL apps/sample/test/cart.test.ts > calculates subtotal",
+          " AssertionError: expected 100 to be 120",
+        ].join("\n")
+        const semanticRes = yield* triageFailure(mixedOutput).pipe(Effect.provide(failingLayer))
+        expect(semanticRes.kind).toBe("semantic")
+        expect(semanticRes.hint).toContain("harness_tests_reaching")
+
+        const silentDefectRes = yield* triageFailure(
+          "error: silent-catch-defect: Effect.catchDefect handler silently swallows runtime defects without logging",
+        ).pipe(Effect.provide(failingLayer))
+        expect(silentDefectRes.kind).toBe("mechanical")
+        expect(silentDefectRes.hint).toContain("Effect.logWarning")
+
+        const chmodRes = yield* triageFailure(
+          "error: ignored-chmod-permission: Ignoring chmodSync/fchmodSync failure with Effect.ignore",
+        ).pipe(Effect.provide(failingLayer))
+        expect(chmodRes.kind).toBe("mechanical")
+        expect(chmodRes.hint).toContain("fail closed")
+
+        const escapeRes = yield* triageFailure(
+          "ProjectPathEscapeError: path '../../etc/passwd' escapes repoRoot",
+        ).pipe(Effect.provide(failingLayer))
+        expect(escapeRes.kind).toBe("mechanical")
+        expect(escapeRes.hint).toContain("ProjectPathEscapeError")
+
+        const socketChmodRes = yield* triageFailure(
+          "DaemonSocketChmodError: failed to chmod 0o600 on daemon.sock",
+        ).pipe(Effect.provide(failingLayer))
+        expect(socketChmodRes.kind).toBe("mechanical")
+        expect(socketChmodRes.hint).toContain("DaemonSocketChmodError")
+      }),
+  )
 })

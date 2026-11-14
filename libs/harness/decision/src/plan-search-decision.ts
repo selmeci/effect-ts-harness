@@ -33,7 +33,7 @@ export const PlanSearchScorerV1 = Decision.make({
     candidateId: Schema.String,
     candidateSkeletonSummary: Schema.String,
     earsRequirementsSummary: Schema.String,
-    violationCount: Schema.Int,
+    violationCount: Schema.Natural,
     cyclomaticComplexity: Schema.Int,
   }),
   decisions: {
