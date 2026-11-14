@@ -2,13 +2,13 @@ import * as path from "node:path"
 import { Effect, Exit, Schema, Scope } from "effect"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
-import { WorkspaceFilePath } from "@harness/contract"
 import {
-  AstGateCache,
   AstSourceContent,
   AstSourceFilePath,
   HARNESS_GATE_RULE_VERSION,
-} from "@harness/gates"
+  WorkspaceFilePath,
+} from "@harness/contract"
+import { AstGateCache } from "@harness/gates"
 import { extractWorkspaceTypeAwareGraph } from "@harness/graph"
 import {
   nodeSyncHostIo,

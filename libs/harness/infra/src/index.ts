@@ -7,10 +7,7 @@ import {
   makeDecisionCacheLayer,
 } from "./decision-cache-live.js"
 import { nodeSyncHostIo } from "./node-host-io.js"
-import {
-  HarnessSubprocessRunnerLive,
-  HarnessSubprocessRunnerNodeLive,
-} from "./subprocess-runner-live.js"
+import { HarnessSubprocessRunnerLive } from "./subprocess-runner-live.js"
 import {
   makeUnixSocketDaemonLayer,
   queryUnixSocketLine,
@@ -19,11 +16,11 @@ import {
   UnixSocketDaemonLive,
   type UnixSocketDaemonLayerOptions,
 } from "./unix-socket-daemon-live.js"
-import { WorkspaceFsLive, WorkspaceFsNodeLive } from "./workspace-fs-live.js"
+import { WorkspaceFsLive } from "./workspace-fs-live.js"
 
 export { nodeSyncHostIo }
-export { WorkspaceFsLive, WorkspaceFsNodeLive }
-export { HarnessSubprocessRunnerLive, HarnessSubprocessRunnerNodeLive }
+export { WorkspaceFsLive }
+export { HarnessSubprocessRunnerLive }
 export { AstGateCacheLive, makeAstGateCacheLayer }
 export { DecisionCacheLive, makeDecisionCacheLayer, type DecisionCacheStatsSnapshot }
 export {
@@ -39,8 +36,8 @@ export const TsCompilerOverlayServiceLive = makeTsCompilerOverlayLayer(nodeSyncH
 export const OmnigraphSyncLive = makeOmnigraphSyncLayer(nodeSyncHostIo)
 
 export const HarnessInfraLive = Layer.mergeAll(
-  WorkspaceFsNodeLive,
-  HarnessSubprocessRunnerNodeLive,
+  WorkspaceFsLive,
+  HarnessSubprocessRunnerLive,
   AstGateCacheLive,
   DecisionCacheLive,
   UnixSocketDaemonLive,

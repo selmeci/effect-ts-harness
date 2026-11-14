@@ -37,11 +37,10 @@ import {
   cleanSubprocessError,
   COMMANDS,
   ensureLocalOmnigraphReady,
-  run,
-  runCli,
   stripAnsiCodes,
   tryQueryWarmDaemonSocket,
 } from "../src/index.js"
+import { runCli } from "./run-cli-helper.js"
 
 describe("harness cli baseline", () => {
   it("registers all MVP v2 commands including plan-check and doctor", () => {
@@ -69,9 +68,6 @@ describe("harness cli baseline", () => {
       "scenario",
       "help",
     ])
-    for (const command of COMMANDS) {
-      expect(run([command])).toBe(0)
-    }
   })
 
   it("builds repo-scoped omnigraph kill args to prevent killing other clusters", () => {
@@ -81,10 +77,6 @@ describe("harness cli baseline", () => {
       "-f",
       "omnigraph-server.*--cluster file:///tmp/test-repo/\\.harness/omnigraph-cluster",
     ])
-  })
-
-  it("rejects unknown commands with exit code 1", () => {
-    expect(run(["nonsense"])).toBe(1)
   })
 
   it("prints usage on the help command", async () => {
@@ -408,7 +400,7 @@ describe("harness-cli v2 commands", () => {
         mkdirSync(srcDir, { recursive: true })
         writeFileSync(
           join(srcDir, "a.ts"),
-          `import { Effect } from "effect"\nimport { stub } from "@harness/gates"\nexport const fnStub = Effect.fn("Sample.stubbed")(function* () { return yield* stub<number, never, never>() })\n`,
+          `import { Effect } from "effect"\nimport { stub } from "@harness/contract"\nexport const fnStub = Effect.fn("Sample.stubbed")(function* () { return yield* stub<number, never, never>() })\n`,
         )
 
         const res = await runCli(["verify"], { repoRoot: dir, skipSubprocessVerify: true })
@@ -924,7 +916,7 @@ enforced_by:
         mkdirSync(srcDir, { recursive: true })
         writeFileSync(
           join(srcDir, "index.ts"),
-          `import { Effect } from "effect"\nimport { stub } from "@harness/gates"\nexport const pendingFn = Effect.fn("Sample.pendingFn")(function* () { return yield* stub<number, never, never>() })\n`,
+          `import { Effect } from "effect"\nimport { stub } from "@harness/contract"\nexport const pendingFn = Effect.fn("Sample.pendingFn")(function* () { return yield* stub<number, never, never>() })\n`,
         )
 
         const sess = await runCli(["session", "--format=antigravity"], {

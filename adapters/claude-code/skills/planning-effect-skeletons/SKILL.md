@@ -32,7 +32,7 @@ In this project, the plan IS compilable TypeScript code. Never write long Markdo
    - **No Future-Phase Leakage:** Never copy unimplemented future-phase symbols (e.g., `DeciderInvariantError`, `commandId` idempotency deduplication, partial event matching, or unconfigured `scope:fixture` Nx tags) into the current phase's EARS Spec or ADR.
    - **1:1 Symbol Parity:** Every method name (e.g. `.thenEvents`, `.thenNothing`, `.thenFails`), every `*Error` in prose or Mermaid diagrams, and every Nx tag in the Spec/ADR must match the current skeleton 1:1.
    - **No Empty Source Modules (`empty-source-module` gate):** Never leave placeholder `export {}` files in `src/`.
-   - **Clean Dependency Manifests (`unused-package-dependency` gate):** Never leave unused dependencies in `package.json` `dependencies`. Keep `@harness/gates` and `@harness/graph` in `devDependencies` once implementation replaces `stub()`.
+   - **Clean Dependency Manifests (`unused-package-dependency` gate):** Never leave unused dependencies in `package.json` `dependencies`. Move `@harness/contract` (when only used for `stub()`), `@harness/gates`, and `@harness/graph` to `devDependencies` once implementation replaces `stub()`.
 7. **Specify Adversarial & Negative Test Matrix in the Plan:**
    - **Contract Schemas (`type:contract`):** Plan both positive decode tests and negative rejection tests (`-1`, `1.5`, `""`, missing fields) for all constrained schemas (`Schema.Int`, `Schema.Natural`, `PositiveInt`, `NonEmptyString`). Clarify that `Schema.Int`/`Schema.Natural` are decode-time checks whose TypeScript type is `number`; add `.pipe(Schema.brand("..."))` when compile-time branding is needed for in-memory construction.
    - **BDD / Test Runners (`testing.ts` in `type:core`):**
@@ -63,7 +63,7 @@ In this project, the plan IS compilable TypeScript code. Never write long Markdo
 
 ```ts
 import { Effect } from "effect"
-import { stub } from "@harness/gates"
+import { stub } from "@harness/contract"
 import { PhotoNotFoundError } from "@harness/sample-contract"
 import { AlbumCounterClient, PhotoRepo } from "@harness/sample-service"
 

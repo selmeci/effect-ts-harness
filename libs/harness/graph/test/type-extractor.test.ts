@@ -56,7 +56,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
         packageTag: "domain",
         content: `
           import { Effect } from "effect"
-          import { stub } from "@harness/gates"
+          import { stub } from "@harness/contract"
           import { InventoryRepo, OutOfStockError, PaymentError, PaymentService } from "../../service/src/index.js"
 
           export const checkoutSkeleton = Effect.fn("Cart.checkout")(function* (sku: string) {
@@ -246,7 +246,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
         packageTag: "domain",
         content: `
           import { Effect } from "effect"
-          import { stub } from "@harness/gates"
+          import { stub } from "@harness/contract"
           import { CustomServiceClass } from "../../service/src/index.js"
 
           export const callCustom = Effect.fn("Sample.callCustom")(function* () {

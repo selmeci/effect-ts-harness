@@ -1,9 +1,6 @@
 export { stub } from "./stub.js"
 export {
-  AstContentSha256,
-  AstGateCategory,
   AstGatePackageTag,
-  AstRuleVersion,
   AstSourceContent,
   AstSourceFilePath,
   ContentSha256,
@@ -13,7 +10,6 @@ export {
   GateRuleId,
   GateRuleVersion,
   GateVerdict,
-  GateViolationCategory,
   GateViolationMessage,
   HARNESS_GATE_RULE_VERSION,
   MaxPluginFileLines,
@@ -52,7 +48,6 @@ export {
   TsCompilerOverlayError,
   UnknownToolError,
   WorkspaceFileContent,
-  WorkspaceFileExistsFlag,
   WorkspaceFilePath,
   WorkspaceFileStat,
   WorkspaceFsError,

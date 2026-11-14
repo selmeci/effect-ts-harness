@@ -28,62 +28,16 @@
 import { Schema } from "effect"
 import { match, P } from "ts-pattern"
 import {
-  AstContentSha256,
-  AstGateCategory,
   AstGatePackageTag,
-  AstRuleVersion,
-  AstSourceContent,
   AstSourceFilePath,
-  ContentSha256,
   EnclosingSymbolName,
   GateCategory,
   GateRuleId,
-  GateRuleVersion,
-  GateVerdict,
-  GateViolationCategory,
   GateViolationMessage,
-  HARNESS_GATE_RULE_VERSION,
   SourceLineNumber,
 } from "@harness/contract"
 import { ts } from "@harness/graph"
 import { checkMigrationSqlSafety } from "../migration-check.js"
-
-export {
-  AstContentSha256,
-  AstGateCategory,
-  AstGatePackageTag,
-  AstRuleVersion,
-  AstSourceContent,
-  AstSourceFilePath,
-  ContentSha256,
-  EnclosingSymbolName,
-  GateCategory,
-  GateRuleId,
-  GateRuleVersion,
-  GateVerdict,
-  GateViolationCategory,
-  GateViolationMessage,
-  HARNESS_GATE_RULE_VERSION,
-  SourceLineNumber,
-}
-
-const REPO_WIDE_AST_RULES = new Set<string>([
-  "effect-fn-dummy-void",
-  "switch-statement",
-  "match-run-statement",
-  "non-exhaustive-union-match",
-  "catch-cause-interrupts-only",
-  "unisolated-dot-harness-test-write",
-  "unsafe-type-cast",
-  "ast-grep-tsx-grammar",
-  "node-sqlite-in-infra",
-  "silent-catch-defect",
-  "ignored-chmod-permission",
-])
-
-export const isRepoWideAstRule = (rule: string, message: string): boolean =>
-  REPO_WIDE_AST_RULES.has(rule) ||
-  (rule === "discriminant-branching" && message.startsWith("Switch statement"))
 
 export const GateViolation = Schema.Struct({
   category: GateCategory,
@@ -161,10 +115,6 @@ export const isDummyEffectVoidYield = (
       inner.expression.name.text === "asVoid")
   )
 }
-
-const isAstGatePackageTag = (val: string): val is AstGatePackageTag =>
-  val === "contract" || val === "domain" || val === "service" ||
-  val === "infra" || val === "app" || val === "test"
 
 export const inferPackageTagFromPath = (filePath: string): AstGatePackageTag => {
   if (filePath.includes("/contract/")) return AstGatePackageTag.make("contract")
@@ -264,17 +214,11 @@ export const isIgnoredChmodPermissionCall = (node: ts.CallExpression, sf: ts.Sou
 export const visitSourceFileSinglePass = (
   sourceFile: ts.SourceFile,
   filePathOrRelPath: string | AstSourceFilePath,
-  packageTagOrContent?: AstGatePackageTag | string,
-  _contentOrPackageTag?: string | AstGatePackageTag,
+  packageTagParam?: AstGatePackageTag,
 ): ReadonlyArray<GateViolation> => {
   const filePath = AstSourceFilePath.make(String(filePathOrRelPath))
   const normalizedFilePath = filePath.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "")
-  const packageTag =
-    packageTagOrContent !== undefined && isAstGatePackageTag(packageTagOrContent)
-      ? AstGatePackageTag.make(packageTagOrContent)
-      : _contentOrPackageTag !== undefined && isAstGatePackageTag(_contentOrPackageTag)
-        ? AstGatePackageTag.make(_contentOrPackageTag)
-        : inferPackageTagFromPath(normalizedFilePath)
+  const packageTag = packageTagParam ?? inferPackageTagFromPath(normalizedFilePath)
 
   const violations: Array<GateViolation> = []
   const isTestFile =

@@ -22,7 +22,7 @@ import {
   AstGateCacheLive,
   DecisionCacheLive,
   HarnessInfraLive,
-  HarnessSubprocessRunnerNodeLive,
+  HarnessSubprocessRunnerLive,
   makeAstGateCacheLayer,
   makeDecisionCacheLayer,
   makeUnixSocketDaemonLayer,
@@ -31,7 +31,7 @@ import {
   resolveHarnessDaemonSocketPath,
   startScopedUnixSocketDaemon,
   UnixSocketDaemonLive,
-  WorkspaceFsNodeLive,
+  WorkspaceFsLive,
 } from "../src/index.js"
 
 const withTempDir = <A, E, R>(
@@ -50,8 +50,8 @@ describe("@harness/infra live adapters", () => {
   it.effect("exports live layers and nodeSyncHostIo", () =>
     Effect.sync(() => {
       expect(typeof nodeSyncHostIo.existsSync).toBe("function")
-      expect(WorkspaceFsNodeLive).toBeDefined()
-      expect(HarnessSubprocessRunnerNodeLive).toBeDefined()
+      expect(WorkspaceFsLive).toBeDefined()
+      expect(HarnessSubprocessRunnerLive).toBeDefined()
       expect(AstGateCacheLive).toBeDefined()
       expect(DecisionCacheLive).toBeDefined()
       expect(UnixSocketDaemonLive).toBeDefined()
@@ -59,7 +59,7 @@ describe("@harness/infra live adapters", () => {
     }),
   )
 
-  it.effect("WorkspaceFsNodeLive reads, atomically writes, checks existence, and maps errors", () =>
+  it.effect("WorkspaceFsLive reads, atomically writes, checks existence, and maps errors", () =>
     withTempDir((dir) =>
       Effect.gen(function* () {
         const fs = yield* WorkspaceFs
@@ -87,11 +87,11 @@ describe("@harness/infra live adapters", () => {
         expect(readErr._tag).toBe("WorkspaceFsError")
         expect(readErr.operation).toBe("read")
         expect(readErr.filePath).toBe(missingPath)
-      }).pipe(Effect.provide(WorkspaceFsNodeLive)),
+      }).pipe(Effect.provide(WorkspaceFsLive)),
     ),
   )
 
-  it.live("HarnessSubprocessRunnerNodeLive executes zero, failing, and timed-out commands", () =>
+  it.live("HarnessSubprocessRunnerLive executes zero, failing, and timed-out commands", () =>
     Effect.gen(function* () {
       const okResult = yield* execCheckedSubprocess({
         command: SubprocessCommand.make(process.execPath),
@@ -123,7 +123,7 @@ describe("@harness/infra live adapters", () => {
         timeoutMs: SubprocessTimeoutMs.make(50),
       }).pipe(Effect.flip)
       expect(timeoutErr._tag).toBe("HarnessSubprocessError")
-    }).pipe(Effect.provide(HarnessSubprocessRunnerNodeLive)),
+    }).pipe(Effect.provide(HarnessSubprocessRunnerLive)),
   )
 
   it.effect("REQ-3.1: AstGateCacheLive reuses cached digests and persists across layer rebuilds", () =>

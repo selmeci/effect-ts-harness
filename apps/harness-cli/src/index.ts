@@ -111,7 +111,7 @@ export const runCliEffect = (
       .with("guard", () => "guard" as const)
       .with("route", () => "routing" as const)
       .with("ontology", () => "ontology" as const)
-      .with("plan-check", "verify", "gc", "mutate", "bench", () => "gate" as const)
+      .with("plan-check", "verify", "gc", "mutate", "bench", "benchmark", () => "gate" as const)
       .otherwise(() => "lifecycle" as const)
 
     const outcome: TelemetryOutcome = match(requested)
@@ -164,23 +164,6 @@ export const runCliEffect = (
 
     return res
   }).pipe(Effect.provideService(Logger.LogToStderr, true))
-
-export const runCli = (
-  argv: ReadonlyArray<string>,
-  options?: CliEnv,
-  maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>,
-): Promise<CliResult> => Effect.runPromise(runCliEffect(argv, options, maybeDecisionLayer))
-
-export const run = (argv: ReadonlyArray<string>): number => {
-  const requested = argv[0] ?? "help"
-  if (!isCommand(requested)) {
-    console.error(`unknown command: ${requested}`)
-    console.error(`usage: harness <${COMMANDS.join("|")}>`)
-    return 1
-  }
-  console.log(`harness ${requested}`)
-  return 0
-}
 
 if (
   process.argv[1] !== undefined &&

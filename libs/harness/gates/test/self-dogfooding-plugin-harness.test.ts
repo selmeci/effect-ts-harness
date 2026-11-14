@@ -5,18 +5,22 @@ import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
 import { Cause, Deferred, Effect, Fiber, Layer, Option, Schema } from "effect"
 import { match } from "ts-pattern"
-import { buildHarnessGraph, NonNegativeCount, ts } from "@harness/graph"
-import { type IndexedEffectFn, runWithTestTracer } from "@harness/ingest"
-import { decideSpanBudgets, type SpanSample } from "../src/span-budget.js"
 import {
   ActiveMutantId,
+  AstGatePackageTag,
+  AstSourceContent,
+  AstSourceFilePath,
+  EnclosingSymbolName,
+  GateRuleVersion,
+  GateVerdict,
+  HARNESS_GATE_RULE_VERSION,
   MaxPluginFileLines,
   PluginFileLineCount,
   PluginId,
-  type SelfDogfoodingInput,
   SelfDogfoodingMessage,
   SelfDogfoodingRuleId,
   type SelfDogfoodingViolation,
+  SourceLineNumber,
   SubprocessArg,
   SubprocessCommand,
   SubprocessExitCode,
@@ -25,7 +29,12 @@ import {
   WorkspaceFileContent,
   WorkspaceFilePath,
   WorkspaceFsOperation,
-} from "../src/plugins/self-dogfooding-contract.js"
+} from "@harness/contract"
+import { ActiveMutantContext, HarnessSubprocessRunner, WorkspaceFs } from "@harness/service"
+import { buildHarnessGraph, NonNegativeCount, ts } from "@harness/graph"
+import { type IndexedEffectFn, runWithTestTracer } from "@harness/ingest"
+import { decideSpanBudgets, type SpanSample } from "../src/span-budget.js"
+import { type SelfDogfoodingInput } from "../src/plugins/self-dogfooding-contract.js"
 import {
   decideSelfDogfooding,
   isGraphOrchestratorFacadePath,
@@ -44,17 +53,14 @@ import {
   makeWorkspaceFsHostIoLayer,
   makeWorkspaceFsMemoryLayer,
   readAndVerifyWorkspaceFile,
-  WorkspaceFs,
 } from "../src/services/workspace-fs.js"
 import {
   execCheckedSubprocess,
-  HarnessSubprocessRunner,
   makeHarnessSubprocessRunnerHostIoLayer,
   makeHarnessSubprocessRunnerTestLayer,
 } from "../src/services/subprocess-runner.js"
 import { testHostIo } from "./helpers/test-host-io.js"
 import {
-  ActiveMutantContext,
   ActiveMutantContextLive,
   withActiveMutantEffect,
 } from "../src/services/active-mutant-context.js"
@@ -68,16 +74,7 @@ import { MUTATION_PATTERNS } from "../src/mutation/mutant-ast-generator.js"
 import {
   AstGateCache,
   type AstGateCacheEntry,
-  AstGatePackageTag,
-  AstSourceContent,
-  AstSourceFilePath,
-  EnclosingSymbolName,
-  GateRuleVersion,
-  GateVerdict,
-  HARNESS_GATE_RULE_VERSION,
-  isRepoWideAstRule,
   MAX_GATE_CACHE_SIZE,
-  SourceLineNumber,
   visitSourceFileSinglePass,
 } from "../src/ast-cache.js"
 import { decideEarsSpecLint } from "../src/ears-lint.js"
@@ -795,10 +792,13 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         let observedInside: string | null = null
         const { result, spans } = yield* runWithTestTracer(
           testId,
-          withActiveMutantEffect(mutantId, () => {
-            observedInside = getActiveMutantId() ?? null
-            return true
-          }).pipe(Effect.provide(ActiveMutantContextLive)),
+          withActiveMutantEffect(
+            mutantId,
+            Effect.sync(() => {
+              observedInside = getActiveMutantId() ?? null
+              return true
+            }),
+          ).pipe(Effect.provide(ActiveMutantContextLive)),
           emptyFnIndex,
         )
 
@@ -816,10 +816,13 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         const { result: failExit, spans: failSpans } = yield* runWithTestTracer(
           "MutationCheck.withActiveMutant::callback-defect",
           Effect.exit(
-            withActiveMutantEffect(ActiveMutantId.make("mutant-fail-99"), () => {
-              observedInsideFailure = getActiveMutantId() ?? null
-              throw new Error("boom")
-            }).pipe(Effect.provide(ActiveMutantContextLive)),
+            withActiveMutantEffect(
+              ActiveMutantId.make("mutant-fail-99"),
+              Effect.sync(() => {
+                observedInsideFailure = getActiveMutantId() ?? null
+                throw new Error("boom")
+              }),
+            ).pipe(Effect.provide(ActiveMutantContextLive)),
           ),
           emptyFnIndex,
         )
@@ -2202,7 +2205,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
   )
 
   it.effect(
-    "AST hardening: silent-catch-defect, ignored-chmod-permission, expanded catch-cause-interrupts-only, and isRepoWideAstRule",
+    "AST hardening: silent-catch-defect, ignored-chmod-permission, and expanded catch-cause-interrupts-only",
     () =>
       Effect.gen(function* () {
         // 1. silent-catch-defect flags silent handler, allows reporting handlers
@@ -2280,27 +2283,6 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(
           exitDogfoodReport.violations.filter((v) => v.rule === "catch-cause-interrupts-only"),
         ).toHaveLength(2)
-
-        // 4. isRepoWideAstRule covers all repo-wide rules including the new ones
-        const expectedRepoWideRules = [
-          "effect-fn-dummy-void",
-          "switch-statement",
-          "match-run-statement",
-          "non-exhaustive-union-match",
-          "catch-cause-interrupts-only",
-          "unisolated-dot-harness-test-write",
-          "unsafe-type-cast",
-          "ast-grep-tsx-grammar",
-          "node-sqlite-in-infra",
-          "silent-catch-defect",
-          "ignored-chmod-permission",
-        ]
-        for (const rule of expectedRepoWideRules) {
-          expect(isRepoWideAstRule(rule, "msg")).toBe(true)
-        }
-        expect(isRepoWideAstRule("discriminant-branching", "Switch statement in 'a.ts' is banned")).toBe(true)
-        expect(isRepoWideAstRule("discriminant-branching", "If statement in 'a.ts' inspects union")).toBe(false)
-        expect(isRepoWideAstRule("unscoped-effect-run", "Unscoped Effect.runSync")).toBe(false)
       }),
   )
 

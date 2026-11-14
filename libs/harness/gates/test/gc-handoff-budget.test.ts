@@ -3,7 +3,16 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { Effect, Schema } from "effect"
-import { buildHarnessGraph, loadGraphSnapshotEffect, RelationId, saveGraphSnapshot } from "@harness/graph"
+import {
+  buildHarnessGraph,
+  deriveRepoOmnigraphPort,
+  loadGraphSnapshotEffect,
+  RelationId,
+  resolveCanonicalRepoRoot,
+  resolveOmnigraphClusterDir,
+  resolveOmnigraphTaskBranches,
+  saveGraphSnapshot,
+} from "@harness/graph"
 import {
   buildSessionHandoff,
   checkLoopThrashing,
@@ -18,7 +27,6 @@ import {
   decideOntologyInvariants,
   decideSessionHandoff,
   decideSpanBudgets,
-  deriveRepoOmnigraphPort,
   diffPlanAndImplGraphs,
   discoverDomainMutants,
   evaluateMutationOutcomes,
@@ -27,10 +35,7 @@ import {
   levenshteinDistance,
   loadGovernanceDocsFromDisk,
   parseGovernanceDocFrontmatter,
-  resolveCanonicalRepoRoot,
   resolveHarnessStateDir,
-  resolveOmnigraphClusterDir,
-  resolveOmnigraphTaskBranches,
   type CodeMutant,
   type FrictionCluster,
   type FrictionEvent,
@@ -2466,7 +2471,7 @@ title: Test ADR
 status: accepted
 date: 2026-10-27
 enforced_by:
-  - libs/harness/gates/src/stub.ts
+  - libs/harness/contract/src/stub.ts
 spans:
   - AdrDocLint.decide
 ---

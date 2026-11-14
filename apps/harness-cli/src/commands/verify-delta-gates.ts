@@ -2,19 +2,20 @@ import { join, relative } from "node:path"
 import { Cause, Data, Effect, Layer, Option, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
-  AstGateCache,
   AstSourceContent,
   AstSourceFilePath,
+  HARNESS_GATE_RULE_VERSION,
+  WorkspaceFilePath,
+} from "@harness/contract"
+import {
+  AstGateCache,
   collectModularPluginFiles,
   evaluateAllGatePlugins,
   GatePluginRegistryLive,
-  HARNESS_GATE_RULE_VERSION,
   isModularPluginPath,
-  isRepoWideAstRule,
   type SpanSample,
-  WorkspaceFilePath,
 } from "@harness/gates"
-import { nodeSyncHostIo, WorkspaceFsNodeLive as WorkspaceFsLive } from "@harness/infra"
+import { nodeSyncHostIo, WorkspaceFsLive } from "@harness/infra"
 import type { CliResult } from "./daemon-and-omnigraph.service.js"
 
 export const runDeltaAstAndPluginGates = (
@@ -32,14 +33,7 @@ export const runDeltaAstAndPluginGates = (
       ruleVersion: HARNESS_GATE_RULE_VERSION,
       cacheFilePath: AstGateCache.resolveCachePath(repoRoot),
     })
-    const enforcedAstViolations = astReport.violations.filter((v) => {
-      // Repo-wide AST rules enforce uniformly across libs/harness/*, apps/harness-*, and tools/*;
-      // legacy AST rules still exempt tools/* only.
-      if (isRepoWideAstRule(v.rule, v.message)) {
-        return true
-      }
-      return !v.file.startsWith("tools/")
-    })
+    const enforcedAstViolations = astReport.violations.filter((v) => !v.file.startsWith("tools/"))
     if (enforcedAstViolations.length > 0) {
       const msg = enforcedAstViolations
         .map((v) => `[${v.rule}] ${v.file}:${v.line}: ${v.message}`)

@@ -25,7 +25,7 @@ const toWorkspaceFsError = (
   })
 }
 
-export const WorkspaceFsNodeLive: Layer.Layer<WorkspaceFs> = Layer.effect(
+export const WorkspaceFsLive: Layer.Layer<WorkspaceFs> = Layer.effect(
   WorkspaceFs,
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem
@@ -53,5 +53,3 @@ export const WorkspaceFsNodeLive: Layer.Layer<WorkspaceFs> = Layer.effect(
     return impl
   }),
 ).pipe(Layer.provide(NodeServices.layer))
-
-export const WorkspaceFsLive: Layer.Layer<WorkspaceFs> = WorkspaceFsNodeLive

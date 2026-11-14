@@ -21,7 +21,7 @@ export interface WorkspaceFsShape {
 }
 
 export class WorkspaceFs extends Context.Service<WorkspaceFs, WorkspaceFsShape>()(
-  "@harness/gates/WorkspaceFs",
+  "@harness/service/WorkspaceFs",
 ) {}
 
 export interface HarnessSubprocessRunnerShape {
@@ -33,7 +33,7 @@ export interface HarnessSubprocessRunnerShape {
 export class HarnessSubprocessRunner extends Context.Service<
   HarnessSubprocessRunner,
   HarnessSubprocessRunnerShape
->()("@harness/gates/HarnessSubprocessRunner") {}
+>()("@harness/service/HarnessSubprocessRunner") {}
 
 export interface ActiveMutantContextShape {
   readonly getCurrentMutant: Effect.Effect<Option.Option<ActiveMutantId>>
@@ -46,7 +46,7 @@ export interface ActiveMutantContextShape {
 export class ActiveMutantContext extends Context.Service<
   ActiveMutantContext,
   ActiveMutantContextShape
->()("@harness/gates/ActiveMutantContext") {}
+>()("@harness/service/ActiveMutantContext") {}
 
 export {
   AstGateCachePort,

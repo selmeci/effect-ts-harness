@@ -7,6 +7,7 @@ import {
   AstGateViolationContract,
   ErrorReasonMessage,
   GateVerdict,
+  HARNESS_GATE_RULE_VERSION,
   NonNegativeCount,
   type WorkspaceFilePath,
   WorkspaceFsError,
@@ -15,7 +16,6 @@ import {
 import {
   computeContentSha256,
   getOrCreateCachedSourceFile,
-  HARNESS_GATE_RULE_VERSION,
   inferPackageTagFromPath,
   visitSourceFileSinglePass,
 } from "@harness/gates"

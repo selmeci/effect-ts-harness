@@ -6,7 +6,7 @@ import {
   deriveRepoOmnigraphPort,
   resolveCanonicalRepoRoot,
   resolveOmnigraphClusterDir,
-} from "@harness/gates"
+} from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
 
 export const CLI_REPO_ROOT = (() => {

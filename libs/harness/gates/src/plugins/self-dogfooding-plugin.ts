@@ -1,7 +1,18 @@
 import { Effect } from "effect"
+import {
+  computeWorkspaceFileLineCount,
+  DEFAULT_MAX_PLUGIN_FILE_LINES,
+  EnclosingSymbolName,
+  makeSelfDogfoodingReport,
+  SelfDogfoodingMessage,
+  type SelfDogfoodingReport,
+  SelfDogfoodingRuleId,
+  type SelfDogfoodingViolation,
+  SelfDogfoodingViolationError,
+  SourceLineNumber,
+} from "@harness/contract"
 import { NonNegativeCount, ts } from "@harness/graph"
 import {
-  EnclosingSymbolName,
   getLineNumber,
   getOrCreateCachedSourceFile,
   isCatchCauseInterruptsOnlyCall,
@@ -9,20 +20,9 @@ import {
   isIgnoredChmodPermissionCall,
   isSilentCatchDefectCall,
   resolveEnclosingSymbol,
-  SourceLineNumber,
   unwrapAstExpression,
 } from "../ast-cache.js"
-import {
-  computeWorkspaceFileLineCount,
-  DEFAULT_MAX_PLUGIN_FILE_LINES,
-  makeSelfDogfoodingReport,
-  type SelfDogfoodingInput,
-  SelfDogfoodingMessage,
-  type SelfDogfoodingReport,
-  SelfDogfoodingRuleId,
-  type SelfDogfoodingViolation,
-  SelfDogfoodingViolationError,
-} from "./self-dogfooding-contract.js"
+import { type SelfDogfoodingInput } from "./self-dogfooding-contract.js"
 
 const isExcludedProductionPath = (normPath: string): boolean =>
   normPath.endsWith(".test.ts") ||

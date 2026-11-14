@@ -21,36 +21,27 @@ import { Effect, Schema } from "effect"
 import {
   type AstGateEvaluationReport,
   type AstGateFileBatchInput,
+  AstGatePackageTag,
+  AstSourceContent,
+  AstSourceFilePath,
+  ContentSha256,
+  GateCategory,
+  GateRuleVersion,
+  GateVerdict,
+  HARNESS_GATE_RULE_VERSION,
   type WorkspaceFsError,
 } from "@harness/contract"
 import { NonNegativeCount, ts } from "@harness/graph"
 import { AstGateCachePort } from "@harness/service"
 import { decideMigrationSafety } from "./migration-check.js"
 import {
-  AstContentSha256,
-  AstGateCategory,
-  AstGatePackageTag,
-  AstRuleVersion,
-  AstSourceContent,
-  AstSourceFilePath,
-  ContentSha256,
-  EnclosingSymbolName,
-  GateCategory,
-  GateRuleId,
-  GateRuleVersion,
-  GateVerdict,
   GateViolation,
-  GateViolationCategory,
-  GateViolationMessage,
-  HARNESS_GATE_RULE_VERSION,
-  SourceLineNumber,
   getLineNumber,
   inferPackageTagFromPath,
   isCatchCauseInterruptsOnlyCall,
   isDummyEffectVoidYield,
   isIgnoredChmodPermissionCall,
   isImpureDomainSpecifier,
-  isRepoWideAstRule,
   isSilentCatchDefectCall,
   MIGRATOR_KEY_REGEX,
   resolveEnclosingSymbol,
@@ -61,26 +52,7 @@ import {
 } from "./plugins/ast-gate-visitors.js"
 import { resolveHarnessStateDir } from "./worktree.js"
 
-// Re-export leaf AST gate schemas and contract types defined in ast-gate-visitors
-export {
-  AstContentSha256,
-  AstGateCategory,
-  AstGatePackageTag,
-  AstRuleVersion,
-  AstSourceContent,
-  AstSourceFilePath,
-  ContentSha256,
-  EnclosingSymbolName,
-  GateCategory,
-  GateRuleId,
-  GateRuleVersion,
-  GateVerdict,
-  GateViolation,
-  GateViolationCategory,
-  GateViolationMessage,
-  HARNESS_GATE_RULE_VERSION,
-  SourceLineNumber,
-}
+export { GateViolation }
 
 export const AstGateFileInput = Schema.Struct({
   filePath: AstSourceFilePath,
@@ -105,12 +77,6 @@ export const AstGateCacheEntry = Schema.Struct({
 })
 export type AstGateCacheEntry = typeof AstGateCacheEntry.Type
 
-/**
- * Contract alias for a cached AST evaluation record for a single file.
- */
-export const AstGateFileEntry = AstGateCacheEntry
-export type AstGateFileEntry = typeof AstGateFileEntry.Type
-
 export const AstGateCacheStoreSchema = Schema.Struct({
   version: GateRuleVersion,
   entries: Schema.Record(Schema.String, AstGateCacheEntry),
@@ -125,12 +91,6 @@ export const AstGateDecisionReport = Schema.Struct({
 })
 export type AstGateDecisionReport = typeof AstGateDecisionReport.Type
 
-/**
- * Contract alias for the aggregate AST decision report for a gate evaluation run.
- */
-export const AstCategoryGateReport = AstGateDecisionReport
-export type AstCategoryGateReport = typeof AstCategoryGateReport.Type
-
 export const AstCacheHitCount = NonNegativeCount
 export type AstCacheHitCount = typeof AstCacheHitCount.Type
 
@@ -139,14 +99,12 @@ export type AstCacheDurationMs = typeof AstCacheDurationMs.Type
 
 export const computeContentSha256 = (content: string): ContentSha256 =>
   ContentSha256.make(createHash("sha256").update(content, "utf8").digest("hex"))
-export const sha256Hex = computeContentSha256
 
 export const makeAstGateCacheKey = (filePath: string, packageTag: string): string =>
   `${filePath}\0${packageTag}`
 
 export const resolveAstGateCachePath = (repoRoot: string): AstSourceFilePath =>
   AstSourceFilePath.make(join(resolveHarnessStateDir(repoRoot), "cache", "ast-gates-v1.json"))
-export const resolveDefaultAstGateCachePath = resolveAstGateCachePath
 
 export const MAX_SOURCE_FILE_CACHE_SIZE = 500
 export const MAX_GATE_CACHE_SIZE = 1000
@@ -338,7 +296,6 @@ export {
   isDummyEffectVoidYield,
   isIgnoredChmodPermissionCall,
   isImpureDomainSpecifier,
-  isRepoWideAstRule,
   isSilentCatchDefectCall,
   MIGRATOR_KEY_REGEX,
   resolveEnclosingSymbol,

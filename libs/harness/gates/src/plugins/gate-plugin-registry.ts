@@ -1,20 +1,22 @@
 import { Context, Effect, Layer } from "effect"
-import { NonNegativeCount } from "@harness/graph"
-import { AstSourceContent, AstSourceFilePath } from "../ast-cache.js"
 import {
+  AstSourceContent,
+  AstSourceFilePath,
   makeSelfDogfoodingReport,
   type MaxPluginFileLines,
   PluginId,
-  type SelfDogfoodingFileInput,
   SelfDogfoodingMessage,
   type SelfDogfoodingReport,
   type SelfDogfoodingViolation,
   SelfDogfoodingViolationError,
   type WorkspaceFilePath,
   type WorkspaceFsError,
-} from "./self-dogfooding-contract.js"
+} from "@harness/contract"
+import { NonNegativeCount } from "@harness/graph"
+import { WorkspaceFs } from "@harness/service"
+import { type SelfDogfoodingFileInput } from "./self-dogfooding-contract.js"
 import { decideSelfDogfooding } from "./self-dogfooding-plugin.js"
-import { statAndReadWorkspaceFiles, WorkspaceFs } from "../services/workspace-fs.js"
+import { statAndReadWorkspaceFiles } from "../services/workspace-fs.js"
 
 export interface GatePluginDescriptor {
   readonly pluginId: PluginId

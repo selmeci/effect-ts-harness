@@ -6,7 +6,7 @@ import {
   formatDpoPriorKey,
   isBoundaryCallerQualname,
   parseDpoPriorKey,
-} from "@harness/gates"
+} from "@harness/graph"
 import { Effect, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"

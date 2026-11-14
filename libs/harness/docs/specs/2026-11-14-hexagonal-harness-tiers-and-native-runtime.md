@@ -55,9 +55,9 @@ spans:
   - HarnessCli.runScenario
   - HarnessMcp.executeManagedTool
 services:
-  - "@harness/gates/WorkspaceFs"
-  - "@harness/gates/HarnessSubprocessRunner"
-  - "@harness/gates/ActiveMutantContext"
+  - "@harness/service/WorkspaceFs"
+  - "@harness/service/HarnessSubprocessRunner"
+  - "@harness/service/ActiveMutantContext"
   - "@harness/service/AstGateCachePort"
   - "@harness/service/DecisionCachePort"
   - "@harness/service/UnixSocketDaemonPort"
@@ -75,7 +75,7 @@ errors:
 This specification defines the behavioral requirements for the five-tier hexagonal split of `libs/harness/*` governed by `harness:ADR-0013`. It separates pure `effect`-only contracts (`@harness/contract`) and pure `Context.Service` ports (`@harness/service`) from live `Layer` implementations (`@harness/gates`, `@harness/graph`), eliminating dual `["type:contract", "type:service"]` Nx tags and adding batched workspace file stat/read support to `WorkspaceFs`.
 
 - **Reused Contracts / Errors:** `WorkspaceFsError`, `HarnessSubprocessError`, `SelfDogfoodingViolationError`
-- **Reused Services:** `@harness/gates/WorkspaceFs`, `@harness/gates/HarnessSubprocessRunner`, `@harness/gates/ActiveMutantContext`
+- **Reused Services:** `@harness/service/WorkspaceFs`, `@harness/service/HarnessSubprocessRunner`, `@harness/service/ActiveMutantContext`
 - **New Capabilities Needed:** `HarnessTierTopology.decide`, `WorkspaceFs.statAndReadAll`
 
 ## Goal
@@ -158,7 +158,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ## Known residual risks
 
-- Legacy re-export shims in `@harness/gates` for `stub` and contract schemas must be kept in sync with `@harness/contract` until all external consumers migrate directly to `@harness/contract`.
+- None; all contract schemas, stub, and service ports are imported directly from @harness/contract and @harness/service without transitional re-export shims.
 
 ## Acceptance criteria
 

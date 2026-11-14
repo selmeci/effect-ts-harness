@@ -2,14 +2,16 @@ import { join } from "node:path"
 import { Cause, Effect } from "effect"
 import { match } from "ts-pattern"
 import {
-  AstGateCache,
   AstSourceContent,
   AstSourceFilePath,
+  HARNESS_GATE_RULE_VERSION,
+} from "@harness/contract"
+import {
+  AstGateCache,
   BenchStageName,
   buildStageLatencyMeasurement,
   decideHarnessBench,
   DEFAULT_STAGE_LATENCY_BUDGETS,
-  HARNESS_GATE_RULE_VERSION,
   LatencyMillis,
   LatencySloViolationError,
   runDomainMutationSuite,

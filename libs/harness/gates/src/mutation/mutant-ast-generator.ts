@@ -276,8 +276,7 @@ export const discoverDomainMutants = (
 
 /**
  * Compiles all `M` discovered mutations for a module into a single in-memory
- * Mutant Schema AST parameterized by `globalThis.__HARNESS_ACTIVE_MUTANT_ID` and
- * `globalThis.__harnessActiveMutant` (`RFC-0005 §4.3.2`).
+ * Mutant Schema AST parameterized by `globalThis.__HARNESS_ACTIVE_MUTANT_ID` (`RFC-0005 §4.3.2`).
  */
 export const compileMutantSchemaModule = (
   filePath: string,
@@ -301,7 +300,7 @@ export const compileMutantSchemaModule = (
     if (origLine === undefined) continue
     let transformed = origLine
     for (const m of lineMutants) {
-      const mutantCondition = `((globalThis.__HARNESS_ACTIVE_MUTANT_ID ?? (globalThis as { __HARNESS_ACTIVE_MUTANT_ID?: string }).__HARNESS_ACTIVE_MUTANT_ID ?? (globalThis as { __harnessActiveMutant?: string }).__harnessActiveMutant ?? process.env["HARNESS_ACTIVE_MUTANT_ID"]) === ${JSON.stringify(m.id)})`
+      const mutantCondition = `((globalThis.__HARNESS_ACTIVE_MUTANT_ID ?? (globalThis as { __HARNESS_ACTIVE_MUTANT_ID?: string }).__HARNESS_ACTIVE_MUTANT_ID ?? process.env["HARNESS_ACTIVE_MUTANT_ID"]) === ${JSON.stringify(m.id)})`
       if (m.original.startsWith("return ")) {
         const origExpr = m.original.slice("return ".length)
         const replExpr = m.replacement.slice("return ".length)

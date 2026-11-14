@@ -21,9 +21,7 @@ import {
   parseDstSeedEnv,
   readFrictionEvents,
   readTelemetryEvents,
-  resolveOmnigraphTaskBranches,
   runDstSeedSuite,
-  writeGraphHeadMeta,
   writeSessionReportFiles,
   writeVerifyStamp,
 } from "@harness/gates"
@@ -39,8 +37,10 @@ import {
   makeOmnigraphSyncLayer,
   makeTsCompilerOverlayLayer,
   mergeOmnigraphBranch,
+  resolveOmnigraphTaskBranches,
   saveGraphSnapshot,
   syncToOmnigraphAndSnapshot,
+  writeGraphHeadMeta,
 } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
 import { buildWorkspaceFnIndex } from "@harness/ingest"

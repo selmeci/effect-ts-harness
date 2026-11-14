@@ -7,8 +7,6 @@ import {
   type HarnessTierTopologyViolation,
   NonNegativeCount,
   NxTierTag,
-  PackageDependencyName,
-  PackageManifestName,
   PackageManifestPath,
   type PackageTierManifestInput,
   type ServiceTierSourceInput,
@@ -16,23 +14,6 @@ import {
   TierTopologyRuleId,
 } from "@harness/contract"
 import { getOrCreateCachedSourceFile } from "../ast-cache.js"
-
-export type {
-  HarnessTierTopologyInput,
-  HarnessTierTopologyReport,
-  HarnessTierTopologyViolation,
-  PackageTierManifestInput,
-  ServiceTierSourceInput,
-}
-
-export {
-  NxTierTag,
-  PackageDependencyName,
-  PackageManifestName,
-  PackageManifestPath,
-  TierTopologyMessage,
-  TierTopologyRuleId,
-}
 
 const NODE_BUILTIN_ROOT_MODULES = new Set([
   "assert",

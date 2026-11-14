@@ -8,13 +8,12 @@ import {
   collectModularPluginFiles,
   type FrictionEventKind,
   type GovernanceDocReference,
-  resolveCanonicalRepoRoot,
   type TelemetryCategory,
   type TelemetryEngineSource,
   type TelemetryOutcome,
   type TelemetrySurface,
 } from "@harness/gates"
-import type { HarnessGraph } from "@harness/graph"
+import { type HarnessGraph, resolveCanonicalRepoRoot } from "@harness/graph"
 import { nodeSyncHostIo, queryUnixSocketLine } from "@harness/infra"
 import {
   buildOmnigraphClusterKillArgs,

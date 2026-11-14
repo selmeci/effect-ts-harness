@@ -2,7 +2,7 @@ import { join } from "node:path"
 import { Effect, Option } from "effect"
 import * as Graph from "effect/Graph"
 import { match, P } from "ts-pattern"
-import { loadGovernanceDocsFromDisk, resolveOmnigraphTaskBranches } from "@harness/gates"
+import { loadGovernanceDocsFromDisk } from "@harness/gates"
 import {
   BisectionProbeCount,
   checkEffectGraph,
@@ -11,6 +11,7 @@ import {
   extractWorkspaceTypeAwareGraph,
   getNodeKey,
   makeOmnigraphSyncLayer,
+  resolveOmnigraphTaskBranches,
   saveGraphSnapshot,
   syncToOmnigraphAndSnapshot,
   VerificationStatus,

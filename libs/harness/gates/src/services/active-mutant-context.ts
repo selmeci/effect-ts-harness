@@ -3,23 +3,18 @@
  */
 import { Effect, Layer, Option, Semaphore, SynchronizedRef } from "effect"
 import { type ActiveMutantId } from "@harness/contract"
-import { ActiveMutantContext, type ActiveMutantContextShape } from "@harness/service"
-
-export { ActiveMutantContext, type ActiveMutantContextShape }
+import { ActiveMutantContext } from "@harness/service"
 
 interface GlobalWithMutantId {
   __HARNESS_ACTIVE_MUTANT_ID?: string | undefined
-  __harnessActiveMutant?: string | undefined
 }
 
 export const getActiveMutantId = (): string | undefined =>
   (globalThis as GlobalWithMutantId).__HARNESS_ACTIVE_MUTANT_ID ??
-  (globalThis as GlobalWithMutantId).__harnessActiveMutant ??
   process.env["HARNESS_ACTIVE_MUTANT_ID"]
 
 export const setActiveMutantId = (mutantId: string | undefined): void => {
   ;(globalThis as GlobalWithMutantId).__HARNESS_ACTIVE_MUTANT_ID = mutantId
-  ;(globalThis as GlobalWithMutantId).__harnessActiveMutant = mutantId
 }
 
 export const ActiveMutantContextLive: Layer.Layer<ActiveMutantContext> = Layer.effect(
@@ -61,12 +56,8 @@ export const ActiveMutantContextLive: Layer.Layer<ActiveMutantContext> = Layer.e
 
 export const withActiveMutantEffect = Effect.fn("MutationCheck.withActiveMutant")(function* (
   mutantId: ActiveMutantId,
-  callbackOrEffect: (() => boolean) | Effect.Effect<boolean>,
+  effect: Effect.Effect<boolean>,
 ): Effect.fn.Return<boolean, never, ActiveMutantContext> {
   const ctx = yield* ActiveMutantContext
-  const eff =
-    typeof callbackOrEffect === "function"
-      ? Effect.sync(callbackOrEffect)
-      : callbackOrEffect
-  return yield* ctx.runWithMutant(mutantId, eff)
+  return yield* ctx.runWithMutant(mutantId, effect)
 })

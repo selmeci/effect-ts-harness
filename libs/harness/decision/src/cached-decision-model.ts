@@ -10,7 +10,8 @@ import {
   DecisionCacheTtlMillis,
   type WorkspaceFsError,
 } from "@harness/contract"
-import { NonNegativeCount, resolveHarnessStateDir } from "@harness/gates"
+import { resolveHarnessStateDir } from "@harness/gates"
+import { NonNegativeCount } from "@harness/graph"
 import { DecisionCachePort } from "@harness/service"
 import { match } from "ts-pattern"
 

@@ -435,7 +435,7 @@ export const projectEffectFnNode = (
 
   if (node.isStub === true && sf.getVariableDeclaration("stub") === undefined) {
     const hasStubImport = sf.getImportDeclarations().some((d) => d.getNamedImports().some((n) => n.getName() === "stub"))
-    if (!hasStubImport) ensureNamedImport(ctx, norm, "@harness/gates", ["stub"], ruleId, rationale)
+    if (!hasStubImport) ensureNamedImport(ctx, norm, "@harness/contract", ["stub"], ruleId, rationale)
   }
 
   const catchSuffix =

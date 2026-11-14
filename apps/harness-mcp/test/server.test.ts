@@ -24,7 +24,6 @@ import { match } from "ts-pattern"
 import {
   createServer,
   dispatchMcpTool,
-  executeTool,
   isPathInsideRoot,
   makeLiveMcpToolRegistryLayer,
   normalizeProjectPath,
@@ -35,6 +34,7 @@ import {
   runDefaultLspDiagnostics,
   startHarnessDaemonServer,
 } from "../src/server.js"
+import { executeTool } from "./execute-tool-helper.js"
 import { resolveGraph } from "../src/tools/mcp-helpers.js"
 import { McpToolInputName } from "../src/tools/tool-registry.js"
 

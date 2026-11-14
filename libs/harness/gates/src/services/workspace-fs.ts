@@ -10,9 +10,7 @@ import {
   WorkspaceFsError,
   WorkspaceFsOperation,
 } from "@harness/contract"
-import { type SyncHostIo, WorkspaceFs, type WorkspaceFsShape } from "@harness/service"
-
-export { WorkspaceFs, type WorkspaceFsShape }
+import { type SyncHostIo, WorkspaceFs } from "@harness/service"
 
 export const makeWorkspaceFsHostIoLayer = (hostIo: SyncHostIo): Layer.Layer<WorkspaceFs> =>
   Layer.succeed(WorkspaceFs, {

@@ -29,7 +29,7 @@ const toSubprocessError = (
   })
 }
 
-export const HarnessSubprocessRunnerNodeLive: Layer.Layer<HarnessSubprocessRunner> = Layer.effect(
+export const HarnessSubprocessRunnerLive: Layer.Layer<HarnessSubprocessRunner> = Layer.effect(
   HarnessSubprocessRunner,
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
@@ -94,6 +94,3 @@ export const HarnessSubprocessRunnerNodeLive: Layer.Layer<HarnessSubprocessRunne
     return impl
   }),
 ).pipe(Layer.provide(NodeServices.layer))
-
-export const HarnessSubprocessRunnerLive: Layer.Layer<HarnessSubprocessRunner> =
-  HarnessSubprocessRunnerNodeLive

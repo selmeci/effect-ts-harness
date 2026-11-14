@@ -8,8 +8,6 @@ export type NonNegativeCount = typeof NonNegativeCount.Type
 
 export const GateRuleVersion = Schema.NonEmptyString.pipe(Schema.brand("GateRuleVersion"))
 export type GateRuleVersion = typeof GateRuleVersion.Type
-export const AstRuleVersion = GateRuleVersion
-export type AstRuleVersion = typeof AstRuleVersion.Type
 export const HARNESS_GATE_RULE_VERSION: GateRuleVersion = GateRuleVersion.make("ast-gates-v4")
 
 export const AstSourceFilePath = Schema.NonEmptyString.pipe(Schema.brand("AstSourceFilePath"))
@@ -17,8 +15,6 @@ export type AstSourceFilePath = typeof AstSourceFilePath.Type
 
 export const ContentSha256 = Schema.NonEmptyString.pipe(Schema.brand("ContentSha256"))
 export type ContentSha256 = typeof ContentSha256.Type
-export const AstContentSha256 = ContentSha256
-export type AstContentSha256 = typeof AstContentSha256.Type
 
 export const AstSourceContent = Schema.String.pipe(Schema.brand("AstSourceContent"))
 export type AstSourceContent = typeof AstSourceContent.Type
@@ -27,10 +23,6 @@ export const GateCategory = Schema.Literals([
   "syntax-bans", "test-integrity", "migration-safety", "domain-purity", "effect-laws",
 ]).pipe(Schema.brand("GateCategory"))
 export type GateCategory = typeof GateCategory.Type
-export const AstGateCategory = GateCategory
-export type AstGateCategory = typeof AstGateCategory.Type
-export const GateViolationCategory = GateCategory
-export type GateViolationCategory = typeof GateViolationCategory.Type
 
 export const GateRuleId = Schema.NonEmptyString.pipe(Schema.brand("GateRuleId"))
 export type GateRuleId = typeof GateRuleId.Type

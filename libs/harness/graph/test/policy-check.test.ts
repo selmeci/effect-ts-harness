@@ -232,7 +232,7 @@ describe("effect-graph:check policy rules", () => {
   it("end-to-end: extracts from source skeleton with forbidden infra dependency and reports violation", () => {
     const domainSource = `
 import { Effect } from "effect"
-import { stub } from "@harness/gates"
+import { stub } from "@harness/contract"
 
 export class R2BucketBinding {
   static readonly _tag = "ServiceTag"
@@ -2374,7 +2374,7 @@ export const evolveCartV2 = (state: CartState, event: CartEventV2): CartState =>
         packageTag: "domain",
         content: `
           import { Context, Data, Effect } from "effect"
-          import { stub } from "@harness/gates"
+          import { stub } from "@harness/contract"
 
           export class CustomError extends Data.TaggedError("CustomError")<{ readonly message: string }> {}
           export class SqlClient extends Context.Service<SqlClient, {}>()("SqlClient") {}

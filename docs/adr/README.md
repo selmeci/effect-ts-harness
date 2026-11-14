@@ -32,7 +32,7 @@ title: Stručný a výstižný názov architektonického rozhodnutia
 status: proposed | accepted | superseded | deprecated
 date: YYYY-MM-DD
 enforced_by:
-  - libs/harness/gates/src/stub.ts
+  - libs/harness/contract/src/stub.ts
   - tools/oxlint/syntax-bans.js
 spans:
   - GraphGc.decide

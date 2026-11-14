@@ -10,11 +10,6 @@ export type WorkspaceFilePath = typeof WorkspaceFilePath.Type
 export const WorkspaceFileContent = Schema.String.pipe(Schema.brand("WorkspaceFileContent"))
 export type WorkspaceFileContent = typeof WorkspaceFileContent.Type
 
-export const WorkspaceFileExistsFlag = Schema.Boolean.pipe(
-  Schema.brand("WorkspaceFileExistsFlag"),
-)
-export type WorkspaceFileExistsFlag = typeof WorkspaceFileExistsFlag.Type
-
 export const WorkspaceFsOperation = Schema.Literals(["read", "write", "stat", "readdir"]).pipe(
   Schema.brand("WorkspaceFsOperation"),
 )

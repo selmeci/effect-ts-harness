@@ -470,6 +470,9 @@ importers:
       '@harness/gates':
         specifier: workspace:*
         version: link:../gates
+      '@harness/graph':
+        specifier: workspace:*
+        version: link:../graph
       '@harness/service':
         specifier: workspace:*
         version: link:../service

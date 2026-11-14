@@ -37,7 +37,7 @@ export {
   resolveOmnigraphClusterDir,
   resolveOmnigraphTaskBranches,
   writeGraphHeadMeta,
-} from "@harness/gates"
+} from "@harness/graph"
 export { type HarnessDaemonServerHandle, resolveDaemonSocketPath, startHarnessDaemonServer } from "./daemon/unix-socket-daemon.js"
 export { executeManagedMcpTool, makeMcpMainLayer, makeMcpManagedRuntime } from "./managed-runtime.js"
 export { type LspDiagnosticsReport, runDefaultLspDiagnostics } from "./tools/lsp-and-telemetry.tools.js"
@@ -83,12 +83,6 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
   recordMcpToolTelemetry(toolName, args, result, durationMs, options)
   return result
 })
-
-export const executeTool = (
-  toolName: string,
-  args: Readonly<Record<string, unknown>>,
-  options?: ServerOptions,
-): Promise<unknown> => Effect.runPromise(executeToolEffect(toolName, args, options))
 
 export const createServer = (options?: ServerOptions): McpServer => {
   const server = new McpServer({ name: "harness-mcp", version: "0.0.0" })

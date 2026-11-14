@@ -9,11 +9,8 @@ import {
 } from "@harness/contract"
 import {
   HarnessSubprocessRunner,
-  type HarnessSubprocessRunnerShape,
   type SyncHostIo,
 } from "@harness/service"
-
-export { HarnessSubprocessRunner, type HarnessSubprocessRunnerShape }
 
 export const validateSubprocessInput = (
   input: SubprocessExecInput,

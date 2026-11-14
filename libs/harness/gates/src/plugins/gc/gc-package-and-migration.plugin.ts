@@ -18,12 +18,22 @@
 import { join, posix, relative } from "node:path"
 import { Cause, Effect, Layer, Schema } from "effect"
 import { match } from "ts-pattern"
+import {
+  AstSourceContent,
+  AstSourceFilePath,
+  NxTierTag,
+  PackageDependencyName,
+  PackageManifestName,
+  PackageManifestPath,
+  type PackageTierManifestInput,
+  type ServiceTierSourceInput,
+  WorkspaceFilePath,
+} from "@harness/contract"
 import type { SyncHostIo } from "@harness/service"
 import { checkMigrationFiles, checkMigrationSqlSafety } from "../../migration-check.js"
-import { AstSourceContent, AstSourceFilePath, decideAstGateCache, type AstGateFileInput } from "../../ast-cache.js"
+import { decideAstGateCache, type AstGateFileInput } from "../../ast-cache.js"
 import { evaluateAllGatePlugins, GatePluginRegistryLive } from "../gate-plugin-registry.js"
 import { makeWorkspaceFsHostIoLayer } from "../../services/workspace-fs.js"
-import { WorkspaceFilePath } from "../self-dogfooding-contract.js"
 import {
   collectModularPluginFiles,
   collectWorkspaceAllFiles,
@@ -38,15 +48,7 @@ import {
   safeFs,
 } from "./gc-helpers.js"
 import { checkUnusedContractExports } from "./gc-topology-entropy.plugin.js"
-import {
-  decideHarnessTierTopology,
-  NxTierTag,
-  PackageDependencyName,
-  PackageManifestName,
-  PackageManifestPath,
-  type PackageTierManifestInput,
-  type ServiceTierSourceInput,
-} from "../harness-tier-topology.js"
+import { decideHarnessTierTopology } from "../harness-tier-topology.js"
 
 const PackageJsonSchema = Schema.Struct({
   name: Schema.optional(Schema.String),

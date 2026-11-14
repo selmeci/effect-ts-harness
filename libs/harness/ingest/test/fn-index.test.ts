@@ -19,7 +19,7 @@ describe("Effect.fn syntactic index", () => {
   it("extracts exported Effect.fn declarations and detects stub() bodies", () => {
     const src = `
       import { Effect } from "effect"
-      import { stub } from "@harness/gates"
+      import { stub } from "@harness/contract"
       export const greet = Effect.fn("Sample.greet")(function* (input: { name: string }) {
         return \`Hello, \${input.name}!\`
       })

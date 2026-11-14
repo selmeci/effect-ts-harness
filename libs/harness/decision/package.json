@@ -16,6 +16,7 @@
     "@effect/ai-typesafe": "4.0.0",
     "@harness/contract": "workspace:*",
     "@harness/gates": "workspace:*",
+    "@harness/graph": "workspace:*",
     "@harness/service": "workspace:*",
     "effect": "4.0.0",
     "ts-pattern": "5.9.2"

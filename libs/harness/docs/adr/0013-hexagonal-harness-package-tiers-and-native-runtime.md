@@ -51,9 +51,9 @@ spans:
   - HarnessCli.runScenario
   - HarnessMcp.executeManagedTool
 services:
-  - "@harness/gates/WorkspaceFs"
-  - "@harness/gates/HarnessSubprocessRunner"
-  - "@harness/gates/ActiveMutantContext"
+  - "@harness/service/WorkspaceFs"
+  - "@harness/service/HarnessSubprocessRunner"
+  - "@harness/service/ActiveMutantContext"
   - "@harness/service/AstGateCachePort"
   - "@harness/service/DecisionCachePort"
   - "@harness/service/UnixSocketDaemonPort"
@@ -99,7 +99,7 @@ Leaving these dual tier tags and mixed contract-service-infra boundaries in plac
 1. `@harness/contract` (`libs/harness/contract`) carries `type:contract` only, depends exclusively on `effect`, and exports `stub`, `WorkspaceFsError`, `HarnessSubprocessError`, `SelfDogfoodingViolationError`, `TsCompilerOverlayError`, `CliCommandNotFoundError`, `UnknownToolError`, `DaemonServerError`, cache/daemon schemas, and tier-topology contract schemas.
 2. `@harness/service` (`libs/harness/service`) carries `type:service` only, depends exclusively on `effect` and `@harness/contract`, and exports pure `Context.Service` ports (`WorkspaceFs`, `HarnessSubprocessRunner`, `ActiveMutantContext`, `AstGateCachePort`, `DecisionCachePort`, `UnixSocketDaemonPort`, and host I/O ports) without Node or `type:infra` imports.
 3. No `libs/harness/*` project may declare both `type:contract` and `type:service` in `project.json`.
-4. `WorkspaceFs` exposes `statAndReadAll` for batched workspace file stat and UTF-8 reading behind the `@harness/gates/WorkspaceFs` capability seam, failing with typed `WorkspaceFsError`.
+4. `WorkspaceFs` exposes `statAndReadAll` for batched workspace file stat and UTF-8 reading behind the `@harness/service/WorkspaceFs` capability seam, failing with typed `WorkspaceFsError`.
 5. `@harness/infra` (`libs/harness/infra`) carries `type:infra` only and provides live `Layer` implementations built over `@effect/platform-node` (`NodeServices.layer`, `FileSystem.FileSystem`, `Path.Path`, `ChildProcessSpawner`, `ScopedCache`, `SynchronizedRef`, `Effect.acquireRelease`) for workspace I/O, subprocess execution, scoped AST/decision caches (`AstGateCachePort`, `DecisionCachePort`), and scoped `0600` Unix socket daemon lifecycle (`UnixSocketDaemonPort` failing with `DaemonServerError`).
 6. Non-infra `libs/harness/*` packages (`type:contract`, `type:service`, `type:core`, `type:domain`) must maintain zero `node:*` imports and zero global mutable caches; all stateful caching and Node runtime bindings live in `@harness/infra`.
 7. `apps/harness-cli` routes all CLI invocations declaratively through `effect/cli` (`Command.make`, `Flag`, `Argument`) and `NodeRuntime.runMain` in `HarnessCli.runDeclarativeCli`, exposing typed subcommands (`check-openapi`, `check-migrations`, `check-event-schemas`, `benchmark`, `scenario`) with zero production `Effect.runSync` calls.
@@ -132,7 +132,6 @@ Merge `ingest`, `decision`, `gates`, `graph`, `contract`, and `service` into one
 ### Negative Consequences and Trade-offs
 
 - Adding a new harness schema or `Context.Service` capability requires placing the schema/error in `libs/harness/contract`, the port in `libs/harness/service`, and the live `Layer` in `libs/harness/gates` or `libs/harness/graph`.
-- Existing internal imports of `stub` and shared error/schema types must resolve through `@harness/contract` and `@harness/service` re-exports.
 
 ### Deterministic Enforcement
 
@@ -142,7 +141,7 @@ Merge `ingest`, `decision`, `gates`, `graph`, `contract`, and `service` into one
 | Enforce `effect`-only dependencies on `type:contract` packages (`forbidden-contract-dependency`)                                   | `libs/harness/gates/src/plugins/harness-tier-topology.ts`, `libs/harness/contract/src/tier-topology.ts` | `HarnessTierTopology.decide` (`harness gc --strict`) | `HarnessTierTopology.decide`                                                                               |
 | Restrict `type:service` dependencies to `effect` and `type:contract` (`forbidden-service-dependency`)                              | `libs/harness/gates/src/plugins/harness-tier-topology.ts`, `libs/harness/contract/src/tier-topology.ts` | `HarnessTierTopology.decide` (`harness gc --strict`) | `HarnessTierTopology.decide`                                                                               |
 | Ban Node/infra imports inside `type:service` source files (`impure-service-tier-import`)                                           | `libs/harness/gates/src/plugins/harness-tier-topology.ts`, `libs/harness/contract/src/tier-topology.ts` | `HarnessTierTopology.decide` (`harness gc --strict`) | `HarnessTierTopology.decide`                                                                               |
-| Batched workspace file stat/read via `WorkspaceFs` capability seam failing with `WorkspaceFsError`                                 | `libs/harness/gates/src/services/workspace-fs.ts`, `libs/harness/service/src/index.ts`, `libs/harness/infra/src/workspace-fs-live.ts` | `pnpm harness gc --strict` & `pnpm harness verify`  | `WorkspaceFs.statAndReadAll`, `WorkspaceFs.readAndVerifyFile`, `WorkspaceFsError`, `@harness/gates/WorkspaceFs` |
+| Batched workspace file stat/read via `WorkspaceFs` capability seam failing with `WorkspaceFsError`                                 | `libs/harness/gates/src/services/workspace-fs.ts`, `libs/harness/service/src/index.ts`, `libs/harness/infra/src/workspace-fs-live.ts` | `pnpm harness gc --strict` & `pnpm harness verify`  | `WorkspaceFs.statAndReadAll`, `WorkspaceFs.readAndVerifyFile`, `WorkspaceFsError`, `@harness/service/WorkspaceFs` |
 | Native Effect v4 `@harness/infra` (`type:infra`) adapters over `@effect/platform-node` (`NodeServices.layer`, `FileSystem.FileSystem`, `Path.Path`, `ChildProcessSpawner`, `ScopedCache`, `SynchronizedRef`, `Effect.acquireRelease`) with zero `node:*` or global mutable caches in non-infra `libs/harness/*` | `libs/harness/infra/src/index.ts`, `libs/harness/infra/src/ast-gate-cache-live.ts`, `libs/harness/infra/src/decision-cache-live.ts`, `libs/harness/infra/src/unix-socket-daemon-live.ts`, `libs/harness/infra/src/subprocess-runner-live.ts`, `libs/harness/infra/src/node-host-io.ts` | `pnpm harness gc --strict` & `pnpm harness verify`  | `AstGateCache.evaluateCached`, `DecisionCache.lookupOrCompute`, `UnixSocketDaemon.startScoped`, `@harness/service/AstGateCachePort`, `@harness/service/DecisionCachePort`, `@harness/service/UnixSocketDaemonPort`, `DaemonServerError` |
 | Declarative `effect/cli` + `NodeRuntime.runMain` entry with typed repo-check & scenario subcommands (`check-openapi`, `check-migrations`, `check-event-schemas`, `benchmark`, `scenario`) and zero production `Effect.runSync` | `apps/harness-cli/src/commands/declarative-cli.ts`, `apps/harness-cli/src/commands/repo-checks.command.ts`, `apps/harness-cli/src/commands/scenario.command.ts`, `apps/harness-cli/src/commands/scenario-eval.ts` | `pnpm harness gc --strict` & `pnpm harness verify`  | `HarnessCli.runDeclarativeCli`, `HarnessCli.checkOpenApi`, `HarnessCli.checkMigrations`, `HarnessCli.checkEventSchemas`, `HarnessCli.runScenario` |
 | Scoped `ManagedRuntime` MCP tool execution in `apps/harness-mcp` with zero production `Effect.runSync` | `apps/harness-mcp/src/managed-runtime.ts` | `pnpm harness gc --strict` & `pnpm harness verify`  | `HarnessMcp.executeManagedTool` |
