@@ -19,6 +19,7 @@ import * as AiError from "effect/ai/AiError"
 import { makeMockDecisionModelLayer } from "@harness/decision"
 import { buildHarnessGraph, saveGraphSnapshot } from "@harness/graph"
 import { readTelemetryEvents } from "@harness/gates"
+import { nodeSyncHostIo } from "@harness/infra"
 import { match } from "ts-pattern"
 import {
   createServer,
@@ -470,7 +471,7 @@ describe("harness-mcp tools", () => {
   it("resolves reaching tests from disk snapshot when snapshotPath is provided", async () => {
     const tempSnapshotPath = path.join(os.tmpdir(), `test-snapshot-${Date.now()}.json`)
     try {
-      saveGraphSnapshot(graph, tempSnapshotPath)
+      saveGraphSnapshot(graph, tempSnapshotPath, nodeSyncHostIo)
       const tests = await executeTool(
         "harness_tests_reaching",
         { symbolOrSpan: "Sample.greet" },
@@ -742,7 +743,7 @@ describe("harness-mcp tools", () => {
       const verifyPath = path.join(harnessDir, "graph-snapshot.json")
 
       // 1. Case A: graph-snapshot.json is absent, plan-graph-snapshot.json is present
-      saveGraphSnapshot(planGraph, planPath)
+      saveGraphSnapshot(planGraph, planPath, nodeSyncHostIo)
       const resPlanOnly = await executeTool("harness_resolve", {
         symbolOrSpan: "Sample.planFn",
         repoRoot: tmpDir,
@@ -752,7 +753,7 @@ describe("harness-mcp tools", () => {
       })
 
       // 2. Case B: graph-snapshot.json exists, but plan-graph-snapshot.json is newer
-      saveGraphSnapshot(verifyGraph, verifyPath)
+      saveGraphSnapshot(verifyGraph, verifyPath, nodeSyncHostIo)
       const past = new Date(Date.now() - 100000)
       const now = new Date()
       fs.utimesSync(verifyPath, past, past)
@@ -1574,7 +1575,7 @@ describe("harness-mcp tools", () => {
           { repoRoot: tmpDir },
         )
 
-        const events = readTelemetryEvents(tmpDir)
+        const events = readTelemetryEvents(tmpDir, nodeSyncHostIo)
         expect(events).toHaveLength(2)
         expect(events[0]).toMatchObject({
           surface: "mcp",
@@ -1604,7 +1605,7 @@ describe("harness-mcp tools", () => {
             { repoRoot: readOnlyRoot },
           ),
         ).not.toThrow()
-        expect(readTelemetryEvents(readOnlyRoot)).toEqual([])
+        expect(readTelemetryEvents(readOnlyRoot, nodeSyncHostIo)).toEqual([])
       }).pipe(
         Effect.ensuring(
           Effect.sync(() => {

@@ -12,11 +12,12 @@ import {
   decideGraphRewrite,
   extractWorkspaceTypeAwareGraph,
   getNodeKey,
-  OmnigraphSync,
+  makeOmnigraphSyncLayer,
   saveGraphSnapshot,
   syncToOmnigraphAndSnapshot,
   VerificationStatus,
 } from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 import { buildWorkspaceFnIndex } from "@harness/ingest"
 import {
   type CliEnv,
@@ -43,7 +44,8 @@ export const handlePlanCheck = (
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-    const governanceDocs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot)
+    const governanceDocs =
+      options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot, nodeSyncHostIo)
     const graphOnly = argv.includes("--graph-only")
 
     const requireOllama =
@@ -88,7 +90,7 @@ export const handlePlanCheck = (
       }
     }
 
-    const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
+    const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, nodeSyncHostIo)
     if (fnIndex.duplicates.length > 0) {
       return {
         exitCode: 1,
@@ -97,7 +99,7 @@ export const handlePlanCheck = (
       }
     }
 
-    const graph = yield* extractWorkspaceTypeAwareGraph(repoRoot)
+    const graph = yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo)
     const checkResult = checkEffectGraph(graph)
     if (!checkResult.ok) {
       return {
@@ -157,7 +159,7 @@ export const handlePlanCheck = (
     if (!graphOnly) {
       const snapshotPath = join(repoRoot, ".harness", "plan-graph-snapshot.json")
       if (isIsolatedExternalWorkspace(repoRoot)) {
-        saveGraphSnapshot(graph, snapshotPath)
+        saveGraphSnapshot(graph, snapshotPath, nodeSyncHostIo)
         recordTelemetry(options, {
           surface: "cli",
           category: "graph_query",
@@ -168,14 +170,14 @@ export const handlePlanCheck = (
         })
       } else {
         yield* ensureLocalOmnigraphReady(repoRoot)
-        const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
+        const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
         const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
           repoRoot: resolveClusterRepoRoot(repoRoot),
           branch: taskBranches.planBranch,
           from: taskBranches.mainBranch,
           snapshotPath,
         }).pipe(
-          Effect.provide(OmnigraphSync.Live),
+          Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
           Effect.orElseSucceed(() => ({
             syncedToOmnigraph: false,
             snapshotPath,
@@ -225,7 +227,8 @@ export const handlePlanSynth = (
       }
     }
 
-    const graph = options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot))
+    const graph =
+      options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo))
     const rewriteOutcome = yield* decideGraphRewrite(graph, "auto-plan")
     const selected =
       Option.getOrUndefined(rewriteOutcome.result.recommendedCandidate) ??
@@ -275,6 +278,7 @@ export const handlePlanSynth = (
       workspaceRoot: repoRoot,
       initialGraph: graph,
       verifyRoundTrip,
+      hostIo: nodeSyncHostIo,
     })
 
     return yield* finalizeProjectionCliResult({
@@ -322,7 +326,8 @@ export const handleRepair = (
       }
     }
 
-    const graph = options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot))
+    const graph =
+      options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo))
     const rewriteOutcome = yield* decideGraphRewrite(graph, "auto-repair")
     const selected =
       Option.getOrUndefined(rewriteOutcome.result.recommendedCandidate) ??
@@ -367,6 +372,7 @@ export const handleRepair = (
             workspaceRoot: repoRoot,
             initialGraph: graph,
             verifyRoundTrip,
+            hostIo: nodeSyncHostIo,
           })
         : {
             operations: [],

@@ -1,6 +1,6 @@
-import * as fs from "node:fs"
 import * as path from "node:path"
-import { Effect, Option, Schema } from "effect"
+import type { SyncHostIo } from "@harness/service"
+import { Effect, Option, Result, Schema } from "effect"
 import * as Graph from "effect/Graph"
 import { match, P } from "ts-pattern"
 import {
@@ -362,33 +362,29 @@ export const deserializeGraphSnapshotEffect = Effect.fn("GraphEngine.deserialize
 
 export const saveGraphSnapshot = (
   harnessGraph: HarnessGraph,
-  snapshotPath = path.resolve(process.cwd(), ".harness/graph-snapshot.json"),
+  snapshotPath: string,
+  hostIo: SyncHostIo,
 ): void => {
   const dir = path.dirname(snapshotPath)
-  fs.mkdirSync(dir, { recursive: true })
+  hostIo.mkdirRecursiveSync(dir)
   const serialized = serializeGraphSnapshot(harnessGraph)
   const payload = JSON.stringify(serialized, null, 2)
   const tmpPath = `${snapshotPath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`
-  Effect.runSync(
-    Effect.acquireUseRelease(
-      Effect.void,
-      () =>
-        Effect.sync(() => {
-          fs.writeFileSync(tmpPath, payload, "utf8")
-          fs.renameSync(tmpPath, snapshotPath)
-        }),
-      () =>
-        Effect.sync(() => {
-          if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath)
-        }),
-    ),
-  )
+  const res = Result.try(() => {
+    hostIo.writeTextSync(tmpPath, payload)
+    hostIo.renameSync(tmpPath, snapshotPath)
+  })
+  if (hostIo.existsSync(tmpPath)) {
+    Result.try(() => hostIo.unlinkSync(tmpPath))
+  }
+  Result.getOrThrow(res)
 }
 
 export const loadGraphSnapshotEffect = Effect.fn("GraphEngine.loadSnapshot")(function* (
-  snapshotPath = path.resolve(process.cwd(), ".harness/graph-snapshot.json"),
+  snapshotPath: string,
+  hostIo: SyncHostIo,
 ) {
-  if (!fs.existsSync(snapshotPath)) {
+  if (!hostIo.existsSync(snapshotPath)) {
     return yield* new GraphSnapshotError({
       path: snapshotPath,
       reason: "missing-file",
@@ -397,7 +393,7 @@ export const loadGraphSnapshotEffect = Effect.fn("GraphEngine.loadSnapshot")(fun
   }
 
   const raw = yield* Effect.try({
-    try: () => fs.readFileSync(snapshotPath, "utf8"),
+    try: () => hostIo.readTextSync(snapshotPath),
     catch: (err) =>
       new GraphSnapshotError({
         path: snapshotPath,

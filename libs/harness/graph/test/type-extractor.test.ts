@@ -6,7 +6,6 @@ import * as Graph from "effect/Graph"
 import { describe, expect, it } from "vitest"
 import {
   buildHarnessGraph,
-  clearWarmProgramSessions,
   computeBaseTopologyHash,
   computeDeclHash,
   createTypeScriptProgramSession,
@@ -19,11 +18,12 @@ import {
   findCallees,
   findCallers,
   findTestsReaching,
-  getOrCreateWarmProgramSession,
   isInfraOrCloudIdentifier,
   resolveNode,
   stripCommentsAndTestTitles,
 } from "../src/index.js"
+import { loadFileGraphFragmentsFromDisk } from "../src/extractor/compiler-session.js"
+import { testHostIo } from "./helpers/test-host-io.js"
 import {
   type EffectFnNode,
   getEdgeKey,
@@ -262,7 +262,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
 
   it("extracts workspace type-aware graph from repoRoot", () => {
     const repoRoot = path.resolve(__dirname, "../../../..")
-    const resultGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(repoRoot))
+    const resultGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(repoRoot, testHostIo))
 
     // Sample greet function should be indexed
     const greetNode = resolveNode(resultGraph, "Sample.greet")
@@ -410,7 +410,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
         `,
       )
 
-      const resultGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir))
+      const resultGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir, testHostIo))
 
       const decideNode = resolveNode(resultGraph, "Cart.decide")
       const evolveNode = resolveNode(resultGraph, "Cart.evolve")
@@ -459,7 +459,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
         `,
       )
 
-      const resultGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir))
+      const resultGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir, testHostIo))
 
       const primitiveNode = resolveNode(
         resultGraph,
@@ -590,7 +590,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
         `,
       )
 
-      const resultGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir))
+      const resultGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir, testHostIo))
 
       const scalarNode = resolveNode(
         resultGraph,
@@ -820,8 +820,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
   })
 
   it("PERF-01: warm TypeScriptProgramSession reuses unchanged SourceFiles and applies declHash early cut-off on body-only edits", async () => {
-    clearWarmProgramSessions()
-    const session = createTypeScriptProgramSession(process.cwd())
+    const session = createTypeScriptProgramSession(process.cwd(), testHostIo)
 
     const baseFiles = [
       {
@@ -930,14 +929,15 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
         `import { Effect } from "effect"\nexport const ping = Effect.fn("Sample.ping")(function* () { return yield* Effect.succeed(1) })\n`,
         "utf-8",
       )
-      const wsSession = getOrCreateWarmProgramSession(tmpRoot)
+      const wsSession = createTypeScriptProgramSession(tmpRoot, testHostIo)
+      wsSession.persistToDisk = true
       const wsGraph1 = await Effect.runPromise(
-        extractTypeGraph({ repoRoot: tmpRoot, session: wsSession }),
+        extractTypeGraph({ repoRoot: tmpRoot, hostIo: testHostIo, session: wsSession }),
       )
       expect(resolveNode(wsGraph1, "Sample.ping")?._tag).toBe("EffectFn")
 
       const wsGraph2 = await Effect.runPromise(
-        extractTypeGraph({ repoRoot: tmpRoot, session: wsSession }),
+        extractTypeGraph({ repoRoot: tmpRoot, hostIo: testHostIo, session: wsSession }),
       )
       expect(wsSession.lastReextractedFiles).toEqual([])
       expect(resolveNode(wsGraph2, "Sample.ping")?._tag).toBe("EffectFn")
@@ -948,10 +948,11 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
       }
 
       // Verify persistent .harness/cache/file-graph-v1.json reload across cold process sessions (F-9)
-      clearWarmProgramSessions()
-      const reloadedSession = getOrCreateWarmProgramSession(tmpRoot)
+      const reloadedSession = createTypeScriptProgramSession(tmpRoot, testHostIo)
+      reloadedSession.persistToDisk = true
+      loadFileGraphFragmentsFromDisk(tmpRoot, reloadedSession, testHostIo)
       const wsGraphReloaded = await Effect.runPromise(
-        extractTypeGraph({ repoRoot: tmpRoot, session: reloadedSession }),
+        extractTypeGraph({ repoRoot: tmpRoot, hostIo: testHostIo, session: reloadedSession }),
       )
       expect(reloadedSession.lastReextractedFiles).toEqual([])
       const reloadedNodeKeys = Array.from(Graph.nodes(wsGraphReloaded.graph))
@@ -974,7 +975,6 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
   })
 
   it("maintains strict warm-vs-cold graph equality across unannotated inferred-return edits, 2-hop cones, file add/delete, and packageTag changes (F-4, F-5, F-13)", () => {
-    clearWarmProgramSessions()
     const session = createTypeScriptProgramSession("/virtual-eq-repo")
 
     const assertWarmEqualsCold = (
@@ -1131,7 +1131,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
       fs.mkdirSync(domainDir, { recursive: true })
       fs.writeFileSync(path.join(domainDir, "index.ts"), "export const okValue: number = 1\n", "utf-8")
 
-      const session = createTypeScriptProgramSession(tmpRoot)
+      const session = createTypeScriptProgramSession(tmpRoot, testHostIo)
       const brokenDiags = evaluateOverlayDiagnostics(
         tmpRoot,
         { "libs/sample/domain/src/index.ts": 'export const okValue: number = "broken"\n' },
@@ -1147,7 +1147,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
       )
       expect(cleanDiags.filter((d) => d.severity === "error")).toEqual([])
 
-      const g1 = await Effect.runPromise(extractWorkspaceTypeAwareGraph(tmpRoot, { session }))
+      const g1 = await Effect.runPromise(extractWorkspaceTypeAwareGraph(tmpRoot, testHostIo, { session }))
       expect(session.lastWorkspaceSnapshot?.baseTopologyHash).toBe(computeBaseTopologyHash(session))
       expect(g1.nodeIndexByKey).toBeInstanceOf(Map)
       expect(g1.branchingViolations).toEqual([])
@@ -1184,14 +1184,14 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
       fs.symlinkSync(externalFile, symlinkPath)
 
       // 1. Direct workspace extraction ignores symlink escaping repoRoot
-      const graph = await Effect.runPromise(extractWorkspaceTypeAwareGraph(tmpRepo))
+      const graph = await Effect.runPromise(extractWorkspaceTypeAwareGraph(tmpRepo, testHostIo))
       expect(graph.nodeIndexByKey).toBeInstanceOf(Map)
       expect(resolveNode(graph, "Sample.validFn")?._tag).toBe("EffectFn")
       expect(resolveNode(graph, "Sample.secretFn")).toBeUndefined()
 
       // 2. Overlay normalization also rejects symlink escaping repoRoot
       const overlayResult = await Effect.runPromise(
-        extractWorkspaceTypeAwareGraph(tmpRepo, {
+        extractWorkspaceTypeAwareGraph(tmpRepo, testHostIo, {
           overlays: {
             "libs/sample/domain/src/escaped-link.ts": `import { Effect } from "effect"\nexport const secretFn = Effect.fn("Sample.secretFn")(function* () { return yield* Effect.succeed("overlay-leak") })\n`,
             "../../outside-escape.ts": `import { Effect } from "effect"\nexport const secretFn = Effect.fn("Sample.secretFn")(function* () { return yield* Effect.succeed("overlay-leak2") })\n`,

@@ -3,10 +3,10 @@ import { Cause, Effect, Fiber, Option, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   buildHarnessGraph,
+  createTypeScriptProgramSession,
   decideGraphProjection,
   decideGraphRewrite,
   type EntityNode,
-  getOrCreateWarmProgramSession,
   type GraphMeasure,
   type GraphPatch,
   GraphProjector,
@@ -23,6 +23,7 @@ import {
   verifyProjectedSubset,
   verifySubgraphMonomorphism,
 } from "../src/index.js"
+import { testHostIo } from "./helpers/test-host-io.js"
 
 const zeroMeasure: GraphMeasure = {
   archViolations: NonNegativeCount.make(0),
@@ -1067,7 +1068,7 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
     () =>
       Effect.gen(function* () {
         const repoRoot = process.cwd()
-        const warmSession = getOrCreateWarmProgramSession(repoRoot)
+        const warmSession = createTypeScriptProgramSession(repoRoot, testHostIo)
         const sentinelKey = "__sentinel__/preserve-cache.ts"
         const hadSentinelBefore = warmSession.fileFragmentCache.has(sentinelKey)
         warmSession.fileFragmentCache.set(sentinelKey, {

@@ -11,9 +11,9 @@
  * - node-sqlite-in-infra: Enforces real workerd storage against branching violations.
  * - unused-contract-export: Detects dead contract exports not used across tiers.
  */
-import { type Dirent, existsSync, readdirSync, readFileSync } from "node:fs"
 import { join, relative } from "node:path"
 import * as Graph from "effect/Graph"
+import type { SyncHostIo } from "@harness/service"
 import {
   collectWorkspaceAllFiles,
   collectWorkspaceTsFiles,
@@ -27,17 +27,20 @@ import {
 
 export const checkUnusedContractExports = (
   repoRoot: string,
+  hostIo: SyncHostIo,
   targetScope?: string,
 ): ReadonlyArray<GcFinding> => {
   const libsDir = join(repoRoot, "libs")
-  if (!existsSync(libsDir)) return []
+  if (!hostIo.existsSync(libsDir)) return []
   const scopes = targetScope !== undefined
     ? [targetScope]
     : safeFs<ReadonlyArray<string>>(
-        () => {
-          const dirents: ReadonlyArray<Dirent> = readdirSync(libsDir, { withFileTypes: true })
-          return dirents.filter((e) => e.isDirectory()).map((e) => e.name).sort((a, b) => a.localeCompare(b))
-        },
+        () =>
+          hostIo
+            .readdirSync(libsDir)
+            .filter((e) => e.isDirectory)
+            .map((e) => e.name)
+            .sort((a, b) => a.localeCompare(b)),
         [],
       )
   const findings: Array<GcFinding> = []
@@ -45,27 +48,21 @@ export const checkUnusedContractExports = (
   for (const scope of scopes) {
     const scopeDir = join(libsDir, scope)
     const contractSrcDir = join(scopeDir, "contract", "src")
-    if (!existsSync(contractSrcDir)) continue
+    if (!hostIo.existsSync(contractSrcDir)) continue
 
     const existingSiblingDirs: Array<string> = []
-    const scopeChildren = safeFs<ReadonlyArray<Dirent>>(
-      () => readdirSync(scopeDir, { withFileTypes: true }),
-      [],
-    )
+    const scopeChildren = safeFs(() => hostIo.readdirSync(scopeDir), [])
     for (const child of scopeChildren) {
-      if (child.isDirectory() && child.name !== "contract" && child.name !== "docs") {
+      if (child.isDirectory && child.name !== "contract" && child.name !== "docs") {
         existingSiblingDirs.push(join(scopeDir, child.name))
       }
     }
     const appsDir = join(repoRoot, "apps")
-    if (existsSync(appsDir)) {
-      const appChildren = safeFs<ReadonlyArray<Dirent>>(
-        () => readdirSync(appsDir, { withFileTypes: true }),
-        [],
-      )
+    if (hostIo.existsSync(appsDir)) {
+      const appChildren = safeFs(() => hostIo.readdirSync(appsDir), [])
       for (const appChild of appChildren) {
         if (
-          appChild.isDirectory() &&
+          appChild.isDirectory &&
           (appChild.name === scope || appChild.name.startsWith(`${scope}-`))
         ) {
           existingSiblingDirs.push(join(appsDir, appChild.name))
@@ -73,14 +70,14 @@ export const checkUnusedContractExports = (
       }
     }
     const contractScriptsDir = join(scopeDir, "contract", "scripts")
-    if (existsSync(contractScriptsDir)) existingSiblingDirs.push(contractScriptsDir)
+    if (hostIo.existsSync(contractScriptsDir)) existingSiblingDirs.push(contractScriptsDir)
     if (existingSiblingDirs.length === 0) continue
 
-    const contractFiles = collectWorkspaceTsFiles(contractSrcDir)
+    const contractFiles = collectWorkspaceTsFiles(contractSrcDir, hostIo)
     const siblingFiles: Array<string> = []
     for (const sibDir of existingSiblingDirs) {
-      if (sibDir.endsWith("/scripts")) siblingFiles.push(...collectWorkspaceAllFiles(sibDir))
-      else siblingFiles.push(...collectWorkspaceTsFiles(sibDir))
+      if (sibDir.endsWith("/scripts")) siblingFiles.push(...collectWorkspaceAllFiles(sibDir, hostIo))
+      else siblingFiles.push(...collectWorkspaceTsFiles(sibDir, hostIo))
     }
 
     const stripCommentsAndStrings = (text: string): string =>
@@ -90,20 +87,20 @@ export const checkUnusedContractExports = (
         .replace(/(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/g, '""')
 
     const combinedSiblingContent = siblingFiles
-      .map((f) => safeFs(() => readFileSync(f, "utf8"), ""))
+      .map((f) => safeFs(() => hostIo.readTextSync(f), ""))
       .map((text) => stripCommentsAndStrings(text).replace(/export\s+(?:type\s+)?\{[^}]*\}\s+from\s+["'][^"']*["']/g, ""))
       .join("\n")
 
     const nonTestSiblingContent = siblingFiles
       .filter((f) => !f.endsWith(".test.ts") && !f.endsWith(".spec.ts"))
-      .map((f) => safeFs(() => readFileSync(f, "utf8"), ""))
+      .map((f) => safeFs(() => hostIo.readTextSync(f), ""))
       .map(stripCommentsAndStrings)
       .join("\n")
 
     const hasActiveStubs = /\bstub\s*</.test(nonTestSiblingContent)
 
     for (const contractFile of contractFiles) {
-      const content = safeFs(() => readFileSync(contractFile, "utf8"), "")
+      const content = safeFs(() => hostIo.readTextSync(contractFile), "")
       const strippedContractContent = stripCommentsAndStrings(content)
       const relContractFile = relative(repoRoot, contractFile).replace(/\\/g, "/")
       const exportRegex = /(?:^|\n)\s*export\s+(?:const|class|function)\s+([A-Za-z_$][\w$]*)/g

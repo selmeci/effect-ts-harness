@@ -1,8 +1,8 @@
-import { Effect, Option } from "effect"
+import { Option, Result } from "effect"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
 import {
-  decideConceptLattice,
+  computeConceptLatticeSync,
   HARNESS_PERA_CONCEPT_LATTICE_CONFIG,
   validateRelationRolesWithLattice,
 } from "../concept-lattice.js"
@@ -123,16 +123,12 @@ export const mapPlaysRoleToOmnigraphEdgeName = (
 export const isHarnessGraph = (u: unknown): u is HarnessGraph =>
   typeof u === "object" && u !== null && HarnessGraphTypeId in u
 
-let cachedPeraConceptLatticeResult: ConceptLatticeResult | undefined
+const PERA_CONCEPT_LATTICE_RESULT: ConceptLatticeResult = Result.getOrThrow(
+  computeConceptLatticeSync(HARNESS_PERA_CONCEPT_LATTICE_CONFIG),
+)
 
-export const getPeraConceptLatticeResult = (): ConceptLatticeResult => {
-  if (cachedPeraConceptLatticeResult === undefined) {
-    cachedPeraConceptLatticeResult = Effect.runSync(
-      decideConceptLattice(HARNESS_PERA_CONCEPT_LATTICE_CONFIG),
-    )
-  }
-  return cachedPeraConceptLatticeResult
-}
+export const getPeraConceptLatticeResult = (): ConceptLatticeResult =>
+  PERA_CONCEPT_LATTICE_RESULT
 
 export const pushUnique = <T>(arr: Array<T>, item: T): void => {
   if (!arr.includes(item)) arr.push(item)

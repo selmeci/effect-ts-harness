@@ -211,6 +211,9 @@ importers:
 
   apps/harness-cli:
     dependencies:
+      '@effect/platform-node':
+        specifier: 4.0.0
+        version: 4.0.0(effect@4.0.0)(redis@6.3.0)
       '@harness/contract':
         specifier: workspace:*
         version: link:../../libs/harness/contract
@@ -223,9 +226,15 @@ importers:
       '@harness/graph':
         specifier: workspace:*
         version: link:../../libs/harness/graph
+      '@harness/infra':
+        specifier: workspace:*
+        version: link:../../libs/harness/infra
       '@harness/ingest':
         specifier: workspace:*
         version: link:../../libs/harness/ingest
+      '@harness/service':
+        specifier: workspace:*
+        version: link:../../libs/harness/service
       effect:
         specifier: 4.0.0
         version: 4.0.0
@@ -242,6 +251,9 @@ importers:
 
   apps/harness-mcp:
     dependencies:
+      '@effect/platform-node':
+        specifier: 4.0.0
+        version: 4.0.0(effect@4.0.0)(redis@6.3.0)
       '@harness/contract':
         specifier: workspace:*
         version: link:../../libs/harness/contract
@@ -254,9 +266,15 @@ importers:
       '@harness/graph':
         specifier: workspace:*
         version: link:../../libs/harness/graph
+      '@harness/infra':
+        specifier: workspace:*
+        version: link:../../libs/harness/infra
       '@harness/ingest':
         specifier: workspace:*
         version: link:../../libs/harness/ingest
+      '@harness/service':
+        specifier: workspace:*
+        version: link:../../libs/harness/service
       '@modelcontextprotocol/sdk':
         specifier: 1.32.0
         version: 1.32.0(supports-color@7.2.0)(zod@4.6.5)
@@ -431,9 +449,15 @@ importers:
       '@effect/ai-typesafe':
         specifier: 4.0.0
         version: 4.0.0(effect@4.0.0)
+      '@harness/contract':
+        specifier: workspace:*
+        version: link:../contract
       '@harness/gates':
         specifier: workspace:*
         version: link:../gates
+      '@harness/service':
+        specifier: workspace:*
+        version: link:../service
       effect:
         specifier: 4.0.0
         version: 4.0.0
@@ -484,6 +508,9 @@ importers:
       '@harness/contract':
         specifier: workspace:*
         version: link:../contract
+      '@harness/service':
+        specifier: workspace:*
+        version: link:../service
       '@modernrelay/omnigraph':
         specifier: 0.14.0
         version: 0.14.0
@@ -507,11 +534,48 @@ importers:
         specifier: 5.0.3
         version: 5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))
 
+  libs/harness/infra:
+    dependencies:
+      '@effect/platform-node':
+        specifier: 4.0.0
+        version: 4.0.0(effect@4.0.0)(redis@6.3.0)
+      '@harness/contract':
+        specifier: workspace:*
+        version: link:../contract
+      '@harness/gates':
+        specifier: workspace:*
+        version: link:../gates
+      '@harness/graph':
+        specifier: workspace:*
+        version: link:../graph
+      '@harness/service':
+        specifier: workspace:*
+        version: link:../service
+      effect:
+        specifier: 4.0.0
+        version: 4.0.0
+    devDependencies:
+      '@effect/vitest':
+        specifier: 4.0.0
+        version: 4.0.0(effect@4.0.0)(vitest@5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)))
+      '@harness/decision':
+        specifier: workspace:*
+        version: link:../decision
+      '@types/node':
+        specifier: 26.6.5
+        version: 26.6.5
+      vitest:
+        specifier: 5.0.3
+        version: 5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))
+
   libs/harness/ingest:
     dependencies:
       '@ast-grep/napi':
         specifier: 0.51.0
         version: 0.51.0
+      '@harness/service':
+        specifier: workspace:*
+        version: link:../service
       effect:
         specifier: 4.0.0
         version: 4.0.0

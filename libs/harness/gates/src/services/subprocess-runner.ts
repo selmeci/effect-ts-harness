@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process"
 import { Effect, Layer } from "effect"
 import {
   ErrorReasonMessage,
@@ -8,7 +7,11 @@ import {
   SubprocessExitCode,
   SubprocessOutput,
 } from "@harness/contract"
-import { HarnessSubprocessRunner, type HarnessSubprocessRunnerShape } from "@harness/service"
+import {
+  HarnessSubprocessRunner,
+  type HarnessSubprocessRunnerShape,
+  type SyncHostIo,
+} from "@harness/service"
 
 export { HarnessSubprocessRunner, type HarnessSubprocessRunnerShape }
 
@@ -42,55 +45,38 @@ export const validateSubprocessInput = (
     }
   })
 
-export const HarnessSubprocessRunnerLive: Layer.Layer<HarnessSubprocessRunner> = Layer.succeed(
-  HarnessSubprocessRunner,
-  {
+export const makeHarnessSubprocessRunnerHostIoLayer = (
+  hostIo: SyncHostIo,
+): Layer.Layer<HarnessSubprocessRunner> =>
+  Layer.succeed(HarnessSubprocessRunner, {
     exec: (input) =>
       Effect.gen(function* () {
         yield* validateSubprocessInput(input)
-        const res = spawnSync(input.command, [...input.args], {
-          cwd: input.cwd,
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "pipe"],
-          timeout: input.timeoutMs ?? 60_000,
-          maxBuffer: input.maxBufferBytes ?? 10 * 1024 * 1024,
-          windowsHide: true,
+        const res = yield* Effect.try({
+          try: () =>
+            hostIo.execFileSync(input.command, input.args, {
+              cwd: input.cwd,
+              timeoutMs: input.timeoutMs ?? 60_000,
+              maxBufferBytes: input.maxBufferBytes ?? 10 * 1024 * 1024,
+            }),
+          catch: (err) =>
+            new HarnessSubprocessError({
+              command: input.command,
+              exitCode: SubprocessExitCode.make(1),
+              stderr: SubprocessOutput.make(err instanceof Error ? err.message : String(err)),
+              reason: ErrorReasonMessage.make(
+                `Command '${input.command}' failed to spawn: ${err instanceof Error ? err.message : String(err)}`,
+              ),
+            }),
         })
-        if (res.error !== undefined) {
-          const isTimeout =
-            "code" in res.error &&
-            (res.error as { readonly code?: unknown }).code === "ETIMEDOUT"
-          const reasonText = isTimeout
-            ? `Command '${input.command}' timed out`
-            : `Command '${input.command}' failed to spawn: ${res.error.message}`
-          const stderrText = (res.stderr ?? "").trim() || res.error.message
-          return yield* new HarnessSubprocessError({
-            command: input.command,
-            exitCode: SubprocessExitCode.make(1),
-            stderr: SubprocessOutput.make(stderrText),
-            reason: ErrorReasonMessage.make(reasonText),
-          })
-        }
-        if (res.signal !== null) {
-          const stderrText = (res.stderr ?? "").trim() || `Terminated by signal ${res.signal}`
-          return yield* new HarnessSubprocessError({
-            command: input.command,
-            exitCode: SubprocessExitCode.make(1),
-            stderr: SubprocessOutput.make(stderrText),
-            reason: ErrorReasonMessage.make(
-              `Command '${input.command}' terminated by signal ${res.signal}`,
-            ),
-          })
-        }
         return {
           command: input.command,
-          exitCode: SubprocessExitCode.make(res.status ?? 0),
-          stdout: SubprocessOutput.make(res.stdout ?? ""),
-          stderr: SubprocessOutput.make(res.stderr ?? ""),
+          exitCode: SubprocessExitCode.make(res.exitCode),
+          stdout: SubprocessOutput.make(res.stdout),
+          stderr: SubprocessOutput.make(res.stderr),
         }
       }),
-  },
-)
+  })
 
 export const makeHarnessSubprocessRunnerTestLayer = (
   handler: (

@@ -18,6 +18,7 @@ import * as DecisionModel from "effect/ai/DecisionModel"
 import { makeFailingDecisionModelLayer, makeMockDecisionModelLayer } from "@harness/decision"
 import { readTelemetryEvents, writeVerifyStamp } from "@harness/gates"
 import { buildHarnessGraph, ShadowFileOverlay } from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 // oxlint-disable-next-line @nx/enforce-module-boundaries
 import syntaxBansPlugin from "../../../tools/oxlint/syntax-bans.js"
 import {
@@ -543,7 +544,7 @@ enforced_by:
           reason: expect.stringContaining("Run harness verify"),
         })
 
-        writeVerifyStamp(dir, "impl/current")
+        writeVerifyStamp(dir, nodeSyncHostIo, "impl/current")
         const green = await runCli(["done"], {
           repoRoot: dir,
           decisionLayer: makeMockDecisionModelLayer({
@@ -572,7 +573,7 @@ enforced_by:
     it("blocks when planGraph vs implGraph diff detects missing functions or remaining stubs", async () => {
       const dir = mkdtempSync(join(tmpdir(), "harness-cli-done-diff-"))
       try {
-        writeVerifyStamp(dir, "impl/current")
+        writeVerifyStamp(dir, nodeSyncHostIo, "impl/current")
 
         const planGraph = buildHarnessGraph({
           fns: [
@@ -609,7 +610,7 @@ enforced_by:
     it("blocks when plan step coverage check fails", async () => {
       const dir = mkdtempSync(join(tmpdir(), "harness-cli-done-cov-"))
       try {
-        writeVerifyStamp(dir, "impl/current")
+        writeVerifyStamp(dir, nodeSyncHostIo, "impl/current")
 
         const failingCovLayer = makeMockDecisionModelLayer({
           implementedProb: 0.3,
@@ -646,7 +647,7 @@ enforced_by:
         })
         expect(res.exitCode).toBe(0)
         expect(res.stdout).toBe("")
-        const events = readTelemetryEvents(dir)
+        const events = readTelemetryEvents(dir, nodeSyncHostIo)
         expect(events).toHaveLength(1)
         expect(events[0]?.detail).toBe("fullyIdle=false")
         expect(existsSync(join(dir, ".harness", "session-report.json"))).toBe(false)
@@ -2714,7 +2715,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       })
       expect(doneRes.exitCode).toBe(0)
       expect(JSON.parse(doneRes.stdout)).toEqual({ decision: "stop" })
-      const events = readTelemetryEvents(dir)
+      const events = readTelemetryEvents(dir, nodeSyncHostIo)
       expect(events).toHaveLength(1)
       expect(events[0]?.detail).toBe("subagent=true")
 
@@ -2774,7 +2775,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       })
       expect(readOnlyRes.exitCode).toBe(0)
       expect(JSON.parse(readOnlyRes.stdout)).toEqual({ decision: "stop" })
-      const eventsAfterReadOnly = readTelemetryEvents(dir)
+      const eventsAfterReadOnly = readTelemetryEvents(dir, nodeSyncHostIo)
       expect(eventsAfterReadOnly.at(-1)?.detail).toBe("readOnly=true")
 
       const mutatingTranscript = join(dir, "mutating-transcript.jsonl")

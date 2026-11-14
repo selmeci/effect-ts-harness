@@ -1,8 +1,8 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Effect, Exit, Layer, Schema } from "effect"
-import { buildWorkspaceFnIndex, runWithTestTracer } from "@harness/ingest"
+import { Cause, Effect, Exit, Layer, Result, Schema } from "effect"
+import { buildWorkspaceFnIndex, runWithTestTracer, type SyncHostIo } from "@harness/ingest"
 import {
   buildHarnessGraph,
   findTestsReaching,
@@ -35,12 +35,29 @@ const resolveRepoRoot = (startDir: string): string => {
   return startDir
 }
 
+const testHostIo: SyncHostIo = {
+  existsSync: (p) => fs.existsSync(p),
+  isFileSync: (p) => Result.getOrElse(Result.try(() => fs.statSync(p).isFile()), () => false),
+  isDirectorySync: (p) => Result.getOrElse(Result.try(() => fs.statSync(p).isDirectory()), () => false),
+  isSymbolicLinkSync: (p) => Result.getOrElse(Result.try(() => fs.lstatSync(p).isSymbolicLink()), () => false),
+  readTextSync: (p) => fs.readFileSync(p, "utf8"),
+  readBytesSync: (p) => fs.readFileSync(p),
+  writeTextSync: (p, c) => { fs.writeFileSync(p, c, "utf8") },
+  appendTextSync: (p, c) => { fs.appendFileSync(p, c, "utf8") },
+  mkdirRecursiveSync: (p, m) => { fs.mkdirSync(p, m === undefined ? { recursive: true } : { recursive: true, mode: m }) },
+  renameSync: (a, b) => { fs.renameSync(a, b) },
+  unlinkSync: (p) => { fs.unlinkSync(p) },
+  readdirSync: (p) => fs.readdirSync(p, { withFileTypes: true }).map((e) => ({ name: e.name, isFile: e.isFile(), isDirectory: e.isDirectory() })),
+  realpathSync: (p) => fs.realpathSync(p),
+  execFileSync: () => ({ exitCode: 1, stdout: "", stderr: "unused in unit test" }),
+}
+
 describe("greet", () => {
   it.effect("greets by name", () =>
     Effect.gen(function* () {
       const testId = "libs/sample/domain/test/index.test.ts::greets by name"
       const repoRoot = resolveRepoRoot(process.cwd())
-      const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
+      const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, testHostIo)
 
       const { result, edges } = yield* runWithTestTracer(
         testId,
@@ -81,8 +98,8 @@ describe("greet", () => {
 
       if (process.env.HARNESS_TRACE === "1") {
         const snapshotPath = path.join(repoRoot, ".harness", "graph-snapshot.json")
-        saveGraphSnapshot(graph, snapshotPath)
-        const loadedGraph = yield* loadGraphSnapshotEffect(snapshotPath)
+        saveGraphSnapshot(graph, snapshotPath, testHostIo)
+        const loadedGraph = yield* loadGraphSnapshotEffect(snapshotPath, testHostIo)
         const reachingFromLoaded = findTestsReaching(loadedGraph, "Sample.greet")
         expect(reachingFromLoaded.map((t) => t.testId)).toContain(testId)
       }
@@ -207,7 +224,7 @@ describe("uploadPhoto", () => {
     Effect.gen(function* () {
       const testId = "libs/sample/domain/test/index.test.ts::uploads photo with traced calls"
       const repoRoot = resolveRepoRoot(process.cwd())
-      const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
+      const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, testHostIo)
       const { testLayer, photos, getCount } = makeTestLayers(5)
 
       const { result, edges } = yield* runWithTestTracer(

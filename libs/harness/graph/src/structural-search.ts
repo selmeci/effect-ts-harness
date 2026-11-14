@@ -1,7 +1,7 @@
-import * as fs from "node:fs"
 import * as path from "node:path"
 import { Lang, parse } from "@ast-grep/napi"
-import { Effect, Schema } from "effect"
+import type { SyncHostIo } from "@harness/service"
+import { Effect, Result, Schema } from "effect"
 import { NonNegativeCount } from "./model.js"
 
 export const StructuralSearchPattern = Schema.NonEmptyString.pipe(
@@ -73,6 +73,7 @@ export type StructuralSearchInput = typeof StructuralSearchInput.Type
 
 export interface StructuralSearchOptions {
   readonly pattern: string
+  readonly hostIo: SyncHostIo
   readonly repoRoot?: string | undefined
   readonly filePath?: string | undefined
   readonly paths?: ReadonlyArray<string> | undefined
@@ -97,10 +98,10 @@ const isAllowedFile = (fileName: string, allowJsJson: boolean): boolean => {
   return false
 }
 
-const resolveRepoRoot = (startDir: string): string => {
+const resolveRepoRoot = (startDir: string, hostIo: SyncHostIo): string => {
   let curr = path.resolve(startDir)
   while (curr !== path.dirname(curr)) {
-    if (fs.existsSync(path.join(curr, "pnpm-workspace.yaml"))) {
+    if (hostIo.existsSync(path.join(curr, "pnpm-workspace.yaml"))) {
       return curr
     }
     curr = path.dirname(curr)
@@ -109,18 +110,22 @@ const resolveRepoRoot = (startDir: string): string => {
 }
 
 const tryOrUndefined = <A>(fn: () => A): A | undefined =>
-  Effect.runSync(Effect.try(fn).pipe(Effect.orElseSucceed(() => undefined)))
+  Result.getOrElse(Result.try(fn), () => undefined)
 
-const isContainedInRoot = (repoRoot: string, candidate: string): string | undefined => {
+const isContainedInRoot = (
+  repoRoot: string,
+  candidate: string,
+  hostIo: SyncHostIo,
+): string | undefined => {
   const resolved = path.resolve(repoRoot, candidate)
   const rel = path.relative(repoRoot, resolved).replace(/\\/g, "/")
   if (rel.startsWith("..") || path.isAbsolute(rel)) {
     return undefined
   }
-  if (fs.existsSync(resolved)) {
+  if (hostIo.existsSync(resolved)) {
     const realInside = tryOrUndefined(() => {
-      const realRepo = fs.realpathSync.native(repoRoot)
-      const realTarget = fs.realpathSync.native(resolved)
+      const realRepo = hostIo.realpathSync(repoRoot)
+      const realTarget = hostIo.realpathSync(resolved)
       const realRel = path.relative(realRepo, realTarget).replace(/\\/g, "/")
       return !realRel.startsWith("..") && !path.isAbsolute(realRel)
     })
@@ -136,9 +141,10 @@ const walkDir = (
   absDir: string,
   allowJsJson: boolean,
   accum: Set<string>,
+  hostIo: SyncHostIo,
 ): void => {
-  if (!fs.existsSync(absDir)) return
-  const entries = tryOrUndefined(() => fs.readdirSync(absDir, { withFileTypes: true }))
+  if (!hostIo.existsSync(absDir)) return
+  const entries = tryOrUndefined(() => hostIo.readdirSync(absDir))
   if (entries === undefined) return
   for (const entry of entries) {
     const name = entry.name
@@ -153,11 +159,11 @@ const walkDir = (
       continue
     }
     const full = path.join(absDir, name)
-    if (entry.isDirectory()) {
-      walkDir(repoRoot, full, allowJsJson, accum)
+    if (entry.isDirectory) {
+      walkDir(repoRoot, full, allowJsJson, accum, hostIo)
     }
-    if (entry.isFile() && isAllowedFile(name, allowJsJson)) {
-      const rel = isContainedInRoot(repoRoot, full)
+    if (entry.isFile && isAllowedFile(name, allowJsJson)) {
+      const rel = isContainedInRoot(repoRoot, full, hostIo)
       if (rel !== undefined && rel.length > 0) {
         accum.add(rel)
       }
@@ -169,6 +175,7 @@ const collectSearchFiles = (
   repoRoot: string,
   options: StructuralSearchOptions,
 ): ReadonlyArray<string> => {
+  const { hostIo } = options
   const hasSpecificFiles =
     (options.filePath !== undefined && options.filePath.trim().length > 0) ||
     (options.paths !== undefined && options.paths.length > 0)
@@ -192,27 +199,22 @@ const collectSearchFiles = (
     }
 
     for (const rawPath of rawPaths) {
-      const rel = isContainedInRoot(repoRoot, rawPath)
+      const rel = isContainedInRoot(repoRoot, rawPath, hostIo)
       if (rel === undefined) {
         // Escapes repo root -> reject/skip
         continue
       }
       const abs = path.resolve(repoRoot, rawPath)
-      if (!fs.existsSync(abs)) {
+      if (!hostIo.existsSync(abs)) {
         continue
       }
-      const stat = tryOrUndefined(() => fs.statSync(abs))
-      if (stat === undefined) {
-        continue
-      }
-      if (stat.isFile()) {
+      if (hostIo.isFileSync(abs)) {
         const base = path.basename(abs)
         if (isAllowedFile(base, allowJsJson)) {
           accum.add(rel)
         }
-      }
-      if (stat.isDirectory()) {
-        walkDir(repoRoot, abs, allowJsJson, accum)
+      } else if (hostIo.isDirectorySync(abs)) {
+        walkDir(repoRoot, abs, allowJsJson, accum, hostIo)
       }
     }
   } else {
@@ -221,23 +223,18 @@ const collectSearchFiles = (
       if (typeof subDir !== "string" || subDir.trim().length === 0) {
         continue
       }
-      const rel = isContainedInRoot(repoRoot, subDir.trim())
+      const rel = isContainedInRoot(repoRoot, subDir.trim(), hostIo)
       if (rel === undefined) {
         // Escapes repo root -> reject/skip
         continue
       }
       const abs = path.resolve(repoRoot, subDir.trim())
-      if (!fs.existsSync(abs)) {
+      if (!hostIo.existsSync(abs)) {
         continue
       }
-      const stat = tryOrUndefined(() => fs.statSync(abs))
-      if (stat === undefined) {
-        continue
-      }
-      if (stat.isDirectory()) {
-        walkDir(repoRoot, abs, allowJsJson, accum)
-      }
-      if (stat.isFile()) {
+      if (hostIo.isDirectorySync(abs)) {
+        walkDir(repoRoot, abs, allowJsJson, accum, hostIo)
+      } else if (hostIo.isFileSync(abs)) {
         const base = path.basename(abs)
         if (isAllowedFile(base, allowJsJson)) {
           accum.add(rel)
@@ -302,14 +299,12 @@ export const runStructuralSearch = (
     return []
   }
 
-  const repoRoot = path.resolve(options.repoRoot ?? resolveRepoRoot(process.cwd()))
+  const { hostIo } = options
+  const repoRoot = path.resolve(options.repoRoot ?? resolveRepoRoot(process.cwd(), hostIo))
   let effectiveOptions = options
   if (options?.filePath !== undefined && options.filePath.trim().length > 0) {
     const candidate = path.resolve(repoRoot, options.filePath.trim())
-    if (
-      fs.existsSync(candidate) &&
-      tryOrUndefined(() => fs.statSync(candidate).isDirectory()) === true
-    ) {
+    if (hostIo.existsSync(candidate) && hostIo.isDirectorySync(candidate)) {
       effectiveOptions = {
         ...options,
         filePath: undefined,
@@ -328,8 +323,8 @@ export const runStructuralSearch = (
       break
     }
     const fullPath = path.join(repoRoot, relFile)
-    if (!fs.existsSync(fullPath)) continue
-    const source = tryOrUndefined(() => fs.readFileSync(fullPath, "utf-8"))
+    if (!hostIo.existsSync(fullPath)) continue
+    const source = tryOrUndefined(() => hostIo.readTextSync(fullPath))
     if (source === undefined) {
       continue
     }

@@ -1,4 +1,5 @@
 import { Lang, parse } from "@ast-grep/napi"
+import type { SyncHostIo } from "@harness/service"
 import * as Graph from "effect/Graph"
 import { Node, Project, SyntaxKind, ts } from "ts-morph"
 import { match } from "ts-pattern"
@@ -444,6 +445,7 @@ export const projectPatchesToInMemoryWorkspace = (
   patches: ReadonlyArray<GraphPatch>,
   initialGraph?: HarnessGraph,
   existingFiles?: Readonly<Record<string, string>>,
+  hostIo?: SyncHostIo,
 ): {
   readonly operations: ReadonlyArray<AstCodeModOperation>
   readonly overlays: ReadonlyArray<ShadowFileOverlay>
@@ -531,18 +533,18 @@ export const projectPatchesToInMemoryWorkspace = (
   }
   for (const f of candidateFiles) {
     if (typeof f !== "string" || f.trim().length === 0) continue
-    const validated = validateRelPath(repoRoot, f)
+    const validated = validateRelPath(repoRoot, f, undefined, hostIo)
     if (!validated.ok) continue
     const norm = validated.relPath
     if (!initialContents.has(norm)) {
-      const diskContent = readInitialFileContent(repoRoot, norm, existingFiles)
+      const diskContent = readInitialFileContent(repoRoot, norm, existingFiles, hostIo)
       if (diskContent !== undefined) initialContents.set(norm, diskContent)
     }
     const barrelMatch = norm.match(/^(libs\/(?:[^/]+\/)?(?:contract|service|domain|core|infra)\/src)\//)
     if (barrelMatch?.[1] !== undefined) {
       const barrelRel = `${barrelMatch[1]}/index.ts`
       if (!initialContents.has(barrelRel)) {
-        const diskBarrel = readInitialFileContent(repoRoot, barrelRel, existingFiles)
+        const diskBarrel = readInitialFileContent(repoRoot, barrelRel, existingFiles, hostIo)
         if (diskBarrel !== undefined) initialContents.set(barrelRel, diskBarrel)
       }
     }

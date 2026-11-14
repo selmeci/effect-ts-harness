@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { basename, dirname, join, resolve } from "node:path"
-import { Effect, Option, Schema } from "effect"
+import type { SyncHostIo } from "@harness/service"
+import { Effect, Option, Result, Schema } from "effect"
 
 export interface GitHeadState {
   readonly gitBranch: string | null
@@ -10,24 +10,24 @@ export interface GitHeadState {
 
 const resolveGitDirs = (
   repoRoot: string,
+  hostIo: SyncHostIo,
 ): { readonly gitDir: string; readonly commonGitDir: string } | null => {
   const absRoot = resolve(repoRoot)
   const dotGit = join(absRoot, ".git")
-  if (!existsSync(dotGit)) {
+  if (!hostIo.existsSync(dotGit)) {
     return null
   }
-  const st = statSync(dotGit)
-  if (st.isDirectory()) {
+  if (hostIo.isDirectorySync(dotGit)) {
     return { gitDir: dotGit, commonGitDir: dotGit }
   }
-  if (st.isFile()) {
-    const content = readFileSync(dotGit, "utf8").trim()
+  if (hostIo.isFileSync(dotGit)) {
+    const content = hostIo.readTextSync(dotGit).trim()
     if (content.startsWith("gitdir:")) {
       const rawGitDir = content.slice("gitdir:".length).trim()
       const gitDir = resolve(absRoot, rawGitDir)
       const commonDirFile = join(gitDir, "commondir")
-      if (existsSync(commonDirFile)) {
-        const commondir = readFileSync(commonDirFile, "utf8").trim()
+      if (hostIo.existsSync(commonDirFile)) {
+        const commondir = hostIo.readTextSync(commonDirFile).trim()
         const commonGitDir = resolve(gitDir, commondir)
         return { gitDir, commonGitDir }
       }
@@ -37,20 +37,25 @@ const resolveGitDirs = (
   return null
 }
 
-const resolveRefSha = (gitDir: string, commonGitDir: string, refPath: string): string | null => {
+const resolveRefSha = (
+  gitDir: string,
+  commonGitDir: string,
+  refPath: string,
+  hostIo: SyncHostIo,
+): string | null => {
   const localRefFile = join(gitDir, refPath)
-  if (existsSync(localRefFile) && statSync(localRefFile).isFile()) {
-    const sha = readFileSync(localRefFile, "utf8").trim()
+  if (hostIo.existsSync(localRefFile) && hostIo.isFileSync(localRefFile)) {
+    const sha = hostIo.readTextSync(localRefFile).trim()
     if (sha.length > 0) return sha
   }
   const commonRefFile = join(commonGitDir, refPath)
-  if (existsSync(commonRefFile) && statSync(commonRefFile).isFile()) {
-    const sha = readFileSync(commonRefFile, "utf8").trim()
+  if (hostIo.existsSync(commonRefFile) && hostIo.isFileSync(commonRefFile)) {
+    const sha = hostIo.readTextSync(commonRefFile).trim()
     if (sha.length > 0) return sha
   }
   const packedRefsFile = join(commonGitDir, "packed-refs")
-  if (existsSync(packedRefsFile) && statSync(packedRefsFile).isFile()) {
-    const lines = readFileSync(packedRefsFile, "utf8").split(/\r?\n/)
+  if (hostIo.existsSync(packedRefsFile) && hostIo.isFileSync(packedRefsFile)) {
+    const lines = hostIo.readTextSync(packedRefsFile).split(/\r?\n/)
     for (const line of lines) {
       const trimmed = line.trim()
       if (trimmed.length === 0 || trimmed.startsWith("#") || trimmed.startsWith("^")) {
@@ -71,55 +76,44 @@ const resolveRefSha = (gitDir: string, commonGitDir: string, refPath: string): s
 
 export const resolveGitHeadState = (
   repoRoot: string,
+  hostIo: SyncHostIo,
   env: NodeJS.ProcessEnv = process.env,
 ): GitHeadState => {
   const envBranch = env.HARNESS_GIT_BRANCH?.trim()
   const envSha = env.HARNESS_GIT_HEAD_SHA?.trim()
-  return Effect.runSync(
-    Effect.try({
-      try: (): GitHeadState => {
-        const dirs = resolveGitDirs(repoRoot)
-        if (dirs === null) {
-          return {
-            gitBranch: envBranch && envBranch.length > 0 ? envBranch : null,
-            headSha: envSha && envSha.length > 0 ? envSha : null,
-          }
-        }
-        const headFile = join(dirs.gitDir, "HEAD")
-        if (!existsSync(headFile) || !statSync(headFile).isFile()) {
-          return {
-            gitBranch: envBranch && envBranch.length > 0 ? envBranch : null,
-            headSha: envSha && envSha.length > 0 ? envSha : null,
-          }
-        }
-        const headContent = readFileSync(headFile, "utf8").trim()
-        if (headContent.startsWith("ref:")) {
-          const refPath = headContent.slice("ref:".length).trim()
-          const detectedBranch = refPath.startsWith("refs/heads/")
-            ? refPath.slice("refs/heads/".length)
-            : null
-          const detectedSha = resolveRefSha(dirs.gitDir, dirs.commonGitDir, refPath)
-          return {
-            gitBranch: envBranch && envBranch.length > 0 ? envBranch : detectedBranch,
-            headSha: envSha && envSha.length > 0 ? envSha : detectedSha,
-          }
-        }
+  const fallback: GitHeadState = {
+    gitBranch: envBranch && envBranch.length > 0 ? envBranch : null,
+    headSha: envSha && envSha.length > 0 ? envSha : null,
+  }
+  return Result.getOrElse(
+    Result.try((): GitHeadState => {
+      const dirs = resolveGitDirs(repoRoot, hostIo)
+      if (dirs === null) {
+        return fallback
+      }
+      const headFile = join(dirs.gitDir, "HEAD")
+      if (!hostIo.existsSync(headFile) || !hostIo.isFileSync(headFile)) {
+        return fallback
+      }
+      const headContent = hostIo.readTextSync(headFile).trim()
+      if (headContent.startsWith("ref:")) {
+        const refPath = headContent.slice("ref:".length).trim()
+        const detectedBranch = refPath.startsWith("refs/heads/")
+          ? refPath.slice("refs/heads/".length)
+          : null
+        const detectedSha = resolveRefSha(dirs.gitDir, dirs.commonGitDir, refPath, hostIo)
         return {
-          gitBranch: envBranch && envBranch.length > 0 ? envBranch : null,
-          headSha:
-            envSha && envSha.length > 0 ? envSha : headContent.length > 0 ? headContent : null,
+          gitBranch: envBranch && envBranch.length > 0 ? envBranch : detectedBranch,
+          headSha: envSha && envSha.length > 0 ? envSha : detectedSha,
         }
-      },
-      catch: (): GitHeadState => ({
+      }
+      return {
         gitBranch: envBranch && envBranch.length > 0 ? envBranch : null,
-        headSha: envSha && envSha.length > 0 ? envSha : null,
-      }),
-    }).pipe(
-      Effect.orElseSucceed((): GitHeadState => ({
-        gitBranch: envBranch && envBranch.length > 0 ? envBranch : null,
-        headSha: envSha && envSha.length > 0 ? envSha : null,
-      })),
-    ),
+        headSha:
+          envSha && envSha.length > 0 ? envSha : headContent.length > 0 ? headContent : null,
+      }
+    }),
+    () => fallback,
   )
 }
 
@@ -134,6 +128,7 @@ const decodeGraphHeadMetaOption = Schema.decodeOption(Schema.fromJsonString(Grap
 
 export const readGraphHeadMeta = (
   repoRoot: string,
+  hostIo: SyncHostIo,
   env: NodeJS.ProcessEnv = process.env,
 ): GraphHeadMeta | null => {
   const customDir = env.HARNESS_STATE_DIR?.trim()
@@ -142,27 +137,23 @@ export const readGraphHeadMeta = (
       ? resolve(repoRoot, customDir)
       : join(resolve(repoRoot), ".harness")
   const metaPath = join(stateDir, "graph-head.json")
-  if (!existsSync(metaPath)) {
+  if (!hostIo.existsSync(metaPath)) {
     return null
   }
-  return Effect.runSync(
-    Effect.try({
-      try: () => readFileSync(metaPath, "utf8"),
-      catch: () => "",
-    }).pipe(
-      Effect.flatMap((raw) => Effect.fromOption(decodeGraphHeadMetaOption(raw))),
-      Effect.option,
-      Effect.map((opt) => Option.getOrNull(opt)),
-    ),
+  const raw = Result.getOrElse(
+    Result.try(() => hostIo.readTextSync(metaPath)),
+    () => "",
   )
+  return Option.getOrNull(decodeGraphHeadMetaOption(raw))
 }
 
 export const writeGraphHeadMeta = (
   repoRoot: string,
+  hostIo: SyncHostIo,
   headState?: GitHeadState,
   env: NodeJS.ProcessEnv = process.env,
 ): GraphHeadMeta | null => {
-  const resolved = headState ?? resolveGitHeadState(repoRoot, env)
+  const resolved = headState ?? resolveGitHeadState(repoRoot, hostIo, env)
   if (resolved.headSha === null && resolved.gitBranch === null) {
     return null
   }
@@ -176,17 +167,12 @@ export const writeGraphHeadMeta = (
     gitBranch: resolved.gitBranch,
     updatedAt: new Date().toISOString(),
   }
-  Effect.runSync(
-    Effect.try({
-      try: () => {
-        if (!existsSync(stateDir)) {
-          mkdirSync(stateDir, { recursive: true })
-        }
-        writeFileSync(join(stateDir, "graph-head.json"), JSON.stringify(meta, null, 2), "utf8")
-      },
-      catch: () => undefined,
-    }).pipe(Effect.orElseSucceed(() => undefined)),
-  )
+  Result.try(() => {
+    if (!hostIo.existsSync(stateDir)) {
+      hostIo.mkdirRecursiveSync(stateDir)
+    }
+    hostIo.writeTextSync(join(stateDir, "graph-head.json"), JSON.stringify(meta, null, 2))
+  })
   return meta
 }
 
@@ -265,58 +251,58 @@ export const decideOmnigraphReconcile = Effect.fn("OmnigraphReconcile.decide")(f
   } satisfies OmnigraphReconcileDecision)
 })
 
-export const resolveCanonicalRepoRoot = (repoRoot: string): string => {
+export const resolveCanonicalRepoRoot = (repoRoot: string, hostIo: SyncHostIo): string => {
   const absRoot = resolve(repoRoot)
-  return Effect.runSync(
-    Effect.try({
-      try: () => {
-        const dotGit = join(absRoot, ".git")
-        if (existsSync(dotGit) && statSync(dotGit).isFile()) {
-          const content = readFileSync(dotGit, "utf8").trim()
-          if (content.startsWith("gitdir:")) {
-            const rawGitDir = content.slice("gitdir:".length).trim()
-            const gitDir = resolve(absRoot, rawGitDir)
-            const commonDirFile = join(gitDir, "commondir")
-            if (existsSync(commonDirFile)) {
-              const commondir = readFileSync(commonDirFile, "utf8").trim()
-              const commonGitDir = resolve(gitDir, commondir)
-              if (basename(commonGitDir) === ".git") {
-                return dirname(commonGitDir)
-              }
-            }
-            const match = gitDir.match(/^(.*?)[/\\]\.git[/\\]worktrees([/\\]|$)/)
-            if (match && match[1]) {
-              return match[1]
+  return Result.getOrElse(
+    Result.try(() => {
+      const dotGit = join(absRoot, ".git")
+      if (hostIo.existsSync(dotGit) && hostIo.isFileSync(dotGit)) {
+        const content = hostIo.readTextSync(dotGit).trim()
+        if (content.startsWith("gitdir:")) {
+          const rawGitDir = content.slice("gitdir:".length).trim()
+          const gitDir = resolve(absRoot, rawGitDir)
+          const commonDirFile = join(gitDir, "commondir")
+          if (hostIo.existsSync(commonDirFile)) {
+            const commondir = hostIo.readTextSync(commonDirFile).trim()
+            const commonGitDir = resolve(gitDir, commondir)
+            if (basename(commonGitDir) === ".git") {
+              return dirname(commonGitDir)
             }
           }
+          const match = gitDir.match(/^(.*?)[/\\]\.git[/\\]worktrees([/\\]|$)/)
+          if (match && match[1]) {
+            return match[1]
+          }
         }
-        return absRoot
-      },
-      catch: () => absRoot,
-    }).pipe(Effect.orElseSucceed(() => absRoot)),
+      }
+      return absRoot
+    }),
+    () => absRoot,
   )
 }
 
 export const resolveOmnigraphClusterDir = (
   repoRoot: string,
+  hostIo: SyncHostIo,
   env: NodeJS.ProcessEnv = process.env,
 ): string => {
   const customDir = env.HARNESS_STATE_DIR?.trim()
   if (customDir && customDir.length > 0) {
     return join(resolve(repoRoot, customDir), "omnigraph-cluster")
   }
-  const canonicalRoot = resolveCanonicalRepoRoot(repoRoot)
+  const canonicalRoot = resolveCanonicalRepoRoot(repoRoot, hostIo)
   return join(canonicalRoot, ".harness", "omnigraph-cluster")
 }
 
-export const deriveRepoOmnigraphPort = (repoRoot: string): number => {
-  const canonicalRoot = resolveCanonicalRepoRoot(repoRoot)
+export const deriveRepoOmnigraphPort = (repoRoot: string, hostIo: SyncHostIo): number => {
+  const canonicalRoot = resolveCanonicalRepoRoot(repoRoot, hostIo)
   const hash = createHash("sha256").update(canonicalRoot).digest()
   return 18080 + (hash.readUInt16BE(0) % 10000)
 }
 
 export const resolveOmnigraphTaskBranches = (
   repoRoot: string,
+  hostIo: SyncHostIo,
   env: NodeJS.ProcessEnv = process.env,
 ): {
   readonly planBranch: string
@@ -333,7 +319,7 @@ export const resolveOmnigraphTaskBranches = (
     }
   }
   const absRoot = resolve(repoRoot)
-  const canonicalRoot = resolveCanonicalRepoRoot(absRoot)
+  const canonicalRoot = resolveCanonicalRepoRoot(absRoot, hostIo)
   if (absRoot !== canonicalRoot) {
     const slug = sanitizeOmnigraphBranchSlug(basename(absRoot))
     return {
@@ -342,7 +328,7 @@ export const resolveOmnigraphTaskBranches = (
       mainBranch: "main",
     }
   }
-  const headState = resolveGitHeadState(absRoot, env)
+  const headState = resolveGitHeadState(absRoot, hostIo, env)
   const gitBranch = headState.gitBranch?.trim()
   if (gitBranch && gitBranch.length > 0 && gitBranch !== "main" && gitBranch !== "master") {
     const slug = sanitizeOmnigraphBranchSlug(gitBranch)

@@ -1,11 +1,12 @@
 import { resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 import { loadPatternDocs } from "../src/pattern-index.js"
+import { testHostIo } from "./helpers/test-host-io.js"
 
 describe("agent-patterns index", () => {
   it("loads all 16 reviewed pattern files with non-empty summaries", () => {
     const repoRoot = resolve(import.meta.dirname, "../../../..")
-    const docs = loadPatternDocs(repoRoot)
+    const docs = loadPatternDocs(repoRoot, testHostIo)
     expect(docs.map((d) => d.slug).sort()).toEqual([
       "alchemy-infra",
       "atom",

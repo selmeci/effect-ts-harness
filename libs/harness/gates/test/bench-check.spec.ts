@@ -1,8 +1,11 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Effect, Option, Schema } from "effect"
+import { Cause, Effect, Layer, Option, Schema } from "effect"
+import {
+  type AstGateEvaluationReport,
+  AstGateViolationContract,
+  NonNegativeCount,
+} from "@harness/contract"
+import { AstGateCachePort } from "@harness/service"
 import {
   AstGateCache,
   AstGateCacheEntry,
@@ -15,6 +18,7 @@ import {
   BenchSampleCount,
   BenchStageName,
   buildStageLatencyMeasurement,
+  computeContentSha256,
   computePercentileMillis,
   ContentSha256,
   decideAstGateCache,
@@ -24,20 +28,19 @@ import {
   decideSyntaxBansGate,
   decideTestIntegrityGate,
   DEFAULT_STAGE_LATENCY_BUDGETS,
-  DomainPurity,
-  EffectLaws,
   evaluateAstGateFiles,
+  evaluateCachedAstGates,
   GateCategory,
   GateRuleId,
   GateRuleVersion,
   GateVerdict,
   GateViolation,
   GateViolationMessage,
-  getAstGateCacheSize,
   HARNESS_GATE_RULE_VERSION,
   HarnessBench,
   HarnessBenchInput,
   HarnessBenchReport,
+  inferPackageTagFromPath,
   LatencyExceededDimension,
   LatencyMillis,
   LatencySloViolationError,
@@ -46,13 +49,54 @@ import {
   StageLatencyMeasurement,
   StageLatencyStatus,
   StageLatencyViolation,
-  SyntaxBans,
-  TestIntegrity,
-} from "./index.js"
+} from "../src/index.js"
 
 const CompositeStageMeasurementsArb = Schema.Array(StageLatencyMeasurement)
 
 const CompositeAstGateFilesArb = Schema.Array(AstGateFileInput)
+
+const makeInMemoryAstGateCachePortLayer = (): Layer.Layer<AstGateCachePort> =>
+  Layer.effect(
+    AstGateCachePort,
+    Effect.sync(() => {
+      const store = new Map<string, AstGateCacheEntry>()
+      return {
+        evaluateBatch: (files) =>
+          Effect.sync(() => {
+            const report = evaluateAstGateFiles(
+              {
+                files: files.map((f) => ({
+                  filePath: f.filePath,
+                  content: f.content,
+                  ...(f.packageTag !== undefined ? { packageTag: f.packageTag } : {}),
+                })),
+              },
+              undefined,
+              store,
+            )
+            return {
+              verdict: report.verdict,
+              violations: report.violations.map((v) =>
+                AstGateViolationContract.make({
+                  category: v.category,
+                  rule: v.rule,
+                  message: v.message,
+                  file: v.file,
+                  line: v.line,
+                  enclosingSymbol: v.enclosingSymbol,
+                }),
+              ),
+              inspectedFileCount: NonNegativeCount.make(files.length),
+              cacheHitCount: report.cacheHitCount,
+            } satisfies AstGateEvaluationReport
+          }),
+        clearCache: Effect.sync(() => {
+          store.clear()
+        }),
+        cacheSize: Effect.sync(() => NonNegativeCount.make(store.size)),
+      }
+    }),
+  )
 
 describe("HarnessBench.decide — Latency SLO Gate (PERF-06, RFC-0006)", () => {
   it.effect("evaluates warm stage measurements within default budgets as passed", () =>
@@ -301,12 +345,10 @@ describe("HarnessBench.decide — Latency SLO Gate (PERF-06, RFC-0006)", () => {
 
 describe("AstGateCache & Unified Single-Pass AST Gate Deciders (PERF-02, RFC-0006)", () => {
   it.effect(
-    "parses each modified SourceFile at most once across all 5 AST gate categories and hits disk/memory cache in < 5ms",
+    "parses each modified SourceFile at most once across all 5 AST gate categories and hits local cacheStore",
     () =>
       Effect.gen(function* () {
-        const tmpDir = mkdtempSync(join(tmpdir(), "harness-ast-cache-"))
-        const cacheFile = AstSourceFilePath.make(join(tmpDir, "ast-gates-v1.json"))
-        AstGateCache.clear()
+        const cacheStore = new Map<string, AstGateCacheEntry>()
 
         const domainBadCode = [
           'import { drizzle } from "drizzle-orm"',
@@ -352,48 +394,46 @@ describe("AstGateCache & Unified Single-Pass AST Gate Deciders (PERF-02, RFC-000
           },
         ]
 
-        const initialParses = AstGateCache.getSourceFileParseCount()
+        const fullReport = yield* AstGateCache.decide(
+          {
+            files,
+            ruleVersion: HARNESS_GATE_RULE_VERSION,
+          },
+          cacheStore,
+        )
 
-        const fullReport = yield* AstGateCache.decide({
-          files,
-          ruleVersion: HARNESS_GATE_RULE_VERSION,
-          cacheFilePath: cacheFile,
-        })
-
-        const afterFirstPassParses = AstGateCache.getSourceFileParseCount()
-        expect(afterFirstPassParses - initialParses).toBe(3)
         expect(fullReport.verdict).toBe(GateVerdict.make("violated"))
         expect(fullReport.parsedFileCount).toBe(3)
         expect(fullReport.cacheHitCount).toBe(0)
-        expect(existsSync(cacheFile)).toBe(true)
+        expect(cacheStore.size).toBe(3)
 
-        // Subsequent category-specific gate calls reuse the cached AST / violations with 0 new parses
-        const syntaxReport = yield* SyntaxBans.decide({
-          files,
-          ruleVersion: HARNESS_GATE_RULE_VERSION,
-          cacheFilePath: cacheFile,
-        })
-        const testReport = yield* TestIntegrity.decide({
-          files,
-          ruleVersion: HARNESS_GATE_RULE_VERSION,
-          cacheFilePath: cacheFile,
-        })
-        const purityReport = yield* DomainPurity.decide({
-          files,
-          ruleVersion: HARNESS_GATE_RULE_VERSION,
-          cacheFilePath: cacheFile,
-        })
-        const effectLawsReport = yield* EffectLaws.decide({
-          files,
-          ruleVersion: HARNESS_GATE_RULE_VERSION,
-          cacheFilePath: cacheFile,
-        })
+        // Subsequent category-specific gate calls reuse the cached violations with 0 new parses
+        const syntaxReport = evaluateAstGateFiles(
+          { files, ruleVersion: HARNESS_GATE_RULE_VERSION },
+          GateCategory.make("syntax-bans"),
+          cacheStore,
+        )
+        const testReport = evaluateAstGateFiles(
+          { files, ruleVersion: HARNESS_GATE_RULE_VERSION },
+          GateCategory.make("test-integrity"),
+          cacheStore,
+        )
+        const purityReport = evaluateAstGateFiles(
+          { files, ruleVersion: HARNESS_GATE_RULE_VERSION },
+          GateCategory.make("domain-purity"),
+          cacheStore,
+        )
+        const effectLawsReport = evaluateAstGateFiles(
+          { files, ruleVersion: HARNESS_GATE_RULE_VERSION },
+          GateCategory.make("effect-laws"),
+          cacheStore,
+        )
         const migSafetyReport = yield* MigrationSafety.decide({
           files: [{ file: "libs/sample/infra/src/bad-infra.ts", sql: "DROP TABLE users" }],
         })
 
-        expect(AstGateCache.getSourceFileParseCount()).toBe(afterFirstPassParses)
         expect(syntaxReport.cacheHitCount).toBe(3)
+        expect(syntaxReport.parsedFileCount).toBe(0)
         expect(
           syntaxReport.violations.some((v) => v.rule === GateRuleId.make("unsafe-type-cast")),
         ).toBe(true)
@@ -406,18 +446,6 @@ describe("AstGateCache & Unified Single-Pass AST Gate Deciders (PERF-02, RFC-000
         expect(effectLawsReport.cacheHitCount).toBe(3)
         expect(migSafetyReport.violations.length).toBeGreaterThan(0)
 
-        // Verify disk reload deep equality
-        AstGateCache.clear()
-        const warmDiskReport = yield* decideAstGateCache({
-          files,
-          ruleVersion: HARNESS_GATE_RULE_VERSION,
-          cacheFilePath: cacheFile,
-        })
-        expect(warmDiskReport.cacheHitCount).toBe(3)
-        expect(warmDiskReport.parsedFileCount).toBe(0)
-        expect(warmDiskReport.violations).toEqual(fullReport.violations)
-        expect(warmDiskReport.verdict).toBe(fullReport.verdict)
-
         // Verify schema exports
         expect(GateRuleVersion.make("ast-gates-v1")).toBe("ast-gates-v1")
         expect(ContentSha256.make("abc")).toBe("abc")
@@ -428,184 +456,151 @@ describe("AstGateCache & Unified Single-Pass AST Gate Deciders (PERF-02, RFC-000
         expect(AstGateEvaluationInput.fields).toBeDefined()
         expect(AstGateDecisionReport.fields).toBeDefined()
         expect(evaluateAstGateFiles({ files: [] }).verdict).toBe("clean")
-
-        rmSync(tmpDir, { recursive: true, force: true })
+        expect(computeContentSha256("abc")).toHaveLength(64)
+        expect(inferPackageTagFromPath("libs/sample/domain/src/a.ts")).toBe("domain")
       }),
   )
 
   it.effect(
-    "invalidates cached result on edit (clean -> violating -> clean), recomputes violations accurately, and keeps getCacheSize() bounded at files.length",
+    "invalidates cached result on edit (clean -> violating -> clean), recomputes violations accurately, and keeps cacheStore bounded at files.length",
     () =>
       Effect.gen(function* () {
-        AstGateCache.clear()
+        const cacheStore = new Map<string, AstGateCacheEntry>()
         const filePath = AstSourceFilePath.make("libs/sample/domain/src/dynamic.ts")
         const cleanContent = AstSourceContent.make("export const x = 1\n")
         const violatingContent = AstSourceContent.make("export const x = 1 as any\n")
 
         // 1. Initial clean file
-        const r1 = yield* AstGateCache.decide({
-          files: [
-            {
-              filePath,
-              content: cleanContent,
-              packageTag: AstGatePackageTag.make("domain"),
-            },
-          ],
-        })
+        const r1 = yield* AstGateCache.decide(
+          {
+            files: [
+              {
+                filePath,
+                content: cleanContent,
+                packageTag: AstGatePackageTag.make("domain"),
+              },
+            ],
+          },
+          cacheStore,
+        )
         expect(r1.verdict).toBe(GateVerdict.make("clean"))
         expect(r1.violations).toHaveLength(0)
         expect(r1.parsedFileCount).toBe(1)
         expect(r1.cacheHitCount).toBe(0)
-        expect(getAstGateCacheSize()).toBe(1)
-        expect(AstGateCache.getCacheSize()).toBe(1)
+        expect(cacheStore.size).toBe(1)
 
         // Second call with same content is a hit
-        const r1Cached = yield* AstGateCache.decide({
-          files: [
-            {
-              filePath,
-              content: cleanContent,
-              packageTag: AstGatePackageTag.make("domain"),
-            },
-          ],
-        })
+        const r1Cached = yield* AstGateCache.decide(
+          {
+            files: [
+              {
+                filePath,
+                content: cleanContent,
+                packageTag: AstGatePackageTag.make("domain"),
+              },
+            ],
+          },
+          cacheStore,
+        )
         expect(r1Cached.cacheHitCount).toBe(1)
         expect(r1Cached.parsedFileCount).toBe(0)
 
         // 2. Edit file to violating
-        const r2 = yield* AstGateCache.decide({
-          files: [
-            {
-              filePath,
-              content: violatingContent,
-              packageTag: AstGatePackageTag.make("domain"),
-            },
-          ],
-        })
+        const r2 = yield* AstGateCache.decide(
+          {
+            files: [
+              {
+                filePath,
+                content: violatingContent,
+                packageTag: AstGatePackageTag.make("domain"),
+              },
+            ],
+          },
+          cacheStore,
+        )
         expect(r2.verdict).toBe(GateVerdict.make("violated"))
         expect(r2.violations.length).toBeGreaterThan(0)
         expect(r2.parsedFileCount).toBe(1)
         expect(r2.cacheHitCount).toBe(0)
-        expect(getAstGateCacheSize()).toBe(1)
-        expect(AstGateCache.getCacheSize()).toBe(1)
+        expect(cacheStore.size).toBe(1)
 
         // 3. Edit back to clean
-        const r3 = yield* AstGateCache.decide({
-          files: [
-            {
-              filePath,
-              content: cleanContent,
-              packageTag: AstGatePackageTag.make("domain"),
-            },
-          ],
-        })
+        const r3 = yield* AstGateCache.decide(
+          {
+            files: [
+              {
+                filePath,
+                content: cleanContent,
+                packageTag: AstGatePackageTag.make("domain"),
+              },
+            ],
+          },
+          cacheStore,
+        )
         expect(r3.verdict).toBe(GateVerdict.make("clean"))
         expect(r3.violations).toHaveLength(0)
         expect(r3.parsedFileCount).toBe(1)
         expect(r3.cacheHitCount).toBe(0)
-        expect(getAstGateCacheSize()).toBe(1)
-        expect(AstGateCache.getCacheSize()).toBe(1)
+        expect(cacheStore.size).toBe(1)
       }),
   )
 
   it.effect("causes cache miss when ruleVersion or packageTag changes", () =>
     Effect.gen(function* () {
-      const tmpDir = mkdtempSync(join(tmpdir(), "harness-miss-cache-"))
-      const cacheFile = AstSourceFilePath.make(join(tmpDir, "ast-gates-v1.json"))
-
+      const cacheStore = new Map<string, AstGateCacheEntry>()
       const filePath = AstSourceFilePath.make("libs/sample/domain/src/versioned.ts")
       const content = AstSourceContent.make("export const v = 42\n")
 
       // 1. Initial run: populate cache with ruleVersion = ast-gates-v1, packageTag = domain
-      AstGateCache.clear()
-      const r1 = yield* AstGateCache.decide({
-        files: [{ filePath, content, packageTag: AstGatePackageTag.make("domain") }],
-        ruleVersion: GateRuleVersion.make("ast-gates-v1"),
-        cacheFilePath: cacheFile,
-      })
+      const r1 = yield* AstGateCache.decide(
+        {
+          files: [{ filePath, content, packageTag: AstGatePackageTag.make("domain") }],
+          ruleVersion: GateRuleVersion.make("ast-gates-v1"),
+        },
+        cacheStore,
+      )
       expect(r1.parsedFileCount).toBe(1)
       expect(r1.cacheHitCount).toBe(0)
 
-      // Warm disk cache hit
-      AstGateCache.clear()
-      const rHit = yield* AstGateCache.decide({
-        files: [{ filePath, content, packageTag: AstGatePackageTag.make("domain") }],
-        ruleVersion: GateRuleVersion.make("ast-gates-v1"),
-        cacheFilePath: cacheFile,
-      })
+      // Warm cache hit
+      const rHit = yield* AstGateCache.decide(
+        {
+          files: [{ filePath, content, packageTag: AstGatePackageTag.make("domain") }],
+          ruleVersion: GateRuleVersion.make("ast-gates-v1"),
+        },
+        cacheStore,
+      )
       expect(rHit.parsedFileCount).toBe(0)
       expect(rHit.cacheHitCount).toBe(1)
 
       // 2. Miss when ruleVersion changes
-      AstGateCache.clear()
-      const rRuleMiss = yield* AstGateCache.decide({
-        files: [{ filePath, content, packageTag: AstGatePackageTag.make("domain") }],
-        ruleVersion: GateRuleVersion.make("ast-gates-v2"),
-        cacheFilePath: cacheFile,
-      })
+      const rRuleMiss = yield* AstGateCache.decide(
+        {
+          files: [{ filePath, content, packageTag: AstGatePackageTag.make("domain") }],
+          ruleVersion: GateRuleVersion.make("ast-gates-v2"),
+        },
+        cacheStore,
+      )
       expect(rRuleMiss.parsedFileCount).toBe(1)
       expect(rRuleMiss.cacheHitCount).toBe(0)
 
       // 3. Miss when packageTag changes
-      AstGateCache.clear()
-      const rTagMiss = yield* AstGateCache.decide({
-        files: [{ filePath, content, packageTag: AstGatePackageTag.make("contract") }],
-        ruleVersion: GateRuleVersion.make("ast-gates-v2"),
-        cacheFilePath: cacheFile,
-      })
+      const rTagMiss = yield* AstGateCache.decide(
+        {
+          files: [{ filePath, content, packageTag: AstGatePackageTag.make("contract") }],
+          ruleVersion: GateRuleVersion.make("ast-gates-v2"),
+        },
+        cacheStore,
+      )
       expect(rTagMiss.parsedFileCount).toBe(1)
       expect(rTagMiss.cacheHitCount).toBe(0)
-
-      rmSync(tmpDir, { recursive: true, force: true })
     }),
-  )
-
-  it.effect(
-    "recovers from corrupt disk cache without throwing and overwrites with valid JSON",
-    () =>
-      Effect.gen(function* () {
-        const tmpDir = mkdtempSync(join(tmpdir(), "harness-corrupt-cache-"))
-        const cacheFile = AstSourceFilePath.make(join(tmpDir, "ast-gates-v1.json"))
-        writeFileSync(cacheFile, "{not-json", "utf8")
-
-        AstGateCache.clear()
-        const file = {
-          filePath: AstSourceFilePath.make("libs/sample/domain/src/corrupt-test.ts"),
-          content: AstSourceContent.make("export const safe = 1\n"),
-          packageTag: AstGatePackageTag.make("domain"),
-        }
-
-        const report = yield* decideAstGateCache({
-          files: [file],
-          ruleVersion: HARNESS_GATE_RULE_VERSION,
-          cacheFilePath: cacheFile,
-        })
-
-        expect(report.verdict).toBe(GateVerdict.make("clean"))
-        expect(report.parsedFileCount).toBe(1)
-        expect(report.cacheHitCount).toBe(0)
-
-        // Verify cacheFile is overwritten with valid JSON
-        const diskContent = readFileSync(cacheFile, "utf8")
-        const CacheDiskSchema = Schema.fromJsonString(
-          Schema.Struct({
-            version: Schema.String,
-            entries: Schema.Record(Schema.String, Schema.Unknown),
-          }),
-        )
-        const parsed = yield* Schema.decodeEffect(CacheDiskSchema)(diskContent)
-        expect(parsed.version).toBe(HARNESS_GATE_RULE_VERSION)
-        expect(Object.keys(parsed.entries).length).toBe(1)
-
-        rmSync(tmpDir, { recursive: true, force: true })
-      }),
   )
 
   it.effect(
     "flags Cause.isFailType/Predicate.isTagged ternaries, Effect.ignore in domain, and hardcoded parse(Lang.TypeScript) in .tsx-aware files",
     () =>
       Effect.gen(function* () {
-        AstGateCache.clear()
         const files = [
           {
             filePath: AstSourceFilePath.make("libs/sample/domain/src/guardrail-domain.ts"),
@@ -653,8 +648,32 @@ describe("AstGateCache & Unified Single-Pass AST Gate Deciders (PERF-02, RFC-000
       }),
   )
 
+  it.effect(
+    "REQ-3.1: AstGateCache.evaluateCached delegates to AstGateCachePort and increments cacheHitCount",
+    () =>
+      Effect.gen(function* () {
+        const files = [
+          {
+            filePath: AstSourceFilePath.make("libs/sample/domain/src/cached-port.ts"),
+            content: AstSourceContent.make("export const ok = 1\n"),
+            packageTag: AstGatePackageTag.make("domain"),
+          },
+        ]
+
+        const first = yield* evaluateCachedAstGates(files)
+        expect(first.verdict).toBe("clean")
+        expect(first.inspectedFileCount).toBe(1)
+        expect(first.cacheHitCount).toBe(0)
+
+        const second = yield* AstGateCache.evaluateCached(files)
+        expect(second.verdict).toBe("clean")
+        expect(second.inspectedFileCount).toBe(1)
+        expect(second.cacheHitCount).toBe(1)
+      }).pipe(Effect.provide(makeInMemoryAstGateCachePortLayer())),
+  )
+
   it.effect.prop(
-    "property: AstGateCache, SyntaxBans, TestIntegrity, DomainPurity, and EffectLaws deciders are idempotent and cache-consistent",
+    "property: AstGateCache, SyntaxBans, TestIntegrity, DomainPurity, and EffectLaws deciders are idempotent and pure",
     [CompositeAstGateFilesArb],
     ([generatedFiles]) =>
       Effect.gen(function* () {
@@ -675,7 +694,6 @@ describe("AstGateCache & Unified Single-Pass AST Gate Deciders (PERF-02, RFC-000
         expect(r3.verdict).toBe("clean")
         expect(r4.verdict).toBe("clean")
         expect(r5.verdict).toBe("clean")
-        expect(r2.cacheHitCount).toBe(safeFiles.length)
       }),
   )
 })

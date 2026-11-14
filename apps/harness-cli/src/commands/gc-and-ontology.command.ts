@@ -17,6 +17,7 @@ import {
   queryOntologyWhy,
   renderOntologyMermaid,
 } from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 import { type CliEnv, type CliResult, findWorkspaceRoot } from "./daemon-and-omnigraph.service.js"
 
 export const handleGc = (
@@ -26,9 +27,9 @@ export const handleGc = (
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     const strict = argv.includes("--strict")
-    const graph = yield* extractWorkspaceTypeAwareGraph(repoRoot)
+    const graph = yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo)
     const hasPatternsDir = existsSync(join(repoRoot, "agent-patterns"))
-    const governanceDocs = loadGovernanceDocsFromDisk(repoRoot)
+    const governanceDocs = loadGovernanceDocsFromDisk(repoRoot, nodeSyncHostIo)
     const report = scanGraphEntropy(graph, {
       expectedPatterns: hasPatternsDir ? IDIOM_BLOCKS : undefined,
       checkUntestedDomainFns: true,
@@ -36,7 +37,7 @@ export const handleGc = (
       governanceDocs,
     })
     const findings = strict
-      ? [...report.findings, ...scanWorkspacePackageHygiene(repoRoot)]
+      ? [...report.findings, ...scanWorkspacePackageHygiene(repoRoot, nodeSyncHostIo)]
       : report.findings
     const finalReport = {
       clean: findings.length === 0,
@@ -56,7 +57,8 @@ export const handleOntology = (
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-    const graph = options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot))
+    const graph =
+      options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo))
     const sub = argv[1] ?? "layers"
 
     return yield* match(sub)
@@ -92,7 +94,8 @@ export const handleOntology = (
           const scopeArg = argv.find((arg) => arg.startsWith("--scope="))
           const scope = scopeArg ? scopeArg.slice("--scope=".length) : undefined
 
-          const allDocs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot)
+          const allDocs =
+            options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot, nodeSyncHostIo)
           const docs = scope
             ? allDocs.filter(
                 (doc) =>

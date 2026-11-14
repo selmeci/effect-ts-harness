@@ -41,17 +41,18 @@ import {
   makeGatePluginRegistryLayer,
 } from "../src/plugins/gate-plugin-registry.js"
 import {
+  makeWorkspaceFsHostIoLayer,
   makeWorkspaceFsMemoryLayer,
   readAndVerifyWorkspaceFile,
   WorkspaceFs,
-  WorkspaceFsLive,
 } from "../src/services/workspace-fs.js"
 import {
   execCheckedSubprocess,
   HarnessSubprocessRunner,
-  HarnessSubprocessRunnerLive,
+  makeHarnessSubprocessRunnerHostIoLayer,
   makeHarnessSubprocessRunnerTestLayer,
 } from "../src/services/subprocess-runner.js"
+import { testHostIo } from "./helpers/test-host-io.js"
 import {
   ActiveMutantContext,
   ActiveMutantContextLive,
@@ -66,14 +67,13 @@ import {
 import { MUTATION_PATTERNS } from "../src/mutation/mutant-ast-generator.js"
 import {
   AstGateCache,
+  type AstGateCacheEntry,
   AstGatePackageTag,
   AstSourceContent,
   AstSourceFilePath,
-  clearAstGateCache,
   EnclosingSymbolName,
   GateRuleVersion,
   GateVerdict,
-  getAstGateCacheSize,
   HARNESS_GATE_RULE_VERSION,
   isRepoWideAstRule,
   MAX_GATE_CACHE_SIZE,
@@ -527,7 +527,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         } finally {
           rmSync(tmpDir, { recursive: true, force: true })
         }
-      }).pipe(Effect.provide(WorkspaceFsLive)),
+      }).pipe(Effect.provide(makeWorkspaceFsHostIoLayer(testHostIo))),
   )
 
   it.effect(
@@ -731,7 +731,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
             expect(errOpt.value.reason).toBe("Subprocess command contains null bytes")
           }
         }
-      }).pipe(Effect.provide(HarnessSubprocessRunnerLive)),
+      }).pipe(Effect.provide(makeHarnessSubprocessRunnerHostIoLayer(testHostIo))),
   )
 
   it.effect(
@@ -1115,30 +1115,42 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         const cachePath = AstSourceFilePath.make(join(tmpDir, "cache.json"))
         const filePath = AstSourceFilePath.make("libs/harness/gates/src/test-file.ts")
         const content = AstSourceContent.make("export const x = 1\n")
+        const cacheStore = new Map()
 
-        const v1Report = AstGateCache.evaluateFiles({
-          files: [{ filePath, content }],
-          ruleVersion: GateRuleVersion.make("rule-v1"),
-          cacheFilePath: cachePath,
-        })
+        const v1Report = AstGateCache.evaluateFiles(
+          {
+            files: [{ filePath, content }],
+            ruleVersion: GateRuleVersion.make("rule-v1"),
+            cacheFilePath: cachePath,
+          },
+          undefined,
+          cacheStore,
+        )
         expect(v1Report.parsedFileCount).toBe(1)
         expect(v1Report.cacheHitCount).toBe(0)
 
-        const v1HitReport = AstGateCache.evaluateFiles({
-          files: [{ filePath, content }],
-          ruleVersion: GateRuleVersion.make("rule-v1"),
-          cacheFilePath: cachePath,
-        })
+        const v1HitReport = AstGateCache.evaluateFiles(
+          {
+            files: [{ filePath, content }],
+            ruleVersion: GateRuleVersion.make("rule-v1"),
+            cacheFilePath: cachePath,
+          },
+          undefined,
+          cacheStore,
+        )
         expect(v1HitReport.cacheHitCount).toBe(1)
 
-        const v2Report = AstGateCache.evaluateFiles({
-          files: [{ filePath, content }],
-          ruleVersion: GateRuleVersion.make("rule-v2"),
-          cacheFilePath: cachePath,
-        })
+        const v2Report = AstGateCache.evaluateFiles(
+          {
+            files: [{ filePath, content }],
+            ruleVersion: GateRuleVersion.make("rule-v2"),
+            cacheFilePath: cachePath,
+          },
+          undefined,
+          cacheStore,
+        )
         expect(v2Report.cacheHitCount).toBe(0)
       } finally {
-        AstGateCache.clear()
         rmSync(tmpDir, { recursive: true, force: true })
       }
     }),
@@ -1525,21 +1537,24 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           ).toContain(tc.expectedRule)
         }
 
-        // Verify cache clear & MAX_GATE_CACHE_SIZE export
-        clearAstGateCache()
-        expect(getAstGateCacheSize()).toBe(0)
+        // Verify local cacheStore & MAX_GATE_CACHE_SIZE export
+        const cacheStore = new Map<string, AstGateCacheEntry>()
+        expect(cacheStore.size).toBe(0)
         expect(MAX_GATE_CACHE_SIZE).toBe(1000)
-        yield* AstGateCache.decide({
-          files: [
-            {
-              filePath: AstSourceFilePath.make("libs/sample/domain/src/clean.ts"),
-              content: AstSourceContent.make("export const cleanVal = 42\n"),
-            },
-          ],
-        })
-        expect(getAstGateCacheSize()).toBe(1)
-        clearAstGateCache()
-        expect(getAstGateCacheSize()).toBe(0)
+        yield* AstGateCache.decide(
+          {
+            files: [
+              {
+                filePath: AstSourceFilePath.make("libs/sample/domain/src/clean.ts"),
+                content: AstSourceContent.make("export const cleanVal = 42\n"),
+              },
+            ],
+          },
+          cacheStore,
+        )
+        expect(cacheStore.size).toBe(1)
+        cacheStore.clear()
+        expect(cacheStore.size).toBe(0)
       }),
   )
 
@@ -1631,6 +1646,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         const wsReport = yield* decideGraphEntropy({
           graph: baseGraph,
           workspaceRoot: tmpWs,
+          hostIo: testHostIo,
         }).pipe(
           Effect.ensuring(
             Effect.sync(() => {
@@ -1890,7 +1906,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         const testDir = dirname(fileURLToPath(import.meta.url))
         const repoRoot = resolve(testDir, "../../../..")
 
-        const collectedAbsFiles = collectModularPluginFiles(repoRoot)
+        const collectedAbsFiles = collectModularPluginFiles(repoRoot, testHostIo)
         const relFiles = collectedAbsFiles.map((abs) => relative(repoRoot, abs).replace(/\\/g, "/"))
 
         expect(relFiles.length).toBeGreaterThanOrEqual(100)

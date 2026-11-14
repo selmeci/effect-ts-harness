@@ -28,6 +28,7 @@ import {
   LocalDecisionModel,
   ProposedRoleName,
 } from "@harness/decision"
+import { nodeSyncHostIo } from "@harness/infra"
 import {
   McpToolName,
   type McpToolPluginDescriptor,
@@ -466,6 +467,7 @@ export const buildDatalogAndDpoToolDescriptors = (
                 workspaceRoot: root,
                 initialGraph: graph,
                 verifyRoundTrip,
+                hostIo: nodeSyncHostIo,
               })
             : {
                 operations: [],

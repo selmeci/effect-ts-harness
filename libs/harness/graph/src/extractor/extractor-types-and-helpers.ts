@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
-import * as fs from "node:fs"
 import * as path from "node:path"
-import { Effect, Schema } from "effect"
+import type { SyncHostIo } from "@harness/service"
+import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   Node,
@@ -77,31 +77,37 @@ export const PackageJsonSchema = Schema.Struct({
 
 export const decodePackageJson = Schema.decodeOption(Schema.fromJsonString(PackageJsonSchema))
 
-export const resolvePackageTag = (repoRoot: string, relFilePath: string): PackageTag => {
+export const resolvePackageTag = (
+  repoRoot: string,
+  relFilePath: string,
+  hostIo?: SyncHostIo,
+): PackageTag => {
   if (relFilePath.startsWith("apps/") || relFilePath.includes("/apps/")) return "app"
-  let currentDir = path.dirname(path.join(repoRoot, relFilePath))
-  while (currentDir.length >= repoRoot.length) {
-    const pkgPath = path.join(currentDir, "package.json")
-    if (fs.existsSync(pkgPath)) {
-      const content = fs.readFileSync(pkgPath, "utf-8")
-      const opt = decodePackageJson(content)
-      const tags = match(opt)
-        .with({ _tag: "Some" }, ({ value }) => value.nx?.tags ?? [])
-        .with({ _tag: "None" }, () => [] as ReadonlyArray<string>)
-        .exhaustive()
-      if (tags.length > 0) {
-        if (tags.includes("type:domain") || tags.includes("type:core")) return "domain"
-        if (tags.includes("type:infra")) return "infra"
-        if (tags.includes("type:app")) return "app"
-        if (tags.includes("type:contract") && !tags.includes("type:service")) return "contract"
-        if (tags.includes("type:service")) return "service"
-        if (tags.includes("type:contract")) return "contract"
+  if (hostIo !== undefined) {
+    let currentDir = path.dirname(path.join(repoRoot, relFilePath))
+    while (currentDir.length >= repoRoot.length) {
+      const pkgPath = path.join(currentDir, "package.json")
+      if (hostIo.existsSync(pkgPath)) {
+        const content = hostIo.readTextSync(pkgPath)
+        const opt = decodePackageJson(content)
+        const tags = match(opt)
+          .with({ _tag: "Some" }, ({ value }) => value.nx?.tags ?? [])
+          .with({ _tag: "None" }, () => [] as ReadonlyArray<string>)
+          .exhaustive()
+        if (tags.length > 0) {
+          if (tags.includes("type:domain") || tags.includes("type:core")) return "domain"
+          if (tags.includes("type:infra")) return "infra"
+          if (tags.includes("type:app")) return "app"
+          if (tags.includes("type:contract") && !tags.includes("type:service")) return "contract"
+          if (tags.includes("type:service")) return "service"
+          if (tags.includes("type:contract")) return "contract"
+        }
+        break
       }
-      break
+      const parent = path.dirname(currentDir)
+      if (parent === currentDir) break
+      currentDir = parent
     }
-    const parent = path.dirname(currentDir)
-    if (parent === currentDir) break
-    currentDir = parent
   }
   if (relFilePath.includes("/domain/") || relFilePath.includes("/core/")) return "domain"
   if (relFilePath.includes("/infra/")) return "infra"
@@ -110,10 +116,11 @@ export const resolvePackageTag = (repoRoot: string, relFilePath: string): Packag
   return "service"
 }
 
-export const resolveRepoRoot = (startDir: string): string => {
+export const resolveRepoRoot = (startDir: string, hostIo?: SyncHostIo): string => {
+  const exists = (p: string) => (hostIo !== undefined ? hostIo.existsSync(p) : ts.sys.fileExists(p))
   let curr = path.resolve(startDir)
   while (curr !== path.dirname(curr)) {
-    if (fs.existsSync(path.join(curr, "pnpm-workspace.yaml"))) return curr
+    if (exists(path.join(curr, "pnpm-workspace.yaml"))) return curr
     curr = path.dirname(curr)
   }
   return startDir
@@ -374,6 +381,7 @@ export const stripCommentsAndTestTitles = (code: string): string => {
 export const computeDynamicPaths = (
   repoRoot: string,
   workspaceRoot: string,
+  hostIo?: SyncHostIo,
 ): Record<string, Array<string>> => {
   const graphNodeModules = path.join(workspaceRoot, "libs/harness/graph/node_modules")
   const paths: Record<string, Array<string>> = {
@@ -422,9 +430,9 @@ export const computeDynamicPaths = (
     "@harness/sample-infra": [path.join(repoRoot, "libs/sample/infra/src/index.ts")],
   }
   const libsDir = path.join(repoRoot, "libs")
-  if (fs.existsSync(libsDir)) {
-    for (const s of fs.readdirSync(libsDir, { withFileTypes: true })) {
-      if (!s.isDirectory() || s.name === "harness") continue
+  if (hostIo !== undefined && hostIo.existsSync(libsDir)) {
+    for (const s of hostIo.readdirSync(libsDir)) {
+      if (!s.isDirectory || s.name === "harness") continue
       for (const tier of ["contract", "service", "domain", "core", "infra"]) {
         const entry = path.join(libsDir, s.name, tier, "src", "index.ts")
         paths[`@harness/${s.name}-${tier}`] = [entry]
@@ -459,33 +467,28 @@ export const resolveImportSpecToRelFile = (
   return null
 }
 
-export const resolveContainedRelPath = (repoRoot: string, rawPath: string): string | null => {
+export const resolveContainedRelPath = (repoRoot: string, rawPath: string, hostIo?: SyncHostIo): string | null => {
   const trimmed = rawPath.trim()
   if (trimmed.length === 0) return null
   const logicalRoot = path.resolve(repoRoot)
   const abs = path.isAbsolute(trimmed) ? path.resolve(trimmed) : path.resolve(logicalRoot, trimmed)
   const rel = path.relative(logicalRoot, abs).replace(/\\/g, "/")
   if (rel.length === 0 || rel === "." || rel.startsWith("..") || path.isAbsolute(rel)) return null
-  return Effect.runSync(
-    Effect.try({
-      try: () => {
-        if (fs.existsSync(logicalRoot)) {
-          const realRoot = fs.realpathSync.native(logicalRoot)
-          let probe = logicalRoot
-          for (const seg of rel.split("/")) {
-            probe = path.join(probe, seg)
-            const st = fs.lstatSync(probe, { throwIfNoEntry: false })
-            if (st === undefined) break
-            if (st.isSymbolicLink() && !fs.existsSync(probe)) return null
-            const realRel = path.relative(realRoot, fs.realpathSync.native(probe)).replace(/\\/g, "/")
-            if (realRel.startsWith("..") || path.isAbsolute(realRel)) return null
-          }
-        }
-        return rel
-      },
-      catch: () => null,
-    }),
-  )
+  if (hostIo === undefined) return rel
+  return Result.getOrElse(Result.try(() => {
+    if (hostIo.existsSync(logicalRoot)) {
+      const realRoot = hostIo.realpathSync(logicalRoot)
+      let probe = logicalRoot
+      for (const seg of rel.split("/")) {
+        probe = path.join(probe, seg)
+        if (hostIo.isSymbolicLinkSync(probe) && !hostIo.existsSync(probe)) return null
+        if (!hostIo.existsSync(probe)) break
+        const realRel = path.relative(realRoot, hostIo.realpathSync(probe)).replace(/\\/g, "/")
+        if (realRel.startsWith("..") || path.isAbsolute(realRel)) return null
+      }
+    }
+    return rel
+  }), () => null)
 }
 
 

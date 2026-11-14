@@ -38,12 +38,13 @@ import {
   type GraphSnapshotError,
   type HarnessGraph,
   loadGraphSnapshotEffect,
+  makeOmnigraphSyncLayer,
+  makeTsCompilerOverlayLayer,
   mergeOmnigraphBranch,
-  OmnigraphSync,
   saveGraphSnapshot,
   syncToOmnigraphAndSnapshot,
-  TsCompilerOverlayServiceLive,
 } from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 import { buildWorkspaceFnIndex } from "@harness/ingest"
 import {
   type CliEnv,
@@ -78,7 +79,7 @@ const verifyFailureWithThrashing = (
   stderrMsg: string,
 ): CliResult => {
   recordFriction(options, { kind: "verify_failure", summary, detail })
-  const thrashing = checkLoopThrashing(readFrictionEvents(repoRoot))
+  const thrashing = checkLoopThrashing(readFrictionEvents(repoRoot, nodeSyncHostIo))
   if (thrashing.stuck && thrashing.escalationMessage !== null) {
     return { exitCode: 2, stdout: "", stderr: `${thrashing.escalationMessage}\n${stderrMsg}` }
   }
@@ -129,7 +130,7 @@ export const handleVerify = (
       }
     }
 
-    const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
+    const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, nodeSyncHostIo)
     const stubs = Array.from(fnIndex.bySpanName.values()).filter((fn) => fn.isStub)
     if (stubs.length > 0) {
       return {
@@ -146,8 +147,10 @@ export const handleVerify = (
     if (Option.isSome(astGateFail)) return astGateFail.value
 
     const graph = yield* extractGraphViaCompilerOverlay({ repoRoot }).pipe(
-      Effect.provide(TsCompilerOverlayServiceLive),
-      Effect.catchTag("TsCompilerOverlayError", () => extractTypeGraph({ repoRoot })),
+      Effect.provide(makeTsCompilerOverlayLayer(nodeSyncHostIo)),
+      Effect.catchTag("TsCompilerOverlayError", () =>
+        extractTypeGraph({ repoRoot, hostIo: nodeSyncHostIo }),
+      ),
     )
     const graphStubs: Array<string> = []
     for (const [, node] of Graph.nodes(graph.graph)) {
@@ -175,7 +178,8 @@ export const handleVerify = (
       )
     }
 
-    const governanceDocs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot)
+    const governanceDocs =
+      options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot, nodeSyncHostIo)
     const ontologyInvariants = yield* decideOntologyInvariants({ graph, governanceDocs })
     if (!ontologyInvariants.clean) {
       const msg = ontologyInvariants.findings
@@ -190,11 +194,11 @@ export const handleVerify = (
       )
     }
 
-    const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
+    const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
     const snapshotPath = join(repoRoot, ".harness", "graph-snapshot.json")
     if (isIsolatedExternalWorkspace(repoRoot)) {
-      saveGraphSnapshot(graph, snapshotPath)
-      writeGraphHeadMeta(repoRoot)
+      saveGraphSnapshot(graph, snapshotPath, nodeSyncHostIo)
+      writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
       recordTelemetry(options, {
         surface: "cli",
         category: "graph_query",
@@ -211,10 +215,10 @@ export const handleVerify = (
         from: taskBranches.mainBranch,
         snapshotPath,
       }).pipe(
-        Effect.provide(OmnigraphSync.Live),
+        Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
         Effect.orElseSucceed(() => ({ syncedToOmnigraph: false, snapshotPath, error: undefined })),
       )
-      writeGraphHeadMeta(repoRoot)
+      writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
       recordTelemetry(options, {
         surface: "cli",
         category: "graph_query",
@@ -320,7 +324,7 @@ export const handleVerify = (
                     stderr: `[GATE FAILURE] verify:span-budget\n${err.message}`,
                   }))
                   .with({ _tag: "Ok" }, () => {
-                    const stamp = writeVerifyStamp(repoRoot, taskBranches.implBranch, {
+                    const stamp = writeVerifyStamp(repoRoot, nodeSyncHostIo, taskBranches.implBranch, {
                       dstSeed: suite.initialSeed,
                       dstSeedsRun: suite.seedsRun,
                     })
@@ -363,7 +367,7 @@ const loadSnapshotPair = (
     }
 
     const loadOne = (path: string, label: string) =>
-      loadGraphSnapshotEffect(path).pipe(
+      loadGraphSnapshotEffect(path, nodeSyncHostIo).pipe(
         Effect.map((graph) => ({ _tag: "Ok" as const, graph })),
         Effect.catchTag("GraphSnapshotError", (err: GraphSnapshotError) =>
           Effect.gen(function* () {
@@ -464,7 +468,7 @@ export const handleDone = (
     }
 
     // 3. Verify stamp check
-    const stampCheck = checkVerifyStamp(repoRoot)
+    const stampCheck = checkVerifyStamp(repoRoot, nodeSyncHostIo)
     if (!stampCheck.valid) {
       if (hasVerifiedSinceLastMutation(decodedStdin)) {
         return {
@@ -521,7 +525,7 @@ export const handleDone = (
 
           // 6. Omnigraph sync & branch merge
           if (isIsolatedExternalWorkspace(repoRoot)) {
-            writeGraphHeadMeta(repoRoot)
+            writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
             recordTelemetry(options, {
               surface: isAntigravity ? "hook" : "cli",
               category: "graph_query",
@@ -533,20 +537,26 @@ export const handleDone = (
           } else {
             yield* ensureLocalOmnigraphReady(repoRoot)
             const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
-            const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
+            const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
             yield* diffOmnigraphBranches({
               repoRoot: clusterRepoRoot,
               source: taskBranches.implBranch,
               target: taskBranches.planBranch,
-            }).pipe(Effect.provide(OmnigraphSync.Live), Effect.orElseSucceed(() => Option.none()))
+            }).pipe(
+              Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
+              Effect.orElseSucceed(() => Option.none()),
+            )
 
             const merged = yield* mergeOmnigraphBranch({
               repoRoot: clusterRepoRoot,
               source: taskBranches.implBranch,
               target: taskBranches.mainBranch,
               cleanupBranches: [taskBranches.implBranch, taskBranches.planBranch],
-            }).pipe(Effect.provide(OmnigraphSync.Live), Effect.orElseSucceed(() => false))
-            writeGraphHeadMeta(repoRoot)
+            }).pipe(
+              Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
+              Effect.orElseSucceed(() => false),
+            )
+            writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
             recordTelemetry(options, {
               surface: isAntigravity ? "hook" : "cli",
               category: "graph_query",
@@ -569,11 +579,11 @@ export const handleDone = (
 
           if (options?.repoRoot !== undefined || process.env.VITEST === undefined) {
             const report = buildSessionReport({
-              events: readTelemetryEvents(repoRoot),
-              frictionEvents: readFrictionEvents(repoRoot),
+              events: readTelemetryEvents(repoRoot, nodeSyncHostIo),
+              frictionEvents: readFrictionEvents(repoRoot, nodeSyncHostIo),
               stampValid: true,
             })
-            writeSessionReportFiles(repoRoot, report)
+            writeSessionReportFiles(repoRoot, report, nodeSyncHostIo)
           }
 
           return {

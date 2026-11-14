@@ -47,3 +47,19 @@ export class ActiveMutantContext extends Context.Service<
   ActiveMutantContext,
   ActiveMutantContextShape
 >()("@harness/gates/ActiveMutantContext") {}
+
+export {
+  AstGateCachePort,
+  type AstGateCachePortShape,
+  DecisionCachePort,
+  type DecisionCachePortShape,
+  UnixSocketDaemonPort,
+  type UnixSocketDaemonPortShape,
+} from "./cache-and-daemon-ports.js"
+
+export type {
+  SyncHostDirEntry,
+  SyncHostExecOptions,
+  SyncHostExecResult,
+  SyncHostIo,
+} from "./host-io.js"

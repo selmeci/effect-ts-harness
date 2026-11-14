@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
 import { Effect, Layer } from "effect"
 import {
@@ -11,57 +10,60 @@ import {
   WorkspaceFsError,
   WorkspaceFsOperation,
 } from "@harness/contract"
-import { WorkspaceFs, type WorkspaceFsShape } from "@harness/service"
+import { type SyncHostIo, WorkspaceFs, type WorkspaceFsShape } from "@harness/service"
 
 export { WorkspaceFs, type WorkspaceFsShape }
 
-export const WorkspaceFsLive: Layer.Layer<WorkspaceFs> = Layer.succeed(WorkspaceFs, {
-  readTextFile: (filePath) =>
-    Effect.try({
-      try: () => WorkspaceFileContent.make(readFileSync(filePath, "utf8")),
-      catch: (err) =>
-        new WorkspaceFsError({
-          filePath,
-          operation: WorkspaceFsOperation.make("read"),
-          reason: ErrorReasonMessage.make(
-            err instanceof Error && err.message.trim().length > 0 ? err.message : "Read failed",
-          ),
-        }),
-    }),
-  writeTextFileAtomic: (filePath, content) =>
-    Effect.suspend(() => {
-      const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`
-      return Effect.try({
-        try: () => {
-          mkdirSync(dirname(filePath), { recursive: true })
-          writeFileSync(tmpPath, content, "utf8")
-          renameSync(tmpPath, filePath)
-        },
+export const makeWorkspaceFsHostIoLayer = (hostIo: SyncHostIo): Layer.Layer<WorkspaceFs> =>
+  Layer.succeed(WorkspaceFs, {
+    readTextFile: (filePath) =>
+      Effect.try({
+        try: () => WorkspaceFileContent.make(hostIo.readTextSync(filePath)),
         catch: (err) =>
           new WorkspaceFsError({
             filePath,
-            operation: WorkspaceFsOperation.make("write"),
+            operation: WorkspaceFsOperation.make("read"),
             reason: ErrorReasonMessage.make(
-              err instanceof Error && err.message.trim().length > 0 ? err.message : "Write failed",
+              err instanceof Error && err.message.trim().length > 0 ? err.message : "Read failed",
             ),
           }),
-      }).pipe(
-        Effect.ensuring(
-          Effect.ignore(
-            Effect.try({
-              try: () => {
-                if (existsSync(tmpPath)) {
-                  unlinkSync(tmpPath)
-                }
-              },
-              catch: () => undefined,
+      }),
+    writeTextFileAtomic: (filePath, content) =>
+      Effect.suspend(() => {
+        const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`
+        return Effect.try({
+          try: () => {
+            hostIo.mkdirRecursiveSync(dirname(filePath))
+            hostIo.writeTextSync(tmpPath, content)
+            hostIo.renameSync(tmpPath, filePath)
+          },
+          catch: (err) =>
+            new WorkspaceFsError({
+              filePath,
+              operation: WorkspaceFsOperation.make("write"),
+              reason: ErrorReasonMessage.make(
+                err instanceof Error && err.message.trim().length > 0
+                  ? err.message
+                  : "Write failed",
+              ),
             }),
+        }).pipe(
+          Effect.ensuring(
+            Effect.ignore(
+              Effect.try({
+                try: () => {
+                  if (hostIo.existsSync(tmpPath)) {
+                    hostIo.unlinkSync(tmpPath)
+                  }
+                },
+                catch: () => undefined,
+              }),
+            ),
           ),
-        ),
-      )
-    }),
-  exists: (filePath) => Effect.sync(() => existsSync(filePath)),
-})
+        )
+      }),
+    exists: (filePath) => Effect.sync(() => hostIo.existsSync(filePath)),
+  })
 
 export const makeWorkspaceFsMemoryLayer = (
   initialFiles: Readonly<Record<string, string>> = {},

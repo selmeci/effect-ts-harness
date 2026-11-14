@@ -1,17 +1,19 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Layer, Schema } from "effect"
+import { Effect, Layer, Option, Schema } from "effect"
 import * as AiError from "effect/ai/AiError"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import {
+  DecisionCachePayloadJson,
+  DecisionCacheTtlMillis,
+  NonNegativeCount,
+} from "@harness/contract"
+import { DecisionCachePort } from "@harness/service"
 import {
   CachedDecisionLookupInput,
   CachedDecisionLookupResult,
   CachedDecisionModel,
   CanonicalInputJson,
   canonicalJson,
-  clearGlobalDecisionCache,
   computeDecisionCacheKey,
   decideCachedDecisionLookup,
   DecisionCacheHitStatus,
@@ -21,15 +23,56 @@ import {
   evaluateBatchCachedDecisions,
   HARNESS_DECISION_PROMPT_VERSION,
   IdiomRouterV1,
+  lookupOrComputeDecisionPayload,
   makeCachedDecisionModelLayer,
   makeFailingDecisionModelLayer,
   makeMockDecisionModelLayer,
   resolveDecisionCachePath,
   routeStep,
   wrapDecisionModelLayer,
-} from "./index.js"
+} from "../src/index.js"
 
 const CompositeLookupInputsArb = Schema.Array(CachedDecisionLookupInput)
+
+const makeInMemoryDecisionCachePortLayer = (): Layer.Layer<DecisionCachePort> => {
+  const entries = new Map<
+    string,
+    { readonly payload: DecisionCachePayloadJson; readonly expiresAtMs: number }
+  >()
+  let hits = 0
+  let misses = 0
+  return Layer.succeed(DecisionCachePort, {
+    lookup: (key) =>
+      Effect.sync(() => {
+        const entry = entries.get(key)
+        if (entry === undefined || Date.now() > entry.expiresAtMs) {
+          if (entry !== undefined) entries.delete(key)
+          misses += 1
+          return Option.none<DecisionCachePayloadJson>()
+        }
+        hits += 1
+        return Option.some(entry.payload)
+      }),
+    store: (key, payload, ttlMillis) =>
+      Effect.sync(() => {
+        entries.set(key, {
+          payload,
+          expiresAtMs: Date.now() + ttlMillis,
+        })
+      }),
+    clear: Effect.sync(() => {
+      entries.clear()
+      hits = 0
+      misses = 0
+    }),
+    stats: Effect.sync(() => ({
+      hits: NonNegativeCount.make(hits),
+      misses: NonNegativeCount.make(misses),
+      coalescedRequests: NonNegativeCount.make(0),
+      size: NonNegativeCount.make(entries.size),
+    })),
+  })
+}
 
 const makeCountingDecisionModelLayer = (counter: { count: number }, yieldTicks: number = 0) =>
   Layer.effect(
@@ -69,10 +112,6 @@ describe("CachedDecisionModel — Content-Addressable Caching & Request Coalesci
     "produces identical cache keys regardless of object key order and hits cache without re-invoking underlying model",
     () =>
       Effect.gen(function* () {
-        const tmpDir = mkdtempSync(join(tmpdir(), "harness-decision-cache-"))
-        const cacheFile = join(tmpDir, "decisions-v1.json")
-        clearGlobalDecisionCache()
-
         const key1 = computeDecisionCacheKey({
           taskId: "route",
           input: { b: 2, a: 1, nested: { y: "two", x: "one" } },
@@ -93,10 +132,10 @@ describe("CachedDecisionModel — Content-Addressable Caching & Request Coalesci
 
         const counter = { count: 0 }
         const baseLayer = makeCountingDecisionModelLayer(counter)
+        const portLayer = makeInMemoryDecisionCachePortLayer()
         const cachedLayer = wrapDecisionModelLayer(baseLayer, {
-          cacheFilePath: cacheFile,
           promptVersion: HARNESS_DECISION_PROMPT_VERSION,
-        })
+        }).pipe(Layer.provideMerge(portLayer))
 
         // First call -> cache miss (1 underlying call)
         const r1 = yield* routeStep("Validate customer checkout payload").pipe(
@@ -104,7 +143,6 @@ describe("CachedDecisionModel — Content-Addressable Caching & Request Coalesci
         )
         expect(r1).toBe("schema")
         expect(counter.count).toBe(1)
-        expect(existsSync(cacheFile)).toBe(true)
 
         // Second identical call -> cache hit (still 1 underlying call)
         const r2 = yield* routeStep("Validate customer checkout payload").pipe(
@@ -122,38 +160,34 @@ describe("CachedDecisionModel — Content-Addressable Caching & Request Coalesci
 
         // Changed promptVersion -> cache miss (3 underlying calls)
         const v2Layer = wrapDecisionModelLayer(baseLayer, {
-          cacheFilePath: cacheFile,
           promptVersion: "decisions-v2",
-        })
+        }).pipe(Layer.provideMerge(portLayer))
         const r4 = yield* routeStep("Validate customer checkout payload").pipe(
           Effect.provide(v2Layer),
         )
         expect(r4).toBe("schema")
         expect(counter.count).toBe(3)
 
-        // Fresh layer reading persisted disk cache -> 0 new underlying calls
-        const diskBackedLayer = Layer.provide(
+        // Fresh layer reading persisted DecisionCachePort -> 0 new underlying calls
+        const portBackedLayer = Layer.provide(
           makeCachedDecisionModelLayer({
-            cacheFilePath: cacheFile,
             promptVersion: "decisions-v2",
           }),
           baseLayer,
-        )
+        ).pipe(Layer.provideMerge(portLayer))
         const r5 = yield* routeStep("Validate customer checkout payload").pipe(
-          Effect.provide(diskBackedLayer),
+          Effect.provide(portBackedLayer),
         )
         expect(r5).toBe("schema")
         expect(counter.count).toBe(3)
 
-        expect(resolveDecisionCachePath(tmpDir)).toContain("decisions-v1.json")
+        expect(resolveDecisionCachePath("/tmp/repo")).toContain("decisions-v1.json")
         expect(DecisionTaskId.make("route")).toBe("route")
         expect(DecisionPromptVersion.make("decisions-v1")).toBe("decisions-v1")
         expect(DecisionCacheKey.make(key1)).toBe(key1)
         expect(DecisionCacheHitStatus.make("hit")).toBe("hit")
         expect(CanonicalInputJson.make("{}")).toBe("{}")
         expect(CachedDecisionLookupResult.fields).toBeDefined()
-
-        rmSync(tmpDir, { recursive: true, force: true })
       }),
   )
 
@@ -161,7 +195,6 @@ describe("CachedDecisionModel — Content-Addressable Caching & Request Coalesci
     "coalesces concurrent identical requests into a single underlying DecisionModel invocation",
     () =>
       Effect.gen(function* () {
-        clearGlobalDecisionCache()
         const counter = { count: 0 }
         const slowBaseLayer = makeCountingDecisionModelLayer(counter, 4)
         const wrappedLayer = CachedDecisionModel.wrapLayer(slowBaseLayer, {
@@ -185,15 +218,20 @@ describe("CachedDecisionModel — Content-Addressable Caching & Request Coalesci
     [CompositeLookupInputsArb],
     ([inputs]) =>
       Effect.gen(function* () {
-        clearGlobalDecisionCache()
         const sample = inputs[0] ?? {
           taskId: DecisionTaskId.make("route"),
           promptVersion: HARNESS_DECISION_PROMPT_VERSION,
           canonicalInputJson: CanonicalInputJson.make("{}"),
         }
-        const mockLayer = makeMockDecisionModelLayer()
-        const first = yield* CachedDecisionModel.decide(sample).pipe(Effect.provide(mockLayer))
-        const second = yield* decideCachedDecisionLookup(sample).pipe(Effect.provide(mockLayer))
+        const combinedLayer = Layer.mergeAll(
+          makeMockDecisionModelLayer(),
+          makeInMemoryDecisionCachePortLayer(),
+        )
+        const [first, second] = yield* Effect.gen(function* () {
+          const a = yield* CachedDecisionModel.decide(sample)
+          const b = yield* decideCachedDecisionLookup(sample)
+          return [a, b] as const
+        }).pipe(Effect.provide(combinedLayer))
 
         expect(first.cacheKey).toBe(second.cacheKey)
         expect(first.cacheStatus).toBe("miss")
@@ -205,25 +243,24 @@ describe("CachedDecisionModel — Content-Addressable Caching & Request Coalesci
     "does not cache failures in decideCachedDecisionLookup or makeCachedDecisionModelLayer",
     () =>
       Effect.gen(function* () {
-        clearGlobalDecisionCache()
         const sample = {
           taskId: DecisionTaskId.make("test-failure-caching"),
           promptVersion: HARNESS_DECISION_PROMPT_VERSION,
           canonicalInputJson: CanonicalInputJson.make('{"input":"test"}'),
         }
+        const portLayer = makeInMemoryDecisionCachePortLayer()
 
         // 1. decideCachedDecisionLookup with failing layer does not cache failure
-        const failingLayer = makeFailingDecisionModelLayer("Network timeout")
-        const miss1 = yield* decideCachedDecisionLookup(sample).pipe(Effect.provide(failingLayer))
+        const failingLayer = Layer.mergeAll(makeFailingDecisionModelLayer("Network timeout"), portLayer)
+        const mockLayer = Layer.mergeAll(makeMockDecisionModelLayer(), portLayer)
+        const [miss1, miss2, hit] = yield* Effect.gen(function* () {
+          const a = yield* decideCachedDecisionLookup(sample).pipe(Effect.provide(failingLayer))
+          const b = yield* decideCachedDecisionLookup(sample).pipe(Effect.provide(mockLayer))
+          const c = yield* decideCachedDecisionLookup(sample).pipe(Effect.provide(mockLayer))
+          return [a, b, c] as const
+        })
         expect(miss1.cacheStatus).toBe("miss")
-
-        // Next call with mock layer should STILL be a miss (because failure was not cached)
-        const mockLayer = makeMockDecisionModelLayer()
-        const miss2 = yield* decideCachedDecisionLookup(sample).pipe(Effect.provide(mockLayer))
         expect(miss2.cacheStatus).toBe("miss")
-
-        // Now that mockLayer succeeded, it should be cached as a hit
-        const hit = yield* decideCachedDecisionLookup(sample).pipe(Effect.provide(mockLayer))
         expect(hit.cacheStatus).toBe("hit")
 
         // 2. makeCachedDecisionModelLayer with dynamic failing/succeeding model
@@ -353,66 +390,62 @@ describe("CachedDecisionModel — Content-Addressable Caching & Request Coalesci
     },
   )
 
-  it.effect("handles corrupt JSON in cache file gracefully without throwing", () =>
-    Effect.gen(function* () {
-      const tmpDir = mkdtempSync(join(tmpdir(), "harness-corrupt-json-"))
-      const cacheFile = join(tmpDir, "decisions-v1.json")
-      writeFileSync(cacheFile, "CORRUPT NOT JSON {[[[", "utf8")
-
-      const counter = { count: 0 }
-      const baseLayer = makeCountingDecisionModelLayer(counter)
-      const diskLayer = wrapDecisionModelLayer(baseLayer, {
-        cacheFilePath: cacheFile,
-        promptVersion: HARNESS_DECISION_PROMPT_VERSION,
-      })
-
-      const res = yield* routeStep("Test after corrupt cache").pipe(Effect.provide(diskLayer))
-      expect(res).toBe("schema")
-      expect(counter.count).toBe(1)
-
-      rmSync(tmpDir, { recursive: true, force: true })
-    }),
-  )
-
   it.effect(
-    "does not populate globalDecisionMemoryCache when shareGlobalMemoryCache is omitted or false",
+    "isolates in-memory caches per layer build when no DecisionCachePort is provided",
     () =>
       Effect.gen(function* () {
-        clearGlobalDecisionCache()
         const counter = { count: 0 }
         const baseLayer = makeCountingDecisionModelLayer(counter)
 
-        // 1. Without shareGlobalMemoryCache
-        const unsharedLayer = wrapDecisionModelLayer(baseLayer, {
-          promptVersion: "unshared-v1",
-        })
-        yield* routeStep("Evaluate unshared step").pipe(Effect.provide(unsharedLayer))
+        const layer1 = wrapDecisionModelLayer(baseLayer, { promptVersion: "isolated-v1" })
+        const layer2 = wrapDecisionModelLayer(baseLayer, { promptVersion: "isolated-v1" })
+
+        yield* routeStep("Evaluate isolated step").pipe(Effect.provide(layer1))
         expect(counter.count).toBe(1)
 
-        // The global cache should remain empty
-        const lookup = yield* decideCachedDecisionLookup({
-          taskId: DecisionTaskId.make("route"),
-          promptVersion: DecisionPromptVersion.make("unshared-v1"),
-          canonicalInputJson: CanonicalInputJson.make('{"planStep":"Evaluate unshared step"}'),
-        }).pipe(Effect.provide(baseLayer))
-        expect(lookup.cacheStatus).toBe("miss")
-
-        // 2. With shareGlobalMemoryCache: true
-        clearGlobalDecisionCache()
-        const sharedLayer = wrapDecisionModelLayer(baseLayer, {
-          promptVersion: "shared-v1",
-          shareGlobalMemoryCache: true,
-        })
-        yield* routeStep("Evaluate shared step").pipe(Effect.provide(sharedLayer))
-        expect(counter.count).toBe(3) // 1 from unshared + 1 from probe + 1 from shared
-
-        // Another instance sharing global memory cache should hit memory cache without re-invoking
-        const sharedLayer2 = wrapDecisionModelLayer(baseLayer, {
-          promptVersion: "shared-v1",
-          shareGlobalMemoryCache: true,
-        })
-        yield* routeStep("Evaluate shared step").pipe(Effect.provide(sharedLayer2))
-        expect(counter.count).toBe(3) // No increment! Hit globalDecisionMemoryCache
+        // Separate layer build without shared DecisionCachePort misses and invokes model again
+        yield* routeStep("Evaluate isolated step").pipe(Effect.provide(layer2))
+        expect(counter.count).toBe(2)
       }),
+  )
+
+  it.effect(
+    "REQ-3.2: DecisionCache.lookupOrCompute memoizes payloads via DecisionCachePort",
+    () =>
+      Effect.gen(function* () {
+        let computeCalls = 0
+        const key = computeDecisionCacheKey({
+          taskId: "req-3-2",
+          input: { step: "memoize" },
+        })
+        const ttlMillis = DecisionCacheTtlMillis.make(60_000)
+
+        const result1 = yield* lookupOrComputeDecisionPayload({
+          key,
+          ttlMillis,
+          compute: Effect.sync(() => {
+            computeCalls += 1
+            return DecisionCachePayloadJson.make('{"answer":"ok"}')
+          }),
+        })
+        const result2 = yield* lookupOrComputeDecisionPayload({
+          key,
+          ttlMillis,
+          compute: Effect.sync(() => {
+            computeCalls += 1
+            return DecisionCachePayloadJson.make('{"answer":"other"}')
+          }),
+        })
+
+        expect(result1).toBe('{"answer":"ok"}')
+        expect(result2).toBe('{"answer":"ok"}')
+        expect(computeCalls).toBe(1)
+
+        const port = yield* DecisionCachePort
+        const stats = yield* port.stats
+        expect(stats.hits).toBe(1)
+        expect(stats.misses).toBe(1)
+        expect(stats.size).toBe(1)
+      }).pipe(Effect.provide(makeInMemoryDecisionCachePortLayer())),
   )
 })

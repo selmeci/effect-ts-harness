@@ -15,15 +15,15 @@
  * - architecture-policy-violation: Self-dogfooding and AST policy violations.
  * - unused-contract-export: Per-scope unused contract symbols.
  */
-import { type Dirent, existsSync, readdirSync, readFileSync } from "node:fs"
 import { join, posix, relative } from "node:path"
 import { Cause, Effect, Layer, Option, Schema } from "effect"
 import { match } from "ts-pattern"
 import * as Graph from "effect/Graph"
+import type { SyncHostIo } from "@harness/service"
 import { checkMigrationFiles, checkMigrationSqlSafety } from "../../migration-check.js"
 import { AstSourceContent, AstSourceFilePath, decideAstGateCache, type AstGateFileInput } from "../../ast-cache.js"
 import { evaluateAllGatePlugins, GatePluginRegistryLive } from "../gate-plugin-registry.js"
-import { WorkspaceFsLive } from "../../services/workspace-fs.js"
+import { makeWorkspaceFsHostIoLayer } from "../../services/workspace-fs.js"
 import { WorkspaceFilePath } from "../self-dogfooding-contract.js"
 import {
   collectModularPluginFiles,
@@ -64,13 +64,15 @@ const SKIPPED_PACKAGE_DEPS = new Set([
   "effect", "@effect/sql-d1", "@effect/sql-sqlite-do", "@effect/ai-typesafe", "drizzle-orm",
 ])
 
-const listSubdirs = (dir: string): ReadonlyArray<string> => {
-  if (!existsSync(dir)) return []
+const listSubdirs = (dir: string, hostIo: SyncHostIo): ReadonlyArray<string> => {
+  if (!hostIo.existsSync(dir)) return []
   return safeFs<ReadonlyArray<string>>(
-    () => {
-      const dirents: ReadonlyArray<Dirent> = readdirSync(dir, { withFileTypes: true })
-      return dirents.filter((e) => e.isDirectory()).map((e) => e.name).sort((a, b) => a.localeCompare(b))
-    },
+    () =>
+      hostIo
+        .readdirSync(dir)
+        .filter((e) => e.isDirectory)
+        .map((e) => e.name)
+        .sort((a, b) => a.localeCompare(b)),
     [],
   )
 }
@@ -80,31 +82,33 @@ export const evaluatePackageAndMigrationPlugin = (
   _ctx?: GraphReachabilityContext,
 ): Effect.Effect<ReadonlyArray<GcFinding>> =>
   Effect.gen(function* () {
-    if (input.workspaceRoot === undefined) return []
+    if (input.workspaceRoot === undefined || input.hostIo === undefined) return []
     const repoRoot = input.workspaceRoot
+    const hostIo = input.hostIo
+    const workspaceFsLayer = makeWorkspaceFsHostIoLayer(hostIo)
     const findings: Array<GcFinding> = []
     const tierManifests: Array<PackageTierManifestInput> = []
     const serviceTierFiles: Array<ServiceTierSourceInput> = []
     const libsDir = join(repoRoot, "libs")
-    const scopes = listSubdirs(libsDir)
+    const scopes = listSubdirs(libsDir, hostIo)
 
     for (const scope of scopes) {
       // Rule: unused-contract-export & dead-tagged-error (contract)
-      findings.push(...checkUnusedContractExports(repoRoot, scope))
+      findings.push(...checkUnusedContractExports(repoRoot, hostIo, scope))
 
       const scopeDir = join(libsDir, scope)
-      const tiers = listSubdirs(scopeDir)
+      const tiers = listSubdirs(scopeDir, hostIo)
       for (const tier of tiers) {
         const tierDir = join(scopeDir, tier)
         const srcDir = join(tierDir, "src")
-        if (!existsSync(srcDir)) continue
+        if (!hostIo.existsSync(srcDir)) continue
 
-        const srcFiles = collectWorkspaceTsFiles(srcDir).filter((f) => !f.endsWith(".test.ts") && !f.endsWith(".spec.ts"))
+        const srcFiles = collectWorkspaceTsFiles(srcDir, hostIo).filter((f) => !f.endsWith(".test.ts") && !f.endsWith(".spec.ts"))
         if (tier === "service") {
           for (const file of srcFiles) {
             serviceTierFiles.push({
               filePath: AstSourceFilePath.make(relative(repoRoot, file).replace(/\\/g, "/")),
-              content: AstSourceContent.make(safeFs(() => readFileSync(file, "utf8"), "")),
+              content: AstSourceContent.make(safeFs(() => hostIo.readTextSync(file), "")),
             })
           }
         }
@@ -113,7 +117,7 @@ export const evaluatePackageAndMigrationPlugin = (
 
         if (tier === "infra" && scope !== "harness") {
           for (const file of srcFiles) {
-            const content = safeFs(() => readFileSync(file, "utf8"), "")
+            const content = safeFs(() => hostIo.readTextSync(file), "")
             const noComments = content.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\r\n]*/g, "")
             const mvRegex = /(?:const|let)\s+([A-Za-z0-9_$]*[Mm]igrations[A-Za-z0-9_$]*)\s*(?::[^=]+)?=\s*\{/g
             let mvMatch: RegExpExecArray | null
@@ -126,7 +130,7 @@ export const evaluatePackageAndMigrationPlugin = (
 
         for (const file of srcFiles) {
           const relFilePath = relative(repoRoot, file).replace(/\\/g, "/")
-          const content = safeFs(() => readFileSync(file, "utf8"), "")
+          const content = safeFs(() => hostIo.readTextSync(file), "")
           const stripped = content.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\r\n]*/g, "").replace(/\s+/g, "")
           if (stripped === "" || stripped === "export{}" || stripped === "export{};") {
             findings.push({
@@ -342,7 +346,7 @@ export const evaluatePackageAndMigrationPlugin = (
         }
 
         const pkgJsonPath = join(tierDir, "package.json")
-        const pkgContent = safeFs(() => existsSync(pkgJsonPath) ? readFileSync(pkgJsonPath, "utf8") : "", "")
+        const pkgContent = safeFs(() => hostIo.existsSync(pkgJsonPath) ? hostIo.readTextSync(pkgJsonPath) : "", "")
         if (pkgContent.length > 0) {
           const pkgOpt = decodePackageJson(pkgContent)
           const relPkgPath = relative(repoRoot, pkgJsonPath).replace(/\\/g, "/")
@@ -368,8 +372,8 @@ export const evaluatePackageAndMigrationPlugin = (
             .exhaustive()
           if (Option.isSome(pkgOpt) && pkgOpt.value.dependencies !== undefined) {
             const dependencies = pkgOpt.value.dependencies, pkgName = pkgOpt.value.name ?? `${scope}/${tier}`
-            const scriptFiles = safeFs(() => existsSync(join(tierDir, "scripts")) ? collectWorkspaceAllFiles(join(tierDir, "scripts")) : [], [])
-            const combinedContent = [...srcFiles, ...scriptFiles].map((f) => safeFs(() => readFileSync(f, "utf8"), "")).join("\n")
+            const scriptFiles = safeFs(() => hostIo.existsSync(join(tierDir, "scripts")) ? collectWorkspaceAllFiles(join(tierDir, "scripts"), hostIo) : [], [])
+            const combinedContent = [...srcFiles, ...scriptFiles].map((f) => safeFs(() => hostIo.readTextSync(f), "")).join("\n")
             for (const depName of Object.keys(dependencies)) {
               if (SKIPPED_PACKAGE_DEPS.has(depName)) continue
               const isReferenced = combinedContent.includes(`"${depName}"`) || combinedContent.includes(`'${depName}'`) || combinedContent.includes(`"${depName}/`) || combinedContent.includes(`'${depName}/`)
@@ -403,19 +407,19 @@ export const evaluatePackageAndMigrationPlugin = (
       }
     }
 
-    const sqlFilesToScan: Array<string> = [...collectWorkspaceSqlFiles(join(repoRoot, "migrations"))]
+    const sqlFilesToScan: Array<string> = [...collectWorkspaceSqlFiles(join(repoRoot, "migrations"), hostIo)]
     for (const scope of scopes) {
       const scopeDir = join(libsDir, scope)
-      for (const tier of listSubdirs(scopeDir)) {
-        sqlFilesToScan.push(...collectWorkspaceSqlFiles(join(scopeDir, tier, "migrations")))
+      for (const tier of listSubdirs(scopeDir, hostIo)) {
+        sqlFilesToScan.push(...collectWorkspaceSqlFiles(join(scopeDir, tier, "migrations"), hostIo))
       }
     }
     const appsDir = join(repoRoot, "apps")
-    for (const app of listSubdirs(appsDir)) {
-      sqlFilesToScan.push(...collectWorkspaceSqlFiles(join(appsDir, app, "migrations")))
+    for (const app of listSubdirs(appsDir, hostIo)) {
+      sqlFilesToScan.push(...collectWorkspaceSqlFiles(join(appsDir, app, "migrations"), hostIo))
     }
     if (sqlFilesToScan.length > 0) {
-      for (const v of checkMigrationFiles(sqlFilesToScan).violations) {
+      for (const v of checkMigrationFiles(sqlFilesToScan, hostIo).violations) {
         const relFile = relative(repoRoot, v.file).replace(/\\/g, "/")
         findings.push({
           kind: "unsafe-sql-migration", nodeId: `${relFile}:${v.kind}`, location: relFile,
@@ -425,13 +429,13 @@ export const evaluatePackageAndMigrationPlugin = (
       }
     }
 
-    const modularFiles = collectModularPluginFiles(repoRoot)
+    const modularFiles = collectModularPluginFiles(repoRoot, hostIo)
     if (modularFiles.length > 0) {
       const gateExit = yield* evaluateAllGatePlugins({
         filePaths: modularFiles.map((f) => WorkspaceFilePath.make(f.replace(/\\/g, "/"))),
         failOnViolation: false,
       }).pipe(
-        Effect.provide(Layer.mergeAll(GatePluginRegistryLive, WorkspaceFsLive)),
+        Effect.provide(Layer.mergeAll(GatePluginRegistryLive, workspaceFsLayer)),
         Effect.exit,
       )
       match(gateExit)
@@ -456,7 +460,7 @@ export const evaluatePackageAndMigrationPlugin = (
 
       const astFiles: Array<AstGateFileInput> = []
       for (const f of modularFiles) {
-        const content = safeFs(() => readFileSync(f, "utf8"), "")
+        const content = safeFs(() => hostIo.readTextSync(f), "")
         astFiles.push({
           filePath: AstSourceFilePath.make(relative(repoRoot, f).replace(/\\/g, "/")),
           content: AstSourceContent.make(content),
@@ -502,13 +506,19 @@ export const evaluatePackageAndMigrationPlugin = (
     return findings
   })
 
-export const scanPackageAndMigrationHygiene = (repoRoot: string): ReadonlyArray<GcFinding> =>
+export const scanPackageAndMigrationHygiene = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+): ReadonlyArray<GcFinding> =>
   Effect.runSync(
     evaluatePackageAndMigrationPlugin({
       graph: { graph: Graph.directed(), nodeIndexByKey: new Map() },
       workspaceRoot: repoRoot,
+      hostIo,
     }),
   )
 
-export const scanWorkspacePackageHygiene = (repoRoot: string): ReadonlyArray<GcFinding> =>
-  scanPackageAndMigrationHygiene(repoRoot)
+export const scanWorkspacePackageHygiene = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+): ReadonlyArray<GcFinding> => scanPackageAndMigrationHygiene(repoRoot, hostIo)

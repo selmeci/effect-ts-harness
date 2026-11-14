@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs"
-import { Effect } from "effect"
+import { Effect, Result } from "effect"
+import type { SyncHostIo } from "@harness/service"
 
 export type MigrationViolationKind =
   | "drop-statement"
@@ -90,14 +90,15 @@ export const checkMigrationSqlSafety = (
   files: ReadonlyArray<MigrationSqlFile>,
 ): MigrationSafetyReport => Effect.runSync(decideMigrationSafety({ files }))
 
-export const checkMigrationFiles = (filePaths: ReadonlyArray<string>): MigrationSafetyReport => {
+export const checkMigrationFiles = (
+  filePaths: ReadonlyArray<string>,
+  hostIo: SyncHostIo,
+): MigrationSafetyReport => {
   const files: Array<MigrationSqlFile> = []
   for (const file of filePaths) {
-    const sql = Effect.runSync(
-      Effect.try({
-        try: () => (existsSync(file) ? readFileSync(file, "utf8") : ""),
-        catch: () => "",
-      }).pipe(Effect.orElseSucceed(() => "")),
+    const sql = Result.getOrElse(
+      Result.try(() => (hostIo.existsSync(file) ? hostIo.readTextSync(file) : "")),
+      () => "",
     )
     if (sql.length > 0) {
       files.push({ file, sql })

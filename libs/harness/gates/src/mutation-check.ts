@@ -1,18 +1,23 @@
 /**
  * @fileoverview Mutation verification gate, mutant discovery, test execution, and span saturation analysis.
  */
-import { execFileSync } from "node:child_process"
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { join, relative, resolve } from "node:path"
 import { Effect, Layer, Schema } from "effect"
+import type { SyncHostIo } from "@harness/service"
 import {
   ActiveMutantId, SubprocessArg, SubprocessCommand, SubprocessTimeoutMs, WorkspaceFilePath,
 } from "./plugins/self-dogfooding-contract.js"
 import {
   ActiveMutantContext, ActiveMutantContextLive, getActiveMutantId, setActiveMutantId, withActiveMutantEffect,
 } from "./services/active-mutant-context.js"
-import { execCheckedSubprocess, HarnessSubprocessRunnerLive } from "./services/subprocess-runner.js"
-import { readAndVerifyWorkspaceFile, WorkspaceFsLive } from "./services/workspace-fs.js"
+import {
+  execCheckedSubprocess,
+  makeHarnessSubprocessRunnerHostIoLayer,
+} from "./services/subprocess-runner.js"
+import {
+  makeWorkspaceFsHostIoLayer,
+  readAndVerifyWorkspaceFile,
+} from "./services/workspace-fs.js"
 import {
   CodeMutant, compileMutantSchemaModule, discoverDomainMutants, evaluateMutantSchemaInProcess,
   MutantCategory, MutantOutcome, type MutantSchemaModule, parseGitDiffModifiedLines,
@@ -243,15 +248,22 @@ interface DomainFile {
   readonly relFile: string
 }
 
-const findDomainFiles = (repoRoot: string, scope?: string): ReadonlyArray<DomainFile> => {
+const findDomainFiles = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  scope?: string,
+): ReadonlyArray<DomainFile> => {
   const results: Array<DomainFile> = []
   const libsDir = join(repoRoot, "libs")
-  if (!existsSync(libsDir)) return results
+  if (!hostIo.existsSync(libsDir)) return results
 
   const cleanScope = scope
     ? scope.replace(/^@harness\//, "").replace(/-(domain|core|contract)$/, "")
     : undefined
-  const scopes = cleanScope !== undefined ? [cleanScope] : readdirSync(libsDir)
+  const scopes =
+    cleanScope !== undefined
+      ? [cleanScope]
+      : hostIo.readdirSync(libsDir).map((e) => e.name)
 
   for (const s of scopes) {
     const scopePath = join(libsDir, s)
@@ -264,15 +276,15 @@ const findDomainFiles = (repoRoot: string, scope?: string): ReadonlyArray<Domain
     ]
 
     for (const { dir, tier } of tiersToScan) {
-      if (!existsSync(dir)) continue
+      if (!hostIo.existsSync(dir)) continue
       const walk = (d: string) => {
-        for (const entry of readdirSync(d, { withFileTypes: true })) {
+        for (const entry of hostIo.readdirSync(d)) {
           const full = join(d, entry.name)
-          if (entry.isDirectory()) {
+          if (entry.isDirectory) {
             walk(full)
-          } else if (entry.isFile() && (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx")) && !entry.name.endsWith(".d.ts")) {
+          } else if (entry.isFile && (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx")) && !entry.name.endsWith(".d.ts")) {
             if (tier === "contract") {
-              const content = readFileSync(full, "utf8")
+              const content = hostIo.readTextSync(full)
               if (content.includes("Effect.fn") || content.includes("Effect.gen") || content.includes("match(")) {
                 results.push({ scope: s, tier, fullPath: full, relFile: relative(repoRoot, full).replace(/\\/g, "/") })
               }
@@ -299,22 +311,31 @@ const trySyncOrElse = <A>(fn: () => A, fallback: () => A): A =>
 
 export const extractGitDiffModifiedLines = (
   repoRoot: string,
+  hostIo: SyncHostIo,
 ): ReadonlyMap<string, ReadonlySet<number>> | undefined => {
-  const gitOpts = { cwd: repoRoot, stdio: "pipe" as const, encoding: "utf8" as const, timeout: 15_000 }
+  const gitOpts = { cwd: repoRoot, timeoutMs: 15_000 }
   const isGit = trySyncOrElse(
-    () => execFileSync("git", ["rev-parse", "--is-inside-work-tree"], gitOpts).trim() === "true",
+    () => {
+      const res = hostIo.execFileSync("git", ["rev-parse", "--is-inside-work-tree"], gitOpts)
+      return res.exitCode === 0 && res.stdout.trim() === "true"
+    },
     () => false,
   )
   if (!isGit) return undefined
 
+  const runGitDiff = (args: ReadonlyArray<string>): string | null => {
+    const res = hostIo.execFileSync("git", args, gitOpts)
+    return res.exitCode === 0 ? res.stdout : null
+  }
+
   const primaryDiff = trySyncOrElse<string | null>(
-    () => execFileSync("git", ["diff", "-U0"], gitOpts),
-    () => trySyncOrElse<string | null>(() => execFileSync("git", ["diff", "-U0", "HEAD"], gitOpts), () => null),
+    () => runGitDiff(["diff", "-U0"]) ?? runGitDiff(["diff", "-U0", "HEAD"]),
+    () => null,
   )
   if (primaryDiff === null) return new Map<string, ReadonlySet<number>>()
 
   const headDiff = trySyncOrElse(
-    () => execFileSync("git", ["diff", "-U0", "HEAD"], gitOpts),
+    () => runGitDiff(["diff", "-U0", "HEAD"]) ?? "",
     () => "",
   )
   const diffOut = headDiff.length > 0 ? `${primaryDiff}\n${headDiff}` : primaryDiff
@@ -323,23 +344,31 @@ export const extractGitDiffModifiedLines = (
 
 export const getWorkspaceGitDiffModifiedLines = extractGitDiffModifiedLines
 
-export const findReachingTestFiles = (repoRoot: string, file: DomainFile): ReadonlyArray<string> => {
+export const findReachingTestFiles = (
+  repoRoot: string,
+  file: DomainFile,
+  hostIo: SyncHostIo,
+): ReadonlyArray<string> => {
   const testDir = join(repoRoot, "libs", file.scope, file.tier, "test")
-  if (!existsSync(testDir)) return []
+  if (!hostIo.existsSync(testDir)) return []
   const reaching: Array<string> = []
   const walk = (dir: string) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    for (const entry of hostIo.readdirSync(dir)) {
       const full = join(dir, entry.name)
-      if (entry.isDirectory()) walk(full)
-      else if (entry.isFile() && (entry.name.endsWith(".test.ts") || entry.name.endsWith(".spec.ts"))) reaching.push(full)
+      if (entry.isDirectory) walk(full)
+      else if (entry.isFile && (entry.name.endsWith(".test.ts") || entry.name.endsWith(".spec.ts"))) reaching.push(full)
     }
   }
   walk(testDir)
   return reaching
 }
 
-export const collectReachingTestAssertions = (repoRoot: string, file: DomainFile): string =>
-  findReachingTestFiles(repoRoot, file).map((full) => readFileSync(full, "utf8")).join("\n")
+export const collectReachingTestAssertions = (
+  repoRoot: string,
+  file: DomainFile,
+  hostIo: SyncHostIo,
+): string =>
+  findReachingTestFiles(repoRoot, file, hostIo).map((full) => hostIo.readTextSync(full)).join("\n")
 
 export interface RunMutationOptions {
   readonly scope?: string | undefined
@@ -354,10 +383,13 @@ export interface RunMutationOptions {
 
 export const runDomainMutationSuite = (
   repoRoot: string,
+  hostIo: SyncHostIo,
   options?: RunMutationOptions,
 ): MutationSuiteReport => {
+  const workspaceFsLayer = makeWorkspaceFsHostIoLayer(hostIo)
+  const subprocessLayer = makeHarnessSubprocessRunnerHostIoLayer(hostIo)
   const backupPath = join(repoRoot, ".harness", "mutation-backup.json")
-  if (existsSync(backupPath)) {
+  if (hostIo.existsSync(backupPath)) {
     let restoredOk = false
     Effect.runSync(
       Effect.gen(function* () {
@@ -376,25 +408,25 @@ export const runDomainMutationSuite = (
             const resolvedTarget = resolve(repoRoot, filePath)
             const relTarget = relative(resolve(repoRoot), resolvedTarget).replace(/\\/g, "/")
             if (!relTarget.startsWith("..") && !relTarget.startsWith("/") && (relTarget.startsWith("libs/") || relTarget.startsWith("apps/"))) {
-              writeFileSync(resolvedTarget, originalSource, "utf8")
+              hostIo.writeTextSync(resolvedTarget, originalSource)
               restoredOk = true
             }
           }
         }
       }).pipe(
-        Effect.provide(WorkspaceFsLive),
+        Effect.provide(workspaceFsLayer),
         Effect.orElseSucceed(() => undefined),
         Effect.ensuring(
           Effect.sync(() => {
-            if (restoredOk && existsSync(backupPath)) unlinkSync(backupPath)
+            if (restoredOk && hostIo.existsSync(backupPath)) hostIo.unlinkSync(backupPath)
           }),
         ),
       ),
     )
   }
 
-  const domainFiles = findDomainFiles(repoRoot, options?.scope)
-  const diffLinesMap = options?.includeAllLines === true ? undefined : extractGitDiffModifiedLines(repoRoot)
+  const domainFiles = findDomainFiles(repoRoot, hostIo, options?.scope)
+  const diffLinesMap = options?.includeAllLines === true ? undefined : extractGitDiffModifiedLines(repoRoot, hostIo)
   const outcomes: Array<MutantOutcome> = []
 
   for (const file of domainFiles) {
@@ -415,8 +447,8 @@ export const runDomainMutationSuite = (
       Effect.runSync(
         readAndVerifyWorkspaceFile(WorkspaceFilePath.make(file.fullPath)).pipe(
           Effect.map((s) => s.content),
-          Effect.provide(WorkspaceFsLive),
-          Effect.orElseSucceed(() => readFileSync(file.fullPath, "utf8")),
+          Effect.provide(workspaceFsLayer),
+          Effect.orElseSucceed(() => hostIo.readTextSync(file.fullPath)),
         ),
       )
     const mutants = discoverDomainMutants(
@@ -427,7 +459,7 @@ export const runDomainMutationSuite = (
     if (mutants.length === 0) continue
 
     const schemaBundle = compileMutantSchemaModule(file.relFile, originalContent, mutants)
-    const reachingTestFiles = findReachingTestFiles(repoRoot, file)
+    const reachingTestFiles = findReachingTestFiles(repoRoot, file, hostIo)
 
     if (reachingTestFiles.length === 0) {
       for (const mutant of mutants) outcomes.push({ mutant, status: "survived" })
@@ -451,7 +483,7 @@ export const runDomainMutationSuite = (
     }
 
     if (overlaySource !== undefined) {
-      const assertionContent = collectReachingTestAssertions(repoRoot, file)
+      const assertionContent = collectReachingTestAssertions(repoRoot, file, hostIo)
       const hasAssertions =
         assertionContent.includes("expect(") &&
         (assertionContent.includes("it(") || assertionContent.includes("it.effect"))
@@ -463,12 +495,12 @@ export const runDomainMutationSuite = (
 
     const originalSource = originalContent
     const harnessDir = join(repoRoot, ".harness")
-    if (!existsSync(harnessDir)) mkdirSync(harnessDir, { recursive: true })
-    writeFileSync(backupPath, JSON.stringify({ filePath: file.fullPath, originalSource }), "utf8")
+    if (!hostIo.existsSync(harnessDir)) hostIo.mkdirRecursiveSync(harnessDir)
+    hostIo.writeTextSync(backupPath, JSON.stringify({ filePath: file.fullPath, originalSource }))
     const onProcessExit = () => {
       trySyncOrElse(() => {
-        writeFileSync(file.fullPath, originalSource, "utf8")
-        if (existsSync(backupPath)) unlinkSync(backupPath)
+        hostIo.writeTextSync(file.fullPath, originalSource)
+        if (hostIo.existsSync(backupPath)) hostIo.unlinkSync(backupPath)
       }, () => undefined)
     }
     const onSigInt = () => { onProcessExit(); process.exit(130) }
@@ -477,7 +509,7 @@ export const runDomainMutationSuite = (
     Effect.runSync(
       Effect.gen(function* () {
         const mutantCtx = yield* ActiveMutantContext
-        writeFileSync(file.fullPath, schemaBundle.schemaSource, "utf8")
+        hostIo.writeTextSync(file.fullPath, schemaBundle.schemaSource)
         for (const mutant of mutants) {
           const runSubprocess = Effect.acquireUseRelease(
             Effect.sync(() => {
@@ -510,14 +542,14 @@ export const runDomainMutationSuite = (
           outcomes.push({ mutant, status })
         }
       }).pipe(
-        Effect.provide(Layer.merge(HarnessSubprocessRunnerLive, ActiveMutantContextLive)),
+        Effect.provide(Layer.merge(subprocessLayer, ActiveMutantContextLive)),
         Effect.ensuring(
           Effect.sync(() => {
             process.removeListener("exit", onProcessExit)
             process.removeListener("SIGINT", onSigInt)
             process.removeListener("SIGTERM", onSigTerm)
-            writeFileSync(file.fullPath, originalSource, "utf8")
-            if (existsSync(backupPath)) unlinkSync(backupPath)
+            hostIo.writeTextSync(file.fullPath, originalSource)
+            if (hostIo.existsSync(backupPath)) hostIo.unlinkSync(backupPath)
           }),
         ),
       ),

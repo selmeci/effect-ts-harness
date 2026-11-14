@@ -8,6 +8,7 @@ import {
   resolveCanonicalRepoRoot,
   resolveOmnigraphClusterDir,
 } from "@harness/gates"
+import { nodeSyncHostIo } from "@harness/infra"
 
 export const CLI_REPO_ROOT = (() => {
   let curr = resolve(dirname(fileURLToPath(import.meta.url)))
@@ -150,9 +151,9 @@ const decodeOmnigraphServerMeta = Schema.decodeOption(
 export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boolean> {
   return Effect.gen(function* () {
     const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
-    const canonicalRepoRoot = resolveCanonicalRepoRoot(clusterRepoRoot)
-    const clusterRootDir = resolveOmnigraphClusterDir(clusterRepoRoot)
-    const defaultPort = deriveRepoOmnigraphPort(canonicalRepoRoot)
+    const canonicalRepoRoot = resolveCanonicalRepoRoot(clusterRepoRoot, nodeSyncHostIo)
+    const clusterRootDir = resolveOmnigraphClusterDir(clusterRepoRoot, nodeSyncHostIo)
+    const defaultPort = deriveRepoOmnigraphPort(canonicalRepoRoot, nodeSyncHostIo)
 
     let serverMeta: OmnigraphServerMeta | undefined
     const serverJsonPath = join(clusterRootDir, "server.json")

@@ -2,7 +2,8 @@ import { spawnSync } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { Data, Effect, Option, Schema } from "effect"
-import { evaluateOverlayDiagnostics, getOrCreateWarmProgramSession } from "@harness/graph"
+import { createTypeScriptProgramSession, evaluateOverlayDiagnostics } from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 import {
   buildSessionReport,
   readFrictionEvents,
@@ -257,7 +258,7 @@ export const runDefaultLspDiagnostics = (
               evaluateOverlayDiagnostics(
                 repoRoot,
                 overlays,
-                getOrCreateWarmProgramSession(repoRoot),
+                createTypeScriptProgramSession(repoRoot, nodeSyncHostIo),
               ).filter((d) => d.code !== "TS2591" && d.code !== "TS2580"),
             catch: toLspExecutionError,
           })
@@ -448,7 +449,7 @@ const evaluateOverlaysDiagnostics = (
   )
   const matchedKeys =
     targetRelFile !== undefined ? compilableKeys.filter(matchesTargetFile) : compilableKeys
-  const session = getOrCreateWarmProgramSession(root)
+  const session = createTypeScriptProgramSession(root, nodeSyncHostIo)
   const diags = evaluateOverlayDiagnostics(root, overlays, session)
   const filteredDiags =
     targetRelFile !== undefined ? diags.filter((d) => matchesTargetFile(d.file)) : diags
@@ -502,8 +503,8 @@ export const buildLspAndTelemetryToolDescriptors = (
       Effect.gen(function* () {
         const { format, cumulative } = yield* decodeTelemetryReportInput(args)
         const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-        const events = readTelemetryEvents(root)
-        const frictionEvents = readFrictionEvents(root)
+        const events = readTelemetryEvents(root, nodeSyncHostIo)
+        const frictionEvents = readFrictionEvents(root, nodeSyncHostIo)
         const report = buildSessionReport({
           events,
           frictionEvents,

@@ -55,6 +55,7 @@ import {
   parseGitDiffModifiedLines,
   runDomainMutationSuite,
 } from "../src/mutation-check.js"
+import { testHostIo } from "./helpers/test-host-io.js"
 import {
   RuleGraphToken,
   RuleQualityScoreMillis,
@@ -899,7 +900,7 @@ describe("Milestone 5: EARS Consistency, DST Engine, Span Causality, Mutant Sche
           expect(() => parseDstSeedEnv("-1")).toThrow()
           expect(() => parseDstSeedEnv("not-a-number")).toThrow()
 
-          const report = runDomainMutationSuite(process.cwd(), {
+          const report = runDomainMutationSuite(process.cwd(), testHostIo, {
             sourceCodeOverlays: {
               "libs/sample/domain/src/sample.ts": "export const f = (x: number) => x > 0",
             },

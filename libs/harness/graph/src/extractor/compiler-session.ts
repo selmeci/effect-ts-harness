@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import * as path from "node:path"
-import { Effect, Schema } from "effect"
+import type { SyncHostIo } from "@harness/service"
+import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import { type Project, ts } from "ts-morph"
 export { ts }
@@ -39,6 +39,7 @@ export interface FileGraphFragment {
 
 export interface TypeScriptProgramSession {
   readonly repoRoot: string
+  readonly hostIo?: SyncHostIo | undefined
   persistToDisk?: boolean | undefined
   oldProgram?: ts.Program | undefined
   project?: Project | undefined
@@ -69,6 +70,7 @@ export interface TypeScriptProgramSession {
 
 export interface TypeExtractorOptions {
   readonly repoRoot?: string | undefined
+  readonly hostIo?: SyncHostIo | undefined
   readonly patternDocs?: ReadonlyArray<PatternDocNode> | undefined
   readonly overlays?: Readonly<Record<string, string>> | undefined
   readonly previousProgram?: ts.Program | undefined
@@ -232,74 +234,65 @@ const resolveFileGraphCachePath = (repoRoot: string): string =>
 export const loadFileGraphFragmentsFromDisk = (
   repoRoot: string,
   session: TypeScriptProgramSession,
+  hostIo: SyncHostIo | undefined = session.hostIo,
 ): void => {
+  if (hostIo === undefined) return
   const cachePath = resolveFileGraphCachePath(repoRoot)
-  if (!existsSync(cachePath)) return
-  Effect.runSync(
-    Effect.try({
-      try: () => {
-        const raw = readFileSync(cachePath, "utf8")
-        const decoded = decodeFileGraphCacheStore(raw)
-        match(decoded)
-          .with({ _tag: "Some" }, ({ value }) => {
-            if (value.version !== FILE_GRAPH_CACHE_VERSION) return
-            for (const [relPath, frag] of Object.entries(value.fragments)) {
-              session.fileFragmentCache.set(relPath, frag)
-              session.sourceFileCache.set(relPath, {
-                packageTag: frag.packageTag,
-                contentSha256: frag.contentSha256,
-                declHash: frag.declHash,
-                importedSpecs: frag.importedSpecs,
-              })
-            }
+  if (!hostIo.existsSync(cachePath)) return
+  Result.try(() => {
+    const raw = hostIo.readTextSync(cachePath)
+    const decoded = decodeFileGraphCacheStore(raw)
+    match(decoded)
+      .with({ _tag: "Some" }, ({ value }) => {
+        if (value.version !== FILE_GRAPH_CACHE_VERSION) return
+        for (const [relPath, frag] of Object.entries(value.fragments)) {
+          session.fileFragmentCache.set(relPath, frag)
+          session.sourceFileCache.set(relPath, {
+            packageTag: frag.packageTag,
+            contentSha256: frag.contentSha256,
+            declHash: frag.declHash,
+            importedSpecs: frag.importedSpecs,
           })
-          .with({ _tag: "None" }, () => undefined)
-          .exhaustive()
-      },
-      catch: () => undefined,
-    }).pipe(Effect.ignore),
-  )
+        }
+      })
+      .with({ _tag: "None" }, () => undefined)
+      .exhaustive()
+  })
 }
 
 export const saveFileGraphFragmentsToDisk = (
   repoRoot: string,
   session: TypeScriptProgramSession,
+  hostIo: SyncHostIo | undefined = session.hostIo,
 ): void => {
-  if (session.persistToDisk !== true) return
+  if (session.persistToDisk !== true || hostIo === undefined) return
   const cachePath = resolveFileGraphCachePath(repoRoot)
-  Effect.runSync(
-    Effect.gen(function* () {
-      mkdirSync(path.dirname(cachePath), { recursive: true })
-      const fragments: Record<string, FileGraphFragment> = {}
-      for (const [relPath, frag] of session.fileFragmentCache.entries()) {
-        fragments[relPath] = frag
-      }
-      const tmpPath = `${cachePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`
-      yield* Effect.acquireUseRelease(
-        Effect.void,
-        () =>
-          Effect.sync(() => {
-            writeFileSync(tmpPath, JSON.stringify({ version: FILE_GRAPH_CACHE_VERSION, fragments }), "utf8")
-            renameSync(tmpPath, cachePath)
-          }),
-        () =>
-          Effect.sync(() => {
-            if (existsSync(tmpPath)) unlinkSync(tmpPath)
-          }),
-      )
-    }).pipe(Effect.ignore),
-  )
+  Result.try(() => {
+    hostIo.mkdirRecursiveSync(path.dirname(cachePath))
+    const fragments: Record<string, FileGraphFragment> = {}
+    for (const [relPath, frag] of session.fileFragmentCache.entries()) {
+      fragments[relPath] = frag
+    }
+    const tmpPath = `${cachePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`
+    Result.try(() => {
+      hostIo.writeTextSync(tmpPath, JSON.stringify({ version: FILE_GRAPH_CACHE_VERSION, fragments }))
+      hostIo.renameSync(tmpPath, cachePath)
+    })
+    if (hostIo.existsSync(tmpPath)) {
+      Result.try(() => hostIo.unlinkSync(tmpPath))
+    }
+  })
 }
-
-const warmSessionsByRoot = new Map<string, TypeScriptProgramSession>()
 
 export const createTypeScriptProgramSession = (
   repoRoot: string = process.cwd(),
+  hostIo?: SyncHostIo,
 ): TypeScriptProgramSession => {
   const root = path.resolve(repoRoot)
-  const realRepoRoot = existsSync(root) ? realpathSync(root) : root
+  const realRepoRoot = hostIo !== undefined && hostIo.existsSync(root) ? hostIo.realpathSync(root) : root
   return {
     repoRoot: realRepoRoot,
+    ...(hostIo !== undefined ? { hostIo } : {}),
     sourceFileCache: new Map(),
     fileFragmentCache: new Map(),
     reverseImportsByFile: new Map(),
@@ -309,43 +302,28 @@ export const createTypeScriptProgramSession = (
   }
 }
 
-export const getOrCreateWarmProgramSession = (repoRoot: string): TypeScriptProgramSession => {
-  const resolved = existsSync(repoRoot) ? realpathSync(repoRoot) : path.resolve(repoRoot)
-  let session = warmSessionsByRoot.get(resolved)
-  if (session === undefined) {
-    session = createTypeScriptProgramSession(resolved)
-    session.persistToDisk = true
-    loadFileGraphFragmentsFromDisk(resolved, session)
-    warmSessionsByRoot.set(resolved, session)
-  }
-  return session
-}
-
-export const clearWarmProgramSessions = (): void => {
-  warmSessionsByRoot.clear()
-}
-
 const walkWorkspaceFiles = (
   repoRoot: string,
   filterFile: (rel: string, name: string) => boolean,
-  skipTestDir = false,
+  skipTestDir: boolean,
+  hostIo: SyncHostIo,
 ): ReadonlyArray<string> => {
   const results: Array<string> = []
   const walk = (current: string): void => {
-    if (!existsSync(current)) return
-    for (const e of readdirSync(current, { withFileTypes: true })) {
+    if (!hostIo.existsSync(current)) return
+    for (const e of hostIo.readdirSync(current)) {
       if (
         e.name === "node_modules" || e.name === "dist" || e.name === ".nx" ||
         e.name === "repos" || e.name === ".git" || e.name === ".harness"
       ) continue
       if (skipTestDir && e.name === "test") {
         const fixturesDir = path.join(current, "test", "fixtures")
-        if (existsSync(fixturesDir)) walk(fixturesDir)
+        if (hostIo.existsSync(fixturesDir)) walk(fixturesDir)
         continue
       }
       const full = path.join(current, e.name)
-      if (e.isDirectory()) walk(full)
-      else if (e.isFile()) {
+      if (e.isDirectory) walk(full)
+      else if (e.isFile) {
         const rel = path.relative(repoRoot, full).replace(/\\/g, "/")
         if (filterFile(rel, e.name)) results.push(rel)
       }
@@ -355,35 +333,46 @@ const walkWorkspaceFiles = (
   return results
 }
 
-export const findWorkspaceSrcFiles = (repoRoot: string): ReadonlyArray<string> =>
+export const findWorkspaceSrcFiles = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+): ReadonlyArray<string> =>
   walkWorkspaceFiles(repoRoot, (rel, name) =>
     (name.endsWith(".ts") || name.endsWith(".tsx")) && !name.endsWith(".d.ts") &&
     !name.endsWith(".config.ts") && !name.endsWith(".test.ts") && !name.endsWith(".spec.ts") &&
-    (rel.includes("/src/") || rel.includes("/test/fixtures/") || rel.endsWith("alchemy.run.ts")), true)
+    (rel.includes("/src/") || rel.includes("/test/fixtures/") || rel.endsWith("alchemy.run.ts")), true, hostIo)
 
-export const findWorkspaceTestFiles = (repoRoot: string): ReadonlyArray<string> =>
+export const findWorkspaceTestFiles = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+): ReadonlyArray<string> =>
   walkWorkspaceFiles(repoRoot, (rel, name) =>
     (name.endsWith(".test.ts") || name.endsWith(".spec.ts")) &&
-    (rel.includes("/test/") || name.endsWith(".spec.ts")), false)
+    (rel.includes("/test/") || name.endsWith(".spec.ts")), false, hostIo)
 
 export interface ExtractTypeGraphOptions {
   readonly repoRoot: string
+  readonly hostIo: SyncHostIo
   readonly overlays?: Readonly<Record<string, string>> | undefined
   readonly previousProgram?: ts.Program | undefined
   readonly session?: TypeScriptProgramSession | undefined
 }
 
-export const resolveTsLibDir = (root: string): string | undefined => {
-  const workspaceRoot = resolveRepoRoot(import.meta.dirname)
-  const dynamicResolved = Effect.runSync(
-    Effect.try({
-      try: () => {
-        const req = createRequire(path.join(workspaceRoot, "package.json"))
-        const tsEntry = req.resolve("typescript")
-        return path.dirname(tsEntry)
-      },
-      catch: () => undefined,
+export const resolveTsLibDir = (root: string, hostIo?: SyncHostIo): string | undefined => {
+  const workspaceRoot = resolveRepoRoot(import.meta.dirname, hostIo)
+  const fileExists = (p: string) => (hostIo !== undefined ? hostIo.existsSync(p) : ts.sys.fileExists(p))
+  const dirExists = (p: string) => (hostIo !== undefined ? hostIo.existsSync(p) : ts.sys.directoryExists(p))
+  const readDirNames = (p: string): ReadonlyArray<string> =>
+    hostIo !== undefined
+      ? Result.getOrElse(Result.try(() => hostIo.readdirSync(p).map((e) => e.name)), () => [])
+      : ts.sys.getDirectories(p)
+  const dynamicResolved = Result.getOrElse(
+    Result.try(() => {
+      const req = createRequire(path.join(workspaceRoot, "package.json"))
+      const tsEntry = req.resolve("typescript")
+      return path.dirname(tsEntry)
     }),
+    () => undefined,
   )
   const candidates = [
     ...(dynamicResolved !== undefined ? [dynamicResolved] : []),
@@ -391,21 +380,18 @@ export const resolveTsLibDir = (root: string): string | undefined => {
     path.join(workspaceRoot, "node_modules/typescript/lib"),
   ]
   for (const c of candidates) {
-    if (existsSync(path.join(c, "lib.es2023.full.d.ts"))) return c
+    if (fileExists(path.join(c, "lib.es2023.full.d.ts"))) return c
   }
   for (const baseRoot of [root, workspaceRoot]) {
     const pnpmDir = path.join(baseRoot, "node_modules/.pnpm")
-    if (existsSync(pnpmDir)) {
-      const entries = Effect.runSync(
-        Effect.try({ try: () => readdirSync(pnpmDir), catch: () => [] as Array<string> }),
-      )
-      for (const entry of entries) {
+    if (dirExists(pnpmDir)) {
+      for (const entry of readDirNames(pnpmDir)) {
         if (entry.startsWith("typescript@") || entry.startsWith("@typescript+typescript")) {
           const subPkg = entry.startsWith("@typescript+")
             ? entry.slice(0, entry.lastIndexOf("@")).replace("+", "/")
             : "typescript"
           const potential = path.join(pnpmDir, entry, "node_modules", subPkg, "lib")
-          if (existsSync(path.join(potential, "lib.es2023.full.d.ts"))) return potential
+          if (fileExists(path.join(potential, "lib.es2023.full.d.ts"))) return potential
         }
       }
     }
@@ -413,25 +399,23 @@ export const resolveTsLibDir = (root: string): string | undefined => {
   return undefined
 }
 
-const resolveCanonicalPath = (root: string, candidate: string): string | null =>
-  Effect.runSync(
-    Effect.try({
-      try: () => {
-        const abs = path.resolve(root, candidate)
-        if (existsSync(abs)) return realpathSync(abs)
-        let cur = abs
-        const suffixParts: Array<string> = []
-        while (!existsSync(cur)) {
-          const parent = path.dirname(cur)
-          if (parent === cur) break
-          suffixParts.unshift(path.basename(cur))
-          cur = parent
-        }
-        return existsSync(cur) ? path.join(realpathSync(cur), ...suffixParts) : abs
-      },
-      catch: () => null,
-    }),
-  )
+const resolveCanonicalPath = (root: string, candidate: string, hostIo?: SyncHostIo): string | null => {
+  const abs = path.resolve(root, candidate)
+  const pathExists = (p: string) => hostIo !== undefined ? hostIo.existsSync(p) : ts.sys.fileExists(p) || ts.sys.directoryExists(p)
+  const realPath = (p: string) => hostIo !== undefined ? hostIo.realpathSync(p) : (ts.sys.realpath?.(p) ?? p)
+  return Result.getOrElse(Result.try(() => {
+    if (pathExists(abs)) return realPath(abs)
+    let cur = abs
+    const suffixParts: Array<string> = []
+    while (!pathExists(cur)) {
+      const parent = path.dirname(cur)
+      if (parent === cur) break
+      suffixParts.unshift(path.basename(cur))
+      cur = parent
+    }
+    return pathExists(cur) ? path.join(realPath(cur), ...suffixParts) : abs
+  }), () => null)
+}
 
 const isPathWithinRealRoot = (
   realRepoRoot: string,
@@ -458,23 +442,30 @@ export const createOverlayCompilerHost = (
   overlays: Readonly<Record<string, string>>,
   oldProgram?: ts.Program,
   repoRoot: string = process.cwd(),
+  hostIo?: SyncHostIo,
 ): ts.CompilerHost => {
-  const root = resolveRepoRoot(repoRoot)
-  const realRepoRoot = existsSync(root) ? realpathSync(root) : path.resolve(root)
-  const workspaceRoot = resolveRepoRoot(import.meta.dirname)
-  const realWorkspaceRoot = existsSync(workspaceRoot) ? realpathSync(workspaceRoot) : path.resolve(workspaceRoot)
+  const root = resolveRepoRoot(repoRoot, hostIo)
+  const pathExists = (p: string) =>
+    hostIo !== undefined ? hostIo.existsSync(p) : ts.sys.fileExists(p) || ts.sys.directoryExists(p)
+  const realPath = (p: string) =>
+    hostIo !== undefined ? hostIo.realpathSync(p) : (ts.sys.realpath?.(p) ?? p)
+  const readText = (p: string) =>
+    hostIo !== undefined ? hostIo.readTextSync(p) : (ts.sys.readFile(p) ?? "")
+  const realRepoRoot = pathExists(root) ? realPath(root) : path.resolve(root)
+  const workspaceRoot = resolveRepoRoot(import.meta.dirname, hostIo)
+  const realWorkspaceRoot = pathExists(workspaceRoot) ? realPath(workspaceRoot) : path.resolve(workspaceRoot)
   const wsNodeModules = path.join(realWorkspaceRoot, "node_modules")
-  const realWorkspaceNodeModules = existsSync(wsNodeModules) ? realpathSync(wsNodeModules).replace(/\\/g, "/") : undefined
-  const tsLibDir = resolveTsLibDir(root)
-  const realTsLibDir = tsLibDir && existsSync(tsLibDir) ? realpathSync(tsLibDir).replace(/\\/g, "/") : tsLibDir?.replace(/\\/g, "/")
+  const realWorkspaceNodeModules = pathExists(wsNodeModules) ? realPath(wsNodeModules).replace(/\\/g, "/") : undefined
+  const tsLibDir = resolveTsLibDir(root, hostIo)
+  const realTsLibDir = tsLibDir && pathExists(tsLibDir) ? realPath(tsLibDir).replace(/\\/g, "/") : tsLibDir?.replace(/\\/g, "/")
   const isTsLibFile = (fileName: string): boolean =>
-    tsLibDir !== undefined && path.basename(fileName).startsWith("lib.") && existsSync(path.join(tsLibDir, path.basename(fileName)))
+    tsLibDir !== undefined && path.basename(fileName).startsWith("lib.") && pathExists(path.join(tsLibDir, path.basename(fileName)))
 
   const normalizedOverlays = new Map<string, string>(), overlayDirectories = new Set<string>()
   for (const [k, v] of Object.entries(overlays)) {
-    const rel = resolveContainedRelPath(root, k)
+    const rel = resolveContainedRelPath(root, k, hostIo)
     if (rel === null) continue
-    const canonical = resolveCanonicalPath(root, k)
+    const canonical = resolveCanonicalPath(root, k, hostIo)
     if (canonical === null || !isPathWithinRealRoot(realRepoRoot, canonical, false)) continue
     const abs = path.resolve(root, rel).replace(/\\/g, "/")
     normalizedOverlays.set(abs, v); normalizedOverlays.set(rel, v)
@@ -483,7 +474,7 @@ export const createOverlayCompilerHost = (
   }
 
   const isHostPathAllowed = (candidate: string): boolean => {
-    const canonical = resolveCanonicalPath(root, candidate)
+    const canonical = resolveCanonicalPath(root, candidate, hostIo)
     return canonical !== null && isPathWithinRealRoot(realRepoRoot, canonical, true, realTsLibDir, realWorkspaceRoot, realWorkspaceNodeModules)
   }
 
@@ -491,7 +482,7 @@ export const createOverlayCompilerHost = (
     if (!isHostPathAllowed(fileName)) return undefined
     const norm = fileName.replace(/\\/g, "/"), direct = normalizedOverlays.get(norm)
     if (direct !== undefined) return direct
-    const rel = resolveContainedRelPath(root, fileName)
+    const rel = resolveContainedRelPath(root, fileName, hostIo)
     if (rel === null) return undefined
     const abs = path.resolve(root, rel).replace(/\\/g, "/")
     return normalizedOverlays.get(abs) ?? normalizedOverlays.get(rel)
@@ -516,7 +507,7 @@ export const createOverlayCompilerHost = (
       if (!isHostPathAllowed(fileName)) return undefined
       const ov = findOverlay(fileName)
       if (ov !== undefined) return ov
-      if (isTsLibFile(fileName) && tsLibDir !== undefined) return readFileSync(path.join(tsLibDir, path.basename(fileName)), "utf8")
+      if (isTsLibFile(fileName) && tsLibDir !== undefined) return readText(path.join(tsLibDir, path.basename(fileName)))
       return baseHost.readFile(fileName)
     },
     getSourceFile: (fileName, languageVersion, onError, shouldCreateNewSourceFile) => {
@@ -526,7 +517,7 @@ export const createOverlayCompilerHost = (
       if (isTsLibFile(fileName) && tsLibDir !== undefined) {
         const existingLib = oldProgram?.getSourceFile(fileName)
         if (existingLib !== undefined && !shouldCreateNewSourceFile) return existingLib
-        return ts.createSourceFile(fileName, readFileSync(path.join(tsLibDir, path.basename(fileName)), "utf8"), languageVersion, true)
+        return ts.createSourceFile(fileName, readText(path.join(tsLibDir, path.basename(fileName))), languageVersion, true)
       }
       const existing = oldProgram?.getSourceFile(fileName)
       if (existing !== undefined && !shouldCreateNewSourceFile) {
@@ -562,16 +553,21 @@ export const evaluateOverlayDiagnostics = (
   repoRoot: string,
   overlays: Readonly<Record<string, string>>,
   session?: TypeScriptProgramSession,
+  hostIo?: SyncHostIo,
 ): ReadonlyArray<OverlayDiagnosticItem> => {
-  const root = resolveRepoRoot(repoRoot)
-  const activeSession = session ?? getOrCreateWarmProgramSession(root)
+  const effectiveHostIo = hostIo ?? session?.hostIo
+  const root = resolveRepoRoot(repoRoot, effectiveHostIo)
   const overlayEntries = Object.entries(overlays)
   if (overlayEntries.length === 0) return []
 
   const virtualVitestPath = path.join(root, ".harness/__virtual_types__/@effect/vitest/index.d.ts")
   const virtualSqliteDoPath = path.join(root, ".harness/__virtual_types__/@effect/sql-sqlite-do/index.d.ts")
-  const workspaceRoot = existsSync(path.join(root, "libs/harness/graph/node_modules")) ? root : resolveRepoRoot(import.meta.dirname)
-  const dynamicPaths = computeDynamicPaths(root, workspaceRoot)
+  const pathExists = (p: string) =>
+    effectiveHostIo !== undefined ? effectiveHostIo.existsSync(p) : ts.sys.fileExists(p) || ts.sys.directoryExists(p)
+  const workspaceRoot = pathExists(path.join(root, "libs/harness/graph/node_modules"))
+    ? root
+    : resolveRepoRoot(import.meta.dirname, effectiveHostIo)
+  const dynamicPaths = computeDynamicPaths(root, workspaceRoot, effectiveHostIo)
   dynamicPaths["@effect/vitest"] = [path.join(root, "node_modules/@effect/vitest"), path.join(workspaceRoot, "node_modules/@effect/vitest"), virtualVitestPath]
   dynamicPaths["@effect/sql-sqlite-do"] = [path.join(root, "node_modules/@effect/sql-sqlite-do"), path.join(workspaceRoot, "node_modules/@effect/sql-sqlite-do"), virtualSqliteDoPath]
   dynamicPaths["@effect/sql-sqlite-do/SqliteMigrator"] = [path.join(root, "node_modules/@effect/sql-sqlite-do/SqliteMigrator"), path.join(workspaceRoot, "node_modules/@effect/sql-sqlite-do/SqliteMigrator"), virtualSqliteDoPath]
@@ -601,21 +597,25 @@ export const evaluateOverlayDiagnostics = (
 
   const rootPkgJsonPath = path.join(root, "package.json")
   const overlaysWithVirtualTypes: Record<string, string> = {
-    ...(existsSync(rootPkgJsonPath) ? {} : { [rootPkgJsonPath]: JSON.stringify({ name: "overlay-workspace", type: "module" }) }),
+    ...(pathExists(rootPkgJsonPath)
+      ? {}
+      : { [rootPkgJsonPath]: JSON.stringify({ name: "overlay-workspace", type: "module" }) }),
     [virtualVitestPath]: VIRTUAL_EFFECT_VITEST_DTS,
     [virtualSqliteDoPath]: VIRTUAL_EFFECT_SQL_SQLITE_DO_DTS,
     ...overlays,
   }
 
-  const host = createOverlayCompilerHost(compilerOptions, overlaysWithVirtualTypes, activeSession.oldProgram, root)
+  const host = createOverlayCompilerHost(compilerOptions, overlaysWithVirtualTypes, session?.oldProgram, root, effectiveHostIo)
   const rootNames = overlayEntries
     .map(([k]) => path.resolve(root, k).replace(/\\/g, "/"))
     .filter((f) => (f.endsWith(".ts") || f.endsWith(".tsx")) && !f.endsWith(".d.ts"))
 
   if (rootNames.length === 0) return []
 
-  const program = ts.createProgram(rootNames, compilerOptions, host, activeSession.oldProgram)
-  activeSession.oldProgram = program
+  const program = ts.createProgram(rootNames, compilerOptions, host, session?.oldProgram)
+  if (session !== undefined) {
+    session.oldProgram = program
+  }
 
   const diagnostics: Array<OverlayDiagnosticItem> = []
   for (const fileName of rootNames) {

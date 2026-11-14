@@ -7,6 +7,7 @@ import {
   indexEffectFnsInFile,
   validateUniqueSpanNames,
 } from "../src/fn-index.js"
+import { testHostIo } from "./helpers/test-host-io.js"
 // @ts-expect-error - JS plugin without ambient typings
 // oxlint-disable-next-line @nx/enforce-module-boundaries
 import syntaxBansPlugin from "../../../../tools/oxlint/syntax-bans.js"
@@ -68,7 +69,7 @@ describe("Effect.fn syntactic index", () => {
     "buildWorkspaceFnIndex indexes workspace and finds Sample.greet and Sample.logToConsole",
     () =>
       Effect.gen(function* () {
-        const index = yield* buildWorkspaceFnIndex(repoRoot)
+        const index = yield* buildWorkspaceFnIndex(repoRoot, testHostIo)
         expect(index.bySpanName.has("Sample.greet")).toBe(true)
         const greet = index.bySpanName.get("Sample.greet")
         expect(greet).toBeDefined()

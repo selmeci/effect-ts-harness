@@ -33,10 +33,11 @@ import {
   extractWorkspaceTypeAwareGraph,
   type GraphSnapshotError,
   loadGraphSnapshotEffect,
-  OmnigraphSync,
+  makeOmnigraphSyncLayer,
   saveGraphSnapshot,
   syncToOmnigraphAndSnapshot,
 } from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 import { buildWorkspaceFnIndex } from "@harness/ingest"
 import {
   type CliEnv,
@@ -85,8 +86,8 @@ export const handleDoctorOrSession = (
     const planPath = join(harnessDir, "plan-graph-snapshot.json")
     const implPath = join(harnessDir, "graph-snapshot.json")
 
-    const headState = resolveGitHeadState(repoRoot)
-    const recordedMeta = readGraphHeadMeta(repoRoot)
+    const headState = resolveGitHeadState(repoRoot, nodeSyncHostIo)
+    const recordedMeta = readGraphHeadMeta(repoRoot, nodeSyncHostIo)
     if (!isolatedExternal || recordedMeta !== null) {
       const reconcileDecision = yield* decideOmnigraphReconcile({
         snapshotExists: existsSync(implPath),
@@ -96,10 +97,10 @@ export const handleDoctorOrSession = (
         currentGitBranch: headState.gitBranch,
       })
       if (reconcileDecision.needsReconcile) {
-        const reconciledGraph = yield* extractWorkspaceTypeAwareGraph(repoRoot)
+        const reconciledGraph = yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo)
         if (isolatedExternal) {
-          saveGraphSnapshot(reconciledGraph, implPath)
-          writeGraphHeadMeta(repoRoot, headState)
+          saveGraphSnapshot(reconciledGraph, implPath, nodeSyncHostIo)
+          writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
         } else {
           yield* syncToOmnigraphAndSnapshot(reconciledGraph, {
             repoRoot: resolveClusterRepoRoot(repoRoot),
@@ -107,14 +108,14 @@ export const handleDoctorOrSession = (
             from: "main",
             snapshotPath: implPath,
           }).pipe(
-            Effect.provide(OmnigraphSync.Live),
+            Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
             Effect.orElseSucceed(() => ({
               syncedToOmnigraph: false,
               snapshotPath: implPath,
               error: undefined,
             })),
           )
-          writeGraphHeadMeta(repoRoot, headState)
+          writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
         }
       }
     }
@@ -153,7 +154,7 @@ export const handleDoctorOrSession = (
           ),
         )
 
-    const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
+    const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, nodeSyncHostIo)
     const activeStubs = Array.from(fnIndex.bySpanName.values())
       .filter((fn) => fn.isStub)
       .map((fn) => fn.spanName)
@@ -162,7 +163,7 @@ export const handleDoctorOrSession = (
     let snapshotOk = true
     if (existsSync(planPath) && existsSync(implPath)) {
       const loadSnap = (path: string, label: string) =>
-        loadGraphSnapshotEffect(path).pipe(
+        loadGraphSnapshotEffect(path, nodeSyncHostIo).pipe(
           Effect.map((graph) => ({ _tag: "Ok" as const, graph })),
           Effect.catchTag("GraphSnapshotError", (err: GraphSnapshotError) =>
             Effect.gen(function* () {
@@ -194,13 +195,13 @@ export const handleDoctorOrSession = (
         .exhaustive()
     }
 
-    const stampCheck = checkVerifyStamp(repoRoot)
+    const stampCheck = checkVerifyStamp(repoRoot, nodeSyncHostIo)
     const hasPlanOrStamp =
       existsSync(planPath) || existsSync(join(harnessDir, "verify-stamp.json"))
     const effectiveStampValid = hasPlanOrStamp ? stampCheck.valid : true
     const stampReason = !stampCheck.valid ? stampCheck.reason : undefined
-    const rawFrictionEvents = readFrictionEvents(repoRoot)
-    const telemetryEvents = readTelemetryEvents(repoRoot)
+    const rawFrictionEvents = readFrictionEvents(repoRoot, nodeSyncHostIo)
+    const telemetryEvents = readTelemetryEvents(repoRoot, nodeSyncHostIo)
     const scoped = scopeSessionReportInput({
       events: telemetryEvents,
       frictionEvents: rawFrictionEvents,
@@ -275,11 +276,11 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
 ): Effect.fn.Return<CliResult> {
   const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
   const isAntigravity = argv.includes("--format=antigravity")
-  const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
+  const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, nodeSyncHostIo)
   const harnessDir = resolveHarnessStateDir(repoRoot)
   const snapshotPath = join(harnessDir, "graph-snapshot.json")
-  const headState = resolveGitHeadState(repoRoot)
-  const recordedMeta = readGraphHeadMeta(repoRoot)
+  const headState = resolveGitHeadState(repoRoot, nodeSyncHostIo)
+  const recordedMeta = readGraphHeadMeta(repoRoot, nodeSyncHostIo)
   const reconcileDecision = yield* decideOmnigraphReconcile({
     snapshotExists: existsSync(snapshotPath),
     recordedHeadSha: recordedMeta?.headSha ?? null,
@@ -289,8 +290,8 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
   })
 
   if (!isAntigravity || reconcileDecision.needsReconcile) {
-    const graph = yield* extractWorkspaceTypeAwareGraph(repoRoot)
-    const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
+    const graph = yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo)
+    const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
     const targetBranch =
       headState.gitBranch === null ||
       headState.gitBranch === "main" ||
@@ -299,8 +300,8 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
         : taskBranches.implBranch
 
     if (isIsolatedExternalWorkspace(repoRoot)) {
-      saveGraphSnapshot(graph, snapshotPath)
-      writeGraphHeadMeta(repoRoot, headState)
+      saveGraphSnapshot(graph, snapshotPath, nodeSyncHostIo)
+      writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
       return {
         exitCode: 0,
         stdout: isAntigravity
@@ -323,14 +324,14 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
       from: taskBranches.mainBranch,
       snapshotPath,
     }).pipe(
-      Effect.provide(OmnigraphSync.Live),
+      Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
       Effect.orElseSucceed(() => ({
         syncedToOmnigraph: false,
         snapshotPath,
         error: undefined,
       })),
     )
-    writeGraphHeadMeta(repoRoot, headState)
+    writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
     return {
       exitCode: 0,
       stdout: isAntigravity
@@ -369,7 +370,7 @@ export const handleLearn = (
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     const shouldClear = argv.includes("--clear")
-    const events = readFrictionEvents(repoRoot)
+    const events = readFrictionEvents(repoRoot, nodeSyncHostIo)
     const clusters = summarizeFrictionEvents(events)
     const proposals = []
     let useFastFallback =
@@ -468,7 +469,7 @@ export const handleLearn = (
     }
 
     if (shouldClear) {
-      clearFrictionEvents(repoRoot)
+      clearFrictionEvents(repoRoot, nodeSyncHostIo)
     }
 
     return {
@@ -492,11 +493,11 @@ export const handleReport = (
   Effect.sync(() => {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     if (argv.includes("--reset") || argv.includes("--clear")) {
-      clearTelemetryEvents(repoRoot)
+      clearTelemetryEvents(repoRoot, nodeSyncHostIo)
     }
-    const events = readTelemetryEvents(repoRoot)
-    const frictionEvents = readFrictionEvents(repoRoot)
-    const stampCheck = checkVerifyStamp(repoRoot)
+    const events = readTelemetryEvents(repoRoot, nodeSyncHostIo)
+    const frictionEvents = readFrictionEvents(repoRoot, nodeSyncHostIo)
+    const stampCheck = checkVerifyStamp(repoRoot, nodeSyncHostIo)
     const report = buildSessionReport({
       events,
       frictionEvents,
@@ -504,7 +505,7 @@ export const handleReport = (
       cumulative: argv.includes("--all"),
     })
     if (options?.repoRoot !== undefined || process.env.VITEST === undefined) {
-      writeSessionReportFiles(repoRoot, report)
+      writeSessionReportFiles(repoRoot, report, nodeSyncHostIo)
     }
     if (argv.includes("--format=markdown")) {
       return {

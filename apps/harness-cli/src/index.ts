@@ -5,6 +5,7 @@ import { Effect, Layer, Logger } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import { LocalDecisionModel } from "@harness/decision"
+import { nodeSyncHostIo } from "@harness/infra"
 import {
   buildSessionReport,
   readFrictionEvents,
@@ -179,14 +180,14 @@ export const runCliEffect = (
       res.telemetryDetail !== "readOnly=true" &&
       (options?.repoRoot !== undefined || process.env.VITEST === undefined)
     ) {
-      const finalEvents = readTelemetryEvents(repoRoot)
-      const finalFriction = readFrictionEvents(repoRoot)
+      const finalEvents = readTelemetryEvents(repoRoot, nodeSyncHostIo)
+      const finalFriction = readFrictionEvents(repoRoot, nodeSyncHostIo)
       const finalReport = buildSessionReport({
         events: finalEvents,
         frictionEvents: finalFriction,
         stampValid: true,
       })
-      writeSessionReportFiles(repoRoot, finalReport)
+      writeSessionReportFiles(repoRoot, finalReport, nodeSyncHostIo)
     }
 
     return res

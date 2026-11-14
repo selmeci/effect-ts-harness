@@ -2,7 +2,7 @@ import { Effect, Schema } from "effect"
 import {
   HARNESS_GQ_QUERY_NAMES,
   invokeOmnigraphNamedQuery,
-  OmnigraphSync,
+  makeOmnigraphSyncLayer,
   projectOntologyLayers,
   queryOntologyImpact,
   queryOntologyWhy,
@@ -14,6 +14,7 @@ import {
   loadGovernanceDocsFromDisk,
   LocalDecisionModel,
 } from "@harness/decision"
+import { nodeSyncHostIo } from "@harness/infra"
 import {
   McpToolName,
   type McpToolPluginDescriptor,
@@ -120,7 +121,7 @@ export const buildOntologyAndGqToolDescriptors = (
         const { scope } = yield* decodeOntologyCheckInput(args)
         const graph = yield* resolveGraph(options, args)
         const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-        const docs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(root)
+        const docs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(root, nodeSyncHostIo)
         const invariants = yield* decideOntologyInvariants({
           graph,
           governanceDocs: docs,
@@ -162,7 +163,7 @@ export const buildOntologyAndGqToolDescriptors = (
           params,
           branch,
           fallbackGraph: graph,
-        }).pipe(Effect.provide(OmnigraphSync.Live))
+        }).pipe(Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)))
       }),
   },
 ]

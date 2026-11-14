@@ -26,6 +26,7 @@ import {
   writeGraphHeadMeta,
 } from "@harness/graph"
 import type { GovernanceDocReference } from "@harness/decision"
+import { nodeSyncHostIo } from "@harness/infra"
 
 export { McpToolInputName, McpToolName, UnknownToolError }
 
@@ -200,23 +201,23 @@ export const resolveGraph = (
       const verifyExists = fs.existsSync(verifySnap)
       const planExists = fs.existsSync(planSnap)
       if (verifyExists) {
-        const recordedMeta = readGraphHeadMeta(root)
-        const headState = resolveGitHeadState(root)
+        const recordedMeta = readGraphHeadMeta(root, nodeSyncHostIo)
+        const headState = resolveGitHeadState(root, nodeSyncHostIo)
         if (
           recordedMeta !== null &&
           headState.headSha !== null &&
           recordedMeta.headSha !== headState.headSha
         ) {
-          const freshGraph = yield* extractWorkspaceTypeAwareGraph(root)
-          saveGraphSnapshot(freshGraph, verifySnap)
-          writeGraphHeadMeta(root, headState)
+          const freshGraph = yield* extractWorkspaceTypeAwareGraph(root, nodeSyncHostIo)
+          saveGraphSnapshot(freshGraph, verifySnap, nodeSyncHostIo)
+          writeGraphHeadMeta(root, nodeSyncHostIo, headState)
           return freshGraph
         }
       }
       snapshotPath = selectSnapshotPath(root, verifySnap, planSnap, verifyExists, planExists)
     }
     if (snapshotPath && fs.existsSync(snapshotPath)) {
-      return yield* loadGraphSnapshotEffect(snapshotPath).pipe(
+      return yield* loadGraphSnapshotEffect(snapshotPath, nodeSyncHostIo).pipe(
         Effect.tapError((error) =>
           Effect.sync(() => {
             process.stderr.write(
@@ -391,12 +392,16 @@ export const recordMcpToolTelemetry = (
         ? "fail"
         : "ok"
 
-  appendTelemetryEvent(root, {
-    surface: "mcp",
-    category,
-    toolName,
-    outcome,
-    durationMs,
-    engineSource,
-  })
+  appendTelemetryEvent(
+    root,
+    {
+      surface: "mcp",
+      category,
+      toolName,
+      outcome,
+      durationMs,
+      engineSource,
+    },
+    nodeSyncHostIo,
+  )
 }

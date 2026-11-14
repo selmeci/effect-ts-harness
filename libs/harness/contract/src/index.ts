@@ -71,3 +71,15 @@ export {
   TierTopologyMessage,
   TierTopologyRuleId,
 } from "./tier-topology.js"
+export {
+  AstGateEvaluationReport,
+  AstGateFileBatchInput,
+  AstGateViolationContract,
+  DaemonServerError,
+  DaemonServerInfo,
+  DaemonSocketPath,
+  DecisionCacheKey,
+  DecisionCachePayloadJson,
+  DecisionCacheStatsSnapshot,
+  DecisionCacheTtlMillis,
+} from "./cache-and-daemon.js"

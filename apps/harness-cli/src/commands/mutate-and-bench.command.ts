@@ -16,14 +16,14 @@ import {
   runDomainMutationSuite,
 } from "@harness/gates"
 import {
-  clearWarmProgramSessions,
+  createTypeScriptProgramSession,
   DatalogFilePath,
   DatalogSession,
   decideGraphRewrite,
   extractTypeGraph,
-  getOrCreateWarmProgramSession,
   stepDatalogFileDelta,
 } from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 import { type CliEnv, type CliResult, findWorkspaceRoot } from "./daemon-and-omnigraph.service.js"
 
 export const handleMutate = (
@@ -35,7 +35,7 @@ export const handleMutate = (
     const scopeArg = argv.find((arg) => arg.startsWith("--scope="))
     const scope = scopeArg ? scopeArg.slice("--scope=".length) : undefined
 
-    const report = runDomainMutationSuite(repoRoot, { scope })
+    const report = runDomainMutationSuite(repoRoot, nodeSyncHostIo, { scope })
     return {
       exitCode: !report.passed ? 1 : 0,
       stdout: JSON.stringify(report),
@@ -70,15 +70,15 @@ export const handleBench = (
       ? readFileSync(sampleFilePath, "utf-8")
       : "export const x = 1\n"
 
-    clearWarmProgramSessions()
-    const session = getOrCreateWarmProgramSession(repoRoot)
+    const session = createTypeScriptProgramSession(repoRoot, nodeSyncHostIo)
     const coldExtractStart = performance.now()
-    const initialGraph = yield* extractTypeGraph({ repoRoot, session })
+    const initialGraph = yield* extractTypeGraph({ repoRoot, session, hostIo: nodeSyncHostIo })
     const coldExtractMs = Math.max(0, performance.now() - coldExtractStart)
 
     yield* extractTypeGraph({
       repoRoot,
       session,
+      hostIo: nodeSyncHostIo,
       overlays: {
         [benchRelFile]: `${sampleContent}\n// warm-prime\n`,
       },
@@ -90,6 +90,7 @@ export const handleBench = (
       yield* extractTypeGraph({
         repoRoot,
         session,
+        hostIo: nodeSyncHostIo,
         overlays: {
           [benchRelFile]: `${sampleContent}\n// warm-bench-${i}\n`,
         },

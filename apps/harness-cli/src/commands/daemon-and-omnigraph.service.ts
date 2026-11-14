@@ -17,6 +17,7 @@ import {
   type TelemetrySurface,
 } from "@harness/gates"
 import type { HarnessGraph } from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 import {
   buildOmnigraphClusterKillArgs,
   CLI_REPO_ROOT,
@@ -91,7 +92,10 @@ export const isIsolatedExternalWorkspace = (repoRoot: string): boolean => {
   if (explicitEnvUrl) {
     return false
   }
-  return resolveCanonicalRepoRoot(repoRoot) !== resolveCanonicalRepoRoot(CLI_REPO_ROOT)
+  return (
+    resolveCanonicalRepoRoot(repoRoot, nodeSyncHostIo) !==
+    resolveCanonicalRepoRoot(CLI_REPO_ROOT, nodeSyncHostIo)
+  )
 }
 
 export const recordFriction = (
@@ -105,7 +109,7 @@ export const recordFriction = (
   if (options?.repoRoot === undefined && process.env.VITEST !== undefined) {
     return
   }
-  appendFrictionEvent(options?.repoRoot ?? findWorkspaceRoot(), event)
+  appendFrictionEvent(options?.repoRoot ?? findWorkspaceRoot(), event, nodeSyncHostIo)
 }
 
 export const recordTelemetry = (
@@ -123,7 +127,7 @@ export const recordTelemetry = (
   if (options?.repoRoot === undefined && process.env.VITEST !== undefined) {
     return
   }
-  appendTelemetryEvent(options?.repoRoot ?? findWorkspaceRoot(), event)
+  appendTelemetryEvent(options?.repoRoot ?? findWorkspaceRoot(), event, nodeSyncHostIo)
 }
 
 export const ANSI_REGEX = new RegExp(
@@ -231,7 +235,7 @@ export const readGitBranchDiffFiles = (repoRoot: string): ReadonlyArray<string> 
     process.stderr.write(
       `[harness:verify] Warning: git branch diff failed or returned empty in ${repoRoot}; falling back to scanning all modular gate files.\n`,
     )
-    return collectModularPluginFiles(repoRoot).map((abs) =>
+    return collectModularPluginFiles(repoRoot, nodeSyncHostIo).map((abs) =>
       relative(repoRoot, abs).replace(/\\/g, "/"),
     )
   }

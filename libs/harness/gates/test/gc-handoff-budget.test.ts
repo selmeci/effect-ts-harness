@@ -41,6 +41,7 @@ import {
   type GovernanceDocReference,
   type SpanSample,
 } from "../src/index.js"
+import { testHostIo } from "./helpers/test-host-io.js"
 
 describe("Harness Gates: GC check, Session Handoff, Span Budget, and State Dir", () => {
   it.effect("diffs plan and impl snapshots and confirms 0 missing symbols", () =>
@@ -75,10 +76,10 @@ describe("Harness Gates: GC check, Session Handoff, Span Budget, and State Dir",
         })
         const planPath = join(tempDir, "plan-graph-snapshot.json")
         const implPath = join(tempDir, "graph-snapshot.json")
-        saveGraphSnapshot(initialPlanGraph, planPath)
-        saveGraphSnapshot(initialImplGraph, implPath)
-        const planGraph = yield* loadGraphSnapshotEffect(planPath)
-        const implGraph = yield* loadGraphSnapshotEffect(implPath)
+        saveGraphSnapshot(initialPlanGraph, planPath, testHostIo)
+        saveGraphSnapshot(initialImplGraph, implPath, testHostIo)
+        const planGraph = yield* loadGraphSnapshotEffect(planPath, testHostIo)
+        const implGraph = yield* loadGraphSnapshotEffect(implPath, testHostIo)
         const diff = diffPlanAndImplGraphs(planGraph, implGraph)
         expect(diff.ok).toBe(true)
         expect(diff.reasons).toHaveLength(0)
@@ -962,12 +963,12 @@ errors: []
     )
 
     it("loads governance docs safely from disk even when folders do not exist", () => {
-      const docs = loadGovernanceDocsFromDisk("/non/existent/repo/root")
+      const docs = loadGovernanceDocsFromDisk("/non/existent/repo/root", testHostIo)
       expect(Array.isArray(docs)).toBe(true)
       expect(docs).toHaveLength(0)
 
       const repoRoot = "/home/roan/WebstormProjects/effect-ts-harness"
-      const repoDocs = loadGovernanceDocsFromDisk(repoRoot)
+      const repoDocs = loadGovernanceDocsFromDisk(repoRoot, testHostIo)
       expect(Array.isArray(repoDocs)).toBe(true)
     })
 
@@ -1053,7 +1054,7 @@ status: accepted
 `,
         )
 
-        const docs = loadGovernanceDocsFromDisk(tempDir)
+        const docs = loadGovernanceDocsFromDisk(tempDir, testHostIo)
         expect(docs).toHaveLength(3)
 
         const paths = docs.map((d) => d.docPath)
@@ -1518,10 +1519,10 @@ status: accepted
       const regularDir = mkdtempSync(join(tmpdir(), "harness-reg-repo-"))
       const wtDir = mkdtempSync(join(tmpdir(), "harness-wt-repo-"))
       try {
-        expect(resolveCanonicalRepoRoot(regularDir)).toBe(regularDir)
+        expect(resolveCanonicalRepoRoot(regularDir, testHostIo)).toBe(regularDir)
 
         writeFileSync(join(wtDir, ".git"), "gitdir: /path/to/main/.git/worktrees/wt-1\n")
-        expect(resolveCanonicalRepoRoot(wtDir)).toBe("/path/to/main")
+        expect(resolveCanonicalRepoRoot(wtDir, testHostIo)).toBe("/path/to/main")
       } finally {
         rmSync(regularDir, { recursive: true, force: true })
         rmSync(wtDir, { recursive: true, force: true })
@@ -1538,22 +1539,22 @@ status: accepted
         )
 
         // Without HARNESS_WORKTREE_ID
-        expect(resolveOmnigraphClusterDir(mainRepo, {})).toBe(
+        expect(resolveOmnigraphClusterDir(mainRepo, testHostIo, {})).toBe(
           join(mainRepo, ".harness", "omnigraph-cluster"),
         )
 
         // With HARNESS_WORKTREE_ID set, still points to canonical repo root cluster
-        expect(resolveOmnigraphClusterDir(mainRepo, { HARNESS_WORKTREE_ID: "wt-feature" })).toBe(
+        expect(resolveOmnigraphClusterDir(mainRepo, testHostIo, { HARNESS_WORKTREE_ID: "wt-feature" })).toBe(
           join(mainRepo, ".harness", "omnigraph-cluster"),
         )
 
         // Inside linked git worktree, points to canonical repo root cluster
-        expect(resolveOmnigraphClusterDir(wtDir, {})).toBe(
+        expect(resolveOmnigraphClusterDir(wtDir, testHostIo, {})).toBe(
           join(mainRepo, ".harness", "omnigraph-cluster"),
         )
 
         // With explicit HARNESS_STATE_DIR
-        expect(resolveOmnigraphClusterDir(mainRepo, { HARNESS_STATE_DIR: ".custom-state" })).toBe(
+        expect(resolveOmnigraphClusterDir(mainRepo, testHostIo, { HARNESS_STATE_DIR: ".custom-state" })).toBe(
           join(mainRepo, ".custom-state", "omnigraph-cluster"),
         )
       } finally {
@@ -1571,15 +1572,15 @@ status: accepted
           `gitdir: ${join(mainRepo, ".git", "worktrees", "wt-1")}\n`,
         )
 
-        const mainPort = deriveRepoOmnigraphPort(mainRepo)
-        const wtPort = deriveRepoOmnigraphPort(wtDir)
+        const mainPort = deriveRepoOmnigraphPort(mainRepo, testHostIo)
+        const wtPort = deriveRepoOmnigraphPort(wtDir, testHostIo)
 
         expect(wtPort).toBe(mainPort)
         expect(mainPort).toBeGreaterThanOrEqual(18080)
         expect(mainPort).toBeLessThanOrEqual(28079)
 
-        const portAlpha = deriveRepoOmnigraphPort("/tmp/repo-alpha")
-        const portBeta = deriveRepoOmnigraphPort("/tmp/repo-beta")
+        const portAlpha = deriveRepoOmnigraphPort("/tmp/repo-alpha", testHostIo)
+        const portBeta = deriveRepoOmnigraphPort("/tmp/repo-beta", testHostIo)
         expect(portAlpha).toBeGreaterThanOrEqual(18080)
         expect(portAlpha).toBeLessThanOrEqual(28079)
         expect(portBeta).toBeGreaterThanOrEqual(18080)
@@ -1601,7 +1602,7 @@ status: accepted
         )
 
         // Default
-        expect(resolveOmnigraphTaskBranches(mainRepo, {})).toEqual({
+        expect(resolveOmnigraphTaskBranches(mainRepo, testHostIo, {})).toEqual({
           planBranch: "plan/current",
           implBranch: "impl/current",
           mainBranch: "main",
@@ -1609,7 +1610,7 @@ status: accepted
 
         // With HARNESS_WORKTREE_ID
         expect(
-          resolveOmnigraphTaskBranches(mainRepo, { HARNESS_WORKTREE_ID: "feature-auth" }),
+          resolveOmnigraphTaskBranches(mainRepo, testHostIo, { HARNESS_WORKTREE_ID: "feature-auth" }),
         ).toEqual({
           planBranch: "plan/wt-feature-auth",
           implBranch: "impl/wt-feature-auth",
@@ -1617,7 +1618,7 @@ status: accepted
         })
 
         expect(
-          resolveOmnigraphTaskBranches(mainRepo, { HARNESS_WORKTREE_ID: "feat/nested#branch" }),
+          resolveOmnigraphTaskBranches(mainRepo, testHostIo, { HARNESS_WORKTREE_ID: "feat/nested#branch" }),
         ).toEqual({
           planBranch: "plan/wt-feat_nested_branch",
           implBranch: "impl/wt-feat_nested_branch",
@@ -1626,7 +1627,7 @@ status: accepted
 
         // Inside linked git worktree directory
         const slug = basename(wtDir).replace(/[^a-zA-Z0-9._-]/g, "_")
-        expect(resolveOmnigraphTaskBranches(wtDir, {})).toEqual({
+        expect(resolveOmnigraphTaskBranches(wtDir, testHostIo, {})).toEqual({
           planBranch: `plan/wt-${slug}`,
           implBranch: `impl/wt-${slug}`,
           mainBranch: "main",
@@ -2742,7 +2743,7 @@ export {};
 
           writeFileSync(join(srcDir, "index.ts"), `export const value = 42\n`)
 
-          const findings = scanWorkspacePackageHygiene(tempDir)
+          const findings = scanWorkspacePackageHygiene(tempDir, testHostIo)
 
           const emptyModuleFinding = findings.find(
             (f) =>
@@ -2785,7 +2786,7 @@ export {};
             `import { UsedContract } from "../contract/src/index.js";\nconsole.log(UsedContract);\n`,
           )
 
-          const findings = scanWorkspacePackageHygiene(tempDir)
+          const findings = scanWorkspacePackageHygiene(tempDir, testHostIo)
 
           const unusedFindings = findings.filter((f) => f.kind === "unused-contract-export")
           expect(unusedFindings.length).toBe(3)
@@ -2824,7 +2825,7 @@ export {};
             `import { Effect } from "effect";\nimport { ConstructedError, type PhantomError } from "../contract/src/index.js";\nexport const run = (): Effect.Effect<void, ConstructedError | PhantomError> => Effect.fail(new ConstructedError({}));\n`,
           )
 
-          const findings = scanWorkspacePackageHygiene(tempDir)
+          const findings = scanWorkspacePackageHygiene(tempDir, testHostIo)
           const deadErrorFindings = findings.filter((f) => f.kind === "dead-tagged-error")
           expect(deadErrorFindings).toHaveLength(1)
           expect(deadErrorFindings[0]?.nodeId).toBe("sample/contract:PhantomError")
@@ -2883,7 +2884,7 @@ export {};
           mkdirSync(migrationsDir, { recursive: true })
           writeFileSync(join(migrationsDir, "0002_drop.sql"), "DROP TABLE old_table;\n")
 
-          const findings = scanWorkspacePackageHygiene(tempDir)
+          const findings = scanWorkspacePackageHygiene(tempDir, testHostIo)
 
           // Check unmanaged-sql-ddl
           const unmanagedFindings = findings.filter(
@@ -2984,7 +2985,7 @@ export {};
             `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nconst aggregateCoreMigrations = {\n  "1_init_foo": sql\`CREATE TABLE IF NOT EXISTS foo (id INT);\`,\n};\nexport const cleanMigrations = SqliteMigrator.fromRecord({\n  ...aggregateCoreMigrations,\n  "2_init_bar": sql\`CREATE TABLE IF NOT EXISTS bar (id INT);\`,\n});\nexport const runAggregateMigrations = SqliteMigrator.run({ loader: cleanMigrations });\nexport const projectorCoreMigrations = {\n  "1_init_projector": sql\`CREATE TABLE IF NOT EXISTS proj (id INT);\`,\n};\nexport const runProjectorMigrations = SqliteMigrator.run({\n  loader: SqliteMigrator.fromRecord(projectorCoreMigrations),\n  table: "es_projector_sql_migrations",\n});\n`,
           )
 
-          const cleanFindings = scanWorkspacePackageHygiene(cleanTempDir)
+          const cleanFindings = scanWorkspacePackageHygiene(cleanTempDir, testHostIo)
           expect(cleanFindings).toHaveLength(0)
         } finally {
           rmSync(cleanTempDir, { recursive: true, force: true })
@@ -3006,7 +3007,7 @@ export {};
             `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nexport const projectorCoreMigrations = {\n  "2_init_projector": sql\`CREATE TABLE IF NOT EXISTS proj (id INT);\`,\n};\nexport const runProj = SqliteMigrator.run({ loader: SqliteMigrator.fromRecord(projectorCoreMigrations) });\nexport const decodeRow = (row: { readonly stream_version: number }) => StreamVersion.make(Math.max(0, row.stream_version));\n`,
           )
 
-          const collisionFindings = scanWorkspacePackageHygiene(collisionTempDir)
+          const collisionFindings = scanWorkspacePackageHygiene(collisionTempDir, testHostIo)
 
           const startAtTwoFinding = collisionFindings.find(
             (f) =>

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { join, relative } from "node:path"
-import { Effect, Option, Schema } from "effect"
+import { Option, Result, Schema } from "effect"
+import type { SyncHostIo } from "@harness/service"
 import { DstSeed } from "./dst-engine.js"
 import { resolveHarnessStateDir } from "./worktree.js"
 
@@ -48,9 +48,10 @@ const collectFiles = (
   baseDir: string,
   acc: Array<string>,
   harnessStateDir: string,
+  hostIo: SyncHostIo,
 ): void => {
-  if (!existsSync(dir)) return
-  const entries = readdirSync(dir, { withFileTypes: true })
+  if (!hostIo.existsSync(dir)) return
+  const entries = hostIo.readdirSync(dir)
   for (const entry of entries) {
     if (IGNORED_NAMES.has(entry.name) || /^(?:temp-|__temp_)/.test(entry.name)) {
       continue
@@ -59,26 +60,27 @@ const collectFiles = (
     if (fullPath === harnessStateDir || fullPath.startsWith(harnessStateDir + "/")) {
       continue
     }
-    if (entry.isDirectory()) {
-      collectFiles(fullPath, baseDir, acc, harnessStateDir)
-    } else if (entry.isFile()) {
+    if (entry.isDirectory) {
+      collectFiles(fullPath, baseDir, acc, harnessStateDir, hostIo)
+    } else if (entry.isFile) {
       const rel = relative(baseDir, fullPath).replace(/\\/g, "/")
       acc.push(rel)
     }
   }
 }
 
-export const computeWorkspaceTreeHash = (repoRoot: string): string => {
+export const computeWorkspaceTreeHash = (repoRoot: string, hostIo: SyncHostIo): string => {
   const files: Array<string> = []
   const harnessStateDir = resolveHarnessStateDir(repoRoot)
-  collectFiles(repoRoot, repoRoot, files, harnessStateDir)
+  collectFiles(repoRoot, repoRoot, files, harnessStateDir, hostIo)
   files.sort()
   const hasher = createHash("sha256")
   for (const rel of files) {
     const fullPath = join(repoRoot, rel)
-    if (!existsSync(fullPath)) continue
-    const content = Option.getOrUndefined(
-      Effect.runSync(Effect.option(Effect.try(() => readFileSync(fullPath)))),
+    if (!hostIo.existsSync(fullPath)) continue
+    const content = Result.getOrElse(
+      Result.try(() => hostIo.readBytesSync(fullPath)),
+      () => undefined,
     )
     if (content === undefined) continue
     hasher.update(rel)
@@ -106,10 +108,11 @@ export const parseDstSeedEnv = (raw: string | undefined): DstSeed | undefined =>
 
 export const writeVerifyStamp = (
   repoRoot: string,
+  hostIo: SyncHostIo,
   taskBranch?: string,
   dstOptions?: { readonly dstSeed?: DstSeed | undefined; readonly dstSeedsRun?: number | undefined },
 ): VerifyStamp => {
-  const treeHash = computeWorkspaceTreeHash(repoRoot)
+  const treeHash = computeWorkspaceTreeHash(repoRoot, hostIo)
   const envSeed = parseDstSeedEnv(process.env["DST_SEED"])
   const resolvedSeed = dstOptions?.dstSeed ?? envSeed ?? DstSeed.make(0)
   const stamp: VerifyStamp = {
@@ -122,20 +125,23 @@ export const writeVerifyStamp = (
       : {}),
   }
   const harnessDir = resolveHarnessStateDir(repoRoot)
-  if (!existsSync(harnessDir)) {
-    mkdirSync(harnessDir, { recursive: true })
+  if (!hostIo.existsSync(harnessDir)) {
+    hostIo.mkdirRecursiveSync(harnessDir)
   }
   const stampPath = join(harnessDir, "verify-stamp.json")
-  writeFileSync(stampPath, JSON.stringify(stamp, null, 2) + "\n", "utf-8")
+  hostIo.writeTextSync(stampPath, JSON.stringify(stamp, null, 2) + "\n")
   return stamp
 }
 
 const decodeVerifyStamp = Schema.decodeOption(Schema.fromJsonString(VerifyStampSchema))
 
-export const checkVerifyStamp = (repoRoot: string): CheckVerifyStampResult => {
+export const checkVerifyStamp = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+): CheckVerifyStampResult => {
   const harnessDir = resolveHarnessStateDir(repoRoot)
   const stampPath = join(harnessDir, "verify-stamp.json")
-  if (!existsSync(stampPath)) {
+  if (!hostIo.existsSync(stampPath)) {
     return {
       valid: false,
       reason:
@@ -143,7 +149,7 @@ export const checkVerifyStamp = (repoRoot: string): CheckVerifyStampResult => {
     }
   }
 
-  const content = readFileSync(stampPath, "utf-8")
+  const content = hostIo.readTextSync(stampPath)
   const decoded = decodeVerifyStamp(content)
   if (Option.isNone(decoded)) {
     return {
@@ -153,7 +159,7 @@ export const checkVerifyStamp = (repoRoot: string): CheckVerifyStampResult => {
     }
   }
 
-  const currentTreeHash = computeWorkspaceTreeHash(repoRoot)
+  const currentTreeHash = computeWorkspaceTreeHash(repoRoot, hostIo)
   if (decoded.value.treeHash !== currentTreeHash) {
     return {
       valid: false,

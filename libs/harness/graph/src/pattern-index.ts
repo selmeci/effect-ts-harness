@@ -1,24 +1,27 @@
-import * as fs from "node:fs"
 import * as path from "node:path"
+import type { SyncHostIo } from "@harness/service"
 import type { PatternDocNode } from "./model.js"
 
-export const loadPatternDocs = (repoRoot: string): ReadonlyArray<PatternDocNode> => {
+export const loadPatternDocs = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+): ReadonlyArray<PatternDocNode> => {
   const dirPath = path.join(repoRoot, "agent-patterns")
-  if (!fs.existsSync(dirPath)) {
+  if (!hostIo.existsSync(dirPath)) {
     return []
   }
 
-  const entries = fs.readdirSync(dirPath, { withFileTypes: true })
+  const entries = hostIo.readdirSync(dirPath)
   const docs: Array<PatternDocNode> = []
 
   for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith(".md") || entry.name === "README.md") {
+    if (!entry.isFile || !entry.name.endsWith(".md") || entry.name === "README.md") {
       continue
     }
 
     const slug = entry.name.slice(0, -3)
     const filePath = path.join(dirPath, entry.name)
-    const content = fs.readFileSync(filePath, "utf-8")
+    const content = hostIo.readTextSync(filePath)
     const lines = content.split(/\r?\n/)
 
     let foundTitle = false

@@ -1,6 +1,6 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { Effect, Option, Schema } from "effect"
+import { Effect, Option, Result, Schema } from "effect"
+import type { SyncHostIo } from "@harness/service"
 import { resolveHarnessStateDir } from "./worktree.js"
 
 export const FrictionEventKind = Schema.Literals([
@@ -174,6 +174,7 @@ export const appendFrictionEvent = (
     readonly detail: string
     readonly timestamp?: string | undefined
   },
+  hostIo: SyncHostIo,
 ): FrictionEvent => {
   const record: FrictionEvent = {
     kind: input.kind,
@@ -183,30 +184,35 @@ export const appendFrictionEvent = (
   }
   const harnessDir = resolveHarnessStateDir(repoRoot)
   const filePath = join(harnessDir, "friction-log.jsonl")
-  Effect.runSync(
-    Effect.try(() => {
-      if (!existsSync(harnessDir)) {
-        mkdirSync(harnessDir, { recursive: true })
+  Result.getOrElse(
+    Result.try(() => {
+      if (!hostIo.existsSync(harnessDir)) {
+        hostIo.mkdirRecursiveSync(harnessDir)
       }
-      appendFileSync(filePath, JSON.stringify(record) + "\n", "utf-8")
-    }).pipe(Effect.orElseSucceed(() => undefined)),
+      hostIo.appendTextSync(filePath, JSON.stringify(record) + "\n")
+    }),
+    () => undefined,
   )
   return record
 }
 
-export const readFrictionEvents = (repoRoot: string): ReadonlyArray<FrictionEvent> => {
+export const readFrictionEvents = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+): ReadonlyArray<FrictionEvent> => {
   const harnessDir = resolveHarnessStateDir(repoRoot)
   const filePath = join(harnessDir, "friction-log.jsonl")
-  if (!existsSync(filePath)) {
+  if (!hostIo.existsSync(filePath)) {
     return []
   }
-  const contentOption = Effect.runSync(
-    Effect.try(() => readFileSync(filePath, "utf-8")).pipe(Effect.option),
+  const content = Result.getOrElse(
+    Result.try(() => hostIo.readTextSync(filePath)),
+    () => null,
   )
-  if (Option.isNone(contentOption)) {
+  if (content === null) {
     return []
   }
-  const lines = contentOption.value.split("\n")
+  const lines = content.split("\n")
   const events: Array<FrictionEvent> = []
   for (const line of lines) {
     const trimmed = line.trim()
@@ -219,16 +225,17 @@ export const readFrictionEvents = (repoRoot: string): ReadonlyArray<FrictionEven
   return events
 }
 
-export const clearFrictionEvents = (repoRoot: string): void => {
+export const clearFrictionEvents = (repoRoot: string, hostIo: SyncHostIo): void => {
   const harnessDir = resolveHarnessStateDir(repoRoot)
   const filePath = join(harnessDir, "friction-log.jsonl")
-  Effect.runSync(
-    Effect.try(() => {
-      if (!existsSync(harnessDir)) {
-        mkdirSync(harnessDir, { recursive: true })
+  Result.getOrElse(
+    Result.try(() => {
+      if (!hostIo.existsSync(harnessDir)) {
+        hostIo.mkdirRecursiveSync(harnessDir)
       }
-      writeFileSync(filePath, "", "utf-8")
-    }).pipe(Effect.orElseSucceed(() => undefined)),
+      hostIo.writeTextSync(filePath, "")
+    }),
+    () => undefined,
   )
 }
 

@@ -13,6 +13,7 @@ import {
   isAggregateFnNode,
   type EffectFnNode,
 } from "../src/index.js"
+import { testHostIo } from "./helpers/test-host-io.js"
 
 const makeTestFnNode = (partial: {
   readonly spanName: string
@@ -1446,7 +1447,7 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
         `,
       )
 
-      const badGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir))
+      const badGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir, testHostIo))
       const badResult = checkEffectGraph(badGraph)
       const violations = badResult.violations.filter((v) => v.rule === "unasserted-state-field")
       expect(violations.length).toBe(1)
@@ -1470,7 +1471,7 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
         `,
       )
 
-      const goodGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir))
+      const goodGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir, testHostIo))
       const goodResult = checkEffectGraph(goodGraph)
       expect(goodResult.violations.filter((v) => v.rule === "unasserted-state-field")).toHaveLength(
         0,

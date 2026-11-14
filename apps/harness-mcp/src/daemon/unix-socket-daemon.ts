@@ -5,6 +5,7 @@ import { Data, Effect, Schema } from "effect"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
 import { extractWorkspaceTypeAwareGraph } from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 import {
   AstGateCache,
   AstSourceContent,
@@ -150,7 +151,7 @@ const createDaemonNetServer = (
               .with("ping", () => Effect.succeed({ id: req.id, ok: true, status: "warm" }))
               .with("extract-graph", () =>
                 Effect.gen(function* () {
-                  const graph = yield* extractWorkspaceTypeAwareGraph(resolvedRoot)
+                  const graph = yield* extractWorkspaceTypeAwareGraph(resolvedRoot, nodeSyncHostIo)
                   return {
                     id: req.id,
                     ok: true,

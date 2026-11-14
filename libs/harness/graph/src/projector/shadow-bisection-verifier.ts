@@ -1,3 +1,4 @@
+import type { SyncHostIo } from "@harness/service"
 import { Cause, Effect } from "effect"
 import { match } from "ts-pattern"
 import { decideGraphInference } from "../datalog-engine.js"
@@ -42,6 +43,7 @@ export const verifyProjectedSubset = (
   existingFiles?: Readonly<Record<string, string>>,
   forceFailRuleIds?: ReadonlySet<string>,
   session?: TypeScriptProgramSession,
+  hostIo?: SyncHostIo,
 ): Effect.Effect<BatchVerificationOutcome, never, never> =>
   Effect.gen(function* () {
     if (subsetPatches.length === 0) {
@@ -63,9 +65,9 @@ export const verifyProjectedSubset = (
       ...overlayMap,
     }
 
-    const activeSession = session ?? createTypeScriptProgramSession(repoRoot)
+    const activeSession = session ?? createTypeScriptProgramSession(repoRoot, hostIo)
     const compilerDiagExit = yield* Effect.try({
-      try: () => evaluateOverlayDiagnostics(repoRoot, combinedOverlays, activeSession),
+      try: () => evaluateOverlayDiagnostics(repoRoot, combinedOverlays, activeSession, hostIo),
       catch: (err) => (err instanceof Error ? err.message : String(err)),
     }).pipe(Effect.exit)
     if (compilerDiagExit._tag === "Failure" && Cause.hasInterrupts(compilerDiagExit.cause)) {
@@ -88,7 +90,7 @@ export const verifyProjectedSubset = (
 
     const sourceInputs: Array<SourceFileInput> = []
     for (const [relFile, content] of Object.entries(combinedOverlays)) {
-      const contained = resolveContainedRelPath(repoRoot, relFile)
+      const contained = resolveContainedRelPath(repoRoot, relFile, hostIo)
       if (contained === null) continue
       const norm = contained
       if (norm.includes("/test/") || norm.endsWith(".test.ts") || norm.endsWith(".spec.ts")) {
@@ -97,7 +99,7 @@ export const verifyProjectedSubset = (
       sourceInputs.push({
         filePath: norm,
         content,
-        packageTag: resolvePackageTag(repoRoot, norm),
+        packageTag: resolvePackageTag(repoRoot, norm, hostIo),
       })
     }
 
@@ -107,6 +109,7 @@ export const verifyProjectedSubset = (
           repoRoot,
           overlays: combinedOverlays,
           session: activeSession,
+          ...(hostIo !== undefined ? { hostIo } : {}),
         }),
       catch: (err) => (err instanceof Error ? err.message : String(err)),
     }).pipe(Effect.exit)
@@ -234,6 +237,7 @@ export const safeProjectPatchesToInMemoryWorkspace = (
   patches: ReadonlyArray<GraphPatch>,
   initialGraph?: HarnessGraph,
   existingFiles?: Readonly<Record<string, string>>,
+  hostIo?: SyncHostIo,
 ): Effect.Effect<
   ReturnType<typeof projectPatchesToInMemoryWorkspace>,
   GraphProjectorError,
@@ -248,6 +252,7 @@ export const safeProjectPatchesToInMemoryWorkspace = (
           patches,
           initialGraph,
           existingFiles,
+          hostIo,
         ),
       catch: (err) =>
         err instanceof GraphProjectorError
@@ -272,13 +277,14 @@ export const isolateFirstOffendingPatchIndex = (
   existingFiles?: Readonly<Record<string, string>>,
   forceFailRuleIds?: ReadonlySet<string>,
   session?: TypeScriptProgramSession,
+  hostIo?: SyncHostIo,
 ): Effect.Effect<
   { readonly offendingIndex: number; readonly probes: number },
   GraphProjectorError,
   never
 > =>
   Effect.gen(function* () {
-    const activeSession = session ?? createTypeScriptProgramSession(repoRoot)
+    const activeSession = session ?? createTypeScriptProgramSession(repoRoot, hostIo)
     let low = 0
     let high = phasePatches.length - 1
     let probes = 0
@@ -293,6 +299,7 @@ export const isolateFirstOffendingPatchIndex = (
         candidateSlice,
         baseGraph,
         existingFiles,
+        hostIo,
       )
       const check = yield* verifyProjectedSubset(
         repoRoot,
@@ -303,6 +310,7 @@ export const isolateFirstOffendingPatchIndex = (
         existingFiles,
         forceFailRuleIds,
         activeSession,
+        hostIo,
       )
       if (!check.isClean) {
         high = mid

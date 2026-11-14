@@ -14,8 +14,8 @@ import {
   isRepoWideAstRule,
   type SpanSample,
   WorkspaceFilePath,
-  WorkspaceFsLive,
 } from "@harness/gates"
+import { nodeSyncHostIo, WorkspaceFsNodeLive as WorkspaceFsLive } from "@harness/infra"
 import type { CliResult } from "./daemon-and-omnigraph.service.js"
 
 export const runDeltaAstAndPluginGates = (
@@ -60,7 +60,7 @@ export const runDeltaAstAndPluginGates = (
       process.stderr.write(
         `[harness:verify] Warning: no modular gate delta files detected in ${repoRoot}; falling back to scanning all modular gate files.\n`,
       )
-      modularDeltaFiles = collectModularPluginFiles(repoRoot).map((abs) =>
+      modularDeltaFiles = collectModularPluginFiles(repoRoot, nodeSyncHostIo).map((abs) =>
         relative(repoRoot, abs).replace(/\\/g, "/"),
       )
     }

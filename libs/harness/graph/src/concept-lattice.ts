@@ -1,4 +1,4 @@
-import { Effect } from "effect"
+import { Effect, Result } from "effect"
 import * as Graph from "effect/Graph"
 import {
   ARCHIMATE_BY_ROLE,
@@ -156,12 +156,17 @@ const findCycleInConceptHierarchy = (
 }
 
 /**
- * Cache for O(1) indexed lookups over `ConceptLatticeResult` entries.
+ * Builds a lookup index for `ConceptLatticeResult` entries.
  */
-const latticeIndexCache = new WeakMap<
-  ConceptLatticeResult,
-  ReadonlyMap<ConceptId, ConceptClosureEntry>
->()
+export const buildConceptLatticeIndex = (
+  lattice: ConceptLatticeResult,
+): ReadonlyMap<ConceptId, ConceptClosureEntry> => {
+  const index = new Map<ConceptId, ConceptClosureEntry>()
+  for (const entry of lattice.entries) {
+    index.set(entry.conceptId, entry)
+  }
+  return index
+}
 
 /**
  * O(1) indexed lookup for a concept's closure entry in a `ConceptLatticeResult`.
@@ -169,36 +174,27 @@ const latticeIndexCache = new WeakMap<
 export const getConceptClosureEntry = (
   lattice: ConceptLatticeResult,
   id: ConceptId,
-): ConceptClosureEntry | undefined => {
-  let index = latticeIndexCache.get(lattice)
-  if (index === undefined) {
-    const map = new Map<ConceptId, ConceptClosureEntry>()
-    for (const entry of lattice.entries) {
-      map.set(entry.conceptId, entry)
-    }
-    index = map
-    latticeIndexCache.set(lattice, index)
-  }
-  return index.get(id)
-}
+): ConceptClosureEntry | undefined => buildConceptLatticeIndex(lattice).get(id)
 
 /**
- * Pure ontology concept lattice decider (`ConceptLattice.decide`, `R = never`).
+ * Pure synchronous computation for the ontology concept lattice.
  * Validates acyclicity of the concept hierarchy using `effect/Graph` and computes
  * reflexive-transitive subtype closure ($\sqsubseteq^*$) and inherited role sets ($\text{roles}^*(c)$).
  */
-export const decideConceptLattice = Effect.fn("ConceptLattice.decide")(function* (
+export const computeConceptLatticeSync = (
   config: ConceptLatticeConfig,
-): Effect.fn.Return<ConceptLatticeResult, ConceptLatticeCycleError, never> {
+): Result.Result<ConceptLatticeResult, ConceptLatticeCycleError> => {
   // 1. Duplicate concept ID validation
   const seenIds = new Set<ConceptId>()
   for (const c of config.concepts) {
     if (seenIds.has(c.id)) {
-      return yield* new ConceptLatticeCycleError({
-        cycle: [c.id, c.id],
-        reason: "duplicate-concept-id",
-        message: `Duplicate concept ID in lattice: ${c.id}`,
-      })
+      return Result.fail(
+        new ConceptLatticeCycleError({
+          cycle: [c.id, c.id],
+          reason: "duplicate-concept-id",
+          message: `Duplicate concept ID in lattice: ${c.id}`,
+        }),
+      )
     }
     seenIds.add(c.id)
   }
@@ -212,11 +208,13 @@ export const decideConceptLattice = Effect.fn("ConceptLattice.decide")(function*
   for (const c of config.concepts) {
     for (const supId of c.supertypes) {
       if (!conceptsById.has(supId)) {
-        return yield* new ConceptLatticeCycleError({
-          cycle: [c.id, supId],
-          reason: "dangling-supertype",
-          message: `Concept ${c.id} references unknown supertype ${supId}`,
-        })
+        return Result.fail(
+          new ConceptLatticeCycleError({
+            cycle: [c.id, supId],
+            reason: "dangling-supertype",
+            message: `Concept ${c.id} references unknown supertype ${supId}`,
+          }),
+        )
       }
     }
   }
@@ -224,11 +222,13 @@ export const decideConceptLattice = Effect.fn("ConceptLattice.decide")(function*
   // 3. Cycle detection
   const detectedCycle = findCycleInConceptHierarchy(conceptsById)
   if (detectedCycle !== undefined) {
-    return yield* new ConceptLatticeCycleError({
-      cycle: [...detectedCycle],
-      reason: "cycle",
-      message: `Concept lattice contains a subtype cycle: ${detectedCycle.join(" -> ")}`,
-    })
+    return Result.fail(
+      new ConceptLatticeCycleError({
+        cycle: [...detectedCycle],
+        reason: "cycle",
+        message: `Concept lattice contains a subtype cycle: ${detectedCycle.join(" -> ")}`,
+      }),
+    )
   }
 
   const nodeIdxById = new Map<ConceptId, Graph.NodeIndex>()
@@ -251,11 +251,13 @@ export const decideConceptLattice = Effect.fn("ConceptLattice.decide")(function*
 
   if (!Graph.isAcyclic(hierarchyGraph)) {
     const cycle = detectedCycle ?? []
-    return yield* new ConceptLatticeCycleError({
-      cycle: [...cycle],
-      reason: "cycle",
-      message: `Concept lattice contains a subtype cycle`,
-    })
+    return Result.fail(
+      new ConceptLatticeCycleError({
+        cycle: [...cycle],
+        reason: "cycle",
+        message: `Concept lattice contains a subtype cycle`,
+      }),
+    )
   }
 
   // Deterministic Kahn's topological sort (supertypes before subtypes)
@@ -320,20 +322,24 @@ export const decideConceptLattice = Effect.fn("ConceptLattice.decide")(function*
     for (const cSpec of c.relatesRoles ?? []) {
       // Verify minCard >= 0 and (maxCard === null || minCard <= maxCard)
       if (cSpec.minCard < 0 || (cSpec.maxCard !== null && cSpec.minCard > cSpec.maxCard)) {
-        return yield* new ConceptLatticeCycleError({
-          cycle: [c.id, c.id],
-          reason: "invalid-role-refinement",
-          message: `Role '${cSpec.role}' on concept '${c.id}' has invalid cardinality: minCard (${cSpec.minCard}) must be <= maxCard (${cSpec.maxCard})`,
-        })
+        return Result.fail(
+          new ConceptLatticeCycleError({
+            cycle: [c.id, c.id],
+            reason: "invalid-role-refinement",
+            message: `Role '${cSpec.role}' on concept '${c.id}' has invalid cardinality: minCard (${cSpec.minCard}) must be <= maxCard (${cSpec.maxCard})`,
+          }),
+        )
       }
       // Verify every allowedPlayer exists in conceptsById
       for (const player of cSpec.allowedPlayers) {
         if (!conceptsById.has(player)) {
-          return yield* new ConceptLatticeCycleError({
-            cycle: [c.id, player],
-            reason: "invalid-role-refinement",
-            message: `Role '${cSpec.role}' on concept '${c.id}' references unknown allowedPlayer '${player}'`,
-          })
+          return Result.fail(
+            new ConceptLatticeCycleError({
+              cycle: [c.id, player],
+              reason: "invalid-role-refinement",
+              message: `Role '${cSpec.role}' on concept '${c.id}' references unknown allowedPlayer '${player}'`,
+            }),
+          )
         }
       }
 
@@ -345,22 +351,26 @@ export const decideConceptLattice = Effect.fn("ConceptLattice.decide")(function*
         if (matchedSupRoleSpec !== undefined) {
           // Cannot weaken lower bound: cSpec.minCard >= matchedSupRoleSpec.minCard
           if (cSpec.minCard < matchedSupRoleSpec.minCard) {
-            return yield* new ConceptLatticeCycleError({
-              cycle: [c.id, supId],
-              reason: "invalid-role-refinement",
-              message: `Concept '${c.id}' weakens lower cardinality bound for role '${cSpec.role}' (refined: ${cSpec.minCard}, supertype '${supId}': ${matchedSupRoleSpec.minCard})`,
-            })
+            return Result.fail(
+              new ConceptLatticeCycleError({
+                cycle: [c.id, supId],
+                reason: "invalid-role-refinement",
+                message: `Concept '${c.id}' weakens lower cardinality bound for role '${cSpec.role}' (refined: ${cSpec.minCard}, supertype '${supId}': ${matchedSupRoleSpec.minCard})`,
+              }),
+            )
           }
           // Cannot widen upper bound: if matchedSupRoleSpec.maxCard !== null, then cSpec.maxCard !== null && cSpec.maxCard <= matchedSupRoleSpec.maxCard
           if (
             matchedSupRoleSpec.maxCard !== null &&
             (cSpec.maxCard === null || cSpec.maxCard > matchedSupRoleSpec.maxCard)
           ) {
-            return yield* new ConceptLatticeCycleError({
-              cycle: [c.id, supId],
-              reason: "invalid-role-refinement",
-              message: `Concept '${c.id}' widens upper cardinality bound for role '${cSpec.role}' (refined: ${cSpec.maxCard}, supertype '${supId}': ${matchedSupRoleSpec.maxCard})`,
-            })
+            return Result.fail(
+              new ConceptLatticeCycleError({
+                cycle: [c.id, supId],
+                reason: "invalid-role-refinement",
+                message: `Concept '${c.id}' widens upper cardinality bound for role '${cSpec.role}' (refined: ${cSpec.maxCard}, supertype '${supId}': ${matchedSupRoleSpec.maxCard})`,
+              }),
+            )
           }
           // Covariant allowedPlayers: every player in cSpec.allowedPlayers must be a subtype of (or equal to) at least one player in matchedSupRoleSpec.allowedPlayers
           for (const player of cSpec.allowedPlayers) {
@@ -369,11 +379,13 @@ export const decideConceptLattice = Effect.fn("ConceptLattice.decide")(function*
               (supPlayer) => playerSupertypes?.has(supPlayer) ?? false,
             )
             if (!isSubtypeOfAllowed) {
-              return yield* new ConceptLatticeCycleError({
-                cycle: [c.id, supId],
-                reason: "invalid-role-refinement",
-                message: `Concept '${c.id}' specifies incompatible allowedPlayer '${player}' for role '${cSpec.role}'; must be a subtype of supertype '${supId}' allowed players (${matchedSupRoleSpec.allowedPlayers.join(", ")})`,
-              })
+              return Result.fail(
+                new ConceptLatticeCycleError({
+                  cycle: [c.id, supId],
+                  reason: "invalid-role-refinement",
+                  message: `Concept '${c.id}' specifies incompatible allowedPlayer '${player}' for role '${cSpec.role}'; must be a subtype of supertype '${supId}' allowed players (${matchedSupRoleSpec.allowedPlayers.join(", ")})`,
+                }),
+              )
             }
           }
         }
@@ -430,14 +442,21 @@ export const decideConceptLattice = Effect.fn("ConceptLattice.decide")(function*
     topologicalOrder,
   }
 
-  // Pre-populate index cache for O(1) lookups
-  const index = new Map<ConceptId, ConceptClosureEntry>()
-  for (const entry of entries) {
-    index.set(entry.conceptId, entry)
-  }
-  latticeIndexCache.set(result, index)
+  return Result.succeed(result)
+}
 
-  return result
+/**
+ * Pure ontology concept lattice decider (`ConceptLattice.decide`, `R = never`).
+ * Validates acyclicity of the concept hierarchy using `effect/Graph` and computes
+ * reflexive-transitive subtype closure ($\sqsubseteq^*$) and inherited role sets ($\text{roles}^*(c)$).
+ */
+export const decideConceptLattice = Effect.fn("ConceptLattice.decide")(function* (
+  config: ConceptLatticeConfig,
+): Effect.fn.Return<ConceptLatticeResult, ConceptLatticeCycleError, never> {
+  return yield* Result.match(computeConceptLatticeSync(config), {
+    onSuccess: Effect.succeed,
+    onFailure: Effect.fail,
+  })
 })
 
 /**

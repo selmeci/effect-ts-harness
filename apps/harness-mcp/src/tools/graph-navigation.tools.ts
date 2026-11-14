@@ -9,6 +9,7 @@ import {
   resolveNode,
 } from "@harness/graph"
 import { LocalDecisionModel, routeStep } from "@harness/decision"
+import { nodeSyncHostIo } from "@harness/infra"
 import {
   isPathInsideRoot,
   McpToolName,
@@ -171,6 +172,7 @@ export const buildGraphNavigationToolDescriptors = (
           filePath: input.filePath,
           paths: input.paths,
           subDirs: input.subDirs,
+          hostIo: nodeSyncHostIo,
         })
       }),
   },

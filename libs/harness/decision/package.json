@@ -14,7 +14,9 @@
   },
   "dependencies": {
     "@effect/ai-typesafe": "4.0.0",
+    "@harness/contract": "workspace:*",
     "@harness/gates": "workspace:*",
+    "@harness/service": "workspace:*",
     "effect": "4.0.0"
   },
   "devDependencies": {

@@ -67,6 +67,7 @@ export const decideGraphProjection = Effect.fn("GraphProjector.decide")(function
 ): Effect.fn.Return<AstProjectionResult, GraphProjectorError, never> {
   const repoRoot = resolveRepoRoot(
     input.workspaceRoot !== undefined ? String(input.workspaceRoot) : process.cwd(),
+    input.hostIo,
   )
 
   const allPatches: Array<GraphPatch> =
@@ -82,7 +83,7 @@ export const decideGraphProjection = Effect.fn("GraphProjector.decide")(function
     }
     for (const ent of patch.insertedEntityNodes) {
       if ("file" in ent) {
-        const validated = validateRelPath(repoRoot, String(ent.file), patch.ruleId)
+        const validated = validateRelPath(repoRoot, String(ent.file), patch.ruleId, input.hostIo)
         if (!validated.ok) {
           return yield* validated.error
         }
@@ -119,6 +120,7 @@ export const decideGraphProjection = Effect.fn("GraphProjector.decide")(function
       allPatches,
       input.initialGraph,
       input.existingFiles,
+      input.hostIo,
     )
     return {
       operations: [...projected.operations],
@@ -142,7 +144,7 @@ export const decideGraphProjection = Effect.fn("GraphProjector.decide")(function
   const skippedRuleIds: Array<RewriteRuleId> = []
   const collectedDiagnostics: Array<string> = []
   let totalBisectionProbes = 0
-  const probeSession = createTypeScriptProgramSession(repoRoot)
+  const probeSession = createTypeScriptProgramSession(repoRoot, input.hostIo)
 
   for (const phase of phaseOrder) {
     let remainingInPhase = allPatches.filter((p) => p.phase === phase)
@@ -159,6 +161,7 @@ export const decideGraphProjection = Effect.fn("GraphProjector.decide")(function
         candidateBatch,
         input.initialGraph,
         input.existingFiles,
+        input.hostIo,
       )
       const batchCheck = yield* verifyProjectedSubset(
         repoRoot,
@@ -169,6 +172,7 @@ export const decideGraphProjection = Effect.fn("GraphProjector.decide")(function
         input.existingFiles,
         forceFailSet,
         probeSession,
+        input.hostIo,
       )
 
       if (batchCheck.isClean) {
@@ -191,6 +195,7 @@ export const decideGraphProjection = Effect.fn("GraphProjector.decide")(function
             input.existingFiles,
             forceFailSet,
             probeSession,
+            input.hostIo,
           )
           totalBisectionProbes += bisected.probes
           const offending = remainingInPhase[bisected.offendingIndex]
@@ -210,6 +215,7 @@ export const decideGraphProjection = Effect.fn("GraphProjector.decide")(function
     acceptedPatches,
     input.initialGraph,
     input.existingFiles,
+    input.hostIo,
   )
 
   const verificationStatus =

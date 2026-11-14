@@ -1,6 +1,3 @@
-import * as fs from "node:fs"
-import * as path from "node:path"
-import { fileURLToPath } from "node:url"
 import { Option } from "effect"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
@@ -10,13 +7,9 @@ import {
   projectOntologyLayers,
   queryOntologyWhy,
 } from "./archimate-ontology.js"
+import { HARNESS_GQ_QUERIES_TEXT, HARNESS_PG_SCHEMA_TEXT } from "./gq-static-assets.js"
 import { findCallees, findCallers, findTestsReaching, resolveNode } from "./graph-engine.js"
 import type { HarnessGraph, ServiceLayerNode, ServiceTagNode } from "./model.js"
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-
-export const HARNESS_PG_SCHEMA_PATH = path.resolve(__dirname, "../schema.pg")
-export const HARNESS_GQ_QUERIES_PATH = path.resolve(__dirname, "../queries/harness.gq")
 
 export const HARNESS_GQ_QUERY_NAMES = [
   "resolve_effect_fn",
@@ -203,10 +196,9 @@ export const HARNESS_GQ_QUERIES: Readonly<Record<HarnessGqQueryName, HarnessGqQu
   },
 }
 
-export const loadHarnessPgSchemaText = (): string => fs.readFileSync(HARNESS_PG_SCHEMA_PATH, "utf8")
+export const loadHarnessPgSchemaText = (): string => HARNESS_PG_SCHEMA_TEXT
 
-export const loadHarnessGqQueriesText = (): string =>
-  fs.readFileSync(HARNESS_GQ_QUERIES_PATH, "utf8")
+export const loadHarnessGqQueriesText = (): string => HARNESS_GQ_QUERIES_TEXT
 
 const getStringParam = (
   params: Readonly<Record<string, unknown>> | undefined,

@@ -16,23 +16,40 @@ enforced_by:
   - libs/harness/contract/src/workspace-and-process.ts
   - libs/harness/contract/src/ast-and-gate-primitives.ts
   - libs/harness/contract/src/tier-topology.ts
+  - libs/harness/contract/src/cache-and-daemon.ts
   - libs/harness/service/src/index.ts
+  - libs/harness/service/src/cache-and-daemon-ports.ts
+  - libs/harness/service/src/host-io.ts
   - libs/harness/gates/src/plugins/harness-tier-topology.ts
   - libs/harness/gates/src/services/workspace-fs.ts
+  - libs/harness/infra/src/index.ts
+  - libs/harness/infra/src/workspace-fs-live.ts
+  - libs/harness/infra/src/subprocess-runner-live.ts
+  - libs/harness/infra/src/ast-gate-cache-live.ts
+  - libs/harness/infra/src/decision-cache-live.ts
+  - libs/harness/infra/src/unix-socket-daemon-live.ts
+  - libs/harness/infra/src/node-host-io.ts
 spans:
   - HarnessTierTopology.decide
   - WorkspaceFs.statAndReadAll
   - WorkspaceFs.readAndVerifyFile
   - HarnessSubprocess.execChecked
   - MutationCheck.withActiveMutant
+  - AstGateCache.evaluateCached
+  - DecisionCache.lookupOrCompute
+  - UnixSocketDaemon.startScoped
 services:
   - "@harness/gates/WorkspaceFs"
   - "@harness/gates/HarnessSubprocessRunner"
   - "@harness/gates/ActiveMutantContext"
+  - "@harness/service/AstGateCachePort"
+  - "@harness/service/DecisionCachePort"
+  - "@harness/service/UnixSocketDaemonPort"
 errors:
   - WorkspaceFsError
   - HarnessSubprocessError
   - SelfDogfoodingViolationError
+  - DaemonServerError
 ---
 
 # SPEC-0012 · Five-Tier Hexagonal Harness Package Topology and Pure Contract-Service Split
@@ -77,6 +94,17 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | REQ-2.2 | Unwanted behaviour | **If** a target `WorkspaceFilePath` passed to `WorkspaceFs.statAndReadAll` fails to stat or read due to an OS I/O error, **then** the `WorkspaceFs.statAndReadAll` use-case **shall** fail with a typed `WorkspaceFsError`.                     | `WorkspaceFsError`             | `UnitTest`   |
 | REQ-2.3 | Unwanted behaviour | **If** a subprocess invoked through `HarnessSubprocess.execChecked` exits with a non-zero status code, **then** the `HarnessSubprocess.execChecked` use-case **shall** fail with a typed `HarnessSubprocessError` from `@harness/contract`.    | `HarnessSubprocessError`       | `UnitTest`   |
 | REQ-2.4 | Unwanted behaviour | **If** `GatePluginRunner.evaluateAll` evaluates files containing self-dogfooding violations with `failOnViolation` enabled, **then** the `GatePluginRunner.evaluateAll` use-case **shall** fail with a typed `SelfDogfoodingViolationError`.  | `SelfDogfoodingViolationError` | `UnitTest`   |
+
+### 3 · Native Effect v4 Infrastructure Adapters, Scoped Caches, and Daemon Lifecycle
+
+**Source (`harness:ADR-0013`):** `@harness/infra` (`type:infra`) must provide live Effect v4 `NodeServices.layer`, `ScopedCache`, `SynchronizedRef`, and `Effect.acquireRelease` adapters behind `@harness/service` ports (`AstGateCachePort`, `DecisionCachePort`, `UnixSocketDaemonPort`) so non-infra `libs/harness/*` packages remain free of `node:*` imports and global mutable caches.
+
+| ID      | Pattern            | Requirement                                                                                                                                                                                                                                   | Effect Symbol                    | Verification |
+| :------ | :----------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------- | :----------- |
+| REQ-3.1 | Event-driven       | **When** `AstGateCache.evaluateCached` is invoked with a batch of `AstGateFileBatchInput` items, the `AstGateCache.evaluateCached` use-case **shall** yield `AstGateCachePort` from `R` and return an `AstGateEvaluationReport` reusing cached file digests across invocations. | `AstGateCache.evaluateCached`    | `UnitTest`   |
+| REQ-3.2 | Event-driven       | **When** `DecisionCache.lookupOrCompute` is invoked with a `DecisionCacheKey` and computation effect, the `DecisionCache.lookupOrCompute` use-case **shall** yield `DecisionCachePort` from `R` and memoize the serialized payload within the scoped cache. | `DecisionCache.lookupOrCompute`  | `UnitTest`   |
+| REQ-3.3 | Event-driven       | **When** `UnixSocketDaemon.startScoped` is invoked within an Effect `Scope`, the `UnixSocketDaemon.startScoped` use-case **shall** yield `UnixSocketDaemonPort` from `R`, bind a `0600` Unix socket, and remove the socket file upon scope finalization. | `UnixSocketDaemon.startScoped`   | `UnitTest`   |
+| REQ-3.4 | Unwanted behaviour | **If** binding or hardening the Unix socket in `UnixSocketDaemon.startScoped` fails, **then** the `UnixSocketDaemon.startScoped` use-case **shall** fail with a typed `DaemonServerError`. | `DaemonServerError`              | `UnitTest`   |
 
 ## Assumptions
 

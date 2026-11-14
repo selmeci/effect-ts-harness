@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Layer, type Scope } from "effect"
+import { Effect, Layer, Result, type Scope } from "effect"
+import * as nodeFs from "node:fs"
 import { existsSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -19,7 +20,7 @@ import { BINDING_PLATFORM_PROXY_TOKEN } from "@alchemy.run/cloudflare-runtime/co
 import type * as WorkerdConfig from "@alchemy.run/cloudflare-runtime/core/workerd/Config"
 import { Workerd, WorkerdLive } from "@alchemy.run/cloudflare-runtime/core/workerd/Workerd"
 import { makeWithDefaults } from "drizzle-orm/effect-d1"
-import { buildWorkspaceFnIndex, runWithTestTracer } from "@harness/ingest"
+import { buildWorkspaceFnIndex, runWithTestTracer, type SyncHostIo } from "@harness/ingest"
 import { AlbumId, GreetingMessage, PhotoId, PhotoName } from "@harness/sample-contract"
 import { uploadPhoto } from "@harness/sample-domain"
 import { PhotoRepo } from "@harness/sample-service"
@@ -278,9 +279,26 @@ describe("sample-infra", () => {
     it.effect("propagates traceparent header and links remote DO spans into test trace graph", () =>
       Effect.scoped(
         Effect.gen(function* () {
+const testHostIo: SyncHostIo = {
+  existsSync: (p) => nodeFs.existsSync(p),
+  isFileSync: (p) => Result.getOrElse(Result.try(() => nodeFs.statSync(p).isFile()), () => false),
+  isDirectorySync: (p) => Result.getOrElse(Result.try(() => nodeFs.statSync(p).isDirectory()), () => false),
+  isSymbolicLinkSync: (p) => Result.getOrElse(Result.try(() => nodeFs.lstatSync(p).isSymbolicLink()), () => false),
+  readTextSync: (p) => nodeFs.readFileSync(p, "utf8"),
+  readBytesSync: (p) => nodeFs.readFileSync(p),
+  writeTextSync: (p, c) => { nodeFs.writeFileSync(p, c, "utf8") },
+  appendTextSync: (p, c) => { nodeFs.appendFileSync(p, c, "utf8") },
+  mkdirRecursiveSync: (p, m) => { nodeFs.mkdirSync(p, m === undefined ? { recursive: true } : { recursive: true, mode: m }) },
+  renameSync: (a, b) => { nodeFs.renameSync(a, b) },
+  unlinkSync: (p) => { nodeFs.unlinkSync(p) },
+  readdirSync: (p) => nodeFs.readdirSync(p, { withFileTypes: true }).map((e) => ({ name: e.name, isFile: e.isFile(), isDirectory: e.isDirectory() })),
+  realpathSync: (p) => nodeFs.realpathSync(p),
+  execFileSync: () => ({ exitCode: 1, stdout: "", stderr: "unused in unit test" }),
+}
+
           const testId = "libs/sample/infra/test/index.test.ts::distributed traceparent correlation"
           const repoRoot = resolveRepoRoot(process.cwd())
-          const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
+          const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, testHostIo)
 
           const d1 = yield* createWorkerdD1Database
           const drizzleDb = yield* makeWithDefaults({}).pipe(

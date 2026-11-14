@@ -1,6 +1,6 @@
-import * as fs from "node:fs"
 import * as path from "node:path"
 import { Lang, parse } from "@ast-grep/napi"
+import type { SyncHostIo } from "@harness/service"
 import { Schema } from "effect"
 import { Node, type Project, type SourceFile, SyntaxKind, VariableDeclarationKind } from "ts-morph"
 import { match } from "ts-pattern"
@@ -64,6 +64,7 @@ export interface GraphProjectorInput {
   readonly existingFiles?: Readonly<Record<string, string>> | undefined
   readonly verifyRoundTrip?: boolean | undefined
   readonly forceFailRuleIds?: ReadonlyArray<RewriteRuleId | string> | undefined
+  readonly hostIo?: SyncHostIo | undefined
 }
 
 export class GraphProjectorError extends Schema.TaggedError<GraphProjectorError>()(
@@ -83,13 +84,13 @@ export const sanitizeIdentifier = (raw: string): string => {
 }
 
 export const validateRelPath = (
-  repoRoot: string, rawPath: string, ruleId?: RewriteRuleId,
+  repoRoot: string, rawPath: string, ruleId?: RewriteRuleId, hostIo?: SyncHostIo,
 ): { readonly ok: true; readonly relPath: string } | { readonly ok: false; readonly error: GraphProjectorError } => {
   const trimmed = (rawPath ?? "").trim()
   if (trimmed.length === 0) {
     return { ok: false, error: new GraphProjectorError({ ...(ruleId !== undefined ? { ruleId } : {}), reason: "invalid-patch-target", message: "Target file path cannot be empty." }) }
   }
-  const rel = resolveContainedRelPath(repoRoot, trimmed)
+  const rel = resolveContainedRelPath(repoRoot, trimmed, hostIo)
   if (rel === null) {
     return { ok: false, error: new GraphProjectorError({ ...(ruleId !== undefined ? { ruleId } : {}), reason: "invalid-patch-target", message: `Target file path '${rawPath}' escapes workspace root '${repoRoot}'.` }) }
   }
@@ -122,15 +123,19 @@ export interface ProjectorContext {
 }
 
 export const readInitialFileContent = (
-  repoRoot: string, relPath: string, existingFiles?: Readonly<Record<string, string>>,
+  repoRoot: string,
+  relPath: string,
+  existingFiles?: Readonly<Record<string, string>>,
+  hostIo?: SyncHostIo,
 ): string | undefined => {
   if (existingFiles !== undefined) {
     if (existingFiles[relPath] !== undefined) return existingFiles[relPath]
     const absKey = path.resolve(repoRoot, relPath).replace(/\\/g, "/")
     if (existingFiles[absKey] !== undefined) return existingFiles[absKey]
   }
+  if (hostIo === undefined) return undefined
   const fullPath = path.resolve(repoRoot, relPath)
-  return fs.existsSync(fullPath) ? fs.readFileSync(fullPath, "utf8") : undefined
+  return hostIo.existsSync(fullPath) ? hostIo.readTextSync(fullPath) : undefined
 }
 
 export const getOrCreateSourceFile = (
