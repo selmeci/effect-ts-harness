@@ -1,10 +1,12 @@
-import { mkdtempSync, rmSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Schema } from "effect"
+import { Effect, Layer, Schema } from "effect"
+import * as DecisionModel from "effect/ai/DecisionModel"
 import { makeMockDecisionModelLayer } from "@harness/decision"
-import { buildHarnessGraph } from "@harness/graph"
+import { buildHarnessGraph, saveGraphSnapshot } from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 import { executeToolEffect } from "../src/server.js"
 
 describe("harness-mcp ontology tools", () => {
@@ -116,6 +118,9 @@ describe("harness-mcp ontology tools", () => {
       }),
     ),
     evaluatedPairs: Schema.Finite,
+    degraded: Schema.optional(Schema.Boolean),
+    degradedReason: Schema.optional(Schema.String),
+    evaluationError: Schema.optional(Schema.String),
     layerCounts: Schema.Struct({
       Motivation: Schema.Finite,
       Business: Schema.Finite,
@@ -379,6 +384,201 @@ status: accepted
       expect(cleanRes.clean).toBe(true)
       expect(cleanRes.summary.filesChecked).toBe(1)
       expect(cleanRes.summary.errors).toBe(0)
+    }),
+  )
+
+  it.effect("marks harness_ontology_check degraded and non-clean when decisionLayer fails", () =>
+    Effect.gen(function* () {
+      const conflictingDocs = [
+        {
+          id: "sample:SPEC-0001",
+          docPath: "libs/sample/docs/specs/0001.md",
+          status: "accepted" as const,
+          markdown: `---
+id: sample:SPEC-0001
+title: Sample Gallery
+status: accepted
+---
+
+# Sample Gallery
+
+| ID | Pattern | Requirement | Effect Symbol | Verification |
+|---|---|---|---|---|
+| REQ-1.1 | Event-driven | When upload is submitted, the system shall approve photo upload. | Sample.uploadPhoto | test |
+| REQ-1.2 | Event-driven | When upload is submitted, the system shall reject photo upload. | Sample.uploadPhoto | test |
+`,
+        },
+      ]
+
+      const failingLayer = Layer.effect(
+        DecisionModel.DecisionModel,
+        DecisionModel.make({
+          decide: () => Effect.die("LLM timeout"),
+        }),
+      )
+
+      const raw = yield* executeToolEffect(
+        "harness_ontology_check",
+        { scope: "sample" },
+        {
+          graph,
+          governanceDocs: conflictingDocs,
+          decisionLayer: failingLayer,
+        },
+      )
+
+      const res = decodeCheckResult(raw)
+      expect(res.clean).toBe(false)
+      expect(res.degraded).toBe(true)
+      expect(res.evaluationError).toContain("DecisionModel")
+    }),
+  )
+
+  it.effect("marks harness_ontology_check degraded and non-clean when graph snapshot is corrupt", () =>
+    Effect.gen(function* () {
+      const tmpDir = mkdtempSync(join(tmpdir(), "harness-mcp-corrupt-graph-"))
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          rmSync(tmpDir, { recursive: true, force: true })
+        }),
+      )
+      mkdirSync(join(tmpDir, ".harness"), { recursive: true })
+      writeFileSync(join(tmpDir, ".harness", "graph-snapshot.json"), "{not valid json", "utf8")
+
+      const raw = yield* executeToolEffect(
+        "harness_ontology_check",
+        { scope: "sample" },
+        {
+          repoRoot: tmpDir,
+          governanceDocs: [],
+          decisionLayer: makeMockDecisionModelLayer(),
+        },
+      )
+
+      const res = decodeCheckResult(raw)
+      expect(res.clean).toBe(false)
+      expect(res.degraded).toBe(true)
+      expect(typeof res.evaluationError).toBe("string")
+    }),
+  )
+
+  it.effect("marks harness_ontology_check degraded and non-clean when graph snapshot is missing", () =>
+    Effect.gen(function* () {
+      const tmpDir = mkdtempSync(join(tmpdir(), "harness-mcp-missing-graph-"))
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          rmSync(tmpDir, { recursive: true, force: true })
+        }),
+      )
+
+      const raw = yield* executeToolEffect(
+        "harness_ontology_check",
+        { scope: "sample" },
+        {
+          repoRoot: tmpDir,
+          governanceDocs: [],
+          decisionLayer: makeMockDecisionModelLayer(),
+        },
+      )
+
+      const res = decodeCheckResult(raw)
+      expect(res.clean).toBe(false)
+      expect(res.degraded).toBe(true)
+      expect(res.degradedReason).toBe("missing-graph-snapshot")
+    }),
+  )
+
+  it.effect("marks harness_ontology_check degraded when recorded graph-head.json exists but git HEAD is unavailable", () =>
+    Effect.gen(function* () {
+      const tmpDir = mkdtempSync(join(tmpdir(), "harness-mcp-no-git-head-"))
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          rmSync(tmpDir, { recursive: true, force: true })
+        }),
+      )
+      mkdirSync(join(tmpDir, ".harness"), { recursive: true })
+      saveGraphSnapshot(graph, join(tmpDir, ".harness", "graph-snapshot.json"), nodeSyncHostIo)
+      writeFileSync(
+        join(tmpDir, ".harness", "graph-head.json"),
+        JSON.stringify({ headSha: "deadbeef", gitBranch: "main", updatedAt: "2026-01-01T00:00:00Z" }),
+        "utf8",
+      )
+
+      const raw = yield* executeToolEffect(
+        "harness_ontology_check",
+        { scope: "sample" },
+        {
+          repoRoot: tmpDir,
+          governanceDocs: [],
+          decisionLayer: makeMockDecisionModelLayer(),
+        },
+      )
+
+      const res = decodeCheckResult(raw)
+      expect(res.clean).toBe(false)
+      expect(res.degraded).toBe(true)
+      expect(res.degradedReason).toBe("git-head-unavailable")
+    }),
+  )
+
+  it.effect("F-8.1: harness_ontology_why and harness_ontology_impact surface degraded: true on missing snapshot", () =>
+    Effect.gen(function* () {
+      const tmpDir = mkdtempSync(join(tmpdir(), "harness-mcp-ontology-degraded-"))
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          rmSync(tmpDir, { recursive: true, force: true })
+        }),
+      )
+
+      const whyRes = (yield* executeToolEffect(
+        "harness_ontology_why",
+        { symbolOrSpan: "PhotoRepo", repoRoot: tmpDir },
+        { repoRoot: tmpDir },
+      )) as { readonly degraded: boolean; readonly degradedReason?: string }
+      expect(whyRes.degraded).toBe(true)
+      expect(whyRes.degradedReason).toBe("missing-graph-snapshot")
+
+      const impactRes = (yield* executeToolEffect(
+        "harness_ontology_impact",
+        { symbolOrSpan: "PhotoRepo", repoRoot: tmpDir },
+        { repoRoot: tmpDir },
+      )) as { readonly degraded: boolean; readonly degradedReason?: string }
+      expect(impactRes.degraded).toBe(true)
+      expect(impactRes.degradedReason).toBe("missing-graph-snapshot")
+    }),
+  )
+
+  it.effect("fails closed with degradedReason=unreadable-governance-docs when governance doc cannot be read", () =>
+    Effect.gen(function* () {
+      if (typeof process.getuid === "function" && process.getuid() === 0) return
+      const tmpDir = mkdtempSync(join(tmpdir(), "harness-mcp-unreadable-doc-"))
+      const adrDir = join(tmpDir, "docs", "adr")
+      const adrPath = join(adrDir, "ADR-0001.md")
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          if (existsSync(adrPath)) chmodSync(adrPath, 0o644)
+          rmSync(tmpDir, { recursive: true, force: true })
+        }),
+      )
+      mkdirSync(adrDir, { recursive: true })
+      writeFileSync(adrPath, "# ADR-0001\n", "utf8")
+      chmodSync(adrPath, 0o000)
+
+      const raw = yield* executeToolEffect(
+        "harness_ontology_check",
+        { repoRoot: tmpDir },
+        {
+          repoRoot: tmpDir,
+          graph,
+          decisionLayer: makeMockDecisionModelLayer(),
+        },
+      )
+      const res = decodeCheckResult(raw)
+      expect(res.clean).toBe(false)
+      expect(res.degraded).toBe(true)
+      expect(res.degradedReason).toBe("unreadable-governance-docs")
+      expect(res.evaluationError).toContain("Unreadable governance docs:")
+      expect(res.findings.some((f) => f.kind === "unreadable-workspace-file")).toBe(true)
     }),
   )
 })

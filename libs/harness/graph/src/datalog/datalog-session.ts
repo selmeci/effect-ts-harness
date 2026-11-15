@@ -10,7 +10,8 @@ import {
 import { Context, Effect, Layer, Semaphore } from "effect"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
-import { runGraphInferencePipeline } from "./stratum-3-completion-and-holes.js"
+import { runGraphInferencePipeline, runGraphInferenceSync } from "./stratum-3-completion-and-holes.js"
+export { runGraphInferenceSync }
 import {
   type DatalogFileDeltaResult,
   type DatalogFilePath,
@@ -24,7 +25,6 @@ import {
   type SemanticEdgePriors,
   getEdgeKey,
   getNodeKey,
-  isEntityNode,
   isRelationNode,
 } from "../model.js"
 
@@ -184,12 +184,33 @@ const mergeFileSubgraphIntoWorkspace = (
     const key = getNodeKey(node)
     const file = getEntityNodeFilePath(node)
     if (matchesFilePath(file, normalizedTarget)) {
-      if (isEntityNode(node)) {
-        removedEntityKeys.add(key)
-      } else if (isRelationNode(node)) {
-        removedRelationIds.add(node.relationId)
-        removedRelationIds.add(key)
-      }
+      match(node)
+        .with(
+          { _tag: "EffectFn" },
+          { _tag: "ServiceTag" },
+          { _tag: "ServiceLayer" },
+          { _tag: "TaggedError" },
+          { _tag: "SchemaDef" },
+          { _tag: "VitestCase" },
+          { _tag: "PatternDoc" },
+          { _tag: "AdrDoc" },
+          { _tag: "EarsSpec" },
+          () => {
+            removedEntityKeys.add(key)
+          },
+        )
+        .with(
+          { _tag: "EffectSignature" },
+          { _tag: "LayerFlow" },
+          { _tag: "TraceabilityTuple" },
+          { _tag: "HttpEndpointTuple" },
+          { _tag: "MigrationTuple" },
+          (rel) => {
+            removedRelationIds.add(rel.relationId)
+            removedRelationIds.add(key)
+          },
+        )
+        .exhaustive()
       continue
     }
     keptNodes.set(key, node)

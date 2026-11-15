@@ -1,10 +1,8 @@
-import { execFileSync } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
-import { Effect, Layer, Option } from "effect"
+import { Cause, Duration, Effect } from "effect"
 import * as Graph from "effect/Graph"
-import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
+import { isPureInterruptCause } from "@harness/contract"
 import { checkPlanStepCoverage, triageFailure } from "@harness/decision"
 import {
   buildSessionReport,
@@ -13,37 +11,32 @@ import {
   decideOntologyInvariants,
   decideSpanBudgets,
   diffPlanAndImplGraphs,
-  DstErrorTag,
   DstExecutionTier,
-  DstMethodName,
-  DstServiceTag,
   DstStepCount,
-  type DstTargetServiceMethod as DstTargetMethodSpec,
-  loadGovernanceDocsFromDisk,
+  loadGovernanceDocsChecked,
   parseDstSeedEnv,
   readFrictionEvents,
   readTelemetryEvents,
-  resolveOmnigraphTaskBranches,
   runDstSeedSuite,
-  writeGraphHeadMeta,
   writeSessionReportFiles,
   writeVerifyStamp,
 } from "@harness/gates"
 import {
   checkEffectGraph,
-  diffOmnigraphBranches,
   extractGraphViaCompilerOverlay,
   extractTypeGraph,
   findTestsReaching,
   type GraphSnapshotError,
   type HarnessGraph,
   loadGraphSnapshotEffect,
-  mergeOmnigraphBranch,
-  OmnigraphSync,
+  makeOmnigraphSyncLayer,
+  makeTsCompilerOverlayLayer,
+  resolveOmnigraphTaskBranches,
   saveGraphSnapshot,
   syncToOmnigraphAndSnapshot,
-  TsCompilerOverlayServiceLive,
+  writeGraphHeadMeta,
 } from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 import { buildWorkspaceFnIndex } from "@harness/ingest"
 import {
   type CliEnv,
@@ -54,21 +47,32 @@ import {
   formatSubprocessError,
   isIsolatedExternalWorkspace,
   isRootConfigOrSharedCoreChange,
+  makeReadStdinEffect,
   recordFriction,
   recordTelemetry,
   resolveClusterRepoRoot,
+  resolveDecisionModelLayer,
   resolveModifiedFilesSinceStampOrHead,
   resolveNxAffectedArgs,
   tryQueryWarmDaemonSocket,
 } from "./daemon-and-omnigraph.service.js"
+import { syncOmnigraphOnDone } from "./done-omnigraph-helpers.js"
+import {
+  detectAntigravityHookPayload,
+  hasAntigravityFormat,
+  makeDoneBlockResult,
+} from "./hook-format.js"
 import {
   decodeStopHookStdin,
-  hasVerifiedSinceLastMutation,
-  isReadOnlyStopTurn,
+  inspectTranscriptSessionReadOnly,
   isSubagentStopContext,
   type StopHookStdin,
 } from "./stop-hook-and-transcript.js"
-import { readRecordedSpans, runDeltaAstAndPluginGates } from "./verify-delta-gates.js"
+import {
+  buildDstTargetsFromGraph,
+  readRecordedSpans,
+  runDeltaAstAndPluginGates,
+} from "./verify-delta-gates.js"
 
 const verifyFailureWithThrashing = (
   options: CliEnv | undefined,
@@ -78,39 +82,18 @@ const verifyFailureWithThrashing = (
   stderrMsg: string,
 ): CliResult => {
   recordFriction(options, { kind: "verify_failure", summary, detail })
-  const thrashing = checkLoopThrashing(readFrictionEvents(repoRoot))
+  const thrashing = checkLoopThrashing(readFrictionEvents(repoRoot, nodeSyncHostIo))
   if (thrashing.stuck && thrashing.escalationMessage !== null) {
     return { exitCode: 2, stdout: "", stderr: `${thrashing.escalationMessage}\n${stderrMsg}` }
   }
   return { exitCode: 1, stdout: "", stderr: stderrMsg }
 }
 
-const buildDstTargetsFromGraph = (graph: HarnessGraph): ReadonlyArray<DstTargetMethodSpec> => {
-  const dstTargets: Array<DstTargetMethodSpec> = []
-  for (const [, node] of Graph.nodes(graph.graph)) {
-    if (node._tag === "ServiceTag") {
-      dstTargets.push({
-        serviceTag: DstServiceTag.make(node.name || node.tagId),
-        methodName: DstMethodName.make("execute"),
-        declaredErrors: [DstErrorTag.make(`${node.name || node.tagId}Error`)],
-      })
-    }
-  }
-  if (dstTargets.length === 0) {
-    dstTargets.push({
-      serviceTag: DstServiceTag.make("HarnessVerificationService"),
-      methodName: DstMethodName.make("verify"),
-      declaredErrors: [DstErrorTag.make("HarnessVerificationError")],
-    })
-  }
-  return dstTargets
-}
-
 export const handleVerify = (
   options: CliEnv | undefined,
-  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
+    const decisionLayer = yield* resolveDecisionModelLayer(options?.decisionLayer)
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     if (process.env.HARNESS_USE_DAEMON === "1") {
       yield* tryQueryWarmDaemonSocket(repoRoot, "ping")
@@ -119,7 +102,7 @@ export const handleVerify = (
       process.env.HARNESS_REQUIRE_OLLAMA === "1" ||
       (!isIsolatedExternalWorkspace(repoRoot) &&
         options?.decisionLayer === undefined &&
-        process.env.VITEST === undefined)
+        options?.skipBackgroundDaemons !== true)
     if (requireOllama && !(yield* ensureLocalOllamaReady())) {
       return {
         exitCode: 1,
@@ -129,7 +112,7 @@ export const handleVerify = (
       }
     }
 
-    const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
+    const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, nodeSyncHostIo)
     const stubs = Array.from(fnIndex.bySpanName.values()).filter((fn) => fn.isStub)
     if (stubs.length > 0) {
       return {
@@ -139,19 +122,66 @@ export const handleVerify = (
       }
     }
 
-    const deltaFiles = resolveModifiedFilesSinceStampOrHead(repoRoot).filter(
-      (f) => (f.endsWith(".ts") || f.endsWith(".tsx")) && existsSync(join(repoRoot, f)),
-    )
-    const astGateFail = yield* runDeltaAstAndPluginGates(repoRoot, deltaFiles)
-    if (Option.isSome(astGateFail)) return astGateFail.value
+    const modifiedResult = resolveModifiedFilesSinceStampOrHead(repoRoot)
+    const deltaFilesOutcome = match(modifiedResult)
+      .with({ _tag: "GitFailed" }, ({ reason }) => ({
+        _tag: "GitFailed" as const,
+        reason,
+      }))
+      .with({ _tag: "Resolved" }, ({ files }) => ({
+        _tag: "Resolved" as const,
+        files: files.filter(
+          (f) =>
+            (f.endsWith(".ts") || f.endsWith(".tsx")) &&
+            nodeSyncHostIo.existsSync(join(repoRoot, f)),
+        ),
+      }))
+      .exhaustive()
+    const astGateFail = yield* runDeltaAstAndPluginGates(repoRoot, deltaFilesOutcome)
+    const astGateResult = match(astGateFail)
+      .with({ _tag: "Some" }, ({ value }) => value)
+      .with({ _tag: "None" }, () => undefined)
+      .exhaustive()
+    if (astGateResult !== undefined) return astGateResult
+    const deltaFiles = match(deltaFilesOutcome)
+      .with({ _tag: "Resolved" }, ({ files }) => files)
+      .with({ _tag: "GitFailed" }, () => [] as ReadonlyArray<string>)
+      .exhaustive()
 
     const graph = yield* extractGraphViaCompilerOverlay({ repoRoot }).pipe(
-      Effect.provide(TsCompilerOverlayServiceLive),
-      Effect.catchTag("TsCompilerOverlayError", () => extractTypeGraph({ repoRoot })),
+      Effect.provide(makeTsCompilerOverlayLayer(nodeSyncHostIo)),
+      Effect.catchTag("TsCompilerOverlayError", (err) =>
+        Effect.gen(function* () {
+          process.stderr.write(
+            `[harness:verify] Warning: TsCompilerOverlayService failed (${err.reason}); falling back to extractTypeGraph.\n`,
+          )
+          return yield* extractTypeGraph({ repoRoot, hostIo: nodeSyncHostIo })
+        }),
+      ),
     )
     const graphStubs: Array<string> = []
     for (const [, node] of Graph.nodes(graph.graph)) {
-      if (node._tag === "EffectFn" && node.isStub) graphStubs.push(node.spanName)
+      match(node)
+        .with({ _tag: "EffectFn" }, (n) => {
+          if (n.isStub) graphStubs.push(n.spanName)
+        })
+        .with(
+          { _tag: "ServiceTag" },
+          { _tag: "ServiceLayer" },
+          { _tag: "TaggedError" },
+          { _tag: "SchemaDef" },
+          { _tag: "VitestCase" },
+          { _tag: "PatternDoc" },
+          { _tag: "AdrDoc" },
+          { _tag: "EarsSpec" },
+          { _tag: "EffectSignature" },
+          { _tag: "LayerFlow" },
+          { _tag: "TraceabilityTuple" },
+          { _tag: "HttpEndpointTuple" },
+          { _tag: "MigrationTuple" },
+          () => undefined,
+        )
+        .exhaustive()
     }
     if (graphStubs.length > 0) {
       return {
@@ -175,7 +205,23 @@ export const handleVerify = (
       )
     }
 
-    const governanceDocs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot)
+    const checkedDocs =
+      options?.governanceDocs !== undefined
+        ? { docs: options.governanceDocs, findings: [] }
+        : loadGovernanceDocsChecked(repoRoot, nodeSyncHostIo)
+    if (checkedDocs.findings.length > 0) {
+      const msg = checkedDocs.findings
+        .map((f) => `[${f.kind}] ${f.location ?? f.nodeId}: ${f.message}`)
+        .join("\n")
+      return verifyFailureWithThrashing(
+        options,
+        repoRoot,
+        checkedDocs.findings[0]?.kind ?? "governance-doc-read-failed",
+        msg,
+        `Verification failed: unreadable governance docs\n${msg}`,
+      )
+    }
+    const governanceDocs = checkedDocs.docs
     const ontologyInvariants = yield* decideOntologyInvariants({ graph, governanceDocs })
     if (!ontologyInvariants.clean) {
       const msg = ontologyInvariants.findings
@@ -190,11 +236,11 @@ export const handleVerify = (
       )
     }
 
-    const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
+    const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
     const snapshotPath = join(repoRoot, ".harness", "graph-snapshot.json")
     if (isIsolatedExternalWorkspace(repoRoot)) {
-      saveGraphSnapshot(graph, snapshotPath)
-      writeGraphHeadMeta(repoRoot)
+      saveGraphSnapshot(graph, snapshotPath, nodeSyncHostIo)
+      writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
       recordTelemetry(options, {
         surface: "cli",
         category: "graph_query",
@@ -211,10 +257,19 @@ export const handleVerify = (
         from: taskBranches.mainBranch,
         snapshotPath,
       }).pipe(
-        Effect.provide(OmnigraphSync.Live),
-        Effect.orElseSucceed(() => ({ syncedToOmnigraph: false, snapshotPath, error: undefined })),
+        Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
+        Effect.catchCause((cause) => {
+          if (isPureInterruptCause(cause)) return Effect.interrupt
+          return Effect.succeed({
+            syncedToOmnigraph: false,
+            snapshotPath,
+            error: Cause.pretty(cause),
+          })
+        }),
       )
-      writeGraphHeadMeta(repoRoot)
+      if (syncRes.syncedToOmnigraph) {
+        writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
+      }
       recordTelemetry(options, {
         surface: "cli",
         category: "graph_query",
@@ -232,7 +287,7 @@ export const handleVerify = (
       }
     }
 
-    if (!options?.skipSubprocessVerify && existsSync(join(repoRoot, "package.json"))) {
+    if (!options?.skipSubprocessVerify && nodeSyncHostIo.existsSync(join(repoRoot, "package.json"))) {
       const leafFastPathEligible =
         deltaFiles.length > 0 && !isRootConfigOrSharedCoreChange(deltaFiles)
       const scopedFiles = leafFastPathEligible ? deltaFiles : undefined
@@ -242,12 +297,18 @@ export const handleVerify = (
       const nxArgs = resolveNxAffectedArgs(repoRoot, ["verify"], scopedFiles)
       const subprocessErr = yield* Effect.try({
         try: () => {
-          execFileSync("pnpm", nxArgs, {
+          const res = nodeSyncHostIo.execFileSync("pnpm", nxArgs, {
             cwd: repoRoot,
-            stdio: "pipe",
             env: { ...process.env, CI: "true" },
           })
-          return null
+          return match(res)
+            .with({ _tag: "Exited" }, (exited) =>
+              exited.exitCode === 0 ? null : formatSubprocessError(exited),
+            )
+            .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, (err) =>
+              formatSubprocessError(err),
+            )
+            .exhaustive()
         },
         catch: (cause) => formatSubprocessError(cause),
       }).pipe(Effect.catch((msg) => Effect.succeed(msg || "Verification subprocess failed")))
@@ -320,7 +381,7 @@ export const handleVerify = (
                     stderr: `[GATE FAILURE] verify:span-budget\n${err.message}`,
                   }))
                   .with({ _tag: "Ok" }, () => {
-                    const stamp = writeVerifyStamp(repoRoot, taskBranches.implBranch, {
+                    const stamp = writeVerifyStamp(repoRoot, nodeSyncHostIo, taskBranches.implBranch, {
                       dstSeed: suite.initialSeed,
                       dstSeedsRun: suite.seedsRun,
                     })
@@ -340,7 +401,6 @@ const loadSnapshotPair = (
   initialPlan: HarnessGraph | undefined,
   initialImpl: HarnessGraph | undefined,
   isAntigravity: boolean,
-  blockDecision: string,
 ): Effect.Effect<
   | { readonly _tag: "Done"; readonly result: CliResult }
   | {
@@ -356,14 +416,14 @@ const loadSnapshotPair = (
     const planPath = join(repoRoot, ".harness", "plan-graph-snapshot.json")
     const implPath = join(repoRoot, ".harness", "graph-snapshot.json")
     if (
-      (initialPlan === undefined && !existsSync(planPath)) ||
-      (initialImpl === undefined && !existsSync(implPath))
+      (initialPlan === undefined && !nodeSyncHostIo.existsSync(planPath)) ||
+      (initialImpl === undefined && !nodeSyncHostIo.existsSync(implPath))
     ) {
       return { _tag: "Graphs" as const, planGraph: initialPlan, implGraph: initialImpl }
     }
 
     const loadOne = (path: string, label: string) =>
-      loadGraphSnapshotEffect(path).pipe(
+      loadGraphSnapshotEffect(path, nodeSyncHostIo).pipe(
         Effect.map((graph) => ({ _tag: "Ok" as const, graph })),
         Effect.catchTag("GraphSnapshotError", (err: GraphSnapshotError) =>
           Effect.gen(function* () {
@@ -389,22 +449,14 @@ const loadSnapshotPair = (
         const reason = `Corrupt plan graph snapshot at '${err.path}' [${err.reason}]: ${err.message}`
         return {
           _tag: "Done" as const,
-          result: {
-            exitCode: isAntigravity ? 0 : 1,
-            stdout: JSON.stringify({ decision: blockDecision, reason }),
-            stderr: `[GATE FAILURE] done:plan-graph-snapshot\n${reason}`,
-          },
+          result: makeDoneBlockResult(isAntigravity, reason, "[GATE FAILURE] done:plan-graph-snapshot\n"),
         }
       })
       .with({ implLoad: { _tag: "Err" } }, ({ implLoad: { err } }) => {
         const reason = `Corrupt implementation graph snapshot at '${err.path}' [${err.reason}]: ${err.message}`
         return {
           _tag: "Done" as const,
-          result: {
-            exitCode: isAntigravity ? 0 : 1,
-            stdout: JSON.stringify({ decision: blockDecision, reason }),
-            stderr: `[GATE FAILURE] done:impl-graph-snapshot\n${reason}`,
-          },
+          result: makeDoneBlockResult(isAntigravity, reason, "[GATE FAILURE] done:impl-graph-snapshot\n"),
         }
       })
       .with({ planLoad: { _tag: "Ok" }, implLoad: { _tag: "Ok" } }, ({ planLoad, implLoad }) => ({
@@ -415,174 +467,167 @@ const loadSnapshotPair = (
       .exhaustive()
   })
 
+const parseDoneDeadlineMs = (): number => {
+  const raw = process.env.HARNESS_DONE_DEADLINE_MS
+  if (raw === undefined || raw.trim().length === 0) {
+    return 23_000
+  }
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 23_000
+}
+
 export const handleDone = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
-  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
-): Effect.Effect<CliResult> =>
-  Effect.gen(function* () {
+): Effect.Effect<CliResult> => {
+  const entryStartedAtMs = Date.now()
+  const totalDeadlineMs = parseDoneDeadlineMs()
+  let isAntigravity =
+    hasAntigravityFormat(argv) ||
+    (options?.stdin !== undefined && detectAntigravityHookPayload(options.stdin))
+  return Effect.gen(function* () {
+    const decisionLayer = yield* resolveDecisionModelLayer(options?.decisionLayer)
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-    const isAntigravity = argv.includes("--format=antigravity")
-    const blockDecision = isAntigravity ? "continue" : "block"
 
     let rawStdin = options?.stdin
-    if (rawStdin === undefined && !process.stdin.isTTY) {
-      rawStdin = yield* Effect.try({
-        try: () => readFileSync(0, "utf8"),
-        catch: () => "",
-      }).pipe(Effect.orElseSucceed(() => ""))
+    if (rawStdin === undefined && process.stdin.isTTY !== true) {
+      const stdinTimeoutMs = Math.min(options?.stdinTimeoutMs ?? 4_000, Math.max(20, totalDeadlineMs))
+      const stdinRes = yield* Effect.result(
+        makeReadStdinEffect({
+          timeoutMs: stdinTimeoutMs,
+          maxBytes: options?.stdinMaxBytes,
+        }),
+      )
+      const stdinErrResult = match(stdinRes)
+        .with({ _tag: "Success" }, ({ success }) => {
+          rawStdin = success
+          if (detectAntigravityHookPayload(success)) {
+            isAntigravity = true
+            options?.hookStdinTracker?.markAntigravityDetected()
+          }
+          return undefined
+        })
+        .with({ _tag: "Failure" }, ({ failure }) => {
+          const reason = `done: failed or timed out reading Stop hook stdin (${failure.reason})`
+          return makeDoneBlockResult(isAntigravity, reason)
+        })
+        .exhaustive()
+      if (stdinErrResult !== undefined) {
+        return stdinErrResult
+      }
+    }
+    if (rawStdin !== undefined && rawStdin.trim().length === 0) {
+      return makeDoneBlockResult(isAntigravity, "done: empty Stop hook stdin payload")
     }
     let decodedStdin: StopHookStdin | undefined
-    if (rawStdin) {
+    if (rawStdin !== undefined && rawStdin.trim().length > 0) {
+      isAntigravity = isAntigravity || detectAntigravityHookPayload(rawStdin)
       const decoded = decodeStopHookStdin(rawStdin)
-      if (Option.isSome(decoded)) {
-        decodedStdin = decoded.value
-        if (decoded.value.fullyIdle === false) {
-          return { exitCode: 0, stdout: "", stderr: "", telemetryDetail: "fullyIdle=false" }
-        }
+      const earlyResult = match(decoded)
+        .with({ _tag: "Some" }, ({ value }) => {
+          decodedStdin = value
+          return value.fullyIdle === false
+            ? ({ exitCode: 0, stdout: "", stderr: "", telemetryDetail: "fullyIdle=false" } satisfies CliResult)
+            : undefined
+        })
+        .with({ _tag: "None" }, () =>
+          makeDoneBlockResult(isAntigravity, "done: malformed Stop hook stdin JSON payload"),
+        )
+        .exhaustive()
+      if (earlyResult !== undefined) {
+        return earlyResult
       }
     }
 
-    // 1. Subagent bypass
-    if (isSubagentStopContext(repoRoot, decodedStdin)) {
-      return {
-        exitCode: 0,
-        stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "",
-        stderr: "",
-        telemetryDetail: "subagent=true",
+    const blockDecision = isAntigravity ? "continue" : "block"
+    const verificationEffect = Effect.gen(function* () {
+      // 1. Subagent bypass
+      if (isSubagentStopContext(repoRoot, decodedStdin)) {
+        return { exitCode: 0, stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "", stderr: "", telemetryDetail: "subagent=true" }
       }
-    }
-
-    // 2. Read-only turn bypass
-    if (isReadOnlyStopTurn(decodedStdin)) {
-      return {
-        exitCode: 0,
-        stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "",
-        stderr: "",
-        telemetryDetail: "readOnly=true",
+      // 2. Read-only turn bypass
+      const readOnlyInspection = inspectTranscriptSessionReadOnly(decodedStdin)
+      const corruptTranscriptNote = match(readOnlyInspection)
+        .with({ _tag: "ReadOnly" }, () => "readOnly" as const)
+        .with({ _tag: "Mutating" }, { _tag: "Unavailable" }, () => undefined)
+        .with({ _tag: "Corrupt" }, ({ reason }) => {
+          process.stderr.write(`[harness:done] ${reason}\n`)
+          return reason
+        })
+        .exhaustive()
+      if (corruptTranscriptNote === "readOnly") {
+        return { exitCode: 0, stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "", stderr: "", telemetryDetail: "readOnly=true" }
       }
-    }
-
-    // 3. Verify stamp check
-    const stampCheck = checkVerifyStamp(repoRoot)
-    if (!stampCheck.valid) {
-      if (hasVerifiedSinceLastMutation(decodedStdin)) {
-        return {
-          exitCode: 0,
-          stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "",
-          stderr: "",
-          telemetryDetail: "completed",
-        }
+      const appendTranscriptNote = (reason: string): string =>
+        corruptTranscriptNote !== undefined ? `${reason} (${corruptTranscriptNote})` : reason
+      const transcriptStderr = corruptTranscriptNote !== undefined ? `[harness:done] ${corruptTranscriptNote}` : ""
+      // 3. Verify stamp check
+      const stampCheck = checkVerifyStamp(repoRoot, nodeSyncHostIo)
+      if (!stampCheck.valid) {
+        return { exitCode: 0, stdout: JSON.stringify({ decision: blockDecision, reason: appendTranscriptNote(stampCheck.reason) }), stderr: transcriptStderr }
       }
-      return {
-        exitCode: 0,
-        stdout: JSON.stringify({ decision: blockDecision, reason: stampCheck.reason }),
-        stderr: "",
-      }
-    }
 
-    const snapshotOutcome = yield* loadSnapshotPair(
-      repoRoot,
-      options?.planGraph,
-      options?.implGraph,
-      isAntigravity,
-      blockDecision,
-    )
+      const withTranscriptStderr = (res: CliResult): CliResult =>
+        transcriptStderr.length === 0
+          ? res
+          : {
+              ...res,
+              stderr: res.stderr.length > 0 ? `${res.stderr}\n${transcriptStderr}` : transcriptStderr,
+            }
+      const snapshotOutcome = yield* loadSnapshotPair(repoRoot, options?.planGraph, options?.implGraph, isAntigravity)
 
-    return yield* match(snapshotOutcome)
-      .with({ _tag: "Done" }, ({ result }) => Effect.succeed(result))
-      .with({ _tag: "Graphs" }, ({ planGraph, implGraph }) =>
-        Effect.gen(function* () {
-          // 4. Plan vs implementation graph diff
-          if (planGraph && implGraph) {
-            const diff = diffPlanAndImplGraphs(planGraph, implGraph)
-            if (!diff.ok) {
-              return {
-                exitCode: 0,
-                stdout: JSON.stringify({ decision: blockDecision, reason: diff.reasons.join("; ") }),
-                stderr: "",
+      return yield* match(snapshotOutcome)
+        .with({ _tag: "Done" }, ({ result }) => Effect.succeed(withTranscriptStderr(result)))
+        .with({ _tag: "Graphs" }, ({ planGraph, implGraph }) =>
+          Effect.gen(function* () {
+            if (planGraph && implGraph) {
+              const diff = diffPlanAndImplGraphs(planGraph, implGraph)
+              if (!diff.ok) {
+                return { exitCode: 0, stdout: JSON.stringify({ decision: blockDecision, reason: appendTranscriptNote(diff.reasons.join("; ")) }), stderr: transcriptStderr }
               }
             }
-          }
-
-          // 5. Plan step coverage
-          if (options?.planSteps && options.planSteps.length > 0) {
-            for (const step of options.planSteps) {
-              const stepRes = yield* checkPlanStepCoverage(step).pipe(Effect.provide(decisionLayer))
-              if (!stepRes.covered) {
-                return {
-                  exitCode: 0,
-                  stdout: JSON.stringify({ decision: blockDecision, reason: stepRes.reason }),
-                  stderr: "",
+            if (options?.planSteps && options.planSteps.length > 0) {
+              for (const step of options.planSteps) {
+                const stepRes = yield* checkPlanStepCoverage(step).pipe(Effect.provide(decisionLayer))
+                if (!stepRes.covered) {
+                  return { exitCode: 0, stdout: JSON.stringify({ decision: blockDecision, reason: appendTranscriptNote(stepRes.reason) }), stderr: transcriptStderr }
                 }
               }
             }
-          }
+            const omnigraphFailure = yield* syncOmnigraphOnDone(repoRoot, options, isAntigravity, blockDecision)
+            if (omnigraphFailure !== undefined) return withTranscriptStderr(omnigraphFailure)
 
-          // 6. Omnigraph sync & branch merge
-          if (isIsolatedExternalWorkspace(repoRoot)) {
-            writeGraphHeadMeta(repoRoot)
-            recordTelemetry(options, {
-              surface: isAntigravity ? "hook" : "cli",
-              category: "graph_query",
-              toolName: "omnigraph:merge-main",
-              outcome: "ok",
-              durationMs: 1,
-              engineSource: "local",
-            })
-          } else {
-            yield* ensureLocalOmnigraphReady(repoRoot)
-            const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
-            const taskBranches = resolveOmnigraphTaskBranches(repoRoot)
-            yield* diffOmnigraphBranches({
-              repoRoot: clusterRepoRoot,
-              source: taskBranches.implBranch,
-              target: taskBranches.planBranch,
-            }).pipe(Effect.provide(OmnigraphSync.Live), Effect.orElseSucceed(() => Option.none()))
-
-            const merged = yield* mergeOmnigraphBranch({
-              repoRoot: clusterRepoRoot,
-              source: taskBranches.implBranch,
-              target: taskBranches.mainBranch,
-              cleanupBranches: [taskBranches.implBranch, taskBranches.planBranch],
-            }).pipe(Effect.provide(OmnigraphSync.Live), Effect.orElseSucceed(() => false))
-            writeGraphHeadMeta(repoRoot)
-            recordTelemetry(options, {
-              surface: isAntigravity ? "hook" : "cli",
-              category: "graph_query",
-              toolName: "omnigraph:merge-main",
-              outcome: merged ? "ok" : "fail",
-              durationMs: 1,
-              engineSource: merged ? "omnigraph" : "memory-fallback",
-            })
-            if (!merged) {
-              return {
-                exitCode: 0,
-                stdout: JSON.stringify({
-                  decision: blockDecision,
-                  reason: `Omnigraph branch merge (${taskBranches.implBranch} -> ${taskBranches.mainBranch}) failed`,
-                }),
-                stderr: "",
-              }
+            if (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) {
+              const report = buildSessionReport({
+                events: readTelemetryEvents(repoRoot, nodeSyncHostIo),
+                frictionEvents: readFrictionEvents(repoRoot, nodeSyncHostIo),
+                stampValid: true,
+              })
+              writeSessionReportFiles(repoRoot, report, nodeSyncHostIo)
             }
-          }
+            return { exitCode: 0, stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "", stderr: transcriptStderr, telemetryDetail: "completed" }
+          }),
+        )
+        .exhaustive()
+    })
 
-          if (options?.repoRoot !== undefined || process.env.VITEST === undefined) {
-            const report = buildSessionReport({
-              events: readTelemetryEvents(repoRoot),
-              frictionEvents: readFrictionEvents(repoRoot),
-              stampValid: true,
-            })
-            writeSessionReportFiles(repoRoot, report)
-          }
-
-          return {
-            exitCode: 0,
-            stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "",
-            stderr: "",
-            telemetryDetail: "completed",
-          }
-        }),
+    const remainingDeadlineMs = Math.max(20, totalDeadlineMs - (Date.now() - entryStartedAtMs))
+    const timedResult = yield* verificationEffect.pipe(Effect.timeoutOption(Duration.millis(remainingDeadlineMs)))
+    return match(timedResult)
+      .with({ _tag: "Some" }, ({ value }) => value)
+      .with({ _tag: "None" }, () =>
+        makeDoneBlockResult(isAntigravity, `Stop hook verification exceeded internal deadline (${totalDeadlineMs}ms) — blocking premature termination.`),
       )
       .exhaustive()
-  })
+  }).pipe(
+    Effect.catchCause((cause) => {
+      if (isPureInterruptCause(cause)) {
+        return Effect.failCause(cause)
+      }
+      const pretty = Cause.pretty(cause)
+      process.stderr.write(`[harness:done] uncaught cause: ${pretty}\n`)
+      const reason = `done: uncaught error or defect (${pretty})`
+      return Effect.succeed(makeDoneBlockResult(isAntigravity, reason, `${pretty}\n`))
+    }),
+  )
+}

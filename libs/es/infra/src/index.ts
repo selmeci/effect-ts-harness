@@ -1,6 +1,5 @@
-import { Context, Effect, Layer } from "effect"
+import { type Layer } from "effect"
 import { SqlClient } from "effect/sql/SqlClient"
-import type { SqlError } from "effect/sql/SqlError"
 import * as SqliteClientModule from "@effect/sql-sqlite-do/SqliteClient"
 import * as SqliteMigrator from "@effect/sql-sqlite-do/SqliteMigrator"
 import {
@@ -9,6 +8,7 @@ import {
   initializeAggregateTables,
   isEventStreamUniqueConflict,
   loadAggregate,
+  makeAggregateMigratorLayer,
 } from "./aggregate.js"
 import {
   executeAggregateCommandAndSync,
@@ -20,6 +20,7 @@ import { DEFAULT_OUTBOX_BATCH_LIMIT, drainAggregateOutbox, relayAggregateOutbox 
 import {
   ingestPublishedEvent,
   initializeProjectorTables,
+  makeProjectorMigratorLayer,
   PROJECTOR_MIGRATIONS_TABLE,
   projectorCoreMigrations,
 } from "./projector.js"
@@ -39,6 +40,8 @@ export {
   initializeProjectorTables,
   isEventStreamUniqueConflict,
   loadAggregate,
+  makeAggregateMigratorLayer,
+  makeProjectorMigratorLayer,
   PROJECTOR_MIGRATIONS_TABLE,
   projectorCoreMigrations,
   queryAggregateReadModel,
@@ -50,38 +53,6 @@ export {
 
 const _makeSqliteClientLayer = (
   config: SqliteClientModule.SqliteClientConfig,
-): Layer.Layer<SqlClient> =>
-  Layer.effect(
-    SqlClient,
-    Effect.gen(function* () {
-      const services = yield* Layer.build(SqliteClientModule.layer(config))
-      return Context.get(services, SqlClient)
-    }),
-  )
+): Layer.Layer<SqlClient> => SqliteClientModule.layer(config)
 
-const _makeAggregateMigratorLayer = (
-  additionalMigrations?: Readonly<Record<string, Effect.Effect<void, SqlError, SqlClient>>>,
-): Layer.Layer<never, SqliteMigrator.MigrationError | SqlError, SqlClient> =>
-  SqliteMigrator.layer({
-    loader: SqliteMigrator.fromRecord({
-      ...aggregateCoreMigrations,
-      ...additionalMigrations,
-    }),
-  })
-
-const _makeProjectorMigratorLayer = (
-  additionalMigrations?: Readonly<Record<string, Effect.Effect<void, SqlError, SqlClient>>>,
-): Layer.Layer<never, SqliteMigrator.MigrationError | SqlError, SqlClient> =>
-  SqliteMigrator.layer({
-    loader: SqliteMigrator.fromRecord({
-      ...projectorCoreMigrations,
-      ...additionalMigrations,
-    }),
-    table: PROJECTOR_MIGRATIONS_TABLE,
-  })
-
-export {
-  _makeAggregateMigratorLayer as makeAggregateMigratorLayer,
-  _makeProjectorMigratorLayer as makeProjectorMigratorLayer,
-  _makeSqliteClientLayer as makeSqliteClientLayer,
-}
+export { _makeSqliteClientLayer as makeSqliteClientLayer }

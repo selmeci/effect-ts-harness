@@ -18,6 +18,9 @@ target_specs:
 
 # RFC-0001: Polymorphic Hypergraph & PERA Ontology Model over `effect/Graph` and Omnigraph (Without TypeDB)
 
+> [!NOTE]
+> **Data Layer Supersession (`harness:ADR-0008` / `harness:ADR-0013`):** All historical `drizzle-orm` / `drizzle-kit` references in this early RFC are **superseded and banned workspace-wide**. The workspace uses native Effect v4 SQL (`@effect/sql-d1`, `@effect/sql-sqlite-do`, `SqlClient.SqlClient`, `SqliteMigrator`, `Schema`) exclusively in `type:infra`.
+
 ## 1. Executive Summary
 
 This document proposes upgrading the graph core in `@harness/graph` from a legacy directed binary graph to a **pure typed polymorphic hypergraph built on the PERA (Polymorphic Entity-Relation-Attribute) model** with a **Clean-Slate / Zero Backward Compatibility** cutover—inspired by the type theory of **TypeDB 3.0**, but implemented **100% in-process in pure Effect-TS v4 (`R = never`)** over `effect/Graph` and synchronized to the local `@modernrelay/omnigraph` store.

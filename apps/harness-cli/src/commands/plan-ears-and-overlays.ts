@@ -1,7 +1,6 @@
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs"
 import { dirname, relative, resolve } from "node:path"
 import { Effect, Option } from "effect"
-import { match } from "ts-pattern"
+import { match, P } from "ts-pattern"
 import {
   classifyFileWrite,
   decideEarsSpecQuality,
@@ -22,6 +21,7 @@ import {
   normalizeConditionPrefix,
 } from "@harness/gates"
 import type { ShadowFileOverlay } from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 import type { CliResult } from "./daemon-and-omnigraph.service.js"
 
 export const checkPlanEarsConsistency = (
@@ -126,7 +126,9 @@ export const checkPlanEarsConsistency = (
 export const formatProjectionError = (err: unknown): string => {
   if (typeof err === "object" && err !== null) {
     const rec = err as Record<string, unknown>
-    const tag = typeof rec._tag === "string" ? rec._tag : undefined
+    const tag = match(Reflect.get(rec, "_tag"))
+      .with(P.string, (t) => t)
+      .otherwise(() => undefined)
     const reason = typeof rec.reason === "string" ? rec.reason : undefined
     const msg = typeof rec.message === "string" ? rec.message : undefined
     if (tag !== undefined && reason !== undefined) {
@@ -153,8 +155,8 @@ export const persistVerifiedOverlays = (
 }> =>
   Effect.gen(function* () {
     const canonicalRoot = resolve(repoRoot)
-    const realCanonicalRoot = existsSync(canonicalRoot)
-      ? realpathSync(canonicalRoot)
+    const realCanonicalRoot = nodeSyncHostIo.existsSync(canonicalRoot)
+      ? nodeSyncHostIo.realpathSync(canonicalRoot)
       : canonicalRoot
     const rejectedFiles: Array<{ readonly file: string; readonly reason: string }> = []
     for (const overlay of overlays) {
@@ -163,12 +165,23 @@ export const persistVerifiedOverlays = (
         rejectedFiles.push({ file: overlay.targetFile, reason: "Target path escapes workspace root." })
         continue
       }
+      if (nodeSyncHostIo.isSymbolicLinkSync(absTarget)) {
+        rejectedFiles.push({
+          file: overlay.targetFile,
+          reason: "Target file is a symbolic link.",
+        })
+        continue
+      }
       let checkDir = absTarget
-      while (!existsSync(checkDir) && checkDir !== canonicalRoot && dirname(checkDir) !== checkDir) {
+      while (
+        !nodeSyncHostIo.existsSync(checkDir) &&
+        checkDir !== canonicalRoot &&
+        dirname(checkDir) !== checkDir
+      ) {
         checkDir = dirname(checkDir)
       }
-      if (existsSync(checkDir)) {
-        const realExisting = realpathSync(checkDir)
+      if (nodeSyncHostIo.existsSync(checkDir)) {
+        const realExisting = nodeSyncHostIo.realpathSync(checkDir)
         const rel = relative(realCanonicalRoot, realExisting)
         if (rel.startsWith("..") || rel === "..") {
           rejectedFiles.push({
@@ -179,12 +192,15 @@ export const persistVerifiedOverlays = (
         }
       }
       const guardDecision = classifyFileWrite(overlay.targetFile)
-      if (guardDecision.verdict !== "allow") {
-        rejectedFiles.push({
-          file: overlay.targetFile,
-          reason: `File write verdict is '${guardDecision.verdict}': ${guardDecision.reason}`,
+      match(guardDecision.verdict)
+        .with("allow", () => undefined)
+        .with("deny", "ask", (verdict) => {
+          rejectedFiles.push({
+            file: overlay.targetFile,
+            reason: `File write verdict is '${verdict}': ${guardDecision.reason}`,
+          })
         })
-      }
+        .exhaustive()
     }
 
     if (rejectedFiles.length > 0) {
@@ -202,8 +218,8 @@ export const persistVerifiedOverlays = (
         try: () => {
           for (const overlay of overlays) {
             const absTarget = resolve(canonicalRoot, overlay.targetFile)
-            mkdirSync(dirname(absTarget), { recursive: true })
-            writeFileSync(absTarget, overlay.content, "utf-8")
+            nodeSyncHostIo.mkdirRecursiveSync(dirname(absTarget))
+            nodeSyncHostIo.writeTextSync(absTarget, overlay.content)
             writtenFiles.push(overlay.targetFile)
           }
         },

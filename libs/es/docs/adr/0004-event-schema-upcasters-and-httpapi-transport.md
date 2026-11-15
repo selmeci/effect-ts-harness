@@ -87,7 +87,7 @@ At the same time, exposing commands, strongly consistent single-aggregate local 
 ### Positive Consequences
 
 - Old `version: 1` payloads in `es_events` and `es_event_archive` remain untouched on disk and transparently decode into `version: 2` domain instances on load and rebuild.
-- Modifying any committed event version snapshot, leaving a newly added version unsnapshotted in `event-snapshots.json`, or adding a new version without a contiguous `EventUpcasterLink` fails `EventSchemaEvolution.verifyParity`, `EventSchemaEvolution.prepareUpdate`, and `libs/es/core/scripts/check-event-schemas.mjs`.
+- Modifying any committed event version snapshot, leaving a newly added version unsnapshotted in `event-snapshots.json`, or adding a new version without a contiguous `EventUpcasterLink` fails `EventSchemaEvolution.verifyParity`, `EventSchemaEvolution.prepareUpdate`, and `harness check-event-schemas`.
 - `AggregateApiSpec` (`makeAggregateApiTestHarness`) tests seeded streams, HTTP command responses, and appended events together, while `AtomHttpApi` verifies reactive client mutations and local/cross-aggregate queries.
 
 ### Negative Consequences and Trade-offs

@@ -8,45 +8,26 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from "@modelcontextprotocol/sdk/types.js"
-import { Cause, Effect, Logger, Schema } from "effect"
-import { match } from "ts-pattern"
+import { NodeServices } from "@effect/platform-node"
+import { Cause, Effect, Exit, Logger, ManagedRuntime, Schema } from "effect"
 import {
   type HarnessDaemonServerHandle,
-  resolveDaemonSocketPath,
   startHarnessDaemonServer,
 } from "./daemon/unix-socket-daemon.js"
+import { executeManagedMcpTool, makeMcpManagedRuntime } from "./managed-runtime.js"
 import {
-  type LspDiagnosticsReport,
-  runDefaultLspDiagnostics,
-} from "./tools/lsp-and-telemetry.tools.js"
-import {
-  isPathInsideRoot,
-  normalizeProjectPath,
-  ProjectPathEscapeError,
+  attachServerCloseRuntimeDisposal,
+  formatMcpToolExit,
   recordMcpToolTelemetry,
-  resolveDefaultRepoRoot,
   type ServerOptions,
   toMcpToolInputJsonSchema,
 } from "./tools/mcp-helpers.js"
-import type {
-  McpToolExecutionError,
-  McpToolHandler,
-  McpToolInputSchema,
-  McpToolPluginDescriptor,
-  McpToolRegistryShape,
-} from "./tools/tool-registry.js"
 import {
   buildLiveMcpToolDescriptors,
-  CANONICAL_MCP_TOOL_NAMES,
-  type DispatchMcpToolInput,
   dispatchMcpTool,
   makeLiveMcpToolRegistryLayer,
-  makeMcpToolRegistryLayer,
-  McpToolInputName,
-  McpToolName,
-  McpToolRegistry,
-  McpToolRegistryLive,
-  UnknownToolError,
+  type McpToolExecutionError,
+  type McpToolPluginDescriptor,
 } from "./tools/tool-registry.js"
 
 export {
@@ -58,16 +39,23 @@ export {
   resolveOmnigraphClusterDir,
   resolveOmnigraphTaskBranches,
   writeGraphHeadMeta,
-} from "@harness/gates"
-
+} from "@harness/graph"
+export { type HarnessDaemonServerHandle, resolveDaemonSocketPath, startHarnessDaemonServer } from "./daemon/unix-socket-daemon.js"
+export { executeManagedMcpTool, makeMcpMainLayer, makeMcpManagedRuntime } from "./managed-runtime.js"
+export { type LspDiagnosticsReport, runDefaultLspDiagnostics } from "./tools/lsp-and-telemetry.tools.js"
+export {
+  isPathInsideRoot,
+  normalizeProjectPath,
+  ProjectPathEscapeError,
+  recordMcpToolTelemetry,
+  resolveDefaultRepoRoot,
+  type ServerOptions,
+} from "./tools/mcp-helpers.js"
 export {
   buildLiveMcpToolDescriptors,
   CANONICAL_MCP_TOOL_NAMES,
   type DispatchMcpToolInput,
   dispatchMcpTool,
-  type HarnessDaemonServerHandle,
-  isPathInsideRoot,
-  type LspDiagnosticsReport,
   makeLiveMcpToolRegistryLayer,
   makeMcpToolRegistryLayer,
   type McpToolHandler,
@@ -78,20 +66,8 @@ export {
   McpToolRegistry,
   McpToolRegistryLive,
   type McpToolRegistryShape,
-  normalizeProjectPath,
-  ProjectPathEscapeError,
-  recordMcpToolTelemetry,
-  resolveDaemonSocketPath,
-  resolveDefaultRepoRoot,
-  runDefaultLspDiagnostics,
-  type ServerOptions,
-  startHarnessDaemonServer,
   UnknownToolError,
-}
-
-if (!("iterations" in globalThis)) {
-  Object.assign(globalThis, { iterations: 0 })
-}
+} from "./tools/tool-registry.js"
 
 export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
   toolName: string,
@@ -110,14 +86,9 @@ export const executeToolEffect = Effect.fn("HarnessMcp.executeTool")(function* (
   return result
 })
 
-export const executeTool = (
-  toolName: string,
-  args: Readonly<Record<string, unknown>>,
-  options?: ServerOptions,
-): Promise<unknown> => Effect.runPromise(executeToolEffect(toolName, args, options))
-
 export const createServer = (options?: ServerOptions): McpServer => {
   const server = new McpServer({ name: "harness-mcp", version: "0.0.0" })
+  const runtime = makeMcpManagedRuntime(options)
   const descriptors = buildLiveMcpToolDescriptors(options)
   const descriptorsByName: ReadonlyMap<string, McpToolPluginDescriptor> = new Map(
     descriptors.map((descriptor) => [descriptor.name, descriptor]),
@@ -142,39 +113,18 @@ export const createServer = (options?: ServerOptions): McpServer => {
       )
     }
     const rawArgs = request.params.arguments ?? {}
-    return Effect.runPromiseExit(
-      Schema.decodeUnknownEffect(Schema.toCodecJson(descriptor.inputSchema))(rawArgs).pipe(
-        Effect.flatMap((decodedArgs) => executeToolEffect(toolName, decodedArgs, options)),
-      ),
-    ).then((exit) =>
-      match(exit)
-        .with({ _tag: "Success" }, ({ value }) => ({
-          content: [{ type: "text" as const, text: JSON.stringify(value ?? null, null, 2) }],
-        }))
-        .with({ _tag: "Failure" }, ({ cause }) => {
-          if (Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)) {
-            return Promise.reject(
-              new McpError(ErrorCode.InternalError, `Tool '${toolName}' execution was interrupted`),
-            )
-          }
-          const squashed = Cause.squash(cause)
-          if (Schema.isSchemaError(squashed)) {
-            return Promise.reject(
-              new McpError(
-                ErrorCode.InvalidParams,
-                `Invalid arguments for tool '${toolName}': ${squashed.message}`,
-              ),
-            )
-          }
-          const message = squashed instanceof Error ? squashed.message : String(squashed)
-          return {
-            content: [{ type: "text" as const, text: message }],
-            isError: true,
-          }
-        })
-        .exhaustive(),
-    )
+    return runtime
+      .runPromiseExit(
+        Schema.decodeUnknownEffect(Schema.toCodecJson(descriptor.inputSchema))(rawArgs).pipe(
+          Effect.flatMap((decodedArgs) =>
+            executeManagedMcpTool({ toolName, args: decodedArgs }, options),
+          ),
+        ),
+      )
+      .then((exit) => formatMcpToolExit(toolName, exit))
   })
+
+  attachServerCloseRuntimeDisposal(server, runtime)
 
   return server
 }
@@ -182,6 +132,7 @@ export const createServer = (options?: ServerOptions): McpServer => {
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const server = createServer()
   const transport = new StdioServerTransport()
+  const cliRuntime = ManagedRuntime.make(NodeServices.layer)
   let daemonHandle: HarnessDaemonServerHandle | undefined = undefined
   let shuttingDown = false
   const daemonStartupPromise: Promise<HarnessDaemonServerHandle | undefined> =
@@ -225,16 +176,38 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
           )
         }),
       )
+      .then(() =>
+        cliRuntime.dispose().catch((err: unknown) => {
+          exitCode = 1
+          process.stderr.write(
+            `[harness-mcp] CLI runtime dispose error: ${err instanceof Error ? err.message : String(err)}\n`,
+          )
+        }),
+      )
       .finally(() => process.exit(exitCode))
   }
   process.once("SIGINT", () => shutdown(0))
   process.once("SIGTERM", () => shutdown(0))
-  void Effect.runPromise(Effect.tryPromise(() => server.connect(transport))).catch(
-    (err: unknown) => {
-      process.stderr.write(
-        `[harness-mcp] Fatal error: ${err instanceof Error ? err.message : String(err)}\n`,
-      )
-      shutdown(1)
-    },
-  )
+  process.stdin.once("end", () => shutdown(0))
+  process.stdin.once("close", () => shutdown(0))
+  void cliRuntime
+    .runPromiseExit(Effect.tryPromise(() => server.connect(transport)))
+    .then((exit) =>
+      Exit.match(exit, {
+        onFailure: (cause) => {
+          const squashed = Cause.squash(cause)
+          process.stderr.write(
+            `[harness-mcp] Fatal error: ${squashed instanceof Error ? squashed.message : String(squashed)}\n`,
+          )
+          shutdown(1)
+        },
+        onSuccess: () => {
+          const previousTransportOnClose = transport.onclose
+          transport.onclose = () => {
+            previousTransportOnClose?.()
+            shutdown(0)
+          }
+        },
+      }),
+    )
 }

@@ -1,4 +1,5 @@
 import { Effect } from "effect"
+import { match, P } from "ts-pattern"
 
 export type AdrLintFindingKind =
   | "adr-frontmatter-invalid"
@@ -127,22 +128,28 @@ const parseFrontmatter = (rawLines: ReadonlyArray<string>): ParsedFrontmatter | 
       const key = keyValMatch[1]!.trim()
       const rest = keyValMatch[2]!.trim()
 
-      if (rest.startsWith("[") && rest.endsWith("]")) {
-        const inner = rest.slice(1, -1).trim()
-        const items =
-          inner.length === 0
-            ? []
-            : inner
-                .split(",")
-                .map(stripQuotes)
-                .filter((s) => s.length > 0)
-        lists.set(key, items)
-      } else if (rest === "") {
-        lists.set(key, [])
-        currentListKey = key
-      } else {
-        scalars.set(key, stripQuotes(rest))
-      }
+      match(rest)
+        .with(
+          P.when((s) => s.startsWith("[") && s.endsWith("]")),
+          (s) => {
+            const inner = s.slice(1, -1).trim()
+            const items =
+              inner.length === 0
+                ? []
+                : inner
+                    .split(",")
+                    .map(stripQuotes)
+                    .filter((item) => item.length > 0)
+            lists.set(key, items)
+          },
+        )
+        .with("", () => {
+          lists.set(key, [])
+          currentListKey = key
+        })
+        .otherwise((s) => {
+          scalars.set(key, stripQuotes(s))
+        })
     }
   }
 
@@ -725,6 +732,3 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
     findings,
   } satisfies AdrDocLintReport)
 })
-
-export const lintAdrDocMarkdown = (docPath: string, markdown: string): AdrDocLintReport =>
-  Effect.runSync(decideAdrDocQuality({ docPath, markdown }))

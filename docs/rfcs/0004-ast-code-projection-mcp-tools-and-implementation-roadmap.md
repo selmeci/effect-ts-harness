@@ -24,6 +24,9 @@ target_specs:
 
 # RFC-0004: Bidirectional Projection $\Delta G \leftrightarrow \text{TypeScript AST}$ (`GraphProjector.decide`), MCP/CLI Interfaces & Rollout Plan
 
+> [!NOTE]
+> **Historical Tech-Stack Supersession:** Any references to `oxc-parser`, `sqlite-vec`, or `FTS5` in this RFC are **superseded** by the workspace's actual stack: TypeScript Compiler API (`ts` / `ts-morph`) + `@ast-grep/napi` + Omnigraph property graph (`@modernrelay/omnigraph-core`) + JSONL/manifest indexes.
+
 ## 1. Executive Summary
 
 Documents [RFC-0001](./0001-polymorphic-hypergraph-and-pera-ontology-model.md), [RFC-0002](./0002-declarative-datalog-inference-and-edge-completion.md), and [RFC-0003](./0003-algebraic-graph-rewriting-dpo-auto-repair-and-planning.md) define our polymorphic PERA hypergraph ($G_{\text{Levi}}$ over `effect/Graph`), stratified Datalog/Differential Dataflow engine (`GraphInfer.decide` over `@electric-sql/d2ts`), and Double-Pushout (DPO) algebraic graph rewriting engine (`GraphRewrite.decide`). One foundational engineering question remains:
@@ -110,10 +113,10 @@ $$W_{\text{shadow}} \;=\; W_{\text{disk}} \;\oplus\; \Delta W_{\text{RAM}}, \qqu
 
 1. **Pure In-Memory Projection ($\gamma\_{\text{RAM}}$):** `GraphProjector.decide` runs all `ts-morph` (`{ useInMemoryFileSystem: true }`) and `@ast-grep/napi` transformations over in-memory file copies and returns unsaved file buffers $\Delta W_{\text{RAM}}$.
 2. **Shadow Verification Before Touching Disk:** Both `extractWorkspaceTypeAwareGraph` (`type-extractor.ts`) and MCP tool `harness_lsp_diagnostics` accept an optional `overlays?: Readonly<Record<string, string>>` parameter:
-   - If a path $p$ exists in `overlays[p]`, the compiler host and `oxc-parser` read the in-memory buffer from RAM instead of disk, while all unmodified files and `node_modules` declarations reuse the cached TypeScript `Program`.
+   - If a path $p$ exists in `overlays[p]`, the compiler host and AST extractors (TypeScript Compiler API + `@ast-grep/napi`; historical `oxc-parser` references superseded) read the in-memory buffer from RAM instead of disk, while all unmodified files and `node_modules` declarations reuse the cached TypeScript `Program`.
    - `GraphProjector.decide` verifies **purely in RAM in $< 35\text{ ms}$**:
      1. that $\alpha(W_{\text{disk}} \oplus \Delta W_{\text{RAM}}) \cong H$ (Round-Trip commutativity),
-     2. that $W_{\text{disk}} \oplus \Delta W_{\text{RAM}}$ produces `0` new diagnostics in `tsc` / `effect-tsgo` / `oxc-parser`.
+     2. that $W_{\text{disk}} \oplus \Delta W_{\text{RAM}}$ produces `0` new diagnostics in `tsc` / `effect-tsgo` / `@ast-grep/napi` (historical `oxc-parser` superseded).
    - **Incremental `ts.CompilerHost` with `oldProgram` AST Cache (Preventing 2,000 ms Cold Re-Parses):**
      > [!IMPORTANT]
      > Instantiating a cold `new Project(...)` in `ts-morph` across the monorepo takes ~2,000 ms because it re-parses all `node_modules` `.d.ts` files. To keep Shadow verification under $< 35\text{ ms}$, `type-extractor.ts` caches the previous `oldProgram: ts.Program` and wraps `ts.CompilerHost` via `createOverlayCompilerHost(options, overlays, oldProgram)`:
@@ -259,7 +262,7 @@ Following our **MCP-First Tooling Preference** (`AGENTS.md`), we add 3 MCP tools
 3. **`harness_graph_rewrite`**
    - Runs `GraphRewrite.decide` + `GraphProjector.decide` in `"auto-plan"`, `"auto-repair"`, or `"cleanup"` mode. Returns ranked `RewriteCandidate` solutions (ordered by $\mu(G) \in \mathbb{N}^6$ and `DpoCandidateRankerV1`), `AstCodeModOperation` items, and the in-memory Shadow Round-Trip verification status $\alpha(W_{\text{disk}} \oplus \Delta W_{\text{RAM}}) \cong H$.
 4. **Extending `harness_lsp_diagnostics` with `overlays?: Readonly<Record<string, string>>` (Shadow LSP)**
-   - Allows agents to submit unsaved in-memory file buffers and receive diagnostics from `tsgo` / `oxc-parser` / PERA extractor in $< 35\text{ ms}$ without touching disk.
+   - Allows agents to submit unsaved in-memory file buffers and receive diagnostics from `tsgo` / `@ast-grep/napi` / PERA extractor (historical `oxc-parser` superseded) in $< 35\text{ ms}$ without touching disk.
 
 ### 6.2 CLI Commands (`apps/harness-cli/src/index.ts`)
 

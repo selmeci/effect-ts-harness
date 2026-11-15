@@ -26,7 +26,7 @@ export const BENCHMARK_TASKS: ReadonlyArray<BenchmarkTaskDefinition> = [
     title: "D1 Repository Implementation",
     targetPackage: "@harness/sample-infra",
     expectedPatternDoc: "agent-patterns/d1-repository.md",
-    description: "Implement SQLite/D1 Drizzle repository decoding rows into contract schemas",
+    description: "Implement SQLite/D1 Effect SQL repository decoding rows into contract schemas",
   },
   {
     id: "task-4-do-rpc",

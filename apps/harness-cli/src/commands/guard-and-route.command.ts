@@ -1,49 +1,83 @@
-import { readFileSync } from "node:fs"
-import { Effect, Layer, Option, Schema } from "effect"
+import { Cause, Effect, Layer, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
-import { decideGuardCommand, routeStep } from "@harness/decision"
+import { isPureInterruptCause } from "@harness/contract"
+import { decideGuardCommand, routeStepWithStatus } from "@harness/decision"
 import {
   CD_COMMAND_BANNED_REASON,
   classifyCommand,
   classifyFileWrite,
+  CLEF_SYSTEMONE_ONLY_BANNED_REASON,
   INTERACTIVE_NX_BANNED_REASON,
   isCdCommand,
   isInteractiveNxCommand,
+  isInvalidClefEndpointCommand,
 } from "@harness/gates"
 import {
   type CliEnv,
   type CliResult,
   ensureLocalOllamaReady,
+  makeReadStdinEffect,
   recordFriction,
+  resolveDecisionModelLayer,
 } from "./daemon-and-omnigraph.service.js"
+import {
+  detectAntigravityHookPayload,
+  hasAntigravityFormat,
+  makeGuardDenyResult,
+} from "./hook-format.js"
 
 export { classifyCommand, classifyFileWrite }
 
+const NullableOptionalString = Schema.optional(Schema.NullOr(Schema.String))
+
 const PreToolUseStdinSchema = Schema.Struct({
-  tool_name: Schema.optional(Schema.String),
+  tool_name: NullableOptionalString,
   tool_input: Schema.optional(
-    Schema.Struct({
-      command: Schema.optional(Schema.String),
-      file_path: Schema.optional(Schema.String),
-      path: Schema.optional(Schema.String),
-    }),
+    Schema.NullOr(
+      Schema.Struct({
+        command: NullableOptionalString,
+        file_path: NullableOptionalString,
+        path: NullableOptionalString,
+        filePath: NullableOptionalString,
+        targetFile: NullableOptionalString,
+      }),
+    ),
   ),
   toolCall: Schema.optional(
-    Schema.Struct({
-      name: Schema.optional(Schema.String),
-      args: Schema.optional(
-        Schema.Struct({
-          CommandLine: Schema.optional(Schema.String),
-          command: Schema.optional(Schema.String),
-          TargetFile: Schema.optional(Schema.String),
-          AbsolutePath: Schema.optional(Schema.String),
-          file_path: Schema.optional(Schema.String),
-        }),
-      ),
-    }),
+    Schema.NullOr(
+      Schema.Struct({
+        name: NullableOptionalString,
+        args: Schema.optional(
+          Schema.NullOr(
+            Schema.Struct({
+              CommandLine: NullableOptionalString,
+              command: NullableOptionalString,
+              TargetFile: NullableOptionalString,
+              AbsolutePath: NullableOptionalString,
+              file_path: NullableOptionalString,
+              filePath: NullableOptionalString,
+              targetFile: NullableOptionalString,
+              path: NullableOptionalString,
+            }),
+          ),
+        ),
+      }),
+    ),
   ),
 })
+
+const READ_ONLY_TOOL_NAMES = new Set([
+  "Read",
+  "Glob",
+  "Grep",
+  "LS",
+  "view_file",
+  "grep_search",
+  "find_by_name",
+  "list_dir",
+  "read_file",
+])
 
 const decodePreToolUseStdin = Schema.decodeOption(Schema.fromJsonString(PreToolUseStdinSchema))
 
@@ -52,19 +86,6 @@ const formatAllowResult = (isAntigravity: boolean): CliResult => ({
   stdout: isAntigravity ? JSON.stringify({ decision: "allow" }) : "",
   stderr: "",
 })
-
-const formatDenyResult = (isAntigravity: boolean, reason: string): CliResult =>
-  isAntigravity
-    ? {
-        exitCode: 0,
-        stdout: JSON.stringify({ decision: "deny", reason }),
-        stderr: "",
-      }
-    : {
-        exitCode: 2,
-        stdout: "",
-        stderr: reason,
-      }
 
 const formatAskResult = (isAntigravity: boolean, reason: string | undefined): CliResult =>
   isAntigravity
@@ -90,86 +111,66 @@ const formatCommandDenyReason = (command: string): string =>
     ? `Blocked by harness guard: ${command} (${CD_COMMAND_BANNED_REASON})`
     : isInteractiveNxCommand(command)
       ? `Blocked by harness guard: ${command} (${INTERACTIVE_NX_BANNED_REASON})`
-      : `Blocked by harness guard: ${command}`
+      : isInvalidClefEndpointCommand(command)
+        ? `Blocked by harness guard: ${command} (${CLEF_SYSTEMONE_ONLY_BANNED_REASON})`
+        : `Blocked by harness guard: ${command}`
 
-export const handleGuard = (
-  argv: ReadonlyArray<string>,
+type GuardVerdictDecision =
+  | { readonly verdict: "deny"; readonly reason: string }
+  | { readonly verdict: "ask"; readonly reason: string | undefined }
+  | { readonly verdict: "allow" }
+
+const verdictRank = (v: GuardVerdictDecision["verdict"]): number =>
+  match(v)
+    .with("allow", () => 0)
+    .with("ask", () => 1)
+    .with("deny", () => 2)
+    .exhaustive()
+
+const pickStrictestDecision = (
+  a: GuardVerdictDecision,
+  b: GuardVerdictDecision,
+): GuardVerdictDecision => (verdictRank(b.verdict) > verdictRank(a.verdict) ? b : a)
+
+const toGuardCliResult = (decision: GuardVerdictDecision, isAntigravity: boolean): CliResult =>
+  match(decision)
+    .with({ verdict: "deny" }, ({ reason }) => makeGuardDenyResult(isAntigravity, reason))
+    .with({ verdict: "ask" }, ({ reason }) => formatAskResult(isAntigravity, reason))
+    .with({ verdict: "allow" }, () => formatAllowResult(isAntigravity))
+    .exhaustive()
+
+const evaluateCommandDecision = (
+  command: string,
   options: CliEnv | undefined,
   decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
-): Effect.Effect<CliResult> =>
+): Effect.Effect<GuardVerdictDecision> =>
   Effect.gen(function* () {
-    const isAntigravityFlag = argv.includes("--format=antigravity")
-    const fileFlag = argv.find((arg) => arg.startsWith("--file="))
-    const cliFilePath = fileFlag ? fileFlag.slice("--file=".length) : undefined
-    const positionalArgs = argv
-      .slice(1)
-      .filter((arg) => !arg.startsWith("--format=") && !arg.startsWith("--file="))
-
-    let rawStdin = options?.stdin
-    if (
-      positionalArgs.length === 0 &&
-      !cliFilePath &&
-      rawStdin === undefined &&
-      !process.stdin.isTTY
-    ) {
-      rawStdin = yield* Effect.try({
-        try: () => readFileSync(0, "utf8"),
-        catch: () => "",
-      }).pipe(Effect.orElseSucceed(() => ""))
-    }
-
-    let stdinCmd: string | undefined
-    let stdinFilePath: string | undefined
-    let isAntigravityStdin = false
-    if (rawStdin) {
-      const decoded = decodePreToolUseStdin(rawStdin)
-      if (Option.isSome(decoded)) {
-        if (decoded.value.toolCall !== undefined) {
-          isAntigravityStdin = true
-          stdinCmd =
-            decoded.value.toolCall.args?.CommandLine ?? decoded.value.toolCall.args?.command
-          stdinFilePath =
-            decoded.value.toolCall.args?.TargetFile ??
-            decoded.value.toolCall.args?.AbsolutePath ??
-            decoded.value.toolCall.args?.file_path
-        } else {
-          stdinCmd = decoded.value.tool_input?.command
-          stdinFilePath = decoded.value.tool_input?.file_path ?? decoded.value.tool_input?.path
-        }
-      }
-    }
-    const isAntigravity = isAntigravityFlag || isAntigravityStdin
-    const filePath = cliFilePath ?? stdinFilePath
-    const command = positionalArgs.length > 0 ? positionalArgs.join(" ") : (stdinCmd ?? "")
-
-    if (filePath && command.trim() === "") {
-      const fileGuard = classifyFileWrite(filePath)
-      return match(fileGuard.verdict)
-        .with("deny", () =>
-          formatDenyResult(isAntigravity, fileGuard.reason ?? `Blocked file write: ${filePath}`),
-        )
-        .with("ask", () => formatAskResult(isAntigravity, fileGuard.reason))
-        .with("allow", () => formatAllowResult(isAntigravity))
-        .exhaustive()
-    }
-
-    if (command.trim() === "") {
-      return formatAllowResult(isAntigravity)
-    }
-
     const classification = classifyCommand(command)
     if (classification !== "escalate") {
-      return match(classification)
-        .with("deny", () => formatDenyResult(isAntigravity, formatCommandDenyReason(command)))
-        .with("allow", () => formatAllowResult(isAntigravity))
-        .with("ask", () =>
-          formatAskResult(isAntigravity, `Command requires human confirmation: ${command}`),
-        )
+      return match<typeof classification, GuardVerdictDecision>(classification)
+        .with("deny", () => ({ verdict: "deny", reason: formatCommandDenyReason(command) }))
+        .with("allow", () => ({ verdict: "allow" }))
+        .with("ask", () => ({
+          verdict: "ask",
+          reason: `Command requires human confirmation: ${command}`,
+        }))
         .exhaustive()
     }
 
-    if (options?.decisionLayer === undefined && process.env.VITEST === undefined) {
-      yield* ensureLocalOllamaReady()
+    if (options?.decisionLayer === undefined && options?.skipBackgroundDaemons !== true) {
+      const ollamaProbe = yield* ensureLocalOllamaReady().pipe(Effect.timeoutOption("2500 millis"))
+      match(ollamaProbe)
+        .with({ _tag: "None" }, () => {
+          process.stderr.write("[harness:guard] Ollama readiness probe timed out after 2500ms.\n")
+        })
+        .with({ _tag: "Some" }, ({ value: ready }) => {
+          if (!ready) {
+            process.stderr.write(
+              "[harness:guard] Ollama server is not ready; continuing with DecisionModel.\n",
+            )
+          }
+        })
+        .exhaustive()
     }
     const decision = yield* decideGuardCommand(command).pipe(Effect.provide(decisionLayer))
     recordFriction(options, {
@@ -178,26 +179,216 @@ export const handleGuard = (
       detail: `verdict=${decision.verdict}; reason=${decision.reason}`,
     })
 
-    return match(decision.verdict)
-      .with("deny", () => {
-        const denyReason = isInteractiveNxCommand(command)
+    return match<typeof decision.verdict, GuardVerdictDecision>(decision.verdict)
+      .with("deny", () => ({
+        verdict: "deny",
+        reason: isInteractiveNxCommand(command)
           ? `Blocked by harness guard: ${command} (${INTERACTIVE_NX_BANNED_REASON})`
-          : `Blocked by harness guard: ${command}`
-        return formatDenyResult(isAntigravity, denyReason)
-      })
-      .with("allow", () => formatAllowResult(isAntigravity))
-      .with("ask", () => formatAskResult(isAntigravity, decision.reason))
+          : isInvalidClefEndpointCommand(command)
+            ? `Blocked by harness guard: ${command} (${CLEF_SYSTEMONE_ONLY_BANNED_REASON})`
+            : `Blocked by harness guard: ${command}`,
+      }))
+      .with("allow", () => ({ verdict: "allow" }))
+      .with("ask", () => ({ verdict: "ask", reason: decision.reason }))
       .exhaustive()
   })
+
+export const handleGuard = (
+  argv: ReadonlyArray<string>,
+  options: CliEnv | undefined,
+): Effect.Effect<CliResult> => {
+  const isAntigravityFlag = hasAntigravityFormat(argv)
+  let isAntigravity =
+    isAntigravityFlag ||
+    (options?.stdin !== undefined && detectAntigravityHookPayload(options.stdin))
+
+  return Effect.gen(function* () {
+    const decisionLayer = yield* resolveDecisionModelLayer(options?.decisionLayer)
+    const fileFlag = argv.find((arg) => arg.startsWith("--file="))
+    const cliFilePath = fileFlag ? fileFlag.slice("--file=".length) : undefined
+    const positionalArgs = argv
+      .slice(1)
+      .filter((arg) => !arg.startsWith("--format=") && !arg.startsWith("--file="))
+
+    const invokedAsHook =
+      isAntigravityFlag ||
+      (positionalArgs.length === 0 &&
+        !cliFilePath &&
+        options?.stdin === undefined &&
+        process.stdin.isTTY !== true)
+
+    let rawStdin = options?.stdin
+    if (
+      positionalArgs.length === 0 &&
+      !cliFilePath &&
+      rawStdin === undefined &&
+      process.stdin.isTTY !== true
+    ) {
+      const stdinRes = yield* Effect.result(
+        makeReadStdinEffect({
+          timeoutMs: options?.stdinTimeoutMs,
+          maxBytes: options?.stdinMaxBytes,
+        }),
+      )
+      const readFailed = match(stdinRes)
+        .with({ _tag: "Success" }, ({ success }) => {
+          rawStdin = success
+          if (detectAntigravityHookPayload(success)) {
+            isAntigravity = true
+            options?.hookStdinTracker?.markAntigravityDetected()
+          }
+          return undefined
+        })
+        .with({ _tag: "Failure" }, ({ failure }) =>
+          makeGuardDenyResult(
+            isAntigravity,
+            `guard: failed or timed out reading hook stdin payload (${failure.reason})`,
+          ),
+        )
+        .exhaustive()
+      if (readFailed !== undefined) {
+        return readFailed
+      }
+    }
+
+    if (
+      positionalArgs.length === 0 &&
+      !cliFilePath &&
+      invokedAsHook &&
+      (rawStdin === undefined || rawStdin.trim().length === 0)
+    ) {
+      return makeGuardDenyResult(isAntigravity, "guard: empty hook stdin payload")
+    }
+
+    let stdinCmd: string | undefined
+    let stdinFilePath: string | undefined
+    let isAntigravityStdin = false
+    let stdinDecodeFailureReason: string | undefined
+    let isReadOnlyToolCall = false
+
+    if (rawStdin !== undefined && rawStdin.trim().length > 0 && positionalArgs.length === 0 && !cliFilePath) {
+      const stdinText = rawStdin
+      isAntigravity = isAntigravity || detectAntigravityHookPayload(stdinText)
+      const decoded = decodePreToolUseStdin(stdinText)
+      match(decoded)
+        .with({ _tag: "Some" }, ({ value }) => {
+          const toolName = value.toolCall?.name ?? value.tool_name ?? undefined
+          if (value.toolCall !== undefined && value.toolCall !== null) {
+            isAntigravityStdin = true
+            stdinCmd = value.toolCall.args?.CommandLine ?? value.toolCall.args?.command ?? undefined
+            stdinFilePath =
+              value.toolCall.args?.TargetFile ??
+              value.toolCall.args?.AbsolutePath ??
+              value.toolCall.args?.file_path ??
+              value.toolCall.args?.filePath ??
+              value.toolCall.args?.targetFile ??
+              value.toolCall.args?.path ??
+              undefined
+          } else {
+            stdinCmd = value.tool_input?.command ?? undefined
+            stdinFilePath =
+              value.tool_input?.file_path ??
+              value.tool_input?.path ??
+              value.tool_input?.filePath ??
+              value.tool_input?.targetFile ??
+              undefined
+          }
+          if (
+            !stdinFilePath &&
+            (!stdinCmd || stdinCmd.trim() === "")
+          ) {
+            if (toolName !== undefined && READ_ONLY_TOOL_NAMES.has(toolName)) {
+              isReadOnlyToolCall = true
+            } else {
+              stdinDecodeFailureReason = "guard: hook stdin payload missing command or file path"
+            }
+          }
+        })
+        .with({ _tag: "None" }, () => {
+          if (
+            !isAntigravityFlag &&
+            options?.stdin !== undefined &&
+            !stdinText.trim().startsWith("{")
+          ) {
+            stdinCmd = stdinText
+          } else {
+            stdinDecodeFailureReason = "guard: malformed or unrecognized hook stdin JSON payload"
+          }
+        })
+        .exhaustive()
+    }
+
+    isAntigravity = isAntigravity || isAntigravityStdin
+    if (stdinDecodeFailureReason !== undefined) {
+      return makeGuardDenyResult(isAntigravity, stdinDecodeFailureReason)
+    }
+
+    const filePath = cliFilePath ?? stdinFilePath
+    const command = positionalArgs.length > 0 ? positionalArgs.join(" ") : (stdinCmd ?? "")
+    const hasCommand = command.trim().length > 0
+
+    if (filePath && hasCommand) {
+      const fileGuard = classifyFileWrite(filePath)
+      const fileDecision: GuardVerdictDecision = match<typeof fileGuard.verdict, GuardVerdictDecision>(
+        fileGuard.verdict,
+      )
+        .with("deny", () => ({
+          verdict: "deny",
+          reason: fileGuard.reason ?? `Blocked file write: ${filePath}`,
+        }))
+        .with("ask", () => ({ verdict: "ask", reason: fileGuard.reason }))
+        .with("allow", () => ({ verdict: "allow" }))
+        .exhaustive()
+      const cmdDecision = yield* evaluateCommandDecision(command, options, decisionLayer)
+      return toGuardCliResult(pickStrictestDecision(fileDecision, cmdDecision), isAntigravity)
+    }
+
+    if (filePath && !hasCommand) {
+      const fileGuard = classifyFileWrite(filePath)
+      const fileDecision: GuardVerdictDecision = match<typeof fileGuard.verdict, GuardVerdictDecision>(
+        fileGuard.verdict,
+      )
+        .with("deny", () => ({
+          verdict: "deny",
+          reason: fileGuard.reason ?? `Blocked file write: ${filePath}`,
+        }))
+        .with("ask", () => ({ verdict: "ask", reason: fileGuard.reason }))
+        .with("allow", () => ({ verdict: "allow" }))
+        .exhaustive()
+      return toGuardCliResult(fileDecision, isAntigravity)
+    }
+
+    if (!hasCommand) {
+      if (isReadOnlyToolCall || !invokedAsHook) {
+        return formatAllowResult(isAntigravity)
+      }
+      return makeGuardDenyResult(isAntigravity, "guard: empty hook command payload")
+    }
+
+    const cmdDecision = yield* evaluateCommandDecision(command, options, decisionLayer)
+    return toGuardCliResult(cmdDecision, isAntigravity)
+  }).pipe(
+    Effect.catchCause((cause) => {
+      if (isPureInterruptCause(cause)) {
+        return Effect.failCause(cause)
+      }
+      const pretty = Cause.pretty(cause)
+      process.stderr.write(`[harness:guard] uncaught cause: ${pretty}\n`)
+      return Effect.succeed(
+        makeGuardDenyResult(isAntigravity, `guard: uncaught error or defect (${pretty})`),
+      )
+    }),
+  )
+}
 
 export const handleRoute = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
-  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
+    const decisionLayer = yield* resolveDecisionModelLayer(options?.decisionLayer)
     const step = argv.slice(1).join(" ")
-    const block = yield* routeStep(step).pipe(Effect.provide(decisionLayer))
+    const { block, source } = yield* routeStepWithStatus(step).pipe(Effect.provide(decisionLayer))
     if (block === "review") {
       recordFriction(options, {
         kind: "route_miss",
@@ -206,6 +397,16 @@ export const handleRoute = (
           "IdiomRouterV1 returned review (no matching agent-patterns/*.md with >= 0.7 confidence)",
       })
     }
+    if (source === "degraded-fallback") {
+      process.stderr.write(
+        `[harness:route] DecisionModel unavailable (source=degraded-fallback); returning '${block}'.\n`,
+      )
+    }
     const stdout = block === "review" || block === "effect" ? block : `agent-patterns/${block}.md`
-    return { exitCode: 0, stdout, stderr: "" }
+    return {
+      exitCode: 0,
+      stdout,
+      stderr: "",
+      telemetryDetail: `block=${block};source=${source}`,
+    }
   })

@@ -27,6 +27,7 @@ import {
   verifyDpoGluingCondition,
 } from "../src/index.js"
 import { mapInferenceErrorToRewriteError } from "../src/rewrite/dpo-algebra-core.js"
+import { evaluateAndSelectArchRepairBranch } from "../src/rewrite/repair-rules-arch.plugin.js"
 
 const MeasureTupleSchema = Schema.Tuple([
   Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 0, maximum: 20 }))),
@@ -72,63 +73,66 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
     ])
   })
 
+  const makeOrderGluingGraph = () =>
+    buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/sample/domain/src/order.ts#checkout",
+          spanName: "Order.checkout",
+          file: "libs/sample/domain/src/order.ts",
+          line: 10,
+          packageTag: "domain",
+          inputSchema: "CheckoutInput",
+          outputSchema: "CheckoutResult",
+          successType: "CheckoutResult",
+          isStub: false,
+        },
+      ],
+      schemas: [
+        {
+          schemaName: "CheckoutInput",
+          file: "libs/sample/contract/src/schemas.ts",
+          isBranded: true,
+        },
+        {
+          schemaName: "CheckoutResult",
+          file: "libs/sample/contract/src/schemas.ts",
+          isBranded: true,
+        },
+      ],
+      services: [
+        {
+          tagId: "SqlClient",
+          name: "SqlClient",
+          packageTag: "infra",
+          file: "libs/sample/infra/src/sql.ts",
+        },
+      ],
+      errors: [
+        {
+          errorTag: "OrderDeclinedError",
+          file: "libs/sample/contract/src/errors.ts",
+        },
+      ],
+      requiresService: [
+        {
+          fnQualname: "libs/sample/domain/src/order.ts#checkout",
+          tagId: "SqlClient",
+        },
+      ],
+      failsWith: [
+        {
+          callerQualname: "libs/sample/domain/src/order.ts#checkout",
+          errorTag: "OrderDeclinedError",
+        },
+      ],
+    })
+
   it.effect(
-    "REQ-2.1 & REQ-2.3: enforces the Bipartite Levi Relation Preservation Law (V_R in K) and Dangling Condition (Dangling(m) = empty)",
+    "REQ-2.1: enforces the Bipartite Levi Relation Preservation Law (V_R in K)",
     () =>
       Effect.gen(function* () {
-        const graph = buildHarnessGraph({
-          fns: [
-            {
-              qualname: "libs/sample/domain/src/order.ts#checkout",
-              spanName: "Order.checkout",
-              file: "libs/sample/domain/src/order.ts",
-              line: 10,
-              packageTag: "domain",
-              inputSchema: "CheckoutInput",
-              outputSchema: "CheckoutResult",
-              successType: "CheckoutResult",
-              isStub: false,
-            },
-          ],
-          schemas: [
-            {
-              schemaName: "CheckoutInput",
-              file: "libs/sample/contract/src/schemas.ts",
-              isBranded: true,
-            },
-            {
-              schemaName: "CheckoutResult",
-              file: "libs/sample/contract/src/schemas.ts",
-              isBranded: true,
-            },
-          ],
-          services: [
-            {
-              tagId: "SqlClient",
-              name: "SqlClient",
-              packageTag: "infra",
-              file: "libs/sample/infra/src/sql.ts",
-            },
-          ],
-          errors: [
-            {
-              errorTag: "OrderDeclinedError",
-              file: "libs/sample/contract/src/errors.ts",
-            },
-          ],
-          requiresService: [
-            {
-              fnQualname: "libs/sample/domain/src/order.ts#checkout",
-              tagId: "SqlClient",
-            },
-          ],
-          failsWith: [
-            {
-              callerQualname: "libs/sample/domain/src/order.ts#checkout",
-              errorTag: "OrderDeclinedError",
-            },
-          ],
-        })
+        const graph = makeOrderGluingGraph()
 
         // 1. Valid DPO rewrite (REP-01) preserves EffectSignature in K and keeps input-schema, output-schema, fails-with intact
         const outcome = yield* decideGraphRewrite(graph, "auto-repair")
@@ -191,41 +195,7 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
           })
           .exhaustive()
 
-        // 3. Attempting to delete an entity node while leaving an incident PlaysRoleEdge fails with dangling-edge
-        const illegalEntityDeleteExit = yield* Effect.exit(
-          verifyDpoGluingCondition(graph, {
-            ruleId: RewriteRuleId.make("REP-11"),
-            phase: "CLEANUP",
-            ruleCategory: "cleanup",
-            primaryNodeKey: NodeKey.make("ServiceTag:SqlClient"),
-            description: "Illegal deletion of ServiceTag without deleting incident edge",
-            preservedInterfaceKeys: [sigKey],
-            deletedEntityKeys: [NodeKey.make("ServiceTag:SqlClient")],
-            deletedRelationIds: [],
-            deletedRoleEdges: [],
-            insertedEntityNodes: [],
-            insertedRelationNodes: [],
-            insertedRoleEdges: [],
-          }),
-        )
-        match(illegalEntityDeleteExit)
-          .with({ _tag: "Failure" }, () => {
-            const failure = Exit.findErrorOption(illegalEntityDeleteExit)
-            match(failure)
-              .with({ _tag: "Some" }, (someErr) => {
-                expect(someErr.value.reason).toBe("dangling-edge")
-              })
-              .with({ _tag: "None" }, () => {
-                expect.unreachable("expected error in cause")
-              })
-              .exhaustive()
-          })
-          .with({ _tag: "Success" }, () => {
-            expect.unreachable("expected gluing condition to fail")
-          })
-          .exhaustive()
-
-        // 4. Attempting to delete a PlaysRoleEdge without keeping its source relation in K fails with bipartite-relation-deleted
+        // 3. Attempting to delete a PlaysRoleEdge without keeping its source relation in K fails with bipartite-relation-deleted
         const missingFromKExit = yield* Effect.exit(
           verifyDpoGluingCondition(graph, {
             ruleId: RewriteRuleId.make("REP-01"),
@@ -258,6 +228,49 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
               .with({ _tag: "Some" }, (someErr) => {
                 expect(someErr.value._tag).toBe("GraphRewriteError")
                 expect(someErr.value.reason).toBe("bipartite-relation-deleted")
+              })
+              .with({ _tag: "None" }, () => {
+                expect.unreachable("expected error in cause")
+              })
+              .exhaustive()
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("expected gluing condition to fail")
+          })
+          .exhaustive()
+      }),
+  )
+
+  it.effect(
+    "REQ-2.3: enforces the Dangling Condition (Dangling(m) = empty)",
+    () =>
+      Effect.gen(function* () {
+        const graph = makeOrderGluingGraph()
+        const sigKey = NodeKey.make("EffectSignature:libs/sample/domain/src/order.ts#checkout")
+
+        // Attempting to delete an entity node while leaving an incident PlaysRoleEdge fails with dangling-edge
+        const illegalEntityDeleteExit = yield* Effect.exit(
+          verifyDpoGluingCondition(graph, {
+            ruleId: RewriteRuleId.make("REP-11"),
+            phase: "CLEANUP",
+            ruleCategory: "cleanup",
+            primaryNodeKey: NodeKey.make("ServiceTag:SqlClient"),
+            description: "Illegal deletion of ServiceTag without deleting incident edge",
+            preservedInterfaceKeys: [sigKey],
+            deletedEntityKeys: [NodeKey.make("ServiceTag:SqlClient")],
+            deletedRelationIds: [],
+            deletedRoleEdges: [],
+            insertedEntityNodes: [],
+            insertedRelationNodes: [],
+            insertedRoleEdges: [],
+          }),
+        )
+        match(illegalEntityDeleteExit)
+          .with({ _tag: "Failure" }, () => {
+            const failure = Exit.findErrorOption(illegalEntityDeleteExit)
+            match(failure)
+              .with({ _tag: "Some" }, (someErr) => {
+                expect(someErr.value.reason).toBe("dangling-edge")
               })
               .with({ _tag: "None" }, () => {
                 expect.unreachable("expected error in cause")
@@ -582,7 +595,7 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
   })
 
   it.effect(
-    "4-Phase Stratification & NAC_spec: REP-11 prunes truly orphan ServiceTags in Phase 4 (CLEANUP) but never prunes services referenced by an EarsSpec, AdrDoc, or active stub",
+    "NAC_spec: REP-11 prunes truly orphan ServiceTags in Phase 4 (CLEANUP) while protecting EarsSpec and AdrDoc targets",
     () =>
       Effect.gen(function* () {
         // Case A: No active stubs (isStub: false) â€” SpecProtectedService and AdrProtectedService are protected solely by EarsSpec/AdrDoc, while OrphanService (packageTag: service) and OrphanLegacyService (packageTag: infra) are pruned
@@ -673,8 +686,14 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
         expect(
           outcome.targetGraph.nodeIndexByKey.has(NodeKey.make("ServiceTag:AdrProtectedService")),
         ).toBe(true)
+      }),
+  )
 
-        // Case B: Active stub present (isStub: true) â€” protects unreferenced packageTag: "service" ports while still pruning unreferenced infra ServiceTags
+  it.effect(
+    "4-Phase Stratification: REP-11 preserves unreferenced service ports when an active stub is present",
+    () =>
+      Effect.gen(function* () {
+        // Case B: Active stub present (isStub: true) â€” protects unreferenced packageTag: "service" ports
         const activeStubGraph = buildHarnessGraph({
           fns: [
             {
@@ -957,10 +976,30 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
           Graph.getNode(outcome.targetGraph.graph, validateIdx!),
         )
         const decideNode = Option.getOrThrow(Graph.getNode(outcome.targetGraph.graph, decideIdx!))
-        if (validateNode._tag === "EffectFn" && decideNode._tag === "EffectFn") {
-          expect(validateNode.spanName).toBe("Order.validate")
-          expect(decideNode.spanName).toBe("Order.decide")
-        }
+        const validateSpan = match(validateNode)
+          .with({ _tag: "EffectFn" }, (n) => n.spanName)
+          .with(
+            { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" },
+            { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" },
+            { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" },
+            { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" },
+            { _tag: "MigrationTuple" },
+            () => undefined,
+          )
+          .exhaustive()
+        const decideSpan = match(decideNode)
+          .with({ _tag: "EffectFn" }, (n) => n.spanName)
+          .with(
+            { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" },
+            { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" },
+            { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" },
+            { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" },
+            { _tag: "MigrationTuple" },
+            () => undefined,
+          )
+          .exhaustive()
+        expect(validateSpan).toBe("Order.validate")
+        expect(decideSpan).toBe("Order.decide")
 
         const rep06 = rec.patches.find((p) => p.ruleId === RewriteRuleId.make("REP-06"))
         expect(rep06).toBeDefined()
@@ -1146,4 +1185,23 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
     expect(failedErr._tag).toBe("GraphRewriteError")
     expect(failedErr.reason).toBe("inference-failed")
   })
+
+  it.effect("calls evaluateAndSelectArchRepairBranch directly", () =>
+    Effect.gen(function* () {
+      const emptyGraph = buildHarnessGraph({})
+      const inference = yield* decideGraphInference(emptyGraph)
+      const zeroMeasure = computeGraphMeasure(emptyGraph, inference)
+      const exit = yield* Effect.exit(
+        evaluateAndSelectArchRepairBranch([], emptyGraph, zeroMeasure),
+      )
+      match(exit)
+        .with({ _tag: "Failure" }, () => {
+          expect(true).toBe(true)
+        })
+        .with({ _tag: "Success" }, ({ value }) => {
+          expect(value.winner).toBeDefined()
+        })
+        .exhaustive()
+    }),
+  )
 })

@@ -1,9 +1,11 @@
-import * as fs from "node:fs"
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
-import { Effect, Layer, Option, Schema } from "effect"
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js"
+import { Cause, Effect, type Exit, Layer, type ManagedRuntime, Option, Result, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
+import { McpToolInputName, McpToolName, UnknownToolError } from "@harness/contract"
 import {
   appendTelemetryEvent,
   type TelemetryCategory,
@@ -18,6 +20,7 @@ import {
   type GraphRewriteError,
   type HarnessGraph,
   loadGraphSnapshotEffect,
+  type OmnigraphLoadError,
   readGraphHeadMeta,
   resolveGitHeadState,
   saveGraphSnapshot,
@@ -25,16 +28,9 @@ import {
   writeGraphHeadMeta,
 } from "@harness/graph"
 import type { GovernanceDocReference } from "@harness/decision"
+import { nodeSyncHostIo, resolveHarnessStateDir } from "@harness/infra"
 
-export const McpToolName = Schema.NonEmptyString.pipe(Schema.brand("McpToolName"))
-export type McpToolName = typeof McpToolName.Type
-
-export const McpToolInputName = Schema.String.pipe(Schema.brand("McpToolInputName"))
-export type McpToolInputName = typeof McpToolInputName.Type
-
-export class UnknownToolError extends Schema.TaggedError<UnknownToolError>()("UnknownToolError", {
-  toolName: McpToolInputName,
-}) {}
+export { McpToolInputName, McpToolName, UnknownToolError }
 
 export class ProjectPathEscapeError extends Schema.TaggedError<ProjectPathEscapeError>()(
   "ProjectPathEscapeError",
@@ -53,6 +49,7 @@ export type McpToolExecutionError =
   | GraphInferenceError
   | GraphRewriteError
   | GraphProjectorError
+  | OmnigraphLoadError
 
 export type McpToolInputSchema = Schema.Decoder<Readonly<Record<string, unknown>>> & Schema.Top
 
@@ -82,8 +79,12 @@ export interface ServerOptions {
   readonly graph?: HarnessGraph
   readonly snapshotPath?: string
   readonly decisionLayer?: Layer.Layer<DecisionModel.DecisionModel>
+  readonly extraLayer?: Layer.Layer<never>
   readonly repoRoot?: string
   readonly governanceDocs?: ReadonlyArray<GovernanceDocReference>
+  readonly skipOmnigraphSpawn?: boolean | undefined
+  readonly skipTelemetry?: boolean | undefined
+  readonly skipActiveWorkspaceLookup?: boolean | undefined
   readonly lspDiagnosticsRunner?: (input: {
     readonly file?: string | undefined
     readonly project?: string | undefined
@@ -93,7 +94,7 @@ export interface ServerOptions {
 export const findRepoRoot = (startDir: string): string => {
   let curr = path.resolve(startDir)
   while (curr !== path.dirname(curr)) {
-    if (fs.existsSync(path.join(curr, "pnpm-workspace.yaml"))) {
+    if (nodeSyncHostIo.existsSync(path.join(curr, "pnpm-workspace.yaml"))) {
       return curr
     }
     curr = path.dirname(curr)
@@ -107,7 +108,10 @@ const decodeActiveWorkspace = Schema.decodeUnknownOption(
   Schema.fromJsonString(Schema.Struct({ repoRoot: Schema.String })),
 )
 
-export const resolveDefaultRepoRoot = (args?: Readonly<Record<string, unknown>>): string => {
+export const resolveDefaultRepoRoot = (
+  args?: Readonly<Record<string, unknown>>,
+  options?: Pick<ServerOptions, "skipActiveWorkspaceLookup" | "skipOmnigraphSpawn">,
+): string => {
   const rawRepoRoot = args?.["repoRoot"]
   if (typeof rawRepoRoot === "string" && rawRepoRoot.length > 0) {
     return findRepoRoot(rawRepoRoot)
@@ -132,7 +136,7 @@ export const resolveDefaultRepoRoot = (args?: Readonly<Record<string, unknown>>)
         : undefined
   if (candidate !== undefined) {
     const candidateRoot = findRepoRoot(path.dirname(candidate))
-    if (fs.existsSync(path.join(candidateRoot, "pnpm-workspace.yaml"))) {
+    if (nodeSyncHostIo.existsSync(path.join(candidateRoot, "pnpm-workspace.yaml"))) {
       return candidateRoot
     }
   }
@@ -140,17 +144,18 @@ export const resolveDefaultRepoRoot = (args?: Readonly<Record<string, unknown>>)
   if (cwdRoot !== SERVER_REPO_ROOT) {
     return cwdRoot
   }
-  if (process.env.VITEST === undefined) {
+  if (options?.skipActiveWorkspaceLookup !== true && options?.skipOmnigraphSpawn !== true) {
     const activeWorkspacePath = path.join(SERVER_REPO_ROOT, ".harness", "active-workspace.json")
-    if (fs.existsSync(activeWorkspacePath)) {
-      const resolvedActiveRoot = Effect.runSync(
-        Effect.try(() => {
-          const raw = fs.readFileSync(activeWorkspacePath, "utf-8")
+    if (nodeSyncHostIo.existsSync(activeWorkspacePath)) {
+      const resolvedActiveRoot = Result.getOrElse(
+        Result.try(() => {
+          const raw = nodeSyncHostIo.readTextSync(activeWorkspacePath)
           const parsed = Option.getOrUndefined(decodeActiveWorkspace(raw))
-          return parsed !== undefined && fs.existsSync(parsed.repoRoot)
+          return parsed !== undefined && nodeSyncHostIo.existsSync(parsed.repoRoot)
             ? parsed.repoRoot
             : undefined
-        }).pipe(Effect.orElseSucceed(() => undefined)),
+        }),
+        () => undefined,
       )
       if (resolvedActiveRoot !== undefined) {
         return resolvedActiveRoot
@@ -178,8 +183,8 @@ const selectSnapshotPath = (
   planExists: boolean,
 ): string | undefined => {
   if (verifyExists && planExists) {
-    const verifyMtime = fs.statSync(verifySnap).mtimeMs
-    const planMtime = fs.statSync(planSnap).mtimeMs
+    const verifyMtime = nodeSyncHostIo.statMtimeMsSync(verifySnap) ?? 0
+    const planMtime = nodeSyncHostIo.statMtimeMsSync(planSnap) ?? 0
     return planMtime > verifyMtime ? planSnap : verifySnap
   }
   if (verifyExists) {
@@ -191,50 +196,81 @@ const selectSnapshotPath = (
   return undefined
 }
 
-export const resolveGraph = (
+export interface GraphResolutionStatus {
+  readonly graph: HarnessGraph
+  readonly degraded: boolean
+  readonly degradedReason?: string | undefined
+  readonly evaluationError?: string | undefined
+}
+
+export const resolveGraphWithStatus = (
   options?: ServerOptions,
   args?: Readonly<Record<string, unknown>>,
-): Effect.Effect<HarnessGraph> => {
+): Effect.Effect<GraphResolutionStatus> => {
   if (options?.graph) {
-    return Effect.succeed(options.graph)
+    return Effect.succeed({ graph: options.graph, degraded: false })
   }
   return Effect.gen(function* () {
-    const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+    const root = options?.repoRoot ?? resolveDefaultRepoRoot(args, options)
     let snapshotPath = options?.snapshotPath
+    let stalenessDegradedReason: string | undefined = undefined
+    let stalenessEvaluationError: string | undefined = undefined
     if (!snapshotPath) {
-      const verifySnap = path.join(root, ".harness", "graph-snapshot.json")
-      const planSnap = path.join(root, ".harness", "plan-graph-snapshot.json")
-      const verifyExists = fs.existsSync(verifySnap)
-      const planExists = fs.existsSync(planSnap)
+      const stateDir = resolveHarnessStateDir(root)
+      const verifySnap = path.join(stateDir, "graph-snapshot.json")
+      const planSnap = path.join(stateDir, "plan-graph-snapshot.json")
+      const verifyExists = nodeSyncHostIo.existsSync(verifySnap)
+      const planExists = nodeSyncHostIo.existsSync(planSnap)
       if (verifyExists) {
-        const recordedMeta = readGraphHeadMeta(root)
-        const headState = resolveGitHeadState(root)
-        if (
-          recordedMeta !== null &&
-          headState.headSha !== null &&
-          recordedMeta.headSha !== headState.headSha
-        ) {
-          const freshGraph = yield* extractWorkspaceTypeAwareGraph(root)
-          saveGraphSnapshot(freshGraph, verifySnap)
-          writeGraphHeadMeta(root, headState)
-          return freshGraph
+        const recordedMeta = readGraphHeadMeta(root, nodeSyncHostIo)
+        const headState = resolveGitHeadState(root, nodeSyncHostIo)
+        if (recordedMeta !== null) {
+          if (headState.headSha === null) {
+            stalenessDegradedReason = "git-head-unavailable"
+            stalenessEvaluationError =
+              "Git HEAD SHA is unavailable; cannot verify graph snapshot freshness"
+          }
+          if (headState.headSha !== null && recordedMeta.headSha !== headState.headSha) {
+            const freshGraph = yield* extractWorkspaceTypeAwareGraph(root, nodeSyncHostIo)
+            saveGraphSnapshot(freshGraph, verifySnap, nodeSyncHostIo)
+            writeGraphHeadMeta(root, nodeSyncHostIo, headState)
+            return { graph: freshGraph, degraded: false }
+          }
         }
       }
       snapshotPath = selectSnapshotPath(root, verifySnap, planSnap, verifyExists, planExists)
     }
-    if (snapshotPath && fs.existsSync(snapshotPath)) {
-      return yield* loadGraphSnapshotEffect(snapshotPath).pipe(
-        Effect.tapError((error) =>
-          Effect.sync(() => {
-            process.stderr.write(
-              `[harness-mcp] Failed to load graph snapshot from '${snapshotPath}' [${error.reason}]: ${error.message}\n`,
-            )
-          }),
+    if (snapshotPath && nodeSyncHostIo.existsSync(snapshotPath)) {
+      return yield* loadGraphSnapshotEffect(snapshotPath, nodeSyncHostIo).pipe(
+        Effect.map(
+          (graph): GraphResolutionStatus =>
+            stalenessDegradedReason !== undefined
+              ? {
+                  graph,
+                  degraded: true,
+                  degradedReason: stalenessDegradedReason,
+                  evaluationError: stalenessEvaluationError,
+                }
+              : { graph, degraded: false },
         ),
-        Effect.orElseSucceed(buildEmptyHarnessGraph),
+        Effect.catchTag("GraphSnapshotError", (error) => {
+          const evaluationError = `Failed to load graph snapshot from '${snapshotPath}' [${error.reason}]: ${error.message}`
+          process.stderr.write(`[harness-mcp] ${evaluationError}\n`)
+          return Effect.succeed<GraphResolutionStatus>({
+            graph: buildEmptyHarnessGraph(),
+            degraded: true,
+            degradedReason: "corrupt-graph-snapshot",
+            evaluationError,
+          })
+        }),
       )
     }
-    return buildEmptyHarnessGraph()
+    return {
+      graph: buildEmptyHarnessGraph(),
+      degraded: true,
+      degradedReason: "missing-graph-snapshot",
+      evaluationError: `Graph snapshot file is missing in '${root}'`,
+    }
   }).pipe(
     Effect.catchDefect((defect) => {
       const message = defect instanceof Error ? defect.message : String(defect)
@@ -243,6 +279,22 @@ export const resolveGraph = (
     }),
   )
 }
+
+export const graphStatusMeta = (
+  graphStatus: GraphResolutionStatus,
+): {
+  readonly degraded: boolean
+  readonly degradedReason?: string
+  readonly evaluationError?: string
+} => ({
+  degraded: graphStatus.degraded,
+  ...(graphStatus.degradedReason !== undefined
+    ? { degradedReason: graphStatus.degradedReason }
+    : {}),
+  ...(graphStatus.evaluationError !== undefined
+    ? { evaluationError: graphStatus.evaluationError }
+    : {}),
+})
 
 export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolean => {
   const logicalRoot = path.resolve(rootDir)
@@ -253,26 +305,30 @@ export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolea
   if (rel !== "" && (rel.startsWith("..") || path.isAbsolute(rel))) {
     return false
   }
-  if (fs.existsSync(logicalRoot)) {
+  if (nodeSyncHostIo.existsSync(logicalRoot)) {
     let checkPath = logicalCandidate
-    while (!fs.existsSync(checkPath) && checkPath !== logicalRoot) {
+    while (!nodeSyncHostIo.existsSync(checkPath)) {
+      if (nodeSyncHostIo.isSymbolicLinkSync(checkPath)) {
+        return false
+      }
+      if (checkPath === logicalRoot) {
+        break
+      }
       const parent = path.dirname(checkPath)
       if (parent === checkPath) break
       checkPath = parent
     }
-    if (fs.existsSync(checkPath)) {
+    if (nodeSyncHostIo.existsSync(checkPath)) {
       const checkRel = path.relative(logicalRoot, checkPath)
       if (!checkRel.startsWith("..") && !path.isAbsolute(checkRel)) {
-        const contained = Effect.runSync(
-          Effect.try({
-            try: () => {
-              const realRoot = fs.realpathSync.native(logicalRoot)
-              const realCheck = fs.realpathSync.native(checkPath)
-              const realRel = path.relative(realRoot, realCheck)
-              return !(realRel !== "" && (realRel.startsWith("..") || path.isAbsolute(realRel)))
-            },
-            catch: () => false,
+        const contained = Result.getOrElse(
+          Result.try(() => {
+            const realRoot = nodeSyncHostIo.realpathSync(logicalRoot)
+            const realCheck = nodeSyncHostIo.realpathSync(checkPath)
+            const realRel = path.relative(realRoot, realCheck)
+            return !(realRel !== "" && (realRel.startsWith("..") || path.isAbsolute(realRel)))
           }),
+          () => false,
         )
         if (!contained) {
           return false
@@ -299,7 +355,7 @@ export const normalizeProjectPathEffect = (
       }),
     )
   }
-  if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
+  if (nodeSyncHostIo.existsSync(resolved) && nodeSyncHostIo.isDirectorySync(resolved)) {
     const joined = path.join(resolved, "tsconfig.json")
     if (!isPathInsideRoot(repoRoot, joined)) {
       return Effect.fail(
@@ -360,10 +416,13 @@ export const recordMcpToolTelemetry = (
   durationMs: number,
   options?: ServerOptions,
 ): void => {
-  if (options?.repoRoot === undefined && process.env.VITEST !== undefined) {
+  if (
+    options?.skipTelemetry === true ||
+    (options?.repoRoot === undefined && options?.skipOmnigraphSpawn === true)
+  ) {
     return
   }
-  const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+  const root = options?.repoRoot ?? resolveDefaultRepoRoot(args, options)
   const category: TelemetryCategory = match(toolName)
     .with(
       "harness_ontology_why",
@@ -398,12 +457,76 @@ export const recordMcpToolTelemetry = (
         ? "fail"
         : "ok"
 
-  appendTelemetryEvent(root, {
-    surface: "mcp",
-    category,
-    toolName,
-    outcome,
-    durationMs,
-    engineSource,
-  })
+  appendTelemetryEvent(
+    root,
+    {
+      surface: "mcp",
+      category,
+      toolName,
+      outcome,
+      durationMs,
+      engineSource,
+    },
+    nodeSyncHostIo,
+  )
+}
+
+export const formatMcpToolExit = (
+  toolName: string,
+  exit: Exit.Exit<unknown, unknown>,
+):
+  | { readonly content: ReadonlyArray<{ readonly type: "text"; readonly text: string }>; readonly isError?: boolean }
+  | Promise<never> =>
+  match(exit)
+    .with({ _tag: "Success" }, ({ value }) => ({
+      content: [{ type: "text" as const, text: JSON.stringify(value ?? null, null, 2) }],
+    }))
+    .with({ _tag: "Failure" }, ({ cause }) => {
+      if (Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)) {
+        return Promise.reject(
+          new McpError(ErrorCode.InternalError, `Tool '${toolName}' execution was interrupted`),
+        )
+      }
+      const squashed = Cause.squash(cause)
+      if (Schema.isSchemaError(squashed)) {
+        return Promise.reject(
+          new McpError(
+            ErrorCode.InvalidParams,
+            `Invalid arguments for tool '${toolName}': ${squashed.message}`,
+          ),
+        )
+      }
+      const message = squashed instanceof Error ? squashed.message : String(squashed)
+      return {
+        content: [{ type: "text" as const, text: message }],
+        isError: true,
+      }
+    })
+    .exhaustive()
+
+export const attachServerCloseRuntimeDisposal = <A, E>(
+  server: McpServer,
+  runtime: ManagedRuntime.ManagedRuntime<A, E>,
+): void => {
+  const originalClose = server.close.bind(server)
+  let disposePromise: Promise<void> | undefined
+  const disposeRuntime = (): Promise<void> => {
+    if (disposePromise === undefined) {
+      disposePromise = runtime.dispose().catch((err: unknown) => {
+        disposePromise = undefined
+        return Promise.reject(err)
+      })
+    }
+    return disposePromise
+  }
+  server.close = (): Promise<void> => originalClose().finally(() => disposeRuntime())
+  const previousOnClose = server.server.onclose
+  server.server.onclose = () => {
+    previousOnClose?.()
+    void disposeRuntime().catch((err: unknown) => {
+      process.stderr.write(
+        `[harness-mcp] Runtime dispose error: ${err instanceof Error ? err.message : String(err)}\n`,
+      )
+    })
+  }
 }

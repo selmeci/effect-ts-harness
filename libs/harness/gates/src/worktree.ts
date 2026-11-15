@@ -1,35 +1,26 @@
 import { join, resolve } from "node:path"
-
-export {
-  decideOmnigraphReconcile,
-  deriveRepoOmnigraphPort,
-  type GitHeadState,
-  type GraphHeadMeta,
-  GraphHeadMetaSchema,
-  type OmnigraphReconcileDecision,
-  OmnigraphReconcileInput,
-  OmnigraphReconcileReason,
-  readGraphHeadMeta,
-  resolveCanonicalRepoRoot,
-  resolveGitHeadState,
-  resolveOmnigraphClusterDir,
-  resolveOmnigraphTaskBranches,
-  sanitizeOmnigraphBranchSlug,
-  writeGraphHeadMeta,
-} from "@harness/graph"
+import { Schema } from "effect"
+import {
+  normalizeNonRootWorkspacePath,
+  sanitizeWorktreeIdSegment,
+  WorkspaceFilePath,
+} from "@harness/contract"
 
 export const resolveHarnessStateDir = (
-  repoRoot: string,
+  workspaceRoot: string,
   env: NodeJS.ProcessEnv = process.env,
 ): string => {
-  const customDir = env.HARNESS_STATE_DIR?.trim()
-  if (customDir && customDir.length > 0) {
-    return resolve(repoRoot, customDir)
+  const validRoot = normalizeNonRootWorkspacePath(
+    resolve(normalizeNonRootWorkspacePath(workspaceRoot)),
+  )
+  const rawCustomDir = env.HARNESS_STATE_DIR
+  if (rawCustomDir !== undefined && rawCustomDir.length > 0) {
+    const decodedCustom = Schema.decodeSync(WorkspaceFilePath)(rawCustomDir)
+    return normalizeNonRootWorkspacePath(resolve(validRoot, decodedCustom))
   }
-  const worktreeId = env.HARNESS_WORKTREE_ID?.trim()
-  if (worktreeId && worktreeId.length > 0) {
-    const sanitized = worktreeId.replace(/[^a-zA-Z0-9._-]/g, "_")
-    return join(repoRoot, ".harness", "worktrees", sanitized)
+  const rawWorktreeId = env.HARNESS_WORKTREE_ID
+  if (rawWorktreeId !== undefined && rawWorktreeId.length > 0) {
+    return join(validRoot, ".harness", "worktrees", sanitizeWorktreeIdSegment(rawWorktreeId))
   }
-  return join(repoRoot, ".harness")
+  return join(validRoot, ".harness")
 }

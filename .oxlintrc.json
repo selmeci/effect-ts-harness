@@ -20,8 +20,8 @@
         "enforceBuildableLibDependency": true,
         "depConstraints": [
           { "sourceTag": "scope:web", "onlyDependOnLibsWithTags": ["type:contract"] },
-          { "sourceTag": "type:contract", "onlyDependOnLibsWithTags": ["type:contract"] },
-          { "sourceTag": "type:core", "onlyDependOnLibsWithTags": ["type:contract", "type:core"] },
+          { "sourceTag": "type:contract", "onlyDependOnLibsWithTags": [] },
+          { "sourceTag": "type:core", "onlyDependOnLibsWithTags": ["type:contract", "type:service", "type:core"] },
           {
             "sourceTag": "type:domain",
             "onlyDependOnLibsWithTags": [
@@ -35,8 +35,6 @@
             "sourceTag": "type:service",
             "onlyDependOnLibsWithTags": [
               "type:contract",
-              "type:core",
-              "type:domain",
               "type:service"
             ]
           },
@@ -81,8 +79,8 @@
           {
             "patterns": [
               {
-                "group": ["drizzle-orm", "drizzle-orm/*"],
-                "message": "drizzle-orm is infra-only — import it only in type:infra libraries; repositories decode rows into contract Schemas (docs/mvp_v2.md §10)."
+                "group": ["drizzle-orm", "drizzle-orm/*", "drizzle-kit", "drizzle-kit/*"],
+                "message": "drizzle-orm and drizzle-kit are banned across the workspace — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator)."
               },
               {
                 "group": ["alchemy", "alchemy/*"],
@@ -100,13 +98,63 @@
     {
       "files": ["libs/**/test/**/*.ts", "apps/**/test/**/*.ts"],
       "rules": {
-        "harness/test-integrity": "error"
+        "harness/test-integrity": "error",
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["drizzle-orm", "drizzle-orm/*", "drizzle-kit", "drizzle-kit/*"],
+                "message": "drizzle-orm and drizzle-kit are banned across the workspace — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator)."
+              }
+            ]
+          }
+        ]
       }
     },
     {
       "files": ["**/infra/src/**/*.ts", "**/infra/test/**/*.ts", "apps/sample/**/*.ts"],
       "rules": {
-        "no-restricted-imports": "off"
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["drizzle-orm", "drizzle-orm/*", "drizzle-kit", "drizzle-kit/*"],
+                "message": "drizzle-orm and drizzle-kit are banned across the workspace — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator)."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "libs/**/contract/src/**/*.ts",
+        "libs/**/service/src/**/*.ts",
+        "libs/**/domain/src/**/*.ts",
+        "libs/**/core/src/**/*.ts",
+        "libs/harness/decision/src/**/*.ts",
+        "libs/harness/ingest/src/**/*.ts",
+        "libs/harness/gates/src/**/*.ts",
+        "libs/harness/graph/src/**/*.ts"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["@effect/ai-typesafe", "@effect/ai-typesafe/*", "@effect/platform", "@effect/platform-*"],
+                "message": "@effect/ai-typesafe and @effect/platform* are impure I/O bindings banned in type:contract, type:service, type:core, and type:domain."
+              },
+              {
+                "group": ["@effect/sql-*", "alchemy", "alchemy/*", "drizzle-orm", "drizzle-orm/*", "drizzle-kit", "drizzle-kit/*"],
+                "message": "Infrastructure SQL, Alchemy, and Drizzle packages are banned in type:contract, type:service, type:core, and type:domain."
+              }
+            ]
+          }
+        ]
       }
     }
   ]

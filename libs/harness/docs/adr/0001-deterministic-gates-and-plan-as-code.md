@@ -4,7 +4,7 @@ title: Deterministic Gates and Compilable Plan-as-Code Skeletons Over Prose Plan
 status: accepted
 date: 2026-10-25
 enforced_by:
-  - libs/harness/gates/src/stub.ts
+  - libs/harness/contract/src/stub.ts
   - libs/harness/graph/src/policy-check.ts
   - libs/harness/graph/src/type-extractor.ts
   - libs/harness/graph/src/extractor/ast-policy-extractor.ts
@@ -58,7 +58,7 @@ We establish two foundational architectural rules for the harness:
 
 1. **Compilable Plan-as-Code Skeletons Over Prose Plans:**
    - Planning is not a prose exercise. The plan **IS** compilable TypeScript code committed directly to `.ts` files in the workspace.
-   - Skeletons must use `stub<A, E, R>(...args)` from `@harness/gates`. This consumes arguments to satisfy linters while preserving the precise output (`A`), error (`E`), and service dependency (`R`) channels across all 4 Nx package tiers (`contract`, `service`, `domain`, `infra`).
+   - Skeletons must use `stub<A, E, R>(...args)` from `@harness/contract`. This consumes arguments to satisfy linters while preserving the precise output (`A`), error (`E`), and service dependency (`R`) channels across all 4 Nx package tiers (`contract`, `service`, `domain`, `infra`).
    - The skeleton phase is guarded by `harness plan-check`, which compiles the entire workspace (`HARNESS_PLAN_CHECK=1`), verifies span name uniqueness, validates graph architectural policies (`domain-requires-infra`, `impure-decider`, `layer-cycle`), and snapshots the topology into `.harness/plan-graph-snapshot.json`.
 
 2. **Deterministic Gates Always Win Over LLMs:**
@@ -101,6 +101,6 @@ We establish two foundational architectural rules for the harness:
 
 | Rule                                          | Enforced By                                                                      | Gate / Mechanism                                                                                     | Governed Symbols                                                                                                                                     |
 | --------------------------------------------- | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Compilable plan skeletons                     | libs/harness/gates/src/stub.ts                                                   | `stub<A, E, R>()` and harness plan-check                                                             | `GraphGc.decide`                                                                                                                                     |
+| Compilable plan skeletons                     | libs/harness/contract/src/stub.ts                                                | `stub<A, E, R>()` and harness plan-check                                                             | `GraphGc.decide`                                                                                                                                     |
 | Deterministic graph policies & type-cast bans | libs/harness/graph/src/policy-check.ts, libs/harness/graph/src/type-extractor.ts, libs/harness/graph/src/extractor/ast-policy-extractor.ts, libs/harness/graph/src/extractor/effect-fn-extractor.ts | checkEffectGraph (`unsafe-type-cast`, `domain-requires-infra`, `impure-decider`, `layer-cycle`)      | `SpanBudget.decide`, `MigrationSafety.decide`                                                                                                        |
 | Syntax bans & ADR linting                     | tools/oxlint/syntax-bans.js, libs/harness/gates/src/adr-lint.ts                  | tools/oxlint/syntax-bans.js (zero `any`, unsafe `never`, double type assertions) & AdrDocLint.decide | `MutationCheck.decide`, `LoopCircuitBreaker.decide`, `EarsSpecLint.decide`, `AdrDocLint.decide`, `OntologyInvariants.decide`, `SessionReport.decide` |

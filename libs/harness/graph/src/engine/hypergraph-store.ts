@@ -1,8 +1,8 @@
-import { Effect, Option } from "effect"
+import { Option, Result } from "effect"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
 import {
-  decideConceptLattice,
+  computeConceptLatticeSync,
   HARNESS_PERA_CONCEPT_LATTICE_CONFIG,
   validateRelationRolesWithLattice,
 } from "../concept-lattice.js"
@@ -123,16 +123,12 @@ export const mapPlaysRoleToOmnigraphEdgeName = (
 export const isHarnessGraph = (u: unknown): u is HarnessGraph =>
   typeof u === "object" && u !== null && HarnessGraphTypeId in u
 
-let cachedPeraConceptLatticeResult: ConceptLatticeResult | undefined
+const PERA_CONCEPT_LATTICE_RESULT: ConceptLatticeResult = Result.getOrThrow(
+  computeConceptLatticeSync(HARNESS_PERA_CONCEPT_LATTICE_CONFIG),
+)
 
-export const getPeraConceptLatticeResult = (): ConceptLatticeResult => {
-  if (cachedPeraConceptLatticeResult === undefined) {
-    cachedPeraConceptLatticeResult = Effect.runSync(
-      decideConceptLattice(HARNESS_PERA_CONCEPT_LATTICE_CONFIG),
-    )
-  }
-  return cachedPeraConceptLatticeResult
-}
+export const getPeraConceptLatticeResult = (): ConceptLatticeResult =>
+  PERA_CONCEPT_LATTICE_RESULT
 
 export const pushUnique = <T>(arr: Array<T>, item: T): void => {
   if (!arr.includes(item)) arr.push(item)
@@ -374,14 +370,20 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
     }
 
     for (const [, node] of Graph.nodes(mutable)) {
-      if (node._tag === "EffectFn") {
-        if ((node.payloadSchemas?.length ?? 0) > 0 || node.inputSchema || node.outputSchema) {
-          const b = getOrCreateSigBuilder(node.qualname)
-          for (const s of node.payloadSchemas ?? []) b.payloadSchemas.add(s)
-          if (node.inputSchema) b.payloadSchemas.add(node.inputSchema)
-          if (node.outputSchema) b.payloadSchemas.add(node.outputSchema)
-        }
-      }
+      match(node)
+        .with({ _tag: "EffectFn" }, (fn) => {
+          if ((fn.payloadSchemas?.length ?? 0) > 0 || fn.inputSchema || fn.outputSchema) {
+            const b = getOrCreateSigBuilder(fn.qualname)
+            for (const s of fn.payloadSchemas ?? []) b.payloadSchemas.add(s)
+            if (fn.inputSchema) b.payloadSchemas.add(fn.inputSchema)
+            if (fn.outputSchema) b.payloadSchemas.add(fn.outputSchema)
+          }
+        })
+        .with(
+          { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+          () => {},
+        )
+        .exhaustive()
     }
 
     for (const [, b] of sigBuilders) {
@@ -582,28 +584,33 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
 
     if (input.specifiesSymbols === undefined) {
       for (const [, node] of Graph.nodes(mutable)) {
-        if (node._tag === "EarsSpec") {
-          const specId = node.id
-          const specTarget = resolveTargetEntityKey(`EarsSpec:${specId}`)
-          if (specTarget === undefined) continue
-
-          for (const targetKey of node.specifiedSymbols ?? []) {
-            const matchedTarget = resolveTargetEntityKey(targetKey)
-            if (matchedTarget !== undefined) {
-              const relId = RelationId.make(`TraceabilityTuple:spec-target:${specId}->${matchedTarget.key}`)
-              const ttNode: TraceabilityTupleRelation = {
-                _tag: "TraceabilityTuple",
-                relationId: relId,
-                earsSpecId: specId,
-                targetSymbolQualname: matchedTarget.key,
-                verifyingTestQualnames: [],
+        match(node)
+          .with({ _tag: "EarsSpec" }, (specNode) => {
+            const specId = specNode.id
+            const specTarget = resolveTargetEntityKey(`EarsSpec:${specId}`)
+            if (specTarget === undefined) return
+            for (const targetKey of specNode.specifiedSymbols ?? []) {
+              const matchedTarget = resolveTargetEntityKey(targetKey)
+              if (matchedTarget !== undefined) {
+                const relId = RelationId.make(`TraceabilityTuple:spec-target:${specId}->${matchedTarget.key}`)
+                const ttNode: TraceabilityTupleRelation = {
+                  _tag: "TraceabilityTuple",
+                  relationId: relId,
+                  earsSpecId: specId,
+                  targetSymbolQualname: matchedTarget.key,
+                  verifyingTestQualnames: [],
+                }
+                const ttIdx = addOrGetNode(ttNode)
+                addPlaysRole(ttIdx, relId, specTarget.idx, specTarget.key, "specifying-ears")
+                addPlaysRole(ttIdx, relId, matchedTarget.idx, matchedTarget.key, "specified-target")
               }
-              const ttIdx = addOrGetNode(ttNode)
-              addPlaysRole(ttIdx, relId, specTarget.idx, specTarget.key, "specifying-ears")
-              addPlaysRole(ttIdx, relId, matchedTarget.idx, matchedTarget.key, "specified-target")
             }
-          }
-        }
+          })
+          .with(
+            { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+            () => {},
+          )
+          .exhaustive()
       }
     }
 

@@ -1323,7 +1323,7 @@
         schedule: "Retries, repetition, backoff, timing policies",
         testing: "@effect/vitest, TestClock, mock Layers, emulated tests",
         "alchemy-infra": "Alchemy cloud resources and bindings inside Layers",
-        "d1-repository": "D1 SQLite tables and Drizzle repositories in type:infra",
+        "d1-repository": "D1 SQLite queries and @effect/sql-d1 repositories in type:infra",
         "durable-object-state": "Durable Object SQLite state and synchronous transactions",
         httpapi: "Public HttpApi endpoints with declared error Schemas and OpenAPI",
         rpc: "Internal RpcGroup procedures and Cloudflare.toHttpClient DO calls",
@@ -1421,7 +1421,7 @@
                         <code>harness/syntax-bans</code> -&gt; mechanická (zakázané throw/try/catch)
                       </li>
                       <li>
-                        <code>no-restricted-imports</code> -&gt; mechanická (drizzle/alchemy mimo
+                        <code>no-restricted-imports</code> -&gt; mechanická (@effect/sql-*/alchemy mimo
                         infra)
                       </li>
                       <li>
@@ -2013,7 +2013,7 @@
               <button class="rule-btn" data-rule="rule-domain-cloud">
                 <div class="rule-btn-title"><span>🚫</span> domain-requires-cloud-binding</div>
                 <div class="rule-btn-desc">
-                  Zákaz závislostí na Cloudflare / Alchemy / Drizzle tagov v doméne.
+                  Zákaz závislostí na Cloudflare / Alchemy / SQL driver tagoch v doméne (`drizzle-orm` zakázané).
                 </div>
               </button>
 
@@ -3028,13 +3028,13 @@ expect(violations).toHaveLength(0);</code></pre>
             status: "ASK",
             badgeClass: "badge-ask",
             scenarioTitle: "Eskalácia: Pokus o priamy import infra balíka do domény v kostre",
-            who: "Agent navrhne v kostre import knižnice `drizzle-orm` alebo `@effect/sql-d1` do `type:domain`.",
+            who: "Agent navrhne v kostre import knižnice `@effect/sql-d1` (alebo zakázanej `drizzle-orm`) do `type:domain`.",
             input:
-              'import { sqliteTable } from "drizzle-orm/sqlite-core" vo vnútri libs/sample/domain/src/cart.ts',
+              'import { D1Client } from "@effect/sql-d1" vo vnútri libs/sample/domain/src/cart.ts',
             underTheHood:
-              "Pravidlo `no-restricted-imports` v oxlinte a Nx boundaries zistí zakázaný import. Drizzle a SQL sa smú nachádzať VÝLUČNE v balíkoch `type:infra`.",
+              "Pravidlo `no-restricted-imports` v oxlinte a Nx boundaries zistí zakázaný import. `@effect/sql-*` sa smie nachádzať VÝLUČNE v balíkoch `type:infra` (`drizzle-orm` je zakázané všade).",
             output:
-              'Upozornenie (ASK): "Drizzle nesmie byť v type:domain. Má sa vytvoriť rozhranie CartRepo v libs/sample/service a implementácia v libs/sample/infra?"',
+              'Upozornenie (ASK): "@effect/sql-d1 nesmie byť v type:domain. Má sa vytvoriť rozhranie CartRepo v libs/sample/service a implementácia v libs/sample/infra?"',
             next: "Vývojár potvrdí správne rozdelenie vrstiev pred generovaním súborov.",
           },
         },
@@ -3730,7 +3730,7 @@ expect(violations).toHaveLength(0);</code></pre>
           title: "Pravidlo: domain-requires-cloud-binding",
           badge: "VIOLATION",
           badgeClass: "badge-block",
-          desc: "Funkcia v `type:domain` nesmie vyžadovať žiadny cloudový binding (Cloudflare, Alchemy, Drizzle, Provider, Binding).",
+          desc: "Funkcia v `type:domain` nesmie vyžadovať žiadny cloudový binding (Cloudflare, Alchemy, D1, DurableObject, Provider, Binding).",
           output:
             "✖ checkEffectGraph zlyhal:\n[domain-requires-cloud-binding] Domain function 'User.exportPhotos' forbidden dependency on cloud binding 'CloudflareR2Bucket' (User.exportPhotos -> CloudflareR2Bucket)\nExit kód: 1",
           fix: "Presuňte manipuláciu s cloudovým úložiskom do balíka `type:infra`. Vytvorte doménové rozhranie `PhotoStorage` a implementujte ho cez Alchemy resource binding vo vrstve infra.",
@@ -4135,8 +4135,8 @@ expect(violations).toHaveLength(0);</code></pre>
           tool: "oxlint syntax-bans.js (rule: banned-raw-sql-interpolation)",
           exit: "exitCode: 1",
           output:
-            "Error: Raw template literal interpolation detected in db.prepare(`SELECT * FROM users WHERE id = '${userId}'`) at libs/sample/infra/src/user-repo.ts:34.\nUse parameterized query .prepare(\"SELECT * FROM users WHERE id = ?\").bind(userId) or Drizzle sql tag.",
-          fix: "Zákaz reťazcovej interpolácie v SQL volaniach. Použite výhradne parametrizované dotazy s .bind(...) alebo Drizzle sql template tag.",
+            "Error: Raw template literal interpolation detected in db.prepare(`SELECT * FROM users WHERE id = '${userId}'`) at libs/sample/infra/src/user-repo.ts:34.\nUse parameterized query .prepare(\"SELECT * FROM users WHERE id = ?\").bind(userId) or SqlClient sql`...` tag.",
+          fix: "Zákaz reťazcovej interpolácie v SQL volaniach. Použite výhradne parametrizované dotazy s .bind(...) alebo SqlClient sql`...` template tag.",
         },
         "schedule-forever": {
           title: "Riziko zacyklenia: Neohraničený Schedule.forever v Effect.retry",

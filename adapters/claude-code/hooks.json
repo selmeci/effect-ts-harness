@@ -16,7 +16,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard"
+            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard || exit 2",
+            "timeout": 15
           }
         ]
       },
@@ -25,14 +26,15 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard"
+            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard || exit 2",
+            "timeout": 15
           }
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "Edit|Write",
+        "matcher": "Edit|Write|MultiEdit",
         "hooks": [
           {
             "type": "command",
@@ -46,7 +48,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done"
+            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done || exit 2",
+            "timeout": 30
           }
         ]
       }

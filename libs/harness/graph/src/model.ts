@@ -245,7 +245,7 @@ export const HttpEndpointTupleRelation = Schema.TaggedStruct("HttpEndpointTuple"
 })
 export type HttpEndpointTupleRelation = typeof HttpEndpointTupleRelation.Type
 
-export const MigrationEngineKind = Schema.Literals(["SqliteMigrator", "DrizzleD1"])
+export const MigrationEngineKind = Schema.Literals(["SqliteMigrator", "EffectSqlD1"])
 export type MigrationEngineKind = typeof MigrationEngineKind.Type
 
 export const MigrationTupleRelation = Schema.TaggedStruct("MigrationTuple", {

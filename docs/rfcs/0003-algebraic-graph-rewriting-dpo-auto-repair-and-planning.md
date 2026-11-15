@@ -23,6 +23,9 @@ target_specs:
 
 # RFC-0003: Graph Algebra, Double-Pushout (DPO) Subgraph Rewriting (`GraphRewrite.decide`), Automated Antipattern Repair & Generative Planning
 
+> [!NOTE]
+> **Data Layer Supersession (`harness:ADR-0008` / `harness:ADR-0013`):** All historical `drizzle-orm` / `drizzle-kit` references in this early RFC are **superseded and banned workspace-wide**. The workspace uses native Effect v4 SQL (`@effect/sql-d1`, `@effect/sql-sqlite-do`, `SqlClient.SqlClient`, `SqliteMigrator`, `Schema`) exclusively in `type:infra`.
+
 ## 1. Executive Summary
 
 This document specifies **`GraphRewrite.decide`**—a pure functional **Algebraic Graph Rewriting Engine (`R = never`)** grounded in the **Double-Pushout (DPO)** approach in the category of typed hypergraphs $\mathbf{HGraph}_T$. While `GraphInfer.decide` ([RFC-0002](./0002-declarative-datalog-inference-and-edge-completion.md)) deductively derives transitive relations, antipatterns, and suggested edges (`SuggestedEdge`), **`GraphRewrite.decide` applies algebraic graph productions $p: L \xleftarrow{l} K \xrightarrow{r} R$ with Negative Application Conditions ($\text{NAC}$) to surgically transform one subgraph into another**.

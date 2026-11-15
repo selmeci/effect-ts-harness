@@ -4,7 +4,7 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { classifyFileWrite } from "@harness/gates"
 import { buildHarnessGraph } from "@harness/graph"
-import { runCli } from "../src/index.js"
+import { runCli } from "./run-cli-helper.js"
 
 describe("harness cli plan-synth and repair commands", () => {
   it("rejects plan-synth without spec-id and prints usage", async () => {

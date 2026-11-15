@@ -118,7 +118,7 @@ flowchart LR
     end
 
     subgraph "type:infra"
-        INF_Repo["PhotoRepoLive<br/>(Drizzle D1)"]
+        INF_Repo["PhotoRepoLive<br/>(@effect/sql-d1)"]
         INF_Counter["AlbumCounterClientLive<br/>(DO SQLite RPC)"]
     end
 

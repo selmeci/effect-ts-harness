@@ -20,80 +20,93 @@ Tradičné vývojové rámce s podporou umelej inteligencie trpia halucináciami
 
 ---
 
-### 1.2 Prehľad 12 balíkov v monorepe
+### 1.2 Prehľad 18 balíkov v monorepe (5-vrstvová hexagonálna topológia)
 
-Monorepo je spravované nástrojom **Nx** a balíčkovacím manažérom **pnpm**. Pozostáva z 12 striktne izolovaných balíkov rozdelených do infraštruktúry harnessu a ukážkovej aplikácie:
+Monorepo je spravované nástrojom **Nx** a balíčkovacím manažérom **pnpm**. Pozostáva z **18 striktne izolovaných balíkov** (**14** knižníc v `libs/` + **4** aplikácie v `apps/`) rozdelených do 5 hexagonálnych vrstiev (`type:contract` $\rightarrow$ `type:service` $\rightarrow$ `type:core`/`type:domain` $\rightarrow$ `type:infra` $\rightarrow$ `type:app`):
 
 ```mermaid
 graph TD
-    subgraph "Harness Platform (libs/harness & apps/harness-*)"
-        CLI["apps/harness-cli<br/>(Riadiace CLI rozhranie)"]
-        MCP["apps/harness-mcp<br/>(MCP server pre agentov)"]
-        GATES["libs/harness/gates<br/>(Deterministické brány & pečiatky)"]
-        DECISION["libs/harness/decision<br/>(clef-flash model & schémy)"]
-        INGEST["libs/harness/ingest<br/>(AST indexácia & test tracer)"]
-        GRAPH["libs/harness/graph<br/>(effect/Graph & Omnigraph sync)"]
+    subgraph "Harness Platform (libs/harness/* & apps/harness-*)"
+        CLI["apps/harness-cli<br/>(type:app — effect/cli + NodeRuntime)"]
+        MCP["apps/harness-mcp<br/>(type:app — ManagedRuntime, 15 MCP nástrojov)"]
+        H_INFRA["libs/harness/infra<br/>(type:infra — NodeServices, ScopedCache.makeWith, Ref+Deferred, UnixSocketDaemon, LocalDecisionModel)"]
+        GATES["libs/harness/gates<br/>(type:core — 18+ čistých deciderov & brány)"]
+        DECISION["libs/harness/decision<br/>(type:core — 13 schém DecisionModel & čisté smerovanie)"]
+        INGEST["libs/harness/ingest<br/>(type:core — AST indexácia & test tracer)"]
+        GRAPH["libs/harness/graph<br/>(type:core — effect/Graph, Datalog & Omnigraph)"]
+        H_SVC["libs/harness/service<br/>(type:service — Context.Service porty)"]
+        H_CON["libs/harness/contract<br/>(type:contract — Schémy, chyby & stub)"]
     end
 
-    subgraph "Sample Application (libs/sample & apps/sample-*)"
+    subgraph "Event Sourcing (libs/es/*)"
+        ES_CON["libs/es/contract (type:contract)"]
+        ES_CORE["libs/es/core (type:core)"]
+        ES_INFRA["libs/es/infra (type:infra — @effect/sql-sqlite-do)"]
+    end
+
+    subgraph "Sample Application (libs/sample/* & apps/sample-*)"
         CONTRACT["libs/sample/contract<br/>(type:contract — Schemas & APIs)"]
         SERVICE["libs/sample/service<br/>(type:service — Context.Service)"]
         DOMAIN["libs/sample/domain<br/>(type:domain — Pure logic & Deciders)"]
-        INFRA["libs/sample/infra<br/>(type:infra — Drizzle, DO, Alchemy)"]
+        INFRA["libs/sample/infra<br/>(type:infra — @effect/sql-d1, @effect/sql-sqlite-do, Alchemy)"]
         APP["apps/sample<br/>(type:app — Cloudflare Worker & DO)"]
         WEB["apps/sample-web<br/>(type:app, scope:web — Vite + React)"]
     end
 
-    CLI --> GATES
-    CLI --> DECISION
-    CLI --> INGEST
-    CLI --> GRAPH
+    CLI --> H_INFRA & GATES & DECISION & INGEST & GRAPH
+    MCP --> H_INFRA & GATES & DECISION & INGEST & GRAPH
+    H_INFRA --> GRAPH & H_SVC & H_CON
+    GATES --> GRAPH & H_SVC & H_CON
+    DECISION --> GATES & H_SVC & H_CON
+    INGEST --> H_SVC & H_CON
+    GRAPH --> H_SVC & H_CON
+    H_SVC --> H_CON
 
-    MCP --> GRAPH
-    MCP --> DECISION
+    ES_CORE --> ES_CON
+    ES_INFRA --> ES_CORE & ES_CON
 
-    DOMAIN --> CONTRACT
-    DOMAIN --> SERVICE
+    DOMAIN --> CONTRACT & SERVICE
     SERVICE --> CONTRACT
-    INFRA --> CONTRACT
-    INFRA --> SERVICE
-    INFRA --> DOMAIN
-    APP --> INFRA
-    APP --> CONTRACT
+    INFRA --> CONTRACT & SERVICE & DOMAIN
+    APP --> INFRA & CONTRACT
     WEB --> CONTRACT
 ```
 
 #### Komponenty Harnessu (`libs/harness/*`, `apps/harness-*`)
 
-1. **`libs/harness/gates`:**
-   - Implementuje deterministické bezpečnostné pravidlá príkazov (`ALLOWLIST`, `DENYLIST`, `ASKLIST`).
-   - Poskytuje skeleton helper `stub<A, E, R>(...args)`, ktorý uchováva presné typy kanálov počas plánovania.
-   - Počíta rekurzívny kryptografický SHA-256 hash pracovného stromu a zapisuje/overuje `.harness/verify-stamp.json`.
-   - Zabezpečuje porovnanie grafov plánu a implementácie (`diffPlanAndImplGraphs`).
-2. **`libs/harness/decision`:**
-   - Integruje lokálny model `clef-flash` pomocou `@effect/ai-typesafe` (`TypeSafeDecisionModel`) s timeoutom `1500 ms`.
-   - Definuje 5 typovo bezpečných schém: `IdiomRouterV1`, `GuardV1`, `TriageV1`, `PlanStepCoverageV1` a `LearnProposalV1`.
-3. **`libs/harness/ingest`:**
-   - Využíva `@ast-grep/napi` na statickú indexáciu všetkých deklarácií `Effect.fn` v repozitári (`buildWorkspaceFnIndex`) a detekciu duplicitných názvov spanov.
+1. **`libs/harness/contract` (`type:contract`):**
+   - Definuje zdieľané dátové schémy, typované chyby (`Schema.TaggedErrorClass`), `stub<A, E, R>(...args)` a kontrakty pre brány, cache a daemon. Importuje **výhradne** `effect`.
+2. **`libs/harness/service` (`type:service`):**
+   - Definuje čisté `Context.Service` porty (`WorkspaceFs`, `HarnessSubprocessRunner`, `ActiveMutantContext`, `AstGateCachePort`, `DecisionCachePort`, `UnixSocketDaemonPort`) bez `node:*` importov a bez `Live` vrstiev.
+3. **`libs/harness/gates` (`type:core`):**
+   - Implementuje 18+ čistých deterministických brán a deciderov (`R = never`), vrátane `GraphGc.decide`, `SpanBudget.decide`, `HarnessTierTopology.decide`, `SelfDogfooding.decide` a `AstGateCache.decide`.
+   - Počíta rekurzívny kryptografický SHA-256 hash pracovného stromu a overuje `.harness/verify-stamp.json`.
+4. **`libs/harness/decision` (`type:core`):**
+   - Definuje čisté kontrakty a deterministický fallback nad `DecisionModel` (samotná živá vrstva `LocalDecisionModel` v `libs/harness/infra/src/local-decision-model-live.ts` s timeoutom `1500 ms` žije v `@harness/infra`, aby `@harness/decision` zostalo 100% čisté).
+   - Definuje **13 typovo bezpečných schém**: `IdiomRouterV1`, `GuardV1`, `TriageV1`, `PlanStepCoverageV1`, `LearnProposalV1`, `OntologyConflictV1`, `EarsClauseSemanticsV1`, `HoleRelevanceAndEdgePriorV1`, `DstHazardPriorV1`, `MutantEquivalenceV1`, `SynthesizedRuleQualityV1`, `DpoCandidateRankerV1` a `PlanSearchScorerV1`.
+5. **`libs/harness/ingest` (`type:core`):**
+   - Využíva `@ast-grep/napi` v `fn-index.ts` na statickú indexáciu všetkých deklarácií `Effect.fn` v repozitári (`buildWorkspaceFnIndex`) a detekciu duplicitných názvov spanov, ako aj `recording-tracer.ts` / `runWithTestTracer` na zaznamenávanie runtime NDJSON spanov počas testov.
    - Poskytuje testovací tracer `runWithTestTracer` a W3C `traceparent` koreláciu prepájajúcu `@effect/vitest` testy s reálnymi volaniami funkcií.
-4. **`libs/harness/graph`:**
-   - Zostavuje typovo orientovaný funkcionálny graf závislostí pomocou `effect/Graph` a `ts-morph` (`extractWorkspaceTypeAwareGraph`).
-   - Extrahuje architektonické dokumenty ako uzly `AdrDoc` a `EarsSpec` s hranami `GovernsSymbol` a `SpecifiesSymbol` smerujúcimi na symboly kódu (`EffectFn`, `ServiceTag`, `TaggedError`).
-   - Validuje architektonické invarianty (`checkEffectGraph` vrátane pravidiel `domain-requires-infra`, `domain-requires-cloud-binding`, `impure-decider`, `layer-cycle` a `unmapped-spec-symbol`).
-   - Zabezpečuje obojsmernú synchronizáciu s lokálnym Omnigraphom (`OmnigraphSync`, NDJSON export, zlučovanie vetiev `plan/current` a `impl/current` do `main`).
-   - Obsahuje autorizačné pravidlá Cedar (`policies.cedar`).
-5. **`apps/harness-cli`:**
-   - Centrálny vstupný bod pre nástroje agentov a automatizačné háky (hooks).
-   - Poskytuje subpríkazy: `guard`, `route`, `plan-check`, `verify`, `done`, `ingest`, `session`, `doctor`, `learn`.
-6. **`apps/harness-mcp`:**
-   - Štandardný Model Context Protocol (MCP) server bežiaci cez `stdio`.
-   - Sprístupňuje agentom 6 analytických nástrojov: `harness_resolve`, `harness_callers`, `harness_callees`, `harness_tests_reaching`, `harness_structural_search` a `harness_route`.
+6. **`libs/harness/graph` (`type:core`):**
+   - Zostavuje typovo orientovaný funkcionálny graf závislostí pomocou `effect/Graph`, `ts-morph`, Datalogu (`@electric-sql/d2ts`) a DPO prepisovania.
+   - Extrahuje architektonické dokumenty ako uzly `AdrDoc` a `EarsSpec` s hranami `REALIZES` a `INFLUENCES` smerujúcimi na symboly kódu.
+   - Validuje architektonické invarianty a zabezpečuje obojsmernú synchronizáciu s lokálnym Omnigraphom (`OmnigraphSync`, `.gq` dotazy).
+7. **`libs/harness/infra` (`type:infra`):**
+   - Poskytuje natívne Effect v4 `Live` vrstvy nad `@effect/platform-node` (`NodeServices.layer`, `FileSystem.FileSystem`, `Path.Path`, `ChildProcessSpawner`, `ScopedCache.makeWith` pre `AstGateCacheLive`, per-key `Ref` + `Deferred` single-flight deduplikáciu pre `DecisionCacheLive`, `SynchronizedRef`, `Effect.acquireRelease` pre `UnixSocketDaemonLive`, a `LocalDecisionModel` v `libs/harness/infra/src/local-decision-model-live.ts`).
+8. **`apps/harness-cli` (`type:app`):**
+   - Deklaratívny `effect/cli` + `NodeRuntime.runMain` vstupný bod pre nástroje agentov a automatizačné háky (hooks).
+   - Poskytuje subpríkazy: `guard`, `route`, `plan-check`, `verify`, `done`, `ingest`, `session`, `doctor`, `learn`, `ontology`, `gc`, `mutate`, `report`, `check-openapi`, `check-migrations`, `check-event-schemas`, `benchmark`, `scenario`.
+9. **`apps/harness-mcp` (`type:app`):**
+   - Štandardný Model Context Protocol (MCP) server bežiaci cez `stdio` nad zdieľaným `ManagedRuntime`.
+   - Sprístupňuje agentom **15 analytických nástrojov**: `harness_resolve`, `harness_callers`, `harness_callees`, `harness_tests_reaching`, `harness_structural_search`, `harness_route`, `harness_ontology_why`, `harness_ontology_impact`, `harness_ontology_check`, `harness_gq_query`, `harness_graph_infer`, `harness_graph_complete`, `harness_graph_rewrite`, `harness_lsp_diagnostics` a `harness_telemetry_report`.
 
-#### Komponenty Ukážkovej Aplikácie (`libs/sample/*`, `apps/sample-*`)
+#### Komponenty Event Sourcingu (`libs/es/*`) & Ukážkovej Aplikácie (`libs/sample/*`, `apps/sample-*`)
 
-7. **`libs/sample/contract` (`type:contract`):**
+10. **`libs/es/contract` (`type:contract`), `libs/es/core` (`type:core`), `libs/es/infra` (`type:infra`):**
+    - Zdieľané event-sourcing kontrakty, čistý `Decider` / `AggregateRoot` / `EventStore` engine a natívna `@effect/sql-sqlite-do` infraštruktúra (nulový Drizzle).
+11. **`libs/sample/contract` (`type:contract`):**
    - Definuje zdieľané dátové schémy (`Schema.Struct`), verejné API kontrakty (`HttpApiEndpoint`, `RpcGroup`) a typované chyby (`Schema.TaggedErrorClass`).
-   - Obsahuje kanonický súbor `openapi.json` a skript spätnej kompatibility `scripts/check-openapi.mjs`.
+   - Obsahuje kanonický súbor `openapi.json` overovaný cez typovaný príkaz `harness check-openapi`.
    - Importuje **výhradne** balík `effect`.
 8. **`libs/sample/service` (`type:service`):**
    - Definuje abstraktné servisné identifikátory a rozhrania (`Context.Service`), napríklad `PhotoRepo` a `AlbumCounterClient`.
@@ -101,7 +114,7 @@ graph TD
    - Obsahuje čistú doménovú logiku, prípady použitia a rozhodovacie funkcie (`*.decide`).
    - Striktné pravidlo čistoty: decider funkcie musia mať environment `R = never` a nesmú vykonávať žiadne I/O. Nesmie importovať `type:infra` ani `alchemy`.
 10. **`libs/sample/infra` (`type:infra`):**
-    - Konkrétne implementácie vrstiev (`Layer.Layer`), integrácia Drizzle ORM pre Cloudflare D1 (SQLite) a Durable Objects.
+    - Konkrétne implementácie vrstiev (`Layer.Layer`), natívna integrácia `@effect/sql-d1` / `@effect/sql-sqlite-do` pre Cloudflare D1 (SQLite) a Durable Objects (`drizzle-orm` a `drizzle-kit` sú zakázané).
     - RPC handler s propagáciou W3C `traceparent` hlavičiek a synchronizovanými transakciami Durable Objects.
     - Deklarácia cloudových zdrojov Alchemy.
 11. **`apps/sample` (`type:app`):**
@@ -117,12 +130,12 @@ Architektúra vyžaduje prísnu jednosmernú hierarchiu závislostí riadenú zn
 
 | Značka Nx               | Účel a zodpovednosť                                                          | Povolené importy                                                 | Zakázané importy                                     |
 | :---------------------- | :--------------------------------------------------------------------------- | :--------------------------------------------------------------- | :--------------------------------------------------- |
-| `type:contract`         | Zdieľané `Schema`, `HttpApi`, `RpcGroup`, doménové a API chyby               | Výhradne `effect`                                                | Akékoľvek lokálne knižnice alebo 3rd party I/O       |
-| `type:domain`           | Prípady použitia a čisté rozhodovače (`.decide`)                             | `contract`, `service`, (`@harness/gates` len pre `stub` v pláne) | `type:infra`, `alchemy`, `drizzle-orm`, I/O ovládače |
-| `type:service`          | Servisné rozhrania (`Context.Service`), kontrakty repozitárov                | `contract`, `domain`                                             | `type:infra`, konkrétne databázové knižnice          |
-| `type:infra`            | Živé vrstvy (`Layer.Live`), Drizzle repozitáre, RPC handlery, Alchemy zdroje | `contract`, `domain`, `service`, `infra`                         | Žiadne obmedzenia v rámci monorepa                   |
-| `type:app`              | Spojenie vrstiev a runtime entrypoint (`alchemy.run.ts`)                     | Všetky balíky monorepa                                           | —                                                    |
-| `type:app`, `scope:web` | Frontend aplikácia (Vite + React + AtomHttpApi)                              | `contract` a UI komponenty                                       | `type:infra`, `type:domain`, priamy `fetch(...)`     |
+| `type:contract`         | Zdieľané `Schema`, `HttpApi`, `RpcGroup`, doménové a API chyby               | Výhradne `effect` (`type:contract` / `[]` v workspace)           | `service`, `core`, `domain`, `infra`, `app`, 3rd-party I/O |
+| `type:service`          | Servisné rozhrania (`Context.Service`), kontrakty repozitárov                | `type:contract`, `type:service` (externe výhradne `effect`)      | `core`, `domain`, `infra`, `app`, Node/SQL ovládače  |
+| `type:core`             | Čisté generické enginy, brány a decider funkcie (`.decide`)                  | `type:contract`, `type:service`, `type:core`                     | `type:domain`, `type:infra`, `type:app`              |
+| `type:domain`           | Doménové prípady použitia a čisté rozhodovače (`.decide`)                    | `type:contract`, `type:service`, `type:core`, `type:domain`      | `type:infra`, `type:app`, `alchemy`, `@effect/sql-*` |
+| `type:infra`            | Živé vrstvy (`Layer.Live`), `@effect/sql-*` repozitáre, RPC handlery, Alchemy | `type:contract`, `type:service`, `type:core`, `type:domain`, `type:infra` | `type:app`; `drizzle-orm`/`drizzle-kit` zakázané v celom workspace |
+| `type:app`              | Spojenie vrstiev a runtime entrypoint (`alchemy.run.ts`, CLI, MCP, Web UI)   | Všetky knižničné vrstvy + `type:app` (okrem `scope:web`, ktorý môže importovať iba `type:contract` a UI knižnice) | Pre `scope:web`: `type:service`, `type:core`, `type:domain`, `type:infra`, `type:app`, priamy `fetch(...)` |
 
 ---
 
@@ -199,11 +212,11 @@ flowchart TD
 - **Postup:**
   - V tomto systéme **plán JE kompilovateľný kód**. Nevytvárajú sa žiadne rozsiahle textové `.md` dokumenty s neoverenými ukážkami kódu.
   - Vytvoria sa typové definície v `type:contract` (`Schema.Struct`, `TaggedError`), servisné rozhrania v `type:service` (`Context.Service`) a kostry funkcií v `type:domain` a `type:infra`.
-  - Telá funkcií volajú helper `stub<A, E, R>(...args)` z balíka `@harness/gates`. Tento helper spotrebuje argumenty (aby prešiel `oxlint`) a zaistí zachovanie typovej informácie kanálov `A`, `E` a `R`:
+  - Telá funkcií volajú helper `stub<A, E, R>(...args)` z balíka `@harness/contract`. Tento helper spotrebuje argumenty (aby prešiel `oxlint`) a zaistí zachovanie typovej informácie kanálov `A`, `E` a `R`:
 
 ```typescript
 import { Effect } from "effect"
-import { stub } from "@harness/gates"
+import { stub } from "@harness/contract"
 import { PhotoNotFoundError } from "@harness/sample-contract"
 import { AlbumCounterClient, PhotoRepo } from "@harness/sample-service"
 
@@ -233,10 +246,12 @@ export const deletePhoto = Effect.fn("Sample.deletePhoto")(function* (id: number
   1. Spustí `pnpm nx affected -t typecheck lint` s nastavenou premennou prostredia `HARNESS_PLAN_CHECK=1` (počas plan-checku je volanie `stub()` legálne).
   2. Spustí `buildWorkspaceFnIndex` cez `@ast-grep/napi` a overí, že každý `Effect.fn` má v celom repozitári **globálne unikátny názov spanu**.
   3. Spustí `extractWorkspaceTypeAwareGraph` (`ts-morph`) a zostaví graf volaní a závislostí vrátane uzlov `AdrDoc` a `EarsSpec` s hranami `GovernsSymbol` a `SpecifiesSymbol`.
-  4. Spustí `checkEffectGraph` a overí 5 kľúčových invariantov:
+  4. Spustí `checkEffectGraph` a overí 7 kľúčových invariantov:
      - `domain-requires-infra`: Doménová funkcia nesmie závisieť od infračervenej služby.
-     - `domain-requires-cloud-binding`: Doménová funkcia nesmie priamo viazať cloudové služby (`Cloudflare`, `Alchemy`, `Drizzle`).
+     - `domain-requires-cloud-binding`: Doménová funkcia nesmie priamo viazať cloudové služby (`Cloudflare`, `Alchemy`, `D1`, `DurableObject`).
      - `impure-decider`: Funkcia s príponou `.decide` v `type:domain` nesmie vyžadovať žiadnu službu (`RequiresService` hrana je zakázaná, vyžaduje sa `R = never`).
+     - `impure-reducer`: Čistý reducer (`evolve`) nesmie vyžadovať žiadnu službu (`R = never`).
+     - `aggregate-direct-bus-publish`: Agregát nesmie priamo publikovať na event bus.
      - `layer-cycle`: Detekcia cyklických závislostí medzi vrstvami pomocou `Graph.findCycle`.
      - `unmapped-spec-symbol`: Overenie, že každý span, servis a error deklarovaný v YAML frontmatteri EARS špecifikácie (aj so statusom `status: proposed`) existuje ako uzol v grafe skeletonu (`stub<A, E, R>()`).
 - **Výsledok:**
@@ -251,7 +266,7 @@ Keď je plán uzamknutý v grafe, nastáva implementácia:
 
 1. **Paralelné rozdelenie podľa balíkov:**
    - **Unit A (`type:domain`):** Nahradenie `stub()` skutočnou Effect logikou, testovanie pomocou `@effect/vitest` (`it.effect`), in-memory testovacie vrstvy.
-   - **Unit B (`type:infra`):** Drizzle repozitáre, Durable Objects transakcie, propagácia W3C `traceparent`.
+   - **Unit B (`type:infra`):** Natívne `@effect/sql-d1` / `@effect/sql-sqlite-do` repozitáre, Durable Objects transakcie, propagácia W3C `traceparent`.
    - **Unit C (`scope:web`):** Reakcia komponentov cez `AtomHttpApi` query a mutácie (zákaz surového `fetch`).
 2. **Priebežné ochranné brány:**
    - **`PreToolUse` hook (`harness guard`):** Kontroluje každý príkaz pred spustením. Pravidlá idú v pevnom poradí (`harness:ADR-0003`):
@@ -272,14 +287,14 @@ Keď je plán uzamknutý v grafe, nastáva implementácia:
      - Zákaz `stub()` v produkčnom overení.
      - Zákaz volania `fetch(...)` vo webovej aplikácii $\rightarrow$ použite `SampleApiClient`.
      - Povinné `Config.redacted` pre tajomstvá a kľúče (`SECRET`, `TOKEN`, `PASSWORD`, `API_KEY`).
-     - Zákaz raw SQL template literal interpolácie v `.exec(...)` / `.prepare(...)` $\rightarrow$ použite parametrizované dotazy (`.bind(...)` alebo Drizzle `sql`).
+     - Zákaz raw SQL template literal interpolácie v `.exec(...)` / `.prepare(...)` $\rightarrow$ použite parametrizované dotazy (`.bind(...)` alebo `SqlClient` `sql\`...\``).
      - Zákaz nečistých globálnych volaní (`Date.now()`, `new Date()`, `Math.random()`) a `Effect.ignore` v `type:domain`.
      - Zákaz neohraničeného `Schedule.forever` v `Effect.retry` $\rightarrow$ vyžadujú sa ohraničené Schedule s jitterom a stropom.
    - **`openapi:check` (`libs/sample/contract`):**
      - Deteguje breaking changes voči referenčnej schéme.
      - Ak dôjde k breaking zmene (napr. zmazanie poľa bez spätnej kompatibility), skript skončí s **`exit 2` a výstupom `ESCALATE`**, čo vyžaduje zásah používateľa.
    - **`migration:check` (`libs/sample/infra` & `MigrationSafety.decide`):**
-     - Simuluje `drizzle-kit generate` voči dočasnej zložke a overuje SQL cez `MigrationSafety.decide`.
+     - Validuje committed `.sql` migrácie (`migrations/*.sql`) a `SqliteMigrator` DDL cez `MigrationSafety.decide` (`pnpm harness check-migrations`).
      - Deteguje deštruktívne SQL (`DROP TABLE`, `DROP COLUMN`, `DROP INDEX`), SQLite table rebuildy (`__new_<table_name>`) a `ALTER TABLE ... ADD COLUMN ... NOT NULL` bez `DEFAULT`.
      - Ak nová migrácia obsahuje takéto zmeny, skript skončí s **`exit 2` a výstupom `ESCALATE`**.
 3. **Akceptácia špecifikácie a `harness gc --strict` (`stale-doc-reference`):**
@@ -336,7 +351,7 @@ Lokálny neurónový model slúži ako asistent s ultra-rýchlou odozvou, ktorý
 sequenceDiagram
     autonumber
     participant Caller as "Volajúci (CLI / Hook / MCP)"
-    participant Layer as "LocalDecisionModel (@harness/decision)"
+    participant Layer as "LocalDecisionModel (@harness/infra)"
     participant Ollama as "Ollama (clef-flash @ localhost:11434)"
     participant Fallback as "Deterministický Fallback"
 
@@ -344,7 +359,7 @@ sequenceDiagram
     activate Layer
 
     par Timeout preteká s inferenciou
-        Layer->>Ollama: POST /v1/chat/completions (clef-flash)
+        Layer->>Ollama: POST /v1/systemone (clef-flash)
         Note over Layer,Ollama: Limit: 1500 ms (1.5 sekundy)
     and Časovač (1500 millis)
         Layer->>Layer: Effect.timeoutOption("1500 millis")
@@ -361,13 +376,15 @@ sequenceDiagram
     deactivate Layer
 ```
 
+> **Poznámka k protokolu:** `clef-flash` je štruktúrovaný **TypeSafe System One** model (`@effect/ai-typesafe`), nie generatívny chatový LLM — jediný podporovaný inferenčný endpoint je `POST /v1/systemone`; `/api/generate`, `/api/chat` a `/v1/chat/completions` nie sú podporované.
+
 ---
 
 ### 3.2 Detailný prehľad 5 rozhodovacích schém
 
 | Rozhodovacia schéma                                   | Kedy sa volá                                                       | Vstupné dáta                                                                        | Výstupné polia a kritériá                                                                                                                                   | Rozhodovacie pravidlo v kóde                                                                           | Deterministický fallback (pri timeoute / offline)                                        |
 | :---------------------------------------------------- | :----------------------------------------------------------------- | :---------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------- |
-| **1. `IdiomRouterV1`** (`routeStep`)                  | CLI `harness route` alebo MCP `harness_route` pri tvorbe skeletonu | `{ planStep: string }`                                                              | • `fitsAny`: pravdepodobnosť (0.0–1.0)<br/>• `block`: klasifikácia do 15 kategórií                                                                          | Ak `fitsAny >= 0.7`, vráti sa vybraný `block`, inak `"review"`                                         | `"review"` (žiadny vzor, manuálna kontrola)                                              |
+| **1. `IdiomRouterV1`** (`routeStep`)                  | CLI `harness route` alebo MCP `harness_route` pri tvorbe skeletonu | `{ planStep: string }`                                                              | • `fitsAny`: pravdepodobnosť (0.0–1.0)<br/>• `block`: klasifikácia do 18 kategórií                                                                          | Najprv `DETERMINISTIC_ROUTE_RULES` (regex pred-routovanie); inak `DecisionModel.decide`: ak `fitsAny >= 0.7`, vráti sa vybraný `block`, inak deterministický fallback | Deterministický keyword/filename fallback nad `agent-patterns/<slug>.md` pred `"review"` (keď `DecisionModel` nie je dostupný alebo má nízku istotu) |
 | **2. `GuardV1`** (`decideGuardCommand`)               | CLI `harness guard` (iba ak `classifyCommand` vráti `"escalate"`)  | `{ command: string }`                                                               | • `destructive`: pravdepodobnosť<br/>• `secretAccess`: pravdepodobnosť<br/>• `exfiltration`: pravdepodobnosť                                                | Ak ľubovoľné $\ge 0.7 \rightarrow$ `"deny"`; ak všetky tri $< 0.3 \rightarrow$ `"allow"`; inak `"ask"` | **`"ask"`** (človek musí potvrdiť; **nikdy nie `"allow"`!**)                             |
 | **3. `TriageV1`** (`triageFailure`)                   | Po zlyhaní `verify`, ak sa nezachytilo v statických pravidlách     | `{ failureOutput: string }`                                                         | • `kind`: `"mechanical"` alebo `"semantic"`                                                                                                                 | Klasifikácia charakteru chyby pre nápovedu agentovi                                                    | `"semantic"` (odporučí analyzovať graf cez `harness_tests_reaching`)                     |
 | **4. `PlanStepCoverageV1`** (`checkPlanStepCoverage`) | Počas `harness done`, ak boli zadané kroky `planSteps`             | `{ stepId, planStep, stepDiff }`                                                    | • `implemented`: pravdepodobnosť<br/>• `noOutOfScopeEdits`: pravdepodobnosť                                                                                 | `implemented >= 0.7` A `noOutOfScopeEdits >= 0.7` $\rightarrow$ `covered: true`                        | `covered: false` (pri zlyhaní decision modelu vyžaduje overenie)                         |
@@ -379,12 +396,12 @@ sequenceDiagram
 
 #### 1. `IdiomRouterV1`
 
-Výber správneho vzoru z 15 podporovaných stavebných blokov (`services-and-layers`, `errors`, `schema`, `resources-scope`, `concurrency`, `schedule`, `testing`, `alchemy-infra`, `d1-repository`, `durable-object-state`, `httpapi`, `rpc`, `atom`, `effect`, `review`).
+Výber správneho vzoru z 18 podporovaných stavebných blokov (`services-and-layers`, `errors`, `schema`, `resources-scope`, `concurrency`, `schedule`, `testing`, `alchemy-infra`, `d1-repository`, `durable-object-state`, `httpapi`, `rpc`, `atom`, `effect`, `event-sourcing`, `pattern-matching`, `decision-model`, `review`) — najprv cez deterministické regex pravidlá `DETERMINISTIC_ROUTE_RULES`, následne cez `DecisionModel.decide` (`IdiomRouterV1`), a pri nedostupnosti modelu alebo nízkej istote cez deterministický keyword/filename fallback nad `agent-patterns/<slug>.md` pred `"review"`.
 
 - **Vstup pre model:**
   ```json
   {
-    "planStep": "Create a Drizzle repository for photos with D1 SQLite backend"
+    "planStep": "Create an @effect/sql-d1 repository for photos with D1 SQLite backend"
   }
   ```
 - **Výstup modelu:**
@@ -394,7 +411,7 @@ Výber správneho vzoru z 15 podporovaných stavebných blokov (`services-and-la
       "fitsAny": { "probability": 0.95 },
       "block": {
         "label": "d1-repository",
-        "rationale": "Matches D1 SQLite tables and Drizzle repositories in type:infra"
+        "rationale": "Matches D1 SQLite tables and @effect/sql-d1 repositories in type:infra"
       }
     }
   }
@@ -816,8 +833,8 @@ Harness presadzuje nulovú dôveru voči generovanému kódu prostredníctvom pr
    - Každá konfigurácia obsahujúca citlivé údaje s kľúčmi ako `SECRET`, `TOKEN`, `PASSWORD` alebo `API_KEY` musí byť zapuzdrená cez `Config.redacted(...)` namiesto obyčajného `Config.string(...)`.
    - Tým sa zabráni nechcenému úniku citlivých hodnôt do logov, tracerov alebo chybových hlásení.
 2. **Zákaz raw SQL interpolácie (SQL Injection Ban):**
-   - V `type:infra` (D1, SQLite, Drizzle) je prísne zakázané používať template literal interpoláciu v metódach `.exec(\`...\${...}\`)`alebo`.prepare(\`...\${...}\`)`.
-   - Všetky dynamické hodnoty musia byť odovzdávané výhradne cez parametrizované dotazy (`.bind(...)` alebo Drizzle `sql` tagy s parametrami).
+   - V `type:infra` (D1, SQLite, `@effect/sql-*`) je prísne zakázané používať template literal interpoláciu v metódach `.exec(\`...\${...}\`)` alebo `.prepare(\`...\${...}\`)`.
+   - Všetky dynamické hodnoty musia byť odovzdávané výhradne cez parametrizované dotazy (`.bind(...)` alebo `SqlClient` `sql\`...\`` tagy s parametrami). (`drizzle-orm` a `drizzle-kit` sú zakázané v celom workspace.)
 3. **Pravidlá čistoty domény (`type:domain`):**
    - **Zákaz nečistých globálnych volaní:** Volania `Date.now()`, `new Date()` a `Math.random()` sú v doméne zakázané. Čas a náhodnosť musia pretekať cez Effect služby (`Clock`, `Random`) alebo decider vstupy, aby bola doménová logika 100% deterministická a testovateľná.
    - **Zákaz `Effect.ignore`:** V doméne je zakázané ignorovať zlyhania cez `Effect.ignore`, pretože to maskuje kritické sad-path stavy a zlyhania biznis pravidiel.

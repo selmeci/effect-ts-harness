@@ -55,12 +55,12 @@ const formatErrorCause = (cause: unknown): ErrorMessage => {
  * Designed for test fixtures (`makeAggregateApiTestHarness`) and deterministic state setup.
  */
 export const seedAggregateStream = Effect.fn("AggregateHttp.seedStream")(
-  <Command, Event, State, Err, ProjectionEnv = never, ProjectionErr = never>(
+  function* <Command, Event, State, Err, ProjectionEnv = never, ProjectionErr = never>(
     aggregateId: AggregateId,
     events: ReadonlyArray<Event>,
     config: AggregateConfig<Command, Event, State, Err, ProjectionEnv, ProjectionErr>,
     seedCommandPrefix?: CommandId,
-  ): Effect.Effect<
+  ): Effect.fn.Return<
     StreamVersion,
     | EventSerializationError
     | EventStreamCorruptionError
@@ -68,14 +68,13 @@ export const seedAggregateStream = Effect.fn("AggregateHttp.seedStream")(
     | ProjectionErr
     | SqlError,
     SqlClient | ProjectionEnv
-  > =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient
-      const eventJsonSchema = Schema.fromJsonString(config.eventSchema)
-      const metadataJsonSchema = Schema.fromJsonString(EventMetadata)
+  > {
+    const sql = yield* SqlClient
+    const eventJsonSchema = Schema.fromJsonString(config.eventSchema)
+    const metadataJsonSchema = Schema.fromJsonString(EventMetadata)
 
-      return yield* sql.withTransaction(
-        Effect.gen(function* () {
+    return yield* sql.withTransaction(
+      Effect.gen(function* () {
           const headRows = yield* sql<MaxVersionRow>`
             SELECT MAX(stream_version) as max_version
             FROM es_events
@@ -290,7 +289,7 @@ export const seedAggregateStream = Effect.fn("AggregateHttp.seedStream")(
           return eventVersion
         }),
       )
-    }),
+  },
 )
 
 /**
@@ -325,12 +324,12 @@ export const executeAggregateCommandAndSync = Effect.fn("AggregateHttp.executeCo
  * projections are caught up.
  */
 export const queryAggregateReadModel = Effect.fn("AggregateHttp.queryLocal")(
-  <Command, Event, State, Err, ReadModel, ProjectionEnv = never, ProjectionErr = never>(
+  function* <Command, Event, State, Err, ReadModel, ProjectionEnv = never, ProjectionErr = never>(
     aggregateId: AggregateId,
     projectionName: ProjectionName,
     config: AggregateConfig<Command, Event, State, Err, ProjectionEnv, ProjectionErr>,
     projections: ReadonlyArray<LocalProjection<Event, ReadModel, ProjectionEnv, ProjectionErr>>,
-  ): Effect.Effect<
+  ): Effect.fn.Return<
     ReadModel,
     | AggregateNotFoundError
     | LocalProjectionNotFoundError
@@ -338,11 +337,10 @@ export const queryAggregateReadModel = Effect.fn("AggregateHttp.queryLocal")(
     | ProjectionErr
     | SqlError,
     SqlClient | ProjectionEnv
-  > =>
-    Effect.gen(function* () {
-      yield* loadAggregate(aggregateId, config)
-      return yield* queryLocalProjection(projections, projectionName, aggregateId)
-    }),
+  > {
+    yield* loadAggregate(aggregateId, config)
+    return yield* queryLocalProjection(projections, projectionName, aggregateId)
+  },
 )
 
 /**

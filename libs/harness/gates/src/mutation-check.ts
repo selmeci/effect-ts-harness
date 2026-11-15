@@ -1,22 +1,29 @@
 /**
  * @fileoverview Mutation verification gate, mutant discovery, test execution, and span saturation analysis.
  */
-import { execFileSync } from "node:child_process"
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
-import { join, relative, resolve } from "node:path"
-import { Effect, Layer, Schema } from "effect"
+import { join, relative } from "node:path"
+import { Effect, Result, Schema } from "effect"
+import { match } from "ts-pattern"
+import { computeContentSha256 } from "@harness/contract"
+import type { SyncHostIo } from "@harness/service/host-io"
+import { classifyMutantSubprocessResult, stripAnsi } from "./mutation-subprocess-helpers.js"
+
+export { stripAnsi }
 import {
-  ActiveMutantId, SubprocessArg, SubprocessCommand, SubprocessTimeoutMs, WorkspaceFilePath,
-} from "./plugins/self-dogfooding-contract.js"
-import {
-  ActiveMutantContext, ActiveMutantContextLive, getActiveMutantId, setActiveMutantId, withActiveMutantEffect,
+  getActiveMutantId, setActiveMutantId, withActiveMutantEffect,
 } from "./services/active-mutant-context.js"
-import { execCheckedSubprocess, HarnessSubprocessRunnerLive } from "./services/subprocess-runner.js"
-import { readAndVerifyWorkspaceFile, WorkspaceFsLive } from "./services/workspace-fs.js"
 import {
   CodeMutant, compileMutantSchemaModule, discoverDomainMutants, evaluateMutantSchemaInProcess,
   MutantCategory, MutantOutcome, type MutantSchemaModule, parseGitDiffModifiedLines,
 } from "./mutation/mutant-ast-generator.js"
+import {
+  BackupSchema,
+  extractGitDiffModifiedLinesChecked,
+  type GitDiffExtractionResult,
+  recoverStartupBackup,
+  unlinkBackupChecked,
+  writeMutationBackup,
+} from "./mutation/mutation-backup.js"
 
 export {
   MutantCategory, CodeMutant, MutantOutcome, type MutantSchemaModule,
@@ -72,6 +79,7 @@ export interface MutationSuiteReport {
   readonly equivalentCount?: number | undefined
   readonly equivalentMutants?: ReadonlyArray<CodeMutant> | undefined
   readonly saturationViolations?: ReadonlyArray<SaturationViolation> | undefined
+  readonly diagnostic?: string | undefined
 }
 
 export const evaluateSpanSaturationViolations = (
@@ -161,55 +169,90 @@ export const isMutantMarkedEquivalent = (
   outcome: MutantOutcome,
   priors: Readonly<Record<string, number>> | undefined,
   threshold = 850,
-): boolean => {
-  if (outcome.status === "equivalent") return true
-  const prior = priors?.[outcome.mutant.id]
-  if (prior === undefined) return false
-  return normalizePriorMillis(prior) >= threshold
-}
+): boolean =>
+  match(outcome.status)
+    .with("equivalent", () => true)
+    .with("killed", "survived", () => {
+      const prior = priors?.[outcome.mutant.id]
+      if (prior === undefined) return false
+      return normalizePriorMillis(prior) >= threshold
+    })
+    .exhaustive()
 
-export const decideMutationReport = Effect.fn("MutationCheck.decide")(function* (
-  input: MutationEvaluationInput,
-) {
+export const evaluateMutationOutcomes = (
+  outcomes: ReadonlyArray<MutantOutcome>,
+  minScore?: number,
+  equivalencePriors?: Readonly<Record<string, number>>,
+  saturationSpecs?: ReadonlyArray<SpanSaturationSpec>,
+  spanObservations?: ReadonlyArray<SpanSaturationObservation>,
+): MutationSuiteReport => {
   const equivalentMutantIds = new Set(
-    input.outcomes
-      .filter((o) => o.status !== "killed" && isMutantMarkedEquivalent(o, input.equivalencePriors))
+    outcomes
+      .filter((o) =>
+        match(o.status)
+          .with("killed", () => false)
+          .with("survived", "equivalent", () => isMutantMarkedEquivalent(o, equivalencePriors))
+          .exhaustive(),
+      )
       .map((o) => o.mutant.id),
   )
-  const equivalentMutants = input.outcomes
+  const equivalentMutants = outcomes
     .filter((o) => equivalentMutantIds.has(o.mutant.id))
     .map((o) => o.mutant)
-  const survivedMutants = input.outcomes
-    .filter((o) => o.status === "survived" && !equivalentMutantIds.has(o.mutant.id))
+  const survivedMutants = outcomes
+    .filter((o) =>
+      match(o.status)
+        .with("survived", () => !equivalentMutantIds.has(o.mutant.id))
+        .with("killed", "equivalent", () => false)
+        .exhaustive(),
+    )
     .map((o) => o.mutant)
   const survivedCount = survivedMutants.length
-  const killedCount = input.outcomes.filter((o) => o.status === "killed").length
-  const totalMutants = input.outcomes.length
+  const killedCount = outcomes.filter((o) =>
+    match(o.status)
+      .with("killed", () => true)
+      .with("survived", "equivalent", () => false)
+      .exhaustive(),
+  ).length
+  const totalMutants = outcomes.length
   const actionableMutants = totalMutants - equivalentMutants.length
   const mutationScore = actionableMutants <= 0 ? 1 : killedCount / actionableMutants
-  const minScore = input.minScore ?? 1
+  const effectiveMinScore = minScore ?? 1
 
-  const observations = input.spanObservations ?? input.traceObservations
   const saturationViolations =
-    input.saturationSpecs !== undefined && observations !== undefined
-      ? evaluateSpanSaturationViolations(input.saturationSpecs, observations)
+    saturationSpecs !== undefined && spanObservations !== undefined
+      ? evaluateSpanSaturationViolations(saturationSpecs, spanObservations)
       : undefined
 
   const saturationPassed = saturationViolations === undefined || saturationViolations.length === 0
-  const passed = survivedCount === 0 && mutationScore >= minScore && saturationPassed
+  const passed = survivedCount === 0 && mutationScore >= effectiveMinScore && saturationPassed
 
-  return yield* Effect.succeed({
+  return {
     passed,
     totalMutants,
     killedCount,
     survivedCount,
     mutationScore,
     survivedMutants,
-    ...(input.equivalencePriors !== undefined || equivalentMutants.length > 0
+    ...(equivalencePriors !== undefined || equivalentMutants.length > 0
       ? { equivalentCount: equivalentMutants.length, equivalentMutants }
       : {}),
     ...(saturationViolations !== undefined ? { saturationViolations } : {}),
-  } satisfies MutationSuiteReport)
+  } satisfies MutationSuiteReport
+}
+
+export const decideMutationReport = Effect.fn("MutationCheck.decide")(function* (
+  input: MutationEvaluationInput,
+) {
+  return yield* Effect.succeed(
+    evaluateMutationOutcomes(
+      input.outcomes,
+      input.minScore,
+      input.equivalencePriors,
+      input.saturationSpecs,
+      input.spanObservations ?? input.traceObservations,
+    ),
+  )
 })
 
 /**
@@ -218,24 +261,6 @@ export const decideMutationReport = Effect.fn("MutationCheck.decide")(function* 
  */
 export const decideMutationCheck = decideMutationReport
 
-export const evaluateMutationOutcomes = (
-  outcomes: ReadonlyArray<MutantOutcome>,
-  minScore?: number,
-  equivalencePriors?: Readonly<Record<string, number>>,
-  saturationSpecs?: ReadonlyArray<SpanSaturationSpec>,
-  spanObservations?: ReadonlyArray<SpanSaturationObservation>,
-): MutationSuiteReport =>
-  Effect.runSync(
-    decideMutationReport({
-      outcomes,
-      minScore,
-      equivalencePriors,
-      saturationSpecs,
-      spanObservations,
-      traceObservations: spanObservations,
-    }),
-  )
-
 interface DomainFile {
   readonly scope: string
   readonly tier: "domain" | "core" | "contract"
@@ -243,15 +268,22 @@ interface DomainFile {
   readonly relFile: string
 }
 
-const findDomainFiles = (repoRoot: string, scope?: string): ReadonlyArray<DomainFile> => {
+const findDomainFiles = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  scope?: string,
+): ReadonlyArray<DomainFile> => {
   const results: Array<DomainFile> = []
   const libsDir = join(repoRoot, "libs")
-  if (!existsSync(libsDir)) return results
+  if (!hostIo.existsSync(libsDir)) return results
 
   const cleanScope = scope
     ? scope.replace(/^@harness\//, "").replace(/-(domain|core|contract)$/, "")
     : undefined
-  const scopes = cleanScope !== undefined ? [cleanScope] : readdirSync(libsDir)
+  const scopes =
+    cleanScope !== undefined
+      ? [cleanScope]
+      : hostIo.readdirSync(libsDir).map((e) => e.name)
 
   for (const s of scopes) {
     const scopePath = join(libsDir, s)
@@ -264,22 +296,28 @@ const findDomainFiles = (repoRoot: string, scope?: string): ReadonlyArray<Domain
     ]
 
     for (const { dir, tier } of tiersToScan) {
-      if (!existsSync(dir)) continue
+      if (!hostIo.existsSync(dir)) continue
       const walk = (d: string) => {
-        for (const entry of readdirSync(d, { withFileTypes: true })) {
+        for (const entry of hostIo.readdirSync(d)) {
           const full = join(d, entry.name)
-          if (entry.isDirectory()) {
-            walk(full)
-          } else if (entry.isFile() && (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx")) && !entry.name.endsWith(".d.ts")) {
-            if (tier === "contract") {
-              const content = readFileSync(full, "utf8")
-              if (content.includes("Effect.fn") || content.includes("Effect.gen") || content.includes("match(")) {
-                results.push({ scope: s, tier, fullPath: full, relFile: relative(repoRoot, full).replace(/\\/g, "/") })
+          match({ isDirectory: entry.isDirectory, isFile: entry.isFile })
+            .with({ isDirectory: true }, () => {
+              walk(full)
+            })
+            .with({ isDirectory: false, isFile: true }, () => {
+              if ((entry.name.endsWith(".ts") || entry.name.endsWith(".tsx")) && !entry.name.endsWith(".d.ts")) {
+                if (tier === "contract") {
+                  const content = hostIo.readTextSync(full)
+                  if (content.includes("Effect.fn") || content.includes("Effect.gen") || content.includes("match(")) {
+                    results.push({ scope: s, tier, fullPath: full, relFile: relative(repoRoot, full).replace(/\\/g, "/") })
+                  }
+                } else {
+                  results.push({ scope: s, tier, fullPath: full, relFile: relative(repoRoot, full).replace(/\\/g, "/") })
+                }
               }
-            } else {
-              results.push({ scope: s, tier, fullPath: full, relFile: relative(repoRoot, full).replace(/\\/g, "/") })
-            }
-          }
+            })
+            .with({ isDirectory: false, isFile: false }, () => {})
+            .exhaustive()
         }
       }
       walk(dir)
@@ -289,57 +327,54 @@ const findDomainFiles = (repoRoot: string, scope?: string): ReadonlyArray<Domain
   return results
 }
 
-const trySyncOrElse = <A>(fn: () => A, fallback: () => A): A =>
-  Effect.runSync(
-    Effect.try({
-      try: fn,
-      catch: () => undefined,
-    }).pipe(Effect.orElseSucceed(fallback)),
-  )
-
 export const extractGitDiffModifiedLines = (
   repoRoot: string,
+  hostIo: SyncHostIo,
 ): ReadonlyMap<string, ReadonlySet<number>> | undefined => {
-  const gitOpts = { cwd: repoRoot, stdio: "pipe" as const, encoding: "utf8" as const, timeout: 15_000 }
-  const isGit = trySyncOrElse(
-    () => execFileSync("git", ["rev-parse", "--is-inside-work-tree"], gitOpts).trim() === "true",
-    () => false,
-  )
-  if (!isGit) return undefined
-
-  const primaryDiff = trySyncOrElse<string | null>(
-    () => execFileSync("git", ["diff", "-U0"], gitOpts),
-    () => trySyncOrElse<string | null>(() => execFileSync("git", ["diff", "-U0", "HEAD"], gitOpts), () => null),
-  )
-  if (primaryDiff === null) return new Map<string, ReadonlySet<number>>()
-
-  const headDiff = trySyncOrElse(
-    () => execFileSync("git", ["diff", "-U0", "HEAD"], gitOpts),
-    () => "",
-  )
-  const diffOut = headDiff.length > 0 ? `${primaryDiff}\n${headDiff}` : primaryDiff
-  return parseGitDiffModifiedLines(diffOut)
+  const res = extractGitDiffModifiedLinesChecked(repoRoot, hostIo)
+  return match(res)
+    .with({ kind: "ok" }, ({ lines }) => lines)
+    .with({ kind: "not-git" }, () => undefined)
+    .with({ kind: "failed" }, () => undefined)
+    .exhaustive()
 }
 
 export const getWorkspaceGitDiffModifiedLines = extractGitDiffModifiedLines
 
-export const findReachingTestFiles = (repoRoot: string, file: DomainFile): ReadonlyArray<string> => {
+export const findReachingTestFiles = (
+  repoRoot: string,
+  file: DomainFile,
+  hostIo: SyncHostIo,
+): ReadonlyArray<string> => {
   const testDir = join(repoRoot, "libs", file.scope, file.tier, "test")
-  if (!existsSync(testDir)) return []
+  if (!hostIo.existsSync(testDir)) return []
   const reaching: Array<string> = []
   const walk = (dir: string) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    for (const entry of hostIo.readdirSync(dir)) {
       const full = join(dir, entry.name)
-      if (entry.isDirectory()) walk(full)
-      else if (entry.isFile() && (entry.name.endsWith(".test.ts") || entry.name.endsWith(".spec.ts"))) reaching.push(full)
+      match({ isDirectory: entry.isDirectory, isFile: entry.isFile })
+        .with({ isDirectory: true }, () => {
+          walk(full)
+        })
+        .with({ isDirectory: false, isFile: true }, () => {
+          if (entry.name.endsWith(".test.ts") || entry.name.endsWith(".spec.ts")) {
+            reaching.push(full)
+          }
+        })
+        .with({ isDirectory: false, isFile: false }, () => {})
+        .exhaustive()
     }
   }
   walk(testDir)
   return reaching
 }
 
-export const collectReachingTestAssertions = (repoRoot: string, file: DomainFile): string =>
-  findReachingTestFiles(repoRoot, file).map((full) => readFileSync(full, "utf8")).join("\n")
+export const collectReachingTestAssertions = (
+  repoRoot: string,
+  file: DomainFile,
+  hostIo: SyncHostIo,
+): string =>
+  findReachingTestFiles(repoRoot, file, hostIo).map((full) => hostIo.readTextSync(full)).join("\n")
 
 export interface RunMutationOptions {
   readonly scope?: string | undefined
@@ -354,47 +389,53 @@ export interface RunMutationOptions {
 
 export const runDomainMutationSuite = (
   repoRoot: string,
+  hostIo: SyncHostIo,
   options?: RunMutationOptions,
 ): MutationSuiteReport => {
-  const backupPath = join(repoRoot, ".harness", "mutation-backup.json")
-  if (existsSync(backupPath)) {
-    let restoredOk = false
-    Effect.runSync(
-      Effect.gen(function* () {
-        const fileStat = yield* readAndVerifyWorkspaceFile(WorkspaceFilePath.make(backupPath))
-        const decodedBackupOpt = Schema.decodeOption(
-          Schema.fromJsonString(
-            Schema.Struct({
-              filePath: Schema.optional(Schema.String),
-              originalSource: Schema.optional(Schema.String),
-            }),
-          ),
-        )(fileStat.content)
-        if (decodedBackupOpt._tag === "Some") {
-          const { filePath, originalSource } = decodedBackupOpt.value
-          if (filePath !== undefined && originalSource !== undefined) {
-            const resolvedTarget = resolve(repoRoot, filePath)
-            const relTarget = relative(resolve(repoRoot), resolvedTarget).replace(/\\/g, "/")
-            if (!relTarget.startsWith("..") && !relTarget.startsWith("/") && (relTarget.startsWith("libs/") || relTarget.startsWith("apps/"))) {
-              writeFileSync(resolvedTarget, originalSource, "utf8")
-              restoredOk = true
-            }
-          }
-        }
-      }).pipe(
-        Effect.provide(WorkspaceFsLive),
-        Effect.orElseSucceed(() => undefined),
-        Effect.ensuring(
-          Effect.sync(() => {
-            if (restoredOk && existsSync(backupPath)) unlinkSync(backupPath)
-          }),
-        ),
-      ),
+  const makeAbortedReport = (
+    outcomesSoFar: ReadonlyArray<MutantOutcome>,
+    diagnostic: string,
+  ): MutationSuiteReport => {
+    const base = evaluateMutationOutcomes(
+      outcomesSoFar,
+      options?.minScore,
+      options?.equivalencePriors,
+      options?.saturationSpecs,
+      options?.spanObservations,
     )
+    return {
+      ...base,
+      passed: false,
+      diagnostic,
+    }
   }
 
-  const domainFiles = findDomainFiles(repoRoot, options?.scope)
-  const diffLinesMap = options?.includeAllLines === true ? undefined : extractGitDiffModifiedLines(repoRoot)
+  const backupPath = join(repoRoot, ".harness", "mutation-backup.json")
+  const startupDiag = recoverStartupBackup(repoRoot, backupPath, hostIo)
+  if (startupDiag !== undefined) {
+    process.stderr.write(`${startupDiag}\n`)
+    return makeAbortedReport([], startupDiag)
+  }
+
+  const domainFiles = findDomainFiles(repoRoot, hostIo, options?.scope)
+  const diffResult: GitDiffExtractionResult =
+    options?.includeAllLines === true
+      ? { kind: "not-git" }
+      : extractGitDiffModifiedLinesChecked(repoRoot, hostIo)
+  const diffAbortDiag = match(diffResult)
+    .with({ kind: "failed" }, ({ reason }) => `[mutation-check] Failed to extract git diff modified lines: ${reason}`)
+    .with({ kind: "ok" }, () => undefined)
+    .with({ kind: "not-git" }, () => undefined)
+    .exhaustive()
+  if (diffAbortDiag !== undefined) {
+    process.stderr.write(`${diffAbortDiag}\n`)
+    return makeAbortedReport([], diffAbortDiag)
+  }
+  const diffLinesMap = match(diffResult)
+    .with({ kind: "ok" }, ({ lines }) => lines)
+    .with({ kind: "not-git" }, () => undefined)
+    .with({ kind: "failed" }, () => undefined)
+    .exhaustive()
   const outcomes: Array<MutantOutcome> = []
 
   for (const file of domainFiles) {
@@ -410,15 +451,7 @@ export const runDomainMutationSuite = (
           ? diffLinesMap.get(file.relFile)
           : undefined
 
-    const originalContent =
-      overlaySource ??
-      Effect.runSync(
-        readAndVerifyWorkspaceFile(WorkspaceFilePath.make(file.fullPath)).pipe(
-          Effect.map((s) => s.content),
-          Effect.provide(WorkspaceFsLive),
-          Effect.orElseSucceed(() => readFileSync(file.fullPath, "utf8")),
-        ),
-      )
+    const originalContent = overlaySource ?? hostIo.readTextSync(file.fullPath)
     const mutants = discoverDomainMutants(
       file.relFile,
       originalContent,
@@ -427,7 +460,7 @@ export const runDomainMutationSuite = (
     if (mutants.length === 0) continue
 
     const schemaBundle = compileMutantSchemaModule(file.relFile, originalContent, mutants)
-    const reachingTestFiles = findReachingTestFiles(repoRoot, file)
+    const reachingTestFiles = findReachingTestFiles(repoRoot, file, hostIo)
 
     if (reachingTestFiles.length === 0) {
       for (const mutant of mutants) outcomes.push({ mutant, status: "survived" })
@@ -436,103 +469,311 @@ export const runDomainMutationSuite = (
 
     if (options?.testRunner !== undefined) {
       const runner = options.testRunner
-      Effect.runSync(
-        Effect.gen(function* () {
-          for (const mutant of mutants) {
-            const killed = yield* withActiveMutantEffect(
-              ActiveMutantId.make(mutant.id),
-              () => runner(mutant, schemaBundle.schemaSource, reachingTestFiles) === "killed",
-            )
-            outcomes.push({ mutant, status: killed ? "killed" : "survived" })
-          }
-        }).pipe(Effect.provide(ActiveMutantContextLive)),
-      )
-      continue
-    }
+      const prevGlobal = getActiveMutantId()
+      const prevEnv = process.env["HARNESS_ACTIVE_MUTANT_ID"]
+      const restoreInProcessEnv = () => {
+        setActiveMutantId(prevGlobal)
+        if (prevEnv === undefined) {
+          delete process.env["HARNESS_ACTIVE_MUTANT_ID"]
+        } else {
+          process.env["HARNESS_ACTIVE_MUTANT_ID"] = prevEnv
+        }
+      }
 
-    if (overlaySource !== undefined) {
-      const assertionContent = collectReachingTestAssertions(repoRoot, file)
-      const hasAssertions =
-        assertionContent.includes("expect(") &&
-        (assertionContent.includes("it(") || assertionContent.includes("it.effect"))
+      const baselineMutant: CodeMutant = {
+        id: "__baseline__",
+        file: file.relFile,
+        line: 1,
+        category: "boolean-return",
+        original: "",
+        replacement: "",
+        mutatedSource: originalContent,
+      }
+      setActiveMutantId(undefined)
+      delete process.env["HARNESS_ACTIVE_MUTANT_ID"]
+      const baselineRes = Result.try(() => runner(baselineMutant, originalContent, reachingTestFiles))
+      restoreInProcessEnv()
+      const baselineDiag = match(baselineRes)
+        .with({ _tag: "Success" }, ({ success }) =>
+          success === "survived"
+            ? undefined
+            : `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}'`,
+        )
+        .with({ _tag: "Failure" }, ({ failure }) =>
+          `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}': ${failure instanceof Error ? failure.message : String(failure)}`,
+        )
+        .exhaustive()
+      if (baselineDiag !== undefined) {
+        process.stderr.write(`${baselineDiag}\n`)
+        return makeAbortedReport(outcomes, baselineDiag)
+      }
+
       for (const mutant of mutants) {
-        outcomes.push({ mutant, status: hasAssertions ? "killed" : "survived" })
+        setActiveMutantId(mutant.id)
+        process.env["HARNESS_ACTIVE_MUTANT_ID"] = mutant.id
+        const runRes = Result.try(() => runner(mutant, schemaBundle.schemaSource, reachingTestFiles))
+        restoreInProcessEnv()
+        const runnerDiag = match(runRes)
+          .with({ _tag: "Success" }, ({ success }) => {
+            outcomes.push({ mutant, status: success === "killed" ? "killed" : "survived" })
+            return undefined
+          })
+          .with({ _tag: "Failure" }, ({ failure }) =>
+            `[mutation-check] Custom testRunner threw for mutant '${mutant.id}': ${failure instanceof Error ? failure.message : String(failure)}`,
+          )
+          .exhaustive()
+        if (runnerDiag !== undefined) {
+          process.stderr.write(`${runnerDiag}\n`)
+          return makeAbortedReport(outcomes, runnerDiag)
+        }
       }
       continue
     }
 
-    const originalSource = originalContent
-    const harnessDir = join(repoRoot, ".harness")
-    if (!existsSync(harnessDir)) mkdirSync(harnessDir, { recursive: true })
-    writeFileSync(backupPath, JSON.stringify({ filePath: file.fullPath, originalSource }), "utf8")
-    const onProcessExit = () => {
-      trySyncOrElse(() => {
-        writeFileSync(file.fullPath, originalSource, "utf8")
-        if (existsSync(backupPath)) unlinkSync(backupPath)
-      }, () => undefined)
+    if (overlaySource !== undefined) {
+      for (const mutant of mutants) {
+        outcomes.push({ mutant, status: "survived" })
+      }
+      continue
     }
-    const onSigInt = () => { onProcessExit(); process.exit(130) }
-    const onSigTerm = () => { onProcessExit(); process.exit(143) }
-    process.once("exit", onProcessExit); process.once("SIGINT", onSigInt); process.once("SIGTERM", onSigTerm)
-    Effect.runSync(
-      Effect.gen(function* () {
-        const mutantCtx = yield* ActiveMutantContext
-        writeFileSync(file.fullPath, schemaBundle.schemaSource, "utf8")
-        for (const mutant of mutants) {
-          const runSubprocess = Effect.acquireUseRelease(
-            Effect.sync(() => {
-              const prev = process.env["HARNESS_ACTIVE_MUTANT_ID"]
-              process.env["HARNESS_ACTIVE_MUTANT_ID"] = mutant.id
-              return prev
-            }),
-            () =>
-              execCheckedSubprocess({
-                command: SubprocessCommand.make("pnpm"),
-                args: [SubprocessArg.make("vitest"), SubprocessArg.make("run"), ...reachingTestFiles.map((f) => SubprocessArg.make(f))],
-                cwd: WorkspaceFilePath.make(repoRoot),
-                timeoutMs: SubprocessTimeoutMs.make(30_000),
-              }).pipe(
-                Effect.map(() => "survived" as const),
-                Effect.catchTag("HarnessSubprocessError", (err) =>
-                  Effect.succeed(err.exitCode !== 0 ? ("killed" as const) : ("survived" as const)),
-                ),
-              ),
-            (prev) =>
-              Effect.sync(() => {
-                if (prev === undefined) {
-                  delete process.env["HARNESS_ACTIVE_MUTANT_ID"]
-                } else {
-                  process.env["HARNESS_ACTIVE_MUTANT_ID"] = prev
-                }
-              }),
-          )
-          const status = yield* mutantCtx.runWithMutant(ActiveMutantId.make(mutant.id), runSubprocess)
-          outcomes.push({ mutant, status })
-        }
-      }).pipe(
-        Effect.provide(Layer.merge(HarnessSubprocessRunnerLive, ActiveMutantContextLive)),
-        Effect.ensuring(
-          Effect.sync(() => {
-            process.removeListener("exit", onProcessExit)
-            process.removeListener("SIGINT", onSigInt)
-            process.removeListener("SIGTERM", onSigTerm)
-            writeFileSync(file.fullPath, originalSource, "utf8")
-            if (existsSync(backupPath)) unlinkSync(backupPath)
-          }),
-        ),
-      ),
+
+    const baseSubprocessEnv: Record<string, string | undefined> = {
+      ...process.env,
+      NO_COLOR: "1",
+      FORCE_COLOR: "0",
+    }
+    delete baseSubprocessEnv["HARNESS_ACTIVE_MUTANT_ID"]
+
+    // F-4.1: Unmutated baseline test execution BEFORE writing backup or mutated schema
+    const baselineExecRes = Result.try(() =>
+      hostIo.execFileSync("pnpm", ["vitest", "run", ...reachingTestFiles], {
+        cwd: repoRoot,
+        timeoutMs: 30_000,
+        env: baseSubprocessEnv,
+      }),
     )
+    const baselineDiag = match(baselineExecRes)
+      .with({ _tag: "Failure" }, ({ failure }) =>
+        `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}': ${failure instanceof Error ? failure.message : String(failure)}`,
+      )
+      .with({ _tag: "Success" }, ({ success }) =>
+        match(success)
+          .with({ _tag: "Exited" }, (r) => {
+            if (r.exitCode === 0) return undefined
+            const cleanErr = stripAnsi(r.stderr).trim()
+            const stderrPart = cleanErr.length > 0 ? `, stderr=${cleanErr}` : ""
+            return `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}' (exitCode=${r.exitCode}${stderrPart})`
+          })
+          .with({ _tag: "TimedOut" }, (r) => {
+            const cleanErr = stripAnsi(r.stderr).trim()
+            const stderrPart = cleanErr.length > 0 ? `, stderr=${cleanErr}` : ""
+            return `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}' (timedOut=true${stderrPart})`
+          })
+          .with({ _tag: "Signaled" }, (r) => {
+            const cleanErr = stripAnsi(r.stderr).trim()
+            const stderrPart = cleanErr.length > 0 ? `, stderr=${cleanErr}` : ""
+            return `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}' (signal=${r.signal}${stderrPart})`
+          })
+          .with({ _tag: "SpawnFailed" }, (r) =>
+            `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}' (spawnError=${r.spawnError})`,
+          )
+          .exhaustive(),
+      )
+      .exhaustive()
+
+    if (baselineDiag !== undefined) {
+      process.stderr.write(`${baselineDiag}\n`)
+      return makeAbortedReport(outcomes, baselineDiag)
+    }
+
+    const originalSource = originalContent
+    const originalSha256 = computeContentSha256(originalSource)
+    const expectedMutatedSha256 = computeContentSha256(schemaBundle.schemaSource)
+    const backupWriteErr = writeMutationBackup(
+      repoRoot,
+      backupPath,
+      file.fullPath,
+      originalSource,
+      schemaBundle.schemaSource,
+      hostIo,
+    )
+    if (backupWriteErr !== undefined) {
+      process.stderr.write(`${backupWriteErr}\n`)
+      return makeAbortedReport(outcomes, backupWriteErr)
+    }
+
+    const restoreOriginalFile = (): string | undefined => {
+      const currentDiskRes = Result.try(() => hostIo.readTextSync(file.fullPath))
+      const conflictDiag = match(currentDiskRes)
+        .with({ _tag: "Success" }, ({ success: currentDiskContent }) => {
+          const currentSha256 = computeContentSha256(currentDiskContent)
+          if (currentSha256 !== expectedMutatedSha256 && currentSha256 !== originalSha256) {
+            return `[mutation-check] CRITICAL: Target '${file.relFile}' was modified externally mid-run (sha256=${currentSha256}); refusing to overwrite user edits. Preserving '${backupPath}'.`
+          }
+          return undefined
+        })
+        .with({ _tag: "Failure" }, ({ failure }) =>
+          `[mutation-check] CRITICAL: Failed to read '${file.fullPath}' before restore (${failure instanceof Error ? failure.message : String(failure)}). Preserving '${backupPath}'.`,
+        )
+        .exhaustive()
+
+      if (conflictDiag !== undefined) {
+        process.stderr.write(`${conflictDiag}\n`)
+        return conflictDiag
+      }
+
+      const primaryWrite = Result.try(() => {
+        hostIo.writeTextSync(file.fullPath, originalSource)
+      })
+      const primaryError = match(primaryWrite)
+        .with({ _tag: "Success" }, () => undefined)
+        .with({ _tag: "Failure" }, ({ failure }) =>
+          failure instanceof Error ? failure.message : String(failure),
+        )
+        .exhaustive()
+
+      if (primaryError === undefined) {
+        const unlinkErr = unlinkBackupChecked(backupPath, hostIo)
+        if (unlinkErr !== undefined) {
+          const diag = `[mutation-check] CRITICAL: Restored '${file.fullPath}' but ${unlinkErr}`
+          process.stderr.write(`${diag}\n`)
+          return diag
+        }
+        return undefined
+      }
+
+      // Retry restoring from backupPath before giving up
+      const retryRes = Result.try(() => {
+        const raw = hostIo.readTextSync(backupPath)
+        const decoded = Schema.decodeOption(BackupSchema)(raw)
+        const sourceToWrite = match(decoded)
+          .with({ _tag: "Some" }, ({ value }) => value.content ?? value.originalSource ?? originalSource)
+          .with({ _tag: "None" }, () => originalSource)
+          .exhaustive()
+        hostIo.writeTextSync(file.fullPath, sourceToWrite)
+      })
+
+      return match(retryRes)
+        .with({ _tag: "Success" }, () => {
+          const unlinkErr = unlinkBackupChecked(backupPath, hostIo)
+          if (unlinkErr !== undefined) {
+            const diag = `[mutation-check] CRITICAL: Restored '${file.fullPath}' from backup retry but ${unlinkErr}`
+            process.stderr.write(`${diag}\n`)
+            return diag
+          }
+          return undefined
+        })
+        .with({ _tag: "Failure" }, ({ failure }) => {
+          const retryMsg = failure instanceof Error ? failure.message : String(failure)
+          const diag = `[mutation-check] CRITICAL: Failed to restore '${file.fullPath}' (${primaryError}; backup retry: ${retryMsg}). Preserving '${backupPath}'.`
+          process.stderr.write(`${diag}\n`)
+          return diag
+        })
+        .exhaustive()
+    }
+
+    const onProcessExit = () => {
+      restoreOriginalFile()
+    }
+    const onSigInt = () => {
+      onProcessExit()
+      process.exit(130)
+    }
+    const onSigTerm = () => {
+      onProcessExit()
+      process.exit(143)
+    }
+    process.once("exit", onProcessExit)
+    process.once("SIGINT", onSigInt)
+    process.once("SIGTERM", onSigTerm)
+
+    const cleanupProcessListeners = () => {
+      process.off("exit", onProcessExit)
+      process.off("SIGINT", onSigInt)
+      process.off("SIGTERM", onSigTerm)
+    }
+
+    const runLoopRes = Result.try(() => {
+      let innerWriteSchemaErr: string | undefined = undefined
+      let innerRunnerAbortDiagnostic: string | undefined = undefined
+      let innerRestoreErr: string | undefined = undefined
+      const writeSchemaRes = Result.try(() => {
+        hostIo.writeTextSync(file.fullPath, schemaBundle.schemaSource)
+      })
+      innerWriteSchemaErr = match(writeSchemaRes)
+        .with({ _tag: "Success" }, () => undefined)
+        .with({ _tag: "Failure" }, ({ failure }) =>
+          failure instanceof Error ? failure.message : String(failure),
+        )
+        .exhaustive()
+
+      if (innerWriteSchemaErr !== undefined) {
+        innerRestoreErr = restoreOriginalFile()
+      } else {
+        for (const mutant of mutants) {
+          const execRes = Result.try(() =>
+            hostIo.execFileSync("pnpm", ["vitest", "run", ...reachingTestFiles], {
+              cwd: repoRoot,
+              timeoutMs: 30_000,
+              env: { ...baseSubprocessEnv, HARNESS_ACTIVE_MUTANT_ID: mutant.id },
+            }),
+          )
+          const outcomeOrAbort = classifyMutantSubprocessResult(mutant.id, execRes)
+
+          const abortDiagnostic = match(outcomeOrAbort)
+            .with({ kind: "abort" }, ({ diagnostic }) => diagnostic)
+            .with({ kind: "outcome" }, ({ status }) => {
+              outcomes.push({ mutant, status })
+              return undefined
+            })
+            .exhaustive()
+          if (abortDiagnostic !== undefined) {
+            innerRunnerAbortDiagnostic = abortDiagnostic
+            break
+          }
+        }
+        innerRestoreErr = restoreOriginalFile()
+      }
+      return {
+        writeSchemaErr: innerWriteSchemaErr,
+        runnerAbortDiagnostic: innerRunnerAbortDiagnostic,
+        restoreErr: innerRestoreErr,
+      }
+    })
+    cleanupProcessListeners()
+    const { writeSchemaErr, runnerAbortDiagnostic, restoreErr } = match(runLoopRes)
+      .with({ _tag: "Success" }, ({ success }) => success)
+      .with({ _tag: "Failure" }, ({ failure }) => ({
+        writeSchemaErr: undefined as string | undefined,
+        runnerAbortDiagnostic: `[mutation-check] Unexpected error for '${file.relFile}': ${failure instanceof Error ? failure.message : String(failure)}` as string | undefined,
+        restoreErr: undefined as string | undefined,
+      }))
+      .exhaustive()
+
+    if (writeSchemaErr !== undefined) {
+      const diag =
+        restoreErr !== undefined
+          ? `[mutation-check] Failed to write mutated schema for '${file.relFile}': ${writeSchemaErr} (${restoreErr})`
+          : `[mutation-check] Failed to write mutated schema for '${file.relFile}': ${writeSchemaErr}`
+      process.stderr.write(`${diag}\n`)
+      return makeAbortedReport(outcomes, diag)
+    }
+
+    if (runnerAbortDiagnostic !== undefined) {
+      process.stderr.write(`${runnerAbortDiagnostic}\n`)
+      return makeAbortedReport(outcomes, runnerAbortDiagnostic)
+    }
+    if (restoreErr !== undefined) {
+      return makeAbortedReport(outcomes, restoreErr)
+    }
   }
 
-  return Effect.runSync(
-    decideMutationReport({
-      outcomes,
-      minScore: options?.minScore,
-      equivalencePriors: options?.equivalencePriors,
-      saturationSpecs: options?.saturationSpecs,
-      spanObservations: options?.spanObservations,
-      traceObservations: options?.spanObservations,
-    }),
+  return evaluateMutationOutcomes(
+    outcomes,
+    options?.minScore,
+    options?.equivalencePriors,
+    options?.saturationSpecs,
+    options?.spanObservations,
   )
 }
 

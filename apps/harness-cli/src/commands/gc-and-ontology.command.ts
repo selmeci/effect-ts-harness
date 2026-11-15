@@ -1,14 +1,18 @@
-import { existsSync } from "node:fs"
 import { join } from "node:path"
-import { Effect, Layer } from "effect"
-import * as DecisionModel from "effect/ai/DecisionModel"
+import { Cause, Effect } from "effect"
 import { match } from "ts-pattern"
-import { evaluateOntologyConflicts, extractOntologyConflictPairs, IDIOM_BLOCKS } from "@harness/decision"
+import { isPureInterruptCause } from "@harness/contract"
 import {
+  evaluateOntologyConflictsWithStatus,
+  extractOntologyConflictPairs,
+  IDIOM_BLOCKS,
+  type OntologyConflictEvaluationReport,
+} from "@harness/decision"
+import {
+  decideGraphEntropy,
   decideOntologyInvariants,
-  loadGovernanceDocsFromDisk,
-  scanGraphEntropy,
-  scanWorkspacePackageHygiene,
+  type GraphGcReport,
+  loadGovernanceDocsChecked,
 } from "@harness/gates"
 import {
   extractWorkspaceTypeAwareGraph,
@@ -17,7 +21,13 @@ import {
   queryOntologyWhy,
   renderOntologyMermaid,
 } from "@harness/graph"
-import { type CliEnv, type CliResult, findWorkspaceRoot } from "./daemon-and-omnigraph.service.js"
+import { nodeSyncHostIo } from "@harness/infra"
+import {
+  type CliEnv,
+  type CliResult,
+  findWorkspaceRoot,
+  resolveDecisionModelLayer,
+} from "./daemon-and-omnigraph.service.js"
 
 export const handleGc = (
   argv: ReadonlyArray<string>,
@@ -26,22 +36,32 @@ export const handleGc = (
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     const strict = argv.includes("--strict")
-    const graph = yield* extractWorkspaceTypeAwareGraph(repoRoot)
-    const hasPatternsDir = existsSync(join(repoRoot, "agent-patterns"))
-    const governanceDocs = loadGovernanceDocsFromDisk(repoRoot)
-    const report = scanGraphEntropy(graph, {
+    const graph =
+      options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo))
+    const hasPatternsDir = nodeSyncHostIo.existsSync(join(repoRoot, "agent-patterns"))
+    const { docs: governanceDocs, findings: docReadFindings } = loadGovernanceDocsChecked(
+      repoRoot,
+      nodeSyncHostIo,
+    )
+    const baseReport = yield* decideGraphEntropy({
+      graph,
       expectedPatterns: hasPatternsDir ? IDIOM_BLOCKS : undefined,
       checkUntestedDomainFns: true,
       checkDeciderPropertyTests: true,
       governanceDocs,
+      ...(strict ? { workspaceRoot: repoRoot, hostIo: nodeSyncHostIo } : {}),
     })
-    const findings = strict
-      ? [...report.findings, ...scanWorkspacePackageHygiene(repoRoot)]
-      : report.findings
-    const finalReport = {
-      clean: findings.length === 0,
-      findings,
-    }
+    const finalReport: GraphGcReport =
+      docReadFindings.length > 0
+        ? {
+            ...baseReport,
+            clean: false,
+            findings: [
+              ...baseReport.findings,
+              ...docReadFindings.map((f) => ({ ...f, kind: "governance-doc-read-error" as const })),
+            ],
+          }
+        : baseReport
     return {
       exitCode: strict && !finalReport.clean ? 1 : 0,
       stdout: JSON.stringify(finalReport),
@@ -52,11 +72,12 @@ export const handleGc = (
 export const handleOntology = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
-  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
+    const decisionLayer = yield* resolveDecisionModelLayer(options?.decisionLayer)
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-    const graph = options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot))
+    const graph =
+      options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo))
     const sub = argv[1] ?? "layers"
 
     return yield* match(sub)
@@ -89,10 +110,31 @@ export const handleOntology = (
       .with("check", () =>
         Effect.gen(function* () {
           const strict = argv.includes("--strict")
+          const deterministic = argv.includes("--deterministic")
           const scopeArg = argv.find((arg) => arg.startsWith("--scope="))
           const scope = scopeArg ? scopeArg.slice("--scope=".length) : undefined
 
-          const allDocs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot)
+          const checkedDocs =
+            options?.governanceDocs !== undefined
+              ? { docs: options.governanceDocs, findings: [] }
+              : loadGovernanceDocsChecked(repoRoot, nodeSyncHostIo)
+          const allDocs = checkedDocs.docs
+          const docFindings = checkedDocs.findings
+          if (docFindings.length > 0) {
+            const msg = docFindings.map((f) => `[${f.kind}] ${f.location}: ${f.message}`).join("\n")
+            return {
+              exitCode: 1,
+              stdout: JSON.stringify({
+                clean: false,
+                degraded: true,
+                semanticSkipped: deterministic,
+                findings: docFindings,
+                semanticConflicts: [],
+                evaluatedPairs: 0,
+              }),
+              stderr: `Ontology check failed: unreadable governance docs\n${msg}`,
+            }
+          }
           const docs = scope
             ? allDocs.filter(
                 (doc) =>
@@ -107,18 +149,38 @@ export const handleOntology = (
             graph,
             governanceDocs: docs,
           })
-          const pairs = extractOntologyConflictPairs(docs, scope)
-          const semanticConflicts = yield* evaluateOntologyConflicts(pairs).pipe(
-            Effect.provide(decisionLayer),
-          )
-          const clean = invariants.clean && semanticConflicts.length === 0
+          const pairs = yield* extractOntologyConflictPairs(docs, scope)
+          const semanticReport: OntologyConflictEvaluationReport = deterministic
+            ? { conflicts: [], degraded: false }
+            : yield* evaluateOntologyConflictsWithStatus(pairs).pipe(
+                Effect.provide(decisionLayer),
+                Effect.catchCause((cause) => {
+                  if (isPureInterruptCause(cause)) {
+                    return Effect.interrupt
+                  }
+                  const pretty = Cause.pretty(cause)
+                  process.stderr.write(`[harness:ontology] semantic conflict check failed: ${pretty}\n`)
+                  return Effect.succeed<OntologyConflictEvaluationReport>({
+                    conflicts: [],
+                    degraded: true,
+                    evaluationError: pretty,
+                  })
+                }),
+              )
+          const degraded = semanticReport.degraded
+          const clean = invariants.clean && semanticReport.conflicts.length === 0 && !degraded
 
           return {
             exitCode: strict && !clean ? 1 : 0,
             stdout: JSON.stringify({
               clean,
+              degraded,
+              semanticSkipped: deterministic,
+              ...(semanticReport.evaluationError !== undefined
+                ? { evaluationError: semanticReport.evaluationError }
+                : {}),
               findings: invariants.findings,
-              semanticConflicts,
+              semanticConflicts: semanticReport.conflicts,
               evaluatedPairs: pairs.length,
             }),
             stderr: "",

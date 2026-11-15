@@ -1,3 +1,4 @@
+import { match } from "ts-pattern"
 import {
   type CallExpression,
   type NewExpression,
@@ -49,25 +50,21 @@ export const extractEffectFns = (
     let isEffectFn = false
     let spanName = varName
 
-    if (init && init.getKind() === SyntaxKind.CallExpression) {
-      const outerCall = init as CallExpression
-      const innerExpr = outerCall.getExpression()
-      if (innerExpr.getKind() === SyntaxKind.CallExpression) {
-        const innerCall = innerExpr as CallExpression
-        const callee = innerCall.getExpression().getText()
-        if (callee === "Effect.fn") {
-          isEffectFn = true
-          const args = innerCall.getArguments()
-          if (args.length > 0 && args[0]?.getKind() === SyntaxKind.StringLiteral) {
-            spanName = args[0].getText().replace(/^["'`]|["'`]$/g, "")
-          }
-        } else if (callee === "Effect.fnUntraced") {
-          isEffectFn = true
-          spanName = varName
-        }
-      } else if (innerExpr.getText() === "Effect.fnUntraced") {
-        isEffectFn = true
-        spanName = varName
+    if (init && Node.isCallExpression(init)) {
+      const innerExpr = init.getExpression()
+      if (Node.isCallExpression(innerExpr)) {
+        match(innerExpr.getExpression().getText())
+          .with("Effect.fn", () => {
+            isEffectFn = true
+            const args = innerExpr.getArguments()
+            if (args.length > 0 && args[0]?.getKind() === SyntaxKind.StringLiteral) {
+              spanName = args[0].getText().replace(/^["'`]|["'`]$/g, "")
+            }
+          })
+          .with("Effect.fnUntraced", () => { isEffectFn = true; spanName = varName })
+          .otherwise(() => {})
+      } else {
+        if (innerExpr.getText() === "Effect.fnUntraced") { isEffectFn = true; spanName = varName }
       }
     }
 
@@ -214,19 +211,16 @@ export const extractEffectFns = (
     if (sigs.length > 0 && sigs[0]) {
       const retType = sigs[0].getReturnType()
       const typeArgs = retType.getTypeArguments()
-      if (
-        typeArgs.length >= 1 &&
-        typeArgs[0] &&
-        (successType === "void" || successType === "unknown") &&
-        !typeArgs[0].isAny()
-      ) {
-        successType = typeArgs[0].getText()
-      } else if (successType === "void" || successType === "unknown") {
-        const retNode =
-          Node.isArrowFunction(init) || Node.isFunctionExpression(init)
-            ? init.getReturnTypeNode()?.getText()
-            : undefined
-        successType = retNode ?? (!retType.isAny() ? retType.getText() : "unknown")
+      if (successType === "void" || successType === "unknown") {
+        if (typeArgs.length >= 1 && typeArgs[0] && !typeArgs[0].isAny()) {
+          successType = typeArgs[0].getText()
+        } else {
+          const retNode =
+            Node.isArrowFunction(init) || Node.isFunctionExpression(init)
+              ? init.getReturnTypeNode()?.getText()
+              : undefined
+          successType = retNode ?? (!retType.isAny() ? retType.getText() : "unknown")
+        }
       }
       if (
         typeArgs.length >= 2 &&
@@ -316,24 +310,19 @@ export const extractEffectFns = (
         const callExpr = expr as CallExpression
         const calleeText = callExpr.getExpression().getText()
         if (calleeText === "Effect.fail" || calleeText.endsWith(".fail")) {
-          const args = callExpr.getArguments()
-          if (args.length > 0 && args[0]) {
-            const arg = args[0]
-            if (arg.getKind() === SyntaxKind.NewExpression) {
-              const newExpr = arg as NewExpression
-              errorTags.add(newExpr.getExpression().getText())
-            } else if (arg.getKind() === SyntaxKind.Identifier) {
-              errorTags.add(arg.getText())
-            }
+          const arg = callExpr.getArguments()[0]
+          if (arg) {
+            match(arg.getKind())
+              .with(SyntaxKind.NewExpression, () => { errorTags.add((arg as NewExpression).getExpression().getText()) })
+              .with(SyntaxKind.Identifier, () => { errorTags.add(arg.getText()) })
+              .otherwise(() => {})
           }
-        } else if (calleeText.endsWith(".make")) {
-          const errorId = calleeText.replace(/\.make$/, "")
-          if (
-            errorId.endsWith("Error") ||
-            errors.some((e) => e.errorTag === errorId) ||
-            referencedErrors.has(errorId)
-          ) {
-            errorTags.add(errorId)
+        } else {
+          if (calleeText.endsWith(".make")) {
+            const errorId = calleeText.replace(/\.make$/, "")
+            if (errorId.endsWith("Error") || errors.some((e) => e.errorTag === errorId) || referencedErrors.has(errorId)) {
+              errorTags.add(errorId)
+            }
           }
         }
       }

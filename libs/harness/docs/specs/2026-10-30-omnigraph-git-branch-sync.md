@@ -7,8 +7,8 @@ date: 2026-10-30
 owners:
   - "@harness/graph"
   - "@harness/gates"
-  - "@harness/cli"
-  - "@harness/mcp"
+  - "harness-cli"
+  - "harness-mcp"
 adrs:
   - harness:ADR-0006
 spans:
@@ -25,7 +25,7 @@ errors: []
 
 ## Context and Motivation
 
-Audit of the Omnigraph branch lifecycle and `.harness/graph-snapshot.json` maintenance across `@harness/graph`, `@harness/gates`, `@harness/cli`, and `@harness/mcp` uncovered four architectural gaps when Pull Requests or local Git branches are merged into `main`:
+Audit of the Omnigraph branch lifecycle and `.harness/graph-snapshot.json` maintenance across `@harness/graph`, `@harness/gates`, `harness-cli`, and `harness-mcp` uncovered four architectural gaps when Pull Requests or local Git branches are merged into `main`:
 
 1. **No Post-Merge / `git pull` HEAD Reconciliation (`OmnigraphReconcile.decide`):** When a PR is merged into `main` on GitHub and pulled locally (`git pull`), or when a local feature branch is merged into `main` via `git merge`, no Git hook or CLI/MCP check compared the current Git `HEAD` SHA against the `HEAD` SHA recorded when `.harness/graph-snapshot.json` and Omnigraph `main` were last updated. Consequently, `.harness/graph-snapshot.json` and Omnigraph `main` remained stale until the next manual `harness verify` + `harness done` cycle.
 2. **Git-Branch-Unaware Omnigraph Task Branches (`resolveOmnigraphTaskBranches`):** Unless `HARNESS_WORKTREE_ID` or a linked `.git` worktree directory was used, `resolveOmnigraphTaskBranches` mapped every local Git branch in the primary checkout to `plan/current` and `impl/current`, causing branch collisions when switching between local feature branches.

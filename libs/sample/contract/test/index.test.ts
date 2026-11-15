@@ -1,7 +1,6 @@
 import { spawnSync } from "node:child_process"
 import { readFileSync, rmSync, writeFileSync } from "node:fs"
-import os from "node:os"
-import { resolve } from "node:path"
+import { dirname, resolve } from "node:path"
 import process from "node:process"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
@@ -29,7 +28,7 @@ import {
 
 const currentDir = import.meta.dirname ?? fileURLToPath(new URL(".", import.meta.url))
 const repoRoot = resolve(currentDir, "../../../..")
-const checkScriptPath = resolve(currentDir, "../scripts/check-openapi.mjs")
+const harnessCliEntryPath = resolve(repoRoot, "apps/harness-cli/src/index.ts")
 const resolverPath = resolve(repoRoot, "tools/node-ts-resolver.mjs")
 const openApiPath = resolve(currentDir, "../openapi.json")
 
@@ -98,7 +97,7 @@ describe("sample-contract (Schemas, HttpApi, RpcGroup, OpenAPI)", () => {
     expect(liveSpec).toEqual(committed)
   })
 
-  it("scripts/check-openapi.mjs CLI exits with code 2 and ESCALATE on breaking change", () => {
+  it("harness-cli check-openapi exits with code 2 and ESCALATE on breaking change", () => {
     interface OpenApiDoc {
       paths?: Record<
         string,
@@ -135,14 +134,22 @@ describe("sample-contract (Schemas, HttpApi, RpcGroup, OpenAPI)", () => {
       items.properties = { ...items.properties, extraRequiredField: { type: "string" } }
     }
     const tmpBaselineFile = resolve(
-      os.tmpdir(),
-      `test-baseline-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+      dirname(fileURLToPath(import.meta.url)),
+      `..`,
+      `.tmp-baseline-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
     )
     try {
       writeFileSync(tmpBaselineFile, JSON.stringify(baselineSpec, null, 2), "utf8")
       const res = spawnSync(
         process.execPath,
-        ["--import", resolverPath, checkScriptPath, "--baseline", tmpBaselineFile],
+        [
+          "--import",
+          resolverPath,
+          harnessCliEntryPath,
+          "check-openapi",
+          "--baseline",
+          tmpBaselineFile,
+        ],
         { encoding: "utf8" },
       )
       expect(res.status).toBe(2)

@@ -1,3 +1,4 @@
+import { match } from "ts-pattern"
 import {
   type EffectFnNode,
   type EntityNode,
@@ -39,7 +40,11 @@ export const findPhase1PlanPatches = (
   const sortedSpecs = Array.from(ctx.specsByKey.entries()).sort((a, b) => a[0].localeCompare(b[0]))
 
   for (const [specKey, specNode] of sortedSpecs) {
-    if (specNode.status !== "proposed" && specNode.status !== "accepted") {
+    const isActiveSpec = match(specNode.status)
+      .with("proposed", "accepted", () => true)
+      .with("superseded", "deprecated", () => false)
+      .exhaustive()
+    if (!isActiveSpec) {
       continue
     }
 
@@ -54,9 +59,10 @@ export const findPhase1PlanPatches = (
     const declaredSpans =
       specNode.referencedSpans !== undefined && specNode.referencedSpans.length > 0
         ? specNode.referencedSpans
-        : specNode.status === "proposed"
-          ? [`${sanitizeDpoIdentifier(specNode.id)}.execute`]
-          : []
+        : match(specNode.status)
+            .with("proposed", () => [`${sanitizeDpoIdentifier(specNode.id)}.execute`])
+            .with("accepted", "superseded", "deprecated", () => [] as ReadonlyArray<string>)
+            .exhaustive()
 
     // PLAN-01: WHEN clause -> Input SchemaDef + Use-Case EffectFn stub + EffectSignature + TraceabilityTuple
     for (const spanName of declaredSpans) {
@@ -279,12 +285,14 @@ export const findPhase1PlanPatches = (
     }
     if (existingTraceRelId !== undefined) {
       for (const e of ctx.edgesByRelId.get(existingTraceRelId) ?? []) {
-        if (e.role === "realizing-symbol" || e.role === "specified-target") {
-          const fnNode = ctx.fnsByKey.get(e.entityKey)
-          if (fnNode !== undefined && !specRealizingFns.some((item) => item.key === e.entityKey)) {
-            specRealizingFns.push({ key: e.entityKey, node: fnNode })
-          }
-        }
+        match<string>(e.role)
+          .with("realizing-symbol", "specified-target", () => {
+            const fnNode = ctx.fnsByKey.get(e.entityKey)
+            if (fnNode !== undefined && !specRealizingFns.some((item) => item.key === e.entityKey)) {
+              specRealizingFns.push({ key: e.entityKey, node: fnNode })
+            }
+          })
+          .otherwise(() => {})
       }
     }
 
@@ -304,7 +312,7 @@ export const findPhase1PlanPatches = (
       const alreadyWiredOnSig =
         sigRelId !== undefined &&
         (ctx.edgesByRelId.get(sigRelId) ?? []).some(
-          (e) => e.role === "fails-with" && e.entityKey === errKey,
+          (e) => e.entityKey === errKey && match<string>(e.role).with("fails-with", () => true).otherwise(() => false),
         )
 
       if (existingErr !== undefined && (targetFn === undefined || alreadyWiredOnSig)) {
@@ -381,7 +389,7 @@ export const findPhase1PlanPatches = (
         return (
           sId !== undefined &&
           (ctx.edgesByRelId.get(sId) ?? []).some(
-            (e) => e.role === "requires-service" && e.entityKey === svcKey,
+            (e) => e.entityKey === svcKey && match<string>(e.role).with("requires-service", () => true).otherwise(() => false),
           )
         )
       })
@@ -462,7 +470,7 @@ export const findPhase1PlanPatches = (
           preservedKeys.push(NodeKey.make(sigRelId))
         }
         const alreadyReq = (ctx.edgesByRelId.get(sigRelId) ?? []).some(
-          (e) => e.role === "requires-service" && e.entityKey === svcKey,
+          (e) => e.entityKey === svcKey && match<string>(e.role).with("requires-service", () => true).otherwise(() => false),
         )
         if (!alreadyReq) {
           insertedEdges.push(makePlaysRoleEdge(sigRelId, svcKey, "requires-service"))

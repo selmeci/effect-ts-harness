@@ -4,6 +4,7 @@ import * as path from "node:path"
 import { Effect, Schema } from "effect"
 import * as Graph from "effect/Graph"
 import { describe, expect, it } from "@effect/vitest"
+import { match } from "ts-pattern"
 import {
   buildHarnessGraph,
   checkEffectGraph,
@@ -13,6 +14,7 @@ import {
   isAggregateFnNode,
   type EffectFnNode,
 } from "../src/index.js"
+import { testHostIo } from "./helpers/test-host-io.js"
 
 const makeTestFnNode = (partial: {
   readonly spanName: string
@@ -230,7 +232,7 @@ describe("effect-graph:check policy rules", () => {
   it("end-to-end: extracts from source skeleton with forbidden infra dependency and reports violation", () => {
     const domainSource = `
 import { Effect } from "effect"
-import { stub } from "@harness/gates"
+import { stub } from "@harness/contract"
 
 export class R2BucketBinding {
   static readonly _tag = "ServiceTag"
@@ -1446,7 +1448,7 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
         `,
       )
 
-      const badGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir))
+      const badGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir, testHostIo))
       const badResult = checkEffectGraph(badGraph)
       const violations = badResult.violations.filter((v) => v.rule === "unasserted-state-field")
       expect(violations.length).toBe(1)
@@ -1470,7 +1472,7 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
         `,
       )
 
-      const goodGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir))
+      const goodGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(tmpDir, testHostIo))
       const goodResult = checkEffectGraph(goodGraph)
       expect(goodResult.violations.filter((v) => v.rule === "unasserted-state-field")).toHaveLength(
         0,
@@ -2372,7 +2374,7 @@ export const evolveCartV2 = (state: CartState, event: CartEventV2): CartState =>
         packageTag: "domain",
         content: `
           import { Context, Data, Effect } from "effect"
-          import { stub } from "@harness/gates"
+          import { stub } from "@harness/contract"
 
           export class CustomError extends Data.TaggedError("CustomError")<{ readonly message: string }> {}
           export class SqlClient extends Context.Service<SqlClient, {}>()("SqlClient") {}
@@ -2387,11 +2389,10 @@ export const evolveCartV2 = (state: CartState, event: CartEventV2): CartState =>
     const failsWithErrors = new Set<string>()
     const requiredServices = new Set<string>()
     for (const [, edge] of Graph.edges(graph.graph)) {
-      if (edge.data.role === "fails-with") {
-        failsWithErrors.add(edge.data.entityKey.replace(/^TaggedError:/, ""))
-      } else if (edge.data.role === "requires-service") {
-        requiredServices.add(edge.data.entityKey.replace(/^ServiceTag:/, ""))
-      }
+      match<string>(edge.data.role)
+        .with("fails-with", () => { failsWithErrors.add(edge.data.entityKey.replace(/^TaggedError:/, "")) })
+        .with("requires-service", () => { requiredServices.add(edge.data.entityKey.replace(/^ServiceTag:/, "")) })
+        .otherwise(() => {})
     }
 
     expect(failsWithErrors.has("CustomError")).toBe(true)
@@ -2400,12 +2401,17 @@ export const evolveCartV2 = (state: CartState, event: CartEventV2): CartState =>
     expect(requiredServices.has("ProjectionEnv")).toBe(false)
 
     for (const [, node] of Graph.nodes(graph.graph)) {
-      if (node._tag === "TaggedError") {
-        expect(node.errorTag).not.toBe("Err")
-      }
-      if (node._tag === "ServiceTag") {
-        expect(node.tagId).not.toBe("ProjectionEnv")
-      }
+      match(node)
+        .with({ _tag: "TaggedError" }, (n) => { expect(n.errorTag).not.toBe("Err") })
+        .with({ _tag: "ServiceTag" }, (n) => { expect(n.tagId).not.toBe("ProjectionEnv") })
+        .with(
+          { _tag: "EffectFn" }, { _tag: "ServiceLayer" }, { _tag: "SchemaDef" },
+          { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" },
+          { _tag: "EarsSpec" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" },
+          { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+          () => undefined,
+        )
+        .exhaustive()
     }
   })
 
@@ -2585,6 +2591,14 @@ export const evolveCartV2 = (state: CartState, event: CartEventV2): CartState =>
         // Lifecycle rules gating (untested domain span)
         const hasUntested = effectDecision.violations.some((v) => v.rule === "untested-domain-span")
         expect(hasUntested).toBe(spec.hasUntestedDomainSpan && spec.includeLifecycleRules)
+
+        // F-8.2a: decideEffectGraphPolicy and checkEffectGraph return identical violations
+        const f82aSyncResult = checkEffectGraph(graph, {
+          includeLifecycleRules: spec.includeLifecycleRules,
+          checkUnresolvedReferences: spec.checkUnresolvedReferences,
+        })
+        expect(f82aSyncResult.violations).toEqual(effectDecision.violations)
+        expect(f82aSyncResult.ok).toBe(effectDecision.ok)
       }),
   )
 })

@@ -1,6 +1,6 @@
-import * as fs from "node:fs"
 import * as path from "node:path"
 import { Lang, parse } from "@ast-grep/napi"
+import type { SyncHostReader } from "@harness/service/host-io"
 import { Schema } from "effect"
 import { Node, type Project, type SourceFile, SyntaxKind, VariableDeclarationKind } from "ts-morph"
 import { match } from "ts-pattern"
@@ -64,6 +64,7 @@ export interface GraphProjectorInput {
   readonly existingFiles?: Readonly<Record<string, string>> | undefined
   readonly verifyRoundTrip?: boolean | undefined
   readonly forceFailRuleIds?: ReadonlyArray<RewriteRuleId | string> | undefined
+  readonly hostIo?: SyncHostReader | undefined
 }
 
 export class GraphProjectorError extends Schema.TaggedError<GraphProjectorError>()(
@@ -83,21 +84,26 @@ export const sanitizeIdentifier = (raw: string): string => {
 }
 
 export const validateRelPath = (
-  repoRoot: string, rawPath: string, ruleId?: RewriteRuleId,
+  repoRoot: string, rawPath: string, ruleId?: RewriteRuleId, hostIo?: SyncHostReader,
 ): { readonly ok: true; readonly relPath: string } | { readonly ok: false; readonly error: GraphProjectorError } => {
   const trimmed = (rawPath ?? "").trim()
   if (trimmed.length === 0) {
     return { ok: false, error: new GraphProjectorError({ ...(ruleId !== undefined ? { ruleId } : {}), reason: "invalid-patch-target", message: "Target file path cannot be empty." }) }
   }
-  const rel = resolveContainedRelPath(repoRoot, trimmed)
+  const rel = resolveContainedRelPath(repoRoot, trimmed, hostIo)
   if (rel === null) {
     return { ok: false, error: new GraphProjectorError({ ...(ruleId !== undefined ? { ruleId } : {}), reason: "invalid-patch-target", message: `Target file path '${rawPath}' escapes workspace root '${repoRoot}'.` }) }
   }
   return { ok: true, relPath: rel }
 }
 
-export const normalizeRelPath = (repoRoot: string, rawPath: string, ruleId?: RewriteRuleId): string => {
-  const res = validateRelPath(repoRoot, rawPath, ruleId)
+export const normalizeRelPath = (
+  repoRoot: string,
+  rawPath: string,
+  ruleId?: RewriteRuleId,
+  hostIo?: SyncHostReader,
+): string => {
+  const res = validateRelPath(repoRoot, rawPath, ruleId, hostIo)
   return res.ok ? res.relPath : "__invalid_target__"
 }
 
@@ -118,26 +124,31 @@ export interface ProjectorContext {
   readonly targetEntitiesByKey: Map<string, EntityNode>
   readonly targetRelationsById: Map<string, RelationNode>
   readonly targetEdgesByRelId: Map<string, Array<PlaysRoleEdge>>
+  readonly hostIo?: SyncHostReader | undefined
   pendingError?: GraphProjectorError | undefined
 }
 
 export const readInitialFileContent = (
-  repoRoot: string, relPath: string, existingFiles?: Readonly<Record<string, string>>,
+  repoRoot: string,
+  relPath: string,
+  existingFiles?: Readonly<Record<string, string>>,
+  hostIo?: SyncHostReader,
 ): string | undefined => {
   if (existingFiles !== undefined) {
     if (existingFiles[relPath] !== undefined) return existingFiles[relPath]
     const absKey = path.resolve(repoRoot, relPath).replace(/\\/g, "/")
     if (existingFiles[absKey] !== undefined) return existingFiles[absKey]
   }
+  if (hostIo === undefined) return undefined
   const fullPath = path.resolve(repoRoot, relPath)
-  return fs.existsSync(fullPath) ? fs.readFileSync(fullPath, "utf8") : undefined
+  return hostIo.existsSync(fullPath) ? hostIo.readTextSync(fullPath) : undefined
 }
 
 export const getOrCreateSourceFile = (
   ctx: ProjectorContext, relFile: string,
   options?: { readonly requireExisting?: boolean | undefined; readonly ruleId?: RewriteRuleId | undefined },
 ): { readonly sf: SourceFile; readonly norm: string } => {
-  const validated = validateRelPath(ctx.repoRoot, relFile, options?.ruleId)
+  const validated = validateRelPath(ctx.repoRoot, relFile, options?.ruleId, ctx.hostIo)
   if (!validated.ok) {
     ctx.pendingError ??= validated.error
     const fallbackSf = ctx.project.getSourceFile("/__invalid_target__.ts") ?? ctx.project.createSourceFile("/__invalid_target__.ts", "", { overwrite: true })
@@ -182,9 +193,11 @@ export const ensureNamedImport = (
         addedNames.push(name)
       }
     }
-  } else if (namedImports.length > 0) {
-    sf.insertImportDeclaration(0, { moduleSpecifier: moduleSpec, namedImports: [...namedImports] })
-    addedNames.push(...namedImports)
+  } else {
+    if (namedImports.length > 0) {
+      sf.insertImportDeclaration(0, { moduleSpecifier: moduleSpec, namedImports: [...namedImports] })
+      addedNames.push(...namedImports)
+    }
   }
   if (addedNames.length > 0) {
     ctx.modifiedFiles.add(norm)
@@ -359,18 +372,16 @@ export const collectSignatureTypesForFn = (
   let inputSchemaFromEdge: string | undefined, outputSchemaFromEdge: string | undefined
 
   for (const [, edges] of ctx.targetEdgesByRelId.entries()) {
-    if (!edges.some((e) => e.role === "caller" && e.entityKey === fnKey)) continue
+    if (!edges.some((e) => e.entityKey === fnKey && match<string>(e.role).with("caller", () => true).otherwise(() => false))) continue
     for (const e of edges) {
       const name = resolveExportNameForEntityKey(ctx, e.entityKey)
-      if (e.role === "fails-with" && name !== undefined && !errorTypes.includes(name)) {
-        errorTypes.push(name); errorEntityKeys.push(e.entityKey)
-      } else if (e.role === "requires-service" && name !== undefined && !serviceTypes.includes(name)) {
-        serviceTypes.push(name); serviceEntityKeys.push(e.entityKey)
-      } else if (e.role === "input-schema" && name !== undefined) {
-        inputSchemaFromEdge = name; schemaEntityKeys.push(e.entityKey)
-      } else if (e.role === "output-schema" && name !== undefined) {
-        outputSchemaFromEdge = name; schemaEntityKeys.push(e.entityKey)
-      }
+      if (name === undefined) continue
+      match<string>(e.role)
+        .with("fails-with", () => { if (!errorTypes.includes(name)) { errorTypes.push(name); errorEntityKeys.push(e.entityKey) } })
+        .with("requires-service", () => { if (!serviceTypes.includes(name)) { serviceTypes.push(name); serviceEntityKeys.push(e.entityKey) } })
+        .with("input-schema", () => { inputSchemaFromEdge = name; schemaEntityKeys.push(e.entityKey) })
+        .with("output-schema", () => { outputSchemaFromEdge = name; schemaEntityKeys.push(e.entityKey) })
+        .otherwise(() => {})
     }
   }
 
@@ -391,7 +402,7 @@ export const ensureCrossFileImportsForEntityKeys = (
     const targetFile = resolveFileForEntityKey(ctx, key)
     const exportName = resolveExportNameForEntityKey(ctx, key)
     if (targetFile === undefined || exportName === undefined) continue
-    const normTarget = normalizeRelPath(ctx.repoRoot, targetFile)
+    const normTarget = normalizeRelPath(ctx.repoRoot, targetFile, undefined, ctx.hostIo)
     if (normTarget === fromRelFile) continue
     const moduleSpec = computeRelativeModuleSpec(fromRelFile, normTarget)
     ensureNamedImport(ctx, fromRelFile, moduleSpec, [exportName], ruleId, rationale)
@@ -430,7 +441,7 @@ export const projectEffectFnNode = (
 
   if (node.isStub === true && sf.getVariableDeclaration("stub") === undefined) {
     const hasStubImport = sf.getImportDeclarations().some((d) => d.getNamedImports().some((n) => n.getName() === "stub"))
-    if (!hasStubImport) ensureNamedImport(ctx, norm, "@harness/gates", ["stub"], ruleId, rationale)
+    if (!hasStubImport) ensureNamedImport(ctx, norm, "@harness/contract", ["stub"], ruleId, rationale)
   }
 
   const catchSuffix =
@@ -544,10 +555,12 @@ export const projectServiceLayerNode = (
   const providedServiceKeys: Array<string> = [], requiredServiceKeys: Array<string> = []
 
   for (const [, edges] of ctx.targetEdgesByRelId.entries()) {
-    if (!edges.some((e) => e.role === "provider-layer" && e.entityKey === layerKey)) continue
+    if (!edges.some((e) => e.entityKey === layerKey && match<string>(e.role).with("provider-layer", () => true).otherwise(() => false))) continue
     for (const e of edges) {
-      if (e.role === "provided-service") providedServiceKeys.push(e.entityKey)
-      else if (e.role === "required-service") requiredServiceKeys.push(e.entityKey)
+      match<string>(e.role)
+        .with("provided-service", () => { providedServiceKeys.push(e.entityKey) })
+        .with("required-service", () => { requiredServiceKeys.push(e.entityKey) })
+        .otherwise(() => {})
     }
   }
 
@@ -573,14 +586,16 @@ export const projectServiceLayerNode = (
           const missingYields = requiredNames.filter((req) => !bodyText.includes(req)).map((req) => `yield* ${req}`)
           if (missingYields.length > 0) body.insertStatements(0, missingYields.join("\n"))
         }
-      } else if (Node.isCallExpression(init) && init.getArguments().length >= 2) {
-        const calleeText = init.getExpression().getText()
-        const tagArg = init.getArguments()[0]!.getText()
-        const implArg = init.getArguments()[1]!.getText()
-        const missingYields = requiredNames.filter((req) => !implArg.includes(req)).map((req) => `    yield* ${req}`).join("\n")
-        if (missingYields.length > 0 && (calleeText === "Layer.succeed" || calleeText === "Layer.sync" || calleeText === "Layer.effect")) {
-          const returnExpr = calleeText === "Layer.sync" ? `(${implArg})()` : calleeText === "Layer.effect" ? `yield* (${implArg})` : implArg
-          existingVar.setInitializer(`Layer.effect(\n  ${tagArg},\n  Effect.gen(function* () {\n${missingYields}\n    return ${returnExpr}\n  }),\n)`)
+      } else {
+        if (Node.isCallExpression(init) && init.getArguments().length >= 2) {
+          const calleeText = init.getExpression().getText()
+          const tagArg = init.getArguments()[0]!.getText()
+          const implArg = init.getArguments()[1]!.getText()
+          const missingYields = requiredNames.filter((req) => !implArg.includes(req)).map((req) => `    yield* ${req}`).join("\n")
+          if (missingYields.length > 0 && (calleeText === "Layer.succeed" || calleeText === "Layer.sync" || calleeText === "Layer.effect")) {
+            const returnExpr = calleeText === "Layer.sync" ? `(${implArg})()` : calleeText === "Layer.effect" ? `yield* (${implArg})` : implArg
+            existingVar.setInitializer(`Layer.effect(\n  ${tagArg},\n  Effect.gen(function* () {\n${missingYields}\n    return ${returnExpr}\n  }),\n)`)
+          }
         }
       }
     }
@@ -625,10 +640,10 @@ export const projectVitestCaseNode = (
   const testKey = getNodeKey(node)
   const exercisedFnKeys: Array<string> = []
   for (const [, edges] of ctx.targetEdgesByRelId.entries()) {
-    if (!edges.some((e) => (e.role === "verifying-test" || e.role === "exercising-test") && e.entityKey === testKey)) continue
+    if (!edges.some((e) => e.entityKey === testKey && match<string>(e.role).with("verifying-test", "exercising-test", () => true).otherwise(() => false))) continue
     for (const e of edges) {
-      if ((e.role === "realizing-symbol" || e.role === "exercised-span") && e.entityKey.startsWith("EffectFn:")) {
-        exercisedFnKeys.push(e.entityKey)
+      if (e.entityKey.startsWith("EffectFn:")) {
+        match<string>(e.role).with("realizing-symbol", "exercised-span", () => { exercisedFnKeys.push(e.entityKey) }).otherwise(() => {})
       }
     }
   }

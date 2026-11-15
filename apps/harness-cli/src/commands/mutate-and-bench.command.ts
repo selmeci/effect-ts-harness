@@ -1,29 +1,30 @@
-import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { Cause, Effect } from "effect"
 import { match } from "ts-pattern"
 import {
-  AstGateCache,
   AstSourceContent,
   AstSourceFilePath,
+  HARNESS_GATE_RULE_VERSION,
+} from "@harness/contract"
+import {
+  AstGateCache,
   BenchStageName,
   buildStageLatencyMeasurement,
   decideHarnessBench,
   DEFAULT_STAGE_LATENCY_BUDGETS,
-  HARNESS_GATE_RULE_VERSION,
   LatencyMillis,
   LatencySloViolationError,
   runDomainMutationSuite,
 } from "@harness/gates"
 import {
-  clearWarmProgramSessions,
+  createTypeScriptProgramSession,
   DatalogFilePath,
   DatalogSession,
   decideGraphRewrite,
   extractTypeGraph,
-  getOrCreateWarmProgramSession,
   stepDatalogFileDelta,
 } from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 import { type CliEnv, type CliResult, findWorkspaceRoot } from "./daemon-and-omnigraph.service.js"
 
 export const handleMutate = (
@@ -35,7 +36,7 @@ export const handleMutate = (
     const scopeArg = argv.find((arg) => arg.startsWith("--scope="))
     const scope = scopeArg ? scopeArg.slice("--scope=".length) : undefined
 
-    const report = runDomainMutationSuite(repoRoot, { scope })
+    const report = runDomainMutationSuite(repoRoot, nodeSyncHostIo, { scope })
     return {
       exitCode: !report.passed ? 1 : 0,
       stdout: JSON.stringify(report),
@@ -48,6 +49,12 @@ export const handleBench = (
   options: CliEnv | undefined,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
+    if (argv.includes("--compare")) {
+      const { runBenchmarkCompare } = yield* Effect.promise(
+        () => import("./repo-checks.command.js"),
+      )
+      return yield* runBenchmarkCompare(argv, options)
+    }
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     const iterationsArg = argv.find((a) => a.startsWith("--iterations="))
     const parsedIter = iterationsArg ? Number(iterationsArg.slice("--iterations=".length)) : 3
@@ -60,25 +67,25 @@ export const handleBench = (
         ? LatencyMillis.make(parsedBudget)
         : undefined
 
-    const benchRelFile = existsSync(
+    const benchRelFile = nodeSyncHostIo.existsSync(
       join(repoRoot, "libs", "harness", "gates", "src", "bench-check.ts"),
     )
       ? "libs/harness/gates/src/bench-check.ts"
       : "libs/sample/domain/src/index.ts"
     const sampleFilePath = join(repoRoot, benchRelFile)
-    const sampleContent = existsSync(sampleFilePath)
-      ? readFileSync(sampleFilePath, "utf-8")
+    const sampleContent = nodeSyncHostIo.existsSync(sampleFilePath)
+      ? nodeSyncHostIo.readTextSync(sampleFilePath)
       : "export const x = 1\n"
 
-    clearWarmProgramSessions()
-    const session = getOrCreateWarmProgramSession(repoRoot)
+    const session = createTypeScriptProgramSession(repoRoot, nodeSyncHostIo)
     const coldExtractStart = performance.now()
-    const initialGraph = yield* extractTypeGraph({ repoRoot, session })
+    const initialGraph = yield* extractTypeGraph({ repoRoot, session, hostIo: nodeSyncHostIo })
     const coldExtractMs = Math.max(0, performance.now() - coldExtractStart)
 
     yield* extractTypeGraph({
       repoRoot,
       session,
+      hostIo: nodeSyncHostIo,
       overlays: {
         [benchRelFile]: `${sampleContent}\n// warm-prime\n`,
       },
@@ -90,6 +97,7 @@ export const handleBench = (
       yield* extractTypeGraph({
         repoRoot,
         session,
+        hostIo: nodeSyncHostIo,
         overlays: {
           [benchRelFile]: `${sampleContent}\n// warm-bench-${i}\n`,
         },
@@ -127,7 +135,6 @@ export const handleBench = (
       }
     }
 
-    const cacheFilePath = AstGateCache.resolveCachePath(repoRoot)
     yield* AstGateCache.decide({
       files: [
         {
@@ -136,7 +143,6 @@ export const handleBench = (
         },
       ],
       ruleVersion: HARNESS_GATE_RULE_VERSION,
-      cacheFilePath,
     })
 
     const warmAstSamples: Array<number> = []
@@ -150,7 +156,6 @@ export const handleBench = (
           },
         ],
         ruleVersion: HARNESS_GATE_RULE_VERSION,
-        cacheFilePath,
       })
       warmAstSamples.push(Math.max(0, performance.now() - t0))
     }

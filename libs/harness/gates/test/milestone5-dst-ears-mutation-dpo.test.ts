@@ -16,6 +16,7 @@ import {
   makeChaosLayer,
   makeXorShift64Star,
   resolveDstSeedsForTier,
+  runDstSeedSuite,
   runWithDecoupledClockDriver,
   withDeterministicFaults,
 } from "../src/dst-engine.js"
@@ -55,6 +56,7 @@ import {
   parseGitDiffModifiedLines,
   runDomainMutationSuite,
 } from "../src/mutation-check.js"
+import { testHostIo } from "./helpers/test-host-io.js"
 import {
   RuleGraphToken,
   RuleQualityScoreMillis,
@@ -899,7 +901,7 @@ describe("Milestone 5: EARS Consistency, DST Engine, Span Causality, Mutant Sche
           expect(() => parseDstSeedEnv("-1")).toThrow()
           expect(() => parseDstSeedEnv("not-a-number")).toThrow()
 
-          const report = runDomainMutationSuite(process.cwd(), {
+          const report = runDomainMutationSuite(process.cwd(), testHostIo, {
             sourceCodeOverlays: {
               "libs/sample/domain/src/sample.ts": "export const f = (x: number) => x > 0",
             },
@@ -1259,6 +1261,26 @@ describe("Milestone 5: EARS Consistency, DST Engine, Span Causality, Mutant Sche
           )
           expect(thrashDecision.stuck).toBe(true)
           expect(thrashDecision.recommendedPlanCandidate?.candidateId).toBe("plan-minimal-a")
+
+          const suite = yield* runDstSeedSuite({
+            pinnedSeed: DstSeed.make(7),
+            config: {
+              stepCount: DstStepCount.make(2),
+              baseInterruptProbMillis: DstProbabilityMillis.make(0),
+              baseFailureProbMillis: DstProbabilityMillis.make(0),
+              baseDelayProbMillis: DstProbabilityMillis.make(0),
+              maxDelayTicksMs: DstTickMillis.make(10),
+              targets: [
+                {
+                  serviceTag: DstServiceTag.make("Repo"),
+                  methodName: DstMethodName.make("get"),
+                  declaredErrors: [],
+                },
+              ],
+            },
+          })
+          expect(suite.seedsRun).toBe(1)
+          expect(suite.schedules).toHaveLength(1)
         }),
     )
   })

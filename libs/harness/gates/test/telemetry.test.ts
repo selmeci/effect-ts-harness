@@ -15,6 +15,7 @@ import {
   TelemetryEvent,
   writeSessionReportFiles,
 } from "../src/index.js"
+import { testHostIo } from "./helpers/test-host-io.js"
 
 describe("telemetry & session observability", () => {
   it.effect("computes correct KPIs and health score on a realistic multi-step workflow", () =>
@@ -263,32 +264,40 @@ describe("telemetry & session observability", () => {
           }),
         )
 
-        expect(readTelemetryEvents(tmpDir)).toEqual([])
+        expect(readTelemetryEvents(tmpDir, testHostIo)).toEqual([])
 
-        appendTelemetryEvent(tmpDir, {
-          surface: "cli",
-          category: "gate",
-          toolName: "plan-check",
-          outcome: "ok",
-          durationMs: 120,
-        })
+        appendTelemetryEvent(
+          tmpDir,
+          {
+            surface: "cli",
+            category: "gate",
+            toolName: "plan-check",
+            outcome: "ok",
+            durationMs: 120,
+          },
+          testHostIo,
+        )
 
-        appendTelemetryEvent(tmpDir, {
-          surface: "mcp",
-          category: "graph_query",
-          toolName: "harness_resolve",
-          outcome: "ok",
-          durationMs: 15,
-          engineSource: "local",
-        })
+        appendTelemetryEvent(
+          tmpDir,
+          {
+            surface: "mcp",
+            category: "graph_query",
+            toolName: "harness_resolve",
+            outcome: "ok",
+            durationMs: 15,
+            engineSource: "local",
+          },
+          testHostIo,
+        )
 
-        const readBack = readTelemetryEvents(tmpDir)
+        const readBack = readTelemetryEvents(tmpDir, testHostIo)
         expect(readBack.length).toBe(2)
         expect(readBack[0]?.toolName).toBe("plan-check")
         expect(readBack[1]?.toolName).toBe("harness_resolve")
 
         const report: SessionReport = yield* decideSessionReport({ events: readBack })
-        const written = writeSessionReportFiles(tmpDir, report)
+        const written = writeSessionReportFiles(tmpDir, report, testHostIo)
         expect(existsSync(written.jsonPath)).toBe(true)
         expect(existsSync(written.markdownPath)).toBe(true)
 
@@ -297,8 +306,8 @@ describe("telemetry & session observability", () => {
         expect(mdContent).toContain("plan-check")
         expect(mdContent).toContain("harness_resolve")
 
-        clearTelemetryEvents(tmpDir)
-        expect(readTelemetryEvents(tmpDir)).toEqual([])
+        clearTelemetryEvents(tmpDir, testHostIo)
+        expect(readTelemetryEvents(tmpDir, testHostIo)).toEqual([])
       }),
   )
 

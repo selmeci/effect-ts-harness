@@ -4,17 +4,18 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { buildHarnessGraph } from "@harness/graph"
 import { checkVerifyStamp, computeWorkspaceTreeHash, diffPlanAndImplGraphs, writeVerifyStamp } from "../src/index.js"
+import { testHostIo } from "./helpers/test-host-io.js"
 
 describe("verify-stamp and plan/impl graph diff", () => {
   it("invalidates verify-stamp.json when a file changes after verify", () => {
     const dir = mkdtempSync(join(tmpdir(), "harness-stamp-"))
     try {
       writeFileSync(join(dir, "file.ts"), "export const x = 1\n")
-      writeVerifyStamp(dir, "impl/current")
-      expect(checkVerifyStamp(dir).valid).toBe(true)
+      writeVerifyStamp(dir, testHostIo, "impl/current")
+      expect(checkVerifyStamp(dir, testHostIo).valid).toBe(true)
 
       writeFileSync(join(dir, "file.ts"), "export const x = 2\n")
-      const afterEdit = checkVerifyStamp(dir)
+      const afterEdit = checkVerifyStamp(dir, testHostIo)
       expect(afterEdit.valid).toBe(false)
       if (!afterEdit.valid) {
         expect(afterEdit.reason).toContain("Run harness verify")
@@ -28,12 +29,12 @@ describe("verify-stamp and plan/impl graph diff", () => {
     const dir = mkdtempSync(join(tmpdir(), "harness-stamp-remember-"))
     try {
       writeFileSync(join(dir, "file.ts"), "export const x = 1\n")
-      writeVerifyStamp(dir, "impl/current")
-      expect(checkVerifyStamp(dir).valid).toBe(true)
+      writeVerifyStamp(dir, testHostIo, "impl/current")
+      expect(checkVerifyStamp(dir, testHostIo).valid).toBe(true)
 
       mkdirSync(join(dir, ".remember"), { recursive: true })
       writeFileSync(join(dir, ".remember", "metadata.json"), '{"lastSeen": 123}\n')
-      const afterRememberEdit = checkVerifyStamp(dir)
+      const afterRememberEdit = checkVerifyStamp(dir, testHostIo)
       expect(afterRememberEdit.valid).toBe(true)
     } finally {
       rmSync(dir, { recursive: true, force: true })
@@ -44,16 +45,16 @@ describe("verify-stamp and plan/impl graph diff", () => {
     const dir = mkdtempSync(join(tmpdir(), "harness-stamp-temp-"))
     try {
       writeFileSync(join(dir, "file.ts"), "export const x = 1\n")
-      const baselineHash = computeWorkspaceTreeHash(dir)
-      writeVerifyStamp(dir, "impl/current")
+      const baselineHash = computeWorkspaceTreeHash(dir, testHostIo)
+      writeVerifyStamp(dir, testHostIo, "impl/current")
 
       writeFileSync(join(dir, "temp-probe-123.ts"), "export const tmp = 1\n")
       writeFileSync(join(dir, "__temp_scratch.ts"), "export const tmp2 = 2\n")
       mkdirSync(join(dir, "temp-dir"), { recursive: true })
       writeFileSync(join(dir, "temp-dir", "nested.ts"), "export const nested = 3\n")
 
-      expect(computeWorkspaceTreeHash(dir)).toBe(baselineHash)
-      expect(checkVerifyStamp(dir).valid).toBe(true)
+      expect(computeWorkspaceTreeHash(dir, testHostIo)).toBe(baselineHash)
+      expect(checkVerifyStamp(dir, testHostIo).valid).toBe(true)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -63,7 +64,7 @@ describe("verify-stamp and plan/impl graph diff", () => {
     const dir = mkdtempSync(join(tmpdir(), "harness-stamp-missing-"))
     try {
       writeFileSync(join(dir, "file.ts"), "export const x = 1\n")
-      const missing = checkVerifyStamp(dir)
+      const missing = checkVerifyStamp(dir, testHostIo)
       expect(missing.valid).toBe(false)
       if (!missing.valid) {
         expect(missing.reason).toContain("Run harness verify")
@@ -71,7 +72,7 @@ describe("verify-stamp and plan/impl graph diff", () => {
 
       mkdirSync(join(dir, ".harness"), { recursive: true })
       writeFileSync(join(dir, ".harness", "verify-stamp.json"), "invalid json content")
-      const corrupt = checkVerifyStamp(dir)
+      const corrupt = checkVerifyStamp(dir, testHostIo)
       expect(corrupt.valid).toBe(false)
       if (!corrupt.valid) {
         expect(corrupt.reason).toContain("Run harness verify")

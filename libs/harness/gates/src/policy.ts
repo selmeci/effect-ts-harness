@@ -4,6 +4,7 @@
  * matching Alchemy's own advice to confirm every deploy). */
 
 import * as path from "node:path"
+import { match, P } from "ts-pattern"
 
 export type GuardVerdict = "allow" | "deny" | "ask" | "escalate"
 
@@ -355,21 +356,42 @@ const unwrapCommandSegment = (words: ReadonlyArray<string>): UnwrappedSegment =>
       i++
       while (i < words.length) {
         const arg = words[i]!
-        if (WRAPPER_VALUE_FLAGS.has(arg)) {
-          i += 2
-        } else if (arg === "--") {
-          i++
-          break
-        } else if (arg.startsWith("-")) {
-          i++
-        } else if (WRAPPER_SUBCOMMANDS.has(arg)) {
-          i++
-        } else if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(arg)) {
-          envAssignments.push(arg)
-          i++
-        } else {
-          break
-        }
+        const shouldBreak = match(arg)
+          .with(
+            P.when((a) => WRAPPER_VALUE_FLAGS.has(a)),
+            () => {
+              i += 2
+              return false
+            },
+          )
+          .with("--", () => {
+            i++
+            return true
+          })
+          .with(
+            P.when((a) => a.startsWith("-")),
+            () => {
+              i++
+              return false
+            },
+          )
+          .with(
+            P.when((a) => WRAPPER_SUBCOMMANDS.has(a)),
+            () => {
+              i++
+              return false
+            },
+          )
+          .with(
+            P.when((a) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(a)),
+            (a) => {
+              envAssignments.push(a)
+              i++
+              return false
+            },
+          )
+          .otherwise(() => true)
+        if (shouldBreak) break
       }
       continue
     }
@@ -405,6 +427,60 @@ export const isCdCommand = (trimmed: string): boolean =>
 export const INTERACTIVE_NX_BANNED_REASON =
   "Running 'nx show' without 'CI=true' can hang on interactive prompts; prefix with 'CI=true' or use harness MCP tools."
 
+export const CLEF_SYSTEMONE_ONLY_BANNED_REASON =
+  "clef (clef-flash) is a TypeSafe System One structured decision model, NOT a generative text/chat model — /api/generate, /api/chat, /v1/chat/completions, /v1/completions, and 'ollama run clef*' do not exist for System One models and return HTTP errors. Use DecisionModel.decide (@effect/ai-typesafe TypeSafeDecisionModel) or POST http://localhost:11434/v1/systemone ({ model: 'clef-flash', state, questions }), or run 'pnpm harness doctor' to warm/verify the model."
+
+const IGNORED_CLEF_GUARD_BINARIES: ReadonlySet<string> = new Set([
+  "grep",
+  "rg",
+  "git",
+  "gh",
+  "vitest",
+])
+
+const CLEF_HTTP_OR_SCRIPT_BINARIES: ReadonlySet<string> = new Set([
+  "curl",
+  "wget",
+  "http",
+  "https",
+  "xh",
+  "fetch",
+  "python",
+  "python3",
+  "node",
+  "bun",
+  "tsx",
+  "deno",
+])
+
+const CLEF_MODEL_NAME_PATTERN = /\bclef(?:-flash)?\b/i
+const CLEF_INVALID_ENDPOINT_PATTERN =
+  /(?:\/api\/(?:generate|chat|embeddings|embed)|\/v1\/(?:chat\/completions|completions|responses|embeddings))\b/i
+
+export const isInvalidClefEndpointCommand = (command: string): boolean =>
+  extractCommandSegments(command).some((seg) => {
+    const rawBin = seg.commandWords[0]
+    if (rawBin === undefined) {
+      return false
+    }
+    const bin = rawBin.includes("/") ? rawBin.slice(rawBin.lastIndexOf("/") + 1) : rawBin
+    if (IGNORED_CLEF_GUARD_BINARIES.has(bin)) {
+      return false
+    }
+    if (
+      bin === "ollama" &&
+      seg.commandWords[1] === "run" &&
+      seg.commandWords.slice(2).some((w) => /^clef(?:-|:|$)/i.test(w))
+    ) {
+      return true
+    }
+    if (CLEF_HTTP_OR_SCRIPT_BINARIES.has(bin)) {
+      const segText = seg.commandWords.join(" ")
+      return CLEF_MODEL_NAME_PATTERN.test(segText) && CLEF_INVALID_ENDPOINT_PATTERN.test(segText)
+    }
+    return false
+  })
+
 export const isInteractiveNxCommand = (command: string): boolean =>
   extractCommandSegments(command).some((seg) => {
     const bin = seg.commandWords[0]
@@ -435,6 +511,9 @@ export const classifyCommand = (command: string): GuardVerdict => {
     return "deny"
   }
   if (isInteractiveNxCommand(trimmed)) {
+    return "deny"
+  }
+  if (isInvalidClefEndpointCommand(trimmed)) {
     return "deny"
   }
   const view = toCommandView(command)

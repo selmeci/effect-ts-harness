@@ -35,18 +35,19 @@ Always prefer in-process MCP tools over spawning shell subcommands to eliminate 
 - **Package Archetypes (Framework vs Application):**
   - **Application Archetype:** Standard user-facing domain models live in `type:domain` (`*.decide`, business use cases).
   - **Framework / Library Archetype:** The repo produces generic engines, protocols, and abstractions (e.g. `AggregateRoot`, `EventStore`, `Decider`). Business domains (e.g. `Cart`, `Inventory`, `Order`) **MUST NEVER** be created in production libraries. Domain models belong strictly to `test/fixtures` or `samples/` tagged with `scope:fixture`.
-- `type:contract` — shared Schemas, `HttpApi`, `RpcGroup`, API errors, event/command protocols; imports `effect` only
-- `type:domain` (in applications) / `type:core` (in frameworks) — use cases, generic engines, and pure logic, no I/O; imports `contract` (and `@harness/gates` for `stub` in skeletons); must not depend on `type:infra`
-- `type:service` — service interfaces and repository ports
-- `type:infra` — live Layer implementations, Drizzle repositories and handlers, Alchemy resources, adapter implementations
-- `type:app` — composes Layers and runs the runtime; the `web` app may import `contract` and UI libraries only
+- `type:contract` — shared Schemas, `HttpApi`, `RpcGroup`, API errors, event/command protocols; `effect` only (workspace: `type:contract` / `[]`; forbidden: `service`, `core`, `domain`, `infra`, `app`, 3rd-party I/O)
+- `type:service` — service interfaces and repository ports; imports `type:contract`, `type:service` (external: `effect` only; forbidden: `core`, `domain`, `infra`, `app`, Node/SQL drivers)
+- `type:core` — generic engines, gates, and pure logic, no I/O; imports `type:contract`, `type:service`, `type:core` (forbidden: `type:domain`, `type:infra`, `type:app`)
+- `type:domain` — use cases and pure logic, no I/O; imports `type:contract`, `type:service`, `type:core`, `type:domain` (and `@harness/contract` for `stub` in skeletons; forbidden: `type:infra`, `type:app`, `alchemy`, `@effect/sql-*`)
+- `type:infra` — live Layer implementations, `@effect/sql-*` repositories and handlers, Alchemy resources, adapter implementations; imports `type:contract`, `type:service`, `type:core`, `type:domain`, `type:infra` (forbidden: `type:app`; `drizzle-orm`/`drizzle-kit` banned workspace-wide)
+- `type:app` — composes Layers and runs the runtime; may import all library tiers + `type:app` (except `scope:web`, which may import `type:contract` and UI libraries only)
 
 ## Planning in Effect idioms
 
 A plan maps each section (including EARS requirements: `WHEN` → input Schema & `A`, `IF/THEN` → `Schema.TaggedError<Self>()("Tag", { ... })` in `E`, `WHILE` → pure `.decide` with `R = never` + stateful service in `R`, `WHERE` → `Layer`/`Config` in `R`; see `agent-patterns/planning.md`) to an Effect building block: Schema at boundaries, tagged errors,
 `Context.Service` capabilities, `Layer` dependency graph, `Effect<A, E, R>` use-case signatures,
 `Scope` for resources, `Schedule` for retry/concurrency, `Config` + `Effect.fn("name")` spans, test Layers.
-Plan as code: write the skeleton first (schemas, errors, service interfaces, signatures using `stub<A, E, R>(...args)` from `@harness/gates`) — it must pass typecheck with preserved `A`, `E`, `R` types before implementation starts. `stub()` is allowed during `HARNESS_PLAN_CHECK=1` and banned in `harness verify`.
+Plan as code: write the skeleton first (schemas, errors, service interfaces, signatures using `stub<A, E, R>(...args)` from `@harness/contract`) — it must pass typecheck with preserved `A`, `E`, `R` types before implementation starts. `stub()` is allowed during `HARNESS_PLAN_CHECK=1` and banned in `harness verify`.
 
 ## Code style (from `repos/effect/LLMS.md` & `agent-patterns/pattern-matching.md`)
 
@@ -65,20 +66,12 @@ Plan as code: write the skeleton first (schemas, errors, service interfaces, sig
   - Struct, Class, TaggedStruct, TaggedUnion, and TaggedError fields in `type:contract`, `type:domain`, and `type:core` must reference branded schemas rather than raw `Schema.String`, `Schema.NonEmptyString`, `Schema.Int`, or `Schema.Natural`.
   - Exported domain `Effect.fn` use cases, `.decide` / `evolve` functions, `stub<A, E, R>` skeletons, and `Context.Service` capability methods must use branded domain types or named contract `Schema.Struct` / `Schema.Class` / `Schema.Tagged*` types at their parameter and return/success boundaries — never raw primitives (`string`, `number`, `boolean`, `bigint`, `any`, `unknown`) or inline object type literals (`{ ... }`) (`unbranded-primitive-boundary`). Never bypass brand validation with `as <BrandedType>`; use `<Schema>.make(value)`, `Schema.decodeUnknownEffect(<Schema>)`, or Effect v4 `Brand.nominal` / `Brand.make` / `Brand.check`.
 
-## Nx taxonomy
+## Data layer rules (Native Effect v4 SQL on D1 / Durable Objects)
 
-- `type:contract` — shared Schemas, `HttpApi`, `RpcGroup`, API errors; imports `effect` only
-- `type:domain` — use cases and pure logic, no I/O; imports `contract` (and `@harness/gates` for `stub` in skeletons); must not depend on `type:infra`
-- `type:service` — service interfaces, including repositories
-- `type:infra` — live Layer implementations, Drizzle repositories and handlers, Alchemy resources
-- `type:app` — composes Layers and runs the runtime; the `web` app may import `contract` and UI libraries only
-
-## Data layer rules (Effect SQL & Drizzle on D1 / Durable Objects)
-
-- `drizzle-orm` (`1.0.0-rc.5-ab785fc`), `@effect/sql-*`, and table schemas (`sqliteTable`) are imported only in `type:infra`; repositories decode rows into contract Schemas, so Drizzle types never reach the domain or the frontend.
-- **Schema Migrations (`SqliteMigrator` on DO SQLite & `drizzle-kit` on D1 — `harness:SPEC-0006` / `harness:ADR-0008`):**
+- `drizzle-orm` and `drizzle-kit` are **banned across the entire workspace**. Use native Effect v4 SQL (`@effect/sql-d1`, `@effect/sql-sqlite-do`, `SqlClient.SqlClient`, `SqliteMigrator`) exclusively in `type:infra`; repositories decode raw SQL rows into `type:contract` `Schema`s, so SQL/driver types never reach the domain or the frontend.
+- **Schema Migrations (`SqliteMigrator` on DO SQLite & committed `.sql` migrations on D1 — `harness:SPEC-0006` / `harness:ADR-0008`):**
   - **Durable Object SQLite (`@effect/sql-sqlite-do`):** Schema migrations in `type:infra` (`libs/*/infra/src/**`) must be managed and tracked transactionally via `@effect/sql-sqlite-do/SqliteMigrator` (`SqliteMigrator.run` / `SqliteMigrator.layer` with `SqliteMigrator.fromRecord` or `fromGlob`, recording applied versions in `effect_sql_migrations` using `<positive_int>_<lowercase_snake_case>` keys matching `/^[1-9]\d*_[a-z0-9_]+$/` such as `"1_init_tables"`). Ad-hoc `CREATE TABLE` / `ALTER TABLE` / `DROP TABLE` SQL statements in `libs/*/infra/src/**` are allowed only inside `SqliteMigrator.fromRecord` migration records (`*Migrations` / `fromRecord({ ... })`); stray DDL outside migration records and unnumbered or malformed `fromRecord` keys are strictly banned (`harness(syntax-bans)`, `unmanaged-sql-ddl`, `invalid-migrator-record-key`).
-  - **D1 (`@effect/sql-d1` / Drizzle):** Migrations are generated ahead of time with `drizzle-kit generate` into `migrations/` and committed; they are never generated at deploy.
+  - **D1 (`@effect/sql-d1`):** Hand-authored forward `.sql` migrations live in `migrations/`, are committed to git, and are validated with `pnpm harness check-migrations`; they are never generated at deploy.
   - **Destructive Migration Safety (`MigrationSafety.decide`):** Any migration (in `.sql` files or `SqliteMigrator` DDL) containing `DROP`, SQLite table rebuilds (`__new_` / `PRAGMA foreign_keys=OFF`), or `ALTER TABLE ADD COLUMN ... NOT NULL` without `DEFAULT` is flagged (`unsafe-sql-migration`) and escalates to the human.
 - **Real `workerd` Storage Only — Ban on `node:sqlite` Mocks (`harness:SPEC-0006` / `harness:ADR-0008`):** Importing `node:sqlite` (`DatabaseSync`), `sqlite`, or `better-sqlite3` via static `import`, dynamic `import()`, or `require()` or authoring hand-rolled `DurableObjectStorage`, `SqlStorage`, or `D1Database` mocks in `type:infra` or `type:app` packages (`libs/*/infra/**`, `apps/**`) is strictly banned (`harness(syntax-bans)`, `harness(test-integrity)`, `node-sqlite-in-infra`). Local dev and `type:infra` storage tests must run against the real Cloudflare `workerd` runtime via `@alchemy.run/cloudflare-runtime` (`cloudflareVitePlugin`, `getPlatformProxy` / `D1.local`, and `Workerd` SQLite Durable Objects with `enableSql: true`).
 
@@ -89,6 +82,12 @@ Plan as code: write the skeleton first (schemas, errors, service interfaces, sig
 - Never run `alchemy deploy` or `alchemy destroy` — they are human-only and the guard asks before them. Every deploy is confirmed individually, never batched.
 - Cloudflare credentials live in Alchemy profiles: `alchemy profile edit --add Cloudflare` saves them to `~/.alchemy/profiles.json`. Never export `CLOUDFLARE_ACCOUNT_ID` or `CLOUDFLARE_API_TOKEN`, never put them in `.env`.
 - For Alchemy lookups read the pinned source in `repos/alchemy` and the vendored doc snapshots `docs/alchemy-llms.txt` (index) and `docs/alchemy-llms-full.txt` (per-resource reference — grep it locally, do not fetch). The live https://alchemy.run/llms.txt documents the newest release and drifts from our pin; use it only to refresh the snapshots. Tutorial: https://alchemy.run/cloudflare/tutorial/part-1 through part-5.
+
+## Advisory DecisionModel (`clef-flash` — TypeSafe System One API)
+
+- `clef-flash` (`clef-*`) in Ollama is a **TypeSafe System One** model (`@effect/ai-typesafe`), **never** a generative/chat LLM — `/api/generate`, `/api/chat`, `/v1/chat/completions`, `/v1/completions`, and `ollama run clef-flash` **do not exist** on System One models, return HTTP errors, and are blocked by the harness guard and AST linter.
+- Always invoke in code via `DecisionModel.decide` + `@effect/ai-typesafe` (`TypeSafeDecisionModel` + `TypeSafeClient` against `http://localhost:11434/v1`, see `agent-patterns/decision-model.md`).
+- For CLI readiness/warm-up, use `pnpm harness doctor` (never `curl /api/generate`); if probing raw HTTP in diagnostics, only `POST http://localhost:11434/v1/systemone` (`{ model: "clef-flash", state, questions }`) and `GET /v1/models` / `GET /api/tags` are valid, with `OLLAMA_KEEP_ALIVE=-1` keeping weights resident.
 
 ## Definition of done
 

@@ -21,24 +21,22 @@ import {
   type SemanticEdgePriors,
   VerificationStatus,
 } from "@harness/graph"
+import { isPureInterruptCause } from "@harness/contract"
 import {
   CandidateSymbolKey,
   evaluateDpoCandidatePriorsBatch,
   evaluateHoleCandidatePrior,
-  LocalDecisionModel,
   ProposedRoleName,
 } from "@harness/decision"
+import { LocalDecisionModel, nodeSyncHostIo } from "@harness/infra"
 import {
+  graphStatusMeta,
   McpToolName,
   type McpToolPluginDescriptor,
   resolveDefaultRepoRoot,
-  resolveGraph,
+  resolveGraphWithStatus,
   type ServerOptions,
 } from "./mcp-helpers.js"
-
-if (!("iterations" in globalThis)) {
-  Object.assign(globalThis, { iterations: 0 })
-}
 
 const GraphInferInputSchema = Schema.Struct({
   symbolOrSpan: Schema.optional(
@@ -145,28 +143,83 @@ const resolveDecisionPriors = Effect.fn("HarnessMcp.resolveDecisionPriors")(func
 
   for (const [, node] of Graph.nodes(graph.graph)) {
     if (isEntityNode(node)) {
-      if (node._tag === "EffectFn" && node.isStub === true) {
-        stubFns.push(node)
-      }
-      if (
-        (node._tag === "EffectFn" && node.isStub !== true) ||
-        node._tag === "ServiceTag" ||
-        node._tag === "TaggedError" ||
-        node._tag === "SchemaDef"
-      ) {
-        candidateEntities.push(node)
-      }
+      match(node)
+        .with({ _tag: "EffectFn" }, (n) => {
+          if (n.isStub === true) {
+            stubFns.push(n)
+          } else {
+            candidateEntities.push(n)
+          }
+        })
+        .with(
+          { _tag: "ServiceTag" },
+          { _tag: "TaggedError" },
+          { _tag: "SchemaDef" },
+          (n) => {
+            candidateEntities.push(n)
+          },
+        )
+        .with(
+          { _tag: "ServiceLayer" },
+          { _tag: "VitestCase" },
+          { _tag: "PatternDoc" },
+          { _tag: "AdrDoc" },
+          { _tag: "EarsSpec" },
+          () => undefined,
+        )
+        .exhaustive()
     }
   }
 
   if (stubFns.length === 0) {
     const candidateNode = symbolOrSpan ? resolveNode(graph, symbolOrSpan) : undefined
-    if (candidateNode && candidateNode._tag === "EffectFn") {
-      stubFns.push(candidateNode)
+    const matchedCandidate =
+      candidateNode !== undefined
+        ? match(candidateNode)
+            .with({ _tag: "EffectFn" }, (n) => n)
+            .with(
+              { _tag: "ServiceTag" },
+              { _tag: "ServiceLayer" },
+              { _tag: "TaggedError" },
+              { _tag: "SchemaDef" },
+              { _tag: "VitestCase" },
+              { _tag: "PatternDoc" },
+              { _tag: "AdrDoc" },
+              { _tag: "EarsSpec" },
+              { _tag: "EffectSignature" },
+              { _tag: "LayerFlow" },
+              { _tag: "TraceabilityTuple" },
+              { _tag: "HttpEndpointTuple" },
+              { _tag: "MigrationTuple" },
+              () => undefined,
+            )
+            .exhaustive()
+        : undefined
+    if (matchedCandidate !== undefined) {
+      stubFns.push(matchedCandidate)
     } else {
       for (const [, node] of Graph.nodes(graph.graph)) {
-        if (node._tag === "EffectFn") {
-          stubFns.push(node)
+        const matchedFn = match(node)
+          .with({ _tag: "EffectFn" }, (n) => n)
+          .with(
+            { _tag: "ServiceTag" },
+            { _tag: "ServiceLayer" },
+            { _tag: "TaggedError" },
+            { _tag: "SchemaDef" },
+            { _tag: "VitestCase" },
+            { _tag: "PatternDoc" },
+            { _tag: "AdrDoc" },
+            { _tag: "EarsSpec" },
+            { _tag: "EffectSignature" },
+            { _tag: "LayerFlow" },
+            { _tag: "TraceabilityTuple" },
+            { _tag: "HttpEndpointTuple" },
+            { _tag: "MigrationTuple" },
+            () => undefined,
+          )
+          .exhaustive()
+        if (matchedFn !== undefined) {
+          stubFns.push(matchedFn)
           break
         }
       }
@@ -209,17 +262,24 @@ const resolveDecisionPriors = Effect.fn("HarnessMcp.resolveDecisionPriors")(func
       }).pipe(
         Effect.provide(decisionLayer),
         Effect.timeoutOption("1500 millis"),
-        Effect.catchCause((cause) =>
-          Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeedNone,
-        ),
+        Effect.catchCause((cause) => {
+          if (isPureInterruptCause(cause)) {
+            return Effect.interrupt
+          }
+          process.stderr.write(`[harness-mcp] decision fallback: ${Cause.pretty(cause)}\n`)
+          return Effect.succeedNone
+        }),
       )
 
-      if (Option.isSome(priorResult)) {
-        edgeConfidenceOverrides[candKey] = priorResult.value.edgeConfidenceMillis
-        holeTeleportationWeights[NodeKey.make(candKey)] = PageRankScoreMillis.make(
-          priorResult.value.teleportationWeightMillis,
-        )
-      }
+      match(priorResult)
+        .with({ _tag: "Some" }, ({ value }) => {
+          edgeConfidenceOverrides[candKey] = value.edgeConfidenceMillis
+          holeTeleportationWeights[NodeKey.make(candKey)] = PageRankScoreMillis.make(
+            value.teleportationWeightMillis,
+          )
+        })
+        .with({ _tag: "None" }, () => undefined)
+        .exhaustive()
     }
   }
 
@@ -305,7 +365,8 @@ export const buildDatalogAndDpoToolDescriptors = (
     execute: (args) =>
       Effect.gen(function* () {
         const { symbolOrSpan, ruleId } = yield* decodeGraphInferInput(args)
-        const graph = yield* resolveGraph(options, args)
+        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        const graph = graphStatus.graph
         const resolvedNode =
           symbolOrSpan !== undefined && symbolOrSpan.length > 0
             ? resolveNode(graph, symbolOrSpan)
@@ -342,6 +403,7 @@ export const buildDatalogAndDpoToolDescriptors = (
             (p) => (ruleId === undefined || p.ruleId === ruleId) && filterBySymbol(p.conclusion),
           ),
           iterations: inference.iterations ?? 0,
+          ...graphStatusMeta(graphStatus),
         }
       }),
   },
@@ -358,7 +420,8 @@ export const buildDatalogAndDpoToolDescriptors = (
         const ruleId = input.ruleId
         const useDecisionPriors = input.useDecisionPriors === true
         const rawPriors = input.priors
-        const graph = yield* resolveGraph(options, args)
+        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        const graph = graphStatus.graph
         const resolvedNode =
           symbolOrSpan !== undefined && symbolOrSpan.length > 0
             ? resolveNode(graph, symbolOrSpan)
@@ -399,6 +462,7 @@ export const buildDatalogAndDpoToolDescriptors = (
           typedHoleBundles,
           proofs: inference.proofs.filter((p) => proofIds.has(p.proofId)),
           iterations: inference.iterations ?? 0,
+          ...graphStatusMeta(graphStatus),
         }
       }),
   },
@@ -416,7 +480,8 @@ export const buildDatalogAndDpoToolDescriptors = (
         const useDecisionPriors = typedArgs.useDecisionPriors === true
         const verifyRoundTrip = typedArgs.verifyRoundTrip === true
         const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-        const graph = yield* resolveGraph(options, args)
+        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        const graph = graphStatus.graph
 
         let candidatePriors: DpoCandidatePriors | undefined = undefined
         if (useDecisionPriors) {
@@ -466,6 +531,7 @@ export const buildDatalogAndDpoToolDescriptors = (
                 workspaceRoot: root,
                 initialGraph: graph,
                 verifyRoundTrip,
+                hostIo: nodeSyncHostIo,
               })
             : {
                 operations: [],
@@ -492,6 +558,7 @@ export const buildDatalogAndDpoToolDescriptors = (
             isPolicyClean: c.isPolicyClean,
           })),
           projection,
+          ...graphStatusMeta(graphStatus),
         }
       }),
   },

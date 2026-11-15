@@ -1,7 +1,7 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
 import {
-  assertDecisionLimits,
+  validateDecisionLimits,
   deterministicLearnFallback,
   LearnProposalV1,
   makeFailingDecisionModelLayer,
@@ -13,9 +13,9 @@ import {
 } from "../src/index.js"
 
 describe("LearnProposalV1 and proposeLearningAction", () => {
-  it("validates LearnProposalV1 within decision limits", () => {
-    expect(() => assertDecisionLimits(LearnProposalV1)).not.toThrow()
-  })
+  it.effect("validates LearnProposalV1 within decision limits", () =>
+    validateDecisionLimits(LearnProposalV1),
+  )
 
   describe("proposeLearningAction with mock DecisionModel", () => {
     it.effect("uses DecisionModel answers when available and actionable (prob >= 0.6)", () =>
@@ -125,7 +125,7 @@ describe("LearnProposalV1 and proposeLearningAction", () => {
           actionable: true,
           confidence: 0.85,
           recommendation:
-            'Create or expand an agent-patterns/*.md recipe for "D1 Repository Cache" and register it in IdiomRouterV1 (11 of 26 slots available).',
+            'Create or expand an agent-patterns/*.md recipe for "D1 Repository Cache" and register it in IdiomRouterV1 (8 of 26 slots available).',
           source: "deterministic-fallback",
         })
       }),

@@ -1,5 +1,5 @@
 import { Effect, Schema } from "effect"
-import { match } from "ts-pattern"
+import { match, P } from "ts-pattern"
 
 export const SpanIdString = Schema.NonEmptyString.pipe(Schema.brand("SpanIdString"))
 export type SpanIdString = typeof SpanIdString.Type
@@ -185,27 +185,31 @@ export const checkTemporalCausality = (
             cursorParentId = parent.parentSpanId
           }
 
-          if (isDescendant) {
-            violations.push({
-              ruleId: "CAUS-02",
-              kind: "forbidden-descendant-span",
-              parentSpan: ancestorSpan,
-              targetSpan: forbiddenDescendantSpan,
-              count: 1,
-              maxAllowed: 0,
-              message: `[CAUS-02] Forbidden descendant span: "${forbiddenDescendantSpan}" was invoked inside restricted ancestor span "${ancestorSpan}".`,
+          match({ isDescendant, danglingParentId })
+            .with({ isDescendant: true }, () => {
+              violations.push({
+                ruleId: "CAUS-02",
+                kind: "forbidden-descendant-span",
+                parentSpan: ancestorSpan,
+                targetSpan: forbiddenDescendantSpan,
+                count: 1,
+                maxAllowed: 0,
+                message: `[CAUS-02] Forbidden descendant span: "${forbiddenDescendantSpan}" was invoked inside restricted ancestor span "${ancestorSpan}".`,
+              })
             })
-          } else if (danglingParentId !== null) {
-            violations.push({
-              ruleId: "CAUS-02",
-              kind: "forbidden-descendant-span",
-              parentSpan: ancestorSpan,
-              targetSpan: forbiddenDescendantSpan,
-              count: 1,
-              maxAllowed: 0,
-              message: `[CAUS-02] Forbidden descendant span: "${span.name}" has a dangling unverified parentSpanId "${danglingParentId}" while checking ForbiddenUnder for "${ancestorSpan}".`,
+            .with({ isDescendant: false, danglingParentId: P.string }, ({ danglingParentId: dangling }) => {
+              violations.push({
+                ruleId: "CAUS-02",
+                kind: "forbidden-descendant-span",
+                parentSpan: ancestorSpan,
+                targetSpan: forbiddenDescendantSpan,
+                count: 1,
+                maxAllowed: 0,
+                message: `[CAUS-02] Forbidden descendant span: "${span.name}" has a dangling unverified parentSpanId "${dangling}" while checking ForbiddenUnder for "${ancestorSpan}".`,
+              })
             })
-          }
+            .with({ isDescendant: false, danglingParentId: null }, () => {})
+            .exhaustive()
         }
       })
       .with({ _tag: "RequireCompensationOnFailure" }, ({ failedSpan, compensationSpan }) => {
@@ -345,6 +349,3 @@ export const decideSpanBudgets = Effect.fn("SpanBudget.decide")(function* (
 export const SpanBudget = {
   decide: decideSpanBudgets,
 } as const
-
-export const checkSpanBudgets = (input: SpanBudgetInput): ReadonlyArray<SpanBudgetViolation> =>
-  Effect.runSync(decideSpanBudgets(input))

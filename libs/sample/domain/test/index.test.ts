@@ -1,8 +1,9 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Effect, Exit, Layer, Schema } from "effect"
+import { Cause, Effect, Exit, Layer, Result, Schema } from "effect"
 import { buildWorkspaceFnIndex, runWithTestTracer } from "@harness/ingest"
+import type { SyncHostIo } from "@harness/service/host-io"
 import {
   buildHarnessGraph,
   findTestsReaching,
@@ -20,6 +21,9 @@ import {
   PhotoId,
   PhotoName,
   PhotoNotFoundError,
+  PhotoStorageError,
+  StorageErrorMessage,
+  StorageOperationName,
 } from "@harness/sample-contract"
 import { AlbumCounterClient, PhotoRepo } from "@harness/sample-service"
 import { decideAlbumQuota, getPhotoById, greet, listPhotos, uploadPhoto } from "../src/index.js"
@@ -35,12 +39,29 @@ const resolveRepoRoot = (startDir: string): string => {
   return startDir
 }
 
+const testHostIo: SyncHostIo = {
+  existsSync: (p) => fs.existsSync(p),
+  isFileSync: (p) => Result.getOrElse(Result.try(() => fs.statSync(p).isFile()), () => false),
+  isDirectorySync: (p) => Result.getOrElse(Result.try(() => fs.statSync(p).isDirectory()), () => false),
+  isSymbolicLinkSync: (p) => Result.getOrElse(Result.try(() => fs.lstatSync(p).isSymbolicLink()), () => false),
+  readTextSync: (p) => fs.readFileSync(p, "utf8"),
+  readBytesSync: (p) => fs.readFileSync(p),
+  writeTextSync: (p, c) => { fs.writeFileSync(p, c, "utf8") },
+  appendTextSync: (p, c) => { fs.appendFileSync(p, c, "utf8") },
+  mkdirRecursiveSync: (p, m) => { fs.mkdirSync(p, m === undefined ? { recursive: true } : { recursive: true, mode: m }) },
+  renameSync: (a, b) => { fs.renameSync(a, b) },
+  unlinkSync: (p) => { fs.unlinkSync(p) },
+  readdirSync: (p) => fs.readdirSync(p, { withFileTypes: true }).map((e) => ({ name: e.name, isFile: e.isFile(), isDirectory: e.isDirectory() })),
+  realpathSync: (p) => fs.realpathSync(p),
+  execFileSync: () => ({ _tag: "Exited", exitCode: 1, stdout: "", stderr: "unused in unit test" }),
+}
+
 describe("greet", () => {
   it.effect("greets by name", () =>
     Effect.gen(function* () {
       const testId = "libs/sample/domain/test/index.test.ts::greets by name"
       const repoRoot = resolveRepoRoot(process.cwd())
-      const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
+      const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, testHostIo)
 
       const { result, edges } = yield* runWithTestTracer(
         testId,
@@ -81,8 +102,8 @@ describe("greet", () => {
 
       if (process.env.HARNESS_TRACE === "1") {
         const snapshotPath = path.join(repoRoot, ".harness", "graph-snapshot.json")
-        saveGraphSnapshot(graph, snapshotPath)
-        const loadedGraph = yield* loadGraphSnapshotEffect(snapshotPath)
+        saveGraphSnapshot(graph, snapshotPath, testHostIo)
+        const loadedGraph = yield* loadGraphSnapshotEffect(snapshotPath, testHostIo)
         const reachingFromLoaded = findTestsReaching(loadedGraph, "Sample.greet")
         expect(reachingFromLoaded.map((t) => t.testId)).toContain(testId)
       }
@@ -195,6 +216,11 @@ const makeTestLayers = (initialCount = 0) => {
         count++
         return AlbumPhotoCount.make(count)
       }),
+    decrement: (_albumId: AlbumId) =>
+      Effect.sync(() => {
+        count = Math.max(0, count - 1)
+        return AlbumPhotoCount.make(count)
+      }),
     getCount: (_albumId: AlbumId) => Effect.sync(() => AlbumPhotoCount.make(count)),
   })
 
@@ -207,7 +233,7 @@ describe("uploadPhoto", () => {
     Effect.gen(function* () {
       const testId = "libs/sample/domain/test/index.test.ts::uploads photo with traced calls"
       const repoRoot = resolveRepoRoot(process.cwd())
-      const fnIndex = yield* buildWorkspaceFnIndex(repoRoot)
+      const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, testHostIo)
       const { testLayer, photos, getCount } = makeTestLayers(5)
 
       const { result, edges } = yield* runWithTestTracer(
@@ -257,11 +283,53 @@ describe("uploadPhoto", () => {
         }).pipe(Effect.provide(testLayer)),
       )
 
-      expect(error._tag).toBe("AlbumQuotaExceededError")
-      expect(error.albumId).toBe("album-full")
-      expect(error.count).toBe(100)
+      expect(error).toMatchObject({
+        _tag: "AlbumQuotaExceededError",
+        albumId: "album-full",
+        count: 100,
+      })
       expect(photos).toHaveLength(0)
       expect(getCount()).toBe(100)
+    }),
+  )
+
+  it.effect("compensates counter via decrement when PhotoRepo.insert fails", () =>
+    Effect.gen(function* () {
+      let count = 5
+      const failingRepoLayer = Layer.succeed(PhotoRepo, {
+        insert: () =>
+          Effect.fail(
+            new PhotoStorageError({
+              operation: StorageOperationName.make("PhotoRepo.insert"),
+              message: StorageErrorMessage.make("Simulated insert failure"),
+            }),
+          ),
+        findById: (id: PhotoId) => Effect.fail(new PhotoNotFoundError({ id })),
+        listAll: Effect.succeed([]),
+      })
+      const counterLayer = Layer.succeed(AlbumCounterClient, {
+        increment: () =>
+          Effect.sync(() => {
+            count++
+            return AlbumPhotoCount.make(count)
+          }),
+        decrement: () =>
+          Effect.sync(() => {
+            count = Math.max(0, count - 1)
+            return AlbumPhotoCount.make(count)
+          }),
+        getCount: () => Effect.sync(() => AlbumPhotoCount.make(count)),
+      })
+
+      const err = yield* Effect.flip(
+        uploadPhoto({
+          name: PhotoName.make("Broken.jpg"),
+          albumId: AlbumId.make("album-compensate"),
+        }).pipe(Effect.provide(Layer.merge(failingRepoLayer, counterLayer))),
+      )
+
+      expect(err._tag).toBe("PhotoStorageError")
+      expect(count).toBe(5)
     }),
   )
 })
@@ -292,8 +360,10 @@ describe("getPhotoById & listPhotos", () => {
         getPhotoById(PhotoId.make(999)).pipe(Effect.provide(testLayer)),
       )
 
-      expect(error._tag).toBe("PhotoNotFoundError")
-      expect(error.id).toBe(999)
+      expect(error).toMatchObject({
+        _tag: "PhotoNotFoundError",
+        id: 999,
+      })
     }),
   )
 })

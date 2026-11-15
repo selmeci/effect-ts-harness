@@ -1,12 +1,19 @@
-import { createHash, randomUUID } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
-import { dirname, join } from "node:path"
-import { Deferred, Effect, Layer, Schema } from "effect"
+import { createHash } from "node:crypto"
+import { Deferred, Effect, Layer, Option, Schema } from "effect"
 import * as AiError from "effect/ai/AiError"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
-import { NonNegativeCount, resolveHarnessStateDir } from "@harness/gates"
+import {
+  DecisionCacheKey,
+  DecisionCachePayloadJson,
+  DecisionCacheTtlMillis,
+  type WorkspaceFsError,
+} from "@harness/contract"
+import { NonNegativeCount } from "@harness/graph"
+import { DecisionCachePort } from "@harness/service"
 import { match } from "ts-pattern"
+
+export { DecisionCacheKey }
 
 export const DecisionTaskId = Schema.NonEmptyString.pipe(Schema.brand("DecisionTaskId"))
 export type DecisionTaskId = typeof DecisionTaskId.Type
@@ -18,9 +25,6 @@ export type DecisionPromptVersion = typeof DecisionPromptVersion.Type
 
 export const HARNESS_DECISION_PROMPT_VERSION: DecisionPromptVersion =
   DecisionPromptVersion.make("decisions-v1")
-
-export const DecisionCacheKey = Schema.NonEmptyString.pipe(Schema.brand("DecisionCacheKey"))
-export type DecisionCacheKey = typeof DecisionCacheKey.Type
 
 export const DecisionCacheHitStatus = Schema.Literals(["hit", "miss"]).pipe(
   Schema.brand("DecisionCacheHitStatus"),
@@ -61,40 +65,16 @@ const CachedDecisionEntrySchema = Schema.Struct({
 })
 export type CachedDecisionEntry = typeof CachedDecisionEntrySchema.Type
 
-const DecisionCacheStoreSchema = Schema.Struct({
-  version: DecisionPromptVersion,
-  entries: Schema.Record(Schema.String, CachedDecisionEntrySchema),
-})
-type DecisionCacheStore = typeof DecisionCacheStoreSchema.Type
-
-const decodeDecisionCacheStore = Schema.decodeOption(
-  Schema.fromJsonString(DecisionCacheStoreSchema),
+const decodeCachedDecisionEntry = Schema.decodeOption(
+  Schema.fromJsonString(CachedDecisionEntrySchema),
 )
-
-export interface CachedDecisionModelStats {
-  readonly hits: number
-  readonly misses: number
-  readonly coalescedRequests: number
-  readonly size: number
-}
 
 export interface CachedDecisionModelOptions {
   readonly taskId?: string | undefined
   readonly promptVersion?: string | undefined
   readonly modelId?: string | undefined
-  readonly cacheFilePath?: string | undefined
   readonly ttlMillis?: number | undefined
-  readonly shareGlobalMemoryCache?: boolean | undefined
 }
-
-const globalDecisionMemoryCache = new Map<DecisionCacheKey, CachedDecisionEntry>()
-
-export const clearGlobalDecisionCache = (): void => {
-  globalDecisionMemoryCache.clear()
-}
-
-export const resolveDecisionCachePath = (repoRoot: string): string =>
-  join(resolveHarnessStateDir(repoRoot), "cache", "decisions-v1.json")
 
 export const canonicalJson = (value: unknown): string => {
   if (value === null || value === undefined) {
@@ -110,11 +90,10 @@ export const canonicalJson = (value: unknown): string => {
     return `[${value.map((item) => canonicalJson(item)).join(",")}]`
   }
   if (typeof value === "object") {
-    const record = value as Readonly<Record<string, unknown>>
-    const sortedKeys = Object.keys(record)
-      .filter((k) => record[k] !== undefined)
-      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
-    const pairs = sortedKeys.map((k) => `${JSON.stringify(k)}:${canonicalJson(record[k])}`)
+    const entries = Object.entries(value)
+      .filter(([, v]) => v !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    const pairs = entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`)
     return `{${pairs.join(",")}}`
   }
   return "null"
@@ -144,85 +123,6 @@ const deriveDefinitionTaskId = <
   return `${keys.join(",")}:${canonicalJson(definition.decisions)}`
 }
 
-const loadStoreIntoMap = (
-  cacheFilePath: string,
-  targetMap: Map<DecisionCacheKey, CachedDecisionEntry>,
-): Effect.Effect<void> => {
-  if (!existsSync(cacheFilePath)) {
-    return Effect.void
-  }
-  return Effect.try({
-    try: () => {
-      const raw = readFileSync(cacheFilePath, "utf8")
-      const decoded = decodeDecisionCacheStore(raw)
-      match(decoded)
-        .with({ _tag: "Some" }, ({ value }) => {
-          const now = Date.now()
-          for (const [, entry] of Object.entries(value.entries)) {
-            if (entry.expiresAt !== undefined && now > entry.expiresAt) {
-              continue
-            }
-            targetMap.set(entry.cacheKey, entry)
-          }
-        })
-        .with({ _tag: "None" }, () => {
-          process.stderr.write(
-            `[harness:decision-cache] Warning: failed to parse decision cache from ${cacheFilePath}: invalid schema format\n`,
-          )
-        })
-        .exhaustive()
-    },
-    catch: (err) => {
-      process.stderr.write(
-        `[harness:decision-cache] Warning: failed to read decision cache from ${cacheFilePath}: ${err instanceof Error ? err.message : String(err)}\n`,
-      )
-    },
-  }).pipe(Effect.ignore)
-}
-
-const persistMapToDisk = (
-  cacheFilePath: string,
-  sourceMap: ReadonlyMap<DecisionCacheKey, CachedDecisionEntry>,
-  promptVersion: DecisionPromptVersion,
-): Effect.Effect<void> =>
-  Effect.suspend(() => {
-    const tmpPath = `${cacheFilePath}.${process.pid}.${randomUUID()}.tmp`
-    return Effect.try({
-      try: () => {
-        mkdirSync(dirname(cacheFilePath), { recursive: true })
-        const entries: Record<string, CachedDecisionEntry> = {}
-        for (const [k, v] of sourceMap.entries()) {
-          entries[k] = v
-        }
-        const store: DecisionCacheStore = {
-          version: promptVersion,
-          entries,
-        }
-        writeFileSync(tmpPath, JSON.stringify(store), "utf8")
-        renameSync(tmpPath, cacheFilePath)
-      },
-      catch: (err) => {
-        process.stderr.write(
-          `[harness:decision-cache] Warning: failed to persist decision cache to ${cacheFilePath}: ${err instanceof Error ? err.message : String(err)}\n`,
-        )
-      },
-    }).pipe(
-      Effect.ensuring(
-        Effect.ignore(
-          Effect.try({
-            try: () => {
-              if (existsSync(tmpPath)) {
-                unlinkSync(tmpPath)
-              }
-            },
-            catch: () => undefined,
-          }),
-        ),
-      ),
-      Effect.ignore,
-    )
-  })
-
 const ProbeDecisionDefinition = Decision.make({
   input: Schema.Struct({
     canonicalInputJson: Schema.String,
@@ -234,7 +134,7 @@ const ProbeDecisionDefinition = Decision.make({
   },
 })
 
-export const decideCachedDecisionLookup = Effect.fn("CachedDecisionModel.decide")(function* (
+export const decideCachedDecisionLookup = Effect.fn("CachedDecisionModel.lookup")(function* (
   input: CachedDecisionLookupInput,
 ): Effect.fn.Return<CachedDecisionLookupResult, never, DecisionModel.DecisionModel> {
   const cacheKey = computeDecisionCacheKey({
@@ -242,40 +142,79 @@ export const decideCachedDecisionLookup = Effect.fn("CachedDecisionModel.decide"
     promptVersion: input.promptVersion,
     input: input.canonicalInputJson,
   })
-  const alreadyCached = globalDecisionMemoryCache.has(cacheKey)
-  if (alreadyCached) {
-    return {
-      cacheKey,
-      cacheStatus: DecisionCacheHitStatus.make("hit"),
-      coalescedFiberCount: NonNegativeCount.make(0),
-    }
-  }
-
-  const outcome = yield* DecisionModel.decide(ProbeDecisionDefinition, {
-    input: { canonicalInputJson: input.canonicalInputJson },
-  }).pipe(Effect.option)
-
-  match(outcome)
-    .with({ _tag: "Some" }, ({ value }) => {
-      globalDecisionMemoryCache.set(cacheKey, {
-        cacheKey,
-        taskId: input.taskId,
-        promptVersion: input.promptVersion,
-        answers: value.answers,
-        usage: {
-          inputTokens: value.usage.inputTokens ?? 0,
-          outputTokens: value.usage.outputTokens ?? 0,
-        },
-      })
-    })
-    .with({ _tag: "None" }, () => undefined)
+  const cachePortOpt = yield* Effect.serviceOption(DecisionCachePort)
+  const existingOpt = yield* match(cachePortOpt)
+    .with({ _tag: "Some" }, ({ value }) =>
+      value.lookup(cacheKey).pipe(
+        Effect.catchTag("WorkspaceFsError", (err) =>
+          Effect.logWarning(`Decision cache lookup failed: ${err.reason}`).pipe(
+            Effect.as(Option.none<DecisionCachePayloadJson>()),
+          ),
+        ),
+      ),
+    )
+    .with({ _tag: "None" }, () => Effect.succeed(Option.none<DecisionCachePayloadJson>()))
     .exhaustive()
 
-  return {
-    cacheKey,
-    cacheStatus: DecisionCacheHitStatus.make("miss"),
-    coalescedFiberCount: NonNegativeCount.make(1),
-  }
+  const hitResult = match(existingOpt)
+    .with({ _tag: "Some" }, () =>
+      Option.some<CachedDecisionLookupResult>({
+        cacheKey,
+        cacheStatus: DecisionCacheHitStatus.make("hit"),
+        coalescedFiberCount: NonNegativeCount.make(0),
+      }),
+    )
+    .with({ _tag: "None" }, () => Option.none<CachedDecisionLookupResult>())
+    .exhaustive()
+
+  return yield* match(hitResult)
+    .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
+    .with({ _tag: "None" }, () =>
+      Effect.gen(function* () {
+        const outcome = yield* DecisionModel.decide(ProbeDecisionDefinition, {
+          input: { canonicalInputJson: input.canonicalInputJson },
+        }).pipe(Effect.option)
+
+        yield* match(outcome)
+          .with({ _tag: "Some" }, ({ value }) => {
+            const entry: CachedDecisionEntry = {
+              cacheKey,
+              taskId: input.taskId,
+              promptVersion: input.promptVersion,
+              answers: value.answers,
+              usage: {
+                inputTokens: value.usage.inputTokens ?? 0,
+                outputTokens: value.usage.outputTokens ?? 0,
+              },
+            }
+            return match(cachePortOpt)
+              .with({ _tag: "Some" }, ({ value: port }) =>
+                port
+                  .store(
+                    cacheKey,
+                    DecisionCachePayloadJson.make(JSON.stringify(entry)),
+                    DecisionCacheTtlMillis.make(300_000),
+                  )
+                  .pipe(
+                    Effect.catchTag("WorkspaceFsError", (err) =>
+                      Effect.logWarning(`Decision cache store failed: ${err.reason}`),
+                    ),
+                  ),
+              )
+              .with({ _tag: "None" }, () => Effect.void)
+              .exhaustive()
+          })
+          .with({ _tag: "None" }, () => Effect.void)
+          .exhaustive()
+
+        return {
+          cacheKey,
+          cacheStatus: DecisionCacheHitStatus.make("miss"),
+          coalescedFiberCount: NonNegativeCount.make(1),
+        }
+      }),
+    )
+    .exhaustive()
 })
 
 export const makeCachedDecisionModelLayer = (
@@ -285,20 +224,13 @@ export const makeCachedDecisionModelLayer = (
     DecisionModel.DecisionModel,
     Effect.gen(function* () {
       const inner = yield* DecisionModel.DecisionModel
+      const cachePortOpt = yield* Effect.serviceOption(DecisionCachePort)
       const promptVersion = DecisionPromptVersion.make(
         options?.promptVersion ?? HARNESS_DECISION_PROMPT_VERSION,
       )
       const ttlMillis = options?.ttlMillis ?? 300_000
-      const memoryCache =
-        options?.shareGlobalMemoryCache === true
-          ? globalDecisionMemoryCache
-          : new Map<DecisionCacheKey, CachedDecisionEntry>()
-
+      const memoryCache = new Map<DecisionCacheKey, CachedDecisionEntry>()
       const memoryExpiresAt = new Map<DecisionCacheKey, number>()
-
-      if (options?.cacheFilePath !== undefined) {
-        yield* loadStoreIntoMap(options.cacheFilePath, memoryCache)
-      }
 
       const inFlight = new Map<
         DecisionCacheKey,
@@ -350,6 +282,46 @@ export const makeCachedDecisionModelLayer = (
               }
             }
 
+            const portPayloadOpt = yield* match(cachePortOpt)
+              .with({ _tag: "Some" }, ({ value: port }) =>
+                port.lookup(cacheKey).pipe(
+                  Effect.catchTag("WorkspaceFsError", (err) =>
+                    Effect.logWarning(`Decision cache lookup failed: ${err.reason}`).pipe(
+                      Effect.as(Option.none<DecisionCachePayloadJson>()),
+                    ),
+                  ),
+                ),
+              )
+              .with({ _tag: "None" }, () => Effect.succeed(Option.none<DecisionCachePayloadJson>()))
+              .exhaustive()
+
+            const portEntryOpt = match(portPayloadOpt)
+              .with({ _tag: "Some" }, ({ value }) => decodeCachedDecisionEntry(value))
+              .with({ _tag: "None" }, () => Option.none<CachedDecisionEntry>())
+              .exhaustive()
+
+            const cachedFromPort = match(portEntryOpt)
+              .with({ _tag: "Some" }, ({ value: portEntry }) => {
+                if (portEntry.expiresAt === undefined || nowMs <= portEntry.expiresAt) {
+                  memoryCache.set(cacheKey, portEntry)
+                  return {
+                    answers: portEntry.answers as Decision.Answers<Decisions>,
+                    usage: new DecisionModel.DecisionUsage({
+                      inputTokens: portEntry.usage.inputTokens,
+                      outputTokens: portEntry.usage.outputTokens,
+                    }),
+                    metadata: {},
+                  }
+                }
+                return undefined
+              })
+              .with({ _tag: "None" }, () => undefined)
+              .exhaustive()
+
+            if (cachedFromPort !== undefined) {
+              return cachedFromPort
+            }
+
             const existingDeferred = inFlight.get(cacheKey)
             if (existingDeferred !== undefined) {
               const coalescedEntry = yield* Deferred.await(existingDeferred)
@@ -373,7 +345,7 @@ export const makeCachedDecisionModelLayer = (
                   cacheKey,
                   taskId: DecisionTaskId.make(taskIdStr),
                   promptVersion,
-                  answers: response.answers as Readonly<Record<string, unknown>>,
+                  answers: Object.fromEntries(Object.entries(response.answers)),
                   usage: {
                     inputTokens: response.usage.inputTokens ?? 0,
                     outputTokens: response.usage.outputTokens ?? 0,
@@ -384,12 +356,22 @@ export const makeCachedDecisionModelLayer = (
 
                 memoryCache.set(cacheKey, entry)
                 memoryExpiresAt.set(cacheKey, Date.now() + ttlMillis)
-                if (options?.shareGlobalMemoryCache === true) {
-                  globalDecisionMemoryCache.set(cacheKey, entry)
-                }
-                if (options?.cacheFilePath !== undefined) {
-                  yield* persistMapToDisk(options.cacheFilePath, memoryCache, promptVersion)
-                }
+                yield* match(cachePortOpt)
+                  .with({ _tag: "Some" }, ({ value: port }) =>
+                    port
+                      .store(
+                        cacheKey,
+                        DecisionCachePayloadJson.make(JSON.stringify(entry)),
+                        DecisionCacheTtlMillis.make(ttlMillis),
+                      )
+                      .pipe(
+                        Effect.catchTag("WorkspaceFsError", (err) =>
+                          Effect.logWarning(`Decision cache store failed: ${err.reason}`),
+                        ),
+                      ),
+                  )
+                  .with({ _tag: "None" }, () => Effect.void)
+                  .exhaustive()
 
                 return { response, entry }
               }),
@@ -425,13 +407,22 @@ export const evaluateBatchCachedDecisions = <A, E, R>(
   effects: ReadonlyArray<Effect.Effect<A, E, R>>,
 ): Effect.Effect<Array<A>, E, R> => Effect.all(effects, { concurrency: 4 })
 
+export const lookupOrComputeDecisionPayload = Effect.fn("DecisionCache.lookupOrCompute")(
+  function* (input: {
+    readonly key: DecisionCacheKey
+    readonly ttlMillis: DecisionCacheTtlMillis
+    readonly compute: Effect.Effect<DecisionCachePayloadJson, WorkspaceFsError>
+  }): Effect.fn.Return<DecisionCachePayloadJson, WorkspaceFsError, DecisionCachePort> {
+    const cache = yield* DecisionCachePort
+    return yield* cache.lookupOrCompute(input)
+  },
+)
+
 export const CachedDecisionModel = {
   decide: decideCachedDecisionLookup,
   layer: makeCachedDecisionModelLayer,
   wrapLayer: wrapDecisionModelLayer,
   canonicalJson,
   computeCacheKey: computeDecisionCacheKey,
-  resolveCachePath: resolveDecisionCachePath,
-  clearGlobalCache: clearGlobalDecisionCache,
   evaluateBatch: evaluateBatchCachedDecisions,
 } as const

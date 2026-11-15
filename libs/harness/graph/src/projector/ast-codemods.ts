@@ -1,4 +1,5 @@
 import { Lang, parse } from "@ast-grep/napi"
+import type { SyncHostReader } from "@harness/service/host-io"
 import * as Graph from "effect/Graph"
 import { Node, Project, SyntaxKind, ts } from "ts-morph"
 import { match } from "ts-pattern"
@@ -444,6 +445,7 @@ export const projectPatchesToInMemoryWorkspace = (
   patches: ReadonlyArray<GraphPatch>,
   initialGraph?: HarnessGraph,
   existingFiles?: Readonly<Record<string, string>>,
+  hostIo?: SyncHostReader,
 ): {
   readonly operations: ReadonlyArray<AstCodeModOperation>
   readonly overlays: ReadonlyArray<ShadowFileOverlay>
@@ -463,7 +465,7 @@ export const projectPatchesToInMemoryWorkspace = (
   const initialContents = new Map<string, string>()
   if (existingFiles !== undefined) {
     for (const [k, v] of Object.entries(existingFiles)) {
-      const norm = normalizeRelPath(repoRoot, k)
+      const norm = normalizeRelPath(repoRoot, k, undefined, hostIo)
       initialContents.set(norm, v)
     }
   }
@@ -531,18 +533,18 @@ export const projectPatchesToInMemoryWorkspace = (
   }
   for (const f of candidateFiles) {
     if (typeof f !== "string" || f.trim().length === 0) continue
-    const validated = validateRelPath(repoRoot, f)
+    const validated = validateRelPath(repoRoot, f, undefined, hostIo)
     if (!validated.ok) continue
     const norm = validated.relPath
     if (!initialContents.has(norm)) {
-      const diskContent = readInitialFileContent(repoRoot, norm, existingFiles)
+      const diskContent = readInitialFileContent(repoRoot, norm, existingFiles, hostIo)
       if (diskContent !== undefined) initialContents.set(norm, diskContent)
     }
     const barrelMatch = norm.match(/^(libs\/(?:[^/]+\/)?(?:contract|service|domain|core|infra)\/src)\//)
     if (barrelMatch?.[1] !== undefined) {
       const barrelRel = `${barrelMatch[1]}/index.ts`
       if (!initialContents.has(barrelRel)) {
-        const diskBarrel = readInitialFileContent(repoRoot, barrelRel, existingFiles)
+        const diskBarrel = readInitialFileContent(repoRoot, barrelRel, existingFiles, hostIo)
         if (diskBarrel !== undefined) initialContents.set(barrelRel, diskBarrel)
       }
     }
@@ -558,6 +560,7 @@ export const projectPatchesToInMemoryWorkspace = (
     targetEntitiesByKey,
     targetRelationsById,
     targetEdgesByRelId,
+    ...(hostIo !== undefined ? { hostIo } : {}),
   }
 
   for (const patch of patches) {
@@ -623,7 +626,7 @@ export const projectPatchesToInMemoryWorkspace = (
     for (const edge of [...patch.insertedRoleEdges, ...patch.deletedRoleEdges]) {
       const relEdges = ctx.targetEdgesByRelId.get(edge.relationId) ?? []
       for (const re of relEdges) {
-        if (re.role === "caller") touchedCallerKeys.add(re.entityKey)
+        match<string>(re.role).with("caller", () => { touchedCallerKeys.add(re.entityKey) }).otherwise(() => {})
       }
     }
     for (const callerKey of touchedCallerKeys) {

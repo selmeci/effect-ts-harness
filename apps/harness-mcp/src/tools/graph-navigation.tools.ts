@@ -1,6 +1,6 @@
-import * as fs from "node:fs"
 import * as path from "node:path"
 import { Cause, Effect, Option, Schema } from "effect"
+import { isPureInterruptCause } from "@harness/contract"
 import {
   decideStructuralSearch,
   findCallees,
@@ -8,58 +8,63 @@ import {
   findTestsReaching,
   resolveNode,
 } from "@harness/graph"
-import { LocalDecisionModel, routeStep } from "@harness/decision"
+import { routeStep } from "@harness/decision"
+import { LocalDecisionModel, nodeSyncHostIo } from "@harness/infra"
 import {
+  graphStatusMeta,
   isPathInsideRoot,
   McpToolName,
   type McpToolPluginDescriptor,
   normalizeProjectPath,
   resolveDefaultRepoRoot,
-  resolveGraph,
+  resolveGraphWithStatus,
   type ServerOptions,
 } from "./mcp-helpers.js"
 
-export { isPathInsideRoot, normalizeProjectPath, resolveDefaultRepoRoot, resolveGraph }
+export { isPathInsideRoot, normalizeProjectPath, resolveDefaultRepoRoot }
+
+const BoundedSymbolOrSpan = Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 512)))
+const BoundedRepoRoot = Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 1024)))
 
 const ResolveInputSchema = Schema.Struct({
-  symbolOrSpan: Schema.String.annotate({
+  symbolOrSpan: BoundedSymbolOrSpan.annotate({
     description: "Symbol or span name to resolve",
   }),
   repoRoot: Schema.optional(
-    Schema.String.annotate({
+    BoundedRepoRoot.annotate({
       description: "Optional repository root path",
     }),
   ),
 })
 
 const CallersInputSchema = Schema.Struct({
-  symbolOrSpan: Schema.String.annotate({
+  symbolOrSpan: BoundedSymbolOrSpan.annotate({
     description: "Symbol or span name to query callers for",
   }),
   repoRoot: Schema.optional(
-    Schema.String.annotate({
+    BoundedRepoRoot.annotate({
       description: "Optional repository root path",
     }),
   ),
 })
 
 const CalleesInputSchema = Schema.Struct({
-  symbolOrSpan: Schema.String.annotate({
+  symbolOrSpan: BoundedSymbolOrSpan.annotate({
     description: "Symbol or span name to query callees for",
   }),
   repoRoot: Schema.optional(
-    Schema.String.annotate({
+    BoundedRepoRoot.annotate({
       description: "Optional repository root path",
     }),
   ),
 })
 
 const TestsReachingInputSchema = Schema.Struct({
-  symbolOrSpan: Schema.String.annotate({
+  symbolOrSpan: BoundedSymbolOrSpan.annotate({
     description: "Symbol or span name to find reaching tests for",
   }),
   repoRoot: Schema.optional(
-    Schema.String.annotate({
+    BoundedRepoRoot.annotate({
       description: "Optional repository root path",
     }),
   ),
@@ -96,11 +101,11 @@ const StructuralSearchInputSchema = Schema.Struct({
 })
 
 const RouteInputSchema = Schema.Struct({
-  planStep: Schema.String.annotate({
+  planStep: Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 4096))).annotate({
     description: "Implementation plan step text to route to an Effect idiom block",
   }),
   repoRoot: Schema.optional(
-    Schema.String.annotate({
+    BoundedRepoRoot.annotate({
       description: "Optional repository root path",
     }),
   ),
@@ -120,8 +125,11 @@ export const buildGraphNavigationToolDescriptors = (
     execute: (args) =>
       Effect.gen(function* () {
         const { symbolOrSpan } = yield* decodeResolveInput(args)
-        const graph = yield* resolveGraph(options, args)
-        return resolveNode(graph, symbolOrSpan) ?? null
+        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        return {
+          node: resolveNode(graphStatus.graph, symbolOrSpan) ?? null,
+          ...graphStatusMeta(graphStatus),
+        }
       }),
   },
   {
@@ -131,8 +139,11 @@ export const buildGraphNavigationToolDescriptors = (
     execute: (args) =>
       Effect.gen(function* () {
         const { symbolOrSpan } = yield* decodeResolveInput(args)
-        const graph = yield* resolveGraph(options, args)
-        return findCallers(graph, symbolOrSpan)
+        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        return {
+          callers: findCallers(graphStatus.graph, symbolOrSpan),
+          ...graphStatusMeta(graphStatus),
+        }
       }),
   },
   {
@@ -142,8 +153,11 @@ export const buildGraphNavigationToolDescriptors = (
     execute: (args) =>
       Effect.gen(function* () {
         const { symbolOrSpan } = yield* decodeResolveInput(args)
-        const graph = yield* resolveGraph(options, args)
-        return findCallees(graph, symbolOrSpan)
+        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        return {
+          callees: findCallees(graphStatus.graph, symbolOrSpan),
+          ...graphStatusMeta(graphStatus),
+        }
       }),
   },
   {
@@ -153,8 +167,11 @@ export const buildGraphNavigationToolDescriptors = (
     execute: (args) =>
       Effect.gen(function* () {
         const { symbolOrSpan } = yield* decodeResolveInput(args)
-        const graph = yield* resolveGraph(options, args)
-        return findTestsReaching(graph, symbolOrSpan)
+        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        return {
+          tests: findTestsReaching(graphStatus.graph, symbolOrSpan),
+          ...graphStatusMeta(graphStatus),
+        }
       }),
   },
   {
@@ -171,6 +188,7 @@ export const buildGraphNavigationToolDescriptors = (
           filePath: input.filePath,
           paths: input.paths,
           subDirs: input.subDirs,
+          hostIo: nodeSyncHostIo,
         })
       }),
   },
@@ -186,16 +204,20 @@ export const buildGraphNavigationToolDescriptors = (
         const routedOpt = yield* routeStep(planStep).pipe(
           Effect.provide(decisionLayer),
           Effect.timeoutOption("1500 millis"),
-          Effect.catchCause((cause) =>
-            Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeedNone,
-          ),
+          Effect.catchCause((cause) => {
+            if (isPureInterruptCause(cause)) {
+              return Effect.interrupt
+            }
+            process.stderr.write(`[harness-mcp] decision fallback: ${Cause.pretty(cause)}\n`)
+            return Effect.succeedNone
+          }),
         )
         let block: string = Option.getOrElse(routedOpt, () => "review")
         const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
         if (block === "review") {
           const patternsDir = path.join(root, "agent-patterns")
-          if (fs.existsSync(patternsDir)) {
-            const files = fs.readdirSync(patternsDir, "utf8")
+          if (nodeSyncHostIo.existsSync(patternsDir)) {
+            const files = nodeSyncHostIo.readdirSync(patternsDir).map((entry) => entry.name)
             const stepLower = planStep.toLowerCase()
             const candidates = files
               .filter((f: string) => f.endsWith(".md") && f.toLowerCase() !== "readme.md")

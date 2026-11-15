@@ -1,16 +1,169 @@
-export * from "./idiom-router.js"
-export * from "./guard-decision.js"
-export * from "./triage-decision.js"
-export * from "./plan-coverage-decision.js"
-export * from "./learn-decision.js"
-export * from "./ontology-conflict-decision.js"
-export * from "./hole-prior-decision.js"
-export * from "./dpo-ranker-decision.js"
-export * from "./ears-semantics-decision.js"
-export * from "./dst-hazard-decision.js"
-export * from "./mutant-equivalence-decision.js"
-export * from "./rule-quality-decision.js"
-export * from "./plan-search-decision.js"
-export * from "./cached-decision-model.js"
-export * from "./mock-layer.js"
-
+export {
+  IDIOM_BLOCKS,
+  type IdiomBlock,
+  type BuildingBlock,
+  type DeterministicRouteRule,
+  DETERMINISTIC_ROUTE_RULES,
+  IdiomRouterV1,
+  validateDecisionLimits,
+  type RouteStepSource,
+  type RouteStepStatusResult,
+  routeStepWithStatus,
+  routeStep,
+} from "./idiom-router.js"
+export { GuardV1, type GuardDecisionResult, decideGuardCommand } from "./guard-decision.js"
+export {
+  TriageV1,
+  type TriageKind,
+  type TriageResult,
+  type DeterministicTriageRule,
+  DETERMINISTIC_TRIAGE_RULES,
+  triageFailure,
+} from "./triage-decision.js"
+export {
+  PlanStepCoverageV1,
+  type PlanStepCoverageInput,
+  type PlanStepCoverageResult,
+  checkPlanStepCoverage,
+} from "./plan-coverage-decision.js"
+export {
+  LEARN_TARGETS,
+  type LearnTarget,
+  LearnProposalV1,
+  type LearnProposalInput,
+  type LearnProposalResult,
+  deterministicLearnFallback,
+  proposeLearningAction,
+} from "./learn-decision.js"
+export {
+  decideOntologyInvariants,
+  type GovernanceDocReference,
+  loadGovernanceDocsFromDisk,
+  type OntologyInvariantFinding,
+  type OntologyInvariantsReport,
+  ONTOLOGY_CONFLICT_KINDS,
+  type OntologyConflictKind,
+  OntologyConflictV1,
+  type OntologyConflictInput,
+  type OntologyConflictResult,
+  checkOntologyPairConflict,
+  extractOntologyConflictPairs,
+  type OntologyConflictEvaluationReport,
+  evaluateOntologyConflictsWithStatus,
+  evaluateOntologyConflicts,
+} from "./ontology-conflict-decision.js"
+export {
+  ConfidenceMillis,
+  NodeKey,
+  PageRankScoreMillis,
+  RoleName,
+  CandidateSymbolKey,
+  ProposedRoleName,
+  DecisionModelSource,
+  DeterministicFallbackReason,
+  DeterministicFallbackSource,
+  PriorSource,
+  HOLE_RELEVANCE_LEVELS,
+  type HoleRelevanceLevel,
+  RELEVANCE_WEIGHT_MILLIS,
+  HoleRelevanceAndEdgePriorV1,
+  MAX_BATCHED_HOLE_CANDIDATES,
+  buildBatchedHolePriorDecision,
+  HoleCandidatePriorInput,
+  HoleCandidatePriorResult,
+  SemanticEdgePriorsBatchResult,
+  evaluateHoleCandidatePrior,
+  evaluateHoleCandidatePriorsBatch,
+} from "./hole-prior-decision.js"
+export {
+  DpoPriorKey,
+  RewriteRuleId,
+  SystemOneScoreMillis,
+  formatDpoPriorKey,
+  parseDpoPriorKey,
+  DPO_REPAIR_STRATEGIES,
+  type DpoRepairStrategy,
+  DPO_COHESION_LEVELS,
+  type DpoCohesionLevel,
+  COHESION_SCORE_MILLIS,
+  DpoCandidateRankerV1,
+  MAX_BATCHED_DPO_CANDIDATES,
+  buildBatchedDpoRankerDecision,
+  DpoCandidateRankInput,
+  DpoCandidateRankResult,
+  DpoCandidateBatchResult,
+  evaluateDpoCandidateRank,
+  evaluateDpoCandidatePriorsBatch,
+} from "./dpo-ranker-decision.js"
+export {
+  EARS_GUARD_RELATION_CRITERIA,
+  buildEarsClauseSemanticsDecision,
+  EarsClauseSemanticsV1,
+  EarsClauseSemanticsInput,
+  EarsClauseSemanticsResult,
+  computeGuardRelationFallback,
+  evaluateEarsClauseSemantics,
+} from "./ears-semantics-decision.js"
+export {
+  getHazardProbabilityMillis,
+  DstHazardPriorV1,
+  DstHazardPriorInput,
+  DstHazardPriorResult,
+  evaluateDstHazardPrior,
+} from "./dst-hazard-decision.js"
+export {
+  EQUIVALENT_MUTANT_THRESHOLD_MILLIS,
+  MutantDecisionId,
+  MutantDecisionFilePath,
+  MutantDecisionSpanName,
+  MutantCodeSnippet,
+  MutantAstSummary,
+  MutantEquivalenceV1,
+  MutantEquivalenceInput,
+  MutantEquivalenceResult,
+  evaluateMutantEquivalence,
+} from "./mutant-equivalence-decision.js"
+export {
+  RULE_GENERALITY_LEVELS,
+  type RuleGeneralityLevel,
+  RULE_GENERALITY_SCORE_MILLIS,
+  SynthesizedRuleQualityV1,
+  SynthesizedRuleQualityInput,
+  SynthesizedRuleQualityResult,
+  evaluateSynthesizedRuleQuality,
+} from "./rule-quality-decision.js"
+export {
+  PLAN_SEARCH_COHESION_LEVELS,
+  type PlanSearchCohesionLevel,
+  PLAN_SEARCH_COHESION_MILLIS,
+  PlanSearchScorerV1,
+  PlanSearchScoreInput,
+  PlanSearchScoreResult,
+  evaluatePlanSearchCandidate,
+} from "./plan-search-decision.js"
+export {
+  DecisionCacheKey,
+  DecisionTaskId,
+  DecisionPromptVersion,
+  HARNESS_DECISION_PROMPT_VERSION,
+  DecisionCacheHitStatus,
+  CanonicalInputJson,
+  CachedDecisionLookupInput,
+  CachedDecisionLookupResult,
+  type CachedDecisionEntry,
+  type CachedDecisionModelOptions,
+  canonicalJson,
+  computeDecisionCacheKey,
+  decideCachedDecisionLookup,
+  makeCachedDecisionModelLayer,
+  wrapDecisionModelLayer,
+  evaluateBatchCachedDecisions,
+  lookupOrComputeDecisionPayload,
+  CachedDecisionModel,
+} from "./cached-decision-model.js"
+export {
+  type MockDecisionModelOverrides,
+  makeMockDecisionModelLayer,
+  makeFailingDecisionModel,
+  makeFailingDecisionModelLayer,
+} from "./mock-layer.js"

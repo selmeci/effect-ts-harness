@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Schema } from "effect"
+import { Cause, Effect, Schema } from "effect"
+import { match } from "ts-pattern"
 import {
   ConfidenceMillis,
   DatalogFilePath,
@@ -20,6 +21,7 @@ import {
   minHeightReducer,
   stepDatalogFileDelta,
 } from "../src/index.js"
+import { runGraphInferencePipeline } from "../src/datalog/stratum-3-completion-and-holes.js"
 
 const CallChainHopSpec = Schema.Struct({
   callerIdx: Schema.Literals([0, 1, 2]),
@@ -705,35 +707,31 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
         for (const req of first.effectiveRequires) {
           const matchCaller = req.callerKey.match(/#fn(\d+)$/)
           const matchSvc = req.serviceKey.match(/^ServiceTag:(.+)$/)
-          expect(matchCaller).not.toBeNull()
-          expect(matchSvc).not.toBeNull()
+          expect(matchCaller?.[1]).toMatch(/^\d+$/)
+          expect(typeof matchSvc?.[1]).toBe("string")
           const callerIdx = Number(matchCaller![1])
-          const svcTag = matchSvc![1]
-          expect(svcTag).toBeDefined()
-          if (svcTag !== undefined) {
-            const reachable = reachableFrom(callerIdx)
-            const isValidPath =
-              (directReqs.get(callerIdx)?.has(svcTag) ?? false) ||
-              Array.from(reachable).some((c) => directReqs.get(c)?.has(svcTag) ?? false)
-            expect(isValidPath).toBe(true)
-          }
+          const svcTag = matchSvc?.[1] ?? ""
+          expect(svcTag.length).toBeGreaterThan(0)
+          const reachable = reachableFrom(callerIdx)
+          const isValidPath =
+            (directReqs.get(callerIdx)?.has(svcTag) ?? false) ||
+            Array.from(reachable).some((c) => directReqs.get(c)?.has(svcTag) ?? false)
+          expect(isValidPath).toBe(true)
         }
 
         for (const fail of first.effectiveFailsWith) {
           const matchCaller = fail.callerKey.match(/#fn(\d+)$/)
           const matchErr = fail.errorKey.match(/^TaggedError:(.+)$/)
-          expect(matchCaller).not.toBeNull()
-          expect(matchErr).not.toBeNull()
+          expect(matchCaller?.[1]).toMatch(/^\d+$/)
+          expect(typeof matchErr?.[1]).toBe("string")
           const callerIdx = Number(matchCaller![1])
-          const errTag = matchErr![1]
-          expect(errTag).toBeDefined()
-          if (errTag !== undefined) {
-            const reachable = reachableFrom(callerIdx)
-            const isValidPath =
-              (directFails.get(callerIdx)?.has(errTag) ?? false) ||
-              Array.from(reachable).some((c) => directFails.get(c)?.has(errTag) ?? false)
-            expect(isValidPath).toBe(true)
-          }
+          const errTag = matchErr?.[1] ?? ""
+          expect(errTag.length).toBeGreaterThan(0)
+          const reachable = reachableFrom(callerIdx)
+          const isValidPath =
+            (directFails.get(callerIdx)?.has(errTag) ?? false) ||
+            Array.from(reachable).some((c) => directFails.get(c)?.has(errTag) ?? false)
+          expect(isValidPath).toBe(true)
         }
       }),
   )
@@ -1480,7 +1478,14 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
               nextGraph: editedBSubgraph,
             }),
           )
-          expect(invalidExit._tag).toBe("Failure")
+          match(invalidExit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(Cause.hasFails(cause)).toBe(true)
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected stepDatalogFileDelta to fail")
+            })
+            .exhaustive()
           const latestAfterFailure = yield* session.latestInference
           expect(latestAfterFailure).toEqual(batchParity)
 
@@ -1576,6 +1581,9 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
         })
 
         yield* program.pipe(Effect.provide(DatalogSession.layer(twoPkgGraph)))
+
+        const directPipeline = yield* runGraphInferencePipeline(twoPkgGraph)
+        expect(directPipeline.iterations).toBeGreaterThanOrEqual(1)
       }),
   )
 })

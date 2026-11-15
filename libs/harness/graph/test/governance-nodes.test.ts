@@ -12,6 +12,7 @@ import {
   resolveNode,
   toOmnigraphNdjson,
 } from "../src/index.js"
+import { testHostIo } from "./helpers/test-host-io.js"
 
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))
 
@@ -620,7 +621,7 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
   describe("loadWorkspaceGovernanceDocs and extractWorkspaceTypeAwareGraph", () => {
     it("scans workspace docs and extracts AdrDoc and EarsSpec nodes", () => {
       const repoRoot = process.cwd()
-      const docs = loadWorkspaceGovernanceDocs(repoRoot)
+      const docs = loadWorkspaceGovernanceDocs(repoRoot, testHostIo)
       expect(docs.length).toBeGreaterThan(0)
 
       const sampleAdr = docs.find((d) => d.id === "sample:ADR-0001")
@@ -638,7 +639,7 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
 
     it("extractWorkspaceTypeAwareGraph includes governance docs and edges in the mutated graph", () => {
       const repoRoot = process.cwd()
-      const graph = Effect.runSync(extractWorkspaceTypeAwareGraph(repoRoot))
+      const graph = Effect.runSync(extractWorkspaceTypeAwareGraph(repoRoot, testHostIo))
       expect(graph.graph).toBeDefined()
       const adrNode = resolveNode(graph, "sample:ADR-0001")
       expect(adrNode).toBeDefined()

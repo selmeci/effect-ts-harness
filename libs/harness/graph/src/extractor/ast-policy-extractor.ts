@@ -1,3 +1,4 @@
+import { match } from "ts-pattern"
 import {
   Node,
   type ParameterDeclaration,
@@ -147,22 +148,23 @@ export const checkDiscriminantAndPredicateBranching = (
   const discriminantAliasVars = new Set<string>()
   for (const varDecl of sourceFile.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
     const init = varDecl.getInitializer()
-    if (init && Node.isPropertyAccessExpression(init)) {
+    if (!init) continue
+    if (Node.isPropertyAccessExpression(init)) {
       const objExpr = init.getExpression()
       const propName = init.getName()
       const objType = objExpr.getType()
       if (isDiscriminantPropertyOfUnion(objType, propName, init)) {
         discriminantAliasVars.add(varDecl.getName())
       }
-    } else if (init) {
-      const nameNode = varDecl.getNameNode()
-      if (Node.isObjectBindingPattern(nameNode)) {
-        const objType = init.getType()
-        for (const elem of nameNode.getElements()) {
-          const propName = elem.getPropertyNameNode()?.getText() ?? elem.getName()
-          if (isDiscriminantPropertyOfUnion(objType, propName, elem)) {
-            discriminantAliasVars.add(elem.getName())
-          }
+      continue
+    }
+    const nameNode = varDecl.getNameNode()
+    if (Node.isObjectBindingPattern(nameNode)) {
+      const objType = init.getType()
+      for (const elem of nameNode.getElements()) {
+        const propName = elem.getPropertyNameNode()?.getText() ?? elem.getName()
+        if (isDiscriminantPropertyOfUnion(objType, propName, elem)) {
+          discriminantAliasVars.add(elem.getName())
         }
       }
     }
@@ -212,26 +214,23 @@ export const checkDiscriminantAndPredicateBranching = (
           if (!isLiteralNode(other)) continue
           const objExpr = side.getExpression()
           const propName = side.getName()
-          const objType = objExpr.getType()
-          if (isDiscriminantPropertyOfUnion(objType, propName, side)) {
+          if (isDiscriminantPropertyOfUnion(objExpr.getType(), propName, side)) {
             const enclosingSymbol = findEnclosingSymbolName(statementNode, relPath)
             violations.push({
               rule: "discriminant-branching",
               message: `Condition in '${enclosingSymbol}' branches on union discriminant '${objExpr.getText()}.${propName}' via if/ternary — enumerate all union variants explicitly with match(${objExpr.getText()}).with(...).exhaustive() from ts-pattern.`,
-              file: relPath,
-              line: statementNode.getStartLineNumber(),
-              enclosingSymbol,
+              file: relPath, line: statementNode.getStartLineNumber(), enclosingSymbol,
             })
             return
           }
-        } else if (Node.isIdentifier(side) && discriminantAliasVars.has(side.getText())) {
+          continue
+        }
+        if (Node.isIdentifier(side) && discriminantAliasVars.has(side.getText())) {
           const enclosingSymbol = findEnclosingSymbolName(statementNode, relPath)
           violations.push({
             rule: "discriminant-branching",
             message: `Condition in '${enclosingSymbol}' branches on aliased union discriminant '${side.getText()}' via if/ternary — enumerate all union variants explicitly with match(...).with(...).exhaustive() from ts-pattern.`,
-            file: relPath,
-            line: statementNode.getStartLineNumber(),
-            enclosingSymbol,
+            file: relPath, line: statementNode.getStartLineNumber(), enclosingSymbol,
           })
           return
         }
@@ -270,26 +269,23 @@ export const checkDiscriminantAndPredicateBranching = (
                   if (!isLiteralNode(other)) continue
                   const objExpr = side.getExpression()
                   const propName = side.getName()
-                  const objType = objExpr.getType()
-                  if (isDiscriminantPropertyOfUnion(objType, propName, side)) {
+                  if (isDiscriminantPropertyOfUnion(objExpr.getType(), propName, side)) {
                     const enclosingSymbol = findEnclosingSymbolName(callExpr, relPath)
                     violations.push({
                       rule: "discriminant-branching",
                       message: `Predicate callback in '${enclosingSymbol}' branches on union discriminant '${objExpr.getText()}.${propName}' via .${methodName}() — enumerate all union variants explicitly with match(${objExpr.getText()}).with(...).exhaustive() from ts-pattern.`,
-                      file: relPath,
-                      line: bin.getStartLineNumber(),
-                      enclosingSymbol,
+                      file: relPath, line: bin.getStartLineNumber(), enclosingSymbol,
                     })
                     break
                   }
-                } else if (Node.isIdentifier(side) && discriminantAliasVars.has(side.getText())) {
+                  continue
+                }
+                if (Node.isIdentifier(side) && discriminantAliasVars.has(side.getText())) {
                   const enclosingSymbol = findEnclosingSymbolName(callExpr, relPath)
                   violations.push({
                     rule: "discriminant-branching",
                     message: `Predicate callback in '${enclosingSymbol}' branches on aliased union discriminant '${side.getText()}' via .${methodName}() — enumerate all union variants explicitly with match(...).with(...).exhaustive() from ts-pattern.`,
-                    file: relPath,
-                    line: bin.getStartLineNumber(),
-                    enclosingSymbol,
+                    file: relPath, line: bin.getStartLineNumber(), enclosingSymbol,
                   })
                   break
                 }
@@ -425,15 +421,13 @@ export const checkVacuousErrorAssertion = (
     const name = node.getName()
     if (!name || !ASSERTION_NAME_REGEX.test(name)) continue
 
-    let params: ReadonlyArray<ParameterDeclaration> | undefined
-    if (Node.isMethodSignature(node) || Node.isMethodDeclaration(node) || Node.isFunctionDeclaration(node)) {
-      params = node.getParameters()
-    } else if (Node.isVariableDeclaration(node) || Node.isPropertyAssignment(node)) {
-      const init = node.getInitializer()
-      if (init && (Node.isArrowFunction(init) || Node.isFunctionExpression(init))) {
-        params = init.getParameters()
-      }
-    }
+    const params: ReadonlyArray<ParameterDeclaration> | undefined = match(node)
+      .when((n) => Node.isMethodSignature(n) || Node.isMethodDeclaration(n) || Node.isFunctionDeclaration(n), (n) => n.getParameters())
+      .when((n) => Node.isVariableDeclaration(n) || Node.isPropertyAssignment(n), (n) => {
+        const init = n.getInitializer()
+        return init && (Node.isArrowFunction(init) || Node.isFunctionExpression(init)) ? init.getParameters() : undefined
+      })
+      .otherwise(() => undefined)
 
     if (params !== undefined) {
       const isVacuous =

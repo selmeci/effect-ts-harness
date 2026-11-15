@@ -3,7 +3,8 @@ import { tmpdir } from "node:os"
 import * as path from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import type { FetchLike } from "@modernrelay/omnigraph"
-import { Effect, Option, Schema } from "effect"
+import { Cause, Effect, Layer, Logger, Schema } from "effect"
+import { match } from "ts-pattern"
 import {
   buildHarnessGraph,
   decideOmnigraphReconcile,
@@ -12,9 +13,12 @@ import {
   HARNESS_GQ_QUERIES,
   HARNESS_GQ_QUERY_NAMES,
   invokeOmnigraphNamedQuery,
+  loadHarnessGqQueriesText,
+  loadHarnessPgSchemaText,
+  makeOmnigraphSyncLayer,
   mergeOmnigraphBranch,
+  OmnigraphLoadError,
   OmnigraphReconcileInput,
-  OmnigraphSync,
   queryOmnigraph,
   readGraphHeadMeta,
   RelationId,
@@ -26,6 +30,9 @@ import {
   toOmnigraphNdjson,
   writeGraphHeadMeta,
 } from "../src/index.js"
+import { testHostIo } from "./helpers/test-host-io.js"
+
+const OmnigraphSyncLive = makeOmnigraphSyncLayer(testHostIo)
 
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))
 
@@ -306,11 +313,28 @@ describe("Deterministic in-memory GQ query execution and fallback", () => {
             layer: "Motivation",
             symbol: "Sample.greet",
           },
-        }).pipe(Effect.provide(OmnigraphSync.Live))
+        }).pipe(Effect.provide(OmnigraphSyncLive))
 
-        expect(res.source).toBe("memory-fallback")
+        match(res)
+          .with({ source: "memory-fallback" }, (fallback) => {
+            expect(fallback.degraded).toBe(true)
+            expect(fallback.fallbackError.length).toBeGreaterThan(0)
+          })
+          .with({ source: "omnigraph" }, () => {
+            expect.unreachable("Expected memory-fallback")
+          })
+          .exhaustive()
         expect(Array.isArray(res.rows)).toBe(true)
       }
+
+      const failWithoutFallback = yield* Effect.flip(
+        invokeOmnigraphNamedQuery({
+          name: "resolve_effect_fn",
+          fetch: offlineFetch,
+          params: { spanOrQualname: "Sample.greet" },
+        }).pipe(Effect.provide(OmnigraphSyncLive)),
+      )
+      expect(failWithoutFallback).toBeInstanceOf(OmnigraphLoadError)
     }),
   )
 })
@@ -395,7 +419,7 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
         from: "main",
         fetch: mockFetch,
         snapshotPath: ".harness/test-snapshot.json",
-      }).pipe(Effect.provide(OmnigraphSync.Live))
+      }).pipe(Effect.provide(OmnigraphSyncLive))
 
       expect(syncRes.syncedToOmnigraph).toBe(true)
       const loadReq = recorded.find((r) => r.url.endsWith("/load"))
@@ -485,8 +509,18 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
               JSON.stringify({
                 outcome: "ok",
                 serverRef: "9d92f397",
-                changes: [],
-                netNodeCount: 0,
+                from_commit_id: "cmt-100",
+                to_commit_id: "cmt-200",
+                changes: [
+                  {
+                    id: "EffectFn:Sample.greet",
+                    kind: "node",
+                    op: "insert",
+                    type: { id: "t-fn", name: "EffectFn" },
+                    after: { properties: { spanName: "Sample.greet" } },
+                  },
+                ],
+                netNodeCount: 1,
                 netEdgeCount: 0,
               }),
               {
@@ -512,33 +546,59 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
         name: "resolve_effect_fn",
         params: { spanOrQualname: "Sample.greet" },
         fetch: mockFetch,
-      }).pipe(Effect.provide(OmnigraphSync.Live))
+      }).pipe(Effect.provide(OmnigraphSyncLive))
 
       expect(invokeRes.source).toBe("omnigraph")
+      expect(invokeRes.degraded).toBe(false)
       expect(invokeRes.rows).toHaveLength(1)
       expect(invokeRes.rows[0]?.spanName).toBe("Sample.greet")
 
       const queryRes = yield* queryOmnigraph({
         query: "query count_nodes { match { $n } return { count: count($n) } }",
         fetch: mockFetch,
-      }).pipe(Effect.provide(OmnigraphSync.Live))
+      }).pipe(Effect.provide(OmnigraphSyncLive))
 
-      expect(Option.isSome(queryRes)).toBe(true)
-      if (Option.isSome(queryRes)) {
-        expect(queryRes.value).toHaveLength(1)
-        expect(queryRes.value[0]?.count).toBe(42)
-      }
+      expect(queryRes).toHaveLength(1)
+      expect(queryRes[0]?.count).toBe(42)
 
       const diffRes = yield* diffOmnigraphBranches({
         source: "impl/current",
         target: "plan/current",
         fetch: mockFetch,
-      }).pipe(Effect.provide(OmnigraphSync.Live))
+      }).pipe(Effect.provide(OmnigraphSyncLive))
 
-      expect(Option.isSome(diffRes)).toBe(true)
-      if (Option.isSome(diffRes)) {
-        expect(Array.isArray(diffRes.value.changes)).toBe(true)
-      }
+      expect(diffRes.changes).toHaveLength(1)
+      expect(diffRes.changes[0]).toMatchObject({
+        id: "EffectFn:Sample.greet",
+        kind: "node",
+        op: "insert",
+        type: { id: "t-fn", name: "EffectFn" },
+      })
+
+      const failFetch: FetchLike = () =>
+        Promise.resolve(
+          new Response("Service Unavailable", {
+            status: 503,
+            headers: { "Omnigraph-Http-Api": "0.14" },
+          }),
+        )
+
+      const queryErr = yield* Effect.flip(
+        queryOmnigraph({
+          query: "query count_nodes { match { $n } return { count: count($n) } }",
+          fetch: failFetch,
+        }).pipe(Effect.provide(OmnigraphSyncLive)),
+      )
+      expect(queryErr).toBeInstanceOf(OmnigraphLoadError)
+
+      const diffErr = yield* Effect.flip(
+        diffOmnigraphBranches({
+          source: "impl/current",
+          target: "plan/current",
+          fetch: failFetch,
+        }).pipe(Effect.provide(OmnigraphSyncLive)),
+      )
+      expect(diffErr).toBeInstanceOf(OmnigraphLoadError)
     }),
   )
 
@@ -560,8 +620,8 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
         JSON.stringify({ baseUrl: "http://127.0.0.1:24442", canonicalRepoRoot: repoB }),
       )
 
-      const urlA = resolveOmnigraphBaseUrl({ repoRoot: repoA }, {})
-      const urlB = resolveOmnigraphBaseUrl({ repoRoot: repoB }, {})
+      const urlA = resolveOmnigraphBaseUrl({ repoRoot: repoA }, {}, testHostIo)
+      const urlB = resolveOmnigraphBaseUrl({ repoRoot: repoB }, {}, testHostIo)
 
       expect(urlA).toBe("http://127.0.0.1:19991")
       expect(urlB).toBe("http://127.0.0.1:24442")
@@ -570,7 +630,7 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
       // When server.json does not exist, port is derived deterministically from repoRoot
       const repoC = fs.mkdtempSync(path.join(tmpdir(), "og-repo-c-"))
       try {
-        const urlC = resolveOmnigraphBaseUrl({ repoRoot: repoC }, {})
+        const urlC = resolveOmnigraphBaseUrl({ repoRoot: repoC }, {}, testHostIo)
         expect(urlC).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
         expect(urlC).not.toBe(urlA)
         expect(urlC).not.toBe(urlB)
@@ -595,7 +655,7 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
           const commitSha = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
           fs.writeFileSync(path.join(gitDir, "my-pr"), `${commitSha}\n`)
 
-          const taskBranches = resolveOmnigraphTaskBranches(repoDir, {})
+          const taskBranches = resolveOmnigraphTaskBranches(repoDir, testHostIo, {})
           expect(taskBranches).toEqual({
             planBranch: "plan/branch-feat_my-pr",
             implBranch: "impl/branch-feat_my-pr",
@@ -714,23 +774,22 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
             from: taskBranches.mainBranch,
             snapshotPath,
             fetch: mockFetch,
-          }).pipe(Effect.provide(OmnigraphSync.Live))
+          }).pipe(Effect.provide(OmnigraphSyncLive))
 
           expect(syncRes.syncedToOmnigraph).toBe(true)
-          const headMeta = readGraphHeadMeta(repoDir)
+          const headMeta = readGraphHeadMeta(repoDir, testHostIo)
           expect(headMeta?.headSha).toBe(commitSha)
           expect(headMeta?.gitBranch).toBe("feat/my-pr")
 
           recorded.length = 0
-          const merged = yield* mergeOmnigraphBranch({
+          yield* mergeOmnigraphBranch({
             repoRoot: repoDir,
             source: taskBranches.implBranch,
             target: taskBranches.mainBranch,
             cleanupBranches: [taskBranches.implBranch, taskBranches.planBranch],
             fetch: mockFetch,
-          }).pipe(Effect.provide(OmnigraphSync.Live))
+          }).pipe(Effect.provide(OmnigraphSyncLive))
 
-          expect(merged).toBe(true)
           const deleteRequests = recorded.filter((r) => r.method === "DELETE")
           expect(deleteRequests).toHaveLength(2)
           expect(deleteRequests[0]?.url).toContain("impl%2Fbranch-feat_my-pr")
@@ -772,7 +831,7 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
             from: "main",
             snapshotPath,
             fetch: mockFetch,
-          }).pipe(Effect.provide(OmnigraphSync.Live))
+          }).pipe(Effect.provide(OmnigraphSyncLive))
 
           expect(res.syncedToOmnigraph).toBe(false)
           expect(res.error).toBeDefined()
@@ -785,10 +844,10 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
   )
 
   it.effect(
-    "F-15: mergeOmnigraphBranch falls back to loading .harness/graph-snapshot.json when /branches/merge returns HTTP 500, and returns false when fallback snapshot is missing or corrupt",
+    "F-1.1: mergeOmnigraphBranch fails with OmnigraphLoadError when /branches/merge returns HTTP 500 even if .harness/graph-snapshot.json exists",
     () =>
       Effect.gen(function* () {
-        const repoDir = fs.mkdtempSync(path.join(tmpdir(), "og-merge-fallback-"))
+        const repoDir = fs.mkdtempSync(path.join(tmpdir(), "og-merge-fail-"))
         try {
           const harnessDir = path.join(repoDir, ".harness")
           fs.mkdirSync(harnessDir, { recursive: true })
@@ -864,37 +923,33 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
             )
           }
 
-          // Case A: Missing fallback snapshot -> returns false
-          const mergedMissing = yield* mergeOmnigraphBranch({
-            repoRoot: repoDir,
-            source: "impl/current",
-            target: "main",
-            fetch: mockFetchWithMergeFail,
-          }).pipe(Effect.provide(OmnigraphSync.Live))
-          expect(mergedMissing).toBe(false)
+          // Even when a valid .harness/graph-snapshot.json exists on disk, merge MUST fail with OmnigraphLoadError and NEVER call /load
+          saveGraphSnapshot(sampleGraph, snapshotPath, testHostIo)
+          const exit = yield* Effect.exit(
+            mergeOmnigraphBranch({
+              repoRoot: repoDir,
+              source: "impl/current",
+              target: "main",
+              fetch: mockFetchWithMergeFail,
+            }).pipe(Effect.provide(OmnigraphSyncLive)),
+          )
+          match(exit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              const errOpt = Cause.findErrorOption(cause)
+              match(errOpt)
+                .with({ _tag: "Some" }, ({ value }) => {
+                  expect(value).toBeInstanceOf(OmnigraphLoadError)
+                })
+                .with({ _tag: "None" }, () => {
+                  expect.unreachable("Expected OmnigraphLoadError")
+                })
+                .exhaustive()
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected mergeOmnigraphBranch to fail")
+            })
+            .exhaustive()
           expect(loadCalledOnFallback).toBe(false)
-
-          // Case B: Corrupt fallback snapshot -> returns false
-          fs.writeFileSync(snapshotPath, "{ corrupted json: 123", "utf8")
-          const mergedCorrupt = yield* mergeOmnigraphBranch({
-            repoRoot: repoDir,
-            source: "impl/current",
-            target: "main",
-            fetch: mockFetchWithMergeFail,
-          }).pipe(Effect.provide(OmnigraphSync.Live))
-          expect(mergedCorrupt).toBe(false)
-          expect(loadCalledOnFallback).toBe(false)
-
-          // Case C: Valid fallback snapshot exists -> succeeds via /load and returns true
-          saveGraphSnapshot(sampleGraph, snapshotPath)
-          const mergedSuccess = yield* mergeOmnigraphBranch({
-            repoRoot: repoDir,
-            source: "impl/current",
-            target: "main",
-            fetch: mockFetchWithMergeFail,
-          }).pipe(Effect.provide(OmnigraphSync.Live))
-          expect(mergedSuccess).toBe(true)
-          expect(loadCalledOnFallback).toBe(true)
         } finally {
           fs.rmSync(repoDir, { recursive: true, force: true })
         }
@@ -1275,38 +1330,211 @@ describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
         `# pack-refs with: peeled fully-peeled sorted\n${packedSha} refs/heads/release/v1\n`,
       )
 
-      const mainHead = resolveGitHeadState(repoDir, {})
+      const mainHead = resolveGitHeadState(repoDir, testHostIo, {})
       expect(mainHead).toEqual({
         headSha: mainSha,
         gitBranch: "main",
       })
-      expect(resolveOmnigraphTaskBranches(repoDir, {})).toEqual({
+      expect(resolveOmnigraphTaskBranches(repoDir, testHostIo, {})).toEqual({
         planBranch: "plan/current",
         implBranch: "impl/current",
         mainBranch: "main",
       })
 
       fs.writeFileSync(path.join(repoDir, ".git", "HEAD"), "ref: refs/heads/release/v1\n")
-      const packedHead = resolveGitHeadState(repoDir, {})
+      const packedHead = resolveGitHeadState(repoDir, testHostIo, {})
       expect(packedHead).toEqual({
         headSha: packedSha,
         gitBranch: "release/v1",
       })
-      expect(resolveOmnigraphTaskBranches(repoDir, {})).toEqual({
+      expect(resolveOmnigraphTaskBranches(repoDir, testHostIo, {})).toEqual({
         planBranch: "plan/branch-release_v1",
         implBranch: "impl/branch-release_v1",
         mainBranch: "main",
       })
 
-      writeGraphHeadMeta(repoDir, {
+      writeGraphHeadMeta(repoDir, testHostIo, {
         headSha: packedSha,
         gitBranch: "release/v1",
       })
-      const persisted = readGraphHeadMeta(repoDir)
+      const persisted = readGraphHeadMeta(repoDir, testHostIo)
       expect(persisted?.headSha).toBe(packedSha)
       expect(persisted?.gitBranch).toBe("release/v1")
     } finally {
       fs.rmSync(repoDir, { recursive: true, force: true })
     }
   })
+
+  it("serves embedded schema.pg and queries/harness.gq assets verbatim", () => {
+    const graphPkgDir = path.resolve(import.meta.dirname, "..")
+    expect(loadHarnessPgSchemaText()).toBe(
+      fs.readFileSync(path.resolve(graphPkgDir, "schema.pg"), "utf8"),
+    )
+    expect(loadHarnessGqQueriesText()).toBe(
+      fs.readFileSync(path.resolve(graphPkgDir, "queries/harness.gq"), "utf8"),
+    )
+  })
+
+  it.effect(
+    "S-2: invokeOmnigraphNamedQuery includes both primary queries.invoke and fallback query failure reasons in fallbackError",
+    () =>
+      Effect.gen(function* () {
+        const dualFailFetch: FetchLike = (input) => {
+          const urlStr = toUrlString(input)
+          if (urlStr.endsWith("/healthz")) {
+            return Promise.resolve(
+              new Response(null, {
+                status: 200,
+                headers: { "Omnigraph-Http-Api": "0.14" },
+              }),
+            )
+          }
+          if (urlStr.includes("/queries/")) {
+            return Promise.resolve(
+              new Response("primary-invoke-not-found", {
+                status: 404,
+                headers: {
+                  "Content-Type": "text/plain",
+                  "Omnigraph-Http-Api": "0.14",
+                },
+              }),
+            )
+          }
+          if (urlStr.endsWith("/query")) {
+            return Promise.resolve(
+              new Response("fallback-query-unavailable", {
+                status: 503,
+                headers: {
+                  "Content-Type": "text/plain",
+                  "Omnigraph-Http-Api": "0.14",
+                },
+              }),
+            )
+          }
+          return Promise.resolve(
+            new Response("Not Found", {
+              status: 404,
+              headers: { "Omnigraph-Http-Api": "0.14" },
+            }),
+          )
+        }
+
+        const res = yield* invokeOmnigraphNamedQuery({
+          name: "resolve_effect_fn",
+          params: { spanOrQualname: "Sample.greet" },
+          fallbackGraph: buildHarnessGraph({
+            fns: [
+              {
+                qualname: "libs/sample/domain/src/index.ts#greet",
+                spanName: "Sample.greet",
+                file: "libs/sample/domain/src/index.ts",
+                line: 4,
+                packageTag: "domain",
+                successType: "string",
+                isStub: false,
+              },
+            ],
+          }),
+          fetch: dualFailFetch,
+        }).pipe(Effect.provide(OmnigraphSyncLive))
+
+        if (!res.degraded) {
+          expect.unreachable("expected degraded memory-fallback result")
+        }
+        expect(res.source).toBe("memory-fallback")
+        expect(res.fallbackError).toContain("HTTP 404")
+        expect(res.fallbackError).toContain("HTTP 503")
+
+        const noFallbackErr = yield* Effect.flip(
+          invokeOmnigraphNamedQuery({
+            name: "resolve_effect_fn",
+            params: { spanOrQualname: "Sample.greet" },
+            fetch: dualFailFetch,
+          }).pipe(Effect.provide(OmnigraphSyncLive)),
+        )
+        expect(noFallbackErr).toBeInstanceOf(OmnigraphLoadError)
+        const noFallbackMsg =
+          noFallbackErr.cause instanceof Error
+            ? noFallbackErr.cause.message
+            : String(noFallbackErr.cause)
+        expect(noFallbackMsg).toContain("HTTP 404")
+        expect(noFallbackMsg).toContain("HTTP 503")
+      }),
+  )
+
+  it.effect(
+    "S-8e: mergeOmnigraphBranch logs a warning when cleanup branch delete fails without masking merge success",
+    () =>
+      Effect.gen(function* () {
+        const warnings: Array<string> = []
+        const captureWarningLogger = Logger.make((opts) => {
+          if (opts.logLevel === "Warn") {
+            warnings.push(String(opts.message))
+          }
+        })
+
+        const cleanupFailFetch: FetchLike = (input, init) => {
+          const urlStr = toUrlString(input)
+          const method = init?.method ?? "GET"
+          if (urlStr.endsWith("/healthz")) {
+            return Promise.resolve(
+              new Response(null, {
+                status: 200,
+                headers: { "Omnigraph-Http-Api": "0.14" },
+              }),
+            )
+          }
+          if (method === "GET" && urlStr.endsWith("/graphs/harness/branches")) {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  outcome: "ok",
+                  branches: ["main", "impl/current", "plan/stale"],
+                  serverRef: "9d92f397",
+                }),
+                { status: 200, headers: { "Content-Type": "application/json", "Omnigraph-Http-Api": "0.14" } },
+              ),
+            )
+          }
+          if (method === "POST" && urlStr.endsWith("/graphs/harness/branches/merge")) {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  outcome: "already_up_to_date",
+                  source: "impl/current",
+                  target: "main",
+                  commit: null,
+                  serverRef: "9d92f397",
+                }),
+                { status: 200, headers: { "Content-Type": "application/json", "Omnigraph-Http-Api": "0.14" } },
+              ),
+            )
+          }
+          if (method === "DELETE" && urlStr.includes("/graphs/harness/branches/")) {
+            return Promise.resolve(
+              new Response("cleanup-delete-denied", {
+                status: 500,
+                headers: { "Content-Type": "text/plain", "Omnigraph-Http-Api": "0.14" },
+              }),
+            )
+          }
+          return Promise.resolve(
+            new Response("Not Found", { status: 404, headers: { "Omnigraph-Http-Api": "0.14" } }),
+          )
+        }
+
+        yield* mergeOmnigraphBranch({
+          source: "impl/current",
+          target: "main",
+          cleanupBranches: ["plan/stale"],
+          fetch: cleanupFailFetch,
+        }).pipe(
+          Effect.provide(Layer.mergeAll(OmnigraphSyncLive, Logger.layer([captureWarningLogger]))),
+        )
+
+        expect(warnings).toHaveLength(1)
+        expect(warnings[0]).toContain("plan/stale")
+        expect(warnings[0]).toContain("HTTP 500")
+      }),
+  )
 })

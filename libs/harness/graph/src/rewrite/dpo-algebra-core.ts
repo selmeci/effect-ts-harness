@@ -170,9 +170,9 @@ export const computeGraphMeasure = (
   // Also count proposed EARS specs that have no realizing TraceabilityTuple edge yet
   const realizedSpecKeys = new Set<string>()
   for (const [, edge] of Graph.edges(graph.graph)) {
-    if (edge.data.role === "specifying-ears" || edge.data.role === "specifying-spec") {
-      realizedSpecKeys.add(edge.data.entityKey)
-    }
+    match<string>(edge.data.role)
+      .with("specifying-ears", "specifying-spec", () => { realizedSpecKeys.add(edge.data.entityKey) })
+      .otherwise(() => {})
   }
   for (const [, node] of Graph.nodes(graph.graph)) {
     match(node)
@@ -189,13 +189,16 @@ export const computeGraphMeasure = (
         }
       })
       .with({ _tag: "EarsSpec" }, (n) => {
-        if (n.status === "proposed") {
-          const specKey = getNodeKey(n)
-          if (!realizedSpecKeys.has(specKey)) {
-            const declaredCount = (n.referencedSpans?.length ?? 0) + (n.referencedServices?.length ?? 0) + (n.referencedErrors?.length ?? 0)
-            if (declaredCount === 0) unmappedSpecSymbols += 1
-          }
-        }
+        match(n.status)
+          .with("proposed", () => {
+            const specKey = getNodeKey(n)
+            if (!realizedSpecKeys.has(specKey)) {
+              const declaredCount = (n.referencedSpans?.length ?? 0) + (n.referencedServices?.length ?? 0) + (n.referencedErrors?.length ?? 0)
+              if (declaredCount === 0) unmappedSpecSymbols += 1
+            }
+          })
+          .with("accepted", "superseded", "deprecated", () => undefined)
+          .exhaustive()
       })
       .with(
         { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" },
@@ -537,11 +540,11 @@ export const indexHarnessGraph = (graph: HarnessGraph): IndexedHarnessGraph => {
     }
     entList.push(data)
 
-    if (data.role === "caller") sigIdByCallerKey.set(data.entityKey, data.relationId)
-    if (data.role === "specifying-ears" || data.role === "specifying-spec") traceIdBySpecKey.set(data.entityKey, data.relationId)
-    if (data.role === "realizing-symbol" || data.role === "specified-target" || data.role === "exercised-span") {
-      traceIdByTargetKey.set(data.entityKey, data.relationId)
-    }
+    match<string>(data.role)
+      .with("caller", () => { sigIdByCallerKey.set(data.entityKey, data.relationId) })
+      .with("specifying-ears", "specifying-spec", () => { traceIdBySpecKey.set(data.entityKey, data.relationId) })
+      .with("realizing-symbol", "specified-target", "exercised-span", () => { traceIdByTargetKey.set(data.entityKey, data.relationId) })
+      .otherwise(() => {})
   }
 
   return {
@@ -593,8 +596,8 @@ export const findErrorByTag = (
 export const hasLayerProviderForService = (ctx: IndexedHarnessGraph, serviceKey: string): boolean => {
   for (const [relId] of ctx.layerRelationsById.entries()) {
     const edges = ctx.edgesByRelId.get(relId) ?? []
-    const hasProvider = edges.some((e) => e.role === "provider-layer")
-    const providesSvc = edges.some((e) => e.role === "provided-service" && e.entityKey === serviceKey)
+    const hasProvider = edges.some((e) => match<string>(e.role).with("provider-layer", () => true).otherwise(() => false))
+    const providesSvc = edges.some((e) => e.entityKey === serviceKey && match<string>(e.role).with("provided-service", () => true).otherwise(() => false))
     if (hasProvider && providesSvc) return true
   }
   return false

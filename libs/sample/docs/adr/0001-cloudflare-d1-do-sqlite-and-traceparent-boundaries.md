@@ -34,7 +34,7 @@ Our serverless architecture runs on the Cloudflare Workers edge runtime with dis
 
 - **Option 1:** Dual Persistence (D1 Read Projections + DO Synchronous SQLite State) with W3C Traceparent Propagation.
 - **Option 2:** Using D1 for High-Contention Per-Aggregate/Counter Mutations.
-- **Option 3:** Running Async Operations Inside DO `transactionSync` or Mutating `Ref` Before Commit.
+- **Option 3:** Running Async Operations Inside DO Synchronous `MixedScheduler("sync")` Boundaries or Mutating `Ref` Before Commit.
 - **Option 4:** Leaking Drizzle Table Types Outside `type:infra`.
 
 ## Decision Outcome
@@ -44,20 +44,20 @@ Our serverless architecture runs on the Cloudflare Workers edge runtime with dis
 We establish the following architectural data and persistence boundaries:
 
 1. **Dual Persistence Model: D1 Read Projections vs. DO SQLite State:**
-   - **Cloudflare D1 for Read Projections:** All high-volume read models, multi-entity queries, and projections are persisted in D1 and accessed through repositories (e.g., `PhotoRepo`) implemented with Drizzle ORM.
-   - **Durable Objects with Co-located SQLite for High-Contention Aggregates:** High-contention aggregates, rate limiters, counters, and quotas (such as `AlbumCounterClient`) must reside inside dedicated Durable Objects backed by co-located synchronous SQLite storage (`ctx.storage.transactionSync`).
+   - **Cloudflare D1 for Read Projections:** All high-volume read models, multi-entity queries, and projections are persisted in D1 and accessed through repositories (e.g., `PhotoRepo` via `PhotoRepoD1Layer`) implemented with native `@effect/sql-d1/D1Client` (`D1Client.layer({ db })` + `SqlClient` from `effect/sql/SqlClient`; `drizzle-orm` and `drizzle-kit` are banned).
+   - **Durable Objects with Co-located SQLite for High-Contention Aggregates:** High-contention aggregates, rate limiters, counters, and quotas (such as `AlbumCounterClient`) must reside inside dedicated Durable Objects backed by co-located SQLite storage via `@effect/sql-sqlite-do/SqliteClient` and `@effect/sql-sqlite-do/SqliteMigrator` (`SqliteMigrator.fromRecord` with numbered `<positive_int>_<lowercase_snake_case>` keys such as `"1_init_album_counters"`).
 
 2. **Synchronous Transaction Discipline in Durable Objects:**
-   - All SQLite writes inside Durable Objects MUST run synchronously via `ctx.storage.transactionSync`.
-   - Asynchronous Effect evaluation, network calls, and schema decoding MUST execute _before_ or _after_ the synchronous SQLite transaction block.
-   - In-memory state (`Ref`) may only be updated _after_ the SQLite transaction has successfully committed to disk, ensuring crash-recovery parity.
+   - Durable Object store and decider operations MUST run synchronously under `Scheduler.MixedScheduler("sync")` at the DO bridge boundary.
+   - Asynchronous Effect evaluation, network calls, and `Schema.decodeUnknownEffect` decoding MUST execute _before_ or _after_ the synchronous `MixedScheduler("sync")` boundary.
+   - In-memory state (`Ref`) may only be updated _after_ the SQLite write has successfully committed to disk, ensuring crash-recovery parity.
 
 3. **W3C Traceparent Header Propagation:**
-   - Every Worker-to-Durable-Object RPC call and inter-service HTTP request must extract the current Effect `FiberRef` trace context and inject the standard `traceparent` (and `tracestate`) header.
-   - The receiving Durable Object RPC handler extracts this header and wraps execution within an Effect span using the propagated parent trace ID, maintaining unbroken distributed traces in `runWithTestTracer` and production APM.
+   - Every Worker-to-Durable-Object RPC call and inter-service HTTP request must inspect `Effect.currentSpan` and inject the standard W3C `traceparent` header (`00-${traceId}-${spanId}-01`).
+   - The receiving Durable Object RPC handler parses this `traceparent` header into a `Tracer.externalSpan` and wraps execution with `Effect.withParentSpan`, maintaining unbroken distributed traces in `runWithTestTracer` and production APM.
 
 4. **Strict Encapsulation in `type:infra`:**
-   - Drizzle schemas (`sqliteTable`), SQL builders, and raw storage drivers are strictly isolated to `type:infra`.
+   - `@effect/sql-*` drivers, SQL queries, and raw storage drivers are strictly isolated to `type:infra` (`drizzle-orm` / `drizzle-kit` are banned).
    - Repositories decode database rows into contract Schemas (`type:contract`) before returning values to `type:domain`. Domain logic never observes raw database types.
 
 ## Rejected Alternatives
@@ -66,9 +66,9 @@ We establish the following architectural data and persistence boundaries:
 
 - **Why rejected:** Attempting to update per-album photo counts or user quotas directly in D1 requires repeated `UPDATE ... SET count = count + 1` queries under high concurrency. This causes lock contention on D1, transaction retries, and high p99 latencies. Durable Objects provide localized single-threaded serialization with sub-millisecond in-memory SQLite performance.
 
-### 2 · Running Async Operations Inside DO `transactionSync` or Mutating `Ref` Before Commit
+### 2 · Running Async Operations Inside DO Synchronous `MixedScheduler("sync")` Boundaries or Mutating `Ref` Before Commit
 
-- **Why rejected:** In Cloudflare Durable Objects, `ctx.storage.transactionSync` prohibits asynchronous promises; attempting to yield asynchronous operations inside a synchronous transaction throws runtime exceptions. Furthermore, mutating an in-memory `Ref` before the SQLite commit finishes causes phantom state: if the Worker crashes before commit, memory will reflect a change that was never committed to durable storage.
+- **Why rejected:** In Cloudflare Durable Objects, synchronous SQLite bridge boundaries prohibit asynchronous yields or microtask pauses between statements; attempting to yield asynchronous operations inside a synchronous transaction aborts or breaks lock guarantees. Furthermore, mutating an in-memory `Ref` before the SQLite commit finishes causes phantom state: if the Worker crashes before commit, memory will reflect a change that was never committed to durable storage.
 
 ### 3 · Leaking Drizzle Table Types Outside `type:infra`
 
@@ -84,12 +84,12 @@ We establish the following architectural data and persistence boundaries:
 
 ### Negative Consequences and Trade-offs
 
-- Requires maintaining two persistence mechanisms: Drizzle migrations for D1 and raw synchronous SQLite tables for Durable Objects.
+- Requires maintaining two persistence mechanisms: committed `.sql` migrations (`pnpm harness check-migrations`) for D1 and `@effect/sql-sqlite-do` `SqliteMigrator` for Durable Objects.
 
 ### Deterministic Enforcement
 
 | Rule                        | Enforced By                            | Gate / Mechanism                     | Governed Symbols                  |
 | --------------------------- | -------------------------------------- | ------------------------------------ | --------------------------------- |
-| D1 Read Projections         | agent-patterns/d1-repository.md        | Drizzle ORM repository in type:infra | `PhotoRepo`                       |
-| DO Synchronous SQLite State | agent-patterns/durable-object-state.md | ctx.storage.transactionSync          | `AlbumCounterClient`              |
+| D1 Read Projections         | agent-patterns/d1-repository.md        | `@effect/sql-d1` repository in type:infra | `PhotoRepo`                       |
+| DO Synchronous SQLite State | agent-patterns/durable-object-state.md | `@effect/sql-sqlite-do` + `SqliteMigrator.fromRecord` + `Scheduler.MixedScheduler("sync")` | `AlbumCounterClient`              |
 | Encapsulation in type:infra | libs/sample/infra/src/index.ts         | Contract schema decoding             | `PhotoRepo`, `AlbumCounterClient` |

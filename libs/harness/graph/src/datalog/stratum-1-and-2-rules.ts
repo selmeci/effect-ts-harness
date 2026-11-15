@@ -13,6 +13,7 @@ import {
   output,
   reduce,
 } from "@electric-sql/d2ts"
+import { match } from "ts-pattern"
 import {
   type DatalogEvaluationContext,
   type ProofRegistrar,
@@ -391,9 +392,23 @@ export const runStratum1And2 = (
   sendBatch(inSpecExpectedErrors, specExpectedErrors)
   sendBatch(inSpecExpectedServices, specExpectedSvcs)
 
-  sendBatch(inAdrExpectedTargets, Array.from(ctx.adrsByKey.entries()).filter(([, n]) => n.status === "accepted").flatMap(([k, n]) =>
-    n.enforcedByFiles.flatMap((file) => Array.from(ctx.fnsByKey.entries()).filter(([, fn]) => fn.file === file || fn.file.endsWith(file)).map(([fnKey]): KeyValue<string, [string, string]> => [`${k}->${fnKey}`, [k, fnKey]]))
-  ))
+  sendBatch(
+    inAdrExpectedTargets,
+    Array.from(ctx.adrsByKey.entries())
+      .filter(([, n]) =>
+        match(n.status)
+          .with("accepted", () => true)
+          .with("proposed", "deprecated", "superseded", () => false)
+          .exhaustive(),
+      )
+      .flatMap(([k, n]) =>
+        n.enforcedByFiles.flatMap((file) =>
+          Array.from(ctx.fnsByKey.entries())
+            .filter(([, fn]) => fn.file === file || fn.file.endsWith(file))
+            .map(([fnKey]): KeyValue<string, [string, string]> => [`${k}->${fnKey}`, [k, fnKey]]),
+        ),
+      ),
+  )
   sendBatch(inExistingTraceAdrs, Array.from(ctx.existingTraceGoverningAdrs).map((k): KeyValue<string, string> => [k, k]))
 
   d2.run()

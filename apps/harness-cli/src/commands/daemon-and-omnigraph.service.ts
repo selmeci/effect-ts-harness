@@ -1,22 +1,30 @@
-import { execFileSync, spawn } from "node:child_process"
-import { existsSync } from "node:fs"
-import * as net from "node:net"
 import { join, relative } from "node:path"
-import { Effect, Layer, Option, Schema } from "effect"
+import { Effect, Layer, Option, Result, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import { match } from "ts-pattern"
+import { ErrorReasonMessage, StdinReadError, type StdinReadErrorKind } from "@harness/contract"
 import {
   appendFrictionEvent,
   appendTelemetryEvent,
-  collectModularPluginFiles,
+  collectWorkspaceTsFiles,
   type FrictionEventKind,
+  type GcFinding,
   type GovernanceDocReference,
-  resolveCanonicalRepoRoot,
   type TelemetryCategory,
   type TelemetryEngineSource,
   type TelemetryOutcome,
   type TelemetrySurface,
 } from "@harness/gates"
-import type { HarnessGraph } from "@harness/graph"
+import { type HarnessGraph, resolveCanonicalRepoRoot } from "@harness/graph"
+import {
+  LocalDecisionModel,
+  nodeSyncHostIo,
+  queryUnixSocketLineDetailed,
+} from "@harness/infra"
+import type { CliResult, HookStdinTracker } from "./hook-format.js"
+export type { CliResult } from "./hook-format.js"
+
+type SyncHostIo = typeof nodeSyncHostIo
 import {
   buildOmnigraphClusterKillArgs,
   CLI_REPO_ROOT,
@@ -45,11 +53,16 @@ export const COMMANDS = [
   "gc",
   "mutate",
   "bench",
+  "benchmark",
   "ingest",
   "session",
   "doctor",
   "ontology",
   "report",
+  "check-openapi",
+  "check-migrations",
+  "check-event-schemas",
+  "scenario",
   "help",
 ] as const
 
@@ -60,6 +73,7 @@ export const isCommand = (value: string): value is Command =>
 
 export interface CliEnv {
   readonly repoRoot?: string | undefined
+  readonly cwd?: string | undefined
   readonly stdin?: string | undefined
   readonly decisionLayer?: Layer.Layer<DecisionModel.DecisionModel> | undefined
   readonly planGraph?: HarnessGraph | undefined
@@ -72,18 +86,139 @@ export interface CliEnv {
       }>
     | undefined
   readonly skipSubprocessVerify?: boolean | undefined
+  readonly skipBackgroundDaemons?: boolean | undefined
+  readonly skipAutoSessionReport?: boolean | undefined
+  readonly stdinTimeoutMs?: number | undefined
+  readonly stdinMaxBytes?: number | undefined
   readonly governanceDocs?: ReadonlyArray<GovernanceDocReference> | undefined
+  readonly hookStdinTracker?: HookStdinTracker | undefined
 }
 
-export interface CliResult {
-  readonly exitCode: number
-  readonly stdout: string
-  readonly stderr: string
-  readonly telemetryDetail?: string | undefined
-}
+export const resolveDecisionModelLayer = (
+  maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>,
+): Effect.Effect<Layer.Layer<DecisionModel.DecisionModel>> =>
+  Effect.gen(function* () {
+    if (maybeDecisionLayer !== undefined) {
+      return maybeDecisionLayer
+    }
+    const existing = yield* Effect.serviceOption(DecisionModel.DecisionModel)
+    return match(existing)
+      .with({ _tag: "Some" }, ({ value }) => Layer.succeed(DecisionModel.DecisionModel, value))
+      .with({ _tag: "None" }, () => LocalDecisionModel)
+      .exhaustive()
+  })
+
+export const resolveCommandTelemetryOutcome = (
+  command: string,
+  res: CliResult,
+): TelemetryOutcome =>
+  match(command)
+    .with("guard", () => {
+      if (res.exitCode !== 0 || res.stdout.includes('"decision":"deny"')) {
+        return "deny" as const
+      }
+      if (
+        res.stdout.includes('"decision":"ask"') ||
+        res.stdout.includes('"permissionDecision":"ask"')
+      ) {
+        return "ask" as const
+      }
+      return "ok" as const
+    })
+    .with("done", () =>
+      res.exitCode !== 0 ||
+      res.stdout.includes('"decision":"continue"') ||
+      res.stdout.includes('"decision":"block"')
+        ? ("fail" as const)
+        : ("ok" as const),
+    )
+    .with("route", () => {
+      if (res.telemetryDetail?.includes("source=degraded-fallback")) {
+        return "fallback" as const
+      }
+      if (res.telemetryDetail === undefined && res.stdout === "review") {
+        return "fallback" as const
+      }
+      return "ok" as const
+    })
+    .otherwise(() => (res.exitCode === 0 ? ("ok" as const) : ("fail" as const)))
+
+const DEFAULT_STDIN_TIMEOUT_MS = 4000
+const DEFAULT_STDIN_MAX_BYTES = 2 * 1024 * 1024
+
+export const makeReadStdinEffect = Effect.fn("HarnessCli.readStdin")(function* (stdinOptions?: {
+  readonly timeoutMs?: number | undefined
+  readonly maxBytes?: number | undefined
+}): Effect.fn.Return<string, StdinReadError> {
+  if (process.stdin.isTTY === true) {
+    return ""
+  }
+  const timeoutMs = stdinOptions?.timeoutMs ?? DEFAULT_STDIN_TIMEOUT_MS
+  const maxBytes = stdinOptions?.maxBytes ?? DEFAULT_STDIN_MAX_BYTES
+  return yield* Effect.callback<string, StdinReadError>((resume) => {
+    const chunks: Array<Buffer> = []
+    let totalBytes = 0
+    let settled = false
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined = undefined
+    const cleanup = () => {
+      if (timeoutTimer !== undefined) {
+        clearTimeout(timeoutTimer)
+        timeoutTimer = undefined
+      }
+      process.stdin.off("data", onData)
+      process.stdin.off("end", onEnd)
+      process.stdin.off("error", onError)
+      process.stdin.pause()
+    }
+    const succeed = (value: string) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resume(Effect.succeed(value))
+    }
+    const fail = (reason: string, reasonKind: StdinReadErrorKind) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resume(
+        Effect.fail(
+          new StdinReadError({
+            reason: ErrorReasonMessage.make(reason.trim() || "stdin read error"),
+            reasonKind,
+          }),
+        ),
+      )
+    }
+    const onData = (c: Buffer | string) => {
+      const buf = Buffer.isBuffer(c) ? c : Buffer.from(String(c))
+      totalBytes += buf.byteLength
+      if (totalBytes > maxBytes) {
+        fail(`Stdin payload exceeded maximum size of ${maxBytes} bytes`, "MaxBytesExceeded")
+        return
+      }
+      chunks.push(buf)
+    }
+    const onEnd = () => {
+      succeed(Buffer.concat(chunks).toString("utf8"))
+    }
+    const onError = (err: unknown) => {
+      fail(`Stdin stream error: ${err instanceof Error ? err.message : String(err)}`, "ReadFailed")
+    }
+    timeoutTimer = setTimeout(() => {
+      fail(`Timed out reading stdin after ${timeoutMs}ms`, "Timeout")
+    }, timeoutMs)
+    process.stdin.on("data", onData)
+    process.stdin.once("end", onEnd)
+    process.stdin.once("error", onError)
+    process.stdin.resume()
+    return Effect.sync(cleanup)
+  })
+})
+
+export const readStdinEffect: Effect.Effect<string, StdinReadError> = makeReadStdinEffect()
 
 export const isIsolatedExternalWorkspace = (repoRoot: string): boolean => {
-  if (existsSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"))) {
+  if (nodeSyncHostIo.existsSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"))) {
     return false
   }
   const explicitEnvUrl =
@@ -91,7 +226,10 @@ export const isIsolatedExternalWorkspace = (repoRoot: string): boolean => {
   if (explicitEnvUrl) {
     return false
   }
-  return resolveCanonicalRepoRoot(repoRoot) !== resolveCanonicalRepoRoot(CLI_REPO_ROOT)
+  return (
+    resolveCanonicalRepoRoot(repoRoot, nodeSyncHostIo) !==
+    resolveCanonicalRepoRoot(CLI_REPO_ROOT, nodeSyncHostIo)
+  )
 }
 
 export const recordFriction = (
@@ -102,10 +240,10 @@ export const recordFriction = (
     readonly detail: string
   },
 ): void => {
-  if (options?.repoRoot === undefined && process.env.VITEST !== undefined) {
+  if (options?.repoRoot === undefined && options?.skipBackgroundDaemons === true) {
     return
   }
-  appendFrictionEvent(options?.repoRoot ?? findWorkspaceRoot(), event)
+  appendFrictionEvent(options?.repoRoot ?? findWorkspaceRoot(), event, nodeSyncHostIo)
 }
 
 export const recordTelemetry = (
@@ -120,10 +258,10 @@ export const recordTelemetry = (
     readonly detail?: string | undefined
   },
 ): void => {
-  if (options?.repoRoot === undefined && process.env.VITEST !== undefined) {
+  if (options?.repoRoot === undefined && options?.skipBackgroundDaemons === true) {
     return
   }
-  appendTelemetryEvent(options?.repoRoot ?? findWorkspaceRoot(), event)
+  appendTelemetryEvent(options?.repoRoot ?? findWorkspaceRoot(), event, nodeSyncHostIo)
 }
 
 export const ANSI_REGEX = new RegExp(
@@ -172,14 +310,17 @@ export const formatSubprocessError = (err: unknown): string => {
 }
 
 const hasGitRef = (repoRoot: string, ref: string): boolean =>
-  Effect.runSync(
-    Effect.try({
-      try: () => {
-        execFileSync("git", ["rev-parse", "--verify", ref], { cwd: repoRoot, stdio: "pipe" })
-        return true
-      },
-      catch: () => false,
-    }).pipe(Effect.orElseSucceed(() => false)),
+  Result.getOrElse(
+    Result.try(() => {
+      const res = nodeSyncHostIo.execFileSync("git", ["rev-parse", "--verify", ref], {
+        cwd: repoRoot,
+      })
+      return match(res)
+        .with({ _tag: "Exited" }, ({ exitCode }) => exitCode === 0)
+        .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => false)
+        .exhaustive()
+    }),
+    () => false,
   )
 
 export const resolveNxAffectedArgs = (
@@ -199,74 +340,188 @@ export const resolveNxAffectedArgs = (
   return ["nx", "run-many", "-t", ...targets]
 }
 
+export type TryGitDiffRangeResult =
+  | { readonly _tag: "Ok"; readonly files: ReadonlyArray<string> }
+  | { readonly _tag: "RefMissing" }
+  | { readonly _tag: "GitFailed"; readonly reason: string }
+
+const UNKNOWN_REVISION_RE =
+  /unknown revision|bad revision|ambiguous argument|Needed a single revision|no merge base/i
+
+const collectAllWorkspaceSourceAndTestFiles = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+): ResolveModifiedFilesResult => {
+  const findings: Array<GcFinding> = []
+  const collected: Array<string> = []
+  for (const rootDir of ["libs", "apps"] as const) {
+    const absDir = join(repoRoot, rootDir)
+    if (hostIo.existsSync(absDir)) {
+      for (const absFile of collectWorkspaceTsFiles(absDir, hostIo, findings, repoRoot)) {
+        collected.push(relative(repoRoot, absFile).replace(/\\/g, "/"))
+      }
+    }
+  }
+  if (findings.length > 0) {
+    return {
+      _tag: "GitFailed",
+      reason: findings.map((f) => `[${f.kind}] ${f.location ?? f.nodeId}: ${f.message}`).join("; "),
+    }
+  }
+  return { _tag: "Resolved", files: collected }
+}
+
 export const tryGitDiffRange = (
   repoRoot: string,
   range: string,
-): Option.Option<ReadonlyArray<string>> =>
-  Effect.runSync(
-    Effect.try({
-      try: () =>
-        Option.some(
-          execFileSync("git", ["diff", "--name-only", range], {
-            cwd: repoRoot,
-            stdio: "pipe",
-            encoding: "utf-8",
+  hostIo: SyncHostIo = nodeSyncHostIo,
+): TryGitDiffRangeResult =>
+  Result.getOrElse(
+    Result.try({
+      try: (): TryGitDiffRangeResult => {
+        const res = hostIo.execFileSync("git", ["diff", "--name-only", range], {
+          cwd: repoRoot,
+        })
+        return match(res)
+          .with({ _tag: "Exited" }, ({ exitCode, stdout, stderr }) => {
+            if (exitCode === 0) {
+              return {
+                _tag: "Ok" as const,
+                files: stdout
+                  .split(/\r?\n/)
+                  .map((l) => l.trim())
+                  .filter((l) => l.length > 0),
+              }
+            }
+            if (UNKNOWN_REVISION_RE.test(stderr)) {
+              return { _tag: "RefMissing" as const }
+            }
+            return {
+              _tag: "GitFailed" as const,
+              reason: `git diff ${range} failed (${stderr.trim() || `exit code ${exitCode}`})`,
+            }
           })
-            .split(/\r?\n/)
-            .map((l) => l.trim())
-            .filter((l) => l.length > 0),
-        ),
-      catch: () => Option.none<ReadonlyArray<string>>(),
-    }).pipe(Effect.orElseSucceed(() => Option.none<ReadonlyArray<string>>())),
+          .with({ _tag: "TimedOut" }, () => ({
+            _tag: "GitFailed" as const,
+            reason: `git diff ${range} timed out`,
+          }))
+          .with({ _tag: "Signaled" }, ({ signal }) => ({
+            _tag: "GitFailed" as const,
+            reason: `git diff ${range} killed by signal ${signal}`,
+          }))
+          .with({ _tag: "SpawnFailed" }, ({ spawnError }) => ({
+            _tag: "GitFailed" as const,
+            reason: `git diff ${range} spawn failed: ${spawnError}`,
+          }))
+          .exhaustive()
+      },
+      catch: (err): TryGitDiffRangeResult => ({
+        _tag: "GitFailed",
+        reason: err instanceof Error ? err.message : String(err),
+      }),
+    }),
+    (): TryGitDiffRangeResult => ({
+      _tag: "GitFailed",
+      reason: `git diff ${range} failed unexpectedly`,
+    }),
   )
 
-export const readGitBranchDiffFiles = (repoRoot: string): ReadonlyArray<string> => {
+export const readGitBranchDiffFiles = (
+  repoRoot: string,
+  hostIo: SyncHostIo = nodeSyncHostIo,
+): ResolveModifiedFilesResult => {
+  let sawOkEmpty = false
   for (const range of ["main...HEAD", "origin/main...HEAD", "HEAD~1...HEAD"]) {
-    const opt = tryGitDiffRange(repoRoot, range)
-    if (Option.isSome(opt) && opt.value.length > 0) {
-      return opt.value
+    const res = tryGitDiffRange(repoRoot, range, hostIo)
+    const outcome = match(res)
+      .with({ _tag: "GitFailed" }, (failed) => failed)
+      .with({ _tag: "Ok" }, ({ files }) => {
+        if (files.length > 0) {
+          return { _tag: "Resolved" as const, files }
+        }
+        sawOkEmpty = true
+        return undefined
+      })
+      .with({ _tag: "RefMissing" }, () => undefined)
+      .exhaustive()
+    if (outcome !== undefined) {
+      return outcome
     }
   }
-  if (existsSync(join(repoRoot, "libs", "harness", "gates", "src"))) {
-    process.stderr.write(
-      `[harness:verify] Warning: git branch diff failed or returned empty in ${repoRoot}; falling back to scanning all modular gate files.\n`,
-    )
-    return collectModularPluginFiles(repoRoot).map((abs) =>
-      relative(repoRoot, abs).replace(/\\/g, "/"),
-    )
+  if (sawOkEmpty) {
+    return { _tag: "Resolved", files: [] }
   }
-  return []
+  process.stderr.write(
+    `[harness:verify] Warning: git branch diff refs unavailable in ${repoRoot}; falling back to scanning all workspace .ts/.tsx files.\n`,
+  )
+  return collectAllWorkspaceSourceAndTestFiles(repoRoot, hostIo)
 }
 
-export const resolveModifiedFilesSinceStampOrHead = (repoRoot: string): ReadonlyArray<string> =>
-  Effect.runSync(
-    Effect.try({
-      try: () => {
+export type ResolveModifiedFilesResult =
+  | { readonly _tag: "Resolved"; readonly files: ReadonlyArray<string> }
+  | { readonly _tag: "GitFailed"; readonly reason: string }
+
+export const resolveModifiedFilesSinceStampOrHead = (
+  repoRoot: string,
+  hostIo: SyncHostIo = nodeSyncHostIo,
+): ResolveModifiedFilesResult =>
+  Result.getOrElse(
+    Result.try({
+      try: (): ResolveModifiedFilesResult => {
+        if (!hostIo.existsSync(join(repoRoot, ".git"))) {
+          return collectAllWorkspaceSourceAndTestFiles(repoRoot, hostIo)
+        }
         const files = new Set<string>()
-        const raw = execFileSync("git", ["status", "--porcelain", "-uall"], {
+        const res = hostIo.execFileSync("git", ["status", "--porcelain", "-uall"], {
           cwd: repoRoot,
-          stdio: "pipe",
-          encoding: "utf-8",
         })
-        for (const line of raw.split(/\r?\n/)) {
-          const trimmed = line.trim()
-          if (trimmed.length < 4) continue
-          const relPath = trimmed
-            .slice(2)
-            .trim()
-            .replace(/^.*->\s*/, "")
-            .replace(/^"|"$/g, "")
-          if (relPath.length > 0) {
-            files.add(relPath.replace(/\\/g, "/"))
-          }
+        const statusFailure = match(res)
+          .with({ _tag: "Exited" }, ({ exitCode, stdout, stderr }) => {
+            if (exitCode !== 0) {
+              const detail = stderr.trim() || `exit code ${exitCode}`
+              return `git status failed (${detail})`
+            }
+            for (const line of stdout.split(/\r?\n/)) {
+              const trimmed = line.trim()
+              if (trimmed.length < 4) continue
+              const relPath = trimmed
+                .slice(2)
+                .trim()
+                .replace(/^.*->\s*/, "")
+                .replace(/^"|"$/g, "")
+              if (relPath.length > 0) {
+                files.add(relPath.replace(/\\/g, "/"))
+              }
+            }
+            return undefined
+          })
+          .with({ _tag: "TimedOut" }, () => "git status timed out")
+          .with({ _tag: "Signaled" }, ({ signal }) => `git status killed by signal ${signal}`)
+          .with({ _tag: "SpawnFailed" }, ({ spawnError }) => `git status spawn failed: ${spawnError}`)
+          .exhaustive()
+        if (statusFailure !== undefined) {
+          return { _tag: "GitFailed", reason: statusFailure }
         }
-        for (const diffFile of readGitBranchDiffFiles(repoRoot)) {
-          files.add(diffFile.replace(/\\/g, "/"))
-        }
-        return Array.from(files)
+        const branchDiffResult = readGitBranchDiffFiles(repoRoot, hostIo)
+        return match(branchDiffResult)
+          .with({ _tag: "GitFailed" }, (failed) => failed)
+          .with({ _tag: "Resolved" }, ({ files: diffFiles }) => {
+            for (const diffFile of diffFiles) {
+              files.add(diffFile.replace(/\\/g, "/"))
+            }
+            return { _tag: "Resolved" as const, files: Array.from(files) }
+          })
+          .exhaustive()
       },
-      catch: () => [],
-    }).pipe(Effect.orElseSucceed(() => [])),
+      catch: (err): ResolveModifiedFilesResult => ({
+        _tag: "GitFailed",
+        reason: err instanceof Error ? err.message : String(err),
+      }),
+    }),
+    (): ResolveModifiedFilesResult => ({
+      _tag: "GitFailed",
+      reason: "git status failed unexpectedly",
+    }),
   )
 
 export const isRootConfigOrSharedCoreChange = (modifiedFiles: ReadonlyArray<string>): boolean =>
@@ -289,147 +544,41 @@ export const tryQueryWarmDaemonSocket = (
 ): Effect.Effect<Option.Option<Record<string, unknown>>> =>
   Effect.gen(function* () {
     const socketPath = join(repoRoot, ".harness", "daemon.sock")
-    if (!existsSync(socketPath)) {
+    if (!nodeSyncHostIo.existsSync(socketPath)) {
       return Option.none()
     }
-    return yield* Effect.callback<Option.Option<Record<string, unknown>>>((resume) => {
-      const client = net.createConnection({ path: socketPath })
-      const reqId = `${command}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-      let buffer = ""
-      let settled = false
-      const finish = (opt: Option.Option<Record<string, unknown>>) => {
-        if (!settled) {
-          settled = true
-          clearTimeout(timer)
-          resume(Effect.succeed(opt))
-        }
-      }
-      const timer = setTimeout(() => {
-        client.destroy()
-        finish(Option.none())
-      }, 1500)
-      client.on("connect", () => {
-        client.write(
-          JSON.stringify({
-            id: reqId,
-            command,
-            repoRoot,
-            ...(files !== undefined ? { files } : {}),
-          }) + "\n",
-        )
-      })
-      client.on("data", (chunk) => {
-        buffer += chunk.toString("utf8")
-        if (Buffer.byteLength(buffer, "utf8") > 1_048_576) {
-          client.destroy()
-          finish(Option.none())
-          return
-        }
-        const idx = buffer.indexOf("\n")
-        if (idx !== -1) {
-          const line = buffer.slice(0, idx).trim()
-          client.end()
-          const parsedOpt = Schema.decodeOption(
-            Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
-          )(line)
-          finish(parsedOpt)
-        }
-      })
-      client.once("end", () => {
-        finish(Option.none())
-      })
-      client.once("close", () => {
-        finish(Option.none())
-      })
-      client.on("error", () => {
-        client.destroy()
-        finish(Option.none())
-      })
-      return Effect.sync(() => {
-        clearTimeout(timer)
-        client.destroy()
-      })
+    const reqId = `${command}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const payload = JSON.stringify({
+      id: reqId,
+      command,
+      repoRoot,
+      ...(files !== undefined ? { files } : {}),
     })
-  })
-
-export interface OllamaReadinessOptions {
-  readonly baseUrl?: string | undefined
-  readonly spawnOllama?: (() => void) | undefined
-  readonly maxRetries?: number | undefined
-  readonly retryDelayMs?: number | undefined
-}
-
-export function checkOllamaServerReady(
-  baseUrl: string = process.env.HARNESS_OLLAMA_URL ??
-    process.env.OLLAMA_HOST ??
-    "http://127.0.0.1:11434",
-): Effect.Effect<boolean> {
-  const normalizedUrl = baseUrl.startsWith("http") ? baseUrl : `http://${baseUrl}`
-  return Effect.tryPromise({
-    try: () =>
-      globalThis
-        .fetch(`${normalizedUrl.replace(/\/$/, "")}/api/tags`, {
-          method: "GET",
-          signal: AbortSignal.timeout(2000),
-        })
-        .then((r) => {
-          if (r.status !== 200) {
-            return Promise.resolve(false)
-          }
-          return r.json().then((rawBody: unknown) => {
-            if (typeof rawBody !== "object" || rawBody === null) {
-              return false
-            }
-            const body = rawBody as {
-              readonly models?: ReadonlyArray<{
-                readonly name?: string
-                readonly model?: string
-              }>
-            }
-            if (!Array.isArray(body.models)) {
-              return false
-            }
-            return body.models.some(
-              (m) =>
-                (typeof m.name === "string" && m.name.startsWith("clef-flash")) ||
-                (typeof m.model === "string" && m.model.startsWith("clef-flash")),
+    const socketRes = yield* queryUnixSocketLineDetailed(socketPath, payload, 1500)
+    return match(socketRes)
+      .with({ _tag: "Reply" }, ({ line }) =>
+        Schema.decodeOption(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)))(
+          line,
+        ),
+      )
+      .with({ _tag: "Unavailable" }, ({ reason, detail }) => {
+        match(reason)
+          .with("timeout", "overflow", "socket-error", (unexpectedReason) => {
+            process.stderr.write(
+              `[harness:daemon] Socket query '${command}' failed (${unexpectedReason})${detail ? `: ${detail}` : ""}\n`,
             )
           })
-        })
-        .catch(() => false),
-    catch: () => false,
-  }).pipe(Effect.orElseSucceed(() => false))
-}
-
-export function ensureLocalOllamaReady(opts?: OllamaReadinessOptions): Effect.Effect<boolean> {
-  return Effect.gen(function* () {
-    const customUrl = process.env.HARNESS_OLLAMA_URL
-    const baseUrl =
-      opts?.baseUrl ?? customUrl ?? process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434"
-    if (yield* checkOllamaServerReady(baseUrl)) {
-      return true
-    }
-
-    yield* Effect.try({
-      try: () => {
-        if (opts?.spawnOllama !== undefined) {
-          opts.spawnOllama()
-        } else if (customUrl === undefined) {
-          const child = spawn("ollama", ["serve"], { detached: true, stdio: "ignore" })
-          child.unref()
-        }
-      },
-      catch: () => undefined,
-    }).pipe(Effect.orElseSucceed(() => undefined))
-
-    const maxRetries = opts?.maxRetries ?? (customUrl !== undefined ? 2 : 25)
-    const retryDelayMs = opts?.retryDelayMs ?? (customUrl !== undefined ? 10 : 200)
-    for (let i = 0; i < maxRetries; i++) {
-      yield* Effect.sleep(`${retryDelayMs} millis`)
-      if (yield* checkOllamaServerReady(baseUrl)) {
-        return true
-      }
-    }
-    return false
+          .with("missing-or-refused", "closed", () => undefined)
+          .exhaustive()
+        return Option.none<Record<string, unknown>>()
+      })
+      .exhaustive()
   })
-}
+
+export {
+  checkOllamaServerReady,
+  checkOllamaServerReadyDetailed,
+  ensureLocalOllamaReady,
+  type OllamaProbeResult,
+  type OllamaReadinessOptions,
+} from "./ollama-readiness.js"

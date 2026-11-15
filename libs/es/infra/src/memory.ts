@@ -1,4 +1,4 @@
-import { Context, Deferred, Effect, Exit, Layer, Scope } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer, Ref, Scope, Semaphore } from "effect"
 import { match } from "ts-pattern"
 import { SqlClient } from "effect/sql/SqlClient"
 import * as SqliteClientModule from "@effect/sql-sqlite-do/SqliteClient"
@@ -135,10 +135,21 @@ interface SharedWorkerdBridge {
   readonly callSync: (payload: Record<string, unknown>) => BridgeExecResult
 }
 
-let activeBridge: SharedWorkerdBridge | null = null
-let pendingBridgeDeferred: Deferred.Deferred<SharedWorkerdBridge> | null = null
-let activeRefCount = 0
-let idleCloseTimer: ReturnType<typeof setTimeout> | null = null
+interface SharedBridgeState {
+  readonly activeBridge: SharedWorkerdBridge | null
+  readonly pendingBridgeDeferred: Deferred.Deferred<SharedWorkerdBridge> | null
+  readonly activeRefCount: number
+  readonly idleCloseFiber: Fiber.Fiber<void, never> | null
+}
+
+const sharedBridgeState = Ref.makeUnsafe<SharedBridgeState>({
+  activeBridge: null,
+  pendingBridgeDeferred: null,
+  activeRefCount: 0,
+  idleCloseFiber: null,
+})
+
+const bridgeLock = Semaphore.makeUnsafe(1)
 
 const cleanupBridgeResources = (
   scope: Scope.Closeable,
@@ -162,11 +173,37 @@ const cleanupBridgeResources = (
     ),
   )
 
-const closeSharedBridge = (bridgeToClose: SharedWorkerdBridge): void => {
-  void Effect.runPromise(
-    cleanupBridgeResources(bridgeToClose.scope, bridgeToClose.worker, bridgeToClose.tmpDir),
+const scheduleIdleBridgeClose = (
+  bridgeToClose: SharedWorkerdBridge,
+): Effect.Effect<Fiber.Fiber<void, never>> =>
+  Effect.sleep("50 millis").pipe(
+    Effect.andThen(
+      Effect.gen(function* () {
+        const shouldCleanup = yield* bridgeLock.withPermits(1)(
+          Effect.gen(function* () {
+            const latest = yield* Ref.get(sharedBridgeState)
+            if (latest.activeRefCount === 0 && latest.activeBridge === bridgeToClose) {
+              yield* Ref.set(sharedBridgeState, {
+                ...latest,
+                activeBridge: null,
+                idleCloseFiber: null,
+              })
+              return true
+            }
+            return false
+          }),
+        )
+        if (shouldCleanup) {
+          yield* cleanupBridgeResources(
+            bridgeToClose.scope,
+            bridgeToClose.worker,
+            bridgeToClose.tmpDir,
+          )
+        }
+      }),
+    ),
+    Effect.forkDetach,
   )
-}
 
 const BRIDGE_CALL_TIMEOUT_MS = 30_000
 
@@ -314,73 +351,113 @@ const initSharedWorkerdBridge = (): Effect.Effect<SharedWorkerdBridge> =>
         tmpDir,
         callSync,
       }
-      activeBridge = bridge
       return bridge
     })
 
 const acquireSharedWorkerdBridge = (): Effect.Effect<SharedWorkerdBridge, never, Scope.Scope> =>
   Effect.acquireRelease(
     Effect.gen(function* () {
-      if (idleCloseTimer !== null) {
-        clearTimeout(idleCloseTimer)
-        idleCloseTimer = null
-      }
-      if (activeBridge !== null) {
-        activeRefCount += 1
-        return activeBridge
-      }
-      if (pendingBridgeDeferred !== null) {
-        activeRefCount += 1
-        return yield* Deferred.await(pendingBridgeDeferred).pipe(
-          Effect.onError(() =>
-            Effect.sync(() => {
-              activeRefCount = Math.max(0, activeRefCount - 1)
-            }),
+      const decision = yield* bridgeLock.withPermits(1)(
+        Effect.gen(function* () {
+          let state = yield* Ref.get(sharedBridgeState)
+          if (state.idleCloseFiber !== null) {
+            yield* Fiber.interrupt(state.idleCloseFiber)
+            yield* Ref.update(sharedBridgeState, (s) => ({ ...s, idleCloseFiber: null }))
+            state = yield* Ref.get(sharedBridgeState)
+          }
+          if (state.activeBridge !== null) {
+            yield* Ref.update(sharedBridgeState, (s) => ({
+              ...s,
+              activeRefCount: s.activeRefCount + 1,
+            }))
+            return { _tag: "Ready" as const, bridge: state.activeBridge }
+          }
+          if (state.pendingBridgeDeferred !== null) {
+            const pending = state.pendingBridgeDeferred
+            yield* Ref.update(sharedBridgeState, (s) => ({
+              ...s,
+              activeRefCount: s.activeRefCount + 1,
+            }))
+            return { _tag: "Wait" as const, pending }
+          }
+          const deferred = yield* Deferred.make<SharedWorkerdBridge>()
+          yield* Ref.update(sharedBridgeState, (s) => ({
+            ...s,
+            pendingBridgeDeferred: deferred,
+            activeRefCount: s.activeRefCount + 1,
+          }))
+          return { _tag: "Init" as const, deferred }
+        }),
+      )
+
+      return yield* match(decision)
+        .with({ _tag: "Ready" }, ({ bridge }) => Effect.succeed(bridge))
+        .with({ _tag: "Wait" }, ({ pending }) =>
+          Deferred.await(pending).pipe(
+            Effect.onError(() =>
+              bridgeLock.withPermits(1)(
+                Ref.update(sharedBridgeState, (s) => ({
+                  ...s,
+                  activeRefCount: Math.max(0, s.activeRefCount - 1),
+                })),
+              ),
+            ),
           ),
         )
-      }
-      const deferred = yield* Deferred.make<SharedWorkerdBridge>()
-      pendingBridgeDeferred = deferred
-      activeRefCount += 1
-      return yield* Effect.gen(function* () {
-        const exit = yield* Effect.exit(initSharedWorkerdBridge())
-        return yield* match(exit)
-          .with({ _tag: "Success" }, ({ value }) =>
-            Deferred.succeed(deferred, value).pipe(Effect.as(value)),
-          )
-          .with({ _tag: "Failure" }, ({ cause }) =>
-            Deferred.failCause(deferred, cause).pipe(
-              Effect.andThen(
-                Effect.sync(() => {
-                  activeRefCount = Math.max(0, activeRefCount - 1)
-                }),
-              ),
-              Effect.andThen(Effect.failCause(cause)),
-            ),
-          )
-          .exhaustive()
-      }).pipe(
-        Effect.ensuring(
-          Effect.sync(() => {
-            pendingBridgeDeferred = null
+        .with({ _tag: "Init" }, ({ deferred }) =>
+          Effect.gen(function* () {
+            const exit = yield* Effect.exit(initSharedWorkerdBridge())
+            return yield* match(exit)
+              .with({ _tag: "Success" }, ({ value }) =>
+                bridgeLock
+                  .withPermits(1)(
+                    Ref.update(sharedBridgeState, (s) => ({
+                      ...s,
+                      activeBridge: value,
+                      pendingBridgeDeferred: null,
+                    })),
+                  )
+                  .pipe(Effect.andThen(Deferred.succeed(deferred, value)), Effect.as(value)),
+              )
+              .with({ _tag: "Failure" }, ({ cause }) =>
+                bridgeLock
+                  .withPermits(1)(
+                    Ref.update(sharedBridgeState, (s) => ({
+                      ...s,
+                      activeRefCount: Math.max(0, s.activeRefCount - 1),
+                      pendingBridgeDeferred: null,
+                    })),
+                  )
+                  .pipe(
+                    Effect.andThen(Deferred.failCause(deferred, cause)),
+                    Effect.andThen(Effect.failCause(cause)),
+                  ),
+              )
+              .exhaustive()
           }),
-        ),
-      )
+        )
+        .exhaustive()
     }),
     () =>
-      Effect.sync(() => {
-        activeRefCount = Math.max(0, activeRefCount - 1)
-        if (activeRefCount === 0 && activeBridge !== null) {
-          const bridgeToClose = activeBridge
-          idleCloseTimer = setTimeout(() => {
-            if (activeRefCount === 0 && activeBridge === bridgeToClose) {
-              activeBridge = null
-              idleCloseTimer = null
-              closeSharedBridge(bridgeToClose)
-            }
-          }, 50)
-        }
-      }),
+      bridgeLock.withPermits(1)(
+        Effect.gen(function* () {
+          const current = yield* Ref.get(sharedBridgeState)
+          const nextRefCount = Math.max(0, current.activeRefCount - 1)
+          if (nextRefCount === 0 && current.activeBridge !== null) {
+            const idleFiber = yield* scheduleIdleBridgeClose(current.activeBridge)
+            yield* Ref.set(sharedBridgeState, {
+              ...current,
+              activeRefCount: nextRefCount,
+              idleCloseFiber: idleFiber,
+            })
+          } else {
+            yield* Ref.set(sharedBridgeState, {
+              ...current,
+              activeRefCount: nextRefCount,
+            })
+          }
+        }),
+      ),
   )
 
 const createWorkerdDurableObjectStorage = (
@@ -508,13 +585,11 @@ const createWorkerdDurableObjectStorage = (
   return unsafeCast<DurableObjectStorage>(doStorage)
 }
 
-export const SqlClientMemoryLayer: Layer.Layer<SqlClient> = Layer.effect(
-  SqlClient,
+export const SqlClientMemoryLayer: Layer.Layer<SqlClient> = Layer.unwrap(
   Effect.gen(function* () {
     const bridge = yield* acquireSharedWorkerdBridge()
     const doName = crypto.randomUUID()
     const storage = createWorkerdDurableObjectStorage(bridge, doName)
-    const services = yield* Layer.build(SqliteClientModule.layer({ storage }))
-    return Context.get(services, SqlClient)
+    return SqliteClientModule.layer({ storage })
   }),
 )

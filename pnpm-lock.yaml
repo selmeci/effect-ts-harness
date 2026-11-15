@@ -211,21 +211,45 @@ importers:
 
   apps/harness-cli:
     dependencies:
+      '@effect/platform-node':
+        specifier: 4.0.0
+        version: 4.0.0(effect@4.0.0)(redis@6.3.0)
+      '@harness/contract':
+        specifier: workspace:*
+        version: link:../../libs/harness/contract
       '@harness/decision':
         specifier: workspace:*
         version: link:../../libs/harness/decision
+      '@harness/es-contract':
+        specifier: workspace:*
+        version: link:../../libs/es/contract
+      '@harness/es-core':
+        specifier: workspace:*
+        version: link:../../libs/es/core
       '@harness/gates':
         specifier: workspace:*
         version: link:../../libs/harness/gates
       '@harness/graph':
         specifier: workspace:*
         version: link:../../libs/harness/graph
+      '@harness/infra':
+        specifier: workspace:*
+        version: link:../../libs/harness/infra
       '@harness/ingest':
         specifier: workspace:*
         version: link:../../libs/harness/ingest
+      '@harness/sample-contract':
+        specifier: workspace:*
+        version: link:../../libs/sample/contract
+      '@harness/service':
+        specifier: workspace:*
+        version: link:../../libs/harness/service
       effect:
         specifier: 4.0.0
         version: 4.0.0
+      ts-pattern:
+        specifier: 5.9.2
+        version: 5.9.2
     devDependencies:
       '@effect/vitest':
         specifier: 4.0.0
@@ -239,6 +263,12 @@ importers:
 
   apps/harness-mcp:
     dependencies:
+      '@effect/platform-node':
+        specifier: 4.0.0
+        version: 4.0.0(effect@4.0.0)(redis@6.3.0)
+      '@harness/contract':
+        specifier: workspace:*
+        version: link:../../libs/harness/contract
       '@harness/decision':
         specifier: workspace:*
         version: link:../../libs/harness/decision
@@ -248,15 +278,24 @@ importers:
       '@harness/graph':
         specifier: workspace:*
         version: link:../../libs/harness/graph
+      '@harness/infra':
+        specifier: workspace:*
+        version: link:../../libs/harness/infra
       '@harness/ingest':
         specifier: workspace:*
         version: link:../../libs/harness/ingest
+      '@harness/service':
+        specifier: workspace:*
+        version: link:../../libs/harness/service
       '@modelcontextprotocol/sdk':
         specifier: 1.32.0
         version: 1.32.0(supports-color@7.2.0)(zod@4.6.5)
       effect:
         specifier: 4.0.0
         version: 4.0.0
+      ts-pattern:
+        specifier: 5.9.2
+        version: 5.9.2
     devDependencies:
       '@effect/vitest':
         specifier: 4.0.0
@@ -351,9 +390,9 @@ importers:
       '@effect/vitest':
         specifier: 4.0.0
         version: 4.0.0(effect@4.0.0)(vitest@5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)))
-      '@harness/gates':
+      '@harness/contract':
         specifier: workspace:*
-        version: link:../../harness/gates
+        version: link:../../harness/contract
       '@harness/graph':
         specifier: workspace:*
         version: link:../../harness/graph
@@ -394,9 +433,9 @@ importers:
       '@effect/vitest':
         specifier: 4.0.0
         version: 4.0.0(effect@4.0.0)(vitest@5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)))
-      '@harness/gates':
+      '@harness/contract':
         specifier: workspace:*
-        version: link:../../harness/gates
+        version: link:../../harness/contract
       '@harness/graph':
         specifier: workspace:*
         version: link:../../harness/graph
@@ -407,17 +446,39 @@ importers:
         specifier: 5.0.3
         version: 5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))
 
-  libs/harness/decision:
+  libs/harness/contract:
     dependencies:
-      '@effect/ai-typesafe':
-        specifier: 4.0.0
-        version: 4.0.0(effect@4.0.0)
-      '@harness/gates':
-        specifier: workspace:*
-        version: link:../gates
       effect:
         specifier: 4.0.0
         version: 4.0.0
+    devDependencies:
+      '@types/node':
+        specifier: 26.6.5
+        version: 26.6.5
+      vitest:
+        specifier: 5.0.3
+        version: 5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))
+
+  libs/harness/decision:
+    dependencies:
+      '@harness/contract':
+        specifier: workspace:*
+        version: link:../contract
+      '@harness/gates':
+        specifier: workspace:*
+        version: link:../gates
+      '@harness/graph':
+        specifier: workspace:*
+        version: link:../graph
+      '@harness/service':
+        specifier: workspace:*
+        version: link:../service
+      effect:
+        specifier: 4.0.0
+        version: 4.0.0
+      ts-pattern:
+        specifier: 5.9.2
+        version: 5.9.2
     devDependencies:
       '@effect/vitest':
         specifier: 4.0.0
@@ -431,16 +492,28 @@ importers:
 
   libs/harness/gates:
     dependencies:
+      '@harness/contract':
+        specifier: workspace:*
+        version: link:../contract
       '@harness/graph':
         specifier: workspace:*
         version: link:../graph
+      '@harness/service':
+        specifier: workspace:*
+        version: link:../service
       effect:
         specifier: 4.0.0
         version: 4.0.0
+      ts-pattern:
+        specifier: 5.9.2
+        version: 5.9.2
     devDependencies:
       '@effect/vitest':
         specifier: 4.0.0
         version: 4.0.0(effect@4.0.0)(vitest@5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)))
+      '@harness/ingest':
+        specifier: workspace:*
+        version: link:../ingest
       '@types/node':
         specifier: 26.6.5
         version: 26.6.5
@@ -456,6 +529,12 @@ importers:
       '@electric-sql/d2ts':
         specifier: 0.1.8
         version: 0.1.8
+      '@harness/contract':
+        specifier: workspace:*
+        version: link:../contract
+      '@harness/service':
+        specifier: workspace:*
+        version: link:../service
       '@modernrelay/omnigraph':
         specifier: 0.14.0
         version: 0.14.0
@@ -472,6 +551,46 @@ importers:
       '@effect/vitest':
         specifier: 4.0.0
         version: 4.0.0(effect@4.0.0)(vitest@5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)))
+      '@harness/ingest':
+        specifier: workspace:*
+        version: link:../ingest
+      '@types/node':
+        specifier: 26.6.5
+        version: 26.6.5
+      vitest:
+        specifier: 5.0.3
+        version: 5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))
+
+  libs/harness/infra:
+    dependencies:
+      '@effect/ai-typesafe':
+        specifier: 4.0.0
+        version: 4.0.0(effect@4.0.0)
+      '@effect/platform-node':
+        specifier: 4.0.0
+        version: 4.0.0(effect@4.0.0)(redis@6.3.0)
+      '@harness/contract':
+        specifier: workspace:*
+        version: link:../contract
+      '@harness/graph':
+        specifier: workspace:*
+        version: link:../graph
+      '@harness/service':
+        specifier: workspace:*
+        version: link:../service
+      effect:
+        specifier: 4.0.0
+        version: 4.0.0
+      ts-pattern:
+        specifier: 5.9.2
+        version: 5.9.2
+    devDependencies:
+      '@effect/vitest':
+        specifier: 4.0.0
+        version: 4.0.0(effect@4.0.0)(vitest@5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)))
+      '@harness/decision':
+        specifier: workspace:*
+        version: link:../decision
       '@types/node':
         specifier: 26.6.5
         version: 26.6.5
@@ -484,6 +603,34 @@ importers:
       '@ast-grep/napi':
         specifier: 0.51.0
         version: 0.51.0
+      '@harness/contract':
+        specifier: workspace:*
+        version: link:../contract
+      '@harness/service':
+        specifier: workspace:*
+        version: link:../service
+      effect:
+        specifier: 4.0.0
+        version: 4.0.0
+      ts-pattern:
+        specifier: 5.9.2
+        version: 5.9.2
+    devDependencies:
+      '@effect/vitest':
+        specifier: 4.0.0
+        version: 4.0.0(effect@4.0.0)(vitest@5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)))
+      '@types/node':
+        specifier: 26.6.5
+        version: 26.6.5
+      vitest:
+        specifier: 5.0.3
+        version: 5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))
+
+  libs/harness/service:
+    dependencies:
+      '@harness/contract':
+        specifier: workspace:*
+        version: link:../contract
       effect:
         specifier: 4.0.0
         version: 4.0.0
@@ -532,15 +679,18 @@ importers:
       '@effect/vitest':
         specifier: 4.0.0
         version: 4.0.0(effect@4.0.0)(vitest@5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)))
-      '@harness/gates':
+      '@harness/contract':
         specifier: workspace:*
-        version: link:../../harness/gates
+        version: link:../../harness/contract
       '@harness/graph':
         specifier: workspace:*
         version: link:../../harness/graph
       '@harness/ingest':
         specifier: workspace:*
         version: link:../../harness/ingest
+      '@harness/service':
+        specifier: workspace:*
+        version: link:../../harness/service
       '@types/node':
         specifier: 26.6.5
         version: 26.6.5
@@ -565,9 +715,6 @@ importers:
       '@harness/sample-service':
         specifier: workspace:*
         version: link:../service
-      drizzle-orm:
-        specifier: 1.0.0-rc.5-ab785fc
-        version: 1.0.0-rc.5-ab785fc(@cloudflare/workers-types@5.20261024.1)(@effect/sql-d1@4.0.0(effect@4.0.0))(@effect/sql-sqlite-do@4.0.0(effect@4.0.0))(@electric-sql/pglite@0.3.15)(@libsql/client@0.17.4)(effect@4.0.0)(valibot@1.2.0(typescript@5.9.3))(zod@4.6.5)
       effect:
         specifier: 4.0.0
         version: 4.0.0
@@ -584,18 +731,21 @@ importers:
       '@effect/vitest':
         specifier: 4.0.0
         version: 4.0.0(effect@4.0.0)(vitest@5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0)))
+      '@harness/es-infra':
+        specifier: workspace:*
+        version: link:../../es/infra
       '@harness/graph':
         specifier: workspace:*
         version: link:../../harness/graph
       '@harness/ingest':
         specifier: workspace:*
         version: link:../../harness/ingest
+      '@harness/service':
+        specifier: workspace:*
+        version: link:../../harness/service
       '@types/node':
         specifier: 26.6.5
         version: 26.6.5
-      drizzle-kit:
-        specifier: 1.0.0-rc.5-ab785fc
-        version: 1.0.0-rc.5-ab785fc
       vitest:
         specifier: 5.0.3
         version: 5.0.3(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))
@@ -6035,7 +6185,8 @@ snapshots:
       '@distilled.cloud/core': 1.0.0-rc.13(effect@4.0.0)
       effect: 4.0.0
 
-  '@drizzle-team/brocli@0.12.1': {}
+  '@drizzle-team/brocli@0.12.1':
+    optional: true
 
   '@effect/ai-typesafe@4.0.0(effect@4.0.0)':
     dependencies:
@@ -6494,6 +6645,7 @@ snapshots:
   '@js-temporal/polyfill@0.5.1':
     dependencies:
       jsbi: 4.3.2
+    optional: true
 
   '@keyv/bigmap@1.3.1(keyv@5.6.0)':
     dependencies:
@@ -7696,6 +7848,7 @@ snapshots:
       esbuild: 0.25.12
       get-tsconfig: 4.14.3
       jiti: 2.7.0
+    optional: true
 
   drizzle-orm@1.0.0-rc.5-ab785fc(@cloudflare/workers-types@5.20261024.1)(@effect/sql-d1@4.0.0(effect@4.0.0))(@effect/sql-sqlite-do@4.0.0(effect@4.0.0))(@electric-sql/pglite@0.3.15)(@libsql/client@0.17.4)(effect@4.0.0)(valibot@1.2.0(typescript@5.9.3))(zod@4.6.5):
     optionalDependencies:
@@ -7707,6 +7860,7 @@ snapshots:
       effect: 4.0.0
       valibot: 1.2.0(typescript@5.9.3)
       zod: 4.6.5
+    optional: true
 
   dunder-proto@1.0.1:
     dependencies:
@@ -7781,6 +7935,7 @@ snapshots:
       '@esbuild/win32-arm64': 0.25.12
       '@esbuild/win32-ia32': 0.25.12
       '@esbuild/win32-x64': 0.25.12
+    optional: true
 
   esbuild@0.28.2:
     optionalDependencies:
@@ -8064,6 +8219,7 @@ snapshots:
   get-tsconfig@4.14.3:
     dependencies:
       resolve-pkg-maps: 1.0.0
+    optional: true
 
   glob-parent@6.0.2:
     dependencies:
@@ -8179,7 +8335,8 @@ snapshots:
 
   isexe@2.0.0: {}
 
-  jiti@2.7.0: {}
+  jiti@2.7.0:
+    optional: true
 
   jose@6.2.13: {}
 
@@ -8187,7 +8344,8 @@ snapshots:
 
   js-tokens@4.0.0: {}
 
-  jsbi@4.3.2: {}
+  jsbi@4.3.2:
+    optional: true
 
   jsesc@3.1.0: {}
 
@@ -8758,7 +8916,8 @@ snapshots:
 
   resolve-from@4.0.0: {}
 
-  resolve-pkg-maps@1.0.0: {}
+  resolve-pkg-maps@1.0.0:
+    optional: true
 
   resolve.exports@2.0.3: {}
 

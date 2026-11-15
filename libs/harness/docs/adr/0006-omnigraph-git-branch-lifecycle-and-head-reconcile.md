@@ -6,8 +6,8 @@ date: 2026-10-30
 deciders:
   - "@harness/graph"
   - "@harness/gates"
-  - "@harness/cli"
-  - "@harness/mcp"
+  - "harness-cli"
+  - "harness-mcp"
 enforced_by:
   - libs/harness/graph/src/cluster-resolver.ts
   - libs/harness/graph/src/omnigraph-sync.ts

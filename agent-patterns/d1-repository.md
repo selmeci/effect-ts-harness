@@ -1,66 +1,72 @@
-# D1 Repositories with Drizzle ORM
+# D1 Repositories with Native `@effect/sql-d1`
 
-D1 database repositories use drizzle-orm/effect-d1 on @effect/sql-d1 in type:infra, decoding database rows into contract Schemas.
+D1 database repositories use native Effect v4 SQL (`@effect/sql-d1` + `SqlClient.SqlClient`) in `type:infra`, decoding database rows into `type:contract` `Schema` instances. **`drizzle-orm` and `drizzle-kit` are banned across the workspace.**
 
-## Drizzle ORM on Cloudflare D1
+## Native `@effect/sql-d1` on Cloudflare D1
 
-In this codebase, D1 interactions use `drizzle-orm/effect-d1` (`1.0.0-rc.5-ab785fc`) powered by `@effect/sql-d1`. All table declarations and database queries are strictly confined to `type:infra`.
-
-## Table Definitions in `type:infra`
-
-Define tables using Drizzle's `sqliteTable`:
-
-```ts
-// libs/sample/infra/src/schema/photos.ts
-import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core"
-
-export const photosTable = sqliteTable("photos", {
-  id: text("id").primaryKey(),
-  title: text("title").notNull(),
-  url: text("url").notNull(),
-  viewCount: integer("view_count").notNull().default(0),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
-})
-```
+In this codebase, D1 interactions use `D1Client.layer({ db })` from `@effect/sql-d1/D1Client` and `SqlClient` from `effect/sql/SqlClient`. All SQL queries and driver imports are strictly confined to `type:infra`.
 
 ## Repository Implementation and Schema Decoding
 
-Repositories must decode raw SQL/Drizzle rows into domain contract `Schema` instances. Drizzle types must never escape into `type:domain` or `apps/web`:
+Repositories must use parameterized `sql\`...\`` tagged template queries (never string-interpolated SQL) and decode raw SQL rows into domain contract `Schema` instances. SQL/driver types must never escape into `type:domain` or `apps/sample-web`:
 
 ```ts
-// libs/sample/infra/src/photo-repository.ts
+// libs/sample/infra/src/index.ts
 import { Effect, Layer, Schema } from "effect"
-import { eq } from "drizzle-orm"
-import { drizzle } from "drizzle-orm/effect-d1"
-import { PhotoSchema } from "contract/photos"
-import { PhotoRepo, PhotoNotFoundError } from "service/photo-repository"
-import { photosTable } from "./schema/photos.js"
+import * as D1Client from "@effect/sql-d1/D1Client"
+import { SqlClient } from "effect/sql/SqlClient"
+import {
+  Photo,
+  type PhotoId,
+  PhotoNotFoundError,
+  PhotoStorageError,
+  StorageErrorMessage,
+  StorageOperationName,
+} from "@harness/sample-contract"
+import { PhotoRepo } from "@harness/sample-service"
 
-export const PhotoRepoLive = Layer.effect(
+export type D1DatabaseBinding = D1Client.D1ClientConfig["db"]
+
+const toPhotoStorageError = (operation: string, err: unknown): PhotoStorageError =>
+  new PhotoStorageError({
+    operation: StorageOperationName.make(operation),
+    message: StorageErrorMessage.make(err instanceof Error ? err.message : String(err)),
+  })
+
+export const makePhotoRepoSql = (sql: SqlClient): PhotoRepo["Service"] => {
+  const findById = Effect.fn("PhotoRepo.findById")(function* (id: PhotoId) {
+    const rows = yield* sql`
+      SELECT id, name, album_id AS albumId, created_at AS createdAt
+      FROM photos
+      WHERE id = ${id}
+    `.pipe(Effect.mapError((err) => toPhotoStorageError("PhotoRepo.findById", err)))
+    const firstRow = rows[0]
+    if (firstRow === undefined) {
+      return yield* new PhotoNotFoundError({ id })
+    }
+    // Decode raw SQL row into type:contract Schema
+    return yield* Schema.decodeUnknownEffect(Photo)(firstRow).pipe(
+      Effect.mapError((err) => toPhotoStorageError("PhotoRepo.findById", err)),
+    )
+  })
+
+  // ... insert, listAll (also check `rows[0] === undefined` on RETURNING and map errors via `toPhotoStorageError`)
+  return PhotoRepo.of({ insert, findById, listAll })
+}
+
+export const PhotoRepoD1Layer: Layer.Layer<PhotoRepo, never, SqlClient> = Layer.effect(
   PhotoRepo,
-  Effect.gen(function* () {
-    const db = yield* DrizzleD1Client
-
-    const findById = Effect.fn("PhotoRepo.findById")(function* (id: string) {
-      const rows = yield* db.select().from(photosTable).where(eq(photosTable.id, id))
-      if (rows.length === 0) {
-        return yield* new PhotoNotFoundError({ id })
-      }
-      // Decode Drizzle row into type:contract Schema
-      return yield* Schema.decodeUnknownEffect(PhotoSchema)(rows[0])
-    })
-
-    return PhotoRepo.of({ findById })
-  }),
+  Effect.map(SqlClient, makePhotoRepoSql),
 )
 ```
 
 ## Migrations Workflow
 
-1. **Generation**:
-   - Migrations are generated ahead of time using `drizzle-kit generate` into versioned subfolders (e.g. `migrations/0001_initial.sql`).
-   - Migrations must be committed to git.
+1. **Hand-Authored Versioned `.sql` Migrations**:
+   - Write forward SQL migrations ahead of time into versioned `.sql` files under `migrations/` (e.g. `libs/sample/infra/migrations/0001_photos_and_counters.sql`).
+   - Migrations must be committed to git. `drizzle-kit` is banned and must never be used.
 2. **Never Generate at Deploy**:
    - Migrations are never generated dynamically during deployment.
-3. **Escalation Rules**:
-   - Any migration containing a `DROP TABLE`, `DROP COLUMN`, or table rebuild is considered a destructive change and must escalate to the human for approval.
+3. **Validation & Escalation Rules (`pnpm harness check-migrations`)**:
+   - Validate all `.sql` migrations with `pnpm harness check-migrations` (backed by `MigrationSafety.decide`).
+   - Any migration containing `DROP TABLE`, `DROP COLUMN`, SQLite table rebuilds (`__new_` / `PRAGMA foreign_keys=OFF`), or `ALTER TABLE ADD COLUMN ... NOT NULL` without `DEFAULT` is flagged (`unsafe-sql-migration`) and must escalate to the human for approval.

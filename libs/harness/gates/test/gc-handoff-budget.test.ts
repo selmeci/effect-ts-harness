@@ -3,12 +3,34 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { Effect, Schema } from "effect"
-import { buildHarnessGraph, loadGraphSnapshotEffect, RelationId, saveGraphSnapshot } from "@harness/graph"
+import {
+  buildHarnessGraph,
+  deriveRepoOmnigraphPort,
+  loadGraphSnapshotEffect,
+  RelationId,
+  resolveCanonicalRepoRoot,
+  resolveOmnigraphClusterDir,
+  resolveOmnigraphTaskBranches,
+  saveGraphSnapshot,
+  ts,
+} from "@harness/graph"
+import {
+  AstSourceContent,
+  AstSourceFilePath,
+  NxTierTag,
+  PackageDependencyName,
+  PackageManifestName,
+  PackageManifestPath,
+} from "@harness/contract"
+import { analyzeSqliteMigratorFromRecordAst } from "../src/plugins/sqlite-migrator-ast.js"
+import { visitSourceFileSinglePass } from "../src/plugins/ast-gate-visitors.js"
+import { decideSelfDogfooding } from "../src/plugins/self-dogfooding-plugin.js"
+import { decideHarnessTierTopology } from "../src/plugins/harness-tier-topology.js"
+import { loadGovernanceDocsChecked } from "../src/plugins/gc/gc-helpers.js"
 import {
   buildSessionHandoff,
   checkLoopThrashing,
   checkMigrationSqlSafety,
-  checkSpanBudgets,
   classifyFileWrite,
   decideAdrDocQuality,
   decideEarsSpecQuality,
@@ -19,28 +41,23 @@ import {
   decideOntologyInvariants,
   decideSessionHandoff,
   decideSpanBudgets,
-  deriveRepoOmnigraphPort,
   diffPlanAndImplGraphs,
   discoverDomainMutants,
+  evaluateDocTruthPlugin,
   evaluateMutationOutcomes,
+  evaluatePackageAndMigrationPlugin,
   findClosestMatch,
   levenshteinDistance,
-  lintAdrDocMarkdown,
-  lintEarsSpecMarkdown,
   loadGovernanceDocsFromDisk,
   parseGovernanceDocFrontmatter,
-  resolveCanonicalRepoRoot,
   resolveHarnessStateDir,
-  resolveOmnigraphClusterDir,
-  resolveOmnigraphTaskBranches,
-  scanGraphEntropy,
-  scanWorkspacePackageHygiene,
   type CodeMutant,
   type FrictionCluster,
   type FrictionEvent,
   type GovernanceDocReference,
   type SpanSample,
 } from "../src/index.js"
+import { testHostIo } from "./helpers/test-host-io.js"
 
 describe("Harness Gates: GC check, Session Handoff, Span Budget, and State Dir", () => {
   it.effect("diffs plan and impl snapshots and confirms 0 missing symbols", () =>
@@ -75,10 +92,10 @@ describe("Harness Gates: GC check, Session Handoff, Span Budget, and State Dir",
         })
         const planPath = join(tempDir, "plan-graph-snapshot.json")
         const implPath = join(tempDir, "graph-snapshot.json")
-        saveGraphSnapshot(initialPlanGraph, planPath)
-        saveGraphSnapshot(initialImplGraph, implPath)
-        const planGraph = yield* loadGraphSnapshotEffect(planPath)
-        const implGraph = yield* loadGraphSnapshotEffect(implPath)
+        saveGraphSnapshot(initialPlanGraph, planPath, testHostIo)
+        saveGraphSnapshot(initialImplGraph, implPath, testHostIo)
+        const planGraph = yield* loadGraphSnapshotEffect(planPath, testHostIo)
+        const implGraph = yield* loadGraphSnapshotEffect(implPath, testHostIo)
         const diff = diffPlanAndImplGraphs(planGraph, implGraph)
         expect(diff.ok).toBe(true)
         expect(diff.reasons).toHaveLength(0)
@@ -247,7 +264,8 @@ describe("Harness Gates: GC check, Session Handoff, Span Budget, and State Dir",
       expect(findClosestMatch("CompletelyDifferent", candidates)).toBeUndefined()
     })
 
-    it("passes clean: true via scanGraphEntropy when all elements are correctly wired", () => {
+    it.effect("passes clean: true via decideGraphEntropy when all elements are correctly wired", () =>
+      Effect.gen(function* () {
       const graph = buildHarnessGraph({
         fns: [
           {
@@ -309,13 +327,14 @@ describe("Harness Gates: GC check, Session Handoff, Span Budget, and State Dir",
         ],
       })
 
-      const report = scanGraphEntropy(graph, {
+      const report = yield* decideGraphEntropy({
+        graph,
         expectedPatterns: ["planning", "review", "effect"],
       })
 
       expect(report.clean).toBe(true)
       expect(report.findings).toHaveLength(0)
-    })
+    }))
 
     it.effect(
       "flags untested domain EffectFn when checkUntestedDomainFns: true, passes once tested",
@@ -735,7 +754,8 @@ errors: []
       expect(parseGovernanceDocFrontmatter("docs/adr/empty-id.md", "---\nid: ''\n---")).toBeNull()
     })
 
-    it("returns clean: true when accepted ADR/Spec references valid files, spans, services, and errors", () => {
+    it.effect("returns clean: true when accepted ADR/Spec references valid files, spans, services, and errors", () =>
+      Effect.gen(function* () {
       const graph = buildHarnessGraph({
         fns: [
           {
@@ -808,14 +828,15 @@ errors: []
         referencedErrors: ["GreeterError"],
       }
 
-      const report = scanGraphEntropy(graph, {
+      const report = yield* decideGraphEntropy({
+        graph,
         expectedPatterns: ["planning", "review", "effect"],
         governanceDocs: [doc],
       })
 
       expect(report.clean).toBe(true)
       expect(report.findings).toHaveLength(0)
-    })
+    }))
 
     it.effect(
       "flags stale-doc-reference when accepted doc references missing elements while ignoring proposed/superseded",
@@ -962,12 +983,12 @@ errors: []
     )
 
     it("loads governance docs safely from disk even when folders do not exist", () => {
-      const docs = loadGovernanceDocsFromDisk("/non/existent/repo/root")
+      const docs = loadGovernanceDocsFromDisk("/non/existent/repo/root", testHostIo)
       expect(Array.isArray(docs)).toBe(true)
       expect(docs).toHaveLength(0)
 
       const repoRoot = "/home/roan/WebstormProjects/effect-ts-harness"
-      const repoDocs = loadGovernanceDocsFromDisk(repoRoot)
+      const repoDocs = loadGovernanceDocsFromDisk(repoRoot, testHostIo)
       expect(Array.isArray(repoDocs)).toBe(true)
     })
 
@@ -1053,7 +1074,7 @@ status: accepted
 `,
         )
 
-        const docs = loadGovernanceDocsFromDisk(tempDir)
+        const docs = loadGovernanceDocsFromDisk(tempDir, testHostIo)
         expect(docs).toHaveLength(3)
 
         const paths = docs.map((d) => d.docPath)
@@ -1427,33 +1448,35 @@ status: accepted
     })
   })
 
-  describe("decideSpanBudgets / checkSpanBudgets", () => {
-    it("detects n-plus-one-call violations when child span count exceeds budget", () => {
-      const parent: SpanSample = {
-        spanId: "parent-1",
-        name: "Order.checkout",
-        parentSpanId: null,
-      }
-      const children: Array<SpanSample> = Array.from({ length: 6 }, (_, i) => ({
-        spanId: `child-${i}`,
-        name: "Db.query",
-        parentSpanId: "parent-1",
-      }))
+  describe("decideSpanBudgets", () => {
+    it.effect("detects n-plus-one-call violations when child span count exceeds budget", () =>
+      Effect.gen(function* () {
+        const parent: SpanSample = {
+          spanId: "parent-1",
+          name: "Order.checkout",
+          parentSpanId: null,
+        }
+        const children: Array<SpanSample> = Array.from({ length: 6 }, (_, i) => ({
+          spanId: `child-${i}`,
+          name: "Db.query",
+          parentSpanId: "parent-1",
+        }))
 
-      const violations = checkSpanBudgets({
-        spans: [parent, ...children],
-        maxRepeatedChildCalls: 5,
-      })
+        const violations = yield* decideSpanBudgets({
+          spans: [parent, ...children],
+          maxRepeatedChildCalls: 5,
+        })
 
-      expect(violations).toHaveLength(1)
-      const v = violations[0]!
-      expect(v.kind).toBe("n-plus-one-call")
-      expect(v.parentSpan).toBe("Order.checkout")
-      expect(v.targetSpan).toBe("Db.query")
-      expect(v.count).toBe(6)
-      expect(v.maxAllowed).toBe(5)
-      expect(v.message).toContain("N+1 span repetition detected")
-    })
+        expect(violations).toHaveLength(1)
+        const v = violations[0]!
+        expect(v.kind).toBe("n-plus-one-call")
+        expect(v.parentSpan).toBe("Order.checkout")
+        expect(v.targetSpan).toBe("Db.query")
+        expect(v.count).toBe(6)
+        expect(v.maxAllowed).toBe(5)
+        expect(v.message).toContain("N+1 span repetition detected")
+      }),
+    )
 
     it.effect("detects span-duration-exceeded violations", () =>
       Effect.gen(function* () {
@@ -1514,14 +1537,26 @@ status: accepted
       )
     })
 
+    it("rejects root-resolving paths and invalid HARNESS_WORKTREE_ID or HARNESS_STATE_DIR segments", () => {
+      for (const invalidRoot of ["/.", "/..", "/tmp/..", ".", ".."]) {
+        expect(() => resolveHarnessStateDir(invalidRoot, {})).toThrow()
+      }
+      for (const invalidWorktreeId of ["..", ".", "...", "   "]) {
+        expect(() =>
+          resolveHarnessStateDir("/repo", { HARNESS_WORKTREE_ID: invalidWorktreeId }),
+        ).toThrow()
+      }
+      expect(() => resolveHarnessStateDir("/repo", { HARNESS_STATE_DIR: ".." })).toThrow()
+    })
+
     it("resolveCanonicalRepoRoot resolves regular directory vs linked worktree directory", () => {
       const regularDir = mkdtempSync(join(tmpdir(), "harness-reg-repo-"))
       const wtDir = mkdtempSync(join(tmpdir(), "harness-wt-repo-"))
       try {
-        expect(resolveCanonicalRepoRoot(regularDir)).toBe(regularDir)
+        expect(resolveCanonicalRepoRoot(regularDir, testHostIo)).toBe(regularDir)
 
         writeFileSync(join(wtDir, ".git"), "gitdir: /path/to/main/.git/worktrees/wt-1\n")
-        expect(resolveCanonicalRepoRoot(wtDir)).toBe("/path/to/main")
+        expect(resolveCanonicalRepoRoot(wtDir, testHostIo)).toBe("/path/to/main")
       } finally {
         rmSync(regularDir, { recursive: true, force: true })
         rmSync(wtDir, { recursive: true, force: true })
@@ -1538,22 +1573,22 @@ status: accepted
         )
 
         // Without HARNESS_WORKTREE_ID
-        expect(resolveOmnigraphClusterDir(mainRepo, {})).toBe(
+        expect(resolveOmnigraphClusterDir(mainRepo, testHostIo, {})).toBe(
           join(mainRepo, ".harness", "omnigraph-cluster"),
         )
 
         // With HARNESS_WORKTREE_ID set, still points to canonical repo root cluster
-        expect(resolveOmnigraphClusterDir(mainRepo, { HARNESS_WORKTREE_ID: "wt-feature" })).toBe(
+        expect(resolveOmnigraphClusterDir(mainRepo, testHostIo, { HARNESS_WORKTREE_ID: "wt-feature" })).toBe(
           join(mainRepo, ".harness", "omnigraph-cluster"),
         )
 
         // Inside linked git worktree, points to canonical repo root cluster
-        expect(resolveOmnigraphClusterDir(wtDir, {})).toBe(
+        expect(resolveOmnigraphClusterDir(wtDir, testHostIo, {})).toBe(
           join(mainRepo, ".harness", "omnigraph-cluster"),
         )
 
         // With explicit HARNESS_STATE_DIR
-        expect(resolveOmnigraphClusterDir(mainRepo, { HARNESS_STATE_DIR: ".custom-state" })).toBe(
+        expect(resolveOmnigraphClusterDir(mainRepo, testHostIo, { HARNESS_STATE_DIR: ".custom-state" })).toBe(
           join(mainRepo, ".custom-state", "omnigraph-cluster"),
         )
       } finally {
@@ -1571,15 +1606,15 @@ status: accepted
           `gitdir: ${join(mainRepo, ".git", "worktrees", "wt-1")}\n`,
         )
 
-        const mainPort = deriveRepoOmnigraphPort(mainRepo)
-        const wtPort = deriveRepoOmnigraphPort(wtDir)
+        const mainPort = deriveRepoOmnigraphPort(mainRepo, testHostIo)
+        const wtPort = deriveRepoOmnigraphPort(wtDir, testHostIo)
 
         expect(wtPort).toBe(mainPort)
         expect(mainPort).toBeGreaterThanOrEqual(18080)
         expect(mainPort).toBeLessThanOrEqual(28079)
 
-        const portAlpha = deriveRepoOmnigraphPort("/tmp/repo-alpha")
-        const portBeta = deriveRepoOmnigraphPort("/tmp/repo-beta")
+        const portAlpha = deriveRepoOmnigraphPort("/tmp/repo-alpha", testHostIo)
+        const portBeta = deriveRepoOmnigraphPort("/tmp/repo-beta", testHostIo)
         expect(portAlpha).toBeGreaterThanOrEqual(18080)
         expect(portAlpha).toBeLessThanOrEqual(28079)
         expect(portBeta).toBeGreaterThanOrEqual(18080)
@@ -1601,7 +1636,7 @@ status: accepted
         )
 
         // Default
-        expect(resolveOmnigraphTaskBranches(mainRepo, {})).toEqual({
+        expect(resolveOmnigraphTaskBranches(mainRepo, testHostIo, {})).toEqual({
           planBranch: "plan/current",
           implBranch: "impl/current",
           mainBranch: "main",
@@ -1609,7 +1644,7 @@ status: accepted
 
         // With HARNESS_WORKTREE_ID
         expect(
-          resolveOmnigraphTaskBranches(mainRepo, { HARNESS_WORKTREE_ID: "feature-auth" }),
+          resolveOmnigraphTaskBranches(mainRepo, testHostIo, { HARNESS_WORKTREE_ID: "feature-auth" }),
         ).toEqual({
           planBranch: "plan/wt-feature-auth",
           implBranch: "impl/wt-feature-auth",
@@ -1617,7 +1652,7 @@ status: accepted
         })
 
         expect(
-          resolveOmnigraphTaskBranches(mainRepo, { HARNESS_WORKTREE_ID: "feat/nested#branch" }),
+          resolveOmnigraphTaskBranches(mainRepo, testHostIo, { HARNESS_WORKTREE_ID: "feat/nested#branch" }),
         ).toEqual({
           planBranch: "plan/wt-feat_nested_branch",
           implBranch: "impl/wt-feat_nested_branch",
@@ -1626,7 +1661,7 @@ status: accepted
 
         // Inside linked git worktree directory
         const slug = basename(wtDir).replace(/[^a-zA-Z0-9._-]/g, "_")
-        expect(resolveOmnigraphTaskBranches(wtDir, {})).toEqual({
+        expect(resolveOmnigraphTaskBranches(wtDir, testHostIo, {})).toEqual({
           planBranch: `plan/wt-${slug}`,
           implBranch: `impl/wt-${slug}`,
           mainBranch: "main",
@@ -1748,13 +1783,13 @@ status: accepted
       const mutants = discoverDomainMutants("libs/sample/domain/src/index.ts", sampleSource)
 
       const expectedBoundaryLine =
-        sampleSource.split("\n").findIndex((l) => l.includes("c >= 100")) + 1
+        sampleSource.split("\n").findIndex((l) => l.includes("c >= MAX_PHOTOS_PER_ALBUM")) + 1
       const boundary = mutants.find(
         (m) => m.category === "boundary-operator" && m.original === ">=" && m.replacement === ">",
       )
       expect(boundary).toBeDefined()
       expect(boundary?.line).toBe(expectedBoundaryLine)
-      expect(boundary?.mutatedSource).toContain("c > 100")
+      expect(boundary?.mutatedSource).toContain("c > MAX_PHOTOS_PER_ALBUM")
 
       const expectedArithmeticLine =
         sampleSource.split("\n").findIndex((l) => l.includes("currentCount + 1")) + 1
@@ -1880,8 +1915,9 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState => {
     )
   })
 
-  describe("decideEarsSpecQuality / lintEarsSpecMarkdown (EarsSpecLint.decide)", () => {
-    it("accepts a valid EARS spec with sequential areas, **Source:**, and valid REQ rows", () => {
+  describe("decideEarsSpecQuality (EarsSpecLint.decide)", () => {
+    it.effect("accepts a valid EARS spec with sequential areas, **Source:**, and valid REQ rows", () =>
+      Effect.gen(function* () {
       const validMarkdown = `## Requirements
 
 ### 1 · Photo Gallery Core
@@ -1893,49 +1929,55 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState => {
 | REQ-1.2 | Event-driven | **When** a user requests a photo by ID, The PhotoService **shall** query the repository. | PhotoService.getPhoto | test |
 | REQ-1.3 | Unwanted behaviour | **If** photo is missing, **then** The PhotoService **shall** fail with NotFoundError. | NotFoundError | test |
 `
-      const report = lintEarsSpecMarkdown("docs/specs/valid.md", validMarkdown)
+      const report = yield* decideEarsSpecQuality({
+        docPath: "docs/specs/valid.md",
+        markdown: validMarkdown,
+      })
       expect(report.clean).toBe(true)
       expect(report.requirementCount).toBe(3)
       expect(report.findings).toHaveLength(0)
-    })
+    }),
+    )
 
-    it("rejects generic subject, weak modal, compound obligation, pattern mismatch, numbering gap, and forbidden column", () => {
-      // 1. Generic subject
-      const genericSubjMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Pattern | Requirement | Verification |\n|---|---|---|---|\n| REQ-1.1 | Ubiquitous | The system **shall** validate input. | test |\n`
-      const genericReport = lintEarsSpecMarkdown("docs/specs/test.md", genericSubjMd)
-      expect(genericReport.clean).toBe(false)
-      expect(genericReport.findings.some((f) => f.kind === "generic-subject")).toBe(true)
+    it.effect("rejects generic subject, weak modal, compound obligation, pattern mismatch, numbering gap, and forbidden column", () =>
+      Effect.gen(function* () {
+        // 1. Generic subject
+        const genericSubjMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Pattern | Requirement | Verification |\n|---|---|---|---|\n| REQ-1.1 | Ubiquitous | The system **shall** validate input. | test |\n`
+        const genericReport = yield* decideEarsSpecQuality({ docPath: "docs/specs/test.md", markdown: genericSubjMd })
+        expect(genericReport.clean).toBe(false)
+        expect(genericReport.findings.some((f) => f.kind === "generic-subject")).toBe(true)
 
-      // 2. Weak modal
-      const weakModalMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Pattern | Requirement | Verification |\n|---|---|---|---|\n| REQ-1.1 | Ubiquitous | The PhotoService should validate input. | test |\n`
-      const weakReport = lintEarsSpecMarkdown("docs/specs/test.md", weakModalMd)
-      expect(weakReport.clean).toBe(false)
-      expect(weakReport.findings.some((f) => f.kind === "weak-modal")).toBe(true)
+        // 2. Weak modal
+        const weakModalMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Pattern | Requirement | Verification |\n|---|---|---|---|\n| REQ-1.1 | Ubiquitous | The PhotoService should validate input. | test |\n`
+        const weakReport = yield* decideEarsSpecQuality({ docPath: "docs/specs/test.md", markdown: weakModalMd })
+        expect(weakReport.clean).toBe(false)
+        expect(weakReport.findings.some((f) => f.kind === "weak-modal")).toBe(true)
 
-      // 3. Compound obligation
-      const compoundMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Pattern | Requirement | Verification |\n|---|---|---|---|\n| REQ-1.1 | Ubiquitous | The PhotoService **shall** save the record **and shall** notify subscribers. | test |\n`
-      const compoundReport = lintEarsSpecMarkdown("docs/specs/test.md", compoundMd)
-      expect(compoundReport.clean).toBe(false)
-      expect(compoundReport.findings.some((f) => f.kind === "compound-obligation")).toBe(true)
+        // 3. Compound obligation
+        const compoundMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Pattern | Requirement | Verification |\n|---|---|---|---|\n| REQ-1.1 | Ubiquitous | The PhotoService **shall** save the record **and shall** notify subscribers. | test |\n`
+        const compoundReport = yield* decideEarsSpecQuality({ docPath: "docs/specs/test.md", markdown: compoundMd })
+        expect(compoundReport.clean).toBe(false)
+        expect(compoundReport.findings.some((f) => f.kind === "compound-obligation")).toBe(true)
 
-      // 4. Pattern mismatch
-      const patternMismatchMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Pattern | Requirement | Verification |\n|---|---|---|---|\n| REQ-1.1 | Event-driven | The PhotoService **shall** save the record immediately. | test |\n`
-      const mismatchReport = lintEarsSpecMarkdown("docs/specs/test.md", patternMismatchMd)
-      expect(mismatchReport.clean).toBe(false)
-      expect(mismatchReport.findings.some((f) => f.kind === "pattern-keyword-mismatch")).toBe(true)
+        // 4. Pattern mismatch
+        const patternMismatchMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Pattern | Requirement | Verification |\n|---|---|---|---|\n| REQ-1.1 | Event-driven | The PhotoService **shall** save the record immediately. | test |\n`
+        const mismatchReport = yield* decideEarsSpecQuality({ docPath: "docs/specs/test.md", markdown: patternMismatchMd })
+        expect(mismatchReport.clean).toBe(false)
+        expect(mismatchReport.findings.some((f) => f.kind === "pattern-keyword-mismatch")).toBe(true)
 
-      // 5. Numbering gap
-      const gapMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Pattern | Requirement | Verification |\n|---|---|---|---|\n| REQ-1.1 | Ubiquitous | The PhotoService **shall** step 1. | test |\n| REQ-1.3 | Ubiquitous | The PhotoService **shall** step 3. | test |\n`
-      const gapReport = lintEarsSpecMarkdown("docs/specs/test.md", gapMd)
-      expect(gapReport.clean).toBe(false)
-      expect(gapReport.findings.some((f) => f.kind === "numbering-gap")).toBe(true)
+        // 5. Numbering gap
+        const gapMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Pattern | Requirement | Verification |\n|---|---|---|---|\n| REQ-1.1 | Ubiquitous | The PhotoService **shall** step 1. | test |\n| REQ-1.3 | Ubiquitous | The PhotoService **shall** step 3. | test |\n`
+        const gapReport = yield* decideEarsSpecQuality({ docPath: "docs/specs/test.md", markdown: gapMd })
+        expect(gapReport.clean).toBe(false)
+        expect(gapReport.findings.some((f) => f.kind === "numbering-gap")).toBe(true)
 
-      // 6. Forbidden column
-      const forbiddenMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Status | Pattern | Requirement | Verification |\n|---|---|---|---|---|\n| REQ-1.1 | Done | Ubiquitous | The PhotoService **shall** step 1. | test |\n`
-      const forbiddenReport = lintEarsSpecMarkdown("docs/specs/test.md", forbiddenMd)
-      expect(forbiddenReport.clean).toBe(false)
-      expect(forbiddenReport.findings.some((f) => f.kind === "forbidden-column")).toBe(true)
-    })
+        // 6. Forbidden column
+        const forbiddenMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Status | Pattern | Requirement | Verification |\n|---|---|---|---|---|\n| REQ-1.1 | Done | Ubiquitous | The PhotoService **shall** step 1. | test |\n`
+        const forbiddenReport = yield* decideEarsSpecQuality({ docPath: "docs/specs/test.md", markdown: forbiddenMd })
+        expect(forbiddenReport.clean).toBe(false)
+        expect(forbiddenReport.findings.some((f) => f.kind === "forbidden-column")).toBe(true)
+      }),
+    )
 
     it.effect(
       "flags ears-spec-lint in decideGraphEntropy when governance doc has EARS violations",
@@ -2094,8 +2136,9 @@ We need automated mechanical gating.
 | Canonical MADR | libs/harness/gates/src/adr-lint.ts | AdrDocLint.decide | \`AdrDocLint.decide\` |
 `
 
-    it("accepts valid canonical ADR documents", () => {
-      const report = lintAdrDocMarkdown("docs/adr/test.md", validCanonicalAdr)
+    it.effect("accepts valid canonical ADR documents", () =>
+      Effect.gen(function* () {
+        const report = yield* decideAdrDocQuality({ docPath: "docs/adr/test.md", markdown: validCanonicalAdr })
       expect(report.clean).toBe(true)
       expect(report.findings).toHaveLength(0)
 
@@ -2111,10 +2154,10 @@ We need automated mechanical gating.
         join(root, "libs/harness/docs/adr/0001-deterministic-gates-and-plan-as-code.md"),
         "utf8",
       )
-      const harnessReport = lintAdrDocMarkdown(
-        "libs/harness/docs/adr/0001-deterministic-gates-and-plan-as-code.md",
-        harnessAdr,
-      )
+      const harnessReport = yield* decideAdrDocQuality({
+        docPath: "libs/harness/docs/adr/0001-deterministic-gates-and-plan-as-code.md",
+        markdown: harnessAdr,
+      })
       expect(harnessReport.clean).toBe(true)
       expect(harnessReport.findings).toHaveLength(0)
 
@@ -2125,17 +2168,19 @@ We need automated mechanical gating.
         ),
         "utf8",
       )
-      const sampleReport = lintAdrDocMarkdown(
-        "libs/sample/docs/adr/0001-cloudflare-d1-do-sqlite-and-traceparent-boundaries.md",
-        sampleAdr,
-      )
+      const sampleReport = yield* decideAdrDocQuality({
+        docPath: "libs/sample/docs/adr/0001-cloudflare-d1-do-sqlite-and-traceparent-boundaries.md",
+        markdown: sampleAdr,
+      })
       expect(sampleReport.clean).toBe(true)
       expect(sampleReport.findings).toHaveLength(0)
-    })
+    }),
+    )
 
-    it("rejects invalid frontmatter (missing enforced_by, missing symbols, superseded without superseded_by)", () => {
-      // 1. Missing frontmatter entirely
-      const noFmReport = lintAdrDocMarkdown("test.md", "# No Frontmatter")
+    it.effect("rejects invalid frontmatter (missing enforced_by, missing symbols, superseded without superseded_by)", () =>
+      Effect.gen(function* () {
+        // 1. Missing frontmatter entirely
+        const noFmReport = yield* decideAdrDocQuality({ docPath: "test.md", markdown: "# No Frontmatter" })
       expect(noFmReport.clean).toBe(false)
       expect(noFmReport.findings.some((f) => f.kind === "adr-frontmatter-invalid")).toBe(true)
 
@@ -2149,7 +2194,7 @@ spans:
   - AdrDocLint.decide
 ---
 `
-      const noEnforcedReport = lintAdrDocMarkdown("test.md", noEnforcedMd)
+      const noEnforcedReport = yield* decideAdrDocQuality({ docPath: "test.md", markdown: noEnforcedMd })
       expect(noEnforcedReport.clean).toBe(false)
       expect(
         noEnforcedReport.findings.some(
@@ -2167,7 +2212,7 @@ enforced_by:
   - some/file.ts
 ---
 `
-      const noSymbolsReport = lintAdrDocMarkdown("test.md", noSymbolsMd)
+      const noSymbolsReport = yield* decideAdrDocQuality({ docPath: "test.md", markdown: noSymbolsMd })
       expect(noSymbolsReport.clean).toBe(false)
       expect(
         noSymbolsReport.findings.some(
@@ -2187,22 +2232,24 @@ spans:
   - AdrDocLint.decide
 ---
 `
-      const supersededReport = lintAdrDocMarkdown("test.md", supersededMd)
+      const supersededReport = yield* decideAdrDocQuality({ docPath: "test.md", markdown: supersededMd })
       expect(supersededReport.clean).toBe(false)
       expect(
         supersededReport.findings.some(
           (f) => f.kind === "adr-frontmatter-invalid" && f.message.includes("superseded_by"),
         ),
       ).toBe(true)
-    })
+    }),
+    )
 
-    it("rejects missing or out-of-order canonical sections", () => {
+    it.effect("rejects missing or out-of-order canonical sections", () =>
+      Effect.gen(function* () {
       // Missing section
       const missingSectionMd = validCanonicalAdr.replace(
         "## Decision Drivers\n\n* Guarantee canonical 6-section MADR structure across all ADRs.\n* Deterministically verify frontmatter, chosen options, and rejected alternatives.",
         "",
       )
-      const missingReport = lintAdrDocMarkdown("test.md", missingSectionMd)
+      const missingReport = yield* decideAdrDocQuality({ docPath: "test.md", markdown: missingSectionMd })
       expect(missingReport.clean).toBe(false)
       expect(
         missingReport.findings.some(
@@ -2215,32 +2262,36 @@ spans:
         .replace("## Decision Drivers", "## TEMP_MARKER")
         .replace("## Considered Options", "## Decision Drivers")
         .replace("## TEMP_MARKER", "## Considered Options")
-      const outOfOrderReport = lintAdrDocMarkdown("test.md", outOfOrderMd)
+      const outOfOrderReport = yield* decideAdrDocQuality({ docPath: "test.md", markdown: outOfOrderMd })
       expect(outOfOrderReport.clean).toBe(false)
       expect(
         outOfOrderReport.findings.some(
           (f) => f.kind === "adr-section-structure" && f.message.includes("out of order"),
         ),
       ).toBe(true)
-    })
+    }),
+    )
 
-    it("rejects missing chosen option in Decision Outcome", () => {
+    it.effect("rejects missing chosen option in Decision Outcome", () =>
+      Effect.gen(function* () {
       const noChosenMd = validCanonicalAdr.replace(
         '**Chosen option:** "Option 1" because deterministic gates provide instant mechanical feedback.',
         "We chose Option 1 after careful evaluation.",
       )
-      const report = lintAdrDocMarkdown("test.md", noChosenMd)
+      const report = yield* decideAdrDocQuality({ docPath: "test.md", markdown: noChosenMd })
       expect(report.clean).toBe(false)
       expect(report.findings.some((f) => f.kind === "adr-missing-chosen-option")).toBe(true)
-    })
+    }),
+    )
 
-    it("rejects malformed rejected alternatives (missing ### 1 · or missing **Why rejected:**)", () => {
+    it.effect("rejects malformed rejected alternatives (missing ### 1 · or missing **Why rejected:**)", () =>
+      Effect.gen(function* () {
       // Missing ### 1 · subsection
       const noSubMd = validCanonicalAdr.replace(
         "### 1 · Unstructured Markdown without Linting\n- **Why rejected:** Causes documentation drift and broken references across repos.",
         "We considered unstructured markdown but didn't write it up.",
       )
-      const noSubReport = lintAdrDocMarkdown("test.md", noSubMd)
+      const noSubReport = yield* decideAdrDocQuality({ docPath: "test.md", markdown: noSubMd })
       expect(noSubReport.clean).toBe(false)
       expect(
         noSubReport.findings.some((f) => f.kind === "adr-rejected-alternative-structure"),
@@ -2248,7 +2299,7 @@ spans:
 
       // Missing **Why rejected:**
       const noWhyMd = validCanonicalAdr.replace("**Why rejected:**", "Reason for rejection:")
-      const noWhyReport = lintAdrDocMarkdown("test.md", noWhyMd)
+      const noWhyReport = yield* decideAdrDocQuality({ docPath: "test.md", markdown: noWhyMd })
       expect(noWhyReport.clean).toBe(false)
       expect(
         noWhyReport.findings.some(
@@ -2256,17 +2307,20 @@ spans:
             f.kind === "adr-rejected-alternative-structure" && f.message.includes("Why rejected"),
         ),
       ).toBe(true)
-    })
+    }),
+    )
 
-    it("rejects missing enforcement table under Consequences and Enforcement", () => {
+    it.effect("rejects missing enforcement table under Consequences and Enforcement", () =>
+      Effect.gen(function* () {
       const noTableMd = validCanonicalAdr.replace(
         /\| Rule \|[\s\S]*\| `AdrDocLint\.decide` \|/,
         "Enforcement is handled through code review.",
       )
-      const report = lintAdrDocMarkdown("test.md", noTableMd)
+      const report = yield* decideAdrDocQuality({ docPath: "test.md", markdown: noTableMd })
       expect(report.clean).toBe(false)
       expect(report.findings.some((f) => f.kind === "adr-missing-enforcement-table")).toBe(true)
-    })
+    }),
+    )
 
     it.effect(
       "flags adr-doc-lint in decideGraphEntropy when governance doc has ADR violations",
@@ -2373,7 +2427,8 @@ ${rejectedAlternatives}
         }),
     )
 
-    it("flags adr-enforcement-mismatch when Governed Symbols entry is not declared in frontmatter or cell is empty", () => {
+    it.effect("flags adr-enforcement-mismatch when Governed Symbols entry is not declared in frontmatter or cell is empty", () =>
+      Effect.gen(function* () {
       const adrWithUndeclaredSymbol = `---
 id: test:ADR-0001
 title: Test ADR
@@ -2415,7 +2470,7 @@ Context description here.
 | --- | --- | --- | --- |
 | Check Rule | libs/harness/gates/src/adr-lint.ts | AdrDocLint.decide | \`UndeclaredSymbol\` |
 `
-      const report = lintAdrDocMarkdown("docs/adr/test.md", adrWithUndeclaredSymbol)
+      const report = yield* decideAdrDocQuality({ docPath: "docs/adr/test.md", markdown: adrWithUndeclaredSymbol })
       expect(report.clean).toBe(false)
       const mismatch = report.findings.find((f) => f.kind === "adr-enforcement-mismatch")
       expect(mismatch).toBeDefined()
@@ -2425,23 +2480,25 @@ Context description here.
         "| Check Rule | libs/harness/gates/src/adr-lint.ts | AdrDocLint.decide | `UndeclaredSymbol` |",
         "| Check Rule | - | AdrDocLint.decide | `AdrDocLint.decide` |",
       )
-      const placeholderReport = lintAdrDocMarkdown("docs/adr/test.md", adrWithPlaceholderCell)
+      const placeholderReport = yield* decideAdrDocQuality({ docPath: "docs/adr/test.md", markdown: adrWithPlaceholderCell })
       expect(placeholderReport.clean).toBe(false)
       const placeholderMismatch = placeholderReport.findings.find(
         (f) => f.kind === "adr-enforcement-mismatch",
       )
       expect(placeholderMismatch).toBeDefined()
       expect(placeholderMismatch?.message).toContain("empty or placeholder cell")
-    })
+    }),
+    )
 
-    it("flags adr-enforcement-mismatch when Enforced By path is not declared in frontmatter enforced_by", () => {
+    it.effect("flags adr-enforcement-mismatch when Enforced By path is not declared in frontmatter enforced_by", () =>
+      Effect.gen(function* () {
       const adrWithUndeclaredFile = `---
 id: test:ADR-0001
 title: Test ADR
 status: accepted
 date: 2026-10-27
 enforced_by:
-  - libs/harness/gates/src/stub.ts
+  - libs/harness/contract/src/stub.ts
 spans:
   - AdrDocLint.decide
 ---
@@ -2478,7 +2535,7 @@ Context description here.
 | --- | --- | --- | --- |
 | Check Rule | libs/harness/gates/src/adr-lint.ts | AdrDocLint.decide | \`AdrDocLint.decide\` |
 `
-      const report = lintAdrDocMarkdown("docs/adr/test.md", adrWithUndeclaredFile)
+      const report = yield* decideAdrDocQuality({ docPath: "docs/adr/test.md", markdown: adrWithUndeclaredFile })
       expect(report.clean).toBe(false)
       const mismatch = report.findings.find(
         (f) =>
@@ -2487,9 +2544,11 @@ Context description here.
       )
       expect(mismatch).toBeDefined()
       expect(mismatch?.message).toContain("libs/harness/gates/src/adr-lint.ts")
-    })
+    }),
+    )
 
-    it("flags adr-enforcement-mismatch when Decision Outcome references unconfigured Nx tag scope:fixture as a rule", () => {
+    it.effect("flags adr-enforcement-mismatch when Decision Outcome references unconfigured Nx tag scope:fixture as a rule", () =>
+      Effect.gen(function* () {
       const adrWithScopeFixture = `---
 id: test:ADR-0001
 title: Test ADR
@@ -2535,7 +2594,7 @@ Every domain fixture must have the scope:fixture tag applied in project.json.
 | --- | --- | --- | --- |
 | Check Rule | libs/harness/gates/src/adr-lint.ts | AdrDocLint.decide | \`AdrDocLint.decide\` |
 `
-      const report = lintAdrDocMarkdown("docs/adr/test.md", adrWithScopeFixture)
+      const report = yield* decideAdrDocQuality({ docPath: "docs/adr/test.md", markdown: adrWithScopeFixture })
       expect(report.clean).toBe(false)
       const fixtureMismatch = report.findings.find(
         (f) => f.kind === "adr-enforcement-mismatch" && f.message.includes("scope:fixture"),
@@ -2544,7 +2603,8 @@ Every domain fixture must have the scope:fixture tag applied in project.json.
       expect(fixtureMismatch?.message).toContain(
         "references unconfigured Nx tag 'scope:fixture' as a rule — 'scope:fixture' is not configured in nx.json.",
       )
-    })
+    }),
+    )
 
     it.effect(
       "flags shallow-decider-property-test when decider property test only has scalar/primitive arbitraries",
@@ -2709,8 +2769,9 @@ spans:
         }),
     )
 
-    describe("scanWorkspacePackageHygiene", () => {
-      it("detects empty-source-module and unused-package-dependency with scanWorkspacePackageHygiene", () => {
+    describe("evaluatePackageAndMigrationPlugin", () => {
+      it.effect("detects empty-source-module and unused-package-dependency with evaluatePackageAndMigrationPlugin", () =>
+        Effect.gen(function* () {
         const tempDir = mkdtempSync(join(tmpdir(), "harness-hygiene-test-"))
         try {
           const domainPkgDir = join(tempDir, "libs", "sample", "domain")
@@ -2742,7 +2803,11 @@ export {};
 
           writeFileSync(join(srcDir, "index.ts"), `export const value = 42\n`)
 
-          const findings = scanWorkspacePackageHygiene(tempDir)
+          const findings = yield* evaluatePackageAndMigrationPlugin({
+            graph: buildHarnessGraph({}),
+            workspaceRoot: tempDir,
+            hostIo: testHostIo,
+          })
 
           const emptyModuleFinding = findings.find(
             (f) =>
@@ -2765,9 +2830,11 @@ export {};
         } finally {
           rmSync(tempDir, { recursive: true, force: true })
         }
-      })
+      }),
+      )
 
-      it("detects unused-contract-export with scanWorkspacePackageHygiene", () => {
+      it.effect("detects unused-contract-export with evaluatePackageAndMigrationPlugin", () =>
+        Effect.gen(function* () {
         const tempDir = mkdtempSync(join(tmpdir(), "harness-contract-test-"))
         try {
           const contractSrcDir = join(tempDir, "libs", "sample", "contract", "src")
@@ -2785,7 +2852,11 @@ export {};
             `import { UsedContract } from "../contract/src/index.js";\nconsole.log(UsedContract);\n`,
           )
 
-          const findings = scanWorkspacePackageHygiene(tempDir)
+          const findings = yield* evaluatePackageAndMigrationPlugin({
+            graph: buildHarnessGraph({}),
+            workspaceRoot: tempDir,
+            hostIo: testHostIo,
+          })
 
           const unusedFindings = findings.filter((f) => f.kind === "unused-contract-export")
           expect(unusedFindings.length).toBe(3)
@@ -2804,9 +2875,11 @@ export {};
         } finally {
           rmSync(tempDir, { recursive: true, force: true })
         }
-      })
+      }),
+      )
 
-      it("detects dead-tagged-error when a contract Schema.TaggedError is referenced only in type positions and never constructed at runtime", () => {
+      it.effect("detects dead-tagged-error when a contract Schema.TaggedError is referenced only in type positions and never constructed at runtime", () =>
+        Effect.gen(function* () {
         const tempDir = mkdtempSync(join(tmpdir(), "harness-dead-error-test-"))
         try {
           const contractSrcDir = join(tempDir, "libs", "sample", "contract", "src")
@@ -2824,7 +2897,11 @@ export {};
             `import { Effect } from "effect";\nimport { ConstructedError, type PhantomError } from "../contract/src/index.js";\nexport const run = (): Effect.Effect<void, ConstructedError | PhantomError> => Effect.fail(new ConstructedError({}));\n`,
           )
 
-          const findings = scanWorkspacePackageHygiene(tempDir)
+          const findings = yield* evaluatePackageAndMigrationPlugin({
+            graph: buildHarnessGraph({}),
+            workspaceRoot: tempDir,
+            hostIo: testHostIo,
+          })
           const deadErrorFindings = findings.filter((f) => f.kind === "dead-tagged-error")
           expect(deadErrorFindings).toHaveLength(1)
           expect(deadErrorFindings[0]?.nodeId).toBe("sample/contract:PhantomError")
@@ -2834,9 +2911,11 @@ export {};
         } finally {
           rmSync(tempDir, { recursive: true, force: true })
         }
-      })
+      }),
+      )
 
-      it("enforces SQL migration hygiene and safety across libs/*/infra packages", () => {
+      it.effect("enforces SQL migration hygiene and safety across libs/*/infra packages", () =>
+        Effect.gen(function* () {
         const tempDir = mkdtempSync(join(tmpdir(), "harness-sql-hygiene-test-"))
         try {
           const infraSrcDir = join(tempDir, "libs", "sample", "infra", "src")
@@ -2883,7 +2962,11 @@ export {};
           mkdirSync(migrationsDir, { recursive: true })
           writeFileSync(join(migrationsDir, "0002_drop.sql"), "DROP TABLE old_table;\n")
 
-          const findings = scanWorkspacePackageHygiene(tempDir)
+          const findings = yield* evaluatePackageAndMigrationPlugin({
+            graph: buildHarnessGraph({}),
+            workspaceRoot: tempDir,
+            hostIo: testHostIo,
+          })
 
           // Check unmanaged-sql-ddl
           const unmanagedFindings = findings.filter(
@@ -2923,7 +3006,7 @@ export {};
           )
           expect(duplicateKeyFinding).toBeDefined()
           expect(duplicateKeyFinding?.message).toContain(
-            'Duplicate SqliteMigrator.fromRecord migration id "1" in key "1_second"',
+            "Duplicate migration version prefix '1_' in SqliteMigrator.fromRecord",
           )
 
           // Check multiline Effect.gen second key invalid format
@@ -2945,7 +3028,7 @@ export {};
           )
           expect(spreadDuplicateFinding).toBeDefined()
           expect(spreadDuplicateFinding?.message).toContain(
-            'Duplicate SqliteMigrator.fromRecord migration id "1" in key "1_second"',
+            "Duplicate migration version prefix '1_' in SqliteMigrator.fromRecord",
           )
 
           // Check unsafe-sql-migration from TS file
@@ -2984,7 +3067,11 @@ export {};
             `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nconst aggregateCoreMigrations = {\n  "1_init_foo": sql\`CREATE TABLE IF NOT EXISTS foo (id INT);\`,\n};\nexport const cleanMigrations = SqliteMigrator.fromRecord({\n  ...aggregateCoreMigrations,\n  "2_init_bar": sql\`CREATE TABLE IF NOT EXISTS bar (id INT);\`,\n});\nexport const runAggregateMigrations = SqliteMigrator.run({ loader: cleanMigrations });\nexport const projectorCoreMigrations = {\n  "1_init_projector": sql\`CREATE TABLE IF NOT EXISTS proj (id INT);\`,\n};\nexport const runProjectorMigrations = SqliteMigrator.run({\n  loader: SqliteMigrator.fromRecord(projectorCoreMigrations),\n  table: "es_projector_sql_migrations",\n});\n`,
           )
 
-          const cleanFindings = scanWorkspacePackageHygiene(cleanTempDir)
+          const cleanFindings = yield* evaluatePackageAndMigrationPlugin({
+            graph: buildHarnessGraph({}),
+            workspaceRoot: cleanTempDir,
+            hostIo: testHostIo,
+          })
           expect(cleanFindings).toHaveLength(0)
         } finally {
           rmSync(cleanTempDir, { recursive: true, force: true })
@@ -3006,7 +3093,11 @@ export {};
             `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nexport const projectorCoreMigrations = {\n  "2_init_projector": sql\`CREATE TABLE IF NOT EXISTS proj (id INT);\`,\n};\nexport const runProj = SqliteMigrator.run({ loader: SqliteMigrator.fromRecord(projectorCoreMigrations) });\nexport const decodeRow = (row: { readonly stream_version: number }) => StreamVersion.make(Math.max(0, row.stream_version));\n`,
           )
 
-          const collisionFindings = scanWorkspacePackageHygiene(collisionTempDir)
+          const collisionFindings = yield* evaluatePackageAndMigrationPlugin({
+            graph: buildHarnessGraph({}),
+            workspaceRoot: collisionTempDir,
+            hostIo: testHostIo,
+          })
 
           const startAtTwoFinding = collisionFindings.find(
             (f) =>
@@ -3048,7 +3139,8 @@ export {};
         } finally {
           rmSync(collisionTempDir, { recursive: true, force: true })
         }
-      })
+      }),
+      )
     })
 
     it("discovers guard-condition mutants for Equal.equals and Exit.isSuccess", () => {
@@ -3181,6 +3273,259 @@ errors:
         expect(finding?.message).toBe(
           'Unwanted behaviour requirement REQ-1.1 prose references error "UndeclaredCartError" which does not exist in referencedErrors or the workspace graph.',
         )
+      }),
+    )
+
+    it.effect(
+      "emits unreadable-workspace-file, inline-test-ddl-bypassing-migrations, and doc-truth findings",
+      () =>
+        Effect.gen(function* () {
+          const tempDir = mkdtempSync(join(tmpdir(), "gc-selftrust-"))
+          try {
+            mkdirSync(join(tempDir, "libs/sample/infra/src"), { recursive: true })
+            mkdirSync(join(tempDir, "libs/sample/infra/migrations"), { recursive: true })
+            mkdirSync(join(tempDir, "libs/sample/infra/test"), { recursive: true })
+            mkdirSync(join(tempDir, "adapters/claude-code/rules"), { recursive: true })
+            mkdirSync(join(tempDir, "adapters/antigravity/plugins/effect-harness/rules"), {
+              recursive: true,
+            })
+
+            writeFileSync(
+              join(tempDir, "libs/sample/infra/package.json"),
+              JSON.stringify({ name: "@sample/infra", nx: { tags: ["type:infra"] } }),
+            )
+            writeFileSync(join(tempDir, "libs/sample/infra/project.json"), "{bad json")
+            writeFileSync(
+              join(tempDir, "libs/sample/infra/src/index.ts"),
+              "export const ok = 1\n",
+            )
+            writeFileSync(
+              join(tempDir, "libs/sample/infra/migrations/0001_init.sql"),
+              "CREATE TABLE t (id TEXT PRIMARY KEY);\n",
+            )
+            writeFileSync(
+              join(tempDir, "libs/sample/infra/test/bypass.test.ts"),
+              'export const ddl = "CREATE TABLE t (id TEXT PRIMARY KEY)"\n',
+            )
+            writeFileSync(
+              join(tempDir, "README.md"),
+              "See `@harness/nonexistent`, `harness/bogus-rule`, `libs/missing/file.ts`.\n",
+            )
+            writeFileSync(
+              join(tempDir, "AGENTS.md"),
+              "## Rules\nA\n## Rules\nB\n",
+            )
+            writeFileSync(
+              join(tempDir, "adapters/claude-code/rules/AGENTS.md"),
+              "## Drifted\n",
+            )
+            writeFileSync(
+              join(tempDir, "adapters/claude-code/hooks.json"),
+              JSON.stringify({
+                hooks: { PreToolUse: [{ hooks: [{ type: "command", command: "x" }] }] },
+              }),
+            )
+
+            const failingIo = {
+              ...testHostIo,
+              readTextSync: (p: string) => {
+                if (p.endsWith("libs/sample/infra/src/index.ts")) {
+                  throw new Error("EACCES: permission denied")
+                }
+                return testHostIo.readTextSync(p)
+              },
+            }
+
+            const pkgFindings = yield* evaluatePackageAndMigrationPlugin({
+              graph: buildHarnessGraph({}),
+              workspaceRoot: tempDir,
+              hostIo: failingIo,
+            })
+            expect(pkgFindings.some((f) => f.kind === "unreadable-workspace-file")).toBe(true)
+            expect(
+              pkgFindings.some(
+                (f) =>
+                  f.kind === "architecture-policy-violation" &&
+                  f.nodeId === "libs/sample/infra/project.json:corrupt-manifest",
+              ),
+            ).toBe(true)
+            expect(
+              pkgFindings.some((f) => f.kind === "inline-test-ddl-bypassing-migrations"),
+            ).toBe(true)
+
+            const docFindings = evaluateDocTruthPlugin({
+              graph: buildHarnessGraph({}),
+              workspaceRoot: tempDir,
+              hostIo: failingIo,
+            })
+            expect(docFindings.some((f) => f.kind === "doc-unknown-package-name")).toBe(true)
+            expect(docFindings.some((f) => f.kind === "doc-unknown-rule-id")).toBe(true)
+            expect(docFindings.some((f) => f.kind === "doc-missing-file-path")).toBe(true)
+            expect(docFindings.some((f) => f.kind === "agents-duplicate-section")).toBe(true)
+            expect(docFindings.some((f) => f.kind === "adapter-rules-drift")).toBe(true)
+            expect(docFindings.some((f) => f.kind === "hook-timeout-parity")).toBe(true)
+          } finally {
+            rmSync(tempDir, { recursive: true, force: true })
+          }
+        }),
+    )
+
+    it("closes SqliteMigrator.fromRecord AST bypasses (namespace import, unresolved spread, duplicates, gaps)", () => {
+      const unresolvedImport = analyzeSqliteMigratorFromRecordAst({
+        filePath: "libs/sample/infra/src/m.ts",
+        content: `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { importedMigrations } from "./other.js";\nexport const m = SqliteMigrator.fromRecord({ ...importedMigrations });`,
+      })
+      expect(unresolvedImport.keyIssues.some((i) => i.message.includes("Unresolved spread '...importedMigrations'"))).toBe(true)
+
+      const onlyParam = analyzeSqliteMigratorFromRecordAst({
+        filePath: "libs/sample/infra/src/m.ts",
+        content: `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nexport const make = (extra: Record<string, unknown>) => SqliteMigrator.fromRecord({ ...extra });`,
+      })
+      expect(onlyParam.keyIssues.some((i) => i.message.includes("Unresolved spread '...extra'"))).toBe(true)
+
+      const paramPlusStatic = analyzeSqliteMigratorFromRecordAst({
+        filePath: "libs/sample/infra/src/m.ts",
+        content: `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nexport const make = (extra: Record<string, unknown>) => SqliteMigrator.fromRecord({ "1_init": "ok", ...extra });`,
+      })
+      expect(paramPlusStatic.keyIssues).toHaveLength(0)
+
+      const dupPrefix = analyzeSqliteMigratorFromRecordAst({
+        filePath: "libs/sample/infra/src/m.ts",
+        content: `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nexport const m = SqliteMigrator.fromRecord({ "1_a": "x", "1_b": "y" });`,
+      })
+      expect(dupPrefix.keyIssues.some((i) => i.message.includes("Duplicate migration version prefix '1_'"))).toBe(true)
+
+      const startAtTwo = analyzeSqliteMigratorFromRecordAst({
+        filePath: "libs/sample/infra/src/m.ts",
+        content: `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nexport const m = SqliteMigrator.fromRecord({ "2_start": "x" });`,
+      })
+      expect(startAtTwo.keyIssues.some((i) => i.message.includes("Non-contiguous migration version sequence"))).toBe(true)
+
+      const nsSqlDo = analyzeSqliteMigratorFromRecordAst({
+        filePath: "libs/sample/infra/src/m.ts",
+        content: `import * as SqlDo from "@effect/sql-sqlite-do";\nexport const m = SqlDo.SqliteMigrator.fromRecord({ "badKey": "x" });`,
+      })
+      expect(nsSqlDo.fromRecordCallCount).toBe(1)
+      expect(nsSqlDo.keyIssues.some((i) => i.key === "badKey")).toBe(true)
+    })
+
+    it("catches unscoped-effect-run namespace, computed-element, and destructuring bypasses in ast-gate-visitors", () => {
+      const checkFile = (code: string) => {
+        const sf = ts.createSourceFile("libs/sample/domain/src/bypass.ts", code, ts.ScriptTarget.Latest, true)
+        return visitSourceFileSinglePass(sf, "libs/sample/domain/src/bypass.ts", "domain")
+      }
+      expect(
+        checkFile(`import * as Fx from "effect"; export const x = Fx.Effect.runSync(Fx.Effect.succeed(1));`).some(
+          (v) => v.rule === "unscoped-effect-run",
+        ),
+      ).toBe(true)
+      expect(
+        checkFile(`import { Effect } from "effect"; export const x = Effect["runSync"](Effect.succeed(1));`).some(
+          (v) => v.rule === "unscoped-effect-run",
+        ),
+      ).toBe(true)
+      expect(
+        checkFile(`import * as Fx from "effect"; export const x = Fx["Effect"]["runSync"](Fx.Effect.succeed(1));`).some(
+          (v) => v.rule === "unscoped-effect-run",
+        ),
+      ).toBe(true)
+      expect(
+        checkFile(`export const run = (rt: any) => rt["runSync"](1);`).some(
+          (v) => v.rule === "unscoped-effect-run",
+        ),
+      ).toBe(true)
+      expect(
+        checkFile(`import { Effect } from "effect"; const { runSync } = Effect; export const x = runSync(Effect.succeed(1));`).some(
+          (v) => v.rule === "unscoped-effect-run",
+        ),
+      ).toBe(true)
+      expect(
+        checkFile(`import { Effect } from "effect"; const { runPromise: rp } = Effect; export const x = rp(Effect.succeed(1));`).some(
+          (v) => v.rule === "unscoped-effect-run",
+        ),
+      ).toBe(true)
+      expect(
+        checkFile(`import * as Fx from "effect"; const { Effect: { runSync: r } } = Fx; export const x = r(Fx.Effect.succeed(1));`).some(
+          (v) => v.rule === "unscoped-effect-run",
+        ),
+      ).toBe(true)
+    })
+
+    it.effect("catches pipe/match silent-gate-fs-fallback and exposes loadGovernanceDocsChecked", () =>
+      Effect.gen(function* () {
+        const pipeCode = `import { Result } from "effect"; export const f = (io: any) => Result.try(() => io.readTextSync("a")).pipe(Result.getOrElse(() => ""));`
+        const matchCode = `import { Result } from "effect"; import { match } from "ts-pattern"; export const f = (io: any) => match(Result.try(() => io.readTextSync("a"))).with({ _tag: "Success" }, ({ success }) => success).with({ _tag: "Failure" }, () => "").exhaustive();`
+
+        const sfPipe = ts.createSourceFile("libs/harness/gates/src/example.ts", pipeCode, ts.ScriptTarget.Latest, true)
+        const sfMatch = ts.createSourceFile("libs/harness/gates/src/example.ts", matchCode, ts.ScriptTarget.Latest, true)
+        expect(visitSourceFileSinglePass(sfPipe, "libs/harness/gates/src/example.ts").some((v) => v.rule === "silent-gate-fs-fallback")).toBe(true)
+        expect(visitSourceFileSinglePass(sfMatch, "libs/harness/gates/src/example.ts").some((v) => v.rule === "silent-gate-fs-fallback")).toBe(true)
+
+        const dogfoodReport = yield* decideSelfDogfooding({
+          files: [
+            { filePath: AstSourceFilePath.make("libs/harness/gates/src/pipe-ex.ts"), content: AstSourceContent.make(pipeCode) },
+            { filePath: AstSourceFilePath.make("libs/harness/gates/src/match-ex.ts"), content: AstSourceContent.make(matchCode) },
+          ],
+        })
+        expect(dogfoodReport.violations.filter((v) => v.rule === "silent-gate-fs-fallback").length).toBeGreaterThanOrEqual(2)
+
+        const checkedEmpty = loadGovernanceDocsChecked("/non/existent/repo/root", testHostIo)
+        expect(checkedEmpty.docs).toEqual([])
+        expect(checkedEmpty.findings).toEqual([])
+      }),
+    )
+
+    it.effect("enforces peerDependencies tier checks and infra->app name fallback when app is omitted from manifests", () =>
+      Effect.gen(function* () {
+        const tempDir = mkdtempSync(join(tmpdir(), "harness-peer-dep-test-"))
+        try {
+          const domDir = join(tempDir, "libs", "sample", "domain")
+          mkdirSync(join(domDir, "src"), { recursive: true })
+          writeFileSync(
+            join(domDir, "package.json"),
+            JSON.stringify({
+              name: "@harness/sample-domain",
+              nx: { tags: ["type:domain"] },
+              peerDependencies: { alchemy: "*" },
+            }),
+          )
+          writeFileSync(join(domDir, "src", "index.ts"), "export const x = 1;\n")
+          const findings = yield* evaluatePackageAndMigrationPlugin({
+            graph: buildHarnessGraph({}),
+            workspaceRoot: tempDir,
+            hostIo: testHostIo,
+          })
+          expect(
+            findings.some(
+              (f) =>
+                f.kind === "architecture-policy-violation" &&
+                f.nodeId.includes("forbidden-domain-dependency") &&
+                f.message.includes("alchemy"),
+            ),
+          ).toBe(true)
+        } finally {
+          rmSync(tempDir, { recursive: true, force: true })
+        }
+
+        const topologyReport = yield* decideHarnessTierTopology({
+          manifests: [
+            {
+              manifestPath: PackageManifestPath.make("libs/sample/infra/package.json"),
+              packageName: PackageManifestName.make("@harness/sample-infra"),
+              nxTags: [NxTierTag.make("type:infra")],
+              scopeTags: [],
+              dependencyNames: [PackageDependencyName.make("harness-cli")],
+              nonRuntimeDependencyNames: [],
+            },
+          ],
+          serviceFiles: [],
+          workspaceSourceFiles: [],
+        })
+        expect(
+          topologyReport.violations.some(
+            (v) => v.rule === "forbidden-infra-dependency" && v.message.includes("harness-cli"),
+          ),
+        ).toBe(true)
       }),
     )
   })

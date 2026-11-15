@@ -261,7 +261,8 @@ export const findPhase3CodeRepairPatches = (
           line: 1,
         })
         insertedEdges.push(makePlaysRoleEdge(traceRelId, errKey, "realizing-symbol"))
-      } else if (isSvc) {
+      }
+      if (!isErr && isSvc) {
         const svcKey = `ServiceTag:${missingSymbol}`
         insertedEntities.push({
           _tag: "ServiceTag",

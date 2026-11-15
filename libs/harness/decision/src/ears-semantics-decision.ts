@@ -9,7 +9,6 @@ import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match, P } from "ts-pattern"
 import { type DeterministicFallbackReason, PriorSource } from "./hole-prior-decision.js"
-import { assertDecisionLimits } from "./idiom-router.js"
 
 export const EARS_GUARD_RELATION_CRITERIA: Readonly<
   Record<
@@ -90,7 +89,6 @@ export const buildEarsClauseSemanticsDecision = (
       }),
     },
   })
-  assertDecisionLimits(definition)
   return definition
 }
 

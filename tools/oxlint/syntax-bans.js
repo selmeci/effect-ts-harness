@@ -19,7 +19,7 @@ const fetchBanMessage =
 const secretConfigMessage =
   "Sensitive configuration keys (SECRET, TOKEN, PASSWORD, API_KEY, PRIVATE_KEY, CREDENTIAL) must use Config.redacted(...) instead of Config.string(...) to prevent leaking secrets in logs and spans."
 const sqlInterpolationMessage =
-  "Raw SQL template interpolation in .exec(`...${...}`) or .prepare(`...${...}`) is banned (SQL injection risk) — use parameterized queries or Drizzle ORM."
+  "Raw SQL template interpolation in .exec(`...${...}`) or .prepare(`...${...}`) is banned (SQL injection risk) — use parameterized queries via @effect/sql SqlClient."
 const impureDomainGlobalMessage =
   "Impure global Date.now() / new Date() / Math.random() is banned in type:domain — pass timestamps/randomness via input or use Effect Clock / Random services so domain deciders remain deterministic."
 const foreverRetryMessage =
@@ -52,6 +52,178 @@ const doubleTypeAssertionBanMessage =
   "Double type assertions ('as unknown as T') are banned — decode untrusted data with Effect Schema or type the interface properly instead of erasing types."
 const nodeSqliteInfraMessage = (source, filename) =>
   `Do not import '${source}' in type:infra or type:app ('${filename}') — execute Cloudflare Durable Object SQLite and D1 storages against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006, node-sqlite-in-infra).`
+const bannedDrizzleMessage = (source, filename) =>
+  `banned-drizzle-import: '${source}' is banned across the workspace in '${filename}' — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator).`
+const dynamicHarnessImportMessage = (source, filename) =>
+  `dynamic-harness-import: Dynamic import('${source}') in '${filename}' is banned because @nx/eslint-plugin enforce-module-boundaries crashes under TS7 when dynamic import("@harness/...") is mixed with static imports — use a top-level static import instead.`
+const invalidClefEndpointMessage =
+  "[invalid-clef-endpoint] System One models (clef-flash) only expose POST /v1/systemone (and GET /v1/models or GET /api/tags). Never call /api/generate, /api/chat, or /v1/chat/completions — use DecisionModel.decide (@effect/ai-typesafe) per agent-patterns/decision-model.md."
+
+function isInvalidClefEndpointLiteralText(text) {
+  if (typeof text !== "string" || text.length === 0) return false
+  if (/11434\/(?:api\/(?:generate|chat)|v1\/(?:chat\/completions|completions))\b/i.test(text)) {
+    return true
+  }
+  return /(?:11434|\bclef(?:-flash)?\b)/i.test(text) && /\/api\/(?:generate|chat)\b/i.test(text)
+}
+
+function isClefEndpointCheckedSrcFile(filename) {
+  if (typeof filename !== "string") return false
+  if (/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(filename)) return false
+  if (!/(?:^|\/)src\//.test(filename)) return false
+  return !/(?:^|\/)(?:triage-decision|policy|ast-gate-visitors)\.ts$/.test(filename)
+}
+
+function isDrizzleSpecifier(spec) {
+  return (
+    typeof spec === "string" &&
+    (spec === "drizzle-orm" ||
+      spec.startsWith("drizzle-orm/") ||
+      spec === "drizzle-kit" ||
+      spec.startsWith("drizzle-kit/"))
+  )
+}
+
+function getStaticModuleString(node) {
+  if (node == null) return null
+  if (node.type === "Literal" && typeof node.value === "string") {
+    return node.value
+  }
+  if (
+    node.type === "TemplateLiteral" &&
+    Array.isArray(node.expressions) &&
+    node.expressions.length === 0 &&
+    Array.isArray(node.quasis) &&
+    node.quasis.length === 1
+  ) {
+    const q = node.quasis[0]
+    return q != null && q.value != null ? (q.value.cooked ?? q.value.raw ?? null) : null
+  }
+  return null
+}
+
+function getModulePrefixOrStaticString(node) {
+  const staticStr = getStaticModuleString(node)
+  if (staticStr != null) return staticStr
+  if (
+    node != null &&
+    node.type === "TemplateLiteral" &&
+    Array.isArray(node.quasis) &&
+    node.quasis.length > 0
+  ) {
+    const q = node.quasis[0]
+    return q != null && q.value != null ? (q.value.cooked ?? q.value.raw ?? null) : null
+  }
+  return null
+}
+
+function isRequireCallee(callee) {
+  if (callee == null) return false
+  if (isIdentifier(callee, "require")) return true
+  return (
+    callee.type === "MemberExpression" &&
+    callee.computed !== true &&
+    isIdentifier(callee.property, "require")
+  )
+}
+
+const LEGACY_PROCESS_ENV_BRIDGE_PATHS = new Set([
+  "libs/harness/graph/src/cluster-resolver.ts",
+  "libs/harness/graph/src/omnigraph-sync.ts",
+  "libs/harness/gates/src/verify-stamp.ts",
+  "libs/harness/gates/src/worktree.ts",
+  "libs/harness/gates/src/mutation-check.ts",
+  "libs/harness/gates/src/dst-engine.ts",
+  "libs/harness/gates/src/services/active-mutant-context.ts",
+])
+
+function isPureTierProcessEnvBannedPath(filename) {
+  const libsMatch = /(?:^|\/)(libs\/[^/]+\/[^/]+\/src\/.*)$/.exec(filename)
+  if (libsMatch == null) return false
+  const relLibsPath = libsMatch[1]
+  if (relLibsPath == null) return false
+  if (/^libs\/[^/]+\/infra\/src\//.test(relLibsPath)) return false
+  return !LEGACY_PROCESS_ENV_BRIDGE_PATHS.has(relLibsPath)
+}
+
+function unwrapEstreeExpr(node) {
+  let curr = node
+  while (
+    curr != null &&
+    (curr.type === "TSAsExpression" ||
+      curr.type === "TSTypeAssertion" ||
+      curr.type === "TSSatisfiesExpression" ||
+      curr.type === "TSNonNullExpression" ||
+      curr.type === "ParenthesizedExpression" ||
+      curr.type === "ChainExpression")
+  ) {
+    curr = curr.expression
+  }
+  return curr
+}
+
+function isProcessTargetAst(node) {
+  const target = unwrapEstreeExpr(node)
+  if (target == null) return false
+  if (isIdentifier(target, "process")) return true
+  if (target.type !== "MemberExpression") return false
+  if (!isIdentifier(target.object, "globalThis")) return false
+  if (target.computed !== true) {
+    return isIdentifier(target.property, "process")
+  }
+  return getStaticModuleString(target.property) === "process"
+}
+
+function isProcessEnvMemberAst(node) {
+  if (node == null || node.type !== "MemberExpression") return false
+  const propName =
+    node.computed !== true && node.property?.type === "Identifier"
+      ? node.property.name
+      : node.computed === true
+        ? getStaticModuleString(node.property)
+        : null
+  return propName === "env" && isProcessTargetAst(node.object)
+}
+
+function isProcessEnvDestructuringAst(node) {
+  if (
+    node == null ||
+    node.type !== "VariableDeclarator" ||
+    node.id?.type !== "ObjectPattern" ||
+    node.init == null ||
+    !isProcessTargetAst(node.init)
+  ) {
+    return false
+  }
+  return node.id.properties.some((prop) => {
+    if (prop.type !== "Property") return false
+    if (!prop.computed && prop.key?.type === "Identifier") {
+      return prop.key.name === "env"
+    }
+    return getStaticModuleString(prop.key) === "env"
+  })
+}
+
+function collectLogicalAndTermsAst(expr, out) {
+  const u = unwrapEstreeExpr(expr)
+  if (u != null && u.type === "LogicalExpression" && u.operator === "&&") {
+    collectLogicalAndTermsAst(u.left, out)
+    collectLogicalAndTermsAst(u.right, out)
+    return
+  }
+  if (u != null) out.push(u)
+}
+
+function isNegatedCauseMethodCallAst(term, methodName, expectedArgText, context) {
+  const u = unwrapEstreeExpr(term)
+  if (u == null || u.type !== "UnaryExpression" || u.operator !== "!") return false
+  const call = unwrapEstreeExpr(u.argument)
+  if (call == null || call.type !== "CallExpression") return false
+  if (getCalleeName(call.callee) !== `Cause.${methodName}`) return false
+  const arg = Array.isArray(call.arguments) ? call.arguments[0] : undefined
+  if (arg == null) return false
+  return getNodeSourceText(context, unwrapEstreeExpr(arg)) === expectedArgText
+}
 
 const BOOLEAN_STATE_PROP_REGEX =
   /^(is[A-Z]|has[A-Z]|checkedOut|created|completed|cancelled|canceled|deleted|archived|active|closed|opened|approved|rejected|verified|publish|published|expired)$/
@@ -63,8 +235,8 @@ const DISCRIMINANT_CALLBACK_METHODS = new Set(["filter", "find", "some", "every"
 
 const DISCRIMINANT_PROP_NAMES = new Set(["_tag", "kind", "status", "verdict", "role", "state"])
 
-function isTierOrSampleAppFile(filename) {
-  return /(^|\/)(libs\/[^/]+\/(contract|domain|core|service|infra)|apps\/sample(?:-web)?)\//.test(filename)
+export function isEnforcedWorkspaceFile(filename) {
+  return /(^|\/)(libs\/[^/]+\/[^/]+|apps\/[^/]+)\//.test(filename)
 }
 
 function isDiscriminantMemberAccess(node) {
@@ -812,32 +984,55 @@ function getPropertyKeyName(prop) {
   return null
 }
 
+function getSourceCode(context) {
+  if (context == null) return undefined
+  if (context.sourceCode != null) return context.sourceCode
+  if (typeof context.getSourceCode === "function") {
+    try {
+      return context.getSourceCode()
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
+}
+
+function readFullSourceText(sc, programNode) {
+  if (sc == null) return undefined
+  const hasBody = Array.isArray(programNode?.body) && programNode.body.length > 0
+  if (typeof sc.text === "string") {
+    if (sc.text.length === 0 && hasBody) return undefined
+    return sc.text
+  }
+  if (typeof sc.getText === "function") {
+    try {
+      const text = sc.getText(programNode)
+      if (typeof text === "string") {
+        if (text.length === 0 && hasBody) return undefined
+        return text
+      }
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
+}
+
 function getNodeSourceText(context, node) {
   if (node == null) return ""
   if (node.rawSource && typeof node.rawSource === "string") {
     return node.rawSource
   }
-  if (context.sourceCode && typeof context.sourceCode.getText === "function") {
+  const sc = getSourceCode(context)
+  if (sc && typeof sc.getText === "function") {
     try {
-      const text = context.sourceCode.getText(node)
+      const text = sc.getText(node)
       if (typeof text === "string" && text.length > 0) return text
     } catch {
       // fallback
     }
   }
-  if (typeof context.getSourceCode === "function") {
-    try {
-      const sc = context.getSourceCode()
-      if (sc && typeof sc.getText === "function") {
-        const text = sc.getText(node)
-        if (typeof text === "string" && text.length > 0) return text
-      }
-    } catch {
-      // fallback
-    }
-  }
-  const fullText =
-    context.sourceCode && typeof context.sourceCode.text === "string" ? context.sourceCode.text : ""
+  const fullText = sc && typeof sc.text === "string" ? sc.text : ""
   if (fullText) {
     if (Array.isArray(node.range) && node.range.length >= 2) {
       return fullText.slice(node.range[0], node.range[1])
@@ -845,7 +1040,6 @@ function getNodeSourceText(context, node) {
     if (typeof node.start === "number" && typeof node.end === "number") {
       return fullText.slice(node.start, node.end)
     }
-    return fullText
   }
   return ""
 }
@@ -1201,8 +1395,100 @@ const syntaxBans = {
     const declaredBrandKeys = new Map()
     const migrationRecordVars = new Map()
     const allowedDdlTemplateNodes = new Set()
+    const effectModuleNamespaceNames = new Set()
+    const effectNamespaceNames = new Set(["Effect"])
+    const bannedRunAliases = new Map()
     let hasSqliteMigratorImport = false
     const reportedNodes = new WeakSet()
+
+    const unwrapEstree = (n) => {
+      let cur = n
+      while (
+        cur != null &&
+        (cur.type === "TSAsExpression" ||
+          cur.type === "TSTypeAssertion" ||
+          cur.type === "TSNonNullExpression" ||
+          cur.type === "ParenthesizedExpression")
+      ) {
+        cur = cur.expression
+      }
+      return cur
+    }
+
+    const isEffectNamespaceExpr = (expr) => {
+      const u = unwrapEstree(expr)
+      if (u == null) return false
+      if (u.type === "Identifier") return effectNamespaceNames.has(u.name)
+      if (u.type === "MemberExpression") {
+        const propName =
+          u.computed !== true && u.property?.type === "Identifier"
+            ? u.property.name
+            : u.computed === true
+              ? getStaticModuleString(u.property)
+              : null
+        if (propName === "Effect") {
+          const inner = unwrapEstree(u.object)
+          return inner != null && inner.type === "Identifier" && effectModuleNamespaceNames.has(inner.name)
+        }
+      }
+      return false
+    }
+
+    const isBannedEffectRunMethodName = (methodName, filename) => {
+      if (
+        methodName === "runSync" ||
+        methodName === "runSyncExit" ||
+        methodName === "runSyncWith" ||
+        methodName === "runCallback" ||
+        methodName === "runCallbackWith" ||
+        methodName === "runPromise" ||
+        methodName === "runPromiseWith"
+      ) {
+        return true
+      }
+      const isMcpRunPromiseExitBoundary =
+        /(?:^|\/)apps\/harness-mcp\/src\/(?:server|daemon\/unix-socket-daemon)\.ts$/.test(filename)
+      if (methodName === "runPromiseExit") return !isMcpRunPromiseExitBoundary
+      if (methodName === "runFork" || methodName === "runForkWith") {
+        return !/(?:^|\/)apps\/[^/]+\/src\//.test(filename)
+      }
+      return false
+    }
+
+    const getEstreeBindingPropName = (prop) => {
+      if (prop == null || prop.type !== "Property") return null
+      if (prop.computed !== true) {
+        if (prop.key?.type === "Identifier") return prop.key.name
+        if (prop.key?.type === "Literal" && typeof prop.key.value === "string") return prop.key.value
+        return null
+      }
+      return getStaticModuleString(prop.key)
+    }
+
+    const hasResultTryFsReadEstree = (text) =>
+      text.includes("Result.try") && /(?:readTextSync|readdirSync|readBytesSync)/.test(text)
+
+    const isSilentEmptyFallbackEstree = (fnNode, allowExtended) => {
+      const fn = unwrapEstree(fnNode)
+      if (fn == null || (fn.type !== "ArrowFunctionExpression" && fn.type !== "FunctionExpression")) {
+        return false
+      }
+      let expr = fn.body
+      if (expr != null && expr.type === "BlockStatement") {
+        if (!Array.isArray(expr.body) || expr.body.length !== 1 || expr.body[0]?.type !== "ReturnStatement") {
+          return false
+        }
+        expr = expr.body[0].argument
+      }
+      if (expr == null) return false
+      if (expr.type === "Literal" && expr.value === "") return true
+      if (expr.type === "ArrayExpression" && expr.elements.length === 0) return true
+      if (!allowExtended) return false
+      if (expr.type === "ObjectExpression" && expr.properties.length === 0) return true
+      if (expr.type === "Identifier" && expr.name === "undefined") return true
+      if (expr.type === "Literal" && expr.value === false) return true
+      return false
+    }
 
     function reportOnce(node, message) {
       if (node != null && typeof node === "object") {
@@ -1644,6 +1930,15 @@ const syntaxBans = {
 
     return {
       Program(node) {
+        const sc = getSourceCode(context)
+        const rawText = readFullSourceText(sc, node)
+        if (rawText === undefined) {
+          context.report({
+            node,
+            message:
+              "missing-source-code: Unable to access sourceCode.text or sourceCode.getText() for AST inspection.",
+          })
+        }
         discriminantAliasNames.clear()
         schemaVarNames.clear()
         brandedTypeNames.clear()
@@ -1651,6 +1946,10 @@ const syntaxBans = {
         declaredBrandKeys.clear()
         migrationRecordVars.clear()
         allowedDdlTemplateNodes.clear()
+        effectModuleNamespaceNames.clear()
+        effectNamespaceNames.clear()
+        effectNamespaceNames.add("Effect")
+        bannedRunAliases.clear()
         hasSqliteMigratorImport = false
         if (node.body && Array.isArray(node.body)) {
           for (const stmt of node.body) {
@@ -1695,10 +1994,7 @@ const syntaxBans = {
             }
           }
         }
-        const text =
-          context.sourceCode && typeof context.sourceCode.text === "string"
-            ? context.sourceCode.text
-            : ""
+        const text = rawText ?? ""
         if (
           /^\s*(\/\/|\/\*)\s*(oxlint-disable|eslint-disable)[^\n]*(effecttsgo\/|harness\/)/m.test(
             text,
@@ -1766,6 +2062,57 @@ const syntaxBans = {
           ) {
             reportOnce(node, nodeSqliteInfraMessage(importSource, filename))
           }
+          if (isDrizzleSpecifier(importSource)) {
+            reportOnce(node, bannedDrizzleMessage(importSource, filename))
+          }
+          if (
+            node.importKind !== "type" &&
+            (importSource === "effect" || importSource === "effect/Effect") &&
+            Array.isArray(node.specifiers)
+          ) {
+            const isEnforcedSrc =
+              !isTestFilePath(filename) &&
+              /(?:^|\/)(?:libs\/[^/]+\/[^/]+\/src|apps\/[^/]+\/src)\//.test(filename)
+            const isMcpRunPromiseExitBoundary =
+              /(?:^|\/)apps\/harness-mcp\/src\/(?:server|daemon\/unix-socket-daemon)\.ts$/.test(filename)
+            const isAppSrc = /(?:^|\/)apps\/[^/]+\/src\//.test(filename)
+            for (const spec of node.specifiers) {
+              if (spec == null || spec.importKind === "type") continue
+              if (spec.type === "ImportNamespaceSpecifier" && spec.local?.name) {
+                if (importSource === "effect") {
+                  effectModuleNamespaceNames.add(spec.local.name)
+                } else {
+                  effectNamespaceNames.add(spec.local.name)
+                }
+              } else if (spec.type === "ImportSpecifier") {
+                const importedName = spec.imported?.name ?? spec.local?.name
+                const localName = spec.local?.name
+                if (importSource === "effect" && importedName === "Effect" && localName) {
+                  effectNamespaceNames.add(localName)
+                }
+                if (importSource === "effect/Effect" && isEnforcedSrc && importedName != null) {
+                  const isBannedSync =
+                    importedName === "runSync" ||
+                    importedName === "runSyncExit" ||
+                    importedName === "runSyncWith"
+                  const isBannedCallback =
+                    importedName === "runCallback" || importedName === "runCallbackWith"
+                  const isBannedPromise =
+                    importedName === "runPromise" ||
+                    importedName === "runPromiseWith" ||
+                    (importedName === "runPromiseExit" && !isMcpRunPromiseExitBoundary)
+                  const isBannedFork =
+                    (importedName === "runFork" || importedName === "runForkWith") && !isAppSrc
+                  if (isBannedSync || isBannedCallback || isBannedPromise || isBannedFork) {
+                    context.report({
+                      node: spec,
+                      message: `unscoped-effect-run: 'Effect.${importedName}' import is banned in '${filename}' — compose Effects and execute via NodeRuntime.runMain or ManagedRuntime at the app edge.`,
+                    })
+                  }
+                }
+              }
+            }
+          }
         }
       },
       TSAnyKeyword(node) {
@@ -1776,19 +2123,45 @@ const syntaxBans = {
       },
       ImportExpression(node) {
         const filename = getNormalizedFilename()
+        const sourceVal = getStaticModuleString(node.source)
+        const drizzleSourceVal = getModulePrefixOrStaticString(node.source)
+        if (drizzleSourceVal != null && isDrizzleSpecifier(drizzleSourceVal)) {
+          reportOnce(node, bannedDrizzleMessage(drizzleSourceVal, filename))
+        }
+        if (
+          drizzleSourceVal != null &&
+          drizzleSourceVal.startsWith("@harness/") &&
+          /(?:^|\/)(?:libs|apps)\/.*\/(?:src|test)\//.test(filename)
+        ) {
+          reportOnce(node, dynamicHarnessImportMessage(drizzleSourceVal, filename))
+        }
         if (/(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename)) {
-          const sourceVal =
-            node.source != null &&
-            node.source.type === "Literal" &&
-            typeof node.source.value === "string"
-              ? node.source.value
-              : null
           if (
             sourceVal === "node:sqlite" ||
             sourceVal === "sqlite" ||
             sourceVal === "better-sqlite3"
           ) {
             reportOnce(node, nodeSqliteInfraMessage(sourceVal, filename))
+          }
+        }
+      },
+      TSImportEqualsDeclaration(node) {
+        const filename = getNormalizedFilename()
+        if (
+          node.moduleReference != null &&
+          node.moduleReference.type === "TSExternalModuleReference"
+        ) {
+          const importSource = getStaticModuleString(node.moduleReference.expression)
+          if (importSource != null && isDrizzleSpecifier(importSource)) {
+            reportOnce(node, bannedDrizzleMessage(importSource, filename))
+          }
+          if (
+            /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
+            (importSource === "node:sqlite" ||
+              importSource === "sqlite" ||
+              importSource === "better-sqlite3")
+          ) {
+            reportOnce(node, nodeSqliteInfraMessage(importSource, filename))
           }
         }
       },
@@ -1822,6 +2195,61 @@ const syntaxBans = {
       },
       VariableDeclarator(node) {
         checkNeverVariableDeclarator(context, node)
+        const filenameForRun = getNormalizedFilename()
+        if (
+          !isTestFilePath(filenameForRun) &&
+          isPureTierProcessEnvBannedPath(filenameForRun) &&
+          isProcessEnvDestructuringAst(node)
+        ) {
+          context.report({
+            node,
+            message:
+              "process-env-outside-infra-or-app: Direct process.env access is banned outside type:infra and type:app — inject Config or read environment variables in @harness/infra or apps/*.",
+          })
+        }
+        if (node.init != null) {
+          const unwrappedInit = unwrapEstree(node.init)
+          if (isEffectNamespaceExpr(unwrappedInit)) {
+            if (node.id?.type === "Identifier") {
+              effectNamespaceNames.add(node.id.name)
+            } else if (node.id?.type === "ObjectPattern" && Array.isArray(node.id.properties)) {
+              for (const prop of node.id.properties) {
+                const propName = getEstreeBindingPropName(prop)
+                if (
+                  propName != null &&
+                  prop.value?.type === "Identifier" &&
+                  isBannedEffectRunMethodName(propName, filenameForRun)
+                ) {
+                  bannedRunAliases.set(prop.value.name, propName)
+                }
+              }
+            }
+          } else if (
+            unwrappedInit != null &&
+            unwrappedInit.type === "Identifier" &&
+            effectModuleNamespaceNames.has(unwrappedInit.name) &&
+            node.id?.type === "ObjectPattern" &&
+            Array.isArray(node.id.properties)
+          ) {
+            for (const prop of node.id.properties) {
+              if (getEstreeBindingPropName(prop) !== "Effect") continue
+              if (prop.value?.type === "Identifier") {
+                effectNamespaceNames.add(prop.value.name)
+              } else if (prop.value?.type === "ObjectPattern" && Array.isArray(prop.value.properties)) {
+                for (const nested of prop.value.properties) {
+                  const propName = getEstreeBindingPropName(nested)
+                  if (
+                    propName != null &&
+                    nested.value?.type === "Identifier" &&
+                    isBannedEffectRunMethodName(propName, filenameForRun)
+                  ) {
+                    bannedRunAliases.set(nested.value.name, propName)
+                  }
+                }
+              }
+            }
+          }
+        }
         if (node.id != null && node.id.type === "Identifier") {
           if (node.init != null && node.init.type === "ObjectExpression") {
             migrationRecordVars.set(node.id.name, node.init)
@@ -1895,7 +2323,7 @@ const syntaxBans = {
       },
       IfStatement(node) {
         const filename = getNormalizedFilename()
-        if (!isTierOrSampleAppFile(filename)) return
+        if (!isEnforcedWorkspaceFile(filename)) return
         if (
           isDiscriminantTestExpression(node.test) ||
           isAliasedDiscriminantTest(node.test, discriminantAliasNames)
@@ -1909,7 +2337,7 @@ const syntaxBans = {
       },
       ConditionalExpression(node) {
         const filename = getNormalizedFilename()
-        if (!isTierOrSampleAppFile(filename)) return
+        if (!isEnforcedWorkspaceFile(filename)) return
         if (
           isDiscriminantTestExpression(node.test) ||
           isAliasedDiscriminantTest(node.test, discriminantAliasNames)
@@ -1932,12 +2360,98 @@ const syntaxBans = {
       MemberExpression(node) {
         const filename = getNormalizedFilename()
         if (
+          !isTestFilePath(filename) &&
+          /(?:^|\/)src\//.test(filename) &&
+          !/(?:^|\/)libs\/harness\/contract\/src\/workspace-and-process\.ts$/.test(filename) &&
+          node.computed !== true &&
+          isIdentifier(node.object, "Cause") &&
+          (isIdentifier(node.property, "hasInterrupts") ||
+            isIdentifier(node.property, "hasInterruptsOnly"))
+        ) {
+          let curr = node
+          let anc = node.parent
+          while (
+            anc != null &&
+            (anc.type === "TSAsExpression" ||
+              anc.type === "TSTypeAssertion" ||
+              anc.type === "TSSatisfiesExpression" ||
+              anc.type === "TSNonNullExpression" ||
+              anc.type === "ParenthesizedExpression" ||
+              anc.type === "ChainExpression")
+          ) {
+            curr = anc
+            anc = anc.parent
+          }
+          if (!(anc != null && anc.type === "CallExpression" && anc.callee === curr)) {
+            context.report({
+              node,
+              message:
+                "bare-cause-has-interrupts: Point-free Cause.hasInterrupts or Cause.hasInterruptsOnly in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause from @harness/contract instead.",
+            })
+          }
+        }
+        if (
+          !isTestFilePath(filename) &&
+          isPureTierProcessEnvBannedPath(filename) &&
+          isProcessEnvMemberAst(node)
+        ) {
+          context.report({
+            node,
+            message:
+              "process-env-outside-infra-or-app: Direct process.env access is banned outside type:infra and type:app — inject Config or read environment variables in @harness/infra or apps/*.",
+          })
+        }
+        if (
           /libs\/[^/]+\/(?:domain|core)\/src\//.test(filename) &&
           node.computed !== true &&
-          isIdentifier(node.object, "Effect") &&
+          isEffectNamespaceExpr(node.object) &&
           isIdentifier(node.property, "ignore")
         ) {
           context.report({ node, message: domainEffectIgnoreMessage })
+        }
+        const isEnforcedRunSrc =
+          !isTestFilePath(filename) &&
+          /(?:^|\/)(?:libs\/[^/]+\/[^/]+\/src|apps\/[^/]+\/src)\//.test(filename)
+        const accessMethodName =
+          node.computed !== true && node.property?.type === "Identifier"
+            ? node.property.name
+            : node.computed === true
+              ? getStaticModuleString(node.property)
+              : null
+        if (
+          isEnforcedRunSrc &&
+          accessMethodName != null &&
+          isBannedEffectRunMethodName(accessMethodName, filename) &&
+          (node.computed === true || isEffectNamespaceExpr(node.object))
+        ) {
+          const isMemoryWorkerdBridge = /(?:^|\/)libs\/es\/infra\/src\/memory\.ts$/.test(filename)
+          const isAllowedMemoryDie = (() => {
+            if (!isMemoryWorkerdBridge || accessMethodName !== "runSync") return false
+            const parentCall = node.parent
+            if (parentCall == null || parentCall.type !== "CallExpression" || parentCall.callee !== node) {
+              return false
+            }
+            const arg = unwrapEstree(parentCall.arguments?.[0])
+            return (
+              arg != null &&
+              arg.type === "CallExpression" &&
+              arg.callee != null &&
+              arg.callee.type === "MemberExpression" &&
+              arg.callee.computed !== true &&
+              isEffectNamespaceExpr(arg.callee.object) &&
+              isIdentifier(arg.callee.property, "die")
+            )
+          })()
+          if (isAllowedMemoryDie) return
+          const objText = getNodeSourceText(context, node.object) || "Effect"
+          const targetLabel =
+            node.computed === true
+              ? `${objText}["${accessMethodName}"]`
+              : `${objText}.${accessMethodName}`
+          context.report({
+            node,
+            message: `unscoped-effect-run: '${targetLabel}' is banned in '${filename}' — compose Effects and execute via NodeRuntime.runMain or ManagedRuntime at the app edge.`,
+          })
         }
       },
       TryStatement(node) {
@@ -1948,7 +2462,26 @@ const syntaxBans = {
       },
       CallExpression(node) {
         const filename = getNormalizedFilename()
-        if (isTierOrSampleAppFile(filename)) {
+
+        if (
+          isRequireCallee(node.callee) &&
+          Array.isArray(node.arguments) &&
+          node.arguments.length >= 1
+        ) {
+          const reqSourceVal = getModulePrefixOrStaticString(node.arguments[0])
+          if (
+            reqSourceVal != null &&
+            reqSourceVal.startsWith("@harness/") &&
+            /(?:^|\/)(?:libs|apps)\/.*\/(?:src|test)\//.test(filename)
+          ) {
+            context.report({
+              node,
+              message: dynamicHarnessImportMessage(reqSourceVal, filename),
+            })
+          }
+        }
+
+        if (isEnforcedWorkspaceFile(filename)) {
           if (
             node.callee != null &&
             node.callee.type === "MemberExpression" &&
@@ -2054,20 +2587,21 @@ const syntaxBans = {
           }
         }
         if (
-          /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
-          isIdentifier(node.callee, "require") &&
+          isRequireCallee(node.callee) &&
           Array.isArray(node.arguments) &&
           node.arguments.length >= 1
         ) {
-          const arg0 = node.arguments[0]
-          const sourceVal =
-            arg0 != null && arg0.type === "Literal" && typeof arg0.value === "string"
-              ? arg0.value
-              : null
+          const sourceVal = getStaticModuleString(node.arguments[0])
+          const drizzleSourceVal = getModulePrefixOrStaticString(node.arguments[0])
+          if (drizzleSourceVal != null && isDrizzleSpecifier(drizzleSourceVal)) {
+            reportOnce(node, bannedDrizzleMessage(drizzleSourceVal, filename))
+          }
           if (
-            sourceVal === "node:sqlite" ||
-            sourceVal === "sqlite" ||
-            sourceVal === "better-sqlite3"
+            /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
+            isIdentifier(node.callee, "require") &&
+            (sourceVal === "node:sqlite" ||
+              sourceVal === "sqlite" ||
+              sourceVal === "better-sqlite3")
           ) {
             reportOnce(node, nodeSqliteInfraMessage(sourceVal, filename))
           }
@@ -2091,9 +2625,122 @@ const syntaxBans = {
         const isTest = isTestFilePath(filename)
         const calleeName = getCalleeName(node.callee)
 
+        if (
+          !isTest &&
+          /(?:^|\/)(?:libs\/[^/]+\/[^/]+\/src|apps\/[^/]+\/src)\//.test(filename) &&
+          node.callee?.type === "Identifier" &&
+          bannedRunAliases.has(node.callee.name)
+        ) {
+          const origMethod = bannedRunAliases.get(node.callee.name)
+          context.report({
+            node,
+            message: `unscoped-effect-run: destructured 'Effect.${origMethod}' alias '${node.callee.name}' is banned in '${filename}' — compose Effects and execute via NodeRuntime.runMain or ManagedRuntime at the app edge.`,
+          })
+        }
+
+        if (!isTest && /(?:^|\/)libs\/harness\/gates\/src\//.test(filename)) {
+          if (calleeName === "safeFs") {
+            context.report({
+              node,
+              message: `silent-gate-fs-fallback: 'safeFs(...)' in '${filename}' silently swallows host I/O errors — propagate explicit 'unreadable-workspace-file' findings instead.`,
+            })
+          }
+          const isResultGetOrElse =
+            calleeName === "Result.getOrElse" &&
+            Array.isArray(node.arguments) &&
+            node.arguments.length >= 2
+          if (isResultGetOrElse) {
+            const firstArgText = context.sourceCode.getText(node.arguments[0])
+            if (
+              isSilentEmptyFallbackEstree(node.arguments[1], false) &&
+              hasResultTryFsReadEstree(firstArgText)
+            ) {
+              context.report({
+                node,
+                message: `silent-gate-fs-fallback: 'Result.getOrElse(Result.try(...readTextSync|readdirSync...), () => ""|[])' in '${filename}' silently hides unreadable gate inputs — emit an explicit 'unreadable-workspace-file' finding instead.`,
+              })
+            }
+          }
+          const isPipeGetOrElseArg = (arg) =>
+            arg != null &&
+            arg.type === "CallExpression" &&
+            getCalleeName(arg.callee) === "Result.getOrElse" &&
+            Array.isArray(arg.arguments) &&
+            arg.arguments.length === 1 &&
+            isSilentEmptyFallbackEstree(arg.arguments[0], true)
+          if (
+            node.callee?.type === "MemberExpression" &&
+            node.callee.computed !== true &&
+            isIdentifier(node.callee.property, "pipe") &&
+            hasResultTryFsReadEstree(context.sourceCode.getText(node.callee.object)) &&
+            Array.isArray(node.arguments) &&
+            node.arguments.some(isPipeGetOrElseArg)
+          ) {
+            context.report({
+              node,
+              message: `silent-gate-fs-fallback: 'Result.try(...).pipe(..., Result.getOrElse(...))' in '${filename}' silently hides unreadable gate inputs — emit an explicit 'unreadable-workspace-file' finding instead.`,
+            })
+          }
+          if (
+            calleeName === "pipe" &&
+            Array.isArray(node.arguments) &&
+            node.arguments.length >= 2 &&
+            hasResultTryFsReadEstree(context.sourceCode.getText(node.arguments[0])) &&
+            node.arguments.slice(1).some(isPipeGetOrElseArg)
+          ) {
+            context.report({
+              node,
+              message: `silent-gate-fs-fallback: 'pipe(Result.try(...), ..., Result.getOrElse(...))' in '${filename}' silently hides unreadable gate inputs — emit an explicit 'unreadable-workspace-file' finding instead.`,
+            })
+          }
+          if (
+            node.callee?.type === "MemberExpression" &&
+            node.callee.computed !== true &&
+            isIdentifier(node.callee.property, "with") &&
+            Array.isArray(node.arguments) &&
+            node.arguments.length >= 2 &&
+            isSilentEmptyFallbackEstree(node.arguments[1], true)
+          ) {
+            const pat = unwrapEstree(node.arguments[0])
+            const isFailurePat =
+              pat != null &&
+              pat.type === "ObjectExpression" &&
+              Array.isArray(pat.properties) &&
+              pat.properties.some(
+                (p) =>
+                  p != null &&
+                  p.type === "Property" &&
+                  getEstreeBindingPropName(p) === "_tag" &&
+                  getStaticModuleString(p.value) === "Failure",
+              )
+            if (isFailurePat) {
+              let curr = node.callee
+              while (
+                curr != null &&
+                curr.type === "MemberExpression" &&
+                curr.object != null &&
+                curr.object.type === "CallExpression"
+              ) {
+                const innerCall = curr.object
+                if (innerCall.callee?.type === "Identifier" && innerCall.callee.name === "match") {
+                  const arg0 = innerCall.arguments?.[0]
+                  if (arg0 != null && hasResultTryFsReadEstree(context.sourceCode.getText(arg0))) {
+                    context.report({
+                      node,
+                      message: `silent-gate-fs-fallback: 'match(Result.try(...)).with({ _tag: "Failure" }, ...)' in '${filename}' silently hides unreadable gate inputs — emit an explicit 'unreadable-workspace-file' finding instead.`,
+                    })
+                  }
+                  break
+                }
+                curr = innerCall.callee
+              }
+            }
+          }
+        }
+
+        let isCatchCauseOnly = false
         if (!isTest && calleeName === "Cause.hasInterruptsOnly") {
           let anc = node.parent
-          let hasUnsafeAncestor = false
           while (anc != null) {
             if (anc.type === "CallExpression") {
               const ancCallee = getCalleeName(anc.callee)
@@ -2106,18 +2753,78 @@ const syntaxBans = {
                 ancCallee === "Effect.runSyncExit" ||
                 ancCallee.endsWith(".runSyncExit")
               ) {
-                hasUnsafeAncestor = true
+                isCatchCauseOnly = true
                 break
               }
             }
             anc = anc.parent
           }
-          if (hasUnsafeAncestor) {
+          if (isCatchCauseOnly) {
             context.report({
               node,
               message:
-                "Cause.hasInterruptsOnly(cause) inside catchCause/runPromiseExit/runSyncExit is banned — use Cause.hasInterrupts(cause) and !Cause.hasFails(cause) && !Cause.hasDies(cause) so composite Fail+Interrupt causes are not misclassified.",
+                "Cause.hasInterruptsOnly(cause) inside catchCause/runPromiseExit/runSyncExit is banned — use isPureInterruptCause(cause) or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause) so composite Fail+Interrupt causes are not misclassified.",
             })
+          }
+        }
+
+        if (
+          !isTest &&
+          !isCatchCauseOnly &&
+          /(?:^|\/)src\//.test(filename) &&
+          !/(?:^|\/)libs\/harness\/contract\/src\/workspace-and-process\.ts$/.test(filename) &&
+          (calleeName === "Cause.hasInterrupts" || calleeName === "Cause.hasInterruptsOnly")
+        ) {
+          if (calleeName === "Cause.hasInterruptsOnly") {
+            context.report({
+              node,
+              message:
+                "bare-cause-has-interrupts: Bare Cause.hasInterrupts(cause) or Cause.hasInterruptsOnly(cause) in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause(cause) from @harness/contract (or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)).",
+            })
+          } else {
+            const firstArg = Array.isArray(node.arguments) ? node.arguments[0] : undefined
+            if (firstArg == null) {
+              context.report({
+                node,
+                message:
+                  "bare-cause-has-interrupts: Bare Cause.hasInterrupts(cause) or Cause.hasInterruptsOnly(cause) in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause(cause) from @harness/contract (or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)).",
+              })
+            } else {
+              const argText = getNodeSourceText(context, unwrapEstreeExpr(firstArg))
+              let root = node
+              let anc = node.parent
+              while (anc != null) {
+                if (anc.type === "LogicalExpression" && anc.operator === "&&") {
+                  root = anc
+                  anc = anc.parent
+                  continue
+                }
+                if (
+                  anc.type === "ParenthesizedExpression" ||
+                  anc.type === "ChainExpression"
+                ) {
+                  root = anc
+                  anc = anc.parent
+                  continue
+                }
+                break
+              }
+              const terms = []
+              collectLogicalAndTermsAst(root, terms)
+              const hasNegatedFails = terms.some((t) =>
+                isNegatedCauseMethodCallAst(t, "hasFails", argText, context),
+              )
+              const hasNegatedDies = terms.some((t) =>
+                isNegatedCauseMethodCallAst(t, "hasDies", argText, context),
+              )
+              if (!(hasNegatedFails && hasNegatedDies)) {
+                context.report({
+                  node,
+                  message:
+                    "bare-cause-has-interrupts: Bare Cause.hasInterrupts(cause) or Cause.hasInterruptsOnly(cause) in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause(cause) from @harness/contract (or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)).",
+                })
+              }
+            }
           }
         }
 
@@ -2191,8 +2898,36 @@ const syntaxBans = {
           }
         }
       },
+      ExportAllDeclaration(node) {
+        const filename = getNormalizedFilename()
+        if (
+          /(?:^|\/)(?:libs|apps)\/.*\/src\/index\.ts$/.test(filename) ||
+          /(?:^|\/)libs\/harness\/graph\/src\/(?:type-extractor|datalog-engine|graph-rewrite|graph-engine|graph-projector)\.ts$/.test(
+            filename,
+          )
+        ) {
+          reportOnce(
+            node,
+            `facade-star-reexport: Wildcard 'export *' re-export in '${filename}' is banned — use explicit named re-exports (export { ... } from "./...") instead of export * from.`,
+          )
+        }
+        if (
+          node.source != null &&
+          typeof node.source.value === "string" &&
+          isDrizzleSpecifier(node.source.value)
+        ) {
+          reportOnce(node, bannedDrizzleMessage(node.source.value, filename))
+        }
+      },
       ExportNamedDeclaration(node) {
         const filename = getNormalizedFilename()
+        if (
+          node.source != null &&
+          typeof node.source.value === "string" &&
+          isDrizzleSpecifier(node.source.value)
+        ) {
+          reportOnce(node, bannedDrizzleMessage(node.source.value, filename))
+        }
         if (!/libs\/[^/]+\/(contract|domain|core|service|infra)\/src\//.test(filename)) return
         if (node.declaration == null) return
 
@@ -2317,6 +3052,23 @@ const syntaxBans = {
           }
         }
       },
+      Literal(node) {
+        if (typeof node.value !== "string") return
+        const filename = getNormalizedFilename()
+        if (isClefEndpointCheckedSrcFile(filename) && isInvalidClefEndpointLiteralText(node.value)) {
+          reportOnce(node, invalidClefEndpointMessage)
+        }
+      },
+      TemplateLiteral(node) {
+        const filename = getNormalizedFilename()
+        if (!isClefEndpointCheckedSrcFile(filename) || !Array.isArray(node.quasis)) return
+        const text = node.quasis
+          .map((q) => (q != null && q.value != null ? (q.value.cooked ?? q.value.raw ?? "") : ""))
+          .join("")
+        if (isInvalidClefEndpointLiteralText(text)) {
+          reportOnce(node, invalidClefEndpointMessage)
+        }
+      },
     }
   },
 }
@@ -2333,11 +3085,17 @@ const testIntegrity = {
 
     return {
       Program(node) {
+        const sc = getSourceCode(context)
+        const rawText = readFullSourceText(sc, node)
+        if (rawText === undefined) {
+          context.report({
+            node,
+            message:
+              "missing-source-code: Unable to access sourceCode.text or sourceCode.getText() for AST inspection.",
+          })
+        }
         discriminantAliasNames.clear()
-        const text =
-          context.sourceCode && typeof context.sourceCode.text === "string"
-            ? context.sourceCode.text
-            : ""
+        const text = rawText ?? ""
         if (
           /^\s*(\/\/|\/\*)\s*(oxlint-disable|eslint-disable)[^\n]*(harness\/test-integrity|effecttsgo\/)/m.test(
             text,
@@ -2357,6 +3115,12 @@ const testIntegrity = {
           typeof node.source.value === "string"
         ) {
           const importSource = node.source.value
+          if (isDrizzleSpecifier(importSource)) {
+            context.report({
+              node,
+              message: bannedDrizzleMessage(importSource, filename),
+            })
+          }
           if (
             /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
             (importSource === "node:sqlite" ||
@@ -2370,22 +3134,76 @@ const testIntegrity = {
           }
         }
       },
-      ImportExpression(node) {
+      ExportNamedDeclaration(node) {
         const filename = getNormalizedFilename()
         if (
           node.source != null &&
-          typeof node.source.value === "string"
+          typeof node.source.value === "string" &&
+          isDrizzleSpecifier(node.source.value)
         ) {
-          const importSource = node.source.value
-          if (
-            /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
-            (importSource === "node:sqlite" ||
-              importSource === "sqlite" ||
-              importSource === "better-sqlite3")
-          ) {
+          context.report({
+            node,
+            message: bannedDrizzleMessage(node.source.value, filename),
+          })
+        }
+      },
+      ExportAllDeclaration(node) {
+        const filename = getNormalizedFilename()
+        if (
+          node.source != null &&
+          typeof node.source.value === "string" &&
+          isDrizzleSpecifier(node.source.value)
+        ) {
+          context.report({
+            node,
+            message: bannedDrizzleMessage(node.source.value, filename),
+          })
+        }
+      },
+      ImportExpression(node) {
+        const filename = getNormalizedFilename()
+        const importSource = getStaticModuleString(node.source)
+        const drizzleSourceVal = getModulePrefixOrStaticString(node.source)
+        if (drizzleSourceVal != null && isDrizzleSpecifier(drizzleSourceVal)) {
+          context.report({
+            node,
+            message: bannedDrizzleMessage(drizzleSourceVal, filename),
+          })
+        }
+        if (
+          drizzleSourceVal != null &&
+          drizzleSourceVal.startsWith("@harness/") &&
+          /(?:^|\/)(?:libs|apps)\/.*\/(?:src|test)\//.test(filename)
+        ) {
+          context.report({
+            node,
+            message: dynamicHarnessImportMessage(drizzleSourceVal, filename),
+          })
+        }
+        if (
+          importSource != null &&
+          /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
+          (importSource === "node:sqlite" ||
+            importSource === "sqlite" ||
+            importSource === "better-sqlite3")
+        ) {
+          context.report({
+            node,
+            message: `Do not import '${importSource}' in type:infra or type:app tests ('${filename}') — execute Cloudflare Durable Object SQLite and D1 tests against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006, node-sqlite-in-infra).`,
+          })
+        }
+      },
+      TSImportEqualsDeclaration(node) {
+        const filename = getNormalizedFilename()
+        if (
+          node.moduleReference != null &&
+          node.moduleReference.type === "TSExternalModuleReference"
+        ) {
+          const importSource = getStaticModuleString(node.moduleReference.expression)
+          if (importSource != null && isDrizzleSpecifier(importSource)) {
             context.report({
               node,
-              message: `Do not import '${importSource}' in type:infra or type:app tests ('${filename}') — execute Cloudflare Durable Object SQLite and D1 tests against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006, node-sqlite-in-infra).`,
+              message: bannedDrizzleMessage(importSource, filename),
             })
           }
         }
@@ -2420,7 +3238,7 @@ const testIntegrity = {
       },
       IfStatement(node) {
         const filename = getNormalizedFilename()
-        if (!isTierOrSampleAppFile(filename)) return
+        if (!isEnforcedWorkspaceFile(filename)) return
         if (
           isDiscriminantTestExpression(node.test) ||
           isAliasedDiscriminantTest(node.test, discriminantAliasNames)
@@ -2430,7 +3248,7 @@ const testIntegrity = {
       },
       ConditionalExpression(node) {
         const filename = getNormalizedFilename()
-        if (!isTierOrSampleAppFile(filename)) return
+        if (!isEnforcedWorkspaceFile(filename)) return
         if (
           isDiscriminantTestExpression(node.test) ||
           isAliasedDiscriminantTest(node.test, discriminantAliasNames)
@@ -2444,20 +3262,34 @@ const testIntegrity = {
         }
         const filename = getNormalizedFilename()
         if (
-          /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
-          isIdentifier(node.callee, "require") &&
+          isRequireCallee(node.callee) &&
           Array.isArray(node.arguments) &&
           node.arguments.length >= 1
         ) {
-          const arg0 = node.arguments[0]
-          const importSource =
-            arg0 != null && arg0.type === "Literal" && typeof arg0.value === "string"
-              ? arg0.value
-              : null
+          const importSource = getStaticModuleString(node.arguments[0])
+          const drizzleSourceVal = getModulePrefixOrStaticString(node.arguments[0])
+          if (drizzleSourceVal != null && isDrizzleSpecifier(drizzleSourceVal)) {
+            context.report({
+              node,
+              message: bannedDrizzleMessage(drizzleSourceVal, filename),
+            })
+          }
           if (
-            importSource === "node:sqlite" ||
-            importSource === "sqlite" ||
-            importSource === "better-sqlite3"
+            drizzleSourceVal != null &&
+            drizzleSourceVal.startsWith("@harness/") &&
+            /(?:^|\/)(?:libs|apps)\/.*\/(?:src|test)\//.test(filename)
+          ) {
+            context.report({
+              node,
+              message: dynamicHarnessImportMessage(drizzleSourceVal, filename),
+            })
+          }
+          if (
+            /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
+            isIdentifier(node.callee, "require") &&
+            (importSource === "node:sqlite" ||
+              importSource === "sqlite" ||
+              importSource === "better-sqlite3")
           ) {
             context.report({
               node,
@@ -2465,7 +3297,7 @@ const testIntegrity = {
             })
           }
         }
-        if (isTierOrSampleAppFile(filename)) {
+        if (isEnforcedWorkspaceFile(filename)) {
           if (isImpreciseFailureAssert(node)) {
             context.report({ node, message: impreciseFailureAssertMessage })
           }

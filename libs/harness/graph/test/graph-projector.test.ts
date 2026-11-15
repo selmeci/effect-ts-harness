@@ -1,12 +1,15 @@
+import * as path from "node:path"
 import { describe, expect, it } from "@effect/vitest"
+import { isPureInterruptCause } from "@harness/contract"
+import type { SyncHostReader } from "@harness/service/host-io"
 import { Cause, Effect, Fiber, Option, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   buildHarnessGraph,
+  createTypeScriptProgramSession,
   decideGraphProjection,
   decideGraphRewrite,
   type EntityNode,
-  getOrCreateWarmProgramSession,
   type GraphMeasure,
   type GraphPatch,
   GraphProjector,
@@ -23,6 +26,7 @@ import {
   verifyProjectedSubset,
   verifySubgraphMonomorphism,
 } from "../src/index.js"
+import { testHostIo } from "./helpers/test-host-io.js"
 
 const zeroMeasure: GraphMeasure = {
   archViolations: NonNegativeCount.make(0),
@@ -400,7 +404,7 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
         const pkgTag = "packageTag" in node && node.packageTag !== undefined ? node.packageTag : "contract"
         const barrelFile = `libs/${scope}/${pkgTag}/src/index.ts`
         const barrelOverlay = result.overlays.find((o) => String(o.targetFile) === barrelFile)
-        expect(barrelOverlay).toBeDefined()
+        expect(barrelOverlay?.targetFile).toBe(barrelFile)
         const barrelContent = String(barrelOverlay?.content)
         expect(barrelContent).toContain(symbol)
       }),
@@ -1067,7 +1071,7 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
     () =>
       Effect.gen(function* () {
         const repoRoot = process.cwd()
-        const warmSession = getOrCreateWarmProgramSession(repoRoot)
+        const warmSession = createTypeScriptProgramSession(repoRoot, testHostIo)
         const sentinelKey = "__sentinel__/preserve-cache.ts"
         const hadSentinelBefore = warmSession.fileFragmentCache.has(sentinelKey)
         warmSession.fileFragmentCache.set(sentinelKey, {
@@ -1121,4 +1125,72 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
         }
       }),
   )
+
+  it.effect(
+    "F-19.3: decideGraphProjection forwards custom SyncHostReader through validateRelPath, normalizeRelPath, and getOrCreateSourceFile",
+    () =>
+      Effect.gen(function* () {
+        const calls = { existsSync: 0, readTextSync: 0, realpathSync: 0 }
+        const spyHostIo: SyncHostReader = {
+          ...testHostIo,
+          existsSync: (p) => {
+            calls.existsSync += 1
+            return p.endsWith(".ts") || testHostIo.existsSync(p)
+          },
+          readTextSync: (p) => {
+            calls.readTextSync += 1
+            return testHostIo.existsSync(p) ? testHostIo.readTextSync(p) : ""
+          },
+          realpathSync: (p) => {
+            calls.realpathSync += 1
+            return testHostIo.realpathSync(p)
+          },
+        }
+
+        const specGraph = buildHarnessGraph({
+          earsSpecs: [
+            {
+              id: "sample:SPEC-0001",
+              title: "HostIo spy spec",
+              status: "proposed",
+              path: "libs/sample/docs/specs/spy.md",
+              enforcedByFiles: ["libs/sample/domain/src/index.ts"],
+              referencedSpans: ["Sample.spy"],
+              referencedServices: ["SpyService"],
+              referencedErrors: ["SpyError"],
+            },
+          ],
+        })
+        const rewrite = yield* decideGraphRewrite(specGraph, "auto-plan")
+        const rec = Option.getOrThrow(rewrite.result.recommendedCandidate)
+        const res = yield* decideGraphProjection({
+          workspaceRoot: path.resolve(import.meta.dirname, "../../../.."),
+          initialGraph: specGraph,
+          targetGraph: rewrite.targetGraph,
+          patches: rec.patches,
+          verifyRoundTrip: false,
+          hostIo: spyHostIo,
+        })
+
+        expect(res.overlays.length).toBeGreaterThan(0)
+        expect(calls.existsSync).toBeGreaterThan(0)
+        expect(calls.realpathSync).toBeGreaterThan(0)
+        expect(calls.readTextSync).toBeGreaterThan(0)
+      }),
+  )
+
+  it("F-12.1: isPureInterruptCause preserves composite Fail+Interrupt causes and only matches pure interrupts", () => {
+    const pureInt = Cause.interrupt(1)
+    const compositeFailInt = Cause.combine(
+      Cause.fail(new Error("boom")),
+      Cause.interrupt(1),
+    )
+    const compositeDieInt = Cause.combine(
+      Cause.die("defect"),
+      Cause.interrupt(1),
+    )
+    expect(isPureInterruptCause(pureInt)).toBe(true)
+    expect(isPureInterruptCause(compositeFailInt)).toBe(false)
+    expect(isPureInterruptCause(compositeDieInt)).toBe(false)
+  })
 })

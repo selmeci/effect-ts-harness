@@ -1,3 +1,4 @@
+import { match } from "ts-pattern"
 import {
   type CallExpression,
   Node,
@@ -71,14 +72,11 @@ export const checkDeciderTracing = (
             const decl = sourceFile.getVariableDeclaration(name) ?? sourceFile.getFunction(name)
             return !decl || !Node.isVariableDeclaration(decl) || !decl.getInitializer() || !isTracedWithEffectFn(decl.getInitializer()!)
           }
-          let isUntraced = false
-          if (Node.isMethodDeclaration(decideProp)) isUntraced = true
-          else if (Node.isPropertyAssignment(decideProp)) {
-            const init = decideProp.getInitializer()
-            if (init) isUntraced = Node.isIdentifier(init) ? checkDecl(init.getText()) : !isTracedWithEffectFn(init)
-          } else if (Node.isShorthandPropertyAssignment(decideProp)) {
-            isUntraced = checkDecl(decideProp.getName())
-          }
+          const isUntraced = match(decideProp)
+            .when(Node.isMethodDeclaration, () => true)
+            .when(Node.isPropertyAssignment, (p) => { const init = p.getInitializer(); return init ? (Node.isIdentifier(init) ? checkDecl(init.getText()) : !isTracedWithEffectFn(init)) : false })
+            .when(Node.isShorthandPropertyAssignment, (p) => checkDecl(p.getName()))
+            .otherwise(() => false)
 
           if (isUntraced) {
             const enclosingSymbol = findEnclosingSymbolName(callExpr, relPath)
