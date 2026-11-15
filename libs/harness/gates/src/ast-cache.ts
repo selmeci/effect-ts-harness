@@ -3,7 +3,7 @@
  * Content-addressable AST cache and category deciders for Effect-TS Engineering Harness.
  *
  * Implements an in-memory and disk-persisted cache keyed by file path, package tag,
- * and SHA-256 content digest under `HARNESS_GATE_RULE_VERSION` (`ast-gates-v7`).
+ * and SHA-256 content digest under `HARNESS_GATE_RULE_VERSION` (`ast-gates-v8`).
  * Avoids redundant AST parses and visits across repetitive gate runs.
  *
  * Exposes Effect.fn deciders for each gate category:
@@ -33,7 +33,6 @@ import {
   HARNESS_GATE_RULE_VERSION,
   inferAstGatePackageTagFromPath,
   makeAstGateDecisionReport,
-  resolveDefaultAstGateCachePath,
   type WorkspaceFsError,
 } from "@harness/contract"
 import { NonNegativeCount, ts } from "@harness/graph"
@@ -96,9 +95,6 @@ export const makeAstGateCacheKey = (
   packageTag: string,
   ruleVersion: GateRuleVersion = HARNESS_GATE_RULE_VERSION,
 ): string => `${filePath}\0${packageTag}\0${ruleVersion}`
-
-export const resolveAstGateCachePath = (repoRoot: string): AstSourceFilePath =>
-  AstSourceFilePath.make(resolveDefaultAstGateCachePath(repoRoot))
 
 export const MAX_SOURCE_FILE_CACHE_SIZE = 500
 export const MAX_GATE_CACHE_SIZE = 1000
@@ -274,7 +270,6 @@ export const AstGateCache = {
   evaluateCached: evaluateCachedAstGates,
   evaluateFiles: evaluateAstGateFiles,
   computeContentSha256,
-  resolveCachePath: resolveAstGateCachePath,
   getOrCreateCachedSourceFile,
 } as const
 

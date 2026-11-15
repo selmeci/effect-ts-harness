@@ -61,3 +61,5 @@ export {
   UnixSocketDaemonPort,
   type UnixSocketDaemonPortShape,
 } from "./cache-and-daemon-ports.js"
+
+export type { SyncHostExecutor, SyncHostWriter } from "./host-io.js"

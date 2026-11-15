@@ -1,4 +1,5 @@
 import { join } from "node:path"
+import { toErrorReasonMessage } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { Context, Data, Effect, Layer, Option, Result, Schema } from "effect"
 import * as Graph from "effect/Graph"
@@ -517,7 +518,13 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
               yield* Effect.tryPromise({
                 try: () => og.branches.delete(branchToDelete),
                 catch: (cause) => new OmnigraphLoadError({ cause }),
-              }).pipe(Effect.orElseSucceed(() => undefined))
+              }).pipe(
+                Effect.catch((cleanupErr) =>
+                  Effect.logWarning(
+                    `Failed to delete cleanup branch "${branchToDelete}": ${toErrorReasonMessage(cleanupErr.cause)}`,
+                  ),
+                ),
+              )
             }
           }
           if (options?.repoRoot) {
@@ -586,7 +593,7 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
                     }),
                   )
             }),
-            Effect.catch(() => {
+            Effect.catch((primaryErr) => {
               const queryDescriptor = HARNESS_GQ_QUERIES[input.name]
               return Effect.tryPromise({
                 try: () =>
@@ -612,12 +619,17 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
                         }),
                       )
                 }),
-                Effect.catch((err) => {
+                Effect.catch((fallbackErr) => {
+                  const primaryMsg = toErrorReasonMessage(primaryErr.cause)
+                  const fallbackMsg = toErrorReasonMessage(fallbackErr.cause)
+                  const fallbackError = `Primary queries.invoke failed (${primaryMsg}); fallback query failed (${fallbackMsg})`
                   if (input.fallbackGraph === undefined) {
-                    return Effect.fail(err)
+                    return Effect.fail(
+                      new OmnigraphLoadError({
+                        cause: new Error(fallbackError, { cause: fallbackErr.cause }),
+                      }),
+                    )
                   }
-                  const fallbackError =
-                    err.cause instanceof Error ? err.cause.message : String(err.cause)
                   return Effect.succeed({
                     source: "memory-fallback" as const,
                     rows: executeNamedGqQueryInMemory(input.fallbackGraph, input.name, input.params),

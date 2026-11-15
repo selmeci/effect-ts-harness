@@ -550,6 +550,7 @@ status: accepted
 
   it.effect("fails closed with degradedReason=unreadable-governance-docs when governance doc cannot be read", () =>
     Effect.gen(function* () {
+      if (typeof process.getuid === "function" && process.getuid() === 0) return
       const tmpDir = mkdtempSync(join(tmpdir(), "harness-mcp-unreadable-doc-"))
       const adrDir = join(tmpDir, "docs", "adr")
       const adrPath = join(adrDir, "ADR-0001.md")

@@ -5,11 +5,17 @@
  * Traverses TypeScript ASTs once to enforce architectural invariants across 5 gate categories:
  * 1. syntax-bans:
  *    - node-sqlite-in-infra: Bans node:sqlite, sqlite, better-sqlite3 in infra/app code
+ *    - banned-drizzle-import: Bans drizzle-orm / drizzle-kit imports in non-test code
  *    - discriminant-branching: Bans switch statements (use ts-pattern match(...).exhaustive())
  *    - unsafe-type-cast: Bans 'as any', 'as never', and double assertions 'as unknown as T'
  *    - ast-grep-tsx-grammar: Bans hardcoded Lang.TypeScript parser on .tsx files
+ *    - ignored-chmod-permission: Bans Effect.ignore / Effect.orElseSucceed on chmodSync/fchmodSync
+ *    - silent-gate-fs-fallback: Bans silent fs fallbacks in gates
+ *    - invalid-clef-endpoint: Bans non-SystemOne /api/generate or /api/chat calls against clef-flash
  * 2. test-integrity:
  *    - node-sqlite-in-infra: Bans node:sqlite mocks in test files
+ *    - banned-drizzle-import: Bans drizzle-orm / drizzle-kit imports in test files
+ *    - unisolated-dot-harness-test-write: Bans test writes directly to live .harness/ paths
  *    - vacuous-error-assertion: Bans unverified Exit.isFailure checks lacking cause inspection
  *    - fallback-json-equality: Bans JSON.stringify equality comparisons in tests
  * 3. migration-safety:
@@ -18,17 +24,14 @@
  * 4. domain-purity:
  *    - impure-domain-import: Bans node I/O, Drizzle, SQL, and Alchemy imports in domain/contract packages
  *    - domain-effect-ignore: Bans Effect.ignore in domain logic swallowing typed errors
- *    - unscoped-effect-run: Bans Effect.runSync/runPromise/runFork across non-app tiers + apps/harness-mcp (narrow runSync(Effect.die(...)) bridge in libs/es/infra/src/memory.ts and runPromiseExit in apps/harness-mcp server/daemon boundaries exempted)
+ *    - unscoped-effect-run: Bans unscoped Effect.runSync/runPromise/runFork/runCallback in workspace tier and app files (retaining only the narrow single-file libs/es/infra/src/memory.ts exemption for synchronous workerd SqlStorage callbacks)
  * 5. effect-laws:
  *    - effect-fn-dummy-void: Bans dummy 'yield* Effect.void' in generator functions
  *    - discriminant-branching: Bans if/ternary discriminant or Option/Either/Exit/Result guard inspection
  *    - non-exhaustive-union-match: Bans match(...).run() in favor of .exhaustive()
  *    - catch-cause-interrupts-only: Bans Cause.hasInterruptsOnly inside Effect.catchCause / Exit inspection
- *    - bare-cause-has-interrupts: Bans bare Cause.hasInterrupts(cause) without !Cause.hasFails && !Cause.hasDies
+ *    - bare-cause-has-interrupts: Bans bare Cause.hasInterrupts(cause) (without !Cause.hasFails && !Cause.hasDies) and Cause.hasInterruptsOnly(cause) in production src/
  *    - silent-catch-defect: Bans Effect.catchDefect handlers that swallow defects without logging or re-failing
- *    - ignored-chmod-permission: Bans Effect.ignore / Effect.orElseSucceed on chmodSync/fchmodSync
- *    - silent-gate-fs-fallback: Bans silent fs fallbacks in gates
- *    - invalid-clef-endpoint: Bans non-SystemOne /api/generate or /api/chat calls against clef-flash
  */
 
 import { Schema } from "effect"
@@ -670,7 +673,8 @@ export const visitSourceFileSinglePass = (
         pushViolation(catEffectLaws, "non-exhaustive-union-match", `match(...).run() in '${filePath}' is banned — use .exhaustive() instead.`, node)
       }
 
-      if (!isTestFile && isCatchCauseInterruptsOnlyCall(node, sourceFile)) {
+      const isCatchCauseOnly = !isTestFile && isCatchCauseInterruptsOnlyCall(node, sourceFile)
+      if (isCatchCauseOnly) {
         pushViolation(
           catEffectLaws,
           "catch-cause-interrupts-only",
@@ -680,6 +684,7 @@ export const visitSourceFileSinglePass = (
       }
 
       if (
+        !isCatchCauseOnly &&
         !isTestOrHelperFile &&
         /(?:^|\/)src\//.test(normalizedFilePath) &&
         isBareCauseHasInterruptsNode(node, sourceFile, normalizedFilePath)
@@ -687,7 +692,7 @@ export const visitSourceFileSinglePass = (
         pushViolation(
           catEffectLaws,
           "bare-cause-has-interrupts",
-          "Bare Cause.hasInterrupts(cause) in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause(cause) or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause).",
+          "Bare Cause.hasInterrupts(cause) or Cause.hasInterruptsOnly(cause) in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause(cause) from @harness/contract (or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)).",
           node,
         )
       }
@@ -727,7 +732,7 @@ export const visitSourceFileSinglePass = (
       pushViolation(
         catEffectLaws,
         "bare-cause-has-interrupts",
-        "Point-free Cause.hasInterrupts in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause instead.",
+        "Point-free Cause.hasInterrupts or Cause.hasInterruptsOnly in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause from @harness/contract instead.",
         node,
       )
     }

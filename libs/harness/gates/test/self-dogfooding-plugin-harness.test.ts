@@ -1056,7 +1056,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
     "REQ-1.3: AstGateCache.decide reports effect-fn-dummy-void, discriminant-branching, and non-exhaustive-union-match without isHarnessInternal exemption",
     () =>
       Effect.gen(function* () {
-        expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v7")
+        expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v8")
 
         const testId = "AstGateCache.decide::REQ-1.3"
         const { result: report, spans } = yield* runWithTestTracer(
@@ -2468,6 +2468,46 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(report.violations.filter((v) => v.rule === "process-env-outside-infra-or-app")).toHaveLength(2)
         expect(report.violations.filter((v) => v.rule === "dynamic-harness-import")).toHaveLength(2)
         expect(report.violations.filter((v) => v.rule === "bare-cause-has-interrupts")).toHaveLength(2)
+      }),
+  )
+
+  it.effect(
+    "I-4a: enforces bare-cause-has-interrupts on Cause.hasInterruptsOnly in src/ outside Effect.catchCause while exempting workspace-and-process.ts",
+    () =>
+      Effect.gen(function* () {
+        const report = yield* SelfDogfooding.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/infra/src/interrupt-checks.ts"),
+              content: AstSourceContent.make(
+                [
+                  'import { Cause, Effect, Exit } from "effect"',
+                  'import { match } from "ts-pattern"',
+                  "export const standaloneHelper = (cause: Cause.Cause<unknown>) => Cause.hasInterruptsOnly(cause)",
+                  "export const inspectExit = (exit: Exit.Exit<unknown, unknown>) =>",
+                  "  match(exit)",
+                  '    .with({ _tag: "Failure" }, ({ cause }) => Cause.hasInterruptsOnly(cause))',
+                  '    .with({ _tag: "Success" }, () => false)',
+                  "    .exhaustive()",
+                  "export const pointFreeOnly = (eff: Effect.Effect<void>) => eff.pipe(Effect.catchCauseIf(Cause.hasInterruptsOnly, () => Effect.void))",
+                ].join("\n"),
+              ),
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/harness/contract/src/workspace-and-process.ts"),
+              content: AstSourceContent.make(
+                'import { Cause } from "effect"\nexport const isPureInterruptCause = (c: Cause.Cause<unknown>) => Cause.hasInterruptsOnly(c)\n',
+              ),
+            },
+          ],
+          failOnViolation: false,
+        })
+
+        expect(report.verdict).toBe("violated")
+        const interruptViolations = report.violations.filter((v) => v.rule === "bare-cause-has-interrupts")
+        expect(interruptViolations).toHaveLength(3)
+        expect(interruptViolations.every((v) => v.file === "libs/harness/infra/src/interrupt-checks.ts")).toBe(true)
+        expect(interruptViolations.every((v) => v.message.includes("isPureInterruptCause"))).toBe(true)
       }),
   )
 })

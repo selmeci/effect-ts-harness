@@ -30,7 +30,12 @@ import {
   type SpanSample,
 } from "@harness/gates"
 import type { HarnessGraph } from "@harness/graph"
-import { makeAstGateCacheLayer, nodeSyncHostIo, WorkspaceFsLive } from "@harness/infra"
+import {
+  makeAstGateCacheLayer,
+  nodeSyncHostIo,
+  resolveAstGateCachePath,
+  WorkspaceFsLive,
+} from "@harness/infra"
 import type { CliResult, ResolveModifiedFilesResult } from "./daemon-and-omnigraph.service.js"
 
 export const buildDstTargetsFromGraph = (graph: HarnessGraph): ReadonlyArray<DstTargetMethodSpec> => {
@@ -357,7 +362,7 @@ export const runDeltaAstAndPluginGates = (
             })
           }
           const astGateCacheLayer = makeAstGateCacheLayer({
-            cacheFilePath: WorkspaceFilePath.make(AstGateCache.resolveCachePath(repoRoot)),
+            cacheFilePath: resolveAstGateCachePath(repoRoot),
           }).pipe(Layer.provide(NodeServices.layer))
           const astExit = yield* AstGateCache.evaluateCached(astGateFiles).pipe(
             Effect.provide(astGateCacheLayer),

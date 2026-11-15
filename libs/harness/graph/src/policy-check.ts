@@ -41,12 +41,15 @@ export interface CheckEffectGraphResult {
  */
 export interface CheckEffectGraphOptions {
   /**
-   * When true, includes lifecycle-gated rules enforced by `@harness/gates`:
-   * - `missing-layer-provider` (enforced during Layer composition in `gc-check.ts` / `plugins/gc/gc-topology-entropy.plugin.ts`)
-   * - `untested-domain-span` (enforced during implementation in `gc-check.ts` / `plugins/gc/gc-test-and-decider.plugin.ts`)
-   * - `unverified-migration` (enforced during migration gate in `migration-check.ts`)
+   * When true, includes lifecycle-gated rules evaluated by `evaluateEffectGraphPolicy`
+   * in `@harness/graph/policy-check.ts` when enabled by `@harness/gates` lifecycle phases:
+   * - `missing-layer-provider` (enabled during Layer composition in `gc-check.ts` / `plugins/gc/gc-topology-entropy.plugin.ts`)
+   * - `untested-domain-span` (enabled during implementation in `gc-check.ts` / `plugins/gc/gc-test-and-decider.plugin.ts`)
+   * - `unverified-migration` (enabled during migration gate in `migration-check.ts`)
    *
-   * By default, these rules are gated by task lifecycle phases and excluded from standard policy checks.
+   * Note: AST-level source rules (e.g. syntax bans, effect laws, decider purity) are enforced
+   * separately by `@harness/gates` AST gates, whereas graph/lifecycle policy rules are evaluated here.
+   * By default, these lifecycle-gated rules are excluded from standard policy checks.
    */
   readonly includeLifecycleRules?: boolean
   /**
@@ -62,8 +65,9 @@ export interface CheckEffectGraphOptions {
 
 
 /**
- * Rules that are gated by specific `@harness/gates` lifecycle gates (`gc-check.ts`, `migration-check.ts`)
- * rather than the basic architectural policy gate.
+ * Rules evaluated by `evaluateEffectGraphPolicy` in `@harness/graph/policy-check.ts`
+ * only when enabled by specific `@harness/gates` lifecycle gates (`gc-check.ts`, `migration-check.ts`),
+ * rather than the basic architectural policy check (AST gates live separately in `@harness/gates`).
  */
 export const LIFECYCLE_GATED_RULES: ReadonlySet<ViolationRule> = new Set<ViolationRule>([
   "missing-layer-provider",

@@ -2365,7 +2365,8 @@ const syntaxBans = {
           !/(?:^|\/)libs\/harness\/contract\/src\/workspace-and-process\.ts$/.test(filename) &&
           node.computed !== true &&
           isIdentifier(node.object, "Cause") &&
-          isIdentifier(node.property, "hasInterrupts")
+          (isIdentifier(node.property, "hasInterrupts") ||
+            isIdentifier(node.property, "hasInterruptsOnly"))
         ) {
           let curr = node
           let anc = node.parent
@@ -2385,7 +2386,7 @@ const syntaxBans = {
             context.report({
               node,
               message:
-                "bare-cause-has-interrupts: Point-free Cause.hasInterrupts in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause instead.",
+                "bare-cause-has-interrupts: Point-free Cause.hasInterrupts or Cause.hasInterruptsOnly in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause from @harness/contract instead.",
             })
           }
         }
@@ -2737,9 +2738,9 @@ const syntaxBans = {
           }
         }
 
+        let isCatchCauseOnly = false
         if (!isTest && calleeName === "Cause.hasInterruptsOnly") {
           let anc = node.parent
-          let hasUnsafeAncestor = false
           while (anc != null) {
             if (anc.type === "CallExpression") {
               const ancCallee = getCalleeName(anc.callee)
@@ -2752,13 +2753,13 @@ const syntaxBans = {
                 ancCallee === "Effect.runSyncExit" ||
                 ancCallee.endsWith(".runSyncExit")
               ) {
-                hasUnsafeAncestor = true
+                isCatchCauseOnly = true
                 break
               }
             }
             anc = anc.parent
           }
-          if (hasUnsafeAncestor) {
+          if (isCatchCauseOnly) {
             context.report({
               node,
               message:
@@ -2769,51 +2770,60 @@ const syntaxBans = {
 
         if (
           !isTest &&
+          !isCatchCauseOnly &&
           /(?:^|\/)src\//.test(filename) &&
           !/(?:^|\/)libs\/harness\/contract\/src\/workspace-and-process\.ts$/.test(filename) &&
-          calleeName === "Cause.hasInterrupts"
+          (calleeName === "Cause.hasInterrupts" || calleeName === "Cause.hasInterruptsOnly")
         ) {
-          const firstArg = Array.isArray(node.arguments) ? node.arguments[0] : undefined
-          if (firstArg == null) {
+          if (calleeName === "Cause.hasInterruptsOnly") {
             context.report({
               node,
               message:
-                "bare-cause-has-interrupts: Bare Cause.hasInterrupts(cause) in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause(cause) or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause).",
+                "bare-cause-has-interrupts: Bare Cause.hasInterrupts(cause) or Cause.hasInterruptsOnly(cause) in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause(cause) from @harness/contract (or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)).",
             })
           } else {
-            const argText = getNodeSourceText(context, unwrapEstreeExpr(firstArg))
-            let root = node
-            let anc = node.parent
-            while (anc != null) {
-              if (anc.type === "LogicalExpression" && anc.operator === "&&") {
-                root = anc
-                anc = anc.parent
-                continue
-              }
-              if (
-                anc.type === "ParenthesizedExpression" ||
-                anc.type === "ChainExpression"
-              ) {
-                root = anc
-                anc = anc.parent
-                continue
-              }
-              break
-            }
-            const terms = []
-            collectLogicalAndTermsAst(root, terms)
-            const hasNegatedFails = terms.some((t) =>
-              isNegatedCauseMethodCallAst(t, "hasFails", argText, context),
-            )
-            const hasNegatedDies = terms.some((t) =>
-              isNegatedCauseMethodCallAst(t, "hasDies", argText, context),
-            )
-            if (!(hasNegatedFails && hasNegatedDies)) {
+            const firstArg = Array.isArray(node.arguments) ? node.arguments[0] : undefined
+            if (firstArg == null) {
               context.report({
                 node,
                 message:
-                  "bare-cause-has-interrupts: Bare Cause.hasInterrupts(cause) in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause(cause) or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause).",
+                  "bare-cause-has-interrupts: Bare Cause.hasInterrupts(cause) or Cause.hasInterruptsOnly(cause) in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause(cause) from @harness/contract (or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)).",
               })
+            } else {
+              const argText = getNodeSourceText(context, unwrapEstreeExpr(firstArg))
+              let root = node
+              let anc = node.parent
+              while (anc != null) {
+                if (anc.type === "LogicalExpression" && anc.operator === "&&") {
+                  root = anc
+                  anc = anc.parent
+                  continue
+                }
+                if (
+                  anc.type === "ParenthesizedExpression" ||
+                  anc.type === "ChainExpression"
+                ) {
+                  root = anc
+                  anc = anc.parent
+                  continue
+                }
+                break
+              }
+              const terms = []
+              collectLogicalAndTermsAst(root, terms)
+              const hasNegatedFails = terms.some((t) =>
+                isNegatedCauseMethodCallAst(t, "hasFails", argText, context),
+              )
+              const hasNegatedDies = terms.some((t) =>
+                isNegatedCauseMethodCallAst(t, "hasDies", argText, context),
+              )
+              if (!(hasNegatedFails && hasNegatedDies)) {
+                context.report({
+                  node,
+                  message:
+                    "bare-cause-has-interrupts: Bare Cause.hasInterrupts(cause) or Cause.hasInterruptsOnly(cause) in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause(cause) from @harness/contract (or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)).",
+                })
+              }
             }
           }
         }

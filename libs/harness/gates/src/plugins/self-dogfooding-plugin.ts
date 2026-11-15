@@ -528,7 +528,8 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
           })
         }
 
-        if (isCatchCauseInterruptsOnlyCall(node, sourceFile)) {
+        const isCatchCauseOnly = isCatchCauseInterruptsOnlyCall(node, sourceFile)
+        if (isCatchCauseOnly) {
           violations.push({
             rule: SelfDogfoodingRuleId.make("catch-cause-interrupts-only"),
             message: SelfDogfoodingMessage.make(
@@ -541,13 +542,14 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
         }
 
         if (
+          !isCatchCauseOnly &&
           /(?:^|\/)src\//.test(normPath) &&
           isBareCauseHasInterruptsNode(node, sourceFile, normPath)
         ) {
           violations.push({
             rule: SelfDogfoodingRuleId.make("bare-cause-has-interrupts"),
             message: SelfDogfoodingMessage.make(
-              "Bare Cause.hasInterrupts(cause) in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause(cause) or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause).",
+              "Bare Cause.hasInterrupts(cause) or Cause.hasInterruptsOnly(cause) in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause(cause) from @harness/contract (or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)).",
             ),
             file: file.filePath,
             line: getLineNumber(sourceFile, node.getStart(sourceFile)),
@@ -722,7 +724,7 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
         violations.push({
           rule: SelfDogfoodingRuleId.make("bare-cause-has-interrupts"),
           message: SelfDogfoodingMessage.make(
-            "Point-free Cause.hasInterrupts in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause instead.",
+            "Point-free Cause.hasInterrupts or Cause.hasInterruptsOnly in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause from @harness/contract instead.",
           ),
           file: file.filePath,
           line: getLineNumber(sourceFile, node.getStart(sourceFile)),

@@ -17,9 +17,12 @@ import {
   resolveModifiedFilesSinceStampOrHead,
 } from "../src/commands/daemon-and-omnigraph.service.js"
 import { handleGc } from "../src/commands/gc-and-ontology.command.js"
+import { syncOmnigraphOnDone } from "../src/commands/done-omnigraph-helpers.js"
 import { handleRoute } from "../src/commands/guard-and-route.command.js"
 import { stopStaleOmnigraphClusterBeforeDelete } from "../src/commands/omnigraph-lifecycle.js"
 import { handlePlanCheck } from "../src/commands/plan-and-repair.command.js"
+import { handleDoctorOrSession, handleIngest } from "../src/commands/session-learn-report.command.js"
+import { handleVerify } from "../src/commands/verify-and-done.command.js"
 import {
   isReadOnlyStopTurn,
   isSubagentStopContext,
@@ -178,9 +181,11 @@ describe("PR #28 adjudicated review fixes (F-6.2, F-8.3c, F-11.1, F-12.1, F-14.1
       writeFileSync(join(dir, "libs", "harness", "graph", "cluster.yaml"), "name: test\n")
 
       const res = await runCli(["ingest"], { repoRoot: dir })
-      expect(res.exitCode).toBe(0)
-      const parsed = JSON.parse(res.stdout) as { readonly syncedToOmnigraph: boolean }
+      expect(res.exitCode).toBe(1)
+      expect(res.stderr).toContain("[harness:ingest] Omnigraph sync failed:")
+      const parsed = JSON.parse(res.stdout) as { readonly syncedToOmnigraph: boolean; readonly error?: string }
       expect(parsed.syncedToOmnigraph).toBe(false)
+      expect(typeof parsed.error).toBe("string")
       expect(existsSync(join(dir, ".harness", "graph-head.json"))).toBe(false)
     } finally {
       if (origHome !== undefined) process.env.HOME = origHome
@@ -347,12 +352,18 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
     }
   })
 
-  it("F-4.1 & F-19.2: isRootConfigOrSharedCoreChange and fail-closed GitFailed in verify", async () => {
+  it("F-4.1: isRootConfigOrSharedCoreChange classifies root configs, tools/, nested package.json/tsconfig.json, and domain files", () => {
     expect(isRootConfigOrSharedCoreChange([])).toBe(true)
     expect(isRootConfigOrSharedCoreChange(["tsconfig.base.json"])).toBe(true)
     expect(isRootConfigOrSharedCoreChange(["libs/harness/gates/src/index.ts"])).toBe(true)
     expect(isRootConfigOrSharedCoreChange(["apps/harness-cli/src/index.ts"])).toBe(true)
+    expect(isRootConfigOrSharedCoreChange(["tools/oxlint/syntax-bans.js"])).toBe(true)
+    expect(isRootConfigOrSharedCoreChange(["libs/sample/domain/package.json"])).toBe(true)
+    expect(isRootConfigOrSharedCoreChange(["apps/sample/tsconfig.json"])).toBe(true)
     expect(isRootConfigOrSharedCoreChange(["libs/sample/domain/src/cart.ts"])).toBe(false)
+  })
+
+  it("F-19.2: runDeltaAstAndPluginGates fails closed on GitFailed in verify", async () => {
 
     const dir = mkdtempSync(join(tmpdir(), "harness-f41-"))
     try {
@@ -385,6 +396,7 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
   })
 
   it("F-7.1: gc --strict exits 1 and includes governance-doc-read-error on unreadable ADR/Spec", async () => {
+    if (typeof process.getuid === "function" && process.getuid() === 0) return
     const dir = mkdtempSync(join(tmpdir(), "harness-f71-"))
     const adrDir = join(dir, "docs", "adr")
     const adrPath = join(adrDir, "ADR-0001.md")
@@ -417,8 +429,7 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
     const res = await Effect.runPromise(
       handleRoute(
         ["route", "unmatched-obscure-step-xyz"],
-        undefined,
-        makeFailingDecisionModelLayer("offline"),
+        { decisionLayer: makeFailingDecisionModelLayer("offline") },
       ),
     )
     expect(res.exitCode).toBe(0)
@@ -445,6 +456,7 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
   })
 
   it("W3B: handlePlanCheck fails closed on unreadable governance docs", async () => {
+    if (typeof process.getuid === "function" && process.getuid() === 0) return
     const dir = mkdtempSync(join(tmpdir(), "harness-w3b-plan-"))
     const adrDir = join(dir, "docs", "adr")
     const adrPath = join(adrDir, "ADR-0001.md")
@@ -590,6 +602,336 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
         })
         .exhaustive()
     } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("I-7b: handleVerify fails closed with verify:git-delta and no verify-stamp.json when .git is corrupt (GitFailed)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-i7b-verify-git-"))
+    try {
+      mkdirSync(join(dir, ".harness"), { recursive: true })
+      writeFileSync(join(dir, ".git"), "gitdir: /nonexistent-git-dir\n", "utf8")
+      const res = await Effect.runPromise(
+        handleVerify({
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+          decisionLayer: makeFailingDecisionModelLayer("offline"),
+        }),
+      )
+      expect(res.exitCode).toBe(1)
+      expect(`${res.stdout}\n${res.stderr}`).toContain("verify:git-delta")
+      expect(existsSync(join(dir, ".harness", "verify-stamp.json"))).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("S-4: resolveCommandTelemetryOutcome records degraded-fallback as fallback even for non-review blocks", () => {
+    expect(
+      resolveCommandTelemetryOutcome("route", {
+        exitCode: 0,
+        stdout: "effect",
+        stderr: "",
+        telemetryDetail: "block=effect;source=degraded-fallback",
+      }),
+    ).toBe("fallback")
+    expect(
+      resolveCommandTelemetryOutcome("route", {
+        exitCode: 0,
+        stdout: "review",
+        stderr: "",
+        telemetryDetail: "block=review;source=model",
+      }),
+    ).toBe("ok")
+    expect(
+      resolveCommandTelemetryOutcome("route", {
+        exitCode: 0,
+        stdout: "agent-patterns/errors.md",
+        stderr: "",
+        telemetryDetail: "block=errors;source=deterministic",
+      }),
+    ).toBe("ok")
+    expect(
+      resolveCommandTelemetryOutcome("route", {
+        exitCode: 0,
+        stdout: "review",
+        stderr: "",
+      }),
+    ).toBe("fallback")
+  })
+
+  const startFailingSyncOmnigraphServer = async (): Promise<{
+    readonly url: string
+    readonly close: () => Promise<void>
+  }> => {
+    const server = http.createServer((req, res) => {
+      if (req.url === "/readyz") {
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          "Omnigraph-Http-Api": "0.14",
+        })
+        res.end(JSON.stringify({ ready: true, status: "serving", ready_graph_count: 1 }))
+        return
+      }
+      res.writeHead(500, { "Content-Type": "application/json" })
+      res.end(JSON.stringify({ error: "mock sync failure" }))
+    })
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", () => resolve())
+    })
+    const addr = server.address()
+    if (typeof addr !== "object" || addr === null) {
+      throw new Error("Expected TCP address")
+    }
+    return {
+      url: `http://127.0.0.1:${addr.port}`,
+      close: async () => {
+        server.closeAllConnections()
+        await new Promise<void>((resolve) => server.close(() => resolve()))
+      },
+    }
+  }
+
+  it("I-3a: handleDoctorOrSession surfaces reconcile sync failures to stderr, exitCode=1, and reconcileError", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-i3a-session-"))
+    const prevUrl = process.env.OMNIGRAPH_URL
+    const mockServer = await startFailingSyncOmnigraphServer()
+    process.env.OMNIGRAPH_URL = mockServer.url
+    try {
+      const res = await Effect.runPromise(
+        handleDoctorOrSession(["session"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+          decisionLayer: makeFailingDecisionModelLayer("offline"),
+        }),
+      )
+      expect(res.exitCode).toBe(1)
+      expect(res.stderr).toContain("reconcileError=")
+      const parsed = JSON.parse(res.stdout) as {
+        omnigraphInitialized: boolean
+        reconcileError?: string
+      }
+      expect(parsed.omnigraphInitialized).toBe(false)
+      expect(typeof parsed.reconcileError).toBe("string")
+      expect((parsed.reconcileError ?? "").length).toBeGreaterThan(0)
+    } finally {
+      await mockServer.close()
+      if (prevUrl === undefined) Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
+      else process.env.OMNIGRAPH_URL = prevUrl
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("I-3b: handleIngest surfaces Omnigraph sync failures with exitCode 1 (CLI) and exitCode 0 (--format=antigravity)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-i3b-ingest-"))
+    const prevUrl = process.env.OMNIGRAPH_URL
+    const mockServer = await startFailingSyncOmnigraphServer()
+    process.env.OMNIGRAPH_URL = mockServer.url
+    try {
+      const cliRes = await Effect.runPromise(
+        handleIngest(["ingest"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(cliRes.exitCode).toBe(1)
+      expect(cliRes.stderr).toContain("[harness:ingest] Omnigraph sync failed:")
+      const cliJson = JSON.parse(cliRes.stdout) as { syncedToOmnigraph: boolean; error?: string }
+      expect(cliJson.syncedToOmnigraph).toBe(false)
+      expect(typeof cliJson.error).toBe("string")
+      expect((cliJson.error ?? "").length).toBeGreaterThan(0)
+
+      rmSync(join(dir, ".harness", "graph-snapshot.json"), { force: true })
+      const agyRes = await Effect.runPromise(
+        handleIngest(["ingest", "--format=antigravity"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(agyRes.exitCode).toBe(0)
+      expect(agyRes.stderr).toContain("[harness:ingest] Omnigraph sync failed:")
+      const agyJson = JSON.parse(agyRes.stdout) as { error?: string }
+      expect(typeof agyJson.error).toBe("string")
+      expect((agyJson.error ?? "").length).toBeGreaterThan(0)
+    } finally {
+      await mockServer.close()
+      if (prevUrl === undefined) Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
+      else process.env.OMNIGRAPH_URL = prevUrl
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("runDeclarativeCli session --format=antigravity emits pure parseable JSON stdout even when plan-graph-snapshot.json is corrupt", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-session-corrupt-plan-"))
+    try {
+      mkdirSync(join(dir, ".harness"), { recursive: true })
+      writeFileSync(join(dir, ".harness", "plan-graph-snapshot.json"), "{corrupt-json", "utf8")
+      const res = await Effect.runPromise(
+        runDeclarativeCli(["session", "--format=antigravity"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(res.exitCode).toBe(0)
+      const parsed = JSON.parse(res.stdout) as { readonly injectSteps?: unknown }
+      expect(Array.isArray(parsed.injectSteps)).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  const startDoneMergeMockServer = async (options: {
+    readonly mergeFails: boolean
+  }): Promise<{
+    readonly url: string
+    readonly requests: ReadonlyArray<{ readonly method: string; readonly url: string }>
+    readonly close: () => Promise<void>
+  }> => {
+    const requests: Array<{ readonly method: string; readonly url: string }> = []
+    const headers = {
+      "Content-Type": "application/json",
+      "Omnigraph-Http-Api": "0.14",
+    } as const
+    const server = http.createServer((req, res) => {
+      const method = req.method ?? "GET"
+      const url = req.url ?? "/"
+      requests.push({ method, url })
+
+      if (url === "/readyz") {
+        res.writeHead(200, headers)
+        res.end(JSON.stringify({ ready: true, ready_graph_count: 1 }))
+        return
+      }
+      if (url === "/healthz") {
+        res.writeHead(200, { "Omnigraph-Http-Api": "0.14" })
+        res.end()
+        return
+      }
+      if (method === "GET" && url.endsWith("/branches")) {
+        res.writeHead(200, headers)
+        res.end(JSON.stringify({ outcome: "ok", branches: ["main"], serverRef: "srv-1" }))
+        return
+      }
+      if (method === "POST" && url.endsWith("/branches")) {
+        res.writeHead(200, headers)
+        res.end(
+          JSON.stringify({ outcome: "created", branch: "impl/current", serverRef: "srv-1" }),
+        )
+        return
+      }
+      if (method === "POST" && url.includes("/branches/merge")) {
+        if (options.mergeFails) {
+          res.writeHead(500, headers)
+          res.end(JSON.stringify({ error: "mock merge failure" }))
+          return
+        }
+        res.writeHead(200, headers)
+        res.end(
+          JSON.stringify({
+            outcome: "already_up_to_date",
+            source: "impl/current",
+            target: "main",
+            commit: null,
+            serverRef: "srv-1",
+          }),
+        )
+        return
+      }
+      if (method === "GET" && url.includes("/branches/diff")) {
+        res.writeHead(200, headers)
+        res.end(
+          JSON.stringify({
+            outcome: "ok",
+            serverRef: "srv-1",
+            from_commit_id: "cmt-1",
+            to_commit_id: "cmt-2",
+            changes: [],
+            netNodeCount: 0,
+            netEdgeCount: 0,
+          }),
+        )
+        return
+      }
+      if (method === "DELETE" && url.includes("/branches/")) {
+        res.writeHead(200, headers)
+        res.end(JSON.stringify({ outcome: "deleted", serverRef: "srv-1" }))
+        return
+      }
+      res.writeHead(404, headers)
+      res.end(JSON.stringify({ error: "not found" }))
+    })
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", () => resolve())
+    })
+    const addr = server.address()
+    if (typeof addr !== "object" || addr === null) {
+      throw new Error("Expected TCP address")
+    }
+    return {
+      url: `http://127.0.0.1:${addr.port}`,
+      requests,
+      close: async () => {
+        server.closeAllConnections()
+        await new Promise<void>((resolve) => server.close(() => resolve()))
+      },
+    }
+  }
+
+  const setupNonIsolatedWorkspaceDir = (prefix: string): string => {
+    const dir = mkdtempSync(join(tmpdir(), prefix))
+    const configDir = join(dir, "libs", "harness", "graph")
+    mkdirSync(join(configDir, "queries"), { recursive: true })
+    writeFileSync(join(configDir, "cluster.yaml"), "name: test\n", "utf8")
+    writeFileSync(join(configDir, "schema.pg"), "", "utf8")
+    writeFileSync(join(configDir, "queries", "harness.gq"), "", "utf8")
+    const clusterRootDir = join(dir, ".harness", "omnigraph-cluster")
+    mkdirSync(clusterRootDir, { recursive: true })
+    writeFileSync(join(clusterRootDir, ".config-stamp"), "name: test\n\n---\n\n---\n", "utf8")
+    return dir
+  }
+
+  it("S-8d: syncOmnigraphOnDone returns undefined on successful HTTP merge in non-isolated workspace", async () => {
+    const dir = setupNonIsolatedWorkspaceDir("harness-s8d-ok-")
+    const prevUrl = process.env.OMNIGRAPH_URL
+    const mockServer = await startDoneMergeMockServer({ mergeFails: false })
+    process.env.OMNIGRAPH_URL = mockServer.url
+    try {
+      const result = await Effect.runPromise(
+        syncOmnigraphOnDone(dir, { repoRoot: dir, skipBackgroundDaemons: true }, true, "block"),
+      )
+      expect(result).toBeUndefined()
+      expect(
+        mockServer.requests.some((r) => r.method === "POST" && r.url.includes("/branches/merge")),
+      ).toBe(true)
+    } finally {
+      await mockServer.close()
+      if (prevUrl === undefined) Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
+      else process.env.OMNIGRAPH_URL = prevUrl
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("S-8d: syncOmnigraphOnDone returns block decision when POST /branches/merge returns HTTP 500", async () => {
+    const dir = setupNonIsolatedWorkspaceDir("harness-s8d-fail-")
+    const prevUrl = process.env.OMNIGRAPH_URL
+    const mockServer = await startDoneMergeMockServer({ mergeFails: true })
+    process.env.OMNIGRAPH_URL = mockServer.url
+    try {
+      const result = await Effect.runPromise(
+        syncOmnigraphOnDone(dir, { repoRoot: dir, skipBackgroundDaemons: true }, true, "block"),
+      )
+      expect(result).toBeDefined()
+      expect(result?.exitCode).toBe(0)
+      const parsed = JSON.parse(result?.stdout ?? "{}") as {
+        readonly decision?: string
+        readonly reason?: string
+      }
+      expect(parsed.decision).toBe("block")
+      expect(parsed.reason).toMatch(/^Omnigraph branch merge \(.*\) failed$/)
+    } finally {
+      await mockServer.close()
+      if (prevUrl === undefined) Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
+      else process.env.OMNIGRAPH_URL = prevUrl
       rmSync(dir, { recursive: true, force: true })
     }
   })

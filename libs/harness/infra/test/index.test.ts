@@ -59,7 +59,9 @@ import {
   queryUnixSocketLine,
   queryUnixSocketLineDetailed,
   resolveAstGateCachePath,
+  resolveDecisionCachePath,
   resolveHarnessDaemonSocketPath,
+  resolveHarnessStateDir,
   startScopedUnixSocketDaemon,
   UnixSocketDaemonLive,
   WorkspaceFsLive,
@@ -1036,25 +1038,27 @@ describe("@harness/infra live adapters", () => {
     ),
   )
 
-  it.effect("F-15.1 & F-16.1: WorkspaceFsLive.exists returns false on ENOENT, fails with WorkspaceFsError on EACCES, and handles untrimmed/empty errors", () =>
+  it.effect("F-15.1 / F-16.1: WorkspaceFsLive.exists returns false on ENOENT, fails with WorkspaceFsError on EACCES, and handles untrimmed/empty errors", () =>
     withTempDir((dir) =>
       Effect.gen(function* () {
         const fs = yield* WorkspaceFs
         const missing = WorkspaceFilePath.make(join(dir, "does-not-exist.txt"))
         expect(yield* fs.exists(missing)).toBe(false)
 
-        const lockedDir = join(dir, "locked")
-        mkdirSync(lockedDir, { recursive: true })
-        writeFileSync(join(lockedDir, "secret.txt"), "x", "utf8")
-        chmodSync(lockedDir, 0o000)
-        const existsErr = yield* fs
-          .exists(WorkspaceFilePath.make(join(lockedDir, "secret.txt")))
-          .pipe(
-            Effect.ensuring(Effect.sync(() => chmodSync(lockedDir, 0o755))),
-            Effect.flip,
-          )
-        expect(existsErr._tag).toBe("WorkspaceFsError")
-        expect(existsErr.operation).toBe("stat")
+        if (typeof process.getuid !== "function" || process.getuid() !== 0) {
+          const lockedDir = join(dir, "locked")
+          mkdirSync(lockedDir, { recursive: true })
+          writeFileSync(join(lockedDir, "secret.txt"), "x", "utf8")
+          chmodSync(lockedDir, 0o000)
+          const existsErr = yield* fs
+            .exists(WorkspaceFilePath.make(join(lockedDir, "secret.txt")))
+            .pipe(
+              Effect.ensuring(Effect.sync(() => chmodSync(lockedDir, 0o755))),
+              Effect.flip,
+            )
+          expect(existsErr._tag).toBe("WorkspaceFsError")
+          expect(existsErr.operation).toBe("stat")
+        }
 
         const hostIo = {
           existsSync: () => {
@@ -1157,5 +1161,106 @@ describe("@harness/infra live adapters", () => {
         { url: "http://localhost:11434/v1/systemone", model: "clef-custom" },
       ])
     }),
+  )
+
+  it("I-1 / S-8b: resolveDecisionCachePath, resolveAstGateCachePath, and resolveHarnessStateDir honor HARNESS_STATE_DIR and HARNESS_WORKTREE_ID isolation", () => {
+    const prevStateDir = process.env.HARNESS_STATE_DIR
+    const prevWorktreeId = process.env.HARNESS_WORKTREE_ID
+    try {
+      Reflect.deleteProperty(process.env, "HARNESS_STATE_DIR")
+      Reflect.deleteProperty(process.env, "HARNESS_WORKTREE_ID")
+      expect(resolveHarnessStateDir("/tmp/repo")).toBe("/tmp/repo/.harness")
+      expect(resolveDecisionCachePath("/tmp/repo")).toBe(
+        "/tmp/repo/.harness/cache/decision-cache-v1.json",
+      )
+      expect(resolveAstGateCachePath("/tmp/repo")).toBe(
+        "/tmp/repo/.harness/cache/ast-gate-cache-v1.json",
+      )
+
+      process.env.HARNESS_WORKTREE_ID = "wt/123"
+      expect(resolveHarnessStateDir("/tmp/repo")).toBe("/tmp/repo/.harness/worktrees/wt_123")
+      expect(resolveDecisionCachePath("/tmp/repo")).toBe(
+        "/tmp/repo/.harness/worktrees/wt_123/cache/decision-cache-v1.json",
+      )
+      expect(resolveAstGateCachePath("/tmp/repo")).toBe(
+        "/tmp/repo/.harness/worktrees/wt_123/cache/ast-gate-cache-v1.json",
+      )
+
+      process.env.HARNESS_STATE_DIR = "custom-state"
+      expect(resolveHarnessStateDir("/tmp/repo")).toBe("/tmp/repo/custom-state")
+      expect(resolveDecisionCachePath("/tmp/repo")).toBe(
+        "/tmp/repo/custom-state/cache/decision-cache-v1.json",
+      )
+      expect(resolveAstGateCachePath("/tmp/repo")).toBe(
+        "/tmp/repo/custom-state/cache/ast-gate-cache-v1.json",
+      )
+    } finally {
+      if (prevStateDir === undefined) {
+        Reflect.deleteProperty(process.env, "HARNESS_STATE_DIR")
+      } else {
+        process.env.HARNESS_STATE_DIR = prevStateDir
+      }
+      if (prevWorktreeId === undefined) {
+        Reflect.deleteProperty(process.env, "HARNESS_WORKTREE_ID")
+      } else {
+        process.env.HARNESS_WORKTREE_ID = prevWorktreeId
+      }
+    }
+  })
+
+  it("I-2: resolveHarnessStateDir, resolveDecisionCachePath, and resolveAstGateCachePath reject empty, whitespace, null-byte, and root-only paths", () => {
+    for (const invalidRoot of ["", "   ", "/", "///", "/.", "/..", "/tmp/..", ".", "..", "/tmp\0bad"]) {
+      expect(() => resolveHarnessStateDir(invalidRoot, {})).toThrow()
+      expect(() => resolveDecisionCachePath(invalidRoot, {})).toThrow()
+      expect(() => resolveAstGateCachePath(invalidRoot, {})).toThrow()
+    }
+    for (const invalidStateDir of ["   ", "/", "///", "/.", "/..", "/tmp/..", "bad\0dir"]) {
+      expect(() =>
+        resolveHarnessStateDir("/tmp/repo", { HARNESS_STATE_DIR: invalidStateDir }),
+      ).toThrow()
+      expect(() =>
+        resolveAstGateCachePath("/tmp/repo", { HARNESS_STATE_DIR: invalidStateDir }),
+      ).toThrow()
+    }
+    expect(() =>
+      resolveHarnessStateDir("/repo", { HARNESS_STATE_DIR: ".." }),
+    ).toThrow()
+    expect(() =>
+      resolveAstGateCachePath("/repo", { HARNESS_STATE_DIR: ".." }),
+    ).toThrow()
+    for (const invalidWorktreeId of [".", "..", "...", "   ", "wt\0bad"]) {
+      expect(() =>
+        resolveHarnessStateDir("/repo", { HARNESS_WORKTREE_ID: invalidWorktreeId }),
+      ).toThrow()
+      expect(() =>
+        resolveAstGateCachePath("/repo", { HARNESS_WORKTREE_ID: invalidWorktreeId }),
+      ).toThrow()
+    }
+  })
+
+  it.live("S-5: UnixSocketDaemonLive chmods newly created custom socketPathOverride dirs to 0o700 without touching pre-existing parent dirs", () =>
+    withTempDir((dir) =>
+      Effect.gen(function* () {
+        const repoRoot = WorkspaceFilePath.make(dir)
+        const existingParent = join(dir, "existing-parent")
+        mkdirSync(existingParent, { recursive: true })
+        chmodSync(existingParent, 0o755)
+
+        const newSubdir = join(existingParent, "new-custom-subdir")
+        const socketOverride = DaemonSocketPath.make(join(newSubdir, "custom.sock"))
+
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const info = yield* startScopedUnixSocketDaemon(repoRoot, {
+              socketPathOverride: socketOverride,
+            })
+            expect(info.socketPath).toBe(socketOverride)
+            expect(statSync(newSubdir).mode & 0o777).toBe(0o700)
+            expect(statSync(existingParent).mode & 0o777).toBe(0o755)
+            expect(statSync(socketOverride).mode & 0o777).toBe(0o600)
+          }),
+        ).pipe(Effect.provide(UnixSocketDaemonLive))
+      }),
+    ),
   )
 })

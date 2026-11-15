@@ -4,6 +4,9 @@ import * as DecisionModel from "effect/ai/DecisionModel"
 import { isPureInterruptCause } from "@harness/contract"
 import { match } from "ts-pattern"
 import type { FrictionEventKind } from "@harness/gates"
+import { IDIOM_BLOCKS } from "./idiom-router.js"
+
+const MAX_IDIOM_ROUTER_SLOTS = 26
 
 export const LEARN_TARGETS = [
   "agent-pattern",
@@ -57,13 +60,16 @@ export interface LearnProposalResult {
 
 export const deterministicLearnFallback = (input: LearnProposalInput): LearnProposalResult =>
   match(input.kind)
-    .with("route_miss", () => ({
-      target: "agent-pattern" as const,
-      actionable: true,
-      confidence: 0.85,
-      recommendation: `Create or expand an agent-patterns/*.md recipe for "${input.summary}" and register it in IdiomRouterV1 (11 of 26 slots available).`,
-      source: "deterministic-fallback" as const,
-    }))
+    .with("route_miss", () => {
+      const availableSlots = Math.max(0, MAX_IDIOM_ROUTER_SLOTS - IDIOM_BLOCKS.length)
+      return {
+        target: "agent-pattern" as const,
+        actionable: true,
+        confidence: 0.85,
+        recommendation: `Create or expand an agent-patterns/*.md recipe for "${input.summary}" and register it in IdiomRouterV1 (${availableSlots} of ${MAX_IDIOM_ROUTER_SLOTS} slots available).`,
+        source: "deterministic-fallback" as const,
+      }
+    })
     .with("verify_failure", () => {
       const isAstGraphGate =
         input.detail.includes("domain-requires-") ||

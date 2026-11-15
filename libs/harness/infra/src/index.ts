@@ -11,7 +11,6 @@ import {
 } from "./cache-helpers.js"
 import {
   DecisionCacheLive,
-  type DecisionCacheStatsSnapshot,
   makeDecisionCacheLayer,
 } from "./decision-cache-live.js"
 import { LocalDecisionModel, makeLocalDecisionModelLayer } from "./local-decision-model-live.js"
@@ -50,7 +49,7 @@ export {
 }
 export { AstGateCacheLive, makeAstGateCacheLayer }
 export { resolveAstGateCachePath, resolveDecisionCachePath, resolveHarnessStateDir }
-export { DecisionCacheLive, makeDecisionCacheLayer, type DecisionCacheStatsSnapshot }
+export { DecisionCacheLive, makeDecisionCacheLayer }
 export { LocalDecisionModel, makeLocalDecisionModelLayer }
 export {
   makeUnixSocketDaemonLayer,

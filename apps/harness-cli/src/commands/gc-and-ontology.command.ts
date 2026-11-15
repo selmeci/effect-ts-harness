@@ -1,6 +1,5 @@
 import { join } from "node:path"
-import { Cause, Effect, Layer } from "effect"
-import * as DecisionModel from "effect/ai/DecisionModel"
+import { Cause, Effect } from "effect"
 import { match } from "ts-pattern"
 import { isPureInterruptCause } from "@harness/contract"
 import {
@@ -73,10 +72,9 @@ export const handleGc = (
 export const handleOntology = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
-  maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
-    const decisionLayer = yield* resolveDecisionModelLayer(maybeDecisionLayer)
+    const decisionLayer = yield* resolveDecisionModelLayer(options?.decisionLayer)
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     const graph =
       options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo))

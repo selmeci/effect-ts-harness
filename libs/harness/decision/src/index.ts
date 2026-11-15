@@ -152,7 +152,6 @@ export {
   CachedDecisionLookupResult,
   type CachedDecisionEntry,
   type CachedDecisionModelOptions,
-  resolveDecisionCachePath,
   canonicalJson,
   computeDecisionCacheKey,
   decideCachedDecisionLookup,

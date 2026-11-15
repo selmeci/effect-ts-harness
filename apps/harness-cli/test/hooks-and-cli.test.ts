@@ -703,8 +703,8 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
               skipBackgroundDaemons: true,
               stdin: JSON.stringify({ stop_hook_active: false }),
               planSteps: [{ stepId: "step-1", planStep: "step-1", stepDiff: "diff" }],
+              decisionLayer: slowDecisionLayer,
             },
-            slowDecisionLayer,
           ),
         )
         expect(res.exitCode).toBe(2)
@@ -771,7 +771,16 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
               "apps/harness-cli/src/index.ts",
               ...args,
             ],
-            { cwd: REPO_ROOT, stdio: ["pipe", "pipe", "pipe"] },
+            {
+              cwd: REPO_ROOT,
+              stdio: ["pipe", "pipe", "pipe"],
+              env: {
+                ...process.env,
+                HARNESS_WORKTREE_ID: "",
+                CLAUDE_AGENT_ID: "",
+                ANTIGRAVITY_SUBAGENT: "",
+              },
+            },
           )
           let stdout = ""
           let stderr = ""
@@ -906,6 +915,9 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
                   ...process.env,
                   HARNESS_OLLAMA_URL: `http://127.0.0.1:${port}`,
                   OMNIGRAPH_URL: `http://127.0.0.1:${port}`,
+                  HARNESS_WORKTREE_ID: "",
+                  CLAUDE_AGENT_ID: "",
+                  ANTIGRAVITY_SUBAGENT: "",
                 },
               },
             )
@@ -935,7 +947,7 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
               JSON.stringify({
                 fullyIdle: true,
                 conversationId: "conv-1",
-                workspacePaths: [REPO_ROOT],
+                workspacePaths: [doneSigRepo],
               }),
             )
             child.stdin.end()
@@ -1076,5 +1088,61 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         else Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
       }
     })
+  })
+
+  it("S-1: handleDone surfaces corrupt transcript reason to stderr and block reason", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-s1-corrupt-"))
+    try {
+      const transcriptPath = join(dir, "transcript.jsonl")
+      writeFileSync(transcriptPath, "{not-valid-json\n", "utf8")
+      const res = await Effect.runPromise(
+        handleDone(["done", "--format=antigravity"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+          stdin: JSON.stringify({
+            stop_hook_active: false,
+            transcriptPath,
+          }),
+        }),
+      )
+      expect(res.exitCode).toBe(0)
+      expect(res.stderr).toContain("Corrupt transcript JSONL line 1")
+      const parsed = JSON.parse(res.stdout) as { decision: string; reason: string }
+      expect(parsed.decision).toBe("continue")
+      expect(parsed.reason).toContain("Corrupt transcript JSONL line 1")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("S-3: runDeclarativeCli rejects mixed command and -v/--version or -h/--help flags with exitCode 1", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-s3-version-"))
+    try {
+      const res = await Effect.runPromise(
+        runDeclarativeCli(["gc", "--strict", "-v"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(res.exitCode).toBe(1)
+
+      const vGuardRes = await Effect.runPromise(
+        runDeclarativeCli(["-v", "guard"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(vGuardRes.exitCode).not.toBe(0)
+
+      const hDoneRes = await Effect.runPromise(
+        runDeclarativeCli(["-h", "done"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(hDoneRes.exitCode).not.toBe(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

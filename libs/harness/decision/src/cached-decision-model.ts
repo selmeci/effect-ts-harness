@@ -7,7 +7,6 @@ import {
   DecisionCacheKey,
   DecisionCachePayloadJson,
   DecisionCacheTtlMillis,
-  resolveDefaultDecisionCachePath,
   type WorkspaceFsError,
 } from "@harness/contract"
 import { NonNegativeCount } from "@harness/graph"
@@ -74,11 +73,8 @@ export interface CachedDecisionModelOptions {
   readonly taskId?: string | undefined
   readonly promptVersion?: string | undefined
   readonly modelId?: string | undefined
-  readonly cacheFilePath?: string | undefined
   readonly ttlMillis?: number | undefined
 }
-
-export const resolveDecisionCachePath = resolveDefaultDecisionCachePath
 
 export const canonicalJson = (value: unknown): string => {
   if (value === null || value === undefined) {
@@ -428,6 +424,5 @@ export const CachedDecisionModel = {
   wrapLayer: wrapDecisionModelLayer,
   canonicalJson,
   computeCacheKey: computeDecisionCacheKey,
-  resolveCachePath: resolveDecisionCachePath,
   evaluateBatch: evaluateBatchCachedDecisions,
 } as const

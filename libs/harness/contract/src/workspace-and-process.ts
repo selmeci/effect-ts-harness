@@ -80,7 +80,7 @@ export type StdinReadErrorKind = typeof StdinReadErrorKind.Type
 
 export class StdinReadError extends Schema.TaggedError<StdinReadError>()("StdinReadError", {
   reason: ErrorReasonMessage,
-  reasonKind: Schema.optional(StdinReadErrorKind),
+  reasonKind: StdinReadErrorKind,
 }) {}
 
 export const SubprocessCommand = Schema.NonEmptyString.pipe(

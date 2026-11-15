@@ -8,7 +8,8 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from "@modelcontextprotocol/sdk/types.js"
-import { Cause, Effect, Exit, Layer, Logger, ManagedRuntime, Schema } from "effect"
+import { NodeServices } from "@effect/platform-node"
+import { Cause, Effect, Exit, Logger, ManagedRuntime, Schema } from "effect"
 import {
   type HarnessDaemonServerHandle,
   startHarnessDaemonServer,
@@ -131,7 +132,7 @@ export const createServer = (options?: ServerOptions): McpServer => {
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const server = createServer()
   const transport = new StdioServerTransport()
-  const cliRuntime = ManagedRuntime.make(Layer.empty)
+  const cliRuntime = ManagedRuntime.make(NodeServices.layer)
   let daemonHandle: HarnessDaemonServerHandle | undefined = undefined
   let shuttingDown = false
   const daemonStartupPromise: Promise<HarnessDaemonServerHandle | undefined> =

@@ -24,6 +24,7 @@ import { extractWorkspaceTypeAwareGraph } from "@harness/graph"
 import {
   makeAstGateCacheLayer,
   nodeSyncHostIo,
+  resolveAstGateCachePath,
   resolveHarnessDaemonSocketPath,
   startScopedUnixSocketDaemon,
   UnixSocketDaemonLive,
@@ -105,7 +106,7 @@ const createDaemonLineHandler =
           )
           .with("ast-gates", () =>
             Effect.gen(function* () {
-              const cachePath = AstGateCache.resolveCachePath(resolvedRoot)
+              const cachePath = resolveAstGateCachePath(resolvedRoot)
               const requestedRelPaths = req.files ?? []
               for (const rel of requestedRelPaths) {
                 const resolvedAbs = path.resolve(resolvedRoot, rel)

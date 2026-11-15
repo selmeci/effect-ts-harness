@@ -28,7 +28,7 @@ import {
   writeGraphHeadMeta,
 } from "@harness/graph"
 import type { GovernanceDocReference } from "@harness/decision"
-import { nodeSyncHostIo } from "@harness/infra"
+import { nodeSyncHostIo, resolveHarnessStateDir } from "@harness/infra"
 
 export { McpToolInputName, McpToolName, UnknownToolError }
 
@@ -216,8 +216,9 @@ export const resolveGraphWithStatus = (
     let stalenessDegradedReason: string | undefined = undefined
     let stalenessEvaluationError: string | undefined = undefined
     if (!snapshotPath) {
-      const verifySnap = path.join(root, ".harness", "graph-snapshot.json")
-      const planSnap = path.join(root, ".harness", "plan-graph-snapshot.json")
+      const stateDir = resolveHarnessStateDir(root)
+      const verifySnap = path.join(stateDir, "graph-snapshot.json")
+      const planSnap = path.join(stateDir, "plan-graph-snapshot.json")
       const verifyExists = nodeSyncHostIo.existsSync(verifySnap)
       const planExists = nodeSyncHostIo.existsSync(planSnap)
       if (verifyExists) {

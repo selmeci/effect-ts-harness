@@ -1,5 +1,5 @@
 import { join } from "node:path"
-import { Cause, Effect, Layer, Option, Schema } from "effect"
+import { Cause, Effect, Option, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import { isPureInterruptCause } from "@harness/contract"
@@ -54,10 +54,9 @@ import {
 export const handleDoctorOrSession = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
-  maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
-    const decisionLayer = yield* resolveDecisionModelLayer(maybeDecisionLayer)
+    const decisionLayer = yield* resolveDecisionModelLayer(options?.decisionLayer)
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     const isAntigravity = hasAntigravityFormat(argv)
     const nodeMajor = parseInt(process.versions.node.split(".")[0] ?? "0", 10)
@@ -75,9 +74,10 @@ export const handleDoctorOrSession = (
     }).pipe(Effect.orElseSucceed(() => false))
 
     const isolatedExternal = isIsolatedExternalWorkspace(repoRoot)
-    const omnigraphInitialized = isolatedExternal
+    let omnigraphInitialized = isolatedExternal
       ? true
       : yield* ensureLocalOmnigraphReady(repoRoot)
+    let reconcileError: string | undefined
 
     const requireLiveOllama =
       process.env.HARNESS_REQUIRE_OLLAMA === "1" ||
@@ -123,6 +123,9 @@ export const handleDoctorOrSession = (
           )
           if (reconcileSyncRes.syncedToOmnigraph) {
             writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
+          } else {
+            omnigraphInitialized = false
+            reconcileError = reconcileSyncRes.error ?? "unknown Omnigraph reconcile error"
           }
         }
       }
@@ -247,11 +250,20 @@ export const handleDoctorOrSession = (
         )
       }
       if (!snapshotOk) injected.push(...missingPlannedFns)
+      if (reconcileError !== undefined) {
+        injected.push(`[harness:session] Warning: Omnigraph reconcile sync failed: ${reconcileError}`)
+      }
       if (handoff.handoffMessage !== null) injected.push(handoff.handoffMessage)
       return {
         exitCode: 0,
-        stdout: JSON.stringify({ injectSteps: injected }),
-        stderr: "",
+        stdout: JSON.stringify({
+          injectSteps: injected,
+          ...(reconcileError !== undefined ? { reconcileError } : {}),
+        }),
+        stderr:
+          reconcileError !== undefined
+            ? `[harness:session] Warning: Omnigraph reconcile sync failed: ${reconcileError}`
+            : "",
       }
     }
 
@@ -267,6 +279,7 @@ export const handleDoctorOrSession = (
         ollamaReady,
         modelWarm,
         handoff,
+        ...(reconcileError !== undefined ? { reconcileError } : {}),
         telemetry: {
           totalEvents: telemetryReport.totalEvents,
           healthScore: telemetryReport.healthScore,
@@ -275,7 +288,7 @@ export const handleDoctorOrSession = (
       }),
       stderr: ok
         ? ""
-        : `Doctor check failed: nodeOk=${nodeOk}, snapshotDirOk=${snapshotDirOk}, snapshotOk=${snapshotOk}, effectLspOk=${effectLspOk}, omnigraphInitialized=${omnigraphInitialized}, ollamaReady=${ollamaReady}`,
+        : `Doctor check failed: nodeOk=${nodeOk}, snapshotDirOk=${snapshotDirOk}, snapshotOk=${snapshotOk}, effectLspOk=${effectLspOk}, omnigraphInitialized=${omnigraphInitialized}, ollamaReady=${ollamaReady}${reconcileError !== undefined ? `, reconcileError=${reconcileError}` : ""}`,
     }
   })
 
@@ -287,7 +300,7 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
   options: CliEnv | undefined,
 ): Effect.fn.Return<CliResult> {
   const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-  const isAntigravity = argv.includes("--format=antigravity")
+  const isAntigravity = hasAntigravityFormat(argv)
   const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, nodeSyncHostIo)
   const harnessDir = resolveHarnessStateDir(repoRoot)
   const snapshotPath = join(harnessDir, "graph-snapshot.json")
@@ -349,18 +362,24 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
     if (syncRes.syncedToOmnigraph) {
       writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
     }
+    const syncError = syncRes.syncedToOmnigraph
+      ? undefined
+      : (syncRes.error ?? "unknown Omnigraph sync error")
+    const stderr =
+      syncError !== undefined ? `[harness:ingest] Omnigraph sync failed: ${syncError}` : ""
     return {
-      exitCode: 0,
+      exitCode: syncError !== undefined && !isAntigravity ? 1 : 0,
       stdout: isAntigravity
-        ? JSON.stringify({})
+        ? JSON.stringify(syncError !== undefined ? { error: syncError } : {})
         : JSON.stringify({
             indexedFns: fnIndex.bySpanName.size,
             syncedToOmnigraph: syncRes.syncedToOmnigraph,
             branch: targetBranch,
             headSha: headState.headSha,
             reconcileReason: reconcileDecision.reason,
+            ...(syncError !== undefined ? { error: syncError } : {}),
           }),
-      stderr: "",
+      stderr,
     }
   }
 
@@ -382,10 +401,9 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
 export const handleLearn = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
-  maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
-    const decisionLayer = yield* resolveDecisionModelLayer(maybeDecisionLayer)
+    const decisionLayer = yield* resolveDecisionModelLayer(options?.decisionLayer)
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     const shouldClear = argv.includes("--clear")
     const events = readFrictionEvents(repoRoot, nodeSyncHostIo)

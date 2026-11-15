@@ -10,6 +10,7 @@ import {
   type DaemonServerInfo,
   DaemonSocketPath,
   ErrorReasonMessage,
+  isPureInterruptCause,
   toErrorReasonMessage,
   type WorkspaceFilePath,
 } from "@harness/contract"
@@ -313,14 +314,21 @@ const makeUnixSocketDaemonLayer = (
             options?.socketPathOverride ?? resolveHarnessDaemonSocketPath(repoRoot)
           const dirPath = path.dirname(socketPath)
 
+          const dirExistedBefore = yield* fs
+            .exists(dirPath)
+            .pipe(Effect.mapError((err) => toDaemonServerError(socketPath, err)))
+
           // Architectural rationale ("why"): `0o700` parent directory (for owned `.harness`
-          // directories only, never shared parents like `/tmp`) and `0o600` socket
-          // permissions prevent cross-UID local IPC hijacking or unauthorized command
-          // injection on multi-user hosts.
+          // directories or newly created custom directories, never pre-existing shared parents
+          // like `/tmp`) and `0o600` socket permissions prevent cross-UID local IPC hijacking or
+          // unauthorized command injection on multi-user hosts.
           yield* fs
             .makeDirectory(dirPath, { recursive: true, mode: 0o700 })
             .pipe(Effect.mapError((err) => toDaemonServerError(socketPath, err)))
-          if (process.platform !== "win32" && options?.socketPathOverride === undefined) {
+          if (
+            process.platform !== "win32" &&
+            (options?.socketPathOverride === undefined || !dirExistedBefore)
+          ) {
             yield* Effect.try({
               try: () => {
                 nodeFs.chmodSync(dirPath, 0o700)
@@ -351,7 +359,7 @@ const makeUnixSocketDaemonLayer = (
                         }),
                       )
                       .with({ _tag: "Failure" }, ({ cause }) => {
-                        if (Cause.hasInterruptsOnly(cause)) {
+                        if (isPureInterruptCause(cause)) {
                           return Effect.interrupt
                         }
                         return Effect.sync(() => {

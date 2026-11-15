@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import * as path from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import type { FetchLike } from "@modernrelay/omnigraph"
-import { Cause, Effect, Schema } from "effect"
+import { Cause, Effect, Layer, Logger, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   buildHarnessGraph,
@@ -509,8 +509,18 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
               JSON.stringify({
                 outcome: "ok",
                 serverRef: "9d92f397",
-                changes: [],
-                netNodeCount: 0,
+                from_commit_id: "cmt-100",
+                to_commit_id: "cmt-200",
+                changes: [
+                  {
+                    id: "EffectFn:Sample.greet",
+                    kind: "node",
+                    op: "insert",
+                    type: { id: "t-fn", name: "EffectFn" },
+                    after: { properties: { spanName: "Sample.greet" } },
+                  },
+                ],
+                netNodeCount: 1,
                 netEdgeCount: 0,
               }),
               {
@@ -557,7 +567,13 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
         fetch: mockFetch,
       }).pipe(Effect.provide(OmnigraphSyncLive))
 
-      expect(Array.isArray(diffRes.changes)).toBe(true)
+      expect(diffRes.changes).toHaveLength(1)
+      expect(diffRes.changes[0]).toMatchObject({
+        id: "EffectFn:Sample.greet",
+        kind: "node",
+        op: "insert",
+        type: { id: "t-fn", name: "EffectFn" },
+      })
 
       const failFetch: FetchLike = () =>
         Promise.resolve(
@@ -1358,4 +1374,167 @@ describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
       fs.readFileSync(path.resolve(graphPkgDir, "queries/harness.gq"), "utf8"),
     )
   })
+
+  it.effect(
+    "S-2: invokeOmnigraphNamedQuery includes both primary queries.invoke and fallback query failure reasons in fallbackError",
+    () =>
+      Effect.gen(function* () {
+        const dualFailFetch: FetchLike = (input) => {
+          const urlStr = toUrlString(input)
+          if (urlStr.endsWith("/healthz")) {
+            return Promise.resolve(
+              new Response(null, {
+                status: 200,
+                headers: { "Omnigraph-Http-Api": "0.14" },
+              }),
+            )
+          }
+          if (urlStr.includes("/queries/")) {
+            return Promise.resolve(
+              new Response("primary-invoke-not-found", {
+                status: 404,
+                headers: {
+                  "Content-Type": "text/plain",
+                  "Omnigraph-Http-Api": "0.14",
+                },
+              }),
+            )
+          }
+          if (urlStr.endsWith("/query")) {
+            return Promise.resolve(
+              new Response("fallback-query-unavailable", {
+                status: 503,
+                headers: {
+                  "Content-Type": "text/plain",
+                  "Omnigraph-Http-Api": "0.14",
+                },
+              }),
+            )
+          }
+          return Promise.resolve(
+            new Response("Not Found", {
+              status: 404,
+              headers: { "Omnigraph-Http-Api": "0.14" },
+            }),
+          )
+        }
+
+        const res = yield* invokeOmnigraphNamedQuery({
+          name: "resolve_effect_fn",
+          params: { spanOrQualname: "Sample.greet" },
+          fallbackGraph: buildHarnessGraph({
+            fns: [
+              {
+                qualname: "libs/sample/domain/src/index.ts#greet",
+                spanName: "Sample.greet",
+                file: "libs/sample/domain/src/index.ts",
+                line: 4,
+                packageTag: "domain",
+                successType: "string",
+                isStub: false,
+              },
+            ],
+          }),
+          fetch: dualFailFetch,
+        }).pipe(Effect.provide(OmnigraphSyncLive))
+
+        if (!res.degraded) {
+          expect.unreachable("expected degraded memory-fallback result")
+        }
+        expect(res.source).toBe("memory-fallback")
+        expect(res.fallbackError).toContain("HTTP 404")
+        expect(res.fallbackError).toContain("HTTP 503")
+
+        const noFallbackErr = yield* Effect.flip(
+          invokeOmnigraphNamedQuery({
+            name: "resolve_effect_fn",
+            params: { spanOrQualname: "Sample.greet" },
+            fetch: dualFailFetch,
+          }).pipe(Effect.provide(OmnigraphSyncLive)),
+        )
+        expect(noFallbackErr).toBeInstanceOf(OmnigraphLoadError)
+        const noFallbackMsg =
+          noFallbackErr.cause instanceof Error
+            ? noFallbackErr.cause.message
+            : String(noFallbackErr.cause)
+        expect(noFallbackMsg).toContain("HTTP 404")
+        expect(noFallbackMsg).toContain("HTTP 503")
+      }),
+  )
+
+  it.effect(
+    "S-8e: mergeOmnigraphBranch logs a warning when cleanup branch delete fails without masking merge success",
+    () =>
+      Effect.gen(function* () {
+        const warnings: Array<string> = []
+        const captureWarningLogger = Logger.make((opts) => {
+          if (opts.logLevel === "Warn") {
+            warnings.push(String(opts.message))
+          }
+        })
+
+        const cleanupFailFetch: FetchLike = (input, init) => {
+          const urlStr = toUrlString(input)
+          const method = init?.method ?? "GET"
+          if (urlStr.endsWith("/healthz")) {
+            return Promise.resolve(
+              new Response(null, {
+                status: 200,
+                headers: { "Omnigraph-Http-Api": "0.14" },
+              }),
+            )
+          }
+          if (method === "GET" && urlStr.endsWith("/graphs/harness/branches")) {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  outcome: "ok",
+                  branches: ["main", "impl/current", "plan/stale"],
+                  serverRef: "9d92f397",
+                }),
+                { status: 200, headers: { "Content-Type": "application/json", "Omnigraph-Http-Api": "0.14" } },
+              ),
+            )
+          }
+          if (method === "POST" && urlStr.endsWith("/graphs/harness/branches/merge")) {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  outcome: "already_up_to_date",
+                  source: "impl/current",
+                  target: "main",
+                  commit: null,
+                  serverRef: "9d92f397",
+                }),
+                { status: 200, headers: { "Content-Type": "application/json", "Omnigraph-Http-Api": "0.14" } },
+              ),
+            )
+          }
+          if (method === "DELETE" && urlStr.includes("/graphs/harness/branches/")) {
+            return Promise.resolve(
+              new Response("cleanup-delete-denied", {
+                status: 500,
+                headers: { "Content-Type": "text/plain", "Omnigraph-Http-Api": "0.14" },
+              }),
+            )
+          }
+          return Promise.resolve(
+            new Response("Not Found", { status: 404, headers: { "Omnigraph-Http-Api": "0.14" } }),
+          )
+        }
+
+        yield* mergeOmnigraphBranch({
+          source: "impl/current",
+          target: "main",
+          cleanupBranches: ["plan/stale"],
+          fetch: cleanupFailFetch,
+        }).pipe(
+          Effect.provide(Layer.mergeAll(OmnigraphSyncLive, Logger.layer([captureWarningLogger]))),
+        )
+
+        expect(warnings).toHaveLength(1)
+        expect(warnings[0]).toContain("plan/stale")
+        expect(warnings[0]).toContain("HTTP 500")
+      }),
+  )
 })

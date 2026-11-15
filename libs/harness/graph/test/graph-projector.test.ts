@@ -1,3 +1,4 @@
+import * as path from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import { isPureInterruptCause } from "@harness/contract"
 import type { SyncHostReader } from "@harness/service/host-io"
@@ -1134,11 +1135,11 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
           ...testHostIo,
           existsSync: (p) => {
             calls.existsSync += 1
-            return testHostIo.existsSync(p)
+            return p.endsWith(".ts") || testHostIo.existsSync(p)
           },
           readTextSync: (p) => {
             calls.readTextSync += 1
-            return testHostIo.readTextSync(p)
+            return testHostIo.existsSync(p) ? testHostIo.readTextSync(p) : ""
           },
           realpathSync: (p) => {
             calls.realpathSync += 1
@@ -1153,7 +1154,7 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
               title: "HostIo spy spec",
               status: "proposed",
               path: "libs/sample/docs/specs/spy.md",
-              enforcedByFiles: ["libs/sample/domain/src/spy.ts"],
+              enforcedByFiles: ["libs/sample/domain/src/index.ts"],
               referencedSpans: ["Sample.spy"],
               referencedServices: ["SpyService"],
               referencedErrors: ["SpyError"],
@@ -1163,7 +1164,7 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
         const rewrite = yield* decideGraphRewrite(specGraph, "auto-plan")
         const rec = Option.getOrThrow(rewrite.result.recommendedCandidate)
         const res = yield* decideGraphProjection({
-          workspaceRoot: process.cwd(),
+          workspaceRoot: path.resolve(import.meta.dirname, "../../../.."),
           initialGraph: specGraph,
           targetGraph: rewrite.targetGraph,
           patches: rec.patches,
@@ -1174,7 +1175,7 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
         expect(res.overlays.length).toBeGreaterThan(0)
         expect(calls.existsSync).toBeGreaterThan(0)
         expect(calls.realpathSync).toBeGreaterThan(0)
-        expect(calls.readTextSync).toBeGreaterThanOrEqual(0)
+        expect(calls.readTextSync).toBeGreaterThan(0)
       }),
   )
 

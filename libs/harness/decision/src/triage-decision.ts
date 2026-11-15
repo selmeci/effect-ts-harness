@@ -34,60 +34,50 @@ export interface DeterministicTriageRule {
   readonly result: TriageResult
 }
 
+const makeTriageRule = (
+  id: string,
+  pattern: string | RegExp,
+  kind: TriageKind,
+  hint: string,
+): DeterministicTriageRule => ({
+  id,
+  pattern,
+  kind,
+  hint,
+  result: { kind, hint },
+})
+
 export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> = [
-  {
-    id: "effect-v3-removed-api",
-    pattern:
-      /\b(?:decodeEither|decodeUnknownEither|encodeEither)\b|has no exported member '(?:Either|ParseResult)'/i,
-    kind: "compile",
-    hint: "Effect v4 removed Effect/Either, Effect/ParseResult, and Schema.decodeEither/decodeUnknownEither. Use Effect/Result or Effect/Exit with Schema.decodeExit, Schema.decodeUnknownExit, Schema.decodeSync, or Schema.decodeUnknownSync (see repos/effect/LLMS.md).",
-    result: {
-      kind: "compile",
-      hint: "Effect v4 removed Effect/Either, Effect/ParseResult, and Schema.decodeEither/decodeUnknownEither. Use Effect/Result or Effect/Exit with Schema.decodeExit, Schema.decodeUnknownExit, Schema.decodeSync, or Schema.decodeUnknownSync (see repos/effect/LLMS.md).",
-    },
-  },
-  {
-    id: "schema-decode-sync-unknown-input",
-    pattern:
-      /decodeSync[\s\S]{0,160}Argument of type .* is not assignable to parameter of type|Argument of type .* is not assignable to parameter of type[\s\S]{0,160}decodeSync/i,
-    kind: "compile",
-    hint: "Schema.decodeSync(schema) requires an argument matching the schema's Encoded type. For unvalidated inputs or negative test cases, use Schema.decodeUnknownSync(schema)(input) or Schema.decodeUnknownExit(schema)(input).",
-    result: {
-      kind: "compile",
-      hint: "Schema.decodeSync(schema) requires an argument matching the schema's Encoded type. For unvalidated inputs or negative test cases, use Schema.decodeUnknownSync(schema)(input) or Schema.decodeUnknownExit(schema)(input).",
-    },
-  },
-  {
-    id: "run-effect-inside-effect",
-    pattern: /run-effect-inside-effect|runEffectInsideEffect|TS377024|TS377074/,
-    kind: "mechanical",
-    hint: "Do not call Effect.runSync or Effect.runPromise inside Effect.gen (TS377024/TS377074) — yield* the inner Effect directly, or extract foreign Node.js callback setup (e.g. net.createServer) into a standalone helper outside Effect.gen.",
-    result: {
-      kind: "mechanical",
-      hint: "Do not call Effect.runSync or Effect.runPromise inside Effect.gen (TS377024/TS377074) — yield* the inner Effect directly, or extract foreign Node.js callback setup (e.g. net.createServer) into a standalone helper outside Effect.gen.",
-    },
-  },
-  {
-    id: "outdated-api",
-    pattern: /outdatedApi|TS377052|TS377053/,
-    kind: "mechanical",
-    hint: "Effect v3 API used in an Effect v4 target (TS377052/TS377053) — replace Effect.async with Effect.callback (see repos/effect/LLMS.md).",
-    result: {
-      kind: "mechanical",
-      hint: "Effect v3 API used in an Effect v4 target (TS377052/TS377053) — replace Effect.async with Effect.callback (see repos/effect/LLMS.md).",
-    },
-  },
-  {
-    id: "nx-enforce-module-boundaries-readfile-crash",
-    pattern:
-      /reading 'readFile'[\s\S]{0,200}enforce-module-boundaries|enforce-module-boundaries[\s\S]{0,200}reading 'readFile'/,
-    kind: "mechanical",
-    hint: "@nx/eslint-plugin enforce-module-boundaries crashes on dynamic import('@harness/...') in TS 7 when mixed with static imports — replace dynamic await import('@harness/...') with a top-level static import.",
-    result: {
-      kind: "mechanical",
-      hint: "@nx/eslint-plugin enforce-module-boundaries crashes on dynamic import('@harness/...') in TS 7 when mixed with static imports — replace dynamic await import('@harness/...') with a top-level static import.",
-    },
-  },
+  makeTriageRule(
+    "effect-v3-removed-api",
+    /\b(?:decodeEither|decodeUnknownEither|encodeEither)\b|has no exported member '(?:Either|ParseResult)'/i,
+    "compile",
+    "Effect v4 removed Effect/Either, Effect/ParseResult, and Schema.decodeEither/decodeUnknownEither. Use Effect/Result or Effect/Exit with Schema.decodeExit, Schema.decodeUnknownExit, Schema.decodeSync, or Schema.decodeUnknownSync (see repos/effect/LLMS.md).",
+  ),
+  makeTriageRule(
+    "schema-decode-sync-unknown-input",
+    /decodeSync[\s\S]{0,160}Argument of type .* is not assignable to parameter of type|Argument of type .* is not assignable to parameter of type[\s\S]{0,160}decodeSync/i,
+    "compile",
+    "Schema.decodeSync(schema) requires an argument matching the schema's Encoded type. For unvalidated inputs or negative test cases, use Schema.decodeUnknownSync(schema)(input) or Schema.decodeUnknownExit(schema)(input).",
+  ),
+  makeTriageRule(
+    "run-effect-inside-effect",
+    /run-effect-inside-effect|runEffectInsideEffect|TS377024|TS377074/,
+    "mechanical",
+    "Do not call Effect.runSync or Effect.runPromise inside Effect.gen (TS377024/TS377074) — yield* the inner Effect directly, or extract foreign Node.js callback setup (e.g. net.createServer) into a standalone helper outside Effect.gen.",
+  ),
+  makeTriageRule(
+    "outdated-api",
+    /outdatedApi|TS377052|TS377053/,
+    "mechanical",
+    "Effect v3 API used in an Effect v4 target (TS377052/TS377053) — replace Effect.async with Effect.callback (see repos/effect/LLMS.md).",
+  ),
+  makeTriageRule(
+    "nx-enforce-module-boundaries-readfile-crash",
+    /reading 'readFile'[\s\S]{0,200}enforce-module-boundaries|enforce-module-boundaries[\s\S]{0,200}reading 'readFile'/,
+    "mechanical",
+    "@nx/eslint-plugin enforce-module-boundaries crashes on dynamic import('@harness/...') in TS 7 when mixed with static imports — replace dynamic await import('@harness/...') with a top-level static import.",
+  ),
   {
     pattern: "floatingEffect",
     result: {
@@ -172,46 +162,30 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
       hint: "Unbounded Effect.retry with Schedule.forever is banned (retry storm risk) — bound retries with Schedule.recurs(n) or Schedule.upTo(duration).",
     },
   },
-  {
-    id: "silent-catch-defect",
-    pattern: /silent-catch-defect|silently swallows runtime defects without logging/,
-    kind: "mechanical",
-    hint: "Effect.catchDefect handler silently swallows runtime defects without logging or reporting — log via Effect.logWarning / process.stderr.write or re-fail with Effect.fail / Effect.die.",
-    result: {
-      kind: "mechanical",
-      hint: "Effect.catchDefect handler silently swallows runtime defects without logging or reporting — log via Effect.logWarning / process.stderr.write or re-fail with Effect.fail / Effect.die.",
-    },
-  },
-  {
-    id: "ignored-chmod-permission",
-    pattern: /ignored-chmod-permission|Ignoring chmodSync\/fchmodSync failure/,
-    kind: "mechanical",
-    hint: "Ignoring chmodSync/fchmodSync permission errors with Effect.ignore or Effect.orElseSucceed is banned — permission hardening must fail closed on error.",
-    result: {
-      kind: "mechanical",
-      hint: "Ignoring chmodSync/fchmodSync permission errors with Effect.ignore or Effect.orElseSucceed is banned — permission hardening must fail closed on error.",
-    },
-  },
-  {
-    id: "project-path-escape-error",
-    pattern: /ProjectPathEscapeError/,
-    kind: "mechanical",
-    hint: "ProjectPathEscapeError: requested project path escapes the repository root boundary — pass a canonical relative path or subdirectory inside repoRoot.",
-    result: {
-      kind: "mechanical",
-      hint: "ProjectPathEscapeError: requested project path escapes the repository root boundary — pass a canonical relative path or subdirectory inside repoRoot.",
-    },
-  },
-  {
-    id: "daemon-socket-chmod-error",
-    pattern: /DaemonSocketChmodError/,
-    kind: "mechanical",
-    hint: "DaemonSocketChmodError: failed to set 0o600 permissions on the Unix socket — verify socket directory ownership/permissions and fail closed instead of ignoring chmodSync errors.",
-    result: {
-      kind: "mechanical",
-      hint: "DaemonSocketChmodError: failed to set 0o600 permissions on the Unix socket — verify socket directory ownership/permissions and fail closed instead of ignoring chmodSync errors.",
-    },
-  },
+  makeTriageRule(
+    "silent-catch-defect",
+    /silent-catch-defect|silently swallows runtime defects without logging/,
+    "mechanical",
+    "Effect.catchDefect handler silently swallows runtime defects without logging or reporting — log via Effect.logWarning / process.stderr.write or re-fail with Effect.fail / Effect.die.",
+  ),
+  makeTriageRule(
+    "ignored-chmod-permission",
+    /ignored-chmod-permission|Ignoring chmodSync\/fchmodSync failure/,
+    "mechanical",
+    "Ignoring chmodSync/fchmodSync permission errors with Effect.ignore or Effect.orElseSucceed is banned — permission hardening must fail closed on error.",
+  ),
+  makeTriageRule(
+    "project-path-escape-error",
+    /ProjectPathEscapeError/,
+    "mechanical",
+    "ProjectPathEscapeError: requested project path escapes the repository root boundary — pass a canonical relative path or subdirectory inside repoRoot.",
+  ),
+  makeTriageRule(
+    "daemon-socket-chmod-error",
+    /DaemonSocketChmodError/,
+    "mechanical",
+    "DaemonSocketChmodError: failed to set 0o600 permissions on the Unix socket — verify socket directory ownership/permissions and fail closed instead of ignoring chmodSync errors.",
+  ),
   {
     pattern: "Effect.ignore",
     result: {
@@ -352,151 +326,90 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
       hint: "Every domain/core Effect.fn must be justified by an accepted EARS spec (specifies) and ADR (governs) in the ontology realization chain — add the symbol to the spec EARS table and spec/ADR frontmatter spans (see agent-patterns/planning.md).",
     },
   },
-  {
-    id: "plan-impl-signature-drift",
-    pattern: /Missing planned (?:Service|Error):|Undeclared (?:Service|Error) added:/,
-    kind: "mechanical",
-    hint: "Plan-vs-Impl signature drift in `harness done` — ensure the implemented Effect.fn preserves the exact R and E channels from `stub<A, E, R>()` (avoid namespace-qualified type aliases if the implementation yields an unqualified ServiceTag or TaggedError, or re-run `harness plan-check` + `harness verify` to refresh `.harness/plan-graph-snapshot.json`).",
-    result: {
-      kind: "mechanical",
-      hint: "Plan-vs-Impl signature drift in `harness done` — ensure the implemented Effect.fn preserves the exact R and E channels from `stub<A, E, R>()` (avoid namespace-qualified type aliases if the implementation yields an unqualified ServiceTag or TaggedError, or re-run `harness plan-check` + `harness verify` to refresh `.harness/plan-graph-snapshot.json`).",
-    },
-  },
-  {
-    id: "pera-levi-bipartite-violation",
-    pattern:
-      /PlaysRoleEdge must connect a reified|BipartitePlaysRoleInvariant|bipartite-relation-deleted/,
-    kind: "mechanical",
-    hint: "PERA Levi hypergraph invariant violation — PlaysRoleEdge must connect a reified relation node in V_R (`EffectSignature:sig:*`, `LayerFlow:flow:*`, `TraceabilityTuple:trace:*`) to an entity node in V_E (`EffectFn:*`, `ServiceTag:*`, `ServiceLayer:*`, `TaggedError:*`, `ContractSchema:*`, `EarsSpec:*`, `AdrDoc:*`, `PatternDoc:*`, `TestSuite:*`) with all required relation fields populated.",
-    result: {
-      kind: "mechanical",
-      hint: "PERA Levi hypergraph invariant violation — PlaysRoleEdge must connect a reified relation node in V_R (`EffectSignature:sig:*`, `LayerFlow:flow:*`, `TraceabilityTuple:trace:*`) to an entity node in V_E (`EffectFn:*`, `ServiceTag:*`, `ServiceLayer:*`, `TaggedError:*`, `ContractSchema:*`, `EarsSpec:*`, `AdrDoc:*`, `PatternDoc:*`, `TestSuite:*`) with all required relation fields populated.",
-    },
-  },
-  {
-    id: "self-dogfooding-and-lazy-effect",
-    pattern:
-      /TS377091|effecttsgo\(lazy-effect\)|effect-fn-dummy-void|nested-effect-run-sync|harness-switch-statement|file-line-budget-exceeded|facade-star-reexport/,
-    kind: "mechanical",
-    hint: "Self-dogfooding, wildcard re-export, or Effect v4 lazyEffect violation — zero-argument service members must be Effect.Effect<A, E, R> properties (not () => Effect.Effect<...>), never use dummy 'yield* Effect.void' (use Effect.succeed or a real yield), never nest Effect.runSync inside Effect/Layer constructors, replace switch with ts-pattern match(...).exhaustive(), export explicit named symbols instead of 'export *', and keep modular plugin files under 800 lines (see harness:ADR-0012).",
-    result: {
-      kind: "mechanical",
-      hint: "Self-dogfooding, wildcard re-export, or Effect v4 lazyEffect violation — zero-argument service members must be Effect.Effect<A, E, R> properties (not () => Effect.Effect<...>), never use dummy 'yield* Effect.void' (use Effect.succeed or a real yield), never nest Effect.runSync inside Effect/Layer constructors, replace switch with ts-pattern match(...).exhaustive(), export explicit named symbols instead of 'export *', and keep modular plugin files under 800 lines (see harness:ADR-0012).",
-    },
-  },
-  {
-    id: "effect-exit-and-interruption-laws",
-    pattern:
-      /effecttsgo\(run-of-exit-to-run-exit\)|catch-cause-interrupts-only|unisolated-dot-harness-test-write/,
-    kind: "mechanical",
-    hint: "Use Effect.runPromiseExit/Effect.runSyncExit instead of Effect.runPromise(Effect.exit(...)), use Cause.hasInterrupts(cause) inside Effect.catchCause so composite causes never swallow interruption, and use os.tmpdir() instead of live .harness/ paths in tests (see agent-patterns/testing.md and agent-patterns/resources-scope.md).",
-    result: {
-      kind: "mechanical",
-      hint: "Use Effect.runPromiseExit/Effect.runSyncExit instead of Effect.runPromise(Effect.exit(...)), use Cause.hasInterrupts(cause) inside Effect.catchCause so composite causes never swallow interruption, and use os.tmpdir() instead of live .harness/ paths in tests (see agent-patterns/testing.md and agent-patterns/resources-scope.md).",
-    },
-  },
-  {
-    id: "clef-systemone-endpoint-mismatch",
-    pattern:
-      /does not support (?:generate|chat)|\/api\/(?:generate|chat)\b[\s\S]{0,120}\bclef|\bclef[\s\S]{0,120}\/api\/(?:generate|chat)\b/i,
-    kind: "semantic",
-    hint: "clef (clef-flash) is a TypeSafe System One decision model — use @effect/ai-typesafe (DecisionModel.decide / POST /v1/systemone), not /api/generate or /api/chat (see agent-patterns/decision-model.md).",
-    result: {
-      kind: "semantic",
-      hint: "clef (clef-flash) is a TypeSafe System One decision model — use @effect/ai-typesafe (DecisionModel.decide / POST /v1/systemone), not /api/generate or /api/chat (see agent-patterns/decision-model.md).",
-    },
-  },
-  {
-    id: "doc-truth-drift",
-    pattern:
-      /doc-unknown-package-name|doc-unknown-rule-id|doc-missing-file-path|agents-duplicate-section|adapter-rules-drift|hook-timeout-parity/,
-    kind: "mechanical",
-    hint: "Documentation or adapter truth drift — fix unknown @harness/* package names, invalid oxlint rule IDs, missing file paths, duplicate AGENTS.md sections, adapter rules drift, or missing hook timeouts.",
-    result: {
-      kind: "mechanical",
-      hint: "Documentation or adapter truth drift — fix unknown @harness/* package names, invalid oxlint rule IDs, missing file paths, duplicate AGENTS.md sections, adapter rules drift, or missing hook timeouts.",
-    },
-  },
-  {
-    id: "stale-gate-rule-version",
-    pattern: /stale-gate-rule-version|EXPECTED_GATE_RULE_VERSION_DIGEST/,
-    kind: "mechanical",
-    hint: "Gate rule IDs changed without bumping HARNESS_GATE_RULE_VERSION and EXPECTED_GATE_RULE_VERSION_DIGEST — bump HARNESS_GATE_RULE_VERSION in @harness/contract and update EXPECTED_GATE_RULE_VERSION_DIGEST in gc-doc-truth.plugin.ts.",
-    result: {
-      kind: "mechanical",
-      hint: "Gate rule IDs changed without bumping HARNESS_GATE_RULE_VERSION and EXPECTED_GATE_RULE_VERSION_DIGEST — bump HARNESS_GATE_RULE_VERSION in @harness/contract and update EXPECTED_GATE_RULE_VERSION_DIGEST in gc-doc-truth.plugin.ts.",
-    },
-  },
-  {
-    id: "silent-gate-fs-fallback",
-    pattern: /silent-gate-fs-fallback|unreadable-workspace-file/,
-    kind: "mechanical",
-    hint: "Silent gate filesystem fallback or unreadable workspace file — replace safeFs/Result.getOrElse(..., () => \"\"|[]) with readTextOrReport/readdirOrReport so unreadable files emit explicit 'unreadable-workspace-file' findings.",
-    result: {
-      kind: "mechanical",
-      hint: "Silent gate filesystem fallback or unreadable workspace file — replace safeFs/Result.getOrElse(..., () => \"\"|[]) with readTextOrReport/readdirOrReport so unreadable files emit explicit 'unreadable-workspace-file' findings.",
-    },
-  },
-  {
-    id: "bare-cause-has-interrupts",
-    pattern: /bare-cause-has-interrupts/,
-    kind: "mechanical",
-    hint: "Bare Cause.hasInterrupts(cause) in Effect.catchCause can swallow composite failure/defect causes — use isPureInterruptCause(cause) ? Effect.failCause(cause) : ... from @harness/contract.",
-    result: {
-      kind: "mechanical",
-      hint: "Bare Cause.hasInterrupts(cause) in Effect.catchCause can swallow composite failure/defect causes — use isPureInterruptCause(cause) ? Effect.failCause(cause) : ... from @harness/contract.",
-    },
-  },
-  {
-    id: "process-env-outside-infra-or-app",
-    pattern: /process-env-outside-infra-or-app/,
-    kind: "mechanical",
-    hint: "Direct process.env access is banned outside type:infra and type:app — inject Config or read environment variables in @harness/infra or apps/*.",
-    result: {
-      kind: "mechanical",
-      hint: "Direct process.env access is banned outside type:infra and type:app — inject Config or read environment variables in @harness/infra or apps/*.",
-    },
-  },
-  {
-    id: "skill-tier-table-drift",
-    pattern: /skill-tier-table-drift/,
-    kind: "mechanical",
-    hint: "Skill tier table drifted from NxTierTag / tier-topology rules — synchronize the skill markdown table with @harness/contract TierTopology.",
-    result: {
-      kind: "mechanical",
-      hint: "Skill tier table drifted from NxTierTag / tier-topology rules — synchronize the skill markdown table with @harness/contract TierTopology.",
-    },
-  },
-  {
-    id: "mermaid-dependency-drift",
-    pattern: /mermaid-dependency-drift/,
-    kind: "mechanical",
-    hint: "Mermaid dependency diagram drifted from package.json / Nx project graph — update the diagram edges to match actual workspace dependencies.",
-    result: {
-      kind: "mechanical",
-      hint: "Mermaid dependency diagram drifted from package.json / Nx project graph — update the diagram edges to match actual workspace dependencies.",
-    },
-  },
-  {
-    id: "hook-bootstrap-fail-closed",
-    pattern: /hook-bootstrap-fail-closed/,
-    kind: "mechanical",
-    hint: "Hook bootstrap must fail closed — return a non-zero/deny verdict when hook prerequisites or config cannot be loaded.",
-    result: {
-      kind: "mechanical",
-      hint: "Hook bootstrap must fail closed — return a non-zero/deny verdict when hook prerequisites or config cannot be loaded.",
-    },
-  },
-  {
-    id: "doc-banned-or-phantom-tech",
-    pattern: /doc-banned-or-phantom-tech/,
-    kind: "mechanical",
-    hint: "Documentation references banned or phantom technology (e.g. drizzle-orm, Effect v3 idioms, or non-existent APIs) — update docs to match current Effect v4 / Alchemy v2.",
-    result: {
-      kind: "mechanical",
-      hint: "Documentation references banned or phantom technology (e.g. drizzle-orm, Effect v3 idioms, or non-existent APIs) — update docs to match current Effect v4 / Alchemy v2.",
-    },
-  },
+  makeTriageRule(
+    "plan-impl-signature-drift",
+    /Missing planned (?:Service|Error):|Undeclared (?:Service|Error) added:/,
+    "mechanical",
+    "Plan-vs-Impl signature drift in `harness done` — ensure the implemented Effect.fn preserves the exact R and E channels from `stub<A, E, R>()` (avoid namespace-qualified type aliases if the implementation yields an unqualified ServiceTag or TaggedError, or re-run `harness plan-check` + `harness verify` to refresh `.harness/plan-graph-snapshot.json`).",
+  ),
+  makeTriageRule(
+    "pera-levi-bipartite-violation",
+    /PlaysRoleEdge must connect a reified|BipartitePlaysRoleInvariant|bipartite-relation-deleted/,
+    "mechanical",
+    "PERA Levi hypergraph invariant violation — PlaysRoleEdge must connect a reified relation node in V_R (`EffectSignature:sig:*`, `LayerFlow:flow:*`, `TraceabilityTuple:trace:*`) to an entity node in V_E (`EffectFn:*`, `ServiceTag:*`, `ServiceLayer:*`, `TaggedError:*`, `ContractSchema:*`, `EarsSpec:*`, `AdrDoc:*`, `PatternDoc:*`, `TestSuite:*`) with all required relation fields populated.",
+  ),
+  makeTriageRule(
+    "self-dogfooding-and-lazy-effect",
+    /TS377091|effecttsgo\(lazy-effect\)|effect-fn-dummy-void|nested-effect-run-sync|harness-switch-statement|file-line-budget-exceeded|facade-star-reexport/,
+    "mechanical",
+    "Self-dogfooding, wildcard re-export, or Effect v4 lazyEffect violation — zero-argument service members must be Effect.Effect<A, E, R> properties (not () => Effect.Effect<...>), never use dummy 'yield* Effect.void' (use Effect.succeed or a real yield), never nest Effect.runSync inside Effect/Layer constructors, replace switch with ts-pattern match(...).exhaustive(), export explicit named symbols instead of 'export *', and keep modular plugin files under 800 lines (see harness:ADR-0012).",
+  ),
+  makeTriageRule(
+    "effect-exit-and-interruption-laws",
+    /effecttsgo\(run-of-exit-to-run-exit\)|catch-cause-interrupts-only|unisolated-dot-harness-test-write/,
+    "mechanical",
+    "Use Effect.runPromiseExit/Effect.runSyncExit instead of Effect.runPromise(Effect.exit(...)), use isPureInterruptCause(cause) from @harness/contract (Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)) inside Effect.catchCause so composite causes never swallow interruption, and use os.tmpdir() instead of live .harness/ paths in tests (see agent-patterns/testing.md and agent-patterns/resources-scope.md).",
+  ),
+  makeTriageRule(
+    "clef-systemone-endpoint-mismatch",
+    /does not support (?:generate|chat)|\/api\/(?:generate|chat)\b[\s\S]{0,120}\bclef|\bclef[\s\S]{0,120}\/api\/(?:generate|chat)\b/i,
+    "semantic",
+    "clef (clef-flash) is a TypeSafe System One decision model — use @effect/ai-typesafe (DecisionModel.decide / POST /v1/systemone), not /api/generate or /api/chat (see agent-patterns/decision-model.md).",
+  ),
+  makeTriageRule(
+    "doc-truth-drift",
+    /doc-unknown-package-name|doc-unknown-rule-id|doc-missing-file-path|agents-duplicate-section|adapter-rules-drift|hook-timeout-parity/,
+    "mechanical",
+    "Documentation or adapter truth drift — fix unknown @harness/* package names, invalid oxlint rule IDs, missing file paths, duplicate AGENTS.md sections, adapter rules drift, or missing hook timeouts.",
+  ),
+  makeTriageRule(
+    "stale-gate-rule-version",
+    /stale-gate-rule-version|EXPECTED_GATE_RULE_VERSION_DIGEST/,
+    "mechanical",
+    "Gate rule IDs changed without bumping HARNESS_GATE_RULE_VERSION and EXPECTED_GATE_RULE_VERSION_DIGEST — bump HARNESS_GATE_RULE_VERSION in @harness/contract and update EXPECTED_GATE_RULE_VERSION_DIGEST in gc-doc-truth.plugin.ts.",
+  ),
+  makeTriageRule(
+    "silent-gate-fs-fallback",
+    /silent-gate-fs-fallback|unreadable-workspace-file/,
+    "mechanical",
+    "Silent gate filesystem fallback or unreadable workspace file — replace safeFs/Result.getOrElse(..., () => \"\"|[]) with readTextOrReport/readdirOrReport so unreadable files emit explicit 'unreadable-workspace-file' findings.",
+  ),
+  makeTriageRule(
+    "bare-cause-has-interrupts",
+    /bare-cause-has-interrupts/,
+    "mechanical",
+    "Bare Cause.hasInterrupts(cause) in Effect.catchCause can swallow composite failure/defect causes — use isPureInterruptCause(cause) ? Effect.failCause(cause) : ... from @harness/contract.",
+  ),
+  makeTriageRule(
+    "process-env-outside-infra-or-app",
+    /process-env-outside-infra-or-app/,
+    "mechanical",
+    "Direct process.env access is banned outside type:infra and type:app — inject Config or read environment variables in @harness/infra or apps/*.",
+  ),
+  makeTriageRule(
+    "skill-tier-table-drift",
+    /skill-tier-table-drift/,
+    "mechanical",
+    "Skill tier table drifted from NxTierTag / tier-topology rules — synchronize the skill markdown table with @harness/contract TierTopology.",
+  ),
+  makeTriageRule(
+    "mermaid-dependency-drift",
+    /mermaid-dependency-drift/,
+    "mechanical",
+    "Mermaid dependency diagram drifted from package.json / Nx project graph — update the diagram edges to match actual workspace dependencies.",
+  ),
+  makeTriageRule(
+    "hook-bootstrap-fail-closed",
+    /hook-bootstrap-fail-closed/,
+    "mechanical",
+    "Hook bootstrap must fail closed — return a non-zero/deny verdict when hook prerequisites or config cannot be loaded.",
+  ),
+  makeTriageRule(
+    "doc-banned-or-phantom-tech",
+    /doc-banned-or-phantom-tech/,
+    "mechanical",
+    "Documentation references banned or phantom technology (e.g. drizzle-orm, Effect v3 idioms, or non-existent APIs) — update docs to match current Effect v4 / Alchemy v2.",
+  ),
   {
     pattern: /harness(?:\/|\()syntax-bans\)?/,
     result: {

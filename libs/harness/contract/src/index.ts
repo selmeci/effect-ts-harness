@@ -99,6 +99,8 @@ export {
   HARNESS_DECISION_CACHE_FILENAME,
   makeAstGateDecisionReport,
   makeAstGateEvaluationReport,
+  normalizeNonRootWorkspacePath,
   resolveDefaultAstGateCachePath,
   resolveDefaultDecisionCachePath,
+  sanitizeWorktreeIdSegment,
 } from "./cache-and-daemon.js"

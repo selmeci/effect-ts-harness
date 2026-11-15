@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 import { dirname, join, resolve } from "node:path"
 import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
-import { nodeSyncHostIo } from "@harness/infra"
+import { nodeSyncHostIo, resolveHarnessStateDir } from "@harness/infra"
 
 const EXCLUDE_START = "# --- scenario-runner-hide-start ---"
 const EXCLUDE_END = "# --- scenario-runner-hide-end ---"
@@ -111,17 +111,7 @@ export const makeScenarioPaths = (repoRoot: string): MakeScenarioPathsResult => 
     .exhaustive()
 }
 
-export const resolveStateDir = (repoRoot: string): string => {
-  const custom = process.env.HARNESS_STATE_DIR?.trim()
-  if (custom !== undefined && custom.length > 0) {
-    return resolve(repoRoot, custom)
-  }
-  const worktreeId = process.env.HARNESS_WORKTREE_ID?.trim()
-  if (worktreeId !== undefined && worktreeId.length > 0) {
-    return join(repoRoot, ".harness", "worktrees", worktreeId.replace(/[^a-zA-Z0-9._-]/g, "_"))
-  }
-  return join(repoRoot, ".harness")
-}
+export const resolveStateDir = (repoRoot: string): string => resolveHarnessStateDir(repoRoot)
 
 export const activeScenariosDir = (paths: ScenarioPaths): string =>
   nodeSyncHostIo.existsSync(paths.stashedScenariosDir)

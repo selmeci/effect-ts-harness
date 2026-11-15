@@ -84,8 +84,8 @@ export const syncOmnigraphOnDone = (
       }).pipe(Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo))),
     )
     const mergeOutcome = match(mergeExit)
-      .with({ _tag: "Success" }, ({ value }) => ({
-        ok: typeof value === "boolean" ? value : true,
+      .with({ _tag: "Success" }, () => ({
+        ok: true,
         detail: undefined,
       }))
       .with({ _tag: "Failure" }, ({ cause }) => {

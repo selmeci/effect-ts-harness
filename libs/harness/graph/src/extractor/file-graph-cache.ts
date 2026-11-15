@@ -119,9 +119,11 @@ export const loadFileGraphFragmentsFromDisk = (
 
 const isSyncHostIo = (io: SyncHostReader): io is SyncHostIo =>
   "writeTextSync" in io &&
+  "appendTextSync" in io &&
   "mkdirRecursiveSync" in io &&
   "renameSync" in io &&
-  "unlinkSync" in io
+  "unlinkSync" in io &&
+  "execFileSync" in io
 
 export const saveFileGraphFragmentsToDisk = (
   repoRoot: string,

@@ -1537,6 +1537,18 @@ status: accepted
       )
     })
 
+    it("rejects root-resolving paths and invalid HARNESS_WORKTREE_ID or HARNESS_STATE_DIR segments", () => {
+      for (const invalidRoot of ["/.", "/..", "/tmp/..", ".", ".."]) {
+        expect(() => resolveHarnessStateDir(invalidRoot, {})).toThrow()
+      }
+      for (const invalidWorktreeId of ["..", ".", "...", "   "]) {
+        expect(() =>
+          resolveHarnessStateDir("/repo", { HARNESS_WORKTREE_ID: invalidWorktreeId }),
+        ).toThrow()
+      }
+      expect(() => resolveHarnessStateDir("/repo", { HARNESS_STATE_DIR: ".." })).toThrow()
+    })
+
     it("resolveCanonicalRepoRoot resolves regular directory vs linked worktree directory", () => {
       const regularDir = mkdtempSync(join(tmpdir(), "harness-reg-repo-"))
       const wtDir = mkdtempSync(join(tmpdir(), "harness-wt-repo-"))
@@ -3501,6 +3513,7 @@ errors:
               manifestPath: PackageManifestPath.make("libs/sample/infra/package.json"),
               packageName: PackageManifestName.make("@harness/sample-infra"),
               nxTags: [NxTierTag.make("type:infra")],
+              scopeTags: [],
               dependencyNames: [PackageDependencyName.make("harness-cli")],
               nonRuntimeDependencyNames: [],
             },

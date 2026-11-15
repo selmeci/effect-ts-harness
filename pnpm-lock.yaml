@@ -603,6 +603,9 @@ importers:
       '@ast-grep/napi':
         specifier: 0.51.0
         version: 0.51.0
+      '@harness/contract':
+        specifier: workspace:*
+        version: link:../contract
       '@harness/service':
         specifier: workspace:*
         version: link:../service

@@ -1,5 +1,5 @@
 import { NodeServices } from "@effect/platform-node"
-import { Cause, Console, Effect, Layer, Option, Ref } from "effect"
+import { Cause, Console, Effect, Layer, Logger, Option, Ref } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { Argument, Command as CliCommand, Flag } from "effect/cli"
 import { match } from "ts-pattern"
@@ -454,14 +454,14 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
 ): Effect.fn.Return<CliResult> {
   const hookStdinTracker = options?.hookStdinTracker ?? createHookStdinTracker()
   const requested = argv[0] ?? "help"
-  if (requested === "--help" || requested === "-h") {
+  if (argv.length === 1 && (requested === "--help" || requested === "-h")) {
     return {
       exitCode: 0,
       stdout: `harness help\nusage: harness <${COMMANDS.join("|")}>`,
       stderr: "",
     }
   }
-  if (requested === "--version" || requested === "-v") {
+  if (argv.length === 1 && (requested === "--version" || requested === "-v")) {
     return {
       exitCode: 0,
       stdout: "0.0.0",
@@ -535,21 +535,15 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
     trace: pushStderrLine,
     warn: pushStderrLine,
   }
-  const isHookCommand = requested === "guard" || requested === "done"
-  const mainLayer = isHookCommand
-    ? Layer.mergeAll(
-        HarnessInfraLive,
-        decisionLayer,
-        liveCommandLayer,
-        NodeServices.layer,
-        Layer.succeed(Console.Console, hookConsole),
-      )
-    : Layer.mergeAll(
-        HarnessInfraLive,
-        decisionLayer,
-        liveCommandLayer,
-        NodeServices.layer,
-      )
+  const isHookCommand = requested === "guard" || requested === "done" || hasAntigravityFormat(argv)
+  const mainLayer = Layer.mergeAll(
+    HarnessInfraLive,
+    decisionLayer,
+    liveCommandLayer,
+    NodeServices.layer,
+    Layer.succeed(Logger.LogToStderr, true),
+    isHookCommand ? Layer.succeed(Console.Console, hookConsole) : Layer.empty,
+  )
 
   const normalizedArgv = argv.length === 0 ? ["help"] : argv
   const cliErr = yield* CliCommand.runWith(rootCmd, {
@@ -618,9 +612,6 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
           effectiveOptions.stdin,
           hookStdinTracker,
         )
-      }
-      if (argv.includes("--version") || argv.includes("-v")) {
-        return { exitCode: 0, stdout: "", stderr: "" }
       }
       return {
         exitCode: 1,

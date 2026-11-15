@@ -96,7 +96,7 @@ export const PackageTierManifestInput = Schema.Struct({
   manifestPath: PackageManifestPath,
   packageName: PackageManifestName,
   nxTags: Schema.Array(NxTierTag),
-  scopeTags: Schema.optional(Schema.Array(NxScopeTag)),
+  scopeTags: Schema.Array(NxScopeTag),
   dependencyNames: Schema.Array(PackageDependencyName),
   nonRuntimeDependencyNames: Schema.Array(PackageDependencyName),
 })

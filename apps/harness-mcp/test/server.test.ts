@@ -1750,7 +1750,7 @@ describe("harness-mcp tools", () => {
     }
   })
 
-  it("F-8.1 & F-12.1: harness_graph_infer surfaces degraded status on missing snapshot and isPureInterruptCause preserves composite causes", async () => {
+  it("F-8.1 / F-12.1: harness_graph_infer surfaces degraded status on missing snapshot and isPureInterruptCause preserves composite causes", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-mcp-degraded-"))
     try {
       const inferRes = (await executeTool(
@@ -1769,4 +1769,34 @@ describe("harness-mcp tools", () => {
       isPureInterruptCause(Cause.combine(Cause.fail(new Error("err")), Cause.interrupt(1))),
     ).toBe(false)
   })
+
+  it.each([
+    { toolName: "harness_resolve", args: { symbolOrSpan: "Sample.greet" } },
+    { toolName: "harness_callers", args: { symbolOrSpan: "Sample.greet" } },
+    { toolName: "harness_callees", args: { symbolOrSpan: "Sample.greet" } },
+    { toolName: "harness_tests_reaching", args: { symbolOrSpan: "Sample.greet" } },
+    { toolName: "harness_ontology_why", args: { symbolOrSpan: "Sample.greet" } },
+    { toolName: "harness_ontology_impact", args: { symbolOrSpan: "Sample.greet" } },
+    {
+      toolName: "harness_gq_query",
+      args: { queryName: "resolve_effect_fn", params: { spanOrQualname: "Sample.greet" } },
+    },
+  ])(
+    "I-7a: $toolName surfaces degraded=true and non-empty degradedReason when Omnigraph is unreachable and no fallback snapshot exists",
+    async ({ toolName, args }) => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-mcp-nav-degraded-"))
+      try {
+        const parsed = (await executeTool(
+          toolName,
+          { ...args, repoRoot: tmpDir },
+          { repoRoot: tmpDir, skipOmnigraphSpawn: true },
+        )) as { readonly degraded?: unknown; readonly degradedReason?: unknown }
+        expect(parsed.degraded).toBe(true)
+        expect(typeof parsed.degradedReason).toBe("string")
+        expect((parsed.degradedReason as string).length).toBeGreaterThan(0)
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true })
+      }
+    },
+  )
 })

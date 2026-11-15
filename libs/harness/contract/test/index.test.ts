@@ -57,9 +57,11 @@ import {
   makeHarnessTierTopologyReport,
   makeSelfDogfoodingReport,
   makeVerdictReport,
+  normalizeNonRootWorkspacePath,
   parseManifestTags,
   resolveDefaultAstGateCachePath,
   resolveDefaultDecisionCachePath,
+  sanitizeWorktreeIdSegment,
   toErrorReasonMessage,
   validateSubprocessInput,
 } from "../src/index.js"
@@ -272,14 +274,29 @@ describe("@harness/contract schemas", () => {
     const validStdinExit = Schema.decodeExit(StdinReadError)({
       _tag: "StdinReadError",
       reason: "stdin timed out",
+      reasonKind: "Timeout",
     })
     match(validStdinExit)
       .with({ _tag: "Success" }, (s) => {
         expect(s.value._tag).toBe("StdinReadError")
         expect(s.value.reason).toBe(ErrorReasonMessage.make("stdin timed out"))
+        expect(s.value.reasonKind).toBe("Timeout")
       })
       .with({ _tag: "Failure" }, (f) => {
         expect.unreachable(`Expected StdinReadError decode to succeed: ${Cause.pretty(f.cause)}`)
+      })
+      .exhaustive()
+
+    const missingReasonKindStdinExit = Schema.decodeUnknownExit(StdinReadError)({
+      _tag: "StdinReadError",
+      reason: "stdin timed out",
+    })
+    match(missingReasonKindStdinExit)
+      .with({ _tag: "Failure" }, (f) => {
+        expect(Cause.pretty(f.cause).length).toBeGreaterThan(0)
+      })
+      .with({ _tag: "Success" }, () => {
+        expect.unreachable("Expected StdinReadError without reasonKind to fail decode")
       })
       .exhaustive()
 
@@ -287,6 +304,7 @@ describe("@harness/contract schemas", () => {
       const invalidStdinExit = Schema.decodeExit(StdinReadError)({
         _tag: "StdinReadError",
         reason: invalidReason,
+        reasonKind: "ReadFailed",
       })
       match(invalidStdinExit)
         .with({ _tag: "Failure" }, (f) => {
@@ -340,13 +358,14 @@ describe("@harness/contract schemas", () => {
     expect(DecisionCachePayloadJson.make("{}")).toBe("{}")
   })
 
-  it("decodes tier topology input schema with required nonRuntimeDependencyNames and workspaceSourceFiles", () => {
+  it("decodes tier topology input schema with required nonRuntimeDependencyNames, scopeTags, and workspaceSourceFiles", () => {
     const input = Schema.decodeSync(HarnessTierTopologyInput)({
       manifests: [
         {
           manifestPath: PackageManifestPath.make("libs/harness/contract/package.json"),
           packageName: PackageManifestName.make("@harness/contract"),
           nxTags: [NxTierTag.make("type:contract")],
+          scopeTags: [],
           dependencyNames: [PackageDependencyName.make("effect")],
           nonRuntimeDependencyNames: [],
         },
@@ -367,10 +386,32 @@ describe("@harness/contract schemas", () => {
     expect(input.manifests).toHaveLength(1)
     expect(input.serviceFiles).toHaveLength(1)
     expect(input.workspaceSourceFiles).toHaveLength(1)
+
+    const missingScopeTagsExit = Schema.decodeUnknownExit(HarnessTierTopologyInput)({
+      manifests: [
+        {
+          manifestPath: PackageManifestPath.make("libs/harness/contract/package.json"),
+          packageName: PackageManifestName.make("@harness/contract"),
+          nxTags: [NxTierTag.make("type:contract")],
+          dependencyNames: [PackageDependencyName.make("effect")],
+          nonRuntimeDependencyNames: [],
+        },
+      ],
+      serviceFiles: [],
+      workspaceSourceFiles: [],
+    })
+    match(missingScopeTagsExit)
+      .with({ _tag: "Failure" }, (f) => {
+        expect(Cause.pretty(f.cause).length).toBeGreaterThan(0)
+      })
+      .with({ _tag: "Success" }, () => {
+        expect.unreachable("Expected PackageTierManifestInput without scopeTags to fail decode")
+      })
+      .exhaustive()
   })
 
   it("computes SHA-256 identically to node:crypto across empty, ASCII, multi-block, and multi-byte UTF-8 inputs", () => {
-    expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v7")
+    expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v8")
     const samples = [
       "",
       "abc",
@@ -456,6 +497,18 @@ describe("@harness/contract schemas", () => {
     expect(HARNESS_DECISION_CACHE_FILENAME).toBe("decision-cache-v1.json")
     expect(resolveDefaultAstGateCachePath("/repo/")).toBe("/repo/.harness/cache/ast-gate-cache-v1.json")
     expect(resolveDefaultDecisionCachePath("/repo")).toBe("/repo/.harness/cache/decision-cache-v1.json")
+    for (const invalidRoot of ["", "   ", "/", "///", "/.", "/..", "/tmp/..", ".", "..", "./.", "a/..", "../..", "C:\\.", "C:\\a\\..", "/repo\0"]) {
+      expect(() => resolveDefaultAstGateCachePath(invalidRoot)).toThrow()
+      expect(() => resolveDefaultDecisionCachePath(invalidRoot)).toThrow()
+      expect(() => normalizeNonRootWorkspacePath(invalidRoot)).toThrow()
+    }
+    expect(normalizeNonRootWorkspacePath("/repo/sub/../dir/")).toBe("/repo/dir")
+    expect(normalizeNonRootWorkspacePath("C:\\repo\\sub\\..")).toBe("C:/repo")
+    expect(normalizeNonRootWorkspacePath("../sibling")).toBe("../sibling")
+    for (const invalidWorktreeId of ["", "   ", ".", "..", "...", "wt\0id"]) {
+      expect(() => sanitizeWorktreeIdSegment(invalidWorktreeId)).toThrow()
+    }
+    expect(sanitizeWorktreeIdSegment("feat/nested#branch")).toBe("feat_nested_branch")
 
     const parsed = parseManifestTags(["type:contract", "scope:web", "custom:tag", "type:infra"])
     expect(parsed.nxTags).toEqual([NxTierTag.make("type:contract"), NxTierTag.make("type:infra")])

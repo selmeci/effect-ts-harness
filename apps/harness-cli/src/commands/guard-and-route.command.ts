@@ -196,7 +196,6 @@ const evaluateCommandDecision = (
 export const handleGuard = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
-  maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> => {
   const isAntigravityFlag = hasAntigravityFormat(argv)
   let isAntigravity =
@@ -204,7 +203,7 @@ export const handleGuard = (
     (options?.stdin !== undefined && detectAntigravityHookPayload(options.stdin))
 
   return Effect.gen(function* () {
-    const decisionLayer = yield* resolveDecisionModelLayer(maybeDecisionLayer)
+    const decisionLayer = yield* resolveDecisionModelLayer(options?.decisionLayer)
     const fileFlag = argv.find((arg) => arg.startsWith("--file="))
     const cliFilePath = fileFlag ? fileFlag.slice("--file=".length) : undefined
     const positionalArgs = argv
@@ -385,10 +384,9 @@ export const handleGuard = (
 export const handleRoute = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
-  maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
-    const decisionLayer = yield* resolveDecisionModelLayer(maybeDecisionLayer)
+    const decisionLayer = yield* resolveDecisionModelLayer(options?.decisionLayer)
     const step = argv.slice(1).join(" ")
     const { block, source } = yield* routeStepWithStatus(step).pipe(Effect.provide(decisionLayer))
     if (block === "review") {

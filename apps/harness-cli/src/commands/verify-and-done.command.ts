@@ -1,7 +1,6 @@
 import { join } from "node:path"
-import { Cause, Duration, Effect, Layer } from "effect"
+import { Cause, Duration, Effect } from "effect"
 import * as Graph from "effect/Graph"
-import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import { isPureInterruptCause } from "@harness/contract"
 import { checkPlanStepCoverage, triageFailure } from "@harness/decision"
@@ -65,7 +64,7 @@ import {
 } from "./hook-format.js"
 import {
   decodeStopHookStdin,
-  isReadOnlyStopTurn,
+  inspectTranscriptSessionReadOnly,
   isSubagentStopContext,
   type StopHookStdin,
 } from "./stop-hook-and-transcript.js"
@@ -92,10 +91,9 @@ const verifyFailureWithThrashing = (
 
 export const handleVerify = (
   options: CliEnv | undefined,
-  maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
-    const decisionLayer = yield* resolveDecisionModelLayer(maybeDecisionLayer)
+    const decisionLayer = yield* resolveDecisionModelLayer(options?.decisionLayer)
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     if (process.env.HARNESS_USE_DAEMON === "1") {
       yield* tryQueryWarmDaemonSocket(repoRoot, "ping")
@@ -481,7 +479,6 @@ const parseDoneDeadlineMs = (): number => {
 export const handleDone = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
-  maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> => {
   const entryStartedAtMs = Date.now()
   const totalDeadlineMs = parseDoneDeadlineMs()
@@ -489,7 +486,7 @@ export const handleDone = (
     hasAntigravityFormat(argv) ||
     (options?.stdin !== undefined && detectAntigravityHookPayload(options.stdin))
   return Effect.gen(function* () {
-    const decisionLayer = yield* resolveDecisionModelLayer(maybeDecisionLayer)
+    const decisionLayer = yield* resolveDecisionModelLayer(options?.decisionLayer)
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
 
     let rawStdin = options?.stdin
@@ -549,37 +546,56 @@ export const handleDone = (
         return { exitCode: 0, stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "", stderr: "", telemetryDetail: "subagent=true" }
       }
       // 2. Read-only turn bypass
-      if (isReadOnlyStopTurn(decodedStdin)) {
+      const readOnlyInspection = inspectTranscriptSessionReadOnly(decodedStdin)
+      const corruptTranscriptNote = match(readOnlyInspection)
+        .with({ _tag: "ReadOnly" }, () => "readOnly" as const)
+        .with({ _tag: "Mutating" }, { _tag: "Unavailable" }, () => undefined)
+        .with({ _tag: "Corrupt" }, ({ reason }) => {
+          process.stderr.write(`[harness:done] ${reason}\n`)
+          return reason
+        })
+        .exhaustive()
+      if (corruptTranscriptNote === "readOnly") {
         return { exitCode: 0, stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "", stderr: "", telemetryDetail: "readOnly=true" }
       }
+      const appendTranscriptNote = (reason: string): string =>
+        corruptTranscriptNote !== undefined ? `${reason} (${corruptTranscriptNote})` : reason
+      const transcriptStderr = corruptTranscriptNote !== undefined ? `[harness:done] ${corruptTranscriptNote}` : ""
       // 3. Verify stamp check
       const stampCheck = checkVerifyStamp(repoRoot, nodeSyncHostIo)
       if (!stampCheck.valid) {
-        return { exitCode: 0, stdout: JSON.stringify({ decision: blockDecision, reason: stampCheck.reason }), stderr: "" }
+        return { exitCode: 0, stdout: JSON.stringify({ decision: blockDecision, reason: appendTranscriptNote(stampCheck.reason) }), stderr: transcriptStderr }
       }
 
+      const withTranscriptStderr = (res: CliResult): CliResult =>
+        transcriptStderr.length === 0
+          ? res
+          : {
+              ...res,
+              stderr: res.stderr.length > 0 ? `${res.stderr}\n${transcriptStderr}` : transcriptStderr,
+            }
       const snapshotOutcome = yield* loadSnapshotPair(repoRoot, options?.planGraph, options?.implGraph, isAntigravity)
 
       return yield* match(snapshotOutcome)
-        .with({ _tag: "Done" }, ({ result }) => Effect.succeed(result))
+        .with({ _tag: "Done" }, ({ result }) => Effect.succeed(withTranscriptStderr(result)))
         .with({ _tag: "Graphs" }, ({ planGraph, implGraph }) =>
           Effect.gen(function* () {
             if (planGraph && implGraph) {
               const diff = diffPlanAndImplGraphs(planGraph, implGraph)
               if (!diff.ok) {
-                return { exitCode: 0, stdout: JSON.stringify({ decision: blockDecision, reason: diff.reasons.join("; ") }), stderr: "" }
+                return { exitCode: 0, stdout: JSON.stringify({ decision: blockDecision, reason: appendTranscriptNote(diff.reasons.join("; ")) }), stderr: transcriptStderr }
               }
             }
             if (options?.planSteps && options.planSteps.length > 0) {
               for (const step of options.planSteps) {
                 const stepRes = yield* checkPlanStepCoverage(step).pipe(Effect.provide(decisionLayer))
                 if (!stepRes.covered) {
-                  return { exitCode: 0, stdout: JSON.stringify({ decision: blockDecision, reason: stepRes.reason }), stderr: "" }
+                  return { exitCode: 0, stdout: JSON.stringify({ decision: blockDecision, reason: appendTranscriptNote(stepRes.reason) }), stderr: transcriptStderr }
                 }
               }
             }
             const omnigraphFailure = yield* syncOmnigraphOnDone(repoRoot, options, isAntigravity, blockDecision)
-            if (omnigraphFailure !== undefined) return omnigraphFailure
+            if (omnigraphFailure !== undefined) return withTranscriptStderr(omnigraphFailure)
 
             if (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) {
               const report = buildSessionReport({
@@ -589,7 +605,7 @@ export const handleDone = (
               })
               writeSessionReportFiles(repoRoot, report, nodeSyncHostIo)
             }
-            return { exitCode: 0, stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "", stderr: "", telemetryDetail: "completed" }
+            return { exitCode: 0, stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "", stderr: transcriptStderr, telemetryDetail: "completed" }
           }),
         )
         .exhaustive()

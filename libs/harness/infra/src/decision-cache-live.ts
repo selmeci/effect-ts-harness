@@ -16,14 +16,13 @@ import {
   DecisionCachePayloadJson,
   type DecisionCacheStatsSnapshot,
   type DecisionCacheTtlMillis,
+  isPureInterruptCause,
   NonNegativeCount,
   type WorkspaceFilePath,
   type WorkspaceFsError,
 } from "@harness/contract"
 import { DecisionCachePort, type DecisionCachePortShape } from "@harness/service"
 import { toReadError, toWriteError } from "./cache-helpers.js"
-
-export type { DecisionCacheStatsSnapshot }
 
 const PersistedDecisionEntrySchema = Schema.Struct({
   payload: DecisionCachePayloadJson,
@@ -328,7 +327,7 @@ const makeDecisionCacheLayer = (options?: {
                               return { ...state, inFlight: nextInFlight }
                             }).pipe(
                               Effect.andThen(
-                                Cause.hasInterruptsOnly(cause)
+                                isPureInterruptCause(cause)
                                   ? Deferred.succeed(deferred, Option.none())
                                   : Deferred.failCause(deferred, cause),
                               ),
@@ -353,7 +352,7 @@ const makeDecisionCacheLayer = (options?: {
                               Deferred.succeed(deferred, Option.none()),
                             )
                             .with({ _tag: "Failure" }, ({ failure: defectOrInterruptCause }) =>
-                              Cause.hasInterruptsOnly(defectOrInterruptCause)
+                              isPureInterruptCause(defectOrInterruptCause)
                                 ? Deferred.succeed(deferred, Option.none())
                                 : Deferred.failCause(deferred, defectOrInterruptCause),
                             )

@@ -346,30 +346,44 @@ const parseTranscriptSteps = (decoded?: StopHookStdin): ParseTranscriptStepsResu
   )
 }
 
-export const isReadOnlyStopTurn = (decoded?: StopHookStdin): boolean =>
+export type TranscriptSessionReadOnlyStatus =
+  | { readonly _tag: "ReadOnly" }
+  | { readonly _tag: "Mutating" }
+  | { readonly _tag: "Corrupt"; readonly reason: string }
+  | { readonly _tag: "Unavailable" }
+
+export const inspectTranscriptSessionReadOnly = (
+  decoded?: StopHookStdin,
+): TranscriptSessionReadOnlyStatus =>
   match(parseTranscriptSteps(decoded))
-    .with({ _tag: "Corrupt" }, () => false)
-    .with({ _tag: "Ok" }, ({ steps }) => {
-      if (steps.length === 0) return false
+    .with({ _tag: "Corrupt" }, ({ reason }): TranscriptSessionReadOnlyStatus => ({
+      _tag: "Corrupt",
+      reason,
+    }))
+    .with({ _tag: "Ok" }, ({ steps }): TranscriptSessionReadOnlyStatus => {
+      if (steps.length === 0) return { _tag: "Unavailable" }
       let lastUserExplicitIdx = -1
       for (let i = 0; i < steps.length; i++) {
         if (steps[i]?.source === "USER_EXPLICIT") {
           lastUserExplicitIdx = i
         }
       }
-      if (lastUserExplicitIdx === -1) return false
+      if (lastUserExplicitIdx === -1) return { _tag: "Unavailable" }
       for (let i = lastUserExplicitIdx + 1; i < steps.length; i++) {
         const step = steps[i]
         if (!step?.tool_calls) continue
         for (const tc of step.tool_calls) {
           if (isMutatingTranscriptToolCall(tc)) {
-            return false
+            return { _tag: "Mutating" }
           }
         }
       }
-      return true
+      return { _tag: "ReadOnly" }
     })
     .exhaustive()
+
+export const isReadOnlyStopTurn = (decoded?: StopHookStdin): boolean =>
+  inspectTranscriptSessionReadOnly(decoded)._tag === "ReadOnly"
 
 export const isSubagentStopContext = (repoRoot: string, decoded?: StopHookStdin): boolean => {
   if (

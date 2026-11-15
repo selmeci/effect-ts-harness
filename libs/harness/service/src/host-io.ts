@@ -9,11 +9,14 @@
  * imports while `@harness/infra` (`nodeSyncHostIo`) owns the concrete Node binding.
  *
  * Capabilities:
- * - `SyncHostIo`: synchronous file/directory reads and metadata (`existsSync`, `isFileSync`,
+ * - `SyncHostReader`: synchronous file/directory reads and metadata (`existsSync`, `isFileSync`,
  *   `isDirectorySync`, `isSymbolicLinkSync`, `readTextSync`, `readBytesSync`, `readdirSync`,
- *   `realpathSync`), writes and mutations (`writeTextSync`, `appendTextSync`,
- *   `mkdirRecursiveSync`, `renameSync`, `unlinkSync`), and synchronous subprocess execution
- *   (`execFileSync`).
+ *   `realpathSync`).
+ * - `SyncHostWriter`: synchronous filesystem writes and mutations (`writeTextSync`,
+ *   `appendTextSync`, `mkdirRecursiveSync`, `renameSync`, `unlinkSync`).
+ * - `SyncHostExecutor`: synchronous subprocess execution (`execFileSync`).
+ * - `SyncHostMutator`: composes `SyncHostWriter` and `SyncHostExecutor`.
+ * - `SyncHostIo`: composes `SyncHostReader` and `SyncHostMutator`.
  * - `ExtendedHostIo`: extends `SyncHostIo` with recursive/temp/permission/process helpers
  *   (`rmRecursiveSync`, `cpRecursiveSync`, `mkdtempSync`, `statMtimeMsSync`, `chmodSync`,
  *   `spawnDetached`).
@@ -83,18 +86,23 @@ export interface SyncHostReader {
   readonly realpathSync: (filePath: string) => string
 }
 
-export interface SyncHostMutator {
+export interface SyncHostWriter {
   readonly writeTextSync: (filePath: string, content: string) => void
   readonly appendTextSync: (filePath: string, content: string) => void
   readonly mkdirRecursiveSync: (dirPath: string, mode?: number) => void
   readonly renameSync: (oldPath: string, newPath: string) => void
   readonly unlinkSync: (filePath: string) => void
+}
+
+export interface SyncHostExecutor {
   readonly execFileSync: (
     command: string,
     args: ReadonlyArray<string>,
     options?: SyncHostExecOptions,
   ) => SyncHostExecResult
 }
+
+export interface SyncHostMutator extends SyncHostWriter, SyncHostExecutor {}
 
 export interface SyncHostIo extends SyncHostReader, SyncHostMutator {}
 

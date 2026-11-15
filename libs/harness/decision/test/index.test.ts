@@ -125,7 +125,7 @@ describe("LearnProposalV1 and proposeLearningAction", () => {
           actionable: true,
           confidence: 0.85,
           recommendation:
-            'Create or expand an agent-patterns/*.md recipe for "D1 Repository Cache" and register it in IdiomRouterV1 (11 of 26 slots available).',
+            'Create or expand an agent-patterns/*.md recipe for "D1 Repository Cache" and register it in IdiomRouterV1 (8 of 26 slots available).',
           source: "deterministic-fallback",
         })
       }),

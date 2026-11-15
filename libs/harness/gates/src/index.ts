@@ -382,7 +382,6 @@ export {
   isSilentCatchDefectCall,
   makeAstGateCacheKey,
   makeAstGateDecisionReport,
-  resolveAstGateCachePath,
   resolveEnclosingSymbol,
   type AstGateCacheStore,
   type AstSourceFileCache,

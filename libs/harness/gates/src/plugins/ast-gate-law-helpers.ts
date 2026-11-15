@@ -104,7 +104,7 @@ export const isBareCauseHasInterruptsNode = (
     ts.isPropertyAccessExpression(node) &&
     ts.isIdentifier(node.expression) &&
     node.expression.text === "Cause" &&
-    node.name.text === "hasInterrupts"
+    (node.name.text === "hasInterrupts" || node.name.text === "hasInterruptsOnly")
   ) {
     return !isCalleeOfCallExpression(node)
   }
@@ -116,9 +116,12 @@ export const isBareCauseHasInterruptsNode = (
     !ts.isPropertyAccessExpression(expr) ||
     !ts.isIdentifier(expr.expression) ||
     expr.expression.text !== "Cause" ||
-    expr.name.text !== "hasInterrupts"
+    (expr.name.text !== "hasInterrupts" && expr.name.text !== "hasInterruptsOnly")
   ) {
     return false
+  }
+  if (expr.name.text === "hasInterruptsOnly") {
+    return true
   }
   const firstArg = node.arguments[0]
   if (firstArg === undefined) return true

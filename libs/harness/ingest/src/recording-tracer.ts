@@ -1,3 +1,4 @@
+import { isPureInterruptCause } from "@harness/contract"
 import { Cause, Context, Effect, Exit, Function, Layer, Option, Tracer } from "effect"
 import { match } from "ts-pattern"
 import type { IndexedEffectFn } from "./fn-index.js"
@@ -63,7 +64,7 @@ export const extractExitMetadata = <A, E>(
       valueTag: extractRuntimeTag(value),
     }))
     .with({ _tag: "Failure" }, ({ cause }) => {
-      if (Cause.hasInterruptsOnly(cause)) {
+      if (isPureInterruptCause(cause)) {
         return {
           exitTag: "Interrupt" as const,
           errorTag: "FiberInterrupt",

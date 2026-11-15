@@ -23,10 +23,7 @@ export const readAndVerifyWorkspaceFile = Effect.fn("WorkspaceFs.readAndVerifyFi
 export const statAndReadWorkspaceFiles = Effect.fn("WorkspaceFs.statAndReadAll")(function* (
   filePaths: ReadonlyArray<WorkspaceFilePath>,
 ): Effect.fn.Return<ReadonlyArray<WorkspaceFileStat>, WorkspaceFsError, WorkspaceFs> {
-  const stats: Array<WorkspaceFileStat> = []
-  for (const filePath of filePaths) {
-    const stat = yield* readAndVerifyWorkspaceFile(filePath)
-    stats.push(stat)
-  }
-  return stats
+  return yield* Effect.forEach(filePaths, (filePath) => readAndVerifyWorkspaceFile(filePath), {
+    concurrency: 16,
+  })
 })

@@ -18,13 +18,74 @@ import { ErrorReasonMessage } from "./workspace-and-process.js"
 export const HARNESS_AST_GATE_CACHE_FILENAME = "ast-gate-cache-v1.json" as const
 export const HARNESS_DECISION_CACHE_FILENAME = "decision-cache-v1.json" as const
 
+export const normalizeNonRootWorkspacePath = (raw: string): WorkspaceFilePath => {
+  const decoded = Schema.decodeSync(WorkspaceFilePath)(raw)
+  if (/^[\\/]+$/.test(decoded) || /^[A-Za-z]:[\\/]*$/.test(decoded)) {
+    return Schema.decodeSync(WorkspaceFilePath)("")
+  }
+  const hasUncPrefix = decoded.startsWith("//") || decoded.startsWith("\\\\")
+  const hasPosixPrefix = !hasUncPrefix && decoded.startsWith("/")
+  const hasWinDrivePrefix = !hasUncPrefix && !hasPosixPrefix && /^[A-Za-z]:[\\/]/.test(decoded)
+  const prefix = hasUncPrefix
+    ? "//"
+    : hasPosixPrefix
+      ? "/"
+      : hasWinDrivePrefix
+        ? `${decoded.slice(0, 2)}/`
+        : ""
+  const rest = hasUncPrefix
+    ? decoded.slice(2)
+    : hasPosixPrefix
+      ? decoded.slice(1)
+      : hasWinDrivePrefix
+        ? decoded.slice(3)
+        : decoded
+  const isRooted = prefix.length > 0
+  const stack: Array<string> = []
+  for (const segment of rest.split(/[\\/]+/)) {
+    if (segment === "" || segment === ".") {
+      continue
+    }
+    if (segment === "..") {
+      if (isRooted) {
+        if (stack.length > 0) {
+          stack.pop()
+        }
+        continue
+      }
+      if (stack.length > 0 && stack[stack.length - 1] !== "..") {
+        stack.pop()
+      } else {
+        stack.push("..")
+      }
+      continue
+    }
+    stack.push(segment)
+  }
+  if (isRooted) {
+    if (stack.length === 0) {
+      return Schema.decodeSync(WorkspaceFilePath)("")
+    }
+    return WorkspaceFilePath.make(`${prefix}${stack.join("/")}`)
+  }
+  if (stack.every((segment) => segment === "..")) {
+    return Schema.decodeSync(WorkspaceFilePath)("")
+  }
+  return WorkspaceFilePath.make(stack.join("/"))
+}
+
+export const sanitizeWorktreeIdSegment = (rawWorktreeId: string): string => {
+  const trimmed = Schema.decodeSync(WorkspaceFilePath)(rawWorktreeId.trim())
+  const sanitized = trimmed.replace(/[^a-zA-Z0-9._-]/g, "_")
+  if (/^\.+$/.test(sanitized)) {
+    return Schema.decodeSync(WorkspaceFilePath)("")
+  }
+  return sanitized
+}
+
 const resolveDefaultCacheFilePath = (repoRoot: string, fileName: string): WorkspaceFilePath => {
-  const normalizedRoot = repoRoot.trim().replace(/\/+$/, "")
-  const joined =
-    normalizedRoot.length === 0
-      ? `/.harness/cache/${fileName}`
-      : `${normalizedRoot}/.harness/cache/${fileName}`
-  return WorkspaceFilePath.make(joined)
+  const normalizedRoot = normalizeNonRootWorkspacePath(repoRoot)
+  return WorkspaceFilePath.make(`${normalizedRoot}/.harness/cache/${fileName}`)
 }
 
 export const resolveDefaultAstGateCachePath = (repoRoot: string): WorkspaceFilePath =>

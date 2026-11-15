@@ -132,7 +132,15 @@ export const resolveCommandTelemetryOutcome = (
         ? ("fail" as const)
         : ("ok" as const),
     )
-    .with("route", () => (res.stdout === "review" ? ("fallback" as const) : ("ok" as const)))
+    .with("route", () => {
+      if (res.telemetryDetail?.includes("source=degraded-fallback")) {
+        return "fallback" as const
+      }
+      if (res.telemetryDetail === undefined && res.stdout === "review") {
+        return "fallback" as const
+      }
+      return "ok" as const
+    })
     .otherwise(() => (res.exitCode === 0 ? ("ok" as const) : ("fail" as const)))
 
 const DEFAULT_STDIN_TIMEOUT_MS = 4000

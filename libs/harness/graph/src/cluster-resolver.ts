@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto"
 import { basename, dirname, join, resolve } from "node:path"
+import {
+  normalizeNonRootWorkspacePath,
+  sanitizeWorktreeIdSegment,
+  WorkspaceFilePath,
+} from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { Effect, Option, Result, Schema } from "effect"
 
@@ -126,16 +131,31 @@ export type GraphHeadMeta = typeof GraphHeadMetaSchema.Type
 
 const decodeGraphHeadMetaOption = Schema.decodeOption(Schema.fromJsonString(GraphHeadMetaSchema))
 
+const resolveGraphMetaStateDir = (
+  repoRoot: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string => {
+  const validRoot = normalizeNonRootWorkspacePath(
+    resolve(normalizeNonRootWorkspacePath(repoRoot)),
+  )
+  const rawCustomDir = env.HARNESS_STATE_DIR
+  if (rawCustomDir !== undefined && rawCustomDir.length > 0) {
+    const decodedCustom = Schema.decodeSync(WorkspaceFilePath)(rawCustomDir)
+    return normalizeNonRootWorkspacePath(resolve(validRoot, decodedCustom))
+  }
+  const rawWorktreeId = env.HARNESS_WORKTREE_ID
+  if (rawWorktreeId !== undefined && rawWorktreeId.length > 0) {
+    return join(validRoot, ".harness", "worktrees", sanitizeWorktreeIdSegment(rawWorktreeId))
+  }
+  return join(validRoot, ".harness")
+}
+
 export const readGraphHeadMeta = (
   repoRoot: string,
   hostIo: SyncHostIo,
   env: NodeJS.ProcessEnv = process.env,
 ): GraphHeadMeta | null => {
-  const customDir = env.HARNESS_STATE_DIR?.trim()
-  const stateDir =
-    customDir && customDir.length > 0
-      ? resolve(repoRoot, customDir)
-      : join(resolve(repoRoot), ".harness")
+  const stateDir = resolveGraphMetaStateDir(repoRoot, env)
   const metaPath = join(stateDir, "graph-head.json")
   if (!hostIo.existsSync(metaPath)) {
     return null
@@ -157,11 +177,7 @@ export const writeGraphHeadMeta = (
   if (resolved.headSha === null && resolved.gitBranch === null) {
     return null
   }
-  const customDir = env.HARNESS_STATE_DIR?.trim()
-  const stateDir =
-    customDir && customDir.length > 0
-      ? resolve(repoRoot, customDir)
-      : join(resolve(repoRoot), ".harness")
+  const stateDir = resolveGraphMetaStateDir(repoRoot, env)
   const meta: GraphHeadMeta = {
     headSha: resolved.headSha,
     gitBranch: resolved.gitBranch,
@@ -286,9 +302,12 @@ export const resolveOmnigraphClusterDir = (
   hostIo: SyncHostIo,
   env: NodeJS.ProcessEnv = process.env,
 ): string => {
-  const customDir = env.HARNESS_STATE_DIR?.trim()
-  if (customDir && customDir.length > 0) {
-    return join(resolve(repoRoot, customDir), "omnigraph-cluster")
+  const rawCustomDir = env.HARNESS_STATE_DIR
+  if (rawCustomDir !== undefined && rawCustomDir.length > 0) {
+    const customStateDir = normalizeNonRootWorkspacePath(
+      resolve(repoRoot, Schema.decodeSync(WorkspaceFilePath)(rawCustomDir)),
+    )
+    return join(customStateDir, "omnigraph-cluster")
   }
   const canonicalRoot = resolveCanonicalRepoRoot(repoRoot, hostIo)
   return join(canonicalRoot, ".harness", "omnigraph-cluster")

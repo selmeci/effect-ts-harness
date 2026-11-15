@@ -23,45 +23,48 @@ import {
 
 export { isPathInsideRoot, normalizeProjectPath, resolveDefaultRepoRoot }
 
+const BoundedSymbolOrSpan = Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 512)))
+const BoundedRepoRoot = Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 1024)))
+
 const ResolveInputSchema = Schema.Struct({
-  symbolOrSpan: Schema.String.annotate({
+  symbolOrSpan: BoundedSymbolOrSpan.annotate({
     description: "Symbol or span name to resolve",
   }),
   repoRoot: Schema.optional(
-    Schema.String.annotate({
+    BoundedRepoRoot.annotate({
       description: "Optional repository root path",
     }),
   ),
 })
 
 const CallersInputSchema = Schema.Struct({
-  symbolOrSpan: Schema.String.annotate({
+  symbolOrSpan: BoundedSymbolOrSpan.annotate({
     description: "Symbol or span name to query callers for",
   }),
   repoRoot: Schema.optional(
-    Schema.String.annotate({
+    BoundedRepoRoot.annotate({
       description: "Optional repository root path",
     }),
   ),
 })
 
 const CalleesInputSchema = Schema.Struct({
-  symbolOrSpan: Schema.String.annotate({
+  symbolOrSpan: BoundedSymbolOrSpan.annotate({
     description: "Symbol or span name to query callees for",
   }),
   repoRoot: Schema.optional(
-    Schema.String.annotate({
+    BoundedRepoRoot.annotate({
       description: "Optional repository root path",
     }),
   ),
 })
 
 const TestsReachingInputSchema = Schema.Struct({
-  symbolOrSpan: Schema.String.annotate({
+  symbolOrSpan: BoundedSymbolOrSpan.annotate({
     description: "Symbol or span name to find reaching tests for",
   }),
   repoRoot: Schema.optional(
-    Schema.String.annotate({
+    BoundedRepoRoot.annotate({
       description: "Optional repository root path",
     }),
   ),
@@ -98,11 +101,11 @@ const StructuralSearchInputSchema = Schema.Struct({
 })
 
 const RouteInputSchema = Schema.Struct({
-  planStep: Schema.String.annotate({
+  planStep: Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 4096))).annotate({
     description: "Implementation plan step text to route to an Effect idiom block",
   }),
   repoRoot: Schema.optional(
-    Schema.String.annotate({
+    BoundedRepoRoot.annotate({
       description: "Optional repository root path",
     }),
   ),
