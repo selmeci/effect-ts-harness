@@ -28,6 +28,7 @@ export const GcFindingKind = Schema.Literals([
   "invalid-migrator-record-key", "unsafe-sql-migration", "untrusted-row-brand-make",
   "architecture-policy-violation",
   "unreadable-workspace-file",
+  "governance-doc-read-error",
   "inline-test-ddl-bypassing-migrations",
   "doc-unknown-package-name",
   "doc-unknown-rule-id",
@@ -35,6 +36,10 @@ export const GcFindingKind = Schema.Literals([
   "agents-duplicate-section",
   "adapter-rules-drift",
   "hook-timeout-parity",
+  "hook-bootstrap-fail-closed",
+  "skill-tier-table-drift",
+  "mermaid-dependency-drift",
+  "doc-banned-or-phantom-tech",
   "stale-gate-rule-version",
 ])
 export type GcFindingKind = typeof GcFindingKind.Type

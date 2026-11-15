@@ -17,7 +17,7 @@ export interface WorkspaceFsShape {
     filePath: WorkspaceFilePath,
     content: WorkspaceFileContent,
   ) => Effect.Effect<void, WorkspaceFsError>
-  readonly exists: (filePath: WorkspaceFilePath) => Effect.Effect<boolean, never>
+  readonly exists: (filePath: WorkspaceFilePath) => Effect.Effect<boolean, WorkspaceFsError>
 }
 
 export class WorkspaceFs extends Context.Service<WorkspaceFs, WorkspaceFsShape>()(

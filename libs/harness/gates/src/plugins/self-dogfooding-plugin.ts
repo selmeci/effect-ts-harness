@@ -22,6 +22,18 @@ import {
   resolveEnclosingSymbol,
   unwrapAstExpression,
 } from "../ast-cache.js"
+import {
+  getMutatedStaticObjectName,
+  isBannedNodeBuiltinSpecifier,
+  isBannedParentConstructor,
+  isBareCauseHasInterruptsNode,
+  isDoubleWrappedEffectFn,
+  isLiteralVitestKey,
+  isMemberCall,
+  isProcessEnvDestructuring,
+  isProcessEnvExpression,
+  isPureTierProcessEnvBannedPath,
+} from "./ast-gate-law-helpers.js"
 import { type SelfDogfoodingInput } from "./self-dogfooding-contract.js"
 
 const isExcludedProductionPath = (normPath: string): boolean =>
@@ -97,26 +109,7 @@ export const resolvePathSpecificMaxLines = (
   return tieredMax !== undefined ? Math.min(tieredMax, fallback) : fallback
 }
 
-const EFFECT_CONSTRUCTORS = new Set(["fn", "fnUntraced", "gen", "sync", "suspend", "try", "tryPromise", "promise"])
-const LAYER_CONSTRUCTORS = new Set(["effect", "succeed", "sync"])
 const COLLECTION_MUTATORS = new Set(["set", "add", "delete", "clear"])
-const ALLOWED_PURE_NODE_SUBPATHS = new Set(["path", "path/posix", "path/win32", "crypto", "url"])
-const BANNED_BARE_NODE_BUILTINS = new Set([
-  "fs", "fs/promises", "child_process", "net", "os", "http", "https", "http2", "tls", "dgram",
-  "dns", "dns/promises", "cluster", "worker_threads", "sqlite", "module", "vm", "readline",
-  "readline/promises", "inspector", "inspector/promises", "v8", "perf_hooks", "process", "repl",
-  "tty", "wasi", "zlib", "stream", "stream/promises", "stream/web", "stream/consumers", "timers",
-  "timers/promises", "async_hooks", "diagnostics_channel", "events", "buffer", "util", "util/types",
-  "assert", "assert/strict", "querystring", "string_decoder", "punycode", "trace_events", "domain", "constants", "sys",
-])
-
-const isBannedNodeBuiltinSpecifier = (specifier: string): boolean => {
-  const trimmed = specifier.trim()
-  if (trimmed.startsWith("node:")) {
-    return !ALLOWED_PURE_NODE_SUBPATHS.has(trimmed.slice("node:".length))
-  }
-  return BANNED_BARE_NODE_BUILTINS.has(trimmed)
-}
 
 const extractSpecifierText = (node: ts.Expression): string | undefined => {
   const unwrapped = unwrapAstExpression(node)
@@ -150,94 +143,6 @@ const extractCtorIdentifierName = (expr: ts.LeftHandSideExpression): string | un
 const hasConstAssertion = (expr: ts.Expression): boolean => {
   if (ts.isAsExpression(expr) || ts.isTypeAssertionExpression(expr)) {
     return ts.isTypeReferenceNode(expr.type) && expr.type.typeName.getText() === "const"
-  }
-  return false
-}
-
-const isProcessEnvExpression = (expr: ts.Expression): boolean => {
-  const unwrapped = unwrapAstExpression(expr)
-  if (!ts.isPropertyAccessExpression(unwrapped) || unwrapped.name.text !== "env") {
-    return false
-  }
-  const target = unwrapAstExpression(unwrapped.expression)
-  if (ts.isIdentifier(target) && target.text === "process") {
-    return true
-  }
-  return (
-    ts.isPropertyAccessExpression(target) &&
-    ts.isIdentifier(target.expression) &&
-    target.expression.text === "globalThis" &&
-    target.name.text === "process"
-  )
-}
-
-const isLiteralVitestKey = (expr: ts.Expression): boolean => {
-  const unwrapped = unwrapAstExpression(expr)
-  return (
-    (ts.isStringLiteral(unwrapped) || ts.isNoSubstitutionTemplateLiteral(unwrapped)) &&
-    unwrapped.text === "VITEST"
-  )
-}
-
-const isMemberCall = (callExpr: ts.CallExpression, objName: string, methodName: string): boolean => {
-  const callee = unwrapAstExpression(callExpr.expression)
-  return (
-    ts.isPropertyAccessExpression(callee) &&
-    ts.isIdentifier(callee.expression) &&
-    callee.expression.text === objName &&
-    callee.name.text === methodName
-  )
-}
-
-const isEffectGenBody = (body: ts.ConciseBody): boolean => {
-  if (ts.isBlock(body)) {
-    if (body.statements.length !== 1) {
-      return false
-    }
-    const onlyStmt = body.statements[0]
-    if (onlyStmt === undefined || !ts.isReturnStatement(onlyStmt) || onlyStmt.expression === undefined) {
-      return false
-    }
-    const returnedExpr = unwrapAstExpression(onlyStmt.expression)
-    return ts.isCallExpression(returnedExpr) && isMemberCall(returnedExpr, "Effect", "gen")
-  }
-  const bodyExpr = unwrapAstExpression(body)
-  return ts.isCallExpression(bodyExpr) && isMemberCall(bodyExpr, "Effect", "gen")
-}
-
-const isDoubleWrappedEffectFn = (callExpr: ts.CallExpression): boolean => {
-  const unwrappedExpr = unwrapAstExpression(callExpr.expression)
-  const isWrappedFn =
-    (ts.isCallExpression(unwrappedExpr) && isMemberCall(unwrappedExpr, "Effect", "fn")) ||
-    isMemberCall(callExpr, "Effect", "fnUntraced")
-  if (!isWrappedFn) {
-    return false
-  }
-  const fnArg = callExpr.arguments[0]
-  if (fnArg === undefined) {
-    return false
-  }
-  const unwrappedArg = unwrapAstExpression(fnArg)
-  if (!ts.isArrowFunction(unwrappedArg) && !ts.isFunctionExpression(unwrappedArg)) {
-    return false
-  }
-  return isEffectGenBody(unwrappedArg.body)
-}
-
-const isBannedParentConstructor = (callExpr: ts.CallExpression): boolean => {
-  let callee = unwrapAstExpression(callExpr.expression)
-  if (ts.isCallExpression(callee)) {
-    callee = unwrapAstExpression(callee.expression)
-  }
-  if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression)) {
-    const objName = callee.expression.text
-    const propName = callee.name.text
-    if (objName === "Effect" && EFFECT_CONSTRUCTORS.has(propName)) {
-      return true
-    }
-    if (objName === "Layer" && LAYER_CONSTRUCTORS.has(propName)) {
-      return true
-    }
   }
   return false
 }
@@ -406,7 +311,9 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
     const { sourceFile } = getOrCreateCachedSourceFile(file.filePath, file.content)
     const normPath = file.filePath.replace(/\\/g, "/")
     const isInfraSrc = /\/infra\/src\//.test(normPath)
+    const isPureProcessEnvBanned = isPureTierProcessEnvBannedPath(normPath)
     const staticCollectionNames = new Set<string>()
+    const staticObjectNames = new Set<string>()
     const envAliasNames = new Set<string>()
 
     for (const stmt of sourceFile.statements) {
@@ -444,6 +351,13 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
                 line: getLineNumber(sourceFile, decl.getStart(sourceFile)),
                 enclosingSymbol: EnclosingSymbolName.make(file.filePath),
               })
+            }
+            if (
+              ts.isObjectLiteralExpression(init) &&
+              !hasConstAssertion(decl.initializer) &&
+              ts.isIdentifier(decl.name)
+            ) {
+              staticObjectNames.add(decl.name.text)
             }
             if (ts.isNewExpression(init)) {
               const ctorName = extractCtorIdentifierName(init.expression)
@@ -499,13 +413,13 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
       }
     }
 
-    if (isGraphOrchestratorFacadePath(file.filePath)) {
+    if (isGraphOrchestratorFacadePath(file.filePath) || /(?:^|\/)(?:libs|apps)\/.*\/src\/index\.ts$/.test(normPath)) {
       for (const stmt of sourceFile.statements) {
         if (ts.isExportDeclaration(stmt) && stmt.exportClause === undefined) {
           violations.push({
             rule: SelfDogfoodingRuleId.make("facade-star-reexport"),
             message: SelfDogfoodingMessage.make(
-              `Wildcard 'export *' re-export in '${file.filePath}' is banned — decomposed @harness/graph orchestrator facades must use explicit named re-exports (export { ... } from "./...") instead of export * from so internal submodule helpers do not leak into the public API.`,
+              `Wildcard 'export *' re-export in '${file.filePath}' is banned — orchestrator facades and package src/index.ts barrels must use explicit named re-exports (export { ... } from "./...") instead of export * from.`,
             ),
             file: file.filePath,
             line: SourceLineNumber.make(
@@ -533,14 +447,29 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
       }
 
       if (ts.isCallExpression(node)) {
-        if (!isInfraSrc && node.arguments.length > 0 && node.arguments[0] !== undefined) {
+        if (node.arguments.length > 0 && node.arguments[0] !== undefined) {
           const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword
           const isRequireCall =
             (ts.isIdentifier(node.expression) && node.expression.text === "require") ||
             (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "require")
           if (isDynamicImport || isRequireCall) {
             const spec = extractSpecifierText(node.arguments[0])
-            if (spec !== undefined && isBannedNodeBuiltinSpecifier(spec)) {
+            if (
+              spec !== undefined &&
+              spec.startsWith("@harness/") &&
+              /(?:^|\/)(?:libs|apps)\/.*\/(?:src|test)\//.test(normPath)
+            ) {
+              violations.push({
+                rule: SelfDogfoodingRuleId.make("dynamic-harness-import"),
+                message: SelfDogfoodingMessage.make(
+                  `Dynamic import/require('${spec}') in '${file.filePath}' is banned because @nx/eslint-plugin enforce-module-boundaries crashes under TS7 when dynamic import("@harness/...") is mixed with static imports — use a top-level static import instead.`,
+                ),
+                file: file.filePath,
+                line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+                enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
+              })
+            }
+            if (!isInfraSrc && spec !== undefined && isBannedNodeBuiltinSpecifier(spec)) {
               violations.push({
                 rule: SelfDogfoodingRuleId.make("no-node-builtins-outside-infra"),
                 message: SelfDogfoodingMessage.make(
@@ -603,7 +532,22 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
           violations.push({
             rule: SelfDogfoodingRuleId.make("catch-cause-interrupts-only"),
             message: SelfDogfoodingMessage.make(
-              "Cause.hasInterruptsOnly(cause) inside Effect.catchCause / Exit inspection swallows fiber interruption on composite causes (Fail + Interrupt). Use Cause.hasInterrupts(cause) instead.",
+              "Cause.hasInterruptsOnly(cause) inside Effect.catchCause / Exit inspection swallows fiber interruption on composite causes (Fail + Interrupt). Use isPureInterruptCause(cause) or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause) instead.",
+            ),
+            file: file.filePath,
+            line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+            enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
+          })
+        }
+
+        if (
+          /(?:^|\/)src\//.test(normPath) &&
+          isBareCauseHasInterruptsNode(node, sourceFile, normPath)
+        ) {
+          violations.push({
+            rule: SelfDogfoodingRuleId.make("bare-cause-has-interrupts"),
+            message: SelfDogfoodingMessage.make(
+              "Bare Cause.hasInterrupts(cause) in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause(cause) or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause).",
             ),
             file: file.filePath,
             line: getLineNumber(sourceFile, node.getStart(sourceFile)),
@@ -651,6 +595,29 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
             line: getLineNumber(sourceFile, node.getStart(sourceFile)),
             enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
           })
+        }
+
+        if (
+          staticObjectNames.size > 0 &&
+          (isMemberCall(node, "Object", "assign") || isMemberCall(node, "Reflect", "set")) &&
+          node.arguments.length >= 1 &&
+          node.arguments[0] !== undefined
+        ) {
+          let targetExpr = unwrapAstExpression(node.arguments[0])
+          while (ts.isPropertyAccessExpression(targetExpr) || ts.isElementAccessExpression(targetExpr)) {
+            targetExpr = unwrapAstExpression(targetExpr.expression)
+          }
+          if (ts.isIdentifier(targetExpr) && staticObjectNames.has(targetExpr.text)) {
+            violations.push({
+              rule: SelfDogfoodingRuleId.make("no-global-mutable-cache"),
+              message: SelfDogfoodingMessage.make(
+                `Mutating module-level object '${targetExpr.text}' via '${unwrappedNodeExpr.getText(sourceFile)}' in '${file.filePath}' is banned — avoid global mutable caches.`,
+              ),
+              file: file.filePath,
+              line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+              enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
+            })
+          }
         }
 
         if (isMemberCall(node, "Layer", "build")) {
@@ -740,6 +707,50 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
           rule: SelfDogfoodingRuleId.make("test-env-branch-in-src"),
           message: SelfDogfoodingMessage.make(
             `Test environment branch referencing 'process.env.VITEST' in '${file.filePath}' is banned in production src/ — pass explicit options instead.`,
+          ),
+          file: file.filePath,
+          line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+          enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
+        })
+      }
+
+      if (
+        ts.isPropertyAccessExpression(node) &&
+        /(?:^|\/)src\//.test(normPath) &&
+        isBareCauseHasInterruptsNode(node, sourceFile, normPath)
+      ) {
+        violations.push({
+          rule: SelfDogfoodingRuleId.make("bare-cause-has-interrupts"),
+          message: SelfDogfoodingMessage.make(
+            "Point-free Cause.hasInterrupts in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause instead.",
+          ),
+          file: file.filePath,
+          line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+          enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
+        })
+      }
+
+      if (
+        isPureProcessEnvBanned &&
+        ((ts.isExpression(node) && isProcessEnvExpression(node)) || isProcessEnvDestructuring(node))
+      ) {
+        violations.push({
+          rule: SelfDogfoodingRuleId.make("process-env-outside-infra-or-app"),
+          message: SelfDogfoodingMessage.make(
+            `Direct 'process.env' access in '${file.filePath}' is banned outside type:infra and type:app — inject Config or read environment variables in @harness/infra or apps/*.`,
+          ),
+          file: file.filePath,
+          line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+          enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
+        })
+      }
+
+      const mutatedObjectName = getMutatedStaticObjectName(node, staticObjectNames)
+      if (mutatedObjectName !== undefined) {
+        violations.push({
+          rule: SelfDogfoodingRuleId.make("no-global-mutable-cache"),
+          message: SelfDogfoodingMessage.make(
+            `Mutating module-level object '${mutatedObjectName}' in '${file.filePath}' is banned — avoid global mutable caches.`,
           ),
           file: file.filePath,
           line: getLineNumber(sourceFile, node.getStart(sourceFile)),

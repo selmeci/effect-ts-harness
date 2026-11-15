@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { Cause, Exit, Option, Schema } from "effect"
+import { Cause, Exit, Schema } from "effect"
 import { match } from "ts-pattern"
 import { describe, expect, it } from "vitest"
 import {
@@ -10,6 +10,7 @@ import {
   AstSourceContent,
   AstSourceFilePath,
   CompilerRepoRootPath,
+  ContentSha256,
   DaemonServerError,
   DaemonServerErrorKind,
   DaemonSocketPath,
@@ -19,13 +20,17 @@ import {
   DecisionCacheTtlMillis,
   EnclosingSymbolName,
   ErrorReasonMessage,
+  EvaluatorId,
   GateRuleId,
   GateViolationMessage,
+  HARNESS_AST_GATE_CACHE_FILENAME,
+  HARNESS_DECISION_CACHE_FILENAME,
   HARNESS_GATE_RULE_VERSION,
   HarnessSubprocessError,
   HarnessTierTopologyInput,
   HarnessTierTopologyReport,
   NonNegativeCount,
+  NxScopeTag,
   NxTierTag,
   PackageDependencyName,
   PackageManifestName,
@@ -46,22 +51,39 @@ import {
   WorkspaceFsOperation,
   computeContentSha256,
   inferAstGatePackageTagFromPath,
+  isPureInterruptCause,
   makeAstGateDecisionReport,
   makeAstGateEvaluationReport,
   makeHarnessTierTopologyReport,
   makeSelfDogfoodingReport,
+  makeVerdictReport,
+  parseManifestTags,
+  resolveDefaultAstGateCachePath,
+  resolveDefaultDecisionCachePath,
+  toErrorReasonMessage,
   validateSubprocessInput,
 } from "../src/index.js"
 
 describe("@harness/contract schemas", () => {
-  it("decodes branded AST, self-dogfooding, and workspace primitives and collapses path brands", () => {
+  it("decodes branded AST, self-dogfooding, and workspace primitives and enforces distinct path sub-brands", () => {
     expect(Schema.decodeSync(PluginId)("plugin-1")).toBe("plugin-1")
     expect(Schema.decodeSync(NonNegativeCount)(0)).toBe(0)
     const wsPath = WorkspaceFilePath.make("libs/harness/contract/src/index.ts")
-    const astPath: AstSourceFilePath = wsPath
-    const repoPath: CompilerRepoRootPath = wsPath
-    expect(astPath).toBe("libs/harness/contract/src/index.ts")
-    expect(repoPath).toBe("libs/harness/contract/src/index.ts")
+    const astPath = AstSourceFilePath.make("libs/harness/contract/src/index.ts")
+    const repoPath = CompilerRepoRootPath.make("/repo")
+    const astAsWs: WorkspaceFilePath = astPath
+    const repoAsWs: WorkspaceFilePath = repoPath
+    // @ts-expect-error bare WorkspaceFilePath cannot be assigned to AstSourceFilePath
+    const badAstFromWs: AstSourceFilePath = wsPath
+    // @ts-expect-error bare WorkspaceFilePath cannot be assigned to CompilerRepoRootPath
+    const badRepoFromWs: CompilerRepoRootPath = wsPath
+    // @ts-expect-error AstSourceFilePath and CompilerRepoRootPath are distinct brands
+    const badSwap: AstSourceFilePath = repoPath
+    expect(astAsWs).toBe("libs/harness/contract/src/index.ts")
+    expect(repoAsWs).toBe("/repo")
+    expect(badAstFromWs).toBe(wsPath)
+    expect(badRepoFromWs).toBe(wsPath)
+    expect(badSwap).toBe(repoPath)
     expect(Schema.decodeSync(SubprocessCommand)("pnpm")).toBe("pnpm")
     expect(Schema.decodeSync(ActiveMutantId)("mutant-1")).toBe("mutant-1")
 
@@ -89,12 +111,13 @@ describe("@harness/contract schemas", () => {
       .with("forbidden-contract-dependency", () => 2)
       .with("forbidden-service-dependency", () => 3)
       .with("forbidden-core-dependency", () => 4)
-      .with("impure-service-tier-import", () => 5)
-      .with("undeclared-workspace-dependency", () => 6)
-      .with("banned-workspace-dependency", () => 7)
-      .with("forbidden-domain-dependency", () => 8)
-      .with("forbidden-infra-dependency", () => 9)
-      .with("forbidden-web-app-dependency", () => 10)
+      .with("impure-core-tier-import", () => 5)
+      .with("impure-service-tier-import", () => 6)
+      .with("undeclared-workspace-dependency", () => 7)
+      .with("banned-workspace-dependency", () => 8)
+      .with("forbidden-domain-dependency", () => 9)
+      .with("forbidden-infra-dependency", () => 10)
+      .with("forbidden-web-app-dependency", () => 11)
       .exhaustive()
     expect(ruleTag).toBe(4)
 
@@ -120,7 +143,7 @@ describe("@harness/contract schemas", () => {
     const sampleDogfoodingViolation = {
       rule: "harness-switch-statement" as const,
       message: SelfDogfoodingMessage.make("switch found"),
-      file: WorkspaceFilePath.make("libs/a.ts"),
+      file: AstSourceFilePath.make("libs/a.ts"),
       line: SourceLineNumber.make(1),
       enclosingSymbol: EnclosingSymbolName.make("fn"),
     }
@@ -174,7 +197,7 @@ describe("@harness/contract schemas", () => {
       category: "syntax-bans" as const,
       rule: GateRuleId.make("no-switch"),
       message: GateViolationMessage.make("banned"),
-      file: WorkspaceFilePath.make("libs/x.ts"),
+      file: AstSourceFilePath.make("libs/x.ts"),
       line: SourceLineNumber.make(3),
       enclosingSymbol: EnclosingSymbolName.make("mod"),
     }
@@ -210,12 +233,23 @@ describe("@harness/contract schemas", () => {
   it("rejects empty, whitespace-only, negative, NaN, null, and unknown literal inputs", () => {
     expect(() => Schema.decodeSync(WorkspaceFilePath)("")).toThrow()
     expect(() => Schema.decodeSync(WorkspaceFilePath)("   ")).toThrow()
+    expect(() => Schema.decodeSync(WorkspaceFilePath)("/tmp/bad\0path")).toThrow()
     expect(() => Schema.decodeSync(PluginId)(" untrimmed ")).toThrow()
     expect(() => Schema.decodeSync(NonNegativeCount)(-1)).toThrow()
     expect(() => Schema.decodeSync(NonNegativeCount)(Number.NaN)).toThrow()
     expect(() => Schema.decodeSync(SourceLineNumber)(0)).toThrow()
+    expect(() => Schema.decodeSync(DecisionCacheTtlMillis)(0)).toThrow()
     expect(() => Schema.decodeSync(DecisionCacheTtlMillis)(-5)).toThrow()
+    expect(Schema.decodeSync(DecisionCacheTtlMillis)(1)).toBe(1)
     expect(() => Schema.decodeSync(DecisionCacheKey)("")).toThrow()
+    expect(() => Schema.decodeSync(DecisionCacheKey)("key\0bad")).toThrow()
+    expect(() => Schema.decodeSync(EvaluatorId)("")).toThrow()
+    expect(() => Schema.decodeSync(EvaluatorId)(" untrimmed ")).toThrow()
+    expect(() => Schema.decodeSync(EvaluatorId)("eval\0id")).toThrow()
+    expect(Schema.decodeSync(EvaluatorId)("eval-1")).toBe("eval-1")
+    expect(() => Schema.decodeSync(ContentSha256)("not-a-sha")).toThrow()
+    expect(() => Schema.decodeSync(ContentSha256)("A".repeat(64))).toThrow()
+    expect(Schema.decodeSync(ContentSha256)("0".repeat(64))).toBe("0".repeat(64))
     expect(() => Schema.decodeSync(DaemonSocketPath)("  ")).toThrow()
     const nullInput: unknown = null
     const badRuleInput: unknown = "unknown-rule"
@@ -224,31 +258,16 @@ describe("@harness/contract schemas", () => {
   })
 
   it("validates subprocess null-byte invariants, StdinReadError, and HarnessSubprocessError schema decode", () => {
-    const badCmd = validateSubprocessInput({
-      command: SubprocessCommand.make("node\0evil"),
-      args: [],
-    })
-    expect(Option.isSome(badCmd)).toBe(true)
-
-    const badArg = validateSubprocessInput({
-      command: SubprocessCommand.make("node"),
-      args: [SubprocessArg.make("ok"), SubprocessArg.make("bad\0arg")],
-    })
-    expect(Option.isSome(badArg)).toBe(true)
-
-    const badCwd = validateSubprocessInput({
-      command: SubprocessCommand.make("node"),
-      args: [],
-      cwd: WorkspaceFilePath.make("/tmp/bad\0cwd"),
-    })
-    expect(Option.isSome(badCwd)).toBe(true)
+    expect(() => Schema.decodeSync(SubprocessCommand)("node\0evil")).toThrow()
+    expect(() => Schema.decodeSync(SubprocessArg)("bad\0arg")).toThrow()
+    expect(() => Schema.decodeSync(WorkspaceFilePath)("/tmp/bad\0cwd")).toThrow()
 
     const clean = validateSubprocessInput({
       command: SubprocessCommand.make("node"),
       args: [SubprocessArg.make("--version")],
       cwd: WorkspaceFilePath.make("/tmp"),
     })
-    expect(Option.isNone(clean)).toBe(true)
+    expect(clean._tag).toBe("None")
 
     const validStdinExit = Schema.decodeExit(StdinReadError)({
       _tag: "StdinReadError",
@@ -351,7 +370,7 @@ describe("@harness/contract schemas", () => {
   })
 
   it("computes SHA-256 identically to node:crypto across empty, ASCII, multi-block, and multi-byte UTF-8 inputs", () => {
-    expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v6")
+    expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v7")
     const samples = [
       "",
       "abc",
@@ -400,5 +419,48 @@ describe("@harness/contract schemas", () => {
       reason: ErrorReasonMessage.make("not a socket"),
     })
     expect(daemonErr.reasonKind).toBe("not-a-socket")
+  })
+
+  it("provides pure interrupt cause detection, total error reason formatting, verdict protection, cache paths, and manifest tag parsing", () => {
+    expect(isPureInterruptCause(Cause.interrupt(0))).toBe(true)
+    expect(isPureInterruptCause(Cause.fail("err"))).toBe(false)
+    expect(isPureInterruptCause(Cause.die(new Error("boom")))).toBe(false)
+    expect(
+      isPureInterruptCause(Cause.combine(Cause.die(new Error("boom")), Cause.interrupt(0))),
+    ).toBe(false)
+
+    expect(toErrorReasonMessage(new Error("  spaced error  "))).toBe("spaced error")
+    expect(toErrorReasonMessage({ message: "   " }, "  fallback msg  ")).toBe("fallback msg")
+    expect(toErrorReasonMessage("", "   ")).toBe("Unknown error")
+    expect(toErrorReasonMessage(Object.create(null), "null-proto")).toBe("null-proto")
+
+    const report = makeVerdictReport([], {
+      inspectedFileCount: NonNegativeCount.make(3),
+    })
+    expect(report.verdict).toBe("clean")
+    expect(report.violations).toEqual([])
+    expect(report.inspectedFileCount).toBe(3)
+
+    // @ts-expect-error extra cannot supply verdict or violations
+    makeVerdictReport([], { inspectedFileCount: NonNegativeCount.make(1), verdict: "violated" })
+
+    const spoofedExtra = JSON.parse(
+      '{"inspectedFileCount":3,"verdict":"clean","violations":[]}',
+    ) as { readonly inspectedFileCount: NonNegativeCount }
+    const spoofedReport = makeVerdictReport(["v1"], spoofedExtra)
+    expect(spoofedReport.verdict).toBe("violated")
+    expect(spoofedReport.violations).toEqual(["v1"])
+    expect(spoofedReport.inspectedFileCount).toBe(3)
+
+    expect(HARNESS_AST_GATE_CACHE_FILENAME).toBe("ast-gate-cache-v1.json")
+    expect(HARNESS_DECISION_CACHE_FILENAME).toBe("decision-cache-v1.json")
+    expect(resolveDefaultAstGateCachePath("/repo/")).toBe("/repo/.harness/cache/ast-gate-cache-v1.json")
+    expect(resolveDefaultDecisionCachePath("/repo")).toBe("/repo/.harness/cache/decision-cache-v1.json")
+
+    const parsed = parseManifestTags(["type:contract", "scope:web", "custom:tag", "type:infra"])
+    expect(parsed.nxTags).toEqual([NxTierTag.make("type:contract"), NxTierTag.make("type:infra")])
+    expect(parsed.scopeTags).toEqual([NxScopeTag.make("scope:web")])
+    expect(parsed.unknownTags).toEqual(["custom:tag"])
+    expect(() => Schema.decodeUnknownSync(NxTierTag)("type:unknown")).toThrow()
   })
 })

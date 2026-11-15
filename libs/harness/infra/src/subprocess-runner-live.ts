@@ -10,6 +10,7 @@ import {
   SubprocessExitCode,
   SubprocessFailureKind,
   SubprocessOutput,
+  toErrorReasonMessage,
   validateSubprocessInput,
 } from "@harness/contract"
 import {
@@ -80,15 +81,12 @@ const toSubprocessError = (
   if (err instanceof HarnessSubprocessError) {
     return err
   }
-  const message =
-    err instanceof Error && err.message.trim().length > 0
-      ? err.message.trim()
-      : `Command '${command}' failed to spawn`
+  const reason = toErrorReasonMessage(err, `Command '${command}' failed to spawn`)
   return new HarnessSubprocessError({
     command,
-    stderr: SubprocessOutput.make(message),
-    reason: ErrorReasonMessage.make(message),
-    failureKind: classifySpawnErrorKind(err, message),
+    stderr: SubprocessOutput.make(reason),
+    reason,
+    failureKind: classifySpawnErrorKind(err, reason),
   })
 }
 
@@ -248,7 +246,7 @@ const makeHarnessSubprocessRunnerHostIoLayer = (
               new HarnessSubprocessError({
                 command: input.command,
                 stderr: SubprocessOutput.make(failed.stderr),
-                reason: ErrorReasonMessage.make(failed.spawnError),
+                reason: toErrorReasonMessage(failed.spawnError, `Command '${input.command}' failed to spawn`),
                 failureKind: classifySpawnErrorKind(
                   failed.errorCode !== undefined ? { code: failed.errorCode } : undefined,
                   failed.spawnError,

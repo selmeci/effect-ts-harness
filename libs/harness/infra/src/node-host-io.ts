@@ -47,6 +47,12 @@ const validateSyncCommandInput = (
   if (trimmedCommand.length === 0) {
     return "Subprocess command must not be empty"
   }
+  if (trimmedCommand.includes("\0")) {
+    return "Subprocess command contains a disallowed null byte"
+  }
+  if (args.some((arg) => arg.includes("\0"))) {
+    return "Subprocess arguments contain a disallowed null byte"
+  }
   if (normalizedCwd !== undefined && normalizedCwd.length === 0) {
     return "Subprocess cwd must not be empty"
   }

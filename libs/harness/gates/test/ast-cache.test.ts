@@ -111,7 +111,7 @@ describe("AstGateCache Drizzle interpolated template specifier ban", () => {
 
   it.effect("keys AST cache by HARNESS_GATE_RULE_VERSION and separates different ruleVersion evaluations", () =>
     Effect.sync(() => {
-      expect(makeAstGateCacheKey("a.ts", "infra")).toContain("ast-gates-v6")
+      expect(makeAstGateCacheKey("a.ts", "infra")).toContain("ast-gates-v7")
       const store = new Map()
       const r1 = evaluateAstGateFiles(
         {
@@ -134,7 +134,7 @@ describe("AstGateCache Drizzle interpolated template specifier ban", () => {
               content: AstSourceContent.make("export const x = 1\n"),
             },
           ],
-          ruleVersion: GateRuleVersion.make("ast-gates-v6"),
+          ruleVersion: GateRuleVersion.make("ast-gates-v7"),
         },
         undefined,
         store,

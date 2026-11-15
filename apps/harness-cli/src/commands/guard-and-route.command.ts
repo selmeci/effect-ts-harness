@@ -1,7 +1,8 @@
 import { Cause, Effect, Layer, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
-import { decideGuardCommand, routeStep } from "@harness/decision"
+import { isPureInterruptCause } from "@harness/contract"
+import { decideGuardCommand, routeStepWithStatus } from "@harness/decision"
 import {
   CD_COMMAND_BANNED_REASON,
   classifyCommand,
@@ -18,12 +19,12 @@ import {
   ensureLocalOllamaReady,
   makeReadStdinEffect,
   recordFriction,
+  resolveDecisionModelLayer,
 } from "./daemon-and-omnigraph.service.js"
 import {
   detectAntigravityHookPayload,
   hasAntigravityFormat,
   makeGuardDenyResult,
-  markProcessStdinAntigravityDetected,
 } from "./hook-format.js"
 
 export { classifyCommand, classifyFileWrite }
@@ -157,7 +158,19 @@ const evaluateCommandDecision = (
     }
 
     if (options?.decisionLayer === undefined && options?.skipBackgroundDaemons !== true) {
-      yield* ensureLocalOllamaReady().pipe(Effect.timeoutOption("2500 millis"))
+      const ollamaProbe = yield* ensureLocalOllamaReady().pipe(Effect.timeoutOption("2500 millis"))
+      match(ollamaProbe)
+        .with({ _tag: "None" }, () => {
+          process.stderr.write("[harness:guard] Ollama readiness probe timed out after 2500ms.\n")
+        })
+        .with({ _tag: "Some" }, ({ value: ready }) => {
+          if (!ready) {
+            process.stderr.write(
+              "[harness:guard] Ollama server is not ready; continuing with DecisionModel.\n",
+            )
+          }
+        })
+        .exhaustive()
     }
     const decision = yield* decideGuardCommand(command).pipe(Effect.provide(decisionLayer))
     recordFriction(options, {
@@ -183,7 +196,7 @@ const evaluateCommandDecision = (
 export const handleGuard = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
-  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
+  maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> => {
   const isAntigravityFlag = hasAntigravityFormat(argv)
   let isAntigravity =
@@ -191,6 +204,7 @@ export const handleGuard = (
     (options?.stdin !== undefined && detectAntigravityHookPayload(options.stdin))
 
   return Effect.gen(function* () {
+    const decisionLayer = yield* resolveDecisionModelLayer(maybeDecisionLayer)
     const fileFlag = argv.find((arg) => arg.startsWith("--file="))
     const cliFilePath = fileFlag ? fileFlag.slice("--file=".length) : undefined
     const positionalArgs = argv
@@ -222,7 +236,7 @@ export const handleGuard = (
           rawStdin = success
           if (detectAntigravityHookPayload(success)) {
             isAntigravity = true
-            markProcessStdinAntigravityDetected()
+            options?.hookStdinTracker?.markAntigravityDetected()
           }
           return undefined
         })
@@ -356,7 +370,7 @@ export const handleGuard = (
     return toGuardCliResult(cmdDecision, isAntigravity)
   }).pipe(
     Effect.catchCause((cause) => {
-      if (Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)) {
+      if (isPureInterruptCause(cause)) {
         return Effect.failCause(cause)
       }
       const pretty = Cause.pretty(cause)
@@ -371,11 +385,12 @@ export const handleGuard = (
 export const handleRoute = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
-  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
+  maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
+    const decisionLayer = yield* resolveDecisionModelLayer(maybeDecisionLayer)
     const step = argv.slice(1).join(" ")
-    const block = yield* routeStep(step).pipe(Effect.provide(decisionLayer))
+    const { block, source } = yield* routeStepWithStatus(step).pipe(Effect.provide(decisionLayer))
     if (block === "review") {
       recordFriction(options, {
         kind: "route_miss",
@@ -384,6 +399,16 @@ export const handleRoute = (
           "IdiomRouterV1 returned review (no matching agent-patterns/*.md with >= 0.7 confidence)",
       })
     }
+    if (source === "degraded-fallback") {
+      process.stderr.write(
+        `[harness:route] DecisionModel unavailable (source=degraded-fallback); returning '${block}'.\n`,
+      )
+    }
     const stdout = block === "review" || block === "effect" ? block : `agent-patterns/${block}.md`
-    return { exitCode: 0, stdout, stderr: "" }
+    return {
+      exitCode: 0,
+      stdout,
+      stderr: "",
+      telemetryDetail: `block=${block};source=${source}`,
+    }
   })

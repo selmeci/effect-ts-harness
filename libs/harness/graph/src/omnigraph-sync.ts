@@ -17,7 +17,6 @@ import {
 } from "./gq-queries.js"
 import {
   findTestsReaching,
-  loadGraphSnapshotEffect,
   mapPlaysRoleToOmnigraphEdgeName,
   saveGraphSnapshot,
 } from "./graph-engine.js"
@@ -353,6 +352,21 @@ const toOmnigraphServerNdjson = (graph: HarnessGraph): string => {
   return [...nodeLines, ...validEdgeLines].join("\n")
 }
 
+export type OmnigraphBranchDiff = Diff
+
+export type OmnigraphNamedQueryResult =
+  | {
+      readonly source: "omnigraph"
+      readonly rows: ReadonlyArray<Record<string, unknown>>
+      readonly degraded: false
+    }
+  | {
+      readonly source: "memory-fallback"
+      readonly rows: ReadonlyArray<Record<string, unknown>>
+      readonly degraded: true
+      readonly fallbackError: string
+    }
+
 export interface OmnigraphSyncShape {
   readonly sync: (
     graph: HarnessGraph,
@@ -368,7 +382,7 @@ export interface OmnigraphSyncShape {
       readonly target?: string | undefined
       readonly cleanupBranches?: ReadonlyArray<string> | undefined
     },
-  ) => Effect.Effect<boolean>
+  ) => Effect.Effect<void, OmnigraphLoadError>
   readonly query: (
     input: OmnigraphConnectionOptions & {
       readonly query: string
@@ -376,7 +390,7 @@ export interface OmnigraphSyncShape {
       readonly params?: Readonly<Record<string, unknown>> | undefined
       readonly branch?: string | undefined
     },
-  ) => Effect.Effect<Option.Option<ReadonlyArray<Record<string, unknown>>>>
+  ) => Effect.Effect<ReadonlyArray<Record<string, unknown>>, OmnigraphLoadError>
   readonly invokeNamedQuery: (
     input: OmnigraphConnectionOptions & {
       readonly name: HarnessGqQueryName
@@ -384,16 +398,13 @@ export interface OmnigraphSyncShape {
       readonly branch?: string | undefined
       readonly fallbackGraph?: HarnessGraph | undefined
     },
-  ) => Effect.Effect<{
-    readonly source: "omnigraph" | "memory-fallback"
-    readonly rows: ReadonlyArray<Record<string, unknown>>
-  }>
+  ) => Effect.Effect<OmnigraphNamedQueryResult, OmnigraphLoadError>
   readonly diffBranches: (
     input?: OmnigraphConnectionOptions & {
       readonly source?: string | undefined
       readonly target?: string | undefined
     },
-  ) => Effect.Effect<Option.Option<Diff>>
+  ) => Effect.Effect<OmnigraphBranchDiff, OmnigraphLoadError>
 }
 
 export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncShape>()(
@@ -485,68 +496,39 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
           const target = options?.target ?? "main"
           const og = makeOmnigraphClient(options, hostIo)
 
-          return yield* Effect.gen(function* () {
-            const branches = yield* Effect.tryPromise({
-              try: () => og.branches.list(),
+          const branches = yield* Effect.tryPromise({
+            try: () => og.branches.list(),
+            catch: (cause) => new OmnigraphLoadError({ cause }),
+          })
+          if (!branches.includes(source)) {
+            yield* Effect.tryPromise({
+              try: () => og.branches.create({ name: source, from: target }),
               catch: (cause) => new OmnigraphLoadError({ cause }),
             })
-            if (!branches.includes(source)) {
+          }
+          yield* Effect.tryPromise({
+            try: () => og.branches.merge({ source, target }),
+            catch: (cause) => new OmnigraphLoadError({ cause }),
+          })
+
+          const cleanup = options?.cleanupBranches ?? []
+          for (const branchToDelete of cleanup) {
+            if (branchToDelete !== target && branchToDelete !== "main") {
               yield* Effect.tryPromise({
-                try: () => og.branches.create({ name: source, from: target }),
+                try: () => og.branches.delete(branchToDelete),
                 catch: (cause) => new OmnigraphLoadError({ cause }),
-              })
+              }).pipe(Effect.orElseSucceed(() => undefined))
             }
-            yield* Effect.tryPromise({
-              try: () => og.branches.merge({ source, target }),
-              catch: (cause) => new OmnigraphLoadError({ cause }),
-            }).pipe(
-              Effect.catch((mergeErr) =>
-                Effect.gen(function* () {
-                  if (!options?.repoRoot) {
-                    return yield* mergeErr
-                  }
-                  const fallbackSnap = join(options.repoRoot, ".harness", "graph-snapshot.json")
-                  if (!hostIo.existsSync(fallbackSnap)) {
-                    return yield* mergeErr
-                  }
-                  const snapGraph = yield* loadGraphSnapshotEffect(fallbackSnap, hostIo).pipe(
-                    Effect.mapError((cause) => new OmnigraphLoadError({ cause })),
-                  )
-                  const ndjson = toOmnigraphServerNdjson(snapGraph)
-                  if (ndjson.trim().length > 0) {
-                    yield* Effect.tryPromise({
-                      try: () =>
-                        og.load({
-                          branch: target,
-                          mode: "merge",
-                          data: ndjson,
-                        }),
-                      catch: (cause) => new OmnigraphLoadError({ cause }),
-                    })
-                  }
-                }),
-              ),
-            )
-            const cleanup = options?.cleanupBranches ?? []
-            for (const branchToDelete of cleanup) {
-              if (branchToDelete !== target && branchToDelete !== "main") {
-                yield* Effect.tryPromise({
-                  try: () => og.branches.delete(branchToDelete),
-                  catch: (cause) => new OmnigraphLoadError({ cause }),
-                }).pipe(Effect.orElseSucceed(() => undefined))
-              }
-            }
-            if (options?.repoRoot) {
-              writeGraphHeadMeta(options.repoRoot, hostIo)
-            }
-            return true
-          }).pipe(Effect.orElseSucceed(() => false))
+          }
+          if (options?.repoRoot) {
+            writeGraphHeadMeta(options.repoRoot, hostIo)
+          }
         }),
 
       query: (input) =>
         Effect.gen(function* () {
           const og = makeOmnigraphClient(input, hostIo)
-          return yield* Effect.tryPromise({
+          const res = yield* Effect.tryPromise({
             try: () =>
               og.query({
                 query: input.query,
@@ -555,14 +537,13 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
                 branch: input.branch ?? "main",
               }),
             catch: (cause) => new OmnigraphLoadError({ cause }),
-          }).pipe(
-            Effect.map((res) =>
-              Array.isArray(res.rows)
-                ? Option.some(res.rows as ReadonlyArray<Record<string, unknown>>)
-                : Option.none(),
-            ),
-            Effect.orElseSucceed(() => Option.none()),
-          )
+          })
+          if (!Array.isArray(res.rows)) {
+            return yield* new OmnigraphLoadError({
+              cause: new Error("Omnigraph query response missing rows array"),
+            })
+          }
+          return res.rows as ReadonlyArray<Record<string, unknown>>
         }),
 
       invokeNamedQuery: (input) =>
@@ -570,7 +551,19 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
           const og = makeOmnigraphClient(input, hostIo)
           const branch = input.branch ?? "main"
 
-          const invokeAttempt = yield* Effect.tryPromise({
+          const extractRows = (res: unknown): ReadonlyArray<Record<string, unknown>> | undefined => {
+            if (
+              res &&
+              typeof res === "object" &&
+              "rows" in res &&
+              Array.isArray((res as { rows: unknown }).rows)
+            ) {
+              return (res as { rows: ReadonlyArray<Record<string, unknown>> }).rows
+            }
+            return undefined
+          }
+
+          return yield* Effect.tryPromise({
             try: () =>
               og.queries.invoke(input.name, {
                 ...(input.params ? { params: input.params } : {}),
@@ -579,65 +572,62 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
               }),
             catch: (cause) => new OmnigraphLoadError({ cause }),
           }).pipe(
-            Effect.map((res) => {
-              if (
-                res &&
-                typeof res === "object" &&
-                "rows" in res &&
-                Array.isArray((res as { rows: unknown }).rows)
-              ) {
-                return Option.some((res as { rows: ReadonlyArray<Record<string, unknown>> }).rows)
-              }
-              return Option.none<ReadonlyArray<Record<string, unknown>>>()
+            Effect.flatMap((res) => {
+              const rows = extractRows(res)
+              return rows !== undefined
+                ? Effect.succeed({
+                    source: "omnigraph" as const,
+                    rows,
+                    degraded: false as const,
+                  })
+                : Effect.fail(
+                    new OmnigraphLoadError({
+                      cause: new Error("Omnigraph named query response missing rows array"),
+                    }),
+                  )
             }),
-            Effect.orElseSucceed(() => Option.none<ReadonlyArray<Record<string, unknown>>>()),
-          )
-
-          const invokeRows = Option.getOrUndefined(invokeAttempt)
-          if (invokeRows !== undefined) {
-            return {
-              source: "omnigraph" as const,
-              rows: invokeRows,
-            }
-          }
-
-          const queryDescriptor = HARNESS_GQ_QUERIES[input.name]
-          const queryAttempt = yield* Effect.tryPromise({
-            try: () =>
-              og.query({
-                query: queryDescriptor.source,
-                name: input.name,
-                ...(input.params ? { params: input.params } : {}),
-                branch,
-              }),
-            catch: (cause) => new OmnigraphLoadError({ cause }),
-          }).pipe(
-            Effect.map((res) => {
-              if (
-                res &&
-                typeof res === "object" &&
-                "rows" in res &&
-                Array.isArray((res as { rows: unknown }).rows)
-              ) {
-                return Option.some((res as { rows: ReadonlyArray<Record<string, unknown>> }).rows)
-              }
-              return Option.none<ReadonlyArray<Record<string, unknown>>>()
+            Effect.catch(() => {
+              const queryDescriptor = HARNESS_GQ_QUERIES[input.name]
+              return Effect.tryPromise({
+                try: () =>
+                  og.query({
+                    query: queryDescriptor.source,
+                    name: input.name,
+                    ...(input.params ? { params: input.params } : {}),
+                    branch,
+                  }),
+                catch: (cause) => new OmnigraphLoadError({ cause }),
+              }).pipe(
+                Effect.flatMap((res) => {
+                  const rows = extractRows(res)
+                  return rows !== undefined
+                    ? Effect.succeed({
+                        source: "omnigraph" as const,
+                        rows,
+                        degraded: false as const,
+                      })
+                    : Effect.fail(
+                        new OmnigraphLoadError({
+                          cause: new Error("Omnigraph named query response missing rows array"),
+                        }),
+                      )
+                }),
+                Effect.catch((err) => {
+                  if (input.fallbackGraph === undefined) {
+                    return Effect.fail(err)
+                  }
+                  const fallbackError =
+                    err.cause instanceof Error ? err.cause.message : String(err.cause)
+                  return Effect.succeed({
+                    source: "memory-fallback" as const,
+                    rows: executeNamedGqQueryInMemory(input.fallbackGraph, input.name, input.params),
+                    degraded: true as const,
+                    fallbackError,
+                  })
+                }),
+              )
             }),
-            Effect.orElseSucceed(() => Option.none<ReadonlyArray<Record<string, unknown>>>()),
           )
-
-          return match(queryAttempt)
-            .with({ _tag: "Some" }, ({ value }) => ({
-              source: "omnigraph" as const,
-              rows: value,
-            }))
-            .with({ _tag: "None" }, () => ({
-              source: "memory-fallback" as const,
-              rows: input.fallbackGraph
-                ? executeNamedGqQueryInMemory(input.fallbackGraph, input.name, input.params)
-                : [],
-            }))
-            .exhaustive()
         }),
 
       diffBranches: (input) =>
@@ -649,10 +639,7 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
           return yield* Effect.tryPromise({
             try: () => og.branches.diff({ source, target }),
             catch: (cause) => new OmnigraphLoadError({ cause }),
-          }).pipe(
-            Effect.asSome,
-            Effect.orElseSucceed(() => Option.none()),
-          )
+          })
         }),
     }),
   )
@@ -687,7 +674,7 @@ export const queryOmnigraph = (
     readonly params?: Readonly<Record<string, unknown>> | undefined
     readonly branch?: string | undefined
   },
-): Effect.Effect<Option.Option<ReadonlyArray<Record<string, unknown>>>, never, OmnigraphSync> =>
+): Effect.Effect<ReadonlyArray<Record<string, unknown>>, OmnigraphLoadError, OmnigraphSync> =>
   Effect.flatMap(OmnigraphSync, (service) => service.query(input))
 
 export const invokeOmnigraphNamedQuery = (
@@ -697,19 +684,13 @@ export const invokeOmnigraphNamedQuery = (
     readonly branch?: string | undefined
     readonly fallbackGraph?: HarnessGraph | undefined
   },
-): Effect.Effect<
-  {
-    readonly source: "omnigraph" | "memory-fallback"
-    readonly rows: ReadonlyArray<Record<string, unknown>>
-  },
-  never,
-  OmnigraphSync
-> => Effect.flatMap(OmnigraphSync, (service) => service.invokeNamedQuery(input))
+): Effect.Effect<OmnigraphNamedQueryResult, OmnigraphLoadError, OmnigraphSync> =>
+  Effect.flatMap(OmnigraphSync, (service) => service.invokeNamedQuery(input))
 
 export const diffOmnigraphBranches = (
   input?: OmnigraphConnectionOptions & {
     readonly source?: string | undefined
     readonly target?: string | undefined
   },
-): Effect.Effect<Option.Option<Diff>, never, OmnigraphSync> =>
+): Effect.Effect<OmnigraphBranchDiff, OmnigraphLoadError, OmnigraphSync> =>
   Effect.flatMap(OmnigraphSync, (service) => service.diffBranches(input))

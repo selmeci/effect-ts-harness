@@ -1,17 +1,21 @@
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
-import type { SyncHostIo } from "@harness/service/host-io"
-import { Result, Schema } from "effect"
-import { match } from "ts-pattern"
+import type { SyncHostIo, SyncHostReader } from "@harness/service/host-io"
+import { Result } from "effect"
 import { type Project, ts } from "ts-morph"
 export { ts }
-import {
-  type BranchingViolation, EffectFnNode, type HarnessGraph, PackageTag, type PatternDocNode,
-  SchemaDefNode, ServiceLayerNode, ServiceTagNode, TaggedErrorNode, ViolationRule,
+import type {
+  BranchingViolation, HarnessGraph, PackageTag, PatternDocNode,
 } from "../model.js"
 import {
   computeDynamicPaths, hasExportModifier, resolveContainedRelPath, resolveRepoRoot, sha256Hex,
 } from "./extractor-types-and-helpers.js"
+export {
+  type FileGraphFragment,
+  loadFileGraphFragmentsFromDisk,
+  saveFileGraphFragmentsToDisk,
+} from "./file-graph-cache.js"
+import type { FileGraphFragment } from "./file-graph-cache.js"
 
 export interface SourceFileInput {
   readonly filePath: string
@@ -19,27 +23,9 @@ export interface SourceFileInput {
   readonly packageTag: PackageTag
 }
 
-export interface FileGraphFragment {
-  readonly filePath: string
-  readonly packageTag?: PackageTag | undefined
-  readonly contentSha256: string
-  readonly declHash: string
-  readonly importedSpecs: ReadonlyArray<string>
-  readonly fns: ReadonlyArray<EffectFnNode>
-  readonly services?: ReadonlyArray<ServiceTagNode> | undefined
-  readonly layers: ReadonlyArray<ServiceLayerNode>
-  readonly errors?: ReadonlyArray<TaggedErrorNode> | undefined
-  readonly schemas?: ReadonlyArray<SchemaDefNode> | undefined
-  readonly requiresService: ReadonlyArray<{ readonly callerQualname: string; readonly tagId: string }>
-  readonly failsWith: ReadonlyArray<{ readonly callerQualname: string; readonly errorTag: string }>
-  readonly providesService: ReadonlyArray<{ readonly layerQualname: string; readonly tagId: string }>
-  readonly layerRequires: ReadonlyArray<{ readonly layerQualname: string; readonly tagId: string }>
-  readonly branchingViolations: ReadonlyArray<BranchingViolation>
-}
-
 export interface TypeScriptProgramSession {
   readonly repoRoot: string
-  readonly hostIo?: SyncHostIo | undefined
+  readonly hostIo?: SyncHostReader | undefined
   persistToDisk?: boolean | undefined
   oldProgram?: ts.Program | undefined
   project?: Project | undefined
@@ -70,7 +56,7 @@ export interface TypeScriptProgramSession {
 
 export interface TypeExtractorOptions {
   readonly repoRoot?: string | undefined
-  readonly hostIo?: SyncHostIo | undefined
+  readonly hostIo?: SyncHostReader | undefined
   readonly patternDocs?: ReadonlyArray<PatternDocNode> | undefined
   readonly overlays?: Readonly<Record<string, string>> | undefined
   readonly previousProgram?: ts.Program | undefined
@@ -202,92 +188,9 @@ export const extractModuleSpecifiers = (sourceFile: ts.SourceFile): ReadonlyArra
   return specs
 }
 
-const FILE_GRAPH_CACHE_VERSION = "file-graph-v1"
-
-const BranchingViolationSchema = Schema.Struct({
-  rule: ViolationRule, message: Schema.String, file: Schema.String,
-  line: Schema.Int, enclosingSymbol: Schema.String, path: Schema.optional(Schema.Array(Schema.String)),
-})
-
-const FileGraphFragmentSchema = Schema.Struct({
-  filePath: Schema.String, packageTag: Schema.optional(PackageTag), contentSha256: Schema.String, declHash: Schema.String,
-  importedSpecs: Schema.Array(Schema.String), fns: Schema.Array(EffectFnNode), services: Schema.optional(Schema.Array(ServiceTagNode)),
-  layers: Schema.Array(ServiceLayerNode), errors: Schema.optional(Schema.Array(TaggedErrorNode)), schemas: Schema.optional(Schema.Array(SchemaDefNode)),
-  requiresService: Schema.Array(Schema.Struct({ callerQualname: Schema.String, tagId: Schema.String })),
-  failsWith: Schema.Array(Schema.Struct({ callerQualname: Schema.String, errorTag: Schema.String })),
-  providesService: Schema.Array(Schema.Struct({ layerQualname: Schema.String, tagId: Schema.String })),
-  layerRequires: Schema.Array(Schema.Struct({ layerQualname: Schema.String, tagId: Schema.String })),
-  branchingViolations: Schema.Array(BranchingViolationSchema),
-})
-
-const FileGraphCacheStoreSchema = Schema.Struct({
-  version: Schema.String,
-  fragments: Schema.Record(Schema.String, FileGraphFragmentSchema),
-})
-
-const decodeFileGraphCacheStore = Schema.decodeOption(
-  Schema.fromJsonString(FileGraphCacheStoreSchema),
-)
-
-const resolveFileGraphCachePath = (repoRoot: string): string =>
-  path.join(repoRoot, ".harness", "cache", "file-graph-v1.json")
-
-export const loadFileGraphFragmentsFromDisk = (
-  repoRoot: string,
-  session: TypeScriptProgramSession,
-  hostIo: SyncHostIo | undefined = session.hostIo,
-): void => {
-  if (hostIo === undefined) return
-  const cachePath = resolveFileGraphCachePath(repoRoot)
-  if (!hostIo.existsSync(cachePath)) return
-  Result.try(() => {
-    const raw = hostIo.readTextSync(cachePath)
-    const decoded = decodeFileGraphCacheStore(raw)
-    match(decoded)
-      .with({ _tag: "Some" }, ({ value }) => {
-        if (value.version !== FILE_GRAPH_CACHE_VERSION) return
-        for (const [relPath, frag] of Object.entries(value.fragments)) {
-          session.fileFragmentCache.set(relPath, frag)
-          session.sourceFileCache.set(relPath, {
-            packageTag: frag.packageTag,
-            contentSha256: frag.contentSha256,
-            declHash: frag.declHash,
-            importedSpecs: frag.importedSpecs,
-          })
-        }
-      })
-      .with({ _tag: "None" }, () => undefined)
-      .exhaustive()
-  })
-}
-
-export const saveFileGraphFragmentsToDisk = (
-  repoRoot: string,
-  session: TypeScriptProgramSession,
-  hostIo: SyncHostIo | undefined = session.hostIo,
-): void => {
-  if (session.persistToDisk !== true || hostIo === undefined) return
-  const cachePath = resolveFileGraphCachePath(repoRoot)
-  Result.try(() => {
-    hostIo.mkdirRecursiveSync(path.dirname(cachePath))
-    const fragments: Record<string, FileGraphFragment> = {}
-    for (const [relPath, frag] of session.fileFragmentCache.entries()) {
-      fragments[relPath] = frag
-    }
-    const tmpPath = `${cachePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`
-    Result.try(() => {
-      hostIo.writeTextSync(tmpPath, JSON.stringify({ version: FILE_GRAPH_CACHE_VERSION, fragments }))
-      hostIo.renameSync(tmpPath, cachePath)
-    })
-    if (hostIo.existsSync(tmpPath)) {
-      Result.try(() => hostIo.unlinkSync(tmpPath))
-    }
-  })
-}
-
 export const createTypeScriptProgramSession = (
   repoRoot: string = process.cwd(),
-  hostIo?: SyncHostIo,
+  hostIo?: SyncHostReader,
 ): TypeScriptProgramSession => {
   const root = path.resolve(repoRoot)
   const realRepoRoot = hostIo !== undefined && hostIo.existsSync(root) ? hostIo.realpathSync(root) : root
@@ -359,7 +262,7 @@ export interface ExtractTypeGraphOptions {
   readonly session?: TypeScriptProgramSession | undefined
 }
 
-export const resolveTsLibDir = (root: string, hostIo?: SyncHostIo): string | undefined => {
+export const resolveTsLibDir = (root: string, hostIo?: SyncHostReader): string | undefined => {
   const workspaceRoot = resolveRepoRoot(import.meta.dirname, hostIo)
   const fileExists = (p: string) => (hostIo !== undefined ? hostIo.existsSync(p) : ts.sys.fileExists(p))
   const dirExists = (p: string) => (hostIo !== undefined ? hostIo.existsSync(p) : ts.sys.directoryExists(p))
@@ -399,7 +302,7 @@ export const resolveTsLibDir = (root: string, hostIo?: SyncHostIo): string | und
   return undefined
 }
 
-const resolveCanonicalPath = (root: string, candidate: string, hostIo?: SyncHostIo): string | null => {
+const resolveCanonicalPath = (root: string, candidate: string, hostIo?: SyncHostReader): string | null => {
   const abs = path.resolve(root, candidate)
   const pathExists = (p: string) => hostIo !== undefined ? hostIo.existsSync(p) : ts.sys.fileExists(p) || ts.sys.directoryExists(p)
   const realPath = (p: string) => hostIo !== undefined ? hostIo.realpathSync(p) : (ts.sys.realpath?.(p) ?? p)
@@ -442,7 +345,7 @@ export const createOverlayCompilerHost = (
   overlays: Readonly<Record<string, string>>,
   oldProgram?: ts.Program,
   repoRoot: string = process.cwd(),
-  hostIo?: SyncHostIo,
+  hostIo?: SyncHostReader,
 ): ts.CompilerHost => {
   const root = resolveRepoRoot(repoRoot, hostIo)
   const pathExists = (p: string) =>
@@ -553,7 +456,7 @@ export const evaluateOverlayDiagnostics = (
   repoRoot: string,
   overlays: Readonly<Record<string, string>>,
   session?: TypeScriptProgramSession,
-  hostIo?: SyncHostIo,
+  hostIo?: SyncHostReader,
 ): ReadonlyArray<OverlayDiagnosticItem> => {
   const effectiveHostIo = hostIo ?? session?.hostIo
   const root = resolveRepoRoot(repoRoot, effectiveHostIo)

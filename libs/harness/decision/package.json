@@ -13,7 +13,6 @@
     "verify": "node -e \"\""
   },
   "dependencies": {
-    "@effect/ai-typesafe": "4.0.0",
     "@harness/contract": "workspace:*",
     "@harness/gates": "workspace:*",
     "@harness/graph": "workspace:*",

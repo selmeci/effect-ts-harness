@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import * as path from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import type { FetchLike } from "@modernrelay/omnigraph"
-import { Effect, Schema } from "effect"
+import { Cause, Effect, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   buildHarnessGraph,
@@ -17,6 +17,7 @@ import {
   loadHarnessPgSchemaText,
   makeOmnigraphSyncLayer,
   mergeOmnigraphBranch,
+  OmnigraphLoadError,
   OmnigraphReconcileInput,
   queryOmnigraph,
   readGraphHeadMeta,
@@ -314,9 +315,26 @@ describe("Deterministic in-memory GQ query execution and fallback", () => {
           },
         }).pipe(Effect.provide(OmnigraphSyncLive))
 
-        expect(res.source).toBe("memory-fallback")
+        match(res)
+          .with({ source: "memory-fallback" }, (fallback) => {
+            expect(fallback.degraded).toBe(true)
+            expect(fallback.fallbackError.length).toBeGreaterThan(0)
+          })
+          .with({ source: "omnigraph" }, () => {
+            expect.unreachable("Expected memory-fallback")
+          })
+          .exhaustive()
         expect(Array.isArray(res.rows)).toBe(true)
       }
+
+      const failWithoutFallback = yield* Effect.flip(
+        invokeOmnigraphNamedQuery({
+          name: "resolve_effect_fn",
+          fetch: offlineFetch,
+          params: { spanOrQualname: "Sample.greet" },
+        }).pipe(Effect.provide(OmnigraphSyncLive)),
+      )
+      expect(failWithoutFallback).toBeInstanceOf(OmnigraphLoadError)
     }),
   )
 })
@@ -521,6 +539,7 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
       }).pipe(Effect.provide(OmnigraphSyncLive))
 
       expect(invokeRes.source).toBe("omnigraph")
+      expect(invokeRes.degraded).toBe(false)
       expect(invokeRes.rows).toHaveLength(1)
       expect(invokeRes.rows[0]?.spanName).toBe("Sample.greet")
 
@@ -529,15 +548,8 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
         fetch: mockFetch,
       }).pipe(Effect.provide(OmnigraphSyncLive))
 
-      match(queryRes)
-        .with({ _tag: "Some" }, ({ value }) => {
-          expect(value).toHaveLength(1)
-          expect(value[0]?.count).toBe(42)
-        })
-        .with({ _tag: "None" }, () => {
-          expect.unreachable("Expected queryRes to be Some")
-        })
-        .exhaustive()
+      expect(queryRes).toHaveLength(1)
+      expect(queryRes[0]?.count).toBe(42)
 
       const diffRes = yield* diffOmnigraphBranches({
         source: "impl/current",
@@ -545,14 +557,32 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
         fetch: mockFetch,
       }).pipe(Effect.provide(OmnigraphSyncLive))
 
-      match(diffRes)
-        .with({ _tag: "Some" }, ({ value }) => {
-          expect(Array.isArray(value.changes)).toBe(true)
-        })
-        .with({ _tag: "None" }, () => {
-          expect.unreachable("Expected diffRes to be Some")
-        })
-        .exhaustive()
+      expect(Array.isArray(diffRes.changes)).toBe(true)
+
+      const failFetch: FetchLike = () =>
+        Promise.resolve(
+          new Response("Service Unavailable", {
+            status: 503,
+            headers: { "Omnigraph-Http-Api": "0.14" },
+          }),
+        )
+
+      const queryErr = yield* Effect.flip(
+        queryOmnigraph({
+          query: "query count_nodes { match { $n } return { count: count($n) } }",
+          fetch: failFetch,
+        }).pipe(Effect.provide(OmnigraphSyncLive)),
+      )
+      expect(queryErr).toBeInstanceOf(OmnigraphLoadError)
+
+      const diffErr = yield* Effect.flip(
+        diffOmnigraphBranches({
+          source: "impl/current",
+          target: "plan/current",
+          fetch: failFetch,
+        }).pipe(Effect.provide(OmnigraphSyncLive)),
+      )
+      expect(diffErr).toBeInstanceOf(OmnigraphLoadError)
     }),
   )
 
@@ -736,7 +766,7 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
           expect(headMeta?.gitBranch).toBe("feat/my-pr")
 
           recorded.length = 0
-          const merged = yield* mergeOmnigraphBranch({
+          yield* mergeOmnigraphBranch({
             repoRoot: repoDir,
             source: taskBranches.implBranch,
             target: taskBranches.mainBranch,
@@ -744,7 +774,6 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
             fetch: mockFetch,
           }).pipe(Effect.provide(OmnigraphSyncLive))
 
-          expect(merged).toBe(true)
           const deleteRequests = recorded.filter((r) => r.method === "DELETE")
           expect(deleteRequests).toHaveLength(2)
           expect(deleteRequests[0]?.url).toContain("impl%2Fbranch-feat_my-pr")
@@ -799,10 +828,10 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
   )
 
   it.effect(
-    "F-15: mergeOmnigraphBranch falls back to loading .harness/graph-snapshot.json when /branches/merge returns HTTP 500, and returns false when fallback snapshot is missing or corrupt",
+    "F-1.1: mergeOmnigraphBranch fails with OmnigraphLoadError when /branches/merge returns HTTP 500 even if .harness/graph-snapshot.json exists",
     () =>
       Effect.gen(function* () {
-        const repoDir = fs.mkdtempSync(path.join(tmpdir(), "og-merge-fallback-"))
+        const repoDir = fs.mkdtempSync(path.join(tmpdir(), "og-merge-fail-"))
         try {
           const harnessDir = path.join(repoDir, ".harness")
           fs.mkdirSync(harnessDir, { recursive: true })
@@ -878,37 +907,33 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
             )
           }
 
-          // Case A: Missing fallback snapshot -> returns false
-          const mergedMissing = yield* mergeOmnigraphBranch({
-            repoRoot: repoDir,
-            source: "impl/current",
-            target: "main",
-            fetch: mockFetchWithMergeFail,
-          }).pipe(Effect.provide(OmnigraphSyncLive))
-          expect(mergedMissing).toBe(false)
-          expect(loadCalledOnFallback).toBe(false)
-
-          // Case B: Corrupt fallback snapshot -> returns false
-          fs.writeFileSync(snapshotPath, "{ corrupted json: 123", "utf8")
-          const mergedCorrupt = yield* mergeOmnigraphBranch({
-            repoRoot: repoDir,
-            source: "impl/current",
-            target: "main",
-            fetch: mockFetchWithMergeFail,
-          }).pipe(Effect.provide(OmnigraphSyncLive))
-          expect(mergedCorrupt).toBe(false)
-          expect(loadCalledOnFallback).toBe(false)
-
-          // Case C: Valid fallback snapshot exists -> succeeds via /load and returns true
+          // Even when a valid .harness/graph-snapshot.json exists on disk, merge MUST fail with OmnigraphLoadError and NEVER call /load
           saveGraphSnapshot(sampleGraph, snapshotPath, testHostIo)
-          const mergedSuccess = yield* mergeOmnigraphBranch({
-            repoRoot: repoDir,
-            source: "impl/current",
-            target: "main",
-            fetch: mockFetchWithMergeFail,
-          }).pipe(Effect.provide(OmnigraphSyncLive))
-          expect(mergedSuccess).toBe(true)
-          expect(loadCalledOnFallback).toBe(true)
+          const exit = yield* Effect.exit(
+            mergeOmnigraphBranch({
+              repoRoot: repoDir,
+              source: "impl/current",
+              target: "main",
+              fetch: mockFetchWithMergeFail,
+            }).pipe(Effect.provide(OmnigraphSyncLive)),
+          )
+          match(exit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              const errOpt = Cause.findErrorOption(cause)
+              match(errOpt)
+                .with({ _tag: "Some" }, ({ value }) => {
+                  expect(value).toBeInstanceOf(OmnigraphLoadError)
+                })
+                .with({ _tag: "None" }, () => {
+                  expect.unreachable("Expected OmnigraphLoadError")
+                })
+                .exhaustive()
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected mergeOmnigraphBranch to fail")
+            })
+            .exhaustive()
+          expect(loadCalledOnFallback).toBe(false)
         } finally {
           fs.rmSync(repoDir, { recursive: true, force: true })
         }

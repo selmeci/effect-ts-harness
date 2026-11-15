@@ -10,6 +10,7 @@ import {
   type DaemonServerInfo,
   DaemonSocketPath,
   ErrorReasonMessage,
+  toErrorReasonMessage,
   type WorkspaceFilePath,
 } from "@harness/contract"
 import { UnixSocketDaemonPort, type UnixSocketDaemonPortShape } from "@harness/service"
@@ -67,17 +68,12 @@ const toDaemonServerError = (
   socketPath: DaemonSocketPath,
   err: unknown,
   reasonKind: DaemonServerErrorKind = "bind-failed",
-): DaemonServerError => {
-  const message =
-    err instanceof Error && err.message.trim().length > 0
-      ? err.message.trim()
-      : "Unix socket daemon failure"
-  return new DaemonServerError({
+): DaemonServerError =>
+  new DaemonServerError({
     socketPath,
     reasonKind,
-    reason: ErrorReasonMessage.make(message),
+    reason: toErrorReasonMessage(err, "Unix socket daemon failure"),
   })
-}
 
 export interface UnixSocketDaemonLayerOptions {
   readonly socketPathOverride?: DaemonSocketPath
@@ -283,12 +279,7 @@ const createDaemonNetServer = (
         })
         .with({ _tag: "Some" }, ({ value: req }) => {
           const response = match(req.command)
-            .with("bench", () => ({
-              ...(req.id !== undefined ? { id: req.id } : {}),
-              ok: true,
-              command: "bench",
-            }))
-            .with("plan-check", "gc", "verify", (command) => ({
+            .with("bench", "plan-check", "gc", "verify", (command) => ({
               ...(req.id !== undefined ? { id: req.id } : {}),
               ok: false,
               command,
@@ -329,10 +320,7 @@ const makeUnixSocketDaemonLayer = (
           yield* fs
             .makeDirectory(dirPath, { recursive: true, mode: 0o700 })
             .pipe(Effect.mapError((err) => toDaemonServerError(socketPath, err)))
-          if (
-            process.platform !== "win32" &&
-            (options?.socketPathOverride === undefined || path.basename(dirPath) === ".harness")
-          ) {
+          if (process.platform !== "win32" && options?.socketPathOverride === undefined) {
             yield* Effect.try({
               try: () => {
                 nodeFs.chmodSync(dirPath, 0o700)

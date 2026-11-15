@@ -8,6 +8,8 @@ import {
   resolveOmnigraphClusterDir,
 } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
+
+type SyncHostIo = typeof nodeSyncHostIo
 import {
   isLoopbackOmnigraphUrl,
   isProcessPidAlive,
@@ -251,6 +253,57 @@ const decodeOmnigraphServerMeta = Schema.decodeOption(
   Schema.fromJsonString(OmnigraphServerMetaSchema),
 )
 
+export const stopStaleOmnigraphClusterBeforeDelete = (
+  clusterRootDir: string,
+  serverPid: number | undefined,
+  hostIo: SyncHostIo = nodeSyncHostIo,
+  isPidAlive: (pid: number) => boolean = isProcessPidAlive,
+): boolean => {
+  const [killBin, killArgs] = buildOmnigraphClusterKillArgs(clusterRootDir)
+  const killResult = Result.try({
+    try: () => {
+      const killRes = hostIo.execFileSync(killBin, [...killArgs], { timeoutMs: 5_000 })
+      return match(killRes)
+        .with({ _tag: "Exited" }, ({ exitCode, stderr, stdout }) => {
+          if (exitCode !== 0 && exitCode !== 1) {
+            process.stderr.write(
+              `[harness:omnigraph] Warning: pkill returned exitCode=${exitCode}: ${stderr || stdout}\n`,
+            )
+            return false
+          }
+          return true
+        })
+        .with({ _tag: "TimedOut" }, ({ stderr }) => {
+          process.stderr.write(`[harness:omnigraph] Warning: pkill timed out: ${stderr}\n`)
+          return false
+        })
+        .with({ _tag: "Signaled" }, ({ signal, stderr }) => {
+          process.stderr.write(`[harness:omnigraph] Warning: pkill killed by ${signal}: ${stderr}\n`)
+          return false
+        })
+        .with({ _tag: "SpawnFailed" }, ({ spawnError }) => {
+          process.stderr.write(`[harness:omnigraph] Warning: pkill spawn failed: ${spawnError}\n`)
+          return false
+        })
+        .exhaustive()
+    },
+    catch: (err) => {
+      process.stderr.write(
+        `[harness:omnigraph] Warning: pkill failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      )
+      return false
+    },
+  })
+  const killOk = Result.getOrElse(killResult, () => false)
+  if (!killOk && serverPid !== undefined && isPidAlive(serverPid)) {
+    process.stderr.write(
+      `[harness:omnigraph] Error: pkill failed and stale omnigraph PID ${serverPid} is still alive; aborting RocksDB cleanup\n`,
+    )
+    return false
+  }
+  return true
+}
+
 export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boolean> {
   return Effect.gen(function* () {
     const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
@@ -363,38 +416,15 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
           return false
         }
       }
-      yield* Effect.try({
-        try: () => {
-          const [killBin, killArgs] = buildOmnigraphClusterKillArgs(clusterRootDir)
-          const killRes = nodeSyncHostIo.execFileSync(killBin, [...killArgs], { timeoutMs: 5_000 })
-          match(killRes)
-            .with({ _tag: "Exited" }, ({ exitCode, stderr, stdout }) => {
-              if (exitCode !== 0 && exitCode !== 1) {
-                process.stderr.write(
-                  `[harness:omnigraph] Warning: pkill returned exitCode=${exitCode}: ${stderr || stdout}\n`,
-                )
-              }
-            })
-            .with({ _tag: "TimedOut" }, ({ stderr }) => {
-              process.stderr.write(`[harness:omnigraph] Warning: pkill timed out: ${stderr}\n`)
-            })
-            .with({ _tag: "Signaled" }, ({ signal, stderr }) => {
-              process.stderr.write(
-                `[harness:omnigraph] Warning: pkill killed by ${signal}: ${stderr}\n`,
-              )
-            })
-            .with({ _tag: "SpawnFailed" }, ({ spawnError }) => {
-              process.stderr.write(`[harness:omnigraph] Warning: pkill spawn failed: ${spawnError}\n`)
-            })
-            .exhaustive()
-        },
-        catch: (err) => {
-          process.stderr.write(
-            `[harness:omnigraph] Warning: pkill failed: ${err instanceof Error ? err.message : String(err)}\n`,
-          )
-          return undefined
-        },
-      }).pipe(Effect.orElseSucceed(() => undefined))
+      const stoppedBeforeDelete = stopStaleOmnigraphClusterBeforeDelete(
+        clusterRootDir,
+        typeof serverPid === "number" && Number.isInteger(serverPid) && serverPid > 1
+          ? serverPid
+          : undefined,
+      )
+      if (!stoppedBeforeDelete) {
+        return false
+      }
       yield* Effect.sleep("300 millis")
       const rmOk = yield* Effect.try({
         try: () => {

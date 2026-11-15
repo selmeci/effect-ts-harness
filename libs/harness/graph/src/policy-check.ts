@@ -41,10 +41,10 @@ export interface CheckEffectGraphResult {
  */
 export interface CheckEffectGraphOptions {
   /**
-   * When true, includes lifecycle-gated rules:
-   * - `missing-layer-provider` (enforced during Layer composition / `gc-check.ts` / `plugins/gc/gc-topology-entropy.plugin.ts`)
-   * - `untested-domain-span` (enforced during implementation / `gc-check.ts` / `plugins/gc/gc-test-and-decider.plugin.ts`)
-   * - `unverified-migration` (enforced during migration gate / `migration-check.ts`)
+   * When true, includes lifecycle-gated rules enforced by `@harness/gates`:
+   * - `missing-layer-provider` (enforced during Layer composition in `gc-check.ts` / `plugins/gc/gc-topology-entropy.plugin.ts`)
+   * - `untested-domain-span` (enforced during implementation in `gc-check.ts` / `plugins/gc/gc-test-and-decider.plugin.ts`)
+   * - `unverified-migration` (enforced during migration gate in `migration-check.ts`)
    *
    * By default, these rules are gated by task lifecycle phases and excluded from standard policy checks.
    */
@@ -62,7 +62,7 @@ export interface CheckEffectGraphOptions {
 
 
 /**
- * Rules that are gated by specific lifecycle gates (`gc-check.ts`, `migration-check.ts`)
+ * Rules that are gated by specific `@harness/gates` lifecycle gates (`gc-check.ts`, `migration-check.ts`)
  * rather than the basic architectural policy gate.
  */
 export const LIFECYCLE_GATED_RULES: ReadonlySet<ViolationRule> = new Set<ViolationRule>([

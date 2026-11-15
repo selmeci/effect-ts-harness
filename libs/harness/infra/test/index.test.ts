@@ -3,7 +3,11 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { NodeServices } from "@effect/platform-node"
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Effect, Fiber, Layer, Option } from "effect"
+import { Cause, Deferred, Effect, Fiber, Layer, Option, Schema } from "effect"
+import * as Decision from "effect/ai/Decision"
+import * as DecisionModel from "effect/ai/DecisionModel"
+import * as HttpClient from "effect/http/HttpClient"
+import * as HttpClientResponse from "effect/http/HttpClientResponse"
 import { match } from "ts-pattern"
 import {
   ActiveMutantId,
@@ -15,6 +19,7 @@ import {
   DecisionCachePayloadJson,
   DecisionCacheTtlMillis,
   EnclosingSymbolName,
+  EvaluatorId,
   GateRuleId,
   GateViolationMessage,
   HARNESS_GATE_RULE_VERSION,
@@ -40,11 +45,13 @@ import {
   DecisionCacheLive,
   HarnessInfraLive,
   HarnessSubprocessRunnerLive,
+  LocalDecisionModel,
   makeAstGateCacheLayer,
   makeDecisionCacheLayer,
   makeHarnessInfraLayer,
   makeHarnessSubprocessRunnerHostIoLayer,
   makeHarnessSubprocessRunnerLayer,
+  makeLocalDecisionModelLayer,
   makeUnixSocketDaemonLayer,
   makeWorkspaceFsHostIoLayer,
   makeWorkspaceFsLayer,
@@ -460,13 +467,16 @@ describe("@harness/infra live adapters", () => {
       const key = DecisionCacheKey.make("concurrent-key-1")
       const ttl = DecisionCacheTtlMillis.make(60_000)
       let computeRuns = 0
+      const entered = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
 
-      const results = yield* Effect.all(
-        Array.from({ length: 5 }, () =>
-          cache.lookupOrCompute({
+      const fibers = yield* Effect.forEach(Array.from({ length: 5 }), () =>
+        cache
+          .lookupOrCompute({
             key,
             ttlMillis: ttl,
-            compute: Effect.sleep("25 millis").pipe(
+            compute: Deferred.succeed(entered, undefined).pipe(
+              Effect.andThen(Deferred.await(release)),
               Effect.andThen(
                 Effect.sync(() => {
                   computeRuns += 1
@@ -474,10 +484,15 @@ describe("@harness/infra live adapters", () => {
                 }),
               ),
             ),
-          }),
-        ),
-        { concurrency: "unbounded" },
+          })
+          .pipe(Effect.forkChild),
       )
+
+      yield* Deferred.await(entered)
+      yield* Effect.yieldNow
+      yield* Effect.yieldNow
+      yield* Deferred.succeed(release, undefined)
+      const results = yield* Effect.forEach(fibers, Fiber.join)
 
       expect(computeRuns).toBe(1)
       expect(results).toHaveLength(5)
@@ -642,22 +657,8 @@ describe("@harness/infra live adapters", () => {
       expect(maxBufErr.failureKind).toBe("max-buffer")
       expect(maxBufErr.exitCode).toBeUndefined()
 
-      const invalidArgErr = yield* runner
-        .exec({
-          command: SubprocessCommand.make(process.execPath),
-          args: [SubprocessArg.make("bad\0arg")],
-        })
-        .pipe(Effect.flip)
-      expect(invalidArgErr.failureKind).toBe("invalid-input")
-
-      const invalidCwdErr = yield* runner
-        .exec({
-          command: SubprocessCommand.make(process.execPath),
-          args: [SubprocessArg.make("-e"), SubprocessArg.make("0")],
-          cwd: WorkspaceFilePath.make("/tmp/bad\0cwd"),
-        })
-        .pipe(Effect.flip)
-      expect(invalidCwdErr.failureKind).toBe("invalid-input")
+      expect(() => Schema.decodeSync(SubprocessArg)("bad\0arg")).toThrow()
+      expect(() => Schema.decodeSync(WorkspaceFilePath)("/tmp/bad\0cwd")).toThrow()
     }).pipe(Effect.provide(HarnessSubprocessRunnerLive)),
   )
 
@@ -674,7 +675,7 @@ describe("@harness/infra live adapters", () => {
               JSON.stringify({ id: "req-1", command: "bench" }),
               1000,
             )
-            expect(Option.getOrNull(benchReply)).toContain('"ok":true')
+            expect(Option.getOrNull(benchReply)).toContain('"fallbackToInProcess":true')
 
             const secondErr = yield* Effect.scoped(startScopedUnixSocketDaemon(repoRoot)).pipe(
               Effect.provide(UnixSocketDaemonLive),
@@ -830,8 +831,15 @@ describe("@harness/infra live adapters", () => {
       const cache = yield* DecisionCachePort
       const key = DecisionCacheKey.make("interrupt-key-1")
       const ttl = DecisionCacheTtlMillis.make(60_000)
-      const leader = yield* cache.lookupOrCompute({ key, ttlMillis: ttl, compute: Effect.sleep("5 seconds").pipe(Effect.as(DecisionCachePayloadJson.make('{"v":1}'))) }).pipe(Effect.forkChild)
-      yield* Effect.sleep("15 millis")
+      const entered = yield* Deferred.make<void>()
+      const leader = yield* cache
+        .lookupOrCompute({
+          key,
+          ttlMillis: ttl,
+          compute: Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+        })
+        .pipe(Effect.forkChild)
+      yield* Deferred.await(entered)
       yield* Fiber.interrupt(leader)
       expect(yield* cache.lookupOrCompute({ key, ttlMillis: ttl, compute: Effect.succeed(DecisionCachePayloadJson.make('{"v":2}')) })).toBe('{"v":2}')
     }).pipe(Effect.provide(DecisionCacheLive)))
@@ -859,10 +867,10 @@ describe("@harness/infra live adapters", () => {
     Effect.gen(function* () {
       expect(
         resolveAstGateCachePath("/repo", { HARNESS_STATE_DIR: "/custom/state" }),
-      ).toBe("/custom/state/cache/ast-gates-v1.json")
+      ).toBe("/custom/state/cache/ast-gate-cache-v1.json")
       expect(
         resolveAstGateCachePath("/repo", { HARNESS_WORKTREE_ID: "wt-1" }),
-      ).toBe("/repo/.harness/worktrees/wt-1/cache/ast-gates-v1.json")
+      ).toBe("/repo/.harness/worktrees/wt-1/cache/ast-gate-cache-v1.json")
 
       const cache = yield* AstGateCachePort
       const dupFile = {
@@ -885,7 +893,7 @@ describe("@harness/infra live adapters", () => {
             },
           ]
         },
-        "eval-a",
+        EvaluatorId.make("eval-a"),
       )
       expect(evalCalls).toBe(1)
       expect(report1.inspectedFileCount).toBe(1)
@@ -894,7 +902,7 @@ describe("@harness/infra live adapters", () => {
       const report2 = yield* cache.evaluateBatch([dupFile], () => {
         evalCalls += 1
         return []
-      }, "eval-b")
+      }, EvaluatorId.make("eval-b"))
       expect(evalCalls).toBe(2)
       expect(report2.verdict).toBe("clean")
     }).pipe(Effect.provide(AstGateCacheLive)),
@@ -906,12 +914,15 @@ describe("@harness/infra live adapters", () => {
       const key = DecisionCacheKey.make("coalesce-retry-1")
       const ttl = DecisionCacheTtlMillis.make(60_000)
       let computeCalls = 0
+      const leaderEntered = yield* Deferred.make<void>()
+      const releaseLeader = yield* Deferred.make<void>()
 
-      const leaderEff = cache
+      const leaderFiber = yield* cache
         .lookupOrCompute({
           key,
           ttlMillis: ttl,
-          compute: Effect.sleep("25 millis").pipe(
+          compute: Deferred.succeed(leaderEntered, undefined).pipe(
+            Effect.andThen(Deferred.await(releaseLeader)),
             Effect.andThen(
               Effect.sync(() => {
                 computeCalls += 1
@@ -920,30 +931,32 @@ describe("@harness/infra live adapters", () => {
             Effect.andThen(Effect.fail("leader-failed")),
           ),
         })
+        .pipe(Effect.exit, Effect.forkChild)
+
+      yield* Deferred.await(leaderEntered)
+
+      const followerEff = cache
+        .lookupOrCompute({
+          key,
+          ttlMillis: ttl,
+          compute: Effect.sync(() => {
+            computeCalls += 1
+            return DecisionCachePayloadJson.make('{"ok":true}')
+          }),
+        })
         .pipe(Effect.exit)
 
-      const followerEff = Effect.sleep("5 millis").pipe(
-        Effect.andThen(
-          cache.lookupOrCompute({
-            key,
-            ttlMillis: ttl,
-            compute: Effect.sleep("15 millis").pipe(
-              Effect.andThen(
-                Effect.sync(() => {
-                  computeCalls += 1
-                  return DecisionCachePayloadJson.make('{"ok":true}')
-                }),
-              ),
-            ),
-          }),
-        ),
-        Effect.exit,
-      )
+      const f1Fiber = yield* followerEff.pipe(Effect.forkChild)
+      const f2Fiber = yield* followerEff.pipe(Effect.forkChild)
+      yield* Effect.yieldNow
+      yield* Effect.yieldNow
+      yield* Deferred.succeed(releaseLeader, undefined)
 
-      const [leaderExit, f1Exit, f2Exit] = yield* Effect.all(
-        [leaderEff, followerEff, followerEff],
-        { concurrency: "unbounded" },
-      )
+      const [leaderExit, f1Exit, f2Exit] = yield* Effect.all([
+        Fiber.join(leaderFiber),
+        Fiber.join(f1Fiber),
+        Fiber.join(f2Fiber),
+      ])
       match(leaderExit)
         .with({ _tag: "Failure" }, ({ cause }) => {
           expect(Option.getOrNull(Cause.findErrorOption(cause))).toBe("leader-failed")
@@ -989,5 +1002,160 @@ describe("@harness/infra live adapters", () => {
           .exhaustive()
       }),
     ),
+  )
+
+  it.live("F-2.1 & F-20.5: UnixSocketDaemonLive returns fallbackToInProcess for bench and does not chmod socketPathOverride parent dir", () =>
+    withTempDir((dir) =>
+      Effect.gen(function* () {
+        const repoRoot = WorkspaceFilePath.make(dir)
+        const externalParent = join(dir, "external-parent")
+        mkdirSync(externalParent, { recursive: true })
+        chmodSync(externalParent, 0o755)
+        const socketOverride = DaemonSocketPath.make(join(externalParent, "custom.sock"))
+
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const info = yield* startScopedUnixSocketDaemon(repoRoot, {
+              socketPathOverride: socketOverride,
+            })
+            expect(info.socketPath).toBe(socketOverride)
+            expect(statSync(externalParent).mode & 0o777).toBe(0o755)
+            expect(statSync(socketOverride).mode & 0o777).toBe(0o600)
+
+            const reply = yield* queryUnixSocketLine(
+              socketOverride,
+              JSON.stringify({ id: "b1", command: "bench" }),
+              500,
+            )
+            expect(Option.getOrNull(reply)).toBe(
+              JSON.stringify({ id: "b1", ok: false, command: "bench", fallbackToInProcess: true }),
+            )
+          }),
+        ).pipe(Effect.provide(UnixSocketDaemonLive))
+      }),
+    ),
+  )
+
+  it.effect("F-15.1 & F-16.1: WorkspaceFsLive.exists returns false on ENOENT, fails with WorkspaceFsError on EACCES, and handles untrimmed/empty errors", () =>
+    withTempDir((dir) =>
+      Effect.gen(function* () {
+        const fs = yield* WorkspaceFs
+        const missing = WorkspaceFilePath.make(join(dir, "does-not-exist.txt"))
+        expect(yield* fs.exists(missing)).toBe(false)
+
+        const lockedDir = join(dir, "locked")
+        mkdirSync(lockedDir, { recursive: true })
+        writeFileSync(join(lockedDir, "secret.txt"), "x", "utf8")
+        chmodSync(lockedDir, 0o000)
+        const existsErr = yield* fs
+          .exists(WorkspaceFilePath.make(join(lockedDir, "secret.txt")))
+          .pipe(
+            Effect.ensuring(Effect.sync(() => chmodSync(lockedDir, 0o755))),
+            Effect.flip,
+          )
+        expect(existsErr._tag).toBe("WorkspaceFsError")
+        expect(existsErr.operation).toBe("stat")
+
+        const hostIo = {
+          existsSync: () => {
+            throw new Error("   ")
+          },
+          isFileSync: () => false,
+          isDirectorySync: () => false,
+          isSymbolicLinkSync: () => false,
+          readTextSync: () => {
+            throw new Error("  untrimmed host error  ")
+          },
+          readBytesSync: () => new Uint8Array(),
+          writeTextSync: () => {},
+          appendTextSync: () => {},
+          mkdirRecursiveSync: () => {},
+          renameSync: () => {},
+          unlinkSync: () => {},
+          readdirSync: () => [],
+          realpathSync: (p: string) => p,
+          execFileSync: () => ({
+            _tag: "SpawnFailed" as const,
+            spawnError: "   ",
+            stdout: "",
+            stderr: "",
+          }),
+        }
+
+        const hostFsErr = yield* Effect.gen(function* () {
+          const hfs = yield* WorkspaceFs
+          return yield* hfs.exists(missing).pipe(Effect.flip)
+        }).pipe(Effect.provide(makeWorkspaceFsHostIoLayer(hostIo)))
+        expect(hostFsErr._tag).toBe("WorkspaceFsError")
+        expect(hostFsErr.reason).toBe("Workspace filesystem stat failed")
+
+        const hostReadErr = yield* Effect.gen(function* () {
+          const hfs = yield* WorkspaceFs
+          return yield* hfs.readTextFile(missing).pipe(Effect.flip)
+        }).pipe(Effect.provide(makeWorkspaceFsHostIoLayer(hostIo)))
+        expect(hostReadErr.reason).toBe("untrimmed host error")
+
+        const runnerErr = yield* Effect.gen(function* () {
+          const runner = yield* HarnessSubprocessRunner
+          return yield* runner
+            .exec({ command: SubprocessCommand.make("bad"), args: [] })
+            .pipe(Effect.flip)
+        }).pipe(Effect.provide(makeHarnessSubprocessRunnerHostIoLayer(hostIo)))
+        expect(runnerErr._tag).toBe("HarnessSubprocessError")
+        expect(runnerErr.reason).toBe("Command 'bad' failed to spawn")
+      }).pipe(Effect.provide(makeWorkspaceFsLayer().pipe(Layer.provide(NodeServices.layer)))),
+    ),
+  )
+
+  it.effect("F-6.1: LocalDecisionModel and makeLocalDecisionModelLayer normalize URL and wire HttpClient", () =>
+    Effect.gen(function* () {
+      expect(Layer.isLayer(LocalDecisionModel)).toBe(true)
+      expect(DecisionModel.DecisionModel).toBeDefined()
+
+      const captured: Array<{ readonly url: string; readonly model: string }> = []
+      const mockHttpClient = HttpClient.make((req, url) => {
+        const bodyText = match(req.body)
+          .with({ _tag: "Uint8Array" }, (b) => b.text ?? new TextDecoder().decode(b.body))
+          .with({ _tag: "Empty" }, () => "{}")
+          .with({ _tag: "Raw" }, (b) => String(b.body))
+          .with({ _tag: "FormData" }, () => "{}")
+          .with({ _tag: "Stream" }, () => "{}")
+          .exhaustive()
+        const parsed = JSON.parse(bodyText) as { readonly model?: string }
+        captured.push({ url: url.toString(), model: parsed.model ?? "" })
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(
+            req,
+            new Response(
+              JSON.stringify({
+                model: "clef-custom",
+                answers: { check: { type: "noul", noul: 0.9 } },
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            ),
+          ),
+        )
+      })
+
+      const configured = makeLocalDecisionModelLayer({
+        apiUrl: "  localhost:11434///  ",
+        model: "clef-custom",
+      }).pipe(Layer.provide(Layer.succeed(HttpClient.HttpClient, mockHttpClient)))
+
+      const TestDecision = Decision.make({
+        input: Schema.Struct({ ok: Schema.Boolean }),
+        decisions: {
+          check: Decision.probability({ instructions: "Is the wiring valid?" }),
+        },
+      })
+
+      const outcome = yield* DecisionModel.decide(TestDecision, { input: { ok: true } }).pipe(
+        Effect.provide(configured),
+      )
+      expect(outcome.answers.check.probability).toBeCloseTo(0.9, 4)
+      expect(captured).toEqual([
+        { url: "http://localhost:11434/v1/systemone", model: "clef-custom" },
+      ])
+    }),
   )
 })

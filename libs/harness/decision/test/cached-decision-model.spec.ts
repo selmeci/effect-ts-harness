@@ -212,7 +212,7 @@ describe("CachedDecisionModel — Content-Addressable Caching & Request Coalesci
         expect(r5).toBe("schema")
         expect(counter.count).toBe(3)
 
-        expect(resolveDecisionCachePath("/tmp/repo")).toContain("decisions-v1.json")
+        expect(resolveDecisionCachePath("/tmp/repo")).toContain("decision-cache-v1.json")
         expect(DecisionTaskId.make("route")).toBe("route")
         expect(DecisionPromptVersion.make("decisions-v1")).toBe("decisions-v1")
         expect(DecisionCacheKey.make(key1)).toBe(key1)

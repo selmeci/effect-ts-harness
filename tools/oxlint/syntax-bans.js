@@ -54,6 +54,8 @@ const nodeSqliteInfraMessage = (source, filename) =>
   `Do not import '${source}' in type:infra or type:app ('${filename}') — execute Cloudflare Durable Object SQLite and D1 storages against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006, node-sqlite-in-infra).`
 const bannedDrizzleMessage = (source, filename) =>
   `banned-drizzle-import: '${source}' is banned across the workspace in '${filename}' — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator).`
+const dynamicHarnessImportMessage = (source, filename) =>
+  `dynamic-harness-import: Dynamic import('${source}') in '${filename}' is banned because @nx/eslint-plugin enforce-module-boundaries crashes under TS7 when dynamic import("@harness/...") is mixed with static imports — use a top-level static import instead.`
 const invalidClefEndpointMessage =
   "[invalid-clef-endpoint] System One models (clef-flash) only expose POST /v1/systemone (and GET /v1/models or GET /api/tags). Never call /api/generate, /api/chat, or /v1/chat/completions — use DecisionModel.decide (@effect/ai-typesafe) per agent-patterns/decision-model.md."
 
@@ -123,6 +125,104 @@ function isRequireCallee(callee) {
     callee.computed !== true &&
     isIdentifier(callee.property, "require")
   )
+}
+
+const LEGACY_PROCESS_ENV_BRIDGE_PATHS = new Set([
+  "libs/harness/graph/src/cluster-resolver.ts",
+  "libs/harness/graph/src/omnigraph-sync.ts",
+  "libs/harness/gates/src/verify-stamp.ts",
+  "libs/harness/gates/src/worktree.ts",
+  "libs/harness/gates/src/mutation-check.ts",
+  "libs/harness/gates/src/dst-engine.ts",
+  "libs/harness/gates/src/services/active-mutant-context.ts",
+])
+
+function isPureTierProcessEnvBannedPath(filename) {
+  const libsMatch = /(?:^|\/)(libs\/[^/]+\/[^/]+\/src\/.*)$/.exec(filename)
+  if (libsMatch == null) return false
+  const relLibsPath = libsMatch[1]
+  if (relLibsPath == null) return false
+  if (/^libs\/[^/]+\/infra\/src\//.test(relLibsPath)) return false
+  return !LEGACY_PROCESS_ENV_BRIDGE_PATHS.has(relLibsPath)
+}
+
+function unwrapEstreeExpr(node) {
+  let curr = node
+  while (
+    curr != null &&
+    (curr.type === "TSAsExpression" ||
+      curr.type === "TSTypeAssertion" ||
+      curr.type === "TSSatisfiesExpression" ||
+      curr.type === "TSNonNullExpression" ||
+      curr.type === "ParenthesizedExpression" ||
+      curr.type === "ChainExpression")
+  ) {
+    curr = curr.expression
+  }
+  return curr
+}
+
+function isProcessTargetAst(node) {
+  const target = unwrapEstreeExpr(node)
+  if (target == null) return false
+  if (isIdentifier(target, "process")) return true
+  if (target.type !== "MemberExpression") return false
+  if (!isIdentifier(target.object, "globalThis")) return false
+  if (target.computed !== true) {
+    return isIdentifier(target.property, "process")
+  }
+  return getStaticModuleString(target.property) === "process"
+}
+
+function isProcessEnvMemberAst(node) {
+  if (node == null || node.type !== "MemberExpression") return false
+  const propName =
+    node.computed !== true && node.property?.type === "Identifier"
+      ? node.property.name
+      : node.computed === true
+        ? getStaticModuleString(node.property)
+        : null
+  return propName === "env" && isProcessTargetAst(node.object)
+}
+
+function isProcessEnvDestructuringAst(node) {
+  if (
+    node == null ||
+    node.type !== "VariableDeclarator" ||
+    node.id?.type !== "ObjectPattern" ||
+    node.init == null ||
+    !isProcessTargetAst(node.init)
+  ) {
+    return false
+  }
+  return node.id.properties.some((prop) => {
+    if (prop.type !== "Property") return false
+    if (!prop.computed && prop.key?.type === "Identifier") {
+      return prop.key.name === "env"
+    }
+    return getStaticModuleString(prop.key) === "env"
+  })
+}
+
+function collectLogicalAndTermsAst(expr, out) {
+  const u = unwrapEstreeExpr(expr)
+  if (u != null && u.type === "LogicalExpression" && u.operator === "&&") {
+    collectLogicalAndTermsAst(u.left, out)
+    collectLogicalAndTermsAst(u.right, out)
+    return
+  }
+  if (u != null) out.push(u)
+}
+
+function isNegatedCauseMethodCallAst(term, methodName, expectedArgText, context) {
+  const u = unwrapEstreeExpr(term)
+  if (u == null || u.type !== "UnaryExpression" || u.operator !== "!") return false
+  const call = unwrapEstreeExpr(u.argument)
+  if (call == null || call.type !== "CallExpression") return false
+  if (getCalleeName(call.callee) !== `Cause.${methodName}`) return false
+  const arg = Array.isArray(call.arguments) ? call.arguments[0] : undefined
+  if (arg == null) return false
+  return getNodeSourceText(context, unwrapEstreeExpr(arg)) === expectedArgText
 }
 
 const BOOLEAN_STATE_PROP_REGEX =
@@ -2028,6 +2128,13 @@ const syntaxBans = {
         if (drizzleSourceVal != null && isDrizzleSpecifier(drizzleSourceVal)) {
           reportOnce(node, bannedDrizzleMessage(drizzleSourceVal, filename))
         }
+        if (
+          drizzleSourceVal != null &&
+          drizzleSourceVal.startsWith("@harness/") &&
+          /(?:^|\/)(?:libs|apps)\/.*\/(?:src|test)\//.test(filename)
+        ) {
+          reportOnce(node, dynamicHarnessImportMessage(drizzleSourceVal, filename))
+        }
         if (/(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename)) {
           if (
             sourceVal === "node:sqlite" ||
@@ -2089,6 +2196,17 @@ const syntaxBans = {
       VariableDeclarator(node) {
         checkNeverVariableDeclarator(context, node)
         const filenameForRun = getNormalizedFilename()
+        if (
+          !isTestFilePath(filenameForRun) &&
+          isPureTierProcessEnvBannedPath(filenameForRun) &&
+          isProcessEnvDestructuringAst(node)
+        ) {
+          context.report({
+            node,
+            message:
+              "process-env-outside-infra-or-app: Direct process.env access is banned outside type:infra and type:app — inject Config or read environment variables in @harness/infra or apps/*.",
+          })
+        }
         if (node.init != null) {
           const unwrappedInit = unwrapEstree(node.init)
           if (isEffectNamespaceExpr(unwrappedInit)) {
@@ -2242,6 +2360,47 @@ const syntaxBans = {
       MemberExpression(node) {
         const filename = getNormalizedFilename()
         if (
+          !isTestFilePath(filename) &&
+          /(?:^|\/)src\//.test(filename) &&
+          !/(?:^|\/)libs\/harness\/contract\/src\/workspace-and-process\.ts$/.test(filename) &&
+          node.computed !== true &&
+          isIdentifier(node.object, "Cause") &&
+          isIdentifier(node.property, "hasInterrupts")
+        ) {
+          let curr = node
+          let anc = node.parent
+          while (
+            anc != null &&
+            (anc.type === "TSAsExpression" ||
+              anc.type === "TSTypeAssertion" ||
+              anc.type === "TSSatisfiesExpression" ||
+              anc.type === "TSNonNullExpression" ||
+              anc.type === "ParenthesizedExpression" ||
+              anc.type === "ChainExpression")
+          ) {
+            curr = anc
+            anc = anc.parent
+          }
+          if (!(anc != null && anc.type === "CallExpression" && anc.callee === curr)) {
+            context.report({
+              node,
+              message:
+                "bare-cause-has-interrupts: Point-free Cause.hasInterrupts in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause instead.",
+            })
+          }
+        }
+        if (
+          !isTestFilePath(filename) &&
+          isPureTierProcessEnvBannedPath(filename) &&
+          isProcessEnvMemberAst(node)
+        ) {
+          context.report({
+            node,
+            message:
+              "process-env-outside-infra-or-app: Direct process.env access is banned outside type:infra and type:app — inject Config or read environment variables in @harness/infra or apps/*.",
+          })
+        }
+        if (
           /libs\/[^/]+\/(?:domain|core)\/src\//.test(filename) &&
           node.computed !== true &&
           isEffectNamespaceExpr(node.object) &&
@@ -2302,6 +2461,24 @@ const syntaxBans = {
       },
       CallExpression(node) {
         const filename = getNormalizedFilename()
+
+        if (
+          isRequireCallee(node.callee) &&
+          Array.isArray(node.arguments) &&
+          node.arguments.length >= 1
+        ) {
+          const reqSourceVal = getModulePrefixOrStaticString(node.arguments[0])
+          if (
+            reqSourceVal != null &&
+            reqSourceVal.startsWith("@harness/") &&
+            /(?:^|\/)(?:libs|apps)\/.*\/(?:src|test)\//.test(filename)
+          ) {
+            context.report({
+              node,
+              message: dynamicHarnessImportMessage(reqSourceVal, filename),
+            })
+          }
+        }
 
         if (isEnforcedWorkspaceFile(filename)) {
           if (
@@ -2585,8 +2762,59 @@ const syntaxBans = {
             context.report({
               node,
               message:
-                "Cause.hasInterruptsOnly(cause) inside catchCause/runPromiseExit/runSyncExit is banned — use Cause.hasInterrupts(cause) and !Cause.hasFails(cause) && !Cause.hasDies(cause) so composite Fail+Interrupt causes are not misclassified.",
+                "Cause.hasInterruptsOnly(cause) inside catchCause/runPromiseExit/runSyncExit is banned — use isPureInterruptCause(cause) or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause) so composite Fail+Interrupt causes are not misclassified.",
             })
+          }
+        }
+
+        if (
+          !isTest &&
+          /(?:^|\/)src\//.test(filename) &&
+          !/(?:^|\/)libs\/harness\/contract\/src\/workspace-and-process\.ts$/.test(filename) &&
+          calleeName === "Cause.hasInterrupts"
+        ) {
+          const firstArg = Array.isArray(node.arguments) ? node.arguments[0] : undefined
+          if (firstArg == null) {
+            context.report({
+              node,
+              message:
+                "bare-cause-has-interrupts: Bare Cause.hasInterrupts(cause) in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause(cause) or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause).",
+            })
+          } else {
+            const argText = getNodeSourceText(context, unwrapEstreeExpr(firstArg))
+            let root = node
+            let anc = node.parent
+            while (anc != null) {
+              if (anc.type === "LogicalExpression" && anc.operator === "&&") {
+                root = anc
+                anc = anc.parent
+                continue
+              }
+              if (
+                anc.type === "ParenthesizedExpression" ||
+                anc.type === "ChainExpression"
+              ) {
+                root = anc
+                anc = anc.parent
+                continue
+              }
+              break
+            }
+            const terms = []
+            collectLogicalAndTermsAst(root, terms)
+            const hasNegatedFails = terms.some((t) =>
+              isNegatedCauseMethodCallAst(t, "hasFails", argText, context),
+            )
+            const hasNegatedDies = terms.some((t) =>
+              isNegatedCauseMethodCallAst(t, "hasDies", argText, context),
+            )
+            if (!(hasNegatedFails && hasNegatedDies)) {
+              context.report({
+                node,
+                message:
+                  "bare-cause-has-interrupts: Bare Cause.hasInterrupts(cause) in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause(cause) or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause).",
+              })
+            }
           }
         }
 
@@ -2662,6 +2890,17 @@ const syntaxBans = {
       },
       ExportAllDeclaration(node) {
         const filename = getNormalizedFilename()
+        if (
+          /(?:^|\/)(?:libs|apps)\/.*\/src\/index\.ts$/.test(filename) ||
+          /(?:^|\/)libs\/harness\/graph\/src\/(?:type-extractor|datalog-engine|graph-rewrite|graph-engine|graph-projector)\.ts$/.test(
+            filename,
+          )
+        ) {
+          reportOnce(
+            node,
+            `facade-star-reexport: Wildcard 'export *' re-export in '${filename}' is banned — use explicit named re-exports (export { ... } from "./...") instead of export * from.`,
+          )
+        }
         if (
           node.source != null &&
           typeof node.source.value === "string" &&
@@ -2922,6 +3161,16 @@ const testIntegrity = {
           })
         }
         if (
+          drizzleSourceVal != null &&
+          drizzleSourceVal.startsWith("@harness/") &&
+          /(?:^|\/)(?:libs|apps)\/.*\/(?:src|test)\//.test(filename)
+        ) {
+          context.report({
+            node,
+            message: dynamicHarnessImportMessage(drizzleSourceVal, filename),
+          })
+        }
+        if (
           importSource != null &&
           /(?:libs\/[^/]+\/infra\/|apps\/)/.test(filename) &&
           (importSource === "node:sqlite" ||
@@ -3013,6 +3262,16 @@ const testIntegrity = {
             context.report({
               node,
               message: bannedDrizzleMessage(drizzleSourceVal, filename),
+            })
+          }
+          if (
+            drizzleSourceVal != null &&
+            drizzleSourceVal.startsWith("@harness/") &&
+            /(?:^|\/)(?:libs|apps)\/.*\/(?:src|test)\//.test(filename)
+          ) {
+            context.report({
+              node,
+              message: dynamicHarnessImportMessage(drizzleSourceVal, filename),
             })
           }
           if (

@@ -1,12 +1,10 @@
 import { Context, Effect, Layer, Option } from "effect"
-import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import {
   CliCommandInput,
   CliCommandName,
   CliCommandNotFoundError,
 } from "@harness/contract"
-import { LocalDecisionModel } from "@harness/decision"
 import {
   COMMANDS,
   type CliEnv,
@@ -69,17 +67,16 @@ export type CliCommandHandler = (args: ReadonlyArray<string>) => Effect.Effect<C
 
 export const makeLiveCliCommandDescriptors = (
   options?: CliEnv,
-  decisionLayer: Layer.Layer<DecisionModel.DecisionModel> = LocalDecisionModel,
 ): ReadonlyArray<CliCommandPluginDescriptor> => [
   {
     name: CliCommandName.make("guard"),
     summary: "Evaluate deterministic command and file-write guard policies.",
-    execute: (args) => handleGuard(args, options, decisionLayer),
+    execute: (args) => handleGuard(args, options),
   },
   {
     name: CliCommandName.make("route"),
     summary: "Route a plan step to canonical agent-patterns/*.md documentation.",
-    execute: (args) => handleRoute(args, options, decisionLayer),
+    execute: (args) => handleRoute(args, options),
   },
   {
     name: CliCommandName.make("plan-check"),
@@ -110,7 +107,7 @@ export const makeLiveCliCommandDescriptors = (
     summary: "Execute affected verify targets, check span budgets, and write verify-stamp.json.",
     execute: () =>
       Effect.promise(() => import("./verify-and-done.command.js")).pipe(
-        Effect.flatMap((m) => m.handleVerify(options, decisionLayer)),
+        Effect.flatMap((m) => m.handleVerify(options)),
       ),
   },
   {
@@ -118,7 +115,7 @@ export const makeLiveCliCommandDescriptors = (
     summary: "Verify stamp freshness, diff plan vs impl graph, and merge impl/current to main.",
     execute: (args) =>
       Effect.promise(() => import("./verify-and-done.command.js")).pipe(
-        Effect.flatMap((m) => m.handleDone(args, options, decisionLayer)),
+        Effect.flatMap((m) => m.handleDone(args, options)),
       ),
   },
   {
@@ -126,7 +123,7 @@ export const makeLiveCliCommandDescriptors = (
     summary: "Cluster friction-log.jsonl events and propose deterministic promotions.",
     execute: (args) =>
       Effect.promise(() => import("./session-learn-report.command.js")).pipe(
-        Effect.flatMap((m) => m.handleLearn(args, options, decisionLayer)),
+        Effect.flatMap((m) => m.handleLearn(args, options)),
       ),
   },
   {
@@ -174,7 +171,7 @@ export const makeLiveCliCommandDescriptors = (
     summary: "Inspect active session handoff state and inject pending stubs.",
     execute: (args) =>
       Effect.promise(() => import("./session-learn-report.command.js")).pipe(
-        Effect.flatMap((m) => m.handleDoctorOrSession(args, options, decisionLayer)),
+        Effect.flatMap((m) => m.handleDoctorOrSession(args, options)),
       ),
   },
   {
@@ -182,7 +179,7 @@ export const makeLiveCliCommandDescriptors = (
     summary: "Run workspace health diagnostics and session recovery checks.",
     execute: (args) =>
       Effect.promise(() => import("./session-learn-report.command.js")).pipe(
-        Effect.flatMap((m) => m.handleDoctorOrSession(args, options, decisionLayer)),
+        Effect.flatMap((m) => m.handleDoctorOrSession(args, options)),
       ),
   },
   {
@@ -190,7 +187,7 @@ export const makeLiveCliCommandDescriptors = (
     summary: "Audit ArchiMate 3.2 cross-layer traceability and semantic conflicts.",
     execute: (args) =>
       Effect.promise(() => import("./gc-and-ontology.command.js")).pipe(
-        Effect.flatMap((m) => m.handleOntology(args, options, decisionLayer)),
+        Effect.flatMap((m) => m.handleOntology(args, options)),
       ),
   },
   {
@@ -250,9 +247,8 @@ export const DEFAULT_CLI_COMMAND_DESCRIPTORS: ReadonlyArray<CliCommandPluginDesc
 
 export const makeLiveCliCommandRegistryLayer = (
   options?: CliEnv,
-  decisionLayer: Layer.Layer<DecisionModel.DecisionModel> = LocalDecisionModel,
 ): Layer.Layer<HarnessCommandRegistry> =>
-  makeHarnessCommandRegistryLayer(makeLiveCliCommandDescriptors(options, decisionLayer))
+  makeHarnessCommandRegistryLayer(makeLiveCliCommandDescriptors(options))
 
 export const HarnessCommandRegistryLive: Layer.Layer<HarnessCommandRegistry> =
   makeHarnessCommandRegistryLayer(DEFAULT_CLI_COMMAND_DESCRIPTORS)

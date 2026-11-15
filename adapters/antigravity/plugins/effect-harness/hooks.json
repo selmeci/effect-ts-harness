@@ -13,7 +13,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts guard --format=antigravity",
+            "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts guard --format=antigravity || { rc=$?; if [ \"$rc\" -ne 2 ]; then printf '%s\\n' '{\"decision\":\"deny\",\"reason\":\"guard: runtime bootstrap failed\"}'; fi; exit 2; }",
             "timeout": 15
           }
         ]
@@ -23,7 +23,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts guard --format=antigravity",
+            "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts guard --format=antigravity || { rc=$?; if [ \"$rc\" -ne 2 ]; then printf '%s\\n' '{\"decision\":\"deny\",\"reason\":\"guard: runtime bootstrap failed\"}'; fi; exit 2; }",
             "timeout": 15
           }
         ]
@@ -44,7 +44,7 @@
     "Stop": [
       {
         "type": "command",
-        "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts done --format=antigravity",
+        "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts done --format=antigravity || { rc=$?; if [ \"$rc\" -ne 2 ]; then printf '%s\\n' '{\"decision\":\"continue\",\"reason\":\"done: runtime bootstrap failed\"}'; fi; exit 2; }",
         "timeout": 30
       }
     ]

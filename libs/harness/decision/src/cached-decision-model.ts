@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto"
-import { join } from "node:path"
 import { Deferred, Effect, Layer, Option, Schema } from "effect"
 import * as AiError from "effect/ai/AiError"
 import * as Decision from "effect/ai/Decision"
@@ -8,9 +7,9 @@ import {
   DecisionCacheKey,
   DecisionCachePayloadJson,
   DecisionCacheTtlMillis,
+  resolveDefaultDecisionCachePath,
   type WorkspaceFsError,
 } from "@harness/contract"
-import { resolveHarnessStateDir } from "@harness/gates"
 import { NonNegativeCount } from "@harness/graph"
 import { DecisionCachePort } from "@harness/service"
 import { match } from "ts-pattern"
@@ -71,13 +70,6 @@ const decodeCachedDecisionEntry = Schema.decodeOption(
   Schema.fromJsonString(CachedDecisionEntrySchema),
 )
 
-export interface CachedDecisionModelStats {
-  readonly hits: number
-  readonly misses: number
-  readonly coalescedRequests: number
-  readonly size: number
-}
-
 export interface CachedDecisionModelOptions {
   readonly taskId?: string | undefined
   readonly promptVersion?: string | undefined
@@ -86,8 +78,7 @@ export interface CachedDecisionModelOptions {
   readonly ttlMillis?: number | undefined
 }
 
-export const resolveDecisionCachePath = (repoRoot: string): string =>
-  join(resolveHarnessStateDir(repoRoot), "cache", "decisions-v1.json")
+export const resolveDecisionCachePath = resolveDefaultDecisionCachePath
 
 export const canonicalJson = (value: unknown): string => {
   if (value === null || value === undefined) {

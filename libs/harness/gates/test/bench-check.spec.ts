@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Effect, Layer, Schema } from "effect"
+import { Cause, Effect, Exit, Layer, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   type AstGateEvaluationReport,
@@ -12,7 +12,6 @@ import {
   GateRuleId,
   GateRuleVersion,
   GateVerdict,
-  GateViolationMessage,
   HARNESS_GATE_RULE_VERSION,
   makeAstGateEvaluationReport,
   NonNegativeCount,
@@ -22,8 +21,6 @@ import {
   AstGateCache,
   AstGateCacheEntry,
   AstGateDecisionReport,
-  AstGateEvaluationInput,
-  AstGateFileInput,
   BenchSampleCount,
   BenchStageName,
   buildStageLatencyMeasurement,
@@ -38,24 +35,18 @@ import {
   DEFAULT_STAGE_LATENCY_BUDGETS,
   evaluateAstGateFiles,
   evaluateCachedAstGates,
-  GateViolation,
   HarnessBench,
-  HarnessBenchInput,
   HarnessBenchReport,
   inferPackageTagFromPath,
   LatencyExceededDimension,
   LatencyMillis,
   LatencySloViolationError,
   MigrationSafety,
-  StageLatencyEvaluation,
   StageLatencyMeasurement,
   StageLatencyStatus,
-  StageLatencyViolation,
 } from "../src/index.js"
 
 const CompositeStageMeasurementsArb = Schema.Array(StageLatencyMeasurement)
-
-const CompositeAstGateFilesArb = Schema.Array(AstGateFileInput)
 
 const makeInMemoryAstGateCachePortLayer = (): Layer.Layer<AstGateCachePort> =>
   Layer.effect(
@@ -128,11 +119,13 @@ describe("HarnessBench.decide — Latency SLO Gate (PERF-06, RFC-0006)", () => {
       expect(report.evaluations).toHaveLength(4)
       expect(report.violations).toHaveLength(0)
       expect(computePercentileMillis([10, 20, 30, 40], 0.5)).toBeGreaterThanOrEqual(20)
-      expect(BenchSampleCount.make(4)).toBe(4)
-      expect(StageLatencyEvaluation.fields).toBeDefined()
-      expect(StageLatencyViolation.fields).toBeDefined()
-      expect(HarnessBenchInput.fields).toBeDefined()
-      expect(HarnessBenchReport.fields).toBeDefined()
+      expect(Schema.is(BenchSampleCount)(4)).toBe(true)
+      expect(Schema.is(BenchSampleCount)(-1)).toBe(false)
+      expect(Schema.is(BenchStageName)("GraphRewrite.decide")).toBe(true)
+      expect(Schema.is(BenchStageName)("")).toBe(false)
+      expect(Schema.is(LatencyMillis)(-1)).toBe(false)
+      expect(Exit.isSuccess(Schema.decodeExit(HarnessBenchReport)(report))).toBe(true)
+      expect(Schema.is(HarnessBenchReport)({ status: "invalid" })).toBe(false)
     }),
   )
 
@@ -480,19 +473,43 @@ describe("AstGateCache & Unified Single-Pass AST Gate Deciders (PERF-02, RFC-000
           purityReport.violations.some((v) => v.rule === GateRuleId.make("impure-domain-import")),
         ).toBe(true)
         expect(effectLawsReport.cacheHitCount).toBe(3)
-        expect(migSafetyReport.violations.length).toBeGreaterThan(0)
+        expect(migSafetyReport.violations).toEqual([
+          expect.objectContaining({
+            kind: "drop-statement",
+            file: "libs/sample/infra/src/bad-infra.ts",
+            statement: "DROP TABLE users",
+          }),
+        ])
 
-        // Verify schema exports
-        expect(GateRuleVersion.make("ast-gates-v1")).toBe("ast-gates-v1")
-        expect(ContentSha256.make("abc")).toBe("abc")
-        expect(GateCategory.make("syntax-bans")).toBe("syntax-bans")
-        expect(GateViolationMessage.make("msg")).toBe("msg")
-        expect(GateViolation.fields).toBeDefined()
-        expect(AstGateCacheEntry.fields).toBeDefined()
-        expect(AstGateEvaluationInput.fields).toBeDefined()
-        expect(AstGateDecisionReport.members).toHaveLength(2)
+        // Verify schema codecs (valid & invalid)
+        const validSha = computeContentSha256("abc")
+        expect(validSha).toHaveLength(64)
+        expect(Exit.isSuccess(Schema.decodeExit(ContentSha256)(validSha))).toBe(true)
+        expect(Schema.is(ContentSha256)("abc")).toBe(false)
+        expect(Exit.isSuccess(Schema.decodeExit(GateRuleVersion)("ast-gates-v7"))).toBe(true)
+        expect(Schema.is(GateRuleVersion)("")).toBe(false)
+        expect(
+          Exit.isSuccess(
+            Schema.decodeExit(AstGateCacheEntry)({
+              filePath: "libs/sample/domain/src/a.ts",
+              contentSha256: validSha,
+              ruleVersion: "ast-gates-v7",
+              packageTag: "domain",
+              violations: [],
+            }),
+          ),
+        ).toBe(true)
+        expect(
+          Schema.is(AstGateCacheEntry)({
+            filePath: "libs/sample/domain/src/a.ts",
+            contentSha256: "short",
+            ruleVersion: "ast-gates-v7",
+            violations: [],
+          }),
+        ).toBe(false)
+        expect(Exit.isSuccess(Schema.decodeExit(AstGateDecisionReport)(syntaxReport))).toBe(true)
+        expect(Schema.is(AstGateDecisionReport)({ verdict: "unknown" })).toBe(false)
         expect(evaluateAstGateFiles({ files: [] }).verdict).toBe("clean")
-        expect(computeContentSha256("abc")).toHaveLength(64)
         expect(inferPackageTagFromPath("libs/sample/domain/src/a.ts")).toBe("domain")
       }),
   )
@@ -555,7 +572,13 @@ describe("AstGateCache & Unified Single-Pass AST Gate Deciders (PERF-02, RFC-000
           cacheStore,
         )
         expect(r2.verdict).toBe(GateVerdict.make("violated"))
-        expect(r2.violations.length).toBeGreaterThan(0)
+        expect(r2.violations).toEqual([
+          expect.objectContaining({
+            rule: GateRuleId.make("unsafe-type-cast"),
+            file: filePath,
+            line: 1,
+          }),
+        ])
         expect(r2.parsedFileCount).toBe(1)
         expect(r2.cacheHitCount).toBe(0)
         expect(cacheStore.size).toBe(1)
@@ -709,27 +732,49 @@ describe("AstGateCache & Unified Single-Pass AST Gate Deciders (PERF-02, RFC-000
   )
 
   it.effect.prop(
-    "property: AstGateCache, SyntaxBans, TestIntegrity, DomainPurity, and EffectLaws deciders are idempotent and pure",
-    [CompositeAstGateFilesArb],
-    ([generatedFiles]) =>
+    "property: AstGateCache, SyntaxBans, TestIntegrity, DomainPurity, and EffectLaws deciders are deterministic across diverse ASTs",
+    [
+      Schema.Array(Schema.Literals(["clean", "unsafe-type-cast", "switch", "dummy-void"])).pipe(
+        Schema.check(Schema.isMinLength(1), Schema.isMaxLength(4)),
+      ),
+    ],
+    ([kinds]) =>
       Effect.gen(function* () {
-        const safeFiles = generatedFiles.map((f, idx) => ({
-          filePath: AstSourceFilePath.make(`libs/sample/domain/src/gen_${idx}.ts`),
-          content: AstSourceContent.make(`export const val_${idx} = ${idx}\n`),
-          packageTag: f.packageTag ?? AstGatePackageTag.make("domain"),
+        const snippetMap = {
+          clean: { code: "export const cleanVal = 42\n", expectedCount: 0 },
+          "unsafe-type-cast": { code: "export const badCast = (1 as any)\n", expectedCount: 1 },
+          switch: {
+            code: "export const sw = (x: number) => { switch (x) { default: return 1 } }\n",
+            expectedCount: 1,
+          },
+          "dummy-void": {
+            code: 'import { Effect } from "effect"\nexport const fn = Effect.gen(function* () { yield* Effect.void; return 1 })\n',
+            expectedCount: 1,
+          },
+        } as const
+        const files = kinds.map((k, idx) => ({
+          filePath: AstSourceFilePath.make(`libs/sample/domain/src/prop_${idx}.ts`),
+          content: AstSourceContent.make(snippetMap[k].code),
+          packageTag: AstGatePackageTag.make("domain"),
         }))
+        const expectedCount = kinds.reduce((acc, k) => acc + snippetMap[k].expectedCount, 0)
+        const r1 = yield* decideAstGateCache({ files })
+        const r2 = yield* decideAstGateCache({ files })
+        expect(r1.violations).toHaveLength(expectedCount)
+        expect(r1.verdict).toBe(expectedCount === 0 ? "clean" : "violated")
+        expect(r2.violations).toEqual(r1.violations)
+        expect(r2.verdict).toBe(r1.verdict)
 
-        const r1 = yield* decideAstGateCache({ files: safeFiles })
-        const r2 = yield* decideSyntaxBansGate({ files: safeFiles })
-        const r3 = yield* decideTestIntegrityGate({ files: safeFiles })
-        const r4 = yield* decideDomainPurityGate({ files: safeFiles })
-        const r5 = yield* decideEffectLawsGate({ files: safeFiles })
-
-        expect(r1.verdict).toBe("clean")
-        expect(r2.verdict).toBe("clean")
-        expect(r3.verdict).toBe("clean")
-        expect(r4.verdict).toBe("clean")
-        expect(r5.verdict).toBe("clean")
+        const syntaxReport = yield* decideSyntaxBansGate({ files })
+        const testReport = yield* decideTestIntegrityGate({ files })
+        const purityReport = yield* decideDomainPurityGate({ files })
+        const lawsReport = yield* decideEffectLawsGate({ files })
+        expect(
+          syntaxReport.violations.length +
+            testReport.violations.length +
+            purityReport.violations.length +
+            lawsReport.violations.length,
+        ).toBe(expectedCount)
       }),
   )
 })

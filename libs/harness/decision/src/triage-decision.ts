@@ -1,6 +1,7 @@
 import { Cause, Effect, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import { isPureInterruptCause } from "@harness/contract"
 import { match } from "ts-pattern"
 
 export const TriageV1 = Decision.make({
@@ -437,6 +438,66 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     },
   },
   {
+    id: "bare-cause-has-interrupts",
+    pattern: /bare-cause-has-interrupts/,
+    kind: "mechanical",
+    hint: "Bare Cause.hasInterrupts(cause) in Effect.catchCause can swallow composite failure/defect causes — use isPureInterruptCause(cause) ? Effect.failCause(cause) : ... from @harness/contract.",
+    result: {
+      kind: "mechanical",
+      hint: "Bare Cause.hasInterrupts(cause) in Effect.catchCause can swallow composite failure/defect causes — use isPureInterruptCause(cause) ? Effect.failCause(cause) : ... from @harness/contract.",
+    },
+  },
+  {
+    id: "process-env-outside-infra-or-app",
+    pattern: /process-env-outside-infra-or-app/,
+    kind: "mechanical",
+    hint: "Direct process.env access is banned outside type:infra and type:app — inject Config or read environment variables in @harness/infra or apps/*.",
+    result: {
+      kind: "mechanical",
+      hint: "Direct process.env access is banned outside type:infra and type:app — inject Config or read environment variables in @harness/infra or apps/*.",
+    },
+  },
+  {
+    id: "skill-tier-table-drift",
+    pattern: /skill-tier-table-drift/,
+    kind: "mechanical",
+    hint: "Skill tier table drifted from NxTierTag / tier-topology rules — synchronize the skill markdown table with @harness/contract TierTopology.",
+    result: {
+      kind: "mechanical",
+      hint: "Skill tier table drifted from NxTierTag / tier-topology rules — synchronize the skill markdown table with @harness/contract TierTopology.",
+    },
+  },
+  {
+    id: "mermaid-dependency-drift",
+    pattern: /mermaid-dependency-drift/,
+    kind: "mechanical",
+    hint: "Mermaid dependency diagram drifted from package.json / Nx project graph — update the diagram edges to match actual workspace dependencies.",
+    result: {
+      kind: "mechanical",
+      hint: "Mermaid dependency diagram drifted from package.json / Nx project graph — update the diagram edges to match actual workspace dependencies.",
+    },
+  },
+  {
+    id: "hook-bootstrap-fail-closed",
+    pattern: /hook-bootstrap-fail-closed/,
+    kind: "mechanical",
+    hint: "Hook bootstrap must fail closed — return a non-zero/deny verdict when hook prerequisites or config cannot be loaded.",
+    result: {
+      kind: "mechanical",
+      hint: "Hook bootstrap must fail closed — return a non-zero/deny verdict when hook prerequisites or config cannot be loaded.",
+    },
+  },
+  {
+    id: "doc-banned-or-phantom-tech",
+    pattern: /doc-banned-or-phantom-tech/,
+    kind: "mechanical",
+    hint: "Documentation references banned or phantom technology (e.g. drizzle-orm, Effect v3 idioms, or non-existent APIs) — update docs to match current Effect v4 / Alchemy v2.",
+    result: {
+      kind: "mechanical",
+      hint: "Documentation references banned or phantom technology (e.g. drizzle-orm, Effect v3 idioms, or non-existent APIs) — update docs to match current Effect v4 / Alchemy v2.",
+    },
+  },
+  {
     pattern: /harness(?:\/|\()syntax-bans\)?/,
     result: {
       kind: "mechanical",
@@ -460,13 +521,14 @@ export const triageFailure = Effect.fn("Harness.triageFailure")(function* (failu
 
   const outcome = yield* DecisionModel.decide(TriageV1, { input: { failureOutput } }).pipe(
     Effect.timeoutOption("1500 millis"),
-    Effect.catchCause((cause) =>
-      Cause.hasInterrupts(cause)
-        ? Effect.interrupt
-        : Effect.logWarning(`Decision model fallback: ${Cause.pretty(cause)}`).pipe(
-            Effect.as(Option.none()),
-          ),
+    Effect.catchCauseIf(
+      (cause) => !isPureInterruptCause(cause),
+      (cause) =>
+        Effect.logWarning(`Decision model fallback: ${Cause.pretty(cause)}`).pipe(
+          Effect.as(Option.none()),
+        ),
     ),
+    Effect.orElseSucceed(() => Option.none()),
   )
 
   return yield* match(outcome)

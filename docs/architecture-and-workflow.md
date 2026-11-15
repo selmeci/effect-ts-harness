@@ -29,9 +29,9 @@ graph TD
     subgraph "Harness Platform (libs/harness/* & apps/harness-*)"
         CLI["apps/harness-cli<br/>(type:app — effect/cli + NodeRuntime)"]
         MCP["apps/harness-mcp<br/>(type:app — ManagedRuntime, 15 MCP nástrojov)"]
-        H_INFRA["libs/harness/infra<br/>(type:infra — NodeServices, ScopedCache.makeWith, Ref+Deferred, UnixSocketDaemon)"]
+        H_INFRA["libs/harness/infra<br/>(type:infra — NodeServices, ScopedCache.makeWith, Ref+Deferred, UnixSocketDaemon, LocalDecisionModel)"]
         GATES["libs/harness/gates<br/>(type:core — 18+ čistých deciderov & brány)"]
-        DECISION["libs/harness/decision<br/>(type:core — clef-flash model & 13 schém)"]
+        DECISION["libs/harness/decision<br/>(type:core — 13 schém DecisionModel & čisté smerovanie)"]
         INGEST["libs/harness/ingest<br/>(type:core — AST indexácia & test tracer)"]
         GRAPH["libs/harness/graph<br/>(type:core — effect/Graph, Datalog & Omnigraph)"]
         H_SVC["libs/harness/service<br/>(type:service — Context.Service porty)"]
@@ -55,7 +55,7 @@ graph TD
 
     CLI --> H_INFRA & GATES & DECISION & INGEST & GRAPH
     MCP --> H_INFRA & GATES & DECISION & INGEST & GRAPH
-    H_INFRA --> GATES & DECISION & INGEST & GRAPH & H_SVC & H_CON
+    H_INFRA --> GRAPH & H_SVC & H_CON
     GATES --> GRAPH & H_SVC & H_CON
     DECISION --> GATES & H_SVC & H_CON
     INGEST --> H_SVC & H_CON
@@ -65,7 +65,7 @@ graph TD
     ES_CORE --> ES_CON
     ES_INFRA --> ES_CORE & ES_CON
 
-    DOMAIN --> CONTRACT & SERVICE & H_CON
+    DOMAIN --> CONTRACT & SERVICE
     SERVICE --> CONTRACT
     INFRA --> CONTRACT & SERVICE & DOMAIN
     APP --> INFRA & CONTRACT
@@ -82,17 +82,17 @@ graph TD
    - Implementuje 18+ čistých deterministických brán a deciderov (`R = never`), vrátane `GraphGc.decide`, `SpanBudget.decide`, `HarnessTierTopology.decide`, `SelfDogfooding.decide` a `AstGateCache.decide`.
    - Počíta rekurzívny kryptografický SHA-256 hash pracovného stromu a overuje `.harness/verify-stamp.json`.
 4. **`libs/harness/decision` (`type:core`):**
-   - Integruje lokálny model `clef-flash` pomocou `DecisionModel` s timeoutom `1500 ms` a deterministickým fallbackom.
+   - Definuje čisté kontrakty a deterministický fallback nad `DecisionModel` (samotná živá vrstva `LocalDecisionModel` v `libs/harness/infra/src/local-decision-model-live.ts` s timeoutom `1500 ms` žije v `@harness/infra`, aby `@harness/decision` zostalo 100% čisté).
    - Definuje **13 typovo bezpečných schém**: `IdiomRouterV1`, `GuardV1`, `TriageV1`, `PlanStepCoverageV1`, `LearnProposalV1`, `OntologyConflictV1`, `EarsClauseSemanticsV1`, `HoleRelevanceAndEdgePriorV1`, `DstHazardPriorV1`, `MutantEquivalenceV1`, `SynthesizedRuleQualityV1`, `DpoCandidateRankerV1` a `PlanSearchScorerV1`.
 5. **`libs/harness/ingest` (`type:core`):**
-   - Využíva `oxc-parser` / `@ast-grep/napi` na statickú indexáciu všetkých deklarácií `Effect.fn` v repozitári (`buildWorkspaceFnIndex`) a detekciu duplicitných názvov spanov.
+   - Využíva TypeScript Compiler API, `@ast-grep/napi` a JSONL/manifest indexy na statickú indexáciu všetkých deklarácií `Effect.fn` v repozitári (`buildWorkspaceFnIndex`) a detekciu duplicitných názvov spanov.
    - Poskytuje testovací tracer `runWithTestTracer` a W3C `traceparent` koreláciu prepájajúcu `@effect/vitest` testy s reálnymi volaniami funkcií.
 6. **`libs/harness/graph` (`type:core`):**
    - Zostavuje typovo orientovaný funkcionálny graf závislostí pomocou `effect/Graph`, `ts-morph`, Datalogu (`@electric-sql/d2ts`) a DPO prepisovania.
    - Extrahuje architektonické dokumenty ako uzly `AdrDoc` a `EarsSpec` s hranami `REALIZES` a `INFLUENCES` smerujúcimi na symboly kódu.
    - Validuje architektonické invarianty a zabezpečuje obojsmernú synchronizáciu s lokálnym Omnigraphom (`OmnigraphSync`, `.gq` dotazy).
 7. **`libs/harness/infra` (`type:infra`):**
-   - Poskytuje natívne Effect v4 `Live` vrstvy nad `@effect/platform-node` (`NodeServices.layer`, `FileSystem.FileSystem`, `Path.Path`, `ChildProcessSpawner`, `ScopedCache.makeWith` pre `AstGateCacheLive`, per-key `Ref` + `Deferred` single-flight deduplikáciu pre `DecisionCacheLive`, `SynchronizedRef`, `Effect.acquireRelease` pre `UnixSocketDaemonLive`).
+   - Poskytuje natívne Effect v4 `Live` vrstvy nad `@effect/platform-node` (`NodeServices.layer`, `FileSystem.FileSystem`, `Path.Path`, `ChildProcessSpawner`, `ScopedCache.makeWith` pre `AstGateCacheLive`, per-key `Ref` + `Deferred` single-flight deduplikáciu pre `DecisionCacheLive`, `SynchronizedRef`, `Effect.acquireRelease` pre `UnixSocketDaemonLive`, a `LocalDecisionModel` v `libs/harness/infra/src/local-decision-model-live.ts`).
 8. **`apps/harness-cli` (`type:app`):**
    - Deklaratívny `effect/cli` + `NodeRuntime.runMain` vstupný bod pre nástroje agentov a automatizačné háky (hooks).
    - Poskytuje subpríkazy: `guard`, `route`, `plan-check`, `verify`, `done`, `ingest`, `session`, `doctor`, `learn`, `ontology`, `gc`, `mutate`, `report`, `check-openapi`, `check-migrations`, `check-event-schemas`, `benchmark`, `scenario`.
@@ -246,10 +246,12 @@ export const deletePhoto = Effect.fn("Sample.deletePhoto")(function* (id: number
   1. Spustí `pnpm nx affected -t typecheck lint` s nastavenou premennou prostredia `HARNESS_PLAN_CHECK=1` (počas plan-checku je volanie `stub()` legálne).
   2. Spustí `buildWorkspaceFnIndex` cez `@ast-grep/napi` a overí, že každý `Effect.fn` má v celom repozitári **globálne unikátny názov spanu**.
   3. Spustí `extractWorkspaceTypeAwareGraph` (`ts-morph`) a zostaví graf volaní a závislostí vrátane uzlov `AdrDoc` a `EarsSpec` s hranami `GovernsSymbol` a `SpecifiesSymbol`.
-  4. Spustí `checkEffectGraph` a overí 5 kľúčových invariantov:
+  4. Spustí `checkEffectGraph` a overí 7 kľúčových invariantov:
      - `domain-requires-infra`: Doménová funkcia nesmie závisieť od infračervenej služby.
      - `domain-requires-cloud-binding`: Doménová funkcia nesmie priamo viazať cloudové služby (`Cloudflare`, `Alchemy`, `D1`, `DurableObject`).
      - `impure-decider`: Funkcia s príponou `.decide` v `type:domain` nesmie vyžadovať žiadnu službu (`RequiresService` hrana je zakázaná, vyžaduje sa `R = never`).
+     - `impure-reducer`: Čistý reducer (`evolve`) nesmie vyžadovať žiadnu službu (`R = never`).
+     - `aggregate-direct-bus-publish`: Agregát nesmie priamo publikovať na event bus.
      - `layer-cycle`: Detekcia cyklických závislostí medzi vrstvami pomocou `Graph.findCycle`.
      - `unmapped-spec-symbol`: Overenie, že každý span, servis a error deklarovaný v YAML frontmatteri EARS špecifikácie (aj so statusom `status: proposed`) existuje ako uzol v grafe skeletonu (`stub<A, E, R>()`).
 - **Výsledok:**
@@ -349,7 +351,7 @@ Lokálny neurónový model slúži ako asistent s ultra-rýchlou odozvou, ktorý
 sequenceDiagram
     autonumber
     participant Caller as "Volajúci (CLI / Hook / MCP)"
-    participant Layer as "LocalDecisionModel (@harness/decision)"
+    participant Layer as "LocalDecisionModel (@harness/infra)"
     participant Ollama as "Ollama (clef-flash @ localhost:11434)"
     participant Fallback as "Deterministický Fallback"
 

@@ -9,13 +9,14 @@ import {
   McpError,
 } from "@modelcontextprotocol/sdk/types.js"
 import { Cause, Effect, Exit, Layer, Logger, ManagedRuntime, Schema } from "effect"
-import { match } from "ts-pattern"
 import {
   type HarnessDaemonServerHandle,
   startHarnessDaemonServer,
 } from "./daemon/unix-socket-daemon.js"
 import { executeManagedMcpTool, makeMcpManagedRuntime } from "./managed-runtime.js"
 import {
+  attachServerCloseRuntimeDisposal,
+  formatMcpToolExit,
   recordMcpToolTelemetry,
   type ServerOptions,
   toMcpToolInputJsonSchema,
@@ -119,49 +120,10 @@ export const createServer = (options?: ServerOptions): McpServer => {
           ),
         ),
       )
-      .then((exit) =>
-        match(exit)
-          .with({ _tag: "Success" }, ({ value }) => ({
-            content: [{ type: "text" as const, text: JSON.stringify(value ?? null, null, 2) }],
-          }))
-          .with({ _tag: "Failure" }, ({ cause }) => {
-            if (Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)) {
-              return Promise.reject(
-                new McpError(ErrorCode.InternalError, `Tool '${toolName}' execution was interrupted`),
-              )
-            }
-            const squashed = Cause.squash(cause)
-            if (Schema.isSchemaError(squashed)) {
-              return Promise.reject(
-                new McpError(
-                  ErrorCode.InvalidParams,
-                  `Invalid arguments for tool '${toolName}': ${squashed.message}`,
-                ),
-              )
-            }
-            const message = squashed instanceof Error ? squashed.message : String(squashed)
-            return {
-              content: [{ type: "text" as const, text: message }],
-              isError: true,
-            }
-          })
-          .exhaustive(),
-      )
+      .then((exit) => formatMcpToolExit(toolName, exit))
   })
 
-  const originalClose = server.close.bind(server)
-  let disposePromise: Promise<void> | undefined
-  const disposeRuntime = (): Promise<void> => (disposePromise ??= runtime.dispose())
-  server.close = (): Promise<void> => originalClose().finally(() => disposeRuntime())
-  const previousOnClose = server.server.onclose
-  server.server.onclose = () => {
-    previousOnClose?.()
-    void disposeRuntime().catch((err: unknown) => {
-      process.stderr.write(
-        `[harness-mcp] Runtime dispose error: ${err instanceof Error ? err.message : String(err)}\n`,
-      )
-    })
-  }
+  attachServerCloseRuntimeDisposal(server, runtime)
 
   return server
 }
@@ -213,7 +175,14 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
           )
         }),
       )
-      .then(() => cliRuntime.dispose().catch(() => undefined))
+      .then(() =>
+        cliRuntime.dispose().catch((err: unknown) => {
+          exitCode = 1
+          process.stderr.write(
+            `[harness-mcp] CLI runtime dispose error: ${err instanceof Error ? err.message : String(err)}\n`,
+          )
+        }),
+      )
       .finally(() => process.exit(exitCode))
   }
   process.once("SIGINT", () => shutdown(0))

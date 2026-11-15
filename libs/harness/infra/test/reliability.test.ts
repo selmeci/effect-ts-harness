@@ -58,24 +58,27 @@ describe("@harness/infra reliability", () => {
     withTempDir((dir) =>
       Effect.gen(function* () {
         const repoRoot = WorkspaceFilePath.make(dir)
+        const slowStarted = yield* Deferred.make<void>()
+        const releaseSlow = yield* Deferred.make<void>()
         yield* Effect.scoped(
           Effect.gen(function* () {
             const info = yield* startScopedUnixSocketDaemon(repoRoot, {
               lineHandler: (line) =>
                 line === "slow"
-                  ? Effect.sleep("250 millis").pipe(Effect.as("slow:done"))
+                  ? Deferred.succeed(slowStarted, undefined).pipe(
+                      Effect.andThen(Deferred.await(releaseSlow)),
+                      Effect.as("slow:done"),
+                    )
                   : Effect.succeed(`fast:${line}`),
             })
 
-            const [slowReply, fastReply] = yield* Effect.all(
-              [
-                queryUnixSocketLine(info.socketPath, "slow", 1000),
-                Effect.sleep("15 millis").pipe(
-                  Effect.andThen(queryUnixSocketLine(info.socketPath, "ping", 100)),
-                ),
-              ],
-              { concurrency: "unbounded" },
+            const slowFiber = yield* queryUnixSocketLine(info.socketPath, "slow", 1000).pipe(
+              Effect.forkChild,
             )
+            yield* Deferred.await(slowStarted)
+            const fastReply = yield* queryUnixSocketLine(info.socketPath, "ping", 500)
+            yield* Deferred.succeed(releaseSlow, undefined)
+            const slowReply = yield* Fiber.join(slowFiber)
 
             expect(Option.getOrNull(fastReply)).toBe("fast:ping")
             expect(Option.getOrNull(slowReply)).toBe("slow:done")
@@ -110,7 +113,8 @@ describe("@harness/infra reliability", () => {
         })
         .pipe(Effect.forkChild)
 
-      yield* Effect.sleep("20 millis")
+      yield* Effect.yieldNow
+      yield* Effect.yieldNow
       yield* Fiber.interrupt(leaderFiber)
 
       const followerValue = yield* Fiber.join(followerFiber)

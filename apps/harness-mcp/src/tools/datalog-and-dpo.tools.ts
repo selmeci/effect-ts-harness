@@ -21,19 +21,20 @@ import {
   type SemanticEdgePriors,
   VerificationStatus,
 } from "@harness/graph"
+import { isPureInterruptCause } from "@harness/contract"
 import {
   CandidateSymbolKey,
   evaluateDpoCandidatePriorsBatch,
   evaluateHoleCandidatePrior,
-  LocalDecisionModel,
   ProposedRoleName,
 } from "@harness/decision"
-import { nodeSyncHostIo } from "@harness/infra"
+import { LocalDecisionModel, nodeSyncHostIo } from "@harness/infra"
 import {
+  graphStatusMeta,
   McpToolName,
   type McpToolPluginDescriptor,
   resolveDefaultRepoRoot,
-  resolveGraph,
+  resolveGraphWithStatus,
   type ServerOptions,
 } from "./mcp-helpers.js"
 
@@ -262,7 +263,7 @@ const resolveDecisionPriors = Effect.fn("HarnessMcp.resolveDecisionPriors")(func
         Effect.provide(decisionLayer),
         Effect.timeoutOption("1500 millis"),
         Effect.catchCause((cause) => {
-          if (Cause.hasInterrupts(cause)) {
+          if (isPureInterruptCause(cause)) {
             return Effect.interrupt
           }
           process.stderr.write(`[harness-mcp] decision fallback: ${Cause.pretty(cause)}\n`)
@@ -364,7 +365,8 @@ export const buildDatalogAndDpoToolDescriptors = (
     execute: (args) =>
       Effect.gen(function* () {
         const { symbolOrSpan, ruleId } = yield* decodeGraphInferInput(args)
-        const graph = yield* resolveGraph(options, args)
+        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        const graph = graphStatus.graph
         const resolvedNode =
           symbolOrSpan !== undefined && symbolOrSpan.length > 0
             ? resolveNode(graph, symbolOrSpan)
@@ -401,6 +403,7 @@ export const buildDatalogAndDpoToolDescriptors = (
             (p) => (ruleId === undefined || p.ruleId === ruleId) && filterBySymbol(p.conclusion),
           ),
           iterations: inference.iterations ?? 0,
+          ...graphStatusMeta(graphStatus),
         }
       }),
   },
@@ -417,7 +420,8 @@ export const buildDatalogAndDpoToolDescriptors = (
         const ruleId = input.ruleId
         const useDecisionPriors = input.useDecisionPriors === true
         const rawPriors = input.priors
-        const graph = yield* resolveGraph(options, args)
+        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        const graph = graphStatus.graph
         const resolvedNode =
           symbolOrSpan !== undefined && symbolOrSpan.length > 0
             ? resolveNode(graph, symbolOrSpan)
@@ -458,6 +462,7 @@ export const buildDatalogAndDpoToolDescriptors = (
           typedHoleBundles,
           proofs: inference.proofs.filter((p) => proofIds.has(p.proofId)),
           iterations: inference.iterations ?? 0,
+          ...graphStatusMeta(graphStatus),
         }
       }),
   },
@@ -475,7 +480,8 @@ export const buildDatalogAndDpoToolDescriptors = (
         const useDecisionPriors = typedArgs.useDecisionPriors === true
         const verifyRoundTrip = typedArgs.verifyRoundTrip === true
         const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-        const graph = yield* resolveGraph(options, args)
+        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        const graph = graphStatus.graph
 
         let candidatePriors: DpoCandidatePriors | undefined = undefined
         if (useDecisionPriors) {
@@ -552,6 +558,7 @@ export const buildDatalogAndDpoToolDescriptors = (
             isPolicyClean: c.isPolicyClean,
           })),
           projection,
+          ...graphStatusMeta(graphStatus),
         }
       }),
   },

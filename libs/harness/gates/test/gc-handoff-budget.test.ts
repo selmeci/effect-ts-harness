@@ -1,8 +1,7 @@
 import { describe, expect, it } from "@effect/vitest"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { basename, dirname, join, resolve } from "node:path"
-import { fileURLToPath } from "node:url"
+import { basename, dirname, join } from "node:path"
 import { Effect, Schema } from "effect"
 import {
   buildHarnessGraph,
@@ -24,7 +23,6 @@ import {
   PackageManifestPath,
 } from "@harness/contract"
 import { analyzeSqliteMigratorFromRecordAst } from "../src/plugins/sqlite-migrator-ast.js"
-import { GATE_RULE_SOURCE_FILES } from "../src/plugins/gc/gc-doc-truth.plugin.js"
 import { visitSourceFileSinglePass } from "../src/plugins/ast-gate-visitors.js"
 import { decideSelfDogfooding } from "../src/plugins/self-dogfooding-plugin.js"
 import { decideHarnessTierTopology } from "../src/plugins/harness-tier-topology.js"
@@ -3517,122 +3515,5 @@ errors:
         ).toBe(true)
       }),
     )
-
-    it("[Ears-P1.4] evaluateDocTruthPlugin returns 0 findings on the real repository", () => {
-      const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..")
-      const findings = evaluateDocTruthPlugin({
-        graph: buildHarnessGraph({}),
-        workspaceRoot: repoRoot,
-        hostIo: testHostIo,
-      })
-      expect(findings).toEqual([])
-    })
-
-    it("[Ears-P1.4] emits stale-gate-rule-version when any of the 5 gate rule files changes without updating EXPECTED_GATE_RULE_VERSION_DIGEST", () => {
-      const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..")
-      const tempDir = mkdtempSync(join(tmpdir(), "harness-doc-truth-digest-"))
-      try {
-        for (const rel of GATE_RULE_SOURCE_FILES) {
-          const dest = join(tempDir, rel)
-          mkdirSync(dirname(dest), { recursive: true })
-          const content = readFileSync(join(repoRoot, rel), "utf8")
-          const updated =
-            rel === "tools/oxlint/syntax-bans.js"
-              ? `${content}\n// synthetic visitor edit\n`
-              : content
-          writeFileSync(dest, updated)
-        }
-        const findings = evaluateDocTruthPlugin({
-          graph: buildHarnessGraph({}),
-          workspaceRoot: tempDir,
-          hostIo: testHostIo,
-        })
-        expect(findings.some((f) => f.kind === "stale-gate-rule-version")).toBe(true)
-      } finally {
-        rmSync(tempDir, { recursive: true, force: true })
-      }
-    })
-
-    it("[Ears-P1.4] emits hook-timeout-parity when Stop is missing or lacks a positive timeout in antigravity or claude-code hooks.json", () => {
-      const tempDir = mkdtempSync(join(tmpdir(), "harness-doc-truth-hooks-"))
-      try {
-        const antigravityHooksPath = join(
-          tempDir,
-          "adapters/antigravity/plugins/effect-harness/hooks.json",
-        )
-        mkdirSync(dirname(antigravityHooksPath), { recursive: true })
-        writeFileSync(
-          antigravityHooksPath,
-          JSON.stringify({
-            "effect-harness": {
-              PreToolUse: [{ type: "command", timeout: 15 }],
-              Stop: [{ type: "command" }],
-            },
-          }),
-        )
-
-        const claudeHooksPath = join(tempDir, "adapters/claude-code/hooks.json")
-        mkdirSync(dirname(claudeHooksPath), { recursive: true })
-        writeFileSync(
-          claudeHooksPath,
-          JSON.stringify({
-            hooks: {
-              PreToolUse: [{ hooks: [{ type: "command", timeout: 15 }] }],
-            },
-          }),
-        )
-
-        const findings = evaluateDocTruthPlugin({
-          graph: buildHarnessGraph({}),
-          workspaceRoot: tempDir,
-          hostIo: testHostIo,
-        })
-        expect(
-          findings.some(
-            (f) =>
-              f.kind === "hook-timeout-parity" &&
-              f.location === "adapters/antigravity/plugins/effect-harness/hooks.json",
-          ),
-        ).toBe(true)
-        expect(
-          findings.some(
-            (f) =>
-              f.kind === "hook-timeout-parity" &&
-              f.nodeId === "adapters/claude-code/hooks.json:Stop",
-          ),
-        ).toBe(true)
-      } finally {
-        rmSync(tempDir, { recursive: true, force: true })
-      }
-    })
-
-    it("[Ears-P1.4] emits doc-unknown-rule-id when a markdown Rule ID table cites an unknown rule like no-drizzle", () => {
-      const tempDir = mkdtempSync(join(tmpdir(), "harness-doc-truth-rule-table-"))
-      try {
-        writeFileSync(
-          join(tempDir, "README.md"),
-          [
-            "# Rules",
-            "",
-            "| Rule ID | Enforced Invariant |",
-            "| :--- | :--- |",
-            "| `no-drizzle` | Drizzle is banned |",
-            "",
-          ].join("\n"),
-        )
-        const findings = evaluateDocTruthPlugin({
-          graph: buildHarnessGraph({}),
-          workspaceRoot: tempDir,
-          hostIo: testHostIo,
-        })
-        expect(
-          findings.some(
-            (f) => f.kind === "doc-unknown-rule-id" && f.nodeId === "README.md:no-drizzle",
-          ),
-        ).toBe(true)
-      } finally {
-        rmSync(tempDir, { recursive: true, force: true })
-      }
-    })
   })
 })

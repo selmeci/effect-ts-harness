@@ -1,4 +1,4 @@
-import { Schema } from "effect"
+import { Option, Schema } from "effect"
 import {
   AstSourceContent,
   AstSourceFilePath,
@@ -20,11 +20,53 @@ export const PackageManifestName = Schema.NonEmptyString.pipe(
 )
 export type PackageManifestName = typeof PackageManifestName.Type
 
-export const NxTierTag = Schema.NonEmptyString.pipe(
-  Schema.check(Schema.isTrimmed()),
-  Schema.brand("NxTierTag"),
-)
+export const NxTierTag = Schema.Literals([
+  "type:contract",
+  "type:service",
+  "type:core",
+  "type:domain",
+  "type:infra",
+  "type:app",
+]).pipe(Schema.brand("NxTierTag"))
 export type NxTierTag = typeof NxTierTag.Type
+
+export const NxScopeTag = Schema.Literals(["scope:web", "scope:fixture"]).pipe(
+  Schema.brand("NxScopeTag"),
+)
+export type NxScopeTag = typeof NxScopeTag.Type
+
+const decodeNxTierTag = Schema.decodeUnknownOption(NxTierTag)
+const decodeNxScopeTag = Schema.decodeUnknownOption(NxScopeTag)
+
+export const parseManifestTags = (
+  rawTags: ReadonlyArray<string>,
+): {
+  readonly nxTags: ReadonlyArray<NxTierTag>
+  readonly scopeTags: ReadonlyArray<NxScopeTag>
+  readonly unknownTags: ReadonlyArray<string>
+} => {
+  const nxTags: Array<NxTierTag> = []
+  const scopeTags: Array<NxScopeTag> = []
+  const unknownTags: Array<string> = []
+  for (const raw of rawTags) {
+    Option.match(decodeNxTierTag(raw), {
+      onSome: (tierTag) => {
+        nxTags.push(tierTag)
+      },
+      onNone: () => {
+        Option.match(decodeNxScopeTag(raw), {
+          onSome: (scopeTag) => {
+            scopeTags.push(scopeTag)
+          },
+          onNone: () => {
+            unknownTags.push(raw)
+          },
+        })
+      },
+    })
+  }
+  return { nxTags, scopeTags, unknownTags }
+}
 
 export const PackageDependencyName = Schema.NonEmptyString.pipe(
   Schema.check(Schema.isTrimmed()),
@@ -37,6 +79,7 @@ export const TierTopologyRuleId = Schema.Literals([
   "forbidden-contract-dependency",
   "forbidden-service-dependency",
   "forbidden-core-dependency",
+  "impure-core-tier-import",
   "impure-service-tier-import",
   "undeclared-workspace-dependency",
   "banned-workspace-dependency",
@@ -53,6 +96,7 @@ export const PackageTierManifestInput = Schema.Struct({
   manifestPath: PackageManifestPath,
   packageName: PackageManifestName,
   nxTags: Schema.Array(NxTierTag),
+  scopeTags: Schema.optional(Schema.Array(NxScopeTag)),
   dependencyNames: Schema.Array(PackageDependencyName),
   nonRuntimeDependencyNames: Schema.Array(PackageDependencyName),
 })

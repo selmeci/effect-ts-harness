@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
@@ -518,6 +518,66 @@ status: accepted
       expect(res.clean).toBe(false)
       expect(res.degraded).toBe(true)
       expect(res.degradedReason).toBe("git-head-unavailable")
+    }),
+  )
+
+  it.effect("F-8.1: harness_ontology_why and harness_ontology_impact surface degraded: true on missing snapshot", () =>
+    Effect.gen(function* () {
+      const tmpDir = mkdtempSync(join(tmpdir(), "harness-mcp-ontology-degraded-"))
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          rmSync(tmpDir, { recursive: true, force: true })
+        }),
+      )
+
+      const whyRes = (yield* executeToolEffect(
+        "harness_ontology_why",
+        { symbolOrSpan: "PhotoRepo", repoRoot: tmpDir },
+        { repoRoot: tmpDir },
+      )) as { readonly degraded: boolean; readonly degradedReason?: string }
+      expect(whyRes.degraded).toBe(true)
+      expect(whyRes.degradedReason).toBe("missing-graph-snapshot")
+
+      const impactRes = (yield* executeToolEffect(
+        "harness_ontology_impact",
+        { symbolOrSpan: "PhotoRepo", repoRoot: tmpDir },
+        { repoRoot: tmpDir },
+      )) as { readonly degraded: boolean; readonly degradedReason?: string }
+      expect(impactRes.degraded).toBe(true)
+      expect(impactRes.degradedReason).toBe("missing-graph-snapshot")
+    }),
+  )
+
+  it.effect("fails closed with degradedReason=unreadable-governance-docs when governance doc cannot be read", () =>
+    Effect.gen(function* () {
+      const tmpDir = mkdtempSync(join(tmpdir(), "harness-mcp-unreadable-doc-"))
+      const adrDir = join(tmpDir, "docs", "adr")
+      const adrPath = join(adrDir, "ADR-0001.md")
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          if (existsSync(adrPath)) chmodSync(adrPath, 0o644)
+          rmSync(tmpDir, { recursive: true, force: true })
+        }),
+      )
+      mkdirSync(adrDir, { recursive: true })
+      writeFileSync(adrPath, "# ADR-0001\n", "utf8")
+      chmodSync(adrPath, 0o000)
+
+      const raw = yield* executeToolEffect(
+        "harness_ontology_check",
+        { repoRoot: tmpDir },
+        {
+          repoRoot: tmpDir,
+          graph,
+          decisionLayer: makeMockDecisionModelLayer(),
+        },
+      )
+      const res = decodeCheckResult(raw)
+      expect(res.clean).toBe(false)
+      expect(res.degraded).toBe(true)
+      expect(res.degradedReason).toBe("unreadable-governance-docs")
+      expect(res.evaluationError).toContain("Unreadable governance docs:")
+      expect(res.findings.some((f) => f.kind === "unreadable-workspace-file")).toBe(true)
     }),
   )
 })

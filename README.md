@@ -18,8 +18,8 @@ The harness constrains coding agents with deterministic compiler, linter, proper
 
 1. **Deterministic Gates Always Win:** `@effect/tsgo` (`tsgo` + `@effect/language-service`), `oxlint` (20+ custom AST rules + Nx module boundary rules), Vitest, `GraphGc.decide`, `OntologyInvariants.decide`, and `SpanBudget.decide` hold absolute veto power. The local advisory model (`DecisionModel` / `clef-flash`) never overrides a deterministic check.
 2. **Plan-as-Code (`stub<A, E, R>()`):** Before writing implementation bodies, agents translate EARS requirements and ADR decisions into compilable TypeScript skeletons using `stub<A, E, R>(...args)` from `@harness/contract`. `harness plan-check` verifies that `A` (success), `E` (`Schema.TaggedErrorClass` union), and `R` (`Context.Service` capabilities) typecheck across the workspace before implementation begins.
-3. **ArchiMate 3.2 + Omnigraph Property Graph:** Requirements, ADRs, domain contracts, services, layers, handlers, and tests are indexed into a single property graph backed by `@modernrelay/omnigraph-core` (`v0.14.0` Rust NAPI + SQLite + `sqlite-vec`) and queried via declarative `.gq` pattern-matching queries.
-4. **Zero-Docker, Zero-Python Local Stack:** All parsing, AST extraction, graph traversal, and vector search run in-process on Node.js `>=24.10.0` via Rust NAPI addons (`oxc-parser`, `@ast-grep/napi`, `@modernrelay/omnigraph-core`, `sqlite-vec`).
+3. **ArchiMate 3.2 + Omnigraph Property Graph:** Requirements, ADRs, domain contracts, services, layers, handlers, and tests are indexed into a single property graph backed by `@modernrelay/omnigraph-core` (`v0.14.0` Rust NAPI) and JSONL/manifest indexes, queried via declarative `.gq` pattern-matching queries.
+4. **Zero-Docker, Zero-Python Local Stack:** All parsing, AST extraction, graph traversal, and structural indexing run in-process on Node.js `>=24.10.0` via the TypeScript Compiler API, `@ast-grep/napi`, `@modernrelay/omnigraph-core`, and JSONL/manifest indexes.
 5. **Compounding Learnings Without Context Bloat:** Verification failures and route misses are recorded in `.harness/friction-log.jsonl` and `.harness/telemetry-log.jsonl`. Instead of appending prose rules to `AGENTS.md`, `harness learn` clusters recurring friction into executable `oxlint` rules, deterministic gate tests, or indexed `agent-patterns/*.md` recipes.
 
 ---
@@ -43,7 +43,7 @@ flowchart TD
   end
 
   subgraph Infra["type:infra — Live Layers & Native Bindings"]
-    HARNESS_INFRA["@harness/infra\nNodeServices + ScopedCache.makeWith + Ref/Deferred + UnixSocketDaemon"]
+    HARNESS_INFRA["@harness/infra\nNodeServices + ScopedCache.makeWith + Ref/Deferred + UnixSocketDaemon + LocalDecisionModel"]
     ES_INFRA["@harness/es-infra\nNative @effect/sql-sqlite-do (zero Drizzle)"]
     SAMPLE_INFRA["@harness/sample-infra\n@effect/sql-d1 + @effect/sql-sqlite-do"]
   end
@@ -51,8 +51,8 @@ flowchart TD
   subgraph CoreDomain["type:core / type:domain — Pure Deciders (R = never) & Orchestrators"]
     GATES["@harness/gates (type:core)\n18+ Pure Deciders & Gate Plugins"]
     GRAPH["@harness/graph (type:core)\nOmnigraph v0.14.0 + .gq + ArchiMate 3.2"]
-    INGEST["@harness/ingest (type:core)\nOxc + ast-grep + SQLite FTS5/sqlite-vec"]
-    DECISION["@harness/decision (type:core)\nClef DecisionModel + 13 Versioned Schemas"]
+    INGEST["@harness/ingest (type:core)\nTS Compiler API + @ast-grep/napi + JSONL/manifest indexes"]
+    DECISION["@harness/decision (type:core)\n13 Versioned DecisionModel Schemas + Pure Routing"]
     ES_CORE["@harness/es-core (type:core)\nDecider + AggregateRoot + EventStore"]
     SAMPLE_DOM["@harness/sample-domain (type:domain)\nuploadPhoto + decideAlbumQuota"]
   end
@@ -72,7 +72,7 @@ flowchart TD
   Adapters --> MCP
   CLI --> HARNESS_INFRA & DECISION & GATES & GRAPH & INGEST
   MCP --> HARNESS_INFRA & DECISION & GATES & GRAPH & INGEST
-  HARNESS_INFRA --> DECISION & GATES & GRAPH & INGEST & HARNESS_SVC & HARNESS_CON
+  HARNESS_INFRA --> GRAPH & HARNESS_SVC & HARNESS_CON
   DECISION --> GATES & HARNESS_SVC & HARNESS_CON
   GATES --> GRAPH & HARNESS_SVC & HARNESS_CON
   GRAPH --> HARNESS_SVC & HARNESS_CON
@@ -81,7 +81,7 @@ flowchart TD
   SAMPLE --> SAMPLE_INFRA & SAMPLE_DOM & SAMPLE_CON
   SAMPLE_WEB --> SAMPLE_CON
   SAMPLE_INFRA --> SAMPLE_DOM & SAMPLE_SVC & SAMPLE_CON
-  SAMPLE_DOM --> SAMPLE_SVC & SAMPLE_CON & HARNESS_CON
+  SAMPLE_DOM --> SAMPLE_SVC & SAMPLE_CON
   SAMPLE_SVC --> SAMPLE_CON
   ES_INFRA --> ES_CORE & ES_CON
   ES_CORE --> ES_CON
@@ -200,13 +200,13 @@ Agents and gates query the property graph using Omnigraph's `.gq` language via `
 | `Friction.decide`           | `libs/harness/gates/src/friction-log.ts`         | Clusters `.harness/friction-log.jsonl` events by root cause (`>= 2` occurrences) for `harness learn`.   |
 | `SessionReport.decide`      | `libs/harness/gates/src/telemetry.ts`            | Computes session health score (`0–100`), letter grade (`A–D`), gate pass rates, and recommendations.    |
 
-### 13 Versioned `DecisionModel` Schemas (`@harness/decision`)
+### 13 Versioned `DecisionModel` Schemas (`@harness/decision`) & Live Layer (`@harness/infra`)
 
-Owned by `@harness/decision` and backed by resident Ollama (`clef-flash` via `POST /v1/systemone` using `@effect/ai-typesafe` `TypeSafeDecisionModel` + `TypeSafeClient`, `OLLAMA_KEEP_ALIVE=-1`, and deterministic fallback when Ollama is offline; System One models do not use `/api/generate` or `/v1/chat/completions`):
+Schema contracts and deterministic fallback are owned by `@harness/decision` (`type:core`, 100% pure), while the live `LocalDecisionModel` layer (`libs/harness/infra/src/local-decision-model-live.ts`) lives in `@harness/infra` (`type:infra`) and is backed by resident Ollama (`clef-flash` via `POST /v1/systemone` using `@effect/ai-typesafe` `TypeSafeDecisionModel` + `TypeSafeClient`, `OLLAMA_KEEP_ALIVE=-1`, and deterministic fallback when Ollama is offline; System One models do not use `/api/generate` or `/v1/chat/completions`):
 
 | Schema                        | Used By                          | Purpose                                                                                                           |
 | :---------------------------- | :------------------------------- | :---------------------------------------------------------------------------------------------------------------- |
-| `IdiomRouterV1`               | `harness route`, `harness_route` | Reranks top-K FTS5 / `sqlite-vec` chunks from `repos/effect`, `repos/alchemy`, and `agent-patterns/*.md`.         |
+| `IdiomRouterV1`               | `harness route`, `harness_route` | Reranks top-K structural index chunks (TypeScript Compiler API + `@ast-grep/napi` + JSONL/manifest indexes) from `repos/effect`, `repos/alchemy`, and `agent-patterns/*.md`. |
 | `GuardV1`                     | `harness guard`                  | Classifies ambiguous shell commands when deterministic regex/path guards return `ask`.                            |
 | `TriageV1`                    | `harness verify`                 | Summarizes compiler/test failures and identifies the minimal causal locus when verification fails.                |
 | `PlanStepCoverageV1`          | `harness plan-check`             | Audits whether `stub<A, E, R>()` signatures cover all EARS clauses in the plan.                                   |
@@ -233,9 +233,9 @@ Every typecheck (`pnpm typecheck` / `harness verify`) runs `tsgo -b` patched wit
 
 In addition, `tools/oxlint/syntax-bans.js` (`harness/syntax-bans` and `harness/test-integrity`) together with `AstGateCache` / `SelfDogfooding` enforce Effect v4, Alchemy v2, and SQL AST rules, including:
 
-- `harness/syntax-bans`: bans `// @effect-diagnostics` and `/* @effect-diagnostics */` suppressions, `stub()` outside `HARNESS_PLAN_CHECK=1`, `banned-drizzle-import` (`drizzle-orm` / `drizzle-kit`), `discriminant-branching` (`switch` / discriminant `if-else` / ternary), `non-exhaustive-union-match`, `invalid-clef-endpoint`, raw `JSON.parse`, `async`/`await`, `try`/`catch`, `throw`, `any` / `as never`, and imports from `repos/`.
-- `harness/test-integrity`: enforces `unscoped-effect-run` (allowing `runFork`/`runForkWith` only in `apps/*/src/` and `Effect.runSync(Effect.die(...))` only in `libs/es/infra/src/memory.ts` synchronous DO `SqlStorage` bridge methods), bans vacuous `.thenFails()` assertions, and blocks `oxlint-disable` suppressions.
-- `SelfDogfooding.decide`: enforces `no-node-builtins-outside-infra`, `no-global-mutable-cache`, `no-layer-build-in-layer-effect`, `no-double-wrapped-effect-fn`, and `test-env-branch-in-src`.
+- `harness/syntax-bans`: bans `// @effect-diagnostics` and `/* @effect-diagnostics */` suppressions, `stub()` outside `HARNESS_PLAN_CHECK=1`, `banned-drizzle-import` (`drizzle-orm` / `drizzle-kit`), `discriminant-branching` (`switch` / discriminant `if-else` / ternary), `non-exhaustive-union-match`, `invalid-clef-endpoint`, `unscoped-effect-run` (allowing `runFork`/`runForkWith` only in `apps/*/src/` and `Effect.runSync(Effect.die(...))` only in `libs/es/infra/src/memory.ts` synchronous DO `SqlStorage` bridge methods; also enforced as `domain-purity` in `AstGateCache`), raw `JSON.parse`, `async`/`await`, `try`/`catch`, `throw`, `any` / `as never`, and imports from `repos/`.
+- `harness/test-integrity`: bans vacuous `.thenFails()` assertions and blocks `oxlint-disable` suppressions.
+- `SelfDogfooding.decide`: enforces the 10 hexagonal hygiene rules (`no-node-builtins-outside-infra`, `no-global-mutable-cache`, `no-layer-build-in-layer-effect`, `no-double-wrapped-effect-fn`, `silent-gate-fs-fallback`, `test-env-branch-in-src`, `bare-cause-has-interrupts`, `process-env-outside-infra-or-app`, `facade-star-reexport`, and `dynamic-harness-import`; `18` total `SelfDogfoodingRuleId` rules).
 
 ---
 
@@ -250,7 +250,7 @@ Invoke via `node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/inde
 | `doctor`                                   | Checks Node `>=24.10.0`, `@effect/tsgo` (`effectLspOk`), Omnigraph NAPI, SQLite index, and Ollama `clef-flash` status.                                                                         |
 | `session`                                  | Prints session resume handoff (`SessionHandoff.decide`), active branch, verify stamp freshness, and environment health.                                                                        |
 | `ingest`                                   | Incrementally indexes `repos/effect`, `repos/alchemy`, `agent-patterns/*.md`, `docs/specs/*.md`, `docs/adr/*.md`, and workspace TypeScript symbols into `.harness/index.sqlite` and Omnigraph. |
-| `route --query="..."`                      | Queries the structural FTS5 + `sqlite-vec` index and reranks results via `IdiomRouterV1`.                                                                                                      |
+| `route --query="..."`                      | Queries the structural JSONL/manifest + `@ast-grep/napi` index and reranks results via `IdiomRouterV1`.                                                                                      |
 | `guard --format=antigravity\|claude`       | Evaluates `PreToolUse` shell commands and file edits against `repos/` read-only rules, destructive SQL, and `alchemy deploy`/`destroy` guards.                                                 |
 | `plan-check`                               | Runs `HARNESS_PLAN_CHECK=1` typecheck + `oxlint` + `PlanStepCoverageV1` and checkpoints `plan/<task>`.                                                                                         |
 | `gc [--strict]`                            | Runs `GraphGc.decide` over the Omnigraph symbol graph to detect dead exports and orphan files.                                                                                                 |
@@ -272,7 +272,7 @@ Exposes 15 structural, ontology, Datalog/DPO, diagnostics, and telemetry MCP too
 | `harness_callees`           | `{ symbolId }`                 | Lists outgoing edges from a symbol.                                                                                                                          |
 | `harness_tests_reaching`    | `{ symbolIds }`                | Finds the minimal set of Vitest test files transitively reaching the given symbol IDs.                                                                       |
 | `harness_structural_search` | `{ pattern, path? }`           | Runs `@ast-grep/napi` structural AST pattern searches across TypeScript files.                                                                               |
-| `harness_route`             | `{ query, topK? }`             | Queries the hybrid FTS5 + `sqlite-vec` idiom router across Effect/Alchemy docs and `agent-patterns/*.md`.                                                    |
+| `harness_route`             | `{ query, topK? }`             | Queries the structural JSONL/manifest + `@ast-grep/napi` idiom router across Effect/Alchemy docs and `agent-patterns/*.md`.                                  |
 | `harness_ontology_why`      | `{ symbol }`                   | Traces a symbol upward through ArchiMate 3.2 layers to the EARS `Requirement` and `ADR` nodes it realizes.                                                   |
 | `harness_ontology_impact`   | `{ nodeId }`                   | Computes downstream blast radius across contracts, domain functions, services, layers, and tests when a requirement or symbol changes.                       |
 | `harness_ontology_check`    | `{}`                           | Runs `OntologyInvariants.decide` across the workspace and returns any cross-layer violations.                                                                |

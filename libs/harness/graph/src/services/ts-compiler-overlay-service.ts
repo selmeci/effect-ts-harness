@@ -5,6 +5,7 @@ import {
   CompilerOverlayErrorReason,
   CompilerRepoRootInput,
   CompilerRepoRootPath,
+  isPureInterruptCause,
   TsCompilerOverlayError,
 } from "@harness/contract"
 import { type HarnessGraph } from "../model.js"
@@ -153,7 +154,7 @@ export const makeTsCompilerOverlayLayer = (
                 session,
               }).pipe(
                 Effect.catchCause((cause) => {
-                  if (Cause.hasInterrupts(cause)) {
+                  if (isPureInterruptCause(cause)) {
                     return Effect.failCause(cause)
                   }
                   const defectMsg = Cause.pretty(cause)

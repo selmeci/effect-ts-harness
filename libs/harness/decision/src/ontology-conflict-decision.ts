@@ -1,6 +1,7 @@
 import { Cause, Duration, Effect, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
+import { isPureInterruptCause } from "@harness/contract"
 import { match } from "ts-pattern"
 import {
   decideEarsSpecLint,
@@ -82,13 +83,14 @@ const runCheckOntologyPairConflict = (
   Effect.gen(function* () {
     const outcome = yield* DecisionModel.decide(OntologyConflictV1, { input }).pipe(
       Effect.timeoutOption(timeout),
-      Effect.catchCause((cause) =>
-        Cause.hasInterrupts(cause)
-          ? Effect.interrupt
-          : Effect.logWarning(`Decision model fallback: ${Cause.pretty(cause)}`).pipe(
-              Effect.as(Option.none()),
-            ),
+      Effect.catchCauseIf(
+        (cause) => !isPureInterruptCause(cause),
+        (cause) =>
+          Effect.logWarning(`Decision model fallback: ${Cause.pretty(cause)}`).pipe(
+            Effect.as(Option.none()),
+          ),
       ),
+      Effect.orElseSucceed(() => Option.none()),
     )
 
     return yield* match(outcome)

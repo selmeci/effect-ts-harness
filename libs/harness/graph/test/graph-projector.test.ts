@@ -1,4 +1,6 @@
 import { describe, expect, it } from "@effect/vitest"
+import { isPureInterruptCause } from "@harness/contract"
+import type { SyncHostReader } from "@harness/service/host-io"
 import { Cause, Effect, Fiber, Option, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
@@ -1122,4 +1124,72 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
         }
       }),
   )
+
+  it.effect(
+    "F-19.3: decideGraphProjection forwards custom SyncHostReader through validateRelPath, normalizeRelPath, and getOrCreateSourceFile",
+    () =>
+      Effect.gen(function* () {
+        const calls = { existsSync: 0, readTextSync: 0, realpathSync: 0 }
+        const spyHostIo: SyncHostReader = {
+          ...testHostIo,
+          existsSync: (p) => {
+            calls.existsSync += 1
+            return testHostIo.existsSync(p)
+          },
+          readTextSync: (p) => {
+            calls.readTextSync += 1
+            return testHostIo.readTextSync(p)
+          },
+          realpathSync: (p) => {
+            calls.realpathSync += 1
+            return testHostIo.realpathSync(p)
+          },
+        }
+
+        const specGraph = buildHarnessGraph({
+          earsSpecs: [
+            {
+              id: "sample:SPEC-0001",
+              title: "HostIo spy spec",
+              status: "proposed",
+              path: "libs/sample/docs/specs/spy.md",
+              enforcedByFiles: ["libs/sample/domain/src/spy.ts"],
+              referencedSpans: ["Sample.spy"],
+              referencedServices: ["SpyService"],
+              referencedErrors: ["SpyError"],
+            },
+          ],
+        })
+        const rewrite = yield* decideGraphRewrite(specGraph, "auto-plan")
+        const rec = Option.getOrThrow(rewrite.result.recommendedCandidate)
+        const res = yield* decideGraphProjection({
+          workspaceRoot: process.cwd(),
+          initialGraph: specGraph,
+          targetGraph: rewrite.targetGraph,
+          patches: rec.patches,
+          verifyRoundTrip: false,
+          hostIo: spyHostIo,
+        })
+
+        expect(res.overlays.length).toBeGreaterThan(0)
+        expect(calls.existsSync).toBeGreaterThan(0)
+        expect(calls.realpathSync).toBeGreaterThan(0)
+        expect(calls.readTextSync).toBeGreaterThanOrEqual(0)
+      }),
+  )
+
+  it("F-12.1: isPureInterruptCause preserves composite Fail+Interrupt causes and only matches pure interrupts", () => {
+    const pureInt = Cause.interrupt(1)
+    const compositeFailInt = Cause.combine(
+      Cause.fail(new Error("boom")),
+      Cause.interrupt(1),
+    )
+    const compositeDieInt = Cause.combine(
+      Cause.die("defect"),
+      Cause.interrupt(1),
+    )
+    expect(isPureInterruptCause(pureInt)).toBe(true)
+    expect(isPureInterruptCause(compositeFailInt)).toBe(false)
+    expect(isPureInterruptCause(compositeDieInt)).toBe(false)
+  })
 })

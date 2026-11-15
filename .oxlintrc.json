@@ -127,6 +127,35 @@
           }
         ]
       }
+    },
+    {
+      "files": [
+        "libs/**/contract/src/**/*.ts",
+        "libs/**/service/src/**/*.ts",
+        "libs/**/domain/src/**/*.ts",
+        "libs/**/core/src/**/*.ts",
+        "libs/harness/decision/src/**/*.ts",
+        "libs/harness/ingest/src/**/*.ts",
+        "libs/harness/gates/src/**/*.ts",
+        "libs/harness/graph/src/**/*.ts"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["@effect/ai-typesafe", "@effect/ai-typesafe/*", "@effect/platform", "@effect/platform-*"],
+                "message": "@effect/ai-typesafe and @effect/platform* are impure I/O bindings banned in type:contract, type:service, type:core, and type:domain."
+              },
+              {
+                "group": ["@effect/sql-*", "alchemy", "alchemy/*", "drizzle-orm", "drizzle-orm/*", "drizzle-kit", "drizzle-kit/*"],
+                "message": "Infrastructure SQL, Alchemy, and Drizzle packages are banned in type:contract, type:service, type:core, and type:domain."
+              }
+            ]
+          }
+        ]
+      }
     }
   ]
 }

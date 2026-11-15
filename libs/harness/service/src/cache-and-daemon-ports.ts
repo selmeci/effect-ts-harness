@@ -11,6 +11,7 @@ import type {
   DecisionCachePayloadJson,
   DecisionCacheStatsSnapshot,
   DecisionCacheTtlMillis,
+  EvaluatorId,
   NonNegativeCount,
   WorkspaceFilePath,
   WorkspaceFsError,
@@ -20,7 +21,7 @@ export interface AstGateCachePortShape {
   readonly evaluateBatch: (
     files: ReadonlyArray<AstGateFileBatchInput>,
     evaluateFile: AstGateFileEvaluator,
-    evaluatorId?: string,
+    evaluatorId?: EvaluatorId,
   ) => Effect.Effect<AstGateEvaluationReport, WorkspaceFsError | AstGateEvaluationError>
   readonly clearCache: Effect.Effect<void, WorkspaceFsError>
   readonly cacheSize: Effect.Effect<NonNegativeCount, WorkspaceFsError>

@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto"
 import { dirname } from "node:path"
 import { NodeServices } from "@effect/platform-node"
 import { Effect, FileSystem, Layer, Path } from "effect"
+import { match, P } from "ts-pattern"
 import {
-  ErrorReasonMessage,
+  toErrorReasonMessage,
   WorkspaceFileContent,
   type WorkspaceFilePath,
   WorkspaceFsError,
@@ -16,17 +17,12 @@ const toWorkspaceFsError = (
   filePath: WorkspaceFilePath,
   operation: "read" | "write" | "stat" | "readdir",
   err: unknown,
-): WorkspaceFsError => {
-  const message =
-    err instanceof Error && err.message.trim().length > 0
-      ? err.message.trim()
-      : `Workspace filesystem ${operation} failed`
-  return new WorkspaceFsError({
+): WorkspaceFsError =>
+  new WorkspaceFsError({
     filePath,
     operation: WorkspaceFsOperation.make(operation),
-    reason: ErrorReasonMessage.make(message),
+    reason: toErrorReasonMessage(err, `Workspace filesystem ${operation} failed`),
   })
-}
 
 const makeWorkspaceFsLayer = (
   _options?: Record<string, never>,
@@ -53,7 +49,18 @@ const makeWorkspaceFsLayer = (
               Effect.ensuring(fs.remove(tmpPath, { force: true }).pipe(Effect.ignore)),
             )
           }),
-        exists: (filePath) => fs.exists(filePath).pipe(Effect.orElseSucceed(() => false)),
+        exists: (filePath) =>
+          fs.stat(filePath).pipe(
+            Effect.as(true),
+            Effect.catchTag("PlatformError", (err) =>
+              match(err.reason)
+                .with({ _tag: "NotFound" }, () => Effect.succeed(false))
+                .with({ _tag: P.not("NotFound") }, () =>
+                  Effect.fail(toWorkspaceFsError(filePath, "stat", err)),
+                )
+                .exhaustive(),
+            ),
+          ),
       }
 
       return impl
@@ -69,14 +76,7 @@ const makeWorkspaceFsHostIoLayer = (hostIo: SyncHostIo): Layer.Layer<WorkspaceFs
     readTextFile: (filePath) =>
       Effect.try({
         try: () => WorkspaceFileContent.make(hostIo.readTextSync(filePath)),
-        catch: (err) =>
-          new WorkspaceFsError({
-            filePath,
-            operation: WorkspaceFsOperation.make("read"),
-            reason: ErrorReasonMessage.make(
-              err instanceof Error && err.message.trim().length > 0 ? err.message : "Read failed",
-            ),
-          }),
+        catch: (err) => toWorkspaceFsError(filePath, "read", err),
       }),
     writeTextFileAtomic: (filePath, content) =>
       Effect.suspend(() => {
@@ -87,16 +87,7 @@ const makeWorkspaceFsHostIoLayer = (hostIo: SyncHostIo): Layer.Layer<WorkspaceFs
             hostIo.writeTextSync(tmpPath, content)
             hostIo.renameSync(tmpPath, filePath)
           },
-          catch: (err) =>
-            new WorkspaceFsError({
-              filePath,
-              operation: WorkspaceFsOperation.make("write"),
-              reason: ErrorReasonMessage.make(
-                err instanceof Error && err.message.trim().length > 0
-                  ? err.message
-                  : "Write failed",
-              ),
-            }),
+          catch: (err) => toWorkspaceFsError(filePath, "write", err),
         }).pipe(
           Effect.ensuring(
             Effect.ignore(
@@ -112,7 +103,15 @@ const makeWorkspaceFsHostIoLayer = (hostIo: SyncHostIo): Layer.Layer<WorkspaceFs
           ),
         )
       }),
-    exists: (filePath) => Effect.sync(() => hostIo.existsSync(filePath)),
+    exists: (filePath) =>
+      Effect.try({
+        try: () =>
+          hostIo.isFileSync(filePath) ||
+          hostIo.isDirectorySync(filePath) ||
+          hostIo.isSymbolicLinkSync(filePath) ||
+          hostIo.existsSync(filePath),
+        catch: (err) => toWorkspaceFsError(filePath, "stat", err),
+      }),
   })
 
 export { makeWorkspaceFsHostIoLayer, makeWorkspaceFsLayer }

@@ -9,12 +9,15 @@ import {
   DecisionCachePayloadJson,
   DecisionCacheTtlMillis,
   ErrorReasonMessage,
+  EvaluatorId,
   NonNegativeCount,
   SubprocessCommand,
   SubprocessExitCode,
   SubprocessOutput,
   WorkspaceFileContent,
   WorkspaceFilePath,
+  WorkspaceFsError,
+  WorkspaceFsOperation,
   makeAstGateEvaluationReport,
 } from "@harness/contract"
 import {
@@ -25,6 +28,7 @@ import {
   UnixSocketDaemonPort,
   WorkspaceFs,
 } from "../src/index.js"
+import type { SyncHostReader } from "../src/host-io.js"
 
 describe("@harness/service ports", () => {
   it.effect("resolves WorkspaceFs from a test layer", () =>
@@ -84,10 +88,14 @@ describe("@harness/service ports", () => {
   it.effect("resolves AstGateCachePort, DecisionCachePort, and UnixSocketDaemonPort from test layers", () =>
     Effect.gen(function* () {
       const astCache = yield* AstGateCachePort
-      const astReport = yield* astCache.evaluateBatch([], () => [], "custom-evaluator")
+      const astReport = yield* astCache.evaluateBatch(
+        [],
+        () => [],
+        EvaluatorId.make("custom-evaluator"),
+      )
       expect(astReport.verdict).toBe("clean")
       const evalErr = yield* astCache
-        .evaluateBatch([], () => [], "failing-evaluator")
+        .evaluateBatch([], () => [], EvaluatorId.make("failing-evaluator"))
         .pipe(Effect.flip)
       expect(evalErr._tag).toBe("AstGateEvaluationError")
 
@@ -141,6 +149,40 @@ describe("@harness/service ports", () => {
             repoRoot,
           }),
         isSocketAlive: () => Effect.succeed(false),
+      }),
+    ),
+  )
+
+  it.effect("allows WorkspaceFs.exists to fail with WorkspaceFsError and exposes SyncHostReader", () =>
+    Effect.gen(function* () {
+      const fs = yield* WorkspaceFs
+      const err = yield* fs.exists(WorkspaceFilePath.make("/restricted")).pipe(Effect.flip)
+      expect(err._tag).toBe("WorkspaceFsError")
+      expect(err.operation).toBe("stat")
+
+      const reader: SyncHostReader = {
+        existsSync: () => true,
+        isFileSync: () => true,
+        isDirectorySync: () => false,
+        isSymbolicLinkSync: () => false,
+        readTextSync: () => "ok",
+        readBytesSync: () => new Uint8Array(),
+        readdirSync: () => [],
+        realpathSync: (p) => p,
+      }
+      expect(reader.existsSync("/restricted")).toBe(true)
+    }).pipe(
+      Effect.provideService(WorkspaceFs, {
+        readTextFile: () => Effect.succeed(WorkspaceFileContent.make("")),
+        writeTextFileAtomic: () => Effect.void,
+        exists: (filePath) =>
+          Effect.fail(
+            new WorkspaceFsError({
+              filePath,
+              operation: WorkspaceFsOperation.make("stat"),
+              reason: ErrorReasonMessage.make("EACCES: permission denied"),
+            }),
+          ),
       }),
     ),
   )

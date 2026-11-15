@@ -1,3 +1,4 @@
+import { posix } from "node:path"
 import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import { nodeSyncHostIo } from "@harness/infra"
@@ -27,6 +28,8 @@ const TranscriptStepSchema = Schema.Struct({
 const decodeTranscriptStep = Schema.decodeOption(Schema.fromJsonString(TranscriptStepSchema))
 
 const WRITE_TOOL_NAMES = new Set([
+  "write_file",
+  "edit_file",
   "write_to_file",
   "replace_file_content",
   "multi_replace_file_content",
@@ -56,7 +59,6 @@ const READ_ONLY_SHELL_PREFIXES = [
   "du",
   "df",
   "ps",
-  "env",
   "printenv",
   "true",
   "false",
@@ -80,14 +82,115 @@ const unwrapTranscriptStringArg = (val: unknown): string => {
   return trimmed
 }
 
+const SAFE_ENV_ASSIGNMENT_RE = /^(?:CI|NO_COLOR|FORCE_COLOR|TZ|LC_ALL|LANG)=[A-Za-z0-9_.:/-]+$/
+
+const FIND_MUTATING_FLAGS = new Set([
+  "-exec",
+  "-execdir",
+  "-ok",
+  "-okdir",
+  "-delete",
+  "-fprint",
+  "-fprint0",
+  "-fprintf",
+  "-fls",
+])
+
+const GIT_BRANCH_READONLY_FLAG_RE =
+  /^(?:--list|-l|-a|--all|-r|--remotes|-v|-vv|--verbose|--show-current|--no-color|--color(?:=[a-z]+)?)$/
+
+const tokenizeAndUnquoteShellSegment = (segment: string): ReadonlyArray<string> | undefined => {
+  const tokens: Array<string> = []
+  let current = ""
+  let hasToken = false
+  let quote: "'" | '"' | null = null
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i]!
+    if (quote !== null) {
+      if (ch === quote) {
+        quote = null
+      } else {
+        current += ch
+      }
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      hasToken = true
+      continue
+    }
+    if (/\s/.test(ch)) {
+      if (hasToken) {
+        tokens.push(current)
+        current = ""
+        hasToken = false
+      }
+      continue
+    }
+    current += ch
+    hasToken = true
+  }
+  if (quote !== null) {
+    return undefined
+  }
+  if (hasToken) {
+    tokens.push(current)
+  }
+  return tokens
+}
+
+const stripSafeLeadingEnvAssignments = (segment: string): string => {
+  let rest = segment.trim()
+  while (true) {
+    const m = /^([^\s]+)\s+([\s\S]+)$/.exec(rest)
+    if (!m || !SAFE_ENV_ASSIGNMENT_RE.test(m[1]!)) {
+      return rest
+    }
+    rest = m[2]!.trim()
+  }
+}
+
+const hasDisallowedReadOnlyFlags = (tokens: ReadonlyArray<string>): boolean => {
+  const cmd = tokens[0]
+  if (cmd === "find") {
+    return tokens.slice(1).some((t) => FIND_MUTATING_FLAGS.has(t))
+  }
+  if (cmd === "rg") {
+    return tokens
+      .slice(1)
+      .some((t) => t === "--pre" || t.startsWith("--pre=") || t === "--pre-glob" || t.startsWith("--pre-glob="))
+  }
+  if (cmd === "git") {
+    const sub = tokens[1]
+    if (sub === "branch") {
+      return tokens.slice(2).some((t) => !GIT_BRANCH_READONLY_FLAG_RE.test(t))
+    }
+    if (sub === "remote") {
+      if (tokens.length === 2) return false
+      if (tokens.length === 3 && (tokens[2] === "-v" || tokens[2] === "--verbose")) return false
+      if (tokens.length >= 3 && tokens[2] === "get-url") return false
+      return true
+    }
+    if (sub === "diff" || sub === "log" || sub === "show" || sub === "status") {
+      return tokens
+        .slice(2)
+        .some((t) => t === "--output" || t.startsWith("--output=") || t === "--ext-diff")
+    }
+  }
+  return false
+}
+
 const isReadOnlyShellCommand = (rawCommand: string): boolean => {
+  if (/(\$\(|`|<\(|>\(|\r|\n)/.test(rawCommand)) {
+    return false
+  }
   const cleaned = rawCommand
     .replace(/\b2>\s*\/dev\/null\b/g, "")
     .replace(/\b2>&1\b/g, "")
     .replace(/\b1?>\s*\/dev\/null\b/g, "")
     .trim()
   if (cleaned.length === 0) return true
-  if (/(?:^|[^<>])>>?(?![>&])/.test(cleaned)) {
+  if (/(?:^|[^&])&(?:[^&]|$)|&&&/.test(cleaned) || /[<>]/.test(cleaned)) {
     return false
   }
   const segments = cleaned
@@ -97,13 +200,27 @@ const isReadOnlyShellCommand = (rawCommand: string): boolean => {
   if (segments.length === 0) return true
 
   return segments.every((seg) => {
-    const withoutEnv = seg.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)+/, "").trim()
-    return READ_ONLY_SHELL_PREFIXES.some(
-      (prefix) =>
-        withoutEnv === prefix ||
-        withoutEnv.startsWith(`${prefix} `) ||
-        withoutEnv.startsWith(`${prefix}\t`),
+    const withoutEnv = stripSafeLeadingEnvAssignments(seg)
+    if (withoutEnv.includes("$") || withoutEnv.includes("\\")) {
+      return false
+    }
+    const rawTokens = tokenizeAndUnquoteShellSegment(withoutEnv)
+    if (rawTokens === undefined || rawTokens.length === 0) {
+      return false
+    }
+    if (rawTokens[0] === "git" && rawTokens[1]?.startsWith("-") && rawTokens[1] !== "--no-pager") {
+      return false
+    }
+    const tokens =
+      rawTokens[0] === "git" && rawTokens[1] === "--no-pager"
+        ? [rawTokens[0], ...rawTokens.slice(2)]
+        : rawTokens
+    const normalizedCmd = tokens.join(" ")
+    const matchesPrefix = READ_ONLY_SHELL_PREFIXES.some(
+      (prefix) => normalizedCmd === prefix || normalizedCmd.startsWith(`${prefix} `),
     )
+    if (!matchesPrefix) return false
+    return !hasDisallowedReadOnlyFlags(tokens)
   })
 }
 
@@ -114,16 +231,11 @@ const isMutatingTranscriptToolCall = (
     const targetFile =
       unwrapTranscriptStringArg(tc.args?.TargetFile) ||
       unwrapTranscriptStringArg(tc.args?.file_path)
-    // Exempt planning, RFC, prompt, and Antigravity brain/scratch files so documentation-only
-    // or planning turns do not count as code mutations for the stop-hook verification guard.
-    if (
-      targetFile.length > 0 &&
-      (targetFile.includes("/.gemini/antigravity/brain/") ||
-        targetFile.includes("/.gemini/antigravity/scratch/") ||
-        targetFile.includes("/docs/rfcs/") ||
-        targetFile.includes("/.harness/prompts/"))
-    ) {
-      return false
+    if (targetFile.length > 0) {
+      const normalized = posix.normalize(targetFile.replace(/\\/g, "/"))
+      if (normalized.startsWith("/") && normalized.includes("/.gemini/antigravity/brain/")) {
+        return false
+      }
     }
     return true
   }
@@ -134,7 +246,12 @@ const isMutatingTranscriptToolCall = (
   }
   if (tc.name === "call_mcp_tool") {
     const toolName = unwrapTranscriptStringArg(tc.args?.ToolName)
-    return toolName === "mutate" || toolName === "load" || toolName.startsWith("branches_")
+    return (
+      toolName === "mutate" ||
+      toolName === "load" ||
+      toolName === "harness_graph_rewrite" ||
+      toolName.startsWith("branches_")
+    )
   }
   if (tc.name === "invoke_subagent" || tc.name === "Task") {
     const isReadOnlySubagentType = (typeName: string): boolean => {
@@ -174,23 +291,16 @@ const isMutatingTranscriptToolCall = (
   return false
 }
 
-const isSuccessfulVerifyTranscriptStep = (
-  step: Schema.Schema.Type<typeof TranscriptStepSchema>,
-): boolean => {
-  const content = step.content
-  if (typeof content !== "string" || content.length === 0) return false
-  return (
-    content.includes("The command exited with code 0.") &&
-    content.includes('"taskBranch":') &&
-    /"treeHash"\s*:\s*"[0-9a-f]{64}"/.test(content)
-  )
-}
+type ParseTranscriptStepsResult =
+  | {
+      readonly _tag: "Ok"
+      readonly steps: ReadonlyArray<Schema.Schema.Type<typeof TranscriptStepSchema>>
+    }
+  | { readonly _tag: "Corrupt"; readonly reason: string }
 
-const parseTranscriptSteps = (
-  decoded?: StopHookStdin,
-): ReadonlyArray<Schema.Schema.Type<typeof TranscriptStepSchema>> => {
+const parseTranscriptSteps = (decoded?: StopHookStdin): ParseTranscriptStepsResult => {
   if (!decoded?.transcriptPath || !nodeSyncHostIo.existsSync(decoded.transcriptPath)) {
-    return []
+    return { _tag: "Ok", steps: [] }
   }
   const transcriptPath = decoded.transcriptPath
   const fullTranscriptPath = transcriptPath.replace(/transcript\.jsonl$/, "transcript_full.jsonl")
@@ -200,103 +310,66 @@ const parseTranscriptSteps = (
       : transcriptPath
 
   return Result.getOrElse(
-    Result.try(() => {
-      const lines = nodeSyncHostIo
-        .readTextSync(effectivePath)
-        .split(/\r?\n/)
-        .filter((line) => line.trim().length > 0)
-      const steps: Array<Schema.Schema.Type<typeof TranscriptStepSchema>> = []
-      for (const line of lines) {
-        const stepOpt = decodeTranscriptStep(line)
-        match(stepOpt)
-          .with({ _tag: "Some" }, ({ value }) => {
-            steps.push(value)
-          })
-          .with({ _tag: "None" }, () => undefined)
-          .exhaustive()
-      }
-      return steps
+    Result.try({
+      try: (): ParseTranscriptStepsResult => {
+        const lines = nodeSyncHostIo
+          .readTextSync(effectivePath)
+          .split(/\r?\n/)
+          .filter((line) => line.trim().length > 0)
+        const steps: Array<Schema.Schema.Type<typeof TranscriptStepSchema>> = []
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i]!
+          const stepOpt = decodeTranscriptStep(line)
+          const parsedStep = match(stepOpt)
+            .with({ _tag: "Some" }, ({ value }) => value)
+            .with({ _tag: "None" }, () => undefined)
+            .exhaustive()
+          if (parsedStep === undefined) {
+            return {
+              _tag: "Corrupt",
+              reason: `Corrupt transcript JSONL line ${i + 1} in ${effectivePath}`,
+            }
+          }
+          steps.push(parsedStep)
+        }
+        return { _tag: "Ok", steps }
+      },
+      catch: (err): ParseTranscriptStepsResult => ({
+        _tag: "Corrupt",
+        reason: `Failed to read transcript ${effectivePath}: ${err instanceof Error ? err.message : String(err)}`,
+      }),
     }),
-    () => [],
+    (): ParseTranscriptStepsResult => ({
+      _tag: "Corrupt",
+      reason: `Failed to read transcript ${effectivePath}`,
+    }),
   )
 }
 
-export const isReadOnlyStopTurn = (decoded?: StopHookStdin): boolean => {
-  const steps = parseTranscriptSteps(decoded)
-  if (steps.length === 0) return false
-  let lastUserExplicitIdx = -1
-  for (let i = 0; i < steps.length; i++) {
-    if (steps[i]?.source === "USER_EXPLICIT") {
-      lastUserExplicitIdx = i
-    }
-  }
-  if (lastUserExplicitIdx === -1) return false
-  let firstStopHookBlockIdx = -1
-  for (let i = lastUserExplicitIdx + 1; i < steps.length; i++) {
-    const content = steps[i]?.content
-    if (typeof content === "string" && content.includes("Stop hook blocked termination:")) {
-      firstStopHookBlockIdx = i
-      break
-    }
-  }
-  const endIdx = firstStopHookBlockIdx !== -1 ? firstStopHookBlockIdx : steps.length
-  for (let i = lastUserExplicitIdx + 1; i < endIdx; i++) {
-    const step = steps[i]
-    if (!step?.tool_calls) continue
-    for (const tc of step.tool_calls) {
-      if (isMutatingTranscriptToolCall(tc)) {
-        const targetFile =
-          unwrapTranscriptStringArg(tc.args?.TargetFile) ||
-          unwrapTranscriptStringArg(tc.args?.file_path)
-        const isFileEdit =
-          tc.name === "write_file" ||
-          tc.name === "edit_file" ||
-          tc.name === "replace_file_content" ||
-          tc.name === "multi_replace_file_content" ||
-          tc.name === "write_to_file" ||
-          tc.name === "Edit" ||
-          tc.name === "Write"
-        if (
-          isFileEdit &&
-          (targetFile.includes("/docs/rfcs/") || targetFile.includes("/.harness/prompts/"))
-        ) {
-          continue
-        }
-        return false
-      }
-    }
-  }
-  return true
-}
-
-export const hasVerifiedSinceLastMutation = (decoded?: StopHookStdin): boolean => {
-  const steps = parseTranscriptSteps(decoded)
-  if (steps.length === 0) return false
-  let lastUserExplicitIdx = -1
-  for (let i = 0; i < steps.length; i++) {
-    if (steps[i]?.source === "USER_EXPLICIT") {
-      lastUserExplicitIdx = i
-    }
-  }
-  if (lastUserExplicitIdx === -1) return false
-  let lastMutatingIdx = -1
-  let lastVerifySuccessIdx = -1
-  for (let i = lastUserExplicitIdx + 1; i < steps.length; i++) {
-    const step = steps[i]
-    if (!step) continue
-    if (isSuccessfulVerifyTranscriptStep(step)) {
-      lastVerifySuccessIdx = i
-    }
-    if (step.tool_calls) {
-      for (const tc of step.tool_calls) {
-        if (isMutatingTranscriptToolCall(tc)) {
-          lastMutatingIdx = i
+export const isReadOnlyStopTurn = (decoded?: StopHookStdin): boolean =>
+  match(parseTranscriptSteps(decoded))
+    .with({ _tag: "Corrupt" }, () => false)
+    .with({ _tag: "Ok" }, ({ steps }) => {
+      if (steps.length === 0) return false
+      let lastUserExplicitIdx = -1
+      for (let i = 0; i < steps.length; i++) {
+        if (steps[i]?.source === "USER_EXPLICIT") {
+          lastUserExplicitIdx = i
         }
       }
-    }
-  }
-  return lastVerifySuccessIdx !== -1 && lastVerifySuccessIdx > lastMutatingIdx
-}
+      if (lastUserExplicitIdx === -1) return false
+      for (let i = lastUserExplicitIdx + 1; i < steps.length; i++) {
+        const step = steps[i]
+        if (!step?.tool_calls) continue
+        for (const tc of step.tool_calls) {
+          if (isMutatingTranscriptToolCall(tc)) {
+            return false
+          }
+        }
+      }
+      return true
+    })
+    .exhaustive()
 
 export const isSubagentStopContext = (repoRoot: string, decoded?: StopHookStdin): boolean => {
   if (
@@ -314,52 +387,16 @@ export const isSubagentStopContext = (repoRoot: string, decoded?: StopHookStdin)
     return true
   }
   if (decoded?.transcriptPath && nodeSyncHostIo.existsSync(decoded.transcriptPath)) {
-    const transcriptPath = decoded.transcriptPath
-    const isSubagentTranscript = Result.getOrElse(
-      Result.try({
-        try: () => {
-          const lines = nodeSyncHostIo
-            .readTextSync(transcriptPath)
-            .split(/\r?\n/)
-            .filter((line) => line.trim().length > 0)
-          const firstLine = lines[0]
-          if (firstLine === undefined) {
-            return false
-          }
-          const firstStepOpt = decodeTranscriptStep(firstLine)
-          const isSystemMessage = match(firstStepOpt)
-            .with(
-              { _tag: "Some" },
-              ({ value }) => value.source === "SYSTEM" && Boolean(value.content?.includes("[Message]")),
-            )
-            .with({ _tag: "None" }, () => false)
-            .exhaustive()
-          if (!isSystemMessage) {
-            return false
-          }
-          for (const line of lines) {
-            const stepOpt = decodeTranscriptStep(line)
-            const isUserExplicit = match(stepOpt)
-              .with({ _tag: "Some" }, ({ value }) => value.source === "USER_EXPLICIT")
-              .with({ _tag: "None" }, () => false)
-              .exhaustive()
-            if (isUserExplicit) {
-              return false
-            }
-          }
-          return true
-        },
-        catch: (err) => {
-          process.stderr.write(
-            `[harness] Warning: failed to inspect transcript at ${transcriptPath}: ${
-              err instanceof Error ? err.message : String(err)
-            }\n`,
-          )
+    const isSubagentTranscript = match(parseTranscriptSteps({ transcriptPath: decoded.transcriptPath }))
+      .with({ _tag: "Corrupt" }, () => false)
+      .with({ _tag: "Ok" }, ({ steps }) => {
+        const first = steps[0]
+        if (!first || first.source !== "SYSTEM" || !first.content?.includes("[Message]")) {
           return false
-        },
-      }),
-      () => false,
-    )
+        }
+        return !steps.some((step) => step.source === "USER_EXPLICIT")
+      })
+      .exhaustive()
     if (isSubagentTranscript) {
       return true
     }

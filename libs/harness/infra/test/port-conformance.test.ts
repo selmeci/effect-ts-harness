@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { NodeServices } from "@effect/platform-node"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Layer, Option } from "effect"
+import { Effect, Layer, Option, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   ActiveMutantId,
@@ -68,6 +68,23 @@ const runWorkspaceFsConformance = (
         const readErr = yield* fs.readTextFile(missing).pipe(Effect.flip)
         expect(readErr._tag).toBe("WorkspaceFsError")
         expect(readErr.operation).toBe("read")
+
+        if (typeof process.getuid === "function" && process.getuid() !== 0) {
+          const lockedDir = join(dir, "locked-dir")
+          mkdirSync(lockedDir, { recursive: true })
+          chmodSync(lockedDir, 0o000)
+          const inaccessible = WorkspaceFilePath.make(join(lockedDir, "secret.txt"))
+          const statErr = yield* fs.exists(inaccessible).pipe(
+            Effect.flip,
+            Effect.ensuring(
+              Effect.sync(() => {
+                chmodSync(lockedDir, 0o700)
+              }),
+            ),
+          )
+          expect(statErr._tag).toBe("WorkspaceFsError")
+          expect(statErr.operation).toBe("stat")
+        }
       }).pipe(Effect.provide(layer)),
     ),
   )
@@ -94,14 +111,7 @@ const runSubprocessConformance = (
       })
       expect(nonZero.exitCode).toBe(3)
 
-      const invalid = yield* runner
-        .exec({
-          command: SubprocessCommand.make(process.execPath),
-          args: [SubprocessArg.make("bad\0arg")],
-        })
-        .pipe(Effect.flip)
-      expect(invalid._tag).toBe("HarnessSubprocessError")
-      expect(invalid.failureKind).toBe("invalid-input")
+      expect(() => Schema.decodeSync(SubprocessArg)("bad\0arg")).toThrow()
     }).pipe(Effect.provide(layer)),
   )
 }

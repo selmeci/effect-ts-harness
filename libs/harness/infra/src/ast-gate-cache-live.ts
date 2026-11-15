@@ -21,10 +21,12 @@ import {
   computeContentSha256,
   type ContentSha256,
   ErrorReasonMessage,
+  type EvaluatorId,
   HARNESS_GATE_RULE_VERSION,
   inferAstGatePackageTagFromPath,
   makeAstGateEvaluationReport,
   NonNegativeCount,
+  toErrorReasonMessage,
   WorkspaceFilePath,
   WorkspaceFsError,
   WorkspaceFsOperation,
@@ -191,11 +193,7 @@ const makeAstGateCacheLayer = (options?: {
               catch: (err) =>
                 new AstGateEvaluationError({
                   filePath: pending.file.filePath,
-                  reason: ErrorReasonMessage.make(
-                    err instanceof Error && err.message.trim().length > 0
-                      ? err.message.trim()
-                      : "AST gate evaluator failed",
-                  ),
+                  reason: toErrorReasonMessage(err, "AST gate evaluator failed"),
                 }),
             })
             return {
@@ -209,7 +207,7 @@ const makeAstGateCacheLayer = (options?: {
       const evaluateBatch = Effect.fn("AstGateCachePort.evaluateBatch")(function* (
         files: ReadonlyArray<AstGateFileBatchInput>,
         evaluateFile: AstGateFileEvaluator,
-        evaluatorId?: string,
+        evaluatorId?: EvaluatorId,
       ): Effect.fn.Return<AstGateEvaluationReport, WorkspaceFsError | AstGateEvaluationError> {
         const snapshot = yield* SynchronizedRef.modifyEffect(stateRef, (state) =>
           ensureLoaded(state).pipe(Effect.map((loaded) => [loaded, loaded] as const)),

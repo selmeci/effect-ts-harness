@@ -7,6 +7,7 @@ import {
   Exit,
   Layer,
   ManagedRuntime,
+  Result,
   Schema,
   Scope,
   SynchronizedRef,
@@ -116,16 +117,39 @@ const createDaemonLineHandler =
                   }
                 }
               }
-              const loadedFiles = requestedRelPaths.flatMap((rel) => {
+              const loadedFiles: Array<{
+                readonly filePath: AstSourceFilePath
+                readonly content: AstSourceContent
+              }> = []
+              for (const rel of requestedRelPaths) {
                 const abs = path.resolve(resolvedRoot, rel)
-                if (!nodeSyncHostIo.existsSync(abs)) return []
-                return [
-                  {
-                    filePath: AstSourceFilePath.make(rel),
-                    content: AstSourceContent.make(nodeSyncHostIo.readTextSync(abs)),
-                  },
-                ]
-              })
+                if (!nodeSyncHostIo.existsSync(abs)) {
+                  return {
+                    id: req.id,
+                    ok: false,
+                    error: `AST gate target file unavailable: ${rel} (file does not exist)`,
+                  }
+                }
+                const readRes = Result.try(() => nodeSyncHostIo.readTextSync(abs))
+                const textOrError = match(readRes)
+                  .with({ _tag: "Success" }, ({ success }) => ({ ok: true as const, text: success }))
+                  .with({ _tag: "Failure" }, ({ failure }) => ({
+                    ok: false as const,
+                    error: `AST gate target file unavailable: ${rel} (${failure instanceof Error ? failure.message : String(failure)})`,
+                  }))
+                  .exhaustive()
+                if (!textOrError.ok) {
+                  return {
+                    id: req.id,
+                    ok: false,
+                    error: textOrError.error,
+                  }
+                }
+                loadedFiles.push({
+                  filePath: AstSourceFilePath.make(rel),
+                  content: AstSourceContent.make(textOrError.text),
+                })
+              }
               const cachePort = yield* SynchronizedRef.modifyEffect(cachePortsRef, (ports) => {
                 const existing = ports.get(cachePath)
                 if (existing !== undefined) {
@@ -202,7 +226,13 @@ export const startHarnessDaemonServer = (
                       onSuccess: () => undefined,
                     }),
                   )
-                  .finally(() => daemonRuntime.dispose()),
+                  .finally(() =>
+                    daemonRuntime.dispose().catch((disposeErr: unknown) => {
+                      process.stderr.write(
+                        `[harness-mcp] Daemon runtime dispose error: ${disposeErr instanceof Error ? disposeErr.message : String(disposeErr)}\n`,
+                      )
+                    }),
+                  ),
             }),
           ),
           Effect.catchTag("DaemonServerError", (err) =>
@@ -232,7 +262,14 @@ export const startHarnessDaemonServer = (
     .then((exit) =>
       Exit.match(exit, {
         onFailure: (cause) =>
-          daemonRuntime.dispose().then(() => Promise.reject(Cause.squash(cause))),
+          daemonRuntime
+            .dispose()
+            .catch((disposeErr: unknown) => {
+              process.stderr.write(
+                `[harness-mcp] Daemon runtime dispose error: ${disposeErr instanceof Error ? disposeErr.message : String(disposeErr)}\n`,
+              )
+            })
+            .then(() => Promise.reject(Cause.squash(cause))),
         onSuccess: (handle) => handle,
       }),
     )

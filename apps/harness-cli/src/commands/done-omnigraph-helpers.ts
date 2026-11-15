@@ -1,4 +1,4 @@
-import { Cause, Effect, Option } from "effect"
+import { Cause, Effect } from "effect"
 import { match } from "ts-pattern"
 import {
   diffOmnigraphBranches,
@@ -68,7 +68,11 @@ export const syncOmnigraphOnDone = (
       target: taskBranches.planBranch,
     }).pipe(
       Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
-      Effect.orElseSucceed(() => Option.none()),
+      Effect.catch((err) =>
+        Effect.sync(() => {
+          process.stderr.write(`[harness:done] Omnigraph branch diff warning: ${String(err)}\n`)
+        }),
+      ),
     )
 
     const mergeExit = yield* Effect.exit(
@@ -80,7 +84,10 @@ export const syncOmnigraphOnDone = (
       }).pipe(Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo))),
     )
     const mergeOutcome = match(mergeExit)
-      .with({ _tag: "Success" }, ({ value }) => ({ ok: value, detail: undefined }))
+      .with({ _tag: "Success" }, ({ value }) => ({
+        ok: typeof value === "boolean" ? value : true,
+        detail: undefined,
+      }))
       .with({ _tag: "Failure" }, ({ cause }) => {
         const pretty = Cause.pretty(cause)
         process.stderr.write(`[harness:done] Omnigraph branch merge failed: ${pretty}\n`)

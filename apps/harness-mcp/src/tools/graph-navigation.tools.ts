@@ -1,5 +1,6 @@
 import * as path from "node:path"
 import { Cause, Effect, Option, Schema } from "effect"
+import { isPureInterruptCause } from "@harness/contract"
 import {
   decideStructuralSearch,
   findCallees,
@@ -7,19 +8,20 @@ import {
   findTestsReaching,
   resolveNode,
 } from "@harness/graph"
-import { LocalDecisionModel, routeStep } from "@harness/decision"
-import { nodeSyncHostIo } from "@harness/infra"
+import { routeStep } from "@harness/decision"
+import { LocalDecisionModel, nodeSyncHostIo } from "@harness/infra"
 import {
+  graphStatusMeta,
   isPathInsideRoot,
   McpToolName,
   type McpToolPluginDescriptor,
   normalizeProjectPath,
   resolveDefaultRepoRoot,
-  resolveGraph,
+  resolveGraphWithStatus,
   type ServerOptions,
 } from "./mcp-helpers.js"
 
-export { isPathInsideRoot, normalizeProjectPath, resolveDefaultRepoRoot, resolveGraph }
+export { isPathInsideRoot, normalizeProjectPath, resolveDefaultRepoRoot }
 
 const ResolveInputSchema = Schema.Struct({
   symbolOrSpan: Schema.String.annotate({
@@ -120,8 +122,11 @@ export const buildGraphNavigationToolDescriptors = (
     execute: (args) =>
       Effect.gen(function* () {
         const { symbolOrSpan } = yield* decodeResolveInput(args)
-        const graph = yield* resolveGraph(options, args)
-        return resolveNode(graph, symbolOrSpan) ?? null
+        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        return {
+          node: resolveNode(graphStatus.graph, symbolOrSpan) ?? null,
+          ...graphStatusMeta(graphStatus),
+        }
       }),
   },
   {
@@ -131,8 +136,11 @@ export const buildGraphNavigationToolDescriptors = (
     execute: (args) =>
       Effect.gen(function* () {
         const { symbolOrSpan } = yield* decodeResolveInput(args)
-        const graph = yield* resolveGraph(options, args)
-        return findCallers(graph, symbolOrSpan)
+        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        return {
+          callers: findCallers(graphStatus.graph, symbolOrSpan),
+          ...graphStatusMeta(graphStatus),
+        }
       }),
   },
   {
@@ -142,8 +150,11 @@ export const buildGraphNavigationToolDescriptors = (
     execute: (args) =>
       Effect.gen(function* () {
         const { symbolOrSpan } = yield* decodeResolveInput(args)
-        const graph = yield* resolveGraph(options, args)
-        return findCallees(graph, symbolOrSpan)
+        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        return {
+          callees: findCallees(graphStatus.graph, symbolOrSpan),
+          ...graphStatusMeta(graphStatus),
+        }
       }),
   },
   {
@@ -153,8 +164,11 @@ export const buildGraphNavigationToolDescriptors = (
     execute: (args) =>
       Effect.gen(function* () {
         const { symbolOrSpan } = yield* decodeResolveInput(args)
-        const graph = yield* resolveGraph(options, args)
-        return findTestsReaching(graph, symbolOrSpan)
+        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        return {
+          tests: findTestsReaching(graphStatus.graph, symbolOrSpan),
+          ...graphStatusMeta(graphStatus),
+        }
       }),
   },
   {
@@ -188,7 +202,7 @@ export const buildGraphNavigationToolDescriptors = (
           Effect.provide(decisionLayer),
           Effect.timeoutOption("1500 millis"),
           Effect.catchCause((cause) => {
-            if (Cause.hasInterrupts(cause)) {
+            if (isPureInterruptCause(cause)) {
               return Effect.interrupt
             }
             process.stderr.write(`[harness-mcp] decision fallback: ${Cause.pretty(cause)}\n`)

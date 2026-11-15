@@ -7,11 +7,13 @@ import {
   AstSourceContent,
   AstSourceFilePath,
   HarnessSubprocessError,
+  NxScopeTag,
   NxTierTag,
   PackageDependencyName,
   PackageManifestName,
   PackageManifestPath,
   type PackageTierManifestInput,
+  parseManifestTags,
   SelfDogfoodingViolationError,
   SubprocessCommand,
   SubprocessExitCode,
@@ -445,10 +447,12 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
             readonly nx?: { readonly tags?: ReadonlyArray<string> }
           }
           if (!parsed.name) continue
+          const parsedTags = parseManifestTags(parsed.nx?.tags ?? [])
           manifests.push({
             manifestPath: PackageManifestPath.make(`libs/harness/${pkgDir}/package.json`),
             packageName: PackageManifestName.make(parsed.name),
-            nxTags: (parsed.nx?.tags ?? []).map((t) => NxTierTag.make(t)),
+            nxTags: [...parsedTags.nxTags],
+            scopeTags: [...parsedTags.scopeTags],
             dependencyNames: Object.keys(parsed.dependencies ?? {}).map((d) =>
               PackageDependencyName.make(d),
             ),
@@ -663,7 +667,8 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
           {
             manifestPath: PackageManifestPath.make("apps/web/package.json"),
             packageName: PackageManifestName.make("web-app"),
-            nxTags: [NxTierTag.make("type:app"), NxTierTag.make("scope:web")],
+            nxTags: [NxTierTag.make("type:app")],
+            scopeTags: [NxScopeTag.make("scope:web")],
             dependencyNames: [
               PackageDependencyName.make("effect"),
               PackageDependencyName.make("@sample/domain"),
@@ -701,5 +706,49 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
         ),
       ).toBe(true)
     }),
+  )
+
+  it.effect(
+    "F-6.1: rejects impure type:core manifest deps and source imports (@effect/ai-typesafe, @effect/platform*, FetchHttpClient, node:fs) while allowing node:path/node:crypto",
+    () =>
+      Effect.gen(function* () {
+        const report = yield* decideHarnessTierTopology({
+          manifests: [
+            {
+              manifestPath: PackageManifestPath.make("libs/sample/core/package.json"),
+              packageName: PackageManifestName.make("@sample/core"),
+              nxTags: [NxTierTag.make("type:core")],
+              dependencyNames: [
+                PackageDependencyName.make("effect"),
+                PackageDependencyName.make("@effect/ai-typesafe"),
+                PackageDependencyName.make("@effect/platform-node"),
+              ],
+              nonRuntimeDependencyNames: [],
+            },
+          ],
+          serviceFiles: [],
+          workspaceSourceFiles: [
+            {
+              filePath: AstSourceFilePath.make("libs/sample/core/src/pure.ts"),
+              content: AstSourceContent.make(
+                'import { join } from "node:path"\nimport { createHash } from "node:crypto"\nexport { createHash, join }\n',
+              ),
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/sample/core/src/impure.ts"),
+              content: AstSourceContent.make(
+                'import { readFileSync } from "node:fs"\nimport { FetchHttpClient } from "effect/unstable/http/FetchHttpClient"\nexport { FetchHttpClient, readFileSync }\n',
+              ),
+            },
+          ],
+        })
+
+        expect(report.verdict).toBe("violated")
+        const forbiddenCoreDeps = report.violations.filter((v) => v.rule === "forbidden-core-dependency")
+        expect(forbiddenCoreDeps.length).toBe(2)
+        const impureCoreImports = report.violations.filter((v) => v.rule === "impure-core-tier-import")
+        expect(impureCoreImports.every((v) => v.location === "libs/sample/core/src/impure.ts")).toBe(true)
+        expect(impureCoreImports.length).toBe(2)
+      }),
   )
 })

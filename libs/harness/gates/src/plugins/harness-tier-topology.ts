@@ -7,6 +7,7 @@ import {
   type HarnessTierTopologyViolation,
   makeHarnessTierTopologyReport,
   NonNegativeCount,
+  NxScopeTag,
   NxTierTag,
   type PackageTierManifestInput,
   type ServiceTierSourceInput,
@@ -144,6 +145,37 @@ const isDrizzleDependency = (dep: string): boolean => {
   return rootPkg === "drizzle-orm" || rootPkg === "drizzle-kit"
 }
 
+const ALLOWED_PURE_CORE_NODE_SUBPATHS = new Set(["path", "path/posix", "path/win32", "crypto", "url"])
+
+const isImpureCoreSpecifier = (specifier: string): boolean => {
+  const trimmed = specifier.trim()
+  if (trimmed.startsWith("node:")) {
+    return !ALLOWED_PURE_CORE_NODE_SUBPATHS.has(trimmed.slice("node:".length))
+  }
+  const rootPkg = resolvePackageRootName(trimmed)
+  if (NODE_BUILTIN_ROOT_MODULES.has(rootPkg) && !ALLOWED_PURE_CORE_NODE_SUBPATHS.has(rootPkg)) {
+    return true
+  }
+  if (
+    rootPkg === "@effect/ai-typesafe" ||
+    rootPkg === "@effect/platform" ||
+    rootPkg.startsWith("@effect/platform-") ||
+    rootPkg === "@effect/sql" ||
+    rootPkg.startsWith("@effect/sql-") ||
+    rootPkg === "alchemy" ||
+    rootPkg.startsWith("@alchemy.run/") ||
+    rootPkg === "drizzle-orm" ||
+    rootPkg === "drizzle-kit"
+  ) {
+    return true
+  }
+  return (
+    trimmed === "effect/unstable/http/FetchHttpClient" ||
+    trimmed.startsWith("effect/unstable/http/FetchHttpClient/") ||
+    /(?:^|\/)FetchHttpClient$/.test(trimmed)
+  )
+}
+
 const isForbiddenCoreDependency = (
   dep: string,
   manifestTagsByPkg: ReadonlyMap<string, ReadonlyArray<NxTierTag>>,
@@ -160,9 +192,21 @@ const isForbiddenCoreDependency = (
     rootPkg.endsWith("-infra") ||
     rootPkg === "alchemy" ||
     rootPkg.startsWith("@alchemy.run/") ||
+    rootPkg === "@effect/ai-typesafe" ||
+    rootPkg === "@effect/platform" ||
+    rootPkg.startsWith("@effect/platform-") ||
+    rootPkg === "@effect/sql" ||
     rootPkg.startsWith("@effect/sql-") ||
-    rootPkg === "@effect/platform-node" ||
-    rootPkg === "@effect/platform-node-shared"
+    rootPkg === "drizzle-orm" ||
+    rootPkg === "drizzle-kit" ||
+    rootPkg === "better-sqlite3" ||
+    rootPkg === "sqlite" ||
+    rootPkg === "sqlite3" ||
+    rootPkg === "pg" ||
+    rootPkg === "mysql2" ||
+    rootPkg === "ioredis" ||
+    rootPkg === "redis" ||
+    NODE_BUILTIN_ROOT_MODULES.has(rootPkg)
   )
 }
 
@@ -420,6 +464,86 @@ const collectUndeclaredWorkspaceDependencyViolations = (
   return found
 }
 
+const collectCoreSourceImpurityViolations = (
+  file: ServiceTierSourceInput,
+): ReadonlyArray<HarnessTierTopologyViolation> => {
+  if (!/\.(?:ts|tsx|mts|cts)$/.test(file.filePath)) return []
+  const { sourceFile } = getOrCreateCachedSourceFile(file.filePath, file.content)
+  const location = WorkspaceFilePath.make(file.filePath)
+  const found: Array<HarnessTierTopologyViolation> = []
+
+  const checkSpecifier = (specifier: string | undefined): void => {
+    if (specifier !== undefined && isImpureCoreSpecifier(specifier)) {
+      found.push({
+        rule: TierTopologyRuleId.make("impure-core-tier-import"),
+        location,
+        message: TierTopologyMessage.make(
+          `Core-tier source "${file.filePath}" imports impure module "${specifier}" — type:core modules must not import @effect/ai-typesafe, @effect/platform*, FetchHttpClient, or Node I/O built-ins.`,
+        ),
+      })
+    }
+  }
+
+  const walk = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) && node.moduleSpecifier !== undefined) {
+      if (ts.isStringLiteral(node.moduleSpecifier)) {
+        const spec = node.moduleSpecifier.text
+        if (isImpureCoreSpecifier(spec)) {
+          checkSpecifier(spec)
+          return
+        }
+        if (
+          (spec === "effect" || spec.startsWith("effect/")) &&
+          node.importClause?.isTypeOnly !== true &&
+          node.importClause?.namedBindings !== undefined &&
+          ts.isNamedImports(node.importClause.namedBindings)
+        ) {
+          for (const el of node.importClause.namedBindings.elements) {
+            const importedName = (el.propertyName ?? el.name).text
+            if (importedName === "FetchHttpClient" && !el.isTypeOnly) {
+              found.push({
+                rule: TierTopologyRuleId.make("impure-core-tier-import"),
+                location,
+                message: TierTopologyMessage.make(
+                  `Core-tier source "${file.filePath}" imports FetchHttpClient from "${spec}" — HTTP client bindings belong in type:infra or type:app.`,
+                ),
+              })
+            }
+          }
+        }
+      }
+      return
+    }
+    if (ts.isExportDeclaration(node) && node.moduleSpecifier !== undefined) {
+      if (ts.isStringLiteral(node.moduleSpecifier)) {
+        checkSpecifier(node.moduleSpecifier.text)
+      }
+      return
+    }
+    if (
+      ts.isImportEqualsDeclaration(node) &&
+      ts.isExternalModuleReference(node.moduleReference) &&
+      ts.isStringLiteral(node.moduleReference.expression)
+    ) {
+      checkSpecifier(node.moduleReference.expression.text)
+      return
+    }
+    if (ts.isCallExpression(node) && node.arguments.length > 0 && node.arguments[0] !== undefined) {
+      const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword
+      const isRequireCall =
+        (ts.isIdentifier(node.expression) && node.expression.text === "require") ||
+        (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "require")
+      if (isDynamicImport || isRequireCall) {
+        checkSpecifier(extractStringOrTemplateText(node.arguments[0]))
+      }
+    }
+    ts.forEachChild(node, walk)
+  }
+
+  walk(sourceFile)
+  return found
+}
+
 export const decideHarnessTierTopology = Effect.fn("HarnessTierTopology.decide")(
   (input: HarnessTierTopologyInput): Effect.Effect<HarnessTierTopologyReport> =>
     Effect.sync(() => {
@@ -430,7 +554,7 @@ export const decideHarnessTierTopology = Effect.fn("HarnessTierTopology.decide")
       const domainTag = NxTierTag.make("type:domain")
       const infraTag = NxTierTag.make("type:infra")
       const appTag = NxTierTag.make("type:app")
-      const webScopeTag = NxTierTag.make("scope:web")
+      const webScopeTag = NxScopeTag.make("scope:web")
       const manifestTagsByPkg = buildManifestTagsByPackage(input.manifests)
       const workspacePackageNames = new Set(input.manifests.map((m) => m.packageName))
 
@@ -471,7 +595,8 @@ export const decideHarnessTierTopology = Effect.fn("HarnessTierTopology.decide")
         const isCore = !isContract && !isService && manifest.nxTags.includes(coreTag)
         const isDomain = !isContract && !isService && !isCore && manifest.nxTags.includes(domainTag)
         const isInfra = !isContract && !isService && !isCore && !isDomain && manifest.nxTags.includes(infraTag)
-        const isWebApp = manifest.nxTags.includes(appTag) && manifest.nxTags.includes(webScopeTag)
+        const isWebApp =
+          manifest.nxTags.includes(appTag) && (manifest.scopeTags ?? []).includes(webScopeTag)
 
         if (isContract) {
           for (const dep of nonDrizzleDeps) {
@@ -559,6 +684,17 @@ export const decideHarnessTierTopology = Effect.fn("HarnessTierTopology.decide")
 
       const workspaceSourceFiles = input.workspaceSourceFiles ?? []
       if (workspaceSourceFiles.length > 0) {
+        const coreSrcPrefixes = input.manifests
+          .filter((m) => m.nxTags.includes(coreTag))
+          .map((m) => `${m.manifestPath.replace(/\/package\.json$/, "")}/src/`)
+        for (const file of workspaceSourceFiles) {
+          const isCoreSrc =
+            coreSrcPrefixes.some((prefix) => file.filePath.startsWith(prefix)) ||
+            (/(?:^|\/)core\/src\//.test(file.filePath) && file.filePath.includes("/src/"))
+          if (isCoreSrc) {
+            violations.push(...collectCoreSourceImpurityViolations(file))
+          }
+        }
         for (const manifest of input.manifests) {
           violations.push(
             ...collectUndeclaredWorkspaceDependencyViolations(

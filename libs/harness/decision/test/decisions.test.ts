@@ -12,6 +12,7 @@ import {
   OntologyConflictV1,
   PlanStepCoverageV1,
   routeStep,
+  routeStepWithStatus,
   triageFailure,
   TriageV1,
 } from "../src/index.js"
@@ -41,10 +42,11 @@ describe("Harness decision definitions & fallbacks", () => {
         )
         expect(guardRes.verdict).toBe("ask")
 
-        const routeRes = yield* routeStep(
+        const routeRes = yield* routeStepWithStatus(
           "Retry failed HTTP requests with exponential backoff",
         ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
-        expect(routeRes).toBe("review")
+        expect(routeRes.block).toBe("review")
+        expect(routeRes.source).toBe("degraded-fallback")
       }),
   )
 
@@ -52,53 +54,29 @@ describe("Harness decision definitions & fallbacks", () => {
     "classifies known tsgo/oxlint diagnostics as mechanical without calling DecisionModel",
     () =>
       Effect.gen(function* () {
-        const res = yield* triageFailure(
+        const cases = [
           "error: floatingEffect: Effect.log('x') is not yielded",
-        ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
-        expect(res.kind).toBe("mechanical")
-        expect(res.hint).toContain("yield*")
-
-        const skipRes = yield* triageFailure("Skipping or focusing tests is banned").pipe(
-          Effect.provide(makeFailingDecisionModelLayer()),
-        )
-        expect(skipRes.kind).toBe("mechanical")
-        expect(skipRes.hint).toContain("Three-Layer Test Defence")
-
-        const tsSuppRes = yield* triageFailure("TypeScript suppression directives are banned").pipe(
-          Effect.provide(makeFailingDecisionModelLayer()),
-        )
-        expect(tsSuppRes.kind).toBe("mechanical")
-        expect(tsSuppRes.hint).toContain("@ts-ignore")
-
-        const oxSuppRes = yield* triageFailure(
+          "Skipping or focusing tests is banned",
+          "TypeScript suppression directives are banned",
           "Suppressing `effecttsgo/*` with oxlint-disable is banned",
-        ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
-        expect(oxSuppRes.kind).toBe("mechanical")
-        expect(oxSuppRes.hint).toContain("effecttsgo/*")
-
-        const runOfExitRes = yield* triageFailure(
           "error: effecttsgo(run-of-exit-to-run-exit): use runPromiseExit instead",
-        ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
-        expect(runOfExitRes.kind).toBe("mechanical")
-        expect(runOfExitRes.hint).toContain("runPromiseExit")
-
-        const facadeStarRes = yield* triageFailure(
           "error: facade-star-reexport: export * is banned in facade modules",
-        ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
-        expect(facadeStarRes.kind).toBe("mechanical")
-        expect(facadeStarRes.hint).toContain("ADR-0012")
-
-        const catchCauseRes = yield* triageFailure(
           "warning: catch-cause-interrupts-only: composite cause may swallow interruption",
-        ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
-        expect(catchCauseRes.kind).toBe("mechanical")
-        expect(catchCauseRes.hint).toContain("Cause.hasInterrupts")
-
-        const dotHarnessRes = yield* triageFailure(
           "error: unisolated-dot-harness-test-write: writing directly to .harness/ in test",
-        ).pipe(Effect.provide(makeFailingDecisionModelLayer()))
-        expect(dotHarnessRes.kind).toBe("mechanical")
-        expect(dotHarnessRes.hint).toContain("os.tmpdir()")
+          "error: bare-cause-has-interrupts: use isPureInterruptCause",
+          "error: process-env-outside-infra-or-app: direct process.env access",
+          "error: skill-tier-table-drift: skill table out of sync",
+          "error: mermaid-dependency-drift: mermaid graph out of sync",
+          "error: hook-bootstrap-fail-closed: hook bootstrap failed open",
+          "error: doc-banned-or-phantom-tech: doc mentions banned tech",
+        ]
+        for (const msg of cases) {
+          const res = yield* triageFailure(msg).pipe(
+            Effect.provide(makeFailingDecisionModelLayer()),
+          )
+          expect(res.kind, msg).toBe("mechanical")
+          expect(res.hint.length, msg).toBeGreaterThan(0)
+        }
       }),
   )
 

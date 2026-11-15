@@ -8,18 +8,22 @@ export type NonNegativeCount = typeof NonNegativeCount.Type
 
 export const GateRuleVersion = Schema.NonEmptyString.pipe(Schema.brand("GateRuleVersion"))
 export type GateRuleVersion = typeof GateRuleVersion.Type
-export const HARNESS_GATE_RULE_VERSION: GateRuleVersion = GateRuleVersion.make("ast-gates-v6")
+export const HARNESS_GATE_RULE_VERSION: GateRuleVersion = GateRuleVersion.make("ast-gates-v7")
 
 export const WorkspaceFilePath = Schema.NonEmptyString.pipe(
   Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isPattern(/^[^\0]+$/s)),
   Schema.brand("WorkspaceFilePath"),
 )
 export type WorkspaceFilePath = typeof WorkspaceFilePath.Type
 
-export const AstSourceFilePath = WorkspaceFilePath
-export type AstSourceFilePath = WorkspaceFilePath
+export const AstSourceFilePath = WorkspaceFilePath.pipe(Schema.brand("AstSourceFilePath"))
+export type AstSourceFilePath = typeof AstSourceFilePath.Type
 
-export const ContentSha256 = Schema.NonEmptyString.pipe(Schema.brand("ContentSha256"))
+export const ContentSha256 = Schema.String.pipe(
+  Schema.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
+  Schema.brand("ContentSha256"),
+)
 export type ContentSha256 = typeof ContentSha256.Type
 
 const SHA256_K = new Uint32Array([
@@ -201,6 +205,9 @@ export const SelfDogfoodingRuleId = Schema.Literals([
   "no-double-wrapped-effect-fn",
   "test-env-branch-in-src",
   "silent-gate-fs-fallback",
+  "bare-cause-has-interrupts",
+  "process-env-outside-infra-or-app",
+  "dynamic-harness-import",
 ])
 export type SelfDogfoodingRuleId = typeof SelfDogfoodingRuleId.Type
 
@@ -238,7 +245,13 @@ export const makeVerdictReportSchema = <
     }),
   ])
 
-export const makeVerdictReport = <V, Extra extends Record<string, unknown>>(
+export const makeVerdictReport = <
+  V,
+  Extra extends Record<string, unknown> & {
+    readonly verdict?: never
+    readonly violations?: never
+  },
+>(
   violations: ReadonlyArray<V>,
   extra: Extra,
 ):
@@ -247,15 +260,15 @@ export const makeVerdictReport = <V, Extra extends Record<string, unknown>>(
   const [first, ...rest] = violations
   if (first === undefined) {
     return {
+      ...extra,
       verdict: "clean",
       violations: [],
-      ...extra,
     }
   }
   return {
+    ...extra,
     verdict: "violated",
     violations: [first, ...rest],
-    ...extra,
   }
 }
 

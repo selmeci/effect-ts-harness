@@ -613,71 +613,13 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           yield* decideSpanBudgets({ spans: toSpanSamples(spansNonZero), maxRepeatedChildCalls: 3 }),
         ).toHaveLength(0)
 
-        // SubprocessCommand Schema rejection for empty and whitespace-only
+        // SubprocessCommand Schema rejection for empty, whitespace-only, and null bytes
         expect(Schema.is(SubprocessCommand)("   ")).toBe(false)
         expect(Schema.is(SubprocessCommand)("")).toBe(false)
+        expect(Schema.is(SubprocessCommand)("echo\0null")).toBe(false)
 
-        // execCheckedSubprocess null-byte in command rejection
-        const { result: exitNullCmd, spans: spansNullCmd } = yield* runWithTestTracer(
-          "HarnessSubprocess.execChecked::null-byte-command",
-          Effect.exit(
-            execCheckedSubprocess({
-              command: SubprocessCommand.make("echo\0null"),
-              args: [],
-            }).pipe(Effect.provide(testLayer)),
-          ),
-          emptyFnIndex,
-        )
-        match(exitNullCmd)
-          .with({ _tag: "Failure" }, ({ cause }) => {
-            match(Cause.findErrorOption(cause))
-              .with({ _tag: "Some" }, ({ value }) => {
-                expect(value._tag).toBe("HarnessSubprocessError")
-                expect(value.reason).toBe("Subprocess command contains a disallowed null byte")
-              })
-              .with({ _tag: "None" }, () => {
-                expect.unreachable("Expected typed HarnessSubprocessError")
-              })
-              .exhaustive()
-          })
-          .with({ _tag: "Success" }, () => {
-            expect.unreachable("Expected failure exit")
-          })
-          .exhaustive()
-        expect(
-          yield* decideSpanBudgets({ spans: toSpanSamples(spansNullCmd), maxRepeatedChildCalls: 3 }),
-        ).toHaveLength(0)
-
-        // execCheckedSubprocess null-byte in args rejection
-        const { result: exitNullArg, spans: spansNullArg } = yield* runWithTestTracer(
-          "HarnessSubprocess.execChecked::null-byte-arg",
-          Effect.exit(
-            execCheckedSubprocess({
-              command: SubprocessCommand.make("echo"),
-              args: [SubprocessArg.make("hello\0world")],
-            }).pipe(Effect.provide(testLayer)),
-          ),
-          emptyFnIndex,
-        )
-        match(exitNullArg)
-          .with({ _tag: "Failure" }, ({ cause }) => {
-            match(Cause.findErrorOption(cause))
-              .with({ _tag: "Some" }, ({ value }) => {
-                expect(value._tag).toBe("HarnessSubprocessError")
-                expect(value.reason).toBe("Subprocess arguments contain a disallowed null byte")
-              })
-              .with({ _tag: "None" }, () => {
-                expect.unreachable("Expected typed HarnessSubprocessError")
-              })
-              .exhaustive()
-          })
-          .with({ _tag: "Success" }, () => {
-            expect.unreachable("Expected failure exit")
-          })
-          .exhaustive()
-        expect(
-          yield* decideSpanBudgets({ spans: toSpanSamples(spansNullArg), maxRepeatedChildCalls: 3 }),
-        ).toHaveLength(0)
+        // SubprocessArg null-byte rejection at Schema boundary
+        expect(Schema.is(SubprocessArg)("hello\0world")).toBe(false)
       }),
   )
 
@@ -750,29 +692,8 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           })
           .exhaustive()
 
-        // Null-byte rejection in command
-        const nullCmdExit = yield* Effect.exit(
-          runner.exec({
-            command: SubprocessCommand.make("echo\0null"),
-            args: [],
-          }),
-        )
-        match(nullCmdExit)
-          .with({ _tag: "Failure" }, ({ cause }) => {
-            match(Cause.findErrorOption(cause))
-              .with({ _tag: "Some" }, ({ value }) => {
-                expect(value._tag).toBe("HarnessSubprocessError")
-                expect(value.reason).toBe("Subprocess command contains a disallowed null byte")
-              })
-              .with({ _tag: "None" }, () => {
-                expect.unreachable("Expected typed HarnessSubprocessError")
-              })
-              .exhaustive()
-          })
-          .with({ _tag: "Success" }, () => {
-            expect.unreachable("Expected failure exit")
-          })
-          .exhaustive()
+        // Null-byte rejection at SubprocessCommand boundary
+        expect(Schema.is(SubprocessCommand)("echo\0null")).toBe(false)
       }).pipe(Effect.provide(makeHarnessSubprocessRunnerHostIoLayer(testHostIo))),
   )
 
@@ -1135,7 +1056,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
     "REQ-1.3: AstGateCache.decide reports effect-fn-dummy-void, discriminant-branching, and non-exhaustive-union-match without isHarnessInternal exemption",
     () =>
       Effect.gen(function* () {
-        expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v6")
+        expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v7")
 
         const testId = "AstGateCache.decide::REQ-1.3"
         const { result: report, spans } = yield* runWithTestTracer(
@@ -1823,8 +1744,8 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(violatingReport.verdict).toBe("violated")
         expect(violatingReport.violations.some((v) => v.rule === "facade-star-reexport")).toBe(true)
 
-        // 2. Allowed: export * from in index.ts
-        const allowedIndexReport = yield* decideSelfDogfooding({
+        // 2. Violating: export * from in package src/index.ts barrel (S-1.1)
+        const violatingIndexReport = yield* decideSelfDogfooding({
           files: [
             {
               filePath: AstSourceFilePath.make("libs/harness/graph/src/index.ts"),
@@ -1832,9 +1753,9 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
             },
           ],
         })
-        expect(allowedIndexReport.violations.filter((v) => v.rule === "facade-star-reexport")).toHaveLength(0)
+        expect(violatingIndexReport.violations.filter((v) => v.rule === "facade-star-reexport")).toHaveLength(1)
 
-        // 3. Allowed: explicit named export in orchestrator facade
+        // 3. Allowed: explicit named export in orchestrator facade and src/index.ts
         const allowedNamedReport = yield* decideSelfDogfooding({
           files: [
             {
@@ -1842,6 +1763,10 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
               content: AstSourceContent.make(
                 'export { createCompilerSession } from "./extractor/compiler-session.js"\n',
               ),
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/harness/gates/src/index.ts"),
+              content: AstSourceContent.make('export { classifyCommand } from "./policy.js"\n'),
             },
           ],
         })
@@ -2464,6 +2389,85 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         })
         expect(report.verdict).toBe("violated")
         expect(report.violations.filter((v) => v.rule === "silent-gate-fs-fallback")).toHaveLength(2)
+      }),
+  )
+
+  it.effect(
+    "F-12.1 / F-6.1 / S-5.4: enforces bare-cause-has-interrupts, process-env-outside-infra-or-app, and module-scope object property mutation",
+    () =>
+      Effect.gen(function* () {
+        const report = yield* SelfDogfooding.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/decision/src/bad-checks.ts"),
+              content: AstSourceContent.make(
+                [
+                  'import { Cause } from "effect"',
+                  "const mutableState = { flag: false }",
+                  "export const setFlag = () => { mutableState.flag = true }",
+                  "export const badCause = (c: Cause.Cause<unknown>) => Cause.hasInterrupts(c)",
+                  "export const goodCause = (c: Cause.Cause<unknown>) => Cause.hasInterrupts(c) && !Cause.hasFails(c) && !Cause.hasDies(c)",
+                  'export const badEnv = () => process.env["MY_VAR"]',
+                ].join("\n"),
+              ),
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/harness/contract/src/workspace-and-process.ts"),
+              content: AstSourceContent.make(
+                'import { Cause } from "effect"\nexport const isPureInterruptCause = (c: Cause.Cause<unknown>) => Cause.hasInterrupts(c)\n',
+              ),
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/harness/infra/src/ok-env.ts"),
+              content: AstSourceContent.make('export const okEnv = () => process.env["MY_VAR"]\n'),
+            },
+          ],
+          failOnViolation: false,
+        })
+
+        expect(report.verdict).toBe("violated")
+        expect(report.violations.filter((v) => v.rule === "bare-cause-has-interrupts")).toHaveLength(1)
+        expect(report.violations.filter((v) => v.rule === "process-env-outside-infra-or-app")).toHaveLength(1)
+        expect(report.violations.filter((v) => v.rule === "no-global-mutable-cache")).toHaveLength(1)
+      }),
+  )
+
+  it.effect(
+    "closes AST false negatives for satisfies/nested/++ mutable caches, computed/destructured process.env, dynamic-harness-import, and point-free/mismatched Cause.hasInterrupts",
+    () =>
+      Effect.gen(function* () {
+        const report = yield* SelfDogfooding.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/gates/src/evasion-checks.ts"),
+              content: AstSourceContent.make(
+                [
+                  'import { Cause, Effect } from "effect"',
+                  "type Cache = { count: number; nested: { hits: number } }",
+                  "const cache = { count: 0, nested: { hits: 0 } } satisfies Cache",
+                  "export const bump = () => {",
+                  "  cache.count++",
+                  "  cache.nested.hits = 1",
+                  "  Object.assign(cache, { count: 2 })",
+                  "}",
+                  'export const envBracket = () => process["env"]["FOO"]',
+                  "export const envDestructure = () => { const { env } = process; return env }",
+                  'export const dynImport = () => import("@harness/contract")',
+                  'export const dynRequire = () => require("@harness/contract")',
+                  "export const pointFreeCause = (eff: Effect.Effect<void>) => eff.pipe(Effect.catchCauseIf(Cause.hasInterrupts, () => Effect.void))",
+                  "export const spoofedCause = (c: Cause.Cause<unknown>, other: Cause.Cause<unknown>) => Cause.hasInterrupts(c) && !Cause.hasFails(other) && !Cause.hasDies(c)",
+                ].join("\n"),
+              ),
+            },
+          ],
+          failOnViolation: false,
+        })
+
+        expect(report.verdict).toBe("violated")
+        expect(report.violations.filter((v) => v.rule === "no-global-mutable-cache")).toHaveLength(3)
+        expect(report.violations.filter((v) => v.rule === "process-env-outside-infra-or-app")).toHaveLength(2)
+        expect(report.violations.filter((v) => v.rule === "dynamic-harness-import")).toHaveLength(2)
+        expect(report.violations.filter((v) => v.rule === "bare-cause-has-interrupts")).toHaveLength(2)
       }),
   )
 })

@@ -241,4 +241,102 @@ describe("oxlint syntax-bans & test-integrity Drizzle sealing", () => {
     })
     expect(srcReports.some((r) => r.message.includes("[invalid-clef-endpoint]"))).toBe(true)
   })
+
+  it("bans dynamic import('@harness/...') in src/ and test/ files while allowing external dynamic imports", async () => {
+    const plugin = await loadSyntaxBansPlugin()
+    const syntaxBans = plugin.rules["syntax-bans"]
+    const testIntegrity = plugin.rules["test-integrity"]
+
+    const srcReports: Array<{ message: string }> = []
+    const srcVisitor = syntaxBans.create({
+      filename: "/repo/libs/sample/domain/src/dynamic-import.ts",
+      report: (r: { message: string }) => {
+        srcReports.push(r)
+      },
+    })
+    srcVisitor.ImportExpression?.({
+      type: "ImportExpression",
+      source: { type: "Literal", value: "@harness/contract" },
+    })
+    srcVisitor.ImportExpression?.({
+      type: "ImportExpression",
+      source: { type: "Literal", value: "effect" },
+    })
+    expect(srcReports.filter((r) => r.message.includes("dynamic-harness-import")).length).toBe(1)
+
+    const testReports: Array<{ message: string }> = []
+    const testVisitor = testIntegrity.create({
+      filename: "/repo/libs/sample/domain/test/dynamic-import.test.ts",
+      report: (r: { message: string }) => {
+        testReports.push(r)
+      },
+    })
+    testVisitor.ImportExpression?.({
+      type: "ImportExpression",
+      source: { type: "Literal", value: "@harness/graph" },
+    })
+    testVisitor.CallExpression?.({
+      type: "CallExpression",
+      callee: { type: "Identifier", name: "require" },
+      arguments: [{ type: "Literal", value: "@harness/contract" }],
+    })
+    expect(testReports.filter((r) => r.message.includes("dynamic-harness-import")).length).toBe(2)
+
+    srcVisitor.CallExpression?.({
+      type: "CallExpression",
+      callee: { type: "Identifier", name: "require" },
+      arguments: [{ type: "Literal", value: "@harness/contract" }],
+    })
+    expect(srcReports.filter((r) => r.message.includes("dynamic-harness-import")).length).toBe(2)
+  })
+
+  it("bans computed/destructured process.env in pure libs/src and point-free Cause.hasInterrupts", async () => {
+    const plugin = await loadSyntaxBansPlugin()
+    const syntaxBans = plugin.rules["syntax-bans"]
+
+    const reports: Array<{ message: string }> = []
+    const visitor = syntaxBans.create({
+      filename: "/repo/libs/harness/gates/src/evasion.ts",
+      report: (r: { message: string }) => {
+        reports.push(r)
+      },
+    })
+
+    visitor.MemberExpression?.({
+      type: "MemberExpression",
+      computed: true,
+      object: { type: "Identifier", name: "process" },
+      property: { type: "Literal", value: "env" },
+    })
+    visitor.VariableDeclarator?.({
+      type: "VariableDeclarator",
+      id: {
+        type: "ObjectPattern",
+        properties: [
+          {
+            type: "Property",
+            computed: false,
+            key: { type: "Identifier", name: "env" },
+            value: { type: "Identifier", name: "env" },
+          },
+        ],
+      },
+      init: {
+        type: "MemberExpression",
+        computed: false,
+        object: { type: "Identifier", name: "globalThis" },
+        property: { type: "Identifier", name: "process" },
+      },
+    })
+    visitor.MemberExpression?.({
+      type: "MemberExpression",
+      computed: false,
+      object: { type: "Identifier", name: "Cause" },
+      property: { type: "Identifier", name: "hasInterrupts" },
+      parent: { type: "CallExpression", callee: { type: "Identifier", name: "catchCauseIf" }, arguments: [] },
+    })
+
+    expect(reports.filter((r) => r.message.includes("process-env-outside-infra-or-app")).length).toBe(2)
+    expect(reports.filter((r) => r.message.includes("bare-cause-has-interrupts")).length).toBe(1)
+  })
 })

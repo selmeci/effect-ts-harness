@@ -1,6 +1,7 @@
-import { execFileSync } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
-import { resolve } from "node:path"
+import { execFileSync, spawnSync } from "node:child_process"
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 
 describe("Claude Code adapter & Omnigraph Cedar policy", () => {
@@ -20,7 +21,7 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
     const preHook = hooks.hooks.PreToolUse[0]
     expect(preHook.matcher).toBe("Bash")
     expect(preHook.hooks[0].command).toBe(
-      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard",
+      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard || exit 2",
     )
 
     const postHook = hooks.hooks.PostToolUse[0]
@@ -31,8 +32,63 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
 
     const stopHook = hooks.hooks.Stop[0].hooks[0]
     expect(stopHook.command).toBe(
-      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done",
+      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done || exit 2",
     )
+  })
+
+  it("F-14.1: Claude Code & Antigravity hooks.json shell wrappers fail closed on pre-runMain SyntaxError (exit 1 -> exit 2 + JSON)", () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "harness-f14-1-"))
+    try {
+      const brokenEntry = join(tmpDir, "broken-index.mjs")
+      writeFileSync(brokenEntry, "const broken = (; // SyntaxError\n", "utf8")
+
+      const claudeHooks = JSON.parse(
+        readFileSync(resolve(repoRoot, "adapters/claude-code/hooks.json"), "utf8"),
+      )
+      const agyHooks = JSON.parse(
+        readFileSync(resolve(repoRoot, "adapters/antigravity/plugins/effect-harness/hooks.json"), "utf8"),
+      )
+
+      const claudeGuardCmd = (claudeHooks.hooks.PreToolUse[0].hooks[0].command as string).replace(
+        "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts",
+        `node ${JSON.stringify(brokenEntry)}`,
+      )
+      const claudeGuardRes = spawnSync("/bin/sh", ["-c", claudeGuardCmd], { encoding: "utf8" })
+      expect(claudeGuardRes.status).toBe(2)
+
+      const claudeDoneCmd = (claudeHooks.hooks.Stop[0].hooks[0].command as string).replace(
+        "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts",
+        `node ${JSON.stringify(brokenEntry)}`,
+      )
+      const claudeDoneRes = spawnSync("/bin/sh", ["-c", claudeDoneCmd], { encoding: "utf8" })
+      expect(claudeDoneRes.status).toBe(2)
+
+      const agyGuardCmd = (
+        agyHooks["effect-harness"].PreToolUse[0].hooks[0].command as string
+      ).replace(
+        "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts",
+        `node ${JSON.stringify(brokenEntry)}`,
+      )
+      const agyGuardRes = spawnSync("/bin/sh", ["-c", agyGuardCmd], { encoding: "utf8" })
+      expect(agyGuardRes.status).toBe(2)
+      expect(JSON.parse(agyGuardRes.stdout.trim())).toEqual({
+        decision: "deny",
+        reason: "guard: runtime bootstrap failed",
+      })
+
+      const agyDoneCmd = (agyHooks["effect-harness"].Stop[0].command as string).replace(
+        "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts",
+        `node ${JSON.stringify(brokenEntry)}`,
+      )
+      const agyDoneRes = spawnSync("/bin/sh", ["-c", agyDoneCmd], { encoding: "utf8" })
+      expect(agyDoneRes.status).toBe(2)
+      expect(JSON.parse(agyDoneRes.stdout.trim())).toEqual({
+        decision: "continue",
+        reason: "done: runtime bootstrap failed",
+      })
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
   })
 
   it("configures harness-mcp, omnigraph-mcp, and nx-mcp in .mcp.json", () => {

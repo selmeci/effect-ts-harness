@@ -2,6 +2,7 @@ import { join } from "node:path"
 import { Cause, Effect, Layer, Option, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
+import { isPureInterruptCause } from "@harness/contract"
 import { deterministicLearnFallback, IdiomRouterV1, proposeLearningAction } from "@harness/decision"
 import {
   buildSessionHandoff,
@@ -47,14 +48,16 @@ import {
   findWorkspaceRoot,
   isIsolatedExternalWorkspace,
   resolveClusterRepoRoot,
+  resolveDecisionModelLayer,
 } from "./daemon-and-omnigraph.service.js"
 
 export const handleDoctorOrSession = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
-  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
+  maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
+    const decisionLayer = yield* resolveDecisionModelLayer(maybeDecisionLayer)
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     const isAntigravity = hasAntigravityFormat(argv)
     const nodeMajor = parseInt(process.versions.node.split(".")[0] ?? "0", 10)
@@ -110,7 +113,7 @@ export const handleDoctorOrSession = (
           }).pipe(
             Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
             Effect.catchCause((cause) => {
-              if (Cause.hasInterrupts(cause)) return Effect.interrupt
+              if (isPureInterruptCause(cause)) return Effect.interrupt
               return Effect.succeed({
                 syncedToOmnigraph: false,
                 snapshotPath: implPath,
@@ -153,7 +156,7 @@ export const handleDoctorOrSession = (
           }).pipe(
             Effect.timeoutOption("10 seconds"),
             Effect.catchCause((cause) => {
-              if (Cause.hasInterrupts(cause)) return Effect.interrupt
+              if (isPureInterruptCause(cause)) return Effect.interrupt
               return Effect.sync(() => {
                 process.stderr.write(`[harness learn] decision model fallback: ${Cause.pretty(cause)}\n`)
               }).pipe(Effect.as(Option.none()))
@@ -335,7 +338,7 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
     }).pipe(
       Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
       Effect.catchCause((cause) => {
-        if (Cause.hasInterrupts(cause)) return Effect.interrupt
+        if (isPureInterruptCause(cause)) return Effect.interrupt
         return Effect.succeed({
           syncedToOmnigraph: false,
           snapshotPath,
@@ -379,9 +382,10 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
 export const handleLearn = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
-  decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
+  maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
+    const decisionLayer = yield* resolveDecisionModelLayer(maybeDecisionLayer)
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     const shouldClear = argv.includes("--clear")
     const events = readFrictionEvents(repoRoot, nodeSyncHostIo)
@@ -413,6 +417,11 @@ export const handleLearn = (
       })
     }
 
+    const warnings: Array<string> = []
+    const warnLearn = (msg: string): void => {
+      warnings.push(msg)
+      process.stderr.write(`[harness:learn] Warning: ${msg}\n`)
+    }
     let synthesizedRules: ReadonlyArray<unknown> = []
     const rejectedRules: Array<{ ruleId: string; stage: string; reason: string }> = []
     let planSearchResults: unknown = undefined
@@ -420,7 +429,12 @@ export const handleLearn = (
     if (nodeSyncHostIo.existsSync(learnedSlicesPath)) {
       const rawSlices = yield* Effect.try({
         try: () => nodeSyncHostIo.readTextSync(learnedSlicesPath),
-        catch: () => undefined,
+        catch: (err) => {
+          warnLearn(
+            `failed to read ${learnedSlicesPath}: ${err instanceof Error ? err.message : String(err)}`,
+          )
+          return undefined
+        },
       }).pipe(Effect.orElseSucceed(() => undefined))
       if (rawSlices !== undefined) {
         const decodeJson = Schema.decodeUnknownOption(
@@ -432,7 +446,8 @@ export const handleLearn = (
             Effect.gen(function* () {
               if (Array.isArray(parsed["slices"])) {
                 const rules: Array<unknown> = []
-                for (const s of parsed["slices"]) {
+                for (let idx = 0; idx < parsed["slices"].length; idx++) {
+                  const s = parsed["slices"][idx]
                   const decodedSlice = Schema.decodeUnknownOption(RuleSynthesizerInput)(s)
                   yield* match(decodedSlice)
                     .with({ _tag: "Some" }, ({ value: slice }) =>
@@ -457,7 +472,13 @@ export const handleLearn = (
                           .exhaustive()
                       }),
                     )
-                    .with({ _tag: "None" }, () => Effect.void)
+                    .with({ _tag: "None" }, () =>
+                      Effect.sync(() => {
+                        warnLearn(
+                          `invalid RuleSynthesizerInput at slices[${idx}] in ${learnedSlicesPath}`,
+                        )
+                      }),
+                    )
                     .exhaustive()
                 }
                 synthesizedRules = rules
@@ -470,14 +491,30 @@ export const handleLearn = (
                 const decodedPlanSearch = Schema.decodeUnknownOption(PlanSearchInput)(rawPlanInput)
                 planSearchResults = yield* match(decodedPlanSearch)
                   .with({ _tag: "Some" }, ({ value: input }) =>
-                    decidePlanSearch(input).pipe(Effect.orElseSucceed(() => undefined)),
+                    decidePlanSearch(input).pipe(
+                      Effect.catch((err) =>
+                        Effect.sync(() => {
+                          warnLearn(`decidePlanSearch failed: ${String(err)}`)
+                          return undefined
+                        }),
+                      ),
+                    ),
                   )
-                  .with({ _tag: "None" }, () => Effect.void)
+                  .with({ _tag: "None" }, () =>
+                    Effect.sync(() => {
+                      warnLearn(`invalid PlanSearchInput candidates in ${learnedSlicesPath}`)
+                      return undefined
+                    }),
+                  )
                   .exhaustive()
               }
             }),
           )
-          .with({ _tag: "None" }, () => Effect.void)
+          .with({ _tag: "None" }, () =>
+            Effect.sync(() => {
+              warnLearn(`failed to decode ${learnedSlicesPath} as JSON object`)
+            }),
+          )
           .exhaustive()
       }
     }
@@ -496,7 +533,7 @@ export const handleLearn = (
         ...(rejectedRules.length > 0 ? { rejectedRules } : {}),
         ...(planSearchResults !== undefined ? { planSearchResults } : {}),
       }),
-      stderr: "",
+      stderr: warnings.join("\n"),
     }
   })
 

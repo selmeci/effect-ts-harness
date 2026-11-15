@@ -112,7 +112,7 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
           match(Cause.findErrorOption(cause))
             .with({ _tag: "Some" }, ({ value }) => {
               expect(value._tag).toBe("StdinReadError")
-              expect(value.reason).toContain("Timed out reading stdin")
+              expect(value.reasonKind).toBe("Timeout")
             })
             .with({ _tag: "None" }, () => {
               expect.fail("Expected StdinReadError in cause")
@@ -142,7 +142,7 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
           match(Cause.findErrorOption(cause))
             .with({ _tag: "Some" }, ({ value }) => {
               expect(value._tag).toBe("StdinReadError")
-              expect(value.reason).toContain("exceeded maximum size")
+              expect(value.reasonKind).toBe("MaxBytesExceeded")
             })
             .with({ _tag: "None" }, () => {
               expect.fail("Expected StdinReadError in cause")
@@ -308,6 +308,7 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         expect(idx).toBeGreaterThan(-1)
         return cmd
           .slice(idx + "index.ts ".length)
+          .replace(/\s+\|\|\s+[\s\S]*$/, "")
           .trim()
           .split(/\s+/)
       })
@@ -692,7 +693,7 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         })
         const slowDecisionLayer = Layer.effect(
           DecisionModel.DecisionModel,
-          Effect.sleep("500 millis").pipe(Effect.andThen(Effect.die(new Error("should-timeout")))),
+          Effect.never,
         )
         const res = await Effect.runPromise(
           handleDone(
@@ -787,7 +788,7 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
           child.stderr.on("data", (d) => {
             stderr += String(d)
             if (!signaled && stderr.includes("__HOOK_STDIN_READY__")) {
-              setTimeout(sendSignal, 30)
+              sendSignal()
             }
           })
           child.on("close", (code) => {
@@ -856,7 +857,7 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
             }
             const fallbackTimer = setTimeout(sendTerm, 3000)
             killChildOnRequest = () => {
-              setTimeout(sendTerm, 50)
+              sendTerm()
             }
             child.stdout.on("data", (d) => {
               stdout += String(d)
@@ -918,7 +919,7 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
             }
             const fallbackTimer = setTimeout(sendInt, 4000)
             killChildOnRequest = () => {
-              setTimeout(sendInt, 50)
+              sendInt()
             }
             child.stdout.on("data", (d) => {
               stdout += String(d)

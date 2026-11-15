@@ -14,6 +14,7 @@ import {
   type DecisionCacheStatsSnapshot,
   makeDecisionCacheLayer,
 } from "./decision-cache-live.js"
+import { LocalDecisionModel, makeLocalDecisionModelLayer } from "./local-decision-model-live.js"
 import { nodeSyncHostIo } from "./node-host-io.js"
 import {
   HarnessSubprocessRunnerLive,
@@ -50,6 +51,7 @@ export {
 export { AstGateCacheLive, makeAstGateCacheLayer }
 export { resolveAstGateCachePath, resolveDecisionCachePath, resolveHarnessStateDir }
 export { DecisionCacheLive, makeDecisionCacheLayer, type DecisionCacheStatsSnapshot }
+export { LocalDecisionModel, makeLocalDecisionModelLayer }
 export {
   makeUnixSocketDaemonLayer,
   queryUnixSocketLine,

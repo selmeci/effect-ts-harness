@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import * as path from "node:path"
-import type { SyncHostIo } from "@harness/service/host-io"
+import type { SyncHostReader } from "@harness/service/host-io"
 import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
@@ -80,7 +80,7 @@ export const decodePackageJson = Schema.decodeOption(Schema.fromJsonString(Packa
 export const resolvePackageTag = (
   repoRoot: string,
   relFilePath: string,
-  hostIo?: SyncHostIo,
+  hostIo?: SyncHostReader,
 ): PackageTag => {
   if (relFilePath.startsWith("apps/") || relFilePath.includes("/apps/")) return "app"
   if (hostIo !== undefined) {
@@ -116,7 +116,7 @@ export const resolvePackageTag = (
   return "service"
 }
 
-export const resolveRepoRoot = (startDir: string, hostIo?: SyncHostIo): string => {
+export const resolveRepoRoot = (startDir: string, hostIo?: SyncHostReader): string => {
   const exists = (p: string) => (hostIo !== undefined ? hostIo.existsSync(p) : ts.sys.fileExists(p))
   let curr = path.resolve(startDir)
   while (curr !== path.dirname(curr)) {
@@ -381,7 +381,7 @@ export const stripCommentsAndTestTitles = (code: string): string => {
 export const computeDynamicPaths = (
   repoRoot: string,
   workspaceRoot: string,
-  hostIo?: SyncHostIo,
+  hostIo?: SyncHostReader,
 ): Record<string, Array<string>> => {
   const graphNodeModules = path.join(workspaceRoot, "libs/harness/graph/node_modules")
   const paths: Record<string, Array<string>> = {
@@ -467,7 +467,7 @@ export const resolveImportSpecToRelFile = (
   return null
 }
 
-export const resolveContainedRelPath = (repoRoot: string, rawPath: string, hostIo?: SyncHostIo): string | null => {
+export const resolveContainedRelPath = (repoRoot: string, rawPath: string, hostIo?: SyncHostReader): string | null => {
   const trimmed = rawPath.trim()
   if (trimmed.length === 0) return null
   const logicalRoot = path.resolve(repoRoot)

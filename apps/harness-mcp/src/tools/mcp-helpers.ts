@@ -1,6 +1,8 @@
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
-import { Effect, Layer, Option, Result, Schema } from "effect"
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js"
+import { Cause, Effect, type Exit, Layer, type ManagedRuntime, Option, Result, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import { McpToolInputName, McpToolName, UnknownToolError } from "@harness/contract"
@@ -18,6 +20,7 @@ import {
   type GraphRewriteError,
   type HarnessGraph,
   loadGraphSnapshotEffect,
+  type OmnigraphLoadError,
   readGraphHeadMeta,
   resolveGitHeadState,
   saveGraphSnapshot,
@@ -46,6 +49,7 @@ export type McpToolExecutionError =
   | GraphInferenceError
   | GraphRewriteError
   | GraphProjectorError
+  | OmnigraphLoadError
 
 export type McpToolInputSchema = Schema.Decoder<Readonly<Record<string, unknown>>> & Schema.Top
 
@@ -275,10 +279,21 @@ export const resolveGraphWithStatus = (
   )
 }
 
-export const resolveGraph = (
-  options?: ServerOptions,
-  args?: Readonly<Record<string, unknown>>,
-): Effect.Effect<HarnessGraph> => resolveGraphWithStatus(options, args).pipe(Effect.map((r) => r.graph))
+export const graphStatusMeta = (
+  graphStatus: GraphResolutionStatus,
+): {
+  readonly degraded: boolean
+  readonly degradedReason?: string
+  readonly evaluationError?: string
+} => ({
+  degraded: graphStatus.degraded,
+  ...(graphStatus.degradedReason !== undefined
+    ? { degradedReason: graphStatus.degradedReason }
+    : {}),
+  ...(graphStatus.evaluationError !== undefined
+    ? { evaluationError: graphStatus.evaluationError }
+    : {}),
+})
 
 export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolean => {
   const logicalRoot = path.resolve(rootDir)
@@ -453,4 +468,64 @@ export const recordMcpToolTelemetry = (
     },
     nodeSyncHostIo,
   )
+}
+
+export const formatMcpToolExit = (
+  toolName: string,
+  exit: Exit.Exit<unknown, unknown>,
+):
+  | { readonly content: ReadonlyArray<{ readonly type: "text"; readonly text: string }>; readonly isError?: boolean }
+  | Promise<never> =>
+  match(exit)
+    .with({ _tag: "Success" }, ({ value }) => ({
+      content: [{ type: "text" as const, text: JSON.stringify(value ?? null, null, 2) }],
+    }))
+    .with({ _tag: "Failure" }, ({ cause }) => {
+      if (Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)) {
+        return Promise.reject(
+          new McpError(ErrorCode.InternalError, `Tool '${toolName}' execution was interrupted`),
+        )
+      }
+      const squashed = Cause.squash(cause)
+      if (Schema.isSchemaError(squashed)) {
+        return Promise.reject(
+          new McpError(
+            ErrorCode.InvalidParams,
+            `Invalid arguments for tool '${toolName}': ${squashed.message}`,
+          ),
+        )
+      }
+      const message = squashed instanceof Error ? squashed.message : String(squashed)
+      return {
+        content: [{ type: "text" as const, text: message }],
+        isError: true,
+      }
+    })
+    .exhaustive()
+
+export const attachServerCloseRuntimeDisposal = <A, E>(
+  server: McpServer,
+  runtime: ManagedRuntime.ManagedRuntime<A, E>,
+): void => {
+  const originalClose = server.close.bind(server)
+  let disposePromise: Promise<void> | undefined
+  const disposeRuntime = (): Promise<void> => {
+    if (disposePromise === undefined) {
+      disposePromise = runtime.dispose().catch((err: unknown) => {
+        disposePromise = undefined
+        return Promise.reject(err)
+      })
+    }
+    return disposePromise
+  }
+  server.close = (): Promise<void> => originalClose().finally(() => disposeRuntime())
+  const previousOnClose = server.server.onclose
+  server.server.onclose = () => {
+    previousOnClose?.()
+    void disposeRuntime().catch((err: unknown) => {
+      process.stderr.write(
+        `[harness-mcp] Runtime dispose error: ${err instanceof Error ? err.message : String(err)}\n`,
+      )
+    })
+  }
 }

@@ -185,4 +185,39 @@ describe("Decision catchCause interrupt propagation & defect warning (F-6.3, T-1
       )
     }),
   )
+
+  it.effect("F-12.1: composite Cause.combine(Cause.die, Cause.interrupt) logs warning and returns degraded fallback instead of disappearing as pure interrupt", () =>
+    Effect.gen(function* () {
+      const warnings: Array<string> = []
+      const captureLogger = Logger.make((options) => {
+        if (options.logLevel === "Warn") {
+          warnings.push(String(options.message))
+        }
+      })
+      const compositeLayer = Layer.mergeAll(
+        Layer.succeed(DecisionModel.DecisionModel, {
+          [DecisionModel.TypeId]: DecisionModel.TypeId,
+          decide: () =>
+            Effect.failCause(Cause.combine(Cause.die(new Error("boom")), Cause.interrupt(0))),
+        }),
+        Logger.layer([captureLogger]),
+      )
+
+      const routeRes = yield* routeStep("Add Schema validation for user input").pipe(
+        Effect.provide(compositeLayer),
+      )
+      expect(routeRes).toBe("review")
+
+      const ontologyRes = yield* checkOntologyPairConflict({
+        sourceId: "SPEC-0001#REQ-1",
+        sourceText: "WHEN a happens THEN b",
+        targetId: "ADR-0001",
+        targetText: "Chosen option: c",
+        sharedSymbol: "Foo",
+      }).pipe(Effect.provide(compositeLayer))
+      expect(ontologyRes.timedOutOrUnavailable).toBe(true)
+      expect(ontologyRes.hasConflict).toBe(false)
+      expect(warnings.filter((w) => w.includes("Decision model fallback:")).length).toBe(2)
+    }),
+  )
 })

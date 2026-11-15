@@ -59,4 +59,35 @@ describe("Harness daemon shared AST gate cache", () => {
       fs.rmSync(tmpRoot, { recursive: true, force: true })
     }
   })
+
+  it("F-10.1: ast-gates fails closed with ok: false when any requested file is missing", async () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "harness-daemon-missing-"))
+    try {
+      const handle = await startHarnessDaemonServer(tmpRoot)
+      try {
+        const socketPath = DaemonSocketPath.make(handle.socketPath)
+        const req = JSON.stringify({
+          id: "req-missing",
+          command: "ast-gates",
+          files: ["libs/sample/domain/src/does-not-exist.ts"],
+        })
+        const raw = await Effect.runPromise(
+          queryUnixSocketLine(socketPath, req, 5000).pipe(Effect.provide(UnixSocketDaemonLive)),
+        )
+        const res = JSON.parse(Option.getOrThrow(raw)) as {
+          readonly id: string
+          readonly ok: boolean
+          readonly error?: string
+        }
+        expect(res.id).toBe("req-missing")
+        expect(res.ok).toBe(false)
+        expect(typeof res.error).toBe("string")
+        expect((res.error ?? "").length).toBeGreaterThan(0)
+      } finally {
+        await handle.close()
+      }
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
+  })
 })

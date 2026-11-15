@@ -1,5 +1,8 @@
 # Effect-TS Engineering Harness — Repo Bootstrap Implementation Plan
 
+> [!NOTE]
+> **Data Layer Supersession (`harness:ADR-0008` / `harness:ADR-0013`):** All historical `drizzle-orm` / `drizzle-kit` references in this early bootstrap plan are **superseded and banned workspace-wide**. The workspace uses native Effect v4 SQL (`@effect/sql-d1`, `@effect/sql-sqlite-do`, `SqlClient.SqlClient`, `SqliteMigrator`, `Schema`) exclusively in `type:infra`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Bootstrap the empty `effect-ts-harness` repo into a pnpm + Nx monorepo with the full Effect v4 toolchain (tsgo with Effect diagnostics, oxlint with the effecttsgo preset, module boundaries, composite `verify` gate), the first harness packages with spec-backed seeds, the vendored Effect and Alchemy knowledge layers, and the Alchemy v2 sample-app scaffold — everything `docs/mvp.md` needs before phase 1 starts.

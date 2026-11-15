@@ -16,6 +16,7 @@ vi.mock("node:fs", async (importOriginal) => {
 })
 import * as DecisionModel from "effect/ai/DecisionModel"
 import * as AiError from "effect/ai/AiError"
+import { isPureInterruptCause } from "@harness/contract"
 import { makeMockDecisionModelLayer } from "@harness/decision"
 import { buildHarnessGraph, saveGraphSnapshot } from "@harness/graph"
 import { readTelemetryEvents } from "@harness/gates"
@@ -35,7 +36,7 @@ import {
   startHarnessDaemonServer,
 } from "../src/server.js"
 import { executeTool } from "./execute-tool-helper.js"
-import { resolveGraph } from "../src/tools/mcp-helpers.js"
+import { resolveGraphWithStatus } from "../src/tools/mcp-helpers.js"
 import { McpToolInputName } from "../src/tools/tool-registry.js"
 
 class DaemonClientError extends Data.TaggedError("DaemonClientError")<{
@@ -173,8 +174,11 @@ describe("harness-mcp tools", () => {
       { graph },
     )
     expect(resolved).toMatchObject({
-      qualname: "libs/sample/domain/src/index.ts#greet",
-      spanName: "Sample.greet",
+      degraded: false,
+      node: {
+        qualname: "libs/sample/domain/src/index.ts#greet",
+        spanName: "Sample.greet",
+      },
     })
 
     const tests = await executeTool(
@@ -182,11 +186,14 @@ describe("harness-mcp tools", () => {
       { symbolOrSpan: "Sample.greet" },
       { graph },
     )
-    expect(tests).toEqual([
-      expect.objectContaining({
-        testId: "libs/sample/domain/test/index.test.ts::greets by name",
-      }),
-    ])
+    expect(tests).toMatchObject({
+      degraded: false,
+      tests: [
+        expect.objectContaining({
+          testId: "libs/sample/domain/test/index.test.ts::greets by name",
+        }),
+      ],
+    })
   })
 
   it("queries callers and callees correctly", async () => {
@@ -195,8 +202,9 @@ describe("harness-mcp tools", () => {
       { symbolOrSpan: "Sample.greet" },
       { graph },
     )
-    expect(callers).toEqual(
-      expect.arrayContaining([
+    expect(callers).toMatchObject({
+      degraded: false,
+      callers: expect.arrayContaining([
         expect.objectContaining({
           qualname: "libs/sample/service/src/index.ts#callGreet",
           edgeKind: "TracedCall",
@@ -206,15 +214,16 @@ describe("harness-mcp tools", () => {
           edgeKind: "ExercisesSpan",
         }),
       ]),
-    )
+    })
 
     const callees = await executeTool(
       "harness_callees",
       { symbolOrSpan: "libs/sample/service/src/index.ts#callGreet" },
       { graph },
     )
-    expect(callees).toEqual(
-      expect.arrayContaining([
+    expect(callees).toMatchObject({
+      degraded: false,
+      callees: expect.arrayContaining([
         expect.objectContaining({
           qualname: "libs/sample/domain/src/index.ts#greet",
           edgeKind: "TracedCall",
@@ -224,7 +233,7 @@ describe("harness-mcp tools", () => {
           edgeKind: "RequiresService",
         }),
       ]),
-    )
+    })
   })
 
   it("executes structural search across workspace files", async () => {
@@ -464,14 +473,22 @@ describe("harness-mcp tools", () => {
       { symbolOrSpan: "NonExistent" },
       { snapshotPath: nonExistentPath },
     )
-    expect(resolved).toBeNull()
+    expect(resolved).toMatchObject({
+      node: null,
+      degraded: true,
+      degradedReason: "missing-graph-snapshot",
+    })
 
     const tests = await executeTool(
       "harness_tests_reaching",
       { symbolOrSpan: "NonExistent" },
       { snapshotPath: nonExistentPath },
     )
-    expect(tests).toEqual([])
+    expect(tests).toMatchObject({
+      tests: [],
+      degraded: true,
+      degradedReason: "missing-graph-snapshot",
+    })
   })
 
   it("resolves reaching tests from disk snapshot when snapshotPath is provided", async () => {
@@ -483,11 +500,14 @@ describe("harness-mcp tools", () => {
         { symbolOrSpan: "Sample.greet" },
         { snapshotPath: tempSnapshotPath },
       )
-      expect(tests).toEqual([
-        expect.objectContaining({
-          testId: "libs/sample/domain/test/index.test.ts::greets by name",
-        }),
-      ])
+      expect(tests).toMatchObject({
+        degraded: false,
+        tests: [
+          expect.objectContaining({
+            testId: "libs/sample/domain/test/index.test.ts::greets by name",
+          }),
+        ],
+      })
     } finally {
       if (fs.existsSync(tempSnapshotPath)) {
         fs.unlinkSync(tempSnapshotPath)
@@ -755,7 +775,10 @@ describe("harness-mcp tools", () => {
         repoRoot: tmpDir,
       })
       expect(resPlanOnly).toMatchObject({
-        spanName: "Sample.planFn",
+        degraded: false,
+        node: {
+          spanName: "Sample.planFn",
+        },
       })
 
       // 2. Case B: graph-snapshot.json exists, but plan-graph-snapshot.json is newer
@@ -770,7 +793,10 @@ describe("harness-mcp tools", () => {
         repoRoot: tmpDir,
       })
       expect(resNewerPlan).toMatchObject({
-        spanName: "Sample.planFn",
+        degraded: false,
+        node: {
+          spanName: "Sample.planFn",
+        },
       })
 
       // 3. Case C: graph-snapshot.json is updated to be newer than plan-graph-snapshot.json
@@ -782,7 +808,10 @@ describe("harness-mcp tools", () => {
         repoRoot: tmpDir,
       })
       expect(resNewerVerify).toMatchObject({
-        spanName: "Sample.verifyFn",
+        degraded: false,
+        node: {
+          spanName: "Sample.verifyFn",
+        },
       })
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true })
@@ -1070,14 +1099,22 @@ describe("harness-mcp tools", () => {
           { symbolOrSpan: "Sample.greet" },
           { snapshotPath: corruptSnapshotPath },
         )
-        expect(resolved).toBeNull()
+        expect(resolved).toMatchObject({
+          node: null,
+          degraded: true,
+          degradedReason: "corrupt-graph-snapshot",
+        })
 
         const tests = await executeTool(
           "harness_tests_reaching",
           { symbolOrSpan: "Sample.greet" },
           { snapshotPath: corruptSnapshotPath },
         )
-        expect(tests).toEqual([])
+        expect(tests).toMatchObject({
+          tests: [],
+          degraded: true,
+          degradedReason: "corrupt-graph-snapshot",
+        })
 
         const stderrOutput = stderrChunks.join("")
         const stdoutOutput = stdoutChunks.join("")
@@ -1229,7 +1266,10 @@ describe("harness-mcp tools", () => {
       expect(firstBlock?.type).toBe("text")
       if (firstBlock?.type === "text") {
         expect(JSON.parse(firstBlock.text)).toMatchObject({
-          spanName: "Sample.greet",
+          degraded: false,
+          node: {
+            spanName: "Sample.greet",
+          },
         })
       }
 
@@ -1484,7 +1524,7 @@ describe("harness-mcp tools", () => {
     )
   })
 
-  it("resolveGraph re-throws unexpected defects via Cause.hasDies while logging to stderr", async () => {
+  it("resolveGraphWithStatus re-throws unexpected defects via Cause.hasDies while logging to stderr", async () => {
     const tmpSnap = path.join(os.tmpdir(), `defect-snap-${Date.now()}.json`)
     const stderrChunks: Array<string> = []
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
@@ -1500,7 +1540,7 @@ describe("harness-mcp tools", () => {
 
     await Effect.runPromise(
       Effect.promise(async () => {
-        const exit = await Effect.runPromiseExit(resolveGraph({ snapshotPath: tmpSnap }))
+        const exit = await Effect.runPromiseExit(resolveGraphWithStatus({ snapshotPath: tmpSnap }))
         match(exit)
           .with({ _tag: "Failure" }, ({ cause }) => {
             expect(Cause.hasDies(cause)).toBe(true)
@@ -1509,7 +1549,7 @@ describe("harness-mcp tools", () => {
             )
           })
           .with({ _tag: "Success" }, () => {
-            expect.unreachable("Expected resolveGraph to die on unexpected defect")
+            expect.unreachable("Expected resolveGraphWithStatus to die on unexpected defect")
           })
           .exhaustive()
       }).pipe(
@@ -1708,5 +1748,25 @@ describe("harness-mcp tools", () => {
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true })
     }
+  })
+
+  it("F-8.1 & F-12.1: harness_graph_infer surfaces degraded status on missing snapshot and isPureInterruptCause preserves composite causes", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-mcp-degraded-"))
+    try {
+      const inferRes = (await executeTool(
+        "harness_graph_infer",
+        { repoRoot: tmpDir },
+        { repoRoot: tmpDir },
+      )) as { readonly degraded: boolean; readonly degradedReason?: string }
+      expect(inferRes.degraded).toBe(true)
+      expect(inferRes.degradedReason).toBe("missing-graph-snapshot")
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
+
+    expect(isPureInterruptCause(Cause.interrupt(1))).toBe(true)
+    expect(
+      isPureInterruptCause(Cause.combine(Cause.fail(new Error("err")), Cause.interrupt(1))),
+    ).toBe(false)
   })
 })

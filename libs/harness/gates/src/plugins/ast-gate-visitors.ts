@@ -18,11 +18,17 @@
  * 4. domain-purity:
  *    - impure-domain-import: Bans node I/O, Drizzle, SQL, and Alchemy imports in domain/contract packages
  *    - domain-effect-ignore: Bans Effect.ignore in domain logic swallowing typed errors
- *    - unscoped-effect-run: Bans Effect.runSync/runPromise/runFork outside app edge runtime
+ *    - unscoped-effect-run: Bans Effect.runSync/runPromise/runFork across non-app tiers + apps/harness-mcp (narrow runSync(Effect.die(...)) bridge in libs/es/infra/src/memory.ts and runPromiseExit in apps/harness-mcp server/daemon boundaries exempted)
  * 5. effect-laws:
  *    - effect-fn-dummy-void: Bans dummy 'yield* Effect.void' in generator functions
  *    - discriminant-branching: Bans if/ternary discriminant or Option/Either/Exit/Result guard inspection
  *    - non-exhaustive-union-match: Bans match(...).run() in favor of .exhaustive()
+ *    - catch-cause-interrupts-only: Bans Cause.hasInterruptsOnly inside Effect.catchCause / Exit inspection
+ *    - bare-cause-has-interrupts: Bans bare Cause.hasInterrupts(cause) without !Cause.hasFails && !Cause.hasDies
+ *    - silent-catch-defect: Bans Effect.catchDefect handlers that swallow defects without logging or re-failing
+ *    - ignored-chmod-permission: Bans Effect.ignore / Effect.orElseSucceed on chmodSync/fchmodSync
+ *    - silent-gate-fs-fallback: Bans silent fs fallbacks in gates
+ *    - invalid-clef-endpoint: Bans non-SystemOne /api/generate or /api/chat calls against clef-flash
  */
 
 import { Schema } from "effect"
@@ -39,6 +45,7 @@ import {
 } from "@harness/contract"
 import { ts } from "@harness/graph"
 import { checkMigrationSqlSafety } from "../migration-check.js"
+import { isBareCauseHasInterruptsNode } from "./ast-gate-law-helpers.js"
 import { analyzeSqliteMigratorFromRecordAst } from "./sqlite-migrator-ast.js"
 
 export const GateViolation = Schema.Struct({
@@ -108,6 +115,7 @@ export const unwrapAstExpression = (expr: ts.Expression): ts.Expression => {
     ts.isParenthesizedExpression(curr) ||
     ts.isAsExpression(curr) ||
     ts.isTypeAssertionExpression(curr) ||
+    ts.isSatisfiesExpression(curr) ||
     ts.isNonNullExpression(curr)
   ) {
     curr = curr.expression
@@ -663,7 +671,25 @@ export const visitSourceFileSinglePass = (
       }
 
       if (!isTestFile && isCatchCauseInterruptsOnlyCall(node, sourceFile)) {
-        pushViolation(catEffectLaws, "catch-cause-interrupts-only", "Cause.hasInterruptsOnly(cause) inside Effect.catchCause / Exit inspection swallows fiber interruption on composite causes (Fail + Interrupt). Use Cause.hasInterrupts(cause) instead.", node)
+        pushViolation(
+          catEffectLaws,
+          "catch-cause-interrupts-only",
+          "Cause.hasInterruptsOnly(cause) inside Effect.catchCause / Exit inspection swallows fiber interruption on composite causes (Fail + Interrupt). Use isPureInterruptCause(cause) or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause) instead.",
+          node,
+        )
+      }
+
+      if (
+        !isTestOrHelperFile &&
+        /(?:^|\/)src\//.test(normalizedFilePath) &&
+        isBareCauseHasInterruptsNode(node, sourceFile, normalizedFilePath)
+      ) {
+        pushViolation(
+          catEffectLaws,
+          "bare-cause-has-interrupts",
+          "Bare Cause.hasInterrupts(cause) in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause(cause) or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause).",
+          node,
+        )
       }
 
       if (!isTestFile && isSilentCatchDefectCall(node, sourceFile)) {
@@ -690,6 +716,20 @@ export const visitSourceFileSinglePass = (
           pushViolation(catTestIntegrity, "vacuous-error-assertion", `Vacuous Exit.isFailure assertion in '${filePath}' without inspecting Cause.findErrorOption or error fields.`, node)
         }
       }
+    }
+
+    if (
+      ts.isPropertyAccessExpression(node) &&
+      !isTestOrHelperFile &&
+      /(?:^|\/)src\//.test(normalizedFilePath) &&
+      isBareCauseHasInterruptsNode(node, sourceFile, normalizedFilePath)
+    ) {
+      pushViolation(
+        catEffectLaws,
+        "bare-cause-has-interrupts",
+        "Point-free Cause.hasInterrupts in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause instead.",
+        node,
+      )
     }
 
     // 6. BinaryExpression: JSON.stringify(a) === JSON.stringify(b) in tests

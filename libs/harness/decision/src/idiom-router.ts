@@ -1,9 +1,7 @@
-import { Cause, Effect, Layer, Option, Schema } from "effect"
+import { Cause, Effect, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
-import * as FetchHttpClient from "effect/http/FetchHttpClient"
-import type * as HttpClient from "effect/http/HttpClient"
-import { TypeSafeClient, TypeSafeDecisionModel } from "@effect/ai-typesafe"
+import { isPureInterruptCause } from "@harness/contract"
 import { match } from "ts-pattern"
 
 /** Ordered building blocks for MVP v2 (docs/mvp_v2.md §5 & §11); `review` first is a
@@ -164,31 +162,43 @@ export const validateDecisionLimits = Effect.fn("Harness.validateDecisionLimits"
   }
 })
 
-export const routeStep = Effect.fn("Harness.routeStep")(function* (step: string) {
+export type RouteStepSource = "deterministic" | "model" | "degraded-fallback"
+
+export interface RouteStepStatusResult {
+  readonly block: BuildingBlock
+  readonly source: RouteStepSource
+}
+
+export const routeStepWithStatus = Effect.fn("Harness.routeStepWithStatus")(function* (
+  step: string,
+): Effect.fn.Return<RouteStepStatusResult, never, DecisionModel.DecisionModel> {
   const trimmed = step.trim()
   if (trimmed.length === 0) {
-    return "review" as BuildingBlock
+    return { block: "review" as const, source: "deterministic" as const }
   }
 
   for (const rule of DETERMINISTIC_ROUTE_RULES) {
     if (rule.pattern.test(trimmed)) {
-      return rule.block
+      return { block: rule.block, source: "deterministic" as const }
     }
   }
 
   const outcome = yield* DecisionModel.decide(IdiomRouterV1, { input: { planStep: step } }).pipe(
     Effect.timeoutOption("1500 millis"),
-    Effect.catchCause((cause) =>
-      Cause.hasInterrupts(cause)
-        ? Effect.interrupt
-        : Effect.logWarning(`Decision model fallback: ${Cause.pretty(cause)}`).pipe(
-            Effect.as(Option.none()),
-          ),
+    Effect.catchCauseIf(
+      (cause) => !isPureInterruptCause(cause),
+      (cause) =>
+        Effect.logWarning(`Decision model fallback: ${Cause.pretty(cause)}`).pipe(
+          Effect.as(Option.none()),
+        ),
     ),
+    Effect.orElseSucceed(() => Option.none()),
   )
 
   return yield* match(outcome)
-    .with({ _tag: "None" }, () => Effect.succeed("review" as const))
+    .with({ _tag: "None" }, () =>
+      Effect.succeed({ block: "review" as const, source: "degraded-fallback" as const }),
+    )
     .with({ _tag: "Some" }, ({ value }) =>
       Effect.gen(function* () {
         const { answers } = value
@@ -197,32 +207,16 @@ export const routeStep = Effect.fn("Harness.routeStep")(function* (step: string)
           "decision.block": answers.block.label,
           "decision.fitsAny": answers.fitsAny.probability,
         })
-        return answers.fitsAny.probability >= 0.7 ? answers.block.label : "review"
+        return {
+          block: answers.fitsAny.probability >= 0.7 ? answers.block.label : ("review" as const),
+          source: "model" as const,
+        }
       }),
     )
     .exhaustive()
 })
 
-/** Configurable Clef-flash (9B) DecisionModel Layer requiring an explicit HttpClient. */
-export const makeLocalDecisionModelLayer = (options?: {
-  readonly apiUrl?: string
-  readonly model?: string
-}): Layer.Layer<DecisionModel.DecisionModel, never, HttpClient.HttpClient> => {
-  const rawUrl = (
-    options?.apiUrl ??
-    process.env.HARNESS_OLLAMA_URL ??
-    process.env.OLLAMA_HOST ??
-    "http://localhost:11434/v1"
-  ).replace(/\/$/, "")
-  const withScheme = /^https?:\/\//i.test(rawUrl) ? rawUrl : `http://${rawUrl}`
-  const apiUrl = withScheme.endsWith("/v1") ? withScheme : `${withScheme}/v1`
-  const model = options?.model ?? process.env.HARNESS_CLEF_MODEL ?? "clef-flash"
-  return TypeSafeDecisionModel.layer({ model }).pipe(
-    Layer.provide(TypeSafeClient.layer({ apiUrl })),
-  )
-}
-
-/** Local resident Clef-flash (9B) through Ollama's System One endpoint. */
-export const LocalDecisionModel = makeLocalDecisionModelLayer().pipe(
-  Layer.provide(FetchHttpClient.layer),
-)
+export const routeStep = Effect.fn("Harness.routeStep")(function* (step: string) {
+  const result = yield* routeStepWithStatus(step)
+  return result.block
+})

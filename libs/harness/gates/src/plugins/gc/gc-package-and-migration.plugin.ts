@@ -21,13 +21,14 @@ import { match } from "ts-pattern"
 import {
   AstSourceContent,
   AstSourceFilePath,
-  ErrorReasonMessage,
   NxTierTag,
   PackageDependencyName,
   PackageManifestName,
   PackageManifestPath,
   type PackageTierManifestInput,
+  parseManifestTags,
   type ServiceTierSourceInput,
+  toErrorReasonMessage,
   WorkspaceFileContent,
   WorkspaceFilePath,
   WorkspaceFsError,
@@ -112,9 +113,7 @@ export const evaluatePackageAndMigrationPlugin = (
             new WorkspaceFsError({
               filePath,
               operation: WorkspaceFsOperation.make("read"),
-              reason: ErrorReasonMessage.make(
-                err instanceof Error && err.message.trim().length > 0 ? err.message : "Read failed",
-              ),
+              reason: toErrorReasonMessage(err, "Read failed"),
             }),
         }),
       writeTextFileAtomic: (filePath: WorkspaceFilePath, content: WorkspaceFileContent) =>
@@ -130,9 +129,7 @@ export const evaluatePackageAndMigrationPlugin = (
               new WorkspaceFsError({
                 filePath,
                 operation: WorkspaceFsOperation.make("write"),
-                reason: ErrorReasonMessage.make(
-                  err instanceof Error && err.message.trim().length > 0 ? err.message : "Write failed",
-                ),
+                reason: toErrorReasonMessage(err, "Write failed"),
               }),
           }).pipe(
             Effect.ensuring(
@@ -201,7 +198,9 @@ export const evaluatePackageAndMigrationPlugin = (
             ...(pkgValue.nx?.tags ?? []).map((t) => t.trim()).filter((t) => t.length > 0),
             ...projectTags,
           ])
-          const nxTags = Array.from(mergedTagSet).map((t) => NxTierTag.make(t))
+          const parsedTags = parseManifestTags(Array.from(mergedTagSet))
+          const nxTags = [...parsedTags.nxTags]
+          const scopeTags = [...parsedTags.scopeTags]
           const dependencyNames = [
             ...Object.keys(pkgValue.dependencies ?? {}),
             ...Object.keys(pkgValue.peerDependencies ?? {}),
@@ -218,6 +217,7 @@ export const evaluatePackageAndMigrationPlugin = (
             manifestPath: PackageManifestPath.make(relPkgPath),
             packageName: PackageManifestName.make(pkgName),
             nxTags,
+            scopeTags,
             dependencyNames,
             nonRuntimeDependencyNames,
           })

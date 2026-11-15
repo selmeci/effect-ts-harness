@@ -72,26 +72,31 @@ export interface SyncHostExecOptions {
   readonly env?: Readonly<Record<string, string | undefined>> | undefined
 }
 
-export interface SyncHostIo {
+export interface SyncHostReader {
   readonly existsSync: (filePath: string) => boolean
   readonly isFileSync: (filePath: string) => boolean
   readonly isDirectorySync: (filePath: string) => boolean
   readonly isSymbolicLinkSync: (filePath: string) => boolean
   readonly readTextSync: (filePath: string) => string
   readonly readBytesSync: (filePath: string) => Uint8Array
+  readonly readdirSync: (dirPath: string) => ReadonlyArray<SyncHostDirEntry>
+  readonly realpathSync: (filePath: string) => string
+}
+
+export interface SyncHostMutator {
   readonly writeTextSync: (filePath: string, content: string) => void
   readonly appendTextSync: (filePath: string, content: string) => void
   readonly mkdirRecursiveSync: (dirPath: string, mode?: number) => void
   readonly renameSync: (oldPath: string, newPath: string) => void
   readonly unlinkSync: (filePath: string) => void
-  readonly readdirSync: (dirPath: string) => ReadonlyArray<SyncHostDirEntry>
-  readonly realpathSync: (filePath: string) => string
   readonly execFileSync: (
     command: string,
     args: ReadonlyArray<string>,
     options?: SyncHostExecOptions,
   ) => SyncHostExecResult
 }
+
+export interface SyncHostIo extends SyncHostReader, SyncHostMutator {}
 
 export interface SyncHostSpawned {
   readonly _tag: "Spawned"

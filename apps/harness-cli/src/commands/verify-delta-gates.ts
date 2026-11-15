@@ -6,10 +6,10 @@ import { match } from "ts-pattern"
 import {
   AstSourceContent,
   AstSourceFilePath,
-  NxTierTag,
   PackageDependencyName,
   PackageManifestName,
   PackageManifestPath,
+  parseManifestTags,
   type PackageTierManifestInput,
   type ServiceTierSourceInput,
   WorkspaceFilePath,
@@ -25,12 +25,13 @@ import {
   type DstTargetServiceMethod as DstTargetMethodSpec,
   evaluateAllGatePlugins,
   GatePluginRegistryLive,
+  type GcFinding,
   isModularPluginPath,
   type SpanSample,
 } from "@harness/gates"
 import type { HarnessGraph } from "@harness/graph"
 import { makeAstGateCacheLayer, nodeSyncHostIo, WorkspaceFsLive } from "@harness/infra"
-import type { CliResult } from "./daemon-and-omnigraph.service.js"
+import type { CliResult, ResolveModifiedFilesResult } from "./daemon-and-omnigraph.service.js"
 
 export const buildDstTargetsFromGraph = (graph: HarnessGraph): ReadonlyArray<DstTargetMethodSpec> => {
   const dstTargets: Array<DstTargetMethodSpec> = []
@@ -212,17 +213,19 @@ export const collectHarnessTierTopologyViolationMessages = (
                 .map((d) => d.trim())
                 .filter((d) => d.length > 0)
                 .map((d) => PackageDependencyName.make(d))
-              const mergedTags = Array.from(
+              const rawTags = Array.from(
                 new Set(
                   [...(value.nx?.tags ?? []), ...projectJsonTags]
                     .map((t) => t.trim())
                     .filter((t) => t.length > 0),
                 ),
-              ).map((t) => NxTierTag.make(t))
+              )
+              const parsed = parseManifestTags(rawTags)
               manifests.push({
                 manifestPath: PackageManifestPath.make(relPkgPath),
                 packageName: PackageManifestName.make((value.name ?? defaultName).trim()),
-                nxTags: mergedTags,
+                nxTags: [...parsed.nxTags],
+                scopeTags: [...parsed.scopeTags],
                 dependencyNames: runtimeDependencyNames,
                 nonRuntimeDependencyNames,
               })
@@ -238,7 +241,13 @@ export const collectHarnessTierTopologyViolationMessages = (
       for (const subDir of ["src", "test", "scripts"] as const) {
         const subDirPath = join(pkgDir, subDir)
         if (nodeSyncHostIo.existsSync(subDirPath)) {
-          for (const absFile of collectWorkspaceTsFiles(subDirPath, nodeSyncHostIo)) {
+          const scanFindings: Array<GcFinding> = []
+          for (const absFile of collectWorkspaceTsFiles(
+            subDirPath,
+            nodeSyncHostIo,
+            scanFindings,
+            repoRoot,
+          )) {
             const relFile = relative(repoRoot, absFile).replace(/\\/g, "/")
             const content = readTextChecked(absFile, relFile, manifestDecodeErrors)
             if (content === undefined) continue
@@ -250,6 +259,11 @@ export const collectHarnessTierTopologyViolationMessages = (
             if (isServiceTier && subDir === "src") {
               serviceFiles.push(sourceItem)
             }
+          }
+          for (const finding of scanFindings) {
+            manifestDecodeErrors.push(
+              `[${finding.kind}] ${finding.location ?? finding.nodeId}: ${finding.message}`,
+            )
           }
         }
       }
@@ -291,110 +305,145 @@ export const collectHarnessTierTopologyViolationMessages = (
     ]
   })
 
+const isDeltaFilesArray = (
+  input: ReadonlyArray<string> | ResolveModifiedFilesResult,
+): input is ReadonlyArray<string> => Array.isArray(input)
+
 export const runDeltaAstAndPluginGates = (
   repoRoot: string,
-  deltaFiles: ReadonlyArray<string>,
-): Effect.Effect<Option.Option<CliResult>> =>
-  Effect.gen(function* () {
-    const tierViolations = yield* collectHarnessTierTopologyViolationMessages(repoRoot)
-    if (tierViolations.length > 0) {
-      return Option.some({
+  deltaFilesInput: ReadonlyArray<string> | ResolveModifiedFilesResult,
+): Effect.Effect<Option.Option<CliResult>> => {
+  const normalizedInput: ResolveModifiedFilesResult = isDeltaFilesArray(deltaFilesInput)
+    ? { _tag: "Resolved", files: deltaFilesInput }
+    : deltaFilesInput
+  return match(normalizedInput)
+    .with({ _tag: "GitFailed" }, ({ reason }) =>
+      Effect.succeedSome({
         exitCode: 1,
         stdout: "",
-        stderr: `[GATE FAILURE] verify:tier-topology\n${tierViolations.join("\n")}`,
-      })
-    }
-    if (deltaFiles.length === 0) return Option.none()
-    const astGateReadErrors: Array<string> = []
-    const astGateFiles: Array<{ readonly filePath: AstSourceFilePath; readonly content: AstSourceContent }> = []
-    for (const relPath of deltaFiles) {
-      const content = readTextChecked(join(repoRoot, relPath), relPath, astGateReadErrors)
-      if (content !== undefined) {
-        astGateFiles.push({
-          filePath: AstSourceFilePath.make(relPath),
-          content: AstSourceContent.make(content),
-        })
-      }
-    }
-    if (astGateReadErrors.length > 0) {
-      return Option.some({
-        exitCode: 1,
-        stdout: "",
-        stderr: `[GATE FAILURE] verify:ast-gates\n${astGateReadErrors.join("\n")}`,
-      })
-    }
-    const astGateCacheLayer = makeAstGateCacheLayer({
-      cacheFilePath: WorkspaceFilePath.make(AstGateCache.resolveCachePath(repoRoot)),
-    }).pipe(Layer.provide(NodeServices.layer))
-    const astExit = yield* AstGateCache.evaluateCached(astGateFiles).pipe(
-      Effect.provide(astGateCacheLayer),
-      Effect.exit,
+        stderr: `[GATE FAILURE] verify:git-delta\nFailed to resolve modified files from git: ${reason}`,
+      }),
     )
-    const astFailResult = match(astExit)
-      .with({ _tag: "Failure" }, ({ cause }) =>
-        match(Cause.findErrorOption(cause))
-          .with({ _tag: "Some" }, ({ value }) =>
-            match(value)
-              .with({ _tag: "WorkspaceFsError" }, (err) =>
-                Option.some<CliResult>({
-                  exitCode: 1,
-                  stdout: "",
-                  stderr: `[GATE FAILURE] verify:ast-gates\nFailed to read ${err.filePath}: ${err.reason}`,
-                }),
-              )
-              .with({ _tag: "AstGateEvaluationError" }, (err) =>
-                Option.some<CliResult>({
-                  exitCode: 1,
-                  stdout: "",
-                  stderr: `[GATE FAILURE] verify:ast-gates\n${err.reason}: ${err.message}`,
-                }),
-              )
-              .exhaustive(),
-          )
-          .with({ _tag: "None" }, () =>
-            Option.some<CliResult>({
-              exitCode: 1,
-              stdout: "",
-              stderr: `[GATE FAILURE] verify:ast-gates\n${Cause.pretty(cause)}`,
-            }),
-          )
-          .exhaustive(),
-      )
-      .with({ _tag: "Success" }, ({ value: astReport }) => {
-        const enforcedAstViolations = astReport.violations.filter((v) => !v.file.startsWith("tools/"))
-        if (enforcedAstViolations.length > 0) {
-          const msg = enforcedAstViolations
-            .map((v) => `[${v.rule}] ${v.file}:${v.line}: ${v.message}`)
-            .join("\n")
-          return Option.some<CliResult>({
+    .with({ _tag: "Resolved" }, ({ files: deltaFiles }) =>
+      Effect.gen(function* () {
+        const tierViolations = yield* collectHarnessTierTopologyViolationMessages(repoRoot)
+        if (tierViolations.length > 0) {
+          return Option.some({
             exitCode: 1,
             stdout: "",
-            stderr: `[GATE FAILURE] verify:ast-gates\n${msg}`,
+            stderr: `[GATE FAILURE] verify:tier-topology\n${tierViolations.join("\n")}`,
           })
         }
-        return Option.none<CliResult>()
-      })
-      .exhaustive()
-    const astGateFailure = match(astFailResult)
-      .with({ _tag: "Some" }, ({ value }) => value)
-      .with({ _tag: "None" }, () => undefined)
-      .exhaustive()
-    if (astGateFailure !== undefined) {
-      return Option.some(astGateFailure)
-    }
+        if (deltaFiles.length > 0) {
+          const astGateReadErrors: Array<string> = []
+          const astGateFiles: Array<{
+            readonly filePath: AstSourceFilePath
+            readonly content: AstSourceContent
+          }> = []
+          for (const relPath of deltaFiles) {
+            const content = readTextChecked(join(repoRoot, relPath), relPath, astGateReadErrors)
+            if (content !== undefined) {
+              astGateFiles.push({
+                filePath: AstSourceFilePath.make(relPath),
+                content: AstSourceContent.make(content),
+              })
+            }
+          }
+          if (astGateReadErrors.length > 0) {
+            return Option.some({
+              exitCode: 1,
+              stdout: "",
+              stderr: `[GATE FAILURE] verify:ast-gates\n${astGateReadErrors.join("\n")}`,
+            })
+          }
+          const astGateCacheLayer = makeAstGateCacheLayer({
+            cacheFilePath: WorkspaceFilePath.make(AstGateCache.resolveCachePath(repoRoot)),
+          }).pipe(Layer.provide(NodeServices.layer))
+          const astExit = yield* AstGateCache.evaluateCached(astGateFiles).pipe(
+            Effect.provide(astGateCacheLayer),
+            Effect.exit,
+          )
+          const astFailResult = match(astExit)
+            .with({ _tag: "Failure" }, ({ cause }) =>
+              match(Cause.findErrorOption(cause))
+                .with({ _tag: "Some" }, ({ value }) =>
+                  match(value)
+                    .with({ _tag: "WorkspaceFsError" }, (err) =>
+                      Option.some<CliResult>({
+                        exitCode: 1,
+                        stdout: "",
+                        stderr: `[GATE FAILURE] verify:ast-gates\nFailed to read ${err.filePath}: ${err.reason}`,
+                      }),
+                    )
+                    .with({ _tag: "AstGateEvaluationError" }, (err) =>
+                      Option.some<CliResult>({
+                        exitCode: 1,
+                        stdout: "",
+                        stderr: `[GATE FAILURE] verify:ast-gates\n${err.reason}: ${err.message}`,
+                      }),
+                    )
+                    .exhaustive(),
+                )
+                .with({ _tag: "None" }, () =>
+                  Option.some<CliResult>({
+                    exitCode: 1,
+                    stdout: "",
+                    stderr: `[GATE FAILURE] verify:ast-gates\n${Cause.pretty(cause)}`,
+                  }),
+                )
+                .exhaustive(),
+            )
+            .with({ _tag: "Success" }, ({ value: astReport }) => {
+              const enforcedAstViolations = astReport.violations.filter(
+                (v) => !v.file.startsWith("tools/"),
+              )
+              if (enforcedAstViolations.length > 0) {
+                const msg = enforcedAstViolations
+                  .map((v) => `[${v.rule}] ${v.file}:${v.line}: ${v.message}`)
+                  .join("\n")
+                return Option.some<CliResult>({
+                  exitCode: 1,
+                  stdout: "",
+                  stderr: `[GATE FAILURE] verify:ast-gates\n${msg}`,
+                })
+              }
+              return Option.none<CliResult>()
+            })
+            .exhaustive()
+          const astGateFailure = match(astFailResult)
+            .with({ _tag: "Some" }, ({ value }) => value)
+            .with({ _tag: "None" }, () => undefined)
+            .exhaustive()
+          if (astGateFailure !== undefined) {
+            return Option.some(astGateFailure)
+          }
+        }
 
-    let modularDeltaFiles = deltaFiles.filter((f) => isModularPluginPath(f))
-    if (
-      modularDeltaFiles.length === 0 &&
-      nodeSyncHostIo.existsSync(join(repoRoot, "libs", "harness", "gates", "src"))
-    ) {
-      process.stderr.write(
-        `[harness:verify] Warning: no modular gate delta files detected in ${repoRoot}; falling back to scanning all modular gate files.\n`,
-      )
-      modularDeltaFiles = collectModularPluginFiles(repoRoot, nodeSyncHostIo).map((abs) =>
-        relative(repoRoot, abs).replace(/\\/g, "/"),
-      )
-    }
+        let modularDeltaFiles = deltaFiles.filter((f) => isModularPluginPath(f))
+        if (
+          modularDeltaFiles.length === 0 &&
+          nodeSyncHostIo.existsSync(join(repoRoot, "libs", "harness", "gates", "src"))
+        ) {
+          process.stderr.write(
+            `[harness:verify] Warning: no modular gate delta files detected in ${repoRoot}; falling back to scanning all modular gate files.\n`,
+          )
+          const pluginScanFindings: Array<GcFinding> = []
+          modularDeltaFiles = collectModularPluginFiles(
+            repoRoot,
+            nodeSyncHostIo,
+            pluginScanFindings,
+          ).map((abs) => relative(repoRoot, abs).replace(/\\/g, "/"))
+          if (pluginScanFindings.length > 0) {
+            const msg = pluginScanFindings
+              .map((f) => `[${f.kind}] ${f.location ?? f.nodeId}: ${f.message}`)
+              .join("\n")
+            return Option.some<CliResult>({
+              exitCode: 1,
+              stdout: "",
+              stderr: `[GATE FAILURE] verify:self-dogfooding-plugins\n${msg}`,
+            })
+          }
+        }
     if (modularDeltaFiles.length === 0) return Option.none()
     const pluginExit = yield* evaluateAllGatePlugins({
       filePaths: modularDeltaFiles.map((relPath) => WorkspaceFilePath.make(join(repoRoot, relPath))),
@@ -437,7 +486,10 @@ export const runDeltaAstAndPluginGates = (
           .exhaustive()
       })
       .exhaustive()
-  })
+    }),
+  )
+  .exhaustive()
+}
 
 export class SpanTraceReadError extends Data.TaggedError("SpanTraceReadError")<{
   readonly filePath: string

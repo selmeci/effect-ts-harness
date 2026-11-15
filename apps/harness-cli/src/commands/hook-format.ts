@@ -1,28 +1,37 @@
-import type { CliResult } from "./daemon-and-omnigraph.service.js"
-
-const processHookStdinState = { isAntigravity: false }
-
-export const markProcessStdinAntigravityDetected = (): void => {
-  processHookStdinState.isAntigravity = true
+export interface CliResult {
+  readonly exitCode: number
+  readonly stdout: string
+  readonly stderr: string
+  readonly telemetryDetail?: string | undefined
 }
 
-export const resetProcessStdinAntigravityDetected = (): void => {
-  processHookStdinState.isAntigravity = false
+export interface HookStdinTracker {
+  readonly markAntigravityDetected: () => void
+  readonly isAntigravityDetected: () => boolean
 }
 
-export const isProcessStdinAntigravityDetected = (): boolean => processHookStdinState.isAntigravity
+export const createHookStdinTracker = (): HookStdinTracker => {
+  let detected = false
+  return {
+    markAntigravityDetected: () => {
+      detected = true
+    },
+    isAntigravityDetected: () => detected,
+  }
+}
 
 export const resolveTeardownFailure = (
   args: ReadonlyArray<string>,
   isInterruptOnly: boolean,
   prettyCause: string,
+  isAntigravityStdinDetected = false,
 ): { readonly exitCode: number; readonly stdout: string; readonly stderr: string } => {
   const target = args.find((arg) => !arg.startsWith("-"))
   const isHook = target === "guard" || target === "done"
   if (isInterruptOnly && !isHook) return { exitCode: 130, stdout: "", stderr: "" }
   const summary = isInterruptOnly ? "interrupted by signal" : prettyCause
   if (!isHook) return { exitCode: 1, stdout: "", stderr: `${summary}\n` }
-  const isAntigravity = hasAntigravityFormat(args) || isProcessStdinAntigravityDetected()
+  const isAntigravity = hasAntigravityFormat(args) || isAntigravityStdinDetected
   const res =
     target === "guard"
       ? makeGuardDenyResult(isAntigravity, `${target}: ${summary}`)

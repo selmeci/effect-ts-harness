@@ -15,8 +15,34 @@ import {
 } from "./ast-and-gate-primitives.js"
 import { ErrorReasonMessage } from "./workspace-and-process.js"
 
+export const HARNESS_AST_GATE_CACHE_FILENAME = "ast-gate-cache-v1.json" as const
+export const HARNESS_DECISION_CACHE_FILENAME = "decision-cache-v1.json" as const
+
+const resolveDefaultCacheFilePath = (repoRoot: string, fileName: string): WorkspaceFilePath => {
+  const normalizedRoot = repoRoot.trim().replace(/\/+$/, "")
+  const joined =
+    normalizedRoot.length === 0
+      ? `/.harness/cache/${fileName}`
+      : `${normalizedRoot}/.harness/cache/${fileName}`
+  return WorkspaceFilePath.make(joined)
+}
+
+export const resolveDefaultAstGateCachePath = (repoRoot: string): WorkspaceFilePath =>
+  resolveDefaultCacheFilePath(repoRoot, HARNESS_AST_GATE_CACHE_FILENAME)
+
+export const resolveDefaultDecisionCachePath = (repoRoot: string): WorkspaceFilePath =>
+  resolveDefaultCacheFilePath(repoRoot, HARNESS_DECISION_CACHE_FILENAME)
+
+export const EvaluatorId = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isPattern(/^[^\0]+$/s)),
+  Schema.brand("EvaluatorId"),
+)
+export type EvaluatorId = typeof EvaluatorId.Type
+
 export const DecisionCacheKey = Schema.NonEmptyString.pipe(
   Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isPattern(/^[^\0]+$/s)),
   Schema.brand("DecisionCacheKey"),
 )
 export type DecisionCacheKey = typeof DecisionCacheKey.Type
@@ -27,7 +53,7 @@ export const DecisionCachePayloadJson = Schema.String.pipe(
 export type DecisionCachePayloadJson = typeof DecisionCachePayloadJson.Type
 
 export const DecisionCacheTtlMillis = Schema.Int.pipe(
-  Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+  Schema.check(Schema.isGreaterThan(0)),
   Schema.brand("DecisionCacheTtlMillis"),
 )
 export type DecisionCacheTtlMillis = typeof DecisionCacheTtlMillis.Type

@@ -1,4 +1,5 @@
 import { Cause, Effect, Schema } from "effect"
+import { isPureInterruptCause } from "@harness/contract"
 import {
   HARNESS_GQ_QUERY_NAMES,
   invokeOmnigraphNamedQuery,
@@ -11,16 +12,15 @@ import {
   decideOntologyInvariants,
   evaluateOntologyConflictsWithStatus,
   extractOntologyConflictPairs,
-  loadGovernanceDocsFromDisk,
-  LocalDecisionModel,
   type OntologyConflictEvaluationReport,
 } from "@harness/decision"
-import { nodeSyncHostIo } from "@harness/infra"
+import { loadGovernanceDocsChecked } from "@harness/gates"
+import { LocalDecisionModel, nodeSyncHostIo } from "@harness/infra"
 import {
+  graphStatusMeta,
   McpToolName,
   type McpToolPluginDescriptor,
   resolveDefaultRepoRoot,
-  resolveGraph,
   resolveGraphWithStatus,
   type ServerOptions,
 } from "./mcp-helpers.js"
@@ -98,8 +98,11 @@ export const buildOntologyAndGqToolDescriptors = (
     execute: (args) =>
       Effect.gen(function* () {
         const { symbolOrSpan } = yield* decodeOntologyTargetInput(args)
-        const graph = yield* resolveGraph(options, args)
-        return queryOntologyWhy(graph, symbolOrSpan)
+        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        return {
+          ...queryOntologyWhy(graphStatus.graph, symbolOrSpan),
+          ...graphStatusMeta(graphStatus),
+        }
       }),
   },
   {
@@ -109,8 +112,11 @@ export const buildOntologyAndGqToolDescriptors = (
     execute: (args) =>
       Effect.gen(function* () {
         const { symbolOrSpan } = yield* decodeOntologyTargetInput(args)
-        const graph = yield* resolveGraph(options, args)
-        return queryOntologyImpact(graph, symbolOrSpan)
+        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        return {
+          ...queryOntologyImpact(graphStatus.graph, symbolOrSpan),
+          ...graphStatusMeta(graphStatus),
+        }
       }),
   },
   {
@@ -124,7 +130,32 @@ export const buildOntologyAndGqToolDescriptors = (
         const graphStatus = yield* resolveGraphWithStatus(options, args)
         const graph = graphStatus.graph
         const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-        const docs = options?.governanceDocs ?? loadGovernanceDocsFromDisk(root, nodeSyncHostIo)
+        const checkedDocs =
+          options?.governanceDocs !== undefined
+            ? { docs: options.governanceDocs, findings: [] }
+            : loadGovernanceDocsChecked(root, nodeSyncHostIo)
+        if (checkedDocs.findings.length > 0) {
+          const msg = checkedDocs.findings
+            .map((f) => `[${f.kind}] ${f.location ?? f.nodeId}: ${f.message}`)
+            .join("; ")
+          return {
+            clean: false,
+            degraded: true,
+            degradedReason: "unreadable-governance-docs",
+            evaluationError: `Unreadable governance docs: ${msg}`,
+            findings: checkedDocs.findings,
+            semanticConflicts: [],
+            evaluatedPairs: 0,
+            layerCounts: {
+              Motivation: 0,
+              Business: 0,
+              Application: 0,
+              Technology: 0,
+              Implementation: 0,
+            },
+          }
+        }
+        const docs = checkedDocs.docs
         const invariants = yield* decideOntologyInvariants({
           graph,
           governanceDocs: docs,
@@ -134,7 +165,7 @@ export const buildOntologyAndGqToolDescriptors = (
         const semanticReport = yield* evaluateOntologyConflictsWithStatus(pairs).pipe(
           Effect.provide(decisionLayer),
           Effect.catchCause((cause) => {
-            if (Cause.hasInterrupts(cause)) {
+            if (isPureInterruptCause(cause)) {
               return Effect.interrupt
             }
             const pretty = Cause.pretty(cause)
@@ -180,17 +211,37 @@ export const buildOntologyAndGqToolDescriptors = (
     execute: (args) =>
       Effect.gen(function* () {
         const { queryName, params, branch } = yield* decodeGqQueryInput(args)
-        const graph = yield* resolveGraph(options, args)
+        const graphStatus = yield* resolveGraphWithStatus(options, args)
         const root = options?.repoRoot ?? resolveDefaultRepoRoot(args, options)
         const skipSpawn = options?.skipOmnigraphSpawn === true && !process.env["OMNIGRAPH_URL"]
-        return yield* invokeOmnigraphNamedQuery({
+        const gqResult = yield* invokeOmnigraphNamedQuery({
           repoRoot: root,
           name: queryName,
           params,
           branch,
-          fallbackGraph: graph,
+          fallbackGraph: graphStatus.graph,
           ...(skipSpawn ? { baseUrl: "http://127.0.0.1:1" } : {}),
         }).pipe(Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)))
+
+        const degraded = graphStatus.degraded || gqResult.degraded
+        const degradedReasonParts: Array<string> = []
+        if (graphStatus.degradedReason !== undefined) {
+          degradedReasonParts.push(graphStatus.degradedReason)
+        }
+        if (gqResult.degraded) {
+          degradedReasonParts.push(`omnigraph-fallback: ${gqResult.fallbackError}`)
+        }
+        const degradedReason =
+          degradedReasonParts.length > 0 ? degradedReasonParts.join("; ") : undefined
+
+        return {
+          ...gqResult,
+          degraded,
+          ...(degradedReason !== undefined ? { degradedReason } : {}),
+          ...(graphStatus.evaluationError !== undefined
+            ? { evaluationError: graphStatus.evaluationError }
+            : {}),
+        }
       }),
   },
 ]

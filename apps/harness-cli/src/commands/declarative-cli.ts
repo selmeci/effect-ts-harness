@@ -3,8 +3,8 @@ import { Cause, Console, Effect, Layer, Option, Ref } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { Argument, Command as CliCommand, Flag } from "effect/cli"
 import { match } from "ts-pattern"
-import { LocalDecisionModel } from "@harness/decision"
-import { HarnessInfraLive } from "@harness/infra"
+import { isPureInterruptCause } from "@harness/contract"
+import { HarnessInfraLive, LocalDecisionModel } from "@harness/infra"
 import {
   dispatchCliCommand,
   HarnessCommandRegistry,
@@ -17,12 +17,12 @@ import {
   isCommand,
 } from "./daemon-and-omnigraph.service.js"
 import {
+  createHookStdinTracker,
   detectAntigravityHookPayload,
   hasAntigravityFormat,
-  isProcessStdinAntigravityDetected,
+  type HookStdinTracker,
   makeDoneBlockResult,
   makeGuardDenyResult,
-  resetProcessStdinAntigravityDetected,
 } from "./hook-format.js"
 
 const variadicArgs = Argument.String("args").pipe(Argument.variadic())
@@ -435,12 +435,13 @@ const makeFailClosedHookResult = (
   reason: string,
   extraStderr = "",
   rawStdin?: string,
+  hookStdinTracker?: HookStdinTracker,
 ): CliResult => {
   const isAntigravity =
     hasAntigravityFormat(argv) ||
     (rawStdin !== undefined
       ? detectAntigravityHookPayload(rawStdin)
-      : isProcessStdinAntigravityDetected())
+      : (hookStdinTracker?.isAntigravityDetected() ?? false))
   return requested === "guard"
     ? makeGuardDenyResult(isAntigravity, reason, extraStderr)
     : makeDoneBlockResult(isAntigravity, reason, extraStderr)
@@ -451,14 +452,19 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
   options?: CliEnv,
   maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.fn.Return<CliResult> {
-  if (options?.stdin === undefined) {
-    resetProcessStdinAntigravityDetected()
-  }
+  const hookStdinTracker = options?.hookStdinTracker ?? createHookStdinTracker()
   const requested = argv[0] ?? "help"
   if (requested === "--help" || requested === "-h") {
     return {
       exitCode: 0,
       stdout: `harness help\nusage: harness <${COMMANDS.join("|")}>`,
+      stderr: "",
+    }
+  }
+  if (requested === "--version" || requested === "-v") {
+    return {
+      exitCode: 0,
+      stdout: "0.0.0",
       stderr: "",
     }
   }
@@ -491,10 +497,13 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
     }
   }
 
-  const effectiveOptions =
-    maybeDecisionLayer !== undefined ? { ...options, decisionLayer: maybeDecisionLayer } : options
-  const decisionLayer = effectiveOptions?.decisionLayer ?? LocalDecisionModel
-  const liveCommandLayer = makeLiveCliCommandRegistryLayer(effectiveOptions, decisionLayer)
+  const effectiveOptions: CliEnv = {
+    ...options,
+    ...(maybeDecisionLayer !== undefined ? { decisionLayer: maybeDecisionLayer } : {}),
+    hookStdinTracker,
+  }
+  const decisionLayer = effectiveOptions.decisionLayer ?? LocalDecisionModel
+  const liveCommandLayer = makeLiveCliCommandRegistryLayer(effectiveOptions)
   const resultRef = yield* Ref.make<Option.Option<CliResult>>(Option.none())
   const rootCmd = makeHarnessRootCommand((result) => Ref.set(resultRef, Option.some(result)))
   const stderrBuffer: Array<string> = []
@@ -571,7 +580,7 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
       ),
     ),
     Effect.catchCause((cause) => {
-      if (Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)) {
+      if (isPureInterruptCause(cause)) {
         return Effect.interrupt
       }
       return Effect.succeed(`unexpected defect: ${Cause.pretty(cause)}`)
@@ -585,7 +594,8 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
         argv,
         `${requested}: CLI parse failure (${cliErr})`,
         stderrBuffer.join(""),
-        effectiveOptions?.stdin,
+        effectiveOptions.stdin,
+        hookStdinTracker,
       )
     }
     return {
@@ -605,10 +615,18 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
           argv,
           `${requested}: subcommand handler did not execute`,
           stderrBuffer.join(""),
-          effectiveOptions?.stdin,
+          effectiveOptions.stdin,
+          hookStdinTracker,
         )
       }
-      return { exitCode: 0, stdout: "", stderr: "" }
+      if (argv.includes("--version") || argv.includes("-v")) {
+        return { exitCode: 0, stdout: "", stderr: "" }
+      }
+      return {
+        exitCode: 1,
+        stdout: "",
+        stderr: "CLI command did not execute (invalid arguments or options).",
+      }
     })
     .exhaustive()
 })

@@ -1,5 +1,5 @@
 import { Lang, parse } from "@ast-grep/napi"
-import type { SyncHostIo } from "@harness/service/host-io"
+import type { SyncHostReader } from "@harness/service/host-io"
 import * as Graph from "effect/Graph"
 import { Node, Project, SyntaxKind, ts } from "ts-morph"
 import { match } from "ts-pattern"
@@ -445,7 +445,7 @@ export const projectPatchesToInMemoryWorkspace = (
   patches: ReadonlyArray<GraphPatch>,
   initialGraph?: HarnessGraph,
   existingFiles?: Readonly<Record<string, string>>,
-  hostIo?: SyncHostIo,
+  hostIo?: SyncHostReader,
 ): {
   readonly operations: ReadonlyArray<AstCodeModOperation>
   readonly overlays: ReadonlyArray<ShadowFileOverlay>
@@ -465,7 +465,7 @@ export const projectPatchesToInMemoryWorkspace = (
   const initialContents = new Map<string, string>()
   if (existingFiles !== undefined) {
     for (const [k, v] of Object.entries(existingFiles)) {
-      const norm = normalizeRelPath(repoRoot, k)
+      const norm = normalizeRelPath(repoRoot, k, undefined, hostIo)
       initialContents.set(norm, v)
     }
   }
@@ -560,6 +560,7 @@ export const projectPatchesToInMemoryWorkspace = (
     targetEntitiesByKey,
     targetRelationsById,
     targetEdgesByRelId,
+    ...(hostIo !== undefined ? { hostIo } : {}),
   }
 
   for (const patch of patches) {

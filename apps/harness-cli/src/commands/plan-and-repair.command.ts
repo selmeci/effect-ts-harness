@@ -2,7 +2,8 @@ import { join } from "node:path"
 import { Cause, Effect, Option } from "effect"
 import * as Graph from "effect/Graph"
 import { match, P } from "ts-pattern"
-import { loadGovernanceDocsFromDisk } from "@harness/gates"
+import { isPureInterruptCause } from "@harness/contract"
+import { loadGovernanceDocsChecked } from "@harness/gates"
 import {
   BisectionProbeCount,
   checkEffectGraph,
@@ -43,8 +44,21 @@ export const handlePlanCheck = (
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-    const governanceDocs =
-      options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot, nodeSyncHostIo)
+    const checkedDocs =
+      options?.governanceDocs !== undefined
+        ? { docs: options.governanceDocs, findings: [] }
+        : loadGovernanceDocsChecked(repoRoot, nodeSyncHostIo)
+    if (checkedDocs.findings.length > 0) {
+      const msg = checkedDocs.findings
+        .map((f) => `[${f.kind}] ${f.location ?? f.nodeId}: ${f.message}`)
+        .join("\n")
+      return {
+        exitCode: 1,
+        stdout: "",
+        stderr: `[GATE FAILURE] plan-check:governance-docs\nUnreadable governance docs:\n${msg}`,
+      }
+    }
+    const governanceDocs = checkedDocs.docs
     const graphOnly = argv.includes("--graph-only")
 
     const requireOllama =
@@ -247,7 +261,7 @@ export const handlePlanCheck = (
         }).pipe(
           Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
           Effect.catchCause((cause) => {
-            if (Cause.hasInterrupts(cause)) return Effect.interrupt
+            if (isPureInterruptCause(cause)) return Effect.interrupt
             return Effect.succeed({
               syncedToOmnigraph: false,
               snapshotPath,

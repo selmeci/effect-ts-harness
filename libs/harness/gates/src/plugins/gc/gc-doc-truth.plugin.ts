@@ -15,17 +15,22 @@ import {
   readTextOrReport,
 } from "./gc-helpers.js"
 
-const PkgNameOnlySchema = Schema.Struct({
+const PkgManifestDepsSchema = Schema.Struct({
   name: Schema.optional(Schema.String),
+  dependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  peerDependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  optionalDependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
 })
-const decodePkgNameOnly = Schema.decodeUnknownOption(Schema.fromJsonString(PkgNameOnlySchema))
+const decodePkgManifestDeps = Schema.decodeUnknownOption(Schema.fromJsonString(PkgManifestDepsSchema))
 
 const HookLeafSchema = Schema.Struct({
   type: Schema.optional(Schema.String),
+  command: Schema.optional(Schema.String),
   timeout: Schema.optional(Schema.Finite),
 })
 const HookEntrySchema = Schema.Struct({
   type: Schema.optional(Schema.String),
+  command: Schema.optional(Schema.String),
   timeout: Schema.optional(Schema.Finite),
   hooks: Schema.optional(Schema.Array(HookLeafSchema)),
 })
@@ -48,7 +53,7 @@ export const GATE_RULE_SOURCE_FILES = [
 ] as const
 
 export const EXPECTED_GATE_RULE_VERSION_DIGEST =
-  "1e64caddf4095a84d3a24fe464b8d9f08bca80fe47c61f08d555b2f0fd2758f6"
+  "e8e6b4925d340a9ec24990285fc26a5f3cd5f42ed4f3aad30e828263dcc0b0e8"
 
 const VALID_HARNESS_OXLINT_RULES = new Set(["syntax-bans", "test-integrity"])
 const NON_PACKAGE_HANDLES = new Set(["@harness/architecture"])
@@ -76,20 +81,36 @@ const collectMarkdownFilesRecursive = (
   return out.sort((a, b) => a.localeCompare(b))
 }
 
-const collectWorkspacePackageNames = (
+const collectWorkspacePackageDeps = (
   repoRoot: string,
   hostIo: SyncHostIo,
   findings: Array<GcFinding>,
-): ReadonlySet<string> => {
+): {
+  readonly names: ReadonlySet<string>
+  readonly depsByPkg: ReadonlyMap<string, ReadonlySet<string>>
+  readonly pkgByRelDir: ReadonlyMap<string, string>
+} => {
   const names = new Set<string>()
-  const scanPkgJson = (pkgJsonPath: string): void => {
+  const depsByPkg = new Map<string, Set<string>>()
+  const pkgByRelDir = new Map<string, string>()
+  const scanPkgJson = (pkgJsonPath: string, relDir?: string): void => {
     if (!hostIo.existsSync(pkgJsonPath)) return
     const text = readTextOrReport(pkgJsonPath, hostIo, repoRoot, findings)
     if (text === undefined) return
-    match(decodePkgNameOnly(text))
+    match(decodePkgManifestDeps(text))
       .with({ _tag: "Some" }, ({ value }) => {
         if (value.name !== undefined && value.name.trim().length > 0) {
-          names.add(value.name.trim())
+          const pkgName = value.name.trim()
+          names.add(pkgName)
+          if (relDir !== undefined) {
+            pkgByRelDir.set(relDir, pkgName)
+          }
+          const deps = new Set<string>([
+            ...Object.keys(value.dependencies ?? {}),
+            ...Object.keys(value.peerDependencies ?? {}),
+            ...Object.keys(value.optionalDependencies ?? {}),
+          ])
+          depsByPkg.set(pkgName, deps)
         }
       })
       .with({ _tag: "None" }, () => {})
@@ -103,17 +124,21 @@ const collectWorkspacePackageNames = (
       if (!scope.isDirectory) continue
       const scopeDir = join(libsDir, scope.name)
       for (const tier of readdirOrReport(scopeDir, hostIo, repoRoot, findings) ?? []) {
-        if (tier.isDirectory) scanPkgJson(join(scopeDir, tier.name, "package.json"))
+        if (tier.isDirectory) {
+          scanPkgJson(join(scopeDir, tier.name, "package.json"), `libs/${scope.name}/${tier.name}`)
+        }
       }
     }
   }
   const appsDir = join(repoRoot, "apps")
   if (hostIo.existsSync(appsDir)) {
     for (const app of readdirOrReport(appsDir, hostIo, repoRoot, findings) ?? []) {
-      if (app.isDirectory) scanPkgJson(join(appsDir, app.name, "package.json"))
+      if (app.isDirectory) {
+        scanPkgJson(join(appsDir, app.name, "package.json"), `apps/${app.name}`)
+      }
     }
   }
-  return names
+  return { names, depsByPkg, pkgByRelDir }
 }
 
 const collectDocTargetFiles = (
@@ -276,11 +301,244 @@ const checkHookTimeouts = (
                 action: `Add a positive numeric "timeout" (e.g. 15 or 30) to the ${hookEvent} command hook in "${relPath}".`,
               })
             }
+            if (h.type === "command" && h.command !== undefined) {
+              const cmdMatch = /index\.ts\s+(guard|done)\b/.exec(h.command)
+              if (cmdMatch !== null) {
+                const subcommand = cmdMatch[1]!
+                const hasFailClosedExit = h.command.includes("||") && /\bexit\s+2\b/.test(h.command)
+                const needsAntigravityDecision = h.command.includes("--format=antigravity")
+                const expectedDecision = subcommand === "guard" ? "deny" : "continue"
+                const hasDecisionJson =
+                  !needsAntigravityDecision ||
+                  new RegExp(`"decision"\\s*:\\s*"${expectedDecision}"`).test(h.command)
+                if (!hasFailClosedExit || !hasDecisionJson) {
+                  findings.push({
+                    kind: "hook-bootstrap-fail-closed",
+                    nodeId: `${relPath}:${hookEvent}`,
+                    location: relPath,
+                    message: `Hook command in "${relPath}" (${hookEvent}) invoking ${subcommand} must fail closed with "|| ... exit 2"${needsAntigravityDecision ? ` and emit fallback JSON with "decision":"${expectedDecision}"` : ""}.`,
+                    action: `Wrap the ${hookEvent} command in "${relPath}" with a shell fallback that exits 2${needsAntigravityDecision ? ` and prints {"decision":"${expectedDecision}"} JSON` : ""}.`,
+                  })
+                }
+              }
+            }
           }
         }
       }
     })
     .exhaustive()
+}
+
+const checkSkillTierTables = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  findings: Array<GcFinding>,
+): void => {
+  const adaptersDir = join(repoRoot, "adapters")
+  const mdFiles = collectMarkdownFilesRecursive(adaptersDir, hostIo, repoRoot, findings)
+  const tierRules: ReadonlyArray<{ readonly tier: string; readonly forbidden: RegExp }> = [
+    { tier: "type:contract", forbidden: /(?:type:|`)(?:service|core|domain|infra|app)(?:`|\b)/ },
+    { tier: "type:service", forbidden: /(?:type:|`)(?:core|domain|infra|app)(?:`|\b)/ },
+    { tier: "type:core", forbidden: /(?:type:|`)(?:domain|infra|app)(?:`|\b)/ },
+    { tier: "type:domain", forbidden: /(?:type:|`)(?:infra|app)(?:`|\b)/ },
+    { tier: "type:infra", forbidden: /(?:type:|`)app(?:`|\b)/ },
+    { tier: "scope:web", forbidden: /(?:type:|`)(?:service|core|domain|infra|app)(?:`|\b)/ },
+  ]
+  for (const absPath of mdFiles) {
+    if (!absPath.endsWith("/SKILL.md") && !absPath.endsWith("\\SKILL.md")) continue
+    const relPath = relative(repoRoot, absPath).replace(/\\/g, "/")
+    const content = readTextOrReport(absPath, hostIo, repoRoot, findings)
+    if (content === undefined) continue
+    let tableHeaderParsed = false
+    let tagColIdx = 0
+    let allowedColIdx = 1
+    for (const line of content.split(/\r?\n/)) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith("|")) {
+        tableHeaderParsed = false
+        tagColIdx = 0
+        allowedColIdx = 1
+        continue
+      }
+      const cells = trimmed.split("|").slice(1, -1).map((c) => c.trim())
+      if (cells.length < 2) continue
+      if (cells.every((c) => /^:?-+:?$/.test(c))) continue
+      if (!tableHeaderParsed) {
+        tableHeaderParsed = true
+        const foundAllowed = cells.findIndex((c) => /\b(?:allowed\s*imports|may\s*import)\b/i.test(c))
+        const foundTag = cells.findIndex((c) => /\b(?:tag|tier)\b/i.test(c))
+        if (foundTag >= 0) tagColIdx = foundTag
+        if (foundAllowed >= 0) allowedColIdx = foundAllowed
+        continue
+      }
+      const tierCell = cells[tagColIdx] ?? ""
+      const rawAllowedCell = cells[allowedColIdx] ?? ""
+      const allowedCell = rawAllowedCell.replace(/\([^)]*\b(?:never|forbidden)\b[^)]*\)/gi, "")
+      for (const rule of tierRules) {
+        if (tierCell.includes(rule.tier) && rule.forbidden.test(allowedCell)) {
+          findings.push({
+            kind: "skill-tier-table-drift",
+            nodeId: `${relPath}:${rule.tier}`,
+            location: relPath,
+            message: `Skill tier table in "${relPath}" lists forbidden dependency under "${rule.tier}" allowed column ("${rawAllowedCell}").`,
+            action: `Update the "${rule.tier}" row in "${relPath}" to match AGENTS.md Nx taxonomy.`,
+          })
+        }
+      }
+    }
+  }
+}
+
+const checkMermaidDependencyDrift = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  depsByPkg: ReadonlyMap<string, ReadonlySet<string>>,
+  pkgByRelDir: ReadonlyMap<string, string>,
+  findings: Array<GcFinding>,
+): void => {
+  const candidates: Array<string> = []
+  for (const rel of ["README.md", "docs/architecture-and-workflow.md"]) {
+    const abs = join(repoRoot, rel)
+    if (hostIo.existsSync(abs)) candidates.push(abs)
+  }
+  const rfcsDir = join(repoRoot, "docs/rfcs")
+  if (hostIo.existsSync(rfcsDir)) {
+    for (const e of readdirOrReport(rfcsDir, hostIo, repoRoot, findings) ?? []) {
+      if (e.isFile && e.name.startsWith("0008-") && e.name.endsWith(".md")) {
+        candidates.push(join(rfcsDir, e.name))
+      }
+    }
+  }
+  for (const absPath of candidates) {
+    const relPath = relative(repoRoot, absPath).replace(/\\/g, "/")
+    const content = readTextOrReport(absPath, hostIo, repoRoot, findings)
+    if (content === undefined) continue
+    for (const blockMatch of content.matchAll(/```mermaid\s*\r?\n([\s\S]*?)```/g)) {
+      const block = blockMatch[1] ?? ""
+      if (!/\b(?:flowchart|graph)\s+(?:TD|TB|LR|RL|BT)\b/.test(block)) continue
+      const nodeToPkg = new Map<string, string>()
+      for (const nodeMatch of block.matchAll(/\b([A-Za-z0-9_]+)\s*(?:\["([^"]*)"\]|\(([^)]*)\)|\[([^\]]*)\])/g)) {
+        const nodeId = nodeMatch[1]!
+        const label = nodeMatch[2] ?? nodeMatch[3] ?? nodeMatch[4] ?? ""
+        const pkgMatch = /@harness\/[a-z0-9-]+/.exec(label)
+        if (pkgMatch !== null) {
+          nodeToPkg.set(nodeId, pkgMatch[0])
+          continue
+        }
+        const relDirMatch = /\b((?:libs|apps)\/[a-z0-9-]+(?:\/[a-z0-9-]+)?)\b/.exec(label)
+        if (relDirMatch !== null) {
+          const resolvedPkg = pkgByRelDir.get(relDirMatch[1]!)
+          if (resolvedPkg !== undefined) {
+            nodeToPkg.set(nodeId, resolvedPkg)
+          }
+        }
+      }
+      for (const rawLine of block.split(/\r?\n/)) {
+        const line = rawLine.trim().replace(/;+$/, "")
+        if (!/(?:-->|-\.->|==>)/.test(line)) continue
+        const segments = line.split(/\s*(?:-->|-\.->|==>)(?:\|[^|]*\|)?\s*/)
+        if (segments.length < 2) continue
+        if (!segments.every((seg) => /^[A-Za-z0-9_]+(?:\s*&\s*[A-Za-z0-9_]+)*$/.test(seg.trim()))) {
+          continue
+        }
+        for (let i = 0; i < segments.length - 1; i++) {
+          const sources = segments[i]!.split("&").map((s) => s.trim())
+          const targets = segments[i + 1]!.split("&").map((s) => s.trim())
+          for (const srcId of sources) {
+            const srcPkg = nodeToPkg.get(srcId)
+            if (srcPkg === undefined) continue
+            if (!depsByPkg.has(srcPkg)) continue
+            const reachable = new Set<string>()
+            const queue = [...(depsByPkg.get(srcPkg) ?? [])]
+            while (queue.length > 0) {
+              const dep = queue.shift()!
+              if (reachable.has(dep)) continue
+              reachable.add(dep)
+              const transitive = depsByPkg.get(dep)
+              if (transitive !== undefined) {
+                for (const t of transitive) {
+                  if (!reachable.has(t)) queue.push(t)
+                }
+              }
+            }
+            for (const dstId of targets) {
+              const dstPkg = nodeToPkg.get(dstId)
+              if (dstPkg === undefined || dstPkg === srcPkg) continue
+              if (!reachable.has(dstPkg)) {
+                findings.push({
+                  kind: "mermaid-dependency-drift",
+                  nodeId: `${relPath}:${srcPkg}->${dstPkg}`,
+                  location: relPath,
+                  message: `Mermaid flowchart in "${relPath}" draws edge "${srcPkg} --> ${dstPkg}", but "${srcPkg}" does not declare "${dstPkg}" in package.json.`,
+                  action: `Remove or update the stale edge "${srcPkg} --> ${dstPkg}" in "${relPath}".`,
+                })
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+const checkDocBannedOrPhantomTech = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  findings: Array<GcFinding>,
+): void => {
+  const phantomTargets: Array<string> = []
+  for (const rel of ["README.md", "docs/architecture-and-workflow.md"]) {
+    const abs = join(repoRoot, rel)
+    if (hostIo.existsSync(abs)) phantomTargets.push(abs)
+  }
+  const patternsDir = join(repoRoot, "agent-patterns")
+  if (hostIo.existsSync(patternsDir)) {
+    for (const e of readdirOrReport(patternsDir, hostIo, repoRoot, findings) ?? []) {
+      if (e.isFile && e.name.endsWith(".md")) phantomTargets.push(join(patternsDir, e.name))
+    }
+  }
+  for (const absPath of collectMarkdownFilesRecursive(join(repoRoot, "adapters"), hostIo, repoRoot, findings)) {
+    if (absPath.endsWith("/SKILL.md") || absPath.endsWith("\\SKILL.md")) phantomTargets.push(absPath)
+  }
+  const negationRe = /\b(?:not|never|no|banned|without|instead\s+of|non-goal|replaced|superseded|do\s+not|avoid)\b/i
+  for (const absPath of phantomTargets) {
+    const relPath = relative(repoRoot, absPath).replace(/\\/g, "/")
+    const content = readTextOrReport(absPath, hostIo, repoRoot, findings)
+    if (content === undefined) continue
+    for (const line of content.split(/\r?\n/)) {
+      const m = /\b(oxc-parser|sqlite-vec|FTS5)\b/i.exec(line)
+      if (m !== null && !negationRe.test(line)) {
+        findings.push({
+          kind: "doc-banned-or-phantom-tech",
+          nodeId: `${relPath}:${m[1]!}`,
+          location: relPath,
+          message: `Documentation "${relPath}" claims unimplemented technology "${m[1]!}" outside a negation/non-goal context.`,
+          action: `Remove or clarify "${m[1]!}" in "${relPath}".`,
+        })
+        break
+      }
+    }
+  }
+
+  const docsDir = join(repoRoot, "docs")
+  for (const absPath of collectMarkdownFilesRecursive(docsDir, hostIo, repoRoot, findings)) {
+    const relPath = relative(repoRoot, absPath).replace(/\\/g, "/")
+    if (relPath.startsWith("docs/superpowers/")) continue
+    const content = readTextOrReport(absPath, hostIo, repoRoot, findings)
+    if (content === undefined) continue
+    if (/\b(?:drizzle-orm|drizzle-kit)\b/.test(content)) {
+      const hasBanOrSupersession = /\b(?:banned|supersession|superseded|ADR-0008)\b|zakázan/i.test(content)
+      if (!hasBanOrSupersession) {
+        findings.push({
+          kind: "doc-banned-or-phantom-tech",
+          nodeId: `${relPath}:drizzle`,
+          location: relPath,
+          message: `Documentation "${relPath}" references banned Drizzle ("drizzle-orm"/"drizzle-kit") without an explicit ban or supersession notice.`,
+          action: `Update "${relPath}" to reference native Effect v4 SQL or add a Supersession notice referencing ADR-0008.`,
+        })
+      }
+    }
+  }
 }
 
 export const evaluateDocTruthPlugin = (
@@ -291,7 +549,7 @@ export const evaluateDocTruthPlugin = (
   const hostIo = input.hostIo
   const findings: Array<GcFinding> = []
 
-  const workspacePkgNames = collectWorkspacePackageNames(repoRoot, hostIo, findings)
+  const { names: workspacePkgNames, depsByPkg, pkgByRelDir } = collectWorkspacePackageDeps(repoRoot, hostIo, findings)
   const docFilesWithPatterns = collectDocTargetFiles(repoRoot, hostIo, findings, true)
   const docFilesForPaths = new Set(docFilesWithPatterns)
   const knownGateRuleIds = collectKnownGateRuleIds(repoRoot, hostIo, findings)
@@ -463,6 +721,9 @@ export const evaluateDocTruthPlugin = (
     hostIo,
     findings,
   )
+  checkSkillTierTables(repoRoot, hostIo, findings)
+  checkMermaidDependencyDrift(repoRoot, hostIo, depsByPkg, pkgByRelDir, findings)
+  checkDocBannedOrPhantomTech(repoRoot, hostIo, findings)
 
   const gateRuleAbsPaths = GATE_RULE_SOURCE_FILES.map((rel) => join(repoRoot, rel))
   if (gateRuleAbsPaths.every((p) => hostIo.existsSync(p))) {

@@ -4,13 +4,13 @@ import { NodeRuntime } from "@effect/platform-node"
 import { Cause, Effect, Exit, Layer, Logger } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
+import { isPureInterruptCause } from "@harness/contract"
 import { nodeSyncHostIo } from "@harness/infra"
 import {
   buildSessionReport,
   readFrictionEvents,
   readTelemetryEvents,
   type TelemetryCategory,
-  type TelemetryOutcome,
   type TelemetrySurface,
   writeSessionReportFiles,
 } from "@harness/gates"
@@ -42,11 +42,13 @@ import {
   isCommand,
   type OllamaReadinessOptions,
   recordTelemetry,
+  resolveCommandTelemetryOutcome,
   stripAnsiCodes,
   tryQueryWarmDaemonSocket,
 } from "./commands/daemon-and-omnigraph.service.js"
 import { harnessRootCommand, runDeclarativeCli } from "./commands/declarative-cli.js"
 import {
+  createHookStdinTracker,
   hasAntigravityFormat,
   normalizeProcessArgv,
   resolveTeardownFailure,
@@ -81,37 +83,11 @@ export {
   makeHarnessCommandRegistryLayer,
   makeLiveCliCommandRegistryLayer,
   type OllamaReadinessOptions,
+  resolveCommandTelemetryOutcome,
   runDeclarativeCli,
   stripAnsiCodes,
   tryQueryWarmDaemonSocket,
 }
-
-export const resolveCommandTelemetryOutcome = (
-  command: string,
-  res: CliResult,
-): TelemetryOutcome =>
-  match(command)
-    .with("guard", () => {
-      if (res.exitCode !== 0 || res.stdout.includes('"decision":"deny"')) {
-        return "deny" as const
-      }
-      if (
-        res.stdout.includes('"decision":"ask"') ||
-        res.stdout.includes('"permissionDecision":"ask"')
-      ) {
-        return "ask" as const
-      }
-      return "ok" as const
-    })
-    .with("done", () =>
-      res.exitCode !== 0 ||
-      res.stdout.includes('"decision":"continue"') ||
-      res.stdout.includes('"decision":"block"')
-        ? ("fail" as const)
-        : ("ok" as const),
-    )
-    .with("route", () => (res.stdout === "review" ? ("fallback" as const) : ("ok" as const)))
-    .otherwise(() => (res.exitCode === 0 ? ("ok" as const) : ("fail" as const)))
 
 export const teardownCliMain = (
   exit: Exit.Exit<unknown, unknown>,
@@ -123,6 +99,7 @@ export const teardownCliMain = (
   writeStdout: (s: string) => void = (s) => {
     process.stdout.write(s)
   },
+  isAntigravityStdinDetected = false,
 ): void => {
   match(exit)
     .with({ _tag: "Success" }, () => {
@@ -130,8 +107,13 @@ export const teardownCliMain = (
       onExit(code)
     })
     .with({ _tag: "Failure" }, ({ cause }) => {
-      const isInt = Cause.hasInterruptsOnly(cause)
-      const out = resolveTeardownFailure(normalizeProcessArgv(argv, isCommand), isInt, isInt ? "interrupted by signal" : Cause.pretty(cause))
+      const isInt = isPureInterruptCause(cause)
+      const out = resolveTeardownFailure(
+        normalizeProcessArgv(argv, isCommand),
+        isInt,
+        isInt ? "interrupted by signal" : Cause.pretty(cause),
+        isAntigravityStdinDetected,
+      )
       if (out.stderr) writeStderr(out.stderr)
       if (out.stdout) writeStdout(out.stdout)
       process.exitCode = out.exitCode
@@ -220,7 +202,8 @@ if (
   (fileURLToPath(import.meta.url) === resolve(process.argv[1]) ||
     process.argv[1].endsWith("index.ts"))
 ) {
-  runCliEffect(process.argv.slice(2)).pipe(
+  const hookStdinTracker = createHookStdinTracker()
+  runCliEffect(process.argv.slice(2), { hookStdinTracker }).pipe(
     Effect.tap((res) =>
       Effect.sync(() => {
         if (res.stdout) {
@@ -234,7 +217,15 @@ if (
     ),
     NodeRuntime.runMain({
       disableErrorReporting: true,
-      teardown: (exit, onExit) => teardownCliMain(exit, onExit),
+      teardown: (exit, onExit) =>
+        teardownCliMain(
+          exit,
+          onExit,
+          undefined,
+          process.argv,
+          undefined,
+          hookStdinTracker.isAntigravityDetected(),
+        ),
     }),
   )
 }

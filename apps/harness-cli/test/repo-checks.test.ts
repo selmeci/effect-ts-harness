@@ -10,7 +10,7 @@ import {
   runCheckMigrations,
   runCheckOpenApi,
 } from "../src/commands/repo-checks.command.js"
-import { resolveRepoPathChecked } from "../src/commands/repo-path.js"
+import { resolveRepoPath, resolveRepoPathChecked } from "../src/commands/repo-path.js"
 import { collectHarnessTierTopologyViolationMessages } from "../src/commands/verify-delta-gates.js"
 import { evaluatePackageAndMigrationPlugin } from "@harness/gates"
 import { buildHarnessGraph } from "@harness/graph"
@@ -833,5 +833,26 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
     expect(migEloop.stderr).toContain("Cannot resolve")
     expect(migEloop.stderr).toContain("ELOOP")
     expect(migEloop.stderr).not.toContain("escapes repository root")
+  })
+
+  it("F-19.1: resolveRepoPathChecked returns IoError when repoRoot hits ELOOP and resolveRepoPath returns undefined on IoError/EscapesRoot", () => {
+    const tmpDir = makeTempDir("harness-cli-repopath-f19-1-")
+    const loopRootA = join(tmpDir, "root-loop-a")
+    const loopRootB = join(tmpDir, "root-loop-b")
+    symlinkSync(loopRootB, loopRootA)
+    symlinkSync(loopRootA, loopRootB)
+
+    const rootIoRes = resolveRepoPathChecked(loopRootA, "src/index.ts")
+    match(rootIoRes)
+      .with({ _tag: "IoError" }, ({ code }) => {
+        expect(code).toBe("ELOOP")
+      })
+      .with({ _tag: "Resolved" }, { _tag: "EscapesRoot" }, () => {
+        expect.unreachable("Expected IoError when repoRoot hits ELOOP")
+      })
+      .exhaustive()
+
+    expect(resolveRepoPath(loopRootA, "src/index.ts")).toBeUndefined()
+    expect(resolveRepoPath(tmpDir, "../outside.ts")).toBeUndefined()
   })
 })

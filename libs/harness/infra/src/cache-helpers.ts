@@ -1,6 +1,8 @@
 import { join, resolve } from "node:path"
 import {
-  ErrorReasonMessage,
+  HARNESS_AST_GATE_CACHE_FILENAME,
+  HARNESS_DECISION_CACHE_FILENAME,
+  toErrorReasonMessage,
   WorkspaceFilePath,
   WorkspaceFsError,
   WorkspaceFsOperation,
@@ -14,12 +16,10 @@ const toReadError = (
   if (err instanceof WorkspaceFsError) {
     return err
   }
-  const message =
-    err instanceof Error && err.message.trim().length > 0 ? err.message.trim() : defaultMessage
   return new WorkspaceFsError({
     filePath,
     operation: WorkspaceFsOperation.make("read"),
-    reason: ErrorReasonMessage.make(message),
+    reason: toErrorReasonMessage(err, defaultMessage),
   })
 }
 
@@ -31,12 +31,10 @@ const toWriteError = (
   if (err instanceof WorkspaceFsError) {
     return err
   }
-  const message =
-    err instanceof Error && err.message.trim().length > 0 ? err.message.trim() : defaultMessage
   return new WorkspaceFsError({
     filePath,
     operation: WorkspaceFsOperation.make("write"),
-    reason: ErrorReasonMessage.make(message),
+    reason: toErrorReasonMessage(err, defaultMessage),
   })
 }
 
@@ -61,7 +59,7 @@ const resolveAstGateCachePath = (
   env: NodeJS.ProcessEnv = process.env,
 ): WorkspaceFilePath =>
   WorkspaceFilePath.make(
-    join(resolveHarnessStateDir(workspaceRoot, env), "cache", "ast-gates-v1.json"),
+    join(resolveHarnessStateDir(workspaceRoot, env), "cache", HARNESS_AST_GATE_CACHE_FILENAME),
   )
 
 const resolveDecisionCachePath = (
@@ -69,7 +67,7 @@ const resolveDecisionCachePath = (
   env: NodeJS.ProcessEnv = process.env,
 ): WorkspaceFilePath =>
   WorkspaceFilePath.make(
-    join(resolveHarnessStateDir(workspaceRoot, env), "cache", "decision-cache-v1.json"),
+    join(resolveHarnessStateDir(workspaceRoot, env), "cache", HARNESS_DECISION_CACHE_FILENAME),
   )
 
 export {

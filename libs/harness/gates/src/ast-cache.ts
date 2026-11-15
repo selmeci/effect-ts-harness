@@ -3,11 +3,12 @@
  * Content-addressable AST cache and category deciders for Effect-TS Engineering Harness.
  *
  * Implements an in-memory and disk-persisted cache keyed by file path, package tag,
- * and SHA-256 content digest. Avoids redundant AST parses and visits across repetitive
- * gate runs.
+ * and SHA-256 content digest under `HARNESS_GATE_RULE_VERSION` (`ast-gates-v7`).
+ * Avoids redundant AST parses and visits across repetitive gate runs.
  *
  * Exposes Effect.fn deciders for each gate category:
- * - AstGateCache.decide: Full multi-file AST evaluation across all 5 gate categories.
+ * - AstGateCache.decide: Full multi-file AST evaluation across all 5 gate categories
+ *   (syntax-bans, test-integrity, migration-safety, domain-purity, effect-laws).
  * - SyntaxBans.decide: Filters report to syntax-bans violations.
  * - TestIntegrity.decide: Filters report to test-integrity violations.
  * - DomainPurity.decide: Filters report to domain-purity violations.
@@ -15,7 +16,6 @@
  * - MigrationSafety.decide: Re-exported from migration-check.ts for SQL DDL safety.
  */
 
-import { join } from "node:path"
 import { Effect, Schema } from "effect"
 import {
   AstGateDecisionReport,
@@ -33,6 +33,7 @@ import {
   HARNESS_GATE_RULE_VERSION,
   inferAstGatePackageTagFromPath,
   makeAstGateDecisionReport,
+  resolveDefaultAstGateCachePath,
   type WorkspaceFsError,
 } from "@harness/contract"
 import { NonNegativeCount, ts } from "@harness/graph"
@@ -53,7 +54,6 @@ import {
   unwrapAstExpression,
   visitSourceFileSinglePass,
 } from "./plugins/ast-gate-visitors.js"
-import { resolveHarnessStateDir } from "./worktree.js"
 
 export { AstGateDecisionReport, computeContentSha256, GateViolation, makeAstGateDecisionReport }
 
@@ -98,7 +98,7 @@ export const makeAstGateCacheKey = (
 ): string => `${filePath}\0${packageTag}\0${ruleVersion}`
 
 export const resolveAstGateCachePath = (repoRoot: string): AstSourceFilePath =>
-  AstSourceFilePath.make(join(resolveHarnessStateDir(repoRoot), "cache", "ast-gates-v1.json"))
+  AstSourceFilePath.make(resolveDefaultAstGateCachePath(repoRoot))
 
 export const MAX_SOURCE_FILE_CACHE_SIZE = 500
 export const MAX_GATE_CACHE_SIZE = 1000

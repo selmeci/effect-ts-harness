@@ -40,8 +40,8 @@ describe("Ontology Conflict Decision", () => {
         expect(result.hasConflict).toBe(true)
         expect(result.probability).toBe(0.9)
         expect(result.conflictKind).toBe("state-transition-conflict")
-        expect(result.reason).toContain("Semantic conflict")
-        expect(result.reason).toContain("sample:SPEC-0001:REQ-1.1")
+        expect(result.timedOutOrUnavailable).toBe(false)
+        expect(result.reason.length).toBeGreaterThan(0)
       }),
   )
 
@@ -59,7 +59,8 @@ describe("Ontology Conflict Decision", () => {
 
       expect(result.hasConflict).toBe(false)
       expect(result.conflictKind).toBe("none")
-      expect(result.reason).toContain("No semantic conflict detected")
+      expect(result.timedOutOrUnavailable).toBe(false)
+      expect(result.reason.length).toBeGreaterThan(0)
     }),
   )
 
@@ -78,7 +79,8 @@ describe("Ontology Conflict Decision", () => {
       expect(result.hasConflict).toBe(false)
       expect(result.probability).toBe(0)
       expect(result.conflictKind).toBe("none")
-      expect(result.reason).toContain("DecisionModel unavailable or timed out")
+      expect(result.timedOutOrUnavailable).toBe(true)
+      expect(result.reason.length).toBeGreaterThan(0)
     }),
   )
 

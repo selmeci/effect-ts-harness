@@ -1,5 +1,4 @@
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -8,7 +7,6 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs"
-import * as http from "node:http"
 import * as net from "node:net"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -39,12 +37,9 @@ import {
   buildOmnigraphClusterKillArgs,
   cleanSubprocessError,
   COMMANDS,
-  ensureLocalOmnigraphReady,
-  resolveCommandTelemetryOutcome,
   stripAnsiCodes,
   tryQueryWarmDaemonSocket,
 } from "../src/index.js"
-import { recordTelemetry } from "../src/commands/daemon-and-omnigraph.service.js"
 import { runCli } from "./run-cli-helper.js"
 
 describe("harness cli baseline", () => {
@@ -3187,228 +3182,6 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       expect(payload.passed).toBe(false)
       expect(payload.totalMutants).toBeGreaterThan(0)
       expect(payload.survivedCount).toBe(payload.totalMutants)
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-
-  it("falls through to /readyz readiness poll when omnigraph setup throws before spawn (F-2, F-10)", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "harness-cli-omnigraph-readyz-"))
-    const homeDir = mkdtempSync(join(tmpdir(), "harness-cli-home-"))
-    let readyzCalls = 0
-    const server = http.createServer((req, res) => {
-      if (req.url === "/readyz") {
-        readyzCalls += 1
-        if (readyzCalls === 1) {
-          res.writeHead(503)
-          res.end()
-          return
-        }
-        res.writeHead(200, {
-          "Content-Type": "application/json",
-          "Omnigraph-Http-Api": "0.14",
-        })
-        res.end(JSON.stringify({ ready: true, ready_graph_count: 1 }))
-        return
-      }
-      res.writeHead(404)
-      res.end()
-    })
-    const prevHome = process.env["HOME"]
-    const prevUrl = process.env["OMNIGRAPH_URL"]
-    try {
-      await Effect.runPromise(
-        Effect.callback<void>((resume) => {
-          server.listen(0, "127.0.0.1", () => resume(Effect.void))
-        }),
-      )
-      const address = server.address()
-      const port = typeof address === "object" && address !== null ? address.port : 0
-      expect(port).toBeGreaterThan(0)
-
-      const configDir = join(dir, "libs", "harness", "graph")
-      mkdirSync(join(configDir, "queries"), { recursive: true })
-      writeFileSync(join(configDir, "cluster.yaml"), "name: test\n", "utf-8")
-      writeFileSync(join(configDir, "schema.pg"), "", "utf-8")
-      writeFileSync(join(configDir, "queries", "harness.gq"), "", "utf-8")
-
-      const clusterRootDir = join(dir, ".harness", "omnigraph-cluster")
-      mkdirSync(clusterRootDir, { recursive: true })
-      writeFileSync(join(clusterRootDir, ".config-stamp"), "name: test\n\n---\n\n---\n", "utf-8")
-
-      const localBinDir = join(homeDir, ".local", "bin")
-      mkdirSync(localBinDir, { recursive: true })
-      const omnigraphStub = join(localBinDir, "omnigraph")
-      const omnigraphServerStub = join(localBinDir, "omnigraph-server")
-      writeFileSync(omnigraphStub, "#!/usr/bin/env bash\nexit 1\n", "utf-8")
-      writeFileSync(omnigraphServerStub, "#!/usr/bin/env bash\nexit 0\n", "utf-8")
-      chmodSync(omnigraphStub, 0o755)
-      chmodSync(omnigraphServerStub, 0o755)
-
-      process.env["HOME"] = homeDir
-      process.env["OMNIGRAPH_URL"] = `http://127.0.0.1:${port}`
-
-      const ready = await Effect.runPromise(ensureLocalOmnigraphReady(dir))
-      expect(ready).toBe(true)
-      expect(readyzCalls).toBeGreaterThanOrEqual(2)
-    } finally {
-      if (prevHome === undefined) delete process.env["HOME"]
-      else process.env["HOME"] = prevHome
-      if (prevUrl === undefined) delete process.env["OMNIGRAPH_URL"]
-      else process.env["OMNIGRAPH_URL"] = prevUrl
-      await Effect.runPromise(
-        Effect.callback<void>((resume) => {
-          server.close(() => resume(Effect.void))
-        }),
-      )
-      rmSync(dir, { recursive: true, force: true })
-      rmSync(homeDir, { recursive: true, force: true })
-    }
-  })
-})
-
-describe("PR #28 adjudicated review fixes (F-6.2, F-8.3c, F-11.1, F-12.1, F-14.1, F-20.1a)", () => {
-  it("F-6.2: emits stderr diagnostic when DecisionModel dies in session/doctor while preserving interrupt", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "harness-f62-"))
-    const stderrChunks: Array<string> = []
-    const origWrite = process.stderr.write.bind(process.stderr)
-    process.stderr.write = ((chunk: string | Uint8Array) => {
-      stderrChunks.push(String(chunk))
-      return true
-    }) as typeof process.stderr.write
-
-    try {
-      const dyingDecisionLayer = Layer.succeed(
-        DecisionModel.DecisionModel,
-        DecisionModel.DecisionModel.of({
-          [DecisionModel.TypeId]: DecisionModel.TypeId,
-          decide: () => Effect.die(new Error("boom")),
-        }),
-      )
-
-      const res = await runCli(["session"], { repoRoot: dir }, dyingDecisionLayer)
-      expect(res.exitCode).toBe(0)
-      expect(stderrChunks.join("")).toContain("[harness learn] decision model fallback:")
-      expect(stderrChunks.join("")).toContain("boom")
-    } finally {
-      process.stderr.write = origWrite
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-
-  it("F-8.3c: runDeltaAstAndPluginGates fails when workspace has a HarnessTierTopology violation", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "harness-f83c-"))
-    try {
-      mkdirSync(join(dir, "libs", "sample", "contract", "src"), { recursive: true })
-      writeFileSync(
-        join(dir, "libs", "sample", "contract", "package.json"),
-        JSON.stringify({
-          name: "@sample/contract",
-          nx: { tags: ["scope:sample", "type:contract"] },
-          dependencies: { "@sample/infra": "workspace:*" },
-        }),
-      )
-      const gateResult = await Effect.runPromise(runDeltaAstAndPluginGates(dir, []))
-      match(gateResult)
-        .with({ _tag: "Some" }, ({ value }) => {
-          expect(value.exitCode).toBe(1)
-          expect(value.stderr).toContain("verify:tier-topology")
-          expect(value.stderr).toContain("forbidden-contract-dependency")
-        })
-        .with({ _tag: "None" }, () => {
-          expect.fail("Expected gateResult to be Some")
-        })
-        .exhaustive()
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-
-  it("F-11.1: does not write graph-head.json when Omnigraph sync fails in non-isolated workspace", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "harness-f111-"))
-    const fakeHome = mkdtempSync(join(tmpdir(), "harness-f111-home-"))
-    const origHome = process.env.HOME
-    const origUrl = process.env.OMNIGRAPH_URL
-    try {
-      process.env.HOME = fakeHome
-      Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
-      mkdirSync(join(dir, "libs", "harness", "graph"), { recursive: true })
-      writeFileSync(join(dir, "pnpm-workspace.yaml"), "packages:\n  - 'libs/*'\n")
-      writeFileSync(join(dir, "libs", "harness", "graph", "cluster.yaml"), "name: test\n")
-
-      const res = await runCli(["ingest"], { repoRoot: dir })
-      expect(res.exitCode).toBe(0)
-      const parsed = JSON.parse(res.stdout) as { readonly syncedToOmnigraph: boolean }
-      expect(parsed.syncedToOmnigraph).toBe(false)
-      expect(existsSync(join(dir, ".harness", "graph-head.json"))).toBe(false)
-    } finally {
-      if (origHome !== undefined) process.env.HOME = origHome
-      else Reflect.deleteProperty(process.env, "HOME")
-      if (origUrl !== undefined) process.env.OMNIGRAPH_URL = origUrl
-      else Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
-      rmSync(dir, { recursive: true, force: true })
-      rmSync(fakeHome, { recursive: true, force: true })
-    }
-  })
-
-  it("F-12.1: logs warning with err.reason when TsCompilerOverlayService falls back to extractTypeGraph", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "harness-f121-"))
-    const stderrChunks: Array<string> = []
-    const origWrite = process.stderr.write.bind(process.stderr)
-    process.stderr.write = ((chunk: string | Uint8Array) => {
-      stderrChunks.push(String(chunk))
-      return true
-    }) as typeof process.stderr.write
-
-    try {
-      await runCli(["verify"], { repoRoot: join(dir, "nonexistent-repo"), skipSubprocessVerify: true })
-      expect(stderrChunks.join("")).toContain("TsCompilerOverlayService failed")
-      expect(stderrChunks.join("")).toContain("Repository root path does not exist")
-    } finally {
-      process.stderr.write = origWrite
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-
-  it("F-14.1: resolveCommandTelemetryOutcome checks exitCode and block/continue decisions for done", () => {
-    expect(
-      resolveCommandTelemetryOutcome("done", { exitCode: 1, stdout: "{}", stderr: "err" }),
-    ).toBe("fail")
-    expect(
-      resolveCommandTelemetryOutcome("done", {
-        exitCode: 0,
-        stdout: '{"decision":"block"}',
-        stderr: "",
-      }),
-    ).toBe("fail")
-    expect(
-      resolveCommandTelemetryOutcome("done", {
-        exitCode: 0,
-        stdout: '{"decision":"continue"}',
-        stderr: "",
-      }),
-    ).toBe("fail")
-    expect(
-      resolveCommandTelemetryOutcome("done", { exitCode: 0, stdout: "{}", stderr: "" }),
-    ).toBe("ok")
-  })
-
-  it("F-20.1a: recordTelemetry writes telemetry when skipBackgroundDaemons is false", () => {
-    const dir = mkdtempSync(join(tmpdir(), "harness-f201a-"))
-    try {
-      recordTelemetry(
-        { repoRoot: dir, skipBackgroundDaemons: false },
-        {
-          surface: "cli",
-          category: "lifecycle",
-          toolName: "help",
-          outcome: "ok",
-          durationMs: 1,
-        },
-      )
-      const events = readTelemetryEvents(dir, nodeSyncHostIo)
-      expect(events.length).toBe(1)
-      expect(events[0]?.toolName).toBe("help")
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

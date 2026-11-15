@@ -43,6 +43,7 @@ export {
   McpToolInputName,
   McpToolName,
   StdinReadError,
+  StdinReadErrorKind,
   SubprocessArg,
   SubprocessCommand,
   SubprocessExecInput,
@@ -58,12 +59,15 @@ export {
   WorkspaceFileStat,
   WorkspaceFsError,
   WorkspaceFsOperation,
+  isPureInterruptCause,
+  toErrorReasonMessage,
   validateSubprocessInput,
 } from "./workspace-and-process.js"
 export {
   HarnessTierTopologyInput,
   HarnessTierTopologyReport,
   HarnessTierTopologyViolation,
+  NxScopeTag,
   NxTierTag,
   PackageDependencyName,
   PackageManifestName,
@@ -73,6 +77,7 @@ export {
   TierTopologyMessage,
   TierTopologyRuleId,
   makeHarnessTierTopologyReport,
+  parseManifestTags,
 } from "./tier-topology.js"
 export {
   AstGateDecisionReport,
@@ -89,6 +94,11 @@ export {
   DecisionCachePayloadJson,
   DecisionCacheStatsSnapshot,
   DecisionCacheTtlMillis,
+  EvaluatorId,
+  HARNESS_AST_GATE_CACHE_FILENAME,
+  HARNESS_DECISION_CACHE_FILENAME,
   makeAstGateDecisionReport,
   makeAstGateEvaluationReport,
+  resolveDefaultAstGateCachePath,
+  resolveDefaultDecisionCachePath,
 } from "./cache-and-daemon.js"

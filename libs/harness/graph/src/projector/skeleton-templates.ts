@@ -1,6 +1,6 @@
 import * as path from "node:path"
 import { Lang, parse } from "@ast-grep/napi"
-import type { SyncHostIo } from "@harness/service/host-io"
+import type { SyncHostReader } from "@harness/service/host-io"
 import { Schema } from "effect"
 import { Node, type Project, type SourceFile, SyntaxKind, VariableDeclarationKind } from "ts-morph"
 import { match } from "ts-pattern"
@@ -64,7 +64,7 @@ export interface GraphProjectorInput {
   readonly existingFiles?: Readonly<Record<string, string>> | undefined
   readonly verifyRoundTrip?: boolean | undefined
   readonly forceFailRuleIds?: ReadonlyArray<RewriteRuleId | string> | undefined
-  readonly hostIo?: SyncHostIo | undefined
+  readonly hostIo?: SyncHostReader | undefined
 }
 
 export class GraphProjectorError extends Schema.TaggedError<GraphProjectorError>()(
@@ -84,7 +84,7 @@ export const sanitizeIdentifier = (raw: string): string => {
 }
 
 export const validateRelPath = (
-  repoRoot: string, rawPath: string, ruleId?: RewriteRuleId, hostIo?: SyncHostIo,
+  repoRoot: string, rawPath: string, ruleId?: RewriteRuleId, hostIo?: SyncHostReader,
 ): { readonly ok: true; readonly relPath: string } | { readonly ok: false; readonly error: GraphProjectorError } => {
   const trimmed = (rawPath ?? "").trim()
   if (trimmed.length === 0) {
@@ -97,8 +97,13 @@ export const validateRelPath = (
   return { ok: true, relPath: rel }
 }
 
-export const normalizeRelPath = (repoRoot: string, rawPath: string, ruleId?: RewriteRuleId): string => {
-  const res = validateRelPath(repoRoot, rawPath, ruleId)
+export const normalizeRelPath = (
+  repoRoot: string,
+  rawPath: string,
+  ruleId?: RewriteRuleId,
+  hostIo?: SyncHostReader,
+): string => {
+  const res = validateRelPath(repoRoot, rawPath, ruleId, hostIo)
   return res.ok ? res.relPath : "__invalid_target__"
 }
 
@@ -119,6 +124,7 @@ export interface ProjectorContext {
   readonly targetEntitiesByKey: Map<string, EntityNode>
   readonly targetRelationsById: Map<string, RelationNode>
   readonly targetEdgesByRelId: Map<string, Array<PlaysRoleEdge>>
+  readonly hostIo?: SyncHostReader | undefined
   pendingError?: GraphProjectorError | undefined
 }
 
@@ -126,7 +132,7 @@ export const readInitialFileContent = (
   repoRoot: string,
   relPath: string,
   existingFiles?: Readonly<Record<string, string>>,
-  hostIo?: SyncHostIo,
+  hostIo?: SyncHostReader,
 ): string | undefined => {
   if (existingFiles !== undefined) {
     if (existingFiles[relPath] !== undefined) return existingFiles[relPath]
@@ -142,7 +148,7 @@ export const getOrCreateSourceFile = (
   ctx: ProjectorContext, relFile: string,
   options?: { readonly requireExisting?: boolean | undefined; readonly ruleId?: RewriteRuleId | undefined },
 ): { readonly sf: SourceFile; readonly norm: string } => {
-  const validated = validateRelPath(ctx.repoRoot, relFile, options?.ruleId)
+  const validated = validateRelPath(ctx.repoRoot, relFile, options?.ruleId, ctx.hostIo)
   if (!validated.ok) {
     ctx.pendingError ??= validated.error
     const fallbackSf = ctx.project.getSourceFile("/__invalid_target__.ts") ?? ctx.project.createSourceFile("/__invalid_target__.ts", "", { overwrite: true })
@@ -396,7 +402,7 @@ export const ensureCrossFileImportsForEntityKeys = (
     const targetFile = resolveFileForEntityKey(ctx, key)
     const exportName = resolveExportNameForEntityKey(ctx, key)
     if (targetFile === undefined || exportName === undefined) continue
-    const normTarget = normalizeRelPath(ctx.repoRoot, targetFile)
+    const normTarget = normalizeRelPath(ctx.repoRoot, targetFile, undefined, ctx.hostIo)
     if (normTarget === fromRelFile) continue
     const moduleSpec = computeRelativeModuleSpec(fromRelFile, normTarget)
     ensureNamedImport(ctx, fromRelFile, moduleSpec, [exportName], ruleId, rationale)
