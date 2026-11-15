@@ -34,10 +34,12 @@ import {
   GateCategory,
   GateRuleId,
   GateViolationMessage,
+  inferAstGatePackageTagFromPath,
   SourceLineNumber,
 } from "@harness/contract"
 import { ts } from "@harness/graph"
 import { checkMigrationSqlSafety } from "../migration-check.js"
+import { analyzeSqliteMigratorFromRecordAst } from "./sqlite-migrator-ast.js"
 
 export const GateViolation = Schema.Struct({
   category: GateCategory,
@@ -147,12 +149,116 @@ export const isDummyEffectVoidYield = (
   )
 }
 
-export const inferPackageTagFromPath = (filePath: string): AstGatePackageTag => {
-  if (filePath.includes("/contract/")) return AstGatePackageTag.make("contract")
-  if (filePath.includes("/domain/") || filePath.includes("/core/")) return AstGatePackageTag.make("domain")
-  if (filePath.includes("/service/")) return AstGatePackageTag.make("service")
-  if (filePath.includes("/infra/")) return AstGatePackageTag.make("infra")
-  return AstGatePackageTag.make("app")
+export { inferAstGatePackageTagFromPath as inferPackageTagFromPath }
+
+const isEffectRunSyncOfDie = (
+  node: ts.PropertyAccessExpression | ts.ElementAccessExpression,
+  isEffectNs: (expr: ts.Expression) => boolean,
+): boolean => {
+  const methodName = ts.isPropertyAccessExpression(node)
+    ? node.name.text
+    : extractStringOrNoSubTemplateText(node.argumentExpression)
+  if (methodName !== "runSync") return false
+  if (node.parent === undefined || !ts.isCallExpression(node.parent) || node.parent.expression !== node) {
+    return false
+  }
+  const firstArg = node.parent.arguments[0]
+  if (firstArg === undefined) return false
+  const unwrapped = unwrapAstExpression(firstArg)
+  return (
+    ts.isCallExpression(unwrapped) &&
+    ts.isPropertyAccessExpression(unwrapped.expression) &&
+    isEffectNs(unwrapped.expression.expression) &&
+    unwrapped.expression.name.text === "die"
+  )
+}
+
+const isSilentFallbackFn = (expr: ts.Expression, sf: ts.SourceFile, extended: boolean): boolean => {
+  const fn = unwrapAstExpression(expr)
+  if (!ts.isArrowFunction(fn) && !ts.isFunctionExpression(fn)) return false
+  let body = fn.body.getText(sf).trim()
+  if (ts.isBlock(fn.body)) {
+    if (fn.body.statements.length !== 1) return false
+    const s = fn.body.statements[0]
+    if (s === undefined || !ts.isReturnStatement(s) || s.expression === undefined) return false
+    body = s.expression.getText(sf).trim()
+  }
+  if (body === '""' || body === "''" || body === "[]") return true
+  return extended && (body === "{}" || body === "undefined" || body === "false")
+}
+
+const hasResultTryFsReadText = (text: string): boolean =>
+  text.includes("Result.try") && /(?:readTextSync|readdirSync|readBytesSync)/.test(text)
+
+const isSilentGateFsFallbackAstCall = (node: ts.CallExpression, sf: ts.SourceFile): boolean => {
+  const callee = unwrapAstExpression(node.expression)
+  if (ts.isIdentifier(callee) && callee.text === "safeFs") return true
+  const calleeText = callee.getText(sf)
+  if (
+    calleeText === "Result.getOrElse" &&
+    node.arguments.length >= 2 &&
+    node.arguments[0] !== undefined &&
+    node.arguments[1] !== undefined &&
+    hasResultTryFsReadText(node.arguments[0].getText(sf)) &&
+    isSilentFallbackFn(node.arguments[1], sf, false)
+  ) {
+    return true
+  }
+  const isPipeGetOrElse = (arg: ts.Expression): boolean =>
+    ts.isCallExpression(arg) &&
+    unwrapAstExpression(arg.expression).getText(sf) === "Result.getOrElse" &&
+    arg.arguments.length === 1 &&
+    arg.arguments[0] !== undefined &&
+    isSilentFallbackFn(arg.arguments[0], sf, true)
+  if (
+    ts.isPropertyAccessExpression(callee) &&
+    callee.name.text === "pipe" &&
+    hasResultTryFsReadText(callee.expression.getText(sf)) &&
+    node.arguments.some(isPipeGetOrElse)
+  ) {
+    return true
+  }
+  if (
+    ts.isIdentifier(callee) &&
+    callee.text === "pipe" &&
+    node.arguments.length >= 2 &&
+    node.arguments[0] !== undefined &&
+    hasResultTryFsReadText(node.arguments[0].getText(sf)) &&
+    node.arguments.slice(1).some(isPipeGetOrElse)
+  ) {
+    return true
+  }
+  if (
+    ts.isPropertyAccessExpression(callee) &&
+    callee.name.text === "with" &&
+    node.arguments.length >= 2 &&
+    node.arguments[0] !== undefined &&
+    node.arguments[1] !== undefined &&
+    isSilentFallbackFn(node.arguments[1], sf, true)
+  ) {
+    const pat = unwrapAstExpression(node.arguments[0])
+    const isFailurePat =
+      ts.isObjectLiteralExpression(pat) &&
+      pat.properties.some(
+        (p) =>
+          ts.isPropertyAssignment(p) &&
+          (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) &&
+          p.name.text === "_tag" &&
+          extractStringOrNoSubTemplateText(p.initializer) === "Failure",
+      )
+    if (!isFailurePat) return false
+    let curr: ts.Expression = callee
+    while (ts.isPropertyAccessExpression(curr) && ts.isCallExpression(curr.expression)) {
+      const innerCall = curr.expression
+      const innerCallee = unwrapAstExpression(innerCall.expression)
+      if (ts.isIdentifier(innerCallee) && innerCallee.text === "match") {
+        const arg0 = innerCall.arguments[0]
+        return arg0 !== undefined && hasResultTryFsReadText(arg0.getText(sf))
+      }
+      curr = innerCallee
+    }
+  }
+  return false
 }
 
 const isInsideMigrationsRecord = (node: ts.Node, sourceFile: ts.SourceFile): boolean => {
@@ -249,7 +355,7 @@ export const visitSourceFileSinglePass = (
 ): ReadonlyArray<GateViolation> => {
   const filePath = AstSourceFilePath.make(String(filePathOrRelPath))
   const normalizedFilePath = filePath.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "")
-  const packageTag = packageTagParam ?? inferPackageTagFromPath(normalizedFilePath)
+  const packageTag = packageTagParam ?? inferAstGatePackageTagFromPath(normalizedFilePath)
 
   const violations: Array<GateViolation> = []
   const isTestFile =
@@ -295,11 +401,33 @@ export const visitSourceFileSinglePass = (
     })
   }
 
-  const handlesTsxExtensions =
-    sourceFile.text.includes('".tsx"') || sourceFile.text.includes("'.tsx'")
+  const handlesTsxExtensions = sourceFile.text.includes('".tsx"') || sourceFile.text.includes("'.tsx'")
   const referencesLangTsx = sourceFile.text.includes("Lang.Tsx")
+  const effectModuleNamespaceNames = new Set<string>()
   const effectNamespaceNames = new Set<string>(["Effect"])
+  const bannedRunAliases = new Map<string, string>()
+  const isEffectNsExpr = (expr: ts.Expression): boolean => {
+    const u = unwrapAstExpression(expr)
+    if (ts.isIdentifier(u)) return effectNamespaceNames.has(u.text)
+    if (ts.isPropertyAccessExpression(u) && u.name.text === "Effect") {
+      const inner = unwrapAstExpression(u.expression)
+      return ts.isIdentifier(inner) && effectModuleNamespaceNames.has(inner.text)
+    }
+    if (ts.isElementAccessExpression(u) && extractStringOrNoSubTemplateText(u.argumentExpression) === "Effect") {
+      const inner = unwrapAstExpression(u.expression)
+      return ts.isIdentifier(inner) && effectModuleNamespaceNames.has(inner.text)
+    }
+    return false
+  }
+  const getBindingPropName = (el: ts.BindingElement): string | undefined => {
+    const pn = el.propertyName
+    if (pn === undefined) return ts.isIdentifier(el.name) ? el.name.text : undefined
+    if (ts.isIdentifier(pn) || ts.isStringLiteral(pn) || ts.isNoSubstitutionTemplateLiteral(pn)) return pn.text
+    if (ts.isComputedPropertyName(pn)) return extractStringOrNoSubTemplateText(pn.expression)
+    return undefined
+  }
   const isTestOrHelperFile = isTestFile || /(?:^|\/)test\/(?!fixtures\/)/.test(normalizedFilePath)
+  const isGatesSrcFile = !isTestFile && /(?:^|\/)libs\/harness\/gates\/src\//.test(normalizedFilePath)
   const isClefEndpointCheckedSrcFile =
     !isTestFile &&
     /(?:^|\/)src\//.test(normalizedFilePath) &&
@@ -327,19 +455,9 @@ export const visitSourceFileSinglePass = (
   const reportDrizzleIfBanned = (spec: string | undefined, node: ts.Node): void => {
     if (spec === undefined || !isDrizzleSpecifier(spec)) return
     if (packageTag === "domain" && !isTestFile) {
-      pushViolation(
-        catDomainPurity,
-        "impure-domain-import",
-        `Module '${filePath}' (${packageTag}) imports impure infrastructure dependency '${spec}'.`,
-        node,
-      )
+      pushViolation(catDomainPurity, "impure-domain-import", `Module '${filePath}' (${packageTag}) imports impure infrastructure dependency '${spec}'.`, node)
     } else {
-      pushViolation(
-        isTestFile ? catTestIntegrity : catSyntaxBans,
-        "banned-drizzle-import",
-        `Drizzle import '${spec}' in '${filePath}' is banned across the workspace — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator).`,
-        node,
-      )
+      pushViolation(isTestFile ? catTestIntegrity : catSyntaxBans, "banned-drizzle-import", `Drizzle import '${spec}' in '${filePath}' is banned across the workspace — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator).`, node)
     }
   }
 
@@ -350,93 +468,46 @@ export const visitSourceFileSinglePass = (
       if (!node.importClause?.isTypeOnly && (spec === "effect" || spec === "effect/Effect")) {
         const bindings = node.importClause?.namedBindings
         if (bindings !== undefined && ts.isNamespaceImport(bindings)) {
-          effectNamespaceNames.add(bindings.name.text)
+          if (spec === "effect") effectModuleNamespaceNames.add(bindings.name.text)
+          else effectNamespaceNames.add(bindings.name.text)
         }
         if (bindings !== undefined && ts.isNamedImports(bindings)) {
           for (const el of bindings.elements) {
             if (el.isTypeOnly) continue
             const importedName = (el.propertyName ?? el.name).text
-            if (spec === "effect" && importedName === "Effect") {
-              effectNamespaceNames.add(el.name.text)
-            }
-            if (
-              spec === "effect/Effect" &&
-              !isTestOrHelperFile &&
-              !isMemoryWorkerdBridge &&
-              isBannedEffectRunMethod(importedName)
-            ) {
-              pushViolation(
-                catDomainPurity,
-                "unscoped-effect-run",
-                `Unscoped 'Effect.${importedName}' import in '${filePath}' (${packageTag}) — compose Effects and run via NodeRuntime.runMain or ManagedRuntime at the app edge.`,
-                node,
-              )
+            if (spec === "effect" && importedName === "Effect") effectNamespaceNames.add(el.name.text)
+            if (spec === "effect/Effect" && !isTestOrHelperFile && isBannedEffectRunMethod(importedName)) {
+              pushViolation(catDomainPurity, "unscoped-effect-run", `Unscoped 'Effect.${importedName}' import in '${filePath}' (${packageTag}) — compose Effects and run via NodeRuntime.runMain or ManagedRuntime at the app edge.`, node)
             }
           }
         }
       }
-      if (
-        (spec === "node:sqlite" || spec === "sqlite" || spec === "better-sqlite3") &&
-        (packageTag === "infra" || packageTag === "app")
-      ) {
-        pushViolation(
-          isTestFile ? catTestIntegrity : catSyntaxBans,
-          "node-sqlite-in-infra",
-          `Do not import '${spec}' in '${filePath}' — use @alchemy.run/cloudflare-runtime workerd storage instead of node:sqlite mocks.`,
-          node,
-        )
+      if ((spec === "node:sqlite" || spec === "sqlite" || spec === "better-sqlite3") && (packageTag === "infra" || packageTag === "app")) {
+        pushViolation(isTestFile ? catTestIntegrity : catSyntaxBans, "node-sqlite-in-infra", `Do not import '${spec}' in '${filePath}' — use @alchemy.run/cloudflare-runtime workerd storage instead of node:sqlite mocks.`, node)
       }
       reportDrizzleIfBanned(spec, node)
-      if (
-        !isTestFile &&
-        !isDrizzleSpecifier(spec) &&
-        (packageTag === "domain" || packageTag === "contract") &&
-        isImpureDomainSpecifier(spec)
-      ) {
-        pushViolation(
-          catDomainPurity,
-          "impure-domain-import",
-          `Module '${filePath}' (${packageTag}) imports impure infrastructure dependency '${spec}'.`,
-          node,
-        )
+      if (!isTestFile && !isDrizzleSpecifier(spec) && (packageTag === "domain" || packageTag === "contract") && isImpureDomainSpecifier(spec)) {
+        pushViolation(catDomainPurity, "impure-domain-import", `Module '${filePath}' (${packageTag}) imports impure infrastructure dependency '${spec}'.`, node)
       }
     }
 
-    if (
-      ts.isExportDeclaration(node) &&
-      node.moduleSpecifier !== undefined &&
-      ts.isStringLiteral(node.moduleSpecifier)
-    ) {
+    if (ts.isExportDeclaration(node) && node.moduleSpecifier !== undefined && ts.isStringLiteral(node.moduleSpecifier)) {
       reportDrizzleIfBanned(node.moduleSpecifier.text, node)
     }
 
-    if (
-      ts.isImportEqualsDeclaration(node) &&
-      ts.isExternalModuleReference(node.moduleReference) &&
-      ts.isStringLiteral(node.moduleReference.expression)
-    ) {
+    if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference) && ts.isStringLiteral(node.moduleReference.expression)) {
       reportDrizzleIfBanned(node.moduleReference.expression.text, node)
     }
 
     // 2. Switch statements (syntax-bans)
     if (ts.isSwitchStatement(node) && !isTestFile) {
-      pushViolation(
-        catSyntaxBans,
-        "discriminant-branching",
-        `Switch statement in '${filePath}' is banned — use match(value).with(...).exhaustive() from ts-pattern.`,
-        node,
-      )
+      pushViolation(catSyntaxBans, "discriminant-branching", `Switch statement in '${filePath}' is banned — use match(value).with(...).exhaustive() from ts-pattern.`, node)
     }
 
     // 2b. Dummy yield* Effect.void (effect-laws: effect-fn-dummy-void)
     if (ts.isYieldExpression(node) && !isTestFile) {
       if (node.expression !== undefined && isDummyEffectVoidYield(node.expression, sourceFile)) {
-        pushViolation(
-          catEffectLaws,
-          "effect-fn-dummy-void",
-          `Dummy 'yield* Effect.void' in '${filePath}' is banned — use a pure function or Effect.sync(() => ...) instead of a dummy yield.`,
-          node,
-        )
+        pushViolation(catEffectLaws, "effect-fn-dummy-void", `Dummy 'yield* Effect.void' in '${filePath}' is banned — use a pure function or Effect.sync(() => ...) instead of a dummy yield.`, node)
       }
     }
 
@@ -504,35 +575,70 @@ export const visitSourceFileSinglePass = (
       }
     }
 
-    // 4b. PropertyAccessExpression: Effect.ignore in domain & unscoped Effect.run*
+    // 4a. VariableDeclaration: track Effect/runSync aliases & destructuring
+    if (ts.isVariableDeclaration(node) && !isTestOrHelperFile && node.initializer !== undefined) {
+      const init = unwrapAstExpression(node.initializer)
+      if (isEffectNsExpr(init)) {
+        if (ts.isIdentifier(node.name)) effectNamespaceNames.add(node.name.text)
+        if (ts.isObjectBindingPattern(node.name)) {
+          for (const el of node.name.elements) {
+            const prop = getBindingPropName(el)
+            if (prop !== undefined && isBannedEffectRunMethod(prop) && ts.isIdentifier(el.name)) {
+              bannedRunAliases.set(el.name.text, prop)
+            }
+          }
+        }
+      }
+      if (!isEffectNsExpr(init) && ts.isIdentifier(init) && effectModuleNamespaceNames.has(init.text) && ts.isObjectBindingPattern(node.name)) {
+        for (const el of node.name.elements) {
+          if (getBindingPropName(el) !== "Effect") continue
+          if (ts.isIdentifier(el.name)) effectNamespaceNames.add(el.name.text)
+          if (ts.isObjectBindingPattern(el.name)) {
+            for (const nested of el.name.elements) {
+              const prop = getBindingPropName(nested)
+              if (prop !== undefined && isBannedEffectRunMethod(prop) && ts.isIdentifier(nested.name)) {
+                bannedRunAliases.set(nested.name.text, prop)
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // 4b. PropertyAccessExpression / ElementAccessExpression / Identifier: Effect.ignore & unscoped Effect.run*
     if (ts.isPropertyAccessExpression(node) && !isTestFile) {
-      if (
-        packageTag === "domain" &&
-        ts.isIdentifier(node.expression) &&
-        effectNamespaceNames.has(node.expression.text) &&
-        node.name.text === "ignore"
-      ) {
-        pushViolation(
-          catDomainPurity,
-          "domain-effect-ignore",
-          `Swallowing typed errors with Effect.ignore in '${filePath}' (domain) is banned — surface failures in the E channel or handle them explicitly.`,
-          node,
-        )
+      if (packageTag === "domain" && isEffectNsExpr(node.expression) && node.name.text === "ignore") {
+        pushViolation(catDomainPurity, "domain-effect-ignore", `Swallowing typed errors with Effect.ignore in '${filePath}' (domain) is banned — surface failures in the E channel or handle them explicitly.`, node)
       }
       if (
         !isTestOrHelperFile &&
-        !isMemoryWorkerdBridge &&
-        ts.isIdentifier(node.expression) &&
-        effectNamespaceNames.has(node.expression.text) &&
+        !(isMemoryWorkerdBridge && isEffectRunSyncOfDie(node, isEffectNsExpr)) &&
+        isEffectNsExpr(node.expression) &&
         isBannedEffectRunMethod(node.name.text)
       ) {
-        pushViolation(
-          catDomainPurity,
-          "unscoped-effect-run",
-          `Unscoped '${node.expression.text}.${node.name.text}' in '${filePath}' (${packageTag}) — compose Effects and run via NodeRuntime.runMain or ManagedRuntime at the app edge.`,
-          node,
-        )
+        pushViolation(catDomainPurity, "unscoped-effect-run", `Unscoped '${node.expression.getText(sourceFile)}.${node.name.text}' in '${filePath}' (${packageTag}) — compose Effects and run via NodeRuntime.runMain or ManagedRuntime at the app edge.`, node)
       }
+    }
+    if (ts.isElementAccessExpression(node) && !isTestOrHelperFile) {
+      const methodName = extractStringOrNoSubTemplateText(node.argumentExpression)
+      if (
+        methodName !== undefined &&
+        isBannedEffectRunMethod(methodName) &&
+        !(isMemoryWorkerdBridge && isEffectRunSyncOfDie(node, isEffectNsExpr))
+      ) {
+        pushViolation(catDomainPurity, "unscoped-effect-run", `Unscoped computed '${node.expression.getText(sourceFile)}["${methodName}"]' in '${filePath}' (${packageTag}) — compose Effects and run via NodeRuntime.runMain or ManagedRuntime at the app edge.`, node)
+      }
+    }
+    if (
+      ts.isIdentifier(node) &&
+      !isTestOrHelperFile &&
+      bannedRunAliases.has(node.text) &&
+      !(ts.isBindingElement(node.parent) && node.parent.name === node) &&
+      !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) &&
+      !(ts.isPropertyAssignment(node.parent) && node.parent.name === node)
+    ) {
+      const orig = bannedRunAliases.get(node.text)!
+      pushViolation(catDomainPurity, "unscoped-effect-run", `Unscoped destructured 'Effect.${orig}' alias '${node.text}' in '${filePath}' (${packageTag}) — compose Effects and run via NodeRuntime.runMain or ManagedRuntime at the app edge.`, node)
     }
 
     // 5. CallExpressions (effect-laws, domain-purity, test-integrity, syntax-bans)
@@ -547,106 +653,41 @@ export const visitSourceFileSinglePass = (
 
       const calleeText = node.expression.getText(sourceFile)
 
-      if (
-        !isTestFile &&
-        calleeText === "parse" &&
-        node.arguments.length >= 2 &&
-        node.arguments[0]?.getText(sourceFile) === "Lang.TypeScript" &&
-        handlesTsxExtensions &&
-        !referencesLangTsx
-      ) {
-        pushViolation(
-          catSyntaxBans,
-          "ast-grep-tsx-grammar",
-          `Hardcoded parse(Lang.TypeScript, ...) in '${filePath}' which handles .tsx files — select Lang.Tsx for .tsx files so JSX syntax parses cleanly.`,
-          node,
-        )
+      if (!isTestFile && calleeText === "parse" && node.arguments.length >= 2 && node.arguments[0]?.getText(sourceFile) === "Lang.TypeScript" && handlesTsxExtensions && !referencesLangTsx) {
+        pushViolation(catSyntaxBans, "ast-grep-tsx-grammar", `Hardcoded parse(Lang.TypeScript, ...) in '${filePath}' which handles .tsx files — select Lang.Tsx for .tsx files so JSX syntax parses cleanly.`, node)
       }
 
       const unwrappedExpr = unwrapAstExpression(node.expression)
-      if (
-        !isTestFile &&
-        ts.isPropertyAccessExpression(unwrappedExpr) &&
-        unwrappedExpr.name.text === "run" &&
-        /\bmatch\s*\(/.test(unwrappedExpr.expression.getText(sourceFile))
-      ) {
-        pushViolation(
-          catEffectLaws,
-          "non-exhaustive-union-match",
-          `match(...).run() in '${filePath}' is banned — use .exhaustive() instead.`,
-          node,
-        )
+      if (!isTestFile && ts.isPropertyAccessExpression(unwrappedExpr) && unwrappedExpr.name.text === "run" && /\bmatch\s*\(/.test(unwrappedExpr.expression.getText(sourceFile))) {
+        pushViolation(catEffectLaws, "non-exhaustive-union-match", `match(...).run() in '${filePath}' is banned — use .exhaustive() instead.`, node)
       }
 
       if (!isTestFile && isCatchCauseInterruptsOnlyCall(node, sourceFile)) {
-        pushViolation(
-          catEffectLaws,
-          "catch-cause-interrupts-only",
-          "Cause.hasInterruptsOnly(cause) inside Effect.catchCause / Exit inspection swallows fiber interruption on composite causes (Fail + Interrupt). Use Cause.hasInterrupts(cause) instead.",
-          node,
-        )
+        pushViolation(catEffectLaws, "catch-cause-interrupts-only", "Cause.hasInterruptsOnly(cause) inside Effect.catchCause / Exit inspection swallows fiber interruption on composite causes (Fail + Interrupt). Use Cause.hasInterrupts(cause) instead.", node)
       }
 
       if (!isTestFile && isSilentCatchDefectCall(node, sourceFile)) {
-        pushViolation(
-          catEffectLaws,
-          "silent-catch-defect",
-          `Effect.catchDefect handler in '${filePath}' silently swallows runtime defects without logging or reporting — log via Effect.logWarning / process.stderr.write or re-fail.`,
-          node,
-        )
+        pushViolation(catEffectLaws, "silent-catch-defect", `Effect.catchDefect handler in '${filePath}' silently swallows runtime defects without logging or reporting — log via Effect.logWarning / process.stderr.write or re-fail.`, node)
       }
 
       if (!isTestFile && isIgnoredChmodPermissionCall(node, sourceFile)) {
-        pushViolation(
-          catSyntaxBans,
-          "ignored-chmod-permission",
-          `Ignoring chmodSync/fchmodSync failure with Effect.ignore or Effect.orElseSucceed in '${filePath}' is banned — permission hardening must fail closed on error.`,
-          node,
-        )
+        pushViolation(catSyntaxBans, "ignored-chmod-permission", `Ignoring chmodSync/fchmodSync failure with Effect.ignore or Effect.orElseSucceed in '${filePath}' is banned — permission hardening must fail closed on error.`, node)
       }
 
-      if (
-        isTestFile &&
-        (calleeText === "saveGraphSnapshot" ||
-          calleeText === "saveGraphSnapshotEffect" ||
-          calleeText === "writeFileSync" ||
-          calleeText === "fs.writeFileSync")
-      ) {
-        let hasLiveDotHarnessArg = false
-        for (const arg of node.arguments) {
-          if (/["'`]\.harness\//.test(arg.getText(sourceFile))) {
-            hasLiveDotHarnessArg = true
-            break
-          }
-        }
-        if (hasLiveDotHarnessArg) {
-          pushViolation(
-            catTestIntegrity,
-            "unisolated-dot-harness-test-write",
-            "Test files must not write directly to live .harness/ paths — use os.tmpdir() / fs.mkdtempSync for isolated snapshot and file tests.",
-            node,
-          )
+      if (isGatesSrcFile && isSilentGateFsFallbackAstCall(node, sourceFile)) {
+        pushViolation(catSyntaxBans, "silent-gate-fs-fallback", `Silent filesystem fallback in '${filePath}' is banned — emit an explicit 'unreadable-workspace-file' finding instead of returning "", [], {}, undefined, or false.`, node)
+      }
+
+      if (isTestFile && (calleeText === "saveGraphSnapshot" || calleeText === "saveGraphSnapshotEffect" || calleeText === "writeFileSync" || calleeText === "fs.writeFileSync")) {
+        if (node.arguments.some((arg) => /["'`]\.harness\//.test(arg.getText(sourceFile)))) {
+          pushViolation(catTestIntegrity, "unisolated-dot-harness-test-write", "Test files must not write directly to live .harness/ paths — use os.tmpdir() / fs.mkdtempSync for isolated snapshot and file tests.", node)
         }
       }
 
-      if (
-        isTestFile &&
-        calleeText.startsWith("expect(") &&
-        /expect\s*\(\s*Exit\.isFailure\s*\(\s*([A-Za-z0-9_$]+)\s*\)\s*\)/.test(
-          node.expression.getText(sourceFile),
-        )
-      ) {
+      if (isTestFile && calleeText.startsWith("expect(") && /expect\s*\(\s*Exit\.isFailure\s*\(\s*([A-Za-z0-9_$]+)\s*\)\s*\)/.test(node.expression.getText(sourceFile))) {
         const fullSourceText = sourceFile.text
-        if (
-          !fullSourceText.includes("Cause.findErrorOption") &&
-          !fullSourceText.includes(".cause")
-        ) {
-          pushViolation(
-            catTestIntegrity,
-            "vacuous-error-assertion",
-            `Vacuous Exit.isFailure assertion in '${filePath}' without inspecting Cause.findErrorOption or error fields.`,
-            node,
-          )
+        if (!fullSourceText.includes("Cause.findErrorOption") && !fullSourceText.includes(".cause")) {
+          pushViolation(catTestIntegrity, "vacuous-error-assertion", `Vacuous Exit.isFailure assertion in '${filePath}' without inspecting Cause.findErrorOption or error fields.`, node)
         }
       }
     }
@@ -658,12 +699,7 @@ export const visitSourceFileSinglePass = (
           const leftText = node.left.getText(sourceFile)
           const rightText = node.right.getText(sourceFile)
           if (leftText.startsWith("JSON.stringify(") && rightText.startsWith("JSON.stringify(")) {
-            pushViolation(
-              catTestIntegrity,
-              "fallback-json-equality",
-              `Fallback JSON.stringify equality comparison in '${filePath}' — use structured equality or Equal.equals.`,
-              node,
-            )
+            pushViolation(catTestIntegrity, "fallback-json-equality", `Fallback JSON.stringify equality comparison in '${filePath}' — use structured equality or Equal.equals.`, node)
           }
         })
         .otherwise(() => {})
@@ -675,16 +711,8 @@ export const visitSourceFileSinglePass = (
       if (tagText === "sql" || tagText.endsWith(".sql")) {
         const templateText = node.template.getText(sourceFile).slice(1, -1)
         if (SUSPICIOUS_SQL_DDL_REGEX.test(templateText)) {
-          if (
-            packageTag === "infra" &&
-            (!hasMigratorImport || !isInsideMigrationsRecord(node, sourceFile))
-          ) {
-            pushViolation(
-              catMigrationSafety,
-              "unmanaged-sql-ddl",
-              `Raw SQL DDL in '${filePath}' outside SqliteMigrator.fromRecord migration record.`,
-              node,
-            )
+          if (packageTag === "infra" && (!hasMigratorImport || !isInsideMigrationsRecord(node, sourceFile))) {
+            pushViolation(catMigrationSafety, "unmanaged-sql-ddl", `Raw SQL DDL in '${filePath}' outside SqliteMigrator.fromRecord migration record.`, node)
           }
           const safety = checkMigrationSqlSafety([{ file: filePath, sql: templateText }])
           for (const v of safety.violations) {
@@ -694,15 +722,8 @@ export const visitSourceFileSinglePass = (
       }
     }
 
-    if (
-      isClefEndpointCheckedSrcFile &&
-      (ts.isStringLiteral(node) ||
-        ts.isNoSubstitutionTemplateLiteral(node) ||
-        ts.isTemplateExpression(node))
-    ) {
-      const literalText = ts.isTemplateExpression(node)
-        ? `${node.head.text}${node.templateSpans.map((s) => s.literal.text).join("")}`
-        : node.text
+    if (isClefEndpointCheckedSrcFile && (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateExpression(node))) {
+      const literalText = ts.isTemplateExpression(node) ? `${node.head.text}${node.templateSpans.map((s) => s.literal.text).join("")}` : node.text
       if (isInvalidClefEndpointUrlText(literalText)) {
         pushViolation(catSyntaxBans, "invalid-clef-endpoint", INVALID_CLEF_ENDPOINT_MESSAGE, node)
       }
@@ -712,5 +733,21 @@ export const visitSourceFileSinglePass = (
   }
 
   walk(sourceFile)
+
+  if (sourceFile.text.includes("fromRecord")) {
+    const migratorAnalysis = analyzeSqliteMigratorFromRecordAst({ filePath: normalizedFilePath, content: sourceFile.text })
+    for (const issue of migratorAnalysis.keyIssues) {
+      violations.push({ category: catMigrationSafety, rule: GateRuleId.make("invalid-migrator-record-key"), message: GateViolationMessage.make(issue.message), file: filePath, line: SourceLineNumber.make(issue.line), enclosingSymbol: EnclosingSymbolName.make(filePath) })
+    }
+    const existingUnsafeLines = new Set(violations.filter((v) => v.rule === "unsafe-sql-migration").map((v) => v.line))
+    for (const issue of migratorAnalysis.unsafeSqlIssues) {
+      const lineNum = SourceLineNumber.make(issue.line)
+      if (!existingUnsafeLines.has(lineNum)) {
+        existingUnsafeLines.add(lineNum)
+        violations.push({ category: catMigrationSafety, rule: GateRuleId.make("unsafe-sql-migration"), message: GateViolationMessage.make(issue.message), file: filePath, line: lineNum, enclosingSymbol: EnclosingSymbolName.make(filePath) })
+      }
+    }
+  }
+
   return violations
 }

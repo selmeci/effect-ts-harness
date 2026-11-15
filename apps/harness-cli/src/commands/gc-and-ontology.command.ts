@@ -93,8 +93,24 @@ export const handleOntology = (
           const scopeArg = argv.find((arg) => arg.startsWith("--scope="))
           const scope = scopeArg ? scopeArg.slice("--scope=".length) : undefined
 
+          const docFindings: NonNullable<Parameters<typeof loadGovernanceDocsFromDisk>[2]> = []
           const allDocs =
-            options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot, nodeSyncHostIo)
+            options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot, nodeSyncHostIo, docFindings)
+          if (docFindings.length > 0) {
+            const msg = docFindings.map((f) => `[${f.kind}] ${f.location}: ${f.message}`).join("\n")
+            return {
+              exitCode: 1,
+              stdout: JSON.stringify({
+                clean: false,
+                degraded: true,
+                semanticSkipped: deterministic,
+                findings: docFindings,
+                semanticConflicts: [],
+                evaluatedPairs: 0,
+              }),
+              stderr: `Ontology check failed: unreadable governance docs\n${msg}`,
+            }
+          }
           const docs = scope
             ? allDocs.filter(
                 (doc) =>
@@ -135,6 +151,7 @@ export const handleOntology = (
             stdout: JSON.stringify({
               clean,
               degraded,
+              semanticSkipped: deterministic,
               ...(semanticReport.evaluationError !== undefined
                 ? { evaluationError: semanticReport.evaluationError }
                 : {}),

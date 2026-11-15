@@ -1,4 +1,5 @@
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
+import { createServer } from "node:http"
 import { EventEmitter } from "node:events"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -8,7 +9,13 @@ import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import { afterEach, describe, expect, it } from "vitest"
 import { makeMockDecisionModelLayer } from "@harness/decision"
-import { CLEF_SYSTEMONE_ONLY_BANNED_REASON } from "@harness/gates"
+import { CLEF_SYSTEMONE_ONLY_BANNED_REASON, DstSeed, writeVerifyStamp } from "@harness/gates"
+import {
+  deriveRepoOmnigraphPort,
+  resolveCanonicalRepoRoot,
+  resolveOmnigraphClusterDir,
+} from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 import {
   ensureLocalOmnigraphReady,
   isLoopbackOmnigraphUrl,
@@ -16,6 +23,7 @@ import {
   isValidLockId,
 } from "../src/commands/omnigraph-lifecycle.js"
 import { makeReadStdinEffect } from "../src/commands/daemon-and-omnigraph.service.js"
+import { handleDone } from "../src/commands/verify-and-done.command.js"
 import { runDeclarativeCli, teardownCliMain } from "../src/index.js"
 import { runCli } from "./run-cli-helper.js"
 
@@ -332,7 +340,9 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
           sub === "guard"
             ? JSON.stringify({ tool_name: "Bash", tool_input: { command: "pnpm test" } })
             : sub === "done"
-              ? JSON.stringify({ stop_hook_active: false, fullyIdle: true })
+              ? isAgy
+                ? JSON.stringify({ fullyIdle: true })
+                : JSON.stringify({ stop_hook_active: false })
               : JSON.stringify({})
 
         const res = await Effect.runPromise(
@@ -447,13 +457,55 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         expect(process.exitCode).toBe(2)
         expect(onExitCodes).toEqual([2])
 
-        // 6. Exit.interrupt (130)
+        // 6. Exit.interrupt: hook commands (guard/done) fail closed with 2; non-hook (verify) returns 130
         reset()
         teardownCliMain(
           Exit.interrupt(1),
           (code) => onExitCodes.push(code),
           (s) => stderrChunks.push(s),
           ["node", "index.ts", "guard"],
+          (s) => stdoutChunks.push(s),
+        )
+        expect(process.exitCode).toBe(2)
+        expect(onExitCodes).toEqual([2])
+        expect(stderrChunks.join("")).toContain("interrupted by signal")
+
+        reset()
+        teardownCliMain(
+          Exit.interrupt(1),
+          (code) => onExitCodes.push(code),
+          (s) => stderrChunks.push(s),
+          ["node", "index.ts", "done"],
+          (s) => stdoutChunks.push(s),
+        )
+        expect(process.exitCode).toBe(2)
+        expect(onExitCodes).toEqual([2])
+        expect(JSON.parse(stdoutChunks.join(""))).toEqual({
+          decision: "block",
+          reason: expect.stringContaining("interrupted by signal"),
+        })
+
+        reset()
+        teardownCliMain(
+          Exit.interrupt(1),
+          (code) => onExitCodes.push(code),
+          (s) => stderrChunks.push(s),
+          ["node", "index.ts", "guard", "--format=antigravity"],
+          (s) => stdoutChunks.push(s),
+        )
+        expect(process.exitCode).toBe(2)
+        expect(onExitCodes).toEqual([2])
+        expect(JSON.parse(stdoutChunks.join(""))).toEqual({
+          decision: "deny",
+          reason: expect.stringContaining("interrupted by signal"),
+        })
+
+        reset()
+        teardownCliMain(
+          Exit.interrupt(1),
+          (code) => onExitCodes.push(code),
+          (s) => stderrChunks.push(s),
+          ["node", "index.ts", "verify"],
           (s) => stdoutChunks.push(s),
         )
         expect(process.exitCode).toBe(130)
@@ -523,6 +575,52 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         decision: "deny",
         reason: expect.stringContaining("decisionLayer-exploded"),
       })
+
+      // Stdin-detected Antigravity format WITHOUT --format=antigravity when decisionLayer dies
+      const dieAgyStdinGuard = await Effect.runPromise(
+        runDeclarativeCli(
+          ["guard"],
+          {
+            stdin: JSON.stringify({
+              toolCall: { name: "Bash", args: { CommandLine: "echo hi" } },
+            }),
+          },
+          dyingDecisionLayer,
+        ),
+      )
+      expect(dieAgyStdinGuard.exitCode).toBe(0)
+      expect(JSON.parse(dieAgyStdinGuard.stdout)).toEqual({
+        decision: "deny",
+        reason: expect.stringContaining("decisionLayer-exploded"),
+      })
+
+      const tmpDieDoneRepo = mkdtempSync(join(tmpdir(), "harness-die-done-agy-"))
+      tempDirs.push(tmpDieDoneRepo)
+      writeVerifyStamp(tmpDieDoneRepo, nodeSyncHostIo, "impl/test", {
+        dstSeed: DstSeed.make(1),
+        dstSeedsRun: 1,
+      })
+      const dieAgyStdinDone = await Effect.runPromise(
+        runDeclarativeCli(
+          ["done"],
+          {
+            repoRoot: tmpDieDoneRepo,
+            skipBackgroundDaemons: true,
+            stdin: JSON.stringify({
+              fullyIdle: true,
+              conversationId: "conv-die-1",
+              workspacePaths: [tmpDieDoneRepo],
+            }),
+            planSteps: [{ stepId: "step-1", planStep: "step-1", stepDiff: "diff" }],
+          },
+          dyingDecisionLayer,
+        ),
+      )
+      expect(dieAgyStdinDone.exitCode).toBe(0)
+      expect(JSON.parse(dieAgyStdinDone.stdout)).toEqual({
+        decision: "continue",
+        reason: expect.stringContaining("decisionLayer-exploded"),
+      })
     })
 
     it("C-3, C-4, C-10, T-6: real subprocesses fail closed on empty stdin, guard --format=antigravity --bogus, and done --bogus", () => {
@@ -581,6 +679,277 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
       expect(guardRes.status).toBe(2)
       expect(guardRes.stderr).toContain("Blocked by harness guard")
     })
+
+    it("F-9.1: done blocks with exitCode 2 and valid JSON when HARNESS_DONE_DEADLINE_MS expires", async () => {
+      const prevDeadline = process.env.HARNESS_DONE_DEADLINE_MS
+      process.env.HARNESS_DONE_DEADLINE_MS = "20"
+      try {
+        const tmpRepo = mkdtempSync(join(tmpdir(), "harness-done-deadline-"))
+        tempDirs.push(tmpRepo)
+        writeVerifyStamp(tmpRepo, nodeSyncHostIo, "impl/test", {
+          dstSeed: DstSeed.make(1),
+          dstSeedsRun: 1,
+        })
+        const slowDecisionLayer = Layer.effect(
+          DecisionModel.DecisionModel,
+          Effect.sleep("500 millis").pipe(Effect.andThen(Effect.die(new Error("should-timeout")))),
+        )
+        const res = await Effect.runPromise(
+          handleDone(
+            ["done"],
+            {
+              repoRoot: tmpRepo,
+              skipBackgroundDaemons: true,
+              stdin: JSON.stringify({ stop_hook_active: false }),
+              planSteps: [{ stepId: "step-1", planStep: "step-1", stepDiff: "diff" }],
+            },
+            slowDecisionLayer,
+          ),
+        )
+        expect(res.exitCode).toBe(2)
+        expect(JSON.parse(res.stdout)).toEqual({
+          decision: "block",
+          reason: expect.stringContaining("internal deadline (20ms)"),
+        })
+      } finally {
+        if (prevDeadline !== undefined) process.env.HARNESS_DONE_DEADLINE_MS = prevDeadline
+        else Reflect.deleteProperty(process.env, "HARNESS_DONE_DEADLINE_MS")
+      }
+    })
+
+    it("M-12.1(e): cold-loading guard in a fresh Node subprocess never loads @harness/ingest", () => {
+      const preload = [
+        'import { registerHooks } from "node:module";',
+        "const loaded = [];",
+        "registerHooks({ load(url, ctx, next) { loaded.push(url); return next(url, ctx); } });",
+        'process.on("exit", () => { process.stderr.write("__INGEST_LOADED__=" + String(loaded.some((u) => u.includes("libs/harness/ingest"))) + "\\n"); });',
+      ].join(" ")
+      const sub = spawnSync(
+        process.execPath,
+        [
+          "--import",
+          "./tools/node-ts-resolver.mjs",
+          "--import",
+          `data:text/javascript,${encodeURIComponent(preload)}`,
+          "apps/harness-cli/src/index.ts",
+          "guard",
+        ],
+        {
+          cwd: REPO_ROOT,
+          input: JSON.stringify({ tool_name: "Bash", tool_input: { command: "ls" } }),
+          encoding: "utf8",
+          timeout: 15_000,
+        },
+      )
+      expect(sub.status).toBe(0)
+      expect(sub.stderr).toContain("__INGEST_LOADED__=false")
+    })
+
+    it("F-1.1 & M-4.1: real subprocess SIGINT and SIGTERM fail closed for guard and done", async () => {
+      const stdinReadyPreload = [
+        "const iv = setInterval(() => {",
+        '  if (process.stdin.listenerCount("data") > 0) {',
+        "    clearInterval(iv);",
+        '    process.stderr.write("__HOOK_STDIN_READY__\\n");',
+        "  }",
+        "}, 20);",
+        "iv.unref();",
+      ].join(" ")
+      const runSignalSub = (
+        args: ReadonlyArray<string>,
+        signal: "SIGINT" | "SIGTERM",
+      ) =>
+        new Promise<{ code: number | null; stdout: string; stderr: string }>((resolvePromise) => {
+          const child = spawn(
+            process.execPath,
+            [
+              "--import",
+              "./tools/node-ts-resolver.mjs",
+              "--import",
+              `data:text/javascript,${encodeURIComponent(stdinReadyPreload)}`,
+              "apps/harness-cli/src/index.ts",
+              ...args,
+            ],
+            { cwd: REPO_ROOT, stdio: ["pipe", "pipe", "pipe"] },
+          )
+          let stdout = ""
+          let stderr = ""
+          let signaled = false
+          const sendSignal = () => {
+            if (signaled) return
+            signaled = true
+            child.kill(signal)
+          }
+          const fallbackTimer = setTimeout(sendSignal, 3800)
+          child.stdout.on("data", (d) => {
+            stdout += String(d)
+          })
+          child.stderr.on("data", (d) => {
+            stderr += String(d)
+            if (!signaled && stderr.includes("__HOOK_STDIN_READY__")) {
+              setTimeout(sendSignal, 30)
+            }
+          })
+          child.on("close", (code) => {
+            clearTimeout(fallbackTimer)
+            resolvePromise({ code, stdout, stderr })
+          })
+        })
+
+      // 1. Claude guard SIGTERM
+      const claudeGuardTerm = await runSignalSub(["guard"], "SIGTERM")
+      expect(claudeGuardTerm.code).toBe(2)
+      expect(claudeGuardTerm.stderr).toContain("interrupted")
+
+      // 2. Claude done SIGINT
+      const claudeDoneInt = await runSignalSub(["done"], "SIGINT")
+      expect(claudeDoneInt.code).toBe(2)
+      expect(JSON.parse(claudeDoneInt.stdout.trim())).toEqual({
+        decision: "block",
+        reason: expect.stringContaining("interrupted"),
+      })
+
+      // 3. Antigravity guard with --format=antigravity SIGTERM
+      const agyFlagGuardTerm = await runSignalSub(["guard", "--format=antigravity"], "SIGTERM")
+      expect(agyFlagGuardTerm.code).toBe(2)
+      expect(JSON.parse(agyFlagGuardTerm.stdout.trim())).toEqual({
+        decision: "deny",
+        reason: expect.stringContaining("interrupted"),
+      })
+
+      // 4. Antigravity done with --format=antigravity SIGINT
+      const agyFlagDoneInt = await runSignalSub(["done", "--format=antigravity"], "SIGINT")
+      expect(agyFlagDoneInt.code).toBe(2)
+      expect(JSON.parse(agyFlagDoneInt.stdout.trim())).toEqual({
+        decision: "continue",
+        reason: expect.stringContaining("interrupted"),
+      })
+
+      // 5. Antigravity guard WITHOUT --format=antigravity (detected from stdin payload) SIGTERM
+      let killChildOnRequest: (() => void) | undefined
+      const hangingServer = createServer(() => {
+        // Intentionally hang until child is signaled
+        killChildOnRequest?.()
+      })
+      await new Promise<void>((r) => hangingServer.listen(0, "127.0.0.1", () => r()))
+      const addr = hangingServer.address()
+      const port = typeof addr === "object" && addr !== null ? addr.port : 0
+      try {
+        const agyStdinGuardTerm = await new Promise<{ code: number | null; stdout: string; stderr: string }>(
+          (resolvePromise) => {
+            const child = spawn(
+              process.execPath,
+              ["--import", "./tools/node-ts-resolver.mjs", "apps/harness-cli/src/index.ts", "guard"],
+              {
+                cwd: REPO_ROOT,
+                stdio: ["pipe", "pipe", "pipe"],
+                env: { ...process.env, HARNESS_OLLAMA_URL: `http://127.0.0.1:${port}` },
+              },
+            )
+            let stdout = ""
+            let stderr = ""
+            let signaled = false
+            const sendTerm = () => {
+              if (signaled) return
+              signaled = true
+              child.kill("SIGTERM")
+            }
+            const fallbackTimer = setTimeout(sendTerm, 3000)
+            killChildOnRequest = () => {
+              setTimeout(sendTerm, 50)
+            }
+            child.stdout.on("data", (d) => {
+              stdout += String(d)
+            })
+            child.stderr.on("data", (d) => {
+              stderr += String(d)
+            })
+            child.on("close", (code) => {
+              clearTimeout(fallbackTimer)
+              resolvePromise({ code, stdout, stderr })
+            })
+            child.stdin.write(
+              JSON.stringify({ toolCall: { name: "Bash", args: { CommandLine: "curl https://example.com" } } }),
+            )
+            child.stdin.end()
+          },
+        )
+        expect(agyStdinGuardTerm.code).toBe(2)
+        expect(JSON.parse(agyStdinGuardTerm.stdout.trim())).toEqual({
+          decision: "deny",
+          reason: expect.stringContaining("interrupted"),
+        })
+
+        // 6. Antigravity done WITHOUT --format=antigravity (detected from Stop stdin payload) SIGINT
+        const doneSigRepo = mkdtempSync(join(tmpdir(), "harness-done-sig-agy-"))
+        tempDirs.push(doneSigRepo)
+        mkdirSync(join(doneSigRepo, "libs", "harness", "graph"), { recursive: true })
+        writeFileSync(join(doneSigRepo, "pnpm-workspace.yaml"), "packages:\n  - 'libs/*'\n")
+        writeFileSync(join(doneSigRepo, "libs", "harness", "graph", "cluster.yaml"), "name: test\n")
+        const doneClusterDir = resolveOmnigraphClusterDir(doneSigRepo, nodeSyncHostIo)
+        mkdirSync(doneClusterDir, { recursive: true })
+        writeFileSync(join(doneClusterDir, ".config-stamp"), "name: test\n\n---\n\n---\n")
+        writeVerifyStamp(doneSigRepo, nodeSyncHostIo, "impl/test", {
+          dstSeed: DstSeed.make(1),
+          dstSeedsRun: 1,
+        })
+        const agyStdinDoneInt = await new Promise<{ code: number | null; stdout: string; stderr: string }>(
+          (resolvePromise) => {
+            const child = spawn(
+              process.execPath,
+              ["--import", join(REPO_ROOT, "tools/node-ts-resolver.mjs"), join(REPO_ROOT, "apps/harness-cli/src/index.ts"), "done"],
+              {
+                cwd: doneSigRepo,
+                stdio: ["pipe", "pipe", "pipe"],
+                env: {
+                  ...process.env,
+                  HARNESS_OLLAMA_URL: `http://127.0.0.1:${port}`,
+                  OMNIGRAPH_URL: `http://127.0.0.1:${port}`,
+                },
+              },
+            )
+            let stdout = ""
+            let stderr = ""
+            let signaled = false
+            const sendInt = () => {
+              if (signaled) return
+              signaled = true
+              child.kill("SIGINT")
+            }
+            const fallbackTimer = setTimeout(sendInt, 4000)
+            killChildOnRequest = () => {
+              setTimeout(sendInt, 50)
+            }
+            child.stdout.on("data", (d) => {
+              stdout += String(d)
+            })
+            child.stderr.on("data", (d) => {
+              stderr += String(d)
+            })
+            child.on("close", (code) => {
+              clearTimeout(fallbackTimer)
+              resolvePromise({ code, stdout, stderr })
+            })
+            child.stdin.write(
+              JSON.stringify({
+                fullyIdle: true,
+                conversationId: "conv-1",
+                workspacePaths: [REPO_ROOT],
+              }),
+            )
+            child.stdin.end()
+          },
+        )
+        expect(agyStdinDoneInt.code).toBe(2)
+        expect(JSON.parse(agyStdinDoneInt.stdout.trim())).toEqual({
+          decision: "continue",
+          reason: expect.stringContaining("interrupted"),
+        })
+      } finally {
+        hangingServer.closeAllConnections()
+        hangingServer.close()
+      }
+    }, 25_000)
   })
 
   describe("F-10.1: omnigraph-lifecycle safety checks", () => {
@@ -637,6 +1006,69 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         expect(existsSync(join(fakeHome, ".local", "bin", "omnigraph"))).toBe(false)
       } finally {
         process.stderr.write = origWrite
+        if (origHome !== undefined) process.env.HOME = origHome
+        else Reflect.deleteProperty(process.env, "HOME")
+        if (origUrl !== undefined) process.env.OMNIGRAPH_URL = origUrl
+        else Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
+      }
+    })
+
+    it("Sec-P1.4: returns false instead of accepting a foreign repo omnigraph-server when server.json belongs to another repo and binaries are missing", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "harness-omnigraph-foreign-"))
+      const fakeHome = mkdtempSync(join(tmpdir(), "harness-fake-home-foreign-"))
+      tempDirs.push(dir, fakeHome)
+
+      mkdirSync(join(dir, "libs", "harness", "graph"), { recursive: true })
+      writeFileSync(join(dir, "pnpm-workspace.yaml"), "packages:\n  - 'libs/*'\n")
+      writeFileSync(join(dir, "libs", "harness", "graph", "cluster.yaml"), "name: test\n")
+      const clusterDir = resolveOmnigraphClusterDir(dir, nodeSyncHostIo)
+      mkdirSync(clusterDir, { recursive: true })
+      writeFileSync(join(clusterDir, ".config-stamp"), "name: test\n\n---\n\n---\n")
+
+      const canonicalRoot = resolveCanonicalRepoRoot(dir, nodeSyncHostIo)
+      const defaultPort = deriveRepoOmnigraphPort(canonicalRoot, nodeSyncHostIo)
+
+      const foreignServer = createServer((req, res) => {
+        if (req.url === "/readyz") {
+          res.writeHead(200, {
+            "Content-Type": "application/json",
+            "Omnigraph-Http-Api": "0.14",
+          })
+          res.end(JSON.stringify({ ready: true, status: "serving", ready_graph_count: 1 }))
+          return
+        }
+        res.writeHead(404)
+        res.end()
+      })
+
+      const bound = await new Promise<boolean>((resolvePromise) => {
+        foreignServer.once("error", () => resolvePromise(false))
+        foreignServer.listen(defaultPort, "127.0.0.1", () => resolvePromise(true))
+      })
+      if (!bound) {
+        return
+      }
+
+      writeFileSync(
+        join(clusterDir, "server.json"),
+        JSON.stringify({
+          pid: 999999,
+          port: defaultPort,
+          baseUrl: `http://127.0.0.1:${defaultPort}`,
+          canonicalRepoRoot: "/other/repo",
+        }),
+      )
+
+      const origHome = process.env.HOME
+      const origUrl = process.env.OMNIGRAPH_URL
+      try {
+        process.env.HOME = fakeHome
+        Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
+        const ready = await Effect.runPromise(ensureLocalOmnigraphReady(dir))
+        expect(ready).toBe(false)
+      } finally {
+        foreignServer.closeAllConnections()
+        foreignServer.close()
         if (origHome !== undefined) process.env.HOME = origHome
         else Reflect.deleteProperty(process.env, "HOME")
         if (origUrl !== undefined) process.env.OMNIGRAPH_URL = origUrl

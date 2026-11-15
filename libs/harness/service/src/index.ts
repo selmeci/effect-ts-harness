@@ -24,9 +24,14 @@ export class WorkspaceFs extends Context.Service<WorkspaceFs, WorkspaceFsShape>(
   "@harness/service/WorkspaceFs",
 ) {}
 
+export interface HarnessSubprocessExecOptions {
+  readonly checkExitCode?: boolean | undefined
+}
+
 export interface HarnessSubprocessRunnerShape {
   readonly exec: (
     input: SubprocessExecInput,
+    options?: HarnessSubprocessExecOptions,
   ) => Effect.Effect<SubprocessExecResult, HarnessSubprocessError>
 }
 

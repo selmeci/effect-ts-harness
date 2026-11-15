@@ -46,8 +46,16 @@ import {
   tryQueryWarmDaemonSocket,
 } from "./commands/daemon-and-omnigraph.service.js"
 import { harnessRootCommand, runDeclarativeCli } from "./commands/declarative-cli.js"
-import { hasAntigravityFormat, normalizeProcessArgv } from "./commands/hook-format.js"
-import { handleIngest } from "./commands/session-learn-report.command.js"
+import {
+  hasAntigravityFormat,
+  normalizeProcessArgv,
+  resolveTeardownFailure,
+} from "./commands/hook-format.js"
+
+export const handleIngest = (args: ReadonlyArray<string>, options?: CliEnv): Effect.Effect<CliResult> =>
+  Effect.promise(() => import("./commands/session-learn-report.command.js")).pipe(
+    Effect.flatMap((m) => m.handleIngest(args, options)),
+  )
 
 export {
   buildOmnigraphClusterKillArgs,
@@ -66,7 +74,6 @@ export {
   ensureLocalOllamaReady,
   ensureLocalOmnigraphReady,
   formatSubprocessError,
-  handleIngest,
   HarnessCommandRegistry,
   HarnessCommandRegistryLive,
   harnessRootCommand,
@@ -123,22 +130,12 @@ export const teardownCliMain = (
       onExit(code)
     })
     .with({ _tag: "Failure" }, ({ cause }) => {
-      if (Cause.hasInterruptsOnly(cause)) {
-        process.exitCode = 130
-        onExit(130)
-        return
-      }
-      const pretty = Cause.pretty(cause)
-      writeStderr(`${pretty}\n`)
-      const args = normalizeProcessArgv(argv, isCommand)
-      const target = args.find((arg) => !arg.startsWith("-"))
-      if (hasAntigravityFormat(args) && (target === "guard" || target === "done")) {
-        const decision = target === "guard" ? "deny" : "continue"
-        writeStdout(`${JSON.stringify({ decision, reason: `${target}: uncaught CLI failure (${pretty})` })}\n`)
-      }
-      const failCode = target === "guard" || target === "done" ? 2 : 1
-      process.exitCode = failCode
-      onExit(failCode)
+      const isInt = Cause.hasInterruptsOnly(cause)
+      const out = resolveTeardownFailure(normalizeProcessArgv(argv, isCommand), isInt, isInt ? "interrupted by signal" : Cause.pretty(cause))
+      if (out.stderr) writeStderr(out.stderr)
+      if (out.stdout) writeStdout(out.stdout)
+      process.exitCode = out.exitCode
+      onExit(out.exitCode)
     })
     .exhaustive()
 }

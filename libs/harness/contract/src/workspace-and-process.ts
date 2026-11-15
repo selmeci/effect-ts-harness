@@ -53,7 +53,10 @@ export const SubprocessMaxBufferBytes = Schema.Int.pipe(
 )
 export type SubprocessMaxBufferBytes = typeof SubprocessMaxBufferBytes.Type
 
-export const SubprocessExitCode = Schema.Int.pipe(Schema.brand("SubprocessExitCode"))
+export const SubprocessExitCode = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+  Schema.brand("SubprocessExitCode"),
+)
 export type SubprocessExitCode = typeof SubprocessExitCode.Type
 
 export const SubprocessOutput = Schema.String.pipe(Schema.brand("SubprocessOutput"))
@@ -90,7 +93,7 @@ export class HarnessSubprocessError extends Schema.TaggedError<HarnessSubprocess
   "HarnessSubprocessError",
   {
     command: SubprocessCommand,
-    exitCode: SubprocessExitCode,
+    exitCode: Schema.optional(SubprocessExitCode),
     stderr: SubprocessOutput,
     reason: ErrorReasonMessage,
     failureKind: SubprocessFailureKind,
@@ -104,7 +107,6 @@ export const validateSubprocessInput = (
     return Option.some(
       new HarnessSubprocessError({
         command: input.command,
-        exitCode: SubprocessExitCode.make(-1),
         stderr: SubprocessOutput.make(""),
         reason: ErrorReasonMessage.make("Subprocess command contains a disallowed null byte"),
         failureKind: "invalid-input",
@@ -115,7 +117,6 @@ export const validateSubprocessInput = (
     return Option.some(
       new HarnessSubprocessError({
         command: input.command,
-        exitCode: SubprocessExitCode.make(-1),
         stderr: SubprocessOutput.make(""),
         reason: ErrorReasonMessage.make("Subprocess arguments contain a disallowed null byte"),
         failureKind: "invalid-input",
@@ -126,7 +127,6 @@ export const validateSubprocessInput = (
     return Option.some(
       new HarnessSubprocessError({
         command: input.command,
-        exitCode: SubprocessExitCode.make(-1),
         stderr: SubprocessOutput.make(""),
         reason: ErrorReasonMessage.make("Subprocess cwd contains a disallowed null byte"),
         failureKind: "invalid-input",

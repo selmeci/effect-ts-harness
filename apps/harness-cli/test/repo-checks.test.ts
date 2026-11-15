@@ -1,6 +1,7 @@
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { match } from "ts-pattern"
 import { afterEach, describe, expect, it } from "vitest"
 import { Effect } from "effect"
 import {
@@ -9,6 +10,7 @@ import {
   runCheckMigrations,
   runCheckOpenApi,
 } from "../src/commands/repo-checks.command.js"
+import { resolveRepoPathChecked } from "../src/commands/repo-path.js"
 import { collectHarnessTierTopologyViolationMessages } from "../src/commands/verify-delta-gates.js"
 import { evaluatePackageAndMigrationPlugin } from "@harness/gates"
 import { buildHarnessGraph } from "@harness/graph"
@@ -332,73 +334,75 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
       "utf8",
     )
 
-    // --out
-    expect(
-      (await Effect.runPromise(runCheckOpenApi(["check-openapi", "--out", "../escape.json"], opts)))
-        .exitCode,
-    ).toBe(1)
-    expect(
-      (
-        await Effect.runPromise(
-          runCheckOpenApi(["check-openapi", "--out", "sym-escape/out.json"], opts),
-        )
-      ).exitCode,
-    ).toBe(1)
+    // --out (escape + positive in-root control)
+    const outEscape1 = await Effect.runPromise(
+      runCheckOpenApi(["check-openapi", "--out", "../escape.json"], opts),
+    )
+    expect(outEscape1.exitCode).toBe(1)
+    expect(outEscape1.stderr).toMatch(/escapes repository root/)
+    expect(existsSync(join(tmpDir, "..", "escape.json"))).toBe(false)
 
-    // --module
-    expect(
-      (await Effect.runPromise(runCheckOpenApi(["check-openapi", "--module", "../mod.mjs"], opts)))
-        .exitCode,
-    ).toBe(1)
-    expect(
-      (
-        await Effect.runPromise(
-          runCheckOpenApi(["check-openapi", "--module", "sym-escape/mod.mjs"], opts),
-        )
-      ).exitCode,
-    ).toBe(1)
+    const outEscape2 = await Effect.runPromise(
+      runCheckOpenApi(["check-openapi", "--out", "sym-escape/out.json"], opts),
+    )
+    expect(outEscape2.exitCode).toBe(1)
+    expect(outEscape2.stderr).toMatch(/escapes repository root/)
+    expect(existsSync(join(outsideDir, "out.json"))).toBe(false)
+
+    const outControl = await Effect.runPromise(
+      runCheckOpenApi(["check-openapi", "--module", "openapi-mod.mjs", "--out", "openapi.json"], opts),
+    )
+    expect(outControl.exitCode).toBe(0)
+
+    // --module (escape + positive in-root control)
+    const modEscape1 = await Effect.runPromise(
+      runCheckOpenApi(["check-openapi", "--module", "../mod.mjs"], opts),
+    )
+    expect(modEscape1.exitCode).toBe(1)
+    expect(modEscape1.stderr).toMatch(/escapes repository root/)
+
+    const modEscape2 = await Effect.runPromise(
+      runCheckOpenApi(["check-openapi", "--module", "sym-escape/mod.mjs"], opts),
+    )
+    expect(modEscape2.exitCode).toBe(1)
+    expect(modEscape2.stderr).toMatch(/escapes repository root/)
 
     // --baseline on check-openapi and benchmark
-    expect(
-      (
-        await Effect.runPromise(
-          runCheckOpenApi(
-            [
-              "check-openapi",
-              "--module",
-              "openapi-mod.mjs",
-              "--out",
-              "openapi.json",
-              "--baseline",
-              "sym-escape/secret.json",
-            ],
-            opts,
-          ),
-        )
-      ).exitCode,
-    ).toBe(1)
-    expect(
-      (
-        await Effect.runPromise(
-          runBenchmarkCompare(["benchmark", "--baseline", "sym-escape/secret.json"], opts),
-        )
-      ).exitCode,
-    ).toBe(1)
+    const openapiBaseEscape = await Effect.runPromise(
+      runCheckOpenApi(
+        [
+          "check-openapi",
+          "--module",
+          "openapi-mod.mjs",
+          "--out",
+          "openapi.json",
+          "--baseline",
+          "sym-escape/secret.json",
+        ],
+        opts,
+      ),
+    )
+    expect(openapiBaseEscape.exitCode).toBe(1)
+    expect(openapiBaseEscape.stderr).toMatch(/escapes (?:repository )?root/)
+
+    const benchBaseEscape = await Effect.runPromise(
+      runBenchmarkCompare(["benchmark", "--baseline", "sym-escape/secret.json"], opts),
+    )
+    expect(benchBaseEscape.exitCode).toBe(1)
+    expect(benchBaseEscape.stderr).toMatch(/escapes (?:repository )?root/)
 
     // OPENAPI_BASELINE_PATH
     const prevEnv = process.env.OPENAPI_BASELINE_PATH
     try {
       process.env.OPENAPI_BASELINE_PATH = "sym-escape/secret.json"
-      expect(
-        (
-          await Effect.runPromise(
-            runCheckOpenApi(
-              ["check-openapi", "--module", "openapi-mod.mjs", "--out", "openapi.json"],
-              opts,
-            ),
-          )
-        ).exitCode,
-      ).toBe(1)
+      const openapiEnvEscape = await Effect.runPromise(
+        runCheckOpenApi(
+          ["check-openapi", "--module", "openapi-mod.mjs", "--out", "openapi.json"],
+          opts,
+        ),
+      )
+      expect(openapiEnvEscape.exitCode).toBe(1)
+      expect(openapiEnvEscape.stderr).toMatch(/escapes (?:repository )?root/)
     } finally {
       if (prevEnv === undefined) {
         Reflect.deleteProperty(process.env, "OPENAPI_BASELINE_PATH")
@@ -407,33 +411,41 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
       }
     }
 
-    // --snapshot
-    expect(
-      (
-        await Effect.runPromise(
-          runCheckEventSchemas(
-            ["check-event-schemas", "--snapshot", "sym-escape/snap.json"],
-            opts,
-          ),
-        )
-      ).exitCode,
-    ).toBe(1)
+    // --snapshot (escape + positive in-root control)
+    const snapEscape = await Effect.runPromise(
+      runCheckEventSchemas(
+        ["check-event-schemas", "--snapshot", "sym-escape/snap.json"],
+        opts,
+      ),
+    )
+    expect(snapEscape.exitCode).toBe(1)
+    expect(snapEscape.stderr).toMatch(/escapes repository root/)
+    expect(existsSync(join(outsideDir, "snap.json"))).toBe(false)
 
-    // --package & --dir
-    expect(
-      (
-        await Effect.runPromise(
-          runCheckMigrations(["check-migrations", "--package", "sym-escape"], opts),
-        )
-      ).exitCode,
-    ).toBe(1)
-    expect(
-      (
-        await Effect.runPromise(
-          runCheckMigrations(["check-migrations", "--dir", "sym-escape"], opts),
-        )
-      ).exitCode,
-    ).toBe(1)
+    // --package & --dir (escape + positive in-root control)
+    const pkgEscape = await Effect.runPromise(
+      runCheckMigrations(["check-migrations", "--package", "sym-escape"], opts),
+    )
+    expect(pkgEscape.exitCode).toBe(1)
+    expect(pkgEscape.stderr).toMatch(/escapes repository root/)
+
+    const dirEscape = await Effect.runPromise(
+      runCheckMigrations(["check-migrations", "--dir", "sym-escape"], opts),
+    )
+    expect(dirEscape.exitCode).toBe(1)
+    expect(dirEscape.stderr).toMatch(/escapes repository root/)
+
+    const inRootMigs = join(tmpDir, "in-root-migs")
+    mkdirSync(inRootMigs, { recursive: true })
+    writeFileSync(
+      join(inRootMigs, "0001_init.sql"),
+      "CREATE TABLE IF NOT EXISTS control_items (id TEXT PRIMARY KEY NOT NULL);\n",
+      "utf8",
+    )
+    const dirControl = await Effect.runPromise(
+      runCheckMigrations(["check-migrations", "--dir", "in-root-migs"], opts),
+    )
+    expect(dirControl.exitCode).toBe(0)
   })
 
   it("T-9b: rejects ../../etc/passwd traversal, dangling symlinks, and nested migration symlinks", async () => {
@@ -456,6 +468,16 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
       "utf8",
     )
 
+    const evMod = join(tmpDir, "events-control.mjs")
+    writeFileSync(
+      evMod,
+      [
+        "export const registeredUpcasters = []",
+        "export const computeEventSnapshots = () => [{ eventType: 'Ping', version: 1, jsonSchema: '{\"type\":\"object\"}' }]",
+      ].join("\n"),
+      "utf8",
+    )
+
     // Dangling symlinks pointing to non-existent targets outside repoRoot
     symlinkSync(join(outsideDir, "nonexistent-out.json"), join(tmpDir, "dangling-out.json"))
     symlinkSync(join(outsideDir, "nonexistent-base.json"), join(tmpDir, "dangling-base.json"))
@@ -463,52 +485,105 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
     symlinkSync(join(outsideDir, "nonexistent-bench.json"), join(tmpDir, "dangling-bench.json"))
 
     // 1. ../../etc/passwd traversal
-    expect(
-      (await Effect.runPromise(runCheckOpenApi(["check-openapi", "--baseline", "../../etc/passwd", "--module", "openapi-mod.mjs", "--out", "openapi.json"], opts))).exitCode,
-    ).toBe(1)
-    expect(
-      (await Effect.runPromise(runBenchmarkCompare(["benchmark", "--baseline", "../../etc/passwd"], opts))).exitCode,
-    ).toBe(1)
-    expect(
-      (await Effect.runPromise(runBenchmarkCompare(["benchmark", "--out", "../../etc/passwd"], opts))).exitCode,
-    ).toBe(1)
-    expect(
-      (await Effect.runPromise(runCheckEventSchemas(["check-event-schemas", "--snapshot", "../../etc/passwd"], opts))).exitCode,
-    ).toBe(1)
-    expect(
-      (await Effect.runPromise(runCheckEventSchemas(["check-event-schemas", "--out", "../../etc/passwd"], opts))).exitCode,
-    ).toBe(1)
-    expect(
-      (await Effect.runPromise(runCheckMigrations(["check-migrations", "--package", "../../etc/passwd"], opts))).exitCode,
-    ).toBe(1)
-    expect(
-      (await Effect.runPromise(runCheckMigrations(["check-migrations", "--dir", "../../etc/passwd"], opts))).exitCode,
-    ).toBe(1)
+    const openApiBaseTrav = await Effect.runPromise(
+      runCheckOpenApi(["check-openapi", "--baseline", "../../etc/passwd", "--module", "openapi-mod.mjs", "--out", "openapi.json"], opts),
+    )
+    expect(openApiBaseTrav.exitCode).toBe(1)
+    expect(openApiBaseTrav.stderr).toMatch(/escapes (?:repository )?root/)
+
+    const benchBaseTrav = await Effect.runPromise(
+      runBenchmarkCompare(["benchmark", "--baseline", "../../etc/passwd"], opts),
+    )
+    expect(benchBaseTrav.exitCode).toBe(1)
+    expect(benchBaseTrav.stderr).toMatch(/escapes (?:repository )?root/)
+
+    const benchOutTrav = await Effect.runPromise(
+      runBenchmarkCompare(["benchmark", "--out", "../../etc/passwd"], opts),
+    )
+    expect(benchOutTrav.exitCode).toBe(1)
+    expect(benchOutTrav.stderr).toMatch(/escapes (?:repository )?root/)
+
+    const evSnapTrav = await Effect.runPromise(
+      runCheckEventSchemas(["check-event-schemas", "--snapshot", "../../etc/passwd"], opts),
+    )
+    expect(evSnapTrav.exitCode).toBe(1)
+    expect(evSnapTrav.stderr).toMatch(/escapes (?:repository )?root/)
+
+    const evOutTrav = await Effect.runPromise(
+      runCheckEventSchemas(["check-event-schemas", "--module", "events-control.mjs", "--out", "../../etc/passwd"], opts),
+    )
+    expect(evOutTrav.exitCode).toBe(1)
+    expect(evOutTrav.stderr).toMatch(/escapes (?:repository )?root/)
+
+    const migPkgTrav = await Effect.runPromise(
+      runCheckMigrations(["check-migrations", "--package", "../../etc/passwd"], opts),
+    )
+    expect(migPkgTrav.exitCode).toBe(1)
+    expect(migPkgTrav.stderr).toMatch(/escapes (?:repository )?root/)
+
+    const migDirTrav = await Effect.runPromise(
+      runCheckMigrations(["check-migrations", "--dir", "../../etc/passwd"], opts),
+    )
+    expect(migDirTrav.exitCode).toBe(1)
+    expect(migDirTrav.stderr).toMatch(/escapes (?:repository )?root/)
 
     // 2. Dangling symlinks
-    expect(
-      (await Effect.runPromise(runCheckOpenApi(["check-openapi", "--out", "dangling-out.json", "--write", "--module", "openapi-mod.mjs"], opts))).exitCode,
-    ).toBe(1)
-    expect(
-      (await Effect.runPromise(runCheckOpenApi(["check-openapi", "--baseline", "dangling-base.json", "--module", "openapi-mod.mjs", "--out", "openapi.json"], opts))).exitCode,
-    ).toBe(1)
-    expect(
-      (await Effect.runPromise(runCheckEventSchemas(["check-event-schemas", "--snapshot", "dangling-snap.json"], opts))).exitCode,
-    ).toBe(1)
-    expect(
-      (await Effect.runPromise(runCheckEventSchemas(["check-event-schemas", "--out", "dangling-snap.json"], opts))).exitCode,
-    ).toBe(1)
-    expect(
-      (await Effect.runPromise(runBenchmarkCompare(["benchmark", "--out", "dangling-bench.json"], opts))).exitCode,
-    ).toBe(1)
+    const openApiDanglingOut = await Effect.runPromise(
+      runCheckOpenApi(["check-openapi", "--out", "dangling-out.json", "--write", "--module", "openapi-mod.mjs"], opts),
+    )
+    expect(openApiDanglingOut.exitCode).toBe(1)
+    expect(openApiDanglingOut.stderr).toMatch(/escapes (?:repository )?root/)
+
+    const openApiDanglingBase = await Effect.runPromise(
+      runCheckOpenApi(["check-openapi", "--baseline", "dangling-base.json", "--module", "openapi-mod.mjs", "--out", "openapi.json"], opts),
+    )
+    expect(openApiDanglingBase.exitCode).toBe(1)
+    expect(openApiDanglingBase.stderr).toMatch(/escapes (?:repository )?root/)
+
+    const danglingSnap = await Effect.runPromise(
+      runCheckEventSchemas(["check-event-schemas", "--snapshot", "dangling-snap.json"], opts),
+    )
+    expect(danglingSnap.exitCode).toBe(1)
+    expect(danglingSnap.stderr).toMatch(/escapes (?:repository )?root/)
+    expect(existsSync(join(outsideDir, "nonexistent-snap.json"))).toBe(false)
+
+    // Positive in-root control for check-event-schemas
+    const evUpdate = await Effect.runPromise(
+      runCheckEventSchemas(
+        ["check-event-schemas", "--module", "events-control.mjs", "--snapshot", "in-root-snap.json", "--update"],
+        opts,
+      ),
+    )
+    expect(evUpdate.exitCode).toBe(0)
+    const evControl = await Effect.runPromise(
+      runCheckEventSchemas(
+        ["check-event-schemas", "--module", "events-control.mjs", "--snapshot", "in-root-snap.json"],
+        opts,
+      ),
+    )
+    expect(evControl.exitCode).toBe(0)
+
+    const evDanglingOut = await Effect.runPromise(
+      runCheckEventSchemas(["check-event-schemas", "--module", "events-control.mjs", "--out", "dangling-snap.json"], opts),
+    )
+    expect(evDanglingOut.exitCode).toBe(1)
+    expect(evDanglingOut.stderr).toMatch(/escapes (?:repository )?root/)
+
+    const benchDanglingOut = await Effect.runPromise(
+      runBenchmarkCompare(["benchmark", "--out", "dangling-bench.json"], opts),
+    )
+    expect(benchDanglingOut.exitCode).toBe(1)
+    expect(benchDanglingOut.stderr).toMatch(/escapes (?:repository )?root/)
     expect(existsSync(join(outsideDir, "nonexistent-bench.json"))).toBe(false)
 
     const prevEnv = process.env.OPENAPI_BASELINE_PATH
     try {
       process.env.OPENAPI_BASELINE_PATH = "dangling-base.json"
-      expect(
-        (await Effect.runPromise(runCheckOpenApi(["check-openapi", "--module", "openapi-mod.mjs", "--out", "openapi.json"], opts))).exitCode,
-      ).toBe(1)
+      const openApiDanglingEnv = await Effect.runPromise(
+        runCheckOpenApi(["check-openapi", "--module", "openapi-mod.mjs", "--out", "openapi.json"], opts),
+      )
+      expect(openApiDanglingEnv.exitCode).toBe(1)
+      expect(openApiDanglingEnv.stderr).toMatch(/escapes (?:repository )?root/)
     } finally {
       if (prevEnv === undefined) Reflect.deleteProperty(process.env, "OPENAPI_BASELINE_PATH")
       else process.env.OPENAPI_BASELINE_PATH = prevEnv
@@ -520,18 +595,61 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
     const nestedMigDir = join(tmpDir, "nested-migs")
     mkdirSync(nestedMigDir, { recursive: true })
     symlinkSync(outsideSql, join(nestedMigDir, "0001_escape.sql"))
-    expect(
-      (await Effect.runPromise(runCheckMigrations(["check-migrations", "--dir", "nested-migs"], opts))).exitCode,
-    ).toBe(1)
+    const nestedSqlRes = await Effect.runPromise(
+      runCheckMigrations(["check-migrations", "--dir", "nested-migs"], opts),
+    )
+    expect(nestedSqlRes.exitCode).toBe(1)
+    expect(nestedSqlRes.stderr).toMatch(/escapes (?:repository )?root/)
 
     const outsideTs = join(outsideDir, "evil.ts")
     writeFileSync(outsideTs, "export const x = 1\n", "utf8")
     const pkgSrc = join(tmpDir, "libs", "nested", "infra", "src")
     mkdirSync(pkgSrc, { recursive: true })
     symlinkSync(outsideTs, join(pkgSrc, "escape.ts"))
-    expect(
-      (await Effect.runPromise(runCheckMigrations(["check-migrations", "--package", "libs/nested/infra"], opts))).exitCode,
-    ).toBe(1)
+    const nestedTsRes = await Effect.runPromise(
+      runCheckMigrations(["check-migrations", "--package", "libs/nested/infra"], opts),
+    )
+    expect(nestedTsRes.exitCode).toBe(1)
+    expect(nestedTsRes.stderr).toMatch(/escapes (?:repository )?root/)
+
+    // 4. benchmark IoError (ENOTDIR) vs EscapesRoot
+    writeFileSync(join(tmpDir, "regular-file.txt"), "not a directory\n", "utf8")
+    const benchBaseIoErr = await Effect.runPromise(
+      runBenchmarkCompare(["benchmark", "--baseline", "regular-file.txt/sub.json"], opts),
+    )
+    expect(benchBaseIoErr.exitCode).toBe(1)
+    expect(benchBaseIoErr.stderr).toMatch(/Cannot resolve baseline path.*ENOTDIR/)
+    expect(benchBaseIoErr.stderr).not.toMatch(/escapes (?:repository )?root/)
+
+    const benchOutIoErr = await Effect.runPromise(
+      runBenchmarkCompare(["benchmark", "--out", "regular-file.txt/out.json"], opts),
+    )
+    expect(benchOutIoErr.exitCode).toBe(1)
+    expect(benchOutIoErr.stderr).toMatch(/Cannot resolve output path.*ENOTDIR/)
+    expect(benchOutIoErr.stderr).not.toMatch(/escapes (?:repository )?root/)
+  })
+
+  it("check-migrations fails closed (exitCode 1) when SqliteMigrator.fromRecord has 0 static keys and no .sql files", async () => {
+    const tmpDir = makeTempDir("harness-mig-zero-keys-")
+    const pkgSrc = join(tmpDir, "libs", "zero", "infra", "src")
+    mkdirSync(pkgSrc, { recursive: true })
+    writeFileSync(
+      join(pkgSrc, "migrator.ts"),
+      [
+        'import { SqliteMigrator } from "@effect/sql-sqlite-do"',
+        'import { importedMigrations } from "./other.js"',
+        "export const run = SqliteMigrator.fromRecord(importedMigrations)",
+      ].join("\n"),
+      "utf8",
+    )
+    const res = await Effect.runPromise(
+      runCheckMigrations(["check-migrations", "--package", "libs/zero/infra"], {
+        repoRoot: tmpDir,
+        skipBackgroundDaemons: true,
+      }),
+    )
+    expect(res.exitCode).toBe(1)
+    expect(res.stderr).toContain("no SqliteMigrator.fromRecord records were found")
   })
 
   it("collectHarnessTierTopologyViolationMessages & gc plugin ban drizzle-kit in root package.json and devDependencies", async () => {
@@ -582,5 +700,138 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
       }),
     )
     expect(malformedGc.some((f) => f.nodeId === "package.json:corrupt-manifest")).toBe(true)
+  })
+
+  it("F-3.1 & F-3.2: check-migrations AST validates inline/identifier SqliteMigrator.fromRecord, ignores nested object keys, and fails closed on empty package", async () => {
+    const tmpDir = makeTempDir("harness-cli-mig-ast-")
+    const opts = { repoRoot: tmpDir, skipBackgroundDaemons: true }
+
+    // 1. Empty package with zero migrations -> fail closed (exitCode 1)
+    mkdirSync(join(tmpDir, "libs", "empty", "infra", "src"), { recursive: true })
+    writeFileSync(join(tmpDir, "libs", "empty", "infra", "src", "index.ts"), "export const x = 1\n", "utf8")
+    const emptyPkgRes = await Effect.runPromise(
+      runCheckMigrations(["check-migrations", "--package", "libs/empty/infra"], opts),
+    )
+    expect(emptyPkgRes.exitCode).toBe(1)
+    expect(emptyPkgRes.stderr).toContain("no SqliteMigrator.fromRecord records were found")
+
+    // 2. Multi-line body containing nested object property `table_name:` -> pass (exitCode 0)
+    const nestedPropDir = join(tmpDir, "libs", "nestedprop", "infra", "src")
+    mkdirSync(nestedPropDir, { recursive: true })
+    writeFileSync(
+      join(nestedPropDir, "migrator.ts"),
+      [
+        'import { SqliteMigrator } from "@effect/sql-sqlite-do"',
+        "export const migrations = SqliteMigrator.fromRecord({",
+        '  "1_init": () => {',
+        "    const meta = {",
+        '      table_name: "items",',
+        "    }",
+        "    return meta",
+        "  },",
+        "})",
+      ].join("\n"),
+      "utf8",
+    )
+    const nestedPropRes = await Effect.runPromise(
+      runCheckMigrations(["check-migrations", "--package", "libs/nestedprop/infra"], opts),
+    )
+    expect(nestedPropRes.exitCode).toBe(0)
+
+    // 3. Inline { "1_init": ..., "BadKey": ... } -> fail (exitCode 2)
+    const mixedDir = join(tmpDir, "libs", "mixed", "infra", "src")
+    mkdirSync(mixedDir, { recursive: true })
+    writeFileSync(
+      join(mixedDir, "migrator.ts"),
+      [
+        'import { SqliteMigrator } from "@effect/sql-sqlite-do"',
+        "export const migrations = SqliteMigrator.fromRecord({",
+        '  "1_init": () => {},',
+        '  "BadKey": () => {},',
+        "})",
+      ].join("\n"),
+      "utf8",
+    )
+    const mixedRes = await Effect.runPromise(
+      runCheckMigrations(["check-migrations", "--package", "libs/mixed/infra"], opts),
+    )
+    expect(mixedRes.exitCode).toBe(2)
+    expect(mixedRes.stderr).toContain("invalid-migrator-record-key")
+
+    // 4. Identifier SqliteMigrator.fromRecord(albumCounterMigrations) -> checked & validated
+    const identValidDir = join(tmpDir, "libs", "identvalid", "infra", "src")
+    mkdirSync(identValidDir, { recursive: true })
+    writeFileSync(
+      join(identValidDir, "migrator.ts"),
+      [
+        'import { SqliteMigrator } from "@effect/sql-sqlite-do"',
+        "const albumCounterMigrations = {",
+        '  "1_init_albums": () => {},',
+        "}",
+        "export const layer = SqliteMigrator.fromRecord(albumCounterMigrations)",
+      ].join("\n"),
+      "utf8",
+    )
+    const identValidRes = await Effect.runPromise(
+      runCheckMigrations(["check-migrations", "--package", "libs/identvalid/infra"], opts),
+    )
+    expect(identValidRes.exitCode).toBe(0)
+
+    const identBadDir = join(tmpDir, "libs", "identbad", "infra", "src")
+    mkdirSync(identBadDir, { recursive: true })
+    writeFileSync(
+      join(identBadDir, "migrator.ts"),
+      [
+        'import { SqliteMigrator } from "@effect/sql-sqlite-do"',
+        "const albumCounterMigrations = {",
+        '  "BadIdentKey": () => {},',
+        "}",
+        "export const layer = SqliteMigrator.fromRecord(albumCounterMigrations)",
+      ].join("\n"),
+      "utf8",
+    )
+    const identBadRes = await Effect.runPromise(
+      runCheckMigrations(["check-migrations", "--package", "libs/identbad/infra"], opts),
+    )
+    expect(identBadRes.exitCode).toBe(2)
+    expect(identBadRes.stderr).toContain("invalid-migrator-record-key")
+  })
+
+  it("M-12.1(d): resolveRepoPathChecked distinguishes ELOOP and ENOTDIR I/O errors from EscapesRoot", async () => {
+    const tmpDir = makeTempDir("harness-cli-repopath-io-")
+    symlinkSync(join(tmpDir, "loop-b"), join(tmpDir, "loop-a"))
+    symlinkSync(join(tmpDir, "loop-a"), join(tmpDir, "loop-b"))
+
+    const eloopRes = resolveRepoPathChecked(tmpDir, "loop-a")
+    match(eloopRes)
+      .with({ _tag: "IoError" }, ({ code }) => {
+        expect(code).toBe("ELOOP")
+      })
+      .with({ _tag: "Resolved" }, { _tag: "EscapesRoot" }, () => {
+        expect.unreachable("Expected IoError for ELOOP")
+      })
+      .exhaustive()
+
+    writeFileSync(join(tmpDir, "regular-file"), "hello\n", "utf8")
+    const enotdirRes = resolveRepoPathChecked(tmpDir, "regular-file/child.sql")
+    match(enotdirRes)
+      .with({ _tag: "IoError" }, ({ code }) => {
+        expect(code).toBe("ENOTDIR")
+      })
+      .with({ _tag: "Resolved" }, { _tag: "EscapesRoot" }, () => {
+        expect.unreachable("Expected IoError for ENOTDIR")
+      })
+      .exhaustive()
+
+    const migEloop = await Effect.runPromise(
+      runCheckMigrations(["check-migrations", "--dir", "loop-a"], {
+        repoRoot: tmpDir,
+        skipBackgroundDaemons: true,
+      }),
+    )
+    expect(migEloop.exitCode).toBe(1)
+    expect(migEloop.stderr).toContain("Cannot resolve")
+    expect(migEloop.stderr).toContain("ELOOP")
+    expect(migEloop.stderr).not.toContain("escapes repository root")
   })
 })

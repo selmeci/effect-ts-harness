@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Layer, Result, type Scope } from "effect"
+import * as HttpServerResponse from "effect/http/HttpServerResponse"
 import { SqlClient } from "effect/sql/SqlClient"
 import * as nodeFs from "node:fs"
 import { existsSync, mkdtempSync, rmSync } from "node:fs"
@@ -35,11 +36,13 @@ import { PhotoRepo } from "@harness/sample-service"
 import {
   ActiveCounterStore,
   albumCounterMigrations,
+  handleAlbumCounterRpc,
   initializeAlbumCounterTables,
   logToConsole,
   makeAlbumCounterDoLayer,
   makeAlbumCounterRpcClient,
   makeAlbumCounterRpcHandler,
+  makeAlbumCounterStoreSql,
   makePhotoRepoD1Layer,
   PhotoRepoMemoryLayer,
   toHttpClient,
@@ -156,25 +159,19 @@ const createWorkerdD1Database = (
     )
     const d1 = connected.env.DB
     if (!options?.skipSchema) {
+      const repoRoot = resolveRepoRoot(process.cwd())
+      const migrationSql = nodeFs.readFileSync(
+        join(repoRoot, "libs/sample/infra/migrations/0001_photos_and_counters.sql"),
+        "utf8",
+      )
+      const statements = migrationSql
+        .split(";")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
       yield* Effect.promise(async () => {
-        await d1
-          .prepare(`
-            CREATE TABLE photos (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              name TEXT NOT NULL,
-              album_id TEXT NOT NULL,
-              created_at INTEGER NOT NULL
-            )
-          `)
-          .run()
-        await d1
-          .prepare(`
-            CREATE TABLE album_counters (
-              album_id TEXT PRIMARY KEY,
-              count INTEGER NOT NULL
-            )
-          `)
-          .run()
+        for (const stmt of statements) {
+          await d1.prepare(stmt).run()
+        }
       })
     }
     return d1
@@ -213,8 +210,7 @@ describe("sample-infra", () => {
 
             // Find missing by ID should fail with PhotoNotFoundError
             const missingError = yield* Effect.flip(repo.findById(PhotoId.make(999)))
-            expect(missingError._tag).toBe("PhotoNotFoundError")
-            expect(missingError.id).toBe(999)
+            expect(missingError).toMatchObject({ _tag: "PhotoNotFoundError", id: 999 })
 
             // Insert second photo
             yield* repo.insert({
@@ -372,7 +368,7 @@ describe("sample-infra", () => {
                 .readdirSync(p, { withFileTypes: true })
                 .map((e) => ({ name: e.name, isFile: e.isFile(), isDirectory: e.isDirectory() })),
             realpathSync: (p) => nodeFs.realpathSync(p),
-            execFileSync: () => ({ exitCode: 1, stdout: "", stderr: "unused in unit test" }),
+            execFileSync: () => ({ _tag: "Exited", exitCode: 1, stdout: "", stderr: "unused in unit test" }),
           }
 
           const testId = "libs/sample/infra/test/index.test.ts::distributed traceparent correlation"
@@ -484,9 +480,11 @@ describe("sample-infra", () => {
           const client = makeAlbumCounterRpcClient(httpClient)
 
           const error = yield* Effect.flip(client.increment(AlbumId.make("album-full")))
-          expect(error._tag).toBe("AlbumQuotaExceededError")
-          expect(error.albumId).toBe("album-full")
-          expect(error.count).toBe(100)
+          expect(error).toMatchObject({
+            _tag: "AlbumQuotaExceededError",
+            albumId: "album-full",
+            count: 100,
+          })
         }),
       ),
     )
@@ -517,6 +515,111 @@ describe("sample-infra", () => {
           const failures = results.filter((r) => r._tag === "Failure")
           expect(successes).toHaveLength(1)
           expect(failures).toHaveLength(3)
+        }),
+      ),
+    )
+
+    it.effect("incrementWithQuota enforces 99 -> 100 and reports real stored count at 100 and 105", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const d1 = yield* createWorkerdD1Database()
+          const sql = yield* SqlClient.pipe(Effect.provide(D1Client.layer({ db: d1 })))
+          const store = makeAlbumCounterStoreSql(sql)
+
+          const albumA = AlbumId.make("album-99")
+          yield* store.set(albumA, AlbumPhotoCount.make(99))
+          const at100 = yield* store.incrementWithQuota(albumA)
+          expect(at100).toBe(100)
+
+          const err100 = yield* Effect.flip(store.incrementWithQuota(albumA))
+          expect(err100).toMatchObject({ _tag: "AlbumQuotaExceededError", count: 100 })
+
+          const albumOver = AlbumId.make("album-105")
+          yield* store.set(albumOver, AlbumPhotoCount.make(105))
+          const err105 = yield* Effect.flip(store.incrementWithQuota(albumOver))
+          expect(err105).toMatchObject({ _tag: "AlbumQuotaExceededError", count: 105 })
+
+          const decremented = yield* store.decrement(albumA)
+          expect(decremented).toBe(99)
+        }),
+      ),
+    )
+
+    it.effect("RPC handler returns 400 on malformed JSON, missing action, bad schema, and 500 on SQL failure", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const d1 = yield* createWorkerdD1Database()
+          const sql = yield* SqlClient.pipe(Effect.provide(D1Client.layer({ db: d1 })))
+          const handler = makeAlbumCounterRpcHandler(sql)
+
+          // 1. Malformed JSON -> 400 invalid_json
+          const badJsonRes = yield* handler.fetch(
+            new Request("http://localhost/rpc", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: "{not-json",
+            }),
+          )
+          expect(badJsonRes.status).toBe(400)
+
+          // 2. Missing action -> 400 invalid_request (without mutating count!)
+          const missingActionRes = yield* handler.fetch(
+            new Request("http://localhost/rpc", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ albumId: "album-no-mutate" }),
+            }),
+          )
+          expect(missingActionRes.status).toBe(400)
+          const store = makeAlbumCounterStoreSql(sql)
+          expect(yield* store.get(AlbumId.make("album-no-mutate"))).toBe(0)
+
+          // 3. Bad schema payload -> 400 invalid_request
+          const badPayloadRes = yield* handler.fetch(
+            new Request("http://localhost/rpc", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ action: "IncrementAlbumCount", albumId: 12345 }),
+            }),
+          )
+          expect(badPayloadRes.status).toBe(400)
+
+          // 4. handleAlbumCounterRpc without ActiveCounterStore -> AlbumCounterStorageError
+          const missingStoreErr = yield* Effect.flip(
+            handleAlbumCounterRpc({ action: "GetAlbumCount", albumId: "album-x" }),
+          )
+          expect(missingStoreErr._tag).toBe("AlbumCounterStorageError")
+
+          // 5. SQL failure -> 500 storage_failure (redacted, no SQL text leaked)
+          const emptyD1 = yield* createWorkerdD1Database({ skipSchema: true })
+          const emptySql = yield* SqlClient.pipe(Effect.provide(D1Client.layer({ db: emptyD1 })))
+          const failingHandler = makeAlbumCounterRpcHandler(emptySql)
+          const sqlFailRes = yield* failingHandler.fetch(
+            new Request("http://localhost/rpc", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ action: "GetAlbumCount", albumId: "album-x" }),
+            }),
+          )
+          expect(sqlFailRes.status).toBe(500)
+          const sqlFailBody = yield* Effect.promise(() => HttpServerResponse.toWeb(sqlFailRes).text())
+          expect(sqlFailBody).not.toContain("no such table")
+          expect(sqlFailBody).not.toContain("SELECT")
+          expect(JSON.parse(sqlFailBody)).toEqual({
+            error: "storage_failure",
+            message: "Counter storage operation failed",
+          })
+
+          // 6. Client non-200 handling on getCount, increment, decrement
+          const failingClient = makeAlbumCounterRpcClient(toHttpClient(failingHandler))
+          const getCountErr = yield* Effect.flip(failingClient.getCount(AlbumId.make("album-x")))
+          expect(getCountErr).toMatchObject({ _tag: "AlbumCounterProtocolError", status: 500 })
+
+          const incrementErr = yield* Effect.flip(failingClient.increment(AlbumId.make("album-x")))
+          expect(incrementErr).toMatchObject({ _tag: "AlbumCounterProtocolError", status: 500 })
+
+          const decrementErr = yield* Effect.flip(failingClient.decrement(AlbumId.make("album-x")))
+          expect(decrementErr).toMatchObject({ _tag: "AlbumCounterProtocolError", status: 500 })
         }),
       ),
     )

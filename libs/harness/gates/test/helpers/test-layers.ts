@@ -126,30 +126,58 @@ export const makeHarnessSubprocessRunnerHostIoLayer = (
             new HarnessSubprocessError({
               command: input.command,
               failureKind: "spawn-error",
-              exitCode: SubprocessExitCode.make(1),
               stderr: SubprocessOutput.make(err instanceof Error ? err.message : String(err)),
               reason: ErrorReasonMessage.make(
                 `Command '${input.command}' failed to spawn: ${err instanceof Error ? err.message : String(err)}`,
               ),
             }),
         })
-        if (res.spawnError !== undefined) {
-          return yield* new HarnessSubprocessError({
-            command: input.command,
-            failureKind: "spawn-error",
-            exitCode: SubprocessExitCode.make(res.exitCode),
-            stderr: SubprocessOutput.make(res.stderr),
-            reason: ErrorReasonMessage.make(
-              `Command '${input.command}' failed to spawn: ${res.spawnError}`,
+        return yield* match(res)
+          .with({ _tag: "Exited" }, (exited) =>
+            Effect.succeed({
+              command: input.command,
+              exitCode: SubprocessExitCode.make(exited.exitCode),
+              stdout: SubprocessOutput.make(exited.stdout),
+              stderr: SubprocessOutput.make(exited.stderr),
+            }),
+          )
+          .with({ _tag: "TimedOut" }, (timedOut) =>
+            Effect.fail(
+              new HarnessSubprocessError({
+                command: input.command,
+                failureKind: "timeout",
+                stderr: SubprocessOutput.make(timedOut.stderr),
+                reason: ErrorReasonMessage.make(
+                  `Command '${input.command}' timed out after ${input.timeoutMs ?? 60_000}ms`,
+                ),
+              }),
             ),
-          })
-        }
-        return {
-          command: input.command,
-          exitCode: SubprocessExitCode.make(res.exitCode),
-          stdout: SubprocessOutput.make(res.stdout),
-          stderr: SubprocessOutput.make(res.stderr),
-        }
+          )
+          .with({ _tag: "Signaled" }, (signaled) =>
+            Effect.fail(
+              new HarnessSubprocessError({
+                command: input.command,
+                failureKind: "spawn-error",
+                stderr: SubprocessOutput.make(signaled.stderr),
+                reason: ErrorReasonMessage.make(
+                  `Command '${input.command}' terminated by signal ${signaled.signal}`,
+                ),
+              }),
+            ),
+          )
+          .with({ _tag: "SpawnFailed" }, (failed) =>
+            Effect.fail(
+              new HarnessSubprocessError({
+                command: input.command,
+                failureKind: "spawn-error",
+                stderr: SubprocessOutput.make(failed.stderr),
+                reason: ErrorReasonMessage.make(
+                  `Command '${input.command}' failed to spawn: ${failed.spawnError}`,
+                ),
+              }),
+            ),
+          )
+          .exhaustive()
       }),
   })
 

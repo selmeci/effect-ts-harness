@@ -1,4 +1,5 @@
-import { Effect, Option } from "effect"
+import { Cause, Effect, Option } from "effect"
+import { match } from "ts-pattern"
 import {
   diffOmnigraphBranches,
   makeOmnigraphSyncLayer,
@@ -23,20 +24,42 @@ export const syncOmnigraphOnDone = (
   blockDecision: string,
 ): Effect.Effect<CliResult | undefined> =>
   Effect.gen(function* () {
+    const startedAtMs = Date.now()
+    const surface = isAntigravity ? "hook" : "cli"
     if (isIsolatedExternalWorkspace(repoRoot)) {
       writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
       recordTelemetry(options, {
-        surface: isAntigravity ? "hook" : "cli",
+        surface,
         category: "graph_query",
         toolName: "omnigraph:merge-main",
         outcome: "ok",
-        durationMs: 1,
+        durationMs: Math.max(0, Date.now() - startedAtMs),
         engineSource: "local",
       })
       return undefined
     }
 
-    yield* ensureLocalOmnigraphReady(repoRoot)
+    const isReady = yield* ensureLocalOmnigraphReady(repoRoot)
+    if (!isReady) {
+      recordTelemetry(options, {
+        surface,
+        category: "graph_query",
+        toolName: "omnigraph:merge-main",
+        outcome: "fail",
+        durationMs: Math.max(0, Date.now() - startedAtMs),
+        engineSource: "omnigraph",
+        detail: "omnigraph-server-not-ready",
+      })
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          decision: blockDecision,
+          reason: "Omnigraph server is not ready",
+        }),
+        stderr: "",
+      }
+    }
+
     const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
     const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
     yield* diffOmnigraphBranches({
@@ -48,27 +71,36 @@ export const syncOmnigraphOnDone = (
       Effect.orElseSucceed(() => Option.none()),
     )
 
-    const merged = yield* mergeOmnigraphBranch({
-      repoRoot: clusterRepoRoot,
-      source: taskBranches.implBranch,
-      target: taskBranches.mainBranch,
-      cleanupBranches: [taskBranches.implBranch, taskBranches.planBranch],
-    }).pipe(
-      Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
-      Effect.orElseSucceed(() => false),
+    const mergeExit = yield* Effect.exit(
+      mergeOmnigraphBranch({
+        repoRoot: clusterRepoRoot,
+        source: taskBranches.implBranch,
+        target: taskBranches.mainBranch,
+        cleanupBranches: [taskBranches.implBranch, taskBranches.planBranch],
+      }).pipe(Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo))),
     )
-    if (merged) {
+    const mergeOutcome = match(mergeExit)
+      .with({ _tag: "Success" }, ({ value }) => ({ ok: value, detail: undefined }))
+      .with({ _tag: "Failure" }, ({ cause }) => {
+        const pretty = Cause.pretty(cause)
+        process.stderr.write(`[harness:done] Omnigraph branch merge failed: ${pretty}\n`)
+        return { ok: false, detail: pretty }
+      })
+      .exhaustive()
+
+    if (mergeOutcome.ok) {
       writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
     }
     recordTelemetry(options, {
-      surface: isAntigravity ? "hook" : "cli",
+      surface,
       category: "graph_query",
       toolName: "omnigraph:merge-main",
-      outcome: merged ? "ok" : "fail",
-      durationMs: 1,
-      engineSource: merged ? "omnigraph" : "memory-fallback",
+      outcome: mergeOutcome.ok ? "ok" : "fail",
+      durationMs: Math.max(0, Date.now() - startedAtMs),
+      engineSource: "omnigraph",
+      ...(mergeOutcome.detail !== undefined ? { detail: mergeOutcome.detail } : {}),
     })
-    if (!merged) {
+    if (!mergeOutcome.ok) {
       return {
         exitCode: 0,
         stdout: JSON.stringify({

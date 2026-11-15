@@ -1,4 +1,4 @@
-import { Clock, Effect, Schema } from "effect"
+import { Clock, Effect, Layer, Schema } from "effect"
 import { SqlClient } from "effect/sql/SqlClient"
 import type { SqlError } from "effect/sql/SqlError"
 import * as SqliteMigrator from "@effect/sql-sqlite-do/SqliteMigrator"
@@ -162,6 +162,18 @@ export const initializeAggregateTables = Effect.fn("AggregateInfra.initTables")(
     }),
   })
 })
+
+const _makeAggregateMigratorLayer = (
+  additionalMigrations?: Readonly<Record<string, Effect.Effect<void, SqlError, SqlClient>>>,
+): Layer.Layer<never, SqliteMigrator.MigrationError | SqlError, SqlClient> =>
+  SqliteMigrator.layer({
+    loader: SqliteMigrator.fromRecord({
+      ...aggregateCoreMigrations,
+      ...additionalMigrations,
+    }),
+  })
+
+export { _makeAggregateMigratorLayer as makeAggregateMigratorLayer }
 
 const metadataJsonSchema = Schema.fromJsonString(EventMetadata)
 const commandResultJsonSchema = Schema.fromJsonString(AggregateCommandResult)

@@ -1,12 +1,8 @@
 import { dirname, join, relative } from "node:path"
 import { pathToFileURL } from "node:url"
-import { Cause, Effect, Schema } from "effect"
+import { Cause, Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
-import {
-  AstSourceContent,
-  AstSourceFilePath,
-  HARNESS_GATE_RULE_VERSION,
-} from "@harness/contract"
+import { AstSourceContent, AstSourceFilePath, HARNESS_GATE_RULE_VERSION } from "@harness/contract"
 import {
   EventSchemaEvolutionInput,
   type EventVersionSnapshotEntry as EventVersionSnapshotEntryType,
@@ -16,13 +12,13 @@ import {
 } from "@harness/es-contract"
 import { prepareUpdatedEventSnapshots, verifyCommittedSnapshotParity } from "@harness/es-core"
 import {
+  analyzeSqliteMigratorFromRecordAst,
   AstGateCache,
   checkMigrationSqlSafety,
-  collectWorkspaceTsFiles,
 } from "@harness/gates"
 import { nodeSyncHostIo } from "@harness/infra"
 import { type CliEnv, type CliResult, findWorkspaceRoot } from "./daemon-and-omnigraph.service.js"
-import { resolveRepoPath } from "./repo-path.js"
+import { resolveRepoPathChecked } from "./repo-path.js"
 
 const decodeUnknownJson = Schema.decodeOption(Schema.fromJsonString(Schema.Unknown))
 const decodeSnapshotArray = Schema.decodeEffect(
@@ -83,6 +79,23 @@ const isSnapshotsEffect = (
   value: unknown,
 ): value is Effect.Effect<ReadonlyArray<EventVersionSnapshotEntryType>> => Effect.isEffect(value)
 
+const resolveRepoPathOrMessage = (
+  repoRoot: string,
+  userPath: string,
+  label: string,
+): { readonly ok: true; readonly resolvedPath: string } | { readonly ok: false; readonly message: string } =>
+  match(resolveRepoPathChecked(repoRoot, userPath))
+    .with({ _tag: "Resolved" }, ({ resolvedPath }) => ({ ok: true as const, resolvedPath }))
+    .with({ _tag: "EscapesRoot" }, () => ({
+      ok: false as const,
+      message: `${label} '${userPath}' escapes repository root`,
+    }))
+    .with({ _tag: "IoError" }, ({ code, message }) => ({
+      ok: false as const,
+      message: `Cannot resolve ${label} '${userPath}' (${code}: ${message})`,
+    }))
+    .exhaustive()
+
 const resolveModuleSpecifier = (
   repoRoot: string,
   moduleFlag: string | undefined,
@@ -91,13 +104,11 @@ const resolveModuleSpecifier = (
   if (moduleFlag === undefined) {
     return Effect.succeed(defaultSpecifier)
   }
-  const resolved = resolveRepoPath(repoRoot, moduleFlag)
-  if (resolved === undefined) {
-    return Effect.fail(
-      new RepoCheckCliError({ message: `Module path '${moduleFlag}' escapes repository root` }),
-    )
+  const res = resolveRepoPathOrMessage(repoRoot, moduleFlag, "Module path")
+  if (!res.ok) {
+    return Effect.fail(new RepoCheckCliError({ message: res.message }))
   }
-  return Effect.succeed(pathToFileURL(resolved).href)
+  return Effect.succeed(pathToFileURL(res.resolvedPath).href)
 }
 
 const importModuleRecord = Effect.fn("HarnessCli.importModuleRecord")(function* (
@@ -171,31 +182,23 @@ const resolveOpenApiBaseline = (
 ): BaselineResolution => {
   const cliBaselinePath = extractFlag(subArgs, "--baseline")
   if (cliBaselinePath !== undefined) {
-    const resolvedPath = resolveRepoPath(repoRoot, cliBaselinePath)
-    if (resolvedPath === undefined) {
-      return {
-        ok: false,
-        result: failResult(`ERROR: OpenAPI baseline path '${cliBaselinePath}' escapes repository root\n`),
-      }
+    const resolved = resolveRepoPathOrMessage(repoRoot, cliBaselinePath, "OpenAPI baseline path")
+    if (!resolved.ok) {
+      return { ok: false, result: failResult(`ERROR: ${resolved.message}\n`) }
     }
-    if (nodeSyncHostIo.existsSync(resolvedPath)) {
-      return { ok: true, json: nodeSyncHostIo.readTextSync(resolvedPath), source: `file:${cliBaselinePath}` }
+    if (nodeSyncHostIo.existsSync(resolved.resolvedPath)) {
+      return { ok: true, json: nodeSyncHostIo.readTextSync(resolved.resolvedPath), source: `file:${cliBaselinePath}` }
     }
   }
 
   const envBaselinePath = process.env.OPENAPI_BASELINE_PATH
   if (envBaselinePath !== undefined && envBaselinePath.length > 0) {
-    const resolvedEnvPath = resolveRepoPath(repoRoot, envBaselinePath)
-    if (resolvedEnvPath === undefined) {
-      return {
-        ok: false,
-        result: failResult(
-          `ERROR: OPENAPI_BASELINE_PATH '${envBaselinePath}' escapes repository root\n`,
-        ),
-      }
+    const resolvedEnv = resolveRepoPathOrMessage(repoRoot, envBaselinePath, "OPENAPI_BASELINE_PATH")
+    if (!resolvedEnv.ok) {
+      return { ok: false, result: failResult(`ERROR: ${resolvedEnv.message}\n`) }
     }
-    if (nodeSyncHostIo.existsSync(resolvedEnvPath)) {
-      return { ok: true, json: nodeSyncHostIo.readTextSync(resolvedEnvPath), source: `env:${envBaselinePath}` }
+    if (nodeSyncHostIo.existsSync(resolvedEnv.resolvedPath)) {
+      return { ok: true, json: nodeSyncHostIo.readTextSync(resolvedEnv.resolvedPath), source: `env:${envBaselinePath}` }
     }
   }
 
@@ -204,7 +207,11 @@ const resolveOpenApiBaseline = (
     ["show", "main:libs/sample/contract/openapi.json"],
     { cwd: repoRoot },
   )
-  if (gitMain.exitCode === 0 && gitMain.stdout.trim().length > 0) {
+  const mainOk = match(gitMain)
+    .with({ _tag: "Exited" }, (e) => e.exitCode === 0 && e.stdout.trim().length > 0)
+    .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => false)
+    .exhaustive()
+  if (mainOk) {
     return { ok: true, json: gitMain.stdout, source: "git:main" }
   }
 
@@ -213,7 +220,11 @@ const resolveOpenApiBaseline = (
     ["show", "HEAD:libs/sample/contract/openapi.json"],
     { cwd: repoRoot },
   )
-  if (gitHead.exitCode === 0 && gitHead.stdout.trim().length > 0) {
+  const headOk = match(gitHead)
+    .with({ _tag: "Exited" }, (e) => e.exitCode === 0 && e.stdout.trim().length > 0)
+    .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => false)
+    .exhaustive()
+  if (headOk) {
     return { ok: true, json: gitHead.stdout, source: "git:HEAD" }
   }
 
@@ -226,7 +237,11 @@ const runOasdiffIfAvailable = (
   openApiPath: string,
 ): CliResult | undefined => {
   const versionCheck = nodeSyncHostIo.execFileSync("oasdiff", ["--version"], { cwd: repoRoot })
-  if (versionCheck.exitCode !== 0) {
+  const hasOasdiff = match(versionCheck)
+    .with({ _tag: "Exited" }, (e) => e.exitCode === 0)
+    .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => false)
+    .exhaustive()
+  if (!hasOasdiff) {
     return undefined
   }
   const tmpDir = nodeSyncHostIo.mkdtempSync("harness-openapi-baseline-")
@@ -239,7 +254,11 @@ const runOasdiffIfAvailable = (
   )
   nodeSyncHostIo.rmRecursiveSync(tmpDir)
 
-  if (diffResult.exitCode !== 0) {
+  const diffFailed = match(diffResult)
+    .with({ _tag: "Exited" }, (e) => e.exitCode !== 0)
+    .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => true)
+    .exhaustive()
+  if (diffFailed) {
     const details = [diffResult.stderr, diffResult.stdout].filter((s) => s.length > 0).join("\n")
     return {
       exitCode: 2,
@@ -267,10 +286,11 @@ export const runCheckOpenApi = Effect.fn("HarnessCli.checkOpenApi")(function* (
     (envSpecPath !== undefined && envSpecPath.length > 0
       ? envSpecPath
       : join("libs", "sample", "contract", "openapi.json"))
-  const openApiPath = resolveRepoPath(repoRoot, rawSpecPath)
-  if (openApiPath === undefined) {
-    return failResult(`ERROR: OpenAPI spec path '${rawSpecPath}' escapes repository root\n`)
+  const openApiPathRes = resolveRepoPathOrMessage(repoRoot, rawSpecPath, "OpenAPI spec path")
+  if (!openApiPathRes.ok) {
+    return failResult(`ERROR: ${openApiPathRes.message}\n`)
   }
+  const openApiPath = openApiPathRes.resolvedPath
 
   const modExit = yield* Effect.exit(loadOpenApiModule(repoRoot, moduleFlag))
   const modResult = match(modExit)
@@ -355,47 +375,27 @@ export const runCheckOpenApi = Effect.fn("HarnessCli.checkOpenApi")(function* (
   })
 })
 
-const collectSqlFiles = (dir: string, prefix = ""): ReadonlyArray<string> => {
-  if (!nodeSyncHostIo.isDirectorySync(dir)) {
-    return []
-  }
+const collectPackageFiles = (
+  dir: string,
+  predicate: (name: string) => boolean,
+  prefix = "",
+): ReadonlyArray<string> => {
+  if (!nodeSyncHostIo.isDirectorySync(dir)) return []
   const collected: Array<string> = []
   for (const entry of nodeSyncHostIo.readdirSync(dir)) {
     const relPath = prefix.length > 0 ? join(prefix, entry.name) : entry.name
     const fullPath = join(dir, entry.name)
     if (entry.isDirectory) {
-      collected.push(...collectSqlFiles(fullPath, relPath))
-    } else {
-      if (entry.isFile && entry.name.endsWith(".sql")) {
-        collected.push(relPath)
+      if (entry.name !== "node_modules" && entry.name !== "dist") {
+        collected.push(...collectPackageFiles(fullPath, predicate, relPath))
       }
+      continue
+    }
+    if ((entry.isFile || nodeSyncHostIo.isSymbolicLinkSync(fullPath)) && predicate(entry.name)) {
+      collected.push(relPath)
     }
   }
   return collected.sort()
-}
-
-const MIGRATOR_KEY_RE = /^[1-9]\d*_[a-z0-9_]+$/
-
-const findInvalidMigratorRecordKeys = (
-  files: ReadonlyArray<{ readonly filePath: string; readonly content: string }>,
-): ReadonlyArray<string> => {
-  const errors: Array<string> = []
-  const fromRecordRe = /\bfromRecord\s*(?:<[^>]+>)?\s*\(\s*\{([\s\S]*?)\}\s*\)/g
-  const keyRe = /^\s*(?:["']([^"']+)["']|([A-Za-z_$][\w$]*))\s*:/gm
-  for (const file of files) {
-    for (const block of file.content.matchAll(fromRecordRe)) {
-      const body = block[1] ?? ""
-      for (const km of body.matchAll(keyRe)) {
-        const keyName = km[1] ?? km[2] ?? ""
-        if (keyName.length > 0 && !MIGRATOR_KEY_RE.test(keyName)) {
-          errors.push(
-            `migration check: ESCALATE — [invalid-migrator-record-key] ${file.filePath}: invalid SqliteMigrator.fromRecord key '${keyName}' (must match /^[1-9]\\d*_[a-z0-9_]+$/)`,
-          )
-        }
-      }
-    }
-  }
-  return errors
 }
 
 /**
@@ -418,52 +418,96 @@ export const runCheckMigrations = Effect.fn("HarnessCli.checkMigrations")(functi
   let migrationsDir: string | undefined
 
   if (dirFlag !== undefined) {
-    migrationsDir = resolveRepoPath(repoRoot, dirFlag)
-    if (migrationsDir === undefined) {
-      return failResult(`migration check: FAIL — migrations dir '${dirFlag}' escapes repository root\n`)
+    const dirRes = resolveRepoPathOrMessage(repoRoot, dirFlag, "migrations dir")
+    if (!dirRes.ok) {
+      return failResult(`migration check: FAIL — ${dirRes.message}\n`)
     }
+    migrationsDir = dirRes.resolvedPath
   } else {
     const targetPkg = packageFlag ?? join("libs", "sample", "infra")
-    packageRoot = resolveRepoPath(repoRoot, targetPkg)
-    if (packageRoot === undefined) {
-      return failResult(`migration check: FAIL — package path '${targetPkg}' escapes repository root\n`)
+    const pkgRes = resolveRepoPathOrMessage(repoRoot, targetPkg, "package path")
+    if (!pkgRes.ok) {
+      return failResult(`migration check: FAIL — ${pkgRes.message}\n`)
     }
-    migrationsDir = resolveRepoPath(repoRoot, join(targetPkg, "migrations"))
-    if (migrationsDir === undefined) {
-      return failResult(
-        `migration check: FAIL — migrations dir in '${targetPkg}' escapes repository root\n`,
-      )
+    packageRoot = pkgRes.resolvedPath
+    const migRes = resolveRepoPathOrMessage(
+      repoRoot,
+      join(targetPkg, "migrations"),
+      `migrations dir in '${targetPkg}'`,
+    )
+    if (!migRes.ok) {
+      return failResult(`migration check: FAIL — ${migRes.message}\n`)
     }
+    migrationsDir = migRes.resolvedPath
   }
 
   let srcDir: string | undefined
   if (packageRoot !== undefined) {
-    srcDir = resolveRepoPath(repoRoot, join(packageRoot, "src"))
-    if (srcDir === undefined) {
-      return failResult(`migration check: FAIL — package src dir escapes repository root\n`)
+    const srcRes = resolveRepoPathOrMessage(repoRoot, join(packageRoot, "src"), "package src dir")
+    if (!srcRes.ok) {
+      return failResult(`migration check: FAIL — ${srcRes.message}\n`)
     }
+    srcDir = srcRes.resolvedPath
   }
   const srcFiles: Array<{ readonly filePath: AstSourceFilePath; readonly content: AstSourceContent }> = []
   if (srcDir !== undefined && nodeSyncHostIo.isDirectorySync(srcDir)) {
-    for (const absFile of collectWorkspaceTsFiles(srcDir, nodeSyncHostIo)) {
-      const safeFile = resolveRepoPath(repoRoot, absFile)
-      if (safeFile === undefined) {
-        return failResult(`migration check: FAIL — source file '${absFile}' escapes repository root\n`)
+    const tsFiles = collectPackageFiles(
+      srcDir,
+      (name) => (name.endsWith(".ts") || name.endsWith(".tsx")) && !name.endsWith(".d.ts"),
+    ).map((rel) => join(srcDir, rel))
+    for (const absFile of tsFiles) {
+      const safeRes = resolveRepoPathOrMessage(repoRoot, absFile, "source file")
+      if (!safeRes.ok) {
+        return failResult(`migration check: FAIL — ${safeRes.message}\n`)
+      }
+      const readRes = Result.try(() => nodeSyncHostIo.readTextSync(safeRes.resolvedPath))
+      const readContent = match(readRes)
+        .with({ _tag: "Success" }, ({ success }) => ({ ok: true as const, content: success }))
+        .with({ _tag: "Failure" }, ({ failure }) => ({
+          ok: false as const,
+          error: `migration check: FAIL — unreadable source file '${safeRes.resolvedPath}': ${failure instanceof Error ? failure.message : String(failure)}\n`,
+        }))
+        .exhaustive()
+      if (!readContent.ok) {
+        return failResult(readContent.error)
       }
       srcFiles.push({
-        filePath: AstSourceFilePath.make(relative(repoRoot, safeFile).replace(/\\/g, "/")),
-        content: AstSourceContent.make(nodeSyncHostIo.readTextSync(safeFile)),
+        filePath: AstSourceFilePath.make(relative(repoRoot, safeRes.resolvedPath).replace(/\\/g, "/")),
+        content: AstSourceContent.make(readContent.content),
       })
     }
   }
-  const hasSqliteMigrator = srcFiles.some((f) => f.content.includes("SqliteMigrator.fromRecord"))
+
+  let totalFromRecordCalls = 0
+  let totalCheckedKeys = 0
+  const astMessages: Array<string> = []
+  for (const file of srcFiles) {
+    const analysis = analyzeSqliteMigratorFromRecordAst({
+      filePath: file.filePath,
+      content: file.content,
+    })
+    totalFromRecordCalls += analysis.fromRecordCallCount
+    totalCheckedKeys += analysis.checkedKeyCount
+    for (const issue of analysis.keyIssues) {
+      astMessages.push(
+        `migration check: ESCALATE — [invalid-migrator-record-key] ${issue.filePath}:${issue.line}: ${issue.message}`,
+      )
+    }
+    for (const issue of analysis.unsafeSqlIssues) {
+      astMessages.push(
+        `migration check: ESCALATE — [unsafe-sql-migration] ${issue.filePath}:${issue.line}: ${issue.message}`,
+      )
+    }
+  }
 
   const hasMigrationsDir = nodeSyncHostIo.isDirectorySync(migrationsDir)
-  const committedFiles = hasMigrationsDir ? collectSqlFiles(migrationsDir) : []
+  const committedFiles = hasMigrationsDir
+    ? collectPackageFiles(migrationsDir, (name) => name.endsWith(".sql"))
+    : []
 
-  if (committedFiles.length === 0 && !hasSqliteMigrator) {
+  if (committedFiles.length === 0 && totalCheckedKeys === 0) {
     return failResult(
-      `migration check: FAIL — no committed .sql migrations in '${relative(repoRoot, migrationsDir) || migrationsDir}' and no SqliteMigrator.fromRecord found\n`,
+      `migration check: FAIL — no committed .sql migrations in '${relative(repoRoot, migrationsDir) || migrationsDir}' and no SqliteMigrator.fromRecord records were found to validate (fromRecordCalls=${totalFromRecordCalls})\n`,
     )
   }
 
@@ -471,11 +515,22 @@ export const runCheckMigrations = Effect.fn("HarnessCli.checkMigrations")(functi
     const committedSqlFiles: Array<{ readonly file: string; readonly sql: string }> = []
     for (const file of committedFiles) {
       const absSql = join(migrationsDir, file)
-      const safeSql = resolveRepoPath(repoRoot, absSql)
-      if (safeSql === undefined) {
-        return failResult(`migration check: FAIL — SQL file '${file}' escapes repository root\n`)
+      const safeRes = resolveRepoPathOrMessage(repoRoot, absSql, "SQL file")
+      if (!safeRes.ok) {
+        return failResult(`migration check: FAIL — ${safeRes.message}\n`)
       }
-      committedSqlFiles.push({ file, sql: nodeSyncHostIo.readTextSync(safeSql) })
+      const readRes = Result.try(() => nodeSyncHostIo.readTextSync(safeRes.resolvedPath))
+      const readSql = match(readRes)
+        .with({ _tag: "Success" }, ({ success }) => ({ ok: true as const, sql: success }))
+        .with({ _tag: "Failure" }, ({ failure }) => ({
+          ok: false as const,
+          error: `migration check: FAIL — unreadable SQL file '${file}': ${failure instanceof Error ? failure.message : String(failure)}\n`,
+        }))
+        .exhaustive()
+      if (!readSql.ok) {
+        return failResult(readSql.error)
+      }
+      committedSqlFiles.push({ file, sql: readSql.sql })
     }
     const committedReport = checkMigrationSqlSafety(committedSqlFiles)
     if (committedReport.requiresEscalation) {
@@ -486,11 +541,11 @@ export const runCheckMigrations = Effect.fn("HarnessCli.checkMigrations")(functi
     }
   }
 
+  if (astMessages.length > 0) {
+    return { exitCode: 2, stdout: "", stderr: `${astMessages.join("\n")}\n` }
+  }
+
   if (srcFiles.length > 0) {
-    const invalidKeyMessages = findInvalidMigratorRecordKeys(srcFiles)
-    if (invalidKeyMessages.length > 0) {
-      return { exitCode: 2, stdout: "", stderr: `${invalidKeyMessages.join("\n")}\n` }
-    }
     const astReport = yield* AstGateCache.decide({
       files: srcFiles,
       ruleVersion: HARNESS_GATE_RULE_VERSION,
@@ -529,14 +584,15 @@ export const runCheckEventSchemas = Effect.fn("HarnessCli.checkEventSchemas")(fu
     extractFlag(subArgs, "--snapshot") ??
     extractFlag(subArgs, "--out") ??
     join("libs", "es", "core", "event-snapshots.json")
-  const snapshotFilePath = resolveRepoPath(repoRoot, snapshotFlag)
-  if (snapshotFilePath === undefined) {
+  const snapshotFileRes = resolveRepoPathOrMessage(repoRoot, snapshotFlag, "Snapshot path")
+  if (!snapshotFileRes.ok) {
     return {
       exitCode: 1,
       stdout: "",
-      stderr: `[check-event-schemas] Snapshot path '${snapshotFlag}' escapes repository root\n`,
+      stderr: `[check-event-schemas] ${snapshotFileRes.message}\n`,
     }
   }
+  const snapshotFilePath = snapshotFileRes.resolvedPath
   const moduleFlag = extractFlag(subArgs, "--module")
   const isUpdate = subArgs.includes("--update")
 
@@ -568,19 +624,10 @@ export const runCheckEventSchemas = Effect.fn("HarnessCli.checkEventSchemas")(fu
       const serialized = `${JSON.stringify(validatedSnapshots, null, 2)}\n`
       nodeSyncHostIo.mkdirRecursiveSync(dirname(snapshotFilePath))
       nodeSyncHostIo.writeTextSync(snapshotFilePath, serialized)
-      return {
-        exitCode: 0,
-        stdout: `[check-event-schemas] Updated ${snapshotFilePath} with ${validatedSnapshots.length} verified append-only event snapshots.\n`,
-        stderr: "",
-      } satisfies CliResult
+      return { exitCode: 0, stdout: `[check-event-schemas] Updated ${snapshotFilePath} with ${validatedSnapshots.length} verified append-only event snapshots.\n`, stderr: "" } satisfies CliResult
     }
-
     const valid = yield* verifyCommittedSnapshotParity(input)
-    return {
-      exitCode: 0,
-      stdout: `[check-event-schemas] Event schema evolution verified: ${valid.checkedEventCount} snapshots valid.\n`,
-      stderr: "",
-    } satisfies CliResult
+    return { exitCode: 0, stdout: `[check-event-schemas] Event schema evolution verified: ${valid.checkedEventCount} snapshots valid.\n`, stderr: "" } satisfies CliResult
   })
 
   const exit = yield* Effect.exit(inner)

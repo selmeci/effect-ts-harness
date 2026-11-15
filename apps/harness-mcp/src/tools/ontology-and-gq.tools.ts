@@ -155,6 +155,9 @@ export const buildOntologyAndGqToolDescriptors = (
         return {
           clean: invariants.clean && semanticReport.conflicts.length === 0 && !degraded,
           degraded,
+          ...(graphStatus.degradedReason !== undefined
+            ? { degradedReason: graphStatus.degradedReason }
+            : {}),
           ...(evaluationError !== undefined ? { evaluationError } : {}),
           findings: invariants.findings,
           semanticConflicts: semanticReport.conflicts,

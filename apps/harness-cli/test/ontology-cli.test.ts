@@ -1,11 +1,19 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "@effect/vitest"
+import { describe, expect, it, vi } from "@effect/vitest"
 import { Effect, Layer, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { makeMockDecisionModelLayer } from "@harness/decision"
-import { buildHarnessGraph } from "@harness/graph"
+import { readTelemetryEvents } from "@harness/gates"
+import { buildHarnessGraph, resolveOmnigraphClusterDir } from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
+import type { SyncHostIo } from "@harness/service/host-io"
+import {
+  ensureLocalOmnigraphReady,
+  isSafeOmnigraphPidToKill,
+} from "../src/commands/omnigraph-lifecycle.js"
+import { syncOmnigraphOnDone } from "../src/commands/done-omnigraph-helpers.js"
 import { runCliEffect } from "../src/index.js"
 
 describe("harness-cli ontology command", () => {
@@ -77,6 +85,7 @@ describe("harness-cli ontology command", () => {
     findings: Schema.Array(Schema.Unknown),
     semanticConflicts: Schema.Array(Schema.Unknown),
     evaluatedPairs: Schema.Finite,
+    semanticSkipped: Schema.optional(Schema.Boolean),
     degraded: Schema.optional(Schema.Boolean),
     evaluationError: Schema.optional(Schema.String),
   })
@@ -195,7 +204,135 @@ status: accepted
       const report = decodeCheckOutput(res.stdout)
       expect(report.clean).toBe(true)
       expect(report.degraded).toBe(false)
+      expect(report.semanticSkipped).toBe(true)
       expect(report.evaluatedPairs).toBe(0)
+    }),
+  )
+
+  it.effect("rejects vim omnigraph.md and omnigraph without --cluster in isSafeOmnigraphPidToKill", () =>
+    Effect.sync(() => {
+      const makeFakeHostIo = (argv: ReadonlyArray<string>): SyncHostIo => ({
+        ...nodeSyncHostIo,
+        existsSync: (filePath) => filePath.endsWith("/cmdline"),
+        readTextSync: () => argv.join("\0"),
+      })
+
+      expect(
+        isSafeOmnigraphPidToKill(
+          4242,
+          "/tmp/cluster-a",
+          makeFakeHostIo(["vim", "omnigraph.md"]),
+        ),
+      ).toBe(false)
+      expect(
+        isSafeOmnigraphPidToKill(
+          4242,
+          "/tmp/cluster-a",
+          makeFakeHostIo(["/home/u/.local/bin/omnigraph", "serve"]),
+        ),
+      ).toBe(false)
+      expect(
+        isSafeOmnigraphPidToKill(
+          4242,
+          "/tmp/cluster-a",
+          makeFakeHostIo([
+            "/home/u/.local/bin/omnigraph-server",
+            "--cluster",
+            "file:///tmp/cluster-b",
+          ]),
+        ),
+      ).toBe(false)
+      expect(
+        isSafeOmnigraphPidToKill(
+          4242,
+          "/tmp/cluster-a",
+          makeFakeHostIo([
+            "/home/u/.local/bin/omnigraph-server",
+            "--cluster",
+            "file:///tmp/cluster-a",
+            "--bind",
+            "127.0.0.1:8080",
+          ]),
+        ),
+      ).toBe(true)
+    }),
+  )
+
+  it.live("returns false on drift teardown rmRecursiveSync failure without calling old server or refreshing stamp", () =>
+    Effect.gen(function* () {
+      const tmpDir = mkdtempSync(join(tmpdir(), "harness-cli-drift-fail-"))
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          rmSync(tmpDir, { recursive: true, force: true })
+        }),
+      )
+      mkdirSync(join(tmpDir, "libs", "harness", "graph"), { recursive: true })
+      writeFileSync(join(tmpDir, "libs", "harness", "graph", "cluster.yaml"), "name: test\n", "utf8")
+
+      const clusterDir = resolveOmnigraphClusterDir(tmpDir, nodeSyncHostIo)
+      mkdirSync(clusterDir, { recursive: true })
+      writeFileSync(join(clusterDir, ".config-stamp"), "stale-stamp", "utf8")
+
+      const fetchSpy = vi.spyOn(globalThis, "fetch")
+      const rmSpy = vi.spyOn(nodeSyncHostIo, "rmRecursiveSync").mockImplementation(() => {
+        throw new Error("EACCES: permission denied")
+      })
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+
+      const ready = yield* ensureLocalOmnigraphReady(tmpDir).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            fetchSpy.mockRestore()
+            rmSpy.mockRestore()
+            stderrSpy.mockRestore()
+          }),
+        ),
+      )
+
+      expect(ready).toBe(false)
+      expect(fetchSpy).not.toHaveBeenCalled()
+      expect(readFileSync(join(clusterDir, ".config-stamp"), "utf8")).toBe("stale-stamp")
+    }),
+  )
+
+  it.live("syncOmnigraphOnDone fails closed when omnigraph server is not ready and records real durationMs", () =>
+    Effect.gen(function* () {
+      const tmpDir = mkdtempSync(join(tmpdir(), "harness-cli-done-not-ready-"))
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          rmSync(tmpDir, { recursive: true, force: true })
+        }),
+      )
+      mkdirSync(join(tmpDir, "libs", "harness", "graph"), { recursive: true })
+      writeFileSync(join(tmpDir, "libs", "harness", "graph", "cluster.yaml"), "name: test\n", "utf8")
+
+      const clusterDir = resolveOmnigraphClusterDir(tmpDir, nodeSyncHostIo)
+      mkdirSync(clusterDir, { recursive: true })
+      writeFileSync(join(clusterDir, ".config-stamp"), "stale", "utf8")
+
+      const rmSpy = vi.spyOn(nodeSyncHostIo, "rmRecursiveSync").mockImplementation(() => {
+        throw new Error("boom")
+      })
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+
+      const result = yield* syncOmnigraphOnDone(tmpDir, { repoRoot: tmpDir }, false, "block").pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            rmSpy.mockRestore()
+            stderrSpy.mockRestore()
+          }),
+        ),
+      )
+
+      expect(result).toBeDefined()
+      expect(result?.stdout).toContain("Omnigraph server is not ready")
+      const telemetryLines = readTelemetryEvents(tmpDir, nodeSyncHostIo)
+      const last = telemetryLines[telemetryLines.length - 1]
+      expect(last?.outcome).toBe("fail")
+      expect(last?.engineSource).toBe("omnigraph")
+      expect(last?.detail).toBe("omnigraph-server-not-ready")
+      expect(typeof last?.durationMs).toBe("number")
+      expect(last?.durationMs).toBeGreaterThanOrEqual(0)
     }),
   )
 })

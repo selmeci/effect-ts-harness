@@ -56,15 +56,39 @@ const makeBaseTestHostIo = (): SyncHostIo => ({
       res.error !== undefined && "code" in res.error && typeof res.error.code === "string"
         ? res.error.code
         : undefined
-    const timedOut = errCode === "ETIMEDOUT"
-    const spawnError = res.error !== undefined ? `${errCode !== undefined ? `${errCode}: ` : ""}${res.error.message}` : undefined
+    const stdout = res.stdout ?? ""
+    const stderr = res.stderr ?? ""
+    if (errCode === "ETIMEDOUT") {
+      return {
+        _tag: "TimedOut",
+        stdout,
+        stderr,
+        ...(res.signal !== null ? { signal: res.signal } : {}),
+        ...(res.error !== undefined ? { spawnError: res.error.message } : {}),
+      }
+    }
+    if (res.error !== undefined) {
+      return {
+        _tag: "SpawnFailed",
+        spawnError: `${errCode !== undefined ? `${errCode}: ` : ""}${res.error.message}`,
+        ...(errCode !== undefined ? { errorCode: errCode } : {}),
+        stdout,
+        stderr,
+      }
+    }
+    if (res.signal !== null) {
+      return {
+        _tag: "Signaled",
+        signal: res.signal,
+        stdout,
+        stderr,
+      }
+    }
     return {
-      exitCode: res.status ?? -1,
-      stdout: res.stdout ?? "",
-      stderr: res.stderr ?? "",
-      ...(spawnError !== undefined ? { spawnError } : {}),
-      ...(res.signal !== null ? { signal: res.signal } : {}),
-      ...(timedOut ? { timedOut: true } : {}),
+      _tag: "Exited",
+      exitCode: res.status ?? 0,
+      stdout,
+      stderr,
     }
   },
 })

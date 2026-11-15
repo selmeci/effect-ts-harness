@@ -7,6 +7,8 @@ import {
   GateCategory,
   GateRuleId,
   GateViolationMessage,
+  makeVerdictReport,
+  makeVerdictReportSchema,
   NonNegativeCount,
   SourceLineNumber,
   WorkspaceFilePath,
@@ -59,43 +61,45 @@ export type AstGateFileEvaluator = (
   file: AstGateFileBatchInput,
 ) => ReadonlyArray<AstGateViolationContract>
 
-export const AstGateEvaluationReport = Schema.Union([
-  Schema.Struct({
-    verdict: Schema.Literal("clean"),
-    violations: Schema.Tuple([]),
-    inspectedFileCount: NonNegativeCount,
-    cacheHitCount: NonNegativeCount,
-  }),
-  Schema.Struct({
-    verdict: Schema.Literal("violated"),
-    violations: Schema.NonEmptyArray(AstGateViolationContract),
-    inspectedFileCount: NonNegativeCount,
-    cacheHitCount: NonNegativeCount,
-  }),
-])
+export class AstGateEvaluationError extends Schema.TaggedError<AstGateEvaluationError>()(
+  "AstGateEvaluationError",
+  {
+    filePath: AstSourceFilePath,
+    reason: ErrorReasonMessage,
+  },
+) {}
+
+export const AstGateEvaluationReport = makeVerdictReportSchema(AstGateViolationContract, {
+  inspectedFileCount: NonNegativeCount,
+  cacheHitCount: NonNegativeCount,
+})
 export type AstGateEvaluationReport = typeof AstGateEvaluationReport.Type
 
 export const makeAstGateEvaluationReport = (input: {
   readonly violations: ReadonlyArray<AstGateViolationContract>
   readonly inspectedFileCount: NonNegativeCount
   readonly cacheHitCount: NonNegativeCount
-}): AstGateEvaluationReport => {
-  const [first, ...rest] = input.violations
-  if (first === undefined) {
-    return {
-      verdict: "clean",
-      violations: [],
-      inspectedFileCount: input.inspectedFileCount,
-      cacheHitCount: input.cacheHitCount,
-    }
-  }
-  return {
-    verdict: "violated",
-    violations: [first, ...rest],
+}): AstGateEvaluationReport =>
+  makeVerdictReport(input.violations, {
     inspectedFileCount: input.inspectedFileCount,
     cacheHitCount: input.cacheHitCount,
-  }
-}
+  })
+
+export const AstGateDecisionReport = makeVerdictReportSchema(AstGateViolationContract, {
+  cacheHitCount: NonNegativeCount,
+  parsedFileCount: NonNegativeCount,
+})
+export type AstGateDecisionReport = typeof AstGateDecisionReport.Type
+
+export const makeAstGateDecisionReport = (input: {
+  readonly violations: ReadonlyArray<AstGateViolationContract>
+  readonly cacheHitCount: NonNegativeCount
+  readonly parsedFileCount: NonNegativeCount
+}): AstGateDecisionReport =>
+  makeVerdictReport(input.violations, {
+    cacheHitCount: input.cacheHitCount,
+    parsedFileCount: input.parsedFileCount,
+  })
 
 export const DaemonSocketPath = Schema.NonEmptyString.pipe(
   Schema.check(Schema.isTrimmed()),
@@ -109,10 +113,21 @@ export const DaemonServerInfo = Schema.Struct({
 })
 export type DaemonServerInfo = typeof DaemonServerInfo.Type
 
+export const DaemonServerErrorKind = Schema.Literals([
+  "already-alive",
+  "not-a-socket",
+  "probe-failed",
+  "bind-failed",
+  "chmod-failed",
+  "invalid-path",
+])
+export type DaemonServerErrorKind = typeof DaemonServerErrorKind.Type
+
 export class DaemonServerError extends Schema.TaggedError<DaemonServerError>()(
   "DaemonServerError",
   {
     socketPath: DaemonSocketPath,
+    reasonKind: DaemonServerErrorKind,
     reason: ErrorReasonMessage,
   },
 ) {}

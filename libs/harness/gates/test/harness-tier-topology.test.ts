@@ -55,6 +55,7 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
             packageName: PackageManifestName.make(contractName),
             nxTags: [NxTierTag.make("type:contract")],
             dependencyNames: [PackageDependencyName.make("effect")],
+            nonRuntimeDependencyNames: [],
           },
         ]
 
@@ -69,6 +70,7 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
               PackageDependencyName.make("effect"),
               PackageDependencyName.make(contractName),
             ],
+            nonRuntimeDependencyNames: [],
           })
         }
 
@@ -87,6 +89,7 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
         const report = yield* decideHarnessTierTopology({
           manifests,
           serviceFiles,
+          workspaceSourceFiles: [],
         })
 
         expect(report.verdict).toBe("clean")
@@ -104,9 +107,11 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
             packageName: PackageManifestName.make("@harness/contract"),
             nxTags: [NxTierTag.make("type:contract"), NxTierTag.make("type:service")],
             dependencyNames: [PackageDependencyName.make("effect")],
+            nonRuntimeDependencyNames: [],
           },
         ],
         serviceFiles: [],
+        workspaceSourceFiles: [],
       })
 
       expect(report.verdict).toBe("violated")
@@ -128,9 +133,11 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
               PackageDependencyName.make("effect"),
               PackageDependencyName.make("@harness/service"),
             ],
+            nonRuntimeDependencyNames: [],
           },
         ],
         serviceFiles: [],
+        workspaceSourceFiles: [],
       })
 
       expect(report.verdict).toBe("violated")
@@ -153,9 +160,11 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
               PackageDependencyName.make("@harness/sample-contract"),
               PackageDependencyName.make("@harness/infra"),
             ],
+            nonRuntimeDependencyNames: [],
           },
         ],
         serviceFiles: [],
+        workspaceSourceFiles: [],
       })
 
       expect(report.verdict).toBe("violated")
@@ -197,6 +206,7 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
             ),
           },
         ],
+        workspaceSourceFiles: [],
       })
 
       expect(report.verdict).toBe("violated")
@@ -363,30 +373,35 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
                 PackageDependencyName.make("@acme/shared-types"),
                 PackageDependencyName.make("@acme/custom-domain"),
               ],
+            nonRuntimeDependencyNames: [],
             },
             {
               manifestPath: PackageManifestPath.make("libs/acme/types/package.json"),
               packageName: PackageManifestName.make("@acme/shared-types"),
               nxTags: [NxTierTag.make("type:contract")],
               dependencyNames: [PackageDependencyName.make("effect")],
+            nonRuntimeDependencyNames: [],
             },
             {
               manifestPath: PackageManifestPath.make("libs/acme/domain/package.json"),
               packageName: PackageManifestName.make("@acme/custom-domain"),
               nxTags: [NxTierTag.make("type:core")],
               dependencyNames: [PackageDependencyName.make("@acme/custom-adapters")],
+            nonRuntimeDependencyNames: [],
             },
             {
               manifestPath: PackageManifestPath.make("libs/acme/adapters/package.json"),
               packageName: PackageManifestName.make("@acme/custom-adapters"),
               nxTags: [NxTierTag.make("type:infra")],
               dependencyNames: [],
+            nonRuntimeDependencyNames: [],
             },
             {
               manifestPath: PackageManifestPath.make("libs/acme/dual/package.json"),
               packageName: PackageManifestName.make("@acme/dual-tier"),
               nxTags: [NxTierTag.make("type:service"), NxTierTag.make("type:core")],
               dependencyNames: [],
+            nonRuntimeDependencyNames: [],
             },
           ],
           serviceFiles: [
@@ -397,6 +412,7 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
               ),
             },
           ],
+          workspaceSourceFiles: [],
         })
 
         expect(report.verdict).toBe("violated")
@@ -416,13 +432,10 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
     "F-18.1: real libs/harness/* manifests and @harness/service source files pass HarnessTierTopology.decide cleanly",
     () =>
       Effect.gen(function* () {
-        const harnessDir = resolvePath(process.cwd(), "..")
-        const manifests: Array<{
-          readonly manifestPath: PackageManifestPath
-          readonly packageName: PackageManifestName
-          readonly nxTags: Array<NxTierTag>
-          readonly dependencyNames: Array<PackageDependencyName>
-        }> = []
+        const harnessDir = existsSync(resolvePath(process.cwd(), "..", "service"))
+          ? resolvePath(process.cwd(), "..")
+          : resolvePath(process.cwd(), "libs", "harness")
+        const manifests: Array<PackageTierManifestInput> = []
         for (const pkgDir of readdirSync(harnessDir).sort()) {
           const pkgJsonPath = join(harnessDir, pkgDir, "package.json")
           if (!existsSync(pkgJsonPath)) continue
@@ -439,6 +452,7 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
             dependencyNames: Object.keys(parsed.dependencies ?? {}).map((d) =>
               PackageDependencyName.make(d),
             ),
+            nonRuntimeDependencyNames: [],
           })
         }
 
@@ -451,7 +465,11 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
             content: AstSourceContent.make(readFileSync(join(serviceSrcDir, f), "utf8")),
           }))
 
-        const report = yield* decideHarnessTierTopology({ manifests, serviceFiles })
+        const report = yield* decideHarnessTierTopology({
+          manifests,
+          serviceFiles,
+          workspaceSourceFiles: [],
+        })
         expect(report.verdict).toBe("clean")
         expect(report.violations).toEqual([])
       }),
@@ -466,6 +484,7 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
             packageName: PackageManifestName.make("@harness/infra"),
             nxTags: [NxTierTag.make("type:infra")],
             dependencyNames: [PackageDependencyName.make("@harness/service")],
+            nonRuntimeDependencyNames: [],
           },
         ],
         serviceFiles: [],
@@ -515,9 +534,11 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
             packageName: PackageManifestName.make("@sample/infra"),
             nxTags: [NxTierTag.make("type:infra")],
             dependencyNames: [PackageDependencyName.make("drizzle-orm")],
+            nonRuntimeDependencyNames: [],
           },
         ],
         serviceFiles: [],
+        workspaceSourceFiles: [],
       })
       expect(manifestReport.verdict).toBe("violated")
       expect(manifestReport.violations.some((v) => v.message.includes("drizzle-orm"))).toBe(true)
@@ -533,18 +554,21 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
             packageName: PackageManifestName.make("@harness/domain"),
             nxTags: [NxTierTag.make("type:domain")],
             dependencyNames: [PackageDependencyName.make("effect")],
+            nonRuntimeDependencyNames: [],
           },
           {
             manifestPath: PackageManifestPath.make("apps/sample/package.json"),
             packageName: PackageManifestName.make("sample-app"),
             nxTags: [NxTierTag.make("type:app")],
             dependencyNames: [PackageDependencyName.make("effect"), PackageDependencyName.make("alchemy")],
+            nonRuntimeDependencyNames: [],
           },
           {
             manifestPath: PackageManifestPath.make("libs/sample/domain/package.json"),
             packageName: PackageManifestName.make("@sample/domain"),
             nxTags: [NxTierTag.make("type:domain")],
             dependencyNames: [PackageDependencyName.make("effect")],
+            nonRuntimeDependencyNames: [],
           },
         ],
         serviceFiles: [],
@@ -590,6 +614,7 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
           },
         ],
         serviceFiles: [],
+        workspaceSourceFiles: [],
       })
       expect(report.verdict).toBe("violated")
       expect(report.violations.length).toBe(2)
@@ -597,6 +622,84 @@ describe("HarnessTierTopology & WorkspaceFs (SPEC-0012)", () => {
       expect(report.violations.some((v) => v.location === "libs/sample/contract/package.json")).toBe(true)
       expect(report.violations.some((v) => v.location === "libs/sample/infra/package.json")).toBe(true)
       expect(report.violations.some((v) => v.message.includes("vitest"))).toBe(false)
+    }),
+  )
+
+  it.effect("M-9.1: enforces complete 6-row tier matrix, single banned-workspace-dependency, test/scripts scanning, and relative escapes", () =>
+    Effect.gen(function* () {
+      const report = yield* decideHarnessTierTopology({
+        manifests: [
+          {
+            manifestPath: PackageManifestPath.make("libs/sample/contract/package.json"),
+            packageName: PackageManifestName.make("@sample/contract"),
+            nxTags: [NxTierTag.make("type:contract")],
+            dependencyNames: [
+              PackageDependencyName.make("effect"),
+              PackageDependencyName.make("drizzle-orm"),
+            ],
+            nonRuntimeDependencyNames: [],
+          },
+          {
+            manifestPath: PackageManifestPath.make("libs/sample/domain/package.json"),
+            packageName: PackageManifestName.make("@sample/domain"),
+            nxTags: [NxTierTag.make("type:domain")],
+            dependencyNames: [
+              PackageDependencyName.make("effect"),
+              PackageDependencyName.make("@sample/contract"),
+              PackageDependencyName.make("alchemy"),
+            ],
+            nonRuntimeDependencyNames: [PackageDependencyName.make("vitest")],
+          },
+          {
+            manifestPath: PackageManifestPath.make("libs/sample/infra/package.json"),
+            packageName: PackageManifestName.make("@sample/infra"),
+            nxTags: [NxTierTag.make("type:infra")],
+            dependencyNames: [
+              PackageDependencyName.make("effect"),
+              PackageDependencyName.make("web-app"),
+            ],
+            nonRuntimeDependencyNames: [],
+          },
+          {
+            manifestPath: PackageManifestPath.make("apps/web/package.json"),
+            packageName: PackageManifestName.make("web-app"),
+            nxTags: [NxTierTag.make("type:app"), NxTierTag.make("scope:web")],
+            dependencyNames: [
+              PackageDependencyName.make("effect"),
+              PackageDependencyName.make("@sample/domain"),
+            ],
+            nonRuntimeDependencyNames: [],
+          },
+        ],
+        serviceFiles: [],
+        workspaceSourceFiles: [
+          {
+            filePath: AstSourceFilePath.make("libs/sample/domain/src/ok.ts"),
+            content: AstSourceContent.make('import { X } from "../../contract/src/index.js"\nexport { X }\n'),
+          },
+          {
+            filePath: AstSourceFilePath.make("libs/sample/domain/test/bad.test.ts"),
+            content: AstSourceContent.make('import { Y } from "@sample/infra"\nexport { Y }\n'),
+          },
+        ],
+      })
+
+      expect(report.verdict).toBe("violated")
+      expect(report.violations.filter((v) => v.rule === "banned-workspace-dependency")).toHaveLength(1)
+      expect(report.violations.some((v) => v.rule === "forbidden-contract-dependency")).toBe(false)
+      expect(report.violations.some((v) => v.rule === "forbidden-domain-dependency")).toBe(true)
+      expect(report.violations.some((v) => v.rule === "forbidden-infra-dependency")).toBe(true)
+      expect(report.violations.some((v) => v.rule === "forbidden-web-app-dependency")).toBe(true)
+      expect(
+        report.violations.some(
+          (v) => v.rule === "undeclared-workspace-dependency" && v.location === "libs/sample/domain/src/ok.ts",
+        ),
+      ).toBe(true)
+      expect(
+        report.violations.some(
+          (v) => v.rule === "undeclared-workspace-dependency" && v.location === "libs/sample/domain/test/bad.test.ts",
+        ),
+      ).toBe(true)
     }),
   )
 })

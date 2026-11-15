@@ -74,7 +74,12 @@ export const handlePlanCheck = (
             cwd: repoRoot,
             env: { ...process.env, HARNESS_PLAN_CHECK: "1", CI: "true" },
           })
-          return res.exitCode === 0 ? null : formatSubprocessError(res)
+          return match(res)
+            .with({ _tag: "Exited" }, (r) => (r.exitCode === 0 ? null : formatSubprocessError(r)))
+            .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, (r) =>
+              formatSubprocessError(r),
+            )
+            .exhaustive()
         },
         catch: (cause) => formatSubprocessError(cause),
       }).pipe(Effect.catch((msg) => Effect.succeed(msg || "Plan check subprocess failed")))

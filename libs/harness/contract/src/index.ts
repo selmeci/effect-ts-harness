@@ -23,9 +23,12 @@ export {
   SelfDogfoodingViolationError,
   SourceLineNumber,
   WorkspaceFilePath,
+  computeContentSha256,
   computeWorkspaceFileLineCount,
   inferAstGatePackageTagFromPath,
   makeSelfDogfoodingReport,
+  makeVerdictReport,
+  makeVerdictReportSchema,
 } from "./ast-and-gate-primitives.js"
 export {
   ActiveMutantId,
@@ -72,16 +75,20 @@ export {
   makeHarnessTierTopologyReport,
 } from "./tier-topology.js"
 export {
+  AstGateDecisionReport,
+  AstGateEvaluationError,
   AstGateEvaluationReport,
   AstGateFileBatchInput,
   type AstGateFileEvaluator,
   AstGateViolationContract,
   DaemonServerError,
+  DaemonServerErrorKind,
   DaemonServerInfo,
   DaemonSocketPath,
   DecisionCacheKey,
   DecisionCachePayloadJson,
   DecisionCacheStatsSnapshot,
   DecisionCacheTtlMillis,
+  makeAstGateDecisionReport,
   makeAstGateEvaluationReport,
 } from "./cache-and-daemon.js"

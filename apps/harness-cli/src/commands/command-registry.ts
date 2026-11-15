@@ -12,21 +12,7 @@ import {
   type CliEnv,
   type CliResult,
 } from "./daemon-and-omnigraph.service.js"
-import { handleGc, handleOntology } from "./gc-and-ontology.command.js"
 import { handleGuard, handleRoute } from "./guard-and-route.command.js"
-import { handleBench, handleMutate } from "./mutate-and-bench.command.js"
-import {
-  handlePlanCheck,
-  handlePlanSynth,
-  handleRepair,
-} from "./plan-and-repair.command.js"
-import {
-  handleDoctorOrSession,
-  handleIngest,
-  handleLearn,
-  handleReport,
-} from "./session-learn-report.command.js"
-import { handleDone, handleVerify } from "./verify-and-done.command.js"
 
 export { CliCommandInput, CliCommandName, CliCommandNotFoundError }
 
@@ -98,47 +84,74 @@ export const makeLiveCliCommandDescriptors = (
   {
     name: CliCommandName.make("plan-check"),
     summary: "Validate compilable stub<A,E,R>() skeletons and snapshot plan/current.",
-    execute: (args) => handlePlanCheck(args, options),
+    execute: (args) =>
+      Effect.promise(() => import("./plan-and-repair.command.js")).pipe(
+        Effect.flatMap((m) => m.handlePlanCheck(args, options)),
+      ),
   },
   {
     name: CliCommandName.make("plan-synth"),
     summary: "Synthesize plan graph patches via Double-Pushout (DPO) rules.",
-    execute: (args) => handlePlanSynth(args, options),
+    execute: (args) =>
+      Effect.promise(() => import("./plan-and-repair.command.js")).pipe(
+        Effect.flatMap((m) => m.handlePlanSynth(args, options)),
+      ),
   },
   {
     name: CliCommandName.make("repair"),
     summary: "Repair architectural and code antipatterns via DPO rules.",
-    execute: (args) => handleRepair(args, options),
+    execute: (args) =>
+      Effect.promise(() => import("./plan-and-repair.command.js")).pipe(
+        Effect.flatMap((m) => m.handleRepair(args, options)),
+      ),
   },
   {
     name: CliCommandName.make("verify"),
     summary: "Execute affected verify targets, check span budgets, and write verify-stamp.json.",
-    execute: () => handleVerify(options, decisionLayer),
+    execute: () =>
+      Effect.promise(() => import("./verify-and-done.command.js")).pipe(
+        Effect.flatMap((m) => m.handleVerify(options, decisionLayer)),
+      ),
   },
   {
     name: CliCommandName.make("done"),
     summary: "Verify stamp freshness, diff plan vs impl graph, and merge impl/current to main.",
-    execute: (args) => handleDone(args, options, decisionLayer),
+    execute: (args) =>
+      Effect.promise(() => import("./verify-and-done.command.js")).pipe(
+        Effect.flatMap((m) => m.handleDone(args, options, decisionLayer)),
+      ),
   },
   {
     name: CliCommandName.make("learn"),
     summary: "Cluster friction-log.jsonl events and propose deterministic promotions.",
-    execute: (args) => handleLearn(args, options, decisionLayer),
+    execute: (args) =>
+      Effect.promise(() => import("./session-learn-report.command.js")).pipe(
+        Effect.flatMap((m) => m.handleLearn(args, options, decisionLayer)),
+      ),
   },
   {
     name: CliCommandName.make("gc"),
     summary: "Run zero-entropy graph garbage collection and governance lint.",
-    execute: (args) => handleGc(args, options),
+    execute: (args) =>
+      Effect.promise(() => import("./gc-and-ontology.command.js")).pipe(
+        Effect.flatMap((m) => m.handleGc(args, options)),
+      ),
   },
   {
     name: CliCommandName.make("mutate"),
     summary: "Run in-process Mutant Schemata and saturation verification over domain code.",
-    execute: (args) => handleMutate(args, options),
+    execute: (args) =>
+      Effect.promise(() => import("./mutate-and-bench.command.js")).pipe(
+        Effect.flatMap((m) => m.handleMutate(args, options)),
+      ),
   },
   {
     name: CliCommandName.make("bench"),
     summary: "Measure harness stage latencies and enforce p50/p95 SLO budgets.",
-    execute: (args) => handleBench(args, options),
+    execute: (args) =>
+      Effect.promise(() => import("./mutate-and-bench.command.js")).pipe(
+        Effect.flatMap((m) => m.handleBench(args, options)),
+      ),
   },
   {
     name: CliCommandName.make("benchmark"),
@@ -151,27 +164,42 @@ export const makeLiveCliCommandDescriptors = (
   {
     name: CliCommandName.make("ingest"),
     summary: "Ingest runtime trace NDJSON events into Omnigraph.",
-    execute: (args) => handleIngest(args, options),
+    execute: (args) =>
+      Effect.promise(() => import("./session-learn-report.command.js")).pipe(
+        Effect.flatMap((m) => m.handleIngest(args, options)),
+      ),
   },
   {
     name: CliCommandName.make("session"),
     summary: "Inspect active session handoff state and inject pending stubs.",
-    execute: (args) => handleDoctorOrSession(args, options, decisionLayer),
+    execute: (args) =>
+      Effect.promise(() => import("./session-learn-report.command.js")).pipe(
+        Effect.flatMap((m) => m.handleDoctorOrSession(args, options, decisionLayer)),
+      ),
   },
   {
     name: CliCommandName.make("doctor"),
     summary: "Run workspace health diagnostics and session recovery checks.",
-    execute: (args) => handleDoctorOrSession(args, options, decisionLayer),
+    execute: (args) =>
+      Effect.promise(() => import("./session-learn-report.command.js")).pipe(
+        Effect.flatMap((m) => m.handleDoctorOrSession(args, options, decisionLayer)),
+      ),
   },
   {
     name: CliCommandName.make("ontology"),
     summary: "Audit ArchiMate 3.2 cross-layer traceability and semantic conflicts.",
-    execute: (args) => handleOntology(args, options, decisionLayer),
+    execute: (args) =>
+      Effect.promise(() => import("./gc-and-ontology.command.js")).pipe(
+        Effect.flatMap((m) => m.handleOntology(args, options, decisionLayer)),
+      ),
   },
   {
     name: CliCommandName.make("report"),
     summary: "Generate session telemetry and friction report.",
-    execute: (args) => handleReport(args, options),
+    execute: (args) =>
+      Effect.promise(() => import("./session-learn-report.command.js")).pipe(
+        Effect.flatMap((m) => m.handleReport(args, options)),
+      ),
   },
   {
     name: CliCommandName.make("check-openapi"),

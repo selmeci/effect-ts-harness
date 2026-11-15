@@ -27,6 +27,20 @@ export type CreatedAtMillis = typeof CreatedAtMillis.Type
 export const AlbumPhotoCount = Schema.Natural.pipe(Schema.brand("AlbumPhotoCount"))
 export type AlbumPhotoCount = typeof AlbumPhotoCount.Type
 
+export const MAX_PHOTOS_PER_ALBUM: AlbumPhotoCount = AlbumPhotoCount.make(100)
+
+export const StorageOperationName = Schema.String.pipe(Schema.brand("StorageOperationName"))
+export type StorageOperationName = typeof StorageOperationName.Type
+
+export const StorageErrorMessage = Schema.String.pipe(Schema.brand("StorageErrorMessage"))
+export type StorageErrorMessage = typeof StorageErrorMessage.Type
+
+export const HttpStatusCode = Schema.Int.pipe(Schema.brand("HttpStatusCode"))
+export type HttpStatusCode = typeof HttpStatusCode.Type
+
+export const ProtocolErrorMessage = Schema.String.pipe(Schema.brand("ProtocolErrorMessage"))
+export type ProtocolErrorMessage = typeof ProtocolErrorMessage.Type
+
 // Backward-compatible GreetInput export for sample-domain
 export const GreetInput = Schema.Struct({ name: PersonName })
 export type GreetInput = typeof GreetInput.Type
@@ -61,6 +75,21 @@ export class PhotoNotFoundError extends Schema.TaggedError<PhotoNotFoundError>()
 export class AlbumQuotaExceededError extends Schema.TaggedError<AlbumQuotaExceededError>()(
   "AlbumQuotaExceededError",
   { albumId: AlbumId, count: AlbumPhotoCount },
+) {}
+
+export class AlbumCounterStorageError extends Schema.TaggedError<AlbumCounterStorageError>()(
+  "AlbumCounterStorageError",
+  { operation: StorageOperationName, message: StorageErrorMessage },
+) {}
+
+export class AlbumCounterProtocolError extends Schema.TaggedError<AlbumCounterProtocolError>()(
+  "AlbumCounterProtocolError",
+  { status: HttpStatusCode, message: ProtocolErrorMessage },
+) {}
+
+export class PhotoStorageError extends Schema.TaggedError<PhotoStorageError>()(
+  "PhotoStorageError",
+  { operation: StorageOperationName, message: StorageErrorMessage },
 ) {}
 
 // HttpApi Group & API
@@ -99,7 +128,17 @@ export const GetAlbumCount = Rpc.make("GetAlbumCount", {
 })
 export type GetAlbumCount = typeof GetAlbumCount
 
-export const PhotoCounterRpc = RpcGroup.make(IncrementAlbumCount, GetAlbumCount)
+export const DecrementAlbumCount = Rpc.make("DecrementAlbumCount", {
+  payload: Schema.Struct({ albumId: AlbumId }),
+  success: AlbumPhotoCount,
+})
+export type DecrementAlbumCount = typeof DecrementAlbumCount
+
+export const PhotoCounterRpc = RpcGroup.make(
+  IncrementAlbumCount,
+  GetAlbumCount,
+  DecrementAlbumCount,
+)
 export type PhotoCounterRpc = typeof PhotoCounterRpc
 
 // Pure Breaking Change Detector

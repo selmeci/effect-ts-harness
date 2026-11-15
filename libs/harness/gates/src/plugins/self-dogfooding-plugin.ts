@@ -242,6 +242,130 @@ const isBannedParentConstructor = (callExpr: ts.CallExpression): boolean => {
   return false
 }
 
+const hasResultTryFsRead = (text: string): boolean =>
+  text.includes("Result.try") && /(?:readTextSync|readdirSync|readBytesSync)/.test(text)
+
+const isSilentEmptyFallbackFn = (
+  expr: ts.Expression,
+  sourceFile: ts.SourceFile,
+  allowExtendedEmptyLiterals: boolean,
+): boolean => {
+  const fn = unwrapAstExpression(expr)
+  if (!ts.isArrowFunction(fn) && !ts.isFunctionExpression(fn)) return false
+  let bodyText = fn.body.getText(sourceFile).trim()
+  if (ts.isBlock(fn.body)) {
+    if (fn.body.statements.length !== 1) return false
+    const only = fn.body.statements[0]
+    if (only === undefined || !ts.isReturnStatement(only) || only.expression === undefined) {
+      return false
+    }
+    bodyText = only.expression.getText(sourceFile).trim()
+  }
+  if (bodyText === '""' || bodyText === "''" || bodyText === "[]") return true
+  if (!allowExtendedEmptyLiterals) return false
+  return bodyText === "{}" || bodyText === "undefined" || bodyText === "false"
+}
+
+const hasFailureTagPattern = (expr: ts.Expression): boolean => {
+  const obj = unwrapAstExpression(expr)
+  if (!ts.isObjectLiteralExpression(obj)) return false
+  for (const prop of obj.properties) {
+    if (!ts.isPropertyAssignment(prop)) continue
+    const propName =
+      ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) ? prop.name.text : undefined
+    if (propName !== "_tag") continue
+    const val = unwrapAstExpression(prop.initializer)
+    if (
+      (ts.isStringLiteral(val) || ts.isNoSubstitutionTemplateLiteral(val)) &&
+      val.text === "Failure"
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
+const findRootMatchArgText = (
+  callExpr: ts.CallExpression,
+  sourceFile: ts.SourceFile,
+): string | undefined => {
+  let curr: ts.Expression = unwrapAstExpression(callExpr.expression)
+  while (ts.isPropertyAccessExpression(curr) && ts.isCallExpression(curr.expression)) {
+    const innerCall = curr.expression
+    const innerCallee = unwrapAstExpression(innerCall.expression)
+    if (ts.isIdentifier(innerCallee) && innerCallee.text === "match") {
+      return innerCall.arguments[0]?.getText(sourceFile)
+    }
+    curr = innerCallee
+  }
+  return undefined
+}
+
+const isSilentGateFsFallbackCall = (node: ts.CallExpression, sourceFile: ts.SourceFile): boolean => {
+  const unwrappedCallee = unwrapAstExpression(node.expression)
+  if (ts.isIdentifier(unwrappedCallee) && unwrappedCallee.text === "safeFs") {
+    return true
+  }
+  const calleeText = unwrappedCallee.getText(sourceFile)
+  if (
+    calleeText === "Result.getOrElse" &&
+    node.arguments.length >= 2 &&
+    node.arguments[0] !== undefined &&
+    node.arguments[1] !== undefined &&
+    hasResultTryFsRead(node.arguments[0].getText(sourceFile)) &&
+    isSilentEmptyFallbackFn(node.arguments[1], sourceFile, false)
+  ) {
+    return true
+  }
+  if (
+    ts.isPropertyAccessExpression(unwrappedCallee) &&
+    unwrappedCallee.name.text === "pipe" &&
+    hasResultTryFsRead(unwrappedCallee.expression.getText(sourceFile)) &&
+    node.arguments.some(
+      (arg) =>
+        ts.isCallExpression(arg) &&
+        unwrapAstExpression(arg.expression).getText(sourceFile) === "Result.getOrElse" &&
+        arg.arguments.length === 1 &&
+        arg.arguments[0] !== undefined &&
+        isSilentEmptyFallbackFn(arg.arguments[0], sourceFile, true),
+    )
+  ) {
+    return true
+  }
+  if (
+    ts.isIdentifier(unwrappedCallee) &&
+    unwrappedCallee.text === "pipe" &&
+    node.arguments.length >= 2 &&
+    node.arguments[0] !== undefined &&
+    hasResultTryFsRead(node.arguments[0].getText(sourceFile)) &&
+    node.arguments.slice(1).some(
+      (arg) =>
+        ts.isCallExpression(arg) &&
+        unwrapAstExpression(arg.expression).getText(sourceFile) === "Result.getOrElse" &&
+        arg.arguments.length === 1 &&
+        arg.arguments[0] !== undefined &&
+        isSilentEmptyFallbackFn(arg.arguments[0], sourceFile, true),
+    )
+  ) {
+    return true
+  }
+  if (
+    ts.isPropertyAccessExpression(unwrappedCallee) &&
+    unwrappedCallee.name.text === "with" &&
+    node.arguments.length >= 2 &&
+    node.arguments[0] !== undefined &&
+    node.arguments[1] !== undefined &&
+    hasFailureTagPattern(node.arguments[0]) &&
+    isSilentEmptyFallbackFn(node.arguments[1], sourceFile, true)
+  ) {
+    const matchArgText = findRootMatchArgText(node, sourceFile)
+    if (matchArgText !== undefined && hasResultTryFsRead(matchArgText)) {
+      return true
+    }
+  }
+  return false
+}
+
 export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function* (
   input: SelfDogfoodingInput,
 ): Effect.fn.Return<SelfDogfoodingReport, SelfDogfoodingViolationError, never> {
@@ -563,6 +687,21 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
             enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
           })
         }
+
+        if (
+          /(?:^|\/)libs\/harness\/gates\/src\//.test(file.filePath.replace(/\\/g, "/")) &&
+          isSilentGateFsFallbackCall(node, sourceFile)
+        ) {
+          violations.push({
+            rule: SelfDogfoodingRuleId.make("silent-gate-fs-fallback"),
+            message: SelfDogfoodingMessage.make(
+              `Silent filesystem fallback in '${file.filePath}' is banned — emit an explicit 'unreadable-workspace-file' finding instead of returning "", [], {}, undefined, or false.`,
+            ),
+            file: file.filePath,
+            line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+            enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
+          })
+        }
       }
 
       if (
@@ -628,12 +767,13 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
 
   const report = makeSelfDogfoodingReport(violations, NonNegativeCount.make(inspectedCount))
 
-  if (input.failOnViolation === true && violations.length > 0) {
+  const [firstViolation, ...restViolations] = violations
+  if (input.failOnViolation === true && firstViolation !== undefined) {
     return yield* new SelfDogfoodingViolationError({
       message: SelfDogfoodingMessage.make(
         `SelfDogfooding.decide found ${violations.length} violation(s).`,
       ),
-      violations,
+      violations: [firstViolation, ...restViolations],
     })
   }
 

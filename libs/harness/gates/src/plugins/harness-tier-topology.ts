@@ -151,6 +151,28 @@ const isForbiddenCoreDependency = (
   const rootPkg = resolvePackageRootName(dep)
   const targetTags = manifestTagsByPkg.get(rootPkg)
   if (targetTags !== undefined) {
+    return targetTags.some(
+      (tag) => tag === "type:domain" || tag === "type:infra" || tag === "type:app",
+    )
+  }
+  return (
+    rootPkg === "@harness/infra" ||
+    rootPkg.endsWith("-infra") ||
+    rootPkg === "alchemy" ||
+    rootPkg.startsWith("@alchemy.run/") ||
+    rootPkg.startsWith("@effect/sql-") ||
+    rootPkg === "@effect/platform-node" ||
+    rootPkg === "@effect/platform-node-shared"
+  )
+}
+
+const isForbiddenDomainDependency = (
+  dep: string,
+  manifestTagsByPkg: ReadonlyMap<string, ReadonlyArray<NxTierTag>>,
+): boolean => {
+  const rootPkg = resolvePackageRootName(dep)
+  const targetTags = manifestTagsByPkg.get(rootPkg)
+  if (targetTags !== undefined) {
     return targetTags.some((tag) => tag === "type:infra" || tag === "type:app")
   }
   return (
@@ -162,6 +184,42 @@ const isForbiddenCoreDependency = (
     rootPkg === "@effect/platform-node" ||
     rootPkg === "@effect/platform-node-shared"
   )
+}
+
+const isForbiddenInfraDependency = (
+  dep: string,
+  manifestTagsByPkg: ReadonlyMap<string, ReadonlyArray<NxTierTag>>,
+): boolean => {
+  const rootPkg = resolvePackageRootName(dep)
+  const targetTags = manifestTagsByPkg.get(rootPkg)
+  if (targetTags !== undefined) {
+    return targetTags.some((tag) => tag === "type:app")
+  }
+  if (
+    rootPkg.startsWith("@harness/") ||
+    rootPkg === "harness-cli" ||
+    rootPkg === "harness-mcp" ||
+    rootPkg.endsWith("-app")
+  ) {
+    return rootPkg === "harness-cli" || rootPkg === "harness-mcp" || rootPkg.endsWith("-app")
+  }
+  return false
+}
+
+const isForbiddenWebAppDependency = (
+  dep: string,
+  manifestTagsByPkg: ReadonlyMap<string, ReadonlyArray<NxTierTag>>,
+  workspacePackageNames: ReadonlySet<string>,
+): boolean => {
+  const rootPkg = resolvePackageRootName(dep)
+  if (!workspacePackageNames.has(rootPkg) && !rootPkg.startsWith("@harness/")) {
+    return false
+  }
+  const targetTags = manifestTagsByPkg.get(rootPkg)
+  if (targetTags !== undefined) {
+    return !targetTags.some((tag) => tag === "type:contract")
+  }
+  return rootPkg !== "@harness/contract" && !rootPkg.endsWith("-contract")
 }
 
 const extractStringOrTemplateText = (node: ts.Expression): string | undefined => {
@@ -273,52 +331,36 @@ const collectUndeclaredWorkspaceDependencyViolations = (
   manifest: PackageTierManifestInput,
   workspaceSourceFiles: ReadonlyArray<ServiceTierSourceInput>,
   workspacePackageNames: ReadonlySet<string>,
-  manifestDirs: ReadonlyArray<{ readonly pkgDir: string; readonly packageName: string }>,
 ): ReadonlyArray<HarnessTierTopologyViolation> => {
   const pkgDir = manifest.manifestPath.replace(/\/package\.json$/, "")
   const srcPrefix = `${pkgDir}/src/`
-  const declaredDeps = new Set<string>(manifest.dependencyNames)
+  const testPrefix = `${pkgDir}/test/`
+  const scriptsPrefix = `${pkgDir}/scripts/`
+  const runtimeDeclaredDeps = new Set<string>(manifest.dependencyNames)
+  const allDeclaredDeps = new Set<string>([
+    ...manifest.dependencyNames,
+    ...manifest.nonRuntimeDependencyNames,
+  ])
   const reported = new Set<string>()
   const found: Array<HarnessTierTopologyViolation> = []
 
-  const checkSpecifier = (filePath: WorkspaceFilePath, specifier: string | undefined): void => {
+  const checkSpecifier = (
+    filePath: WorkspaceFilePath,
+    specifier: string | undefined,
+    declaredDeps: ReadonlySet<string>,
+  ): void => {
     if (specifier === undefined) return
     if (specifier.startsWith(".")) {
       const resolved = posix.normalize(posix.join(posix.dirname(filePath), specifier))
-      if (resolved !== pkgDir && !resolved.startsWith(`${pkgDir}/`)) {
-        const targetManifest = manifestDirs.find(
-          (m) => resolved === m.pkgDir || resolved.startsWith(`${m.pkgDir}/`),
-        )
-        if (targetManifest !== undefined) {
-          if (
-            targetManifest.packageName !== manifest.packageName &&
-            !declaredDeps.has(targetManifest.packageName) &&
-            !reported.has(targetManifest.packageName)
-          ) {
-            reported.add(targetManifest.packageName)
-            found.push({
-              rule: TierTopologyRuleId.make("undeclared-workspace-dependency"),
-              location: filePath,
-              message: TierTopologyMessage.make(
-                `Source "${filePath}" imports workspace package "${targetManifest.packageName}" via relative path "${specifier}", which is not declared in "${manifest.manifestPath}" dependencies.`,
-              ),
-            })
-          }
-          return
-        }
-        if (
-          (resolved.startsWith("libs/") || resolved.startsWith("apps/")) &&
-          !reported.has(resolved)
-        ) {
-          reported.add(resolved)
-          found.push({
-            rule: TierTopologyRuleId.make("undeclared-workspace-dependency"),
-            location: filePath,
-            message: TierTopologyMessage.make(
-              `Source "${filePath}" imports cross-package relative path "${specifier}" (resolved "${resolved}") outside "${pkgDir}/", bypassing "${manifest.manifestPath}" dependencies.`,
-            ),
-          })
-        }
+      if (resolved !== pkgDir && !resolved.startsWith(`${pkgDir}/`) && !reported.has(`rel:${resolved}`)) {
+        reported.add(`rel:${resolved}`)
+        found.push({
+          rule: TierTopologyRuleId.make("undeclared-workspace-dependency"),
+          location: filePath,
+          message: TierTopologyMessage.make(
+            `Source "${filePath}" imports relative path "${specifier}" (resolved "${resolved}") escaping package root "${pkgDir}/" — import workspace packages by package name declared in "${manifest.manifestPath}".`,
+          ),
+        })
       }
       return
     }
@@ -337,15 +379,19 @@ const collectUndeclaredWorkspaceDependencyViolations = (
   }
 
   for (const file of workspaceSourceFiles) {
-    if (!file.filePath.startsWith(srcPrefix) || !/\.(?:ts|tsx|mts|cts)$/.test(file.filePath)) {
+    const isSrc = file.filePath.startsWith(srcPrefix)
+    const isTestOrScript =
+      file.filePath.startsWith(testPrefix) || file.filePath.startsWith(scriptsPrefix)
+    if ((!isSrc && !isTestOrScript) || !/\.(?:ts|tsx|mts|cts)$/.test(file.filePath)) {
       continue
     }
+    const allowedDeps = isSrc ? runtimeDeclaredDeps : allDeclaredDeps
     const { sourceFile } = getOrCreateCachedSourceFile(file.filePath, file.content)
     const location = WorkspaceFilePath.make(file.filePath)
     const walk = (node: ts.Node): void => {
       if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier !== undefined) {
         if (ts.isStringLiteral(node.moduleSpecifier)) {
-          checkSpecifier(location, node.moduleSpecifier.text)
+          checkSpecifier(location, node.moduleSpecifier.text, allowedDeps)
         }
         return
       }
@@ -354,7 +400,7 @@ const collectUndeclaredWorkspaceDependencyViolations = (
         ts.isExternalModuleReference(node.moduleReference) &&
         ts.isStringLiteral(node.moduleReference.expression)
       ) {
-        checkSpecifier(location, node.moduleReference.expression.text)
+        checkSpecifier(location, node.moduleReference.expression.text, allowedDeps)
         return
       }
       if (ts.isCallExpression(node) && node.arguments.length > 0 && node.arguments[0] !== undefined) {
@@ -363,7 +409,7 @@ const collectUndeclaredWorkspaceDependencyViolations = (
           (ts.isIdentifier(node.expression) && node.expression.text === "require") ||
           (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "require")
         if (isDynamicImport || isRequireCall) {
-          checkSpecifier(location, extractStringOrTemplateText(node.arguments[0]))
+          checkSpecifier(location, extractStringOrTemplateText(node.arguments[0]), allowedDeps)
         }
       }
       ts.forEachChild(node, walk)
@@ -382,12 +428,11 @@ export const decideHarnessTierTopology = Effect.fn("HarnessTierTopology.decide")
       const serviceTag = NxTierTag.make("type:service")
       const coreTag = NxTierTag.make("type:core")
       const domainTag = NxTierTag.make("type:domain")
+      const infraTag = NxTierTag.make("type:infra")
+      const appTag = NxTierTag.make("type:app")
+      const webScopeTag = NxTierTag.make("scope:web")
       const manifestTagsByPkg = buildManifestTagsByPackage(input.manifests)
       const workspacePackageNames = new Set(input.manifests.map((m) => m.packageName))
-      const manifestDirs = input.manifests.map((m) => ({
-        pkgDir: m.manifestPath.replace(/\/package\.json$/, ""),
-        packageName: m.packageName,
-      }))
 
       for (const manifest of input.manifests) {
         const location = WorkspaceFilePath.make(manifest.manifestPath)
@@ -405,15 +450,31 @@ export const decideHarnessTierTopology = Effect.fn("HarnessTierTopology.decide")
           })
         }
 
+        const allDependencyNames = [
+          ...manifest.dependencyNames,
+          ...(manifest.nonRuntimeDependencyNames ?? []),
+        ]
+        const bannedDrizzleDeps = allDependencyNames.filter((dep) => isDrizzleDependency(dep))
+        if (bannedDrizzleDeps.length > 0) {
+          violations.push({
+            rule: TierTopologyRuleId.make("banned-workspace-dependency"),
+            location,
+            message: TierTopologyMessage.make(
+              `Package "${manifest.packageName}" declares banned Drizzle dependency "${bannedDrizzleDeps[0]}" in "${manifest.manifestPath}" — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator).`,
+            ),
+          })
+        }
+
+        const nonDrizzleDeps = manifest.dependencyNames.filter((dep) => !isDrizzleDependency(dep))
         const isContract = manifest.nxTags.includes(contractTag)
         const isService = !isContract && manifest.nxTags.includes(serviceTag)
-        const isCoreOrDomain =
-          !isContract &&
-          !isService &&
-          (manifest.nxTags.includes(coreTag) || manifest.nxTags.includes(domainTag))
+        const isCore = !isContract && !isService && manifest.nxTags.includes(coreTag)
+        const isDomain = !isContract && !isService && !isCore && manifest.nxTags.includes(domainTag)
+        const isInfra = !isContract && !isService && !isCore && !isDomain && manifest.nxTags.includes(infraTag)
+        const isWebApp = manifest.nxTags.includes(appTag) && manifest.nxTags.includes(webScopeTag)
 
         if (isContract) {
-          for (const dep of manifest.dependencyNames) {
+          for (const dep of nonDrizzleDeps) {
             if (dep !== "effect") {
               violations.push({
                 rule: TierTopologyRuleId.make("forbidden-contract-dependency"),
@@ -426,7 +487,7 @@ export const decideHarnessTierTopology = Effect.fn("HarnessTierTopology.decide")
           }
         }
         if (isService) {
-          for (const dep of manifest.dependencyNames) {
+          for (const dep of nonDrizzleDeps) {
             if (!isAllowedServiceDependency(dep, manifestTagsByPkg)) {
               violations.push({
                 rule: TierTopologyRuleId.make("forbidden-service-dependency"),
@@ -438,30 +499,53 @@ export const decideHarnessTierTopology = Effect.fn("HarnessTierTopology.decide")
             }
           }
         }
-        const allDependencyNames = [
-          ...manifest.dependencyNames,
-          ...(manifest.nonRuntimeDependencyNames ?? []),
-        ]
-        for (const dep of allDependencyNames) {
-          if (isDrizzleDependency(dep)) {
-            violations.push({
-              rule: TierTopologyRuleId.make("forbidden-core-dependency"),
-              location,
-              message: TierTopologyMessage.make(
-                `Package "${manifest.packageName}" declares banned Drizzle dependency "${dep}" in "${manifest.manifestPath}" — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator).`,
-              ),
-            })
-          }
-        }
-
-        if (isCoreOrDomain) {
-          for (const dep of manifest.dependencyNames) {
+        if (isCore) {
+          for (const dep of nonDrizzleDeps) {
             if (isForbiddenCoreDependency(dep, manifestTagsByPkg)) {
               violations.push({
                 rule: TierTopologyRuleId.make("forbidden-core-dependency"),
                 location,
                 message: TierTopologyMessage.make(
-                  `Core/domain package "${manifest.packageName}" declares forbidden dependency "${dep}" — type:core and type:domain packages must not depend on type:infra or type:app packages.`,
+                  `Core package "${manifest.packageName}" declares forbidden dependency "${dep}" — type:core packages must not depend on type:domain, type:infra, or type:app packages.`,
+                ),
+              })
+            }
+          }
+        }
+        if (isDomain) {
+          for (const dep of nonDrizzleDeps) {
+            if (isForbiddenDomainDependency(dep, manifestTagsByPkg)) {
+              violations.push({
+                rule: TierTopologyRuleId.make("forbidden-domain-dependency"),
+                location,
+                message: TierTopologyMessage.make(
+                  `Domain package "${manifest.packageName}" declares forbidden dependency "${dep}" — type:domain packages must not depend on type:infra, type:app, alchemy, or @effect/sql-*.`,
+                ),
+              })
+            }
+          }
+        }
+        if (isInfra) {
+          for (const dep of nonDrizzleDeps) {
+            if (isForbiddenInfraDependency(dep, manifestTagsByPkg)) {
+              violations.push({
+                rule: TierTopologyRuleId.make("forbidden-infra-dependency"),
+                location,
+                message: TierTopologyMessage.make(
+                  `Infra package "${manifest.packageName}" declares forbidden dependency "${dep}" — type:infra packages must not depend on type:app packages.`,
+                ),
+              })
+            }
+          }
+        }
+        if (isWebApp) {
+          for (const dep of nonDrizzleDeps) {
+            if (isForbiddenWebAppDependency(dep, manifestTagsByPkg, workspacePackageNames)) {
+              violations.push({
+                rule: TierTopologyRuleId.make("forbidden-web-app-dependency"),
+                location,
+                message: TierTopologyMessage.make(
+                  `Web app package "${manifest.packageName}" (scope:web) declares forbidden workspace dependency "${dep}" — scope:web apps may import type:contract and UI libraries only.`,
                 ),
               })
             }
@@ -481,7 +565,6 @@ export const decideHarnessTierTopology = Effect.fn("HarnessTierTopology.decide")
               manifest,
               workspaceSourceFiles,
               workspacePackageNames,
-              manifestDirs,
             ),
           )
         }

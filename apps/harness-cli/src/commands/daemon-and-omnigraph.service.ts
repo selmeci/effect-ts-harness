@@ -15,7 +15,7 @@ import {
   type TelemetrySurface,
 } from "@harness/gates"
 import { type HarnessGraph, resolveCanonicalRepoRoot } from "@harness/graph"
-import { nodeSyncHostIo, queryUnixSocketLine } from "@harness/infra"
+import { nodeSyncHostIo, queryUnixSocketLineDetailed } from "@harness/infra"
 import {
   buildOmnigraphClusterKillArgs,
   CLI_REPO_ROOT,
@@ -256,7 +256,10 @@ const hasGitRef = (repoRoot: string, ref: string): boolean =>
       const res = nodeSyncHostIo.execFileSync("git", ["rev-parse", "--verify", ref], {
         cwd: repoRoot,
       })
-      return res.exitCode === 0
+      return match(res)
+        .with({ _tag: "Exited" }, ({ exitCode }) => exitCode === 0)
+        .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => false)
+        .exhaustive()
     }),
     () => false,
   )
@@ -287,15 +290,22 @@ export const tryGitDiffRange = (
       const res = nodeSyncHostIo.execFileSync("git", ["diff", "--name-only", range], {
         cwd: repoRoot,
       })
-      if (res.exitCode !== 0) {
-        return Option.none<ReadonlyArray<string>>()
-      }
-      return Option.some(
-        res.stdout
-          .split(/\r?\n/)
-          .map((l) => l.trim())
-          .filter((l) => l.length > 0),
-      )
+      return match(res)
+        .with({ _tag: "Exited" }, ({ exitCode, stdout }) => {
+          if (exitCode !== 0) {
+            return Option.none<ReadonlyArray<string>>()
+          }
+          return Option.some(
+            stdout
+              .split(/\r?\n/)
+              .map((l) => l.trim())
+              .filter((l) => l.length > 0),
+          )
+        })
+        .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () =>
+          Option.none<ReadonlyArray<string>>(),
+        )
+        .exhaustive()
     }),
     () => Option.none<ReadonlyArray<string>>(),
   )
@@ -329,20 +339,25 @@ export const resolveModifiedFilesSinceStampOrHead = (repoRoot: string): Readonly
       const res = nodeSyncHostIo.execFileSync("git", ["status", "--porcelain", "-uall"], {
         cwd: repoRoot,
       })
-      if (res.exitCode === 0) {
-        for (const line of res.stdout.split(/\r?\n/)) {
-          const trimmed = line.trim()
-          if (trimmed.length < 4) continue
-          const relPath = trimmed
-            .slice(2)
-            .trim()
-            .replace(/^.*->\s*/, "")
-            .replace(/^"|"$/g, "")
-          if (relPath.length > 0) {
-            files.add(relPath.replace(/\\/g, "/"))
+      match(res)
+        .with({ _tag: "Exited" }, ({ exitCode, stdout }) => {
+          if (exitCode === 0) {
+            for (const line of stdout.split(/\r?\n/)) {
+              const trimmed = line.trim()
+              if (trimmed.length < 4) continue
+              const relPath = trimmed
+                .slice(2)
+                .trim()
+                .replace(/^.*->\s*/, "")
+                .replace(/^"|"$/g, "")
+              if (relPath.length > 0) {
+                files.add(relPath.replace(/\\/g, "/"))
+              }
+            }
           }
-        }
-      }
+        })
+        .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => undefined)
+        .exhaustive()
       for (const diffFile of readGitBranchDiffFiles(repoRoot)) {
         files.add(diffFile.replace(/\\/g, "/"))
       }
@@ -381,10 +396,25 @@ export const tryQueryWarmDaemonSocket = (
       repoRoot,
       ...(files !== undefined ? { files } : {}),
     })
-    const lineOpt = yield* queryUnixSocketLine(socketPath, payload, 1500)
-    return Option.flatMap(lineOpt, (line) =>
-      Schema.decodeOption(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)))(line),
-    )
+    const socketRes = yield* queryUnixSocketLineDetailed(socketPath, payload, 1500)
+    return match(socketRes)
+      .with({ _tag: "Reply" }, ({ line }) =>
+        Schema.decodeOption(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)))(
+          line,
+        ),
+      )
+      .with({ _tag: "Unavailable" }, ({ reason, detail }) => {
+        match(reason)
+          .with("timeout", "overflow", "socket-error", (unexpectedReason) => {
+            process.stderr.write(
+              `[harness:daemon] Socket query '${command}' failed (${unexpectedReason})${detail ? `: ${detail}` : ""}\n`,
+            )
+          })
+          .with("missing-or-refused", "closed", () => undefined)
+          .exhaustive()
+        return Option.none<Record<string, unknown>>()
+      })
+      .exhaustive()
   })
 
 export interface OllamaReadinessOptions {
@@ -452,12 +482,20 @@ export function ensureLocalOllamaReady(opts?: OllamaReadinessOptions): Effect.Ef
           opts.spawnOllama()
         } else {
           if (customUrl === undefined) {
-            nodeSyncHostIo.spawnDetached("ollama", ["serve"], {
+            const spawnRes = nodeSyncHostIo.spawnDetached("ollama", ["serve"], {
               env: {
                 ...process.env,
                 OLLAMA_KEEP_ALIVE: process.env.OLLAMA_KEEP_ALIVE ?? "-1",
               },
             })
+            match(spawnRes)
+              .with({ _tag: "Spawned" }, () => undefined)
+              .with({ _tag: "SpawnFailed" }, ({ spawnError }) => {
+                process.stderr.write(
+                  `[harness:ollama] Failed to spawn ollama serve: ${spawnError}\n`,
+                )
+              })
+              .exhaustive()
           }
         }
       },

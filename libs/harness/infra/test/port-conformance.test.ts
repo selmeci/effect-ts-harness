@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { NodeServices } from "@effect/platform-node"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Layer, Option } from "effect"
+import { match } from "ts-pattern"
 import {
   ActiveMutantId,
   AstSourceContent,
@@ -210,7 +211,14 @@ describe("@harness/infra port conformance suite", () => {
           const e2 = yield* cache.cacheSize.pipe(Effect.flip)
           return [e1, e2] as const
         }).pipe(Effect.provide(badLayer))
-        expect(evalErr.operation).toBe("read")
+        match(evalErr)
+          .with({ _tag: "WorkspaceFsError" }, (err) => {
+            expect(err.operation).toBe("read")
+          })
+          .with({ _tag: "AstGateEvaluationError" }, () => {
+            expect.unreachable("Expected WorkspaceFsError")
+          })
+          .exhaustive()
         expect(sizeErr.operation).toBe("read")
       }),
     ),

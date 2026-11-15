@@ -1,12 +1,12 @@
 import { NodeServices } from "@effect/platform-node"
 import {
+  Cause,
   Deferred,
   Effect,
   FileSystem,
   Layer,
   Option,
   Path,
-  Ref,
   Schema,
   SynchronizedRef,
 } from "effect"
@@ -16,13 +16,12 @@ import {
   DecisionCachePayloadJson,
   type DecisionCacheStatsSnapshot,
   type DecisionCacheTtlMillis,
-  ErrorReasonMessage,
   NonNegativeCount,
-  WorkspaceFilePath,
-  WorkspaceFsError,
-  WorkspaceFsOperation,
+  type WorkspaceFilePath,
+  type WorkspaceFsError,
 } from "@harness/contract"
 import { DecisionCachePort, type DecisionCachePortShape } from "@harness/service"
+import { toReadError, toWriteError } from "./cache-helpers.js"
 
 export type { DecisionCacheStatsSnapshot }
 
@@ -40,48 +39,36 @@ const decodePersistedStore = Schema.decodeOption(
   Schema.fromJsonString(PersistedDecisionStoreSchema),
 )
 
-interface DecisionCacheState {
-  readonly loaded: boolean
-  readonly entries: ReadonlyMap<string, PersistedDecisionEntry>
-  readonly hits: number
-  readonly misses: number
-  readonly coalescedRequests: number
-}
-
 type InFlightDecision = Deferred.Deferred<
   Option.Option<DecisionCachePayloadJson>,
   WorkspaceFsError
 >
 
-const toReadError = (filePath: WorkspaceFilePath, err: unknown): WorkspaceFsError => {
-  if (err instanceof WorkspaceFsError) {
-    return err
-  }
-  const message =
-    err instanceof Error && err.message.trim().length > 0
-      ? err.message.trim()
-      : "Failed to read decision cache"
-  return new WorkspaceFsError({
-    filePath,
-    operation: WorkspaceFsOperation.make("read"),
-    reason: ErrorReasonMessage.make(message),
-  })
+interface DecisionCacheState {
+  readonly loaded: boolean
+  readonly entries: ReadonlyMap<string, PersistedDecisionEntry>
+  readonly inFlight: ReadonlyMap<DecisionCacheKey, InFlightDecision>
+  readonly hits: number
+  readonly misses: number
+  readonly coalescedRequests: number
 }
 
-const toWriteError = (filePath: WorkspaceFilePath, err: unknown): WorkspaceFsError => {
-  if (err instanceof WorkspaceFsError) {
-    return err
-  }
-  const message =
-    err instanceof Error && err.message.trim().length > 0
-      ? err.message.trim()
-      : "Failed to persist decision cache"
-  return new WorkspaceFsError({
-    filePath,
-    operation: WorkspaceFsOperation.make("write"),
-    reason: ErrorReasonMessage.make(message),
-  })
+interface LookupStepHit {
+  readonly _tag: "Hit"
+  readonly value: DecisionCachePayloadJson
 }
+
+interface LookupStepFollow {
+  readonly _tag: "Follow"
+  readonly deferred: InFlightDecision
+}
+
+interface LookupStepLead {
+  readonly _tag: "Lead"
+  readonly deferred: InFlightDecision
+}
+
+type LookupStep = LookupStepHit | LookupStepFollow | LookupStepLead
 
 /**
  * Constructs a `DecisionCachePort` layer requiring `FileSystem` and `Path`.
@@ -106,13 +93,11 @@ const makeDecisionCacheLayer = (options?: {
       const stateRef = yield* SynchronizedRef.make<DecisionCacheState>({
         loaded: options?.cacheFilePath === undefined,
         entries: new Map<string, PersistedDecisionEntry>(),
+        inFlight: new Map<DecisionCacheKey, InFlightDecision>(),
         hits: 0,
         misses: 0,
         coalescedRequests: 0,
       })
-      const inFlightRef = yield* Ref.make<ReadonlyMap<DecisionCacheKey, InFlightDecision>>(
-        new Map(),
-      )
 
       const ensureLoaded = (
         state: DecisionCacheState,
@@ -256,71 +241,97 @@ const makeDecisionCacheLayer = (options?: {
         readonly ttlMillis: DecisionCacheTtlMillis
         readonly compute: Effect.Effect<DecisionCachePayloadJson, E, R>
       }): Effect.Effect<DecisionCachePayloadJson, E | WorkspaceFsError, R> =>
-        Effect.gen(function* () {
-          const cachedOpt = yield* SynchronizedRef.modifyEffect(stateRef, (state) =>
-            Effect.gen(function* () {
-              const loaded = yield* ensureLoaded(state)
-              const existing = loaded.entries.get(input.key)
-              if (existing !== undefined && Date.now() <= existing.expiresAtMs) {
-                return [
-                  Option.some(existing.payload),
-                  { ...loaded, hits: loaded.hits + 1 },
-                ] as const
-              }
-              return [Option.none<DecisionCachePayloadJson>(), loaded] as const
-            }),
-          )
-
-          return yield* match(cachedOpt)
-            .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
-            .with({ _tag: "None" }, () =>
+        Effect.acquireUseRelease(
+          SynchronizedRef.modifyEffect(
+            stateRef,
+            (state): Effect.Effect<readonly [LookupStep, DecisionCacheState], WorkspaceFsError> =>
               Effect.gen(function* () {
-                const newDeferred = yield* Deferred.make<
+                const loaded = yield* ensureLoaded(state)
+                const existing = loaded.entries.get(input.key)
+                if (existing !== undefined && Date.now() <= existing.expiresAtMs) {
+                  return [
+                    { _tag: "Hit", value: existing.payload } satisfies LookupStep,
+                    { ...loaded, hits: loaded.hits + 1 },
+                  ] as const
+                }
+                const existingInFlight = loaded.inFlight.get(input.key)
+                if (existingInFlight !== undefined) {
+                  return [
+                    { _tag: "Follow", deferred: existingInFlight } satisfies LookupStep,
+                    { ...loaded, coalescedRequests: loaded.coalescedRequests + 1 },
+                  ] as const
+                }
+                const deferred = yield* Deferred.make<
                   Option.Option<DecisionCachePayloadJson>,
                   WorkspaceFsError
                 >()
-                const existingOrNull = yield* Ref.modify(inFlightRef, (inFlight) => {
-                  const existing = inFlight.get(input.key)
-                  if (existing !== undefined) {
-                    return [existing, inFlight] as const
-                  }
-                  const next = new Map(inFlight)
-                  next.set(input.key, newDeferred)
-                  return [null, next] as const
-                })
-
-                if (existingOrNull !== null) {
-                  yield* SynchronizedRef.update(stateRef, (state) => ({
-                    ...state,
-                    coalescedRequests: state.coalescedRequests + 1,
-                  }))
-                  const resOpt = yield* Deferred.await(existingOrNull)
-                  return yield* match(resOpt)
-                    .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
-                    .with({ _tag: "None" }, () => input.compute)
-                    .exhaustive()
-                }
-
-                return yield* Effect.gen(function* () {
-                  yield* SynchronizedRef.update(stateRef, (state) => ({
-                    ...state,
-                    misses: state.misses + 1,
-                  }))
+                const nextInFlight = new Map(loaded.inFlight)
+                nextInFlight.set(input.key, deferred)
+                return [
+                  { _tag: "Lead", deferred } satisfies LookupStep,
+                  { ...loaded, inFlight: nextInFlight, misses: loaded.misses + 1 },
+                ] as const
+              }),
+          ),
+          (step): Effect.Effect<DecisionCachePayloadJson, E | WorkspaceFsError, R> =>
+            match(step)
+              .with({ _tag: "Hit" }, ({ value }) => Effect.succeed(value))
+              .with({ _tag: "Follow" }, ({ deferred }) =>
+                Deferred.await(deferred).pipe(
+                  Effect.flatMap((outcomeOpt) =>
+                    match(outcomeOpt)
+                      .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
+                      .with({ _tag: "None" }, () => lookupOrCompute(input))
+                      .exhaustive(),
+                  ),
+                ),
+              )
+              .with({ _tag: "Lead" }, ({ deferred }) =>
+                Effect.gen(function* () {
                   const computeExit = yield* Effect.exit(input.compute)
                   return yield* match(computeExit)
                     .with({ _tag: "Success" }, ({ value }) =>
                       Effect.gen(function* () {
                         const commitExit = yield* Effect.exit(
-                          commitEntry(input.key, value, input.ttlMillis),
+                          SynchronizedRef.updateEffect(stateRef, (state) =>
+                            Effect.gen(function* () {
+                              const loaded = yield* ensureLoaded(state)
+                              const nextEntries = new Map(loaded.entries)
+                              nextEntries.set(input.key, {
+                                payload: value,
+                                expiresAtMs: Date.now() + input.ttlMillis,
+                              })
+                              yield* persistEntries(nextEntries)
+                              const nextInFlight = new Map(loaded.inFlight)
+                              if (nextInFlight.get(input.key) === deferred) {
+                                nextInFlight.delete(input.key)
+                              }
+                              return {
+                                ...loaded,
+                                entries: nextEntries,
+                                inFlight: nextInFlight,
+                              }
+                            }),
+                          ),
                         )
                         return yield* match(commitExit)
                           .with({ _tag: "Success" }, () =>
-                            Deferred.succeed(newDeferred, Option.some(value)).pipe(
-                              Effect.as(value),
-                            ),
+                            Deferred.succeed(deferred, Option.some(value)).pipe(Effect.as(value)),
                           )
                           .with({ _tag: "Failure" }, ({ cause }) =>
-                            Deferred.failCause(newDeferred, cause).pipe(
+                            SynchronizedRef.update(stateRef, (state) => {
+                              if (state.inFlight.get(input.key) !== deferred) {
+                                return state
+                              }
+                              const nextInFlight = new Map(state.inFlight)
+                              nextInFlight.delete(input.key)
+                              return { ...state, inFlight: nextInFlight }
+                            }).pipe(
+                              Effect.andThen(
+                                Cause.hasInterruptsOnly(cause)
+                                  ? Deferred.succeed(deferred, Option.none())
+                                  : Deferred.failCause(deferred, cause),
+                              ),
                               Effect.andThen(Effect.failCause(cause)),
                             ),
                           )
@@ -328,31 +339,50 @@ const makeDecisionCacheLayer = (options?: {
                       }),
                     )
                     .with({ _tag: "Failure" }, ({ cause }) =>
-                      Deferred.succeed(newDeferred, Option.none()).pipe(
+                      SynchronizedRef.update(stateRef, (state) => {
+                        if (state.inFlight.get(input.key) !== deferred) {
+                          return state
+                        }
+                        const nextInFlight = new Map(state.inFlight)
+                        nextInFlight.delete(input.key)
+                        return { ...state, inFlight: nextInFlight }
+                      }).pipe(
+                        Effect.andThen(
+                          match(Cause.findError(cause))
+                            .with({ _tag: "Success" }, () =>
+                              Deferred.succeed(deferred, Option.none()),
+                            )
+                            .with({ _tag: "Failure" }, ({ failure: defectOrInterruptCause }) =>
+                              Cause.hasInterruptsOnly(defectOrInterruptCause)
+                                ? Deferred.succeed(deferred, Option.none())
+                                : Deferred.failCause(deferred, defectOrInterruptCause),
+                            )
+                            .exhaustive(),
+                        ),
                         Effect.andThen(Effect.failCause(cause)),
                       ),
                     )
                     .exhaustive()
+                }),
+              )
+              .exhaustive(),
+          (step) =>
+            match(step)
+              .with({ _tag: "Hit" }, { _tag: "Follow" }, () => Effect.void)
+              .with({ _tag: "Lead" }, ({ deferred }) =>
+                SynchronizedRef.update(stateRef, (state) => {
+                  if (state.inFlight.get(input.key) !== deferred) {
+                    return state
+                  }
+                  const nextInFlight = new Map(state.inFlight)
+                  nextInFlight.delete(input.key)
+                  return { ...state, inFlight: nextInFlight }
                 }).pipe(
-                  Effect.ensuring(
-                    Ref.update(inFlightRef, (inFlight) => {
-                      if (inFlight.get(input.key) !== newDeferred) {
-                        return inFlight
-                      }
-                      const next = new Map(inFlight)
-                      next.delete(input.key)
-                      return next
-                    }).pipe(
-                      Effect.andThen(
-                        Deferred.succeed(newDeferred, Option.none()).pipe(Effect.ignore),
-                      ),
-                    ),
-                  ),
-                )
-              }),
-            )
-            .exhaustive()
-        })
+                  Effect.andThen(Deferred.succeed(deferred, Option.none()).pipe(Effect.ignore)),
+                ),
+              )
+              .exhaustive(),
+        )
 
       const clear: Effect.Effect<void, WorkspaceFsError> = SynchronizedRef.updateEffect(
         stateRef,
@@ -367,6 +397,7 @@ const makeDecisionCacheLayer = (options?: {
             return {
               loaded: true,
               entries: new Map<string, PersistedDecisionEntry>(),
+              inFlight: new Map<DecisionCacheKey, InFlightDecision>(),
               hits: 0,
               misses: 0,
               coalescedRequests: 0,

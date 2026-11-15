@@ -13,6 +13,7 @@ import {
   validateSubprocessInput,
 } from "@harness/contract"
 import {
+  type HarnessSubprocessExecOptions,
   HarnessSubprocessRunner,
   type HarnessSubprocessRunnerShape,
 } from "@harness/service"
@@ -20,6 +21,22 @@ import type { SyncHostIo } from "@harness/service/host-io"
 
 const DEFAULT_SUBPROCESS_TIMEOUT_MS = 60_000
 const DEFAULT_MAX_BUFFER_BYTES = 10 * 1024 * 1024
+
+const extractErrnoCode = (err: unknown): string | undefined => {
+  if (typeof err !== "object" || err === null) {
+    return undefined
+  }
+  if ("code" in err && typeof err.code === "string") {
+    return err.code
+  }
+  if ("cause" in err) {
+    return extractErrnoCode(err.cause)
+  }
+  if ("reason" in err) {
+    return extractErrnoCode(err.reason)
+  }
+  return undefined
+}
 
 const hasExitCodePlatformReason = (err: unknown): boolean =>
   typeof err === "object" &&
@@ -31,6 +48,16 @@ const hasExitCodePlatformReason = (err: unknown): boolean =>
   err.reason.method === "exitCode"
 
 const classifySpawnErrorKind = (err: unknown, message: string): SubprocessFailureKind => {
+  const code = extractErrnoCode(err)
+  if (code === "ENOBUFS") {
+    return SubprocessFailureKind.make("max-buffer")
+  }
+  if (code === "ETIMEDOUT") {
+    return SubprocessFailureKind.make("timeout")
+  }
+  if (code === "ENOENT" || code === "EACCES") {
+    return SubprocessFailureKind.make("spawn-error")
+  }
   if (/\bENOBUFS\b|maxBuffer/i.test(message)) {
     return SubprocessFailureKind.make("max-buffer")
   }
@@ -59,7 +86,6 @@ const toSubprocessError = (
       : `Command '${command}' failed to spawn`
   return new HarnessSubprocessError({
     command,
-    exitCode: SubprocessExitCode.make(-1),
     stderr: SubprocessOutput.make(message),
     reason: ErrorReasonMessage.make(message),
     failureKind: classifySpawnErrorKind(err, message),
@@ -81,7 +107,6 @@ const collectBoundedStreamText = (
         return Effect.fail(
           new HarnessSubprocessError({
             command,
-            exitCode: SubprocessExitCode.make(-1),
             stderr: SubprocessOutput.make(
               `Command '${command}' ${streamName} exceeded maxBufferBytes (${maxBufferBytes})`,
             ),
@@ -108,6 +133,7 @@ const makeHarnessSubprocessRunnerLayer = (
 
       const exec = Effect.fn("HarnessSubprocessRunner.exec")(function* (
         input: SubprocessExecInput,
+        options?: HarnessSubprocessExecOptions,
       ): Effect.fn.Return<SubprocessExecResult, HarnessSubprocessError> {
         yield* match(validateSubprocessInput(input))
           .with({ _tag: "Some" }, ({ value }) => Effect.fail(value))
@@ -143,13 +169,12 @@ const makeHarnessSubprocessRunnerLayer = (
         ).pipe(Effect.mapError((err) => toSubprocessError(input.command, err)))
 
         const timed = yield* runSpawned.pipe(Effect.timeoutOption(Duration.millis(timeoutMs)))
-        return yield* match(timed)
+        const result = yield* match(timed)
           .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
           .with({ _tag: "None" }, () =>
             Effect.fail(
               new HarnessSubprocessError({
                 command: input.command,
-                exitCode: SubprocessExitCode.make(-1),
                 stderr: SubprocessOutput.make(`Timed out after ${timeoutMs}ms`),
                 reason: ErrorReasonMessage.make(
                   `Command '${input.command}' timed out after ${timeoutMs}ms`,
@@ -159,6 +184,20 @@ const makeHarnessSubprocessRunnerLayer = (
             ),
           )
           .exhaustive()
+
+        if (options?.checkExitCode === true && result.exitCode !== 0) {
+          return yield* new HarnessSubprocessError({
+            command: input.command,
+            exitCode: result.exitCode,
+            stderr: result.stderr,
+            reason: ErrorReasonMessage.make(
+              `Command '${input.command}' exited with code ${result.exitCode}`,
+            ),
+            failureKind: SubprocessFailureKind.make("non-zero-exit"),
+          })
+        }
+
+        return result
       })
 
       const impl: HarnessSubprocessRunnerShape = {
@@ -176,7 +215,7 @@ const makeHarnessSubprocessRunnerHostIoLayer = (
   hostIo: SyncHostIo,
 ): Layer.Layer<HarnessSubprocessRunner> =>
   Layer.succeed(HarnessSubprocessRunner, {
-    exec: (input) =>
+    exec: (input, options) =>
       Effect.gen(function* () {
         yield* match(validateSubprocessInput(input))
           .with({ _tag: "Some" }, ({ value }) => Effect.fail(value))
@@ -193,44 +232,65 @@ const makeHarnessSubprocessRunnerHostIoLayer = (
           catch: (err) => toSubprocessError(input.command, err),
         })
 
-        if (res.timedOut === true) {
-          return yield* new HarnessSubprocessError({
-            command: input.command,
-            exitCode: SubprocessExitCode.make(-1),
-            stderr: SubprocessOutput.make(res.stderr),
-            reason: ErrorReasonMessage.make(`Command '${input.command}' timed out`),
-            failureKind: SubprocessFailureKind.make("timeout"),
-          })
-        }
-
-        if (res.spawnError !== undefined) {
-          return yield* new HarnessSubprocessError({
-            command: input.command,
-            exitCode: SubprocessExitCode.make(-1),
-            stderr: SubprocessOutput.make(res.stderr),
-            reason: ErrorReasonMessage.make(res.spawnError),
-            failureKind: classifySpawnErrorKind(undefined, res.spawnError),
-          })
-        }
-
-        if (res.signal != null) {
-          return yield* new HarnessSubprocessError({
-            command: input.command,
-            exitCode: SubprocessExitCode.make(res.exitCode),
-            stderr: SubprocessOutput.make(res.stderr),
-            reason: ErrorReasonMessage.make(
-              `Command '${input.command}' terminated by signal ${res.signal}`,
+        return yield* match(res)
+          .with({ _tag: "TimedOut" }, (timedOut) =>
+            Effect.fail(
+              new HarnessSubprocessError({
+                command: input.command,
+                stderr: SubprocessOutput.make(timedOut.stderr),
+                reason: ErrorReasonMessage.make(`Command '${input.command}' timed out`),
+                failureKind: SubprocessFailureKind.make("timeout"),
+              }),
             ),
-            failureKind: SubprocessFailureKind.make("signal"),
+          )
+          .with({ _tag: "SpawnFailed" }, (failed) =>
+            Effect.fail(
+              new HarnessSubprocessError({
+                command: input.command,
+                stderr: SubprocessOutput.make(failed.stderr),
+                reason: ErrorReasonMessage.make(failed.spawnError),
+                failureKind: classifySpawnErrorKind(
+                  failed.errorCode !== undefined ? { code: failed.errorCode } : undefined,
+                  failed.spawnError,
+                ),
+              }),
+            ),
+          )
+          .with({ _tag: "Signaled" }, (signaled) =>
+            Effect.fail(
+              new HarnessSubprocessError({
+                command: input.command,
+                stderr: SubprocessOutput.make(signaled.stderr),
+                reason: ErrorReasonMessage.make(
+                  `Command '${input.command}' terminated by signal ${signaled.signal}`,
+                ),
+                failureKind: SubprocessFailureKind.make("signal"),
+              }),
+            ),
+          )
+          .with({ _tag: "Exited" }, (exited) => {
+            const exitCode = SubprocessExitCode.make(exited.exitCode)
+            if (options?.checkExitCode === true && exited.exitCode !== 0) {
+              return Effect.fail(
+                new HarnessSubprocessError({
+                  command: input.command,
+                  exitCode,
+                  stderr: SubprocessOutput.make(exited.stderr),
+                  reason: ErrorReasonMessage.make(
+                    `Command '${input.command}' exited with code ${exited.exitCode}`,
+                  ),
+                  failureKind: SubprocessFailureKind.make("non-zero-exit"),
+                }),
+              )
+            }
+            return Effect.succeed({
+              command: input.command,
+              exitCode,
+              stdout: SubprocessOutput.make(exited.stdout),
+              stderr: SubprocessOutput.make(exited.stderr),
+            })
           })
-        }
-
-        return {
-          command: input.command,
-          exitCode: SubprocessExitCode.make(res.exitCode),
-          stdout: SubprocessOutput.make(res.stdout),
-          stderr: SubprocessOutput.make(res.stderr),
-        }
+          .exhaustive()
       }),
   })
 

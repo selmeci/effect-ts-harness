@@ -16,7 +16,14 @@ import {
   type CliResult,
   isCommand,
 } from "./daemon-and-omnigraph.service.js"
-import { hasAntigravityFormat, makeDoneBlockResult, makeGuardDenyResult } from "./hook-format.js"
+import {
+  detectAntigravityHookPayload,
+  hasAntigravityFormat,
+  isProcessStdinAntigravityDetected,
+  makeDoneBlockResult,
+  makeGuardDenyResult,
+  resetProcessStdinAntigravityDetected,
+} from "./hook-format.js"
 
 const variadicArgs = Argument.String("args").pipe(Argument.variadic())
 const boolFlag = (name: string) => Flag.Boolean(name).pipe(Flag.withDefault(false))
@@ -427,8 +434,13 @@ const makeFailClosedHookResult = (
   argv: ReadonlyArray<string>,
   reason: string,
   extraStderr = "",
+  rawStdin?: string,
 ): CliResult => {
-  const isAntigravity = hasAntigravityFormat(argv)
+  const isAntigravity =
+    hasAntigravityFormat(argv) ||
+    (rawStdin !== undefined
+      ? detectAntigravityHookPayload(rawStdin)
+      : isProcessStdinAntigravityDetected())
   return requested === "guard"
     ? makeGuardDenyResult(isAntigravity, reason, extraStderr)
     : makeDoneBlockResult(isAntigravity, reason, extraStderr)
@@ -439,6 +451,9 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
   options?: CliEnv,
   maybeDecisionLayer?: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.fn.Return<CliResult> {
+  if (options?.stdin === undefined) {
+    resetProcessStdinAntigravityDetected()
+  }
   const requested = argv[0] ?? "help"
   if (requested === "--help" || requested === "-h") {
     return {
@@ -452,6 +467,8 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
       requested,
       argv,
       `${requested}: --help flag is not permitted on ${requested}`,
+      "",
+      options?.stdin,
     )
   }
   if (
@@ -568,6 +585,7 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
         argv,
         `${requested}: CLI parse failure (${cliErr})`,
         stderrBuffer.join(""),
+        effectiveOptions?.stdin,
       )
     }
     return {
@@ -587,6 +605,7 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
           argv,
           `${requested}: subcommand handler did not execute`,
           stderrBuffer.join(""),
+          effectiveOptions?.stdin,
         )
       }
       return { exitCode: 0, stdout: "", stderr: "" }

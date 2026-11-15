@@ -15,20 +15,24 @@
  * - MigrationSafety.decide: Re-exported from migration-check.ts for SQL DDL safety.
  */
 
-import { createHash } from "node:crypto"
 import { join } from "node:path"
 import { Effect, Schema } from "effect"
 import {
+  AstGateDecisionReport,
+  type AstGateEvaluationError,
   type AstGateEvaluationReport,
   type AstGateFileBatchInput,
   type AstGateFileEvaluator,
   AstGatePackageTag,
   AstSourceContent,
   AstSourceFilePath,
+  computeContentSha256,
   ContentSha256,
   GateCategory,
   GateRuleVersion,
   HARNESS_GATE_RULE_VERSION,
+  inferAstGatePackageTagFromPath,
+  makeAstGateDecisionReport,
   type WorkspaceFsError,
 } from "@harness/contract"
 import { NonNegativeCount, ts } from "@harness/graph"
@@ -37,7 +41,6 @@ import { decideMigrationSafety } from "./migration-check.js"
 import {
   GateViolation,
   getLineNumber,
-  inferPackageTagFromPath,
   isCatchCauseInterruptsOnlyCall,
   isDummyEffectVoidYield,
   isIgnoredChmodPermissionCall,
@@ -52,7 +55,7 @@ import {
 } from "./plugins/ast-gate-visitors.js"
 import { resolveHarnessStateDir } from "./worktree.js"
 
-export { GateViolation }
+export { AstGateDecisionReport, computeContentSha256, GateViolation, makeAstGateDecisionReport }
 
 export const AstGateFileInput = Schema.Struct({
   filePath: AstSourceFilePath,
@@ -82,55 +85,17 @@ export const AstGateCacheStoreSchema = Schema.Struct({
 })
 export type AstGateCacheStore = typeof AstGateCacheStoreSchema.Type
 
-export const AstGateDecisionReport = Schema.Union([
-  Schema.Struct({
-    verdict: Schema.Literal("clean"),
-    violations: Schema.Tuple([]),
-    cacheHitCount: NonNegativeCount,
-    parsedFileCount: NonNegativeCount,
-  }),
-  Schema.Struct({
-    verdict: Schema.Literal("violated"),
-    violations: Schema.NonEmptyArray(GateViolation),
-    cacheHitCount: NonNegativeCount,
-    parsedFileCount: NonNegativeCount,
-  }),
-])
-export type AstGateDecisionReport = typeof AstGateDecisionReport.Type
-
-export const makeAstGateDecisionReport = (input: {
-  readonly violations: ReadonlyArray<GateViolation>
-  readonly cacheHitCount: NonNegativeCount
-  readonly parsedFileCount: NonNegativeCount
-}): AstGateDecisionReport => {
-  const [first, ...rest] = input.violations
-  if (first === undefined) {
-    return {
-      verdict: "clean",
-      violations: [],
-      cacheHitCount: input.cacheHitCount,
-      parsedFileCount: input.parsedFileCount,
-    }
-  }
-  return {
-    verdict: "violated",
-    violations: [first, ...rest],
-    cacheHitCount: input.cacheHitCount,
-    parsedFileCount: input.parsedFileCount,
-  }
-}
-
 export const AstCacheHitCount = NonNegativeCount
 export type AstCacheHitCount = typeof AstCacheHitCount.Type
 
 export const AstCacheDurationMs = NonNegativeCount
 export type AstCacheDurationMs = typeof AstCacheDurationMs.Type
 
-export const computeContentSha256 = (content: string): ContentSha256 =>
-  ContentSha256.make(createHash("sha256").update(content, "utf8").digest("hex"))
-
-export const makeAstGateCacheKey = (filePath: string, packageTag: string): string =>
-  `${filePath}\0${packageTag}`
+export const makeAstGateCacheKey = (
+  filePath: string,
+  packageTag: string,
+  ruleVersion: GateRuleVersion = HARNESS_GATE_RULE_VERSION,
+): string => `${filePath}\0${packageTag}\0${ruleVersion}`
 
 export const resolveAstGateCachePath = (repoRoot: string): AstSourceFilePath =>
   AstSourceFilePath.make(join(resolveHarnessStateDir(repoRoot), "cache", "ast-gates-v1.json"))
@@ -187,11 +152,17 @@ export const evaluateAstGateFiles = (
   let cacheHitCount = 0
   let parsedFileCount = 0
   const allViolations: Array<GateViolation> = []
+  const seenBatchKeys = new Set<string>()
 
   for (const file of input.files) {
-    const pkgTag = file.packageTag ?? inferPackageTagFromPath(file.filePath)
+    const pkgTag = file.packageTag ?? inferAstGatePackageTagFromPath(file.filePath)
+    const batchKey = `${file.filePath}\0${pkgTag}`
+    if (seenBatchKeys.has(batchKey)) {
+      continue
+    }
+    seenBatchKeys.add(batchKey)
     const contentSha256 = computeContentSha256(file.content)
-    const cacheKey = makeAstGateCacheKey(file.filePath, pkgTag)
+    const cacheKey = makeAstGateCacheKey(file.filePath, pkgTag, ruleVersion)
     const cached = gateCache.get(cacheKey)
 
     const isHit =
@@ -251,7 +222,7 @@ export const evaluateAstGateFiles = (
 }
 
 export const evaluateSingleAstGateFile: AstGateFileEvaluator = (file) => {
-  const pkgTag = file.packageTag ?? inferPackageTagFromPath(file.filePath)
+  const pkgTag = file.packageTag ?? inferAstGatePackageTagFromPath(file.filePath)
   const { sourceFile } = getOrCreateCachedSourceFile(file.filePath, file.content)
   return visitSourceFileSinglePass(sourceFile, file.filePath, pkgTag)
 }
@@ -265,7 +236,11 @@ export const decideAstGateCache = Effect.fn("AstGateCache.decide")(function* (
 
 export const evaluateCachedAstGates = Effect.fn("AstGateCache.evaluateCached")(function* (
   files: ReadonlyArray<AstGateFileBatchInput>,
-): Effect.fn.Return<AstGateEvaluationReport, WorkspaceFsError, AstGateCachePort> {
+): Effect.fn.Return<
+  AstGateEvaluationReport,
+  AstGateEvaluationError | WorkspaceFsError,
+  AstGateCachePort
+> {
   const port = yield* AstGateCachePort
   return yield* port.evaluateBatch(files, evaluateSingleAstGateFile)
 })
@@ -325,7 +300,8 @@ export const MigrationSafety = {
 
 export {
   getLineNumber,
-  inferPackageTagFromPath,
+  inferAstGatePackageTagFromPath,
+  inferAstGatePackageTagFromPath as inferPackageTagFromPath,
   isCatchCauseInterruptsOnlyCall,
   isDummyEffectVoidYield,
   isIgnoredChmodPermissionCall,

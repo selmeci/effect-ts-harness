@@ -2,10 +2,21 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Option } from "effect"
-import { SubprocessArg, SubprocessCommand, WorkspaceFilePath } from "@harness/contract"
-import { HarnessSubprocessRunner } from "@harness/service"
+import { Deferred, Effect, Fiber, Option } from "effect"
 import {
+  AstSourceContent,
+  AstSourceFilePath,
+  DecisionCacheKey,
+  DecisionCachePayloadJson,
+  DecisionCacheTtlMillis,
+  SubprocessArg,
+  SubprocessCommand,
+  WorkspaceFilePath,
+} from "@harness/contract"
+import { AstGateCachePort, DecisionCachePort, HarnessSubprocessRunner } from "@harness/service"
+import {
+  AstGateCacheLive,
+  DecisionCacheLive,
   HarnessSubprocessRunnerLive,
   queryUnixSocketLine,
   startScopedUnixSocketDaemon,
@@ -72,5 +83,66 @@ describe("@harness/infra reliability", () => {
         ).pipe(Effect.provide(UnixSocketDaemonLive))
       }),
     ),
+  )
+
+  it.live("DecisionCacheLive.lookupOrCompute clears inFlight and lets waiting followers take over when leader is interrupted", () =>
+    Effect.gen(function* () {
+      const cache = yield* DecisionCachePort
+      const key = DecisionCacheKey.make("interrupt-regression-key")
+      const ttlMillis = DecisionCacheTtlMillis.make(60_000)
+      const enteredCompute = yield* Deferred.make<void>()
+
+      const leaderFiber = yield* cache
+        .lookupOrCompute({
+          key,
+          ttlMillis,
+          compute: Deferred.succeed(enteredCompute, undefined).pipe(Effect.andThen(Effect.never)),
+        })
+        .pipe(Effect.forkChild)
+
+      yield* Deferred.await(enteredCompute)
+
+      const followerFiber = yield* cache
+        .lookupOrCompute({
+          key,
+          ttlMillis,
+          compute: Effect.succeed(DecisionCachePayloadJson.make('{"followerTookOver":true}')),
+        })
+        .pipe(Effect.forkChild)
+
+      yield* Effect.sleep("20 millis")
+      yield* Fiber.interrupt(leaderFiber)
+
+      const followerValue = yield* Fiber.join(followerFiber)
+      expect(followerValue).toBe('{"followerTookOver":true}')
+
+      const recovered = yield* cache.lookupOrCompute({
+        key,
+        ttlMillis,
+        compute: Effect.succeed(DecisionCachePayloadJson.make('{"recomputed":false}')),
+      })
+      expect(recovered).toBe('{"followerTookOver":true}')
+    }).pipe(Effect.provide(DecisionCacheLive)),
+  )
+
+  it.live("AstGateCacheLive.evaluateBatch cleans pendingEvalRef on interruption so subsequent evaluations succeed", () =>
+    Effect.gen(function* () {
+      const cache = yield* AstGateCachePort
+      const files = [
+        {
+          filePath: AstSourceFilePath.make("libs/sample/domain/src/interrupt-test.ts"),
+          content: AstSourceContent.make("export const x = 1\n"),
+        },
+      ] as const
+
+      const interruptedFiber = yield* cache
+        .evaluateBatch(files, () => [])
+        .pipe(Effect.forkChild)
+      yield* Fiber.interrupt(interruptedFiber)
+
+      const report = yield* cache.evaluateBatch(files, () => [])
+      expect(report.inspectedFileCount).toBe(1)
+      expect(report.violations).toEqual([])
+    }).pipe(Effect.provide(AstGateCacheLive)),
   )
 })

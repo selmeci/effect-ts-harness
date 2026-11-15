@@ -5,7 +5,8 @@ import { describe, expect, it } from "@effect/vitest"
 import { Effect, Layer, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { makeMockDecisionModelLayer } from "@harness/decision"
-import { buildHarnessGraph } from "@harness/graph"
+import { buildHarnessGraph, saveGraphSnapshot } from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 import { executeToolEffect } from "../src/server.js"
 
 describe("harness-mcp ontology tools", () => {
@@ -118,6 +119,7 @@ describe("harness-mcp ontology tools", () => {
     ),
     evaluatedPairs: Schema.Finite,
     degraded: Schema.optional(Schema.Boolean),
+    degradedReason: Schema.optional(Schema.String),
     evaluationError: Schema.optional(Schema.String),
     layerCounts: Schema.Struct({
       Motivation: Schema.Finite,
@@ -457,6 +459,65 @@ status: accepted
       expect(res.clean).toBe(false)
       expect(res.degraded).toBe(true)
       expect(typeof res.evaluationError).toBe("string")
+    }),
+  )
+
+  it.effect("marks harness_ontology_check degraded and non-clean when graph snapshot is missing", () =>
+    Effect.gen(function* () {
+      const tmpDir = mkdtempSync(join(tmpdir(), "harness-mcp-missing-graph-"))
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          rmSync(tmpDir, { recursive: true, force: true })
+        }),
+      )
+
+      const raw = yield* executeToolEffect(
+        "harness_ontology_check",
+        { scope: "sample" },
+        {
+          repoRoot: tmpDir,
+          governanceDocs: [],
+          decisionLayer: makeMockDecisionModelLayer(),
+        },
+      )
+
+      const res = decodeCheckResult(raw)
+      expect(res.clean).toBe(false)
+      expect(res.degraded).toBe(true)
+      expect(res.degradedReason).toBe("missing-graph-snapshot")
+    }),
+  )
+
+  it.effect("marks harness_ontology_check degraded when recorded graph-head.json exists but git HEAD is unavailable", () =>
+    Effect.gen(function* () {
+      const tmpDir = mkdtempSync(join(tmpdir(), "harness-mcp-no-git-head-"))
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          rmSync(tmpDir, { recursive: true, force: true })
+        }),
+      )
+      mkdirSync(join(tmpDir, ".harness"), { recursive: true })
+      saveGraphSnapshot(graph, join(tmpDir, ".harness", "graph-snapshot.json"), nodeSyncHostIo)
+      writeFileSync(
+        join(tmpDir, ".harness", "graph-head.json"),
+        JSON.stringify({ headSha: "deadbeef", gitBranch: "main", updatedAt: "2026-01-01T00:00:00Z" }),
+        "utf8",
+      )
+
+      const raw = yield* executeToolEffect(
+        "harness_ontology_check",
+        { scope: "sample" },
+        {
+          repoRoot: tmpDir,
+          governanceDocs: [],
+          decisionLayer: makeMockDecisionModelLayer(),
+        },
+      )
+
+      const res = decodeCheckResult(raw)
+      expect(res.clean).toBe(false)
+      expect(res.degraded).toBe(true)
+      expect(res.degradedReason).toBe("git-head-unavailable")
     }),
   )
 })

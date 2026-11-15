@@ -4,50 +4,66 @@ D1 database repositories use native Effect v4 SQL (`@effect/sql-d1` + `SqlClient
 
 ## Native `@effect/sql-d1` on Cloudflare D1
 
-In this codebase, D1 interactions use `D1Client.layer({ db })` from `@effect/sql-d1` and `SqlClient.SqlClient` from `effect/unstable/sql` (or `@effect/sql`). All SQL queries and driver imports are strictly confined to `type:infra`.
+In this codebase, D1 interactions use `D1Client.layer({ db })` from `@effect/sql-d1/D1Client` and `SqlClient` from `effect/sql/SqlClient`. All SQL queries and driver imports are strictly confined to `type:infra`.
 
 ## Repository Implementation and Schema Decoding
 
-Repositories must use parameterized `sql\`...\`` tagged template queries (never string-interpolated SQL) and decode raw SQL rows into domain contract `Schema` instances. SQL/driver types must never escape into `type:domain` or `apps/web`:
+Repositories must use parameterized `sql\`...\`` tagged template queries (never string-interpolated SQL) and decode raw SQL rows into domain contract `Schema` instances. SQL/driver types must never escape into `type:domain` or `apps/sample-web`:
 
 ```ts
-// libs/sample/infra/src/photo-repository.ts
+// libs/sample/infra/src/index.ts
 import { Effect, Layer, Schema } from "effect"
-import { D1Client } from "@effect/sql-d1"
-import { SqlClient } from "effect/unstable/sql"
-import { PhotoId, PhotoSchema } from "@sample/contract/photos"
-import { PhotoRepo, PhotoNotFoundError } from "@sample/service/photo-repository"
+import * as D1Client from "@effect/sql-d1/D1Client"
+import { SqlClient } from "effect/sql/SqlClient"
+import {
+  Photo,
+  type PhotoId,
+  PhotoNotFoundError,
+  PhotoStorageError,
+  StorageErrorMessage,
+  StorageOperationName,
+} from "@harness/sample-contract"
+import { PhotoRepo } from "@harness/sample-service"
 
-export const makeD1ClientLayer = (db: D1Database) => D1Client.layer({ db })
+export type D1DatabaseBinding = D1Client.D1ClientConfig["db"]
 
-export const PhotoRepoLive = Layer.effect(
+const toPhotoStorageError = (operation: string, err: unknown): PhotoStorageError =>
+  new PhotoStorageError({
+    operation: StorageOperationName.make(operation),
+    message: StorageErrorMessage.make(err instanceof Error ? err.message : String(err)),
+  })
+
+export const makePhotoRepoSql = (sql: SqlClient): PhotoRepo["Service"] => {
+  const findById = Effect.fn("PhotoRepo.findById")(function* (id: PhotoId) {
+    const rows = yield* sql`
+      SELECT id, name, album_id AS albumId, created_at AS createdAt
+      FROM photos
+      WHERE id = ${id}
+    `.pipe(Effect.mapError((err) => toPhotoStorageError("PhotoRepo.findById", err)))
+    const firstRow = rows[0]
+    if (firstRow === undefined) {
+      return yield* new PhotoNotFoundError({ id })
+    }
+    // Decode raw SQL row into type:contract Schema
+    return yield* Schema.decodeUnknownEffect(Photo)(firstRow).pipe(
+      Effect.mapError((err) => toPhotoStorageError("PhotoRepo.findById", err)),
+    )
+  })
+
+  // ... insert, listAll (also check `rows[0] === undefined` on RETURNING and map errors via `toPhotoStorageError`)
+  return PhotoRepo.of({ insert, findById, listAll })
+}
+
+export const PhotoRepoD1Layer: Layer.Layer<PhotoRepo, never, SqlClient> = Layer.effect(
   PhotoRepo,
-  Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient
-
-    const findById = Effect.fn("PhotoRepo.findById")(function* (id: PhotoId) {
-      const rows = yield* sql`
-        SELECT id, title, url, view_count AS viewCount, created_at AS createdAt
-        FROM photos
-        WHERE id = ${id}
-        LIMIT 1
-      `
-      if (rows.length === 0) {
-        return yield* new PhotoNotFoundError({ id })
-      }
-      // Decode raw SQL row into type:contract Schema
-      return yield* Schema.decodeUnknownEffect(PhotoSchema)(rows[0])
-    })
-
-    return PhotoRepo.of({ findById })
-  }),
+  Effect.map(SqlClient, makePhotoRepoSql),
 )
 ```
 
 ## Migrations Workflow
 
 1. **Hand-Authored Versioned `.sql` Migrations**:
-   - Write forward SQL migrations ahead of time into versioned `.sql` files under `migrations/` (e.g. `migrations/0001_initial.sql`).
+   - Write forward SQL migrations ahead of time into versioned `.sql` files under `migrations/` (e.g. `libs/sample/infra/migrations/0001_photos_and_counters.sql`).
    - Migrations must be committed to git. `drizzle-kit` is banned and must never be used.
 2. **Never Generate at Deploy**:
    - Migrations are never generated dynamically during deployment.

@@ -1,5 +1,6 @@
 import { Context, type Effect, type Option, type Scope } from "effect"
 import type {
+  AstGateEvaluationError,
   AstGateEvaluationReport,
   AstGateFileBatchInput,
   AstGateFileEvaluator,
@@ -19,7 +20,8 @@ export interface AstGateCachePortShape {
   readonly evaluateBatch: (
     files: ReadonlyArray<AstGateFileBatchInput>,
     evaluateFile: AstGateFileEvaluator,
-  ) => Effect.Effect<AstGateEvaluationReport, WorkspaceFsError>
+    evaluatorId?: string,
+  ) => Effect.Effect<AstGateEvaluationReport, WorkspaceFsError | AstGateEvaluationError>
   readonly clearCache: Effect.Effect<void, WorkspaceFsError>
   readonly cacheSize: Effect.Effect<NonNegativeCount, WorkspaceFsError>
 }

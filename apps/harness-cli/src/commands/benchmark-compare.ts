@@ -4,7 +4,7 @@ import { match } from "ts-pattern"
 import { BENCHMARK_TASKS, type BenchmarkRunMetrics, compareBenchmarkRuns } from "@harness/gates"
 import { nodeSyncHostIo } from "@harness/infra"
 import { type CliEnv, type CliResult, findWorkspaceRoot } from "./daemon-and-omnigraph.service.js"
-import { resolveRepoPath } from "./repo-path.js"
+import { resolveRepoPathChecked } from "./repo-path.js"
 
 const extractFlag = (subArgs: ReadonlyArray<string>, flagName: string): string | undefined => {
   for (let i = 0; i < subArgs.length; i++) {
@@ -58,12 +58,37 @@ export const runBenchmarkCompare = Effect.fn("HarnessCli.benchmarkCompare")(func
 
   let runs: ReadonlyArray<BenchmarkRunMetrics> = canonicalBenchmarkRuns
   if (baselineFlag !== undefined) {
-    const baselinePath = resolveRepoPath(repoRoot, baselineFlag)
-    if (baselinePath === undefined || !nodeSyncHostIo.existsSync(baselinePath)) {
+    const baselineOutcome = match(resolveRepoPathChecked(repoRoot, baselineFlag))
+      .with({ _tag: "Resolved" }, ({ resolvedPath }) => ({
+        ok: true as const,
+        resolvedPath,
+      }))
+      .with({ _tag: "EscapesRoot" }, () => ({
+        ok: false as const,
+        result: {
+          exitCode: 1,
+          stdout: "",
+          stderr: `benchmark: FAIL — baseline path escapes repository root: ${baselineFlag}\n`,
+        } satisfies CliResult,
+      }))
+      .with({ _tag: "IoError" }, ({ code, message }) => ({
+        ok: false as const,
+        result: {
+          exitCode: 1,
+          stdout: "",
+          stderr: `benchmark: FAIL — Cannot resolve baseline path '${baselineFlag}' (${code}: ${message})\n`,
+        } satisfies CliResult,
+      }))
+      .exhaustive()
+    if (!baselineOutcome.ok) {
+      return baselineOutcome.result
+    }
+    const baselinePath = baselineOutcome.resolvedPath
+    if (!nodeSyncHostIo.existsSync(baselinePath)) {
       return {
         exitCode: 1,
         stdout: "",
-        stderr: `benchmark: FAIL — baseline file not found or escapes root: ${baselineFlag}\n`,
+        stderr: `benchmark: FAIL — baseline file not found: ${baselineFlag}\n`,
       }
     }
     const raw = nodeSyncHostIo.readTextSync(baselinePath)
@@ -99,14 +124,32 @@ export const runBenchmarkCompare = Effect.fn("HarnessCli.benchmarkCompare")(func
   const serialized = `${JSON.stringify(output, null, 2)}\n`
 
   if (outFlag !== undefined) {
-    const outPath = resolveRepoPath(repoRoot, outFlag)
-    if (outPath === undefined) {
-      return {
-        exitCode: 1,
-        stdout: "",
-        stderr: `benchmark: FAIL — output path escapes repository root: ${outFlag}\n`,
-      }
+    const outOutcome = match(resolveRepoPathChecked(repoRoot, outFlag))
+      .with({ _tag: "Resolved" }, ({ resolvedPath }) => ({
+        ok: true as const,
+        resolvedPath,
+      }))
+      .with({ _tag: "EscapesRoot" }, () => ({
+        ok: false as const,
+        result: {
+          exitCode: 1,
+          stdout: "",
+          stderr: `benchmark: FAIL — output path escapes repository root: ${outFlag}\n`,
+        } satisfies CliResult,
+      }))
+      .with({ _tag: "IoError" }, ({ code, message }) => ({
+        ok: false as const,
+        result: {
+          exitCode: 1,
+          stdout: "",
+          stderr: `benchmark: FAIL — Cannot resolve output path '${outFlag}' (${code}: ${message})\n`,
+        } satisfies CliResult,
+      }))
+      .exhaustive()
+    if (!outOutcome.ok) {
+      return outOutcome.result
     }
+    const outPath = outOutcome.resolvedPath
     nodeSyncHostIo.mkdirRecursiveSync(dirname(outPath))
     nodeSyncHostIo.writeTextSync(outPath, serialized)
   }

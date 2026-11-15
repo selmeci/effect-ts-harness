@@ -11,7 +11,8 @@ import {
 import * as http from "node:http"
 import * as net from "node:net"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
+import { pathToFileURL } from "node:url"
 import { describe, expect, it } from "vitest"
 import { Cause, Effect, Layer, Option, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
@@ -20,8 +21,10 @@ import { makeFailingDecisionModelLayer, makeMockDecisionModelLayer } from "@harn
 import { readTelemetryEvents, writeVerifyStamp } from "@harness/gates"
 import { buildHarnessGraph, ShadowFileOverlay } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
-// oxlint-disable-next-line @nx/enforce-module-boundaries
-import syntaxBansPlugin from "../../../tools/oxlint/syntax-bans.js"
+const syntaxBansPluginMod = await import(
+  pathToFileURL(resolve(import.meta.dirname, "../../../tools/oxlint/syntax-bans.js")).href
+)
+const syntaxBansPlugin = syntaxBansPluginMod.default
 import {
   formatProjectionError,
   matchesExactSpecToken,

@@ -36,11 +36,28 @@ export const evaluateScenarioStep = (
 ): Effect.Effect<ScenarioEvalSummary> =>
   Effect.sync(() => {
     const res = nodeSyncHostIo.execFileSync("/bin/bash", ["-lc", step.command])
-    return {
-      name: step.name,
-      passed: res.exitCode === 0,
-      detail: res.exitCode === 0 ? res.stdout.trim() || "ok" : res.stderr.trim() || `exit ${res.exitCode}`,
-    }
+    return match(res)
+      .with({ _tag: "Exited" }, (r) => ({
+        name: step.name,
+        passed: r.exitCode === 0,
+        detail: r.exitCode === 0 ? r.stdout.trim() || "ok" : r.stderr.trim() || `exit ${r.exitCode}`,
+      }))
+      .with({ _tag: "TimedOut" }, (r) => ({
+        name: step.name,
+        passed: false,
+        detail: r.stderr.trim() || "timed out",
+      }))
+      .with({ _tag: "Signaled" }, (r) => ({
+        name: step.name,
+        passed: false,
+        detail: r.stderr.trim() || `signal ${r.signal}`,
+      }))
+      .with({ _tag: "SpawnFailed" }, (r) => ({
+        name: step.name,
+        passed: false,
+        detail: r.stderr.trim() || r.spawnError,
+      }))
+      .exhaustive()
   })
 
 export const ScenarioMarkSchema = Schema.Struct({

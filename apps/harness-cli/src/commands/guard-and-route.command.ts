@@ -19,7 +19,12 @@ import {
   makeReadStdinEffect,
   recordFriction,
 } from "./daemon-and-omnigraph.service.js"
-import { hasAntigravityFormat } from "./hook-format.js"
+import {
+  detectAntigravityHookPayload,
+  hasAntigravityFormat,
+  makeGuardDenyResult,
+  markProcessStdinAntigravityDetected,
+} from "./hook-format.js"
 
 export { classifyCommand, classifyFileWrite }
 
@@ -81,19 +86,6 @@ const formatAllowResult = (isAntigravity: boolean): CliResult => ({
   stderr: "",
 })
 
-const formatDenyResult = (isAntigravity: boolean, reason: string): CliResult =>
-  isAntigravity
-    ? {
-        exitCode: 0,
-        stdout: JSON.stringify({ decision: "deny", reason }),
-        stderr: "",
-      }
-    : {
-        exitCode: 2,
-        stdout: "",
-        stderr: reason,
-      }
-
 const formatAskResult = (isAntigravity: boolean, reason: string | undefined): CliResult =>
   isAntigravity
     ? {
@@ -141,7 +133,7 @@ const pickStrictestDecision = (
 
 const toGuardCliResult = (decision: GuardVerdictDecision, isAntigravity: boolean): CliResult =>
   match(decision)
-    .with({ verdict: "deny" }, ({ reason }) => formatDenyResult(isAntigravity, reason))
+    .with({ verdict: "deny" }, ({ reason }) => makeGuardDenyResult(isAntigravity, reason))
     .with({ verdict: "ask" }, ({ reason }) => formatAskResult(isAntigravity, reason))
     .with({ verdict: "allow" }, () => formatAllowResult(isAntigravity))
     .exhaustive()
@@ -192,9 +184,13 @@ export const handleGuard = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
   decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
-): Effect.Effect<CliResult> =>
-  Effect.gen(function* () {
-    const isAntigravityFlag = hasAntigravityFormat(argv)
+): Effect.Effect<CliResult> => {
+  const isAntigravityFlag = hasAntigravityFormat(argv)
+  let isAntigravity =
+    isAntigravityFlag ||
+    (options?.stdin !== undefined && detectAntigravityHookPayload(options.stdin))
+
+  return Effect.gen(function* () {
     const fileFlag = argv.find((arg) => arg.startsWith("--file="))
     const cliFilePath = fileFlag ? fileFlag.slice("--file=".length) : undefined
     const positionalArgs = argv
@@ -224,11 +220,15 @@ export const handleGuard = (
       const readFailed = match(stdinRes)
         .with({ _tag: "Success" }, ({ success }) => {
           rawStdin = success
+          if (detectAntigravityHookPayload(success)) {
+            isAntigravity = true
+            markProcessStdinAntigravityDetected()
+          }
           return undefined
         })
         .with({ _tag: "Failure" }, ({ failure }) =>
-          formatDenyResult(
-            isAntigravityFlag,
+          makeGuardDenyResult(
+            isAntigravity,
             `guard: failed or timed out reading hook stdin payload (${failure.reason})`,
           ),
         )
@@ -244,7 +244,7 @@ export const handleGuard = (
       invokedAsHook &&
       (rawStdin === undefined || rawStdin.trim().length === 0)
     ) {
-      return formatDenyResult(isAntigravityFlag, "guard: empty hook stdin payload")
+      return makeGuardDenyResult(isAntigravity, "guard: empty hook stdin payload")
     }
 
     let stdinCmd: string | undefined
@@ -255,6 +255,7 @@ export const handleGuard = (
 
     if (rawStdin !== undefined && rawStdin.trim().length > 0 && positionalArgs.length === 0 && !cliFilePath) {
       const stdinText = rawStdin
+      isAntigravity = isAntigravity || detectAntigravityHookPayload(stdinText)
       const decoded = decodePreToolUseStdin(stdinText)
       match(decoded)
         .with({ _tag: "Some" }, ({ value }) => {
@@ -304,9 +305,9 @@ export const handleGuard = (
         .exhaustive()
     }
 
-    const isAntigravity = isAntigravityFlag || isAntigravityStdin
+    isAntigravity = isAntigravity || isAntigravityStdin
     if (stdinDecodeFailureReason !== undefined) {
-      return formatDenyResult(isAntigravity, stdinDecodeFailureReason)
+      return makeGuardDenyResult(isAntigravity, stdinDecodeFailureReason)
     }
 
     const filePath = cliFilePath ?? stdinFilePath
@@ -348,7 +349,7 @@ export const handleGuard = (
       if (isReadOnlyToolCall || !invokedAsHook) {
         return formatAllowResult(isAntigravity)
       }
-      return formatDenyResult(isAntigravity, "guard: empty hook command payload")
+      return makeGuardDenyResult(isAntigravity, "guard: empty hook command payload")
     }
 
     const cmdDecision = yield* evaluateCommandDecision(command, options, decisionLayer)
@@ -356,16 +357,16 @@ export const handleGuard = (
   }).pipe(
     Effect.catchCause((cause) => {
       if (Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)) {
-        return Effect.interrupt
+        return Effect.failCause(cause)
       }
       const pretty = Cause.pretty(cause)
       process.stderr.write(`[harness:guard] uncaught cause: ${pretty}\n`)
-      const isAntigravityFlag = hasAntigravityFormat(argv)
       return Effect.succeed(
-        formatDenyResult(isAntigravityFlag, `guard: uncaught error or defect (${pretty})`),
+        makeGuardDenyResult(isAntigravity, `guard: uncaught error or defect (${pretty})`),
       )
     }),
   )
+}
 
 export const handleRoute = (
   argv: ReadonlyArray<string>,

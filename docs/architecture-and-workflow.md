@@ -130,12 +130,12 @@ Architektúra vyžaduje prísnu jednosmernú hierarchiu závislostí riadenú zn
 
 | Značka Nx               | Účel a zodpovednosť                                                          | Povolené importy                                                 | Zakázané importy                                     |
 | :---------------------- | :--------------------------------------------------------------------------- | :--------------------------------------------------------------- | :--------------------------------------------------- |
-| `type:contract`         | Zdieľané `Schema`, `HttpApi`, `RpcGroup`, doménové a API chyby               | Výhradne `effect`                                                | Akékoľvek lokálne knižnice alebo 3rd party I/O       |
-| `type:domain`           | Prípady použitia a čisté rozhodovače (`.decide`)                             | `contract`, `service`, (`@harness/contract` pre `stub` v pláne)  | `type:infra`, `alchemy`, `drizzle-orm`, `@effect/sql-*` |
-| `type:service`          | Servisné rozhrania (`Context.Service`), kontrakty repozitárov                | `contract`, `service`                                            | `type:infra`, konkrétne databázové knižnice          |
-| `type:infra`            | Živé vrstvy (`Layer.Live`), `@effect/sql-*` repozitáre, RPC handlery, Alchemy | `contract`, `domain`, `service`, `infra`                         | `drizzle-orm`, `drizzle-kit` (zakázané v celom workspace) |
-| `type:app`              | Spojenie vrstiev a runtime entrypoint (`alchemy.run.ts`)                     | Všetky balíky monorepa                                           | —                                                    |
-| `type:app`, `scope:web` | Frontend aplikácia (Vite + React + AtomHttpApi)                              | `contract` a UI komponenty                                       | `type:infra`, `type:domain`, priamy `fetch(...)`     |
+| `type:contract`         | Zdieľané `Schema`, `HttpApi`, `RpcGroup`, doménové a API chyby               | Výhradne `effect` (`type:contract` / `[]` v workspace)           | `service`, `core`, `domain`, `infra`, `app`, 3rd-party I/O |
+| `type:service`          | Servisné rozhrania (`Context.Service`), kontrakty repozitárov                | `type:contract`, `type:service` (externe výhradne `effect`)      | `core`, `domain`, `infra`, `app`, Node/SQL ovládače  |
+| `type:core`             | Čisté generické enginy, brány a decider funkcie (`.decide`)                  | `type:contract`, `type:service`, `type:core`                     | `type:domain`, `type:infra`, `type:app`              |
+| `type:domain`           | Doménové prípady použitia a čisté rozhodovače (`.decide`)                    | `type:contract`, `type:service`, `type:core`, `type:domain`      | `type:infra`, `type:app`, `alchemy`, `@effect/sql-*` |
+| `type:infra`            | Živé vrstvy (`Layer.Live`), `@effect/sql-*` repozitáre, RPC handlery, Alchemy | `type:contract`, `type:service`, `type:core`, `type:domain`, `type:infra` | `type:app`; `drizzle-orm`/`drizzle-kit` zakázané v celom workspace |
+| `type:app`              | Spojenie vrstiev a runtime entrypoint (`alchemy.run.ts`, CLI, MCP, Web UI)   | Všetky knižničné vrstvy + `type:app` (okrem `scope:web`, ktorý môže importovať iba `type:contract` a UI knižnice) | Pre `scope:web`: `type:service`, `type:core`, `type:domain`, `type:infra`, `type:app`, priamy `fetch(...)` |
 
 ---
 

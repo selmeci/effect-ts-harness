@@ -1295,9 +1295,100 @@ const syntaxBans = {
     const declaredBrandKeys = new Map()
     const migrationRecordVars = new Map()
     const allowedDdlTemplateNodes = new Set()
+    const effectModuleNamespaceNames = new Set()
     const effectNamespaceNames = new Set(["Effect"])
+    const bannedRunAliases = new Map()
     let hasSqliteMigratorImport = false
     const reportedNodes = new WeakSet()
+
+    const unwrapEstree = (n) => {
+      let cur = n
+      while (
+        cur != null &&
+        (cur.type === "TSAsExpression" ||
+          cur.type === "TSTypeAssertion" ||
+          cur.type === "TSNonNullExpression" ||
+          cur.type === "ParenthesizedExpression")
+      ) {
+        cur = cur.expression
+      }
+      return cur
+    }
+
+    const isEffectNamespaceExpr = (expr) => {
+      const u = unwrapEstree(expr)
+      if (u == null) return false
+      if (u.type === "Identifier") return effectNamespaceNames.has(u.name)
+      if (u.type === "MemberExpression") {
+        const propName =
+          u.computed !== true && u.property?.type === "Identifier"
+            ? u.property.name
+            : u.computed === true
+              ? getStaticModuleString(u.property)
+              : null
+        if (propName === "Effect") {
+          const inner = unwrapEstree(u.object)
+          return inner != null && inner.type === "Identifier" && effectModuleNamespaceNames.has(inner.name)
+        }
+      }
+      return false
+    }
+
+    const isBannedEffectRunMethodName = (methodName, filename) => {
+      if (
+        methodName === "runSync" ||
+        methodName === "runSyncExit" ||
+        methodName === "runSyncWith" ||
+        methodName === "runCallback" ||
+        methodName === "runCallbackWith" ||
+        methodName === "runPromise" ||
+        methodName === "runPromiseWith"
+      ) {
+        return true
+      }
+      const isMcpRunPromiseExitBoundary =
+        /(?:^|\/)apps\/harness-mcp\/src\/(?:server|daemon\/unix-socket-daemon)\.ts$/.test(filename)
+      if (methodName === "runPromiseExit") return !isMcpRunPromiseExitBoundary
+      if (methodName === "runFork" || methodName === "runForkWith") {
+        return !/(?:^|\/)apps\/[^/]+\/src\//.test(filename)
+      }
+      return false
+    }
+
+    const getEstreeBindingPropName = (prop) => {
+      if (prop == null || prop.type !== "Property") return null
+      if (prop.computed !== true) {
+        if (prop.key?.type === "Identifier") return prop.key.name
+        if (prop.key?.type === "Literal" && typeof prop.key.value === "string") return prop.key.value
+        return null
+      }
+      return getStaticModuleString(prop.key)
+    }
+
+    const hasResultTryFsReadEstree = (text) =>
+      text.includes("Result.try") && /(?:readTextSync|readdirSync|readBytesSync)/.test(text)
+
+    const isSilentEmptyFallbackEstree = (fnNode, allowExtended) => {
+      const fn = unwrapEstree(fnNode)
+      if (fn == null || (fn.type !== "ArrowFunctionExpression" && fn.type !== "FunctionExpression")) {
+        return false
+      }
+      let expr = fn.body
+      if (expr != null && expr.type === "BlockStatement") {
+        if (!Array.isArray(expr.body) || expr.body.length !== 1 || expr.body[0]?.type !== "ReturnStatement") {
+          return false
+        }
+        expr = expr.body[0].argument
+      }
+      if (expr == null) return false
+      if (expr.type === "Literal" && expr.value === "") return true
+      if (expr.type === "ArrayExpression" && expr.elements.length === 0) return true
+      if (!allowExtended) return false
+      if (expr.type === "ObjectExpression" && expr.properties.length === 0) return true
+      if (expr.type === "Identifier" && expr.name === "undefined") return true
+      if (expr.type === "Literal" && expr.value === false) return true
+      return false
+    }
 
     function reportOnce(node, message) {
       if (node != null && typeof node === "object") {
@@ -1755,8 +1846,10 @@ const syntaxBans = {
         declaredBrandKeys.clear()
         migrationRecordVars.clear()
         allowedDdlTemplateNodes.clear()
+        effectModuleNamespaceNames.clear()
         effectNamespaceNames.clear()
         effectNamespaceNames.add("Effect")
+        bannedRunAliases.clear()
         hasSqliteMigratorImport = false
         if (node.body && Array.isArray(node.body)) {
           for (const stmt of node.body) {
@@ -1879,15 +1972,18 @@ const syntaxBans = {
           ) {
             const isEnforcedSrc =
               !isTestFilePath(filename) &&
-              /(?:^|\/)(?:libs\/[^/]+\/[^/]+\/src|apps\/[^/]+\/src)\//.test(filename) &&
-              !/(?:^|\/)libs\/es\/infra\/src\/memory\.ts$/.test(filename)
+              /(?:^|\/)(?:libs\/[^/]+\/[^/]+\/src|apps\/[^/]+\/src)\//.test(filename)
             const isMcpRunPromiseExitBoundary =
               /(?:^|\/)apps\/harness-mcp\/src\/(?:server|daemon\/unix-socket-daemon)\.ts$/.test(filename)
             const isAppSrc = /(?:^|\/)apps\/[^/]+\/src\//.test(filename)
             for (const spec of node.specifiers) {
               if (spec == null || spec.importKind === "type") continue
               if (spec.type === "ImportNamespaceSpecifier" && spec.local?.name) {
-                effectNamespaceNames.add(spec.local.name)
+                if (importSource === "effect") {
+                  effectModuleNamespaceNames.add(spec.local.name)
+                } else {
+                  effectNamespaceNames.add(spec.local.name)
+                }
               } else if (spec.type === "ImportSpecifier") {
                 const importedName = spec.imported?.name ?? spec.local?.name
                 const localName = spec.local?.name
@@ -1992,6 +2088,50 @@ const syntaxBans = {
       },
       VariableDeclarator(node) {
         checkNeverVariableDeclarator(context, node)
+        const filenameForRun = getNormalizedFilename()
+        if (node.init != null) {
+          const unwrappedInit = unwrapEstree(node.init)
+          if (isEffectNamespaceExpr(unwrappedInit)) {
+            if (node.id?.type === "Identifier") {
+              effectNamespaceNames.add(node.id.name)
+            } else if (node.id?.type === "ObjectPattern" && Array.isArray(node.id.properties)) {
+              for (const prop of node.id.properties) {
+                const propName = getEstreeBindingPropName(prop)
+                if (
+                  propName != null &&
+                  prop.value?.type === "Identifier" &&
+                  isBannedEffectRunMethodName(propName, filenameForRun)
+                ) {
+                  bannedRunAliases.set(prop.value.name, propName)
+                }
+              }
+            }
+          } else if (
+            unwrappedInit != null &&
+            unwrappedInit.type === "Identifier" &&
+            effectModuleNamespaceNames.has(unwrappedInit.name) &&
+            node.id?.type === "ObjectPattern" &&
+            Array.isArray(node.id.properties)
+          ) {
+            for (const prop of node.id.properties) {
+              if (getEstreeBindingPropName(prop) !== "Effect") continue
+              if (prop.value?.type === "Identifier") {
+                effectNamespaceNames.add(prop.value.name)
+              } else if (prop.value?.type === "ObjectPattern" && Array.isArray(prop.value.properties)) {
+                for (const nested of prop.value.properties) {
+                  const propName = getEstreeBindingPropName(nested)
+                  if (
+                    propName != null &&
+                    nested.value?.type === "Identifier" &&
+                    isBannedEffectRunMethodName(propName, filenameForRun)
+                  ) {
+                    bannedRunAliases.set(nested.value.name, propName)
+                  }
+                }
+              }
+            }
+          }
+        }
         if (node.id != null && node.id.type === "Identifier") {
           if (node.init != null && node.init.type === "ObjectExpression") {
             migrationRecordVars.set(node.id.name, node.init)
@@ -2104,46 +2244,54 @@ const syntaxBans = {
         if (
           /libs\/[^/]+\/(?:domain|core)\/src\//.test(filename) &&
           node.computed !== true &&
-          node.object != null &&
-          node.object.type === "Identifier" &&
-          effectNamespaceNames.has(node.object.name) &&
+          isEffectNamespaceExpr(node.object) &&
           isIdentifier(node.property, "ignore")
         ) {
           context.report({ node, message: domainEffectIgnoreMessage })
         }
-        if (
+        const isEnforcedRunSrc =
           !isTestFilePath(filename) &&
-          /(?:^|\/)(?:libs\/[^/]+\/[^/]+\/src|apps\/[^/]+\/src)\//.test(filename) &&
-          !/(?:^|\/)libs\/es\/infra\/src\/memory\.ts$/.test(filename) &&
-          node.computed !== true &&
-          node.object != null &&
-          node.object.type === "Identifier" &&
-          effectNamespaceNames.has(node.object.name) &&
-          node.property != null &&
-          node.property.type === "Identifier"
+          /(?:^|\/)(?:libs\/[^/]+\/[^/]+\/src|apps\/[^/]+\/src)\//.test(filename)
+        const accessMethodName =
+          node.computed !== true && node.property?.type === "Identifier"
+            ? node.property.name
+            : node.computed === true
+              ? getStaticModuleString(node.property)
+              : null
+        if (
+          isEnforcedRunSrc &&
+          accessMethodName != null &&
+          isBannedEffectRunMethodName(accessMethodName, filename) &&
+          (node.computed === true || isEffectNamespaceExpr(node.object))
         ) {
-          const methodName = node.property.name
-          const isMcpRunPromiseExitBoundary =
-            /(?:^|\/)apps\/harness-mcp\/src\/(?:server|daemon\/unix-socket-daemon)\.ts$/.test(filename)
-          const isBannedSyncRun =
-            methodName === "runSync" ||
-            methodName === "runSyncExit" ||
-            methodName === "runSyncWith"
-          const isBannedCallbackRun =
-            methodName === "runCallback" || methodName === "runCallbackWith"
-          const isBannedPromiseRun =
-            methodName === "runPromise" ||
-            methodName === "runPromiseWith" ||
-            (methodName === "runPromiseExit" && !isMcpRunPromiseExitBoundary)
-          const isBannedForkRun =
-            (methodName === "runFork" || methodName === "runForkWith") &&
-            !/(?:^|\/)apps\/[^/]+\/src\//.test(filename)
-          if (isBannedSyncRun || isBannedCallbackRun || isBannedPromiseRun || isBannedForkRun) {
-            context.report({
-              node,
-              message: `unscoped-effect-run: '${node.object.name}.${methodName}' is banned in '${filename}' — compose Effects and execute via NodeRuntime.runMain or ManagedRuntime at the app edge.`,
-            })
-          }
+          const isMemoryWorkerdBridge = /(?:^|\/)libs\/es\/infra\/src\/memory\.ts$/.test(filename)
+          const isAllowedMemoryDie = (() => {
+            if (!isMemoryWorkerdBridge || accessMethodName !== "runSync") return false
+            const parentCall = node.parent
+            if (parentCall == null || parentCall.type !== "CallExpression" || parentCall.callee !== node) {
+              return false
+            }
+            const arg = unwrapEstree(parentCall.arguments?.[0])
+            return (
+              arg != null &&
+              arg.type === "CallExpression" &&
+              arg.callee != null &&
+              arg.callee.type === "MemberExpression" &&
+              arg.callee.computed !== true &&
+              isEffectNamespaceExpr(arg.callee.object) &&
+              isIdentifier(arg.callee.property, "die")
+            )
+          })()
+          if (isAllowedMemoryDie) return
+          const objText = getNodeSourceText(context, node.object) || "Effect"
+          const targetLabel =
+            node.computed === true
+              ? `${objText}["${accessMethodName}"]`
+              : `${objText}.${accessMethodName}`
+          context.report({
+            node,
+            message: `unscoped-effect-run: '${targetLabel}' is banned in '${filename}' — compose Effects and execute via NodeRuntime.runMain or ManagedRuntime at the app edge.`,
+          })
         }
       },
       TryStatement(node) {
@@ -2298,6 +2446,119 @@ const syntaxBans = {
 
         const isTest = isTestFilePath(filename)
         const calleeName = getCalleeName(node.callee)
+
+        if (
+          !isTest &&
+          /(?:^|\/)(?:libs\/[^/]+\/[^/]+\/src|apps\/[^/]+\/src)\//.test(filename) &&
+          node.callee?.type === "Identifier" &&
+          bannedRunAliases.has(node.callee.name)
+        ) {
+          const origMethod = bannedRunAliases.get(node.callee.name)
+          context.report({
+            node,
+            message: `unscoped-effect-run: destructured 'Effect.${origMethod}' alias '${node.callee.name}' is banned in '${filename}' — compose Effects and execute via NodeRuntime.runMain or ManagedRuntime at the app edge.`,
+          })
+        }
+
+        if (!isTest && /(?:^|\/)libs\/harness\/gates\/src\//.test(filename)) {
+          if (calleeName === "safeFs") {
+            context.report({
+              node,
+              message: `silent-gate-fs-fallback: 'safeFs(...)' in '${filename}' silently swallows host I/O errors — propagate explicit 'unreadable-workspace-file' findings instead.`,
+            })
+          }
+          const isResultGetOrElse =
+            calleeName === "Result.getOrElse" &&
+            Array.isArray(node.arguments) &&
+            node.arguments.length >= 2
+          if (isResultGetOrElse) {
+            const firstArgText = context.sourceCode.getText(node.arguments[0])
+            if (
+              isSilentEmptyFallbackEstree(node.arguments[1], false) &&
+              hasResultTryFsReadEstree(firstArgText)
+            ) {
+              context.report({
+                node,
+                message: `silent-gate-fs-fallback: 'Result.getOrElse(Result.try(...readTextSync|readdirSync...), () => ""|[])' in '${filename}' silently hides unreadable gate inputs — emit an explicit 'unreadable-workspace-file' finding instead.`,
+              })
+            }
+          }
+          const isPipeGetOrElseArg = (arg) =>
+            arg != null &&
+            arg.type === "CallExpression" &&
+            getCalleeName(arg.callee) === "Result.getOrElse" &&
+            Array.isArray(arg.arguments) &&
+            arg.arguments.length === 1 &&
+            isSilentEmptyFallbackEstree(arg.arguments[0], true)
+          if (
+            node.callee?.type === "MemberExpression" &&
+            node.callee.computed !== true &&
+            isIdentifier(node.callee.property, "pipe") &&
+            hasResultTryFsReadEstree(context.sourceCode.getText(node.callee.object)) &&
+            Array.isArray(node.arguments) &&
+            node.arguments.some(isPipeGetOrElseArg)
+          ) {
+            context.report({
+              node,
+              message: `silent-gate-fs-fallback: 'Result.try(...).pipe(..., Result.getOrElse(...))' in '${filename}' silently hides unreadable gate inputs — emit an explicit 'unreadable-workspace-file' finding instead.`,
+            })
+          }
+          if (
+            calleeName === "pipe" &&
+            Array.isArray(node.arguments) &&
+            node.arguments.length >= 2 &&
+            hasResultTryFsReadEstree(context.sourceCode.getText(node.arguments[0])) &&
+            node.arguments.slice(1).some(isPipeGetOrElseArg)
+          ) {
+            context.report({
+              node,
+              message: `silent-gate-fs-fallback: 'pipe(Result.try(...), ..., Result.getOrElse(...))' in '${filename}' silently hides unreadable gate inputs — emit an explicit 'unreadable-workspace-file' finding instead.`,
+            })
+          }
+          if (
+            node.callee?.type === "MemberExpression" &&
+            node.callee.computed !== true &&
+            isIdentifier(node.callee.property, "with") &&
+            Array.isArray(node.arguments) &&
+            node.arguments.length >= 2 &&
+            isSilentEmptyFallbackEstree(node.arguments[1], true)
+          ) {
+            const pat = unwrapEstree(node.arguments[0])
+            const isFailurePat =
+              pat != null &&
+              pat.type === "ObjectExpression" &&
+              Array.isArray(pat.properties) &&
+              pat.properties.some(
+                (p) =>
+                  p != null &&
+                  p.type === "Property" &&
+                  getEstreeBindingPropName(p) === "_tag" &&
+                  getStaticModuleString(p.value) === "Failure",
+              )
+            if (isFailurePat) {
+              let curr = node.callee
+              while (
+                curr != null &&
+                curr.type === "MemberExpression" &&
+                curr.object != null &&
+                curr.object.type === "CallExpression"
+              ) {
+                const innerCall = curr.object
+                if (innerCall.callee?.type === "Identifier" && innerCall.callee.name === "match") {
+                  const arg0 = innerCall.arguments?.[0]
+                  if (arg0 != null && hasResultTryFsReadEstree(context.sourceCode.getText(arg0))) {
+                    context.report({
+                      node,
+                      message: `silent-gate-fs-fallback: 'match(Result.try(...)).with({ _tag: "Failure" }, ...)' in '${filename}' silently hides unreadable gate inputs — emit an explicit 'unreadable-workspace-file' finding instead.`,
+                    })
+                  }
+                  break
+                }
+                curr = innerCall.callee
+              }
+            }
+          }
+        }
 
         if (!isTest && calleeName === "Cause.hasInterruptsOnly") {
           let anc = node.parent

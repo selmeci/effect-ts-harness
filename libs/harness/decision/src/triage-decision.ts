@@ -406,6 +406,37 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     },
   },
   {
+    id: "doc-truth-drift",
+    pattern:
+      /doc-unknown-package-name|doc-unknown-rule-id|doc-missing-file-path|agents-duplicate-section|adapter-rules-drift|hook-timeout-parity/,
+    kind: "mechanical",
+    hint: "Documentation or adapter truth drift — fix unknown @harness/* package names, invalid oxlint rule IDs, missing file paths, duplicate AGENTS.md sections, adapter rules drift, or missing hook timeouts.",
+    result: {
+      kind: "mechanical",
+      hint: "Documentation or adapter truth drift — fix unknown @harness/* package names, invalid oxlint rule IDs, missing file paths, duplicate AGENTS.md sections, adapter rules drift, or missing hook timeouts.",
+    },
+  },
+  {
+    id: "stale-gate-rule-version",
+    pattern: /stale-gate-rule-version|EXPECTED_GATE_RULE_VERSION_DIGEST/,
+    kind: "mechanical",
+    hint: "Gate rule IDs changed without bumping HARNESS_GATE_RULE_VERSION and EXPECTED_GATE_RULE_VERSION_DIGEST — bump HARNESS_GATE_RULE_VERSION in @harness/contract and update EXPECTED_GATE_RULE_VERSION_DIGEST in gc-doc-truth.plugin.ts.",
+    result: {
+      kind: "mechanical",
+      hint: "Gate rule IDs changed without bumping HARNESS_GATE_RULE_VERSION and EXPECTED_GATE_RULE_VERSION_DIGEST — bump HARNESS_GATE_RULE_VERSION in @harness/contract and update EXPECTED_GATE_RULE_VERSION_DIGEST in gc-doc-truth.plugin.ts.",
+    },
+  },
+  {
+    id: "silent-gate-fs-fallback",
+    pattern: /silent-gate-fs-fallback|unreadable-workspace-file/,
+    kind: "mechanical",
+    hint: "Silent gate filesystem fallback or unreadable workspace file — replace safeFs/Result.getOrElse(..., () => \"\"|[]) with readTextOrReport/readdirOrReport so unreadable files emit explicit 'unreadable-workspace-file' findings.",
+    result: {
+      kind: "mechanical",
+      hint: "Silent gate filesystem fallback or unreadable workspace file — replace safeFs/Result.getOrElse(..., () => \"\"|[]) with readTextOrReport/readdirOrReport so unreadable files emit explicit 'unreadable-workspace-file' findings.",
+    },
+  },
+  {
     pattern: /harness(?:\/|\()syntax-bans\)?/,
     result: {
       kind: "mechanical",

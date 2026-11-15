@@ -6,7 +6,7 @@ date: 2026-10-30
 deciders:
   - "@harness/gates"
   - "@harness/decision"
-  - "@harness/cli"
+  - "harness-cli"
 enforced_by:
   - libs/harness/decision/src/idiom-router.ts
   - libs/harness/decision/src/triage-decision.ts
@@ -26,7 +26,7 @@ errors: []
 
 ## Context and Problem Statement
 
-Forensic analysis of live Antigravity session `65596e97-aea2-447f-911a-2c0178874cf4` exposed three architectural friction points across `@harness/decision`, `@harness/gates`, and `@harness/cli`:
+Forensic analysis of live Antigravity session `65596e97-aea2-447f-911a-2c0178874cf4` exposed three architectural friction points across `@harness/decision`, `@harness/gates`, and `harness-cli`:
 
 1. `Harness.routeStep` relied exclusively on the local LLM (`IdiomRouterV1` via `clef` / `gemma4:e2b`), which returned `"review"` (`route_miss`) for unambiguous domain phrases like `"event sourcing decider core"` and `"event sourcing"`. Meanwhile, `Harness.triageFailure` already uses a deterministic regex pre-filter (`DETERMINISTIC_TRIAGE_RULES`) before falling back to `TriageV1`.
 2. `SessionReport.decide` conflated routing fallbacks (`outcome === "fallback"`) with Omnigraph memory-fallbacks (`engineSource === "memory-fallback"`), and conflated internal CLI graph writes (`omnigraph:sync-plan`, `omnigraph:sync-impl`, `omnigraph:merge-main`) with agent graph discovery queries.

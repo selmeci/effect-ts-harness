@@ -1,5 +1,5 @@
 import { join } from "node:path"
-import { Cause, Effect, Layer } from "effect"
+import { Cause, Duration, Effect, Layer } from "effect"
 import * as Graph from "effect/Graph"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
@@ -56,7 +56,12 @@ import {
   tryQueryWarmDaemonSocket,
 } from "./daemon-and-omnigraph.service.js"
 import { syncOmnigraphOnDone } from "./done-omnigraph-helpers.js"
-import { hasAntigravityFormat, makeDoneBlockResult } from "./hook-format.js"
+import {
+  detectAntigravityHookPayload,
+  hasAntigravityFormat,
+  makeDoneBlockResult,
+  markProcessStdinAntigravityDetected,
+} from "./hook-format.js"
 import {
   decodeStopHookStdin,
   hasVerifiedSinceLastMutation,
@@ -186,8 +191,19 @@ export const handleVerify = (
       )
     }
 
+    const docFindings: NonNullable<Parameters<typeof loadGovernanceDocsFromDisk>[2]> = []
     const governanceDocs =
-      options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot, nodeSyncHostIo)
+      options?.governanceDocs ?? loadGovernanceDocsFromDisk(repoRoot, nodeSyncHostIo, docFindings)
+    if (docFindings.length > 0) {
+      const msg = docFindings.map((f) => `[${f.kind}] ${f.location}: ${f.message}`).join("\n")
+      return verifyFailureWithThrashing(
+        options,
+        repoRoot,
+        docFindings[0]?.kind ?? "governance-doc-read-failed",
+        msg,
+        `Verification failed: unreadable governance docs\n${msg}`,
+      )
+    }
     const ontologyInvariants = yield* decideOntologyInvariants({ graph, governanceDocs })
     if (!ontologyInvariants.clean) {
       const msg = ontologyInvariants.findings
@@ -267,7 +283,14 @@ export const handleVerify = (
             cwd: repoRoot,
             env: { ...process.env, CI: "true" },
           })
-          return res.exitCode === 0 ? null : formatSubprocessError(res)
+          return match(res)
+            .with({ _tag: "Exited" }, (exited) =>
+              exited.exitCode === 0 ? null : formatSubprocessError(exited),
+            )
+            .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, (err) =>
+              formatSubprocessError(err),
+            )
+            .exhaustive()
         },
         catch: (cause) => formatSubprocessError(cause),
       }).pipe(Effect.catch((msg) => Effect.succeed(msg || "Verification subprocess failed")))
@@ -426,27 +449,44 @@ const loadSnapshotPair = (
       .exhaustive()
   })
 
+const parseDoneDeadlineMs = (): number => {
+  const raw = process.env.HARNESS_DONE_DEADLINE_MS
+  if (raw === undefined || raw.trim().length === 0) {
+    return 23_000
+  }
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 23_000
+}
+
 export const handleDone = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
   decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
 ): Effect.Effect<CliResult> => {
-  const isAntigravity = hasAntigravityFormat(argv)
-  const blockDecision = isAntigravity ? "continue" : "block"
+  const entryStartedAtMs = Date.now()
+  const totalDeadlineMs = parseDoneDeadlineMs()
+  let isAntigravity =
+    hasAntigravityFormat(argv) ||
+    (options?.stdin !== undefined && detectAntigravityHookPayload(options.stdin))
   return Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
 
     let rawStdin = options?.stdin
     if (rawStdin === undefined && process.stdin.isTTY !== true) {
+      const stdinTimeoutMs = Math.min(options?.stdinTimeoutMs ?? 4_000, Math.max(20, totalDeadlineMs))
       const stdinRes = yield* Effect.result(
         makeReadStdinEffect({
-          timeoutMs: options?.stdinTimeoutMs,
+          timeoutMs: stdinTimeoutMs,
           maxBytes: options?.stdinMaxBytes,
         }),
       )
       const stdinErrResult = match(stdinRes)
         .with({ _tag: "Success" }, ({ success }) => {
           rawStdin = success
+          if (detectAntigravityHookPayload(success)) {
+            isAntigravity = true
+            markProcessStdinAntigravityDetected()
+          }
           return undefined
         })
         .with({ _tag: "Failure" }, ({ failure }) => {
@@ -463,6 +503,7 @@ export const handleDone = (
     }
     let decodedStdin: StopHookStdin | undefined
     if (rawStdin !== undefined && rawStdin.trim().length > 0) {
+      isAntigravity = isAntigravity || detectAntigravityHookPayload(rawStdin)
       const decoded = decodeStopHookStdin(rawStdin)
       const earlyResult = match(decoded)
         .with({ _tag: "Some" }, ({ value }) => {
@@ -480,114 +521,110 @@ export const handleDone = (
       }
     }
 
-    // 1. Subagent bypass
-    if (isSubagentStopContext(repoRoot, decodedStdin)) {
-      return {
-        exitCode: 0,
-        stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "",
-        stderr: "",
-        telemetryDetail: "subagent=true",
+    const blockDecision = isAntigravity ? "continue" : "block"
+    const verificationEffect = Effect.gen(function* () {
+      // 1. Subagent bypass
+      if (isSubagentStopContext(repoRoot, decodedStdin)) {
+        return { exitCode: 0, stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "", stderr: "", telemetryDetail: "subagent=true" }
       }
-    }
-
-    // 2. Read-only turn bypass
-    if (isReadOnlyStopTurn(decodedStdin)) {
-      return {
-        exitCode: 0,
-        stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "",
-        stderr: "",
-        telemetryDetail: "readOnly=true",
+      // 2. Read-only turn bypass
+      if (isReadOnlyStopTurn(decodedStdin)) {
+        return { exitCode: 0, stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "", stderr: "", telemetryDetail: "readOnly=true" }
       }
-    }
-
-    // 3. Verify stamp check
-    const stampCheck = checkVerifyStamp(repoRoot, nodeSyncHostIo)
-    if (!stampCheck.valid) {
-      if (hasVerifiedSinceLastMutation(decodedStdin)) {
-        return {
-          exitCode: 0,
-          stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "",
-          stderr: "",
-          telemetryDetail: "completed",
+      // 3. Verify stamp check
+      const stampCheck = checkVerifyStamp(repoRoot, nodeSyncHostIo)
+      if (!stampCheck.valid) {
+        if (hasVerifiedSinceLastMutation(decodedStdin)) {
+          return { exitCode: 0, stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "", stderr: "", telemetryDetail: "completed" }
         }
+        return { exitCode: 0, stdout: JSON.stringify({ decision: blockDecision, reason: stampCheck.reason }), stderr: "" }
       }
-      return {
-        exitCode: 0,
-        stdout: JSON.stringify({ decision: blockDecision, reason: stampCheck.reason }),
-        stderr: "",
-      }
-    }
 
-    const snapshotOutcome = yield* loadSnapshotPair(
-      repoRoot,
-      options?.planGraph,
-      options?.implGraph,
-      isAntigravity,
-    )
+      const snapshotOutcome = yield* loadSnapshotPair(
+        repoRoot,
+        options?.planGraph,
+        options?.implGraph,
+        isAntigravity,
+      )
 
-    return yield* match(snapshotOutcome)
-      .with({ _tag: "Done" }, ({ result }) => Effect.succeed(result))
-      .with({ _tag: "Graphs" }, ({ planGraph, implGraph }) =>
-        Effect.gen(function* () {
-          // 4. Plan vs implementation graph diff
-          if (planGraph && implGraph) {
-            const diff = diffPlanAndImplGraphs(planGraph, implGraph)
-            if (!diff.ok) {
-              return {
-                exitCode: 0,
-                stdout: JSON.stringify({ decision: blockDecision, reason: diff.reasons.join("; ") }),
-                stderr: "",
-              }
-            }
-          }
-
-          // 5. Plan step coverage
-          if (options?.planSteps && options.planSteps.length > 0) {
-            for (const step of options.planSteps) {
-              const stepRes = yield* checkPlanStepCoverage(step).pipe(Effect.provide(decisionLayer))
-              if (!stepRes.covered) {
+      return yield* match(snapshotOutcome)
+        .with({ _tag: "Done" }, ({ result }) => Effect.succeed(result))
+        .with({ _tag: "Graphs" }, ({ planGraph, implGraph }) =>
+          Effect.gen(function* () {
+            // 4. Plan vs implementation graph diff
+            if (planGraph && implGraph) {
+              const diff = diffPlanAndImplGraphs(planGraph, implGraph)
+              if (!diff.ok) {
                 return {
                   exitCode: 0,
-                  stdout: JSON.stringify({ decision: blockDecision, reason: stepRes.reason }),
+                  stdout: JSON.stringify({ decision: blockDecision, reason: diff.reasons.join("; ") }),
                   stderr: "",
                 }
               }
             }
-          }
 
-          // 6. Omnigraph sync & branch merge
-          const omnigraphFailure = yield* syncOmnigraphOnDone(
-            repoRoot,
-            options,
-            isAntigravity,
-            blockDecision,
-          )
-          if (omnigraphFailure !== undefined) {
-            return omnigraphFailure
-          }
+            // 5. Plan step coverage
+            if (options?.planSteps && options.planSteps.length > 0) {
+              for (const step of options.planSteps) {
+                const stepRes = yield* checkPlanStepCoverage(step).pipe(Effect.provide(decisionLayer))
+                if (!stepRes.covered) {
+                  return {
+                    exitCode: 0,
+                    stdout: JSON.stringify({ decision: blockDecision, reason: stepRes.reason }),
+                    stderr: "",
+                  }
+                }
+              }
+            }
 
-          if (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) {
-            const report = buildSessionReport({
-              events: readTelemetryEvents(repoRoot, nodeSyncHostIo),
-              frictionEvents: readFrictionEvents(repoRoot, nodeSyncHostIo),
-              stampValid: true,
-            })
-            writeSessionReportFiles(repoRoot, report, nodeSyncHostIo)
-          }
+            // 6. Omnigraph sync & branch merge
+            const omnigraphFailure = yield* syncOmnigraphOnDone(
+              repoRoot,
+              options,
+              isAntigravity,
+              blockDecision,
+            )
+            if (omnigraphFailure !== undefined) {
+              return omnigraphFailure
+            }
 
-          return {
-            exitCode: 0,
-            stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "",
-            stderr: "",
-            telemetryDetail: "completed",
-          }
-        }),
+            if (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) {
+              const report = buildSessionReport({
+                events: readTelemetryEvents(repoRoot, nodeSyncHostIo),
+                frictionEvents: readFrictionEvents(repoRoot, nodeSyncHostIo),
+                stampValid: true,
+              })
+              writeSessionReportFiles(repoRoot, report, nodeSyncHostIo)
+            }
+
+            return {
+              exitCode: 0,
+              stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "",
+              stderr: "",
+              telemetryDetail: "completed",
+            }
+          }),
+        )
+        .exhaustive()
+    })
+
+    const remainingDeadlineMs = Math.max(20, totalDeadlineMs - (Date.now() - entryStartedAtMs))
+    const timedResult = yield* verificationEffect.pipe(
+      Effect.timeoutOption(Duration.millis(remainingDeadlineMs)),
+    )
+    return match(timedResult)
+      .with({ _tag: "Some" }, ({ value }) => value)
+      .with({ _tag: "None" }, () =>
+        makeDoneBlockResult(
+          isAntigravity,
+          `Stop hook verification exceeded internal deadline (${totalDeadlineMs}ms) — blocking premature termination.`,
+        ),
       )
       .exhaustive()
   }).pipe(
     Effect.catchCause((cause) => {
       if (Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)) {
-        return Effect.interrupt
+        return Effect.failCause(cause)
       }
       const pretty = Cause.pretty(cause)
       process.stderr.write(`[harness:done] uncaught cause: ${pretty}\n`)

@@ -47,6 +47,7 @@ describe("AlbumCounterClient", () => {
     Effect.gen(function* () {
       const clientImpl = {
         increment: () => Effect.succeed(AlbumPhotoCount.make(1)),
+        decrement: () => Effect.succeed(AlbumPhotoCount.make(0)),
         getCount: () => Effect.succeed(AlbumPhotoCount.make(0)),
       }
       const program = Effect.gen(function* () {

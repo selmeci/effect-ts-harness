@@ -1,15 +1,12 @@
 /**
  * @fileoverview Backup recovery and git-diff line extraction helpers for mutation-check.
  */
-import { createHash } from "node:crypto"
 import { join, relative, resolve } from "node:path"
 import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
+import { computeContentSha256 } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { parseGitDiffModifiedLines } from "./mutant-ast-generator.js"
-
-export const sha256Hex = (content: string): string =>
-  createHash("sha256").update(content, "utf8").digest("hex")
 
 export type GitDiffExtractionResult =
   | { readonly kind: "not-git" }
@@ -24,44 +21,82 @@ export const extractGitDiffModifiedLinesChecked = (
   const revParseRes = Result.try(() =>
     hostIo.execFileSync("git", ["rev-parse", "--is-inside-work-tree"], gitOpts),
   )
-  const isGit = match(revParseRes)
+  const revParseStatus:
+    | { readonly kind: "proceed" }
+    | { readonly kind: "not-git" }
+    | { readonly kind: "failed"; readonly reason: string } = match(revParseRes)
+    .with({ _tag: "Failure" }, ({ failure }) => ({
+      kind: "failed" as const,
+      reason: `git rev-parse --is-inside-work-tree threw: ${failure instanceof Error ? failure.message : String(failure)}`,
+    }))
     .with({ _tag: "Success" }, ({ success }) =>
-      success.spawnError == null &&
-      success.timedOut !== true &&
-      success.signal == null &&
-      success.exitCode === 0 &&
-      success.stdout.trim() === "true",
+      match(success)
+        .with({ _tag: "Exited" }, (res) => {
+          if (res.exitCode === 0 && res.stdout.trim() === "true") {
+            return { kind: "proceed" as const }
+          }
+          if (res.exitCode === 128 && /not a git repository/i.test(`${res.stdout}\n${res.stderr}`)) {
+            return { kind: "not-git" as const }
+          }
+          const stderrPart = res.stderr.trim().length > 0 ? `, stderr=${res.stderr.trim()}` : ""
+          return {
+            kind: "failed" as const,
+            reason: `git rev-parse --is-inside-work-tree failed (exitCode=${res.exitCode}${stderrPart})`,
+          }
+        })
+        .with({ _tag: "TimedOut" }, (res) => ({
+          kind: "failed" as const,
+          reason: `git rev-parse --is-inside-work-tree failed (timedOut=true${res.stderr.trim().length > 0 ? `, stderr=${res.stderr.trim()}` : ""})`,
+        }))
+        .with({ _tag: "Signaled" }, (res) => ({
+          kind: "failed" as const,
+          reason: `git rev-parse --is-inside-work-tree failed (signal=${res.signal}${res.stderr.trim().length > 0 ? `, stderr=${res.stderr.trim()}` : ""})`,
+        }))
+        .with({ _tag: "SpawnFailed" }, (res) => ({
+          kind: "failed" as const,
+          reason: `git rev-parse --is-inside-work-tree failed (spawnError=${res.spawnError})`,
+        }))
+        .exhaustive(),
     )
-    .with({ _tag: "Failure" }, () => false)
     .exhaustive()
-  if (!isGit) return { kind: "not-git" }
+
+  const earlyExit = match(revParseStatus)
+    .with({ kind: "proceed" }, () => undefined)
+    .with({ kind: "not-git" }, () => ({ kind: "not-git" as const }))
+    .with({ kind: "failed" }, ({ reason }) => ({ kind: "failed" as const, reason }))
+    .exhaustive()
+  if (earlyExit !== undefined) return earlyExit
 
   const runGitDiff = (
     args: ReadonlyArray<string>,
   ): { readonly ok: true; readonly stdout: string } | { readonly ok: false; readonly reason: string } => {
     const res = Result.try(() => hostIo.execFileSync("git", args, gitOpts))
     return match(res)
-      .with({ _tag: "Success" }, ({ success }) => {
-        if (
-          success.spawnError != null ||
-          success.timedOut === true ||
-          success.signal != null ||
-          success.exitCode !== 0
-        ) {
-          const reasons: Array<string> = []
-          if (success.spawnError != null) reasons.push(`spawnError=${success.spawnError}`)
-          if (success.timedOut === true) reasons.push("timedOut=true")
-          if (success.signal != null) reasons.push(`signal=${success.signal}`)
-          if (success.exitCode !== 0) reasons.push(`exitCode=${success.exitCode}`)
-          if (success.stderr.trim().length > 0) reasons.push(`stderr=${success.stderr.trim()}`)
-          return { ok: false as const, reason: `git ${args.join(" ")} failed (${reasons.join(", ")})` }
-        }
-        return { ok: true as const, stdout: success.stdout }
-      })
       .with({ _tag: "Failure" }, ({ failure }) => ({
         ok: false as const,
         reason: `git ${args.join(" ")} threw: ${failure instanceof Error ? failure.message : String(failure)}`,
       }))
+      .with({ _tag: "Success" }, ({ success }) =>
+        match(success)
+          .with({ _tag: "Exited" }, (r) => {
+            if (r.exitCode === 0) return { ok: true as const, stdout: r.stdout }
+            const stderrPart = r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""
+            return { ok: false as const, reason: `git ${args.join(" ")} failed (exitCode=${r.exitCode}${stderrPart})` }
+          })
+          .with({ _tag: "TimedOut" }, (r) => ({
+            ok: false as const,
+            reason: `git ${args.join(" ")} failed (timedOut=true${r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""})`,
+          }))
+          .with({ _tag: "Signaled" }, (r) => ({
+            ok: false as const,
+            reason: `git ${args.join(" ")} failed (signal=${r.signal}${r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""})`,
+          }))
+          .with({ _tag: "SpawnFailed" }, (r) => ({
+            ok: false as const,
+            reason: `git ${args.join(" ")} failed (spawnError=${r.spawnError}${r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""})`,
+          }))
+          .exhaustive(),
+      )
       .exhaustive()
   }
 
@@ -129,8 +164,8 @@ export const recoverStartupBackup = (
               `Failed to read target '${relTarget}': ${failure instanceof Error ? failure.message : String(failure)}`,
             )
             .with({ _tag: "Success" }, ({ success: currentContent }) => {
-              const currentSha256 = sha256Hex(currentContent)
-              const originalSha256 = decoded.originalSha256 ?? sha256Hex(content)
+              const currentSha256 = computeContentSha256(currentContent)
+              const originalSha256 = decoded.originalSha256 ?? computeContentSha256(content)
               if (decoded.mutatedSha256 !== undefined && currentSha256 === decoded.mutatedSha256) {
                 const writeRes = Result.try(() => {
                   hostIo.writeTextSync(resolvedTarget, content)
@@ -180,8 +215,8 @@ export const writeMutationBackup = (
       backupPath,
       JSON.stringify({
         filePath: targetPath,
-        originalSha256: sha256Hex(originalSource),
-        mutatedSha256: sha256Hex(mutatedSource),
+        originalSha256: computeContentSha256(originalSource),
+        mutatedSha256: computeContentSha256(mutatedSource),
         content: originalSource,
       }),
     )

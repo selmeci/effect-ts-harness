@@ -35,11 +35,12 @@ Always prefer in-process MCP tools over spawning shell subcommands to eliminate 
 - **Package Archetypes (Framework vs Application):**
   - **Application Archetype:** Standard user-facing domain models live in `type:domain` (`*.decide`, business use cases).
   - **Framework / Library Archetype:** The repo produces generic engines, protocols, and abstractions (e.g. `AggregateRoot`, `EventStore`, `Decider`). Business domains (e.g. `Cart`, `Inventory`, `Order`) **MUST NEVER** be created in production libraries. Domain models belong strictly to `test/fixtures` or `samples/` tagged with `scope:fixture`.
-- `type:contract` — shared Schemas, `HttpApi`, `RpcGroup`, API errors, event/command protocols; imports `effect` only
-- `type:domain` (in applications) / `type:core` (in frameworks) — use cases, generic engines, and pure logic, no I/O; imports `contract` (and `@harness/contract` for `stub` in skeletons); must not depend on `type:infra`
-- `type:service` — service interfaces and repository ports
-- `type:infra` — live Layer implementations, `@effect/sql-*` repositories and handlers, Alchemy resources, adapter implementations
-- `type:app` — composes Layers and runs the runtime; the `web` app may import `contract` and UI libraries only
+- `type:contract` — shared Schemas, `HttpApi`, `RpcGroup`, API errors, event/command protocols; `effect` only (workspace: `type:contract` / `[]`; forbidden: `service`, `core`, `domain`, `infra`, `app`, 3rd-party I/O)
+- `type:service` — service interfaces and repository ports; imports `type:contract`, `type:service` (external: `effect` only; forbidden: `core`, `domain`, `infra`, `app`, Node/SQL drivers)
+- `type:core` — generic engines, gates, and pure logic, no I/O; imports `type:contract`, `type:service`, `type:core` (forbidden: `type:domain`, `type:infra`, `type:app`)
+- `type:domain` — use cases and pure logic, no I/O; imports `type:contract`, `type:service`, `type:core`, `type:domain` (and `@harness/contract` for `stub` in skeletons; forbidden: `type:infra`, `type:app`, `alchemy`, `@effect/sql-*`)
+- `type:infra` — live Layer implementations, `@effect/sql-*` repositories and handlers, Alchemy resources, adapter implementations; imports `type:contract`, `type:service`, `type:core`, `type:domain`, `type:infra` (forbidden: `type:app`; `drizzle-orm`/`drizzle-kit` banned workspace-wide)
+- `type:app` — composes Layers and runs the runtime; may import all library tiers + `type:app` (except `scope:web`, which may import `type:contract` and UI libraries only)
 
 ## Planning in Effect idioms
 
@@ -64,14 +65,6 @@ Plan as code: write the skeleton first (schemas, errors, service interfaces, sig
   - Raw primitive type aliases (`type UserId = string`), inline object type aliases (`type Input = { ... }`), and unbranded scalar schemas in `type:contract` are banned (`harness(syntax-bans)`, `unbranded-contract-schema`). Always pipe scalar schemas into `.pipe(Schema.brand("<BrandName>"))` and derive `export type <BrandName> = typeof <BrandName>.Type`. Each brand key (`Schema.brand("<BrandName>")`) has a single canonical constructor; wire codecs decode into it via `Schema.FiniteFromString.pipe(Schema.decodeTo(<BrandName>))`.
   - Struct, Class, TaggedStruct, TaggedUnion, and TaggedError fields in `type:contract`, `type:domain`, and `type:core` must reference branded schemas rather than raw `Schema.String`, `Schema.NonEmptyString`, `Schema.Int`, or `Schema.Natural`.
   - Exported domain `Effect.fn` use cases, `.decide` / `evolve` functions, `stub<A, E, R>` skeletons, and `Context.Service` capability methods must use branded domain types or named contract `Schema.Struct` / `Schema.Class` / `Schema.Tagged*` types at their parameter and return/success boundaries — never raw primitives (`string`, `number`, `boolean`, `bigint`, `any`, `unknown`) or inline object type literals (`{ ... }`) (`unbranded-primitive-boundary`). Never bypass brand validation with `as <BrandedType>`; use `<Schema>.make(value)`, `Schema.decodeUnknownEffect(<Schema>)`, or Effect v4 `Brand.nominal` / `Brand.make` / `Brand.check`.
-
-## Nx taxonomy
-
-- `type:contract` — shared Schemas, `HttpApi`, `RpcGroup`, API errors; imports `effect` only
-- `type:domain` — use cases and pure logic, no I/O; imports `contract` (and `@harness/contract` for `stub` in skeletons); must not depend on `type:infra`
-- `type:service` — service interfaces, including repositories
-- `type:infra` — live Layer implementations, `@effect/sql-*` repositories and handlers, Alchemy resources
-- `type:app` — composes Layers and runs the runtime; the `web` app may import `contract` and UI libraries only
 
 ## Data layer rules (Native Effect v4 SQL on D1 / Durable Objects)
 

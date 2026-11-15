@@ -4,10 +4,23 @@
  * Architectural rationale ("why"): TypeScript's `ts.CompilerHost` (`ts.createProgram`)
  * and `ts-morph` require strictly synchronous filesystem callbacks (`fileExists`,
  * `readFile`, `realpath`, `getDirectories`) that cannot yield Effect fibers. Isolating
- * those synchronous callbacks behind `SyncHostIo` keeps `@harness/graph`, `@harness/gates`,
- * and `@harness/ingest` free of direct `node:fs` / `node:child_process` imports while
- * `@harness/infra` (`nodeSyncHostIo`) owns the concrete Node binding. All Effect-native
- * asynchronous workflows should prefer `WorkspaceFs` and `HarnessSubprocessRunner`.
+ * those synchronous callbacks behind `SyncHostIo` / `ExtendedHostIo` keeps `@harness/graph`,
+ * `@harness/gates`, and `@harness/ingest` free of direct `node:fs` / `node:child_process`
+ * imports while `@harness/infra` (`nodeSyncHostIo`) owns the concrete Node binding.
+ *
+ * Capabilities:
+ * - `SyncHostIo`: synchronous file/directory reads and metadata (`existsSync`, `isFileSync`,
+ *   `isDirectorySync`, `isSymbolicLinkSync`, `readTextSync`, `readBytesSync`, `readdirSync`,
+ *   `realpathSync`), writes and mutations (`writeTextSync`, `appendTextSync`,
+ *   `mkdirRecursiveSync`, `renameSync`, `unlinkSync`), and synchronous subprocess execution
+ *   (`execFileSync`).
+ * - `ExtendedHostIo`: extends `SyncHostIo` with recursive/temp/permission/process helpers
+ *   (`rmRecursiveSync`, `cpRecursiveSync`, `mkdtempSync`, `statMtimeMsSync`, `chmodSync`,
+ *   `spawnDetached`).
+ *
+ * Note: Standalone compiler extractors fall back to `ts.sys` only when `hostIo` is
+ * omitted. All Effect-native asynchronous workflows should prefer `WorkspaceFs` and
+ * `HarnessSubprocessRunner`.
  */
 export interface SyncHostDirEntry {
   readonly name: string
@@ -15,14 +28,42 @@ export interface SyncHostDirEntry {
   readonly isDirectory: boolean
 }
 
-export interface SyncHostExecResult {
+export interface SyncHostExecExited {
+  readonly _tag: "Exited"
   readonly exitCode: number
   readonly stdout: string
   readonly stderr: string
-  readonly spawnError?: string | undefined
-  readonly signal?: string | null | undefined
-  readonly timedOut?: boolean | undefined
 }
+
+export interface SyncHostExecTimedOut {
+  readonly _tag: "TimedOut"
+  readonly stdout: string
+  readonly stderr: string
+  readonly signal?: string | undefined
+  readonly spawnError?: string | undefined
+}
+
+export interface SyncHostExecSignaled {
+  readonly _tag: "Signaled"
+  readonly signal: string
+  readonly stdout: string
+  readonly stderr: string
+  readonly spawnError?: string | undefined
+}
+
+export interface SyncHostExecSpawnFailed {
+  readonly _tag: "SpawnFailed"
+  readonly spawnError: string
+  readonly errorCode?: string | undefined
+  readonly stdout: string
+  readonly stderr: string
+}
+
+export type SyncHostExecResult =
+  | SyncHostExecExited
+  | SyncHostExecTimedOut
+  | SyncHostExecSignaled
+  | SyncHostExecSpawnFailed
 
 export interface SyncHostExecOptions {
   readonly cwd?: string | undefined
@@ -52,9 +93,23 @@ export interface SyncHostIo {
   ) => SyncHostExecResult
 }
 
-export interface SyncHostSpawnDetachedResult {
-  readonly pid?: number | undefined
-  readonly spawnError?: string | undefined
+export interface SyncHostSpawned {
+  readonly _tag: "Spawned"
+  readonly pid: number
+}
+
+export interface SyncHostSpawnFailed {
+  readonly _tag: "SpawnFailed"
+  readonly spawnError: string
+  readonly errorCode?: string | undefined
+}
+
+export type SyncHostSpawnDetachedResult = SyncHostSpawned | SyncHostSpawnFailed
+
+export interface SyncHostSpawnDetachedOptions {
+  readonly cwd?: string | undefined
+  readonly env?: Readonly<Record<string, string | undefined>> | undefined
+  readonly stderrLogPath?: string | undefined
 }
 
 export interface ExtendedHostIo extends SyncHostIo {
@@ -66,9 +121,6 @@ export interface ExtendedHostIo extends SyncHostIo {
   readonly spawnDetached: (
     command: string,
     args: ReadonlyArray<string>,
-    options?: {
-      readonly cwd?: string | undefined
-      readonly env?: Readonly<Record<string, string | undefined>> | undefined
-    },
+    options?: SyncHostSpawnDetachedOptions,
   ) => SyncHostSpawnDetachedResult
 }

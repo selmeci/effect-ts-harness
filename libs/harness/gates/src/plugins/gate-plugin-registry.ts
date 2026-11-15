@@ -95,12 +95,13 @@ export const makeGatePluginRegistryLayer = (
               NonNegativeCount.make(inspectedCount),
             )
 
-            if (options?.failOnViolation === true && allViolations.length > 0) {
+            const [firstViolation, ...restViolations] = allViolations
+            if (options?.failOnViolation === true && firstViolation !== undefined) {
               return yield* new SelfDogfoodingViolationError({
                 message: SelfDogfoodingMessage.make(
                   `GatePluginRegistry found ${allViolations.length} violation(s) across ${plugins.length} plugin(s).`,
                 ),
-                violations: allViolations,
+                violations: [firstViolation, ...restViolations],
               })
             }
             return report

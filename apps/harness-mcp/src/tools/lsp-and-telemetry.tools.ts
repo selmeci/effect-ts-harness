@@ -269,9 +269,14 @@ export const runDefaultLspDiagnostics = (
 
     const seen = new Set<string>()
     const mergedDiags: Array<unknown> = []
+    const procFailed = match(proc)
+      .with({ _tag: "Exited" }, (p) => p.exitCode !== 0)
+      .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => true)
+      .exhaustive()
+
     match(decoded)
       .with({ _tag: "None" }, () => {
-        if (proc.exitCode !== 0 && Object.keys(overlays).length === 0) {
+        if (procFailed && Object.keys(overlays).length === 0) {
           const errMsg = proc.stderr.trim()
           process.stderr.write(`[harness-mcp] effect-tsgo diagnostic process failure: ${errMsg}\n`)
           mergedDiags.push({
@@ -330,11 +335,28 @@ export const runDefaultLspDiagnostics = (
       })
       .with({ _tag: "None" }, () => {
         const failureDetails: Array<string> = []
-        if (proc.exitCode !== 0) {
-          failureDetails.push(
-            `[lsp-exit-${proc.exitCode}] effect-tsgo exited with status ${proc.exitCode}`,
-          )
-        }
+        match(proc)
+          .with({ _tag: "Exited" }, (p) => {
+            if (p.exitCode !== 0) {
+              failureDetails.push(
+                `[lsp-exit-${p.exitCode}] effect-tsgo exited with status ${p.exitCode}`,
+              )
+            }
+          })
+          .with({ _tag: "TimedOut" }, (p) => {
+            failureDetails.push(
+              `[lsp-timeout] effect-tsgo timed out${p.signal ? ` (${p.signal})` : ""}`,
+            )
+          })
+          .with({ _tag: "Signaled" }, (p) => {
+            failureDetails.push(
+              `[lsp-signal-${p.signal}] effect-tsgo terminated by signal ${p.signal}`,
+            )
+          })
+          .with({ _tag: "SpawnFailed" }, (p) => {
+            failureDetails.push(`[lsp-spawn-error] effect-tsgo failed to spawn: ${p.spawnError}`)
+          })
+          .exhaustive()
         const stderrText = proc.stderr.trim()
         if (stderrText.length > 0) {
           failureDetails.push(stderrText)

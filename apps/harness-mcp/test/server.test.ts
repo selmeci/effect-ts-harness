@@ -251,7 +251,7 @@ describe("harness-mcp tools", () => {
     expect(Array.isArray(results)).toBe(true)
     expect(results.length).toBe(1)
     expect(results[0]?.file).toBe("libs/sample/domain/src/index.ts")
-    expect(results[0]?.line).toBe(14)
+    expect(results[0]?.line).toBe(15)
   })
 
   it("executes structural search with filePath scoped to .md file", async () => {
@@ -1691,5 +1691,22 @@ describe("harness-mcp tools", () => {
         ),
       ),
     )
+  })
+
+  it("daemon rejects non-socket file with DaemonServerError reasonKind not-a-socket", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-mcp-daemon-nonsocket-"))
+    const socketPath = resolveDaemonSocketPath(tmpDir)
+    fs.mkdirSync(path.dirname(socketPath), { recursive: true })
+    fs.writeFileSync(socketPath, "not-a-socket", "utf8")
+
+    try {
+      await expect(startHarnessDaemonServer(tmpDir)).rejects.toMatchObject({
+        _tag: "DaemonServerError",
+        reasonKind: "not-a-socket",
+        socketPath,
+      })
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
   })
 })

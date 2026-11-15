@@ -3,7 +3,7 @@ import { Effect, Schema } from "effect"
 import { match } from "ts-pattern"
 import { nodeSyncHostIo } from "@harness/infra"
 import { type CliEnv, type CliResult, findWorkspaceRoot } from "./daemon-and-omnigraph.service.js"
-import { resolveRepoPath } from "./repo-path.js"
+import { resolveRepoPathChecked } from "./repo-path.js"
 import {
   discoverTranscript,
   evaluateScenarioRun,
@@ -282,9 +282,13 @@ const handleStart = (
       if (setupRes.stdout.length > 0) {
         out.push(setupRes.stdout.trimEnd())
       }
-      if (setupRes.exitCode !== 0) {
+      const setupExit = match(setupRes)
+        .with({ _tag: "Exited" }, ({ exitCode }) => exitCode)
+        .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => 1)
+        .exhaustive()
+      if (setupExit !== 0) {
         return {
-          exitCode: setupRes.exitCode,
+          exitCode: setupExit,
           stdout: `${out.join("\n")}\n`,
           stderr: setupRes.stderr,
         }
@@ -405,11 +409,22 @@ const handleEnd = (paths: ScenarioPaths, flags: ScenarioFlags): Effect.Effect<Cl
     const friction = readJsonl(join(loaded.run.stateDir, "friction-log.jsonl")).filter(inRun)
     let safeFlags = flags
     if (flags.transcript !== undefined && flags.transcript.length > 0) {
-      const safeTranscript = resolveRepoPath(paths.repoRoot, flags.transcript)
-      if (safeTranscript === undefined) {
-        return failMsg(`Transcript path '${flags.transcript}' escapes repository root`)
+      const transcriptRes = resolveRepoPathChecked(paths.repoRoot, flags.transcript)
+      const transcriptErr = match(transcriptRes)
+        .with({ _tag: "Resolved" }, ({ resolvedPath }) => {
+          safeFlags = { ...flags, transcript: resolvedPath }
+          return undefined
+        })
+        .with({ _tag: "EscapesRoot" }, () =>
+          failMsg(`Transcript path '${flags.transcript}' escapes repository root`),
+        )
+        .with({ _tag: "IoError" }, ({ code, message }) =>
+          failMsg(`Cannot resolve transcript path '${flags.transcript}' (${code}: ${message})`),
+        )
+        .exhaustive()
+      if (transcriptErr !== undefined) {
+        return transcriptErr
       }
-      safeFlags = { ...flags, transcript: safeTranscript }
     }
     const discovered = discoverTranscript(paths.repoRoot, paths.homeDir, loaded.run, safeFlags)
     if (discovered.error !== undefined) {
@@ -518,7 +533,11 @@ export const runScenarioCommand = Effect.fn("HarnessCli.runScenario")(function* 
     )
   }
   const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-  const paths = makeScenarioPaths(repoRoot)
+  const pathsRes = makeScenarioPaths(repoRoot)
+  if (!pathsRes.ok) {
+    return failMsg(pathsRes.error)
+  }
+  const paths = pathsRes.paths
 
   return yield* match(cmd)
     .with("list", () => Effect.succeed(handleList(paths, flags)))

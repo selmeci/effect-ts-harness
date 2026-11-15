@@ -16,7 +16,7 @@
  * - unused-contract-export: Per-scope unused contract symbols.
  */
 import { dirname, join, posix, relative } from "node:path"
-import { Cause, Effect, Result, Schema } from "effect"
+import { Cause, Effect, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   AstSourceContent,
@@ -49,8 +49,10 @@ import {
   type GcFinding,
   type GraphEntropyInput,
   type GraphReachabilityContext,
-  safeFs,
+  readdirOrReport,
+  readTextOrReport,
 } from "./gc-helpers.js"
+import { analyzeSqliteMigratorFromRecordAst } from "../sqlite-migrator-ast.js"
 import { checkUnusedContractExports } from "./gc-topology-entropy.plugin.js"
 import { decideHarnessTierTopology } from "../harness-tier-topology.js"
 
@@ -79,17 +81,19 @@ const SKIPPED_PACKAGE_DEPS = new Set([
   "effect", "@effect/sql-d1", "@effect/sql-sqlite-do", "@effect/ai-typesafe",
 ])
 
-const listSubdirs = (dir: string, hostIo: SyncHostIo): ReadonlyArray<string> => {
+const listSubdirs = (
+  dir: string,
+  hostIo: SyncHostIo,
+  repoRoot: string,
+  findings: Array<GcFinding>,
+): ReadonlyArray<string> => {
   if (!hostIo.existsSync(dir)) return []
-  return safeFs<ReadonlyArray<string>>(
-    () =>
-      hostIo
-        .readdirSync(dir)
-        .filter((e) => e.isDirectory)
-        .map((e) => e.name)
-        .sort((a, b) => a.localeCompare(b)),
-    [],
-  )
+  const entries = readdirOrReport(dir, hostIo, repoRoot, findings)
+  if (entries === undefined) return []
+  return entries
+    .filter((e) => e.isDirectory)
+    .map((e) => e.name)
+    .sort((a, b) => a.localeCompare(b))
 }
 
 export const evaluatePackageAndMigrationPlugin = (
@@ -160,27 +164,15 @@ export const evaluatePackageAndMigrationPlugin = (
       const pkgJsonPath = join(pkgDir, "package.json")
       if (!hostIo.existsSync(pkgJsonPath)) return
       const relPkgPath = relative(repoRoot, pkgJsonPath).replace(/\\/g, "/")
-      const pkgReadRes = Result.try(() => hostIo.readTextSync(pkgJsonPath))
-      const pkgContent = match(pkgReadRes)
-        .with({ _tag: "Success" }, ({ success }) => success)
-        .with({ _tag: "Failure" }, ({ failure }) => {
-          findings.push({
-            kind: "architecture-policy-violation",
-            nodeId: `${relPkgPath}:unreadable-manifest`,
-            location: relPkgPath,
-            message: `Failed to read package manifest "${relPkgPath}": ${failure instanceof Error ? failure.message : String(failure)}`,
-            action: `Ensure "${relPkgPath}" is readable valid JSON.`,
-          })
-          return undefined
-        })
-        .exhaustive()
+      const pkgContent = readTextOrReport(pkgJsonPath, hostIo, repoRoot, findings)
       if (pkgContent === undefined) return
       const pkgOpt = decodePackageJson(pkgContent)
       const projectJsonPath = join(pkgDir, "project.json")
+      const relProjPath = relative(repoRoot, projectJsonPath).replace(/\\/g, "/")
       const projectTags: Array<string> = []
       if (hostIo.existsSync(projectJsonPath)) {
-        const projContent = safeFs(() => hostIo.readTextSync(projectJsonPath), "")
-        if (projContent.length > 0) {
+        const projContent = readTextOrReport(projectJsonPath, hostIo, repoRoot, findings)
+        if (projContent !== undefined) {
           const projOpt = decodeProjectJson(projContent)
           match(projOpt)
             .with({ _tag: "Some" }, ({ value: projValue }) => {
@@ -189,7 +181,15 @@ export const evaluatePackageAndMigrationPlugin = (
                 if (trimmed.length > 0) projectTags.push(trimmed)
               }
             })
-            .with({ _tag: "None" }, () => undefined)
+            .with({ _tag: "None" }, () => {
+              findings.push({
+                kind: "architecture-policy-violation",
+                nodeId: `${relProjPath}:corrupt-manifest`,
+                location: relProjPath,
+                message: `Project manifest "${relProjPath}" is invalid JSON or failed schema validation.`,
+                action: `Fix JSON syntax and schema in "${relProjPath}".`,
+              })
+            })
             .exhaustive()
         }
       }
@@ -202,13 +202,18 @@ export const evaluatePackageAndMigrationPlugin = (
             ...projectTags,
           ])
           const nxTags = Array.from(mergedTagSet).map((t) => NxTierTag.make(t))
-          const dependencyNames = Object.keys(pkgValue.dependencies ?? {})
+          const dependencyNames = [
+            ...Object.keys(pkgValue.dependencies ?? {}),
+            ...Object.keys(pkgValue.peerDependencies ?? {}),
+            ...Object.keys(pkgValue.optionalDependencies ?? {}),
+          ]
             .map((d) => d.trim())
             .filter((d) => d.length > 0)
             .map((d) => PackageDependencyName.make(d))
-          const nonRuntimeDependencyNames = [
-            ...Object.keys(pkgValue.devDependencies ?? {}), ...Object.keys(pkgValue.peerDependencies ?? {}), ...Object.keys(pkgValue.optionalDependencies ?? {}),
-          ].map((d) => d.trim()).filter((d) => d.length > 0).map((d) => PackageDependencyName.make(d))
+          const nonRuntimeDependencyNames = Object.keys(pkgValue.devDependencies ?? {})
+            .map((d) => d.trim())
+            .filter((d) => d.length > 0)
+            .map((d) => PackageDependencyName.make(d))
           tierManifests.push({
             manifestPath: PackageManifestPath.make(relPkgPath),
             packageName: PackageManifestName.make(pkgName),
@@ -218,19 +223,39 @@ export const evaluatePackageAndMigrationPlugin = (
           })
           const isServiceTier = nxTags.includes(NxTierTag.make("type:service"))
           for (const file of srcFiles) {
+            const content = readTextOrReport(file, hostIo, repoRoot, findings)
+            if (content === undefined) continue
             const sourceInput: ServiceTierSourceInput = {
               filePath: AstSourceFilePath.make(relative(repoRoot, file).replace(/\\/g, "/")),
-              content: AstSourceContent.make(safeFs(() => hostIo.readTextSync(file), "")),
+              content: AstSourceContent.make(content),
             }
             workspaceSourceFiles.push(sourceInput)
             if (isServiceTier) {
               serviceTierFiles.push(sourceInput)
             }
           }
+          const testDir = join(pkgDir, "test")
+          const scriptsDir = join(pkgDir, "scripts")
+          const extraTierFiles = [
+            ...(hostIo.existsSync(testDir) ? collectWorkspaceTsFiles(testDir, hostIo, findings, repoRoot) : []),
+            ...(hostIo.existsSync(scriptsDir) ? collectWorkspaceTsFiles(scriptsDir, hostIo, findings, repoRoot) : []),
+          ]
+          for (const file of extraTierFiles) {
+            const content = readTextOrReport(file, hostIo, repoRoot, findings)
+            if (content === undefined) continue
+            workspaceSourceFiles.push({
+              filePath: AstSourceFilePath.make(relative(repoRoot, file).replace(/\\/g, "/")),
+              content: AstSourceContent.make(content),
+            })
+          }
           if (checkUnusedDeps && pkgValue.dependencies !== undefined) {
             const dependencies = pkgValue.dependencies
-            const scriptFiles = safeFs(() => hostIo.existsSync(join(pkgDir, "scripts")) ? collectWorkspaceAllFiles(join(pkgDir, "scripts"), hostIo) : [], [])
-            const combinedContent = [...srcFiles, ...scriptFiles].map((f) => safeFs(() => hostIo.readTextSync(f), "")).join("\n")
+            const scriptFiles = hostIo.existsSync(scriptsDir)
+              ? collectWorkspaceAllFiles(scriptsDir, hostIo, findings, repoRoot)
+              : []
+            const combinedContent = [...srcFiles, ...scriptFiles]
+              .map((f) => readTextOrReport(f, hostIo, repoRoot, findings) ?? "")
+              .join("\n")
             for (const depName of Object.keys(dependencies)) {
               if (SKIPPED_PACKAGE_DEPS.has(depName)) continue
               const isReferenced = combinedContent.includes(`"${depName}"`) || combinedContent.includes(`'${depName}'`) || combinedContent.includes(`"${depName}/`) || combinedContent.includes(`'${depName}/`)
@@ -257,26 +282,27 @@ export const evaluatePackageAndMigrationPlugin = (
     }
 
     const libsDir = join(repoRoot, "libs")
-    const scopes = listSubdirs(libsDir, hostIo)
+    const scopes = listSubdirs(libsDir, hostIo, repoRoot, findings)
 
     for (const scope of scopes) {
       // Rule: unused-contract-export & dead-tagged-error (contract)
       findings.push(...checkUnusedContractExports(repoRoot, hostIo, scope))
 
       const scopeDir = join(libsDir, scope)
-      const tiers = listSubdirs(scopeDir, hostIo)
+      const tiers = listSubdirs(scopeDir, hostIo, repoRoot, findings)
       for (const tier of tiers) {
         const tierDir = join(scopeDir, tier)
         const srcDir = join(tierDir, "src")
         if (!hostIo.existsSync(srcDir)) continue
 
-        const srcFiles = collectWorkspaceTsFiles(srcDir, hostIo).filter((f) => !f.endsWith(".test.ts") && !f.endsWith(".spec.ts"))
+        const srcFiles = collectWorkspaceTsFiles(srcDir, hostIo, findings, repoRoot).filter((f) => !f.endsWith(".test.ts") && !f.endsWith(".spec.ts"))
         const packageNamedMigrationBodies = new Map<string, string>()
         const defaultTableMigratorRoots = new Map<string, string>()
 
         if (tier === "infra" && scope !== "harness") {
           for (const file of srcFiles) {
-            const content = safeFs(() => hostIo.readTextSync(file), "")
+            const content = readTextOrReport(file, hostIo, repoRoot, findings)
+            if (content === undefined) continue
             const noComments = content.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\r\n]*/g, "")
             const mvRegex = /(?:const|let)\s+([A-Za-z0-9_$]*[Mm]igrations[A-Za-z0-9_$]*)\s*(?::[^=]+)?=\s*\{/g
             let mvMatch: RegExpExecArray | null
@@ -289,7 +315,8 @@ export const evaluatePackageAndMigrationPlugin = (
 
         for (const file of srcFiles) {
           const relFilePath = relative(repoRoot, file).replace(/\\/g, "/")
-          const content = safeFs(() => hostIo.readTextSync(file), "")
+          const content = readTextOrReport(file, hostIo, repoRoot, findings)
+          if (content === undefined) continue
           const stripped = content.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\r\n]*/g, "").replace(/\s+/g, "")
           if (stripped === "" || stripped === "export{}" || stripped === "export{};") {
             findings.push({
@@ -426,6 +453,34 @@ export const evaluatePackageAndMigrationPlugin = (
             }
 
             const reportedKeyNodeIds = new Set<string>()
+            const astMigrator = analyzeSqliteMigratorFromRecordAst({ filePath: relFilePath, content })
+            for (const issue of astMigrator.keyIssues) {
+              const nodeId = `${relFilePath}:${issue.key}`
+              if (!reportedKeyNodeIds.has(nodeId)) {
+                reportedKeyNodeIds.add(nodeId)
+                findings.push({
+                  kind: "invalid-migrator-record-key", nodeId, location: relFilePath,
+                  message: issue.message,
+                  action: `Rename migration key to "<positive_integer>_<snake_case_name>" (e.g. "1_init_tables") with an unused integer id.`,
+                })
+              }
+            }
+            const reportedUnsafeNodeIds = new Set<string>(
+              findings.map((f) => `${f.kind}:${f.nodeId}`),
+            )
+            for (const issue of astMigrator.unsafeSqlIssues) {
+              const nodeId = `${relFilePath}:${issue.kind}`
+              const dedupeKey = `unsafe-sql-migration:${nodeId}`
+              if (!reportedUnsafeNodeIds.has(dedupeKey)) {
+                reportedUnsafeNodeIds.add(dedupeKey)
+                findings.push({
+                  kind: "unsafe-sql-migration", nodeId, location: relFilePath,
+                  message: issue.message,
+                  action: `Escalate destructive migration (${issue.kind}) to the human or refactor to an additive migration.`,
+                })
+              }
+            }
+
             for (const objBody of [...fromRecordBodies, ...namedMigrationBodies.values()]) {
               const { keys, hasUnresolvedSpread } = resolveRecordKeys(objBody, namedMigrationBodies)
               const seenIds = new Set<number>()
@@ -504,47 +559,79 @@ export const evaluatePackageAndMigrationPlugin = (
           }
         }
 
+        if (tier === "infra" && scope !== "harness") {
+          const migrationsDir = join(tierDir, "migrations")
+          const infraTestDir = join(tierDir, "test")
+          if (
+            hostIo.existsSync(migrationsDir) &&
+            hostIo.existsSync(infraTestDir) &&
+            collectWorkspaceSqlFiles(migrationsDir, hostIo, findings, repoRoot).length > 0
+          ) {
+            for (const testFile of collectWorkspaceTsFiles(infraTestDir, hostIo, findings, repoRoot)) {
+              const testContent = readTextOrReport(testFile, hostIo, repoRoot, findings)
+              if (testContent === undefined) continue
+              if (
+                /\bCREATE\s+(?:TEMP\s+|TEMPORARY\s+)?TABLE\b/i.test(testContent) &&
+                !testContent.includes("migrations/") &&
+                !testContent.includes("SqliteMigrator")
+              ) {
+                const relTestFile = relative(repoRoot, testFile).replace(/\\/g, "/")
+                findings.push({
+                  kind: "inline-test-ddl-bypassing-migrations",
+                  nodeId: relTestFile,
+                  location: relTestFile,
+                  message: `Infra test "${relTestFile}" defines inline CREATE TABLE SQL while "${scope}/infra/migrations/" has .sql migrations — run real migrations from migrations/ or SqliteMigrator instead of drifting inline test schemas.`,
+                  action: `Load SQL migrations from "${scope}/infra/migrations/" or SqliteMigrator in "${relTestFile}".`,
+                })
+              }
+            }
+          }
+        }
+
         collectPackageManifest(tierDir, `${scope}/${tier}`, srcFiles, true)
       }
     }
 
     const appsDir = join(repoRoot, "apps")
-    for (const app of listSubdirs(appsDir, hostIo)) {
+    for (const app of listSubdirs(appsDir, hostIo, repoRoot, findings)) {
       const appDir = join(appsDir, app)
       const appSrcDir = join(appDir, "src")
       const appSrcFiles = hostIo.existsSync(appSrcDir)
-        ? collectWorkspaceTsFiles(appSrcDir, hostIo).filter((f) => !f.endsWith(".test.ts") && !f.endsWith(".spec.ts"))
+        ? collectWorkspaceTsFiles(appSrcDir, hostIo, findings, repoRoot).filter((f) => !f.endsWith(".test.ts") && !f.endsWith(".spec.ts"))
         : []
       collectPackageManifest(appDir, app, appSrcFiles, false)
     }
 
     const rootPkgJsonPath = join(repoRoot, "package.json")
     if (hostIo.existsSync(rootPkgJsonPath)) {
-      const rootOpt = decodePackageJson(safeFs(() => hostIo.readTextSync(rootPkgJsonPath), ""))
-      match(rootOpt)
-        .with({ _tag: "Some" }, ({ value: rootPkg }) => {
-          const allRootDeps = [
-            ...Object.keys(rootPkg.dependencies ?? {}), ...Object.keys(rootPkg.devDependencies ?? {}),
-            ...Object.keys(rootPkg.peerDependencies ?? {}), ...Object.keys(rootPkg.optionalDependencies ?? {}),
-          ].map((d) => d.trim()).filter((d) => d.length > 0)
-          for (const dep of allRootDeps) {
-            if (isBannedDrizzleDep(dep)) {
-              findings.push({
-                kind: "architecture-policy-violation", nodeId: `package.json:forbidden-core-dependency:${dep}`, location: "package.json",
-                message: `Root package "${(rootPkg.name ?? "root").trim()}" declares banned Drizzle dependency "${dep}" in "package.json" — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator).`,
-                action: `Remove "${dep}" from package.json.`,
-              })
+      const rootContent = readTextOrReport(rootPkgJsonPath, hostIo, repoRoot, findings)
+      if (rootContent !== undefined) {
+        const rootOpt = decodePackageJson(rootContent)
+        match(rootOpt)
+          .with({ _tag: "Some" }, ({ value: rootPkg }) => {
+            const allRootDeps = [
+              ...Object.keys(rootPkg.dependencies ?? {}), ...Object.keys(rootPkg.devDependencies ?? {}),
+              ...Object.keys(rootPkg.peerDependencies ?? {}), ...Object.keys(rootPkg.optionalDependencies ?? {}),
+            ].map((d) => d.trim()).filter((d) => d.length > 0)
+            for (const dep of allRootDeps) {
+              if (isBannedDrizzleDep(dep)) {
+                findings.push({
+                  kind: "architecture-policy-violation", nodeId: `package.json:forbidden-core-dependency:${dep}`, location: "package.json",
+                  message: `Root package "${(rootPkg.name ?? "root").trim()}" declares banned Drizzle dependency "${dep}" in "package.json" — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator).`,
+                  action: `Remove "${dep}" from package.json.`,
+                })
+              }
             }
-          }
-        })
-        .with({ _tag: "None" }, () => {
-          findings.push({
-            kind: "architecture-policy-violation", nodeId: "package.json:corrupt-manifest", location: "package.json",
-            message: `Package manifest "package.json" is invalid JSON or failed schema validation.`,
-            action: `Fix JSON syntax and schema in "package.json".`,
           })
-        })
-        .exhaustive()
+          .with({ _tag: "None" }, () => {
+            findings.push({
+              kind: "architecture-policy-violation", nodeId: "package.json:corrupt-manifest", location: "package.json",
+              message: `Package manifest "package.json" is invalid JSON or failed schema validation.`,
+              action: `Fix JSON syntax and schema in "package.json".`,
+            })
+          })
+          .exhaustive()
+      }
     }
 
     if (tierManifests.length > 0 || serviceTierFiles.length > 0) {
@@ -564,15 +651,15 @@ export const evaluatePackageAndMigrationPlugin = (
       }
     }
 
-    const sqlFilesToScan: Array<string> = [...collectWorkspaceSqlFiles(join(repoRoot, "migrations"), hostIo)]
+    const sqlFilesToScan: Array<string> = [...collectWorkspaceSqlFiles(join(repoRoot, "migrations"), hostIo, findings, repoRoot)]
     for (const scope of scopes) {
       const scopeDir = join(libsDir, scope)
-      for (const tier of listSubdirs(scopeDir, hostIo)) {
-        sqlFilesToScan.push(...collectWorkspaceSqlFiles(join(scopeDir, tier, "migrations"), hostIo))
+      for (const tier of listSubdirs(scopeDir, hostIo, repoRoot, findings)) {
+        sqlFilesToScan.push(...collectWorkspaceSqlFiles(join(scopeDir, tier, "migrations"), hostIo, findings, repoRoot))
       }
     }
-    for (const app of listSubdirs(appsDir, hostIo)) {
-      sqlFilesToScan.push(...collectWorkspaceSqlFiles(join(appsDir, app, "migrations"), hostIo))
+    for (const app of listSubdirs(appsDir, hostIo, repoRoot, findings)) {
+      sqlFilesToScan.push(...collectWorkspaceSqlFiles(join(appsDir, app, "migrations"), hostIo, findings, repoRoot))
     }
     if (sqlFilesToScan.length > 0) {
       for (const v of checkMigrationFiles(sqlFilesToScan, hostIo).violations) {
@@ -585,7 +672,7 @@ export const evaluatePackageAndMigrationPlugin = (
       }
     }
 
-    const modularFiles = collectModularPluginFiles(repoRoot, hostIo)
+    const modularFiles = collectModularPluginFiles(repoRoot, hostIo, findings)
     if (modularFiles.length > 0) {
       const gateExit = yield* evaluateAllGatePlugins({
         filePaths: modularFiles.map((f) => WorkspaceFilePath.make(f.replace(/\\/g, "/"))),
@@ -617,7 +704,8 @@ export const evaluatePackageAndMigrationPlugin = (
 
       const astFiles: Array<AstGateFileInput> = []
       for (const f of modularFiles) {
-        const content = safeFs(() => hostIo.readTextSync(f), "")
+        const content = readTextOrReport(f, hostIo, repoRoot, findings)
+        if (content === undefined) continue
         astFiles.push({
           filePath: AstSourceFilePath.make(relative(repoRoot, f).replace(/\\/g, "/")),
           content: AstSourceContent.make(content),

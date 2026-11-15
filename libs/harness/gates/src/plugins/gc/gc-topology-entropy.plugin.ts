@@ -23,7 +23,8 @@ import {
   type GraphReachabilityContext,
   IGNORED_ERRORS,
   IGNORED_SERVICES,
-  safeFs,
+  readdirOrReport,
+  readTextOrReport,
 } from "./gc-helpers.js"
 
 export const checkUnusedContractExports = (
@@ -33,18 +34,13 @@ export const checkUnusedContractExports = (
 ): ReadonlyArray<GcFinding> => {
   const libsDir = join(repoRoot, "libs")
   if (!hostIo.existsSync(libsDir)) return []
+  const findings: Array<GcFinding> = []
   const scopes = targetScope !== undefined
     ? [targetScope]
-    : safeFs<ReadonlyArray<string>>(
-        () =>
-          hostIo
-            .readdirSync(libsDir)
-            .filter((e) => e.isDirectory)
-            .map((e) => e.name)
-            .sort((a, b) => a.localeCompare(b)),
-        [],
-      )
-  const findings: Array<GcFinding> = []
+    : (readdirOrReport(libsDir, hostIo, repoRoot, findings) ?? [])
+        .filter((e) => e.isDirectory)
+        .map((e) => e.name)
+        .sort((a, b) => a.localeCompare(b))
 
   for (const scope of scopes) {
     const scopeDir = join(libsDir, scope)
@@ -52,7 +48,7 @@ export const checkUnusedContractExports = (
     if (!hostIo.existsSync(contractSrcDir)) continue
 
     const existingSiblingDirs: Array<string> = []
-    const scopeChildren = safeFs(() => hostIo.readdirSync(scopeDir), [])
+    const scopeChildren = readdirOrReport(scopeDir, hostIo, repoRoot, findings) ?? []
     for (const child of scopeChildren) {
       if (child.isDirectory && child.name !== "contract" && child.name !== "docs") {
         existingSiblingDirs.push(join(scopeDir, child.name))
@@ -60,7 +56,7 @@ export const checkUnusedContractExports = (
     }
     const appsDir = join(repoRoot, "apps")
     if (hostIo.existsSync(appsDir)) {
-      const appChildren = safeFs(() => hostIo.readdirSync(appsDir), [])
+      const appChildren = readdirOrReport(appsDir, hostIo, repoRoot, findings) ?? []
       for (const appChild of appChildren) {
         if (
           appChild.isDirectory &&
@@ -76,11 +72,11 @@ export const checkUnusedContractExports = (
     if (hostIo.existsSync(contractScriptsDir)) existingSiblingDirs.push(contractScriptsDir)
     if (existingSiblingDirs.length === 0) continue
 
-    const contractFiles = collectWorkspaceTsFiles(contractSrcDir, hostIo)
+    const contractFiles = collectWorkspaceTsFiles(contractSrcDir, hostIo, findings, repoRoot)
     const siblingFiles: Array<string> = []
     for (const sibDir of existingSiblingDirs) {
-      if (sibDir.endsWith("/scripts")) siblingFiles.push(...collectWorkspaceAllFiles(sibDir, hostIo))
-      else siblingFiles.push(...collectWorkspaceTsFiles(sibDir, hostIo))
+      if (sibDir.endsWith("/scripts")) siblingFiles.push(...collectWorkspaceAllFiles(sibDir, hostIo, findings, repoRoot))
+      else siblingFiles.push(...collectWorkspaceTsFiles(sibDir, hostIo, findings, repoRoot))
     }
 
     const stripCommentsAndStrings = (text: string): string =>
@@ -90,20 +86,21 @@ export const checkUnusedContractExports = (
         .replace(/(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/g, '""')
 
     const combinedSiblingContent = siblingFiles
-      .map((f) => safeFs(() => hostIo.readTextSync(f), ""))
+      .map((f) => readTextOrReport(f, hostIo, repoRoot, findings) ?? "")
       .map((text) => stripCommentsAndStrings(text).replace(/export\s+(?:type\s+)?\{[^}]*\}\s+from\s+["'][^"']*["']/g, ""))
       .join("\n")
 
     const nonTestSiblingContent = siblingFiles
       .filter((f) => !f.endsWith(".test.ts") && !f.endsWith(".spec.ts"))
-      .map((f) => safeFs(() => hostIo.readTextSync(f), ""))
+      .map((f) => readTextOrReport(f, hostIo, repoRoot, findings) ?? "")
       .map(stripCommentsAndStrings)
       .join("\n")
 
     const hasActiveStubs = /\bstub\s*</.test(nonTestSiblingContent)
 
     for (const contractFile of contractFiles) {
-      const content = safeFs(() => hostIo.readTextSync(contractFile), "")
+      const content = readTextOrReport(contractFile, hostIo, repoRoot, findings)
+      if (content === undefined) continue
       const strippedContractContent = stripCommentsAndStrings(content)
       const relContractFile = relative(repoRoot, contractFile).replace(/\\/g, "/")
       const exportRegex = /(?:^|\n)\s*export\s+(?:const|class|function)\s+([A-Za-z_$][\w$]*)/g

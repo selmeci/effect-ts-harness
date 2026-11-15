@@ -1135,7 +1135,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
     "REQ-1.3: AstGateCache.decide reports effect-fn-dummy-void, discriminant-branching, and non-exhaustive-union-match without isHarnessInternal exemption",
     () =>
       Effect.gen(function* () {
-        expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v4")
+        expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v6")
 
         const testId = "AstGateCache.decide::REQ-1.3"
         const { result: report, spans } = yield* runWithTestTracer(
@@ -2129,12 +2129,23 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(sampleMemoryViolations.some((v) => v.rule === "unscoped-effect-run")).toBe(true)
 
         const esMemoryPath = "libs/es/infra/src/memory.ts"
-        const esMemoryViolations = visitSourceFileSinglePass(
+        const esMemoryDisallowedViolations = visitSourceFileSinglePass(
           ts.createSourceFile(esMemoryPath, sourceText, ts.ScriptTarget.Latest, true),
           AstSourceFilePath.make(esMemoryPath),
           infraTag,
         )
-        expect(esMemoryViolations.some((v) => v.rule === "unscoped-effect-run")).toBe(false)
+        expect(esMemoryDisallowedViolations.some((v) => v.rule === "unscoped-effect-run")).toBe(true)
+
+        const esMemoryDieOnly = [
+          'import { Effect } from "effect"',
+          'export const fail = () => Effect.runSync(Effect.die("fatal"))',
+        ].join("\n")
+        const esMemoryDieViolations = visitSourceFileSinglePass(
+          ts.createSourceFile(esMemoryPath, esMemoryDieOnly, ts.ScriptTarget.Latest, true),
+          AstSourceFilePath.make(esMemoryPath),
+          infraTag,
+        )
+        expect(esMemoryDieViolations.some((v) => v.rule === "unscoped-effect-run")).toBe(false)
       }),
   )
 
@@ -2429,6 +2440,30 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(
           report.violations.filter((v) => v.rule === "no-node-builtins-outside-infra"),
         ).toHaveLength(1)
+      }),
+  )
+
+  it.effect(
+    "flags silent-gate-fs-fallback for safeFs and Result.getOrElse(Result.try(...readTextSync...), () => '') in libs/harness/gates/src/**",
+    () =>
+      Effect.gen(function* () {
+        const report = yield* SelfDogfooding.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/gates/src/plugins/gc/bad.ts"),
+              content: AstSourceContent.make(
+                [
+                  'import { Result } from "effect"',
+                  'export const a = safeFs(() => "x", "")',
+                  'export const b = Result.getOrElse(Result.try(() => hostIo.readTextSync("x")), () => "")',
+                ].join("\n"),
+              ),
+            },
+          ],
+          failOnViolation: false,
+        })
+        expect(report.verdict).toBe("violated")
+        expect(report.violations.filter((v) => v.rule === "silent-gate-fs-fallback")).toHaveLength(2)
       }),
   )
 })

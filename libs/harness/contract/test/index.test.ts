@@ -1,12 +1,17 @@
+import { createHash } from "node:crypto"
 import { Cause, Exit, Option, Schema } from "effect"
 import { match } from "ts-pattern"
 import { describe, expect, it } from "vitest"
 import {
   ActiveMutantId,
+  AstGateDecisionReport,
+  AstGateEvaluationError,
   AstGateEvaluationReport,
   AstSourceContent,
   AstSourceFilePath,
   CompilerRepoRootPath,
+  DaemonServerError,
+  DaemonServerErrorKind,
   DaemonSocketPath,
   DecisionCacheKey,
   DecisionCachePayloadJson,
@@ -16,6 +21,7 @@ import {
   ErrorReasonMessage,
   GateRuleId,
   GateViolationMessage,
+  HARNESS_GATE_RULE_VERSION,
   HarnessSubprocessError,
   HarnessTierTopologyInput,
   HarnessTierTopologyReport,
@@ -27,6 +33,7 @@ import {
   PluginId,
   SelfDogfoodingMessage,
   SelfDogfoodingReport,
+  SelfDogfoodingViolationError,
   SourceLineNumber,
   StdinReadError,
   SubprocessArg,
@@ -37,7 +44,9 @@ import {
   TierTopologyRuleId,
   WorkspaceFilePath,
   WorkspaceFsOperation,
+  computeContentSha256,
   inferAstGatePackageTagFromPath,
+  makeAstGateDecisionReport,
   makeAstGateEvaluationReport,
   makeHarnessTierTopologyReport,
   makeSelfDogfoodingReport,
@@ -82,6 +91,10 @@ describe("@harness/contract schemas", () => {
       .with("forbidden-core-dependency", () => 4)
       .with("impure-service-tier-import", () => 5)
       .with("undeclared-workspace-dependency", () => 6)
+      .with("banned-workspace-dependency", () => 7)
+      .with("forbidden-domain-dependency", () => 8)
+      .with("forbidden-infra-dependency", () => 9)
+      .with("forbidden-web-app-dependency", () => 10)
       .exhaustive()
     expect(ruleTag).toBe(4)
 
@@ -285,7 +298,6 @@ describe("@harness/contract schemas", () => {
     const signalSubprocessExit = Schema.decodeExit(HarnessSubprocessError)({
       _tag: "HarnessSubprocessError",
       command: SubprocessCommand.make("node"),
-      exitCode: SubprocessExitCode.make(-1),
       stderr: SubprocessOutput.make(""),
       reason: ErrorReasonMessage.make("received SIGTERM"),
       failureKind: "signal",
@@ -309,7 +321,7 @@ describe("@harness/contract schemas", () => {
     expect(DecisionCachePayloadJson.make("{}")).toBe("{}")
   })
 
-  it("decodes tier topology input schema with optional workspaceSourceFiles", () => {
+  it("decodes tier topology input schema with required nonRuntimeDependencyNames and workspaceSourceFiles", () => {
     const input = Schema.decodeSync(HarnessTierTopologyInput)({
       manifests: [
         {
@@ -317,6 +329,7 @@ describe("@harness/contract schemas", () => {
           packageName: PackageManifestName.make("@harness/contract"),
           nxTags: [NxTierTag.make("type:contract")],
           dependencyNames: [PackageDependencyName.make("effect")],
+          nonRuntimeDependencyNames: [],
         },
       ],
       serviceFiles: [
@@ -335,5 +348,57 @@ describe("@harness/contract schemas", () => {
     expect(input.manifests).toHaveLength(1)
     expect(input.serviceFiles).toHaveLength(1)
     expect(input.workspaceSourceFiles).toHaveLength(1)
+  })
+
+  it("computes SHA-256 identically to node:crypto across empty, ASCII, multi-block, and multi-byte UTF-8 inputs", () => {
+    expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v6")
+    const samples = [
+      "",
+      "abc",
+      "The quick brown fox jumps over the lazy dog",
+      "a".repeat(55),
+      "a".repeat(56),
+      "a".repeat(64),
+      "x".repeat(200),
+      "🚀 Effect-TS 中文 café naïve — ∀x∈ℝ",
+    ]
+    for (const sample of samples) {
+      const expected = createHash("sha256").update(sample, "utf8").digest("hex")
+      expect(computeContentSha256(sample)).toBe(expected)
+    }
+  })
+
+  it("enforces non-negative SubprocessExitCode, optional exitCode, non-empty SelfDogfoodingViolationError, AstGateDecisionReport, and DaemonServerErrorKind", () => {
+    expect(() => Schema.decodeSync(SubprocessExitCode)(-1)).toThrow()
+    expect(Schema.decodeSync(SubprocessExitCode)(0)).toBe(0)
+    expect(Schema.decodeSync(SubprocessExitCode)(127)).toBe(127)
+
+    const emptyDogfoodingErr: unknown = {
+      _tag: "SelfDogfoodingViolationError",
+      message: SelfDogfoodingMessage.make("failed"),
+      violations: [],
+    }
+    expect(() => Schema.decodeUnknownSync(SelfDogfoodingViolationError)(emptyDogfoodingErr)).toThrow()
+
+    const evalErr = new AstGateEvaluationError({
+      filePath: AstSourceFilePath.make("libs/a.ts"),
+      reason: ErrorReasonMessage.make("parse failed"),
+    })
+    expect(evalErr._tag).toBe("AstGateEvaluationError")
+
+    const decisionReport = makeAstGateDecisionReport({
+      violations: [],
+      cacheHitCount: NonNegativeCount.make(1),
+      parsedFileCount: NonNegativeCount.make(2),
+    })
+    expect(Schema.decodeSync(AstGateDecisionReport)(decisionReport).verdict).toBe("clean")
+
+    const kind = Schema.decodeSync(DaemonServerErrorKind)("not-a-socket")
+    const daemonErr = new DaemonServerError({
+      socketPath: DaemonSocketPath.make("/tmp/d.sock"),
+      reasonKind: kind,
+      reason: ErrorReasonMessage.make("not a socket"),
+    })
+    expect(daemonErr.reasonKind).toBe("not-a-socket")
   })
 })

@@ -15,7 +15,7 @@ import { join, relative } from "node:path"
 import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import * as Graph from "effect/Graph"
-import type { SyncHostIo } from "@harness/service/host-io"
+import type { SyncHostDirEntry, SyncHostIo } from "@harness/service/host-io"
 import type { GovernanceDocStatus, GraphInferenceResult, HarnessGraph, HarnessNode } from "@harness/graph"
 import { isModularPluginPath } from "../self-dogfooding-plugin.js"
 
@@ -27,6 +27,15 @@ export const GcFindingKind = Schema.Literals([
   "unused-contract-export", "node-sqlite-in-infra", "unmanaged-sql-ddl",
   "invalid-migrator-record-key", "unsafe-sql-migration", "untrusted-row-brand-make",
   "architecture-policy-violation",
+  "unreadable-workspace-file",
+  "inline-test-ddl-bypassing-migrations",
+  "doc-unknown-package-name",
+  "doc-unknown-rule-id",
+  "doc-missing-file-path",
+  "agents-duplicate-section",
+  "adapter-rules-drift",
+  "hook-timeout-parity",
+  "stale-gate-rule-version",
 ])
 export type GcFindingKind = typeof GcFindingKind.Type
 
@@ -419,22 +428,67 @@ export const parseGovernanceDocFrontmatter = (
   }
 }
 
-export const safeFs = <T>(fn: () => T, fallback: T): T =>
-  Result.getOrElse(Result.try(fn), () => fallback)
+export const formatRelPath = (repoRoot: string, absPath: string): string =>
+  relative(repoRoot, absPath).replace(/\\/g, "/") || "."
+
+export const readTextOrReport = (
+  absPath: string,
+  hostIo: SyncHostIo,
+  repoRoot: string,
+  findings: Array<GcFinding>,
+): string | undefined =>
+  match(Result.try(() => hostIo.readTextSync(absPath)))
+    .with({ _tag: "Success" }, ({ success }) => success)
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      const relPath = formatRelPath(repoRoot, absPath)
+      findings.push({
+        kind: "unreadable-workspace-file",
+        nodeId: relPath,
+        location: relPath,
+        message: `Failed to read workspace file "${relPath}": ${String(failure)}`,
+        action: `Restore read permissions or fix the broken path at "${relPath}".`,
+      })
+      return undefined
+    })
+    .exhaustive()
+
+export const readdirOrReport = (
+  absDirPath: string,
+  hostIo: SyncHostIo,
+  repoRoot: string,
+  findings: Array<GcFinding>,
+): ReadonlyArray<SyncHostDirEntry> | undefined =>
+  match(Result.try(() => hostIo.readdirSync(absDirPath)))
+    .with({ _tag: "Success" }, ({ success }) => success)
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      const relPath = formatRelPath(repoRoot, absDirPath)
+      findings.push({
+        kind: "unreadable-workspace-file",
+        nodeId: relPath,
+        location: relPath,
+        message: `Failed to read workspace directory "${relPath}": ${String(failure)}`,
+        action: `Restore directory permissions or fix the broken directory at "${relPath}".`,
+      })
+      return undefined
+    })
+    .exhaustive()
 
 export const loadGovernanceDocsFromDisk = (
   repoRoot: string,
   hostIo: SyncHostIo,
+  findings?: Array<GcFinding>,
 ): ReadonlyArray<GovernanceDocReference> => {
+  const sink = findings ?? []
   const relDirs: Array<string> = ["docs/adr", "docs/specs"]
   const listSubs = (p: string): ReadonlyArray<string> => {
     const full = join(repoRoot, p)
-    return !hostIo.existsSync(full)
-      ? []
-      : safeFs(() => hostIo.readdirSync(full), [])
-          .filter((e) => e.isDirectory)
-          .map((e) => e.name)
-          .sort((a, b) => a.localeCompare(b))
+    if (!hostIo.existsSync(full)) return []
+    const entries = readdirOrReport(full, hostIo, repoRoot, sink)
+    if (entries === undefined) return []
+    return entries
+      .filter((e) => e.isDirectory)
+      .map((e) => e.name)
+      .sort((a, b) => a.localeCompare(b))
   }
   for (const s of listSubs("libs")) relDirs.push(`libs/${s}/docs/adr`, `libs/${s}/docs/specs`)
   for (const a of listSubs("apps")) relDirs.push(`apps/${a}/docs/adr`, `apps/${a}/docs/specs`)
@@ -443,24 +497,45 @@ export const loadGovernanceDocsFromDisk = (
   for (const relDir of relDirs) {
     const fullDir = join(repoRoot, relDir)
     if (!hostIo.existsSync(fullDir)) continue
-    const files = safeFs(() => hostIo.readdirSync(fullDir), [])
+    const dirEntries = readdirOrReport(fullDir, hostIo, repoRoot, sink)
+    if (dirEntries === undefined) continue
+    const files = dirEntries
       .filter((e) => e.isFile && e.name.endsWith(".md") && e.name !== "README.md" && e.name !== "TEMPLATE.md")
       .map((e) => e.name).sort((a, b) => a.localeCompare(b))
     for (const file of files) {
       const relDocPath = `${relDir}/${file}`
-      const content = safeFs(() => hostIo.readTextSync(join(repoRoot, relDocPath)), "")
+      const content = readTextOrReport(join(repoRoot, relDocPath), hostIo, repoRoot, sink)
+      if (content === undefined) continue
       const parsed = parseGovernanceDocFrontmatter(relDocPath, content, (rel) => hostIo.existsSync(join(repoRoot, rel)))
       if (parsed === null) continue
       const enforcedByFileContents: Record<string, string> = {}
       for (const ef of parsed.enforcedByFiles ?? []) {
         const fullEf = join(repoRoot, ef)
-        if (hostIo.existsSync(fullEf)) enforcedByFileContents[ef] = safeFs(() => hostIo.readTextSync(fullEf), "")
+        if (hostIo.existsSync(fullEf)) {
+          const efContent = readTextOrReport(fullEf, hostIo, repoRoot, sink)
+          if (efContent !== undefined) enforcedByFileContents[ef] = efContent
+        }
       }
       const isSpecOrAdr = relDir.endsWith("/specs") || relDir.endsWith("/adr") || parsed.id.includes(":SPEC-") || parsed.id.includes(":ADR-") || parsed.id.startsWith("ADR-") || parsed.id.startsWith("SPEC-")
       results.push({ ...parsed, ...(isSpecOrAdr ? { markdown: content } : {}), enforcedByFileContents })
     }
   }
   return results
+}
+
+export const loadGovernanceDocsChecked = (
+  repoRoot: string,
+  hostIo?: SyncHostIo,
+): {
+  readonly docs: ReadonlyArray<GovernanceDocReference>
+  readonly findings: ReadonlyArray<GcFinding>
+} => {
+  if (hostIo === undefined) {
+    return { docs: [], findings: [] }
+  }
+  const findings: Array<GcFinding> = []
+  const docs = loadGovernanceDocsFromDisk(repoRoot, hostIo, findings)
+  return { docs, findings }
 }
 
 const EXCLUDED_WORKSPACE_SCAN_DIRS = new Set(["node_modules", "dist", "repos", ".git", ".nx", "coverage"])
@@ -471,28 +546,53 @@ const collectWorkspaceFiles = (
   hostIo: SyncHostIo,
   predicate: (name: string) => boolean,
   excludedDirs: ReadonlySet<string> = EXCLUDED_WORKSPACE_SCAN_DIRS,
+  findings?: Array<GcFinding>,
+  repoRoot?: string,
 ): ReadonlyArray<string> => {
   if (!hostIo.existsSync(dir)) return []
-  return safeFs<ReadonlyArray<string>>(() => {
-    const result: Array<string> = []
-    for (const e of hostIo.readdirSync(dir)) {
-      const full = join(dir, e.name)
-      if (e.isDirectory) {
-        if (!excludedDirs.has(e.name)) result.push(...collectWorkspaceFiles(full, hostIo, predicate, excludedDirs))
-        continue
+  const sink = findings ?? []
+  const root = repoRoot ?? dir
+  const entries = readdirOrReport(dir, hostIo, root, sink)
+  if (entries === undefined) return []
+  const result: Array<string> = []
+  for (const e of entries) {
+    const full = join(dir, e.name)
+    if (e.isDirectory) {
+      if (!excludedDirs.has(e.name)) {
+        result.push(...collectWorkspaceFiles(full, hostIo, predicate, excludedDirs, sink, root))
       }
-      if (e.isFile && predicate(e.name)) result.push(full)
+      continue
     }
-    return result.sort((a, b) => a.localeCompare(b))
-  }, [])
+    if (e.isFile && predicate(e.name)) result.push(full)
+  }
+  return result.sort((a, b) => a.localeCompare(b))
 }
 
-export const collectWorkspaceTsFiles = (dir: string, hostIo: SyncHostIo): ReadonlyArray<string> =>
-  collectWorkspaceFiles(dir, hostIo, (n) => (n.endsWith(".ts") || n.endsWith(".tsx")) && !n.endsWith(".d.ts"))
-export const collectWorkspaceSqlFiles = (dir: string, hostIo: SyncHostIo): ReadonlyArray<string> =>
-  collectWorkspaceFiles(dir, hostIo, (n) => n.endsWith(".sql"))
-export const collectWorkspaceAllFiles = (dir: string, hostIo: SyncHostIo): ReadonlyArray<string> =>
-  collectWorkspaceFiles(dir, hostIo, () => true)
+export const collectWorkspaceTsFiles = (
+  dir: string,
+  hostIo: SyncHostIo,
+  findings?: Array<GcFinding>,
+  repoRoot?: string,
+): ReadonlyArray<string> =>
+  collectWorkspaceFiles(dir, hostIo, (n) => (n.endsWith(".ts") || n.endsWith(".tsx")) && !n.endsWith(".d.ts"), EXCLUDED_WORKSPACE_SCAN_DIRS, findings, repoRoot)
+export const collectWorkspaceSqlFiles = (
+  dir: string,
+  hostIo: SyncHostIo,
+  findings?: Array<GcFinding>,
+  repoRoot?: string,
+): ReadonlyArray<string> =>
+  collectWorkspaceFiles(dir, hostIo, (n) => n.endsWith(".sql"), EXCLUDED_WORKSPACE_SCAN_DIRS, findings, repoRoot)
+export const collectWorkspaceAllFiles = (
+  dir: string,
+  hostIo: SyncHostIo,
+  findings?: Array<GcFinding>,
+  repoRoot?: string,
+): ReadonlyArray<string> =>
+  collectWorkspaceFiles(dir, hostIo, () => true, EXCLUDED_WORKSPACE_SCAN_DIRS, findings, repoRoot)
 
-export const collectModularPluginFiles = (repoRoot: string, hostIo: SyncHostIo): ReadonlyArray<string> =>
-  [...new Set(["libs", "apps"].map((d) => join(repoRoot, d)).filter((d) => hostIo.existsSync(d)).flatMap((d) => collectWorkspaceFiles(d, hostIo, (n) => (n.endsWith(".ts") || n.endsWith(".tsx")) && !n.endsWith(".d.ts"), EXCLUDED_MODULAR_SCAN_DIRS).filter((f) => isModularPluginPath(relative(repoRoot, f).replace(/\\/g, "/")))))].sort((a, b) => a.localeCompare(b))
+export const collectModularPluginFiles = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  findings?: Array<GcFinding>,
+): ReadonlyArray<string> =>
+  [...new Set(["libs", "apps"].map((d) => join(repoRoot, d)).filter((d) => hostIo.existsSync(d)).flatMap((d) => collectWorkspaceFiles(d, hostIo, (n) => (n.endsWith(".ts") || n.endsWith(".tsx")) && !n.endsWith(".d.ts"), EXCLUDED_MODULAR_SCAN_DIRS, findings, repoRoot).filter((f) => isModularPluginPath(relative(repoRoot, f).replace(/\\/g, "/")))))].sort((a, b) => a.localeCompare(b))

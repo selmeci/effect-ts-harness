@@ -6,6 +6,7 @@ export type MigrationViolationKind =
   | "drop-statement"
   | "table-rebuild"
   | "add-not-null-without-default"
+  | "unreadable-migration-file"
 
 export interface MigrationViolation {
   readonly kind: MigrationViolationKind
@@ -114,14 +115,41 @@ export const checkMigrationFiles = (
   hostIo: SyncHostIo,
 ): MigrationSafetyReport => {
   const files: Array<MigrationSqlFile> = []
+  const readViolations: Array<MigrationViolation> = []
+
   for (const file of filePaths) {
-    const sql = Result.getOrElse(
-      Result.try(() => (hostIo.existsSync(file) ? hostIo.readTextSync(file) : "")),
-      () => "",
-    )
-    if (sql.length > 0) {
-      files.push({ file, sql })
+    if (!hostIo.existsSync(file)) {
+      readViolations.push({
+        kind: "unreadable-migration-file",
+        file,
+        statement: "",
+        message: `Migration file "${file}" does not exist or is not accessible (fail-closed ESCALATE).`,
+      })
+      continue
     }
+    const readRes = Result.try(() => hostIo.readTextSync(file))
+    match(readRes)
+      .with({ _tag: "Success" }, ({ success: sql }) => {
+        if (sql.length > 0) {
+          files.push({ file, sql })
+        }
+      })
+      .with({ _tag: "Failure" }, ({ failure }) => {
+        readViolations.push({
+          kind: "unreadable-migration-file",
+          file,
+          statement: "",
+          message: `Failed to read migration file "${file}": ${failure instanceof Error ? failure.message : String(failure)} (fail-closed ESCALATE).`,
+        })
+      })
+      .exhaustive()
   }
-  return checkMigrationSqlSafety(files)
+
+  const sqlReport = checkMigrationSqlSafety(files)
+  const violations = [...readViolations, ...sqlReport.violations]
+  return {
+    safe: violations.length === 0,
+    requiresEscalation: violations.length > 0,
+    violations,
+  } satisfies MigrationSafetyReport
 }

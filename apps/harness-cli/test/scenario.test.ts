@@ -1,11 +1,12 @@
 import { execFileSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { Cause, Effect } from "effect"
 import { match } from "ts-pattern"
 import { runScenarioCommand } from "../src/commands/scenario.command.js"
+import { hideScenariosFromWorkspace, makeScenarioPaths } from "../src/commands/scenario-fs.js"
 
 const tempDirs: Array<string> = []
 
@@ -255,5 +256,79 @@ describe("scenario.command behavioral suite (F-7.2)", () => {
       .exhaustive()
     expect(existsSync(join(defectDir, ".harness", "scenario-runs", "current.json"))).toBe(false)
     expect(existsSync(join(defectDir, "scenarios", "defect-case", "expectations.json"))).toBe(true)
+  })
+
+  it("M-1.2: rejects --transcript outside-root absolute path and symlink escape with /escapes repository root/ + positive in-root control", async () => {
+    const tmpDir = makeTempDir("harness-cli-scenario-tx-")
+    const outsideDir = makeTempDir("harness-cli-scenario-tx-out-")
+    seedScenarioWorkspace(tmpDir, "tx-case", "Transcript Path Case")
+    const opts = { repoRoot: tmpDir, skipBackgroundDaemons: true }
+
+    const outsideTx = join(outsideDir, "outside-transcript.jsonl")
+    writeFileSync(
+      outsideTx,
+      `${JSON.stringify({ timestamp: new Date().toISOString(), tool: "read_file", args: {} })}\n`,
+      "utf8",
+    )
+    symlinkSync(outsideTx, join(tmpDir, "sym-transcript.jsonl"))
+
+    const startRes = await Effect.runPromise(runScenarioCommand(["scenario", "start", "tx-case"], opts))
+    expect(startRes.exitCode).toBe(0)
+
+    // 1. Absolute outside-root path
+    const absEscape = await Effect.runPromise(
+      runScenarioCommand(["scenario", "end", "--transcript", outsideTx], opts),
+    )
+    expect(absEscape.exitCode).toBe(1)
+    expect(absEscape.stderr).toMatch(/escapes repository root/)
+
+    // Re-start for symlink escape check (Effect.ensuring restored scenarios on failed end)
+    await Effect.runPromise(runScenarioCommand(["scenario", "start", "tx-case"], opts))
+    const symEscape = await Effect.runPromise(
+      runScenarioCommand(["scenario", "end", "--transcript", "sym-transcript.jsonl"], opts),
+    )
+    expect(symEscape.exitCode).toBe(1)
+    expect(symEscape.stderr).toMatch(/escapes repository root/)
+
+    // Positive in-root control
+    const inRootTx = join(tmpDir, "in-root-transcript.jsonl")
+    writeFileSync(
+      inRootTx,
+      `${JSON.stringify({ timestamp: new Date().toISOString(), tool: "read_file", args: {} })}\n`,
+      "utf8",
+    )
+    await Effect.runPromise(runScenarioCommand(["scenario", "start", "tx-case"], opts))
+    const okEnd = await Effect.runPromise(
+      runScenarioCommand(["scenario", "end", "--transcript", "in-root-transcript.jsonl"], opts),
+    )
+    expect(okEnd.exitCode).toBe(0)
+  })
+
+  it("M-6.2: makeScenarioPaths fails on broken worktree .git and hideScenariosFromWorkspace rolls back renameSync on post-rename error", async () => {
+    // 1. Broken .git file (worktree) causes makeScenarioPaths & scenario command to fail instead of silently falling back
+    const brokenWt = makeTempDir("harness-cli-broken-wt-")
+    writeFileSync(join(brokenWt, ".git"), "gitdir: /nonexistent/path/to/gitdir\n", "utf8")
+    const pathsRes = makeScenarioPaths(brokenWt)
+    expect(pathsRes.ok).toBe(false)
+    const cmdRes = await Effect.runPromise(
+      runScenarioCommand(["scenario", "list"], { repoRoot: brokenWt, skipBackgroundDaemons: true }),
+    )
+    expect(cmdRes.exitCode).toBe(1)
+
+    // 2. hideScenariosFromWorkspace rolls back renameSync when git exclude file is missing after rename
+    const repoDir = makeTempDir("harness-cli-hide-rollback-")
+    execFileSync("git", ["init"], { cwd: repoDir })
+    seedScenarioWorkspace(repoDir, "rb-case", "Rollback Case")
+    const validPathsRes = makeScenarioPaths(repoDir)
+    expect(validPathsRes.ok).toBe(true)
+    if (!validPathsRes.ok) return
+
+    // Remove .git/info/exclude so post-rename check fails
+    rmSync(validPathsRes.paths.gitExcludeFile, { force: true })
+    const hideRes = hideScenariosFromWorkspace(validPathsRes.paths)
+    expect(hideRes.ok).toBe(false)
+    // Verify scenarios/ was rolled back to its original location
+    expect(existsSync(join(repoDir, "scenarios", "rb-case", "expectations.json"))).toBe(true)
+    expect(existsSync(validPathsRes.paths.stashedScenariosDir)).toBe(false)
   })
 })

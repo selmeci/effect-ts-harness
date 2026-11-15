@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, type Option, Ref, Scheduler, Schema, Tracer } from "effect"
+import { Clock, Effect, Layer, type Option, Ref, Scheduler, Schema, Tracer } from "effect"
 import * as HttpClient from "effect/http/HttpClient"
 import * as HttpClientRequest from "effect/http/HttpClientRequest"
 import * as HttpClientResponse from "effect/http/HttpClientResponse"
@@ -7,30 +7,75 @@ import * as HttpServerResponse from "effect/http/HttpServerResponse"
 import { SqlClient } from "effect/sql/SqlClient"
 import type { SqlError } from "effect/sql/SqlError"
 import * as D1Client from "@effect/sql-d1/D1Client"
+import * as SqliteClient from "@effect/sql-sqlite-do/SqliteClient"
 import * as SqliteMigrator from "@effect/sql-sqlite-do/SqliteMigrator"
 import { match, P } from "ts-pattern"
 import {
+  AlbumCounterProtocolError,
+  AlbumCounterStorageError,
   type AlbumId,
   AlbumPhotoCount,
   AlbumQuotaExceededError,
   type CreatePhotoInput,
+  DecrementAlbumCount,
   GetAlbumCount,
   type GreetingMessage,
+  HttpStatusCode,
   IncrementAlbumCount,
+  MAX_PHOTOS_PER_ALBUM,
   Photo,
   PhotoCounterRpc,
   type PhotoId,
   PhotoNotFoundError,
+  PhotoStorageError,
+  ProtocolErrorMessage,
+  StorageErrorMessage,
+  StorageOperationName,
 } from "@harness/sample-contract"
-import { AlbumCounterClient, PhotoRepo } from "@harness/sample-service"
+import {
+  ActiveCounterStore,
+  AlbumCounterClient,
+  type AlbumCounterStore,
+  AlbumCounterStoreTypeId,
+  PhotoRepo,
+} from "@harness/sample-service"
 import { decideAlbumQuota } from "@harness/sample-domain"
 
 export type D1DatabaseBinding = D1Client.D1ClientConfig["db"]
+export type SqlStorageBinding = NonNullable<SqliteClient.SqliteClientConfig["db"]>
+
+const SQL_CLIENT_TYPE_ID = "~effect/sql/SqlClient"
 
 const isSqlClient = (value: unknown): value is SqlClient =>
   (typeof value === "object" || typeof value === "function") &&
   value != null &&
-  "withTransaction" in value
+  SQL_CLIENT_TYPE_ID in value
+
+const isD1Database = (value: unknown): value is D1DatabaseBinding =>
+  (typeof value === "object" || typeof value === "function") &&
+  value != null &&
+  typeof (value as { readonly prepare?: unknown }).prepare === "function"
+
+const isAlbumCounterStore = (value: unknown): value is AlbumCounterStore =>
+  value != null && typeof value === "object" && AlbumCounterStoreTypeId in value
+
+const toPhotoStorageError = (operation: string, err: unknown): PhotoStorageError =>
+  new PhotoStorageError({
+    operation: StorageOperationName.make(operation),
+    message: StorageErrorMessage.make(err instanceof Error ? err.message : String(err)),
+  })
+
+const toCounterStorageError = (operation: string, err: unknown): AlbumCounterStorageError =>
+  new AlbumCounterStorageError({
+    operation: StorageOperationName.make(operation),
+    message: StorageErrorMessage.make(err instanceof Error ? err.message : String(err)),
+  })
+
+const toProtocolError = (status: number, err: unknown): AlbumCounterProtocolError =>
+  new AlbumCounterProtocolError({
+    status: HttpStatusCode.make(status),
+    message: ProtocolErrorMessage.make(err instanceof Error ? err.message : String(err)),
+  })
 
 export const logToConsole = Effect.fn("Sample.logToConsole")(function* (message: GreetingMessage) {
   yield* Effect.sync(() => {
@@ -46,13 +91,16 @@ export const PhotoRepoMemoryLayer: Layer.Layer<PhotoRepo> = Layer.effect(
     let nextId = 1
 
     const insert = Effect.fn("PhotoRepo.insert")(function* (input: CreatePhotoInput) {
+      const nowMillis = yield* Clock.currentTimeMillis
       const raw = {
         id: nextId++,
         name: input.name,
         albumId: input.albumId,
-        createdAt: Math.floor(Date.now()),
+        createdAt: Math.floor(nowMillis),
       }
-      const photo = yield* Schema.decodeEffect(Photo)(raw).pipe(Effect.orDie)
+      const photo = yield* Schema.decodeEffect(Photo)(raw).pipe(
+        Effect.mapError((err) => toPhotoStorageError("PhotoRepo.insert", err)),
+      )
       yield* Ref.update(itemsRef, (items) => [...items, photo])
       return photo
     })
@@ -66,7 +114,7 @@ export const PhotoRepoMemoryLayer: Layer.Layer<PhotoRepo> = Layer.effect(
       return found
     })
 
-    const listAll: Effect.Effect<ReadonlyArray<Photo>> = Ref.get(itemsRef).pipe(
+    const listAll: Effect.Effect<ReadonlyArray<Photo>, PhotoStorageError> = Ref.get(itemsRef).pipe(
       Effect.withSpan("PhotoRepo.listAll"),
     )
 
@@ -76,39 +124,52 @@ export const PhotoRepoMemoryLayer: Layer.Layer<PhotoRepo> = Layer.effect(
 
 // PhotoRepo Native Effect SQL Implementation (D1 / SQLite)
 const _makePhotoRepoSql = (sql: SqlClient): PhotoRepo["Service"] => {
-  const insert = Effect.fn("PhotoRepo.insert")(
-    function* (input: CreatePhotoInput) {
-      const createdAt = Math.floor(Date.now())
-      const rows = yield* sql`
-        INSERT INTO photos (name, album_id, created_at)
-        VALUES (${input.name}, ${input.albumId}, ${createdAt})
-        RETURNING id, name, album_id AS albumId, created_at AS createdAt
-      `
-      return yield* Schema.decodeUnknownEffect(Photo)(rows[0])
-    },
-    Effect.orDie,
-  )
+  const insert = Effect.fn("PhotoRepo.insert")(function* (input: CreatePhotoInput) {
+    const nowMillis = yield* Clock.currentTimeMillis
+    const createdAt = Math.floor(nowMillis)
+    const rows = yield* sql`
+      INSERT INTO photos (name, album_id, created_at)
+      VALUES (${input.name}, ${input.albumId}, ${createdAt})
+      RETURNING id, name, album_id AS albumId, created_at AS createdAt
+    `.pipe(Effect.mapError((err) => toPhotoStorageError("PhotoRepo.insert", err)))
+    const firstRow = rows[0]
+    if (firstRow === undefined) {
+      return yield* toPhotoStorageError(
+        "PhotoRepo.insert",
+        "INSERT INTO photos RETURNING did not return a row",
+      )
+    }
+    return yield* Schema.decodeUnknownEffect(Photo)(firstRow).pipe(
+      Effect.mapError((err) => toPhotoStorageError("PhotoRepo.insert", err)),
+    )
+  })
 
   const findById = Effect.fn("PhotoRepo.findById")(function* (id: PhotoId) {
     const rows = yield* sql`
       SELECT id, name, album_id AS albumId, created_at AS createdAt
       FROM photos
       WHERE id = ${id}
-    `.pipe(Effect.orDie)
-    if (rows.length === 0) {
+    `.pipe(Effect.mapError((err) => toPhotoStorageError("PhotoRepo.findById", err)))
+    const firstRow = rows[0]
+    if (firstRow === undefined) {
       return yield* new PhotoNotFoundError({ id })
     }
-    return yield* Schema.decodeUnknownEffect(Photo)(rows[0]).pipe(Effect.orDie)
+    return yield* Schema.decodeUnknownEffect(Photo)(firstRow).pipe(
+      Effect.mapError((err) => toPhotoStorageError("PhotoRepo.findById", err)),
+    )
   })
 
-  const listAll: Effect.Effect<ReadonlyArray<Photo>> = Effect.gen(function* () {
+  const listAll: Effect.Effect<ReadonlyArray<Photo>, PhotoStorageError> = Effect.gen(function* () {
     const rows = yield* sql`
       SELECT id, name, album_id AS albumId, created_at AS createdAt
       FROM photos
       ORDER BY id ASC
     `
     return yield* Schema.decodeUnknownEffect(Schema.Array(Photo))(rows)
-  }).pipe(Effect.orDie, Effect.withSpan("PhotoRepo.listAll"))
+  }).pipe(
+    Effect.mapError((err) => toPhotoStorageError("PhotoRepo.listAll", err)),
+    Effect.withSpan("PhotoRepo.listAll"),
+  )
 
   return PhotoRepo.of({ insert, findById, listAll })
 }
@@ -128,21 +189,8 @@ export {
   _makePhotoRepoD1Layer as makePhotoRepoD1Layer,
 }
 
-// AlbumCounter Store Interface & Implementations
-const MAX_PHOTOS_PER_ALBUM = 100
-
-export interface AlbumCounterStore {
-  readonly get: (albumId: AlbumId) => Effect.Effect<AlbumPhotoCount>
-  readonly set: (albumId: AlbumId, count: AlbumPhotoCount) => Effect.Effect<void>
-  readonly incrementWithQuota: (
-    albumId: AlbumId,
-  ) => Effect.Effect<AlbumPhotoCount, AlbumQuotaExceededError>
-}
-
-export class ActiveCounterStore extends Context.Service<ActiveCounterStore, AlbumCounterStore>()(
-  "SampleInfra.ActiveCounterStore",
-) {}
-
+// PhotoCounterDO stores per-album counters in DO SQLite via SqliteMigrator,
+// while D1 stores `photos` + fallback `album_counters` via `migrations/0001_photos_and_counters.sql`.
 export const albumCounterMigrations: Readonly<
   Record<string, Effect.Effect<void, SqlError, SqlClient>>
 > = {
@@ -176,6 +224,7 @@ export const AlbumCounterMigratorLayer: Layer.Layer<
 const _makeAlbumCounterStoreMemory = (initial: Record<string, number> = {}): AlbumCounterStore => {
   const map = new Map<string, number>(Object.entries(initial))
   return {
+    [AlbumCounterStoreTypeId]: AlbumCounterStoreTypeId,
     get: (albumId: AlbumId) => Effect.sync(() => AlbumPhotoCount.make(map.get(albumId) ?? 0)),
     set: (albumId: AlbumId, count: AlbumPhotoCount) =>
       Effect.sync(() => {
@@ -188,6 +237,13 @@ const _makeAlbumCounterStoreMemory = (initial: Record<string, number> = {}): Alb
         map.set(albumId, nextCount)
         return nextCount
       }),
+    decrement: (albumId: AlbumId) =>
+      Effect.sync(() => {
+        const current = map.get(albumId) ?? 0
+        const next = Math.max(0, current - 1)
+        map.set(albumId, next)
+        return AlbumPhotoCount.make(next)
+      }),
   }
 }
 
@@ -196,31 +252,44 @@ export const AlbumCounterStoreMemoryLayer: Layer.Layer<ActiveCounterStore> = Lay
   () => _makeAlbumCounterStoreMemory(),
 )
 
+const decodeAlbumPhotoCount = (
+  operation: string,
+  rawCount: unknown,
+): Effect.Effect<AlbumPhotoCount, AlbumCounterStorageError> =>
+  match(Schema.decodeUnknownOption(AlbumPhotoCount)(rawCount))
+    .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
+    .with({ _tag: "None" }, () =>
+      Effect.fail(
+        toCounterStorageError(
+          operation,
+          `Invalid AlbumPhotoCount in album_counters: ${String(rawCount)}`,
+        ),
+      ),
+    )
+    .exhaustive()
+
 const _makeAlbumCounterStoreSql = (sql: SqlClient): AlbumCounterStore => ({
+  [AlbumCounterStoreTypeId]: AlbumCounterStoreTypeId,
   get: (albumId: AlbumId) =>
     Effect.gen(function* () {
       const rows = yield* sql<{ readonly count: number }>`
         SELECT count FROM album_counters WHERE album_id = ${albumId}
-      `
+      `.pipe(Effect.mapError((err) => toCounterStorageError("AlbumCounterStore.get", err)))
       const firstRow = rows[0]
       if (firstRow === undefined) {
         return AlbumPhotoCount.make(0)
       }
-      return yield* match(Schema.decodeOption(AlbumPhotoCount)(firstRow.count))
-        .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
-        .with({ _tag: "None" }, () =>
-          Effect.die(
-            new Error(`Invalid AlbumPhotoCount in album_counters: ${String(firstRow.count)}`),
-          ),
-        )
-        .exhaustive()
-    }).pipe(Effect.orDie),
+      return yield* decodeAlbumPhotoCount("AlbumCounterStore.get", firstRow.count)
+    }),
   set: (albumId: AlbumId, count: AlbumPhotoCount) =>
     sql`
       INSERT INTO album_counters (album_id, count)
       VALUES (${albumId}, ${count})
       ON CONFLICT (album_id) DO UPDATE SET count = excluded.count
-    `.pipe(Effect.asVoid, Effect.orDie),
+    `.pipe(
+      Effect.asVoid,
+      Effect.mapError((err) => toCounterStorageError("AlbumCounterStore.set", err)),
+    ),
   incrementWithQuota: (albumId: AlbumId) =>
     Effect.gen(function* () {
       const rows = yield* sql<{ readonly count: number }>`
@@ -229,22 +298,58 @@ const _makeAlbumCounterStoreSql = (sql: SqlClient): AlbumCounterStore => ({
         ON CONFLICT(album_id) DO UPDATE SET count = album_counters.count + 1
         WHERE album_counters.count < ${MAX_PHOTOS_PER_ALBUM}
         RETURNING count
-      `.pipe(Effect.orDie)
+      `.pipe(
+        Effect.mapError((err) => toCounterStorageError("AlbumCounterStore.incrementWithQuota", err)),
+      )
       const firstRow = rows[0]
       if (firstRow === undefined) {
-        return yield* new AlbumQuotaExceededError({
-          albumId,
-          count: AlbumPhotoCount.make(MAX_PHOTOS_PER_ALBUM),
-        })
-      }
-      return yield* match(Schema.decodeOption(AlbumPhotoCount)(firstRow.count))
-        .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
-        .with({ _tag: "None" }, () =>
-          Effect.die(
-            new Error(`Invalid AlbumPhotoCount in album_counters: ${String(firstRow.count)}`),
+        const existingRows = yield* sql<{ readonly count: number }>`
+          SELECT count FROM album_counters WHERE album_id = ${albumId}
+        `.pipe(
+          Effect.mapError((err) =>
+            toCounterStorageError("AlbumCounterStore.incrementWithQuota", err),
           ),
         )
-        .exhaustive()
+        const existingRow = existingRows[0]
+        if (existingRow === undefined) {
+          return yield* toCounterStorageError(
+            "AlbumCounterStore.incrementWithQuota",
+            "Conditional upsert returned no rows and no album_counters row exists",
+          )
+        }
+        const storedCount = yield* decodeAlbumPhotoCount(
+          "AlbumCounterStore.incrementWithQuota",
+          existingRow.count,
+        )
+        if (storedCount >= MAX_PHOTOS_PER_ALBUM) {
+          return yield* new AlbumQuotaExceededError({
+            albumId,
+            count: storedCount,
+          })
+        }
+        return yield* toCounterStorageError(
+          "AlbumCounterStore.incrementWithQuota",
+          `Conditional upsert returned no rows despite stored count ${storedCount} < ${MAX_PHOTOS_PER_ALBUM}`,
+        )
+      }
+      return yield* decodeAlbumPhotoCount("AlbumCounterStore.incrementWithQuota", firstRow.count)
+    }),
+  decrement: (albumId: AlbumId) =>
+    Effect.gen(function* () {
+      const rows = yield* sql<{ readonly count: number }>`
+        INSERT INTO album_counters (album_id, count)
+        VALUES (${albumId}, 0)
+        ON CONFLICT(album_id) DO UPDATE SET count = MAX(0, album_counters.count - 1)
+        RETURNING count
+      `.pipe(Effect.mapError((err) => toCounterStorageError("AlbumCounterStore.decrement", err)))
+      const firstRow = rows[0]
+      if (firstRow === undefined) {
+        return yield* toCounterStorageError(
+          "AlbumCounterStore.decrement",
+          "Decrement upsert RETURNING did not return a row",
+        )
+      }
+      return yield* decodeAlbumPhotoCount("AlbumCounterStore.decrement", firstRow.count)
     }),
 })
 
@@ -254,16 +359,21 @@ export const AlbumCounterDoLayer: Layer.Layer<ActiveCounterStore, never, SqlClie
 )
 
 const _makeAlbumCounterDoLayer = (
-  d1OrSql: D1DatabaseBinding | SqlClient,
+  binding: D1DatabaseBinding | SqlStorageBinding | SqlClient,
 ): Layer.Layer<ActiveCounterStore> =>
-  match(d1OrSql)
+  match(binding)
     .with(P.when(isSqlClient), (sql) =>
       Layer.succeed(ActiveCounterStore, _makeAlbumCounterStoreSql(sql)),
     )
-    .otherwise((db) => AlbumCounterDoLayer.pipe(Layer.provide(D1Client.layer({ db })), Layer.orDie))
+    .with(P.when(isD1Database), (db) =>
+      AlbumCounterDoLayer.pipe(Layer.provide(D1Client.layer({ db })), Layer.orDie),
+    )
+    .otherwise((sqlStorage) =>
+      AlbumCounterDoLayer.pipe(Layer.provide(SqliteClient.layer({ db: sqlStorage })), Layer.orDie),
+    )
 
 const RpcActionSchema = Schema.Struct({
-  action: Schema.optional(Schema.Literals(["GetAlbumCount", "IncrementAlbumCount"])),
+  action: Schema.Literals(["GetAlbumCount", "IncrementAlbumCount", "DecrementAlbumCount"]),
 })
 
 const formatTraceparent = (maybeSpan: Option.Option<Tracer.AnySpan>): string | undefined =>
@@ -276,15 +386,22 @@ export const handleAlbumCounterRpc = Effect.fn("SampleInfra.handleAlbumCounterRp
   rawInput: unknown,
 ) {
   const parsedAction = yield* Schema.decodeUnknownEffect(RpcActionSchema)(rawInput)
-  const action = parsedAction.action ?? "IncrementAlbumCount"
+  const action = parsedAction.action
   if (!PhotoCounterRpc.requests.has(action)) {
-    return yield* Effect.die(new Error(`Unknown PhotoCounterRpc action: ${action}`))
+    return yield* toProtocolError(400, `Unknown PhotoCounterRpc action: ${action}`)
   }
 
   const maybeStore = yield* Effect.serviceOption(ActiveCounterStore)
-  const store = match(maybeStore)
-    .with({ _tag: "Some" }, ({ value }) => value)
-    .with({ _tag: "None" }, () => _makeAlbumCounterStoreMemory())
+  const store = yield* match(maybeStore)
+    .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
+    .with({ _tag: "None" }, () =>
+      Effect.fail(
+        toCounterStorageError(
+          "handleAlbumCounterRpc",
+          "ActiveCounterStore service is not provided",
+        ),
+      ),
+    )
     .exhaustive()
 
   // Synchronous DO transaction discipline: decode outside, then run store + decide under MixedScheduler("sync")
@@ -312,6 +429,16 @@ export const handleAlbumCounterRpc = Effect.fn("SampleInfra.handleAlbumCounterRp
         }).pipe(Effect.provideService(Scheduler.Scheduler, new Scheduler.MixedScheduler("sync")))
       }),
     )
+    .with("DecrementAlbumCount", () =>
+      Effect.gen(function* () {
+        const payload = yield* Schema.decodeUnknownEffect(DecrementAlbumCount.payloadSchema)(
+          rawInput,
+        )
+        return yield* store
+          .decrement(payload.albumId)
+          .pipe(Effect.provideService(Scheduler.Scheduler, new Scheduler.MixedScheduler("sync")))
+      }),
+    )
     .exhaustive()
 })
 
@@ -335,8 +462,26 @@ export { _toHttpClient as toHttpClient }
 const isServerRequest = (req: unknown): req is HttpServerRequest.HttpServerRequest =>
   req != null && typeof req === "object" && HttpServerRequest.TypeId in req
 
-const isAlbumCounterStore = (value: unknown): value is AlbumCounterStore =>
-  value != null && typeof value === "object" && "get" in value && "set" in value
+const parseRequestJson = (
+  request: HttpServerRequest.HttpServerRequest | Request,
+): Effect.Effect<Option.Option<unknown>, never, never> => {
+  if (isServerRequest(request)) {
+    return request.json.pipe(Effect.option)
+  }
+  return Effect.tryPromise({
+    try: () => request.json(),
+    catch: () => toProtocolError(400, "Invalid JSON"),
+  }).pipe(Effect.option)
+}
+
+const extractTraceparentHeader = (
+  request: HttpServerRequest.HttpServerRequest | Request,
+): string | undefined => {
+  if (isServerRequest(request)) {
+    return request.headers["traceparent"]
+  }
+  return request.headers.get("traceparent") ?? undefined
+}
 
 const _makeAlbumCounterRpcHandler = (
   storeOrSql?: AlbumCounterStore | SqlClient,
@@ -355,73 +500,114 @@ const _makeAlbumCounterRpcHandler = (
       request: HttpServerRequest.HttpServerRequest | Request,
     ): Effect.Effect<HttpServerResponse.HttpServerResponse, never, never> =>
       Effect.gen(function* () {
-        let traceparentHeader: string | undefined
-        let rawBody: unknown
-
-        if (isServerRequest(request)) {
-          traceparentHeader = request.headers["traceparent"]
-          rawBody = yield* Effect.orDie(request.json)
-        } else {
-          traceparentHeader = request.headers.get("traceparent") ?? undefined
-          rawBody = yield* Effect.orDie(Effect.promise(() => request.json()))
-        }
-
-        let externalSpan: Tracer.ExternalSpan | undefined
-        if (typeof traceparentHeader === "string") {
-          const parsedTrace = /^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/i.exec(
-            traceparentHeader.trim(),
+        const maybeBody = yield* parseRequestJson(request)
+        return yield* match(maybeBody)
+          .with({ _tag: "None" }, () =>
+            HttpServerResponse.json(
+              { error: "invalid_json", message: "Malformed JSON request body" },
+              { status: 400 },
+            ),
           )
-          if (parsedTrace && parsedTrace[1] && parsedTrace[2]) {
-            externalSpan = Tracer.externalSpan({
-              traceId: parsedTrace[1],
-              spanId: parsedTrace[2],
-              sampled: true,
-            })
-          }
-        }
-
-        let handler = handleAlbumCounterRpc(rawBody).pipe(
-          Effect.provideService(ActiveCounterStore, localStore),
-        )
-        if (externalSpan) {
-          handler = Effect.withParentSpan(handler, externalSpan)
-        }
-
-        const res = yield* handler.pipe(
-          Effect.map((count) => ({ _tag: "Success" as const, count })),
-          Effect.catch((err: unknown) => Effect.succeed({ _tag: "Failure" as const, err })),
-        )
-
-        return yield* match(res)
-          .with({ _tag: "Success" }, ({ count }) =>
+          .with({ _tag: "Some" }, ({ value: rawBody }) =>
             Effect.gen(function* () {
-              const encodedCount = yield* Schema.encodeUnknownEffect(
-                IncrementAlbumCount.successSchema,
-              )(count)
-              return yield* HttpServerResponse.json({ count: encodedCount })
+              const traceparentHeader = extractTraceparentHeader(request)
+              let externalSpan: Tracer.ExternalSpan | undefined
+              if (typeof traceparentHeader === "string") {
+                const parsedTrace = /^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/i.exec(
+                  traceparentHeader.trim(),
+                )
+                if (parsedTrace && parsedTrace[1] && parsedTrace[2]) {
+                  externalSpan = Tracer.externalSpan({
+                    traceId: parsedTrace[1],
+                    spanId: parsedTrace[2],
+                    sampled: true,
+                  })
+                }
+              }
+
+              let handler = handleAlbumCounterRpc(rawBody).pipe(
+                Effect.flatMap((count) =>
+                  Schema.encodeUnknownEffect(IncrementAlbumCount.successSchema)(count).pipe(
+                    Effect.mapError((err) =>
+                      toCounterStorageError("AlbumCounterRpc.encodeResponse", err),
+                    ),
+                  ),
+                ),
+                Effect.provideService(ActiveCounterStore, localStore),
+              )
+              if (externalSpan) {
+                handler = Effect.withParentSpan(handler, externalSpan)
+              }
+
+              const res = yield* handler.pipe(
+                Effect.map((encodedCount) => ({ _tag: "Success" as const, encodedCount })),
+                Effect.catch((err: unknown) => Effect.succeed({ _tag: "Failure" as const, err })),
+              )
+
+              return yield* match(res)
+                .with({ _tag: "Success" }, ({ encodedCount }) =>
+                  HttpServerResponse.json({ count: encodedCount }),
+                )
+                .with(
+                  {
+                    _tag: "Failure",
+                    err: P.when(
+                      (failure): failure is AlbumQuotaExceededError =>
+                        failure != null &&
+                        typeof failure === "object" &&
+                        "_tag" in failure &&
+                        failure._tag === "AlbumQuotaExceededError",
+                    ),
+                  },
+                  ({ err }) =>
+                    Effect.gen(function* () {
+                      const encodedErr = yield* Schema.encodeUnknownEffect(
+                        IncrementAlbumCount.errorSchema,
+                      )(err)
+                      return yield* HttpServerResponse.json(encodedErr, { status: 429 })
+                    }),
+                )
+                .with(
+                  {
+                    _tag: "Failure",
+                    err: P.when(Schema.isSchemaError),
+                  },
+                  () =>
+                    HttpServerResponse.json(
+                      { error: "invalid_request", message: "Invalid RPC request payload" },
+                      { status: 400 },
+                    ),
+                )
+                .with(
+                  {
+                    _tag: "Failure",
+                    err: P.instanceOf(AlbumCounterProtocolError),
+                  },
+                  () =>
+                    HttpServerResponse.json(
+                      { error: "invalid_request", message: "Invalid RPC request" },
+                      { status: 400 },
+                    ),
+                )
+                .with(
+                  {
+                    _tag: "Failure",
+                    err: P.instanceOf(AlbumCounterStorageError),
+                  },
+                  () =>
+                    HttpServerResponse.json(
+                      { error: "storage_failure", message: "Counter storage operation failed" },
+                      { status: 500 },
+                    ),
+                )
+                .with({ _tag: "Failure" }, () =>
+                  HttpServerResponse.json(
+                    { error: "storage_failure", message: "Internal counter service error" },
+                    { status: 500 },
+                  ),
+                )
+                .exhaustive()
             }),
-          )
-          .with(
-            {
-              _tag: "Failure",
-              err: P.when(
-                (failure): failure is AlbumQuotaExceededError =>
-                  failure != null &&
-                  typeof failure === "object" &&
-                  "_tag" in failure &&
-                  failure._tag === "AlbumQuotaExceededError",
-              ),
-            },
-            ({ err }) =>
-              Effect.gen(function* () {
-                const encodedErr = yield* Schema.encodeUnknownEffect(
-                  IncrementAlbumCount.errorSchema,
-                )(err)
-                return yield* HttpServerResponse.json(encodedErr, { status: 400 })
-              }),
-          )
-          .with({ _tag: "Failure" }, ({ err }) =>
-            HttpServerResponse.json({ error: String(err) }, { status: 500 }),
           )
           .exhaustive()
       }).pipe(Effect.orDie),
@@ -432,88 +618,96 @@ export { _makeAlbumCounterRpcHandler as makeAlbumCounterRpcHandler }
 
 const _makeAlbumCounterRpcClient = (
   httpClient: HttpClient.HttpClient | ServerRequestFetcher,
-): Layer.Layer<AlbumCounterClient> & {
-  readonly increment: (albumId: AlbumId) => Effect.Effect<AlbumPhotoCount, AlbumQuotaExceededError>
-  readonly getCount: (albumId: AlbumId) => Effect.Effect<AlbumPhotoCount>
-} => {
+): Layer.Layer<AlbumCounterClient> & AlbumCounterClient["Service"] => {
   const client: HttpClient.HttpClient = HttpClient.isHttpClient(httpClient)
     ? httpClient
     : _toHttpClient(httpClient)
 
-  const increment = (albumId: AlbumId): Effect.Effect<AlbumPhotoCount, AlbumQuotaExceededError> =>
+  const sendAction = (
+    action: "IncrementAlbumCount" | "GetAlbumCount" | "DecrementAlbumCount",
+    albumId: AlbumId,
+  ): Effect.Effect<HttpClientResponse.HttpClientResponse, AlbumCounterProtocolError> =>
     Effect.gen(function* () {
       const maybeSpan = yield* Effect.currentSpan.pipe(Effect.option)
       const traceparent = formatTraceparent(maybeSpan)
-
-      const encodedPayload = yield* Schema.encodeUnknownEffect(IncrementAlbumCount.payloadSchema)({
+      const encodedPayload = yield* Schema.encodeUnknownEffect(GetAlbumCount.payloadSchema)({
         albumId,
-      })
-      let req = HttpClientRequest.post("http://localhost/rpc/IncrementAlbumCount").pipe(
-        HttpClientRequest.bodyJsonUnsafe({ action: "IncrementAlbumCount", ...encodedPayload }),
+      }).pipe(Effect.mapError((err) => toProtocolError(400, err)))
+      let req = HttpClientRequest.post(`http://localhost/rpc/${action}`).pipe(
+        HttpClientRequest.bodyJsonUnsafe({ action, ...encodedPayload }),
       )
       if (traceparent) {
         req = HttpClientRequest.setHeader(req, "traceparent", traceparent)
       }
+      return yield* client.execute(req).pipe(Effect.mapError((err) => toProtocolError(502, err)))
+    })
 
-      const response = yield* client.execute(req)
-      return yield* match(response.status)
-        .with(200, () =>
-          Effect.gen(function* () {
-            const data = yield* HttpClientResponse.schemaBodyJson(
-              Schema.Struct({ count: IncrementAlbumCount.successSchema }),
-            )(response)
-            return data.count
-          }),
-        )
-        .otherwise(() =>
-          Effect.gen(function* () {
-            const err = yield* HttpClientResponse.schemaBodyJson(IncrementAlbumCount.errorSchema)(
-              response,
-            )
-            return yield* err
-          }),
-        )
-    }).pipe(
-      Effect.catch((err: unknown) =>
-        match(err)
-          .with(P.instanceOf(AlbumQuotaExceededError), (e) => Effect.fail(e))
-          .with(
-            P.when(
-              (e): e is AlbumQuotaExceededError =>
-                e != null &&
-                typeof e === "object" &&
-                "_tag" in e &&
-                e._tag === "AlbumQuotaExceededError",
-            ),
-            (e) => Effect.fail(e),
-          )
-          .otherwise((e) => Effect.die(e)),
+  const decodeSuccessCount = (
+    response: HttpClientResponse.HttpClientResponse,
+  ): Effect.Effect<AlbumPhotoCount, AlbumCounterProtocolError> =>
+    HttpClientResponse.schemaBodyJson(Schema.Struct({ count: IncrementAlbumCount.successSchema }))(
+      response,
+    ).pipe(
+      Effect.map((data) => data.count),
+      Effect.mapError((err) => toProtocolError(response.status, err)),
+    )
+
+  const readErrorProtocol = (
+    response: HttpClientResponse.HttpClientResponse,
+    action: string,
+  ): Effect.Effect<never, AlbumCounterProtocolError> =>
+    response.text.pipe(
+      Effect.orElseSucceed(() => ""),
+      Effect.flatMap((bodyText) =>
+        Effect.fail(
+          toProtocolError(
+            response.status,
+            `${action} failed with HTTP ${response.status}${bodyText.length > 0 ? `: ${bodyText}` : ""}`,
+          ),
+        ),
       ),
     )
 
-  const getCount = (albumId: AlbumId): Effect.Effect<AlbumPhotoCount> =>
+  const increment = (
+    albumId: AlbumId,
+  ): Effect.Effect<
+    AlbumPhotoCount,
+    AlbumQuotaExceededError | AlbumCounterStorageError | AlbumCounterProtocolError
+  > =>
     Effect.gen(function* () {
-      const maybeSpan = yield* Effect.currentSpan.pipe(Effect.option)
-      const traceparent = formatTraceparent(maybeSpan)
+      const response = yield* sendAction("IncrementAlbumCount", albumId)
+      return yield* match(response.status)
+        .with(200, () => decodeSuccessCount(response))
+        .with(429, () =>
+          HttpClientResponse.schemaBodyJson(IncrementAlbumCount.errorSchema)(response).pipe(
+            Effect.mapError((err) => toProtocolError(429, err)),
+            Effect.flatMap((quotaErr) => Effect.fail(quotaErr)),
+          ),
+        )
+        .otherwise(() => readErrorProtocol(response, "IncrementAlbumCount"))
+    })
 
-      const encodedPayload = yield* Schema.encodeUnknownEffect(GetAlbumCount.payloadSchema)({
-        albumId,
-      })
-      let req = HttpClientRequest.post("http://localhost/rpc/GetAlbumCount").pipe(
-        HttpClientRequest.bodyJsonUnsafe({ action: "GetAlbumCount", ...encodedPayload }),
-      )
-      if (traceparent) {
-        req = HttpClientRequest.setHeader(req, "traceparent", traceparent)
-      }
+  const decrement = (
+    albumId: AlbumId,
+  ): Effect.Effect<AlbumPhotoCount, AlbumCounterStorageError | AlbumCounterProtocolError> =>
+    Effect.gen(function* () {
+      const response = yield* sendAction("DecrementAlbumCount", albumId)
+      return yield* match(response.status)
+        .with(200, () => decodeSuccessCount(response))
+        .otherwise(() => readErrorProtocol(response, "DecrementAlbumCount"))
+    })
 
-      const response = yield* client.execute(req)
-      const data = yield* HttpClientResponse.schemaBodyJson(
-        Schema.Struct({ count: GetAlbumCount.successSchema }),
-      )(response)
-      return data.count
-    }).pipe(Effect.orDie)
+  const getCount = (
+    albumId: AlbumId,
+  ): Effect.Effect<AlbumPhotoCount, AlbumCounterStorageError | AlbumCounterProtocolError> =>
+    Effect.gen(function* () {
+      const response = yield* sendAction("GetAlbumCount", albumId)
+      return yield* match(response.status)
+        .with(200, () => decodeSuccessCount(response))
+        .otherwise(() => readErrorProtocol(response, "GetAlbumCount"))
+    })
 
-  const service = AlbumCounterClient.of({ increment, getCount })
+  const service = AlbumCounterClient.of({ increment, decrement, getCount })
   const layer = Layer.succeed(AlbumCounterClient, service)
   return Object.assign(layer, service)
 }
@@ -522,10 +716,13 @@ export const AlbumCounterClientMemoryLayer: Layer.Layer<AlbumCounterClient> =
   _makeAlbumCounterRpcClient(_makeAlbumCounterRpcHandler())
 
 export {
+  ActiveCounterStore,
+  type AlbumCounterStore,
   _makeAlbumCounterRpcClient as makeAlbumCounterRpcClient,
   _makeAlbumCounterStoreMemory as makeAlbumCounterStoreMemory,
   _makeAlbumCounterStoreSql as makeAlbumCounterStoreSql,
   _makeAlbumCounterDoLayer as makeAlbumCounterDoLayer,
+  DecrementAlbumCount,
   GetAlbumCount,
   IncrementAlbumCount,
 }

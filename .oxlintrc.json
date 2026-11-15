@@ -98,13 +98,34 @@
     {
       "files": ["libs/**/test/**/*.ts", "apps/**/test/**/*.ts"],
       "rules": {
-        "harness/test-integrity": "error"
+        "harness/test-integrity": "error",
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["drizzle-orm", "drizzle-orm/*", "drizzle-kit", "drizzle-kit/*"],
+                "message": "drizzle-orm and drizzle-kit are banned across the workspace — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator)."
+              }
+            ]
+          }
+        ]
       }
     },
     {
       "files": ["**/infra/src/**/*.ts", "**/infra/test/**/*.ts", "apps/sample/**/*.ts"],
       "rules": {
-        "no-restricted-imports": "off"
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["drizzle-orm", "drizzle-orm/*", "drizzle-kit", "drizzle-kit/*"],
+                "message": "drizzle-orm and drizzle-kit are banned across the workspace — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator)."
+              }
+            ]
+          }
+        ]
       }
     }
   ]

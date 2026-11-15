@@ -2,10 +2,13 @@ import { describe, expect, it } from "@effect/vitest"
 import { Effect, Option } from "effect"
 import {
   ActiveMutantId,
+  AstGateEvaluationError,
+  AstSourceFilePath,
   DaemonSocketPath,
   DecisionCacheKey,
   DecisionCachePayloadJson,
   DecisionCacheTtlMillis,
+  ErrorReasonMessage,
   NonNegativeCount,
   SubprocessCommand,
   SubprocessExitCode,
@@ -81,8 +84,12 @@ describe("@harness/service ports", () => {
   it.effect("resolves AstGateCachePort, DecisionCachePort, and UnixSocketDaemonPort from test layers", () =>
     Effect.gen(function* () {
       const astCache = yield* AstGateCachePort
-      const astReport = yield* astCache.evaluateBatch([], () => [])
+      const astReport = yield* astCache.evaluateBatch([], () => [], "custom-evaluator")
       expect(astReport.verdict).toBe("clean")
+      const evalErr = yield* astCache
+        .evaluateBatch([], () => [], "failing-evaluator")
+        .pipe(Effect.flip)
+      expect(evalErr._tag).toBe("AstGateEvaluationError")
 
       const decCache = yield* DecisionCachePort
       const payload = yield* decCache.lookupOrCompute({
@@ -97,14 +104,21 @@ describe("@harness/service ports", () => {
       expect(alive).toBe(false)
     }).pipe(
       Effect.provideService(AstGateCachePort, {
-        evaluateBatch: () =>
-          Effect.succeed(
-            makeAstGateEvaluationReport({
-              violations: [],
-              inspectedFileCount: NonNegativeCount.make(0),
-              cacheHitCount: NonNegativeCount.make(0),
-            }),
-          ),
+        evaluateBatch: (_files, _evaluateFile, evaluatorId) =>
+          evaluatorId === "failing-evaluator"
+            ? Effect.fail(
+                new AstGateEvaluationError({
+                  filePath: AstSourceFilePath.make("libs/a.ts"),
+                  reason: ErrorReasonMessage.make("eval failed"),
+                }),
+              )
+            : Effect.succeed(
+                makeAstGateEvaluationReport({
+                  violations: [],
+                  inspectedFileCount: NonNegativeCount.make(0),
+                  cacheHitCount: NonNegativeCount.make(0),
+                }),
+              ),
         clearCache: Effect.void,
         cacheSize: Effect.succeed(NonNegativeCount.make(0)),
       }),

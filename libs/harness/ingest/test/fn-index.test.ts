@@ -1,5 +1,5 @@
 import * as path from "node:path"
-import { fileURLToPath } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
 import {
@@ -8,12 +8,12 @@ import {
   validateUniqueSpanNames,
 } from "../src/fn-index.js"
 import { testHostIo } from "./helpers/test-host-io.js"
-// @ts-expect-error - JS plugin without ambient typings
-// oxlint-disable-next-line @nx/enforce-module-boundaries
-import syntaxBansPlugin from "../../../../tools/oxlint/syntax-bans.js"
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(__dirname, "../../../..")
+const syntaxBansPluginMod = await import(
+  pathToFileURL(path.resolve(repoRoot, "tools/oxlint/syntax-bans.js")).href
+)
+const syntaxBansPlugin = syntaxBansPluginMod.default
 
 describe("Effect.fn syntactic index", () => {
   it("extracts exported Effect.fn declarations and detects stub() bodies", () => {
@@ -606,6 +606,77 @@ describe("Effect.fn syntactic index", () => {
         arguments: [{ type: "ArrowFunctionExpression" }],
       })
       expect(reports).toHaveLength(6)
+    }
+
+    // 7. Rejects unscoped-effect-run namespace, computed-element, and destructuring bypasses
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = rule.create({
+        filename: "/repo/libs/sample/domain/src/index.ts",
+        sourceCode: {
+          text: "",
+          getText: (n: { name?: string; value?: string }) => n.name ?? n.value ?? "expr",
+        },
+        report: (r: { message: string }) => {
+          reports.push(r)
+        },
+      })
+      visitor.Program({ type: "Program", body: [] })
+      visitor.ImportDeclaration({
+        type: "ImportDeclaration",
+        importKind: "value",
+        source: { type: "Literal", value: "effect" },
+        specifiers: [{ type: "ImportNamespaceSpecifier", local: { type: "Identifier", name: "Fx" } }],
+      })
+
+      // Fx.Effect.runSync(...)
+      visitor.MemberExpression({
+        type: "MemberExpression",
+        computed: false,
+        object: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Fx" },
+          property: { type: "Identifier", name: "Effect" },
+        },
+        property: { type: "Identifier", name: "runSync" },
+      })
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain("unscoped-effect-run")
+
+      // Effect["runSync"](...)
+      visitor.MemberExpression({
+        type: "MemberExpression",
+        computed: true,
+        object: { type: "Identifier", name: "Effect" },
+        property: { type: "Literal", value: "runSync" },
+      })
+      expect(reports).toHaveLength(2)
+      expect(reports[1]?.message).toContain("unscoped-effect-run")
+
+      // const { runSync } = Effect; runSync(...)
+      visitor.VariableDeclarator({
+        type: "VariableDeclarator",
+        id: {
+          type: "ObjectPattern",
+          properties: [
+            {
+              type: "Property",
+              computed: false,
+              key: { type: "Identifier", name: "runSync" },
+              value: { type: "Identifier", name: "runSync" },
+            },
+          ],
+        },
+        init: { type: "Identifier", name: "Effect" },
+      })
+      visitor.CallExpression({
+        type: "CallExpression",
+        callee: { type: "Identifier", name: "runSync" },
+        arguments: [],
+      })
+      expect(reports).toHaveLength(3)
+      expect(reports[2]?.message).toContain("unscoped-effect-run")
     }
   })
 })

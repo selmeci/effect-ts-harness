@@ -1,6 +1,6 @@
 import { join, relative } from "node:path"
 import { NodeServices } from "@effect/platform-node"
-import { Cause, Data, Effect, Layer, Option, Schema } from "effect"
+import { Cause, Data, Effect, Layer, Option, Result, Schema } from "effect"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
 import {
@@ -84,12 +84,46 @@ const TierPackageJsonSchema = Schema.Struct({
   ),
 })
 const decodeTierPackageJson = Schema.decodeUnknownOption(Schema.fromJsonString(TierPackageJsonSchema))
+const ProjectJsonTagsSchema = Schema.Struct({
+  tags: Schema.optional(Schema.Array(Schema.String)),
+})
+const decodeProjectJsonTags = Schema.decodeUnknownOption(Schema.fromJsonString(ProjectJsonTagsSchema))
 
 const isBannedDrizzleDepName = (dep: string): boolean =>
   dep === "drizzle-orm" ||
   dep.startsWith("drizzle-orm/") ||
   dep === "drizzle-kit" ||
   dep.startsWith("drizzle-kit/")
+
+const readTextChecked = (
+  filePath: string,
+  relPath: string,
+  errors: Array<string>,
+): string | undefined =>
+  match(Result.try(() => nodeSyncHostIo.readTextSync(filePath)))
+    .with({ _tag: "Success" }, ({ success }) => success)
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      errors.push(
+        `[unreadable-workspace-file] ${relPath}: failed to read file (${failure instanceof Error ? failure.message : String(failure)})`,
+      )
+      return undefined
+    })
+    .exhaustive()
+
+const readdirChecked = (
+  dirPath: string,
+  relPath: string,
+  errors: Array<string>,
+) =>
+  match(Result.try(() => nodeSyncHostIo.readdirSync(dirPath)))
+    .with({ _tag: "Success" }, ({ success }) => success)
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      errors.push(
+        `[unreadable-workspace-dir] ${relPath}: failed to read directory (${failure instanceof Error ? failure.message : String(failure)})`,
+      )
+      return undefined
+    })
+    .exhaustive()
 
 export const collectHarnessTierTopologyViolationMessages = (
   repoRoot: string,
@@ -111,88 +145,123 @@ export const collectHarnessTierTopologyViolationMessages = (
     const manifestDecodeErrors: Array<string> = []
 
     if (nodeSyncHostIo.existsSync(rootPkgJsonPath)) {
-      const rawRoot = nodeSyncHostIo.readTextSync(rootPkgJsonPath)
-      match(decodeTierPackageJson(rawRoot))
-        .with({ _tag: "Some" }, ({ value }) => {
-          const allRootDeps = [
-            ...Object.keys(value.dependencies ?? {}),
-            ...Object.keys(value.devDependencies ?? {}),
-            ...Object.keys(value.peerDependencies ?? {}),
-            ...Object.keys(value.optionalDependencies ?? {}),
-          ]
-            .map((d) => d.trim())
-            .filter((d) => d.length > 0)
-          for (const dep of allRootDeps) {
-            if (isBannedDrizzleDepName(dep)) {
-              manifestDecodeErrors.push(
-                `[forbidden-core-dependency] package.json: Root package "${(value.name ?? "root").trim()}" declares banned Drizzle dependency "${dep}" in "package.json" — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator).`,
-              )
-            }
-          }
-        })
-        .with({ _tag: "None" }, () => {
-          manifestDecodeErrors.push(
-            `[invalid-package-manifest] package.json: failed to parse or validate package.json`,
-          )
-        })
-        .exhaustive()
-    }
-
-    const collectPackageDir = (pkgDir: string, defaultName: string, isServiceTier: boolean): void => {
-      const pkgJsonPath = join(pkgDir, "package.json")
-      if (nodeSyncHostIo.existsSync(pkgJsonPath)) {
-        const raw = nodeSyncHostIo.readTextSync(pkgJsonPath)
-        const relPkgPath = relative(repoRoot, pkgJsonPath).replace(/\\/g, "/")
-        match(decodeTierPackageJson(raw))
+      const rawRoot = readTextChecked(rootPkgJsonPath, "package.json", manifestDecodeErrors)
+      if (rawRoot !== undefined) {
+        match(decodeTierPackageJson(rawRoot))
           .with({ _tag: "Some" }, ({ value }) => {
-            const nonRuntimeDependencyNames = [
+            const allRootDeps = [
+              ...Object.keys(value.dependencies ?? {}),
               ...Object.keys(value.devDependencies ?? {}),
               ...Object.keys(value.peerDependencies ?? {}),
               ...Object.keys(value.optionalDependencies ?? {}),
             ]
               .map((d) => d.trim())
               .filter((d) => d.length > 0)
-              .map((d) => PackageDependencyName.make(d))
-            manifests.push({
-              manifestPath: PackageManifestPath.make(relPkgPath),
-              packageName: PackageManifestName.make((value.name ?? defaultName).trim()),
-              nxTags: (value.nx?.tags ?? [])
-                .map((t) => t.trim())
-                .filter((t) => t.length > 0)
-                .map((t) => NxTierTag.make(t)),
-              dependencyNames: Object.keys(value.dependencies ?? {})
-                .map((d) => d.trim())
-                .filter((d) => d.length > 0)
-                .map((d) => PackageDependencyName.make(d)),
-              nonRuntimeDependencyNames,
-            })
+            for (const dep of allRootDeps) {
+              if (isBannedDrizzleDepName(dep)) {
+                manifestDecodeErrors.push(
+                  `[forbidden-core-dependency] package.json: Root package "${(value.name ?? "root").trim()}" declares banned Drizzle dependency "${dep}" in "package.json" — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator).`,
+                )
+              }
+            }
           })
           .with({ _tag: "None" }, () => {
             manifestDecodeErrors.push(
-              `[invalid-package-manifest] ${relPkgPath}: failed to parse or validate package.json`,
+              `[invalid-package-manifest] package.json: failed to parse or validate package.json`,
             )
           })
           .exhaustive()
       }
-      if (nodeSyncHostIo.existsSync(join(pkgDir, "src"))) {
-        for (const absFile of collectWorkspaceTsFiles(join(pkgDir, "src"), nodeSyncHostIo)) {
-          const sourceItem: ServiceTierSourceInput = {
-            filePath: AstSourceFilePath.make(relative(repoRoot, absFile).replace(/\\/g, "/")),
-            content: AstSourceContent.make(nodeSyncHostIo.readTextSync(absFile)),
-          }
-          workspaceSourceFiles.push(sourceItem)
-          if (isServiceTier) {
-            serviceFiles.push(sourceItem)
+    }
+
+    const collectPackageDir = (pkgDir: string, defaultName: string, isServiceTier: boolean): void => {
+      const pkgJsonPath = join(pkgDir, "package.json")
+      const projectJsonPath = join(pkgDir, "project.json")
+      let projectJsonTags: ReadonlyArray<string> = []
+      if (nodeSyncHostIo.existsSync(projectJsonPath)) {
+        const relProjPath = relative(repoRoot, projectJsonPath).replace(/\\/g, "/")
+        const rawProj = readTextChecked(projectJsonPath, relProjPath, manifestDecodeErrors)
+        if (rawProj !== undefined) {
+          match(decodeProjectJsonTags(rawProj))
+            .with({ _tag: "Some" }, ({ value }) => {
+              projectJsonTags = value.tags ?? []
+            })
+            .with({ _tag: "None" }, () => {
+              manifestDecodeErrors.push(
+                `[invalid-project-manifest] ${relProjPath}: failed to parse or validate project.json`,
+              )
+            })
+            .exhaustive()
+        }
+      }
+      if (nodeSyncHostIo.existsSync(pkgJsonPath)) {
+        const relPkgPath = relative(repoRoot, pkgJsonPath).replace(/\\/g, "/")
+        const raw = readTextChecked(pkgJsonPath, relPkgPath, manifestDecodeErrors)
+        if (raw !== undefined) {
+          match(decodeTierPackageJson(raw))
+            .with({ _tag: "Some" }, ({ value }) => {
+              const nonRuntimeDependencyNames = Object.keys(value.devDependencies ?? {})
+                .map((d) => d.trim())
+                .filter((d) => d.length > 0)
+                .map((d) => PackageDependencyName.make(d))
+              const runtimeDependencyNames = [
+                ...Object.keys(value.dependencies ?? {}),
+                ...Object.keys(value.peerDependencies ?? {}),
+                ...Object.keys(value.optionalDependencies ?? {}),
+              ]
+                .map((d) => d.trim())
+                .filter((d) => d.length > 0)
+                .map((d) => PackageDependencyName.make(d))
+              const mergedTags = Array.from(
+                new Set(
+                  [...(value.nx?.tags ?? []), ...projectJsonTags]
+                    .map((t) => t.trim())
+                    .filter((t) => t.length > 0),
+                ),
+              ).map((t) => NxTierTag.make(t))
+              manifests.push({
+                manifestPath: PackageManifestPath.make(relPkgPath),
+                packageName: PackageManifestName.make((value.name ?? defaultName).trim()),
+                nxTags: mergedTags,
+                dependencyNames: runtimeDependencyNames,
+                nonRuntimeDependencyNames,
+              })
+            })
+            .with({ _tag: "None" }, () => {
+              manifestDecodeErrors.push(
+                `[invalid-package-manifest] ${relPkgPath}: failed to parse or validate package.json`,
+              )
+            })
+            .exhaustive()
+        }
+      }
+      for (const subDir of ["src", "test", "scripts"] as const) {
+        const subDirPath = join(pkgDir, subDir)
+        if (nodeSyncHostIo.existsSync(subDirPath)) {
+          for (const absFile of collectWorkspaceTsFiles(subDirPath, nodeSyncHostIo)) {
+            const relFile = relative(repoRoot, absFile).replace(/\\/g, "/")
+            const content = readTextChecked(absFile, relFile, manifestDecodeErrors)
+            if (content === undefined) continue
+            const sourceItem: ServiceTierSourceInput = {
+              filePath: AstSourceFilePath.make(relFile),
+              content: AstSourceContent.make(content),
+            }
+            workspaceSourceFiles.push(sourceItem)
+            if (isServiceTier && subDir === "src") {
+              serviceFiles.push(sourceItem)
+            }
           }
         }
       }
     }
 
     if (nodeSyncHostIo.existsSync(libsDir)) {
-      const scopes = nodeSyncHostIo.readdirSync(libsDir).filter((e) => e.isDirectory).map((e) => e.name)
+      const libEntries = readdirChecked(libsDir, "libs", manifestDecodeErrors)
+      const scopes = (libEntries ?? []).filter((e) => e.isDirectory).map((e) => e.name)
       for (const scope of scopes) {
         const scopeDir = join(libsDir, scope)
-        const tiers = nodeSyncHostIo.readdirSync(scopeDir).filter((e) => e.isDirectory).map((e) => e.name)
+        const scopeEntries = readdirChecked(scopeDir, `libs/${scope}`, manifestDecodeErrors)
+        const tiers = (scopeEntries ?? []).filter((e) => e.isDirectory).map((e) => e.name)
         for (const tier of tiers) {
           collectPackageDir(join(scopeDir, tier), `${scope}/${tier}`, tier === "service")
         }
@@ -200,7 +269,8 @@ export const collectHarnessTierTopologyViolationMessages = (
     }
 
     if (nodeSyncHostIo.existsSync(appsDir)) {
-      const appNames = nodeSyncHostIo.readdirSync(appsDir).filter((e) => e.isDirectory).map((e) => e.name)
+      const appEntries = readdirChecked(appsDir, "apps", manifestDecodeErrors)
+      const appNames = (appEntries ?? []).filter((e) => e.isDirectory).map((e) => e.name)
       for (const appName of appNames) {
         collectPackageDir(join(appsDir, appName), appName, false)
       }
@@ -235,10 +305,24 @@ export const runDeltaAstAndPluginGates = (
       })
     }
     if (deltaFiles.length === 0) return Option.none()
-    const astGateFiles = deltaFiles.map((relPath) => ({
-      filePath: AstSourceFilePath.make(relPath),
-      content: AstSourceContent.make(nodeSyncHostIo.readTextSync(join(repoRoot, relPath))),
-    }))
+    const astGateReadErrors: Array<string> = []
+    const astGateFiles: Array<{ readonly filePath: AstSourceFilePath; readonly content: AstSourceContent }> = []
+    for (const relPath of deltaFiles) {
+      const content = readTextChecked(join(repoRoot, relPath), relPath, astGateReadErrors)
+      if (content !== undefined) {
+        astGateFiles.push({
+          filePath: AstSourceFilePath.make(relPath),
+          content: AstSourceContent.make(content),
+        })
+      }
+    }
+    if (astGateReadErrors.length > 0) {
+      return Option.some({
+        exitCode: 1,
+        stdout: "",
+        stderr: `[GATE FAILURE] verify:ast-gates\n${astGateReadErrors.join("\n")}`,
+      })
+    }
     const astGateCacheLayer = makeAstGateCacheLayer({
       cacheFilePath: WorkspaceFilePath.make(AstGateCache.resolveCachePath(repoRoot)),
     }).pipe(Layer.provide(NodeServices.layer))
@@ -248,11 +332,33 @@ export const runDeltaAstAndPluginGates = (
     )
     const astFailResult = match(astExit)
       .with({ _tag: "Failure" }, ({ cause }) =>
-        Option.some<CliResult>({
-          exitCode: 1,
-          stdout: "",
-          stderr: `[GATE FAILURE] verify:ast-gates\n${Cause.pretty(cause)}`,
-        }),
+        match(Cause.findErrorOption(cause))
+          .with({ _tag: "Some" }, ({ value }) =>
+            match(value)
+              .with({ _tag: "WorkspaceFsError" }, (err) =>
+                Option.some<CliResult>({
+                  exitCode: 1,
+                  stdout: "",
+                  stderr: `[GATE FAILURE] verify:ast-gates\nFailed to read ${err.filePath}: ${err.reason}`,
+                }),
+              )
+              .with({ _tag: "AstGateEvaluationError" }, (err) =>
+                Option.some<CliResult>({
+                  exitCode: 1,
+                  stdout: "",
+                  stderr: `[GATE FAILURE] verify:ast-gates\n${err.reason}: ${err.message}`,
+                }),
+              )
+              .exhaustive(),
+          )
+          .with({ _tag: "None" }, () =>
+            Option.some<CliResult>({
+              exitCode: 1,
+              stdout: "",
+              stderr: `[GATE FAILURE] verify:ast-gates\n${Cause.pretty(cause)}`,
+            }),
+          )
+          .exhaustive(),
       )
       .with({ _tag: "Success" }, ({ value: astReport }) => {
         const enforcedAstViolations = astReport.violations.filter((v) => !v.file.startsWith("tools/"))

@@ -7,6 +7,7 @@ import {
   type DecideAlbumQuotaInput,
   type GreetInput,
   GreetingMessage,
+  MAX_PHOTOS_PER_ALBUM,
   type PhotoId,
 } from "@harness/sample-contract"
 import { AlbumCounterClient, PhotoRepo } from "@harness/sample-service"
@@ -18,7 +19,7 @@ export const greet = Effect.fn("Sample.greet")(function* (input: GreetInput) {
 export const decideAlbumQuota = Effect.fn("Album.decide")(function* (input: DecideAlbumQuotaInput) {
   return yield* match(input)
     .with(
-      { currentCount: P.when((c) => c >= 100) },
+      { currentCount: P.when((c) => c >= MAX_PHOTOS_PER_ALBUM) },
       ({ albumId, currentCount }) =>
         new AlbumQuotaExceededError({
           albumId,
@@ -33,8 +34,15 @@ export const uploadPhoto = Effect.fn("Sample.uploadPhoto")(function* (input: Cre
   const repo = yield* PhotoRepo
   const currentCount = yield* counter.getCount(input.albumId)
   yield* decideAlbumQuota({ albumId: input.albumId, currentCount })
-  yield* counter.increment(input.albumId)
-  return yield* repo.insert(input)
+  return yield* Effect.acquireUseRelease(
+    counter.increment(input.albumId),
+    () => repo.insert(input),
+    (_, exit) =>
+      match(exit)
+        .with({ _tag: "Success" }, () => Effect.void)
+        .with({ _tag: "Failure" }, () => counter.decrement(input.albumId).pipe(Effect.catch(() => Effect.void)))
+        .exhaustive(),
+  )
 })
 
 export const getPhotoById = Effect.fn("Sample.getPhotoById")(function* (id: PhotoId) {

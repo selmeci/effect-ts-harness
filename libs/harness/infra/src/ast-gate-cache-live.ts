@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto"
 import { NodeServices } from "@effect/platform-node"
 import {
   Duration,
@@ -14,11 +13,13 @@ import {
 } from "effect"
 import { match, P } from "ts-pattern"
 import {
+  AstGateEvaluationError,
   type AstGateEvaluationReport,
   type AstGateFileBatchInput,
   type AstGateFileEvaluator,
   AstGateViolationContract,
-  ContentSha256,
+  computeContentSha256,
+  type ContentSha256,
   ErrorReasonMessage,
   HARNESS_GATE_RULE_VERSION,
   inferAstGatePackageTagFromPath,
@@ -29,6 +30,7 @@ import {
   WorkspaceFsOperation,
 } from "@harness/contract"
 import { AstGateCachePort, type AstGateCachePortShape } from "@harness/service"
+import { toReadError, toWriteError } from "./cache-helpers.js"
 
 const AST_GATE_SCOPED_CACHE_CAPACITY = 2048
 
@@ -58,39 +60,6 @@ interface PendingAstEvaluation {
   readonly contentSha256: ContentSha256
   readonly evaluateFile: AstGateFileEvaluator
   readonly waiters: number
-}
-
-const computeContentSha256 = (content: string): ContentSha256 =>
-  ContentSha256.make(createHash("sha256").update(content, "utf8").digest("hex"))
-
-const toReadError = (filePath: WorkspaceFilePath, err: unknown): WorkspaceFsError => {
-  if (err instanceof WorkspaceFsError) {
-    return err
-  }
-  const message =
-    err instanceof Error && err.message.trim().length > 0
-      ? err.message.trim()
-      : "Failed to read AST gate cache"
-  return new WorkspaceFsError({
-    filePath,
-    operation: WorkspaceFsOperation.make("read"),
-    reason: ErrorReasonMessage.make(message),
-  })
-}
-
-const toWriteError = (filePath: WorkspaceFilePath, err: unknown): WorkspaceFsError => {
-  if (err instanceof WorkspaceFsError) {
-    return err
-  }
-  const message =
-    err instanceof Error && err.message.trim().length > 0
-      ? err.message.trim()
-      : "Failed to persist AST gate cache"
-  return new WorkspaceFsError({
-    filePath,
-    operation: WorkspaceFsOperation.make("write"),
-    reason: ErrorReasonMessage.make(message),
-  })
 }
 
 /**
@@ -196,7 +165,7 @@ const makeAstGateCacheLayer = (options?: {
       const scopedCache = yield* ScopedCache.makeWith<
         string,
         PersistedAstCacheEntry,
-        WorkspaceFsError
+        WorkspaceFsError | AstGateEvaluationError
       >({
         capacity: AST_GATE_SCOPED_CACHE_CAPACITY,
         timeToLive: (exit) =>
@@ -217,7 +186,18 @@ const makeAstGateCacheLayer = (options?: {
                 ),
               })
             }
-            const contractViolations = pending.evaluateFile(pending.file)
+            const contractViolations = yield* Effect.try({
+              try: () => pending.evaluateFile(pending.file),
+              catch: (err) =>
+                new AstGateEvaluationError({
+                  filePath: pending.file.filePath,
+                  reason: ErrorReasonMessage.make(
+                    err instanceof Error && err.message.trim().length > 0
+                      ? err.message.trim()
+                      : "AST gate evaluator failed",
+                  ),
+                }),
+            })
             return {
               contentSha256: pending.contentSha256,
               ruleVersion: HARNESS_GATE_RULE_VERSION,
@@ -229,7 +209,8 @@ const makeAstGateCacheLayer = (options?: {
       const evaluateBatch = Effect.fn("AstGateCachePort.evaluateBatch")(function* (
         files: ReadonlyArray<AstGateFileBatchInput>,
         evaluateFile: AstGateFileEvaluator,
-      ): Effect.fn.Return<AstGateEvaluationReport, WorkspaceFsError> {
+        evaluatorId?: string,
+      ): Effect.fn.Return<AstGateEvaluationReport, WorkspaceFsError | AstGateEvaluationError> {
         const snapshot = yield* SynchronizedRef.modifyEffect(stateRef, (state) =>
           ensureLoaded(state).pipe(Effect.map((loaded) => [loaded, loaded] as const)),
         )
@@ -241,14 +222,25 @@ const makeAstGateCacheLayer = (options?: {
           readonly contentSha256: ContentSha256
         }
 
+        const resolvedEvaluatorId =
+          evaluatorId !== undefined && evaluatorId.trim().length > 0
+            ? evaluatorId.trim()
+            : "default"
         const hitMap = new Map<string, PersistedAstCacheEntry>()
         const misses: Array<PreparedMiss> = []
         const orderedKeys: Array<string> = []
+        const seenBatchEntries = new Set<string>()
         let cacheHitCount = 0
 
         for (const file of files) {
           const pkgTag = file.packageTag ?? inferAstGatePackageTagFromPath(file.filePath)
-          const cacheKey = `${file.filePath}\0${pkgTag}`
+          const dedupeKey = `${file.filePath}\0${pkgTag}`
+          if (seenBatchEntries.has(dedupeKey)) {
+            continue
+          }
+          seenBatchEntries.add(dedupeKey)
+
+          const cacheKey = `${dedupeKey}\0${HARNESS_GATE_RULE_VERSION}\0${resolvedEvaluatorId}`
           orderedKeys.push(cacheKey)
           const contentSha256 = computeContentSha256(file.content)
           const existing = snapshot.entries.get(cacheKey)
@@ -261,7 +253,7 @@ const makeAstGateCacheLayer = (options?: {
             cacheHitCount += 1
             hitMap.set(cacheKey, existing)
           } else {
-            const scopedKey = `${cacheKey}\0${contentSha256}\0${HARNESS_GATE_RULE_VERSION}`
+            const scopedKey = `${cacheKey}\0${contentSha256}`
             misses.push({ cacheKey, scopedKey, file, contentSha256 })
           }
         }
@@ -271,8 +263,8 @@ const makeAstGateCacheLayer = (options?: {
           const computedPairs = yield* Effect.forEach(
             misses,
             (miss) =>
-              Effect.gen(function* () {
-                yield* Ref.update(pendingEvalRef, (pending) => {
+              Effect.acquireUseRelease(
+                Ref.update(pendingEvalRef, (pending) => {
                   const next = new Map(pending)
                   const prev = next.get(miss.scopedKey)
                   next.set(miss.scopedKey, {
@@ -282,26 +274,29 @@ const makeAstGateCacheLayer = (options?: {
                     waiters: (prev?.waiters ?? 0) + 1,
                   })
                   return next
-                })
-                const entry = yield* ScopedCache.get(scopedCache, miss.scopedKey).pipe(
-                  Effect.mapError((err) =>
-                    err instanceof WorkspaceFsError ? err : toWriteError(miss.file.filePath, err),
-                  ),
-                  Effect.ensuring(
-                    Ref.update(pendingEvalRef, (pending) => {
-                      const next = new Map(pending)
-                      const prev = next.get(miss.scopedKey)
-                      if (prev === undefined || prev.waiters <= 1) {
-                        next.delete(miss.scopedKey)
-                      } else {
-                        next.set(miss.scopedKey, { ...prev, waiters: prev.waiters - 1 })
+                }),
+                () =>
+                  ScopedCache.get(scopedCache, miss.scopedKey).pipe(
+                    Effect.mapError((err) => {
+                      if (err instanceof WorkspaceFsError || err instanceof AstGateEvaluationError) {
+                        return err
                       }
-                      return next
+                      return toWriteError(miss.file.filePath, err)
                     }),
+                    Effect.map((entry) => [miss.cacheKey, entry] as const),
                   ),
-                )
-                return [miss.cacheKey, entry] as const
-              }),
+                () =>
+                  Ref.update(pendingEvalRef, (pending) => {
+                    const next = new Map(pending)
+                    const prev = next.get(miss.scopedKey)
+                    if (prev === undefined || prev.waiters <= 1) {
+                      next.delete(miss.scopedKey)
+                    } else {
+                      next.set(miss.scopedKey, { ...prev, waiters: prev.waiters - 1 })
+                    }
+                    return next
+                  }),
+              ),
             { concurrency: "unbounded" },
           )
 
@@ -326,7 +321,13 @@ const makeAstGateCacheLayer = (options?: {
                 }
               }
               if (dirty) {
-                yield* persistEntries(nextEntries)
+                yield* persistEntries(nextEntries).pipe(
+                  Effect.catchTag("WorkspaceFsError", (err) =>
+                    Effect.logWarning(
+                      `Failed to persist AST gate cache at '${err.filePath}': ${err.reason}`,
+                    ),
+                  ),
+                )
               }
               return [undefined, { loaded: true, entries: nextEntries }] as const
             }),
@@ -343,7 +344,7 @@ const makeAstGateCacheLayer = (options?: {
 
         return makeAstGateEvaluationReport({
           violations,
-          inspectedFileCount: NonNegativeCount.make(files.length),
+          inspectedFileCount: NonNegativeCount.make(orderedKeys.length),
           cacheHitCount: NonNegativeCount.make(cacheHitCount),
         })
       })

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { dirname, join, resolve } from "node:path"
-import { Schema } from "effect"
+import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import { nodeSyncHostIo } from "@harness/infra"
 
@@ -50,36 +50,65 @@ const resolveGitExcludeFile = (repoRoot: string): GitExcludeResolution => {
     ["rev-parse", "--git-path", "info/exclude"],
     { cwd: repoRoot },
   )
-  const trimmed = res.stdout.trim()
-  if (res.exitCode === 0 && trimmed.length > 0) {
-    return { ok: true, path: resolve(repoRoot, trimmed) }
+  const resolved = match(res)
+    .with({ _tag: "Exited" }, (exited) => {
+      const trimmed = exited.stdout.trim()
+      if (exited.exitCode === 0 && trimmed.length > 0) {
+        return { ok: true as const, path: resolve(repoRoot, trimmed) }
+      }
+      return {
+        ok: false as const,
+        detail: exited.stderr.trim() || trimmed || `git rev-parse exited with ${exited.exitCode}`,
+      }
+    })
+    .with({ _tag: "TimedOut" }, () => ({
+      ok: false as const,
+      detail: "git rev-parse timed out",
+    }))
+    .with({ _tag: "Signaled" }, (s) => ({
+      ok: false as const,
+      detail: `git rev-parse terminated by signal ${s.signal}`,
+    }))
+    .with({ _tag: "SpawnFailed" }, (s) => ({
+      ok: false as const,
+      detail: s.spawnError,
+    }))
+    .exhaustive()
+  if (resolved.ok) {
+    return resolved
   }
   if (hasGit) {
     return {
       ok: false,
-      error: `Failed to resolve git info/exclude in '${repoRoot}': ${res.stderr.trim() || res.stdout.trim() || "git rev-parse failed"}`,
+      error: `Failed to resolve git info/exclude in '${repoRoot}': ${resolved.detail}`,
     }
   }
   return { ok: true, path: join(repoRoot, ".git", "info", "exclude") }
 }
 
-export const makeScenarioPaths = (repoRoot: string): ScenarioPaths => {
+export type MakeScenarioPathsResult =
+  | { readonly ok: true; readonly paths: ScenarioPaths }
+  | { readonly ok: false; readonly error: string }
+
+export const makeScenarioPaths = (repoRoot: string): MakeScenarioPathsResult => {
   const runsDir = join(repoRoot, ".harness", "scenario-runs")
   const excludeRes = resolveGitExcludeFile(repoRoot)
-  const gitExcludeFile = match(excludeRes)
-    .with({ ok: true }, ({ path }) => path)
-    .with({ ok: false }, () => join(repoRoot, ".git", "info", "exclude"))
+  return match(excludeRes)
+    .with({ ok: false }, ({ error }) => ({ ok: false as const, error }))
+    .with({ ok: true }, ({ path: gitExcludeFile }) => ({
+      ok: true as const,
+      paths: {
+        repoRoot,
+        homeDir: process.env.HOME ?? "/root",
+        scenariosDir: join(repoRoot, "scenarios"),
+        runsDir,
+        stashedScenariosDir: join(runsDir, "_stashed-scenarios"),
+        currentPointer: join(runsDir, "current.json"),
+        lastPointer: join(runsDir, "last.json"),
+        gitExcludeFile,
+      },
+    }))
     .exhaustive()
-  return {
-    repoRoot,
-    homeDir: process.env.HOME ?? "/root",
-    scenariosDir: join(repoRoot, "scenarios"),
-    runsDir,
-    stashedScenariosDir: join(runsDir, "_stashed-scenarios"),
-    currentPointer: join(runsDir, "current.json"),
-    lastPointer: join(runsDir, "last.json"),
-    gitExcludeFile,
-  }
 }
 
 export const resolveStateDir = (repoRoot: string): string => {
@@ -161,30 +190,58 @@ export const hideScenariosFromWorkspace = (paths: ScenarioPaths): ScenarioFsOutc
       error: `Scenario stash collision: both '${paths.scenariosDir}' and '${paths.stashedScenariosDir}' exist; refusing to clobber stashed scenarios.`,
     }
   }
+  let didRename = false
   if (
     nodeSyncHostIo.existsSync(paths.scenariosDir) &&
     !nodeSyncHostIo.existsSync(paths.stashedScenariosDir)
   ) {
     nodeSyncHostIo.renameSync(paths.scenariosDir, paths.stashedScenariosDir)
+    didRename = true
   }
-  const hasGit = nodeSyncHostIo.existsSync(join(paths.repoRoot, ".git"))
-  const excludeRes = resolveGitExcludeFile(paths.repoRoot)
-  if (!excludeRes.ok) {
-    return { ok: false, error: excludeRes.error }
-  }
-  const excludePath = excludeRes.path
-  if (hasGit && !nodeSyncHostIo.existsSync(excludePath)) {
-    return { ok: false, error: `Git exclude file not found at '${excludePath}'` }
-  }
-  if (nodeSyncHostIo.existsSync(excludePath)) {
-    const raw = nodeSyncHostIo.readTextSync(excludePath)
-    if (!raw.includes(EXCLUDE_START)) {
-      const suffix = `${raw.endsWith("\n") ? "" : "\n"}${EXCLUDE_START}\n/scenarios/\n/tools/scenario/\n${EXCLUDE_END}\n`
-      nodeSyncHostIo.writeTextSync(excludePath, raw + suffix)
+  const rollbackRename = (): void => {
+    if (
+      didRename &&
+      nodeSyncHostIo.existsSync(paths.stashedScenariosDir) &&
+      !nodeSyncHostIo.existsSync(paths.scenariosDir)
+    ) {
+      nodeSyncHostIo.renameSync(paths.stashedScenariosDir, paths.scenariosDir)
     }
   }
-  refreshVerifyStampHash(paths.repoRoot)
-  return { ok: true }
+  const postRename = Result.try(() => {
+    const hasGit = nodeSyncHostIo.existsSync(join(paths.repoRoot, ".git"))
+    const excludeRes = resolveGitExcludeFile(paths.repoRoot)
+    if (!excludeRes.ok) {
+      return { ok: false as const, error: excludeRes.error }
+    }
+    const excludePath = excludeRes.path
+    if (hasGit && !nodeSyncHostIo.existsSync(excludePath)) {
+      return { ok: false as const, error: `Git exclude file not found at '${excludePath}'` }
+    }
+    if (nodeSyncHostIo.existsSync(excludePath)) {
+      const raw = nodeSyncHostIo.readTextSync(excludePath)
+      if (!raw.includes(EXCLUDE_START)) {
+        const suffix = `${raw.endsWith("\n") ? "" : "\n"}${EXCLUDE_START}\n/scenarios/\n/tools/scenario/\n${EXCLUDE_END}\n`
+        nodeSyncHostIo.writeTextSync(excludePath, raw + suffix)
+      }
+    }
+    refreshVerifyStampHash(paths.repoRoot)
+    return { ok: true as const }
+  })
+  return match(postRename)
+    .with({ _tag: "Success" }, ({ success }) => {
+      if (!success.ok) {
+        rollbackRename()
+      }
+      return success
+    })
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      rollbackRename()
+      return {
+        ok: false as const,
+        error: `Failed to hide scenarios from workspace: ${failure instanceof Error ? failure.message : String(failure)}`,
+      }
+    })
+    .exhaustive()
 }
 
 const mergeRestoreWithoutClobber = (

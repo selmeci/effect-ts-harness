@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { NodeServices } from "@effect/platform-node"
 import { describe, expect, it } from "@effect/vitest"
 import { Cause, Effect, Fiber, Layer, Option } from "effect"
+import { match } from "ts-pattern"
 import {
   ActiveMutantId,
   AstSourceContent,
@@ -13,7 +14,11 @@ import {
   DecisionCacheKey,
   DecisionCachePayloadJson,
   DecisionCacheTtlMillis,
+  EnclosingSymbolName,
+  GateRuleId,
+  GateViolationMessage,
   HARNESS_GATE_RULE_VERSION,
+  SourceLineNumber,
   SubprocessArg,
   SubprocessCommand,
   SubprocessMaxBufferBytes,
@@ -45,6 +50,8 @@ import {
   makeWorkspaceFsLayer,
   nodeSyncHostIo,
   queryUnixSocketLine,
+  queryUnixSocketLineDetailed,
+  resolveAstGateCachePath,
   resolveHarnessDaemonSocketPath,
   startScopedUnixSocketDaemon,
   UnixSocketDaemonLive,
@@ -318,52 +325,78 @@ describe("@harness/infra live adapters", () => {
   it.effect("F-4.2: nodeSyncHostIo.execFileSync & spawnDetached handle normal, trimmed, missing, timedOut, and invalid inputs safely", () =>
     Effect.sync(() => {
       const okRes = nodeSyncHostIo.execFileSync(`  ${process.execPath}  `, ["-e", "process.stdout.write('trimmed')"])
-      expect(okRes.exitCode).toBe(0)
-      expect(okRes.stdout).toBe("trimmed")
-      expect(okRes.signal).toBeUndefined()
+      match(okRes)
+        .with({ _tag: "Exited" }, (exited) => {
+          expect(exited.exitCode).toBe(0)
+          expect(exited.stdout).toBe("trimmed")
+        })
+        .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => {
+          expect.unreachable("Expected Exited")
+        })
+        .exhaustive()
       expect("signal" in okRes).toBe(false)
 
       const missingRes = nodeSyncHostIo.execFileSync("definitely-nonexistent-binary-xyz-42", [])
-      expect(missingRes.exitCode).toBe(-1)
-      expect(missingRes.spawnError).toBeDefined()
-      expect(missingRes.timedOut).toBe(false)
+      match(missingRes)
+        .with({ _tag: "SpawnFailed" }, (failed) => {
+          expect(failed.spawnError.length).toBeGreaterThan(0)
+        })
+        .with({ _tag: "Exited" }, { _tag: "TimedOut" }, { _tag: "Signaled" }, () => {
+          expect.unreachable("Expected SpawnFailed")
+        })
+        .exhaustive()
 
       const timeoutRes = nodeSyncHostIo.execFileSync(
         process.execPath,
         ["-e", "setTimeout(() => {}, 5000)"],
         { timeoutMs: 50 },
       )
-      expect(timeoutRes.exitCode).toBe(-1)
-      expect(timeoutRes.timedOut).toBe(true)
+      expect(timeoutRes._tag).toBe("TimedOut")
 
       const badCmd = nodeSyncHostIo.execFileSync("node\0bad", [])
-      expect(badCmd.exitCode).toBe(-1)
-      expect(badCmd.spawnError).toBeDefined()
+      expect(badCmd._tag).toBe("SpawnFailed")
 
       const badArg = nodeSyncHostIo.execFileSync(process.execPath, ["arg\0bad"])
-      expect(badArg.exitCode).toBe(-1)
-      expect(badArg.spawnError).toBeDefined()
+      expect(badArg._tag).toBe("SpawnFailed")
 
       const badCwd = nodeSyncHostIo.execFileSync(process.execPath, ["-e", "0"], { cwd: "/tmp/bad\0cwd" })
-      expect(badCwd.exitCode).toBe(-1)
-      expect(badCwd.spawnError).toBeDefined()
+      expect(badCwd._tag).toBe("SpawnFailed")
 
       const emptyCmd = nodeSyncHostIo.execFileSync("   ", [])
-      expect(emptyCmd.exitCode).toBe(-1)
-      expect(emptyCmd.spawnError).toBeDefined()
+      expect(emptyCmd._tag).toBe("SpawnFailed")
 
       const detachedInvalid = nodeSyncHostIo.spawnDetached("  ", [])
-      expect(detachedInvalid.spawnError).toBeDefined()
+      expect(detachedInvalid._tag).toBe("SpawnFailed")
 
       const wsCwdExec = nodeSyncHostIo.execFileSync(process.execPath, ["-e", "0"], { cwd: "   " })
-      expect(wsCwdExec.exitCode).toBe(-1)
-      expect(wsCwdExec.spawnError).toBe("Subprocess cwd must not be empty")
+      match(wsCwdExec)
+        .with({ _tag: "SpawnFailed" }, (failed) => {
+          expect(failed.spawnError).toBe("Subprocess cwd must not be empty")
+        })
+        .with({ _tag: "Exited" }, { _tag: "TimedOut" }, { _tag: "Signaled" }, () => {
+          expect.unreachable("Expected SpawnFailed")
+        })
+        .exhaustive()
 
       const wsCwdDetached = nodeSyncHostIo.spawnDetached(process.execPath, ["-e", "0"], { cwd: "   " })
-      expect(wsCwdDetached.spawnError).toBe("Subprocess cwd must not be empty")
+      match(wsCwdDetached)
+        .with({ _tag: "SpawnFailed" }, (failed) => {
+          expect(failed.spawnError).toBe("Subprocess cwd must not be empty")
+        })
+        .with({ _tag: "Spawned" }, () => {
+          expect.unreachable("Expected SpawnFailed")
+        })
+        .exhaustive()
 
       const detachedMissing = nodeSyncHostIo.spawnDetached("definitely-nonexistent-binary-xyz-42", [])
-      expect(typeof detachedMissing.spawnError === "string" || typeof detachedMissing.pid === "number").toBe(true)
+      match(detachedMissing)
+        .with({ _tag: "SpawnFailed" }, (failed) => {
+          expect(failed.errorCode).toBe("ENOENT")
+        })
+        .with({ _tag: "Spawned" }, () => {
+          expect.unreachable("Expected SpawnFailed")
+        })
+        .exhaustive()
     }),
   )
 
@@ -547,25 +580,22 @@ describe("@harness/infra live adapters", () => {
         const astLayer = makeAstGateCacheLayer({ cacheFilePath: unwritableAstPath }).pipe(
           Layer.provide(NodeServices.layer),
         )
-        const [evalErr, astSize] = yield* Effect.gen(function* () {
+        const [evalReport, astSize] = yield* Effect.gen(function* () {
           const cache = yield* AstGateCachePort
-          const err = yield* cache
-            .evaluateBatch(
-              [
-                {
-                  filePath: AstSourceFilePath.make("libs/sample/domain/src/a.ts"),
-                  content: AstSourceContent.make("export const a = 1\n"),
-                },
-              ],
-              () => [],
-            )
-            .pipe(Effect.flip)
+          const report = yield* cache.evaluateBatch(
+            [
+              {
+                filePath: AstSourceFilePath.make("libs/sample/domain/src/a.ts"),
+                content: AstSourceContent.make("export const a = 1\n"),
+              },
+            ],
+            () => [],
+          )
           const size = yield* cache.cacheSize
-          return [err, size] as const
+          return [report, size] as const
         }).pipe(Effect.provide(astLayer))
-        expect(evalErr._tag).toBe("WorkspaceFsError")
-        expect(evalErr.operation).toBe("write")
-        expect(astSize).toBe(0)
+        expect(evalReport.verdict).toBe("clean")
+        expect(astSize).toBe(1)
       }).pipe(
         Effect.ensuring(
           Effect.sync(() => {
@@ -587,7 +617,7 @@ describe("@harness/infra live adapters", () => {
         })
         .pipe(Effect.flip)
       expect(spawnErr.failureKind).toBe("spawn-error")
-      expect(spawnErr.exitCode).toBe(-1)
+      expect(spawnErr.exitCode).toBeUndefined()
 
       const timeoutErr = yield* runner
         .exec({
@@ -597,7 +627,7 @@ describe("@harness/infra live adapters", () => {
         })
         .pipe(Effect.flip)
       expect(timeoutErr.failureKind).toBe("timeout")
-      expect(timeoutErr.exitCode).toBe(-1)
+      expect(timeoutErr.exitCode).toBeUndefined()
 
       const maxBufErr = yield* runner
         .exec({
@@ -610,7 +640,7 @@ describe("@harness/infra live adapters", () => {
         })
         .pipe(Effect.flip)
       expect(maxBufErr.failureKind).toBe("max-buffer")
-      expect(maxBufErr.exitCode).toBe(-1)
+      expect(maxBufErr.exitCode).toBeUndefined()
 
       const invalidArgErr = yield* runner
         .exec({
@@ -776,13 +806,21 @@ describe("@harness/infra live adapters", () => {
     ),
   )
 
-  it.live("AstGateCacheLive does not negative-cache evaluateFile defects across subsequent evaluateBatch calls", () =>
+  it.live("AstGateCacheLive does not negative-cache evaluateFile failures across subsequent evaluateBatch calls", () =>
     Effect.gen(function* () {
       const cache = yield* AstGateCachePort
       const batch = [{ filePath: AstSourceFilePath.make("libs/sample/domain/src/retry.ts"), content: AstSourceContent.make("export const r = 1\n") }]
       let calls = 0
       const failExit = yield* Effect.exit(cache.evaluateBatch(batch, () => { calls += 1; throw new Error("transient-boom") }))
-      expect(failExit._tag === "Failure" && Cause.hasDies(failExit.cause)).toBe(true)
+      match(failExit)
+        .with({ _tag: "Failure" }, ({ cause }) => {
+          const failure = Option.getOrNull(Cause.findErrorOption(cause))
+          expect(failure?._tag).toBe("AstGateEvaluationError")
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("Expected AstGateEvaluationError")
+        })
+        .exhaustive()
       const okReport = yield* cache.evaluateBatch(batch, () => { calls += 1; return [] })
       expect([okReport.verdict, okReport.cacheHitCount, calls]).toEqual(["clean", 0, 2])
     }).pipe(Effect.provide(AstGateCacheLive)),
@@ -797,4 +835,159 @@ describe("@harness/infra live adapters", () => {
       yield* Fiber.interrupt(leader)
       expect(yield* cache.lookupOrCompute({ key, ttlMillis: ttl, compute: Effect.succeed(DecisionCachePayloadJson.make('{"v":2}')) })).toBe('{"v":2}')
     }).pipe(Effect.provide(DecisionCacheLive)))
+
+  it.effect("nodeSyncHostIo.spawnDetached detects non-executable file (EACCES) synchronously", () =>
+    withTempDir((dir) =>
+      Effect.sync(() => {
+        const scriptPath = join(dir, "non-exec.sh")
+        writeFileSync(scriptPath, "#!/bin/sh\necho hi\n", "utf8")
+        chmodSync(scriptPath, 0o644)
+        const res = nodeSyncHostIo.spawnDetached(scriptPath, [])
+        match(res)
+          .with({ _tag: "SpawnFailed" }, (failed) => {
+            expect(failed.errorCode).toBe("EACCES")
+          })
+          .with({ _tag: "Spawned" }, () => {
+            expect.unreachable("Expected EACCES SpawnFailed")
+          })
+          .exhaustive()
+      }),
+    ),
+  )
+
+  it.live("AstGateCacheLive deduplicates batch entries, isolates evaluatorId, and resolves HARNESS_STATE_DIR", () =>
+    Effect.gen(function* () {
+      expect(
+        resolveAstGateCachePath("/repo", { HARNESS_STATE_DIR: "/custom/state" }),
+      ).toBe("/custom/state/cache/ast-gates-v1.json")
+      expect(
+        resolveAstGateCachePath("/repo", { HARNESS_WORKTREE_ID: "wt-1" }),
+      ).toBe("/repo/.harness/worktrees/wt-1/cache/ast-gates-v1.json")
+
+      const cache = yield* AstGateCachePort
+      const dupFile = {
+        filePath: AstSourceFilePath.make("libs/sample/domain/src/dup.ts"),
+        content: AstSourceContent.make("export const d = 1\n"),
+      }
+      let evalCalls = 0
+      const report1 = yield* cache.evaluateBatch(
+        [dupFile, dupFile],
+        (file) => {
+          evalCalls += 1
+          return [
+            {
+              category: "syntax-bans",
+              rule: GateRuleId.make("test-rule"),
+              message: GateViolationMessage.make("violation"),
+              file: file.filePath,
+              line: SourceLineNumber.make(1),
+              enclosingSymbol: EnclosingSymbolName.make("d"),
+            },
+          ]
+        },
+        "eval-a",
+      )
+      expect(evalCalls).toBe(1)
+      expect(report1.inspectedFileCount).toBe(1)
+      expect(report1.violations).toHaveLength(1)
+
+      const report2 = yield* cache.evaluateBatch([dupFile], () => {
+        evalCalls += 1
+        return []
+      }, "eval-b")
+      expect(evalCalls).toBe(2)
+      expect(report2.verdict).toBe("clean")
+    }).pipe(Effect.provide(AstGateCacheLive)),
+  )
+
+  it.live("DecisionCacheLive coalesces retry across followers when leader fails", () =>
+    Effect.gen(function* () {
+      const cache = yield* DecisionCachePort
+      const key = DecisionCacheKey.make("coalesce-retry-1")
+      const ttl = DecisionCacheTtlMillis.make(60_000)
+      let computeCalls = 0
+
+      const leaderEff = cache
+        .lookupOrCompute({
+          key,
+          ttlMillis: ttl,
+          compute: Effect.sleep("25 millis").pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                computeCalls += 1
+              }),
+            ),
+            Effect.andThen(Effect.fail("leader-failed")),
+          ),
+        })
+        .pipe(Effect.exit)
+
+      const followerEff = Effect.sleep("5 millis").pipe(
+        Effect.andThen(
+          cache.lookupOrCompute({
+            key,
+            ttlMillis: ttl,
+            compute: Effect.sleep("15 millis").pipe(
+              Effect.andThen(
+                Effect.sync(() => {
+                  computeCalls += 1
+                  return DecisionCachePayloadJson.make('{"ok":true}')
+                }),
+              ),
+            ),
+          }),
+        ),
+        Effect.exit,
+      )
+
+      const [leaderExit, f1Exit, f2Exit] = yield* Effect.all(
+        [leaderEff, followerEff, followerEff],
+        { concurrency: "unbounded" },
+      )
+      match(leaderExit)
+        .with({ _tag: "Failure" }, ({ cause }) => {
+          expect(Option.getOrNull(Cause.findErrorOption(cause))).toBe("leader-failed")
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("Expected leader to fail")
+        })
+        .exhaustive()
+      expect(f1Exit._tag).toBe("Success")
+      expect(f2Exit._tag).toBe("Success")
+      expect(computeCalls).toBe(2)
+    }).pipe(Effect.provide(DecisionCacheLive)),
+  )
+
+  it.live("UnixSocketDaemonLive refuses non-socket with reasonKind not-a-socket and queryUnixSocketLineDetailed reports reasons", () =>
+    withTempDir((dir) =>
+      Effect.gen(function* () {
+        const repoRoot = WorkspaceFilePath.make(dir)
+        const regularFile = DaemonSocketPath.make(join(dir, "not-a-socket.sock"))
+        writeFileSync(regularFile, "plain-file", "utf8")
+
+        const nonSocketErr = yield* Effect.scoped(
+          startScopedUnixSocketDaemon(repoRoot, { socketPathOverride: regularFile }),
+        ).pipe(
+          Effect.provide(UnixSocketDaemonLive),
+          Effect.flip,
+        )
+        expect(nonSocketErr._tag).toBe("DaemonServerError")
+        expect(nonSocketErr.reasonKind).toBe("not-a-socket")
+
+        const missingQuery = yield* queryUnixSocketLineDetailed(
+          join(dir, "missing.sock"),
+          "ping",
+          200,
+        )
+        match(missingQuery)
+          .with({ _tag: "Unavailable" }, (unavail) => {
+            expect(unavail.reason).toBe("missing-or-refused")
+          })
+          .with({ _tag: "Reply" }, () => {
+            expect.unreachable("Expected Unavailable")
+          })
+          .exhaustive()
+      }),
+    ),
+  )
 })

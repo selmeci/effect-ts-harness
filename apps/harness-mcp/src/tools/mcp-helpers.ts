@@ -195,6 +195,7 @@ const selectSnapshotPath = (
 export interface GraphResolutionStatus {
   readonly graph: HarnessGraph
   readonly degraded: boolean
+  readonly degradedReason?: string | undefined
   readonly evaluationError?: string | undefined
 }
 
@@ -208,6 +209,8 @@ export const resolveGraphWithStatus = (
   return Effect.gen(function* () {
     const root = options?.repoRoot ?? resolveDefaultRepoRoot(args, options)
     let snapshotPath = options?.snapshotPath
+    let stalenessDegradedReason: string | undefined = undefined
+    let stalenessEvaluationError: string | undefined = undefined
     if (!snapshotPath) {
       const verifySnap = path.join(root, ".harness", "graph-snapshot.json")
       const planSnap = path.join(root, ".harness", "plan-graph-snapshot.json")
@@ -216,34 +219,53 @@ export const resolveGraphWithStatus = (
       if (verifyExists) {
         const recordedMeta = readGraphHeadMeta(root, nodeSyncHostIo)
         const headState = resolveGitHeadState(root, nodeSyncHostIo)
-        if (
-          recordedMeta !== null &&
-          headState.headSha !== null &&
-          recordedMeta.headSha !== headState.headSha
-        ) {
-          const freshGraph = yield* extractWorkspaceTypeAwareGraph(root, nodeSyncHostIo)
-          saveGraphSnapshot(freshGraph, verifySnap, nodeSyncHostIo)
-          writeGraphHeadMeta(root, nodeSyncHostIo, headState)
-          return { graph: freshGraph, degraded: false }
+        if (recordedMeta !== null) {
+          if (headState.headSha === null) {
+            stalenessDegradedReason = "git-head-unavailable"
+            stalenessEvaluationError =
+              "Git HEAD SHA is unavailable; cannot verify graph snapshot freshness"
+          }
+          if (headState.headSha !== null && recordedMeta.headSha !== headState.headSha) {
+            const freshGraph = yield* extractWorkspaceTypeAwareGraph(root, nodeSyncHostIo)
+            saveGraphSnapshot(freshGraph, verifySnap, nodeSyncHostIo)
+            writeGraphHeadMeta(root, nodeSyncHostIo, headState)
+            return { graph: freshGraph, degraded: false }
+          }
         }
       }
       snapshotPath = selectSnapshotPath(root, verifySnap, planSnap, verifyExists, planExists)
     }
     if (snapshotPath && nodeSyncHostIo.existsSync(snapshotPath)) {
       return yield* loadGraphSnapshotEffect(snapshotPath, nodeSyncHostIo).pipe(
-        Effect.map((graph): GraphResolutionStatus => ({ graph, degraded: false })),
+        Effect.map(
+          (graph): GraphResolutionStatus =>
+            stalenessDegradedReason !== undefined
+              ? {
+                  graph,
+                  degraded: true,
+                  degradedReason: stalenessDegradedReason,
+                  evaluationError: stalenessEvaluationError,
+                }
+              : { graph, degraded: false },
+        ),
         Effect.catchTag("GraphSnapshotError", (error) => {
           const evaluationError = `Failed to load graph snapshot from '${snapshotPath}' [${error.reason}]: ${error.message}`
           process.stderr.write(`[harness-mcp] ${evaluationError}\n`)
           return Effect.succeed<GraphResolutionStatus>({
             graph: buildEmptyHarnessGraph(),
             degraded: true,
+            degradedReason: "corrupt-graph-snapshot",
             evaluationError,
           })
         }),
       )
     }
-    return { graph: buildEmptyHarnessGraph(), degraded: false }
+    return {
+      graph: buildEmptyHarnessGraph(),
+      degraded: true,
+      degradedReason: "missing-graph-snapshot",
+      evaluationError: `Graph snapshot file is missing in '${root}'`,
+    }
   }).pipe(
     Effect.catchDefect((defect) => {
       const message = defect instanceof Error ? defect.message : String(defect)

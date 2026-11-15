@@ -4,7 +4,11 @@
 import { join, relative } from "node:path"
 import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
+import { computeContentSha256 } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
+import { classifyMutantSubprocessResult, stripAnsi } from "./mutation-subprocess-helpers.js"
+
+export { stripAnsi }
 import {
   getActiveMutantId, setActiveMutantId, withActiveMutantEffect,
 } from "./services/active-mutant-context.js"
@@ -466,10 +470,49 @@ export const runDomainMutationSuite = (
     if (options?.testRunner !== undefined) {
       const runner = options.testRunner
       const prevGlobal = getActiveMutantId()
+      const prevEnv = process.env["HARNESS_ACTIVE_MUTANT_ID"]
+      const restoreInProcessEnv = () => {
+        setActiveMutantId(prevGlobal)
+        if (prevEnv === undefined) {
+          delete process.env["HARNESS_ACTIVE_MUTANT_ID"]
+        } else {
+          process.env["HARNESS_ACTIVE_MUTANT_ID"] = prevEnv
+        }
+      }
+
+      const baselineMutant: CodeMutant = {
+        id: "__baseline__",
+        file: file.relFile,
+        line: 1,
+        category: "boolean-return",
+        original: "",
+        replacement: "",
+        mutatedSource: originalContent,
+      }
+      setActiveMutantId(undefined)
+      delete process.env["HARNESS_ACTIVE_MUTANT_ID"]
+      const baselineRes = Result.try(() => runner(baselineMutant, originalContent, reachingTestFiles))
+      restoreInProcessEnv()
+      const baselineDiag = match(baselineRes)
+        .with({ _tag: "Success" }, ({ success }) =>
+          success === "survived"
+            ? undefined
+            : `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}'`,
+        )
+        .with({ _tag: "Failure" }, ({ failure }) =>
+          `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}': ${failure instanceof Error ? failure.message : String(failure)}`,
+        )
+        .exhaustive()
+      if (baselineDiag !== undefined) {
+        process.stderr.write(`${baselineDiag}\n`)
+        return makeAbortedReport(outcomes, baselineDiag)
+      }
+
       for (const mutant of mutants) {
         setActiveMutantId(mutant.id)
+        process.env["HARNESS_ACTIVE_MUTANT_ID"] = mutant.id
         const runRes = Result.try(() => runner(mutant, schemaBundle.schemaSource, reachingTestFiles))
-        setActiveMutantId(prevGlobal)
+        restoreInProcessEnv()
         const runnerDiag = match(runRes)
           .with({ _tag: "Success" }, ({ success }) => {
             outcomes.push({ mutant, status: success === "killed" ? "killed" : "survived" })
@@ -494,7 +537,58 @@ export const runDomainMutationSuite = (
       continue
     }
 
+    const baseSubprocessEnv: Record<string, string | undefined> = {
+      ...process.env,
+      NO_COLOR: "1",
+      FORCE_COLOR: "0",
+    }
+    delete baseSubprocessEnv["HARNESS_ACTIVE_MUTANT_ID"]
+
+    // F-4.1: Unmutated baseline test execution BEFORE writing backup or mutated schema
+    const baselineExecRes = Result.try(() =>
+      hostIo.execFileSync("pnpm", ["vitest", "run", ...reachingTestFiles], {
+        cwd: repoRoot,
+        timeoutMs: 30_000,
+        env: baseSubprocessEnv,
+      }),
+    )
+    const baselineDiag = match(baselineExecRes)
+      .with({ _tag: "Failure" }, ({ failure }) =>
+        `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}': ${failure instanceof Error ? failure.message : String(failure)}`,
+      )
+      .with({ _tag: "Success" }, ({ success }) =>
+        match(success)
+          .with({ _tag: "Exited" }, (r) => {
+            if (r.exitCode === 0) return undefined
+            const cleanErr = stripAnsi(r.stderr).trim()
+            const stderrPart = cleanErr.length > 0 ? `, stderr=${cleanErr}` : ""
+            return `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}' (exitCode=${r.exitCode}${stderrPart})`
+          })
+          .with({ _tag: "TimedOut" }, (r) => {
+            const cleanErr = stripAnsi(r.stderr).trim()
+            const stderrPart = cleanErr.length > 0 ? `, stderr=${cleanErr}` : ""
+            return `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}' (timedOut=true${stderrPart})`
+          })
+          .with({ _tag: "Signaled" }, (r) => {
+            const cleanErr = stripAnsi(r.stderr).trim()
+            const stderrPart = cleanErr.length > 0 ? `, stderr=${cleanErr}` : ""
+            return `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}' (signal=${r.signal}${stderrPart})`
+          })
+          .with({ _tag: "SpawnFailed" }, (r) =>
+            `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}' (spawnError=${r.spawnError})`,
+          )
+          .exhaustive(),
+      )
+      .exhaustive()
+
+    if (baselineDiag !== undefined) {
+      process.stderr.write(`${baselineDiag}\n`)
+      return makeAbortedReport(outcomes, baselineDiag)
+    }
+
     const originalSource = originalContent
+    const originalSha256 = computeContentSha256(originalSource)
+    const expectedMutatedSha256 = computeContentSha256(schemaBundle.schemaSource)
     const backupWriteErr = writeMutationBackup(
       repoRoot,
       backupPath,
@@ -509,6 +603,25 @@ export const runDomainMutationSuite = (
     }
 
     const restoreOriginalFile = (): string | undefined => {
+      const currentDiskRes = Result.try(() => hostIo.readTextSync(file.fullPath))
+      const conflictDiag = match(currentDiskRes)
+        .with({ _tag: "Success" }, ({ success: currentDiskContent }) => {
+          const currentSha256 = computeContentSha256(currentDiskContent)
+          if (currentSha256 !== expectedMutatedSha256 && currentSha256 !== originalSha256) {
+            return `[mutation-check] CRITICAL: Target '${file.relFile}' was modified externally mid-run (sha256=${currentSha256}); refusing to overwrite user edits. Preserving '${backupPath}'.`
+          }
+          return undefined
+        })
+        .with({ _tag: "Failure" }, ({ failure }) =>
+          `[mutation-check] CRITICAL: Failed to read '${file.fullPath}' before restore (${failure instanceof Error ? failure.message : String(failure)}). Preserving '${backupPath}'.`,
+        )
+        .exhaustive()
+
+      if (conflictDiag !== undefined) {
+        process.stderr.write(`${conflictDiag}\n`)
+        return conflictDiag
+      }
+
       const primaryWrite = Result.try(() => {
         hostIo.writeTextSync(file.fullPath, originalSource)
       })
@@ -562,37 +675,82 @@ export const runDomainMutationSuite = (
     const onProcessExit = () => {
       restoreOriginalFile()
     }
-    const onSigInt = () => { onProcessExit(); process.exit(130) }
-    const onSigTerm = () => { onProcessExit(); process.exit(143) }
-    process.once("exit", onProcessExit); process.once("SIGINT", onSigInt); process.once("SIGTERM", onSigTerm)
+    const onSigInt = () => {
+      onProcessExit()
+      process.exit(130)
+    }
+    const onSigTerm = () => {
+      onProcessExit()
+      process.exit(143)
+    }
+    process.once("exit", onProcessExit)
+    process.once("SIGINT", onSigInt)
+    process.once("SIGTERM", onSigTerm)
 
-    const prevGlobal = getActiveMutantId()
-    const prevEnv = process.env["HARNESS_ACTIVE_MUTANT_ID"]
-    const cleanupProcessState = () => {
-      setActiveMutantId(prevGlobal)
-      if (prevEnv === undefined) {
-        delete process.env["HARNESS_ACTIVE_MUTANT_ID"]
-      } else {
-        process.env["HARNESS_ACTIVE_MUTANT_ID"] = prevEnv
-      }
-      process.removeListener("exit", onProcessExit)
-      process.removeListener("SIGINT", onSigInt)
-      process.removeListener("SIGTERM", onSigTerm)
+    const cleanupProcessListeners = () => {
+      process.off("exit", onProcessExit)
+      process.off("SIGINT", onSigInt)
+      process.off("SIGTERM", onSigTerm)
     }
 
-    const writeSchemaRes = Result.try(() => {
-      hostIo.writeTextSync(file.fullPath, schemaBundle.schemaSource)
+    const runLoopRes = Result.try(() => {
+      let innerWriteSchemaErr: string | undefined = undefined
+      let innerRunnerAbortDiagnostic: string | undefined = undefined
+      let innerRestoreErr: string | undefined = undefined
+      const writeSchemaRes = Result.try(() => {
+        hostIo.writeTextSync(file.fullPath, schemaBundle.schemaSource)
+      })
+      innerWriteSchemaErr = match(writeSchemaRes)
+        .with({ _tag: "Success" }, () => undefined)
+        .with({ _tag: "Failure" }, ({ failure }) =>
+          failure instanceof Error ? failure.message : String(failure),
+        )
+        .exhaustive()
+
+      if (innerWriteSchemaErr !== undefined) {
+        innerRestoreErr = restoreOriginalFile()
+      } else {
+        for (const mutant of mutants) {
+          const execRes = Result.try(() =>
+            hostIo.execFileSync("pnpm", ["vitest", "run", ...reachingTestFiles], {
+              cwd: repoRoot,
+              timeoutMs: 30_000,
+              env: { ...baseSubprocessEnv, HARNESS_ACTIVE_MUTANT_ID: mutant.id },
+            }),
+          )
+          const outcomeOrAbort = classifyMutantSubprocessResult(mutant.id, execRes)
+
+          const abortDiagnostic = match(outcomeOrAbort)
+            .with({ kind: "abort" }, ({ diagnostic }) => diagnostic)
+            .with({ kind: "outcome" }, ({ status }) => {
+              outcomes.push({ mutant, status })
+              return undefined
+            })
+            .exhaustive()
+          if (abortDiagnostic !== undefined) {
+            innerRunnerAbortDiagnostic = abortDiagnostic
+            break
+          }
+        }
+        innerRestoreErr = restoreOriginalFile()
+      }
+      return {
+        writeSchemaErr: innerWriteSchemaErr,
+        runnerAbortDiagnostic: innerRunnerAbortDiagnostic,
+        restoreErr: innerRestoreErr,
+      }
     })
-    const writeSchemaErr = match(writeSchemaRes)
-      .with({ _tag: "Success" }, () => undefined)
-      .with({ _tag: "Failure" }, ({ failure }) =>
-        failure instanceof Error ? failure.message : String(failure),
-      )
+    cleanupProcessListeners()
+    const { writeSchemaErr, runnerAbortDiagnostic, restoreErr } = match(runLoopRes)
+      .with({ _tag: "Success" }, ({ success }) => success)
+      .with({ _tag: "Failure" }, ({ failure }) => ({
+        writeSchemaErr: undefined as string | undefined,
+        runnerAbortDiagnostic: `[mutation-check] Unexpected error for '${file.relFile}': ${failure instanceof Error ? failure.message : String(failure)}` as string | undefined,
+        restoreErr: undefined as string | undefined,
+      }))
       .exhaustive()
 
     if (writeSchemaErr !== undefined) {
-      cleanupProcessState()
-      const restoreErr = restoreOriginalFile()
       const diag =
         restoreErr !== undefined
           ? `[mutation-check] Failed to write mutated schema for '${file.relFile}': ${writeSchemaErr} (${restoreErr})`
@@ -600,80 +758,6 @@ export const runDomainMutationSuite = (
       process.stderr.write(`${diag}\n`)
       return makeAbortedReport(outcomes, diag)
     }
-
-    let runnerAbortDiagnostic: string | undefined = undefined
-    for (const mutant of mutants) {
-      setActiveMutantId(mutant.id)
-      process.env["HARNESS_ACTIVE_MUTANT_ID"] = mutant.id
-      const execRes = Result.try(() =>
-        hostIo.execFileSync("pnpm", ["vitest", "run", ...reachingTestFiles], {
-          cwd: repoRoot,
-          timeoutMs: 30_000,
-          env: { ...process.env, HARNESS_ACTIVE_MUTANT_ID: mutant.id },
-        }),
-      )
-      const outcomeOrAbort = match(execRes)
-        .with({ _tag: "Success" }, ({ success }) => {
-          const combinedOutput = `${success.stdout}\n${success.stderr}`
-          const hasVitestTestFailureEvidence =
-            /\bTests\s+[1-9]\d*\s+failed\b/.test(combinedOutput)
-          const hasModuleLoadOrSyntaxError =
-            /\b(?:SyntaxError:|ERR_MODULE_NOT_FOUND)\b/.test(combinedOutput) ||
-            /\bTests\s+no tests\b/i.test(combinedOutput)
-          const isExit1WithoutTestFailure =
-            success.exitCode === 1 && !hasVitestTestFailureEvidence
-          const isRunnerStartupOrCompileError =
-            success.exitCode < 0 ||
-            success.exitCode > 1 ||
-            hasModuleLoadOrSyntaxError ||
-            isExit1WithoutTestFailure ||
-            /\bERR_PNPM_|ERR_MODULE_NOT_FOUND|Command\s+["']?vitest["']?\s+not found|Failed to load config|Failed to resolve import|Cannot find (?:module|package)|No test (?:files|suite) found|Startup Error|Transform failed with \d+ error/i.test(
-              combinedOutput,
-            )
-          if (
-            success.spawnError != null ||
-            success.timedOut === true ||
-            success.signal != null ||
-            isRunnerStartupOrCompileError
-          ) {
-            const reasons: Array<string> = []
-            if (success.spawnError != null) reasons.push(`spawnError=${success.spawnError}`)
-            if (success.timedOut === true) reasons.push("timedOut=true")
-            if (success.signal != null) reasons.push(`signal=${success.signal}`)
-            if (isRunnerStartupOrCompileError) reasons.push(`exitCode=${success.exitCode}`)
-            if (isExit1WithoutTestFailure) reasons.push("missingVitestFailureEvidence=true")
-            if (success.stderr.trim().length > 0) reasons.push(`stderr=${success.stderr.trim()}`)
-            return {
-              kind: "abort" as const,
-              diagnostic: `[mutation-check] Runner infrastructure failure for mutant '${mutant.id}': ${reasons.join(", ")}`,
-            }
-          }
-          return {
-            kind: "outcome" as const,
-            status: success.exitCode !== 0 ? ("killed" as const) : ("survived" as const),
-          }
-        })
-        .with({ _tag: "Failure" }, ({ failure }) => ({
-          kind: "abort" as const,
-          diagnostic: `[mutation-check] Runner execution threw for mutant '${mutant.id}': ${failure instanceof Error ? failure.message : String(failure)}`,
-        }))
-        .exhaustive()
-
-      const abortDiagnostic = match(outcomeOrAbort)
-        .with({ kind: "abort" }, ({ diagnostic }) => diagnostic)
-        .with({ kind: "outcome" }, ({ status }) => {
-          outcomes.push({ mutant, status })
-          return undefined
-        })
-        .exhaustive()
-      if (abortDiagnostic !== undefined) {
-        runnerAbortDiagnostic = abortDiagnostic
-        break
-      }
-    }
-
-    cleanupProcessState()
-    const restoreErr = restoreOriginalFile()
 
     if (runnerAbortDiagnostic !== undefined) {
       process.stderr.write(`${runnerAbortDiagnostic}\n`)

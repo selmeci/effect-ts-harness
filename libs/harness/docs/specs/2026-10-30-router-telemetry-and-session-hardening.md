@@ -7,7 +7,7 @@ date: 2026-10-30
 owners:
   - "@harness/gates"
   - "@harness/decision"
-  - "@harness/cli"
+  - "harness-cli"
 adrs:
   - harness:ADR-0005
 spans:

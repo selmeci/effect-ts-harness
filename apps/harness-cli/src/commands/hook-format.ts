@@ -1,5 +1,37 @@
 import type { CliResult } from "./daemon-and-omnigraph.service.js"
 
+const processHookStdinState = { isAntigravity: false }
+
+export const markProcessStdinAntigravityDetected = (): void => {
+  processHookStdinState.isAntigravity = true
+}
+
+export const resetProcessStdinAntigravityDetected = (): void => {
+  processHookStdinState.isAntigravity = false
+}
+
+export const isProcessStdinAntigravityDetected = (): boolean => processHookStdinState.isAntigravity
+
+export const resolveTeardownFailure = (
+  args: ReadonlyArray<string>,
+  isInterruptOnly: boolean,
+  prettyCause: string,
+): { readonly exitCode: number; readonly stdout: string; readonly stderr: string } => {
+  const target = args.find((arg) => !arg.startsWith("-"))
+  const isHook = target === "guard" || target === "done"
+  if (isInterruptOnly && !isHook) return { exitCode: 130, stdout: "", stderr: "" }
+  const summary = isInterruptOnly ? "interrupted by signal" : prettyCause
+  if (!isHook) return { exitCode: 1, stdout: "", stderr: `${summary}\n` }
+  const isAntigravity = hasAntigravityFormat(args) || isProcessStdinAntigravityDetected()
+  const res =
+    target === "guard"
+      ? makeGuardDenyResult(isAntigravity, `${target}: ${summary}`)
+      : makeDoneBlockResult(isAntigravity, `${target}: ${summary}`)
+  const stdout = res.stdout ? `${res.stdout}\n` : ""
+  const stderr = isInterruptOnly ? (res.stderr ? `${res.stderr}\n` : "") : `${summary}\n`
+  return { exitCode: 2, stdout, stderr }
+}
+
 /**
  * Strips `[node, script]` prefix from raw `process.argv` while preserving already-normalized arrays.
  */
@@ -40,6 +72,12 @@ export const hasAntigravityFormat = (argv: ReadonlyArray<string>): boolean => {
   }
   return false
 }
+
+/**
+ * Returns true when raw stdin JSON contains an Antigravity PreToolUse or Stop hook payload.
+ */
+export const detectAntigravityHookPayload = (rawStdin: string): boolean =>
+  /"(?:toolCall|fullyIdle|workspacePaths|conversationId)"\s*:/.test(rawStdin)
 
 /**
  * Builds a fail-closed Stop (`done`) hook result matching Antigravity (`continue`, exit 0)

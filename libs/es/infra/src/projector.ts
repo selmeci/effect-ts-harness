@@ -1,4 +1,4 @@
-import { Effect, Schema } from "effect"
+import { Effect, Layer, Schema } from "effect"
 import { SqlClient } from "effect/sql/SqlClient"
 import type { SqlError } from "effect/sql/SqlError"
 import * as SqliteMigrator from "@effect/sql-sqlite-do/SqliteMigrator"
@@ -82,6 +82,19 @@ export const initializeProjectorTables = Effect.fn("ProjectorInfra.initTables")(
     table: PROJECTOR_MIGRATIONS_TABLE,
   })
 })
+
+const _makeProjectorMigratorLayer = (
+  additionalMigrations?: Readonly<Record<string, Effect.Effect<void, SqlError, SqlClient>>>,
+): Layer.Layer<never, SqliteMigrator.MigrationError | SqlError, SqlClient> =>
+  SqliteMigrator.layer({
+    loader: SqliteMigrator.fromRecord({
+      ...projectorCoreMigrations,
+      ...additionalMigrations,
+    }),
+    table: PROJECTOR_MIGRATIONS_TABLE,
+  })
+
+export { _makeProjectorMigratorLayer as makeProjectorMigratorLayer }
 
 interface GapRow {
   readonly stream_version: number

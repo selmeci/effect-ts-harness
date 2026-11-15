@@ -5,6 +5,11 @@ import { makeOmnigraphSyncLayer, makeTsCompilerOverlayLayer, type TsCompilerOver
 import { ActiveMutantContextLive } from "./active-mutant-context-live.js"
 import { AstGateCacheLive, makeAstGateCacheLayer } from "./ast-gate-cache-live.js"
 import {
+  resolveAstGateCachePath,
+  resolveDecisionCachePath,
+  resolveHarnessStateDir,
+} from "./cache-helpers.js"
+import {
   DecisionCacheLive,
   type DecisionCacheStatsSnapshot,
   makeDecisionCacheLayer,
@@ -18,10 +23,15 @@ import {
 import {
   makeUnixSocketDaemonLayer,
   queryUnixSocketLine,
+  queryUnixSocketLineDetailed,
   resolveHarnessDaemonSocketPath,
   startScopedUnixSocketDaemon,
   UnixSocketDaemonLive,
   type UnixSocketDaemonLayerOptions,
+  type UnixSocketQueryReason,
+  type UnixSocketQueryReply,
+  type UnixSocketQueryResult,
+  type UnixSocketQueryUnavailable,
 } from "./unix-socket-daemon-live.js"
 import {
   makeWorkspaceFsHostIoLayer,
@@ -38,22 +48,25 @@ export {
   makeHarnessSubprocessRunnerLayer,
 }
 export { AstGateCacheLive, makeAstGateCacheLayer }
+export { resolveAstGateCachePath, resolveDecisionCachePath, resolveHarnessStateDir }
 export { DecisionCacheLive, makeDecisionCacheLayer, type DecisionCacheStatsSnapshot }
 export {
   makeUnixSocketDaemonLayer,
   queryUnixSocketLine,
+  queryUnixSocketLineDetailed,
   resolveHarnessDaemonSocketPath,
   startScopedUnixSocketDaemon,
   UnixSocketDaemonLive,
   type UnixSocketDaemonLayerOptions,
+  type UnixSocketQueryReason,
+  type UnixSocketQueryReply,
+  type UnixSocketQueryResult,
+  type UnixSocketQueryUnavailable,
 }
 
 export const TsCompilerOverlayServiceLive: Layer.Layer<TsCompilerOverlayService> =
   makeTsCompilerOverlayLayer(nodeSyncHostIo)
 export const OmnigraphSyncLive = makeOmnigraphSyncLayer(nodeSyncHostIo)
-
-const cacheFileUnderRoot = (repoRoot: WorkspaceFilePath, fileName: string): WorkspaceFilePath =>
-  WorkspaceFilePath.make(`${repoRoot.replace(/\/+$/, "")}/.harness/cache/${fileName}`)
 
 const makeHarnessInfraLayer = (options?: {
   readonly repoRoot?: WorkspaceFilePath
@@ -63,10 +76,10 @@ const makeHarnessInfraLayer = (options?: {
     makeWorkspaceFsLayer(),
     makeHarnessSubprocessRunnerLayer(),
     makeAstGateCacheLayer({
-      cacheFilePath: cacheFileUnderRoot(repoRoot, "ast-gates-v1.json"),
+      cacheFilePath: resolveAstGateCachePath(repoRoot),
     }),
     makeDecisionCacheLayer({
-      cacheFilePath: cacheFileUnderRoot(repoRoot, "decision-cache-v1.json"),
+      cacheFilePath: resolveDecisionCachePath(repoRoot),
     }),
     UnixSocketDaemonLive,
     ActiveMutantContextLive,
