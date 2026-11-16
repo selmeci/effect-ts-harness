@@ -78,7 +78,7 @@ Stage 6: Git Commit, Optional Push/PR & <promise>DONE</promise>
 **REQUIRED SUB-SKILL:** Use `planning-effect-skeletons`:
 
 1. Call `harness_route` for each non-trivial capability and read the matched `agent-patterns/*.md` recipe.
-2. Define boundary Schemas and `Schema.TaggedError` classes in `type:contract`, `Context.Service` ports in `type:service`, and `stub<A, E, R>(...args)` skeletons in `type:domain` / `type:core` / `type:infra` (keeping `*.decide` strictly pure with `R = never`).
+2. Define boundary Schemas and `Schema.TaggedError` classes in `type:contract` (`0` workspace dependencies), pure `Context.Service` ports in `type:service` (zero `Layer.*` constructors or `node:*` imports), and `stub<A, E, R>(...args)` skeletons in `type:domain` / `type:core` / `type:infra` (keeping `*.decide` strictly pure with `R = never`, and honoring `HarnessTierTopology.decide` and `SelfDogfooding.decide` across all 5 hexagonal tiers: single `type:*` tag per package, explicit named exports in `index.ts` barrels with no `export *`, zero `node:*` outside `type:infra` except `path`/`crypto`/`url`, zero `process.env` outside `type:infra`/`type:app`, and zero module-scope mutable caches).
 3. Run the deterministic plan gate:
    ```bash
    node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts plan-check

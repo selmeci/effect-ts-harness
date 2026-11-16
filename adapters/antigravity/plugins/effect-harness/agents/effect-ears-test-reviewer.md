@@ -22,8 +22,8 @@ Do NOT flag or report any of the following, as deterministic workspace gates (`@
 
 - TypeScript compilation and type errors (`tsc`, `@effect/tsgo`)
 - `@effect/language-service` lint diagnostics (`floatingEffect`, `lazyEffect`)
-- Syntactic bans enforced by `tools/oxlint/syntax-bans.js` (`async/await`, `new Promise`, `try/catch`, `throw`, raw `JSON.parse`)
-- Nx architecture and module boundary tag violations (`type:contract`, `type:domain`, `type:service`, `type:infra`, `type:app`)
+- Syntactic bans and hexagonal self-dogfooding rules enforced by `tools/oxlint/syntax-bans.js` and `SelfDogfooding.decide` (`async/await`, `new Promise`, `try/catch`, `throw`, raw `JSON.parse`, `no-node-builtins-outside-infra`, `no-global-mutable-cache`, `facade-star-reexport`)
+- Nx 5-tier hexagonal architecture and module boundary tag violations (`type:contract`, `type:service`, `type:core`, `type:domain`, `type:infra`, `type:app`, `HarnessTierTopology.decide`)
 - Dead `TaggedError`s or unused service tags (`harness gc --strict`)
 
 ## What to Hunt For

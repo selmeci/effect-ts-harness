@@ -30,7 +30,7 @@ date: YYYY-MM-DD
 enforced_by:
   - libs/<scope>/contract/src/index.ts
   - libs/<scope>/service/src/index.ts
-  - libs/<scope>/domain/src/index.ts
+  - libs/<scope>/core/src/index.ts # or: libs/<scope>/domain/src/index.ts
   - libs/<scope>/infra/src/index.ts
 spans:
   - <planned Effect.fn span names, e.g. Domain.useCase, Domain.decide>
@@ -96,7 +96,7 @@ The `Verification` column in the EARS table maps each requirement to its determi
 ## Acceptance criteria
 
 - All requirement rows pass their declared Verification methods (`UnitTest`, `PropertyTest`, `TraceTest`, `GraphCheck`, `AstGate`).
-- Affected Nx packages updated: `type:contract` -> `type:service` -> `type:domain` -> `type:infra` -> `scope:web`.
+- Affected 5-tier hexagonal Nx packages updated: `type:contract` -> `type:service` -> `type:core` / `type:domain` -> `type:infra` -> `type:app` (`scope:web`).
 - Frontmatter updated to `status: accepted` upon implementation and verified by `harness gc --strict`.
 ```
 
@@ -104,7 +104,7 @@ The `Verification` column in the EARS table maps each requirement to its determi
 
 | Excuse                                                                           | Reality                                                                                                                                                                 |
 | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| "The user said 'quickly / no time', so I'll invent default assumptions silently" | Silent assumptions cause full rewrites across 4 Nx tiers. Put defaults in `## Assumptions` and confirm EARS clauses first.                                              |
+| "The user said 'quickly / no time', so I'll invent default assumptions silently" | Silent assumptions cause full rewrites across 5 hexagonal Nx tiers. Put defaults in `## Assumptions` and confirm EARS clauses first.                                    |
 | "I can write a prose Markdown implementation plan instead of EARS"               | Prose plans hide missing `E` (error) and `WHILE` (pure `.decide` over `Schema.TaggedUnion` with `match()...exhaustive()`) channels. EARS maps 1:1 to `Effect<A, E, R>`. |
 | "I don't need `harness_resolve` before asking questions"                         | Asking without checking the graph wastes the user's time on things already defined in `type:contract` or `type:service`.                                                |
 | "I can use 'the system shall' to save time"                                      | Generic subjects fail `EarsSpecLint.decide` (`generic-subject`). Every Effect requirement must name a concrete symbol.                                                  |

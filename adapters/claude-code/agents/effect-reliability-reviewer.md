@@ -22,11 +22,11 @@ Do NOT flag or report the following standard patterns, as deterministic workspac
 
 - Unbounded `Effect.retry(..., Schedule.forever)`, which `tools/oxlint/syntax-bans.js` blocks.
 - `Effect.ignore` in `type:domain`, which `tools/oxlint/syntax-bans.js` blocks.
-- Purely architectural module boundary violations already governed by Nx tags.
+- Purely architectural module boundary violations already governed by Nx 5-tier hexagonal tags (`HarnessTierTopology.decide` & `SelfDogfooding.decide`).
 
 ## What to Hunt For
 
-Perform deep reliability reviews across these four critical operational dimensions:
+Perform deep reliability reviews across these six critical operational dimensions:
 
 ### 1. Durable Object SQLite Synchronous Transaction Discipline
 

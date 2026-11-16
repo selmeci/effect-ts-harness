@@ -499,4 +499,116 @@ describe("Antigravity adapter & plugin configuration", () => {
       }
     }
   })
+
+  it("enforces 5-tier hexagonal architecture invariants (ADR-0013 / HarnessTierTopology.decide / SelfDogfooding.decide) across agent-patterns/planning.md, skills, references, and reviewer personas in both adapters", () => {
+    const planningMd = readFileSync(resolve(repoRoot, "agent-patterns/planning.md"), "utf8")
+    expect(planningMd).not.toContain("`type:infra` / `type:service`")
+    expect(planningMd).toContain("`type:infra` & `type:core`")
+    expect(planningMd).toContain("HarnessTierTopology.decide")
+    expect(planningMd).toContain("SelfDogfooding.decide")
+    expect(planningMd).toContain("impure-service-tier-import")
+    expect(planningMd).toContain("facade-star-reexport")
+
+    const skillDirs = [
+      resolve(pluginDir, "skills"),
+      resolve(repoRoot, "adapters/claude-code/skills"),
+    ]
+
+    for (const skillsRoot of skillDirs) {
+      const specifyingSkill = readFileSync(
+        resolve(skillsRoot, "specifying-ears-with-effect/SKILL.md"),
+        "utf8",
+      )
+      expect(specifyingSkill).toContain("libs/<scope>/core/src/index.ts")
+      expect(specifyingSkill).toContain("5 hexagonal Nx tiers")
+      expect(specifyingSkill).not.toContain("across 4 Nx tiers")
+
+      const earsPatterns = readFileSync(
+        resolve(skillsRoot, "specifying-ears-with-effect/references/ears-patterns.md"),
+        "utf8",
+      )
+      expect(earsPatterns).toContain("`type:domain` / `type:core`")
+
+      const planningSkill = readFileSync(
+        resolve(skillsRoot, "planning-effect-skeletons/SKILL.md"),
+        "utf8",
+      )
+      expect(planningSkill).toContain("HarnessTierTopology.decide")
+      expect(planningSkill).toContain("SelfDogfooding.decide")
+      expect(planningSkill).toContain("dual-contract-tier-tag")
+      expect(planningSkill).toContain("impure-service-tier-import")
+      expect(planningSkill).toContain("no-node-builtins-outside-infra")
+      expect(planningSkill).toContain("no-global-mutable-cache")
+      expect(planningSkill).toContain("process-env-outside-infra-or-app")
+      expect(planningSkill).toContain("facade-star-reexport")
+
+      const adrGuidelines = readFileSync(
+        resolve(skillsRoot, "planning-effect-skeletons/references/adr-guidelines.md"),
+        "utf8",
+      )
+      expect(adrGuidelines).toContain("`type:core` / `type:domain`")
+
+      const executingSkill = readFileSync(
+        resolve(skillsRoot, "executing-effect-stubs/SKILL.md"),
+        "utf8",
+      )
+      expect(executingSkill).toContain("8-Point Anti-Rubber-Stamp")
+      expect(executingSkill).not.toContain("7-Point Anti-Rubber-Stamp")
+      expect(executingSkill).not.toContain("all 4 layers")
+      expect(executingSkill).toContain("5 hexagonal")
+      expect(executingSkill).toContain("no-node-builtins-outside-infra")
+      expect(executingSkill).toContain("no-global-mutable-cache")
+      expect(executingSkill).toContain("facade-star-reexport")
+
+      const dispatchReviewers = readFileSync(
+        resolve(skillsRoot, "executing-effect-stubs/references/dispatch-reviewers.md"),
+        "utf8",
+      )
+      expect(dispatchReviewers).toContain("8-Point Anti-Rubber-Stamp")
+      expect(dispatchReviewers).not.toContain("7-Point Anti-Rubber-Stamp")
+      expect(dispatchReviewers).toContain("HarnessTierTopology.decide")
+      expect(dispatchReviewers).toContain("SelfDogfooding.decide")
+
+      const lfgSkill = readFileSync(resolve(skillsRoot, "effect-lfg/SKILL.md"), "utf8")
+      expect(lfgSkill).toContain("HarnessTierTopology.decide")
+      expect(lfgSkill).toContain("SelfDogfooding.decide")
+
+      const personaFiles = [
+        "ears-test-reviewer.md",
+        "adversarial-reviewer.md",
+        "security-reviewer.md",
+        "reliability-reviewer.md",
+      ]
+      for (const personaFile of personaFiles) {
+        const personaPath = resolve(
+          skillsRoot,
+          "executing-effect-stubs/references/personas",
+          personaFile,
+        )
+        const personaContent = readFileSync(personaPath, "utf8")
+        expect(
+          personaContent,
+          `Expected ${personaPath} not to reference nonexistent grep_search`,
+        ).not.toContain("grep_search")
+        expect(personaContent, `Expected ${personaPath} to contain MCP protocol header`).toContain(
+          "## MCP Tooling & Navigation Protocol",
+        )
+        expect(
+          personaContent,
+          `Expected ${personaPath} to reference harness_structural_search`,
+        ).toContain("harness_structural_search")
+      }
+
+      const earsPersona = readFileSync(
+        resolve(
+          skillsRoot,
+          "executing-effect-stubs/references/personas/ears-test-reviewer.md",
+        ),
+        "utf8",
+      )
+      expect(earsPersona).toContain("8-Point Anti-Rubber-Stamp Deep Audit")
+      expect(earsPersona).not.toContain("7-Point Anti-Rubber-Stamp Deep Audit")
+      expect(earsPersona).toContain("`type:infra` Guard-Deletion Falsification")
+    }
+  })
 })

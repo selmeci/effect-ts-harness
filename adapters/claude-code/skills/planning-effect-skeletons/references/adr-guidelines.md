@@ -163,12 +163,12 @@ Before committing or marking an ADR as `status: accepted`, verify it against the
 
 - Does the `Decision Outcome` directly resolve every single driver listed under `## Decision Drivers`?
 - Are the `Governed Symbols` listed in the enforcement table identical to the `spans`, `services`, and `errors` in the YAML frontmatter?
-- Is the choice consistent with the repository's Nx taxonomy (`type:contract` $\to$ `type:service` $\to$ `type:domain` $\to$ `type:infra` $\to$ `type:app`)?
+- Is the choice consistent with the repository's 5-tier hexagonal Nx taxonomy (`type:contract` $\to$ `type:service` $\to$ `type:core` / `type:domain` $\to$ `type:infra` $\to$ `type:app`)?
 
 ### 2. Feasibility Lens (Release Engineer & CI/CD)
 
 - Does every file path listed in `enforced_by` actually exist on disk in the current workspace?
-- Is every gate and mechanism listed in `### Deterministic Enforcement` (e.g. `oxlint`, `checkEffectGraph`, `GraphGc.decide`, `MigrationSafety.decide`) active and executable in the repo?
+- Is every gate and mechanism listed in `### Deterministic Enforcement` (e.g. `oxlint`, `checkEffectGraph`, `HarnessTierTopology.decide`, `SelfDogfooding.decide`, `GraphGc.decide`, `MigrationSafety.decide`) active and executable in the repo?
 - Can this ADR pass `node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts gc --strict` without warnings or failures?
 
 ### 3. Adversarial Counterfactual Lens (Autonomous Chaos Agent)
