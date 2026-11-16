@@ -25,6 +25,7 @@ import {
   isProcessPidAlive,
   isSafeOmnigraphPidToKill,
   isValidLockId,
+  probeOmnigraphServerReady,
 } from "./omnigraph-safety-helpers.js"
 import {
   acquireOmnigraphClusterLockEffect,
@@ -184,77 +185,6 @@ export function unlockOmnigraphClusterIfNeeded(
   return { ok: true }
 }
 
-type ReadyzProbeResult =
-  | { readonly _tag: "Ready" }
-  | { readonly _tag: "NotReady"; readonly reason: string }
-
-const ReadyzBodySchema = Schema.Struct({
-  ready: Schema.optional(Schema.Boolean),
-  status: Schema.optional(Schema.String),
-  ready_graph_count: Schema.optional(Schema.Finite),
-})
-const decodeReadyzBody = Schema.decodeUnknownOption(ReadyzBodySchema)
-
-function probeOmnigraphServerReady(baseUrl: string): Effect.Effect<ReadyzProbeResult> {
-  return Effect.tryPromise({
-    try: () =>
-      globalThis
-        .fetch(`${baseUrl}/readyz`, {
-          method: "GET",
-          signal: AbortSignal.timeout(3000),
-        })
-        .then((r): Promise<ReadyzProbeResult> =>
-          match(r.status)
-            .with(200, () => {
-              const apiHeader = r.headers.get("Omnigraph-Http-Api")
-              if (apiHeader !== "0.14") {
-                void r.body?.cancel().catch(() => undefined)
-                return Promise.resolve<ReadyzProbeResult>({
-                  _tag: "NotReady",
-                  reason: `unexpected Omnigraph-Http-Api header: ${String(apiHeader)}`,
-                })
-              }
-              return r.json().then((rawBody: unknown): ReadyzProbeResult =>
-                match(decodeReadyzBody(rawBody))
-                  .with({ _tag: "None" }, () => ({
-                    _tag: "NotReady" as const,
-                    reason: "decode mismatch: /readyz body failed schema check",
-                  }))
-                  .with({ _tag: "Some" }, ({ value: body }) => {
-                    const isReady =
-                      (body.ready === true || body.status === "serving") &&
-                      (body.ready_graph_count ?? 0) >= 1
-                    return isReady
-                      ? { _tag: "Ready" as const }
-                      : {
-                          _tag: "NotReady" as const,
-                          reason: `not ready (ready=${String(body.ready)}, status=${String(body.status)}, ready_graph_count=${String(body.ready_graph_count)})`,
-                        }
-                  })
-                  .exhaustive(),
-              )
-            })
-            .otherwise((status) => {
-              void r.body?.cancel().catch(() => undefined)
-              return Promise.resolve<ReadyzProbeResult>({
-                _tag: "NotReady",
-                reason: `HTTP ${status}`,
-              })
-            }),
-        )
-        .catch((err: unknown): ReadyzProbeResult => ({
-          _tag: "NotReady",
-          reason: `network error: ${err instanceof Error ? err.message : String(err)}`,
-        })),
-    catch: (err): ReadyzProbeResult => ({
-      _tag: "NotReady",
-      reason: `network error: ${err instanceof Error ? err.message : String(err)}`,
-    }),
-  }).pipe(
-    Effect.catch((err) => Effect.succeed<ReadyzProbeResult>(err)),
-  )
-}
-
 export const buildOmnigraphClusterKillArgs = (
   clusterRootDir: string,
 ): readonly [string, ReadonlyArray<string>] => {
@@ -341,9 +271,22 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
     const omnigraphBin = join(homeBin, "omnigraph")
     const omnigraphServerBin = join(homeBin, "omnigraph-server")
     const clusterYamlPath = join(configDir, "cluster.yaml")
-    const hasPolicies =
-      nodeSyncHostIo.existsSync(clusterYamlPath) &&
-      clusterYamlDeclaresPolicies(nodeSyncHostIo.readTextSync(clusterYamlPath))
+    let hasPolicies = false
+    if (nodeSyncHostIo.existsSync(clusterYamlPath)) {
+      const yamlRead = match(Result.try(() => nodeSyncHostIo.readTextSync(clusterYamlPath)))
+        .with({ _tag: "Success" }, ({ success }) => ({ ok: true as const, content: success }))
+        .with({ _tag: "Failure" }, ({ failure }) => {
+          process.stderr.write(
+            `[harness:omnigraph] Error: failed to read ${clusterYamlPath}: ${failure instanceof Error ? failure.message : String(failure)}\n`,
+          )
+          return { ok: false as const, content: "" }
+        })
+        .exhaustive()
+      if (!yamlRead.ok) {
+        return false
+      }
+      hasPolicies = clusterYamlDeclaresPolicies(yamlRead.content)
+    }
 
     type SetupRes = { readonly ok: true; readonly pid: number; readonly appliedCluster: boolean } | { readonly ok: false }
     return yield* Effect.acquireUseRelease(
@@ -356,23 +299,32 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
           }
 
           let serverMeta: OmnigraphServerMeta | undefined
+          let serverJsonCorruptOrUnreadable = false
           const serverJsonPath = join(clusterRootDir, "server.json")
           if (nodeSyncHostIo.existsSync(serverJsonPath)) {
-            const rawMeta = Result.getOrElse(
-              Result.try(() => nodeSyncHostIo.readTextSync(serverJsonPath)),
-              () => "",
-            )
-            serverMeta = match(decodeOmnigraphServerMeta(rawMeta))
-              .with({ _tag: "Some" }, ({ value }) => value)
-              .with({ _tag: "None" }, () => {
-                if (rawMeta.length > 0) {
+            const rawMetaOutcome = match(Result.try(() => nodeSyncHostIo.readTextSync(serverJsonPath)))
+              .with({ _tag: "Success" }, ({ success }) => ({ ok: true as const, raw: success }))
+              .with({ _tag: "Failure" }, ({ failure }) => {
+                process.stderr.write(
+                  `[harness:omnigraph] Warning: failed to read ${serverJsonPath}: ${failure instanceof Error ? failure.message : String(failure)}\n`,
+                )
+                return { ok: false as const, raw: "" }
+              })
+              .exhaustive()
+            if (!rawMetaOutcome.ok) {
+              serverJsonCorruptOrUnreadable = true
+            } else {
+              serverMeta = match(decodeOmnigraphServerMeta(rawMetaOutcome.raw))
+                .with({ _tag: "Some" }, ({ value }) => value)
+                .with({ _tag: "None" }, () => {
+                  serverJsonCorruptOrUnreadable = true
                   process.stderr.write(
                     `[harness:omnigraph] Warning: failed to decode ${serverJsonPath} as OmnigraphServerMeta JSON\n`,
                   )
-                }
-                return undefined
-              })
-              .exhaustive()
+                  return undefined
+                })
+                .exhaustive()
+            }
           }
 
           const targetBaseUrl =
@@ -438,14 +390,18 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
             )
             .with({ _tag: "LiveClusterApply" }, () =>
               Effect.gen(function* () {
-                if (!(yield* killOmnigraphServerPidIfAlive(serverPid, clusterRootDir, "live cluster apply"))) {
-                  return { ok: false as const, applyCluster: false }
-                }
-                return { ok: true as const, applyCluster: true }
+                const stopped =
+                  serverPid === undefined && serverJsonCorruptOrUnreadable
+                    ? stopStaleOmnigraphClusterBeforeDelete(clusterRootDir, undefined)
+                    : yield* killOmnigraphServerPidIfAlive(serverPid, clusterRootDir, "live cluster apply")
+                return { ok: stopped, applyCluster: stopped }
               }),
             )
             .with({ _tag: "NoOp" }, () =>
               Effect.gen(function* () {
+                if (serverJsonCorruptOrUnreadable) {
+                  stopStaleOmnigraphClusterBeforeDelete(clusterRootDir, undefined)
+                }
                 const belongsToThisRepo =
                   explicitEnvUrl !== undefined || serverMeta?.canonicalRepoRoot === canonicalRepoRoot
                 if (belongsToThisRepo) {
@@ -537,6 +493,11 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
               const hasExplicitEmbeddingKey =
                 typeof process.env.OMNIGRAPH_EMBEDDING_API_KEY === "string" &&
                 process.env.OMNIGRAPH_EMBEDDING_API_KEY.length > 0
+              if (process.env.OMNIGRAPH_EMBEDDINGS_MOCK === undefined && !hasExplicitEmbeddingKey) {
+                process.stderr.write(
+                  "[harness:omnigraph] Warning: OMNIGRAPH_EMBEDDING_API_KEY not set; spawning omnigraph-server with deterministic mock embeddings (OMNIGRAPH_EMBEDDINGS_MOCK=1)\n",
+                )
+              }
               const spawnEnv: Record<string, string | undefined> = {
                 ...process.env,
                 OMNIGRAPH_EMBEDDING_API_KEY: process.env.OMNIGRAPH_EMBEDDING_API_KEY ?? DEFAULT_EMBEDDING_API_KEY,
@@ -617,14 +578,17 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
                 canonicalRepoRoot: WorkspaceFilePath.make(canonicalRepoRoot),
                 updatedAt: OmnigraphIsoTimestamp.make(new Date().toISOString()),
               })
-              const metaWriteOk = match(metaWriteRes)
-                .with({ _tag: "Success" }, () => true)
-                .with({ _tag: "Failure" }, ({ failure }) => {
-                  process.stderr.write(
-                    `[harness:omnigraph] Error: failed to write server.json: ${failure.message}\n`,
-                  )
-                  return false
-                })
+              const metaWriteOk = yield* match(metaWriteRes)
+                .with({ _tag: "Success" }, () => Effect.succeed(true))
+                .with({ _tag: "Failure" }, ({ failure }) =>
+                  Effect.gen(function* () {
+                    process.stderr.write(
+                      `[harness:omnigraph] Error: failed to write server.json: ${failure.message}\n`,
+                    )
+                    yield* killOmnigraphServerPidIfAlive(setupRes.pid, clusterRootDir, "server.json write failure")
+                    return false
+                  }),
+                )
                 .exhaustive()
               return metaWriteOk
             }

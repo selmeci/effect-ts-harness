@@ -43,7 +43,7 @@ export type OmnigraphBaseUrl = typeof OmnigraphBaseUrl.Type
 export const OmnigraphIsoTimestamp = TrimmedNonEmptyString.pipe(Schema.brand("OmnigraphIsoTimestamp"))
 export type OmnigraphIsoTimestamp = typeof OmnigraphIsoTimestamp.Type
 
-export const OmnigraphLintStatus = TrimmedNonEmptyString.pipe(Schema.brand("OmnigraphLintStatus"))
+export const OmnigraphLintStatus = Schema.Literals(["ok", "error"])
 export type OmnigraphLintStatus = typeof OmnigraphLintStatus.Type
 
 export const OmnigraphProcessId = Schema.Int.pipe(
@@ -92,57 +92,72 @@ export const OmnigraphMergeConflictDetail = Schema.Struct({
 })
 export type OmnigraphMergeConflictDetail = typeof OmnigraphMergeConflictDetail.Type
 
-export const EffectFnDiffChange = Schema.TaggedStruct("EffectFnDiffChange", {
+export const EffectFnInserted = Schema.TaggedStruct("EffectFnInserted", {
   entityId: OmnigraphEntityId,
-  op: OmnigraphChangeOp,
+  stubAfter: Schema.Boolean,
+  spanName: Schema.NullOr(OmnigraphSpanName),
+})
+export type EffectFnInserted = typeof EffectFnInserted.Type
+
+export const EffectFnUpdated = Schema.TaggedStruct("EffectFnUpdated", {
+  entityId: OmnigraphEntityId,
   wasStubBefore: Schema.Boolean,
   stubAfter: Schema.Boolean,
   spanName: Schema.NullOr(OmnigraphSpanName),
 })
-export type EffectFnDiffChange = typeof EffectFnDiffChange.Type
+export type EffectFnUpdated = typeof EffectFnUpdated.Type
+
+export const EffectFnDeleted = Schema.TaggedStruct("EffectFnDeleted", {
+  entityId: OmnigraphEntityId,
+  wasStubBefore: Schema.Boolean,
+  spanName: Schema.NullOr(OmnigraphSpanName),
+})
+export type EffectFnDeleted = typeof EffectFnDeleted.Type
 
 export const EntityDiffChange = Schema.TaggedStruct("EntityDiffChange", {
   entityKind: OmnigraphEntityKind,
   typeName: OmnigraphTypeName,
   entityId: OmnigraphEntityId,
   op: OmnigraphChangeOp,
-  wasStubBefore: Schema.Boolean,
-  stubAfter: Schema.Boolean,
 })
 export type EntityDiffChange = typeof EntityDiffChange.Type
 
-export const OmnigraphDiffChangeSummary = Schema.Union([EffectFnDiffChange, EntityDiffChange])
+export const OmnigraphDiffChangeSummary = Schema.Union([
+  EffectFnInserted,
+  EffectFnUpdated,
+  EffectFnDeleted,
+  EntityDiffChange,
+])
 export type OmnigraphDiffChangeSummary = typeof OmnigraphDiffChangeSummary.Type
 
-export const MissingMergeBaseViolation = Schema.TaggedStruct("MissingMergeBaseViolation", {
-  ruleId: Schema.Literal("missing-merge-base"),
+export const MissingMergeBaseViolation = Schema.TaggedStruct("missing-merge-base", {
   message: ErrorReasonMessage,
 })
 export type MissingMergeBaseViolation = typeof MissingMergeBaseViolation.Type
 
-export const DryRunMergeConflictViolation = Schema.TaggedStruct("DryRunMergeConflictViolation", {
-  ruleId: Schema.Literal("dry-run-merge-conflict"),
+export const DryRunMergeConflictViolation = Schema.TaggedStruct("dry-run-merge-conflict", {
   message: ErrorReasonMessage,
   conflict: OmnigraphMergeConflictDetail,
 })
 export type DryRunMergeConflictViolation = typeof DryRunMergeConflictViolation.Type
 
-export const PlannedEffectFnDroppedViolation = Schema.TaggedStruct(
-  "PlannedEffectFnDroppedViolation",
-  {
-    ruleId: Schema.Literal("planned-effect-fn-dropped"),
-    message: ErrorReasonMessage,
-    change: OmnigraphDiffChangeSummary,
-  },
-)
+export const PlannedEffectFnDroppedViolation = Schema.TaggedStruct("planned-effect-fn-dropped", {
+  message: ErrorReasonMessage,
+  change: EffectFnDeleted,
+})
 export type PlannedEffectFnDroppedViolation = typeof PlannedEffectFnDroppedViolation.Type
 
+export const NoEffectFnImplementedViolation = Schema.TaggedStruct("no-effect-fn-implemented", {
+  message: ErrorReasonMessage,
+  activeDiffEffectFnCount: NonNegativeCount,
+})
+export type NoEffectFnImplementedViolation = typeof NoEffectFnImplementedViolation.Type
+
 export const UnimplementedStubRemainingViolation = Schema.TaggedStruct(
-  "UnimplementedStubRemainingViolation",
+  "unimplemented-stub-remaining",
   {
-    ruleId: Schema.Literal("unimplemented-stub-remaining"),
     message: ErrorReasonMessage,
-    change: Schema.NullOr(OmnigraphDiffChangeSummary),
+    change: Schema.NullOr(Schema.Union([EffectFnInserted, EffectFnUpdated])),
   },
 )
 export type UnimplementedStubRemainingViolation = typeof UnimplementedStubRemainingViolation.Type
@@ -151,6 +166,7 @@ export const OmnigraphBranchViolation = Schema.Union([
   MissingMergeBaseViolation,
   DryRunMergeConflictViolation,
   PlannedEffectFnDroppedViolation,
+  NoEffectFnImplementedViolation,
   UnimplementedStubRemainingViolation,
 ])
 export type OmnigraphBranchViolation = typeof OmnigraphBranchViolation.Type
@@ -158,6 +174,8 @@ export type OmnigraphBranchViolation = typeof OmnigraphBranchViolation.Type
 export const OmnigraphBranchDiffState = Schema.Union([
   Schema.TaggedStruct("ResolvedDiff", {
     changes: Schema.Array(OmnigraphDiffChangeSummary),
+    observedImplEffectFnCount: Schema.NullOr(NonNegativeCount),
+    unchangedStubCount: NonNegativeCount,
   }),
   Schema.TaggedStruct("MissingMergeBase", {}),
 ])
@@ -169,8 +187,6 @@ export const OmnigraphBranchVerifyInput = Schema.Struct({
   mainBranch: OmnigraphBranchName,
   diffState: OmnigraphBranchDiffState,
   dryRunConflicts: Schema.Array(OmnigraphMergeConflictDetail),
-  implEffectFnCount: NonNegativeCount,
-  remainingStubCount: NonNegativeCount,
 })
 export type OmnigraphBranchVerifyInput = typeof OmnigraphBranchVerifyInput.Type
 
@@ -217,8 +233,6 @@ export type OmnigraphLintDiagnostic = typeof OmnigraphLintDiagnostic.Type
 
 export const OmnigraphLintInput = Schema.Struct({
   statusOk: Schema.Boolean,
-  errorCount: NonNegativeCount,
-  warningCount: NonNegativeCount,
   queriesProcessed: NonNegativeCount,
   diagnostics: Schema.Array(OmnigraphLintDiagnostic),
   policy: OmnigraphLintPolicy,
@@ -226,12 +240,10 @@ export const OmnigraphLintInput = Schema.Struct({
 export type OmnigraphLintInput = typeof OmnigraphLintInput.Type
 
 export const OmnigraphLintViolation = Schema.Union([
-  Schema.TaggedStruct("LintStatusNotOkViolation", {
-    ruleId: Schema.Literal("omnigraph-lint-status-not-ok"),
+  Schema.TaggedStruct("omnigraph-lint-status-not-ok", {
     message: ErrorReasonMessage,
   }),
-  Schema.TaggedStruct("LintDiagnosticViolation", {
-    ruleId: Schema.Literal("omnigraph-lint-error"),
+  Schema.TaggedStruct("omnigraph-lint-error", {
     message: ErrorReasonMessage,
     diagnostic: Schema.NullOr(OmnigraphLintDiagnostic),
   }),
@@ -253,33 +265,13 @@ export const OmnigraphAuthTokensSchema = Schema.Struct({
 export type OmnigraphAuthTokens = typeof OmnigraphAuthTokensSchema.Type
 
 export const OmnigraphServerMetaSchema = Schema.Struct({
-  pid: Schema.optional(OmnigraphProcessId),
-  port: Schema.optional(OmnigraphTcpPort),
-  baseUrl: Schema.optional(OmnigraphBaseUrl),
-  canonicalRepoRoot: Schema.optional(WorkspaceFilePath),
-  updatedAt: Schema.optional(OmnigraphIsoTimestamp),
+  pid: OmnigraphProcessId,
+  port: OmnigraphTcpPort,
+  baseUrl: OmnigraphBaseUrl,
+  canonicalRepoRoot: WorkspaceFilePath,
+  updatedAt: Schema.NullOr(OmnigraphIsoTimestamp),
 })
 export type OmnigraphServerMeta = typeof OmnigraphServerMetaSchema.Type
-
-export const OmnigraphLintFindingWireSchema = Schema.Struct({
-  code: Schema.optional(OmnigraphDiagnosticCode),
-  message: Schema.optional(ErrorReasonMessage),
-  severity: Schema.optional(OmnigraphDiagnosticSeverity),
-  target: Schema.optional(Schema.NullOr(OmnigraphTargetName)),
-  target_name: Schema.optional(Schema.NullOr(OmnigraphTargetName)),
-  targetName: Schema.optional(Schema.NullOr(OmnigraphTargetName)),
-})
-export type OmnigraphLintFindingWire = typeof OmnigraphLintFindingWireSchema.Type
-
-export const OmnigraphLintCliOutputSchema = Schema.Struct({
-  status: Schema.optional(OmnigraphLintStatus),
-  errors: Schema.optional(NonNegativeCount),
-  warnings: Schema.optional(NonNegativeCount),
-  queries_processed: Schema.optional(NonNegativeCount),
-  findings: Schema.optional(Schema.Array(OmnigraphLintFindingWireSchema)),
-  diagnostics: Schema.optional(Schema.Array(OmnigraphLintFindingWireSchema)),
-})
-export type OmnigraphLintCliOutput = typeof OmnigraphLintCliOutputSchema.Type
 
 export class OmnigraphPreconditionError extends Schema.TaggedError<OmnigraphPreconditionError>()(
   "OmnigraphPreconditionError",

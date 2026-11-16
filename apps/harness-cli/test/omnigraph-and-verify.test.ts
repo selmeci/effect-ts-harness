@@ -848,7 +848,7 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
               outcome: "already_up_to_date",
               source: parsedReq.source ?? "impl/current",
               target: parsedReq.target ?? "main",
-              ...(isDryRun ? { dry_run: true } : {}),
+              ...(isDryRun ? { dry_run: true } : { branch_deleted: true }),
               commit: null,
               serverRef: "srv-1",
             }),

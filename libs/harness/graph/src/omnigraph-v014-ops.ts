@@ -69,19 +69,30 @@ export const readAuthTokensFromClusterDir = (
   if (!hostIo.existsSync(authPath)) {
     return undefined
   }
-  const raw = Result.getOrElse(
-    Result.try(() => hostIo.readTextSync(authPath)),
-    () => "",
-  )
-  return match(decodeAuthTokensOption(raw))
-    .with({ _tag: "Some" }, ({ value: tokens }) => {
-      const selected = match(actor)
-        .with("harness-cli", () => tokens.cliToken)
-        .with("agent-mcp", () => tokens.mcpToken)
-        .exhaustive()
-      return selected && selected.length > 0 ? selected : undefined
+  return match(Result.try(() => hostIo.readTextSync(authPath)))
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      process.stderr.write(
+        `[harness/graph] Warning: failed to read ${authPath}: ${toErrorReasonMessage(failure)}\n`,
+      )
+      return undefined
     })
-    .with({ _tag: "None" }, () => undefined)
+    .with({ _tag: "Success" }, ({ success: raw }) =>
+      match(decodeAuthTokensOption(raw))
+        .with({ _tag: "Some" }, ({ value: tokens }) => {
+          const selected = match(actor)
+            .with("harness-cli", () => tokens.cliToken)
+            .with("agent-mcp", () => tokens.mcpToken)
+            .exhaustive()
+          return selected && selected.length > 0 ? selected : undefined
+        })
+        .with({ _tag: "None" }, () => {
+          process.stderr.write(
+            `[harness/graph] Warning: failed to decode ${authPath} as OmnigraphAuthTokens JSON\n`,
+          )
+          return undefined
+        })
+        .exhaustive(),
+    )
     .exhaustive()
 }
 
@@ -154,18 +165,31 @@ export const mapOmnigraphConflictError = (
   if (cause instanceof ConflictError) {
     const conflicts: Array<OmnigraphMergeConflictDetail> = []
     for (const c of cause.mergeConflicts ?? []) {
-      const kind = Option.getOrElse(
+      const decodedOpt = Option.all([
         Schema.decodeOption(OmnigraphConflictKind)(c.kind),
-        () => "divergent_update" as const,
-      )
-      const entityKind = Option.getOrElse(
         Schema.decodeOption(OmnigraphEntityKind)(c.entityKind),
-        () => "node" as const,
-      )
-      const typeName = Option.getOrElse(
         Schema.decodeOption(OmnigraphTypeName)(c.typeName),
-        () => OmnigraphTypeName.make("Unknown"),
-      )
+      ])
+      const fieldsOrErr = match(decodedOpt)
+        .with({ _tag: "Some" }, ({ value: [kind, entityKind, typeName] }) => ({
+          ok: true as const,
+          kind,
+          entityKind,
+          typeName,
+        }))
+        .with({ _tag: "None" }, () => ({
+          ok: false as const,
+          error: new OmnigraphLoadError({
+            cause: new Error(
+              `Invalid Omnigraph merge conflict metadata (kind=${JSON.stringify(c.kind)}, entityKind=${JSON.stringify(c.entityKind)}, typeName=${JSON.stringify(c.typeName)})`,
+            ),
+          }),
+        }))
+        .exhaustive()
+      if (!fieldsOrErr.ok) {
+        return fieldsOrErr.error
+      }
+      const { kind, entityKind, typeName } = fieldsOrErr
       const entityIdRes = decodeStrictOptionalEntityId(c.entityId)
       const earlyErr = match(entityIdRes)
         .with({ _tag: "Failure" }, ({ failure }) => failure)

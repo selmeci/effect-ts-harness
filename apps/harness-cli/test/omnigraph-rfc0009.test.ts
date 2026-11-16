@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process"
+import { execFileSync, spawn } from "node:child_process"
 import { createServer } from "node:http"
 import type { AddressInfo } from "node:net"
 import {
@@ -28,6 +28,7 @@ import {
 import { nodeSyncHostIo } from "@harness/infra"
 import {
   isBranchNotFoundError,
+  runOmnigraphMaintenance,
   runPreMergeOmnigraphBranchVerify,
   syncOmnigraphOnDone,
   syncVerifyImplToOmnigraph,
@@ -43,6 +44,7 @@ import {
   releaseOmnigraphClusterLock,
   runOfflineOmnigraphLintGate,
   runOmnigraphOptimizeAndCleanup,
+  tryAcquireOmnigraphClusterLock,
   writeClusterDriftReceipts,
 } from "../src/commands/omnigraph-auth-and-drift.js"
 import {
@@ -258,7 +260,7 @@ exit 1
               outcome: "already_up_to_date",
               source: parsedReq.source ?? taskBranches.implBranch,
               target: parsedReq.target ?? taskBranches.mainBranch,
-              ...(isDryRun ? { dry_run: true } : {}),
+              ...(isDryRun ? { dry_run: true } : { branch_deleted: true }),
               commit: null,
               serverRef: "srv-1",
             }),
@@ -313,6 +315,7 @@ exit 1
         port,
         baseUrl: `http://127.0.0.1:${port}`,
         canonicalRepoRoot: canonicalRoot,
+        updatedAt: null,
       }),
       "utf8",
     )
@@ -505,6 +508,7 @@ EOF
         port,
         baseUrl: `http://127.0.0.1:${port}`,
         canonicalRepoRoot: canonicalRoot,
+        updatedAt: null,
       }),
       "utf8",
     )
@@ -652,7 +656,7 @@ EOF
                 outcome: "already_up_to_date",
                 source: parsedReq.source ?? taskBranches.implBranch,
                 target: parsedReq.target ?? taskBranches.mainBranch,
-                ...(isDryRun ? { dry_run: true } : {}),
+                ...(isDryRun ? { dry_run: true } : { branch_deleted: true }),
                 commit: null,
                 serverRef: "srv-1",
               }),
@@ -683,6 +687,7 @@ EOF
           port,
           baseUrl: `http://127.0.0.1:${port}`,
           canonicalRepoRoot: canonicalRoot,
+          updatedAt: null,
         }),
         "utf8",
       )
@@ -811,7 +816,7 @@ EOF
               outcome: "already_up_to_date",
               source: parsedReq.source ?? taskBranches.implBranch,
               target: parsedReq.target ?? taskBranches.mainBranch,
-              ...(isDryRun ? { dry_run: true } : {}),
+              ...(isDryRun ? { dry_run: true } : { branch_deleted: true }),
               commit: null,
               serverRef: "srv-1",
             }),
@@ -840,6 +845,7 @@ EOF
         port,
         baseUrl: `http://127.0.0.1:${port}`,
         canonicalRepoRoot: canonicalRoot,
+        updatedAt: null,
       }),
       "utf8",
     )
@@ -1107,7 +1113,7 @@ setTimeout(() => process.exit(0), 5000);
       ["policy", "validate", "--target", `file://${tempClusterDir}`],
       { encoding: "utf8" },
     )
-    expect(validateOut.length).toBeGreaterThanOrEqual(0)
+    expect(validateOut).toContain("policy valid: bundle 'graph-access'")
 
     const testOut = execFileSync(
       omnigraphBin,
@@ -1121,7 +1127,7 @@ setTimeout(() => process.exit(0), 5000);
       ],
       { encoding: "utf8" },
     )
-    expect(testOut.length).toBeGreaterThanOrEqual(0)
+    expect(testOut).toContain("policy tests passed: 13 cases")
   })
 
   it("F-7.4 & S-2.1: tools/omnigraph-mcp-launcher.mjs enforces loopback, canonicalRepoRoot, live PID, and 0o600 auth-tokens checks", () => {
@@ -1285,7 +1291,7 @@ setTimeout(() => process.exit(0), 5000);
     const port = (server.address() as AddressInfo).port
     writeFileSync(
       join(clusterDir, "server.json"),
-      JSON.stringify({ pid: process.pid, port, baseUrl: `http://127.0.0.1:${port}`, canonicalRepoRoot: canonicalRoot }),
+      JSON.stringify({ pid: process.pid, port, baseUrl: `http://127.0.0.1:${port}`, canonicalRepoRoot: canonicalRoot, updatedAt: null }),
       "utf8",
     )
 
@@ -1315,15 +1321,16 @@ setTimeout(() => process.exit(0), 5000);
       )
       expect(res?.exitCode).toBe(1)
       expect(res?.stderr).toContain("[unimplemented-stub-remaining]")
-      expect(res?.stderr).toContain("1 stub node(s)")
+      expect(res?.stderr).toContain("1 unchanged stub node(s)")
     } finally {
       server.closeAllConnections()
       server.close()
     }
   })
 
-  it("F-10.1 & F-10.2 & F-14.1: isBranchNotFoundError, HTTP 500/401 diff failure, and Antigravity hook exitCode 0", async () => {
-    expect(isBranchNotFoundError({ name: "NotFoundError", message: "missing" })).toBe(true)
+  it("isBranchNotFoundError, HTTP 500/401 diff failure, and Antigravity hook exitCode 0", async () => {
+    expect(isBranchNotFoundError({ name: "NotFoundError", message: "missing" })).toBe(false)
+    expect(isBranchNotFoundError({ status: 404, message: "not found" })).toBe(false)
     expect(isBranchNotFoundError({ code: "branch_not_found" })).toBe(true)
     expect(isBranchNotFoundError({ status: 404, message: "branch plan/current not found" })).toBe(true)
     expect(isBranchNotFoundError(new Error("listening on port 4040"))).toBe(false)
@@ -1365,7 +1372,7 @@ setTimeout(() => process.exit(0), 5000);
     const port = (server.address() as AddressInfo).port
     writeFileSync(
       join(clusterDir, "server.json"),
-      JSON.stringify({ pid: process.pid, port, baseUrl: `http://127.0.0.1:${port}`, canonicalRepoRoot: canonicalRoot }),
+      JSON.stringify({ pid: process.pid, port, baseUrl: `http://127.0.0.1:${port}`, canonicalRepoRoot: canonicalRoot, updatedAt: null }),
       "utf8",
     )
 
@@ -1388,12 +1395,12 @@ setTimeout(() => process.exit(0), 5000);
     }
   })
 
-  it("F-13.1 & F-13.2 & F-13.3: startup lock prevents stealing live PID lock, enforces compare-and-delete, and waits on contention", async () => {
+  it("startup lock prevents stealing live PID lock, enforces compare-and-delete, and waits on contention", async () => {
     const repoRoot = makeTempRepo("harness-rfc0009-locks-")
     const clusterDir = join(repoRoot, ".harness", "omnigraph-cluster")
     const lockPath = `${clusterDir}.startup.lock`
 
-    // F-13.2: old lock owned by live PID is NOT stolen
+    // Old lock owned by live PID is NOT stolen
     mkdirSync(join(repoRoot, ".harness"), { recursive: true })
     writeFileSync(
       lockPath,
@@ -1404,11 +1411,11 @@ setTimeout(() => process.exit(0), 5000);
     utimesSync(lockPath, oldDate, oldDate)
     expect(acquireOmnigraphClusterLock(clusterDir)).toBeUndefined()
 
-    // F-13.2: releaseOmnigraphClusterLock does not unlink lock owned by another token
+    // releaseOmnigraphClusterLock does not unlink lock owned by another token
     releaseOmnigraphClusterLock({ lockPath, lockToken: "wrong-token" })
     expect(nodeSyncHostIo.existsSync(lockPath)).toBe(true)
 
-    // F-13.3: acquireOmnigraphClusterLockEffect waits and acquires when lock is released
+    // acquireOmnigraphClusterLockEffect waits and acquires when lock is released
     setTimeout(() => {
       rmSync(lockPath, { force: true })
     }, 150)
@@ -1419,7 +1426,7 @@ setTimeout(() => process.exit(0), 5000);
       expect(nodeSyncHostIo.existsSync(lockPath)).toBe(false)
     }
 
-    // F-13.3: bounded timeout returns undefined when live owner holds lock
+    // Bounded timeout returns undefined when live owner holds lock
     writeFileSync(
       lockPath,
       JSON.stringify({ pid: process.pid, lockToken: "held-token", createdAtMs: Date.now() }),
@@ -1429,7 +1436,7 @@ setTimeout(() => process.exit(0), 5000);
     expect(timedOut).toBeUndefined()
     rmSync(lockPath, { force: true })
 
-    // F-13.1: ensureLocalOmnigraphReady waits on startup lock before evaluating readyz/drift
+    // ensureLocalOmnigraphReady waits on startup lock before evaluating readyz/drift
     const configDir = join(repoRoot, "libs", "harness", "graph")
     const initDrift = await Effect.runPromise(evaluateClusterConfigDrift(clusterDir, configDir, false))
     writeClusterDriftReceipts(clusterDir, initDrift.expectedStamp, configDir)
@@ -1452,7 +1459,7 @@ setTimeout(() => process.exit(0), 5000);
     const readyPort = (readyServer.address() as AddressInfo).port
     writeFileSync(
       join(clusterDir, "server.json"),
-      JSON.stringify({ pid: process.pid, port: readyPort, baseUrl: `http://127.0.0.1:${readyPort}`, canonicalRepoRoot: canonicalRoot }),
+      JSON.stringify({ pid: process.pid, port: readyPort, baseUrl: `http://127.0.0.1:${readyPort}`, canonicalRepoRoot: canonicalRoot, updatedAt: null }),
       "utf8",
     )
     writeFileSync(
@@ -1474,8 +1481,8 @@ setTimeout(() => process.exit(0), 5000);
     }
   })
 
-  it("F-16.2 & F-16.4 & F-17.1a & S-3.1: handleGc --strict compact, syncVerifyImplToOmnigraph putBlob, LoadErr, lifecycle helpers, and isolated telemetry", async () => {
-    // F-16.2: gc --strict invokes optimize/cleanup on non-isolated cluster dir
+  it("handleGc --strict runs optimize only, syncVerifyImplToOmnigraph uploads and stats blob, lifecycle helpers guard unsafe PIDs, and isolated done skips omnigraph:merge-main telemetry", async () => {
+    // gc --strict invokes optimize only (without destructive cleanup) on non-isolated cluster dir
     const gcRepo = makeTempRepo("harness-rfc0009-gc-")
     const gcClusterDir = resolveOmnigraphClusterDir(gcRepo, nodeSyncHostIo)
     mkdirSync(gcClusterDir, { recursive: true })
@@ -1490,13 +1497,21 @@ setTimeout(() => process.exit(0), 5000);
       await Effect.runPromise(handleGc(["gc", "--strict"], { repoRoot: gcRepo }))
       const optLog = readFileSync(gcOptLog, "utf8")
       expect(optLog).toContain("optimize")
-      expect(optLog).toContain("cleanup")
+      expect(optLog).not.toContain("cleanup")
+
+      // runOmnigraphMaintenance with includeCleanup: true (used by done) runs optimize + cleanup
+      writeFileSync(gcOptLog, "", "utf8")
+      runOmnigraphMaintenance(gcRepo, { includeCleanup: true })
+      const doneOptLog = readFileSync(gcOptLog, "utf8")
+      expect(doneOptLog).toContain("optimize")
+      expect(doneOptLog).toContain("cleanup --target")
+      expect(doneOptLog).toContain("--keep 5 --confirm")
     } finally {
       if (prevHome === undefined) Reflect.deleteProperty(process.env, "HOME")
       else process.env.HOME = prevHome
     }
 
-    // F-16.4 & F-17.1a: syncVerifyImplToOmnigraph sends putBlob when spans.jsonl + VitestCase exist
+    // syncVerifyImplToOmnigraph sends putBlob + statBlob when spans.jsonl + VitestCase exist
     const verifyRepo = makeTempRepo("harness-rfc0009-putblob-")
     const verifyClusterDir = resolveOmnigraphClusterDir(verifyRepo, nodeSyncHostIo)
     mkdirSync(verifyClusterDir, { recursive: true })
@@ -1507,6 +1522,7 @@ setTimeout(() => process.exit(0), 5000);
     const canonicalRoot = resolveCanonicalRepoRoot(verifyRepo, nodeSyncHostIo)
     const taskBranches = resolveOmnigraphTaskBranches(verifyRepo, nodeSyncHostIo)
     const putBlobRequests: Array<string> = []
+    const statBlobRequests: Array<string> = []
     const headers = { "Content-Type": "application/json", "Omnigraph-Http-Api": "0.14" } as const
     const server = createServer((req, res) => {
       const url = req.url ?? ""
@@ -1527,6 +1543,17 @@ setTimeout(() => process.exit(0), 5000);
             serverRef: "srv-1",
           }),
         )
+        return
+      }
+      if (req.method === "HEAD" && url.includes("/blob")) {
+        statBlobRequests.push(url)
+        res.writeHead(200, {
+          "Content-Length": "10",
+          ETag: '"etag-1"',
+          "Content-Type": "application/octet-stream",
+          "Omnigraph-Http-Api": "0.14",
+        })
+        res.end()
         return
       }
       if (url.includes("/load")) {
@@ -1558,7 +1585,7 @@ setTimeout(() => process.exit(0), 5000);
     const port = (server.address() as AddressInfo).port
     writeFileSync(
       join(verifyClusterDir, "server.json"),
-      JSON.stringify({ pid: process.pid, port, baseUrl: `http://127.0.0.1:${port}`, canonicalRepoRoot: canonicalRoot }),
+      JSON.stringify({ pid: process.pid, port, baseUrl: `http://127.0.0.1:${port}`, canonicalRepoRoot: canonicalRoot, updatedAt: null }),
       "utf8",
     )
     const okBin = join(verifyRepo, "omnigraph-ok.sh")
@@ -1594,6 +1621,7 @@ setTimeout(() => process.exit(0), 5000);
       expect(syncRes).toBeUndefined()
       expect(putBlobRequests.length).toBe(1)
       expect(putBlobRequests[0]).toContain("spanTraceBlob")
+      expect(statBlobRequests.length).toBe(1)
     } finally {
       server.closeAllConnections()
       server.close()
@@ -1601,11 +1629,11 @@ setTimeout(() => process.exit(0), 5000);
       else process.env.HOME = prevHome
     }
 
-    // F-17.1a: killOmnigraphServerPidIfAlive refuses unsafe PID (e.g. current vitest PID) & stopStaleOmnigraphClusterBeforeDelete
+    // killOmnigraphServerPidIfAlive refuses unsafe PID (current vitest PID) & stopStaleOmnigraphClusterBeforeDelete
     expect(await Effect.runPromise(killOmnigraphServerPidIfAlive(process.pid, gcClusterDir, "test"))).toBe(false)
     expect(stopStaleOmnigraphClusterBeforeDelete(gcClusterDir, undefined)).toBe(true)
 
-    // S-3.1: isolated workspace telemetry includes skipped-isolated-workspace
+    // Isolated workspace syncOmnigraphOnDone does not record omnigraph:merge-main telemetry
     const isoDir = mkdtempSync(join(tmpdir(), "harness-rfc0009-iso-"))
     tempDirs.push(isoDir)
     const isoRes = await Effect.runPromise(
@@ -1613,7 +1641,381 @@ setTimeout(() => process.exit(0), 5000);
     )
     expect(isoRes).toBeUndefined()
     const telemetryLines = readTelemetryEvents(isoDir, nodeSyncHostIo)
-    expect(telemetryLines[0]?.detail).toBe("skipped-isolated-workspace")
-    expect(telemetryLines[0]?.durationMs).toBeGreaterThanOrEqual(0)
+    expect(telemetryLines.some((e) => e.toolName === "omnigraph:merge-main")).toBe(false)
+  })
+
+  it("startup lock steals dead-PID and aged corrupt locks, respects 2000ms grace on fresh corrupt locks, and aborts immediately on Failed", async () => {
+    const repoRoot = makeTempRepo("harness-rfc0009-lock-r2-")
+    const clusterDir = join(repoRoot, ".harness", "omnigraph-cluster")
+    mkdirSync(join(repoRoot, ".harness"), { recursive: true })
+    const lockPath = `${clusterDir}.startup.lock`
+
+    // Dead PID lock is stolen
+    writeFileSync(lockPath, JSON.stringify({ pid: 999999, lockToken: "dead", createdAtMs: 1 }), "utf8")
+    const deadRes = tryAcquireOmnigraphClusterLock(clusterDir)
+    expect(deadRes._tag).toBe("Acquired")
+    match(deadRes)
+      .with({ _tag: "Acquired" }, ({ handle }) => releaseOmnigraphClusterLock(handle))
+      .with({ _tag: "Contended" }, { _tag: "Failed" }, () => undefined)
+      .exhaustive()
+
+    // Fresh unparseable lock (< 2000ms) is Contended
+    writeFileSync(lockPath, "{partial-json", "utf8")
+    expect(tryAcquireOmnigraphClusterLock(clusterDir)._tag).toBe("Contended")
+
+    // Aged unparseable lock (>= 2000ms) is stolen
+    const aged = new Date(Date.now() - 5_000)
+    utimesSync(lockPath, aged, aged)
+    const agedRes = tryAcquireOmnigraphClusterLock(clusterDir)
+    expect(agedRes._tag).toBe("Acquired")
+    match(agedRes)
+      .with({ _tag: "Acquired" }, ({ handle }) => releaseOmnigraphClusterLock(handle))
+      .with({ _tag: "Contended" }, { _tag: "Failed" }, () => undefined)
+      .exhaustive()
+
+    // Failed write aborts acquireOmnigraphClusterLockEffect immediately
+    vi.spyOn(nodeSyncHostIo, "tryWriteExclusiveTextSync").mockReturnValue({
+      _tag: "Failed",
+      code: "EACCES",
+      message: "EACCES: permission denied",
+    })
+    const stderrChunks: Array<string> = []
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderrChunks.push(String(chunk))
+      return true
+    })
+    const started = Date.now()
+    const failedHandle = await Effect.runPromise(acquireOmnigraphClusterLockEffect(clusterDir, 10_000))
+    stderrSpy.mockRestore()
+    expect(failedHandle).toBeUndefined()
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(stderrChunks.join("")).toContain("EACCES: permission denied")
+  })
+
+  it("killOmnigraphServerPidIfAlive terminates a real matching omnigraph-server child process", async () => {
+    const repoRoot = makeTempRepo("harness-rfc0009-kill-real-")
+    const clusterDir = resolveOmnigraphClusterDir(repoRoot, nodeSyncHostIo)
+    mkdirSync(clusterDir, { recursive: true })
+    const scriptPath = join(repoRoot, "omnigraph-server")
+    writeFileSync(scriptPath, "setInterval(() => {}, 1000)\n", "utf8")
+    const child = spawn(process.execPath, [scriptPath, "--cluster", `file://${clusterDir}`], {
+      stdio: "ignore",
+    })
+    expect(child.pid).toBeDefined()
+    const pid = child.pid!
+    try {
+      const killed = await Effect.runPromise(killOmnigraphServerPidIfAlive(pid, clusterDir, "test-kill"))
+      expect(killed).toBe(true)
+    } finally {
+      try {
+        process.kill(pid, "SIGKILL")
+      } catch {
+        // already exited
+      }
+    }
+  })
+
+  it("ensureLocalOmnigraphReady kills spawned server if writeServerMetaAtomic fails and handles unreadable server.json", async () => {
+    const repoRoot = makeTempRepo("harness-rfc0009-meta-fail-")
+    const fakeHome = join(repoRoot, "fake-home")
+    const binDir = join(fakeHome, ".local", "bin")
+    mkdirSync(binDir, { recursive: true })
+    const canonicalRoot = resolveCanonicalRepoRoot(repoRoot, nodeSyncHostIo)
+    const port = deriveRepoOmnigraphPort(canonicalRoot, nodeSyncHostIo)
+    const pidFile = join(repoRoot, "spawned.pid")
+
+    const fakeCli = join(binDir, "omnigraph")
+    writeFileSync(
+      fakeCli,
+      `#!/bin/sh
+if [ "$1" = "cluster" ] && [ "$2" = "apply" ]; then
+  mkdir -p "${join(repoRoot, ".harness", "omnigraph-cluster", "graphs", "harness.omni")}"
+  echo '{"status":"applied"}'
+fi
+exit 0
+`,
+      "utf8",
+    )
+    chmodSync(fakeCli, 0o755)
+    const fakeServer = join(binDir, "omnigraph-server")
+    writeFileSync(
+      fakeServer,
+      `#!${process.execPath}
+const http = require("node:http");
+const fs = require("node:fs");
+fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+const server = http.createServer((_req, res) => {
+  res.writeHead(200, { "Content-Type": "application/json", "Omnigraph-Http-Api": "0.14" });
+  res.end(JSON.stringify({ ready: true, status: "serving", ready_graph_count: 1 }));
+});
+server.listen(${port}, "127.0.0.1");
+setTimeout(() => process.exit(0), 10000);
+`,
+      "utf8",
+    )
+    chmodSync(fakeServer, 0o755)
+
+    const origRename = nodeSyncHostIo.renameSync.bind(nodeSyncHostIo)
+    vi.spyOn(nodeSyncHostIo, "renameSync").mockImplementation((from, to) => {
+      if (to.endsWith("server.json")) {
+        throw new Error("ENOSPC: disk full")
+      }
+      origRename(from, to)
+    })
+
+    const prevHome = process.env.HOME
+    const prevUrl = process.env.OMNIGRAPH_URL
+    process.env.HOME = fakeHome
+    Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
+    try {
+      const ready = await Effect.runPromise(ensureLocalOmnigraphReady(repoRoot))
+      expect(ready).toBe(false)
+      const spawnedPid = Number(readFileSync(pidFile, "utf8").trim())
+      expect(Number.isInteger(spawnedPid)).toBe(true)
+      let alive = true
+      try {
+        process.kill(spawnedPid, 0)
+      } catch {
+        alive = false
+      }
+      expect(alive).toBe(false)
+    } finally {
+      if (prevHome === undefined) Reflect.deleteProperty(process.env, "HOME")
+      else process.env.HOME = prevHome
+      if (prevUrl === undefined) Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
+      else process.env.OMNIGRAPH_URL = prevUrl
+    }
+
+    // Unreadable server.json triggers warning and stale cluster stop
+    const repo2 = makeTempRepo("harness-rfc0009-unread-meta-")
+    const clusterDir2 = resolveOmnigraphClusterDir(repo2, nodeSyncHostIo)
+    mkdirSync(clusterDir2, { recursive: true })
+    const drift2 = await Effect.runPromise(
+      evaluateClusterConfigDrift(clusterDir2, join(repo2, "libs", "harness", "graph"), false),
+    )
+    writeClusterDriftReceipts(clusterDir2, drift2.expectedStamp, join(repo2, "libs", "harness", "graph"))
+    writeFileSync(join(clusterDir2, "server.json"), "{}", "utf8")
+    const origRead = nodeSyncHostIo.readTextSync.bind(nodeSyncHostIo)
+    vi.spyOn(nodeSyncHostIo, "readTextSync").mockImplementation((p) => {
+      if (p.endsWith("server.json")) throw new Error("EACCES: unreadable")
+      return origRead(p)
+    })
+    const execCalls: Array<string> = []
+    const origExec = nodeSyncHostIo.execFileSync.bind(nodeSyncHostIo)
+    vi.spyOn(nodeSyncHostIo, "execFileSync").mockImplementation((cmd, args, opts) => {
+      execCalls.push(`${cmd} ${args.join(" ")}`)
+      if (cmd === "pkill") {
+        return { _tag: "Exited", exitCode: 1, stdout: "", stderr: "" }
+      }
+      return origExec(cmd, args, opts)
+    })
+    const stderrChunks2: Array<string> = []
+    const stderrSpy2 = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderrChunks2.push(String(chunk))
+      return true
+    })
+    process.env.HOME = join(repo2, "missing-home")
+    try {
+      const ready2 = await Effect.runPromise(ensureLocalOmnigraphReady(repo2))
+      expect(ready2).toBe(false)
+      expect(stderrChunks2.join("")).toContain("failed to read")
+      expect(execCalls.some((c) => c.startsWith("pkill "))).toBe(true)
+    } finally {
+      stderrSpy2.mockRestore()
+      if (prevHome === undefined) Reflect.deleteProperty(process.env, "HOME")
+      else process.env.HOME = prevHome
+    }
+  })
+
+  it("syncOmnigraphOnDone uploads and verifies spanTraceBlob via putBlob + statBlob and fails closed on statBlob 404", async () => {
+    const repoRoot = makeTempRepo("harness-rfc0009-done-blob-")
+    const configDir = join(repoRoot, "libs", "harness", "graph")
+    const clusterDir = resolveOmnigraphClusterDir(repoRoot, nodeSyncHostIo)
+    mkdirSync(clusterDir, { recursive: true })
+    const drift = await Effect.runPromise(evaluateClusterConfigDrift(clusterDir, configDir, false))
+    writeClusterDriftReceipts(clusterDir, drift.expectedStamp, configDir)
+    const canonicalRoot = resolveCanonicalRepoRoot(repoRoot, nodeSyncHostIo)
+    const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
+
+    let statStatus = 200
+    let putCount = 0
+    let statCount = 0
+    const headers = { "Content-Type": "application/json", "Omnigraph-Http-Api": "0.14" } as const
+    const server = createServer((req, res) => {
+      const url = req.url ?? ""
+      if (url === "/readyz") {
+        res.writeHead(200, headers)
+        res.end(JSON.stringify({ ready: true, status: "serving", ready_graph_count: 1 }))
+        return
+      }
+      if (req.method === "PUT" && url.includes("/blob")) {
+        putCount += 1
+        res.writeHead(200, headers)
+        res.end(JSON.stringify({ outcome: "written", sha256: "abc", size: 10, etag: '"e1"', serverRef: "srv-1" }))
+        return
+      }
+      if (req.method === "HEAD" && url.includes("/blob")) {
+        statCount += 1
+        res.writeHead(statStatus, {
+          "Content-Length": "10",
+          ETag: '"e1"',
+          "Content-Type": "application/octet-stream",
+          "Omnigraph-Http-Api": "0.14",
+        })
+        res.end()
+        return
+      }
+      if (url.includes("/load")) {
+        res.writeHead(200, headers)
+        res.end(JSON.stringify({ outcome: "loaded", commit_id: "c1", nodes_loaded: 1, edges_loaded: 0 }))
+        return
+      }
+      if (url.includes("/branches/diff")) {
+        res.writeHead(200, headers)
+        res.end(JSON.stringify({ outcome: "ok", from_commit_id: "c0", to_commit_id: "c1", changes: [], netNodeCount: 0, netEdgeCount: 0 }))
+        return
+      }
+      if (url.includes("/branches/merge")) {
+        let body = ""
+        req.on("data", (c) => { body += String(c) })
+        req.on("end", () => {
+          const isDryRun = body.includes('"dry_run":true')
+          res.writeHead(200, headers)
+          res.end(
+            JSON.stringify({
+              outcome: "already_up_to_date",
+              source: taskBranches.implBranch,
+              target: taskBranches.mainBranch,
+              ...(isDryRun ? { dry_run: true } : { branch_deleted: true }),
+              commit: null,
+            }),
+          )
+        })
+        return
+      }
+      res.writeHead(200, headers)
+      res.end(JSON.stringify({ outcome: "ok", branches: [taskBranches.mainBranch, taskBranches.implBranch] }))
+    })
+    await new Promise<void>((resolvePromise, rejectPromise) => {
+      server.once("error", rejectPromise)
+      server.listen(0, "127.0.0.1", () => resolvePromise())
+    })
+    const port = (server.address() as AddressInfo).port
+    writeFileSync(
+      join(clusterDir, "server.json"),
+      JSON.stringify({ pid: process.pid, port, baseUrl: `http://127.0.0.1:${port}`, canonicalRepoRoot: canonicalRoot, updatedAt: null }),
+      "utf8",
+    )
+    mkdirSync(join(repoRoot, ".harness"), { recursive: true })
+    writeFileSync(join(repoRoot, ".harness", "spans.jsonl"), '{"span":"done-test"}\n', "utf8")
+    const g = buildHarnessGraph({
+      tests: [{ testId: "tc-done-1", testFile: "test/demo.test.ts", testName: "demo", line: 1, isPropertyTest: false }],
+    })
+    saveGraphSnapshot(g, join(repoRoot, ".harness", "graph-snapshot.json"), nodeSyncHostIo)
+
+    try {
+      const okRes = await Effect.runPromise(syncOmnigraphOnDone(repoRoot, { repoRoot }, false, "block"))
+      expect(okRes).toBeUndefined()
+      expect(putCount).toBe(1)
+      expect(statCount).toBe(1)
+
+      statStatus = 404
+      const failRes = await Effect.runPromise(syncOmnigraphOnDone(repoRoot, { repoRoot }, false, "block"))
+      expect(failRes?.exitCode).toBe(1)
+      expect(failRes?.stderr).toContain("done:omnigraph-span-blob")
+    } finally {
+      server.closeAllConnections()
+      server.close()
+    }
+  })
+
+  it("runOfflineOmnigraphLintGate trims untrimmed/empty target diagnostics, negative drift stays NoOp, [state_lock_held] logs Info, and launcher emits stderr warnings", async () => {
+    const repoRoot = makeTempRepo("harness-rfc0009-r2-misc-")
+    const configDir = join(repoRoot, "libs", "harness", "graph")
+    const clusterDir = join(repoRoot, ".harness", "omnigraph-cluster")
+
+    // Untrimmed/empty target diagnostic decoding
+    const lintBin = join(repoRoot, "omnigraph-untrimmed.sh")
+    writeFileSync(
+      lintBin,
+      `#!/bin/sh
+cat <<'EOF'
+{"status":"error","queries_processed":1,"findings":[{"code":" Q001 ","message":" Bad query ","target":"   "}]}
+EOF
+exit 1
+`,
+      "utf8",
+    )
+    chmodSync(lintBin, 0o755)
+    const lintRes = await Effect.runPromise(runOfflineOmnigraphLintGate(repoRoot, lintBin))
+    expect(lintRes.ok).toBe(false)
+    if (!lintRes.ok) {
+      expect(lintRes.message).toContain("Bad query")
+      expect(lintRes.message).not.toContain("invalid JSON")
+    }
+
+    // Negative drift test: unedited config stays NoOp
+    writeFileSync(join(configDir, "graph.policy.yaml"), "version: 1\n", "utf8")
+    writeFileSync(join(configDir, "cluster.policy.yaml"), "version: 1\n", "utf8")
+    const initDrift = await Effect.runPromise(evaluateClusterConfigDrift(clusterDir, configDir, false))
+    writeClusterDriftReceipts(clusterDir, initDrift.expectedStamp, configDir)
+    expect((await Effect.runPromise(evaluateClusterConfigDrift(clusterDir, configDir, true))).action._tag).toBe("NoOp")
+    expect((await Effect.runPromise(evaluateClusterConfigDrift(clusterDir, configDir, false))).action._tag).toBe("NoOp")
+
+    // [state_lock_held] emits Info stderr
+    const lockHeldBin = join(repoRoot, "omnigraph-lockheld.sh")
+    writeFileSync(lockHeldBin, '#!/bin/sh\necho "[state_lock_held] busy" >&2\nexit 1\n', "utf8")
+    chmodSync(lockHeldBin, 0o755)
+    const infoChunks: Array<string> = []
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      infoChunks.push(String(chunk))
+      return true
+    })
+    runOmnigraphOptimizeAndCleanup(clusterDir, lockHeldBin, false)
+    stderrSpy.mockRestore()
+    expect(infoChunks.join("")).toContain("Info: skipped offline omnigraph optimize because cluster state lock is held")
+
+    // Launcher stderr warnings for missing auth-tokens.json when server.json exists & non-loopback OMNIGRAPH_URL
+    const launcherPath = resolve(import.meta.dirname, "../../../tools/omnigraph-mcp-launcher.mjs")
+    const binDir = join(repoRoot, "fake-bin")
+    mkdirSync(binDir, { recursive: true })
+    writeFileSync(join(binDir, "npx"), '#!/bin/sh\necho "{}"\n', "utf8")
+    chmodSync(join(binDir, "npx"), 0o755)
+    writeFileSync(
+      join(clusterDir, "server.json"),
+      JSON.stringify({ pid: 999999, port: 19999, baseUrl: "http://127.0.0.1:19999", canonicalRepoRoot: "/other/repo", updatedAt: null }),
+      "utf8",
+    )
+    const envClean: Record<string, string | undefined> = { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}` }
+    Reflect.deleteProperty(envClean, "OMNIGRAPH_URL")
+    Reflect.deleteProperty(envClean, "OMNIGRAPH_BASE_URL")
+    Reflect.deleteProperty(envClean, "OMNIGRAPH_TOKEN")
+    const warnOut = nodeSyncHostIo.execFileSync(process.execPath, [launcherPath], {
+      cwd: repoRoot,
+      env: envClean,
+      timeoutMs: 10_000,
+    })
+    match(warnOut)
+      .with({ _tag: "Exited" }, (ex) => {
+        expect(ex.stderr).toContain("canonicalRepoRoot mismatch")
+        expect(ex.stderr).toContain("auth-tokens.json does not exist")
+      })
+      .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, ({ _tag }) => {
+        expect.fail(`Expected Exited, got ${_tag}`)
+      })
+      .exhaustive()
+    const remoteOut = nodeSyncHostIo.execFileSync(process.execPath, [launcherPath], {
+      cwd: repoRoot,
+      env: { ...envClean, OMNIGRAPH_URL: "https://remote.example.com", OMNIGRAPH_TOKEN: "secret" },
+      timeoutMs: 10_000,
+    })
+    match(remoteOut)
+      .with({ _tag: "Exited" }, (ex) => {
+        expect(ex.stderr).toContain("not loopback; not forwarding OMNIGRAPH_TOKEN")
+      })
+      .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, ({ _tag }) => {
+        expect.fail(`Expected Exited, got ${_tag}`)
+      })
+      .exhaustive()
   })
 })

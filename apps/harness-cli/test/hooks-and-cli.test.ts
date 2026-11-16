@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process"
 import { createServer } from "node:http"
+import type { AddressInfo } from "node:net"
 import { EventEmitter } from "node:events"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -11,8 +12,6 @@ import { afterEach, describe, expect, it } from "vitest"
 import { makeMockDecisionModelLayer } from "@harness/decision"
 import { CLEF_SYSTEMONE_ONLY_BANNED_REASON, DstSeed, writeVerifyStamp } from "@harness/gates"
 import {
-  deriveRepoOmnigraphPort,
-  resolveCanonicalRepoRoot,
   resolveOmnigraphClusterDir,
 } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
@@ -1038,9 +1037,6 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
       mkdirSync(clusterDir, { recursive: true })
       writeFileSync(join(clusterDir, ".config-stamp"), "name: test\n\n---\n\n---\n")
 
-      const canonicalRoot = resolveCanonicalRepoRoot(dir, nodeSyncHostIo)
-      const defaultPort = deriveRepoOmnigraphPort(canonicalRoot, nodeSyncHostIo)
-
       const foreignServer = createServer((req, res) => {
         if (req.url === "/readyz") {
           res.writeHead(200, {
@@ -1054,21 +1050,20 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         res.end()
       })
 
-      const bound = await new Promise<boolean>((resolvePromise) => {
-        foreignServer.once("error", () => resolvePromise(false))
-        foreignServer.listen(defaultPort, "127.0.0.1", () => resolvePromise(true))
+      await new Promise<void>((resolvePromise, rejectPromise) => {
+        foreignServer.once("error", rejectPromise)
+        foreignServer.listen(0, "127.0.0.1", () => resolvePromise())
       })
-      if (!bound) {
-        return
-      }
+      const foreignPort = (foreignServer.address() as AddressInfo).port
 
       writeFileSync(
         join(clusterDir, "server.json"),
         JSON.stringify({
           pid: 999999,
-          port: defaultPort,
-          baseUrl: `http://127.0.0.1:${defaultPort}`,
+          port: foreignPort,
+          baseUrl: `http://127.0.0.1:${foreignPort}`,
           canonicalRepoRoot: "/other/repo",
+          updatedAt: null,
         }),
       )
 

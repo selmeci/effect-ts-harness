@@ -28,7 +28,10 @@ import {
   OmnigraphSync,
   PackageTag,
   pollOmnigraphChanges,
+  readAuthTokensFromClusterDir,
   readGraphHeadMeta,
+  readGraphHeadMetaState,
+  resolveOmnigraphBaseUrl,
   syncToOmnigraphAndSnapshot,
   toOmnigraphServerNdjson,
   updateGraphHeadCursor,
@@ -830,7 +833,13 @@ describe("Omnigraph v0.14.0 native capabilities (RFC-0009)", () => {
           )
           fs.writeFileSync(
             path.join(clusterDir, "server.json"),
-            JSON.stringify({ baseUrl: "http://127.0.0.1:18999", canonicalRepoRoot: tmpRepo }),
+            JSON.stringify({
+              pid: process.pid,
+              port: 18999,
+              baseUrl: "http://127.0.0.1:18999",
+              canonicalRepoRoot: tmpRepo,
+              updatedAt: null,
+            }),
           )
 
           let seenAuthHeader: string | null = null
@@ -1217,6 +1226,162 @@ describe("Omnigraph v0.14.0 native capabilities (RFC-0009)", () => {
         expect(merged?.changeFeedCursor).toBe("cur-merged-1")
       } finally {
         fs.rmSync(tmpRepo, { recursive: true, force: true })
+      }
+    }),
+  )
+
+  it("R2-P1: resolveOmnigraphBaseUrl and makeOmnigraphClient default env to process.env while explicit {} isolates", () => {
+    const prevUrl = process.env["OMNIGRAPH_URL"]
+    const prevTok = process.env["OMNIGRAPH_TOKEN"]
+    try {
+      process.env["OMNIGRAPH_URL"] = "http://127.0.0.1:19444"
+      process.env["OMNIGRAPH_TOKEN"] = "env-default-token"
+
+      expect(resolveOmnigraphBaseUrl()).toBe("http://127.0.0.1:19444")
+      expect(resolveOmnigraphBaseUrl(undefined, {})).toBe("http://127.0.0.1:8080")
+
+      const client = makeOmnigraphClient(undefined, testHostIo)
+      expect(client).toBeDefined()
+    } finally {
+      if (prevUrl === undefined) {
+        delete process.env["OMNIGRAPH_URL"]
+      } else {
+        process.env["OMNIGRAPH_URL"] = prevUrl
+      }
+      if (prevTok === undefined) {
+        delete process.env["OMNIGRAPH_TOKEN"]
+      } else {
+        process.env["OMNIGRAPH_TOKEN"] = prevTok
+      }
+    }
+  })
+
+  it("R2-P3: readGraphHeadMetaState distinguishes Present/Missing/Corrupt and updateGraphHeadCursor refuses corrupt overwrite", () => {
+    const tmpRepo = fs.mkdtempSync(path.join(tmpdir(), "og-v014-r2p3-"))
+    const stderrChunks: Array<string> = []
+    const origWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+      return true
+    }) as typeof process.stderr.write
+    try {
+      expect(readGraphHeadMetaState(tmpRepo, testHostIo, {})).toEqual({ _tag: "Missing" })
+
+      const metaPath = path.join(tmpRepo, ".harness", "graph-head.json")
+      fs.mkdirSync(path.dirname(metaPath), { recursive: true })
+      fs.writeFileSync(metaPath, "{corrupt-meta", "utf8")
+
+      const corruptState = readGraphHeadMetaState(tmpRepo, testHostIo, {})
+      match(corruptState)
+        .with({ _tag: "Corrupt" }, ({ path: corruptPath }) => {
+          expect(corruptPath).toBe(metaPath)
+        })
+        .with({ _tag: "Present" }, () => expect.fail("Expected Corrupt state"))
+        .with({ _tag: "Missing" }, () => expect.fail("Expected Corrupt state"))
+        .exhaustive()
+
+      const cursorRes = updateGraphHeadCursor(
+        tmpRepo,
+        testHostIo,
+        OmnigraphChangeCursor.make("cur-should-not-write"),
+        {},
+      )
+      expect(cursorRes).toBeNull()
+      expect(fs.readFileSync(metaPath, "utf8")).toBe("{corrupt-meta")
+      expect(stderrChunks.join("")).toContain("refusing cursor update on corrupt")
+
+      writeGraphHeadMeta(
+        tmpRepo,
+        testHostIo,
+        { headSha: "sha-ok", gitBranch: "main" },
+        {},
+      )
+      const presentState = readGraphHeadMetaState(tmpRepo, testHostIo, {})
+      match(presentState)
+        .with({ _tag: "Present" }, ({ meta }) => {
+          expect(meta.headSha).toBe("sha-ok")
+        })
+        .with({ _tag: "Missing" }, () => expect.fail("Expected Present state"))
+        .with({ _tag: "Corrupt" }, () => expect.fail("Expected Present state"))
+        .exhaustive()
+    } finally {
+      process.stderr.write = origWrite
+      fs.rmSync(tmpRepo, { recursive: true, force: true })
+    }
+  })
+
+  it("R2-I3a: logs stderr warnings on corrupt auth-tokens.json and server.json", () => {
+    const tmpRepo = fs.mkdtempSync(path.join(tmpdir(), "og-v014-r2i3a-"))
+    const stderrChunks: Array<string> = []
+    const origWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+      return true
+    }) as typeof process.stderr.write
+    try {
+      const clusterDir = path.join(tmpRepo, ".harness", "omnigraph-cluster")
+      fs.mkdirSync(clusterDir, { recursive: true })
+      fs.writeFileSync(path.join(clusterDir, "auth-tokens.json"), "{corrupt-auth", "utf8")
+      fs.writeFileSync(path.join(clusterDir, "server.json"), "{corrupt-server", "utf8")
+
+      expect(readAuthTokensFromClusterDir(clusterDir, testHostIo, "harness-cli")).toBeUndefined()
+      const fallbackUrl = resolveOmnigraphBaseUrl({ repoRoot: tmpRepo }, {}, testHostIo)
+      expect(fallbackUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
+
+      const logs = stderrChunks.join("")
+      expect(logs).toContain("failed to decode")
+      expect(logs).toContain("OmnigraphAuthTokens")
+      expect(logs).toContain("OmnigraphServerMeta")
+
+      stderrChunks.length = 0
+      fs.writeFileSync(
+        path.join(clusterDir, "server.json"),
+        JSON.stringify({
+          pid: process.pid,
+          port: 18081,
+          baseUrl: "https://remote.example.com",
+          canonicalRepoRoot: tmpRepo,
+          updatedAt: null,
+        }),
+        "utf8",
+      )
+      resolveOmnigraphBaseUrl({ repoRoot: tmpRepo }, {}, testHostIo)
+      expect(stderrChunks.join("")).toContain("ignoring non-loopback baseUrl")
+    } finally {
+      process.stderr.write = origWrite
+      fs.rmSync(tmpRepo, { recursive: true, force: true })
+    }
+  })
+
+  it.effect("R2-I8c: mapOmnigraphConflictError fails with OmnigraphLoadError on invalid kind, entityKind, or typeName", () =>
+    Effect.gen(function* () {
+      const source = OmnigraphBranchName.make("impl/task")
+      const target = OmnigraphBranchName.make("main")
+
+      for (const badConflict of [
+        { kind: "unknown_kind", entity_kind: "node", type_name: "EffectFn", entity_id: "fn.1", message: "bad" },
+        { kind: "divergent_update", entity_kind: "hyperedge", type_name: "EffectFn", entity_id: "fn.1", message: "bad" },
+        { kind: "divergent_update", entity_kind: "node", type_name: "   ", entity_id: "fn.1", message: "bad" },
+      ]) {
+        const badFetch: FetchLike = (input) => {
+          if (toUrlString(input).endsWith("/healthz")) {
+            return Promise.resolve(new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }))
+          }
+          return jsonResponse(
+            {
+              code: "conflict",
+              message: "Conflict",
+              merge_conflicts: [badConflict],
+            },
+            409,
+          )
+        }
+        const err = yield* Effect.flip(
+          dryRunMergeOmnigraphBranches({ source, target, fetch: badFetch }).pipe(
+            Effect.provide(OmnigraphSyncLive),
+          ),
+        )
+        expect(err).toBeInstanceOf(OmnigraphLoadError)
       }
     }),
   )

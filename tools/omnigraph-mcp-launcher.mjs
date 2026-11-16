@@ -125,14 +125,27 @@ const clusterDir = join(clusterRepoRoot, ".harness", "omnigraph-cluster")
 const fallbackPort = deriveRepoOmnigraphPort(clusterRepoRoot)
 const fallbackUrl = `http://127.0.0.1:${fallbackPort}`
 
-const serverMeta = readJsonSafe(join(clusterDir, "server.json"))
-const validServerUrl =
-  typeof serverMeta?.baseUrl === "string" &&
-  isLoopbackUrl(serverMeta.baseUrl) &&
-  serverMeta?.canonicalRepoRoot === clusterRepoRoot &&
-  isPidAlive(serverMeta?.pid)
-    ? serverMeta.baseUrl
-    : undefined
+const serverJsonPath = join(clusterDir, "server.json")
+const serverJsonExists = existsSync(serverJsonPath)
+const serverMeta = readJsonSafe(serverJsonPath)
+let validServerUrl
+if (serverMeta !== undefined) {
+  if (typeof serverMeta.baseUrl !== "string" || !isLoopbackUrl(serverMeta.baseUrl)) {
+    process.stderr.write(
+      `[omnigraph-mcp-launcher] Warning: ignoring server.json with non-loopback or invalid baseUrl (${String(serverMeta.baseUrl)})\n`,
+    )
+  } else if (serverMeta.canonicalRepoRoot !== clusterRepoRoot) {
+    process.stderr.write(
+      `[omnigraph-mcp-launcher] Warning: ignoring server.json due to canonicalRepoRoot mismatch (expected ${clusterRepoRoot}, got ${String(serverMeta.canonicalRepoRoot)})\n`,
+    )
+  } else if (!isPidAlive(serverMeta.pid)) {
+    process.stderr.write(
+      `[omnigraph-mcp-launcher] Warning: ignoring server.json with dead pid (${String(serverMeta.pid)})\n`,
+    )
+  } else {
+    validServerUrl = serverMeta.baseUrl
+  }
+}
 
 const explicitEnvUrl = [process.env.OMNIGRAPH_URL, process.env.OMNIGRAPH_BASE_URL].find(
   (u) => typeof u === "string" && u.length > 0 && u !== "http://127.0.0.1:8080",
@@ -140,9 +153,23 @@ const explicitEnvUrl = [process.env.OMNIGRAPH_URL, process.env.OMNIGRAPH_BASE_UR
 
 const resolvedUrl = explicitEnvUrl ?? validServerUrl ?? fallbackUrl
 
-const resolvedToken = isLoopbackUrl(resolvedUrl)
-  ? (process.env.OMNIGRAPH_TOKEN ?? readSafeMcpToken(join(clusterDir, "auth-tokens.json")))
-  : undefined
+const authTokensPath = join(clusterDir, "auth-tokens.json")
+let resolvedToken
+if (isLoopbackUrl(resolvedUrl)) {
+  if (process.env.OMNIGRAPH_TOKEN !== undefined) {
+    resolvedToken = process.env.OMNIGRAPH_TOKEN
+  } else if (existsSync(authTokensPath)) {
+    resolvedToken = readSafeMcpToken(authTokensPath)
+  } else if (serverJsonExists) {
+    process.stderr.write(
+      `[omnigraph-mcp-launcher] Warning: OMNIGRAPH_TOKEN is unset and ${authTokensPath} does not exist for initialized cluster\n`,
+    )
+  }
+} else {
+  process.stderr.write(
+    `[omnigraph-mcp-launcher] Warning: resolved URL ${resolvedUrl} is not loopback; not forwarding OMNIGRAPH_TOKEN to MCP child\n`,
+  )
+}
 
 const childEnv = {
   ...process.env,

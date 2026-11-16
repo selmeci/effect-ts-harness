@@ -1,8 +1,13 @@
-import { basename, resolve } from "node:path"
-import { Graph, Result, Schema } from "effect"
+import { basename, join, resolve } from "node:path"
+import { Effect, Graph, Result, Schema } from "effect"
 import { match } from "ts-pattern"
-import { OmnigraphSpanName } from "@harness/contract"
-import type { HarnessGraph } from "@harness/graph"
+import {
+  OmnigraphBranchName,
+  OmnigraphEntityId,
+  OmnigraphSpanName,
+  OmnigraphTypeName,
+} from "@harness/contract"
+import { type HarnessGraph, type makeOmnigraphSyncLayer, OmnigraphSync } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
 import type { SyncHostIo } from "@harness/service/host-io"
 
@@ -253,6 +258,7 @@ export const clusterYamlDeclaresPolicies = (clusterYaml: string): boolean => {
       }
       continue
     }
+    let followedByMappingKey = false
     for (let j = i + 1; j < lines.length; j++) {
       const nextLine = lines[j] ?? ""
       if (nextLine.trim().length === 0) continue
@@ -264,7 +270,14 @@ export const clusterYamlDeclaresPolicies = (clusterYaml: string): boolean => {
       if (nextIndent === keyIndent && (trimmedNext === "-" || trimmedNext.startsWith("- "))) {
         return true
       }
-      break
+      if (nextIndent <= keyIndent && /^[A-Za-z0-9_.-]+\s*:/.test(trimmedNext) && !trimmedNext.startsWith("-")) {
+        followedByMappingKey = true
+        break
+      }
+      return true
+    }
+    if (!followedByMappingKey) {
+      return true
     }
   }
   return false
@@ -341,6 +354,15 @@ export const readIsStubFromImage = (
   return "isStub" in props && (props as { readonly isStub?: unknown }).isStub === true
 }
 
+export const readEffectFnStubAfterFromImage = (
+  image: { readonly properties: unknown } | null | undefined,
+): boolean => {
+  if (image === null || image === undefined) return false
+  const props = image.properties
+  if (typeof props !== "object" || props === null || !("isStub" in props)) return true
+  return (props as { readonly isStub?: unknown }).isStub !== false
+}
+
 export const readSpanNameFromImages = (
   before: { readonly properties: unknown } | null | undefined,
   after: { readonly properties: unknown } | null | undefined,
@@ -374,24 +396,9 @@ export const isBranchNotFoundError = (err: unknown): boolean => {
       : err
   for (const candidate of [inner, err]) {
     if (typeof candidate === "object" && candidate !== null) {
-      const httpStatus = Reflect.get(candidate, "status")
-      const httpStatusCode = Reflect.get(candidate, "statusCode")
-      const errName = Reflect.get(candidate, "name")
       const errCode = Reflect.get(candidate, "code")
       const errMessage = Reflect.get(candidate, "message")
-      if (errName === "NotFoundError") {
-        return true
-      }
       if (typeof errCode === "string" && BRANCH_NOT_FOUND_CODE_PATTERN.test(errCode)) {
-        return true
-      }
-      if (
-        (httpStatus === 404 || httpStatusCode === 404) &&
-        (typeof errMessage !== "string" ||
-          errMessage.length === 0 ||
-          BRANCH_NOT_FOUND_MESSAGE_PATTERN.test(errMessage) ||
-          /\bnot[\s_-]*found\b/i.test(errMessage))
-      ) {
         return true
       }
       if (typeof errMessage === "string" && BRANCH_NOT_FOUND_MESSAGE_PATTERN.test(errMessage)) {
@@ -401,6 +408,196 @@ export const isBranchNotFoundError = (err: unknown): boolean => {
   }
   return BRANCH_NOT_FOUND_MESSAGE_PATTERN.test(String(err))
 }
+
+export const resolveDefaultOmnigraphBin = (): string =>
+  join(process.env.HOME ?? "/root", ".local", "bin", "omnigraph")
+
+export const runOmnigraphOptimizeAndCleanup = (
+  clusterRootDir: string,
+  omnigraphBin: string = resolveDefaultOmnigraphBin(),
+  includeCleanup = true,
+): void => {
+  if (!nodeSyncHostIo.existsSync(omnigraphBin) || !nodeSyncHostIo.existsSync(clusterRootDir)) {
+    return
+  }
+  const targetUri = `file://${clusterRootDir}`
+  const commands: ReadonlyArray<ReadonlyArray<string>> = includeCleanup
+    ? [
+        ["optimize", "--target", targetUri, "--graph", "harness"],
+        ["cleanup", "--target", targetUri, "--graph", "harness", "--keep", "5", "--confirm"],
+      ]
+    : [["optimize", "--target", targetUri, "--graph", "harness"]]
+  for (const args of commands) {
+    const subcommand = args[0] ?? "optimize"
+    const execAttempt = Result.try(() =>
+      nodeSyncHostIo.execFileSync(omnigraphBin, [...args], { timeoutMs: 15_000 }),
+    )
+    match(execAttempt)
+      .with({ _tag: "Failure" }, ({ failure }) => {
+        process.stderr.write(
+          `[harness:omnigraph] Warning: omnigraph ${subcommand} failed: ${failure instanceof Error ? failure.message : String(failure)}\n`,
+        )
+      })
+      .with({ _tag: "Success" }, ({ success: res }) => {
+        match(res)
+          .with({ _tag: "Exited" }, ({ exitCode, stderr, stdout }) => {
+            const combined = stderr || stdout
+            if (exitCode !== 0) {
+              const msg = combined.includes("[state_lock_held]")
+                ? `[harness:omnigraph] Info: skipped offline omnigraph ${subcommand} because cluster state lock is held by running omnigraph-server\n`
+                : `[harness:omnigraph] Warning: omnigraph ${subcommand} exited ${exitCode}: ${combined}\n`
+              process.stderr.write(msg)
+            }
+          })
+          .with({ _tag: "TimedOut" }, ({ stderr }) => {
+            process.stderr.write(`[harness:omnigraph] Warning: omnigraph ${subcommand} timed out: ${stderr}\n`)
+          })
+          .with({ _tag: "Signaled" }, ({ signal, stderr }) => {
+            process.stderr.write(`[harness:omnigraph] Warning: omnigraph ${subcommand} killed by ${signal}: ${stderr}\n`)
+          })
+          .with({ _tag: "SpawnFailed" }, ({ spawnError }) => {
+            process.stderr.write(`[harness:omnigraph] Warning: omnigraph ${subcommand} spawn failed: ${spawnError}\n`)
+          })
+          .exhaustive()
+      })
+      .exhaustive()
+  }
+}
+
+export type ReadyzProbeResult =
+  | { readonly _tag: "Ready" }
+  | { readonly _tag: "NotReady"; readonly reason: string }
+
+const ReadyzBodySchema = Schema.Struct({
+  ready: Schema.optional(Schema.Boolean),
+  status: Schema.optional(Schema.String),
+  ready_graph_count: Schema.optional(Schema.Finite),
+})
+const decodeReadyzBody = Schema.decodeUnknownOption(ReadyzBodySchema)
+
+export function probeOmnigraphServerReady(baseUrl: string): Effect.Effect<ReadyzProbeResult> {
+  return Effect.tryPromise({
+    try: () =>
+      globalThis
+        .fetch(`${baseUrl}/readyz`, {
+          method: "GET",
+          signal: AbortSignal.timeout(3000),
+        })
+        .then((r): Promise<ReadyzProbeResult> =>
+          match(r.status)
+            .with(200, () => {
+              const apiHeader = r.headers.get("Omnigraph-Http-Api")
+              if (apiHeader !== "0.14") {
+                void r.body?.cancel().catch(() => undefined)
+                return Promise.resolve<ReadyzProbeResult>({
+                  _tag: "NotReady",
+                  reason: `unexpected Omnigraph-Http-Api header: ${String(apiHeader)}`,
+                })
+              }
+              return r.json().then((rawBody: unknown): ReadyzProbeResult =>
+                match(decodeReadyzBody(rawBody))
+                  .with({ _tag: "None" }, () => ({
+                    _tag: "NotReady" as const,
+                    reason: "decode mismatch: /readyz body failed schema check",
+                  }))
+                  .with({ _tag: "Some" }, ({ value: body }) => {
+                    const isReady =
+                      (body.ready === true || body.status === "serving") &&
+                      (body.ready_graph_count ?? 0) >= 1
+                    return isReady
+                      ? { _tag: "Ready" as const }
+                      : {
+                          _tag: "NotReady" as const,
+                          reason: `not ready (ready=${String(body.ready)}, status=${String(body.status)}, ready_graph_count=${String(body.ready_graph_count)})`,
+                        }
+                  })
+                  .exhaustive(),
+              )
+            })
+            .otherwise((status) => {
+              void r.body?.cancel().catch(() => undefined)
+              return Promise.resolve<ReadyzProbeResult>({
+                _tag: "NotReady",
+                reason: `HTTP ${status}`,
+              })
+            }),
+        )
+        .catch((err: unknown): ReadyzProbeResult => ({
+          _tag: "NotReady",
+          reason: `network error: ${err instanceof Error ? err.message : String(err)}`,
+        })),
+    catch: (err): ReadyzProbeResult => ({
+      _tag: "NotReady",
+      reason: `network error: ${err instanceof Error ? err.message : String(err)}`,
+    }),
+  }).pipe(Effect.catch((err) => Effect.succeed<ReadyzProbeResult>(err)))
+}
+
+export const uploadAndVerifySpanTraceBlob = (
+  repoRoot: string,
+  clusterRepoRoot: string,
+  branchName: string,
+  graph: HarnessGraph,
+  syncLayer: ReturnType<typeof makeOmnigraphSyncLayer>,
+  phaseLabel: "verify" | "done",
+  failExitCode: number,
+  blockDecision?: string,
+): Effect.Effect<{
+  readonly exitCode: number
+  readonly stdout: string
+  readonly stderr: string
+} | undefined> =>
+  Effect.gen(function* () {
+    const spansPath = join(repoRoot, ".harness", "spans.jsonl")
+    if (!nodeSyncHostIo.existsSync(spansPath)) return undefined
+    const firstTestId = findFirstVitestCaseId(graph)
+    if (firstTestId === undefined) return undefined
+    const makeFail = (reason: string) => ({
+      exitCode: failExitCode,
+      stdout:
+        blockDecision !== undefined ? JSON.stringify({ decision: blockDecision, reason }) : "",
+      stderr: `[GATE FAILURE] ${phaseLabel}:omnigraph-span-blob\n${reason}`,
+    })
+    const readOutcome = match(Result.try(() => nodeSyncHostIo.readTextSync(spansPath)))
+      .with({ _tag: "Success" }, ({ success }) => ({ ok: true as const, data: success }))
+      .with({ _tag: "Failure" }, ({ failure }) => ({
+        ok: false as const,
+        reason: `Failed to read ${spansPath}: ${failure instanceof Error ? failure.message : String(failure)}`,
+      }))
+      .exhaustive()
+    if (!readOutcome.ok) return makeFail(readOutcome.reason)
+
+    const blobSelector = {
+      repoRoot: clusterRepoRoot,
+      entity: "node" as const,
+      type: OmnigraphTypeName.make("VitestCase"),
+      id: OmnigraphEntityId.make(firstTestId),
+      property: "spanTraceBlob" as const,
+      branch: OmnigraphBranchName.make(branchName),
+    }
+    const ogSync = yield* OmnigraphSync.pipe(Effect.provide(syncLayer))
+    const putOutcome = yield* ogSync
+      .putBlob({ ...blobSelector, data: readOutcome.data })
+      .pipe(
+        Effect.map(() => ({ ok: true as const })),
+        Effect.catch((err) =>
+          Effect.succeed({ ok: false as const, reason: `putBlob failed: ${String(err)}` }),
+        ),
+      )
+    if (!putOutcome.ok) return makeFail(putOutcome.reason)
+
+    const statOutcome = yield* ogSync.statBlob(blobSelector).pipe(
+      Effect.map((stat) =>
+        match(stat.status)
+          .with(200, () => ({ ok: true as const }))
+          .otherwise((status) => ({ ok: false as const, reason: `statBlob returned status ${status}` })),
+      ),
+      Effect.catch((err) =>
+        Effect.succeed({ ok: false as const, reason: `statBlob failed: ${String(err)}` }),
+      ),
+    )
+    return statOutcome.ok ? undefined : makeFail(statOutcome.reason)
+  })
 
 export const formatDiffErrorMessage = (err: unknown): string => {
   if (typeof err === "object" && err !== null && "cause" in err) {

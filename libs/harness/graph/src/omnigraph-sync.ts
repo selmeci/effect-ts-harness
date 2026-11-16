@@ -8,7 +8,6 @@ import {
 import type { SyncHostIo } from "@harness/service/host-io"
 import { Context, Effect, Layer, Option, Schema } from "effect"
 import {
-  ApiContractError,
   type BlobWrite,
   type Commit,
   type CommitChanges,
@@ -252,7 +251,7 @@ export const makeOmnigraphSyncLayer = (
               }),
             catch: (cause) => new OmnigraphLoadError({ cause }),
           }).pipe(
-            Effect.map((loadRes) => {
+            Effect.flatMap((loadRes) => {
               const legacyCommitId =
                 "graphCommitId" in loadRes
                   ? (loadRes as { readonly graphCommitId?: string }).graphCommitId
@@ -261,19 +260,25 @@ export const makeOmnigraphSyncLayer = (
                 extractOmnigraphCommitId(loadRes.commit?.graphCommitId) ??
                 extractOmnigraphCommitId(legacyCommitId)
               if (shouldWriteMeta && options?.repoRoot) {
-                if (commitId !== undefined) {
-                  writeGraphHeadMeta(options.repoRoot, hostIo, undefined, env, {
-                    omnigraphCommitId: commitId,
-                  })
-                } else {
-                  writeGraphHeadMeta(options.repoRoot, hostIo, undefined, env)
+                const metaSaved =
+                  commitId !== undefined
+                    ? writeGraphHeadMeta(options.repoRoot, hostIo, undefined, env, {
+                        omnigraphCommitId: commitId,
+                      })
+                    : writeGraphHeadMeta(options.repoRoot, hostIo, undefined, env)
+                if (commitId !== undefined && metaSaved === null) {
+                  return Effect.fail(
+                    new OmnigraphLoadError({
+                      cause: new Error("Failed to persist graph-head.json with omnigraphCommitId"),
+                    }),
+                  )
                 }
               }
-              return {
+              return Effect.succeed({
                 syncedToOmnigraph: true,
                 snapshotPath,
                 ...(commitId !== undefined ? { commitId } : {}),
-              }
+              })
             }),
             Effect.catch((err) =>
               Effect.succeed({
@@ -303,16 +308,7 @@ export const makeOmnigraphSyncLayer = (
           const mergeRes = yield* Effect.tryPromise({
             try: () => og.branches.merge({ source, target, deleteBranch: true }),
             catch: (cause) => new OmnigraphLoadError({ cause }),
-          }).pipe(
-            Effect.catchIf(
-              (err) => err.cause instanceof ApiContractError,
-              () =>
-                Effect.tryPromise({
-                  try: () => og.branches.merge({ source, target }),
-                  catch: (retryCause) => new OmnigraphLoadError({ cause: retryCause }),
-                }),
-            ),
-          )
+          })
 
           const cleanup = options?.cleanupBranches ?? []
           for (const branchToDelete of cleanup) {
@@ -334,12 +330,16 @@ export const makeOmnigraphSyncLayer = (
           }
           if (options?.repoRoot) {
             const commitId = extractOmnigraphCommitId(mergeRes.commit?.graphCommitId)
-            if (commitId !== undefined) {
-              writeGraphHeadMeta(options.repoRoot, hostIo, undefined, env, {
-                omnigraphCommitId: commitId,
+            const metaSaved =
+              commitId !== undefined
+                ? writeGraphHeadMeta(options.repoRoot, hostIo, undefined, env, {
+                    omnigraphCommitId: commitId,
+                  })
+                : writeGraphHeadMeta(options.repoRoot, hostIo, undefined, env)
+            if (commitId !== undefined && metaSaved === null) {
+              return yield* new OmnigraphLoadError({
+                cause: new Error("Failed to persist graph-head.json with omnigraphCommitId"),
               })
-            } else {
-              writeGraphHeadMeta(options.repoRoot, hostIo, undefined, env)
             }
           }
         }),

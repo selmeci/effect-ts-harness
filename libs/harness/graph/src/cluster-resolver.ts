@@ -5,6 +5,7 @@ import {
   OmnigraphChangeCursor,
   OmnigraphCommitId,
   sanitizeWorktreeIdSegment,
+  toErrorReasonMessage,
   WorkspaceFilePath,
 } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
@@ -160,37 +161,59 @@ const resolveGraphMetaStateDir = (
   return join(validRoot, ".harness")
 }
 
-export const readGraphHeadMeta = (
+export type GraphHeadMetaReadState =
+  | { readonly _tag: "Present"; readonly meta: GraphHeadMeta }
+  | { readonly _tag: "Missing" }
+  | { readonly _tag: "Corrupt"; readonly path: string; readonly reason: string }
+
+export const readGraphHeadMetaState = (
   repoRoot: string,
   hostIo: SyncHostIo,
   env: NodeJS.ProcessEnv = process.env,
-): GraphHeadMeta | null => {
+): GraphHeadMetaReadState => {
   const stateDir = resolveGraphMetaStateDir(repoRoot, env)
   const metaPath = join(stateDir, "graph-head.json")
   if (!hostIo.existsSync(metaPath)) {
-    return null
+    return { _tag: "Missing" }
   }
   const readRes = Result.try(() => hostIo.readTextSync(metaPath))
   return match(readRes)
-    .with({ _tag: "Failure" }, ({ failure }) => {
-      process.stderr.write(
-        `[harness/graph] Warning: failed to read ${metaPath}: ${String(failure)}\n`,
-      )
-      return null
-    })
+    .with({ _tag: "Failure" }, ({ failure }) => ({
+      _tag: "Corrupt" as const,
+      path: metaPath,
+      reason: toErrorReasonMessage(failure),
+    }))
     .with({ _tag: "Success" }, ({ success: raw }) =>
       match(decodeGraphHeadMetaOption(raw))
-        .with({ _tag: "Some" }, ({ value }) => value)
-        .with({ _tag: "None" }, () => {
-          process.stderr.write(
-            `[harness/graph] Warning: failed to decode ${metaPath} as GraphHeadMeta\n`,
-          )
-          return null
-        })
+        .with({ _tag: "Some" }, ({ value }) => ({
+          _tag: "Present" as const,
+          meta: value,
+        }))
+        .with({ _tag: "None" }, () => ({
+          _tag: "Corrupt" as const,
+          path: metaPath,
+          reason: "failed to decode as GraphHeadMeta",
+        }))
         .exhaustive(),
     )
     .exhaustive()
 }
+
+export const readGraphHeadMeta = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  env: NodeJS.ProcessEnv = process.env,
+): GraphHeadMeta | null =>
+  match(readGraphHeadMetaState(repoRoot, hostIo, env))
+    .with({ _tag: "Present" }, ({ meta }) => meta)
+    .with({ _tag: "Missing" }, () => null)
+    .with({ _tag: "Corrupt" }, ({ path, reason }) => {
+      process.stderr.write(
+        `[harness/graph] Warning: failed to decode ${path} as GraphHeadMeta (${reason})\n`,
+      )
+      return null
+    })
+    .exhaustive()
 
 const persistGraphHeadMeta = (
   repoRoot: string,
@@ -230,7 +253,21 @@ export const updateGraphHeadCursor = (
   cursor: OmnigraphChangeCursor | null,
   env: NodeJS.ProcessEnv = process.env,
 ): GraphHeadMeta | null => {
-  const existing = readGraphHeadMeta(repoRoot, hostIo, env)
+  const state = readGraphHeadMetaState(repoRoot, hostIo, env)
+  const existingOrErr = match(state)
+    .with({ _tag: "Present" }, ({ meta }) => ({ ok: true as const, meta }))
+    .with({ _tag: "Missing" }, () => ({ ok: true as const, meta: null }))
+    .with({ _tag: "Corrupt" }, ({ path, reason }) => {
+      process.stderr.write(
+        `[harness/graph] Error: refusing cursor update on corrupt ${path} (${reason}); run full graph sync to rebuild\n`,
+      )
+      return { ok: false as const }
+    })
+    .exhaustive()
+  if (!existingOrErr.ok) {
+    return null
+  }
+  const existing = existingOrErr.meta
   const meta: GraphHeadMeta = {
     headSha: existing?.headSha ?? null,
     gitBranch: existing?.gitBranch ?? null,

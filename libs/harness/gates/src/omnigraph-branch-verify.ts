@@ -1,7 +1,6 @@
 import { Effect } from "effect"
 import { match } from "ts-pattern"
 import {
-  type EffectFnDiffChange,
   ErrorReasonMessage,
   NonNegativeCount,
   type OmnigraphBranchVerifyInput,
@@ -18,24 +17,28 @@ export const decideOmnigraphBranchVerify = Effect.fn("OmnigraphBranchVerify.deci
 ): Effect.fn.Return<OmnigraphBranchVerifyReport, never, never> {
   const violations: Array<OmnigraphBranchViolation> = []
 
-  const diffChanges = match(input.diffState)
+  const resolvedDiff = match(input.diffState)
     .with({ _tag: "MissingMergeBase" }, () => {
       violations.push({
-        _tag: "MissingMergeBaseViolation",
-        ruleId: "missing-merge-base",
+        _tag: "missing-merge-base",
         message: ErrorReasonMessage.make(
           `Missing merge base between '${input.planBranch}', '${input.implBranch}', and '${input.mainBranch}'.`,
         ),
       })
-      return []
+      return {
+        changes: [],
+        observedImplEffectFnCount: NonNegativeCount.make(0),
+        unchangedStubCount: NonNegativeCount.make(0),
+      }
     })
-    .with({ _tag: "ResolvedDiff" }, ({ changes }) => changes)
+    .with({ _tag: "ResolvedDiff" }, (resolved) => resolved)
     .exhaustive()
+
+  const diffChanges = resolvedDiff.changes
 
   for (const conflict of input.dryRunConflicts) {
     violations.push({
-      _tag: "DryRunMergeConflictViolation",
-      ruleId: "dry-run-merge-conflict",
+      _tag: "dry-run-merge-conflict",
       message: ErrorReasonMessage.make(
         `Dry-run merge (${input.implBranch} -> ${input.mainBranch}) conflict [${conflict.kind}] on ${conflict.typeName}(${conflict.entityId ?? "unknown"}): ${conflict.message}`,
       ),
@@ -45,97 +48,81 @@ export const decideOmnigraphBranchVerify = Effect.fn("OmnigraphBranchVerify.deci
 
   const activeSpanNames = new Set<OmnigraphSpanName>()
   let activeDiffEffectFnCount = 0
-  let firstActiveEffectFn: EffectFnDiffChange | undefined
   for (const ch of diffChanges) {
     match(ch)
-      .with({ _tag: "EffectFnDiffChange" }, (fnChange) => {
-        match(fnChange.op)
-          .with("insert", "update", () => {
-            activeDiffEffectFnCount += 1
-            if (firstActiveEffectFn === undefined) {
-              firstActiveEffectFn = fnChange
-            }
-            if (fnChange.spanName !== null) {
-              activeSpanNames.add(fnChange.spanName)
-            }
-          })
-          .with("delete", () => undefined)
-          .exhaustive()
+      .with({ _tag: "EffectFnInserted" }, { _tag: "EffectFnUpdated" }, (fnChange) => {
+        activeDiffEffectFnCount += 1
+        if (fnChange.spanName !== null) {
+          activeSpanNames.add(fnChange.spanName)
+        }
       })
-      .with({ _tag: "EntityDiffChange" }, () => undefined)
+      .with({ _tag: "EffectFnDeleted" }, { _tag: "EntityDiffChange" }, () => undefined)
       .exhaustive()
   }
 
-  let diffStubViolationCount = 0
   for (const ch of diffChanges) {
     match(ch)
-      .with({ _tag: "EffectFnDiffChange" }, (fnChange) => {
-        match(fnChange.op)
-          .with("delete", () => {
-            const movedOrRenamed =
-              fnChange.spanName !== null && activeSpanNames.has(fnChange.spanName)
-            if (!movedOrRenamed) {
-              violations.push({
-                _tag: "PlannedEffectFnDroppedViolation",
-                ruleId: "planned-effect-fn-dropped",
-                message: ErrorReasonMessage.make(
-                  `Planned EffectFn '${fnChange.entityId}' was dropped before verify on '${input.implBranch}'.`,
-                ),
-                change: fnChange,
-              })
-            }
+      .with({ _tag: "EffectFnDeleted" }, (fnChange) => {
+        const movedOrRenamed =
+          fnChange.spanName !== null && activeSpanNames.has(fnChange.spanName)
+        if (!movedOrRenamed) {
+          violations.push({
+            _tag: "planned-effect-fn-dropped",
+            message: ErrorReasonMessage.make(
+              `Planned EffectFn '${fnChange.entityId}' was dropped before verify on '${input.implBranch}'.`,
+            ),
+            change: fnChange,
           })
-          .with("insert", "update", () => {
-            if (fnChange.stubAfter) {
-              diffStubViolationCount += 1
-              violations.push({
-                _tag: "UnimplementedStubRemainingViolation",
-                ruleId: "unimplemented-stub-remaining",
-                message: ErrorReasonMessage.make(
-                  `Planned EffectFn '${fnChange.entityId}' remains a stub in '${input.implBranch}'.`,
-                ),
-                change: fnChange,
-              })
-            }
+        }
+      })
+      .with({ _tag: "EffectFnInserted" }, { _tag: "EffectFnUpdated" }, (fnChange) => {
+        if (fnChange.stubAfter) {
+          violations.push({
+            _tag: "unimplemented-stub-remaining",
+            message: ErrorReasonMessage.make(
+              `Planned EffectFn '${fnChange.entityId}' remains a stub in '${input.implBranch}'.`,
+            ),
+            change: fnChange,
           })
-          .exhaustive()
+        }
       })
       .with({ _tag: "EntityDiffChange" }, () => undefined)
       .exhaustive()
   }
 
   if (
+    resolvedDiff.observedImplEffectFnCount !== null &&
     activeDiffEffectFnCount > 0 &&
-    input.implEffectFnCount === 0 &&
-    firstActiveEffectFn !== undefined
+    resolvedDiff.observedImplEffectFnCount === 0
   ) {
+    const activeCount = NonNegativeCount.make(activeDiffEffectFnCount)
     violations.push({
-      _tag: "PlannedEffectFnDroppedViolation",
-      ruleId: "planned-effect-fn-dropped",
+      _tag: "no-effect-fn-implemented",
       message: ErrorReasonMessage.make(
-        `Diff contains ${activeDiffEffectFnCount} active planned EffectFn(s) on '${input.implBranch}', but implEffectFnCount is 0.`,
+        `Diff contains ${activeDiffEffectFnCount} active planned EffectFn(s) on '${input.implBranch}', but observed implEffectFnCount is 0.`,
       ),
-      change: firstActiveEffectFn,
+      activeDiffEffectFnCount: activeCount,
     })
   }
 
-  if (input.remainingStubCount > diffStubViolationCount) {
-    const extraStubCount = input.remainingStubCount - diffStubViolationCount
+  if (resolvedDiff.unchangedStubCount > 0) {
     violations.push({
-      _tag: "UnimplementedStubRemainingViolation",
-      ruleId: "unimplemented-stub-remaining",
+      _tag: "unimplemented-stub-remaining",
       message: ErrorReasonMessage.make(
-        `Implementation branch '${input.implBranch}' still contains ${input.remainingStubCount} stub node(s) (${extraStubCount} unchanged between plan and impl).`,
+        `Implementation branch '${input.implBranch}' still contains ${resolvedDiff.unchangedStubCount} unchanged stub node(s) from plan.`,
       ),
       change: null,
     })
   }
 
+  const implEffectFnCount =
+    resolvedDiff.observedImplEffectFnCount ?? NonNegativeCount.make(activeDiffEffectFnCount)
+
   return yield* Effect.succeed(
     makeVerdictReport(violations, {
       verifiedChangeCount: NonNegativeCount.make(diffChanges.length),
       conflictCount: NonNegativeCount.make(input.dryRunConflicts.length),
-      implEffectFnCount: input.implEffectFnCount,
+      implEffectFnCount,
     }),
   )
 })

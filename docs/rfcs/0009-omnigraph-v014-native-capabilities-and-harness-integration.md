@@ -32,6 +32,9 @@ target_specs:
 
 # RFC-0009: Omnigraph v0.14.0 Native Capabilities, Zero-Loss Branch Lifecycle, Hybrid Graph Search & Policy-Gated Harness Integration
 
+> [!NOTE]
+> **Post-Implementation Status Note:** `harness:SPEC-0013` (`libs/harness/docs/specs/2026-11-16-omnigraph-v014-native-capabilities.md`) and `harness:ADR-0014` (`libs/harness/docs/adr/0014-omnigraph-v014-keyed-schema-branch-verify-and-policy.md`) are the normative post-implementation specifications for this work.
+
 ## 1. Executive Summary
 
 The **Effect-TS Engineering Harness** models workspace architecture as a **PERA Bipartite Levi Incidence Hypergraph** ($G_{\text{Levi}} = (V_E \sqcup V_R, E_{\text{role}})$) backed by `effect/Graph` in memory and **`@modernrelay/omnigraph` (`v0.14.0`)** on disk ([RFC-0001](./0001-polymorphic-hypergraph-and-pera-ontology-model.md), [RFC-0002](./0002-declarative-datalog-inference-and-edge-completion.md), [RFC-0003](./0003-algebraic-graph-rewriting-dpo-auto-repair-and-planning.md), [`harness:ADR-0006`](../../libs/harness/docs/adr/0006-omnigraph-git-branch-lifecycle-and-head-reconcile.md), [`harness:ADR-0009`](../../libs/harness/docs/adr/0009-polymorphic-hypergraph-datalog-and-dpo-rewriting.md)). Omnigraph v0.14.0 is a **Lakehouse-native versioned property graph** built over columnar Lance v16 Copy-on-Write storage and Apache DataFusion (`Omnigraph-Http-Api: 0.14`). It provides native keyed edge identity (`@key(@src, @dst, role)`), lossless `mode: "overwrite"` branch replacement, three-way `branches.merge({ dryRun, deleteBranch, asCommit })` with typed merge conflicts, `branches.diff`, hybrid vector + Tantivy BM25 Reciprocal Rank Fusion (`rrf(nearest(...), bm25(...))`), GQ 2.1 edge unions and correlated negations, Optimistic Concurrency Control (`ifGraphCommit`), durable change feeds (`changes.poll`), versioned `Blob` cells, offline static schema/query linting (`omnigraph lint`), live zero-downtime schema/query deployment (`omnigraph cluster plan/apply`), Cedar policy-as-code enforcement (`protected_branches`), and storage optimization (`omnigraph optimize` / `cleanup`).
@@ -111,7 +114,7 @@ All 10 gaps below are directly observed in the live workspace files cited in eac
   - Furthermore, [`graph.policy.yaml`](../../libs/harness/graph/graph.policy.yaml#L1-L24) sets `branch_scope: any` and `target_branch_scope: any` without defining top-level `protected_branches: [main]`.
   - [`omnigraph-lifecycle.ts`](../../apps/harness-cli/src/commands/omnigraph-lifecycle.ts#L558) launches `omnigraph-server` with `--unauthenticated` and no token source.
   - [`adapters/antigravity/plugins/effect-harness/mcp_config.json`](../../adapters/antigravity/plugins/effect-harness/mcp_config.json#L15-L19) sets `"OMNIGRAPH_URL": "http://127.0.0.1:8080"`, whereas [`deriveRepoOmnigraphPort`](../../libs/harness/graph/src/cluster-resolver.ts#L316-L320) derives `18080 + (hash.readUInt16BE(0) % 10000)`.
-- **Root Cause & Consequence:** Server-side Cedar authorization is inert, `main` is not branch-protected at the storage layer, `omnigraph policy test` is unused, and standalone `omnigraph-mcp` tools hit connection errors unless `OMNIGRAPH_URL` matches `.harness/omnigraph-endpoint.json`.
+- **Root Cause & Consequence:** Server-side Cedar authorization is inert, `main` is not branch-protected at the storage layer, `omnigraph policy test` is unused, and standalone `omnigraph-mcp` tools hit connection errors unless `OMNIGRAPH_URL` matches `.harness/omnigraph-cluster/server.json`.
 
 ### Gap 9 (`OMNI-09`): RAM-Only DPO Rewrite Candidates vs. Persistent Unpublished Commit Proposals
 - **Empirical Evidence:**
@@ -136,9 +139,9 @@ All 10 gaps below are directly observed in the live workspace files cited in eac
 5. **`OMNI-05` (GQ 2.1 Edge Unions, Multi-Hop Traversals & Negations):** Upgrade `queries/harness.gq` with GQ 2.1 edge union syntax `(e1 | e2 | ...)`, `{1,5}` path bounds, `EarsSpec` traceability, and `not { ... }` policy invariant queries synchronized 1:1 with `gq-queries.ts`.
 6. **`OMNI-06` (Self-Describing Schema & In-Graph `GraphPolicy` Nodes):** Annotate every `node`/`edge` and key property with `@instruction` / `@description`, and model inspectable `GraphPolicy` nodes in `schema.pg`.
 7. **`OMNI-07` (Offline `omnigraph lint` Gate & Non-Destructive Schema Evolution):** Add an offline `omnigraph lint` gate in `plan-check`/`verify` and replace blind `rmRecursiveSync` on `.config-stamp` drift with pure `OmnigraphSchemaEvolution.decide` driving `omnigraph cluster plan/apply`.
-8. **`OMNI-08` (Active Cedar Policies & MCP Port Alignment):** Mount `graph.policy.yaml` (`protected_branches: [main]`) and `cluster.policy.yaml` inside `cluster.yaml`, verify via `omnigraph policy validate/test`, launch authenticated actor scopes (`harness-cli` vs `agent-mcp`), and align `omnigraph-mcp` URL resolution.
-9. **`OMNI-09` (Unpublished Commit Proposals for DPO Candidates):** Expose `proposeCommit` / `publishProposal` / `dropProposal` on `OmnigraphSync` so multi-candidate DPO rewrites in `plan-synth` / `repair` can be inspected and atomically promoted.
-10. **`OMNI-10` (Versioned `Blob` Artifacts & Lance Maintenance):** Attach nullable `Blob?` columns (`markdownBlob`, `spanTraceBlob`, `proofBlob`) to governance/test/relation nodes pinned to `graphCommitId`, and run `omnigraph optimize` + `omnigraph cleanup` in `harness gc` and post-`done`.
+8. **`OMNI-08` (Active Cedar Policies & MCP Port Alignment):** Mount `graph.policy.yaml` (`protected_branches: [main]`) as the single `graph-access` bundle inside `cluster.yaml` (keeping `cluster.policy.yaml` as an unmounted reference on disk), verify via `omnigraph policy validate/test`, launch authenticated actor scopes (`harness-cli` vs `agent-mcp`), and align `omnigraph-mcp` URL resolution.
+9. **`OMNI-09` (Unpublished Commit Proposals for DPO Candidates):** Expose `proposeMergeCommit` / `inspectCommitChanges` / `publishCommit` / `dropCommit` on `OmnigraphSync` in `@harness/graph` so multi-candidate DPO rewrites can be inspected and atomically promoted (wiring into `plan-and-repair` CLI commands is deferred).
+10. **`OMNI-10` (Versioned `Blob` Artifacts & Lance Maintenance):** Attach nullable `Blob?` columns (`markdownBlob`, `spanTraceBlob`, `proofBlob`) to governance/test/relation nodes pinned to `graphCommitId`, and run non-destructive `omnigraph optimize` in `harness gc --strict` and `omnigraph optimize` + `omnigraph cleanup --keep 5 --confirm` post-`done`.
 
 ### 3.2 Non-Goals
 - Running external remote cloud graph databases (Omnigraph runs locally on `file://` loopback cluster storage unless explicitly pointed at an `s3://` or `az://` URI).
@@ -494,7 +497,7 @@ query policy_orphan_effect_signatures() {
 ### 5.3 Complete `cluster.yaml`, Cedar Policy Bundles & `mcp_config.json` Alignment
 
 Per Omnigraph v0.14.0 (`references/server-policy.md`, `references/cluster.md`, `references/search.md`):
-- `cluster.yaml` declares embedding providers and binds policy bundles (`applies_to: [harness]` and `applies_to: [cluster]`).
+- `cluster.yaml` declares embedding providers and mounts the single `graph-access` policy bundle (`applies_to: [harness]`), while `cluster.policy.yaml` is retained on disk as an unmounted reference because Omnigraph CLI rejects mounting two policy bundles simultaneously (`matches 2 policy bundles`).
 - `graph.policy.yaml` sets `protected_branches: [main]`, separates `branch_scope` (valid only on `read`, `export`, `change`) from `target_branch_scope` (valid only on `branch_create`, `branch_delete`, `branch_merge`, `schema_apply`), and omits branch scope on `invoke_query`.
 
 ```yaml
@@ -506,19 +509,15 @@ state:
   backend: cluster
   lock: true
 providers:
-  embeddings:
+  embedding:
     local-ollama:
-      kind: openai-compatible
       base_url: http://127.0.0.1:11434/v1
       model: nomic-embed-text
-      dimension: 768
+      api_key: ${OMNIGRAPH_EMBEDDING_API_KEY}
 policies:
   graph-access:
     file: graph.policy.yaml
     applies_to: [harness]
-  cluster-access:
-    file: cluster.policy.yaml
-    applies_to: [cluster]
 graphs:
   harness:
     schema: schema.pg
@@ -904,9 +903,9 @@ export const decideOmnigraphSchemaEvolution = Effect.fn("OmnigraphSchemaEvolutio
 - `dryRunMerge({ source, target })` invokes `og.branches.merge({ source, target, dryRun: true })` and translates `ConflictError.mergeConflicts` directly into `OmnigraphMergeConflictError`.
 - `mergeBranch({ source, target, deleteBranch: true })` uses native server-side `deleteBranch: true` in `og.branches.merge(...)` instead of separate cleanup loops.
 - `mutateConditional({ query, name, params, branch, ifGraphCommit })` maps HTTP `412 PreconditionFailedError` directly to `OmnigraphPreconditionError`.
-- `pollChanges({ branch, cursor, start, kind, type, op })` and `baselineChanges({ branch, kind, type })` feed `DatalogSession.stepFileDelta` on the warm daemon and recover cleanly on HTTP `410 GoneError` (`changeFeedGap`).
-- `proposeMergeCommit({ source, target })`, `listUnpublishedCommits()`, `inspectCommitChanges(id)`, `publishCommit(id)`, `dropCommit(id)` manage DPO proposal commits.
-- `putBlob(...)`, `getBlob(...)`, `statBlob(...)` read/write `markdownBlob` / `spanTraceBlob` cells pinned to `graphCommitId`.
+- `pollChanges({ branch, cursor, start, kind, type, op })` feeds `DatalogSession.stepFileDelta` on the warm daemon and recovers cleanly via `og.changes.baseline` on HTTP `410 GoneError` (`changeFeedGap`).
+- `proposeMergeCommit({ source, target })`, `inspectCommitChanges({ commitId })`, `publishCommit({ commitId })`, and `dropCommit({ commitId })` manage unpublished DPO proposal commits.
+- `putBlob(...)`, `getBlobText(...)`, and `statBlob(...)` read/write `markdownBlob` / `spanTraceBlob` cells pinned to `graphCommitId`.
 
 ---
 
@@ -924,8 +923,8 @@ export const decideOmnigraphSchemaEvolution = Effect.fn("OmnigraphSchemaEvolutio
 | **`OMNI-06`** | `@instruction`, `@description`, `node GraphPolicy` | `libs/harness/graph/schema.pg`, `queries/harness.gq`, `ontology-and-gq.tools.ts` | `harness_ontology_check` |
 | **`OMNI-07`** | `omnigraph lint` gate + `OmnigraphSchemaEvolution.decide` (`cluster apply`) | `libs/harness/gates/src/omnigraph-lint.ts`, `apps/harness-cli/src/commands/omnigraph-lifecycle.ts` | `OmnigraphSchemaEvolution.decide` |
 | **`OMNI-08`** | Cedar `policies:` in `cluster.yaml`, `protected_branches: [main]`, `omnigraph policy test` | `cluster.yaml`, `graph.policy.yaml`, `policy-tests.yaml`, `adapters/.../mcp_config.json` | `omnigraph policy test` + `og.access()` |
-| **`OMNI-09`** | Unpublished commit proposals (`commits.publish` / `drop` / `changes`) | `plan-and-repair.command.ts`, `apps/harness-mcp/src/tools/datalog-and-dpo.tools.ts` | `harness plan-synth` / `repair` |
-| **`OMNI-10`** | `Blob` cells (`og.blobs.put/get/stat`) + `omnigraph optimize` & `cleanup` | `schema.pg`, `gc-and-ontology.command.ts`, `done-omnigraph-helpers.ts` | `harness gc` / `done` |
+| **`OMNI-09`** | Unpublished commit proposals (`commits.publish` / `drop` / `changes`) | `libs/harness/graph/src/omnigraph-sync.ts` (`plan-and-repair` wiring deferred) | `proposeMergeCommit`, `inspectCommitChanges`, `publishCommit`, `dropCommit` |
+| **`OMNI-10`** | `Blob` cells (`og.blobs.put/get/stat`) + `omnigraph optimize` & `cleanup` | `schema.pg`, `gc-and-ontology.command.ts`, `done-omnigraph-helpers.ts` | `harness gc --strict` / `done` |
 
 ### 6.2 Upgraded Task Lifecycle Sequence
 
@@ -953,7 +952,7 @@ sequenceDiagram
     CLI->>OG: branches.merge(source="impl/...", target="main", deleteBranch=true)
     CLI->>OG: Execute `omnigraph optimize` (persist derived traversal adjacency)
     OG-->>Datalog: changes.poll(branch="main", cursor) -> Z-set deltas (+1 / -1)
-    Datalog->>Datalog: stepFileDelta(deltas) (< 3 ms incremental recompute)
+    Datalog->>Datalog: stepFileDelta(deltas) (incremental recompute)
 ```
 
 ---
@@ -963,10 +962,10 @@ sequenceDiagram
 | Decision Area | Chosen Approach (RFC-0009) | Rejected Alternative | Technical Root Cause for Rejection |
 | :--- | :--- | :--- | :--- |
 | **1. Edge Identity & Sync Mode** | Keyed edges `@key(@src, @dst, role)` + `mode: "overwrite"` on task branches. | Supplying random UUIDs or calling `og.branches.delete(branch)` before `mode: "merge"`. | Unkeyed edges duplicate on every `main` merge (`references/data.md`), while deleting branches erases all commit lineage needed for `mergeBase` and `branches.diff`. |
-| **2. Config Drift Handling** | Offline `omnigraph lint` gate + pure `OmnigraphSchemaEvolution.decide` invoking `cluster plan/apply`. | Killing `omnigraph-server` and calling `rmRecursiveSync(clusterRootDir)` on any stamp change. | Blind deletion destroys all open task branches and Blob history and costs `~3.5 s` restart latency, whereas `cluster apply` updates additive schemas and stored queries in-place (`references/cluster.md`). |
+| **2. Config Drift Handling** | Offline `omnigraph lint` gate + pure `OmnigraphSchemaEvolution.decide` invoking `cluster plan/apply`. | Killing `omnigraph-server` and calling `rmRecursiveSync(clusterRootDir)` on any stamp change. | Blind deletion destroys all open task branches and Blob history and incurs full restart latency, whereas `cluster apply` updates additive schemas and stored queries in-place (`references/cluster.md`). |
 | **3. Semantic Retrieval** | Omnigraph `@embed` + Scope-First `rrf(nearest(...), bm25(...))` + `fuzzy`. | Separate SQLite vector extension, external Qdrant/Chroma daemon, or unconstrained LLM ranking. | Separate vector stores cannot join structurally against the live PERA Levi hypergraph in a single query (`Scope-First, Rank-Second`), and break our zero-external-DB invariant. |
 | **4. Concurrent Branch & Main Protection** | Server-side Cedar `protected_branches: [main]` + `ifGraphCommit` OCC + `dryRun: true` merge. | Relying purely on client-side file locks or silently force-overwriting `main` on merge conflict. | Client locks do not govern standalone `omnigraph-mcp` callers (`agent-mcp`), and silent overwrite masks concurrent edits across `Workspace: "share"` subagents. |
-| **5. Actor Authentication (`harness-cli` vs. `agent-mcp`)** | Static per-workspace Bearer tokens via `OMNIGRAPH_SERVER_BEARER_TOKENS_JSON` persisted in `.harness/omnigraph-endpoint.json` (`0o600`) + MCP launcher. | Signed `--data-token-trust` credentials or keeping `--unauthenticated` (`default` actor). | `--data-token-trust` binds keys to a cluster `deploymentId` that invalidates on every clean-slate reset; `--unauthenticated` ignores actor separation so Cedar policies cannot distinguish `agent-mcp` from `harness-cli`. |
+| **5. Actor Authentication (`harness-cli` vs. `agent-mcp`)** | Static per-workspace Bearer tokens via `OMNIGRAPH_SERVER_BEARER_TOKENS_JSON` persisted in `.harness/omnigraph-cluster/auth-tokens.json` (`0o600`, alongside `.harness/omnigraph-cluster/server.json`) + MCP launcher. | Signed `--data-token-trust` credentials or keeping `--unauthenticated` (`default` actor). | `--data-token-trust` binds keys to a cluster `deploymentId` that invalidates on every clean-slate reset; `--unauthenticated` ignores actor separation so Cedar policies cannot distinguish `agent-mcp` from `harness-cli`. |
 
 ---
 
@@ -974,18 +973,18 @@ sequenceDiagram
 
 ### 8.1 Performance & Resource Impact
 - **Cold Query Startup (`omnigraph optimize`):** Persisting derived traversal adjacency inside `.harness/omnigraph-cluster` eliminates in-memory adjacency reconstruction on server boot and compacts fragmented Lance tables produced by frequent `plan-check`/`verify` cycles.
-- **Hybrid Search Latency (`OMNI-02`):** Scope-first filtering by `archimateLayer` or `packageTag` followed by `rrf(nearest(...), bm25(...))` with `limit 10` bounds vector/BM25 scoring to small domain subgraphs (`< 8 ms`), avoiding repeated multi-hundred-millisecond LLM classification round-trips.
-- **Incremental Daemon Sync (`OMNI-04`):** `changes.poll` reads only committed `ChangeBlock`s since `cursor`, keeping `DatalogSession.stepFileDelta` warm under `< 3 ms` per commit without re-scanning TypeScript ASTs.
-- **Offline `omnigraph lint` Gate (`OMNI-07`):** Executes statically against `schema.pg` and `queries/harness.gq` in `< 15 ms` with zero network I/O, catching query/schema mismatches (`T...` / `Q...`) before launching `omnigraph-server`.
+- **Hybrid Search Latency (`OMNI-02`):** Scope-first filtering by `archimateLayer` or `packageTag` followed by `rrf(nearest(...), bm25(...))` with `limit 10` bounds vector/BM25 scoring to small domain subgraphs, avoiding repeated multi-hundred-millisecond LLM classification round-trips.
+- **Incremental Daemon Sync (`OMNI-04`):** `changes.poll` reads only committed `ChangeBlock`s since `cursor`, keeping `DatalogSession.stepFileDelta` warm without re-scanning TypeScript ASTs.
+- **Offline `omnigraph lint` Gate (`OMNI-07`):** Executes statically against `schema.pg` and `queries/harness.gq` with zero network I/O, catching query/schema mismatches (`T...` / `Q...`) before launching `omnigraph-server`.
 
-### 8.2 Clean-Slate Reset & Evolution Strategy (No Backward Compatibility)
+### 8.2 Clean-Slate Reset & Evolution Strategy (Conditional `RequiresCleanRebuild` vs `LiveClusterApply`)
 Per Omnigraph v0.14.0 constraints observed in `references/schema.md` and `references/server-policy.md`:
 1. Omnigraph's schema planner **refuses** adding `@key(...)` to an *existing* unkeyed edge type in-place.
 2. Omnigraph **refuses** modifying an already-applied Cedar policy bundle on an existing graph with `deployment_scope`.
 
-**Locked Decision — Unconditional Clean-Slate Cluster Reset:** Backward compatibility with legacy pre-RFC-0009 `.harness/omnigraph-cluster` contents and historical cluster state retention are **explicit non-goals** because the workspace AST/spec extract is our deterministic source of truth.
-1. Rolling out **Phase 9A** unconditionally wipes `.harness/omnigraph-cluster` (`nodeSyncHostIo.rmRecursiveSync`), creates the fresh cluster with `@key(@src, @dst, role)`, mounted Cedar policy bundles, and `.cluster-schema-epoch = "rfc-0009-v2"`, and repopulates `main` cleanly via `pnpm harness ingest` + `omnigraph optimize`.
-2. Any subsequent future change that sets `policyBundleOrEdgeKeyChanged: true` triggers `RequiresCleanRebuild` in `OmnigraphSchemaEvolution.decide` to execute an unconditional clean reset + re-ingest, whereas ordinary additive `.pg` edits (`@index`, nullable fields) and `.gq` query edits flow through live `omnigraph cluster apply` without wiping commit history.
+**Conditional Cutover & Evolution Strategy:** Backward compatibility with legacy pre-RFC-0009 `.harness/omnigraph-cluster` contents is an explicit non-goal because the workspace AST/spec extract is our deterministic source of truth.
+1. Rolling out **Phase 9A** (`rfc-0009-v2` epoch) resets `.harness/omnigraph-cluster` via `RequiresCleanRebuild`, creates the fresh cluster with `@key(@src, @dst, role)` and mounted `graph-access` Cedar policy bundle, and repopulates `main` cleanly via `pnpm harness ingest` + `omnigraph optimize`.
+2. Any subsequent change that sets `policyBundleOrEdgeKeyChanged: true` triggers `RequiresCleanRebuild` in `OmnigraphSchemaEvolution.decide` to execute a clean rebuild + re-ingest, whereas ordinary additive `.pg` edits (`@index`, nullable fields) and `.gq` query edits flow through `LiveClusterApply` (`omnigraph cluster apply`) without wiping commit history.
 
 ---
 
@@ -1056,7 +1055,7 @@ In `RFC-0001`..`RFC-0003` and `harness:ADR-0006`, `@modernrelay/omnigraph` v0.14
 
 ## Decision Outcome
 
-Chosen option: **Option 1** (`RFC-0009`). All 32 `Plays*Role` edges in `schema.pg` declare `@key(@src, @dst, role)`; task branch loads use `mode: "overwrite"` without deleting branch history; `OmnigraphBranchVerify.decide` evaluates `branches.diff` and `branches.merge({ dryRun: true })` during `verify`; `OmnigraphSchemaEvolution.decide` selects `cluster apply` over `rmRecursiveSync` for additive schema/query updates; Cedar `graph.policy.yaml` (`protected_branches: [main]`) and `cluster.policy.yaml` are mounted in `cluster.yaml`; hybrid search (`rrf(nearest, bm25)`, `fuzzy`) and `GraphPolicy` queries are curated in `queries/harness.gq` and gated offline by `OmnigraphLint.decide`; and `ifGraphCommit` + `changes.poll` + `Blob` + `omnigraph optimize` complete the end-to-end integration.
+Chosen option: **Option 1** (`RFC-0009`). All 32 `Plays*Role` edges in `schema.pg` declare `@key(@src, @dst, role)`; task branch loads use `mode: "overwrite"` without deleting branch history; `OmnigraphBranchVerify.decide` evaluates `branches.diff` and `branches.merge({ dryRun: true })` during `verify`; `OmnigraphSchemaEvolution.decide` selects `cluster apply` over `rmRecursiveSync` for additive schema/query updates; Cedar `graph.policy.yaml` (`protected_branches: [main]`) is mounted as `graph-access` in `cluster.yaml` (with `cluster.policy.yaml` retained on disk as reference); hybrid search (`rrf(nearest, bm25)`, `fuzzy`) and `GraphPolicy` queries are curated in `queries/harness.gq` and gated offline by `OmnigraphLint.decide`; and `ifGraphCommit` + `changes.poll` + `Blob` + `omnigraph optimize` complete the end-to-end integration.
 
 ## Rejected Alternatives
 
@@ -1070,7 +1069,7 @@ Chosen option: **Option 1** (`RFC-0009`). All 32 `Plays*Role` edges in `schema.p
 
 ### Positive Consequences
 - Exact, idempotent graph representation with zero duplicate edges on `main` and full commit lineage across `plan/*` and `impl/*`.
-- Early conflict detection across concurrent worktrees during `verify`, zero-restart `cluster apply` on additive edits, and `< 8 ms` hybrid search + `< 15 ms` offline `.pg`/`.gq` linting.
+- Early conflict detection across concurrent worktrees during `verify`, zero-restart `cluster apply` on additive edits, hybrid search, and offline `.pg`/`.gq` linting.
 
 ### Negative Consequences and Trade-offs
 - Requires a one-time clean-slate rebuild of `.harness/omnigraph-cluster` (`rfc-0009-v2` epoch) because Omnigraph v0.14.0 refuses adding `@key(...)` to existing unkeyed edge types in place.
@@ -1191,8 +1190,8 @@ errors:
 
 | ID | Pattern | Requirement | Effect Symbol | Verification |
 | :--- | :--- | :--- | :--- | :--- |
-| **REQ-8.1** | Ubiquitous | `cluster.yaml` shall bind `graph.policy.yaml` (`protected_branches: [main]`) and `cluster.policy.yaml`, while `ensureLocalOmnigraphReady` configures `OMNIGRAPH_SERVER_BEARER_TOKENS_JSON` for `harness-cli` and `agent-mcp` without `--unauthenticated`. | — | Inspection |
-| **REQ-8.2** | Optional feature | Where the repository Omnigraph cluster runs on a hash-derived loopback port with per-actor Bearer tokens, the `omnigraph-mcp` adapter launcher shall read the active `baseUrl` and `agent-mcp` token from `.harness/omnigraph-endpoint.json` (`0o600`) instead of hardcoding port `8080`. | — | UnitTest |
+| **REQ-8.1** | Ubiquitous | `cluster.yaml` shall bind `graph.policy.yaml` (`protected_branches: [main]`), while `ensureLocalOmnigraphReady` configures `OMNIGRAPH_SERVER_BEARER_TOKENS_JSON` for `harness-cli` and `agent-mcp` without `--unauthenticated`. | — | Inspection |
+| **REQ-8.2** | Optional feature | Where the repository Omnigraph cluster runs on a hash-derived loopback port with per-actor Bearer tokens, the `omnigraph-mcp` adapter launcher shall read the active `baseUrl` from `.harness/omnigraph-cluster/server.json` (`0o600`) and `agent-mcp` token from `.harness/omnigraph-cluster/auth-tokens.json` (`0o600`) instead of hardcoding port `8080`. | — | UnitTest |
 
 ### 9 · Unpublished Commit Proposals for DPO Candidates (`OMNI-09`)
 **Source:** [RFC-0009 §2, §5.6](../../../docs/rfcs/0009-omnigraph-v014-native-capabilities-and-harness-integration.md)
@@ -1207,7 +1206,7 @@ errors:
 | ID | Pattern | Requirement | Effect Symbol | Verification |
 | :--- | :--- | :--- | :--- | :--- |
 | **REQ-10.1** | Event-driven | When `verify` records test execution spans or ingests governance markdown, `OmnigraphSync` shall support reading and writing nullable `spanTraceBlob` and `markdownBlob` cells via `og.blobs.get`, `stat`, and `put`. | — | UnitTest |
-| **REQ-10.2** | Event-driven | When `pnpm harness gc` or `done` completes a task merge, `harness-cli` shall invoke `omnigraph optimize` (and retention-bounded `omnigraph cleanup`) on `.harness/omnigraph-cluster/graphs/harness.omni` to persist derived traversal adjacency. | — | UnitTest |
+| **REQ-10.2** | Event-driven | When `pnpm harness gc --strict` runs (non-destructive `omnigraph optimize`) or `done` completes a task merge, `harness-cli` shall invoke `omnigraph optimize` (and retention-bounded `omnigraph cleanup --keep 5 --confirm` on `done`) on `.harness/omnigraph-cluster/graphs/harness.omni` to persist derived traversal adjacency. | — | UnitTest |
 ```
 
 ---
@@ -1219,5 +1218,5 @@ errors:
 | **Phase 9A — Contracts, Keyed Schema & GQ 2.1 Suite** (`OMNI-01`, `OMNI-05`, `OMNI-06`) | 1. Author `libs/harness/contract/src/omnigraph.ts` and export from `@harness/contract`.<br/>2. Update `libs/harness/graph/schema.pg` (`@key(@src, @dst, role)` on all 32 edges, `@instruction`/`@description`, `GraphPolicy`, `Vector(768)? @embed`, `Blob?` columns) and rebuild `libs/harness/graph/src/gq-static-assets.ts`.<br/>3. Upgrade `libs/harness/graph/queries/harness.gq` and `libs/harness/graph/src/gq-queries.ts` (`resolve_effect_fn_fuzzy`, `ontology_realized_by_doc`, `rank_patterns_hybrid`, `rank_candidate_services_for_stub`, `policy_*`). | `omnigraph lint --schema libs/harness/graph/schema.pg --query libs/harness/graph/queries/harness.gq --json` passes (`errors: 0`). |
 | **Phase 9B — Cedar Policies, Non-Destructive Lifecycle & Port Alignment** (`OMNI-07`, `OMNI-08`) | 1. Mount `policies:` + `embeddings:` in `libs/harness/graph/cluster.yaml`, add `protected_branches: [main]` in `graph.policy.yaml`, and add `policy-tests.yaml`.<br/>2. Implement pure `OmnigraphLint.decide` and `OmnigraphSchemaEvolution.decide` in `libs/harness/gates/`.<br/>3. Replace unconditional `rmRecursiveSync` in `apps/harness-cli/src/commands/omnigraph-lifecycle.ts` with `OmnigraphSchemaEvolution.decide` (`LiveClusterApply` vs clean `rfc-0009-v2` epoch cutover) + actor tokens + launcher for `adapters/antigravity/plugins/effect-harness/mcp_config.json`. | `omnigraph policy validate`, `omnigraph policy test`, and `og.access()` pass across `harness-cli` & `agent-mcp`. |
 | **Phase 9C — Lossless Overwrite Sync, Branch Diff & Dry-Run Merge Gate** (`OMNI-03`, `OMNI-04`) | 1. Implement pure `OmnigraphBranchVerify.decide` (`R = never`).<br/>2. Extend `OmnigraphSyncShape` in `libs/harness/graph/src/omnigraph-sync.ts` (`mode: "overwrite"`, zero branch delete before sync, `dryRunMerge`, `deleteBranch: true`, `ifGraphCommit` OCC).<br/>3. Persist `omnigraphCommitId` in `GraphHeadMeta` (`cluster-resolver.ts`) and wire `OmnigraphBranchVerify.decide` into `verify-and-done.command.ts` + `done-omnigraph-helpers.ts`. | Unit + Property tests prove concurrent branch edits fail with `OmnigraphMergeConflictError` during `verify` and stale writes fail with `OmnigraphPreconditionError`. |
-| **Phase 9D — Hybrid RRF Search & Change-Feed Datalog Streaming** (`OMNI-02`, `OMNI-04`) | 1. Wire `rank_patterns_hybrid` & `rank_candidate_services_for_stub` ahead of System One evaluators in `harness_route` / `harness_graph_complete`.<br/>2. Subscribe `apps/harness-mcp/src/daemon/unix-socket-daemon.ts` to `og.changes.poll` feeding `DatalogSession.stepFileDelta` (with `baseline` recovery on `410`). | Live benchmarks confirm `< 10 ms` hybrid search and `< 3 ms` incremental Datalog updates. |
-| **Phase 9E — DPO Proposals, Blob Artifacts & Lance Maintenance** (`OMNI-09`, `OMNI-10`) | 1. Add proposal staging (`commits.publish/drop/changes`) to `plan-and-repair.command.ts` & `harness_graph_rewrite`.<br/>2. Attach `spanTraceBlob` / `markdownBlob` reads/writes via `og.blobs` and wire `omnigraph optimize` + `omnigraph cleanup` into `gc-and-ontology.command.ts` and `done-omnigraph-helpers.ts`.<br/>3. Promote `harness:ADR-0014` and `harness:SPEC-0013` into `libs/harness/docs/{adr,specs}` and pass `pnpm harness gc --strict` + `pnpm harness verify`. | Full `pnpm harness gc --strict && pnpm harness verify` green on live workspace. |
+| **Phase 9D — Hybrid RRF Search & Change-Feed Datalog Streaming** (`OMNI-02`, `OMNI-04`) | 1. Wire `rank_patterns_hybrid` & `rank_candidate_services_for_stub` ahead of System One evaluators in `harness_route` / `harness_graph_complete`.<br/>2. Subscribe `apps/harness-mcp/src/daemon/unix-socket-daemon.ts` to `og.changes.poll` feeding `DatalogSession.stepFileDelta` (with `baseline` recovery on `410`). | Tests confirm hybrid search and incremental Datalog updates. |
+| **Phase 9E — DPO Proposals, Blob Artifacts & Lance Maintenance** (`OMNI-09`, `OMNI-10`) | 1. Expose proposal staging (`proposeMergeCommit`/`inspectCommitChanges`/`publishCommit`/`dropCommit`) in `@harness/graph` (`plan-and-repair` wiring deferred).<br/>2. Attach `spanTraceBlob` reads/writes via `og.blobs` (`putBlob`/`getBlobText`/`statBlob`) and wire `omnigraph optimize` + `omnigraph cleanup` into `gc-and-ontology.command.ts` and `done-omnigraph-helpers.ts`.<br/>3. Promote `harness:ADR-0014` and `harness:SPEC-0013` into `libs/harness/docs/{adr,specs}` and pass `pnpm harness gc --strict` + `pnpm harness verify`. | Full `pnpm harness gc --strict && pnpm harness verify` green on live workspace. |

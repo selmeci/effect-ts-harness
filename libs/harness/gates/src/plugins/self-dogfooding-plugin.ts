@@ -24,6 +24,7 @@ import {
 } from "../ast-cache.js"
 import {
   getMutatedStaticObjectName,
+  hasResultTryFsReadText,
   isBannedNodeBuiltinSpecifier,
   isBannedParentConstructor,
   isBareCauseHasInterruptsNode,
@@ -33,6 +34,7 @@ import {
   isProcessEnvDestructuring,
   isProcessEnvExpression,
   isPureTierProcessEnvBannedPath,
+  isSilentFsFallbackCheckedPath,
 } from "./ast-gate-law-helpers.js"
 import { type SelfDogfoodingInput } from "./self-dogfooding-contract.js"
 
@@ -147,9 +149,6 @@ const hasConstAssertion = (expr: ts.Expression): boolean => {
   return false
 }
 
-const hasResultTryFsRead = (text: string): boolean =>
-  text.includes("Result.try") && /(?:readTextSync|readdirSync|readBytesSync)/.test(text)
-
 const isSilentEmptyFallbackFn = (
   expr: ts.Expression,
   sourceFile: ts.SourceFile,
@@ -217,7 +216,7 @@ const isSilentGateFsFallbackCall = (node: ts.CallExpression, sourceFile: ts.Sour
     node.arguments.length >= 2 &&
     node.arguments[0] !== undefined &&
     node.arguments[1] !== undefined &&
-    hasResultTryFsRead(node.arguments[0].getText(sourceFile)) &&
+    hasResultTryFsReadText(node.arguments[0].getText(sourceFile)) &&
     isSilentEmptyFallbackFn(node.arguments[1], sourceFile, false)
   ) {
     return true
@@ -225,7 +224,7 @@ const isSilentGateFsFallbackCall = (node: ts.CallExpression, sourceFile: ts.Sour
   if (
     ts.isPropertyAccessExpression(unwrappedCallee) &&
     unwrappedCallee.name.text === "pipe" &&
-    hasResultTryFsRead(unwrappedCallee.expression.getText(sourceFile)) &&
+    hasResultTryFsReadText(unwrappedCallee.expression.getText(sourceFile)) &&
     node.arguments.some(
       (arg) =>
         ts.isCallExpression(arg) &&
@@ -242,7 +241,7 @@ const isSilentGateFsFallbackCall = (node: ts.CallExpression, sourceFile: ts.Sour
     unwrappedCallee.text === "pipe" &&
     node.arguments.length >= 2 &&
     node.arguments[0] !== undefined &&
-    hasResultTryFsRead(node.arguments[0].getText(sourceFile)) &&
+    hasResultTryFsReadText(node.arguments[0].getText(sourceFile)) &&
     node.arguments.slice(1).some(
       (arg) =>
         ts.isCallExpression(arg) &&
@@ -264,7 +263,7 @@ const isSilentGateFsFallbackCall = (node: ts.CallExpression, sourceFile: ts.Sour
     isSilentEmptyFallbackFn(node.arguments[1], sourceFile, true)
   ) {
     const matchArgText = findRootMatchArgText(node, sourceFile)
-    if (matchArgText !== undefined && hasResultTryFsRead(matchArgText)) {
+    if (matchArgText !== undefined && hasResultTryFsReadText(matchArgText)) {
       return true
     }
   }
@@ -658,7 +657,7 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
         }
 
         if (
-          /(?:^|\/)libs\/harness\/gates\/src\//.test(file.filePath.replace(/\\/g, "/")) &&
+          isSilentFsFallbackCheckedPath(file.filePath.replace(/\\/g, "/")) &&
           isSilentGateFsFallbackCall(node, sourceFile)
         ) {
           violations.push({

@@ -29,7 +29,7 @@ import {
   isIsolatedExternalWorkspace,
   resolveDecisionModelLayer,
 } from "./daemon-and-omnigraph.service.js"
-import { runPostDoneOmnigraphCompact } from "./done-omnigraph-helpers.js"
+import { runOmnigraphMaintenance } from "./done-omnigraph-helpers.js"
 
 export const handleGc = (
   argv: ReadonlyArray<string>,
@@ -70,7 +70,7 @@ export const handleGc = (
       options?.implGraph === undefined &&
       !isIsolatedExternalWorkspace(repoRoot)
     ) {
-      runPostDoneOmnigraphCompact(repoRoot)
+      runOmnigraphMaintenance(repoRoot, { includeCleanup: false })
     }
     return {
       exitCode: strict && !finalReport.clean ? 1 : 0,

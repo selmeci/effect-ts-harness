@@ -13,6 +13,7 @@ import {
   EnclosingSymbolName,
   GateRuleVersion,
   HARNESS_GATE_RULE_VERSION,
+  inferAstGatePackageTagFromPath,
   makeSelfDogfoodingReport,
   MaxPluginFileLines,
   PluginFileLineCount,
@@ -2510,4 +2511,74 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(interruptViolations.every((v) => v.message.includes("isPureInterruptCause"))).toBe(true)
       }),
   )
+
+  it("H-1..H-4: enforces silent-gate-fs-fallback scope, all-optional-contract-struct, test bailouts/vacuous length, and discarded-persistence-result", () => {
+    const runAst = (relPath: string, code: string) => {
+      const sf = ts.createSourceFile(relPath, code, ts.ScriptTarget.Latest, true)
+      return visitSourceFileSinglePass(
+        sf,
+        AstSourceFilePath.make(relPath),
+        inferAstGatePackageTagFromPath(AstSourceFilePath.make(relPath)),
+      )
+    }
+
+    // H-1: silent-gate-fs-fallback across graph/cli/mcp, exempting compiler-session.ts and /proc/ probes
+    const graphFallback = runAst(
+      "libs/harness/graph/src/bad-io.ts",
+      'import { Result } from "effect"\nexport const f = () => Result.getOrElse(Result.try(() => readTextSync("x")), () => "")\n',
+    )
+    expect(graphFallback.filter((v) => v.rule === "silent-gate-fs-fallback")).toHaveLength(1)
+
+    const procProbe = runAst(
+      "apps/harness-mcp/src/proc-probe.ts",
+      'import { Result } from "effect"\nexport const p = (procCmdlinePath: string) => Result.getOrElse(Result.try(() => readTextSync(procCmdlinePath)), () => "")\n',
+    )
+    expect(procProbe.filter((v) => v.rule === "silent-gate-fs-fallback")).toHaveLength(0)
+
+    const compilerSession = runAst(
+      "libs/harness/graph/src/extractor/compiler-session.ts",
+      'import { Result } from "effect"\nexport const c = () => Result.getOrElse(Result.try(() => readTextSync("x")), () => "")\n',
+    )
+    expect(compilerSession.filter((v) => v.rule === "silent-gate-fs-fallback")).toHaveLength(0)
+
+    // H-2: all-optional-contract-struct
+    const allOptional = runAst(
+      "libs/sample/contract/src/bad-struct.ts",
+      [
+        'import { Schema } from "effect"',
+        "export const BadMeta = Schema.Struct({ pid: Schema.optional(Schema.Int), port: Schema.optional(Schema.Int) })",
+        "export const GoodMeta = Schema.Struct({ pid: Schema.Int, port: Schema.optional(Schema.Int) })",
+      ].join("\n"),
+    )
+    expect(allOptional.filter((v) => v.rule === "all-optional-contract-struct")).toHaveLength(1)
+
+    // H-3: conditional-port-bind-bailout & vacuous-length-nonnegative-assertion
+    const badTest = runAst(
+      "libs/sample/domain/test/bad.test.ts",
+      [
+        "export const t = (bound: boolean, items: ReadonlyArray<string>) => {",
+        "  if (!bound) return",
+        "  expect(items.length).toBeGreaterThanOrEqual(0)",
+        "  expect(items.length).toBeGreaterThanOrEqual(1)",
+        "}",
+      ].join("\n"),
+    )
+    expect(badTest.filter((v) => v.rule === "conditional-port-bind-bailout")).toHaveLength(1)
+    expect(badTest.filter((v) => v.rule === "vacuous-length-nonnegative-assertion")).toHaveLength(1)
+
+    // H-4: discarded-persistence-result
+    const badPersist = runAst(
+      "libs/harness/graph/src/persist.ts",
+      [
+        "export const p = () => {",
+        "  writeGraphHeadMeta()",
+        "  updateGraphHeadCursor()",
+        "  writeServerMetaAtomic()",
+        "  const ok = writeGraphHeadMeta()",
+        "  return ok",
+        "}",
+      ].join("\n"),
+    )
+    expect(badPersist.filter((v) => v.rule === "discarded-persistence-result")).toHaveLength(3)
+  })
 })

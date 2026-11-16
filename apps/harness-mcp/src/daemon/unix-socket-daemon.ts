@@ -31,7 +31,7 @@ import {
   extractWorkspaceTypeAwareGraph,
   makeOmnigraphSyncLayer,
   pollOmnigraphChanges,
-  readGraphHeadMeta,
+  readGraphHeadMetaState,
   updateGraphHeadCursor,
 } from "@harness/graph"
 import {
@@ -244,8 +244,26 @@ const createDaemonLineHandler =
               })
               return yield* pollSem.withPermits(1)(
                 Effect.gen(function* () {
-                  const headMeta = readGraphHeadMeta(resolvedRoot, nodeSyncHostIo)
-                  const rawReqCursor = req.cursor?.trim() || undefined
+                  if (req.branch !== undefined && req.branch.trim().length === 0) {
+                    return { id: req.id, ok: false, error: "Invalid branch name" }
+                  }
+                  if (req.cursor !== undefined && req.cursor.trim().length === 0) {
+                    return { id: req.id, ok: false, error: "Invalid change cursor" }
+                  }
+                  const headMetaState = readGraphHeadMetaState(resolvedRoot, nodeSyncHostIo)
+                  const headMetaOrErr = match(headMetaState)
+                    .with({ _tag: "Present" }, ({ meta }) => ({ ok: true as const, meta }))
+                    .with({ _tag: "Missing" }, () => ({ ok: true as const, meta: null }))
+                    .with({ _tag: "Corrupt" }, ({ path: corruptPath, reason }) => ({
+                      ok: false as const,
+                      error: `Corrupt graph-head.json at ${corruptPath}: ${reason}`,
+                    }))
+                    .exhaustive()
+                  if (!headMetaOrErr.ok) {
+                    return { id: req.id, ok: false, error: headMetaOrErr.error }
+                  }
+                  const headMeta = headMetaOrErr.meta
+                  const rawReqCursor = req.cursor?.trim()
                   const storedCursor =
                     headMeta?.changeFeedCursor !== undefined && headMeta.changeFeedCursor !== null
                       ? match(Schema.decodeOption(OmnigraphChangeCursor)(headMeta.changeFeedCursor))
@@ -258,7 +276,7 @@ const createDaemonLineHandler =
                           })
                           .exhaustive()
                       : undefined
-                  const rawBranch = req.branch?.trim() || undefined
+                  const rawBranch = req.branch?.trim()
                   const branch =
                     rawBranch === undefined
                       ? undefined

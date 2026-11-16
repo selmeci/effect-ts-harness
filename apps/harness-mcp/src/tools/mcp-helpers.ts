@@ -233,7 +233,12 @@ export const resolveGraphWithStatus = (
           if (headState.headSha !== null && recordedMeta.headSha !== headState.headSha) {
             const freshGraph = yield* extractWorkspaceTypeAwareGraph(root, nodeSyncHostIo)
             saveGraphSnapshot(freshGraph, verifySnap, nodeSyncHostIo)
-            writeGraphHeadMeta(root, nodeSyncHostIo, headState)
+            const savedMeta = writeGraphHeadMeta(root, nodeSyncHostIo, headState)
+            if (savedMeta === null && (headState.headSha !== null || headState.gitBranch !== null)) {
+              process.stderr.write(
+                `[harness-mcp] Warning: failed to persist graph-head.json in '${root}'\n`,
+              )
+            }
             return { graph: freshGraph, degraded: false }
           }
         }

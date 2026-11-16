@@ -1,5 +1,5 @@
 import { join } from "node:path"
-import { OmnigraphServerMetaSchema } from "@harness/contract"
+import { OmnigraphServerMetaSchema, toErrorReasonMessage } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { Option, Result, Schema } from "effect"
 import * as Graph from "effect/Graph"
@@ -82,7 +82,7 @@ export const decodeServerMetaOption = Schema.decodeOption(
  */
 export const resolveOmnigraphBaseUrl = (
   options?: OmnigraphConnectionOptions,
-  env: NodeJS.ProcessEnv = {},
+  env: NodeJS.ProcessEnv = process.env,
   hostIo?: SyncHostIo,
 ): string => {
   const effectiveEnv = options?.env ?? env
@@ -97,27 +97,42 @@ export const resolveOmnigraphBaseUrl = (
     const clusterDir = resolveOmnigraphClusterDir(options.repoRoot, effectiveHostIo, effectiveEnv)
     const serverJsonPath = join(clusterDir, "server.json")
     if (effectiveHostIo.existsSync(serverJsonPath)) {
-      const raw = Result.getOrElse(
-        Result.try(() => effectiveHostIo.readTextSync(serverJsonPath)),
-        () => "",
-      )
       const expectedCanonicalRoot = resolveCanonicalRepoRoot(options.repoRoot, effectiveHostIo)
-      const metaOpt = decodeServerMetaOption(raw)
-      const baseUrlFromMeta = match(metaOpt)
-        .with({ _tag: "Some" }, ({ value: meta }) => {
-          const validRoot =
-            meta.canonicalRepoRoot === undefined || meta.canonicalRepoRoot === expectedCanonicalRoot
-          if (
-            validRoot &&
-            meta.baseUrl &&
-            meta.baseUrl.length > 0 &&
-            isLoopbackOmnigraphUrl(meta.baseUrl)
-          ) {
-            return meta.baseUrl
-          }
+      const baseUrlFromMeta = match(
+        Result.try(() => effectiveHostIo.readTextSync(serverJsonPath)),
+      )
+        .with({ _tag: "Failure" }, ({ failure }) => {
+          process.stderr.write(
+            `[harness/graph] Warning: failed to read ${serverJsonPath}: ${toErrorReasonMessage(failure)}\n`,
+          )
           return undefined
         })
-        .with({ _tag: "None" }, () => undefined)
+        .with({ _tag: "Success" }, ({ success: raw }) =>
+          match(decodeServerMetaOption(raw))
+            .with({ _tag: "None" }, () => {
+              process.stderr.write(
+                `[harness/graph] Warning: failed to decode ${serverJsonPath} as OmnigraphServerMeta JSON\n`,
+              )
+              return undefined
+            })
+            .with({ _tag: "Some" }, ({ value: meta }) => {
+              const validRoot = meta.canonicalRepoRoot === expectedCanonicalRoot
+              if (!validRoot) {
+                process.stderr.write(
+                  `[harness/graph] Warning: ignoring ${serverJsonPath} with mismatched canonicalRepoRoot (${meta.canonicalRepoRoot} !== ${expectedCanonicalRoot})\n`,
+                )
+                return undefined
+              }
+              if (!isLoopbackOmnigraphUrl(meta.baseUrl)) {
+                process.stderr.write(
+                  `[harness/graph] Warning: ignoring non-loopback baseUrl in ${serverJsonPath}: ${meta.baseUrl}\n`,
+                )
+                return undefined
+              }
+              return meta.baseUrl
+            })
+            .exhaustive(),
+        )
         .exhaustive()
       if (baseUrlFromMeta !== undefined) {
         return baseUrlFromMeta
@@ -131,7 +146,7 @@ export const resolveOmnigraphBaseUrl = (
 export const makeOmnigraphClient = (
   options?: OmnigraphConnectionOptions,
   hostIo?: SyncHostIo,
-  env: NodeJS.ProcessEnv = {},
+  env: NodeJS.ProcessEnv = process.env,
 ): Omnigraph => {
   const effectiveEnv = options?.env ?? env
   const baseUrl = resolveOmnigraphBaseUrl(options, effectiveEnv, hostIo)

@@ -277,6 +277,7 @@ export {
   decideOmnigraphReconcile,
   deriveRepoOmnigraphPort,
   readGraphHeadMeta,
+  readGraphHeadMetaState,
   resolveCanonicalRepoRoot,
   resolveGitHeadState,
   resolveOmnigraphClusterDir,
@@ -287,6 +288,7 @@ export {
   type GitHeadState,
   type GraphHeadMeta,
   type GraphHeadMetaExtra,
+  type GraphHeadMetaReadState,
   type OmnigraphReconcileDecision,
 } from "./cluster-resolver.js"
 export {

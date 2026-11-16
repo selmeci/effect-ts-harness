@@ -48,7 +48,7 @@ import {
 } from "@harness/contract"
 import { ts } from "@harness/graph"
 import { checkMigrationSqlSafety } from "../migration-check.js"
-import { isBareCauseHasInterruptsNode } from "./ast-gate-law-helpers.js"
+import { hasResultTryFsReadText, isAllOptionalSchemaStructCall, isBareCauseHasInterruptsNode, isConditionalPortBindBailout, isDiscardedPersistenceCallStatement, isSilentFsFallbackCheckedPath, isVacuousLengthNonNegativeAssertion } from "./ast-gate-law-helpers.js"
 import { analyzeSqliteMigratorFromRecordAst } from "./sqlite-migrator-ast.js"
 
 export const GateViolation = Schema.Struct({
@@ -197,9 +197,6 @@ const isSilentFallbackFn = (expr: ts.Expression, sf: ts.SourceFile, extended: bo
   if (body === '""' || body === "''" || body === "[]") return true
   return extended && (body === "{}" || body === "undefined" || body === "false")
 }
-
-const hasResultTryFsReadText = (text: string): boolean =>
-  text.includes("Result.try") && /(?:readTextSync|readdirSync|readBytesSync)/.test(text)
 
 const isSilentGateFsFallbackAstCall = (node: ts.CallExpression, sf: ts.SourceFile): boolean => {
   const callee = unwrapAstExpression(node.expression)
@@ -438,7 +435,8 @@ export const visitSourceFileSinglePass = (
     return undefined
   }
   const isTestOrHelperFile = isTestFile || /(?:^|\/)test\/(?!fixtures\/)/.test(normalizedFilePath)
-  const isGatesSrcFile = !isTestFile && /(?:^|\/)libs\/harness\/gates\/src\//.test(normalizedFilePath)
+  const isGatesSrcFile = !isTestFile && isSilentFsFallbackCheckedPath(normalizedFilePath)
+  const isContractSrcFile = !isTestFile && /(?:^|\/)libs\/[^/]+\/contract\/src\//.test(normalizedFilePath)
   const isClefEndpointCheckedSrcFile =
     !isTestFile &&
     /(?:^|\/)src\//.test(normalizedFilePath) &&
@@ -705,9 +703,9 @@ export const visitSourceFileSinglePass = (
         pushViolation(catSyntaxBans, "ignored-chmod-permission", `Ignoring chmodSync/fchmodSync failure with Effect.ignore or Effect.orElseSucceed in '${filePath}' is banned — permission hardening must fail closed on error.`, node)
       }
 
-      if (isGatesSrcFile && isSilentGateFsFallbackAstCall(node, sourceFile)) {
-        pushViolation(catSyntaxBans, "silent-gate-fs-fallback", `Silent filesystem fallback in '${filePath}' is banned — emit an explicit 'unreadable-workspace-file' finding instead of returning "", [], {}, undefined, or false.`, node)
-      }
+      if (isGatesSrcFile && isSilentGateFsFallbackAstCall(node, sourceFile)) pushViolation(catSyntaxBans, "silent-gate-fs-fallback", `Silent filesystem fallback in '${filePath}' is banned — emit an explicit 'unreadable-workspace-file' finding instead of returning "", [], {}, undefined, or false.`, node)
+      if (isContractSrcFile && isAllOptionalSchemaStructCall(node)) pushViolation(catSyntaxBans, "all-optional-contract-struct", `Schema.Struct with all Schema.optional(...) fields in '${filePath}' is banned — require canonical non-optional contract fields.`, node)
+      if (isTestFile && isVacuousLengthNonNegativeAssertion(node)) pushViolation(catTestIntegrity, "vacuous-length-nonnegative-assertion", `Vacuous 'expect(...length).toBeGreaterThanOrEqual(0)' assertion in '${filePath}' is always true — assert exact length or element contents.`, node)
 
       if (isTestFile && (calleeText === "saveGraphSnapshot" || calleeText === "saveGraphSnapshotEffect" || calleeText === "writeFileSync" || calleeText === "fs.writeFileSync")) {
         if (node.arguments.some((arg) => /["'`]\.harness\//.test(arg.getText(sourceFile)))) {
@@ -774,6 +772,8 @@ export const visitSourceFileSinglePass = (
       }
     }
 
+    if (isTestFile && isConditionalPortBindBailout(node)) pushViolation(catTestIntegrity, "conditional-port-bind-bailout", `Conditional port-bind bailout ('if (!bound) return') in '${filePath}' silently skips test assertions.`, node)
+    if (!isTestOrHelperFile && /(?:^|\/)(?:libs|apps)\/.*\/src\//.test(normalizedFilePath) && isDiscardedPersistenceCallStatement(node)) pushViolation(catSyntaxBans, "discarded-persistence-result", `Discarded persistence call result in '${filePath}' is banned — inspect or propagate the returned Result/Effect.`, node)
     ts.forEachChild(node, walk)
   }
 

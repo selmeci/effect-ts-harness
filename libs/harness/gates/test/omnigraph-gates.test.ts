@@ -43,18 +43,17 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
             _tag: "ResolvedDiff",
             changes: [
               {
-                _tag: "EffectFnDiffChange",
+                _tag: "EffectFnUpdated",
                 entityId: OmnigraphEntityId.make("fn:Orders.create"),
-                op: OmnigraphChangeOp.make("update"),
                 wasStubBefore: true,
                 stubAfter: false,
                 spanName: OmnigraphSpanName.make("Orders.create"),
               },
             ],
+            observedImplEffectFnCount: NonNegativeCount.make(1),
+            unchangedStubCount: NonNegativeCount.make(0),
           },
           dryRunConflicts: [],
-          implEffectFnCount: NonNegativeCount.make(1),
-          remainingStubCount: NonNegativeCount.make(0),
         }
 
         const { result: report, spans } = yield* runWithTestTracer(
@@ -84,18 +83,14 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
             _tag: "ResolvedDiff",
             changes: [
               {
-                _tag: "EffectFnDiffChange",
+                _tag: "EffectFnDeleted",
                 entityId: OmnigraphEntityId.make("fn:old-file:Orders.create"),
-                op: OmnigraphChangeOp.make("delete"),
                 wasStubBefore: true,
-                stubAfter: false,
                 spanName: OmnigraphSpanName.make("Orders.create"),
               },
               {
-                _tag: "EffectFnDiffChange",
+                _tag: "EffectFnInserted",
                 entityId: OmnigraphEntityId.make("fn:new-file:Orders.create"),
-                op: OmnigraphChangeOp.make("insert"),
-                wasStubBefore: false,
                 stubAfter: false,
                 spanName: OmnigraphSpanName.make("Orders.create"),
               },
@@ -105,14 +100,12 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
                 typeName: OmnigraphTypeName.make("ServiceTag"),
                 entityId: OmnigraphEntityId.make("svc:DeprecatedService"),
                 op: OmnigraphChangeOp.make("delete"),
-                wasStubBefore: false,
-                stubAfter: false,
               },
             ],
+            observedImplEffectFnCount: NonNegativeCount.make(1),
+            unchangedStubCount: NonNegativeCount.make(0),
           },
           dryRunConflicts: [],
-          implEffectFnCount: NonNegativeCount.make(1),
-          remainingStubCount: NonNegativeCount.make(0),
         })
         expect(movedClean.verdict).toBe("clean")
         expect(movedClean.violations).toHaveLength(0)
@@ -126,19 +119,15 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
         }
 
         const droppedFn: OmnigraphDiffChangeSummary = {
-          _tag: "EffectFnDiffChange",
+          _tag: "EffectFnDeleted",
           entityId: OmnigraphEntityId.make("fn:Cart.reserve"),
-          op: OmnigraphChangeOp.make("delete"),
           wasStubBefore: true,
-          stubAfter: false,
           spanName: null,
         }
 
         const stillStubFn: OmnigraphDiffChangeSummary = {
-          _tag: "EffectFnDiffChange",
+          _tag: "EffectFnInserted",
           entityId: OmnigraphEntityId.make("fn:Cart.refund"),
-          op: OmnigraphChangeOp.make("insert"),
-          wasStubBefore: false,
           stubAfter: true,
           spanName: OmnigraphSpanName.make("Cart.refund"),
         }
@@ -150,20 +139,23 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
           diffState: {
             _tag: "ResolvedDiff",
             changes: [droppedFn, stillStubFn],
+            observedImplEffectFnCount: NonNegativeCount.make(0),
+            unchangedStubCount: NonNegativeCount.make(1),
           },
           dryRunConflicts: [conflict],
-          implEffectFnCount: NonNegativeCount.make(0),
-          remainingStubCount: NonNegativeCount.make(2),
         })
 
         expect(extraStubReport.verdict).toBe("violated")
         const stubViolations = extraStubReport.violations.filter(
-          (v) => v.ruleId === "unimplemented-stub-remaining",
+          (v) => v._tag === "unimplemented-stub-remaining",
         )
         expect(stubViolations).toHaveLength(2)
-        expect(extraStubReport.violations.some((v) => v.ruleId === "planned-effect-fn-dropped")).toBe(
-          true,
-        )
+        expect(
+          extraStubReport.violations.some((v) => v._tag === "planned-effect-fn-dropped"),
+        ).toBe(true)
+        expect(
+          extraStubReport.violations.some((v) => v._tag === "no-effect-fn-implemented"),
+        ).toBe(true)
         expect(extraStubReport.conflictCount).toBe(1)
 
         const missingBaseReport = yield* decideOmnigraphBranchVerify({
@@ -172,29 +164,27 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
           mainBranch: OmnigraphBranchName.make("main"),
           diffState: { _tag: "MissingMergeBase" },
           dryRunConflicts: [],
-          implEffectFnCount: NonNegativeCount.make(0),
-          remainingStubCount: NonNegativeCount.make(0),
         })
         expect(missingBaseReport.verdict).toBe("violated")
-        expect(missingBaseReport.violations.map((v) => v.ruleId)).toEqual(["missing-merge-base"])
+        expect(missingBaseReport.violations.map((v) => v._tag)).toEqual(["missing-merge-base"])
       }),
   )
 
   it.effect.prop(
-    "REQ-3.1 property: mixed-type diffChanges and conflicts produce exact violation ruleId sets",
+    "REQ-3.1 property: mixed-type diffChanges and conflicts produce exact violation _tag sets",
     {
       diffChanges: Schema.Array(OmnigraphDiffChangeSummary),
       conflictCount: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 2 })),
-      remainingStubCount: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 3 })),
+      unchangedStubCount: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 2 })),
       missingMergeBase: Schema.Boolean,
-      zeroImplEffectFnCount: Schema.Boolean,
+      zeroObservedImplEffectFnCount: Schema.Boolean,
     },
     ({
       diffChanges,
       conflictCount,
-      remainingStubCount,
+      unchangedStubCount,
       missingMergeBase,
-      zeroImplEffectFnCount,
+      zeroObservedImplEffectFnCount,
     }) =>
       Effect.gen(function* () {
         const dryRunConflicts: Array<OmnigraphMergeConflictDetail> = Array.from(
@@ -211,12 +201,16 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
         const effectiveChanges = missingMergeBase ? [] : diffChanges
         const activeDiffFns = effectiveChanges.filter((ch) =>
           match(ch)
-            .with({ _tag: "EffectFnDiffChange" }, (fnCh) => fnCh.op !== "delete")
-            .with({ _tag: "EntityDiffChange" }, () => false)
+            .with({ _tag: "EffectFnInserted" }, { _tag: "EffectFnUpdated" }, () => true)
+            .with({ _tag: "EffectFnDeleted" }, { _tag: "EntityDiffChange" }, () => false)
             .exhaustive(),
         )
-        const implEffectFnCount = NonNegativeCount.make(
-          zeroImplEffectFnCount ? 0 : Math.max(1, activeDiffFns.length),
+        const observedImplEffectFnCount = NonNegativeCount.make(
+          missingMergeBase
+            ? 0
+            : zeroObservedImplEffectFnCount
+              ? 0
+              : Math.max(1, activeDiffFns.length),
         )
 
         const report = yield* decideOmnigraphBranchVerify({
@@ -225,18 +219,21 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
           mainBranch: OmnigraphBranchName.make("main"),
           diffState: missingMergeBase
             ? { _tag: "MissingMergeBase" }
-            : { _tag: "ResolvedDiff", changes: diffChanges },
+            : {
+                _tag: "ResolvedDiff",
+                changes: diffChanges,
+                observedImplEffectFnCount,
+                unchangedStubCount: NonNegativeCount.make(unchangedStubCount),
+              },
           dryRunConflicts,
-          implEffectFnCount,
-          remainingStubCount: NonNegativeCount.make(remainingStubCount),
         })
 
         const activeSpanNames = new Set(
           activeDiffFns
             .map((ch) =>
               match(ch)
-                .with({ _tag: "EffectFnDiffChange" }, (fnCh) => fnCh.spanName)
-                .with({ _tag: "EntityDiffChange" }, () => null)
+                .with({ _tag: "EffectFnInserted" }, { _tag: "EffectFnUpdated" }, (fnCh) => fnCh.spanName)
+                .with({ _tag: "EffectFnDeleted" }, { _tag: "EntityDiffChange" }, () => null)
                 .exhaustive(),
             )
             .filter((name): name is OmnigraphSpanName => name !== null),
@@ -245,40 +242,34 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
         const expectedRules = new Set<string>()
         if (missingMergeBase) expectedRules.add("missing-merge-base")
         if (conflictCount > 0) expectedRules.add("dry-run-merge-conflict")
-        let diffStubCount = 0
         for (const ch of effectiveChanges) {
           match(ch)
-            .with({ _tag: "EffectFnDiffChange" }, (fnCh) => {
-              match(fnCh.op)
-                .with("delete", () => {
-                  if (fnCh.spanName === null || !activeSpanNames.has(fnCh.spanName)) {
-                    expectedRules.add("planned-effect-fn-dropped")
-                  }
-                })
-                .with("insert", "update", () => {
-                  if (fnCh.stubAfter) {
-                    diffStubCount += 1
-                    expectedRules.add("unimplemented-stub-remaining")
-                  }
-                })
-                .exhaustive()
+            .with({ _tag: "EffectFnDeleted" }, (fnCh) => {
+              if (fnCh.spanName === null || !activeSpanNames.has(fnCh.spanName)) {
+                expectedRules.add("planned-effect-fn-dropped")
+              }
+            })
+            .with({ _tag: "EffectFnInserted" }, { _tag: "EffectFnUpdated" }, (fnCh) => {
+              if (fnCh.stubAfter) {
+                expectedRules.add("unimplemented-stub-remaining")
+              }
             })
             .with({ _tag: "EntityDiffChange" }, () => undefined)
             .exhaustive()
         }
-        if (activeDiffFns.length > 0 && implEffectFnCount === 0) {
-          expectedRules.add("planned-effect-fn-dropped")
+        if (activeDiffFns.length > 0 && observedImplEffectFnCount === 0) {
+          expectedRules.add("no-effect-fn-implemented")
         }
-        if (remainingStubCount > diffStubCount) {
+        if (!missingMergeBase && unchangedStubCount > 0) {
           expectedRules.add("unimplemented-stub-remaining")
         }
 
-        const actualRules = new Set(report.violations.map((v) => v.ruleId))
+        const actualRules = new Set(report.violations.map((v) => v._tag))
         expect(actualRules).toEqual(expectedRules)
         expect(report.verdict).toBe(expectedRules.size > 0 ? "violated" : "clean")
         expect(report.verifiedChangeCount).toBe(effectiveChanges.length)
         expect(report.conflictCount).toBe(conflictCount)
-        expect(report.implEffectFnCount).toBe(implEffectFnCount)
+        expect(report.implEffectFnCount).toBe(observedImplEffectFnCount)
       }),
   )
 
@@ -358,8 +349,6 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
       Effect.gen(function* () {
         const cleanInput: OmnigraphLintInput = {
           statusOk: true,
-          errorCount: NonNegativeCount.make(0),
-          warningCount: NonNegativeCount.make(1),
           queriesProcessed: NonNegativeCount.make(14),
           diagnostics: [
             {
@@ -380,13 +369,13 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
         expect(cleanReport.verdict).toBe("clean")
         expect(cleanReport.violations).toHaveLength(0)
         expect(cleanReport.queriesProcessed).toBe(14)
+        expect(cleanReport.errorCount).toBe(0)
+        expect(cleanReport.warningCount).toBe(1)
         expect(spans.some((s) => s.name === "OmnigraphLint.decide")).toBe(true)
 
-        const errorDiagEvenWithZeroCountExit = yield* Effect.exit(
+        const errorDiagExit = yield* Effect.exit(
           decideOmnigraphLint({
             statusOk: true,
-            errorCount: NonNegativeCount.make(0),
-            warningCount: NonNegativeCount.make(0),
             queriesProcessed: NonNegativeCount.make(14),
             diagnostics: [
               {
@@ -400,7 +389,7 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
           }),
         )
 
-        const exitOk = Exit.match(errorDiagEvenWithZeroCountExit, {
+        const exitOk = Exit.match(errorDiagExit, {
           onSuccess: () => false,
           onFailure: (cause) =>
             !Cause.hasDies(cause) &&
@@ -421,18 +410,14 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
     {
       statusOk: Schema.Boolean,
       diagnostics: Schema.Array(OmnigraphLintDiagnostic),
-      errorCount: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 2 })),
-      warningCount: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 2 })),
       policy: OmnigraphLintPolicy,
       queriesProcessed: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 20 })),
     },
-    ({ statusOk, diagnostics, errorCount, warningCount, policy, queriesProcessed }) =>
+    ({ statusOk, diagnostics, policy, queriesProcessed }) =>
       Effect.gen(function* () {
         const exit = yield* Effect.exit(
           decideOmnigraphLint({
             statusOk,
-            errorCount: NonNegativeCount.make(errorCount),
-            warningCount: NonNegativeCount.make(warningCount),
             queriesProcessed: NonNegativeCount.make(queriesProcessed),
             diagnostics,
             policy,
@@ -440,11 +425,12 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
         )
 
         const denyWarnings = policy === "deny-warnings"
+        const errorCount = diagnostics.filter((d) => d.severity === "error").length
+        const warningCount = diagnostics.filter((d) => d.severity === "warning").length
         const blockingCount = diagnostics.filter(
           (d) => d.severity === "error" || (d.severity === "warning" && denyWarnings),
         ).length
-        const hasBlockingErrors =
-          errorCount > 0 || blockingCount > 0 || !statusOk || (denyWarnings && warningCount > 0)
+        const hasBlockingErrors = blockingCount > 0 || !statusOk
         const shouldFail = policy !== "report-only" && hasBlockingErrors
         const expectedVerdict = hasBlockingErrors ? "violated" : "clean"
 
@@ -462,7 +448,9 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
           onSuccess: (report) =>
             !shouldFail &&
             report.verdict === expectedVerdict &&
-            report.queriesProcessed === queriesProcessed,
+            report.queriesProcessed === queriesProcessed &&
+            report.errorCount === errorCount &&
+            report.warningCount === warningCount,
         })
         expect(Exit.isFailure(exit)).toBe(shouldFail)
         expect(checkResult).toBe(true)

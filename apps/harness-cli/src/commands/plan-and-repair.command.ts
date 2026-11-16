@@ -247,7 +247,7 @@ export const handlePlanCheck = (
         recordTelemetry(options, {
           surface: "cli",
           category: "graph_query",
-          toolName: "omnigraph:sync-plan",
+          toolName: "graph:snapshot-local",
           outcome: "ok",
           durationMs: Math.max(0, Date.now() - omnigraphStartedAtMs),
           engineSource: "local",

@@ -106,9 +106,12 @@ export {
 } from "./cache-and-daemon.js"
 export {
   DryRunMergeConflictViolation,
-  EffectFnDiffChange,
+  EffectFnDeleted,
+  EffectFnInserted,
+  EffectFnUpdated,
   EntityDiffChange,
   MissingMergeBaseViolation,
+  NoEffectFnImplementedViolation,
   OmnigraphActorToken,
   OmnigraphAuthTokensSchema,
   OmnigraphBaseUrl,
@@ -128,10 +131,8 @@ export {
   OmnigraphEntityId,
   OmnigraphEntityKind,
   OmnigraphIsoTimestamp,
-  OmnigraphLintCliOutputSchema,
   OmnigraphLintDiagnostic,
   OmnigraphLintError,
-  OmnigraphLintFindingWireSchema,
   OmnigraphLintInput,
   OmnigraphLintPolicy,
   OmnigraphLintReport,
@@ -151,7 +152,5 @@ export {
   PlannedEffectFnDroppedViolation,
   UnimplementedStubRemainingViolation,
   type OmnigraphAuthTokens,
-  type OmnigraphLintCliOutput,
-  type OmnigraphLintFindingWire,
   type OmnigraphServerMeta,
 } from "./omnigraph.js"

@@ -113,6 +113,7 @@ describe("RFC-0009 unix-socket-daemon poll-changes", () => {
         port,
         baseUrl: `http://127.0.0.1:${port}`,
         canonicalRepoRoot: repoRoot,
+        updatedAt: null,
       }),
       "utf8",
     )
@@ -198,6 +199,7 @@ describe("RFC-0009 unix-socket-daemon poll-changes", () => {
         port,
         baseUrl: `http://127.0.0.1:${port}`,
         canonicalRepoRoot: repoRoot,
+        updatedAt: null,
       }),
       "utf8",
     )
@@ -275,6 +277,7 @@ describe("RFC-0009 unix-socket-daemon poll-changes", () => {
         port,
         baseUrl: `http://127.0.0.1:${port}`,
         canonicalRepoRoot: repoRoot,
+        updatedAt: null,
       }),
       "utf8",
     )
@@ -360,6 +363,7 @@ describe("RFC-0009 unix-socket-daemon poll-changes", () => {
         port,
         baseUrl: `http://127.0.0.1:${port}`,
         canonicalRepoRoot: repoRoot,
+        updatedAt: null,
       }),
       "utf8",
     )
@@ -385,8 +389,6 @@ describe("RFC-0009 unix-socket-daemon poll-changes", () => {
   it("F-4.1: poll-changes returns ok:false when graph-head.json persistence fails", async () => {
     const repoRoot = makeMockRepo()
     rmSync(join(repoRoot, ".harness", "graph-head.json"))
-    // Create a directory at graph-head.json so renameSync fails with EISDIR
-    mkdirSync(join(repoRoot, ".harness", "graph-head.json"), { recursive: true })
 
     const headers = {
       "Content-Type": "application/json",
@@ -400,6 +402,8 @@ describe("RFC-0009 unix-socket-daemon poll-changes", () => {
         return
       }
       if (url.includes("/changes")) {
+        // Create a directory at graph-head.json after initial Missing check so renameSync fails with EISDIR
+        mkdirSync(join(repoRoot, ".harness", "graph-head.json"), { recursive: true })
         res.writeHead(200, headers)
         res.end(
           JSON.stringify({
@@ -424,6 +428,7 @@ describe("RFC-0009 unix-socket-daemon poll-changes", () => {
         port,
         baseUrl: `http://127.0.0.1:${port}`,
         canonicalRepoRoot: repoRoot,
+        updatedAt: null,
       }),
       "utf8",
     )
@@ -445,16 +450,8 @@ describe("RFC-0009 unix-socket-daemon poll-changes", () => {
     }
   })
 
-  it("S-2.2: non-.ts change blocks refresh DatalogSession baseline and corrupt graph-head.json emits stderr warning", async () => {
+  it("S-2.2: non-.ts change blocks refresh DatalogSession baseline", async () => {
     const repoRoot = makeMockRepo()
-    writeFileSync(join(repoRoot, ".harness", "graph-head.json"), "{corrupt-json", "utf8")
-    const stderrChunks: Array<string> = []
-    const origWrite = process.stderr.write.bind(process.stderr)
-    process.stderr.write = ((chunk: string | Uint8Array) => {
-      stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
-      return true
-    }) as typeof process.stderr.write
-
     const headers = {
       "Content-Type": "application/json",
       "Omnigraph-Http-Api": "0.14",
@@ -505,6 +502,7 @@ describe("RFC-0009 unix-socket-daemon poll-changes", () => {
         port,
         baseUrl: `http://127.0.0.1:${port}`,
         canonicalRepoRoot: repoRoot,
+        updatedAt: null,
       }),
       "utf8",
     )
@@ -526,12 +524,67 @@ describe("RFC-0009 unix-socket-daemon poll-changes", () => {
       expect(parsed.cursor).toBe("cur-nonts-1")
       expect(parsed.blockCount).toBe(1)
       expect(parsed.updatedFiles).toEqual([])
-      expect(stderrChunks.join("")).toContain("failed to decode")
     } finally {
-      process.stderr.write = origWrite
       await handle.close()
       server.closeAllConnections()
       server.close()
+    }
+  })
+
+  it("R2-P3 & R2-I10: poll-changes fails closed on corrupt graph-head.json and rejects empty/whitespace branch or cursor", async () => {
+    const repoRoot = makeMockRepo()
+    writeFileSync(join(repoRoot, ".harness", "graph-head.json"), "{corrupt-json", "utf8")
+
+    const handle = await startHarnessDaemonServer(repoRoot)
+    try {
+      const corruptRaw = await sendDaemonLine(handle.socketPath, {
+        id: "poll-corrupt-1",
+        command: "poll-changes",
+        repoRoot,
+      })
+      const corruptParsed = JSON.parse(corruptRaw) as {
+        readonly ok?: boolean
+        readonly error?: string
+      }
+      expect(corruptParsed.ok).toBe(false)
+      expect(corruptParsed.error).toContain("Corrupt graph-head.json")
+      expect(readFileSync(join(repoRoot, ".harness", "graph-head.json"), "utf8")).toBe(
+        "{corrupt-json",
+      )
+
+      rmSync(join(repoRoot, ".harness", "graph-head.json"))
+
+      for (const badBranch of ["", "   "]) {
+        const badBranchRaw = await sendDaemonLine(handle.socketPath, {
+          id: `poll-bad-branch-${badBranch.length}`,
+          command: "poll-changes",
+          repoRoot,
+          branch: badBranch,
+        })
+        const badBranchParsed = JSON.parse(badBranchRaw) as {
+          readonly ok?: boolean
+          readonly error?: string
+        }
+        expect(badBranchParsed.ok).toBe(false)
+        expect(badBranchParsed.error).toContain("Invalid branch name")
+      }
+
+      for (const badCursor of ["", "   "]) {
+        const badCursorRaw = await sendDaemonLine(handle.socketPath, {
+          id: `poll-bad-cursor-${badCursor.length}`,
+          command: "poll-changes",
+          repoRoot,
+          cursor: badCursor,
+        })
+        const badCursorParsed = JSON.parse(badCursorRaw) as {
+          readonly ok?: boolean
+          readonly error?: string
+        }
+        expect(badCursorParsed.ok).toBe(false)
+        expect(badCursorParsed.error).toContain("Invalid change cursor")
+      }
+    } finally {
+      await handle.close()
     }
   })
 })

@@ -289,6 +289,24 @@ describe("Harness decision definitions & fallbacks", () => {
         ).pipe(Effect.provide(failingLayer))
         expect(silentFsRes.kind).toBe("mechanical")
         expect(silentFsRes.hint).toContain("unreadable-workspace-file")
+
+        const cliAsRes = yield* triageFailure(
+          "error: omnigraph optimize does not accept --as",
+        ).pipe(Effect.provide(failingLayer))
+        expect(cliAsRes.kind).toBe("mechanical")
+        expect(cliAsRes.hint).toContain("--as")
+
+        const stateLockRes = yield* triageFailure(
+          "Error: [state_lock_held] cluster state lock already exists",
+        ).pipe(Effect.provide(failingLayer))
+        expect(stateLockRes.kind).toBe("mechanical")
+        expect(stateLockRes.hint).toContain("state_lock_held")
+
+        const multiBundleRes = yield* triageFailure(
+          "Error: target matches 2 policy bundles",
+        ).pipe(Effect.provide(failingLayer))
+        expect(multiBundleRes.kind).toBe("mechanical")
+        expect(multiBundleRes.hint).toContain("matches 2 policy bundles")
       }),
   )
 })

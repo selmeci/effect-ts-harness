@@ -689,11 +689,23 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
 
       fs.writeFileSync(
         path.join(clusterA, "server.json"),
-        JSON.stringify({ baseUrl: "http://127.0.0.1:19991", canonicalRepoRoot: repoA }),
+        JSON.stringify({
+          pid: process.pid,
+          port: 19991,
+          baseUrl: "http://127.0.0.1:19991",
+          canonicalRepoRoot: repoA,
+          updatedAt: null,
+        }),
       )
       fs.writeFileSync(
         path.join(clusterB, "server.json"),
-        JSON.stringify({ baseUrl: "http://127.0.0.1:24442", canonicalRepoRoot: repoB }),
+        JSON.stringify({
+          pid: process.pid,
+          port: 24442,
+          baseUrl: "http://127.0.0.1:24442",
+          canonicalRepoRoot: repoB,
+          updatedAt: null,
+        }),
       )
 
       const urlA = resolveOmnigraphBaseUrl({ repoRoot: repoA }, {}, testHostIo)
@@ -803,6 +815,8 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
                     outcome: "already_up_to_date",
                     source: taskBranches.implBranch,
                     target: taskBranches.mainBranch,
+                    branch_deleted: false,
+                    branch_delete_error_details: { error: "simulated delete skip" },
                     commit: null,
                     serverRef: "9d92f397",
                   }),
@@ -1579,6 +1593,7 @@ describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
                   outcome: "already_up_to_date",
                   source: "impl/current",
                   target: "main",
+                  branch_deleted: true,
                   commit: null,
                   serverRef: "9d92f397",
                 }),

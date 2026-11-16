@@ -30,6 +30,7 @@ import {
   type HarnessGraph,
   loadGraphSnapshotEffect,
   makeTsCompilerOverlayLayer,
+  resolveGitHeadState,
   resolveOmnigraphTaskBranches,
   saveGraphSnapshot,
   writeGraphHeadMeta,
@@ -53,7 +54,7 @@ import {
   tryQueryWarmDaemonSocket,
 } from "./daemon-and-omnigraph.service.js"
 import {
-  runPostDoneOmnigraphCompact,
+  runOmnigraphMaintenance,
   syncOmnigraphOnDone,
   syncVerifyImplToOmnigraph,
 } from "./done-omnigraph-helpers.js"
@@ -241,11 +242,19 @@ export const handleVerify = (
     const syncStartedAtMs = Date.now()
     if (isIsolatedExternalWorkspace(repoRoot)) {
       saveGraphSnapshot(graph, snapshotPath, nodeSyncHostIo)
-      writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
+      const headState = resolveGitHeadState(repoRoot, nodeSyncHostIo)
+      const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
+      if ((headState.headSha !== null || headState.gitBranch !== null) && savedMeta === null) {
+        return {
+          exitCode: 1,
+          stdout: "",
+          stderr: "Verification failed: could not persist graph head metadata (.harness/graph-head.json)",
+        }
+      }
       recordTelemetry(options, {
         surface: "cli",
         category: "graph_query",
-        toolName: "omnigraph:sync-impl",
+        toolName: "graph:snapshot-local",
         outcome: "ok",
         durationMs: Math.max(0, Date.now() - syncStartedAtMs),
         engineSource: "local",
@@ -580,7 +589,7 @@ export const handleDone = (
               })
               writeSessionReportFiles(repoRoot, report, nodeSyncHostIo)
             }
-            runPostDoneOmnigraphCompact(repoRoot)
+            runOmnigraphMaintenance(repoRoot, { includeCleanup: true })
             return { exitCode: 0, stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "", stderr: transcriptStderr, telemetryDetail: "completed" }
           }),
         )

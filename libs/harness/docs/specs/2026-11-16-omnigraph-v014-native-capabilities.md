@@ -87,7 +87,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 | ID | Pattern | Requirement | Effect Symbol | Verification |
 | :--- | :--- | :--- | :--- | :--- |
-| REQ-2.1 | Ubiquitous | `schema.pg` **shall** declare `@index` text fields and nullable `Vector(768)? @embed(...)` columns on `EffectFn`, `ServiceTag`, `PatternDoc`, `AdrDoc`, and `EarsSpec`. | — | `GraphCheck` |
+| REQ-2.1 | Ubiquitous | `schema.pg` **shall** declare `@index` text fields and nullable `Vector(768)? @embed(...)` columns on all 7 embedded node types: `EffectFn`, `ServiceTag`, `TaggedError`, `SchemaDef`, `PatternDoc`, `AdrDoc`, and `EarsSpec`. | — | `GraphCheck` |
 | REQ-2.2 | Event-driven | **When** `harness_gq_query` executes `rank_patterns_hybrid`, `rank_candidate_services_for_stub`, or `resolve_effect_fn_fuzzy`, `OmnigraphSync` **shall** rank scope-filtered subgraph matches using `rrf(nearest(...), bm25(...))` or `fuzzy(..., 2)`. | — | `UnitTest` |
 
 ### 3 · Branch Diff & Dry-Run Merge Gate (`OMNI-03`)
@@ -96,7 +96,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 | ID | Pattern | Requirement | Effect Symbol | Verification |
 | :--- | :--- | :--- | :--- | :--- |
-| REQ-3.1 | State-driven | **While** executing in pure evaluation mode, `OmnigraphBranchVerify.decide` **shall** inspect `OmnigraphBranchDiff` changes and `dryRunConflicts` with `R = never` and return `verdict: "violated"` if any planned `EffectFn` was deleted, remains a stub, or has a merge conflict. | `OmnigraphBranchVerify.decide` | `GraphCheck, PropertyTest` |
+| REQ-3.1 | State-driven | **While** executing in pure evaluation mode, `OmnigraphBranchVerify.decide` **shall** inspect `OmnigraphBranchDiffState` (`ResolvedDiff` with `changes`, `observedImplEffectFnCount`, and `unchangedStubCount`, or `MissingMergeBase`) and `dryRunConflicts` with `R = never` and return `verdict: "violated"` on `missing-merge-base`, `dry-run-merge-conflict`, `planned-effect-fn-dropped` (with move/rename exemption when matching `spanName` is re-inserted), `no-effect-fn-implemented` (`observedImplEffectFnCount === 0`), or `unimplemented-stub-remaining` (from diff `isStubAfter` or `unchangedStubCount > 0`). | `OmnigraphBranchVerify.decide` | `GraphCheck, PropertyTest` |
 | REQ-3.2 | Unwanted behaviour | **If** `OmnigraphSync.dryRunMerge` (`og.branches.merge` with `dryRun: true`) reports a `ConflictError` with `mergeConflicts`, **then** `OmnigraphSync` **shall** fail with typed `OmnigraphMergeConflictError`. | `OmnigraphMergeConflictError` | `UnitTest` |
 | REQ-3.3 | Event-driven | **When** `OmnigraphSync.mergeBranch` merges `impl/*` into `main` on `done`, `OmnigraphSync.mergeBranch` **shall** pass `deleteBranch: true` instead of force-overwriting `main` on conflicts. | `OmnigraphSync.mergeBranch` | `UnitTest` |
 
@@ -107,7 +107,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | ID | Pattern | Requirement | Effect Symbol | Verification |
 | :--- | :--- | :--- | :--- | :--- |
 | REQ-4.1 | Unwanted behaviour | **If** `OmnigraphSync.mutateConditional` sends a conditional write with `ifGraphCommit` and Omnigraph responds with `PreconditionFailedError` (HTTP `412`), **then** `OmnigraphSync` **shall** fail with `OmnigraphPreconditionError` carrying expected and actual `OmnigraphCommitId` values. | `OmnigraphPreconditionError` | `UnitTest` |
-| REQ-4.2 | Event-driven | **When** `OmnigraphSync.pollChanges` polls `og.changes.poll` in the warm MCP daemon using a persisted `OmnigraphChangeCursor`, `unix-socket-daemon` **shall** convert committed `EntityChange` blocks into incremental deltas for `DatalogSession.stepFileDelta` and fall back to `og.changes.baseline` on HTTP `410`. | `OmnigraphSync.pollChanges` | `TraceTest` |
+| REQ-4.2 | Event-driven | **When** `OmnigraphSync.pollChanges` (`executePollChanges`) polls `og.changes.poll` using a persisted `OmnigraphChangeCursor` and encounters HTTP `410`, `executePollChanges` **shall** recover via `og.changes.baseline` and return `requiresBaseline: true`, while `unix-socket-daemon` consumes `requiresBaseline` to rebuild or incrementally step `DatalogSession.stepFileDelta` from committed `EntityChange` blocks. | `OmnigraphSync.pollChanges` | `TraceTest` |
 
 ### 5 · GQ 2.1 Edge Unions & Multi-Hop Governance Queries (`OMNI-05`)
 
@@ -131,7 +131,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 | ID | Pattern | Requirement | Effect Symbol | Verification |
 | :--- | :--- | :--- | :--- | :--- |
-| REQ-7.1 | Unwanted behaviour | **If** `OmnigraphLint.decide` inspects non-empty type/syntax errors from `omnigraph lint --json`, **then** `OmnigraphLint.decide` **shall** fail with `OmnigraphLintError` prior to cluster deployment. | `OmnigraphLintError` | `UnitTest` |
+| REQ-7.1 | Unwanted behaviour | **If** `OmnigraphLint.decide` inspects `omnigraph lint --json` output under `OmnigraphLintPolicy` (`fail-on-error`, `deny-warnings`, or `report-only`) and detects a failing status or blocking diagnostic, **then** `OmnigraphLint.decide` **shall** report `OmnigraphLintViolation` (`_tag`: `omnigraph-lint-status-not-ok` or `omnigraph-lint-error`) and `harness-cli` **shall** fail with `OmnigraphLintError` prior to cluster deployment. | `OmnigraphLintError` | `UnitTest` |
 | REQ-7.2 | State-driven | **While** evaluating config drift with `R = never`, `OmnigraphSchemaEvolution.decide` **shall** emit `LiveClusterApply` for additive schema or query updates and `RequiresCleanRebuild` for `@key(...)` edge-key or policy-bundle changes rather than wiping `.harness/omnigraph-cluster` on additive edits. | `OmnigraphSchemaEvolution.decide` | `GraphCheck, PropertyTest` |
 
 ### 8 · Cedar Policies & Authenticated MCP Binding (`OMNI-08`)
@@ -157,8 +157,8 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 | ID | Pattern | Requirement | Effect Symbol | Verification |
 | :--- | :--- | :--- | :--- | :--- |
-| REQ-10.1 | Event-driven | **When** `verify` syncs traces with `.harness/spans.jsonl` present or `OmnigraphSync` accesses `og.blobs`, `harness-cli` and `OmnigraphSync` **shall** persist span traces via `putBlob` and read or stat nullable `spanTraceBlob` and `markdownBlob` cells via `getBlobText` and `statBlob`. | — | `UnitTest` |
-| REQ-10.2 | Event-driven | **When** `pnpm harness gc --strict` (on a full workspace cluster) or `done` completes a task merge, `harness-cli` **shall** invoke `omnigraph optimize` and retention-bounded `omnigraph cleanup --keep 5` on `.harness/omnigraph-cluster/graphs/harness.omni` to persist derived traversal adjacency. | — | `UnitTest` |
+| REQ-10.1 | Event-driven | **When** `verify` or `done` runs with `.harness/spans.jsonl` present, `harness-cli` **shall** persist the trace payload onto the first `VitestCase.spanTraceBlob` via `putBlob` and verify it via `statBlob`, while `OmnigraphSync.getBlobText` and `OmnigraphSync.statBlob` expose typed reads for callers. | — | `UnitTest` |
+| REQ-10.2 | Event-driven | **When** `pnpm harness gc --strict` runs on a full workspace cluster, `harness-cli` **shall** invoke non-destructive `omnigraph optimize`, and **when** `done` completes a task merge, `harness-cli` **shall** invoke `omnigraph optimize` followed by retention-bounded `omnigraph cleanup --keep 5 --confirm` on `.harness/omnigraph-cluster/graphs/harness.omni` to persist derived traversal adjacency. | — | `UnitTest` |
 
 ## Assumptions
 

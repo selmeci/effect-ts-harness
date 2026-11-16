@@ -25,11 +25,11 @@ import {
   OmnigraphEntityId,
   OmnigraphEntityKind,
   OmnigraphIsoTimestamp,
-  OmnigraphLintCliOutputSchema,
   OmnigraphLintDiagnostic,
   OmnigraphLintError,
   OmnigraphLintInput,
   OmnigraphLintReport,
+  OmnigraphLintStatus,
   type OmnigraphLintViolation,
   OmnigraphMergeConflictDetail,
   OmnigraphMergeConflictError,
@@ -97,9 +97,8 @@ describe("@harness/contract omnigraph schemas", () => {
     }
 
     const change: OmnigraphDiffChangeSummary = {
-      _tag: "EffectFnDiffChange",
+      _tag: "EffectFnUpdated",
       entityId: OmnigraphEntityId.make("fn:Cart.checkout"),
-      op: Schema.decodeSync(OmnigraphChangeOp)("update"),
       wasStubBefore: true,
       stubAfter: false,
       spanName: OmnigraphSpanName.make("Cart.checkout"),
@@ -112,10 +111,10 @@ describe("@harness/contract omnigraph schemas", () => {
       diffState: {
         _tag: "ResolvedDiff",
         changes: [change],
+        observedImplEffectFnCount: NonNegativeCount.make(1),
+        unchangedStubCount: NonNegativeCount.make(0),
       },
       dryRunConflicts: [conflict],
-      implEffectFnCount: NonNegativeCount.make(1),
-      remainingStubCount: NonNegativeCount.make(0),
     }
 
     const decodedInput = Schema.decodeSync(OmnigraphBranchVerifyInput)(
@@ -126,8 +125,7 @@ describe("@harness/contract omnigraph schemas", () => {
     expect(decodedInput.dryRunConflicts).toHaveLength(1)
 
     const violation: OmnigraphBranchViolation = {
-      _tag: "DryRunMergeConflictViolation",
-      ruleId: "dry-run-merge-conflict",
+      _tag: "dry-run-merge-conflict",
       message: ErrorReasonMessage.make("Merge conflict detected"),
       conflict,
     }
@@ -209,20 +207,22 @@ describe("@harness/contract omnigraph schemas", () => {
       }),
     )
     expect(meta.port).toBe(18080)
+    const invalidMetaPort: unknown = {
+      pid: 4242,
+      port: 70000,
+      baseUrl: "http://127.0.0.1:18080",
+      canonicalRepoRoot: "/tmp/repo",
+      updatedAt: null,
+    }
+    expect(() => Schema.decodeUnknownSync(OmnigraphServerMetaSchema)({})).toThrow()
+    expect(() => Schema.decodeUnknownSync(OmnigraphServerMetaSchema)(invalidMetaPort)).toThrow()
 
-    const lintOut = Schema.decodeSync(Schema.fromJsonString(OmnigraphLintCliOutputSchema))(
-      JSON.stringify({
-        status: "ok",
-        errors: 0,
-        warnings: 1,
-        queries_processed: 14,
-        findings: [{ code: "GQ-W01", message: "hint", severity: "warning", target: null }],
-      }),
-    )
-    expect(lintOut.warnings).toBe(1)
+    expect(Schema.decodeSync(OmnigraphLintStatus)("ok")).toBe("ok")
+    expect(Schema.decodeSync(OmnigraphLintStatus)("error")).toBe("error")
+    expect(() => Schema.decodeUnknownSync(OmnigraphLintStatus)("warning")).toThrow()
   })
 
-  it("roundtrips OmnigraphLintInput, OmnigraphLintReport, and constructs TaggedErrors", () => {
+  it("roundtrips OmnigraphLintInput, OmnigraphLintReport, and TaggedErrors with negative validation rejections", () => {
     const diagnostic: OmnigraphLintDiagnostic = {
       code: OmnigraphDiagnosticCode.make("GQ-T37"),
       message: ErrorReasonMessage.make("rrf cannot be projected in return"),
@@ -232,8 +232,6 @@ describe("@harness/contract omnigraph schemas", () => {
 
     const lintInput: OmnigraphLintInput = {
       statusOk: false,
-      errorCount: NonNegativeCount.make(1),
-      warningCount: NonNegativeCount.make(0),
       queriesProcessed: NonNegativeCount.make(14),
       diagnostics: [diagnostic],
       policy: "fail-on-error",
@@ -245,8 +243,7 @@ describe("@harness/contract omnigraph schemas", () => {
     expect(decodedLintInput.diagnostics).toHaveLength(1)
 
     const lintViolation: OmnigraphLintViolation = {
-      _tag: "LintDiagnosticViolation",
-      ruleId: "omnigraph-lint-error",
+      _tag: "omnigraph-lint-error",
       message: ErrorReasonMessage.make("Query failed lint"),
       diagnostic,
     }
@@ -262,46 +259,63 @@ describe("@harness/contract omnigraph schemas", () => {
     )
     expect(decodedLintReport.verdict).toBe("violated")
 
-    const precondErr = new OmnigraphPreconditionError({
-      branch: OmnigraphBranchName.make("main"),
-      expectedCommit: OmnigraphCommitId.make("commit-1"),
-      actualCommit: OmnigraphCommitId.make("commit-2"),
-    })
-    expect(precondErr._tag).toBe("OmnigraphPreconditionError")
-    expect(precondErr.branch).toBe("main")
-    expect(precondErr.expectedCommit).toBe("commit-1")
-    expect(precondErr.actualCommit).toBe("commit-2")
-
-    const precondNullErr = new OmnigraphPreconditionError({
-      branch: OmnigraphBranchName.make("main"),
-      expectedCommit: OmnigraphCommitId.make("commit-1"),
+    const precondRaw = {
+      _tag: "OmnigraphPreconditionError" as const,
+      branch: "main",
+      expectedCommit: "commit-1",
       actualCommit: null,
-    })
-    expect(precondNullErr.actualCommit).toBeNull()
-
-    const conflictDetail: OmnigraphMergeConflictDetail = {
-      kind: OmnigraphConflictKind.make("orphan_edge"),
-      entityKind: OmnigraphEntityKind.make("edge"),
-      typeName: OmnigraphTypeName.make("PlaysCallerRole"),
-      entityId: null,
-      message: ErrorReasonMessage.make("Target missing"),
     }
-    const conflictErr = new OmnigraphMergeConflictError({
-      sourceBranch: OmnigraphBranchName.make("impl/task-1"),
-      targetBranch: OmnigraphBranchName.make("main"),
-      conflicts: [conflictDetail],
-    })
-    expect(conflictErr._tag).toBe("OmnigraphMergeConflictError")
-    expect(conflictErr.sourceBranch).toBe("impl/task-1")
-    expect(conflictErr.targetBranch).toBe("main")
-    expect(conflictErr.conflicts).toEqual([conflictDetail])
+    const decodedPrecond = Schema.decodeSync(OmnigraphPreconditionError)(precondRaw)
+    expect(decodedPrecond._tag).toBe("OmnigraphPreconditionError")
+    expect(decodedPrecond.actualCommit).toBeNull()
+    expect(Schema.encodeSync(OmnigraphPreconditionError)(decodedPrecond)).toEqual(precondRaw)
+    const invalidPrecond: unknown = {
+      _tag: "OmnigraphPreconditionError",
+      branch: "",
+      expectedCommit: "commit-1",
+      actualCommit: null,
+    }
+    expect(() => Schema.decodeUnknownSync(OmnigraphPreconditionError)(invalidPrecond)).toThrow()
 
-    const lintErr = new OmnigraphLintError({
-      errorCount: NonNegativeCount.make(1),
-      diagnosticsSummary: ErrorReasonMessage.make("GQ-T37 error"),
-    })
-    expect(lintErr._tag).toBe("OmnigraphLintError")
-    expect(lintErr.errorCount).toBe(1)
-    expect(lintErr.diagnosticsSummary).toBe("GQ-T37 error")
+    const conflictRaw = {
+      _tag: "OmnigraphMergeConflictError" as const,
+      sourceBranch: "impl/task-1",
+      targetBranch: "main",
+      conflicts: [
+        {
+          kind: "orphan_edge" as const,
+          entityKind: "edge" as const,
+          typeName: "PlaysCallerRole",
+          entityId: null,
+          message: "Target missing",
+        },
+      ],
+    }
+    const decodedConflict = Schema.decodeSync(OmnigraphMergeConflictError)(conflictRaw)
+    expect(decodedConflict._tag).toBe("OmnigraphMergeConflictError")
+    expect(Schema.encodeSync(OmnigraphMergeConflictError)(decodedConflict)).toEqual(conflictRaw)
+    const invalidConflict: unknown = { ...conflictRaw, sourceBranch: "  " }
+    expect(() => Schema.decodeUnknownSync(OmnigraphMergeConflictError)(invalidConflict)).toThrow()
+
+    const lintErrRaw = {
+      _tag: "OmnigraphLintError" as const,
+      errorCount: 1,
+      diagnosticsSummary: "GQ-T37 error",
+    }
+    const decodedLintErr = Schema.decodeSync(OmnigraphLintError)(lintErrRaw)
+    expect(decodedLintErr._tag).toBe("OmnigraphLintError")
+    expect(Schema.encodeSync(OmnigraphLintError)(decodedLintErr)).toEqual(lintErrRaw)
+    const invalidLintCount: unknown = {
+      _tag: "OmnigraphLintError",
+      errorCount: -1,
+      diagnosticsSummary: "GQ-T37 error",
+    }
+    const invalidLintSummary: unknown = {
+      _tag: "OmnigraphLintError",
+      errorCount: 1,
+      diagnosticsSummary: "",
+    }
+    expect(() => Schema.decodeUnknownSync(OmnigraphLintError)(invalidLintCount)).toThrow()
+    expect(() => Schema.decodeUnknownSync(OmnigraphLintError)(invalidLintSummary)).toThrow()
   })
 })

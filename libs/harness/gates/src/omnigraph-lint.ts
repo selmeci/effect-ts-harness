@@ -19,8 +19,7 @@ export const decideOmnigraphLint = Effect.fn("OmnigraphLint.decide")(function* (
 
   if (!input.statusOk) {
     violations.push({
-      _tag: "LintStatusNotOkViolation",
-      ruleId: "omnigraph-lint-status-not-ok",
+      _tag: "omnigraph-lint-status-not-ok",
       message: ErrorReasonMessage.make("Omnigraph lint reported non-ok status."),
     })
   }
@@ -30,7 +29,19 @@ export const decideOmnigraphLint = Effect.fn("OmnigraphLint.decide")(function* (
     .with("fail-on-error", "report-only", () => false)
     .exhaustive()
 
+  let errorCount = 0
+  let warningCount = 0
   for (const diag of input.diagnostics) {
+    match(diag.severity)
+      .with("error", () => {
+        errorCount += 1
+      })
+      .with("warning", () => {
+        warningCount += 1
+      })
+      .with("info", () => undefined)
+      .exhaustive()
+
     const isBlocking = match(diag.severity)
       .with("error", () => true)
       .with("warning", () => denyWarnings)
@@ -40,8 +51,7 @@ export const decideOmnigraphLint = Effect.fn("OmnigraphLint.decide")(function* (
     if (isBlocking) {
       blockingDiags.push(diag)
       violations.push({
-        _tag: "LintDiagnosticViolation",
-        ruleId: "omnigraph-lint-error",
+        _tag: "omnigraph-lint-error",
         message: ErrorReasonMessage.make(
           `[${diag.code}]${diag.targetName === null ? "" : ` (${diag.targetName})`} ${diag.message}`,
         ),
@@ -50,33 +60,7 @@ export const decideOmnigraphLint = Effect.fn("OmnigraphLint.decide")(function* (
     }
   }
 
-  if (input.errorCount > 0 && blockingDiags.length === 0) {
-    violations.push({
-      _tag: "LintDiagnosticViolation",
-      ruleId: "omnigraph-lint-error",
-      message: ErrorReasonMessage.make(
-        `Omnigraph lint reported ${input.errorCount} error(s) without structured diagnostics.`,
-      ),
-      diagnostic: null,
-    })
-  }
-
-  if (denyWarnings && input.warningCount > 0 && blockingDiags.length === 0) {
-    violations.push({
-      _tag: "LintDiagnosticViolation",
-      ruleId: "omnigraph-lint-error",
-      message: ErrorReasonMessage.make(
-        `Omnigraph lint reported ${input.warningCount} warning(s) under deny-warnings policy.`,
-      ),
-      diagnostic: null,
-    })
-  }
-
-  const hasBlockingErrors =
-    input.errorCount > 0 ||
-    blockingDiags.length > 0 ||
-    !input.statusOk ||
-    (denyWarnings && input.warningCount > 0)
+  const hasBlockingErrors = blockingDiags.length > 0 || !input.statusOk
 
   const shouldFail = match(input.policy)
     .with("fail-on-error", "deny-warnings", () => hasBlockingErrors)
@@ -87,16 +71,14 @@ export const decideOmnigraphLint = Effect.fn("OmnigraphLint.decide")(function* (
     const summary =
       violations.map((v) => v.message).join("; ") || "Omnigraph lint reported blocking errors."
     return yield* new OmnigraphLintError({
-      errorCount: NonNegativeCount.make(
-        Math.max(1, input.errorCount, blockingDiags.length),
-      ),
+      errorCount: NonNegativeCount.make(Math.max(1, blockingDiags.length)),
       diagnosticsSummary: ErrorReasonMessage.make(summary),
     })
   }
 
   return makeVerdictReport(violations, {
     queriesProcessed: input.queriesProcessed,
-    errorCount: input.errorCount,
-    warningCount: input.warningCount,
+    errorCount: NonNegativeCount.make(errorCount),
+    warningCount: NonNegativeCount.make(warningCount),
   })
 })

@@ -18,7 +18,7 @@ import {
   loadGraphSnapshotEffect,
   makeOmnigraphSyncLayer,
   mergeOmnigraphBranch,
-  OmnigraphSync,
+  resolveGitHeadState,
   resolveOmnigraphClusterDir,
   resolveOmnigraphTaskBranches,
   syncToOmnigraphAndSnapshot,
@@ -39,11 +39,12 @@ import {
 } from "./omnigraph-auth-and-drift.js"
 import {
   countImplEffectFns,
-  findFirstVitestCaseId,
   formatDiffErrorMessage,
   isBranchNotFoundError,
+  readEffectFnStubAfterFromImage,
   readIsStubFromImage,
   readSpanNameFromImages,
+  uploadAndVerifySpanTraceBlob,
 } from "./omnigraph-safety-helpers.js"
 
 export { isBranchNotFoundError }
@@ -66,12 +67,19 @@ export const runVerifyOmnigraphLintCheck = (
     return undefined
   })
 
-export const runPostDoneOmnigraphCompact = (repoRoot: string): void => {
+/**
+ * Runs offline Omnigraph storage maintenance (`optimize`, and optionally `cleanup`)
+ * on the local cluster when not in an isolated external workspace.
+ */
+export const runOmnigraphMaintenance = (
+  repoRoot: string,
+  options?: { readonly includeCleanup?: boolean },
+): void => {
   if (isIsolatedExternalWorkspace(repoRoot)) return
   const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
   const clusterDir = resolveOmnigraphClusterDir(clusterRepoRoot, nodeSyncHostIo)
   if (nodeSyncHostIo.existsSync(clusterDir)) {
-    runOmnigraphOptimizeAndCleanup(clusterDir)
+    runOmnigraphOptimizeAndCleanup(clusterDir, undefined, options?.includeCleanup ?? true)
   }
 }
 
@@ -98,7 +106,11 @@ export const runPreMergeOmnigraphBranchVerify = (
     )
 
     type BranchDiffOutcome =
-      | { readonly _tag: "Ok"; readonly diff: Effect.Success<ReturnType<typeof diffOmnigraphBranches>> }
+      | {
+          readonly _tag: "Ok"
+          readonly diff: Effect.Success<ReturnType<typeof diffOmnigraphBranches>>
+          readonly effectivePlanBranch: string
+        }
       | { readonly _tag: "MissingMergeBase" }
       | { readonly _tag: "DiffFailed"; readonly message: string }
 
@@ -108,7 +120,11 @@ export const runPreMergeOmnigraphBranchVerify = (
       target: taskBranches.planBranch,
     }).pipe(
       Effect.provide(syncLayer),
-      Effect.map((diff): BranchDiffOutcome => ({ _tag: "Ok", diff })),
+      Effect.map((diff): BranchDiffOutcome => ({
+        _tag: "Ok",
+        diff,
+        effectivePlanBranch: taskBranches.planBranch,
+      })),
       Effect.catch((err): Effect.Effect<BranchDiffOutcome> => {
         if (!isBranchNotFoundError(err)) {
           const message = formatDiffErrorMessage(err)
@@ -124,7 +140,12 @@ export const runPreMergeOmnigraphBranchVerify = (
             target: taskBranches.mainBranch,
           }).pipe(
             Effect.provide(syncLayer),
-            Effect.map((diff): BranchDiffOutcome => ({ _tag: "Ok", diff })),
+            Effect.map((diff): BranchDiffOutcome => {
+              process.stderr.write(
+                `[harness:done] Info: Omnigraph plan branch '${taskBranches.planBranch}' not found; comparing '${taskBranches.implBranch}' against '${taskBranches.mainBranch}' instead\n`,
+              )
+              return { _tag: "Ok", diff, effectivePlanBranch: taskBranches.mainBranch }
+            }),
             Effect.catch((fallbackErr): Effect.Effect<BranchDiffOutcome> =>
               Effect.sync(() => {
                 const message = formatDiffErrorMessage(fallbackErr)
@@ -171,6 +192,11 @@ export const runPreMergeOmnigraphBranchVerify = (
       return diffFailureResult
     }
 
+    const effectivePlanBranch = match(branchDiffOpt)
+      .with({ _tag: "Ok" }, (ok) => ok.effectivePlanBranch)
+      .with({ _tag: "DiffFailed" }, { _tag: "MissingMergeBase" }, () => taskBranches.planBranch)
+      .exhaustive()
+
     const diffState = match(branchDiffOpt)
       .with({ _tag: "DiffFailed" }, { _tag: "MissingMergeBase" }, () => ({
         _tag: "MissingMergeBase" as const,
@@ -178,27 +204,57 @@ export const runPreMergeOmnigraphBranchVerify = (
       .with({ _tag: "Ok" }, ({ diff }) => {
         const changes: Array<OmnigraphDiffChangeSummary> = diff.changes.map((c) => {
           const spanName = readSpanNameFromImages(c.before, c.after) ?? null
-          const base = {
-            entityId: OmnigraphEntityId.make(c.id),
-            op: c.op,
-            wasStubBefore: readIsStubFromImage(c.before),
-            stubAfter: readIsStubFromImage(c.after),
-          }
+          const entityId = OmnigraphEntityId.make(c.id)
           if (c.type.name === "EffectFn") {
-            return {
-              _tag: "EffectFnDiffChange" as const,
-              ...base,
-              spanName,
-            }
+            return match(c.op)
+              .with("insert", () => ({
+                _tag: "EffectFnInserted" as const,
+                entityId,
+                stubAfter: readEffectFnStubAfterFromImage(c.after),
+                spanName,
+              }))
+              .with("update", () => ({
+                _tag: "EffectFnUpdated" as const,
+                entityId,
+                wasStubBefore: readIsStubFromImage(c.before),
+                stubAfter: readEffectFnStubAfterFromImage(c.after),
+                spanName,
+              }))
+              .with("delete", () => ({
+                _tag: "EffectFnDeleted" as const,
+                entityId,
+                wasStubBefore: readIsStubFromImage(c.before),
+                spanName,
+              }))
+              .exhaustive()
           }
           return {
             _tag: "EntityDiffChange" as const,
             entityKind: c.kind,
             typeName: OmnigraphTypeName.make(c.type.name),
-            ...base,
+            entityId,
+            op: c.op,
           }
         })
-        return { _tag: "ResolvedDiff" as const, changes }
+        const diffStubCount = changes.filter((ch) =>
+          match(ch)
+            .with({ _tag: "EffectFnInserted" }, { _tag: "EffectFnUpdated" }, (c) => c.stubAfter)
+            .with({ _tag: "EffectFnDeleted" }, { _tag: "EntityDiffChange" }, () => false)
+            .exhaustive(),
+        ).length
+        const counts = implGraph !== undefined ? countImplEffectFns(implGraph) : undefined
+        const observedImplEffectFnCount =
+          counts !== undefined ? NonNegativeCount.make(counts.implEffectFnCount) : null
+        const unchangedStubCount =
+          counts !== undefined
+            ? NonNegativeCount.make(Math.max(0, counts.remainingStubCount - diffStubCount))
+            : NonNegativeCount.make(0)
+        return {
+          _tag: "ResolvedDiff" as const,
+          changes,
+          observedImplEffectFnCount,
+          unchangedStubCount,
+        }
       })
       .exhaustive()
 
@@ -245,47 +301,18 @@ export const runPreMergeOmnigraphBranchVerify = (
       })
       .with({ _tag: "Ok" }, { _tag: "Conflicts" }, ({ conflicts }) =>
         Effect.gen(function* () {
-          let implEffectFnCount = 0
-          let remainingStubCount = 0
-          if (implGraph !== undefined) {
-            const counts = countImplEffectFns(implGraph)
-            implEffectFnCount = counts.implEffectFnCount
-            remainingStubCount = counts.remainingStubCount
-          } else {
-            match(diffState)
-              .with({ _tag: "ResolvedDiff" }, ({ changes }) => {
-                for (const c of changes) {
-                  if (c.op !== "delete") {
-                    match(c)
-                      .with({ _tag: "EffectFnDiffChange" }, () => {
-                        implEffectFnCount += 1
-                      })
-                      .with({ _tag: "EntityDiffChange" }, () => undefined)
-                      .exhaustive()
-                    if (c.stubAfter) {
-                      remainingStubCount += 1
-                    }
-                  }
-                }
-              })
-              .with({ _tag: "MissingMergeBase" }, () => undefined)
-              .exhaustive()
-          }
-
           const verifyReport = yield* decideOmnigraphBranchVerify({
-            planBranch: OmnigraphBranchName.make(taskBranches.planBranch),
+            planBranch: OmnigraphBranchName.make(effectivePlanBranch),
             implBranch: OmnigraphBranchName.make(taskBranches.implBranch),
             mainBranch: OmnigraphBranchName.make(taskBranches.mainBranch),
             diffState,
             dryRunConflicts: conflicts,
-            implEffectFnCount: NonNegativeCount.make(implEffectFnCount),
-            remainingStubCount: NonNegativeCount.make(remainingStubCount),
           })
 
           return match(verifyReport)
             .with({ verdict: "clean" }, () => undefined)
             .with({ verdict: "violated" }, ({ violations }) => {
-              const reason = violations.map((v) => `[${v.ruleId}] ${v.message}`).join("; ")
+              const reason = violations.map((v) => `[${v._tag}] ${v.message}`).join("; ")
               recordTelemetry(options, {
                 surface,
                 category: "graph_query",
@@ -353,40 +380,31 @@ export const syncVerifyImplToOmnigraph = (
     )
     if (syncRes.syncedToOmnigraph) {
       const commitId = "commitId" in syncRes ? syncRes.commitId : undefined
-      writeGraphHeadMeta(
+      const headState = resolveGitHeadState(repoRoot, nodeSyncHostIo)
+      const savedMeta = writeGraphHeadMeta(
         repoRoot,
         nodeSyncHostIo,
-        undefined,
+        headState,
         process.env,
         commitId !== undefined ? { omnigraphCommitId: commitId } : undefined,
       )
-      const spansPath = join(repoRoot, ".harness", "spans.jsonl")
-      if (nodeSyncHostIo.existsSync(spansPath)) {
-        const firstTestId = findFirstVitestCaseId(graph)
-        if (firstTestId !== undefined) {
-          const rawSpans = nodeSyncHostIo.readTextSync(spansPath)
-          const ogSync = yield* OmnigraphSync.pipe(Effect.provide(syncLayer))
-          yield* ogSync
-            .putBlob({
-              repoRoot: clusterRepoRoot,
-              entity: "node",
-              type: OmnigraphTypeName.make("VitestCase"),
-              id: OmnigraphEntityId.make(firstTestId),
-              property: "spanTraceBlob",
-              branch: OmnigraphBranchName.make(taskBranches.implBranch),
-              data: rawSpans,
-            })
-            .pipe(
-              Effect.catch((blobErr) =>
-                Effect.sync(() => {
-                  process.stderr.write(
-                    `[harness:verify] Warning: failed to upload spanTraceBlob: ${String(blobErr)}\n`,
-                  )
-                }),
-              ),
-            )
+      if ((headState.headSha !== null || headState.gitBranch !== null || commitId !== undefined) && savedMeta === null) {
+        return {
+          exitCode: 1,
+          stdout: "",
+          stderr: "Verification failed: could not persist graph head metadata (.harness/graph-head.json)",
         }
       }
+      const blobFail = yield* uploadAndVerifySpanTraceBlob(
+        repoRoot,
+        clusterRepoRoot,
+        taskBranches.implBranch,
+        graph,
+        syncLayer,
+        "verify",
+        1,
+      )
+      if (blobFail !== undefined) return blobFail
     }
     recordTelemetry(options, {
       surface: "cli",
@@ -425,16 +443,18 @@ export const syncOmnigraphOnDone = (
     const surface = isAntigravity ? "hook" : "cli"
     const failExitCode = isAntigravity ? 0 : 1
     if (isIsolatedExternalWorkspace(repoRoot)) {
-      writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
-      recordTelemetry(options, {
-        surface,
-        category: "graph_query",
-        toolName: "omnigraph:merge-main",
-        outcome: "ok",
-        durationMs: Math.max(0, Date.now() - startedAtMs),
-        engineSource: "local",
-        detail: "skipped-isolated-workspace",
-      })
+      const headState = resolveGitHeadState(repoRoot, nodeSyncHostIo)
+      const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
+      if ((headState.headSha !== null || headState.gitBranch !== null) && savedMeta === null) {
+        return {
+          exitCode: failExitCode,
+          stdout: JSON.stringify({
+            decision: blockDecision,
+            reason: "Failed to persist graph head metadata (.harness/graph-head.json)",
+          }),
+          stderr: "[GATE FAILURE] done:graph-head-meta\nFailed to persist .harness/graph-head.json",
+        }
+      }
       return undefined
     }
 
@@ -531,6 +551,17 @@ export const syncOmnigraphOnDone = (
           stderr: `[GATE FAILURE] done:omnigraph-snapshot-sync\n${errMsg}`,
         }
       }
+      const doneBlobFail = yield* uploadAndVerifySpanTraceBlob(
+        repoRoot,
+        clusterRepoRoot,
+        taskBranches.implBranch,
+        implGraph,
+        syncLayer,
+        "done",
+        failExitCode,
+        blockDecision,
+      )
+      if (doneBlobFail !== undefined) return doneBlobFail
     }
 
     const verifyFailure = yield* runPreMergeOmnigraphBranchVerify(
@@ -567,7 +598,18 @@ export const syncOmnigraphOnDone = (
       .exhaustive()
 
     if (mergeOutcome.ok) {
-      writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
+      const headState = resolveGitHeadState(repoRoot, nodeSyncHostIo)
+      const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
+      if ((headState.headSha !== null || headState.gitBranch !== null) && savedMeta === null) {
+        return {
+          exitCode: failExitCode,
+          stdout: JSON.stringify({
+            decision: blockDecision,
+            reason: "Failed to persist graph head metadata (.harness/graph-head.json) after merge",
+          }),
+          stderr: "[GATE FAILURE] done:graph-head-meta\nFailed to persist .harness/graph-head.json",
+        }
+      }
     }
     recordTelemetry(options, {
       surface,
