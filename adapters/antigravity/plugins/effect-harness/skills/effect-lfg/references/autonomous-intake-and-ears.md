@@ -43,9 +43,19 @@ Classify the input request using bounded Graph MCP queries (`harness_resolve`, `
   1. Execute the 5-phase `resolving-effect-review-feedback` workflow autonomously (Ingest $\rightarrow$ Central Graph MCP Adjudication $\rightarrow$ Spec/ADR Sync $\rightarrow$ Package-Isolated `gemini-4-hydrogen-medium` Fixers via `invoke_subagent` or `swarm`).
   2. Advance directly to **Stage 5 (Compounding Learnings & Final Deterministic Gate Sequence)** and **Stage 6 (Shipping)**.
 
-### Route C — Feature Requirement, Behavior Change, or Defect Report
+### Route D — Multi-Phase RFC or Multi-Slice Epic (Worktree-per-Slice DAG)
 
-- **Trigger:** Any feature request, enhancement, architectural task, or bug report that changes code and does not yet have a current EARS specification.
+- **Trigger:** The prompt names an RFC (`docs/rfcs/*.md`), a multi-phase plan (`docs/plans/*.md`), or a large requirement spanning **$\ge 4$ workspace packages** or **$\ge 2$ sequential architectural phases/milestones** (such as `RFC-0009` Phases `9A–9E`).
+- **Action:**
+  1. **Never** write one giant monolithic `stub<A, E, R>()` skeleton across all phases or copy unimplemented future-phase symbols (`enforced_by`, `spans`, `services`, `errors`) from an RFC's end-state Spec/ADR draft into `libs/<scope>/docs/` up front (which fails `unmapped-spec-symbol`, `dead-tagged-error`, and `stale-doc-reference`).
+  2. Read [multi-slice-worktree-execution.md](multi-slice-worktree-execution.md) and decompose the epic into topological **Waves of Disjoint Slices** (`Wave 1 -> Wave 2 -> ... -> Wave K`).
+  3. Dispatch each slice in a Wave to an isolated worktree subagent (`Workspace: "share"` in `invoke_subagent` or `workspace: "share"` in `swarm` with `HARNESS_WORKTREE_ID=slice-<id>`), where each slice worker runs its own scoped EARS increment (`status: proposed`), `plan-check`, implementation, `verify`, `done` (merging `impl/wt-slice-<id>` $\to$ `main` in the shared `.harness/omnigraph-cluster`), and commits to `slice/<epic-slug>-<slice-id>`.
+  4. In the controller worktree, merge completed slice branches (`git merge --no-ff slice/<epic-slug>-<slice-id>`), clean up slice worktrees (`swarm kill` / `git worktree prune`), run `harness ingest`, and advance to the next Wave.
+  5. Once all Waves are integrated, promote the full epic ADR (`status: accepted`), refresh `plan-check` on the controller workspace, and advance to **Stage 4 (4-Lens Review)**, **Stage 5 (Final Gates)**, and **Stage 6 (Shipping)**.
+
+### Route C — Single-Slice Feature Requirement, Behavior Change, or Defect Report
+
+- **Trigger:** Any single-slice feature request, enhancement, or bug report (`1–3` packages, single phase) that changes code and does not yet have a current EARS specification.
 - **Action:** Execute the **Autonomous EARS Specification Protocol** below.
 
 ---

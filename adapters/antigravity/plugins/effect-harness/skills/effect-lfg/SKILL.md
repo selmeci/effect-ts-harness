@@ -1,14 +1,14 @@
 ---
 name: effect-lfg
-description: Use when the user asks for autonomous end-to-end execution of a requirement, feature, bugfix, or EARS spec through the full Effect-TS Engineering Harness without stopping between stages, or when invoking /effect-lfg directly.
-argument-hint: "[requirement, bug report, EARS spec path, or PR/review reference]"
+description: Use when the user asks for autonomous end-to-end execution of a requirement, feature, bugfix, EARS spec, or multi-phase RFC through the full Effect-TS Engineering Harness without stopping between stages, or when invoking /effect-lfg directly.
+argument-hint: "[requirement, bug report, EARS spec path, RFC path, or PR/review reference]"
 ---
 
 # Effect-LFG (Autonomous End-to-End Harness Pipeline)
 
 ## Overview
 
-Take a single user requirement, defect report, EARS specification path, or review reference all the way to verified completion, hands-off, through the full Effect-TS Engineering Harness lifecycle. A child stage's completion immediately resumes the next numbered stage in the same turn — the run does not pause for intermediate human sign-off and does not end until `<promise>DONE</promise>` or a hard stop condition.
+Take a single user requirement, defect report, EARS specification path, multi-phase RFC, or review reference all the way to verified completion, hands-off, through the full Effect-TS Engineering Harness lifecycle. A child stage's completion immediately resumes the next numbered stage in the same turn — the run does not pause for intermediate human sign-off and does not end until `<promise>DONE</promise>` or a hard stop condition.
 
 **Violating the letter of the rules is violating the spirit of the rules.**
 
@@ -16,13 +16,15 @@ Take a single user requirement, defect report, EARS specification path, or revie
 
 ## Autonomous Pipeline Overrides (Resolving Interactive Deadlocks)
 
-When running under `effect-lfg`, apply these three pipeline overrides to the underlying interactive skills:
+When running under `effect-lfg`, apply these four pipeline overrides to the underlying interactive skills:
 
 1. **No EARS Approval Pause (`specifying-ears-with-effect` override):**
    Never pause to ask clarifying questions or wait for user approval of `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md`. Resolve existing contracts, services, and ADRs via in-process Graph MCP (`harness_resolve`, `harness_callers`, `harness_ontology_why`, `harness_ontology_impact`). Record any non-blocking product or technical defaults explicitly under `## Assumptions` and `## Out of scope`, verify the spec with `harness gc --strict` and `harness_ontology_check`, and advance immediately to `planning-effect-skeletons`.
-2. **Closed-Loop Specialist Review Auto-Fix (`executing-effect-stubs` + `resolving-effect-review-feedback` override):**
-   After `gemini-4-hydrogen-medium` implementer subagents replace `stub<A, E, R>()` skeletons, dispatch the applicable read-only specialist reviewers (`effect-ears-test-reviewer`, `effect-security-reviewer`, `effect-reliability-reviewer`, `effect-adversarial-reviewer`) via `invoke_subagent` (default) or `swarm` (`model: "gemini-4-hydrogen-medium"`). Adjudicate findings centrally via Graph MCP, hunt AST twins with `harness_structural_search`, and autonomously apply all valid `fix`, `class-fix`, and `doc-sync-fix` items before final gates.
-3. **Stamp-Safe Compounding Learnings (`compounding-effect-learnings` override):**
+2. **Multi-Slice Worktree DAG Execution for RFCs & Epics (`Route D` override):**
+   When the input is an RFC (`docs/rfcs/*.md`), multi-phase plan (`docs/plans/*.md`), or epic spanning $\ge 4$ packages or $\ge 2$ sequential architectural phases (e.g., `RFC-0009` Phases `9A–9E`), **never** write one monolithic `stub<A, E, R>()` skeleton across all phases or dump end-state RFC spec/ADR drafts with unimplemented future-phase symbols into `libs/<scope>/docs/`. Instead, decompose into topological **Waves of Disjoint Slices** and execute each slice in its own isolated Git worktree (`Workspace: "share"` in `invoke_subagent` or `workspace: "share"` in `swarm` with `HARNESS_WORKTREE_ID=slice-<id>`) per [references/multi-slice-worktree-execution.md](references/multi-slice-worktree-execution.md). Each slice worker runs its own phase-scoped EARS spec increment (`status: proposed`), `plan-check`, implementation, `verify`, and `done` (merging `impl/wt-slice-<id>` $\to$ `main` in the shared root `.harness/omnigraph-cluster`), commits to `slice/<epic-slug>-<slice-id>`, and is merged (`git merge --no-ff`) + cleaned up by the controller before the next Wave.
+3. **Closed-Loop Specialist Review Auto-Fix (`executing-effect-stubs` + `resolving-effect-review-feedback` override):**
+   After `gemini-4-hydrogen-medium` implementer subagents replace `stub<A, E, R>()` skeletons (or after the final Wave merges in `Route D`), dispatch the applicable read-only specialist reviewers (`effect-ears-test-reviewer`, `effect-security-reviewer`, `effect-reliability-reviewer`, `effect-adversarial-reviewer`) via `invoke_subagent` (default) or `swarm` (`model: "gemini-4-hydrogen-medium"`). Adjudicate findings centrally via Graph MCP, hunt AST twins with `harness_structural_search`, and autonomously apply all valid `fix`, `class-fix`, and `doc-sync-fix` items before final gates.
+4. **Stamp-Safe Compounding Learnings (`compounding-effect-learnings` override):**
    Execute `harness learn` and apply clear mechanical promotions (`triage-rule`, `guard-allowlist`, `agent-pattern`, `ast-graph-gate`, or `adr`) followed by `harness learn --clear` **before** running the final `harness gc --strict` $\rightarrow$ `harness mutate --strict` $\rightarrow$ `harness verify` $\rightarrow$ `harness done` sequence so post-verify file edits never invalidate `.harness/verify-stamp.json`.
 
 ---
@@ -42,14 +44,14 @@ A stop leaves nothing pushed that was not already pushed and reports the exact b
 
 ## The Autonomous Run (Stages 0–6)
 
-Read [references/autonomous-intake-and-ears.md](references/autonomous-intake-and-ears.md) before starting Stages 0–1, and read [references/review-and-shipping.md](references/review-and-shipping.md) before starting Stages 4–6.
+Read [references/autonomous-intake-and-ears.md](references/autonomous-intake-and-ears.md) before starting Stages 0–1, [references/multi-slice-worktree-execution.md](references/multi-slice-worktree-execution.md) when executing Route D (multi-phase RFCs/epics), and [references/review-and-shipping.md](references/review-and-shipping.md) before starting Stages 4–6.
 
 ```text
 Stage 0: Worktree & Session Readiness
   ↓
-Stage 1: Route Intake & Autonomous EARS Specification (specifying-ears-with-effect)
+Stage 1: Route Intake (A: Spec | B: PR Review | D: Multi-Slice RFC/Epic DAG | C: Single-Slice Feature/Defect)
   ↓
-Stage 2: Plan-as-Code Skeletons, plan-check & ADR Sync (planning-effect-skeletons)
+Stage 2: Plan-as-Code Skeletons, plan-check & ADR Sync (or Wave-by-Wave Worktree Slices on Route D)
   ↓
 Stage 3: Package-Isolated gemini-4-hydrogen-medium Implementation & Trace/Prop Tests (executing-effect-stubs)
   ↓
@@ -67,11 +69,16 @@ Stage 6: Git Commit, Optional Push/PR & <promise>DONE</promise>
 
 ### Stage 1 — Route Intake & Autonomous EARS Specification
 
-**REQUIRED SUB-SKILL:** Use `specifying-ears-with-effect` in autonomous pipeline mode per [references/autonomous-intake-and-ears.md](references/autonomous-intake-and-ears.md):
+**REQUIRED SUB-SKILL:** Use `specifying-ears-with-effect` in autonomous pipeline mode per [references/autonomous-intake-and-ears.md](references/autonomous-intake-and-ears.md) (evaluating routes in this exact precedence order):
 
 - **Route A (Existing EARS Spec Path):** If the input names an existing spec in `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` (or `docs/specs/`), validate it and jump to Stage 2.
 - **Route B (External PR / Review Feedback):** If the input is a PR number/URL or pasted review feedback, execute `resolving-effect-review-feedback` end-to-end, then jump to Stage 5.
-- **Route C (Requirement / Feature / Defect):** Inspect the graph (`harness_resolve`, `harness_callers`, `harness_ontology_why`, `harness_ontology_impact`), determine archetype (`application` vs `framework`), author `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` (`status: proposed`) with explicit `## Assumptions`, run the 3-role self-review, verify with `harness gc --strict` and `harness_ontology_check`, and continue immediately to Stage 2.
+- **Route D (Multi-Phase RFC / Multi-Slice Epic):** If the input names an RFC (`docs/rfcs/*.md`), a multi-phase plan (`docs/plans/*.md`), or a requirement spanning $\ge 4$ workspace packages or $\ge 2$ sequential architectural phases (e.g., `RFC-0009` Phases `9A–9E`), execute the **Multi-Slice Worktree DAG Protocol** in [references/multi-slice-worktree-execution.md](references/multi-slice-worktree-execution.md):
+  1. Decompose the epic into topological **Waves of Disjoint Slices** (`Wave 1 .. Wave K`), placing shared `type:contract`, `type:service`, and `.pg`/`.gq`/`cluster.yaml` foundations in `Wave 1` and ensuring parallel slices within any Wave own 100% disjoint files (moving slices that touch the same file, such as `omnigraph-sync.ts`, into sequential Waves or extracting disjoint submodules).
+  2. Dispatch each slice in the active Wave to an isolated Git worktree subagent (`invoke_subagent` with `TypeName: "self"`, `Workspace: "share"` or `swarm` with `action: "add"`, `model: "gemini-4-hydrogen-medium"`, `workspace: "share"`, `HARNESS_WORKTREE_ID=slice-<id>`).
+  3. Inside its `Workspace: "share"` worktree (`repoRoot`), each slice worker creates branch `slice/<epic-slug>-<slice-id>`, updates `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` (`status: proposed`) with **only** cumulative symbols up through that slice (zero future-phase symbols, deferring epic-wide `accepted` ADR creation until all `enforced_by` files exist), runs `plan-check` $\to$ implements stubs $\to$ runs `gc --strict` $\to$ `ontology check --strict` $\to$ `mutate --strict` $\to$ `CI=true harness verify` $\to$ `CI=true harness done` (which merges `impl/wt-slice-<id>` $\to$ `main` in the shared root `.harness/omnigraph-cluster`), and commits to `slice/<epic-slug>-<slice-id>`.
+  4. After each Wave completes, the controller merges each slice branch (`git merge --no-ff slice/<epic-slug>-<slice-id>`), cleans up the slice worktrees (`swarm kill` / `git worktree prune`), runs `harness ingest`, and advances to the next Wave. After the final Wave merges, the controller promotes the epic ADR (`status: accepted`), runs `harness plan-check` on the integrated workspace, and proceeds to Stage 4.
+- **Route C (Single-Slice Requirement / Feature / Defect):** For single-phase work (`1–3` packages), inspect the graph (`harness_resolve`, `harness_callers`, `harness_ontology_why`, `harness_ontology_impact`), determine archetype (`application` vs `framework`), author `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` (`status: proposed`) with explicit `## Assumptions`, run the 3-role self-review, verify with `harness gc --strict` and `harness_ontology_check`, and continue immediately to Stage 2.
 
 ### Stage 2 — Plan-as-Code Skeletons, `plan-check` & ADR Governance
 
@@ -139,7 +146,8 @@ Follow [references/review-and-shipping.md](references/review-and-shipping.md) to
 | Stage              | Sub-Skill                          | Key MCP Tools & CLI Gates                                                                      | Exit Artifact / State                                                                       |
 | :----------------- | :--------------------------------- | :--------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------ |
 | **0. Readiness**   | `effect-harness`                   | `harness session`, `git worktree`                                                              | Isolated clean branch & session state                                                       |
-| **1. EARS Spec**   | `specifying-ears-with-effect`      | `harness_resolve`, `harness_ontology_why`, `harness gc --strict`, `harness_ontology_check`     | `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` (`status: proposed` + `## Assumptions`)      |
+| **1. Intake/Spec** | `specifying-ears-with-effect`      | `harness_resolve`, `harness_ontology_why`, `harness gc --strict`, `harness_ontology_check`     | Route A/B/C/D selected; `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` (`status: proposed`) |
+| **1D. Epic Waves** | `effect-lfg` (`Route D`)           | `invoke_subagent` / `swarm` (`Workspace: "share"`), per-slice `plan-check -> verify -> done`, `git merge --no-ff` | Disjoint wave slices committed, merged into epic branch & shared Omnigraph `main`, worktrees cleaned |
 | **2. Skeleton**    | `planning-effect-skeletons`        | `harness_route`, `harness_lsp_diagnostics`, `harness plan-check`                               | Compilable `stub<A,E,R>()` graph, `.harness/plan-graph-snapshot.json`, Mermaid in spec, ADR |
 | **3. Implement**   | `executing-effect-stubs`           | `invoke_subagent` / `swarm` (`gemini-4-hydrogen-medium`), `harness_lsp_diagnostics`, `pnpm nx run <proj>:verify` | Zero active `stub()` calls, `@effect/vitest` trace + property tests                         |
 | **4. Review**      | `resolving-effect-review-feedback` | 4 specialist reviewers, `harness_structural_search`, `harness_tests_reaching`                  | All valid `fix` / `class-fix` / `doc-sync-fix` items applied                                |
@@ -153,6 +161,9 @@ Follow [references/review-and-shipping.md](references/review-and-shipping.md) to
 | Excuse                                                                                                             | Reality                                                                                                                                                                                                                                                                                         |
 | :----------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | "I must stop after drafting the EARS spec and wait for the user to approve it."                                    | In `effect-lfg` autonomous mode, stopping for EARS approval deadlocks the pipeline. Record non-blocking defaults in `## Assumptions`, verify with `gc --strict` and `harness_ontology_check`, and proceed immediately to `planning-effect-skeletons`.                                           |
+| "The RFC already has the full `SPEC-NNNN` and `ADR-NNNN` drafts in Section 10, so I'll write one unified `stub<A,E,R>()` skeleton across all 8 packages and run `plan-check` once." | Monolithic skeletons across multi-phase RFCs (`Route D`) create brittle 20-stub snapshots, leak future-phase symbols (`unmapped-spec-symbol`, `stale-doc-reference`), and dilute review accuracy. Decompose into topological Waves of Disjoint Slices (`Workspace: "share"`) per [references/multi-slice-worktree-execution.md](references/multi-slice-worktree-execution.md). |
+| "I'll run parallel slice subagents in the same checkout (`workspace: 'inherit'`) with `HARNESS_WORKTREE_ID` so each runs `plan-check -> verify`." | `plan-check` and `done` read and write `<repoRoot>/.harness/plan-graph-snapshot.json` and `graph-snapshot.json` directly under `repoRoot`. Sharing one `repoRoot` clobbers snapshots and invalidates `.harness/verify-stamp.json`. Every slice subagent MUST use `Workspace: "share"` (`workspace: "share"`) so it gets its own worktree `repoRoot` while sharing `<canonicalRoot>/.harness/omnigraph-cluster`. |
+| "I'll spawn 5 parallel worktree subagents for Phases 9A–9E all at once in Wave 1."                                 | Phases 9B–9E depend on Foundation Wave `type:contract` / `type:service` / `.pg` schemas from 9A and modify shared files like `omnigraph-sync.ts`. Organize slices into topological Waves (`Wave 1 -> Wave 2 -> ...`) where slices in the same parallel Wave own 100% disjoint files.            |
 | "The user said 'just ship it', so I'll skip the EARS spec and `stub<A, E, R>()` `plan-check`."                     | Skipping EARS or `plan-check` omits `.harness/plan-graph-snapshot.json` and `SpecifiesSymbol` edges, causing deterministic failures in `harness gc --strict` and `harness done`. Autonomous means hands-off, never gate-free.                                                                   |
 | "The change is small, so I don't need the 4 specialist review subagents."                                          | Autonomous runs have no human eyes before completion. Specialist `gemini-4-hydrogen-medium` reviewers (`effect-ears-test-reviewer`, `effect-security-reviewer`, `effect-reliability-reviewer`, `effect-adversarial-reviewer`) catch vacuous tests, IDOR, sync DO violations, and race conditions before `verify`.  |
 | "I'll run `harness learn` or tweak a markdown file after `harness verify` and `harness done`."                     | `.harness/verify-stamp.json` hashes the entire working tree via SHA-256. Any tracked file edit after `harness verify` invalidates the stamp and causes the `Stop` hook to block completion. Always run `learn` and finalize all docs _before_ the final `verify` $\rightarrow$ `done` sequence. |
@@ -164,6 +175,10 @@ Follow [references/review-and-shipping.md](references/review-and-shipping.md) to
 ## Red Flags — STOP
 
 - Stopping after Stage 1 (`specifying-ears-with-effect`) to ask the user to approve the EARS specification instead of recording `## Assumptions` and continuing to Stage 2
+- Treating a multi-phase RFC (`docs/rfcs/*.md`) or $\ge 4$-package epic as a single monolithic Route C skeleton (`Option A`) instead of Route D topological Wave slices in isolated worktrees (`Workspace: "share"`)
+- Copying unimplemented future-slice `spans`, `errors`, `services`, or `enforced_by` files from an RFC draft into `libs/<scope>/docs/specs/` or `libs/<scope>/docs/adr/` before those slices are implemented, or leaving non-sequential `### <n> · <Title>` area numbers (e.g., jumping from `2` to `5`) in a slice spec (`EarsSpecLint.decide` `area-structure` / `numbering-gap`)
+- Running multiple `plan-check -> implement -> verify` slice workers in the same `repoRoot` (`Workspace: "inherit"`) or placing two slices that edit the same file (including `omnigraph-sync.ts` or the canonical `YYYY-MM-DD-<slug>.md` spec without a temporary companion spec) into the same parallel Wave
+- Killing a `swarm` (`workspace: "share"`) slice worker before merging its `slice/<epic-slug>-<slice-id>` branch into the controller's epic branch
 - Skipping `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md`, `stub<A, E, R>()` skeletons, or `harness plan-check` in the name of speed
 - Invoking generic Markdown planning skills (`ce-plan`, `ce-work`) that bypass `stub<A, E, R>()`, `harness plan-check`, and `.harness/verify-stamp.json`
 - Skipping the parallel specialist review lenses (`effect-ears-test-reviewer`, etc.) or ignoring valid P0/P1 findings they report
