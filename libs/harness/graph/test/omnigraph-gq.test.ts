@@ -13,11 +13,13 @@ import {
   executeNamedGqQueryInMemory,
   HARNESS_GQ_QUERIES,
   HARNESS_GQ_QUERY_NAMES,
+  type HarnessGqQueryName,
   invokeOmnigraphNamedQuery,
   loadHarnessGqQueriesText,
   loadHarnessPgSchemaText,
   makeOmnigraphSyncLayer,
   mergeOmnigraphBranch,
+  NodeKey,
   OmnigraphLoadError,
   OmnigraphReconcileInput,
   queryOmnigraph,
@@ -26,6 +28,7 @@ import {
   resolveGitHeadState,
   resolveOmnigraphBaseUrl,
   resolveOmnigraphTaskBranches,
+  RoleName,
   saveGraphSnapshot,
   syncToOmnigraphAndSnapshot,
   toOmnigraphNdjson,
@@ -1610,4 +1613,226 @@ describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
         expect(warnings[0]).toContain("HTTP 500")
       }),
   )
+
+  it.effect(
+    "F-11.1a: mergeOmnigraphBranch fails with OmnigraphLoadError when source branch is missing",
+    () =>
+      Effect.gen(function* () {
+        let createCalled = false
+        const missingSourceFetch: FetchLike = (input, init) => {
+          const urlStr = toUrlString(input)
+          const method = init?.method ?? "GET"
+          if (urlStr.endsWith("/healthz")) {
+            return Promise.resolve(
+              new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }),
+            )
+          }
+          if (method === "GET" && urlStr.endsWith("/graphs/harness/branches")) {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({ outcome: "ok", branches: ["main"], serverRef: "ref-1" }),
+                { status: 200, headers: { "Content-Type": "application/json", "Omnigraph-Http-Api": "0.14" } },
+              ),
+            )
+          }
+          if (method === "POST" && urlStr.endsWith("/graphs/harness/branches")) {
+            createCalled = true
+          }
+          return Promise.resolve(
+            new Response("Not Found", { status: 404, headers: { "Omnigraph-Http-Api": "0.14" } }),
+          )
+        }
+
+        const err = yield* Effect.flip(
+          mergeOmnigraphBranch({
+            source: "impl/missing",
+            target: "main",
+            fetch: missingSourceFetch,
+          }).pipe(Effect.provide(OmnigraphSyncLive)),
+        )
+        expect(err).toBeInstanceOf(OmnigraphLoadError)
+        expect(createCalled).toBe(false)
+        expect(err.cause instanceof Error ? err.cause.message : String(err.cause)).toContain(
+          "impl/missing",
+        )
+      }),
+  )
+
+  it.effect(
+    "F-12.1: invokeNamedQuery logs Effect.logWarning with primary and fallback causes before memory-fallback",
+    () =>
+      Effect.gen(function* () {
+        const warnings: Array<string> = []
+        const captureLogger = Logger.make((opts) => {
+          if (opts.logLevel === "Warn") {
+            warnings.push(String(opts.message))
+          }
+        })
+        const failFetch: FetchLike = (input) => {
+          const urlStr = toUrlString(input)
+          if (urlStr.endsWith("/healthz")) {
+            return Promise.resolve(
+              new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }),
+            )
+          }
+          if (urlStr.includes("/queries/")) {
+            return Promise.resolve(
+              new Response("primary-404", { status: 404, headers: { "Omnigraph-Http-Api": "0.14" } }),
+            )
+          }
+          return Promise.resolve(
+            new Response("fallback-502", { status: 502, headers: { "Omnigraph-Http-Api": "0.14" } }),
+          )
+        }
+
+        const res = yield* invokeOmnigraphNamedQuery({
+          name: "resolve_effect_fn",
+          params: { spanOrQualname: "Demo.fn" },
+          fallbackGraph: buildHarnessGraph({
+            fns: [
+              {
+                qualname: "libs/demo/src/index.ts#fn",
+                spanName: "Demo.fn",
+                file: "libs/demo/src/index.ts",
+                line: 1,
+                packageTag: "domain",
+                successType: "void",
+                isStub: false,
+              },
+            ],
+          }),
+          fetch: failFetch,
+        }).pipe(Effect.provide(Layer.mergeAll(OmnigraphSyncLive, Logger.layer([captureLogger]))))
+
+        expect(res.source).toBe("memory-fallback")
+        expect(warnings).toHaveLength(1)
+        expect(warnings[0]).toContain("HTTP 404")
+        expect(warnings[0]).toContain("HTTP 502")
+      }),
+  )
+
+  it.effect(
+    "F-12.2: invokeNamedQuery rejects unknown query name cleanly with OmnigraphLoadError",
+    () =>
+      Effect.gen(function* () {
+        const okFetch: FetchLike = () =>
+          Promise.resolve(
+            new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }),
+          )
+        const err = yield* Effect.flip(
+          invokeOmnigraphNamedQuery({
+            name: "unknown_query" as HarnessGqQueryName,
+            fetch: okFetch,
+          }).pipe(Effect.provide(OmnigraphSyncLive)),
+        )
+        expect(err).toBeInstanceOf(OmnigraphLoadError)
+        expect(err.cause instanceof Error ? err.cause.message : String(err.cause)).toContain(
+          "Unknown named GQ query",
+        )
+      }),
+  )
+
+  it("F-16.1: ontology_realized_by_doc traverses governing-adr, specifying-ears, and realizing-symbol edges", () => {
+    const base = buildHarnessGraph({
+      adrDocs: [
+        {
+          id: "ADR-9999",
+          path: "docs/adr/9999-test.md",
+          title: "Test ADR",
+          status: "accepted",
+          enforcedByFiles: [],
+          referencedSpans: [],
+          referencedServices: [],
+          referencedErrors: [],
+        },
+      ],
+      earsSpecs: [
+        {
+          id: "SPEC-9999",
+          path: "docs/specs/9999-test.md",
+          title: "Test Spec",
+          status: "accepted",
+          enforcedByFiles: [],
+          referencedSpans: [],
+          referencedServices: [],
+          referencedErrors: [],
+        },
+      ],
+      fns: [
+        {
+          qualname: "libs/demo/domain/src/edge-realized.ts#run",
+          spanName: "Demo.run",
+          file: "libs/demo/domain/src/edge-realized.ts",
+          line: 10,
+          packageTag: "domain",
+          isStub: false,
+        },
+      ],
+    })
+
+    const edgeBackedGraph = {
+      ...base,
+      graph: Graph.mutate(base.graph, (mutable) => {
+        const tupleIdx = Graph.addNode(mutable, {
+          _tag: "TraceabilityTuple",
+          relationId: RelationId.make("TraceabilityTuple:edge-only-1"),
+          targetSymbolQualname: "fallback-unused-qualname",
+          requirementId: "REQ-9.1",
+          earsPattern: "Event-driven",
+          verifyingTestQualnames: [],
+        })
+        let adrIdx: Graph.NodeIndex | undefined
+        let specIdx: Graph.NodeIndex | undefined
+        let fnIdx: Graph.NodeIndex | undefined
+        for (const [idx, n] of Graph.nodes(mutable)) {
+          match(n)
+            .with({ _tag: "AdrDoc" }, () => { adrIdx = idx })
+            .with({ _tag: "EarsSpec" }, () => { specIdx = idx })
+            .with({ _tag: "EffectFn" }, () => { fnIdx = idx })
+            .otherwise(() => {})
+        }
+        if (adrIdx !== undefined) {
+          Graph.addEdge(mutable, tupleIdx, adrIdx, {
+            _tag: "PlaysRole",
+            relationId: RelationId.make("TraceabilityTuple:edge-only-1"),
+            entityKey: NodeKey.make("AdrDoc:ADR-9999"),
+            role: RoleName.make("governing-adr"),
+            archimateRelation: "Influence",
+          })
+        }
+        if (specIdx !== undefined) {
+          Graph.addEdge(mutable, tupleIdx, specIdx, {
+            _tag: "PlaysRole",
+            relationId: RelationId.make("TraceabilityTuple:edge-only-1"),
+            entityKey: NodeKey.make("EarsSpec:SPEC-9999"),
+            role: RoleName.make("specifying-ears"),
+            archimateRelation: "Realization",
+          })
+        }
+        if (fnIdx !== undefined) {
+          Graph.addEdge(mutable, tupleIdx, fnIdx, {
+            _tag: "PlaysRole",
+            relationId: RelationId.make("TraceabilityTuple:edge-only-1"),
+            entityKey: NodeKey.make("libs/demo/domain/src/edge-realized.ts#run"),
+            role: RoleName.make("realizing-symbol"),
+            archimateRelation: "Realization",
+          })
+        }
+      }),
+    }
+
+    const adrRows = executeNamedGqQueryInMemory(edgeBackedGraph, "ontology_realized_by_doc", {
+      docId: "ADR-9999",
+    })
+    expect(adrRows).toHaveLength(1)
+    expect(adrRows[0]?.adrId).toBe("ADR-9999")
+    expect(adrRows[0]?.earsSpecId).toBe("SPEC-9999")
+    expect(adrRows[0]?.artifactQualname).toBe("libs/demo/domain/src/edge-realized.ts#run")
+
+    const specRows = executeNamedGqQueryInMemory(edgeBackedGraph, "ontology_realized_by_doc", {
+      docId: "SPEC-9999",
+    })
+    expect(specRows).toHaveLength(1)
+    expect(specRows[0]?.tupleId).toBe("TraceabilityTuple:edge-only-1")
+  })
 })

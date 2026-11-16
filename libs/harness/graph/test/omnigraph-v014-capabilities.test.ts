@@ -15,7 +15,7 @@ import {
 } from "@harness/contract"
 import { runWithTestTracer } from "@harness/ingest"
 import { Cause, Effect, Schema } from "effect"
-import type { FetchLike } from "@modernrelay/omnigraph"
+import { type FetchLike } from "@modernrelay/omnigraph"
 import { match } from "ts-pattern"
 import {
   buildHarnessGraph,
@@ -31,6 +31,8 @@ import {
   readGraphHeadMeta,
   syncToOmnigraphAndSnapshot,
   toOmnigraphServerNdjson,
+  updateGraphHeadCursor,
+  writeGraphHeadMeta,
 } from "../src/index.js"
 import { testHostIo } from "./helpers/test-host-io.js"
 
@@ -824,7 +826,7 @@ describe("Omnigraph v0.14.0 native capabilities (RFC-0009)", () => {
           fs.mkdirSync(clusterDir, { recursive: true })
           fs.writeFileSync(
             path.join(clusterDir, "auth-tokens.json"),
-            JSON.stringify({ cliToken: "cli-secret", mcpToken: "mcp-secret" }),
+            JSON.stringify({ schemaVersion: 1, cliToken: "cli-secret", mcpToken: "mcp-secret" }),
           )
           fs.writeFileSync(
             path.join(clusterDir, "server.json"),
@@ -948,5 +950,274 @@ describe("Omnigraph v0.14.0 native capabilities (RFC-0009)", () => {
           })
           .exhaustive()
       }),
+  )
+
+  it("F-1.1a: updateGraphHeadCursor preserves null or prior headSha/gitBranch without reading git HEAD", () => {
+    const tmpRepo = fs.mkdtempSync(path.join(tmpdir(), "og-v014-cursor-only-"))
+    try {
+      const gitDir = path.join(tmpRepo, ".git", "refs", "heads")
+      fs.mkdirSync(gitDir, { recursive: true })
+      fs.writeFileSync(path.join(tmpRepo, ".git", "HEAD"), "ref: refs/heads/feat/live\n")
+      fs.mkdirSync(path.join(tmpRepo, ".git", "refs", "heads", "feat"), { recursive: true })
+      fs.writeFileSync(path.join(tmpRepo, ".git", "refs", "heads", "feat", "live"), "live-head-sha-999")
+
+      // 1. When prior graph-head.json is missing, headSha and gitBranch remain null
+      const created = updateGraphHeadCursor(tmpRepo, testHostIo, OmnigraphChangeCursor.make("cur-1"), {})
+      expect(created).not.toBeNull()
+      expect(created?.headSha).toBeNull()
+      expect(created?.gitBranch).toBeNull()
+      expect(created?.changeFeedCursor).toBe("cur-1")
+
+      // 2. When prior graph-head.json has a different SHA/branch, it is preserved verbatim
+      writeGraphHeadMeta(tmpRepo, testHostIo, {
+        headSha: "prior-sync-sha-111",
+        gitBranch: "main",
+        omnigraphCommitId: OmnigraphCommitId.make("cmt-10"),
+      }, {})
+      const updated = updateGraphHeadCursor(tmpRepo, testHostIo, OmnigraphChangeCursor.make("cur-2"), {})
+      expect(updated?.headSha).toBe("prior-sync-sha-111")
+      expect(updated?.gitBranch).toBe("main")
+      expect(updated?.omnigraphCommitId).toBe("cmt-10")
+      expect(updated?.changeFeedCursor).toBe("cur-2")
+    } finally {
+      fs.rmSync(tmpRepo, { recursive: true, force: true })
+    }
+  })
+
+  it.effect("F-3.1: OmnigraphSync honors OMNIGRAPH_URL and OMNIGRAPH_TOKEN from layer env and options.env", () =>
+    Effect.gen(function* () {
+      const seenUrls: Array<string> = []
+      const seenAuths: Array<string | null> = []
+      const captureFetch: FetchLike = (input, init) => {
+        seenUrls.push(toUrlString(input))
+        seenAuths.push(new Headers(init?.headers).get("Authorization"))
+        if (toUrlString(input).endsWith("/healthz")) {
+          return Promise.resolve(new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }))
+        }
+        return jsonResponse({ rows: [] })
+      }
+
+      const layerFromEnv = makeOmnigraphSyncLayer(testHostIo, {
+        OMNIGRAPH_URL: "http://127.0.0.1:19111",
+        OMNIGRAPH_TOKEN: "layer-tok",
+      })
+      yield* Effect.flatMap(OmnigraphSync, (s) =>
+        s.query({ query: "MATCH (n) RETURN n", fetch: captureFetch }),
+      ).pipe(Effect.provide(layerFromEnv))
+
+      expect(seenUrls.some((u) => u.startsWith("http://127.0.0.1:19111"))).toBe(true)
+      expect(seenAuths.some((a) => a === "Bearer layer-tok")).toBe(true)
+
+      seenUrls.length = 0
+      seenAuths.length = 0
+      yield* Effect.flatMap(OmnigraphSync, (s) =>
+        s.query({
+          query: "MATCH (n) RETURN n",
+          fetch: captureFetch,
+          env: {
+            OMNIGRAPH_URL: "http://127.0.0.1:19222",
+            OMNIGRAPH_TOKEN: "opt-tok",
+          },
+        }),
+      ).pipe(Effect.provide(layerFromEnv))
+
+      expect(seenUrls.some((u) => u.startsWith("http://127.0.0.1:19222"))).toBe(true)
+      expect(seenAuths.some((a) => a === "Bearer opt-tok")).toBe(true)
+    }),
+  )
+
+  it("F-4.1: writeGraphHeadMeta returns null and logs to stderr when writeTextSync throws", () => {
+    const tmpRepo = fs.mkdtempSync(path.join(tmpdir(), "og-v014-write-fail-"))
+    const stderrChunks: Array<string> = []
+    const origWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+      return true
+    }) as typeof process.stderr.write
+    try {
+      const failingIo = {
+        ...testHostIo,
+        writeTextSync: () => {
+          throw new Error("EACCES: permission denied")
+        },
+      }
+      const res = writeGraphHeadMeta(tmpRepo, failingIo, {
+        headSha: "sha-1",
+        gitBranch: "main",
+      })
+      expect(res).toBeNull()
+      expect(stderrChunks.join("")).toContain("failed to persist")
+    } finally {
+      process.stderr.write = origWrite
+      fs.rmSync(tmpRepo, { recursive: true, force: true })
+    }
+  })
+
+  it("F-5.1: readGraphHeadMeta returns null and logs warning to stderr on corrupt JSON", () => {
+    const tmpRepo = fs.mkdtempSync(path.join(tmpdir(), "og-v014-corrupt-meta-"))
+    const stderrChunks: Array<string> = []
+    const origWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+      return true
+    }) as typeof process.stderr.write
+    try {
+      const harnessDir = path.join(tmpRepo, ".harness")
+      fs.mkdirSync(harnessDir, { recursive: true })
+      fs.writeFileSync(path.join(harnessDir, "graph-head.json"), "{not-valid-json")
+
+      const res = readGraphHeadMeta(tmpRepo, testHostIo, {})
+      expect(res).toBeNull()
+      expect(stderrChunks.join("")).toContain("failed to decode")
+    } finally {
+      process.stderr.write = origWrite
+      fs.rmSync(tmpRepo, { recursive: true, force: true })
+    }
+  })
+
+  it.effect("F-11.2: empty graph syncToOmnigraphAndSnapshot returns syncedToOmnigraph=false without writing graph-head.json", () =>
+    Effect.gen(function* () {
+      const tmpRepo = fs.mkdtempSync(path.join(tmpdir(), "og-v014-empty-sync-"))
+      try {
+        const emptyGraph = buildHarnessGraph({})
+        const snapshotPath = path.join(tmpRepo, ".harness", "graph-snapshot.json")
+        const res = yield* syncToOmnigraphAndSnapshot(emptyGraph, {
+          repoRoot: tmpRepo,
+          snapshotPath,
+          fetch: () => Promise.reject(new Error("should not call fetch for empty graph")),
+        }).pipe(Effect.provide(OmnigraphSyncLive))
+
+        expect(res.syncedToOmnigraph).toBe(false)
+        expect(res.error).toContain("Cannot sync empty graph payload (0 entities)")
+        expect(fs.existsSync(path.join(tmpRepo, ".harness", "graph-head.json"))).toBe(false)
+      } finally {
+        fs.rmSync(tmpRepo, { recursive: true, force: true })
+      }
+    }),
+  )
+
+  it.effect("F-15.7: rejects malformed non-null entityId/commitId strings with OmnigraphLoadError instead of null coercion", () =>
+    Effect.gen(function* () {
+      const source = OmnigraphBranchName.make("impl/task")
+      const target = OmnigraphBranchName.make("main")
+
+      const badConflictFetch: FetchLike = (input) => {
+        if (toUrlString(input).endsWith("/healthz")) {
+          return Promise.resolve(new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }))
+        }
+        return jsonResponse(
+          {
+            code: "conflict",
+            message: "Conflict",
+            merge_conflicts: [
+              {
+                kind: "divergent_update",
+                entity_kind: "node",
+                type_name: "EffectFn",
+                entity_id: "   ",
+                message: "bad entity id",
+              },
+            ],
+          },
+          409,
+        )
+      }
+      const mappedConflict = yield* Effect.flip(
+        dryRunMergeOmnigraphBranches({ source, target, fetch: badConflictFetch }).pipe(
+          Effect.provide(OmnigraphSyncLive),
+        ),
+      )
+      expect(mappedConflict).toBeInstanceOf(OmnigraphLoadError)
+
+      const badPrecondFetch: FetchLike = (input) => {
+        if (toUrlString(input).endsWith("/healthz")) {
+          return Promise.resolve(new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }))
+        }
+        return jsonResponse(
+          {
+            code: "precondition_failed",
+            message: "Precondition failed",
+            precondition_failure: {
+              expected: "cmt-1",
+              actual: "   ",
+            },
+          },
+          412,
+        )
+      }
+      const mappedPrecond = yield* Effect.flip(
+        mutateOmnigraphConditional({
+          branch: target,
+          query: "CREATE (n:EffectFn { qualname: 'x' })",
+          ifGraphCommit: OmnigraphCommitId.make("cmt-1"),
+          fetch: badPrecondFetch,
+        }).pipe(Effect.provide(OmnigraphSyncLive)),
+      )
+      expect(mappedPrecond).toBeInstanceOf(OmnigraphLoadError)
+
+      const badCommitFetch: FetchLike = (input) => {
+        if (toUrlString(input).endsWith("/healthz")) {
+          return Promise.resolve(new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }))
+        }
+        return jsonResponse({
+          outcome: "fast_forward",
+          source: "impl/task",
+          target: "main",
+          commit: { graph_commit_id: "   " },
+        })
+      }
+      const proposeErr = yield* Effect.flip(
+        Effect.flatMap(OmnigraphSync, (s) =>
+          s.proposeMergeCommit({ source, target, fetch: badCommitFetch }),
+        ).pipe(Effect.provide(OmnigraphSyncLive)),
+      )
+      expect(proposeErr).toBeInstanceOf(OmnigraphLoadError)
+    }),
+  )
+
+  it.effect("F-17.1b: sync handles /load HTTP 500 failure and writeGraphHeadMeta merges partial metadata preserving headSha", () =>
+    Effect.gen(function* () {
+      const tmpRepo = fs.mkdtempSync(path.join(tmpdir(), "og-v014-sync500-merge-"))
+      try {
+        const snapshotPath = path.join(tmpRepo, ".harness", "graph-snapshot.json")
+        const fail500Fetch: FetchLike = (input) => {
+          if (toUrlString(input).endsWith("/healthz")) {
+            return Promise.resolve(new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }))
+          }
+          return Promise.resolve(
+            new Response("internal server error", {
+              status: 500,
+              headers: { "Omnigraph-Http-Api": "0.14" },
+            }),
+          )
+        }
+        const syncRes = yield* syncToOmnigraphAndSnapshot(sampleGraph, {
+          repoRoot: tmpRepo,
+          snapshotPath,
+          fetch: fail500Fetch,
+        }).pipe(Effect.provide(OmnigraphSyncLive))
+        expect(syncRes.syncedToOmnigraph).toBe(false)
+        expect(syncRes.error).toContain("500")
+
+        writeGraphHeadMeta(tmpRepo, testHostIo, {
+          headSha: "sha-base-1",
+          gitBranch: "main",
+          omnigraphCommitId: OmnigraphCommitId.make("cmt-base-1"),
+        }, {})
+        writeGraphHeadMeta(
+          tmpRepo,
+          testHostIo,
+          { headSha: "sha-base-1", gitBranch: "main" },
+          {},
+          { changeFeedCursor: OmnigraphChangeCursor.make("cur-merged-1") },
+        )
+        const merged = readGraphHeadMeta(tmpRepo, testHostIo, {})
+        expect(merged?.headSha).toBe("sha-base-1")
+        expect(merged?.omnigraphCommitId).toBe("cmt-base-1")
+        expect(merged?.changeFeedCursor).toBe("cur-merged-1")
+      } finally {
+        fs.rmSync(tmpRepo, { recursive: true, force: true })
+      }
+    }),
   )
 })

@@ -1,6 +1,8 @@
 import { basename, resolve } from "node:path"
-import { Result } from "effect"
+import { Graph, Result, Schema } from "effect"
 import { match } from "ts-pattern"
+import { OmnigraphSpanName } from "@harness/contract"
+import type { HarnessGraph } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
 import type { SyncHostIo } from "@harness/service/host-io"
 
@@ -187,4 +189,224 @@ export const isProcessPidAlive = (pid: number): boolean => {
     .with({ _tag: "Success" }, ({ success }) => success)
     .with({ _tag: "Failure" }, ({ failure }) => failure)
     .exhaustive()
+}
+
+const stripYamlLineComment = (line: string): string => {
+  let inSingle = false
+  let inDouble = false
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle
+      continue
+    }
+    if (ch === '"' && !inSingle && line[i - 1] !== "\\") {
+      inDouble = !inDouble
+      continue
+    }
+    if (ch === "#" && !inSingle && !inDouble) {
+      return line.slice(0, i)
+    }
+  }
+  return line
+}
+
+const isNonEmptyYamlInlineValue = (rawValue: string): boolean => {
+  const val = rawValue.trim()
+  if (
+    val.length === 0 ||
+    val === "null" ||
+    val === "~" ||
+    val === "[]" ||
+    val === "{}" ||
+    val === '""' ||
+    val === "''"
+  ) {
+    return false
+  }
+  if (val.startsWith("[") && val.endsWith("]")) {
+    return val.slice(1, -1).trim().length > 0
+  }
+  if (val.startsWith("{") && val.endsWith("}")) {
+    return val.slice(1, -1).trim().length > 0
+  }
+  return true
+}
+
+export const clusterYamlDeclaresPolicies = (clusterYaml: string): boolean => {
+  const lines = clusterYaml.split(/\r?\n/).map(stripYamlLineComment)
+  const strippedAll = lines.join("\n")
+  const flowMatch = strippedAll.match(/\bpolicies\s*:\s*(\[[^\]]*\]|\{[^}]*\})/)
+  if (flowMatch?.[1] !== undefined) {
+    return isNonEmptyYamlInlineValue(flowMatch[1])
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? ""
+    const keyMatch = line.match(/^(\s*)policies\s*:\s*(.*)$/)
+    if (keyMatch === null) continue
+    const keyIndent = keyMatch[1]?.length ?? 0
+    const rest = (keyMatch[2] ?? "").trim()
+    if (rest.length > 0) {
+      if (isNonEmptyYamlInlineValue(rest)) {
+        return true
+      }
+      continue
+    }
+    for (let j = i + 1; j < lines.length; j++) {
+      const nextLine = lines[j] ?? ""
+      if (nextLine.trim().length === 0) continue
+      const nextIndent = nextLine.match(/^(\s*)/)?.[1]?.length ?? 0
+      const trimmedNext = nextLine.trimStart()
+      if (nextIndent > keyIndent) {
+        return true
+      }
+      if (nextIndent === keyIndent && (trimmedNext === "-" || trimmedNext.startsWith("- "))) {
+        return true
+      }
+      break
+    }
+  }
+  return false
+}
+
+export const countImplEffectFns = (
+  graph: HarnessGraph,
+): { readonly implEffectFnCount: number; readonly remainingStubCount: number } => {
+  let implEffectFnCount = 0
+  let remainingStubCount = 0
+  for (const [, node] of Graph.nodes(graph.graph)) {
+    match(node)
+      .with({ _tag: "EffectFn" }, (fnNode) => {
+        implEffectFnCount += 1
+        if (fnNode.isStub) {
+          remainingStubCount += 1
+        }
+      })
+      .with(
+        { _tag: "ServiceTag" },
+        { _tag: "ServiceLayer" },
+        { _tag: "TaggedError" },
+        { _tag: "SchemaDef" },
+        { _tag: "VitestCase" },
+        { _tag: "PatternDoc" },
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "HttpEndpointTuple" },
+        { _tag: "MigrationTuple" },
+        () => undefined,
+      )
+      .exhaustive()
+  }
+  return { implEffectFnCount, remainingStubCount }
+}
+
+export const findFirstVitestCaseId = (graph: HarnessGraph): string | undefined => {
+  for (const [, node] of Graph.nodes(graph.graph)) {
+    const found = match(node)
+      .with({ _tag: "VitestCase" }, (vc) => vc.testId)
+      .with(
+        { _tag: "EffectFn" },
+        { _tag: "ServiceTag" },
+        { _tag: "ServiceLayer" },
+        { _tag: "TaggedError" },
+        { _tag: "SchemaDef" },
+        { _tag: "PatternDoc" },
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "HttpEndpointTuple" },
+        { _tag: "MigrationTuple" },
+        () => undefined,
+      )
+      .exhaustive()
+    if (found !== undefined) {
+      return found
+    }
+  }
+  return undefined
+}
+
+export const readIsStubFromImage = (
+  image: { readonly properties: unknown } | null | undefined,
+): boolean => {
+  if (image === null || image === undefined) return false
+  const props = image.properties
+  if (typeof props !== "object" || props === null) return false
+  return "isStub" in props && (props as { readonly isStub?: unknown }).isStub === true
+}
+
+export const readSpanNameFromImages = (
+  before: { readonly properties: unknown } | null | undefined,
+  after: { readonly properties: unknown } | null | undefined,
+): OmnigraphSpanName | undefined => {
+  for (const image of [after, before]) {
+    if (image === null || image === undefined) continue
+    const props = image.properties
+    if (typeof props !== "object" || props === null) continue
+    if ("spanName" in props) {
+      const candidate = (props as { readonly spanName?: unknown }).spanName
+      const decoded = Schema.decodeUnknownOption(OmnigraphSpanName)(candidate)
+      const matched = match(decoded)
+        .with({ _tag: "Some" }, ({ value }) => value)
+        .with({ _tag: "None" }, () => undefined)
+        .exhaustive()
+      if (matched !== undefined) {
+        return matched
+      }
+    }
+  }
+  return undefined
+}
+
+const BRANCH_NOT_FOUND_CODE_PATTERN = /^(not[_-]?found|branch[_-]?not[_-]?found|unknown[_-]?branch)$/i
+const BRANCH_NOT_FOUND_MESSAGE_PATTERN = /\bbranch\b.*(not\s+found|unknown|does\s+not\s+exist)|(?:not\s+found|unknown|does\s+not\s+exist).*\bbranch\b/i
+
+export const isBranchNotFoundError = (err: unknown): boolean => {
+  const inner =
+    typeof err === "object" && err !== null && "cause" in err
+      ? (err as { readonly cause?: unknown }).cause
+      : err
+  for (const candidate of [inner, err]) {
+    if (typeof candidate === "object" && candidate !== null) {
+      const httpStatus = Reflect.get(candidate, "status")
+      const httpStatusCode = Reflect.get(candidate, "statusCode")
+      const errName = Reflect.get(candidate, "name")
+      const errCode = Reflect.get(candidate, "code")
+      const errMessage = Reflect.get(candidate, "message")
+      if (errName === "NotFoundError") {
+        return true
+      }
+      if (typeof errCode === "string" && BRANCH_NOT_FOUND_CODE_PATTERN.test(errCode)) {
+        return true
+      }
+      if (
+        (httpStatus === 404 || httpStatusCode === 404) &&
+        (typeof errMessage !== "string" ||
+          errMessage.length === 0 ||
+          BRANCH_NOT_FOUND_MESSAGE_PATTERN.test(errMessage) ||
+          /\bnot[\s_-]*found\b/i.test(errMessage))
+      ) {
+        return true
+      }
+      if (typeof errMessage === "string" && BRANCH_NOT_FOUND_MESSAGE_PATTERN.test(errMessage)) {
+        return true
+      }
+    }
+  }
+  return BRANCH_NOT_FOUND_MESSAGE_PATTERN.test(String(err))
+}
+
+export const formatDiffErrorMessage = (err: unknown): string => {
+  if (typeof err === "object" && err !== null && "cause" in err) {
+    const inner = (err as { readonly cause?: unknown }).cause
+    if (inner instanceof Error) return inner.message
+    if (typeof inner === "string") return inner
+  }
+  return err instanceof Error ? err.message : String(err)
 }

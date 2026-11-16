@@ -52,6 +52,7 @@ import {
   toOmnigraphServerNdjson,
   toOmnigraphServerNdjsonResult,
 } from "./omnigraph-operations.js"
+import { decodeStrictOptionalCommitId } from "./omnigraph-v014-ops.js"
 
 export {
   OmnigraphClient,
@@ -192,7 +193,10 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
   "@harness/graph/OmnigraphSync",
 ) {}
 
-export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<OmnigraphSync> =>
+export const makeOmnigraphSyncLayer = (
+  hostIo: SyncHostIo,
+  env: NodeJS.ProcessEnv = process.env,
+): Layer.Layer<OmnigraphSync> =>
   Layer.succeed(
     OmnigraphSync,
     OmnigraphSync.of({
@@ -225,47 +229,14 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
           )
 
           const branch = options?.branch ?? "main"
-          const og = makeOmnigraphClient(options, hostIo)
+          const og = makeOmnigraphClient(options, hostIo, env)
 
           if (ndjson.trim().length === 0) {
-            return yield* Effect.gen(function* () {
-              if (branch === "main") {
-                yield* Effect.tryPromise({
-                  try: () => og.health(),
-                  catch: (cause) => new OmnigraphLoadError({ cause }),
-                })
-              } else {
-                const branches = yield* Effect.tryPromise({
-                  try: () => og.branches.list(),
-                  catch: (cause) => new OmnigraphLoadError({ cause }),
-                })
-                if (!branches.includes(branch)) {
-                  yield* Effect.tryPromise({
-                    try: () =>
-                      og.branches.create({
-                        name: branch,
-                        from: options?.from ?? "main",
-                      }),
-                    catch: (cause) => new OmnigraphLoadError({ cause }),
-                  })
-                }
-              }
-              if (shouldWriteMeta && options?.repoRoot) {
-                writeGraphHeadMeta(options.repoRoot, hostIo)
-              }
-              return {
-                syncedToOmnigraph: true,
-                snapshotPath,
-              }
-            }).pipe(
-              Effect.catch((err) =>
-                Effect.succeed({
-                  syncedToOmnigraph: false,
-                  snapshotPath,
-                  error: toErrorReasonMessage(err.cause),
-                }),
-              ),
-            )
+            return {
+              syncedToOmnigraph: false,
+              snapshotPath,
+              error: "Cannot sync empty graph payload (0 entities)",
+            }
           }
 
           const mode = options?.mode ?? (branch !== "main" ? "overwrite" : "merge")
@@ -291,11 +262,11 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
                 extractOmnigraphCommitId(legacyCommitId)
               if (shouldWriteMeta && options?.repoRoot) {
                 if (commitId !== undefined) {
-                  writeGraphHeadMeta(options.repoRoot, hostIo, undefined, process.env, {
+                  writeGraphHeadMeta(options.repoRoot, hostIo, undefined, env, {
                     omnigraphCommitId: commitId,
                   })
                 } else {
-                  writeGraphHeadMeta(options.repoRoot, hostIo)
+                  writeGraphHeadMeta(options.repoRoot, hostIo, undefined, env)
                 }
               }
               return {
@@ -318,16 +289,15 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
         Effect.gen(function* () {
           const source = options?.source ?? "impl/current"
           const target = options?.target ?? "main"
-          const og = makeOmnigraphClient(options, hostIo)
+          const og = makeOmnigraphClient(options, hostIo, env)
 
           const branches = yield* Effect.tryPromise({
             try: () => og.branches.list(),
             catch: (cause) => new OmnigraphLoadError({ cause }),
           })
           if (!branches.includes(source)) {
-            yield* Effect.tryPromise({
-              try: () => og.branches.create({ name: source, from: target }),
-              catch: (cause) => new OmnigraphLoadError({ cause }),
+            return yield* new OmnigraphLoadError({
+              cause: new Error(`Source branch "${source}" does not exist`),
             })
           }
           const mergeRes = yield* Effect.tryPromise({
@@ -365,11 +335,11 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
           if (options?.repoRoot) {
             const commitId = extractOmnigraphCommitId(mergeRes.commit?.graphCommitId)
             if (commitId !== undefined) {
-              writeGraphHeadMeta(options.repoRoot, hostIo, undefined, process.env, {
+              writeGraphHeadMeta(options.repoRoot, hostIo, undefined, env, {
                 omnigraphCommitId: commitId,
               })
             } else {
-              writeGraphHeadMeta(options.repoRoot, hostIo)
+              writeGraphHeadMeta(options.repoRoot, hostIo, undefined, env)
             }
           }
         }),
@@ -377,7 +347,7 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
       dryRunMerge: (options) =>
         Effect.gen(function* () {
           const targetBranch = options.target ?? OmnigraphBranchName.make("main")
-          const og = makeOmnigraphClient(options, hostIo)
+          const og = makeOmnigraphClient(options, hostIo, env)
           const res = yield* Effect.tryPromise({
             try: () =>
               og.branches.merge({
@@ -397,7 +367,7 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
 
       query: (input) =>
         Effect.gen(function* () {
-          const og = makeOmnigraphClient(input, hostIo)
+          const og = makeOmnigraphClient(input, hostIo, env)
           const res = yield* Effect.tryPromise({
             try: () =>
               og.query({
@@ -419,7 +389,7 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
       mutateConditional: (input) =>
         Effect.gen(function* () {
           const branch = input.branch ?? OmnigraphBranchName.make("main")
-          const og = makeOmnigraphClient(input, hostIo)
+          const og = makeOmnigraphClient(input, hostIo, env)
           const res = yield* Effect.tryPromise({
             try: () =>
               og.mutate(
@@ -444,7 +414,12 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
 
       invokeNamedQuery: (input) =>
         Effect.gen(function* () {
-          const og = makeOmnigraphClient(input, hostIo)
+          if (!Object.hasOwn(HARNESS_GQ_QUERIES, input.name)) {
+            return yield* new OmnigraphLoadError({
+              cause: new Error(`Unknown named GQ query: ${String(input.name)}`),
+            })
+          }
+          const og = makeOmnigraphClient(input, hostIo, env)
           const branch = input.branch ?? "main"
 
           const rowsEnvelopeSchema = Schema.Struct({
@@ -516,12 +491,20 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
                       }),
                     )
                   }
-                  return Effect.succeed({
-                    source: "memory-fallback" as const,
-                    rows: executeNamedGqQueryInMemory(input.fallbackGraph, input.name, input.params),
-                    degraded: true as const,
-                    fallbackError,
-                  })
+                  return Effect.logWarning(
+                    `Named query "${input.name}" falling back to in-memory execution: ${fallbackError}`,
+                  ).pipe(
+                    Effect.as({
+                      source: "memory-fallback" as const,
+                      rows: executeNamedGqQueryInMemory(
+                        input.fallbackGraph,
+                        input.name,
+                        input.params,
+                      ),
+                      degraded: true as const,
+                      fallbackError,
+                    }),
+                  )
                 }),
               )
             }),
@@ -530,7 +513,7 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
 
       diffBranches: (input) =>
         Effect.gen(function* () {
-          const og = makeOmnigraphClient(input, hostIo)
+          const og = makeOmnigraphClient(input, hostIo, env)
           const source = input?.source ?? "impl/current"
           const target = input?.target ?? "plan/current"
 
@@ -540,12 +523,12 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
           })
         }),
 
-      pollChanges: (input) => executePollChanges(makeOmnigraphClient(input, hostIo), input),
+      pollChanges: (input) => executePollChanges(makeOmnigraphClient(input, hostIo, env), input),
 
       proposeMergeCommit: (input) =>
         Effect.gen(function* () {
           const targetBranch = input.target ?? OmnigraphBranchName.make("main")
-          const og = makeOmnigraphClient(input, hostIo)
+          const og = makeOmnigraphClient(input, hostIo, env)
           const res = yield* Effect.tryPromise({
             try: () =>
               og.branches.merge({
@@ -555,13 +538,16 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
               }),
             catch: (cause) => mapOmnigraphConflictError(cause, input.source, targetBranch),
           })
-          return extractOmnigraphCommitId(res.commit?.graphCommitId) ?? null
+          return yield* match(decodeStrictOptionalCommitId(res.commit?.graphCommitId))
+            .with({ _tag: "Success" }, ({ success }) => Effect.succeed(success))
+            .with({ _tag: "Failure" }, ({ failure }) => Effect.fail(failure))
+            .exhaustive()
         }),
 
       inspectCommitChanges: (input) =>
         Effect.tryPromise({
           try: () =>
-            makeOmnigraphClient(input, hostIo).commits.changes(input.commitId, {
+            makeOmnigraphClient(input, hostIo, env).commits.changes(input.commitId, {
               ...(input.pageToken ? { pageToken: input.pageToken } : {}),
               ...(input.limit !== undefined ? { limit: input.limit } : {}),
             }),
@@ -570,13 +556,13 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
 
       publishCommit: (input) =>
         Effect.tryPromise({
-          try: () => makeOmnigraphClient(input, hostIo).commits.publish(input.commitId),
+          try: () => makeOmnigraphClient(input, hostIo, env).commits.publish(input.commitId),
           catch: (cause) => new OmnigraphLoadError({ cause }),
         }),
 
       dropCommit: (input) =>
         Effect.tryPromise({
-          try: () => makeOmnigraphClient(input, hostIo).commits.drop(input.commitId),
+          try: () => makeOmnigraphClient(input, hostIo, env).commits.drop(input.commitId),
           catch: (cause) => new OmnigraphLoadError({ cause }),
         }),
 
@@ -585,7 +571,7 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
           typeof input.data === "string" ? new TextEncoder().encode(input.data) : input.data
         return Effect.tryPromise({
           try: () =>
-            makeOmnigraphClient(input, hostIo).blobs.put({
+            makeOmnigraphClient(input, hostIo, env).blobs.put({
               entity: input.entity,
               type: input.type,
               id: input.id,
@@ -598,9 +584,9 @@ export const makeOmnigraphSyncLayer = (hostIo: SyncHostIo): Layer.Layer<Omnigrap
         })
       },
 
-      getBlobText: (input) => executeGetBlobText(makeOmnigraphClient(input, hostIo), input),
+      getBlobText: (input) => executeGetBlobText(makeOmnigraphClient(input, hostIo, env), input),
 
-      statBlob: (input) => executeStatBlob(makeOmnigraphClient(input, hostIo), input),
+      statBlob: (input) => executeStatBlob(makeOmnigraphClient(input, hostIo, env), input),
     }),
   )
 

@@ -238,6 +238,7 @@ export const handleVerify = (
 
     const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
     const snapshotPath = join(repoRoot, ".harness", "graph-snapshot.json")
+    const syncStartedAtMs = Date.now()
     if (isIsolatedExternalWorkspace(repoRoot)) {
       saveGraphSnapshot(graph, snapshotPath, nodeSyncHostIo)
       writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
@@ -246,8 +247,9 @@ export const handleVerify = (
         category: "graph_query",
         toolName: "omnigraph:sync-impl",
         outcome: "ok",
-        durationMs: 1,
+        durationMs: Math.max(0, Date.now() - syncStartedAtMs),
         engineSource: "local",
+        detail: "skipped-isolated-workspace",
       })
     } else {
       const verifySyncFail = yield* syncVerifyImplToOmnigraph(

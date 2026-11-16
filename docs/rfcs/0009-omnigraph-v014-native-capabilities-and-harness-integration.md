@@ -527,32 +527,23 @@ graphs:
 ```
 
 ```yaml
-# libs/harness/graph/graph.policy.yaml
+# libs/harness/graph/graph.policy.yaml (read-only agent-mcp aligned with policies.cedar)
 version: 1
 protected_branches: [main]
 groups:
-  admins: [harness-cli, default]
+  admins: [harness-cli]
   agents: [agent-mcp]
+  readers: [agent-mcp, harness-cli, default]
 rules:
   - id: everyone-can-read-all-branches
     allow:
-      actors: { group: [admins, agents] }
+      actors: { group: readers }
       actions: [read]
       branch_scope: any
   - id: everyone-can-invoke-queries
     allow:
-      actors: { group: [admins, agents] }
+      actors: { group: readers }
       actions: [invoke_query]
-  - id: agents-can-propose-on-unprotected-branches
-    allow:
-      actors: { group: agents }
-      actions: [change]
-      branch_scope: unprotected
-  - id: agents-can-fork-plan-branches
-    allow:
-      actors: { group: agents }
-      actions: [branch_create]
-      target_branch_scope: unprotected
   - id: admins-full-graph-write
     allow:
       actors: { group: admins }
@@ -566,29 +557,69 @@ rules:
 ```
 
 ```yaml
-# libs/harness/graph/policy-tests.yaml (executed by `omnigraph policy test`)
+# libs/harness/graph/policy-tests.yaml (13 cases executed by `omnigraph policy test`)
 version: 1
 cases:
-  - name: agent-mcp-cannot-mutate-main
+  - id: agent-mcp-cannot-mutate-main
     actor: agent-mcp
     action: change
     branch: main
     expect: deny
-  - name: agent-mcp-cannot-merge-into-main
+  - id: agent-mcp-cannot-merge-into-main
     actor: agent-mcp
     action: branch_merge
     target_branch: main
     expect: deny
-  - name: agent-mcp-can-invoke-stored-queries
+  - id: agent-mcp-cannot-export-main
+    actor: agent-mcp
+    action: export
+    branch: main
+    expect: deny
+  - id: agent-mcp-cannot-delete-main
+    actor: agent-mcp
+    action: branch_delete
+    target_branch: main
+    expect: deny
+  - id: agent-mcp-cannot-apply-schema-to-main
+    actor: agent-mcp
+    action: schema_apply
+    target_branch: main
+    expect: deny
+  - id: agent-mcp-can-invoke-stored-queries
     actor: agent-mcp
     action: invoke_query
     expect: allow
-  - name: agent-mcp-can-stage-on-plan-branch
+  - id: agent-mcp-cannot-mutate-plan-branch
     actor: agent-mcp
     action: change
     branch: plan/current
-    expect: allow
-  - name: harness-cli-can-merge-into-main
+    expect: deny
+  - id: agent-mcp-cannot-create-plan-branch
+    actor: agent-mcp
+    action: branch_create
+    target_branch: plan/current
+    expect: deny
+  - id: default-cannot-mutate-main
+    actor: default
+    action: change
+    branch: main
+    expect: deny
+  - id: default-cannot-merge-into-main
+    actor: default
+    action: branch_merge
+    target_branch: main
+    expect: deny
+  - id: default-cannot-delete-main
+    actor: default
+    action: branch_delete
+    target_branch: main
+    expect: deny
+  - id: default-cannot-apply-schema-to-main
+    actor: default
+    action: schema_apply
+    target_branch: main
+    expect: deny
+  - id: harness-cli-can-merge-into-main
     actor: harness-cli
     action: branch_merge
     target_branch: main
@@ -596,9 +627,9 @@ cases:
 ```
 
 **Locked Actor Authentication & MCP Alignment (Option A — `OMNIGRAPH_SERVER_BEARER_TOKENS_JSON`):**
-- On cluster startup, [`ensureLocalOmnigraphReady`](../../apps/harness-cli/src/commands/omnigraph-lifecycle.ts#L307) generates two per-workspace cryptographic Bearer tokens (`harness-cli` and `agent-mcp`), persists them in `.harness/omnigraph-endpoint.json` with restrictive `0o600` permissions (gitignored, excluded from repo), and launches `omnigraph-server` **without** `--unauthenticated`, passing `OMNIGRAPH_SERVER_BEARER_TOKENS_JSON='{"harness-cli":"<token-cli>","agent-mcp":"<token-mcp>"}'`.
+- On cluster startup, [`ensureLocalOmnigraphReady`](../../apps/harness-cli/src/commands/omnigraph-lifecycle.ts) generates two per-workspace cryptographic Bearer tokens (`harness-cli` and `agent-mcp`), persists them atomically in `.harness/omnigraph-cluster/auth-tokens.json` (`0o600` permissions, alongside token-free `.harness/omnigraph-cluster/server.json` with `0o600` permissions, gitignored and excluded from repo), and launches `omnigraph-server` **without** `--unauthenticated`, passing `OMNIGRAPH_SERVER_BEARER_TOKENS_JSON='{"harness-cli":"<token-cli>","agent-mcp":"<token-mcp>"}'`.
 - `OmnigraphSync` (`makeOmnigraphClient`) reads the `harness-cli` token when running CLI gates (`plan-check`, `verify`, `done`), allowing merges into `protected_branches: [main]`.
-- `adapters/antigravity/plugins/effect-harness/mcp_config.json` replaces the hardcoded `127.0.0.1:8080` settings with a thin stdio launcher that reads `baseUrl` (`18080 + hash` dynamic port) and the `agent-mcp` Bearer token from `.harness/omnigraph-endpoint.json`, sets `OMNIGRAPH_URL` and `OMNIGRAPH_TOKEN`, and execs `@modernrelay/omnigraph-mcp@0.14.0`. Consequently, `omnigraph-server` rejects any attempt by `agent-mcp` to mutate or merge `main` with `403 Forbidden`.
+- `adapters/antigravity/plugins/effect-harness/mcp_config.json` replaces hardcoded `127.0.0.1:8080` settings with [`tools/omnigraph-mcp-launcher.mjs`](../../tools/omnigraph-mcp-launcher.mjs), which validates live loopback `baseUrl` + `canonicalRepoRoot` from `.harness/omnigraph-cluster/server.json` and the `agent-mcp` Bearer token from `0o600` `.harness/omnigraph-cluster/auth-tokens.json`, sets `OMNIGRAPH_URL` and `OMNIGRAPH_TOKEN`, and execs `@modernrelay/omnigraph-mcp@0.14.0`. Consequently, `omnigraph-server` rejects any attempt by `agent-mcp` to mutate or create/merge branches with `403 Forbidden`.
 
 ---
 

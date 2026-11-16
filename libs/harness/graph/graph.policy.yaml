@@ -14,16 +14,6 @@ rules:
     allow:
       actors: { group: readers }
       actions: [invoke_query]
-  - id: agents-can-propose-on-unprotected-branches
-    allow:
-      actors: { group: agents }
-      actions: [change]
-      branch_scope: unprotected
-  - id: agents-can-fork-plan-branches
-    allow:
-      actors: { group: agents }
-      actions: [branch_create]
-      target_branch_scope: unprotected
   - id: admins-full-graph-write
     allow:
       actors: { group: admins }

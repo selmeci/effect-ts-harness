@@ -240,6 +240,7 @@ export const handlePlanCheck = (
     }
 
     if (!graphOnly) {
+      const omnigraphStartedAtMs = Date.now()
       const snapshotPath = join(repoRoot, ".harness", "plan-graph-snapshot.json")
       if (isIsolatedExternalWorkspace(repoRoot)) {
         saveGraphSnapshot(graph, snapshotPath, nodeSyncHostIo)
@@ -248,8 +249,9 @@ export const handlePlanCheck = (
           category: "graph_query",
           toolName: "omnigraph:sync-plan",
           outcome: "ok",
-          durationMs: 1,
+          durationMs: Math.max(0, Date.now() - omnigraphStartedAtMs),
           engineSource: "local",
+          detail: "skipped-isolated-workspace",
         })
       } else {
         const lintRes = yield* runOfflineOmnigraphLintGate(resolveClusterRepoRoot(repoRoot))
@@ -290,7 +292,7 @@ export const handlePlanCheck = (
           category: "graph_query",
           toolName: "omnigraph:sync-plan",
           outcome: syncRes.syncedToOmnigraph ? "ok" : "fail",
-          durationMs: 1,
+          durationMs: Math.max(0, Date.now() - omnigraphStartedAtMs),
           engineSource: syncRes.syncedToOmnigraph ? "omnigraph" : "memory-fallback",
         })
         if (!syncRes.syncedToOmnigraph) {

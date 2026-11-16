@@ -5,7 +5,12 @@ import { match } from "ts-pattern"
 import {
   ErrorReasonMessage,
   NonNegativeCount,
+  OmnigraphActorToken,
+  type OmnigraphAuthTokens,
+  OmnigraphAuthTokensSchema,
+  type OmnigraphConfigDriftKind,
   OmnigraphDiagnosticCode,
+  OmnigraphLintCliOutputSchema,
   type OmnigraphLintDiagnostic,
   type OmnigraphLintInput,
   type OmnigraphSchemaEvolutionAction,
@@ -38,35 +43,11 @@ const ConfigDigestsSchema = Schema.fromJsonString(
 
 type ConfigDigests = Schema.Schema.Type<typeof ConfigDigestsSchema>
 
-const OmnigraphLintFindingJsonSchema = Schema.Struct({
-  code: Schema.optional(Schema.String),
-  message: Schema.optional(Schema.String),
-  severity: Schema.optional(Schema.Literals(["error", "warning", "info"])),
-  target: Schema.optional(Schema.NullOr(Schema.String)),
-  target_name: Schema.optional(Schema.NullOr(Schema.String)),
-  targetName: Schema.optional(Schema.NullOr(Schema.String)),
-})
+const OmnigraphLintJsonSchema = Schema.fromJsonString(OmnigraphLintCliOutputSchema)
 
-const OmnigraphLintJsonSchema = Schema.fromJsonString(
-  Schema.Struct({
-    status: Schema.optional(Schema.String),
-    errors: Schema.optional(Schema.Finite),
-    warnings: Schema.optional(Schema.Finite),
-    queries_processed: Schema.optional(Schema.Finite),
-    findings: Schema.optional(Schema.Array(OmnigraphLintFindingJsonSchema)),
-    diagnostics: Schema.optional(Schema.Array(OmnigraphLintFindingJsonSchema)),
-  }),
-)
+const EndpointTokensJsonSchema = Schema.fromJsonString(OmnigraphAuthTokensSchema)
 
-const EndpointTokensSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(1),
-  cliToken: Schema.NonEmptyString,
-  mcpToken: Schema.NonEmptyString,
-})
-
-const EndpointTokensJsonSchema = Schema.fromJsonString(EndpointTokensSchema)
-
-export type OmnigraphEndpointTokens = Schema.Schema.Type<typeof EndpointTokensSchema>
+export type OmnigraphEndpointTokens = OmnigraphAuthTokens
 
 export type OfflineOmnigraphLintResult =
   | { readonly ok: true }
@@ -88,12 +69,18 @@ export const runOfflineOmnigraphLintGate = (
 ): Effect.Effect<OfflineOmnigraphLintResult> =>
   Effect.gen(function* () {
     if (!nodeSyncHostIo.existsSync(omnigraphBin)) {
-      return { ok: true } as const
+      return {
+        ok: false as const,
+        message: `omnigraph binary not found at ${omnigraphBin}; cannot run offline lint gate`,
+      }
     }
     const schemaPath = join(repoRoot, "libs", "harness", "graph", "schema.pg")
     const queryPath = join(repoRoot, "libs", "harness", "graph", "queries", "harness.gq")
     if (!nodeSyncHostIo.existsSync(schemaPath) || !nodeSyncHostIo.existsSync(queryPath)) {
-      return { ok: true } as const
+      return {
+        ok: false as const,
+        message: `Missing Omnigraph schema (${schemaPath}) or query (${queryPath}) file; cannot run offline lint gate`,
+      }
     }
 
     const execAttempt = Result.try(() =>
@@ -162,7 +149,7 @@ export const runOfflineOmnigraphLintGate = (
               code: OmnigraphDiagnosticCode.make(rawCode),
               message: ErrorReasonMessage.make(rawMsg),
               targetName: rawTarget && rawTarget.length > 0 ? OmnigraphTargetName.make(rawTarget) : null,
-              ...(d.severity !== undefined ? { severity: d.severity } : {}),
+              severity: d.severity ?? "error",
             }
           })
 
@@ -174,7 +161,7 @@ export const runOfflineOmnigraphLintGate = (
               Math.max(0, Math.floor(parsed.queries_processed ?? 0)),
             ),
             diagnostics,
-            failOnError: true,
+            policy: "fail-on-error",
           }
 
           const lintRes = yield* decideOmnigraphLint(lintInput).pipe(
@@ -306,13 +293,25 @@ export const evaluateClusterConfigDrift = (
             digests["schema.pg@keys"] !== prevDigests["schema.pg@keys"])
         : stampChanged)
 
-    const action = yield* decideOmnigraphSchemaEvolution({
-      clusterExists,
-      queriesChanged,
-      schemaAdditiveChanged,
-      policyBundleOrEdgeKeyChanged,
-      serverAlive,
-    })
+    const driftKind: OmnigraphConfigDriftKind = policyBundleOrEdgeKeyChanged
+      ? "edge-key-or-policy-bundle-breaking"
+      : schemaAdditiveChanged
+        ? "schema-additive-or-rename"
+        : queriesChanged
+          ? "queries-only"
+          : "none"
+
+    const action = yield* decideOmnigraphSchemaEvolution(
+      clusterExists
+        ? {
+            _tag: "ClusterPresent",
+            driftKind,
+            serverAlive,
+          }
+        : {
+            _tag: "ClusterMissing",
+          },
+    )
 
     return { action, expectedStamp, digests }
   })
@@ -337,9 +336,15 @@ export const writeClusterDriftReceipts = (
 const StartupLockJsonSchema = Schema.fromJsonString(
   Schema.Struct({
     pid: Schema.optional(Schema.Finite),
+    lockToken: Schema.optional(Schema.String),
     createdAtMs: Schema.optional(Schema.Finite),
   }),
 )
+
+export interface OmnigraphClusterLockHandle {
+  readonly lockPath: string
+  readonly lockToken: string
+}
 
 const ensureSecureClusterDir = (clusterRootDir: string): void => {
   if (!nodeSyncHostIo.existsSync(clusterRootDir)) {
@@ -414,25 +419,28 @@ export const ensureOmnigraphEndpointTokens = (
 
       const tokens: OmnigraphEndpointTokens = {
         schemaVersion: 1,
-        cliToken: randomBytes(32).toString("hex"),
-        mcpToken: randomBytes(32).toString("hex"),
+        cliToken: OmnigraphActorToken.make(randomBytes(32).toString("hex")),
+        mcpToken: OmnigraphActorToken.make(randomBytes(32).toString("hex")),
       }
       return Result.map(writeSecureJsonAtomic(tokensPath, tokens), () => tokens)
     })
     .exhaustive()
 }
 
-export const acquireOmnigraphClusterLock = (clusterRootDir: string): string | undefined => {
+export const acquireOmnigraphClusterLock = (
+  clusterRootDir: string,
+): OmnigraphClusterLockHandle | undefined => {
   const lockParent = dirname(clusterRootDir)
   if (!nodeSyncHostIo.existsSync(lockParent)) {
     nodeSyncHostIo.mkdirRecursiveSync(lockParent)
   }
   const lockPath = `${clusterRootDir}.startup.lock`
-  const payload = JSON.stringify({ pid: process.pid, createdAtMs: Date.now() })
+  const lockToken = randomBytes(16).toString("hex")
+  const payload = JSON.stringify({ pid: process.pid, lockToken, createdAtMs: Date.now() })
   for (let attempt = 0; attempt < 2; attempt++) {
     const writeRes = nodeSyncHostIo.tryWriteExclusiveTextSync(lockPath, payload, 0o600)
     const acquired = match(writeRes)
-      .with({ _tag: "Written" }, () => lockPath)
+      .with({ _tag: "Written" }, () => ({ lockPath, lockToken }))
       .with({ _tag: "Exists" }, { _tag: "Failed" }, () => undefined)
       .exhaustive()
     if (acquired !== undefined) {
@@ -440,8 +448,6 @@ export const acquireOmnigraphClusterLock = (clusterRootDir: string): string | un
     }
     const staleCleared = Result.getOrElse(
       Result.try(() => {
-        const mtimeMs = nodeSyncHostIo.statMtimeMsSync(lockPath) ?? 0
-        const ageMs = Date.now() - mtimeMs
         const raw = nodeSyncHostIo.readTextSync(lockPath)
         const parsedOpt = Schema.decodeOption(StartupLockJsonSchema)(raw)
         const ownerAlive = match(parsedOpt)
@@ -450,7 +456,7 @@ export const acquireOmnigraphClusterLock = (clusterRootDir: string): string | un
           )
           .with({ _tag: "None" }, () => false)
           .exhaustive()
-        if (!ownerAlive || ageMs > 30_000) {
+        if (!ownerAlive) {
           nodeSyncHostIo.unlinkSync(lockPath)
           return true
         }
@@ -465,9 +471,46 @@ export const acquireOmnigraphClusterLock = (clusterRootDir: string): string | un
   return undefined
 }
 
-export const releaseOmnigraphClusterLock = (lockPath: string | undefined): void => {
-  if (lockPath === undefined) return
-  Result.try(() => nodeSyncHostIo.unlinkSync(lockPath))
+export const acquireOmnigraphClusterLockEffect = (
+  clusterRootDir: string,
+  timeoutMs = 15_000,
+): Effect.Effect<OmnigraphClusterLockHandle | undefined> =>
+  Effect.gen(function* () {
+    const deadlineMs = Date.now() + Math.max(0, timeoutMs)
+    while (true) {
+      const handle = acquireOmnigraphClusterLock(clusterRootDir)
+      if (handle !== undefined) {
+        return handle
+      }
+      if (Date.now() >= deadlineMs) {
+        return undefined
+      }
+      yield* Effect.sleep("100 millis")
+    }
+  })
+
+export const releaseOmnigraphClusterLock = (
+  handle: OmnigraphClusterLockHandle | string | undefined,
+): void => {
+  if (handle === undefined) return
+  if (typeof handle === "string") {
+    Result.try(() => nodeSyncHostIo.unlinkSync(handle))
+    return
+  }
+  Result.try(() => {
+    if (!nodeSyncHostIo.existsSync(handle.lockPath)) return
+    const raw = nodeSyncHostIo.readTextSync(handle.lockPath)
+    const parsedOpt = Schema.decodeOption(StartupLockJsonSchema)(raw)
+    const isOwner = match(parsedOpt)
+      .with({ _tag: "Some" }, ({ value }) =>
+        value.pid === process.pid && value.lockToken === handle.lockToken,
+      )
+      .with({ _tag: "None" }, () => false)
+      .exhaustive()
+    if (isOwner) {
+      nodeSyncHostIo.unlinkSync(handle.lockPath)
+    }
+  })
 }
 
 export const killOmnigraphServerPidIfAlive = (
@@ -533,8 +576,8 @@ export const runOmnigraphOptimizeAndCleanup = (
   }
   const targetUri = `file://${clusterRootDir}`
   for (const args of [
-    ["optimize", "--target", targetUri, "--graph", "harness", "--as", "harness-cli"],
-    ["cleanup", "--target", targetUri, "--graph", "harness", "--as", "harness-cli", "--keep", "5"],
+    ["optimize", "--target", targetUri, "--graph", "harness"],
+    ["cleanup", "--target", targetUri, "--graph", "harness", "--keep", "5", "--confirm"],
   ] as const) {
     const subcommand = args[0]
     const execAttempt = Result.try(() =>
@@ -551,9 +594,10 @@ export const runOmnigraphOptimizeAndCleanup = (
       .with({ _tag: "Success" }, ({ success: res }) => {
         match(res)
           .with({ _tag: "Exited" }, ({ exitCode, stderr, stdout }) => {
-            if (exitCode !== 0) {
+            const combined = stderr || stdout
+            if (exitCode !== 0 && !combined.includes("[state_lock_held]")) {
               process.stderr.write(
-                `[harness:omnigraph] Warning: omnigraph ${subcommand} exited ${exitCode}: ${stderr || stdout}\n`,
+                `[harness:omnigraph] Warning: omnigraph ${subcommand} exited ${exitCode}: ${combined}\n`,
               )
             }
           })

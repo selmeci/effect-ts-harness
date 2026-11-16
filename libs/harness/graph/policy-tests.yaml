@@ -29,11 +29,16 @@ cases:
     actor: agent-mcp
     action: invoke_query
     expect: allow
-  - id: agent-mcp-can-stage-on-plan-branch
+  - id: agent-mcp-cannot-mutate-plan-branch
     actor: agent-mcp
     action: change
     branch: plan/current
-    expect: allow
+    expect: deny
+  - id: agent-mcp-cannot-create-plan-branch
+    actor: agent-mcp
+    action: branch_create
+    target_branch: plan/current
+    expect: deny
   - id: default-cannot-mutate-main
     actor: default
     action: change

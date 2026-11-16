@@ -32,7 +32,7 @@ import {
   makeOmnigraphSyncLayer,
   pollOmnigraphChanges,
   readGraphHeadMeta,
-  writeGraphHeadMeta,
+  updateGraphHeadCursor,
 } from "@harness/graph"
 import {
   makeAstGateCacheLayer,
@@ -229,7 +229,6 @@ const createDaemonLineHandler =
           )
           .with("poll-changes", () =>
             Effect.gen(function* () {
-              // OCC conditional mutations use Omnigraph-If-Graph-Commit via mutateOmnigraphConditional.
               const pollSem = yield* SynchronizedRef.modifyEffect(pollSemaphoresRef, (sems) => {
                 const existing = sems.get(resolvedRoot)
                 if (existing !== undefined) {
@@ -246,7 +245,19 @@ const createDaemonLineHandler =
               return yield* pollSem.withPermits(1)(
                 Effect.gen(function* () {
                   const headMeta = readGraphHeadMeta(resolvedRoot, nodeSyncHostIo)
-                  const rawCursor = req.cursor?.trim() || headMeta?.changeFeedCursor || undefined
+                  const rawReqCursor = req.cursor?.trim() || undefined
+                  const storedCursor =
+                    headMeta?.changeFeedCursor !== undefined && headMeta.changeFeedCursor !== null
+                      ? match(Schema.decodeOption(OmnigraphChangeCursor)(headMeta.changeFeedCursor))
+                          .with({ _tag: "Some" }, ({ value }) => value)
+                          .with({ _tag: "None" }, () => {
+                            process.stderr.write(
+                              "[harness-mcp] Warning: ignoring malformed stored changeFeedCursor in graph-head.json\n",
+                            )
+                            return undefined
+                          })
+                          .exhaustive()
+                      : undefined
                   const rawBranch = req.branch?.trim() || undefined
                   const branch =
                     rawBranch === undefined
@@ -259,14 +270,18 @@ const createDaemonLineHandler =
                     return { id: req.id, ok: false, error: `Invalid branch name: ${rawBranch}` }
                   }
                   const cursor =
-                    rawCursor === undefined
-                      ? undefined
-                      : match(Schema.decodeOption(OmnigraphChangeCursor)(rawCursor))
+                    rawReqCursor === undefined
+                      ? storedCursor
+                      : match(Schema.decodeOption(OmnigraphChangeCursor)(rawReqCursor))
                           .with({ _tag: "Some" }, ({ value }) => value)
                           .with({ _tag: "None" }, () => null)
                           .exhaustive()
                   if (cursor === null) {
-                    return { id: req.id, ok: false, error: `Invalid change cursor: ${rawCursor}` }
+                    return {
+                      id: req.id,
+                      ok: false,
+                      error: `Invalid change cursor: ${rawReqCursor}`,
+                    }
                   }
 
                   const feedRes = yield* pollOmnigraphChanges({
@@ -309,12 +324,15 @@ const createDaemonLineHandler =
                           }
                         }
 
-                        if (feed.requiresBaseline || changedTsFiles.size > 0) {
+                        const hasNonTsChanges =
+                          changedTsFiles.size === 0 &&
+                          feed.blocks.some((block) => block.changes.length > 0)
+                        if (feed.requiresBaseline || hasNonTsChanges || changedTsFiles.size > 0) {
                           const nextGraph = yield* extractWorkspaceTypeAwareGraph(
                             resolvedRoot,
                             nodeSyncHostIo,
                           )
-                          if (feed.requiresBaseline) {
+                          if (feed.requiresBaseline || hasNonTsChanges) {
                             const rebuiltRes = yield* DatalogSession.make(nextGraph).pipe(
                               Effect.flatMap((created) =>
                                 SynchronizedRef.update(datalogSessionsRef, (sessions) => {
@@ -403,9 +421,18 @@ const createDaemonLineHandler =
                         }
 
                         if (feed.cursor !== null) {
-                          writeGraphHeadMeta(resolvedRoot, nodeSyncHostIo, undefined, process.env, {
-                            changeFeedCursor: feed.cursor,
-                          })
+                          const persisted = updateGraphHeadCursor(
+                            resolvedRoot,
+                            nodeSyncHostIo,
+                            feed.cursor,
+                          )
+                          if (persisted === null) {
+                            return {
+                              id: req.id,
+                              ok: false,
+                              error: "Failed to persist graph-head.json",
+                            }
+                          }
                         }
 
                         return {

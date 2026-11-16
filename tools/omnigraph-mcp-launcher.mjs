@@ -79,7 +79,10 @@ function readJsonSafe(filePath) {
   try {
     if (!existsSync(filePath)) return undefined
     return JSON.parse(readFileSync(filePath, "utf8"))
-  } catch {
+  } catch (err) {
+    process.stderr.write(
+      `[omnigraph-mcp-launcher] Warning: failed to read/parse JSON at ${filePath}: ${err instanceof Error ? err.message : String(err)}\n`,
+    )
     return undefined
   }
 }
@@ -89,6 +92,9 @@ function readSafeMcpToken(tokensPath) {
     if (!existsSync(tokensPath)) return undefined
     const mode = statSync(tokensPath).mode & 0o777
     if ((mode & 0o077) !== 0) {
+      process.stderr.write(
+        `[omnigraph-mcp-launcher] Warning: refusing ${tokensPath} with permissive mode ${mode.toString(8)}\n`,
+      )
       return undefined
     }
     const parsed = JSON.parse(readFileSync(tokensPath, "utf8"))
@@ -101,7 +107,13 @@ function readSafeMcpToken(tokensPath) {
     ) {
       return parsed.mcpToken
     }
-  } catch {
+    process.stderr.write(
+      `[omnigraph-mcp-launcher] Warning: invalid auth-tokens.json schema at ${tokensPath}\n`,
+    )
+  } catch (err) {
+    process.stderr.write(
+      `[omnigraph-mcp-launcher] Warning: failed to read/parse ${tokensPath}: ${err instanceof Error ? err.message : String(err)}\n`,
+    )
     return undefined
   }
   return undefined

@@ -8,7 +8,7 @@ import {
   WorkspaceFilePath,
 } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
-import { Effect, Option, Result, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 
 export interface GitHeadState {
@@ -170,11 +170,77 @@ export const readGraphHeadMeta = (
   if (!hostIo.existsSync(metaPath)) {
     return null
   }
-  const raw = Result.getOrElse(
-    Result.try(() => hostIo.readTextSync(metaPath)),
-    () => "",
-  )
-  return Option.getOrNull(decodeGraphHeadMetaOption(raw))
+  const readRes = Result.try(() => hostIo.readTextSync(metaPath))
+  return match(readRes)
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      process.stderr.write(
+        `[harness/graph] Warning: failed to read ${metaPath}: ${String(failure)}\n`,
+      )
+      return null
+    })
+    .with({ _tag: "Success" }, ({ success: raw }) =>
+      match(decodeGraphHeadMetaOption(raw))
+        .with({ _tag: "Some" }, ({ value }) => value)
+        .with({ _tag: "None" }, () => {
+          process.stderr.write(
+            `[harness/graph] Warning: failed to decode ${metaPath} as GraphHeadMeta\n`,
+          )
+          return null
+        })
+        .exhaustive(),
+    )
+    .exhaustive()
+}
+
+const persistGraphHeadMeta = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  meta: GraphHeadMeta,
+  env: NodeJS.ProcessEnv = process.env,
+): GraphHeadMeta | null => {
+  const stateDir = resolveGraphMetaStateDir(repoRoot, env)
+  const targetPath = join(stateDir, "graph-head.json")
+  const tmpPath = join(stateDir, `.graph-head.json.${process.pid}.tmp`)
+  const writeResult = Result.try(() => {
+    if (!hostIo.existsSync(stateDir)) {
+      hostIo.mkdirRecursiveSync(stateDir)
+    }
+    hostIo.writeTextSync(tmpPath, JSON.stringify(meta, null, 2))
+    hostIo.renameSync(tmpPath, targetPath)
+  })
+  return match(writeResult)
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      process.stderr.write(
+        `[harness/graph] Error: failed to persist ${targetPath}: ${String(failure)}\n`,
+      )
+      Result.try(() => {
+        if (hostIo.existsSync(tmpPath)) {
+          hostIo.unlinkSync(tmpPath)
+        }
+      })
+      return null
+    })
+    .with({ _tag: "Success" }, () => meta)
+    .exhaustive()
+}
+
+export const updateGraphHeadCursor = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  cursor: OmnigraphChangeCursor | null,
+  env: NodeJS.ProcessEnv = process.env,
+): GraphHeadMeta | null => {
+  const existing = readGraphHeadMeta(repoRoot, hostIo, env)
+  const meta: GraphHeadMeta = {
+    headSha: existing?.headSha ?? null,
+    gitBranch: existing?.gitBranch ?? null,
+    updatedAt: new Date().toISOString(),
+    ...(existing?.omnigraphCommitId !== undefined
+      ? { omnigraphCommitId: existing.omnigraphCommitId }
+      : {}),
+    changeFeedCursor: cursor,
+  }
+  return persistGraphHeadMeta(repoRoot, hostIo, meta, env)
 }
 
 export const writeGraphHeadMeta = (
@@ -206,7 +272,6 @@ export const writeGraphHeadMeta = (
       : headState?.changeFeedCursor !== undefined
         ? headState.changeFeedCursor
         : existing?.changeFeedCursor
-  const stateDir = resolveGraphMetaStateDir(repoRoot, env)
   const meta: GraphHeadMeta = {
     headSha: resolved.headSha,
     gitBranch: resolved.gitBranch,
@@ -214,26 +279,7 @@ export const writeGraphHeadMeta = (
     ...(omnigraphCommitId !== undefined ? { omnigraphCommitId } : {}),
     ...(changeFeedCursor !== undefined ? { changeFeedCursor } : {}),
   }
-  const targetPath = join(stateDir, "graph-head.json")
-  const tmpPath = join(stateDir, `.graph-head.json.${process.pid}.tmp`)
-  const writeResult = Result.try(() => {
-    if (!hostIo.existsSync(stateDir)) {
-      hostIo.mkdirRecursiveSync(stateDir)
-    }
-    hostIo.writeTextSync(tmpPath, JSON.stringify(meta, null, 2))
-    hostIo.renameSync(tmpPath, targetPath)
-  })
-  match(writeResult)
-    .with({ _tag: "Failure" }, () => {
-      Result.try(() => {
-        if (hostIo.existsSync(tmpPath)) {
-          hostIo.unlinkSync(tmpPath)
-        }
-      })
-    })
-    .with({ _tag: "Success" }, () => undefined)
-    .exhaustive()
-  return meta
+  return persistGraphHeadMeta(repoRoot, hostIo, meta, env)
 }
 
 export const OmnigraphReconcileReason = Schema.Literals([

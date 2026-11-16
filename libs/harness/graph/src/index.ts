@@ -282,6 +282,7 @@ export {
   resolveOmnigraphClusterDir,
   resolveOmnigraphTaskBranches,
   sanitizeOmnigraphBranchSlug,
+  updateGraphHeadCursor,
   writeGraphHeadMeta,
   type GitHeadState,
   type GraphHeadMeta,

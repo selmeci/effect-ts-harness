@@ -1,3 +1,6 @@
+# Cluster-scope Cedar policy reference for the Harness Omnigraph cluster.
+# Complements graph.policy.yaml (per-graph branch/query/mutation rules) by
+# governing cluster-level operations (config_manage, graph_list) across actors.
 version: 1
 groups:
   owners: [harness-cli]

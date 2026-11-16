@@ -782,6 +782,7 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
 
   const startDoneMergeMockServer = async (options: {
     readonly mergeFails: boolean
+    readonly branches?: ReadonlyArray<string>
   }): Promise<{
     readonly url: string
     readonly requests: ReadonlyArray<{ readonly method: string; readonly url: string }>
@@ -809,7 +810,13 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
       }
       if (method === "GET" && url.endsWith("/branches")) {
         res.writeHead(200, headers)
-        res.end(JSON.stringify({ outcome: "ok", branches: ["main"], serverRef: "srv-1" }))
+        res.end(
+          JSON.stringify({
+            outcome: "ok",
+            branches: options.branches ?? ["main", "impl/current", "impl/wt-cli-unit"],
+            serverRef: "srv-1",
+          }),
+        )
         return
       }
       if (method === "POST" && url.endsWith("/branches")) {
@@ -826,6 +833,10 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
         })
         req.on("end", () => {
           const isDryRun = body.includes('"dry_run":true')
+          const parsedReq = JSON.parse(body || "{}") as {
+            readonly source?: string
+            readonly target?: string
+          }
           if (options.mergeFails && !isDryRun) {
             res.writeHead(500, headers)
             res.end(JSON.stringify({ error: "mock merge failure" }))
@@ -835,8 +846,8 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
           res.end(
             JSON.stringify({
               outcome: "already_up_to_date",
-              source: "impl/current",
-              target: "main",
+              source: parsedReq.source ?? "impl/current",
+              target: parsedReq.target ?? "main",
               ...(isDryRun ? { dry_run: true } : {}),
               commit: null,
               serverRef: "srv-1",
@@ -923,6 +934,34 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
     const dir = setupNonIsolatedWorkspaceDir("harness-s8d-fail-")
     const prevUrl = process.env.OMNIGRAPH_URL
     const mockServer = await startDoneMergeMockServer({ mergeFails: true })
+    process.env.OMNIGRAPH_URL = mockServer.url
+    try {
+      const result = await Effect.runPromise(
+        syncOmnigraphOnDone(dir, { repoRoot: dir, skipBackgroundDaemons: true }, true, "block"),
+      )
+      expect(result).toBeDefined()
+      expect(result?.exitCode).toBe(0)
+      const parsed = JSON.parse(result?.stdout ?? "{}") as {
+        readonly decision?: string
+        readonly reason?: string
+      }
+      expect(parsed.decision).toBe("block")
+      expect(parsed.reason).toMatch(/^Omnigraph branch merge \(.*\) failed$/)
+    } finally {
+      await mockServer.close()
+      if (prevUrl === undefined) Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
+      else process.env.OMNIGRAPH_URL = prevUrl
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("S-8d: syncOmnigraphOnDone blocks when source branch impl/current is missing from /branches", async () => {
+    const dir = setupNonIsolatedWorkspaceDir("harness-s8d-missing-src-")
+    const prevUrl = process.env.OMNIGRAPH_URL
+    const mockServer = await startDoneMergeMockServer({
+      mergeFails: false,
+      branches: ["main"],
+    })
     process.env.OMNIGRAPH_URL = mockServer.url
     try {
       const result = await Effect.runPromise(

@@ -63,7 +63,7 @@ This specification defines the behavioral requirements for integrating `@modernr
 
 ## Goal
 
-Every PERA incidence edge in `schema.pg` carries `@key(@src, @dst, role)` for idempotent loads, non-`main` branches preserve commit lineage via `mode: "overwrite"`, concurrent branch conflicts and schema drift are evaluated deterministically by pure `R = never` deciders (`OmnigraphBranchVerify.decide`, `OmnigraphSchemaEvolution.decide`, `OmnigraphLint.decide`), `main` is protected by mounted Cedar policies and `ifGraphCommit` OCC preconditions, and `DatalogSession` stays incrementally synchronized via `og.changes.poll` (under 10 ms hybrid search and under 3 ms incremental Datalog updates).
+Every PERA incidence edge in `schema.pg` carries `@key(@src, @dst, role)` for idempotent loads, non-`main` branches preserve commit lineage via `mode: "overwrite"`, concurrent branch conflicts and schema drift are evaluated deterministically by pure `R = never` deciders (`OmnigraphBranchVerify.decide`, `OmnigraphSchemaEvolution.decide`, `OmnigraphLint.decide`), `main` and all branches enforce read-only `agent-mcp` policy rules alongside `ifGraphCommit` OCC preconditions, and `DatalogSession` stays incrementally synchronized via `og.changes.poll` with hybrid search and incremental Datalog updates.
 
 ## How to read the requirements
 
@@ -115,7 +115,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 | ID | Pattern | Requirement | Effect Symbol | Verification |
 | :--- | :--- | :--- | :--- | :--- |
-| REQ-5.1 | Event-driven | **When** `ontology_realized_by_doc` is invoked for an `AdrDoc` or `EarsSpec`, `queries/harness.gq` and `executeNamedGqQueryInMemory` **shall** traverse both `playsGoverningAdrRole` and `playsSpecifyingEarsRole` across all five realizing artifact role edges. | — | `UnitTest` |
+| REQ-5.1 | Event-driven | **When** `ontology_realized_by_doc` is invoked for an `AdrDoc` or `EarsSpec`, `queries/harness.gq` **shall** match `TraceabilityTuple` rows by `adrId` or `earsSpecId` and `executeNamedGqQueryInMemory` **shall** traverse outgoing `TraceabilityTuple` `governing-adr`/`specifying-ears` and `realizing-symbol` role edges across realizing artifacts. | — | `UnitTest` |
 
 ### 6 · Self-Describing Schema & In-Graph `GraphPolicy` Nodes (`OMNI-06`)
 
@@ -132,7 +132,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | ID | Pattern | Requirement | Effect Symbol | Verification |
 | :--- | :--- | :--- | :--- | :--- |
 | REQ-7.1 | Unwanted behaviour | **If** `OmnigraphLint.decide` inspects non-empty type/syntax errors from `omnigraph lint --json`, **then** `OmnigraphLint.decide` **shall** fail with `OmnigraphLintError` prior to cluster deployment. | `OmnigraphLintError` | `UnitTest` |
-| REQ-7.2 | State-driven | **While** evaluating config drift with `R = never`, `OmnigraphSchemaEvolution.decide` **shall** emit `LiveClusterApply` for additive schema or query updates rather than wiping `.harness/omnigraph-cluster`. | `OmnigraphSchemaEvolution.decide` | `GraphCheck, PropertyTest` |
+| REQ-7.2 | State-driven | **While** evaluating config drift with `R = never`, `OmnigraphSchemaEvolution.decide` **shall** emit `LiveClusterApply` for additive schema or query updates and `RequiresCleanRebuild` for `@key(...)` edge-key or policy-bundle changes rather than wiping `.harness/omnigraph-cluster` on additive edits. | `OmnigraphSchemaEvolution.decide` | `GraphCheck, PropertyTest` |
 
 ### 8 · Cedar Policies & Authenticated MCP Binding (`OMNI-08`)
 
@@ -140,7 +140,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 | ID | Pattern | Requirement | Effect Symbol | Verification |
 | :--- | :--- | :--- | :--- | :--- |
-| REQ-8.1 | Ubiquitous | `cluster.yaml` **shall** mount the single `graph-access` policy bundle from `graph.policy.yaml` (`protected_branches: [main]`, `admins: [harness-cli]`, `agents: [agent-mcp]`, `readers: [agent-mcp, harness-cli, default]`, covering all 12 cases in `policy-tests.yaml`), while keeping hardened `cluster.policy.yaml` (`owners: [harness-cli]`, `readers: [agent-mcp, harness-cli]`) on disk because Omnigraph CLI rejects mounting multiple bundles simultaneously (`matches 2 policy bundles`), and `ensureLocalOmnigraphReady` configures `OMNIGRAPH_SERVER_BEARER_TOKENS_JSON` without `--unauthenticated`. | — | `Inspection` |
+| REQ-8.1 | Ubiquitous | `cluster.yaml` **shall** mount the single `graph-access` policy bundle from `graph.policy.yaml` (`protected_branches: [main]`, `admins: [harness-cli]`, `readers: [agent-mcp, harness-cli, default]` with `agent-mcp` read-only across all branches matching `policies.cedar`, covering all 13 cases in `policy-tests.yaml`), while keeping hardened `cluster.policy.yaml` (`owners: [harness-cli]`, `readers: [agent-mcp, harness-cli]`) on disk because Omnigraph CLI rejects mounting multiple bundles simultaneously (`matches 2 policy bundles`), and `ensureLocalOmnigraphReady` configures `OMNIGRAPH_SERVER_BEARER_TOKENS_JSON` without `--unauthenticated` when `cluster.yaml` declares `policies:` (logging a warning to stderr only in conditional fallback when `policies:` is absent). | — | `Inspection` |
 | REQ-8.2 | Optional feature | **Where** the repository Omnigraph cluster runs on a hash-derived loopback port with per-actor Bearer tokens, `ensureOmnigraphEndpointTokens` **shall** harden `clusterRootDir` (`0o700`), write atomic `0o600` `server.json` (without `token`) and atomic `0o600` `auth-tokens.json` (per-actor tokens for `harness-cli` and `agent-mcp`, failing closed if permissive `(mode & 0o077) !== 0` or corrupt), while `resolveOmnigraphBaseUrl` and `tools/omnigraph-mcp-launcher.mjs` enforce loopback and `canonicalRepoRoot` checks with `agent-mcp` actor token validation and deterministic fallback port resolution. | — | `UnitTest` |
 
 ### 9 · Unpublished Commit Proposals for DPO Candidates (`OMNI-09`)
@@ -149,7 +149,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 | ID | Pattern | Requirement | Effect Symbol | Verification |
 | :--- | :--- | :--- | :--- | :--- |
-| REQ-9.1 | Event-driven | **When** `plan-synth` or `repair` generates multiple candidate DPO patches, `OmnigraphSync` **shall** support staging candidates as unpublished commit proposals inspectable via `commits.changes` before `commits.publish` or `commits.drop`. | — | `UnitTest` |
+| REQ-9.1 | Event-driven | **When** `OmnigraphSync` stages or inspects unpublished DPO commit proposals via `proposeMergeCommit`, `inspectCommitChanges`, `publishCommit`, or `dropCommit`, `OmnigraphSync` **shall** isolate uncommitted graph changes before publishing or dropping them on the target branch. | — | `UnitTest` |
 
 ### 10 · Versioned `Blob` Artifacts & Lance Maintenance (`OMNI-10`)
 
@@ -157,13 +157,13 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 | ID | Pattern | Requirement | Effect Symbol | Verification |
 | :--- | :--- | :--- | :--- | :--- |
-| REQ-10.1 | Event-driven | **When** `verify` records test execution spans or ingests governance markdown, `OmnigraphSync` **shall** support reading and writing nullable `spanTraceBlob` and `markdownBlob` cells via `og.blobs.get`, `stat`, and `put`. | — | `UnitTest` |
-| REQ-10.2 | Event-driven | **When** `pnpm harness gc` or `done` completes a task merge, `harness-cli` **shall** invoke `omnigraph optimize` (and retention-bounded `omnigraph cleanup`) on `.harness/omnigraph-cluster/graphs/harness.omni` to persist derived traversal adjacency. | — | `UnitTest` |
+| REQ-10.1 | Event-driven | **When** `verify` syncs traces with `.harness/spans.jsonl` present or `OmnigraphSync` accesses `og.blobs`, `harness-cli` and `OmnigraphSync` **shall** persist span traces via `putBlob` and read or stat nullable `spanTraceBlob` and `markdownBlob` cells via `getBlobText` and `statBlob`. | — | `UnitTest` |
+| REQ-10.2 | Event-driven | **When** `pnpm harness gc --strict` (on a full workspace cluster) or `done` completes a task merge, `harness-cli` **shall** invoke `omnigraph optimize` and retention-bounded `omnigraph cleanup --keep 5` on `.harness/omnigraph-cluster/graphs/harness.omni` to persist derived traversal adjacency. | — | `UnitTest` |
 
 ## Assumptions
 
 - **REQ-1.1:** A one-time clean-slate rebuild of `.harness/omnigraph-cluster` (`rfc-0009-v2` epoch) is performed because Omnigraph v0.14.0 refuses adding `@key(...)` to existing unkeyed edge types in place.
-- **REQ-2.1:** Local `nomic-embed-text` embeddings are available in Ollama when evaluating ANN arms, with nullable `Vector(768)?` columns degrading gracefully when embeddings are absent.
+- **REQ-2.1:** By default, local spawned `omnigraph-server` uses deterministic mock embeddings (`OMNIGRAPH_EMBEDDINGS_MOCK=1`) unless `OMNIGRAPH_EMBEDDING_API_KEY` is explicitly provided; nullable `Vector(768)?` columns degrade cleanly to BM25 lexical matching when embeddings are absent.
 
 ## Out of scope
 
@@ -171,7 +171,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ## Known residual risks
 
-- **Embedding latency on cold Ollama start:** First-time `nomic-embed-text` embedding generation may incur model load latency before stabilizing under 10 ms for hybrid queries.
+- **Embedding latency when external provider key is configured:** Enabling an external embedding provider (`OMNIGRAPH_EMBEDDING_API_KEY`) incurs provider latency on first query/load before ANN arms stabilize.
 - **Change-feed baseline reset on retention compaction:** Aggressive `omnigraph cleanup` retention windows can expire an old `OmnigraphChangeCursor`, requiring `og.changes.baseline` recovery on HTTP `410`.
 
 ## Acceptance criteria

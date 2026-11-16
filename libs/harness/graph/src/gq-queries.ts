@@ -521,10 +521,9 @@ export const executeNamedGqQueryInMemory = (
             }
           })
           .with(
-            { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" },
-            { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" },
-            { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" },
-            { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" },
+            { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" },
+            { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" },
+            { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" },
             { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
             () => {},
           )
@@ -543,64 +542,73 @@ export const executeNamedGqQueryInMemory = (
             if (score > 0) {
               scored.push({
                 score,
-                row: {
-                  qualname: fn.qualname,
-                  spanName: fn.spanName,
-                  packageTag: fn.packageTag,
-                  file: fn.file,
-                  line: fn.line,
-                  isStub: fn.isStub ?? false,
-                  score,
-                },
+                row: { qualname: fn.qualname, spanName: fn.spanName, packageTag: fn.packageTag, file: fn.file, line: fn.line, isStub: fn.isStub ?? false, score },
               })
             }
           })
           .with(
-            { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" },
-            { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" },
-            { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" },
-            { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" },
+            { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" },
+            { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" },
+            { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" },
             { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
             () => {},
           )
           .exhaustive()
       }
-      return scored
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 10)
-        .map((entry) => entry.row)
+      return scored.sort((a, b) => b.score - a.score).slice(0, 10).map((entry) => entry.row)
     })
     .with("ontology_realized_by_doc", () => {
       const docId = getStringParam(params, "docId")
+      const g = harnessGraph.graph
       const results: Array<Record<string, unknown>> = []
-      for (const [, node] of Graph.nodes(harnessGraph.graph)) {
+      for (const [nodeIdx, node] of Graph.nodes(g)) {
         match(node)
           .with({ _tag: "TraceabilityTuple" }, (tt) => {
-            if (tt.adrId === docId || tt.earsSpecId === docId) {
+            let edgeAdrId: string | undefined
+            let edgeEarsSpecId: string | undefined
+            let edgeArtifactQualname: string | undefined
+            for (const edgeIdx of Graph.outgoingEdges(g, nodeIdx)) {
+              const edge = Option.getOrUndefined(Graph.getEdge(g, edgeIdx))
+              if (!edge) continue
+              const target = Option.getOrUndefined(Graph.getNode(g, edge.target))
+              if (!target) continue
+              match<string>(edge.data.role)
+                .with("governing-adr", "specifying-ears", () => {
+                  match(target)
+                    .with({ _tag: "AdrDoc" }, (d) => { edgeAdrId = d.id })
+                    .with({ _tag: "EarsSpec" }, (d) => { edgeEarsSpecId = d.id })
+                    .with(
+                      { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" },
+                      { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "EffectSignature" },
+                      { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+                      () => {},
+                    )
+                    .exhaustive()
+                })
+                .with("realizing-symbol", () => { edgeArtifactQualname = edge.data.entityKey })
+                .otherwise(() => {})
+            }
+            const adrId = edgeAdrId ?? tt.adrId ?? null
+            const earsSpecId = edgeEarsSpecId ?? tt.earsSpecId ?? null
+            if (adrId === docId || earsSpecId === docId) {
               results.push({
-                tupleId: tt.relationId,
-                adrId: tt.adrId ?? null,
-                earsSpecId: tt.earsSpecId ?? null,
-                requirementId: tt.requirementId ?? null,
-                earsPattern: tt.earsPattern ?? null,
-                artifactQualname: tt.targetSymbolQualname,
+                tupleId: tt.relationId, adrId, earsSpecId,
+                requirementId: tt.requirementId ?? null, earsPattern: tt.earsPattern ?? null,
+                artifactQualname: edgeArtifactQualname ?? tt.targetSymbolQualname,
               })
             }
           })
           .with(
-            { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" },
-            { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" },
-            { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" },
-            { _tag: "EffectSignature" }, { _tag: "LayerFlow" },
+            { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" },
+            { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" },
+            { _tag: "EarsSpec" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" },
             { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
             () => {},
           )
           .exhaustive()
       }
-      return results.sort(
-        (a, b) =>
-          String(a.artifactQualname).localeCompare(String(b.artifactQualname)) ||
-          String(a.tupleId).localeCompare(String(b.tupleId)),
+      return results.sort((a, b) =>
+        String(a.artifactQualname).localeCompare(String(b.artifactQualname)) || String(a.tupleId).localeCompare(String(b.tupleId)),
       )
     })
     .with("rank_patterns_hybrid", () => {
@@ -616,19 +624,13 @@ export const executeNamedGqQueryInMemory = (
             const score = query === "" ? 0.5 : haystack.includes(query) ? 1 : 0.1
             scored.push({
               score,
-              row: {
-                slug: p.slug,
-                path: p.path,
-                title: p.title ?? null,
-                summary: p.summary,
-              },
+              row: { slug: p.slug, path: p.path, title: p.title ?? null, summary: p.summary },
             })
           })
           .with(
-            { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" },
-            { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" },
-            { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" },
-            { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" },
+            { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" },
+            { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" },
+            { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" },
             { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
             () => {},
           )
@@ -679,22 +681,14 @@ export const executeNamedGqQueryInMemory = (
       for (const [, node] of Graph.nodes(harnessGraph.graph)) {
         match(node)
           .with({ _tag: "EffectFn" }, (fn) => {
-            if (fn.packageTag === "domain" && !fn.isStub) {
-              const reaching = findTestsReaching(harnessGraph, fn.qualname)
-              if (reaching.length === 0) {
-                results.push({
-                  qualname: fn.qualname,
-                  spanName: fn.spanName,
-                  file: fn.file,
-                })
-              }
+            if (fn.packageTag === "domain" && !fn.isStub && findTestsReaching(harnessGraph, fn.qualname).length === 0) {
+              results.push({ qualname: fn.qualname, spanName: fn.spanName, file: fn.file })
             }
           })
           .with(
-            { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" },
-            { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" },
-            { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" },
-            { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" },
+            { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" },
+            { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" },
+            { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" },
             { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
             () => {},
           )
@@ -718,18 +712,13 @@ export const executeNamedGqQueryInMemory = (
               }
             }
             if (!hasCaller) {
-              results.push({
-                relationId: sig.relationId,
-                callerQualname: sig.callerQualname,
-                file: sig.file,
-              })
+              results.push({ relationId: sig.relationId, callerQualname: sig.callerQualname, file: sig.file })
             }
           })
           .with(
-            { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" },
-            { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" },
-            { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" },
-            { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" },
+            { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" },
+            { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" },
+            { _tag: "EarsSpec" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" },
             { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
             () => {},
           )

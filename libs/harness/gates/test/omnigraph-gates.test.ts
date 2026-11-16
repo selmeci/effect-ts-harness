@@ -13,6 +13,7 @@ import {
   OmnigraphEntityKind,
   OmnigraphLintDiagnostic,
   type OmnigraphLintInput,
+  OmnigraphLintPolicy,
   type OmnigraphMergeConflictDetail,
   OmnigraphSchemaEvolutionInput,
   OmnigraphSpanName,
@@ -20,6 +21,7 @@ import {
   OmnigraphTypeName,
 } from "@harness/contract"
 import { type IndexedEffectFn, runWithTestTracer } from "@harness/ingest"
+import { match } from "ts-pattern"
 import {
   decideOmnigraphBranchVerify,
   decideOmnigraphLint,
@@ -37,17 +39,19 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
           planBranch: OmnigraphBranchName.make("plan/task-1"),
           implBranch: OmnigraphBranchName.make("impl/task-1"),
           mainBranch: OmnigraphBranchName.make("main"),
-          diffChanges: [
-            {
-              entityKind: OmnigraphEntityKind.make("node"),
-              typeName: OmnigraphTypeName.make("EffectFn"),
-              entityId: OmnigraphEntityId.make("fn:Orders.create"),
-              op: OmnigraphChangeOp.make("update"),
-              wasStubBefore: true,
-              stubAfter: false,
-              spanName: OmnigraphSpanName.make("Orders.create"),
-            },
-          ],
+          diffState: {
+            _tag: "ResolvedDiff",
+            changes: [
+              {
+                _tag: "EffectFnDiffChange",
+                entityId: OmnigraphEntityId.make("fn:Orders.create"),
+                op: OmnigraphChangeOp.make("update"),
+                wasStubBefore: true,
+                stubAfter: false,
+                spanName: OmnigraphSpanName.make("Orders.create"),
+              },
+            ],
+          },
           dryRunConflicts: [],
           implEffectFnCount: NonNegativeCount.make(1),
           remainingStubCount: NonNegativeCount.make(0),
@@ -63,46 +67,49 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
         expect(report.violations).toHaveLength(0)
         expect(report.verifiedChangeCount).toBe(1)
         expect(report.conflictCount).toBe(0)
+        expect(report.implEffectFnCount).toBe(1)
         expect(spans.some((s) => s.name === "OmnigraphBranchVerify.decide")).toBe(true)
       }),
   )
 
   it.effect(
-    "REQ-3.1: decideOmnigraphBranchVerify flags conflicts, dropped EffectFns, remaining stubs, and missing-merge-base, while allowing moved EffectFns and non-EffectFn deletes",
+    "REQ-3.1: decideOmnigraphBranchVerify flags conflicts, dropped/0-count EffectFns, remaining & unchanged stubs, and missing-merge-base",
     () =>
       Effect.gen(function* () {
         const movedClean = yield* decideOmnigraphBranchVerify({
           planBranch: OmnigraphBranchName.make("plan/move"),
           implBranch: OmnigraphBranchName.make("impl/move"),
           mainBranch: OmnigraphBranchName.make("main"),
-          diffChanges: [
-            {
-              entityKind: OmnigraphEntityKind.make("node"),
-              typeName: OmnigraphTypeName.make("EffectFn"),
-              entityId: OmnigraphEntityId.make("fn:old-file:Orders.create"),
-              op: OmnigraphChangeOp.make("delete"),
-              wasStubBefore: true,
-              stubAfter: false,
-              spanName: OmnigraphSpanName.make("Orders.create"),
-            },
-            {
-              entityKind: OmnigraphEntityKind.make("node"),
-              typeName: OmnigraphTypeName.make("EffectFn"),
-              entityId: OmnigraphEntityId.make("fn:new-file:Orders.create"),
-              op: OmnigraphChangeOp.make("insert"),
-              wasStubBefore: false,
-              stubAfter: false,
-              spanName: OmnigraphSpanName.make("Orders.create"),
-            },
-            {
-              entityKind: OmnigraphEntityKind.make("node"),
-              typeName: OmnigraphTypeName.make("ServiceTag"),
-              entityId: OmnigraphEntityId.make("svc:DeprecatedService"),
-              op: OmnigraphChangeOp.make("delete"),
-              wasStubBefore: false,
-              stubAfter: false,
-            },
-          ],
+          diffState: {
+            _tag: "ResolvedDiff",
+            changes: [
+              {
+                _tag: "EffectFnDiffChange",
+                entityId: OmnigraphEntityId.make("fn:old-file:Orders.create"),
+                op: OmnigraphChangeOp.make("delete"),
+                wasStubBefore: true,
+                stubAfter: false,
+                spanName: OmnigraphSpanName.make("Orders.create"),
+              },
+              {
+                _tag: "EffectFnDiffChange",
+                entityId: OmnigraphEntityId.make("fn:new-file:Orders.create"),
+                op: OmnigraphChangeOp.make("insert"),
+                wasStubBefore: false,
+                stubAfter: false,
+                spanName: OmnigraphSpanName.make("Orders.create"),
+              },
+              {
+                _tag: "EntityDiffChange",
+                entityKind: OmnigraphEntityKind.make("node"),
+                typeName: OmnigraphTypeName.make("ServiceTag"),
+                entityId: OmnigraphEntityId.make("svc:DeprecatedService"),
+                op: OmnigraphChangeOp.make("delete"),
+                wasStubBefore: false,
+                stubAfter: false,
+              },
+            ],
+          },
           dryRunConflicts: [],
           implEffectFnCount: NonNegativeCount.make(1),
           remainingStubCount: NonNegativeCount.make(0),
@@ -119,64 +126,77 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
         }
 
         const droppedFn: OmnigraphDiffChangeSummary = {
-          entityKind: OmnigraphEntityKind.make("node"),
-          typeName: OmnigraphTypeName.make("EffectFn"),
+          _tag: "EffectFnDiffChange",
           entityId: OmnigraphEntityId.make("fn:Cart.reserve"),
           op: OmnigraphChangeOp.make("delete"),
           wasStubBefore: true,
           stubAfter: false,
+          spanName: null,
         }
 
         const stillStubFn: OmnigraphDiffChangeSummary = {
-          entityKind: OmnigraphEntityKind.make("node"),
-          typeName: OmnigraphTypeName.make("EffectFn"),
+          _tag: "EffectFnDiffChange",
           entityId: OmnigraphEntityId.make("fn:Cart.refund"),
           op: OmnigraphChangeOp.make("insert"),
           wasStubBefore: false,
           stubAfter: true,
+          spanName: OmnigraphSpanName.make("Cart.refund"),
         }
 
-        const report = yield* decideOmnigraphBranchVerify({
+        const extraStubReport = yield* decideOmnigraphBranchVerify({
           planBranch: OmnigraphBranchName.make("plan/task-2"),
           implBranch: OmnigraphBranchName.make("impl/task-2"),
           mainBranch: OmnigraphBranchName.make("main"),
-          diffChanges: [droppedFn, stillStubFn],
+          diffState: {
+            _tag: "ResolvedDiff",
+            changes: [droppedFn, stillStubFn],
+          },
           dryRunConflicts: [conflict],
-          implEffectFnCount: NonNegativeCount.make(1),
-          remainingStubCount: NonNegativeCount.make(1),
-          missingMergeBase: true,
+          implEffectFnCount: NonNegativeCount.make(0),
+          remainingStubCount: NonNegativeCount.make(2),
         })
 
-        expect(report.verdict).toBe("violated")
-        const ruleIds = new Set(report.violations.map((v) => v.ruleId))
-        expect(ruleIds).toEqual(
-          new Set([
-            "missing-merge-base",
-            "dry-run-merge-conflict",
-            "planned-effect-fn-dropped",
-            "unimplemented-stub-remaining",
-          ]),
+        expect(extraStubReport.verdict).toBe("violated")
+        const stubViolations = extraStubReport.violations.filter(
+          (v) => v.ruleId === "unimplemented-stub-remaining",
         )
-        expect(report.conflictCount).toBe(1)
+        expect(stubViolations).toHaveLength(2)
+        expect(extraStubReport.violations.some((v) => v.ruleId === "planned-effect-fn-dropped")).toBe(
+          true,
+        )
+        expect(extraStubReport.conflictCount).toBe(1)
+
+        const missingBaseReport = yield* decideOmnigraphBranchVerify({
+          planBranch: OmnigraphBranchName.make("plan/task-3"),
+          implBranch: OmnigraphBranchName.make("impl/task-3"),
+          mainBranch: OmnigraphBranchName.make("main"),
+          diffState: { _tag: "MissingMergeBase" },
+          dryRunConflicts: [],
+          implEffectFnCount: NonNegativeCount.make(0),
+          remainingStubCount: NonNegativeCount.make(0),
+        })
+        expect(missingBaseReport.verdict).toBe("violated")
+        expect(missingBaseReport.violations.map((v) => v.ruleId)).toEqual(["missing-merge-base"])
       }),
   )
 
   it.effect.prop(
     "REQ-3.1 property: mixed-type diffChanges and conflicts produce exact violation ruleId sets",
     {
-      rawChanges: Schema.Array(OmnigraphDiffChangeSummary),
-      typeKinds: Schema.Array(Schema.Literals(["EffectFn", "ServiceTag", "SchemaDef"])),
+      diffChanges: Schema.Array(OmnigraphDiffChangeSummary),
       conflictCount: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 2 })),
-      remainingStubCount: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 2 })),
+      remainingStubCount: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 3 })),
       missingMergeBase: Schema.Boolean,
+      zeroImplEffectFnCount: Schema.Boolean,
     },
-    ({ rawChanges, typeKinds, conflictCount, remainingStubCount, missingMergeBase }) =>
+    ({
+      diffChanges,
+      conflictCount,
+      remainingStubCount,
+      missingMergeBase,
+      zeroImplEffectFnCount,
+    }) =>
       Effect.gen(function* () {
-        const diffChanges: Array<OmnigraphDiffChangeSummary> = rawChanges.map((ch, idx) => ({
-          ...ch,
-          typeName: OmnigraphTypeName.make(typeKinds[idx % Math.max(1, typeKinds.length)] ?? "EffectFn"),
-        }))
-
         const dryRunConflicts: Array<OmnigraphMergeConflictDetail> = Array.from(
           { length: conflictCount },
           (_, idx) => ({
@@ -188,49 +208,77 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
           }),
         )
 
+        const effectiveChanges = missingMergeBase ? [] : diffChanges
+        const activeDiffFns = effectiveChanges.filter((ch) =>
+          match(ch)
+            .with({ _tag: "EffectFnDiffChange" }, (fnCh) => fnCh.op !== "delete")
+            .with({ _tag: "EntityDiffChange" }, () => false)
+            .exhaustive(),
+        )
+        const implEffectFnCount = NonNegativeCount.make(
+          zeroImplEffectFnCount ? 0 : Math.max(1, activeDiffFns.length),
+        )
+
         const report = yield* decideOmnigraphBranchVerify({
           planBranch: OmnigraphBranchName.make("plan/prop"),
           implBranch: OmnigraphBranchName.make("impl/prop"),
           mainBranch: OmnigraphBranchName.make("main"),
-          diffChanges,
+          diffState: missingMergeBase
+            ? { _tag: "MissingMergeBase" }
+            : { _tag: "ResolvedDiff", changes: diffChanges },
           dryRunConflicts,
-          implEffectFnCount: NonNegativeCount.make(1),
+          implEffectFnCount,
           remainingStubCount: NonNegativeCount.make(remainingStubCount),
-          missingMergeBase,
         })
 
         const activeSpanNames = new Set(
-          diffChanges
-            .filter(
-              (ch) =>
-                String(ch.typeName) === "EffectFn" &&
-                ch.op !== "delete" &&
-                ch.spanName !== undefined,
+          activeDiffFns
+            .map((ch) =>
+              match(ch)
+                .with({ _tag: "EffectFnDiffChange" }, (fnCh) => fnCh.spanName)
+                .with({ _tag: "EntityDiffChange" }, () => null)
+                .exhaustive(),
             )
-            .map((ch) => ch.spanName),
+            .filter((name): name is OmnigraphSpanName => name !== null),
         )
 
         const expectedRules = new Set<string>()
         if (missingMergeBase) expectedRules.add("missing-merge-base")
         if (conflictCount > 0) expectedRules.add("dry-run-merge-conflict")
-        for (const ch of diffChanges) {
-          if (String(ch.typeName) === "EffectFn") {
-            if (ch.op === "delete") {
-              if (ch.spanName === undefined || !activeSpanNames.has(ch.spanName)) {
-                expectedRules.add("planned-effect-fn-dropped")
-              }
-            } else if (ch.stubAfter) {
-              expectedRules.add("unimplemented-stub-remaining")
-            }
-          }
+        let diffStubCount = 0
+        for (const ch of effectiveChanges) {
+          match(ch)
+            .with({ _tag: "EffectFnDiffChange" }, (fnCh) => {
+              match(fnCh.op)
+                .with("delete", () => {
+                  if (fnCh.spanName === null || !activeSpanNames.has(fnCh.spanName)) {
+                    expectedRules.add("planned-effect-fn-dropped")
+                  }
+                })
+                .with("insert", "update", () => {
+                  if (fnCh.stubAfter) {
+                    diffStubCount += 1
+                    expectedRules.add("unimplemented-stub-remaining")
+                  }
+                })
+                .exhaustive()
+            })
+            .with({ _tag: "EntityDiffChange" }, () => undefined)
+            .exhaustive()
         }
-        if (remainingStubCount > 0) expectedRules.add("unimplemented-stub-remaining")
+        if (activeDiffFns.length > 0 && implEffectFnCount === 0) {
+          expectedRules.add("planned-effect-fn-dropped")
+        }
+        if (remainingStubCount > diffStubCount) {
+          expectedRules.add("unimplemented-stub-remaining")
+        }
 
         const actualRules = new Set(report.violations.map((v) => v.ruleId))
         expect(actualRules).toEqual(expectedRules)
         expect(report.verdict).toBe(expectedRules.size > 0 ? "violated" : "clean")
-        expect(report.verifiedChangeCount).toBe(diffChanges.length)
+        expect(report.verifiedChangeCount).toBe(effectiveChanges.length)
         expect(report.conflictCount).toBe(conflictCount)
+        expect(report.implEffectFnCount).toBe(implEffectFnCount)
       }),
   )
 
@@ -240,32 +288,22 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
       Effect.gen(function* () {
         const { result: initAction, spans } = yield* runWithTestTracer(
           "OmnigraphSchemaEvolution.decide::init",
-          decideOmnigraphSchemaEvolution({
-            clusterExists: false,
-            queriesChanged: false,
-            schemaAdditiveChanged: false,
-            policyBundleOrEdgeKeyChanged: false,
-            serverAlive: false,
-          }),
+          decideOmnigraphSchemaEvolution({ _tag: "ClusterMissing" }),
           emptyFnIndex,
         )
         expect(initAction).toEqual({ _tag: "LiveClusterApply", requiresUnlock: true })
         expect(spans.some((s) => s.name === "OmnigraphSchemaEvolution.decide")).toBe(true)
 
         const rebuildAction = yield* decideOmnigraphSchemaEvolution({
-          clusterExists: true,
-          queriesChanged: true,
-          schemaAdditiveChanged: true,
-          policyBundleOrEdgeKeyChanged: true,
+          _tag: "ClusterPresent",
+          driftKind: "edge-key-or-policy-bundle-breaking",
           serverAlive: true,
         })
         expect(rebuildAction._tag).toBe("RequiresCleanRebuild")
 
         const noopAction = yield* decideOmnigraphSchemaEvolution({
-          clusterExists: true,
-          queriesChanged: false,
-          schemaAdditiveChanged: false,
-          policyBundleOrEdgeKeyChanged: false,
+          _tag: "ClusterPresent",
+          driftKind: "none",
           serverAlive: true,
         })
         expect(noopAction).toEqual({ _tag: "NoOp" })
@@ -273,7 +311,7 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
   )
 
   it.effect.prop(
-    "REQ-7.2 property: schema evolution decision is total and deterministic",
+    "REQ-7.2 property: schema evolution decision is total and deterministic across union inputs",
     {
       input: OmnigraphSchemaEvolutionInput,
     },
@@ -281,24 +319,36 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
       Effect.gen(function* () {
         const action = yield* decideOmnigraphSchemaEvolution(input)
 
-        if (!input.clusterExists) {
-          expect(action).toEqual({ _tag: "LiveClusterApply", requiresUnlock: true })
-          expect(Object.keys(action).sort()).toEqual(["_tag", "requiresUnlock"])
-        } else if (input.policyBundleOrEdgeKeyChanged) {
-          expect(action).toEqual({
-            _tag: "RequiresCleanRebuild",
-            reason: ErrorReasonMessage.make(
-              "Applied policy bundle edits or edge @key changes cannot be applied in-place (Omnigraph deployment_scope / edge-key rule); rebuild cluster from workspace extract.",
-            ),
+        match(input)
+          .with({ _tag: "ClusterMissing" }, () => {
+            expect(action).toEqual({ _tag: "LiveClusterApply", requiresUnlock: true })
+            expect(Object.keys(action).sort()).toEqual(["_tag", "requiresUnlock"])
           })
-          expect(Object.keys(action).sort()).toEqual(["_tag", "reason"])
-        } else if (input.schemaAdditiveChanged || input.queriesChanged) {
-          expect(action).toEqual({ _tag: "LiveClusterApply", requiresUnlock: !input.serverAlive })
-          expect(Object.keys(action).sort()).toEqual(["_tag", "requiresUnlock"])
-        } else {
-          expect(action).toEqual({ _tag: "NoOp" })
-          expect(Object.keys(action)).toEqual(["_tag"])
-        }
+          .with({ _tag: "ClusterPresent" }, ({ driftKind, serverAlive }) => {
+            match(driftKind)
+              .with("edge-key-or-policy-bundle-breaking", () => {
+                expect(action).toEqual({
+                  _tag: "RequiresCleanRebuild",
+                  reason: ErrorReasonMessage.make(
+                    "Applied policy bundle edits or edge @key changes cannot be applied in-place (Omnigraph deployment_scope / edge-key rule); rebuild cluster from workspace extract.",
+                  ),
+                })
+                expect(Object.keys(action).sort()).toEqual(["_tag", "reason"])
+              })
+              .with("schema-additive-or-rename", "queries-only", () => {
+                expect(action).toEqual({
+                  _tag: "LiveClusterApply",
+                  requiresUnlock: !serverAlive,
+                })
+                expect(Object.keys(action).sort()).toEqual(["_tag", "requiresUnlock"])
+              })
+              .with("none", () => {
+                expect(action).toEqual({ _tag: "NoOp" })
+                expect(Object.keys(action)).toEqual(["_tag"])
+              })
+              .exhaustive()
+          })
+          .exhaustive()
       }),
   )
 
@@ -319,6 +369,7 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
               severity: "warning",
             },
           ],
+          policy: "fail-on-error",
         }
 
         const { result: cleanReport, spans } = yield* runWithTestTracer(
@@ -345,6 +396,7 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
                 severity: "error",
               },
             ],
+            policy: "fail-on-error",
           }),
         )
 
@@ -365,35 +417,35 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
   )
 
   it.effect.prop(
-    "REQ-7.1 property: severity, denyWarnings, and failOnError govern blocking violations and OmnigraphLintError",
+    "REQ-7.1 property: OmnigraphLintPolicy governs blocking violations and OmnigraphLintError",
     {
       statusOk: Schema.Boolean,
       diagnostics: Schema.Array(OmnigraphLintDiagnostic),
       errorCount: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 2 })),
-      failOnError: Schema.UndefinedOr(Schema.Boolean),
-      denyWarnings: Schema.Boolean,
+      warningCount: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 2 })),
+      policy: OmnigraphLintPolicy,
       queriesProcessed: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 20 })),
     },
-    ({ statusOk, diagnostics, errorCount, failOnError, denyWarnings, queriesProcessed }) =>
+    ({ statusOk, diagnostics, errorCount, warningCount, policy, queriesProcessed }) =>
       Effect.gen(function* () {
         const exit = yield* Effect.exit(
           decideOmnigraphLint({
             statusOk,
             errorCount: NonNegativeCount.make(errorCount),
-            warningCount: NonNegativeCount.make(0),
+            warningCount: NonNegativeCount.make(warningCount),
             queriesProcessed: NonNegativeCount.make(queriesProcessed),
             diagnostics,
-            ...(failOnError !== undefined ? { failOnError } : {}),
-            denyWarnings,
+            policy,
           }),
         )
 
-        const blockingCount = diagnostics.filter((d) => {
-          const sev = d.severity ?? "error"
-          return sev === "error" || (sev === "warning" && denyWarnings)
-        }).length
-        const hasBlockingErrors = errorCount > 0 || blockingCount > 0 || !statusOk
-        const shouldFail = (failOnError ?? true) && hasBlockingErrors
+        const denyWarnings = policy === "deny-warnings"
+        const blockingCount = diagnostics.filter(
+          (d) => d.severity === "error" || (d.severity === "warning" && denyWarnings),
+        ).length
+        const hasBlockingErrors =
+          errorCount > 0 || blockingCount > 0 || !statusOk || (denyWarnings && warningCount > 0)
+        const shouldFail = policy !== "report-only" && hasBlockingErrors
         const expectedVerdict = hasBlockingErrors ? "violated" : "clean"
 
         const checkResult = Exit.match(exit, {

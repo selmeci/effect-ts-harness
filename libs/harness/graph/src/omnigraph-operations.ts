@@ -1,4 +1,5 @@
 import { join } from "node:path"
+import { OmnigraphServerMetaSchema } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { Option, Result, Schema } from "effect"
 import * as Graph from "effect/Graph"
@@ -41,6 +42,7 @@ import {
 } from "./omnigraph-v014-ops.js"
 
 export {
+  OmnigraphServerMetaSchema,
   decodeCursorOrNull,
   executeGetBlobText,
   executePollChanges,
@@ -70,13 +72,6 @@ export {
 
 export const OmnigraphClient = Omnigraph
 
-export const OmnigraphServerMetaSchema = Schema.Struct({
-  baseUrl: Schema.optional(Schema.String),
-  port: Schema.optional(Schema.Finite),
-  pid: Schema.optional(Schema.Finite),
-  canonicalRepoRoot: Schema.optional(Schema.String),
-})
-
 export const decodeServerMetaOption = Schema.decodeOption(
   Schema.fromJsonString(OmnigraphServerMetaSchema),
 )
@@ -84,25 +79,22 @@ export const decodeServerMetaOption = Schema.decodeOption(
 /**
  * Resolves the Omnigraph server base URL from explicit options, environment
  * variables, or `.harness/omnigraph-cluster/server.json`.
- *
- * Conditional OCC mutations (`mutateOmnigraphConditional`) send the
- * `Omnigraph-If-Graph-Commit` header via `opts.ifGraphCommit`, while
- * `dryRunMergeOmnigraphBranches` validates branch merges before landing.
  */
 export const resolveOmnigraphBaseUrl = (
   options?: OmnigraphConnectionOptions,
   env: NodeJS.ProcessEnv = {},
   hostIo?: SyncHostIo,
 ): string => {
+  const effectiveEnv = options?.env ?? env
   if (options?.baseUrl !== undefined) {
     return options.baseUrl
   }
-  if (env.OMNIGRAPH_URL && env.OMNIGRAPH_URL !== "http://127.0.0.1:8080") {
-    return env.OMNIGRAPH_URL
+  if (effectiveEnv.OMNIGRAPH_URL && effectiveEnv.OMNIGRAPH_URL !== "http://127.0.0.1:8080") {
+    return effectiveEnv.OMNIGRAPH_URL
   }
   const effectiveHostIo = hostIo ?? options?.hostIo
   if (options?.repoRoot && effectiveHostIo !== undefined) {
-    const clusterDir = resolveOmnigraphClusterDir(options.repoRoot, effectiveHostIo, env)
+    const clusterDir = resolveOmnigraphClusterDir(options.repoRoot, effectiveHostIo, effectiveEnv)
     const serverJsonPath = join(clusterDir, "server.json")
     if (effectiveHostIo.existsSync(serverJsonPath)) {
       const raw = Result.getOrElse(
@@ -133,7 +125,7 @@ export const resolveOmnigraphBaseUrl = (
     }
     return `http://127.0.0.1:${deriveRepoOmnigraphPort(options.repoRoot, effectiveHostIo)}`
   }
-  return env.OMNIGRAPH_URL ?? "http://127.0.0.1:8080"
+  return effectiveEnv.OMNIGRAPH_URL ?? "http://127.0.0.1:8080"
 }
 
 export const makeOmnigraphClient = (
@@ -141,22 +133,23 @@ export const makeOmnigraphClient = (
   hostIo?: SyncHostIo,
   env: NodeJS.ProcessEnv = {},
 ): Omnigraph => {
-  const baseUrl = resolveOmnigraphBaseUrl(options, env, hostIo)
-  const graphId = options?.graphId ?? env.OMNIGRAPH_GRAPH_ID ?? "harness"
+  const effectiveEnv = options?.env ?? env
+  const baseUrl = resolveOmnigraphBaseUrl(options, effectiveEnv, hostIo)
+  const graphId = options?.graphId ?? effectiveEnv.OMNIGRAPH_GRAPH_ID ?? "harness"
   const effectiveHostIo = hostIo ?? options?.hostIo
   const localAuthToken =
     options?.token === undefined &&
-    env.OMNIGRAPH_TOKEN === undefined &&
+    effectiveEnv.OMNIGRAPH_TOKEN === undefined &&
     options?.repoRoot &&
     effectiveHostIo !== undefined &&
     isLoopbackOmnigraphUrl(baseUrl)
       ? readAuthTokensFromClusterDir(
-          resolveOmnigraphClusterDir(options.repoRoot, effectiveHostIo, env),
+          resolveOmnigraphClusterDir(options.repoRoot, effectiveHostIo, effectiveEnv),
           effectiveHostIo,
           options.actor ?? "harness-cli",
         )
       : undefined
-  const token = options?.token ?? env.OMNIGRAPH_TOKEN ?? localAuthToken
+  const token = options?.token ?? effectiveEnv.OMNIGRAPH_TOKEN ?? localAuthToken
 
   return new Omnigraph({
     baseUrl,

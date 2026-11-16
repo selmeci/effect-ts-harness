@@ -26,8 +26,10 @@ import {
   type CliEnv,
   type CliResult,
   findWorkspaceRoot,
+  isIsolatedExternalWorkspace,
   resolveDecisionModelLayer,
 } from "./daemon-and-omnigraph.service.js"
+import { runPostDoneOmnigraphCompact } from "./done-omnigraph-helpers.js"
 
 export const handleGc = (
   argv: ReadonlyArray<string>,
@@ -62,7 +64,14 @@ export const handleGc = (
             ],
           }
         : baseReport
-    // Storage compaction (`omnigraph optimize` / `runOmnigraphOptimizeAndCleanup`) runs in `harness done`.
+    if (
+      strict &&
+      !options?.skipBackgroundDaemons &&
+      options?.implGraph === undefined &&
+      !isIsolatedExternalWorkspace(repoRoot)
+    ) {
+      runPostDoneOmnigraphCompact(repoRoot)
+    }
     return {
       exitCode: strict && !finalReport.clean ? 1 : 0,
       stdout: JSON.stringify(finalReport),

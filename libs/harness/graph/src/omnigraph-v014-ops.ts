@@ -1,5 +1,6 @@
 import { join } from "node:path"
 import {
+  OmnigraphAuthTokensSchema,
   OmnigraphBranchName,
   OmnigraphChangeCursor,
   OmnigraphChangeOp,
@@ -39,12 +40,8 @@ export interface OmnigraphConnectionOptions {
   readonly actor?: "harness-cli" | "agent-mcp" | undefined
   readonly fetch?: FetchLike | undefined
   readonly hostIo?: SyncHostIo | undefined
+  readonly env?: NodeJS.ProcessEnv | undefined
 }
-
-const OmnigraphAuthTokensSchema = Schema.Struct({
-  cliToken: Schema.optional(Schema.String),
-  mcpToken: Schema.optional(Schema.String),
-})
 
 const decodeAuthTokensOption = Schema.decodeOption(
   Schema.fromJsonString(OmnigraphAuthTokensSchema),
@@ -99,39 +96,94 @@ export const extractOmnigraphCommitId = (raw: unknown): OmnigraphCommitId | unde
   return Option.getOrUndefined(Schema.decodeOption(OmnigraphCommitId)(trimmed))
 }
 
+const decodeStrictOptionalEntityId = (
+  raw: unknown,
+): Result.Result<OmnigraphEntityId | null, OmnigraphLoadError> => {
+  if (raw === null || raw === undefined) {
+    return Result.succeed(null)
+  }
+  if (typeof raw !== "string") {
+    return Result.fail(
+      new OmnigraphLoadError({
+        cause: new Error(`Invalid non-string Omnigraph entityId (${typeof raw})`),
+      }),
+    )
+  }
+  return match(Schema.decodeOption(OmnigraphEntityId)(raw.trim()))
+    .with({ _tag: "Some" }, ({ value }) => Result.succeed(value))
+    .with({ _tag: "None" }, () =>
+      Result.fail(
+        new OmnigraphLoadError({
+          cause: new Error(`Invalid Omnigraph entityId: ${JSON.stringify(raw)}`),
+        }),
+      ),
+    )
+    .exhaustive()
+}
+
+export const decodeStrictOptionalCommitId = (
+  raw: unknown,
+): Result.Result<OmnigraphCommitId | null, OmnigraphLoadError> => {
+  if (raw === null || raw === undefined) {
+    return Result.succeed(null)
+  }
+  if (typeof raw !== "string") {
+    return Result.fail(
+      new OmnigraphLoadError({
+        cause: new Error(`Invalid non-string Omnigraph commitId (${typeof raw})`),
+      }),
+    )
+  }
+  return match(Schema.decodeOption(OmnigraphCommitId)(raw.trim()))
+    .with({ _tag: "Some" }, ({ value }) => Result.succeed(value))
+    .with({ _tag: "None" }, () =>
+      Result.fail(
+        new OmnigraphLoadError({
+          cause: new Error(`Invalid Omnigraph commitId: ${JSON.stringify(raw)}`),
+        }),
+      ),
+    )
+    .exhaustive()
+}
+
 export const mapOmnigraphConflictError = (
   cause: unknown,
   sourceBranch: OmnigraphBranchName,
   targetBranch: OmnigraphBranchName,
 ): OmnigraphLoadError | OmnigraphMergeConflictError => {
   if (cause instanceof ConflictError) {
-    const conflicts: Array<OmnigraphMergeConflictDetail> = (cause.mergeConflicts ?? []).map(
-      (c) => {
-        const kind = Option.getOrElse(
-          Schema.decodeOption(OmnigraphConflictKind)(c.kind),
-          () => "divergent_update" as const,
-        )
-        const entityKind = Option.getOrElse(
-          Schema.decodeOption(OmnigraphEntityKind)(c.entityKind),
-          () => "node" as const,
-        )
-        const typeName = Option.getOrElse(
-          Schema.decodeOption(OmnigraphTypeName)(c.typeName),
-          () => OmnigraphTypeName.make("Unknown"),
-        )
-        const entityId =
-          typeof c.entityId === "string"
-            ? Option.getOrNull(Schema.decodeOption(OmnigraphEntityId)(c.entityId.trim()))
-            : null
-        return {
-          kind,
-          entityKind,
-          typeName,
-          entityId,
-          message: toErrorReasonMessage(c.message),
-        }
-      },
-    )
+    const conflicts: Array<OmnigraphMergeConflictDetail> = []
+    for (const c of cause.mergeConflicts ?? []) {
+      const kind = Option.getOrElse(
+        Schema.decodeOption(OmnigraphConflictKind)(c.kind),
+        () => "divergent_update" as const,
+      )
+      const entityKind = Option.getOrElse(
+        Schema.decodeOption(OmnigraphEntityKind)(c.entityKind),
+        () => "node" as const,
+      )
+      const typeName = Option.getOrElse(
+        Schema.decodeOption(OmnigraphTypeName)(c.typeName),
+        () => OmnigraphTypeName.make("Unknown"),
+      )
+      const entityIdRes = decodeStrictOptionalEntityId(c.entityId)
+      const earlyErr = match(entityIdRes)
+        .with({ _tag: "Failure" }, ({ failure }) => failure)
+        .with({ _tag: "Success" }, ({ success: entityId }) => {
+          conflicts.push({
+            kind,
+            entityKind,
+            typeName,
+            entityId,
+            message: toErrorReasonMessage(c.message),
+          })
+          return undefined
+        })
+        .exhaustive()
+      if (earlyErr !== undefined) {
+        return earlyErr
+      }
+    }
     return new OmnigraphMergeConflictError({
       sourceBranch,
       targetBranch,
@@ -147,16 +199,17 @@ export const mapOmnigraphPreconditionError = (
   expectedCommit: OmnigraphCommitId,
 ): OmnigraphLoadError | OmnigraphPreconditionError => {
   if (cause instanceof PreconditionFailedError) {
-    const actualRaw = cause.preconditionFailure?.actual
-    const actualCommit =
-      typeof actualRaw === "string"
-        ? Option.getOrNull(Schema.decodeOption(OmnigraphCommitId)(actualRaw.trim()))
-        : null
-    return new OmnigraphPreconditionError({
-      branch,
-      expectedCommit,
-      actualCommit,
-    })
+    const actualCommitRes = decodeStrictOptionalCommitId(cause.preconditionFailure?.actual)
+    return match(actualCommitRes)
+      .with({ _tag: "Failure" }, ({ failure }) => failure)
+      .with({ _tag: "Success" }, ({ success: actualCommit }) =>
+        new OmnigraphPreconditionError({
+          branch,
+          expectedCommit,
+          actualCommit,
+        }),
+      )
+      .exhaustive()
   }
   return new OmnigraphLoadError({ cause })
 }

@@ -1,5 +1,5 @@
 import { join } from "node:path"
-import { Cause, Effect, Schema } from "effect"
+import { Cause, Effect } from "effect"
 import { match } from "ts-pattern"
 import {
   isPureInterruptCause,
@@ -8,7 +8,6 @@ import {
   type OmnigraphDiffChangeSummary,
   OmnigraphEntityId,
   type OmnigraphMergeConflictDetail,
-  OmnigraphSpanName,
   OmnigraphTypeName,
 } from "@harness/contract"
 import { decideOmnigraphBranchVerify } from "@harness/gates"
@@ -16,8 +15,10 @@ import {
   diffOmnigraphBranches,
   dryRunMergeOmnigraphBranches,
   type HarnessGraph,
+  loadGraphSnapshotEffect,
   makeOmnigraphSyncLayer,
   mergeOmnigraphBranch,
+  OmnigraphSync,
   resolveOmnigraphClusterDir,
   resolveOmnigraphTaskBranches,
   syncToOmnigraphAndSnapshot,
@@ -36,38 +37,16 @@ import {
   runOfflineOmnigraphLintGate,
   runOmnigraphOptimizeAndCleanup,
 } from "./omnigraph-auth-and-drift.js"
+import {
+  countImplEffectFns,
+  findFirstVitestCaseId,
+  formatDiffErrorMessage,
+  isBranchNotFoundError,
+  readIsStubFromImage,
+  readSpanNameFromImages,
+} from "./omnigraph-safety-helpers.js"
 
-const readIsStubFromImage = (
-  image: { readonly properties: unknown } | null | undefined,
-): boolean => {
-  if (image === null || image === undefined) return false
-  const props = image.properties
-  if (typeof props !== "object" || props === null) return false
-  return "isStub" in props && (props as { readonly isStub?: unknown }).isStub === true
-}
-
-const readSpanNameFromImages = (
-  before: { readonly properties: unknown } | null | undefined,
-  after: { readonly properties: unknown } | null | undefined,
-): OmnigraphSpanName | undefined => {
-  for (const image of [after, before]) {
-    if (image === null || image === undefined) continue
-    const props = image.properties
-    if (typeof props !== "object" || props === null) continue
-    if ("spanName" in props) {
-      const candidate = (props as { readonly spanName?: unknown }).spanName
-      const decoded = Schema.decodeUnknownOption(OmnigraphSpanName)(candidate)
-      const matched = match(decoded)
-        .with({ _tag: "Some" }, ({ value }) => value)
-        .with({ _tag: "None" }, () => undefined)
-        .exhaustive()
-      if (matched !== undefined) {
-        return matched
-      }
-    }
-  }
-  return undefined
-}
+export { isBranchNotFoundError }
 
 export const runVerifyOmnigraphLintCheck = (
   repoRoot: string,
@@ -96,38 +75,6 @@ export const runPostDoneOmnigraphCompact = (repoRoot: string): void => {
   }
 }
 
-const isBranchNotFoundError = (err: unknown): boolean => {
-  const inner =
-    typeof err === "object" && err !== null && "cause" in err
-      ? (err as { readonly cause?: unknown }).cause
-      : err
-  for (const candidate of [inner, err]) {
-    if (typeof candidate === "object" && candidate !== null) {
-      const httpStatus = Reflect.get(candidate, "status")
-      const httpStatusCode = Reflect.get(candidate, "statusCode")
-      const errName = Reflect.get(candidate, "name")
-      const errCode = Reflect.get(candidate, "code")
-      const errMessage = Reflect.get(candidate, "message")
-      if (httpStatus === 404 || httpStatusCode === 404 || errName === "NotFoundError") {
-        return true
-      }
-      if (
-        typeof errCode === "string" &&
-        /not[\s_-]*found|unknown[\s_-]*branch/i.test(errCode)
-      ) {
-        return true
-      }
-      if (
-        typeof errMessage === "string" &&
-        /404|not[\s_-]*found|unknown branch|does not exist/i.test(errMessage)
-      ) {
-        return true
-      }
-    }
-  }
-  return /404|not[\s_-]*found|unknown branch|does not exist/i.test(String(err))
-}
-
 export const runPreMergeOmnigraphBranchVerify = (
   repoRoot: string,
   taskBranches: {
@@ -139,6 +86,7 @@ export const runPreMergeOmnigraphBranchVerify = (
   blockDecision: string,
   options?: CliEnv,
   startedAtMs: number = Date.now(),
+  implGraph?: HarnessGraph,
 ): Effect.Effect<CliResult | undefined> =>
   Effect.gen(function* () {
     const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
@@ -149,64 +97,109 @@ export const runPreMergeOmnigraphBranchVerify = (
       join(repoRoot, ".harness", "plan-graph-snapshot.json"),
     )
 
-    const branchDiffOpt = yield* diffOmnigraphBranches({
+    type BranchDiffOutcome =
+      | { readonly _tag: "Ok"; readonly diff: Effect.Success<ReturnType<typeof diffOmnigraphBranches>> }
+      | { readonly _tag: "MissingMergeBase" }
+      | { readonly _tag: "DiffFailed"; readonly message: string }
+
+    const branchDiffOpt: BranchDiffOutcome = yield* diffOmnigraphBranches({
       repoRoot: clusterRepoRoot,
       source: taskBranches.implBranch,
       target: taskBranches.planBranch,
     }).pipe(
       Effect.provide(syncLayer),
-      Effect.map((diff) => ({ _tag: "Ok" as const, diff })),
-      Effect.catch((err) => {
-        if (
-          !hasPlanSnapshot &&
-          taskBranches.planBranch !== taskBranches.mainBranch &&
-          isBranchNotFoundError(err)
-        ) {
+      Effect.map((diff): BranchDiffOutcome => ({ _tag: "Ok", diff })),
+      Effect.catch((err): Effect.Effect<BranchDiffOutcome> => {
+        if (!isBranchNotFoundError(err)) {
+          const message = formatDiffErrorMessage(err)
+          return Effect.sync(() => {
+            process.stderr.write(`[harness:done] Omnigraph branch diff failed: ${message}\n`)
+            return { _tag: "DiffFailed", message }
+          })
+        }
+        if (!hasPlanSnapshot && taskBranches.planBranch !== taskBranches.mainBranch) {
           return diffOmnigraphBranches({
             repoRoot: clusterRepoRoot,
             source: taskBranches.implBranch,
             target: taskBranches.mainBranch,
           }).pipe(
             Effect.provide(syncLayer),
-            Effect.map((diff) => ({ _tag: "Ok" as const, diff })),
-            Effect.catch((fallbackErr) =>
+            Effect.map((diff): BranchDiffOutcome => ({ _tag: "Ok", diff })),
+            Effect.catch((fallbackErr): Effect.Effect<BranchDiffOutcome> =>
               Effect.sync(() => {
+                const message = formatDiffErrorMessage(fallbackErr)
                 process.stderr.write(
-                  `[harness:done] Omnigraph branch diff fallback failed: ${String(fallbackErr)}\n`,
+                  `[harness:done] Omnigraph branch diff fallback failed: ${message}\n`,
                 )
-                return { _tag: "Err" as const }
+                return isBranchNotFoundError(fallbackErr)
+                  ? { _tag: "MissingMergeBase" }
+                  : { _tag: "DiffFailed", message }
               }),
             ),
           )
         }
         return Effect.sync(() => {
-          process.stderr.write(`[harness:done] Omnigraph branch diff failed: ${String(err)}\n`)
-          return { _tag: "Err" as const }
+          process.stderr.write(`[harness:done] Omnigraph branch diff missing merge base: ${formatDiffErrorMessage(err)}\n`)
+          return { _tag: "MissingMergeBase" }
         })
       }),
     )
 
-    const missingMergeBase = match(branchDiffOpt)
-      .with({ _tag: "Err" }, () => true)
-      .with({ _tag: "Ok" }, () => false)
+    const diffFailureResult: CliResult | undefined = match(branchDiffOpt)
+      .with({ _tag: "DiffFailed" }, ({ message }) => {
+        recordTelemetry(options, {
+          surface,
+          category: "graph_query",
+          toolName: "omnigraph:merge-main",
+          outcome: "fail",
+          durationMs: Math.max(0, Date.now() - startedAtMs),
+          engineSource: "omnigraph",
+          detail: message,
+        })
+        return {
+          exitCode: failExitCode,
+          stdout: JSON.stringify({
+            decision: blockDecision,
+            reason: `Omnigraph branch diff failed: ${message}`,
+          }),
+          stderr: `[GATE FAILURE] done:omnigraph-branch-diff\n${message}`,
+        }
+      })
+      .with({ _tag: "MissingMergeBase" }, { _tag: "Ok" }, () => undefined)
       .exhaustive()
+    if (diffFailureResult !== undefined) {
+      return diffFailureResult
+    }
 
-    const diffChanges: Array<OmnigraphDiffChangeSummary> = match(branchDiffOpt)
-      .with({ _tag: "Err" }, () => [])
-      .with({ _tag: "Ok" }, ({ diff }) =>
-        diff.changes.map((c) => {
-          const spanName = readSpanNameFromImages(c.before, c.after)
-          return {
-            entityKind: c.kind,
-            typeName: OmnigraphTypeName.make(c.type.name),
+    const diffState = match(branchDiffOpt)
+      .with({ _tag: "DiffFailed" }, { _tag: "MissingMergeBase" }, () => ({
+        _tag: "MissingMergeBase" as const,
+      }))
+      .with({ _tag: "Ok" }, ({ diff }) => {
+        const changes: Array<OmnigraphDiffChangeSummary> = diff.changes.map((c) => {
+          const spanName = readSpanNameFromImages(c.before, c.after) ?? null
+          const base = {
             entityId: OmnigraphEntityId.make(c.id),
             op: c.op,
             wasStubBefore: readIsStubFromImage(c.before),
             stubAfter: readIsStubFromImage(c.after),
-            ...(spanName !== undefined ? { spanName } : {}),
           }
-        }),
-      )
+          if (c.type.name === "EffectFn") {
+            return {
+              _tag: "EffectFnDiffChange" as const,
+              ...base,
+              spanName,
+            }
+          }
+          return {
+            _tag: "EntityDiffChange" as const,
+            entityKind: c.kind,
+            typeName: OmnigraphTypeName.make(c.type.name),
+            ...base,
+          }
+        })
+        return { _tag: "ResolvedDiff" as const, changes }
+      })
       .exhaustive()
 
     const dryRunOutcome = yield* dryRunMergeOmnigraphBranches({
@@ -252,22 +245,41 @@ export const runPreMergeOmnigraphBranchVerify = (
       })
       .with({ _tag: "Ok" }, { _tag: "Conflicts" }, ({ conflicts }) =>
         Effect.gen(function* () {
-          const implEffectFnCount = diffChanges.filter(
-            (c) => c.typeName === "EffectFn" && c.op !== "delete",
-          ).length
-          const remainingStubCount = diffChanges.filter(
-            (c) => c.op !== "delete" && c.stubAfter,
-          ).length
+          let implEffectFnCount = 0
+          let remainingStubCount = 0
+          if (implGraph !== undefined) {
+            const counts = countImplEffectFns(implGraph)
+            implEffectFnCount = counts.implEffectFnCount
+            remainingStubCount = counts.remainingStubCount
+          } else {
+            match(diffState)
+              .with({ _tag: "ResolvedDiff" }, ({ changes }) => {
+                for (const c of changes) {
+                  if (c.op !== "delete") {
+                    match(c)
+                      .with({ _tag: "EffectFnDiffChange" }, () => {
+                        implEffectFnCount += 1
+                      })
+                      .with({ _tag: "EntityDiffChange" }, () => undefined)
+                      .exhaustive()
+                    if (c.stubAfter) {
+                      remainingStubCount += 1
+                    }
+                  }
+                }
+              })
+              .with({ _tag: "MissingMergeBase" }, () => undefined)
+              .exhaustive()
+          }
 
           const verifyReport = yield* decideOmnigraphBranchVerify({
             planBranch: OmnigraphBranchName.make(taskBranches.planBranch),
             implBranch: OmnigraphBranchName.make(taskBranches.implBranch),
             mainBranch: OmnigraphBranchName.make(taskBranches.mainBranch),
-            diffChanges,
+            diffState,
             dryRunConflicts: conflicts,
             implEffectFnCount: NonNegativeCount.make(implEffectFnCount),
             remainingStubCount: NonNegativeCount.make(remainingStubCount),
-            ...(missingMergeBase ? { missingMergeBase: true } : {}),
           })
 
           return match(verifyReport)
@@ -284,7 +296,7 @@ export const runPreMergeOmnigraphBranchVerify = (
                 detail: reason,
               })
               return {
-                exitCode: 1,
+                exitCode: failExitCode,
                 stdout: JSON.stringify({
                   decision: blockDecision,
                   reason: `Omnigraph branch verification failed: ${reason}`,
@@ -310,6 +322,7 @@ export const syncVerifyImplToOmnigraph = (
   options: CliEnv | undefined,
 ): Effect.Effect<CliResult | undefined> =>
   Effect.gen(function* () {
+    const startedAtMs = Date.now()
     const lintFail = yield* runVerifyOmnigraphLintCheck(repoRoot)
     if (lintFail !== undefined) return lintFail
     const omnigraphReady = yield* ensureLocalOmnigraphReady(repoRoot)
@@ -320,13 +333,15 @@ export const syncVerifyImplToOmnigraph = (
         stderr: "Verification failed: Omnigraph server is not ready",
       }
     }
+    const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
+    const syncLayer = makeOmnigraphSyncLayer(nodeSyncHostIo)
     const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
-      repoRoot: resolveClusterRepoRoot(repoRoot),
+      repoRoot: clusterRepoRoot,
       branch: taskBranches.implBranch,
       from: taskBranches.mainBranch,
       snapshotPath,
     }).pipe(
-      Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
+      Effect.provide(syncLayer),
       Effect.catchCause((cause) => {
         if (isPureInterruptCause(cause)) return Effect.interrupt
         return Effect.succeed({
@@ -345,13 +360,40 @@ export const syncVerifyImplToOmnigraph = (
         process.env,
         commitId !== undefined ? { omnigraphCommitId: commitId } : undefined,
       )
+      const spansPath = join(repoRoot, ".harness", "spans.jsonl")
+      if (nodeSyncHostIo.existsSync(spansPath)) {
+        const firstTestId = findFirstVitestCaseId(graph)
+        if (firstTestId !== undefined) {
+          const rawSpans = nodeSyncHostIo.readTextSync(spansPath)
+          const ogSync = yield* OmnigraphSync.pipe(Effect.provide(syncLayer))
+          yield* ogSync
+            .putBlob({
+              repoRoot: clusterRepoRoot,
+              entity: "node",
+              type: OmnigraphTypeName.make("VitestCase"),
+              id: OmnigraphEntityId.make(firstTestId),
+              property: "spanTraceBlob",
+              branch: OmnigraphBranchName.make(taskBranches.implBranch),
+              data: rawSpans,
+            })
+            .pipe(
+              Effect.catch((blobErr) =>
+                Effect.sync(() => {
+                  process.stderr.write(
+                    `[harness:verify] Warning: failed to upload spanTraceBlob: ${String(blobErr)}\n`,
+                  )
+                }),
+              ),
+            )
+        }
+      }
     }
     recordTelemetry(options, {
       surface: "cli",
       category: "graph_query",
       toolName: "omnigraph:sync-impl",
       outcome: syncRes.syncedToOmnigraph ? "ok" : "fail",
-      durationMs: 1,
+      durationMs: Math.max(0, Date.now() - startedAtMs),
       engineSource: syncRes.syncedToOmnigraph ? "omnigraph" : "memory-fallback",
     })
     if (!syncRes.syncedToOmnigraph) {
@@ -361,7 +403,15 @@ export const syncVerifyImplToOmnigraph = (
         stderr: `Verification failed: could not sync implementation graph to Omnigraph${syncRes.error ? ` (${syncRes.error})` : ""}`,
       }
     }
-    return yield* runPreMergeOmnigraphBranchVerify(repoRoot, taskBranches, false, "block", options)
+    return yield* runPreMergeOmnigraphBranchVerify(
+      repoRoot,
+      taskBranches,
+      false,
+      "block",
+      options,
+      startedAtMs,
+      graph,
+    )
   })
 
 export const syncOmnigraphOnDone = (
@@ -383,6 +433,7 @@ export const syncOmnigraphOnDone = (
         outcome: "ok",
         durationMs: Math.max(0, Date.now() - startedAtMs),
         engineSource: "local",
+        detail: "skipped-isolated-workspace",
       })
       return undefined
     }
@@ -412,6 +463,76 @@ export const syncOmnigraphOnDone = (
     const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
     const syncLayer = makeOmnigraphSyncLayer(nodeSyncHostIo)
 
+    let implGraph: HarnessGraph | undefined
+    const snapshotPath = join(repoRoot, ".harness", "graph-snapshot.json")
+    if (nodeSyncHostIo.existsSync(snapshotPath)) {
+      const loadExit = yield* Effect.exit(loadGraphSnapshotEffect(snapshotPath, nodeSyncHostIo))
+      const loaded = match(loadExit)
+        .with({ _tag: "Success" }, ({ value }) => ({ ok: true as const, graph: value }))
+        .with({ _tag: "Failure" }, ({ cause }) => ({
+          ok: false as const,
+          message: Cause.pretty(cause),
+        }))
+        .exhaustive()
+      if (!loaded.ok) {
+        recordTelemetry(options, {
+          surface,
+          category: "graph_query",
+          toolName: "omnigraph:merge-main",
+          outcome: "fail",
+          durationMs: Math.max(0, Date.now() - startedAtMs),
+          engineSource: "omnigraph",
+          detail: loaded.message,
+        })
+        return {
+          exitCode: failExitCode,
+          stdout: JSON.stringify({
+            decision: blockDecision,
+            reason: `Failed to load .harness/graph-snapshot.json: ${loaded.message}`,
+          }),
+          stderr: `[GATE FAILURE] done:omnigraph-snapshot-load\n${loaded.message}`,
+        }
+      }
+      implGraph = loaded.graph
+      const reloadRes = yield* syncToOmnigraphAndSnapshot(implGraph, {
+        repoRoot: clusterRepoRoot,
+        branch: taskBranches.implBranch,
+        from: taskBranches.mainBranch,
+        mode: "overwrite",
+        snapshotPath,
+      }).pipe(
+        Effect.provide(syncLayer),
+        Effect.catchCause((cause) => {
+          if (isPureInterruptCause(cause)) return Effect.interrupt
+          return Effect.succeed({
+            syncedToOmnigraph: false,
+            snapshotPath,
+            error: Cause.pretty(cause),
+          })
+        }),
+      )
+      if (!reloadRes.syncedToOmnigraph) {
+        const errMsg = reloadRes.error ?? "unknown sync error"
+        recordTelemetry(options, {
+          surface,
+          category: "graph_query",
+          toolName: "omnigraph:merge-main",
+          outcome: "fail",
+          durationMs: Math.max(0, Date.now() - startedAtMs),
+          engineSource: "omnigraph",
+          detail: errMsg,
+        })
+        return {
+          exitCode: failExitCode,
+          stdout: JSON.stringify({
+            decision: blockDecision,
+            reason: `Failed to reload .harness/graph-snapshot.json to Omnigraph branch '${taskBranches.implBranch}': ${errMsg}`,
+          }),
+          stderr: `[GATE FAILURE] done:omnigraph-snapshot-sync\n${errMsg}`,
+        }
+      }
+    }
+
     const verifyFailure = yield* runPreMergeOmnigraphBranchVerify(
       repoRoot,
       taskBranches,
@@ -419,6 +540,7 @@ export const syncOmnigraphOnDone = (
       blockDecision,
       options,
       startedAtMs,
+      implGraph,
     )
     if (verifyFailure !== undefined) {
       return verifyFailure
