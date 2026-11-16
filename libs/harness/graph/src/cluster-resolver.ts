@@ -2,11 +2,14 @@ import { createHash } from "node:crypto"
 import { basename, dirname, join, resolve } from "node:path"
 import {
   normalizeNonRootWorkspacePath,
+  OmnigraphChangeCursor,
+  OmnigraphCommitId,
   sanitizeWorktreeIdSegment,
   WorkspaceFilePath,
 } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { Effect, Option, Result, Schema } from "effect"
+import { match } from "ts-pattern"
 
 export interface GitHeadState {
   readonly gitBranch: string | null
@@ -126,8 +129,15 @@ export const GraphHeadMetaSchema = Schema.Struct({
   headSha: Schema.NullOr(Schema.String),
   gitBranch: Schema.NullOr(Schema.String),
   updatedAt: Schema.String,
+  omnigraphCommitId: Schema.optional(Schema.NullOr(OmnigraphCommitId)),
+  changeFeedCursor: Schema.optional(Schema.NullOr(OmnigraphChangeCursor)),
 })
 export type GraphHeadMeta = typeof GraphHeadMetaSchema.Type
+
+export interface GraphHeadMetaExtra {
+  readonly omnigraphCommitId?: OmnigraphCommitId | null | undefined
+  readonly changeFeedCursor?: OmnigraphChangeCursor | null | undefined
+}
 
 const decodeGraphHeadMetaOption = Schema.decodeOption(Schema.fromJsonString(GraphHeadMetaSchema))
 
@@ -170,25 +180,59 @@ export const readGraphHeadMeta = (
 export const writeGraphHeadMeta = (
   repoRoot: string,
   hostIo: SyncHostIo,
-  headState?: GitHeadState,
+  headState?: GitHeadState & GraphHeadMetaExtra,
   env: NodeJS.ProcessEnv = process.env,
+  extra?: GraphHeadMetaExtra,
 ): GraphHeadMeta | null => {
   const resolved = headState ?? resolveGitHeadState(repoRoot, hostIo, env)
-  if (resolved.headSha === null && resolved.gitBranch === null) {
+  const hasExplicitOmnigraphExtra =
+    extra?.omnigraphCommitId !== undefined ||
+    extra?.changeFeedCursor !== undefined ||
+    headState?.omnigraphCommitId !== undefined ||
+    headState?.changeFeedCursor !== undefined
+  if (resolved.headSha === null && resolved.gitBranch === null && !hasExplicitOmnigraphExtra) {
     return null
   }
+  const existing = readGraphHeadMeta(repoRoot, hostIo, env)
+  const omnigraphCommitId =
+    extra?.omnigraphCommitId !== undefined
+      ? extra.omnigraphCommitId
+      : headState?.omnigraphCommitId !== undefined
+        ? headState.omnigraphCommitId
+        : existing?.omnigraphCommitId
+  const changeFeedCursor =
+    extra?.changeFeedCursor !== undefined
+      ? extra.changeFeedCursor
+      : headState?.changeFeedCursor !== undefined
+        ? headState.changeFeedCursor
+        : existing?.changeFeedCursor
   const stateDir = resolveGraphMetaStateDir(repoRoot, env)
   const meta: GraphHeadMeta = {
     headSha: resolved.headSha,
     gitBranch: resolved.gitBranch,
     updatedAt: new Date().toISOString(),
+    ...(omnigraphCommitId !== undefined ? { omnigraphCommitId } : {}),
+    ...(changeFeedCursor !== undefined ? { changeFeedCursor } : {}),
   }
-  Result.try(() => {
+  const targetPath = join(stateDir, "graph-head.json")
+  const tmpPath = join(stateDir, `.graph-head.json.${process.pid}.tmp`)
+  const writeResult = Result.try(() => {
     if (!hostIo.existsSync(stateDir)) {
       hostIo.mkdirRecursiveSync(stateDir)
     }
-    hostIo.writeTextSync(join(stateDir, "graph-head.json"), JSON.stringify(meta, null, 2))
+    hostIo.writeTextSync(tmpPath, JSON.stringify(meta, null, 2))
+    hostIo.renameSync(tmpPath, targetPath)
   })
+  match(writeResult)
+    .with({ _tag: "Failure" }, () => {
+      Result.try(() => {
+        if (hostIo.existsSync(tmpPath)) {
+          hostIo.unlinkSync(tmpPath)
+        }
+      })
+    })
+    .with({ _tag: "Success" }, () => undefined)
+    .exhaustive()
   return meta
 }
 
@@ -277,6 +321,14 @@ export const resolveCanonicalRepoRoot = (repoRoot: string, hostIo: SyncHostIo): 
         if (content.startsWith("gitdir:")) {
           const rawGitDir = content.slice("gitdir:".length).trim()
           const gitDir = resolve(absRoot, rawGitDir)
+          const backPtrFile = join(gitDir, "gitdir")
+          if (hostIo.existsSync(backPtrFile) && hostIo.isFileSync(backPtrFile)) {
+            const rawBackPtr = hostIo.readTextSync(backPtrFile).trim()
+            const resolvedBackPtr = resolve(gitDir, rawBackPtr)
+            if (resolvedBackPtr !== dotGit) {
+              return absRoot
+            }
+          }
           const commonDirFile = join(gitDir, "commondir")
           if (hostIo.existsSync(commonDirFile)) {
             const commondir = hostIo.readTextSync(commonDirFile).trim()

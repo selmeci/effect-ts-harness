@@ -62,6 +62,7 @@ export const handleGc = (
             ],
           }
         : baseReport
+    // Storage compaction (`omnigraph optimize` / `runOmnigraphOptimizeAndCleanup`) runs in `harness done`.
     return {
       exitCode: strict && !finalReport.clean ? 1 : 0,
       stdout: JSON.stringify(finalReport),

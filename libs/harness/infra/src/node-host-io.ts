@@ -31,6 +31,7 @@ import {
   WorkspaceFilePath,
 } from "@harness/contract"
 import type {
+  ExclusiveWriteResult,
   ExtendedHostIo,
   SyncHostDirEntry,
   SyncHostExecOptions,
@@ -305,8 +306,46 @@ export const nodeSyncHostIo: ExtendedHostIo = {
   mkdtempSync: (prefix: string): string => mkdtempSync(join(tmpdir(), prefix)),
   statMtimeMsSync: (filePath: string): number | undefined =>
     statSync(filePath, { throwIfNoEntry: false })?.mtimeMs,
+  statModeSync: (filePath: string): number | undefined =>
+    statSync(filePath, { throwIfNoEntry: false })?.mode,
   chmodSync: (filePath: string, mode: number): void => {
     chmodSync(filePath, mode)
+  },
+  writeTextWithModeSync: (
+    filePath: string,
+    content: string,
+    mode: number,
+  ): void => {
+    writeFileSync(filePath, content, { encoding: "utf8", mode })
+    chmodSync(filePath, mode)
+  },
+  tryWriteExclusiveTextSync: (
+    filePath: string,
+    content: string,
+    mode = 0o600,
+  ): ExclusiveWriteResult => {
+    const res = Result.try({
+      try: () => {
+        writeFileSync(filePath, content, { encoding: "utf8", flag: "wx", mode })
+      },
+      catch: (err) => ({
+        code: getErrnoCode(err),
+        message: err instanceof Error ? err.message : String(err),
+      }),
+    })
+    return match(res)
+      .with({ _tag: "Success" }, () => ({ _tag: "Written" as const }))
+      .with({ _tag: "Failure" }, ({ failure }) => {
+        if (failure.code === "EEXIST") {
+          return { _tag: "Exists" as const }
+        }
+        return {
+          _tag: "Failed" as const,
+          code: failure.code,
+          message: failure.message,
+        }
+      })
+      .exhaustive()
   },
   spawnDetached: (
     command: string,

@@ -820,21 +820,29 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
         return
       }
       if (method === "POST" && url.includes("/branches/merge")) {
-        if (options.mergeFails) {
-          res.writeHead(500, headers)
-          res.end(JSON.stringify({ error: "mock merge failure" }))
-          return
-        }
-        res.writeHead(200, headers)
-        res.end(
-          JSON.stringify({
-            outcome: "already_up_to_date",
-            source: "impl/current",
-            target: "main",
-            commit: null,
-            serverRef: "srv-1",
-          }),
-        )
+        let body = ""
+        req.on("data", (chunk) => {
+          body += String(chunk)
+        })
+        req.on("end", () => {
+          const isDryRun = body.includes('"dry_run":true')
+          if (options.mergeFails && !isDryRun) {
+            res.writeHead(500, headers)
+            res.end(JSON.stringify({ error: "mock merge failure" }))
+            return
+          }
+          res.writeHead(200, headers)
+          res.end(
+            JSON.stringify({
+              outcome: "already_up_to_date",
+              source: "impl/current",
+              target: "main",
+              ...(isDryRun ? { dry_run: true } : {}),
+              commit: null,
+              serverRef: "srv-1",
+            }),
+          )
+        })
         return
       }
       if (method === "GET" && url.includes("/branches/diff")) {

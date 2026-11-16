@@ -216,6 +216,7 @@ export const buildOntologyAndGqToolDescriptors = (
         const skipSpawn = options?.skipOmnigraphSpawn === true && !process.env["OMNIGRAPH_URL"]
         const gqResult = yield* invokeOmnigraphNamedQuery({
           repoRoot: root,
+          actor: "agent-mcp",
           name: queryName,
           params,
           branch,

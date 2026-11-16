@@ -468,3 +468,10 @@ export {
 export {
   withActiveMutantEffect,
 } from "./services/active-mutant-context.js"
+export {
+  decideOmnigraphBranchVerify,
+  decideOmnigraphSchemaEvolution,
+} from "./omnigraph-branch-verify.js"
+export {
+  decideOmnigraphLint,
+} from "./omnigraph-lint.js"

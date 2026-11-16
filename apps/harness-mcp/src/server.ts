@@ -10,6 +10,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js"
 import { NodeServices } from "@effect/platform-node"
 import { Cause, Effect, Exit, Logger, ManagedRuntime, Schema } from "effect"
+import { isPureInterruptCause } from "@harness/contract"
 import {
   type HarnessDaemonServerHandle,
   startHarnessDaemonServer,
@@ -195,6 +196,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
     .then((exit) =>
       Exit.match(exit, {
         onFailure: (cause) => {
+          if (isPureInterruptCause(cause)) return
           const squashed = Cause.squash(cause)
           process.stderr.write(
             `[harness-mcp] Fatal error: ${squashed instanceof Error ? squashed.message : String(squashed)}\n`,

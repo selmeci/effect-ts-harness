@@ -101,11 +101,9 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
       args: ["--import", "./tools/node-ts-resolver.mjs", "apps/harness-mcp/src/server.ts"],
     })
     expect(mcp.mcpServers["omnigraph-mcp"]).toEqual({
-      command: "npx",
-      args: ["-y", "@modernrelay/omnigraph-mcp@0.14.0"],
+      command: "node",
+      args: ["./tools/omnigraph-mcp-launcher.mjs"],
       env: {
-        OMNIGRAPH_BASE_URL: "http://127.0.0.1:8080",
-        OMNIGRAPH_URL: "http://127.0.0.1:8080",
         OMNIGRAPH_GRAPH_ID: "harness",
         OMNIGRAPH_SUBJECT: "agent-mcp",
       },
@@ -136,7 +134,7 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
     })
   })
 
-  it("forbids agent-mcp from mutating Omnigraph branches in policies.cedar", () => {
+  it("forbids agent-mcp from mutating Omnigraph branches in policies.cedar and policy YAML files", () => {
     const cedar = readFileSync(resolve(repoRoot, "libs/harness/graph/policies.cedar"), "utf8")
     expect(cedar).toContain('Omnigraph::Subject::"agent-mcp"')
     expect(cedar).toContain('Omnigraph::Action::"read"')
@@ -145,6 +143,9 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
     expect(cedar).toContain('Omnigraph::Subject::"harness-cli"')
     expect(cedar).toContain('Omnigraph::Action::"branch_create"')
     expect(cedar).toContain('Omnigraph::Action::"branch_merge"')
+    expect(existsSync(resolve(repoRoot, "libs/harness/graph/graph.policy.yaml"))).toBe(true)
+    expect(existsSync(resolve(repoRoot, "libs/harness/graph/cluster.policy.yaml"))).toBe(true)
+    expect(existsSync(resolve(repoRoot, "libs/harness/graph/policy-tests.yaml"))).toBe(true)
   })
 
   it("provides comprehensive instructions in effect-harness skill", () => {
@@ -192,11 +193,9 @@ describe("Antigravity adapter & plugin configuration", () => {
       ],
     })
     expect(mcp.mcpServers["omnigraph-mcp"]).toEqual({
-      command: "npx",
-      args: ["-y", "@modernrelay/omnigraph-mcp@0.14.0"],
+      command: "node",
+      args: ["../../../../tools/omnigraph-mcp-launcher.mjs"],
       env: {
-        OMNIGRAPH_BASE_URL: "http://127.0.0.1:8080",
-        OMNIGRAPH_URL: "http://127.0.0.1:8080",
         OMNIGRAPH_GRAPH_ID: "harness",
         OMNIGRAPH_SUBJECT: "agent-mcp",
       },

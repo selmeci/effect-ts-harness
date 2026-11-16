@@ -1,12 +1,13 @@
 version: 1
 groups:
-  owners: [harness-cli, agent-mcp, default]
+  owners: [harness-cli]
+  readers: [agent-mcp, harness-cli]
 rules:
   - id: owners-manage-config
     allow:
       actors: { group: owners }
       actions: [config_manage]
-  - id: owners-list-graphs
+  - id: readers-list-graphs
     allow:
-      actors: { group: owners }
+      actors: { group: readers }
       actions: [graph_list]

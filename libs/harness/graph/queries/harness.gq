@@ -99,16 +99,15 @@ query ontology_layer_nodes($layer: String) {
 query ontology_governed_by($symbol: String) {
   match {
     $tt: TraceabilityTuple
-    $doc: AdrDoc
-    $target: EffectFn
-    $tt $rel:playsGoverningAdrRole $doc
-    $tt playsRealizingFnRole $target
-    $target.qualname = $symbol or $target.spanName = $symbol
+    $tt.targetSymbolQualname = $symbol
   }
   return {
-    $doc,
-    $rel.archimateRelation as rel,
-    $target
+    $tt.relationId as tupleId,
+    $tt.adrId as adrId,
+    $tt.earsSpecId as earsSpecId,
+    $tt.requirementId as requirementId,
+    $tt.earsPattern as earsPattern,
+    $tt.targetSymbolQualname as targetQualname
   }
 }
 
@@ -127,5 +126,98 @@ query untested_domain_fns() {
     $fn.qualname as qualname,
     $fn.spanName as spanName,
     $fn.file as file
+  }
+}
+
+query resolve_effect_fn_fuzzy($query: String) {
+  match {
+    $fn: EffectFn
+    fuzzy($fn.spanName, $query, 2)
+  }
+  return {
+    $fn.qualname,
+    $fn.spanName,
+    $fn.packageTag,
+    $fn.file,
+    $fn.line,
+    $fn.isStub,
+    bm25($fn.spanName, $query) as score
+  }
+  order { bm25($fn.spanName, $query) }
+  limit 10
+}
+
+query ontology_realized_by_doc($docId: String) {
+  match {
+    $tt: TraceabilityTuple
+    $tt.adrId = $docId or $tt.earsSpecId = $docId
+  }
+  return {
+    $tt.relationId as tupleId,
+    $tt.adrId as adrId,
+    $tt.earsSpecId as earsSpecId,
+    $tt.requirementId as requirementId,
+    $tt.earsPattern as earsPattern,
+    $tt.targetSymbolQualname as artifactQualname
+  }
+  order { $tt.targetSymbolQualname asc, $tt.relationId asc }
+}
+
+query rank_patterns_hybrid($query: String, $targetLayer: String) {
+  match {
+    $p: PatternDoc
+    $p.archimateLayer = $targetLayer or $targetLayer = "*"
+  }
+  return {
+    $p.slug as slug,
+    $p.path as path,
+    $p.title as title,
+    $p.summary as summary
+  }
+  order { rrf(nearest($p.summaryEmbedding, $query), bm25($p.summary, $query)) }
+  limit 8
+}
+
+query rank_candidate_services_for_stub($layer: String, $intent: String) {
+  match {
+    $svc: ServiceTag
+    $svc.archimateLayer = $layer or $layer = "*"
+  }
+  return {
+    $svc.tagId as tagId,
+    $svc.qualname as qualname,
+    $svc.file as file
+  }
+  order { rrf(nearest($svc.capabilityEmbedding, $intent), bm25($svc.name, $intent)) }
+  limit 10
+}
+
+query policy_unverified_domain_fns() {
+  match {
+    $fn: EffectFn
+    $fn.packageTag = "domain" and $fn.isStub = false
+    not {
+      $tt: TraceabilityTuple
+      $test: VitestCase
+      $tt playsExercisingTestRole $test
+      $tt playsExercisedSpanRole $fn
+    }
+  }
+  return {
+    $fn.qualname as qualname,
+    $fn.spanName as spanName,
+    $fn.file as file
+  }
+}
+
+query policy_orphan_effect_signatures() {
+  match {
+    $sig: EffectSignature
+    not { $sig playsCallerRole $_ }
+  }
+  return {
+    $sig.relationId as relationId,
+    $sig.callerQualname as callerQualname,
+    $sig.file as file
   }
 }

@@ -342,7 +342,23 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
       }
     }
 
-    yield* ensureLocalOmnigraphReady(repoRoot)
+    const omnigraphReady = yield* ensureLocalOmnigraphReady(repoRoot)
+    if (!omnigraphReady) {
+      const msg = "Omnigraph server is not ready"
+      return {
+        exitCode: !isAntigravity ? 1 : 0,
+        stdout: isAntigravity
+          ? JSON.stringify({ error: msg })
+          : JSON.stringify({
+              indexedFns: fnIndex.bySpanName.size,
+              syncedToOmnigraph: false,
+              branch: targetBranch,
+              headSha: headState.headSha,
+              error: msg,
+            }),
+        stderr: `[harness:ingest] Omnigraph sync failed: ${msg}`,
+      }
+    }
     const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
       repoRoot: resolveClusterRepoRoot(repoRoot),
       branch: targetBranch,

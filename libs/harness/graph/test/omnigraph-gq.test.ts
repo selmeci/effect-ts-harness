@@ -4,6 +4,7 @@ import * as path from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import type { FetchLike } from "@modernrelay/omnigraph"
 import { Cause, Effect, Layer, Logger, Schema } from "effect"
+import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
 import {
   buildHarnessGraph,
@@ -108,10 +109,21 @@ describe("Omnigraph 0.14.0 schema.pg and queries/harness.gq", () => {
         }
 
         expect(schema).toContain("archimateRelation: String @index")
+        expect(schema).toContain("node GraphPolicy")
+        expect(schema).toContain("@instruction(")
+        expect(schema).toContain("Vector(768)? @embed(")
+
+        const edgeMatches = [...schema.matchAll(/edge\s+(Plays\w+Role):[\s\S]*?\{([\s\S]*?)\}/g)]
+        expect(edgeMatches).toHaveLength(32)
+        for (const [, edgeName, edgeBody] of edgeMatches) {
+          expect(edgeBody, `${edgeName} must declare @key(@src, @dst, role)`).toContain(
+            "@key(@src, @dst, role)",
+          )
+        }
       }),
   )
 
-  it.effect("declares all 8 canonical GQ queries in queries/harness.gq", () =>
+  it.effect("declares all 14 canonical GQ queries in queries/harness.gq", () =>
     Effect.gen(function* () {
       yield* Effect.void
       const gqSource = fs.readFileSync(queriesPath, "utf8")
@@ -286,6 +298,67 @@ describe("Deterministic in-memory GQ query execution and fallback", () => {
       const untestedRows = executeNamedGqQueryInMemory(sampleGraph, "untested_domain_fns")
       expect(untestedRows).toHaveLength(1)
       expect(untestedRows[0]?.spanName).toBe("Sample.untested")
+
+      const fuzzyRows = executeNamedGqQueryInMemory(sampleGraph, "resolve_effect_fn_fuzzy", {
+        query: "Sample.gret",
+      })
+      expect(fuzzyRows.length).toBeGreaterThanOrEqual(1)
+      expect(fuzzyRows[0]?.spanName).toBe("Sample.greet")
+
+      const realizedRows = executeNamedGqQueryInMemory(sampleGraph, "ontology_realized_by_doc", {
+        docId: "sample:ADR-0001",
+      })
+      expect(realizedRows).toHaveLength(1)
+      expect(realizedRows[0]?.artifactQualname).toBe("ServiceTag:PhotoRepo")
+
+      const patternRows = executeNamedGqQueryInMemory(sampleGraph, "rank_patterns_hybrid", {
+        query: "stub",
+        targetLayer: "*",
+      })
+      expect(patternRows).toHaveLength(1)
+      expect(patternRows[0]?.slug).toBe("planning")
+
+      const stubSvcRows = executeNamedGqQueryInMemory(
+        sampleGraph,
+        "rank_candidate_services_for_stub",
+        {
+          layer: "*",
+          intent: "photo",
+        },
+      )
+      expect(stubSvcRows).toHaveLength(1)
+      expect(stubSvcRows[0]?.tagId).toBe("PhotoRepo")
+
+      const policyUnverifiedRows = executeNamedGqQueryInMemory(
+        sampleGraph,
+        "policy_unverified_domain_fns",
+      )
+      expect(policyUnverifiedRows).toHaveLength(1)
+      expect(policyUnverifiedRows[0]?.spanName).toBe("Sample.untested")
+
+      const baseOrphanGraph = buildHarnessGraph({ fns: [] })
+      const graphWithOrphanSig = {
+        ...baseOrphanGraph,
+        graph: Graph.mutate(baseOrphanGraph.graph, (mutable) => {
+          Graph.addNode(mutable, {
+            _tag: "EffectSignature",
+            relationId: RelationId.make("sig:orphan-1"),
+            callerQualname: "libs/sample/domain/src/index.ts#missing",
+            requiredServices: [],
+            emittedErrors: [],
+            calleeQualnames: [],
+            payloadSchemas: [],
+            file: "libs/sample/domain/src/index.ts",
+            line: 1,
+          })
+        }),
+      }
+      const orphanSigRows = executeNamedGqQueryInMemory(
+        graphWithOrphanSig,
+        "policy_orphan_effect_signatures",
+      )
+      expect(orphanSigRows).toHaveLength(1)
+      expect(orphanSigRows[0]?.relationId).toBe("sig:orphan-1")
     }),
   )
 

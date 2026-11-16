@@ -13,14 +13,27 @@ import {
   SynchronizedRef,
 } from "effect"
 import * as Graph from "effect/Graph"
+import * as Semaphore from "effect/Semaphore"
 import { match } from "ts-pattern"
 import {
   AstSourceContent,
   AstSourceFilePath,
+  OmnigraphBranchName,
+  OmnigraphChangeCursor,
+  toErrorReasonMessage,
   WorkspaceFilePath,
 } from "@harness/contract"
 import { AstGateCache } from "@harness/gates"
-import { extractWorkspaceTypeAwareGraph } from "@harness/graph"
+import {
+  DatalogFilePath,
+  DatalogSession,
+  type DatalogSessionShape,
+  extractWorkspaceTypeAwareGraph,
+  makeOmnigraphSyncLayer,
+  pollOmnigraphChanges,
+  readGraphHeadMeta,
+  writeGraphHeadMeta,
+} from "@harness/graph"
 import {
   makeAstGateCacheLayer,
   nodeSyncHostIo,
@@ -48,10 +61,13 @@ const DaemonRequestSchema = Schema.Struct({
     "gc",
     "verify",
     "bench",
+    "poll-changes",
   ]),
   argv: Schema.optional(Schema.Array(Schema.String)),
   repoRoot: Schema.optional(Schema.String),
   files: Schema.optional(Schema.Array(Schema.String)),
+  branch: Schema.optional(Schema.String),
+  cursor: Schema.optional(Schema.String),
 })
 
 const decodeDaemonRequest = Schema.decodeOption(Schema.fromJsonString(DaemonRequestSchema))
@@ -59,11 +75,37 @@ const decodeDaemonRequest = Schema.decodeOption(Schema.fromJsonString(DaemonRequ
 export const resolveDaemonSocketPath = (repoRoot: string): string =>
   resolveHarnessDaemonSocketPath(repoRoot)
 
+const extractChangedTsFilesFromImage = (
+  image: { readonly properties: unknown } | null | undefined,
+  out: Set<string>,
+): void => {
+  if (image === null || image === undefined) return
+  const props = image.properties
+  if (typeof props !== "object" || props === null) return
+  const record = props as {
+    readonly file?: unknown
+    readonly testFile?: unknown
+    readonly moduleFile?: unknown
+    readonly path?: unknown
+  }
+  for (const candidate of [record.file, record.testFile, record.moduleFile, record.path]) {
+    if (
+      typeof candidate === "string" &&
+      candidate.trim().length > 0 &&
+      (candidate.endsWith(".ts") || candidate.endsWith(".tsx"))
+    ) {
+      out.add(candidate.trim())
+    }
+  }
+}
+
 const createDaemonLineHandler =
   (
     repoRoot: string,
     daemonScope: Scope.Scope,
     cachePortsRef: SynchronizedRef.SynchronizedRef<ReadonlyMap<string, AstGateCachePortShape>>,
+    datalogSessionsRef: SynchronizedRef.SynchronizedRef<ReadonlyMap<string, DatalogSessionShape>>,
+    pollSemaphoresRef: SynchronizedRef.SynchronizedRef<ReadonlyMap<string, Semaphore.Semaphore>>,
   ) =>
   (line: string): Effect.Effect<string> => {
     const reqOpt = decodeDaemonRequest(line.trim())
@@ -185,12 +227,209 @@ const createDaemonLineHandler =
           .with("plan-check", "gc", "verify", "bench", () =>
             Effect.succeed({ id: req.id, ok: false, fallbackToInProcess: true }),
           )
+          .with("poll-changes", () =>
+            Effect.gen(function* () {
+              // OCC conditional mutations use Omnigraph-If-Graph-Commit via mutateOmnigraphConditional.
+              const pollSem = yield* SynchronizedRef.modifyEffect(pollSemaphoresRef, (sems) => {
+                const existing = sems.get(resolvedRoot)
+                if (existing !== undefined) {
+                  return Effect.succeed([existing, sems] as const)
+                }
+                return Semaphore.make(1).pipe(
+                  Effect.map((created) => {
+                    const next = new Map(sems)
+                    next.set(resolvedRoot, created)
+                    return [created, next] as const
+                  }),
+                )
+              })
+              return yield* pollSem.withPermits(1)(
+                Effect.gen(function* () {
+                  const headMeta = readGraphHeadMeta(resolvedRoot, nodeSyncHostIo)
+                  const rawCursor = req.cursor?.trim() || headMeta?.changeFeedCursor || undefined
+                  const rawBranch = req.branch?.trim() || undefined
+                  const branch =
+                    rawBranch === undefined
+                      ? undefined
+                      : match(Schema.decodeOption(OmnigraphBranchName)(rawBranch))
+                          .with({ _tag: "Some" }, ({ value }) => value)
+                          .with({ _tag: "None" }, () => null)
+                          .exhaustive()
+                  if (branch === null) {
+                    return { id: req.id, ok: false, error: `Invalid branch name: ${rawBranch}` }
+                  }
+                  const cursor =
+                    rawCursor === undefined
+                      ? undefined
+                      : match(Schema.decodeOption(OmnigraphChangeCursor)(rawCursor))
+                          .with({ _tag: "Some" }, ({ value }) => value)
+                          .with({ _tag: "None" }, () => null)
+                          .exhaustive()
+                  if (cursor === null) {
+                    return { id: req.id, ok: false, error: `Invalid change cursor: ${rawCursor}` }
+                  }
+
+                  const feedRes = yield* pollOmnigraphChanges({
+                    repoRoot: resolvedRoot,
+                    actor: "agent-mcp",
+                    ...(branch !== undefined ? { branch } : {}),
+                    ...(cursor !== undefined ? { cursor } : { start: "beginning" as const }),
+                  }).pipe(
+                    Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
+                    Effect.map((feed) => ({ _tag: "Ok" as const, feed })),
+                    Effect.catchTag("OmnigraphLoadError", (err) =>
+                      Effect.succeed({
+                        _tag: "Err" as const,
+                        error: toErrorReasonMessage(err.cause),
+                      }),
+                    ),
+                  )
+
+                  return yield* match(feedRes)
+                    .with({ _tag: "Err" }, ({ error }) =>
+                      Effect.succeed({ id: req.id, ok: false, error }),
+                    )
+                    .with({ _tag: "Ok" }, ({ feed }) =>
+                      Effect.gen(function* () {
+                        const changedTsFiles = new Set<string>()
+                        for (const block of feed.blocks) {
+                          for (const change of block.changes) {
+                            extractChangedTsFilesFromImage(change.before, changedTsFiles)
+                            extractChangedTsFilesFromImage(change.after, changedTsFiles)
+                          }
+                        }
+                        for (const relPath of changedTsFiles) {
+                          const absPath = path.resolve(resolvedRoot, relPath)
+                          if (!isPathInsideRoot(resolvedRoot, absPath)) {
+                            return {
+                              id: req.id,
+                              ok: false,
+                              error: `Change-feed file path escapes workspace root: ${relPath}`,
+                            }
+                          }
+                        }
+
+                        if (feed.requiresBaseline || changedTsFiles.size > 0) {
+                          const nextGraph = yield* extractWorkspaceTypeAwareGraph(
+                            resolvedRoot,
+                            nodeSyncHostIo,
+                          )
+                          if (feed.requiresBaseline) {
+                            const rebuiltRes = yield* DatalogSession.make(nextGraph).pipe(
+                              Effect.flatMap((created) =>
+                                SynchronizedRef.update(datalogSessionsRef, (sessions) => {
+                                  const next = new Map(sessions)
+                                  next.set(resolvedRoot, created)
+                                  return next
+                                }),
+                              ),
+                              Effect.map(() => ({ ok: true as const })),
+                              Effect.catch((err) =>
+                                Effect.succeed({
+                                  ok: false as const,
+                                  error: toErrorReasonMessage(err),
+                                }),
+                              ),
+                            )
+                            if (!rebuiltRes.ok) {
+                              return { id: req.id, ok: false, error: rebuiltRes.error }
+                            }
+                          } else {
+                            const sessionRes = yield* SynchronizedRef.modifyEffect(
+                              datalogSessionsRef,
+                              (sessions) => {
+                                const existing = sessions.get(resolvedRoot)
+                                if (existing !== undefined) {
+                                  return Effect.succeed([existing, sessions] as const)
+                                }
+                                return DatalogSession.make(nextGraph).pipe(
+                                  Effect.map((created) => {
+                                    const next = new Map(sessions)
+                                    next.set(resolvedRoot, created)
+                                    return [created, next] as const
+                                  }),
+                                )
+                              },
+                            ).pipe(
+                              Effect.map((s) => ({ _tag: "Ok" as const, session: s })),
+                              Effect.catch((err) =>
+                                Effect.succeed({
+                                  _tag: "Err" as const,
+                                  error: toErrorReasonMessage(err),
+                                }),
+                              ),
+                            )
+
+                            const stepOutcome = yield* match(sessionRes)
+                              .with({ _tag: "Err" }, ({ error }) =>
+                                Effect.succeed({ ok: false as const, error }),
+                              )
+                              .with({ _tag: "Ok" }, ({ session }) =>
+                                Effect.gen(function* () {
+                                  for (const filePath of changedTsFiles) {
+                                    const stepRes = yield* session
+                                      .stepFileDelta({
+                                        filePath: DatalogFilePath.make(filePath),
+                                        nextGraph,
+                                      })
+                                      .pipe(
+                                        Effect.map(() => ({ ok: true as const })),
+                                        Effect.catch((err) =>
+                                          SynchronizedRef.update(datalogSessionsRef, (sessions) => {
+                                            const next = new Map(sessions)
+                                            next.delete(resolvedRoot)
+                                            return next
+                                          }).pipe(
+                                            Effect.as({
+                                              ok: false as const,
+                                              error: toErrorReasonMessage(err),
+                                            }),
+                                          ),
+                                        ),
+                                      )
+                                    if (!stepRes.ok) {
+                                      return stepRes
+                                    }
+                                  }
+                                  return { ok: true as const }
+                                }),
+                              )
+                              .exhaustive()
+
+                            if (!stepOutcome.ok) {
+                              return { id: req.id, ok: false, error: stepOutcome.error }
+                            }
+                          }
+                        }
+
+                        if (feed.cursor !== null) {
+                          writeGraphHeadMeta(resolvedRoot, nodeSyncHostIo, undefined, process.env, {
+                            changeFeedCursor: feed.cursor,
+                          })
+                        }
+
+                        return {
+                          id: req.id,
+                          ok: true,
+                          cursor: feed.cursor,
+                          caughtUp: feed.caughtUp,
+                          requiresBaseline: feed.requiresBaseline,
+                          blockCount: feed.blocks.length,
+                          updatedFiles: Array.from(changedTsFiles),
+                        }
+                      }),
+                    )
+                    .exhaustive()
+                }),
+              )
+            }),
+          )
           .exhaustive()
           .pipe(
             Effect.map((res) => JSON.stringify(res)),
             Effect.catchDefect((defect: unknown) =>
               Effect.sync(() => {
-                const message = defect instanceof Error ? defect.message : "Daemon execution error"
+                const message = toErrorReasonMessage(defect)
                 process.stderr.write(`[harness-mcp] Daemon line handler defect: ${message}\n`)
                 return JSON.stringify({ id: req.id, ok: false, error: message })
               }),
@@ -211,8 +450,20 @@ export const startHarnessDaemonServer = (
         const cachePortsRef = yield* SynchronizedRef.make<
           ReadonlyMap<string, AstGateCachePortShape>
         >(new Map())
+        const datalogSessionsRef = yield* SynchronizedRef.make<
+          ReadonlyMap<string, DatalogSessionShape>
+        >(new Map())
+        const pollSemaphoresRef = yield* SynchronizedRef.make<
+          ReadonlyMap<string, Semaphore.Semaphore>
+        >(new Map())
         return yield* startScopedUnixSocketDaemon(WorkspaceFilePath.make(repoRoot), {
-          lineHandler: createDaemonLineHandler(repoRoot, scope, cachePortsRef),
+          lineHandler: createDaemonLineHandler(
+            repoRoot,
+            scope,
+            cachePortsRef,
+            datalogSessionsRef,
+            pollSemaphoresRef,
+          ),
         }).pipe(
           Scope.provide(scope),
           Effect.map(

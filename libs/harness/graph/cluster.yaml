@@ -4,7 +4,17 @@ metadata:
 state:
   backend: cluster
   lock: true
+providers:
+  embedding:
+    local-ollama:
+      model: mock
+      api_key: ${OMNIGRAPH_EMBEDDING_API_KEY}
+policies:
+  graph-access:
+    file: graph.policy.yaml
+    applies_to: [harness]
 graphs:
   harness:
     schema: schema.pg
     queries: queries/
+    embedding_provider: local-ollama

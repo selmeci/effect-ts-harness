@@ -125,12 +125,42 @@ export interface SyncHostSpawnDetachedOptions {
   readonly stderrLogPath?: string | undefined
 }
 
+export interface ExclusiveWriteWritten {
+  readonly _tag: "Written"
+}
+
+export interface ExclusiveWriteExists {
+  readonly _tag: "Exists"
+}
+
+export interface ExclusiveWriteFailed {
+  readonly _tag: "Failed"
+  readonly code: string | undefined
+  readonly message: string
+}
+
+export type ExclusiveWriteResult =
+  | ExclusiveWriteWritten
+  | ExclusiveWriteExists
+  | ExclusiveWriteFailed
+
 export interface ExtendedHostIo extends SyncHostIo {
   readonly rmRecursiveSync: (targetPath: string) => void
   readonly cpRecursiveSync: (srcPath: string, destPath: string) => void
   readonly mkdtempSync: (prefix: string) => string
   readonly statMtimeMsSync: (filePath: string) => number | undefined
+  readonly statModeSync: (filePath: string) => number | undefined
   readonly chmodSync: (filePath: string, mode: number) => void
+  readonly writeTextWithModeSync: (
+    filePath: string,
+    content: string,
+    mode: number,
+  ) => void
+  readonly tryWriteExclusiveTextSync: (
+    filePath: string,
+    content: string,
+    mode?: number,
+  ) => ExclusiveWriteResult
   readonly spawnDetached: (
     command: string,
     args: ReadonlyArray<string>,
