@@ -22,7 +22,7 @@ Because `type:contract` and `type:service` are already compiled and locked by `p
 - **Unit B (`type:infra`):** Implement live `Layer`s, native `@effect/sql-d1` / `@effect/sql-sqlite-do` repositories (`D1Client.layer`, `SqlClient`, `SqliteMigrator`; `drizzle-orm` / `drizzle-kit` banned) decoding rows into contract Schemas, synchronous DO SQLite transactions, and W3C `traceparent` headers, and test with `@effect/vitest`.
 - **Unit C (`type:app` / `scope:web`):** Compose runtime Layers (`NodeRuntime.runMain`, `ManagedRuntime`, `runFork`) in `type:app`, or derive `AtomHttpApi` query/mutation atoms from `type:contract` in `scope:web` (zero raw `fetch`).
 
-When launching parallel subagents that run CLI or build commands concurrently, isolate their workspaces using an isolated git worktree with `HARNESS_WORKTREE_ID=<unit>` (e.g. `HARNESS_WORKTREE_ID=unit-a`) or `Workspace: "share"` so `.harness/worktrees/<id>` state files and stamps never collide.
+When launching parallel subagents that run CLI or build commands concurrently, isolate their workspaces using an isolated git worktree (`Workspace: "share"` with `HARNESS_WORKTREE_ID` unset when running a full `plan-check -> verify` slice, or `HARNESS_WORKTREE_ID=<unit>` in a shared checkout when running package-scoped `CI=true pnpm nx run <project>:verify` checks) so `.harness/` snapshots and stamps never collide.
 
 When delegating a unit to an implementer subagent, provide this exact 4-part prompt:
 

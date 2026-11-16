@@ -25,9 +25,9 @@ Because `type:contract` and `type:service` are already compiled and locked by `p
 Choose the dispatch mechanism dynamically based on task topology:
 
 - **Default — Hub-and-Spoke `invoke_subagent` (1–2 downstream packages or one-shot units):**
-  Use `invoke_subagent` (`TypeName: "self"`, `Workspace: "share"`, and `Model: "gemini-4-hydrogen-medium"` if present in the tool's `Model` enum, otherwise `Model: "flash"` or `"inherit"` when the session is already running on Gemini 4 Hydrogen). It has zero message-board overhead and returns results directly in one turn.
-- **Escalation — Multi-Worker `swarm` (`3+` parallel packages, cross-package author $\leftrightarrow$ verifier loops, or explicit model pinning):**
-  Use `swarm` (`action: "add"`, `name: "<unit>"`, `model: "gemini-4-hydrogen-medium"`, `workspace: "inherit"` with disjoint file ownership and `HARNESS_WORKTREE_ID=<unit>` for CLI test commands). Using `workspace: "inherit"` with strict disjoint package ownership ensures edits land directly in the working tree without requiring subagents to run `git commit` before `swarm kill`.
+  Use `invoke_subagent` (`TypeName: "self"`, `Workspace: "share"`, and `Model: "gemini-4-hydrogen-medium"` if present in the tool's `Model` enum, otherwise `Model: "flash"` or `"inherit"` when the session is already running on Gemini 4 Hydrogen; keep `HARNESS_WORKTREE_ID` unset inside `Workspace: "share"`). It has zero message-board overhead and returns results directly in one turn.
+- **Escalation — Multi-Worker `swarm` (`3+` parallel packages, cross-package author <-> verifier loops, or explicit model pinning):**
+  Use `swarm` (`action: "add"`, `name: "<unit>"`, `model: "gemini-4-hydrogen-medium"`, `workspace: "inherit"` with disjoint file ownership and `HARNESS_WORKTREE_ID=<unit>` for package-scoped `CI=true pnpm nx run <project>:verify` test commands — package workers in `workspace: "inherit"` never run monorepo `plan-check`, `verify`, or `done`). Using `workspace: "inherit"` with strict disjoint package ownership ensures edits land directly in the working tree without requiring subagents to run `git commit` before `swarm kill`.
 
 When delegating a unit to an implementer subagent, provide this exact 4-part prompt/brief:
 
