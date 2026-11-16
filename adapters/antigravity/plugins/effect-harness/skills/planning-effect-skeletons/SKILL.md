@@ -14,21 +14,25 @@ In this project, the plan IS compilable TypeScript code. Never write long Markdo
 ## Step-by-Step Recipe
 
 1. **Route Idioms & Inspect Ontology:** Call `harness_route` for each non-trivial capability (e.g., D1, Durable Object RPC, `HttpApi`, `AtomHttpApi`) and read the matched `agent-patterns/*.md` file. For any existing services or use-cases being modified, call `harness_ontology_why` and `harness_ontology_impact` to inspect cross-layer ArchiMate dependencies and governing ADR/EARS constraints.
-2. **Define Boundary Types (`type:contract` & `type:service`):**
-   - `WHEN <trigger>` $\rightarrow$ Request/response `Schema.Struct` and `HttpApiEndpoint` / `Rpc` in `type:contract`.
+2. **Define Boundary Types (`type:contract` & `type:service` — Enforced by `HarnessTierTopology.decide`):**
+   - **Single Canonical `type:*` Tag (`dual-contract-tier-tag`):** Every workspace package declares exactly one `type:*` Nx tag (`type:contract`, `type:service`, `type:core`, `type:domain`, `type:infra`, or `type:app`) — dual `["type:contract", "type:service"]` tags are strictly banned.
+   - `WHEN <trigger>` $\rightarrow$ Request/response `Schema.Struct` and `HttpApiEndpoint` / `Rpc` in `type:contract` (`0` workspace dependencies, external `effect` only; `forbidden-contract-dependency`).
    - `IF <condition>, THEN` $\rightarrow$ `Schema.TaggedError<Self>()("Tag", { ... })` in `type:contract`.
    - `WHILE <state>` $\rightarrow$ Closed discriminated unions (`Schema.TaggedUnion` / `Schema.TaggedStruct`) for domain states and decisions in `type:contract` (`agent-patterns/pattern-matching.md`).
-   - Stateful capabilities $\rightarrow$ `Context.Service` methods in `type:service`.
-3. **Write `stub<A, E, R>()` Skeletons (`type:domain` & `type:infra`):**
-   - `WHILE <state>` $\rightarrow$ Pure decider `Effect.fn("<Domain>.decide")` returning `yield* stub<Out, Err, never>(input)` (`R = never` is mandatory).
-   - `WHEN <trigger>` $\rightarrow$ Use case `Effect.fn("<Domain>.<useCase>")` returning `yield* stub<A, E, R>(input)` with exact union types for `E` and `R`.
+   - Stateful capabilities $\rightarrow$ Pure `Context.Service` ports in `type:service` (`forbidden-service-dependency`, `impure-service-tier-import`: `type:service` imports `effect`, `type:contract`, and `type:service` only — constructing `Layer.*` values, importing `node:*`, or importing `type:core`/`type:domain`/`type:infra` inside `type:service` is strictly banned).
+3. **Write `stub<A, E, R>()` Skeletons (`type:core`, `type:domain` & `type:infra` — Enforced by `SelfDogfooding.decide`):**
+   - `WHILE <state>` $\rightarrow$ Pure decider `Effect.fn("<Domain>.decide")` in `type:domain` / `type:core` returning `yield* stub<Out, Err, never>(input)` (`R = never` is mandatory).
+   - `WHEN <trigger>` $\rightarrow$ Use case / engine `Effect.fn("<Domain>.<useCase>")` in `type:domain` / `type:core` / `type:infra` returning `yield* stub<A, E, R>(input)` with exact union types for `E` and `R`.
+   - **Hexagonal Purity in Non-Infra Tiers (`no-node-builtins-outside-infra`, `process-env-outside-infra-or-app`, `no-global-mutable-cache`, `impure-core-tier-import`):** Outside `type:infra` (`libs/*/infra/src/`), `node:*` built-in imports (except `{path, path/posix, path/win32, crypto, url}` — also enforced on `type:app`) and `FetchHttpClient` / `@effect/ai-typesafe` / `@effect/platform*` imports are banned. `process.env` is banned outside `type:infra` and `type:app`, and module-scope mutable caches (`let`, module-scope `Map`/`Set`/`WeakMap`, or mutated module-scope object literals) are banned across all production `src/` files.
 4. **Run the Deterministic Plan Gate:**
    ```bash
    node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts plan-check
    ```
    Fix any type error, duplicate span name, or `GraphPolicyViolation` (`domain-requires-infra`, `domain-requires-cloud-binding`, `impure-decider`, `layer-cycle`, `discriminant-branching`, `non-exhaustive-union-match`, `unmapped-spec-symbol` — verifying that every `span`, `service`, and `error` in the EARS spec frontmatter is represented in the `.ts` skeleton graph) until `plan-check` exits `0` and prints the Mermaid graph.
 5. **Pre-Implementation Adversarial & Feasibility Lens (for stateful or multi-package plans):** After `harness plan-check` exits `0` and prints the Mermaid graph, audit the skeleton graph against failure modes before dispatching implementers using the [Pre-Implementation Adversarial Plan Lens](references/adversarial-plan-lens.md) (or dispatching [@effect-adversarial-reviewer](../../executing-effect-stubs/references/personas/adversarial-reviewer.md)): verify idempotency keys are present in contract inputs, partial-failure compensation between DO/D1/Queue is represented in `E` and `R`, optimistic concurrency error channels are declared, and no domain `*.decide` function depends on impure services. For reviewer dispatch instructions and personas across all stages, consult the [Reviewer Dispatch Guide](../../executing-effect-stubs/references/dispatch-reviewers.md).
-6. **Enforce Phase-Strict Scope & Doc-to-Code Parity Checklist:**
+6. **Enforce Phase-Strict Scope, 5-Tier Hexagonal Topology & Doc-to-Code Parity Checklist:**
+   - **5-Tier Hexagonal Topology (`HarnessTierTopology.decide`):** Single canonical `type:*` tag per package (`dual-contract-tier-tag`), `0` workspace dependencies on `type:contract` (`forbidden-contract-dependency`), zero `Layer.*` or `node:*` imports in `type:service` (`impure-service-tier-import`), and every `@harness/*` import in `src/` declared in `package.json` `dependencies` (`undeclared-workspace-dependency`).
+   - **Self-Dogfooding Hygiene (`SelfDogfooding.decide`):** Zero `export * from` in `libs/**/src/index.ts` or `apps/**/src/index.ts` barrels (`facade-star-reexport` — use explicit named exports), zero dynamic `import("@harness/...")` (`dynamic-harness-import`), zero `Layer.build` inside `Layer.effect` (`no-layer-build-in-layer-effect`), and zero double-wrapped `Effect.fn` around `Effect.gen` (`no-double-wrapped-effect-fn`).
    - **No Future-Phase Leakage:** Never copy unimplemented future-phase symbols (e.g., `DeciderInvariantError`, `commandId` idempotency deduplication, partial event matching, or unconfigured `scope:fixture` Nx tags) into the current phase's EARS Spec or ADR.
    - **1:1 Symbol Parity:** Every method name (e.g. `.thenEvents`, `.thenNothing`, `.thenFails`), every `*Error` in prose or Mermaid diagrams, and every Nx tag in the Spec/ADR must match the current skeleton 1:1.
    - **No Empty Source Modules (`empty-source-module` gate):** Never leave placeholder `export {}` files in `src/`.
@@ -78,8 +82,10 @@ export const deletePhoto = Effect.fn("Sample.deletePhoto")(function* (id: number
 })
 ```
 
-## Phase-Strict Scope & Doc-to-Code Parity Checklist
+## Phase-Strict Scope, 5-Tier Hexagonal Topology & Doc-to-Code Parity Checklist
 
+- [ ] **5-Tier Hexagonal Topology (`HarnessTierTopology.decide`):** Single canonical `type:*` tag per package (`dual-contract-tier-tag`), `0` workspace dependencies on `type:contract` (`forbidden-contract-dependency`), zero `Layer.*` or `node:*` imports in `type:service` (`impure-service-tier-import`), and all `@harness/*` imports declared in `package.json` `dependencies` (`undeclared-workspace-dependency`).
+- [ ] **Self-Dogfooding Hygiene (`SelfDogfooding.decide`):** Zero `node:*` imports outside `type:infra` except `{path, path/posix, path/win32, crypto, url}` (`no-node-builtins-outside-infra`), zero `process.env` outside `type:infra`/`type:app` (`process-env-outside-infra-or-app`), zero module-scope mutable `let`/`Map`/`Set` caches (`no-global-mutable-cache`), and explicit named exports on all `index.ts` barrels (`facade-star-reexport` — no `export *`).
 - [ ] **No Future-Phase Leakage:** Unimplemented future-phase symbols (`DeciderInvariantError`, `commandId` deduplication, partial event matching, unconfigured `scope:fixture` Nx tags) are omitted from current Spec and ADR.
 - [ ] **Exact Symbol Parity:** Every method name (`.thenEvents`, `.thenNothing`, `.thenFails`), every `*Error` in prose/Mermaid diagrams, and every Nx tag matches the current skeleton 1:1.
 - [ ] **No Empty Modules (`empty-source-module`):** Zero placeholder `export {}` files in `src/`.
@@ -97,6 +103,8 @@ export const deletePhoto = Effect.fn("Sample.deletePhoto")(function* (id: number
 | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | "I'll write the plan in a `.md` file with code blocks first"                       | Uncompiled Markdown code drifts from `effect@4.0.0` types and burns 2x tokens. Write `.ts` skeletons with `stub<A, E, R>()` instead.                                                 |
 | "I'll use `Effect.die('TODO')` instead of `stub<A, E, R>()`"                       | `Effect.die` erases `A`, `E`, and `R` to `never`, blinding `effect-graph:check`. Always use `stub<A, E, R>(...args)`.                                                                |
+| "I'll put a default `Layer.succeed` in `type:service` or use dual `type:*` tags"   | `HarnessTierTopology.decide` rejects `Layer.*` or `node:*` in `type:service` (`impure-service-tier-import`) and rejects multiple `type:*` tags (`dual-contract-tier-tag`).           |
+| "I'll use `export * from` in `src/index.ts` barrels to save time"                  | `SelfDogfooding.decide` rejects `export *` across all `libs/**/src/index.ts` and `apps/**/src/index.ts` barrels (`facade-star-reexport`). Always use explicit named exports.         |
 | "This feature is small, I'll skip `plan-check` and write the body directly"        | `plan-check` snapshots `.harness/plan-graph-snapshot.json` required by `harness done` to verify plan-vs-impl parity.                                                                 |
 | "I don't need to append the Mermaid graph or record ADRs in docs/"                 | Omitting the verified topology graph from `libs/<scope>/docs/specs/` deprives reviewer agents of ground truth. ADRs prevent future agents from re-litigating non-obvious trade-offs. |
 | "I'll document future phase errors and commands in the ADR now so we don't forget" | Unimplemented symbols in specs/ADRs violate doc-to-code parity and fail `stale-doc-reference`. Document only what exists in the current phase skeleton.                              |
@@ -108,6 +116,8 @@ export const deletePhoto = Effect.fn("Sample.deletePhoto")(function* (id: number
 - Creating a `.md` plan with multi-line TypeScript code blocks instead of `.ts` `stub<A, E, R>()` skeletons
 - Writing production `Effect.gen` bodies before `harness plan-check` exits `0`
 - Adding `RequiresService` dependencies to a `*.decide` function (`impure-decider`)
+- Constructing `Layer.*` values or importing `node:*` inside `type:service` (`impure-service-tier-import`), or declaring `0` or `>1` `type:*` tags on a package (`dual-contract-tier-tag`)
+- Importing `node:*` (other than `path`, `crypto`, `url`) outside `type:infra` (`no-node-builtins-outside-infra`), reading `process.env` outside `type:infra`/`type:app` (`process-env-outside-infra-or-app`), declaring module-scope mutable `let`/`Map`/`Set` caches (`no-global-mutable-cache`), or using `export *` in `index.ts` barrels (`facade-star-reexport`)
 - Skipping updating `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` with the verified Mermaid graph and adversarial lens summary after `plan-check`
 - Creating an ADR that violates the canonical 6-section structure or omitting `**Chosen option:**` / `**Why rejected:**`
 - Leaking future-phase symbols or unconfigured Nx tags into current phase specs/ADRs (`stale-doc-reference`)

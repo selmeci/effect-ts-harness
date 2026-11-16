@@ -22,7 +22,7 @@ Do NOT flag or report the following standard patterns unless you detect an inten
 
 - Direct `Config.string` or `Config.nonEmptyString` with literal sensitive names (`SECRET`, `TOKEN`, `PASSWORD`, `API_KEY`, `PRIVATE_KEY`, `CREDENTIAL`), which `tools/oxlint/syntax-bans.js` already blocks. Flag only when obfuscated or bypassed (e.g. dynamic property access, indirect naming).
 - Direct raw SQL template interpolation in `.exec(\`...\${...}\`)`or`.prepare(\`...\${...}\`)`, which `tools/oxlint/syntax-bans.js` blocks.
-- Purely architectural module boundary violations already governed by Nx tags.
+- Purely architectural module boundary violations already governed by Nx 5-tier hexagonal tags (`HarnessTierTopology.decide` & `SelfDogfooding.decide`).
 
 ## What to Hunt For
 

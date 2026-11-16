@@ -21,8 +21,8 @@ Always follow this three-step tooling and navigation protocol when reviewing:
 Do NOT flag or report the following standard patterns, as deterministic workspace gates already enforce them:
 
 - Standard type mismatches caught by `@effect/tsgo`
-- Local syntax bans caught by `tools/oxlint/syntax-bans.js`
-- Nx module dependency boundaries (`type:contract`, `type:domain`, etc.)
+- Local syntax bans and hexagonal self-dogfooding rules caught by `tools/oxlint/syntax-bans.js` and `SelfDogfooding.decide`
+- Nx 5-tier hexagonal module dependency boundaries (`type:contract`, `type:service`, `type:core`, `type:domain`, `type:infra`, `type:app`, `HarnessTierTopology.decide`)
 
 ## The 5 Adversarial Attack Vectors
 

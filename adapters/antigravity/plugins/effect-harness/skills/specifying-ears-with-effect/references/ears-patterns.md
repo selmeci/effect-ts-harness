@@ -23,13 +23,13 @@ Both leading clauses are optional. Which clauses are present defines the pattern
 
 ### Pattern Mapping Matrix
 
-| Pattern                | Required Bold Keyword | Modal Verb                    | Effect v4 Building Block                     | Channel / Location                       | Required Verification      |
-| ---------------------- | --------------------- | ----------------------------- | -------------------------------------------- | ---------------------------------------- | -------------------------- |
-| **Ubiquitous**         | _(none)_              | `**shall**` / `**shall not**` | `Schema` brand / refinement / invariant      | `type:contract`                          | `UnitTest` / `AstGate`     |
-| **Event-driven**       | `**When**`            | `**shall**`                   | `Effect.fn` input schema & success outcome   | `A` channel (`type:domain`)              | `UnitTest` / `TraceTest`   |
-| **State-driven**       | `**While**`           | `**shall**`                   | Pure `*.decide` function (`R = never`)       | Domain decider (`type:domain`)           | `PropertyTest` (`it.prop`) |
-| **Unwanted behaviour** | `**If** … **then**`   | `**shall**` / `**shall not**` | `Schema.TaggedError<Self>()("Tag", { ... })` | `E` channel (`type:contract` / `domain`) | `UnitTest`                 |
-| **Optional feature**   | `**Where**`           | `**shall**`                   | `Context.Service` + `Layer` / `Config`       | `R` channel (`type:service` / `infra`)   | `GraphCheck` / `UnitTest`  |
+| Pattern                | Required Bold Keyword | Modal Verb                    | Effect v4 Building Block                     | Channel / Location                                    | Required Verification      |
+| ---------------------- | --------------------- | ----------------------------- | -------------------------------------------- | ----------------------------------------------------- | -------------------------- |
+| **Ubiquitous**         | _(none)_              | `**shall**` / `**shall not**` | `Schema` brand / refinement / invariant      | `type:contract`                                       | `UnitTest` / `AstGate`     |
+| **Event-driven**       | `**When**`            | `**shall**`                   | `Effect.fn` input schema & success outcome   | `A` channel (`type:domain` / `type:core`)             | `UnitTest` / `TraceTest`   |
+| **State-driven**       | `**While**`           | `**shall**`                   | Pure `*.decide` function (`R = never`)       | Decider (`type:domain` / `type:core`)                 | `PropertyTest` (`it.prop`) |
+| **Unwanted behaviour** | `**If** … **then**`   | `**shall**` / `**shall not**` | `Schema.TaggedError<Self>()("Tag", { ... })` | `E` channel (`type:contract` / `type:domain` / `type:core`) | `UnitTest`           |
+| **Optional feature**   | `**Where**`           | `**shall**`                   | `Context.Service` + `Layer` / `Config`       | `R` channel (`type:service` port / `type:infra` Layer) | `GraphCheck` / `UnitTest` |
 
 ### Modal Verb Rule
 
