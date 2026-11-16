@@ -409,6 +409,7 @@ describe("Antigravity adapter & plugin configuration", () => {
       resolve(repoRoot, "adapters/claude-code/skills/effect-lfg"),
     ]) {
       expect(existsSync(resolve(base, "references/autonomous-intake-and-ears.md"))).toBe(true)
+      expect(existsSync(resolve(base, "references/multi-slice-worktree-execution.md"))).toBe(true)
       expect(existsSync(resolve(base, "references/review-and-shipping.md"))).toBe(true)
     }
 

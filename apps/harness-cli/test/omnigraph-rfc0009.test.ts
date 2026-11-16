@@ -502,4 +502,165 @@ EOF
     expect(parsed.url).toBe(`http://127.0.0.1:${expectedPort}`)
     expect(parsed.token).toBe(tokens.mcpToken)
   })
+
+  it("syncOmnigraphOnDone enforces missing-merge-base when plan-graph-snapshot.json exists and falls back to main diff for Route B without plan snapshot", async () => {
+    const setupScenario = async (options: {
+      readonly writePlanSnapshot: boolean
+      readonly stubInMainDiff: boolean
+    }) => {
+      const repoRoot = makeTempRepo("harness-rfc0009-routeb-")
+      const configDir = join(repoRoot, "libs", "harness", "graph")
+      const clusterDir = resolveOmnigraphClusterDir(repoRoot, nodeSyncHostIo)
+      mkdirSync(clusterDir, { recursive: true })
+      const initialDrift = await Effect.runPromise(
+        evaluateClusterConfigDrift(clusterDir, configDir, false),
+      )
+      writeClusterDriftReceipts(clusterDir, initialDrift.expectedStamp, configDir)
+
+      const canonicalRoot = resolveCanonicalRepoRoot(repoRoot, nodeSyncHostIo)
+      const port = deriveRepoOmnigraphPort(canonicalRoot, nodeSyncHostIo)
+      let realMergeCalled = false
+      const diffTargets: Array<string | null> = []
+
+      const headers = {
+        "Content-Type": "application/json",
+        "Omnigraph-Http-Api": "0.14",
+      } as const
+      const server = createServer((req, res) => {
+        const rawUrl = req.url ?? ""
+        if (rawUrl === "/readyz") {
+          res.writeHead(200, headers)
+          res.end(JSON.stringify({ ready: true, status: "serving", ready_graph_count: 1 }))
+          return
+        }
+        if (rawUrl === "/healthz") {
+          res.writeHead(200, { "Omnigraph-Http-Api": "0.14" })
+          res.end()
+          return
+        }
+        if (rawUrl.includes("/branches/diff")) {
+          const parsedUrl = new URL(rawUrl, `http://127.0.0.1:${port}`)
+          const target = parsedUrl.searchParams.get("target")
+          diffTargets.push(target)
+          if (target === "plan/current") {
+            res.writeHead(404, headers)
+            res.end(JSON.stringify({ code: "not_found", message: "branch plan/current not found" }))
+            return
+          }
+          res.writeHead(200, headers)
+          res.end(
+            JSON.stringify({
+              outcome: "ok",
+              serverRef: "srv-1",
+              from_commit_id: "c1",
+              to_commit_id: "c2",
+              changes: options.stubInMainDiff
+                ? [
+                    {
+                      id: "fn-stub-1",
+                      kind: "node",
+                      op: "insert",
+                      type: { id: "t1", name: "EffectFn" },
+                      before: null,
+                      after: { properties: { isStub: true, spanName: "Demo.routeBStub" } },
+                    },
+                  ]
+                : [],
+              netNodeCount: options.stubInMainDiff ? 1 : 0,
+              netEdgeCount: 0,
+            }),
+          )
+          return
+        }
+        if (rawUrl.includes("/branches/merge")) {
+          let body = ""
+          req.on("data", (chunk) => {
+            body += String(chunk)
+          })
+          req.on("end", () => {
+            const isDryRun = body.includes('"dry_run":true')
+            if (!isDryRun) {
+              realMergeCalled = true
+            }
+            res.writeHead(200, headers)
+            res.end(
+              JSON.stringify({
+                outcome: "already_up_to_date",
+                source: "impl/current",
+                target: "main",
+                ...(isDryRun ? { dry_run: true } : {}),
+                commit: null,
+                serverRef: "srv-1",
+              }),
+            )
+          })
+          return
+        }
+        res.writeHead(200, headers)
+        res.end(JSON.stringify({ outcome: "ok", branches: ["main", "impl/current"] }))
+      })
+
+      const bound = await new Promise<boolean>((resolvePromise) => {
+        server.once("error", () => resolvePromise(false))
+        server.listen(port, "127.0.0.1", () => resolvePromise(true))
+      })
+      if (!bound) {
+        return undefined
+      }
+
+      if (options.writePlanSnapshot) {
+        mkdirSync(join(repoRoot, ".harness"), { recursive: true })
+        writeFileSync(join(repoRoot, ".harness", "plan-graph-snapshot.json"), "{}", "utf8")
+      }
+      writeFileSync(
+        join(clusterDir, "server.json"),
+        JSON.stringify({
+          pid: process.pid,
+          port,
+          baseUrl: `http://127.0.0.1:${port}`,
+          canonicalRepoRoot: canonicalRoot,
+        }),
+        "utf8",
+      )
+      writeVerifyStamp(repoRoot, nodeSyncHostIo, "impl/current")
+
+      try {
+        const res = await Effect.runPromise(
+          syncOmnigraphOnDone(repoRoot, { repoRoot }, false, "block"),
+        )
+        return {
+          res,
+          diffTargets,
+          realMergeCalled,
+        }
+      } finally {
+        server.closeAllConnections()
+        server.close()
+      }
+    }
+
+    const withPlan = await setupScenario({ writePlanSnapshot: true, stubInMainDiff: false })
+    if (withPlan) {
+      expect(withPlan.diffTargets).toEqual(["plan/current"])
+      expect(withPlan.res?.exitCode).toBe(1)
+      expect(withPlan.res?.stderr).toContain("[missing-merge-base]")
+      expect(withPlan.realMergeCalled).toBe(false)
+    }
+
+    const routeBClean = await setupScenario({ writePlanSnapshot: false, stubInMainDiff: false })
+    if (routeBClean) {
+      expect(routeBClean.diffTargets).toEqual(["plan/current", "main"])
+      expect(routeBClean.res).toBeUndefined()
+      expect(routeBClean.realMergeCalled).toBe(true)
+    }
+
+    const routeBStub = await setupScenario({ writePlanSnapshot: false, stubInMainDiff: true })
+    if (routeBStub) {
+      expect(routeBStub.diffTargets).toEqual(["plan/current", "main"])
+      expect(routeBStub.res?.exitCode).toBe(1)
+      expect(routeBStub.res?.stderr).toContain("[unimplemented-stub-remaining]")
+      expect(routeBStub.res?.stderr).toContain("fn-stub-1")
+      expect(routeBStub.realMergeCalled).toBe(false)
+    }
+  })
 })

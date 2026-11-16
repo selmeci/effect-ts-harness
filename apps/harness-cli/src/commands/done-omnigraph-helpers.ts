@@ -1,3 +1,4 @@
+import { join } from "node:path"
 import { Cause, Effect, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
@@ -95,6 +96,38 @@ export const runPostDoneOmnigraphCompact = (repoRoot: string): void => {
   }
 }
 
+const isBranchNotFoundError = (err: unknown): boolean => {
+  const inner =
+    typeof err === "object" && err !== null && "cause" in err
+      ? (err as { readonly cause?: unknown }).cause
+      : err
+  for (const candidate of [inner, err]) {
+    if (typeof candidate === "object" && candidate !== null) {
+      const httpStatus = Reflect.get(candidate, "status")
+      const httpStatusCode = Reflect.get(candidate, "statusCode")
+      const errName = Reflect.get(candidate, "name")
+      const errCode = Reflect.get(candidate, "code")
+      const errMessage = Reflect.get(candidate, "message")
+      if (httpStatus === 404 || httpStatusCode === 404 || errName === "NotFoundError") {
+        return true
+      }
+      if (
+        typeof errCode === "string" &&
+        /not[\s_-]*found|unknown[\s_-]*branch/i.test(errCode)
+      ) {
+        return true
+      }
+      if (
+        typeof errMessage === "string" &&
+        /404|not[\s_-]*found|unknown branch|does not exist/i.test(errMessage)
+      ) {
+        return true
+      }
+    }
+  }
+  return /404|not[\s_-]*found|unknown branch|does not exist/i.test(String(err))
+}
+
 export const runPreMergeOmnigraphBranchVerify = (
   repoRoot: string,
   taskBranches: {
@@ -112,6 +145,9 @@ export const runPreMergeOmnigraphBranchVerify = (
     const syncLayer = makeOmnigraphSyncLayer(nodeSyncHostIo)
     const surface = isAntigravity ? "hook" : "cli"
     const failExitCode = isAntigravity ? 0 : 1
+    const hasPlanSnapshot = nodeSyncHostIo.existsSync(
+      join(repoRoot, ".harness", "plan-graph-snapshot.json"),
+    )
 
     const branchDiffOpt = yield* diffOmnigraphBranches({
       repoRoot: clusterRepoRoot,
@@ -120,12 +156,34 @@ export const runPreMergeOmnigraphBranchVerify = (
     }).pipe(
       Effect.provide(syncLayer),
       Effect.map((diff) => ({ _tag: "Ok" as const, diff })),
-      Effect.catch((err) =>
-        Effect.sync(() => {
+      Effect.catch((err) => {
+        if (
+          !hasPlanSnapshot &&
+          taskBranches.planBranch !== taskBranches.mainBranch &&
+          isBranchNotFoundError(err)
+        ) {
+          return diffOmnigraphBranches({
+            repoRoot: clusterRepoRoot,
+            source: taskBranches.implBranch,
+            target: taskBranches.mainBranch,
+          }).pipe(
+            Effect.provide(syncLayer),
+            Effect.map((diff) => ({ _tag: "Ok" as const, diff })),
+            Effect.catch((fallbackErr) =>
+              Effect.sync(() => {
+                process.stderr.write(
+                  `[harness:done] Omnigraph branch diff fallback failed: ${String(fallbackErr)}\n`,
+                )
+                return { _tag: "Err" as const }
+              }),
+            ),
+          )
+        }
+        return Effect.sync(() => {
           process.stderr.write(`[harness:done] Omnigraph branch diff failed: ${String(err)}\n`)
           return { _tag: "Err" as const }
-        }),
-      ),
+        })
+      }),
     )
 
     const missingMergeBase = match(branchDiffOpt)
