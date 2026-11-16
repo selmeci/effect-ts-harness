@@ -17,7 +17,7 @@ Google Code Wiki and other generated/prose docs are out — never cite them.
 ## Workflow (one task)
 
 plan (in Effect idioms, `agent-patterns/planning.md` template) → skeleton with `stub<A, E, R>(...args)` typechecks →
-`pnpm harness plan-check` (`plan/<task>` branch) → implement (isolate concurrent subagents with `Workspace: "share"` or `HARNESS_WORKTREE_ID`) → `pnpm harness gc --strict` (`GraphGc.decide` zero-entropy gate) → `pnpm harness verify` (the ONLY sanctioned verification, checks `SpanBudget.decide` and writes `.harness/verify-stamp.json` + `impl/<task>` branch) → `pnpm harness done` → `pnpm harness learn` (`compounding-effect-learnings` to promote `.harness/friction-log.jsonl` into recipes/gates).
+`pnpm harness plan-check` (`plan/<task>` branch) → implement (isolate concurrent subagents with `Workspace: "share"` worktrees for full-slice `plan-check -> verify` flows, or `HARNESS_WORKTREE_ID=<unit>` for package-scoped `nx run <pkg>:verify` workers in a shared checkout) → `pnpm harness gc --strict` (`GraphGc.decide` zero-entropy gate) → `pnpm harness verify` (the ONLY sanctioned verification, checks `SpanBudget.decide` and writes `.harness/verify-stamp.json` + `impl/<task>` branch) → `pnpm harness done` → `pnpm harness learn` (`compounding-effect-learnings` to promote `.harness/friction-log.jsonl` into recipes/gates).
 
 ### MCP-First Tooling Preference
 
