@@ -27,7 +27,7 @@ Follow the adjudication rubric from `resolving-effect-review-feedback`:
 
 1. **Adjudicate via Graph MCP:** For every finding reported by the specialist reviewers, verify type and ontology facts with `harness_resolve`, `harness_callers`, `harness_ontology_why`, and `harness_tests_reaching`.
 2. **Hunt AST Twins (`class-fix`):** Whenever a valid defect is confirmed, run `harness_structural_search` (`@ast-grep/napi`) across the workspace to locate and fix all identical occurrences in a single pass.
-3. **Sync Contracts, Specs & ADRs First:** If a valid fix alters a contract Schema, error tag, EARS clause, or ADR invariant, update the EARS spec / ADR first and re-run `harness plan-check` if public signatures changed.
+3. **Sync Contracts, Specs & ADRs First:** If a valid fix alters a contract Schema, error tag, `Effect.fn` signature, `Context.Service` port, EARS clause, or ADR invariant, update the EARS spec / ADR first and re-run `pnpm harness plan-check` (and update `## 4. Verified Plan Topology Graph`) so `.harness/plan-graph-snapshot.json` matches the post-review implementation graph before Stage 5 (`verify -> done`).
 4. **Apply Eligible Fixes & Record Residuals:**
    - Autonomously apply all valid `fix`, `class-fix`, and `doc-sync-fix` items (dispatching scoped `flash` fixer subagents when changes span multiple packages).
    - Record any `decline-with-evidence` items or non-blocking advisory notes in a `## Residual & Declined Review Findings` section for the final PR body / closeout report.
@@ -61,7 +61,7 @@ Update `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` (or `docs/specs/`) frontma
    node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts learn --clear
    ```
 
-### Step 5.3 — Final Deterministic Gate Sequence (`gc` $\rightarrow$ `ontology` $\rightarrow$ `mutate` $\rightarrow$ `verify` $\rightarrow$ `done`)
+### Step 5.3 — Final Deterministic Gate Sequence (`gc` -> `ontology` -> `mutate` -> `verify` -> `done`)
 
 With all code, tests, specs, ADRs, and learning promotions written to disk, execute the complete verification sequence (`WaitMsBeforeAsync: 10000` on each command):
 

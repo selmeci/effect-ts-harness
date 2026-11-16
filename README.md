@@ -127,7 +127,7 @@ flowchart LR
 3. **Plan Gate (`harness plan-check`):**
    Runs `HARNESS_PLAN_CHECK=1 tsgo -b --noEmit` + `oxlint` (allowing `stub()` calls) + `PlanStepCoverageV1`. Checkpoints the verified skeleton onto `plan/<task>`.
 4. **Implementation (`executing-effect-stubs`):**
-   Replace `stub<A, E, R>()` bodies with production `Effect.fn("Domain.operation")` implementations, live Layers, and Vitest tests using `@effect/vitest` (`it.effect`, `TestClock`, `Layer.mock`). Concurrent subagents isolate work via `Workspace: "share"` or `HARNESS_WORKTREE_ID=<id>`.
+   Replace `stub<A, E, R>()` bodies with production `Effect.fn("Domain.operation")` implementations, live Layers, and Vitest tests using `@effect/vitest` (`it.effect`, `TestClock`, `Layer.mock`). Concurrent subagents isolate work via `Workspace: "share"` worktrees (for full-slice `plan-check -> verify` flows, with `HARNESS_WORKTREE_ID` unset) or `HARNESS_WORKTREE_ID=<id>` (for package-scoped `nx run <pkg>:verify` workers in a shared checkout).
 5. **Zero-Entropy, Ontology & Mutation Gates (`harness gc`, `harness ontology`, `harness mutate`):**
    - `harness gc --strict`: Checks `GraphGc.decide` for orphan symbols, dead exports, and unreferenced files.
    - `harness ontology <why|impact|layers|check> [--strict] [--deterministic] [--scope=...]`: Verifies all 5 ArchiMate 3.2 cross-layer traceability invariants (`OntologyInvariants.decide`) and optionally checks semantic drift via `OntologyConflictV1` (skip with `--deterministic`).
