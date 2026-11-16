@@ -44,32 +44,37 @@ export const readFileContents = (filename: string) =>
   }).pipe(Effect.scoped)
 ```
 
-## Scoped Services with `Layer.scoped`
+## Scoped Services with `Layer.scoped` (`type:service` Port + `type:infra` Layer)
 
-For services that represent long-lived stateful resources (such as database pools, network sockets, or background workers), use `Layer.scoped`:
+For services that represent long-lived stateful resources (such as database pools, network sockets, or background workers), declare the pure `Context.Service` port in `type:service` and construct the `Layer.scoped` implementation in `type:infra` (`impure-service-tier-import`):
 
 ```ts
-import { Context, Effect, Layer } from "effect"
+// In libs/sample/service/src/connection-pool.ts (type:service — pure port)
+import { Context, Effect } from "effect"
 
 export class ConnectionPool extends Context.Service<
   ConnectionPool,
   {
     readonly execute: (query: string) => Effect.Effect<void>
   }
->()("infra/ConnectionPool") {
-  static readonly Live = Layer.scoped(
-    ConnectionPool,
-    Effect.gen(function* () {
-      yield* Effect.logInfo("Connecting connection pool...")
+>()("myapp/ConnectionPool") {}
 
-      yield* Effect.addFinalizer((exit) => Effect.logInfo("Closing connection pool..."))
+// In libs/sample/infra/src/connection-pool-live.ts (type:infra — scoped Layer)
+import { Effect, Layer } from "effect"
+import { ConnectionPool } from "@harness/sample-service"
 
-      return ConnectionPool.of({
-        execute: (query) => Effect.logInfo(`Running ${query}`),
-      })
-    }),
-  )
-}
+export const ConnectionPoolLive = Layer.scoped(
+  ConnectionPool,
+  Effect.gen(function* () {
+    yield* Effect.logInfo("Connecting connection pool...")
+
+    yield* Effect.addFinalizer((_exit) => Effect.logInfo("Closing connection pool..."))
+
+    return ConnectionPool.of({
+      execute: (query) => Effect.logInfo(`Running ${query}`),
+    })
+  }),
+)
 ```
 
 ## Interruption and Guarantee Rules
@@ -79,32 +84,35 @@ export class ConnectionPool extends Context.Service<
 
 ## Interruption Propagation & Atomic File Persistence
 
-### Preserving Composite Interruption in `Effect.catchCause`
+### Preserving Composite Causes & Pure Interruption Classification (`bare-cause-has-interrupts`)
 
-When catching causes with `Effect.catchCause`, beware of swallowed interruptions. A composite cause can hold both a typed error/defect and an interruption signal (e.g. when racing effects or joining concurrent fibers). Checking `Cause.hasInterruptsOnly(cause)` misses composite causes where interruption coincided with an error or defect, causing fibers to ignore shutdown signals (`catch-cause-interrupts-only`).
+When catching causes with `Effect.catchCause`, a composite `Cause` can hold both a typed error/defect (`Fail` / `Die`) and an interruption signal (`Interrupt`). Calling bare `Cause.hasInterrupts(cause)` or `Cause.hasInterruptsOnly(cause)` in production `src/` is **banned** by `SelfDogfooding.decide` and `tools/oxlint/syntax-bans.js` (`bare-cause-has-interrupts`), because misclassifying a mixed `Fail + Interrupt` cause as a pure interrupt silently drops the failure/defect or exits `0` on crash.
 
-Always use `Cause.hasInterrupts(cause)` to detect interruption and re-propagate it via `Effect.failCause(cause)`:
+Always use `isPureInterruptCause(cause)` from `@harness/contract` (which checks `Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)`):
 
 ```ts
 import { Cause, Effect } from "effect"
+import { isPureInterruptCause } from "@harness/contract"
 
 export const safeCatchCause = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(
     Effect.catchCause((cause) => {
-      // Re-propagate if the cause contains any interruption
-      if (Cause.hasInterrupts(cause)) {
+      // Re-propagate pure fiber interruption without masking mixed Fail/Die causes
+      if (isPureInterruptCause(cause)) {
         return Effect.failCause(cause)
       }
-      return Effect.logWarning(`Recovered from failure: ${Cause.pretty(cause)}`)
+      return Effect.logError(`Failed with non-interrupt cause: ${Cause.pretty(cause)}`).pipe(
+        Effect.andThen(Effect.failCause(cause)),
+      )
     }),
   )
 ```
 
-### Crash-Safe Atomic Persistence with `Effect.acquireUseRelease`
+### Crash-Safe Atomic Persistence in `type:infra` (`Effect.acquireUseRelease` & `WorkspaceFs`)
 
-Direct writes to target files can leave corrupted or partial content if a crash, process termination, or fiber interruption occurs mid-stream. Robust atomic file persistence writes to an isolated sibling `.tmp` file first and commits atomically with `fs.renameSync`.
+Direct writes to target files can leave corrupted or partial content if a crash, process termination, or fiber interruption occurs mid-stream. Outside `type:infra` (`libs/*/infra/src/`), importing `node:fs` is banned by `no-node-builtins-outside-infra` (`SelfDogfooding.decide`) — non-infra tiers must call `WorkspaceFs.writeTextFileAtomic` from `@harness/service`.
 
-Use `Effect.acquireUseRelease` to ensure that any unfinished temporary file is cleaned up via best-effort `fs.unlinkSync` on interruption or failure:
+Inside `type:infra` (`libs/*/infra/src/workspace-fs-live.ts`), implement atomic persistence by writing to an isolated sibling `.tmp` file first, committing atomically with `fs.renameSync`, and cleaning up unfinished `.tmp` files via `Effect.acquireUseRelease`:
 
 ```ts
 import * as fs from "node:fs"

@@ -6,26 +6,35 @@ Errors in Effect are typed values tracked in the error channel E using Schema.Ta
 
 In Effect, failure is explicitly modeled in the error channel `E`. There are two main ways to define tagged errors:
 
-### 1. `Schema.TaggedError` (Serializable Boundary Errors)
+### 1. `Schema.TaggedError` (Serializable Boundary Errors with Branded Fields)
 
-Use `Schema.TaggedError` for domain, API, and boundary errors that need schema validation, serialization, or client exposure:
+Use `Schema.TaggedError` in `type:contract` for domain, API, and boundary errors that need schema validation, serialization, or client exposure. Every scalar field inside a `Schema.TaggedError` in `type:contract`, `type:core`, or `type:domain` must reference a branded schema (`.pipe(Schema.brand("<BrandName>"))`) rather than raw `Schema.String`, `Schema.Int`, or `Schema.Number` (`unbranded-contract-schema`, `harness:SPEC-0005` / `ADR-0007`):
 
 ```ts
 import { Schema } from "effect"
 
+export const UserId = Schema.NonEmptyString.pipe(Schema.brand("UserId"))
+export type UserId = typeof UserId.Type
+
+export const ErrorMessage = Schema.NonEmptyString.pipe(Schema.brand("ErrorMessage"))
+export type ErrorMessage = typeof ErrorMessage.Type
+
+export const CentsAmount = Schema.Natural.pipe(Schema.brand("CentsAmount"))
+export type CentsAmount = typeof CentsAmount.Type
+
 export class UserNotFoundError extends Schema.TaggedError<UserNotFoundError>()(
   "UserNotFoundError",
   {
-    userId: Schema.String,
-    message: Schema.String,
+    userId: UserId,
+    message: ErrorMessage,
   },
 ) {}
 
 export class InsufficientFundsError extends Schema.TaggedError<InsufficientFundsError>()(
   "InsufficientFundsError",
   {
-    currentBalance: Schema.Number,
-    requestedAmount: Schema.Number,
+    currentBalance: CentsAmount,
+    requestedAmount: CentsAmount,
   },
 ) {}
 ```

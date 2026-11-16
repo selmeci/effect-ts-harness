@@ -12,13 +12,13 @@ Once package-isolated `gemini-4-hydrogen-medium` implementer subagents have repl
 
 Select and invoke the read-only specialist review subagents (`invoke_subagent` by default with `Workspace: "share"`, or `swarm` with `action: "add"`, `model: "gemini-4-hydrogen-medium"` when an active swarm is running or explicit model pinning is needed) across the **entire git diff (`git diff main...HEAD`)** — including any modified harness gates (`libs/harness/**`) and linter plugins (`tools/oxlint/**`), not just domain packages:
 
-1. **`effect-ears-test-reviewer` (Always):**
-   Verifies 1:1 behavioral coverage between every EARS clause (`WHEN`, `IF/THEN`, `WHILE`, `WHERE`) in `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` and `@effect/vitest` assertions (`it.effect`, `it.effect.prop`, `Cause.findErrorOption`, `Equal.equals`, `checkSpanBudgets`).
+1. **`effect-ears-test-reviewer` (Always & Mandatory for Core/Domain):**
+   Executes the **8-Point Anti-Rubber-Stamp Deep Audit** (including Point 8: `type:infra` Guard-Deletion Falsification) and verifies 1:1 behavioral coverage between every EARS clause (`WHEN`, `IF/THEN`, `WHILE`, `WHERE`) in `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` and `@effect/vitest` assertions (`it.effect`, `it.effect.prop`, `Cause.findErrorOption`, `Equal.equals`, `checkSpanBudgets`).
 2. **`effect-security-reviewer` (When touching `type:contract`, `HttpApi`, `Rpc`, auth, SQL, `Config`, or `policy.ts`):**
-   Audits boundary `Schema` constraints, actor/tenant authorization (IDOR) in `type:domain`, parameterized SQL in `type:infra`, `Config.redacted` secret handling, and shell/file guard allowlist bypasses.
+   Audits boundary `Schema` constraints, actor/tenant authorization (IDOR) in `type:domain` / `type:core`, parameterized SQL in `type:infra`, `Config.redacted` secret handling, and shell/file guard allowlist bypasses.
 3. **`effect-reliability-reviewer` (When touching `type:infra`, DO SQLite, D1, Queues, `Schedule`, or `Scope`):**
    Audits synchronous DO SQLite transaction discipline (`MixedScheduler("sync")`, zero async I/O inside `withTransaction`), bounded jittered `Schedule` retries, and `Scope` resource finalizers.
-4. **`effect-adversarial-reviewer` (When touching `*.decide` deciders, Event Sourcing, Outbox, Projections, multi-step stateful flows, OR harness gate implementations in `libs/harness/**` and `tools/oxlint/**`):**
+4. **`effect-adversarial-reviewer` (Mandatory for `type:core`, `type:domain`, `*.decide` deciders, Event Sourcing, Outbox, Projections, multi-step stateful flows, OR harness gate implementations in `libs/harness/**` and `tools/oxlint/**`):**
    Constructs crash-between-steps sequences, duplicate command delivery, out-of-order replay, boundary mutation cases, and adversarial gate evasion vectors (shell wrapper/quoting/subshell bypasses, multi-aggregate / multi-schema scope bleed, and fail-open fallbacks).
 
 ### Step 4.2 — Central Adjudication & Twin Class-Fix Loop
@@ -53,10 +53,10 @@ Update `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` (or `docs/specs/`) frontma
    node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts learn
    ```
 2. Inspect `.harness/friction-log.jsonl` clusters (`Friction.decide` + `LearnProposalV1`) and any gate blind spots uncovered in Stage 4:
-   - Autonomously apply clear, deterministic promotions across the 5 targets (`agent-pattern` in `agent-patterns/*.md`, `triage-rule` in `DETERMINISTIC_TRIAGE_RULES`, `guard-allowlist` in `ALLOWLIST`, `ast-graph-gate` in `tools/oxlint/syntax-bans.js` / `policy-check.ts`, or `adr` in `libs/<scope>/docs/adr/`).
+   - Autonomously apply clear, deterministic promotions across the 5 targets (`agent-pattern` in `agent-patterns/*.md`, `triage-rule` in `DETERMINISTIC_TRIAGE_RULES`, `guard-allowlist` in `ALLOWLIST`, `ast-graph-gate` in `@harness/contract` / `@harness/gates` (`HarnessTierTopology.decide`, `SelfDogfooding.decide`) / `tools/oxlint/syntax-bans.js` / `policy-check.ts`, or `adr` in `libs/<scope>/docs/adr/`).
    - Never append prose warnings to `AGENTS.md`.
    - Note: Modifying `.oxlintrc.json`, `tools/oxlint/*`, or `policies.cedar` triggers a human confirmation prompt via `harness guard`; only touch protected linter policy files when a high-confidence gate escape requires it, otherwise promote via `agent-patterns/*.md`, `DETERMINISTIC_TRIAGE_RULES`, or an ADR.
-3. Clear processed friction logs:
+3. Refresh any `wc -l` / numeric LOC tables in `docs/**`, `libs/*/docs/**`, `apps/*/docs/**`, and `README.md` that reference files modified in Stages 3–5, and clear processed friction logs:
    ```bash
    node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts learn --clear
    ```

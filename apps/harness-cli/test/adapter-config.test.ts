@@ -46,7 +46,10 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
         readFileSync(resolve(repoRoot, "adapters/claude-code/hooks.json"), "utf8"),
       )
       const agyHooks = JSON.parse(
-        readFileSync(resolve(repoRoot, "adapters/antigravity/plugins/effect-harness/hooks.json"), "utf8"),
+        readFileSync(
+          resolve(repoRoot, "adapters/antigravity/plugins/effect-harness/hooks.json"),
+          "utf8",
+        ),
       )
 
       const claudeGuardCmd = (claudeHooks.hooks.PreToolUse[0].hooks[0].command as string).replace(
@@ -600,15 +603,115 @@ describe("Antigravity adapter & plugin configuration", () => {
       }
 
       const earsPersona = readFileSync(
-        resolve(
-          skillsRoot,
-          "executing-effect-stubs/references/personas/ears-test-reviewer.md",
-        ),
+        resolve(skillsRoot, "executing-effect-stubs/references/personas/ears-test-reviewer.md"),
         "utf8",
       )
       expect(earsPersona).toContain("8-Point Anti-Rubber-Stamp Deep Audit")
       expect(earsPersona).not.toContain("7-Point Anti-Rubber-Stamp Deep Audit")
       expect(earsPersona).toContain("`type:infra` Guard-Deletion Falsification")
+
+      const effectHarnessSkill = readFileSync(
+        resolve(skillsRoot, "effect-harness/SKILL.md"),
+        "utf8",
+      )
+      expect(effectHarnessSkill).toContain("HarnessTierTopology.decide")
+      expect(effectHarnessSkill).toContain("SelfDogfooding.decide")
+      expect(effectHarnessSkill).toContain("harness_lsp_diagnostics")
+      expect(effectHarnessSkill).toContain("harness_ontology_check")
+      expect(effectHarnessSkill).toContain("harness_gq_query")
+      expect(effectHarnessSkill).toContain("harness_telemetry_report")
+
+      const resolvingSkill = readFileSync(
+        resolve(skillsRoot, "resolving-effect-review-feedback/SKILL.md"),
+        "utf8",
+      )
+      expect(resolvingSkill).toContain("HarnessTierTopology.decide")
+      expect(resolvingSkill).toContain("SelfDogfooding.decide")
+      expect(resolvingSkill).toContain("8-Point Anti-Rubber-Stamp")
+      expect(resolvingSkill).toContain(".harness/verify-stamp.json")
+      expect(resolvingSkill).toContain("impure-service-tier-import")
+      expect(resolvingSkill).toContain("facade-star-reexport")
+      expect(resolvingSkill).toContain("bare-cause-has-interrupts")
+      expect(resolvingSkill).toContain("unbranded-contract-schema")
+
+      const evaluationRubric = readFileSync(
+        resolve(skillsRoot, "resolving-effect-review-feedback/references/evaluation-rubric.md"),
+        "utf8",
+      )
+      expect(evaluationRubric).toContain("HarnessTierTopology.decide")
+      expect(evaluationRubric).toContain("SelfDogfooding.decide")
+      expect(evaluationRubric).toContain("impure-service-tier-import")
+      expect(evaluationRubric).toContain("no-node-builtins-outside-infra")
+      expect(evaluationRubric).toContain("no-global-mutable-cache")
+      expect(evaluationRubric).toContain("process-env-outside-infra-or-app")
+      expect(evaluationRubric).toContain("facade-star-reexport")
+      expect(evaluationRubric).toContain("bare-cause-has-interrupts")
+      expect(evaluationRubric).toContain("isPureInterruptCause")
+      expect(evaluationRubric).toContain("unbranded-contract-schema")
+      expect(evaluationRubric).not.toContain(
+        "!Cause.hasDies(cause)` or `Cause.hasInterruptsOnly(cause)`",
+      )
+
+      const fixerPrompt = readFileSync(
+        resolve(skillsRoot, "resolving-effect-review-feedback/references/effect-fixer-prompt.md"),
+        "utf8",
+      )
+      expect(fixerPrompt).toContain("HarnessTierTopology.decide")
+      expect(fixerPrompt).toContain("SelfDogfooding.decide")
+      expect(fixerPrompt).toContain("impure-service-tier-import")
+      expect(fixerPrompt).toContain("no-node-builtins-outside-infra")
+      expect(fixerPrompt).toContain("no-global-mutable-cache")
+      expect(fixerPrompt).toContain("facade-star-reexport")
+      expect(fixerPrompt).toContain("bare-cause-has-interrupts")
+      expect(fixerPrompt).toContain("isPureInterruptCause")
+      expect(fixerPrompt).toContain("unbranded-contract-schema")
+
+      const compoundingSkill = readFileSync(
+        resolve(skillsRoot, "compounding-effect-learnings/SKILL.md"),
+        "utf8",
+      )
+      expect(compoundingSkill).toContain("@harness/contract")
+      expect(compoundingSkill).toContain("HarnessTierTopology.decide")
+      expect(compoundingSkill).toContain("SelfDogfooding.decide")
+      expect(compoundingSkill).toContain(".harness/verify-stamp.json")
+      expect(compoundingSkill).toContain("facade-star-reexport")
+
+      const adversarialPlanLens = readFileSync(
+        resolve(skillsRoot, "planning-effect-skeletons/references/adversarial-plan-lens.md"),
+        "utf8",
+      )
+      expect(adversarialPlanLens).toContain("HarnessTierTopology.decide")
+      expect(adversarialPlanLens).toContain("SelfDogfooding.decide")
+      expect(adversarialPlanLens).toContain("`type:core`, `type:domain`, and `type:infra`")
+
+      const reviewAndShipping = readFileSync(
+        resolve(skillsRoot, "effect-lfg/references/review-and-shipping.md"),
+        "utf8",
+      )
+      expect(reviewAndShipping).toContain("8-Point Anti-Rubber-Stamp Deep Audit")
+      expect(reviewAndShipping).toContain("HarnessTierTopology.decide")
+      expect(reviewAndShipping).toContain("SelfDogfooding.decide")
     }
+
+    const servicesAndLayersMd = readFileSync(
+      resolve(repoRoot, "agent-patterns/services-and-layers.md"),
+      "utf8",
+    )
+    expect(servicesAndLayersMd).toContain("HarnessTierTopology.decide")
+    expect(servicesAndLayersMd).toContain("impure-service-tier-import")
+    expect(servicesAndLayersMd).toContain("no-layer-build-in-layer-effect")
+    expect(servicesAndLayersMd).not.toContain("static readonly Live = Layer.effect")
+
+    const errorsMd = readFileSync(resolve(repoRoot, "agent-patterns/errors.md"), "utf8")
+    expect(errorsMd).toContain("unbranded-contract-schema")
+    expect(errorsMd).toContain('Schema.brand("UserId")')
+
+    const resourcesScopeMd = readFileSync(
+      resolve(repoRoot, "agent-patterns/resources-scope.md"),
+      "utf8",
+    )
+    expect(resourcesScopeMd).toContain("bare-cause-has-interrupts")
+    expect(resourcesScopeMd).toContain("isPureInterruptCause")
+    expect(resourcesScopeMd).toContain("no-node-builtins-outside-infra")
   })
 })

@@ -2,38 +2,46 @@
 
 Context.Service defines service interfaces and tags in Effect v4, while Layer manages dependency injection, resource lifetimes, and environment composition.
 
-## Context.Service in Effect v4
+## Context.Service in Effect v4 (`type:service` Port Purity)
 
-In Effect v4, the standard way to define a service capability is to extend `Context.Service`. Pass the service class as the first type parameter and the service interface as the second:
+In Effect v4, the standard way to define a service capability port in `type:service` (`libs/*/service/src/**`) is to extend `Context.Service`. Pass the service class as the first type parameter and the service interface as the second.
+
+> [!IMPORTANT]
+> **5-Tier Hexagonal Port Purity (`HarnessTierTopology.decide` — `impure-service-tier-import`):**
+> `type:service` packages (`libs/*/service/src/**`) declare pure `Context.Service` interfaces only (importing `effect`, `type:contract`, and `type:service`). Never construct `Layer.*` (`Layer.effect`, `Layer.succeed`, `Layer.scoped`) or import `node:*` / `type:core` / `type:domain` / `type:infra` inside `type:service` source files! Place live `Layer` implementations in `type:infra` (`libs/*/infra/src/**`) and test `Layer`s in `test/`.
 
 ```ts
-import { Context, Effect, Layer, Schema } from "effect"
-
-export class DatabaseError extends Schema.TaggedError<DatabaseError>()("DatabaseError", {
-  message: Schema.String,
-}) {}
+// In libs/sample/service/src/database.ts (type:service — pure port only)
+import { Context, Effect } from "effect"
+import { DatabaseError, SqlQueryText } from "@harness/sample-contract"
 
 export interface DatabaseService {
-  readonly query: (sql: string) => Effect.Effect<ReadonlyArray<unknown>, DatabaseError>
+  readonly query: (sql: SqlQueryText) => Effect.Effect<ReadonlyArray<unknown>, DatabaseError>
 }
 
-export class Database extends Context.Service<Database, DatabaseService>()("myapp/Database") {
-  // Static layer providing the default or live implementation
-  static readonly Live = Layer.effect(
-    Database,
-    Effect.gen(function* () {
-      const query = Effect.fn("Database.query")(function* (sql: string) {
-        yield* Effect.logInfo(`Executing SQL: ${sql}`)
-        return [{ id: 1, name: "Sample Item" }]
-      })
-
-      return Database.of({ query })
-    }),
-  )
-}
+export class Database extends Context.Service<Database, DatabaseService>()("myapp/Database") {}
 
 // Access the service interface type when needed
 export type DatabaseInstance = Database["Service"]
+```
+
+```ts
+// In libs/sample/infra/src/database-live.ts (type:infra — live Layer implementation)
+import { Effect, Layer } from "effect"
+import { SqlQueryText } from "@harness/sample-contract"
+import { Database } from "@harness/sample-service"
+
+export const DatabaseLive = Layer.effect(
+  Database,
+  Effect.gen(function* () {
+    const query = Effect.fn("Database.query")(function* (sql: SqlQueryText) {
+      yield* Effect.logInfo(`Executing SQL: ${sql}`)
+      return [{ id: 1, name: "Sample Item" }]
+    })
+
+    return Database.of({ query })
+  }),
+)
 ```
 
 ## Consuming Services in Domain Code
@@ -108,9 +116,11 @@ export const SharedServices = Layer.merge(Database.Live, Cache.Live)
 export const ComposedWithDeps = ServiceLayer.pipe(Layer.provideMerge(Database.Live))
 ```
 
-## Architectural Guidelines
+## Architectural Guidelines (`HarnessTierTopology.decide` & `SelfDogfooding.decide`)
 
-- Service definitions live in `type:service` libraries.
-- Live implementations and infrastructure wiring live in `type:infra` libraries.
-- Domain logic (`type:domain`) depends on service interfaces via `R`, never directly on concrete implementations or database drivers.
+- **Single Canonical `type:*` Tag (`dual-contract-tier-tag`):** Every workspace package declares exactly one `type:*` Nx tag (`type:contract`, `type:service`, `type:core`, `type:domain`, `type:infra`, or `type:app`).
+- **Pure Service Ports (`impure-service-tier-import`):** Service definitions live in `type:service` libraries with zero `Layer.*` constructors and zero `node:*` imports.
+- **Live Layers in `type:infra` (`no-layer-build-in-layer-effect`):** Live implementations and infrastructure wiring live in `type:infra` libraries. Never invoke `Layer.build` inside `Layer.effect` (`no-layer-build-in-layer-effect`); compose dependencies with `Layer.provide` / `Layer.provideMerge` or `Layer.scoped`.
+- **Explicit Barrel Exports (`facade-star-reexport`):** All `libs/**/src/index.ts` and `apps/**/src/index.ts` barrels must use explicit named exports (`export { ... } from "..."`), never `export * from "..."`.
+- **Domain & Core Purity:** Domain logic (`type:domain`) and generic engines (`type:core`) depend on service interfaces via `R`, never directly on concrete implementations, `node:*` I/O built-ins (`no-node-builtins-outside-infra`), `process.env` (`process-env-outside-infra-or-app`), or database drivers.
 - **No zero-argument `() => Effect` or `() => Layer` thunks (`effect(lazyEffect)` / `TS377091`):** `Effect` and `Layer` are already lazy blueprints. If a `Context.Service` member takes zero arguments, declare it as `readonly listAll: Effect.Effect<ReadonlyArray<Item>>` (not `() => Effect.Effect<...>`), and export parameterless layers as `export const MyLayer: Layer.Layer<...>` constants.

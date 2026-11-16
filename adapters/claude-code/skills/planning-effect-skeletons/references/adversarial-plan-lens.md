@@ -32,12 +32,13 @@ Concurrent clients mutating the same state entity will race.
 - [ ] **Typed Concurrency Failure in `E`:** Does the use case or service method signature declare `OptimisticConcurrencyError` (or equivalent `ConflictError`) in its `E` union? If omitted from `E`, implementers will either swallow the conflict or crash the process via `Effect.die`.
 - [ ] **Projection Ordering Errors:** Do event projection handlers account for out-of-order delivery with a typed sequencing error (e.g. `OutOfOrderEventError`) in `E`?
 
-### 4. Decider Purity & Zero Layer Enforcement (`WHILE` Clauses)
+### 4. Decider Purity & 5-Tier Hexagonal Port Enforcement (`WHILE` Clauses, `HarnessTierTopology.decide` & `SelfDogfooding.decide`)
 
 EARS `WHILE <state>` clauses describe business policies and state transitions.
 
 - [ ] **Zero Dependencies (`R = never`):** Verify that every decider function (`*.decide`) has `R = never` in its `stub<A, E, never>()` return type.
 - [ ] **Deterministic Inputs:** Ensure deciders do not access clocks, random numbers, or environment globals directly. All state and environmental inputs must be passed explicitly as arguments.
+- [ ] **5-Tier Hexagonal Purity (`HarnessTierTopology.decide` & `SelfDogfooding.decide`):** Verify `type:contract` has `0` workspace dependencies (`effect` only; `forbidden-contract-dependency`), `type:service` contains pure `Context.Service` ports only with zero `Layer.*` constructors or `node:*` imports (`impure-service-tier-import`), all `index.ts` barrels use explicit named exports (`facade-star-reexport` — no `export *`), and non-infra skeletons (`type:core`, `type:domain`, `type:app`) import zero `node:*` built-ins outside `{path, path/posix, path/win32, crypto, url}` (`no-node-builtins-outside-infra`).
 
 ### 5. Skeleton `E`-Channel Completeness (Preventing the `Effect.orDie` Trap)
 
@@ -59,7 +60,7 @@ Skeletons often declare optimistic, domain-only errors while ignoring operationa
    node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts plan-check
    ```
 2. **Review Skeleton Signatures:**
-   Check the `E` and `R` channels across all `stub<A, E, R>()` declarations in `type:domain` and `type:infra`.
+   Check the `E` and `R` channels across all `stub<A, E, R>()` declarations in `type:core`, `type:domain`, and `type:infra`.
 3. **Dispatch `@effect-adversarial-reviewer`:**
    For high-risk, stateful, or event-sourced designs, invoke the adversarial specialist agent on the skeleton files:
    ```ts
