@@ -3,6 +3,11 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
+import {
+  CANONICAL_MCP_TOOL_NAMES,
+  SelfDogfoodingRuleId,
+  TierTopologyRuleId,
+} from "@harness/contract"
 
 describe("Claude Code adapter & Omnigraph Cedar policy", () => {
   const repoRoot = resolve(import.meta.dirname, "../../..")
@@ -503,215 +508,369 @@ describe("Antigravity adapter & plugin configuration", () => {
     }
   })
 
-  it("enforces 5-tier hexagonal architecture invariants (ADR-0013 / HarnessTierTopology.decide / SelfDogfooding.decide) across agent-patterns/planning.md, skills, references, and reviewer personas in both adapters", () => {
-    const planningMd = readFileSync(resolve(repoRoot, "agent-patterns/planning.md"), "utf8")
-    expect(planningMd).not.toContain("`type:infra` / `type:service`")
-    expect(planningMd).toContain("`type:infra` & `type:core`")
-    expect(planningMd).toContain("HarnessTierTopology.decide")
-    expect(planningMd).toContain("SelfDogfooding.decide")
-    expect(planningMd).toContain("impure-service-tier-import")
-    expect(planningMd).toContain("facade-star-reexport")
+  it("enforces 5-tier hexagonal architecture and canonical rule/tool registries across skills, references, and reviewer personas in both adapters", () => {
+    const registeredRules = new Set<string>([
+      ...SelfDogfoodingRuleId.literals,
+      ...TierTopologyRuleId.literals,
+    ])
+    const canonicalTopologyRules = [
+      "dual-contract-tier-tag",
+      "impure-service-tier-import",
+      "forbidden-contract-dependency",
+      "forbidden-service-dependency",
+      "undeclared-workspace-dependency",
+    ] as const
+    const canonicalDogfoodRules = [
+      "no-node-builtins-outside-infra",
+      "no-global-mutable-cache",
+      "process-env-outside-infra-or-app",
+      "facade-star-reexport",
+      "bare-cause-has-interrupts",
+      "catch-cause-interrupts-only",
+      "no-layer-build-in-layer-effect",
+      "no-double-wrapped-effect-fn",
+      "dynamic-harness-import",
+    ] as const
+    for (const ruleId of [...canonicalTopologyRules, ...canonicalDogfoodRules]) {
+      expect(registeredRules.has(ruleId), `Rule ${ruleId} must exist in @harness/contract`).toBe(
+        true,
+      )
+    }
+    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(15)
+
+    const skillExpectations: ReadonlyArray<{
+      readonly relPath: string
+      readonly requiredTokens: ReadonlyArray<string>
+      readonly bannedTokens: ReadonlyArray<string>
+    }> = [
+      {
+        relPath: "specifying-ears-with-effect/SKILL.md",
+        requiredTokens: ["libs/<scope>/core/src/index.ts", "5 hexagonal Nx tiers"],
+        bannedTokens: ["across 4 Nx tiers", "Layer.scoped", "Schema.TaggedErrorClass"],
+      },
+      {
+        relPath: "specifying-ears-with-effect/references/ears-patterns.md",
+        requiredTokens: ["`type:domain` / `type:core`"],
+        bannedTokens: ["Layer.scoped", "Schema.TaggedErrorClass"],
+      },
+      {
+        relPath: "planning-effect-skeletons/SKILL.md",
+        requiredTokens: [
+          "HarnessTierTopology.decide",
+          "SelfDogfooding.decide",
+          "dual-contract-tier-tag",
+          "impure-service-tier-import",
+          "no-node-builtins-outside-infra",
+          "no-global-mutable-cache",
+          "process-env-outside-infra-or-app",
+          "facade-star-reexport",
+        ],
+        bannedTokens: ["Layer.scoped", "Schema.TaggedErrorClass"],
+      },
+      {
+        relPath: "planning-effect-skeletons/references/adr-guidelines.md",
+        requiredTokens: ["`type:core` / `type:domain`"],
+        bannedTokens: ["Layer.scoped", "Schema.TaggedErrorClass"],
+      },
+      {
+        relPath: "planning-effect-skeletons/references/adversarial-plan-lens.md",
+        requiredTokens: [
+          "HarnessTierTopology.decide",
+          "SelfDogfooding.decide",
+          "`type:core`, `type:domain`, and `type:infra`",
+        ],
+        bannedTokens: ["Layer.scoped", "Schema.TaggedErrorClass"],
+      },
+      {
+        relPath: "executing-effect-stubs/SKILL.md",
+        requiredTokens: [
+          "8-Point Anti-Rubber-Stamp",
+          "5 hexagonal",
+          "no-node-builtins-outside-infra",
+          "no-global-mutable-cache",
+          "facade-star-reexport",
+        ],
+        bannedTokens: ["7-Point Anti-Rubber-Stamp", "all 4 layers", "Layer.scoped"],
+      },
+      {
+        relPath: "executing-effect-stubs/references/dispatch-reviewers.md",
+        requiredTokens: [
+          "8-Point Anti-Rubber-Stamp",
+          "HarnessTierTopology.decide",
+          "SelfDogfooding.decide",
+        ],
+        bannedTokens: ["7-Point Anti-Rubber-Stamp", "Layer.scoped"],
+      },
+      {
+        relPath: "executing-effect-stubs/references/personas/ears-test-reviewer.md",
+        requiredTokens: [
+          "## MCP Tooling & Navigation Protocol",
+          "harness_structural_search",
+          "8-Point Anti-Rubber-Stamp Deep Audit",
+          "`type:infra` Guard-Deletion Falsification",
+        ],
+        bannedTokens: ["grep_search", "7-Point Anti-Rubber-Stamp Deep Audit"],
+      },
+      {
+        relPath: "executing-effect-stubs/references/personas/adversarial-reviewer.md",
+        requiredTokens: ["## MCP Tooling & Navigation Protocol", "harness_structural_search"],
+        bannedTokens: ["grep_search"],
+      },
+      {
+        relPath: "executing-effect-stubs/references/personas/security-reviewer.md",
+        requiredTokens: ["## MCP Tooling & Navigation Protocol", "harness_structural_search"],
+        bannedTokens: ["grep_search"],
+      },
+      {
+        relPath: "executing-effect-stubs/references/personas/reliability-reviewer.md",
+        requiredTokens: ["## MCP Tooling & Navigation Protocol", "harness_structural_search"],
+        bannedTokens: ["grep_search"],
+      },
+      {
+        relPath: "effect-lfg/SKILL.md",
+        requiredTokens: ["HarnessTierTopology.decide", "SelfDogfooding.decide"],
+        bannedTokens: ["Layer.scoped", "Schema.TaggedErrorClass"],
+      },
+      {
+        relPath: "effect-lfg/references/review-and-shipping.md",
+        requiredTokens: [
+          "8-Point Anti-Rubber-Stamp Deep Audit",
+          "HarnessTierTopology.decide",
+          "SelfDogfooding.decide",
+          "ontology check --strict",
+        ],
+        bannedTokens: ["Layer.scoped", "Schema.TaggedErrorClass"],
+      },
+      {
+        relPath: "effect-harness/SKILL.md",
+        requiredTokens: [
+          "### 2.1 MCP-First Tooling Preference",
+          "during development only",
+          "HarnessTierTopology.decide",
+          "SelfDogfooding.decide",
+          "{path, path/posix, path/win32, crypto, url}",
+          "Phase 5 Step 0",
+          "ontology check --strict",
+          ...CANONICAL_MCP_TOOL_NAMES,
+        ],
+        bannedTokens: [
+          "### 1.3 MCP-First Tooling Preference",
+          "Layer.scoped",
+          "Schema.TaggedErrorClass",
+        ],
+      },
+      {
+        relPath: "resolving-effect-review-feedback/SKILL.md",
+        requiredTokens: [
+          "HarnessTierTopology.decide",
+          "SelfDogfooding.decide",
+          "8-Point Anti-Rubber-Stamp",
+          ".harness/verify-stamp.json",
+          "Phase 5 Metric Sync Matrix",
+          "PHASE_5_STEP_0_WC_L",
+          "ontology check --strict",
+          "impure-service-tier-import",
+          "facade-star-reexport",
+          "bare-cause-has-interrupts",
+          "unbranded-contract-schema",
+        ],
+        bannedTokens: ["Layer.scoped", "Schema.TaggedErrorClass", "7-Point Anti-Rubber-Stamp"],
+      },
+      {
+        relPath: "resolving-effect-review-feedback/references/evaluation-rubric.md",
+        requiredTokens: [
+          "HarnessTierTopology.decide",
+          "SelfDogfooding.decide",
+          ...canonicalTopologyRules,
+          ...canonicalDogfoodRules,
+          "isPureInterruptCause",
+          "unbranded-contract-schema",
+          "contract-test-effect-vitest-import",
+          "PHASE_5_STEP_0_WC_L",
+        ],
+        bannedTokens: [
+          "Layer.scoped",
+          "Schema.TaggedErrorClass",
+          "!Cause.hasDies(cause)` or `Cause.hasInterruptsOnly(cause)`",
+        ],
+      },
+      {
+        relPath: "resolving-effect-review-feedback/references/effect-fixer-prompt.md",
+        requiredTokens: [
+          "HarnessTierTopology.decide",
+          "SelfDogfooding.decide",
+          "impure-service-tier-import",
+          "no-node-builtins-outside-infra",
+          "no-global-mutable-cache",
+          "facade-star-reexport",
+          "bare-cause-has-interrupts",
+          "isPureInterruptCause",
+          "unbranded-contract-schema",
+          "contract-test-effect-vitest-import",
+        ],
+        bannedTokens: ["Layer.scoped", "Schema.TaggedErrorClass"],
+      },
+      {
+        relPath: "compounding-effect-learnings/SKILL.md",
+        requiredTokens: [
+          "@harness/contract",
+          "HarnessTierTopology.decide",
+          "SelfDogfooding.decide",
+          ".harness/verify-stamp.json",
+          "facade-star-reexport",
+          "ontology check --strict",
+        ],
+        bannedTokens: ["Layer.scoped", "Schema.TaggedErrorClass"],
+      },
+    ]
 
     const skillDirs = [
       resolve(pluginDir, "skills"),
       resolve(repoRoot, "adapters/claude-code/skills"),
     ]
 
+    const failures: Array<string> = []
     for (const skillsRoot of skillDirs) {
-      const specifyingSkill = readFileSync(
-        resolve(skillsRoot, "specifying-ears-with-effect/SKILL.md"),
-        "utf8",
-      )
-      expect(specifyingSkill).toContain("libs/<scope>/core/src/index.ts")
-      expect(specifyingSkill).toContain("5 hexagonal Nx tiers")
-      expect(specifyingSkill).not.toContain("across 4 Nx tiers")
-
-      const earsPatterns = readFileSync(
-        resolve(skillsRoot, "specifying-ears-with-effect/references/ears-patterns.md"),
-        "utf8",
-      )
-      expect(earsPatterns).toContain("`type:domain` / `type:core`")
-
-      const planningSkill = readFileSync(
-        resolve(skillsRoot, "planning-effect-skeletons/SKILL.md"),
-        "utf8",
-      )
-      expect(planningSkill).toContain("HarnessTierTopology.decide")
-      expect(planningSkill).toContain("SelfDogfooding.decide")
-      expect(planningSkill).toContain("dual-contract-tier-tag")
-      expect(planningSkill).toContain("impure-service-tier-import")
-      expect(planningSkill).toContain("no-node-builtins-outside-infra")
-      expect(planningSkill).toContain("no-global-mutable-cache")
-      expect(planningSkill).toContain("process-env-outside-infra-or-app")
-      expect(planningSkill).toContain("facade-star-reexport")
-
-      const adrGuidelines = readFileSync(
-        resolve(skillsRoot, "planning-effect-skeletons/references/adr-guidelines.md"),
-        "utf8",
-      )
-      expect(adrGuidelines).toContain("`type:core` / `type:domain`")
-
-      const executingSkill = readFileSync(
-        resolve(skillsRoot, "executing-effect-stubs/SKILL.md"),
-        "utf8",
-      )
-      expect(executingSkill).toContain("8-Point Anti-Rubber-Stamp")
-      expect(executingSkill).not.toContain("7-Point Anti-Rubber-Stamp")
-      expect(executingSkill).not.toContain("all 4 layers")
-      expect(executingSkill).toContain("5 hexagonal")
-      expect(executingSkill).toContain("no-node-builtins-outside-infra")
-      expect(executingSkill).toContain("no-global-mutable-cache")
-      expect(executingSkill).toContain("facade-star-reexport")
-
-      const dispatchReviewers = readFileSync(
-        resolve(skillsRoot, "executing-effect-stubs/references/dispatch-reviewers.md"),
-        "utf8",
-      )
-      expect(dispatchReviewers).toContain("8-Point Anti-Rubber-Stamp")
-      expect(dispatchReviewers).not.toContain("7-Point Anti-Rubber-Stamp")
-      expect(dispatchReviewers).toContain("HarnessTierTopology.decide")
-      expect(dispatchReviewers).toContain("SelfDogfooding.decide")
-
-      const lfgSkill = readFileSync(resolve(skillsRoot, "effect-lfg/SKILL.md"), "utf8")
-      expect(lfgSkill).toContain("HarnessTierTopology.decide")
-      expect(lfgSkill).toContain("SelfDogfooding.decide")
-
-      const personaFiles = [
-        "ears-test-reviewer.md",
-        "adversarial-reviewer.md",
-        "security-reviewer.md",
-        "reliability-reviewer.md",
-      ]
-      for (const personaFile of personaFiles) {
-        const personaPath = resolve(
-          skillsRoot,
-          "executing-effect-stubs/references/personas",
-          personaFile,
-        )
-        const personaContent = readFileSync(personaPath, "utf8")
-        expect(
-          personaContent,
-          `Expected ${personaPath} not to reference nonexistent grep_search`,
-        ).not.toContain("grep_search")
-        expect(personaContent, `Expected ${personaPath} to contain MCP protocol header`).toContain(
-          "## MCP Tooling & Navigation Protocol",
-        )
-        expect(
-          personaContent,
-          `Expected ${personaPath} to reference harness_structural_search`,
-        ).toContain("harness_structural_search")
+      for (const spec of skillExpectations) {
+        const fullPath = resolve(skillsRoot, spec.relPath)
+        const content = readFileSync(fullPath, "utf8")
+        for (const req of spec.requiredTokens) {
+          if (!content.includes(req)) {
+            failures.push(`Missing required token "${req}" in ${fullPath}`)
+          }
+        }
+        for (const banned of spec.bannedTokens) {
+          if (content.includes(banned)) {
+            failures.push(`Found banned stale token "${banned}" in ${fullPath}`)
+          }
+        }
       }
-
-      const earsPersona = readFileSync(
-        resolve(skillsRoot, "executing-effect-stubs/references/personas/ears-test-reviewer.md"),
-        "utf8",
-      )
-      expect(earsPersona).toContain("8-Point Anti-Rubber-Stamp Deep Audit")
-      expect(earsPersona).not.toContain("7-Point Anti-Rubber-Stamp Deep Audit")
-      expect(earsPersona).toContain("`type:infra` Guard-Deletion Falsification")
-
-      const effectHarnessSkill = readFileSync(
-        resolve(skillsRoot, "effect-harness/SKILL.md"),
-        "utf8",
-      )
-      expect(effectHarnessSkill).toContain("HarnessTierTopology.decide")
-      expect(effectHarnessSkill).toContain("SelfDogfooding.decide")
-      expect(effectHarnessSkill).toContain("harness_lsp_diagnostics")
-      expect(effectHarnessSkill).toContain("harness_ontology_check")
-      expect(effectHarnessSkill).toContain("harness_gq_query")
-      expect(effectHarnessSkill).toContain("harness_telemetry_report")
-
-      const resolvingSkill = readFileSync(
-        resolve(skillsRoot, "resolving-effect-review-feedback/SKILL.md"),
-        "utf8",
-      )
-      expect(resolvingSkill).toContain("HarnessTierTopology.decide")
-      expect(resolvingSkill).toContain("SelfDogfooding.decide")
-      expect(resolvingSkill).toContain("8-Point Anti-Rubber-Stamp")
-      expect(resolvingSkill).toContain(".harness/verify-stamp.json")
-      expect(resolvingSkill).toContain("impure-service-tier-import")
-      expect(resolvingSkill).toContain("facade-star-reexport")
-      expect(resolvingSkill).toContain("bare-cause-has-interrupts")
-      expect(resolvingSkill).toContain("unbranded-contract-schema")
-
-      const evaluationRubric = readFileSync(
-        resolve(skillsRoot, "resolving-effect-review-feedback/references/evaluation-rubric.md"),
-        "utf8",
-      )
-      expect(evaluationRubric).toContain("HarnessTierTopology.decide")
-      expect(evaluationRubric).toContain("SelfDogfooding.decide")
-      expect(evaluationRubric).toContain("impure-service-tier-import")
-      expect(evaluationRubric).toContain("no-node-builtins-outside-infra")
-      expect(evaluationRubric).toContain("no-global-mutable-cache")
-      expect(evaluationRubric).toContain("process-env-outside-infra-or-app")
-      expect(evaluationRubric).toContain("facade-star-reexport")
-      expect(evaluationRubric).toContain("bare-cause-has-interrupts")
-      expect(evaluationRubric).toContain("isPureInterruptCause")
-      expect(evaluationRubric).toContain("unbranded-contract-schema")
-      expect(evaluationRubric).not.toContain(
-        "!Cause.hasDies(cause)` or `Cause.hasInterruptsOnly(cause)`",
-      )
-
-      const fixerPrompt = readFileSync(
-        resolve(skillsRoot, "resolving-effect-review-feedback/references/effect-fixer-prompt.md"),
-        "utf8",
-      )
-      expect(fixerPrompt).toContain("HarnessTierTopology.decide")
-      expect(fixerPrompt).toContain("SelfDogfooding.decide")
-      expect(fixerPrompt).toContain("impure-service-tier-import")
-      expect(fixerPrompt).toContain("no-node-builtins-outside-infra")
-      expect(fixerPrompt).toContain("no-global-mutable-cache")
-      expect(fixerPrompt).toContain("facade-star-reexport")
-      expect(fixerPrompt).toContain("bare-cause-has-interrupts")
-      expect(fixerPrompt).toContain("isPureInterruptCause")
-      expect(fixerPrompt).toContain("unbranded-contract-schema")
-
-      const compoundingSkill = readFileSync(
-        resolve(skillsRoot, "compounding-effect-learnings/SKILL.md"),
-        "utf8",
-      )
-      expect(compoundingSkill).toContain("@harness/contract")
-      expect(compoundingSkill).toContain("HarnessTierTopology.decide")
-      expect(compoundingSkill).toContain("SelfDogfooding.decide")
-      expect(compoundingSkill).toContain(".harness/verify-stamp.json")
-      expect(compoundingSkill).toContain("facade-star-reexport")
-
-      const adversarialPlanLens = readFileSync(
-        resolve(skillsRoot, "planning-effect-skeletons/references/adversarial-plan-lens.md"),
-        "utf8",
-      )
-      expect(adversarialPlanLens).toContain("HarnessTierTopology.decide")
-      expect(adversarialPlanLens).toContain("SelfDogfooding.decide")
-      expect(adversarialPlanLens).toContain("`type:core`, `type:domain`, and `type:infra`")
-
-      const reviewAndShipping = readFileSync(
-        resolve(skillsRoot, "effect-lfg/references/review-and-shipping.md"),
-        "utf8",
-      )
-      expect(reviewAndShipping).toContain("8-Point Anti-Rubber-Stamp Deep Audit")
-      expect(reviewAndShipping).toContain("HarnessTierTopology.decide")
-      expect(reviewAndShipping).toContain("SelfDogfooding.decide")
     }
 
-    const servicesAndLayersMd = readFileSync(
-      resolve(repoRoot, "agent-patterns/services-and-layers.md"),
+    const claudeResolvingSkill = readFileSync(
+      resolve(repoRoot, "adapters/claude-code/skills/resolving-effect-review-feedback/SKILL.md"),
       "utf8",
     )
-    expect(servicesAndLayersMd).toContain("HarnessTierTopology.decide")
-    expect(servicesAndLayersMd).toContain("impure-service-tier-import")
-    expect(servicesAndLayersMd).toContain("no-layer-build-in-layer-effect")
-    expect(servicesAndLayersMd).not.toContain("static readonly Live = Layer.effect")
-
-    const errorsMd = readFileSync(resolve(repoRoot, "agent-patterns/errors.md"), "utf8")
-    expect(errorsMd).toContain("unbranded-contract-schema")
-    expect(errorsMd).toContain('Schema.brand("UserId")')
-
-    const resourcesScopeMd = readFileSync(
-      resolve(repoRoot, "agent-patterns/resources-scope.md"),
+    const claudeFixerPrompt = readFileSync(
+      resolve(
+        repoRoot,
+        "adapters/claude-code/skills/resolving-effect-review-feedback/references/effect-fixer-prompt.md",
+      ),
       "utf8",
     )
-    expect(resourcesScopeMd).toContain("bare-cause-has-interrupts")
-    expect(resourcesScopeMd).toContain("isPureInterruptCause")
-    expect(resourcesScopeMd).toContain("no-node-builtins-outside-infra")
+    expect(claudeResolvingSkill).not.toContain('model: "flash"')
+    expect(claudeFixerPrompt).not.toContain('model: "flash"')
+    expect(failures).toEqual([])
+  })
+
+  it("enforces Phase 5 Step 0 metric sync, stamp-safe ordering, and 15-tool MCP catalog across README.md and adapter READMEs", () => {
+    const rootReadme = readFileSync(resolve(repoRoot, "README.md"), "utf8")
+    const agyReadme = readFileSync(resolve(pluginDir, "README.md"), "utf8")
+    const claudeReadme = readFileSync(resolve(repoRoot, "adapters/claude-code/README.md"), "utf8")
+
+    expect(rootReadme).toContain("Phase 5 Metric Sync Matrix")
+    expect(rootReadme).toContain("harness ontology check --strict")
+    expect(rootReadme).not.toContain("Schema.TaggedErrorClass")
+    expect(rootReadme).not.toContain("Layer.scoped")
+    expect(rootReadme).not.toContain("{ writeReport? }")
+
+    for (const readme of [agyReadme, claudeReadme]) {
+      expect(readme).toContain("exposing 15 tools")
+      for (const toolName of CANONICAL_MCP_TOOL_NAMES) {
+        expect(readme).toContain(toolName)
+      }
+    }
+    for (const toolName of CANONICAL_MCP_TOOL_NAMES) {
+      expect(rootReadme).toContain(toolName)
+    }
+  })
+
+  it("enforces Effect v4 and 5-tier hexagonal purity across agent-patterns/*.md recipes and bans removed Effect v3 APIs", () => {
+    const patternExpectations: ReadonlyArray<{
+      readonly file: string
+      readonly requiredTokens: ReadonlyArray<string>
+      readonly bannedTokens: ReadonlyArray<string>
+    }> = [
+      {
+        file: "agent-patterns/planning.md",
+        requiredTokens: [
+          "`type:infra` & `type:core`",
+          "HarnessTierTopology.decide",
+          "SelfDogfooding.decide",
+          "impure-service-tier-import",
+          "facade-star-reexport",
+        ],
+        bannedTokens: ["`type:infra` / `type:service`", "Layer.scoped", "Schema.TaggedErrorClass"],
+      },
+      {
+        file: "agent-patterns/services-and-layers.md",
+        requiredTokens: [
+          "HarnessTierTopology.decide",
+          "impure-service-tier-import",
+          "no-layer-build-in-layer-effect",
+          "DatabaseLive",
+          "SqlQueryText",
+        ],
+        bannedTokens: [
+          "static readonly Live = Layer",
+          "Database.Live",
+          "Config.Live",
+          "Cache.Live",
+          "export const ManagedPoolLive = Layer.scoped",
+        ],
+      },
+      {
+        file: "agent-patterns/errors.md",
+        requiredTokens: [
+          "unbranded-contract-schema",
+          'Schema.brand("UserId")',
+          "Schema.TaggedError",
+        ],
+        bannedTokens: ["Schema.TaggedErrorClass"],
+      },
+      {
+        file: "agent-patterns/resources-scope.md",
+        requiredTokens: [
+          "bare-cause-has-interrupts",
+          "catch-cause-interrupts-only",
+          "isPureInterruptCause",
+          "no-node-builtins-outside-infra",
+          "SqlQueryText",
+          "Result.try",
+        ],
+        bannedTokens: [
+          "export const ConnectionPoolLive = Layer.scoped",
+          "execute: (query: string)",
+          "try {\n            fs.unlinkSync",
+        ],
+      },
+      {
+        file: "agent-patterns/pattern-matching.md",
+        requiredTokens: ["Schema.TaggedError"],
+        bannedTokens: ["Schema.TaggedErrorClass"],
+      },
+      {
+        file: "agent-patterns/README.md",
+        requiredTokens: ["Schema.TaggedError", "Layer.effect"],
+        bannedTokens: ["Schema.TaggedErrorClass", "Layer.scoped"],
+      },
+    ]
+
+    const failures: Array<string> = []
+    for (const spec of patternExpectations) {
+      const fullPath = resolve(repoRoot, spec.file)
+      const content = readFileSync(fullPath, "utf8")
+      for (const req of spec.requiredTokens) {
+        if (!content.includes(req)) {
+          failures.push(`Missing required token "${req}" in ${spec.file}`)
+        }
+      }
+      for (const banned of spec.bannedTokens) {
+        if (content.includes(banned)) {
+          failures.push(`Found banned stale token "${banned}" in ${spec.file}`)
+        }
+      }
+    }
+    expect(failures).toEqual([])
   })
 })

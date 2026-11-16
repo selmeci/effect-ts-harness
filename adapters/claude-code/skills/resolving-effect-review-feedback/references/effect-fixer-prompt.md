@@ -1,6 +1,6 @@
 # Effect Fixer Subagent Prompt Template & Contract
 
-This document specifies the exact dispatch prompt and completion contract used by the orchestrator to delegate adjudicated review fixes to lightweight, package-isolated fixer subagents (`Agent` tool with `model: "flash"` / `"haiku"` and `HARNESS_WORKTREE_ID=<unit>` or git worktree isolation).
+This document specifies the exact dispatch prompt and completion contract used by the orchestrator to delegate adjudicated review fixes to lightweight, package-isolated fixer subagents (`Agent` tool with `model: "haiku"` or `"sonnet"` and `HARNESS_WORKTREE_ID=<unit>` or git worktree isolation).
 
 ---
 
@@ -53,7 +53,7 @@ Retrieved from `harness_route` (or mapped from `evaluation-rubric.md`):
 Retrieved from `harness_tests_reaching`:
 
 - Test file(s): `{TEST_FILE_PATH}`
-- Test Runner Tier Boundary:
+- Test Runner Tier Boundary (`contract-test-effect-vitest-import`):
   - In `type:contract` packages (`libs/*/contract/test/**`), import `{ describe, expect, it } from "vitest"` (NEVER `"@effect/vitest"`).
   - In `type:core`, `type:domain`, `type:infra`, and `type:app` packages, import `{ describe, expect, it } from "@effect/vitest"`.
 - Required Test Changes:
@@ -72,7 +72,7 @@ Retrieved from `harness_tests_reaching`:
 1. **Exhaustive Matching:** Always use `match(val)...exhaustive()` from `ts-pattern`. Never use `switch`, `else if`, or ternary `? :` on union discriminants (`_tag`, `Option.isSome`, `Either.isRight`, `Result.isSuccess`).
 2. **Structural Equality:** Always use `Equal.equals(a, b)` from `effect/Equal`. Never use `JSON.stringify` comparisons.
 3. **5-Tier Hexagonal & Self-Dogfooding Discipline (`HarnessTierTopology.decide` & `SelfDogfooding.decide`):**
-   - **Service Port Purity (`impure-service-tier-import`, `dual-contract-tier-tag`, `forbidden-contract-dependency`):** Never construct `Layer.*` (`Layer.succeed`, `Layer.effect`, `Layer.scoped`) or import `node:*`/`type:core`/`type:domain`/`type:infra` inside `type:service` (`libs/*/service/src/**`); `type:contract` depends on `effect` only (`0` workspace deps).
+   - **Service Port Purity (`impure-service-tier-import`, `dual-contract-tier-tag`, `forbidden-contract-dependency`):** Never construct `Layer.*` (`Layer.succeed`, `Layer.effect`, `Layer.effectDiscard`) or import `node:*`/`type:core`/`type:domain`/`type:infra` inside `type:service` (`libs/*/service/src/**`); `type:contract` depends on `effect` only (`0` workspace deps).
    - **Hexagonal Non-Infra Purity (`no-node-builtins-outside-infra`, `process-env-outside-infra-or-app`, `no-global-mutable-cache`, `impure-core-tier-import`):** Outside `type:infra` (`libs/*/infra/src/`), never import `node:*` built-ins except `{path, path/posix, path/win32, crypto, url}`. Never read `process.env` outside `type:infra`/`type:app`, and never declare module-scope mutable `let`, `Map`, `Set`, `WeakMap`, or mutated module-scope object caches in `src/` (use `@harness/service` capability ports + `ScopedCache.makeWith` / `SynchronizedRef` in `type:infra`).
    - **Explicit Barrel Exports & Layer Hygiene (`facade-star-reexport`, `dynamic-harness-import`, `no-layer-build-in-layer-effect`, `no-double-wrapped-effect-fn`, `undeclared-workspace-dependency`):** Never use `export * from` in `libs/**/src/index.ts` or `apps/**/src/index.ts` barrels (always use explicit named exports `export { ... } from "..."`), never use dynamic `import("@harness/...")`, never call `Layer.build` inside `Layer.effect`, and never wrap `Effect.gen` inside `Effect.fn`.
    - **Pure Interrupt Classification (`bare-cause-has-interrupts`):** Never use bare `Cause.hasInterrupts(cause)` or `Cause.hasInterruptsOnly(cause)` in production `src/`; always use `isPureInterruptCause(cause)` from `@harness/contract` (or `Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)`).

@@ -7,10 +7,10 @@ in `effect/Graph` and Omnigraph.
 ## Indexed Patterns
 
 1. [`planning.md`](./planning.md) — Plan-as-Code markdown template with the 16-row building block mapping and `stub<A, E, R>(...args)` skeleton pattern.
-2. [`services-and-layers.md`](./services-and-layers.md) — `Context.Service` interface definition, tags, and `Layer.effect` / `Layer.succeed` / `Layer.scoped` composition.
-3. [`errors.md`](./errors.md) — Tagged error modeling with `Schema.TaggedErrorClass` / `Data.TaggedError`, recovery combinators, and strict ban on `throw`.
+2. [`services-and-layers.md`](./services-and-layers.md) — `Context.Service` interface definition, tags, and `Layer.effect` / `Layer.succeed` / `Layer.provideMerge` composition.
+3. [`errors.md`](./errors.md) — Tagged error modeling with `Schema.TaggedError` / `Data.TaggedError`, recovery combinators, and strict ban on `throw`.
 4. [`schema.md`](./schema.md) — Input decoding, boundary validation, and serialization with `Schema.Struct`, `Schema.Class`, `Schema.Int`, and `Schema.fromJsonString`.
-5. [`resources-scope.md`](./resources-scope.md) — Safe lifecycle management and deterministic cleanup using `Scope`, `Effect.acquireRelease`, and `Layer.scoped`.
+5. [`resources-scope.md`](./resources-scope.md) — Safe lifecycle management and deterministic cleanup using `Scope`, `Effect.acquireRelease`, `Effect.addFinalizer`, and `Layer.effect`.
 6. [`concurrency.md`](./concurrency.md) — Structured concurrency with `Effect.all`, fibers, `Deferred` latches, `Queue`, and `Semaphore`.
 7. [`schedule.md`](./schedule.md) — Retries, exponential backoff, jitter, repetition, and timeouts using `Schedule` and `Effect.retry`.
 8. [`testing.md`](./testing.md) — Unit and integration testing with `@effect/vitest` (`it.effect`, `it.scoped`), test layers, and trace span recording with `@harness/ingest`.

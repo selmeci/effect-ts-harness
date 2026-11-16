@@ -693,7 +693,7 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
   }
 
   it("I-3a: handleDoctorOrSession surfaces reconcile sync failures to stderr, exitCode=1, and reconcileError", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "harness-i3a-session-"))
+    const dir = setupNonIsolatedWorkspaceDir("harness-i3a-session-")
     const prevUrl = process.env.OMNIGRAPH_URL
     const mockServer = await startFailingSyncOmnigraphServer()
     process.env.OMNIGRAPH_URL = mockServer.url
@@ -723,7 +723,7 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
   })
 
   it("I-3b: handleIngest surfaces Omnigraph sync failures with exitCode 1 (CLI) and exitCode 0 (--format=antigravity)", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "harness-i3b-ingest-"))
+    const dir = setupNonIsolatedWorkspaceDir("harness-i3b-ingest-")
     const prevUrl = process.env.OMNIGRAPH_URL
     const mockServer = await startFailingSyncOmnigraphServer()
     process.env.OMNIGRAPH_URL = mockServer.url

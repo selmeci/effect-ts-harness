@@ -19,32 +19,25 @@ import {
 
 export { isLoopbackOmnigraphUrl, isProcessPidAlive, isSafeOmnigraphPidToKill, isValidLockId }
 
-export const CLI_REPO_ROOT = (() => {
-  let curr = resolve(dirname(fileURLToPath(import.meta.url)))
-  while (curr !== dirname(curr)) {
-    if (nodeSyncHostIo.existsSync(join(curr, "pnpm-workspace.yaml"))) {
-      return curr
-    }
-    curr = dirname(curr)
-  }
-  return process.cwd()
-})()
-
-export const findWorkspaceRoot = (startDir: string = process.cwd()): string => {
+const walkUpForPnpmWorkspace = (startDir: string): string | undefined => {
   let curr = resolve(startDir)
   while (curr !== dirname(curr)) {
-    if (nodeSyncHostIo.existsSync(join(curr, "pnpm-workspace.yaml"))) {
-      return curr
-    }
+    if (nodeSyncHostIo.existsSync(join(curr, "pnpm-workspace.yaml"))) return curr
     curr = dirname(curr)
   }
-  return CLI_REPO_ROOT
+  return undefined
 }
+
+export const CLI_REPO_ROOT =
+  walkUpForPnpmWorkspace(dirname(fileURLToPath(import.meta.url))) ?? process.cwd()
+
+export const findWorkspaceRoot = (startDir: string = process.cwd()): string =>
+  walkUpForPnpmWorkspace(startDir) ?? CLI_REPO_ROOT
 
 export const resolveClusterRepoRoot = (repoRoot: string): string =>
   nodeSyncHostIo.existsSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"))
     ? repoRoot
-    : findWorkspaceRoot(repoRoot)
+    : (walkUpForPnpmWorkspace(repoRoot) ?? resolve(repoRoot))
 
 const LockJsonSchema = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
 
@@ -362,7 +355,10 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
       return false
     }
 
-    const configDir = join(clusterRepoRoot, "libs", "harness", "graph")
+    const localConfigDir = join(clusterRepoRoot, "libs", "harness", "graph")
+    const configDir = nodeSyncHostIo.existsSync(join(localConfigDir, "cluster.yaml"))
+      ? localConfigDir
+      : join(CLI_REPO_ROOT, "libs", "harness", "graph")
     const stampPath = join(clusterRootDir, ".config-stamp")
     const expectedStamp = computeOmnigraphConfigStamp(configDir)
     const currentStamp = nodeSyncHostIo.existsSync(stampPath)

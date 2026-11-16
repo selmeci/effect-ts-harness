@@ -235,6 +235,24 @@ export class CliCommandNotFoundError extends Schema.TaggedError<CliCommandNotFou
 export const McpToolName = Schema.NonEmptyString.pipe(Schema.brand("McpToolName"))
 export type McpToolName = typeof McpToolName.Type
 
+export const CANONICAL_MCP_TOOL_NAMES: ReadonlyArray<McpToolName> = [
+  McpToolName.make("harness_resolve"),
+  McpToolName.make("harness_callers"),
+  McpToolName.make("harness_callees"),
+  McpToolName.make("harness_tests_reaching"),
+  McpToolName.make("harness_structural_search"),
+  McpToolName.make("harness_route"),
+  McpToolName.make("harness_ontology_why"),
+  McpToolName.make("harness_ontology_impact"),
+  McpToolName.make("harness_ontology_check"),
+  McpToolName.make("harness_gq_query"),
+  McpToolName.make("harness_lsp_diagnostics"),
+  McpToolName.make("harness_telemetry_report"),
+  McpToolName.make("harness_graph_infer"),
+  McpToolName.make("harness_graph_complete"),
+  McpToolName.make("harness_graph_rewrite"),
+]
+
 export const McpToolInputName = Schema.String.pipe(Schema.brand("McpToolInputName"))
 export type McpToolInputName = typeof McpToolInputName.Type
 

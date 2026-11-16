@@ -4,6 +4,7 @@ import { buildDatalogAndDpoToolDescriptors } from "./datalog-and-dpo.tools.js"
 import { buildGraphNavigationToolDescriptors } from "./graph-navigation.tools.js"
 import { buildLspAndTelemetryToolDescriptors } from "./lsp-and-telemetry.tools.js"
 import {
+  CANONICAL_MCP_TOOL_NAMES,
   type McpToolExecutionError,
   McpToolInputName,
   McpToolName,
@@ -15,6 +16,7 @@ import {
 import { buildOntologyAndGqToolDescriptors } from "./ontology-and-gq.tools.js"
 
 export {
+  CANONICAL_MCP_TOOL_NAMES,
   type McpToolExecutionError,
   McpToolInputName,
   McpToolName,
@@ -72,9 +74,6 @@ const STATIC_LIVE_TOOL_DESCRIPTORS: ReadonlyArray<McpToolPluginDescriptor> =
 const STATIC_LIVE_TOOL_MAP: ReadonlyMap<string, McpToolPluginDescriptor> = new Map(
   STATIC_LIVE_TOOL_DESCRIPTORS.map((descriptor) => [descriptor.name, descriptor]),
 )
-
-export const CANONICAL_MCP_TOOL_NAMES: ReadonlyArray<McpToolName> =
-  STATIC_LIVE_TOOL_DESCRIPTORS.map((descriptor) => descriptor.name)
 
 export const McpToolRegistryLive: Layer.Layer<McpToolRegistry> = Layer.succeed(McpToolRegistry, {
   listTools: Effect.succeed(STATIC_LIVE_TOOL_DESCRIPTORS),

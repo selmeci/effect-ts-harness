@@ -6,11 +6,11 @@ This reference governs **Stage 4 (4-Lens Specialist Review & Autonomous Fix Loop
 
 ## 1. Stage 4 — 4-Lens Specialist Review & Autonomous Fix Loop
 
-Once package-isolated `flash` implementer subagents have replaced all `stub<A, E, R>()` calls and passed package-level verification (`CI=true pnpm nx run <project>:verify`):
+Once package-isolated `haiku` implementer subagents have replaced all `stub<A, E, R>()` calls and passed package-level verification (`CI=true pnpm nx run <project>:verify`):
 
 ### Step 4.1 — Dispatch Parallel Specialist Review Lenses (Whole Git Diff)
 
-Select and invoke the read-only specialist review subagents (`Model: "flash"`, `Workspace: "share"`) across the **entire git diff (`git diff main...HEAD`)** — including any modified harness gates (`libs/harness/**`) and linter plugins (`tools/oxlint/**`), not just domain packages:
+Select and invoke the read-only specialist review subagents (`model: "haiku"`, isolated worktree) across the **entire git diff (`git diff main...HEAD`)** — including any modified harness gates (`libs/harness/**`) and linter plugins (`tools/oxlint/**`), not just domain packages:
 
 1. **`effect-ears-test-reviewer` (Always & Mandatory for Core/Domain):**
    Executes the **8-Point Anti-Rubber-Stamp Deep Audit** (including Point 8: `type:infra` Guard-Deletion Falsification) and verifies 1:1 behavioral coverage between every EARS clause (`WHEN`, `IF/THEN`, `WHILE`, `WHERE`) in `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` and `@effect/vitest` assertions (`it.effect`, `it.effect.prop`, `Cause.findErrorOption`, `Equal.equals`, `checkSpanBudgets`).
@@ -29,7 +29,7 @@ Follow the adjudication rubric from `resolving-effect-review-feedback`:
 2. **Hunt AST Twins (`class-fix`):** Whenever a valid defect is confirmed, run `harness_structural_search` (`@ast-grep/napi`) across the workspace to locate and fix all identical occurrences in a single pass.
 3. **Sync Contracts, Specs & ADRs First:** If a valid fix alters a contract Schema, error tag, `Effect.fn` signature, `Context.Service` port, EARS clause, or ADR invariant, update the EARS spec / ADR first and re-run `pnpm harness plan-check` (and update `## 4. Verified Plan Topology Graph`) so `.harness/plan-graph-snapshot.json` matches the post-review implementation graph before Stage 5 (`verify -> done`).
 4. **Apply Eligible Fixes & Record Residuals:**
-   - Autonomously apply all valid `fix`, `class-fix`, and `doc-sync-fix` items (dispatching scoped `flash` fixer subagents when changes span multiple packages).
+   - Autonomously apply all valid `fix`, `class-fix`, and `doc-sync-fix` items (dispatching scoped `haiku` fixer subagents when changes span multiple packages).
    - Record any `decline-with-evidence` items or non-blocking advisory notes in a `## Residual & Declined Review Findings` section for the final PR body / closeout report.
    - If a finding exposes an unresolvable conflict with an accepted ADR or requires a destructive migration, stop and escalate.
 

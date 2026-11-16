@@ -7,10 +7,10 @@ description: Use when addressing code review feedback pasted as text (from Grok,
 
 ## Overview
 
-This skill governs central adjudication and parallel subagent execution for code review feedback across the 5-tier hexagonal Effect-TS Engineering Harness workspace (`type:contract` $\rightarrow$ `type:service` $\rightarrow$ `type:core` / `type:domain` $\rightarrow$ `type:infra` $\rightarrow$ `type:app`):
+This skill governs central adjudication and parallel subagent execution for code review feedback across the 5-tier hexagonal Effect-TS Engineering Harness workspace (`1. type:contract` $\rightarrow$ `2. type:service` $\rightarrow$ `3. type:core / type:domain` $\rightarrow$ `4. type:infra` $\rightarrow$ `5. type:app`; see [effect-harness §4](../effect-harness/SKILL.md#4-architectural-boundaries-5-tier-hexagonal-nx-taxonomy)):
 
 - The **Orchestrator** inventories every sub-bullet and `Suggestion` clause 1-to-1, adjudicates centrally via **Order of Authority** (`HarnessTierTopology.decide`, `SelfDogfooding.decide`, `LLMS.md`, `agent-patterns/*.md`, accepted ADRs/EARS specs) and **in-process Graph MCP (`harness-mcp`)**, exposes fail-open bugs masked by passing tests, synchronizes semantic contracts first, dispatches isolated fixers, runs post-edit gate promotions + metric syncs, and closes with the stamp-safe deterministic gate sequence.
-- Lightweight **`flash` / `haiku` Fixer Subagents** operate as disjoint execution hands returning a 1-to-1 **`Sub-Bullet Verification Matrix`**. They never adjudicate, never merge assigned sub-IDs, and never run monorepo gates.
+- Lightweight **`haiku` / `sonnet` Fixer Subagents** operate as disjoint execution hands returning a 1-to-1 **`Sub-Bullet Verification Matrix`**. They never adjudicate, never merge assigned sub-IDs, and never run monorepo gates.
 
 **Violating the letter of the rules is violating the spirit of the rules.**
 
@@ -96,7 +96,7 @@ If any `fix`, `class-fix`, or semantic/prose `doc-sync-fix` (`orchestrator-phase
 Partition `fix` and `class-fix` `Atomic IDs` by disjoint file/package ownership across the 5 hexagonal tiers (`type:contract`, `type:service`, `type:core` / `type:domain`, `type:infra`, `type:app` / `scope:web`).
 
 1. **Pattern Route:** Call `harness_route` (or use the mapped `Sanctioned Pattern` in [references/evaluation-rubric.md](references/evaluation-rubric.md) §3 if `patternFile: null`).
-2. **Dispatch Fixers:** Launch parallel subagents using the `Agent` tool (`model: "flash"` or `"haiku"`, isolated via `HARNESS_WORKTREE_ID=<unit>` or git worktree isolation) with [references/effect-fixer-prompt.md](references/effect-fixer-prompt.md). Supply every `Atomic ID` row and all pre-enumerated module-wide lifecycle sites.
+2. **Dispatch Fixers:** Launch parallel subagents using the `Agent` tool (`model: "haiku"` or `"sonnet"`, isolated via `HARNESS_WORKTREE_ID=<unit>` or git worktree isolation) with [references/effect-fixer-prompt.md](references/effect-fixer-prompt.md). Supply every `Atomic ID` row and all pre-enumerated module-wide lifecycle sites.
 3. **Subagent Discipline:** Fixers run `harness_lsp_diagnostics` and `CI=true pnpm nx run <project>:test` (using `"vitest"` in `type:contract` and `"@effect/vitest"` in `type:core`/`type:domain`/`type:infra`/`type:app`), NEVER touch whole-workspace gates (`verify`, `done`, `gc`, `mutate`, `plan-check`) or git, and return the 1-to-1 `Sub-Bullet Verification Matrix`.
 4. **Orchestrator Acceptance Gate (Mandatory Before Merging/Proceeding):**
    Verify every assigned `Atomic ID` appears as its own row with `Status: FIXED` AND:
@@ -111,7 +111,7 @@ Partition `fix` and `class-fix` `Atomic IDs` by disjoint file/package ownership 
 ### Phase 5 — Gate Promotion, Metric Sync & Stamp-Safe Deterministic Gates (Orchestrator Only)
 
 > [!IMPORTANT]
-> **Stamp-Safe Ordering Rule (`.harness/verify-stamp.json`):** `harness verify` computes and writes the SHA-256 `treeHash` of all tracked workspace files into `.harness/verify-stamp.json`. Editing **any** tracked file (including gate promotions in `libs/harness/**` or `tools/oxlint/**`, `agent-patterns/*.md`, or `wc -l` LOC tables in `docs/**`) _after_ `harness verify` invalidates `.harness/verify-stamp.json` and causes `harness done` (and the `Stop` hook) to fail! Therefore, **Compounding Gate Promotions and Post-Edit `wc -l` Metric Sync MUST both complete in Step 0 BEFORE running the terminal Step 1 verification sequence (`gc --strict` $\rightarrow$ `ontology check --strict` $\rightarrow$ `mutate --strict` $\rightarrow$ `verify` $\rightarrow$ `done`)**. If any file is edited after `verify`, you MUST re-run Step 0 `Phase 5 Metric Sync Matrix` + Step 1 in full.
+> **Stamp-Safe Ordering Rule (`.harness/verify-stamp.json`):** `harness verify` computes and writes the SHA-256 `treeHash` of all tracked workspace files (ignoring `.git/` and `.harness/`) into `.harness/verify-stamp.json`. While `learn --clear` only touches `.harness/friction-log.jsonl` and does not alter `treeHash`, editing **any** tracked workspace file (including gate promotions in `libs/harness/**` or `tools/oxlint/**`, `agent-patterns/*.md`, or `wc -l` LOC tables in `docs/**`) _after_ `harness verify` invalidates `.harness/verify-stamp.json` and causes `harness done` (and the `Stop` hook) to fail! Therefore, **Compounding Gate Promotions and Post-Edit `wc -l` Metric Sync MUST both complete in Step 0 BEFORE running the terminal Step 1 verification sequence (`gc --strict` $\rightarrow$ `ontology check --strict` $\rightarrow$ `mutate --strict` $\rightarrow$ `verify` $\rightarrow$ `done`)**. If any tracked file is edited after `verify`, you MUST re-run Step 0 `Phase 5 Metric Sync Matrix` + Step 1 in full.
 
 #### Step 0 — Merge, Compounding Gate Audit (`compounding-effect-learnings`) & Post-Edit Numeric/LOC Sync (`PHASE_5_STEP_0_WC_L`)
 
