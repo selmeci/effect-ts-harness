@@ -213,7 +213,10 @@ export const buildOntologyAndGqToolDescriptors = (
         const { queryName, params, branch } = yield* decodeGqQueryInput(args)
         const graphStatus = yield* resolveGraphWithStatus(options, args)
         const root = options?.repoRoot ?? resolveDefaultRepoRoot(args, options)
-        const skipSpawn = options?.skipOmnigraphSpawn === true && !process.env["OMNIGRAPH_URL"]
+        const skipSpawn =
+          (options?.skipOmnigraphSpawn === true ||
+            (options?.graph !== undefined && options?.skipOmnigraphSpawn !== false)) &&
+          !process.env["OMNIGRAPH_URL"]
         const gqResult = yield* invokeOmnigraphNamedQuery({
           repoRoot: root,
           actor: "agent-mcp",

@@ -51,7 +51,7 @@ Claude Code executes hooks defined in `adapters/claude-code/hooks.json` at key s
 
 The adapter configures three Model Context Protocol servers over stdio:
 
-- **`harness-mcp`:** In-process TypeScript server (`apps/harness-mcp/src/server.ts`) exposing 12 tools: symbol resolution (`harness_resolve`, `harness_callers`, `harness_callees`), test reachability (`harness_tests_reaching`), AST pattern searching (`harness_structural_search`), idiom routing (`harness_route`), ArchiMate ontology tracing (`harness_ontology_why`, `harness_ontology_impact`, `harness_ontology_check`), graph queries (`harness_gq_query`), type diagnostics (`harness_lsp_diagnostics`), and telemetry reporting (`harness_telemetry_report`).
+- **`harness-mcp`:** In-process TypeScript server (`apps/harness-mcp/src/server.ts`) exposing 15 tools: symbol resolution (`harness_resolve`, `harness_callers`, `harness_callees`), test reachability (`harness_tests_reaching`), AST pattern searching (`harness_structural_search`), idiom routing (`harness_route`), ArchiMate ontology tracing (`harness_ontology_why`, `harness_ontology_impact`, `harness_ontology_check`), graph queries & Datalog/DPO inference (`harness_gq_query`, `harness_graph_infer`, `harness_graph_complete`, `harness_graph_rewrite`), type diagnostics (`harness_lsp_diagnostics`), and telemetry reporting (`harness_telemetry_report`).
 - **`omnigraph-mcp` (`@modernrelay/omnigraph-mcp@0.14.0`):** Graph database server managing the ArchiMate 3.2 property graph on port 8080, governed by `libs/harness/graph/policies.cedar`.
 - **`nx-mcp`:** Workspace graph server for Nx target and project discovery.
 

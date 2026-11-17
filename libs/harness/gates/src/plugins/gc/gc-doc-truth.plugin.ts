@@ -498,23 +498,27 @@ const checkDocBannedOrPhantomTech = (
     }
   }
   for (const absPath of collectMarkdownFilesRecursive(join(repoRoot, "adapters"), hostIo, repoRoot, findings)) {
-    if (absPath.endsWith("/SKILL.md") || absPath.endsWith("\\SKILL.md")) phantomTargets.push(absPath)
+    phantomTargets.push(absPath)
   }
-  const negationRe = /\b(?:not|never|no|banned|without|instead\s+of|non-goal|replaced|superseded|do\s+not|avoid)\b/i
+  const negationRe = /\b(?:not|never|no|banned|removed|merged|without|instead\s+of|non-goal|replaced|superseded|do\s+not|does\s+not|avoid)\b/i
   for (const absPath of phantomTargets) {
     const relPath = relative(repoRoot, absPath).replace(/\\/g, "/")
     const content = readTextOrReport(absPath, hostIo, repoRoot, findings)
     if (content === undefined) continue
     for (const line of content.split(/\r?\n/)) {
-      const m = /\b(oxc-parser|sqlite-vec|FTS5)\b/i.exec(line)
+      const m = /\b(oxc-parser|sqlite-vec|FTS5|Layer\.scoped|Schema\.TaggedErrorClass|Cause\.failureOption)\b/.exec(line)
       if (m !== null && !negationRe.test(line)) {
         findings.push({
           kind: "doc-banned-or-phantom-tech",
           nodeId: `${relPath}:${m[1]!}`,
           location: relPath,
-          message: `Documentation "${relPath}" claims unimplemented technology "${m[1]!}" outside a negation/non-goal context.`,
-          action: `Remove or clarify "${m[1]!}" in "${relPath}".`,
+          message: `Documentation "${relPath}" claims unimplemented or removed Effect v3 API/technology "${m[1]!}" outside a negation/migration context.`,
+          action: `Remove or replace "${m[1]!}" in "${relPath}".`,
         })
+        break
+      }
+      if (relPath.startsWith("adapters/claude-code/skills/resolving-effect-review-feedback/") && /\bmodel:\s*"flash"/.test(line) && !negationRe.test(line)) {
+        findings.push({ kind: "doc-banned-or-phantom-tech", nodeId: `${relPath}:claude-agent-model-flash`, location: relPath, message: `Claude Code skill "${relPath}" specifies invalid Agent model "flash" — use "haiku" or "sonnet" for Claude Code Agent tool dispatches.`, action: `Replace model: "flash" with model: "haiku" or "sonnet" in "${relPath}".` })
         break
       }
     }

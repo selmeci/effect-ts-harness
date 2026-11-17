@@ -3,8 +3,13 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
+import { Effect } from "effect"
 import { buildHarnessGraph } from "@harness/graph"
-import { evaluateDocTruthPlugin, GATE_RULE_SOURCE_FILES } from "../src/plugins/gc/gc-doc-truth.plugin.js"
+import {
+  evaluateDocTruthPlugin,
+  GATE_RULE_SOURCE_FILES,
+} from "../src/plugins/gc/gc-doc-truth.plugin.js"
+import { evaluatePackageAndMigrationPlugin } from "../src/plugins/gc/gc-package-and-migration.plugin.js"
 import { testHostIo } from "./helpers/test-host-io.js"
 
 describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
@@ -87,8 +92,7 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
       expect(
         findings.some(
           (f) =>
-            f.kind === "hook-timeout-parity" &&
-            f.nodeId === "adapters/claude-code/hooks.json:Stop",
+            f.kind === "hook-timeout-parity" && f.nodeId === "adapters/claude-code/hooks.json:Stop",
         ),
       ).toBe(true)
     } finally {
@@ -193,8 +197,17 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
       const infraPkg = join(tempDir, "libs/harness/infra/package.json")
       mkdirSync(dirname(svcPkg), { recursive: true })
       mkdirSync(dirname(infraPkg), { recursive: true })
-      writeFileSync(svcPkg, JSON.stringify({ name: "@harness/service", dependencies: { effect: "4.0.0" } }))
-      writeFileSync(infraPkg, JSON.stringify({ name: "@harness/infra", dependencies: { "@harness/service": "workspace:*" } }))
+      writeFileSync(
+        svcPkg,
+        JSON.stringify({ name: "@harness/service", dependencies: { effect: "4.0.0" } }),
+      )
+      writeFileSync(
+        infraPkg,
+        JSON.stringify({
+          name: "@harness/infra",
+          dependencies: { "@harness/service": "workspace:*" },
+        }),
+      )
       writeFileSync(
         join(tempDir, "README.md"),
         [
@@ -244,8 +257,30 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
         claudeHooks,
         JSON.stringify({
           hooks: {
-            PreToolUse: [{ hooks: [{ type: "command", command: "node ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard", timeout: 15 }] }],
-            Stop: [{ hooks: [{ type: "command", command: "node ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done || exit 2", timeout: 30 }] }],
+            PreToolUse: [
+              {
+                hooks: [
+                  {
+                    type: "command",
+                    command:
+                      "node ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard",
+                    timeout: 15,
+                  },
+                ],
+              },
+            ],
+            Stop: [
+              {
+                hooks: [
+                  {
+                    type: "command",
+                    command:
+                      "node ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done || exit 2",
+                    timeout: 30,
+                  },
+                ],
+              },
+            ],
           },
         }),
       )
@@ -253,8 +288,21 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
         agyHooks,
         JSON.stringify({
           "effect-harness": {
-            PreToolUse: [{ type: "command", command: "node apps/harness-cli/src/index.ts guard --format=antigravity || exit 2", timeout: 15 }],
-            Stop: [{ type: "command", command: 'node apps/harness-cli/src/index.ts done --format=antigravity || { printf \'{"decision":"continue"}\'; exit 2; }', timeout: 30 }],
+            PreToolUse: [
+              {
+                type: "command",
+                command: "node apps/harness-cli/src/index.ts guard --format=antigravity || exit 2",
+                timeout: 15,
+              },
+            ],
+            Stop: [
+              {
+                type: "command",
+                command:
+                  'node apps/harness-cli/src/index.ts done --format=antigravity || { printf \'{"decision":"continue"}\'; exit 2; }',
+                timeout: 30,
+              },
+            ],
           },
         }),
       )
@@ -290,8 +338,22 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
         agyHooks,
         JSON.stringify({
           "effect-harness": {
-            PreToolUse: [{ type: "command", command: 'node apps/harness-cli/src/index.ts guard --format=antigravity || { printf \'{"decision":"allow"}\'; exit 2; }', timeout: 15 }],
-            Stop: [{ type: "command", command: 'node apps/harness-cli/src/index.ts done --format=antigravity || { printf \'{"decision":"stop"}\'; exit 2; }', timeout: 30 }],
+            PreToolUse: [
+              {
+                type: "command",
+                command:
+                  'node apps/harness-cli/src/index.ts guard --format=antigravity || { printf \'{"decision":"allow"}\'; exit 2; }',
+                timeout: 15,
+              },
+            ],
+            Stop: [
+              {
+                type: "command",
+                command:
+                  'node apps/harness-cli/src/index.ts done --format=antigravity || { printf \'{"decision":"stop"}\'; exit 2; }',
+                timeout: 30,
+              },
+            ],
           },
         }),
       )
@@ -325,7 +387,10 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
       mkdirSync(join(tempDir, "docs"), { recursive: true })
       writeFileSync(join(tempDir, "README.md"), "# Stack\nWe use oxc-parser for ASTs.\n")
       writeFileSync(join(tempDir, "docs/guide.md"), "# DB\nUse drizzle-orm for D1.\n")
-      writeFileSync(join(tempDir, "docs/superseded.md"), "# DB\ndrizzle-orm is banned (ADR-0008).\n")
+      writeFileSync(
+        join(tempDir, "docs/superseded.md"),
+        "# DB\ndrizzle-orm is banned (ADR-0008).\n",
+      )
       const findings = evaluateDocTruthPlugin({
         graph: buildHarnessGraph({}),
         workspaceRoot: tempDir,
@@ -343,9 +408,99 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
       ).toBe(true)
       expect(
         findings.some(
-          (f) => f.kind === "doc-banned-or-phantom-tech" && f.nodeId === "docs/superseded.md:drizzle",
+          (f) =>
+            f.kind === "doc-banned-or-phantom-tech" && f.nodeId === "docs/superseded.md:drizzle",
         ),
       ).toBe(false)
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('PR-32: emits doc-banned-or-phantom-tech for Layer.scoped, Schema.TaggedErrorClass, and Claude Code model: "flash", and emits contract-test-effect-vitest-import for @effect/vitest in type:contract tests', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "harness-doc-truth-pr32-"))
+    try {
+      mkdirSync(join(tempDir, "agent-patterns"), { recursive: true })
+      mkdirSync(
+        join(tempDir, "adapters/claude-code/skills/resolving-effect-review-feedback/references"),
+        { recursive: true },
+      )
+      writeFileSync(
+        join(tempDir, "agent-patterns/services-and-layers.md"),
+        "# Layers\nexport const PoolLive = Layer.scoped(Pool, Effect.void)\n",
+      )
+      writeFileSync(
+        join(tempDir, "agent-patterns/errors.md"),
+        "# Errors\n> Schema.TaggedErrorClass was removed in Effect v4.\nexport class Bad extends Schema.TaggedErrorClass {}\n",
+      )
+      writeFileSync(
+        join(
+          tempDir,
+          "adapters/claude-code/skills/resolving-effect-review-feedback/references/effect-fixer-prompt.md",
+        ),
+        '# Fixer\nDispatch via Agent tool with model: "flash".\n',
+      )
+
+      const docFindings = evaluateDocTruthPlugin({
+        graph: buildHarnessGraph({}),
+        workspaceRoot: tempDir,
+        hostIo: testHostIo,
+      })
+      expect(
+        docFindings.some(
+          (f) =>
+            f.kind === "doc-banned-or-phantom-tech" &&
+            f.nodeId === "agent-patterns/services-and-layers.md:Layer.scoped",
+        ),
+      ).toBe(true)
+      expect(
+        docFindings.some(
+          (f) =>
+            f.kind === "doc-banned-or-phantom-tech" &&
+            f.nodeId === "agent-patterns/errors.md:Schema.TaggedErrorClass",
+        ),
+      ).toBe(true)
+      expect(
+        docFindings.some(
+          (f) =>
+            f.kind === "doc-banned-or-phantom-tech" &&
+            f.nodeId ===
+              "adapters/claude-code/skills/resolving-effect-review-feedback/references/effect-fixer-prompt.md:claude-agent-model-flash",
+        ),
+      ).toBe(true)
+
+      const contractTestDir = join(tempDir, "libs/sample/contract/test")
+      const contractSrcDir = join(tempDir, "libs/sample/contract/src")
+      mkdirSync(contractTestDir, { recursive: true })
+      mkdirSync(contractSrcDir, { recursive: true })
+      writeFileSync(
+        join(tempDir, "libs/sample/contract/package.json"),
+        JSON.stringify({
+          name: "@harness/sample-contract",
+          dependencies: { effect: "4.0.0" },
+          nx: { tags: ["type:contract"] },
+        }),
+      )
+      writeFileSync(join(contractSrcDir, "index.ts"), "export const X = 1\n")
+      writeFileSync(
+        join(contractTestDir, "index.test.ts"),
+        'import { describe, expect, it } from "@effect/vitest"\ndescribe("x", () => { it("y", () => { expect(1).toBe(1) }) })\n',
+      )
+
+      const pkgFindings = Effect.runSync(
+        evaluatePackageAndMigrationPlugin({
+          graph: buildHarnessGraph({}),
+          workspaceRoot: tempDir,
+          hostIo: testHostIo,
+        }),
+      )
+      expect(
+        pkgFindings.some(
+          (f) =>
+            f.kind === "contract-test-effect-vitest-import" &&
+            f.nodeId === "libs/sample/contract/test/index.test.ts:@effect/vitest",
+        ),
+      ).toBe(true)
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
     }

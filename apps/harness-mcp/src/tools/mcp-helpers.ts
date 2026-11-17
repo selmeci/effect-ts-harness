@@ -5,7 +5,12 @@ import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js"
 import { Cause, Effect, type Exit, Layer, type ManagedRuntime, Option, Result, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
-import { McpToolInputName, McpToolName, UnknownToolError } from "@harness/contract"
+import {
+  CANONICAL_MCP_TOOL_NAMES,
+  McpToolInputName,
+  McpToolName,
+  UnknownToolError,
+} from "@harness/contract"
 import {
   appendTelemetryEvent,
   type TelemetryCategory,
@@ -30,7 +35,7 @@ import {
 import type { GovernanceDocReference } from "@harness/decision"
 import { nodeSyncHostIo, resolveHarnessStateDir } from "@harness/infra"
 
-export { McpToolInputName, McpToolName, UnknownToolError }
+export { CANONICAL_MCP_TOOL_NAMES, McpToolInputName, McpToolName, UnknownToolError }
 
 export class ProjectPathEscapeError extends Schema.TaggedError<ProjectPathEscapeError>()(
   "ProjectPathEscapeError",

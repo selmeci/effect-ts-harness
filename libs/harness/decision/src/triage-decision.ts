@@ -426,7 +426,13 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     "doc-banned-or-phantom-tech",
     /doc-banned-or-phantom-tech/,
     "mechanical",
-    "Documentation references banned or phantom technology (e.g. drizzle-orm, Effect v3 idioms, or non-existent APIs) — update docs to match current Effect v4 / Alchemy v2.",
+    'Documentation references banned or phantom technology (e.g. drizzle-orm, removed Effect v3 Layer.scoped / Schema.TaggedErrorClass, or invalid Claude Code model: "flash") — update docs to match current Effect v4 / Alchemy v2.',
+  ),
+  makeTriageRule(
+    "contract-test-effect-vitest-import",
+    /contract-test-effect-vitest-import/,
+    "mechanical",
+    'type:contract test files must import { describe, expect, it } from "vitest", never "@effect/vitest" (see agent-patterns/testing.md).',
   ),
   {
     pattern: /harness(?:\/|\()syntax-bans\)?/,
