@@ -155,7 +155,7 @@ const collectDocTargetFiles = (
   const rfcsDir = join(repoRoot, "docs/rfcs")
   if (hostIo.existsSync(rfcsDir)) {
     for (const e of readdirOrReport(rfcsDir, hostIo, repoRoot, findings) ?? []) {
-      if (e.isFile && e.name.startsWith("0008-") && e.name.endsWith(".md")) {
+      if (e.isFile && e.name.startsWith("0009-") && e.name.endsWith(".md")) {
         files.push(join(rfcsDir, e.name))
       }
     }
@@ -404,7 +404,7 @@ const checkMermaidDependencyDrift = (
   const rfcsDir = join(repoRoot, "docs/rfcs")
   if (hostIo.existsSync(rfcsDir)) {
     for (const e of readdirOrReport(rfcsDir, hostIo, repoRoot, findings) ?? []) {
-      if (e.isFile && e.name.startsWith("0008-") && e.name.endsWith(".md")) {
+      if (e.isFile && e.name.startsWith("0009-") && e.name.endsWith(".md")) {
         candidates.push(join(rfcsDir, e.name))
       }
     }
