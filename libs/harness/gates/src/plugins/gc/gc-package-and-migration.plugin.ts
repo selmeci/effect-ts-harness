@@ -240,11 +240,16 @@ export const evaluatePackageAndMigrationPlugin = (
             ...(hostIo.existsSync(testDir) ? collectWorkspaceTsFiles(testDir, hostIo, findings, repoRoot) : []),
             ...(hostIo.existsSync(scriptsDir) ? collectWorkspaceTsFiles(scriptsDir, hostIo, findings, repoRoot) : []),
           ]
+          const isContractTier = nxTags.includes(NxTierTag.make("type:contract"))
           for (const file of extraTierFiles) {
             const content = readTextOrReport(file, hostIo, repoRoot, findings)
             if (content === undefined) continue
+            const relExtraPath = relative(repoRoot, file).replace(/\\/g, "/")
+            if (isContractTier && /["'`]@effect\/vitest(?:\/[^"'`]*)?["'`]/.test(content)) {
+              findings.push({ kind: "contract-test-effect-vitest-import", nodeId: `${relExtraPath}:@effect/vitest`, location: relExtraPath, message: `Contract test file "${relExtraPath}" (${pkgName}, type:contract) imports "@effect/vitest" — type:contract tests must import { describe, expect, it } from "vitest".`, action: `Replace "@effect/vitest" with "vitest" in "${relExtraPath}".` })
+            }
             workspaceSourceFiles.push({
-              filePath: AstSourceFilePath.make(relative(repoRoot, file).replace(/\\/g, "/")),
+              filePath: AstSourceFilePath.make(relExtraPath),
               content: AstSourceContent.make(content),
             })
           }

@@ -4,7 +4,7 @@ Exhaustive structural pattern matching with `ts-pattern` (`match(value).with(...
 
 ## Authority & Ground-Truth Sources
 
-- `repos/effect/LLMS.md` & `repos/effect/packages/effect/src/Schema.ts` (`Schema.TaggedStruct`, `Schema.TaggedUnion`, `Schema.TaggedClass`, `Schema.TaggedErrorClass`)
+- `repos/effect/LLMS.md` & `repos/effect/packages/effect/src/Schema.ts` (`Schema.TaggedStruct`, `Schema.TaggedUnion`, `Schema.TaggedClass`, `Schema.TaggedError`)
 - `node_modules/ts-pattern` (`match`, `P`, `P.union`, `P.select`, `P.when`, `P.not`, `.exhaustive()`, `.otherwise()`)
 - Enforced by:
   - Layer 1 (Fast AST Gate): `tools/oxlint/syntax-bans.js`
@@ -76,7 +76,7 @@ export const formatOptionalCursor = (cursor: Option.Option<string>): string =>
 ## 3. Combining `match(...)` with `Effect.fn` and `Effect.gen`
 
 > **Critical TypeScript Generator Rule:** `.with(pattern, handler)` callbacks are ordinary functions, **not** generator functions (`function*`), so `yield*` cannot be used inside a `.with(...)` callback.
-> Instead, each `.with(...)` branch must **return** an `Effect` (or a `Schema.TaggedErrorClass` / `Data.TaggedError` instance, which is directly yieldable in Effect v4), and the outer `Effect.fn` generator yields the resulting `Effect` once with `return yield* match(...)...exhaustive()`.
+> Instead, each `.with(...)` branch must **return** an `Effect` (or a `Schema.TaggedError` / `Data.TaggedError` instance, which is directly yieldable in Effect v4), and the outer `Effect.fn` generator yields the resulting `Effect` once with `return yield* match(...)...exhaustive()`.
 
 ```ts
 import { Effect } from "effect"

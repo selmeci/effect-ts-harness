@@ -32,6 +32,7 @@ export {
 } from "./ast-and-gate-primitives.js"
 export {
   ActiveMutantId,
+  CANONICAL_MCP_TOOL_NAMES,
   CliCommandInput,
   CliCommandName,
   CliCommandNotFoundError,

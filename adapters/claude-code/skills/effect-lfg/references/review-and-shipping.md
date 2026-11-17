@@ -6,19 +6,19 @@ This reference governs **Stage 4 (4-Lens Specialist Review & Autonomous Fix Loop
 
 ## 1. Stage 4 — 4-Lens Specialist Review & Autonomous Fix Loop
 
-Once package-isolated `flash` implementer subagents have replaced all `stub<A, E, R>()` calls and passed package-level verification (`CI=true pnpm nx run <project>:verify`):
+Once package-isolated `haiku` implementer subagents have replaced all `stub<A, E, R>()` calls and passed package-level verification (`CI=true pnpm nx run <project>:verify`):
 
 ### Step 4.1 — Dispatch Parallel Specialist Review Lenses (Whole Git Diff)
 
-Select and invoke the read-only specialist review subagents (`Model: "flash"`, `Workspace: "share"`) across the **entire git diff (`git diff main...HEAD`)** — including any modified harness gates (`libs/harness/**`) and linter plugins (`tools/oxlint/**`), not just domain packages:
+Select and invoke the read-only specialist review subagents (`model: "haiku"`, isolated worktree) across the **entire git diff (`git diff main...HEAD`)** — including any modified harness gates (`libs/harness/**`) and linter plugins (`tools/oxlint/**`), not just domain packages:
 
-1. **`effect-ears-test-reviewer` (Always):**
-   Verifies 1:1 behavioral coverage between every EARS clause (`WHEN`, `IF/THEN`, `WHILE`, `WHERE`) in `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` and `@effect/vitest` assertions (`it.effect`, `it.effect.prop`, `Cause.findErrorOption`, `Equal.equals`, `checkSpanBudgets`).
+1. **`effect-ears-test-reviewer` (Always & Mandatory for Core/Domain):**
+   Executes the **8-Point Anti-Rubber-Stamp Deep Audit** (including Point 8: `type:infra` Guard-Deletion Falsification) and verifies 1:1 behavioral coverage between every EARS clause (`WHEN`, `IF/THEN`, `WHILE`, `WHERE`) in `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` and `@effect/vitest` assertions (`it.effect`, `it.effect.prop`, `Cause.findErrorOption`, `Equal.equals`, `checkSpanBudgets`).
 2. **`effect-security-reviewer` (When touching `type:contract`, `HttpApi`, `Rpc`, auth, SQL, `Config`, or `policy.ts`):**
-   Audits boundary `Schema` constraints, actor/tenant authorization (IDOR) in `type:domain`, parameterized SQL in `type:infra`, `Config.redacted` secret handling, and shell/file guard allowlist bypasses.
+   Audits boundary `Schema` constraints, actor/tenant authorization (IDOR) in `type:domain` / `type:core`, parameterized SQL in `type:infra`, `Config.redacted` secret handling, and shell/file guard allowlist bypasses.
 3. **`effect-reliability-reviewer` (When touching `type:infra`, DO SQLite, D1, Queues, `Schedule`, or `Scope`):**
    Audits synchronous DO SQLite transaction discipline (`MixedScheduler("sync")`, zero async I/O inside `withTransaction`), bounded jittered `Schedule` retries, and `Scope` resource finalizers.
-4. **`effect-adversarial-reviewer` (When touching `*.decide` deciders, Event Sourcing, Outbox, Projections, multi-step stateful flows, OR harness gate implementations in `libs/harness/**` and `tools/oxlint/**`):**
+4. **`effect-adversarial-reviewer` (Mandatory for `type:core`, `type:domain`, `*.decide` deciders, Event Sourcing, Outbox, Projections, multi-step stateful flows, OR harness gate implementations in `libs/harness/**` and `tools/oxlint/**`):**
    Constructs crash-between-steps sequences, duplicate command delivery, out-of-order replay, boundary mutation cases, and adversarial gate evasion vectors (shell wrapper/quoting/subshell bypasses, multi-aggregate / multi-schema scope bleed, and fail-open fallbacks).
 
 ### Step 4.2 — Central Adjudication & Twin Class-Fix Loop
@@ -29,7 +29,7 @@ Follow the adjudication rubric from `resolving-effect-review-feedback`:
 2. **Hunt AST Twins (`class-fix`):** Whenever a valid defect is confirmed, run `harness_structural_search` (`@ast-grep/napi`) across the workspace to locate and fix all identical occurrences in a single pass.
 3. **Sync Contracts, Specs & ADRs First:** If a valid fix alters a contract Schema, error tag, `Effect.fn` signature, `Context.Service` port, EARS clause, or ADR invariant, update the EARS spec / ADR first and re-run `pnpm harness plan-check` (and update `## 4. Verified Plan Topology Graph`) so `.harness/plan-graph-snapshot.json` matches the post-review implementation graph before Stage 5 (`verify -> done`).
 4. **Apply Eligible Fixes & Record Residuals:**
-   - Autonomously apply all valid `fix`, `class-fix`, and `doc-sync-fix` items (dispatching scoped `flash` fixer subagents when changes span multiple packages).
+   - Autonomously apply all valid `fix`, `class-fix`, and `doc-sync-fix` items (dispatching scoped `haiku` fixer subagents when changes span multiple packages).
    - Record any `decline-with-evidence` items or non-blocking advisory notes in a `## Residual & Declined Review Findings` section for the final PR body / closeout report.
    - If a finding exposes an unresolvable conflict with an accepted ADR or requires a destructive migration, stop and escalate.
 
@@ -53,10 +53,10 @@ Update `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` (or `docs/specs/`) frontma
    node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts learn
    ```
 2. Inspect `.harness/friction-log.jsonl` clusters (`Friction.decide` + `LearnProposalV1`) and any gate blind spots uncovered in Stage 4:
-   - Autonomously apply clear, deterministic promotions across the 5 targets (`agent-pattern` in `agent-patterns/*.md`, `triage-rule` in `DETERMINISTIC_TRIAGE_RULES`, `guard-allowlist` in `ALLOWLIST`, `ast-graph-gate` in `tools/oxlint/syntax-bans.js` / `policy-check.ts`, or `adr` in `libs/<scope>/docs/adr/`).
+   - Autonomously apply clear, deterministic promotions across the 5 targets (`agent-pattern` in `agent-patterns/*.md`, `triage-rule` in `DETERMINISTIC_TRIAGE_RULES`, `guard-allowlist` in `ALLOWLIST`, `ast-graph-gate` in `@harness/contract` / `@harness/gates` (`HarnessTierTopology.decide`, `SelfDogfooding.decide`) / `tools/oxlint/syntax-bans.js` / `policy-check.ts`, or `adr` in `libs/<scope>/docs/adr/`).
    - Never append prose warnings to `AGENTS.md`.
    - Note: Modifying `.oxlintrc.json`, `tools/oxlint/*`, or `policies.cedar` triggers a human confirmation prompt via `harness guard`; only touch protected linter policy files when a high-confidence gate escape requires it, otherwise promote via `agent-patterns/*.md`, `DETERMINISTIC_TRIAGE_RULES`, or an ADR.
-3. Clear processed friction logs:
+3. Refresh any `wc -l` / numeric LOC tables in `docs/**`, `libs/*/docs/**`, `apps/*/docs/**`, and `README.md` that reference files modified in Stages 3–5, and clear processed friction logs:
    ```bash
    node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts learn --clear
    ```

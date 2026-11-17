@@ -75,7 +75,7 @@ graph TD
 #### Komponenty Harnessu (`libs/harness/*`, `apps/harness-*`)
 
 1. **`libs/harness/contract` (`type:contract`):**
-   - Definuje zdieľané dátové schémy, typované chyby (`Schema.TaggedErrorClass`), `stub<A, E, R>(...args)` a kontrakty pre brány, cache a daemon. Importuje **výhradne** `effect`.
+   - Definuje zdieľané dátové schémy, typované chyby (`Schema.TaggedError`), `stub<A, E, R>(...args)` a kontrakty pre brány, cache a daemon. Importuje **výhradne** `effect`.
 2. **`libs/harness/service` (`type:service`):**
    - Definuje čisté `Context.Service` porty (`WorkspaceFs`, `HarnessSubprocessRunner`, `ActiveMutantContext`, `AstGateCachePort`, `DecisionCachePort`, `UnixSocketDaemonPort`) bez `node:*` importov a bez `Live` vrstiev.
 3. **`libs/harness/gates` (`type:core`):**
@@ -105,9 +105,11 @@ graph TD
 10. **`libs/es/contract` (`type:contract`), `libs/es/core` (`type:core`), `libs/es/infra` (`type:infra`):**
     - Zdieľané event-sourcing kontrakty, čistý `Decider` / `AggregateRoot` / `EventStore` engine a natívna `@effect/sql-sqlite-do` infraštruktúra (nulový Drizzle).
 11. **`libs/sample/contract` (`type:contract`):**
-   - Definuje zdieľané dátové schémy (`Schema.Struct`), verejné API kontrakty (`HttpApiEndpoint`, `RpcGroup`) a typované chyby (`Schema.TaggedErrorClass`).
-   - Obsahuje kanonický súbor `openapi.json` overovaný cez typovaný príkaz `harness check-openapi`.
-   - Importuje **výhradne** balík `effect`.
+
+- Definuje zdieľané dátové schémy (`Schema.Struct`), verejné API kontrakty (`HttpApiEndpoint`, `RpcGroup`) a typované chyby (`Schema.TaggedError`).
+- Obsahuje kanonický súbor `openapi.json` overovaný cez typovaný príkaz `harness check-openapi`.
+- Importuje **výhradne** balík `effect`.
+
 8. **`libs/sample/service` (`type:service`):**
    - Definuje abstraktné servisné identifikátory a rozhrania (`Context.Service`), napríklad `PhotoRepo` a `AlbumCounterClient`.
 9. **`libs/sample/domain` (`type:domain`):**
@@ -128,14 +130,14 @@ graph TD
 
 Architektúra vyžaduje prísnu jednosmernú hierarchiu závislostí riadenú značkami (tags) v `package.json` a kontrolovanú linterom:
 
-| Značka Nx               | Účel a zodpovednosť                                                          | Povolené importy                                                 | Zakázané importy                                     |
-| :---------------------- | :--------------------------------------------------------------------------- | :--------------------------------------------------------------- | :--------------------------------------------------- |
-| `type:contract`         | Zdieľané `Schema`, `HttpApi`, `RpcGroup`, doménové a API chyby               | Výhradne `effect` (`type:contract` / `[]` v workspace)           | `service`, `core`, `domain`, `infra`, `app`, 3rd-party I/O |
-| `type:service`          | Servisné rozhrania (`Context.Service`), kontrakty repozitárov                | `type:contract`, `type:service` (externe výhradne `effect`)      | `core`, `domain`, `infra`, `app`, Node/SQL ovládače  |
-| `type:core`             | Čisté generické enginy, brány a decider funkcie (`.decide`)                  | `type:contract`, `type:service`, `type:core`                     | `type:domain`, `type:infra`, `type:app`              |
-| `type:domain`           | Doménové prípady použitia a čisté rozhodovače (`.decide`)                    | `type:contract`, `type:service`, `type:core`, `type:domain`      | `type:infra`, `type:app`, `alchemy`, `@effect/sql-*` |
-| `type:infra`            | Živé vrstvy (`Layer.Live`), `@effect/sql-*` repozitáre, RPC handlery, Alchemy | `type:contract`, `type:service`, `type:core`, `type:domain`, `type:infra` | `type:app`; `drizzle-orm`/`drizzle-kit` zakázané v celom workspace |
-| `type:app`              | Spojenie vrstiev a runtime entrypoint (`alchemy.run.ts`, CLI, MCP, Web UI)   | Všetky knižničné vrstvy + `type:app` (okrem `scope:web`, ktorý môže importovať iba `type:contract` a UI knižnice) | Pre `scope:web`: `type:service`, `type:core`, `type:domain`, `type:infra`, `type:app`, priamy `fetch(...)` |
+| Značka Nx       | Účel a zodpovednosť                                                           | Povolené importy                                                                                                  | Zakázané importy                                                                                           |
+| :-------------- | :---------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------- |
+| `type:contract` | Zdieľané `Schema`, `HttpApi`, `RpcGroup`, doménové a API chyby                | Výhradne `effect` (`type:contract` / `[]` v workspace)                                                            | `service`, `core`, `domain`, `infra`, `app`, 3rd-party I/O                                                 |
+| `type:service`  | Servisné rozhrania (`Context.Service`), kontrakty repozitárov                 | `type:contract`, `type:service` (externe výhradne `effect`)                                                       | `core`, `domain`, `infra`, `app`, Node/SQL ovládače                                                        |
+| `type:core`     | Čisté generické enginy, brány a decider funkcie (`.decide`)                   | `type:contract`, `type:service`, `type:core`                                                                      | `type:domain`, `type:infra`, `type:app`                                                                    |
+| `type:domain`   | Doménové prípady použitia a čisté rozhodovače (`.decide`)                     | `type:contract`, `type:service`, `type:core`, `type:domain`                                                       | `type:infra`, `type:app`, `alchemy`, `@effect/sql-*`                                                       |
+| `type:infra`    | Živé vrstvy (`Layer.Live`), `@effect/sql-*` repozitáre, RPC handlery, Alchemy | `type:contract`, `type:service`, `type:core`, `type:domain`, `type:infra`                                         | `type:app`; `drizzle-orm`/`drizzle-kit` zakázané v celom workspace                                         |
+| `type:app`      | Spojenie vrstiev a runtime entrypoint (`alchemy.run.ts`, CLI, MCP, Web UI)    | Všetky knižničné vrstvy + `type:app` (okrem `scope:web`, ktorý môže importovať iba `type:contract` a UI knižnice) | Pre `scope:web`: `type:service`, `type:core`, `type:domain`, `type:infra`, `type:app`, priamy `fetch(...)` |
 
 ---
 
@@ -196,7 +198,7 @@ flowchart TD
      - **Existujúci kontext grafu:** Reused Contracts / Errors, Reused Services, New Capabilities.
      - **EARS požiadavky s pomenovanými subjektmi (nikdy nie generický „the system“):**
        - `WHEN <trigger>, the <UseCase> use-case SHALL <response>` $\rightarrow$ mapuje sa na vstupné Schémy a návratový typ úspechu `A` v `Effect<A, E, R>`.
-       - `IF <condition>, THEN the <UseCase> use-case SHALL fail with <TaggedError>` $\rightarrow$ mapuje sa na `Schema.TaggedErrorClass` a chybový kanál `E`.
+       - `IF <condition>, THEN the <UseCase> use-case SHALL fail with <TaggedError>` $\rightarrow$ mapuje sa na `Schema.TaggedError` a chybový kanál `E`.
        - `WHILE <state>, the <decider> SHALL <response>` $\rightarrow$ mapuje sa na čistý decider `Effect.fn("*.decide")` s `R = never` a overenie cez `PropertyTest`.
        - `WHERE <feature>, the <provider> SHALL <response>` $\rightarrow$ mapuje sa na `Layer` a `Config` v parametri `R`.
        - `UBIQUITOUS` $\rightarrow$ globálny invariant domény.
@@ -382,13 +384,13 @@ sequenceDiagram
 
 ### 3.2 Detailný prehľad 5 rozhodovacích schém
 
-| Rozhodovacia schéma                                   | Kedy sa volá                                                       | Vstupné dáta                                                                        | Výstupné polia a kritériá                                                                                                                                   | Rozhodovacie pravidlo v kóde                                                                           | Deterministický fallback (pri timeoute / offline)                                        |
-| :---------------------------------------------------- | :----------------------------------------------------------------- | :---------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------- |
+| Rozhodovacia schéma                                   | Kedy sa volá                                                       | Vstupné dáta                                                                        | Výstupné polia a kritériá                                                                                                                                   | Rozhodovacie pravidlo v kóde                                                                                                                                          | Deterministický fallback (pri timeoute / offline)                                                                                                    |
+| :---------------------------------------------------- | :----------------------------------------------------------------- | :---------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **1. `IdiomRouterV1`** (`routeStep`)                  | CLI `harness route` alebo MCP `harness_route` pri tvorbe skeletonu | `{ planStep: string }`                                                              | • `fitsAny`: pravdepodobnosť (0.0–1.0)<br/>• `block`: klasifikácia do 18 kategórií                                                                          | Najprv `DETERMINISTIC_ROUTE_RULES` (regex pred-routovanie); inak `DecisionModel.decide`: ak `fitsAny >= 0.7`, vráti sa vybraný `block`, inak deterministický fallback | Deterministický keyword/filename fallback nad `agent-patterns/<slug>.md` pred `"review"` (keď `DecisionModel` nie je dostupný alebo má nízku istotu) |
-| **2. `GuardV1`** (`decideGuardCommand`)               | CLI `harness guard` (iba ak `classifyCommand` vráti `"escalate"`)  | `{ command: string }`                                                               | • `destructive`: pravdepodobnosť<br/>• `secretAccess`: pravdepodobnosť<br/>• `exfiltration`: pravdepodobnosť                                                | Ak ľubovoľné $\ge 0.7 \rightarrow$ `"deny"`; ak všetky tri $< 0.3 \rightarrow$ `"allow"`; inak `"ask"` | **`"ask"`** (človek musí potvrdiť; **nikdy nie `"allow"`!**)                             |
-| **3. `TriageV1`** (`triageFailure`)                   | Po zlyhaní `verify`, ak sa nezachytilo v statických pravidlách     | `{ failureOutput: string }`                                                         | • `kind`: `"mechanical"` alebo `"semantic"`                                                                                                                 | Klasifikácia charakteru chyby pre nápovedu agentovi                                                    | `"semantic"` (odporučí analyzovať graf cez `harness_tests_reaching`)                     |
-| **4. `PlanStepCoverageV1`** (`checkPlanStepCoverage`) | Počas `harness done`, ak boli zadané kroky `planSteps`             | `{ stepId, planStep, stepDiff }`                                                    | • `implemented`: pravdepodobnosť<br/>• `noOutOfScopeEdits`: pravdepodobnosť                                                                                 | `implemented >= 0.7` A `noOutOfScopeEdits >= 0.7` $\rightarrow$ `covered: true`                        | `covered: false` (pri zlyhaní decision modelu vyžaduje overenie)                         |
-| **5. `LearnProposalV1`** (`proposeLearningAction`)    | CLI `harness learn` po zistení opakovaného trenia                  | `{ kind: FrictionEventKind, summary: string, detail: string, occurrences: number }` | • `actionable`: pravdepodobnosť (0.0–1.0)<br/>• `target`: klasifikácia do 4 kategórií (`agent-pattern`, `triage-rule`, `guard-allowlist`, `ast-graph-gate`) | Ak `actionable >= 0.7`, navrhne sa vybraný `target`, inak sa záznam archivuje bez povýšenia            | Deterministický fallback: pri `occurrences >= 2` mapuje `kind` priamo na predvolený cieľ |
+| **2. `GuardV1`** (`decideGuardCommand`)               | CLI `harness guard` (iba ak `classifyCommand` vráti `"escalate"`)  | `{ command: string }`                                                               | • `destructive`: pravdepodobnosť<br/>• `secretAccess`: pravdepodobnosť<br/>• `exfiltration`: pravdepodobnosť                                                | Ak ľubovoľné $\ge 0.7 \rightarrow$ `"deny"`; ak všetky tri $< 0.3 \rightarrow$ `"allow"`; inak `"ask"`                                                                | **`"ask"`** (človek musí potvrdiť; **nikdy nie `"allow"`!**)                                                                                         |
+| **3. `TriageV1`** (`triageFailure`)                   | Po zlyhaní `verify`, ak sa nezachytilo v statických pravidlách     | `{ failureOutput: string }`                                                         | • `kind`: `"mechanical"` alebo `"semantic"`                                                                                                                 | Klasifikácia charakteru chyby pre nápovedu agentovi                                                                                                                   | `"semantic"` (odporučí analyzovať graf cez `harness_tests_reaching`)                                                                                 |
+| **4. `PlanStepCoverageV1`** (`checkPlanStepCoverage`) | Počas `harness done`, ak boli zadané kroky `planSteps`             | `{ stepId, planStep, stepDiff }`                                                    | • `implemented`: pravdepodobnosť<br/>• `noOutOfScopeEdits`: pravdepodobnosť                                                                                 | `implemented >= 0.7` A `noOutOfScopeEdits >= 0.7` $\rightarrow$ `covered: true`                                                                                       | `covered: false` (pri zlyhaní decision modelu vyžaduje overenie)                                                                                     |
+| **5. `LearnProposalV1`** (`proposeLearningAction`)    | CLI `harness learn` po zistení opakovaného trenia                  | `{ kind: FrictionEventKind, summary: string, detail: string, occurrences: number }` | • `actionable`: pravdepodobnosť (0.0–1.0)<br/>• `target`: klasifikácia do 4 kategórií (`agent-pattern`, `triage-rule`, `guard-allowlist`, `ast-graph-gate`) | Ak `actionable >= 0.7`, navrhne sa vybraný `target`, inak sa záznam archivuje bez povýšenia                                                                           | Deterministický fallback: pri `occurrences >= 2` mapuje `kind` priamo na predvolený cieľ                                                             |
 
 ---
 
@@ -750,7 +752,7 @@ Počas rýchlych iterácií v subagentoch dochádza k hromadeniu mŕtveho kódu,
 
 1. **`unused-service`:** Služba (`Context.Service`), ktorú v monorepe nepožaduje žiadna funkcia v parametri prostredia `R`.
 2. **`unprovided-service`:** Služba požadovaná doménou v type `R`, ktorá však nie je poskytnutá žiadnym produkčným `Layer`om v `type:infra` ani `type:app`.
-3. **`dead-tagged-error`:** Chybová trieda (`Schema.TaggedErrorClass`), ktorú žiadna use-case funkcia nevracia v type `E`.
+3. **`dead-tagged-error`:** Chybová trieda (`Schema.TaggedError`), ktorú žiadna use-case funkcia nevracia v type `E`.
 4. **`orphan-effect-fn`:** Funkcia deklarovaná cez `Effect.fn`, na ktorú neodkazuje žiadny volajúci ani integračný test.
 5. **`untested-effect-fn` (pri `--strict`):** Doménová funkcia deklarovaná cez `Effect.fn`, ktorá nemá v grafe prichádzajúcu `ExercisesSpan` hranu z `@effect/vitest` testov. Každý doménový use-case musí byť overený aspoň jedným testom.
 6. **`missing-decider-property-test` (pri `--strict`):** Čistý doménový decider (`*.decide` v `type:domain`), ktorý nie je testovaný property-based testom (`it.effect.prop` alebo `it.prop`). Všetky pure decidery (klauzuly EARS `WHILE <state>`) a reducery/projekcie musia byť overené voči arbitrárnym generovaným vstupom zo `Schema` cez `effect/Arbitrary`.
@@ -833,8 +835,8 @@ Harness presadzuje nulovú dôveru voči generovanému kódu prostredníctvom pr
    - Každá konfigurácia obsahujúca citlivé údaje s kľúčmi ako `SECRET`, `TOKEN`, `PASSWORD` alebo `API_KEY` musí byť zapuzdrená cez `Config.redacted(...)` namiesto obyčajného `Config.string(...)`.
    - Tým sa zabráni nechcenému úniku citlivých hodnôt do logov, tracerov alebo chybových hlásení.
 2. **Zákaz raw SQL interpolácie (SQL Injection Ban):**
-   - V `type:infra` (D1, SQLite, `@effect/sql-*`) je prísne zakázané používať template literal interpoláciu v metódach `.exec(\`...\${...}\`)` alebo `.prepare(\`...\${...}\`)`.
-   - Všetky dynamické hodnoty musia byť odovzdávané výhradne cez parametrizované dotazy (`.bind(...)` alebo `SqlClient` `sql\`...\`` tagy s parametrami). (`drizzle-orm` a `drizzle-kit` sú zakázané v celom workspace.)
+   - V `type:infra` (D1, SQLite, `@effect/sql-*`) je prísne zakázané používať template literal interpoláciu v metódach `.exec(\`...\${...}\`)`alebo`.prepare(\`...\${...}\`)`.
+   - Všetky dynamické hodnoty musia byť odovzdávané výhradne cez parametrizované dotazy (`.bind(...)` alebo `SqlClient` `sql\`...\`` tagy s parametrami). (`drizzle-orm`a`drizzle-kit` sú zakázané v celom workspace.)
 3. **Pravidlá čistoty domény (`type:domain`):**
    - **Zákaz nečistých globálnych volaní:** Volania `Date.now()`, `new Date()` a `Math.random()` sú v doméne zakázané. Čas a náhodnosť musia pretekať cez Effect služby (`Clock`, `Random`) alebo decider vstupy, aby bola doménová logika 100% deterministická a testovateľná.
    - **Zákaz `Effect.ignore`:** V doméne je zakázané ignorovať zlyhania cez `Effect.ignore`, pretože to maskuje kritické sad-path stavy a zlyhania biznis pravidiel.
