@@ -593,7 +593,10 @@ export const projectServiceLayerNode = (
           const implArg = init.getArguments()[1]!.getText()
           const missingYields = requiredNames.filter((req) => !implArg.includes(req)).map((req) => `    yield* ${req}`).join("\n")
           if (missingYields.length > 0 && (calleeText === "Layer.succeed" || calleeText === "Layer.sync" || calleeText === "Layer.effect")) {
-            const returnExpr = calleeText === "Layer.sync" ? `(${implArg})()` : calleeText === "Layer.effect" ? `yield* (${implArg})` : implArg
+            const returnExpr = match(calleeText)
+              .with("Layer.sync", () => `(${implArg})()`)
+              .with("Layer.effect", () => `yield* (${implArg})`)
+              .otherwise(() => implArg)
             existingVar.setInitializer(`Layer.effect(\n  ${tagArg},\n  Effect.gen(function* () {\n${missingYields}\n    return ${returnExpr}\n  }),\n)`)
           }
         }

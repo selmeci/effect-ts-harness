@@ -14,6 +14,7 @@
 import { join, relative } from "node:path"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
+import { ts } from "@harness/graph"
 import type { SyncHostIo } from "@harness/service/host-io"
 import {
   collectWorkspaceAllFiles,
@@ -165,6 +166,143 @@ export const evaluateBranchingSqliteViolations = (
       })
     }
   }
+  return findings
+}
+
+const unwrapParens = (expr: ts.Expression): ts.Expression => {
+  let current = expr
+  while (ts.isParenthesizedExpression(current)) {
+    current = current.expression
+  }
+  return current
+}
+
+const isLiteralLikeExpr = (expr: ts.Expression): boolean => {
+  const e = unwrapParens(expr)
+  return (
+    ts.isStringLiteral(e) ||
+    ts.isNumericLiteral(e) ||
+    ts.isNoSubstitutionTemplateLiteral(e) ||
+    e.kind === ts.SyntaxKind.TrueKeyword ||
+    e.kind === ts.SyntaxKind.FalseKeyword ||
+    e.kind === ts.SyntaxKind.NullKeyword ||
+    (ts.isIdentifier(e) && e.text === "undefined")
+  )
+}
+
+const astPrinter = ts.createPrinter({ removeComments: true })
+
+const normalizeTargetExpr = (expr: ts.Expression, sourceFile: ts.SourceFile): string =>
+  astPrinter.printNode(ts.EmitHint.Expression, unwrapParens(expr), sourceFile).replace(/\s+/g, " ").trim()
+
+const extractEqualityTargets = (
+  expr: ts.Expression,
+  sourceFile: ts.SourceFile,
+): ReadonlyArray<string> | undefined => {
+  const e = unwrapParens(expr)
+  if (!ts.isBinaryExpression(e)) return undefined
+  if (
+    e.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
+    e.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
+  ) {
+    const left = extractEqualityTargets(e.left, sourceFile)
+    const right = extractEqualityTargets(e.right, sourceFile)
+    if (left === undefined || right === undefined) return undefined
+    const shared = left.filter((t) => right.includes(t))
+    return shared.length > 0 ? shared : undefined
+  }
+  if (
+    e.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+    e.operatorToken.kind === ts.SyntaxKind.EqualsEqualsToken ||
+    e.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken ||
+    e.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsToken
+  ) {
+    const leftLit = isLiteralLikeExpr(e.left)
+    const rightLit = isLiteralLikeExpr(e.right)
+    if (leftLit && rightLit) return undefined
+    if (leftLit) return [normalizeTargetExpr(e.right, sourceFile)]
+    if (rightLit) return [normalizeTargetExpr(e.left, sourceFile)]
+    return [normalizeTargetExpr(e.left, sourceFile), normalizeTargetExpr(e.right, sourceFile)]
+  }
+  return undefined
+}
+
+export const checkChainedEqualityTernaries = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+): ReadonlyArray<GcFinding> => {
+  const findings: Array<GcFinding> = []
+  const candidateFiles: Array<string> = []
+  for (const rootSubdir of ["libs", "apps"]) {
+    const dir = join(repoRoot, rootSubdir)
+    if (hostIo.existsSync(dir)) {
+      candidateFiles.push(...collectWorkspaceTsFiles(dir, hostIo, findings, repoRoot))
+    }
+  }
+
+  for (const filePath of candidateFiles) {
+    const relPath = relative(repoRoot, filePath).replace(/\\/g, "/")
+    if (!/^(?:libs|apps)\/.*\/src\/.*\.tsx?$/.test(relPath)) continue
+    if (/\/test\//.test(relPath) || /\.test\.tsx?$/.test(relPath)) continue
+
+    const content = readTextOrReport(filePath, hostIo, repoRoot, findings)
+    if (content === undefined) continue
+
+    const scriptKind = relPath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+    const sourceFile = ts.createSourceFile(relPath, content, ts.ScriptTarget.Latest, true, scriptKind)
+    const reported = new Set<ts.ConditionalExpression>()
+
+    const markMatchingArmChain = (
+      arm: ts.Expression,
+      sharedTarget: string,
+    ): void => {
+      const unwrapped = unwrapParens(arm)
+      if (!ts.isConditionalExpression(unwrapped)) return
+      const armTargets = extractEqualityTargets(unwrapped.condition, sourceFile)
+      if (armTargets === undefined || !armTargets.includes(sharedTarget)) return
+      reported.add(unwrapped)
+      markMatchingArmChain(unwrapped.whenFalse, sharedTarget)
+      markMatchingArmChain(unwrapped.whenTrue, sharedTarget)
+    }
+
+    const visit = (node: ts.Node): void => {
+      if (ts.isConditionalExpression(node) && !reported.has(node)) {
+        const targets1 = extractEqualityTargets(node.condition, sourceFile)
+        if (targets1 !== undefined) {
+          const falseCond = unwrapParens(node.whenFalse)
+          const trueCond = unwrapParens(node.whenTrue)
+          const falseTargets = ts.isConditionalExpression(falseCond)
+            ? extractEqualityTargets(falseCond.condition, sourceFile)
+            : undefined
+          const trueTargets = ts.isConditionalExpression(trueCond)
+            ? extractEqualityTargets(trueCond.condition, sourceFile)
+            : undefined
+          const sharedTarget = targets1.find(
+            (t) =>
+              (falseTargets !== undefined && falseTargets.includes(t)) ||
+              (trueTargets !== undefined && trueTargets.includes(t)),
+          )
+          if (sharedTarget !== undefined) {
+            const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1
+            findings.push({
+              kind: "chained-equality-ternary",
+              nodeId: `${relPath}:${line}:${sharedTarget}`,
+              location: `${relPath}:${line}`,
+              message: `Chained equality ternary on "${sharedTarget}" at ${relPath}:${line}.`,
+              action: `Replace chained equality ternary on "${sharedTarget}" with match(value).with(...).exhaustive() from ts-pattern (or RECORD[key] with satisfies Record<(typeof LITERALS)[number], V> in effect-only type:contract).`,
+            })
+            reported.add(node)
+            markMatchingArmChain(node.whenFalse, sharedTarget)
+            markMatchingArmChain(node.whenTrue, sharedTarget)
+          }
+        }
+      }
+      ts.forEachChild(node, visit)
+    }
+
+    visit(sourceFile)
+  }
+
   return findings
 }
 
@@ -326,6 +464,10 @@ export const evaluateTopologyEntropyPlugin = (
         })
       }
     }
+  }
+
+  if (input.workspaceRoot !== undefined && input.hostIo !== undefined) {
+    findings.push(...checkChainedEqualityTernaries(input.workspaceRoot, input.hostIo))
   }
 
   return findings

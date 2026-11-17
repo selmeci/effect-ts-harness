@@ -10,6 +10,7 @@ export type AdrLintFindingKind =
   | "adr-missing-enforcement-table"
   | "adr-unfilled-placeholder"
   | "adr-enforcement-mismatch"
+  | "adr-overstated-proof-claim"
 
 export interface AdrLintFinding {
   readonly line: number
@@ -286,6 +287,18 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
         line: lineNum,
         kind: "adr-unfilled-placeholder",
         message: `Line ${lineNum} contains unfilled placeholder or HTML comment.`,
+      })
+    }
+    if (
+      !/\b(?:do not|cannot|can't|does not|doesn't|never)\s+prove\b|\binstead of claiming tests prove\b/i.test(rawLine) &&
+      /\b(?:unit|property(?:-based)?|integration|regression)\s+(?:(?:and|or|,)\s+(?:unit|property(?:-based)?|integration|regression)\s+)*tests?\b[^.\n]{0,100}\bproves?\b/i.test(
+        rawLine,
+      )
+    ) {
+      findings.push({
+        line: lineNum,
+        kind: "adr-overstated-proof-claim",
+        message: `Line ${lineNum} claims empirical tests 'prove' an invariant; use 'verify' or 'exercise' instead (reserve 'prove' for type-level/formal proofs).`,
       })
     }
   }

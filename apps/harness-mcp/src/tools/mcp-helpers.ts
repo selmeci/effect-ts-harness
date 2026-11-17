@@ -7,8 +7,10 @@ import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import {
   CANONICAL_MCP_TOOL_NAMES,
+  InvalidReviewRouteInputError,
   McpToolInputName,
   McpToolName,
+  type ReviewTimeoutMillis,
   UnknownToolError,
 } from "@harness/contract"
 import {
@@ -50,6 +52,7 @@ export type McpToolExecutionError =
   | UnknownToolError
   | Schema.SchemaError
   | ProjectPathEscapeError
+  | InvalidReviewRouteInputError
   | ConceptLatticeCycleError
   | GraphInferenceError
   | GraphRewriteError
@@ -86,6 +89,7 @@ export interface ServerOptions {
   readonly decisionLayer?: Layer.Layer<DecisionModel.DecisionModel>
   readonly extraLayer?: Layer.Layer<never>
   readonly repoRoot?: string
+  readonly reviewRouteTimeoutMs?: ReviewTimeoutMillis | undefined
   readonly governanceDocs?: ReadonlyArray<GovernanceDocReference>
   readonly skipOmnigraphSpawn?: boolean | undefined
   readonly skipTelemetry?: boolean | undefined
@@ -435,7 +439,7 @@ export const recordMcpToolTelemetry = (
       "harness_ontology_check",
       () => "ontology" as const,
     )
-    .with("harness_route", () => "routing" as const)
+    .with("harness_route", "harness_review_route", () => "routing" as const)
     .with("harness_lsp_diagnostics", () => "gate" as const)
     .otherwise(() => "graph_query" as const)
 
@@ -448,7 +452,12 @@ export const recordMcpToolTelemetry = (
         ? ("omnigraph" as const)
         : ("memory-fallback" as const),
     )
-    .with("harness_route", "harness_ontology_check", () => "decision-model" as const)
+    .with(
+      "harness_route",
+      "harness_review_route",
+      "harness_ontology_check",
+      () => "decision-model" as const,
+    )
     .otherwise(() => "local" as const)
 
   const outcome: TelemetryOutcome =
@@ -500,6 +509,12 @@ export const formatMcpToolExit = (
             `Invalid arguments for tool '${toolName}': ${squashed.message}`,
           ),
         )
+      }
+      if (squashed instanceof InvalidReviewRouteInputError) {
+        return {
+          content: [{ type: "text" as const, text: squashed.reason }],
+          isError: true,
+        }
       }
       const message = squashed instanceof Error ? squashed.message : String(squashed)
       return {

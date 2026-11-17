@@ -12,20 +12,25 @@ adapters/claude-code/
 ├── rules/
 │   └── AGENTS.md       # Governing harness rules, order of authority, and coding standards
 ├── commands/
-│   └── effect-lfg.md   # Slash command entrypoint (/effect-lfg)
+│   ├── effect-lfg.md         # Slash command entrypoint (/effect-lfg)
+│   └── effect-code-review.md # Slash command entrypoint (/effect-code-review)
 ├── skills/
 │   ├── effect-harness/                   # Master orchestrator for the 7-step lifecycle
 │   ├── effect-lfg/                       # Autonomous end-to-end pipeline (/effect-lfg)
+│   ├── effect-code-review/               # Read-only monotonic hybrid code review (/effect-code-review)
 │   ├── specifying-ears-with-effect/      # EARS requirement and ADR authoring
 │   ├── planning-effect-skeletons/        # Plan-as-Code stub<A, E, R>() skeleton generation
 │   ├── executing-effect-stubs/           # Implementation, test authoring, and gate execution
 │   ├── resolving-effect-review-feedback/ # Adjudication and fix loop for external PR reviews
 │   └── compounding-effect-learnings/     # Friction analysis and deterministic gate promotion
 └── agents/
-    ├── effect-ears-test-reviewer.md      # EARS clause-to-test traceability specialist
-    ├── effect-security-reviewer.md       # Trust boundaries, input validation, and secrets
-    ├── effect-reliability-reviewer.md    # DO SQLite sync discipline and resource scopes
-    └── effect-adversarial-reviewer.md    # Falsification, crash sequences, and race conditions
+    ├── effect-ears-test-reviewer.md         # EARS clause-to-test traceability specialist
+    ├── effect-security-reviewer.md          # Trust boundaries, input validation, and secrets
+    ├── effect-reliability-reviewer.md       # DO SQLite sync discipline and resource scopes
+    ├── effect-adversarial-reviewer.md       # Falsification, crash sequences, and race conditions
+    ├── effect-web-reviewer.md               # scope:web AtomHttpApi, React concurrency & Result matching
+    ├── effect-migration-contract-reviewer.md # Expand-contract SQL, wire schemas & Alchemy bindings
+    └── effect-architecture-reviewer.md      # Archetype purity, 5-tier cohesion & adapter parity
 ```
 
 ---
@@ -51,13 +56,13 @@ Claude Code executes hooks defined in `adapters/claude-code/hooks.json` at key s
 
 The adapter configures three Model Context Protocol servers over stdio:
 
-- **`harness-mcp`:** In-process TypeScript server (`apps/harness-mcp/src/server.ts`) exposing 15 tools: symbol resolution (`harness_resolve`, `harness_callers`, `harness_callees`), test reachability (`harness_tests_reaching`), AST pattern searching (`harness_structural_search`), idiom routing (`harness_route`), ArchiMate ontology tracing (`harness_ontology_why`, `harness_ontology_impact`, `harness_ontology_check`), graph queries & Datalog/DPO inference (`harness_gq_query`, `harness_graph_infer`, `harness_graph_complete`, `harness_graph_rewrite`), type diagnostics (`harness_lsp_diagnostics`), and telemetry reporting (`harness_telemetry_report`).
+- **`harness-mcp`:** In-process TypeScript server (`apps/harness-mcp/src/server.ts`) exposing 16 tools: symbol resolution (`harness_resolve`, `harness_callers`, `harness_callees`), test reachability (`harness_tests_reaching`), AST pattern searching (`harness_structural_search`), idiom & review routing (`harness_route`, `harness_review_route`), ArchiMate ontology tracing (`harness_ontology_why`, `harness_ontology_impact`, `harness_ontology_check`), graph queries & Datalog/DPO inference (`harness_gq_query`, `harness_graph_infer`, `harness_graph_complete`, `harness_graph_rewrite`), type diagnostics (`harness_lsp_diagnostics`), and telemetry reporting (`harness_telemetry_report`).
 - **`omnigraph-mcp` (`@modernrelay/omnigraph-mcp@0.14.0`):** Graph database server managing the ArchiMate 3.2 property graph on port 8080, governed by `libs/harness/graph/policies.cedar`.
 - **`nx-mcp`:** Workspace graph server for Nx target and project discovery.
 
 ---
 
-## 7 Workflow Skills
+## 8 Workflow Skills
 
 Use the workflow skills to drive task progress through each lifecycle stage or execute end-to-end autonomously:
 
@@ -71,13 +76,21 @@ Use the workflow skills to drive task progress through each lifecycle stage or e
 
 ### 2. `effect-lfg` (`/effect-lfg`)
 
-- **When to Use:** Autonomous end-to-end pipeline orchestrator. Use when you want to pass a requirement, bug report, or EARS spec and have the harness run hands-off from start to finish (EARS spec with explicit `## Assumptions` $\rightarrow$ `stub<A, E, R>()` & `plan-check` $\rightarrow$ subagent implementation $\rightarrow$ 4-lens specialist review & auto-fix $\rightarrow$ `learn`, `gc --strict`, `mutate --strict`, `verify`, `done` $\rightarrow$ git commit & optional PR).
+- **When to Use:** Autonomous end-to-end pipeline orchestrator. Use when you want to pass a requirement, bug report, or EARS spec and have the harness run hands-off from start to finish (EARS spec with explicit `## Assumptions` $\rightarrow$ `stub<A, E, R>()` & `plan-check` $\rightarrow$ subagent implementation $\rightarrow$ 7-lens specialist review & auto-fix $\rightarrow$ `learn`, `gc --strict`, `mutate --strict`, `verify`, `done` $\rightarrow$ git commit & optional PR).
 - **Trigger / Starter Prompt:**
   ```text
   "/effect-lfg Add a Sample.archiveAlbum use-case to libs/sample that marks an album archived or fails with AlbumNotFoundError."
   ```
 
-### 3. `specifying-ears-with-effect`
+### 3. `effect-code-review` (`/effect-code-review`)
+
+- **When to Use:** Standalone read-only code review skill. Use when reviewing git diffs, branches, commit ranges, or pull requests via `harness_review_route` and the 7 specialist reviewers with deterministic-gate noise suppression.
+- **Trigger / Starter Prompt:**
+  ```text
+  "/effect-code-review Review git diff main...HEAD"
+  ```
+
+### 4. `specifying-ears-with-effect`
 
 - **When to Use:** Step 1 of the task lifecycle. Use before writing code or skeletons when requirements are informal, unwritten, or missing EARS clauses (`WHEN`, `IF/THEN`, `WHILE`, `WHERE`).
 - **Trigger / Starter Prompt:**
@@ -85,7 +98,7 @@ Use the workflow skills to drive task progress through each lifecycle stage or e
   "Author the EARS specification and ADR for rate-limiting Durable Object storage using specifying-ears-with-effect."
   ```
 
-### 4. `planning-effect-skeletons`
+### 5. `planning-effect-skeletons`
 
 - **When to Use:** Steps 2–3 of the task lifecycle. Use after specification approval to translate EARS clauses into compilable `stub<A, E, R>()` signatures and pass `harness plan-check`.
 - **Trigger / Starter Prompt:**
@@ -93,7 +106,7 @@ Use the workflow skills to drive task progress through each lifecycle stage or e
   "Create plan-as-code skeletons for the session store service and domain functions using planning-effect-skeletons."
   ```
 
-### 5. `executing-effect-stubs`
+### 6. `executing-effect-stubs`
 
 - **When to Use:** Steps 4–6 of the task lifecycle. Use once `harness plan-check` passes on `plan/<task>` to replace stubs with `Effect.fn` implementations, Layers, and Vitest test suites.
 - **Trigger / Starter Prompt:**
@@ -101,7 +114,7 @@ Use the workflow skills to drive task progress through each lifecycle stage or e
   "Execute stubs in libs/sample/domain and libs/sample/infra using executing-effect-stubs and verify all gates."
   ```
 
-### 6. `resolving-effect-review-feedback`
+### 7. `resolving-effect-review-feedback`
 
 - **When to Use:** Step 8 (Post-PR / External Review Resolution). Use when addressing code review comments from Grok, Codex, Claude, human reviewers, or GitHub PR threads (`gh pr view`).
 - **Trigger / Starter Prompt:**
@@ -113,7 +126,7 @@ Use the workflow skills to drive task progress through each lifecycle stage or e
   "Resolve the code review comments on pull request #42 using resolving-effect-review-feedback."
   ```
 
-### 7. `compounding-effect-learnings`
+### 8. `compounding-effect-learnings`
 
 - **When to Use:** Step 7 of the task lifecycle and post-review retrospectives. Use when completing tasks that encountered gate failures, route misses, or new idioms to promote friction into deterministic gates.
 - **Trigger / Starter Prompt:**
@@ -123,16 +136,19 @@ Use the workflow skills to drive task progress through each lifecycle stage or e
 
 ---
 
-## 4 Specialist Review Subagents
+## 7 Specialist Review Subagents
 
 Invoke specialist review subagents as read-only inspectors during implementation, before verification, or during review adjudication:
 
-| Subagent                      | Role & Activation                                                                                  | Audit Focus                                                                                                                                                                                                       | Primary References                                                                                          |
-| :---------------------------- | :------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------- |
-| `effect-ears-test-reviewer`   | Read-only test fidelity auditor. Invoke during test implementation or PR review.                   | Verifies 1:1 coverage between EARS clauses (`WHEN`, `IF/THEN`, `WHILE`, `WHERE`) and `@effect/vitest` assertions; flags vacuous `.thenFails()` without expected error instances; checks mock boundary fidelity.   | `docs/specs/*.md`<br>`agent-patterns/testing.md`                                                            |
-| `effect-security-reviewer`    | Read-only security auditor. Invoke when modifying contracts, authorization, or queries.            | Audits boundary decoding (`Schema.decodeUnknownEffect`); checks IDOR authorization checks in `type:domain`; detects raw SQL string interpolation; verifies `Redacted` usage for sensitive configuration.          | `agent-patterns/schema.md`<br>`agent-patterns/d1-repository.md`<br>`agent-patterns/httpapi.md`              |
-| `effect-reliability-reviewer` | Read-only reliability auditor. Invoke when modifying concurrency, Durable Objects, or scopes.      | Audits DO SQLite synchronous transaction discipline (`MixedScheduler("sync")`, pre-transaction decoding, commit-order mutation); checks `Scope` finalizers; detects unbounded `Schedule` retries and fiber leaks. | `agent-patterns/durable-object-state.md`<br>`agent-patterns/concurrency.md`<br>`agent-patterns/schedule.md` |
-| `effect-adversarial-reviewer` | Read-only chaos auditor. Invoke for complex state transitions, deciders, or distributed workflows. | Constructs partial-failure crash-between-steps sequences; constructs concurrent race conditions; analyzes out-of-order event replay; tests boundary value mutations against pure deciders.                        | `agent-patterns/event-sourcing.md`<br>`agent-patterns/pattern-matching.md`<br>`agent-patterns/errors.md`    |
+| Subagent                               | Role & Activation                                                                                  | Audit Focus                                                                                                                                                                                                       | Primary References                                                                                          |
+| :------------------------------------- | :------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------- |
+| `effect-ears-test-reviewer`            | Read-only test fidelity auditor. Invoke during test implementation or PR review.                   | Verifies 1:1 coverage between EARS clauses (`WHEN`, `IF/THEN`, `WHILE`, `WHERE`) and `@effect/vitest` assertions; flags vacuous `.thenFails()` without expected error instances; checks mock boundary fidelity.   | `docs/specs/*.md`<br>`agent-patterns/testing.md`                                                            |
+| `effect-security-reviewer`             | Read-only security auditor. Invoke when modifying contracts, authorization, or queries.            | Audits boundary decoding (`Schema.decodeUnknownEffect`); checks IDOR authorization checks in `type:domain`; detects raw SQL string interpolation; verifies `Redacted` usage for sensitive configuration.          | `agent-patterns/schema.md`<br>`agent-patterns/d1-repository.md`<br>`agent-patterns/httpapi.md`              |
+| `effect-reliability-reviewer`          | Read-only reliability auditor. Invoke when modifying concurrency, Durable Objects, or scopes.      | Audits DO SQLite synchronous transaction discipline (`MixedScheduler("sync")`, pre-transaction decoding, commit-order mutation); checks `Scope` finalizers; detects unbounded `Schedule` retries and fiber leaks. | `agent-patterns/durable-object-state.md`<br>`agent-patterns/concurrency.md`<br>`agent-patterns/schedule.md` |
+| `effect-adversarial-reviewer`          | Read-only chaos auditor. Invoke for complex state transitions, deciders, or distributed workflows. | Constructs partial-failure crash-between-steps sequences; constructs concurrent race conditions; analyzes out-of-order event replay; tests boundary value mutations against pure deciders.                        | `agent-patterns/event-sourcing.md`<br>`agent-patterns/pattern-matching.md`<br>`agent-patterns/errors.md`    |
+| `effect-web-reviewer`                  | Read-only frontend auditor. Invoke for `scope:web`, `apps/*-web/**`, `.tsx`, or `AtomHttpApi`.     | Audits `AtomHttpApi` / `@effect/atom-react` boundary discipline, frontend concurrency & double-submit races, exhaustive `Result`/`Option` rendering via `ts-pattern`, and form/URL brand decoding.                 | `agent-patterns/atom.md`<br>`agent-patterns/pattern-matching.md`<br>`agent-patterns/schema.md`              |
+| `effect-migration-contract-reviewer`   | Read-only schema & migration auditor. Invoke for SQL migrations, contracts, or Alchemy bindings.   | Audits zero-downtime expand-and-contract SQL evolution, `SqliteMigrator` table isolation, D1/SQLite index coverage, `HttpApiEndpoint`/`RpcGroup`/event compatibility, and Alchemy v2 bindings.                    | `agent-patterns/d1-repository.md`<br>`agent-patterns/alchemy-infra.md`<br>`agent-patterns/schema.md`        |
+| `effect-architecture-reviewer`         | Read-only architecture auditor. Invoke for `type:service`, framework/adapter surfaces, or large diffs. | Audits framework-vs-application archetype purity, 5-tier hexagonal cohesion, `SelfDogfooding.decide` line-ceiling proximity, and agent-surface adapter parity.                                                    | `agent-patterns/planning.md`<br>`agent-patterns/services-and-layers.md`                                     |
 
 ---
 

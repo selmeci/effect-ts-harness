@@ -10,6 +10,7 @@ import {
   GATE_RULE_SOURCE_FILES,
 } from "../src/plugins/gc/gc-doc-truth.plugin.js"
 import { evaluatePackageAndMigrationPlugin } from "../src/plugins/gc/gc-package-and-migration.plugin.js"
+import { checkChainedEqualityTernaries } from "../src/plugins/gc/gc-topology-entropy.plugin.js"
 import { testHostIo } from "./helpers/test-host-io.js"
 
 describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
@@ -501,6 +502,42 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
             f.nodeId === "libs/sample/contract/test/index.test.ts:@effect/vitest",
         ),
       ).toBe(true)
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it("checkChainedEqualityTernaries: detects direct, parenthesized, reversed, ||/&&-compound, trivia-evaded, and !=/whenTrue chains while ignoring distinct targets", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "harness-chained-ternary-"))
+    try {
+      const srcDir = join(tempDir, "libs/sample/domain/src")
+      mkdirSync(srcDir, { recursive: true })
+      writeFileSync(
+        join(srcDir, "cases.ts"),
+        [
+          'export const direct = (x: string) => (x === "a" ? 1 : x === "b" ? 2 : 3)',
+          'export const paren = (x: string) => ((x === "a") ? 1 : ((x === "b") ? 2 : 3))',
+          'export const reversed = (x: string) => ("a" === x ? 1 : "b" === x ? 2 : 3)',
+          'export const compound = (x: string) => (x === "a" || x === "b" ? 1 : x === "c" ? 2 : 3)',
+          'export const trivia = (a: { b: string }) => (a /* comment */ . b === "x" ? 1 : a.b === "y" ? 2 : 3)',
+          'export const negated = (x: string) => (x !== "a" ? (x !== "b" ? 3 : 2) : 1)',
+          'export const mixedNeg = (x: string) => (x === "a" ? 1 : x !== "b" ? 3 : 2)',
+          "export const distinct = (a: number, b: number) => (a === 1 ? 10 : b === 2 ? 20 : 30)",
+        ].join("\n"),
+      )
+
+      const findings = checkChainedEqualityTernaries(tempDir, testHostIo)
+      expect(findings).toHaveLength(7)
+      expect(findings.every((f) => f.kind === "chained-equality-ternary")).toBe(true)
+      expect(findings.map((f) => f.location)).toEqual([
+        "libs/sample/domain/src/cases.ts:1",
+        "libs/sample/domain/src/cases.ts:2",
+        "libs/sample/domain/src/cases.ts:3",
+        "libs/sample/domain/src/cases.ts:4",
+        "libs/sample/domain/src/cases.ts:5",
+        "libs/sample/domain/src/cases.ts:6",
+        "libs/sample/domain/src/cases.ts:7",
+      ])
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
     }
