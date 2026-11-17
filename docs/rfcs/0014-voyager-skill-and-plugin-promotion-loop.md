@@ -32,7 +32,7 @@ target_specs:
 
 # RFC-0014: Voyager-Style Compounding Skill & Typed Plugin Promotion in `harness learn` (Immutable TCB)
 
-> **Revision (2026-11-17):** reworked after independent review ([review](./reviews/2026-11-16-rfc-0011-0014-review.md)); v1 promotes only query presets and Mode A codemod recipes, requires support from 3 distinct tasks, emits into a new tagged Nx project, and runs outside `harness workflow ship` on its own branch and PR. Gate plugins moved to v2 with human activation.
+> Supporting evidence: [independent review of RFC-0011..0014](./reviews/2026-11-16-rfc-0011-0014-review.md).
 
 ## 1. Executive Summary
 
