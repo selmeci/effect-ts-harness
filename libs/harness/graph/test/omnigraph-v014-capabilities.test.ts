@@ -26,8 +26,14 @@ import {
   mergeOmnigraphBranch,
   mutateOmnigraphConditional,
   NodeKey,
+  type OmnigraphBlobOpsShape,
+  type OmnigraphBranchOpsShape,
+  type OmnigraphChangeFeedOpsShape,
+  type OmnigraphCommitProposalOpsShape,
   OmnigraphLoadError,
+  type OmnigraphQueryOpsShape,
   OmnigraphSync,
+  type OmnigraphSyncShape,
   PackageTag,
   pollOmnigraphChanges,
   readAuthTokensFromClusterDir,
@@ -41,7 +47,8 @@ import {
   updateGraphHeadCursor,
   writeGraphHeadMeta,
 } from "../src/index.js"
-import { testHostIo } from "./helpers/test-host-io.js"
+import { withGraphHeadLock } from "../src/cluster-resolver.js"
+import { extendedTestHostIo, makeExtendedTestHostIo, testHostIo } from "./helpers/test-host-io.js"
 
 const OmnigraphSyncLive = makeOmnigraphSyncLayer(testHostIo)
 
@@ -831,10 +838,13 @@ describe("Omnigraph v0.14.0 native capabilities (RFC-0009)", () => {
         try {
           const clusterDir = path.join(tmpRepo, ".harness", "omnigraph-cluster")
           fs.mkdirSync(clusterDir, { recursive: true })
+          const authTokensPath = path.join(clusterDir, "auth-tokens.json")
           fs.writeFileSync(
-            path.join(clusterDir, "auth-tokens.json"),
+            authTokensPath,
             JSON.stringify({ schemaVersion: 1, cliToken: "cli-secret", mcpToken: "mcp-secret" }),
+            { mode: 0o600 },
           )
+          fs.chmodSync(authTokensPath, 0o600)
           fs.writeFileSync(
             path.join(clusterDir, "server.json"),
             JSON.stringify({
@@ -858,7 +868,7 @@ describe("Omnigraph v0.14.0 native capabilities (RFC-0009)", () => {
 
           const cliClient = makeOmnigraphClient(
             { repoRoot: tmpRepo, actor: "harness-cli", fetch: captureAuthFetch },
-            testHostIo,
+            extendedTestHostIo,
             {},
           )
           yield* Effect.tryPromise({
@@ -868,7 +878,7 @@ describe("Omnigraph v0.14.0 native capabilities (RFC-0009)", () => {
           // health() is unauthenticated, test access() or query() for Authorization header
           const mcpClient = makeOmnigraphClient(
             { repoRoot: tmpRepo, actor: "agent-mcp", fetch: captureAuthFetch },
-            testHostIo,
+            extendedTestHostIo,
             {},
           )
           yield* Effect.tryPromise({
@@ -885,7 +895,7 @@ describe("Omnigraph v0.14.0 native capabilities (RFC-0009)", () => {
               actor: "harness-cli",
               fetch: captureAuthFetch,
             },
-            testHostIo,
+            extendedTestHostIo,
             {},
           )
           yield* Effect.tryPromise({
@@ -1343,10 +1353,12 @@ describe("Omnigraph v0.14.0 native capabilities (RFC-0009)", () => {
     try {
       const clusterDir = path.join(tmpRepo, ".harness", "omnigraph-cluster")
       fs.mkdirSync(clusterDir, { recursive: true })
-      fs.writeFileSync(path.join(clusterDir, "auth-tokens.json"), "{corrupt-auth", "utf8")
+      const authPath = path.join(clusterDir, "auth-tokens.json")
+      fs.writeFileSync(authPath, "{corrupt-auth", { encoding: "utf8", mode: 0o600 })
+      fs.chmodSync(authPath, 0o600)
       fs.writeFileSync(path.join(clusterDir, "server.json"), "{corrupt-server", "utf8")
 
-      expect(readAuthTokensFromClusterDir(clusterDir, testHostIo, "harness-cli")).toBeUndefined()
+      expect(readAuthTokensFromClusterDir(clusterDir, extendedTestHostIo, "harness-cli")).toBeUndefined()
       const fallbackUrl = resolveOmnigraphBaseUrl({ repoRoot: tmpRepo }, {}, testHostIo)
       expect(fallbackUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
 
@@ -1587,4 +1599,282 @@ describe("Omnigraph v0.14.0 native capabilities (RFC-0009)", () => {
       }
     }),
   )
+
+  it("P1-2: writeGraphHeadMeta & updateGraphHeadCursor use nonce temp paths and clean up .graph-head.json.lock on success, error, and stale lock recovery", () => {
+    const tmpRepo = fs.mkdtempSync(path.join(tmpdir(), "og-v014-p1-2-lock-"))
+    try {
+      const seenTmpPaths: Array<string> = []
+      const lockSeenDuringWrite: Array<boolean> = []
+      const lockPath = path.join(tmpRepo, ".harness", ".graph-head.json.lock")
+
+      const spyingIo = makeExtendedTestHostIo({
+        writeTextSync: (filePath, content) => {
+          seenTmpPaths.push(filePath)
+          lockSeenDuringWrite.push(fs.existsSync(lockPath))
+          extendedTestHostIo.writeTextSync(filePath, content)
+        },
+      })
+
+      const written = writeGraphHeadMeta(
+        tmpRepo,
+        spyingIo,
+        { headSha: "sha-p1-2", gitBranch: "main" },
+        {},
+      )
+      expect(written?.headSha).toBe("sha-p1-2")
+      expect(seenTmpPaths).toHaveLength(1)
+      expect(path.basename(seenTmpPaths[0] ?? "")).toMatch(
+        new RegExp(`^\\.graph-head\\.json\\.${process.pid}\\.[0-9a-f]{12}\\.tmp$`),
+      )
+      expect(lockSeenDuringWrite).toEqual([true])
+      expect(fs.existsSync(lockPath)).toBe(false)
+
+      const updated = updateGraphHeadCursor(
+        tmpRepo,
+        spyingIo,
+        OmnigraphChangeCursor.make("cur-p1-2"),
+        {},
+      )
+      expect(updated?.changeFeedCursor).toBe("cur-p1-2")
+      expect(seenTmpPaths).toHaveLength(2)
+      expect(path.basename(seenTmpPaths[1] ?? "")).toMatch(
+        new RegExp(`^\\.graph-head\\.json\\.${process.pid}\\.[0-9a-f]{12}\\.tmp$`),
+      )
+      expect(seenTmpPaths[0]).not.toBe(seenTmpPaths[1])
+      expect(fs.existsSync(lockPath)).toBe(false)
+
+      // Error path inside locked callback still removes lockfile
+      expect(() =>
+        withGraphHeadLock(
+          tmpRepo,
+          extendedTestHostIo,
+          () => {
+            expect(fs.existsSync(lockPath)).toBe(true)
+            throw new Error("boom-inside-lock")
+          },
+          {},
+        ),
+      ).toThrow("boom-inside-lock")
+      expect(fs.existsSync(lockPath)).toBe(false)
+
+      // Stale lock recovery (>5000ms old) unlinks stale lock, acquires fresh lock, and cleans up
+      fs.writeFileSync(lockPath, JSON.stringify({ pid: 999999, ts: Date.now() - 10_000 }), "utf8")
+      const recovered = writeGraphHeadMeta(
+        tmpRepo,
+        spyingIo,
+        { headSha: "sha-stale-recovered", gitBranch: "main" },
+        {},
+      )
+      expect(recovered?.headSha).toBe("sha-stale-recovered")
+      expect(lockSeenDuringWrite[2]).toBe(true)
+      expect(fs.existsSync(lockPath)).toBe(false)
+
+      // Non-stale lock is preserved on cleanup (not unlinked by contender)
+      const freshLockContent = JSON.stringify({ pid: 999998, ts: Date.now() })
+      fs.writeFileSync(lockPath, freshLockContent, "utf8")
+      withGraphHeadLock(tmpRepo, extendedTestHostIo, () => undefined, {})
+      expect(fs.existsSync(lockPath)).toBe(true)
+      expect(fs.readFileSync(lockPath, "utf8")).toBe(freshLockContent)
+    } finally {
+      fs.rmSync(tmpRepo, { recursive: true, force: true })
+    }
+  })
+
+  it("P1-4: readAuthTokensFromClusterDir rejects permissive (0o644) and undefined modes while accepting 0o600", () => {
+    const tmpRepo = fs.mkdtempSync(path.join(tmpdir(), "og-v014-p1-4-auth-mode-"))
+    const stderrChunks: Array<string> = []
+    const origWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+      return true
+    }) as typeof process.stderr.write
+    try {
+      const clusterDir = path.join(tmpRepo, ".harness", "omnigraph-cluster")
+      fs.mkdirSync(clusterDir, { recursive: true })
+      const authPath = path.join(clusterDir, "auth-tokens.json")
+      fs.writeFileSync(
+        authPath,
+        JSON.stringify({ schemaVersion: 1, cliToken: "cli-tok", mcpToken: "mcp-tok" }),
+        { encoding: "utf8", mode: 0o600 },
+      )
+      fs.chmodSync(authPath, 0o600)
+
+      // 0o600 succeeds
+      expect(readAuthTokensFromClusterDir(clusterDir, extendedTestHostIo, "harness-cli")).toBe(
+        "cli-tok",
+      )
+
+      // 0o644 permissive mode is rejected
+      const permissiveIo = makeExtendedTestHostIo({
+        statModeSync: () => 0o100644,
+      })
+      expect(readAuthTokensFromClusterDir(clusterDir, permissiveIo, "harness-cli")).toBeUndefined()
+      expect(stderrChunks.join("")).toContain("permissive (644) mode")
+
+      // undefined mode (or SyncHostIo without statModeSync) is rejected
+      stderrChunks.length = 0
+      const unknownModeIo = makeExtendedTestHostIo({
+        statModeSync: () => undefined,
+      })
+      expect(readAuthTokensFromClusterDir(clusterDir, unknownModeIo, "harness-cli")).toBeUndefined()
+      expect(readAuthTokensFromClusterDir(clusterDir, testHostIo, "harness-cli")).toBeUndefined()
+      expect(stderrChunks.join("")).toContain("unknown mode")
+    } finally {
+      process.stderr.write = origWrite
+      fs.rmSync(tmpRepo, { recursive: true, force: true })
+    }
+  })
+
+  it.effect("P1-5: mergeBranch persists graph-head.json before cleanupBranches delete failures", () =>
+    Effect.gen(function* () {
+      const tmpRepo = fs.mkdtempSync(path.join(tmpdir(), "og-v014-p1-5-merge-order-"))
+      try {
+        fs.mkdirSync(path.join(tmpRepo, ".git", "refs", "heads"), { recursive: true })
+        fs.writeFileSync(path.join(tmpRepo, ".git", "HEAD"), "ref: refs/heads/main\n")
+        fs.writeFileSync(path.join(tmpRepo, ".git", "refs", "heads", "main"), "merge-head-sha-1\n")
+
+        let headMetaWrittenBeforeCleanupDelete = false
+        const mockFetch: FetchLike = (input, init) => {
+          const url = toUrlString(input)
+          const method = init?.method ?? "GET"
+          if (url.endsWith("/graphs/harness/branches") && method === "GET") {
+            return jsonResponse({ branches: ["main", "impl/task", "plan/task"] })
+          }
+          if (url.endsWith("/graphs/harness/branches/merge")) {
+            return jsonResponse({
+              outcome: "fast_forward",
+              source: "impl/task",
+              target: "main",
+              branch_deleted: true,
+              commit: {
+                graph_commit_id: "cmt-merge-p1-5",
+                created_at: 1002,
+                graph_manifest_version: 1,
+                graph_branch: "main",
+                parent_commit_id: "cmt-parent-0",
+                merged_parent_commit_id: "cmt-impl-0",
+                kind: "published",
+                published: true,
+              },
+            })
+          }
+          if (method === "DELETE" && url.includes("/graphs/harness/branches/")) {
+            const metaDuringCleanup = readGraphHeadMeta(tmpRepo, extendedTestHostIo, {})
+            headMetaWrittenBeforeCleanupDelete =
+              metaDuringCleanup?.omnigraphCommitId === "cmt-merge-p1-5"
+            return Promise.resolve(
+              new Response("cleanup delete failed", {
+                status: 500,
+                headers: { "Omnigraph-Http-Api": "0.14" },
+              }),
+            )
+          }
+          return jsonResponse({})
+        }
+
+        yield* mergeOmnigraphBranch({
+          repoRoot: tmpRepo,
+          source: "impl/task",
+          target: "main",
+          cleanupBranches: ["impl/task", "plan/task"],
+          fetch: mockFetch,
+        }).pipe(Effect.provide(makeOmnigraphSyncLayer(extendedTestHostIo)))
+
+        expect(headMetaWrittenBeforeCleanupDelete).toBe(true)
+        const finalMeta = readGraphHeadMeta(tmpRepo, extendedTestHostIo, {})
+        expect(finalMeta?.omnigraphCommitId).toBe("cmt-merge-p1-5")
+      } finally {
+        fs.rmSync(tmpRepo, { recursive: true, force: true })
+      }
+    }),
+  )
+
+  it.effect("P1-6: sync does not overwrite existing graph-snapshot.json when og.load fails, but creates missing fallback snapshot", () =>
+    Effect.gen(function* () {
+      const tmpRepo = fs.mkdtempSync(path.join(tmpdir(), "og-v014-p1-6-snapshot-order-"))
+      try {
+        const snapshotPath = path.join(tmpRepo, ".harness", "graph-snapshot.json")
+        const fail500Fetch: FetchLike = (input) => {
+          if (toUrlString(input).endsWith("/healthz")) {
+            return Promise.resolve(
+              new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }),
+            )
+          }
+          return Promise.resolve(
+            new Response("load failed", {
+              status: 500,
+              headers: { "Omnigraph-Http-Api": "0.14" },
+            }),
+          )
+        }
+
+        // 1. Missing snapshot: fallback creates snapshotPath on failure
+        const initialRes = yield* syncToOmnigraphAndSnapshot(sampleGraph, {
+          repoRoot: tmpRepo,
+          snapshotPath,
+          fetch: fail500Fetch,
+        }).pipe(Effect.provide(OmnigraphSyncLive))
+        expect(initialRes.syncedToOmnigraph).toBe(false)
+        expect(fs.existsSync(snapshotPath)).toBe(true)
+
+        // 2. Existing snapshot: failure does NOT overwrite existing snapshotPath
+        const sentinel = JSON.stringify({ sentinel: "keep-on-load-failure" })
+        fs.writeFileSync(snapshotPath, sentinel, "utf8")
+        const failAgainRes = yield* syncToOmnigraphAndSnapshot(sampleGraph, {
+          repoRoot: tmpRepo,
+          snapshotPath,
+          fetch: fail500Fetch,
+        }).pipe(Effect.provide(OmnigraphSyncLive))
+        expect(failAgainRes.syncedToOmnigraph).toBe(false)
+        expect(fs.readFileSync(snapshotPath, "utf8")).toBe(sentinel)
+
+        // 3. Successful load updates snapshotPath
+        const okFetch: FetchLike = (input) => {
+          if (toUrlString(input).endsWith("/healthz")) {
+            return Promise.resolve(
+              new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }),
+            )
+          }
+          return jsonResponse({
+            branch: "main",
+            branch_created: false,
+            commit: {
+              graph_commit_id: "cmt-ok-p1-6",
+              created_at: 1003,
+              graph_manifest_version: 1,
+              kind: "published",
+            },
+            edges: [],
+            embedding_generation: null,
+            mode: "merge",
+          })
+        }
+        const okRes = yield* syncToOmnigraphAndSnapshot(sampleGraph, {
+          repoRoot: tmpRepo,
+          snapshotPath,
+          fetch: okFetch,
+        }).pipe(Effect.provide(OmnigraphSyncLive))
+        expect(okRes.syncedToOmnigraph).toBe(true)
+        expect(fs.readFileSync(snapshotPath, "utf8")).not.toBe(sentinel)
+        expect(fs.readFileSync(snapshotPath, "utf8")).toContain("Sample.ping")
+      } finally {
+        fs.rmSync(tmpRepo, { recursive: true, force: true })
+      }
+    }),
+  )
+
+  it("P1-7: OmnigraphSyncShape composes the 5 exported capability sub-interfaces", () => {
+    const assertBranchOps = (s: OmnigraphSyncShape): OmnigraphBranchOpsShape => s
+    const assertQueryOps = (s: OmnigraphSyncShape): OmnigraphQueryOpsShape => s
+    const assertChangeFeedOps = (s: OmnigraphSyncShape): OmnigraphChangeFeedOpsShape => s
+    const assertCommitProposalOps = (s: OmnigraphSyncShape): OmnigraphCommitProposalOpsShape => s
+    const assertBlobOps = (s: OmnigraphSyncShape): OmnigraphBlobOpsShape => s
+    expect([
+      assertBranchOps,
+      assertQueryOps,
+      assertChangeFeedOps,
+      assertCommitProposalOps,
+      assertBlobOps,
+    ]).toHaveLength(5)
+  })
 })

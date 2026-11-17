@@ -3,7 +3,7 @@ import * as net from "node:net"
 import * as os from "node:os"
 import * as path from "node:path"
 import { describe, expect, it, vi } from "vitest"
-import { Cause, Data, Effect, Layer, Option } from "effect"
+import { Cause, Data, Effect, Layer, Option, Schema } from "effect"
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>()
@@ -37,6 +37,12 @@ import {
 } from "../src/server.js"
 import { executeTool } from "./execute-tool-helper.js"
 import { resolveGraphWithStatus } from "../src/tools/mcp-helpers.js"
+import {
+  GqQueryInputSchema,
+  OntologyCheckInputSchema,
+  OntologyImpactInputSchema,
+  OntologyWhyInputSchema,
+} from "../src/tools/ontology-and-gq.tools.js"
 import { McpToolInputName } from "../src/tools/tool-registry.js"
 
 class DaemonClientError extends Data.TaggedError("DaemonClientError")<{
@@ -1297,7 +1303,16 @@ describe("harness-mcp tools", () => {
         { name: "harness_graph_rewrite", arguments: { candidateRank: 0 } },
         { name: "harness_graph_rewrite", arguments: { candidateRank: 6 } },
         { name: "harness_graph_rewrite", arguments: { mode: "bogus" } },
+        { name: "harness_ontology_why", arguments: { symbolOrSpan: "   " } },
+        { name: "harness_ontology_why", arguments: { symbolOrSpan: " Sample.greet" } },
+        { name: "harness_ontology_impact", arguments: { symbolOrSpan: "x".repeat(513) } },
+        { name: "harness_ontology_check", arguments: { scope: "x".repeat(129) } },
         { name: "harness_gq_query", arguments: { queryName: "bogus" } },
+        { name: "harness_gq_query", arguments: { queryName: "resolve_effect_fn", branch: " main" } },
+        {
+          name: "harness_gq_query",
+          arguments: { queryName: "resolve_effect_fn", params: { " badKey": "v" } },
+        },
       ]) {
         await expect(client.callTool(invalidCall)).rejects.toMatchObject({
           code: ErrorCode.InvalidParams,
@@ -1799,4 +1814,104 @@ describe("harness-mcp tools", () => {
       }
     },
   )
+
+  it("enforces bounded trimmed inputs on ontology and gq input schemas", () => {
+    const decodeWhy = Schema.decodeUnknownSync(OntologyWhyInputSchema)
+    const decodeImpact = Schema.decodeUnknownSync(OntologyImpactInputSchema)
+    const decodeCheck = Schema.decodeUnknownSync(OntologyCheckInputSchema)
+    const decodeGq = Schema.decodeUnknownSync(GqQueryInputSchema)
+
+    expect(decodeWhy({ symbolOrSpan: "Sample.greet" })).toEqual({ symbolOrSpan: "Sample.greet" })
+    expect(
+      decodeWhy({ symbolOrSpan: "a".repeat(512), repoRoot: "b".repeat(1024) }),
+    ).toEqual({
+      symbolOrSpan: "a".repeat(512),
+      repoRoot: "b".repeat(1024),
+    })
+
+    expect(decodeImpact({ symbolOrSpan: "Sample.greet", repoRoot: "/tmp/repo" })).toEqual({
+      symbolOrSpan: "Sample.greet",
+      repoRoot: "/tmp/repo",
+    })
+
+    expect(decodeCheck({})).toEqual({})
+    expect(decodeCheck({ scope: "s".repeat(128), repoRoot: "r".repeat(1024) })).toEqual({
+      scope: "s".repeat(128),
+      repoRoot: "r".repeat(1024),
+    })
+
+    const maxParams: Record<string, unknown> = Object.fromEntries(
+      Array.from({ length: 64 }, (_, i) => [`k${i}`, i]),
+    )
+    expect(
+      decodeGq({
+        queryName: "resolve_effect_fn",
+        params: maxParams,
+        branch: "b".repeat(256),
+        repoRoot: "r".repeat(1024),
+      }),
+    ).toEqual({
+      queryName: "resolve_effect_fn",
+      params: maxParams,
+      branch: "b".repeat(256),
+      repoRoot: "r".repeat(1024),
+    })
+
+    for (const invalidTarget of [
+      { symbolOrSpan: "" },
+      { symbolOrSpan: "   " },
+      { symbolOrSpan: " Sample.greet" },
+      { symbolOrSpan: "Sample.greet " },
+      { symbolOrSpan: "a".repeat(513) },
+      { symbolOrSpan: "Sample.greet", repoRoot: "" },
+      { symbolOrSpan: "Sample.greet", repoRoot: "   " },
+      { symbolOrSpan: "Sample.greet", repoRoot: " /tmp/repo" },
+      { symbolOrSpan: "Sample.greet", repoRoot: "/tmp/repo " },
+      { symbolOrSpan: "Sample.greet", repoRoot: "r".repeat(1025) },
+    ]) {
+      expect(() => decodeWhy(invalidTarget)).toThrow()
+      expect(() => decodeImpact(invalidTarget)).toThrow()
+    }
+
+    for (const invalidCheck of [
+      { scope: "" },
+      { scope: "   " },
+      { scope: " sample" },
+      { scope: "sample " },
+      { scope: "s".repeat(129) },
+      { repoRoot: "" },
+      { repoRoot: "   " },
+      { repoRoot: " /tmp/repo" },
+      { repoRoot: "r".repeat(1025) },
+    ]) {
+      expect(() => decodeCheck(invalidCheck)).toThrow()
+    }
+
+    const tooManyParams: Record<string, unknown> = Object.fromEntries(
+      Array.from({ length: 65 }, (_, i) => [`k${i}`, i]),
+    )
+    for (const invalidGq of [
+      { queryName: "" },
+      { queryName: "   " },
+      { queryName: " resolve_effect_fn" },
+      { queryName: "q".repeat(16_385) },
+      { queryName: "resolve_effect_fn", branch: "" },
+      { queryName: "resolve_effect_fn", branch: "   " },
+      { queryName: "resolve_effect_fn", branch: " main" },
+      { queryName: "resolve_effect_fn", branch: "main " },
+      { queryName: "resolve_effect_fn", branch: "b".repeat(257) },
+      { queryName: "resolve_effect_fn", repoRoot: "" },
+      { queryName: "resolve_effect_fn", repoRoot: "   " },
+      { queryName: "resolve_effect_fn", repoRoot: " /tmp/repo" },
+      { queryName: "resolve_effect_fn", repoRoot: "r".repeat(1025) },
+      { queryName: "resolve_effect_fn", params: tooManyParams },
+      { queryName: "resolve_effect_fn", params: { "": "v" } },
+      { queryName: "resolve_effect_fn", params: { "   ": "v" } },
+      { queryName: "resolve_effect_fn", params: { " key": "v" } },
+      { queryName: "resolve_effect_fn", params: { "key ": "v" } },
+      { queryName: "resolve_effect_fn", params: { ["k".repeat(129)]: "v" } },
+    ]) {
+      expect(() => decodeGq(invalidGq)).toThrow()
+    }
+  })
 })

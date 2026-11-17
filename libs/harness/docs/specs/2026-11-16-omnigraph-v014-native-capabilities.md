@@ -29,6 +29,7 @@ enforced_by:
   - apps/harness-cli/src/commands/omnigraph-lifecycle.ts
   - apps/harness-cli/src/commands/omnigraph-auth-and-drift.ts
   - apps/harness-cli/src/commands/omnigraph-safety-helpers.ts
+  - apps/harness-cli/src/commands/omnigraph-lint-gate.ts
   - apps/harness-cli/src/commands/verify-and-done.command.ts
   - apps/harness-cli/src/commands/done-omnigraph-helpers.ts
   - apps/harness-cli/src/commands/gc-and-ontology.command.ts

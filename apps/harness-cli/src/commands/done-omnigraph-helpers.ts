@@ -19,7 +19,6 @@ import {
   makeOmnigraphSyncLayer,
   mergeOmnigraphBranch,
   resolveGitHeadState,
-  resolveOmnigraphClusterDir,
   resolveOmnigraphTaskBranches,
   syncToOmnigraphAndSnapshot,
   writeGraphHeadMeta,
@@ -34,9 +33,9 @@ import {
   resolveClusterRepoRoot,
 } from "./daemon-and-omnigraph.service.js"
 import {
-  runOfflineOmnigraphLintGate,
-  runOmnigraphOptimizeAndCleanup,
-} from "./omnigraph-auth-and-drift.js"
+  runOmnigraphMaintenance,
+  runVerifyOmnigraphLintCheck,
+} from "./omnigraph-lint-gate.js"
 import {
   countImplEffectFns,
   formatDiffErrorMessage,
@@ -48,41 +47,7 @@ import {
   uploadAndVerifySpanTraceBlob,
 } from "./omnigraph-safety-helpers.js"
 
-export { isBranchNotFoundError }
-
-export const runVerifyOmnigraphLintCheck = (
-  repoRoot: string,
-): Effect.Effect<CliResult | undefined> =>
-  Effect.gen(function* () {
-    if (isIsolatedExternalWorkspace(repoRoot)) {
-      return undefined
-    }
-    const lintRes = yield* runOfflineOmnigraphLintGate(resolveClusterRepoRoot(repoRoot))
-    if (!lintRes.ok) {
-      return {
-        exitCode: 1,
-        stdout: "",
-        stderr: `[GATE FAILURE] verify:omnigraph-lint\n${lintRes.message}`,
-      }
-    }
-    return undefined
-  })
-
-/**
- * Runs offline Omnigraph storage maintenance (`optimize`, and optionally `cleanup`)
- * on the local cluster when not in an isolated external workspace.
- */
-export const runOmnigraphMaintenance = (
-  repoRoot: string,
-  options?: { readonly includeCleanup?: boolean },
-): void => {
-  if (isIsolatedExternalWorkspace(repoRoot)) return
-  const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
-  const clusterDir = resolveOmnigraphClusterDir(clusterRepoRoot, nodeSyncHostIo)
-  if (nodeSyncHostIo.existsSync(clusterDir)) {
-    runOmnigraphOptimizeAndCleanup(clusterDir, undefined, options?.includeCleanup ?? true)
-  }
-}
+export { isBranchNotFoundError, runOmnigraphMaintenance, runVerifyOmnigraphLintCheck }
 
 export const runPreMergeOmnigraphBranchVerify = (
   repoRoot: string,

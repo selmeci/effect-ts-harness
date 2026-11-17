@@ -1,5 +1,4 @@
-import { dirname, join, resolve } from "node:path"
-import { fileURLToPath } from "node:url"
+import { join, resolve } from "node:path"
 import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
@@ -38,30 +37,24 @@ import {
   writeServerMetaAtomic,
 } from "./omnigraph-auth-and-drift.js"
 
+import {
+  CLI_REPO_ROOT,
+  findWorkspaceRoot,
+  resolveClusterRepoRoot,
+} from "./repo-path.js"
+
 const DEFAULT_EMBEDDING_API_KEY = "ollama-local"
 const DEFAULT_EMBEDDINGS_MOCK = "1"
 
-export { isLoopbackOmnigraphUrl, isProcessPidAlive, isSafeOmnigraphPidToKill, isValidLockId }
-
-const walkUpForPnpmWorkspace = (startDir: string): string | undefined => {
-  let curr = resolve(startDir)
-  while (curr !== dirname(curr)) {
-    if (nodeSyncHostIo.existsSync(join(curr, "pnpm-workspace.yaml"))) return curr
-    curr = dirname(curr)
-  }
-  return undefined
+export {
+  CLI_REPO_ROOT,
+  findWorkspaceRoot,
+  isLoopbackOmnigraphUrl,
+  isProcessPidAlive,
+  isSafeOmnigraphPidToKill,
+  isValidLockId,
+  resolveClusterRepoRoot,
 }
-
-export const CLI_REPO_ROOT =
-  walkUpForPnpmWorkspace(dirname(fileURLToPath(import.meta.url))) ?? process.cwd()
-
-export const findWorkspaceRoot = (startDir: string = process.cwd()): string =>
-  walkUpForPnpmWorkspace(startDir) ?? CLI_REPO_ROOT
-
-export const resolveClusterRepoRoot = (repoRoot: string): string =>
-  nodeSyncHostIo.existsSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"))
-    ? repoRoot
-    : (walkUpForPnpmWorkspace(repoRoot) ?? resolve(repoRoot))
 
 const LockJsonSchema = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
 

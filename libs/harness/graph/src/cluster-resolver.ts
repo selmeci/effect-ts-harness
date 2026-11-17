@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto"
+import { createHash, randomBytes } from "node:crypto"
 import { basename, dirname, join, resolve } from "node:path"
 import {
   normalizeNonRootWorkspacePath,
@@ -8,7 +8,7 @@ import {
   toErrorReasonMessage,
   WorkspaceFilePath,
 } from "@harness/contract"
-import type { SyncHostIo } from "@harness/service/host-io"
+import type { ExtendedHostIo, SyncHostIo } from "@harness/service/host-io"
 import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 
@@ -215,6 +215,104 @@ export const readGraphHeadMeta = (
     })
     .exhaustive()
 
+const GRAPH_HEAD_LOCK_STALE_MS = 5000
+
+const LockPayloadSchema = Schema.Struct({
+  ts: Schema.Finite,
+})
+const decodeLockPayloadOption = Schema.decodeOption(Schema.fromJsonString(LockPayloadSchema))
+
+type GraphHeadLockHostIo = SyncHostIo & Pick<ExtendedHostIo, "tryWriteExclusiveTextSync">
+
+const hasTryWriteExclusiveTextSync = (hostIo: SyncHostIo): hostIo is GraphHeadLockHostIo =>
+  "tryWriteExclusiveTextSync" in hostIo && typeof hostIo.tryWriteExclusiveTextSync === "function"
+
+const isLockPayloadStale = (lockPath: string, hostIo: SyncHostIo): boolean => {
+  const readRes = Result.try(() => hostIo.readTextSync(lockPath))
+  return match(readRes)
+    .with({ _tag: "Failure" }, () => !hostIo.existsSync(lockPath))
+    .with({ _tag: "Success" }, ({ success: raw }) =>
+      match(decodeLockPayloadOption(raw))
+        .with({ _tag: "None" }, () => true)
+        .with(
+          { _tag: "Some" },
+          ({ value }) => Date.now() - value.ts > GRAPH_HEAD_LOCK_STALE_MS,
+        )
+        .exhaustive(),
+    )
+    .exhaustive()
+}
+
+export const withGraphHeadLock = <A>(
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  fn: () => A,
+  env: NodeJS.ProcessEnv = process.env,
+): A => {
+  if (!hasTryWriteExclusiveTextSync(hostIo)) {
+    return fn()
+  }
+  const stateDir = resolveGraphMetaStateDir(repoRoot, env)
+  const lockPath = join(stateDir, ".graph-head.json.lock")
+  const dirReady = Result.isSuccess(
+    Result.try(() => {
+      if (!hostIo.existsSync(stateDir)) {
+        hostIo.mkdirRecursiveSync(stateDir)
+      }
+    }),
+  )
+  if (!dirReady) {
+    return fn()
+  }
+
+  const writeLockOnce = () =>
+    hostIo.tryWriteExclusiveTextSync(
+      lockPath,
+      JSON.stringify({ pid: process.pid, ts: Date.now() }),
+      0o600,
+    )
+
+  const acquired = match(writeLockOnce())
+    .with({ _tag: "Written" }, () => true)
+    .with({ _tag: "Failed" }, () => false)
+    .with({ _tag: "Exists" }, () => {
+      if (!isLockPayloadStale(lockPath, hostIo)) {
+        return false
+      }
+      Result.try(() => {
+        if (hostIo.existsSync(lockPath)) {
+          hostIo.unlinkSync(lockPath)
+        }
+      })
+      return match(writeLockOnce())
+        .with({ _tag: "Written" }, () => true)
+        .with({ _tag: "Exists" }, { _tag: "Failed" }, () => false)
+        .exhaustive()
+    })
+    .exhaustive()
+
+  if (!acquired) {
+    return fn()
+  }
+
+  const fnResult = Result.try({
+    try: () => fn(),
+    catch: (cause) => cause,
+  })
+  Result.try(() => {
+    if (hostIo.existsSync(lockPath)) {
+      hostIo.unlinkSync(lockPath)
+    }
+  })
+  return match(fnResult)
+    .with({ _tag: "Success" }, ({ success }) => success)
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      // oxlint-disable-next-line -- synchronous lock boundary rethrowing callback error
+      throw failure
+    })
+    .exhaustive()
+}
+
 const persistGraphHeadMeta = (
   repoRoot: string,
   hostIo: SyncHostIo,
@@ -223,7 +321,7 @@ const persistGraphHeadMeta = (
 ): GraphHeadMeta | null => {
   const stateDir = resolveGraphMetaStateDir(repoRoot, env)
   const targetPath = join(stateDir, "graph-head.json")
-  const tmpPath = join(stateDir, `.graph-head.json.${process.pid}.tmp`)
+  const tmpPath = join(stateDir, `.graph-head.json.${process.pid}.${randomBytes(6).toString("hex")}.tmp`)
   const writeResult = Result.try(() => {
     if (!hostIo.existsSync(stateDir)) {
       hostIo.mkdirRecursiveSync(stateDir)
@@ -252,33 +350,39 @@ export const updateGraphHeadCursor = (
   hostIo: SyncHostIo,
   cursor: OmnigraphChangeCursor | null,
   env: NodeJS.ProcessEnv = process.env,
-): GraphHeadMeta | null => {
-  const state = readGraphHeadMetaState(repoRoot, hostIo, env)
-  const existingOrErr = match(state)
-    .with({ _tag: "Present" }, ({ meta }) => ({ ok: true as const, meta }))
-    .with({ _tag: "Missing" }, () => ({ ok: true as const, meta: null }))
-    .with({ _tag: "Corrupt" }, ({ path, reason }) => {
-      process.stderr.write(
-        `[harness/graph] Error: refusing cursor update on corrupt ${path} (${reason}); run full graph sync to rebuild\n`,
-      )
-      return { ok: false as const }
-    })
-    .exhaustive()
-  if (!existingOrErr.ok) {
-    return null
-  }
-  const existing = existingOrErr.meta
-  const meta: GraphHeadMeta = {
-    headSha: existing?.headSha ?? null,
-    gitBranch: existing?.gitBranch ?? null,
-    updatedAt: new Date().toISOString(),
-    ...(existing?.omnigraphCommitId !== undefined
-      ? { omnigraphCommitId: existing.omnigraphCommitId }
-      : {}),
-    changeFeedCursor: cursor,
-  }
-  return persistGraphHeadMeta(repoRoot, hostIo, meta, env)
-}
+): GraphHeadMeta | null =>
+  withGraphHeadLock(
+    repoRoot,
+    hostIo,
+    () => {
+      const state = readGraphHeadMetaState(repoRoot, hostIo, env)
+      const existingOrErr = match(state)
+        .with({ _tag: "Present" }, ({ meta }) => ({ ok: true as const, meta }))
+        .with({ _tag: "Missing" }, () => ({ ok: true as const, meta: null }))
+        .with({ _tag: "Corrupt" }, ({ path, reason }) => {
+          process.stderr.write(
+            `[harness/graph] Error: refusing cursor update on corrupt ${path} (${reason}); run full graph sync to rebuild\n`,
+          )
+          return { ok: false as const }
+        })
+        .exhaustive()
+      if (!existingOrErr.ok) {
+        return null
+      }
+      const existing = existingOrErr.meta
+      const meta: GraphHeadMeta = {
+        headSha: existing?.headSha ?? null,
+        gitBranch: existing?.gitBranch ?? null,
+        updatedAt: new Date().toISOString(),
+        ...(existing?.omnigraphCommitId !== undefined
+          ? { omnigraphCommitId: existing.omnigraphCommitId }
+          : {}),
+        changeFeedCursor: cursor,
+      }
+      return persistGraphHeadMeta(repoRoot, hostIo, meta, env)
+    },
+    env,
+  )
 
 export const writeGraphHeadMeta = (
   repoRoot: string,
@@ -286,38 +390,44 @@ export const writeGraphHeadMeta = (
   headState?: GitHeadState & GraphHeadMetaExtra,
   env: NodeJS.ProcessEnv = process.env,
   extra?: GraphHeadMetaExtra,
-): GraphHeadMeta | null => {
-  const resolved = headState ?? resolveGitHeadState(repoRoot, hostIo, env)
-  const hasExplicitOmnigraphExtra =
-    extra?.omnigraphCommitId !== undefined ||
-    extra?.changeFeedCursor !== undefined ||
-    headState?.omnigraphCommitId !== undefined ||
-    headState?.changeFeedCursor !== undefined
-  if (resolved.headSha === null && resolved.gitBranch === null && !hasExplicitOmnigraphExtra) {
-    return null
-  }
-  const existing = readGraphHeadMeta(repoRoot, hostIo, env)
-  const omnigraphCommitId =
-    extra?.omnigraphCommitId !== undefined
-      ? extra.omnigraphCommitId
-      : headState?.omnigraphCommitId !== undefined
-        ? headState.omnigraphCommitId
-        : existing?.omnigraphCommitId
-  const changeFeedCursor =
-    extra?.changeFeedCursor !== undefined
-      ? extra.changeFeedCursor
-      : headState?.changeFeedCursor !== undefined
-        ? headState.changeFeedCursor
-        : existing?.changeFeedCursor
-  const meta: GraphHeadMeta = {
-    headSha: resolved.headSha,
-    gitBranch: resolved.gitBranch,
-    updatedAt: new Date().toISOString(),
-    ...(omnigraphCommitId !== undefined ? { omnigraphCommitId } : {}),
-    ...(changeFeedCursor !== undefined ? { changeFeedCursor } : {}),
-  }
-  return persistGraphHeadMeta(repoRoot, hostIo, meta, env)
-}
+): GraphHeadMeta | null =>
+  withGraphHeadLock(
+    repoRoot,
+    hostIo,
+    () => {
+      const resolved = headState ?? resolveGitHeadState(repoRoot, hostIo, env)
+      const hasExplicitOmnigraphExtra =
+        extra?.omnigraphCommitId !== undefined ||
+        extra?.changeFeedCursor !== undefined ||
+        headState?.omnigraphCommitId !== undefined ||
+        headState?.changeFeedCursor !== undefined
+      if (resolved.headSha === null && resolved.gitBranch === null && !hasExplicitOmnigraphExtra) {
+        return null
+      }
+      const existing = readGraphHeadMeta(repoRoot, hostIo, env)
+      const omnigraphCommitId =
+        extra?.omnigraphCommitId !== undefined
+          ? extra.omnigraphCommitId
+          : headState?.omnigraphCommitId !== undefined
+            ? headState.omnigraphCommitId
+            : existing?.omnigraphCommitId
+      const changeFeedCursor =
+        extra?.changeFeedCursor !== undefined
+          ? extra.changeFeedCursor
+          : headState?.changeFeedCursor !== undefined
+            ? headState.changeFeedCursor
+            : existing?.changeFeedCursor
+      const meta: GraphHeadMeta = {
+        headSha: resolved.headSha,
+        gitBranch: resolved.gitBranch,
+        updatedAt: new Date().toISOString(),
+        ...(omnigraphCommitId !== undefined ? { omnigraphCommitId } : {}),
+        ...(changeFeedCursor !== undefined ? { changeFeedCursor } : {}),
+      }
+      return persistGraphHeadMeta(repoRoot, hostIo, meta, env)
+    },
+    env,
+  )
 
 export const OmnigraphReconcileReason = Schema.Literals([
   "up-to-date",

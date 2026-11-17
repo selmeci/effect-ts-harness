@@ -112,7 +112,7 @@ export type OmnigraphNamedQueryResult =
       readonly fallbackError: string
     }
 
-export interface OmnigraphSyncShape {
+export interface OmnigraphBranchOpsShape {
   readonly sync: (
     graph: HarnessGraph,
     options?: OmnigraphConnectionOptions & {
@@ -132,6 +132,15 @@ export interface OmnigraphSyncShape {
   readonly dryRunMerge: (
     options: OmnigraphDryRunMergeInput,
   ) => Effect.Effect<OmnigraphDryRunMergeResult, OmnigraphLoadError | OmnigraphMergeConflictError>
+  readonly diffBranches: (
+    input?: OmnigraphConnectionOptions & {
+      readonly source?: OmnigraphBranchName | string | undefined
+      readonly target?: OmnigraphBranchName | string | undefined
+    },
+  ) => Effect.Effect<OmnigraphBranchDiff, OmnigraphLoadError>
+}
+
+export interface OmnigraphQueryOpsShape {
   readonly query: (
     input: OmnigraphConnectionOptions & {
       readonly query: string
@@ -154,15 +163,15 @@ export interface OmnigraphSyncShape {
       readonly fallbackGraph?: HarnessGraph | undefined
     },
   ) => Effect.Effect<OmnigraphNamedQueryResult, OmnigraphLoadError>
-  readonly diffBranches: (
-    input?: OmnigraphConnectionOptions & {
-      readonly source?: OmnigraphBranchName | string | undefined
-      readonly target?: OmnigraphBranchName | string | undefined
-    },
-  ) => Effect.Effect<OmnigraphBranchDiff, OmnigraphLoadError>
+}
+
+export interface OmnigraphChangeFeedOpsShape {
   readonly pollChanges: (
     input: OmnigraphPollChangesInput,
   ) => Effect.Effect<OmnigraphChangeFeedResult, OmnigraphLoadError>
+}
+
+export interface OmnigraphCommitProposalOpsShape {
   readonly proposeMergeCommit: (
     input: OmnigraphProposeMergeInput,
   ) => Effect.Effect<OmnigraphCommitId | null, OmnigraphLoadError | OmnigraphMergeConflictError>
@@ -175,6 +184,9 @@ export interface OmnigraphSyncShape {
   readonly dropCommit: (
     input: OmnigraphCommitActionInput,
   ) => Effect.Effect<void, OmnigraphLoadError>
+}
+
+export interface OmnigraphBlobOpsShape {
   readonly putBlob: (
     input: OmnigraphPutBlobInput,
   ) => Effect.Effect<BlobWrite, OmnigraphLoadError>
@@ -185,6 +197,13 @@ export interface OmnigraphSyncShape {
     input: OmnigraphGetBlobInput,
   ) => Effect.Effect<OmnigraphBlobStatResult, OmnigraphLoadError>
 }
+
+export interface OmnigraphSyncShape
+  extends OmnigraphBranchOpsShape,
+    OmnigraphQueryOpsShape,
+    OmnigraphChangeFeedOpsShape,
+    OmnigraphCommitProposalOpsShape,
+    OmnigraphBlobOpsShape {}
 
 export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncShape>()(
   "@harness/graph/OmnigraphSync",
@@ -228,7 +247,6 @@ export const makeOmnigraphSyncLayer = (
             }
           }
 
-          saveGraphSnapshot(graph, snapshotPath, hostIo)
           const shouldWriteMeta = Boolean(
             options?.repoRoot && !snapshotPath.endsWith("plan-graph-snapshot.json"),
           )
@@ -262,6 +280,7 @@ export const makeOmnigraphSyncLayer = (
                 .with({ _tag: "Failure" }, ({ failure }) => Effect.fail(failure))
                 .with({ _tag: "Success" }, ({ success: decodedCommitId }) => {
                   const commitId = decodedCommitId ?? undefined
+                  saveGraphSnapshot(graph, snapshotPath, hostIo)
                   if (shouldWriteMeta && options?.repoRoot) {
                     const metaSaved =
                       commitId !== undefined
@@ -285,13 +304,16 @@ export const makeOmnigraphSyncLayer = (
                 })
                 .exhaustive()
             }),
-            Effect.catch((err) =>
-              Effect.succeed({
+            Effect.catch((err) => {
+              if (!hostIo.existsSync(snapshotPath)) {
+                saveGraphSnapshot(graph, snapshotPath, hostIo)
+              }
+              return Effect.succeed({
                 syncedToOmnigraph: false,
                 snapshotPath,
                 error: err.cause instanceof Error ? err.cause.message : String(err.cause),
-              }),
-            ),
+              })
+            }),
           )
         }),
 
@@ -315,25 +337,7 @@ export const makeOmnigraphSyncLayer = (
             catch: (cause) => new OmnigraphLoadError({ cause }),
           })
 
-          const cleanup = options?.cleanupBranches ?? []
-          for (const branchToDelete of cleanup) {
-            if (branchToDelete === source && mergeRes.branchDeleted === true) {
-              continue
-            }
-            if (branchToDelete !== target && branchToDelete !== "main") {
-              yield* Effect.tryPromise({
-                try: () => og.branches.delete(branchToDelete),
-                catch: (cause) => new OmnigraphLoadError({ cause }),
-              }).pipe(
-                Effect.catch((cleanupErr) =>
-                  Effect.logWarning(
-                    `Failed to delete cleanup branch "${branchToDelete}": ${toErrorReasonMessage(cleanupErr.cause)}`,
-                  ),
-                ),
-              )
-            }
-          }
-          if (options?.repoRoot) {
+          if (options?.repoRoot !== undefined) {
             const commitId = yield* match(
               decodeStrictOptionalCommitId(mergeRes.commit?.graphCommitId),
             )
@@ -350,6 +354,25 @@ export const makeOmnigraphSyncLayer = (
               return yield* new OmnigraphLoadError({
                 cause: new Error("Failed to persist graph-head.json with omnigraphCommitId"),
               })
+            }
+          }
+
+          const cleanup = options?.cleanupBranches ?? []
+          for (const branchToDelete of cleanup) {
+            if (branchToDelete === source && mergeRes.branchDeleted === true) {
+              continue
+            }
+            if (branchToDelete !== target && branchToDelete !== "main") {
+              yield* Effect.tryPromise({
+                try: () => og.branches.delete(branchToDelete),
+                catch: (cause) => new OmnigraphLoadError({ cause }),
+              }).pipe(
+                Effect.catch((cleanupErr) =>
+                  Effect.logWarning(
+                    `Failed to delete cleanup branch "${branchToDelete}": ${toErrorReasonMessage(cleanupErr.cause)}`,
+                  ),
+                ),
+              )
             }
           }
         }),

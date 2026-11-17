@@ -17,7 +17,7 @@ import {
   OmnigraphTypeName,
   toErrorReasonMessage,
 } from "@harness/contract"
-import type { SyncHostIo } from "@harness/service/host-io"
+import type { ExtendedHostIo, SyncHostIo } from "@harness/service/host-io"
 import { Data, Effect, Option, Result, Schema, Stream } from "effect"
 import {
   type BranchMergeOutcome,
@@ -65,6 +65,11 @@ export const isLoopbackOmnigraphUrl = (rawUrl: string): boolean =>
     () => false,
   )
 
+const hasStatModeSync = (
+  hostIo: SyncHostIo,
+): hostIo is SyncHostIo & Pick<ExtendedHostIo, "statModeSync"> =>
+  "statModeSync" in hostIo && typeof hostIo.statModeSync === "function"
+
 export const readAuthTokensFromClusterDir = (
   clusterDir: string,
   hostIo: SyncHostIo,
@@ -72,6 +77,13 @@ export const readAuthTokensFromClusterDir = (
 ): string | undefined => {
   const authPath = join(clusterDir, "auth-tokens.json")
   if (!hostIo.existsSync(authPath)) {
+    return undefined
+  }
+  const mode = hasStatModeSync(hostIo) ? hostIo.statModeSync(authPath) : undefined
+  if (mode === undefined || (mode & 0o077) !== 0) {
+    process.stderr.write(
+      `[harness/graph] Warning: refusing ${authPath} with ${mode === undefined ? "unknown" : `permissive (${(mode & 0o777).toString(8)})`} mode\n`,
+    )
     return undefined
   }
   return match(Result.try(() => hostIo.readTextSync(authPath)))

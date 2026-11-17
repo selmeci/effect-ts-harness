@@ -2,6 +2,25 @@ import { join, resolve } from "node:path"
 import { Effect, Schema } from "effect"
 import { match, P } from "ts-pattern"
 import { nodeSyncHostIo } from "@harness/infra"
+import {
+  type ScenarioMark,
+  ScenarioMarkSchema,
+  ScenarioPointerSchema,
+  type ScenarioPreflight,
+  ScenarioPreflightSchema,
+  type ScenarioRunState,
+  ScenarioRunStateSchema,
+} from "./scenario-fs.js"
+
+export {
+  type ScenarioMark,
+  ScenarioMarkSchema,
+  ScenarioPointerSchema,
+  type ScenarioPreflight,
+  ScenarioPreflightSchema,
+  type ScenarioRunState,
+  ScenarioRunStateSchema,
+}
 
 /**
  * Branded scenario identifier.
@@ -59,36 +78,6 @@ export const evaluateScenarioStep = (
       }))
       .exhaustive()
   })
-
-export const ScenarioMarkSchema = Schema.Struct({
-  label: Schema.String,
-  note: Schema.optional(Schema.String),
-  timestamp: Schema.String,
-})
-export type ScenarioMark = typeof ScenarioMarkSchema.Type
-
-export const ScenarioPreflightSchema = Schema.Struct({
-  clefModel: Schema.Boolean,
-  coldMs: Schema.optional(Schema.Finite),
-  warmMs: Schema.optional(Schema.Finite),
-  detail: Schema.String,
-})
-export type ScenarioPreflight = typeof ScenarioPreflightSchema.Type
-
-export const ScenarioRunStateSchema = Schema.Struct({
-  scenario: Schema.String,
-  startedAt: Schema.String,
-  endedAt: Schema.optional(Schema.String),
-  stateDir: Schema.String,
-  preflight: ScenarioPreflightSchema,
-  marks: Schema.Array(ScenarioMarkSchema),
-  transcriptFile: Schema.optional(Schema.String),
-})
-export type ScenarioRunState = typeof ScenarioRunStateSchema.Type
-
-export const ScenarioPointerSchema = Schema.Struct({
-  runDir: Schema.String,
-})
 
 const CheckSelectorSchema = Schema.Struct({
   source: Schema.String,
