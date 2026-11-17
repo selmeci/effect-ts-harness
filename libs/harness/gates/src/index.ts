@@ -34,11 +34,7 @@ export {
   type VerifyStamp,
   writeVerifyStamp,
 } from "./verify-stamp.js"
-export {
-  diffPlanAndImplGraphs,
-  formatEntityKey,
-  type PlanImplDiffResult,
-} from "./branch-diff.js"
+export { diffPlanAndImplGraphs, formatEntityKey, type PlanImplDiffResult } from "./branch-diff.js"
 export {
   BENCHMARK_TASKS,
   compareBenchmarkRuns,
@@ -142,9 +138,7 @@ export {
   type SpanBudgetViolation,
   type SpanSample,
 } from "./span-budget.js"
-export {
-  resolveHarnessStateDir,
-} from "./worktree.js"
+export { resolveHarnessStateDir } from "./worktree.js"
 export {
   checkMigrationFiles,
   checkMigrationSqlSafety,
@@ -408,10 +402,7 @@ export {
   computePercentileMillis,
   decideHarnessBench,
 } from "./bench-check.js"
-export {
-  SelfDogfoodingFileInput,
-  SelfDogfoodingInput,
-} from "./plugins/self-dogfooding-contract.js"
+export { SelfDogfoodingFileInput, SelfDogfoodingInput } from "./plugins/self-dogfooding-contract.js"
 export {
   SelfDogfooding,
   decideSelfDogfooding,
@@ -419,9 +410,7 @@ export {
   isModularPluginPath,
   resolvePathSpecificMaxLines,
 } from "./plugins/self-dogfooding-plugin.js"
-export {
-  decideHarnessTierTopology,
-} from "./plugins/harness-tier-topology.js"
+export { decideHarnessTierTopology } from "./plugins/harness-tier-topology.js"
 export {
   DEFAULT_GATE_PLUGINS,
   GatePluginRegistry,
@@ -432,10 +421,7 @@ export {
   type GatePluginDescriptor,
   type GatePluginRegistryShape,
 } from "./plugins/gate-plugin-registry.js"
-export {
-  IMPURE_DOMAIN_MODULES,
-  isDrizzleSpecifier,
-} from "./plugins/ast-gate-visitors.js"
+export { IMPURE_DOMAIN_MODULES, isDrizzleSpecifier } from "./plugins/ast-gate-visitors.js"
 export {
   SQLITE_MIGRATOR_KEY_REGEX,
   analyzeSqliteMigratorFromRecordAst,
@@ -450,28 +436,18 @@ export {
   readTextOrReport,
   readdirOrReport,
 } from "./plugins/gc/gc-helpers.js"
-export {
-  GATE_RULE_SOURCE_FILES,
-} from "./plugins/gc/gc-doc-truth.plugin.js"
-export {
-  MUTATION_PATTERNS,
-  isAssertionFailure,
-} from "./mutation/mutant-ast-generator.js"
-export {
-  readAndVerifyWorkspaceFile,
-  statAndReadWorkspaceFiles,
-} from "./services/workspace-fs.js"
-export {
-  execCheckedSubprocess,
-  validateSubprocessInput,
-} from "./services/subprocess-runner.js"
-export {
-  withActiveMutantEffect,
-} from "./services/active-mutant-context.js"
+export { GATE_RULE_SOURCE_FILES } from "./plugins/gc/gc-doc-truth.plugin.js"
+export { MUTATION_PATTERNS, isAssertionFailure } from "./mutation/mutant-ast-generator.js"
+export { readAndVerifyWorkspaceFile, statAndReadWorkspaceFiles } from "./services/workspace-fs.js"
+export { execCheckedSubprocess, validateSubprocessInput } from "./services/subprocess-runner.js"
+export { withActiveMutantEffect } from "./services/active-mutant-context.js"
 export {
   decideOmnigraphBranchVerify,
   decideOmnigraphSchemaEvolution,
 } from "./omnigraph-branch-verify.js"
+export { decideOmnigraphLint } from "./omnigraph-lint.js"
 export {
-  decideOmnigraphLint,
-} from "./omnigraph-lint.js"
+  PlanWorkflowCompiler,
+  assertDisjointWave,
+  compileWorkflowWaves,
+} from "./plan-workflow-compiler.js"

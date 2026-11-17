@@ -1,0 +1,30 @@
+import { Schema } from "effect"
+
+const hasNoControlChars = (value: string): boolean => {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i)
+    if (code <= 0x1f || code === 0x7f) {
+      return false
+    }
+  }
+  return true
+}
+
+export const AbsoluteRepoRoot = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isMaxLength(1024)),
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isPattern(/^(?:\/(?!\.\.?(?:\/|$))[^\\/]+)+$/)),
+  Schema.check(
+    Schema.makeFilter(hasNoControlChars, {
+      message: "AbsoluteRepoRoot must not contain ASCII control characters",
+    }),
+  ),
+  Schema.brand("AbsoluteRepoRoot"),
+)
+export type AbsoluteRepoRoot = typeof AbsoluteRepoRoot.Type
+
+export const GitCommitSha = Schema.String.pipe(
+  Schema.check(Schema.isPattern(/^[0-9a-f]{40}$/)),
+  Schema.brand("GitCommitSha"),
+)
+export type GitCommitSha = typeof GitCommitSha.Type
