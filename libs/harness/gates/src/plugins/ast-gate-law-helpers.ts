@@ -51,11 +51,49 @@ export const isSilentFsFallbackCheckedPath = (normPath: string): boolean => {
   return /(?:^|\/)(?:libs\/harness\/(?:gates|graph)\/src|apps\/harness-(?:cli|mcp)\/src)\//.test(normPath)
 }
 
-export const hasResultTryFsReadText = (text: string): boolean =>
-  text.includes("Result.try") &&
-  /(?:readTextSync|readdirSync|readBytesSync)/.test(text) &&
-  !text.includes("procCmdlinePath") &&
-  !text.includes("/proc/")
+const FS_READ_SYNC_NAMES = new Set(["readTextSync", "readdirSync", "readBytesSync"])
+
+const isProcExemptFsArg = (arg: ts.Expression | undefined): boolean => {
+  if (arg === undefined) return false
+  const u = unwrapExpr(arg)
+  if (ts.isIdentifier(u) && u.text === "procCmdlinePath") return true
+  if (ts.isStringLiteral(u) || ts.isNoSubstitutionTemplateLiteral(u)) {
+    return u.text.includes("/proc/")
+  }
+  if (ts.isTemplateExpression(u)) {
+    return u.head.text.includes("/proc/") || u.templateSpans.some((s) => s.literal.text.includes("/proc/"))
+  }
+  return false
+}
+
+const getFsReadSyncCall = (call: ts.CallExpression): boolean => {
+  const callee = unwrapExpr(call.expression)
+  if (ts.isIdentifier(callee)) return FS_READ_SYNC_NAMES.has(callee.text)
+  if (ts.isPropertyAccessExpression(callee)) return FS_READ_SYNC_NAMES.has(callee.name.text)
+  return false
+}
+
+export const hasResultTryFsReadText = (text: string): boolean => {
+  if (!text.includes("Result.try") || !/(?:readTextSync|readdirSync|readBytesSync)/.test(text)) {
+    return false
+  }
+  const sf = ts.createSourceFile("expr.ts", text, ts.ScriptTarget.Latest, true)
+  let hasResultTry = false
+  let hasNonExemptFsRead = false
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      if (isMemberCall(node, "Result", "try")) {
+        hasResultTry = true
+      }
+      if (getFsReadSyncCall(node) && !isProcExemptFsArg(node.arguments[0])) {
+        hasNonExemptFsRead = true
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sf)
+  return hasResultTry && hasNonExemptFsRead
+}
 
 export const isPureTierProcessEnvBannedPath = (normPath: string): boolean => {
   const libsMatch = /(?:^|\/)(libs\/[^/]+\/[^/]+\/src\/.*)$/.exec(normPath)
@@ -387,11 +425,22 @@ const PERSISTENCE_RESULT_CALLEES = new Set([
   "writeServerMetaAtomic",
 ])
 
-export const isDiscardedPersistenceCallStatement = (node: ts.Node): boolean => {
-  if (!ts.isExpressionStatement(node)) return false
-  const expr = unwrapExpr(node.expression)
-  if (!ts.isCallExpression(expr)) return false
-  const callee = unwrapExpr(expr.expression)
+const isPersistenceResultCallExpr = (expr: ts.Expression): boolean => {
+  const unwrapped = unwrapExpr(expr)
+  if (ts.isVoidExpression(unwrapped)) {
+    return isPersistenceResultCallExpr(unwrapped.expression)
+  }
+  if (
+    ts.isBinaryExpression(unwrapped) &&
+    unwrapped.operatorToken.kind === ts.SyntaxKind.CommaToken
+  ) {
+    return (
+      isPersistenceResultCallExpr(unwrapped.left) ||
+      isPersistenceResultCallExpr(unwrapped.right)
+    )
+  }
+  if (!ts.isCallExpression(unwrapped)) return false
+  const callee = unwrapExpr(unwrapped.expression)
   const name = ts.isIdentifier(callee)
     ? callee.text
     : ts.isPropertyAccessExpression(callee)
@@ -399,3 +448,6 @@ export const isDiscardedPersistenceCallStatement = (node: ts.Node): boolean => {
       : undefined
   return name !== undefined && PERSISTENCE_RESULT_CALLEES.has(name)
 }
+
+export const isDiscardedPersistenceCallStatement = (node: ts.Node): boolean =>
+  ts.isExpressionStatement(node) && isPersistenceResultCallExpr(node.expression)

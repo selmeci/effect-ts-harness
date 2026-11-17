@@ -259,7 +259,7 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
       return false
     }
 
-    const candidateConfigDir = resolveOmnigraphConfigDir(repoRoot, clusterRepoRoot)
+    const candidateConfigDir = resolveOmnigraphConfigDir(repoRoot, canonicalRepoRoot)
     const configDir = nodeSyncHostIo.existsSync(join(candidateConfigDir, "cluster.yaml"))
       ? candidateConfigDir
       : join(CLI_REPO_ROOT, "libs", "harness", "graph")
@@ -347,6 +347,26 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
           const driftHandled = yield* match(drift.action)
             .with({ _tag: "RequiresCleanRebuild" }, () =>
               Effect.gen(function* () {
+                if (
+                  resolve(repoRoot) !== resolve(canonicalRepoRoot) &&
+                  process.env.HARNESS_ALLOW_WORKTREE_CLUSTER_REBUILD !== "1"
+                ) {
+                  const probe = yield* probeOmnigraphServerReady(targetBaseUrl)
+                  const alreadyReady = match(probe)
+                    .with({ _tag: "Ready" }, () => true)
+                    .with({ _tag: "NotReady" }, () => false)
+                    .exhaustive()
+                  if (alreadyReady) {
+                    process.stderr.write(
+                      `[harness:omnigraph] Warning: skipping destructive RequiresCleanRebuild of shared canonical cluster '${clusterRootDir}' from linked worktree '${repoRoot}'; reusing running server.\n`,
+                    )
+                    return { ok: true as const, alreadyReady: true as const, applyCluster: false }
+                  }
+                  process.stderr.write(
+                    `[harness:omnigraph] Error: refusing destructive RequiresCleanRebuild of shared canonical cluster '${clusterRootDir}' from linked worktree '${repoRoot}' (canonical: '${canonicalRepoRoot}'). Set HARNESS_ALLOW_WORKTREE_CLUSTER_REBUILD=1 or rebuild from canonical repo.\n`,
+                  )
+                  return { ok: false as const, applyCluster: false }
+                }
                 if (!(yield* killOmnigraphServerPidIfAlive(serverPid, clusterRootDir, "clean rebuild"))) {
                   return { ok: false as const, applyCluster: false }
                 }
@@ -396,7 +416,10 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
             .with({ _tag: "NoOp" }, () =>
               Effect.gen(function* () {
                 if (serverJsonCorruptOrUnreadable) {
-                  stopStaleOmnigraphClusterBeforeDelete(clusterRootDir, undefined)
+                  const stopped = stopStaleOmnigraphClusterBeforeDelete(clusterRootDir, undefined)
+                  if (!stopped) {
+                    return { ok: false as const, applyCluster: false }
+                  }
                 }
                 const belongsToThisRepo =
                   explicitEnvUrl !== undefined || serverMeta?.canonicalRepoRoot === canonicalRepoRoot

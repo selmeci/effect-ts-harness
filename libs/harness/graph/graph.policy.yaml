@@ -3,7 +3,7 @@ protected_branches: [main]
 groups:
   admins: [harness-cli]
   agents: [agent-mcp]
-  readers: [agent-mcp, harness-cli, default]
+  readers: [agent-mcp, harness-cli]
 rules:
   - id: everyone-can-read-all-branches
     allow:

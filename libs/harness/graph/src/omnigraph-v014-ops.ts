@@ -1,6 +1,9 @@
 import { join } from "node:path"
 import {
+  ErrorReasonMessage,
+  OmnigraphActorToken,
   OmnigraphAuthTokensSchema,
+  OmnigraphBaseUrl,
   OmnigraphBranchName,
   OmnigraphChangeCursor,
   OmnigraphChangeOp,
@@ -22,9 +25,11 @@ import {
   ConflictError,
   type FetchLike,
   GoneError,
+  NetworkError,
   NotFoundError,
   Omnigraph,
   PreconditionFailedError,
+  ServiceUnavailableError,
 } from "@modernrelay/omnigraph"
 import { match } from "ts-pattern"
 
@@ -33,10 +38,10 @@ export class OmnigraphLoadError extends Data.TaggedError("OmnigraphLoadError")<{
 }> {}
 
 export interface OmnigraphConnectionOptions {
-  readonly baseUrl?: string | undefined
+  readonly baseUrl?: OmnigraphBaseUrl | string | undefined
   readonly repoRoot?: string | undefined
   readonly graphId?: string | undefined
-  readonly token?: string | undefined
+  readonly token?: OmnigraphActorToken | string | undefined
   readonly actor?: "harness-cli" | "agent-mcp" | undefined
   readonly fetch?: FetchLike | undefined
   readonly hostIo?: SyncHostIo | undefined
@@ -96,15 +101,42 @@ export const readAuthTokensFromClusterDir = (
     .exhaustive()
 }
 
-export const extractOmnigraphCommitId = (raw: unknown): OmnigraphCommitId | undefined => {
-  if (typeof raw !== "string") {
-    return undefined
+export const isOmnigraphUnavailableError = (cause: unknown): boolean => {
+  if (cause instanceof ServiceUnavailableError || cause instanceof NetworkError) {
+    return true
   }
-  const trimmed = raw.trim()
-  if (trimmed.length === 0) {
-    return undefined
+  if (typeof cause === "object" && cause !== null) {
+    const status = Reflect.get(cause, "status")
+    if (
+      status === 502 ||
+      status === 503 ||
+      status === 504 ||
+      (status === 0 && Reflect.get(cause, "requestDispatched") === false)
+    ) {
+      return true
+    }
   }
-  return Option.getOrUndefined(Schema.decodeOption(OmnigraphCommitId)(trimmed))
+  if (cause instanceof TypeError) {
+    return true
+  }
+  if (cause instanceof Error) {
+    const code = "code" in cause && typeof cause.code === "string" ? cause.code : undefined
+    if (
+      code === "ECONNREFUSED" ||
+      code === "ECONNRESET" ||
+      code === "ETIMEDOUT" ||
+      code === "ENOTFOUND" ||
+      code === "EHOSTUNREACH" ||
+      code === "EPIPE" ||
+      code === "UND_ERR_CONNECT_TIMEOUT"
+    ) {
+      return true
+    }
+    if ("cause" in cause && cause.cause !== undefined && cause.cause !== cause) {
+      return isOmnigraphUnavailableError(cause.cause)
+    }
+  }
+  return false
 }
 
 const decodeStrictOptionalEntityId = (
@@ -166,14 +198,12 @@ export const mapOmnigraphConflictError = (
     const conflicts: Array<OmnigraphMergeConflictDetail> = []
     for (const c of cause.mergeConflicts ?? []) {
       const decodedOpt = Option.all([
-        Schema.decodeOption(OmnigraphConflictKind)(c.kind),
         Schema.decodeOption(OmnigraphEntityKind)(c.entityKind),
         Schema.decodeOption(OmnigraphTypeName)(c.typeName),
       ])
       const fieldsOrErr = match(decodedOpt)
-        .with({ _tag: "Some" }, ({ value: [kind, entityKind, typeName] }) => ({
+        .with({ _tag: "Some" }, ({ value: [entityKind, typeName] }) => ({
           ok: true as const,
-          kind,
           entityKind,
           typeName,
         }))
@@ -189,7 +219,21 @@ export const mapOmnigraphConflictError = (
       if (!fieldsOrErr.ok) {
         return fieldsOrErr.error
       }
-      const { kind, entityKind, typeName } = fieldsOrErr
+      const { entityKind, typeName } = fieldsOrErr
+      const baseMessage = toErrorReasonMessage(c.message)
+      const { kind, message } = match(Schema.decodeOption(OmnigraphConflictKind)(c.kind))
+        .with({ _tag: "Some" }, ({ value }) => ({
+          kind: value,
+          message: baseMessage,
+        }))
+        .with({ _tag: "None" }, () => {
+          const rawKind = String(c.kind).trim() || String(c.kind)
+          return {
+            kind: "value_constraint_violation" as const,
+            message: ErrorReasonMessage.make(`[${rawKind}] ${baseMessage}`),
+          }
+        })
+        .exhaustive()
       const entityIdRes = decodeStrictOptionalEntityId(c.entityId)
       const earlyErr = match(entityIdRes)
         .with({ _tag: "Failure" }, ({ failure }) => failure)
@@ -199,7 +243,7 @@ export const mapOmnigraphConflictError = (
             entityKind,
             typeName,
             entityId,
-            message: toErrorReasonMessage(c.message),
+            message,
           })
           return undefined
         })
@@ -245,16 +289,34 @@ export const isChangeFeedGapError = (cause: unknown): boolean =>
     "status" in cause &&
     (cause as { readonly status: unknown }).status === 410)
 
-export const decodeCursorOrNull = (raw: string | null | undefined): OmnigraphChangeCursor | null => {
-  if (typeof raw !== "string" || raw.trim().length === 0) {
-    return null
+export const decodeStrictOptionalCursor = (
+  raw: unknown,
+): Result.Result<OmnigraphChangeCursor | null, OmnigraphLoadError> => {
+  if (raw === null || raw === undefined) {
+    return Result.succeed(null)
   }
-  return Option.getOrNull(Schema.decodeOption(OmnigraphChangeCursor)(raw.trim()))
+  if (typeof raw !== "string") {
+    return Result.fail(
+      new OmnigraphLoadError({
+        cause: new Error(`Invalid non-string Omnigraph change cursor (${typeof raw})`),
+      }),
+    )
+  }
+  return match(Schema.decodeOption(OmnigraphChangeCursor)(raw.trim()))
+    .with({ _tag: "Some" }, ({ value }) => Result.succeed(value))
+    .with({ _tag: "None" }, () =>
+      Result.fail(
+        new OmnigraphLoadError({
+          cause: new Error(`Invalid Omnigraph change cursor: ${JSON.stringify(raw)}`),
+        }),
+      ),
+    )
+    .exhaustive()
 }
 
 export interface OmnigraphDryRunMergeInput extends OmnigraphConnectionOptions {
-  readonly source: OmnigraphBranchName
-  readonly target?: OmnigraphBranchName | undefined
+  readonly source: OmnigraphBranchName | string
+  readonly target?: OmnigraphBranchName | string | undefined
 }
 
 export interface OmnigraphDryRunMergeResult {
@@ -268,7 +330,7 @@ export interface OmnigraphConditionalMutationInput extends OmnigraphConnectionOp
   readonly query: string
   readonly name?: string | undefined
   readonly params?: Readonly<Record<string, unknown>> | undefined
-  readonly branch?: OmnigraphBranchName | undefined
+  readonly branch?: OmnigraphBranchName | string | undefined
   readonly ifGraphCommit: OmnigraphCommitId
 }
 
@@ -281,7 +343,7 @@ export interface OmnigraphConditionalMutationResult {
 }
 
 export interface OmnigraphPollChangesInput extends OmnigraphConnectionOptions {
-  readonly branch?: OmnigraphBranchName | undefined
+  readonly branch?: OmnigraphBranchName | string | undefined
   readonly cursor?: OmnigraphChangeCursor | undefined
   readonly start?: "now" | "beginning" | `after:${string}` | undefined
   readonly kind?: ReadonlyArray<OmnigraphEntityKind> | undefined
@@ -299,8 +361,8 @@ export interface OmnigraphChangeFeedResult {
 }
 
 export interface OmnigraphProposeMergeInput extends OmnigraphConnectionOptions {
-  readonly source: OmnigraphBranchName
-  readonly target?: OmnigraphBranchName | undefined
+  readonly source: OmnigraphBranchName | string
+  readonly target?: OmnigraphBranchName | string | undefined
 }
 
 export interface OmnigraphInspectCommitChangesInput extends OmnigraphConnectionOptions {
@@ -318,7 +380,7 @@ export interface OmnigraphBlobSelectorInput extends OmnigraphConnectionOptions {
   readonly type: OmnigraphTypeName
   readonly id: OmnigraphEntityId
   readonly property: string
-  readonly branch?: OmnigraphBranchName | undefined
+  readonly branch?: OmnigraphBranchName | string | undefined
 }
 
 export interface OmnigraphPutBlobInput extends OmnigraphBlobSelectorInput {
@@ -361,14 +423,19 @@ export const executePollChanges = (
       }),
     catch: (cause) => new OmnigraphLoadError({ cause }),
   }).pipe(
-    Effect.map(
-      (feed): OmnigraphChangeFeedResult => ({
-        blocks: feed.blocks,
-        cursor: decodeCursorOrNull(feed.cursor),
-        caughtUp: feed.caughtUp ?? false,
-        nextPageToken: feed.nextPageToken ?? null,
-        requiresBaseline: false,
-      }),
+    Effect.flatMap((feed) =>
+      match(decodeStrictOptionalCursor(feed.cursor))
+        .with({ _tag: "Failure" }, ({ failure }) => Effect.fail(failure))
+        .with({ _tag: "Success" }, ({ success: cursor }) =>
+          Effect.succeed<OmnigraphChangeFeedResult>({
+            blocks: feed.blocks,
+            cursor,
+            caughtUp: feed.caughtUp ?? false,
+            nextPageToken: feed.nextPageToken ?? null,
+            requiresBaseline: false,
+          }),
+        )
+        .exhaustive(),
     ),
     Effect.catchIf(
       (err) => isChangeFeedGapError(err.cause),
@@ -382,9 +449,21 @@ export const executePollChanges = (
           }),
           (cause) => new OmnigraphLoadError({ cause }),
         ).pipe(
+          Stream.mapEffect((rec) =>
+            "baseline" in rec
+              ? match(decodeStrictOptionalCursor(rec.baseline.resumeCursor))
+                  .with({ _tag: "Failure" }, ({ failure }) => Effect.fail(failure))
+                  .with({ _tag: "Success" }, ({ success }) => Effect.succeedSome(success))
+                  .exhaustive()
+              : Effect.succeedNone,
+          ),
           Stream.runFold(
             () => null as OmnigraphChangeCursor | null,
-            (acc, rec) => ("baseline" in rec ? decodeCursorOrNull(rec.baseline.resumeCursor) : acc),
+            (acc, cursorOpt) =>
+              match(cursorOpt)
+                .with({ _tag: "Some" }, ({ value }) => value)
+                .with({ _tag: "None" }, () => acc)
+                .exhaustive(),
           ),
           Effect.flatMap((resumeCursor) =>
             resumeCursor === null

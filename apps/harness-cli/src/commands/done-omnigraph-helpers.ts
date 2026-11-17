@@ -42,6 +42,7 @@ import {
   formatDiffErrorMessage,
   isBranchNotFoundError,
   readEffectFnStubAfterFromImage,
+  readExistingSpanTraceBlobIfSpansMissing,
   readIsStubFromImage,
   readSpanNameFromImages,
   uploadAndVerifySpanTraceBlob,
@@ -412,7 +413,7 @@ export const syncVerifyImplToOmnigraph = (
       toolName: "omnigraph:sync-impl",
       outcome: syncRes.syncedToOmnigraph ? "ok" : "fail",
       durationMs: Math.max(0, Date.now() - startedAtMs),
-      engineSource: syncRes.syncedToOmnigraph ? "omnigraph" : "memory-fallback",
+      engineSource: syncRes.syncedToOmnigraph ? "omnigraph" : "omnigraph-failed",
     })
     if (!syncRes.syncedToOmnigraph) {
       return {
@@ -514,6 +515,13 @@ export const syncOmnigraphOnDone = (
         }
       }
       implGraph = loaded.graph
+      const preservedBlob = yield* readExistingSpanTraceBlobIfSpansMissing(
+        repoRoot,
+        clusterRepoRoot,
+        taskBranches.implBranch,
+        implGraph,
+        syncLayer,
+      )
       const reloadRes = yield* syncToOmnigraphAndSnapshot(implGraph, {
         repoRoot: clusterRepoRoot,
         branch: taskBranches.implBranch,
@@ -560,6 +568,7 @@ export const syncOmnigraphOnDone = (
         "done",
         failExitCode,
         blockDecision,
+        preservedBlob,
       )
       if (doneBlobFail !== undefined) return doneBlobFail
     }

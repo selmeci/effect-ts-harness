@@ -133,7 +133,6 @@ export {
 export {
   OmnigraphClient,
   OmnigraphLoadError,
-  OmnigraphServerMetaSchema,
   OmnigraphSync,
   diffOmnigraphBranches,
   dryRunMergeOmnigraphBranches,

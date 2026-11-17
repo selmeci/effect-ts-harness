@@ -3,7 +3,10 @@ import { connect } from "node:net"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { Effect } from "effect"
+import * as Graph from "effect/Graph"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import { DatalogSession, type DatalogSessionShape, GraphInferenceError } from "@harness/graph"
 import { startHarnessDaemonServer } from "../src/daemon/unix-socket-daemon.js"
 
 const tempDirs: Array<string> = []
@@ -49,6 +52,7 @@ const makeMockRepo = (): string => {
 
 describe("RFC-0009 unix-socket-daemon poll-changes", () => {
   afterEach(() => {
+    vi.restoreAllMocks()
     while (tempDirs.length > 0) {
       const dir = tempDirs.pop()
       if (dir) {
@@ -585,6 +589,358 @@ describe("RFC-0009 unix-socket-daemon poll-changes", () => {
       }
     } finally {
       await handle.close()
+    }
+  })
+
+  it("F-5.1: mixed TS and non-TS change feed triggers full DatalogSession rebuild and advances cursor", async () => {
+    const repoRoot = makeMockRepo()
+    const createdSessions: Array<DatalogSessionShape> = []
+    const stepSpies: Array<ReturnType<typeof vi.spyOn>> = []
+    const origMake = DatalogSession.make.bind(DatalogSession)
+    vi.spyOn(DatalogSession, "make").mockImplementation((graph, priors) =>
+      origMake(graph, priors).pipe(
+        Effect.tap((session) =>
+          Effect.sync(() => {
+            createdSessions.push(session)
+            stepSpies.push(vi.spyOn(session, "stepFileDelta"))
+          }),
+        ),
+      ),
+    )
+
+    let pollCount = 0
+    const headers = {
+      "Content-Type": "application/json",
+      "Omnigraph-Http-Api": "0.14",
+    } as const
+    const server = createServer((req, res) => {
+      const url = req.url ?? ""
+      if (url === "/healthz") {
+        res.writeHead(200, { "Omnigraph-Http-Api": "0.14" })
+        res.end()
+        return
+      }
+      if (url.includes("/changes")) {
+        pollCount += 1
+        res.writeHead(200, headers)
+        if (pollCount === 1) {
+          res.end(
+            JSON.stringify({
+              cursor: "cur-mixed-1",
+              caught_up: true,
+              next_page_token: null,
+              blocks: [
+                {
+                  cause: { authored_at: 1000, authored_branch: "main", graph_commit_id: "cmt-1" },
+                  changes: [
+                    {
+                      id: "fn-1",
+                      kind: "node",
+                      op: "insert",
+                      type: { id: "t1", name: "EffectFn" },
+                      before: null,
+                      after: { properties: { file: "src/index.ts", spanName: "Demo.run" } },
+                    },
+                  ],
+                },
+              ],
+            }),
+          )
+          return
+        }
+        res.end(
+          JSON.stringify({
+            cursor: "cur-mixed-2",
+            caught_up: true,
+            next_page_token: null,
+            blocks: [
+              {
+                cause: { authored_at: 2000, authored_branch: "main", graph_commit_id: "cmt-2" },
+                changes: [
+                  {
+                    id: "fn-2",
+                    kind: "node",
+                    op: "insert",
+                    type: { id: "t1", name: "EffectFn" },
+                    before: null,
+                    after: { properties: { file: "libs/demo/src/extra.ts", spanName: "Extra.run" } },
+                  },
+                  {
+                    id: "adr-1",
+                    kind: "node",
+                    op: "insert",
+                    type: { id: "t2", name: "AdrDoc" },
+                    before: null,
+                    after: { properties: { file: "docs/adr/0001-mixed.md" } },
+                  },
+                ],
+              },
+            ],
+          }),
+        )
+        return
+      }
+      res.writeHead(404, headers)
+      res.end()
+    })
+    await new Promise<void>((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise))
+    const addr = server.address()
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0
+    writeFileSync(
+      join(repoRoot, ".harness", "omnigraph-cluster", "server.json"),
+      JSON.stringify({
+        pid: process.pid,
+        port,
+        baseUrl: `http://127.0.0.1:${port}`,
+        canonicalRepoRoot: repoRoot,
+        updatedAt: null,
+      }),
+      "utf8",
+    )
+
+    const handle = await startHarnessDaemonServer(repoRoot)
+    try {
+      const raw1 = await sendDaemonLine(handle.socketPath, {
+        id: "poll-mixed-init",
+        command: "poll-changes",
+        repoRoot,
+      })
+      const parsed1 = JSON.parse(raw1) as { readonly ok?: boolean; readonly cursor?: string }
+      expect(parsed1.ok).toBe(true)
+      expect(parsed1.cursor).toBe("cur-mixed-1")
+      expect(createdSessions).toHaveLength(1)
+      expect(stepSpies[0]).toHaveBeenCalledTimes(1)
+
+      mkdirSync(join(repoRoot, "libs", "demo", "src"), { recursive: true })
+      writeFileSync(
+        join(repoRoot, "libs", "demo", "package.json"),
+        JSON.stringify({ name: "@demo/pkg" }),
+        "utf8",
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "demo", "src", "extra.ts"),
+        'import { Effect } from "effect"\nexport const extra = Effect.fn("Extra.run")(function* () { return 2 })\n',
+        "utf8",
+      )
+      mkdirSync(join(repoRoot, "docs", "adr"), { recursive: true })
+      writeFileSync(
+        join(repoRoot, "docs", "adr", "0001-mixed.md"),
+        "# ADR-0001: Mixed Change Feed\n",
+        "utf8",
+      )
+
+      const raw2 = await sendDaemonLine(handle.socketPath, {
+        id: "poll-mixed-both",
+        command: "poll-changes",
+        repoRoot,
+      })
+      const parsed2 = JSON.parse(raw2) as {
+        readonly ok?: boolean
+        readonly cursor?: string
+        readonly updatedFiles?: ReadonlyArray<string>
+      }
+      expect(parsed2.ok).toBe(true)
+      expect(parsed2.cursor).toBe("cur-mixed-2")
+      expect(parsed2.updatedFiles).toEqual(["libs/demo/src/extra.ts"])
+
+      // Full rebuild was triggered instead of stepping the cached session
+      expect(createdSessions).toHaveLength(2)
+      expect(stepSpies[0]).toHaveBeenCalledTimes(1)
+      expect(stepSpies[1]).toHaveBeenCalledTimes(0)
+
+      const rebuiltSnapshot = await Effect.runPromise(createdSessions[1]!.snapshot)
+      expect(rebuiltSnapshot.epoch).toBe(1)
+      const fnNames = Array.from(Graph.values(Graph.nodes(rebuiltSnapshot.graph.graph)))
+        .filter((node) => node._tag === "EffectFn")
+        .map((node) => node.spanName)
+      expect(fnNames).toContain("Extra.run")
+
+      const headMeta = JSON.parse(
+        readFileSync(join(repoRoot, ".harness", "graph-head.json"), "utf8"),
+      ) as { readonly changeFeedCursor?: string }
+      expect(headMeta.changeFeedCursor).toBe("cur-mixed-2")
+    } finally {
+      await handle.close()
+      server.closeAllConnections()
+      server.close()
+    }
+  })
+
+  it("F-6.1: failed DatalogSession.make rebuild evicts cached DatalogSession so subsequent polls do not use stale state", async () => {
+    const repoRoot = makeMockRepo()
+    const createdSessions: Array<DatalogSessionShape> = []
+    const stepSpies: Array<ReturnType<typeof vi.spyOn>> = []
+    const origMake = DatalogSession.make.bind(DatalogSession)
+    let makeAttempt = 0
+    vi.spyOn(DatalogSession, "make").mockImplementation((graph, priors) => {
+      makeAttempt += 1
+      if (makeAttempt === 2) {
+        return Effect.fail(
+          new GraphInferenceError({
+            reason: "rebuild-failed",
+            message: "simulated rebuild failure",
+          }),
+        )
+      }
+      return origMake(graph, priors).pipe(
+        Effect.tap((session) =>
+          Effect.sync(() => {
+            createdSessions.push(session)
+            stepSpies.push(vi.spyOn(session, "stepFileDelta"))
+          }),
+        ),
+      )
+    })
+
+    let pollCount = 0
+    const headers = {
+      "Content-Type": "application/json",
+      "Omnigraph-Http-Api": "0.14",
+    } as const
+    const server = createServer((req, res) => {
+      const url = req.url ?? ""
+      if (url === "/healthz") {
+        res.writeHead(200, { "Omnigraph-Http-Api": "0.14" })
+        res.end()
+        return
+      }
+      if (url.includes("/changes")) {
+        pollCount += 1
+        res.writeHead(200, headers)
+        if (pollCount === 1) {
+          res.end(
+            JSON.stringify({
+              cursor: "cur-evict-1",
+              caught_up: true,
+              next_page_token: null,
+              blocks: [
+                {
+                  cause: { authored_at: 1000, authored_branch: "main", graph_commit_id: "cmt-1" },
+                  changes: [
+                    {
+                      id: "fn-1",
+                      kind: "node",
+                      op: "insert",
+                      type: { id: "t1", name: "EffectFn" },
+                      before: null,
+                      after: { properties: { file: "src/index.ts", spanName: "Demo.run" } },
+                    },
+                  ],
+                },
+              ],
+            }),
+          )
+          return
+        }
+        if (pollCount === 2) {
+          res.end(
+            JSON.stringify({
+              cursor: "cur-evict-2",
+              caught_up: true,
+              next_page_token: null,
+              blocks: [
+                {
+                  cause: { authored_at: 2000, authored_branch: "main", graph_commit_id: "cmt-2" },
+                  changes: [
+                    {
+                      id: "adr-2",
+                      kind: "node",
+                      op: "insert",
+                      type: { id: "t2", name: "AdrDoc" },
+                      before: null,
+                      after: { properties: { file: "docs/adr/0002-evict.md" } },
+                    },
+                  ],
+                },
+              ],
+            }),
+          )
+          return
+        }
+        res.end(
+          JSON.stringify({
+            cursor: "cur-evict-3",
+            caught_up: true,
+            next_page_token: null,
+            blocks: [
+              {
+                cause: { authored_at: 3000, authored_branch: "main", graph_commit_id: "cmt-3" },
+                changes: [
+                  {
+                    id: "fn-3",
+                    kind: "node",
+                    op: "insert",
+                    type: { id: "t1", name: "EffectFn" },
+                    before: null,
+                    after: { properties: { file: "src/index.ts", spanName: "Demo.run" } },
+                  },
+                ],
+              },
+            ],
+          }),
+        )
+        return
+      }
+      res.writeHead(404, headers)
+      res.end()
+    })
+    await new Promise<void>((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise))
+    const addr = server.address()
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0
+    writeFileSync(
+      join(repoRoot, ".harness", "omnigraph-cluster", "server.json"),
+      JSON.stringify({
+        pid: process.pid,
+        port,
+        baseUrl: `http://127.0.0.1:${port}`,
+        canonicalRepoRoot: repoRoot,
+        updatedAt: null,
+      }),
+      "utf8",
+    )
+
+    const handle = await startHarnessDaemonServer(repoRoot)
+    try {
+      // 1. Initial TS-only poll caches session 0
+      const raw1 = await sendDaemonLine(handle.socketPath, {
+        id: "poll-evict-1",
+        command: "poll-changes",
+        repoRoot,
+      })
+      const parsed1 = JSON.parse(raw1) as { readonly ok?: boolean; readonly cursor?: string }
+      expect(parsed1.ok).toBe(true)
+      expect(parsed1.cursor).toBe("cur-evict-1")
+      expect(createdSessions).toHaveLength(1)
+      expect(stepSpies[0]).toHaveBeenCalledTimes(1)
+
+      // 2. Non-TS poll triggers rebuild which fails -> must evict cached session 0
+      const raw2 = await sendDaemonLine(handle.socketPath, {
+        id: "poll-evict-2",
+        command: "poll-changes",
+        repoRoot,
+      })
+      const parsed2 = JSON.parse(raw2) as { readonly ok?: boolean; readonly error?: string }
+      expect(parsed2.ok).toBe(false)
+      expect(parsed2.error).toContain("simulated rebuild failure")
+
+      // 3. Subsequent TS-only poll must NOT reuse stale session 0; it must construct a fresh session
+      const raw3 = await sendDaemonLine(handle.socketPath, {
+        id: "poll-evict-3",
+        command: "poll-changes",
+        repoRoot,
+      })
+      const parsed3 = JSON.parse(raw3) as { readonly ok?: boolean; readonly cursor?: string }
+      expect(parsed3.ok).toBe(true)
+      expect(parsed3.cursor).toBe("cur-evict-3")
+
+      expect(makeAttempt).toBe(3)
+      expect(createdSessions).toHaveLength(2)
+      expect(stepSpies[0]).toHaveBeenCalledTimes(1)
+      expect(stepSpies[1]).toHaveBeenCalledTimes(1)
+    } finally {
+      await handle.close()
+      server.closeAllConnections()
+      server.close()
     }
   })
 })

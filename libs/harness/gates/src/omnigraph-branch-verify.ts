@@ -46,15 +46,21 @@ export const decideOmnigraphBranchVerify = Effect.fn("OmnigraphBranchVerify.deci
     })
   }
 
-  const activeSpanNames = new Set<OmnigraphSpanName>()
+  const insertedSpanCounts = new Map<OmnigraphSpanName, number>()
   let activeDiffEffectFnCount = 0
   for (const ch of diffChanges) {
     match(ch)
-      .with({ _tag: "EffectFnInserted" }, { _tag: "EffectFnUpdated" }, (fnChange) => {
+      .with({ _tag: "EffectFnInserted" }, (fnChange) => {
         activeDiffEffectFnCount += 1
-        if (fnChange.spanName !== null) {
-          activeSpanNames.add(fnChange.spanName)
+        if (!fnChange.stubAfter && fnChange.spanName !== null) {
+          insertedSpanCounts.set(
+            fnChange.spanName,
+            (insertedSpanCounts.get(fnChange.spanName) ?? 0) + 1,
+          )
         }
+      })
+      .with({ _tag: "EffectFnUpdated" }, () => {
+        activeDiffEffectFnCount += 1
       })
       .with({ _tag: "EffectFnDeleted" }, { _tag: "EntityDiffChange" }, () => undefined)
       .exhaustive()
@@ -63,9 +69,11 @@ export const decideOmnigraphBranchVerify = Effect.fn("OmnigraphBranchVerify.deci
   for (const ch of diffChanges) {
     match(ch)
       .with({ _tag: "EffectFnDeleted" }, (fnChange) => {
-        const movedOrRenamed =
-          fnChange.spanName !== null && activeSpanNames.has(fnChange.spanName)
-        if (!movedOrRenamed) {
+        const available =
+          fnChange.spanName !== null ? (insertedSpanCounts.get(fnChange.spanName) ?? 0) : 0
+        if (available > 0 && fnChange.spanName !== null) {
+          insertedSpanCounts.set(fnChange.spanName, available - 1)
+        } else {
           violations.push({
             _tag: "planned-effect-fn-dropped",
             message: ErrorReasonMessage.make(

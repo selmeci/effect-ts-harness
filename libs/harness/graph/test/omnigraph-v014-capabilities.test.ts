@@ -15,6 +15,7 @@ import {
 } from "@harness/contract"
 import { runWithTestTracer } from "@harness/ingest"
 import { Cause, Effect, Schema } from "effect"
+import * as Graph from "effect/Graph"
 import { type FetchLike } from "@modernrelay/omnigraph"
 import { match } from "ts-pattern"
 import {
@@ -24,6 +25,7 @@ import {
   makeOmnigraphSyncLayer,
   mergeOmnigraphBranch,
   mutateOmnigraphConditional,
+  NodeKey,
   OmnigraphLoadError,
   OmnigraphSync,
   PackageTag,
@@ -31,7 +33,9 @@ import {
   readAuthTokensFromClusterDir,
   readGraphHeadMeta,
   readGraphHeadMetaState,
+  RelationId,
   resolveOmnigraphBaseUrl,
+  RoleName,
   syncToOmnigraphAndSnapshot,
   toOmnigraphServerNdjson,
   updateGraphHeadCursor,
@@ -1230,7 +1234,7 @@ describe("Omnigraph v0.14.0 native capabilities (RFC-0009)", () => {
     }),
   )
 
-  it("R2-P1: resolveOmnigraphBaseUrl and makeOmnigraphClient default env to process.env while explicit {} isolates", () => {
+  it("R2-P1: resolveOmnigraphBaseUrl and makeOmnigraphClient default env to process.env while explicit {} isolates", async () => {
     const prevUrl = process.env["OMNIGRAPH_URL"]
     const prevTok = process.env["OMNIGRAPH_TOKEN"]
     try {
@@ -1240,8 +1244,26 @@ describe("Omnigraph v0.14.0 native capabilities (RFC-0009)", () => {
       expect(resolveOmnigraphBaseUrl()).toBe("http://127.0.0.1:19444")
       expect(resolveOmnigraphBaseUrl(undefined, {})).toBe("http://127.0.0.1:8080")
 
-      const client = makeOmnigraphClient(undefined, testHostIo)
-      expect(client).toBeDefined()
+      let seenUrl = ""
+      let seenAuth: string | null = null
+      const captureFetch: FetchLike = (input, init) => {
+        const url = toUrlString(input)
+        seenUrl = url
+        const headers = new Headers(
+          init?.headers ?? (typeof input === "object" && "headers" in input ? input.headers : undefined),
+        )
+        seenAuth = headers.get("authorization")
+        if (url.endsWith("/healthz")) {
+          return Promise.resolve(
+            new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }),
+          )
+        }
+        return jsonResponse({ branches: ["main"] })
+      }
+      const client = makeOmnigraphClient({ fetch: captureFetch }, testHostIo)
+      await client.branches.list()
+      expect(seenUrl.startsWith("http://127.0.0.1:19444/")).toBe(true)
+      expect(seenAuth).toBe("Bearer env-default-token")
     } finally {
       if (prevUrl === undefined) {
         delete process.env["OMNIGRAPH_URL"]
@@ -1353,35 +1375,215 @@ describe("Omnigraph v0.14.0 native capabilities (RFC-0009)", () => {
     }
   })
 
-  it.effect("R2-I8c: mapOmnigraphConflictError fails with OmnigraphLoadError on invalid kind, entityKind, or typeName", () =>
-    Effect.gen(function* () {
-      const source = OmnigraphBranchName.make("impl/task")
-      const target = OmnigraphBranchName.make("main")
+  it.effect(
+    "R2-I8c: mapOmnigraphConflictError maps unknown kind to value_constraint_violation with [rawKind] prefix while failing on invalid entityKind or typeName",
+    () =>
+      Effect.gen(function* () {
+        const source = OmnigraphBranchName.make("impl/task")
+        const target = OmnigraphBranchName.make("main")
 
-      for (const badConflict of [
-        { kind: "unknown_kind", entity_kind: "node", type_name: "EffectFn", entity_id: "fn.1", message: "bad" },
-        { kind: "divergent_update", entity_kind: "hyperedge", type_name: "EffectFn", entity_id: "fn.1", message: "bad" },
-        { kind: "divergent_update", entity_kind: "node", type_name: "   ", entity_id: "fn.1", message: "bad" },
-      ]) {
-        const badFetch: FetchLike = (input) => {
+        const unknownKindFetch: FetchLike = (input) => {
           if (toUrlString(input).endsWith("/healthz")) {
-            return Promise.resolve(new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }))
+            return Promise.resolve(
+              new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }),
+            )
           }
           return jsonResponse(
             {
               code: "conflict",
               message: "Conflict",
-              merge_conflicts: [badConflict],
+              merge_conflicts: [
+                {
+                  kind: "unknown_kind",
+                  entity_kind: "node",
+                  type_name: "EffectFn",
+                  entity_id: "fn.1",
+                  message: "bad",
+                },
+              ],
             },
             409,
           )
         }
-        const err = yield* Effect.flip(
-          dryRunMergeOmnigraphBranches({ source, target, fetch: badFetch }).pipe(
+        const unknownKindErr = yield* Effect.flip(
+          dryRunMergeOmnigraphBranches({ source, target, fetch: unknownKindFetch }).pipe(
             Effect.provide(OmnigraphSyncLive),
           ),
         )
-        expect(err).toBeInstanceOf(OmnigraphLoadError)
+        expect(unknownKindErr).toBeInstanceOf(OmnigraphMergeConflictError)
+        if (!(unknownKindErr instanceof OmnigraphMergeConflictError)) {
+          expect.unreachable("expected OmnigraphMergeConflictError")
+        }
+        expect(unknownKindErr.conflicts).toHaveLength(1)
+        expect(unknownKindErr.conflicts[0]?.kind).toBe("value_constraint_violation")
+        expect(unknownKindErr.conflicts[0]?.message).toBe("[unknown_kind] bad")
+
+        for (const badConflict of [
+          {
+            kind: "divergent_update",
+            entity_kind: "hyperedge",
+            type_name: "EffectFn",
+            entity_id: "fn.1",
+            message: "bad",
+          },
+          {
+            kind: "divergent_update",
+            entity_kind: "node",
+            type_name: "   ",
+            entity_id: "fn.1",
+            message: "bad",
+          },
+        ]) {
+          const badFetch: FetchLike = (input) => {
+            if (toUrlString(input).endsWith("/healthz")) {
+              return Promise.resolve(
+                new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }),
+              )
+            }
+            return jsonResponse(
+              {
+                code: "conflict",
+                message: "Conflict",
+                merge_conflicts: [badConflict],
+              },
+              409,
+            )
+          }
+          const err = yield* Effect.flip(
+            dryRunMergeOmnigraphBranches({ source, target, fetch: badFetch }).pipe(
+              Effect.provide(OmnigraphSyncLive),
+            ),
+          )
+          expect(err).toBeInstanceOf(OmnigraphLoadError)
+        }
+      }),
+  )
+
+  it.effect("F-13.1: pollOmnigraphChanges fails with OmnigraphLoadError on malformed non-empty cursor while preserving null", () =>
+    Effect.gen(function* () {
+      const whitespaceCursorFetch: FetchLike = (input) => {
+        if (toUrlString(input).endsWith("/healthz")) {
+          return Promise.resolve(
+            new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }),
+          )
+        }
+        return jsonResponse({
+          blocks: [],
+          cursor: "   ",
+          caughtUp: true,
+          nextPageToken: null,
+        })
+      }
+      const err = yield* Effect.flip(
+        pollOmnigraphChanges({ fetch: whitespaceCursorFetch }).pipe(
+          Effect.provide(OmnigraphSyncLive),
+        ),
+      )
+      expect(err).toBeInstanceOf(OmnigraphLoadError)
+
+      const nullCursorFetch: FetchLike = (input) => {
+        if (toUrlString(input).endsWith("/healthz")) {
+          return Promise.resolve(
+            new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }),
+          )
+        }
+        return jsonResponse({
+          blocks: [],
+          cursor: null,
+          caughtUp: true,
+          nextPageToken: null,
+        })
+      }
+      const okFeed = yield* pollOmnigraphChanges({ fetch: nullCursorFetch }).pipe(
+        Effect.provide(OmnigraphSyncLive),
+      )
+      expect(okFeed.cursor).toBeNull()
+    }),
+  )
+
+  it.effect("F-13.2: mutateOmnigraphConditional fails closed with OmnigraphLoadError on malformed commitId", () =>
+    Effect.gen(function* () {
+      const badCommitFetch: FetchLike = (input) => {
+        if (toUrlString(input).endsWith("/healthz")) {
+          return Promise.resolve(
+            new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }),
+          )
+        }
+        return jsonResponse({
+          branch: "main",
+          commit: { graphCommitId: "   " },
+          affectedNodes: 1,
+          affectedEdges: 0,
+          queryName: "test_mut",
+        })
+      }
+      const err = yield* Effect.flip(
+        mutateOmnigraphConditional({
+          query: "MATCH (n) RETURN n",
+          ifGraphCommit: OmnigraphCommitId.make("cmt-1"),
+          fetch: badCommitFetch,
+        }).pipe(Effect.provide(OmnigraphSyncLive)),
+      )
+      expect(err).toBeInstanceOf(OmnigraphLoadError)
+    }),
+  )
+
+  it("F-13.3: toOmnigraphServerNdjson throws OmnigraphLoadError on unmappable edge role", () => {
+    const base = buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/a/src/index.ts#a",
+          spanName: "A.a",
+          file: "libs/a/src/index.ts",
+          line: 1,
+          packageTag: "domain",
+        },
+        {
+          qualname: "libs/a/src/index.ts#b",
+          spanName: "A.b",
+          file: "libs/a/src/index.ts",
+          line: 2,
+          packageTag: "domain",
+        },
+      ],
+    })
+    const invalidGraph = {
+      ...base,
+      graph: Graph.mutate(base.graph, (mutable) => {
+        const indices = [...Graph.nodes(mutable)].map(([idx]) => idx)
+        if (indices[0] !== undefined && indices[1] !== undefined) {
+          Graph.addEdge(mutable, indices[0], indices[1], {
+            _tag: "PlaysRole",
+            relationId: RelationId.make("bad-rel"),
+            entityKey: NodeKey.make("libs/a/src/index.ts#b"),
+            role: RoleName.make("unmappable-role"),
+            archimateRelation: "Flow",
+          })
+        }
+      }),
+    }
+    expect(() => toOmnigraphServerNdjson(invalidGraph)).toThrow(OmnigraphLoadError)
+  })
+
+  it.effect("P0: syncToOmnigraphAndSnapshot does not clobber existing snapshot when graph is empty", () =>
+    Effect.gen(function* () {
+      const tmpRepo = fs.mkdtempSync(path.join(tmpdir(), "og-v014-empty-"))
+      try {
+        const snapshotPath = path.join(tmpRepo, ".harness", "graph-snapshot.json")
+        fs.mkdirSync(path.dirname(snapshotPath), { recursive: true })
+        const sentinel = JSON.stringify({ sentinel: "keep-existing-snapshot" })
+        fs.writeFileSync(snapshotPath, sentinel, "utf8")
+
+        const emptyGraph = buildHarnessGraph({})
+        const res = yield* syncToOmnigraphAndSnapshot(emptyGraph, {
+          repoRoot: tmpRepo,
+          snapshotPath,
+        }).pipe(Effect.provide(OmnigraphSyncLive))
+        expect(res.syncedToOmnigraph).toBe(false)
+        expect(res.error).toContain("empty graph")
+        expect(fs.readFileSync(snapshotPath, "utf8")).toBe(sentinel)
+      } finally {
+        fs.rmSync(tmpRepo, { recursive: true, force: true })
       }
     }),
   )

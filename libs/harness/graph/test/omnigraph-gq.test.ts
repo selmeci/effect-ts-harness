@@ -1364,11 +1364,14 @@ describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
     ([input]) =>
       Effect.gen(function* () {
         const decision = yield* decideOmnigraphReconcile(input)
+        const worktreeTrimmed = input.worktreeSlug?.trim() ?? ""
         const branchTrimmed = input.currentGitBranch?.trim() ?? ""
         const expectedTargetBranch =
-          branchTrimmed.length > 0 && branchTrimmed !== "main" && branchTrimmed !== "master"
-            ? `impl/branch-${branchTrimmed.replace(/[^a-zA-Z0-9._-]/g, "_")}`
-            : "main"
+          worktreeTrimmed.length > 0
+            ? `impl/wt-${worktreeTrimmed.replace(/[^a-zA-Z0-9._-]/g, "_")}`
+            : branchTrimmed.length > 0 && branchTrimmed !== "main" && branchTrimmed !== "master"
+              ? `impl/branch-${branchTrimmed.replace(/[^a-zA-Z0-9._-]/g, "_")}`
+              : "main"
         expect(decision.targetOmnigraphBranch).toBe(expectedTargetBranch)
         if (!input.snapshotExists) {
           expect(decision).toEqual({
@@ -1850,4 +1853,69 @@ describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
     expect(specRows).toHaveLength(1)
     expect(specRows[0]?.tupleId).toBe("TraceabilityTuple:edge-only-1")
   })
+
+  it.effect(
+    "F-11.1: invokeOmnigraphNamedQuery fails closed on 401/403/400 without falling back to memory-fallback",
+    () =>
+      Effect.gen(function* () {
+        const fallbackGraph = buildHarnessGraph({
+          fns: [
+            {
+              qualname: "libs/sample/domain/src/index.ts#greet",
+              spanName: "Sample.greet",
+              file: "libs/sample/domain/src/index.ts",
+              line: 4,
+              packageTag: "domain",
+              successType: "string",
+              isStub: false,
+            },
+          ],
+        })
+
+        for (const status of [401, 403, 400] as const) {
+          const authFailFetch: FetchLike = (input) => {
+            if (toUrlString(input).endsWith("/healthz")) {
+              return Promise.resolve(
+                new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }),
+              )
+            }
+            return Promise.resolve(
+              new Response(`HTTP ${status} error`, {
+                status,
+                headers: { "Content-Type": "text/plain", "Omnigraph-Http-Api": "0.14" },
+              }),
+            )
+          }
+
+          const err = yield* Effect.flip(
+            invokeOmnigraphNamedQuery({
+              name: "resolve_effect_fn",
+              params: { spanOrQualname: "Sample.greet" },
+              fallbackGraph,
+              fetch: authFailFetch,
+            }).pipe(Effect.provide(OmnigraphSyncLive)),
+          )
+          expect(err).toBeInstanceOf(OmnigraphLoadError)
+          const msg = err.cause instanceof Error ? err.cause.message : String(err.cause)
+          expect(msg).toContain(String(status))
+        }
+      }),
+  )
+
+  it.effect(
+    "P1: decideOmnigraphReconcile resolves impl/wt-<slug> when worktreeSlug is provided",
+    () =>
+      Effect.gen(function* () {
+        const decision = yield* decideOmnigraphReconcile({
+          snapshotExists: true,
+          recordedHeadSha: "sha-1",
+          currentHeadSha: "sha-1",
+          recordedGitBranch: "main",
+          currentGitBranch: "main",
+          worktreeSlug: "subagent/fix#1",
+        })
+        expect(decision.needsReconcile).toBe(false)
+        expect(decision.targetOmnigraphBranch).toBe("impl/wt-subagent_fix_1")
+      }),
+  )
 })

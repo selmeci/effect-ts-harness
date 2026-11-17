@@ -6,7 +6,10 @@ import {
 } from "./ast-and-gate-primitives.js"
 import { ErrorReasonMessage } from "./workspace-and-process.js"
 
-const TrimmedNonEmptyString = Schema.NonEmptyString.pipe(Schema.check(Schema.isTrimmed()))
+const TrimmedNonEmptyString = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isMaxLength(4096)),
+)
 
 export const OmnigraphCommitId = TrimmedNonEmptyString.pipe(Schema.brand("OmnigraphCommitId"))
 export type OmnigraphCommitId = typeof OmnigraphCommitId.Type

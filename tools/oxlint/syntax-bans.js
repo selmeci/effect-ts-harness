@@ -147,8 +147,35 @@ function isSilentFsFallbackCheckedPathEstree(filename) {
   )
 }
 
+function unwrapPipeTargetEstree(node) {
+  let curr = unwrapEstreeExpr(node)
+  while (curr != null && curr.type === "CallExpression") {
+    const callee = unwrapEstreeExpr(curr.callee)
+    if (
+      callee != null &&
+      callee.type === "MemberExpression" &&
+      callee.computed !== true &&
+      isIdentifier(callee.property, "pipe")
+    ) {
+      curr = unwrapEstreeExpr(callee.object)
+      continue
+    }
+    if (
+      callee != null &&
+      isIdentifier(callee, "pipe") &&
+      Array.isArray(curr.arguments) &&
+      curr.arguments.length > 0
+    ) {
+      curr = unwrapEstreeExpr(curr.arguments[0])
+      continue
+    }
+    break
+  }
+  return curr
+}
+
 function isAllOptionalSchemaStructEstree(node) {
-  const call = unwrapEstreeExpr(node)
+  const call = unwrapPipeTargetEstree(node)
   if (
     call == null ||
     call.type !== "CallExpression" ||
@@ -164,7 +191,7 @@ function isAllOptionalSchemaStructEstree(node) {
   }
   return obj.properties.every((prop) => {
     if (prop == null || prop.type !== "Property") return false
-    const val = unwrapEstreeExpr(prop.value)
+    const val = unwrapPipeTargetEstree(prop.value)
     return val != null && val.type === "CallExpression" && getCalleeName(val.callee) === "Schema.optional"
   })
 }
@@ -175,10 +202,16 @@ const PERSISTENCE_RESULT_CALLEES_ESTREE = new Set([
   "writeServerMetaAtomic",
 ])
 
-function isDiscardedPersistenceCallStatementEstree(node) {
-  if (node == null || node.type !== "ExpressionStatement") return false
-  const expr = unwrapEstreeExpr(node.expression)
-  if (expr == null || expr.type !== "CallExpression") return false
+function isPersistenceResultCallExprEstree(node) {
+  const expr = unwrapEstreeExpr(node)
+  if (expr == null) return false
+  if (expr.type === "UnaryExpression" && expr.operator === "void") {
+    return isPersistenceResultCallExprEstree(expr.argument)
+  }
+  if (expr.type === "SequenceExpression" && Array.isArray(expr.expressions)) {
+    return expr.expressions.some(isPersistenceResultCallExprEstree)
+  }
+  if (expr.type !== "CallExpression") return false
   const callee = unwrapEstreeExpr(expr.callee)
   if (callee == null) return false
   const name =
@@ -188,6 +221,11 @@ function isDiscardedPersistenceCallStatementEstree(node) {
         ? callee.property.name
         : null
   return name != null && PERSISTENCE_RESULT_CALLEES_ESTREE.has(name)
+}
+
+function isDiscardedPersistenceCallStatementEstree(node) {
+  if (node == null || node.type !== "ExpressionStatement") return false
+  return isPersistenceResultCallExprEstree(node.expression)
 }
 
 function isConditionalPortBindBailoutEstree(node) {

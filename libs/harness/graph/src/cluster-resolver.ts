@@ -333,6 +333,7 @@ export const OmnigraphReconcileInput = Schema.Struct({
   currentHeadSha: Schema.NullOr(Schema.String),
   recordedGitBranch: Schema.NullOr(Schema.String),
   currentGitBranch: Schema.NullOr(Schema.String),
+  worktreeSlug: Schema.optional(Schema.NullOr(Schema.String)),
 })
 export type OmnigraphReconcileInput = typeof OmnigraphReconcileInput.Type
 
@@ -348,12 +349,16 @@ export const sanitizeOmnigraphBranchSlug = (raw: string): string =>
 export const decideOmnigraphReconcile = Effect.fn("OmnigraphReconcile.decide")(function* (
   input: OmnigraphReconcileInput,
 ) {
+  const worktreeTrimmed = input.worktreeSlug?.trim() ?? ""
   const branchTrimmed = input.currentGitBranch?.trim() ?? ""
   const isFeatureBranch =
     branchTrimmed.length > 0 && branchTrimmed !== "main" && branchTrimmed !== "master"
-  const targetOmnigraphBranch = isFeatureBranch
-    ? `impl/branch-${sanitizeOmnigraphBranchSlug(branchTrimmed)}`
-    : "main"
+  const targetOmnigraphBranch =
+    worktreeTrimmed.length > 0
+      ? `impl/wt-${sanitizeOmnigraphBranchSlug(worktreeTrimmed)}`
+      : isFeatureBranch
+        ? `impl/branch-${sanitizeOmnigraphBranchSlug(branchTrimmed)}`
+        : "main"
 
   if (!input.snapshotExists) {
     return yield* Effect.succeed({

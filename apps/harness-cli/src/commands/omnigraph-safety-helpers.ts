@@ -417,7 +417,13 @@ export const runOmnigraphOptimizeAndCleanup = (
   omnigraphBin: string = resolveDefaultOmnigraphBin(),
   includeCleanup = true,
 ): void => {
-  if (!nodeSyncHostIo.existsSync(omnigraphBin) || !nodeSyncHostIo.existsSync(clusterRootDir)) {
+  if (!nodeSyncHostIo.existsSync(clusterRootDir)) {
+    return
+  }
+  if (!nodeSyncHostIo.existsSync(omnigraphBin)) {
+    process.stderr.write(
+      `[harness:omnigraph] Warning: omnigraph binary not found at ${omnigraphBin}; skipping cluster optimize/cleanup\n`,
+    )
     return
   }
   const targetUri = `file://${clusterRootDir}`
@@ -533,6 +539,32 @@ export function probeOmnigraphServerReady(baseUrl: string): Effect.Effect<Readyz
   }).pipe(Effect.catch((err) => Effect.succeed<ReadyzProbeResult>(err)))
 }
 
+export const readExistingSpanTraceBlobIfSpansMissing = (
+  repoRoot: string,
+  clusterRepoRoot: string,
+  branchName: string,
+  graph: HarnessGraph,
+  syncLayer: ReturnType<typeof makeOmnigraphSyncLayer>,
+): Effect.Effect<string | undefined> =>
+  Effect.gen(function* () {
+    const spansPath = join(repoRoot, ".harness", "spans.jsonl")
+    if (nodeSyncHostIo.existsSync(spansPath)) return undefined
+    const firstTestId = findFirstVitestCaseId(graph)
+    if (firstTestId === undefined) return undefined
+    const ogSync = yield* OmnigraphSync.pipe(Effect.provide(syncLayer))
+    const existing = yield* ogSync
+      .getBlobText({
+        repoRoot: clusterRepoRoot,
+        entity: "node" as const,
+        type: OmnigraphTypeName.make("VitestCase"),
+        id: OmnigraphEntityId.make(firstTestId),
+        property: "spanTraceBlob" as const,
+        branch: OmnigraphBranchName.make(branchName),
+      })
+      .pipe(Effect.orElseSucceed(() => null))
+    return typeof existing === "string" ? existing : undefined
+  })
+
 export const uploadAndVerifySpanTraceBlob = (
   repoRoot: string,
   clusterRepoRoot: string,
@@ -542,6 +574,7 @@ export const uploadAndVerifySpanTraceBlob = (
   phaseLabel: "verify" | "done",
   failExitCode: number,
   blockDecision?: string,
+  fallbackBlobData?: string,
 ): Effect.Effect<{
   readonly exitCode: number
   readonly stdout: string
@@ -549,7 +582,8 @@ export const uploadAndVerifySpanTraceBlob = (
 } | undefined> =>
   Effect.gen(function* () {
     const spansPath = join(repoRoot, ".harness", "spans.jsonl")
-    if (!nodeSyncHostIo.existsSync(spansPath)) return undefined
+    const hasSpansFile = nodeSyncHostIo.existsSync(spansPath)
+    if (!hasSpansFile && fallbackBlobData === undefined) return undefined
     const firstTestId = findFirstVitestCaseId(graph)
     if (firstTestId === undefined) return undefined
     const makeFail = (reason: string) => ({
@@ -558,13 +592,15 @@ export const uploadAndVerifySpanTraceBlob = (
         blockDecision !== undefined ? JSON.stringify({ decision: blockDecision, reason }) : "",
       stderr: `[GATE FAILURE] ${phaseLabel}:omnigraph-span-blob\n${reason}`,
     })
-    const readOutcome = match(Result.try(() => nodeSyncHostIo.readTextSync(spansPath)))
-      .with({ _tag: "Success" }, ({ success }) => ({ ok: true as const, data: success }))
-      .with({ _tag: "Failure" }, ({ failure }) => ({
-        ok: false as const,
-        reason: `Failed to read ${spansPath}: ${failure instanceof Error ? failure.message : String(failure)}`,
-      }))
-      .exhaustive()
+    const readOutcome = hasSpansFile
+      ? match(Result.try(() => nodeSyncHostIo.readTextSync(spansPath)))
+          .with({ _tag: "Success" }, ({ success }) => ({ ok: true as const, data: success }))
+          .with({ _tag: "Failure" }, ({ failure }) => ({
+            ok: false as const,
+            reason: `Failed to read ${spansPath}: ${failure instanceof Error ? failure.message : String(failure)}`,
+          }))
+          .exhaustive()
+      : { ok: true as const, data: fallbackBlobData ?? "" }
     if (!readOutcome.ok) return makeFail(readOutcome.reason)
 
     const blobSelector = {

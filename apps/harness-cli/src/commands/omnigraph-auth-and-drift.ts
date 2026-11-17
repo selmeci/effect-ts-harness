@@ -1,22 +1,16 @@
 import { createHash, randomBytes } from "node:crypto"
-import { dirname, join } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
-  ErrorReasonMessage,
-  NonNegativeCount,
   OmnigraphActorToken,
   type OmnigraphAuthTokens,
   OmnigraphAuthTokensSchema,
   type OmnigraphConfigDriftKind,
-  OmnigraphDiagnosticCode,
-  type OmnigraphLintDiagnostic,
-  type OmnigraphLintInput,
-  OmnigraphLintStatus,
   type OmnigraphSchemaEvolutionAction,
-  OmnigraphTargetName,
+  type OmnigraphServerMeta,
 } from "@harness/contract"
-import { decideOmnigraphLint, decideOmnigraphSchemaEvolution } from "@harness/gates"
+import { decideOmnigraphSchemaEvolution } from "@harness/gates"
 import { nodeSyncHostIo } from "@harness/infra"
 import {
   isProcessPidAlive,
@@ -24,8 +18,17 @@ import {
   resolveDefaultOmnigraphBin,
   runOmnigraphOptimizeAndCleanup,
 } from "./omnigraph-safety-helpers.js"
+import {
+  type OfflineOmnigraphLintResult,
+  runOfflineOmnigraphLintGate,
+} from "./omnigraph-lint-gate.js"
 
-export { resolveDefaultOmnigraphBin, runOmnigraphOptimizeAndCleanup }
+export {
+  type OfflineOmnigraphLintResult,
+  resolveDefaultOmnigraphBin,
+  runOfflineOmnigraphLintGate,
+  runOmnigraphOptimizeAndCleanup,
+}
 
 export const CLUSTER_SCHEMA_EPOCH = "rfc-0009-v2"
 
@@ -50,180 +53,28 @@ const ConfigDigestsSchema = Schema.fromJsonString(
 
 type ConfigDigests = Schema.Schema.Type<typeof ConfigDigestsSchema>
 
-const RawOmnigraphLintDiagnosticSchema = Schema.Struct({
-  code: Schema.optional(Schema.NullOr(Schema.String)),
-  message: Schema.optional(Schema.NullOr(Schema.String)),
-  targetName: Schema.optional(Schema.NullOr(Schema.String)),
-  target_name: Schema.optional(Schema.NullOr(Schema.String)),
-  target: Schema.optional(Schema.NullOr(Schema.String)),
-  severity: Schema.optional(Schema.Literals(["error", "warning", "info"])),
-})
-
-const OmnigraphLintJsonSchema = Schema.fromJsonString(
-  Schema.Struct({
-    status: Schema.optional(Schema.NullOr(Schema.String)),
-    queries_processed: Schema.optional(Schema.NullOr(Schema.Finite)),
-    findings: Schema.optional(Schema.NullOr(Schema.Array(RawOmnigraphLintDiagnosticSchema))),
-    diagnostics: Schema.optional(Schema.NullOr(Schema.Array(RawOmnigraphLintDiagnosticSchema))),
-  }),
-)
-
 const EndpointTokensJsonSchema = Schema.fromJsonString(OmnigraphAuthTokensSchema)
 
 export type OmnigraphEndpointTokens = OmnigraphAuthTokens
 
-export type OfflineOmnigraphLintResult =
-  | { readonly ok: true }
-  | { readonly ok: false; readonly message: string }
-
-export const resolveOmnigraphConfigDir = (repoRoot: string, clusterRepoRoot: string): string => {
+export const resolveOmnigraphConfigDir = (
+  repoRoot: string,
+  canonicalRepoRoot: string,
+  allowWorktreeOverride = process.env.HARNESS_ALLOW_WORKTREE_CLUSTER_REBUILD === "1",
+): string => {
+  const canonicalConfigDir = join(canonicalRepoRoot, "libs", "harness", "graph")
+  if (
+    !allowWorktreeOverride &&
+    resolve(repoRoot) !== resolve(canonicalRepoRoot) &&
+    nodeSyncHostIo.existsSync(join(canonicalConfigDir, "cluster.yaml"))
+  ) {
+    return canonicalConfigDir
+  }
   const worktreeConfigDir = join(repoRoot, "libs", "harness", "graph")
   return nodeSyncHostIo.existsSync(join(worktreeConfigDir, "cluster.yaml"))
     ? worktreeConfigDir
-    : join(clusterRepoRoot, "libs", "harness", "graph")
+    : canonicalConfigDir
 }
-
-export const runOfflineOmnigraphLintGate = (
-  repoRoot: string,
-  omnigraphBin: string = resolveDefaultOmnigraphBin(),
-): Effect.Effect<OfflineOmnigraphLintResult> =>
-  Effect.gen(function* () {
-    if (!nodeSyncHostIo.existsSync(omnigraphBin)) {
-      return {
-        ok: false as const,
-        message: `omnigraph binary not found at ${omnigraphBin}; cannot run offline lint gate`,
-      }
-    }
-    const schemaPath = join(repoRoot, "libs", "harness", "graph", "schema.pg")
-    const queryPath = join(repoRoot, "libs", "harness", "graph", "queries", "harness.gq")
-    if (!nodeSyncHostIo.existsSync(schemaPath) || !nodeSyncHostIo.existsSync(queryPath)) {
-      return {
-        ok: false as const,
-        message: `Missing Omnigraph schema (${schemaPath}) or query (${queryPath}) file; cannot run offline lint gate`,
-      }
-    }
-
-    const execAttempt = Result.try(() =>
-      nodeSyncHostIo.execFileSync(
-        omnigraphBin,
-        ["lint", "--schema", schemaPath, "--query", queryPath, "--json"],
-        { cwd: repoRoot, timeoutMs: 15_000 },
-      ),
-    )
-
-    const execOutcome = match(execAttempt)
-      .with({ _tag: "Failure" }, ({ failure }) => ({
-        _tag: "ExecError" as const,
-        message: `omnigraph lint execution failed: ${failure instanceof Error ? failure.message : String(failure)}`,
-      }))
-      .with({ _tag: "Success" }, ({ success: res }) =>
-        match(res)
-          .with({ _tag: "Exited" }, ({ exitCode, stdout, stderr }) => ({
-            _tag: "Exited" as const,
-            exitCode,
-            stdout,
-            stderr,
-          }))
-          .with({ _tag: "TimedOut" }, ({ stderr }) => ({
-            _tag: "ExecError" as const,
-            message: `omnigraph lint timed out: ${stderr}`,
-          }))
-          .with({ _tag: "Signaled" }, ({ signal, stderr }) => ({
-            _tag: "ExecError" as const,
-            message: `omnigraph lint killed by ${signal}: ${stderr}`,
-          }))
-          .with({ _tag: "SpawnFailed" }, ({ spawnError }) => ({
-            _tag: "ExecError" as const,
-            message: `omnigraph lint spawn failed: ${spawnError}`,
-          }))
-          .exhaustive(),
-      )
-      .exhaustive()
-
-    return yield* match(execOutcome)
-      .with({ _tag: "ExecError" }, ({ message }) =>
-        Effect.succeed({ ok: false as const, message }),
-      )
-      .with({ _tag: "Exited" }, ({ exitCode, stdout, stderr }) =>
-        Effect.gen(function* () {
-          const parsedOpt = Schema.decodeOption(OmnigraphLintJsonSchema)(stdout)
-          const parsed = match(parsedOpt)
-            .with({ _tag: "Some" }, ({ value }) => value)
-            .with({ _tag: "None" }, () => undefined)
-            .exhaustive()
-
-          if (parsed === undefined) {
-            const detail = stderr.trim() || stdout.trim() || `exitCode=${exitCode}`
-            return {
-              ok: false as const,
-              message: `omnigraph lint returned invalid JSON (${detail})`,
-            }
-          }
-
-          const rawDiagnostics = parsed.findings ?? parsed.diagnostics ?? []
-          const diagnostics: Array<OmnigraphLintDiagnostic> = rawDiagnostics.map((d) => {
-            const rawCode = (d.code ?? "LINT_ERROR").trim() || "LINT_ERROR"
-            const rawMsg = (d.message ?? "Omnigraph lint diagnostic").trim() || "Omnigraph lint diagnostic"
-            const rawTarget = (d.targetName ?? d.target_name ?? d.target ?? null)?.trim() ?? null
-            return {
-              code: OmnigraphDiagnosticCode.make(rawCode),
-              message: ErrorReasonMessage.make(rawMsg),
-              targetName: rawTarget && rawTarget.length > 0 ? OmnigraphTargetName.make(rawTarget) : null,
-              severity: d.severity ?? "error",
-            }
-          })
-
-          const statusOk = match(
-            Schema.decodeUnknownOption(OmnigraphLintStatus)(parsed.status?.trim()),
-          )
-            .with({ _tag: "Some" }, ({ value }) =>
-              match(value)
-                .with("ok", () => true)
-                .with("error", () => false)
-                .exhaustive(),
-            )
-            .with({ _tag: "None" }, () => false)
-            .exhaustive()
-
-          const lintInput: OmnigraphLintInput = {
-            statusOk,
-            queriesProcessed: NonNegativeCount.make(
-              Math.max(0, Math.floor(parsed.queries_processed ?? 0)),
-            ),
-            diagnostics,
-            policy: "fail-on-error",
-          }
-
-          const lintRes = yield* decideOmnigraphLint(lintInput).pipe(
-            Effect.map((report) => ({ _tag: "Report" as const, report })),
-            Effect.catchTag("OmnigraphLintError", (err) => Effect.succeed({ _tag: "Err" as const, err })),
-          )
-
-          return match(lintRes)
-            .with({ _tag: "Err" }, ({ err }) => ({
-              ok: false as const,
-              message: `omnigraph lint failed (${err.errorCount} errors): ${err.diagnosticsSummary}`,
-            }))
-            .with({ _tag: "Report" }, ({ report }) =>
-              match(report)
-                .with({ verdict: "violated" }, ({ violations }) => {
-                  const summary = violations.map((v) => `[${v._tag}] ${v.message}`).join("; ")
-                  return { ok: false as const, message: `omnigraph lint failed: ${summary}` }
-                })
-                .with({ verdict: "clean" }, () => {
-                  if (exitCode !== 0) {
-                    const detail = stderr.trim() || `exitCode=${exitCode}`
-                    return { ok: false as const, message: `omnigraph lint exited with ${detail}` }
-                  }
-                  return { ok: true as const }
-                })
-                .exhaustive(),
-            )
-            .exhaustive()
-        }),
-      )
-      .exhaustive()
-  })
 
 export const computeOmnigraphConfigStamp = (configDir: string): string => {
   const baseFiles = ["cluster.yaml", "schema.pg", "queries/harness.gq"]
@@ -314,7 +165,7 @@ export const evaluateClusterConfigDrift = (
     const schemaAdditiveChanged =
       prevDigests !== undefined ? digests["schema.pg"] !== prevDigests["schema.pg"] : stampChanged
     const policyBundleOrEdgeKeyChanged =
-      (clusterExists && !epochMatches && stampChanged) ||
+      (clusterExists && !epochMatches) ||
       (prevDigests !== undefined
         ? digests["cluster.yaml"] !== prevDigests["cluster.yaml"] ||
           digests["graph.policy.yaml"] !== prevDigests["graph.policy.yaml"] ||
@@ -405,7 +256,7 @@ const writeSecureJsonAtomic = (
 
 export const writeServerMetaAtomic = (
   clusterRootDir: string,
-  meta: Record<string, unknown>,
+  meta: OmnigraphServerMeta,
 ): Result.Result<void, Error> => writeSecureJsonAtomic(join(clusterRootDir, "server.json"), meta)
 
 export const ensureOmnigraphEndpointTokens = (
@@ -421,10 +272,12 @@ export const ensureOmnigraphEndpointTokens = (
       const tokensPath = join(clusterRootDir, "auth-tokens.json")
       if (nodeSyncHostIo.existsSync(tokensPath)) {
         const mode = nodeSyncHostIo.statModeSync(tokensPath)
-        if (mode !== undefined && (mode & 0o077) !== 0) {
+        if (mode === undefined || (mode & 0o077) !== 0) {
           return Result.fail(
             new Error(
-              `Refusing to use auth-tokens.json with permissive mode ${mode.toString(8)}: ${tokensPath}`,
+              mode === undefined
+                ? `Unable to stat mode for auth-tokens.json: ${tokensPath}`
+                : `Refusing to use auth-tokens.json with permissive mode ${mode.toString(8)}: ${tokensPath}`,
             ),
           )
         }
@@ -468,7 +321,22 @@ const compareAndUnlinkStaleLock = (lockPath: string, expectedRaw: string): boole
   Result.getOrElse(
     Result.try(() => {
       if (nodeSyncHostIo.readTextSync(lockPath) !== expectedRaw) return false
-      nodeSyncHostIo.unlinkSync(lockPath)
+      const tombstonePath = `${lockPath}.tombstone.${process.pid}.${randomBytes(6).toString("hex")}`
+      nodeSyncHostIo.renameSync(lockPath, tombstonePath)
+      const movedMatches = Result.getOrElse(
+        Result.try(() => nodeSyncHostIo.readTextSync(tombstonePath) === expectedRaw),
+        () => false,
+      )
+      if (!movedMatches) {
+        Result.try(() => nodeSyncHostIo.renameSync(tombstonePath, lockPath))
+        return false
+      }
+      match(Result.try({ try: () => nodeSyncHostIo.unlinkSync(tombstonePath), catch: (e) => String(e) }))
+        .with({ _tag: "Success" }, () => undefined)
+        .with({ _tag: "Failure" }, ({ failure }) => {
+          process.stderr.write(`[harness:omnigraph] Warning: failed to unlink tombstone ${tombstonePath}: ${failure}\n`)
+        })
+        .exhaustive()
       return true
     }),
     () => false,
@@ -572,24 +440,29 @@ export const releaseOmnigraphClusterLock = (
   handle: OmnigraphClusterLockHandle | string | undefined,
 ): void => {
   if (handle === undefined) return
-  if (typeof handle === "string") {
-    Result.try(() => nodeSyncHostIo.unlinkSync(handle))
-    return
-  }
-  Result.try(() => {
-    if (!nodeSyncHostIo.existsSync(handle.lockPath)) return
-    const raw = nodeSyncHostIo.readTextSync(handle.lockPath)
-    const parsedOpt = Schema.decodeOption(StartupLockJsonSchema)(raw)
-    const isOwner = match(parsedOpt)
-      .with({ _tag: "Some" }, ({ value }) =>
-        value.pid === process.pid && value.lockToken === handle.lockToken,
-      )
-      .with({ _tag: "None" }, () => false)
-      .exhaustive()
-    if (isOwner) {
-      nodeSyncHostIo.unlinkSync(handle.lockPath)
-    }
+  const targetPath = typeof handle === "string" ? handle : handle.lockPath
+  const res = Result.try({
+    try: () => {
+      if (typeof handle === "string") {
+        nodeSyncHostIo.unlinkSync(handle)
+        return
+      }
+      if (!nodeSyncHostIo.existsSync(handle.lockPath)) return
+      const parsedOpt = Schema.decodeOption(StartupLockJsonSchema)(nodeSyncHostIo.readTextSync(handle.lockPath))
+      const isOwner = match(parsedOpt)
+        .with({ _tag: "Some" }, ({ value }) => value.pid === process.pid && value.lockToken === handle.lockToken)
+        .with({ _tag: "None" }, () => false)
+        .exhaustive()
+      if (isOwner) nodeSyncHostIo.unlinkSync(handle.lockPath)
+    },
+    catch: (err) => (err instanceof Error ? err.message : String(err)),
   })
+  match(res)
+    .with({ _tag: "Success" }, () => undefined)
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      process.stderr.write(`[harness:omnigraph] Warning: failed to release lock ${targetPath}: ${failure}\n`)
+    })
+    .exhaustive()
 }
 
 export const killOmnigraphServerPidIfAlive = (

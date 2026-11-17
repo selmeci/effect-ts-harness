@@ -23,6 +23,7 @@ export type TelemetryOutcome = typeof TelemetryOutcome.Type
 
 export const TelemetryEngineSource = Schema.Literals([
   "omnigraph",
+  "omnigraph-failed",
   "memory-fallback",
   "local",
   "decision-model",

@@ -85,6 +85,39 @@ describe("@harness/contract omnigraph schemas", () => {
     expect(() => Schema.decodeUnknownSync(OmnigraphEntityKind)("vertex")).toThrow()
     expect(() => Schema.decodeUnknownSync(OmnigraphChangeOp)("upsert")).toThrow()
     expect(() => Schema.decodeUnknownSync(OmnigraphConfigDriftKind)("breaking")).toThrow()
+
+    expect(Schema.decodeSync(OmnigraphCommitId)("a".repeat(4096))).toHaveLength(4096)
+    expect(() => Schema.decodeSync(OmnigraphCommitId)("a".repeat(4097))).toThrow()
+  })
+
+  it("rejects invalid unknown inputs for OmnigraphProcessId and OmnigraphTcpPort", () => {
+    const invalidProcessIds: ReadonlyArray<unknown> = [
+      "0",
+      "18080",
+      null,
+      undefined,
+      Number.NaN,
+      1.5,
+      0,
+      1,
+    ]
+    for (const invalid of invalidProcessIds) {
+      expect(() => Schema.decodeUnknownSync(OmnigraphProcessId)(invalid)).toThrow()
+    }
+
+    const invalidPorts: ReadonlyArray<unknown> = [
+      "0",
+      "18080",
+      null,
+      undefined,
+      Number.NaN,
+      1.5,
+      0,
+      65536,
+    ]
+    for (const invalid of invalidPorts) {
+      expect(() => Schema.decodeUnknownSync(OmnigraphTcpPort)(invalid)).toThrow()
+    }
   })
 
   it("roundtrips OmnigraphBranchVerifyInput and OmnigraphBranchVerifyReport with closed tagged unions", () => {

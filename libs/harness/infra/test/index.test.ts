@@ -1263,4 +1263,58 @@ describe("@harness/infra live adapters", () => {
       }),
     ),
   )
+
+  it.effect(
+    "P1: nodeSyncHostIo tryWriteExclusiveTextSync, writeTextWithModeSync, statModeSync, and spawnDetached stderrLogPath guards",
+    () =>
+      withTempDir((dir) =>
+        Effect.sync(() => {
+          const exclPath = join(dir, "exclusive.txt")
+          const first = nodeSyncHostIo.tryWriteExclusiveTextSync(exclPath, "first", 0o600)
+          expect(first).toEqual({ _tag: "Written" })
+
+          const second = nodeSyncHostIo.tryWriteExclusiveTextSync(exclPath, "second", 0o600)
+          expect(second).toEqual({ _tag: "Exists" })
+
+          const missingParentPath = join(dir, "missing-dir", "exclusive.txt")
+          const failed = nodeSyncHostIo.tryWriteExclusiveTextSync(missingParentPath, "fail", 0o600)
+          expect(failed._tag).toBe("Failed")
+
+          const modePath = join(dir, "secret.txt")
+          nodeSyncHostIo.writeTextWithModeSync(modePath, "secret", 0o600)
+          const mode = nodeSyncHostIo.statModeSync(modePath)
+          expect(mode).toBeDefined()
+          expect((mode ?? 0) & 0o777).toBe(0o600)
+          expect(nodeSyncHostIo.statModeSync(join(dir, "nonexistent.txt"))).toBeUndefined()
+
+          const whitespaceRes = nodeSyncHostIo.spawnDetached(process.execPath, ["-e", "process.exit(0)"], {
+            stderrLogPath: "   ",
+          })
+          expect(whitespaceRes).toEqual({
+            _tag: "SpawnFailed",
+            spawnError: "Invalid stderrLogPath for detached process",
+          })
+
+          const nullByteRes = nodeSyncHostIo.spawnDetached(process.execPath, ["-e", "process.exit(0)"], {
+            stderrLogPath: join(dir, "bad\0.log"),
+          })
+          expect(nullByteRes).toEqual({
+            _tag: "SpawnFailed",
+            spawnError: "Invalid stderrLogPath for detached process",
+          })
+
+          const enoentRes = nodeSyncHostIo.spawnDetached(process.execPath, ["-e", "process.exit(0)"], {
+            stderrLogPath: join(dir, "missing-subdir", "stderr.log"),
+          })
+          match(enoentRes)
+            .with({ _tag: "SpawnFailed" }, (failed) => {
+              expect(failed.errorCode).toBe("ENOENT")
+            })
+            .with({ _tag: "Spawned" }, () => {
+              expect.unreachable("Expected SpawnFailed")
+            })
+            .exhaustive()
+        }),
+      ),
+  )
 })

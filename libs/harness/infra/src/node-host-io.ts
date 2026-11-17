@@ -409,7 +409,15 @@ export const nodeSyncHostIo: ExtendedHostIo = {
                   stdio: stderrFd !== undefined ? ["ignore", "ignore", stderrFd] : "ignore",
                   windowsHide: true,
                 })
-                child.on("error", () => {})
+                child.on("error", (err) => {
+                  const detail =
+                    err instanceof Error && err.message.trim().length > 0
+                      ? err.message.trim()
+                      : String(err)
+                  process.stderr.write(
+                    `[harness/infra] Detached process error (${resolvedPath}): ${detail}\n`,
+                  )
+                })
                 child.unref()
                 return child.pid
               },

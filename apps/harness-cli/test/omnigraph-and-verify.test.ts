@@ -79,6 +79,7 @@ describe("Omnigraph & Verify Delta Gates (extracted from index.test.ts)", () => 
       const clusterRootDir = join(dir, ".harness", "omnigraph-cluster")
       mkdirSync(clusterRootDir, { recursive: true })
       writeFileSync(join(clusterRootDir, ".config-stamp"), "name: test\n\n---\n\n---\n", "utf-8")
+      writeFileSync(join(clusterRootDir, ".cluster-schema-epoch"), "rfc-0009-v2", "utf-8")
 
       const localBinDir = join(homeDir, ".local", "bin")
       mkdirSync(localBinDir, { recursive: true })
@@ -906,6 +907,7 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
     const clusterRootDir = join(dir, ".harness", "omnigraph-cluster")
     mkdirSync(clusterRootDir, { recursive: true })
     writeFileSync(join(clusterRootDir, ".config-stamp"), "name: test\n\n---\n\n---\n", "utf8")
+    writeFileSync(join(clusterRootDir, ".cluster-schema-epoch"), "rfc-0009-v2", "utf8")
     return dir
   }
 

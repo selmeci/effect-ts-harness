@@ -14,13 +14,14 @@ import {
 import { mapPlaysRoleToOmnigraphEdgeName } from "./graph-engine.js"
 import { getNodeKey, type HarnessGraph, type HarnessNode } from "./model.js"
 import {
-  decodeCursorOrNull,
+  decodeStrictOptionalCommitId,
+  decodeStrictOptionalCursor,
   executeGetBlobText,
   executePollChanges,
   executeStatBlob,
-  extractOmnigraphCommitId,
   isChangeFeedGapError,
   isLoopbackOmnigraphUrl,
+  isOmnigraphUnavailableError,
   mapOmnigraphConflictError,
   mapOmnigraphPreconditionError,
   type OmnigraphBlobSelectorInput,
@@ -42,14 +43,14 @@ import {
 } from "./omnigraph-v014-ops.js"
 
 export {
-  OmnigraphServerMetaSchema,
-  decodeCursorOrNull,
+  decodeStrictOptionalCommitId,
+  decodeStrictOptionalCursor,
   executeGetBlobText,
   executePollChanges,
   executeStatBlob,
-  extractOmnigraphCommitId,
   isChangeFeedGapError,
   isLoopbackOmnigraphUrl,
+  isOmnigraphUnavailableError,
   mapOmnigraphConflictError,
   mapOmnigraphPreconditionError,
   OmnigraphLoadError,
@@ -72,7 +73,7 @@ export {
 
 export const OmnigraphClient = Omnigraph
 
-export const decodeServerMetaOption = Schema.decodeOption(
+const decodeServerMetaOption = Schema.decodeOption(
   Schema.fromJsonString(OmnigraphServerMetaSchema),
 )
 
@@ -436,4 +437,4 @@ export const toOmnigraphServerNdjsonResult = (
 }
 
 export const toOmnigraphServerNdjson = (graph: HarnessGraph): string =>
-  Result.getOrElse(toOmnigraphServerNdjsonResult(graph), () => "")
+  Result.getOrThrow(toOmnigraphServerNdjsonResult(graph))

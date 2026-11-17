@@ -898,6 +898,7 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         const doneClusterDir = resolveOmnigraphClusterDir(doneSigRepo, nodeSyncHostIo)
         mkdirSync(doneClusterDir, { recursive: true })
         writeFileSync(join(doneClusterDir, ".config-stamp"), "name: test\n\n---\n\n---\n")
+        writeFileSync(join(doneClusterDir, ".cluster-schema-epoch"), "rfc-0009-v2")
         writeVerifyStamp(doneSigRepo, nodeSyncHostIo, "impl/test", {
           dstSeed: DstSeed.make(1),
           dstSeedsRun: 1,
@@ -1056,10 +1057,12 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
       })
       const foreignPort = (foreignServer.address() as AddressInfo).port
 
+      const exitedPid = spawnSync(process.execPath, ["-e", "process.exit(0)"]).pid
+      expect(exitedPid).toBeGreaterThan(1)
       writeFileSync(
         join(clusterDir, "server.json"),
         JSON.stringify({
-          pid: 999999,
+          pid: exitedPid,
           port: foreignPort,
           baseUrl: `http://127.0.0.1:${foreignPort}`,
           canonicalRepoRoot: "/other/repo",

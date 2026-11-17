@@ -39,7 +39,6 @@ function resolveCanonicalRepoRoot(repoRoot) {
       }
     }
   } catch {
-    // Fall back to absRoot
   }
   return absRoot
 }
@@ -151,13 +150,35 @@ const explicitEnvUrl = [process.env.OMNIGRAPH_URL, process.env.OMNIGRAPH_BASE_UR
   (u) => typeof u === "string" && u.length > 0 && u !== "http://127.0.0.1:8080",
 )
 
+if (explicitEnvUrl === undefined && validServerUrl === undefined) {
+  process.stderr.write(
+    `[omnigraph-mcp-launcher] Warning: falling back to derived URL ${fallbackUrl} (${serverJsonExists ? "server.json invalid or dead PID" : "server.json missing"})\n`,
+  )
+  try {
+    const probeRes = await fetch(`${fallbackUrl}/readyz`, { signal: AbortSignal.timeout(1000) })
+    if (!probeRes.ok) {
+      process.stderr.write(
+        `[omnigraph-mcp-launcher] Warning: fallback probe ${fallbackUrl}/readyz returned HTTP ${probeRes.status}\n`,
+      )
+    }
+  } catch (err) {
+    process.stderr.write(
+      `[omnigraph-mcp-launcher] Warning: fallback probe ${fallbackUrl}/readyz failed: ${err instanceof Error ? err.message : String(err)}\n`,
+    )
+  }
+}
+
 const resolvedUrl = explicitEnvUrl ?? validServerUrl ?? fallbackUrl
 
 const authTokensPath = join(clusterDir, "auth-tokens.json")
+const envToken =
+  typeof process.env.OMNIGRAPH_TOKEN === "string" && process.env.OMNIGRAPH_TOKEN.length > 0
+    ? process.env.OMNIGRAPH_TOKEN
+    : undefined
 let resolvedToken
 if (isLoopbackUrl(resolvedUrl)) {
-  if (process.env.OMNIGRAPH_TOKEN !== undefined) {
-    resolvedToken = process.env.OMNIGRAPH_TOKEN
+  if (envToken !== undefined) {
+    resolvedToken = envToken
   } else if (existsSync(authTokensPath)) {
     resolvedToken = readSafeMcpToken(authTokensPath)
   } else if (serverJsonExists) {
@@ -175,12 +196,23 @@ const childEnv = {
   ...process.env,
   OMNIGRAPH_URL: resolvedUrl,
   OMNIGRAPH_BASE_URL: resolvedUrl,
-  ...(resolvedToken !== undefined ? { OMNIGRAPH_TOKEN: resolvedToken } : {}),
+}
+if (resolvedToken !== undefined) {
+  childEnv.OMNIGRAPH_TOKEN = resolvedToken
+} else {
+  delete childEnv.OMNIGRAPH_TOKEN
 }
 
 const child = spawn("npx", ["-y", "@modernrelay/omnigraph-mcp@0.14.0"], {
   stdio: "inherit",
   env: childEnv,
+})
+
+child.on("error", (err) => {
+  process.stderr.write(
+    `[omnigraph-mcp-launcher] Error: failed to spawn MCP server: ${err instanceof Error ? err.message : String(err)}\n`,
+  )
+  process.exit(1)
 })
 
 child.on("exit", (code, signal) => {

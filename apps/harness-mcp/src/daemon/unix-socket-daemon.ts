@@ -75,28 +75,37 @@ const decodeDaemonRequest = Schema.decodeOption(Schema.fromJsonString(DaemonRequ
 export const resolveDaemonSocketPath = (repoRoot: string): string =>
   resolveHarnessDaemonSocketPath(repoRoot)
 
-const extractChangedTsFilesFromImage = (
+const classifyImageFiles = (
   image: { readonly properties: unknown } | null | undefined,
-  out: Set<string>,
-): void => {
-  if (image === null || image === undefined) return
+  tsOut: Set<string>,
+): { readonly hasTs: boolean; readonly hasNonTs: boolean } => {
+  if (image === null || image === undefined) {
+    return { hasTs: false, hasNonTs: false }
+  }
   const props = image.properties
-  if (typeof props !== "object" || props === null) return
+  if (typeof props !== "object" || props === null) {
+    return { hasTs: false, hasNonTs: false }
+  }
   const record = props as {
     readonly file?: unknown
     readonly testFile?: unknown
     readonly moduleFile?: unknown
     readonly path?: unknown
   }
+  let hasTs = false
+  let hasNonTs = false
   for (const candidate of [record.file, record.testFile, record.moduleFile, record.path]) {
-    if (
-      typeof candidate === "string" &&
-      candidate.trim().length > 0 &&
-      (candidate.endsWith(".ts") || candidate.endsWith(".tsx"))
-    ) {
-      out.add(candidate.trim())
+    if (typeof candidate !== "string") continue
+    const trimmed = candidate.trim()
+    if (trimmed.length === 0) continue
+    if (trimmed.endsWith(".ts") || trimmed.endsWith(".tsx")) {
+      tsOut.add(trimmed)
+      hasTs = true
+    } else {
+      hasNonTs = true
     }
   }
+  return { hasTs, hasNonTs }
 }
 
 const createDaemonLineHandler =
@@ -325,10 +334,18 @@ const createDaemonLineHandler =
                     .with({ _tag: "Ok" }, ({ feed }) =>
                       Effect.gen(function* () {
                         const changedTsFiles = new Set<string>()
+                        let hasNonTsChanges = false
                         for (const block of feed.blocks) {
                           for (const change of block.changes) {
-                            extractChangedTsFilesFromImage(change.before, changedTsFiles)
-                            extractChangedTsFilesFromImage(change.after, changedTsFiles)
+                            const beforeFiles = classifyImageFiles(change.before, changedTsFiles)
+                            const afterFiles = classifyImageFiles(change.after, changedTsFiles)
+                            if (
+                              beforeFiles.hasNonTs ||
+                              afterFiles.hasNonTs ||
+                              (!beforeFiles.hasTs && !afterFiles.hasTs)
+                            ) {
+                              hasNonTsChanges = true
+                            }
                           }
                         }
                         for (const relPath of changedTsFiles) {
@@ -342,9 +359,6 @@ const createDaemonLineHandler =
                           }
                         }
 
-                        const hasNonTsChanges =
-                          changedTsFiles.size === 0 &&
-                          feed.blocks.some((block) => block.changes.length > 0)
                         if (feed.requiresBaseline || hasNonTsChanges || changedTsFiles.size > 0) {
                           const nextGraph = yield* extractWorkspaceTypeAwareGraph(
                             resolvedRoot,
@@ -361,10 +375,16 @@ const createDaemonLineHandler =
                               ),
                               Effect.map(() => ({ ok: true as const })),
                               Effect.catch((err) =>
-                                Effect.succeed({
-                                  ok: false as const,
-                                  error: toErrorReasonMessage(err),
-                                }),
+                                SynchronizedRef.update(datalogSessionsRef, (sessions) => {
+                                  const next = new Map(sessions)
+                                  next.delete(resolvedRoot)
+                                  return next
+                                }).pipe(
+                                  Effect.as({
+                                    ok: false as const,
+                                    error: toErrorReasonMessage(err),
+                                  }),
+                                ),
                               ),
                             )
                             if (!rebuiltRes.ok) {
