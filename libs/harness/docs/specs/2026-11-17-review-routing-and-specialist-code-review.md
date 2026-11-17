@@ -16,6 +16,7 @@ enforced_by:
   - libs/harness/decision/src/review-router-decision.ts
   - libs/harness/decision/src/index.ts
   - apps/harness-mcp/src/tools/graph-navigation.tools.ts
+  - apps/harness-cli/test/adapter-config.test.ts
 spans:
   - ReviewRouter.inferDiffSignals
   - ReviewRouter.decideDeterministic
@@ -27,15 +28,15 @@ errors:
 
 ## Context
 
-Today, automated and agent-driven code review in the Effect-TS Harness lacks a typed, deterministic routing contract and precomputed Effect graph context bundle. Reviewing a diff without structured signal extraction causes two opposite failure modes: small, localized diffs over-dispatch multiple specialist reviewers and burn context tokens, while cross-cutting diffs touching `scope:web` atoms, D1/DO migrations, `type:contract` schemas, or framework `type:core` packages miss domain-specific failure modes.
+Today, automated and agent-driven code review in the Effect-TS Harness lacks a typed, deterministic routing contract, a precomputed Effect graph context bundle, and parity across both Antigravity and Claude Code adapters. Reviewing a diff without structured signal extraction causes two opposite failure modes: small, localized diffs over-dispatch multiple specialist reviewers and burn context tokens, while cross-cutting diffs touching `scope:web` atoms, D1/DO migrations, `type:contract` schemas, or framework `type:core` packages miss domain-specific failure modes, and adapter drift risks inconsistent specialist rosters or read-only guarantees.
 
 - **Reused Contracts / Errors:** `NxTierTag`, `NxScopeTag`, `EnclosingSymbolName`, `ErrorReasonMessage`, `McpToolName`, `CANONICAL_MCP_TOOL_NAMES`, `stub` from `@harness/contract`
 - **Reused Services:** `DecisionModel.DecisionModel` (`effect/ai/DecisionModel`), `LocalDecisionModel` (`@harness/infra`)
-- **New Capabilities Needed:** `ReviewRawDiffInput`, `ReviewDiffSignals`, `ReviewRoutingPlan` (`SkipReviewPlan` | `ActiveReviewPlan`), `ReviewerId` (7 specialist lenses), `ReviewDepth`, `ReviewGraphContextBundle`, `ReviewRouteToolOutput`, `InvalidReviewRouteInputError`, `ReviewRouterV1`, `ReviewRouter.inferDiffSignals`, `ReviewRouter.decideDeterministic`, `Harness.routeReviewDiff`, and MCP tool `harness_review_route` (`HarnessMcp.routeReview`).
+- **New Capabilities Needed:** `ReviewRawDiffInput`, `ReviewDiffSignals`, `ReviewRoutingPlan` (`SkipReviewPlan` | `ActiveReviewPlan`), `ReviewerId` (7 specialist lenses), `ReviewDepth`, `ReviewGraphContextBundle`, `ReviewRouteToolOutput`, `InvalidReviewRouteInputError`, `ReviewRouterV1`, `ReviewRouter.inferDiffSignals`, `ReviewRouter.decideDeterministic`, `Harness.routeReviewDiff`, MCP tool `harness_review_route` (`HarnessMcp.routeReview`), and synchronized 7-specialist read-only `effect-code-review` adapters across Antigravity and Claude Code.
 
 ## Goal
 
-Every code review invocation routes diffs monotonically from deterministic file, tier, scope, and line-count signals—optionally augmented upward by `clef-flash` (`ReviewRouterV1`) within a bounded `1500 millis` timeout—to a closed `ReviewRoutingPlan` and precomputed `ReviewGraphContextBundle` via `harness_review_route`, ensuring trivial changes stay lightweight while high-risk diffs always receive mandatory specialist lenses.
+Every code review invocation routes diffs monotonically from deterministic file, tier, scope, and line-count signals—optionally augmented upward by `clef-flash` (`ReviewRouterV1`) within a bounded `1500 millis` timeout—to a closed `ReviewRoutingPlan` and precomputed `ReviewGraphContextBundle` via `harness_review_route`, dispatching strictly read-only specialist reviewers from a synchronized 7-lens roster across Antigravity and Claude Code adapters so trivial changes stay lightweight while high-risk diffs always receive mandatory specialist lenses.
 
 ## How to read the requirements
 
@@ -71,6 +72,16 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | REQ-3.1 | Event-driven       | **When** `Harness.routeReviewDiff` invokes `ReviewRouterV1` via `DecisionModel.decide`, `Harness.routeReviewDiff` **shall** only escalate `ReviewDepth` or append additional `ReviewerSelection` entries above the deterministic floor. | Harness.routeReviewDiff | PropertyTest |
 | REQ-3.2 | Unwanted behaviour | **If** `DecisionModel.decide` times out after `1500 millis` or fails with a non-interrupt cause, **then** `Harness.routeReviewDiff` **shall** return the deterministic `ReviewRoutingPlan` with `source = "degraded-fallback"`. | Harness.routeReviewDiff | UnitTest     |
 | REQ-3.3 | Event-driven       | **When** `harness_review_route` is invoked with `ReviewRawDiffInput`, `HarnessMcp.routeReview` **shall** return `ReviewRouteToolOutput` containing the `ReviewRoutingPlan`, `ReviewDiffSignals`, and `ReviewGraphContextBundle`. | HarnessMcp.routeReview | UnitTest     |
+
+### 4 · Seven-Specialist Roster, Read-Only Review Skill, and Cross-Adapter Parity
+
+**Source (harness:ADR-0014, Adapter & Skill Governance):** Both Antigravity and Claude Code adapters must ship identical 7-specialist read-only review capabilities, SDO-compliant `effect-code-review` skills, and complete 16-tool MCP documentation without cross-runtime tool leakage.
+
+| ID      | Pattern    | Requirement                                                                                                                                                                                                                                   | Effect Symbol          | Verification |
+| ------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- | ------------ |
+| REQ-4.1 | Ubiquitous | Both Antigravity and Claude Code adapters **shall** ship all seven read-only specialist reviewer definitions matching `SPECIALIST_REVIEWER_IDS` with the MCP Tooling and Navigation Protocol and Quote-the-Line output contract.           | HarnessMcp.routeReview | UnitTest     |
+| REQ-4.2 | Ubiquitous | Both Antigravity and Claude Code adapters **shall** ship the read-only `effect-code-review` skill with `"Use when..."` SDO frontmatter, hard deterministic-gate suppression, and runtime-specific subagent dispatch without cross-adapter tool leakage. | HarnessMcp.routeReview | UnitTest     |
+| REQ-4.3 | Ubiquitous | All adapter skill catalogs and READMEs **shall** document all sixteen `CANONICAL_MCP_TOOL_NAMES` entries including `harness_review_route`.                                                                                                  | HarnessMcp.routeReview | UnitTest     |
 
 ## Assumptions
 
