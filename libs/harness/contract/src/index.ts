@@ -107,10 +107,13 @@ export {
 } from "./cache-and-daemon.js"
 export {
   ActiveReviewPlan,
+  DEFAULT_REVIEW_ROUTE_TIMEOUT_MS,
   InvalidReviewRouteInputError,
   REVIEW_DEPTH_LEVELS,
+  REVIEW_DEPTH_RANK,
   ReviewChangedLines,
   ReviewDepth,
+  ReviewDepthRank,
   ReviewDiffSignals,
   ReviewGraphContextBundle,
   ReviewRawDiffInput,
@@ -121,8 +124,10 @@ export {
   ReviewRoutingSource,
   ReviewSignalPath,
   ReviewSummaryText,
+  ReviewTimeoutMillis,
   ReviewerId,
   ReviewerSelection,
   SPECIALIST_REVIEWER_IDS,
   SkipReviewPlan,
+  getReviewDepthRank,
 } from "./review-routing.js"

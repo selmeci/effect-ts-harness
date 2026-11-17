@@ -82,7 +82,7 @@ Assume there are at least 3 P0/P1 bugs hiding across the spec, ADR, contract, fi
 
 ### In Claude Code
 
-Dispatch using the specialist agent name (`effect-ears-test-reviewer`, `effect-security-reviewer`, `effect-reliability-reviewer`, `effect-adversarial-reviewer`) or delegate with the persona definition from `references/personas/*.md`.
+Dispatch using the specialist agent name (`effect-ears-test-reviewer`, `effect-security-reviewer`, `effect-reliability-reviewer`, `effect-adversarial-reviewer`, `effect-web-reviewer`, `effect-migration-contract-reviewer`, `effect-architecture-reviewer`) or delegate with the persona definition from `references/personas/*.md`.
 
 ---
 
@@ -126,7 +126,7 @@ Every reported `P0` or `P1` finding MUST follow this exact schema:
 ````markdown
 ### [P0|P1] <Concise Title>
 
-- **Reviewer:** <ears-test | security | reliability | adversarial>
+- **Reviewer:** <effect-ears-test-reviewer | effect-security-reviewer | effect-reliability-reviewer | effect-adversarial-reviewer | effect-web-reviewer | effect-migration-contract-reviewer | effect-architecture-reviewer>
 - **Confidence:** 100 | 75
 - **Evidence:** `<relative_file_path>:<line_number>`
   ```ts

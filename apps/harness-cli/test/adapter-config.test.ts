@@ -1,10 +1,19 @@
 import { execFileSync, spawnSync } from "node:child_process"
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
   CANONICAL_MCP_TOOL_NAMES,
+  SPECIALIST_REVIEWER_IDS,
   SelfDogfoodingRuleId,
   TierTopologyRuleId,
 } from "@harness/contract"
@@ -453,7 +462,7 @@ describe("Antigravity adapter & plugin configuration", () => {
     }
   })
 
-  it("documents all 7 workflow skills and all 4 specialist reviewer subagents in README.md and adapter READMEs", () => {
+  it("documents all workflow skills and SPECIALIST_REVIEWER_IDS in README.md and adapter READMEs", () => {
     const docPaths = [
       resolve(repoRoot, "README.md"),
       resolve(pluginDir, "README.md"),
@@ -469,15 +478,6 @@ describe("Antigravity adapter & plugin configuration", () => {
       "resolving-effect-review-feedback",
       "compounding-effect-learnings",
     ]
-    const specialistSubagents = [
-      "effect-ears-test-reviewer",
-      "effect-security-reviewer",
-      "effect-reliability-reviewer",
-      "effect-adversarial-reviewer",
-      "effect-web-reviewer",
-      "effect-migration-contract-reviewer",
-      "effect-architecture-reviewer",
-    ]
 
     for (const docPath of docPaths) {
       expect(existsSync(docPath), `Document file must exist: ${docPath}`).toBe(true)
@@ -485,7 +485,7 @@ describe("Antigravity adapter & plugin configuration", () => {
       for (const skill of workflowSkills) {
         expect(content, `Expected ${docPath} to document workflow skill ${skill}`).toContain(skill)
       }
-      for (const agent of specialistSubagents) {
+      for (const agent of SPECIALIST_REVIEWER_IDS) {
         expect(
           content,
           `Expected ${docPath} to document specialist reviewer subagent ${agent}`,
@@ -495,22 +495,13 @@ describe("Antigravity adapter & plugin configuration", () => {
   })
 
   it("enforces MCP tooling & navigation protocol and bans grep_search across all specialist reviewer agents in both adapters", () => {
-    const reviewerNames = [
-      "effect-ears-test-reviewer",
-      "effect-security-reviewer",
-      "effect-reliability-reviewer",
-      "effect-adversarial-reviewer",
-      "effect-web-reviewer",
-      "effect-migration-contract-reviewer",
-      "effect-architecture-reviewer",
-    ]
     const adapterDirs = [
       resolve(pluginDir, "agents"),
       resolve(repoRoot, "adapters/claude-code/agents"),
     ]
 
     for (const dir of adapterDirs) {
-      for (const name of reviewerNames) {
+      for (const name of SPECIALIST_REVIEWER_IDS) {
         const filePath = resolve(dir, `${name}.md`)
         expect(existsSync(filePath), `Reviewer file must exist: ${filePath}`).toBe(true)
         const content = readFileSync(filePath, "utf8")
@@ -833,7 +824,7 @@ describe("Antigravity adapter & plugin configuration", () => {
     expect(failures).toEqual([])
   })
 
-  it("enforces Phase 5 Step 0 metric sync, stamp-safe ordering, and 15-tool MCP catalog across README.md and adapter READMEs", () => {
+  it("enforces Phase 5 Step 0 metric sync, stamp-safe ordering, and CANONICAL_MCP_TOOL_NAMES MCP catalog across README.md and adapter READMEs", () => {
     const rootReadme = readFileSync(resolve(repoRoot, "README.md"), "utf8")
     const agyReadme = readFileSync(resolve(pluginDir, "README.md"), "utf8")
     const claudeReadme = readFileSync(resolve(repoRoot, "adapters/claude-code/README.md"), "utf8")
@@ -942,5 +933,89 @@ describe("Antigravity adapter & plugin configuration", () => {
       }
     }
     expect(failures).toEqual([])
+  })
+
+  it("keeps specialist agent definitions and persona references in exact body parity across both adapters", () => {
+    const marker = "## MCP Tooling & Navigation Protocol"
+    const extractBodyFromProtocol = (filePath: string): string => {
+      const content = readFileSync(filePath, "utf8")
+      const idx = content.indexOf(marker)
+      expect(idx, `Expected "${marker}" in ${filePath}`).toBeGreaterThanOrEqual(0)
+      return content.slice(idx)
+    }
+    const normalizeAntigravityToClaude = (body: string): string =>
+      body
+        .replaceAll("effect-harness_harness-mcp", "harness-mcp")
+        .replaceAll("effect-harness_omnigraph-mcp", "omnigraph-mcp")
+        .replaceAll("`read_file` with targeted `StartLine` and `EndLine`", "`Read` with targeted `offset` and `limit`")
+        .replaceAll("`read_file`", "`Read`")
+
+    for (const reviewerId of SPECIALIST_REVIEWER_IDS) {
+      const personaFile = `${reviewerId.replace(/^effect-/, "")}.md`
+      const agyAgentBody = extractBodyFromProtocol(resolve(pluginDir, "agents", `${reviewerId}.md`))
+      const agyPersonaBody = extractBodyFromProtocol(
+        resolve(pluginDir, "skills/executing-effect-stubs/references/personas", personaFile),
+      )
+      expect(agyAgentBody, `Antigravity agent vs persona parity failed for ${reviewerId}`).toBe(
+        agyPersonaBody,
+      )
+
+      const claudeAgentBody = extractBodyFromProtocol(
+        resolve(repoRoot, "adapters/claude-code/agents", `${reviewerId}.md`),
+      )
+      const claudePersonaBody = extractBodyFromProtocol(
+        resolve(
+          repoRoot,
+          "adapters/claude-code/skills/executing-effect-stubs/references/personas",
+          personaFile,
+        ),
+      )
+      expect(claudeAgentBody, `Claude Code agent vs persona parity failed for ${reviewerId}`).toBe(
+        claudePersonaBody,
+      )
+
+      expect(
+        normalizeAntigravityToClaude(agyAgentBody),
+        `Cross-adapter normalized agent body parity failed for ${reviewerId}`,
+      ).toBe(claudeAgentBody)
+    }
+  })
+
+  it("bans view_file across both adapters and bans Antigravity-prefixed MCP server names in adapters/claude-code", () => {
+    const collectFiles = (dir: string): ReadonlyArray<string> => {
+      const out: Array<string> = []
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry)
+        if (statSync(full).isDirectory()) {
+          out.push(...collectFiles(full))
+        } else {
+          out.push(full)
+        }
+      }
+      return out
+    }
+
+    const adapterFiles = [
+      ...collectFiles(resolve(pluginDir, "agents")),
+      ...collectFiles(resolve(pluginDir, "skills")),
+      ...collectFiles(resolve(repoRoot, "adapters/claude-code")),
+    ]
+    for (const filePath of adapterFiles) {
+      const content = readFileSync(filePath, "utf8")
+      expect(content, `Banned "view_file" found in ${filePath}`).not.toContain("view_file")
+    }
+
+    const claudeFiles = collectFiles(resolve(repoRoot, "adapters/claude-code"))
+    for (const filePath of claudeFiles) {
+      const content = readFileSync(filePath, "utf8")
+      expect(
+        content,
+        `Banned Antigravity MCP server name "effect-harness_harness-mcp" found in ${filePath}`,
+      ).not.toContain("effect-harness_harness-mcp")
+      expect(
+        content,
+        `Banned Antigravity MCP server name "effect-harness_omnigraph-mcp" found in ${filePath}`,
+      ).not.toContain("effect-harness_omnigraph-mcp")
+    }
   })
 })

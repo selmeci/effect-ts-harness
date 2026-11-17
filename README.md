@@ -52,7 +52,7 @@ flowchart TD
     GATES["@harness/gates (type:core)\n18+ Pure Deciders & Gate Plugins"]
     GRAPH["@harness/graph (type:core)\nOmnigraph v0.14.0 + .gq + ArchiMate 3.2"]
     INGEST["@harness/ingest (type:core)\n@ast-grep/napi Effect.fn Span Indexer + RecordingTracer"]
-    DECISION["@harness/decision (type:core)\n13 Versioned DecisionModel Schemas + Pure Routing"]
+    DECISION["@harness/decision (type:core)\n14 Versioned DecisionModel Schemas + Pure Routing"]
     ES_CORE["@harness/es-core (type:core)\nDecider + AggregateRoot + EventStore"]
     SAMPLE_DOM["@harness/sample-domain (type:domain)\nuploadPhoto + decideAlbumQuota"]
   end
@@ -348,7 +348,7 @@ The harness packages full engineering capabilities into two first-class adapter 
    - **Subagent 2 (`libs/<scope>/infra`):** Implements live `@effect/sql-d1` / `@effect/sql-sqlite-do` repositories and Alchemy resource bindings.
    - **Subagent 3 (`apps/sample-web` or UI):** Implements `@effect/atom-react` state and client contracts.
 3. **Subagent Execution Discipline:** Subagents run `harness_lsp_diagnostics` and package unit tests (`pnpm nx run <project>:test`). Subagents **never** run monorepo `verify` or mutate `.harness/verify-stamp.json`.
-4. **Specialist Review Lenses:** Orchestrator runs read-only specialist subagents (`effect-ears-test-reviewer`, `effect-security-reviewer`, `effect-reliability-reviewer`, `effect-adversarial-reviewer`) against the implementation.
+4. **Specialist Review Lenses:** Orchestrator queries `harness_review_route` and dispatches matching read-only specialist subagents from the 7-reviewer roster (`effect-ears-test-reviewer`, `effect-security-reviewer`, `effect-reliability-reviewer`, `effect-adversarial-reviewer`, `effect-web-reviewer`, `effect-migration-contract-reviewer`, `effect-architecture-reviewer`) against the implementation.
 5. **Close Monorepo Gates:** Orchestrator runs `harness gc --strict`, `harness mutate --strict`, `CI=true harness verify`, and `harness done`.
 
 #### Recipe C: Resolving Code Review Feedback (`resolving-effect-review-feedback`)

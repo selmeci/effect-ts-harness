@@ -82,7 +82,15 @@ Use the workflow skills to guide agents through specific development phases or r
   "/effect-lfg Add a Sample.archiveAlbum use-case to libs/sample that marks an album archived or fails with AlbumNotFoundError."
   ```
 
-### 3. `specifying-ears-with-effect`
+### 3. `effect-code-review` (`/effect-code-review`)
+
+- **When to Use:** Standalone read-only code review skill. Use when reviewing git diffs, branches, commit ranges, or pull requests via `harness_review_route` and the 7 specialist reviewers with deterministic-gate noise suppression.
+- **Trigger / Starter Prompt:**
+  ```text
+  "/effect-code-review Review git diff main...HEAD"
+  ```
+
+### 4. `specifying-ears-with-effect`
 
 - **When to Use:** Step 1 of the task lifecycle. Use before writing code or skeletons when requirements are informal, unwritten, or missing EARS clauses (`WHEN`, `IF/THEN`, `WHILE`, `WHERE`).
 - **Trigger / Starter Prompt:**
@@ -90,7 +98,7 @@ Use the workflow skills to guide agents through specific development phases or r
   "Author the EARS specification and ADR for rate-limiting Durable Object storage using specifying-ears-with-effect."
   ```
 
-### 4. `planning-effect-skeletons`
+### 5. `planning-effect-skeletons`
 
 - **When to Use:** Steps 2–3 of the task lifecycle. Use after specification approval to translate EARS clauses into compilable `stub<A, E, R>()` signatures and pass `harness plan-check`.
 - **Trigger / Starter Prompt:**
@@ -98,7 +106,7 @@ Use the workflow skills to guide agents through specific development phases or r
   "Create plan-as-code skeletons for the session store service and domain functions using planning-effect-skeletons."
   ```
 
-### 5. `executing-effect-stubs`
+### 6. `executing-effect-stubs`
 
 - **When to Use:** Steps 4–6 of the task lifecycle. Use once `harness plan-check` passes on `plan/<task>` to replace stubs with `Effect.fn` implementations, Layers, and Vitest test suites.
 - **Trigger / Starter Prompt:**
@@ -106,7 +114,7 @@ Use the workflow skills to guide agents through specific development phases or r
   "Execute stubs in libs/sample/domain and libs/sample/infra using executing-effect-stubs and verify all gates."
   ```
 
-### 6. `resolving-effect-review-feedback`
+### 7. `resolving-effect-review-feedback`
 
 - **When to Use:** Step 8 (Post-PR / External Review Resolution). Use when addressing code review comments from Grok, Codex, Claude, human reviewers, or GitHub PR threads (`gh pr view`).
 - **Trigger / Starter Prompt:**
@@ -118,7 +126,7 @@ Use the workflow skills to guide agents through specific development phases or r
   "Resolve the code review comments on pull request #42 using resolving-effect-review-feedback."
   ```
 
-### 7. `compounding-effect-learnings`
+### 8. `compounding-effect-learnings`
 
 - **When to Use:** Step 7 of the task lifecycle and post-review retrospectives. Use when completing tasks that encountered gate failures, route misses, or new idioms to promote friction into deterministic gates.
 - **Trigger / Starter Prompt:**

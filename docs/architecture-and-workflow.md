@@ -391,7 +391,7 @@ sequenceDiagram
 | **3. `TriageV1`** (`triageFailure`)                   | Po zlyhaní `verify`, ak sa nezachytilo v statických pravidlách     | `{ failureOutput: string }`                                                         | • `kind`: `"mechanical"` alebo `"semantic"`                                                                                                                 | Klasifikácia charakteru chyby pre nápovedu agentovi                                                                                                                   | `"semantic"` (odporučí analyzovať graf cez `harness_tests_reaching`)                                                                                 |
 | **4. `PlanStepCoverageV1`** (`checkPlanStepCoverage`) | Počas `harness done`, ak boli zadané kroky `planSteps`             | `{ stepId, planStep, stepDiff }`                                                    | • `implemented`: pravdepodobnosť<br/>• `noOutOfScopeEdits`: pravdepodobnosť                                                                                 | `implemented >= 0.7` A `noOutOfScopeEdits >= 0.7` $\rightarrow$ `covered: true`                                                                                       | `covered: false` (pri zlyhaní decision modelu vyžaduje overenie)                                                                                     |
 | **5. `LearnProposalV1`** (`proposeLearningAction`)    | CLI `harness learn` po zistení opakovaného trenia                  | `{ kind: FrictionEventKind, summary: string, detail: string, occurrences: number }` | • `actionable`: pravdepodobnosť (0.0–1.0)<br/>• `target`: klasifikácia do 4 kategórií (`agent-pattern`, `triage-rule`, `guard-allowlist`, `ast-graph-gate`) | Ak `actionable >= 0.7`, navrhne sa vybraný `target`, inak sa záznam archivuje bez povýšenia                                                                           | Deterministický fallback: pri `occurrences >= 2` mapuje `kind` priamo na predvolený cieľ                                                             |
-| **6. `ReviewRouterV1`** (`routeReviewDiff`)           | MCP `harness_review_route` pred spustením `effect-code-review`     | `{ changedFiles, touchedTiers, touchedScopes, changedLineCount, ...flags }`         | • `recommendedDepth`: `skip \| lite \| focused \| full`<br/>• `extraLenses`: doplnkové špecializované šošovky                                               | `ReviewRouter.decideDeterministic` určí nepodkročiteľnú podlahu; `clef-flash` smie eskalovať **iba smerom nahor** (monotonicky)                                       | `source = "degraded-fallback"` — zachová deterministickú podlahu z `ReviewRouter.decideDeterministic`                                                |
+| **6. `ReviewRouterV1`** (`routeReviewDiff`)           | MCP `harness_review_route` pred spustením `effect-code-review`     | `{ changedFiles: string, diffSummary: string, changedLineCount: ReviewChangedLines, touchedTiers: string }` | • `recommendedDepth`: `skip \| lite \| focused \| full`<br/>• 5 pravdepodobností (`>= 0.75`): `needsSecurityLens`, `needsReliabilityLens`, `needsAdversarialLens`, `needsMigrationContractLens`, `needsArchitectureLens` | `ReviewRouter.decideDeterministic` určí čistú podlahu; `Harness.routeReviewDiff` zlúči výsledok monotonicky nahor a nastaví `source = "model-augmented"` len pri reálnej zmene | `source = "degraded-fallback"` + `degradedReason` — zachová deterministickú podlahu z `ReviewRouter.decideDeterministic` |
 
 ---
 
@@ -518,33 +518,56 @@ Analyzuje nakopené trenie z `.harness/friction-log.jsonl` a odporúča jeho pov
 
 #### 6. `ReviewRouterV1` (`routeReviewDiff`)
 
-Zabezpečuje monotonické smerovanie code review (`skip < lite < focused < full`): `ReviewRouter.decideDeterministic` najskôr určí nepodkročiteľnú podlahu hĺbky a povinných špecialistov zo signálov diffu (`R = never`). Následne `Harness.routeReviewDiff` zavolá `clef-flash` (`ReviewRouterV1`) s rozpočtom `1500 ms`, ktorý smie hĺbku alebo zoznam šošoviek **iba eskalovať smerom nahor** (nikdy ponížiť ani odstrániť). Pri timeoute alebo nedostupnosti modelu sa vráti deterministický plán s `source: "degraded-fallback"`.
+Zabezpečuje monotonické smerovanie code review (`skip < lite < focused < full`): `ReviewRouter.decideDeterministic` najskôr určí čistú deterministickú podlahu hĺbky a povinných špecialistov zo signálov diffu (`R = never`). Následne `Harness.routeReviewDiff` zavolá `clef-flash` (`ReviewRouterV1`) s predvoleným rozpočtom `1500 ms` (`ReviewTimeoutMillis`), ktorý klasifikuje `recommendedDepth` a 5 sémantických pravdepodobností (`security`, `reliability`, `adversarial`, `migration-contract`, `architecture` s prahom `>= 0.75`) a smie plán **iba eskalovať smerom nahor** (vrátane prepočtu minimálnej hĺbky pri pridaní šošoviek; `source: "model-augmented"` sa nastaví len ak model reálne zvýšil hĺbku alebo pridal šošovku). Pri timeoute alebo chybe modelu sa zaloguje varovanie a vráti deterministický plán so `source: "degraded-fallback"` a poľom `degradedReason`.
 
-- **Vstup pre model (`ReviewDiffSignals`):**
+- **Vstup pre model (`ReviewRouterV1`):**
   ```json
   {
-    "changedFiles": ["libs/sample/infra/src/photo-repo.ts", "migrations/0003_add_album_idx.sql"],
-    "touchedTiers": ["type:infra"],
-    "touchedScopes": ["sample"],
+    "changedFiles": "libs/sample/infra/src/photo-repo.ts, libs/sample/infra/migrations/0003_add_album_idx.sql",
+    "diffSummary": "Add album index migration and D1 query",
     "changedLineCount": 84,
-    "hasMigrationOrInfraBindingChange": true,
-    "hasConcurrencyOrResourceChange": true
+    "touchedTiers": "type:infra"
   }
   ```
-- **Výstup modelu a zlúčenie (`ReviewRoutingPlan`):**
+- **Výstup modelu (`ReviewRouterV1` `answers`):**
   ```json
   {
-    "source": "hybrid",
-    "depth": "focused",
+    "answers": {
+      "recommendedDepth": { "label": "focused", "rationale": "Infra repository and SQL index change" },
+      "needsSecurityLens": { "probability": 0.15 },
+      "needsReliabilityLens": { "probability": 0.88 },
+      "needsAdversarialLens": { "probability": 0.82 },
+      "needsMigrationContractLens": { "probability": 0.96 },
+      "needsArchitectureLens": { "probability": 0.20 }
+    }
+  }
+  ```
+- **Zlúčený výstup (`ActiveReviewPlan` v `ReviewRoutingPlan`):**
+  ```json
+  {
+    "_tag": "ActiveReviewPlan",
+    "source": "model-augmented",
+    "depth": "full",
     "selections": [
-      { "reviewerId": "effect-ears-test-reviewer", "mandatory": true },
-      { "reviewerId": "effect-migration-contract-reviewer", "mandatory": true },
-      { "reviewerId": "effect-reliability-reviewer", "mandatory": true },
-      { "reviewerId": "effect-adversarial-reviewer", "mandatory": false }
+      {
+        "reviewer": "effect-reliability-reviewer",
+        "reason": "Infra, resource Scope, concurrency, or daemon surface touched",
+        "mandatory": true
+      },
+      {
+        "reviewer": "effect-migration-contract-reviewer",
+        "reason": "Contract boundary, SQL migration, or Alchemy binding surface touched",
+        "mandatory": true
+      },
+      {
+        "reviewer": "effect-adversarial-reviewer",
+        "reason": "System One flagged elevated state-transition/invariant risk",
+        "mandatory": false
+      }
     ]
   }
   ```
-- **Vyhodnotenie v kóde:** Deterministická podlaha vyžaduje `ears-test`, `migration-contract` a `reliability`; `ReviewRouterV1` pridá `effect-adversarial-reviewer`, pričom `harness_review_route` k plánu pripojí aj `ReviewGraphContextBundle` (`touchedSymbols`, `reachingTests`, `governanceRefs`).
+- **Vyhodnotenie v kóde:** Deterministická podlaha vynúti `depth: "full"` (pretože `migrations/*.sql` nastaví `hasMigrationOrInfraBindingChange = true`) a povinné šošovky `effect-reliability-reviewer` + `effect-migration-contract-reviewer` (`mandatory: true`), takže nižší návrh modelu (`recommendedDepth: "focused"`) podlahu nikdy neponíži; zároveň `needsAdversarialLens = 0.82 >= 0.75` pridá voliteľného špecialistu `effect-adversarial-reviewer` (`mandatory: false`), pričom `harness_review_route` k plánu pripojí aj `ReviewDiffSignals` (s `touchedScopes: []` alebo platnými `NxScopeTag` hodnotami ako `"scope:web"`), `warnings`, `degraded` a `ReviewGraphContextBundle` (`touchedSymbols`, `reachingTests`, `governanceRefs`).
 
 ---
 
@@ -889,18 +912,19 @@ Pred spustením finálnych brán `harness gc --strict` a `harness verify` (alebo
 
 | Špecializovaná šošovka (`ReviewerId`)      | Kedy sa spúšťa (Aktivácia signálom / `ReviewDiffSignals`)                                         | Zameranie kontroly a odhaľované riziká                                                                                                                                                                                                                  |
 | :----------------------------------------- | :------------------------------------------------------------------------------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **1. `effect-ears-test-reviewer`**         | **Vždy** pri ne-triviálnom diffe (`hasTestOrSpecChange` alebo aktívna implementácia)              | Overuje, že každá EARS klauzula (`WHEN`, `IF/THEN`, `WHILE`) má citlivé testovacie tvrdenie v `@effect/vitest`. Odmieta prázdne/mock-only testy a kontroluje pokrytie sad-path vetiev pre všetky deklarované `TaggedError`s.                         |
-| **2. `effect-security-reviewer`**          | Pri zásahu do `type:contract`, `HttpApi`, `Rpc`, auth alebo `Config` (`hasAuthOrSecretSurface`)   | Kontroluje autorizáciu aktéra a tenanta (prevencia IDOR) v use-caseoch, správu tajomstiev cez `Config.redacted`, a reštrikcie na vstupných Schémach (ohraničené dĺžky reťazcov, polí, konečné čísla `Schema.Finite`).                                   |
-| **3. `effect-reliability-reviewer`**       | Pri zásahu do `type:infra`, DO SQLite, D1, Queues, `Schedule` (`hasConcurrencyOrResourceChange`) | Kontroluje striktnú synchrónnu SQLite transakčnú disciplínu v DO (zákaz asynchrónneho I/O vo vnútri `runSyncTransaction`), ohraničené retry stratégie s jitterom a limitom, timeouty na externých `HttpClient` volaniach a bezpečné finišéry v `Scope`. |
-| **4. `effect-adversarial-reviewer`**       | Pri stavových tokoch, Event Sourcingu, Outboxe, Projekciách (`hasStatefulOrDeciderChange`)        | Simuluje rolu chaos inžiniera: konštruuje konkrétne sekvencie zlyhaní (duplicitné doručenie `commandId`, out-of-order správy v Queue, crash medzi commitom do SQLite a odoslaním DO alarmu / správy do frontu).                                         |
-| **5. `effect-web-reviewer`**               | Pri zásahu do `scope:web` (`apps/sample-web` a `AtomHttpApi`, `hasWebSurface`)                   | Kontroluje reaktivitu `AtomHttpApi` query/mutácií, správne `Result` / `AsyncResult` vetvenie v React komponentoch, absenciu surového `fetch(...)` a správu stavu bez únikov mimo atomov.                                                                |
-| **6. `effect-migration-contract-reviewer`**| Pri zásahu do `migrations/*.sql`, `SqliteMigrator`, `openapi.json` (`hasMigrationOrInfraBindingChange` / `hasContractBoundaryChange`) | Overuje expand-contract kompatibilitu schém, spätnú kompatibilitu event/API kontraktov a bezpečnosť migrácií nad rámec statickej brány `MigrationSafety.decide`.                                                                                         |
-| **7. `effect-architecture-reviewer`**      | Pri zásahu do `libs/harness/*`, adaptérov alebo hraníc balíkov (`hasArchitectureOrAdapterSurface`) | Kontroluje dodržanie framework-vs-application archetypu (zákaz biznis domén v produkčných knižniciach), 5-vrstvovú hexagonálnu topológiu a paritu medzi adaptérmi Antigravity a Claude Code.                                                            |
+| **1. `effect-ears-test-reviewer`**         | Pri testoch (`*.test.*`, `**/test/**`), EARS/ADR dokumentoch (`docs/{specs,adr}/*.md`), alebo `type:core`/`type:domain` (`hasTestOrSpecChange` / `hasStatefulOrDeciderChange`) | Overuje, že každá EARS klauzula (`WHEN`, `IF/THEN`, `WHILE`) má citlivé testovacie tvrdenie v `@effect/vitest`. Odmieta prázdne/mock-only testy a kontroluje pokrytie sad-path vetiev pre všetky deklarované `TaggedError`s.                         |
+| **2. `effect-security-reviewer`**          | Pri zásahu do auth/session/token/secret ciest, `Redacted`/`Config.redacted`, `idFromName`, alebo auth API kontraktov (`hasAuthOrSecretSurface`) | Kontroluje autorizáciu aktéra a tenanta (prevencia IDOR) v use-caseoch, správu tajomstiev cez `Config.redacted`, a reštrikcie na vstupných Schémach (ohraničené dĺžky reťazcov, polí, konečné čísla `Schema.Finite`).                                   |
+| **3. `effect-reliability-reviewer`**       | Pri zásahu do `type:infra`, DO SQLite, D1, Queues, Alarms, `Schedule`, `Scope` (`hasConcurrencyOrResourceChange`) | Kontroluje striktnú synchrónnu SQLite transakčnú disciplínu v DO (zákaz asynchrónneho I/O vo vnútri `runSyncTransaction`), ohraničené retry stratégie s jitterom a limitom, timeouty na externých `HttpClient` volaniach a bezpečné finišéry v `Scope`. |
+| **4. `effect-adversarial-reviewer`**       | Pri `type:core`, `type:domain`, stavových tokoch, Event Sourcingu, Outboxe, Projekciách a bránach (`hasStatefulOrDeciderChange`) | Simuluje rolu chaos inžiniera: konštruuje konkrétne sekvencie zlyhaní (duplicitné doručenie `commandId`, out-of-order správy v Queue, crash medzi commitom do SQLite a odoslaním DO alarmu / správy do frontu).                                         |
+| **5. `effect-web-reviewer`**               | Pri zásahu do `scope:web` (`apps/*-web/**`, `*.tsx` a `AtomHttpApi`, `hasWebSurface`)             | Kontroluje reaktivitu `AtomHttpApi` query/mutácií, správne `Result` / `AsyncResult` vetvenie v React komponentoch, absenciu surového `fetch(...)` a správu stavu bez únikov mimo atomov.                                                                |
+| **6. `effect-migration-contract-reviewer`**| Pri zásahu do `migrations/*.sql`, `SqliteMigrator`, `alchemy.run.ts`, `type:contract`, `openapi*.json` (`hasMigrationOrInfraBindingChange` / `hasContractBoundaryChange`) | Overuje expand-contract kompatibilitu schém, spätnú kompatibilitu event/API kontraktov a bezpečnosť migrácií nad rámec statickej brány `MigrationSafety.decide`.                                                                                         |
+| **7. `effect-architecture-reviewer`**      | Pri zásahu do `type:service`, `libs/harness/*`, `libs/es/*`, adaptérov alebo pri `changedLineCount >= 180` (`hasArchitectureOrAdapterSurface`) | Kontroluje dodržanie framework-vs-application archetypu (zákaz biznis domén v produkčných knižniciach), 5-vrstvovú hexagonálnu topológiu a paritu medzi adaptérmi Antigravity a Claude Code.                                                            |
 
 **Tvrdé potlačenie deterministických brán & prísny režim read-only (`harness:ADR-0014`):**
 - Všetkých 7 šošoviek potláča nálezy, ktoré už deterministicky zachytávajú `@effect/tsgo`, `oxlint`, `HarnessTierTopology.decide`, `SelfDogfooding.decide` a `MigrationSafety.decide`, aby do reportu prenikli len sémantické, architektonické a behaviorálne defekty.
 - Zručnosť `effect-code-review` pracuje **výhradne v režime read-only** (nikdy neupravuje súbory ani neprepína vetvy cez `git checkout` / `git switch` / `gh pr checkout`), čím chráni `.harness/verify-stamp.json`, `plan-graph-snapshot.json` a súlad s EARS/ADR. Všetky opravy sa delegujú výlučne do zručnosti **`resolving-effect-review-feedback`**.
-- Okrem fázy implementácie sa **Adversarial & Feasibility Lens** zapája už v Krok 2/3 (`planning-effect-skeletons`), kde po úspešnom `harness plan-check` audituje graf skeletonu pred pridelením práce implementátorom (idempotency kľúče v kontraktoch, reprezentácia čiastočných zlyhaní v `E` a `R`, čistota deciderov).
+
+> **Poznámka k fáze plánovania (`planning-effect-skeletons`):** Nezávisle od post-implementačného `effect-code-review` sa už v Kroku 2/3 zapája **Pre-Implementation Adversarial Plan Lens**, ktorá po úspešnom `harness plan-check` audituje graf skeletonu pred pridelením práce implementátorom (idempotency kľúče v kontraktoch, reprezentácia čiastočných zlyhaní v `E` a `R`, čistota deciderov).
 
 ### 6.7 Živá Architektonická Dokumentácia (`libs/<scope>/docs/{adr,specs}/` & `docs/{adr,specs}/`) a ochrana proti zastarávaniu (`AdrDocLint.decide`, `EarsSpecLint.decide` a `stale-doc-reference` v `harness gc --strict`)
 

@@ -37,10 +37,10 @@ Before reading or judging diff hunks, gather deterministic routing and graph con
 
 Follow the `ReviewRoutingPlan` from Stage 1 (see [references/review-routing-and-lenses.md](references/review-routing-and-lenses.md) for observable predicates and lens checklists):
 
-- **`skip`:** Doc/comment/formatting-only diff with zero behavioral risk. Emit the Stage 4 receipt noting `depth: skip` and stop.
-- **`lite`:** `< 40` changed lines in 1 non-`type:core`/non-`type:domain` file (`1` selection, no stateful/decider or migration/infra-binding signal). Run a single-pass read-only review using the matching specialist lens without swarming.
-- **`focused`:** Multi-file or single-boundary diff. Dispatch only the signal-routed specialist(s) via `invoke_subagent` or `swarm` (`model: "gemini-4-hydrogen-medium"`).
-- **`full`:** Any `type:core` / `type:domain` / decider / event-sourcing diff, multi-tier diff, or high-risk migration/security/architecture change. Dispatch all routed specialists in parallel—always including **both** `effect-ears-test-reviewer` (with the `8-Point Anti-Rubber-Stamp` Audit) and `effect-adversarial-reviewer` for `type:core`/`type:domain`.
+- **`skip`:** Non-empty diff (`changedFiles.length > 0`, `changedLineCount < 40`) where **every** file matches the non-governance documentation allowlist (`*.md`, `*.mdx`, `*.txt`, `LICENSE*` outside `adapters/`, `agent-patterns/`, and `docs/{specs,adr}/`) with zero surface flags (empty `changedFiles` or missing `changedLineCount` is rejected, never skipped). Emit the Stage 4 receipt noting `depth: skip` and stop.
+- **`lite`:** Single file (`changedFiles.length === 1`), `changedLineCount < 40`, `1` selection, and no `focused`/`full` escalator (e.g. a small `< 40`-line localized change in a single `scope:web` component, single spec/ADR doc, single test file, or single non-doc config/script). Run a single-pass read-only review using the matching specialist lens without swarming.
+- **`focused`:** Not `full`, and `changedFiles.length > 1`, `changedLineCount >= 40` (`< 180`), `2` selections, `hasAuthOrSecretSurface` (even `< 40` lines), `hasContractBoundaryChange` (even `< 40` lines), or manifest diagnostic warnings. Dispatch only the signal-routed specialist(s) via `invoke_subagent` or `swarm` (`model: "gemini-4-hydrogen-medium"`).
+- **`full`:** `hasStatefulOrDeciderChange` (`type:core`, `type:domain`, `libs/es/`, deciders/outbox/projectors/gates), `hasMigrationOrInfraBindingChange` (`migrations/*.sql`, `*migrator*`, `alchemy.run.ts`), `touchedTiers.length >= 2`, `selections.length >= 3`, or `changedLineCount >= 180`. Dispatch all routed specialists in parallel—always including **both** `effect-ears-test-reviewer` (with the `8-Point Anti-Rubber-Stamp` Audit) and `effect-adversarial-reviewer` for `type:core`/`type:domain`.
 
 ### Stage 3: Graph Verification & Hard False-Positive Suppression Gate
 

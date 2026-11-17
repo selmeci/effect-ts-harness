@@ -98,7 +98,7 @@ Every reported `P0` or `P1` finding MUST follow this exact schema:
 ````markdown
 ### [P0|P1] <Concise Title>
 
-- **Reviewer:** <ears-test | security | reliability | adversarial>
+- **Reviewer:** <effect-ears-test-reviewer | effect-security-reviewer | effect-reliability-reviewer | effect-adversarial-reviewer | effect-web-reviewer | effect-migration-contract-reviewer | effect-architecture-reviewer>
 - **Confidence:** 100 | 75
 - **Evidence:** `<relative_file_path>:<line_number>`
   ```ts

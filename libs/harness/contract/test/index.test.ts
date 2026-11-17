@@ -15,6 +15,7 @@ import {
   DaemonServerError,
   DaemonServerErrorKind,
   DaemonSocketPath,
+  DEFAULT_REVIEW_ROUTE_TIMEOUT_MS,
   DecisionCacheKey,
   DecisionCachePayloadJson,
   DecisionCacheStatsSnapshot,
@@ -39,6 +40,7 @@ import {
   PackageManifestName,
   PackageManifestPath,
   PluginId,
+  REVIEW_DEPTH_RANK,
   ReviewChangedLines,
   ReviewDepth,
   ReviewRawDiffInput,
@@ -47,6 +49,7 @@ import {
   ReviewRoutingReason,
   ReviewRoutingSource,
   ReviewSignalPath,
+  ReviewTimeoutMillis,
   ReviewerId,
   ReviewerSelection,
   SPECIALIST_REVIEWER_IDS,
@@ -63,6 +66,7 @@ import {
   TierTopologyRuleId,
   WorkspaceFilePath,
   WorkspaceFsOperation,
+  getReviewDepthRank,
   computeContentSha256,
   inferAstGatePackageTagFromPath,
   isPureInterruptCause,
@@ -614,9 +618,44 @@ describe("@harness/contract schemas", () => {
     for (const invalidCount of [-1, 1.5, "0", Number.NaN, null, undefined]) {
       expect(() => Schema.decodeUnknownSync(ReviewChangedLines)(invalidCount)).toThrow()
     }
-    for (const invalidPath of ["", "  ", " libs/a.ts ", null]) {
+    for (const invalidPath of [
+      "",
+      "  ",
+      " libs/a.ts ",
+      "../../etc/passwd",
+      "../secret.ts",
+      "a/../b.ts",
+      "./libs/a.ts",
+      "a/./b.ts",
+      "/etc/passwd",
+      "C:/repo/a.ts",
+      "C:secret.ts",
+      "libs\\a.ts",
+      "libs//a.ts",
+      "libs/a.ts/",
+      "libs/ a.ts",
+      "libs/a\0b.ts",
+      "a".repeat(513),
+      null,
+    ]) {
       expect(() => Schema.decodeUnknownSync(ReviewSignalPath)(invalidPath)).toThrow()
+      if (typeof invalidPath === "string") {
+        expect(() => ReviewSignalPath.make(invalidPath)).toThrow()
+      }
     }
+    expect(ReviewSignalPath.make(".oxlintrc.json")).toBe(".oxlintrc.json")
+    expect(ReviewSignalPath.make("a".repeat(512))).toHaveLength(512)
+    expect(() => ReviewRawFileInput.make("a".repeat(513))).toThrow()
+    expect(ReviewRawFileInput.make("a".repeat(512))).toHaveLength(512)
+
+    expect(getReviewDepthRank(ReviewDepth.make("skip"))).toBe(REVIEW_DEPTH_RANK.skip)
+    expect(getReviewDepthRank(ReviewDepth.make("lite"))).toBe(1)
+    expect(getReviewDepthRank(ReviewDepth.make("focused"))).toBe(2)
+    expect(getReviewDepthRank(ReviewDepth.make("full"))).toBe(3)
+    expect(DEFAULT_REVIEW_ROUTE_TIMEOUT_MS).toBe(1500)
+    expect(() => ReviewTimeoutMillis.make(99)).toThrow()
+    expect(() => ReviewTimeoutMillis.make(30001)).toThrow()
+
     expect(() =>
       Schema.decodeUnknownSync(ReviewRoutingPlan)({
         _tag: "ActiveReviewPlan",
@@ -627,11 +666,38 @@ describe("@harness/contract schemas", () => {
     ).toThrow()
     expect(() =>
       Schema.decodeSync(ReviewRawDiffInput)({
+        changedFiles: [],
+        diffSummary: "",
+        changedLineCount: 0,
+        touchedTiers: [],
+        touchedScopes: [],
+      }),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeSync(ReviewRawDiffInput)({
         changedFiles: Array.from({ length: 201 }, (_, i) => `libs/file-${i}.ts`),
         diffSummary: "",
         changedLineCount: 0,
         touchedTiers: [],
         touchedScopes: [],
+      }),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(ReviewRawDiffInput)({
+        changedFiles: ["libs/a.ts"],
+        diffSummary: "",
+        changedLineCount: 1,
+        touchedTiers: Array.from({ length: 17 }, () => "type:contract"),
+        touchedScopes: [],
+      }),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(ReviewRawDiffInput)({
+        changedFiles: ["libs/a.ts"],
+        diffSummary: "",
+        changedLineCount: 1,
+        touchedTiers: [],
+        touchedScopes: Array.from({ length: 17 }, () => "scope:web"),
       }),
     ).toThrow()
   })

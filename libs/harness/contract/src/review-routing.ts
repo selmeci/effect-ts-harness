@@ -21,8 +21,34 @@ export const REVIEW_DEPTH_LEVELS = ["skip", "lite", "focused", "full"] as const
 export const ReviewDepth = Schema.Literals(REVIEW_DEPTH_LEVELS).pipe(Schema.brand("ReviewDepth"))
 export type ReviewDepth = typeof ReviewDepth.Type
 
-export const ReviewSignalPath = Schema.NonEmptyString.pipe(
+export const ReviewDepthRank = Schema.Literals([0, 1, 2, 3]).pipe(Schema.brand("ReviewDepthRank"))
+export type ReviewDepthRank = typeof ReviewDepthRank.Type
+
+export const REVIEW_DEPTH_RANK = {
+  skip: ReviewDepthRank.make(0),
+  lite: ReviewDepthRank.make(1),
+  focused: ReviewDepthRank.make(2),
+  full: ReviewDepthRank.make(3),
+} as const satisfies Record<(typeof REVIEW_DEPTH_LEVELS)[number], ReviewDepthRank>
+
+export const getReviewDepthRank = (depth: ReviewDepth): ReviewDepthRank =>
+  depth === "skip"
+    ? REVIEW_DEPTH_RANK.skip
+    : depth === "lite"
+      ? REVIEW_DEPTH_RANK.lite
+      : depth === "focused"
+        ? REVIEW_DEPTH_RANK.focused
+        : REVIEW_DEPTH_RANK.full
+
+const SAFE_PATH_SEGMENT = "(?!\\.\\.?(?:\\/|$))[^\\0\\\\/\\s](?:[^\\0\\\\/]*[^\\0\\\\/\\s])?"
+const SAFE_REVIEW_SIGNAL_PATH_RE = new RegExp(
+  `^(?![A-Za-z]:)${SAFE_PATH_SEGMENT}(?:\\/${SAFE_PATH_SEGMENT})*$`,
+)
+
+export const ReviewSignalPath = Schema.String.pipe(
+  Schema.check(Schema.isBetweenLength(1, 512)),
   Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isPattern(SAFE_REVIEW_SIGNAL_PATH_RE)),
   Schema.brand("ReviewSignalPath"),
 )
 export type ReviewSignalPath = typeof ReviewSignalPath.Type
@@ -32,6 +58,15 @@ export const ReviewChangedLines = Schema.Int.pipe(
   Schema.brand("ReviewChangedLines"),
 )
 export type ReviewChangedLines = typeof ReviewChangedLines.Type
+
+export const ReviewTimeoutMillis = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(100)),
+  Schema.check(Schema.isLessThanOrEqualTo(30000)),
+  Schema.brand("ReviewTimeoutMillis"),
+)
+export type ReviewTimeoutMillis = typeof ReviewTimeoutMillis.Type
+
+export const DEFAULT_REVIEW_ROUTE_TIMEOUT_MS: ReviewTimeoutMillis = ReviewTimeoutMillis.make(1500)
 
 export const ReviewSummaryText = Schema.String.pipe(
   Schema.check(Schema.isMaxLength(4096)),
@@ -53,7 +88,7 @@ export const ReviewRoutingSource = Schema.Literals([
 export type ReviewRoutingSource = typeof ReviewRoutingSource.Type
 
 export const ReviewRawFileInput = Schema.String.pipe(
-  Schema.check(Schema.isMaxLength(1024)),
+  Schema.check(Schema.isMaxLength(512)),
   Schema.brand("ReviewRawFileInput"),
 )
 export type ReviewRawFileInput = typeof ReviewRawFileInput.Type
@@ -67,16 +102,17 @@ export class InvalidReviewRouteInputError extends Schema.TaggedError<InvalidRevi
 ) {}
 
 export const ReviewRawDiffInput = Schema.Struct({
-  changedFiles: Schema.Array(ReviewRawFileInput).pipe(Schema.check(Schema.isMaxLength(200))),
+  changedFiles: Schema.Array(ReviewRawFileInput).pipe(Schema.check(Schema.isBetweenLength(1, 200))),
   diffSummary: ReviewSummaryText,
   changedLineCount: ReviewChangedLines,
   touchedTiers: Schema.Array(NxTierTag).pipe(Schema.check(Schema.isMaxLength(16))),
   touchedScopes: Schema.Array(NxScopeTag).pipe(Schema.check(Schema.isMaxLength(16))),
+  timeoutMs: Schema.optional(ReviewTimeoutMillis),
 })
 export type ReviewRawDiffInput = typeof ReviewRawDiffInput.Type
 
 export const ReviewDiffSignals = Schema.Struct({
-  changedFiles: Schema.Array(ReviewSignalPath),
+  changedFiles: Schema.Array(ReviewSignalPath).pipe(Schema.check(Schema.isBetweenLength(1, 200))),
   touchedTiers: Schema.Array(NxTierTag),
   touchedScopes: Schema.Array(NxScopeTag),
   changedLineCount: ReviewChangedLines,
@@ -103,6 +139,7 @@ export const SkipReviewPlan = Schema.TaggedStruct("SkipReviewPlan", {
   depth: Schema.Literal(ReviewDepth.make("skip")),
   source: ReviewRoutingSource,
   reason: ReviewRoutingReason,
+  degradedReason: Schema.optional(ErrorReasonMessage),
   selections: Schema.Tuple([]),
 })
 export type SkipReviewPlan = typeof SkipReviewPlan.Type
@@ -114,6 +151,7 @@ export const ActiveReviewPlan = Schema.TaggedStruct("ActiveReviewPlan", {
     ReviewDepth.make("full"),
   ]),
   source: ReviewRoutingSource,
+  degradedReason: Schema.optional(ErrorReasonMessage),
   selections: Schema.NonEmptyArray(ReviewerSelection),
 })
 export type ActiveReviewPlan = typeof ActiveReviewPlan.Type
@@ -132,5 +170,9 @@ export const ReviewRouteToolOutput = Schema.Struct({
   plan: ReviewRoutingPlan,
   signals: ReviewDiffSignals,
   graphContext: ReviewGraphContextBundle,
+  warnings: Schema.Array(ErrorReasonMessage),
+  degraded: Schema.Boolean,
+  degradedReason: Schema.optional(ErrorReasonMessage),
+  evaluationError: Schema.optional(ErrorReasonMessage),
 })
 export type ReviewRouteToolOutput = typeof ReviewRouteToolOutput.Type

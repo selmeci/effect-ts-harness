@@ -52,8 +52,8 @@ Suppress and **do not emit** as `[P0|P1]` findings any issue already enforced de
 | --- | --- |
 | `@effect/tsgo` & `@effect/language-service` | Type errors, missing imports, JSX in `.ts` files, `floatingEffect`, `lazyEffect`. |
 | `tools/oxlint/syntax-bans.js` | `as any` / `: any` / `as never` / `as unknown as T`, `async/await`, `new Promise`, `try/catch`, `throw`, raw `JSON.parse`, `switch` / `_tag` ternaries, `export *` (`facade-star-reexport`), `node:*` outside `type:infra`, unbranded `Schema` fields, raw DDL outside `SqliteMigrator.fromRecord`. |
-| `HarnessTierTopology.decide` | Cross-tier import violations across `type:contract`, `type:service`, `type:core`, `type:domain`, `type:infra`, `type:app`, `scope:web`. |
-| `SelfDogfooding.decide` & `harness gc --strict` | Hard line-count ceiling breaches, unused `TaggedError`s / service tags, `impure-decider`, `impure-service-tier-import`. |
+| `HarnessTierTopology.decide` | Cross-tier import violations across `type:contract`, `type:service`, `type:core`, `type:domain`, `type:infra`, `type:app`, `scope:web`, and `impure-service-tier-import`. |
+| `SelfDogfooding.decide` & `harness gc --strict` | Hard line-count ceiling breaches, unused `TaggedError`s / service tags, `impure-decider`. |
 | `MigrationSafety.decide` (`pnpm harness check-migrations`) | `DROP TABLE`, `DROP COLUMN`, SQLite `__new_` / `PRAGMA foreign_keys=OFF` rebuilds, `ALTER TABLE ADD COLUMN ... NOT NULL` without `DEFAULT`. |
 
 ## 4. `8-Point Anti-Rubber-Stamp` Audit Summary (For `full` / `type:core` / `type:domain` Reviews)
