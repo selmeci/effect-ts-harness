@@ -75,7 +75,7 @@ describe("harness cli baseline", () => {
     expect(bin).toBe("pkill")
     expect(args).toEqual([
       "-f",
-      "omnigraph-server.*--cluster file:///tmp/test-repo/\\.harness/omnigraph-cluster",
+      "omnigraph-server.*--cluster file:///tmp/test-repo/\\.harness/omnigraph-cluster(\\s|$)",
     ])
   })
 

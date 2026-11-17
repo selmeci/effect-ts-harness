@@ -231,7 +231,13 @@ describe("PR #28 harness-mcp fixes (F-6.1, F-20.1b)", () => {
       fs.mkdirSync(clusterDir, { recursive: true })
       fs.writeFileSync(
         path.join(clusterDir, "server.json"),
-        JSON.stringify({ baseUrl: `http://127.0.0.1:${port}`, port }),
+        JSON.stringify({
+          pid: process.pid,
+          port,
+          baseUrl: `http://127.0.0.1:${port}`,
+          canonicalRepoRoot: tmpRepo,
+          updatedAt: null,
+        }),
         "utf8",
       )
 

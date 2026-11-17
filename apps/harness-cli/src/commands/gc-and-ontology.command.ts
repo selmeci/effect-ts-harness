@@ -26,8 +26,10 @@ import {
   type CliEnv,
   type CliResult,
   findWorkspaceRoot,
+  isIsolatedExternalWorkspace,
   resolveDecisionModelLayer,
 } from "./daemon-and-omnigraph.service.js"
+import { runOmnigraphMaintenance } from "./done-omnigraph-helpers.js"
 
 export const handleGc = (
   argv: ReadonlyArray<string>,
@@ -62,6 +64,14 @@ export const handleGc = (
             ],
           }
         : baseReport
+    if (
+      strict &&
+      !options?.skipBackgroundDaemons &&
+      options?.implGraph === undefined &&
+      !isIsolatedExternalWorkspace(repoRoot)
+    ) {
+      runOmnigraphMaintenance(repoRoot, { includeCleanup: false })
+    }
     return {
       exitCode: strict && !finalReport.clean ? 1 : 0,
       stdout: JSON.stringify(finalReport),

@@ -15,7 +15,7 @@ import {
   type TelemetryOutcome,
   type TelemetrySurface,
 } from "@harness/gates"
-import { type HarnessGraph, resolveCanonicalRepoRoot } from "@harness/graph"
+import { type HarnessGraph } from "@harness/graph"
 import {
   LocalDecisionModel,
   nodeSyncHostIo,
@@ -40,6 +40,7 @@ export {
   findWorkspaceRoot,
   resolveClusterRepoRoot,
 }
+export { isIsolatedExternalWorkspace } from "./repo-path.js"
 
 export const COMMANDS = [
   "guard",
@@ -216,21 +217,6 @@ export const makeReadStdinEffect = Effect.fn("HarnessCli.readStdin")(function* (
 })
 
 export const readStdinEffect: Effect.Effect<string, StdinReadError> = makeReadStdinEffect()
-
-export const isIsolatedExternalWorkspace = (repoRoot: string): boolean => {
-  if (nodeSyncHostIo.existsSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"))) {
-    return false
-  }
-  const explicitEnvUrl =
-    process.env.OMNIGRAPH_URL && process.env.OMNIGRAPH_URL !== "http://127.0.0.1:8080"
-  if (explicitEnvUrl) {
-    return false
-  }
-  return (
-    resolveCanonicalRepoRoot(repoRoot, nodeSyncHostIo) !==
-    resolveCanonicalRepoRoot(CLI_REPO_ROOT, nodeSyncHostIo)
-  )
-}
 
 export const recordFriction = (
   options: CliEnv | undefined,

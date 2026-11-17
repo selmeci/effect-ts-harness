@@ -294,7 +294,7 @@ status: accepted
       const raw = yield* executeToolEffect(
         "harness_gq_query",
         { queryName: "ontology_layer_nodes", params: { layer: "Application" } },
-        { graph },
+        { graph, skipOmnigraphSpawn: true },
       )
       const res = raw as {
         readonly source: string
@@ -317,13 +317,13 @@ status: accepted
       yield* executeToolEffect(
         "harness_ontology_why",
         { symbolOrSpan: "PhotoRepo" },
-        { repoRoot: tmpDir, graph },
+        { repoRoot: tmpDir, graph, skipOmnigraphSpawn: true },
       )
 
       yield* executeToolEffect(
         "harness_gq_query",
         { queryName: "ontology_layer_nodes", params: { layer: "Business" } },
-        { repoRoot: tmpDir, graph },
+        { repoRoot: tmpDir, graph, skipOmnigraphSpawn: true },
       )
 
       const raw = yield* executeToolEffect(

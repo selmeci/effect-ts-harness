@@ -1,7 +1,15 @@
-import { dirname, join, resolve } from "node:path"
-import { fileURLToPath } from "node:url"
+import { join, resolve } from "node:path"
 import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
+import {
+  OmnigraphBaseUrl,
+  OmnigraphIsoTimestamp,
+  OmnigraphProcessId,
+  type OmnigraphServerMeta,
+  OmnigraphServerMetaSchema,
+  OmnigraphTcpPort,
+  WorkspaceFilePath,
+} from "@harness/contract"
 import {
   deriveRepoOmnigraphPort,
   resolveCanonicalRepoRoot,
@@ -11,33 +19,42 @@ import { nodeSyncHostIo } from "@harness/infra"
 
 type SyncHostIo = typeof nodeSyncHostIo
 import {
+  clusterYamlDeclaresPolicies,
   isLoopbackOmnigraphUrl,
   isProcessPidAlive,
   isSafeOmnigraphPidToKill,
   isValidLockId,
+  probeOmnigraphServerReady,
 } from "./omnigraph-safety-helpers.js"
+import {
+  acquireOmnigraphClusterLockEffect,
+  ensureOmnigraphEndpointTokens,
+  evaluateClusterConfigDrift,
+  killOmnigraphServerPidIfAlive,
+  releaseOmnigraphClusterLock,
+  resolveOmnigraphConfigDir,
+  writeClusterDriftReceipts,
+  writeServerMetaAtomic,
+} from "./omnigraph-auth-and-drift.js"
 
-export { isLoopbackOmnigraphUrl, isProcessPidAlive, isSafeOmnigraphPidToKill, isValidLockId }
+import {
+  CLI_REPO_ROOT,
+  findWorkspaceRoot,
+  resolveClusterRepoRoot,
+} from "./repo-path.js"
 
-const walkUpForPnpmWorkspace = (startDir: string): string | undefined => {
-  let curr = resolve(startDir)
-  while (curr !== dirname(curr)) {
-    if (nodeSyncHostIo.existsSync(join(curr, "pnpm-workspace.yaml"))) return curr
-    curr = dirname(curr)
-  }
-  return undefined
+const DEFAULT_EMBEDDING_API_KEY = "ollama-local"
+const DEFAULT_EMBEDDINGS_MOCK = "1"
+
+export {
+  CLI_REPO_ROOT,
+  findWorkspaceRoot,
+  isLoopbackOmnigraphUrl,
+  isProcessPidAlive,
+  isSafeOmnigraphPidToKill,
+  isValidLockId,
+  resolveClusterRepoRoot,
 }
-
-export const CLI_REPO_ROOT =
-  walkUpForPnpmWorkspace(dirname(fileURLToPath(import.meta.url))) ?? process.cwd()
-
-export const findWorkspaceRoot = (startDir: string = process.cwd()): string =>
-  walkUpForPnpmWorkspace(startDir) ?? CLI_REPO_ROOT
-
-export const resolveClusterRepoRoot = (repoRoot: string): string =>
-  nodeSyncHostIo.existsSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"))
-    ? repoRoot
-    : (walkUpForPnpmWorkspace(repoRoot) ?? resolve(repoRoot))
 
 const LockJsonSchema = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
 
@@ -75,7 +92,7 @@ export function unlockOmnigraphClusterIfNeeded(
     const parsedOpt = Schema.decodeOption(LockJsonSchema)(rawLock)
     const decodedOk = match(parsedOpt)
       .with({ _tag: "Some" }, ({ value }) => {
-        for (const key of ["lock_id", "id", "lockId", "holder_id"]) {
+        for (const key of ["lock_id", "id", "lockId"]) {
           const val = value[key]
           if (typeof val === "string" && val.length > 0) {
             if (isValidLockId(val)) {
@@ -104,7 +121,7 @@ export function unlockOmnigraphClusterIfNeeded(
     const execTry = Result.try(() =>
       nodeSyncHostIo.execFileSync(
         omnigraphBin,
-        ["cluster", "force-unlock", lockId, "--target", clusterRootDir],
+        ["cluster", "force-unlock", lockId, "--target", `file://${clusterRootDir}`],
         { timeoutMs: 5_000 },
       ),
     )
@@ -154,93 +171,12 @@ export function unlockOmnigraphClusterIfNeeded(
   return { ok: true }
 }
 
-type ReadyzProbeResult =
-  | { readonly _tag: "Ready" }
-  | { readonly _tag: "NotReady"; readonly reason: string }
-
-function probeOmnigraphServerReady(baseUrl: string): Effect.Effect<ReadyzProbeResult> {
-  return Effect.tryPromise({
-    try: () =>
-      globalThis
-        .fetch(`${baseUrl}/readyz`, {
-          method: "GET",
-          signal: AbortSignal.timeout(3000),
-        })
-        .then((r): Promise<ReadyzProbeResult> =>
-          match(r.status)
-            .with(200, () => {
-              const apiHeader = r.headers.get("Omnigraph-Http-Api")
-              if (apiHeader !== "0.14") {
-                return Promise.resolve<ReadyzProbeResult>({
-                  _tag: "NotReady",
-                  reason: `unexpected Omnigraph-Http-Api header: ${String(apiHeader)}`,
-                })
-              }
-              return r.json().then((rawBody: unknown): ReadyzProbeResult => {
-                if (typeof rawBody !== "object" || rawBody === null) {
-                  return { _tag: "NotReady", reason: "decode mismatch: /readyz body is not an object" }
-                }
-                const body = rawBody as {
-                  readonly ready?: boolean
-                  readonly status?: string
-                  readonly ready_graph_count?: number
-                }
-                const isReady =
-                  (body.ready === true || body.status === "serving") &&
-                  (body.ready_graph_count ?? 0) >= 1
-                return isReady
-                  ? { _tag: "Ready" }
-                  : {
-                      _tag: "NotReady",
-                      reason: `not ready (ready=${String(body.ready)}, status=${String(body.status)}, ready_graph_count=${String(body.ready_graph_count)})`,
-                    }
-              })
-            })
-            .otherwise((status) =>
-              Promise.resolve<ReadyzProbeResult>({
-                _tag: "NotReady",
-                reason: `HTTP ${status}`,
-              }),
-            ),
-        )
-        .catch((err: unknown): ReadyzProbeResult => ({
-          _tag: "NotReady",
-          reason: `network error: ${err instanceof Error ? err.message : String(err)}`,
-        })),
-    catch: (err): ReadyzProbeResult => ({
-      _tag: "NotReady",
-      reason: `network error: ${err instanceof Error ? err.message : String(err)}`,
-    }),
-  }).pipe(
-    Effect.catch((err) => Effect.succeed<ReadyzProbeResult>(err)),
-  )
-}
-
-function computeOmnigraphConfigStamp(configDir: string): string {
-  return ["cluster.yaml", "schema.pg", "queries/harness.gq"]
-    .map((f) => {
-      const p = join(configDir, f)
-      return nodeSyncHostIo.existsSync(p) ? nodeSyncHostIo.readTextSync(p) : ""
-    })
-    .join("\n---\n")
-}
-
 export const buildOmnigraphClusterKillArgs = (
   clusterRootDir: string,
 ): readonly [string, ReadonlyArray<string>] => {
   const escaped = clusterRootDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-  return ["pkill", ["-f", `omnigraph-server.*--cluster file://${escaped}`]]
+  return ["pkill", ["-f", `omnigraph-server.*--cluster file://${escaped}(\\s|$)`]]
 }
-
-const OmnigraphServerMetaSchema = Schema.Struct({
-  pid: Schema.optional(Schema.Finite),
-  port: Schema.optional(Schema.Finite),
-  baseUrl: Schema.optional(Schema.String),
-  canonicalRepoRoot: Schema.optional(Schema.String),
-  updatedAt: Schema.optional(Schema.String),
-})
-
-type OmnigraphServerMeta = Schema.Schema.Type<typeof OmnigraphServerMetaSchema>
 
 const decodeOmnigraphServerMeta = Schema.decodeOption(
   Schema.fromJsonString(OmnigraphServerMetaSchema),
@@ -288,10 +224,12 @@ export const stopStaleOmnigraphClusterBeforeDelete = (
     },
   })
   const killOk = Result.getOrElse(killResult, () => false)
-  if (!killOk && serverPid !== undefined && isPidAlive(serverPid)) {
-    process.stderr.write(
-      `[harness:omnigraph] Error: pkill failed and stale omnigraph PID ${serverPid} is still alive; aborting RocksDB cleanup\n`,
-    )
+  if (!killOk) {
+    if (serverPid !== undefined && isPidAlive(serverPid)) {
+      process.stderr.write(
+        `[harness:omnigraph] Error: pkill failed and stale omnigraph PID ${serverPid} is still alive; aborting RocksDB cleanup\n`,
+      )
+    }
     return false
   }
   return true
@@ -303,332 +241,376 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
     const canonicalRepoRoot = resolveCanonicalRepoRoot(clusterRepoRoot, nodeSyncHostIo)
     const clusterRootDir = resolveOmnigraphClusterDir(clusterRepoRoot, nodeSyncHostIo)
     const defaultPort = deriveRepoOmnigraphPort(canonicalRepoRoot, nodeSyncHostIo)
-
-    let serverMeta: OmnigraphServerMeta | undefined
-    const serverJsonPath = join(clusterRootDir, "server.json")
-    if (nodeSyncHostIo.existsSync(serverJsonPath)) {
-      const decodedMetaOpt = yield* Effect.try({
-        try: () => nodeSyncHostIo.readTextSync(serverJsonPath),
-        catch: (err) => {
-          process.stderr.write(
-            `[harness:omnigraph] Warning: failed to read ${serverJsonPath}: ${err instanceof Error ? err.message : String(err)}\n`,
-          )
-          return ""
-        },
-      }).pipe(
-        Effect.flatMap((raw) => {
-          const decoded = decodeOmnigraphServerMeta(raw)
-          match(decoded)
-            .with({ _tag: "None" }, () => {
-              if (raw.length > 0) {
-                process.stderr.write(
-                  `[harness:omnigraph] Warning: failed to decode ${serverJsonPath} as OmnigraphServerMeta JSON\n`,
-                )
-              }
-            })
-            .with({ _tag: "Some" }, () => undefined)
-            .exhaustive()
-          return Effect.fromOption(decoded)
-        }),
-        Effect.option,
-      )
-      serverMeta = match(decodedMetaOpt)
-        .with({ _tag: "Some" }, ({ value }) => value)
-        .with({ _tag: "None" }, () => undefined)
-        .exhaustive()
-    }
-
     const explicitEnvUrl =
       process.env.OMNIGRAPH_URL && process.env.OMNIGRAPH_URL !== "http://127.0.0.1:8080"
         ? process.env.OMNIGRAPH_URL
         : undefined
-    const targetBaseUrl =
-      explicitEnvUrl ??
-      (serverMeta?.canonicalRepoRoot === canonicalRepoRoot && serverMeta?.baseUrl
-        ? serverMeta.baseUrl
-        : `http://127.0.0.1:${defaultPort}`)
-
-    if (!isLoopbackOmnigraphUrl(targetBaseUrl)) {
+    if (explicitEnvUrl !== undefined && !isLoopbackOmnigraphUrl(explicitEnvUrl)) {
       process.stderr.write(
-        `[harness:omnigraph] Refusing non-loopback Omnigraph URL/bind host: ${targetBaseUrl}\n`,
+        `[harness:omnigraph] Refusing non-loopback Omnigraph URL/bind host: ${explicitEnvUrl}\n`,
       )
       return false
     }
 
-    const localConfigDir = join(clusterRepoRoot, "libs", "harness", "graph")
-    const configDir = nodeSyncHostIo.existsSync(join(localConfigDir, "cluster.yaml"))
-      ? localConfigDir
+    const candidateConfigDir = resolveOmnigraphConfigDir(repoRoot, canonicalRepoRoot)
+    const configDir = nodeSyncHostIo.existsSync(join(candidateConfigDir, "cluster.yaml"))
+      ? candidateConfigDir
       : join(CLI_REPO_ROOT, "libs", "harness", "graph")
-    const stampPath = join(clusterRootDir, ".config-stamp")
-    const expectedStamp = computeOmnigraphConfigStamp(configDir)
-    const currentStamp = nodeSyncHostIo.existsSync(stampPath)
-      ? nodeSyncHostIo.readTextSync(stampPath)
-      : ""
-    const configDrifted = currentStamp !== expectedStamp
-
-    if (configDrifted) {
-      const serverPid = serverMeta?.pid
-      if (
-        typeof serverPid === "number" &&
-        Number.isInteger(serverPid) &&
-        serverPid > 1 &&
-        isProcessPidAlive(serverPid)
-      ) {
-        if (!isSafeOmnigraphPidToKill(serverPid, clusterRootDir)) {
-          process.stderr.write(
-            `[harness:omnigraph] Refusing to kill unsafe or non-omnigraph PID ${String(serverPid)} during config drift teardown\n`,
-          )
-          return false
-        }
-        const killTermRes = yield* Effect.try({
-          try: () => {
-            process.kill(serverPid, "SIGTERM")
-            return { ok: true as const }
-          },
-          catch: (err) => {
-            const code =
-              typeof err === "object" && err !== null && "code" in err && typeof err.code === "string"
-                ? err.code
-                : undefined
-            if (code === "ESRCH") {
-              return { ok: true as const }
-            }
-            process.stderr.write(
-              `[harness:omnigraph] Error: failed to SIGTERM omnigraph PID ${serverPid}: ${err instanceof Error ? err.message : String(err)}\n`,
-            )
-            return { ok: false as const }
-          },
-        }).pipe(Effect.orElseSucceed(() => ({ ok: false as const })))
-        if (!killTermRes.ok) {
-          return false
-        }
-        for (let attempt = 0; attempt < 10 && isProcessPidAlive(serverPid); attempt++) {
-          yield* Effect.sleep("50 millis")
-        }
-        if (isProcessPidAlive(serverPid)) {
-          process.stderr.write(
-            `[harness:omnigraph] Error: omnigraph PID ${serverPid} is still alive after SIGTERM during config drift teardown\n`,
-          )
-          return false
-        }
-      }
-      const stoppedBeforeDelete = stopStaleOmnigraphClusterBeforeDelete(
-        clusterRootDir,
-        typeof serverPid === "number" && Number.isInteger(serverPid) && serverPid > 1
-          ? serverPid
-          : undefined,
-      )
-      if (!stoppedBeforeDelete) {
-        return false
-      }
-      yield* Effect.sleep("300 millis")
-      const rmOk = yield* Effect.try({
-        try: () => {
-          nodeSyncHostIo.rmRecursiveSync(clusterRootDir)
-          return true
-        },
-        catch: (err) => {
-          process.stderr.write(
-            `[harness:omnigraph] Error: failed to remove drifted cluster dir '${clusterRootDir}': ${err instanceof Error ? err.message : String(err)}\n`,
-          )
-          return false
-        },
-      }).pipe(Effect.orElseSucceed(() => false))
-      if (!rmOk) {
-        return false
-      }
-      if (nodeSyncHostIo.existsSync(join(clusterRootDir, "graphs", "harness.omni"))) {
-        process.stderr.write(
-          `[harness:omnigraph] Error: drifted cluster graph still exists at '${join(clusterRootDir, "graphs", "harness.omni")}' after teardown\n`,
-        )
-        return false
-      }
-    } else {
-      const belongsToThisRepo =
-        explicitEnvUrl !== undefined || serverMeta?.canonicalRepoRoot === canonicalRepoRoot
-      if (belongsToThisRepo) {
-        const probe = yield* probeOmnigraphServerReady(targetBaseUrl)
-        const alreadyReady = match(probe)
-          .with({ _tag: "Ready" }, () => true)
-          .with({ _tag: "NotReady" }, () => false)
-          .exhaustive()
-        if (alreadyReady) {
-          return true
-        }
-      }
-    }
-
     const homeBin = join(process.env.HOME ?? "/root", ".local", "bin")
     const omnigraphBin = join(homeBin, "omnigraph")
     const omnigraphServerBin = join(homeBin, "omnigraph-server")
-
-    if (!nodeSyncHostIo.existsSync(omnigraphBin) || !nodeSyncHostIo.existsSync(omnigraphServerBin)) {
-      process.stderr.write(
-        `[harness:omnigraph] Missing omnigraph binaries (${omnigraphBin}, ${omnigraphServerBin}). Install omnigraph v0.14.0 into ~/.local/bin before retrying.\n`,
-      )
-      return false
-    }
-
-    type SetupRes = { readonly ok: true; readonly pid: number } | { readonly ok: false }
-    const setupRes: SetupRes = yield* Effect.try({
-      try: (): SetupRes => {
-        if (!nodeSyncHostIo.existsSync(clusterRootDir)) {
-          nodeSyncHostIo.mkdirRecursiveSync(clusterRootDir)
-        }
-        const preUnlock = unlockOmnigraphClusterIfNeeded(omnigraphBin, clusterRootDir)
-        if (!preUnlock.ok) {
-          return { ok: false }
-        }
-
-        const graphOmniDir = join(clusterRootDir, "graphs", "harness.omni")
-        if (!nodeSyncHostIo.existsSync(graphOmniDir)) {
-          const outRes = nodeSyncHostIo.execFileSync(
-            omnigraphBin,
-            [
-              "cluster",
-              "apply",
-              "--target",
-              clusterRootDir,
-              "--config",
-              configDir,
-              "--as",
-              "harness-cli",
-              "--json",
-            ],
-            {
-              cwd: clusterRepoRoot,
-              timeoutMs: 30_000,
-            },
+    const clusterYamlPath = join(configDir, "cluster.yaml")
+    let hasPolicies = false
+    if (nodeSyncHostIo.existsSync(clusterYamlPath)) {
+      const yamlRead = match(Result.try(() => nodeSyncHostIo.readTextSync(clusterYamlPath)))
+        .with({ _tag: "Success" }, ({ success }) => ({ ok: true as const, content: success }))
+        .with({ _tag: "Failure" }, ({ failure }) => {
+          process.stderr.write(
+            `[harness:omnigraph] Error: failed to read ${clusterYamlPath}: ${failure instanceof Error ? failure.message : String(failure)}\n`,
           )
-          const applyStdout = match(outRes)
-            .with({ _tag: "Exited" }, ({ exitCode, stderr, stdout }) => {
-              if (exitCode !== 0) {
-                process.stderr.write(
-                  `[harness:omnigraph] Local omnigraph cluster apply failed (exitCode=${exitCode}): ${stderr || stdout || "unknown error"}\n`,
-                )
-                return undefined
-              }
-              return stdout
-            })
-            .with({ _tag: "TimedOut" }, ({ stderr }) => {
-              process.stderr.write(
-                `[harness:omnigraph] Local omnigraph cluster apply timed out: ${stderr}\n`,
-              )
-              return undefined
-            })
-            .with({ _tag: "Signaled" }, ({ signal, stderr }) => {
-              process.stderr.write(
-                `[harness:omnigraph] Local omnigraph cluster apply killed by ${signal}: ${stderr}\n`,
-              )
-              return undefined
-            })
-            .with({ _tag: "SpawnFailed" }, ({ spawnError }) => {
-              process.stderr.write(
-                `[harness:omnigraph] Local omnigraph cluster apply spawn failed: ${spawnError}\n`,
-              )
-              return undefined
-            })
-            .exhaustive()
-          if (applyStdout === undefined) {
-            return { ok: false }
-          }
-          const postUnlock = unlockOmnigraphClusterIfNeeded(
-            omnigraphBin,
-            clusterRootDir,
-            applyStdout,
-          )
-          if (!postUnlock.ok) {
-            return { ok: false }
-          }
-          nodeSyncHostIo.writeTextSync(stampPath, expectedStamp)
-        }
-        const readyUnlock = unlockOmnigraphClusterIfNeeded(omnigraphBin, clusterRootDir)
-        if (!readyUnlock.ok) {
-          return { ok: false }
-        }
-
-        const bindHostPort =
-          targetBaseUrl.match(/^https?:\/\/([^/]+)/)?.[1] ?? `127.0.0.1:${defaultPort}`
-        const spawnRes = nodeSyncHostIo.spawnDetached(
-          omnigraphServerBin,
-          ["--cluster", `file://${clusterRootDir}`, "--bind", bindHostPort, "--unauthenticated"],
-          {
-            cwd: clusterRepoRoot,
-            stderrLogPath: join(clusterRootDir, "omnigraph-spawn.stderr.log"),
-          },
-        )
-        return match(spawnRes)
-          .with({ _tag: "SpawnFailed" }, ({ spawnError }): SetupRes => {
-            process.stderr.write(
-              `[harness:omnigraph] Failed to spawn omnigraph-server: ${spawnError}\n`,
-            )
-            return { ok: false }
-          })
-          .with({ _tag: "Spawned" }, ({ pid }): SetupRes => {
-            nodeSyncHostIo.writeTextSync(
-              join(clusterRootDir, "server.json"),
-              JSON.stringify(
-                {
-                  pid,
-                  port: defaultPort,
-                  baseUrl: targetBaseUrl,
-                  canonicalRepoRoot,
-                  updatedAt: new Date().toISOString(),
-                },
-                null,
-                2,
-              ),
-            )
-            return { ok: true, pid }
-          })
-          .exhaustive()
-      },
-      catch: (err): SetupRes => {
-        process.stderr.write(
-          `[harness:omnigraph] Local omnigraph setup/spawn failed: ${err instanceof Error ? err.message : String(err)}\n`,
-        )
-        return { ok: false }
-      },
-    }).pipe(Effect.orElseSucceed((): SetupRes => ({ ok: false })))
-
-    if (!setupRes.ok) {
-      if (explicitEnvUrl !== undefined && !configDrifted) {
-        for (let i = 0; i < 5; i++) {
-          const probe = yield* probeOmnigraphServerReady(targetBaseUrl)
-          const isReady = match(probe)
-            .with({ _tag: "Ready" }, () => true)
-            .with({ _tag: "NotReady" }, () => false)
-            .exhaustive()
-          if (isReady) {
-            return true
-          }
-          yield* Effect.sleep("100 millis")
-        }
-      }
-      return false
-    }
-    let lastFailureReason = "unknown"
-    for (let i = 0; i < 30; i++) {
-      if (!isProcessPidAlive(setupRes.pid)) {
-        lastFailureReason = `spawned omnigraph-server PID ${setupRes.pid} exited prematurely`
-        break
-      }
-      const probe = yield* probeOmnigraphServerReady(targetBaseUrl)
-      const isReady = match(probe)
-        .with({ _tag: "Ready" }, () => true)
-        .with({ _tag: "NotReady" }, ({ reason }) => {
-          lastFailureReason = reason
-          return false
+          return { ok: false as const, content: "" }
         })
         .exhaustive()
-      if (isReady) {
-        return true
+      if (!yamlRead.ok) {
+        return false
       }
-      yield* Effect.sleep("100 millis")
+      hasPolicies = clusterYamlDeclaresPolicies(yamlRead.content)
     }
-    process.stderr.write(
-      `[harness:omnigraph] Omnigraph server did not become ready at ${targetBaseUrl}/readyz: ${lastFailureReason}\n`,
+
+    type SetupRes = { readonly ok: true; readonly pid: number; readonly appliedCluster: boolean } | { readonly ok: false }
+    return yield* Effect.acquireUseRelease(
+      acquireOmnigraphClusterLockEffect(clusterRootDir),
+      (lockHandle) =>
+        Effect.gen(function* () {
+          if (lockHandle === undefined) {
+            process.stderr.write(`[harness:omnigraph] Failed to acquire cluster startup lock for ${clusterRootDir}\n`)
+            return false
+          }
+
+          let serverMeta: OmnigraphServerMeta | undefined
+          let serverJsonCorruptOrUnreadable = false
+          const serverJsonPath = join(clusterRootDir, "server.json")
+          if (nodeSyncHostIo.existsSync(serverJsonPath)) {
+            const rawMetaOutcome = match(Result.try(() => nodeSyncHostIo.readTextSync(serverJsonPath)))
+              .with({ _tag: "Success" }, ({ success }) => ({ ok: true as const, raw: success }))
+              .with({ _tag: "Failure" }, ({ failure }) => {
+                process.stderr.write(
+                  `[harness:omnigraph] Warning: failed to read ${serverJsonPath}: ${failure instanceof Error ? failure.message : String(failure)}\n`,
+                )
+                return { ok: false as const, raw: "" }
+              })
+              .exhaustive()
+            if (!rawMetaOutcome.ok) {
+              serverJsonCorruptOrUnreadable = true
+            } else {
+              serverMeta = match(decodeOmnigraphServerMeta(rawMetaOutcome.raw))
+                .with({ _tag: "Some" }, ({ value }) => value)
+                .with({ _tag: "None" }, () => {
+                  serverJsonCorruptOrUnreadable = true
+                  process.stderr.write(
+                    `[harness:omnigraph] Warning: failed to decode ${serverJsonPath} as OmnigraphServerMeta JSON\n`,
+                  )
+                  return undefined
+                })
+                .exhaustive()
+            }
+          }
+
+          const targetBaseUrl =
+            explicitEnvUrl ??
+            (serverMeta?.canonicalRepoRoot === canonicalRepoRoot && serverMeta?.baseUrl
+              ? serverMeta.baseUrl
+              : `http://127.0.0.1:${defaultPort}`)
+          if (!isLoopbackOmnigraphUrl(targetBaseUrl)) {
+            process.stderr.write(
+              `[harness:omnigraph] Refusing non-loopback Omnigraph URL/bind host: ${targetBaseUrl}\n`,
+            )
+            return false
+          }
+
+          const serverPid = serverMeta?.pid
+          const serverAlive =
+            typeof serverPid === "number" &&
+            Number.isInteger(serverPid) &&
+            serverPid > 1 &&
+            isProcessPidAlive(serverPid) &&
+            isSafeOmnigraphPidToKill(serverPid, clusterRootDir)
+          const drift = yield* evaluateClusterConfigDrift(clusterRootDir, configDir, serverAlive)
+
+          const driftHandled = yield* match(drift.action)
+            .with({ _tag: "RequiresCleanRebuild" }, () =>
+              Effect.gen(function* () {
+                if (
+                  resolve(repoRoot) !== resolve(canonicalRepoRoot) &&
+                  process.env.HARNESS_ALLOW_WORKTREE_CLUSTER_REBUILD !== "1"
+                ) {
+                  const probe = yield* probeOmnigraphServerReady(targetBaseUrl)
+                  const alreadyReady = match(probe)
+                    .with({ _tag: "Ready" }, () => true)
+                    .with({ _tag: "NotReady" }, () => false)
+                    .exhaustive()
+                  if (alreadyReady) {
+                    process.stderr.write(
+                      `[harness:omnigraph] Warning: skipping destructive RequiresCleanRebuild of shared canonical cluster '${clusterRootDir}' from linked worktree '${repoRoot}'; reusing running server.\n`,
+                    )
+                    return { ok: true as const, alreadyReady: true as const, applyCluster: false }
+                  }
+                  process.stderr.write(
+                    `[harness:omnigraph] Error: refusing destructive RequiresCleanRebuild of shared canonical cluster '${clusterRootDir}' from linked worktree '${repoRoot}' (canonical: '${canonicalRepoRoot}'). Set HARNESS_ALLOW_WORKTREE_CLUSTER_REBUILD=1 or rebuild from canonical repo.\n`,
+                  )
+                  return { ok: false as const, applyCluster: false }
+                }
+                if (!(yield* killOmnigraphServerPidIfAlive(serverPid, clusterRootDir, "clean rebuild"))) {
+                  return { ok: false as const, applyCluster: false }
+                }
+                const stoppedBeforeDelete = stopStaleOmnigraphClusterBeforeDelete(
+                  clusterRootDir,
+                  typeof serverPid === "number" && Number.isInteger(serverPid) && serverPid > 1
+                    ? serverPid
+                    : undefined,
+                )
+                if (!stoppedBeforeDelete) {
+                  return { ok: false as const, applyCluster: false }
+                }
+                yield* Effect.sleep("300 millis")
+                const rmOk = yield* Effect.try({
+                  try: () => {
+                    nodeSyncHostIo.rmRecursiveSync(clusterRootDir)
+                    return true
+                  },
+                  catch: (err) => {
+                    process.stderr.write(
+                      `[harness:omnigraph] Error: failed to remove drifted cluster dir '${clusterRootDir}': ${err instanceof Error ? err.message : String(err)}\n`,
+                    )
+                    return false
+                  },
+                }).pipe(Effect.orElseSucceed(() => false))
+                if (!rmOk) {
+                  return { ok: false as const, applyCluster: false }
+                }
+                if (nodeSyncHostIo.existsSync(join(clusterRootDir, "graphs", "harness.omni"))) {
+                  process.stderr.write(
+                    `[harness:omnigraph] Error: drifted cluster graph still exists at '${join(clusterRootDir, "graphs", "harness.omni")}' after teardown\n`,
+                  )
+                  return { ok: false as const, applyCluster: false }
+                }
+                return { ok: true as const, applyCluster: true }
+              }),
+            )
+            .with({ _tag: "LiveClusterApply" }, () =>
+              Effect.gen(function* () {
+                const stopped =
+                  serverPid === undefined && serverJsonCorruptOrUnreadable
+                    ? stopStaleOmnigraphClusterBeforeDelete(clusterRootDir, undefined)
+                    : yield* killOmnigraphServerPidIfAlive(serverPid, clusterRootDir, "live cluster apply")
+                return { ok: stopped, applyCluster: stopped }
+              }),
+            )
+            .with({ _tag: "NoOp" }, () =>
+              Effect.gen(function* () {
+                if (serverJsonCorruptOrUnreadable) {
+                  const stopped = stopStaleOmnigraphClusterBeforeDelete(clusterRootDir, undefined)
+                  if (!stopped) {
+                    return { ok: false as const, applyCluster: false }
+                  }
+                }
+                const belongsToThisRepo =
+                  explicitEnvUrl !== undefined || serverMeta?.canonicalRepoRoot === canonicalRepoRoot
+                if (belongsToThisRepo) {
+                  const probe = yield* probeOmnigraphServerReady(targetBaseUrl)
+                  const alreadyReady = match(probe)
+                    .with({ _tag: "Ready" }, () => true)
+                    .with({ _tag: "NotReady" }, () => false)
+                    .exhaustive()
+                  if (alreadyReady) {
+                    return { ok: true as const, alreadyReady: true as const, applyCluster: false }
+                  }
+                }
+                return { ok: true as const, applyCluster: false }
+              }),
+            )
+            .exhaustive()
+
+          if (!driftHandled.ok) {
+            return false
+          }
+          if ("alreadyReady" in driftHandled && driftHandled.alreadyReady) {
+            return true
+          }
+
+          if (!nodeSyncHostIo.existsSync(omnigraphBin) || !nodeSyncHostIo.existsSync(omnigraphServerBin)) {
+            process.stderr.write(
+              `[harness:omnigraph] Missing omnigraph binaries (${omnigraphBin}, ${omnigraphServerBin}). Install omnigraph v0.14.0 into ~/.local/bin before retrying.\n`,
+            )
+            return false
+          }
+
+          let appliedCluster = false
+          const setupRes: SetupRes = yield* Effect.try({
+            try: (): SetupRes => {
+              if (!nodeSyncHostIo.existsSync(clusterRootDir)) {
+                nodeSyncHostIo.mkdirRecursiveSync(clusterRootDir)
+              }
+              const tokensOutcome = hasPolicies
+                ? match(ensureOmnigraphEndpointTokens(clusterRootDir))
+                    .with({ _tag: "Success" }, ({ success }) => ({
+                      ok: true as const,
+                      tokens: success,
+                    }))
+                    .with({ _tag: "Failure" }, ({ failure }) => {
+                      process.stderr.write(`[harness:omnigraph] ${failure.message}\n`)
+                      return { ok: false as const, tokens: undefined }
+                    })
+                    .exhaustive()
+                : { ok: true as const, tokens: undefined }
+              if (!tokensOutcome.ok) {
+                return { ok: false }
+              }
+              const tokens = tokensOutcome.tokens
+              const preUnlock = unlockOmnigraphClusterIfNeeded(omnigraphBin, clusterRootDir)
+              if (!preUnlock.ok) {
+                return { ok: false }
+              }
+              const graphOmniDir = join(clusterRootDir, "graphs", "harness.omni")
+              if (driftHandled.applyCluster || !nodeSyncHostIo.existsSync(graphOmniDir)) {
+                const outRes = nodeSyncHostIo.execFileSync(
+                  omnigraphBin,
+                  ["cluster", "apply", "--target", `file://${clusterRootDir}`, "--config", configDir, "--as", "harness-cli", "--json"],
+                  { cwd: clusterRepoRoot, timeoutMs: 30_000 },
+                )
+                const applyStdout = match(outRes)
+                  .with({ _tag: "Exited" }, ({ exitCode, stderr, stdout }) => {
+                    if (exitCode !== 0) {
+                      process.stderr.write(`[harness:omnigraph] Local omnigraph cluster apply failed (exitCode=${exitCode}): ${stderr || stdout || "unknown error"}\n`)
+                      return undefined
+                    }
+                    return stdout
+                  })
+                  .with({ _tag: "TimedOut" }, ({ stderr }) => { process.stderr.write(`[harness:omnigraph] Local omnigraph cluster apply timed out: ${stderr}\n`); return undefined })
+                  .with({ _tag: "Signaled" }, ({ signal, stderr }) => { process.stderr.write(`[harness:omnigraph] Local omnigraph cluster apply killed by ${signal}: ${stderr}\n`); return undefined })
+                  .with({ _tag: "SpawnFailed" }, ({ spawnError }) => { process.stderr.write(`[harness:omnigraph] Local omnigraph cluster apply spawn failed: ${spawnError}\n`); return undefined })
+                  .exhaustive()
+                if (applyStdout === undefined) return { ok: false }
+                if (!unlockOmnigraphClusterIfNeeded(omnigraphBin, clusterRootDir, applyStdout).ok) return { ok: false }
+                appliedCluster = true
+              }
+              if (!unlockOmnigraphClusterIfNeeded(omnigraphBin, clusterRootDir).ok) return { ok: false }
+              const bindHostPort = targetBaseUrl.match(/^https?:\/\/([^/]+)/)?.[1] ?? `127.0.0.1:${defaultPort}`
+              if (!hasPolicies) {
+                process.stderr.write(
+                  "[harness:omnigraph] Warning: spawning omnigraph-server with --unauthenticated because cluster.yaml declares no policies:\n",
+                )
+              }
+              const spawnArgs = ["--cluster", `file://${clusterRootDir}`, "--bind", bindHostPort, ...(hasPolicies ? [] : ["--unauthenticated"])]
+              const hasExplicitEmbeddingKey =
+                typeof process.env.OMNIGRAPH_EMBEDDING_API_KEY === "string" &&
+                process.env.OMNIGRAPH_EMBEDDING_API_KEY.length > 0
+              if (process.env.OMNIGRAPH_EMBEDDINGS_MOCK === undefined && !hasExplicitEmbeddingKey) {
+                process.stderr.write(
+                  "[harness:omnigraph] Warning: OMNIGRAPH_EMBEDDING_API_KEY not set; spawning omnigraph-server with deterministic mock embeddings (OMNIGRAPH_EMBEDDINGS_MOCK=1)\n",
+                )
+              }
+              const spawnEnv: Record<string, string | undefined> = {
+                ...process.env,
+                OMNIGRAPH_EMBEDDING_API_KEY: process.env.OMNIGRAPH_EMBEDDING_API_KEY ?? DEFAULT_EMBEDDING_API_KEY,
+                ...(process.env.OMNIGRAPH_EMBEDDINGS_MOCK !== undefined
+                  ? { OMNIGRAPH_EMBEDDINGS_MOCK: process.env.OMNIGRAPH_EMBEDDINGS_MOCK }
+                  : !hasExplicitEmbeddingKey
+                    ? { OMNIGRAPH_EMBEDDINGS_MOCK: DEFAULT_EMBEDDINGS_MOCK }
+                    : {}),
+                ...(tokens !== undefined
+                  ? { OMNIGRAPH_SERVER_BEARER_TOKENS_JSON: JSON.stringify({ "harness-cli": tokens.cliToken, "agent-mcp": tokens.mcpToken }) }
+                  : {}),
+              }
+              if (hasExplicitEmbeddingKey && process.env.OMNIGRAPH_EMBEDDINGS_MOCK === undefined) {
+                delete spawnEnv.OMNIGRAPH_EMBEDDINGS_MOCK
+              }
+              const spawnRes = nodeSyncHostIo.spawnDetached(omnigraphServerBin, spawnArgs, {
+                cwd: clusterRepoRoot,
+                stderrLogPath: join(clusterRootDir, "omnigraph-spawn.stderr.log"),
+                env: spawnEnv,
+              })
+              return match(spawnRes)
+                .with({ _tag: "SpawnFailed" }, ({ spawnError }): SetupRes => {
+                  process.stderr.write(`[harness:omnigraph] Failed to spawn omnigraph-server: ${spawnError}\n`)
+                  return { ok: false }
+                })
+                .with({ _tag: "Spawned" }, ({ pid }): SetupRes => ({ ok: true, pid, appliedCluster }))
+                .exhaustive()
+            },
+            catch: (err): SetupRes => {
+              process.stderr.write(`[harness:omnigraph] Local omnigraph setup/spawn failed: ${err instanceof Error ? err.message : String(err)}\n`)
+              return { ok: false }
+            },
+          }).pipe(Effect.orElseSucceed((): SetupRes => ({ ok: false })))
+
+          const canFallbackProbe = match(drift.action)
+            .with({ _tag: "RequiresCleanRebuild" }, () => false)
+            .with({ _tag: "LiveClusterApply" }, { _tag: "NoOp" }, () => true)
+            .exhaustive()
+
+          if (!setupRes.ok) {
+            if (explicitEnvUrl !== undefined && canFallbackProbe) {
+              for (let i = 0; i < 5; i++) {
+                const probe = yield* probeOmnigraphServerReady(targetBaseUrl)
+                const isReady = match(probe)
+                  .with({ _tag: "Ready" }, () => true)
+                  .with({ _tag: "NotReady" }, () => false)
+                  .exhaustive()
+                if (isReady) return true
+                yield* Effect.sleep("100 millis")
+              }
+            }
+            return false
+          }
+
+          let lastFailureReason = "unknown"
+          for (let i = 0; i < 30; i++) {
+            if (!isProcessPidAlive(setupRes.pid)) {
+              lastFailureReason = `spawned omnigraph-server PID ${setupRes.pid} exited prematurely`
+              break
+            }
+            const probe = yield* probeOmnigraphServerReady(targetBaseUrl)
+            const isReady = match(probe)
+              .with({ _tag: "Ready" }, () => true)
+              .with({ _tag: "NotReady" }, ({ reason }) => { lastFailureReason = reason; return false })
+              .exhaustive()
+            if (isReady) {
+              if (setupRes.appliedCluster) {
+                writeClusterDriftReceipts(clusterRootDir, drift.expectedStamp, configDir)
+              }
+              const parsedPort = Result.getOrElse(
+                Result.try(() => Number(new URL(targetBaseUrl).port) || defaultPort),
+                () => defaultPort,
+              )
+              const metaWriteRes = writeServerMetaAtomic(clusterRootDir, {
+                pid: OmnigraphProcessId.make(setupRes.pid),
+                port: OmnigraphTcpPort.make(parsedPort),
+                baseUrl: OmnigraphBaseUrl.make(targetBaseUrl),
+                canonicalRepoRoot: WorkspaceFilePath.make(canonicalRepoRoot),
+                updatedAt: OmnigraphIsoTimestamp.make(new Date().toISOString()),
+              })
+              const metaWriteOk = yield* match(metaWriteRes)
+                .with({ _tag: "Success" }, () => Effect.succeed(true))
+                .with({ _tag: "Failure" }, ({ failure }) =>
+                  Effect.gen(function* () {
+                    process.stderr.write(
+                      `[harness:omnigraph] Error: failed to write server.json: ${failure.message}\n`,
+                    )
+                    yield* killOmnigraphServerPidIfAlive(setupRes.pid, clusterRootDir, "server.json write failure")
+                    return false
+                  }),
+                )
+                .exhaustive()
+              return metaWriteOk
+            }
+            yield* Effect.sleep("100 millis")
+          }
+          yield* killOmnigraphServerPidIfAlive(setupRes.pid, clusterRootDir, "readyz timeout")
+          process.stderr.write(`[harness:omnigraph] Omnigraph server did not become ready at ${targetBaseUrl}/readyz: ${lastFailureReason}\n`)
+          return false
+        }),
+      (lockHandle) => Effect.sync(() => releaseOmnigraphClusterLock(lockHandle)),
     )
-    return false
   })
 }

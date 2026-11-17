@@ -4,20 +4,7 @@ import { match } from "ts-pattern"
 import { BENCHMARK_TASKS, type BenchmarkRunMetrics, compareBenchmarkRuns } from "@harness/gates"
 import { nodeSyncHostIo } from "@harness/infra"
 import { type CliEnv, type CliResult, findWorkspaceRoot } from "./daemon-and-omnigraph.service.js"
-import { resolveRepoPathChecked } from "./repo-path.js"
-
-const extractFlag = (subArgs: ReadonlyArray<string>, flagName: string): string | undefined => {
-  for (let i = 0; i < subArgs.length; i++) {
-    const arg = subArgs[i]
-    if (arg === flagName && i + 1 < subArgs.length) {
-      return subArgs[i + 1]
-    }
-    if (arg !== undefined && arg.startsWith(`${flagName}=`)) {
-      return arg.slice(flagName.length + 1)
-    }
-  }
-  return undefined
-}
+import { extractFlag, resolveRepoPathChecked } from "./repo-path.js"
 
 const BenchmarkRunMetricsSchema = Schema.Struct({
   taskId: Schema.String,

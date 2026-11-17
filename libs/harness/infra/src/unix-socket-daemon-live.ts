@@ -131,6 +131,11 @@ export const queryUnixSocketLineDetailed = Effect.fn("UnixSocketDaemon.queryLine
         )
       })
       socket.on("close", () => finish({ _tag: "Unavailable", reason: "closed" }))
+      return Effect.sync(() => {
+        settled = true
+        socket.removeAllListeners()
+        socket.destroy()
+      })
     })
   },
 )
@@ -192,6 +197,11 @@ const probeSocketState = (socketPath: DaemonSocketPath): Effect.Effect<SocketPro
       })
       socket.on("connect", () => {
         finish("alive")
+      })
+      return Effect.sync(() => {
+        settled = true
+        socket.removeAllListeners()
+        socket.destroy()
       })
     })
   })
@@ -447,15 +457,36 @@ const makeUnixSocketDaemonLayer = (
               const openSockets = new Set<net.Socket>()
               const server = createDaemonNetServer(openSockets, runLineHandler)
 
+              const onServerRuntimeError = (err: Error) => {
+                process.stderr.write(
+                  `[harness/infra] Unix socket daemon server error (${socketPath}): ${toErrorReasonMessage(err, "unknown error")}\n`,
+                )
+              }
+
               yield* Effect.callback<void, DaemonServerError>((resume) => {
+                let settled = false
                 const onError = (err: Error) => {
+                  if (settled) {
+                    return
+                  }
+                  settled = true
                   resume(Effect.fail(toDaemonServerError(socketPath, err)))
                 }
                 server.once("error", onError)
                 server.listen(socketPath, () => {
+                  if (settled) {
+                    return
+                  }
+                  settled = true
                   server.removeListener("error", onError)
+                  server.on("error", onServerRuntimeError)
                   serverListening = true
                   resume(Effect.void)
+                })
+                return Effect.sync(() => {
+                  settled = true
+                  server.removeListener("error", onError)
+                  server.close()
                 })
               }).pipe(
                 Effect.tapError(() =>

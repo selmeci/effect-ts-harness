@@ -210,6 +210,24 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     "mechanical",
     "DaemonSocketChmodError: failed to set 0o600 permissions on the Unix socket — verify socket directory ownership/permissions and fail closed instead of ignoring chmodSync errors.",
   ),
+  makeTriageRule(
+    "omnigraph-cli-unsupported-as",
+    /\b(?:optimize|cleanup)\s+does not accept\s+--as\b/i,
+    "mechanical",
+    "Omnigraph CLI `optimize` and `cleanup` do not accept `--as <actor>` — omit `--as` when invoking those subcommands.",
+  ),
+  makeTriageRule(
+    "omnigraph-state-lock-held",
+    /\[state_lock_held\]|cluster state lock already exists/i,
+    "mechanical",
+    "Omnigraph cluster state lock is held (`[state_lock_held]`) — wait for the active writer or inspect/release stale cluster lock before retrying.",
+  ),
+  makeTriageRule(
+    "omnigraph-multiple-policy-bundles",
+    /matches\s+2\s+policy\s+bundles/i,
+    "mechanical",
+    "Omnigraph policy bundle ambiguity (`matches 2 policy bundles`) — consolidate or disambiguate matching policy bundle patterns in the cluster config.",
+  ),
   {
     pattern: "Effect.ignore",
     result: {

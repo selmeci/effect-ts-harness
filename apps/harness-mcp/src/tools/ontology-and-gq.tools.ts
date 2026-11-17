@@ -25,65 +25,80 @@ import {
   type ServerOptions,
 } from "./mcp-helpers.js"
 
-const OntologyWhyInputSchema = Schema.Struct({
-  symbolOrSpan: Schema.String.annotate({
+const BoundedNonEmptyString = (max: number) =>
+  Schema.String.pipe(
+    Schema.check(Schema.isTrimmed()),
+    Schema.check(Schema.isBetweenLength(1, max)),
+  )
+
+const BoundedParamsRecord = Schema.Record(
+  Schema.String,
+  Schema.Unknown,
+).pipe(
+  Schema.check(Schema.isPropertyNames(BoundedNonEmptyString(128))),
+  Schema.check(Schema.isMaxProperties(64)),
+)
+
+export const OntologyWhyInputSchema = Schema.Struct({
+  symbolOrSpan: BoundedNonEmptyString(512).annotate({
     description: "Symbol, service, layer, error, or span name to trace upward to Motivation (EARS & ADR)",
   }),
   repoRoot: Schema.optional(
-    Schema.String.annotate({
+    BoundedNonEmptyString(1024).annotate({
       description: "Optional repository root path",
     }),
   ),
 })
 
-const OntologyImpactInputSchema = Schema.Struct({
-  symbolOrSpan: Schema.String.annotate({
+export const OntologyImpactInputSchema = Schema.Struct({
+  symbolOrSpan: BoundedNonEmptyString(512).annotate({
     description:
       "Symbol, service, layer, error, or span name to analyze cross-layer ArchiMate impact for",
   }),
   repoRoot: Schema.optional(
-    Schema.String.annotate({
+    BoundedNonEmptyString(1024).annotate({
       description: "Optional repository root path",
     }),
   ),
 })
 
-const OntologyCheckInputSchema = Schema.Struct({
+export const OntologyCheckInputSchema = Schema.Struct({
   scope: Schema.optional(
-    Schema.String.annotate({
+    BoundedNonEmptyString(128).annotate({
       description:
         "Optional scope name (e.g. 'sample') to check deterministic cross-layer invariants and Clef semantic conflicts",
     }),
   ),
   repoRoot: Schema.optional(
-    Schema.String.annotate({
+    BoundedNonEmptyString(1024).annotate({
       description: "Optional repository root path",
     }),
   ),
 })
 
-const GqQueryInputSchema = Schema.Struct({
+export const GqQueryInputSchema = Schema.Struct({
   queryName: Schema.Literals(HARNESS_GQ_QUERY_NAMES).annotate({
     description: "Name of the canonical .gq query in libs/harness/graph/queries/harness.gq",
   }),
   params: Schema.optional(
-    Schema.Record(Schema.String, Schema.Unknown).annotate({
+    BoundedParamsRecord.annotate({
       description: "Query parameters matching $var placeholders",
     }),
   ),
   branch: Schema.optional(
-    Schema.String.annotate({
+    BoundedNonEmptyString(256).annotate({
       description: "Target graph branch (defaults to 'main')",
     }),
   ),
   repoRoot: Schema.optional(
-    Schema.String.annotate({
+    BoundedNonEmptyString(1024).annotate({
       description: "Target repository root for cluster resolution",
     }),
   ),
 })
 
-const decodeOntologyTargetInput = Schema.decodeUnknownEffect(OntologyWhyInputSchema)
+const decodeOntologyWhyInput = Schema.decodeUnknownEffect(OntologyWhyInputSchema)
+const decodeOntologyImpactInput = Schema.decodeUnknownEffect(OntologyImpactInputSchema)
 const decodeOntologyCheckInput = Schema.decodeUnknownEffect(OntologyCheckInputSchema)
 const decodeGqQueryInput = Schema.decodeUnknownEffect(GqQueryInputSchema)
 
@@ -97,7 +112,7 @@ export const buildOntologyAndGqToolDescriptors = (
     inputSchema: OntologyWhyInputSchema,
     execute: (args) =>
       Effect.gen(function* () {
-        const { symbolOrSpan } = yield* decodeOntologyTargetInput(args)
+        const { symbolOrSpan } = yield* decodeOntologyWhyInput(args)
         const graphStatus = yield* resolveGraphWithStatus(options, args)
         return {
           ...queryOntologyWhy(graphStatus.graph, symbolOrSpan),
@@ -111,7 +126,7 @@ export const buildOntologyAndGqToolDescriptors = (
     inputSchema: OntologyImpactInputSchema,
     execute: (args) =>
       Effect.gen(function* () {
-        const { symbolOrSpan } = yield* decodeOntologyTargetInput(args)
+        const { symbolOrSpan } = yield* decodeOntologyImpactInput(args)
         const graphStatus = yield* resolveGraphWithStatus(options, args)
         return {
           ...queryOntologyImpact(graphStatus.graph, symbolOrSpan),
@@ -219,6 +234,7 @@ export const buildOntologyAndGqToolDescriptors = (
           !process.env["OMNIGRAPH_URL"]
         const gqResult = yield* invokeOmnigraphNamedQuery({
           repoRoot: root,
+          actor: "agent-mcp",
           name: queryName,
           params,
           branch,

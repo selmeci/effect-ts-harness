@@ -4,6 +4,7 @@ import * as path from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import type { FetchLike } from "@modernrelay/omnigraph"
 import { Cause, Effect, Layer, Logger, Schema } from "effect"
+import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
 import {
   buildHarnessGraph,
@@ -12,11 +13,13 @@ import {
   executeNamedGqQueryInMemory,
   HARNESS_GQ_QUERIES,
   HARNESS_GQ_QUERY_NAMES,
+  type HarnessGqQueryName,
   invokeOmnigraphNamedQuery,
   loadHarnessGqQueriesText,
   loadHarnessPgSchemaText,
   makeOmnigraphSyncLayer,
   mergeOmnigraphBranch,
+  NodeKey,
   OmnigraphLoadError,
   OmnigraphReconcileInput,
   queryOmnigraph,
@@ -25,6 +28,7 @@ import {
   resolveGitHeadState,
   resolveOmnigraphBaseUrl,
   resolveOmnigraphTaskBranches,
+  RoleName,
   saveGraphSnapshot,
   syncToOmnigraphAndSnapshot,
   toOmnigraphNdjson,
@@ -108,10 +112,21 @@ describe("Omnigraph 0.14.0 schema.pg and queries/harness.gq", () => {
         }
 
         expect(schema).toContain("archimateRelation: String @index")
+        expect(schema).toContain("node GraphPolicy")
+        expect(schema).toContain("@instruction(")
+        expect(schema).toContain("Vector(768)? @embed(")
+
+        const edgeMatches = [...schema.matchAll(/edge\s+(Plays\w+Role):[\s\S]*?\{([\s\S]*?)\}/g)]
+        expect(edgeMatches).toHaveLength(32)
+        for (const [, edgeName, edgeBody] of edgeMatches) {
+          expect(edgeBody, `${edgeName} must declare @key(@src, @dst, role)`).toContain(
+            "@key(@src, @dst, role)",
+          )
+        }
       }),
   )
 
-  it.effect("declares all 8 canonical GQ queries in queries/harness.gq", () =>
+  it.effect("declares all 14 canonical GQ queries in queries/harness.gq", () =>
     Effect.gen(function* () {
       yield* Effect.void
       const gqSource = fs.readFileSync(queriesPath, "utf8")
@@ -286,6 +301,67 @@ describe("Deterministic in-memory GQ query execution and fallback", () => {
       const untestedRows = executeNamedGqQueryInMemory(sampleGraph, "untested_domain_fns")
       expect(untestedRows).toHaveLength(1)
       expect(untestedRows[0]?.spanName).toBe("Sample.untested")
+
+      const fuzzyRows = executeNamedGqQueryInMemory(sampleGraph, "resolve_effect_fn_fuzzy", {
+        query: "Sample.gret",
+      })
+      expect(fuzzyRows.length).toBeGreaterThanOrEqual(1)
+      expect(fuzzyRows[0]?.spanName).toBe("Sample.greet")
+
+      const realizedRows = executeNamedGqQueryInMemory(sampleGraph, "ontology_realized_by_doc", {
+        docId: "sample:ADR-0001",
+      })
+      expect(realizedRows).toHaveLength(1)
+      expect(realizedRows[0]?.artifactQualname).toBe("ServiceTag:PhotoRepo")
+
+      const patternRows = executeNamedGqQueryInMemory(sampleGraph, "rank_patterns_hybrid", {
+        query: "stub",
+        targetLayer: "*",
+      })
+      expect(patternRows).toHaveLength(1)
+      expect(patternRows[0]?.slug).toBe("planning")
+
+      const stubSvcRows = executeNamedGqQueryInMemory(
+        sampleGraph,
+        "rank_candidate_services_for_stub",
+        {
+          layer: "*",
+          intent: "photo",
+        },
+      )
+      expect(stubSvcRows).toHaveLength(1)
+      expect(stubSvcRows[0]?.tagId).toBe("PhotoRepo")
+
+      const policyUnverifiedRows = executeNamedGqQueryInMemory(
+        sampleGraph,
+        "policy_unverified_domain_fns",
+      )
+      expect(policyUnverifiedRows).toHaveLength(1)
+      expect(policyUnverifiedRows[0]?.spanName).toBe("Sample.untested")
+
+      const baseOrphanGraph = buildHarnessGraph({ fns: [] })
+      const graphWithOrphanSig = {
+        ...baseOrphanGraph,
+        graph: Graph.mutate(baseOrphanGraph.graph, (mutable) => {
+          Graph.addNode(mutable, {
+            _tag: "EffectSignature",
+            relationId: RelationId.make("sig:orphan-1"),
+            callerQualname: "libs/sample/domain/src/index.ts#missing",
+            requiredServices: [],
+            emittedErrors: [],
+            calleeQualnames: [],
+            payloadSchemas: [],
+            file: "libs/sample/domain/src/index.ts",
+            line: 1,
+          })
+        }),
+      }
+      const orphanSigRows = executeNamedGqQueryInMemory(
+        graphWithOrphanSig,
+        "policy_orphan_effect_signatures",
+      )
+      expect(orphanSigRows).toHaveLength(1)
+      expect(orphanSigRows[0]?.relationId).toBe("sig:orphan-1")
     }),
   )
 
@@ -613,11 +689,23 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
 
       fs.writeFileSync(
         path.join(clusterA, "server.json"),
-        JSON.stringify({ baseUrl: "http://127.0.0.1:19991", canonicalRepoRoot: repoA }),
+        JSON.stringify({
+          pid: process.pid,
+          port: 19991,
+          baseUrl: "http://127.0.0.1:19991",
+          canonicalRepoRoot: repoA,
+          updatedAt: null,
+        }),
       )
       fs.writeFileSync(
         path.join(clusterB, "server.json"),
-        JSON.stringify({ baseUrl: "http://127.0.0.1:24442", canonicalRepoRoot: repoB }),
+        JSON.stringify({
+          pid: process.pid,
+          port: 24442,
+          baseUrl: "http://127.0.0.1:24442",
+          canonicalRepoRoot: repoB,
+          updatedAt: null,
+        }),
       )
 
       const urlA = resolveOmnigraphBaseUrl({ repoRoot: repoA }, {}, testHostIo)
@@ -727,6 +815,8 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
                     outcome: "already_up_to_date",
                     source: taskBranches.implBranch,
                     target: taskBranches.mainBranch,
+                    branch_deleted: false,
+                    branch_delete_error_details: { error: "simulated delete skip" },
                     commit: null,
                     serverRef: "9d92f397",
                   }),
@@ -1274,11 +1364,14 @@ describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
     ([input]) =>
       Effect.gen(function* () {
         const decision = yield* decideOmnigraphReconcile(input)
+        const worktreeTrimmed = input.worktreeSlug?.trim() ?? ""
         const branchTrimmed = input.currentGitBranch?.trim() ?? ""
         const expectedTargetBranch =
-          branchTrimmed.length > 0 && branchTrimmed !== "main" && branchTrimmed !== "master"
-            ? `impl/branch-${branchTrimmed.replace(/[^a-zA-Z0-9._-]/g, "_")}`
-            : "main"
+          worktreeTrimmed.length > 0
+            ? `impl/wt-${worktreeTrimmed.replace(/[^a-zA-Z0-9._-]/g, "_")}`
+            : branchTrimmed.length > 0 && branchTrimmed !== "main" && branchTrimmed !== "master"
+              ? `impl/branch-${branchTrimmed.replace(/[^a-zA-Z0-9._-]/g, "_")}`
+              : "main"
         expect(decision.targetOmnigraphBranch).toBe(expectedTargetBranch)
         if (!input.snapshotExists) {
           expect(decision).toEqual({
@@ -1503,6 +1596,7 @@ describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
                   outcome: "already_up_to_date",
                   source: "impl/current",
                   target: "main",
+                  branch_deleted: true,
                   commit: null,
                   serverRef: "9d92f397",
                 }),
@@ -1535,6 +1629,293 @@ describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
         expect(warnings).toHaveLength(1)
         expect(warnings[0]).toContain("plan/stale")
         expect(warnings[0]).toContain("HTTP 500")
+      }),
+  )
+
+  it.effect(
+    "F-11.1a: mergeOmnigraphBranch fails with OmnigraphLoadError when source branch is missing",
+    () =>
+      Effect.gen(function* () {
+        let createCalled = false
+        const missingSourceFetch: FetchLike = (input, init) => {
+          const urlStr = toUrlString(input)
+          const method = init?.method ?? "GET"
+          if (urlStr.endsWith("/healthz")) {
+            return Promise.resolve(
+              new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }),
+            )
+          }
+          if (method === "GET" && urlStr.endsWith("/graphs/harness/branches")) {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({ outcome: "ok", branches: ["main"], serverRef: "ref-1" }),
+                { status: 200, headers: { "Content-Type": "application/json", "Omnigraph-Http-Api": "0.14" } },
+              ),
+            )
+          }
+          if (method === "POST" && urlStr.endsWith("/graphs/harness/branches")) {
+            createCalled = true
+          }
+          return Promise.resolve(
+            new Response("Not Found", { status: 404, headers: { "Omnigraph-Http-Api": "0.14" } }),
+          )
+        }
+
+        const err = yield* Effect.flip(
+          mergeOmnigraphBranch({
+            source: "impl/missing",
+            target: "main",
+            fetch: missingSourceFetch,
+          }).pipe(Effect.provide(OmnigraphSyncLive)),
+        )
+        expect(err).toBeInstanceOf(OmnigraphLoadError)
+        expect(createCalled).toBe(false)
+        expect(err.cause instanceof Error ? err.cause.message : String(err.cause)).toContain(
+          "impl/missing",
+        )
+      }),
+  )
+
+  it.effect(
+    "F-12.1: invokeNamedQuery logs Effect.logWarning with primary and fallback causes before memory-fallback",
+    () =>
+      Effect.gen(function* () {
+        const warnings: Array<string> = []
+        const captureLogger = Logger.make((opts) => {
+          if (opts.logLevel === "Warn") {
+            warnings.push(String(opts.message))
+          }
+        })
+        const failFetch: FetchLike = (input) => {
+          const urlStr = toUrlString(input)
+          if (urlStr.endsWith("/healthz")) {
+            return Promise.resolve(
+              new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }),
+            )
+          }
+          if (urlStr.includes("/queries/")) {
+            return Promise.resolve(
+              new Response("primary-404", { status: 404, headers: { "Omnigraph-Http-Api": "0.14" } }),
+            )
+          }
+          return Promise.resolve(
+            new Response("fallback-502", { status: 502, headers: { "Omnigraph-Http-Api": "0.14" } }),
+          )
+        }
+
+        const res = yield* invokeOmnigraphNamedQuery({
+          name: "resolve_effect_fn",
+          params: { spanOrQualname: "Demo.fn" },
+          fallbackGraph: buildHarnessGraph({
+            fns: [
+              {
+                qualname: "libs/demo/src/index.ts#fn",
+                spanName: "Demo.fn",
+                file: "libs/demo/src/index.ts",
+                line: 1,
+                packageTag: "domain",
+                successType: "void",
+                isStub: false,
+              },
+            ],
+          }),
+          fetch: failFetch,
+        }).pipe(Effect.provide(Layer.mergeAll(OmnigraphSyncLive, Logger.layer([captureLogger]))))
+
+        expect(res.source).toBe("memory-fallback")
+        expect(warnings).toHaveLength(1)
+        expect(warnings[0]).toContain("HTTP 404")
+        expect(warnings[0]).toContain("HTTP 502")
+      }),
+  )
+
+  it.effect(
+    "F-12.2: invokeNamedQuery rejects unknown query name cleanly with OmnigraphLoadError",
+    () =>
+      Effect.gen(function* () {
+        const okFetch: FetchLike = () =>
+          Promise.resolve(
+            new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }),
+          )
+        const err = yield* Effect.flip(
+          invokeOmnigraphNamedQuery({
+            name: "unknown_query" as HarnessGqQueryName,
+            fetch: okFetch,
+          }).pipe(Effect.provide(OmnigraphSyncLive)),
+        )
+        expect(err).toBeInstanceOf(OmnigraphLoadError)
+        expect(err.cause instanceof Error ? err.cause.message : String(err.cause)).toContain(
+          "Unknown named GQ query",
+        )
+      }),
+  )
+
+  it("F-16.1: ontology_realized_by_doc traverses governing-adr, specifying-ears, and realizing-symbol edges", () => {
+    const base = buildHarnessGraph({
+      adrDocs: [
+        {
+          id: "ADR-9999",
+          path: "docs/adr/9999-test.md",
+          title: "Test ADR",
+          status: "accepted",
+          enforcedByFiles: [],
+          referencedSpans: [],
+          referencedServices: [],
+          referencedErrors: [],
+        },
+      ],
+      earsSpecs: [
+        {
+          id: "SPEC-9999",
+          path: "docs/specs/9999-test.md",
+          title: "Test Spec",
+          status: "accepted",
+          enforcedByFiles: [],
+          referencedSpans: [],
+          referencedServices: [],
+          referencedErrors: [],
+        },
+      ],
+      fns: [
+        {
+          qualname: "libs/demo/domain/src/edge-realized.ts#run",
+          spanName: "Demo.run",
+          file: "libs/demo/domain/src/edge-realized.ts",
+          line: 10,
+          packageTag: "domain",
+          isStub: false,
+        },
+      ],
+    })
+
+    const edgeBackedGraph = {
+      ...base,
+      graph: Graph.mutate(base.graph, (mutable) => {
+        const tupleIdx = Graph.addNode(mutable, {
+          _tag: "TraceabilityTuple",
+          relationId: RelationId.make("TraceabilityTuple:edge-only-1"),
+          targetSymbolQualname: "fallback-unused-qualname",
+          requirementId: "REQ-9.1",
+          earsPattern: "Event-driven",
+          verifyingTestQualnames: [],
+        })
+        let adrIdx: Graph.NodeIndex | undefined
+        let specIdx: Graph.NodeIndex | undefined
+        let fnIdx: Graph.NodeIndex | undefined
+        for (const [idx, n] of Graph.nodes(mutable)) {
+          match(n)
+            .with({ _tag: "AdrDoc" }, () => { adrIdx = idx })
+            .with({ _tag: "EarsSpec" }, () => { specIdx = idx })
+            .with({ _tag: "EffectFn" }, () => { fnIdx = idx })
+            .otherwise(() => {})
+        }
+        if (adrIdx !== undefined) {
+          Graph.addEdge(mutable, tupleIdx, adrIdx, {
+            _tag: "PlaysRole",
+            relationId: RelationId.make("TraceabilityTuple:edge-only-1"),
+            entityKey: NodeKey.make("AdrDoc:ADR-9999"),
+            role: RoleName.make("governing-adr"),
+            archimateRelation: "Influence",
+          })
+        }
+        if (specIdx !== undefined) {
+          Graph.addEdge(mutable, tupleIdx, specIdx, {
+            _tag: "PlaysRole",
+            relationId: RelationId.make("TraceabilityTuple:edge-only-1"),
+            entityKey: NodeKey.make("EarsSpec:SPEC-9999"),
+            role: RoleName.make("specifying-ears"),
+            archimateRelation: "Realization",
+          })
+        }
+        if (fnIdx !== undefined) {
+          Graph.addEdge(mutable, tupleIdx, fnIdx, {
+            _tag: "PlaysRole",
+            relationId: RelationId.make("TraceabilityTuple:edge-only-1"),
+            entityKey: NodeKey.make("libs/demo/domain/src/edge-realized.ts#run"),
+            role: RoleName.make("realizing-symbol"),
+            archimateRelation: "Realization",
+          })
+        }
+      }),
+    }
+
+    const adrRows = executeNamedGqQueryInMemory(edgeBackedGraph, "ontology_realized_by_doc", {
+      docId: "ADR-9999",
+    })
+    expect(adrRows).toHaveLength(1)
+    expect(adrRows[0]?.adrId).toBe("ADR-9999")
+    expect(adrRows[0]?.earsSpecId).toBe("SPEC-9999")
+    expect(adrRows[0]?.artifactQualname).toBe("libs/demo/domain/src/edge-realized.ts#run")
+
+    const specRows = executeNamedGqQueryInMemory(edgeBackedGraph, "ontology_realized_by_doc", {
+      docId: "SPEC-9999",
+    })
+    expect(specRows).toHaveLength(1)
+    expect(specRows[0]?.tupleId).toBe("TraceabilityTuple:edge-only-1")
+  })
+
+  it.effect(
+    "F-11.1: invokeOmnigraphNamedQuery fails closed on 401/403/400 without falling back to memory-fallback",
+    () =>
+      Effect.gen(function* () {
+        const fallbackGraph = buildHarnessGraph({
+          fns: [
+            {
+              qualname: "libs/sample/domain/src/index.ts#greet",
+              spanName: "Sample.greet",
+              file: "libs/sample/domain/src/index.ts",
+              line: 4,
+              packageTag: "domain",
+              successType: "string",
+              isStub: false,
+            },
+          ],
+        })
+
+        for (const status of [401, 403, 400] as const) {
+          const authFailFetch: FetchLike = (input) => {
+            if (toUrlString(input).endsWith("/healthz")) {
+              return Promise.resolve(
+                new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }),
+              )
+            }
+            return Promise.resolve(
+              new Response(`HTTP ${status} error`, {
+                status,
+                headers: { "Content-Type": "text/plain", "Omnigraph-Http-Api": "0.14" },
+              }),
+            )
+          }
+
+          const err = yield* Effect.flip(
+            invokeOmnigraphNamedQuery({
+              name: "resolve_effect_fn",
+              params: { spanOrQualname: "Sample.greet" },
+              fallbackGraph,
+              fetch: authFailFetch,
+            }).pipe(Effect.provide(OmnigraphSyncLive)),
+          )
+          expect(err).toBeInstanceOf(OmnigraphLoadError)
+          const msg = err.cause instanceof Error ? err.cause.message : String(err.cause)
+          expect(msg).toContain(String(status))
+        }
+      }),
+  )
+
+  it.effect(
+    "P1: decideOmnigraphReconcile resolves impl/wt-<slug> when worktreeSlug is provided",
+    () =>
+      Effect.gen(function* () {
+        const decision = yield* decideOmnigraphReconcile({
+          snapshotExists: true,
+          recordedHeadSha: "sha-1",
+          currentHeadSha: "sha-1",
+          recordedGitBranch: "main",
+          currentGitBranch: "main",
+          worktreeSlug: "subagent/fix#1",
+        })
+        expect(decision.needsReconcile).toBe(false)
+        expect(decision.targetOmnigraphBranch).toBe("impl/wt-subagent_fix_1")
       }),
   )
 })

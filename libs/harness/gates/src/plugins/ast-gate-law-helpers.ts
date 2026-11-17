@@ -36,12 +36,64 @@ export const isBannedNodeBuiltinSpecifier = (specifier: string): boolean => {
 const LEGACY_PROCESS_ENV_BRIDGE_PATHS = new Set([
   "libs/harness/graph/src/cluster-resolver.ts",
   "libs/harness/graph/src/omnigraph-sync.ts",
+  "libs/harness/graph/src/omnigraph-operations.ts",
   "libs/harness/gates/src/verify-stamp.ts",
   "libs/harness/gates/src/worktree.ts",
   "libs/harness/gates/src/mutation-check.ts",
   "libs/harness/gates/src/dst-engine.ts",
   "libs/harness/gates/src/services/active-mutant-context.ts",
 ])
+
+export const isSilentFsFallbackCheckedPath = (normPath: string): boolean => {
+  if (/(?:^|\/)libs\/harness\/graph\/src\/extractor\/compiler-session\.ts$/.test(normPath)) {
+    return false
+  }
+  return /(?:^|\/)(?:libs\/harness\/(?:gates|graph)\/src|apps\/harness-(?:cli|mcp)\/src)\//.test(normPath)
+}
+
+const FS_READ_SYNC_NAMES = new Set(["readTextSync", "readdirSync", "readBytesSync"])
+
+const isProcExemptFsArg = (arg: ts.Expression | undefined): boolean => {
+  if (arg === undefined) return false
+  const u = unwrapExpr(arg)
+  if (ts.isIdentifier(u) && u.text === "procCmdlinePath") return true
+  if (ts.isStringLiteral(u) || ts.isNoSubstitutionTemplateLiteral(u)) {
+    return u.text.includes("/proc/")
+  }
+  if (ts.isTemplateExpression(u)) {
+    return u.head.text.includes("/proc/") || u.templateSpans.some((s) => s.literal.text.includes("/proc/"))
+  }
+  return false
+}
+
+const getFsReadSyncCall = (call: ts.CallExpression): boolean => {
+  const callee = unwrapExpr(call.expression)
+  if (ts.isIdentifier(callee)) return FS_READ_SYNC_NAMES.has(callee.text)
+  if (ts.isPropertyAccessExpression(callee)) return FS_READ_SYNC_NAMES.has(callee.name.text)
+  return false
+}
+
+export const hasResultTryFsReadText = (text: string): boolean => {
+  if (!text.includes("Result.try") || !/(?:readTextSync|readdirSync|readBytesSync)/.test(text)) {
+    return false
+  }
+  const sf = ts.createSourceFile("expr.ts", text, ts.ScriptTarget.Latest, true)
+  let hasResultTry = false
+  let hasNonExemptFsRead = false
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      if (isMemberCall(node, "Result", "try")) {
+        hasResultTry = true
+      }
+      if (getFsReadSyncCall(node) && !isProcExemptFsArg(node.arguments[0])) {
+        hasNonExemptFsRead = true
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sf)
+  return hasResultTry && hasNonExemptFsRead
+}
 
 export const isPureTierProcessEnvBannedPath = (normPath: string): boolean => {
   const libsMatch = /(?:^|\/)(libs\/[^/]+\/[^/]+\/src\/.*)$/.exec(normPath)
@@ -321,3 +373,81 @@ export const getMutatedStaticObjectName = (
   if (mutatedTarget === undefined) return undefined
   return getRootStaticObjectIdentifier(mutatedTarget, staticObjectNames)?.text
 }
+
+export const isAllOptionalSchemaStructCall = (node: ts.Node): boolean => {
+  if (!ts.isCallExpression(node) || !isMemberCall(node, "Schema", "Struct")) return false
+  const firstArg = node.arguments[0]
+  if (firstArg === undefined) return false
+  const obj = unwrapExpr(firstArg)
+  if (!ts.isObjectLiteralExpression(obj) || obj.properties.length === 0) return false
+  return obj.properties.every((prop) => {
+    if (!ts.isPropertyAssignment(prop)) return false
+    const val = unwrapExpr(prop.initializer)
+    return ts.isCallExpression(val) && isMemberCall(val, "Schema", "optional")
+  })
+}
+
+export const isConditionalPortBindBailout = (node: ts.Node): boolean => {
+  if (!ts.isIfStatement(node) || node.elseStatement !== undefined) return false
+  const test = unwrapExpr(node.expression)
+  if (!ts.isPrefixUnaryExpression(test) || test.operator !== ts.SyntaxKind.ExclamationToken) return false
+  const operand = unwrapExpr(test.operand)
+  if (!ts.isIdentifier(operand) || !/bound/i.test(operand.text)) return false
+  if (ts.isReturnStatement(node.thenStatement)) return true
+  return (
+    ts.isBlock(node.thenStatement) &&
+    node.thenStatement.statements.length === 1 &&
+    node.thenStatement.statements[0] !== undefined &&
+    ts.isReturnStatement(node.thenStatement.statements[0])
+  )
+}
+
+export const isVacuousLengthNonNegativeAssertion = (node: ts.Node): boolean => {
+  if (!ts.isCallExpression(node)) return false
+  const callee = unwrapExpr(node.expression)
+  if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== "toBeGreaterThanOrEqual") return false
+  if (node.arguments.length !== 1 || node.arguments[0] === undefined) return false
+  const arg0 = unwrapExpr(node.arguments[0])
+  if (!ts.isNumericLiteral(arg0) || arg0.text !== "0") return false
+  const expectCall = unwrapExpr(callee.expression)
+  if (!ts.isCallExpression(expectCall) || expectCall.arguments.length !== 1 || expectCall.arguments[0] === undefined) {
+    return false
+  }
+  const expectCallee = unwrapExpr(expectCall.expression)
+  if (!ts.isIdentifier(expectCallee) || expectCallee.text !== "expect") return false
+  const expectArg = unwrapExpr(expectCall.arguments[0])
+  return ts.isPropertyAccessExpression(expectArg) && expectArg.name.text === "length"
+}
+
+const PERSISTENCE_RESULT_CALLEES = new Set([
+  "writeGraphHeadMeta",
+  "updateGraphHeadCursor",
+  "writeServerMetaAtomic",
+])
+
+const isPersistenceResultCallExpr = (expr: ts.Expression): boolean => {
+  const unwrapped = unwrapExpr(expr)
+  if (ts.isVoidExpression(unwrapped)) {
+    return isPersistenceResultCallExpr(unwrapped.expression)
+  }
+  if (
+    ts.isBinaryExpression(unwrapped) &&
+    unwrapped.operatorToken.kind === ts.SyntaxKind.CommaToken
+  ) {
+    return (
+      isPersistenceResultCallExpr(unwrapped.left) ||
+      isPersistenceResultCallExpr(unwrapped.right)
+    )
+  }
+  if (!ts.isCallExpression(unwrapped)) return false
+  const callee = unwrapExpr(unwrapped.expression)
+  const name = ts.isIdentifier(callee)
+    ? callee.text
+    : ts.isPropertyAccessExpression(callee)
+      ? callee.name.text
+      : undefined
+  return name !== undefined && PERSISTENCE_RESULT_CALLEES.has(name)
+}
+
+export const isDiscardedPersistenceCallStatement = (node: ts.Node): boolean =>
+  ts.isExpressionStatement(node) && isPersistenceResultCallExpr(node.expression)

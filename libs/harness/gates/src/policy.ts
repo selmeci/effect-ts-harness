@@ -284,6 +284,18 @@ export const DESTRUCTIVE_ARGUMENT_PATTERNS: ReadonlyArray<GuardPatternRule> = [
       /\bgh\s+api\b.*(?:\s-(?:X|f|F)[A-Za-z0-9_=-]*|\s--(?:method|field|raw-field|input)(?:=|\s|$))/,
     reason: "gh api mutating request method or body field",
   },
+  {
+    pattern: /\bomnigraph\s+cleanup\b.*--keep(?:=|\s+)0(?:\s|$)/,
+    reason: "omnigraph cleanup with --keep 0 deletes all history",
+  },
+  {
+    pattern: /\bomnigraph\s+branches\s+delete\s+main(?:\s|$)/,
+    reason: "omnigraph branches delete main destroys the main branch",
+  },
+  {
+    pattern: /\bomnigraph\s+cluster\s+(?:reset|destroy|rm)(?:\s|$)/,
+    reason: "omnigraph cluster reset/destroy/rm destroys cluster state",
+  },
 ]
 
 /** REQ-1.3: `>`, `>>`, `N>`, `&>`, `&>>`, `>& file` into a file. Not stream duplication

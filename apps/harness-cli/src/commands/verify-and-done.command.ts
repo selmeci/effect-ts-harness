@@ -29,11 +29,10 @@ import {
   type GraphSnapshotError,
   type HarnessGraph,
   loadGraphSnapshotEffect,
-  makeOmnigraphSyncLayer,
   makeTsCompilerOverlayLayer,
+  resolveGitHeadState,
   resolveOmnigraphTaskBranches,
   saveGraphSnapshot,
-  syncToOmnigraphAndSnapshot,
   writeGraphHeadMeta,
 } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
@@ -42,7 +41,6 @@ import {
   type CliEnv,
   type CliResult,
   ensureLocalOllamaReady,
-  ensureLocalOmnigraphReady,
   findWorkspaceRoot,
   formatSubprocessError,
   isIsolatedExternalWorkspace,
@@ -50,13 +48,16 @@ import {
   makeReadStdinEffect,
   recordFriction,
   recordTelemetry,
-  resolveClusterRepoRoot,
   resolveDecisionModelLayer,
   resolveModifiedFilesSinceStampOrHead,
   resolveNxAffectedArgs,
   tryQueryWarmDaemonSocket,
 } from "./daemon-and-omnigraph.service.js"
-import { syncOmnigraphOnDone } from "./done-omnigraph-helpers.js"
+import {
+  runOmnigraphMaintenance,
+  syncOmnigraphOnDone,
+  syncVerifyImplToOmnigraph,
+} from "./done-omnigraph-helpers.js"
 import {
   detectAntigravityHookPayload,
   hasAntigravityFormat,
@@ -238,53 +239,36 @@ export const handleVerify = (
 
     const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
     const snapshotPath = join(repoRoot, ".harness", "graph-snapshot.json")
+    const syncStartedAtMs = Date.now()
     if (isIsolatedExternalWorkspace(repoRoot)) {
       saveGraphSnapshot(graph, snapshotPath, nodeSyncHostIo)
-      writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
-      recordTelemetry(options, {
-        surface: "cli",
-        category: "graph_query",
-        toolName: "omnigraph:sync-impl",
-        outcome: "ok",
-        durationMs: 1,
-        engineSource: "local",
-      })
-    } else {
-      yield* ensureLocalOmnigraphReady(repoRoot)
-      const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
-        repoRoot: resolveClusterRepoRoot(repoRoot),
-        branch: taskBranches.implBranch,
-        from: taskBranches.mainBranch,
-        snapshotPath,
-      }).pipe(
-        Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
-        Effect.catchCause((cause) => {
-          if (isPureInterruptCause(cause)) return Effect.interrupt
-          return Effect.succeed({
-            syncedToOmnigraph: false,
-            snapshotPath,
-            error: Cause.pretty(cause),
-          })
-        }),
-      )
-      if (syncRes.syncedToOmnigraph) {
-        writeGraphHeadMeta(repoRoot, nodeSyncHostIo)
-      }
-      recordTelemetry(options, {
-        surface: "cli",
-        category: "graph_query",
-        toolName: "omnigraph:sync-impl",
-        outcome: syncRes.syncedToOmnigraph ? "ok" : "fail",
-        durationMs: 1,
-        engineSource: syncRes.syncedToOmnigraph ? "omnigraph" : "memory-fallback",
-      })
-      if (!syncRes.syncedToOmnigraph) {
+      const headState = resolveGitHeadState(repoRoot, nodeSyncHostIo)
+      const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
+      if ((headState.headSha !== null || headState.gitBranch !== null) && savedMeta === null) {
         return {
           exitCode: 1,
           stdout: "",
-          stderr: `Verification failed: could not sync implementation graph to Omnigraph${syncRes.error ? ` (${syncRes.error})` : ""}`,
+          stderr: "Verification failed: could not persist graph head metadata (.harness/graph-head.json)",
         }
       }
+      recordTelemetry(options, {
+        surface: "cli",
+        category: "graph_query",
+        toolName: "graph:snapshot-local",
+        outcome: "ok",
+        durationMs: Math.max(0, Date.now() - syncStartedAtMs),
+        engineSource: "local",
+        detail: "skipped-isolated-workspace",
+      })
+    } else {
+      const verifySyncFail = yield* syncVerifyImplToOmnigraph(
+        repoRoot,
+        graph,
+        snapshotPath,
+        taskBranches,
+        options,
+      )
+      if (verifySyncFail !== undefined) return verifySyncFail
     }
 
     if (!options?.skipSubprocessVerify && nodeSyncHostIo.existsSync(join(repoRoot, "package.json"))) {
@@ -605,6 +589,7 @@ export const handleDone = (
               })
               writeSessionReportFiles(repoRoot, report, nodeSyncHostIo)
             }
+            runOmnigraphMaintenance(repoRoot, { includeCleanup: true })
             return { exitCode: 0, stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "", stderr: transcriptStderr, telemetryDetail: "completed" }
           }),
         )

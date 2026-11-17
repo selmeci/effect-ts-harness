@@ -1,0 +1,66 @@
+version: 1
+cases:
+  - id: agent-mcp-cannot-mutate-main
+    actor: agent-mcp
+    action: change
+    branch: main
+    expect: deny
+  - id: agent-mcp-cannot-merge-into-main
+    actor: agent-mcp
+    action: branch_merge
+    target_branch: main
+    expect: deny
+  - id: agent-mcp-cannot-export-main
+    actor: agent-mcp
+    action: export
+    branch: main
+    expect: deny
+  - id: agent-mcp-cannot-delete-main
+    actor: agent-mcp
+    action: branch_delete
+    target_branch: main
+    expect: deny
+  - id: agent-mcp-cannot-apply-schema-to-main
+    actor: agent-mcp
+    action: schema_apply
+    target_branch: main
+    expect: deny
+  - id: agent-mcp-can-invoke-stored-queries
+    actor: agent-mcp
+    action: invoke_query
+    expect: allow
+  - id: agent-mcp-cannot-mutate-plan-branch
+    actor: agent-mcp
+    action: change
+    branch: plan/current
+    expect: deny
+  - id: agent-mcp-cannot-create-plan-branch
+    actor: agent-mcp
+    action: branch_create
+    target_branch: plan/current
+    expect: deny
+  - id: default-cannot-mutate-main
+    actor: default
+    action: change
+    branch: main
+    expect: deny
+  - id: default-cannot-merge-into-main
+    actor: default
+    action: branch_merge
+    target_branch: main
+    expect: deny
+  - id: default-cannot-delete-main
+    actor: default
+    action: branch_delete
+    target_branch: main
+    expect: deny
+  - id: default-cannot-apply-schema-to-main
+    actor: default
+    action: schema_apply
+    target_branch: main
+    expect: deny
+  - id: harness-cli-can-merge-into-main
+    actor: harness-cli
+    action: branch_merge
+    target_branch: main
+    expect: allow

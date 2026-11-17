@@ -460,4 +460,17 @@ describe("guard policy", () => {
     expect(classifyCommand('git commit -m "ban /api/generate on clef"')).toBe("allow")
     expect(CLEF_SYSTEMONE_ONLY_BANNED_REASON).toContain("/v1/systemone")
   })
+
+  it("escalates destructive omnigraph commands before ALLOWLIST allows benign omnigraph commands", () => {
+    expect(classifyCommand("omnigraph cleanup --keep 0")).toBe("escalate")
+    expect(classifyCommand("omnigraph cleanup --keep=0")).toBe("escalate")
+    expect(classifyCommand("omnigraph branches delete main")).toBe("escalate")
+    expect(classifyCommand("omnigraph cluster reset")).toBe("escalate")
+    expect(classifyCommand("omnigraph cluster destroy")).toBe("escalate")
+    expect(classifyCommand("omnigraph cluster rm")).toBe("escalate")
+
+    expect(classifyCommand("omnigraph status")).toBe("allow")
+    expect(classifyCommand("omnigraph cleanup --keep 5")).toBe("allow")
+    expect(classifyCommand("omnigraph branches delete feat/old")).toBe("allow")
+  })
 })

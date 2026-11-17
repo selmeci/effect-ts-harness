@@ -103,7 +103,10 @@ export const handleDoctorOrSession = (
         const reconciledGraph = yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo)
         if (isolatedExternal) {
           saveGraphSnapshot(reconciledGraph, implPath, nodeSyncHostIo)
-          writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
+          const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
+          if ((headState.headSha !== null || headState.gitBranch !== null) && savedMeta === null) {
+            process.stderr.write("[harness:session] Warning: failed to persist .harness/graph-head.json\n")
+          }
         } else {
           const reconcileSyncRes = yield* syncToOmnigraphAndSnapshot(reconciledGraph, {
             repoRoot: resolveClusterRepoRoot(repoRoot),
@@ -122,7 +125,10 @@ export const handleDoctorOrSession = (
             }),
           )
           if (reconcileSyncRes.syncedToOmnigraph) {
-            writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
+            const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
+            if ((headState.headSha !== null || headState.gitBranch !== null) && savedMeta === null) {
+              process.stderr.write("[harness:session] Warning: failed to persist .harness/graph-head.json\n")
+            }
           } else {
             omnigraphInitialized = false
             reconcileError = reconcileSyncRes.error ?? "unknown Omnigraph reconcile error"
@@ -326,7 +332,10 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
 
     if (isIsolatedExternalWorkspace(repoRoot)) {
       saveGraphSnapshot(graph, snapshotPath, nodeSyncHostIo)
-      writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
+      const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
+      if ((headState.headSha !== null || headState.gitBranch !== null) && savedMeta === null) {
+        process.stderr.write("[harness:ingest] Warning: failed to persist .harness/graph-head.json\n")
+      }
       return {
         exitCode: 0,
         stdout: isAntigravity
@@ -342,7 +351,23 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
       }
     }
 
-    yield* ensureLocalOmnigraphReady(repoRoot)
+    const omnigraphReady = yield* ensureLocalOmnigraphReady(repoRoot)
+    if (!omnigraphReady) {
+      const msg = "Omnigraph server is not ready"
+      return {
+        exitCode: !isAntigravity ? 1 : 0,
+        stdout: isAntigravity
+          ? JSON.stringify({ error: msg })
+          : JSON.stringify({
+              indexedFns: fnIndex.bySpanName.size,
+              syncedToOmnigraph: false,
+              branch: targetBranch,
+              headSha: headState.headSha,
+              error: msg,
+            }),
+        stderr: `[harness:ingest] Omnigraph sync failed: ${msg}`,
+      }
+    }
     const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
       repoRoot: resolveClusterRepoRoot(repoRoot),
       branch: targetBranch,
@@ -360,7 +385,10 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
       }),
     )
     if (syncRes.syncedToOmnigraph) {
-      writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
+      const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
+      if ((headState.headSha !== null || headState.gitBranch !== null) && savedMeta === null) {
+        process.stderr.write("[harness:ingest] Warning: failed to persist .harness/graph-head.json\n")
+      }
     }
     const syncError = syncRes.syncedToOmnigraph
       ? undefined

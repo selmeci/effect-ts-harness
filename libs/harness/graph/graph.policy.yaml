@@ -1,23 +1,25 @@
 version: 1
+protected_branches: [main]
 groups:
-  admins: [harness-cli, default]
-  readers: [agent-mcp, harness-cli, default]
+  admins: [harness-cli]
+  agents: [agent-mcp]
+  readers: [agent-mcp, harness-cli]
 rules:
-  - id: readers-can-read
+  - id: everyone-can-read-all-branches
     allow:
       actors: { group: readers }
       actions: [read]
       branch_scope: any
-  - id: readers-can-invoke
+  - id: everyone-can-invoke-queries
     allow:
       actors: { group: readers }
       actions: [invoke_query]
-  - id: admins-can-write-branch
+  - id: admins-full-graph-write
     allow:
       actors: { group: admins }
       actions: [read, export, change]
       branch_scope: any
-  - id: admins-can-manage-branches
+  - id: admins-manage-protected-branches
     allow:
       actors: { group: admins }
       actions: [branch_create, branch_delete, branch_merge, schema_apply]

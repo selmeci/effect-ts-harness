@@ -13,6 +13,7 @@ import {
   EnclosingSymbolName,
   GateRuleVersion,
   HARNESS_GATE_RULE_VERSION,
+  inferAstGatePackageTagFromPath,
   makeSelfDogfoodingReport,
   MaxPluginFileLines,
   PluginFileLineCount,
@@ -2510,4 +2511,192 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(interruptViolations.every((v) => v.message.includes("isPureInterruptCause"))).toBe(true)
       }),
   )
+
+  it("H-1..H-4: enforces silent-gate-fs-fallback scope, all-optional-contract-struct, test bailouts/vacuous length, and discarded-persistence-result", () => {
+    const runAst = (relPath: string, code: string) => {
+      const sf = ts.createSourceFile(relPath, code, ts.ScriptTarget.Latest, true)
+      return visitSourceFileSinglePass(
+        sf,
+        AstSourceFilePath.make(relPath),
+        inferAstGatePackageTagFromPath(AstSourceFilePath.make(relPath)),
+      )
+    }
+
+    // H-1: silent-gate-fs-fallback across graph/cli/mcp, exempting compiler-session.ts and /proc/ probes
+    const graphFallback = runAst(
+      "libs/harness/graph/src/bad-io.ts",
+      'import { Result } from "effect"\nexport const f = () => Result.getOrElse(Result.try(() => readTextSync("x")), () => "")\n',
+    )
+    expect(graphFallback.filter((v) => v.rule === "silent-gate-fs-fallback")).toHaveLength(1)
+
+    const procProbe = runAst(
+      "apps/harness-mcp/src/proc-probe.ts",
+      'import { Result } from "effect"\nexport const p = (procCmdlinePath: string) => Result.getOrElse(Result.try(() => readTextSync(procCmdlinePath)), () => "")\nexport const p2 = () => Result.getOrElse(Result.try(() => readTextSync("/proc/1/cmdline")), () => "")\nexport const p3 = (pid: number) => Result.getOrElse(Result.try(() => readTextSync(`/proc/${pid}/cmdline`)), () => "")\n',
+    )
+    expect(procProbe.filter((v) => v.rule === "silent-gate-fs-fallback")).toHaveLength(0)
+
+    const procDecoy = runAst(
+      "apps/harness-mcp/src/proc-decoy.ts",
+      'import { Result } from "effect"\nexport const decoy = () => Result.getOrElse(Result.try(() => { const hint = "/proc/"; return readTextSync("secret.txt") }), () => "")\n',
+    )
+    expect(procDecoy.filter((v) => v.rule === "silent-gate-fs-fallback")).toHaveLength(1)
+
+    const compilerSession = runAst(
+      "libs/harness/graph/src/extractor/compiler-session.ts",
+      'import { Result } from "effect"\nexport const c = () => Result.getOrElse(Result.try(() => readTextSync("x")), () => "")\n',
+    )
+    expect(compilerSession.filter((v) => v.rule === "silent-gate-fs-fallback")).toHaveLength(0)
+
+    // H-2: all-optional-contract-struct
+    const allOptional = runAst(
+      "libs/sample/contract/src/bad-struct.ts",
+      [
+        'import { Schema } from "effect"',
+        "export const BadMeta = Schema.Struct({ pid: Schema.optional(Schema.Int), port: Schema.optional(Schema.Int) })",
+        "export const GoodMeta = Schema.Struct({ pid: Schema.Int, port: Schema.optional(Schema.Int) })",
+      ].join("\n"),
+    )
+    expect(allOptional.filter((v) => v.rule === "all-optional-contract-struct")).toHaveLength(1)
+
+    // H-3: conditional-port-bind-bailout & vacuous-length-nonnegative-assertion
+    const badTest = runAst(
+      "libs/sample/domain/test/bad.test.ts",
+      [
+        "export const t = (bound: boolean, items: ReadonlyArray<string>) => {",
+        "  if (!bound) return",
+        "  expect(items.length).toBeGreaterThanOrEqual(0)",
+        "  expect(items.length).toBeGreaterThanOrEqual(1)",
+        "}",
+      ].join("\n"),
+    )
+    expect(badTest.filter((v) => v.rule === "conditional-port-bind-bailout")).toHaveLength(1)
+    expect(badTest.filter((v) => v.rule === "vacuous-length-nonnegative-assertion")).toHaveLength(1)
+
+    // H-4: discarded-persistence-result (including void and sequence expression evasion)
+    const badPersist = runAst(
+      "libs/harness/graph/src/persist.ts",
+      [
+        "export const p = () => {",
+        "  writeGraphHeadMeta()",
+        "  updateGraphHeadCursor()",
+        "  writeServerMetaAtomic()",
+        "  void writeGraphHeadMeta()",
+        "  ;(0, writeGraphHeadMeta())",
+        "  const ok = writeGraphHeadMeta()",
+        "  return ok",
+        "}",
+      ].join("\n"),
+    )
+    expect(badPersist.filter((v) => v.rule === "discarded-persistence-result")).toHaveLength(5)
+  })
+
+  it("oxlint syntax-bans catches .pipe() all-optional-contract-struct and void/sequence discarded-persistence-result", async () => {
+    const pluginMod = (await import(
+      new URL("../../../../tools/oxlint/syntax-bans.js", import.meta.url).href
+    )) as {
+      default: {
+        rules: {
+          "syntax-bans": {
+            create: (ctx: unknown) => Record<string, ((node: Record<string, unknown>) => void) | undefined>
+          }
+        }
+      }
+    }
+    const syntaxBans = pluginMod.default.rules["syntax-bans"]
+
+    const structReports: Array<{ message: string }> = []
+    const contractVisitor = syntaxBans.create({
+      filename: "/repo/libs/sample/contract/src/bad-pipe-struct.ts",
+      report: (r: { message: string }) => {
+        structReports.push(r)
+      },
+    })
+    contractVisitor.ExportNamedDeclaration?.({
+      type: "ExportNamedDeclaration",
+      declaration: {
+        type: "VariableDeclaration",
+        declarations: [
+          {
+            type: "VariableDeclarator",
+            id: { type: "Identifier", name: "BadPipeStruct" },
+            init: {
+              type: "CallExpression",
+              callee: {
+                type: "MemberExpression",
+                computed: false,
+                object: {
+                  type: "CallExpression",
+                  callee: {
+                    type: "MemberExpression",
+                    computed: false,
+                    object: { type: "Identifier", name: "Schema" },
+                    property: { type: "Identifier", name: "Struct" },
+                  },
+                  arguments: [
+                    {
+                      type: "ObjectExpression",
+                      properties: [
+                        {
+                          type: "Property",
+                          key: { type: "Identifier", name: "a" },
+                          value: {
+                            type: "CallExpression",
+                            callee: {
+                              type: "MemberExpression",
+                              computed: false,
+                              object: { type: "Identifier", name: "Schema" },
+                              property: { type: "Identifier", name: "optional" },
+                            },
+                            arguments: [{ type: "MemberExpression", computed: false, object: { type: "Identifier", name: "Schema" }, property: { type: "Identifier", name: "Int" } }],
+                          },
+                        },
+                      ],
+                    },
+                  ],
+                },
+                property: { type: "Identifier", name: "pipe" },
+              },
+              arguments: [{ type: "Identifier", name: "someAnnotation" }],
+            },
+          },
+        ],
+      },
+    })
+    expect(structReports.some((r) => r.message.includes("all-optional-contract-struct"))).toBe(true)
+
+    const persistReports: Array<{ message: string }> = []
+    const graphVisitor = syntaxBans.create({
+      filename: "/repo/libs/harness/graph/src/persist.ts",
+      report: (r: { message: string }) => {
+        persistReports.push(r)
+      },
+    })
+    graphVisitor.ExpressionStatement?.({
+      type: "ExpressionStatement",
+      expression: {
+        type: "UnaryExpression",
+        operator: "void",
+        argument: {
+          type: "CallExpression",
+          callee: { type: "Identifier", name: "writeGraphHeadMeta" },
+          arguments: [],
+        },
+      },
+    })
+    graphVisitor.ExpressionStatement?.({
+      type: "ExpressionStatement",
+      expression: {
+        type: "SequenceExpression",
+        expressions: [
+          { type: "Literal", value: 0 },
+          {
+            type: "CallExpression",
+            callee: { type: "Identifier", name: "updateGraphHeadCursor" },
+            arguments: [],
+          },
+        ],
+      },
+    })
+    expect(persistReports.filter((r) => r.message.includes("discarded-persistence-result"))).toHaveLength(2)
+  })
 })

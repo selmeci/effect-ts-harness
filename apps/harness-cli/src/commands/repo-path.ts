@@ -1,6 +1,8 @@
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 import { Result } from "effect"
 import { match } from "ts-pattern"
+import { resolveCanonicalRepoRoot } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
 
 export const isInsideRoot = (rootDir: string, candidatePath: string): boolean => {
@@ -121,4 +123,69 @@ export const resolveRepoPath = (repoRoot: string, targetPath: string): string | 
   match(resolveRepoPathChecked(repoRoot, targetPath))
     .with({ _tag: "Resolved" }, ({ resolvedPath }) => resolvedPath)
     .with({ _tag: "EscapesRoot" }, { _tag: "IoError" }, () => undefined)
+    .exhaustive()
+
+const walkUpForPnpmWorkspace = (startDir: string): string | undefined => {
+  let curr = resolve(startDir)
+  while (curr !== dirname(curr)) {
+    if (nodeSyncHostIo.existsSync(join(curr, "pnpm-workspace.yaml"))) return curr
+    curr = dirname(curr)
+  }
+  return undefined
+}
+
+export const CLI_REPO_ROOT =
+  walkUpForPnpmWorkspace(dirname(fileURLToPath(import.meta.url))) ?? process.cwd()
+
+export const findWorkspaceRoot = (startDir: string = process.cwd()): string =>
+  walkUpForPnpmWorkspace(startDir) ?? CLI_REPO_ROOT
+
+export const resolveClusterRepoRoot = (repoRoot: string): string =>
+  nodeSyncHostIo.existsSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"))
+    ? repoRoot
+    : (walkUpForPnpmWorkspace(repoRoot) ?? resolve(repoRoot))
+
+export const isIsolatedExternalWorkspace = (repoRoot: string): boolean => {
+  if (nodeSyncHostIo.existsSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"))) {
+    return false
+  }
+  const explicitEnvUrl =
+    process.env.OMNIGRAPH_URL && process.env.OMNIGRAPH_URL !== "http://127.0.0.1:8080"
+  if (explicitEnvUrl) {
+    return false
+  }
+  return (
+    resolveCanonicalRepoRoot(repoRoot, nodeSyncHostIo) !==
+    resolveCanonicalRepoRoot(CLI_REPO_ROOT, nodeSyncHostIo)
+  )
+}
+
+export const extractFlag = (subArgs: ReadonlyArray<string>, flagName: string): string | undefined => {
+  for (let i = 0; i < subArgs.length; i++) {
+    const arg = subArgs[i]
+    if (arg === flagName && i + 1 < subArgs.length) {
+      return subArgs[i + 1]
+    }
+    if (arg !== undefined && arg.startsWith(`${flagName}=`)) {
+      return arg.slice(flagName.length + 1)
+    }
+  }
+  return undefined
+}
+
+export const resolveRepoPathOrMessage = (
+  repoRoot: string,
+  userPath: string,
+  label: string,
+): { readonly ok: true; readonly resolvedPath: string } | { readonly ok: false; readonly message: string } =>
+  match(resolveRepoPathChecked(repoRoot, userPath))
+    .with({ _tag: "Resolved" }, ({ resolvedPath }) => ({ ok: true as const, resolvedPath }))
+    .with({ _tag: "EscapesRoot" }, () => ({
+      ok: false as const,
+      message: `${label} '${userPath}' escapes repository root`,
+    }))
+    .with({ _tag: "IoError" }, ({ code, message }) => ({
+      ok: false as const,
+      message: `Cannot resolve ${label} '${userPath}' (${code}: ${message})`,
+    }))
     .exhaustive()

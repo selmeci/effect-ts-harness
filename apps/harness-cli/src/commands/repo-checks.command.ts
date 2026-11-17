@@ -18,25 +18,12 @@ import {
 } from "@harness/gates"
 import { nodeSyncHostIo } from "@harness/infra"
 import { type CliEnv, type CliResult, findWorkspaceRoot } from "./daemon-and-omnigraph.service.js"
-import { resolveRepoPathChecked } from "./repo-path.js"
+import { extractFlag, resolveRepoPathOrMessage } from "./repo-path.js"
 
 const decodeUnknownJson = Schema.decodeOption(Schema.fromJsonString(Schema.Unknown))
 const decodeSnapshotArray = Schema.decodeEffect(
   Schema.fromJsonString(Schema.Array(EventVersionSnapshotEntry)),
 )
-
-const extractFlag = (subArgs: ReadonlyArray<string>, flagName: string): string | undefined => {
-  for (let i = 0; i < subArgs.length; i++) {
-    const arg = subArgs[i]
-    if (arg === flagName && i + 1 < subArgs.length) {
-      return subArgs[i + 1]
-    }
-    if (arg !== undefined && arg.startsWith(`${flagName}=`)) {
-      return arg.slice(flagName.length + 1)
-    }
-  }
-  return undefined
-}
 
 const failResult = (stderr: string, exitCode = 1): CliResult => ({ exitCode, stdout: "", stderr })
 
@@ -78,23 +65,6 @@ class RepoCheckCliError extends Schema.TaggedError<RepoCheckCliError>()(
 const isSnapshotsEffect = (
   value: unknown,
 ): value is Effect.Effect<ReadonlyArray<EventVersionSnapshotEntryType>> => Effect.isEffect(value)
-
-const resolveRepoPathOrMessage = (
-  repoRoot: string,
-  userPath: string,
-  label: string,
-): { readonly ok: true; readonly resolvedPath: string } | { readonly ok: false; readonly message: string } =>
-  match(resolveRepoPathChecked(repoRoot, userPath))
-    .with({ _tag: "Resolved" }, ({ resolvedPath }) => ({ ok: true as const, resolvedPath }))
-    .with({ _tag: "EscapesRoot" }, () => ({
-      ok: false as const,
-      message: `${label} '${userPath}' escapes repository root`,
-    }))
-    .with({ _tag: "IoError" }, ({ code, message }) => ({
-      ok: false as const,
-      message: `Cannot resolve ${label} '${userPath}' (${code}: ${message})`,
-    }))
-    .exhaustive()
 
 const resolveModuleSpecifier = (
   repoRoot: string,
@@ -202,30 +172,19 @@ const resolveOpenApiBaseline = (
     }
   }
 
-  const gitMain = nodeSyncHostIo.execFileSync(
-    "git",
-    ["show", "main:libs/sample/contract/openapi.json"],
-    { cwd: repoRoot },
-  )
-  const mainOk = match(gitMain)
-    .with({ _tag: "Exited" }, (e) => e.exitCode === 0 && e.stdout.trim().length > 0)
-    .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => false)
-    .exhaustive()
-  if (mainOk) {
-    return { ok: true, json: gitMain.stdout, source: "git:main" }
-  }
-
-  const gitHead = nodeSyncHostIo.execFileSync(
-    "git",
-    ["show", "HEAD:libs/sample/contract/openapi.json"],
-    { cwd: repoRoot },
-  )
-  const headOk = match(gitHead)
-    .with({ _tag: "Exited" }, (e) => e.exitCode === 0 && e.stdout.trim().length > 0)
-    .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => false)
-    .exhaustive()
-  if (headOk) {
-    return { ok: true, json: gitHead.stdout, source: "git:HEAD" }
+  for (const ref of ["main", "HEAD"] as const) {
+    const gitRes = nodeSyncHostIo.execFileSync(
+      "git",
+      ["show", `${ref}:libs/sample/contract/openapi.json`],
+      { cwd: repoRoot },
+    )
+    const ok = match(gitRes)
+      .with({ _tag: "Exited" }, (e) => e.exitCode === 0 && e.stdout.trim().length > 0)
+      .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => false)
+      .exhaustive()
+    if (ok) {
+      return { ok: true, json: gitRes.stdout, source: `git:${ref}` }
+    }
   }
 
   return { ok: true, json: committedJson, source: "committed" }

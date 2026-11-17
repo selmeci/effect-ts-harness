@@ -130,12 +130,151 @@ function isRequireCallee(callee) {
 const LEGACY_PROCESS_ENV_BRIDGE_PATHS = new Set([
   "libs/harness/graph/src/cluster-resolver.ts",
   "libs/harness/graph/src/omnigraph-sync.ts",
+  "libs/harness/graph/src/omnigraph-operations.ts",
   "libs/harness/gates/src/verify-stamp.ts",
   "libs/harness/gates/src/worktree.ts",
   "libs/harness/gates/src/mutation-check.ts",
   "libs/harness/gates/src/dst-engine.ts",
   "libs/harness/gates/src/services/active-mutant-context.ts",
 ])
+
+function isSilentFsFallbackCheckedPathEstree(filename) {
+  if (/(?:^|\/)libs\/harness\/graph\/src\/extractor\/compiler-session\.ts$/.test(filename)) {
+    return false
+  }
+  return /(?:^|\/)(?:libs\/harness\/(?:gates|graph)\/src|apps\/harness-(?:cli|mcp)\/src)\//.test(
+    filename,
+  )
+}
+
+function unwrapPipeTargetEstree(node) {
+  let curr = unwrapEstreeExpr(node)
+  while (curr != null && curr.type === "CallExpression") {
+    const callee = unwrapEstreeExpr(curr.callee)
+    if (
+      callee != null &&
+      callee.type === "MemberExpression" &&
+      callee.computed !== true &&
+      isIdentifier(callee.property, "pipe")
+    ) {
+      curr = unwrapEstreeExpr(callee.object)
+      continue
+    }
+    if (
+      callee != null &&
+      isIdentifier(callee, "pipe") &&
+      Array.isArray(curr.arguments) &&
+      curr.arguments.length > 0
+    ) {
+      curr = unwrapEstreeExpr(curr.arguments[0])
+      continue
+    }
+    break
+  }
+  return curr
+}
+
+function isAllOptionalSchemaStructEstree(node) {
+  const call = unwrapPipeTargetEstree(node)
+  if (
+    call == null ||
+    call.type !== "CallExpression" ||
+    getCalleeName(call.callee) !== "Schema.Struct" ||
+    !Array.isArray(call.arguments) ||
+    call.arguments.length === 0
+  ) {
+    return false
+  }
+  const obj = unwrapEstreeExpr(call.arguments[0])
+  if (obj == null || obj.type !== "ObjectExpression" || !Array.isArray(obj.properties) || obj.properties.length === 0) {
+    return false
+  }
+  return obj.properties.every((prop) => {
+    if (prop == null || prop.type !== "Property") return false
+    const val = unwrapPipeTargetEstree(prop.value)
+    return val != null && val.type === "CallExpression" && getCalleeName(val.callee) === "Schema.optional"
+  })
+}
+
+const PERSISTENCE_RESULT_CALLEES_ESTREE = new Set([
+  "writeGraphHeadMeta",
+  "updateGraphHeadCursor",
+  "writeServerMetaAtomic",
+])
+
+function isPersistenceResultCallExprEstree(node) {
+  const expr = unwrapEstreeExpr(node)
+  if (expr == null) return false
+  if (expr.type === "UnaryExpression" && expr.operator === "void") {
+    return isPersistenceResultCallExprEstree(expr.argument)
+  }
+  if (expr.type === "SequenceExpression" && Array.isArray(expr.expressions)) {
+    return expr.expressions.some(isPersistenceResultCallExprEstree)
+  }
+  if (expr.type !== "CallExpression") return false
+  const callee = unwrapEstreeExpr(expr.callee)
+  if (callee == null) return false
+  const name =
+    callee.type === "Identifier"
+      ? callee.name
+      : callee.type === "MemberExpression" && callee.computed !== true && callee.property?.type === "Identifier"
+        ? callee.property.name
+        : null
+  return name != null && PERSISTENCE_RESULT_CALLEES_ESTREE.has(name)
+}
+
+function isDiscardedPersistenceCallStatementEstree(node) {
+  if (node == null || node.type !== "ExpressionStatement") return false
+  return isPersistenceResultCallExprEstree(node.expression)
+}
+
+function isConditionalPortBindBailoutEstree(node) {
+  if (node == null || node.type !== "IfStatement" || node.alternate != null) return false
+  const test = unwrapEstreeExpr(node.test)
+  if (test == null || test.type !== "UnaryExpression" || test.operator !== "!") return false
+  const arg = unwrapEstreeExpr(test.argument)
+  if (arg == null || arg.type !== "Identifier" || !/bound/i.test(arg.name)) return false
+  if (node.consequent?.type === "ReturnStatement") return true
+  return (
+    node.consequent?.type === "BlockStatement" &&
+    Array.isArray(node.consequent.body) &&
+    node.consequent.body.length === 1 &&
+    node.consequent.body[0]?.type === "ReturnStatement"
+  )
+}
+
+function isVacuousLengthNonNegativeAssertionEstree(node) {
+  if (node == null || node.type !== "CallExpression") return false
+  const callee = unwrapEstreeExpr(node.callee)
+  if (
+    callee == null ||
+    callee.type !== "MemberExpression" ||
+    callee.computed === true ||
+    !isIdentifier(callee.property, "toBeGreaterThanOrEqual")
+  ) {
+    return false
+  }
+  if (!Array.isArray(node.arguments) || node.arguments.length !== 1) return false
+  const arg0 = unwrapEstreeExpr(node.arguments[0])
+  if (arg0 == null || arg0.type !== "Literal" || arg0.value !== 0) return false
+  const expectCall = unwrapEstreeExpr(callee.object)
+  if (
+    expectCall == null ||
+    expectCall.type !== "CallExpression" ||
+    !isIdentifier(unwrapEstreeExpr(expectCall.callee), "expect") ||
+    !Array.isArray(expectCall.arguments) ||
+    expectCall.arguments.length !== 1
+  ) {
+    return false
+  }
+  const expectArg = unwrapEstreeExpr(expectCall.arguments[0])
+  return (
+    expectArg != null &&
+    expectArg.type === "MemberExpression" &&
+    expectArg.computed !== true &&
+    isIdentifier(expectArg.property, "length")
+  )
+}
 
 function isPureTierProcessEnvBannedPath(filename) {
   const libsMatch = /(?:^|\/)(libs\/[^/]+\/[^/]+\/src\/.*)$/.exec(filename)
@@ -1466,7 +1605,10 @@ const syntaxBans = {
     }
 
     const hasResultTryFsReadEstree = (text) =>
-      text.includes("Result.try") && /(?:readTextSync|readdirSync|readBytesSync)/.test(text)
+      text.includes("Result.try") &&
+      /(?:readTextSync|readdirSync|readBytesSync)/.test(text) &&
+      !text.includes("procCmdlinePath") &&
+      !text.includes("/proc/")
 
     const isSilentEmptyFallbackEstree = (fnNode, allowExtended) => {
       const fn = unwrapEstree(fnNode)
@@ -2638,7 +2780,7 @@ const syntaxBans = {
           })
         }
 
-        if (!isTest && /(?:^|\/)libs\/harness\/gates\/src\//.test(filename)) {
+        if (!isTest && isSilentFsFallbackCheckedPathEstree(filename)) {
           if (calleeName === "safeFs") {
             context.report({
               node,
@@ -3015,6 +3157,12 @@ const syntaxBans = {
                   )
                 }
               }
+              if (varDecl.init != null && isAllOptionalSchemaStructEstree(varDecl.init)) {
+                reportOnce(
+                  varDecl,
+                  `[all-optional-contract-struct] Schema.Struct '${varName}' has all Schema.optional(...) fields in '${filename}' — require canonical non-optional contract fields.`,
+                )
+              }
             }
           }
           return
@@ -3050,6 +3198,19 @@ const syntaxBans = {
             }
             checkDomainBoundaryVarDeclarator(varDecl, filename)
           }
+        }
+      },
+      ExpressionStatement(node) {
+        const filename = getNormalizedFilename()
+        if (
+          !isTestFilePath(filename) &&
+          /(?:^|\/)(?:libs|apps)\/.*\/src\//.test(filename) &&
+          isDiscardedPersistenceCallStatementEstree(node)
+        ) {
+          reportOnce(
+            node,
+            `[discarded-persistence-result] Discarded persistence call result in '${filename}' is banned — inspect or propagate the returned Result/Effect.`,
+          )
         }
       },
       Literal(node) {
@@ -3245,6 +3406,12 @@ const testIntegrity = {
         ) {
           context.report({ node, message: discriminantIfBanMessage })
         }
+        if (isConditionalPortBindBailoutEstree(node)) {
+          context.report({
+            node,
+            message: `[conditional-port-bind-bailout] Conditional port-bind bailout ('if (!bound) return') in '${filename}' silently skips test assertions.`,
+          })
+        }
       },
       ConditionalExpression(node) {
         const filename = getNormalizedFilename()
@@ -3300,6 +3467,12 @@ const testIntegrity = {
         if (isEnforcedWorkspaceFile(filename)) {
           if (isImpreciseFailureAssert(node)) {
             context.report({ node, message: impreciseFailureAssertMessage })
+          }
+          if (isVacuousLengthNonNegativeAssertionEstree(node)) {
+            context.report({
+              node,
+              message: `[vacuous-length-nonnegative-assertion] Vacuous 'expect(...length).toBeGreaterThanOrEqual(0)' assertion in '${filename}' is always true — assert exact length or element contents.`,
+            })
           }
           if (
             isPropertyTestCall(node) &&

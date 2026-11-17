@@ -1,12 +1,16 @@
-import { createHash } from "node:crypto"
+import { createHash, randomBytes } from "node:crypto"
 import { basename, dirname, join, resolve } from "node:path"
 import {
   normalizeNonRootWorkspacePath,
+  OmnigraphChangeCursor,
+  OmnigraphCommitId,
   sanitizeWorktreeIdSegment,
+  toErrorReasonMessage,
   WorkspaceFilePath,
 } from "@harness/contract"
-import type { SyncHostIo } from "@harness/service/host-io"
-import { Effect, Option, Result, Schema } from "effect"
+import type { ExtendedHostIo, SyncHostIo } from "@harness/service/host-io"
+import { Effect, Result, Schema } from "effect"
+import { match } from "ts-pattern"
 
 export interface GitHeadState {
   readonly gitBranch: string | null
@@ -126,8 +130,15 @@ export const GraphHeadMetaSchema = Schema.Struct({
   headSha: Schema.NullOr(Schema.String),
   gitBranch: Schema.NullOr(Schema.String),
   updatedAt: Schema.String,
+  omnigraphCommitId: Schema.optional(Schema.NullOr(OmnigraphCommitId)),
+  changeFeedCursor: Schema.optional(Schema.NullOr(OmnigraphChangeCursor)),
 })
 export type GraphHeadMeta = typeof GraphHeadMetaSchema.Type
+
+export interface GraphHeadMetaExtra {
+  readonly omnigraphCommitId?: OmnigraphCommitId | null | undefined
+  readonly changeFeedCursor?: OmnigraphChangeCursor | null | undefined
+}
 
 const decodeGraphHeadMetaOption = Schema.decodeOption(Schema.fromJsonString(GraphHeadMetaSchema))
 
@@ -150,47 +161,273 @@ const resolveGraphMetaStateDir = (
   return join(validRoot, ".harness")
 }
 
+export type GraphHeadMetaReadState =
+  | { readonly _tag: "Present"; readonly meta: GraphHeadMeta }
+  | { readonly _tag: "Missing" }
+  | { readonly _tag: "Corrupt"; readonly path: string; readonly reason: string }
+
+export const readGraphHeadMetaState = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  env: NodeJS.ProcessEnv = process.env,
+): GraphHeadMetaReadState => {
+  const stateDir = resolveGraphMetaStateDir(repoRoot, env)
+  const metaPath = join(stateDir, "graph-head.json")
+  if (!hostIo.existsSync(metaPath)) {
+    return { _tag: "Missing" }
+  }
+  const readRes = Result.try(() => hostIo.readTextSync(metaPath))
+  return match(readRes)
+    .with({ _tag: "Failure" }, ({ failure }) => ({
+      _tag: "Corrupt" as const,
+      path: metaPath,
+      reason: toErrorReasonMessage(failure),
+    }))
+    .with({ _tag: "Success" }, ({ success: raw }) =>
+      match(decodeGraphHeadMetaOption(raw))
+        .with({ _tag: "Some" }, ({ value }) => ({
+          _tag: "Present" as const,
+          meta: value,
+        }))
+        .with({ _tag: "None" }, () => ({
+          _tag: "Corrupt" as const,
+          path: metaPath,
+          reason: "failed to decode as GraphHeadMeta",
+        }))
+        .exhaustive(),
+    )
+    .exhaustive()
+}
+
 export const readGraphHeadMeta = (
   repoRoot: string,
   hostIo: SyncHostIo,
   env: NodeJS.ProcessEnv = process.env,
+): GraphHeadMeta | null =>
+  match(readGraphHeadMetaState(repoRoot, hostIo, env))
+    .with({ _tag: "Present" }, ({ meta }) => meta)
+    .with({ _tag: "Missing" }, () => null)
+    .with({ _tag: "Corrupt" }, ({ path, reason }) => {
+      process.stderr.write(
+        `[harness/graph] Warning: failed to decode ${path} as GraphHeadMeta (${reason})\n`,
+      )
+      return null
+    })
+    .exhaustive()
+
+const GRAPH_HEAD_LOCK_STALE_MS = 5000
+
+const LockPayloadSchema = Schema.Struct({
+  ts: Schema.Finite,
+})
+const decodeLockPayloadOption = Schema.decodeOption(Schema.fromJsonString(LockPayloadSchema))
+
+type GraphHeadLockHostIo = SyncHostIo & Pick<ExtendedHostIo, "tryWriteExclusiveTextSync">
+
+const hasTryWriteExclusiveTextSync = (hostIo: SyncHostIo): hostIo is GraphHeadLockHostIo =>
+  "tryWriteExclusiveTextSync" in hostIo && typeof hostIo.tryWriteExclusiveTextSync === "function"
+
+const isLockPayloadStale = (lockPath: string, hostIo: SyncHostIo): boolean => {
+  const readRes = Result.try(() => hostIo.readTextSync(lockPath))
+  return match(readRes)
+    .with({ _tag: "Failure" }, () => !hostIo.existsSync(lockPath))
+    .with({ _tag: "Success" }, ({ success: raw }) =>
+      match(decodeLockPayloadOption(raw))
+        .with({ _tag: "None" }, () => true)
+        .with(
+          { _tag: "Some" },
+          ({ value }) => Date.now() - value.ts > GRAPH_HEAD_LOCK_STALE_MS,
+        )
+        .exhaustive(),
+    )
+    .exhaustive()
+}
+
+export const withGraphHeadLock = <A>(
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  fn: () => A,
+  env: NodeJS.ProcessEnv = process.env,
+): A => {
+  if (!hasTryWriteExclusiveTextSync(hostIo)) {
+    return fn()
+  }
+  const stateDir = resolveGraphMetaStateDir(repoRoot, env)
+  const lockPath = join(stateDir, ".graph-head.json.lock")
+  const dirReady = Result.isSuccess(
+    Result.try(() => {
+      if (!hostIo.existsSync(stateDir)) {
+        hostIo.mkdirRecursiveSync(stateDir)
+      }
+    }),
+  )
+  if (!dirReady) {
+    return fn()
+  }
+
+  const writeLockOnce = () =>
+    hostIo.tryWriteExclusiveTextSync(
+      lockPath,
+      JSON.stringify({ pid: process.pid, ts: Date.now() }),
+      0o600,
+    )
+
+  const acquired = match(writeLockOnce())
+    .with({ _tag: "Written" }, () => true)
+    .with({ _tag: "Failed" }, () => false)
+    .with({ _tag: "Exists" }, () => {
+      if (!isLockPayloadStale(lockPath, hostIo)) {
+        return false
+      }
+      Result.try(() => {
+        if (hostIo.existsSync(lockPath)) {
+          hostIo.unlinkSync(lockPath)
+        }
+      })
+      return match(writeLockOnce())
+        .with({ _tag: "Written" }, () => true)
+        .with({ _tag: "Exists" }, { _tag: "Failed" }, () => false)
+        .exhaustive()
+    })
+    .exhaustive()
+
+  if (!acquired) {
+    return fn()
+  }
+
+  const fnResult = Result.try({
+    try: () => fn(),
+    catch: (cause) => cause,
+  })
+  Result.try(() => {
+    if (hostIo.existsSync(lockPath)) {
+      hostIo.unlinkSync(lockPath)
+    }
+  })
+  return match(fnResult)
+    .with({ _tag: "Success" }, ({ success }) => success)
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      // oxlint-disable-next-line -- synchronous lock boundary rethrowing callback error
+      throw failure
+    })
+    .exhaustive()
+}
+
+const persistGraphHeadMeta = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  meta: GraphHeadMeta,
+  env: NodeJS.ProcessEnv = process.env,
 ): GraphHeadMeta | null => {
   const stateDir = resolveGraphMetaStateDir(repoRoot, env)
-  const metaPath = join(stateDir, "graph-head.json")
-  if (!hostIo.existsSync(metaPath)) {
-    return null
-  }
-  const raw = Result.getOrElse(
-    Result.try(() => hostIo.readTextSync(metaPath)),
-    () => "",
-  )
-  return Option.getOrNull(decodeGraphHeadMetaOption(raw))
+  const targetPath = join(stateDir, "graph-head.json")
+  const tmpPath = join(stateDir, `.graph-head.json.${process.pid}.${randomBytes(6).toString("hex")}.tmp`)
+  const writeResult = Result.try(() => {
+    if (!hostIo.existsSync(stateDir)) {
+      hostIo.mkdirRecursiveSync(stateDir)
+    }
+    hostIo.writeTextSync(tmpPath, JSON.stringify(meta, null, 2))
+    hostIo.renameSync(tmpPath, targetPath)
+  })
+  return match(writeResult)
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      process.stderr.write(
+        `[harness/graph] Error: failed to persist ${targetPath}: ${String(failure)}\n`,
+      )
+      Result.try(() => {
+        if (hostIo.existsSync(tmpPath)) {
+          hostIo.unlinkSync(tmpPath)
+        }
+      })
+      return null
+    })
+    .with({ _tag: "Success" }, () => meta)
+    .exhaustive()
 }
+
+export const updateGraphHeadCursor = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  cursor: OmnigraphChangeCursor | null,
+  env: NodeJS.ProcessEnv = process.env,
+): GraphHeadMeta | null =>
+  withGraphHeadLock(
+    repoRoot,
+    hostIo,
+    () => {
+      const state = readGraphHeadMetaState(repoRoot, hostIo, env)
+      const existingOrErr = match(state)
+        .with({ _tag: "Present" }, ({ meta }) => ({ ok: true as const, meta }))
+        .with({ _tag: "Missing" }, () => ({ ok: true as const, meta: null }))
+        .with({ _tag: "Corrupt" }, ({ path, reason }) => {
+          process.stderr.write(
+            `[harness/graph] Error: refusing cursor update on corrupt ${path} (${reason}); run full graph sync to rebuild\n`,
+          )
+          return { ok: false as const }
+        })
+        .exhaustive()
+      if (!existingOrErr.ok) {
+        return null
+      }
+      const existing = existingOrErr.meta
+      const meta: GraphHeadMeta = {
+        headSha: existing?.headSha ?? null,
+        gitBranch: existing?.gitBranch ?? null,
+        updatedAt: new Date().toISOString(),
+        ...(existing?.omnigraphCommitId !== undefined
+          ? { omnigraphCommitId: existing.omnigraphCommitId }
+          : {}),
+        changeFeedCursor: cursor,
+      }
+      return persistGraphHeadMeta(repoRoot, hostIo, meta, env)
+    },
+    env,
+  )
 
 export const writeGraphHeadMeta = (
   repoRoot: string,
   hostIo: SyncHostIo,
-  headState?: GitHeadState,
+  headState?: GitHeadState & GraphHeadMetaExtra,
   env: NodeJS.ProcessEnv = process.env,
-): GraphHeadMeta | null => {
-  const resolved = headState ?? resolveGitHeadState(repoRoot, hostIo, env)
-  if (resolved.headSha === null && resolved.gitBranch === null) {
-    return null
-  }
-  const stateDir = resolveGraphMetaStateDir(repoRoot, env)
-  const meta: GraphHeadMeta = {
-    headSha: resolved.headSha,
-    gitBranch: resolved.gitBranch,
-    updatedAt: new Date().toISOString(),
-  }
-  Result.try(() => {
-    if (!hostIo.existsSync(stateDir)) {
-      hostIo.mkdirRecursiveSync(stateDir)
-    }
-    hostIo.writeTextSync(join(stateDir, "graph-head.json"), JSON.stringify(meta, null, 2))
-  })
-  return meta
-}
+  extra?: GraphHeadMetaExtra,
+): GraphHeadMeta | null =>
+  withGraphHeadLock(
+    repoRoot,
+    hostIo,
+    () => {
+      const resolved = headState ?? resolveGitHeadState(repoRoot, hostIo, env)
+      const hasExplicitOmnigraphExtra =
+        extra?.omnigraphCommitId !== undefined ||
+        extra?.changeFeedCursor !== undefined ||
+        headState?.omnigraphCommitId !== undefined ||
+        headState?.changeFeedCursor !== undefined
+      if (resolved.headSha === null && resolved.gitBranch === null && !hasExplicitOmnigraphExtra) {
+        return null
+      }
+      const existing = readGraphHeadMeta(repoRoot, hostIo, env)
+      const omnigraphCommitId =
+        extra?.omnigraphCommitId !== undefined
+          ? extra.omnigraphCommitId
+          : headState?.omnigraphCommitId !== undefined
+            ? headState.omnigraphCommitId
+            : existing?.omnigraphCommitId
+      const changeFeedCursor =
+        extra?.changeFeedCursor !== undefined
+          ? extra.changeFeedCursor
+          : headState?.changeFeedCursor !== undefined
+            ? headState.changeFeedCursor
+            : existing?.changeFeedCursor
+      const meta: GraphHeadMeta = {
+        headSha: resolved.headSha,
+        gitBranch: resolved.gitBranch,
+        updatedAt: new Date().toISOString(),
+        ...(omnigraphCommitId !== undefined ? { omnigraphCommitId } : {}),
+        ...(changeFeedCursor !== undefined ? { changeFeedCursor } : {}),
+      }
+      return persistGraphHeadMeta(repoRoot, hostIo, meta, env)
+    },
+    env,
+  )
 
 export const OmnigraphReconcileReason = Schema.Literals([
   "up-to-date",
@@ -206,6 +443,7 @@ export const OmnigraphReconcileInput = Schema.Struct({
   currentHeadSha: Schema.NullOr(Schema.String),
   recordedGitBranch: Schema.NullOr(Schema.String),
   currentGitBranch: Schema.NullOr(Schema.String),
+  worktreeSlug: Schema.optional(Schema.NullOr(Schema.String)),
 })
 export type OmnigraphReconcileInput = typeof OmnigraphReconcileInput.Type
 
@@ -221,12 +459,16 @@ export const sanitizeOmnigraphBranchSlug = (raw: string): string =>
 export const decideOmnigraphReconcile = Effect.fn("OmnigraphReconcile.decide")(function* (
   input: OmnigraphReconcileInput,
 ) {
+  const worktreeTrimmed = input.worktreeSlug?.trim() ?? ""
   const branchTrimmed = input.currentGitBranch?.trim() ?? ""
   const isFeatureBranch =
     branchTrimmed.length > 0 && branchTrimmed !== "main" && branchTrimmed !== "master"
-  const targetOmnigraphBranch = isFeatureBranch
-    ? `impl/branch-${sanitizeOmnigraphBranchSlug(branchTrimmed)}`
-    : "main"
+  const targetOmnigraphBranch =
+    worktreeTrimmed.length > 0
+      ? `impl/wt-${sanitizeOmnigraphBranchSlug(worktreeTrimmed)}`
+      : isFeatureBranch
+        ? `impl/branch-${sanitizeOmnigraphBranchSlug(branchTrimmed)}`
+        : "main"
 
   if (!input.snapshotExists) {
     return yield* Effect.succeed({
@@ -277,6 +519,14 @@ export const resolveCanonicalRepoRoot = (repoRoot: string, hostIo: SyncHostIo): 
         if (content.startsWith("gitdir:")) {
           const rawGitDir = content.slice("gitdir:".length).trim()
           const gitDir = resolve(absRoot, rawGitDir)
+          const backPtrFile = join(gitDir, "gitdir")
+          if (hostIo.existsSync(backPtrFile) && hostIo.isFileSync(backPtrFile)) {
+            const rawBackPtr = hostIo.readTextSync(backPtrFile).trim()
+            const resolvedBackPtr = resolve(gitDir, rawBackPtr)
+            if (resolvedBackPtr !== dotGit) {
+              return absRoot
+            }
+          }
           const commonDirFile = join(gitDir, "commondir")
           if (hostIo.existsSync(commonDirFile)) {
             const commondir = hostIo.readTextSync(commonDirFile).trim()

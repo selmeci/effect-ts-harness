@@ -31,6 +31,7 @@ import {
   resolveClusterRepoRoot,
   resolveNxAffectedArgs,
 } from "./daemon-and-omnigraph.service.js"
+import { runOfflineOmnigraphLintGate } from "./omnigraph-auth-and-drift.js"
 import {
   checkPlanEarsConsistency,
   finalizeProjectionCliResult,
@@ -239,19 +240,36 @@ export const handlePlanCheck = (
     }
 
     if (!graphOnly) {
+      const omnigraphStartedAtMs = Date.now()
       const snapshotPath = join(repoRoot, ".harness", "plan-graph-snapshot.json")
       if (isIsolatedExternalWorkspace(repoRoot)) {
         saveGraphSnapshot(graph, snapshotPath, nodeSyncHostIo)
         recordTelemetry(options, {
           surface: "cli",
           category: "graph_query",
-          toolName: "omnigraph:sync-plan",
+          toolName: "graph:snapshot-local",
           outcome: "ok",
-          durationMs: 1,
+          durationMs: Math.max(0, Date.now() - omnigraphStartedAtMs),
           engineSource: "local",
+          detail: "skipped-isolated-workspace",
         })
       } else {
-        yield* ensureLocalOmnigraphReady(repoRoot)
+        const lintRes = yield* runOfflineOmnigraphLintGate(resolveClusterRepoRoot(repoRoot))
+        if (!lintRes.ok) {
+          return {
+            exitCode: 1,
+            stdout: "",
+            stderr: `[GATE FAILURE] plan-check:omnigraph-lint\n${lintRes.message}`,
+          }
+        }
+        const omnigraphReady = yield* ensureLocalOmnigraphReady(repoRoot)
+        if (!omnigraphReady) {
+          return {
+            exitCode: 1,
+            stdout: "",
+            stderr: "[GATE FAILURE] plan-check:omnigraph-ready\nOmnigraph server is not ready",
+          }
+        }
         const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
         const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
           repoRoot: resolveClusterRepoRoot(repoRoot),
@@ -274,7 +292,7 @@ export const handlePlanCheck = (
           category: "graph_query",
           toolName: "omnigraph:sync-plan",
           outcome: syncRes.syncedToOmnigraph ? "ok" : "fail",
-          durationMs: 1,
+          durationMs: Math.max(0, Date.now() - omnigraphStartedAtMs),
           engineSource: syncRes.syncedToOmnigraph ? "omnigraph" : "memory-fallback",
         })
         if (!syncRes.syncedToOmnigraph) {

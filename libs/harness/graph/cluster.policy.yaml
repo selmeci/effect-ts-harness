@@ -1,12 +1,17 @@
+# Unmounted cluster-scope Cedar policy reference for the Harness Omnigraph cluster.
+# Kept on disk alongside graph.policy.yaml as a reference (Omnigraph CLI rejects
+# mounting two policy bundles simultaneously) for cluster-level operations
+# (config_manage, graph_list) across actors.
 version: 1
 groups:
-  owners: [harness-cli, agent-mcp, default]
+  owners: [harness-cli]
+  readers: [agent-mcp, harness-cli]
 rules:
   - id: owners-manage-config
     allow:
       actors: { group: owners }
       actions: [config_manage]
-  - id: owners-list-graphs
+  - id: readers-list-graphs
     allow:
-      actors: { group: owners }
+      actors: { group: readers }
       actions: [graph_list]

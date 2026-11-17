@@ -5,11 +5,9 @@
       "args": ["--import", "./tools/node-ts-resolver.mjs", "apps/harness-mcp/src/server.ts"]
     },
     "omnigraph-mcp": {
-      "command": "npx",
-      "args": ["-y", "@modernrelay/omnigraph-mcp@0.14.0"],
+      "command": "node",
+      "args": ["./tools/omnigraph-mcp-launcher.mjs"],
       "env": {
-        "OMNIGRAPH_BASE_URL": "http://127.0.0.1:8080",
-        "OMNIGRAPH_URL": "http://127.0.0.1:8080",
         "OMNIGRAPH_GRAPH_ID": "harness",
         "OMNIGRAPH_SUBJECT": "agent-mcp"
       }
