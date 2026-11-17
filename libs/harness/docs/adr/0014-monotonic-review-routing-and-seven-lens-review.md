@@ -10,10 +10,10 @@ enforced_by:
   - libs/harness/contract/src/review-routing.ts
   - libs/harness/contract/src/workspace-and-process.ts
   - libs/harness/decision/src/review-router-decision.ts
+  - libs/harness/decision/test/review-router.test.ts
   - apps/harness-mcp/src/tools/graph-navigation.tools.ts
   - apps/harness-mcp/src/tools/review-route-helpers.ts
   - apps/harness-cli/test/adapter-config.test.ts
-  - libs/harness/gates/src/plugins/gc/gc-doc-truth.plugin.ts
 spans:
   - ReviewRouter.inferDiffSignals
   - ReviewRouter.decideDeterministic
@@ -81,7 +81,7 @@ Allow the review skill to directly edit files during review like generic ce-code
 
 ### Positive Consequences
 
-- Pure `ReviewRouter.decideDeterministic` (`R = never`) provides a fast, inspectable deterministic floor, while unit and property tests over `Harness.routeReviewDiff` prove hybrid depth monotonicity and mandatory lens preservation across all model outputs.
+- Pure `ReviewRouter.decideDeterministic` (`R = never`) provides a fast, inspectable deterministic floor, while unit and property tests over `Harness.routeReviewDiff` verify hybrid depth monotonicity and mandatory lens preservation across all model outputs.
 - `harness_review_route` gives review workflows the routing plan, manifest diagnostics, graph degradation status, and precomputed Effect-graph context (`touchedSymbols`, `reachingTests`, `governanceRefs`) in a single MCP call.
 
 ### Negative Consequences and Trade-offs
@@ -92,7 +92,6 @@ Allow the review skill to directly edit files during review like generic ce-code
 
 | Rule | Enforced By | Gate / Mechanism | Governed Symbols |
 | :--- | :--- | :--- | :--- |
-| Path-safe branded scalars, non-empty `ReviewRawDiffInput`, shared `getReviewDepthRank`, and closed `ReviewRoutingPlan` union in `type:contract` with `effect`-only imports | `libs/harness/contract/src/review-routing.ts` | `HarnessTierTopology.decide` & `SelfDogfooding.decide` | `ReviewRouter.inferDiffSignals`, `InvalidReviewRouteInputError` |
-| Pure deterministic floor (`R = never`), monotonic `Harness.routeReviewDiff` merge, and logged `degraded-fallback` with `degradedReason` | `libs/harness/decision/src/review-router-decision.ts` & `apps/harness-mcp/src/tools/graph-navigation.tools.ts` | `pnpm harness verify` | `ReviewRouter.decideDeterministic`, `Harness.routeReviewDiff`, `HarnessMcp.routeReview` |
-| Cross-adapter skill, `SPECIALIST_REVIEWER_IDS` agent-to-persona body parity, SDO frontmatter, `CANONICAL_MCP_TOOL_NAMES` catalog, and runtime tool/server-name leakage bans | `apps/harness-cli/test/adapter-config.test.ts` | `pnpm harness verify` | `HarnessMcp.routeReview` |
-| Documentation path existence (`doc-missing-file-path`) and banned/phantom API checks (`doc-banned-or-phantom-tech`) across specs, ADRs, and adapter markdown | `libs/harness/gates/src/plugins/gc/gc-doc-truth.plugin.ts` | `pnpm harness gc --strict` | `HarnessMcp.routeReview` |
+| Path-safe branded scalars, non-empty `ReviewRawDiffInput`, shared `getReviewDepthRank`, `CANONICAL_MCP_TOOL_NAMES`, and closed `ReviewRoutingPlan` union in `type:contract` with `effect`-only imports | `libs/harness/contract/src/review-routing.ts` & `libs/harness/contract/src/workspace-and-process.ts` | `Schema.brand` & `Schema.Literals` (`REVIEW_DEPTH_RANK` exhaustive lookup, `CANONICAL_MCP_TOOL_NAMES`) | `ReviewRouter.inferDiffSignals`, `InvalidReviewRouteInputError` |
+| Pure deterministic floor (`R = never`), monotonic `Harness.routeReviewDiff` merge, and logged `degraded-fallback` with `degradedReason` | `libs/harness/decision/src/review-router-decision.ts`, `libs/harness/decision/test/review-router.test.ts`, `apps/harness-mcp/src/tools/graph-navigation.tools.ts`, & `apps/harness-mcp/src/tools/review-route-helpers.ts` | `ReviewRouter.decideDeterministic`, `Harness.routeReviewDiff`, & `HarnessMcp.routeReview` | `ReviewRouter.decideDeterministic`, `Harness.routeReviewDiff`, `HarnessMcp.routeReview` |
+| Cross-adapter skill, `SPECIALIST_REVIEWER_IDS` agent-to-persona body parity, SDO frontmatter, `CANONICAL_MCP_TOOL_NAMES` catalog, and runtime tool/server-name leakage bans | `apps/harness-cli/test/adapter-config.test.ts` | `SPECIALIST_REVIEWER_IDS` adapter parity suite | `HarnessMcp.routeReview` |

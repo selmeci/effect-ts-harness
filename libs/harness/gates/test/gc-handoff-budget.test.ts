@@ -2079,6 +2079,57 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState => {
           )
         }),
     )
+
+    it.effect(
+      "flags stale-temporal-context in status: accepted EARS specs, ignoring status: proposed and fenced code blocks",
+      () =>
+        Effect.gen(function* () {
+          const acceptedMd = `---
+id: SPEC-0099
+status: accepted
+---
+
+## Context
+Today, the router lacks deterministic fallback handling.
+
+\`\`\`ts
+// Currently, this is inside a fenced code block
+\`\`\`
+
+\`\`\`markdown
+Currently, this is inside a fenced code block and must be ignored.
+\`\`\`
+
+## Requirements
+
+### 1 · Area
+**Source:** test source
+
+| ID | Pattern | Requirement | Verification |
+|---|---|---|---|
+| REQ-1.1 | Ubiquitous | The harness **shall** route deterministically. | test |
+`
+          const acceptedReport = yield* decideEarsSpecQuality({
+            docPath: "docs/specs/accepted.md",
+            markdown: acceptedMd,
+          })
+          expect(acceptedReport.clean).toBe(false)
+          const temporalFindings = acceptedReport.findings.filter(
+            (f) => f.kind === "stale-temporal-context",
+          )
+          expect(temporalFindings).toHaveLength(1)
+          expect(temporalFindings[0]?.line).toBe(7)
+
+          const proposedMd = acceptedMd.replace("status: accepted", "status: proposed")
+          const proposedReport = yield* decideEarsSpecQuality({
+            docPath: "docs/specs/proposed.md",
+            markdown: proposedMd,
+          })
+          expect(
+            proposedReport.findings.some((f) => f.kind === "stale-temporal-context"),
+          ).toBe(false)
+        }),
+    )
   })
 
   describe("decideAdrDocQuality / lintAdrDocMarkdown", () => {
@@ -2604,6 +2655,28 @@ Every domain fixture must have the scope:fixture tag applied in project.json.
         "references unconfigured Nx tag 'scope:fixture' as a rule — 'scope:fixture' is not configured in nx.json.",
       )
     }),
+    )
+
+    it.effect(
+      "flags adr-overstated-proof-claim outside fenced code blocks while ignoring negations",
+      () =>
+        Effect.gen(function* () {
+          const adrWithOverclaim = validCanonicalAdr.replace(
+            "## Context and Problem Statement",
+            "## Context and Problem Statement\n\nUnit tests prove this invariant holds.\nTests do not prove absence of bugs.\n\n```\nUnit tests prove code inside fences is ignored.\n```",
+          )
+
+          const report = yield* decideAdrDocQuality({
+            docPath: "docs/adr/test.md",
+            markdown: adrWithOverclaim,
+          })
+          expect(report.clean).toBe(false)
+          const proofFindings = report.findings.filter(
+            (f) => f.kind === "adr-overstated-proof-claim",
+          )
+          expect(proofFindings).toHaveLength(1)
+          expect(proofFindings[0]?.message).toContain("verify")
+        }),
     )
 
     it.effect(

@@ -40,6 +40,7 @@ import {
   PackageManifestName,
   PackageManifestPath,
   PluginId,
+  REVIEW_DEPTH_LEVELS,
   REVIEW_DEPTH_RANK,
   ReviewChangedLines,
   ReviewDepth,
@@ -652,6 +653,12 @@ describe("@harness/contract schemas", () => {
     expect(getReviewDepthRank(ReviewDepth.make("lite"))).toBe(1)
     expect(getReviewDepthRank(ReviewDepth.make("focused"))).toBe(2)
     expect(getReviewDepthRank(ReviewDepth.make("full"))).toBe(3)
+    const ranks = REVIEW_DEPTH_LEVELS.map((d) => getReviewDepthRank(ReviewDepth.make(d)))
+    expect(ranks).toEqual([0, 1, 2, 3])
+    expect(Object.keys(REVIEW_DEPTH_RANK)).toEqual([...REVIEW_DEPTH_LEVELS])
+    for (let i = 1; i < ranks.length; i++) {
+      expect(ranks[i]!).toBeGreaterThan(ranks[i - 1]!)
+    }
     expect(DEFAULT_REVIEW_ROUTE_TIMEOUT_MS).toBe(1500)
     expect(() => ReviewTimeoutMillis.make(99)).toThrow()
     expect(() => ReviewTimeoutMillis.make(30001)).toThrow()

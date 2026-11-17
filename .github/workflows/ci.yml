@@ -23,3 +23,7 @@ jobs:
           else
             pnpm exec nx affected -t verify --base=HEAD~1
           fi
+      - name: Verify adapter configuration parity
+        run: CI=true pnpm --dir apps/harness-cli exec vitest run test/adapter-config.test.ts
+      - name: Run strict GraphGC gate
+        run: node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts gc --strict

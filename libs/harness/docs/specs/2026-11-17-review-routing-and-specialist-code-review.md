@@ -29,7 +29,7 @@ errors:
 
 ## Context
 
-Today, automated and agent-driven code review in the Effect-TS Harness lacks a typed, deterministic routing contract, a precomputed Effect graph context bundle, and parity across both Antigravity and Claude Code adapters. Reviewing a diff without structured signal extraction causes two opposite failure modes: small, localized diffs over-dispatch multiple specialist reviewers and burn context tokens, while cross-cutting diffs touching `scope:web` atoms, D1/DO migrations, `type:contract` schemas, or framework `type:core` packages miss domain-specific failure modes, and adapter drift risks inconsistent specialist rosters or read-only guarantees.
+Without a typed, deterministic review-routing contract, automated and agent-driven code review in the Effect-TS Harness lacks a precomputed Effect graph context bundle and parity across both Antigravity and Claude Code adapters. Reviewing a diff without structured signal extraction causes two opposite failure modes: small, localized diffs over-dispatch multiple specialist reviewers and burn context tokens, while cross-cutting diffs touching `scope:web` atoms, D1/DO migrations, `type:contract` schemas, or framework `type:core` packages miss domain-specific failure modes, and adapter drift risks inconsistent specialist rosters or read-only guarantees.
 
 - **Reused Contracts / Errors:** `NxTierTag`, `NxScopeTag`, `EnclosingSymbolName`, `ErrorReasonMessage`, `McpToolName`, `CANONICAL_MCP_TOOL_NAMES`, `stub` from `@harness/contract`
 - **Reused Services:** `DecisionModel.DecisionModel` (`effect/ai/DecisionModel`), `LocalDecisionModel` (`@harness/infra`)

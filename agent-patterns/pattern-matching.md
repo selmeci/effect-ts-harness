@@ -122,4 +122,38 @@ export const decideAlbumQuota = Effect.fn("Sample.decide")(function* (
 | `switch (x) { ... }`                          | **Banned**   | Banned in all domain/service/infra/app code by `syntax-bans`.                                                                                                                                      |
 | `if (...) ... else if (...)`                  | **Banned**   | Multi-branch `if / else if` chains are banned; use `match(...)` with `.with(...)` branches.                                                                                                        |
 | `if (union.tag === "A")` / `Option.isSome(x)` | **Banned**   | Branching on a union discriminant in `if / else` or ternary `? :` is banned by `syntax-bans` and `discriminant-branching` in `checkEffectGraph` — even for 2 variants.                             |
+| `x === "a" ? 1 : x === "b" ? 2 : 3`           | **Banned**   | Nested equality ternaries over literal unions are banned by `chained-equality-ternary` in `GraphGc.decide`; use `match(...)` or an exhaustive `Record` lookup in `type:contract` (see §5).       |
 | Simple `if (count <= 0)`                      | **Allowed**  | Simple 1-branch `if` or `if / else` is permitted **only** when the condition does not inspect a discriminant or tag of a union type.                                                               |
+
+---
+
+## 5. Exhaustive Branded Literal Lookups in `type:contract` (Zero `ts-pattern`)
+
+`type:contract` packages may import `effect` only and cannot import `ts-pattern`. To map a branded `Schema.Literals` union (such as `ReviewDepth`) to values without banned nested equality ternaries (`chained-equality-ternary` in `GraphGc.decide`), use a `const` lookup table constrained with `as const satisfies Record<(typeof LITERALS)[number], Value>` and a 2-line helper:
+
+```ts
+import { Schema } from "effect"
+
+export const REVIEW_DEPTH_LEVELS = ["skip", "lite", "focused", "full"] as const
+export const ReviewDepth = Schema.Literals(REVIEW_DEPTH_LEVELS).pipe(Schema.brand("ReviewDepth"))
+export type ReviewDepth = typeof ReviewDepth.Type
+
+export const ReviewDepthRank = Schema.Literals([0, 1, 2, 3]).pipe(Schema.brand("ReviewDepthRank"))
+export type ReviewDepthRank = typeof ReviewDepthRank.Type
+
+export const REVIEW_DEPTH_RANK = {
+  skip: ReviewDepthRank.make(0),
+  lite: ReviewDepthRank.make(1),
+  focused: ReviewDepthRank.make(2),
+  full: ReviewDepthRank.make(3),
+} as const satisfies Record<(typeof REVIEW_DEPTH_LEVELS)[number], ReviewDepthRank>
+
+const lookupReviewDepthRank = (
+  depth: (typeof REVIEW_DEPTH_LEVELS)[number],
+): ReviewDepthRank => REVIEW_DEPTH_RANK[depth]
+
+export const getReviewDepthRank = (depth: ReviewDepth): ReviewDepthRank =>
+  lookupReviewDepthRank(depth)
+```
+
+This achieves zero casts, zero fallback branches, and compile-time exhaustiveness (`tsc` fails immediately if a literal is added to `REVIEW_DEPTH_LEVELS` without updating `REVIEW_DEPTH_RANK`).

@@ -55,6 +55,30 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     "Effect v4 removed Effect/Either, Effect/ParseResult, and Schema.decodeEither/decodeUnknownEither. Use Effect/Result or Effect/Exit with Schema.decodeExit, Schema.decodeUnknownExit, Schema.decodeSync, or Schema.decodeUnknownSync (see repos/effect/LLMS.md).",
   ),
   makeTriageRule(
+    "ts7053-brand-index-lookup",
+    /TS7053[\s\S]{0,200}Brand|Element implicitly has an 'any' type because expression of type[\s\S]{0,160}Brand/i,
+    "compile",
+    "TS7053 indexing with a Brand type: define a narrow `(key: (typeof LITERALS)[number]) => V` helper indexing a `satisfies Record<(typeof LITERALS)[number], V>` map in `type:contract`, or use `match(val)...exhaustive()` from `ts-pattern`.",
+  ),
+  makeTriageRule(
+    "chained-equality-ternary",
+    /chained-equality-ternary|Chained equality ternary on/,
+    "mechanical",
+    "Replace chained equality ternary (`x === a ? ... : x === b ? ... : ...`) with `match(value).with(...).exhaustive()` from `ts-pattern` (or `RECORD[key]` with `satisfies Record<(typeof LITERALS)[number], V>` lookup in `type:contract`).",
+  ),
+  makeTriageRule(
+    "stale-temporal-context",
+    /stale-temporal-context/,
+    "mechanical",
+    "Accepted EARS specs must state timeless problem framing — rewrite transient pre-implementation wording ('Today, ...', 'Currently, ...', 'Right now, ...', 'At present, ...') into timeless present-tense problem statements.",
+  ),
+  makeTriageRule(
+    "adr-overstated-proof-claim",
+    /adr-overstated-proof-claim/,
+    "mechanical",
+    "Replace empirical 'tests ... prove' claims in ADR prose with 'tests ... verify' or 'tests ... exercise', reserving 'prove' for type-level or formal proofs.",
+  ),
+  makeTriageRule(
     "schema-decode-sync-unknown-input",
     /decodeSync[\s\S]{0,160}Argument of type .* is not assignable to parameter of type|Argument of type .* is not assignable to parameter of type[\s\S]{0,160}decodeSync/i,
     "compile",

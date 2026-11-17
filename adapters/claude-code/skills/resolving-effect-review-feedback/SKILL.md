@@ -41,7 +41,7 @@ Accept feedback from:
 
 Decompose **EVERY single discrete claim** BEFORE evaluating Out-of-Scope rules — **never group multiple sub-bullets, functions, or clauses into one ID**:
 
-- **Atomic IDs:** `F-<item>.<sub_bullet>` (`Critical`/`Important`) and `S-<item>.<sub_bullet>` (`Suggestions`/`Nitpicks`/inline nits). If one sub-bullet spans multiple files in disjoint fixer units, split further (`F-10.1a`, `F-10.1b`). Split mixed doc findings into semantic (`Assigned Unit: orchestrator-phase3`) vs numeric/LOC (`Assigned Unit: orchestrator-phase5`).
+- **Atomic IDs:** `F-<item>.<sub_bullet>` (`Critical`/`Important`) and `S-<item>.<sub_bullet>` (`Suggestions`/`Nitpicks`/inline nits). If one sub-bullet spans multiple files in disjoint fixer units, split further (`F-10.1a`, `F-10.1b`). When a single reviewer sentence or bullet critiques multiple lines or distinct defects in the same governance doc (e.g., an overstated `enforced_by` entry on line 16 AND an overstated `"prove"` verb on line 84), split each critique into its own sub-ID (`F-19.1a`, `F-19.1b`) so fixing one clause never marks the sibling clause resolved. Split mixed doc findings into semantic (`Assigned Unit: orchestrator-phase3`) vs numeric/LOC (`Assigned Unit: orchestrator-phase5`).
 - **Source Anchor:** Required on every row (`Crit-1.a`, `Imp-10.b`, `Sug-3.a`, `PR-Thread-12345.1`).
 - **Out-of-Scope Predicate (Observable Only — Zero Nuance Clauses):** An inventoried sub-claim may be moved to the `Out-of-Scope Rejection Table` (`out-of-scope`) ONLY IF **BOTH** hold:
   1. It requests a brand-new product feature absent from the active EARS spec (`REQ-*`); **AND**

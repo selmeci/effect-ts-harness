@@ -31,14 +31,12 @@ export const REVIEW_DEPTH_RANK = {
   full: ReviewDepthRank.make(3),
 } as const satisfies Record<(typeof REVIEW_DEPTH_LEVELS)[number], ReviewDepthRank>
 
+const lookupReviewDepthRank = (
+  depth: (typeof REVIEW_DEPTH_LEVELS)[number],
+): ReviewDepthRank => REVIEW_DEPTH_RANK[depth]
+
 export const getReviewDepthRank = (depth: ReviewDepth): ReviewDepthRank =>
-  depth === "skip"
-    ? REVIEW_DEPTH_RANK.skip
-    : depth === "lite"
-      ? REVIEW_DEPTH_RANK.lite
-      : depth === "focused"
-        ? REVIEW_DEPTH_RANK.focused
-        : REVIEW_DEPTH_RANK.full
+  lookupReviewDepthRank(depth)
 
 const SAFE_PATH_SEGMENT = "(?!\\.\\.?(?:\\/|$))[^\\0\\\\/\\s](?:[^\\0\\\\/]*[^\\0\\\\/\\s])?"
 const SAFE_REVIEW_SIGNAL_PATH_RE = new RegExp(

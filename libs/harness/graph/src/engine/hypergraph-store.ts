@@ -228,42 +228,30 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
       if (nodeIndexByKey.has(targetKey)) {
         return { idx: nodeIndexByKey.get(targetKey)!, key: NodeKey.make(targetKey) }
       }
+      const preferredTag =
+        preferredKind !== undefined
+          ? match(preferredKind)
+              .with("span", "EffectFn", () => "EffectFn" as const)
+              .with("service", "ServiceTag", () => "ServiceTag" as const)
+              .with("error", "TaggedError", () => "TaggedError" as const)
+              .with("schema", () => "SchemaDef" as const)
+              .with("layer", () => "ServiceLayer" as const)
+              .with("test", () => "VitestCase" as const)
+              .with("pattern", () => "PatternDoc" as const)
+              .exhaustive()
+          : undefined
       const prefixes =
-        preferredKind === "span" || preferredKind === "EffectFn"
-          ? ["EffectFn"]
-          : preferredKind === "service" || preferredKind === "ServiceTag"
-            ? ["ServiceTag"]
-            : preferredKind === "error" || preferredKind === "TaggedError"
-              ? ["TaggedError"]
-              : preferredKind === "schema"
-                ? ["SchemaDef"]
-                : preferredKind === "layer"
-                  ? ["ServiceLayer"]
-                  : preferredKind === "test"
-                    ? ["VitestCase"]
-                    : preferredKind === "pattern"
-                      ? ["PatternDoc"]
-                      : [
-                          "EffectFn", "ServiceTag", "TaggedError", "ServiceLayer",
-                          "SchemaDef", "VitestCase", "PatternDoc", "AdrDoc", "EarsSpec",
-                        ]
+        preferredTag !== undefined
+          ? [preferredTag]
+          : [
+              "EffectFn", "ServiceTag", "TaggedError", "ServiceLayer",
+              "SchemaDef", "VitestCase", "PatternDoc", "AdrDoc", "EarsSpec",
+            ]
       for (const prefix of prefixes) {
         const candidate = `${prefix}:${targetKey}`
         const idx = nodeIndexByKey.get(candidate)
         if (idx !== undefined) return { idx, key: NodeKey.make(candidate) }
       }
-
-      const preferredTag = preferredKind !== undefined
-        ? match(preferredKind)
-            .with("span", "EffectFn", () => "EffectFn" as const)
-            .with("service", "ServiceTag", () => "ServiceTag" as const)
-            .with("error", "TaggedError", () => "TaggedError" as const)
-            .with("schema", () => "SchemaDef" as const)
-            .with("layer", () => "ServiceLayer" as const)
-            .with("test", () => "VitestCase" as const)
-            .with("pattern", () => "PatternDoc" as const)
-            .exhaustive()
-        : undefined
 
       for (const [idx, node] of Graph.nodes(mutable)) {
         if (!isEntityNode(node)) continue

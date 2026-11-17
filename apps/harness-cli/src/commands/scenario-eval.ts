@@ -1,6 +1,6 @@
 import { join, resolve } from "node:path"
 import { Effect, Schema } from "effect"
-import { match } from "ts-pattern"
+import { match, P } from "ts-pattern"
 import { nodeSyncHostIo } from "@harness/infra"
 
 /**
@@ -309,11 +309,10 @@ export const discoverTranscript = (
 }
 
 const asDisplayString = (value: unknown, fallback = ""): string =>
-  typeof value === "string"
-    ? value
-    : typeof value === "number" || typeof value === "boolean"
-      ? String(value)
-      : fallback
+  match(value)
+    .with(P.string, (s) => s)
+    .with(P.number, P.boolean, (v) => String(v))
+    .otherwise(() => fallback)
 
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
