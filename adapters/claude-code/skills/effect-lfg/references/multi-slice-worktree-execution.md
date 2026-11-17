@@ -39,7 +39,7 @@ Step D3: Each Slice Worker Runs plan-check -> Implement -> gc/ontology/mutate ->
   ↓
 Step D4: Controller Merges Wave Branches (git merge --no-ff), Updates Cumulative Spec & Runs Inter-Wave Gates
   ↓
-Step D5: After Final Wave -> Promote Epic ADR/Spec, Run 4-Lens Review (Stage 4) & Final Gates (Stages 5–6)
+Step D5: After Final Wave -> Promote Epic ADR/Spec, Run Signal-Routed 7-Lens Review (Stage 4) & Final Gates (Stages 5–6)
 ```
 
 ### Step D0 — Pin Epic Controller Branch & Check Resume State
@@ -140,14 +140,14 @@ When all Slice Workers in Wave `w` report completion with passing `verify` commi
    - After `git merge --no-ff` succeeds, clean up any temporary sibling worktrees (`git worktree prune`; never run `rm -rf` or `git branch -d/-D`, which trigger `harness guard` deny/ask rules; leave local `slice/*` branch refs as lightweight audit pointers).
 4. **Advance to Wave `w + 1`:** Repeat Steps D2–D4 until all Waves `1..K` are integrated into `feat/<epic-slug>`.
 
-### Step D5 — Epic Closeout: ADR Promotion, 4-Lens Review & Final Stamp-Safe Gates (Stages 4–6)
+### Step D5 — Epic Closeout: ADR Promotion, Signal-Routed 7-Lens Review & Final Stamp-Safe Gates (Stages 4–6)
 
 Once the final Wave (`Wave K`) is integrated into `feat/<epic-slug>`:
 
 1. **Promote Full Epic ADR & Finalize EARS Spec Parity:**
    - Author/update `libs/<scope>/docs/adr/NNNN-<slug>.md` (`id: <scope>:ADR-NNNN`, `status: accepted`) using the canonical 6-section MADR structure (`## Context and Problem Statement`, `## Decision Drivers`, `## Considered Options` with `* **Option N:**`, `## Decision Outcome` opening with `**Chosen option:** "..."`, `## Rejected Alternatives` with `### N · <Name>` and `**Why rejected:**`, `## Consequences and Enforcement`).
    - Confirm `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` includes the complete union of `enforced_by`, `spans`, `services`, `errors`, and `informed_by: [<scope>:ADR-NNNN]`, then run `pnpm harness plan-check` on the controller workspace to refresh `<controllerRoot>/.harness/plan-graph-snapshot.json` and `## 4. Verified Plan Topology Graph`.
-2. **Execute Stage 4 (4-Lens Specialist Review Across Full Integrated Diff):**
+2. **Execute Stage 4 (Signal-Routed 7-Lens Specialist Review Across Full Integrated Diff):**
    - Dispatch the parallel read-only specialist reviewers (`effect-ears-test-reviewer`, `effect-adversarial-reviewer`, `effect-security-reviewer`, `effect-reliability-reviewer`) once across `git diff main...HEAD`, adjudicate findings via Graph MCP, and apply all valid `fix`, `class-fix`, and `doc-sync-fix` items.
    - **Post-Review Snapshot Sync:** If Stage 4 review fixes added, renamed, or altered any `Effect.fn` signature, `Schema.TaggedError`, `Context.Service`, or spec/ADR frontmatter symbol, re-run `pnpm harness plan-check` and update `## 4. Verified Plan Topology Graph` so `<controllerRoot>/.harness/plan-graph-snapshot.json` matches the post-review graph before Stage 5.
 3. **Execute Stage 5 (Stamp-Safe `learn` & Final Deterministic Gates Including Single `done`):**

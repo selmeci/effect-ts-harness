@@ -307,6 +307,30 @@ describe("Harness decision definitions & fallbacks", () => {
         ).pipe(Effect.provide(failingLayer))
         expect(multiBundleRes.kind).toBe("mechanical")
         expect(multiBundleRes.hint).toContain("matches 2 policy bundles")
+
+        const ts7053BrandRes = yield* triageFailure(
+          "error TS7053: Element implicitly has an 'any' type because expression of type 'ReviewDepth & Brand<\"ReviewDepth\">' can't be used to index type",
+        ).pipe(Effect.provide(failingLayer))
+        expect(ts7053BrandRes.kind).toBe("compile")
+        expect(ts7053BrandRes.hint).toContain("satisfies Record")
+
+        const chainedTernaryRes = yield* triageFailure(
+          'chained-equality-ternary: Chained equality ternary on "depth" at libs/a/src/b.ts:12',
+        ).pipe(Effect.provide(failingLayer))
+        expect(chainedTernaryRes.kind).toBe("mechanical")
+        expect(chainedTernaryRes.hint).toContain("match(value)")
+
+        const staleTemporalRes = yield* triageFailure(
+          "stale-temporal-context: Line 7 uses pre-implementation temporal deixis",
+        ).pipe(Effect.provide(failingLayer))
+        expect(staleTemporalRes.kind).toBe("mechanical")
+        expect(staleTemporalRes.hint).toContain("timeless")
+
+        const adrProofRes = yield* triageFailure(
+          "adr-overstated-proof-claim: Line 14 claims empirical tests 'prove' an invariant",
+        ).pipe(Effect.provide(failingLayer))
+        expect(adrProofRes.kind).toBe("mechanical")
+        expect(adrProofRes.hint).toContain("verify")
       }),
   )
 })

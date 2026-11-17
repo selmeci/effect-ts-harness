@@ -242,6 +242,7 @@ export const CANONICAL_MCP_TOOL_NAMES: ReadonlyArray<McpToolName> = [
   McpToolName.make("harness_tests_reaching"),
   McpToolName.make("harness_structural_search"),
   McpToolName.make("harness_route"),
+  McpToolName.make("harness_review_route"),
   McpToolName.make("harness_ontology_why"),
   McpToolName.make("harness_ontology_impact"),
   McpToolName.make("harness_ontology_check"),

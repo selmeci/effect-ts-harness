@@ -17,6 +17,7 @@ export type EarsLintFindingKind =
   | "unfilled-placeholder"
   | "legacy-effect-v3-symbol"
   | "defect-polarity-inversion"
+  | "stale-temporal-context"
 
 export interface EarsLintFinding {
   readonly line: number
@@ -95,11 +96,17 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
   const rawLines = input.markdown.split(/\r?\n/)
 
   let frontmatterEndIdx = -1
+  let frontmatterStatus: string | undefined
   if (rawLines[0]?.trim() === "---") {
     for (let i = 1; i < rawLines.length; i++) {
-      if (rawLines[i]?.trim() === "---") {
+      const fmLine = rawLines[i] ?? ""
+      if (fmLine.trim() === "---") {
         frontmatterEndIdx = i
         break
+      }
+      const statusMatch = /^status:\s*['"]?([a-z-]+)['"]?/i.exec(fmLine.trim())
+      if (statusMatch?.[1]) {
+        frontmatterStatus = statusMatch[1].toLowerCase()
       }
     }
   }
@@ -145,6 +152,27 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
         kind: "unfilled-placeholder",
         message: `Line ${lineNum} contains unfilled placeholder or HTML comment.`,
       })
+    }
+
+    // 1b. Temporal deixis in accepted specs
+    if (
+      frontmatterStatus === "accepted" &&
+      !isTableRow(rawLine) &&
+      !/^#{1,6}\s+/.test(rawLine.trim())
+    ) {
+      const trimmedProse = rawLine.trim()
+      if (
+        /^(?:[-*]\s+)?(?:Today|Currently|Right now|At present),\s+/i.test(trimmedProse) ||
+        /\b(?:Today|Currently|Right now|At present),\s+[^.\n]*\b(?:lacks?|does not|do not|has no|have no|is missing|are missing|cannot)\b/i.test(
+          trimmedProse,
+        )
+      ) {
+        findings.push({
+          line: lineNum,
+          kind: "stale-temporal-context",
+          message: `Line ${lineNum} uses pre-implementation temporal deixis in a 'status: accepted' EARS spec; state timeless problem context instead of transient wording ("Today, ...").`,
+        })
+      }
     }
 
     // Check heading transitions

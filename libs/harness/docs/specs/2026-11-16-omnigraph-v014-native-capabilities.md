@@ -1,5 +1,5 @@
 ---
-id: harness:SPEC-0013
+id: harness:SPEC-0014
 title: Omnigraph v0.14.0 Native Capabilities & Harness Integration
 status: accepted
 archetype: framework
@@ -10,7 +10,7 @@ scope: harness
 informed_by:
   - harness:ADR-0006
   - harness:ADR-0009
-  - harness:ADR-0014
+  - harness:ADR-0015
 enforced_by:
   - libs/harness/contract/src/omnigraph.ts
   - libs/harness/graph/schema.pg
@@ -51,11 +51,11 @@ errors:
   - OmnigraphLintError
 ---
 
-# SPEC-0013 · Omnigraph v0.14.0 Native Capabilities & Harness Integration
+# SPEC-0014 · Omnigraph v0.14.0 Native Capabilities & Harness Integration
 
 ## Context
 
-This specification defines the behavioral requirements for integrating `@modernrelay/omnigraph` v0.14.0 native capabilities (`OMNI-01` through `OMNI-10`) into the Effect-TS Engineering Harness, governed by [RFC-0009](../../../../docs/rfcs/0009-omnigraph-v014-native-capabilities-and-harness-integration.md) and `harness:ADR-0014`. It replaces unkeyed `Plays*Role` edges, destructive `branches.delete` / `rmRecursiveSync` workarounds, and unauthenticated local startup with keyed incidence edges, lossless `mode: "overwrite"` branch synchronization, pure `R = never` branch verification and schema evolution deciders, hybrid RRF search, Optimistic Concurrency Control (`ifGraphCommit`), incremental `changes.poll` Datalog streaming, mounted Cedar policies, unpublished DPO commit proposals, and `Blob` / `omnigraph optimize` maintenance.
+This specification defines the behavioral requirements for integrating `@modernrelay/omnigraph` v0.14.0 native capabilities (`OMNI-01` through `OMNI-10`) into the Effect-TS Engineering Harness, governed by [RFC-0009](../../../../docs/rfcs/0009-omnigraph-v014-native-capabilities-and-harness-integration.md) and `harness:ADR-0015`. It replaces unkeyed `Plays*Role` edges, destructive `branches.delete` / `rmRecursiveSync` workarounds, and unauthenticated local startup with keyed incidence edges, lossless `mode: "overwrite"` branch synchronization, pure `R = never` branch verification and schema evolution deciders, hybrid RRF search, Optimistic Concurrency Control (`ifGraphCommit`), incremental `changes.poll` Datalog streaming, mounted Cedar policies, unpublished DPO commit proposals, and `Blob` / `omnigraph optimize` maintenance.
 
 - **Reused Contracts / Errors:** `OmnigraphPreconditionError`, `OmnigraphMergeConflictError`, `OmnigraphLintError`
 - **Reused Services:** `@harness/graph/OmnigraphSync`

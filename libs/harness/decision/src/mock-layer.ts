@@ -1,3 +1,4 @@
+import type { ReviewDepth } from "@harness/contract"
 import type { DstHazardRiskLevel, EarsGuardPairRelation } from "@harness/gates"
 import { Effect, Layer } from "effect"
 import * as AiError from "effect/ai/AiError"
@@ -36,6 +37,12 @@ export interface MockDecisionModelOverrides {
   readonly ruleGeneralityLabel?: RuleGeneralityLevel | undefined
   readonly ruleNonTautologicalProb?: number | undefined
   readonly planSearchCohesionLabel?: PlanSearchCohesionLevel | undefined
+  readonly reviewDepthLabel?: ReviewDepth | undefined
+  readonly needsSecurityProb?: number | undefined
+  readonly needsReliabilityProb?: number | undefined
+  readonly needsAdversarialProb?: number | undefined
+  readonly needsMigrationContractProb?: number | undefined
+  readonly needsArchitectureProb?: number | undefined
 }
 
 export const makeMockDecisionModelLayer = (
@@ -65,6 +72,11 @@ export const makeMockDecisionModelLayer = (
                   )
                   .with("isEquivalent", () => overrides?.mutantEquivalentProb ?? 0.1)
                   .with("isNonTautological", () => overrides?.ruleNonTautologicalProb ?? 0.9)
+                  .with("needsSecurityLens", () => overrides?.needsSecurityProb ?? 0.1)
+                  .with("needsReliabilityLens", () => overrides?.needsReliabilityProb ?? 0.1)
+                  .with("needsAdversarialLens", () => overrides?.needsAdversarialProb ?? 0.1)
+                  .with("needsMigrationContractLens", () => overrides?.needsMigrationContractProb ?? 0.1)
+                  .with("needsArchitectureLens", () => overrides?.needsArchitectureProb ?? 0.1)
                   .otherwise(() => 0.5)
                 return {
                   _tag: "Probability",
@@ -106,6 +118,10 @@ export const makeMockDecisionModelLayer = (
                     () =>
                       overrides?.earsGuardRelationLabel ??
                       (labels.includes("mutually_exclusive") ? "mutually_exclusive" : defaultLabel),
+                  )
+                  .with(
+                    "recommendedDepth",
+                    () => overrides?.reviewDepthLabel ?? (labels.includes("lite") ? "lite" : defaultLabel),
                   )
                   .otherwise(() => defaultLabel)
 

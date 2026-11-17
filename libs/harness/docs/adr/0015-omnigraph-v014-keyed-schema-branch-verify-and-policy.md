@@ -1,5 +1,5 @@
 ---
-id: harness:ADR-0014
+id: harness:ADR-0015
 title: Omnigraph v0.14.0 Keyed Incidence Schema, Lossless Branch Lifecycle, Hybrid RRF Search, and Cedar Policy Enforcement
 status: accepted
 date: 2026-11-16
@@ -45,10 +45,10 @@ errors:
   - OmnigraphMergeConflictError
   - OmnigraphLintError
 informs:
-  - harness:SPEC-0013
+  - harness:SPEC-0014
 ---
 
-# ADR-0014 · Omnigraph v0.14.0 Keyed Incidence Schema, Lossless Branch Lifecycle, Hybrid RRF Search, and Cedar Policy Enforcement
+# ADR-0015 · Omnigraph v0.14.0 Keyed Incidence Schema, Lossless Branch Lifecycle, Hybrid RRF Search, and Cedar Policy Enforcement
 
 ## Context and Problem Statement
 

@@ -24,16 +24,16 @@ depends_on:
 target_adrs:
   - "harness:ADR-0006"
   - "harness:ADR-0009"
-  - "harness:ADR-0014"
+  - "harness:ADR-0015"
 target_specs:
   - "harness:SPEC-0004"
-  - "harness:SPEC-0013"
+  - "harness:SPEC-0014"
 ---
 
 # RFC-0009: Omnigraph v0.14.0 Native Capabilities, Zero-Loss Branch Lifecycle, Hybrid Graph Search & Policy-Gated Harness Integration
 
 > [!NOTE]
-> **Post-Implementation Status Note:** `harness:SPEC-0013` (`libs/harness/docs/specs/2026-11-16-omnigraph-v014-native-capabilities.md`) and `harness:ADR-0014` (`libs/harness/docs/adr/0014-omnigraph-v014-keyed-schema-branch-verify-and-policy.md`) are the normative post-implementation specifications for this work.
+> **Post-Implementation Status Note:** `harness:SPEC-0014` (`libs/harness/docs/specs/2026-11-16-omnigraph-v014-native-capabilities.md`) and `harness:ADR-0015` (`libs/harness/docs/adr/0015-omnigraph-v014-keyed-schema-branch-verify-and-policy.md`) are the normative post-implementation specifications for this work.
 
 ## 1. Executive Summary
 
@@ -46,13 +46,13 @@ Prior to RFC-0009, an empirical audit of our Omnigraph integration showed that w
 3. [`syncOmnigraphOnDone`](../../apps/harness-cli/src/commands/done-omnigraph-helpers.ts) invoked `diffOmnigraphBranches` and **discarded the returned `Diff`**, while `handleVerify` never ran `branches.merge({ dryRun: true })` to detect concurrent worktree collisions before `done`.
 4. Neither `ifGraphCommit` OCC preconditions nor `og.changes.poll` into `DatalogSession.stepFileDelta` were wired; [`graph.policy.yaml`](../../libs/harness/graph/graph.policy.yaml) and [`cluster.policy.yaml`](../../libs/harness/graph/cluster.policy.yaml) were **never mounted in [`cluster.yaml`](../../libs/harness/graph/cluster.yaml)**; [`mcp_config.json`](../../adapters/antigravity/plugins/effect-harness/mcp_config.json) hardcoded port `8080` instead of our dynamic repo hash port; and [`queries/harness.gq`](../../libs/harness/graph/queries/harness.gq) omitted hybrid search, `EarsSpec` traceability, multi-hop bounds, and `GraphPolicy` invariant queries.
 
-This RFC specifies a cohesive 10-capability architecture (**`OMNI-01` through `OMNI-10`**) across `schema.pg`, `queries/harness.gq`, `cluster.yaml`, Cedar policy bundles, `@harness/contract`, `@harness/service`, `@harness/graph`, `@harness/gates`, `@harness/decision`, `@harness/infra`, `harness-cli`, and `harness-mcp`, complete with ready-to-adopt schemas, Effect-TS v4 code signatures, rejected alternatives, and the canonical drafts for **`harness:ADR-0014`** and **`harness:SPEC-0013`**.
+This RFC specifies a cohesive 10-capability architecture (**`OMNI-01` through `OMNI-10`**) across `schema.pg`, `queries/harness.gq`, `cluster.yaml`, Cedar policy bundles, `@harness/contract`, `@harness/service`, `@harness/graph`, `@harness/gates`, `@harness/decision`, `@harness/infra`, `harness-cli`, and `harness-mcp`, complete with ready-to-adopt schemas, Effect-TS v4 code signatures, rejected alternatives, and the canonical **`harness:ADR-0015`** and **`harness:SPEC-0014`**.
 
 ---
 
 ## 2. Motivation & Pre-RFC Baseline Gap Analysis
 
-All 10 gaps below were observed in the pre-RFC-0009 baseline prior to implementing `SPEC-0013` and `ADR-0014` (file links refer to the owning modules rather than pre-RFC line numbers).
+All 10 gaps below were observed in the pre-RFC-0009 baseline prior to implementing `SPEC-0014` and `ADR-0015` (file links refer to the owning modules rather than pre-RFC line numbers).
 
 ### Gap 1 (`OMNI-01`): Unkeyed Edges Duplicating on `main` & Destructive `branches.delete` on Task Branches
 - **Empirical Evidence:**
@@ -1012,15 +1012,15 @@ Per Omnigraph v0.14.0 constraints observed in `references/schema.md` and `refere
 
 ---
 
-### 10.1 Accepted ADR: `harness:ADR-0014`
+### 10.1 Accepted ADR: `harness:ADR-0015`
 
-See [ADR-0014 · Omnigraph v0.14.0 Keyed Incidence Schema, Lossless Branch Lifecycle, Hybrid RRF Search, and Cedar Policy Enforcement](../../libs/harness/docs/adr/0014-omnigraph-v014-keyed-schema-branch-verify-and-policy.md) (`status: accepted`).
+See [ADR-0015 · Omnigraph v0.14.0 Keyed Incidence Schema, Lossless Branch Lifecycle, Hybrid RRF Search, and Cedar Policy Enforcement](../../libs/harness/docs/adr/0015-omnigraph-v014-keyed-schema-branch-verify-and-policy.md) (`status: accepted`).
 
 ---
 
-### 10.2 Accepted EARS Specification: `harness:SPEC-0013`
+### 10.2 Accepted EARS Specification: `harness:SPEC-0014`
 
-See [SPEC-0013 · Omnigraph v0.14.0 Native Capabilities & Harness Integration](../../libs/harness/docs/specs/2026-11-16-omnigraph-v014-native-capabilities.md) (`status: accepted`).
+See [SPEC-0014 · Omnigraph v0.14.0 Native Capabilities & Harness Integration](../../libs/harness/docs/specs/2026-11-16-omnigraph-v014-native-capabilities.md) (`status: accepted`).
 
 ---
 
@@ -1032,4 +1032,4 @@ See [SPEC-0013 · Omnigraph v0.14.0 Native Capabilities & Harness Integration](.
 | **Phase 9B — Cedar Policies, Non-Destructive Lifecycle & Port Alignment** (`OMNI-07`, `OMNI-08`) | 1. Mount `policies:` + `embeddings:` in `libs/harness/graph/cluster.yaml`, add `protected_branches: [main]` in `graph.policy.yaml`, and add `policy-tests.yaml`.<br/>2. Implement pure `OmnigraphLint.decide` and `OmnigraphSchemaEvolution.decide` in `libs/harness/gates/`.<br/>3. Replace unconditional `rmRecursiveSync` in `apps/harness-cli/src/commands/omnigraph-lifecycle.ts` with `OmnigraphSchemaEvolution.decide` (`LiveClusterApply` vs clean `rfc-0009-v2` epoch cutover) + actor tokens + `tools/omnigraph-mcp-launcher.mjs`. | `omnigraph policy validate` & `omnigraph policy test` (13 cases) pass. |
 | **Phase 9C — Lossless Overwrite Sync, Branch Diff & Dry-Run Merge Gate** (`OMNI-03`, `OMNI-04`) | 1. Implement pure `OmnigraphBranchVerify.decide` (`R = never`).<br/>2. Extend `OmnigraphSyncShape` in `libs/harness/graph/src/omnigraph-sync.ts` (`mode: "overwrite"`, zero branch delete before sync, `dryRunMerge`, `deleteBranch: true`, `ifGraphCommit` OCC).<br/>3. Persist `omnigraphCommitId` in `GraphHeadMeta` (`cluster-resolver.ts`) and wire `OmnigraphBranchVerify.decide` into `verify-and-done.command.ts` + `done-omnigraph-helpers.ts`. | Unit + Property tests prove concurrent branch edits fail with `OmnigraphMergeConflictError` during `verify` and stale writes fail with `OmnigraphPreconditionError`. |
 | **Phase 9D — Hybrid RRF Search & Change-Feed Datalog Streaming** (`OMNI-02`, `OMNI-04`) | 1. Curate `rank_patterns_hybrid` & `rank_candidate_services_for_stub` in `queries/harness.gq` (`harness_gq_query`; routing integration deferred).<br/>2. Subscribe `apps/harness-mcp/src/daemon/unix-socket-daemon.ts` to `og.changes.poll` feeding `DatalogSession.stepFileDelta` (with `baseline` recovery on `410`). | Tests confirm hybrid search and incremental Datalog updates. |
-| **Phase 9E — DPO Proposals, Blob Artifacts & Lance Maintenance** (`OMNI-09`, `OMNI-10`) | 1. Expose proposal staging (`proposeMergeCommit`/`inspectCommitChanges`/`publishCommit`/`dropCommit`) in `@harness/graph` (`plan-and-repair` wiring deferred).<br/>2. Attach `spanTraceBlob` reads/writes via `og.blobs` (`putBlob`/`getBlobText`/`statBlob`) and wire `omnigraph optimize` + `omnigraph cleanup` into `gc-and-ontology.command.ts` and `done-omnigraph-helpers.ts`.<br/>3. Accept `harness:ADR-0014` and `harness:SPEC-0013` into `libs/harness/docs/{adr,specs}` and pass `pnpm harness gc --strict` + `pnpm harness verify`. | Full `pnpm harness gc --strict && pnpm harness verify` green on live workspace. |
+| **Phase 9E — DPO Proposals, Blob Artifacts & Lance Maintenance** (`OMNI-09`, `OMNI-10`) | 1. Expose proposal staging (`proposeMergeCommit`/`inspectCommitChanges`/`publishCommit`/`dropCommit`) in `@harness/graph` (`plan-and-repair` wiring deferred).<br/>2. Attach `spanTraceBlob` reads/writes via `og.blobs` (`putBlob`/`getBlobText`/`statBlob`) and wire `omnigraph optimize` + `omnigraph cleanup` into `gc-and-ontology.command.ts` and `done-omnigraph-helpers.ts`.<br/>3. Accept `harness:ADR-0015` and `harness:SPEC-0014` into `libs/harness/docs/{adr,specs}` and pass `pnpm harness gc --strict` + `pnpm harness verify`. | Full `pnpm harness gc --strict && pnpm harness verify` green on live workspace. |

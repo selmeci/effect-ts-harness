@@ -1,6 +1,17 @@
 import * as path from "node:path"
 import { Cause, Effect, Option, Schema } from "effect"
-import { isPureInterruptCause } from "@harness/contract"
+import type * as DecisionModel from "effect/ai/DecisionModel"
+import {
+  ErrorReasonMessage,
+  InvalidReviewRouteInputError,
+  type NxScopeTag,
+  type NxTierTag,
+  ReviewRawDiffInput,
+  ReviewRawFileInput,
+  ReviewRouteToolOutput,
+  isPureInterruptCause,
+  toErrorReasonMessage,
+} from "@harness/contract"
 import {
   decideStructuralSearch,
   findCallees,
@@ -8,7 +19,12 @@ import {
   findTestsReaching,
   resolveNode,
 } from "@harness/graph"
-import { routeStep } from "@harness/decision"
+import {
+  inferReviewDiffSignals,
+  normalizeReviewFilePaths,
+  routeReviewDiff,
+  routeStep,
+} from "@harness/decision"
 import { LocalDecisionModel, nodeSyncHostIo } from "@harness/infra"
 import {
   graphStatusMeta,
@@ -16,12 +32,23 @@ import {
   McpToolName,
   type McpToolPluginDescriptor,
   normalizeProjectPath,
+  ProjectPathEscapeError,
   resolveDefaultRepoRoot,
   resolveGraphWithStatus,
   type ServerOptions,
 } from "./mcp-helpers.js"
+import {
+  buildReviewGraphContextBundle,
+  collectManifestTagsForFiles,
+  decodeReviewRouteInput,
+  escalatePlanOnDiagnostics,
+  resolveReviewRouteTimeoutMs,
+  type ReviewRouteExecutionContext,
+  ReviewRouteInputSchema,
+} from "./review-route-helpers.js"
 
 export { isPathInsideRoot, normalizeProjectPath, resolveDefaultRepoRoot }
+export type { ReviewRouteExecutionContext }
 
 const BoundedSymbolOrSpan = Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 512)))
 const BoundedRepoRoot = Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 1024)))
@@ -114,6 +141,93 @@ const RouteInputSchema = Schema.Struct({
 const decodeResolveInput = Schema.decodeUnknownEffect(ResolveInputSchema)
 const decodeStructuralSearchInput = Schema.decodeUnknownEffect(StructuralSearchInputSchema)
 const decodeRouteInput = Schema.decodeUnknownEffect(RouteInputSchema)
+
+export const executeReviewRouteTool = Effect.fn("HarnessMcp.routeReview")(function* (
+  input: ReviewRawDiffInput,
+  context?: ReviewRouteExecutionContext,
+): Effect.fn.Return<
+  ReviewRouteToolOutput,
+  InvalidReviewRouteInputError,
+  DecisionModel.DecisionModel
+> {
+  yield* Schema.decodeEffect(ReviewRawDiffInput)(input).pipe(
+    Effect.mapError(
+      (schemaError) =>
+        new InvalidReviewRouteInputError({
+          offendingPath: input.changedFiles[0] ?? ReviewRawFileInput.make(""),
+          reason: toErrorReasonMessage(schemaError),
+        }),
+    ),
+  )
+
+  const normalizedFiles = yield* normalizeReviewFilePaths(input.changedFiles)
+
+  const manifestResult = yield* Effect.gen(function* () {
+    if (context?.repoRoot === undefined) {
+      return {
+        tiers: [] as ReadonlyArray<NxTierTag>,
+        scopes: [] as ReadonlyArray<NxScopeTag>,
+        warnings: [
+          ErrorReasonMessage.make("No repoRoot supplied; manifest tier/scope enrichment unavailable"),
+        ] as ReadonlyArray<ErrorReasonMessage>,
+      }
+    }
+    if (!nodeSyncHostIo.existsSync(context.repoRoot)) {
+      return {
+        tiers: [] as ReadonlyArray<NxTierTag>,
+        scopes: [] as ReadonlyArray<NxScopeTag>,
+        warnings: [
+          toErrorReasonMessage(
+            `Configured repoRoot does not exist on disk: ${context.repoRoot}`,
+          ),
+        ] as ReadonlyArray<ErrorReasonMessage>,
+      }
+    }
+    return yield* collectManifestTagsForFiles(context.repoRoot, normalizedFiles)
+  })
+
+  const mergedTiers = [...new Set([...input.touchedTiers, ...manifestResult.tiers])]
+  const mergedScopes = [...new Set([...input.touchedScopes, ...manifestResult.scopes])]
+
+  const enrichedInput = yield* Schema.decodeEffect(ReviewRawDiffInput)({
+    ...input,
+    changedFiles: normalizedFiles,
+    touchedTiers: mergedTiers,
+    touchedScopes: mergedScopes,
+  }).pipe(
+    Effect.mapError(
+      (schemaError) =>
+        new InvalidReviewRouteInputError({
+          offendingPath: input.changedFiles[0] ?? ReviewRawFileInput.make(""),
+          reason: toErrorReasonMessage(schemaError),
+        }),
+    ),
+  )
+
+  const signals = yield* inferReviewDiffSignals(enrichedInput)
+  const rawPlan = yield* routeReviewDiff(enrichedInput, signals)
+  const plan =
+    manifestResult.warnings.length > 0 ? escalatePlanOnDiagnostics(rawPlan) : rawPlan
+  const graphContext = buildReviewGraphContextBundle(
+    context?.repoRoot,
+    context?.graph,
+    signals.changedFiles,
+  )
+
+  return ReviewRouteToolOutput.make({
+    plan,
+    signals,
+    graphContext,
+    warnings: manifestResult.warnings,
+    degraded: context?.graphStatus?.degraded ?? false,
+    ...(context?.graphStatus?.degradedReason !== undefined
+      ? { degradedReason: toErrorReasonMessage(context.graphStatus.degradedReason) }
+      : {}),
+    ...(context?.graphStatus?.evaluationError !== undefined
+      ? { evaluationError: toErrorReasonMessage(context.graphStatus.evaluationError) }
+      : {}),
+  })
+})
 
 export const buildGraphNavigationToolDescriptors = (
   options?: ServerOptions,
@@ -235,6 +349,49 @@ export const buildGraphNavigationToolDescriptors = (
         const patternFile =
           block === "review" || block === "effect" ? null : `agent-patterns/${block}.md`
         return { block, patternFile }
+      }),
+  },
+  {
+    name: McpToolName.make("harness_review_route"),
+    description:
+      "Route a code diff to required review depth, specialist reviewers, and Effect graph context",
+    inputSchema: ReviewRouteInputSchema,
+    execute: (args) =>
+      Effect.gen(function* () {
+        const parsed = yield* decodeReviewRouteInput(args)
+        const boundaryRoot = options?.repoRoot ?? resolveDefaultRepoRoot(undefined, options)
+        if (parsed.repoRoot !== undefined && !isPathInsideRoot(boundaryRoot, parsed.repoRoot)) {
+          return yield* new ProjectPathEscapeError({
+            projectPath: parsed.repoRoot,
+            repoRoot: boundaryRoot,
+            message: "repoRoot escapes configured workspace root",
+          })
+        }
+        const effectiveRoot =
+          parsed.repoRoot !== undefined
+            ? path.isAbsolute(parsed.repoRoot)
+              ? path.resolve(parsed.repoRoot)
+              : path.resolve(boundaryRoot, parsed.repoRoot)
+            : boundaryRoot
+        const effectiveTimeoutMs = resolveReviewRouteTimeoutMs(parsed.timeoutMs, options)
+        const rawInput = yield* Schema.decodeEffect(ReviewRawDiffInput)({
+          changedFiles: parsed.changedFiles,
+          diffSummary: parsed.diffSummary ?? "",
+          changedLineCount: parsed.changedLineCount,
+          touchedTiers: parsed.touchedTiers ?? [],
+          touchedScopes: parsed.touchedScopes ?? [],
+          ...(effectiveTimeoutMs !== undefined ? { timeoutMs: effectiveTimeoutMs } : {}),
+        })
+        const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
+        const graphStatus = yield* resolveGraphWithStatus(
+          { ...options, repoRoot: effectiveRoot },
+          args,
+        )
+        return yield* executeReviewRouteTool(rawInput, {
+          repoRoot: effectiveRoot,
+          graph: graphStatus.graph,
+          graphStatus,
+        }).pipe(Effect.provide(decisionLayer))
       }),
   },
 ]
