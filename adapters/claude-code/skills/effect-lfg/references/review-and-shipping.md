@@ -1,16 +1,16 @@
-# Autonomous 4-Lens Review, Stamp-Safe Gates & Shipping (Stages 4–6)
+# Autonomous Signal-Routed 7-Lens Review, Stamp-Safe Gates & Shipping (Stages 4–6)
 
-This reference governs **Stage 4 (4-Lens Specialist Review & Autonomous Fix Loop)**, **Stage 5 (Compounding Learnings & Final Deterministic Gate Sequence)**, and **Stage 6 (Git Commit, Optional Push/PR & Closeout)** of `effect-lfg`.
+This reference governs **Stage 4 (Signal-Routed 7-Lens Specialist Review & Autonomous Fix Loop)**, **Stage 5 (Compounding Learnings & Final Deterministic Gate Sequence)**, and **Stage 6 (Git Commit, Optional Push/PR & Closeout)** of `effect-lfg`.
 
 ---
 
-## 1. Stage 4 — 4-Lens Specialist Review & Autonomous Fix Loop
+## 1. Stage 4 — Signal-Routed 7-Lens Specialist Review & Autonomous Fix Loop
 
 Once package-isolated `haiku` implementer subagents have replaced all `stub<A, E, R>()` calls and passed package-level verification (`CI=true pnpm nx run <project>:verify`):
 
 ### Step 4.1 — Dispatch Parallel Specialist Review Lenses (Whole Git Diff)
 
-Select and invoke the read-only specialist review subagents (`model: "haiku"`, isolated worktree) across the **entire git diff (`git diff main...HEAD`)** — including any modified harness gates (`libs/harness/**`) and linter plugins (`tools/oxlint/**`), not just domain packages:
+Select and invoke the read-only specialist review subagents via `harness_review_route` (`model: "haiku"`, isolated worktree) across the **entire git diff (`git diff main...HEAD`)** — including any modified harness gates (`libs/harness/**`) and linter plugins (`tools/oxlint/**`), not just domain packages:
 
 1. **`effect-ears-test-reviewer` (Always & Mandatory for Core/Domain):**
    Executes the **8-Point Anti-Rubber-Stamp Deep Audit** (including Point 8: `type:infra` Guard-Deletion Falsification) and verifies 1:1 behavioral coverage between every EARS clause (`WHEN`, `IF/THEN`, `WHILE`, `WHERE`) in `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` and `@effect/vitest` assertions (`it.effect`, `it.effect.prop`, `Cause.findErrorOption`, `Equal.equals`, `checkSpanBudgets`).
@@ -20,6 +20,12 @@ Select and invoke the read-only specialist review subagents (`model: "haiku"`, i
    Audits synchronous DO SQLite transaction discipline (`MixedScheduler("sync")`, zero async I/O inside `withTransaction`), bounded jittered `Schedule` retries, and `Scope` resource finalizers.
 4. **`effect-adversarial-reviewer` (Mandatory for `type:core`, `type:domain`, `*.decide` deciders, Event Sourcing, Outbox, Projections, multi-step stateful flows, OR harness gate implementations in `libs/harness/**` and `tools/oxlint/**`):**
    Constructs crash-between-steps sequences, duplicate command delivery, out-of-order replay, boundary mutation cases, and adversarial gate evasion vectors (shell wrapper/quoting/subshell bypasses, multi-aggregate / multi-schema scope bleed, and fail-open fallbacks).
+5. **`effect-web-reviewer` (When touching `scope:web`, `apps/*-web/**`, `*.tsx`, or `AtomHttpApi`):**
+   Audits `@effect/atom-react` boundary discipline, frontend concurrency & double-submit races, exhaustive `Result`/`Option` rendering via `ts-pattern`, and form/URL brand decoding.
+6. **`effect-migration-contract-reviewer` (When touching `migrations/*.sql`, `SqliteMigrator`, `alchemy.run.ts`, or `type:contract` evolution):**
+   Audits zero-downtime expand-and-contract SQL evolution, D1/SQLite index coverage, `HttpApiEndpoint`/`RpcGroup`/event schema compatibility, and Alchemy v2 binding hygiene.
+7. **`effect-architecture-reviewer` (When touching `type:service`, `libs/es/**`, `libs/harness/**`, `adapters/**`, or `changedLineCount >= 180`):**
+   Audits framework-vs-application archetype purity, 5-tier hexagonal cohesion, `SelfDogfooding.decide` line-ceiling proximity, and agent-surface adapter parity.
 
 ### Step 4.2 — Central Adjudication & Twin Class-Fix Loop
 

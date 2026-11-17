@@ -6,14 +6,17 @@ This document defines the orchestration protocol for dispatching specialist revi
 
 ## 1. Signal-Routing Table
 
-The controller inspects the files, package boundaries (Nx tags), and Effect capabilities touched by the current task or diff, then routes to the appropriate specialist reviewers:
+The controller calls `harness_review_route` (or inspects the files, package boundaries (Nx tags), and Effect capabilities touched by the current task or diff), then routes monotonically to the appropriate specialist reviewers:
 
-| Touched Files / Nx Tags / Capabilities                                                                                                                                                   | Specialist Agent              | Persona Reference                             | Primary Hunting Ground                                                                                                                                                                                                                                                                                       |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Always (Every Task) & Mandatory for Core/Domain/Event Sourcing**<br>Any `*.test.ts`, `*.spec.ts`, `type:domain`, `type:core`, deciders, or EARS acceptance criteria                    | `effect-ears-test-reviewer`   | `references/personas/ears-test-reviewer.md`   | 8-Point Anti-Rubber-Stamp Deep Audit, EARS clause test assertions (`WHEN`, `IF/THEN`, `WHILE`), mock over-specification, vacuous tests (`toBeDefined`), `runWithTestTracer`, folded state properties, contract brand reuse, `type:infra` guard-deletion falsification, and `checkSpanBudgets` (N+1 query protection). |
-| **Mandatory for Core/Domain/Event Sourcing & Stateful Flows**<br>`type:core`, `type:domain`, deciders, event streams, Outbox, Projections, Process Managers, `stub<A, E, R>()` skeletons | `effect-adversarial-reviewer` | `references/personas/adversarial-reviewer.md` | Cross-entity command/event injection, property test generator weakening, protocol tracing enforcement (`Decider.make`), inter-step crash windows (commit vs. publish), duplicate message replay / idempotency deduplication, optimistic concurrency races, schema evolution, and omitted error types in `E`. |
-| **Contracts, APIs, Auth, Secrets**<br>`type:contract`, `HttpApi*`, `Rpc*`, `Config.*`, auth context, sessions                                                                            | `effect-security-reviewer`    | `references/personas/security-reviewer.md`    | Multi-tenant IDOR / authorization in use cases, secret leakage via `Redacted.value(...)`, unbounded schemas (`Schema.Finite`, string/array length limits), and indirect injection in `type:infra`.                                                                                                           |
-| **Infra, Storage, Retries, Resources**<br>`type:infra`, DO SQLite, D1, Queues, `Schedule.*`, `Scope`, `HttpClient`                                                                       | `effect-reliability-reviewer` | `references/personas/reliability-reviewer.md` | DO SQLite synchronous transaction discipline (`MixedScheduler("sync")`), pre-transaction schema decoding, commit-order `Ref` mutation, retry storms, missing timeouts, and `Scope` leaks.                                                                                                                    |
+| Touched Files / Nx Tags / Capabilities                                                                                                                                                   | Specialist Agent                     | Persona Reference                                    | Primary Hunting Ground                                                                                                                                                                                                                                                                                       |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Always (Every Task) & Mandatory for Core/Domain/Event Sourcing**<br>Any `*.test.ts`, `*.spec.ts`, `type:domain`, `type:core`, deciders, or EARS acceptance criteria                    | `effect-ears-test-reviewer`          | `references/personas/ears-test-reviewer.md`          | 8-Point Anti-Rubber-Stamp Deep Audit, EARS clause test assertions (`WHEN`, `IF/THEN`, `WHILE`), mock over-specification, vacuous tests (`toBeDefined`), `runWithTestTracer`, folded state properties, contract brand reuse, `type:infra` guard-deletion falsification, and `checkSpanBudgets` (N+1 query protection). |
+| **Mandatory for Core/Domain/Event Sourcing & Stateful Flows**<br>`type:core`, `type:domain`, deciders, event streams, Outbox, Projections, Process Managers, `stub<A, E, R>()` skeletons | `effect-adversarial-reviewer`        | `references/personas/adversarial-reviewer.md`        | Cross-entity command/event injection, property test generator weakening, protocol tracing enforcement (`Decider.make`), inter-step crash windows (commit vs. publish), duplicate message replay / idempotency deduplication, optimistic concurrency races, schema evolution, and omitted error types in `E`. |
+| **Contracts, APIs, Auth, Secrets**<br>`type:contract`, `HttpApi*`, `Rpc*`, `Config.*`, auth context, sessions                                                                            | `effect-security-reviewer`           | `references/personas/security-reviewer.md`           | Multi-tenant IDOR / authorization in use cases, secret leakage via `Redacted.value(...)`, unbounded schemas (`Schema.Finite`, string/array length limits), and indirect injection in `type:infra`.                                                                                                           |
+| **Infra, Storage, Retries, Resources**<br>`type:infra`, DO SQLite, D1, Queues, `Schedule.*`, `Scope`, `HttpClient`                                                                       | `effect-reliability-reviewer`        | `references/personas/reliability-reviewer.md`        | DO SQLite synchronous transaction discipline (`MixedScheduler("sync")`), pre-transaction schema decoding, commit-order `Ref` mutation, retry storms, missing timeouts, and `Scope` leaks.                                                                                                                    |
+| **Frontend / Web Surfaces**<br>`scope:web`, `apps/*-web/**`, `*.tsx`, `AtomHttpApi`, `useAtomValue`, `useAtomSend`                                                                       | `effect-web-reviewer`                | `references/personas/web-reviewer.md`                | `AtomHttpApi` / `@effect/atom-react` boundary discipline, frontend concurrency & double-submit races, exhaustive `Result`/`Option` rendering via `ts-pattern`, and form/URL input brand decoding.                                                                                                           |
+| **Migrations, Wire Contracts, Alchemy Bindings**<br>`migrations/*.sql`, `*migrator*`, `alchemy.run.ts`, `type:contract` evolution                                                        | `effect-migration-contract-reviewer` | `references/personas/migration-contract-reviewer.md` | Zero-downtime expand-and-contract SQL evolution & `SqliteMigrator` table isolation, D1/SQLite index & query shape coverage, `HttpApiEndpoint`/`RpcGroup`/persisted event schema compatibility, and Alchemy v2 binding hygiene.                                                                               |
+| **Architecture, Ports, Adapters & Large Diffs**<br>`type:service`, `libs/es/**`, `libs/harness/**`, `adapters/**`, `changedLineCount >= 180`                                             | `effect-architecture-reviewer`       | `references/personas/architecture-reviewer.md`       | Framework-vs-application archetype purity, 5-tier hexagonal cohesion & `Context.Service`/`Layer` design, `SelfDogfooding.decide` line-ceiling proximity, and agent-surface SDO & adapter parity.                                                                                                             |
 
 > [!IMPORTANT]
 > **Mandatory Dual-Review for Core / Domain / Event Sourcing:** For any task touching `type:core`, `type:domain`, deciders, or event sourcing, dispatching **BOTH** `effect-ears-test-reviewer` AND `effect-adversarial-reviewer` is strictly mandatory.
@@ -25,60 +28,33 @@ The controller inspects the files, package boundaries (Nx tags), and Effect capa
 
 Specialist reviewers run concurrently as read-only subagents. They never mutate workspace files or run git commands.
 
-### In Antigravity (`invoke_subagent` by Default, `swarm` When Pinning `gemini-4-hydrogen-medium`)
+### In Claude Code (`Agent` Tool Concurrent Dispatch)
 
-Prefer `invoke_subagent` with `Workspace: "share"` for one-shot read-only specialist reviews (passing `Model: "gemini-4-hydrogen-medium"` if supported by the `Model` enum, otherwise `Model: "flash"` or `"inherit"` when the session runs on Gemini 4 Hydrogen), or use `swarm` (`action: "add"`, `model: "gemini-4-hydrogen-medium"`, `workspace: "inherit"`) when an active swarm is already running or explicit model pinning is needed:
+Dispatch matching specialist agents (`effect-ears-test-reviewer`, `effect-security-reviewer`, `effect-reliability-reviewer`, `effect-adversarial-reviewer`, `effect-web-reviewer`, `effect-migration-contract-reviewer`, `effect-architecture-reviewer`) concurrently in a single turn using the `Agent` tool (`model: "haiku"` or `"sonnet"`), or delegate with the persona definition from `references/personas/*.md`:
 
 ```ts
-// Default: Dispatching via defined specialist agents (invoke_subagent):
-invoke_subagent({
-  Subagents: [
-    {
-      TypeName: "effect-ears-test-reviewer",
-      Role: "EARS & Test Fidelity Reviewer",
-      Model: "flash", // Use "gemini-4-hydrogen-medium" if in Model enum, or "inherit" if session runs on Hydrogen
-      Workspace: "share",
-      Prompt: `Assume there are at least 3 P0/P1 bugs hiding across the spec, ADR, contract, fixtures, and tests; find them using the 8-Point Anti-Rubber-Stamp Audit. Do not assume any code or test is correct:
+// Parallel read-only specialist dispatch via Claude Code Agent tool:
+Agent({
+  subagent_type: "effect-ears-test-reviewer",
+  model: "haiku",
+  description: "Review EARS & test fidelity",
+  prompt: `Assume there are at least 3 P0/P1 bugs hiding across the spec, ADR, contract, fixtures, and tests; find them using the 8-Point Anti-Rubber-Stamp Audit. Do not assume any code or test is correct:
 - Target Files: libs/sample/domain/src/sample.ts, libs/sample/domain/test/sample.test.ts
 - EARS Requirements & ADRs: libs/sample/docs/specs/SPEC-0001.md, libs/sample/docs/adr/0001.md
 - Execute the 8-Point Anti-Rubber-Stamp Deep Audit.
 - Adhere strictly to the Quote-the-Line Gate and False-Positive Suppression List.`,
-    },
-    {
-      TypeName: "effect-security-reviewer",
-      Role: "Security & Trust-Boundary Reviewer",
-      Model: "flash", // Use "gemini-4-hydrogen-medium" if in Model enum, or "inherit" if session runs on Hydrogen
-      Workspace: "share",
-      Prompt: `Audit touched contract and domain files for authorization (IDOR), secret unwrapping, and schema bounds:
+})
+
+Agent({
+  subagent_type: "effect-security-reviewer",
+  model: "haiku",
+  description: "Review security & trust boundaries",
+  prompt: `Audit touched contract and domain files for authorization (IDOR), secret unwrapping, and schema bounds:
 - Target Files: libs/sample/contract/src/index.ts, libs/sample/domain/src/usecase.ts
-- Persona Guide: adapters/antigravity/plugins/effect-harness/skills/executing-effect-stubs/references/personas/security-reviewer.md
+- Persona Guide: adapters/claude-code/skills/executing-effect-stubs/references/personas/security-reviewer.md
 - Adhere strictly to the Quote-the-Line Gate and False-Positive Suppression List.`,
-    },
-  ],
 })
 ```
-
-When explicitly pinning `gemini-4-hydrogen-medium` via `swarm`:
-
-```ts
-swarm({
-  action: "add",
-  name: "reliability-reviewer",
-  model: "gemini-4-hydrogen-medium",
-  workspace: "inherit",
-  brief: `Read the persona instructions at:
-adapters/antigravity/plugins/effect-harness/skills/executing-effect-stubs/references/personas/reliability-reviewer.md
-
-Review the following files:
-- Target Files: libs/sample/infra/src/repository.ts
-- Adhere strictly to the Quote-the-Line Gate and False-Positive Suppression List.
-- Post your structured review report to @coordinator when finished.`,
-})
-```
-
-### In Claude Code
-
-Dispatch using the specialist agent name (`effect-ears-test-reviewer`, `effect-security-reviewer`, `effect-reliability-reviewer`, `effect-adversarial-reviewer`) or delegate with the persona definition from `references/personas/*.md`.
 
 ---
 

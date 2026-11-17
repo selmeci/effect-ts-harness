@@ -9,6 +9,7 @@ import {
   AstGateEvaluationReport,
   AstSourceContent,
   AstSourceFilePath,
+  CANONICAL_MCP_TOOL_NAMES,
   CompilerRepoRootPath,
   ContentSha256,
   DaemonServerError,
@@ -29,6 +30,8 @@ import {
   HarnessSubprocessError,
   HarnessTierTopologyInput,
   HarnessTierTopologyReport,
+  InvalidReviewRouteInputError,
+  McpToolName,
   NonNegativeCount,
   NxScopeTag,
   NxTierTag,
@@ -36,6 +39,17 @@ import {
   PackageManifestName,
   PackageManifestPath,
   PluginId,
+  ReviewChangedLines,
+  ReviewDepth,
+  ReviewRawDiffInput,
+  ReviewRawFileInput,
+  ReviewRoutingPlan,
+  ReviewRoutingReason,
+  ReviewRoutingSource,
+  ReviewSignalPath,
+  ReviewerId,
+  ReviewerSelection,
+  SPECIALIST_REVIEWER_IDS,
   SelfDogfoodingMessage,
   SelfDogfoodingReport,
   SelfDogfoodingViolationError,
@@ -515,5 +529,110 @@ describe("@harness/contract schemas", () => {
     expect(parsed.scopeTags).toEqual([NxScopeTag.make("scope:web")])
     expect(parsed.unknownTags).toEqual(["custom:tag"])
     expect(() => Schema.decodeUnknownSync(NxTierTag)("type:unknown")).toThrow()
+  })
+
+  it("validates review routing contracts, branded literals, and 16 canonical MCP tool names", () => {
+    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(16)
+    expect(CANONICAL_MCP_TOOL_NAMES).toContain(McpToolName.make("harness_review_route"))
+
+    expect(SPECIALIST_REVIEWER_IDS).toHaveLength(7)
+    for (const id of SPECIALIST_REVIEWER_IDS) {
+      expect(Schema.decodeSync(ReviewerId)(id)).toBe(id)
+    }
+    expect(() => Schema.decodeUnknownSync(ReviewerId)("unknown-reviewer")).toThrow()
+
+    for (const depth of ["skip", "lite", "focused", "full"] as const) {
+      expect(Schema.decodeSync(ReviewDepth)(depth)).toBe(depth)
+    }
+    expect(() => Schema.decodeUnknownSync(ReviewDepth)("deep")).toThrow()
+
+    const skipPlan = Schema.decodeUnknownSync(ReviewRoutingPlan)({
+      _tag: "SkipReviewPlan",
+      depth: "skip",
+      source: "deterministic",
+      reason: "Doc-only edit under 40 lines",
+      selections: [],
+    })
+    expect(
+      match(skipPlan)
+        .with({ _tag: "SkipReviewPlan" }, (p) => p.depth)
+        .with({ _tag: "ActiveReviewPlan" }, (p) => p.depth)
+        .exhaustive(),
+    ).toBe(ReviewDepth.make("skip"))
+
+    expect(() =>
+      Schema.decodeUnknownSync(ReviewRoutingPlan)({
+        _tag: "SkipReviewPlan",
+        depth: "skip",
+        source: "deterministic",
+        reason: "Invalid non-empty selections",
+        selections: [
+          {
+            reviewer: "effect-ears-test-reviewer",
+            reason: "Should fail",
+            mandatory: true,
+          },
+        ],
+      }),
+    ).toThrow()
+
+    const activePlan = Schema.decodeSync(ReviewRoutingPlan)({
+      _tag: "ActiveReviewPlan",
+      depth: ReviewDepth.make("focused"),
+      source: ReviewRoutingSource.make("deterministic"),
+      selections: [
+        ReviewerSelection.make({
+          reviewer: ReviewerId.make("effect-web-reviewer"),
+          reason: ReviewRoutingReason.make("scope:web touched"),
+          mandatory: true,
+        }),
+      ],
+    })
+    expect(activePlan._tag).toBe("ActiveReviewPlan")
+
+    expect(() =>
+      Schema.decodeUnknownSync(ReviewRoutingPlan)({
+        _tag: "ActiveReviewPlan",
+        depth: "skip",
+        source: "deterministic",
+        selections: [
+          {
+            reviewer: "effect-web-reviewer",
+            reason: "Invalid depth skip",
+            mandatory: true,
+          },
+        ],
+      }),
+    ).toThrow()
+
+    const err = new InvalidReviewRouteInputError({
+      offendingPath: ReviewRawFileInput.make("../secret.ts"),
+      reason: ErrorReasonMessage.make("Path traversal is not allowed"),
+    })
+    expect(err._tag).toBe("InvalidReviewRouteInputError")
+
+    for (const invalidCount of [-1, 1.5, "0", Number.NaN, null, undefined]) {
+      expect(() => Schema.decodeUnknownSync(ReviewChangedLines)(invalidCount)).toThrow()
+    }
+    for (const invalidPath of ["", "  ", " libs/a.ts ", null]) {
+      expect(() => Schema.decodeUnknownSync(ReviewSignalPath)(invalidPath)).toThrow()
+    }
+    expect(() =>
+      Schema.decodeUnknownSync(ReviewRoutingPlan)({
+        _tag: "ActiveReviewPlan",
+        depth: "lite",
+        source: "deterministic",
+        selections: [],
+      }),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeSync(ReviewRawDiffInput)({
+        changedFiles: Array.from({ length: 201 }, (_, i) => `libs/file-${i}.ts`),
+        diffSummary: "",
+        changedLineCount: 0,
+        touchedTiers: [],
+        touchedScopes: [],
+      }),
+    ).toThrow()
   })
 })

@@ -1,14 +1,31 @@
 import * as path from "node:path"
-import { Cause, Effect, Option, Schema } from "effect"
-import { isPureInterruptCause } from "@harness/contract"
+import { Cause, Effect, Graph, Option, Schema } from "effect"
+import type * as DecisionModel from "effect/ai/DecisionModel"
+import { match, P } from "ts-pattern"
 import {
+  EnclosingSymbolName,
+  InvalidReviewRouteInputError,
+  NxScopeTag,
+  NxTierTag,
+  ReviewChangedLines,
+  ReviewGraphContextBundle,
+  ReviewRawDiffInput,
+  ReviewRawFileInput,
+  ReviewRouteToolOutput,
+  ReviewSignalPath,
+  ReviewSummaryText,
+  isPureInterruptCause,
+  parseManifestTags,
+} from "@harness/contract"
+import {
+  type HarnessGraph,
   decideStructuralSearch,
   findCallees,
   findCallers,
   findTestsReaching,
   resolveNode,
 } from "@harness/graph"
-import { routeStep } from "@harness/decision"
+import { inferReviewDiffSignals, routeReviewDiff, routeStep } from "@harness/decision"
 import { LocalDecisionModel, nodeSyncHostIo } from "@harness/infra"
 import {
   graphStatusMeta,
@@ -16,6 +33,7 @@ import {
   McpToolName,
   type McpToolPluginDescriptor,
   normalizeProjectPath,
+  ProjectPathEscapeError,
   resolveDefaultRepoRoot,
   resolveGraphWithStatus,
   type ServerOptions,
@@ -111,9 +129,277 @@ const RouteInputSchema = Schema.Struct({
   ),
 })
 
+const ReviewRouteInputSchema = Schema.Struct({
+  changedFiles: Schema.Array(Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 512))))
+    .pipe(Schema.check(Schema.isMaxLength(200)))
+    .annotate({
+      description: "Changed workspace file paths in the diff",
+    }),
+  diffSummary: Schema.optional(
+    Schema.String.pipe(Schema.check(Schema.isMaxLength(4096))).annotate({
+      description: "Optional bounded diff summary text",
+    }),
+  ),
+  changedLineCount: Schema.optional(
+    Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0))).annotate({
+      description: "Optional non-negative count of changed lines",
+    }),
+  ),
+  repoRoot: Schema.optional(
+    BoundedRepoRoot.annotate({
+      description: "Optional repository root path",
+    }),
+  ),
+})
+
 const decodeResolveInput = Schema.decodeUnknownEffect(ResolveInputSchema)
 const decodeStructuralSearchInput = Schema.decodeUnknownEffect(StructuralSearchInputSchema)
 const decodeRouteInput = Schema.decodeUnknownEffect(RouteInputSchema)
+const decodeReviewRouteInput = Schema.decodeUnknownEffect(ReviewRouteInputSchema)
+
+const ManifestTagsSchema = Schema.Struct({
+  tags: Schema.optional(Schema.Array(Schema.String)),
+  nx: Schema.optional(
+    Schema.Struct({
+      tags: Schema.optional(Schema.Array(Schema.String)),
+    }),
+  ),
+})
+const decodeManifestJson = Schema.decodeUnknownEffect(Schema.fromJsonString(ManifestTagsSchema))
+
+const decodeEnclosingSymbol = Schema.decodeUnknownOption(EnclosingSymbolName)
+const decodeReviewSignalPath = Schema.decodeUnknownOption(ReviewSignalPath)
+
+const addDecodedSymbol = (target: Set<EnclosingSymbolName>, raw: string, max: number): void => {
+  if (target.size >= max) return
+  match(decodeEnclosingSymbol(raw.trim()))
+    .with({ _tag: "Some" }, ({ value }) => {
+      target.add(value)
+    })
+    .with({ _tag: "None" }, () => {})
+    .exhaustive()
+}
+
+const addDecodedSignalPath = (target: Set<ReviewSignalPath>, raw: string, max: number): void => {
+  if (target.size >= max) return
+  match(decodeReviewSignalPath(raw.trim()))
+    .with({ _tag: "Some" }, ({ value }) => {
+      target.add(value)
+    })
+    .with({ _tag: "None" }, () => {})
+    .exhaustive()
+}
+
+const collectManifestTagsForFiles = (
+  repoRoot: string,
+  changedFiles: ReadonlyArray<ReviewSignalPath>,
+): Effect.Effect<{
+  readonly tiers: ReadonlyArray<NxTierTag>
+  readonly scopes: ReadonlyArray<NxScopeTag>
+}> =>
+  Effect.gen(function* () {
+    const tiers = new Set<NxTierTag>()
+    const scopes = new Set<NxScopeTag>()
+    const visitedDirs = new Set<string>()
+    const resolvedRoot = path.resolve(repoRoot)
+
+    for (const relFile of changedFiles) {
+      let currDir = path.dirname(path.resolve(resolvedRoot, relFile))
+      while (isPathInsideRoot(resolvedRoot, currDir) && currDir !== resolvedRoot) {
+        if (visitedDirs.has(currDir)) {
+          break
+        }
+        visitedDirs.add(currDir)
+
+        for (const manifestName of ["project.json", "package.json"] as const) {
+          const manifestPath = path.join(currDir, manifestName)
+          if (isPathInsideRoot(resolvedRoot, manifestPath) && nodeSyncHostIo.existsSync(manifestPath)) {
+            const rawText = yield* Effect.try(() =>
+              nodeSyncHostIo.readTextSync(manifestPath),
+            ).pipe(Effect.orElseSucceed(() => ""))
+            if (rawText.length > 0) {
+              const decoded = yield* decodeManifestJson(rawText).pipe(
+                Effect.orElseSucceed(() => ({ tags: undefined, nx: undefined })),
+              )
+              const candidateTags = [
+                ...(decoded.tags ?? []),
+                ...(decoded.nx?.tags ?? []),
+              ]
+              if (candidateTags.length > 0) {
+                const parsed = parseManifestTags(candidateTags)
+                for (const t of parsed.nxTags) tiers.add(t)
+                for (const s of parsed.scopeTags) scopes.add(s)
+              }
+            }
+          }
+        }
+        currDir = path.dirname(currDir)
+      }
+    }
+
+    return {
+      tiers: [...tiers],
+      scopes: [...scopes],
+    }
+  })
+
+const normalizeGraphFile = (repoRoot: string | undefined, filePath: string): string => {
+  const normalized = filePath.replaceAll("\\", "/")
+  if (repoRoot === undefined) {
+    return normalized
+  }
+  const resolvedRoot = path.resolve(repoRoot).replaceAll("\\", "/")
+  return normalized.startsWith(`${resolvedRoot}/`)
+    ? normalized.slice(resolvedRoot.length + 1)
+    : normalized
+}
+
+const buildReviewGraphContextBundle = (
+  repoRoot: string | undefined,
+  harnessGraph: HarnessGraph | undefined,
+  changedFiles: ReadonlyArray<ReviewSignalPath>,
+): ReviewGraphContextBundle => {
+  if (harnessGraph === undefined || changedFiles.length === 0) {
+    return ReviewGraphContextBundle.make({
+      touchedSymbols: [],
+      reachingTests: [],
+      governanceRefs: [],
+    })
+  }
+
+  const changedSet = new Set<string>(changedFiles)
+  const touchedSymbolsSet = new Set<EnclosingSymbolName>()
+  const governanceRefsSet = new Set<ReviewSignalPath>()
+
+  for (const [, node] of Graph.nodes(harnessGraph.graph)) {
+    match(node)
+      .with({ _tag: "EffectFn" }, (fnNode) => {
+        const rel = normalizeGraphFile(repoRoot, fnNode.file)
+        if (changedSet.has(rel)) {
+          addDecodedSymbol(
+            touchedSymbolsSet,
+            fnNode.spanName.length > 0 ? fnNode.spanName : fnNode.qualname,
+            50,
+          )
+        }
+      })
+      .with({ _tag: "ServiceTag" }, (svcNode) => {
+        const rel = normalizeGraphFile(repoRoot, svcNode.file)
+        if (changedSet.has(rel)) {
+          addDecodedSymbol(touchedSymbolsSet, svcNode.name, 50)
+        }
+      })
+      .with({ _tag: "ServiceLayer" }, (layerNode) => {
+        const rel = normalizeGraphFile(repoRoot, layerNode.file)
+        if (changedSet.has(rel)) {
+          addDecodedSymbol(touchedSymbolsSet, layerNode.qualname, 50)
+        }
+      })
+      .with({ _tag: "TaggedError" }, (errNode) => {
+        const rel = normalizeGraphFile(repoRoot, errNode.file)
+        if (changedSet.has(rel)) {
+          addDecodedSymbol(touchedSymbolsSet, errNode.errorTag, 50)
+        }
+      })
+      .with({ _tag: "AdrDoc" }, (adrNode) => {
+        const relDoc = normalizeGraphFile(repoRoot, adrNode.path)
+        const enforcedMatch = adrNode.enforcedByFiles.some((e) =>
+          changedSet.has(normalizeGraphFile(repoRoot, e)),
+        )
+        if (enforcedMatch || changedSet.has(relDoc)) {
+          addDecodedSignalPath(governanceRefsSet, relDoc, 30)
+        }
+      })
+      .with({ _tag: "EarsSpec" }, (specNode) => {
+        const relDoc = normalizeGraphFile(repoRoot, specNode.path)
+        const enforcedMatch = specNode.enforcedByFiles.some((e) =>
+          changedSet.has(normalizeGraphFile(repoRoot, e)),
+        )
+        if (enforcedMatch || changedSet.has(relDoc)) {
+          addDecodedSignalPath(governanceRefsSet, relDoc, 30)
+        }
+      })
+      .with(
+        {
+          _tag: P.union(
+            "SchemaDef",
+            "VitestCase",
+            "PatternDoc",
+            "EffectSignature",
+            "LayerFlow",
+            "TraceabilityTuple",
+            "HttpEndpointTuple",
+            "MigrationTuple",
+          ),
+        },
+        () => {},
+      )
+      .exhaustive()
+  }
+
+  const touchedSymbols = [...touchedSymbolsSet]
+  const reachingTestsSet = new Set<EnclosingSymbolName>()
+  for (const sym of touchedSymbols.slice(0, 20)) {
+    for (const testCase of findTestsReaching(harnessGraph, sym)) {
+      if (reachingTestsSet.size >= 50) break
+      addDecodedSymbol(
+        reachingTestsSet,
+        testCase.testName.length > 0 ? testCase.testName : (testCase.file ?? ""),
+        50,
+      )
+    }
+  }
+
+  return ReviewGraphContextBundle.make({
+    touchedSymbols,
+    reachingTests: [...reachingTestsSet],
+    governanceRefs: [...governanceRefsSet],
+  })
+}
+
+export interface ReviewRouteExecutionContext {
+  readonly repoRoot?: string | undefined
+  readonly graph?: HarnessGraph | undefined
+}
+
+export const executeReviewRouteTool = Effect.fn("HarnessMcp.routeReview")(function* (
+  input: ReviewRawDiffInput,
+  context?: ReviewRouteExecutionContext,
+): Effect.fn.Return<
+  ReviewRouteToolOutput,
+  InvalidReviewRouteInputError,
+  DecisionModel.DecisionModel
+> {
+  const initialSignals = yield* inferReviewDiffSignals(input)
+
+  const manifestTags =
+    context?.repoRoot !== undefined && nodeSyncHostIo.existsSync(context.repoRoot)
+      ? yield* collectManifestTagsForFiles(context.repoRoot, initialSignals.changedFiles)
+      : { tiers: [] as ReadonlyArray<NxTierTag>, scopes: [] as ReadonlyArray<NxScopeTag> }
+
+  const mergedTiers = [...new Set([...input.touchedTiers, ...manifestTags.tiers])]
+  const mergedScopes = [...new Set([...input.touchedScopes, ...manifestTags.scopes])]
+
+  const enrichedInput = ReviewRawDiffInput.make({
+    ...input,
+    touchedTiers: mergedTiers,
+    touchedScopes: mergedScopes,
+  })
+
+  const signals = yield* inferReviewDiffSignals(enrichedInput)
+  const plan = yield* routeReviewDiff(enrichedInput)
+  const graphContext = buildReviewGraphContextBundle(
+    context?.repoRoot,
+    context?.graph,
+    signals.changedFiles,
+  )
+
+  return ReviewRouteToolOutput.make({
+    plan,
+    signals,
+    graphContext,
+  })
+})
 
 export const buildGraphNavigationToolDescriptors = (
   options?: ServerOptions,
@@ -235,6 +521,50 @@ export const buildGraphNavigationToolDescriptors = (
         const patternFile =
           block === "review" || block === "effect" ? null : `agent-patterns/${block}.md`
         return { block, patternFile }
+      }),
+  },
+  {
+    name: McpToolName.make("harness_review_route"),
+    description:
+      "Route a code diff to required review depth, specialist reviewers, and Effect graph context",
+    inputSchema: ReviewRouteInputSchema,
+    execute: (args) =>
+      Effect.gen(function* () {
+        const parsed = yield* decodeReviewRouteInput(args)
+        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+        if (
+          options?.repoRoot !== undefined &&
+          parsed.repoRoot !== undefined &&
+          !isPathInsideRoot(options.repoRoot, parsed.repoRoot)
+        ) {
+          return yield* new ProjectPathEscapeError({
+            projectPath: parsed.repoRoot,
+            repoRoot: options.repoRoot,
+            message: "repoRoot escapes configured workspace root",
+          })
+        }
+        const rawInput = ReviewRawDiffInput.make({
+          changedFiles: parsed.changedFiles.map((filePath) => ReviewRawFileInput.make(filePath)),
+          diffSummary: ReviewSummaryText.make(parsed.diffSummary ?? ""),
+          changedLineCount: ReviewChangedLines.make(parsed.changedLineCount ?? 0),
+          touchedTiers: [],
+          touchedScopes: [],
+        })
+        const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
+        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        return yield* executeReviewRouteTool(rawInput, {
+          repoRoot: root,
+          graph: graphStatus.graph,
+        }).pipe(
+          Effect.provide(decisionLayer),
+          Effect.catchTag("InvalidReviewRouteInputError", (err) =>
+            new ProjectPathEscapeError({
+              projectPath: err.offendingPath,
+              repoRoot: root,
+              message: err.reason,
+            }),
+          ),
+        )
       }),
   },
 ]

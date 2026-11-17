@@ -1239,7 +1239,7 @@ describe("harness-mcp tools", () => {
     await client.connect(clientTransport)
     try {
       const listed = await client.listTools()
-      expect(listed.tools).toHaveLength(15)
+      expect(listed.tools).toHaveLength(16)
       for (const tool of listed.tools) {
         expect(tool.description?.length).toBeGreaterThan(0)
         expect(tool.inputSchema.type).toBe("object")

@@ -58,7 +58,7 @@ Stage 2: Plan-as-Code Skeletons, plan-check & ADR Sync (Single-Slice on Routes A
   ↓
 Stage 3: Package-Isolated gemini-4-hydrogen-medium Implementation & Trace/Prop Tests (executing-effect-stubs)
   ↓
-Stage 4: 4-Lens Specialist Review & Autonomous Class-Fix Loop (resolving-effect-review-feedback)
+Stage 4: Signal-Routed 7-Lens Specialist Review & Autonomous Class-Fix Loop (resolving-effect-review-feedback)
   ↓
 Stage 5: Compounding Learnings & Final Deterministic Gate Sequence (verify -> done)
   ↓
@@ -111,15 +111,18 @@ Stage 6: Git Commit, Optional Push/PR & <promise>DONE</promise>
    Provide the 4-part prompt/brief (Target Stubs, EARS Clauses, Pattern Reference, Package Gate `CI=true pnpm nx run <project>:verify`). When only a single downstream package has stubs, implement it inline under the same package gate.
 3. Ensure every EARS clause is verified by `@effect/vitest` (`it.effect` + `runWithTestTracer` + `checkSpanBudgets`), negative tests assert exact error instances via `Cause.findErrorOption(exit.cause)`, and every pure `*.decide` / reducer has `it.effect.prop` / `it.prop` property-based tests over `Schema.Array(EventUnionSchema)`.
 
-### Stage 4 — 4-Lens Specialist Review & Autonomous Fix Loop
+### Stage 4 — Signal-Routed 7-Lens Specialist Review & Autonomous Fix Loop
 
 **REQUIRED SUB-SKILL:** Use `resolving-effect-review-feedback` per [references/review-and-shipping.md](references/review-and-shipping.md) (executed once on the controller workspace after Stage 3 on Routes A/C, or after all Waves are integrated in Step D5 on Route D):
 
-1. Dispatch parallel read-only `gemini-4-hydrogen-medium` specialist reviewers (`invoke_subagent` by default with `Workspace: "share"`, or `swarm` with `model: "gemini-4-hydrogen-medium"`) across `git diff main...HEAD` based on touched signals:
+1. Route via `harness_review_route` and dispatch parallel read-only `gemini-4-hydrogen-medium` specialist reviewers (`invoke_subagent` by default with `Workspace: "share"`, or `swarm` with `model: "gemini-4-hydrogen-medium"`) across `git diff main...HEAD` based on touched signals:
    - `effect-ears-test-reviewer` (Always)
    - `effect-security-reviewer` (Contracts, `HttpApi`, `Rpc`, auth, SQL, `Config`)
    - `effect-reliability-reviewer` (`type:infra`, DO SQLite, D1, Queues, `Schedule`, `Scope`)
    - `effect-adversarial-reviewer` (Deciders, Event Sourcing, stateful or multi-step flows, or harness gates)
+   - `effect-web-reviewer` (`scope:web`, `apps/*-web/**`, `*.tsx`, `AtomHttpApi`)
+   - `effect-migration-contract-reviewer` (`migrations/*.sql`, `SqliteMigrator`, `alchemy.run.ts`, `type:contract` evolution)
+   - `effect-architecture-reviewer` (`type:service`, framework/adapter surfaces, or `changedLineCount >= 180`)
 2. Centrally adjudicate findings via Graph MCP (`harness_resolve`, `harness_ontology_why`, `harness_structural_search`, `harness_tests_reaching`).
 3. Synchronize specs/ADRs first if needed, apply all valid `fix`, `class-fix`, and `doc-sync-fix` items, re-run `pnpm harness plan-check` if any public signature or frontmatter symbol changed, and record any non-blocking declined/residual items for the closeout report.
 

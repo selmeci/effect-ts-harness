@@ -167,3 +167,9 @@ export {
   makeFailingDecisionModel,
   makeFailingDecisionModelLayer,
 } from "./mock-layer.js"
+export {
+  ReviewRouterV1,
+  inferReviewDiffSignals,
+  decideDeterministicReviewRoute,
+  routeReviewDiff,
+} from "./review-router-decision.js"

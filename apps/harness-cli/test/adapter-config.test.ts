@@ -214,7 +214,7 @@ describe("Antigravity adapter & plugin configuration", () => {
   it("wires PreInvocation, PreToolUse, PostToolUse, and Stop hooks in Antigravity hooks.json", () => {
     const hooks = JSON.parse(readFileSync(resolve(pluginDir, "hooks.json"), "utf8"))
     const spec = hooks["effect-harness"]
-    expect(spec).toBeDefined()
+    expect(Object.keys(spec)).toEqual(["PreInvocation", "PreToolUse", "PostToolUse", "Stop"])
     expect(spec.PreInvocation[0].command).toContain("session --format=antigravity")
     expect(spec.PreToolUse[0].matcher).toBe("run_command")
     expect(spec.PreToolUse[0].hooks[0].command).toContain("guard --format=antigravity")
@@ -393,6 +393,7 @@ describe("Antigravity adapter & plugin configuration", () => {
   it("ships effect-lfg, specifying-ears-with-effect, planning-effect-skeletons, executing-effect-stubs, compounding-effect-learnings, and resolving-effect-review-feedback in both adapters", () => {
     const workflowSkills = [
       "effect-lfg",
+      "effect-code-review",
       "specifying-ears-with-effect",
       "planning-effect-skeletons",
       "executing-effect-stubs",
@@ -429,6 +430,21 @@ describe("Antigravity adapter & plugin configuration", () => {
     expect(claudeCommand).toContain("argument-hint:")
 
     for (const base of [
+      resolve(pluginDir, "skills/effect-code-review"),
+      resolve(repoRoot, "adapters/claude-code/skills/effect-code-review"),
+    ]) {
+      expect(existsSync(resolve(base, "references/review-routing-and-lenses.md"))).toBe(true)
+      expect(existsSync(resolve(base, "references/report-contract-and-suppression.md"))).toBe(true)
+    }
+
+    const claudeReviewCommand = readFileSync(
+      resolve(repoRoot, "adapters/claude-code/commands/effect-code-review.md"),
+      "utf8",
+    )
+    expect(claudeReviewCommand).toContain("name: effect-code-review")
+    expect(claudeReviewCommand).toContain("argument-hint:")
+
+    for (const base of [
       resolve(pluginDir, "skills/resolving-effect-review-feedback"),
       resolve(repoRoot, "adapters/claude-code/skills/resolving-effect-review-feedback"),
     ]) {
@@ -446,6 +462,7 @@ describe("Antigravity adapter & plugin configuration", () => {
     const workflowSkills = [
       "effect-harness",
       "effect-lfg",
+      "effect-code-review",
       "specifying-ears-with-effect",
       "planning-effect-skeletons",
       "executing-effect-stubs",
@@ -457,6 +474,9 @@ describe("Antigravity adapter & plugin configuration", () => {
       "effect-security-reviewer",
       "effect-reliability-reviewer",
       "effect-adversarial-reviewer",
+      "effect-web-reviewer",
+      "effect-migration-contract-reviewer",
+      "effect-architecture-reviewer",
     ]
 
     for (const docPath of docPaths) {
@@ -480,6 +500,9 @@ describe("Antigravity adapter & plugin configuration", () => {
       "effect-security-reviewer",
       "effect-reliability-reviewer",
       "effect-adversarial-reviewer",
+      "effect-web-reviewer",
+      "effect-migration-contract-reviewer",
+      "effect-architecture-reviewer",
     ]
     const adapterDirs = [
       resolve(pluginDir, "agents"),
@@ -536,7 +559,7 @@ describe("Antigravity adapter & plugin configuration", () => {
         true,
       )
     }
-    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(15)
+    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(16)
 
     const skillExpectations: ReadonlyArray<{
       readonly relPath: string
@@ -625,6 +648,31 @@ describe("Antigravity adapter & plugin configuration", () => {
         relPath: "executing-effect-stubs/references/personas/reliability-reviewer.md",
         requiredTokens: ["## MCP Tooling & Navigation Protocol", "harness_structural_search"],
         bannedTokens: ["grep_search"],
+      },
+      {
+        relPath: "executing-effect-stubs/references/personas/web-reviewer.md",
+        requiredTokens: ["## MCP Tooling & Navigation Protocol", "harness_structural_search"],
+        bannedTokens: ["grep_search"],
+      },
+      {
+        relPath: "executing-effect-stubs/references/personas/migration-contract-reviewer.md",
+        requiredTokens: ["## MCP Tooling & Navigation Protocol", "harness_structural_search"],
+        bannedTokens: ["grep_search"],
+      },
+      {
+        relPath: "executing-effect-stubs/references/personas/architecture-reviewer.md",
+        requiredTokens: ["## MCP Tooling & Navigation Protocol", "harness_structural_search"],
+        bannedTokens: ["grep_search"],
+      },
+      {
+        relPath: "effect-code-review/SKILL.md",
+        requiredTokens: [
+          "harness_review_route",
+          "HarnessTierTopology.decide",
+          "SelfDogfooding.decide",
+          "8-Point Anti-Rubber-Stamp",
+        ],
+        bannedTokens: ["grep_search", "Layer.scoped", "Schema.TaggedErrorClass"],
       },
       {
         relPath: "effect-lfg/SKILL.md",
@@ -760,6 +808,28 @@ describe("Antigravity adapter & plugin configuration", () => {
     )
     expect(claudeResolvingSkill).not.toContain('model: "flash"')
     expect(claudeFixerPrompt).not.toContain('model: "flash"')
+
+    const claudeDispatchReviewers = readFileSync(
+      resolve(
+        repoRoot,
+        "adapters/claude-code/skills/executing-effect-stubs/references/dispatch-reviewers.md",
+      ),
+      "utf8",
+    )
+    const claudeCodeReviewSkill = readFileSync(
+      resolve(repoRoot, "adapters/claude-code/skills/effect-code-review/SKILL.md"),
+      "utf8",
+    )
+    for (const content of [claudeDispatchReviewers, claudeCodeReviewSkill]) {
+      expect(content).not.toContain("invoke_subagent")
+      expect(content).not.toContain("gemini-4-hydrogen-medium")
+    }
+
+    for (const skillsRoot of skillDirs) {
+      const harnessSkill = readFileSync(resolve(skillsRoot, "effect-harness/SKILL.md"), "utf8")
+      expect(harnessSkill).toMatch(/description:\s*(?:>-\s*\n\s*)?Use when /)
+    }
+
     expect(failures).toEqual([])
   })
 
@@ -775,7 +845,7 @@ describe("Antigravity adapter & plugin configuration", () => {
     expect(rootReadme).not.toContain("{ writeReport? }")
 
     for (const readme of [agyReadme, claudeReadme]) {
-      expect(readme).toContain("exposing 15 tools")
+      expect(readme).toContain("exposing 16 tools")
       for (const toolName of CANONICAL_MCP_TOOL_NAMES) {
         expect(readme).toContain(toolName)
       }
